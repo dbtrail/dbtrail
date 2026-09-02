@@ -293,7 +293,11 @@ func NewServer(cfg Config) *mcp.Server {
 		Description: "Generate reversal SQL to undo matching binlog events (dry-run only). " +
 			"Produces a BEGIN/COMMIT-wrapped SQL script that reverses events in reverse chronological order (most recent first): " +
 			"DELETE->INSERT, UPDATE->reverse UPDATE, INSERT->DELETE. " +
-			"Review carefully before applying to production.",
+			"Review carefully before applying to production. " +
+			"The script comes back as plain SQL while it is small. Past the response size limit it is NOT returned: " +
+			"the result is a JSON summary naming the statement count and how to fetch the script in statement-aligned " +
+			"chunks with sql_offset/sql_limit, which concatenate in order into the exact script. Use summary_only to ask " +
+			"how large a reversal is before pulling it.",
 		Annotations: &mcp.ToolAnnotations{
 			Title:          "Generate recovery SQL",
 			ReadOnlyHint:   true,
@@ -360,7 +364,10 @@ func NewServer(cfg Config) *mcp.Server {
 				"rows and rewritten/nulled child FKs; this tool synthesizes those from the index and reverses " +
 				"them too. If the synthesis is provably partial the call fails with the reasons unless " +
 				"allow_incomplete is set; always check the `incomplete` list in the result. " +
-				"Review carefully before applying to production.",
+				"Review carefully before applying to production. " +
+				"Past the response size limit the `sql` field is omitted and the result says how to fetch the script " +
+				"in statement-aligned chunks with sql_offset/sql_limit, which concatenate in order into the exact " +
+				"script; summary_only asks for the counts and coverage alone.",
 			Annotations: &mcp.ToolAnnotations{
 				Title:          "Generate FK-cascade recovery SQL",
 				ReadOnlyHint:   true,
@@ -513,6 +520,34 @@ type RecoverArgs struct {
 	Limit      int      `json:"limit,omitempty" jsonschema:"Maximum number of events to reverse (default: 1000)"`
 	Profile    string   `json:"profile,omitempty" jsonschema:"Apply RBAC access rules for this profile (table-level deny and column-level redaction)"`
 	NoArchive  bool     `json:"no_archive,omitempty" jsonschema:"Disable auto-routing to Parquet archives (MySQL-only results)"`
+	// The transport parameters (#1438), identical to recover_cascade's. They
+	// change what this response CARRIES, never what is generated. Setting any
+	// of them switches the result from plain SQL text to a JSON envelope whose
+	// `sql` field holds the exact bytes — the same switch the size cap makes —
+	// so a client can tell a chunk from a whole script programmatically, which
+	// a SQL comment cannot do.
+	SummaryOnly bool `json:"summary_only,omitempty" jsonschema:"Return the statement count and script size without the SQL script. Answers how large the reversal is before deciding to pull it."`
+	SQLOffset   int  `json:"sql_offset,omitempty" jsonschema:"0-based index of the first STATEMENT to return, for fetching a large script in pieces. Chunks cut on statement boundaries and concatenate in order into the exact script."`
+	SQLLimit    int  `json:"sql_limit,omitempty" jsonschema:"How many statements to return from sql_offset. Reduced (never silently) when the chunk would exceed the response size limit; the result says so and gives the next offset."`
+}
+
+// recoverResult is the recover tool's JSON envelope, used ONLY when the script
+// is not carried whole: a summary, or one chunk of a paginated fetch (#1438).
+// The plain-SQL-text result is unchanged for every call that fits, so the
+// common path is byte-for-byte what it always was.
+//
+// It carries no counts beyond the script's own shape — the tool's product is
+// the script, and the cascade tool is the one with a coverage report.
+type recoverResult struct {
+	SQL            string `json:"sql,omitempty"`
+	StatementCount int    `json:"statement_count"`
+	ScriptID       string `json:"script_id,omitempty"`
+	ScriptBytes    int    `json:"script_bytes,omitempty"`
+	SQLFrom        int    `json:"sql_from,omitempty"`
+	SQLTo          int    `json:"sql_to,omitempty"`
+	SQLMore        bool   `json:"sql_more,omitempty"`
+	NextSQLOffset  int    `json:"next_sql_offset,omitempty"`
+	SQLNote        string `json:"sql_note,omitempty"`
 }
 
 // StatusArgs are the status tool's parameters.
@@ -951,7 +986,7 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 			gen.SetMaxScriptBytes(v)
 		}
 		var buf bytes.Buffer
-		n, err := gen.GenerateSQLFromRows(rows, &buf)
+		n, stmtEnds, err := gen.GenerateSQLFromRowsIndexed(rows, &buf)
 		if err != nil {
 			// A *recovery.ScriptBudgetError gets a message built from its typed
 			// fields rather than its own Error() verbatim — that text ends with
@@ -993,22 +1028,67 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 			text += "\n-- Warning: " + eventDivergenceWarning(divergedEvents) + "\n"
 		}
 
-		ext.Record(ctx, ext.AuditEvent{
-			Surface: cfg.auditSurface(),
-			Action:  "recover.generate",
-			Actor:   ext.ProcessActor(args.Profile),
-			Schema:  args.Schema,
-			Table:   args.Table,
-			Detail: map[string]string{
+		// What this response carries of the script (#1438). The notes appended
+		// above sit past the last statement's end offset, so they ride the FINAL
+		// chunk and concatenating the chunks reproduces `text` exactly.
+		script, serr := deliverScript(text, stmtEnds, args.SummaryOnly, args.SQLOffset, args.SQLLimit)
+		if serr != nil {
+			return ErrorResult(serr), nil, nil
+		}
+
+		// See the recover_cascade sibling for why a chunk fetch records too,
+		// and why a summary does not: bytes of row data, not calls, are what
+		// this audits.
+		if script.Served {
+			detail := map[string]string{
 				"statements": strconv.Itoa(n),
 				"dry_run":    "true", // MCP recover always returns the script, never applies it
 				"gtid":       args.GTID,
-			},
-		})
+			}
+			if script.Chunked {
+				detail["chunk"] = fmt.Sprintf("statements %d-%d of %d", script.From, script.To, n)
+				detail["script_id"] = script.ScriptID
+			}
+			ext.Record(ctx, ext.AuditEvent{
+				Surface: cfg.auditSurface(),
+				Action:  "recover.generate",
+				Actor:   ext.ProcessActor(args.Profile),
+				Schema:  args.Schema,
+				Table:   args.Table,
+				Detail:  detail,
+			})
+		}
 
+		// The whole script goes back as plain SQL, exactly as it always has.
+		// Anything else — a summary, or one chunk — goes back as JSON, because
+		// a chunk MUST be distinguishable from a complete script by a client
+		// that reads fields rather than prose, and a SQL comment cannot do
+		// that. Putting the marker inside the SQL would also break the promise
+		// that concatenating chunks reproduces the script byte for byte.
+		if script.Served && !script.Chunked {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: script.SQL},
+				},
+			}, nil, nil
+		}
+		payload, err := json.MarshalIndent(recoverResult{
+			SQL:            script.SQL,
+			StatementCount: n,
+			ScriptID:       script.ScriptID,
+			ScriptBytes:    script.ScriptBytes,
+			SQLFrom:        script.From,
+			SQLTo:          script.To,
+			SQLMore:        script.More,
+			NextSQLOffset:  script.NextOffset,
+			SQLNote:        script.Note,
+		}, "", "  ")
+		if err != nil {
+			return ErrorResult(fmt.Errorf("encode recover result: %w", err)), nil, nil
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
-				&mcp.TextContent{Text: text},
+				&mcp.TextContent{Text: string(payload)},
 			},
 		}, nil, nil
 	}

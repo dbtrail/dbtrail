@@ -316,6 +316,41 @@ a partial undo, not a smaller one. The refusal names the escape hatch — retry
 with `no_archive: true` to generate from the live index only, accepting that
 archived events will not be reversed.
 
+**Large reversal scripts.** An MCP client caps how big a tool result can be, and
+a cascade touching thousands of rows produces a script well past that cap. Both
+`recover` and `recover_cascade` handle this the same way
+([#1438](https://github.com/dbtrail/dbtrail/issues/1438)), and neither ever
+truncates: a script that fits comes back whole, exactly as before, and a script
+that does not is **withheld** with its statement count, its size, and
+instructions.
+
+- `summary_only` returns the counts (and, for `recover_cascade`, the whole
+  coverage report) with no script. It answers "how big is this, is it complete"
+  before you decide to pull the script at all.
+- `sql_offset` / `sql_limit` fetch the script in pieces. They count
+  **statements**, not bytes, and chunks cut on statement boundaries, so no chunk
+  ever splits a statement — a `;` and a newline are both ordinary characters
+  inside a captured value. Concatenating the chunks in order reproduces the
+  script byte for byte, with the `BEGIN`/`COMMIT` framing and the preamble in
+  the first and last chunk exactly once. **No chunk is runnable on its own.**
+- Every chunk carries `script_id`. Chunks are stateless rebuilds, so a chunk
+  fetched after an event was indexed, a baseline published or archives rotated
+  belongs to a *different* build; a changed `script_id` means the fetch must
+  restart at `sql_offset: 0`. Concatenating across ids assembles a script that
+  never existed.
+- `sql_limit` is reduced when the chunk would overflow the response. The result
+  says so and gives `next_sql_offset`; nothing is dropped.
+
+`recover` returns plain SQL text for a whole script, as it always has, and
+switches to a JSON envelope (whose `sql` field holds the exact bytes) for a
+summary or a chunk — a client has to be able to tell a chunk from a complete
+script by reading a field, which a SQL comment cannot do. `recover_cascade` is
+JSON in every case.
+
+For a script too large to be comfortable over MCP at all, `bintrail recover` and
+`bintrail recover-cascade` from the CLI write the whole thing to a file in one
+go.
+
 **Index DSN.** The server connects to the index via the `BINTRAIL_INDEX_DSN`
 environment variable (set once at startup) or the per-call `index_dsn` parameter,
 which overrides the env var. Set the env var at startup so callers don't repeat

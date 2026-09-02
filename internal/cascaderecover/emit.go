@@ -69,12 +69,24 @@ type Header struct {
 // supplies child PK columns for the restore WHERE clauses; gen must be built
 // from the same (or an equivalent) resolver (recovery.New(db, resolver)).
 func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNullRows []cascade.SetNullRestore, keyUpdates []cascade.FKKeyRestore, resolver *metadata.Resolver, hdr Header) (int, error) {
+	n, _, err := EmitSQLIndexed(w, gen, rows, setNullRows, keyUpdates, resolver, hdr)
+	return n, err
+}
+
+// EmitSQLIndexed is EmitSQL plus the byte offset just past each emitted
+// statement, relative to the first byte written to w, in emission order (the
+// generator's reversals first, then the SET NULL restorations, then the ON
+// UPDATE key restorations). It lets a transport hand the script over in pieces
+// without cutting a statement in half (#1438); see
+// recovery.GenerateSQLFromRowsIndexed for why a scanner over the rendered text
+// cannot do this safely. The script is byte-identical either way.
+func EmitSQLIndexed(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNullRows []cascade.SetNullRestore, keyUpdates []cascade.FKKeyRestore, resolver *metadata.Resolver, hdr Header) (int, []int, error) {
 	// Enforce the recover script-size budget first (#654). GenerateSQLFromRows
 	// re-checks it before rendering, but checking here keeps the refusal
 	// precedence stable (budget outranks a SET NULL build error below) and also
 	// bounds the pre-preamble render buffer (genBuf, further down).
 	if err := gen.CheckScriptBudget(rows); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	// Fail loud on a residual unchanged-TOAST marker (#592) next, mirroring the
@@ -83,7 +95,7 @@ func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNu
 	for _, row := range rows {
 		if err := event.CheckUnresolvedToast(row.SchemaName, row.TableName, row.PKValues,
 			row.RowBefore, row.RowAfter); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 	}
 
@@ -94,17 +106,17 @@ func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNu
 	// but drop the closing `SET FOREIGN_KEY_CHECKS=1`, handing the operator a
 	// script that re-enables nothing.
 	if resolver == nil && (len(setNullRows) > 0 || len(keyUpdates) > 0) {
-		return 0, fmt.Errorf("a schema snapshot is required to restore foreign keys an InnoDB cascade nulled or rewrote (run `bintrail snapshot`)")
+		return 0, nil, fmt.Errorf("a schema snapshot is required to restore foreign keys an InnoDB cascade nulled or rewrote (run `bintrail snapshot`)")
 	}
 	var setNullStmts []string
 	for _, sr := range setNullRows {
 		tm, terr := resolver.Resolve(sr.Schema, sr.Table)
 		if terr != nil {
-			return 0, fmt.Errorf("resolve %s.%s for SET NULL restore: %w", sr.Schema, sr.Table, terr)
+			return 0, nil, fmt.Errorf("resolve %s.%s for SET NULL restore: %w", sr.Schema, sr.Table, terr)
 		}
 		stmt, ferr := recovery.FormatSetNullRestore(sr.Schema, sr.Table, sr.Column, sr.Value, tm.PKColumnMetas(), sr.Row)
 		if ferr != nil {
-			return 0, ferr
+			return 0, nil, ferr
 		}
 		setNullStmts = append(setNullStmts, stmt)
 	}
@@ -112,11 +124,11 @@ func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNu
 	for _, kr := range keyUpdates {
 		tm, terr := resolver.Resolve(kr.Schema, kr.Table)
 		if terr != nil {
-			return 0, fmt.Errorf("resolve %s.%s for ON UPDATE cascade restore: %w", kr.Schema, kr.Table, terr)
+			return 0, nil, fmt.Errorf("resolve %s.%s for ON UPDATE cascade restore: %w", kr.Schema, kr.Table, terr)
 		}
 		stmt, ferr := recovery.FormatFKCascadeRestore(kr.Schema, kr.Table, kr.Column, kr.OldValue, kr.NewValue, tm.PKColumnMetas(), kr.Row)
 		if ferr != nil {
-			return 0, ferr
+			return 0, nil, ferr
 		}
 		keyUpdateStmts = append(keyUpdateStmts, stmt)
 	}
@@ -130,9 +142,9 @@ func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNu
 	// all-or-nothing for every generator refusal, present and future. Peak
 	// memory stays bounded by the script budget enforced above.
 	var genBuf bytes.Buffer
-	n, err := gen.GenerateSQLFromRows(rows, &genBuf)
+	n, genEnds, err := gen.GenerateSQLFromRowsIndexed(rows, &genBuf)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	// Reconcile the generated statement count against the parent+victim rows
 	// (#835): the generator emits exactly one statement per row or fails loud
@@ -140,7 +152,7 @@ func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNu
 	// — vanished from the script without an error. Refusing makes a silently
 	// incomplete cascade recovery impossible even if the generator regresses.
 	if n != len(rows) {
-		return 0, fmt.Errorf("cascade recover: generator rendered %d of %d expected reversal statement(s); refusing to emit a script that silently drops row(s)", n, len(rows))
+		return 0, nil, fmt.Errorf("cascade recover: generator rendered %d of %d expected reversal statement(s); refusing to emit a script that silently drops row(s)", n, len(rows))
 	}
 
 	var b strings.Builder
@@ -196,12 +208,21 @@ func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNu
 		}
 	}
 	b.WriteString("\nSET FOREIGN_KEY_CHECKS=0;\n\n")
-	if _, err := io.WriteString(w, b.String()); err != nil {
-		return 0, err
+	// Every write from here on goes through the counter, so a statement's end
+	// offset is read off it rather than summed from the literals above — a
+	// later added line cannot silently shift the offsets that follow it.
+	cw := &countingWriter{w: w}
+	if _, err := io.WriteString(cw, b.String()); err != nil {
+		return 0, nil, err
 	}
 
-	if _, err := io.Copy(w, &genBuf); err != nil {
-		return 0, err
+	// The generator's offsets are relative to genBuf, which starts here.
+	ends := make([]int, 0, len(genEnds)+len(setNullStmts)+len(keyUpdateStmts))
+	for _, e := range genEnds {
+		ends = append(ends, cw.n+e)
+	}
+	if _, err := io.Copy(cw, &genBuf); err != nil {
+		return 0, nil, err
 	}
 
 	// SET NULL restorations: idempotent UPDATEs (… AND fk IS NULL) that only
@@ -209,13 +230,14 @@ func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNu
 	// re-point of the child is never clobbered. Pre-built above, so nothing here
 	// can fail after the INSERTs are already on disk.
 	if len(setNullStmts) > 0 {
-		if _, err := io.WriteString(w, "\n-- SET NULL FK restorations (idempotent: only rows whose FK is still NULL):\n"); err != nil {
-			return n, err
+		if _, err := io.WriteString(cw, "\n-- SET NULL FK restorations (idempotent: only rows whose FK is still NULL):\n"); err != nil {
+			return n, ends, err
 		}
 		for _, stmt := range setNullStmts {
-			if _, werr := io.WriteString(w, stmt+";\n"); werr != nil {
-				return n, werr
+			if _, werr := io.WriteString(cw, stmt+";\n"); werr != nil {
+				return n, ends, werr
 			}
+			ends = append(ends, cw.n)
 			n++
 		}
 	}
@@ -225,21 +247,37 @@ func EmitSQL(w io.Writer, gen *recovery.Generator, rows []query.ResultRow, setNu
 	// parent's NEW key under ON UPDATE CASCADE, NULL under ON UPDATE SET NULL) —
 	// so a child re-pointed after the cascade is never clobbered either.
 	if len(keyUpdateStmts) > 0 {
-		if _, err := io.WriteString(w, "\n-- ON UPDATE cascade FK restorations (idempotent: only rows whose FK still holds the cascaded value):\n"); err != nil {
-			return n, err
+		if _, err := io.WriteString(cw, "\n-- ON UPDATE cascade FK restorations (idempotent: only rows whose FK still holds the cascaded value):\n"); err != nil {
+			return n, ends, err
 		}
 		for _, stmt := range keyUpdateStmts {
-			if _, werr := io.WriteString(w, stmt+";\n"); werr != nil {
-				return n, werr
+			if _, werr := io.WriteString(cw, stmt+";\n"); werr != nil {
+				return n, ends, werr
 			}
+			ends = append(ends, cw.n)
 			n++
 		}
 	}
 
-	if _, err := io.WriteString(w, "\nSET FOREIGN_KEY_CHECKS=1;\n"); err != nil {
-		return n, err
+	if _, err := io.WriteString(cw, "\nSET FOREIGN_KEY_CHECKS=1;\n"); err != nil {
+		return n, ends, err
 	}
-	return n, nil
+	return n, ends, nil
+}
+
+// countingWriter tracks bytes delivered to w so EmitSQLIndexed can read a
+// statement's end offset off the counter. Its recovery sibling exists for the
+// same reason; the two are deliberately not shared, since exporting one would
+// put a transport detail in the reversal generator's public API.
+type countingWriter struct {
+	w io.Writer
+	n int
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += n
+	return n, err
 }
 
 // MergeParentRoots combines the parent DELETE roots with the parent key-UPDATE
