@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The schema-drift refusal names the schema-era cause, and what it costs**
+  (#1617). `recover` refuses to emit reversal SQL that would name a column the
+  latest schema snapshot no longer has (#601). The refusal is right; its
+  remediation offered only two ways out, both assuming the drift was a mistake:
+  re-snapshot, or reconcile by hand. Neither describes what a long-lived index
+  reaches most often. A column that existed when an event was captured and does
+  not exist now is the normal result of adding a column, capturing events while
+  it exists, and later dropping it. Nobody is at fault and the snapshot is
+  already current, so re-snapshotting does nothing. Narrowing the recovery
+  window in time to events captured under the current shape emits normally, and
+  the message now says so. It also says what that costs, because only the
+  stale-snapshot case is diagnosable: past it the detector is in one state and
+  the choice is about intent. The events you exclude are not reversed, and
+  nothing downstream reports that a key lost coverage because the window moved,
+  so narrowing is worth taking only when a current-shape event holds the state
+  you want; otherwise hand reconciliation is still the answer. `--limit-per-pk 1`
+  reaches this easily, since it takes the newest event for a key whatever era
+  captured it. The window advice is spelled `since/until` rather than `--since`,
+  because this error is raised inside `GenerateSQLFromRows` and so reaches MCP
+  and console clients too, and an agent handed a CLI flag cannot pass it.
+
 ## [0.78.0] - 2026-09-07
 
 ### Fixed

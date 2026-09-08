@@ -562,6 +562,28 @@ func partialGenerationError(failures []genFailure) error {
 // schemaDriftError builds the fail-loud error for #601: the reversal SQL references
 // columns the latest schema snapshot no longer carries. It names every affected
 // schema.table and its drifted columns so the operator knows exactly what to reconcile.
+//
+// The remediation covers the case the accident-shaped ones miss. Drift is not
+// necessarily a mistake: in a long-lived index the matched event can simply predate a
+// DDL, so the reversal is correct for the shape that existed then and wrong for the
+// shape now. Re-snapshotting does nothing there (the snapshot is already current), and
+// the message used to offer only that and hand reconciliation.
+//
+// Only cause 1 is DIAGNOSABLE — the live table still having the column is observable.
+// Past that, driftedColumns is in one state and the choice is about intent, not
+// evidence, so the message must not present narrowing as strictly better. Narrowing
+// EXCLUDES the drifted events, which then go unreversed, and nothing downstream reports
+// that a PK lost coverage because the window moved (recover.go warns on elided archives
+// and truncation only). This file refuses silently-incomplete recoveries everywhere
+// else — partialGenerationError scopes the same advice "if they are known-unrecoverable"
+// — so the cost is stated here rather than left for the operator to discover.
+//
+// The window advice is written "since/until", never "--since": this error crosses the
+// CLI, MCP and console surfaces (GenerateSQLFromRows is shared, and neither the MCP nor
+// the console rewrites it), and an MCP client handed a --flag will not find it. That is
+// the #1114 rule, precedent in internal/mcptools/recover_cascade_test.go. The guard bans
+// the specific CLI spellings rather than every "--", per #1271: operator-addressed
+// remediation prose naming a shell command is deliberately NOT a leak.
 func schemaDriftError(drift map[string]map[string]bool, order []string) error {
 	parts := make([]string, 0, len(order))
 	for _, key := range order {
@@ -574,8 +596,12 @@ func schemaDriftError(drift map[string]map[string]bool, order []string) error {
 	}
 	return fmt.Errorf("recover: refusing to emit reversal SQL — it references column(s) that the latest schema "+
 		"snapshot no longer has (dropped or renamed after the event was captured), so the SQL would not apply to "+
-		"the current table: %s. Re-snapshot if the table actually still has these columns; otherwise reconcile the "+
-		"column(s) by hand", strings.Join(parts, "; "))
+		"the current table: %s. If the table does still have these columns the snapshot is stale, so "+
+		"re-snapshot. Otherwise the matched event was captured under an earlier shape of this table than the "+
+		"one the SQL would apply to, and there are two ways on. Narrowing the recovery window in time "+
+		"(since/until) to events captured under the current shape emits normally, but the events you exclude "+
+		"are then NOT reversed, so take it only when a current-shape event holds the state you want. If you "+
+		"need the excluded events, reconcile the column(s) by hand", strings.Join(parts, "; "))
 }
 
 // ─── Script-size budget (#654) ─────────────────────────────────────────────────
