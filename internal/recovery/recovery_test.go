@@ -1882,6 +1882,54 @@ func TestSchemaDriftError_namesTablesAndColumns(t *testing.T) {
 	}
 }
 
+// TestSchemaDriftError_advisesTheSchemaEraCase pins the REMEDIATION half of #601's
+// refusal, which the naming test above does not read.
+//
+// Drift is not always an accident. In a long-lived index the matched event can simply
+// predate a DDL, so the reversal is right for the shape that existed then and wrong for
+// the shape now. Neither re-snapshotting nor hand reconciliation fixes that; narrowing
+// the window in time does, by selecting an event from the current schema era. The
+// message used to offer only the two accident-shaped causes, so the most common
+// occurrence read as unrecoverable.
+//
+// "NOT reversed" is the load-bearing half of the remedy, not decoration. Narrowing the
+// window EXCLUDES the drifted events, so they go unreversed, and no downstream warning
+// reports that a PK lost coverage that way. Presenting narrowing as a clean fix would
+// make this the one place in the file that recommends a silently-incomplete recovery.
+//
+// The second loop is the #1114 rule. GenerateSQLFromRows is shared by the CLI, MCP and
+// console, so this error reaches MCP clients, and a --flag named here is one the client
+// cannot pass on its own surface (precedent: internal/mcptools/recover_cascade_test.go).
+// It is a FORWARD guard: the pre-#1617 message named no flags either, so this loop never
+// saw the old text fail. It is armed against the next edit, which is why the list is the
+// specific CLI spellings and not a blanket "--" ban (#1271 keeps prose naming an
+// operator-addressed shell command legal).
+func TestSchemaDriftError_advisesTheSchemaEraCase(t *testing.T) {
+	msg := schemaDriftError(
+		map[string]map[string]bool{"shop.orders": {"coupon_code": true}},
+		[]string{"shop.orders"},
+	).Error()
+
+	for _, want := range []string{
+		"earlier shape of this table",           // the schema-era cause is named at all
+		"Narrowing the recovery window in time", // and carries its own remedy
+		"since/until",                           // spelled for every surface, not just the CLI
+		"NOT reversed",                          // ...and the remedy states what it costs
+		"re-snapshot",                           // the stale-snapshot cause survives
+		"by hand",                               // hand reconciliation stays the option for the rest
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("remediation missing %q; got: %s", want, msg)
+		}
+	}
+
+	for _, flag := range []string{"--since", "--until", "--pk", "--pks", "--limit"} {
+		if strings.Contains(msg, flag) {
+			t.Errorf("error leaks CLI flag %q to non-CLI surfaces: %s", flag, msg)
+		}
+	}
+}
+
 // TestGenerateSQLFromRows_noResolverNoDriftRefusal proves detection degrades safely:
 // with no resolver (no schema knowledge), a reversal still emits normally — never
 // blocked. Without this, file-indexed DBs and the nil-resolver fallback would break.
