@@ -55,11 +55,17 @@ const (
 	BackupMethodRefresh = "refresh"
 )
 
-// BackupScheduleMinEvery is the shortest interval a schedule accepts. A full
-// backup every few minutes is a footgun on the source, and a rebuild that
-// often is one on the disk of a server with no S3 destination, where nothing
-// uploads and so retention cannot reclaim it; the floor is generous enough for every real
-// cadence and low enough to try the feature out.
+// BackupScheduleMinEvery is the shortest interval a schedule accepts: a
+// sanity bound a few ticks above the loop's one-minute clock, not a
+// protection. It was 15m until #1620, when a server that folds from S3
+// wanted the cadence of a reporting copy. The floor does NOT stop the two
+// costs that number once guarded against: a server with an S3 destination
+// and no local backup directory, or one with no previous backup, takes a
+// FULL backup every slot (ChooseBackupMethod), and a local-only server keeps
+// every snapshot it publishes. Both are said out loud instead, at save and
+// at boot (warnBackupScheduleRate and its twin in backup_schedule_api.go)
+// and on the card as the 30-day count, so the operator reads the rate before
+// the source or the disk does.
 const BackupScheduleMinEvery = 5 * time.Minute
 
 // backupScheduleMinEveryText is the floor as an operator types it, for the
