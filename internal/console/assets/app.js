@@ -5993,7 +5993,7 @@ function backupScheduleCard(cur, b) {
     row.append(remove);
   }
   body.append(row, el("p", { class: "form-hint", text:
-    "Every: minutes, hours or days (30m, 6h, 1d), at least 15m. At: the UTC time the timetable lines up on." }), msg);
+    "Every: minutes, hours or days (5m, 6h, 1d), at least 5m. At: the UTC time the timetable lines up on." }), msg);
   // The rate, before the disk finds out: every run is a full copy of every
   // table, and backups kept only on this machine are never removed on their
   // own (the daemon prunes only what it confirmed durable in S3). Same

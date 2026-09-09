@@ -448,7 +448,7 @@ panel that answers whether a restore would work, far below the fold.
   stack's `.env`, or run the printed command where bintrail is installed. See
   [Iceberg export](iceberg-export.md) and [docker.md](docker.md).
 - **Scheduled backups** (#1442) — a per-server timetable, set from this page:
-  every N minutes, hours or days (at least 15m), lined up on a UTC time of
+  every N minutes, hours or days (at least 5m), lined up on a UTC time of
   day. The operator picks WHEN; HOW each run is made is the daemon's decision
   per slot (`console.ChooseBackupMethod`), and the page says which one comes
   next and why: a server with no local backup directory gets a **full backup**
