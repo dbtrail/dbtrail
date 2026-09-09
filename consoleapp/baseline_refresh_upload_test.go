@@ -115,6 +115,48 @@ func TestRunRefresh_S3BackedServerFoldsFromTheBucketAndUploads(t *testing.T) {
 	}
 }
 
+// #1626 through runRefresh itself, not the resolver alone: when the local
+// directory holds the bucket's newest snapshot, the fold reads the directory.
+// The bucket listing is stubbed to MIRROR the local one, so the two newest
+// snapshots are the same instant with the same table. Deleting the line in
+// runRefresh that stores the resolved source leaves TestResolveFoldSource
+// green and turns this red.
+func TestRunRefresh_readsTheLocalCopyWhenItIsTheBucketsNewest(t *testing.T) {
+	local := stageBaselineRoot(t)
+	uploads, _ := stubS3Fold(t, []string{"shop.orders"}, nil)
+	realLB := listBaselines
+	t.Cleanup(func() { listBaselines = realLB })
+	listBaselines = func(ctx context.Context, _ string) ([]reconstruct.BaselineFile, error) {
+		return realLB(ctx, local)
+	}
+	injectFold(t, 0, nil)
+	prevFold := foldTables
+	var readFrom string
+	foldTables = func(ctx context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		readFrom = cfg.BaselineSrc
+		return prevFold(ctx, cfg)
+	}
+	t.Cleanup(func() { foldTables = prevFold })
+
+	out, st := runRefreshFor(t, refreshRequest{
+		ServerID: "s", ServerName: "s", IndexDSN: "d",
+		BaselineDir: local, BaselineS3: "s3://bucket/backups/",
+	})
+
+	if out != "" {
+		t.Fatalf("the refresh warned: %s", out)
+	}
+	if !st.Published || st.State != "succeeded" {
+		t.Fatalf("status = %+v, want a published success", st)
+	}
+	if readFrom != local {
+		t.Fatalf("the fold read %q, want the local directory %q: the resolved source never reached the fold", readFrom, local)
+	}
+	if len(*uploads) != 1 {
+		t.Fatalf("uploads = %+v, want the result sent to the bucket exactly once regardless of where it was read from", *uploads)
+	}
+}
+
 // The daemon-wide --baseline-refresh-interval names no destination, so its
 // requests carry no S3 and nothing is uploaded. Keeping that untouched is the
 // point of gating on the request's own field rather than on a mode: the flag

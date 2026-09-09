@@ -1198,6 +1198,7 @@ func TestBackupScheduler_aRefusedFoldStillFallsBack(t *testing.T) {
 func TestStartRebuild_carriesTheDestinationIntoTheFold(t *testing.T) {
 	realList := newestSnapshotTables
 	t.Cleanup(func() { newestSnapshotTables = realList })
+	stubBucketListing(t)
 	newestSnapshotTables = func(ctx context.Context, src string) ([]string, error) {
 		if !strings.HasPrefix(src, "s3://") {
 			return realList(ctx, src)

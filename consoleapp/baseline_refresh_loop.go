@@ -273,8 +273,18 @@ func resolveFoldSource(ctx context.Context, req refreshRequest) string {
 
 // newestSnapshotOf returns the newest snapshot time in a ListBaselines result
 // (newest first) and the schema.table set of that snapshot.
+// The newest instant is computed over the whole listing rather than read
+// off files[0]: ListBaselines sorts newest-first today, but this helper
+// serves BOTH sides of the comparison, so trusting the order would make an
+// older instant the two sides share look like a match, and that is the one
+// error this comparison exists to refuse.
 func newestSnapshotOf(files []reconstruct.BaselineFile) (time.Time, map[string]struct{}) {
-	newest := files[0].SnapshotTime
+	var newest time.Time
+	for _, f := range files {
+		if f.SnapshotTime.After(newest) {
+			newest = f.SnapshotTime
+		}
+	}
 	tables := map[string]struct{}{}
 	for _, f := range files {
 		if f.SnapshotTime.Equal(newest) {
