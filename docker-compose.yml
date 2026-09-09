@@ -316,7 +316,8 @@ services:
       BINTRAIL_CONSOLE_BASELINE_STAGING: /var/lib/bintrail/baseline-staging
       # Prune local backup snapshots older than this once S3 holds a copy
       # (Nh/Nd). Empty = keep everything local. Worth setting with a short
-      # schedule: every run publishes a full-table snapshot.
+      # schedule: every run publishes a full-table snapshot. It reclaims only
+      # servers that have an S3 destination; the boot entry here has none.
       BINTRAIL_CONSOLE_BASELINE_RETAIN: ${BASELINE_RETAIN:-}
       # "Run verification" button (#677): lets the console run `bintrail verify`
       # in-process for a monitored server (trigger, poll per-table results,

@@ -60,9 +60,9 @@ const (
 // protection. It was 15m until #1620, when a server that folds from S3
 // wanted the cadence of a reporting copy. The floor does NOT stop the two
 // costs that number once guarded against: a server with an S3 destination
-// and no local backup directory, or one with no previous backup, takes a
-// FULL backup every slot (ChooseBackupMethod), and a local-only server keeps
-// every snapshot it publishes. Both are said out loud instead, at save and
+// and no local backup directory takes a FULL backup every slot, one with no
+// previous backup takes one on its first (ChooseBackupMethod), and a
+// local-only server keeps every snapshot it publishes. All are said out loud instead, at save and
 // at boot (warnBackupScheduleRate and its twin in backup_schedule_api.go)
 // and on the card as the 30-day count, so the operator reads the rate before
 // the source or the disk does.
