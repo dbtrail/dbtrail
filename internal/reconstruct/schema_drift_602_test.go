@@ -212,6 +212,29 @@ func TestReconstruct1624_generatedColumnIsNotAPostBaselineColumn(t *testing.T) {
 		t.Fatalf("no .sql chunk written")
 	}
 
+	// The footer says generated but the schema snapshot of today says plain:
+	// the column was converted after the baseline (MODIFY on a STORED
+	// generated column), so the baseline holds no value for it. Dropping it
+	// would lose every post-ALTER value, so this refuses and names the column.
+	err = mergeBaselineIntoWriter(context.Background(), mergeInput{
+		LocalBaselinePath: baselinePath, CreateTableSQL: create, Schema: "mydb", Table: "orders",
+		PKCols: pkColsIntID(), Changes: changes(), OutputDir: t.TempDir(),
+		CurrentGenerated: map[string]bool{"id": false, "status": false, "line_total": false},
+	}, &TableReport{})
+	if err == nil || !strings.Contains(err.Error(), "line_total") || !strings.Contains(err.Error(), "plain column now") {
+		t.Fatalf("a generated column turned plain after the baseline must refuse and say so, got: %v", err)
+	}
+	// The snapshot agreeing (still generated) or not knowing the column at all
+	// keeps the lossless drop.
+	for _, cur := range []map[string]bool{{"line_total": true}, {"id": false}, nil} {
+		if err := mergeBaselineIntoWriter(context.Background(), mergeInput{
+			LocalBaselinePath: baselinePath, CreateTableSQL: create, Schema: "mydb", Table: "orders",
+			PKCols: pkColsIntID(), Changes: changes(), OutputDir: t.TempDir(), CurrentGenerated: cur,
+		}, &TableReport{}); err != nil {
+			t.Fatalf("CurrentGenerated=%v must not refuse: %v", cur, err)
+		}
+	}
+
 	// A column that is NOT generated still fails loud, so the #602 guard has
 	// lost nothing: same shape, the CREATE TABLE declares line_total as a
 	// plain column.
@@ -237,9 +260,10 @@ func TestGeneratedColumnsIn(t *testing.T) {
 		"  `made_at` datetime DEFAULT (now()),\n" +
 		"  `note` varchar(20) DEFAULT NULL COMMENT 'not GENERATED ALWAYS AS anything',\n" +
 		"  `odd``name` int GENERATED ALWAYS AS (`id` + 1) STORED,\n" +
+		"  `short_form` int AS (`id` * 2) PERSISTENT,\n" +
 		"  PRIMARY KEY (`id`)\n)"
 	got := generatedColumnsIn(sql)
-	want := []string{"total", "upper_name", "odd`name"}
+	want := []string{"total", "upper_name", "odd`name", "short_form"}
 	if len(got) != len(want) {
 		t.Fatalf("generatedColumnsIn = %v, want exactly %v", got, want)
 	}

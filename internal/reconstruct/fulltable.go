@@ -1178,6 +1178,7 @@ func ReconstructTable(
 		Changes:           changes,
 		ImageColumns:      fold.ImageColumns,
 		SawImage:          fold.SawImage,
+		CurrentGenerated:  generatedByName(tm.Columns),
 		OutputDir:         cfg.OutputDir,
 		ChunkSize:         cfg.ChunkSize,
 		DuckDBTuning:      cfg.DuckDBTuning,
@@ -1244,6 +1245,12 @@ func prepareMerge(ctx context.Context, in mergeInput) ([]string, error) {
 		var dropped []string
 		for _, col := range extra {
 			if _, ok := gen[col]; ok {
+				if cur, known := in.CurrentGenerated[col]; known && !cur {
+					return nil, fmt.Errorf(
+						"full-table reconstruct: %s.%s column %s was a generated column when the baseline was taken and is a plain column now; "+
+							"the baseline holds no value for it — re-run `bintrail baseline` to capture a snapshot that includes it: %w",
+						in.Schema, in.Table, col, ErrSchemaChanged)
+				}
 				dropped = append(dropped, col)
 				continue
 			}
@@ -1302,8 +1309,17 @@ type mergeInput struct {
 	// trimmed Changes map can no longer provide (see droppedBaselineColumns).
 	ImageColumns map[string]struct{}
 	SawImage     bool
-	OutputDir    string
-	ChunkSize    int64
+	// CurrentGenerated is the schema snapshot's view of which columns are
+	// generated today, keyed by name (absent = the snapshot does not know the
+	// column). prepareMerge cross-checks it against the baseline CREATE TABLE:
+	// a column the footer calls generated but the snapshot calls plain was
+	// converted after the snapshot (MySQL allows MODIFY on a STORED generated
+	// column), so the baseline holds no value for it and dropping it would
+	// lose data. Parquet mode also refuses that shape in
+	// checkBaselineSchemaCurrent; mydumper mode has only this check.
+	CurrentGenerated map[string]bool
+	OutputDir        string
+	ChunkSize        int64
 
 	// SnapshotDir / SnapshotAt / Cut / SourceBaseline are set only under
 	// OutputFormatParquet and drive mergeBaselineIntoParquet: where the snapshot
@@ -2308,11 +2324,14 @@ func postBaselineColumns(changes map[string]*query.ResultRow, colNames []string)
 
 // generatedColumnRe matches one column definition line of a SHOW CREATE TABLE
 // that declares a STORED or VIRTUAL generated column, once string literals
-// have been blanked out of the line. SHOW CREATE TABLE puts every column on
-// its own line and always backticks the name. Expression defaults
+// have been blanked out of the line: the MySQL spelling `GENERATED ALWAYS AS`
+// and the short `AS (expr) STORED|VIRTUAL|PERSISTENT` that MariaDB also
+// prints, the same two shapes baseline.generatedRe accepts, so this guard and
+// the dump agree on what a baseline holds. SHOW CREATE TABLE puts every
+// column on its own line and always backticks the name. Expression defaults
 // (`DEFAULT (expr)`) are NOT generated columns: mydumper keeps them in the
 // dump, so they never reach the #602 guard and must not be listed here.
-var generatedColumnRe = regexp.MustCompile("(?i)^\\s*`((?:[^`]|``)+)`\\s+.*\\bGENERATED\\s+ALWAYS\\s+AS\\b")
+var generatedColumnRe = regexp.MustCompile("(?i)^\\s*`((?:[^`]|``)+)`\\s+.*(?:\\bGENERATED\\s+ALWAYS\\s+AS\\b|\\bAS\\s*\\(.*\\)\\s*(?:VIRTUAL|STORED|PERSISTENT)\\b)")
 
 // sqlStringLiteralRe finds single-quoted SQL string literals (with ” as the
 // escaped quote), so a COMMENT or DEFAULT that happens to contain the words
@@ -2332,6 +2351,16 @@ func generatedColumnsIn(createTableSQL string) map[string]struct{} {
 			continue
 		}
 		out[strings.ReplaceAll(m[1], "``", "`")] = struct{}{}
+	}
+	return out
+}
+
+// generatedByName keys a schema snapshot's columns by name with their
+// IsGenerated flag, the shape mergeInput.CurrentGenerated wants.
+func generatedByName(cols []metadata.ColumnMeta) map[string]bool {
+	out := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		out[c.Name] = c.IsGenerated
 	}
 	return out
 }
