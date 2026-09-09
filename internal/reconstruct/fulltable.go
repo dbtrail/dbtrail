@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -1177,6 +1178,7 @@ func ReconstructTable(
 		Changes:           changes,
 		ImageColumns:      fold.ImageColumns,
 		SawImage:          fold.SawImage,
+		CurrentGenerated:  generatedByName(tm.Columns),
 		OutputDir:         cfg.OutputDir,
 		ChunkSize:         cfg.ChunkSize,
 		DuckDBTuning:      cfg.DuckDBTuning,
@@ -1229,7 +1231,40 @@ func prepareMerge(ctx context.Context, in mergeInput) ([]string, error) {
 	// same fail-loud choice the supportedPKType guard in ReconstructTable makes:
 	// a warning isn't enough because an operator running --log-level error would
 	// not see it and would get output silently missing a column.
-	if extra := postBaselineColumns(in.Changes, colNames); len(extra) > 0 {
+	// A STORED/VIRTUAL generated column is absent from the baseline BY DESIGN:
+	// `bintrail baseline` (mydumper) leaves it out of the dump because the
+	// server refuses an explicit value for it, while every ROW image carries
+	// it. Without this exclusion the first fold over any table with such a
+	// column that had a row event in the window refused with ErrSchemaChanged
+	// (#1624), and on a schedule with the full-backup opt-in on that refusal
+	// fell back to a FULL backup at every slot. Dropping the value is the
+	// right thing: the server recomputes it on load, and the baseline never
+	// held it (baseline.parseSchemaFrom leaves it out of the columns it reads
+	// the dump with).
+	extra := postBaselineColumns(in.Changes, colNames)
+	if gen := generatedColumnsIn(in.CreateTableSQL); len(gen) > 0 && len(extra) > 0 {
+		kept := extra[:0]
+		var dropped []string
+		for _, col := range extra {
+			if _, ok := gen[col]; ok {
+				if cur, known := in.CurrentGenerated[col]; known && !cur {
+					return nil, fmt.Errorf(
+						"full-table reconstruct: %s.%s column %s was a generated column when the baseline was taken and is a plain column now; "+
+							"the baseline holds no value for it — re-run `bintrail baseline` to capture a snapshot that includes it: %w",
+						in.Schema, in.Table, col, ErrSchemaChanged)
+				}
+				dropped = append(dropped, col)
+				continue
+			}
+			kept = append(kept, col)
+		}
+		extra = kept
+		if len(dropped) > 0 {
+			slog.Debug("full-table reconstruct: generated column(s) in delta events left out of the output, the server recomputes them",
+				"schema", in.Schema, "table", in.Table, "columns", strings.Join(dropped, ", "))
+		}
+	}
+	if len(extra) > 0 {
 		return nil, fmt.Errorf(
 			"full-table reconstruct: %s.%s has column(s) %s present in delta events but absent from the baseline schema "+
 				"(added after the baseline snapshot); their values cannot be emitted without dropping data silently — "+
@@ -1276,8 +1311,17 @@ type mergeInput struct {
 	// trimmed Changes map can no longer provide (see droppedBaselineColumns).
 	ImageColumns map[string]struct{}
 	SawImage     bool
-	OutputDir    string
-	ChunkSize    int64
+	// CurrentGenerated is the schema snapshot's view of which columns are
+	// generated today, keyed by name (absent = the snapshot does not know the
+	// column). prepareMerge cross-checks it against the baseline CREATE TABLE:
+	// a column the footer calls generated but the snapshot calls plain was
+	// converted after the baseline was taken (MySQL allows MODIFY on a STORED
+	// generated column), so the baseline holds no value for it and dropping
+	// it would lose data. Parquet mode also refuses that shape in
+	// checkBaselineSchemaCurrent; mydumper mode has only this check.
+	CurrentGenerated map[string]bool
+	OutputDir        string
+	ChunkSize        int64
 
 	// SnapshotDir / SnapshotAt / Cut / SourceBaseline are set only under
 	// OutputFormatParquet and drive mergeBaselineIntoParquet: where the snapshot
@@ -2277,6 +2321,62 @@ func postBaselineColumns(changes map[string]*query.ResultRow, colNames []string)
 		out = append(out, col)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// columnDefNameRe captures the name of one column definition line of a
+// SHOW CREATE TABLE, the same line shape baseline.colRe scans: at least one
+// leading space, a backticked name, then the type. The `\\s+` matters: a line
+// colRe would skip must be skipped here too, or the column lands in the
+// "declared but not held" set and is dropped instead of refused. Index and
+// constraint lines never start with a backtick.
+var columnDefNameRe = regexp.MustCompile("^\\s+`([^`]+)`\\s+\\S")
+
+// generatedColumnsIn returns the columns a CREATE TABLE declares that the
+// baseline built from it does NOT hold: STORED/VIRTUAL/PERSISTENT generated
+// columns and MariaDB's explicit ROW START/END period columns. It does not
+// classify the clause itself; baseline.ParseSchemaText is the parser that
+// decided which columns went into the Parquet at dump time, so the set is
+// "every column definition line" minus "what that parser keeps", and the
+// guard and the dump cannot disagree on a spelling (#1624 on MariaDB's short
+// `AS (expr) PERSISTENT`). A statement the parser cannot read, an empty one,
+// or a PostgreSQL baseline (no CREATE TABLE) yields an empty set, which keeps
+// the #602 guard exactly as strict as before for every column.
+func generatedColumnsIn(createTableSQL string) map[string]struct{} {
+	out := map[string]struct{}{}
+	held, err := baseline.ParseSchemaText(createTableSQL)
+	if err != nil || len(held) == 0 {
+		return out
+	}
+	kept := make(map[string]struct{}, len(held))
+	for _, c := range held {
+		kept[c.Name] = struct{}{}
+	}
+	for line := range strings.SplitSeq(createTableSQL, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "PRIMARY") || strings.HasPrefix(trimmed, "UNIQUE") ||
+			strings.HasPrefix(trimmed, "KEY") || strings.HasPrefix(trimmed, "CONSTRAINT") ||
+			trimmed == ");" || trimmed == ")" {
+			break
+		}
+		m := columnDefNameRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		if _, ok := kept[m[1]]; !ok {
+			out[m[1]] = struct{}{}
+		}
+	}
+	return out
+}
+
+// generatedByName keys a schema snapshot's columns by name with their
+// IsGenerated flag, the shape mergeInput.CurrentGenerated wants.
+func generatedByName(cols []metadata.ColumnMeta) map[string]bool {
+	out := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		out[c.Name] = c.IsGenerated
+	}
 	return out
 }
 
