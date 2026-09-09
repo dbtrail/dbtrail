@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.81.0] - 2026-09-10
+
+### Fixed
+- **A scheduled backup on a server with both a Backup dir and a Backup S3
+  destination reads its previous snapshot from the directory when the
+  directory holds the bucket's newest snapshot** (#1626). Since #1539 that
+  update always read the bucket, and the disk-space setting (#1471) refuses
+  to carry a table forward from S3, so every slot rewrote every table and
+  reported `reuse_unchanged: not applicable`. The directory is used only
+  when its newest snapshot is the same instant as the bucket's newest and
+  holds every table the bucket's copy has, table for table; any other local
+  state, an unreadable directory, or a listing failure keeps the bucket as
+  before. The result is still uploaded to the bucket. The local listing runs
+  first, so an S3-backed server whose directory is empty pays no extra
+  bucket listing per slot.
+
 ## [0.80.0] - 2026-09-09
 
 ### Fixed
