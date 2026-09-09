@@ -251,7 +251,8 @@ func TestReconstruct1624_generatedColumnIsNotAPostBaselineColumn(t *testing.T) {
 // TestGeneratedColumnsIn pins the set the guard excludes: STORED, VIRTUAL and
 // MariaDB's short PERSISTENT form are found, an expression DEFAULT is not, a
 // COMMENT that mentions the words does not promote its column, a period
-// column is found, and nothing past the first index line is read.
+// column is found, and a column-shaped line past the first index line is
+// not read.
 func TestGeneratedColumnsIn(t *testing.T) {
 	sql := "CREATE TABLE `t` (\n" +
 		"  `id` int NOT NULL,\n" +
@@ -262,7 +263,8 @@ func TestGeneratedColumnsIn(t *testing.T) {
 		"  `short_form` int AS (`id` * 2) PERSISTENT,\n" +
 		"  `row_end` timestamp(6) GENERATED ALWAYS AS ROW END,\n" +
 		"  PRIMARY KEY (`id`),\n" +
-		"  KEY `ghost` (`id`)\n) ENGINE=InnoDB"
+		"  `ghost` int AS (`id`) STORED,\n" +
+		"  KEY `k` (`id`)\n) ENGINE=InnoDB"
 	got := generatedColumnsIn(sql)
 	want := []string{"total", "upper_name", "short_form", "row_end"}
 	if len(got) != len(want) {

@@ -1235,10 +1235,12 @@ func prepareMerge(ctx context.Context, in mergeInput) ([]string, error) {
 	// `bintrail baseline` (mydumper) leaves it out of the dump because the
 	// server refuses an explicit value for it, while every ROW image carries
 	// it. Without this exclusion the first fold over any table with such a
-	// column refused with ErrSchemaChanged (#1624), and on a schedule that
-	// refusal fell back to a FULL backup at every slot. Dropping the value is
-	// the right thing: the server recomputes it on load, the same way the
-	// baseline path already excludes it from the emitted column list.
+	// column that had a row event in the window refused with ErrSchemaChanged
+	// (#1624), and on a schedule with the full-backup opt-in on that refusal
+	// fell back to a FULL backup at every slot. Dropping the value is the
+	// right thing: the server recomputes it on load, and the baseline never
+	// held it (baseline.parseSchemaFrom leaves it out of the columns it reads
+	// the dump with).
 	extra := postBaselineColumns(in.Changes, colNames)
 	if gen := generatedColumnsIn(in.CreateTableSQL); len(gen) > 0 && len(extra) > 0 {
 		kept := extra[:0]
@@ -1313,9 +1315,9 @@ type mergeInput struct {
 	// generated today, keyed by name (absent = the snapshot does not know the
 	// column). prepareMerge cross-checks it against the baseline CREATE TABLE:
 	// a column the footer calls generated but the snapshot calls plain was
-	// converted after the snapshot (MySQL allows MODIFY on a STORED generated
-	// column), so the baseline holds no value for it and dropping it would
-	// lose data. Parquet mode also refuses that shape in
+	// converted after the baseline was taken (MySQL allows MODIFY on a STORED
+	// generated column), so the baseline holds no value for it and dropping
+	// it would lose data. Parquet mode also refuses that shape in
 	// checkBaselineSchemaCurrent; mydumper mode has only this check.
 	CurrentGenerated map[string]bool
 	OutputDir        string
@@ -2323,10 +2325,12 @@ func postBaselineColumns(changes map[string]*query.ResultRow, colNames []string)
 }
 
 // columnDefNameRe captures the name of one column definition line of a
-// SHOW CREATE TABLE, the same line shape baseline.colRe scans (leading
-// whitespace, a backticked name, then the type). Index and constraint lines
-// never start with a backtick.
-var columnDefNameRe = regexp.MustCompile("^\\s*`([^`]+)`\\s+\\S")
+// SHOW CREATE TABLE, the same line shape baseline.colRe scans: at least one
+// leading space, a backticked name, then the type. The `\\s+` matters: a line
+// colRe would skip must be skipped here too, or the column lands in the
+// "declared but not held" set and is dropped instead of refused. Index and
+// constraint lines never start with a backtick.
+var columnDefNameRe = regexp.MustCompile("^\\s+`([^`]+)`\\s+\\S")
 
 // generatedColumnsIn returns the columns a CREATE TABLE declares that the
 // baseline built from it does NOT hold: STORED/VIRTUAL/PERSISTENT generated
