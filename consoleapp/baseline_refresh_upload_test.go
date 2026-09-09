@@ -152,8 +152,13 @@ func TestRunRefresh_readsTheLocalCopyWhenItIsTheBucketsNewest(t *testing.T) {
 	if readFrom != local {
 		t.Fatalf("the fold read %q, want the local directory %q: the resolved source never reached the fold", readFrom, local)
 	}
-	if len(*uploads) != 1 {
-		t.Fatalf("uploads = %+v, want the result sent to the bucket exactly once regardless of where it was read from", *uploads)
+	// The destination is the request's bucket, never the resolved fold
+	// source: this is the one test where the two differ, so a cleanup that
+	// unified them would ship every slot's result to a local path here.
+	stamp := reconstruct.SnapshotDirName(refreshAt)
+	want := uploadCall{filepath.Join(local, stamp), "s3://bucket/backups/" + stamp}
+	if len(*uploads) != 1 || (*uploads)[0] != want {
+		t.Fatalf("uploads = %+v, want exactly %+v: read from the directory, sent to the bucket", *uploads, want)
 	}
 }
 
