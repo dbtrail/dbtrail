@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.80.0] - 2026-09-09
+
+### Fixed
+- **A table with a `GENERATED ALWAYS AS ... STORED` column can be folded**
+  (#1624). `bintrail baseline` leaves generated columns out of the dump, so
+  the baseline Parquet has no such column, while every ROW image carries it.
+  The guard that refuses a column added after the baseline (#602) read that
+  as a schema change and refused the table with `ErrSchemaChanged`; on a
+  schedule with the full-backup opt-in on, the refusal fell back to a full
+  backup at every slot. Columns the baseline's `CREATE TABLE` declares as
+  generated (MySQL's `GENERATED ALWAYS AS`, MariaDB's short `AS (expr)
+  PERSISTENT`, and explicit `ROW START`/`ROW END` period columns, decided by
+  the same parser that built the baseline) are now left out of the emitted
+  rows, which the server recomputes on load. A generated column that was
+  turned into a plain column after the baseline still refuses and names
+  itself, since the baseline holds no value for it.
+
 ## [0.79.0] - 2026-09-09
 
 ### Changed
