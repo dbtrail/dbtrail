@@ -142,3 +142,113 @@ func TestPostBaselineColumns(t *testing.T) {
 		})
 	}
 }
+
+// TestReconstruct1624_generatedColumnIsNotAPostBaselineColumn is the regression
+// for #1624. A STORED generated column is absent from the baseline on purpose
+// (mydumper leaves it out) while every ROW image carries it, so the #602 guard
+// used to refuse the table as if the column had been ADDed after the snapshot.
+// With the CREATE TABLE declaring it generated, the merge must succeed and the
+// emitted rows must not carry the column (the server recomputes it on load).
+func TestReconstruct1624_generatedColumnIsNotAPostBaselineColumn(t *testing.T) {
+	baselinePath := writeTestBaseline(t, [][]string{
+		{"1", "new"},
+		{"2", "paid"},
+	})
+	outDir := t.TempDir()
+	// Built per call: the merge consumes the change map as it folds.
+	changes := func() map[string]*query.ResultRow {
+		return map[string]*query.ResultRow{
+			pkStrForInt(2): {
+				EventType: parser.EventUpdate,
+				PKValues:  pkStrForInt(2),
+				RowBefore: map[string]any{"id": float64(2), "status": "paid"},
+				RowAfter:  map[string]any{"id": float64(2), "status": "shipped", "line_total": "90.00"},
+			},
+		}
+	}
+	create := "CREATE TABLE `orders` (\n" +
+		"  `id` int unsigned NOT NULL AUTO_INCREMENT,\n" +
+		"  `status` varchar(20) NOT NULL DEFAULT 'new',\n" +
+		"  `line_total` decimal(10,2) GENERATED ALWAYS AS ((`quantity` * `unit_price`)) STORED,\n" +
+		"  PRIMARY KEY (`id`)\n) ENGINE=InnoDB"
+	rep := &TableReport{}
+	err := mergeBaselineIntoWriter(context.Background(), mergeInput{
+		LocalBaselinePath: baselinePath,
+		CreateTableSQL:    create,
+		Schema:            "mydb",
+		Table:             "orders",
+		PKCols:            pkColsIntID(),
+		Changes:           changes(),
+		OutputDir:         outDir,
+		ChunkSize:         0,
+	}, rep)
+	if err != nil {
+		t.Fatalf("a STORED generated column must not be treated as a post-baseline column: %v", err)
+	}
+	entries, derr := os.ReadDir(outDir)
+	if derr != nil {
+		t.Fatalf("read output dir: %v", derr)
+	}
+	var sawSQL bool
+	for _, e := range entries {
+		// Data chunks only: the -schema.sql file carries the CREATE TABLE, which
+		// names the generated column on purpose.
+		if !strings.HasSuffix(e.Name(), ".sql") || strings.HasSuffix(e.Name(), "-schema.sql") {
+			continue
+		}
+		sawSQL = true
+		b, rerr := os.ReadFile(outDir + "/" + e.Name())
+		if rerr != nil {
+			t.Fatalf("read %s: %v", e.Name(), rerr)
+		}
+		if strings.Contains(string(b), "line_total") {
+			t.Errorf("%s: the generated column must be left out of the emitted rows", e.Name())
+		}
+		if !strings.Contains(string(b), "shipped") {
+			t.Errorf("%s: the folded UPDATE must reach the output", e.Name())
+		}
+	}
+	if !sawSQL {
+		t.Fatalf("no .sql chunk written")
+	}
+
+	// A column that is NOT generated still fails loud, so the #602 guard has
+	// lost nothing: same shape, the CREATE TABLE declares line_total as a
+	// plain column.
+	plain := strings.Replace(create, "GENERATED ALWAYS AS ((`quantity` * `unit_price`)) STORED", "NOT NULL DEFAULT '0.00'", 1)
+	err = mergeBaselineIntoWriter(context.Background(), mergeInput{
+		LocalBaselinePath: baselinePath, CreateTableSQL: plain, Schema: "mydb", Table: "orders",
+		PKCols: pkColsIntID(), Changes: changes(), OutputDir: t.TempDir(),
+	}, &TableReport{})
+	if err == nil || !strings.Contains(err.Error(), "line_total") {
+		t.Fatalf("a plain column absent from the baseline must still refuse and name it, got: %v", err)
+	}
+}
+
+// TestGeneratedColumnsIn pins the CREATE TABLE parser: STORED and VIRTUAL
+// generated columns are found, an expression DEFAULT is not, a COMMENT that
+// mentions the words does not promote its column, and a backticked name with
+// an escaped backtick round-trips.
+func TestGeneratedColumnsIn(t *testing.T) {
+	sql := "CREATE TABLE `t` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `total` decimal(10,2) GENERATED ALWAYS AS ((`q` * `p`)) STORED,\n" +
+		"  `upper_name` varchar(50) GENERATED ALWAYS AS (upper(`name`)) VIRTUAL,\n" +
+		"  `made_at` datetime DEFAULT (now()),\n" +
+		"  `note` varchar(20) DEFAULT NULL COMMENT 'not GENERATED ALWAYS AS anything',\n" +
+		"  `odd``name` int GENERATED ALWAYS AS (`id` + 1) STORED,\n" +
+		"  PRIMARY KEY (`id`)\n)"
+	got := generatedColumnsIn(sql)
+	want := []string{"total", "upper_name", "odd`name"}
+	if len(got) != len(want) {
+		t.Fatalf("generatedColumnsIn = %v, want exactly %v", got, want)
+	}
+	for _, w := range want {
+		if _, ok := got[w]; !ok {
+			t.Errorf("missing %q in %v", w, got)
+		}
+	}
+	if len(generatedColumnsIn("")) != 0 || len(generatedColumnsIn("-- test")) != 0 {
+		t.Errorf("empty or non-MySQL CREATE TABLE must yield no generated columns")
+	}
+}

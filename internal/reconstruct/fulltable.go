@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -1229,7 +1230,32 @@ func prepareMerge(ctx context.Context, in mergeInput) ([]string, error) {
 	// same fail-loud choice the supportedPKType guard in ReconstructTable makes:
 	// a warning isn't enough because an operator running --log-level error would
 	// not see it and would get output silently missing a column.
-	if extra := postBaselineColumns(in.Changes, colNames); len(extra) > 0 {
+	// A STORED/VIRTUAL generated column is absent from the baseline BY DESIGN:
+	// `bintrail baseline` (mydumper) leaves it out of the dump because the
+	// server refuses an explicit value for it, while every ROW image carries
+	// it. Without this exclusion the first fold over any table with such a
+	// column refused with ErrSchemaChanged (#1624), and on a schedule that
+	// refusal fell back to a FULL backup at every slot. Dropping the value is
+	// the right thing: the server recomputes it on load, the same way the
+	// baseline path already excludes it from the emitted column list.
+	extra := postBaselineColumns(in.Changes, colNames)
+	if gen := generatedColumnsIn(in.CreateTableSQL); len(gen) > 0 && len(extra) > 0 {
+		kept := extra[:0]
+		var dropped []string
+		for _, col := range extra {
+			if _, ok := gen[col]; ok {
+				dropped = append(dropped, col)
+				continue
+			}
+			kept = append(kept, col)
+		}
+		extra = kept
+		if len(dropped) > 0 {
+			slog.Debug("full-table reconstruct: generated column(s) in delta events left out of the output, the server recomputes them",
+				"schema", in.Schema, "table", in.Table, "columns", strings.Join(dropped, ", "))
+		}
+	}
+	if len(extra) > 0 {
 		return nil, fmt.Errorf(
 			"full-table reconstruct: %s.%s has column(s) %s present in delta events but absent from the baseline schema "+
 				"(added after the baseline snapshot); their values cannot be emitted without dropping data silently — "+
@@ -2277,6 +2303,36 @@ func postBaselineColumns(changes map[string]*query.ResultRow, colNames []string)
 		out = append(out, col)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// generatedColumnRe matches one column definition line of a SHOW CREATE TABLE
+// that declares a STORED or VIRTUAL generated column, once string literals
+// have been blanked out of the line. SHOW CREATE TABLE puts every column on
+// its own line and always backticks the name. Expression defaults
+// (`DEFAULT (expr)`) are NOT generated columns: mydumper keeps them in the
+// dump, so they never reach the #602 guard and must not be listed here.
+var generatedColumnRe = regexp.MustCompile("(?i)^\\s*`((?:[^`]|``)+)`\\s+.*\\bGENERATED\\s+ALWAYS\\s+AS\\b")
+
+// sqlStringLiteralRe finds single-quoted SQL string literals (with ” as the
+// escaped quote), so a COMMENT or DEFAULT that happens to contain the words
+// GENERATED ALWAYS AS cannot promote its column.
+var sqlStringLiteralRe = regexp.MustCompile("'(?:[^']|'')*'")
+
+// generatedColumnsIn returns the names of the STORED/VIRTUAL generated columns
+// a CREATE TABLE declares, keyed for lookup. An empty or non-MySQL statement
+// (PostgreSQL baselines carry none) yields an empty set, which keeps the #602
+// guard exactly as strict as before for every other column.
+func generatedColumnsIn(createTableSQL string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for line := range strings.SplitSeq(createTableSQL, "\n") {
+		line = sqlStringLiteralRe.ReplaceAllString(line, "''")
+		m := generatedColumnRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		out[strings.ReplaceAll(m[1], "``", "`")] = struct{}{}
+	}
 	return out
 }
 
