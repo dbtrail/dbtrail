@@ -24,10 +24,28 @@ type uploadCall struct{ outputDir, dest string }
 // asked to upload, so a whole refresh can run for an S3-backed server without
 // a bucket. Only s3:// sources are answered here; a local source still runs
 // the real listing, which is what the on-disk cases depend on.
+// stubBucketListing keeps resolveFoldSource (#1626) off the network: a bucket
+// listing answers empty, so the fold keeps the bucket as its source exactly as
+// it did before the seam existed, and a local directory is listed for real.
+// Without it every request carrying both a directory and a bucket opened
+// DuckDB with httpfs and globbed a bucket literally named "bucket".
+func stubBucketListing(t *testing.T) {
+	t.Helper()
+	real := listBaselines
+	t.Cleanup(func() { listBaselines = real })
+	listBaselines = func(ctx context.Context, src string) ([]reconstruct.BaselineFile, error) {
+		if !strings.HasPrefix(src, "s3://") {
+			return real(ctx, src)
+		}
+		return nil, nil
+	}
+}
+
 func stubS3Fold(t *testing.T, bucketTables []string, uploadErr error) (*[]uploadCall, *[]string) {
 	t.Helper()
 	realList, realUpload := newestSnapshotTables, uploadSnapshot
 	t.Cleanup(func() { newestSnapshotTables, uploadSnapshot = realList, realUpload })
+	stubBucketListing(t)
 
 	var listed []string
 	newestSnapshotTables = func(ctx context.Context, src string) ([]string, error) {
@@ -94,6 +112,53 @@ func TestRunRefresh_S3BackedServerFoldsFromTheBucketAndUploads(t *testing.T) {
 	want := uploadCall{filepath.Join(local, stamp), "s3://bucket/backups/" + stamp}
 	if len(*uploads) != 1 || (*uploads)[0] != want {
 		t.Fatalf("uploads = %+v, want exactly %+v", *uploads, want)
+	}
+}
+
+// #1626 through runRefresh itself, not the resolver alone: when the local
+// directory holds the bucket's newest snapshot, the fold reads the directory.
+// The bucket listing is stubbed to MIRROR the local one, so the two newest
+// snapshots are the same instant with the same table. Deleting the line in
+// runRefresh that stores the resolved source leaves TestResolveFoldSource
+// green and turns this red.
+func TestRunRefresh_readsTheLocalCopyWhenItIsTheBucketsNewest(t *testing.T) {
+	local := stageBaselineRoot(t)
+	uploads, _ := stubS3Fold(t, []string{"shop.orders"}, nil)
+	realLB := listBaselines
+	t.Cleanup(func() { listBaselines = realLB })
+	listBaselines = func(ctx context.Context, _ string) ([]reconstruct.BaselineFile, error) {
+		return realLB(ctx, local)
+	}
+	injectFold(t, 0, nil)
+	prevFold := foldTables
+	var readFrom string
+	foldTables = func(ctx context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		readFrom = cfg.BaselineSrc
+		return prevFold(ctx, cfg)
+	}
+	t.Cleanup(func() { foldTables = prevFold })
+
+	out, st := runRefreshFor(t, refreshRequest{
+		ServerID: "s", ServerName: "s", IndexDSN: "d",
+		BaselineDir: local, BaselineS3: "s3://bucket/backups/",
+	})
+
+	if out != "" {
+		t.Fatalf("the refresh warned: %s", out)
+	}
+	if !st.Published || st.State != "succeeded" {
+		t.Fatalf("status = %+v, want a published success", st)
+	}
+	if readFrom != local {
+		t.Fatalf("the fold read %q, want the local directory %q: the resolved source never reached the fold", readFrom, local)
+	}
+	// The destination is the request's bucket, never the resolved fold
+	// source: this is the one test where the two differ, so a cleanup that
+	// unified them would ship every slot's result to a local path here.
+	stamp := reconstruct.SnapshotDirName(refreshAt)
+	want := uploadCall{filepath.Join(local, stamp), "s3://bucket/backups/" + stamp}
+	if len(*uploads) != 1 || (*uploads)[0] != want {
+		t.Fatalf("uploads = %+v, want exactly %+v: read from the directory, sent to the bucket", *uploads, want)
 	}
 }
 
@@ -194,6 +259,7 @@ func TestPublishedSnapshotTime_namesTheSnapshotAnUploadFailureLeftBehind(t *test
 func TestRunRefresh_recordsHowManyFilesReachedTheDestination(t *testing.T) {
 	realList, realUpload := newestSnapshotTables, uploadSnapshot
 	t.Cleanup(func() { newestSnapshotTables, uploadSnapshot = realList, realUpload })
+	stubBucketListing(t)
 	newestSnapshotTables = func(ctx context.Context, src string) ([]string, error) {
 		if !strings.HasPrefix(src, "s3://") {
 			return realList(ctx, src)

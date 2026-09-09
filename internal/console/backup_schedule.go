@@ -278,7 +278,10 @@ func FullBackupPossible(e ServerEntry, gates BackupScheduleGates) error {
 // stale is read stale by time-travel and fresh by the fold. The Backups
 // listing merges both locations (#1571) and the point-in-time restore reads
 // this same source (#1541); do not "fix" the divergence by making the fold
-// read local.
+// read local. The daemon's refresh loop DOES read the local copy for one run
+// when that copy is the bucket's newest snapshot, table for table
+// (consoleapp resolveFoldSource, #1626): never a stale copy, only the same
+// one, so unchanged tables can be carried forward by hard link.
 //
 // The OUTPUT stays local whatever this returns: the fold writes Parquet to a
 // filesystem, and the upload is a separate step afterwards.

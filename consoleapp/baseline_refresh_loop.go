@@ -44,6 +44,13 @@ type refreshRequest struct {
 	// the operator named. The gate is therefore data rather than a mode flag:
 	// there is no way to reach the upload without a destination to reach.
 	BaselineS3 string
+	// FoldSource, when set, is where THIS run reads its previous snapshot
+	// from, resolved by resolveFoldSource just before the fold. Empty means
+	// the standing rule (baselineFoldSource): the bucket when the server has
+	// one, else the local directory. It is per run on purpose: whether the
+	// local copy IS the bucket's newest snapshot is only true at the moment
+	// it was checked.
+	FoldSource string
 }
 
 // TriggerRefresh starts a periodic baseline refresh for a server, sharing the
@@ -121,6 +128,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// snapshot directory holds anything this run did not write, and once the
 	// fold has run its own files are in there too. See claimSnapshotDir.
 	unclaimed := claimSnapshotDir(refreshSnapshotDir(req, at))
+	req.FoldSource = resolveFoldSource(s.ctx, req)
 	tables, refused, reuse, err := s.executeRefresh(req, at)
 	// Publishing is not finished until the snapshot is where this server's
 	// backups live. A fold that wrote a perfect local snapshot for a server
@@ -197,12 +205,93 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 }
 
 // baselineFoldSource is where this request's fold reads the PREVIOUS snapshot
-// from. Mirrors console.BaselineFoldSource, on the loop's own request type.
+// from. Mirrors console.BaselineFoldSource, on the loop's own request type,
+// unless resolveFoldSource already settled it for this run.
 func baselineFoldSource(req refreshRequest) string {
+	if req.FoldSource != "" {
+		return req.FoldSource
+	}
 	if req.BaselineS3 != "" {
 		return req.BaselineS3
 	}
 	return req.BaselineDir
+}
+
+// resolveFoldSource decides where one run reads its previous snapshot from.
+//
+// The standing rule (#1539) reads the bucket whenever the server has one,
+// because the local directory may hold less than the bucket: what this daemon
+// folded since it started, minus what retention reclaimed. That rule has a
+// cost on a server with BOTH: carrying an unchanged table forward means
+// hard-linking its previous file (carryForwardEligible refuses an s3://
+// source), so every table was rewritten and re-uploaded at every slot even
+// when the local directory held the very snapshot the bucket had (#1626), and
+// after the first fold it always does: the fold writes locally and uploads,
+// and retention never removes the newest snapshot.
+//
+// So: when the local directory's newest complete snapshot is the SAME one the
+// bucket reports (same instant) and holds every table the bucket's copy
+// holds, read the local copy. Anything else (no local copy, an older one, a
+// listing that failed, a local copy missing a table) keeps the bucket, so a
+// stale local directory can never be folded from — the hazard the standing
+// rule exists to avoid. The upload is unaffected either way.
+func resolveFoldSource(ctx context.Context, req refreshRequest) string {
+	standing := baselineFoldSource(req)
+	if req.FoldSource != "" || req.BaselineS3 == "" || req.BaselineDir == "" {
+		return standing
+	}
+	// The local listing goes first: it is a directory read, and an empty or
+	// unreadable directory settles the answer without a bucket listing, which
+	// is two globs over S3. The #1539 shape this does not apply to (a bucket
+	// server whose directory holds nothing yet) then costs no extra S3 work.
+	local, err := listBaselines(ctx, req.BaselineDir)
+	if err != nil || len(local) == 0 {
+		return standing
+	}
+	remote, err := listBaselines(ctx, req.BaselineS3)
+	if err != nil || len(remote) == 0 {
+		return standing
+	}
+	remoteAt, remoteTables := newestSnapshotOf(remote)
+	localAt, localTables := newestSnapshotOf(local)
+	if !localAt.Equal(remoteAt) {
+		slog.Debug("baseline refresh: local copy is not the bucket's newest snapshot, reading the bucket",
+			"server", req.ServerName, "local", localAt.UTC().Format(time.RFC3339), "bucket", remoteAt.UTC().Format(time.RFC3339))
+		return standing
+	}
+	for t := range remoteTables {
+		if _, ok := localTables[t]; !ok {
+			slog.Debug("baseline refresh: local copy of the newest snapshot is missing a table, reading the bucket",
+				"server", req.ServerName, "table", t)
+			return standing
+		}
+	}
+	slog.Info("baseline refresh: the local copy is the bucket's newest snapshot, reading it instead of the bucket",
+		"server", req.ServerName, "snapshot", localAt.UTC().Format(time.RFC3339), "dir", req.BaselineDir)
+	return req.BaselineDir
+}
+
+// newestSnapshotOf returns the newest snapshot time in a ListBaselines result
+// (newest first) and the schema.table set of that snapshot.
+// The newest instant is computed over the whole listing rather than read
+// off files[0]: ListBaselines sorts newest-first today, but this helper
+// serves BOTH sides of the comparison, so trusting the order would make an
+// older instant the two sides share look like a match, and that is the one
+// error this comparison exists to refuse.
+func newestSnapshotOf(files []reconstruct.BaselineFile) (time.Time, map[string]struct{}) {
+	var newest time.Time
+	for _, f := range files {
+		if f.SnapshotTime.After(newest) {
+			newest = f.SnapshotTime
+		}
+	}
+	tables := map[string]struct{}{}
+	for _, f := range files {
+		if f.SnapshotTime.Equal(newest) {
+			tables[f.Schema+"."+f.Table] = struct{}{}
+		}
+	}
+	return newest, tables
 }
 
 // errSnapshotNotUploaded marks the ONE failure that leaves a complete snapshot
@@ -649,9 +738,12 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		// always. On an S3-backed server the previous snapshot may exist ONLY
 		// in the bucket, so folding from the local directory would find nothing
 		// to fold from; BaselineSrc takes an s3:// URL and FindBaseline
-		// dispatches on the prefix. OutputDir cannot follow it: the Parquet
-		// writer needs a real directory, and the upload below is what moves the
-		// finished snapshot to the destination.
+		// dispatches on the prefix. The one exception is resolved per run by
+		// resolveFoldSource: a local copy that IS the bucket's newest snapshot
+		// is read locally so unchanged tables can be hard-linked (#1626).
+		// OutputDir cannot follow it: the Parquet writer needs a real
+		// directory, and the upload below is what moves the finished snapshot
+		// to the destination.
 		BaselineSrc:           baselineFoldSource(req),
 		Tables:                tableList,
 		At:                    at,
@@ -739,6 +831,9 @@ var foldTables = reconstruct.ReconstructTablesDetailed
 var (
 	newestSnapshotTables = reconstruct.NewestSnapshotTables
 	uploadSnapshot       = baseline.Upload
+	// listBaselines feeds resolveFoldSource; it addresses the bucket on an
+	// S3-backed server, same rule as the two above.
+	listBaselines = reconstruct.ListBaselines
 )
 
 // foldOutcome is everything foldSnapshot decides once the fold has run, split

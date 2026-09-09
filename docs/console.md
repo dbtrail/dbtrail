@@ -459,7 +459,11 @@ panel that answers whether a restore would work, far below the fold.
   the server's own local backup directory to write into). When the backups go
   to S3 that update reads its previous snapshot straight from the bucket and
   uploads its result back to the same place (#1539), so an S3 destination no
-  longer forces a nightly full read of the source. An update that
+  longer forces a nightly full read of the source; when the local directory
+  already holds that same newest snapshot, table for table, the update reads
+  the local copy instead, so with the disk-space setting on, unchanged tables
+  can keep their previous file (a hard link where the filesystem allows one, a
+  copy otherwise) (#1626); any other local state keeps the bucket as the source. An update that
   fails (a capture gap, a schema change, an internal error) falls back to a
   full backup at the same slot when the daemon may take one (the creation
   opt-in); otherwise that slot is recorded as skipped with both reasons.

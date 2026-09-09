@@ -4082,14 +4082,20 @@ function rotationCard(rot) {
 // producers ever sets BaselineS3:
 //
 //   consoleapp/baseline_refresh_loop.go  interval loop   BaselineDir only
-//   consoleapp/baseline_schedule_loop.go per-server job  BaselineS3 set
-//   consoleapp/baseline_restore.go       restore         BaselineDir only
+//   consoleapp/baseline_schedule_loop.go per-server job  BaselineS3 set; since
+//                                        #1626 resolveFoldSource reads the local
+//                                        directory when it holds the bucket's
+//                                        newest snapshot, the bucket otherwise
+//   consoleapp/baseline_restore.go       restore         BaselineS3 set (#1541);
+//                                        reads the bucket on an S3-backed
+//                                        server, the directory otherwise
 //
 // So the sentence is keyed to servers with NO local directory ("keeps backups
 // only in S3"): on those every producer refuses. A server carrying BOTH a
 // directory and a bucket is deliberately not described: its scheduled backup
-// does not reuse while the interval loop and every restore do, and one
-// sentence cannot carry that without being false in one direction. The field
+// reuses only on the runs where the directory is current, a restore never
+// does there, and the interval loop always does; one sentence cannot carry
+// that without being false in one direction. The field
 // is "Backup S3" (baseline_s3), NOT "Archive to S3" (archive_s3), which is the
 // binlog archive tier and has nothing to do with this.
 //
