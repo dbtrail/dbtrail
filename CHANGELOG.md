@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.79.0] - 2026-09-09
+
+### Changed
+- **Backup schedules can run every 5 minutes** (#1620). The Backups page
+  refused any `every` under `15m`. That floor predates #1539: a server whose
+  backups go to S3 now folds from the bucket and uploads the result, so a
+  five-minute schedule costs it neither a full read of the source nor
+  unbounded local disk, and a reporting copy of a busy table wants exactly
+  that cadence. The floor is now `5m`. The two costs the old number guarded
+  against are still said out loud at save and at boot: a server with an S3
+  destination and no local backup directory takes a full backup every slot,
+  and a local-only server keeps every snapshot it publishes.
+
+### Added
+- `docker-compose.yml` passes `BASELINE_RETAIN` through to
+  `BINTRAIL_CONSOLE_BASELINE_RETAIN`, so a short schedule can prune its
+  local snapshots once S3 holds a copy without editing the compose file.
+  It reclaims only servers that have an S3 destination.
+
 ## [0.78.0] - 2026-09-07
 
 ### Fixed
