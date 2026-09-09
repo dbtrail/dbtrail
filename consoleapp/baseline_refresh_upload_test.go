@@ -24,10 +24,28 @@ type uploadCall struct{ outputDir, dest string }
 // asked to upload, so a whole refresh can run for an S3-backed server without
 // a bucket. Only s3:// sources are answered here; a local source still runs
 // the real listing, which is what the on-disk cases depend on.
+// stubBucketListing keeps resolveFoldSource (#1626) off the network: a bucket
+// listing answers empty, so the fold keeps the bucket as its source exactly as
+// it did before the seam existed, and a local directory is listed for real.
+// Without it every request carrying both a directory and a bucket opened
+// DuckDB with httpfs and globbed a bucket literally named "bucket".
+func stubBucketListing(t *testing.T) {
+	t.Helper()
+	real := listBaselines
+	t.Cleanup(func() { listBaselines = real })
+	listBaselines = func(ctx context.Context, src string) ([]reconstruct.BaselineFile, error) {
+		if !strings.HasPrefix(src, "s3://") {
+			return real(ctx, src)
+		}
+		return nil, nil
+	}
+}
+
 func stubS3Fold(t *testing.T, bucketTables []string, uploadErr error) (*[]uploadCall, *[]string) {
 	t.Helper()
 	realList, realUpload := newestSnapshotTables, uploadSnapshot
 	t.Cleanup(func() { newestSnapshotTables, uploadSnapshot = realList, realUpload })
+	stubBucketListing(t)
 
 	var listed []string
 	newestSnapshotTables = func(ctx context.Context, src string) ([]string, error) {
@@ -194,6 +212,7 @@ func TestPublishedSnapshotTime_namesTheSnapshotAnUploadFailureLeftBehind(t *test
 func TestRunRefresh_recordsHowManyFilesReachedTheDestination(t *testing.T) {
 	realList, realUpload := newestSnapshotTables, uploadSnapshot
 	t.Cleanup(func() { newestSnapshotTables, uploadSnapshot = realList, realUpload })
+	stubBucketListing(t)
 	newestSnapshotTables = func(ctx context.Context, src string) ([]string, error) {
 		if !strings.HasPrefix(src, "s3://") {
 			return realList(ctx, src)

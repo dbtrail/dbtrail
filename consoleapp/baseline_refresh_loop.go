@@ -240,12 +240,16 @@ func resolveFoldSource(ctx context.Context, req refreshRequest) string {
 	if req.FoldSource != "" || req.BaselineS3 == "" || req.BaselineDir == "" {
 		return standing
 	}
-	remote, err := listBaselines(ctx, req.BaselineS3)
-	if err != nil || len(remote) == 0 {
-		return standing
-	}
+	// The local listing goes first: it is a directory read, and an empty or
+	// unreadable directory settles the answer without a bucket listing, which
+	// is two globs over S3. The #1539 shape this does not apply to (a bucket
+	// server whose directory holds nothing yet) then costs no extra S3 work.
 	local, err := listBaselines(ctx, req.BaselineDir)
 	if err != nil || len(local) == 0 {
+		return standing
+	}
+	remote, err := listBaselines(ctx, req.BaselineS3)
+	if err != nil || len(remote) == 0 {
 		return standing
 	}
 	remoteAt, remoteTables := newestSnapshotOf(remote)

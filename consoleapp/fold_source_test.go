@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -75,6 +76,12 @@ func TestResolveFoldSource(t *testing.T) {
 			}
 			if (tc.req.BaselineS3 == "" || tc.req.BaselineDir == "" || tc.req.FoldSource != "") && len(calls) != 0 {
 				t.Fatalf("no listing may run when the answer needs none, got %v", calls)
+			}
+			// The directory is read first and settles the empty case alone: a
+			// bucket listing is two S3 globs, and the run that follows lists
+			// the bucket again, so an empty directory must not pay for one here.
+			if len(tc.local) == 0 && tc.errAt != "/b" && slices.Contains(calls, tc.req.BaselineS3) && tc.req.BaselineS3 != "" {
+				t.Fatalf("an empty local directory must settle the answer without listing the bucket, got %v", calls)
 			}
 		})
 	}
