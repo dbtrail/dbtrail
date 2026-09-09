@@ -60,12 +60,12 @@ const (
 // often is one on the disk of a server with no S3 destination, where nothing
 // uploads and so retention cannot reclaim it; the floor is generous enough for every real
 // cadence and low enough to try the feature out.
-const BackupScheduleMinEvery = 15 * time.Minute
+const BackupScheduleMinEvery = 5 * time.Minute
 
 // backupScheduleMinEveryText is the floor as an operator types it, for the
 // refusal message. Kept next to the constant so the two cannot drift apart
 // unnoticed (a test pins them equal).
-const backupScheduleMinEveryText = "15m"
+const backupScheduleMinEveryText = "5m"
 
 // BackupSchedule is the per-server schedule as stored in the registry. The
 // fields hold the operator-typed strings so they round-trip exactly; Parse

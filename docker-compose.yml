@@ -314,6 +314,10 @@ services:
       # merges deltas onto, so the weaker modes must be asked for (#1377/#1378).
       BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: ${BASELINE_LOCK_MODE:-ftwrl}
       BINTRAIL_CONSOLE_BASELINE_STAGING: /var/lib/bintrail/baseline-staging
+      # Prune local backup snapshots older than this once S3 holds a copy
+      # (Nh/Nd). Empty = keep everything local. Worth setting with a short
+      # schedule: every run publishes a full-table snapshot.
+      BINTRAIL_CONSOLE_BASELINE_RETAIN: ${BASELINE_RETAIN:-}
       # "Run verification" button (#677): lets the console run `bintrail verify`
       # in-process for a monitored server (trigger, poll per-table results,
       # explain a mismatch) — the same read-only baseline/index reads the
