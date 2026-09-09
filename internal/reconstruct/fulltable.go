@@ -2322,35 +2322,46 @@ func postBaselineColumns(changes map[string]*query.ResultRow, colNames []string)
 	return out
 }
 
-// generatedColumnRe matches one column definition line of a SHOW CREATE TABLE
-// that declares a STORED or VIRTUAL generated column, once string literals
-// have been blanked out of the line: the MySQL spelling `GENERATED ALWAYS AS`
-// and the short `AS (expr) STORED|VIRTUAL|PERSISTENT` that MariaDB also
-// prints, the same two shapes baseline.generatedRe accepts, so this guard and
-// the dump agree on what a baseline holds. SHOW CREATE TABLE puts every
-// column on its own line and always backticks the name. Expression defaults
-// (`DEFAULT (expr)`) are NOT generated columns: mydumper keeps them in the
-// dump, so they never reach the #602 guard and must not be listed here.
-var generatedColumnRe = regexp.MustCompile("(?i)^\\s*`((?:[^`]|``)+)`\\s+.*(?:\\bGENERATED\\s+ALWAYS\\s+AS\\b|\\bAS\\s*\\(.*\\)\\s*(?:VIRTUAL|STORED|PERSISTENT)\\b)")
+// columnDefNameRe captures the name of one column definition line of a
+// SHOW CREATE TABLE, the same line shape baseline.colRe scans (leading
+// whitespace, a backticked name, then the type). Index and constraint lines
+// never start with a backtick.
+var columnDefNameRe = regexp.MustCompile("^\\s*`([^`]+)`\\s+\\S")
 
-// sqlStringLiteralRe finds single-quoted SQL string literals (with ” as the
-// escaped quote), so a COMMENT or DEFAULT that happens to contain the words
-// GENERATED ALWAYS AS cannot promote its column.
-var sqlStringLiteralRe = regexp.MustCompile("'(?:[^']|'')*'")
-
-// generatedColumnsIn returns the names of the STORED/VIRTUAL generated columns
-// a CREATE TABLE declares, keyed for lookup. An empty or non-MySQL statement
-// (PostgreSQL baselines carry none) yields an empty set, which keeps the #602
-// guard exactly as strict as before for every other column.
+// generatedColumnsIn returns the columns a CREATE TABLE declares that the
+// baseline built from it does NOT hold: STORED/VIRTUAL/PERSISTENT generated
+// columns and MariaDB's explicit ROW START/END period columns. It does not
+// classify the clause itself; baseline.ParseSchemaText is the parser that
+// decided which columns went into the Parquet at dump time, so the set is
+// "every column definition line" minus "what that parser keeps", and the
+// guard and the dump cannot disagree on a spelling (#1624 on MariaDB's short
+// `AS (expr) PERSISTENT`). A statement the parser cannot read, an empty one,
+// or a PostgreSQL baseline (no CREATE TABLE) yields an empty set, which keeps
+// the #602 guard exactly as strict as before for every column.
 func generatedColumnsIn(createTableSQL string) map[string]struct{} {
 	out := map[string]struct{}{}
+	held, err := baseline.ParseSchemaText(createTableSQL)
+	if err != nil || len(held) == 0 {
+		return out
+	}
+	kept := make(map[string]struct{}, len(held))
+	for _, c := range held {
+		kept[c.Name] = struct{}{}
+	}
 	for line := range strings.SplitSeq(createTableSQL, "\n") {
-		line = sqlStringLiteralRe.ReplaceAllString(line, "''")
-		m := generatedColumnRe.FindStringSubmatch(line)
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "PRIMARY") || strings.HasPrefix(trimmed, "UNIQUE") ||
+			strings.HasPrefix(trimmed, "KEY") || strings.HasPrefix(trimmed, "CONSTRAINT") ||
+			trimmed == ");" || trimmed == ")" {
+			break
+		}
+		m := columnDefNameRe.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
-		out[strings.ReplaceAll(m[1], "``", "`")] = struct{}{}
+		if _, ok := kept[m[1]]; !ok {
+			out[m[1]] = struct{}{}
+		}
 	}
 	return out
 }

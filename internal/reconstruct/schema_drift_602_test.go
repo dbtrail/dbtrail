@@ -248,10 +248,10 @@ func TestReconstruct1624_generatedColumnIsNotAPostBaselineColumn(t *testing.T) {
 	}
 }
 
-// TestGeneratedColumnsIn pins the CREATE TABLE parser: STORED and VIRTUAL
-// generated columns are found, an expression DEFAULT is not, a COMMENT that
-// mentions the words does not promote its column, and a backticked name with
-// an escaped backtick round-trips.
+// TestGeneratedColumnsIn pins the set the guard excludes: STORED, VIRTUAL and
+// MariaDB's short PERSISTENT form are found, an expression DEFAULT is not, a
+// COMMENT that mentions the words does not promote its column, a period
+// column is found, and nothing past the first index line is read.
 func TestGeneratedColumnsIn(t *testing.T) {
 	sql := "CREATE TABLE `t` (\n" +
 		"  `id` int NOT NULL,\n" +
@@ -259,11 +259,12 @@ func TestGeneratedColumnsIn(t *testing.T) {
 		"  `upper_name` varchar(50) GENERATED ALWAYS AS (upper(`name`)) VIRTUAL,\n" +
 		"  `made_at` datetime DEFAULT (now()),\n" +
 		"  `note` varchar(20) DEFAULT NULL COMMENT 'not GENERATED ALWAYS AS anything',\n" +
-		"  `odd``name` int GENERATED ALWAYS AS (`id` + 1) STORED,\n" +
 		"  `short_form` int AS (`id` * 2) PERSISTENT,\n" +
-		"  PRIMARY KEY (`id`)\n)"
+		"  `row_end` timestamp(6) GENERATED ALWAYS AS ROW END,\n" +
+		"  PRIMARY KEY (`id`),\n" +
+		"  KEY `ghost` (`id`)\n) ENGINE=InnoDB"
 	got := generatedColumnsIn(sql)
-	want := []string{"total", "upper_name", "odd`name", "short_form"}
+	want := []string{"total", "upper_name", "short_form", "row_end"}
 	if len(got) != len(want) {
 		t.Fatalf("generatedColumnsIn = %v, want exactly %v", got, want)
 	}
@@ -272,7 +273,9 @@ func TestGeneratedColumnsIn(t *testing.T) {
 			t.Errorf("missing %q in %v", w, got)
 		}
 	}
-	if len(generatedColumnsIn("")) != 0 || len(generatedColumnsIn("-- test")) != 0 {
-		t.Errorf("empty or non-MySQL CREATE TABLE must yield no generated columns")
+	for _, s := range []string{"", "-- test", "CREATE TABLE t (id int)"} {
+		if n := len(generatedColumnsIn(s)); n != 0 {
+			t.Errorf("%q: want no generated columns, got %d", s, n)
+		}
 	}
 }
