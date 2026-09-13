@@ -61,7 +61,11 @@ func (a CascadeAdvisory) Empty() bool {
 // Names compare case-insensitively: the index compares them server-side
 // under a case-insensitive collation when it fetches the rows, and a
 // reversal that finds its rows must not lose its warning to the spelling
-// the operator typed (lower_case_table_names servers accept either).
+// the operator typed (lower_case_table_names servers accept either). This
+// assumes the index database's collation is case-insensitive, as bintrail
+// provisions it (utf8mb4_unicode_ci); on an operator-created index with a
+// _bin collation and two tables differing only by case, the list could
+// merge both parents' children. Advisory text only, never the script.
 func DetectCascade(db *sql.DB, schema, table string) (CascadeAdvisory, error) {
 	var adv CascadeAdvisory
 	edges, err := metadata.CascadeConstraintsInIndex(db, nil)
