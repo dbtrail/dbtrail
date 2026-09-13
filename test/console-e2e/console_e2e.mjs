@@ -15,6 +15,7 @@
 import { chromium } from "playwright";
 import zlib from "node:zlib";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 
 const URL = process.env.CONSOLE_URL || "http://127.0.0.1:8090";
@@ -43,6 +44,88 @@ const results = [];
 const ok = (name) => results.push({ name, pass: true });
 const bad = (name, detail) => results.push({ name, pass: false, detail });
 
+// Playwright's signature is waitForFunction(pageFunction, arg, options) —
+// options are the THIRD parameter, unlike Puppeteer's second. Passing
+// { timeout: N } in the arg slot serializes it as the page function's
+// argument and discards it, so the wait silently runs on the 30-second
+// default: measured at 30011 ms for the two-arg form against 2003 ms for the
+// three-arg one (#1589).
+//
+// Every budget in this file was written that way, so none of the stated
+// numbers had ever run. Adopting them at the position fix would have enabled
+// ~25 untested budgets at once on a suite whose flakes are load-sensitive, so
+// the ones below 30s were DROPPED instead of moved: the default is what the
+// suite is actually green with, and a number that has never been exercised is
+// worse than no number. Only the 60s verification wait was moved to the third
+// slot, because that one was being silently SHORTENED to 30s — the single
+// case where the bug could cause a flake rather than mask one.
+//
+// This guard keeps the shape from coming back. It reads its own source, so a
+// call written in the two-arg form fails the run with the line number instead
+// of quietly waiting 30s. It counts ARGUMENTS, not commas: the first census
+// counted commas and walked past a two-arg call with a trailing comma, so the
+// bug it was written against survived it once. It is a bracket walk, not a
+// parser: a comment, string or regex literal inside a call's argument span
+// takes part in the depth and comma counts, so an unbalanced bracket or a
+// top-level comma inside one skews the argument count in either direction.
+// waitForSelector is deliberately not scanned: its options ARE the second
+// parameter.
+{
+  // fileURLToPath, not `new URL`: this file shadows the global URL with the
+  // console's address (line 20), so the constructor form throws here.
+  const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  // Assembled rather than written whole: the scan reads this very file, and a
+  // literal here would be a call site of its own to parse.
+  const NEEDLE = "waitFor" + "Function(";
+  const scan = (text) => {
+  const misplaced = [];
+  let i = 0;
+  while ((i = text.indexOf(NEEDLE, i)) >= 0) {
+    let depth = 0, j = i + NEEDLE.length - 1;
+    const cuts = [j];
+    for (; j < text.length; j++) {
+      const c = text[j];
+      if (c === "(" || c === "{" || c === "[") depth++;
+      else if (c === ")" || c === "}" || c === "]") { depth--; if (depth === 0) { break; } }
+      else if (c === "," && depth === 1) cuts.push(j);
+    }
+    cuts.push(j);
+    j++;
+    // Arguments, not commas: a trailing comma before `)` is a third cut with
+    // nothing after it, and the shape it decorates is still two arguments.
+    const args = [];
+    for (let k = 0; k + 1 < cuts.length; k++) args.push(text.slice(cuts[k] + 1, cuts[k + 1]).trim());
+    while (args.length && args[args.length - 1] === "") args.pop();
+    // Two arguments and a timeout in the second one: the options object is
+    // sitting in the arg slot.
+    if (args.length === 2 && /\btimeout\b/.test(args[1])) {
+      misplaced.push(text.slice(0, i).split("\n").length);
+    }
+    i = j;
+  }
+  return misplaced;
+  };
+  // Positive control: the scanner must see the bad shape in both spellings it
+  // has been written in (single line, and multi-line with a trailing comma)
+  // and must pass the three-argument form. Without this a scanner that stops
+  // matching anything reads as "all clear".
+  const fixture = [
+    `await page.${NEEDLE}() => x, { timeout: 5000 });`,
+    `await page.${NEEDLE}\n  () => x,\n  { timeout: 5000 },\n);`,
+    `await page.${NEEDLE}(v) => x, v, { timeout: 5000 });`,
+  ].join("\n");
+  const control = scan(fixture);
+  if (control.length !== 2 || control[0] !== 1 || control[1] !== 2) {
+    bad("suite: the waitForFunction scanner detects the two-arg shape", `control flagged lines ${JSON.stringify(control)}, expected [1,2]`);
+  } else {
+    const misplaced = scan(src);
+    misplaced.length === 0
+      ? ok("suite: every waitForFunction timeout is in the options slot")
+      : bad("suite: every waitForFunction timeout is in the options slot",
+          `lines ${misplaced.join(", ")} pass options as the page-function argument, so the stated timeout never applies`);
+  }
+}
+
 const browser = await chromium.launch({ headless: true, channel: CHANNEL });
 const page = await browser.newPage({ viewport: { width: 1300, height: 1000 } });
 const jsErrors = [];
@@ -52,7 +135,6 @@ try {
   await page.goto(`${URL}/?token=${encodeURIComponent(TOKEN)}`, { waitUntil: "networkidle" });
   await page.waitForFunction(
     () => typeof openServersModal === "function" && typeof renderError === "function",
-    { timeout: 10000 },
   );
 
   // Scenario 0 — the page loads and the monitor capability is reported. A
@@ -63,7 +145,7 @@ try {
   // bare name in evaluate's global scope, never as a window property.
   let monitor = false;
   try {
-    await page.waitForFunction(() => typeof capsCache !== "undefined" && capsCache.monitor === true, { timeout: 8000 });
+    await page.waitForFunction(() => typeof capsCache !== "undefined" && capsCache.monitor === true);
     monitor = true;
   } catch (_) {
     monitor = await page.evaluate(() => typeof capsCache !== "undefined" && !!capsCache.monitor);
@@ -1048,7 +1130,7 @@ try {
     // words the command line refuses with) and writes nothing.
     await page.fill('#ap-flag-form input[name="flag"]', "orphan");
     await page.click('#ap-flag-form button[type="submit"]');
-    await page.waitForFunction(() => !document.getElementById("toast-error").hidden, { timeout: 5000 });
+    await page.waitForFunction(() => !document.getElementById("toast-error").hidden);
     const apRefusal = await page.evaluate(async () => ({
       toast: document.getElementById("toast-error").textContent,
       flags: (await api("/api/access-profiles")).flags.length,
@@ -1059,11 +1141,11 @@ try {
 
     // Tear down through the buttons: the rule, the profile, then the flag.
     await page.click("#ap-rules .ap-row button");
-    await page.waitForFunction(() => document.querySelectorAll("#ap-rules .ap-row").length === 0, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll("#ap-rules .ap-row").length === 0);
     await page.click("#ap-profiles .ap-row button");
-    await page.waitForFunction(() => document.querySelectorAll("#ap-profiles .ap-row").length === 0, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll("#ap-profiles .ap-row").length === 0);
     await page.click("#ap-flags .ap-row button");
-    await page.waitForFunction(() => document.querySelectorAll("#ap-flags .ap-row").length === 0, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll("#ap-flags .ap-row").length === 0);
     const apAfter = await page.evaluate(() => api("/api/access-profiles"));
     (apAfter.flags.length === 0 && apAfter.profiles.length === 0 && apAfter.rules.length === 0)
       ? ok("access profiles: the Remove buttons take the rule, the profile and the flag back off the index")
@@ -1403,7 +1485,7 @@ try {
   await page.waitForFunction(() => {
     const b = document.querySelector("#recover-out .ctx-banner .badge");
     return b && b.textContent === "CASCADE";
-  }, { timeout: 8000 });
+  });
   const cas = await page.evaluate(() => ({
     banner: (document.querySelector("#recover-out .ctx-banner") || {}).textContent || "",
     sql: (document.querySelector("#recover-out #sql-panel .code") || {}).textContent || "",
@@ -1476,7 +1558,7 @@ try {
   // pk=4: exists ONLY in the baseline (no events) — a binlog-only reconstruct
   // cannot resolve it, so this pins the baseline half of baseline+deltas.
   await page.evaluate(async () => { const f = document.getElementById("recover-form"); f.elements.pk.value = "4"; await runState(f, false); });
-  await page.waitForFunction(() => /d@example\.com/.test((document.querySelector("#modal .state-modal") || {}).textContent || ""), { timeout: 10000 });
+  await page.waitForFunction(() => /d@example\.com/.test((document.querySelector("#modal .state-modal") || {}).textContent || ""));
   const tt4 = await page.evaluate(() => {
     const cells = {};
     document.querySelectorAll("#modal .state-modal .statetable tr").forEach((tr) => {
@@ -1491,7 +1573,7 @@ try {
   // pk=2: in the baseline, then DELETEd — must render the deleted note, not an
   // empty table and not the stale baseline value.
   await page.evaluate(async () => { const f = document.getElementById("recover-form"); f.elements.pk.value = "2"; await runState(f, false); });
-  await page.waitForFunction(() => !!document.querySelector("#modal .state-modal .deleted-note"), { timeout: 10000 });
+  await page.waitForFunction(() => !!document.querySelector("#modal .state-modal .deleted-note"));
   const tt2 = await page.evaluate(() => (document.querySelector("#modal .state-modal .deleted-note") || {}).textContent || "");
   /Row was deleted/.test(tt2)
     ? ok("restore: a deleted row renders the deleted note")
@@ -1959,10 +2041,10 @@ try {
   // Wait on the TILES, not on the scope lines: waiting on the thing under test
   // turns a missing scope into a driver timeout that aborts the rest of the run
   // instead of one legible failure.
-  await page.waitForFunction(() => document.querySelectorAll(".ov-stat").length === 4, { timeout: 10000 });
+  await page.waitForFunction(() => document.querySelectorAll(".ov-stat").length === 4);
   // The coverage card fills independently (#1352); its freshness clock is part
   // of what this scenario pins, so wait for that fill too.
-  await page.waitForFunction(() => !!document.querySelector(".cov-card .cov-asof"), { timeout: 10000 });
+  await page.waitForFunction(() => !!document.querySelector(".cov-card .cov-asof"));
   const ovLive = await page.evaluate(() => ({
     scopes: Array.from(document.querySelectorAll(".ov-stat")).map((n) => (n.querySelector(".ov-stat-scope") || {}).textContent || ""),
     win: (document.querySelector(".ov-coverage") || {}).textContent || "",
@@ -2168,7 +2250,7 @@ try {
   // enabled, and the fixture snapshot (1 table, anchored at
   // binlog.000001:50) must be listed.
   await page.evaluate(() => navigate("baselines"));
-  await page.waitForFunction(() => Array.from(document.querySelectorAll(".stg-row")).some((r) => r.textContent.includes("binlog.000001:50")), { timeout: 10000 });
+  await page.waitForFunction(() => Array.from(document.querySelectorAll(".stg-row")).some((r) => r.textContent.includes("binlog.000001:50")));
   const stg = await page.evaluate(() => {
     // #1415: the Create action moved to the context strip (page level); the
     // uniform table count moved there too, so the row carries only what
@@ -2597,7 +2679,7 @@ try {
       /To load into MySQL/.test((c.querySelector(".bk-lane-t") || {}).textContent || ""));
     return !!card && /Ready: every table as of/.test(card.textContent) &&
       Array.from(card.querySelectorAll("button")).some((b) => /Download \.sql backup/.test(b.textContent));
-  }, { timeout: 30000 });
+  });
   ok("sqlx: after the run settles the card offers the finished build for download");
 
   // The download wire: gunzip the archive in node and read the actual SQL.
@@ -2679,7 +2761,7 @@ try {
         const card = Array.from(v.querySelectorAll(".bk-lane")).find((c) =>
           /To load into MySQL/.test((c.querySelector(".bk-lane-t") || {}).textContent || ""));
         return !!card && /Last build failed/.test(card.textContent);
-      }, { timeout: 15000 });
+      });
       const gapMsg = await page.evaluate(() => {
         const v = document.querySelector(".view");
         const card = Array.from(v.querySelectorAll(".bk-lane")).find((c) =>
@@ -2718,15 +2800,13 @@ try {
 
   await page.evaluate(() => navigate("baselines"));
   await page.waitForFunction(() => location.pathname === "/baselines"
-    && Array.from(document.querySelectorAll(".ov-panel-title")).some((h) => /Backups/.test(h.textContent)),
-    { timeout: 10000 });
+    && Array.from(document.querySelectorAll(".ov-panel-title")).some((h) => /Backups/.test(h.textContent)));
   ok("protect: /baselines renders the snapshot panel");
 
   await page.evaluate(() => navigate("verification"));
   await page.waitForFunction(() => location.pathname === "/verification"
     && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Verification/.test(h.textContent))
-    && document.querySelectorAll(".vfy-region").length >= 3,
-    { timeout: 10000 });
+    && document.querySelectorAll(".vfy-region").length >= 3);
   ok("protect: /verification renders its three regions");
 
   // Scenario 15w — the page-header Docs link (#1450). One route → slug table
@@ -2748,8 +2828,7 @@ try {
     : bad("docs link: Verification header links to /docs/guides/verify/ in a new tab", JSON.stringify(docsVfy));
   await page.evaluate(() => navigate("events"));
   await page.waitForFunction(() => location.pathname === "/events"
-    && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Events/.test(h.textContent)),
-    { timeout: 10000 });
+    && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Events/.test(h.textContent)));
   const docsEvents = await docsLinkOf();
   docsEvents.n === 1 && docsEvents.href === "https://www.dbtrail.com/docs/guides/recovery/"
     ? ok("docs link: follows the route change to Events")
@@ -2757,7 +2836,7 @@ try {
   // Put the page back: 15v below reads the Verification form as it found it.
   await page.evaluate(() => navigate("verification"));
   await page.waitForFunction(() => location.pathname === "/verification"
-    && document.querySelectorAll(".vfy-region").length >= 3, { timeout: 10000 });
+    && document.querySelectorAll(".vfy-region").length >= 3);
 
   // Scenario 15v — the verification page rework (#1417/#1418/#1419/#1420),
   // driven END TO END against the real daemon: a real recover-inputs run over
@@ -2884,7 +2963,7 @@ try {
     if (sel.value !== "recover-inputs") { sel.value = "recover-inputs"; sel.dispatchEvent(new Event("change")); }
     document.querySelector(".vfy-run").click();
   });
-  await page.waitForFunction(() => document.querySelector(".vfy-results .chip-done") !== null, { timeout: 60000 });
+  await page.waitForFunction(() => document.querySelector(".vfy-results .chip-done") !== null, undefined, { timeout: 60000 });
   const vfyDone = await page.evaluate(() => ({
     verdictSentence: (document.querySelector(".vfy-results .form-hint") || {}).textContent || "",
     rows: document.querySelectorAll(".vfy-results .vfy-row").length,
@@ -2897,7 +2976,7 @@ try {
   // (e) history (#1417): the finished run is a disclosure row that expands to
   // its per-table detail — data the old renderer dropped on the floor — and
   // LAST VERIFIED wears the age treatment, not the live one (#1420).
-  await page.waitForFunction(() => document.querySelectorAll(".vfy-histrow").length > 0, { timeout: 10000 });
+  await page.waitForFunction(() => document.querySelectorAll(".vfy-histrow").length > 0);
   const vfyHist = await page.evaluate(() => {
     const row = document.querySelector(".vfy-histrow");
     row.click();
@@ -2953,8 +3032,7 @@ try {
   // existing link and bookmark drops the operator on Overview.
   await page.evaluate(() => navigate("storage"));
   await page.waitForFunction(() => location.pathname === "/retention"
-    && Array.from(document.querySelectorAll(".ov-panel-title")).some((h) => /S3 archiving/.test(h.textContent)),
-    { timeout: 10000 });
+    && Array.from(document.querySelectorAll(".ov-panel-title")).some((h) => /S3 archiving/.test(h.textContent)));
   const storageTitles = await page.evaluate(() =>
     Array.from(document.querySelectorAll(".ov-panel-title")).map((h) => h.textContent));
   (!storageTitles.some((t) => /Baseline snapshots|Backups|Verification/.test(t)))
@@ -3988,7 +4066,7 @@ try {
   // On This daemon, which is the half that still carries two or more
   // unconditional cards after the split (#1543); Retention has one.
   await page.evaluate(() => navigate("daemon"));
-  await page.waitForFunction(() => location.pathname === "/daemon" && document.querySelectorAll(".cards .card").length >= 2, { timeout: 10000 });
+  await page.waitForFunction(() => location.pathname === "/daemon" && document.querySelectorAll(".cards .card").length >= 2);
   const tints = await page.evaluate(() => {
     const cards = Array.from(document.querySelectorAll(".cards .card")).slice(0, 2);
     return cards.map((c) => getComputedStyle(c).backgroundColor);
@@ -4013,7 +4091,7 @@ try {
   const rowFill = [];
   for (const route of ["retention", "daemon"]) {
     await page.evaluate((r) => navigate(r), route);
-    await page.waitForFunction(() => document.querySelectorAll(".cards .card").length >= 1, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll(".cards .card").length >= 1);
     rowFill.push(await page.evaluate((r) => {
       const g = document.querySelector(".cards");
       const gw = g.getBoundingClientRect().width;
@@ -4047,7 +4125,7 @@ try {
   await page.setViewportSize({ width: 1000, height: 1000 });
   await page.evaluate(() => navigate("connect"));
   await page.waitForFunction(() => location.pathname === "/connect"
-    && document.querySelectorAll(".cards .card").length >= 3, { timeout: 10000 });
+    && document.querySelectorAll(".cards .card").length >= 3);
   const bandRow = await page.evaluate(() => {
     const g = document.querySelector(".cards");
     const gw = g.getBoundingClientRect().width;
@@ -4065,7 +4143,7 @@ try {
   // one.
   await page.evaluate(() => navigate("daemon"));
   await page.waitForFunction(() => location.pathname === "/daemon"
-    && document.querySelectorAll(".cards .card").length >= 2, { timeout: 10000 });
+    && document.querySelectorAll(".cards .card").length >= 2);
   // rows > 1 asserts the band is actually the wrapped case, so a future width
   // change that stops wrapping here cannot pass this vacuously.
   (bandRow.rows > 1 && bandRow.left <= 2)
@@ -4413,7 +4491,7 @@ try {
   // sleep could pass this vacuously against a half-rendered page.
   await page.evaluate(() => navigate("baselines"));
   await page.waitForFunction(() => location.pathname === "/baselines"
-    && document.querySelector(".view .ov-panel-title"), { timeout: 10000 });
+    && document.querySelector(".view .ov-panel-title"));
   const dupCard = await page.evaluate(() => !!document.querySelector(".view .bkr-head"));
   (!dupCard)
     ? ok("backups: the carry-forward card is not duplicated on the Backups page")
@@ -4452,7 +4530,7 @@ try {
   // ABORTS the suite at this line, hiding the four assertions below and every
   // later scenario. Catch it and let the assertions report the actual shape.
   await page.waitForFunction(() => location.pathname === "/connect"
-    && document.querySelectorAll(".view .cn-card").length === 3, { timeout: 15000 })
+    && document.querySelectorAll(".view .cn-card").length === 3)
     .catch(() => {});
   // The mock's field labels come from the REAL bundle manifest, not from a
   // second hand-maintained copy: renaming either side alone rings below. A
@@ -4947,7 +5025,7 @@ try {
   scr.tsTitle.startsWith("UTC; in your local time:") ? ok("schema changes: rows carry the local-time tooltip") : bad("schema changes: rows carry the local-time tooltip", JSON.stringify(scr.tsTitle));
   scr.count === "2" ? ok("schema changes: the count line says 2") : bad("schema changes: the count line says 2", JSON.stringify(scr.count));
   await page.selectOption('#sc-form select[name="ddl_type"]', "CREATE");
-  await page.waitForFunction(() => document.querySelectorAll("#sc-rows .sc-row").length === 1, { timeout: 10000 });
+  await page.waitForFunction(() => document.querySelectorAll("#sc-rows .sc-row").length === 1);
   const scf = await page.evaluate(() => Array.from(document.querySelectorAll("#sc-rows .sc-row")).map((r) => r.textContent).join(" | "));
   (scf.includes("e2e-ddl-create") && !scf.includes("e2e-ddl-alter"))
     ? ok("schema changes: the type filter narrows to the CREATE through the API")
