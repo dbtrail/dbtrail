@@ -387,6 +387,7 @@ function clearAuthState() {
   lastSQL = "";
   lastEvents = [];
   capsCache = {};
+  capsKnown = false;
   applyAuthGate();
 }
 
@@ -8698,8 +8699,8 @@ function buildServerForm() {
   // eyeline of the button that caused it, at the bottom of a long modal the
   // scrim scrolls, and the button read as dead. The Test result goes beside
   // its own button, the way the saved-server row already shows it.
-  form.append(el("div", { id: "server-form-msg", class: "form-msg" }));
   form.append(el("div", { id: "doctor-cards", class: "doctor-cards" }));
+  form.append(el("div", { id: "server-form-msg", class: "form-msg" }));
   const foot = el("div", { class: "modal-foot filter-actions" });
   foot.append(el("button", { class: "btn btn-primary", type: "submit", text: "Save" }));
   foot.append(el("button", { class: "btn", type: "button", id: "server-test", text: "Test connection" }));
@@ -8709,9 +8710,14 @@ function buildServerForm() {
   return form;
 }
 
+// showServerForm returns false when the servers modal is gone (closed while a
+// save or its startup checks were in flight): a caller then has no form to
+// speak through and must say what happened somewhere that lasts.
 function showServerForm(prefill) {
-  document.getElementById("server-add-wrap").hidden = true;
+  const addWrap = document.getElementById("server-add-wrap");
   const mountEl = document.getElementById("server-form-mount");
+  if (!addWrap || !mountEl) return false;
+  addWrap.hidden = true;
   const form = buildServerForm();
   mountEl.replaceChildren(form);
   $all("[data-capability]", form).forEach((n) => n.classList.toggle("cap-on", !!capsCache[n.dataset.capability]));
@@ -8757,9 +8763,11 @@ function showServerForm(prefill) {
   if (prefill && prefill.id) form.elements.flavor.disabled = true;
   applyFlavor(form);
   form.elements.name.focus();
+  return true;
 }
 function hideServerForm() {
-  document.getElementById("server-form-mount").replaceChildren();
+  const mountEl = document.getElementById("server-form-mount");
+  if (mountEl) mountEl.replaceChildren();
   const addWrap = document.getElementById("server-add-wrap");
   if (addWrap) addWrap.hidden = false;
 }
@@ -8822,8 +8830,14 @@ async function saveServer(form) {
     // enabled on a failure: it IS the retry once the operator has fixed the
     // server (most checks are fixed on the database side, with the same form
     // values). showServerForm rebuilds the check cards, so it goes first.
-    showServerForm(saved);
-    if (res && res.started) { renderDoctor(res.doctor); formMsg("Monitoring started; review the warnings above", false); }
+    if (!showServerForm(saved)) {
+      // The modal was closed while the checks ran: nothing on screen can
+      // carry the outcome, so it goes to a toast that stays until dismissed.
+      if (res && res.started) toastError("Monitoring started for " + saved.name + ", with warnings; open Servers and press Start to review them");
+      else toastError("Startup checks failed for " + saved.name + "; open Servers and press Start to see what to fix");
+      return;
+    }
+    if (res && res.started) { renderDoctor(res.doctor); formMsg("Monitoring started; review the warnings above", false); scrollDoctorIntoView(); }
     else if (res) { renderDoctor(res.doctor); formMsg("Startup checks failed: fix the items above and save again", true); scrollDoctorIntoView(); }
     else { formMsg("Could not start monitoring; check the notification for details and try again", true); } // startMonitor returned null (transport error)
     return;
@@ -8913,7 +8927,8 @@ async function testServerRow(id) {
   if (slot) { slot.className = "srv-status"; slot.textContent = "testing…"; }
   try {
     const res = await api("/api/servers/" + encodeURIComponent(id) + "/test", { method: "POST", body: {} });
-    if (slot) { slot.className = "srv-status " + (res.provision_pending ? "pending" : (res.ok ? "ok" : "err")); slot.textContent = testResultText(res); }
+    const note = noCaptureNotes[id]; // the row rebuild re-derives it; here it only needs to survive the test result
+    if (slot) { slot.className = "srv-status " + (res.provision_pending ? "pending" : (res.ok ? "ok" : "err")); slot.textContent = testResultText(res) + (note ? " · ○ " + note : ""); }
   } catch (err) { if (slot) { slot.className = "srv-status err"; slot.textContent = "✗ " + ((err && err.message) || err); } }
 }
 
@@ -8952,7 +8967,7 @@ async function startMonitorRow(id) {
   if (opened) {
     renderDoctor(res.doctor);
     formMsg(res.started ? "Monitoring started; review the warnings above" : "Startup checks failed: fix the items above, save, and start again", !res.started);
-    if (!res.started) scrollDoctorIntoView();
+    scrollDoctorIntoView();
   } else if (res.started) { toast("Monitoring started, with warnings"); }
   else { toastError("Startup checks failed"); }
 }

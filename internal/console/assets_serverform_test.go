@@ -64,14 +64,33 @@ func TestServerFormAnswersAboveTheButtons(t *testing.T) {
 	if strings.Contains(saveSpan, "below") {
 		t.Error("saveServer still says the checks are below the buttons")
 	}
-	sf, rd := strings.Index(save, "showServerForm(saved)"), strings.Index(save, "renderDoctor(res.doctor)")
-	if sf < 0 || rd < 0 || sf > rd {
-		t.Errorf("a failed first save does not re-show the form from the saved entry before rendering the checks (showServerForm at %d, renderDoctor at %d); Save would POST a duplicate", sf, rd)
+	// The re-show precedes the warn/fail split (so BOTH branches get it) and
+	// every renderDoctor comes after it (showServerForm rebuilds the cards).
+	// First-occurrence checks let the re-show slide into the warn branch
+	// alone and the fail path lose it, which is the duplicate-POST bug.
+	sf, split, rdLast := strings.Index(save, "showServerForm(saved)"), strings.Index(save, "if (res && res.started)"), strings.LastIndex(save, "renderDoctor(res.doctor)")
+	if sf < 0 || split < 0 || rdLast < 0 || sf > split || sf > rdLast {
+		t.Errorf("the failed first save does not re-show the form from the saved entry ahead of both outcome branches (showServerForm at %d, split at %d, last renderDoctor at %d); Save would POST a duplicate", sf, split, rdLast)
+	}
+	// A modal closed mid-save leaves no form to speak through: the outcome
+	// goes to a lasting toast, never a thrown TypeError.
+	if !strings.Contains(save, "if (!showServerForm(saved))") {
+		t.Error("saveServer does not handle the modal being closed while the checks ran")
+	}
+	show := jsFunctionBody(t, js, "showServerForm")
+	if !strings.Contains(show, "if (!addWrap || !mountEl) return false;") || !strings.Contains(show, "return true;") {
+		t.Error("showServerForm does not report a missing mount")
+	}
+	// Both the warn and the fail branch scroll the cards into view: the
+	// rebuild focuses the Name field at the top, and "review the warnings
+	// above" is only true if the warnings are in view.
+	if n := strings.Count(save, "scrollDoctorIntoView()"); n != 2 {
+		t.Errorf("saveServer scrolls the check cards into view on %d of the 2 outcome branches", n)
 	}
 	// The row's own Start button path got the same treatment.
 	start := jsFunctionSpan(t, js, "startMonitorRow")
-	if strings.Contains(start, "below") || !strings.Contains(start, "scrollDoctorIntoView()") {
-		t.Error("startMonitorRow still points below the buttons or does not scroll the failing check into view")
+	if strings.Contains(start, "below") || strings.Count(start, "scrollDoctorIntoView()") != 1 || strings.Contains(start, "if (!res.started) scrollDoctorIntoView") {
+		t.Error("startMonitorRow still points below the buttons or scrolls only the fail branch into view")
 	}
 }
 
@@ -105,6 +124,12 @@ func TestServerThatWillNotStreamIsMarked(t *testing.T) {
 			t.Errorf("the %s case is tested before the broader one; a serve console with no source would be told to add one", p.cond)
 		}
 		prev = at
+	}
+	// Logout clears the capability set AND forgets it was read: otherwise a
+	// stale capsKnown with an empty cache yields the confident serve reason.
+	logout := jsFunctionBody(t, js, "clearAuthState")
+	if !strings.Contains(logout, "capsKnown = false;") {
+		t.Error("clearAuthState resets capsCache but not capsKnown")
 	}
 	if !strings.Contains(why, "isLiveMonitorState(s.monitor_state)") {
 		t.Error("noCaptureReason does not exempt a server that already streams; an edit of a running server would be marked as never capturing")
