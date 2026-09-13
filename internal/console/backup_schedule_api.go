@@ -52,7 +52,11 @@ type backupScheduleDTO struct {
 }
 
 type backupScheduleRunDTO struct {
-	Method     string `json:"method"`
+	Method string `json:"method"`
+	// Why / WhyCode: for a full backup, the reason an update was not
+	// possible when it ran (#1604), and its stable code for the remedy.
+	Why        string `json:"why,omitempty"`
+	WhyCode    string `json:"why_code,omitempty"`
 	StartedAt  string `json:"started_at"`
 	FinishedAt string `json:"finished_at"`
 	OK         bool   `json:"ok"`
@@ -170,6 +174,8 @@ func (s *Server) backupScheduleDTO(ctx context.Context, e ServerEntry, now time.
 func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 	return &backupScheduleRunDTO{
 		Method:        runMethod(run.Kind),
+		Why:           run.Why,
+		WhyCode:       run.WhyCode,
 		StartedAt:     run.StartedAt,
 		FinishedAt:    run.FinishedAt,
 		OK:            run.Error == "",
@@ -203,6 +209,8 @@ func scheduleRunFromStatus(st BackupScheduleState) *backupScheduleRunDTO {
 	}
 	return &backupScheduleRunDTO{
 		Method:        st.LastMethod,
+		Why:           st.LastWhy,
+		WhyCode:       BackupWhyCode(st.LastWhy),
 		StartedAt:     st.LastStartedAt,
 		FinishedAt:    cur.FinishedAt,
 		OK:            ok,

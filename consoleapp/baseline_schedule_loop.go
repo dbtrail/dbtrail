@@ -97,6 +97,8 @@ type scheduledStart struct {
 	// since is the supervisor's Since for the job, read back right after
 	// the trigger. Attribution compares on it exactly.
 	since string
+	// why is the reason a full backup was chosen (#1604); "" for an update.
+	why string
 	// last is the job's status once it was observed in a terminal state,
 	// nil until then.
 	last *console.BaselineStatus
@@ -207,7 +209,7 @@ func (b *backupScheduler) ScheduleState(serverID string) console.BackupScheduleS
 	if !started {
 		return out
 	}
-	out.LastStartedAt, out.LastMethod = st.at, st.method
+	out.LastStartedAt, out.LastMethod, out.LastWhy = st.at, st.method, st.why
 	var cur console.BaselineStatus
 	if st.method == console.BackupMethodRefresh {
 		cur = b.sup.RefreshStatus(serverID)
@@ -422,7 +424,7 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 		}
 		return
 	}
-	if b.startFull(e, stamp, now, degraded) {
+	if b.startFull(e, stamp, now, degraded, why) {
 		b.watch(e, stamp, method)
 	}
 }
@@ -463,24 +465,26 @@ func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBa
 	if err := b.sup.TriggerRefresh(req, p.Every); err != nil {
 		return err
 	}
-	b.record(e, console.BackupMethodRefresh, stamp, b.sup.RefreshStatus(e.ID).Since, false)
+	b.record(e, console.BackupMethodRefresh, stamp, b.sup.RefreshStatus(e.ID).Since, false, "")
 	return nil
 }
 
 // startFull triggers a full backup and records the job as the schedule's,
 // or records the skip; reports whether the job started. because, when set,
 // is the failed update this full backup stands in for, so a collision skip
-// carries both facts.
-func (b *backupScheduler) startFull(e console.ServerEntry, stamp string, now time.Time, because string) bool {
+// carries both facts. why is the reason a full backup was chosen at all
+// (#1604), carried on the request so the run record keeps it.
+func (b *backupScheduler) startFull(e console.ServerEntry, stamp string, now time.Time, because, why string) bool {
 	req := console.BaselineRequestFor(e)
 	req.Trigger = console.BaselineRunTriggerScheduled
+	req.Why = why
 	prefix, when := "", "at the scheduled time"
 	if because != "" {
 		prefix, when = because+"; ", "when the full backup was tried"
 	}
 	switch err := b.sup.Trigger(req); {
 	case err == nil:
-		b.record(e, console.BackupMethodFull, stamp, b.sup.Status(e.ID).Since, because != "")
+		b.record(e, console.BackupMethodFull, stamp, b.sup.Status(e.ID).Since, because != "", why)
 		return true
 	case errors.Is(err, console.ErrBaselineRunning):
 		// The collision the issue names: a manual backup, restore or export
@@ -497,9 +501,9 @@ func (b *backupScheduler) startFull(e console.ServerEntry, stamp string, now tim
 // stamp is read back right after the trigger: it is the key ScheduleState
 // attributes the slot by, and the trigger returned, so the slot is ours
 // until the job finishes and something else claims it.
-func (b *backupScheduler) record(e console.ServerEntry, method, stamp, since string, fallback bool) {
+func (b *backupScheduler) record(e console.ServerEntry, method, stamp, since string, fallback bool, why string) {
 	b.mu.Lock()
-	b.started[e.ID] = scheduledStart{method: method, at: stamp, since: since, fallback: fallback}
+	b.started[e.ID] = scheduledStart{method: method, at: stamp, since: since, fallback: fallback, why: why}
 	b.mu.Unlock()
 	slog.Info("backup schedule: started", "server", e.Name, "method", method, "every", e.BackupSchedule.Every)
 }
@@ -581,9 +585,9 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, reason string) {
 		return
 	}
 	e = cur
-	failed := "the update from the recorded changes was refused"
+	failed := console.BackupWhyFoldRefusedPrefix
 	if strings.HasPrefix(reason, "internal error") {
-		failed = "the update from the recorded changes hit an internal error"
+		failed = console.BackupWhyFoldCrashedPrefix
 	}
 	because := failed + " (" + reason + ")"
 	now := time.Now().UTC()
@@ -604,7 +608,7 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, reason string) {
 		return
 	}
 	stamp := now.Format(time.RFC3339)
-	if b.startFull(e, stamp, now, because) {
+	if b.startFull(e, stamp, now, because, because) {
 		b.mu.Lock()
 		b.fallback[e.ID] = scheduledFallback{at: stamp, reason: reason}
 		b.mu.Unlock()

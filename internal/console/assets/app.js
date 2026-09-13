@@ -5649,6 +5649,22 @@ function fmtSeconds(sec) {
 
 const BACKUP_KIND_LABEL = { dump: "full copy of the source", refresh: "automatic refresh", restore: "point-in-time restore" };
 
+// Why a scheduled run read the database in full instead of updating the
+// previous backup (#1604), keyed by the code the daemon fixed when the run
+// happened. The first two are the setting to change, said as such; the
+// rest carry the run's own reason, which names the error.
+const BACKUP_WHY_REMEDY = {
+  no_index: "This server has no index connection, so there are no recorded changes to update from: every scheduled run reads your database in full.",
+  no_local_dir: "Set a Backup dir for this server (Backup settings) and the next run updates from the recorded changes instead of reading your database in full.",
+  first_backup: "First backup: there was nothing to update from yet. The next run updates from it.",
+};
+function backupWhyLine(why, code) {
+  if (!why) return "";
+  const fixed = BACKUP_WHY_REMEDY[code];
+  if (fixed) return fixed;
+  return "Full backup because " + backupFoldError(why) + (/[.!?]$/.test(why) ? "" : ".");
+}
+
 // loadBackupDetail fills a row's expansion: tables with sizes, total weight,
 // and duration. The recorded run (this daemon performed it) gives the exact
 // duration; otherwise the file timestamps bound it, labeled as such.
@@ -5698,6 +5714,7 @@ async function loadBackupDetail(at, box) {
     facts.append(el("span", { class: "stg-dest", text:
       "took " + fmtSeconds(d.run.seconds) + " (" + (BACKUP_KIND_LABEL[d.run.kind] || d.run.kind) +
       (d.run.rows ? ", " + Number(d.run.rows).toLocaleString("en-US") + " rows" : "") + ")" }));
+    if (d.run.why) facts.append(el("span", { class: "stg-dest", text: backupWhyLine(d.run.why, d.run.why_code) }));
   } else if (d.write_span_seconds > 0) {
     facts.append(el("span", { class: "stg-dest", text:
       "files written over about " + fmtSeconds(d.write_span_seconds) + " (from file timestamps; the real run took longer)" }));
@@ -6065,6 +6082,11 @@ function backupScheduleCard(cur, b) {
           "Last scheduled backup finished " + when + " (" + what + "): " + (run.tables || 0) + " table(s)" +
           (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(run.carried_copied || 0) : "") +
           (run.uploaded ? ", " + run.uploaded + " file(s) uploaded" : "") + "." }));
+        // The reason a full backup was taken, as recorded when it ran, and
+        // the setting that turns the next one into an update (#1604).
+        if (run.method !== "refresh" && run.why) {
+          body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code) }));
+        }
       } else {
         alarm = true;
         // A failed run that still names a snapshot is the one shape where the

@@ -66,6 +66,11 @@ type BaselineRunRecord struct {
 	Uploaded      int    `json:"uploaded,omitempty"`
 	Refused       int    `json:"refused,omitempty"`
 	Error         string `json:"error,omitempty"`
+	// Why is the reason a scheduled run was a FULL backup rather than an
+	// update, as decided when it ran (#1604); WhyCode is BackupWhyCode of
+	// it, fixed at write time. Empty on updates and manual backups.
+	Why     string `json:"why,omitempty"`
+	WhyCode string `json:"why_code,omitempty"`
 }
 
 type baselineHistoryFile struct {
