@@ -1047,7 +1047,7 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		// had children. The index knows. Gated to MySQL/MariaDB like the
 		// console's own detection: PostgreSQL logical replication captures
 		// cascades as real events, so there is nothing missing to warn about.
-		if dialect == recovery.MySQLDialect && len(rows) > 0 {
+		if dialect == recovery.MySQLDialect && recovery.RowsCanCascade(rows) {
 			adv, aerr := recovery.DetectCascade(t.DB, args.Schema, args.Table)
 			var w string
 			switch {
@@ -1060,7 +1060,7 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 				}
 				w = "could not check whether " + subject + " foreign-key children with cascading rules (" + aerr.Error() + "); if so, the child rows MySQL deleted or re-pointed along with these are NOT in this script. Use the recover_cascade tool to reconstruct them"
 			case adv.AppliesTo(rows, args.Table):
-				w = adv.Warning("the recover_cascade tool")
+				w = adv.Warning(args.Table, "the recover_cascade tool")
 			}
 			if w != "" {
 				text += "\n-- Warning: " + w + ".\n"

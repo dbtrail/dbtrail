@@ -47,11 +47,16 @@ func (a CascadeAdvisory) Empty() bool {
 // which is the side a reversal can cascade FROM: with a table named, the
 // edges whose parent is that table, so a child in another schema (#833) is
 // named and an unrelated cascade in the same schema is not (the warning
-// says "this table has children (...)", and that list must be true of this
-// table); with only a schema named, the edges whose parent lives in that
-// schema, since those are the deletes a window scoped to it can hold. The
-// old child-schema scope missed exactly the cross-schema parent. The parent
+// says "this table has children (...)", so the list is that table's; with
+// no schema given, a same-named table in another schema contributes too);
+// with only a schema named, the edges whose parent lives in that schema,
+// since those are the deletes a window scoped to it can hold. The old
+// child-schema scope missed exactly the cross-schema parent. The parent
 // flags come from the same edges, per referential action.
+//
+// A target that is only a CHILD gets no advisory: its own DELETE or UPDATE
+// is a real binlogged event and its reversal is complete. Cascades fire from
+// the parent's change, and that is the only side a plain reversal misses.
 //
 // Names compare case-insensitively: the index compares them server-side
 // under a case-insensitive collation when it fetches the rows, and a
@@ -92,6 +97,18 @@ func DetectCascade(db *sql.DB, schema, table string) (CascadeAdvisory, error) {
 // per-action split has to be redone here).
 func cascades(rule string) bool { return rule == "CASCADE" || rule == "SET NULL" }
 
+// RowsCanCascade reports whether any row is a DELETE or an UPDATE, the only
+// events a cascade can follow; callers skip the FK probe on a window of
+// INSERTs, which can never have cascaded.
+func RowsCanCascade(rows []query.ResultRow) bool {
+	for _, r := range rows {
+		if r.EventType == event.EventDelete || r.EventType == event.EventUpdate {
+			return true
+		}
+	}
+	return false
+}
+
 // AppliesTo reports whether the reversal of these rows is the kind the
 // advisory is about, so a surface that returns the script to a client does
 // not cry wolf over an INSERT undo on a table that happens to have children.
@@ -123,13 +140,20 @@ func (a CascadeAdvisory) AppliesTo(rows []query.ResultRow, table string) bool {
 	return false
 }
 
-// Warning renders the advisory for a response. remedy names the surface's
-// own cascade path, since the same sentence must not hand an MCP client a
-// shell command or an operator a tool name: "`bintrail recover-cascade`" on
-// the CLI, "the recover_cascade tool" over MCP.
-func (a CascadeAdvisory) Warning(remedy string) string {
+// Warning renders the advisory for a response. table is the target the
+// caller named, or "" for a schema- or window-wide reversal, where the
+// subject is the parents in the window rather than "this table". remedy
+// names the surface's own cascade path, since the same sentence must not
+// hand an MCP client a shell command or an operator a tool name:
+// "`bintrail recover-cascade`" on the CLI, "the recover_cascade tool" over
+// MCP.
+func (a CascadeAdvisory) Warning(table, remedy string) string {
 	var b strings.Builder
-	b.WriteString("this table has foreign-key children with ON DELETE / ON UPDATE CASCADE or SET NULL rules")
+	if table != "" {
+		b.WriteString("this table has foreign-key children with ON DELETE / ON UPDATE CASCADE or SET NULL rules")
+	} else {
+		b.WriteString("tables in this window have foreign-key children with ON DELETE / ON UPDATE CASCADE or SET NULL rules")
+	}
 	if len(a.ChildTables) > 0 {
 		b.WriteString(" (" + strings.Join(a.ChildTables, ", ") + ")")
 	}

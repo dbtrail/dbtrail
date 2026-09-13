@@ -850,7 +850,7 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 	// cascade path here. Say what the script cannot contain and how to get
 	// it, instead of returning a parent-only script that reads as complete.
 	// Same MySQL gate as above: PostgreSQL captures cascades as real events.
-	if dialect == recovery.MySQLDialect && body.Table == "" && len(rows) > 0 {
+	if dialect == recovery.MySQLDialect && body.Table == "" && recovery.RowsCanCascade(rows) {
 		adv, aerr := recovery.DetectCascade(b.db, body.Schema, "")
 		switch {
 		case aerr != nil:

@@ -80,12 +80,9 @@ func TestRecoverTool_cascadeWarningNeedsAMatchingEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// A DELETE on a child-only table beside the INSERT: the probe runs and
+	// finds no parent rule for the target, so nothing is said.
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(cascadeAdvisoryRows(int64(parser.EventInsert), "orders"))
-	expectFKTableExists(mock, true)
-	mock.ExpectQuery("FROM fk_constraints").WillReturnRows(sqlmock.NewRows(
-		[]string{"schema_name", "table_name", "column_name", "referenced_schema_name", "referenced_table_name", "delete_rule", "update_rule"}).
-		AddRow("app", "order_items", "order_id", "app", "orders", "CASCADE", "NO ACTION"))
-
 	res, _, _ := MakeRecoverTool(newRecoverToolTarget(db, 0))(context.Background(), nil, RecoverArgs{Schema: "app", Table: "orders"})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", resultText(res))
@@ -181,5 +178,44 @@ func TestRecoverTool_cascadeWarningRidesSummaryAndChunks(t *testing.T) {
 	}
 	if strings.Contains(first.SQL, "-- Warning: this table") || !strings.Contains(last.SQL, "-- Warning: this table") {
 		t.Errorf("the script comment must ride the LAST chunk only:\nfirst:\n%s\nlast:\n%s", first.SQL, last.SQL)
+	}
+}
+
+// A window-wide recover (no table named) names the parents' children and
+// never says "this table".
+func TestRecoverTool_tablelessWarningNamesTheWindow(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("FROM binlog_events").WillReturnRows(cascadeAdvisoryRows(int64(parser.EventDelete), "orders"))
+	expectCascadeParent(mock)
+
+	res, _, _ := MakeRecoverTool(newRecoverToolTarget(db, 0))(context.Background(), nil, RecoverArgs{Schema: "app"})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", resultText(res))
+	}
+	text := resultText(res)
+	if !strings.Contains(text, "tables in this window have") || !strings.Contains(text, "app.order_items") || strings.Contains(text, "this table has") {
+		t.Errorf("table-less advisory:\n%s", text)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// An INSERT-only window issues no FK probe at all (sqlmock would report an
+// unexpected query as a "could not check" warning).
+func TestRecoverTool_insertOnlyWindowSkipsTheProbe(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("FROM binlog_events").WillReturnRows(cascadeAdvisoryRows(int64(parser.EventInsert), "orders"))
+	res, _, _ := MakeRecoverTool(newRecoverToolTarget(db, 0))(context.Background(), nil, RecoverArgs{Schema: "app", Table: "orders"})
+	if res.IsError || strings.Contains(resultText(res), "could not check") {
+		t.Errorf("an INSERT-only window reached the FK probe:\n%s", resultText(res))
 	}
 }

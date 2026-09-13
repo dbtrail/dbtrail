@@ -174,12 +174,15 @@ func TestCascadeAdvisory_AppliesTo(t *testing.T) {
 // A parent with no readable child list (a newer index could hide one) still
 // renders a remedy, and never an empty parenthesis.
 func TestCascadeAdvisory_WarningWithoutChildList(t *testing.T) {
-	w := CascadeAdvisory{ParentOnDelete: true}.Warning("X")
-	if !strings.Contains(w, "Use X to reconstruct") || strings.Contains(w, "()") {
+	w := CascadeAdvisory{ParentOnDelete: true}.Warning("orders", "X")
+	if !strings.HasPrefix(w, "this table has") || !strings.Contains(w, "Use X to reconstruct") || strings.Contains(w, "()") {
 		t.Errorf("warning without a child list: %s", w)
 	}
-	w = CascadeAdvisory{ChildTables: []string{"a.b", "a.c"}}.Warning("Y")
-	if !strings.Contains(w, "(a.b, a.c)") || !strings.Contains(w, "Use Y to reconstruct") {
-		t.Errorf("warning with a child list: %s", w)
+	w = CascadeAdvisory{ChildTables: []string{"a.b", "a.c"}}.Warning("", "Y")
+	if !strings.HasPrefix(w, "tables in this window have") || !strings.Contains(w, "(a.b, a.c)") || !strings.Contains(w, "Use Y to reconstruct") {
+		t.Errorf("warning for a table-less reversal names \"this table\" or drops the list: %s", w)
+	}
+	if !RowsCanCascade([]query.ResultRow{{EventType: event.EventUpdate}}) || RowsCanCascade([]query.ResultRow{{EventType: event.EventInsert}}) {
+		t.Error("RowsCanCascade: an UPDATE can cascade, an INSERT cannot")
 	}
 }

@@ -220,12 +220,13 @@ func runRecover(cmd *cobra.Command, args []string) error {
 
 	// Plain recover cannot reconstruct rows deleted by an FK ON DELETE CASCADE:
 	// InnoDB executes the cascade below the binlog (MySQL Bug #32506), so the
-	// cascaded child deletes were never indexed. Warn loudly when the targeted
-	// schema carries cascade FKs and point at `recover-cascade`, which
-	// reconstructs them; plain recover cannot.
-	// The check itself is shared with MCP and the console (#1616,
-	// recovery.DetectCascade): child side scoped by schema, plus the
-	// cross-schema parent side per referential action (#833/#1002). Here it
+	// cascaded child deletes were never indexed. Warn loudly when the target
+	// is a cascade PARENT (with --table: that table, its children in any
+	// schema, #833; with --schema alone: any parent in the schema) and point
+	// at `recover-cascade`, which reconstructs them; plain recover cannot.
+	// The check is shared with MCP and the console (#1616,
+	// recovery.DetectCascade): one index-wide read of the FK graph, filtered
+	// by the referenced side, flags per referential action (#1002). Here it
 	// is reported whenever the graph carries a rule, since `recover` cannot
 	// see which event types the filter will match; the surfaces that return
 	// the script to a client gate on the matched rows instead.
@@ -234,7 +235,7 @@ func runRecover(cmd *cobra.Command, args []string) error {
 		slog.Warn("could not check the index for FK cascade constraints", "error", cerr)
 	}
 	if !adv.Empty() {
-		slog.Warn("target has FK ON DELETE and/or ON UPDATE CASCADE/SET NULL "+
+		slog.Warn("target is the parent of FK ON DELETE and/or ON UPDATE CASCADE/SET NULL "+
 			"constraints (including cross-schema children); plain `recover` cannot "+
 			"reconstruct cascade-deleted child rows, SET NULL'd FKs or FKs a parent-key "+
 			"UPDATE rewrote (none are ever binlogged, MySQL Bug #32506); use "+
