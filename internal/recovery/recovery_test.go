@@ -1915,8 +1915,9 @@ func TestSchemaDriftError_advisesTheSchemaEraCase(t *testing.T) {
 		"Narrowing the recovery window in time", // and carries its own remedy
 		"since/until",                           // spelled for every surface, not just the CLI
 		"NOT reversed",                          // ...and the remedy states what it costs
-		"re-snapshot",                           // the stale-snapshot cause survives
-		"by hand",                               // hand reconciliation stays the option for the rest
+		"take it only when a current-shape event holds the state you want", // ...and stays conditional, never a recommendation
+		"re-snapshot", // the stale-snapshot cause survives
+		"by hand",     // hand reconciliation stays the option for the rest
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("remediation missing %q; got: %s", want, msg)
