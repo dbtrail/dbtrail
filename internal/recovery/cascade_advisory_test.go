@@ -10,6 +10,10 @@ import (
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
+// unscopedEdgeQuery matches CascadeConstraintsInIndex's SQL only when no
+// schema filter was appended (sqlmock collapses whitespace before matching).
+const unscopedEdgeQuery = `update_rule IN \('CASCADE', 'SET NULL'\)\) ORDER BY schema_name`
+
 var fkEdgeCols = []string{"schema_name", "table_name", "column_name", "referenced_schema_name", "referenced_table_name", "delete_rule", "update_rule"}
 
 // The list under "this table has children (...)" must be true of THIS table:
@@ -22,10 +26,12 @@ func TestDetectCascade_namesTheTargetsOwnChildrenAcrossSchemas(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(true))
-	// WithArgs() with no arguments pins the INDEX-WIDE read: scoped by the
-	// child schema, the query would carry "shop" and billing.invoices would
-	// never be returned by a real index.
-	mock.ExpectQuery("FROM fk_constraints").WithArgs().WillReturnRows(sqlmock.NewRows(fkEdgeCols).
+	// The pattern pins the INDEX-WIDE read (nothing between the rule filter
+	// and ORDER BY): scoped by the child schema the query carries "AND
+	// schema_name IN (?)" there, and a real index would never return
+	// billing.invoices. sqlmock's WithArgs() with no arguments does not pin
+	// anything (a nil argument list means "do not check").
+	mock.ExpectQuery(unscopedEdgeQuery).WillReturnRows(sqlmock.NewRows(fkEdgeCols).
 		AddRow("shop", "order_items", "order_id", "shop", "orders", "CASCADE", "NO ACTION").
 		AddRow("billing", "invoices", "customer_id", "shop", "customers", "CASCADE", "NO ACTION").
 		AddRow("billing", "invoices", "account_id", "shop", "customers", "NO ACTION", "SET NULL").
@@ -56,7 +62,7 @@ func TestDetectCascade_scopes(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(true))
-	mock.ExpectQuery("FROM fk_constraints").WithArgs().WillReturnRows(sqlmock.NewRows(fkEdgeCols).
+	mock.ExpectQuery(unscopedEdgeQuery).WillReturnRows(sqlmock.NewRows(fkEdgeCols).
 		AddRow("shop", "order_items", "order_id", "shop", "orders", "CASCADE", "NO ACTION").
 		AddRow("crm", "notes", "customer_id", "crm", "customers", "SET NULL", "NO ACTION"))
 	adv, err := DetectCascade(db, "", "orders")
