@@ -45,6 +45,15 @@ type ScannedFile struct {
 	// RowCount is set when the footer was read (always for local scans —
 	// a local footer read is cheap — and for S3 only under --deep).
 	RowCount sql.NullInt64
+	// ColumnSet is the file's own column set in archive.ColumnSet form, read
+	// from the same footer as RowCount and therefore under the same rule:
+	// always on a local scan, on S3 only under --deep. Empty = not read.
+	//
+	// This is the backfill path for #1535: rotate records the set for archives
+	// it writes from now on, and everything already on disk gets it here, one
+	// footer each, offline — instead of DuckDB paying for every footer on
+	// every statement over the events view.
+	ColumnSet string
 }
 
 // StateRow is one archive_state row as stored.
@@ -57,6 +66,7 @@ type StateRow struct {
 	S3Bucket      sql.NullString
 	S3Key         sql.NullString
 	S3UploadedAt  sql.NullTime
+	ColumnSet     sql.NullString
 	ArchivedAt    time.Time
 }
 
@@ -354,6 +364,9 @@ func insertAction(k key, local, s3f *ScannedFile) Action {
 	if rowCount.Valid {
 		a.Changes = append(a.Changes, FieldChange{"row_count", rowCount.Int64})
 	}
+	if cs := pickColumnSet(local, s3f); cs != "" {
+		a.Changes = append(a.Changes, FieldChange{"column_set", cs})
+	}
 	if s3f != nil {
 		a.Changes = append(a.Changes,
 			FieldChange{"s3_bucket", s3f.S3Bucket},
@@ -444,12 +457,41 @@ func updateAction(k key, row *StateRow, local, s3f *ScannedFile, opts DiffOption
 		a.Changes = append(a.Changes, FieldChange{"row_count", rowCount.Int64})
 		addReason("row count drift")
 	}
+	// column_set: recorded whenever a footer was READ and the row disagrees,
+	// NOT gated on --deep. The gate exists to keep S3 footer reads off the
+	// default path, and a set that was not read is empty here — so on S3
+	// without --deep this condition simply never fires, while a local scan
+	// (whose footer read is cheap and already happened) backfills every row
+	// #1535 needs. A row already carrying the right set produces no action,
+	// which is what keeps a repaired registry from reporting drift forever.
+	if cs := pickColumnSet(local, s3f); cs != "" && (!row.ColumnSet.Valid || row.ColumnSet.String != cs) {
+		a.Changes = append(a.Changes, FieldChange{"column_set", cs})
+		if row.ColumnSet.Valid {
+			addReason("archived column set drift")
+		} else {
+			addReason("archived column set not recorded (the events view binds one footer per file without it)")
+		}
+	}
 
 	if len(a.Changes) == 0 {
 		return Action{}, false
 	}
 	a.Reason = reasons
 	return a, true
+}
+
+// pickColumnSet picks the column set from the scanned files, preferring local
+// for the same reason pickMeta does: the two describe the same Parquet object,
+// and the local footer read is the one that already happened. Empty when
+// neither footer was read (an S3-only scan without --deep).
+func pickColumnSet(local, s3f *ScannedFile) string {
+	if local != nil && local.ColumnSet != "" {
+		return local.ColumnSet
+	}
+	if s3f != nil {
+		return s3f.ColumnSet
+	}
+	return ""
 }
 
 // pickMeta picks size/row_count from the scanned files, preferring local

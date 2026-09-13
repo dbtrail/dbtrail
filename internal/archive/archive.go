@@ -8,7 +8,9 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
@@ -73,7 +75,44 @@ type Stats struct {
 	Rows       int64
 	MinEventTS time.Time
 	MaxEventTS time.Time
+	// Columns is the canonical column set of the file that was just written
+	// (#1535), for the caller to record in archive_state.column_set. Reported by
+	// the writer rather than read back off BinlogEventColumns at the call site
+	// so the record cannot drift from the bytes: a build that ever writes a
+	// narrower file records the narrower set.
+	Columns string
 }
+
+// ColumnSet renders a Parquet column list as the canonical archive_state.column_set
+// value: lowercase names, SORTED, comma-joined.
+//
+// Sorted, because it is a grouping KEY (#1535). Two files holding the same
+// columns in different physical order are one schema group and must produce one
+// string; grouping on write order would split them for nothing, and each extra
+// group costs a footer read at bind time — the exact cost this exists to remove.
+func ColumnSet(cols []baseline.Column) string {
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		names[i] = strings.ToLower(c.Name)
+	}
+	return ColumnSetOf(names)
+}
+
+// ColumnSetOf is ColumnSet over bare names — what a footer read produces.
+// Deduplicates: a repeated name would make the set a multiset and split a group
+// that is really the same schema.
+func ColumnSetOf(names []string) string {
+	lower := make([]string, 0, len(names))
+	for _, n := range names {
+		n = strings.ToLower(strings.TrimSpace(n))
+		if n != "" && !slices.Contains(lower, n) {
+			lower = append(lower, n)
+		}
+	}
+	slices.Sort(lower)
+	return strings.Join(lower, ",")
+}
+
 
 // ArchivePartition writes all rows from the named partition of binlog_events
 // to a Parquet file at outputPath. The db must have been opened with
@@ -128,7 +167,9 @@ func ArchivePartition(ctx context.Context, db *sql.DB, dbName, partition, output
 	}
 	defer rows.Close()
 
-	var stats Stats
+	// Reported from the SAME list the writer above was built with, so the
+	// recorded set is the file's set by construction (#1535).
+	stats := Stats{Columns: ColumnSet(BinlogEventColumns)}
 	for rows.Next() {
 		// Every NOT NULL column is scanned defensively and its
 		// Valid bit is propagated into the nulls[] slice so the Parquet

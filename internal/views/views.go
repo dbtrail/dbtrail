@@ -90,6 +90,18 @@ type BaselineTable struct {
 	SchemaKnown bool
 }
 
+// ArchiveGroup is one set of archived files that share a column set, as read
+// back from archive_state by query.ArchiveGroups (#1535). Restated here as a
+// plain struct so this package keeps generating text out of values and links
+// nothing to reach the registry.
+type ArchiveGroup struct {
+	// Columns is the group's shared column set, lowercase. A column another
+	// group has and this one does not is emitted as NULL.
+	Columns []string
+	// Files are the group's archived files: full local paths or s3:// URLs.
+	Files []string
+}
+
 // LiveIndex names the index whose `binlog_events` the events view unions in as
 // its hot leg, so a query is fresh to capture lag instead of to the archive
 // retention window (#1480).
@@ -187,6 +199,22 @@ type Input struct {
 	// named the roots with --archive-dir/--archive-s3 gets exactly what they
 	// named, both of them if they passed both (#1456).
 	PortableRouting bool
+	// ArchiveGroups, when non-empty, REPLACES the single globbed cold leg with
+	// one leg per column set (#1535). Each group names its files explicitly and
+	// reads them with union_by_name = false, so the bind opens one footer per
+	// GROUP instead of one per file — the cost that made a statement over the
+	// events view wait on every archive ever written.
+	//
+	// Correctness is preserved by writing out what union_by_name was doing: a
+	// column a group does not have is emitted as NULL. Absent groups keep the
+	// globbed form, which is what every caller did before this existed.
+	ArchiveGroups []ArchiveGroup
+	// UngroupedPartitions is how many registered partitions have no recorded
+	// column set. It must be zero for ArchiveGroups to be used — see
+	// query.ArchiveGroups — and it is carried here so the file can SAY why it
+	// still binds the slow way instead of leaving the operator to wonder.
+	UngroupedPartitions int
+
 	// ArchiveDiscoveryFailed is set when the registry could not be read at
 	// all. The file then says so instead of "none registered", which would
 	// state a cause the caller does not know. A bool, not the error: the
@@ -219,6 +247,29 @@ type Input struct {
 	// the header. BaselineSnapshot is that snapshot's timestamp.
 	BaselineSource   string
 	BaselineSnapshot time.Time
+	// NewerElsewhere names a snapshot that is more recent than the one this
+	// file pins, found in the server's OTHER backup location (#1571).
+	//
+	// It is a warning and deliberately NOT a correction. This file names ONE
+	// root, and every state view resolves a path under it: a reader who has
+	// the local directory cannot open an s3:// path and the reverse is just
+	// as true, so merging the two locations would produce views that half of
+	// the readers cannot resolve. What silence cost instead was worse in a
+	// quieter way — a file pinned to a week-old snapshot because the newest
+	// one had already aged out of local retention, reading as current.
+	NewerElsewhere       time.Time
+	NewerElsewhereSource string
+	// NewerElsewhereHowTo is the route THIS producer's reader can take to get
+	// that snapshot instead, rendered verbatim as one comment line. Same rule
+	// as LiveLegHowTo: this package states no route it cannot see, so an empty
+	// value leaves the note stating the fact alone. A note that names a
+	// problem and no way to act on it is where the reader stops.
+	NewerElsewhereHowTo string
+	// NewerElsewhereUnchecked names the other location when the look at it did
+	// NOT answer, so the header can say the question is open instead of
+	// rendering a file indistinguishable from one whose other location was
+	// read and held nothing newer. Set only when NewerElsewhere is zero.
+	NewerElsewhereUnchecked string
 	// Follow records how, if at all, the state views reach a snapshot published
 	// after this file was generated (#1484, #1550). ApplyFollow is what sets
 	// it; see FollowMode for what each mode costs the reader.
@@ -554,6 +605,14 @@ func writeHeader(b *strings.Builder, in Input) {
 		orUnknown(in.Version), in.GeneratedAt.UTC().Format(time.RFC3339))
 	b.WriteString("--\n")
 	b.WriteString("-- THIS FILE IS A SNAPSHOT OF THE LAYOUT, NOT A LIVE BINDING. ")
+	// The events view follows the layout only when it is GLOBBED. A grouped one
+	// (#1535) names its archived files one by one, which is what buys the cheap
+	// bind and what costs the self-updating: partitions archived later are not
+	// in it. Every sentence below that says the file keeps up with rotation is
+	// gated on this, because getting it wrong is worse than saying nothing —
+	// the reader keeps a file that quietly stopped covering the recent end of
+	// their history.
+	grouped := len(in.ArchiveGroups) > 0
 	// checksSnapshot, not Follow.follows(), for the sentence below that names
 	// the dropped-table check. The two are the same today for every render a
 	// producer makes, and they come apart for a filtered one: writeStateViews
@@ -575,7 +634,14 @@ func writeHeader(b *strings.Builder, in Input) {
 		if in.Follow == FollowNewest {
 			how = "select the newest completed snapshot"
 		}
-		if in.rendersEvents() {
+		if in.rendersEvents() && grouped {
+			b.WriteString("The events view below\n")
+			b.WriteString("-- names the archived files it reads one by one, so partitions archived\n")
+			b.WriteString("-- after this file was written are NOT in it, with no error and no warning:\n")
+			b.WriteString("-- a query over the most recent hours simply returns nothing for them.\n")
+			b.WriteString("-- Regenerate on the schedule your rotation archives on. The baseline state\n")
+			b.WriteString("-- views do " + how + ", so a refreshed baseline reaches them\n")
+		} else if in.rendersEvents() {
 			b.WriteString("The globs below\n")
 			b.WriteString("-- keep picking up newly rotated partitions, and the baseline state views\n")
 			b.WriteString("-- " + how + ", so a refreshed baseline reaches them\n")
@@ -607,6 +673,16 @@ func writeHeader(b *strings.Builder, in Input) {
 		b.WriteString("-- changes to some other type arrives as whatever the new file holds (an\n")
 		b.WriteString("-- ORDER BY can start sorting text), and an archive source added later is\n")
 		b.WriteString("-- simply not here. None of those raise an error.\n")
+	} else if in.rendersEvents() && grouped {
+		b.WriteString("The events view below\n")
+		b.WriteString("-- names the archived files it reads, one by one, and the baseline state views\n")
+		b.WriteString("-- point at ONE snapshot. NOTHING here updates itself: partitions archived\n")
+		b.WriteString("-- after this file was written are not in it, with no error and no warning —\n")
+		b.WriteString("-- a query over the most recent hours simply returns nothing for them.\n")
+		b.WriteString("-- Regenerate this file on the schedule your rotation archives on, and after\n")
+		b.WriteString("-- taking or refreshing a baseline, and whenever archive sources are added or\n")
+		b.WriteString("-- removed. Re-run `bintrail views`, or download the file again from the\n")
+		b.WriteString("-- console.\n")
 	} else if in.rendersEvents() {
 		// The one self-following half of the file, and only the events view
 		// has it: its globs are evaluated per query. Claimed only when that
@@ -724,14 +800,14 @@ func writeHeader(b *strings.Builder, in Input) {
 		b.WriteString("--   (none registered in archive_state: no rotated partitions have been archived yet)\n")
 	}
 	for _, s := range in.ArchiveSources {
-		fmt.Fprintf(b, "--   %s\n", s)
+		fmt.Fprintf(b, "--   %s\n", commentSafe(s))
 	}
 	b.WriteString("-- Baseline snapshot:\n")
 	switch {
 	case len(in.Baselines) == 0 && in.BaselineSource == "":
 		b.WriteString("--   (no baseline source given: pass --baseline-dir or --baseline-s3)\n")
 	case len(in.Baselines) == 0:
-		fmt.Fprintf(b, "--   (none discoverable under %s)\n", in.BaselineSource)
+		fmt.Fprintf(b, "--   (none discoverable under %s)\n", commentSafe(in.BaselineSource))
 	case in.SnapshotScoped && in.BaselineSource == ".":
 		// The tarball's copy (#1583): paths spelled "./schema/table.parquet".
 		// Guarded by INTENT, not by the path value alone: `bintrail views
@@ -751,8 +827,28 @@ func writeHeader(b *strings.Builder, in Input) {
 		b.WriteString("--   holding the schema directories). From anywhere else the reads fail with\n")
 		b.WriteString("--   DuckDB's own \"No files found\" naming the exact relative path.\n")
 	default:
+		// commentSafe on the SOURCE as well as the sentence: a registry entry's
+		// baseline path is operator-supplied and unvalidated for newlines, and
+		// one here would end the comment and leave the rest of the path on a
+		// line DuckDB executes. The HowTo beside it is a compile-time
+		// constant; this one is not, which is the half that needed it.
 		fmt.Fprintf(b, "--   %s at %s (%d table(s))\n",
-			in.BaselineSource, in.BaselineSnapshot.UTC().Format(time.RFC3339), len(in.Baselines))
+			commentSafe(in.BaselineSource), in.BaselineSnapshot.UTC().Format(time.RFC3339), len(in.Baselines))
+		switch {
+		case !in.NewerElsewhere.IsZero():
+			fmt.Fprintf(b, "--   NOTE: a newer snapshot (%s) exists under %s, which this file does\n"+
+				"--   not read. A file names one location, and its paths only resolve there.\n",
+				in.NewerElsewhere.UTC().Format(time.RFC3339), commentSafe(in.NewerElsewhereSource))
+			if in.NewerElsewhereHowTo != "" {
+				fmt.Fprintf(b, "--   %s\n", commentSafe(in.NewerElsewhereHowTo))
+			}
+		case in.NewerElsewhereUnchecked != "":
+			// Say the check did not answer. Silence here is indistinguishable
+			// from "the other location holds nothing newer", and the two lead
+			// to opposite actions. Same shape as the archive half above.
+			fmt.Fprintf(b, "--   (whether %s holds a newer snapshot could not be read; the\n"+
+				"--   console log has the error)\n", commentSafe(in.NewerElsewhereUnchecked))
+		}
 		switch in.Follow {
 		case FollowPointer:
 			// Name the timestamp AND the pointer: the timestamp is what the
@@ -760,7 +856,7 @@ func writeHeader(b *strings.Builder, in Input) {
 			// actually open. Reporting only one of the two would make a
 			// followed file indistinguishable from a pinned one.
 			fmt.Fprintf(b, "--   read through %s/%s, which is that snapshot right now\n",
-				strings.TrimSuffix(in.BaselineSource, "/"), baseline.CurrentLinkName)
+				commentSafe(strings.TrimSuffix(in.BaselineSource, "/")), baseline.CurrentLinkName)
 		case FollowNewest:
 			// Same job as the pointer line, and the same reason: the timestamp
 			// above is where the column types came from, not what the views
@@ -1164,10 +1260,48 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 
 	if cold {
 		b.WriteString("--\n")
-		b.WriteString("-- union_by_name is required, not cosmetic: archives written before a column\n")
-		b.WriteString("-- existed simply lack it, and those files must read back with NULLs rather\n")
-		b.WriteString("-- than failing the whole scan. A column absent from EVERY archived file is\n")
-		b.WriteString("-- still an error: drop it from the SELECT if you hit that on an old archive.\n")
+		if len(in.ArchiveGroups) > 0 {
+			fmt.Fprintf(b, "-- The archives are read in %d group(s), one per column set. Archives written\n", len(in.ArchiveGroups))
+			b.WriteString("-- before a column existed simply lack it, so that column is selected as NULL\n")
+			b.WriteString("-- for the group that lacks it. Files inside a group share a column set, which\n")
+			b.WriteString("-- is why each read_parquet can say union_by_name = false: with it on, DuckDB\n")
+			b.WriteString("-- opens EVERY file's footer to unify the schema, on every statement, and the\n")
+			b.WriteString("-- wait grows with the archive. Grouping makes that one footer per group.\n")
+			b.WriteString("--\n")
+			b.WriteString("-- The file list is FIXED, and it comes from archive_state. Two consequences,\n")
+			b.WriteString("-- both worth knowing before you save this file:\n")
+			b.WriteString("--   - partitions archived after this was generated are not read. Regenerate.\n")
+			b.WriteString("--   - a file under one of these roots with no archive_state row is not read.\n")
+			b.WriteString("-- `bintrail archive reconcile` exits non-zero on both kinds of drift; it\n")
+			b.WriteString("-- reports counts per partition, not file paths.\n")
+		} else {
+			b.WriteString("-- union_by_name is required, not cosmetic: archives written before a column\n")
+			b.WriteString("-- existed simply lack it, and those files must read back with NULLs rather\n")
+			b.WriteString("-- than failing the whole scan. A column absent from EVERY archived file is\n")
+			b.WriteString("-- still an error here: drop it from the SELECT if you hit that on an old\n")
+			b.WriteString("-- archive. (The grouped form this file is not using pads it with NULL.)\n")
+			b.WriteString("--\n")
+			b.WriteString("-- COST: union_by_name makes DuckDB open one Parquet footer per archived file\n")
+			b.WriteString("-- to unify the schema, and a view re-binds on every statement, so the wait\n")
+			b.WriteString("-- before the first row grows with the archive.\n")
+			if in.UngroupedPartitions > 0 {
+				fmt.Fprintf(b, "-- %d archived partition(s) cannot be grouped by schema: no recorded column\n", in.UngroupedPartitions)
+				b.WriteString("-- set, or a registered file that is not on disk. Recording the set reads\n")
+				b.WriteString("-- each footer once, offline:\n")
+				if in.NeedsS3() {
+					// --deep is not optional on S3: without it the scan never
+					// opens a remote footer, so the repair finds nothing to
+					// record and the wait stays exactly as it is.
+					b.WriteString("--   bintrail archive reconcile --index-dsn ... --archive-s3 ... --deep --repair\n")
+					b.WriteString("-- `--deep` is what reads the footers over S3; without it the repair records\n")
+					b.WriteString("-- nothing and this note comes back unchanged.\n")
+				} else {
+					b.WriteString("--   bintrail archive reconcile --index-dsn ... --archive-dir ... --repair\n")
+				}
+				b.WriteString("-- Regenerating this file afterwards emits one read_parquet per column set,\n")
+				b.WriteString("-- which binds one footer per group instead of one per file.\n")
+			}
+		}
 	}
 
 	switch {
@@ -1189,9 +1323,9 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 		writeLiveCostNote(b, true)
 		b.WriteString("CREATE OR REPLACE VIEW \"events\" AS\n")
 		b.WriteString("  WITH cold AS (\n")
-		writeEventSelect(b, in, false, "    ")
+		writeColdSide(b, in, "    ")
 		b.WriteString("\n  ), hot AS (\n")
-		writeEventSelect(b, in, true, "    ")
+		writeEventSelect(b, in, true, nil, "    ")
 		b.WriteString("\n  )\n")
 		b.WriteString("  SELECT * FROM cold\n")
 		b.WriteString("  UNION ALL BY NAME\n")
@@ -1211,7 +1345,7 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 		writeAttachDegradeNote(b, stateSurvives, false)
 		writeLiveCostNote(b, false)
 		b.WriteString("CREATE OR REPLACE VIEW \"events\" AS\n")
-		writeEventSelect(b, in, true, "  ")
+		writeEventSelect(b, in, true, nil, "  ")
 		b.WriteString(";\n\n")
 	default:
 		b.WriteString("--\n")
@@ -1232,7 +1366,7 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 			b.WriteString("--   bintrail views --index-dsn ... --include-live\n")
 		}
 		b.WriteString("CREATE OR REPLACE VIEW \"events\" AS\n")
-		writeEventSelect(b, in, false, "  ")
+		writeColdSide(b, in, "  ")
 		b.WriteString(";\n\n")
 	}
 	return true
@@ -1265,11 +1399,33 @@ func writeLiveCostNote(b *strings.Builder, withCold bool) {
 	b.WriteString("-- event_timestamp and on schema_name/table_name.\n")
 }
 
+// writeColdSide renders the archive half of the events view: one SELECT over
+// the whole globbed layout, or — when the column sets are recorded — one per
+// group, joined by UNION ALL BY NAME.
+//
+// BY NAME, not positional: the groups pad different columns, so their projected
+// order is the same only because both walk archive.BinlogEventColumns. Relying
+// on that would make a future reordering of that list silently misalign two
+// groups' columns instead of failing, and a UNION that misaligns is a wrong
+// answer, not an error.
+func writeColdSide(b *strings.Builder, in Input, indent string) {
+	if len(in.ArchiveGroups) == 0 {
+		writeEventSelect(b, in, false, nil, indent)
+		return
+	}
+	for i := range in.ArchiveGroups {
+		if i > 0 {
+			b.WriteString("\n" + indent + "UNION ALL BY NAME\n")
+		}
+		writeEventSelect(b, in, false, &in.ArchiveGroups[i], indent)
+	}
+}
+
 // writeEventSelect renders one leg of the events view. Both legs go through
 // here so the derived columns (the event_type label, commit_time) cannot drift
 // between them: two hand-written copies of one projection is how a UNION starts
 // reporting different things for the same event depending on its age.
-func writeEventSelect(b *strings.Builder, in Input, live bool, indent string) {
+func writeEventSelect(b *strings.Builder, in Input, live bool, group *ArchiveGroup, indent string) {
 	exclude := make(map[string]bool, len(in.ExcludeEventColumns))
 	for _, c := range in.ExcludeEventColumns {
 		exclude[strings.ToLower(c)] = true
@@ -1305,18 +1461,21 @@ func writeEventSelect(b *strings.Builder, in Input, live bool, indent string) {
 		b.WriteString(col + "\"bintrail_id\", \"event_date\", \"event_hour\",\n")
 	}
 
-	has := liveColumnSet(in, live)
+	has := legColumnSet(in, live, group)
 	for _, c := range archive.BinlogEventColumns {
 		if exclude[strings.ToLower(c.Name)] {
 			continue
 		}
 		if has != nil && !has[strings.ToLower(c.Name)] {
-			// The hot leg's union_by_name. This index does not have the column
-			// (it was migrated to an older point than this build's schema);
-			// naming it would fail the whole file with a binder error and
-			// define no view at all, so it reads back NULL the same way an old
-			// archive's missing column does.
-			writeMissingLiveColumn(b, col, c.Name)
+			// The leg's own union_by_name, written out. On the HOT leg the
+			// index does not have the column (it was migrated to an older
+			// point than this build's schema); naming it would fail the whole
+			// file with a binder error and define no view at all. On a COLD
+			// GROUP the archived files in it were written before the column
+			// existed, which is precisely what union_by_name used to paper
+			// over for the whole layout at the cost of a footer read per file.
+			// Either way it reads back NULL.
+			writeMissingColumn(b, col, c.Name, missingReason(live))
 			continue
 		}
 		switch c.Name {
@@ -1378,18 +1537,35 @@ func writeEventSelect(b *strings.Builder, in Input, live bool, indent string) {
 		fmt.Fprintf(b, "\n%sFROM %s.\"binlog_events\"", indent, quoteIdent(liveAttachAlias))
 		return
 	}
+	paths := make([]string, 0, len(in.ArchiveSources))
+	if group != nil {
+		paths = append(paths, group.Files...)
+	} else {
+		for _, src := range in.ArchiveSources {
+			paths = append(paths, archiveGlob(src))
+		}
+	}
 	b.WriteString("\n" + indent + "FROM read_parquet(\n")
 	b.WriteString(indent + "  [\n")
-	for i, src := range in.ArchiveSources {
+	for i, p := range paths {
 		sep := ","
-		if i == len(in.ArchiveSources)-1 {
+		if i == len(paths)-1 {
 			sep = ""
 		}
-		fmt.Fprintf(b, "%s    %s%s\n", indent, sqlString(archiveGlob(src)), sep)
+		fmt.Fprintf(b, "%s    %s%s\n", indent, sqlString(p), sep)
 	}
 	b.WriteString(indent + "  ],\n")
 	b.WriteString(indent + "  hive_partitioning = true,\n")
-	b.WriteString(indent + "  union_by_name = true\n")
+	// The whole point of a group: its files share a column set, so there is
+	// nothing to unify and DuckDB binds ONE footer for the list instead of
+	// opening every one of them. hive_partitioning still reads bintrail_id,
+	// event_date and event_hour off these explicit paths, and a filter on them
+	// still prunes files, exactly as it does over a glob.
+	if group != nil {
+		b.WriteString(indent + "  union_by_name = false\n")
+	} else {
+		b.WriteString(indent + "  union_by_name = true\n")
+	}
 	b.WriteString(indent + ")")
 }
 
@@ -1454,25 +1630,47 @@ func commentSafe(s string) string {
 	return strings.NewReplacer("\n", " ", "\r", " ").Replace(s)
 }
 
-// liveColumnSet returns the lookup for which columns the hot leg may name, or
-// nil when every column is nameable — the cold leg (whose union_by_name handles
-// its own absences) and a producer that observed no column set.
-func liveColumnSet(in Input, live bool) map[string]bool {
-	if !live || len(in.LiveIndex.TableColumns) == 0 {
+// legColumnSet returns the lookup for which columns THIS leg may name, or nil
+// when every column is nameable: a producer that observed no column set, and
+// the globbed cold leg, whose union_by_name still handles its own absences.
+//
+// A cold GROUP always has one, even when it holds every column: the set is what
+// the group was formed on, so trusting it is not an extra assumption, and a
+// group that named a column its files lack would fail the whole view with a
+// binder error — the failure union_by_name = false trades away.
+func legColumnSet(in Input, live bool, group *ArchiveGroup) map[string]bool {
+	var names []string
+	switch {
+	case group != nil:
+		names = group.Columns
+	case live:
+		names = in.LiveIndex.TableColumns
+	}
+	if len(names) == 0 {
 		return nil
 	}
-	has := make(map[string]bool, len(in.LiveIndex.TableColumns))
-	for _, c := range in.LiveIndex.TableColumns {
+	has := make(map[string]bool, len(names))
+	for _, c := range names {
 		has[strings.ToLower(c)] = true
 	}
 	return has
 }
 
-// writeMissingLiveColumn emits the NULL placeholders for one column this index
-// does not have. It follows the projection's own shape: the two columns that
-// render as two outputs must produce two NULLs, or the legs stop lining up.
-func writeMissingLiveColumn(b *strings.Builder, col, name string) {
-	const why = " -- not a column of this index's binlog_events\n"
+// missingReason is the end-of-line comment a NULL placeholder carries, naming
+// the leg it is missing FROM. Two legs put a NULL in the same output column for
+// unrelated reasons, and a reader deciding whether to re-archive or re-migrate
+// needs to know which one they are looking at.
+func missingReason(live bool) string {
+	if live {
+		return " -- not a column of this index's binlog_events\n"
+	}
+	return " -- not a column of the archives in this group\n"
+}
+
+// writeMissingColumn emits the NULL placeholders for one column this leg does
+// not have. It follows the projection's own shape: the two columns that render
+// as two outputs must produce two NULLs, or the legs stop lining up.
+func writeMissingColumn(b *strings.Builder, col, name, why string) {
 	switch name {
 	case "event_type":
 		b.WriteString(col + "NULL AS \"event_type_code\"," + why)

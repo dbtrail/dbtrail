@@ -178,12 +178,18 @@ func TestDuckDBParquetRowCountSharedSession(t *testing.T) {
 		}
 	}
 	for name, want := range files {
-		got, err := duckdbParquetRowCount(ctx, db, filepath.Join(dir, name))
+		got, cols, err := duckdbParquetFooter(ctx, db, filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("probe %s on the shared session: %v", name, err)
 		}
 		if got != want {
 			t.Errorf("%s: row count %d, want %d", name, got, want)
+		}
+		// The same footer read yields the column set the #1535 backfill
+		// records; the fixture is COPY (SELECT * FROM range(n)), whose single
+		// column is named "range".
+		if cols != "range" {
+			t.Errorf("%s: column set %q, want %q", name, cols, "range")
 		}
 	}
 }

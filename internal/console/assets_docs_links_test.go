@@ -38,13 +38,17 @@ var expectedDocsPages = map[string]docsPage{
 	"verification": {slug: "guides/verify", title: "Verification"},
 	"storage":      {slug: "guides/capacity-planning", title: "Capacity Planning"},
 	"connect":      {slug: "claude/setup", title: "Claude Setup"},
+	// #1603: the settings page had a docs page all along and no link to it.
+	"backup-settings": {slug: "guides/backup-settings", title: "Backup settings"},
 }
 
 const docsBaseURL = "https://www.dbtrail.com/docs/"
 
 // One `route: "slug",` entry of the DOCS_PAGES literal. Keys are bare route
 // names (the ROUTES vocabulary), values are slugs under DOCS_BASE.
-var docsPageEntryRE = regexp.MustCompile(`^([a-z]+):\s*"([a-z0-9/-]+)",?$`)
+// A hyphenated route is a quoted key in JS ("backup-settings"), so the
+// key may wear quotes.
+var docsPageEntryRE = regexp.MustCompile(`^"?([a-z-]+)"?:\s*"([a-z0-9/-]+)",?$`)
 
 // A slug is lowercase segments joined by "/", no leading or trailing slash:
 // DOCS_BASE ends in "/" and docsLink appends the trailing "/".
@@ -126,6 +130,37 @@ func TestDocsLinksTableIsExact(t *testing.T) {
 // The fingerprint is the page's own <title>; the shell's is "dbtrail". A
 // control fetch of a path that does not exist proves the fingerprint
 // discriminates before any real page is judged by it.
+// docsMoreRE reads one docsMore("slug", "section", ...) call: the compact
+// blocks' own links into the docs site (#1603).
+var docsMoreRE = regexp.MustCompile(`docsMore\("([^"]*)",\s*"([^"]*)"`)
+
+// TestDocsMoreLinksArePagesTheTableCarries: a compact block may only link to
+// a page the header table already names, so the network check below covers
+// it. A slug typed only in a docsMore call would be a link nobody checks.
+func TestDocsMoreLinksArePagesTheTableCarries(t *testing.T) {
+	raw, err := os.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+	known := map[string]bool{}
+	for _, slug := range parseDocsPages(t, js) {
+		known[slug] = true
+	}
+	calls := docsMoreRE.FindAllStringSubmatch(js, -1)
+	if len(calls) == 0 {
+		t.Fatal("no docsMore call in app.js; the compact blocks lost their docs links")
+	}
+	for _, m := range calls {
+		if !known[m[1]] {
+			t.Errorf("docsMore links to %q, which no DOCS_PAGES entry names; add the page to the table so the site check reaches it", m[1])
+		}
+		if m[2] != "" && !regexp.MustCompile(`^[a-z0-9]+(-+[a-z0-9]+)*$`).MatchString(m[2]) {
+			t.Errorf("docsMore section %q is not a lowercase heading id", m[2])
+		}
+	}
+}
+
 func TestDocsLinksResolveOnTheSite(t *testing.T) {
 	if os.Getenv("BINTRAIL_CHECK_DOCS_LINKS") != "1" {
 		t.Skip("set BINTRAIL_CHECK_DOCS_LINKS=1 to fetch every Docs link from www.dbtrail.com")
@@ -184,6 +219,23 @@ func TestDocsLinksResolveOnTheSite(t *testing.T) {
 			t.Errorf("%s does not serve the %q page: expected %q in the body, got %s (%d bytes) — "+
 				"the console's %s header links to a page the site no longer has",
 				url, want.title, titleTag(want), got, len(body), route)
+		}
+	}
+	// The compact blocks' section links (#1603): a heading id the site does
+	// not render lands the reader at the top of the page with no error.
+	sections := map[string]bool{}
+	for _, m := range docsMoreRE.FindAllStringSubmatch(string(raw), -1) {
+		if m[2] == "" {
+			continue
+		}
+		url := docsBaseURL + m[1] + "/"
+		key := url + "#" + m[2]
+		if sections[key] {
+			continue
+		}
+		sections[key] = true
+		if !strings.Contains(fetch(url), `id="`+m[2]+`"`) {
+			t.Errorf("%s has no heading with id %q; a docsMore link points at a section the site does not render", url, m[2])
 		}
 	}
 }

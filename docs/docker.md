@@ -480,7 +480,7 @@ Each run creates a new snapshot under
 `bintrail-state` volume), with the source's binlog coordinates embedded so
 reconstruct knows where deltas begin. Then point the console at it:
 
-- **Servers added from the UI**: Backups & snapshots (left nav) → the
+- **Servers added from the UI**: Backup settings (left nav) → the
   server's row → **Backup dir** = `/var/lib/bintrail/baselines` (a
   *container* path — the `watch` daemon reads it, not your host). The
   server's Time-travel tab lights up, and its row shows a TT chip under

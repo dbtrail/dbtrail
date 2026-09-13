@@ -219,6 +219,7 @@ const ddlArchiveState = `CREATE TABLE IF NOT EXISTS archive_state (
     s3_uploaded_at  DATETIME,
     min_event_ts    DATETIME DEFAULT NULL COMMENT 'MIN(event_timestamp) of the archived rows; NULL for archives written before #1037 or registered by upload/reconcile. Content-derived pruning: may precede the partition hour label when backfilled events landed in the partition',
     max_event_ts    DATETIME DEFAULT NULL COMMENT 'MAX(event_timestamp) of the archived rows; see min_event_ts (#1037)',
+    column_set      VARCHAR(4096) DEFAULT NULL COMMENT 'the archived Parquet file own column set: lowercase, sorted, comma-joined (#1535). NULL = unknown (written before this column, or registered without a footer read); archive reconcile --repair records it, needing --deep on an S3-only archive',
     archived_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_partition (partition_name, bintrail_id)
 ) ENGINE=InnoDB`

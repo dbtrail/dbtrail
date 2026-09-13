@@ -78,3 +78,35 @@ func TestIndexChecksWithAbsentDatabase(t *testing.T) {
 		t.Errorf("unreachable server: Name = %q", bad.Name)
 	}
 }
+
+// TestBuildRegistersThePrimaryKeyCheck: the check has to be IN the report.
+//
+// Unwiring `report.add(checkPrimaryKeys(...))` from Build left the entire
+// suite green, tagged and untagged, so the feature could be deleted from the
+// report and CI would say nothing. Asserted through Build rather than by
+// reading the source, because what matters is that a real run produces it.
+//
+// It also pins the advisory contract the daemons depend on: whatever this
+// check answers on a healthy fixture, it must never be the FAIL that makes
+// watch and up refuse to boot (consoleapp/watch.go passes only the capacity
+// check to ErrExcluding, so any other FAIL is a boot refusal).
+func TestBuildRegistersThePrimaryKeyCheck(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+
+	report := Build(t.Context(), testutil.BaseDSN()+"/?parseTime=true", "", "", 0)
+
+	var found *CheckResult
+	for i := range report.Checks {
+		if report.Checks[i].Name == PrimaryKeyCheckName {
+			found = &report.Checks[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("Build produced no %q check, so it never runs. Checks: %d", PrimaryKeyCheckName, len(report.Checks))
+	}
+	if found.Status == StatusFail {
+		t.Errorf("%q returned FAIL (detail=%q). Nothing consumes this answer, and a FAIL here "+
+			"refuses to boot watch and up on a source that captures fine", PrimaryKeyCheckName, found.Detail)
+	}
+}

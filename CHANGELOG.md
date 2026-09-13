@@ -7,6 +7,215 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.81.0] - 2026-09-10
+
+### Fixed
+- **A scheduled backup on a server with both a Backup dir and a Backup S3
+  destination reads its previous snapshot from the directory when the
+  directory holds the bucket's newest snapshot** (#1626). Since #1539 that
+  update always read the bucket, and the disk-space setting (#1471) refuses
+  to carry a table forward from S3, so every slot rewrote every table and
+  reported `reuse_unchanged: not applicable`. The directory is used only
+  when its newest snapshot is the same instant as the bucket's newest and
+  holds every table the bucket's copy has, table for table; any other local
+  state, an unreadable directory, or a listing failure keeps the bucket as
+  before. The result is still uploaded to the bucket. The local listing runs
+  first, so an S3-backed server whose directory is empty pays no extra
+  bucket listing per slot.
+
+## [0.80.0] - 2026-09-09
+
+### Fixed
+- **A table with a `GENERATED ALWAYS AS ... STORED` column can be folded**
+  (#1624). `bintrail baseline` leaves generated columns out of the dump, so
+  the baseline Parquet has no such column, while every ROW image carries it.
+  The guard that refuses a column added after the baseline (#602) read that
+  as a schema change and refused the table with `ErrSchemaChanged`; on a
+  schedule with the full-backup opt-in on, the refusal fell back to a full
+  backup at every slot. Columns the baseline's `CREATE TABLE` declares as
+  generated (MySQL's `GENERATED ALWAYS AS`, MariaDB's short `AS (expr)
+  PERSISTENT`, and explicit `ROW START`/`ROW END` period columns, decided by
+  the same parser that built the baseline) are now left out of the emitted
+  rows, which the server recomputes on load. A generated column that was
+  turned into a plain column after the baseline still refuses and names
+  itself, since the baseline holds no value for it.
+
+## [0.79.0] - 2026-09-09
+
+### Changed
+- **Backup schedules can run every 5 minutes** (#1620). The Backups page
+  refused any `every` under `15m`. That floor predates #1539: a server whose
+  backups go to S3 now folds from the bucket and uploads the result, so a
+  five-minute schedule costs it neither a full read of the source nor
+  unbounded local disk, and a reporting copy of a busy table wants exactly
+  that cadence. The floor is now `5m`. The two costs the old number guarded
+  against are still said out loud at save and at boot: a server with an S3
+  destination and no local backup directory takes a full backup every slot,
+  and a local-only server keeps every snapshot it publishes.
+
+### Added
+- `docker-compose.yml` passes `BASELINE_RETAIN` through to
+  `BINTRAIL_CONSOLE_BASELINE_RETAIN`, so a short schedule can prune its
+  local snapshots once S3 holds a copy without editing the compose file.
+  It reclaims only servers that have an S3 destination.
+
+## [0.78.0] - 2026-09-07
+
+### Fixed
+- **Point-in-time restore folds from the server's S3 backups** (#1541). The
+  console's Restore listed the backup to fold from in the server's local
+  directory only, which on an S3-backed server holds what this daemon folded
+  since it started, so every backup that was uploaded and pruned, or made by
+  another host, was invisible and the restore refused with "no backup exists
+  at or before" while the bucket held dozens. It now reads where the scheduled
+  update reads (`BaselineFoldSource`: the bucket when the server has one, the
+  local directory otherwise), still writes into the local directory, and
+  uploads the result so retention can reclaim it; a failed upload keeps the
+  local snapshot and says so, and a restore at the exact second of a backup
+  the bucket already holds is refused rather than overwriting it. The
+  Overview coverage card, which was graded on the old behaviour, now grades
+  against the location the button actually reads: `GET /api/coverage` gains
+  `restore_reads` (`s3`/`dir`, empty when the server has no local directory
+  and Restore refuses it, `inherited` when it grades the daemon-wide locations), and `offsite_tables` is **renamed**
+  `unreachable_tables`, whose meaning mirrors per server — on a `dir` server,
+  tables backed up only in a daemon-wide bucket; on an `s3` server, tables
+  backed up only on this host, which the daemon-wide refresh interval and a
+  failed upload both produce. The Backups page's restore lane offers the
+  snapshots the fold reads, and says which location the skipped ones are in.
+
+### Changed
+- **Console: the Backups & snapshots settings page is now Backup settings, and
+  it shows the three kinds of setting instead of describing them** (#1603).
+  The nav item and the page head both read Backup settings, so the pair with
+  the Backups page reads as work vs configuration (the item already sits
+  inside the sidebar's Settings group, which is why it is not the bare word).
+  The three kinds are told apart by layout: the disk-space switch and the
+  per-server rows sit under "Change here" and apply at once; the daemon's own
+  values sit under "Set when dbtrail starts" on a plain card, retitled Set at
+  startup, with ONE "Restart to change" chip at card level instead of nine
+  identical chips. An empty daemon value renders as the word for what applies
+  (`none`, `off`, `all tables`, `temp folder`), never as `not set`, which read
+  as nine faults on a healthy install.
+  Two rules that used to be paragraphs are drawn: the disk-space switch as two
+  backups of five tables, the unchanged ones carried across as dashed tiles
+  and the changed ones written again; and which backup location is in force,
+  as a three-row legend (own location, daemon default, no location) with the
+  server's own case highlighted and a tick or a cross per lane, so the daemon
+  default's "time-travel reads, backups and restores refuse" is one glyph
+  instead of a sentence. Everything a reader does not need in order to act is
+  compact by default under "More about ..." blocks, not cut, and each block
+  links into the docs guide; the page head carries the Docs link the page
+  never had. Visible text on the daemon-side cards drops from 1719 to about
+  900 characters, and the guards that keep it there: an e2e budget with the
+  fine print compact, a Go test pinning the drawn location cases to the API's
+  own `Source` verdicts in both directions and by count (a fourth verdict on
+  either side fails), and the e2e holding each server's drawn case against
+  the API response. Nothing about what the settings do changes.
+
+### Added
+- **`doctor` warns about tables with no primary key** (#1608). Those tables are
+  not captured at all: the first snapshot REFUSES outright and the stream does
+  not start, and a later snapshot after a schema change EXCLUDES them and skips
+  their row events. Until now nothing said so before the refusal. The check
+  names the tables, up to ten, keeps the count exact past that, and its
+  remediation states what actually happens rather than describing degraded
+  recovery over data that does not exist.
+  It is advisory on every path, including its own errors: nothing downstream
+  consumes the answer, since the snapshot re-derives it and refuses on its own,
+  so a transient `information_schema` error must not stop capture on a source
+  that is healthy. Nothing visible in scope reports `skip`, never `pass`.
+  The finding comes from `metadata.TablesWithoutPrimaryKey`, which is the
+  snapshot's OWN classifier, rather than a second query asking a similar
+  question. Both directions of drift were measured on live servers before this
+  landed: a `TABLE_CONSTRAINTS` question warns about a `UNIQUE NOT NULL` table
+  that MySQL marks `COLUMN_KEY = 'PRI'` and the product keys perfectly well,
+  and a `TABLE_TYPE = 'BASE TABLE'` filter misses MariaDB's `SYSTEM VERSIONED`
+  tables, which is the shape where the data loss is total (#1272).
+
+## [0.77.0] - 2026-09-03
+
+### Fixed
+- **Restore Coverage is graded across every backup location** (#1571). The
+  panel that answers how far back a server can be restored derived that from
+  `bundle.baselineSrc` alone, so on a server with a local directory and an S3
+  destination a table whose only surviving anchor lives in the bucket was not
+  graded, not named broken, and not counted — a clean verdict over an inventory
+  missing a table. It now merges both locations through the same
+  `listBaselinesMerged` the Backups listing uses (#1542), and **a location that
+  fails to list** makes the verdict `unknown` rather than grading the half that
+  did: a partial listing can only understate coverage, and an understated
+  window names healthy tables broken. (A location that lists but skips an
+  unreadable snapshot directory returns no error, so it is not covered by that
+  rule.) Merging can also flip a verdict from `ok` to `unknown`, when the
+  second location contributes a table whose anchor is unattributable.
+  A table whose only usable backup is in S3 is reported in a new
+  `offsite_tables` bucket instead of widening the restorable window: the
+  listing reads every location, but the Restore button folds from the local
+  backup directory alone (#1541), so counting that anchor would print a start
+  the button then refuses. It is not `broken_tables` either — that drives an
+  alarm and advises a fresh backup, and the backup exists. Time travel still
+  reads it, through the S3 fallback `bundle.findBaseline` already has (#766) —
+  which is also why a table whose STALE LOCAL copy shadows a fresh offsite one
+  stays in `broken_tables`: that fallback fires only on `ErrNoBaseline`, so a
+  local hit means no console surface ever reaches the bucket. On a server that
+  backs up only to S3 there is no local anchor at all, so the card states that
+  once (`restore_needs_local`) instead of naming every table. Tables that
+  could not be graded at all are named in `unevaluable_tables` rather than
+  collapsing into a bare "could not be checked": on an index whose archives
+  cannot be attributed to one source, the ambiguity demotion (#1219) turns
+  every shadowed table's verdict into `unknown`, which is the right call for
+  the verdict and would have erased the inventory it applies to.
+- **The downloaded `views.sql` says when a newer backup lives somewhere it does
+  not read** (#1571). The file names ONE root and every state view resolves a
+  path under it, so merging the two locations would produce views that half of
+  its readers cannot open — the paths would not resolve. What silence cost was
+  quieter: with the newest snapshot aged out of local retention but still in
+  the bucket, the file pinned the older local one and read as current. The
+  header now names the newer snapshot, where it is, and the control that reads
+  it instead ("Works on another machine"). The route is named only when the
+  control moves the reader *toward* the newer snapshot: with the box already
+  ticked the newer snapshot is the local one, and unticking would hand a file
+  of local paths to someone who asked for one that travels, so the fact is
+  stated and the route withheld. A second location that will not answer costs
+  the download nothing and is disclosed in the header, since silence there is
+  indistinguishable from "it holds nothing newer" and the two lead to opposite
+  actions. Every operator-supplied path printed into the header is now escaped
+  for newlines: a registry backup path containing one ended the comment and
+  left the rest of the value on a line DuckDB would execute.
+
+### Changed
+- **The `events` view binds one Parquet footer per SCHEMA, not per archived
+  file** (#1535). `archive_state` gains `column_set`, the archived file's own
+  column set, and `bintrail views` and the console's DuckDB-schema download now
+  emit one `read_parquet` per distinct set — each with an explicit file list and
+  `union_by_name = false`, padding the columns a group lacks with `NULL` and
+  joining the groups with `UNION ALL BY NAME`. A view re-binds on every
+  statement, so what used to cost one footer read per archived file, forever
+  growing, now costs one per group; the S3 LIST the glob needed goes away with
+  it. Explicit paths still carry `hive_partitioning`, so `bintrail_id`,
+  `event_date` and `event_hour` are still synthesized and a filter on them
+  still prunes files.
+  Rotation records the set for archives it writes, and `restore-index` records
+  it for archives it re-registers. For archives already on disk, `bintrail
+  archive reconcile --repair` records it from the footer it already reads for
+  `row_count` — no extra file opens. **On an S3 archive that means `--deep
+  --repair`**: without `--deep` no remote footer is read, so the repair records
+  nothing. The first reconcile after upgrading reports drift on every partition
+  that predates the column; that is the backfill asking to be run, not a new
+  fault.
+  Until every registered partition has a recorded set AND its file is where the
+  registry says it is, the generated SQL keeps the globbed form and says so,
+  naming the command. The file list comes from the registry rather than a glob,
+  so grouping a partial one would leave those partitions out of the view rather
+  than merely slow to bind — and a listed file that is not there makes DuckDB
+  refuse the whole script, `events` and every state view with it.
+  **A grouped file does not follow the layout**: it names its archives
+  explicitly, so partitions archived after it was generated are not in it. The
+  header says which of the two forms the file uses; regenerate on the schedule
+  rotation archives on. `archive reconcile` now migrates `archive_state` before
+  reading it (that table only — its dry run is a cron drift monitor, and the
+  full migration also touches `binlog_events`).
+
 ## [0.76.0] - 2026-09-01
 
 ### Added
@@ -46,7 +255,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ## [0.75.0] - 2026-09-01
-
 ### Fixed
 - **A DuckDB schema file now refuses a dropped table up front, by name, before
   it creates any view.** When a table is dropped at the source it leaves the

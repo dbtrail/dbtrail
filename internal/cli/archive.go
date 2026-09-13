@@ -20,6 +20,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/archive"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
@@ -45,10 +46,20 @@ registry row each file implies, and diffs against archive_state:
   - rows without files   → reported; --prune deletes them (registry rows
                            only; data files are NEVER touched)
   - metadata drift       → --repair updates (file size always; row counts
-                           only under --deep, which reads Parquet footers)
+                           and the archived column set from Parquet footers,
+                           which a local scan reads anyway and an S3 scan
+                           reads only under --deep)
+
+The archived column set is what lets the DuckDB schema bintrail views writes
+read the layout one group per schema instead of opening every file's footer on
+every query (#1535). On an S3 archive that means --deep --repair: without
+--deep no remote footer is read, so the repair records nothing.
 
 The default is a DRY-RUN that prints the drift and exits non-zero when any
-exists; safe to run from cron as a drift monitor.
+exists; safe to run from cron as a drift monitor. Note the first run after
+upgrading to a build that records the column set reports drift on every
+partition that predates it — that is the backfill asking to be run, not a new
+fault.
 
 Safety rules:
   - a row is only a prune candidate when EVERY backend it references was
@@ -201,6 +212,23 @@ func runArchiveReconcile(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
+	// reconcile reads and writes archive_state columns this build knows about,
+	// so it migrates THAT TABLE first — the same rule the read paths adopted
+	// when query_text/query_hash were added (#699): a SELECT naming a column
+	// the index has not been migrated to is a hard 1054, not a degraded read.
+	// column_set (#1535) is the current instance: without this, `archive
+	// reconcile` against an index whose rotation is older than this binary
+	// fails outright, which is exactly the operator most likely to run it.
+	//
+	// EnsureArchiveStateSchema, NOT EnsureSchema: this command's dry run is
+	// documented as a read-only cron drift monitor, and the full migration also
+	// adds columns to binlog_events — the largest table in the deployment.
+	// Instant on a current MySQL, a rebuild on an older one, and either way not
+	// something a monitor should start on its own.
+	if err := indexer.EnsureArchiveStateSchema(db); err != nil {
+		return fmt.Errorf("migrate archive_state schema: %w", err)
+	}
+
 	rows, err := loadArchiveStateRows(ctx, db)
 	if err != nil {
 		return fmt.Errorf("load archive_state: %w", err)
@@ -270,10 +298,11 @@ func scanLocalArchive(root string) ([]archive.ScannedFile, error) {
 			PartitionName: part, BintrailID: id, Backend: archive.BackendLocal,
 			LocalPath: path, SizeBytes: info.Size(), LastModified: info.ModTime().UTC(),
 		}
-		if n, err := localParquetRowCount(path, info.Size()); err == nil {
+		if n, cols, err := localParquetFooter(path, info.Size()); err == nil {
 			f.RowCount = sql.NullInt64{Int64: n, Valid: true}
+			f.ColumnSet = cols
 		} else {
-			slog.Warn("reconcile: cannot read parquet footer, row_count left unset", "path", path, "error", err)
+			slog.Warn("reconcile: cannot read parquet footer, row_count and column set left unset", "path", path, "error", err)
 		}
 		out = append(out, f)
 		return nil
@@ -284,17 +313,25 @@ func scanLocalArchive(root string) ([]archive.ScannedFile, error) {
 	return out, nil
 }
 
-func localParquetRowCount(path string, size int64) (int64, error) {
+// localParquetFooter reads the row count AND the column set from one local
+// footer. One function, one open: the column set is the #1535 backfill, and
+// reading it in a second pass would double the file opens a repair costs on an
+// archive with thousands of partitions.
+func localParquetFooter(path string, size int64) (int64, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	defer f.Close()
 	pf, err := parquet.OpenFile(f, size)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return pf.NumRows(), nil
+	var names []string
+	for _, fld := range pf.Schema().Fields() {
+		names = append(names, fld.Name())
+	}
+	return pf.NumRows(), archive.ColumnSetOf(names), nil
 }
 
 // scanS3Archive lists the prefix for Hive-layout parquet objects. Size and
@@ -383,8 +420,9 @@ func scanS3Archive(ctx context.Context, s3URL, region string, deep bool) ([]arch
 					}
 					secretIssuedAt = time.Now()
 				}
-				if n, err := duckdbParquetRowCount(ctx, footerDB, "s3://"+bucket+"/"+*obj.Key); err == nil {
+				if n, cols, err := duckdbParquetFooter(ctx, footerDB, "s3://"+bucket+"/"+*obj.Key); err == nil {
 					f.RowCount = sql.NullInt64{Int64: n, Valid: true}
+					f.ColumnSet = cols
 				} else {
 					slog.Warn("reconcile: cannot read s3 parquet footer, row_count left unset",
 						"key", *obj.Key, "error", err)
@@ -442,23 +480,52 @@ func openS3FooterSession(ctx context.Context, region string) (*sql.DB, error) {
 	return db, nil
 }
 
-// duckdbParquetRowCount reads num_rows from a Parquet footer on the given
-// session (the ReadParquetMetadataAny pattern in internal/baseline). path is
-// an s3:// URI on the reconcile path; local paths work too (tests).
-func duckdbParquetRowCount(ctx context.Context, db *sql.DB, path string) (int64, error) {
+// duckdbParquetFooter reads num_rows and the column set from a Parquet footer
+// on the given session (the ReadParquetMetadataAny pattern in
+// internal/baseline). path is an s3:// URI on the reconcile path; local paths
+// work too (tests).
+//
+// Two statements, one remote footer: DuckDB caches the metadata it just read
+// for parquet_file_metadata, and parquet_schema over the same path answers
+// from it. Splitting them keeps each SELECT single-column, which is what the
+// scan-into-one-value shape here needs.
+//
+// parquet_schema returns the FULL schema tree, whose root is the message itself
+// and carries a child count; a LEAF carries NULL there, not 0 (verified against
+// the pinned DuckDB — filtering on `= 0` selects nothing at all and would
+// record every archive as having no columns). The archive layout is flat, so
+// "leaf" and "column" are the same set here.
+func duckdbParquetFooter(ctx context.Context, db *sql.DB, path string) (int64, string, error) {
 	safe := strings.ReplaceAll(path, "'", "''")
 	var n int64
 	if err := db.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT num_rows FROM parquet_file_metadata('%s')", safe)).Scan(&n); err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return n, nil
+	rows, err := db.QueryContext(ctx,
+		fmt.Sprintf("SELECT name FROM parquet_schema('%s') WHERE num_children IS NULL", safe))
+	if err != nil {
+		return 0, "", err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return 0, "", err
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, "", err
+	}
+	return n, archive.ColumnSetOf(names), nil
 }
 
 func loadArchiveStateRows(ctx context.Context, db *sql.DB) ([]archive.StateRow, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT partition_name, bintrail_id, local_path, file_size_bytes,
-		       row_count, s3_bucket, s3_key, s3_uploaded_at, archived_at
+		       row_count, s3_bucket, s3_key, s3_uploaded_at, column_set, archived_at
 		FROM archive_state
 		WHERE bintrail_id IS NOT NULL`)
 	if err != nil {
@@ -470,7 +537,7 @@ func loadArchiveStateRows(ctx context.Context, db *sql.DB) ([]archive.StateRow, 
 	for rows.Next() {
 		var r archive.StateRow
 		if err := rows.Scan(&r.PartitionName, &r.BintrailID, &r.LocalPath, &r.FileSizeBytes,
-			&r.RowCount, &r.S3Bucket, &r.S3Key, &r.S3UploadedAt, &r.ArchivedAt); err != nil {
+			&r.RowCount, &r.S3Bucket, &r.S3Key, &r.S3UploadedAt, &r.ColumnSet, &r.ArchivedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -484,6 +551,7 @@ func loadArchiveStateRows(ctx context.Context, db *sql.DB) ([]archive.StateRow, 
 var reconcileColumns = map[string]bool{
 	"local_path": true, "file_size_bytes": true, "row_count": true,
 	"s3_bucket": true, "s3_key": true, "s3_uploaded_at": true,
+	"column_set": true,
 }
 
 // executeReconcileActions applies insert/update actions under --repair and

@@ -7,7 +7,7 @@ import (
 )
 
 // TestUpConsoleConfig_backupSettingsDefaultsReachTheConsole pins the read path
-// of the Backups & snapshots settings page (#1582): daemon flags and env ->
+// of the Backup settings page (#1582): daemon flags and env ->
 // console.Config -> the read-only rows. The page's whole promise is that each
 // row shows what the daemon was TOLD, verbatim; deleting the
 // BackupSettingsDefaults block in upConsoleConfig would leave every row

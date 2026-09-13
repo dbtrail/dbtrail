@@ -534,6 +534,33 @@ duckdb -init views.sql lake.db
 The `state_*` views are the baseline, not the table right now; changes after
 it are in `events`, and joining the two is your query's job.
 
+**If the first row takes a long time to arrive**, the `events` view is reading
+your archives the slow way. DuckDB has to know the column set before it can run
+anything, and where bintrail cannot tell it, DuckDB works it out by opening
+every archived file. That happens once per statement, so the wait grows with
+the archive.
+
+bintrail records each archived file's column set when it writes it. Archives
+written before that was recorded do not have one, and one file without it is
+enough to put the whole view back on the slow path. Record them once:
+
+```sh
+bintrail archive reconcile --index-dsn "$IDX" --archive-dir /data/archives --repair
+```
+
+If your archives live in S3, add `--deep`. Without it the scan never opens a
+remote file, so the repair records nothing and the wait stays exactly as it is.
+
+Then regenerate `views.sql`. It reads each group of same-shaped files directly,
+which is a handful of reads instead of thousands. The file says which of the two
+it is doing, in a comment above the `events` view.
+
+**A fast file names its archives one by one, so it stops covering new ones.**
+That is the trade: the slow file follows the layout because it describes it with
+a pattern, and the fast one cannot. Regenerate `views.sql` on the schedule your
+rotation archives on. Nothing warns you — a query over the last few hours simply
+comes back empty for them — so the file says so in its own header.
+
 **A table that stays current.** `bintrail export iceberg` does that join once
 per run and writes the result as an Apache Iceberg table per source table,
 appending only what changed since its last run, under a local warehouse:

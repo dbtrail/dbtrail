@@ -12,6 +12,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/archive"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -228,5 +229,115 @@ func TestParseArchivePathRoundTrip(t *testing.T) {
 		if gotID != id || gotPart != indexer.PartitionName(h) {
 			t.Errorf("round-trip(%s): got (%s, %s), want (%s, %s)", p, gotID, gotPart, id, indexer.PartitionName(h))
 		}
+	}
+}
+
+// TestArchiveReconcileRecordsTheColumnSet is #1535's backfill end to end: a real
+// Parquet archive, a registry with no recorded column set, and a repair that
+// fills it from the footer it already reads — after which query.ArchiveGroups
+// can group the layout and the views bind one footer per group instead of one
+// per file.
+//
+// Against real MySQL and a real footer on purpose. The unit tests drive Diff
+// with a hand-set ColumnSet, so they would still pass if the scan never read
+// the names, if the value rotation records disagreed with the file, or if the
+// column could not be written to archive_state at all.
+func TestArchiveReconcileRecordsTheColumnSet(t *testing.T) {
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	ctx := context.Background()
+
+	h1 := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h1})
+	testutil.InsertEvent(t, db, "binlog.000001", 100, 200,
+		h1.Add(30*time.Minute).Format("2006-01-02 15:04:05"), nil,
+		"testdb", "orders", 1, "42", nil, nil, []byte(`{"id":42}`))
+
+	archiveDir := t.TempDir()
+	const bintrailID = "deadbeef-dead-beef-dead-beefdeadbeef"
+	part := indexer.PartitionName(h1)
+	outPath, err := rotation.HiveArchivePath(archiveDir, bintrailID, part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := archive.ArchivePartition(ctx, db, dbName, part, outPath, "zstd")
+	if err != nil {
+		t.Fatalf("ArchivePartition: %v", err)
+	}
+	// The writer reports the set it wrote, which is what rotation records.
+	if stats.Columns != archive.ColumnSet(archive.BinlogEventColumns) {
+		t.Fatalf("ArchivePartition reported column set %q, want the archive's own", stats.Columns)
+	}
+
+	// A registry row that predates the column: everything else recorded, no
+	// column set. This is every deployment on the day it upgrades.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO archive_state (partition_name, bintrail_id, local_path, file_size_bytes, row_count)
+		 VALUES (?, ?, ?, ?, ?)`, part, bintrailID, outPath, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := scanLocalArchive(archiveDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].ColumnSet != stats.Columns {
+		t.Fatalf("the local scan read column set %q from the real footer, want %q",
+			files[0].ColumnSet, stats.Columns)
+	}
+	rows, err := loadArchiveStateRows(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deep is FALSE: the backfill must not need it. A local footer read has
+	// already happened for row_count, so requiring --deep here would leave
+	// every plain reconcile unable to fix the thing it just measured.
+	rep := archive.Diff(files, rows, archive.DiffOptions{
+		ScannedLocal: true, PruneMinAge: time.Hour, Now: time.Now().UTC(),
+	})
+	if executed, errs := executeReconcileActions(ctx, db, rep.Actions, true, false); len(errs) != 0 || executed != 1 {
+		t.Fatalf("repair: executed=%d errs=%v", executed, errs)
+	}
+
+	var recorded sql.NullString
+	if err := db.QueryRowContext(ctx,
+		`SELECT column_set FROM archive_state WHERE partition_name = ? AND bintrail_id = ?`,
+		part, bintrailID).Scan(&recorded); err != nil {
+		t.Fatalf("read back column_set: %v", err)
+	}
+	if !recorded.Valid || recorded.String != stats.Columns {
+		t.Fatalf("column_set = %+v, want %q", recorded, stats.Columns)
+	}
+
+	// And the payoff: the registry can now group the layout.
+	groups, ungrouped, err := query.ArchiveGroups(ctx, db,
+		[]string{filepath.Join(archiveDir, "bintrail_id="+bintrailID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ungrouped != 0 {
+		t.Fatalf("ungrouped = %d after a repair; the views would still bind every footer", ungrouped)
+	}
+	if len(groups) != 1 || len(groups[0].Files) != 1 || groups[0].Files[0] != outPath {
+		t.Fatalf("groups = %+v, want the archived file under its own source", groups)
+	}
+
+	// A second reconcile finds nothing to do. Without this the repair reports
+	// drift forever and a cron never goes green again.
+	rows, err = loadArchiveStateRows(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep = archive.Diff(files, rows, archive.DiffOptions{
+		ScannedLocal: true, PruneMinAge: time.Hour, Now: time.Now().UTC(),
+	})
+	if rep.Err() != nil {
+		t.Errorf("a repaired registry still reports drift: %v", rep.Err())
 	}
 }

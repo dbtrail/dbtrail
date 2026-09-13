@@ -27,9 +27,9 @@ func TestBackupSchedule_Parse(t *testing.T) {
 			ParsedBackupSchedule{Every: 30 * time.Minute, At: 9*time.Hour + 15*time.Minute}, ""},
 		{"whitespace tolerated", BackupSchedule{Every: " 1d ", At: " 03:00 "},
 			ParsedBackupSchedule{Every: 24 * time.Hour, At: 3 * time.Hour}, ""},
-		{"floor", BackupSchedule{Every: "5m"}, ParsedBackupSchedule{}, "too often"},
-		{"exactly the floor is fine", BackupSchedule{Every: "15m"},
-			ParsedBackupSchedule{Every: 15 * time.Minute}, ""},
+		{"floor", BackupSchedule{Every: "4m"}, ParsedBackupSchedule{}, "too often"},
+		{"exactly the floor is fine", BackupSchedule{Every: "5m"},
+			ParsedBackupSchedule{Every: 5 * time.Minute}, ""},
 		{"no unit", BackupSchedule{Every: "6"}, ParsedBackupSchedule{}, "every:"},
 		{"seconds are not a unit", BackupSchedule{Every: "900s"}, ParsedBackupSchedule{}, "every:"},
 		{"empty every", BackupSchedule{}, ParsedBackupSchedule{}, "every:"},
@@ -406,9 +406,9 @@ func TestBaselineTriggerPrecheck_sharedWithTheSchedule(t *testing.T) {
 		t.Fatal("fixture is runnable; the test needs a refused entry")
 	}
 	got := CheckBackupSchedule(e, BackupSchedule{Every: "1d"}, BackupScheduleGates{LoopRunning: true, FullBackups: true})
-	// The button's hint "(Backups & snapshots page)" moves to the end of the combined
+	// The button's hint "(Backup settings page)" moves to the end of the combined
 	// reason and appears once, not once per producer.
-	const hint = " (Backups & snapshots page)"
+	const hint = " (Backup settings page)"
 	reason := RefusalReason(got)
 	if got == nil || !strings.HasPrefix(reason, strings.TrimSuffix(want.Error(), hint)) {
 		t.Fatalf("schedule reason %v does not start with the button's %v", got, want)

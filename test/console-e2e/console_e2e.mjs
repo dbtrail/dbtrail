@@ -4182,7 +4182,20 @@ try {
             const el = backupRefreshCard({ carry_forward_unchanged: on, enabled, scheduled, source,
               targets, skipped_s3_only: skipped });
             const t = el.innerText || el.textContent || "";
+            // What sits INSIDE the compact block. Detached, innerText is
+            // textContent, so `t` alone cannot tell visible from compact;
+            // the floor below needs the split (#1603).
+            const fine = Array.from(el.querySelectorAll("details.cn-fine")).map((d) => d.textContent).join("\n");
             rows.push({
+              // The floor: what must stay in plain view is not inside the
+              // compact block, and what moved there by design is.
+              hiddenAlarm: fine.includes("no server can be refreshed"),
+              hiddenDormant: fine.includes("Nothing uses this yet"),
+              // The COUNTED sentence, so the compact block's own "keeps
+              // backups only in S3" wording cannot false-positive.
+              hiddenSkip: fine.includes(skipped + " server(s) keep backups only in S3"),
+              compactSaving: fine.includes("only when the last backup is read from this machine"),
+              compactChose: fine.includes("You chose this here"),
               on, enabled, scheduled, source, targets, skipped,
               alarm: t.includes("no server can be refreshed"),
               // The count is read back, not just the sentence: a card that
@@ -4224,6 +4237,11 @@ try {
   const cardBad = cardStates.filter((r) =>
     // the value is on screen, and it is the value
     r.pill !== (r.on ? "On" : "Off")
+    // the compact block never swallows a fault or the dormancy note, and
+    // it does hold the qualifiers that moved there (#1603): a "compact" that
+    // hid the alarm would pass every presence check above
+    || r.hiddenAlarm || r.hiddenDormant || r.hiddenSkip
+    || !r.compactSaving || r.compactChose !== (r.source === "override")
     // dormant is said when nothing consumes the setting, and only then
     || r.dormant !== !r.enabled
     // the middle state is the --baseline-trigger daemon: live for restores,
@@ -4301,43 +4319,173 @@ try {
     ? ok("telemetry: the shown bytes are the daemon's sample_event verbatim")
     : bad("telemetry: the shown bytes are the daemon's sample_event verbatim", JSON.stringify({ shown: telSample.shown, fromApi: telSample.fromApi }));
 
-  // ── Scenario 17i — the Backups & snapshots settings page (#1582) ──
-  // The page's job is provenance. Driven LIVE against the watch daemon: nine
-  // daemon rows, each carrying the exact flag or variable name and a restart
-  // chip on the control (the split between applies-now and needs-restart,
-  // said on the row rather than in prose), plus the carry-forward card that
-  // moved here from the Backups page — one surface at a time, so the old
-  // page must no longer mount it.
+  // ── Scenario 17i — the Backup settings page (#1582, #1603) ──
+  // The page's job is provenance, and since #1603 it SHOWS the three kinds
+  // of setting instead of describing them: the disk-space switch and the
+  // per-server rows under "Change here", the daemon's own values under "Set
+  // when dbtrail starts" on a plain card with ONE restart chip, and two
+  // drawings where paragraphs used to be. Driven LIVE against the watch
+  // daemon. Guards, in the order the issue ranked them:
+  //   1. the name: nav item and page head both read Backup settings;
+  //   2. the kinds: two section labels, one card-level chip and zero per-row
+  //      chips, no "not set" anywhere (an empty value renders as the word
+  //      for what applies);
+  //   3. the budget and the drawings: visible text under a cap with the
+  //      fine print compact (closed <details>), the switch drawn as tiles,
+  //      and the location drawing held against the API: every server has
+  //      exactly one current case, stamped with the source the API returned.
+  // innerText is the budget's measuring stick, as on Connect: a closed
+  // <details> contributes only its summary line. The per-server panel is
+  // EXCLUDED from the count because it scales with the registry (this run
+  // seeds several servers), which would make the cap measure the fixture.
+  // The cap (1300) sits ~45% above the rewritten page (906 measured here,
+  // with the harness's daemon flags; the nine rows' labels and flag names
+  // are most of it) and ~25% below the pre-#1603 page (1719 measured by the
+  // same method with zero compact blocks, RED verified), so a copy edit
+  // breathes but a wall of text rings.
   await page.evaluate(() => navigate("backup-settings"));
   // Options are the THIRD waitForFunction parameter; an options object in
   // the arg slot is serialized to the predicate and silently discarded
   // (#1589), leaving the 30s default in force. Stated as 30s explicitly.
   await page.waitForFunction(() => location.pathname === "/backup-settings"
     && document.querySelectorAll(".bks-row").length >= 5, undefined, { timeout: 30000 });
+  const bksAPI = await page.evaluate(() => api("/api/backup-settings"));
   const bks = await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll(".bks-row")).map((r) => ({
-      chip: (r.querySelector(".bks-restart") || {}).textContent || "",
+    const view = document.querySelector(".view");
+    const rows = Array.from(view.querySelectorAll(".bks-row")).map((r) => ({
+      chips: r.querySelectorAll(".bks-restart").length,
       cli: (r.querySelector(".bks-cli") || {}).textContent || "",
       value: (r.querySelector(".bks-value") || {}).textContent || "",
     }));
+    const boot = view.querySelector(".card.bks-boot");
+    const perServer = view.querySelector(".ov-panel");
+    const fine = Array.from(view.querySelectorAll("details.cn-fine"));
+    const visible = view.innerText;
     return {
+      head: (view.querySelector(".page-title") || {}).textContent || "",
+      nav: (document.querySelector('.nav-item[data-route="backup-settings"] span:last-child') || {}).textContent || "",
+      docsLink: !!view.querySelector(".page-docs"),
       rows: rows.length,
-      allChipped: rows.every((r) => r.chip === "restart to change"),
+      rowChips: rows.reduce((n, r) => n + r.chips, 0),
+      cardChips: boot ? boot.querySelectorAll(".card-title .bks-restart").length : -1,
+      bootInGrid: !!view.querySelector(".cards .bks-boot"),
+      sections: Array.from(view.querySelectorAll(".bks-sect")).map((n) => n.textContent),
       allNamed: rows.every((r) => /^\(CLI: (--|BINTRAIL_)/.test(r.cli)),
-      // "not set" is the card's own fallback, so every row always has SOME
-      // text; the discriminating assertion is that the values the harness
-      // configured came through. run.sh starts watch with --baseline-dir,
-      // so the first row must carry a real path, not the fallback.
+      // run.sh starts watch with --baseline-dir, so the first row must carry
+      // a real path, not the word for an empty value.
       configuredValued: rows.length > 0 && rows[0].value.startsWith("/"),
-      refreshCardHere: !!document.querySelector(".view .bkr-head"),
+      notSet: /not set/i.test(visible),
+      emDash: /—/.test(visible),
+      visibleChars: visible.length - (perServer ? perServer.innerText.length : 0),
+      fine: fine.length,
+      fineOpen: fine.filter((d) => d.open).length,
+      refreshCardHere: !!view.querySelector(".bkr-head"),
+      cfTiles: view.querySelectorAll(".bkr-head ~ .cf-shape .cf-row").length,
+      legend: Array.from(view.querySelectorAll(".bl-legend .bl-case")).map((c) => c.dataset.source),
+      current: Array.from(view.querySelectorAll(".bks-server")).map((b) => ({
+        name: (b.querySelector(".bks-server-name") || {}).textContent || "",
+        cases: Array.from(b.querySelectorAll(".bl-case.is-current")).map((c) => c.dataset.source),
+      })),
+      moreLinks: Array.from(view.querySelectorAll("details.cn-fine a.bks-docs")).map((a) => a.href),
     };
   });
-  (bks.rows === 9 && bks.allChipped && bks.allNamed && bks.configuredValued)
-    ? ok("backup-settings: nine daemon rows, each named and chipped, the configured one valued")
-    : bad("backup-settings: nine daemon rows, each named and chipped, the configured one valued", JSON.stringify(bks));
-  (bks.refreshCardHere)
-    ? ok("backup-settings: the carry-forward card moved here")
-    : bad("backup-settings: the carry-forward card moved here", "no .bkr-head on /backup-settings");
+  // The measurement itself, so a cap can be re-derived from a run's log.
+  console.log("backup-settings: measured " + JSON.stringify({ visibleChars: bks.visibleChars, fine: bks.fine }));
+  (bks.head === "Backup settings" && bks.nav === "Backup settings" && bks.docsLink)
+    ? ok("backup-settings: named Backup settings in the nav and the head, with a Docs link")
+    : bad("backup-settings: named Backup settings in the nav and the head, with a Docs link", JSON.stringify({ head: bks.head, nav: bks.nav, docsLink: bks.docsLink }));
+  (bks.rows === 9 && bks.allNamed && bks.configuredValued && !bks.notSet)
+    ? ok("backup-settings: nine daemon rows, each named, the configured one valued, none reading not set")
+    : bad("backup-settings: nine daemon rows, each named, the configured one valued, none reading not set", JSON.stringify(bks));
+  (bks.cardChips === 1 && bks.rowChips === 0 && !bks.bootInGrid && bks.sections.length === 2)
+    ? ok("backup-settings: the three kinds are drawn apart: two sections, one card-level restart chip, the daemon card outside the tinted grid")
+    : bad("backup-settings: the three kinds are drawn apart: two sections, one card-level restart chip, the daemon card outside the tinted grid",
+        JSON.stringify({ cardChips: bks.cardChips, rowChips: bks.rowChips, bootInGrid: bks.bootInGrid, sections: bks.sections }));
+  (bks.visibleChars > 0 && bks.visibleChars < 1300 && bks.fine >= 2 && bks.fineOpen === 0 && !bks.emDash)
+    ? ok("backup-settings: visible text stays under budget with the fine print compact")
+    : bad("backup-settings: visible text stays under budget with the fine print compact",
+        JSON.stringify({ chars: bks.visibleChars, fine: bks.fine, open: bks.fineOpen, emDash: bks.emDash }));
+  (bks.refreshCardHere && bks.cfTiles === 2)
+    ? ok("backup-settings: the carry-forward card moved here and draws two backups")
+    : bad("backup-settings: the carry-forward card moved here and draws two backups", JSON.stringify({ here: bks.refreshCardHere, rows: bks.cfTiles }));
+  // The drawing cannot lie: the legend draws exactly the three verdicts
+  // (the Go side pins that same set to the handler's constants, so a fourth
+  // fails there first), and each seeded server's current case is the source
+  // the API returned for it, held against the response rather than a list
+  // typed here.
+  const apiSources = (bksAPI.servers || []).map((s) => ({ name: s.name || s.id, source: s.source }));
+  const legendSet = bks.legend.slice().sort().join(",");
+  const currentMatches = apiSources.length > 0 && apiSources.length === bks.current.length
+    && apiSources.every((s, i) => bks.current[i].name === s.name && bks.current[i].cases.length === 1 && bks.current[i].cases[0] === s.source);
+  (legendSet === "default,none,server" && currentMatches)
+    ? ok("backup-settings: the location drawing shows the three cases and marks each server's own as the API reports it")
+    : bad("backup-settings: the location drawing shows the three cases and marks each server's own as the API reports it",
+        JSON.stringify({ legend: bks.legend, api: apiSources, current: bks.current }));
+  (bks.moreLinks.length >= 3 && bks.moreLinks.every((h) => h.startsWith("https://www.dbtrail.com/docs/guides/")))
+    ? ok("backup-settings: the compact blocks link into the docs guides")
+    : bad("backup-settings: the compact blocks link into the docs guides", JSON.stringify(bks.moreLinks));
+  // The states this harness never puts on screen, rendered DETACHED through
+  // the real functions (#1603): the switch drawn ON (three kept, two written,
+  // the kept swatch in the key) and OFF (five written, no kept swatch), a
+  // refused daemon value (loud line under the row, outside the compact
+  // block, value marked), and the serve-mode page (no sections, no daemon
+  // card, its own sub line). Detached so nothing on the live page changes.
+  const bksStates = await page.evaluate(() => {
+    const shape = (on) => {
+      const s = cfShape(on);
+      const rows = Array.from(s.querySelectorAll(".cf-row")).map((r) => ({
+        tiles: r.querySelectorAll(".cf-tile").length, kept: r.querySelectorAll(".cf-tile.cf-kept").length }));
+      return { rows, key: (s.querySelector(".cf-key") || {}).textContent || "",
+        img: s.getAttribute("role") === "img" && (s.getAttribute("aria-label") || "").length > 20 };
+    };
+    const refused = backupDaemonCard([{ key: "lock_mode", value: "ftwrl", err: "bad mode; MySQL dumps are refused until it is fixed", cli: "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE", needs_restart: true }]);
+    const loud = Array.from(refused.querySelectorAll("p.form-msg.err"));
+    const view = document.querySelector(".view");
+    const keep = { monitor: capsCache.monitor, html: view.innerHTML };
+    capsCache.monitor = false;
+    let serve;
+    try {
+      buildBackupSettings({ daemon: [], servers: [{ id: "x", name: "x", source: "none" }], registry_read_only: false }, null);
+      serve = { sections: view.querySelectorAll(".bks-sect").length, boot: !!view.querySelector(".bks-boot"),
+        sub: (view.querySelector(".page-sub") || {}).textContent || "", current: (view.querySelector(".bl-case.is-current") || {}).dataset };
+    } finally { capsCache.monitor = keep.monitor; view.innerHTML = keep.html; }
+    return { on: shape(true), off: shape(false),
+      refused: { marked: !!refused.querySelector(".bks-value.bks-refused"), loud: loud.length === 1 && loud[0].textContent.includes("bad mode"),
+        outside: loud.length === 1 && !loud[0].closest("details") },
+      serve };
+  });
+  const cf = bksStates.on, cfo = bksStates.off;
+  (cf.rows.length === 2 && cf.rows.every((r) => r.tiles === 5) && cf.rows[0].kept === 0 && cf.rows[1].kept === 3 && /kept/.test(cf.key) && cf.img
+    && cfo.rows.length === 2 && cfo.rows.every((r) => r.tiles === 5) && cfo.rows[1].kept === 0 && !/kept/.test(cfo.key) && cfo.img)
+    ? ok("backup-settings: the switch drawn on keeps three of five and written two; off writes all five")
+    : bad("backup-settings: the switch drawn on keeps three of five and written two; off writes all five", JSON.stringify({ on: cf, off: cfo }));
+  (bksStates.refused.marked && bksStates.refused.loud && bksStates.refused.outside)
+    ? ok("backup-settings: a refused daemon value is marked and its reason stays in plain view")
+    : bad("backup-settings: a refused daemon value is marked and its reason stays in plain view", JSON.stringify(bksStates.refused));
+  (bksStates.serve.sections === 0 && !bksStates.serve.boot && bksStates.serve.sub === "Where each server keeps its backups." && bksStates.serve.current && bksStates.serve.current.source === "none")
+    ? ok("backup-settings: on serve the page is the per-server half alone, with its own sub line")
+    : bad("backup-settings: on serve the page is the per-server half alone, with its own sub line", JSON.stringify(bksStates.serve));
+  // Restored the live page above; re-render it so the next assertion reads
+  // the real thing, not the restored HTML with its listeners gone.
+  await page.evaluate(() => renderRoute());
+  await page.waitForFunction(() => document.querySelectorAll(".bks-server input[name=baseline_dir]").length >= 1, undefined, { timeout: 30000 });
+  // Save wakes up on a change and sleeps again when the field is put back;
+  // a Save that stays asleep is an operator who cannot set a backup location.
+  const dirtySave = await page.evaluate(async () => {
+    const box = document.querySelector(".bks-server");
+    const input = box.querySelector("input[name=baseline_dir]");
+    const save = Array.from(box.querySelectorAll("button")).find((b) => b.textContent === "Save");
+    const was = input.value;
+    const fire = () => input.dispatchEvent(new Event("input", { bubbles: true }));
+    const atRest = save.disabled;
+    input.value = was + "x"; fire();
+    const afterEdit = save.disabled;
+    input.value = was; fire();
+    return { atRest, afterEdit, afterRestore: save.disabled };
+  });
+  (dirtySave.atRest && !dirtySave.afterEdit && dirtySave.afterRestore)
+    ? ok("backup-settings: Save wakes on a change and sleeps again when the field is put back")
+    : bad("backup-settings: Save wakes on a change and sleeps again when the field is put back", JSON.stringify(dirtySave));
   // Settled on the LISTING panel, not a timer: the whole page builds in one
   // pass, so once the panel title is up, a mounted card would be too — a
   // sleep could pass this vacuously against a half-rendered page.

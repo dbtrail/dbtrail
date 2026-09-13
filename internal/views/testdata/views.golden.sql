@@ -83,7 +83,12 @@ CREATE OR REPLACE VIEW "state_shop_order_items_2" AS
 -- union_by_name is required, not cosmetic: archives written before a column
 -- existed simply lack it, and those files must read back with NULLs rather
 -- than failing the whole scan. A column absent from EVERY archived file is
--- still an error: drop it from the SELECT if you hit that on an old archive.
+-- still an error here: drop it from the SELECT if you hit that on an old
+-- archive. (The grouped form this file is not using pads it with NULL.)
+--
+-- COST: union_by_name makes DuckDB open one Parquet footer per archived file
+-- to unify the schema, and a view re-binds on every statement, so the wait
+-- before the first row grows with the archive.
 --
 -- SCOPE: these are the ARCHIVED events only. Partitions rotation has not
 -- archived yet exist solely in the index, so the most recent window is

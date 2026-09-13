@@ -189,7 +189,7 @@ type Config struct {
 	BaselineRefreshDefaults BaselineRefreshDefaults
 
 	// BackupSettingsDefaults carries the daemon-wide backup/snapshot flag and
-	// env values the Backups & snapshots settings page (#1582) reports
+	// env values the Backup settings page (#1582) reports
 	// read-only: what the process was told, verbatim, with the exact name to
 	// change each one under. Same role as RotationDefaults above.
 	BackupSettingsDefaults BackupSettingsDefaults

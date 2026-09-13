@@ -38,12 +38,21 @@ func newLiveViewsServer(t *testing.T, dsn string) (*Server, sqlmock.Sqlmock) {
 	return srv, mock
 }
 
-// expectArchiveSource queues the archive_state read buildViewsInput does, so
-// there is a layout to describe.
+// expectArchiveSource queues the TWO archive_state reads buildViewsInput does,
+// so there is a layout to describe: the per-source roots, then the per-column-
+// set groups (#1535).
+//
+// The group read answers with a NULL column_set on purpose. That is what a
+// registry looks like before `archive reconcile --repair` has recorded one, and
+// it keeps these tests on the globbed leg they were written against — the
+// grouped shape has its own tests, where the difference is the point.
 func expectArchiveSource(mock sqlmock.Sqlmock, id string) {
 	mock.ExpectQuery("FROM archive_state").WillReturnRows(
 		sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}).
 			AddRow(id, nil, "bkt", "events/bintrail_id="+id+"/f.parquet"))
+	mock.ExpectQuery("FROM archive_state").WillReturnRows(
+		sqlmock.NewRows([]string{"bintrail_id", "local_path", "s3_key", "column_set"}).
+			AddRow(id, nil, "events/bintrail_id="+id+"/f.parquet", nil))
 }
 
 // TestViewsAPI_includeLiveAddsTheHotLeg: the download can now carry the leg

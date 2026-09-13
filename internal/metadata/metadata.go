@@ -1182,6 +1182,96 @@ func TakeSnapshotExcludingInvalid(sourceDB, indexDB *sql.DB, schemas []string) (
 	return takeSnapshot(sourceDB, indexDB, schemas, true)
 }
 
+// TablesWithoutPrimaryKey reports the tables the snapshot would refuse (strict)
+// or exclude (degraded) for having no primary key, as "schema.table", sorted.
+//
+// Exported so `doctor` can warn about them BEFORE capture hits the refusal,
+// and deliberately implemented by calling the snapshot's own classifier rather
+// than asking information_schema a similar question. Two oracles for "has a
+// primary key" is how a preflight comes to disagree with the pipeline it is
+// predicting: bintrail's row identity is COLUMN_KEY == "PRI" (see ColumnMeta),
+// which MySQL also sets on a UNIQUE NOT NULL index with no declared PRIMARY
+// KEY, so a TABLE_CONSTRAINTS-shaped question warns about tables the product
+// keys perfectly well. The table-type filter has the same hazard in the other
+// direction (#1272, see invalidTables).
+func TablesWithoutPrimaryKey(sourceDB *sql.DB, schemas []string) ([]string, error) {
+	columns, err := fetchColumnRows(sourceDB, schemas)
+	if err != nil {
+		return nil, err
+	}
+	if len(columns) == 0 {
+		// No columns visible is not "every table has a primary key". The
+		// caller decides what to say; it must not be the reassuring answer.
+		return nil, ErrNoColumnsVisible
+	}
+	_, noPK, _, err := invalidTables(sourceDB, schemas, columns)
+	if err != nil {
+		return nil, err
+	}
+	return noPK, nil
+}
+
+// ErrNoColumnsVisible marks a source whose information_schema.COLUMNS answered
+// with nothing for the requested scope: an empty schema, a misspelled name, or
+// an account that cannot see it. Every one of those means the question was not
+// answered, which is different from a clean answer.
+var ErrNoColumnsVisible = errors.New("no columns are visible for the requested schemas")
+
+// fetchColumnRows reads the source's column metadata for the requested scope.
+// Shared by takeSnapshot and TablesWithoutPrimaryKey so the set of tables the
+// two reason about cannot drift apart.
+func fetchColumnRows(sourceDB *sql.DB, schemas []string) ([]columnRow, error) {
+	var (
+		query string
+		args  []any
+	)
+
+	if len(schemas) == 0 {
+		query = `
+			SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME,
+			       ORDINAL_POSITION, COLUMN_KEY, DATA_TYPE, COLUMN_TYPE,
+			       IS_NULLABLE, COLUMN_DEFAULT, GENERATION_EXPRESSION, CHARACTER_SET_NAME
+			FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql','sys')
+			ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION`
+	} else {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(schemas)), ",")
+		query = fmt.Sprintf(`
+			SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME,
+			       ORDINAL_POSITION, COLUMN_KEY, DATA_TYPE, COLUMN_TYPE,
+			       IS_NULLABLE, COLUMN_DEFAULT, GENERATION_EXPRESSION, CHARACTER_SET_NAME
+			FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA IN (%s)
+			ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION`, placeholders)
+		for _, s := range schemas {
+			args = append(args, s)
+		}
+	}
+
+	srcRows, err := sourceDB.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query information_schema.COLUMNS: %w", err)
+	}
+	defer srcRows.Close()
+
+	var columns []columnRow
+	for srcRows.Next() {
+		var c columnRow
+		if err := srcRows.Scan(
+			&c.schemaName, &c.tableName, &c.columnName,
+			&c.ordinalPosition, &c.columnKey, &c.dataType, &c.columnType,
+			&c.isNullable, &c.columnDefault, &c.generationExpression, &c.characterSet,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan column row: %w", err)
+		}
+		columns = append(columns, c)
+	}
+	if err := srcRows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate source columns: %w", err)
+	}
+	return columns, nil
+}
+
 func takeSnapshot(sourceDB, indexDB *sql.DB, schemas []string, excludeInvalid bool) (SnapshotStats, error) {
 	// ── 1. Query information_schema on the source server ─────────────────────
 	var (

@@ -382,16 +382,27 @@ func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFil
 	} else {
 		localPath = f.LocalPath
 	}
+	// column_set (#1535) when the scan read a footer — always on a local scan,
+	// never on the S3 one here (it is called with deep=false). NULL where it
+	// was not read, which the views generator treats as "cannot group" and
+	// falls back to the globbed bind for; recording it costs nothing extra and
+	// spares a restored index a `reconcile --repair` before its views are fast
+	// again.
+	var columnSet any
+	if f.ColumnSet != "" {
+		columnSet = f.ColumnSet
+	}
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO archive_state
-			(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, s3_uploaded_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, s3_uploaded_at, column_set)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			local_path = COALESCE(VALUES(local_path), local_path),
 			s3_bucket = COALESCE(VALUES(s3_bucket), s3_bucket),
 			s3_key = COALESCE(VALUES(s3_key), s3_key),
-			s3_uploaded_at = COALESCE(VALUES(s3_uploaded_at), s3_uploaded_at)`,
-		f.PartitionName, f.BintrailID, localPath, f.SizeBytes, rows, bucket, key, uploadedAt)
+			s3_uploaded_at = COALESCE(VALUES(s3_uploaded_at), s3_uploaded_at),
+			column_set = COALESCE(VALUES(column_set), column_set)`,
+		f.PartitionName, f.BintrailID, localPath, f.SizeBytes, rows, bucket, key, uploadedAt, columnSet)
 	return err
 }
 

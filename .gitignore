@@ -32,3 +32,6 @@ docker-compose.override.yml
 
 # Local scratch space for design notes — never published (#tidy-root).
 drafts/
+
+# tokenade editor artifacts
+*.tokenade-original

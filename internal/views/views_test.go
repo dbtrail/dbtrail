@@ -213,3 +213,48 @@ func TestArchiveGlob(t *testing.T) {
 		}
 	}
 }
+
+// A registry entry's baseline path and archive prefix are operator-supplied
+// and unvalidated for newlines. Printed raw into a `--` comment, one newline
+// ends the comment and leaves the rest of the value on its own line inside the
+// header, where DuckDB will try to EXECUTE it.
+//
+// Scoped to the header block on purpose. Later in the file the same values
+// appear inside single-quoted path literals, where a newline stays inside the
+// quotes and produces an unresolvable path rather than a statement -- flagging
+// those would make this fail for a reason it is not about.
+func TestGenerate_aNewlineInAPathCannotEscapeTheHeaderComment(t *testing.T) {
+	poison := "\nDROP TABLE shop.orders;\n"
+	in := Input{
+		GeneratedAt:          time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		ArchiveSources:       []string{"/data/archives/bintrail_id=abc" + poison},
+		BaselineSource:       "/backups" + poison,
+		BaselineSnapshot:     time.Date(2026, 4, 30, 9, 0, 0, 0, time.UTC),
+		Baselines:            []BaselineTable{{Schema: "shop", Table: "orders", Path: "/backups/shop/orders.parquet"}},
+		NewerElsewhere:       time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC),
+		NewerElsewhereSource: "s3://bucket/prefix" + poison,
+		// FollowPointer prints the root a SECOND time, in its own arm two lines
+		// below. Left at the zero value this test is blind to that print, which
+		// is how it survived the first pass.
+		Follow: FollowPointer,
+	}
+	// The unchecked-location arm is the SIBLING of NewerElsewhere in the same
+	// switch, so it never renders in the case above and needs its own input.
+	unchecked := in
+	unchecked.NewerElsewhere = time.Time{}
+	unchecked.NewerElsewhereSource = ""
+	unchecked.NewerElsewhereUnchecked = "s3://bucket/prefix" + poison
+
+	// The header is the leading run of comment lines, closed by a blank line.
+	for name, probe := range map[string]Input{"newer-elsewhere": in, "unchecked": unchecked} {
+		for _, line := range strings.Split(Generate(probe), "\n") {
+			if strings.TrimSpace(line) == "" {
+				break
+			}
+			if !strings.HasPrefix(strings.TrimSpace(line), "--") {
+				t.Errorf("[%s] a newline in an operator-supplied path broke out of the header "+
+					"comment, leaving this line for DuckDB to execute: %q", name, line)
+			}
+		}
+	}
+}

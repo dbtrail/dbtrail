@@ -202,6 +202,16 @@ func runViews(cmd *cobra.Command, _ []string) error {
 		// the connection and report it as an index fault.
 	}
 
+	// Grouping needs the registry, so it applies to operator-named roots too —
+	// but only when there is an index to ask. `--archive-dir` alone describes a
+	// layout with nothing to read column sets from, and the file then carries
+	// the globbed form, which is what it has always carried.
+	if vIndexDSN != "" {
+		if err := resolveArchiveGroups(cmd.Context(), vIndexDSN, &in); err != nil {
+			return err
+		}
+	}
+
 	if vIncludeLive {
 		li, err := resolveLiveIndex(cmd.Context(), vIndexDSN, vBintrailID)
 		if err != nil {
@@ -307,6 +317,52 @@ func discoverArchiveSourcesFrom(ctx context.Context, db *sql.DB) ([]string, erro
 		return nil, fmt.Errorf("resolve archive sources from archive_state: %w", err)
 	}
 	return sources, nil
+}
+
+// resolveArchiveGroups fills the per-column-set groups the events view is
+// emitted from (#1535), leaving them empty when the registry cannot fully
+// answer.
+//
+// EMPTY IS THE SAFE STATE and the reason this never fails the command: with no
+// groups the file keeps the globbed union_by_name leg, which reads every file
+// under the roots. Grouping reads the file list from archive_state instead, so
+// it is used only when every registered partition has a recorded column set —
+// otherwise the ungrouped ones would be missing from the view rather than
+// merely slow to bind.
+func resolveArchiveGroups(ctx context.Context, dsn string, in *views.Input) error {
+	db, err := config.Connect(dsn)
+	if err != nil {
+		return fmt.Errorf("connect to index DB: %w", err)
+	}
+	defer db.Close()
+	return resolveArchiveGroupsFrom(ctx, db, in)
+}
+
+// resolveArchiveGroupsFrom is the DB-taking half, split out so the all-or-
+// nothing rule is pinned by a test rather than by the comment above it. The
+// console half has its own; a revert on either surface would otherwise ship
+// unnoticed, exactly as with discoverArchiveSourcesFrom.
+func resolveArchiveGroupsFrom(ctx context.Context, db *sql.DB, in *views.Input) error {
+	groups, ungrouped, err := query.ArchiveGroups(ctx, db, in.ArchiveSources)
+	if err != nil {
+		return fmt.Errorf("read archived column sets from archive_state: %w", err)
+	}
+	in.UngroupedPartitions = ungrouped
+	if ungrouped == 0 {
+		in.ArchiveGroups = toViewGroups(groups)
+	}
+	return nil
+}
+
+// toViewGroups converts the registry's groups to the generator's own struct.
+// The two are separate types so internal/views links nothing that reaches a
+// database; this is the only place they meet.
+func toViewGroups(groups []query.ArchiveGroup) []views.ArchiveGroup {
+	out := make([]views.ArchiveGroup, len(groups))
+	for i, g := range groups {
+		out[i] = views.ArchiveGroup{Columns: g.Columns, Files: g.Files}
+	}
+	return out
 }
 
 // resolveBaselineViews picks the NEWEST discoverable snapshot and takes its

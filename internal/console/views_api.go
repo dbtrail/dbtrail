@@ -87,6 +87,33 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 	in.ArchiveSources, archiveErr = consoleArchiveSources(ctx, b.db, portable)
 	in.PortableRouting = portable
 	in.ArchiveDiscoveryFailed = archiveErr != nil
+	if archiveErr == nil {
+		// Per-column-set groups (#1535): whether a statement over the events
+		// view waits on EVERY archived file's footer or on one per schema.
+		// The console no longer runs this SQL itself (#1554 removed the panel),
+		// so the wait this saves is entirely the operator's, in whatever DuckDB
+		// they open the downloaded file in.
+		//
+		// A failure to read the column sets is NOT fatal and NOT reported as
+		// discovery failure: the sources resolved, so the file is honest with
+		// the globbed leg it has always carried. Only the speed is lost.
+		groups, ungrouped, err := query.ArchiveGroups(ctx, b.db, in.ArchiveSources)
+		if err != nil {
+			slog.Warn("console: could not read archived column sets; the events view keeps the globbed bind",
+				"error", err)
+		} else {
+			in.UngroupedPartitions = ungrouped
+			if ungrouped == 0 {
+				// Its own loop rather than a shared helper, deliberately: the
+				// CLI half has one too, and a test on each surface is what
+				// keeps one of them from silently losing the grouping.
+				in.ArchiveGroups = make([]views.ArchiveGroup, len(groups))
+				for i, g := range groups {
+					in.ArchiveGroups[i] = views.ArchiveGroup{Columns: g.Columns, Files: g.Files}
+				}
+			}
+		}
+	}
 	baseSrc := b.baselineSrc
 	if req.PortableBaseline && b.baselineFallbackSrc != "" {
 		// Read from the bundle, never from the request: the two locations this
@@ -103,6 +130,37 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		if len(files) > 0 {
 			newest := files[0].SnapshotTime // ListBaselines returns newest first
 			in.BaselineSnapshot = newest
+			// #1571: this file pins ONE location, so a newer snapshot in the
+			// other one is invisible to its reader. Not merged -- the state
+			// views resolve paths under a single root, and a mixed file
+			// resolves for nobody. Named instead, best-effort.
+			if other := otherBaselineSource(b, baseSrc); other != "" {
+				octx, cancel := context.WithTimeout(ctx, baselineListTimeout)
+				othersFiles, oerr := reconstruct.ListBaselines(octx, other)
+				cancel()
+				switch {
+				case oerr != nil:
+					slog.Warn("console: could not check the other backup location for a newer snapshot; the generated file says the check did not answer",
+						"source", other, "error", oerr)
+					// Carried into the file, not swallowed: a header that says
+					// nothing reads as "the other location holds nothing
+					// newer", and that reader stops looking.
+					in.NewerElsewhereUnchecked = other
+				case len(othersFiles) > 0 && othersFiles[0].SnapshotTime.After(newest):
+					in.NewerElsewhere = othersFiles[0].SnapshotTime
+					in.NewerElsewhereSource = other
+					// The route, not just the fact (#1551 gave the download a
+					// control for exactly this). Named only when the toggle
+					// moves the reader TOWARD the newer snapshot: with the box
+					// already ticked, the newer snapshot is the local one, and
+					// telling this reader to untick would hand a file of local
+					// paths to someone who asked for one that travels. The
+					// fact alone is right there; only the route is withheld.
+					if !req.PortableBaseline {
+						in.NewerElsewhereHowTo = `To read that one instead, tick "Works on another machine" and download again.`
+					}
+				}
+			}
 			for _, f := range files {
 				if !f.SnapshotTime.Equal(newest) {
 					continue
@@ -405,4 +463,17 @@ func (s *Server) viewsAvailable(r *http.Request, b *bundle) bool {
 	// sources is nil whenever err is set, so the err check is intent, not a
 	// distinct branch: the gate must never say yes on a failed read.
 	return err == nil && len(sources) > 0
+}
+
+// otherBaselineSource names the configured backup location that `picked` is
+// NOT. Empty when the server has only one, or when the two are the same
+// string. It exists so the generated views file can say that a newer
+// snapshot lives somewhere it does not read (#1571).
+func otherBaselineSource(b *bundle, picked string) string {
+	for _, src := range baselineSourcesOf(b) {
+		if src != "" && src != picked {
+			return src
+		}
+	}
+	return ""
 }

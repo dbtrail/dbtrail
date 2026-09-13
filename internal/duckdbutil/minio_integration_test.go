@@ -54,7 +54,7 @@ import (
 // Skips without
 // BINTRAIL_TEST_MINIO_ENDPOINT (CI starts the container; locally:
 // `docker run -d -p 9000:9000 -e MINIO_ROOT_USER=bintrail
-// -e MINIO_ROOT_PASSWORD=bintrail-it-secret minio/minio server /data`).
+// -e MINIO_ROOT_PASSWORD=bintrail-it-secret quay.io/minio/minio server /data`).
 func TestS3Compat_MinIO(t *testing.T) {
 	endpoint := os.Getenv("BINTRAIL_TEST_MINIO_ENDPOINT")
 	if endpoint == "" {

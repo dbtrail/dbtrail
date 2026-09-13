@@ -91,7 +91,10 @@ func TestBackupsPanelRendersEveryLocation(t *testing.T) {
 //
 // The restore card is the exception and stays on cur.baseline_dir on purpose:
 // its endpoint REFUSES the shared daemon store, because that fold would mix
-// servers. Same field, opposite meanings.
+// servers. Same field, opposite meanings. Where it READS is the other half
+// (#1541): this server's S3 backups when it has them, else that directory,
+// which is the scheduled update's rule and what the coverage card reports as
+// restore_reads, so the card narrows on cur.baseline_s3.
 func TestBackupJobCardsOfferOnlyWhatTheirJobCanRead(t *testing.T) {
 	raw, err := os.ReadFile("assets/app.js")
 	if err != nil {
@@ -108,7 +111,7 @@ func TestBackupJobCardsOfferOnlyWhatTheirJobCanRead(t *testing.T) {
 			"A server inheriting the daemon-wide backup location has none, so the lane either " +
 			"vanishes or defaults to a snapshot the build cannot read")
 	}
-	if !strings.Contains(exportCard, `backupSnapshotsFor(b, b.kind === "dir" ? "dir" : "s3")`) {
+	if !strings.Contains(exportCard, `const reads = b.kind === "dir" ? "dir" : "s3";`) || !strings.Contains(exportCard, `backupSnapshotsFor(b, reads)`) {
 		t.Error("the .sql lane does not choose its default from the location the build " +
 			"will actually read")
 	}
@@ -118,8 +121,9 @@ func TestBackupJobCardsOfferOnlyWhatTheirJobCanRead(t *testing.T) {
 		t.Error("the restore card no longer requires the server's OWN directory; its endpoint " +
 			"refuses the shared daemon store, so the card must not offer it")
 	}
-	if !strings.Contains(restoreCard, `backupSnapshotsFor(b, "dir")`) {
-		t.Error("the restore card does not narrow to the snapshots its fold can read")
+	if !strings.Contains(restoreCard, `const reads = cur.baseline_s3 ? "s3" : "dir";`) || !strings.Contains(restoreCard, `backupSnapshotsFor(b, reads)`) {
+		t.Error("the restore card does not narrow to the snapshots its fold can read: this server's " +
+			"S3 backups when it has them, else its directory (#1541)")
 	}
 
 	for _, fn := range []string{"function backupSQLLane(", "function backupRestoreCard("} {

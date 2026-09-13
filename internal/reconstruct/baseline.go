@@ -285,11 +285,19 @@ func NewestSnapshotTables(ctx context.Context, source string) ([]string, error) 
 // snapshot anchors on the older snapshot FindBaseline will pick, and must
 // fold that snapshot's tables.
 func SnapshotTablesAt(ctx context.Context, source string, at time.Time) ([]string, error) {
+	tables, _, err := SnapshotAt(ctx, source, at)
+	return tables, err
+}
+
+// SnapshotAt is SnapshotTablesAt plus the anchor it settled on: the snapshot
+// time of the newest discoverable snapshot at or before at (zero when none is
+// that old). A caller that is about to PUBLISH a snapshot named by at needs
+// the anchor to notice that one already exists at exactly that instant.
+func SnapshotAt(ctx context.Context, source string, at time.Time) (tables []string, anchor time.Time, err error) {
 	files, err := ListBaselines(ctx, source)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
-	var anchor time.Time
 	seen := map[string]bool{}
 	var out []string
 	for _, f := range files { // newest first
@@ -310,7 +318,7 @@ func SnapshotTablesAt(ctx context.Context, source string, at time.Time) ([]strin
 		out = append(out, entry)
 	}
 	sort.Strings(out)
-	return out, nil
+	return out, anchor, nil
 }
 
 // ListBaselines enumerates every baseline snapshot file under source (a local

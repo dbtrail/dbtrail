@@ -75,6 +75,11 @@ type mergedBaselines struct {
 	// Listed counts the locations that answered. Zero means nothing could be
 	// read, which is the only case that is still a hard failure.
 	Listed int
+	// InS3 marks every file an s3 location listed, whichever path Files kept
+	// for it. The coverage card needs it: Restore folds from the bucket on an
+	// S3-backed server, and a file present in both locations keeps its LOCAL
+	// path below, so the path alone cannot say whether the bucket has it.
+	InS3 map[baselineFileKey]bool
 }
 
 // listBaselinesMerged lists every configured location and returns their union.
@@ -100,7 +105,7 @@ type mergedBaselines struct {
 type baselineLister func(ctx context.Context, source string) ([]reconstruct.BaselineFile, error)
 
 func listBaselinesMerged(ctx context.Context, sources []string, list baselineLister) mergedBaselines {
-	out := mergedBaselines{Kinds: map[int64][]string{}}
+	out := mergedBaselines{Kinds: map[int64][]string{}, InS3: map[baselineFileKey]bool{}}
 	seen := map[baselineFileKey]int{}
 	kindSeen := map[int64]map[string]bool{}
 
@@ -139,6 +144,9 @@ func listBaselinesMerged(ctx context.Context, sources []string, list baselineLis
 			kindSeen[ts][kind] = true
 
 			k := keyOf(f)
+			if kind == "s3" {
+				out.InS3[k] = true
+			}
 			if idx, dup := seen[k]; dup {
 				// Keep the LOCAL path when the same file exists in both. The
 				// footer read downstream opens Path directly, and doing that
@@ -193,4 +201,28 @@ func baselineSourcesOf(b *bundle) []string {
 		return []string{b.baselineSrc}
 	}
 	return []string{b.baselineSrc, b.baselineFallbackSrc}
+}
+
+// bundleBaselineDir and bundleBaselineS3 split a bundle's resolved locations
+// back by kind, for the one caller that needs to classify them the way a
+// registry entry's own fields are classified (the coverage card's
+// restoreReadsFrom). The bundle keeps them as primary/fallback because that is
+// the order findBaseline consults them; which is which by KIND is what the
+// Restore rule needs.
+func bundleBaselineDir(b *bundle) string {
+	for _, src := range baselineSourcesOf(b) {
+		if baselineKindOf(src) == "dir" {
+			return src
+		}
+	}
+	return ""
+}
+
+func bundleBaselineS3(b *bundle) string {
+	for _, src := range baselineSourcesOf(b) {
+		if baselineKindOf(src) == "s3" {
+			return src
+		}
+	}
+	return ""
 }

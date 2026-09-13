@@ -210,9 +210,9 @@ and searching events:
    downloadable; its status names the previous build's directory until that
    removal succeeds. The This daemon page shows what is staged while it
    exists, previous builds that could not be removed included.
-8. **Settings** — **Backups & snapshots** (every parameter that shapes a
+8. **Settings** — **Backup settings** (every parameter that shapes a
    backup or a snapshot, with its provenance — see
-   [The Backups & snapshots settings page](#the-backups--snapshots-settings-page);
+   [The Backup settings page](#the-backup-settings-page);
    on `serve` only the editable per-server half renders, since this page is
    the one editor of a server's backup location), and under `watch` only:
    **Retention** (rotation policy and
@@ -448,7 +448,7 @@ panel that answers whether a restore would work, far below the fold.
   stack's `.env`, or run the printed command where bintrail is installed. See
   [Iceberg export](iceberg-export.md) and [docker.md](docker.md).
 - **Scheduled backups** (#1442) — a per-server timetable, set from this page:
-  every N minutes, hours or days (at least 15m), lined up on a UTC time of
+  every N minutes, hours or days (at least 5m), lined up on a UTC time of
   day. The operator picks WHEN; HOW each run is made is the daemon's decision
   per slot (`console.ChooseBackupMethod`), and the page says which one comes
   next and why: a server with no local backup directory gets a **full backup**
@@ -459,7 +459,11 @@ panel that answers whether a restore would work, far below the fold.
   the server's own local backup directory to write into). When the backups go
   to S3 that update reads its previous snapshot straight from the bucket and
   uploads its result back to the same place (#1539), so an S3 destination no
-  longer forces a nightly full read of the source. An update that
+  longer forces a nightly full read of the source; when the local directory
+  already holds that same newest snapshot, table for table, the update reads
+  the local copy instead, so with the disk-space setting on, unchanged tables
+  can keep their previous file (a hard link where the filesystem allows one, a
+  copy otherwise) (#1626); any other local state keeps the bucket as the source. An update that
   fails (a capture gap, a schema change, an internal error) falls back to a
   full backup at the same slot when the daemon may take one (the creation
   opt-in); otherwise that slot is recorded as skipped with both reasons.
@@ -511,7 +515,7 @@ The Backups summary card that used to point here from Storage is gone (#1543):
 Backups has its own entry in the same sidebar, and the pointer only existed
 because the page it pointed away from was a drawer.
 
-### The Backups & snapshots settings page
+### The Backup settings page
 
 One page owns every parameter that shapes a backup or a snapshot (#1582),
 because no two of them were configured the same way: some are daemon flags,
@@ -521,25 +525,37 @@ real and invisible. A server backed by the daemon's `--baseline-dir` showed
 an empty Backup dir field, indistinguishable from a server with no backup
 location at all.
 
-- **This daemon** — the nine daemon-wide values (`--baseline-dir`,
+The page shows the three kinds of setting instead of describing them (#1603).
+Two section labels split it: **Change here** and **Set when dbtrail starts**.
+
+- **Backups & disk space** (change here) — the carry-forward toggle, moved
+  here from the Backups page; it applies live. What it does is drawn: two
+  backups of five tables, the unchanged ones carried across as dashed tiles
+  and the changed ones written again, with one sentence under it. The
+  local-only rule, the S3 skip count and whose choice the value was sit in a
+  compact **More about disk space** block, with links into the docs guide.
+- **Per server** (change here) — each registry server's Backup dir, Backup
+  S3 and archive toggle, editable in place, with which location is in force
+  drawn rather than said: a three-row legend (own location, daemon default,
+  no location) with a tick or a cross per lane, and the server's own case
+  highlighted under its fields. The daemon default backs time-travel,
+  verification and `.sql` exports but backups, restores and the schedule
+  refuse, which is the cross on the middle row. The per-server fields left
+  the server edit form for this page (the form still round-trips them, so an
+  unrelated edit cannot wipe them). A stored schedule that cannot run as
+  things stand shows the refusal above the compact block; the schedule
+  itself and the full-backup note sit inside it. Save wakes up when a field
+  differs from what was loaded.
+- **Set at startup** — the nine daemon-wide values (`--baseline-dir`,
   `--baseline-s3`, `--baseline-retain`, `--baseline-refresh-interval`,
   `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE`, `BINTRAIL_CONSOLE_BASELINE_TRIGGER`,
   `BINTRAIL_CONSOLE_BASELINE_STAGING`, `--verify-interval`,
   `--verify-tables`), each shown verbatim with the exact flag or variable
-  name and a "restart to change" chip on the row. Read-only on purpose: the
-  console never edits the process's command line or environment.
-- **Backups & disk space** — the carry-forward toggle, moved here from the
-  Backups page; it applies live, which is why it is a card with buttons and
-  not a chipped row.
-- **Per server** — each registry server's Backup dir, Backup S3 and archive
-  toggle, editable in place, with a provenance line: its own location, the
-  daemon default it falls back to, or nothing. The per-server fields left the
-  server edit form for this page (the form still round-trips them, so an
-  unrelated edit cannot wipe them). A server whose scheduled backups can only
-  run as full reads (an S3 prefix and no local folder — folding writes files)
-  says so on its row, and a stored schedule that cannot run at all (say, its
-  backup location was cleared after the schedule was saved) shows the refusal
-  instead of the promise.
+  name, on a plain card with one **Restart to change** chip. An empty value
+  reads as the word for what applies (`none`, `off`, `all tables`, `temp
+  folder`), never as a fault. Read-only on purpose: the console never edits
+  the process's command line or environment. A value the daemon refused
+  (today: an invalid lock mode) stays loud under its row.
 
 The per-server half is the whole page on the standalone `serve` console: the
 daemon cards describe loops only `watch` runs, but the backup location is
@@ -568,7 +584,7 @@ Storage, which had become a drawer: seven cards from five unrelated concerns
 
 Two cards left the page entirely. **Backups & disk space** moved to the
 Backups page beside **Scheduled backups** (#1543), and from there to the
-**Backups & snapshots** settings page (#1582), which owns settings the way
+**Backup settings** page (#1582), which owns settings the way
 the Backups page owns the work — schedules, runs and downloads stay beside
 the data they report on.
 **Download a DuckDB schema** moved to the SQL page, from there to
@@ -1248,7 +1264,7 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `POST /api/auth/password` | Set (first time; requires static-token auth) or rotate (`current_password` verified) the console password. Revokes all sessions and returns a fresh one. |
 | `GET /api/status` | Index status (same payload as `bintrail status --format json`). For a session with restricted data access, the capture-health detail names only the tables that session may read; `tables_withheld` counts the rest and the counts stay whole. |
 | `GET /api/capacity` | The doctor's index disk-capacity check for the selected server: `{status, reason, retention: {known, retain, source, enabled}, measured, sample_hours, current_bytes, events_per_day, bytes_per_event, growth_bytes_per_day, projected_bytes, remaining_bytes, free_known, free_bytes, days_until_full}`. `status` is `pass`/`warn`/`fail`/`skip` as `bintrail doctor` grades it; `reason` names the branch (`ok`, `headroom_low`, `free_under_floor`, `growth_exceeds_free`, `no_retention`, `free_unknown`, `retention_unknown`, `not_enough_history`, `not_initialized`). Rate and projection fields are absent while `measured` is false; `free_bytes` is meaningful only when `free_known`; `retention.known` is false on the standalone console. `502` when the partition statistics cannot be read. |
-| `GET /api/coverage` | Live RPO summary: restorable delta window `[delta_from, delta_to]`, `lag_seconds`, `continuity`; with a baseline source, `full_table_status` (`ok`/`unknown`), `full_table_from` and `broken_tables` (profile-restricted sessions get the delta half only). |
+| `GET /api/coverage` | Live RPO summary: restorable delta window `[delta_from, delta_to]`, `lag_seconds`, `continuity`; with a baseline source, `full_table_status` (`ok`/`unknown`), `full_table_from`, `broken_tables`, `unreachable_tables`, `restore_reads`, `unevaluable_tables` and `restore_needs_local` (profile-restricted sessions get the delta half only). The full-table half is graded across **every** configured backup location, but `full_table_from` names only anchors the console's own Restore can fold from, and Restore folds from ONE location: the server's S3 backups when it has an S3 destination, else its local backup directory, the same rule the scheduled update follows ([#1541](https://github.com/dbtrail/dbtrail/issues/1541)); `restore_reads` (`s3`/`dir`) says which the card graded against; it is empty when the server has no local directory of its own, since Restore refuses such a server outright, and `inherited` when the server names no location of its own and the card graded the daemon-wide ones (a backup is there and Time-travel reads it, but Restore refuses that server as well, #1602). A restore at the exact second of a backup the bucket already holds is refused rather than overwriting it. A table whose only usable backup is in the other location is listed in `unreachable_tables` instead: not counted toward the window, and not in `broken_tables`, since the backup exists and Time-travel still reads it (Time-travel reads local first and falls back to the bucket). On a `dir` server that is a table backed up only in a daemon-wide bucket; on an `s3` server it is a table backed up only on this host, which the daemon-wide refresh interval and a failed upload both produce. On a `dir` server a table that DOES have a local copy stays in `broken_tables` even when a fresher one sits in the bucket: the S3 fallback fires only when the local location holds nothing at or before the instant, so a stale local copy shadows the fresh offsite one and no console surface reaches it; on an `s3` server the same shape is restorable, because Restore folds the fresh copy from the bucket, and the mirror shape is what stays `broken` there: a stale bucket copy with a fresh copy only on this host, since the fold anchors on the bucket copy and the fresh one was never sent up. On a server that backs up only to S3 there is no local directory to fold into, so `restore_needs_local` is true and `unreachable_tables` is left empty rather than naming every table. `unevaluable_tables` names the tables that forced `full_table_status: "unknown"`: their newest backup predates a floor whose archives cannot be attributed to one source, so it may or may not still be covered (see the ambiguity demotion in `bintrail status`). Too uncertain to call broken, and too specific to leave unnamed. `restore_needs_local` reports that no configured backup location is a local directory; note a server inheriting the daemon-wide `--baseline-dir` is not detected by it, and Restore refuses that server for a different reason (#1602). |
 | `GET /api/activity` | Window aggregate behind the Overview tiles: counts by event type, distinct tables touched, and a per-table breakdown. The window **is the live retention** — derived from the oldest live `binlog_events` partition, so the counts cover exactly what the live index still holds and read the live tier only (no archive scan, and nothing archived can fall inside the window by construction). Returns `{label, since, until, refreshed_at, total, inserts, updates, deletes, other, tables, top_tables, complete, notes}`. The aggregate is a **server-side materialization** refreshed when older than ~30 minutes (a stale copy is served immediately while one recompute runs in the background); `refreshed_at` is when it was computed, and the UI renders it on the tiles ("as of …") so a cached number is never presented as live. `complete: false` means the counts are knowably a floor (an index with a pathological table count trips the grouping cap) and `notes` says so; the UI marks the affected tiles "partial". RBAC deny rules are applied, so a denied table contributes to neither the counts nor `top_tables`, and each deny profile gets its own materialization. |
 | `GET /api/schemas` | Schemas known to the index: those observed in `binlog_events` **plus** those in the latest schema snapshot, so a schema whose partitions have all been rotated out to Parquet/S3 is still listed (the archives still answer `/api/events` and `/api/recover`). `schemas` is that full union; `snapshot_only` (when present) is the subset with no live events observed — the UI labels these "snapshot only" since queries against them may return nothing; `snapshot_unavailable: true` means the snapshot half was skipped because the schema resolver failed to load (check the server log), so archive-only schemas may be missing from the list. The snapshot half is skipped under `--no-archive` or an active `--profile`, where archived data is unreachable anyway. Note this answers *which schemas this index knows of*, not *which have data in a given window* — for that, see `bintrail status`'s continuity verdict. `?schema=<name>` → that schema's tables. |
 | `GET /api/events` | Event browser. Query params: `schema, table, pk, event_type, gtid, since, until, changed_column, order, limit, limit_per_pk` plus the `after`/`before` keyset cursors. `limit_per_pk` keeps only the latest N events per row, requires `pk`, and is **refused alongside a cursor** — it is a whole-result-set cap, so paging would re-anchor it to each page's remainder. `scope=live` serves the **live index only** and answers immediately (the UI's phase 1: rows in `binlog_events` are milliseconds away, an archive scan can take tens of seconds); the response then carries `scope: "live"` and `archives_pending` (never omitted — `false` is a meaningful answer) — `true` means registered archives were **not** read and a follow-up full read is required before the list is complete (the warning says so, loudly); `false` means no follow-up read would add anything: either nothing is registered, or the archives are excluded for this console/session (a session profile always announces itself; a --no-archive console announces only when the window has gaps to point at). Anything else in `scope` is a 400, never a silent full read. |

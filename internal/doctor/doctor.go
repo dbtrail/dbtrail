@@ -158,6 +158,7 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	report.add(checkServerIDCollision(ctx, sourceDB, sourceDSN))
 	report.add(checkFKCascades(sourceDB, schemas))
 	report.add(checkSchemaVisibility(ctx, sourceDB, schemas))
+	report.add(checkPrimaryKeys(sourceDB, schemas))
 
 	// ── Index MySQL checks (optional) ─────────────────────────────────────────
 	if indexDSN != "" {
@@ -815,6 +816,104 @@ func checkFKCascades(db *sql.DB, schemas []string) CheckResult {
 			"schemas — it WARNS and proceeds — so the FK graph is captured for cascade recovery.\n" +
 			"Plain `recover` still produces incomplete SQL for cascade-affected tables; use\n" +
 			"`recover-cascade` instead for those.",
+	}
+}
+
+// pkNameLimit caps how many table names a missing-primary-key finding prints
+// before it falls back to counting. A schema converted from MyISAM can have
+// hundreds, and a wall of names is read as noise where a count plus a query
+// is read as a task.
+const pkNameLimit = 10
+
+// PrimaryKeyCheckName is the check that reports tables with no primary key.
+// Exported so the daemons can hold it advisory the way they hold the capacity
+// check: nothing here gates the snapshot, so a failure to ASK the question
+// must not refuse boot on a source that is capturing fine.
+const PrimaryKeyCheckName = "Every table has a PRIMARY KEY"
+
+// checkPrimaryKeys reports tables the snapshot will not capture for lack of a
+// primary key.
+//
+// It calls metadata.TablesWithoutPrimaryKey, which is the snapshot's OWN
+// classifier, rather than asking information_schema a similar question. That
+// is the whole design: a preflight that predicts the pipeline with a second
+// implementation drifts from it, and both directions of drift were measured on
+// live servers before this landed. A TABLE_CONSTRAINTS-shaped question warns
+// about a UNIQUE NOT NULL table that MySQL marks COLUMN_KEY = 'PRI' and the
+// product keys perfectly well, and a TABLE_TYPE = 'BASE TABLE' filter misses
+// MariaDB's SYSTEM VERSIONED tables, which is the one shape where the data
+// loss is total (#1272).
+//
+// WARN, never FAIL, on every path including its own errors. Nothing downstream
+// consumes this answer: the snapshot re-derives it and refuses or excludes on
+// its own. Failing here would let a transient information_schema error stop
+// capture on a source that is otherwise healthy, which is the trade
+// checkIndexCapacity already refused to make.
+func checkPrimaryKeys(db *sql.DB, schemas []string) CheckResult {
+	tables, err := metadata.TablesWithoutPrimaryKey(db, schemas)
+	switch {
+	case errors.Is(err, metadata.ErrNoColumnsVisible):
+		// Not a pass. Schema visibility has its own check and has already
+		// spoken; this one simply has no evidence, and saying "every table
+		// has a primary key" on no evidence is the failure it exists to break.
+		return CheckResult{
+			Name:   PrimaryKeyCheckName,
+			Status: StatusSkip,
+			Detail: "no tables are visible in the requested scope, so this was not checked",
+		}
+	case err != nil:
+		return CheckResult{
+			Name:   PrimaryKeyCheckName,
+			Status: StatusWarn,
+			Detail: "could not be checked: " + err.Error(),
+			Remediation: "This check is advisory and does not block capture. The snapshot applies the\n" +
+				"same rule itself and will refuse or exclude a table with no primary key when\n" +
+				"it runs, so the gap is reported either way, later and less conveniently.\n\n" +
+				"The account needs to read information_schema.COLUMNS and\n" +
+				"information_schema.TABLES for the monitored schemas.",
+		}
+	case len(tables) == 0:
+		return CheckResult{Name: PrimaryKeyCheckName, Status: StatusPass}
+	}
+
+	names := tables
+	if len(names) > pkNameLimit {
+		names = names[:pkNameLimit]
+	}
+	detail := fmt.Sprintf("%d table(s) without a primary key: %s", len(tables), strings.Join(names, ", "))
+	if len(tables) > len(names) {
+		detail += fmt.Sprintf(", and %d more", len(tables)-len(names))
+	}
+	scope := ""
+	if len(schemas) > 0 {
+		scope = " --schemas " + strings.Join(schemas, ",")
+	}
+	return CheckResult{
+		Name:   PrimaryKeyCheckName,
+		Status: StatusWarn,
+		Detail: detail,
+		// States what HAPPENS, not what degrades. An earlier draft of this said
+		// the tables were captured but could not be addressed by row, which is
+		// wrong in the reassuring direction: the operator reads it as degraded
+		// recovery over data they still hold, and they hold none.
+		Remediation: "These tables are NOT captured. bintrail identifies a row by its primary key,\n" +
+			"and a table without one is refused rather than captured without identity:\n\n" +
+			"  - taking the first snapshot REFUSES outright, and the stream does not start\n" +
+			"  - a later snapshot, after a schema change, EXCLUDES them and skips their\n" +
+			"    row events, capturing every other table\n\n" +
+			"So this is not degraded recovery for those tables. There is no history for\n" +
+			"them at all, and none of it can be recovered later by adding the key: only\n" +
+			"changes made AFTER the key exists are captured.\n\n" +
+			"Give each table a primary key. Any existing column that is UNIQUE and\n" +
+			"NOT NULL will do:\n\n" +
+			"  ALTER TABLE <schema>.<table> ADD PRIMARY KEY (<unique, NOT NULL column>);\n\n" +
+			"When no column qualifies, add a surrogate key, which is what InnoDB is\n" +
+			"already keeping internally and invisibly:\n\n" +
+			"  ALTER TABLE <schema>.<table> ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;\n\n" +
+			"To list them all yourself, in the same scope this check used:\n\n" +
+			"  bintrail doctor --source-dsn <dsn>" + scope + "\n\n" +
+			"This check is advisory: it does not block anything. The snapshot is what\n" +
+			"refuses, when it runs.",
 	}
 }
 

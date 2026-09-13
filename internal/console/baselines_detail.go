@@ -208,13 +208,19 @@ func snapshotIncomplete(files []baselineSnapshotFile) bool {
 }
 
 // parseSnapshotAt parses the ?at= parameter: the listing's own `time` format
-// first, RFC3339 as a fallback. Both are UTC.
+// first, RFC3339 as a fallback. Both are UTC, and the result is truncated to
+// the second: Go's parser accepts a fractional second even when the layout
+// has none, and every consumer of this instant collapses to seconds anyway —
+// the snapshot directory name, the status and history stamps. Left in, a
+// fraction is a way past every "already exists at exactly" guard: the
+// snapshot at 10:00:00 is at-or-before 10:00:00.5, so the fold anchors on it,
+// names its output 10-00-00Z, and overwrites it in place (#1541).
 func parseSnapshotAt(raw string) (time.Time, bool) {
 	if t, err := time.ParseInLocation(consoleTSFormat, raw, time.UTC); err == nil {
-		return t, true
+		return t.Truncate(time.Second), true
 	}
 	if t, err := time.Parse(time.RFC3339, raw); err == nil {
-		return t.UTC(), true
+		return t.UTC().Truncate(time.Second), true
 	}
 	return time.Time{}, false
 }

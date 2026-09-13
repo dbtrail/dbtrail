@@ -159,6 +159,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 					}
 					var n int64
 					var minTS, maxTS time.Time
+					var columnSet string
 					skipped := false
 					if opts.Retry && fileExists(outPath) {
 						// A file existing at outPath with size>0 is NOT sufficient
@@ -194,7 +195,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 						if aerr != nil {
 							return Result{}, fmt.Errorf("archive partition %s: %w", name, aerr)
 						}
-						n, minTS, maxTS = st.Rows, st.MinEventTS, st.MaxEventTS
+						n, minTS, maxTS, columnSet = st.Rows, st.MinEventTS, st.MaxEventTS, st.Columns
 						// A partition whose CONTENT escapes its hour label holds
 						// backfilled events (#1037): old rows replayed after a
 						// capture stall land in the oldest live RANGE partition.
@@ -249,10 +250,15 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 						if !maxTS.IsZero() {
 							insertMax = maxTS.UTC()
 						}
+						// column_set: the file's own column set, straight from
+						// the writer that just produced it (#1535). Recorded
+						// here so the views generator can group the layout by
+						// schema instead of making DuckDB open every footer at
+						// bind time.
 						if _, err := db.ExecContext(ctx,
 							`INSERT INTO archive_state
-								(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, min_event_ts, max_event_ts)
-							VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+								(partition_name, bintrail_id, local_path, file_size_bytes, row_count, s3_bucket, s3_key, min_event_ts, max_event_ts, column_set)
+							VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 							ON DUPLICATE KEY UPDATE
 								local_path = VALUES(local_path),
 								file_size_bytes = VALUES(file_size_bytes),
@@ -260,8 +266,9 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 								s3_bucket = COALESCE(VALUES(s3_bucket), s3_bucket),
 								s3_key = COALESCE(VALUES(s3_key), s3_key),
 								min_event_ts = VALUES(min_event_ts),
-								max_event_ts = VALUES(max_event_ts)`,
-							name, opts.BintrailID, outPath, fileSize, n, insertBucket, insertKey, insertMin, insertMax,
+								max_event_ts = VALUES(max_event_ts),
+								column_set = VALUES(column_set)`,
+							name, opts.BintrailID, outPath, fileSize, n, insertBucket, insertKey, insertMin, insertMax, columnSet,
 						); err != nil {
 							return Result{}, fmt.Errorf("record archive state for %s: %w", name, err)
 						}

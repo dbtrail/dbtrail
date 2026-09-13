@@ -685,26 +685,7 @@ func EnsureSchema(db *sql.DB) error {
 	); err != nil {
 		return err
 	}
-	// min_event_ts/max_event_ts record the content-derived event_timestamp
-	// range of each archived partition (#1037). A backfill after a capture
-	// stall lands old events in the OLDEST live RANGE partition, so the
-	// Parquet file archived under that partition's hour label can hold rows
-	// from much earlier hours; any pruning that trusts the label alone
-	// (planner hour mapping, date-scoped S3 listings) then silently skips
-	// them. The planner reads these columns to expand archive coverage and to
-	// tell the archive fetcher which mislabeled files a time-scoped read must
-	// still open. NULL on rows written before this column existed (or by
-	// upload/reconcile, which do not scan row contents): the planner falls
-	// back to label-only pruning for those rows, exactly the pre-#1037
-	// behavior.
-	if err := ensureColumn(db, "archive_state", "min_event_ts",
-		`ALTER TABLE archive_state ADD COLUMN min_event_ts DATETIME DEFAULT NULL COMMENT 'MIN(event_timestamp) of the archived rows; NULL for archives written before #1037 or registered by upload/reconcile. Content-derived pruning: may precede the partition hour label when backfilled events landed in the partition' AFTER s3_uploaded_at`,
-	); err != nil {
-		return err
-	}
-	if err := ensureColumn(db, "archive_state", "max_event_ts",
-		`ALTER TABLE archive_state ADD COLUMN max_event_ts DATETIME DEFAULT NULL COMMENT 'MAX(event_timestamp) of the archived rows; see min_event_ts (#1037)' AFTER min_event_ts`,
-	); err != nil {
+	if err := EnsureArchiveStateSchema(db); err != nil {
 		return err
 	}
 	// gap_lost_at/_detail record an unfillable-gap auto-advance durably
@@ -940,4 +921,56 @@ func InsertSchemaChange(db *sql.DB, ev event.Event, snapshotID *int) error {
 		ev.Timestamp, ev.BinlogFile, ev.EndPos,
 		nullOrString(ev.GTID), ev.Schema, ev.Table, ev.DDLType, ev.DDLQuery, snapArg)
 	return err
+}
+
+
+// EnsureArchiveStateSchema adds the archive_state columns introduced after the
+// initial schema. Idempotent, like EnsureSchema, which calls it.
+//
+// Split out so a caller that needs ONLY this table does not migrate
+// binlog_events as a side effect (#1535). `archive reconcile` is that caller:
+// its dry run is documented as a read-only cron drift monitor, and adding a
+// column to the largest table in the deployment is not something such a run
+// should ever start.
+func EnsureArchiveStateSchema(db *sql.DB) error {
+	// min_event_ts/max_event_ts record the content-derived event_timestamp
+	// range of each archived partition (#1037). A backfill after a capture
+	// stall lands old events in the OLDEST live RANGE partition, so the
+	// Parquet file archived under that partition's hour label can hold rows
+	// from much earlier hours; any pruning that trusts the label alone
+	// (planner hour mapping, date-scoped S3 listings) then silently skips
+	// them. The planner reads these columns to expand archive coverage and to
+	// tell the archive fetcher which mislabeled files a time-scoped read must
+	// still open. NULL on rows written before this column existed (or by
+	// upload/reconcile, which do not scan row contents): the planner falls
+	// back to label-only pruning for those rows, exactly the pre-#1037
+	// behavior.
+	if err := ensureColumn(db, "archive_state", "min_event_ts",
+		`ALTER TABLE archive_state ADD COLUMN min_event_ts DATETIME DEFAULT NULL COMMENT 'MIN(event_timestamp) of the archived rows; NULL for archives written before #1037 or registered by upload/reconcile. Content-derived pruning: may precede the partition hour label when backfilled events landed in the partition' AFTER s3_uploaded_at`,
+	); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "archive_state", "max_event_ts",
+		`ALTER TABLE archive_state ADD COLUMN max_event_ts DATETIME DEFAULT NULL COMMENT 'MAX(event_timestamp) of the archived rows; see min_event_ts (#1037)' AFTER min_event_ts`,
+	); err != nil {
+		return err
+	}
+	// column_set is the archived file's own column set (#1535): lowercase names,
+	// sorted, comma-joined. It is a GROUPING KEY, not a description — the
+	// DuckDB views generator emits one read_parquet per distinct set so the
+	// bind opens one footer per SCHEMA instead of one per file, and
+	// union_by_name (which is what makes the bind O(files)) is no longer
+	// needed within a group.
+	//
+	// NULL on every row written before this column existed. Absent means
+	// UNKNOWN, never "the same as the others": a partition with no recorded
+	// set cannot join a group, and the generator falls back to the globbed
+	// union_by_name leg rather than silently leaving it out of the view.
+	// `archive reconcile --repair` records it from the footer, offline.
+	if err := ensureColumn(db, "archive_state", "column_set",
+		`ALTER TABLE archive_state ADD COLUMN column_set VARCHAR(4096) DEFAULT NULL COMMENT 'the archived Parquet file own column set: lowercase, sorted, comma-joined (#1535). NULL = unknown (written before this column, or registered without a footer read); archive reconcile --repair records it, needing --deep on an S3-only archive' AFTER max_event_ts`,
+	); err != nil {
+		return err
+	}
+	return nil
 }

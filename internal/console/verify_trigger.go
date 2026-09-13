@@ -276,7 +276,7 @@ func (s *Server) handleVerifyTrigger(w http.ResponseWriter, r *http.Request) {
 	// binlog_events and nothing else.
 	if mode != VerifyModeRecoverInputs && e.BaselineDir == "" && e.BaselineS3 == "" {
 		writeJSONError(w, http.StatusBadRequest,
-			"this server has no baseline location set up; set a baseline directory or S3 location first (Backups & snapshots page)")
+			"this server has no baseline location set up; set a baseline directory or S3 location first (Backup settings page)")
 		return
 	}
 	if mode == VerifyModeLiveSource && e.SourceDSN == "" {

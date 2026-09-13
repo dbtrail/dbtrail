@@ -55,17 +55,23 @@ const (
 	BackupMethodRefresh = "refresh"
 )
 
-// BackupScheduleMinEvery is the shortest interval a schedule accepts. A full
-// backup every few minutes is a footgun on the source, and a rebuild that
-// often is one on the disk of a server with no S3 destination, where nothing
-// uploads and so retention cannot reclaim it; the floor is generous enough for every real
-// cadence and low enough to try the feature out.
-const BackupScheduleMinEvery = 15 * time.Minute
+// BackupScheduleMinEvery is the shortest interval a schedule accepts: a
+// sanity bound a few ticks above the loop's one-minute clock, not a
+// protection. It was 15m until #1620, when a server that folds from S3
+// wanted the cadence of a reporting copy. The floor does NOT stop the two
+// costs that number once guarded against: a server with an S3 destination
+// and no local backup directory takes a FULL backup every slot, one with no
+// previous backup takes one on its first (ChooseBackupMethod), and a
+// local-only server keeps every snapshot it publishes. All are said out loud instead, at save and
+// at boot (warnBackupScheduleRate and its twin in backup_schedule_api.go)
+// and on the card as the 30-day count, so the operator reads the rate before
+// the source or the disk does.
+const BackupScheduleMinEvery = 5 * time.Minute
 
 // backupScheduleMinEveryText is the floor as an operator types it, for the
 // refusal message. Kept next to the constant so the two cannot drift apart
 // unnoticed (a test pins them equal).
-const backupScheduleMinEveryText = "15m"
+const backupScheduleMinEveryText = "5m"
 
 // BackupSchedule is the per-server schedule as stored in the registry. The
 // fields hold the operator-typed strings so they round-trip exactly; Parse
@@ -266,11 +272,16 @@ func FullBackupPossible(e ServerEntry, gates BackupScheduleGates) error {
 // and ListBaselines both dispatch on the s3:// prefix, so the remote source
 // needs no separate code path here.
 //
-// Note this is NOT the source the console's own listing uses: newBundleDerived
+// Note this is NOT how time-travel resolves a baseline: bundle.findBaseline
 // prefers the local directory and treats the bucket only as a per-table
-// fallback, so on this shape the Backups page can show nothing while the fold
-// correctly finds the previous snapshot. That divergence predates #1539 and is
-// tracked separately; do not "fix" it by making the fold read local.
+// fallback (#766), so on a server with both, a table whose local copy is
+// stale is read stale by time-travel and fresh by the fold. The Backups
+// listing merges both locations (#1571) and the point-in-time restore reads
+// this same source (#1541); do not "fix" the divergence by making the fold
+// read local. The daemon's refresh loop DOES read the local copy for one run
+// when that copy is the bucket's newest snapshot, table for table
+// (consoleapp resolveFoldSource, #1626): never a stale copy, only the same
+// one, so unchanged tables can be carried forward by hard link.
 //
 // The OUTPUT stays local whatever this returns: the fold writes Parquet to a
 // filesystem, and the upload is a separate step afterwards.
@@ -318,7 +329,7 @@ func CheckBackupSchedule(e ServerEntry, sched BackupSchedule, gates BackupSchedu
 		return nil
 	}
 	if rebuildErr := rebuildPossible(e); rebuildErr != nil {
-		return notRunnable(strings.TrimSuffix(fullErr.Error(), " (Backups & snapshots page)") + "; " + rebuildErr.Error() + " (Backups & snapshots page)")
+		return notRunnable(strings.TrimSuffix(fullErr.Error(), " (Backup settings page)") + "; " + rebuildErr.Error() + " (Backup settings page)")
 	}
 	// Only a rebuild is possible. That is a runnable schedule (it is what
 	// --baseline-refresh-interval does), but only once there is a backup to

@@ -124,7 +124,7 @@ func (s *Server) handleSQLExportTrigger(w http.ResponseWriter, r *http.Request) 
 	}
 	if src == "" {
 		writeJSONError(w, http.StatusBadRequest,
-			"this server has no backup location set up; set a backup directory or S3 location first (Backups & snapshots page)")
+			"this server has no backup location set up; set a backup directory or S3 location first (Backup settings page)")
 		return
 	}
 	var body struct {

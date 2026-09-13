@@ -2917,3 +2917,65 @@ button { font-family: inherit; }
 .bks-server { padding: 14px 0; border-bottom: 1px dotted var(--line); }
 .bks-server:last-child { border-bottom: none; padding-bottom: 4px; }
 .bks-server-name { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+
+/* Backup settings (#1603): three kinds of setting, told apart by layout.
+   A section label opens each group; the disk-space card keeps the tinted
+   grid ("change here"), and the daemon card sits outside it, plain, with
+   one restart chip at card level ("set at startup"). */
+.bks-sect {
+  font-family: var(--f-mono); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3);
+  margin: 22px 0 10px;
+}
+.page-head + .bks-sect { margin-top: 0; }
+.bks-boot { margin-bottom: 18px; }
+.bks-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* An empty value renders as the word for what applies, in the muted style: a
+   value, not a gap. A refused value shows the fallback the daemon fell to,
+   in the fault colour, with the loud line under the row saying why; not
+   struck through, because the fallback is a real value, just not in force. */
+.bks-value.bks-default { color: var(--ink-3); font-weight: 400; }
+.bks-value.bks-refused { color: var(--delete); }
+.bks-more { margin-bottom: 4px; }
+.bks-docs { color: var(--ink-2); text-decoration: underline; text-underline-offset: 2px; }
+.bks-docs:hover { color: var(--accent); }
+.bks-server .cn-fine { margin-top: 6px; }
+.bks-server .stg-cardfoot { margin-top: 10px; }
+
+/* cfShape: the disk-space switch drawn. Two rows of five tiles, one backup
+   above the next. A kept tile is dashed in --line on --surface (the same
+   file, carried across); a written tile is solid --accent, the button's own
+   hue, so the control and the drawing say the same thing. With the switch
+   off every tile in the second row is solid accent: written again, all of
+   them. The first row stays neutral because it is the constant. */
+.cf-shape { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 12px; max-width: 320px; }
+.cf-row { display: flex; align-items: center; gap: 4px; }
+.cf-tile { width: 22px; height: 22px; border-radius: 5px; background: var(--ink-4); flex: none; box-sizing: border-box; }
+.cf-tile.cf-kept { background: var(--surface); border: 2px dashed var(--ink-4); }
+.cf-tile.cf-new { background: var(--accent); }
+.cf-key { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink-3); }
+.cf-key .cf-tile { width: 12px; height: 12px; border-radius: 3px; margin-right: 2px; }
+.cf-key .cf-tile.cf-kept { border-width: 1.5px; }
+.cf-key span + .cf-tile { margin-left: 10px; }
+
+/* blCase: which backup location is in force, one row per case. The legend
+   draws all three in --ink-3; the server's own row is highlighted with the
+   Backups page's latest-row idiom (violet tint + line). Marks are glyphs, so
+   the meaning never rides on colour alone. */
+.bl-legend { display: flex; flex-direction: column; gap: 2px; margin: 0 0 14px; }
+.bl-case {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px;
+  padding: 5px 8px; border-radius: var(--radius-sm); font-size: 12.5px; color: var(--ink-3);
+  border: 1px solid transparent;
+}
+.bl-name { min-width: 118px; font-weight: 600; color: var(--ink-2); }
+.bl-lane { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.bl-mark { font-weight: 700; }
+.bl-lane.on .bl-mark { color: var(--insert); }
+.bl-lane.no .bl-mark { color: var(--delete); }
+.bl-lane.no { color: var(--ink-3); }
+.bks-server .bl-case { margin: 10px 0 6px; }
+.bl-case.bl-unknown .bl-name { color: var(--delete); }
+.bl-case.is-current { background: var(--violet-tint); border-color: var(--violet-line); color: var(--ink-2); }
+.bl-case.is-current .bl-name { color: var(--ink); }
+.bl-case.is-current .bl-lane.no { color: var(--ink-2); }

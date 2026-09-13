@@ -72,8 +72,8 @@ type backupSettingsServerDTO struct {
 	NoArchive   bool   `json:"no_archive"`
 	ResolvedDir string `json:"resolved_dir"`
 	ResolvedS3  string `json:"resolved_s3"`
-	// Source is "server" when the entry names its own location, "default"
-	// when the daemon's --baseline-dir/--baseline-s3 back it, "none" when
+	// Source is one of the backupSource* verdicts: the entry names its own
+	// location, the daemon's --baseline-dir/--baseline-s3 back it, or
 	// neither exists.
 	Source string `json:"source"`
 	// The schedule as CONFIGURED (its own endpoints own editing it; the
@@ -90,6 +90,18 @@ type backupSettingsServerDTO struct {
 	// so clearing a dir here left a row promising runs that will all refuse.
 	ScheduleRefusal string `json:"schedule_refusal,omitempty"`
 }
+
+// The three provenance verdicts a server's backup location can have. The
+// page DRAWS them (BACKUP_SOURCE_CASES in app.js) rather than describing
+// them, and a drawing cannot be allowed to lie: assets_backupsettings_test.go
+// pins the JS keys to exactly these values AND to the number of places
+// below that assign one, so a fourth verdict added on either side fails on
+// the desk instead of leaving a picture that still shows three.
+const (
+	backupSourceServer  = "server"
+	backupSourceDefault = "default"
+	backupSourceNone    = "none"
+)
 
 type backupSettingsDTO struct {
 	Daemon           []backupSettingRow        `json:"daemon"`
@@ -108,7 +120,7 @@ func lockModeRowErr(err string) string {
 }
 
 // handleBackupSettingsGet serves GET /api/backup-settings: the consolidated
-// read model for the Backups & snapshots settings page.
+// read model for the Backup settings page.
 func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request) {
 	d := s.backupSettingsDefaults
 	on := func(b bool) *bool { return &b }
@@ -152,11 +164,11 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	}
 	switch {
 	case e.BaselineDir != "" || e.BaselineS3 != "":
-		dto.Source = "server"
+		dto.Source = backupSourceServer
 	case resolved.BaselineDir != "" || resolved.BaselineS3 != "":
-		dto.Source = "default"
+		dto.Source = backupSourceDefault
 	default:
-		dto.Source = "none"
+		dto.Source = backupSourceNone
 	}
 	if e.BackupSchedule != nil {
 		dto.ScheduleEvery = e.BackupSchedule.Every

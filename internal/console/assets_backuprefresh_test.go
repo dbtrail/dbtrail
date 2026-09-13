@@ -233,7 +233,7 @@ func TestBackupRefreshWireNamesMatchTheFrontend(t *testing.T) {
 // an operator cannot reach is the same as a setting that does not exist.
 //
 // The card moved from Storage to Backups (#1543) and from there to the
-// Backups & snapshots settings page (#1582), which owns settings the way the
+// Backup settings page (#1582), which owns settings the way the
 // Backups page owns the work. The guard follows the card rather than the
 // page, and it checks BOTH halves of a move so it cannot be half-done: the
 // new page mounts and feeds it, and the old page no longer does — a control
@@ -243,7 +243,7 @@ func TestSettingsPageMountsTheRefreshCard(t *testing.T) {
 	js := readAsset(t, "app.js")
 	body := jsFunctionBody(t, js, "renderBackupSettings") + jsFunctionBody(t, js, "buildBackupSettings")
 	if !strings.Contains(body, "backupRefreshCard(") {
-		t.Error("the Backups & snapshots settings page no longer mounts backupRefreshCard, so the reuse setting has no UI at all")
+		t.Error("the Backup settings page no longer mounts backupRefreshCard, so the reuse setting has no UI at all")
 	}
 	if !strings.Contains(body, `api("/api/baseline-refresh")`) {
 		t.Error("the settings page does not fetch /api/baseline-refresh, so the card can only ever render its error branch")

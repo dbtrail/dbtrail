@@ -116,7 +116,7 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 		return errors.New("this server has no source configured; set the source connection first")
 	}
 	if e.BaselineDir == "" && e.BaselineS3 == "" {
-		return errors.New("this server has no baseline location set up; set a baseline directory or S3 location first (Backups & snapshots page)")
+		return errors.New("this server has no baseline location set up; set a baseline directory or S3 location first (Backup settings page)")
 	}
 	if e.IsPostgres() && (e.SourceSlot == "" || e.SourcePublication == "") {
 		return errors.New("this PostgreSQL server has no replication slot/publication configured; set them first (Edit → Source)")
@@ -142,11 +142,21 @@ type BaselineRestorer interface {
 
 // BaselineRestoreRequest identifies the server and the instant to restore to.
 type BaselineRestoreRequest struct {
-	ServerID    string
-	ServerName  string
-	IndexDSN    string
+	ServerID   string
+	ServerName string
+	IndexDSN   string
+	// BaselineDir is the server's own local directory: where the fold WRITES,
+	// and where it reads the backup to fold from when BaselineS3 is empty.
 	BaselineDir string
-	At          time.Time
+	// BaselineS3 is the server's configured S3 destination, or empty. When
+	// set, the backup to fold from is looked for in the bucket (the
+	// BaselineFoldSource rule) and the finished snapshot is uploaded there, so the restore
+	// behaves like the scheduled update on the same server (#1541). Before it
+	// was carried, the restore listed the local directory alone, which on an
+	// S3-backed server holds only what this daemon folded since it started,
+	// and refused with "no backup exists" while the bucket held dozens.
+	BaselineS3 string
+	At         time.Time
 	// CarryForwardUnchanged is the effective setting the console resolved for
 	// this restore. A restore is the same fold the refresh performs, into the
 	// same store, so it honours the same operator choice; leaving it out is
@@ -290,19 +300,19 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e.BaselineDir == "" {
-		// Same constraint as the periodic refresh: the fold reads the previous
-		// snapshot and writes the new one on disk, so it needs the SERVER'S OWN
-		// local directory. The daemon-level --baseline-dir is deliberately not
+		// Same constraint as the periodic refresh: the fold WRITES the new
+		// snapshot on disk (it reads the previous one from the bucket when the
+		// server has one, #1541), so it needs the SERVER'S OWN local directory. The daemon-level --baseline-dir is deliberately not
 		// a fallback here: it is a shared store, and folding this server's
 		// index onto another server's snapshots would publish a backup that
 		// belongs to neither.
 		if e.BaselineS3 != "" {
 			writeJSONError(w, http.StatusBadRequest,
-				"this server keeps its backups only in S3; point-in-time restore needs a local backup directory (Backups & snapshots page)")
+				"this server keeps its backups only in S3; point-in-time restore needs a local backup directory (Backup settings page)")
 			return
 		}
 		writeJSONError(w, http.StatusBadRequest,
-			"this server has no backup directory of its own; set one first (Backups & snapshots page)")
+			"this server has no backup directory of its own; set one first (Backup settings page)")
 		return
 	}
 	var body struct {
@@ -329,6 +339,15 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		// on purpose (reconstruct's leftover rule), and the listing hides it,
 		// so "use that backup" would name something the operator cannot see.
 		if baseline.SnapshotComplete(snapDir) {
+			// The fold WRITES here whatever it reads from, so this is a
+			// collision either way; "use that backup" is only advice when the
+			// restore would read it, which on an S3-backed server it does not
+			// (a local-only snapshot is the leftover of a failed upload).
+			if e.BaselineS3 != "" {
+				writeJSONError(w, http.StatusConflict,
+					"a backup already exists on this host at exactly "+at.Format(consoleTSFormat)+"; pick another second")
+				return
+			}
 			writeJSONError(w, http.StatusConflict,
 				"a backup already exists at exactly "+at.Format(consoleTSFormat)+"; pick another second, or use that backup")
 			return
@@ -360,10 +379,14 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := BaselineRestoreRequest{
-		ServerID:              e.ID,
-		ServerName:            e.Name,
-		IndexDSN:              e.DSN,
-		BaselineDir:           e.BaselineDir,
+		ServerID:    e.ID,
+		ServerName:  e.Name,
+		IndexDSN:    e.DSN,
+		BaselineDir: e.BaselineDir,
+		// The server's OWN destination, as the scheduled update carries it
+		// (baseline_schedule_loop.go). Not the daemon-wide --baseline-s3: that
+		// is a shared store, for the reason BaselineDir above is not defaulted.
+		BaselineS3:            e.BaselineS3,
 		At:                    at,
 		CarryForwardUnchanged: s.effectiveBaselineRefresh().CarryForwardUnchanged,
 	}
