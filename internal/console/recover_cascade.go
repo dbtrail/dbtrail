@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/cascade"
@@ -505,7 +506,10 @@ func (s *Server) cascadeParentDetect(b *bundle, schema, table string) (onDelete,
 // the other way would be a silently dangling child FK.
 func rowsContainCascadeTriggerOn(rows []query.ResultRow, table string, onDelete, onUpdate bool) bool {
 	for _, r := range rows {
-		if r.TableName != table {
+		// Case-insensitive like the fetch that produced these rows (#1616):
+		// the index matches table_name under its collation, and a gate that
+		// compared bytes let "Orders" fetch the rows and skip the synthesis.
+		if !strings.EqualFold(r.TableName, table) {
 			continue
 		}
 		if onDelete && r.EventType == event.EventDelete {

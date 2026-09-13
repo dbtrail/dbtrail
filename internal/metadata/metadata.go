@@ -1946,12 +1946,13 @@ func ValidateNoFKCascades(db *sql.DB, schemas []string) error {
 // FKCascadeEdge describes a CASCADE foreign-key edge recorded in the index's
 // fk_constraints table (latest snapshot).
 type FKCascadeEdge struct {
-	Schema          string
-	Table           string
-	Column          string
-	ReferencedTable string
-	DeleteRule      string
-	UpdateRule      string
+	Schema           string
+	Table            string
+	Column           string
+	ReferencedSchema string // the parent's schema; differs from Schema on a cross-schema FK (#833)
+	ReferencedTable  string
+	DeleteRule       string
+	UpdateRule       string
 }
 
 // CascadeConstraintsInIndex returns the CASCADE foreign-key edges recorded in
@@ -1976,7 +1977,7 @@ func CascadeConstraintsInIndex(indexDB *sql.DB, schemas []string) ([]FKCascadeEd
 		return nil, nil
 	}
 
-	query := `SELECT schema_name, table_name, column_name, referenced_table_name, delete_rule, update_rule
+	query := `SELECT schema_name, table_name, column_name, referenced_schema_name, referenced_table_name, delete_rule, update_rule
 		FROM fk_constraints
 		WHERE snapshot_id = (SELECT MAX(snapshot_id) FROM fk_constraints)
 		  AND (delete_rule IN ('CASCADE', 'SET NULL') OR update_rule IN ('CASCADE', 'SET NULL'))`
@@ -1999,7 +2000,7 @@ func CascadeConstraintsInIndex(indexDB *sql.DB, schemas []string) ([]FKCascadeEd
 	var out []FKCascadeEdge
 	for rows.Next() {
 		var e FKCascadeEdge
-		if err := rows.Scan(&e.Schema, &e.Table, &e.Column, &e.ReferencedTable, &e.DeleteRule, &e.UpdateRule); err != nil {
+		if err := rows.Scan(&e.Schema, &e.Table, &e.Column, &e.ReferencedSchema, &e.ReferencedTable, &e.DeleteRule, &e.UpdateRule); err != nil {
 			return nil, fmt.Errorf("failed to scan cascade FK row: %w", err)
 		}
 		out = append(out, e)

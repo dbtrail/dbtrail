@@ -177,8 +177,8 @@ func EmitSQLIndexed(w io.Writer, gen *recovery.Generator, rows []query.ResultRow
 		b.WriteString("-- reconstructed even if untouched within the window. Tables NOT covered by a\n")
 		b.WriteString("-- baseline are flagged above. \"Complete\" means everything DETECTABLE was recovered.\n")
 	} else {
-		b.WriteString("-- Phase-1 (binlog-window) recovery: a child untouched within --lookback and not\n")
-		b.WriteString("-- in a baseline is NOT reconstructed — pass --baseline-dir/--baseline-s3 to enable\n")
+		b.WriteString("-- Phase-1 (binlog-window) recovery: a child untouched within the lookback window and\n")
+		b.WriteString("-- not in a baseline is NOT reconstructed; point the recovery at a baseline to enable\n")
 		b.WriteString("-- Phase-2 fallback. \"Complete\" means everything DETECTABLE was recovered.\n")
 	}
 	b.WriteString("--\n")

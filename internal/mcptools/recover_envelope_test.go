@@ -29,6 +29,9 @@ func twoInsertRows(t *testing.T) (*sqlmock.Sqlmock, Config) {
 		AddRow(int64(1), "bin.000001", int64(4), int64(40), ts, nil, nil, "app", "users", int64(parser.EventInsert), "1",
 			nil, nil, []byte(`{"id":1}`), int64(0), nil, nil, nil)
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(rows)
+	// The #1616 cascade probe runs after generation; an index without the
+	// fk_constraints table answers "no cascade" in one query.
+	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(false))
 	return &mock, newRecoverToolTarget(db, 0)
 }
 

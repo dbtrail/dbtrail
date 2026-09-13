@@ -184,8 +184,8 @@ func TestEmitSQL_goldenPhase1(t *testing.T) {
 -- 0 SET NULL'd FK(s) and 0 cascade-rewritten FK(s) that InnoDB removed/nulled/rewrote
 -- below the binlog (MySQL Bug #32506). NEVER auto-applied.
 --
--- Phase-1 (binlog-window) recovery: a child untouched within --lookback and not
--- in a baseline is NOT reconstructed — pass --baseline-dir/--baseline-s3 to enable
+-- Phase-1 (binlog-window) recovery: a child untouched within the lookback window and
+-- not in a baseline is NOT reconstructed; point the recovery at a baseline to enable
 -- Phase-2 fallback. "Complete" means everything DETECTABLE was recovered.
 --
 -- If you have already re-created a deleted parent, delete its INSERT below:
@@ -261,8 +261,8 @@ func TestEmitSQL_goldenCaveats(t *testing.T) {
 -- 0 SET NULL'd FK(s) and 0 cascade-rewritten FK(s) that InnoDB removed/nulled/rewrote
 -- below the binlog (MySQL Bug #32506). NEVER auto-applied.
 --
--- Phase-1 (binlog-window) recovery: a child untouched within --lookback and not
--- in a baseline is NOT reconstructed — pass --baseline-dir/--baseline-s3 to enable
+-- Phase-1 (binlog-window) recovery: a child untouched within the lookback window and
+-- not in a baseline is NOT reconstructed; point the recovery at a baseline to enable
 -- Phase-2 fallback. "Complete" means everything DETECTABLE was recovered.
 --
 -- If you have already re-created a deleted parent, delete its INSERT below:
@@ -400,8 +400,8 @@ func TestEmitSQL_goldenSetNull(t *testing.T) {
 -- 1 SET NULL'd FK(s) and 0 cascade-rewritten FK(s) that InnoDB removed/nulled/rewrote
 -- below the binlog (MySQL Bug #32506). NEVER auto-applied.
 --
--- Phase-1 (binlog-window) recovery: a child untouched within --lookback and not
--- in a baseline is NOT reconstructed — pass --baseline-dir/--baseline-s3 to enable
+-- Phase-1 (binlog-window) recovery: a child untouched within the lookback window and
+-- not in a baseline is NOT reconstructed; point the recovery at a baseline to enable
 -- Phase-2 fallback. "Complete" means everything DETECTABLE was recovered.
 --
 -- If you have already re-created a deleted parent, delete its INSERT below:
@@ -522,8 +522,8 @@ func TestEmitSQL_goldenSetNullMultiRow(t *testing.T) {
 -- 2 SET NULL'd FK(s) and 0 cascade-rewritten FK(s) that InnoDB removed/nulled/rewrote
 -- below the binlog (MySQL Bug #32506). NEVER auto-applied.
 --
--- Phase-1 (binlog-window) recovery: a child untouched within --lookback and not
--- in a baseline is NOT reconstructed — pass --baseline-dir/--baseline-s3 to enable
+-- Phase-1 (binlog-window) recovery: a child untouched within the lookback window and
+-- not in a baseline is NOT reconstructed; point the recovery at a baseline to enable
 -- Phase-2 fallback. "Complete" means everything DETECTABLE was recovered.
 --
 -- If you have already re-created a deleted parent, delete its INSERT below:
