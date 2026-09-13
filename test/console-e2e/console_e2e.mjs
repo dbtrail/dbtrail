@@ -62,8 +62,10 @@ const bad = (name, detail) => results.push({ name, pass: false, detail });
 //
 // This guard keeps the shape from coming back. It reads its own source, so a
 // call written in the two-arg form fails the run with the line number instead
-// of quietly waiting 30s. waitForSelector is deliberately not scanned: its
-// options ARE the second parameter.
+// of quietly waiting 30s. It counts ARGUMENTS, not commas: the first census
+// counted commas and walked past a two-arg call with a trailing comma, so the
+// bug it was written against survived it once. waitForSelector is deliberately
+// not scanned: its options ARE the second parameter.
 {
   // fileURLToPath, not `new URL`: this file shadows the global URL with the
   // console's address (line 20), so the constructor form throws here.
@@ -71,28 +73,53 @@ const bad = (name, detail) => results.push({ name, pass: false, detail });
   // Assembled rather than written whole: the scan reads this very file, and a
   // literal here would be a call site of its own to parse.
   const NEEDLE = "waitFor" + "Function(";
+  const scan = (text) => {
   const misplaced = [];
   let i = 0;
-  while ((i = src.indexOf(NEEDLE, i)) >= 0) {
+  while ((i = text.indexOf(NEEDLE, i)) >= 0) {
     let depth = 0, j = i + NEEDLE.length - 1;
-    const start = j, topCommas = [];
-    for (; j < src.length; j++) {
-      const c = src[j];
+    const cuts = [j];
+    for (; j < text.length; j++) {
+      const c = text[j];
       if (c === "(" || c === "{" || c === "[") depth++;
-      else if (c === ")" || c === "}" || c === "]") { depth--; if (depth === 0) { j++; break; } }
-      else if (c === "," && depth === 1) topCommas.push(j);
+      else if (c === ")" || c === "}" || c === "]") { depth--; if (depth === 0) { break; } }
+      else if (c === "," && depth === 1) cuts.push(j);
     }
-    // Two top-level arguments and a timeout in the second one: the options
-    // object is sitting in the arg slot.
-    if (topCommas.length === 1 && /timeout:\s*\d+/.test(src.slice(topCommas[0], j))) {
-      misplaced.push(src.slice(0, i).split("\n").length);
+    cuts.push(j);
+    j++;
+    // Arguments, not commas: a trailing comma before `)` is a third cut with
+    // nothing after it, and the shape it decorates is still two arguments.
+    const args = [];
+    for (let k = 0; k + 1 < cuts.length; k++) args.push(text.slice(cuts[k] + 1, cuts[k + 1]).trim());
+    while (args.length && args[args.length - 1] === "") args.pop();
+    // Two arguments and a timeout in the second one: the options object is
+    // sitting in the arg slot.
+    if (args.length === 2 && /\btimeout\b/.test(args[1])) {
+      misplaced.push(text.slice(0, i).split("\n").length);
     }
     i = j;
   }
-  misplaced.length === 0
-    ? ok("suite: every waitForFunction timeout is in the options slot")
-    : bad("suite: every waitForFunction timeout is in the options slot",
-        `lines ${misplaced.join(", ")} pass options as the page-function argument, so the stated timeout never applies`);
+  return misplaced;
+  };
+  // Positive control: the scanner must see the bad shape in both spellings it
+  // has been written in (single line, and multi-line with a trailing comma)
+  // and must pass the three-argument form. Without this a scanner that stops
+  // matching anything reads as "all clear".
+  const fixture = [
+    `await page.${NEEDLE}() => x, { timeout: 5000 });`,
+    `await page.${NEEDLE}\n  () => x,\n  { timeout: 5000 },\n);`,
+    `await page.${NEEDLE}(v) => x, v, { timeout: 5000 });`,
+  ].join("\n");
+  const control = scan(fixture);
+  if (control.length !== 2 || control[0] !== 1 || control[1] !== 2) {
+    bad("suite: the waitForFunction scanner detects the two-arg shape", `control flagged lines ${JSON.stringify(control)}, expected [1,2]`);
+  } else {
+    const misplaced = scan(src);
+    misplaced.length === 0
+      ? ok("suite: every waitForFunction timeout is in the options slot")
+      : bad("suite: every waitForFunction timeout is in the options slot",
+          `lines ${misplaced.join(", ")} pass options as the page-function argument, so the stated timeout never applies`);
+  }
 }
 
 const browser = await chromium.launch({ headless: true, channel: CHANNEL });
@@ -104,7 +131,6 @@ try {
   await page.goto(`${URL}/?token=${encodeURIComponent(TOKEN)}`, { waitUntil: "networkidle" });
   await page.waitForFunction(
     () => typeof openServersModal === "function" && typeof renderError === "function",
-    { timeout: 10000 },
   );
 
   // Scenario 0 — the page loads and the monitor capability is reported. A
