@@ -5658,9 +5658,19 @@ const BACKUP_WHY_REMEDY = {
   no_local_dir: "Set a Backup dir for this server (Backup settings) and the next run updates from the recorded changes instead of reading your database in full.",
   first_backup: "First backup: there was nothing to update from yet. The next run updates from it.",
 };
-function backupWhyLine(why, code) {
+// The same three, as a FACT about a past run, for the detail of a backup
+// that may be months old: "the next run updates" is false there (it ran
+// long ago) and "this server has no index connection" may no longer hold.
+const BACKUP_WHY_FACT = {
+  no_index: "Full backup: this server had no index connection at the time, so there were no recorded changes to update from.",
+  no_local_dir: "Full backup: an update from the recorded changes needed a local backup directory, which this server did not have at the time.",
+  first_backup: "Full backup: the first one, with nothing to update from yet.",
+};
+// remedy: true on the schedule card (this IS the last run, and the setting
+// to change is the point); false on a snapshot's detail (the fact only).
+function backupWhyLine(why, code, remedy) {
   if (!why) return "";
-  const fixed = BACKUP_WHY_REMEDY[code];
+  const fixed = (remedy ? BACKUP_WHY_REMEDY : BACKUP_WHY_FACT)[code];
   if (fixed) return fixed;
   // The fold's own refusal rides inside the parentheses of a fallback
   // reason; it is the part backupFoldError knows how to say (its bare
@@ -5738,7 +5748,7 @@ async function loadBackupDetail(at, box) {
   }
   // Outside the duration branch: a run stamped within one second has no
   // duration to show and still has its reason (#1604).
-  if (d.run && d.run.why) facts.append(el("span", { class: "stg-dest", text: backupWhyLine(d.run.why, d.run.why_code) }));
+  if (d.run && d.run.why) facts.append(el("span", { class: "stg-dest", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
   const dl = el("button", { class: "btn", type: "button",
     text: "Download (.tar.gz) · " + humanBytes(d.total_bytes || 0) });
   if (d.incomplete) dl.disabled = true;
@@ -6120,7 +6130,7 @@ function backupScheduleCard(cur, b) {
       // BOTH branches: a full read that then failed is the run whose
       // operator most needs to know why it was a full read.
       if (run.method !== "refresh" && run.why) {
-        body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code) }));
+        body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code, true) }));
       }
     }
     if (fb) {

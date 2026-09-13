@@ -94,13 +94,35 @@ func TestBackupWhyRemedyKeysMatchTheCodes(t *testing.T) {
 			t.Errorf("code %q has neither a remedy entry nor a sentence in backupWhyLine", code)
 		}
 	}
-	// Every JS key is a code Go produces.
-	for _, l := range strings.Split(block, "\n") {
-		l = strings.TrimSpace(l)
-		if k, _, ok := strings.Cut(l, ":"); ok && !strings.HasPrefix(l, "//") && !strings.Contains(k, " ") {
-			if !produced[k] {
-				t.Errorf("BACKUP_WHY_REMEDY key %q is produced by no BackupWhyCode branch", k)
+	// Every JS key is a code Go produces, in BOTH tables.
+	f := strings.Index(js, "const BACKUP_WHY_FACT = {")
+	if f < 0 {
+		t.Fatal("app.js has no BACKUP_WHY_FACT")
+	}
+	fact := js[f : f+strings.Index(js[f:], "};")]
+	keys := func(block string) (out []string) {
+		for _, l := range strings.Split(block, "\n") {
+			l = strings.TrimSpace(l)
+			if k, _, ok := strings.Cut(l, ":"); ok && !strings.HasPrefix(l, "//") && !strings.Contains(k, " ") {
+				out = append(out, k)
 			}
+		}
+		return out
+	}
+	for _, k := range append(keys(block), keys(fact)...) {
+		if !produced[k] {
+			t.Errorf("fixed-sentence key %q is produced by no BackupWhyCode branch", k)
+		}
+	}
+	// The card's remedies and the detail's facts cover the same codes, and
+	// the three reasons that carry the run's OWN message stay out of both:
+	// a fixed sentence there would replace the recorded error with prose.
+	if strings.Join(keys(block), ",") != strings.Join(keys(fact), ",") {
+		t.Errorf("remedy keys %v and fact keys %v differ", keys(block), keys(fact))
+	}
+	for _, own := range []string{"previous_unreadable", "fold_refused", "fold_crashed"} {
+		if strings.Contains(block, own+":") || strings.Contains(fact, own+":") {
+			t.Errorf("code %q has a fixed sentence; it must render the run's own reason", own)
 		}
 	}
 }
