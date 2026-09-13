@@ -909,7 +909,7 @@ func SynthesizeVictims(
 						"(no live-window check is wired on this surface)", fk.Schema, fk.Table)
 				}
 				addIncomplete("baseline-skip-archived:"+fk.Schema+"."+fk.Table,
-					reason+"; skipped baseline augmentation to avoid resurrecting rows whose deletion/re-parent was archived")
+					reason+"; skipped baseline augmentation to avoid resurrecting rows whose deletion/re-parent the live scan cannot see (rotated out, archived or lost)")
 			default:
 				// #618: the stale-baseline advisory belongs HERE — this is the only
 				// branch where a baseline row actually reaches the output. Firing it
