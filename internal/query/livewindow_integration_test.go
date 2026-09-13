@@ -12,8 +12,9 @@ import (
 
 // TestLiveWindowContiguous pins the three answers the cascade gate keys on
 // (#1615): a window fully inside the live partitions is contiguous; a window
-// with one rotated-out hour is not; and a planner that cannot classify the
-// window never answers "contiguous".
+// with one rotated-out hour is not; hours past the newest explicit partition
+// are live (p_future); and an index that cannot be classified never answers
+// "contiguous".
 func TestLiveWindowContiguous(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	db, dbName := testutil.CreateTestDB(t)
@@ -33,7 +34,12 @@ func TestLiveWindowContiguous(t *testing.T) {
 		{"single live hour", h.Add(10 * time.Minute), h.Add(14 * time.Minute), true},
 		{"window crosses the hole", h.Add(2*time.Hour + 10*time.Minute), h.Add(4*time.Hour + 10*time.Minute), false},
 		{"window starts before the oldest live hour", h.Add(-time.Hour), h.Add(10 * time.Minute), false},
-		{"window ends after the newest live hour", h.Add(4 * time.Hour), h.Add(5*time.Hour + 10*time.Minute), false},
+		// Past the newest explicit partition the rows live in p_future, which is
+		// never rotated: contiguous, not a gap (a lapsed add-future horizon must
+		// not cost every cascade its Phase-2).
+		{"window ends after the newest live hour", h.Add(4 * time.Hour), h.Add(5*time.Hour + 10*time.Minute), true},
+		{"window entirely past the horizon", h.Add(6 * time.Hour), h.Add(7 * time.Hour), true},
+		{"hole then horizon", h.Add(2*time.Hour + 10*time.Minute), h.Add(6 * time.Hour), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,9 +53,16 @@ func TestLiveWindowContiguous(t *testing.T) {
 		})
 	}
 
-	// No database name → the planner cannot run → never "contiguous".
+	// No database name → nothing to classify against → never "contiguous".
 	if got, err := LiveWindowContiguous(ctx, db, "", h, h.Add(time.Minute)); err != nil || got {
 		t.Errorf("unclassifiable window must report false: got %v, %v", got, err)
+	}
+	// An index with only p_future (no explicit hourly partition) cannot place
+	// its horizon, so it is never "contiguous" either.
+	db3, dbName3 := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db3)
+	if got, err := LiveWindowContiguous(ctx, db3, dbName3, h, h.Add(time.Minute)); err != nil || got {
+		t.Errorf("no explicit partition must report false: got %v, %v", got, err)
 	}
 	// A closed handle → an error, never a silent false.
 	db2, _ := testutil.CreateTestDB(t)

@@ -398,8 +398,8 @@ func TestRecoverCascade_phase2StaleBaselineWarnsExitZero(t *testing.T) {
 	parentTs := h.Add(30 * time.Minute).Format("2006-01-02 15:04:05")
 	testutil.InsertEvent(t, db, "b.000001", 10, 20, parentTs, nil, dbName, "parent", 3 /*DELETE*/, "1", nil, []byte(`{"id":1}`), nil)
 
-	// TWO baseline generations: the older one has shop.child (2026-06-01), the
-	// newer one (2026-06-15, still before the parent delete above) does NOT —
+	// TWO baseline generations, both inside the live hour and before the parent
+	// delete above: the older one has shop.child, the newer one does NOT —
 	// this is exactly the #466/#618 stale-fallback trigger.
 	baselineDir := t.TempDir()
 	olderDir := filepath.Join(baselineDir, h.Add(1*time.Minute).Format("2006-01-02T15-04-05Z")) // inside the live hour (#1615)

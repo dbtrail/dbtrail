@@ -1960,11 +1960,12 @@ func valToString(v any) string {
 // UNEVALUABLE, treated as gapped, never as clean.
 //
 // An empty dbName (a DSN the caller could not parse, or one carrying no
-// database name) yields nil — the gate then keeps its fail-closed default
-// rather than answering from a planner that cannot run; the caveat says the
-// check was not wired. The three cascade entry points (CLI, MCP, console)
-// wire this the same way; adding a fourth without it silently reverts that
-// surface to the pre-#1615 "any archive skips" rule.
+// database name) yields nil — the gate then falls back to the pre-#1615
+// existence rule (any archive skips, and that caveat says the check was not
+// wired; no archive means augmentation runs unchecked, as before) rather than
+// answering from a check that cannot run. The three cascade entry points
+// (CLI, MCP, console) wire this the same way; adding a fourth without it
+// silently reverts that surface to the existence rule.
 func LiveWindowProbe(db *sql.DB, dbName string) func(ctx context.Context, since, until time.Time) (bool, error) {
 	if db == nil || dbName == "" {
 		return nil
