@@ -331,8 +331,8 @@ instructions.
   **statements**, not bytes, and chunks cut on statement boundaries, so no chunk
   ever splits a statement — a `;` and a newline are both ordinary characters
   inside a captured value. Concatenating the chunks in order reproduces the
-  script byte for byte, with the `BEGIN`/`COMMIT` framing and the preamble in
-  the first and last chunk exactly once. **No chunk is runnable on its own.**
+  script byte for byte, with the preamble in the first chunk and the closing
+  lines in the last, each exactly once. **No chunk is runnable on its own.**
 - Every chunk carries `script_id`. Chunks are stateless rebuilds, so a chunk
   fetched after an event was indexed, a baseline published or archives rotated
   belongs to a *different* build; a changed `script_id` means the fetch must

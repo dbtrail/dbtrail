@@ -474,9 +474,9 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 		// The script itself is unaffected: every path below slices the same
 		// bytes the CLI writes.
 		if len(stmtEnds) != n {
-			return ErrorResult(fmt.Errorf("internal error: %d statement(s) rendered but %d statement offset(s) recorded; refusing to page the script. Call again without sql_offset/sql_limit, or write it whole from the CLI, and report this", n, len(stmtEnds))), nil, nil
+			return ErrorResult(fmt.Errorf("internal error: %d statement(s) rendered but %d statement offset(s) recorded; refusing to serve the script from this surface. Write it whole with `bintrail recover-cascade` from the CLI, and report this", n, len(stmtEnds))), nil, nil
 		}
-		script, serr := deliverScript("bintrail recover-cascade", buf.String(), stmtEnds, args.SummaryOnly, args.SQLOffset, args.SQLLimit)
+		script, serr := deliverScript("bintrail recover-cascade", buf.String(), stmtEnds, false, args.SummaryOnly, args.SQLOffset, args.SQLLimit)
 		if serr != nil {
 			return ErrorResult(serr), nil, nil
 		}

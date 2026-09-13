@@ -1,8 +1,12 @@
 package mcptools
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // buildFixture renders a script-shaped string with a preamble, `n` statements
@@ -46,7 +50,7 @@ func TestDeliverScript_chunksConcatenateIntoTheScript(t *testing.T) {
 		var got strings.Builder
 		chunks, offset := 0, 0
 		for {
-			d, err := deliverScript(cascadeCLI, text, ends, false, offset, size)
+			d, err := deliverScript(cascadeCLI, text, ends, false, false, offset, size)
 			if err != nil {
 				t.Fatalf("size %d, offset %d: %v", size, offset, err)
 			}
@@ -92,7 +96,7 @@ func TestDeliverScript_neverCutsInsideAValue(t *testing.T) {
 	const n = 9
 	text, ends := buildFixture(n)
 	for offset := range n {
-		d, err := deliverScript(cascadeCLI, text, ends, false, offset, 1)
+		d, err := deliverScript(cascadeCLI, text, ends, false, false, offset, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -113,7 +117,7 @@ func TestDeliverScript_neverCutsInsideAValue(t *testing.T) {
 // Served has to be false here.
 func TestDeliverScript_summaryCarriesNoBytes(t *testing.T) {
 	text, ends := buildFixture(4)
-	d, err := deliverScript(cascadeCLI, text, ends, true, 0, 0)
+	d, err := deliverScript(cascadeCLI, text, ends, false, true, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +138,7 @@ func TestDeliverScript_summaryCarriesNoBytes(t *testing.T) {
 // exists to prevent.
 func TestDeliverScript_sizeCapWithholdsRatherThanTruncates(t *testing.T) {
 	small, smallEnds := buildFixture(3)
-	d, err := deliverScript(cascadeCLI, small, smallEnds, false, 0, 0)
+	d, err := deliverScript(cascadeCLI, small, smallEnds, false, false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +150,7 @@ func TestDeliverScript_sizeCapWithholdsRatherThanTruncates(t *testing.T) {
 	if len(big) <= InlineScriptBytes {
 		t.Fatalf("fixture is only %d bytes; it must exceed the %d-byte cap to test it", len(big), InlineScriptBytes)
 	}
-	d, err = deliverScript(cascadeCLI, big, bigEnds, false, 0, 0)
+	d, err = deliverScript(cascadeCLI, big, bigEnds, false, false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +167,7 @@ func TestDeliverScript_sizeCapWithholdsRatherThanTruncates(t *testing.T) {
 // than asked, with no marker, is the truncation the issue bans.
 func TestDeliverScript_oversizedRequestIsReducedNotSilent(t *testing.T) {
 	big, ends := buildFixture(4000)
-	d, err := deliverScript(cascadeCLI, big, ends, false, 0, 4000)
+	d, err := deliverScript(cascadeCLI, big, ends, false, false, 0, 4000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +192,7 @@ func TestDeliverScript_oneOversizedStatementStillComesBack(t *testing.T) {
 	huge := "BEGIN;\nUPDATE `t` SET `blob` = '" + strings.Repeat("x", InlineScriptBytes*2) + "' WHERE `id` = 1;\n"
 	ends := []int{len(huge)}
 	huge += "\nCOMMIT;\n"
-	d, err := deliverScript(cascadeCLI, huge, ends, false, 0, 1)
+	d, err := deliverScript(cascadeCLI, huge, ends, false, false, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +220,7 @@ func TestDeliverScript_rejectsOffsetsOutsideTheScript(t *testing.T) {
 		{"negative limit", 0, -5, "cannot be negative"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := deliverScript(cascadeCLI, text, ends, false, tc.offset, tc.limit); err == nil ||
+			if _, err := deliverScript(cascadeCLI, text, ends, false, false, tc.offset, tc.limit); err == nil ||
 				!strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want one naming %q", err, tc.want)
 			}
@@ -225,7 +229,7 @@ func TestDeliverScript_rejectsOffsetsOutsideTheScript(t *testing.T) {
 
 	// A script with no statements at all ("no events matched") is not a
 	// paginable thing, and saying so beats an empty chunk.
-	if _, err := deliverScript(cascadeCLI, "-- No events matched the specified criteria.\n", nil, false, 0, 10); err == nil {
+	if _, err := deliverScript(cascadeCLI, "-- No events matched the specified criteria.\n", nil, false, false, 0, 10); err == nil {
 		t.Error("paging a statement-less script was accepted")
 	}
 }
@@ -280,7 +284,7 @@ func TestDeliverScript_withholdNoteNamesTheCallersCLI(t *testing.T) {
 	text, ends := buildFixture(3)
 	big := text + strings.Repeat("-- pad\n", InlineScriptBytes/7+1)
 	for _, cli := range []string{"bintrail recover", cascadeCLI} {
-		d, err := deliverScript(cli, big, ends, false, 0, 0)
+		d, err := deliverScript(cli, big, ends, false, false, 0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +309,7 @@ func TestDeliverScript_withholdNoteNamesTheCallersCLI(t *testing.T) {
 // client looking for bytes that never existed.
 func TestDeliverScript_lastChunkIsNotCalledReduced(t *testing.T) {
 	text, ends := buildFixture(5)
-	d, err := deliverScript(cascadeCLI, text, ends, false, 3, 10)
+	d, err := deliverScript(cascadeCLI, text, ends, false, false, 3, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +334,7 @@ func TestDeliverScript_oversizedStatementNoteSaysSo(t *testing.T) {
 	b.WriteString("DELETE FROM `t` WHERE `id` = 1;\n")
 	e2 := b.Len()
 	b.WriteString("COMMIT;\n")
-	d, err := deliverScript(cascadeCLI, b.String(), []int{e1, e2}, false, 0, 1)
+	d, err := deliverScript(cascadeCLI, b.String(), []int{e1, e2}, false, false, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,18 +359,18 @@ func TestDeliverScript_refusesMisalignedOffsets(t *testing.T) {
 		"past the end":        {ends[0], ends[1], len(text) + 3},
 	}
 	for name, bad := range cases {
-		if _, err := deliverScript(cascadeCLI, text, bad, false, 0, 1); err == nil {
+		if _, err := deliverScript(cascadeCLI, text, bad, false, false, 0, 1); err == nil {
 			t.Errorf("%s: misaligned offsets were accepted", name)
 		} else if strings.Contains(err.Error(), "--") {
 			t.Errorf("%s: the refusal names a CLI flag: %v", name, err)
 		}
 	}
-	if _, err := deliverScript(cascadeCLI, text, ends, false, 0, 1); err != nil {
+	if _, err := deliverScript(cascadeCLI, text, ends, false, false, 0, 1); err != nil {
 		t.Fatalf("well-formed offsets refused: %v", err)
 	}
 	// A whole return does not depend on the offsets and is served regardless:
 	// a bad list must not take the non-chunked path down with it.
-	if d, err := deliverScript(cascadeCLI, text, cases["inside the preamble"], false, 0, 0); err != nil || !d.Served {
+	if d, err := deliverScript(cascadeCLI, text, cases["inside the preamble"], false, false, 0, 0); err != nil || !d.Served {
 		t.Errorf("a whole return was refused over offsets it does not use: %v", err)
 	}
 }
@@ -376,7 +380,7 @@ func TestDeliverScript_refusesMisalignedOffsets(t *testing.T) {
 // about it is the silent reduction the schema text promises never happens.
 func TestDeliverScript_reducedIsSaidWhenTheAskOvershootsTheEnd(t *testing.T) {
 	big, ends := buildFixture(4000)
-	d, err := deliverScript(cascadeCLI, big, ends, false, 0, 5000)
+	d, err := deliverScript(cascadeCLI, big, ends, false, false, 0, 5000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +394,7 @@ func TestDeliverScript_reducedIsSaidWhenTheAskOvershootsTheEnd(t *testing.T) {
 // never gets the oversized-statement note.
 func TestDeliverScript_pagesFromALateOffsetByRemainingBytes(t *testing.T) {
 	big, ends := buildFixture(4000)
-	d, err := deliverScript(cascadeCLI, big, ends, false, 3000, 0)
+	d, err := deliverScript(cascadeCLI, big, ends, false, false, 3000, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,17 +453,22 @@ func TestDeliverScript_sizesTheChunkOnTheWire(t *testing.T) {
 	e2 := b.Len()
 	b.WriteString("COMMIT;\n")
 	text := b.String()
-	if len(text) > InlineScriptBytes || wireLen(text) <= InlineScriptBytes {
-		t.Fatalf("fixture must fit raw (%d) and not on the wire (%d)", len(text), wireLen(text))
+	if len(text) > InlineScriptBytes || wireLen(text, envelopeLayers) <= InlineScriptBytes {
+		t.Fatalf("fixture must fit raw (%d) and not on the wire (%d)", len(text), wireLen(text, envelopeLayers))
 	}
-	d, err := deliverScript(cascadeCLI, text, []int{e1, e2}, false, 0, 0)
+	d, err := deliverScript(cascadeCLI, text, []int{e1, e2}, false, false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d.Served {
-		t.Fatalf("a script over the cap on the wire was served inline (%d raw, %d wire)", len(text), wireLen(text))
+		t.Fatalf("a script over the cap on the wire was served inline (%d raw, %d wire)", len(text), wireLen(text, envelopeLayers))
 	}
-	d, err = deliverScript(cascadeCLI, text, []int{e1, e2}, false, 0, 2)
+	// The withhold note states the size the decision was made on: a raw
+	// count under the limit it "exceeds" reads as an arithmetic error.
+	if !strings.Contains(d.Note, fmt.Sprintf("%d bytes on the wire", wireLen(text, envelopeLayers))) {
+		t.Errorf("the withhold note does not state the wire size: %s", d.Note)
+	}
+	d, err = deliverScript(cascadeCLI, text, []int{e1, e2}, false, false, 0, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,14 +497,14 @@ func TestDeliverScript_lastPageCountsTheTrailer(t *testing.T) {
 	if e2 > InlineScriptBytes || len(text) <= InlineScriptBytes {
 		t.Fatalf("fixture must fit without the trailer (%d) and not with it (%d)", e2, len(text))
 	}
-	d, err := deliverScript(cascadeCLI, text, []int{e1, e2}, false, 0, 0)
+	d, err := deliverScript(cascadeCLI, text, []int{e1, e2}, false, false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d.Served {
 		t.Fatal("served inline although the trailer pushes it over the cap")
 	}
-	d, err = deliverScript(cascadeCLI, text, []int{e1, e2}, false, 0, 2)
+	d, err = deliverScript(cascadeCLI, text, []int{e1, e2}, false, false, 0, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +517,7 @@ func TestDeliverScript_lastPageCountsTheTrailer(t *testing.T) {
 // the two parameters made it explicit.
 func TestDeliverScript_offsetAloneOnNoStatementsIsRefused(t *testing.T) {
 	const noEvents = "-- No events matched the specified criteria.\n"
-	if _, err := deliverScript(cascadeCLI, noEvents, nil, false, 1, 0); err == nil {
+	if _, err := deliverScript(cascadeCLI, noEvents, nil, false, false, 1, 0); err == nil {
 		t.Error("sql_offset alone on a statement-less script was not refused")
 	}
 }
@@ -517,7 +526,7 @@ func TestDeliverScript_offsetAloneOnNoStatementsIsRefused(t *testing.T) {
 // carries the script id, the client's first chance to see why.
 func TestDeliverScript_pastTheEndNamesTheScriptID(t *testing.T) {
 	text, ends := buildFixture(3)
-	_, err := deliverScript(cascadeCLI, text, ends, false, 7, 1)
+	_, err := deliverScript(cascadeCLI, text, ends, false, false, 7, 1)
 	if err == nil || !strings.Contains(err.Error(), scriptFingerprint(text)) {
 		t.Errorf("the past-the-end refusal does not carry the script id: %v", err)
 	}
@@ -545,5 +554,68 @@ func TestScriptFingerprint_skipsOnlyTheFirstStampLine(t *testing.T) {
 	c := strings.Replace(a, "2026-09-02 10:00:00 UTC", "2026-09-02 10:00:01 UTC", 1)
 	if scriptFingerprint(a) != scriptFingerprint(c) {
 		t.Error("the generator's own stamp line changed the fingerprint")
+	}
+}
+
+// The cap is measured on the bytes that SHIP: a chunk rides the tool's JSON
+// envelope, and that envelope rides the protocol's text content, which is a
+// JSON string too. Sizing with one escaping layer let a quote-heavy page
+// leave at twice the cap. This test marshals the real protocol content.
+func TestDeliverScript_chunkFitsTheShippedBytes(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("BEGIN;\n")
+	var ends []int
+	// JSON-column values: one quote per two characters, the worst common case.
+	stmt := "INSERT INTO `t` (`doc`) VALUES ('" + strings.Repeat(`{"k":"v"},`, 400) + "');\n"
+	for range 40 {
+		b.WriteString(stmt)
+		ends = append(ends, b.Len())
+	}
+	b.WriteString("COMMIT;\n")
+	text := b.String()
+
+	shipped := func(sql string) int {
+		payload, err := json.MarshalIndent(recoverResult{SQL: sql, StatementCount: len(ends)}, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, err := json.Marshal(&mcp.TextContent{Text: string(payload)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(wire)
+	}
+	d, err := deliverScript(cascadeCLI, text, ends, false, false, 0, len(ends))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.More {
+		t.Fatalf("a %d-byte raw script of JSON values shipped whole: %d bytes on the wire", len(text), shipped(text))
+	}
+	const slack = 512 // the envelope's own fields and indentation
+	if got := shipped(d.SQL); got > InlineScriptBytes+slack {
+		t.Errorf("the chunk ships at %d bytes, over the %d-byte cap: sized one escaping layer below the wire", got, InlineScriptBytes)
+	}
+	if !strings.Contains(d.Note, "reduced") {
+		t.Errorf("the reduction is not stated: %s", d.Note)
+	}
+
+	// The whole-script path of recover ships BARE (one layer), so it must use
+	// one layer: a script that fits bare must not be withheld on the
+	// two-layer count.
+	var one strings.Builder
+	one.WriteString("BEGIN;\n")
+	one.WriteString("INSERT INTO `t` (`doc`) VALUES ('" + strings.Repeat(`{"k":"v"},`, 3400) + "');\n")
+	e := one.Len()
+	one.WriteString("COMMIT;\n")
+	bare := one.String()
+	if wireLen(bare, 1) > InlineScriptBytes || wireLen(bare, envelopeLayers) <= InlineScriptBytes {
+		t.Fatalf("fixture must fit with one layer (%d) and not with two (%d)", wireLen(bare, 1), wireLen(bare, envelopeLayers))
+	}
+	if d, _ := deliverScript("bintrail recover", bare, []int{e}, true, false, 0, 0); !d.Served || d.Chunked {
+		t.Errorf("recover's bare whole script was withheld on the envelope's two-layer count: %+v", d)
+	}
+	if d, _ := deliverScript(cascadeCLI, bare, []int{e}, false, false, 0, 0); d.Served {
+		t.Errorf("recover_cascade's enveloped whole script was served over the cap on the wire")
 	}
 }

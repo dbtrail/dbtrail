@@ -92,7 +92,14 @@ func scriptFingerprint(text string) string {
 // cli names the CLI command that writes this same script whole (`bintrail
 // recover` or `bintrail recover-cascade`): deliverScript serves both tools and
 // the withhold note must send each client to ITS command, not the wider one.
-func deliverScript(cli, text string, ends []int, summaryOnly bool, offset, limit int) (scriptDelivery, error) {
+//
+// wholeIsBare says how a WHOLE script ships: recover returns it as bare text
+// (one JSON escaping layer, the protocol's own), recover_cascade inside its
+// JSON envelope (two layers: the envelope string is itself a protocol string).
+// A chunk or a summary rides the envelope on both tools, so those paths are
+// always sized with two layers; sizing with one measured a layer below the
+// wire and let a quote-heavy page ship at twice the cap.
+func deliverScript(cli, text string, ends []int, wholeIsBare, summaryOnly bool, offset, limit int) (scriptDelivery, error) {
 	total := len(ends)
 	d := scriptDelivery{
 		ScriptID:    scriptFingerprint(text),
@@ -142,18 +149,28 @@ func deliverScript(cli, text string, ends []int, summaryOnly bool, offset, limit
 		return d, nil
 	}
 
-	if !explicit && wireLen(text) <= InlineScriptBytes {
+	wholeLayers := envelopeLayers
+	if wholeIsBare {
+		wholeLayers = 1
+	}
+	// len(text) first: wireLen is never smaller than the raw size, and a
+	// script over the cap raw must not be fully escaped (up to several times
+	// its size) only to be withheld.
+	if !explicit && len(text) <= InlineScriptBytes && wireLen(text, wholeLayers) <= InlineScriptBytes {
 		d.SQL, d.Served = text, true
 		d.From, d.To = 1, total
 		return d, nil
 	}
 	if !explicit {
-		d.Note = fmt.Sprintf("the script is %d bytes, over the %d-byte limit for one response, so it was NOT returned here "+
+		// The figure is the WIRE size, the one the decision was made on: a raw
+		// count smaller than the limit it claims to exceed sends an operator
+		// hunting an arithmetic error instead of the escaping.
+		d.Note = fmt.Sprintf("the script is %d bytes on the wire, over the %d-byte limit for one response, so it was NOT returned here "+
 			"(returning it would be refused or truncated by the client). It has %d statement(s), script id %s. "+
 			"Fetch it in order with sql_offset (0-based statement index) and sql_limit, checking script_id on every chunk: "+
 			"a different value means the underlying events moved and the fetch must restart at sql_offset 0. "+
 			"`%s` from the CLI writes the whole script to a file in one go.",
-			len(text), InlineScriptBytes, total, d.ScriptID, cli)
+			wireLen(text, wholeLayers), InlineScriptBytes, total, d.ScriptID, cli)
 		return d, nil
 	}
 
@@ -174,7 +191,7 @@ func deliverScript(cli, text string, ends []int, summaryOnly bool, offset, limit
 		if i == total-1 {
 			segEnd = len(text)
 		}
-		acc += wireLen(text[prev:segEnd])
+		acc += wireLen(text[prev:segEnd], envelopeLayers)
 		if acc > InlineScriptBytes && fits > 0 {
 			break
 		}
@@ -201,24 +218,35 @@ func deliverScript(cli, text string, ends []int, summaryOnly bool, offset, limit
 	// Only a lone statement can be over the cap here: the fits loop measures
 	// every page on the wire, trailer included, and stops before overflowing
 	// unless the first statement alone already does.
-	if wireLen(d.SQL) > InlineScriptBytes {
+	if wl := wireLen(d.SQL, envelopeLayers); wl > InlineScriptBytes {
 		d.Note += fmt.Sprintf(". This chunk is %d bytes on the wire, over the usual %d-byte response size: one statement (with the closing lines, on the last chunk) cannot be split further",
-			wireLen(d.SQL), InlineScriptBytes)
+			wl, InlineScriptBytes)
 	}
 	return d, nil
 }
 
-// wireLen is the size of s once it sits inside the JSON envelope: the escaped
-// string body, without the quotes. It is what a client's result cap actually
-// sees, and it can be well over len(s) for HTML-heavy or newline-heavy rows.
-// Escaping is per character, so the wire length of a concatenation is the sum
+// envelopeLayers is how many times a chunk's bytes are JSON-escaped before
+// they reach the client: once into the tool's JSON envelope (`sql` field),
+// and once more when that envelope rides the protocol's text content, which
+// is itself a JSON string. A whole recover script skips the envelope.
+const envelopeLayers = 2
+
+// wireLen is the size of s after `layers` JSON escapings: the escaped string
+// body, without the quotes. It is what a client's result cap actually sees,
+// and it can be well over len(s) for HTML-heavy or newline-heavy rows (a
+// newline is 3 bytes after two layers, a quote 4, `<` 7). Escaping is per
+// character at every layer, so the wire length of a concatenation is the sum
 // of its parts, which is what lets the fits loop accumulate per statement.
-func wireLen(s string) int {
-	b, err := json.Marshal(s)
-	if err != nil {
-		return len(s) // unreachable for a Go string; never smaller than the raw size
+func wireLen(s string, layers int) int {
+	cur := s
+	for range layers {
+		b, err := json.Marshal(cur)
+		if err != nil {
+			return len(s) // unreachable for a Go string; never smaller than the raw size
+		}
+		cur = string(b[1 : len(b)-1])
 	}
-	return len(b) - 2
+	return len(cur)
 }
 
 // checkStatementEnds verifies that every recorded statement end sits just
@@ -257,8 +285,8 @@ func chunkNote(offset, last, total, askedLimit, gave int, id string) string {
 	}
 	if last < total {
 		fmt.Fprintf(&b, ". Fetch the next with sql_offset: %d", last)
-		b.WriteString(". Concatenate the chunks in order to get the script exactly as the CLI writes it; " +
-			"the BEGIN/COMMIT framing and the preamble are in the first and last chunk, so no chunk is runnable alone. " +
+		b.WriteString(". Concatenate the chunks in order to get the script exactly as this tool returns it whole; " +
+			"the preamble is in the first chunk and the closing lines in the last, so no chunk is runnable alone. " +
 			"Re-check script_id on every chunk: a different value means the build moved and the fetch must restart at sql_offset 0")
 	} else {
 		b.WriteString(". This is the last chunk")
