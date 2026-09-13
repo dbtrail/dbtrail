@@ -979,7 +979,8 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		// first.
 		rows = query.MergeResults(rows, 0, "ASC")
 
-		gen := recovery.NewForDialect(t.DB, resolver, recovery.DialectForIndex(t.DB))
+		dialect := recovery.DialectForIndex(t.DB)
+		gen := recovery.NewForDialect(t.DB, resolver, dialect)
 		// #849: the console sets cfg.MaxScriptBytes to its own shared-daemon
 		// budget; standalone bintrail-mcp leaves it 0, so the Generator keeps
 		// its own DefaultMaxScriptBytes (2 GiB) exactly as before this field
@@ -1039,6 +1040,28 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 			w := eventDivergenceWarning(divergedEvents)
 			text += "\n-- Warning: " + w + "\n"
 			warnings = append(warnings, w)
+		}
+		// The FK-cascade blind spot (#1616): the CLI has warned about it for
+		// a year and this surface never did, so an agent produced a
+		// parent-only script and had to ask the operator whether the table
+		// had children. The index knows. Gated to MySQL/MariaDB like the
+		// console's own detection: PostgreSQL logical replication captures
+		// cascades as real events, so there is nothing missing to warn about.
+		if dialect == recovery.MySQLDialect {
+			adv, aerr := recovery.DetectCascade(t.DB, args.Schema, args.Table)
+			var w string
+			switch {
+			case aerr != nil:
+				// A failed probe is said, never dropped: "no warning" reads
+				// as "no children", which is the silence this closes.
+				w = "could not check whether this table has foreign-key children with cascading rules (" + aerr.Error() + "); if it does, the child rows MySQL deleted or re-pointed along with these are NOT in this script. Use the recover_cascade tool to reconstruct them"
+			case adv.AppliesTo(rows, args.Table):
+				w = adv.Warning("the recover_cascade tool")
+			}
+			if w != "" {
+				text += "\n-- Warning: " + w + ".\n"
+				warnings = append(warnings, w)
+			}
 		}
 
 		// What this response carries of the script (#1438). The notes appended

@@ -593,8 +593,12 @@ type genFailure struct {
 // Cascade-synthesized rows (cascaderecover, #835) never carry a real event_id — every
 // synthesized victim is EventID==0, so "event 0: ..." is byte-identical across every
 // failing victim and untraceable (and the remediation below, which tells the operator
-// to narrow --pk/--pks, selects the RECOVERY ROOT, not the victim). Name those failures
+// to narrow pk/pks, selects the RECOVERY ROOT, not the victim). Name those failures
 // by schema.table + PK instead, using the fields the row already carries.
+//
+// The window advice is spelled "since/until, pk/pks", never "--since" (#1618):
+// this error crosses the CLI, MCP and console surfaces unchanged, and an MCP
+// client handed a --flag will not find it. Same rule as schemaDriftError below.
 func partialGenerationError(failures []genFailure) error {
 	parts := make([]string, 0, len(failures))
 	for _, f := range failures {
@@ -606,7 +610,7 @@ func partialGenerationError(failures []genFailure) error {
 	}
 	return fmt.Errorf("recover: refusing to emit reversal SQL — %d of the matched event(s) could not be "+
 		"reversed (malformed or truncated stored row image), so the script would be a silently incomplete "+
-		"recovery: %s. Investigate the named event(s); narrow the recovery window (--since/--until, --pk/--pks) "+
+		"recovery: %s. Investigate the named event(s); narrow the recovery window (since/until, pk/pks) "+
 		"to exclude them if they are known-unrecoverable", len(failures), strings.Join(parts, "; "))
 }
 

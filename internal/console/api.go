@@ -845,6 +845,26 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// No single table in scope (#1616): the auto-detection above needs a
+	// table to synthesize for, so a schema-wide or unfiltered undo has no
+	// cascade path here. Say what the script cannot contain and how to get
+	// it, instead of returning a parent-only script that reads as complete.
+	// Same MySQL gate as above: PostgreSQL captures cascades as real events.
+	if dialect == recovery.MySQLDialect && body.Table == "" {
+		adv, aerr := recovery.DetectCascade(b.db, body.Schema, "")
+		switch {
+		case aerr != nil:
+			slog.Warn("console: cascade child detection failed for a table-less recover", "error", aerr)
+			warnings = append([]string{
+				"Could not check whether any table in this window has foreign-key children with cascading rules (detection failed: " + aerr.Error() + "). If one does, the child rows MySQL deleted or re-pointed along with these are NOT included in the script below; retry, or undo that table on its own so the cascade is repaired automatically.",
+			}, warnings...)
+		case adv.AppliesTo(rows, ""):
+			warnings = append([]string{
+				"Some tables in this window have foreign-key children with cascading rules (" + strings.Join(adv.ChildTables, ", ") + "). MySQL applies those below the binary log, so the child rows a delete removed or a key update re-pointed are NOT included in the script below. Undo the parent table on its own to have them repaired automatically.",
+			}, warnings...)
+		}
+	}
+
 	var buf bytes.Buffer
 	// Per-bundle dialect (read above): a PG-flavored index → PostgreSQL reversal SQL.
 	// DialectForIndex defaults to MySQL on any read failure (#533/#573).
