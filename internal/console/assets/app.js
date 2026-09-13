@@ -5662,7 +5662,25 @@ function backupWhyLine(why, code) {
   if (!why) return "";
   const fixed = BACKUP_WHY_REMEDY[code];
   if (fixed) return fixed;
-  return "Full backup because " + backupFoldError(why) + (/[.!?]$/.test(why) ? "" : ".");
+  // The fold's own refusal rides inside the parentheses of a fallback
+  // reason; it is the part backupFoldError knows how to say (its bare
+  // --allow-gaps hint is a CLI flag), the wrapper is said here.
+  const inner = /^[^(]*\((.*)\)$/.exec(why);
+  // Said inside parentheses, so no closing period; and the "pick a later
+  // moment" advice backupFoldError adds is Time-travel's, not a schedule's.
+  const said = (t) => backupFoldError(t).replace(/; pick a later moment\.?$/, "").replace(/\.$/, "");
+  let out;
+  if (code === "fold_refused" && inner) {
+    out = "The update from the recorded changes was refused (" + said(inner[1]) + ") so a full backup was taken instead.";
+  } else if (code === "fold_crashed" && inner) {
+    out = "The update from the recorded changes hit an internal error (" + said(inner[1].replace(/^internal error:?\s*/, "")) + ") so a full backup was taken instead.";
+  } else if (code === "previous_unreadable") {
+    out = why.charAt(0).toUpperCase() + why.slice(1);
+  } else {
+    out = "Full backup because " + why;
+  }
+  if (!/[.!?]$/.test(out.trim())) out = out.trim() + ".";
+  return out;
 }
 
 // loadBackupDetail fills a row's expansion: tables with sizes, total weight,
@@ -5714,11 +5732,13 @@ async function loadBackupDetail(at, box) {
     facts.append(el("span", { class: "stg-dest", text:
       "took " + fmtSeconds(d.run.seconds) + " (" + (BACKUP_KIND_LABEL[d.run.kind] || d.run.kind) +
       (d.run.rows ? ", " + Number(d.run.rows).toLocaleString("en-US") + " rows" : "") + ")" }));
-    if (d.run.why) facts.append(el("span", { class: "stg-dest", text: backupWhyLine(d.run.why, d.run.why_code) }));
   } else if (d.write_span_seconds > 0) {
     facts.append(el("span", { class: "stg-dest", text:
       "files written over about " + fmtSeconds(d.write_span_seconds) + " (from file timestamps; the real run took longer)" }));
   }
+  // Outside the duration branch: a run stamped within one second has no
+  // duration to show and still has its reason (#1604).
+  if (d.run && d.run.why) facts.append(el("span", { class: "stg-dest", text: backupWhyLine(d.run.why, d.run.why_code) }));
   const dl = el("button", { class: "btn", type: "button",
     text: "Download (.tar.gz) · " + humanBytes(d.total_bytes || 0) });
   if (d.incomplete) dl.disabled = true;
@@ -6082,11 +6102,6 @@ function backupScheduleCard(cur, b) {
           "Last scheduled backup finished " + when + " (" + what + "): " + (run.tables || 0) + " table(s)" +
           (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(run.carried_copied || 0) : "") +
           (run.uploaded ? ", " + run.uploaded + " file(s) uploaded" : "") + "." }));
-        // The reason a full backup was taken, as recorded when it ran, and
-        // the setting that turns the next one into an update (#1604).
-        if (run.method !== "refresh" && run.why) {
-          body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code) }));
-        }
       } else {
         alarm = true;
         // A failed run that still names a snapshot is the one shape where the
@@ -6099,6 +6114,13 @@ function backupScheduleCard(cur, b) {
             " The backup is on disk and can be restored from. The next scheduled run folds a new one."
           : "Last scheduled backup failed " + when + " (" + what + "): " + backupFoldError(run.error || "unknown error") +
             " Nothing was overwritten; the next scheduled run tries again." }));
+      }
+      // The reason a full backup was taken, as recorded when it ran, and
+      // the setting that turns the next one into an update (#1604). After
+      // BOTH branches: a full read that then failed is the run whose
+      // operator most needs to know why it was a full read.
+      if (run.method !== "refresh" && run.why) {
+        body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code) }));
       }
     }
     if (fb) {

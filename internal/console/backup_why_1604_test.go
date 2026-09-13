@@ -71,8 +71,10 @@ func TestBaselineHistory_persistsTheFullBackupReason(t *testing.T) {
 	}
 }
 
-// The page's remedy table is keyed by the codes this package emits; a code
-// renamed on one side leaves the other rendering the raw reason.
+// The page's remedy table and the code-specific sentences are keyed by the
+// codes this package emits, in BOTH directions: a code renamed on one side
+// leaves the other rendering the raw reason, and a JS key no Go code
+// produces is dead text.
 func TestBackupWhyRemedyKeysMatchTheCodes(t *testing.T) {
 	js := readAsset(t, "app.js")
 	i := strings.Index(js, "const BACKUP_WHY_REMEDY = {")
@@ -80,9 +82,50 @@ func TestBackupWhyRemedyKeysMatchTheCodes(t *testing.T) {
 		t.Fatal("app.js has no BACKUP_WHY_REMEDY")
 	}
 	block := js[i : i+strings.Index(js[i:], "};")]
-	for _, why := range []string{BackupWhyNoIndex, BackupWhyNoLocalDir, BackupWhyFirstBackup} {
-		if code := BackupWhyCode(why); !strings.Contains(block, "\n  "+code+":") {
-			t.Errorf("BACKUP_WHY_REMEDY has no entry for %q", code)
+	line := jsFunctionBody(t, js, "backupWhyLine")
+	produced := map[string]bool{}
+	for _, why := range []string{BackupWhyNoIndex, BackupWhyNoLocalDir, BackupWhyFirstBackup,
+		BackupWhyUnreadablePrefix + " (x)", BackupWhyFoldRefusedPrefix + " (x)", BackupWhyFoldCrashedPrefix + " (x)"} {
+		produced[BackupWhyCode(why)] = true
+	}
+	// Every code has a rendering: a fixed remedy, or its own sentence.
+	for code := range produced {
+		if !strings.Contains(block, code+":") && !strings.Contains(line, "\""+code+"\"") {
+			t.Errorf("code %q has neither a remedy entry nor a sentence in backupWhyLine", code)
 		}
+	}
+	// Every JS key is a code Go produces.
+	for _, l := range strings.Split(block, "\n") {
+		l = strings.TrimSpace(l)
+		if k, _, ok := strings.Cut(l, ":"); ok && !strings.HasPrefix(l, "//") && !strings.Contains(k, " ") {
+			if !produced[k] {
+				t.Errorf("BACKUP_WHY_REMEDY key %q is produced by no BackupWhyCode branch", k)
+			}
+		}
+	}
+}
+
+// A past run's reason is the one recorded when it ran, not the one the
+// same server would get NOW: the fixture makes the two disagree (the
+// server has a local directory today; the record says it did not), so a
+// "simplification" that reads the live prediction fails here.
+func TestBackupScheduleAPI_lastRunWhyIsNeverRecomputed(t *testing.T) {
+	rep := &stubScheduleReporter{full: true, state: map[string]BackupScheduleState{}}
+	srv, id := newScheduleServer(t, rep)
+	if rec, body := doServersReq(t, srv, "PUT", "/api/servers/"+id+"/backup-schedule", `{"every":"6h"}`); rec.Code != 200 {
+		t.Fatalf("seed: code=%d body=%s", rec.Code, body)
+	}
+	if err := srv.baselineHistory.Append(BaselineRunRecord{ServerID: id, Kind: BaselineRunDump, Trigger: BaselineRunTriggerScheduled,
+		StartedAt: "2026-08-28T09:00:00Z", FinishedAt: "2026-08-28T09:04:00Z",
+		Why: BackupWhyNoLocalDir, WhyCode: "no_local_dir"}); err != nil {
+		t.Fatal(err)
+	}
+	_, body := doServersReqHeader(t, srv, "GET", "/api/baselines", "", id)
+	got := scheduleOf(t, body)
+	if got == nil || got.LastRun == nil || got.LastRun.Why != BackupWhyNoLocalDir || got.LastRun.WhyCode != "no_local_dir" {
+		t.Fatalf("last_run = %+v", got)
+	}
+	if got.NextMethodWhy == BackupWhyNoLocalDir {
+		t.Fatalf("the fixture must make the live prediction disagree with the record, got next_method_why = %q", got.NextMethodWhy)
 	}
 }

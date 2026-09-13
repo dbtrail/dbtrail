@@ -405,7 +405,7 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 	// error is gone and the page would show the cheap producer as if that is
 	// what ran.
 	degraded := ""
-	if method == console.BackupMethodFull && strings.Contains(why, "could not be read") {
+	if method == console.BackupMethodFull && strings.HasPrefix(why, console.BackupWhyUnreadablePrefix) {
 		degraded = why
 		slog.Warn("backup schedule: taking a full backup because the previous one could not be read",
 			"server", e.Name, "id", e.ID, "reason", why)
