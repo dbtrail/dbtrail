@@ -258,7 +258,7 @@ type stalenessWatcher struct {
 	unknownEdge *notify.Edge
 
 	// Injectable for tests — no ticker, no real DB, no real S3.
-	listBaselines func(ctx context.Context, source string) ([]reconstruct.BaselineFile, error)
+	listBaselines func(ctx context.Context, source string) (files []reconstruct.BaselineFile, skipped int, err error)
 	oldestDelta   func(ctx context.Context, dsn string) (status.DeltaFloor, error)
 }
 
@@ -266,7 +266,7 @@ func startStalenessWatch(ctx context.Context, n *watchNotifier, registry *consol
 	w := &stalenessWatcher{
 		n: n, registry: registry, bootDSN: bootDSN, globalDir: globalDir, globalS3: globalS3,
 		unknownEdge:   notify.NewEdge(0),
-		listBaselines: reconstruct.ListBaselines,
+		listBaselines: reconstruct.ListBaselinesReport,
 		oldestDelta:   oldestDeltaByDSN,
 	}
 	go func() {
@@ -333,15 +333,27 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 		// The edge identity is the (dsn, source) pair — see BaselineStale's
 		// doc. \x1f as separator: a control char no DSN or path contains.
 		edgeID := t.dsn + "\x1f" + t.source
-		files, err := w.listBaselines(ctx, t.source)
+		files, skipped, err := w.listBaselines(ctx, t.source)
+		if err == nil && skipped > 0 {
+			// A location read in PART is not evaluable either (#1601): the
+			// newest snapshot may sit in the directory that would not open,
+			// and grading the readable subset fires a baseline_stale alert
+			// on a healthy backup, the cry-wolf shape the coverage card
+			// refuses. Same edge as the unreadable source, so it is logged
+			// once and never resolves an active alert.
+			err = fmt.Errorf("%d snapshot director(y/ies) could not be read", skipped)
+		}
 		if err != nil {
 			// A configured-but-unreadable source (broken mount, revoked S3
 			// credentials, deleted bucket) disarms this whole check — that
 			// must never be silent: a broken window would go undetected, and
 			// an active alert freezes with a dead evaluator.
 			if w.unknownEdge.Fire("staleness-source:"+edgeID, "") {
-				slog.Warn("baseline staleness cannot be evaluated — the baseline source is unreadable; a broken restore window would go UNDETECTED for this server",
-					"server", t.name, "source", t.source, "error", err)
+				msg := "baseline staleness cannot be evaluated: the baseline source is unreadable; a broken restore window would go UNDETECTED for this server"
+				if skipped > 0 {
+					msg = "baseline staleness cannot be evaluated: the baseline source could only be read in part; a broken restore window would go UNDETECTED for this server"
+				}
+				slog.Warn(msg, "server", t.name, "source", t.source, "error", err)
 			}
 			continue
 		}

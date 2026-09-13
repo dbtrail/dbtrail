@@ -270,6 +270,11 @@ type Input struct {
 	// rendering a file indistinguishable from one whose other location was
 	// read and held nothing newer. Set only when NewerElsewhere is zero.
 	NewerElsewhereUnchecked string
+	// BaselineUnreadable counts the snapshot or schema directories under
+	// BaselineSource that could not be read when this file was generated
+	// (#1601). Non-zero means BaselineSnapshot is the newest snapshot that
+	// COULD be read, not necessarily the newest one there.
+	BaselineUnreadable int
 	// Follow records how, if at all, the state views reach a snapshot published
 	// after this file was generated (#1484, #1550). ApplyFollow is what sets
 	// it; see FollowMode for what each mode costs the reader.
@@ -808,6 +813,14 @@ func writeHeader(b *strings.Builder, in Input) {
 		b.WriteString("--   (no baseline source given: pass --baseline-dir or --baseline-s3)\n")
 	case len(in.Baselines) == 0:
 		fmt.Fprintf(b, "--   (none discoverable under %s)\n", commentSafe(in.BaselineSource))
+		if in.BaselineUnreadable > 0 {
+			// "None discoverable" over a directory that could not be opened
+			// is the issue's shape at its worst: the file asserts no backup is
+			// there while one exists (#1601).
+			fmt.Fprintf(b, "--   NOTE: %d snapshot director(y/ies) under this location could not be read\n"+
+				"--   (the log has the error), so a snapshot may exist there that this file\n"+
+				"--   does not name.\n", in.BaselineUnreadable)
+		}
 	case in.SnapshotScoped && in.BaselineSource == ".":
 		// The tarball's copy (#1583): paths spelled "./schema/table.parquet".
 		// Guarded by INTENT, not by the path value alone: `bintrail views
@@ -834,6 +847,15 @@ func writeHeader(b *strings.Builder, in Input) {
 		// constant; this one is not, which is the half that needed it.
 		fmt.Fprintf(b, "--   %s at %s (%d table(s))\n",
 			commentSafe(in.BaselineSource), in.BaselineSnapshot.UTC().Format(time.RFC3339), len(in.Baselines))
+		if in.BaselineUnreadable > 0 {
+			// Say the listing was partial. A file that pins a snapshot and says
+			// nothing reads as "this is the newest one here", and a newer
+			// snapshot in a directory the console could not read would then
+			// be found by nobody.
+			fmt.Fprintf(b, "--   NOTE: %d snapshot director(y/ies) under this location could not be read\n"+
+				"--   (the log has the error), so a newer snapshot than the one pinned\n"+
+				"--   above may exist there.\n", in.BaselineUnreadable)
+		}
 		switch {
 		case !in.NewerElsewhere.IsZero():
 			fmt.Fprintf(b, "--   NOTE: a newer snapshot (%s) exists under %s, which this file does\n"+

@@ -5359,7 +5359,9 @@ function backupSourceList(b) {
     el("code", { class: "stg-code", text: s.source }),
     s.error
       ? el("span", { class: "chip chip-mon", text: "unreadable" })
-      : el("span", { class: "bk-src-n", text: s.count + " file(s)" }))));
+      : (s.skipped > 0
+        ? el("span", { class: "chip chip-mon", text: "listed in part", title: s.skipped + " folder(s) under it could not be read" })
+        : el("span", { class: "bk-src-n", text: s.count + " file(s)" })))));
 }
 
 function backupKindWord(kind) { return kind === "s3" ? "S3" : "disk"; }
@@ -5391,14 +5393,18 @@ function backupWhereChip(b, sn) {
 // operator to check both.
 function backupIncompleteNotice(b) {
   if (!b || !b.incomplete) return null;
-  const bad = ((b.sources) || []).filter((s) => s.error);
+  // A location that answered in PART (#1601: a snapshot folder it could not
+  // open, skipped and counted) is as much a hazard as one that failed: the
+  // list is still a subset. Keying on error alone printed "0 of 1 locations
+  // could not be read" over such a listing and named nothing.
+  const bad = ((b.sources) || []).filter((s) => s.error || s.skipped > 0);
   const box = el("div", { class: "error-box" },
     el("div", { text: "Some backups are not listed: " + bad.length +
-      " of " + ((b.sources) || []).length + " locations could not be read." }));
+      " of " + ((b.sources) || []).length + " locations could not be read in full." }));
   bad.forEach((s) => box.append(el("div", { class: "bk-src" },
     el("span", { class: "bk-src-k", text: backupKindWord(s.kind) }),
     el("code", { class: "stg-code", text: s.source }),
-    el("span", { class: "bk-src-n", text: firstLine(s.error) }))));
+    el("span", { class: "bk-src-n", text: s.error ? firstLine(s.error) : "listed in part: " + s.skipped + " folder(s) could not be read" }))));
   return box;
 }
 

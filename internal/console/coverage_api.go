@@ -422,21 +422,20 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 			resp.RestoreReads = "inherited"
 		}
 
-		merged := listBaselinesMerged(r.Context(), baselineSourcesOf(b), reconstruct.ListBaselines)
+		merged := listBaselinesMerged(r.Context(), baselineSourcesOf(b), reconstruct.ListBaselinesReport)
 		// ANY location that FAILED TO LIST makes the verdict unknown, not just
 		// all of them. A partial listing can only understate coverage, and an
 		// understated coverage window names healthy tables as broken -- the
 		// cry-wolf failure status.DeltaFloor already refuses when archives
 		// cannot be attributed. Unknown is the honest third state.
 		//
-		// Bounded deliberately at whole-location failures: listBaselinesLocal
-		// warns and skips a snapshot subdirectory it cannot read and returns a
-		// nil error, so that location still counts as answered and this guard
-		// does not see it. Closing that hole means propagating a partial
-		// signal out of reconstruct.ListBaselines, which is upstream of here.
-		if merged.Listed < len(merged.Sources) || merged.Listed == 0 {
-			slog.Warn("console: coverage card could not list every backup location; the verdict is unknown rather than graded against a partial view",
-				"server", serverID(r), "listed", merged.Listed, "configured", len(merged.Sources))
+		// A location that answered with unreadable snapshot directories
+		// skipped is a partial answer too (#1601): the newest snapshot may sit
+		// in the directory that would not open, so the readable subset is not
+		// gradable either. reconstruct reports the skips for that reason.
+		if merged.Listed < len(merged.Sources) || merged.Listed == 0 || merged.Skipped > 0 {
+			slog.Warn("console: coverage card could not list every backup location in full; the verdict is unknown rather than graded against a partial view",
+				"server", serverID(r), "listed", merged.Listed, "configured", len(merged.Sources), "unreadable_directories", merged.Skipped)
 			resp.FullTableStatus = "unknown"
 			break
 		}

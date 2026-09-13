@@ -332,18 +332,33 @@ func SnapshotAt(ctx context.Context, source string, at time.Time) (tables []stri
 // Parquet footers) for `bintrail status`; keep the two in sync if the layout
 // ever changes.
 func ListBaselines(ctx context.Context, source string) ([]BaselineFile, error) {
+	files, _, err := ListBaselinesReport(ctx, source)
+	return files, err
+}
+
+// ListBaselinesReport is ListBaselines plus the number of snapshot or schema
+// directories the local walk could NOT read and skipped (#1601). A nil error
+// with skipped > 0 means "listed what it could", not "listed everything": the
+// listing may be missing whole snapshots, so a consumer that grades coverage
+// or names the newest snapshot must treat it as partial. os.ReadDir returns
+// this shape for a datadir at 750, a dangling mount, or a file-descriptor
+// burst under load. An s3 listing is one query and either answers whole or
+// fails, so it reports zero.
+func ListBaselinesReport(ctx context.Context, source string) (files []BaselineFile, skipped int, err error) {
 	if strings.HasPrefix(source, "s3://") {
-		return listBaselinesS3(ctx, source)
+		files, err = listBaselinesS3(ctx, source)
+		return files, 0, err
 	}
 	return listBaselinesLocal(source)
 }
 
-func listBaselinesLocal(baselineDir string) ([]BaselineFile, error) {
+func listBaselinesLocal(baselineDir string) ([]BaselineFile, int, error) {
 	entries, err := os.ReadDir(baselineDir)
 	if err != nil {
-		return nil, fmt.Errorf("read baseline directory %q: %w", baselineDir, err)
+		return nil, 0, fmt.Errorf("read baseline directory %q: %w", baselineDir, err)
 	}
 	var out []BaselineFile
+	skipped := 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -362,6 +377,7 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, error) {
 		dbDirs, err := os.ReadDir(snapDir)
 		if err != nil {
 			slog.Warn("baseline listing: skipping unreadable snapshot directory", "path", snapDir, "error", err)
+			skipped++
 			continue
 		}
 		for _, dbDir := range dbDirs {
@@ -372,6 +388,7 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, error) {
 			files, err := os.ReadDir(schemaDir)
 			if err != nil {
 				slog.Warn("baseline listing: skipping unreadable schema directory", "path", schemaDir, "error", err)
+				skipped++
 				continue
 			}
 			for _, f := range files {
@@ -388,7 +405,7 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, error) {
 		}
 	}
 	sortBaselineFiles(out)
-	return out, nil
+	return out, skipped, nil
 }
 
 func listBaselinesS3(ctx context.Context, s3URL string) ([]BaselineFile, error) {

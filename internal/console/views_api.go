@@ -115,6 +115,7 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		}
 	}
 	baseSrc := b.baselineSrc
+	baseUnreadable := 0
 	if req.PortableBaseline && b.baselineFallbackSrc != "" {
 		// Read from the bundle, never from the request: the two locations this
 		// server actually has are the only two it can be asked for, so a
@@ -123,10 +124,15 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 	}
 	if baseSrc != "" {
 		in.BaselineSource = baseSrc
-		files, err := reconstruct.ListBaselines(ctx, baseSrc)
+		files, skipped, err := reconstruct.ListBaselinesReport(ctx, baseSrc)
 		if err != nil {
 			return views.Input{}, fmt.Errorf("list baselines: %w", err)
 		}
+		// A partial read of the file's OWN location (#1601): the newest
+		// snapshot this file pins may not be the newest one there. Carried
+		// into the header, since silence reads as "this is the newest".
+		in.BaselineUnreadable = skipped
+		baseUnreadable = skipped
 		if len(files) > 0 {
 			newest := files[0].SnapshotTime // ListBaselines returns newest first
 			in.BaselineSnapshot = newest
@@ -136,17 +142,22 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 			// resolves for nobody. Named instead, best-effort.
 			if other := otherBaselineSource(b, baseSrc); other != "" {
 				octx, cancel := context.WithTimeout(ctx, baselineListTimeout)
-				othersFiles, oerr := reconstruct.ListBaselines(octx, other)
+				othersFiles, oskipped, oerr := reconstruct.ListBaselinesReport(octx, other)
 				cancel()
+				newerThere := len(othersFiles) > 0 && othersFiles[0].SnapshotTime.After(newest)
 				switch {
-				case oerr != nil:
-					slog.Warn("console: could not check the other backup location for a newer snapshot; the generated file says the check did not answer",
-						"source", other, "error", oerr)
+				case oerr != nil || (oskipped > 0 && !newerThere):
+					// A location that answered in part is an unanswered
+					// question for THIS purpose (#1601): the snapshot it could
+					// not read may be the newer one. A newer snapshot it DID
+					// read is still reported below, as the more useful fact.
+					slog.Warn("console: could not check the other backup location in full for a newer snapshot; the generated file says the check did not answer",
+						"source", other, "error", oerr, "unreadable_directories", oskipped)
 					// Carried into the file, not swallowed: a header that says
 					// nothing reads as "the other location holds nothing
 					// newer", and that reader stops looking.
 					in.NewerElsewhereUnchecked = other
-				case len(othersFiles) > 0 && othersFiles[0].SnapshotTime.After(newest):
+				case newerThere:
 					in.NewerElsewhere = othersFiles[0].SnapshotTime
 					in.NewerElsewhereSource = other
 					// The route, not just the fact (#1551 gave the download a
@@ -186,6 +197,18 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		}
 	}
 	if len(in.ArchiveSources) == 0 && len(in.Baselines) == 0 {
+		if baseUnreadable > 0 {
+			// Not "nothing here": the location holds snapshot directories
+			// this process could not open (#1601). "No baseline yet" would
+			// send the operator to take a backup they already have.
+			err := fmt.Errorf("list baselines: %d snapshot director(y/ies) under %s could not be read (the console log has the error); nothing readable to generate views over", baseUnreadable, baseSrc)
+			if archiveErr != nil {
+				// Two things broke; name both, or the operator fixes the
+				// permission and meets the second refusal cold.
+				err = fmt.Errorf("%w; and the archive listing failed too: %v", err, archiveErr)
+			}
+			return views.Input{}, err
+		}
 		if archiveErr != nil {
 			// Not "nothing archived": the registry could not be read, and
 			// with no baseline half to carry the file there is nothing

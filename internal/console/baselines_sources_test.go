@@ -24,11 +24,11 @@ func bf(ts string, schema, table, path string) reconstruct.BaselineFile {
 // fakeLister answers per source, so a test can put a local directory and a
 // bucket side by side without either existing.
 func fakeLister(bySource map[string][]reconstruct.BaselineFile, fail map[string]error) baselineLister {
-	return func(_ context.Context, src string) ([]reconstruct.BaselineFile, error) {
+	return func(_ context.Context, src string) ([]reconstruct.BaselineFile, int, error) {
 		if err, bad := fail[src]; bad {
-			return nil, err
+			return nil, 0, err
 		}
-		return bySource[src], nil
+		return bySource[src], 0, nil
 	}
 }
 

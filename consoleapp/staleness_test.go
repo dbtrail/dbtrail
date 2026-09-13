@@ -27,7 +27,7 @@ func TestStalenessWatcher_unattributableFloorNeverResolves(t *testing.T) {
 	floor := status.DeltaFloor{Hour: oldest}
 	w := &stalenessWatcher{
 		n: n, registry: reg, unknownEdge: notify.NewEdge(0),
-		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, error) { return files, nil },
+		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, int, error) { return files, 0, nil },
 		oldestDelta:   func(context.Context, string) (status.DeltaFloor, error) { return floor, nil },
 	}
 	w.runCycle(context.Background())
@@ -73,7 +73,7 @@ func TestStalenessWatcher_unattributableStillGradesInWindow(t *testing.T) {
 	files := []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: now.Add(-time.Hour)}}
 	w := &stalenessWatcher{
 		n: n, registry: reg, unknownEdge: notify.NewEdge(0),
-		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, error) { return files, nil },
+		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, int, error) { return files, 0, nil },
 		oldestDelta: func(context.Context, string) (status.DeltaFloor, error) {
 			return status.DeltaFloor{Hour: oldest, BelowIsUnknown: true}, nil
 		},
@@ -157,7 +157,7 @@ func TestStalenessWatcher_runCycle(t *testing.T) {
 	w := &stalenessWatcher{
 		n: n, registry: reg,
 		unknownEdge:   notify.NewEdge(0),
-		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, error) { return files, nil },
+		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, int, error) { return files, 0, nil },
 		oldestDelta:   func(context.Context, string) (status.DeltaFloor, error) { return status.DeltaFloor{Hour: oldest}, nil },
 	}
 
@@ -205,8 +205,8 @@ func TestStalenessWatcher_runCycle(t *testing.T) {
 	w.oldestDelta = func(context.Context, string) (status.DeltaFloor, error) {
 		return status.DeltaFloor{Hour: oldestAdvanced}, nil
 	}
-	w.listBaselines = func(context.Context, string) ([]reconstruct.BaselineFile, error) {
-		return nil, errors.New("bucket gone")
+	w.listBaselines = func(context.Context, string) ([]reconstruct.BaselineFile, int, error) {
+		return nil, 0, errors.New("bucket gone")
 	}
 	w.runCycle(context.Background())
 	if len(f.events) != 1 {
@@ -218,7 +218,7 @@ func TestStalenessWatcher_runCycle(t *testing.T) {
 		reconstruct.BaselineFile{Schema: "shop", Table: "legacy", SnapshotTime: now.Add(-time.Minute)},
 		reconstruct.BaselineFile{Schema: "shop", Table: "carts", SnapshotTime: now.Add(-time.Minute)},
 	)
-	w.listBaselines = func(context.Context, string) ([]reconstruct.BaselineFile, error) { return files, nil }
+	w.listBaselines = func(context.Context, string) ([]reconstruct.BaselineFile, int, error) { return files, 0, nil }
 	w.runCycle(context.Background())
 	if len(f.events) != 2 || !f.events[1].Resolved {
 		t.Fatalf("fresh baseline must resolve the alert: %+v", f.events)
@@ -237,7 +237,7 @@ func TestStalenessWatcher_agingNeverFires(t *testing.T) {
 	files := []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: oldest.Add(10 * time.Hour)}}
 	w := &stalenessWatcher{
 		n: n, registry: reg, unknownEdge: notify.NewEdge(0),
-		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, error) { return files, nil },
+		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, int, error) { return files, 0, nil },
 		oldestDelta:   func(context.Context, string) (status.DeltaFloor, error) { return status.DeltaFloor{Hour: oldest}, nil },
 	}
 	w.runCycle(context.Background())
@@ -258,11 +258,11 @@ func TestStalenessWatcher_targetIsolation(t *testing.T) {
 	n, f := testNotifier()
 	w := &stalenessWatcher{
 		n: n, registry: reg, unknownEdge: notify.NewEdge(0),
-		listBaselines: func(_ context.Context, source string) ([]reconstruct.BaselineFile, error) {
+		listBaselines: func(_ context.Context, source string) ([]reconstruct.BaselineFile, int, error) {
 			if source == "/a" {
-				return nil, errors.New("bucket gone")
+				return nil, 0, errors.New("bucket gone")
 			}
-			return []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: oldest.Add(-time.Hour)}}, nil
+			return []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: oldest.Add(-time.Hour)}}, 0, nil
 		},
 		oldestDelta: func(context.Context, string) (status.DeltaFloor, error) { return status.DeltaFloor{Hour: oldest}, nil },
 	}
@@ -285,12 +285,12 @@ func TestStalenessWatcher_sameDSNDifferentSources(t *testing.T) {
 	n, f := testNotifier()
 	w := &stalenessWatcher{
 		n: n, registry: reg, unknownEdge: notify.NewEdge(0),
-		listBaselines: func(_ context.Context, source string) ([]reconstruct.BaselineFile, error) {
+		listBaselines: func(_ context.Context, source string) ([]reconstruct.BaselineFile, int, error) {
 			ts := now.Add(-time.Hour)
 			if source == "/stale" {
 				ts = oldest.Add(-time.Hour)
 			}
-			return []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: ts}}, nil
+			return []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: ts}}, 0, nil
 		},
 		oldestDelta: func(context.Context, string) (status.DeltaFloor, error) { return status.DeltaFloor{Hour: oldest}, nil },
 	}
@@ -312,7 +312,7 @@ func TestStalenessWatcher_emptyListingKeepsAlert(t *testing.T) {
 	files := []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: oldest.Add(-time.Hour)}}
 	w := &stalenessWatcher{
 		n: n, registry: reg, unknownEdge: notify.NewEdge(0),
-		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, error) { return files, nil },
+		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, int, error) { return files, 0, nil },
 		oldestDelta:   func(context.Context, string) (status.DeltaFloor, error) { return status.DeltaFloor{Hour: oldest}, nil },
 	}
 	w.runCycle(context.Background())
@@ -329,5 +329,49 @@ func TestStalenessWatcher_emptyListingKeepsAlert(t *testing.T) {
 	w.runCycle(context.Background())
 	if len(f.events) != 1 {
 		t.Fatalf("unchanged broken condition must not re-fire after the gap: %+v", f.events)
+	}
+}
+
+// TestStalenessWatcher_partialListingIsNotGraded: a location that answered in
+// PART (#1601, a snapshot directory the walk could not open) is not evaluable,
+// like an unreadable one: the newest snapshot may sit in the directory that
+// would not open. So the readable subset neither FIRES baseline_stale (cry
+// wolf on a healthy backup) nor RESOLVES an active alert (false all-clear).
+func TestStalenessWatcher_partialListingIsNotGraded(t *testing.T) {
+	reg := testRegistryWithEntries(t, console.ServerEntry{Name: "a", DSN: "d1", BaselineDir: "/part"})
+	now := time.Now().UTC()
+	oldest := now.Add(-100 * time.Hour)
+	n, f := testNotifier()
+	stale := []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: oldest.Add(-time.Hour)}}
+	fresh := []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: now.Add(-time.Minute)}}
+	skipped := 1
+	w := &stalenessWatcher{
+		n: n, registry: reg, unknownEdge: notify.NewEdge(0),
+		listBaselines: func(context.Context, string) ([]reconstruct.BaselineFile, int, error) { return stale, skipped, nil },
+		oldestDelta:   func(context.Context, string) (status.DeltaFloor, error) { return status.DeltaFloor{Hour: oldest}, nil },
+	}
+	// Stale AND partial: no fire. Graded, this would be a critical alert.
+	w.runCycle(context.Background())
+	w.runCycle(context.Background())
+	if len(f.events) != 0 {
+		t.Fatalf("a partial listing was graded: %+v", f.events)
+	}
+	// Fully read and stale: the alert fires.
+	skipped = 0
+	w.runCycle(context.Background())
+	if len(f.events) != 1 || f.events[0].Severity != "critical" {
+		t.Fatalf("a full stale listing must fire: %+v", f.events)
+	}
+	// Fresh but partial: the alert must NOT resolve on a subset.
+	stale, skipped = fresh, 1
+	w.runCycle(context.Background())
+	if len(f.events) != 1 {
+		t.Fatalf("a partial listing must not resolve an active alert: %+v", f.events)
+	}
+	// Fresh and fully read: resolves.
+	skipped = 0
+	w.runCycle(context.Background())
+	if len(f.events) != 2 || !f.events[1].Resolved {
+		t.Fatalf("a full fresh listing must resolve: %+v", f.events)
 	}
 }
