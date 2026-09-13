@@ -4175,6 +4175,15 @@ function s3Parts(url) {
   return { bucket: m[1], prefix: m[2].replace(/\/+$/, "") };
 }
 
+// retentionTooShort: an age rule shorter than the schedule expires the
+// newest complete backup before the next one lands, leaving moments with
+// no backup at all. Equal counts: a 1-day rule under a 1-day schedule
+// expires at the very moment the next run is due, not after it.
+function retentionTooShort(every, days) {
+  const minutes = everyMinutes(every);
+  return minutes > 0 && days * 1440 <= minutes;
+}
+
 // lifecycleRuleFor renders the bucket rule that expires objects under the
 // backup prefix after `days`. Null at the bucket root: a rule with an empty
 // prefix would expire everything in the bucket, the archived changes
@@ -4228,7 +4237,7 @@ function s3RetentionBox(srv) {
     // The rule expires by AGE. Shorter than the schedule, it removes the
     // newest complete backup before the next one lands, and there are
     // moments with no backup at all.
-    if (every > 0 && d * 1440 <= every) {
+    if (retentionTooShort(srv.schedule_every, d)) {
       const least = Math.floor(every / 1440) + 1;
       warn.hidden = false;
       warn.textContent = "With backups every " + srv.schedule_every + " and this rule at " + d + " day" + (d === 1 ? "" : "s") +
