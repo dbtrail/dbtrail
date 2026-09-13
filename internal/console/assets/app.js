@@ -5654,7 +5654,7 @@ const BACKUP_KIND_LABEL = { dump: "full copy of the source", refresh: "automatic
 // happened. The first two are the setting to change, said as such; the
 // rest carry the run's own reason, which names the error.
 const BACKUP_WHY_REMEDY = {
-  no_index: "This server has no index connection, so there are no recorded changes to update from: every scheduled run reads your database in full.",
+  no_index: "Set an index connection for this server (Servers) and the next run updates from the recorded changes instead of reading your database in full; without one there are no recorded changes to update from.",
   no_local_dir: "Set a Backup dir for this server (Backup settings) and the next run updates from the recorded changes instead of reading your database in full.",
   first_backup: "First backup: there was nothing to update from yet. The next run updates from it.",
 };
@@ -5675,15 +5675,19 @@ function backupWhyLine(why, code, remedy) {
   // The fold's own refusal rides inside the parentheses of a fallback
   // reason; it is the part backupFoldError knows how to say (its bare
   // --allow-gaps hint is a CLI flag), the wrapper is said here.
-  const inner = /^[^(]*\((.*)\)$/.exec(why);
-  // Said inside parentheses, so no closing period; and the "pick a later
-  // moment" advice backupFoldError adds is Time-travel's, not a schedule's.
-  const said = (t) => backupFoldError(t).replace(/; pick a later moment\.?$/, "").replace(/\.$/, "");
+  // [\s\S], not ".": a fold refused on several tables joins one line per
+  // table, and "." stops at the first newline, which skipped this branch
+  // and showed the raw text (a CLI flag inside) for the common gap case.
+  const inner = /^[^(]*\(([\s\S]*)\)$/.exec(why);
+  // The fold's message follows as its own sentence rather than inside
+  // parentheses: backupFoldError may turn it into two sentences. Its
+  // "pick a later moment" advice is Time-travel's, not a schedule's.
+  const said = (t) => backupFoldError(t).replace(/; pick a later moment\.?(?=\n|$)/g, ".");
   let out;
   if (code === "fold_refused" && inner) {
-    out = "The update from the recorded changes was refused (" + said(inner[1]) + ") so a full backup was taken instead.";
+    out = "The update from the recorded changes was refused, so a full backup was taken instead. Reason: " + said(inner[1]);
   } else if (code === "fold_crashed" && inner) {
-    out = "The update from the recorded changes hit an internal error (" + said(inner[1].replace(/^internal error:?\s*/, "")) + ") so a full backup was taken instead.";
+    out = "The update from the recorded changes hit an internal error, so a full backup was taken instead. Error: " + said(inner[1].replace(/^internal error:?\s*/, ""));
   } else if (code === "previous_unreadable") {
     out = why.charAt(0).toUpperCase() + why.slice(1);
   } else {
@@ -6129,7 +6133,9 @@ function backupScheduleCard(cur, b) {
       // the setting that turns the next one into an update (#1604). After
       // BOTH branches: a full read that then failed is the run whose
       // operator most needs to know why it was a full read.
-      if (run.method !== "refresh" && run.why) {
+      // Not for a fallback: the red alarm below already carries the same
+      // refusal, and the card is in alarm precisely then.
+      if (run.method !== "refresh" && run.why && !(fb && (run.why_code === "fold_refused" || run.why_code === "fold_crashed"))) {
         body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code, true) }));
       }
     }

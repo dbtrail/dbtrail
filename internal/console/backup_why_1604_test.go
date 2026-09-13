@@ -1,7 +1,11 @@
 package console
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -117,8 +121,11 @@ func TestBackupWhyRemedyKeysMatchTheCodes(t *testing.T) {
 	// The card's remedies and the detail's facts cover the same codes, and
 	// the three reasons that carry the run's OWN message stay out of both:
 	// a fixed sentence there would replace the recorded error with prose.
-	if strings.Join(keys(block), ",") != strings.Join(keys(fact), ",") {
-		t.Errorf("remedy keys %v and fact keys %v differ", keys(block), keys(fact))
+	rk, fk := keys(block), keys(fact)
+	sort.Strings(rk)
+	sort.Strings(fk)
+	if strings.Join(rk, ",") != strings.Join(fk, ",") {
+		t.Errorf("remedy keys %v and fact keys %v differ", rk, fk)
 	}
 	for _, own := range []string{"previous_unreadable", "fold_refused", "fold_crashed"} {
 		if strings.Contains(block, own+":") || strings.Contains(fact, own+":") {
@@ -149,5 +156,81 @@ func TestBackupScheduleAPI_lastRunWhyIsNeverRecomputed(t *testing.T) {
 	}
 	if got.NextMethodWhy == BackupWhyNoLocalDir {
 		t.Fatalf("the fixture must make the live prediction disagree with the record, got next_method_why = %q", got.NextMethodWhy)
+	}
+}
+
+// backupWhyLine, EXECUTED against the strings the daemon writes: the fixed
+// remedy and fact tables, and the three own-message reasons, one of them
+// the common multi-table fold refusal whose message spans lines and
+// carries a CLI flag the page must translate, not show.
+func TestBackupWhyLineExecuted(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv(requireNodeEnv) != "" {
+			t.Fatalf("%s is set and node is not on PATH", requireNodeEnv)
+		}
+		t.Skip("node is not installed")
+	}
+	raw, err := os.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+	block := func(name string) string {
+		i := strings.Index(js, "const "+name+" = {")
+		if i < 0 {
+			t.Fatalf("%s is gone from app.js", name)
+		}
+		return js[i:i+strings.Index(js[i:], "};")+2] + "\n"
+	}
+	// Joined with newlines: functionBody ends at the next declaration, so
+	// a body's trailing comment would otherwise swallow the next "function".
+	script := block("BACKUP_WHY_REMEDY") + block("BACKUP_WHY_FACT") +
+		functionBody(t, js, "function backupFoldError(") + "\n" +
+		functionBody(t, js, "function backupWhyLine(") + "\n" + `
+const gap = "` + BackupWhyFoldRefusedPrefix + ` (shop.orders: reconstruct: capture gap for shop.orders; pass --allow-gaps to proceed with a known-incomplete reconstruction: gap\nshop.items: schema changed since the baseline (added: c1): schema changed)";
+const out = {
+  remedy: backupWhyLine("` + BackupWhyNoLocalDir + `", "no_local_dir", true),
+  fact: backupWhyLine("` + BackupWhyNoLocalDir + `", "no_local_dir", false),
+  unreadable: backupWhyLine("` + BackupWhyUnreadablePrefix + ` from the backup destination (boom), so a full backup is taken instead", "previous_unreadable", true),
+  gap: backupWhyLine(gap, "fold_refused", true),
+  crash: backupWhyLine("` + BackupWhyFoldCrashedPrefix + ` (internal error: nil map)", "fold_crashed", false),
+  unknown: backupWhyLine("something a newer daemon wrote", "", true),
+  empty: backupWhyLine("", "no_index", true),
+};
+console.log(JSON.stringify(out));
+`
+	path := filepath.Join(t.TempDir(), "why.js")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	var got struct{ Remedy, Fact, Unreadable, Gap, Crash, Unknown, Empty string }
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	if !strings.Contains(got.Remedy, "the next run updates") || strings.Contains(got.Fact, "next run") || !strings.Contains(got.Fact, "did not have at the time") {
+		t.Errorf("remedy/fact split: remedy=%q fact=%q", got.Remedy, got.Fact)
+	}
+	if got.Unreadable != "The previous backup could not be read from the backup destination (boom), so a full backup is taken instead." {
+		t.Errorf("unreadable = %q", got.Unreadable)
+	}
+	if !strings.HasPrefix(got.Gap, "The update from the recorded changes was refused, so a full backup was taken instead. Reason: shop.orders") ||
+		strings.Contains(got.Gap, "--allow-gaps") || strings.Contains(got.Gap, "pick a later moment") || !strings.Contains(got.Gap, "shop.items") {
+		t.Errorf("multi-table refusal = %q", got.Gap)
+	}
+	if got.Crash != "The update from the recorded changes hit an internal error, so a full backup was taken instead. Error: nil map." {
+		t.Errorf("crash = %q", got.Crash)
+	}
+	if got.Unknown != "Full backup because something a newer daemon wrote." || got.Empty != "" {
+		t.Errorf("unknown=%q empty=%q", got.Unknown, got.Empty)
+	}
+	for k, v := range map[string]string{"remedy": got.Remedy, "fact": got.Fact, "unreadable": got.Unreadable, "gap": got.Gap, "crash": got.Crash, "unknown": got.Unknown} {
+		if strings.Contains(v, "..") || strings.Contains(v, "\u2014") {
+			t.Errorf("%s: double period or em dash: %q", k, v)
+		}
 	}
 }
