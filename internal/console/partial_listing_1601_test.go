@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/DATA-DOG/go-sqlmock"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,5 +208,30 @@ func TestViewsFile_allUnreadableIsNotNothingHere(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "could not be read") {
 		t.Errorf("the refusal does not name the unreadable directory: %s", body)
+	}
+}
+
+// When BOTH legs fail, the refusal names both: an operator who fixes the
+// directory permission must not meet the archive refusal cold afterwards.
+func TestViewsFile_allUnreadableNamesTheArchiveFailureToo(t *testing.T) {
+	local := t.TempDir()
+	writeBaselineFixture(t, local, "2026-06-10T12-00-00Z", "shop", "orders.parquet")
+	unreadableDir(t, filepath.Join(local, "2026-06-10T12-00-00Z"))
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("FROM archive_state").WillReturnError(errors.New("archive_state: access denied"))
+
+	srv := newBaselineServerWithFallback(t, local, "")
+	srv.cm.boot.db = db
+	rec, body := doServersReq(t, srv, "GET", "/api/views.sql", "")
+	if rec.Code == 404 || rec.Code == 200 {
+		t.Fatalf("code = %d, body = %s", rec.Code, firstLines(string(body), 8))
+	}
+	if !strings.Contains(string(body), "could not be read") || !strings.Contains(string(body), "access denied") {
+		t.Errorf("the refusal must name BOTH the unreadable directory and the archive failure: %s", body)
 	}
 }
