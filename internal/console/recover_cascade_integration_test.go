@@ -144,8 +144,8 @@ func TestIntegrationRecoverCascade_incompleteWithArchives(t *testing.T) {
 	if resp.Complete {
 		t.Errorf("result should be INCOMPLETE when archives exist and no parent matched")
 	}
-	if len(resp.Incomplete) == 0 {
-		t.Errorf("incomplete[] should carry the archived-partition caveat")
+	if joined := strings.Join(resp.Incomplete, " "); !strings.Contains(joined, "no parent DELETE or UPDATE matched") || !strings.Contains(joined, "no-archive") {
+		t.Errorf("incomplete[] should carry the archived-parent caveat naming the exclusion, got %v", resp.Incomplete)
 	}
 }
 

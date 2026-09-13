@@ -257,7 +257,9 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 			SourceResolver: func(ctx context.Context, _ *sql.DB) ([]string, error) {
 				srcs, discoveryFailed := t.archiveSources(ctx)
 				if discoveryFailed {
-					return nil, errors.New("archive source discovery failed")
+					// Target.archiveSources folds the cause into one bit; name the
+					// two it can be so the caveat is actionable.
+					return nil, errors.New("archive source discovery failed (BINTRAIL_ARCHIVE_S3 without BINTRAIL_ID, or archive_state unreadable)")
 				}
 				return srcs, nil
 			}}
@@ -322,8 +324,9 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 				if len(parentEvents) == 0 {
 					caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, and this server excludes its archived partitions (no-archive); the changed parent may be archived")
 				} else {
-					toolWarnings = append(toolWarnings,
-						"this server excludes its archived partitions (no-archive), so cascade recovery searched the live index only; a child whose events were archived may be missed")
+					// A coverage decision, so a hard caveat (allow_incomplete accepts it).
+					caveats = append(caveats,
+						"the index has archived partitions and this server excludes them (no-archive); a child whose events were archived is not reconstructed")
 				}
 			}
 		}
@@ -359,7 +362,7 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 					MaxDepth:        maxDepth,
 					Baseline:        baselineProvider,
 					ArchivesPresent: archivesExist,
-					WindowCovered:   cascade.WindowProbe(t.DB, t.DBName, t.NoArchive),
+					WindowCovered:   cascade.WindowProbe(t.DB, t.DBName, fetcher),
 					PKMetas:         cascade.PKMetasFromResolver(resolver),
 				})
 				results = append(results, r)
@@ -436,6 +439,7 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 		// tool-surface advisories accumulated above — which stay OUT of the
 		// script so it remains byte-comparable with the other surfaces'.
 		warnings := append(append([]string{}, res.Warnings...), toolWarnings...)
+		warnings = append(warnings, fetcher.Notes()...)
 
 		out := recoverCascadeResult{
 			Schema:           args.Schema,

@@ -623,8 +623,8 @@ func TestPhase2_archivesSkipBaselineWithoutProbeWidensScan(t *testing.T) {
 	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:10"] {
 		t.Fatalf("no probe: augmentation skipped but the lookback scan must still find child:10; got %v", res.Victims)
 	}
-	if joined := strings.Join(res.Incomplete, " "); res.Complete() || !strings.Contains(joined, "no live-window check is wired") {
-		t.Errorf("no probe must keep the old existence caveat and say the check is not wired; Incomplete=%v", res.Incomplete)
+	if joined := strings.Join(res.Incomplete, " "); res.Complete() || !strings.Contains(joined, "the window check could not run") {
+		t.Errorf("no probe must keep the old existence caveat and say the check could not run; Incomplete=%v", res.Incomplete)
 	}
 }
 
@@ -671,7 +671,7 @@ func TestWindowProbe_captureGap(t *testing.T) {
 	h := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Hour)
 	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h, h.Add(time.Hour), h.Add(2 * time.Hour)})
 	since, until := h.Add(10*time.Minute), h.Add(2*time.Hour+10*time.Minute)
-	probe := cascade.WindowProbe(db, dbName, true)
+	probe := cascade.WindowProbe(db, dbName, query.New(db))
 
 	if ok, err := probe(ctx, since, until); err != nil || !ok {
 		t.Fatalf("empty stream_state (file-mode index) must be contiguous: %v, %v", ok, err)
@@ -697,7 +697,7 @@ func TestWindowProbe_captureGap(t *testing.T) {
 	if ok, err := probe(ctx, h.Add(time.Hour+time.Minute), until); err != nil || ok {
 		t.Errorf("an unevaluable capture-gap state must not be read as contiguous: %v, %v", ok, err)
 	}
-	if cascade.WindowProbe(db, "", true) != nil || cascade.WindowProbe(nil, dbName, true) != nil {
+	if cascade.WindowProbe(db, "", query.New(db)) != nil || cascade.WindowProbe(nil, dbName, query.New(db)) != nil {
 		t.Errorf("no database name or no handle must yield no probe (fail-closed default), not a probe that cannot run")
 	}
 }
@@ -866,11 +866,23 @@ func TestPhase1_childOnlyInArchiveFoundByMergedFetcher(t *testing.T) {
 
 	// Coverage probe: the archived hour counts when the scan reads archives,
 	// and is a gap when it does not.
-	if ok, err := cascade.WindowProbe(db, dbName, false)(context.Background(), archivedAt, T); err != nil || !ok {
+	if ok, err := cascade.WindowProbe(db, dbName, merged)(context.Background(), archivedAt, T); err != nil || !ok {
 		t.Errorf("archived hour must be covered for an archive-reading scan: %v, %v", ok, err)
 	}
-	if ok, err := cascade.WindowProbe(db, dbName, true)(context.Background(), archivedAt, T); err != nil || ok {
+	if ok, err := cascade.WindowProbe(db, dbName, live)(context.Background(), archivedAt, T); err != nil || ok {
 		t.Errorf("archived hour must be a gap for a live-only scan: %v, %v", ok, err)
+	}
+	// The probe credits ONLY what the fetcher opens: a fetcher confined to
+	// the live index (NoArchive) gets no credit for the very same archive.
+	confined := &query.MergedFetcher{DB: db, Engine: live, DBName: dbName, NoArchive: true}
+	if ok, err := cascade.WindowProbe(db, dbName, confined)(context.Background(), archivedAt, T); err != nil || ok {
+		t.Errorf("a NoArchive fetcher must get no archive credit: %v, %v", ok, err)
+	}
+	// And a fetcher whose discovery FAILED makes the probe fail, never pass.
+	broken := &query.MergedFetcher{DB: db, Engine: live, DBName: dbName, ArchiveFetcher: parquetquery.Fetch,
+		SourceResolver: func(context.Context, *sql.DB) ([]string, error) { return nil, errors.New("env incomplete") }}
+	if ok, err := cascade.WindowProbe(db, dbName, broken)(context.Background(), archivedAt, T); err == nil || ok {
+		t.Errorf("a failed discovery must fail the probe: %v, %v", ok, err)
 	}
 }
 
@@ -889,10 +901,83 @@ func TestPhase1_unreadableArchiveIsAnOperationalFailure(t *testing.T) {
 	}
 	merged := &query.MergedFetcher{DB: db, Engine: query.New(db), DBName: dbName, ArchiveFetcher: failing}
 	res, err := cascade.SynthesizeVictims(context.Background(), merged, cascadeFK(dbName), parentDelete(dbName, T), cascade.Options{})
-	if err == nil || !strings.Contains(err.Error(), "could not be read") {
-		t.Fatalf("an unreadable archive must surface as an operational error, got err=%v", err)
+	var are *query.ArchiveReadError
+	if err == nil || !errors.As(err, &are) || !strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("an unreadable archive must surface as a typed operational error, got err=%v", err)
 	}
 	if res.Complete() || !strings.Contains(strings.Join(res.Incomplete, " "), "partial") {
 		t.Errorf("the result must be flagged partial; Incomplete=%v", res.Incomplete)
+	}
+}
+
+// TestPhase2_skipModeBaselineIsAMembershipFilter pins the guard on the
+// widened skip-mode scan: a child whose latest event predates the snapshot is
+// kept only if the snapshot still lists it under this parent. Absent from the
+// snapshot = removed before it (an unlogged cascade, say) = not restored. A
+// post-snapshot change is always a candidate, by position when the baseline
+// recorded one — a statement executed just before the snapshot but logged
+// after it counts as after (#797) — else by timestamp. A truncated baseline
+// cannot filter and the plain Phase-1 scan stands.
+func TestPhase2_skipModeBaselineIsAMembershipFilter(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	eng := query.New(db)
+	T := time.Now().UTC()
+	h := T.Add(-2 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
+	ts := h.Add(10 * time.Minute).Format("2006-01-02 15:04:05")
+	// 10: pre-snapshot INSERT, absent from the snapshot → removed before it.
+	testutil.InsertEvent(t, db, "b.000001", 10, 20, ts, nil, dbName, "child", 1 /*INSERT*/, "10", nil, nil, []byte(`{"id":10,"pid":1}`))
+	// 11: pre-snapshot INSERT, present in the snapshot → kept.
+	testutil.InsertEvent(t, db, "b.000001", 20, 30, ts, nil, dbName, "child", 1 /*INSERT*/, "11", nil, nil, []byte(`{"id":11,"pid":1}`))
+	// 12: executed before the snapshot by timestamp, logged AFTER its recorded position → a post-snapshot change, kept.
+	testutil.InsertEvent(t, db, "b.000001", 900, 950, ts, nil, dbName, "child", 1 /*INSERT*/, "12", nil, nil, []byte(`{"id":12,"pid":1}`))
+
+	snap := T.Add(-30 * time.Minute)
+	gapped := &liveWindowProbe{ok: false}
+	fb := &fakeBaseline{ok: true, snap: snap, pos: &query.BinlogPos{File: "b.000001", Pos: 500},
+		rows: []cascade.BaselineRow{{PKValues: "11", Row: map[string]any{"id": int64(11), "pid": int64(1)}}}}
+	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fb, WindowCovered: gapped.probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if k := victimKeys(res.Victims); len(res.Victims) != 2 || !k["child:11"] || !k["child:12"] {
+		t.Fatalf("want 11 (in snapshot) and 12 (after the recorded position), never 10 (gone by the snapshot); got %v", res.Victims)
+	}
+
+	// Truncated baseline: no filter, plain Phase-1 — 10 comes back (flagged).
+	fbTrunc := &fakeBaseline{ok: true, snap: snap, trunc: true,
+		rows: []cascade.BaselineRow{{PKValues: "11", Row: map[string]any{"id": int64(11), "pid": int64(1)}}}}
+	res, err = cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fbTrunc, WindowCovered: gapped.probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims (trunc): %v", err)
+	}
+	if len(res.Victims) != 3 || res.Complete() {
+		t.Errorf("a truncated baseline cannot filter: plain Phase-1 scan, flagged; got %d victims, complete=%v", len(res.Victims), res.Complete())
+	}
+}
+
+// TestPhase2_probeMemoizedPerWindowHour pins that the coverage probe runs once
+// per hour-truncated (snapshot, T), not once per (edge, parent key).
+func TestPhase2_probeMemoizedPerWindowHour(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	eng := query.New(db)
+	T := time.Now().UTC().Truncate(time.Hour).Add(30 * time.Minute)
+	fb := &fakeBaseline{ok: true, snap: T.Add(-10 * time.Minute)}
+	probe := &liveWindowProbe{ok: true}
+	roots := append(parentDelete(dbName, T), parentDelete(dbName, T.Add(5*time.Minute))...)
+	roots[1].PKValues = "2"
+	roots[1].RowBefore = map[string]any{"id": json.Number("2")}
+	if _, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), roots,
+		cascade.Options{Baseline: fb, WindowCovered: probe.probe}); err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if probe.calls != 1 {
+		t.Errorf("two roots in the same hour must share one probe; calls=%d", probe.calls)
 	}
 }

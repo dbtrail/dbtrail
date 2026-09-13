@@ -494,8 +494,9 @@ bintrail recover-cascade --index-dsn "..." \
   because a child re-parented or deleted in that gap can't be told apart from an
   untouched one; and when one parent has more cascade victims than the
   per-parent cap. When augmentation is skipped the child scan falls back to the
-  plain lookback window. A table with no baseline keeps the Phase-1 window
-  limit. When the result is
+  plain lookback window (widened to the snapshot when that is older), with the
+  baseline still used as a membership filter for children whose last event
+  predates it. A table with no baseline keeps the Phase-1 window limit. When the result is
   provably partial the output is flagged `INCOMPLETE RECOVERY` and the command
   exits non-zero unless `--allow-incomplete` is given. If you have already
   re-created a deleted parent, remove its `INSERT` from the output —

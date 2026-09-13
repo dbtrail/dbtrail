@@ -229,7 +229,7 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 		Limit:      rcLimit,
 	})
 	if err != nil {
-		return fmt.Errorf("fetch parent deletes: %w (pass --no-archive to search the live index only)", err)
+		return fmt.Errorf("fetch parent deletes: %w%s", err, archiveReadHint(err))
 	}
 	// Parent UPDATEs are CANDIDATES only: the synthesis keeps just the ones that
 	// actually moved a referenced key protected by an ON UPDATE CASCADE / SET
@@ -248,7 +248,7 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 		Limit:      rcLimit,
 	})
 	if err != nil {
-		return fmt.Errorf("fetch parent updates: %w (pass --no-archive to search the live index only)", err)
+		return fmt.Errorf("fetch parent updates: %w%s", err, archiveReadHint(err))
 	}
 	parentEvents := append(append([]query.ResultRow{}, parentDeletes...), parentUpdates...)
 
@@ -276,16 +276,20 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	// excluded them. ArchivesPresent still feeds the gate's fallback rule
 	// for a surface with no coverage probe.
 	archivesExist := false
-	liveWindow := cascade.WindowProbe(db, dbName, rcNoArchive)
+	liveWindow := cascade.WindowProbe(db, dbName, fetcher)
 	if archives, aerr := query.ResolveArchiveSources(cmd.Context(), db); aerr != nil {
 		caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
 	} else if len(archives) > 0 {
 		archivesExist = true
+		// Excluding archives that exist is a coverage decision the operator
+		// made, and the result is partial by that decision: a hard caveat,
+		// so `complete` never reads true over evidence deliberately unread
+		// (--allow-incomplete accepts it explicitly).
 		if rcNoArchive {
 			if len(parentEvents) == 0 {
 				caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, and --no-archive excluded the index's archived partitions; the changed parent may be archived")
 			} else {
-				slog.Warn("--no-archive: the index's archived partitions are not searched; a child whose events were archived may be missed")
+				caveats = append(caveats, "the index has archived partitions and --no-archive excluded them; a child whose events were archived is not reconstructed")
 			}
 		}
 	}
@@ -351,6 +355,7 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	// is COMPLETE despite them, so they are kept OUT of caveats and never reach
 	// cascadeExit's exit-code gate below.
 	warnings := res.Warnings
+	warnings = append(warnings, fetcher.Notes()...)
 
 	// Only the parent UPDATEs the synthesis confirmed as cascading are reversed
 	// (KeyUpdateParents ⊆ parentUpdates); the rest of the UPDATE fetch was
@@ -518,4 +523,16 @@ func cascadeExit(dest string, synthErr error, caveats []string, allowIncomplete 
 		return fmt.Errorf("SQL written to %s but the recovery is INCOMPLETE (%d caveat(s) above); review, then re-run with --allow-incomplete to exit 0", dest, len(caveats))
 	}
 	return nil
+}
+
+// archiveReadHint names the escape hatch ONLY for the error it applies to:
+// an archive the host cannot read. A connection error or a timeout gets no
+// hint — --no-archive would not fix those, and on the read error it turns a
+// loud refusal into a run whose output then carries the exclusion caveat.
+func archiveReadHint(err error) string {
+	var are *query.ArchiveReadError
+	if errors.As(err, &are) {
+		return " (pass --no-archive to search the live index only; the output is then flagged incomplete)"
+	}
+	return ""
 }

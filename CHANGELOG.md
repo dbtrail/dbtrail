@@ -20,8 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server confines the scan to the live index and keeps the old
   archives-excluded caveats. An archive that resolved but cannot be read makes
   the scan refuse, like `recover`, rather than emit a script missing part of the
-  evidence; a failed discovery proceeds live-only and is reported as unknown
-  coverage, as before.
+  evidence; a failed discovery proceeds live-only, the coverage probe then
+  refuses to credit archives the scan never opened, and the caveat says so.
+  Every scan's rotated-and-unarchived hours (and archives the planner proved
+  unnecessary) are reported as advisory notes.
 - **The schema-drift refusal names the schema-era cause, and what it costs**
   (#1617). `recover` refuses to emit reversal SQL that would name a column the
   latest schema snapshot no longer has (#601). The refusal is right; its

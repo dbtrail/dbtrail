@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -271,11 +272,13 @@ func TestRecoverCascade_incompleteExit(t *testing.T) {
 	}
 }
 
-// TestRecoverCascade_archivesWithParentsNotBlocking pins the cry-wolf fix: when
-// parents ARE found, the presence of archives is a warning, NOT a hard caveat —
-// so a routine archived deployment doesn't force --allow-incomplete (which would
-// mask the real coverage gaps). Also exercises --pk filtering (pk=1 matches).
-func TestRecoverCascade_archivesWithParentsNotBlocking(t *testing.T) {
+// TestRecoverCascade_noArchiveWithArchivesIsFlagged: since #1615 archives are
+// READ by default, so --no-archive on an index that has them is a coverage
+// decision — the run is flagged incomplete (children whose events were
+// archived are not reconstructed) and --allow-incomplete accepts it. Before,
+// with archives never read, their mere presence was a warning to avoid
+// cry-wolf; that rationale is gone. Also exercises --pk filtering (pk=1).
+func TestRecoverCascade_noArchiveWithArchivesIsFlagged(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	db, dbName, dsn := seedCascadeIndex(t)
 	addArchiveRow(t, db)
@@ -285,12 +288,16 @@ func TestRecoverCascade_archivesWithParentsNotBlocking(t *testing.T) {
 	rcPK = "1"         // matches the seeded parent delete → parents found
 	rcNoArchive = true // the caveat under test is the one --no-archive keeps (#1615 reads archives otherwise)
 
-	if err := runCascadeCmd(t); err != nil {
-		t.Fatalf("archives present but parents found must NOT block (cry-wolf), got: %v", err)
+	if err := runCascadeCmd(t); err == nil {
+		t.Fatal("--no-archive over an index with archives is a coverage decision and must exit non-zero without --allow-incomplete")
 	}
 	b, _ := os.ReadFile(out)
-	if strings.Contains(string(b), "INCOMPLETE RECOVERY") {
-		t.Errorf("found-parents + archives must not flag INCOMPLETE\n---\n%s", string(b))
+	if !strings.Contains(string(b), "INCOMPLETE RECOVERY") || !strings.Contains(string(b), "--no-archive excluded them") {
+		t.Errorf("the output must flag the exclusion\n---\n%s", string(b))
+	}
+	rcAllowIncomplete = true
+	if err := runCascadeCmd(t); err != nil {
+		t.Fatalf("--allow-incomplete accepts the exclusion, got: %v", err)
 	}
 }
 
@@ -808,14 +815,15 @@ func TestRecoverCascade_childOnlyInArchiveRecovered(t *testing.T) {
 	}
 
 	// --no-archive: same index, live scan only → the child is invisible and
-	// the operator is told archives were excluded.
+	// the run is flagged: archives exist and were excluded.
 	rcNoArchive = true
+	rcAllowIncomplete = true
 	if err := runCascadeCmd(t); err != nil {
-		t.Fatalf("runRecoverCascade --no-archive: %v", err)
+		t.Fatalf("runRecoverCascade --no-archive --allow-incomplete: %v", err)
 	}
 	b, _ = os.ReadFile(out)
-	if strings.Contains(string(b), "archived-10") {
-		t.Errorf("--no-archive must not read the archive\n---\n%s", string(b))
+	if strings.Contains(string(b), "archived-10") || !strings.Contains(string(b), "INCOMPLETE RECOVERY") {
+		t.Errorf("--no-archive must not read the archive and must flag the exclusion\n---\n%s", string(b))
 	}
 }
 
@@ -834,10 +842,14 @@ func TestRecoverCascade_unreadableArchiveRefuses(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unreadable archive source must refuse, not silently narrow the scan")
 	}
-	for _, want := range []string{"could not be read", "--no-archive"} {
+	for _, want := range []string{"could not be read", "pass --no-archive"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should contain %q, got: %v", want, err)
 		}
+	}
+	// The hint is for THAT error only: a plain connection failure gets none.
+	if hint := archiveReadHint(errors.New("dial tcp: connection refused")); hint != "" {
+		t.Errorf("an unrelated error must not carry the --no-archive hint: %q", hint)
 	}
 }
 

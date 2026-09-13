@@ -4,21 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"time"
 )
 
 // WindowCovered reports whether a scan of [since, until] can be complete:
-// every hour of the window is held by a live partition or, unless noArchive,
-// by a registered archive. noArchive mirrors the caller's own read — a
-// --no-archive or profile-confined scan cannot see an archived hour, so for it
-// that hour is a gap whether or not a Parquet file holds it (#1615).
+// every hour of the window is held by a live partition or by an archive in
+// scope. scope names the archives the scan will actually OPEN
+// (MergedFetcher.Scope) — coverage recorded by an archive the read does not
+// open is not coverage (#1232), so a --no-archive or profile-confined scan
+// passes a scope that opens nothing and an archived hour is then a gap for it
+// whether or not a Parquet file holds it (#1615).
 //
-// Archive coverage comes from archive_state labels, the same registry the
-// merged read resolves its sources from; an index whose archive_state cannot
-// be read reports the archived hours as gaps (fail-closed) rather than as an
-// error, because the live half of the answer is still true — the caller
-// merely loses the archive credit.
+// Archive coverage comes from archive_state labels. An archive_state that
+// exists but cannot be read is an ERROR, not a silent "no credit": the
+// caller's caveat then names the failed check instead of guessing at a
+// rotation (a missing table — an index that never archived — is no error).
 //
 // Live hours are classified from the hourly partitions, with one deliberate
 // asymmetry at the two edges. An hour BEFORE the oldest explicit partition is
@@ -38,7 +38,7 @@ import (
 // Fail-closed: an unreadable partition list is returned as an error, and an
 // index with no explicit hourly partition at all, or no database name, reports
 // false. Neither is ever "covered".
-func WindowCovered(ctx context.Context, db *sql.DB, dbName string, since, until time.Time, noArchive bool) (bool, error) {
+func WindowCovered(ctx context.Context, db *sql.DB, dbName string, since, until time.Time, scope ArchiveScope) (bool, error) {
 	if db == nil || dbName == "" {
 		return false, nil
 	}
@@ -57,10 +57,10 @@ func WindowCovered(ctx context.Context, db *sql.DB, dbName string, since, until 
 			newest = h
 		}
 	}
-	if !noArchive {
-		cov, err := loadArchiveCoverage(ctx, db, AllArchives())
+	if !scope.opensNone() {
+		cov, err := loadArchiveCoverage(ctx, db, scope)
 		if err != nil && !isMissingTableErr(err) {
-			slog.Warn("window-coverage check: could not read archive coverage; archived hours count as gaps", "error", err)
+			return false, fmt.Errorf("read archive coverage for the window-coverage check: %w", err)
 		}
 		for _, h := range expandArchiveHours(cov) {
 			covered[h] = true

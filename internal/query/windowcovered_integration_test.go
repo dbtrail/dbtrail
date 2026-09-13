@@ -4,6 +4,8 @@ package query
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,7 +45,7 @@ func TestWindowCovered(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := WindowCovered(ctx, db, dbName, tc.since, tc.until, true)
+			got, err := WindowCovered(ctx, db, dbName, tc.since, tc.until, ScopeFromPaths(nil))
 			if err != nil {
 				t.Fatalf("WindowCovered: %v", err)
 			}
@@ -54,20 +56,20 @@ func TestWindowCovered(t *testing.T) {
 	}
 
 	// No database name → nothing to classify against → never "contiguous".
-	if got, err := WindowCovered(ctx, db, "", h, h.Add(time.Minute), true); err != nil || got {
+	if got, err := WindowCovered(ctx, db, "", h, h.Add(time.Minute), ScopeFromPaths(nil)); err != nil || got {
 		t.Errorf("unclassifiable window must report false: got %v, %v", got, err)
 	}
 	// An index with only p_future (no explicit hourly partition) cannot place
 	// its horizon, so it is never "contiguous" either.
 	db3, dbName3 := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db3)
-	if got, err := WindowCovered(ctx, db3, dbName3, h, h.Add(time.Minute), true); err != nil || got {
+	if got, err := WindowCovered(ctx, db3, dbName3, h, h.Add(time.Minute), ScopeFromPaths(nil)); err != nil || got {
 		t.Errorf("no explicit partition must report false: got %v, %v", got, err)
 	}
 	// A closed handle → an error, never a silent false.
 	db2, _ := testutil.CreateTestDB(t)
 	db2.Close()
-	if _, err := WindowCovered(ctx, db2, dbName, h, h.Add(time.Minute), true); err == nil {
+	if _, err := WindowCovered(ctx, db2, dbName, h, h.Add(time.Minute), ScopeFromPaths(nil)); err == nil {
 		t.Errorf("unreadable partition list must surface as an error")
 	}
 }
@@ -85,13 +87,73 @@ func TestWindowCovered_archiveCredit(t *testing.T) {
 	testutil.MustExec(t, db, `INSERT INTO archive_state (bintrail_id, partition_name, local_path)
 		VALUES ('bt', ?, '/nonexistent/bintrail_id=bt/x.parquet')`, "p_"+h.Add(time.Hour).Format("2006010215")) // archived: h+1
 	since, until := h.Add(time.Hour+10*time.Minute), h.Add(2*time.Hour+10*time.Minute)
-	if got, err := WindowCovered(ctx, db, dbName, since, until, false); err != nil || !got {
-		t.Errorf("archived h+1 and live h+2 cover the window for an archive-reading scan: %v, %v", got, err)
+	if got, err := WindowCovered(ctx, db, dbName, since, until, OnlyArchives("bt")); err != nil || !got {
+		t.Errorf("archived h+1 and live h+2 cover the window for a scan that opens bt: %v, %v", got, err)
 	}
-	if got, err := WindowCovered(ctx, db, dbName, since, until, true); err != nil || got {
-		t.Errorf("archived h+1 is a gap for a live-only scan: %v, %v", got, err)
+	if got, err := WindowCovered(ctx, db, dbName, since, until, ScopeFromPaths(nil)); err != nil || got {
+		t.Errorf("archived h+1 is a gap for a scan that opens no archive: %v, %v", got, err)
 	}
-	if got, err := WindowCovered(ctx, db, dbName, h.Add(10*time.Minute), until, false); err != nil || got {
+	if got, err := WindowCovered(ctx, db, dbName, since, until, OnlyArchives("other")); err != nil || got {
+		t.Errorf("an archive the scan does not open is not coverage (#1232): %v, %v", got, err)
+	}
+	if got, err := WindowCovered(ctx, db, dbName, h.Add(10*time.Minute), until, AllArchives()); err != nil || got {
 		t.Errorf("hour h is held by nothing: %v, %v", got, err)
+	}
+	// archive_state present but unreadable → an error, never a silent verdict.
+	testutil.MustExec(t, db, `ALTER TABLE archive_state RENAME COLUMN partition_name TO partition_nam3`)
+	if _, err := WindowCovered(ctx, db, dbName, since, until, AllArchives()); err == nil {
+		t.Errorf("an unreadable archive_state must surface as an error")
+	}
+	if got, err := WindowCovered(ctx, db, dbName, h.Add(2*time.Hour+10*time.Minute), until, ScopeFromPaths(nil)); err != nil || !got {
+		t.Errorf("a scan opening no archive never reads archive_state: %v, %v", got, err)
+	}
+}
+
+// TestMergedFetcher_gapNote pins the advisory gap report: hours inside a
+// scanned window that neither the live index nor an opened archive holds
+// are collected across scans and rendered once, in the posture of the run.
+func TestMergedFetcher_gapNote(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	ctx := context.Background()
+	h := time.Now().UTC().Add(-6 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h.Add(2 * time.Hour)}) // live: h+2
+	testutil.MustExec(t, db, `INSERT INTO archive_state (bintrail_id, partition_name, local_path)
+		VALUES ('bt', ?, ?)`, "p_"+h.Add(time.Hour).Format("2006010215"), filepath.Join(t.TempDir(), "bintrail_id=bt", "x.parquet")) // archived: h+1 (file absent: the fetch of it fails, so use a no-op fetcher)
+	noop := func(context.Context, Options, string) ([]ResultRow, error) { return nil, nil }
+
+	m := &MergedFetcher{DB: db, Engine: New(db), DBName: dbName, ArchiveFetcher: noop}
+	since, until := h.Add(10*time.Minute), h.Add(2*time.Hour+10*time.Minute)
+	if _, err := m.Fetch(ctx, Options{Schema: "s", Table: "t", Since: &since, Until: &until}); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if gaps := m.GapHours(); len(gaps) != 1 || !gaps[0].Equal(h) {
+		t.Fatalf("only hour h is held by nothing (h+1 archived, h+2 live); got %v", gaps)
+	}
+	note := m.GapNote()
+	if !strings.Contains(note, "1 hour(s)") || !strings.Contains(note, "rotated out with no archive") || strings.Contains(note, "excluded") {
+		t.Errorf("note must name the hour and the archive-reading posture: %q", note)
+	}
+	// A second scan over an already-known gap does not double count.
+	if _, err := m.Fetch(ctx, Options{Schema: "s", Table: "t", Since: &since, Until: &until}); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if gaps := m.GapHours(); len(gaps) != 1 {
+		t.Errorf("gap hours are a set, got %v", gaps)
+	}
+
+	confined := &MergedFetcher{DB: db, Engine: New(db), DBName: dbName, NoArchive: true}
+	if _, err := confined.Fetch(ctx, Options{Schema: "s", Table: "t", Since: &since, Until: &until}); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if gaps := confined.GapHours(); len(gaps) != 2 {
+		t.Errorf("under NoArchive the archived hour is a gap too; got %v", gaps)
+	}
+	if note := confined.GapNote(); !strings.Contains(note, "excluded on this run") {
+		t.Errorf("NoArchive posture must be named: %q", note)
+	}
+	if (&MergedFetcher{DB: db, Engine: New(db), DBName: dbName, NoArchive: true}).GapNote() != "" {
+		t.Errorf("no scan, no note")
 	}
 }

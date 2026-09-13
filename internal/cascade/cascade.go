@@ -655,15 +655,28 @@ func SynthesizeVictims(
 	// be read (ArchivesPresent then stays false). Without a probe the rule is
 	// the pre-#1615 one: any archive at all may gap. A FAILED probe is "may
 	// gap" — never "contiguous" by default.
+	//
+	// Memoized per hour-truncated (snapshot, T): the probe costs a partition
+	// listing, an archive_state read and a stream_state read, and scanChildren
+	// runs per (edge, parent key) — a batch of a thousand roots over a
+	// five-level graph must not issue thousands of identical probes.
+	type gapVerdict struct {
+		gap bool
+		err error
+	}
+	gapMemo := map[[2]time.Time]gapVerdict{}
 	windowMayGap := func(ctx context.Context, snapshot, until time.Time) (bool, error) {
 		if opts.WindowCovered == nil {
 			return opts.ArchivesPresent, nil
 		}
-		contiguous, err := opts.WindowCovered(ctx, snapshot, until)
-		if err != nil {
-			return true, err
+		key := [2]time.Time{snapshot.UTC().Truncate(time.Hour), until.UTC().Truncate(time.Hour)}
+		if v, ok := gapMemo[key]; ok {
+			return v.gap, v.err
 		}
-		return !contiguous, nil
+		contiguous, err := opts.WindowCovered(ctx, snapshot, until)
+		v := gapVerdict{gap: !contiguous || err != nil, err: err}
+		gapMemo[key] = v
+		return v.gap, v.err
 	}
 	scanChildren := func(fk CascadeFK, parentKey string, rootTS time.Time) childScan {
 		// #1273: a child whose PK contains a generated column — the MariaDB
@@ -691,15 +704,26 @@ func SynthesizeVictims(
 		//
 		// When augmentation is going to be SKIPPED (the scan cannot serve
 		// the whole [snapshot, T] window, #1615), the baseline rows never
-		// reach the output, so that exactness buys nothing and costs a lot:
-		// the scan falls back to the plain Phase-1 window [T-lookback, T] —
-		// widened to the snapshot when that is older — which is what the tool
-		// searches with no baseline at all. This is the shape that failed on
-		// stage: children seeded 30 minutes before the DELETE, a 5-minute
-		// backup schedule dropping a snapshot in between, and one unrelated
-		// archive; the [snapshot, T] scan saw no INSERT, the gate then threw
-		// away the baseline that held the rows, and the tool answered "parent
-		// only" with every row it needed sitting in the live index.
+		// reach the output as rows, so that exactness buys nothing and costs
+		// a lot: the scan falls back to the plain Phase-1 window
+		// [T-lookback, T] — widened to the snapshot when that is older —
+		// which is what the tool searches with no baseline at all. This is
+		// the shape that failed on stage: children seeded 30 minutes before
+		// the DELETE, a 5-minute backup schedule dropping a snapshot in
+		// between, and one unrelated archive; the [snapshot, T] scan saw no
+		// INSERT, the gate then threw away the baseline that held the rows,
+		// and the tool answered "parent only" with every row it needed
+		// sitting in the live index.
+		//
+		// The baseline still guards that widened scan, as a MEMBERSHIP
+		// filter rather than a source: a candidate whose latest event is
+		// older than the snapshot is kept only if the snapshot still lists
+		// it under this parent (see the filter after the fetch). Otherwise a
+		// child inserted, then removed by an unlogged cascade before the
+		// snapshot, would come back from its stale INSERT — the same
+		// resurrection the skip exists to avoid, through the scan instead
+		// of the baseline. A truncated baseline cannot serve as a filter and
+		// the scan then keeps the plain Phase-1 exposure, flagged.
 		var (
 			baseRows     []BaselineRow
 			baseSnap     time.Time
@@ -712,6 +736,12 @@ func SynthesizeVictims(
 			// archiveGapErr is the probe failure behind it, when that is why.
 			archiveGap    bool
 			archiveGapErr error
+			// baseRecordedPos is the baseline's recorded binlog position
+			// whenever it has one, independent of whether the scan anchors on
+			// it: the skip-mode membership filter compares candidates to the
+			// snapshot by position (#797) even when the window's lower bound
+			// is the lookback edge.
+			baseRecordedPos *query.BinlogPos
 		)
 		// pkTypeGated skips the ENTIRE baseline block, not just the provider
 		// call: falling through to the switch's `default:` arm would emit
@@ -774,6 +804,7 @@ func SynthesizeVictims(
 				}
 			case covered:
 				baseCovered, baseSnap, baseRows, baseTrunc = true, bl.SnapshotTime, bl.Rows, bl.Truncated
+				baseRecordedPos = bl.SincePos
 				archiveGap, archiveGapErr = windowMayGap(ctx, bl.SnapshotTime, until)
 				if !archiveGap || bl.SnapshotTime.Before(since) {
 					since = bl.SnapshotTime
@@ -877,6 +908,24 @@ func SynthesizeVictims(
 			}
 		}
 
+		// Widened skip-mode scan: the baseline is a membership filter (see the
+		// Phase-2 comment above). Position beats timestamp when the baseline
+		// recorded one (#797): a statement executed just before the snapshot
+		// but logged after it is a post-snapshot change.
+		if baseCovered && archiveGap && !baseTrunc {
+			inBase := make(map[string]bool, len(baseRows))
+			for _, br := range baseRows {
+				inBase[br.PKValues] = true
+			}
+			kept := cands[:0]
+			for _, cev := range cands {
+				if inBase[cev.PKValues] || afterSnapshot(cev, baseSnap, baseRecordedPos) {
+					kept = append(kept, cev)
+				}
+			}
+			cands = kept
+		}
+
 		scan := childScan{cands: cands, baseRows: baseRows, baseSnap: baseSnap}
 		if baseCovered && len(baseRows) > 0 {
 			switch {
@@ -908,7 +957,7 @@ func SynthesizeVictims(
 						"or the hour predates the index, or capture recorded a permanent loss)", fk.Schema, fk.Table)
 				default:
 					reason = fmt.Sprintf("index has archived partitions that may gap the [snapshot, T] window for %s.%s "+
-						"(no live-window check is wired on this surface)", fk.Schema, fk.Table)
+						"(the window check could not run: the index database name is unknown)", fk.Schema, fk.Table)
 				}
 				addIncomplete("baseline-skip-archived:"+fk.Schema+"."+fk.Table,
 					reason+"; skipped baseline augmentation to avoid resurrecting rows whose deletion/re-parent the scan cannot see (rotated out, unreadable or lost)")
@@ -1952,30 +2001,40 @@ func valToString(v any) string {
 	}
 }
 
-// WindowProbe builds Options.WindowCovered for an index reached through db:
-// the partition-and-archive check (query.WindowCovered — noArchive mirrors
-// the Fetcher's own read, so a --no-archive or profile-confined scan gets no
-// archive credit) AND the stream_state capture-loss check
-// (reconstruct.CaptureGapStatus). The second closes the hole the first cannot
-// see — every hour may be held while a stamped gap_lost_at inside the window
-// says events in it exist nowhere (#765) — and follows the three-state rule
-// the MCP reconstruct tool uses: a legacy index whose stream_state predates
-// the gap columns is UNEVALUABLE, treated as gapped, never as clean.
+// WindowProbe builds Options.WindowCovered for an index reached through db,
+// paired with the Fetcher the scans run on: the partition-and-archive check
+// (query.WindowCovered, scoped to exactly the archives that fetcher OPENS —
+// a live *query.Engine opens none, a *query.MergedFetcher its resolved
+// sources, so an archived hour is credited only when the scan will read it)
+// AND the stream_state capture-loss check (reconstruct.CaptureGapStatus).
+// The second closes the hole the first cannot see — every hour may be held
+// while a stamped gap_lost_at inside the window says events in it exist
+// nowhere (#765) — and follows the three-state rule the MCP reconstruct
+// tool uses: a legacy index whose stream_state predates the gap columns is
+// UNEVALUABLE, treated as gapped, never as clean. A fetcher whose archive
+// discovery failed makes the probe FAIL (the "could not verify" caveat),
+// never credit archives it did not open.
 //
 // An empty dbName (a DSN the caller could not parse, or one carrying no
 // database name) yields nil — the gate then falls back to the pre-#1615
-// existence rule (any archive skips, and that caveat says the check was not
-// wired; no archive means augmentation runs unchecked, as before) rather than
-// answering from a check that cannot run. The three cascade entry points
-// (CLI, MCP, console) wire this the same way, paired with the Fetcher they
-// hand SynthesizeVictims; adding a fourth without it silently reverts that
-// surface to the existence rule.
-func WindowProbe(db *sql.DB, dbName string, noArchive bool) func(ctx context.Context, since, until time.Time) (bool, error) {
+// existence rule (any archive skips, and that caveat says the check could
+// not run; no archive means augmentation runs unchecked, as before) rather
+// than answering from a check that cannot run. The three cascade entry
+// points (CLI, MCP, console) wire this the same way; adding a fourth
+// without it silently reverts that surface to the existence rule.
+func WindowProbe(db *sql.DB, dbName string, f query.Fetcher) func(ctx context.Context, since, until time.Time) (bool, error) {
 	if db == nil || dbName == "" {
 		return nil
 	}
 	return func(ctx context.Context, since, until time.Time) (bool, error) {
-		covered, err := query.WindowCovered(ctx, db, dbName, since, until, noArchive)
+		scope := query.ScopeFromPaths(nil) // a live-only fetcher opens no archive
+		if mf, ok := f.(*query.MergedFetcher); ok {
+			var err error
+			if scope, err = mf.Scope(ctx); err != nil {
+				return false, fmt.Errorf("archive discovery failed, so the archives this scan opens are unknown: %w", err)
+			}
+		}
+		covered, err := query.WindowCovered(ctx, db, dbName, since, until, scope)
 		if err != nil || !covered {
 			return false, err
 		}
@@ -1985,4 +2044,17 @@ func WindowProbe(db *sql.DB, dbName string, noArchive bool) func(ctx context.Con
 		}
 		return gap == nil, nil
 	}
+}
+
+// afterSnapshot reports whether ev is a change AT or AFTER the baseline
+// snapshot: by binlog position when the baseline recorded one (exact, #797),
+// else by the event's execution timestamp.
+func afterSnapshot(ev query.ResultRow, snap time.Time, pos *query.BinlogPos) bool {
+	if pos != nil && ev.BinlogFile != "" {
+		if ev.BinlogFile != pos.File {
+			return ev.BinlogFile > pos.File
+		}
+		return ev.StartPos >= pos.Pos
+	}
+	return !ev.EventTimestamp.Before(snap)
 }

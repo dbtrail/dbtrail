@@ -392,7 +392,9 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 			if len(parentEvents) == 0 {
 				caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, and this server excludes its archived partitions (no-archive); the changed parent may be archived")
 			} else {
-				slog.Warn("console: no-archive server; archived partitions are not searched by cascade recovery, a child whose events were archived may be missed")
+				// A coverage decision, so a hard caveat: complete must never
+				// read true over evidence this server deliberately does not read.
+				caveats = append(caveats, "the index has archived partitions and this server excludes them (no-archive); a child whose events were archived is not reconstructed")
 			}
 		}
 	}
@@ -443,7 +445,7 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 				MaxDepth:        p.MaxDepth,
 				Baseline:        baselineProvider,
 				ArchivesPresent: archivesExist,
-				WindowCovered:   cascade.WindowProbe(b.db, b.dbName, b.noArchive),
+				WindowCovered:   cascade.WindowProbe(b.db, b.dbName, fetcher),
 				PKMetas:         cascade.PKMetasFromResolver(b.resolver),
 			})
 			results = append(results, r)
@@ -454,6 +456,8 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 		res = cascade.MergeResults(results...)
 	}
 	caveats = append(caveats, res.Incomplete...)
+	warnings := append([]string{}, res.Warnings...)
+	warnings = append(warnings, fetcher.Notes()...)
 	if synthErr != nil {
 		caveats = append(caveats, "an index query failed mid-synthesis; the result is partial: "+synthErr.Error())
 	}
@@ -465,7 +469,7 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 		SetNullRows:      res.SetNullRows,
 		KeyUpdates:       res.KeyUpdates,
 		Caveats:          caveats,
-		Warnings:         res.Warnings,
+		Warnings:         warnings,
 		SynthErr:         synthErr,
 		BaselineActive:   baselineProvider != nil,
 	}, nil
