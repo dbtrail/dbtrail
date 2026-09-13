@@ -1921,6 +1921,8 @@ button { font-family: inherit; }
 .chip.chip-mon {
   color: var(--orange-2); border-color: var(--ochre); background: var(--ochre-bg);
 }
+.chip.chip-nosrc { color: var(--delete); border-color: var(--delete); background: color-mix(in srgb, var(--delete) 8%, transparent); }
+#server-test-result { margin-left: 2px; }
 
 /* add/edit server form messages */
 .form-msg { font-family: var(--f-mono); font-size: 12px; margin-top: 10px; min-height: 1em; }
@@ -2802,7 +2804,7 @@ button { font-family: inherit; }
    that it stays shorter than the prose it replaced; nothing measures that, so
    read it as the reason these sizes are small rather than as a rule. */
 .ice-flow { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; margin: 2px 0 12px; }
-.ice-stage { flex: 1 1 150px; min-width: 132px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); padding: 9px 11px; }
+.ice-stage { flex: 1 1 150px; min-width: 132px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 9px 11px; }
 .ice-stage-t { font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
 .ice-stage-s { font-size: 11.5px; color: var(--ink-4); margin-top: 3px; }
 .ice-arrow { align-self: center; flex: none; color: var(--ink-4); font-size: 15px; }
@@ -2845,9 +2847,9 @@ button { font-family: inherit; }
 
 /* ── Take a copy with you: the two lanes ───────────────────────────────────
    White lanes on the panel's --surface-2, so each reads as a card and not as
-   a region of the panel. Worth knowing when the Iceberg panel below is next
-   touched: its .ice-stage cards are --surface-2 on a --surface-2 ground, so
-   they are separated by a hairline and nothing else. */
+   a region of the panel. The Iceberg panel's .ice-stage cards use the same
+   --surface fill for the same reason (#1573); --surface-2 on --surface-2 left
+   them separated by a hairline and nothing else. */
 /* auto-fit, not a fixed 1fr 1fr: the MySQL lane is absent whenever the
    selected server is the ephemeral --index-dsn entry or sql_export is off,
    and a fixed pair left the surviving lane at half width beside an empty

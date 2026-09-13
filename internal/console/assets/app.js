@@ -135,6 +135,12 @@ let defaultServerId = "";
 let serverGen = 0;            // bumped on every server switch (staleness guard)
 let viewGen = 0;              // bumped on every route render (staleness guard)
 let capsCache = {};           // last /api/capabilities for the selected server
+let capsKnown = false; // whether capsCache came from a payload we actually read (a failed check degrades to {})
+// noCaptureNotes remembers, per server id, why a save did not start capture
+// (#1607), so the row keeps its reason across list rebuilds in this session;
+// serverRow re-derives the condition before showing it, so a server that
+// later gains a source or starts streaming loses the note on its own.
+const noCaptureNotes = {};
 let extViews = [];            // extension views advertised for the selected server (embedding builds)
 let extSettings = [];         // extension settings panels advertised for this SESSION (permission-gated, not per-server)
 let lastSQL = "";             // last generated undo SQL (for copy/download)
@@ -381,6 +387,7 @@ function clearAuthState() {
   lastSQL = "";
   lastEvents = [];
   capsCache = {};
+  capsKnown = false;
   applyAuthGate();
 }
 
@@ -8137,6 +8144,7 @@ async function gateCapabilities() {
   }
   if (gen !== serverGen) return;
   capsCache = caps || {};
+  capsKnown = capsOK;
   // Extension views advertised for this server (embedding builds; empty in the
   // stock binary and under any active profile — the backend omits them there).
   // Rebuild the nav before the route renders so a deep-linked ext route resolves.
@@ -8539,6 +8547,9 @@ function serverRow(s) {
   if (s.reconstruct) item.append(el("span", { class: "chip chip-tt", text: "TT", title: "Backup configured: Time-travel available" }));
   if (s.monitor_state) item.append(el("span", { class: "chip chip-mon", text: s.monitor_state.replace("_", " ").toUpperCase(), title: MON_STATE_TITLES[s.monitor_state] || ("monitoring " + s.monitor_state) }));
   if (s.flavor && s.flavor !== "mysql") item.append(el("span", { class: "chip", text: s.flavor === "postgres" ? "PG" : s.flavor.toUpperCase(), title: "Source type: " + s.flavor }));
+  // A registry entry with no source connection under a capturing console
+  // never streams; the mark says so where the Start button would be (#1607).
+  if (s.kind !== "ephemeral" && capsKnown && capsCache.monitor && !s.has_source) item.append(el("span", { class: "chip chip-nosrc", text: "NO SOURCE", title: "No source connection: nothing is captured from this server. Edit it and add one." }));
 
   let desc;
   if (s.has_source && s.source_host) desc = "watching " + s.source_user + "@" + s.source_host + ":" + (s.source_port || (s.flavor === "postgres" ? "5432" : "3306")) + (s.source_database ? "/" + s.source_database : "") + (s.schemas ? " [" + s.schemas + "]" : "");
@@ -8546,7 +8557,8 @@ function serverRow(s) {
   else desc = s.dbname || "";
   item.append(el("span", { class: "srv-desc conn", text: desc }));
 
-  item.append(el("span", { class: "srv-status", id: "srv-status-" + s.id }));
+  const note = noCaptureNotes[s.id] && noCaptureReason(s);
+  item.append(el("span", { class: "srv-status" + (note ? " pending" : ""), id: "srv-status-" + s.id, text: note ? "○ " + note : "" }));
 
   const acts = el("span", { class: "acts row-acts" });
   const monitorable = capsCache.monitor && s.has_source && s.kind !== "ephemeral";
@@ -8682,19 +8694,30 @@ function buildServerForm() {
   adv.append(idx);
   form.append(adv);
 
+  // The form's answers sit ABOVE the button row (#1605, #1608): appended
+  // after it, a failed startup check or a test result rendered below the
+  // eyeline of the button that caused it, at the bottom of a long modal the
+  // scrim scrolls, and the button read as dead. The Test result goes beside
+  // its own button, the way the saved-server row already shows it.
+  form.append(el("div", { id: "doctor-cards", class: "doctor-cards" }));
+  form.append(el("div", { id: "server-form-msg", class: "form-msg" }));
   const foot = el("div", { class: "modal-foot filter-actions" });
   foot.append(el("button", { class: "btn btn-primary", type: "submit", text: "Save" }));
   foot.append(el("button", { class: "btn", type: "button", id: "server-test", text: "Test connection" }));
+  foot.append(el("span", { class: "srv-status", id: "server-test-result" }));
   foot.append(el("button", { class: "btn btn-ghost", type: "button", id: "server-cancel", text: "Cancel" }));
   form.append(foot);
-  form.append(el("div", { id: "server-form-msg", class: "form-msg" }));
-  form.append(el("div", { id: "doctor-cards", class: "doctor-cards" }));
   return form;
 }
 
+// showServerForm returns false when the servers modal is gone (closed while a
+// save or its startup checks were in flight): a caller then has no form to
+// speak through and must say what happened somewhere that lasts.
 function showServerForm(prefill) {
-  document.getElementById("server-add-wrap").hidden = true;
+  const addWrap = document.getElementById("server-add-wrap");
   const mountEl = document.getElementById("server-form-mount");
+  if (!addWrap || !mountEl) return false;
+  addWrap.hidden = true;
   const form = buildServerForm();
   mountEl.replaceChildren(form);
   $all("[data-capability]", form).forEach((n) => n.classList.toggle("cap-on", !!capsCache[n.dataset.capability]));
@@ -8740,9 +8763,11 @@ function showServerForm(prefill) {
   if (prefill && prefill.id) form.elements.flavor.disabled = true;
   applyFlavor(form);
   form.elements.name.focus();
+  return true;
 }
 function hideServerForm() {
-  document.getElementById("server-form-mount").replaceChildren();
+  const mountEl = document.getElementById("server-form-mount");
+  if (mountEl) mountEl.replaceChildren();
   const addWrap = document.getElementById("server-add-wrap");
   if (addWrap) addWrap.hidden = false;
 }
@@ -8798,15 +8823,60 @@ async function saveServer(form) {
     formMsg("Running startup checks…", false);
     const res = await startMonitor(saved.id);
     await refreshServersList();
-    if (res && res.started && !doctorWarnings(res.doctor)) { hideServerForm(); toast("Monitoring started. Events will appear within a minute"); }
-    else if (res && res.started) { renderDoctor(res.doctor); formMsg("Monitoring started; review the warnings below", false); }
-    else if (res) { renderDoctor(res.doctor); formMsg("Startup checks failed: fix the items below and save again", true); }
+    if (res && res.started && !doctorWarnings(res.doctor)) { hideServerForm(); toast("Monitoring started. Events will appear within a minute"); return; }
+    // The entry now EXISTS: the form is re-shown from the saved entry so that
+    // Save is a real retry (a PUT of this id) rather than a second POST of the
+    // same name, which the registry refuses as a duplicate. Save stays
+    // enabled on a failure: it IS the retry once the operator has fixed the
+    // server (most checks are fixed on the database side, with the same form
+    // values). showServerForm rebuilds the check cards, so it goes first.
+    if (!showServerForm(saved)) {
+      // The modal was closed while the checks ran: nothing on screen can
+      // carry the outcome, so it goes to a toast that stays until dismissed.
+      if (res && res.started) toastError("Monitoring started for " + saved.name + ", with warnings; open Servers and press Start to review them");
+      else toastError("Startup checks failed for " + saved.name + "; open Servers and press Start to see what to fix");
+      return;
+    }
+    if (res && res.started) { renderDoctor(res.doctor); formMsg("Monitoring started; review the warnings above", false); scrollDoctorIntoView(); }
+    else if (res) { renderDoctor(res.doctor); formMsg("Startup checks failed: fix the items above and save again", true); scrollDoctorIntoView(); }
     else { formMsg("Could not start monitoring; check the notification for details and try again", true); } // startMonitor returned null (transport error)
     return;
   }
   hideServerForm();
+  // A server that will never stream is saved, but the save must not read as
+  // capture (#1607): the reason and the one action for it land on the row's
+  // status slot, kept for this session across list rebuilds (noCaptureNotes),
+  // next to the row's own mark. When the row cannot be found (the list
+  // failed to load, the modal was closed mid-save) the reason goes to a
+  // toast that persists until dismissed, never to a 2-second one.
+  const why = noCaptureReason(saved);
+  if (why) noCaptureNotes[saved.id] = why;
   await refreshServersList();
-  toast(id ? "Server updated" : "Server added");
+  if (why && !document.getElementById("srv-status-" + saved.id)) toastError(why);
+  toast((id ? "Server updated" : "Server added") + (why ? "; it will not capture changes yet" : ""));
+}
+
+// noCaptureReason names why a saved server will not stream, or null when it
+// will (or already does, or is the CLI entry). Two cases, each with its one
+// remedy: this console runs as `serve`, which never captures; or the entry
+// has no source connection.
+function noCaptureReason(s) {
+  if (!s || s.kind === "ephemeral" || isLiveMonitorState(s.monitor_state)) return null;
+  // A capability check that FAILED also leaves capsCache.monitor false, and
+  // that is not serve mode: telling a watch operator to restart as watch would
+  // be a confident wrong remedy. The honest one there is a reload.
+  if (!capsKnown) return "will not capture: the capability check failed when this page loaded, so nothing can be started from here. Reload the page";
+  if (!capsCache.monitor) return "will not capture: this console was started as serve, which reads an index and never captures. Run bintrail-console watch to capture from this server";
+  if (!s.has_source) return "will not capture: no source connection. Edit this server and add one";
+  return null;
+}
+
+// scrollDoctorIntoView brings the first failing check to the eye: the cards
+// sit above the button row, which on a long form the operator has scrolled
+// past.
+function scrollDoctorIntoView() {
+  const c = document.querySelector("#doctor-cards .doctor-card.fail") || document.getElementById("doctor-cards");
+  if (c && c.scrollIntoView) c.scrollIntoView({ block: "nearest" });
 }
 
 async function deleteServer(s) {
@@ -8839,11 +8909,17 @@ function testResultText(res) {
 async function testServerForm(form) {
   const id = form.elements.id.value;
   const body = serverFormBody(form);
-  formMsg("testing…", false);
+  const btn = form.querySelector("#server-test");
+  const slot = document.getElementById("server-test-result");
+  const show = (cls, text) => { if (slot) { slot.className = "srv-status " + cls; slot.textContent = text; } };
+  formMsg("", false);
+  if (btn) btn.disabled = true;
+  show("", "testing…");
   try {
     const res = await api(id ? "/api/servers/" + encodeURIComponent(id) + "/test" : "/api/servers/test", { method: "POST", body });
-    formMsg(testResultText(res), !res.ok && !res.provision_pending);
-  } catch (err) { formMsg((err && err.message) || String(err), true); }
+    show(res.provision_pending ? "pending" : (res.ok ? "ok" : "err"), testResultText(res));
+  } catch (err) { show("err", "✗ " + ((err && err.message) || err)); }
+  finally { if (btn) btn.disabled = false; }
 }
 
 async function testServerRow(id) {
@@ -8851,7 +8927,8 @@ async function testServerRow(id) {
   if (slot) { slot.className = "srv-status"; slot.textContent = "testing…"; }
   try {
     const res = await api("/api/servers/" + encodeURIComponent(id) + "/test", { method: "POST", body: {} });
-    if (slot) { slot.className = "srv-status " + (res.provision_pending ? "pending" : (res.ok ? "ok" : "err")); slot.textContent = testResultText(res); }
+    const note = noCaptureNotes[id]; // the row rebuild re-derives it; here it only needs to survive the test result
+    if (slot) { slot.className = "srv-status " + (res.provision_pending ? "pending" : (res.ok ? "ok" : "err")); slot.textContent = testResultText(res) + (note ? " · ○ " + note : ""); }
   } catch (err) { if (slot) { slot.className = "srv-status err"; slot.textContent = "✗ " + ((err && err.message) || err); } }
 }
 
@@ -8889,7 +8966,8 @@ async function startMonitorRow(id) {
   const opened = await editServer(id);
   if (opened) {
     renderDoctor(res.doctor);
-    formMsg(res.started ? "Monitoring started; review the warnings below" : "Startup checks failed: fix the items below, save, and start again", !res.started);
+    formMsg(res.started ? "Monitoring started; review the warnings above" : "Startup checks failed: fix the items above, save, and start again", !res.started);
+    scrollDoctorIntoView();
   } else if (res.started) { toast("Monitoring started, with warnings"); }
   else { toastError("Startup checks failed"); }
 }
