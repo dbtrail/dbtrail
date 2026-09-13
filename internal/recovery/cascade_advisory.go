@@ -43,27 +43,33 @@ func (a CascadeAdvisory) Empty() bool {
 // so rather than fall silent (a silent "no cascade" over a failed probe is
 // the exact shape this exists to remove).
 //
-// With a table named the edges are read index-wide and filtered to the ones
-// whose REFERENCED side is that table, so a child in another schema (#833)
-// is named and an unrelated cascade in the same schema is not: the warning
+// The edges are read index-wide and filtered here by their REFERENCED side,
+// which is the side a reversal can cascade FROM: with a table named, the
+// edges whose parent is that table, so a child in another schema (#833) is
+// named and an unrelated cascade in the same schema is not (the warning
 // says "this table has children (...)", and that list must be true of this
-// table. The parent flags come from the same edges, per referential action.
-// With no table named, the scope is the schema (or the whole index) and the
-// list is every child table with a cascading rule.
+// table); with only a schema named, the edges whose parent lives in that
+// schema, since those are the deletes a window scoped to it can hold. The
+// old child-schema scope missed exactly the cross-schema parent. The parent
+// flags come from the same edges, per referential action.
+//
+// Names compare case-insensitively: the index compares them server-side
+// under a case-insensitive collation when it fetches the rows, and a
+// reversal that finds its rows must not lose its warning to the spelling
+// the operator typed (lower_case_table_names servers accept either).
 func DetectCascade(db *sql.DB, schema, table string) (CascadeAdvisory, error) {
 	var adv CascadeAdvisory
-	var scope []string
-	if table == "" && schema != "" {
-		scope = []string{schema}
-	}
-	edges, err := metadata.CascadeConstraintsInIndex(db, scope)
+	edges, err := metadata.CascadeConstraintsInIndex(db, nil)
 	if err != nil {
 		return adv, fmt.Errorf("check the index for FK cascade constraints: %w", err)
 	}
 	seen := map[string]bool{}
 	for _, e := range edges {
+		if schema != "" && !strings.EqualFold(e.ReferencedSchema, schema) {
+			continue
+		}
 		if table != "" {
-			if e.ReferencedTable != table || (schema != "" && e.ReferencedSchema != schema) {
+			if !strings.EqualFold(e.ReferencedTable, table) {
 				continue
 			}
 			if cascades(e.DeleteRule) {
@@ -101,7 +107,7 @@ func (a CascadeAdvisory) AppliesTo(rows []query.ResultRow, table string) bool {
 	}
 	for _, r := range rows {
 		if table != "" {
-			if r.TableName != table {
+			if !strings.EqualFold(r.TableName, table) {
 				continue
 			}
 			if (a.ParentOnDelete && r.EventType == event.EventDelete) ||

@@ -10,7 +10,9 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/parser"
+	"github.com/dbtrail/dbtrail/internal/query"
 )
 
 // The console's cascade auto-detection needs ONE table in scope to
@@ -115,5 +117,17 @@ func TestRecover_tablelessProbeFailureIsSaid(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
+	}
+}
+
+// The per-table gate compares names the way the fetch did (case-insensitive
+// collation): "Orders" fetched the rows and must not skip the synthesis.
+func TestRowsContainCascadeTriggerOn_caseInsensitive(t *testing.T) {
+	rows := []query.ResultRow{{TableName: "orders", EventType: event.EventDelete}}
+	if !rowsContainCascadeTriggerOn(rows, "Orders", true, false) {
+		t.Error("a differently-cased table name skipped the cascade gate")
+	}
+	if rowsContainCascadeTriggerOn(rows, "Orders", false, true) {
+		t.Error("a DELETE matched the ON UPDATE rule")
 	}
 }

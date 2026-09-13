@@ -53,8 +53,9 @@ func TestDetectCascade_namesTheTargetsOwnChildrenAcrossSchemas(t *testing.T) {
 }
 
 // A table without a schema (MCP does not require one) still matches by table
-// name; and with no table at all the schema scope applies and every child in
-// it is listed.
+// name; with only a schema, the edges whose PARENT lives in it are listed,
+// which names a child in another schema (#833) and leaves out a cascade
+// whose parent this window could never hold.
 func TestDetectCascade_scopes(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -74,19 +75,45 @@ func TestDetectCascade_scopes(t *testing.T) {
 	}
 
 	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(true))
-	mock.ExpectQuery("FROM fk_constraints").WithArgs("shop").WillReturnRows(sqlmock.NewRows(fkEdgeCols).
+	mock.ExpectQuery(unscopedEdgeQuery).WillReturnRows(sqlmock.NewRows(fkEdgeCols).
 		AddRow("shop", "order_items", "order_id", "shop", "orders", "CASCADE", "NO ACTION").
 		AddRow("shop", "order_items", "coupon_id", "shop", "coupons", "SET NULL", "NO ACTION").
-		AddRow("shop", "shipments", "order_id", "shop", "orders", "CASCADE", "CASCADE"))
+		AddRow("shop", "shipments", "order_id", "shop", "orders", "CASCADE", "CASCADE").
+		AddRow("shop", "audit_rows", "actor_id", "crm", "users", "CASCADE", "NO ACTION").
+		AddRow("billing", "invoices", "customer_id", "shop", "customers", "CASCADE", "NO ACTION"))
 	adv, err = DetectCascade(db, "shop", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(adv.ChildTables, ",") != "shop.order_items,shop.shipments" || adv.ParentOnDelete || adv.ParentOnUpdate {
-		t.Errorf("schema scope: %+v", adv)
+	if strings.Join(adv.ChildTables, ",") != "shop.order_items,shop.shipments,billing.invoices" || adv.ParentOnDelete || adv.ParentOnUpdate {
+		t.Errorf("schema scope must list children of PARENTS in shop (billing.invoices in, shop.audit_rows out): %+v", adv)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
+	}
+}
+
+// Names compare the way the index compares them, case-insensitively: the
+// rows were fetched for "Orders" and the edge is stored as "orders".
+func TestDetectCascade_matchesNamesCaseInsensitively(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(true))
+	mock.ExpectQuery(unscopedEdgeQuery).WillReturnRows(sqlmock.NewRows(fkEdgeCols).
+		AddRow("shop", "order_items", "order_id", "shop", "orders", "CASCADE", "NO ACTION"))
+	adv, err := DetectCascade(db, "Shop", "Orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !adv.ParentOnDelete || len(adv.ChildTables) != 1 {
+		t.Fatalf("a differently-cased spelling lost the advisory: %+v", adv)
+	}
+	rows := []query.ResultRow{{TableName: "orders", EventType: event.EventDelete}}
+	if !adv.AppliesTo(rows, "Orders") {
+		t.Error("AppliesTo compared the row's table name by bytes")
 	}
 }
 
@@ -144,9 +171,8 @@ func TestCascadeAdvisory_AppliesTo(t *testing.T) {
 	}
 }
 
-// The cross-schema case (#833): the children live in another schema, so the
-// list is empty and the parent flag alone carries the warning. The remedy
-// must still be named, and no empty parenthesis rendered.
+// A parent with no readable child list (a newer index could hide one) still
+// renders a remedy, and never an empty parenthesis.
 func TestCascadeAdvisory_WarningWithoutChildList(t *testing.T) {
 	w := CascadeAdvisory{ParentOnDelete: true}.Warning("X")
 	if !strings.Contains(w, "Use X to reconstruct") || strings.Contains(w, "()") {
