@@ -4199,9 +4199,11 @@ function s3PrefixCovers(outer, inner) {
 function s3RetentionConflicts(srv, servers, daemonS3) {
   const own = srv.baseline_s3;
   const archives = [], backups = [];
+  if (srv.archive_s3 && s3PrefixCovers(own, srv.archive_s3)) archives.push("this server");
   for (const o of servers || []) {
-    if (o.archive_s3 && s3PrefixCovers(own, o.archive_s3)) archives.push(o.id === srv.id ? "this server" : o.name);
-    if (o.id !== srv.id && o.resolved_s3 && s3PrefixCovers(own, o.resolved_s3)) backups.push(o.name);
+    if (o.id === srv.id) continue;
+    if (o.archive_s3 && s3PrefixCovers(own, o.archive_s3)) archives.push(o.name);
+    if (o.resolved_s3 && s3PrefixCovers(own, o.resolved_s3)) backups.push(o.name);
   }
   if (daemonS3 && s3PrefixCovers(own, daemonS3)) backups.push("the daemon default (" + daemonS3 + ")");
   return { archives, backups };

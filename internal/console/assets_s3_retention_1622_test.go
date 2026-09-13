@@ -26,7 +26,7 @@ func TestS3RetentionBlockKeepsThePromises(t *testing.T) {
 		"the second command replaces every rule on the bucket",
 		"cannot spare the only complete copy",
 		"if the schedule stops it keeps expiring until none is left",
-		"never to the archived changes",
+		"and to no archived changes configured on this page",
 		"sit at the bucket root",
 		"the newest complete backup expires before the next one exists",
 	} {
@@ -49,7 +49,7 @@ func TestS3RetentionBlockKeepsThePromises(t *testing.T) {
 	// open past the "s3://" on the root-refusal line).
 	for _, want := range []string{
 		"would expire the archived changes too",
-		"not an s3://bucket/prefix destination",
+		"This is not an s3",
 		"the schedule is stored; it cannot run right now",
 		"would expire under this rule",
 		"On a bucket with versioning",
