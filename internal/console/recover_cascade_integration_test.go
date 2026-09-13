@@ -870,3 +870,38 @@ func TestIntegrationRecover_autoCascade_noopUpdateFallsBackToPlain(t *testing.T)
 		t.Errorf("the plain UPDATE reversal is missing\n---\n%s", resp.SQL)
 	}
 }
+
+// TestIntegrationRecoverCascade_archivesOutsideWindowKeepBaseline pins the
+// console wiring of the #1615 gate: an archived partition exists, the baseline
+// snapshot is dated inside the hour the live index holds, and the parent was
+// deleted later in that hour. The window is live-contiguous, so the untouched
+// baseline child (12) is recovered alongside the two binlog children and the
+// run is complete. Before the fix the archive's existence alone skipped it.
+func TestIntegrationRecoverCascade_archivesOutsideWindowKeepBaseline(t *testing.T) {
+	dir := t.TempDir()
+	srv, dbName := seedCascadeConsole(t, func(c *Config) {
+		c.BaselineDir = dir
+		c.NoArchive = false // baselineConfigured folds in NoArchive; the fixture defaults it on
+	})
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour) // the fixture's live hour
+	writeChildBaselineParquet(t, dir, h.Add(5*time.Minute).Format("2006-01-02T15-04-05Z"), dbName,
+		[][]string{{"10", "1"}, {"11", "1"}, {"12", "1"}}, nil)
+	testutil.MustExec(t, srv.cm.boot.db, `INSERT INTO archive_state
+		(bintrail_id, partition_name, local_path, s3_bucket, s3_key)
+		VALUES ('bt', 'p_2026010100', '', 'bucket', 'pfx/bintrail_id=bt/p_2026010100.parquet')`)
+
+	rec, body := doReq(t, srv, "POST", "/api/recover-cascade", `{"schema":"`+dbName+`","table":"parent"}`)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, body)
+	}
+	var resp recoverCascadeResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, body)
+	}
+	if resp.VictimCount != 3 || !strings.Contains(resp.SQL, "(12, 1)") && !strings.Contains(resp.SQL, "12, 1") {
+		t.Errorf("want the untouched baseline child 12 recovered (victim_count 3), got %d\n---\n%s", resp.VictimCount, resp.SQL)
+	}
+	if !resp.Complete {
+		t.Errorf("a live-contiguous window must be complete despite an unrelated archive; incomplete=%v", resp.Incomplete)
+	}
+}

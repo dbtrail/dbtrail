@@ -6,12 +6,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -169,5 +172,63 @@ func TestIntegrationRecoverCascadeToolPKFilter(t *testing.T) {
 	}
 	if !advisory {
 		t.Errorf("warnings must carry the empty-match advisory, got %v", out.Warnings)
+	}
+}
+
+// TestIntegrationRecoverCascadeTool_archivesOutsideWindowKeepBaseline pins the
+// MCP wiring of the #1615 gate: an unrelated archived partition must not skip
+// baseline augmentation when the live index holds the whole [snapshot, T]
+// window — the untouched baseline child (12) is recovered and the run is
+// complete.
+func TestIntegrationRecoverCascadeTool_archivesOutsideWindowKeepBaseline(t *testing.T) {
+	db, dbName := seedCascadeIndex(t)
+	cs := cascadeSession(t, db, dbName)
+	testutil.MustExec(t, db, `INSERT INTO archive_state
+		(bintrail_id, partition_name, local_path, s3_bucket, s3_key)
+		VALUES ('bt', 'p_2026010100', '', 'bucket', 'pfx/bintrail_id=bt/p_2026010100.parquet')`)
+
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour) // the fixture's live hour
+	dir := t.TempDir()
+	path := filepath.Join(dir, h.Add(5*time.Minute).Format("2006-01-02T15-04-05Z"), dbName, "child.parquet")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cols := []baseline.Column{
+		{Name: "id", MySQLType: "int", ParquetType: baseline.MysqlToParquetNode("int")},
+		{Name: "pid", MySQLType: "int", ParquetType: baseline.MysqlToParquetNode("int")},
+	}
+	w, err := baseline.NewWriter(path, cols, baseline.WriterConfig{Compression: "none", RowGroupSize: 10})
+	if err != nil {
+		t.Fatalf("baseline.NewWriter: %v", err)
+	}
+	for _, r := range [][]string{{"10", "1"}, {"11", "1"}, {"12", "1"}} {
+		if err := w.WriteRow(r, []bool{false, false}); err != nil {
+			t.Fatalf("WriteRow: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("writer close: %v", err)
+	}
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "recover_cascade",
+		Arguments: map[string]any{"schema": dbName, "table": "parent", "baseline_dir": dir},
+	})
+	if err != nil {
+		t.Fatalf("CallTool recover_cascade: %v", err)
+	}
+	text := resultText(res)
+	if res.IsError {
+		t.Fatalf("recover_cascade returned a tool error: %s", text)
+	}
+	var out recoverCascadeResult
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("decode payload: %v (payload=%s)", err, text)
+	}
+	if out.Children != 3 || !out.BaselineActive {
+		t.Errorf("children=%d baseline_active=%v, want 3/true (untouched baseline child 12 recovered)\n---\n%s", out.Children, out.BaselineActive, out.SQL)
+	}
+	if !out.Complete {
+		t.Errorf("a live-contiguous window must be complete despite an unrelated archive; incomplete=%v", out.Incomplete)
 	}
 }

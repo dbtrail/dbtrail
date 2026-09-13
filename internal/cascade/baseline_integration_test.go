@@ -5,6 +5,7 @@ package cascade_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -435,5 +436,187 @@ func TestPhase2_setNullUntouchedBaselineChild(t *testing.T) {
 	}
 	if !res.Complete() {
 		t.Errorf("fully-covered baseline SET NULL should be complete, got %v", res.Incomplete)
+	}
+}
+
+// contiguous / notContiguous / probeFails are canned Options.LiveWindowContiguous
+// answers for the #1615 gate tests; each records the window it was asked about.
+type liveWindowProbe struct {
+	ok    bool
+	err   error
+	calls int
+	since time.Time
+	until time.Time
+}
+
+func (p *liveWindowProbe) probe(_ context.Context, since, until time.Time) (bool, error) {
+	p.calls++
+	p.since, p.until = since, until
+	return p.ok, p.err
+}
+
+// TestPhase2_archivesOutsideWindowKeepBaseline is the #1615 headline: archives
+// exist somewhere in the index, but the live partitions hold every hour of
+// [snapshot, T], so the "may gap the window" premise is false and baseline
+// augmentation must run. Before the fix the bare existence of an archive
+// skipped it and the untouched child was lost.
+func TestPhase2_archivesOutsideWindowKeepBaseline(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	eng := query.New(db)
+	T := time.Now().UTC()
+	snap := T.Add(-30 * time.Minute)
+
+	fb := &fakeBaseline{ok: true, snap: snap,
+		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1), "payload": "keep"}}}}
+	probe := &liveWindowProbe{ok: true}
+	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fb, ArchivesPresent: true, LiveWindowContiguous: probe.probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:10"] {
+		t.Fatalf("archives outside the window must not skip augmentation; want child:10 from baseline, got %v", res.Victims)
+	}
+	if !res.Complete() {
+		t.Errorf("a live-contiguous window is complete, got Incomplete=%v", res.Incomplete)
+	}
+	if probe.calls != 1 || !probe.since.Equal(snap) || !probe.until.Equal(T) {
+		t.Errorf("the probe must be asked about exactly [snapshot, T]; calls=%d since=%s until=%s", probe.calls, probe.since, probe.until)
+	}
+}
+
+// TestPhase2_archivesInWindowSkipBaselineButScanWidened is the shape that
+// failed on stage (2026-09-11): the children were INSERTed 30 minutes before
+// the parent DELETE, a 5-minute backup schedule put a snapshot BETWEEN the two,
+// and an unrelated archive existed. The [snapshot, T] scan saw no INSERT and
+// the gate then skipped the very baseline that held the rows: parent only.
+//
+// With the window genuinely gapped, augmentation still must be skipped — but
+// the scan then falls back to the plain Phase-1 window [T-lookback, T], which
+// is what the tool would search with no baseline at all, and catches the
+// pre-snapshot INSERT from the live index.
+func TestPhase2_archivesInWindowSkipBaselineButScanWidened(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	eng := query.New(db)
+
+	T := time.Now().UTC()
+	h := T.Add(-2 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
+	ts := h.Add(10 * time.Minute).Format("2006-01-02 15:04:05")
+	testutil.InsertEvent(t, db, "b.000001", 10, 20, ts, nil, dbName, "child", 1 /*INSERT*/, "10", nil, nil, []byte(`{"id":10,"pid":1,"payload":"seeded"}`))
+
+	// Snapshot taken AFTER the insert (the 5-minute schedule), holding the row.
+	fb := &fakeBaseline{ok: true, snap: T.Add(-30 * time.Minute),
+		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1), "payload": "seeded"}}}}
+	probe := &liveWindowProbe{ok: false}
+	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fb, ArchivesPresent: true, LiveWindowContiguous: probe.probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:10"] {
+		t.Fatalf("a gapped window must fall back to the Phase-1 lookback scan and find the pre-snapshot INSERT; got %v", res.Victims)
+	}
+	if res.Complete() || !strings.Contains(strings.Join(res.Incomplete, " "), "archived") {
+		t.Errorf("a gapped window must still flag the skipped augmentation; Incomplete=%v", res.Incomplete)
+	}
+	if fb.calls == 0 {
+		t.Errorf("the baseline must still be consulted (its snapshot time decides the gate)")
+	}
+}
+
+// TestPhase2_deletedBeforeSnapshotNotResurrected pins why the widened scan is
+// ONLY the fallback: when augmentation runs, the baseline is authoritative at
+// its snapshot instant, so a child whose live INSERT predates the snapshot but
+// which is ABSENT from the snapshot (deleted in between — by an unlogged
+// cascade, or in an hour that later rotated) must not come back from that
+// stale INSERT image. A scan that widened past the snapshot in augment mode
+// would resurrect it.
+func TestPhase2_deletedBeforeSnapshotNotResurrected(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	eng := query.New(db)
+
+	T := time.Now().UTC()
+	h := T.Add(-2 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
+	ts := h.Add(10 * time.Minute).Format("2006-01-02 15:04:05")
+	testutil.InsertEvent(t, db, "b.000001", 10, 20, ts, nil, dbName, "child", 1 /*INSERT*/, "10", nil, nil, []byte(`{"id":10,"pid":1}`))
+
+	fb := &fakeBaseline{ok: true, snap: T.Add(-30 * time.Minute)} // row 10 gone by the snapshot
+	probe := &liveWindowProbe{ok: true}
+	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fb, ArchivesPresent: true, LiveWindowContiguous: probe.probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if len(res.Victims) != 0 {
+		t.Errorf("a child absent from the snapshot must not be resurrected from its pre-snapshot INSERT; got %v", res.Victims)
+	}
+	if !res.Complete() {
+		t.Errorf("nothing was skipped, got Incomplete=%v", res.Incomplete)
+	}
+}
+
+// TestPhase2_liveWindowProbeErrorSkipsBaseline: a probe that cannot answer is
+// never read as "contiguous" — augmentation is skipped and the caveat names
+// the probe failure, so the operator knows it was the check, not the data.
+func TestPhase2_liveWindowProbeErrorSkipsBaseline(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	eng := query.New(db)
+	T := time.Now().UTC()
+
+	fb := &fakeBaseline{ok: true, snap: T.Add(-30 * time.Minute),
+		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1)}}}}
+	probe := &liveWindowProbe{err: errors.New("partition list unreadable")}
+	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fb, ArchivesPresent: true, LiveWindowContiguous: probe.probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if len(res.Victims) != 0 {
+		t.Errorf("a failed probe must skip augmentation; got %v", res.Victims)
+	}
+	joined := strings.Join(res.Incomplete, " ")
+	if res.Complete() || !strings.Contains(joined, "archived") || !strings.Contains(joined, "partition list unreadable") {
+		t.Errorf("the caveat must name the probe failure; Incomplete=%v", res.Incomplete)
+	}
+}
+
+// TestPhase2_archivesSkipBaseline_noProbeCallsNothing: without a probe wired
+// the gate keeps the pre-#1615 rule (any archive skips), and the window is the
+// widened fallback — pinned so a call site that forgets to wire the probe
+// degrades to the old behavior, never to a silent "contiguous".
+func TestPhase2_archivesSkipBaselineWithoutProbeWidensScan(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	eng := query.New(db)
+
+	T := time.Now().UTC()
+	h := T.Add(-2 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
+	ts := h.Add(10 * time.Minute).Format("2006-01-02 15:04:05")
+	testutil.InsertEvent(t, db, "b.000001", 10, 20, ts, nil, dbName, "child", 1 /*INSERT*/, "10", nil, nil, []byte(`{"id":10,"pid":1}`))
+
+	fb := &fakeBaseline{ok: true, snap: T.Add(-30 * time.Minute),
+		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1)}}}}
+	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fb, ArchivesPresent: true})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:10"] {
+		t.Fatalf("no probe: augmentation skipped but the lookback scan must still find child:10; got %v", res.Victims)
+	}
+	if res.Complete() || !strings.Contains(strings.Join(res.Incomplete, " "), "archived") {
+		t.Errorf("no probe must keep the old skip caveat; Incomplete=%v", res.Incomplete)
 	}
 }

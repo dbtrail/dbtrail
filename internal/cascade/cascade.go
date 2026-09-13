@@ -176,6 +176,18 @@ type Options struct {
 	// When true, baseline augmentation is skipped + flagged, exactly like a
 	// truncated binlog scan.
 	ArchivesPresent bool
+	// LiveWindowContiguous, when set, reports whether the live index still
+	// holds every hour of [since, until] — no hour rotated out, archived or
+	// lost. Consulted only when ArchivesPresent is true, to decide whether the
+	// archived partitions can actually gap the [snapshot, T] window that the
+	// "untouched ⟹ baseline verbatim" rule depends on (#1615): an archive from
+	// months ago says nothing about a parent deleted minutes ago whose whole
+	// window is live, and skipping augmentation there threw away the very
+	// baseline that held the children. nil = unknown, treated as NOT
+	// contiguous (the pre-#1615 rule: any archive at all skips); an error is
+	// treated the same way and named in the caveat. Never read as "contiguous"
+	// on failure. Wire it with LiveWindowProbe.
+	LiveWindowContiguous func(ctx context.Context, since, until time.Time) (bool, error)
 	// PKMetas, when non-nil, resolves a table's primary-key column metadata
 	// from the schema snapshot (#1273). The engine uses it to skip child
 	// edges whose PK contains a generated column — the MariaDB system-
@@ -630,6 +642,24 @@ func SynthesizeVictims(
 		augment  bool // baseline augmentation may safely run over baseRows
 		failed   bool // operational failure — the caller must skip this edge
 	}
+	// windowMayGap decides the #1615 gate for one edge: may the live index be
+	// missing hours of [snapshot, T]? Only an index with archived partitions
+	// can (rotation archives as it drops); given one, the wired probe answers
+	// for the exact window, and NO probe or a FAILED probe are both "may gap"
+	// — never "contiguous" by default.
+	windowMayGap := func(ctx context.Context, snapshot, until time.Time) (bool, error) {
+		if !opts.ArchivesPresent {
+			return false, nil
+		}
+		if opts.LiveWindowContiguous == nil {
+			return true, nil
+		}
+		contiguous, err := opts.LiveWindowContiguous(ctx, snapshot, until)
+		if err != nil {
+			return true, err
+		}
+		return !contiguous, nil
+	}
 	scanChildren := func(fk CascadeFK, parentKey string, rootTS time.Time) childScan {
 		// #1273: a child whose PK contains a generated column — the MariaDB
 		// system-versioning shape — cannot be synthesized from EITHER phase:
@@ -645,9 +675,26 @@ func SynthesizeVictims(
 		since := rootTS.Add(-opts.Lookback)
 
 		// Phase-2: look up the child rows that referenced this parent at the
-		// baseline snapshot. Widen the binlog window to the snapshot time so the
-		// scan catches every child touched SINCE the baseline; the untouched ones
-		// are added by the caller after the scan.
+		// baseline snapshot. When augmentation will run, the binlog window
+		// becomes exactly [snapshot, T]: the baseline is authoritative at its
+		// snapshot instant, so every child touched SINCE it is caught by the
+		// scan and the untouched ones are added by the caller after it. A
+		// scan reaching BEFORE the snapshot would be wrong there — a child
+		// deleted between its INSERT and the snapshot (by an unlogged cascade,
+		// or in an hour that later rotated) is absent from the baseline on
+		// purpose, and its stale INSERT image would resurrect it.
+		//
+		// When augmentation is going to be SKIPPED (the live index no longer
+		// holds the whole [snapshot, T] window, #1615), the baseline rows never
+		// reach the output, so that exactness buys nothing and costs a lot:
+		// the scan falls back to the plain Phase-1 window [T-lookback, T] —
+		// widened to the snapshot when that is older — which is what the tool
+		// searches with no baseline at all. This is the shape that failed on
+		// stage: children seeded 30 minutes before the DELETE, a 5-minute
+		// backup schedule dropping a snapshot in between, and one unrelated
+		// archive; the [snapshot, T] scan saw no INSERT, the gate then threw
+		// away the baseline that held the rows, and the tool answered "parent
+		// only" with every row it needed sitting in the live index.
 		var (
 			baseRows     []BaselineRow
 			baseSnap     time.Time
@@ -655,6 +702,11 @@ func SynthesizeVictims(
 			baseCovered  bool
 			baseSincePos *query.BinlogPos
 			baseStaleMsg string // reconstruct.StaleWarning.Message, if the provider fell back to an older snapshot (#618)
+			// archiveGap: the [snapshot, T] window may include hours the live
+			// scan cannot see, so augmentation must be skipped (#1615);
+			// archiveGapErr is the probe failure behind it, when that is why.
+			archiveGap    bool
+			archiveGapErr error
 		)
 		// pkTypeGated skips the ENTIRE baseline block, not just the provider
 		// call: falling through to the switch's `default:` arm would emit
@@ -717,8 +769,11 @@ func SynthesizeVictims(
 				}
 			case covered:
 				baseCovered, baseSnap, baseRows, baseTrunc = true, bl.SnapshotTime, bl.Rows, bl.Truncated
-				since = bl.SnapshotTime
-				baseSincePos = bl.SincePos
+				archiveGap, archiveGapErr = windowMayGap(ctx, bl.SnapshotTime, until)
+				if !archiveGap || bl.SnapshotTime.Before(since) {
+					since = bl.SnapshotTime
+					baseSincePos = bl.SincePos
+				}
 				// #618: captured here but NOT reported yet — it is only meaningful
 				// once we know baseline augmentation actually ran (see the
 				// "default:" branch of the augmentation gate at the end).
@@ -824,15 +879,28 @@ func SynthesizeVictims(
 				addIncomplete("baseline-skip:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
 					"binlog scan truncated for %s.%s; skipped baseline augmentation to avoid resurrecting stale rows",
 					fk.Schema, fk.Table))
-			case opts.ArchivesPresent:
-				// The widened [snapshot, T] window may include archived partitions
-				// the live scan cannot see, so `touched` may be incomplete — a child
-				// re-parented/deleted in an archived gap would be wrongly resurrected
-				// from its stale baseline row. Skip, like the truncated-binlog case.
-				addIncomplete("baseline-skip-archived:"+fk.Schema+"."+fk.Table, fmt.Sprintf(
-					"index has archived partitions that may gap the [snapshot, T] window for %s.%s; "+
-						"skipped baseline augmentation to avoid resurrecting rows whose deletion/re-parent was archived",
-					fk.Schema, fk.Table))
+			case archiveGap:
+				// The [snapshot, T] window includes hours the live scan cannot see
+				// (rotated out — archived or lost), so `touched` may be incomplete
+				// — a child re-parented/deleted in that gap would be wrongly
+				// resurrected from its stale baseline row. Skip, like the
+				// truncated-binlog case. Three wordings for three facts: the
+				// window was verified gapped, the check itself failed, or no
+				// check was wired (the pre-#1615 existence rule).
+				var reason string
+				switch {
+				case archiveGapErr != nil:
+					reason = fmt.Sprintf("could not verify that the live index holds every hour of the [snapshot, T] window for %s.%s (%v)",
+						fk.Schema, fk.Table, archiveGapErr)
+				case opts.LiveWindowContiguous != nil:
+					reason = fmt.Sprintf("the live index no longer holds every hour of the [snapshot, T] window for %s.%s "+
+						"(rotated to archives, which cascade recovery does not read)", fk.Schema, fk.Table)
+				default:
+					reason = fmt.Sprintf("index has archived partitions that may gap the [snapshot, T] window for %s.%s",
+						fk.Schema, fk.Table)
+				}
+				addIncomplete("baseline-skip-archived:"+fk.Schema+"."+fk.Table,
+					reason+"; skipped baseline augmentation to avoid resurrecting rows whose deletion/re-parent was archived")
 			default:
 				// #618: the stale-baseline advisory belongs HERE — this is the only
 				// branch where a baseline row actually reaches the output. Firing it
@@ -1870,5 +1938,21 @@ func valToString(v any) string {
 		return string(x)
 	default:
 		return fmt.Sprintf("%v", x)
+	}
+}
+
+// LiveWindowProbe adapts query.LiveWindowContiguous into
+// Options.LiveWindowContiguous for an index reached through db. An empty
+// dbName (a DSN the caller could not parse) yields nil — the gate then keeps
+// its fail-closed default rather than answering from a planner that cannot
+// run. The three cascade entry points (CLI, MCP, console) wire this the same
+// way; adding a fourth without it silently reverts that surface to the
+// pre-#1615 "any archive skips" rule, which is why Options documents it.
+func LiveWindowProbe(db *sql.DB, dbName string) func(ctx context.Context, since, until time.Time) (bool, error) {
+	if db == nil || dbName == "" {
+		return nil
+	}
+	return func(ctx context.Context, since, until time.Time) (bool, error) {
+		return query.LiveWindowContiguous(ctx, db, dbName, since, until)
 	}
 }
