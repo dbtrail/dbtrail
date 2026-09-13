@@ -147,7 +147,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	// once retention pruned the local copies, the page showed nothing while the
 	// bucket held dozens, and Time-travel resolved tables from a bucket the page
 	// behind it did not list.
-	merged := listBaselinesMerged(r.Context(), baselineSourcesOf(b), reconstruct.ListBaselines)
+	merged := listBaselinesMerged(r.Context(), baselineSourcesOf(b), reconstruct.ListBaselinesReport)
 	resp.Sources = merged.Sources
 	if merged.Listed == 0 {
 		// Nothing could be read anywhere. Still a hard failure, and the message
@@ -159,7 +159,10 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, "list baselines: "+strings.Join(parts, "; "))
 		return
 	}
-	resp.Incomplete = merged.Listed < len(merged.Sources)
+	// Incomplete when a location did not answer OR answered in part: a listing
+	// that dropped an unreadable snapshot reads exactly like a complete one
+	// otherwise (#1601).
+	resp.Incomplete = merged.Listed < len(merged.Sources) || merged.Skipped > 0
 	files := merged.Files
 
 	now := time.Now().UTC()

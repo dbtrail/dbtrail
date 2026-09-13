@@ -238,14 +238,14 @@ func TestGradeFullTable_s3Restore_aFileInBothLocationsIsReachableByItsLocalPath(
 func TestListBaselinesMerged_marksEveryFileTheBucketListed(t *testing.T) {
 	ts := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
 	both := reconstruct.BaselineFile{Schema: "shop", Table: "orders", SnapshotTime: ts}
-	lister := func(_ context.Context, src string) ([]reconstruct.BaselineFile, error) {
+	lister := func(_ context.Context, src string) ([]reconstruct.BaselineFile, int, error) {
 		f := both
 		f.Path = src + "/2026-06-10T12-00-00Z/shop/orders.parquet"
 		if baselineKindOf(src) == "dir" {
 			f2 := reconstruct.BaselineFile{Schema: "shop", Table: "carts", SnapshotTime: ts, Path: src + "/2026-06-10T12-00-00Z/shop/carts.parquet"}
-			return []reconstruct.BaselineFile{f, f2}, nil
+			return []reconstruct.BaselineFile{f, f2}, 0, nil
 		}
-		return []reconstruct.BaselineFile{f}, nil
+		return []reconstruct.BaselineFile{f}, 0, nil
 	}
 	got := listBaselinesMerged(context.Background(), []string{"/backups", "s3://bucket/prefix"}, lister)
 

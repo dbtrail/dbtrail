@@ -1,0 +1,162 @@
+package console
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
+)
+
+// unreadableDir makes dir unreadable for the test. Root bypasses directory
+// permissions, so the test skips there rather than pass on a no-op fixture.
+func unreadableDir(t *testing.T, dir string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory read permissions; the mode-000 fixture is a no-op")
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+}
+
+// TestCoverageAPI_partiallyReadableLocationIsUnknown is #1601's own
+// reproduction: the second location answers, but its only snapshot directory
+// cannot be read. Before, the listing came back short with a nil error, the
+// guard saw a location that "answered", and the card graded green over a
+// table it never saw. A partial answer is an unknown verdict, like a location
+// that did not answer at all.
+func TestCoverageAPI_partiallyReadableLocationIsUnknown(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	latest := now.Add(-30 * time.Second)
+	part := now.Add(-100 * time.Hour).Format("p_2006010215")
+	tsDir := func(age time.Duration) string { return now.Add(-age).Format("2006-01-02T15-04-05Z") }
+
+	primary, fallback := t.TempDir(), t.TempDir()
+	writeBaselineFixture(t, primary, tsDir(time.Hour), "shop", "orders.parquet")
+	oldSnap := tsDir(150 * time.Hour)
+	writeBaselineFixture(t, fallback, oldSnap, "shop", "archived.parquet")
+	unreadableDir(t, filepath.Join(fallback, oldSnap))
+
+	srv := newBaselineServerWithFallback(t, primary, fallback)
+	srv.cm.boot.db = coverageMockDB(t, part, latest, nil)
+	srv.cm.boot.dbName = "binlog_index"
+	got := coverageGet(t, srv)
+
+	if got.FullTableStatus != "unknown" {
+		t.Errorf("status = %q with a snapshot directory unreadable, want unknown: the listing "+
+			"dropped a whole snapshot and the card graded what was left as the whole set", got.FullTableStatus)
+	}
+	if got.FullTableFrom != "" {
+		t.Errorf("full_table_from = %q, want empty: an unknown verdict claims no anchor", got.FullTableFrom)
+	}
+	if len(got.BrokenTables) != 0 {
+		t.Errorf("broken_tables = %v, want none: a partial view must not accuse", got.BrokenTables)
+	}
+}
+
+// The merge carries the skip count per source and in total, so both the
+// coverage guard and the Backups page's "incomplete" flag can see it.
+func TestListBaselinesMerged_carriesTheSkipCount(t *testing.T) {
+	ts := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	f := reconstruct.BaselineFile{Schema: "shop", Table: "orders", SnapshotTime: ts, Path: "/backups/2026-06-10T12-00-00Z/shop/orders.parquet"}
+	lister := func(_ context.Context, src string) ([]reconstruct.BaselineFile, int, error) {
+		if src == "/backups" {
+			return []reconstruct.BaselineFile{f}, 2, nil
+		}
+		return nil, 0, errors.New("bucket down")
+	}
+	got := listBaselinesMerged(context.Background(), []string{"/backups", "s3://bucket/prefix"}, lister)
+	if got.Skipped != 2 {
+		t.Errorf("Skipped = %d, want 2", got.Skipped)
+	}
+	if len(got.Sources) != 2 || got.Sources[0].Skipped != 2 || got.Sources[0].Count != 1 {
+		t.Errorf("per-source report lost the skip count: %+v", got.Sources)
+	}
+	if got.Listed != 1 {
+		t.Errorf("Listed = %d, want 1: a partial answer still counts as an answer; the skip count is the extra signal", got.Listed)
+	}
+}
+
+// The Backups page flags the listing incomplete when a location answered in
+// part, exactly as it does when one did not answer.
+func TestBaselinesAPI_partialListingIsIncomplete(t *testing.T) {
+	local := t.TempDir()
+	writeBaselineFixture(t, local, "2026-06-10T12-00-00Z", "shop", "orders.parquet")
+	writeBaselineFixture(t, local, "2026-06-01T00-00-00Z", "shop", "orders.parquet")
+	unreadableDir(t, filepath.Join(local, "2026-06-01T00-00-00Z"))
+
+	srv := newBaselineServerWithFallback(t, local, "")
+	rec, body := doServersReq(t, srv, "GET", "/api/baselines", "")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d, body = %s", rec.Code, body)
+	}
+	var resp struct {
+		Incomplete bool `json:"incomplete"`
+		Sources    []struct {
+			Skipped int `json:"skipped"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Incomplete {
+		t.Error("incomplete = false with an unreadable snapshot directory; the page shows a shorter list as the whole set")
+	}
+	if len(resp.Sources) == 0 || resp.Sources[0].Skipped != 1 {
+		t.Errorf("the source report does not carry the skip count: %+v", resp.Sources)
+	}
+}
+
+// The generated views.sql says when the OTHER location could only be read in
+// part: the snapshot it could not read may be the newer one, and a header
+// that says nothing reads as "nothing newer over there".
+func TestViewsFile_namesAPartiallyReadableOtherLocation(t *testing.T) {
+	local, bucketish := t.TempDir(), t.TempDir()
+	writeBaselineFixture(t, local, "2026-06-03T12-00-00Z", "shop", "orders.parquet")
+	writeBaselineFixture(t, bucketish, "2026-06-10T12-00-00Z", "shop", "orders.parquet")
+	unreadableDir(t, filepath.Join(bucketish, "2026-06-10T12-00-00Z"))
+
+	srv := newBaselineServerWithFallback(t, local, bucketish)
+	rec, body := doServersReq(t, srv, "GET", "/api/views.sql", "")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d, body = %s", rec.Code, firstLines(string(body), 8))
+	}
+	sql := string(body)
+	// The specific line, not the phrase: "could not be read" also appears in
+	// other header notes, and a generic match let the case go unguarded.
+	if !strings.Contains(sql, "whether "+bucketish+" holds a newer snapshot could not be read") {
+		t.Errorf("the header does not say the other location could not be fully read:\n%s", firstLines(sql, 25))
+	}
+	if strings.Contains(sql, "NOTE: a newer snapshot") {
+		t.Errorf("the header claims a newer snapshot it could not have listed:\n%s", firstLines(sql, 25))
+	}
+}
+
+// And when the file's OWN location was read in part, the header says the
+// pinned snapshot may not be the newest one there.
+func TestViewsFile_namesAPartiallyReadableOwnLocation(t *testing.T) {
+	local := t.TempDir()
+	writeBaselineFixture(t, local, "2026-06-03T12-00-00Z", "shop", "orders.parquet")
+	writeBaselineFixture(t, local, "2026-06-10T12-00-00Z", "shop", "orders.parquet")
+	unreadableDir(t, filepath.Join(local, "2026-06-10T12-00-00Z"))
+
+	srv := newBaselineServerWithFallback(t, local, "")
+	rec, body := doServersReq(t, srv, "GET", "/api/views.sql", "")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d, body = %s", rec.Code, firstLines(string(body), 8))
+	}
+	sql := string(body)
+	if !strings.Contains(sql, "2026-06-03T12:00:00Z") {
+		t.Fatalf("the readable snapshot is not pinned:\n%s", firstLines(sql, 25))
+	}
+	if !strings.Contains(sql, "under this location could not be read") {
+		t.Errorf("the header does not say the location was read in part:\n%s", firstLines(sql, 25))
+	}
+}

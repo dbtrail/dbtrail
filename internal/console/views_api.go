@@ -123,10 +123,14 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 	}
 	if baseSrc != "" {
 		in.BaselineSource = baseSrc
-		files, err := reconstruct.ListBaselines(ctx, baseSrc)
+		files, skipped, err := reconstruct.ListBaselinesReport(ctx, baseSrc)
 		if err != nil {
 			return views.Input{}, fmt.Errorf("list baselines: %w", err)
 		}
+		// A partial read of the file's OWN location (#1601): the newest
+		// snapshot this file pins may not be the newest one there. Carried
+		// into the header, since silence reads as "this is the newest".
+		in.BaselineUnreadable = skipped
 		if len(files) > 0 {
 			newest := files[0].SnapshotTime // ListBaselines returns newest first
 			in.BaselineSnapshot = newest
@@ -136,17 +140,25 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 			// resolves for nobody. Named instead, best-effort.
 			if other := otherBaselineSource(b, baseSrc); other != "" {
 				octx, cancel := context.WithTimeout(ctx, baselineListTimeout)
-				othersFiles, oerr := reconstruct.ListBaselines(octx, other)
+				othersFiles, oskipped, oerr := reconstruct.ListBaselinesReport(octx, other)
 				cancel()
+				newerThere := len(othersFiles) > 0 && othersFiles[0].SnapshotTime.After(newest)
 				switch {
-				case oerr != nil:
+				case oerr != nil || (oskipped > 0 && !newerThere):
+					// A location that answered in part is an unanswered
+					// question for THIS purpose (#1601): the snapshot it could
+					// not read may be the newer one. A newer snapshot it DID
+					// read is still reported below, as the more useful fact.
+					if oerr == nil {
+						oerr = fmt.Errorf("%d unreadable snapshot director(y/ies) skipped", oskipped)
+					}
 					slog.Warn("console: could not check the other backup location for a newer snapshot; the generated file says the check did not answer",
 						"source", other, "error", oerr)
 					// Carried into the file, not swallowed: a header that says
 					// nothing reads as "the other location holds nothing
 					// newer", and that reader stops looking.
 					in.NewerElsewhereUnchecked = other
-				case len(othersFiles) > 0 && othersFiles[0].SnapshotTime.After(newest):
+				case newerThere:
 					in.NewerElsewhere = othersFiles[0].SnapshotTime
 					in.NewerElsewhereSource = other
 					// The route, not just the fact (#1551 gave the download a

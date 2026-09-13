@@ -37,6 +37,10 @@ type baselineSourceDTO struct {
 	// listing beside it is INCOMPLETE, and the page has to say so rather than
 	// render a shorter list as if it were the whole set.
 	Error string `json:"error,omitempty"`
+	// Skipped is how many snapshot or schema directories under this location
+	// could not be read (#1601); a non-zero value means the count above is a
+	// floor and the listing may be missing whole snapshots.
+	Skipped int `json:"skipped,omitempty"`
 }
 
 // baselineKindOf classifies a source the way the rest of the console does.
@@ -75,6 +79,12 @@ type mergedBaselines struct {
 	// Listed counts the locations that answered. Zero means nothing could be
 	// read, which is the only case that is still a hard failure.
 	Listed int
+	// Skipped counts the snapshot or schema directories an answering location
+	// could not read (#1601). A location that answered with skips is a
+	// PARTIAL answer: it can be missing whole snapshots, so the verdicts
+	// built on Files (coverage, "latest") must treat it like a location that
+	// did not answer, not like one that held nothing.
+	Skipped int
 	// InS3 marks every file an s3 location listed, whichever path Files kept
 	// for it. The coverage card needs it: Restore folds from the bucket on an
 	// S3-backed server, and a file present in both locations keeps its LOCAL
@@ -102,7 +112,7 @@ type mergedBaselines struct {
 // break here — dedup across locations, the union of kinds, and preferring the
 // local path for the footer read — are exactly the ones that only appear when
 // the two locations are of different kinds.
-type baselineLister func(ctx context.Context, source string) ([]reconstruct.BaselineFile, error)
+type baselineLister func(ctx context.Context, source string) (files []reconstruct.BaselineFile, skipped int, err error)
 
 func listBaselinesMerged(ctx context.Context, sources []string, list baselineLister) mergedBaselines {
 	out := mergedBaselines{Kinds: map[int64][]string{}, InS3: map[baselineFileKey]bool{}}
@@ -116,7 +126,7 @@ func listBaselinesMerged(ctx context.Context, sources []string, list baselineLis
 		kind := baselineKindOf(src)
 		report := baselineSourceDTO{Source: src, Kind: kind}
 		srcCtx, cancel := context.WithTimeout(ctx, baselineListTimeout)
-		files, err := list(srcCtx, src)
+		files, skipped, err := list(srcCtx, src)
 		cancel()
 		if err != nil {
 			report.Error = err.Error()
@@ -133,7 +143,13 @@ func listBaselinesMerged(ctx context.Context, sources []string, list baselineLis
 			continue
 		}
 		out.Listed++
+		out.Skipped += skipped
 		report.Count = len(files)
+		report.Skipped = skipped
+		if skipped > 0 {
+			slog.Warn("console: a backup location could only be listed in part; whole snapshots may be missing from the listing beside it",
+				"source", src, "kind", kind, "unreadable_directories", skipped)
+		}
 		out.Sources = append(out.Sources, report)
 
 		for _, f := range files {
