@@ -21,7 +21,8 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		jsFunctionBody(t, js, "backupDaemonCard") +
 		jsFunctionBody(t, js, "backupServersPanel") +
 		jsFunctionBody(t, js, "backupServerRow") +
-		jsFunctionBody(t, js, "s3RetentionBox")
+		jsFunctionBody(t, js, "s3RetentionBox") +
+		jsFunctionBody(t, js, "s3RetentionConflicts")
 	// Dotted READS, not bare tokens: "value" also matches dir.value.trim()
 	// and "baseline_dir" matches the input's name: attribute, so a renamed
 	// JSON tag stayed green while the page rendered blanks. The dotted form
