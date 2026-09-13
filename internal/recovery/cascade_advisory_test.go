@@ -22,7 +22,10 @@ func TestDetectCascade_namesTheTargetsOwnChildrenAcrossSchemas(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(true))
-	mock.ExpectQuery("FROM fk_constraints").WillReturnRows(sqlmock.NewRows(fkEdgeCols).
+	// WithArgs() with no arguments pins the INDEX-WIDE read: scoped by the
+	// child schema, the query would carry "shop" and billing.invoices would
+	// never be returned by a real index.
+	mock.ExpectQuery("FROM fk_constraints").WithArgs().WillReturnRows(sqlmock.NewRows(fkEdgeCols).
 		AddRow("shop", "order_items", "order_id", "shop", "orders", "CASCADE", "NO ACTION").
 		AddRow("billing", "invoices", "customer_id", "shop", "customers", "CASCADE", "NO ACTION").
 		AddRow("billing", "invoices", "account_id", "shop", "customers", "NO ACTION", "SET NULL").
@@ -53,7 +56,7 @@ func TestDetectCascade_scopes(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(true))
-	mock.ExpectQuery("FROM fk_constraints").WillReturnRows(sqlmock.NewRows(fkEdgeCols).
+	mock.ExpectQuery("FROM fk_constraints").WithArgs().WillReturnRows(sqlmock.NewRows(fkEdgeCols).
 		AddRow("shop", "order_items", "order_id", "shop", "orders", "CASCADE", "NO ACTION").
 		AddRow("crm", "notes", "customer_id", "crm", "customers", "SET NULL", "NO ACTION"))
 	adv, err := DetectCascade(db, "", "orders")
