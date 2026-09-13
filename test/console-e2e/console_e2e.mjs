@@ -365,6 +365,12 @@ try {
     testText = await page.evaluate(() => (document.getElementById("server-test-result") || {}).textContent || "");
   }
   /[✓✗○]/.test(testText) ? ok("form: Test connection answers beside its button") : bad("form: Test connection answers beside its button", `slot=${JSON.stringify(testText)}`);
+  const after = await page.evaluate(() => ({
+    enabled: !document.getElementById("server-test").disabled,
+    msg: (document.getElementById("server-form-msg") || {}).textContent || "",
+  }));
+  after.enabled ? ok("form: Test button is usable again after the answer") : bad("form: Test button is usable again after the answer", "still disabled");
+  after.msg === "" ? ok("form: Test leaves the message line empty") : bad("form: Test leaves the message line empty", JSON.stringify(after.msg));
 
   // Scenario 4 — the REAL missing-index path (not a fabricated string): query
   // a data endpoint against the default (unprovisioned wp) server, take the

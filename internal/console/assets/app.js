@@ -135,6 +135,12 @@ let defaultServerId = "";
 let serverGen = 0;            // bumped on every server switch (staleness guard)
 let viewGen = 0;              // bumped on every route render (staleness guard)
 let capsCache = {};           // last /api/capabilities for the selected server
+let capsKnown = false; // whether capsCache came from a payload we actually read (a failed check degrades to {})
+// noCaptureNotes remembers, per server id, why a save did not start capture
+// (#1607), so the row keeps its reason across list rebuilds in this session;
+// serverRow re-derives the condition before showing it, so a server that
+// later gains a source or starts streaming loses the note on its own.
+const noCaptureNotes = {};
 let extViews = [];            // extension views advertised for the selected server (embedding builds)
 let extSettings = [];         // extension settings panels advertised for this SESSION (permission-gated, not per-server)
 let lastSQL = "";             // last generated undo SQL (for copy/download)
@@ -8137,6 +8143,7 @@ async function gateCapabilities() {
   }
   if (gen !== serverGen) return;
   capsCache = caps || {};
+  capsKnown = capsOK;
   // Extension views advertised for this server (embedding builds; empty in the
   // stock binary and under any active profile — the backend omits them there).
   // Rebuild the nav before the route renders so a deep-linked ext route resolves.
@@ -8541,7 +8548,7 @@ function serverRow(s) {
   if (s.flavor && s.flavor !== "mysql") item.append(el("span", { class: "chip", text: s.flavor === "postgres" ? "PG" : s.flavor.toUpperCase(), title: "Source type: " + s.flavor }));
   // A registry entry with no source connection under a capturing console
   // never streams; the mark says so where the Start button would be (#1607).
-  if (s.kind !== "ephemeral" && capsCache.monitor && !s.has_source) item.append(el("span", { class: "chip chip-nosrc", text: "NO SOURCE", title: "No source connection: nothing is captured from this server. Edit it and add one." }));
+  if (s.kind !== "ephemeral" && capsKnown && capsCache.monitor && !s.has_source) item.append(el("span", { class: "chip chip-nosrc", text: "NO SOURCE", title: "No source connection: nothing is captured from this server. Edit it and add one." }));
 
   let desc;
   if (s.has_source && s.source_host) desc = "watching " + s.source_user + "@" + s.source_host + ":" + (s.source_port || (s.flavor === "postgres" ? "5432" : "3306")) + (s.source_database ? "/" + s.source_database : "") + (s.schemas ? " [" + s.schemas + "]" : "");
@@ -8549,7 +8556,8 @@ function serverRow(s) {
   else desc = s.dbname || "";
   item.append(el("span", { class: "srv-desc conn", text: desc }));
 
-  item.append(el("span", { class: "srv-status", id: "srv-status-" + s.id }));
+  const note = noCaptureNotes[s.id] && noCaptureReason(s);
+  item.append(el("span", { class: "srv-status" + (note ? " pending" : ""), id: "srv-status-" + s.id, text: note ? "○ " + note : "" }));
 
   const acts = el("span", { class: "acts row-acts" });
   const monitorable = capsCache.monitor && s.has_source && s.kind !== "ephemeral";
@@ -8807,23 +8815,30 @@ async function saveServer(form) {
     formMsg("Running startup checks…", false);
     const res = await startMonitor(saved.id);
     await refreshServersList();
-    if (res && res.started && !doctorWarnings(res.doctor)) { hideServerForm(); toast("Monitoring started. Events will appear within a minute"); }
-    else if (res && res.started) { renderDoctor(res.doctor); formMsg("Monitoring started; review the warnings above", false); }
+    if (res && res.started && !doctorWarnings(res.doctor)) { hideServerForm(); toast("Monitoring started. Events will appear within a minute"); return; }
+    // The entry now EXISTS: the form is re-shown from the saved entry so that
+    // Save is a real retry (a PUT of this id) rather than a second POST of the
+    // same name, which the registry refuses as a duplicate. Save stays
+    // enabled on a failure: it IS the retry once the operator has fixed the
+    // server (most checks are fixed on the database side, with the same form
+    // values). showServerForm rebuilds the check cards, so it goes first.
+    showServerForm(saved);
+    if (res && res.started) { renderDoctor(res.doctor); formMsg("Monitoring started; review the warnings above", false); }
     else if (res) { renderDoctor(res.doctor); formMsg("Startup checks failed: fix the items above and save again", true); scrollDoctorIntoView(); }
     else { formMsg("Could not start monitoring; check the notification for details and try again", true); } // startMonitor returned null (transport error)
-    // Save stays enabled on a failure: it IS the retry once the operator has
-    // fixed the server (most checks are fixed on the database side, with the
-    // same form values), so disabling it would leave no way to run the
-    // checks again. Warnings never block.
     return;
   }
   hideServerForm();
-  await refreshServersList();
   // A server that will never stream is saved, but the save must not read as
   // capture (#1607): the reason and the one action for it land on the row's
-  // status slot, where they last, next to the row's own mark.
+  // status slot, kept for this session across list rebuilds (noCaptureNotes),
+  // next to the row's own mark. When the row cannot be found (the list
+  // failed to load, the modal was closed mid-save) the reason goes to a
+  // toast that persists until dismissed, never to a 2-second one.
   const why = noCaptureReason(saved);
-  if (why) noteServerRow(saved.id, why);
+  if (why) noCaptureNotes[saved.id] = why;
+  await refreshServersList();
+  if (why && !document.getElementById("srv-status-" + saved.id)) toastError(why);
   toast((id ? "Server updated" : "Server added") + (why ? "; it will not capture changes yet" : ""));
 }
 
@@ -8833,16 +8848,13 @@ async function saveServer(form) {
 // has no source connection.
 function noCaptureReason(s) {
   if (!s || s.kind === "ephemeral" || isLiveMonitorState(s.monitor_state)) return null;
+  // A capability check that FAILED also leaves capsCache.monitor false, and
+  // that is not serve mode: telling a watch operator to restart as watch would
+  // be a confident wrong remedy. The honest one there is a reload.
+  if (!capsKnown) return "will not capture: the capability check failed when this page loaded, so nothing can be started from here. Reload the page";
   if (!capsCache.monitor) return "will not capture: this console was started as serve, which reads an index and never captures. Run bintrail-console watch to capture from this server";
   if (!s.has_source) return "will not capture: no source connection. Edit this server and add one";
   return null;
-}
-
-function noteServerRow(id, text) {
-  const slot = document.getElementById("srv-status-" + id);
-  if (!slot) return;
-  slot.className = "srv-status pending";
-  slot.textContent = "○ " + text;
 }
 
 // scrollDoctorIntoView brings the first failing check to the eye: the cards
