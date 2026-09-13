@@ -546,6 +546,21 @@ Two section labels split it: **Change here** and **Set when dbtrail starts**.
   things stand shows the refusal above the compact block; the schedule
   itself and the full-backup note sit inside it. Save wakes up when a field
   differs from what was loaded.
+  A server whose scheduled backups upload to S3 also gets the growth line
+  and the rule (#1622): about how many full backups reach the bucket every
+  30 days at the schedule's rate, and that dbtrail never removes one. Under
+  **Bucket rule to expire old backups** the page generates a lifecycle rule
+  scoped to the backup prefix only (never the archived changes), with the
+  `aws s3api put-bucket-lifecycle-configuration` command to apply it, and
+  says what such a rule cannot do: it expires by age alone, so it cannot
+  spare the only complete copy or a backup a restore is reading, and a
+  stopped schedule under an age rule reaches zero backups. A retention
+  shorter than the schedule is refused in red (the newest complete backup
+  would expire before the next one exists), and backups at the bucket root
+  get no rule at all, since an empty prefix would expire everything in the
+  bucket. The command replaces every rule on the bucket, so the page says to
+  merge it with the rules already there. dbtrail itself never deletes from
+  S3 and never sets a bucket rule; the rule is the operator's to apply.
 - **Set at startup** — the nine daemon-wide values (`--baseline-dir`,
   `--baseline-s3`, `--baseline-retain`, `--baseline-refresh-interval`,
   `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE`, `BINTRAIL_CONSOLE_BASELINE_TRIGGER`,
