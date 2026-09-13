@@ -1336,8 +1336,9 @@ baseline Phase-2 fallback, and the coverage limits.
 **Coverage is surfaced, never hidden.** Phase-1 (live binlog window) recovery is
 partial by construction — a child not touched within `lookback` (default `30d`)
 and not in a baseline cannot be reconstructed. When the result is provably
-partial (a coverage gap, a per-parent overflow, or archived-out partitions the
-live scan can't see) the warnings carry a prominent **provably partial** notice
+partial (a coverage gap, a per-parent overflow, or hours of the baseline window
+the scan can't serve — rotated out with no readable archive, or a recorded
+capture loss) the warnings carry a prominent **provably partial** notice
 listing every caveat — and the same caveats are embedded in the generated SQL's
 preamble, so a partial recovery can never read as a full restore even after you
 copy or download it.

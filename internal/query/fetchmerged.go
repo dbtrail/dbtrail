@@ -123,7 +123,18 @@ type FetchMergedOptions struct {
 	// rejected with a clear error before any DB work happens — detecting
 	// the misconfiguration early is why this package exists.
 	ArchiveFetcher ArchiveFetcher
+
+	// SourceResolver, when set, replaces archive_state discovery
+	// (ResolveArchiveSources) as the source of archive paths — for a surface
+	// whose archives are named by environment rather than by the index (the
+	// standalone MCP server's BINTRAIL_ARCHIVE_S3 + BINTRAIL_ID). Its error
+	// is a discovery failure with the same semantics as a failed
+	// archive_state read. nil = ResolveArchiveSources.
+	SourceResolver SourceResolver
 }
+
+// SourceResolver names the archive sources a merged read will open.
+type SourceResolver func(ctx context.Context, db *sql.DB) ([]string, error)
 
 // validate checks FetchMergedOptions for illegal field combinations that would
 // otherwise surface as silent failures downstream. Runs before any DB work so
@@ -750,7 +761,11 @@ func resolveMergeSources(ctx context.Context, db *sql.DB, o FetchMergedOptions) 
 	var src mergeSources
 
 	if !o.NoArchive {
-		srcs, err := ResolveArchiveSources(ctx, db)
+		resolve := o.SourceResolver
+		if resolve == nil {
+			resolve = ResolveArchiveSources
+		}
+		srcs, err := resolve(ctx, db)
 		if err != nil {
 			// A failed registry read means an unknown set of sources is
 			// missing while the planner (below) would still claim their

@@ -188,7 +188,7 @@ automatically.
 |---|---|---|
 | `query` | `bintrail query` | Search indexed row changes with filters |
 | `recover` | `bintrail recover --dry-run` | Generate reversal SQL (never executes it) |
-| `recover_cascade` | `bintrail recover-cascade --dry-run` | Generate reversal SQL for foreign-key `ON DELETE`/`ON UPDATE` cascade side effects InnoDB ran below the binlog — the child rows plain `recover` cannot see. Fails with the reasons when the synthesis is provably partial, unless `allow_incomplete` is set |
+| `recover_cascade` | `bintrail recover-cascade --dry-run` | Generate reversal SQL for foreign-key `ON DELETE`/`ON UPDATE` cascade side effects InnoDB ran below the binlog — the child rows plain `recover` cannot see. Searches the Parquet archives like `recover` (the server's `no_archive` posture confines it to the live index; an unreadable archive is a tool error). Fails with the reasons when the synthesis is provably partial, unless `allow_incomplete` is set |
 | `reconstruct` | `bintrail reconstruct` | A single row's full state at a point in time (needs a baseline) |
 | `status` | `bintrail status` | Indexed files, partitions, and summary |
 | `list_schema_changes` | reads `schema_changes` (see [DDL tracking](./ddl-tracking.md)) | DDL changes recorded while indexing/streaming, with the full statement, binlog coordinates, and the covering `snapshot_id` (`null` = no auto-snapshot; a TRUNCATE row's null is by design and carries a `snapshot_note` saying so) |

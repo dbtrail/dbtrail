@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/buffer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -56,7 +59,7 @@ func seedCascadeIndex(t *testing.T) (*sql.DB, string) {
 
 // cascadeSession connects an in-memory MCP client over the standalone posture
 // with recover_cascade registered.
-func cascadeSession(t *testing.T, db *sql.DB, dbName string) *mcp.ClientSession {
+func cascadeSession(t *testing.T, db *sql.DB, dbName string, mutate ...func(*Target)) *mcp.ClientSession {
 	t.Helper()
 	resolver, err := metadata.NewResolver(db, 0)
 	if err != nil {
@@ -67,7 +70,11 @@ func cascadeSession(t *testing.T, db *sql.DB, dbName string) *mcp.ClientSession 
 		RecoverCascade:      true,
 		AllowBaselineParams: true,
 		Resolve: func(ctx context.Context, _ string) (*Target, error) {
-			return &Target{DB: db, DBName: dbName, Resolver: resolver, ResolverLoaded: true}, nil
+			tg := &Target{DB: db, DBName: dbName, Resolver: resolver, ResolverLoaded: true}
+			for _, m := range mutate {
+				m(tg)
+			}
+			return tg, nil
 		},
 	}
 
@@ -183,9 +190,7 @@ func TestIntegrationRecoverCascadeToolPKFilter(t *testing.T) {
 func TestIntegrationRecoverCascadeTool_archivesOutsideWindowKeepBaseline(t *testing.T) {
 	db, dbName := seedCascadeIndex(t)
 	cs := cascadeSession(t, db, dbName)
-	testutil.MustExec(t, db, `INSERT INTO archive_state
-		(bintrail_id, partition_name, local_path, s3_bucket, s3_key)
-		VALUES ('bt', 'p_2026010100', '', 'bucket', 'pfx/bintrail_id=bt/p_2026010100.parquet')`)
+	writeArchivedChildInsert(t, db, dbName, "77", time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC)) // readable, nowhere near the window
 
 	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour) // the fixture's live hour
 	dir := t.TempDir()
@@ -230,5 +235,205 @@ func TestIntegrationRecoverCascadeTool_archivesOutsideWindowKeepBaseline(t *test
 	}
 	if !out.Complete {
 		t.Errorf("a live-contiguous window must be complete despite an unrelated archive; incomplete=%v", out.Incomplete)
+	}
+}
+
+// writeArchivedEvents writes rows as ONE Parquet archive file per hour under
+// base (a bintrail_id=… directory) and registers each hour in archive_state
+// with its local path. Rows of the same hour share a file.
+func writeArchivedEvents(t *testing.T, db *sql.DB, base string, rows ...query.ResultRow) {
+	t.Helper()
+	byHour := map[time.Time][]query.ResultRow{}
+	for _, r := range rows {
+		h := r.EventTimestamp.UTC().Truncate(time.Hour)
+		byHour[h] = append(byHour[h], r)
+	}
+	for h, rs := range byHour {
+		hourDir := filepath.Join(base, "event_date="+h.Format("2006-01-02"), "event_hour="+h.Format("15"))
+		if err := os.MkdirAll(hourDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		pq := filepath.Join(hourDir, "events.parquet")
+		if _, err := buffer.WriteParquet(rs, pq, "none"); err != nil {
+			t.Fatalf("WriteParquet: %v", err)
+		}
+		testutil.MustExec(t, db, `INSERT INTO archive_state
+			(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key, s3_uploaded_at)
+			VALUES (?, 'bt', ?, ?, NULL, NULL, NULL)`, "p_"+h.Format("2006010215"), pq, len(rs))
+	}
+}
+
+// archivedChildInsert / archivedParentDelete are the two row shapes the
+// archived-cascade tests need (child pid=1; parent id=1).
+func archivedChildInsert(dbName, pk string, at time.Time) query.ResultRow {
+	id, _ := strconv.ParseInt(pk, 10, 64)
+	return query.ResultRow{
+		EventID: uint64(900000 + id), BinlogFile: "b.000001", StartPos: 4, EndPos: 40,
+		EventTimestamp: at.UTC(), SchemaName: dbName, TableName: "child",
+		EventType: 1 /*INSERT*/, PKValues: pk,
+		RowAfter: map[string]any{"id": id, "pid": int64(1), "payload": "archived-" + pk},
+	}
+}
+
+func archivedParentDelete(dbName string, at time.Time) query.ResultRow {
+	return query.ResultRow{
+		EventID: 800001, BinlogFile: "b.000001", StartPos: 41, EndPos: 80,
+		EventTimestamp: at.UTC(), SchemaName: dbName, TableName: "parent",
+		EventType: 3 /*DELETE*/, PKValues: "1",
+		RowBefore: map[string]any{"id": int64(1)},
+	}
+}
+
+// writeArchivedChildInsert writes ONE child INSERT (pid=1) as a Parquet
+// archive for an hour the live index does NOT hold (#1615: evidence that
+// rotated out of the live index).
+func writeArchivedChildInsert(t *testing.T, db *sql.DB, dbName, pk string, at time.Time) {
+	t.Helper()
+	writeArchivedEvents(t, db, filepath.Join(t.TempDir(), "bintrail_id=bt"), archivedChildInsert(dbName, pk, at))
+}
+
+// TestIntegrationRecoverCascadeTool_childOnlyInArchiveRecovered is the second
+// half of #1615 on the MCP surface: the child's INSERT rotated out into a
+// Parquet archive registered in archive_state; the tool's merged scan finds it.
+func TestIntegrationRecoverCascadeTool_childOnlyInArchiveRecovered(t *testing.T) {
+	db, dbName := seedCascadeIndex(t)
+	cs := cascadeSession(t, db, dbName)
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	writeArchivedChildInsert(t, db, dbName, "12", h.Add(-3*time.Hour+10*time.Minute))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "recover_cascade",
+		Arguments: map[string]any{"schema": dbName, "table": "parent"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool recover_cascade: %v", err)
+	}
+	text := resultText(res)
+	if res.IsError {
+		t.Fatalf("recover_cascade returned a tool error: %s", text)
+	}
+	var out recoverCascadeResult
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("decode payload: %v (payload=%s)", err, text)
+	}
+	if out.Children != 3 || !strings.Contains(out.SQL, "archived-12") {
+		t.Errorf("children=%d, want 3 with the archived child 12\n---\n%s", out.Children, out.SQL)
+	}
+	if !out.Complete {
+		t.Errorf("an archive-covered scan is complete; incomplete=%v", out.Incomplete)
+	}
+	// The 30-day lookback crosses hours nothing holds: the advisory gap note
+	// reaches the payload (never a caveat).
+	if !strings.Contains(strings.Join(out.Warnings, " "), "not held by this scan") {
+		t.Errorf("the fetcher's gap note must reach the payload warnings: %v", out.Warnings)
+	}
+}
+
+// TestIntegrationRecoverCascadeTool_noArchiveServerIsFlagged: a NoArchive
+// target over an index that has archives keeps the archived child invisible
+// and says so as a hard caveat — the tool then fails without allow_incomplete.
+func TestIntegrationRecoverCascadeTool_noArchiveServerIsFlagged(t *testing.T) {
+	db, dbName := seedCascadeIndex(t)
+	cs := cascadeSession(t, db, dbName, func(tg *Target) { tg.NoArchive = true })
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	writeArchivedChildInsert(t, db, dbName, "12", h.Add(-3*time.Hour+10*time.Minute))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "recover_cascade",
+		Arguments: map[string]any{"schema": dbName, "table": "parent", "allow_incomplete": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool recover_cascade: %v", err)
+	}
+	text := resultText(res)
+	if res.IsError {
+		t.Fatalf("with allow_incomplete the partial script is returned: %s", text)
+	}
+	var out recoverCascadeResult
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("decode payload: %v (payload=%s)", err, text)
+	}
+	if out.Children != 2 || strings.Contains(out.SQL, "archived-12") {
+		t.Errorf("a no-archive server must not read the archive; children=%d\n---\n%s", out.Children, out.SQL)
+	}
+	if out.Complete || !strings.Contains(strings.Join(out.Incomplete, " "), "excludes them (no-archive)") {
+		t.Errorf("excluding archives that exist is a hard caveat: complete=%v incomplete=%v", out.Complete, out.Incomplete)
+	}
+}
+
+// TestIntegrationRecoverCascadeTool_envDiscoveryFailureIsACaveat pins #1285
+// for this tool on the standalone surface: a half-set BINTRAIL_ARCHIVE_S3 /
+// BINTRAIL_ID pair is a discovery failure, the scans ran live-only, and the
+// payload says coverage is unknown — never complete with the archived child
+// silently missing.
+func TestIntegrationRecoverCascadeTool_envDiscoveryFailureIsACaveat(t *testing.T) {
+	db, dbName := seedCascadeIndex(t)
+	t.Setenv("BINTRAIL_ARCHIVE_S3", "s3://bucket/prefix")
+	t.Setenv("BINTRAIL_ID", "")
+	cs := cascadeSession(t, db, dbName, func(tg *Target) { tg.EnvArchiveDiscovery = true })
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	writeArchivedChildInsert(t, db, dbName, "12", h.Add(-3*time.Hour+10*time.Minute))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "recover_cascade",
+		Arguments: map[string]any{"schema": dbName, "table": "parent", "allow_incomplete": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool recover_cascade: %v", err)
+	}
+	text := resultText(res)
+	if res.IsError {
+		t.Fatalf("with allow_incomplete the partial script is returned: %s", text)
+	}
+	var out recoverCascadeResult
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("decode payload: %v (payload=%s)", err, text)
+	}
+	joined := strings.Join(out.Incomplete, " ")
+	if out.Complete || !strings.Contains(joined, "coverage is unknown") || !strings.Contains(joined, "BINTRAIL_ID") {
+		t.Errorf("a failed env discovery must be a hard caveat naming the cause: complete=%v incomplete=%v", out.Complete, out.Incomplete)
+	}
+	if strings.Contains(out.SQL, "archived-12") {
+		t.Errorf("discovery failed: nothing archived can have been read\n---\n%s", out.SQL)
+	}
+}
+
+// TestIntegrationRecoverCascadeTool_parentAndChildOnlyInArchiveRecovered: the
+// MCP tool finds a parent whose DELETE rotated out to Parquet and its
+// archived child (#1615).
+func TestIntegrationRecoverCascadeTool_parentAndChildOnlyInArchiveRecovered(t *testing.T) {
+	db, dbName := seedCascadeIndex(t)
+	cs := cascadeSession(t, db, dbName)
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	parent := archivedParentDelete(dbName, h.Add(-4*time.Hour+30*time.Minute))
+	parent.PKValues, parent.RowBefore, parent.EventID = "2", map[string]any{"id": int64(2)}, 800002
+	child := archivedChildInsert(dbName, "20", h.Add(-5*time.Hour+10*time.Minute))
+	child.RowAfter["pid"] = int64(2)
+	writeArchivedEvents(t, db, filepath.Join(t.TempDir(), "bintrail_id=bt"), parent, child)
+	// The fixture stamps its FK snapshot at the live hour; an archived root
+	// older than that would be flagged "no FK snapshot predates the delete".
+	// Backdate the snapshot so the topology is known at delete time.
+	testutil.MustExec(t, db, `UPDATE schema_snapshots SET snapshot_time = ? WHERE snapshot_id = 1`, h.Add(-6*time.Hour).Format("2006-01-02 15:04:05"))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "recover_cascade",
+		Arguments: map[string]any{"schema": dbName, "table": "parent", "pk": "2"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool recover_cascade: %v", err)
+	}
+	text := resultText(res)
+	if res.IsError {
+		t.Fatalf("recover_cascade returned a tool error: %s", text)
+	}
+	var out recoverCascadeResult
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("decode payload: %v (payload=%s)", err, text)
+	}
+	if out.ParentDeletes != 1 || out.Children != 1 || !strings.Contains(out.SQL, "archived-20") {
+		t.Errorf("parent_deletes=%d children=%d, want 1/1 with the archived child 20\n---\n%s", out.ParentDeletes, out.Children, out.SQL)
+	}
+	if !out.Complete {
+		t.Errorf("an archive-covered scan is complete; incomplete=%v", out.Incomplete)
 	}
 }

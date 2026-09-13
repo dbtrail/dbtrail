@@ -308,6 +308,12 @@ type cascadeSynthResult struct {
 // rows. A returned error is an operational fetch/FK-load failure (caller 500s);
 // a PARTIAL synthesis is reported via SynthErr + Caveats, never an error.
 func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynthParams) (cascadeSynthResult, error) {
+	// Every scan — parents and children — goes through the merged read, the
+	// same discovery + planner routing + merge /api/recover uses (#1615), so a
+	// child whose events rotated out of the live index is still found. The
+	// bundle's noArchive (--no-archive, or a profile) confines it, and the
+	// coverage probe below is told the same thing.
+	fetcher := &query.MergedFetcher{DB: b.db, Engine: b.engine, DBName: b.dbName, NoArchive: b.noArchive, ArchiveFetcher: s.archiveFetch()}
 	limit := clampLimit(p.Limit, recoverDefaultLimit, recoverMaxLimit)
 	del := event.EventDelete
 	upd := event.EventUpdate
@@ -337,7 +343,7 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 		// here (an RBAC profile is refused upstream of every caller of
 		// synthesizeCascade).
 		fetchRoots := func(et *event.EventType) ([]query.ResultRow, error) {
-			return b.engine.Fetch(ctx, query.Options{
+			return fetcher.Fetch(ctx, query.Options{
 				Schema:        p.Schema,
 				Table:         p.Table,
 				PKValues:      p.PK,
@@ -375,15 +381,25 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 	//   - archives exist AND parents found → a child whose events were archived
 	//     could be missed → a server log only, NOT a caveat (else every archived
 	//     deployment trips INCOMPLETE on every run).
+	// Coverage posture from the SAME discovery the scans used (see the CLI
+	// for the rationale); archive_state is consulted only on a no-archive
+	// server, to name what it excluded — a hard caveat.
 	archivesExist := false
-	if archives, aerr := query.ResolveArchiveSources(ctx, b.db); aerr != nil {
-		caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
-	} else if len(archives) > 0 {
+	if srcs, serr := fetcher.Sources(ctx); serr != nil {
+		caveats = append(caveats, "archive discovery failed ("+serr.Error()+"), so the scans ran against the live index only; coverage is unknown")
+	} else if len(srcs) > 0 {
 		archivesExist = true
-		if len(parentEvents) == 0 {
-			caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, but the index has archived partitions (cascade recovery does NOT search them); the changed parent may be archived")
-		} else {
-			slog.Warn("console: index has archived partitions, which cascade recovery does NOT search (live index only); a child whose events were archived may be missed")
+	}
+	if b.noArchive {
+		if archives, aerr := query.ResolveArchiveSources(ctx, b.db); aerr != nil {
+			caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
+		} else if len(archives) > 0 {
+			archivesExist = true
+			if len(parentEvents) == 0 {
+				caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, and this server excludes its archived partitions (no-archive); the changed parent may be archived")
+			} else {
+				caveats = append(caveats, "the index has archived partitions and this server excludes them (no-archive); a child whose events were archived is not reconstructed")
+			}
 		}
 	}
 
@@ -428,13 +444,13 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 		caveats = append(caveats, fkCaveats...)
 		results := make([]cascade.Result, 0, len(groups))
 		for _, g := range groups {
-			r, serr := cascade.SynthesizeVictims(ctx, b.engine, g.FKs, g.Roots, cascade.Options{
-				Lookback:             p.Lookback,
-				MaxDepth:             p.MaxDepth,
-				Baseline:             baselineProvider,
-				ArchivesPresent:      archivesExist,
-				LiveWindowContiguous: cascade.LiveWindowProbe(b.db, b.dbName),
-				PKMetas:              cascade.PKMetasFromResolver(b.resolver),
+			r, serr := cascade.SynthesizeVictims(ctx, fetcher, g.FKs, g.Roots, cascade.Options{
+				Lookback:        p.Lookback,
+				MaxDepth:        p.MaxDepth,
+				Baseline:        baselineProvider,
+				ArchivesPresent: archivesExist,
+				WindowCovered:   cascade.WindowProbe(b.db, b.dbName, fetcher),
+				PKMetas:         cascade.PKMetasFromResolver(b.resolver),
 			})
 			results = append(results, r)
 			if serr != nil {
@@ -444,6 +460,8 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 		res = cascade.MergeResults(results...)
 	}
 	caveats = append(caveats, res.Incomplete...)
+	warnings := append([]string{}, res.Warnings...)
+	warnings = append(warnings, fetcher.Notes()...)
 	if synthErr != nil {
 		caveats = append(caveats, "an index query failed mid-synthesis; the result is partial: "+synthErr.Error())
 	}
@@ -455,7 +473,7 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 		SetNullRows:      res.SetNullRows,
 		KeyUpdates:       res.KeyUpdates,
 		Caveats:          caveats,
-		Warnings:         res.Warnings,
+		Warnings:         warnings,
 		SynthErr:         synthErr,
 		BaselineActive:   baselineProvider != nil,
 	}, nil

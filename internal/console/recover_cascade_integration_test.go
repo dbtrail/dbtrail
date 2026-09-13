@@ -3,13 +3,18 @@
 package console
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/buffer"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -139,8 +144,8 @@ func TestIntegrationRecoverCascade_incompleteWithArchives(t *testing.T) {
 	if resp.Complete {
 		t.Errorf("result should be INCOMPLETE when archives exist and no parent matched")
 	}
-	if len(resp.Incomplete) == 0 {
-		t.Errorf("incomplete[] should carry the archived-partition caveat")
+	if joined := strings.Join(resp.Incomplete, " "); !strings.Contains(joined, "no parent DELETE or UPDATE matched") || !strings.Contains(joined, "no-archive") {
+		t.Errorf("incomplete[] should carry the archived-parent caveat naming the exclusion, got %v", resp.Incomplete)
 	}
 }
 
@@ -886,9 +891,7 @@ func TestIntegrationRecoverCascade_archivesOutsideWindowKeepBaseline(t *testing.
 	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour) // the fixture's live hour
 	writeChildBaselineParquet(t, dir, h.Add(5*time.Minute).Format("2006-01-02T15-04-05Z"), dbName,
 		[][]string{{"10", "1"}, {"11", "1"}, {"12", "1"}}, nil)
-	testutil.MustExec(t, srv.cm.boot.db, `INSERT INTO archive_state
-		(bintrail_id, partition_name, local_path, s3_bucket, s3_key)
-		VALUES ('bt', 'p_2026010100', '', 'bucket', 'pfx/bintrail_id=bt/p_2026010100.parquet')`)
+	writeArchivedChildInsert(t, srv.cm.boot.db, dbName, "77", time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC)) // readable, nowhere near the window
 
 	rec, body := doReq(t, srv, "POST", "/api/recover-cascade", `{"schema":"`+dbName+`","table":"parent"}`)
 	if rec.Code != 200 {
@@ -903,5 +906,136 @@ func TestIntegrationRecoverCascade_archivesOutsideWindowKeepBaseline(t *testing.
 	}
 	if !resp.Complete {
 		t.Errorf("a live-contiguous window must be complete despite an unrelated archive; incomplete=%v", resp.Incomplete)
+	}
+}
+
+// writeArchivedEvents writes rows as ONE Parquet archive file per hour under
+// base (a bintrail_id=… directory) and registers each hour in archive_state
+// with its local path. Rows of the same hour share a file.
+func writeArchivedEvents(t *testing.T, db *sql.DB, base string, rows ...query.ResultRow) {
+	t.Helper()
+	byHour := map[time.Time][]query.ResultRow{}
+	for _, r := range rows {
+		h := r.EventTimestamp.UTC().Truncate(time.Hour)
+		byHour[h] = append(byHour[h], r)
+	}
+	for h, rs := range byHour {
+		hourDir := filepath.Join(base, "event_date="+h.Format("2006-01-02"), "event_hour="+h.Format("15"))
+		if err := os.MkdirAll(hourDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		pq := filepath.Join(hourDir, "events.parquet")
+		if _, err := buffer.WriteParquet(rs, pq, "none"); err != nil {
+			t.Fatalf("WriteParquet: %v", err)
+		}
+		testutil.MustExec(t, db, `INSERT INTO archive_state
+			(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key, s3_uploaded_at)
+			VALUES (?, 'bt', ?, ?, NULL, NULL, NULL)`, "p_"+h.Format("2006010215"), pq, len(rs))
+	}
+}
+
+// archivedChildInsert / archivedParentDelete are the two row shapes the
+// archived-cascade tests need (child pid=1; parent id=1).
+func archivedChildInsert(dbName, pk string, at time.Time) query.ResultRow {
+	id, _ := strconv.ParseInt(pk, 10, 64)
+	return query.ResultRow{
+		EventID: uint64(900000 + id), BinlogFile: "b.000001", StartPos: 4, EndPos: 40,
+		EventTimestamp: at.UTC(), SchemaName: dbName, TableName: "child",
+		EventType: 1 /*INSERT*/, PKValues: pk,
+		RowAfter: map[string]any{"id": id, "pid": int64(1), "payload": "archived-" + pk},
+	}
+}
+
+func archivedParentDelete(dbName string, at time.Time) query.ResultRow {
+	return query.ResultRow{
+		EventID: 800001, BinlogFile: "b.000001", StartPos: 41, EndPos: 80,
+		EventTimestamp: at.UTC(), SchemaName: dbName, TableName: "parent",
+		EventType: 3 /*DELETE*/, PKValues: "1",
+		RowBefore: map[string]any{"id": int64(1)},
+	}
+}
+
+// writeArchivedChildInsert writes ONE child INSERT (pid=1) as a Parquet
+// archive for an hour the live index does NOT hold (#1615: evidence that
+// rotated out of the live index).
+func writeArchivedChildInsert(t *testing.T, db *sql.DB, dbName, pk string, at time.Time) {
+	t.Helper()
+	writeArchivedEvents(t, db, filepath.Join(t.TempDir(), "bintrail_id=bt"), archivedChildInsert(dbName, pk, at))
+}
+
+// TestIntegrationRecoverCascade_childOnlyInArchiveRecovered is the second half
+// of #1615 on the console: the child's INSERT rotated out into a Parquet
+// archive, the parent DELETE is live, no baseline. The merged scan reads the
+// archive; the child is recovered and the run is complete.
+func TestIntegrationRecoverCascade_childOnlyInArchiveRecovered(t *testing.T) {
+	srv, dbName := seedCascadeConsole(t, func(c *Config) { c.NoArchive = false })
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour) // the fixture's live hour
+	writeArchivedChildInsert(t, srv.cm.boot.db, dbName, "12", h.Add(-3*time.Hour+10*time.Minute))
+
+	rec, body := doReq(t, srv, "POST", "/api/recover-cascade", `{"schema":"`+dbName+`","table":"parent"}`)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, body)
+	}
+	var resp recoverCascadeResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, body)
+	}
+	if resp.VictimCount != 3 || !strings.Contains(resp.SQL, "archived-12") {
+		t.Errorf("want the archived child 12 alongside the two live children (victim_count 3), got %d\n---\n%s", resp.VictimCount, resp.SQL)
+	}
+	if !resp.Complete {
+		t.Errorf("an archive-covered scan is complete; incomplete=%v", resp.Incomplete)
+	}
+	if !strings.Contains(strings.Join(resp.Warnings, " "), "not held by this scan") {
+		t.Errorf("the fetcher's gap note must reach the response warnings: %v", resp.Warnings)
+	}
+
+	// A no-archive server on the same index: live scan only, the archived
+	// child is invisible and the response says archives were excluded.
+	srv2, dbName2 := seedCascadeConsole(t, nil) // NoArchive: true
+	writeArchivedChildInsert(t, srv2.cm.boot.db, dbName2, "12", h.Add(-3*time.Hour+10*time.Minute))
+	_, body2 := doReq(t, srv2, "POST", "/api/recover-cascade", `{"schema":"`+dbName2+`","table":"parent"}`)
+	var resp2 recoverCascadeResponse
+	if err := json.Unmarshal(body2, &resp2); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, body2)
+	}
+	if resp2.VictimCount != 2 || strings.Contains(resp2.SQL, "archived-12") {
+		t.Errorf("a no-archive server must not read the archive; victim_count=%d\n---\n%s", resp2.VictimCount, resp2.SQL)
+	}
+	if resp2.Complete || !strings.Contains(strings.Join(resp2.Incomplete, " "), "excludes them (no-archive)") {
+		t.Errorf("excluding archives that exist is a hard caveat: complete=%v incomplete=%v", resp2.Complete, resp2.Incomplete)
+	}
+}
+
+// TestIntegrationRecoverCascade_parentAndChildOnlyInArchiveRecovered: the
+// console's explicit cascade endpoint finds a parent whose DELETE itself
+// rotated out to Parquet, and its archived child (#1615).
+func TestIntegrationRecoverCascade_parentAndChildOnlyInArchiveRecovered(t *testing.T) {
+	srv, dbName := seedCascadeConsole(t, func(c *Config) { c.NoArchive = false })
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	// The fixture's live parent is pk 1; this parent is pk 2 and lives only in the archive.
+	parent := archivedParentDelete(dbName, h.Add(-4*time.Hour+30*time.Minute))
+	parent.PKValues, parent.RowBefore, parent.EventID = "2", map[string]any{"id": int64(2)}, 800002
+	child := archivedChildInsert(dbName, "20", h.Add(-5*time.Hour+10*time.Minute))
+	child.RowAfter["pid"] = int64(2)
+	writeArchivedEvents(t, srv.cm.boot.db, filepath.Join(t.TempDir(), "bintrail_id=bt"), parent, child)
+	// The fixture stamps its FK snapshot at the live hour; an archived root
+	// older than that would be flagged "no FK snapshot predates the delete".
+	// Backdate the snapshot so the topology is known at delete time.
+	testutil.MustExec(t, srv.cm.boot.db, `UPDATE schema_snapshots SET snapshot_time = ? WHERE snapshot_id = 1`, h.Add(-6*time.Hour).Format("2006-01-02 15:04:05"))
+
+	rec, body := doReq(t, srv, "POST", "/api/recover-cascade", `{"schema":"`+dbName+`","table":"parent","pk":"2"}`)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, body)
+	}
+	var resp recoverCascadeResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, body)
+	}
+	if resp.VictimCount != 1 || !strings.Contains(resp.SQL, "archived-20") {
+		t.Errorf("the archived parent 2 must be found and its archived child 20 recovered; victim_count=%d\n---\n%s", resp.VictimCount, resp.SQL)
+	}
+	if !resp.Complete {
+		t.Errorf("an archive-covered scan is complete; incomplete=%v", resp.Incomplete)
 	}
 }
