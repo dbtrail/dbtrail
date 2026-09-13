@@ -249,7 +249,9 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	archivesExist := false
 	var liveWindow func(context.Context, time.Time, time.Time) (bool, error)
 	if cfg, perr := mysqldriver.ParseDSN(rcIndexDSN); perr != nil {
-		slog.Warn("could not parse the index DSN; the cascade archive gate stays fail-closed (#1615)", "error", perr)
+		slog.Warn("could not parse the index DSN; the cascade live-window check is off and any archive skips baseline augmentation (#1615)", "error", perr)
+	} else if cfg.DBName == "" {
+		slog.Warn("index DSN carries no database name; the cascade live-window check is off and any archive skips baseline augmentation (#1615)")
 	} else {
 		liveWindow = cascade.LiveWindowProbe(db, cfg.DBName)
 	}

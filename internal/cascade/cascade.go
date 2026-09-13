@@ -176,17 +176,19 @@ type Options struct {
 	// When true, baseline augmentation is skipped + flagged, exactly like a
 	// truncated binlog scan.
 	ArchivesPresent bool
-	// LiveWindowContiguous, when set, reports whether the live index still
-	// holds every hour of [since, until] — no hour rotated out, archived or
-	// lost. Consulted only when ArchivesPresent is true, to decide whether the
-	// archived partitions can actually gap the [snapshot, T] window that the
-	// "untouched ⟹ baseline verbatim" rule depends on (#1615): an archive from
-	// months ago says nothing about a parent deleted minutes ago whose whole
-	// window is live, and skipping augmentation there threw away the very
-	// baseline that held the children. nil = unknown, treated as NOT
-	// contiguous (the pre-#1615 rule: any archive at all skips); an error is
-	// treated the same way and named in the caveat. Never read as "contiguous"
-	// on failure. Wire it with LiveWindowProbe.
+	// LiveWindowContiguous, when set, reports whether a live-only scan of
+	// [since, until] can be complete: every hour of the window is held by a
+	// live partition AND no permanent capture loss is stamped inside it. It
+	// decides whether the [snapshot, T] window that the "untouched ⟹ baseline
+	// verbatim" rule depends on may be gapped (#1615). It is consulted
+	// whenever set, independently of ArchivesPresent: an archive from months
+	// ago says nothing about a parent deleted minutes ago whose whole window
+	// is live (skipping there threw away the very baseline that held the
+	// children), while rotation that drops WITHOUT archiving, or an unreadable
+	// archive_state, leave ArchivesPresent false over a window that IS gapped.
+	// nil = unknown, and the gate falls back to the pre-#1615 rule (any
+	// archive at all skips); an error skips too and is named in the caveat.
+	// Never read as "contiguous" on failure. Wire it with LiveWindowProbe.
 	LiveWindowContiguous func(ctx context.Context, since, until time.Time) (bool, error)
 	// PKMetas, when non-nil, resolves a table's primary-key column metadata
 	// from the schema snapshot (#1273). The engine uses it to skip child
@@ -643,16 +645,17 @@ func SynthesizeVictims(
 		failed   bool // operational failure — the caller must skip this edge
 	}
 	// windowMayGap decides the #1615 gate for one edge: may the live index be
-	// missing hours of [snapshot, T]? Only an index with archived partitions
-	// can (rotation archives as it drops); given one, the wired probe answers
-	// for the exact window, and NO probe or a FAILED probe are both "may gap"
-	// — never "contiguous" by default.
+	// unable to serve every hour of [snapshot, T]? A wired probe answers for
+	// the exact window and is consulted REGARDLESS of ArchivesPresent — it
+	// needs no archive_state, and the two holes ArchivesPresent cannot see are
+	// exactly what it is for: rotation that DROPS without archiving (no
+	// archive_state row is ever written), and an archive_state that could not
+	// be read (ArchivesPresent then stays false). Without a probe the rule is
+	// the pre-#1615 one: any archive at all may gap. A FAILED probe is "may
+	// gap" — never "contiguous" by default.
 	windowMayGap := func(ctx context.Context, snapshot, until time.Time) (bool, error) {
-		if !opts.ArchivesPresent {
-			return false, nil
-		}
 		if opts.LiveWindowContiguous == nil {
-			return true, nil
+			return opts.ArchivesPresent, nil
 		}
 		contiguous, err := opts.LiveWindowContiguous(ctx, snapshot, until)
 		if err != nil {
@@ -890,14 +893,20 @@ func SynthesizeVictims(
 				var reason string
 				switch {
 				case archiveGapErr != nil:
-					reason = fmt.Sprintf("could not verify that the live index holds every hour of the [snapshot, T] window for %s.%s (%v)",
+					reason = fmt.Sprintf("could not verify that the live index can serve every hour of the [snapshot, T] window for %s.%s (%v)",
 						fk.Schema, fk.Table, archiveGapErr)
 				case opts.LiveWindowContiguous != nil:
-					reason = fmt.Sprintf("the live index no longer holds every hour of the [snapshot, T] window for %s.%s "+
-						"(rotated to archives, which cascade recovery does not read)", fk.Schema, fk.Table)
+					// The probe reports one bit; the causes it folds together
+					// (an hour rotated out, an hour before the index existed,
+					// a stamped permanent capture loss) are named rather than
+					// guessed at — "rotated to archives" would send an operator
+					// to archives that may not hold the hour.
+					reason = fmt.Sprintf("the live index cannot serve every hour of the [snapshot, T] window for %s.%s "+
+						"(an hour was rotated out, predates the index, or capture recorded a permanent loss; "+
+						"cascade recovery reads the live index only)", fk.Schema, fk.Table)
 				default:
-					reason = fmt.Sprintf("index has archived partitions that may gap the [snapshot, T] window for %s.%s",
-						fk.Schema, fk.Table)
+					reason = fmt.Sprintf("index has archived partitions that may gap the [snapshot, T] window for %s.%s "+
+						"(no live-window check is wired on this surface)", fk.Schema, fk.Table)
 				}
 				addIncomplete("baseline-skip-archived:"+fk.Schema+"."+fk.Table,
 					reason+"; skipped baseline augmentation to avoid resurrecting rows whose deletion/re-parent was archived")
@@ -1941,18 +1950,34 @@ func valToString(v any) string {
 	}
 }
 
-// LiveWindowProbe adapts query.LiveWindowContiguous into
-// Options.LiveWindowContiguous for an index reached through db. An empty
-// dbName (a DSN the caller could not parse) yields nil — the gate then keeps
-// its fail-closed default rather than answering from a planner that cannot
-// run. The three cascade entry points (CLI, MCP, console) wire this the same
-// way; adding a fourth without it silently reverts that surface to the
-// pre-#1615 "any archive skips" rule, which is why Options documents it.
+// LiveWindowProbe builds Options.LiveWindowContiguous for an index reached
+// through db: the partition check (query.LiveWindowContiguous) AND the
+// stream_state capture-loss check (reconstruct.CaptureGapStatus). The second
+// closes the hole the first cannot see — every hourly partition may still
+// exist while a stamped gap_lost_at inside the window says events in it exist
+// nowhere (#765) — and follows the three-state rule the MCP reconstruct tool
+// uses: a legacy index whose stream_state predates the gap columns is
+// UNEVALUABLE, treated as gapped, never as clean.
+//
+// An empty dbName (a DSN the caller could not parse, or one carrying no
+// database name) yields nil — the gate then keeps its fail-closed default
+// rather than answering from a planner that cannot run; the caveat says the
+// check was not wired. The three cascade entry points (CLI, MCP, console)
+// wire this the same way; adding a fourth without it silently reverts that
+// surface to the pre-#1615 "any archive skips" rule.
 func LiveWindowProbe(db *sql.DB, dbName string) func(ctx context.Context, since, until time.Time) (bool, error) {
 	if db == nil || dbName == "" {
 		return nil
 	}
 	return func(ctx context.Context, since, until time.Time) (bool, error) {
-		return query.LiveWindowContiguous(ctx, db, dbName, since, until)
+		contiguous, err := query.LiveWindowContiguous(ctx, db, dbName, since, until)
+		if err != nil || !contiguous {
+			return false, err
+		}
+		gap, err := reconstruct.CaptureGapStatus(ctx, db, since, until)
+		if err != nil {
+			return false, err
+		}
+		return gap == nil, nil
 	}
 }

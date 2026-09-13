@@ -620,3 +620,71 @@ func TestPhase2_archivesSkipBaselineWithoutProbeWidensScan(t *testing.T) {
 		t.Errorf("no probe must keep the old skip caveat; Incomplete=%v", res.Incomplete)
 	}
 }
+
+// TestPhase2_probeGapWithoutArchivesSkipsBaseline pins that the probe is
+// consulted even when ArchivesPresent is false: rotation that DROPS without
+// archiving writes no archive_state row, and an unreadable archive_state leaves
+// the flag false too — both over a window that IS gapped. The existence flag
+// must not silence the probe.
+func TestPhase2_probeGapWithoutArchivesSkipsBaseline(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	eng := query.New(db)
+	T := time.Now().UTC()
+
+	fb := &fakeBaseline{ok: true, snap: T.Add(-30 * time.Minute),
+		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1)}}}}
+	probe := &liveWindowProbe{ok: false}
+	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fb, ArchivesPresent: false, LiveWindowContiguous: probe.probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if probe.calls != 1 {
+		t.Fatalf("the probe must run without archives present; calls=%d", probe.calls)
+	}
+	if len(res.Victims) != 0 {
+		t.Errorf("a gapped window must skip augmentation even with no archive registered; got %v", res.Victims)
+	}
+	if res.Complete() || !strings.Contains(strings.Join(res.Incomplete, " "), "archived") {
+		t.Errorf("the skip must be flagged; Incomplete=%v", res.Incomplete)
+	}
+}
+
+// TestLiveWindowProbe_captureGap pins the second half of the wired probe: with
+// every hourly partition present, a permanent capture loss stamped inside the
+// window (#765) still makes the window non-contiguous, and a legacy
+// stream_state that cannot be evaluated is never read as clean.
+func TestLiveWindowProbe_captureGap(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	ctx := context.Background()
+	h := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h, h.Add(time.Hour), h.Add(2 * time.Hour)})
+	since, until := h.Add(10*time.Minute), h.Add(2*time.Hour+10*time.Minute)
+	probe := cascade.LiveWindowProbe(db, dbName)
+
+	if ok, err := probe(ctx, since, until); err != nil || !ok {
+		t.Fatalf("empty stream_state (file-mode index) must be contiguous: %v, %v", ok, err)
+	}
+	testutil.MustExec(t, db, `INSERT INTO stream_state
+		(id, mode, binlog_file, binlog_position, gtid_set, events_indexed, last_checkpoint, server_id, gap_lost_at, gap_lost_detail)
+		VALUES (1, 'position', 'binlog.000001', 300, '', 2, NOW(), 1, ?, 'source binlogs purged')`,
+		h.Add(time.Hour).Format("2006-01-02 15:04:05"))
+	if ok, err := probe(ctx, since, until); err != nil || ok {
+		t.Errorf("a capture loss stamped inside the window must not be contiguous: %v, %v", ok, err)
+	}
+	if ok, err := probe(ctx, h.Add(time.Hour+time.Minute), until); err != nil || !ok {
+		t.Errorf("a capture loss before the window is out of scope: %v, %v", ok, err)
+	}
+	// Legacy index: the gap columns are gone → unevaluable → never clean.
+	testutil.MustExec(t, db, `ALTER TABLE stream_state DROP COLUMN gap_lost_at, DROP COLUMN gap_lost_detail`)
+	if ok, err := probe(ctx, h.Add(time.Hour+time.Minute), until); err != nil || ok {
+		t.Errorf("an unevaluable capture-gap state must not be read as contiguous: %v, %v", ok, err)
+	}
+	if cascade.LiveWindowProbe(db, "") != nil || cascade.LiveWindowProbe(nil, dbName) != nil {
+		t.Errorf("no database name or no handle must yield no probe (fail-closed default), not a probe that cannot run")
+	}
+}

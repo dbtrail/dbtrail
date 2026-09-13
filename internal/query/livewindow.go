@@ -12,6 +12,10 @@ import (
 // hour that was rotated out is exactly what such a scan cannot see, whether
 // or not a Parquet archive holds it (#1615).
 //
+// Partitions only: a stamped permanent capture loss inside the window
+// (stream_state.gap_lost_at, #765) is invisible here and must be checked by
+// the caller — cascade.LiveWindowProbe does both.
+//
 // Fail-closed: an unreadable partition list is returned as an error, and a
 // window the planner cannot classify at all (no partitions, no database name)
 // reports false. Neither is ever "contiguous".

@@ -319,7 +319,9 @@ func TestRecoverCascade_phase2BaselineRecoversUntouchedChild(t *testing.T) {
 
 	// Baseline snapshot dated before the parent delete.
 	baselineDir := t.TempDir()
-	snapDir := filepath.Join(baselineDir, "2026-06-01T00-00-00Z")
+	// Dated inside the live hour: a snapshot older than the oldest live partition
+	// is a gapped window since #1615 (hours the index never held are not trusted).
+	snapDir := filepath.Join(baselineDir, h.Add(1*time.Minute).Format("2006-01-02T15-04-05Z"))
 	writeChildBaseline(t, filepath.Join(snapDir, dbName, "child.parquet"))
 	if err := baseline.WriteSuccessMarker(snapDir); err != nil {
 		t.Fatalf("write success marker: %v", err)
@@ -400,12 +402,12 @@ func TestRecoverCascade_phase2StaleBaselineWarnsExitZero(t *testing.T) {
 	// newer one (2026-06-15, still before the parent delete above) does NOT —
 	// this is exactly the #466/#618 stale-fallback trigger.
 	baselineDir := t.TempDir()
-	olderDir := filepath.Join(baselineDir, "2026-06-01T00-00-00Z")
+	olderDir := filepath.Join(baselineDir, h.Add(1*time.Minute).Format("2006-01-02T15-04-05Z")) // inside the live hour (#1615)
 	writeChildBaseline(t, filepath.Join(olderDir, dbName, "child.parquet"))
 	if err := baseline.WriteSuccessMarker(olderDir); err != nil {
 		t.Fatalf("write success marker (older): %v", err)
 	}
-	newerDir := filepath.Join(baselineDir, "2026-06-15T00-00-00Z")
+	newerDir := filepath.Join(baselineDir, h.Add(2*time.Minute).Format("2006-01-02T15-04-05Z"))
 	if err := os.MkdirAll(newerDir, 0o755); err != nil {
 		t.Fatalf("mkdir newer snapshot dir: %v", err)
 	}
@@ -498,7 +500,7 @@ func TestRecoverCascade_phase2DedupCompositePK(t *testing.T) {
 
 	// ...and ALSO present in the baseline (same composite PK).
 	baselineDir := t.TempDir()
-	snapDir := filepath.Join(baselineDir, "2026-06-01T00-00-00Z")
+	snapDir := filepath.Join(baselineDir, h.Add(1*time.Minute).Format("2006-01-02T15-04-05Z")) // inside the live hour (#1615)
 	writeCompositeChildBaseline(t, filepath.Join(snapDir, dbName, "child.parquet"))
 	if err := baseline.WriteSuccessMarker(snapDir); err != nil {
 		t.Fatalf("success marker: %v", err)
