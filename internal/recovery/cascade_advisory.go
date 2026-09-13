@@ -20,13 +20,15 @@ import (
 // says the same thing from the same facts, in its response and not only in a
 // log the client never sees.
 type CascadeAdvisory struct {
-	// ChildTables lists, as schema.table, every table in scope that carries a
-	// cascading rule toward some parent. Scope is the target schema when one
-	// is named, else the whole index.
+	// ChildTables lists, as schema.table, the tables whose rows a change to
+	// the target can cascade into. With a table named these are ITS children,
+	// in any schema (#833: a child in another schema is the one most easily
+	// lost); with no table named, every table in the schema (or the index)
+	// that carries a cascading rule toward some parent.
 	ChildTables []string
 	// ParentOnDelete / ParentOnUpdate say whether the named target table is
-	// the REFERENCED side of a cascading rule, per referential action, across
-	// schemas. Both false when no table was named.
+	// the REFERENCED side of a cascading rule, per referential action (#1002:
+	// the two rules are never merged). Both false when no table was named.
 	ParentOnDelete bool
 	ParentOnUpdate bool
 }
@@ -36,15 +38,22 @@ func (a CascadeAdvisory) Empty() bool {
 	return len(a.ChildTables) == 0 && !a.ParentOnDelete && !a.ParentOnUpdate
 }
 
-// DetectCascade reads the FK graph the index already holds. An error means
-// the question could not be answered; the advisory returned with it carries
-// whatever was found before the failure, and the caller must say the check
-// did not complete rather than fall silent (a silent "no cascade" over a
-// failed probe is the exact shape this exists to remove).
+// DetectCascade reads the FK graph the index already holds, in one query.
+// An error means the question could not be answered, and the caller must say
+// so rather than fall silent (a silent "no cascade" over a failed probe is
+// the exact shape this exists to remove).
+//
+// With a table named the edges are read index-wide and filtered to the ones
+// whose REFERENCED side is that table, so a child in another schema (#833)
+// is named and an unrelated cascade in the same schema is not: the warning
+// says "this table has children (...)", and that list must be true of this
+// table. The parent flags come from the same edges, per referential action.
+// With no table named, the scope is the schema (or the whole index) and the
+// list is every child table with a cascading rule.
 func DetectCascade(db *sql.DB, schema, table string) (CascadeAdvisory, error) {
 	var adv CascadeAdvisory
 	var scope []string
-	if schema != "" {
+	if table == "" && schema != "" {
 		scope = []string{schema}
 	}
 	edges, err := metadata.CascadeConstraintsInIndex(db, scope)
@@ -53,23 +62,29 @@ func DetectCascade(db *sql.DB, schema, table string) (CascadeAdvisory, error) {
 	}
 	seen := map[string]bool{}
 	for _, e := range edges {
+		if table != "" {
+			if e.ReferencedTable != table || (schema != "" && e.ReferencedSchema != schema) {
+				continue
+			}
+			if cascades(e.DeleteRule) {
+				adv.ParentOnDelete = true
+			}
+			if cascades(e.UpdateRule) {
+				adv.ParentOnUpdate = true
+			}
+		}
 		if k := e.Schema + "." + e.Table; !seen[k] {
 			seen[k] = true
 			adv.ChildTables = append(adv.ChildTables, k)
 		}
 	}
-	// Cross-schema parent side (#833): CascadeConstraintsInIndex scopes by
-	// the CHILD schema, so a parent whose only cascade children live in a
-	// different schema is invisible to it. Probe the referenced side too.
-	if schema != "" && table != "" {
-		od, ou, perr := metadata.CascadeParentRulesInIndex(db, schema, table)
-		if perr != nil {
-			return adv, fmt.Errorf("check the index for cross-schema FK cascade parents: %w", perr)
-		}
-		adv.ParentOnDelete, adv.ParentOnUpdate = od, ou
-	}
 	return adv, nil
 }
+
+// cascades is the referential-action test the probe query applies server-side
+// (CascadeConstraintsInIndex returns an edge when EITHER rule cascades, so the
+// per-action split has to be redone here).
+func cascades(rule string) bool { return rule == "CASCADE" || rule == "SET NULL" }
 
 // AppliesTo reports whether the reversal of these rows is the kind the
 // advisory is about, so a surface that returns the script to a client does

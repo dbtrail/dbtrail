@@ -43,6 +43,29 @@ func TestGenerateSQLFromRows_refusesDriftedEventAndWritesNothing(t *testing.T) {
 	}
 }
 
+// The UPDATE reversal computes its emitted set differently (SET from the
+// before-image, WHERE from the PK), so it is driven too; the integration
+// test that used to be its only cover skips without Docker.
+func TestGenerateSQLFromRows_refusesDriftedUpdate(t *testing.T) {
+	evt, cur := driftResolvers()
+	g := New(new(sql.DB), cur)
+	g.cache = map[uint32]*metadata.Resolver{10: evt, 20: cur}
+	rows := []query.ResultRow{{
+		EventID: 3, SchemaName: "shop", TableName: "orders",
+		EventType: parser.EventUpdate, SchemaVersion: 10, PKValues: "3",
+		RowBefore: map[string]any{"id": 3, "status": "paid", "legacy": "x"},
+		RowAfter:  map[string]any{"id": 3, "status": "paid", "legacy": "y"},
+	}}
+	var buf bytes.Buffer
+	n, err := g.GenerateSQLFromRows(rows, &buf)
+	if err == nil || !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("expected the drift refusal naming legacy, got n=%d err=%v:\n%s", n, err, buf.String())
+	}
+	if n != 0 || buf.Len() != 0 {
+		t.Errorf("a refusal must write nothing: n=%d, %d byte(s)", n, buf.Len())
+	}
+}
+
 // The mirror: the same table under the current shape emits normally, so the
 // guard sees both colours and a refusal that fires on every input would fail.
 func TestGenerateSQLFromRows_currentShapeEmits(t *testing.T) {

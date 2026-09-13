@@ -351,7 +351,8 @@ MySQL/MariaDB index, a foreign-key cascade advisory: undoing a DELETE or a
 key UPDATE on a table with `ON DELETE` / `ON UPDATE CASCADE` or `SET NULL`
 children names those children and points at `recover_cascade`, since the
 child rows MySQL changed below the binary log are not in a plain reversal;
-a failed check is reported as such, never as "no children"): the whole script
+a check that fails is reported as such, though an index that never recorded
+foreign keys answers "no children"): the whole script
 carries the same advisories as SQL comments, and a summary or a withheld script
 has no text to carry them in.
 

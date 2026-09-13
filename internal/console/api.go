@@ -850,7 +850,7 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 	// cascade path here. Say what the script cannot contain and how to get
 	// it, instead of returning a parent-only script that reads as complete.
 	// Same MySQL gate as above: PostgreSQL captures cascades as real events.
-	if dialect == recovery.MySQLDialect && body.Table == "" {
+	if dialect == recovery.MySQLDialect && body.Table == "" && len(rows) > 0 {
 		adv, aerr := recovery.DetectCascade(b.db, body.Schema, "")
 		switch {
 		case aerr != nil:
@@ -860,7 +860,7 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 			}, warnings...)
 		case adv.AppliesTo(rows, ""):
 			warnings = append([]string{
-				"Some tables in this window have foreign-key children with cascading rules (" + strings.Join(adv.ChildTables, ", ") + "). MySQL applies those below the binary log, so the child rows a delete removed or a key update re-pointed are NOT included in the script below. Undo the parent table on its own to have them repaired automatically.",
+				"This schema has tables with cascading foreign-key children (" + strings.Join(adv.ChildTables, ", ") + "). If this window holds a delete or a key update on one of their parents, the child rows MySQL removed or re-pointed along with it are NOT included in the script below: MySQL applies those below the binary log. Undo the parent table on its own to have them repaired automatically.",
 			}, warnings...)
 		}
 	}

@@ -62,8 +62,8 @@ func TestRecover_tablelessUndoNamesCascadeChildren(t *testing.T) {
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(tablelessRecoverRows(int64(parser.EventDelete)))
 	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(true))
 	mock.ExpectQuery("FROM fk_constraints").WillReturnRows(sqlmock.NewRows(
-		[]string{"schema_name", "table_name", "column_name", "referenced_table_name", "delete_rule", "update_rule"}).
-		AddRow("app", "order_items", "order_id", "orders", "CASCADE", "NO ACTION"))
+		[]string{"schema_name", "table_name", "column_name", "referenced_schema_name", "referenced_table_name", "delete_rule", "update_rule"}).
+		AddRow("app", "order_items", "order_id", "app", "orders", "CASCADE", "NO ACTION"))
 
 	resp := postTablelessRecover(t, newBootServer(db))
 	if len(resp.Warnings) == 0 || !strings.Contains(resp.Warnings[0], "app.order_items") || !strings.Contains(resp.Warnings[0], "Undo the parent table on its own") {
@@ -85,8 +85,8 @@ func TestRecover_tablelessInsertUndoCarriesNoCascadeWarning(t *testing.T) {
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(tablelessRecoverRows(int64(parser.EventInsert)))
 	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(true))
 	mock.ExpectQuery("FROM fk_constraints").WillReturnRows(sqlmock.NewRows(
-		[]string{"schema_name", "table_name", "column_name", "referenced_table_name", "delete_rule", "update_rule"}).
-		AddRow("app", "order_items", "order_id", "orders", "CASCADE", "NO ACTION"))
+		[]string{"schema_name", "table_name", "column_name", "referenced_schema_name", "referenced_table_name", "delete_rule", "update_rule"}).
+		AddRow("app", "order_items", "order_id", "app", "orders", "CASCADE", "NO ACTION"))
 
 	resp := postTablelessRecover(t, newBootServer(db))
 	for _, w := range resp.Warnings {
