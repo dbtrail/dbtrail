@@ -64,8 +64,12 @@ const bad = (name, detail) => results.push({ name, pass: false, detail });
 // call written in the two-arg form fails the run with the line number instead
 // of quietly waiting 30s. It counts ARGUMENTS, not commas: the first census
 // counted commas and walked past a two-arg call with a trailing comma, so the
-// bug it was written against survived it once. waitForSelector is deliberately
-// not scanned: its options ARE the second parameter.
+// bug it was written against survived it once. It is a bracket walk, not a
+// parser: a comment, string or regex literal inside a call's argument span
+// takes part in the depth and comma counts, so an unbalanced bracket or a
+// top-level comma inside one skews the argument count in either direction.
+// waitForSelector is deliberately not scanned: its options ARE the second
+// parameter.
 {
   // fileURLToPath, not `new URL`: this file shadows the global URL with the
   // console's address (line 20), so the constructor form throws here.
