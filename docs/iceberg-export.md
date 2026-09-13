@@ -44,6 +44,32 @@ and Snowflake read Iceberg through a catalog, so with them you register the
 table's current metadata file (or the directory, where the catalog supports a
 Hadoop-style warehouse) rather than pointing at the path.
 
+## Running it on a timetable
+
+The public guide sends the reader here for this, because the website carries no
+`bintrail` commands. Hourly from cron:
+
+```
+17 * * * * bintrail export iceberg --index-dsn "..." --baseline-dir /data/backups --warehouse /data/iceberg
+```
+
+Keep the password out of the crontab line: put it in a file only the job can read
+and have the job read it from there. Where the bundled stack holds the index and
+the backups you want exported, the compose one-shot avoids the question, since
+the container reads the password from the stack:
+
+```
+17 * * * * cd /path/to/stack && docker compose --profile iceberg-export run --rm iceberg-export
+```
+
+The export is deliberately not a button and never runs inside the capture
+daemon: it writes a whole new copy of your data, and keeping it out of that
+process is what stops a long run slowing capture down.
+
+Two runs cannot overlap on one warehouse; the second refuses while the first
+holds it. A run that dies half way leaves the previous snapshot readable, and
+the next one resumes from the last complete commit.
+
 ## What a run does
 
 **The first run** for a table loads its newest baseline snapshot as the
