@@ -637,3 +637,62 @@ func TestRecoverCascade_archivesOutsideWindowKeepBaseline(t *testing.T) {
 		t.Errorf("a live-contiguous window must be complete\n---\n%s", sql)
 	}
 }
+
+// TestRecoverCascade_baselineOlderThanIndexSkipsAugmentation pins the behavior
+// change through the real probe on the CLI surface: a snapshot dated before the
+// oldest live partition is a window the index never held, so augmentation is
+// skipped and flagged — whether or not an archive is registered.
+func TestRecoverCascade_baselineOlderThanIndexSkipsAugmentation(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	snapTs := "2026-06-01 00:00:00"
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "parent", "id", 1, "PRI", "int", "NO")
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "child", "id", 1, "PRI", "int", "NO")
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "child", "pid", 2, "", "int", "YES")
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "child", "payload", 3, "", "varchar", "YES")
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "child", "created_at", 4, "", "datetime", "YES")
+	testutil.MustExec(t, db, `INSERT INTO fk_constraints
+		(snapshot_id, constraint_name, schema_name, table_name, column_name, ordinal_position,
+		 referenced_schema_name, referenced_table_name, referenced_column_name, delete_rule, update_rule)
+		VALUES (1, 'fk', ?, 'child', 'pid', 1, ?, 'parent', 'id', 'CASCADE', 'RESTRICT')`, dbName, dbName)
+
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
+	parentTs := h.Add(30 * time.Minute).Format("2006-01-02 15:04:05")
+	testutil.InsertEvent(t, db, "b.000001", 10, 20, parentTs, nil, dbName, "parent", 3 /*DELETE*/, "1", nil, []byte(`{"id":1}`), nil)
+	// No archive_state row at all: the probe, not the existence flag, decides.
+
+	baselineDir := t.TempDir()
+	snapDir := filepath.Join(baselineDir, "2026-06-01T00-00-00Z") // months before the only live hour
+	writeChildBaseline(t, filepath.Join(snapDir, dbName, "child.parquet"))
+	if err := baseline.WriteSuccessMarker(snapDir); err != nil {
+		t.Fatalf("write success marker: %v", err)
+	}
+
+	out := filepath.Join(t.TempDir(), "cascade.sql")
+	cleanCascadeFlags(testutil.IntegrationDSN(dbName), dbName, out)
+	rcPK = "1"
+	rcBaselineDir = baselineDir
+	rcAllowIncomplete = true
+	defer func() { rcBaselineDir = ""; rcAllowIncomplete = false }()
+	if err := runCascadeCmd(t); err != nil {
+		t.Fatalf("runRecoverCascade: %v", err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	sql := string(b)
+	if strings.Contains(sql, "keep10") || strings.Contains(sql, "keep11") {
+		t.Errorf("hours the index never held must not be trusted: baseline children must NOT be emitted\n---\n%s", sql)
+	}
+	for _, want := range []string{"INCOMPLETE RECOVERY", "cannot serve every hour"} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("output missing %q\n---\n%s", want, sql)
+		}
+	}
+}

@@ -898,7 +898,7 @@ func TestIntegrationRecoverCascade_archivesOutsideWindowKeepBaseline(t *testing.
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("decode: %v (body=%s)", err, body)
 	}
-	if resp.VictimCount != 3 || !strings.Contains(resp.SQL, "(12, 1)") && !strings.Contains(resp.SQL, "12, 1") {
+	if resp.VictimCount != 3 || !strings.Contains(resp.SQL, "12, 1") {
 		t.Errorf("want the untouched baseline child 12 recovered (victim_count 3), got %d\n---\n%s", resp.VictimCount, resp.SQL)
 	}
 	if !resp.Complete {

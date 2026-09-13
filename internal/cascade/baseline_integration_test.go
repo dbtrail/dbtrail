@@ -25,7 +25,8 @@ type fakeBaseline struct {
 	trunc bool
 	err   error
 	calls int
-	stale string // #618: canned StaleMessage, mirrors reconstruct.StaleWarning.Message
+	stale string           // #618: canned StaleMessage, mirrors reconstruct.StaleWarning.Message
+	pos   *query.BinlogPos // #797: canned SincePos, the baseline's recorded binlog position
 }
 
 func (f *fakeBaseline) BaselineChildren(_ context.Context, _, _, _, _ string, _ time.Time, _ int) (cascade.BaselineLookup, bool, error) {
@@ -33,7 +34,7 @@ func (f *fakeBaseline) BaselineChildren(_ context.Context, _, _, _, _ string, _ 
 	if f.err != nil {
 		return cascade.BaselineLookup{}, false, f.err
 	}
-	return cascade.BaselineLookup{SnapshotTime: f.snap, Rows: f.rows, Truncated: f.trunc, StaleMessage: f.stale}, f.ok, nil
+	return cascade.BaselineLookup{SnapshotTime: f.snap, Rows: f.rows, Truncated: f.trunc, StaleMessage: f.stale, SincePos: f.pos}, f.ok, nil
 }
 
 func cascadeFK(schema string) []cascade.CascadeFK {
@@ -521,8 +522,8 @@ func TestPhase2_archivesInWindowSkipBaselineButScanWidened(t *testing.T) {
 	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:10"] {
 		t.Fatalf("a gapped window must fall back to the Phase-1 lookback scan and find the pre-snapshot INSERT; got %v", res.Victims)
 	}
-	if res.Complete() || !strings.Contains(strings.Join(res.Incomplete, " "), "archived") {
-		t.Errorf("a gapped window must still flag the skipped augmentation; Incomplete=%v", res.Incomplete)
+	if joined := strings.Join(res.Incomplete, " "); res.Complete() || !strings.Contains(joined, "cannot serve every hour") {
+		t.Errorf("a verified gap must be flagged with the verified-gap wording; Incomplete=%v", res.Incomplete)
 	}
 	if fb.calls == 0 {
 		t.Errorf("the baseline must still be consulted (its snapshot time decides the gate)")
@@ -585,7 +586,7 @@ func TestPhase2_liveWindowProbeErrorSkipsBaseline(t *testing.T) {
 		t.Errorf("a failed probe must skip augmentation; got %v", res.Victims)
 	}
 	joined := strings.Join(res.Incomplete, " ")
-	if res.Complete() || !strings.Contains(joined, "archived") || !strings.Contains(joined, "partition list unreadable") {
+	if res.Complete() || !strings.Contains(joined, "could not verify") || !strings.Contains(joined, "partition list unreadable") {
 		t.Errorf("the caveat must name the probe failure; Incomplete=%v", res.Incomplete)
 	}
 }
@@ -616,8 +617,8 @@ func TestPhase2_archivesSkipBaselineWithoutProbeWidensScan(t *testing.T) {
 	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:10"] {
 		t.Fatalf("no probe: augmentation skipped but the lookback scan must still find child:10; got %v", res.Victims)
 	}
-	if res.Complete() || !strings.Contains(strings.Join(res.Incomplete, " "), "archived") {
-		t.Errorf("no probe must keep the old skip caveat; Incomplete=%v", res.Incomplete)
+	if joined := strings.Join(res.Incomplete, " "); res.Complete() || !strings.Contains(joined, "no live-window check is wired") {
+		t.Errorf("no probe must keep the old existence caveat and say the check is not wired; Incomplete=%v", res.Incomplete)
 	}
 }
 
@@ -647,8 +648,8 @@ func TestPhase2_probeGapWithoutArchivesSkipsBaseline(t *testing.T) {
 	if len(res.Victims) != 0 {
 		t.Errorf("a gapped window must skip augmentation even with no archive registered; got %v", res.Victims)
 	}
-	if res.Complete() || !strings.Contains(strings.Join(res.Incomplete, " "), "archived") {
-		t.Errorf("the skip must be flagged; Incomplete=%v", res.Incomplete)
+	if joined := strings.Join(res.Incomplete, " "); res.Complete() || !strings.Contains(joined, "cannot serve every hour") {
+		t.Errorf("the skip must be flagged with the verified-gap wording; Incomplete=%v", res.Incomplete)
 	}
 }
 
@@ -669,6 +670,12 @@ func TestLiveWindowProbe_captureGap(t *testing.T) {
 	if ok, err := probe(ctx, since, until); err != nil || !ok {
 		t.Fatalf("empty stream_state (file-mode index) must be contiguous: %v, %v", ok, err)
 	}
+	// The partition half through the composed probe: a window starting before
+	// the oldest live partition (a baseline older than the index holds) is
+	// gapped even with a clean stream_state.
+	if ok, err := probe(ctx, h.Add(-time.Hour), until); err != nil || ok {
+		t.Fatalf("a window reaching before the oldest live partition must not be contiguous: %v, %v", ok, err)
+	}
 	testutil.MustExec(t, db, `INSERT INTO stream_state
 		(id, mode, binlog_file, binlog_position, gtid_set, events_indexed, last_checkpoint, server_id, gap_lost_at, gap_lost_detail)
 		VALUES (1, 'position', 'binlog.000001', 300, '', 2, NOW(), 1, ?, 'source binlogs purged')`,
@@ -686,5 +693,78 @@ func TestLiveWindowProbe_captureGap(t *testing.T) {
 	}
 	if cascade.LiveWindowProbe(db, "") != nil || cascade.LiveWindowProbe(nil, dbName) != nil {
 		t.Errorf("no database name or no handle must yield no probe (fail-closed default), not a probe that cannot run")
+	}
+}
+
+// TestPhase2_skipModeDropsSincePosUnlessSnapshotIsTheBound pins the other half
+// of the window decision: SincePos REPLACES the Since time filter (#797), so in
+// skip mode it must travel with `since` only when the snapshot is the lower
+// bound. A snapshot newer than T-lookback whose recorded position is past the
+// seeded INSERT would otherwise hide that INSERT behind a widened-looking
+// window — the on-stage failure through a second door.
+func TestPhase2_skipModeDropsSincePosUnlessSnapshotIsTheBound(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	eng := query.New(db)
+
+	T := time.Now().UTC()
+	h := T.Add(-2 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
+	ts := h.Add(10 * time.Minute).Format("2006-01-02 15:04:05")
+	testutil.InsertEvent(t, db, "b.000001", 10, 20, ts, nil, dbName, "child", 1 /*INSERT*/, "10", nil, nil, []byte(`{"id":10,"pid":1}`))
+
+	past := &query.BinlogPos{File: "b.000001", Pos: 1000} // beyond the INSERT at 10-20
+	fb := &fakeBaseline{ok: true, snap: T.Add(-30 * time.Minute), pos: past,
+		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1)}}}}
+	probe := &liveWindowProbe{ok: false}
+	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fb, LiveWindowContiguous: probe.probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:10"] {
+		t.Fatalf("skip mode with the lookback as lower bound must not anchor on the snapshot's SincePos; got %v", res.Victims)
+	}
+
+	// Mirror: in augment mode the position IS the anchor and reaches the scan —
+	// the INSERT sits before it, so the child is untouched and comes back from
+	// the BASELINE row (payload tells which path emitted it).
+	fb2 := &fakeBaseline{ok: true, snap: h, pos: past,
+		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1), "payload": "from-baseline"}}}}
+	res, err = cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fb2, LiveWindowContiguous: (&liveWindowProbe{ok: true}).probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims (augment): %v", err)
+	}
+	if len(res.Victims) != 1 || res.Victims[0].RowBefore["payload"] != "from-baseline" {
+		t.Fatalf("augment mode must anchor the scan on SincePos so the pre-position INSERT is not a candidate; got %v", res.Victims)
+	}
+}
+
+// TestPhase2_skipModeWidensToOlderSnapshot pins the "widened to the snapshot
+// when that is older" clause: with a short lookback and a snapshot older than
+// it, a gapped window still scans from the snapshot, so a child touched
+// between the snapshot and the lookback edge is found.
+func TestPhase2_skipModeWidensToOlderSnapshot(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	eng := query.New(db)
+
+	T := time.Now().UTC()
+	h := T.Add(-2 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
+	ts := h.Add(10 * time.Minute).Format("2006-01-02 15:04:05")
+	testutil.InsertEvent(t, db, "b.000001", 10, 20, ts, nil, dbName, "child", 1 /*INSERT*/, "10", nil, nil, []byte(`{"id":10,"pid":1}`))
+
+	fb := &fakeBaseline{ok: true, snap: T.Add(-3 * time.Hour)} // older than the 1h lookback; row 10 not in it
+	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fb, Lookback: time.Hour, LiveWindowContiguous: (&liveWindowProbe{ok: false}).probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:10"] {
+		t.Fatalf("skip mode must widen to an older snapshot; got %v", res.Victims)
 	}
 }

@@ -12,6 +12,11 @@ import (
 // hour that was rotated out is exactly what such a scan cannot see, whether
 // or not a Parquet archive holds it (#1615).
 //
+// Hours are classified from the hourly partitions alone, so an hour whose
+// rows still sit in p_future (the add-future horizon lapsed) is a gap here
+// even though a live scan would see them: conservative — the cascade then
+// skips augmentation and says so — never a false "contiguous".
+//
 // Partitions only: a stamped permanent capture loss inside the window
 // (stream_state.gap_lost_at, #765) is invisible here and must be checked by
 // the caller — cascade.LiveWindowProbe does both.
