@@ -548,6 +548,10 @@ type recoverResult struct {
 	SQLMore        bool   `json:"sql_more,omitempty"`
 	NextSQLOffset  int    `json:"next_sql_offset,omitempty"`
 	SQLNote        string `json:"sql_note,omitempty"`
+	// Warnings are the advisories the whole-script return carries as SQL
+	// comments (truncation, divergence, snapshot unavailable). A summary or a
+	// withheld script has no text to carry them in, so they ride here.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // StatusArgs are the status tool's parameters.
@@ -1010,8 +1014,16 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		}
 
 		text := buf.String()
+		// Every advisory is appended to the script as a SQL comment (so it
+		// survives inside text an agent hands to an operator verbatim) AND kept
+		// as a plain string: a summary or a withheld script carries no text, and
+		// the truncation warning is the one most likely to accompany a script
+		// too large to return, so the envelope must carry it on its own field.
+		var warnings []string
 		if resolverErr != nil {
-			text += fmt.Sprintf("\n-- Note: schema snapshot unavailable (%v); WHERE clauses use all columns.\n", resolverErr)
+			w := fmt.Sprintf("schema snapshot unavailable (%v); WHERE clauses use all columns", resolverErr)
+			text += "\n-- Note: " + w + ".\n"
+			warnings = append(warnings, w)
 		}
 		if n > 0 {
 			text += fmt.Sprintf("\n-- %d reversal statement(s) generated.\n", n)
@@ -1019,19 +1031,20 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		if n >= opts.Limit {
 			// The fetch ran Order=DESC (#785/#927), so the cut kept the newest
 			// events — say so, matching the CLI recover warning (#1439).
-			text += fmt.Sprintf("\n-- Warning: results truncated at %d rows; only the most recent events of the window are reversed. Use a narrower since/until range or increase the limit to see more.\n", opts.Limit)
+			w := fmt.Sprintf("results truncated at %d rows; only the most recent events of the window are reversed. Use a narrower since/until range or increase the limit to see more", opts.Limit)
+			text += "\n-- Warning: " + w + ".\n"
+			warnings = append(warnings, w)
 		}
 		if divergedEvents > 0 {
-			// SQL-comment form so the warning survives inside the script text an
-			// agent may hand to an operator verbatim (the truncation warning
-			// above is the precedent).
-			text += "\n-- Warning: " + eventDivergenceWarning(divergedEvents) + "\n"
+			w := eventDivergenceWarning(divergedEvents)
+			text += "\n-- Warning: " + w + "\n"
+			warnings = append(warnings, w)
 		}
 
 		// What this response carries of the script (#1438). The notes appended
 		// above sit past the last statement's end offset, so they ride the FINAL
 		// chunk and concatenating the chunks reproduces `text` exactly.
-		script, serr := deliverScript(text, stmtEnds, args.SummaryOnly, args.SQLOffset, args.SQLLimit)
+		script, serr := deliverScript("bintrail recover", text, stmtEnds, args.SummaryOnly, args.SQLOffset, args.SQLLimit)
 		if serr != nil {
 			return ErrorResult(serr), nil, nil
 		}
@@ -1082,6 +1095,7 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 			SQLMore:        script.More,
 			NextSQLOffset:  script.NextOffset,
 			SQLNote:        script.Note,
+			Warnings:       warnings,
 		}, "", "  ")
 		if err != nil {
 			return ErrorResult(fmt.Errorf("encode recover result: %w", err)), nil, nil

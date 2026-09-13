@@ -82,13 +82,27 @@ func scriptFingerprint(text string) string {
 // trailer follows the last one, so the framing lands in the first and last
 // chunk exactly once, with no special-casing: concatenating every chunk in
 // order reproduces text byte for byte.
-func deliverScript(text string, ends []int, summaryOnly bool, offset, limit int) (scriptDelivery, error) {
+//
+// cli names the CLI command that writes this same script whole (`bintrail
+// recover` or `bintrail recover-cascade`): deliverScript serves both tools and
+// the withhold note must send each client to ITS command, not the wider one.
+func deliverScript(cli, text string, ends []int, summaryOnly bool, offset, limit int) (scriptDelivery, error) {
 	total := len(ends)
 	d := scriptDelivery{
 		ScriptID:    scriptFingerprint(text),
 		ScriptBytes: len(text),
 	}
 	explicit := offset > 0 || limit > 0
+
+	// Fail closed on offsets that do not sit on a statement boundary. The
+	// emitters record them off a counting writer, but a rebase that forgets the
+	// preamble (or drops a byte) lands every cut mid-statement while the
+	// concatenation of the chunks STILL equals the script — any increasing
+	// offset list reassembles. This is the check that sees it, and it refuses
+	// rather than serving a chunk that starts inside a comment or a value.
+	if err := checkStatementEnds(text, ends); err != nil {
+		return d, err
+	}
 
 	if offset < 0 || limit < 0 {
 		return d, fmt.Errorf("sql_offset and sql_limit count statements and cannot be negative (got sql_offset: %d, sql_limit: %d)", offset, limit)
@@ -125,14 +139,15 @@ func deliverScript(text string, ends []int, summaryOnly bool, offset, limit int)
 			"(returning it would be refused or truncated by the client). It has %d statement(s), script id %s. "+
 			"Fetch it in order with sql_offset (0-based statement index) and sql_limit, checking script_id on every chunk: "+
 			"a different value means the underlying events moved and the fetch must restart at sql_offset 0. "+
-			"`bintrail recover-cascade` from the CLI writes the whole script to a file in one go.",
-			len(text), InlineScriptBytes, total, d.ScriptID)
+			"`%s` from the CLI writes the whole script to a file in one go.",
+			len(text), InlineScriptBytes, total, d.ScriptID, cli)
 		return d, nil
 	}
 
 	// How many statements fit the response cap from here. At least one, always:
 	// a single statement larger than the cap is still the only way to ever see
-	// it, and the note says the response is over the usual size.
+	// it, and the note then says the response is over the usual size (see the
+	// oversized clause below).
 	start := 0
 	if offset > 0 {
 		start = ends[offset-1]
@@ -161,7 +176,27 @@ func deliverScript(text string, ends []int, summaryOnly bool, offset, limit int)
 		d.NextOffset = last
 	}
 	d.Note = chunkNote(offset, last, total, limit, want, d.ScriptID)
+	if end-start > InlineScriptBytes {
+		d.Note += fmt.Sprintf(". This chunk is %d bytes, over the usual %d-byte response size, because one statement alone is that large; it cannot be split further",
+			end-start, InlineScriptBytes)
+	}
 	return d, nil
+}
+
+// checkStatementEnds verifies that every recorded statement end sits just
+// past a `;` and its newline, strictly increasing and inside text. The
+// emitters guarantee that shape (every statement is written as stmt + ";\n"),
+// so a violation means the offsets were rebased wrong, and a chunk cut on
+// them would start mid-statement.
+func checkStatementEnds(text string, ends []int) error {
+	prev := 0
+	for i, e := range ends {
+		if e <= prev || e > len(text) || e < 2 || text[e-1] != '\n' || text[e-2] != ';' {
+			return fmt.Errorf("internal error: statement offset %d of %d (byte %d) does not end a statement; refusing to cut the script there. Call again without sql_offset/sql_limit, or write it whole from the CLI, and report this", i+1, len(ends), e)
+		}
+		prev = e
+	}
+	return nil
 }
 
 // chunkNote is the human half of the pagination contract: which statements
@@ -174,7 +209,10 @@ func chunkNote(offset, last, total, askedLimit, gave int, id string) string {
 	if i, n, ok := chunkOrdinal(offset, gave, total); ok {
 		fmt.Fprintf(&b, ", chunk %d of %d at this sql_limit", i, n)
 	}
-	if askedLimit > 0 && gave < askedLimit {
+	// "Reduced" only when the size cap cut the page short. On the last chunk
+	// gave < askedLimit merely because the script ended, and saying the cap
+	// did it would send a client looking for bytes that never existed.
+	if askedLimit > 0 && gave < askedLimit && offset+askedLimit <= total {
 		fmt.Fprintf(&b, ". sql_limit %d was reduced to %d so the response fits its size limit; nothing was dropped",
 			askedLimit, gave)
 	}

@@ -473,7 +473,7 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 		// Decide what this response CARRIES of the script just built (#1438).
 		// The script itself is unaffected: every path below slices the same
 		// bytes the CLI writes.
-		script, serr := deliverScript(buf.String(), stmtEnds, args.SummaryOnly, args.SQLOffset, args.SQLLimit)
+		script, serr := deliverScript("bintrail recover-cascade", buf.String(), stmtEnds, args.SummaryOnly, args.SQLOffset, args.SQLLimit)
 		if serr != nil {
 			return ErrorResult(serr), nil, nil
 		}

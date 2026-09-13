@@ -345,7 +345,10 @@ instructions.
 switches to a JSON envelope (whose `sql` field holds the exact bytes) for a
 summary or a chunk — a client has to be able to tell a chunk from a complete
 script by reading a field, which a SQL comment cannot do. `recover_cascade` is
-JSON in every case.
+JSON in every case. The envelope also carries `warnings` (results truncated at
+the row limit, merge divergence, schema snapshot unavailable): the whole script
+carries the same advisories as SQL comments, and a summary or a withheld script
+has no text to carry them in.
 
 For a script too large to be comfortable over MCP at all, `bintrail recover` and
 `bintrail recover-cascade` from the CLI write the whole thing to a file in one
