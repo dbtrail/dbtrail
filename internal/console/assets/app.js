@@ -4243,8 +4243,8 @@ function s3RetentionBox(srv, servers, daemonS3) {
   const minutes = srv.schedule_every_minutes || 0;
   const n = minutes > 0 && !srv.schedule_refusal ? Math.floor(30 * 1440 / minutes) : 0;
   wrap.append(el("p", { class: "form-hint", text:
-    (n ? "About " + n + " backup" + (n === 1 ? "" : "s") + " every 30 days reach S3 at this rate, each a full copy of every table, and " : "Every backup sent to S3 is a full copy of every table, and ") +
-    "dbtrail never removes one: the bucket grows by that much until a rule in the bucket expires old backups." }));
+    (n ? "About " + n + " backup" + (n === 1 ? "" : "s") + " every 30 days reach S3 at this rate, each a full copy of every table, and dbtrail never removes one: the bucket grows by that much until a rule in the bucket expires old backups."
+       : "Every backup sent to S3 is a full copy of every table, and dbtrail never removes one: each stays in the bucket until a rule in the bucket expires old backups.") }));
   if (!s) {
     wrap.append(el("p", { class: "form-msg err", text:
       "This is not an s3://bucket/prefix destination, so no backup can be uploaded to it and no bucket rule applies." }));
@@ -4309,7 +4309,7 @@ function s3RetentionBox(srv, servers, daemonS3) {
       "The backups of " + nested.join(", ") + " sit under this prefix too and would expire under this rule." }));
   }
   body.append(
-    el("p", { class: "form-hint", text: "Save the rule as dbtrail-backups-rule.json. The first command shows the rules the bucket already has; merge this one into them, since the second command replaces every rule on the bucket (the one that aborts unfinished uploads, and the one-year rule bintrail init created if it made this bucket)." }),
+    el("p", { class: "form-hint", text: "Save the rule as dbtrail-backups-rule.json. The first command shows the rules the bucket already has; merge this one into them, since the second command replaces every rule on the bucket, such as one that aborts unfinished uploads, or the one-year rule that bintrail init --s3-bucket sets when it creates a bucket." }),
     rule, cmd,
     el("p", { class: "form-hint", text:
       "The rule applies to " + s.prefix + "/ only, and to no archived changes configured on this page. It expires by age alone: it cannot spare the only complete copy, nor a backup a restore is reading, and if the schedule stops it keeps expiring until none is left." }),
