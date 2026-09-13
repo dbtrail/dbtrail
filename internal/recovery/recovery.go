@@ -569,7 +569,7 @@ func partialGenerationError(failures []genFailure) error {
 // shape now. Re-snapshotting does nothing there (the snapshot is already current), and
 // the message used to offer only that and hand reconciliation.
 //
-// Only cause 1 is DIAGNOSABLE — the live table still having the column is observable.
+// Only the stale-snapshot cause is DIAGNOSABLE — the live table still having the column is observable.
 // Past that, driftedColumns is in one state and the choice is about intent, not
 // evidence, so the message must not present narrowing as strictly better. Narrowing
 // EXCLUDES the drifted events, which then go unreversed, and nothing downstream reports
