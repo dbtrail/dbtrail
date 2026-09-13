@@ -42,6 +42,22 @@ var recoverCLIOnly = map[string]string{
 	"duckdb-memory-limit":    "DuckDB resource tuning; the long-lived MCP daemons keep the safe default (#510/#511)",
 }
 
+// recoverMCPOnly are MCP recover params that deliberately have no CLI flag —
+// the mirror ledger, and so far only the transport parameters (#1438). They
+// are not filters: they change nothing about which events are reversed or what
+// the script says, only how much of an already-built script one response
+// carries. The CLI needs no counterpart because it writes the whole script to
+// a file, which no client size limit applies to.
+//
+// Every entry must still exist as an MCP param (a stale entry fails) and must
+// NOT have grown a CLI flag; if one appears, the reason below no longer holds
+// and the two sides must be reconciled rather than both kept.
+var recoverMCPOnly = map[string]string{
+	"summary_only": "transport, not a filter: the script is built either way, and this only asks for the counts instead of the bytes",
+	"sql_offset":   "transport, not a filter: statement-aligned pagination of one built script, needed because MCP clients cap result size",
+	"sql_limit":    "companion to sql_offset",
+}
+
 // queryCLIOnly is the same ledger for `bintrail query` vs the MCP query tool.
 var queryCLIOnly = map[string]string{
 	"archive-dir":         "explicit archive source override; the MCP surface uses env config + archive_state auto-discovery",
@@ -96,10 +112,20 @@ func mcpParamNames(t *testing.T, args any) map[string]bool {
 	return names
 }
 
-func assertParamParity(t *testing.T, cliCmd string, args any, cliOnly map[string]string) {
+func assertParamParity(t *testing.T, cliCmd string, args any, cliOnly, mcpOnly map[string]string) {
 	t.Helper()
 	flags := cliFlagNames(t, cliCmd)
 	params := mcpParamNames(t, args)
+
+	// Same liveness rule as the cliOnly ledger, in the other direction.
+	for name := range mcpOnly {
+		if !params[name] {
+			t.Errorf("mcpOnly exception %q is not an MCP %s param anymore; delete the stale exception", name, cliCmd)
+		}
+		if flags[strings.ReplaceAll(name, "_", "-")] {
+			t.Errorf("mcpOnly exception %q also exists as a CLI flag; it is not MCP-only — remove one side or the exception", name)
+		}
+	}
 
 	// The exception ledger must stay live: a stale entry means the CLI flag is
 	// gone (delete the entry) or an MCP param appeared anyway (the reason no
@@ -123,19 +149,22 @@ func assertParamParity(t *testing.T, cliCmd string, args any, cliOnly map[string
 		}
 	}
 	for name := range params {
+		if _, excepted := mcpOnly[name]; excepted {
+			continue
+		}
 		if kebab := strings.ReplaceAll(name, "_", "-"); !flags[kebab] {
-			t.Errorf("MCP %s tool param %q has no --%s flag on `bintrail %s`: the surfaces drifted — if the CLI omits the flag DELIBERATELY (changed-column on recover is the precedent), the MCP tool must omit the param too",
+			t.Errorf("MCP %s tool param %q has no --%s flag on `bintrail %s`: the surfaces drifted — if the CLI omits the flag DELIBERATELY (changed-column on recover is the precedent), the MCP tool must omit the param too, or record it in the mcpOnly ledger with the reason it is not a filter",
 				cliCmd, name, kebab, cliCmd)
 		}
 	}
 }
 
 func TestRecoverToolParams_matchCLIRecoverFlags(t *testing.T) {
-	assertParamParity(t, "recover", RecoverArgs{}, recoverCLIOnly)
+	assertParamParity(t, "recover", RecoverArgs{}, recoverCLIOnly, recoverMCPOnly)
 }
 
 func TestQueryToolParams_matchCLIQueryFlags(t *testing.T) {
-	assertParamParity(t, "query", QueryArgs{}, queryCLIOnly)
+	assertParamParity(t, "query", QueryArgs{}, queryCLIOnly, nil)
 }
 
 // TestRecoverSurfaces_neverChangedColumn names the design decision the parity

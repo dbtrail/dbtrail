@@ -45,6 +45,12 @@ type RecoverCascadeArgs struct {
 	AllowIncomplete bool   `json:"allow_incomplete,omitempty" jsonschema:"Return the reversal script even when the synthesis is provably partial. Defaults to false: any coverage caveat makes the call fail, with the caveats reported in the error. When set, the caveats come back in the result's incomplete list instead."`
 	BaselineDir     string `json:"baseline_dir,omitempty" jsonschema:"Local directory of baseline Parquet snapshots for Phase-2 fallback (also recovers children untouched within the lookback window). Overrides BINTRAIL_BASELINE_DIR env var. Rejected on servers that configure the baseline themselves (the console /mcp endpoint)."`
 	BaselineS3      string `json:"baseline_s3,omitempty" jsonschema:"S3 prefix of baseline Parquet snapshots (s3://bucket/prefix) for Phase-2 fallback. Overrides BINTRAIL_BASELINE_S3 env var. Used only when baseline_dir is unset. Rejected on servers that configure the baseline themselves."`
+	// The transport parameters (#1438). They change what this response CARRIES,
+	// never what is generated: the script is built the same way whichever is
+	// set, so a chunk is a slice of the exact bytes the CLI writes.
+	SummaryOnly bool `json:"summary_only,omitempty" jsonschema:"Return the counts, completeness and caveats without the SQL script. Answers how large the recovery is and whether it is complete before deciding to pull the script."`
+	SQLOffset   int  `json:"sql_offset,omitempty" jsonschema:"0-based index of the first STATEMENT to return, for fetching a large script in pieces. Chunks cut on statement boundaries and concatenate in order into the exact script."`
+	SQLLimit    int  `json:"sql_limit,omitempty" jsonschema:"How many statements to return from sql_offset. Reduced (never silently) when the chunk would exceed the response size limit; the result says so and gives the next offset."`
 }
 
 // recoverCascadeResult is the tool's JSON payload: the reversal script plus the
@@ -57,10 +63,25 @@ type RecoverCascadeArgs struct {
 // text and counts only — never event rows — so there is no statement-text or
 // connection-id field to redact.
 type recoverCascadeResult struct {
-	Schema         string `json:"schema"`
-	Table          string `json:"table"`
-	SQL            string `json:"sql"`
+	Schema string `json:"schema"`
+	Table  string `json:"table"`
+	// SQL is the whole script, one statement-aligned chunk of it, or absent —
+	// see the transport fields below. It is omitted rather than empty when the
+	// response carries no script, so "no statements were generated" and "the
+	// script was not carried here" cannot be read as the same answer.
+	SQL            string `json:"sql,omitempty"`
 	StatementCount int    `json:"statement_count"`
+	// The transport fields (#1438). ScriptID identifies the BUILD: chunks are
+	// stateless rebuilds, so a client that concatenates chunks carrying
+	// different ids has assembled a script that never existed.
+	ScriptID    string `json:"script_id,omitempty"`
+	ScriptBytes int    `json:"script_bytes,omitempty"`
+	// SQLFrom and SQLTo are the 1-based inclusive statement range in SQL.
+	SQLFrom       int    `json:"sql_from,omitempty"`
+	SQLTo         int    `json:"sql_to,omitempty"`
+	SQLMore       bool   `json:"sql_more,omitempty"`
+	NextSQLOffset int    `json:"next_sql_offset,omitempty"`
+	SQLNote       string `json:"sql_note,omitempty"`
 	// Parents is the number of parent rows whose own change is reversed:
 	// ParentDeletes plus the parent-key UPDATEs the synthesis confirmed as
 	// cascading (ParentKeyUpdates); an UPDATE of unrelated columns is never
@@ -417,7 +438,7 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 			gen.SetMaxScriptBytes(v)
 		}
 		var buf bytes.Buffer
-		n, err := cascaderecover.EmitSQL(&buf, gen, rows, res.SetNullRows, res.KeyUpdates, resolver, cascaderecover.Header{
+		n, stmtEnds, err := cascaderecover.EmitSQLIndexed(&buf, gen, rows, res.SetNullRows, res.KeyUpdates, resolver, cascaderecover.Header{
 			Schema:         args.Schema,
 			Table:          args.Table,
 			Parents:        len(parents),
@@ -449,10 +470,28 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 		warnings := append(append([]string{}, res.Warnings...), toolWarnings...)
 		warnings = append(warnings, fetcher.Notes()...)
 
+		// Decide what this response CARRIES of the script just built (#1438).
+		// The script itself is unaffected: every path below slices the same
+		// bytes the CLI writes.
+		if len(stmtEnds) != n {
+			return ErrorResult(fmt.Errorf("internal error: %d statement(s) rendered but %d statement offset(s) recorded; refusing to serve the script from this surface. Write it whole with `bintrail recover-cascade` from the CLI, and report this", n, len(stmtEnds))), nil, nil
+		}
+		script, serr := deliverScript("bintrail recover-cascade", buf.String(), stmtEnds, false, args.SummaryOnly, args.SQLOffset, args.SQLLimit)
+		if serr != nil {
+			return ErrorResult(serr), nil, nil
+		}
+
 		out := recoverCascadeResult{
 			Schema:           args.Schema,
 			Table:            args.Table,
-			SQL:              buf.String(),
+			SQL:              script.SQL,
+			ScriptID:         script.ScriptID,
+			ScriptBytes:      script.ScriptBytes,
+			SQLFrom:          script.From,
+			SQLTo:            script.To,
+			SQLMore:          script.More,
+			NextSQLOffset:    script.NextOffset,
+			SQLNote:          script.Note,
 			StatementCount:   n,
 			Parents:          len(parents),
 			ParentDeletes:    len(parentDeletes),
@@ -470,26 +509,42 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 			return ErrorResult(fmt.Errorf("encode recover_cascade result: %w", err)), nil, nil
 		}
 
-		// Recorded when (and only when) a script is actually returned to the
-		// client — the refusal paths above serve no historical row data. The
-		// CLI and console record before their exit-code / complete-flag
-		// decision because their script is already durable by then; here an
-		// incomplete-but-allowed script reaches the client, so it is recorded
-		// with its completeness.
-		ext.Record(ctx, ext.AuditEvent{
-			Surface: cfg.auditSurface(),
-			Action:  "recover.cascade",
-			Actor:   ext.ProcessActor(""),
-			Schema:  args.Schema,
-			Table:   args.Table,
-			Detail: map[string]string{
+		// Recorded when (and only when) script BYTES are actually returned to
+		// the client — the refusal paths above serve no historical row data,
+		// and neither does a summary: it carries counts, which ext/audit.go
+		// deliberately leaves out as a metadata read. The CLI and console
+		// record before their exit-code / complete-flag decision because their
+		// script is already durable by then; here an incomplete-but-allowed
+		// script reaches the client, so it is recorded with its completeness.
+		//
+		// A chunk fetch IS a record, deviating from #1438's "once per build":
+		// chunks are stateless rebuilds, so skipping records for chunks 2..n
+		// would let a client pull most of a recovery with no audit trail at
+		// all. What the issue actually guards against — N chunks reading as N
+		// separate recoveries — is handled by naming the range instead, which
+		// is also how a reader tells a partial fetch from a whole script
+		// without arithmetic.
+		if script.Served {
+			detail := map[string]string{
 				"statements": strconv.Itoa(n),
 				"parents":    strconv.Itoa(len(parentDeletes)),
 				"children":   strconv.Itoa(len(res.Victims)),
 				"complete":   strconv.FormatBool(len(caveats) == 0),
 				"dry_run":    "true", // MCP recover_cascade always returns the script, never applies it
-			},
-		})
+			}
+			if script.Chunked {
+				detail["chunk"] = fmt.Sprintf("statements %d-%d of %d", script.From, script.To, n)
+				detail["script_id"] = script.ScriptID
+			}
+			ext.Record(ctx, ext.AuditEvent{
+				Surface: cfg.auditSurface(),
+				Action:  "recover.cascade",
+				Actor:   ext.ProcessActor(""),
+				Schema:  args.Schema,
+				Table:   args.Table,
+				Detail:  detail,
+			})
+		}
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
