@@ -4157,104 +4157,133 @@ function cfShape(on) {
 // (docs/s3-iam-policy.md: s3:DeleteObject is optional; docs/object-lock.md
 // relies on it). So retention for uploaded backups is a bucket lifecycle
 // rule the OPERATOR applies, and this page's job is to say how fast the
-// bucket grows, generate the rule scoped to the backup prefix only, and
-// name what such a rule cannot do. Decided on #1622.
+// bucket grows, generate the rule scoped to the backup prefix only, refuse
+// it wherever it would reach anything else, and name what such a rule
+// cannot do. Decided on #1622.
 
-// everyMinutes reads the schedule grammar (a whole number of m, h or d); 0
-// when it cannot be read.
-function everyMinutes(every) {
-  const m = /^\s*(\d+)\s*([mhd])\s*$/.exec(String(every || ""));
-  return m ? Number(m[1]) * ({ m: 1, h: 60, d: 1440 })[m[2]] : 0;
-}
-
-// s3Parts splits s3://bucket/prefix; prefix comes back without a trailing
-// slash ("" at the bucket root).
+// s3Parts splits s3://bucket/prefix the way the daemon builds object keys
+// (storage.BuildS3Key trims exactly ONE trailing slash and nothing else):
+// no trimming of spaces, no collapsing of slashes. A prefix the page
+// tidied up would name objects the daemon never wrote, and the rule would
+// match nothing while the page said old backups expire. "" at the root.
 function s3Parts(url) {
-  const m = /^s3:\/\/([^\/]+)\/?(.*)$/.exec(String(url || "").trim());
+  const m = /^s3:\/\/([^\/]+)\/?(.*)$/.exec(String(url || ""));
   if (!m) return null;
-  return { bucket: m[1], prefix: m[2].replace(/\/+$/, "") };
+  return { bucket: m[1], prefix: m[2].replace(/\/$/, "") };
 }
 
 // retentionTooShort: an age rule shorter than the schedule expires the
 // newest complete backup before the next one lands, leaving moments with
 // no backup at all. Equal counts: a 1-day rule under a 1-day schedule
 // expires at the very moment the next run is due, not after it.
-function retentionTooShort(every, days) {
-  const minutes = everyMinutes(every);
-  return minutes > 0 && days * 1440 <= minutes;
+function retentionTooShort(everyMinutes, days) {
+  return everyMinutes > 0 && days * 1440 <= everyMinutes;
+}
+
+// s3PrefixCovers reports whether a rule on `outer` (s3://bucket/prefix)
+// would also expire objects under `inner`: same bucket, and inner's key
+// prefix equals or sits under outer's, compared with the slash so that
+// "dbtrail" does not cover "dbtrail-archives".
+function s3PrefixCovers(outer, inner) {
+  const o = s3Parts(outer), i = s3Parts(inner);
+  if (!o || !i || o.bucket !== i.bucket) return false;
+  return (i.prefix + "/").startsWith(o.prefix + "/");
 }
 
 // lifecycleRuleFor renders the bucket rule that expires objects under the
 // backup prefix after `days`. Null at the bucket root: a rule with an empty
 // prefix would expire everything in the bucket, the archived changes
-// included, and this page must never hand that out.
+// included, and this page must never hand that out. Noncurrent versions
+// expire too: on a versioned bucket (Object Lock needs one) an Expiration
+// alone only writes a delete marker and every byte stays.
 function lifecycleRuleFor(url, days) {
   const s = s3Parts(url);
-  if (!s || !s.prefix || !(days > 0)) return null;
+  if (!s || !s.prefix || !Number.isInteger(days) || days < 1) return null;
   return JSON.stringify({ Rules: [{
     ID: "dbtrail-backups-expire-" + days + "d",
     Status: "Enabled",
     Filter: { Prefix: s.prefix + "/" },
     Expiration: { Days: days },
+    NoncurrentVersionExpiration: { NoncurrentDays: days },
   }] }, null, 2);
 }
 
-// s3RetentionBox is the settings-row block for a server whose scheduled
-// backups upload to S3: the growth line, then the rule behind a fold.
-function s3RetentionBox(srv) {
+// s3RetentionBox is the settings-row block for a server with its OWN S3
+// destination (the raw entry, not the daemon default every server shares):
+// the growth line when a schedule can run, then the rule behind a fold.
+// Mounted whether or not a schedule runs: the Create backup button, a
+// restore and the daemon-wide refresh all upload too, and a schedule that
+// stopped leaves its backups sitting there.
+function s3RetentionBox(srv, servers) {
   const wrap = el("div", { class: "s3-retention" });
-  const n = backupsPer30Days(srv.schedule_every);
-  const s = s3Parts(srv.resolved_s3);
+  const s = s3Parts(srv.baseline_s3);
+  const minutes = srv.schedule_refusal ? 0 : (srv.schedule_every_minutes || 0);
+  const n = minutes > 0 ? Math.floor(30 * 1440 / minutes) : 0;
   wrap.append(el("p", { class: "form-hint", text:
-    (n ? "About " + n + " backup" + (n === 1 ? "" : "s") + " every 30 days reach S3 at this rate, each a full copy of every table, and " : "Every scheduled backup reaches S3, a full copy of every table, and ") +
-    "dbtrail never removes one: the bucket grows by that much every 30 days until a rule in the bucket expires old backups." }));
+    (n ? "About " + n + " backup" + (n === 1 ? "" : "s") + " every 30 days reach S3 at this rate, each a full copy of every table, and " : "Every backup sent to S3 is a full copy of every table, and ") +
+    "dbtrail never removes one: the bucket grows by that much until a rule in the bucket expires old backups." }));
   if (!s) return wrap;
-  const details = el("details", { class: "s3-retention-rule" });
-  details.append(el("summary", { text: "Bucket rule to expire old backups" }));
-  const body = el("div", { class: "form-body" });
+  const details = el("details", { class: "form-advanced s3-retention-rule" });
+  details.append(el("summary", { class: "form-adv-summary", text: "Bucket rule to expire old backups" }));
+  const body = el("div");
+  const refuse = (text) => { body.append(el("p", { class: "form-msg err", text })); details.append(body); wrap.append(details); return wrap; };
   if (!s.prefix) {
-    // The one shape refused: see lifecycleRuleFor.
-    body.append(el("p", { class: "form-msg err", text:
-      "These backups sit at the bucket root, which archived changes may share. A rule there would expire everything in the bucket. Put the backups under a prefix (for example s3://" + s.bucket + "/backups) before applying an expiry rule." }));
-    details.append(body);
-    wrap.append(details);
-    return wrap;
+    // The one shape refused outright: see lifecycleRuleFor.
+    return refuse("These backups sit at the bucket root, which archived changes may share. A rule there would expire everything in the bucket. Put the backups under a prefix (for example s3://" + s.bucket + "/backups) before applying an expiry rule.");
   }
-  const days = el("input", { class: "in", type: "number", min: "1", step: "1", value: "30", "aria-label": "Keep backups for (days)" });
-  days.style.maxWidth = "90px";
-  const row = el("div", { class: "form-row" });
-  row.append(el("label", { text: "Keep backups for (days)" }), days);
+  // The archived changes are the evidence recovery is built from and are
+  // never expired by dbtrail. A rule on a prefix that covers them (the
+  // same prefix, or the archives nested under it) would.
+  if (srv.archive_s3 && s3PrefixCovers(srv.baseline_s3, srv.archive_s3)) {
+    return refuse("This server's archived changes go to " + srv.archive_s3 + ", under the same prefix as its backups. A rule on " + s.prefix + "/ would expire the archived changes too. Move the backups or the archives to their own prefix first.");
+  }
+  // Another server's backups nested under this prefix would expire under
+  // THIS server's retention. Said, not refused: the operator may want that.
+  const nested = (servers || []).filter((o) => o.id !== srv.id && o.baseline_s3 && s3PrefixCovers(srv.baseline_s3, o.baseline_s3)).map((o) => o.name);
+  const days = el("input", { class: "input", type: "number", min: "1", step: "1", value: "30" });
+  const row = el("label", { class: "field field--sm" });
+  row.append(el("span", { class: "field-label", text: "Keep backups for (days)" }), days);
   const warn = el("p", { class: "form-msg err" });
   const rule = el("pre", { class: "stg-code" });
   const cmd = el("pre", { class: "stg-code" });
   const render = () => {
-    const d = Math.floor(Number(days.value));
-    const every = everyMinutes(srv.schedule_every);
-    const text = lifecycleRuleFor(srv.resolved_s3, d);
-    if (!text) { rule.textContent = ""; cmd.textContent = ""; warn.hidden = true; return; }
-    rule.textContent = text;
-    cmd.textContent = "aws s3api put-bucket-lifecycle-configuration --bucket " + s.bucket + " --lifecycle-configuration file://dbtrail-backups-rule.json";
-    // The rule expires by AGE. Shorter than the schedule, it removes the
-    // newest complete backup before the next one lands, and there are
-    // moments with no backup at all.
-    if (retentionTooShort(srv.schedule_every, d)) {
-      const least = Math.floor(every / 1440) + 1;
+    const d = Number(days.value);
+    const text = lifecycleRuleFor(srv.baseline_s3, d);
+    if (!text) {
+      rule.textContent = ""; cmd.textContent = "";
+      warn.hidden = false;
+      warn.textContent = "Enter a whole number of days, 1 or more.";
+      return;
+    }
+    if (retentionTooShort(minutes, d)) {
+      // Refused, not warned beside a payload the operator could still
+      // copy: the rule would leave moments with no backup in S3 at all.
+      const least = Math.floor(minutes / 1440) + 1;
+      rule.textContent = ""; cmd.textContent = "";
       warn.hidden = false;
       warn.textContent = "With backups every " + srv.schedule_every + " and this rule at " + d + " day" + (d === 1 ? "" : "s") +
         ", the newest complete backup expires before the next one exists: there would be moments with no backup in S3 at all. Use at least " + least + " days.";
-    } else {
-      warn.hidden = true;
+      return;
     }
+    warn.hidden = true;
+    rule.textContent = text;
+    cmd.textContent = "aws s3api get-bucket-lifecycle-configuration --bucket " + s.bucket + "\n" +
+      "aws s3api put-bucket-lifecycle-configuration --bucket " + s.bucket + " --lifecycle-configuration file://dbtrail-backups-rule.json";
   };
   days.addEventListener("input", render);
   render();
-  body.append(row, warn,
-    el("p", { class: "form-hint", text: "Save this as dbtrail-backups-rule.json, then apply it to the bucket:" }),
+  body.append(row, warn);
+  if (nested.length) {
+    body.append(el("p", { class: "form-msg err", text:
+      "The backups of " + nested.join(", ") + " sit under this prefix too and would expire under this rule." }));
+  }
+  body.append(
+    el("p", { class: "form-hint", text: "Save the rule as dbtrail-backups-rule.json. The first command shows the rules the bucket already has; merge this one into them, since the second command replaces every rule on the bucket (the one that aborts unfinished uploads, and the one-year rule bintrail init created if it made this bucket)." }),
     rule, cmd,
     el("p", { class: "form-hint", text:
-      "The rule applies to " + s.prefix + "/ only, never to the archived changes. It expires by age alone: it cannot spare the only complete copy, nor a backup a restore is reading, and if the schedule stops it keeps expiring until none is left." }),
+      "The rule applies to " + s.prefix + "/ only" + (srv.archive_s3 ? ", never to the archived changes at " + srv.archive_s3 : "") + ". It expires by age alone: it cannot spare the only complete copy, nor a backup a restore is reading, and if the schedule stops it keeps expiring until none is left." }),
     el("p", { class: "form-hint", text:
-      "That command replaces every lifecycle rule on the bucket. Merge this one with the rules already there (the one that aborts unfinished uploads, and the one-year rule bintrail init created if it made this bucket)." }),
+      "On a bucket with versioning the rule also expires old versions after the same number of days; under an Object Lock retention nothing can be expired before that retention ends." }),
     el("p", { class: "form-hint", text: "dbtrail never deletes from S3 and never changes a bucket's rules; this one is yours to apply." }));
   details.append(body);
   wrap.append(details);
@@ -4592,11 +4621,11 @@ function backupServersPanel(settings) {
     panel.append(el("p", { class: "form-msg err", text:
       "The server registry was written by a newer version and is read-only here; values are shown but cannot be saved." }));
   }
-  for (const srv of servers) panel.append(backupServerRow(srv, settings.registry_read_only));
+  for (const srv of servers) panel.append(backupServerRow(srv, settings.registry_read_only, servers));
   return panel;
 }
 
-function backupServerRow(srv, readOnly) {
+function backupServerRow(srv, readOnly, servers) {
   const box = el("div", { class: "bks-server" });
   box.append(el("h3", { class: "bks-server-name", text: srv.name || srv.id }));
   const grid = el("div", { class: "form-grid" });
@@ -4647,12 +4676,14 @@ function backupServerRow(srv, readOnly) {
       // settings listing must not dial every server to predict a run.
       more.push(p("As set up, each scheduled run takes a full backup from your database: updating from the recorded changes writes files, which needs a Backup dir."));
     }
-    // S3 keeps every uploaded backup forever unless the BUCKET expires it
-    // (#1622): say how fast it grows, and hand over the rule to apply.
-    if (!srv.schedule_refusal && srv.resolved_s3) more.push(s3RetentionBox(srv));
   } else {
     more.push(p("No scheduled backups. Set one on the Backups page."));
   }
+  // S3 keeps every uploaded backup forever unless the BUCKET expires it
+  // (#1622): say how fast it grows, and hand over the rule to apply. The
+  // server's OWN destination only: the daemon default is shared by every
+  // server, and a rule on it is not this row's to hand out.
+  if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers));
   more.push(docsMore("guides/backup-settings", "per-server", "backup locations per server"));
 
   const msg = el("p", { class: "form-msg err" });

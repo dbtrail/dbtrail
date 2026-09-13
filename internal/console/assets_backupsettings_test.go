@@ -334,7 +334,7 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	// jsFunctionBody fails open, because that helper truncates each line at
 	// its first "//" and a URL literal ("s3://...") hides everything after
 	// it on the line. Comments carrying a dash ring here on purpose.
-	for _, name := range []string{"backupRefreshCard", "backupDaemonCard", "backupServerRow", "buildBackupSettings", "cfShape", "blCase"} {
+	for _, name := range []string{"backupRefreshCard", "backupDaemonCard", "backupServerRow", "buildBackupSettings", "cfShape", "blCase", "s3RetentionBox"} {
 		body := jsFunctionSpan(t, js, name)
 		for _, m := range regexp.MustCompile(`"([^"\n]*)"`).FindAllStringSubmatch(body, -1) {
 			if strings.Contains(m[1], "—") {
