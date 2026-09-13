@@ -37,7 +37,7 @@ func TestS3RetentionBlockKeepsThePromises(t *testing.T) {
 	// The mount condition IS the behaviour: the block under a server whose
 	// destination is the daemon default (shared by every server) would hand
 	// out a rule on a prefix that is not this row's.
-	if !strings.Contains(row, `if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers));`) {
+	if !strings.Contains(row, `if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers, daemonS3));`) {
 		t.Error("backupServerRow does not mount the retention block exactly for a server with its own S3 destination")
 	}
 	// The root refusal comes before the form, not instead of it.
@@ -49,6 +49,8 @@ func TestS3RetentionBlockKeepsThePromises(t *testing.T) {
 	// open past the "s3://" on the root-refusal line).
 	for _, want := range []string{
 		"would expire the archived changes too",
+		"not an s3://bucket/prefix destination",
+		"the schedule is stored; it cannot run right now",
 		"would expire under this rule",
 		"On a bucket with versioning",
 		"Enter a whole number of days, 1 or more",
@@ -82,8 +84,18 @@ func TestS3RetentionHelpersExecuted(t *testing.T) {
 		functionBody(t, js, "function s3Parts("),
 		functionBody(t, js, "function retentionTooShort("),
 		functionBody(t, js, "function s3PrefixCovers("),
+		functionBody(t, js, "function s3RetentionConflicts("),
 		functionBody(t, js, "function lifecycleRuleFor("),
 	}, "\n") + `
+const me = { id: "a", name: "A", baseline_s3: "s3://b/dbtrail", archive_s3: "s3://b/arch" };
+const others = [
+  me,
+  { id: "b", name: "B", baseline_s3: "", resolved_s3: "s3://b/dbtrail/shared", archive_s3: "s3://b/dbtrail/archives" },
+  { id: "c", name: "C", baseline_s3: "s3://b/dbtrail-c", resolved_s3: "s3://b/dbtrail-c", archive_s3: "s3://b/dbtrail-c/arch" },
+  { id: "d", name: "D", baseline_s3: "s3://b/dbtrail/d", resolved_s3: "s3://b/dbtrail/d", archive_s3: "" },
+];
+const conflicts = s3RetentionConflicts(me, others, "s3://b/dbtrail/shared");
+const ownArchive = s3RetentionConflicts({ id: "a", name: "A", baseline_s3: "s3://b/x", archive_s3: "s3://b/x/arch" }, [], "");
 const prefixOf = (u) => { const r = lifecycleRuleFor(u, 30); return r === null ? null : JSON.parse(r).Rules[0].Filter.Prefix; };
 const rule7 = JSON.parse(lifecycleRuleFor("s3://b/x", 7)).Rules[0];
 const out = {
@@ -95,6 +107,7 @@ const out = {
   covers: [s3PrefixCovers("s3://b/dbtrail", "s3://b/dbtrail"), s3PrefixCovers("s3://b/dbtrail", "s3://b/dbtrail/archives"),
     s3PrefixCovers("s3://b/dbtrail", "s3://b/dbtrail-archives"), s3PrefixCovers("s3://b/dbtrail", "s3://other/dbtrail"),
     s3PrefixCovers("s3://b/dbtrail/backups", "s3://b/dbtrail"), s3PrefixCovers("s3://b/x", "not a url")],
+  conflicts, ownArchive: ownArchive.archives,
   short: [retentionTooShort(5, 1), retentionTooShort(360, 1), retentionTooShort(1440, 1), retentionTooShort(1440, 2), retentionTooShort(10080, 7), retentionTooShort(10080, 8), retentionTooShort(0, 1)],
 };
 console.log(JSON.stringify(out));
@@ -113,6 +126,8 @@ console.log(JSON.stringify(out));
 		Days, Noncurrent                         int
 		Covers                                   []bool
 		Short                                    []bool
+		Conflicts                                struct{ Archives, Backups []string }
+		OwnArchive                               []string
 	}
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
@@ -133,6 +148,12 @@ console.log(JSON.stringify(out));
 	}
 	if want := []bool{true, true, false, false, false, false}; !equalBools(got.Covers, want) {
 		t.Errorf("s3PrefixCovers = %v, want %v (equal and nested cover; a sibling sharing characters, another bucket, the reverse nesting and a non-URL do not)", got.Covers, want)
+	}
+	if strings.Join(got.Conflicts.Archives, ",") != "B" || strings.Join(got.Conflicts.Backups, ",") != "B,D,the daemon default (s3://b/dbtrail/shared)" {
+		t.Errorf("conflicts = %+v: want B's archives refused, B (by its resolved default), D and the daemon default named, C (sibling prefix) untouched", got.Conflicts)
+	}
+	if strings.Join(got.OwnArchive, ",") != "this server" {
+		t.Errorf("own archives under the backup prefix = %v, want [this server]", got.OwnArchive)
 	}
 	if want := []bool{false, false, true, false, true, false, false}; !equalBools(got.Short, want) {
 		t.Errorf("retentionTooShort = %v, want %v (equal is refused; an unknown interval never warns)", got.Short, want)
