@@ -547,8 +547,10 @@ Two section labels split it: **Change here** and **Set when dbtrail starts**.
   itself and the full-backup note sit inside it. Save wakes up when a field
   differs from what was loaded.
   A server with its own S3 destination also gets the growth line and the
-  rule (#1622): about how many full backups reach the bucket every 30 days
-  at the schedule's rate, and that dbtrail never removes one. Under
+  rule (#1622), schedule or not, since the Create backup button, a restore
+  and the daemon-wide refresh upload too: about how many full backups
+  reach the bucket every 30 days at the schedule's rate (or that every one
+  stays, without a schedule), and that dbtrail never removes one. Under
   **Bucket rule to expire old backups** the page generates a lifecycle rule
   scoped to the backup prefix only, with the two commands to read the
   bucket's current rules and to apply the merged set, and says what such a

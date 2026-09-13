@@ -32,6 +32,7 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		"srv.baseline_dir", "srv.baseline_s3", "srv.no_archive",
 		"srv.resolved_dir", "srv.resolved_s3", "srv.source",
 		"srv.schedule_every", "srv.schedule_at", "srv.schedule_refusal",
+		"srv.schedule_every_minutes", "srv.archive_s3",
 	} {
 		if !strings.Contains(page, read) {
 			t.Errorf("the page never reads %q; the server emits it and the page renders a blank instead", read)
