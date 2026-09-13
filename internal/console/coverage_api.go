@@ -429,14 +429,10 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 		// cry-wolf failure status.DeltaFloor already refuses when archives
 		// cannot be attributed. Unknown is the honest third state.
 		//
-		// Bounded deliberately at whole-location failures: listBaselinesLocal
-		// warns and skips a snapshot subdirectory it cannot read and returns a
-		// nil error, so that location still counts as answered and this guard
-		// does not see it. Closing that hole means propagating a partial
-		// signal out of reconstruct.ListBaselines, which is upstream of here.
-		// ...and (#1601) a location that answered with unreadable snapshot
-		// directories skipped is a partial answer too: reconstruct now reports
-		// the skips, so this guard sees them.
+		// A location that answered with unreadable snapshot directories
+		// skipped is a partial answer too (#1601): the newest snapshot may sit
+		// in the directory that would not open, so the readable subset is not
+		// gradable either. reconstruct reports the skips for that reason.
 		if merged.Listed < len(merged.Sources) || merged.Listed == 0 || merged.Skipped > 0 {
 			slog.Warn("console: coverage card could not list every backup location in full; the verdict is unknown rather than graded against a partial view",
 				"server", serverID(r), "listed", merged.Listed, "configured", len(merged.Sources), "unreadable_directories", merged.Skipped)

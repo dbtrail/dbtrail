@@ -349,8 +349,11 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 			// must never be silent: a broken window would go undetected, and
 			// an active alert freezes with a dead evaluator.
 			if w.unknownEdge.Fire("staleness-source:"+edgeID, "") {
-				slog.Warn("baseline staleness cannot be evaluated — the baseline source is unreadable; a broken restore window would go UNDETECTED for this server",
-					"server", t.name, "source", t.source, "error", err)
+				msg := "baseline staleness cannot be evaluated: the baseline source is unreadable; a broken restore window would go UNDETECTED for this server"
+				if skipped > 0 {
+					msg = "baseline staleness cannot be evaluated: the baseline source could only be read in part; a broken restore window would go UNDETECTED for this server"
+				}
+				slog.Warn(msg, "server", t.name, "source", t.source, "error", err)
 			}
 			continue
 		}

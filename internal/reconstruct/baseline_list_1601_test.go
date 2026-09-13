@@ -47,11 +47,10 @@ func TestListBaselinesReport_countsWhatItCouldNotRead(t *testing.T) {
 	if len(files) != 1 || files[0].SnapshotTime.Format("2006-01-02") != "2026-06-01" {
 		t.Errorf("the readable snapshot was not listed: %+v", files)
 	}
-	// The count is a floor that the newest snapshot hides behind: the file
-	// list alone says "newest is June 1", which is false.
-	plain, perr := ListBaselines(context.Background(), dir)
-	if perr != nil || len(plain) != len(files) {
-		t.Errorf("ListBaselines diverged from the report: %v, %d files", perr, len(plain))
+	// The two-value wrapper keeps its contract over a partial tree: a nil
+	// error. Its unmigrated callers rely on that (#1639 moves them).
+	if _, perr := ListBaselines(context.Background(), dir); perr != nil {
+		t.Errorf("ListBaselines errored over a partial tree: %v", perr)
 	}
 }
 

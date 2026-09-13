@@ -106,7 +106,7 @@ type mergedBaselines struct {
 // a page that shows nothing because a bucket was briefly unreachable would be
 // the same failure with worse manners. It is recorded on the source instead,
 // and every caller has to render it.
-// baselineLister is reconstruct.ListBaselines, taken as a parameter rather than
+// baselineLister is reconstruct.ListBaselinesReport, taken as a parameter rather than
 // called directly so a test can drive the merge across BOTH kinds. An s3://
 // source cannot be listed from a unit test, and the three things most likely to
 // break here — dedup across locations, the union of kinds, and preferring the
