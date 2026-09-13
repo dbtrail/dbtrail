@@ -135,6 +135,12 @@ func TestMergedFetcher_gapNote(t *testing.T) {
 	if !strings.Contains(note, "1 hour(s)") || !strings.Contains(note, "rotated out with no archive") || strings.Contains(note, "excluded") {
 		t.Errorf("note must name the hour and the archive-reading posture: %q", note)
 	}
+	if !strings.Contains(note, "before the index existed") {
+		t.Errorf("hour h predates the oldest hour the index ever held; the note must say so: %q", note)
+	}
+	if strings.Contains(strings.Join(m.Notes(), " "), "registered archives were not read") {
+		t.Errorf("this scan READ the archive (the hour is not live-covered); no elision note: %v", m.Notes())
+	}
 	// A second scan over an already-known gap does not double count.
 	if _, err := m.Fetch(ctx, Options{Schema: "s", Table: "t", Since: &since, Until: &until}); err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -150,8 +156,20 @@ func TestMergedFetcher_gapNote(t *testing.T) {
 	if gaps := confined.GapHours(); len(gaps) != 2 {
 		t.Errorf("under NoArchive the archived hour is a gap too; got %v", gaps)
 	}
-	if note := confined.GapNote(); !strings.Contains(note, "excluded on this run") {
-		t.Errorf("NoArchive posture must be named: %q", note)
+	if note := confined.GapNote(); !strings.Contains(note, "excluded on this run") || strings.Contains(note, "before the index existed") ||
+		!strings.Contains(note, h.Format("2006-01-02 15:04")) || !strings.Contains(note, h.Add(time.Hour).Format("2006-01-02 15:04")) {
+		t.Errorf("NoArchive posture and the first–last range must be named: %q", note)
+	}
+
+	// Elision (#1353): a window the live index provably satisfies leaves the
+	// registered archive unread, and Notes says so.
+	elider := &MergedFetcher{DB: db, Engine: New(db), DBName: dbName, ArchiveFetcher: noop}
+	liveSince, liveUntil := h.Add(2*time.Hour+5*time.Minute), h.Add(2*time.Hour+20*time.Minute)
+	if _, err := elider.Fetch(ctx, Options{Schema: "s", Table: "t", Since: &liveSince, Until: &liveUntil}); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if notes := strings.Join(elider.Notes(), " "); !strings.Contains(notes, "registered archives were not read") || strings.Contains(notes, "not held") {
+		t.Errorf("a live-satisfied window must report elision and no gap: %v", elider.Notes())
 	}
 	if (&MergedFetcher{DB: db, Engine: New(db), DBName: dbName, NoArchive: true}).GapNote() != "" {
 		t.Errorf("no scan, no note")

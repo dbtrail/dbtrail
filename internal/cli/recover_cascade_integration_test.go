@@ -707,6 +707,12 @@ func TestRecoverCascade_archivesOutsideWindowKeepBaseline(t *testing.T) {
 	if strings.Contains(sql, "archived-77") {
 		t.Errorf("child 77 was archived months before this parent's window and must not be recovered\n---\n%s", sql)
 	}
+	// The child scan's [snapshot, T] window sits inside live coverage, so the
+	// planner proves the archive cannot matter and leaves it unread; #1353
+	// wants a human to be able to see that, so it is in the script.
+	if !strings.Contains(sql, "registered archives were not read") {
+		t.Errorf("elided archives must be reported in the script\n---\n%s", sql)
+	}
 }
 
 // TestRecoverCascade_baselineOlderThanIndexSkipsAugmentation pins the behavior
@@ -812,6 +818,9 @@ func TestRecoverCascade_childOnlyInArchiveRecovered(t *testing.T) {
 	}
 	if strings.Contains(sql, "INCOMPLETE RECOVERY") {
 		t.Errorf("an archive-covered scan is complete\n---\n%s", sql)
+	}
+	if !strings.Contains(sql, "not held by this scan") {
+		t.Errorf("the 30-day lookback crosses unheld hours: the advisory gap note must reach the script\n---\n%s", sql)
 	}
 
 	// --no-archive: same index, live scan only → the child is invisible and

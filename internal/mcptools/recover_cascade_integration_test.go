@@ -59,7 +59,7 @@ func seedCascadeIndex(t *testing.T) (*sql.DB, string) {
 
 // cascadeSession connects an in-memory MCP client over the standalone posture
 // with recover_cascade registered.
-func cascadeSession(t *testing.T, db *sql.DB, dbName string) *mcp.ClientSession {
+func cascadeSession(t *testing.T, db *sql.DB, dbName string, mutate ...func(*Target)) *mcp.ClientSession {
 	t.Helper()
 	resolver, err := metadata.NewResolver(db, 0)
 	if err != nil {
@@ -70,7 +70,11 @@ func cascadeSession(t *testing.T, db *sql.DB, dbName string) *mcp.ClientSession 
 		RecoverCascade:      true,
 		AllowBaselineParams: true,
 		Resolve: func(ctx context.Context, _ string) (*Target, error) {
-			return &Target{DB: db, DBName: dbName, Resolver: resolver, ResolverLoaded: true}, nil
+			tg := &Target{DB: db, DBName: dbName, Resolver: resolver, ResolverLoaded: true}
+			for _, m := range mutate {
+				m(tg)
+			}
+			return tg, nil
 		},
 	}
 
@@ -317,6 +321,80 @@ func TestIntegrationRecoverCascadeTool_childOnlyInArchiveRecovered(t *testing.T)
 	}
 	if !out.Complete {
 		t.Errorf("an archive-covered scan is complete; incomplete=%v", out.Incomplete)
+	}
+	// The 30-day lookback crosses hours nothing holds: the advisory gap note
+	// reaches the payload (never a caveat).
+	if !strings.Contains(strings.Join(out.Warnings, " "), "not held by this scan") {
+		t.Errorf("the fetcher's gap note must reach the payload warnings: %v", out.Warnings)
+	}
+}
+
+// TestIntegrationRecoverCascadeTool_noArchiveServerIsFlagged: a NoArchive
+// target over an index that has archives keeps the archived child invisible
+// and says so as a hard caveat — the tool then fails without allow_incomplete.
+func TestIntegrationRecoverCascadeTool_noArchiveServerIsFlagged(t *testing.T) {
+	db, dbName := seedCascadeIndex(t)
+	cs := cascadeSession(t, db, dbName, func(tg *Target) { tg.NoArchive = true })
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	writeArchivedChildInsert(t, db, dbName, "12", h.Add(-3*time.Hour+10*time.Minute))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "recover_cascade",
+		Arguments: map[string]any{"schema": dbName, "table": "parent", "allow_incomplete": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool recover_cascade: %v", err)
+	}
+	text := resultText(res)
+	if res.IsError {
+		t.Fatalf("with allow_incomplete the partial script is returned: %s", text)
+	}
+	var out recoverCascadeResult
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("decode payload: %v (payload=%s)", err, text)
+	}
+	if out.Children != 2 || strings.Contains(out.SQL, "archived-12") {
+		t.Errorf("a no-archive server must not read the archive; children=%d\n---\n%s", out.Children, out.SQL)
+	}
+	if out.Complete || !strings.Contains(strings.Join(out.Incomplete, " "), "excludes them (no-archive)") {
+		t.Errorf("excluding archives that exist is a hard caveat: complete=%v incomplete=%v", out.Complete, out.Incomplete)
+	}
+}
+
+// TestIntegrationRecoverCascadeTool_envDiscoveryFailureIsACaveat pins #1285
+// for this tool on the standalone surface: a half-set BINTRAIL_ARCHIVE_S3 /
+// BINTRAIL_ID pair is a discovery failure, the scans ran live-only, and the
+// payload says coverage is unknown — never complete with the archived child
+// silently missing.
+func TestIntegrationRecoverCascadeTool_envDiscoveryFailureIsACaveat(t *testing.T) {
+	db, dbName := seedCascadeIndex(t)
+	t.Setenv("BINTRAIL_ARCHIVE_S3", "s3://bucket/prefix")
+	t.Setenv("BINTRAIL_ID", "")
+	cs := cascadeSession(t, db, dbName, func(tg *Target) { tg.EnvArchiveDiscovery = true })
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	writeArchivedChildInsert(t, db, dbName, "12", h.Add(-3*time.Hour+10*time.Minute))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "recover_cascade",
+		Arguments: map[string]any{"schema": dbName, "table": "parent", "allow_incomplete": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool recover_cascade: %v", err)
+	}
+	text := resultText(res)
+	if res.IsError {
+		t.Fatalf("with allow_incomplete the partial script is returned: %s", text)
+	}
+	var out recoverCascadeResult
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("decode payload: %v (payload=%s)", err, text)
+	}
+	joined := strings.Join(out.Incomplete, " ")
+	if out.Complete || !strings.Contains(joined, "coverage is unknown") || !strings.Contains(joined, "BINTRAIL_ID") {
+		t.Errorf("a failed env discovery must be a hard caveat naming the cause: complete=%v incomplete=%v", out.Complete, out.Incomplete)
+	}
+	if strings.Contains(out.SQL, "archived-12") {
+		t.Errorf("discovery failed: nothing archived can have been read\n---\n%s", out.SQL)
 	}
 }
 

@@ -275,17 +275,26 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	// archived-parent / archived-child caveats apply only when --no-archive
 	// excluded them. ArchivesPresent still feeds the gate's fallback rule
 	// for a surface with no coverage probe.
+	// Coverage posture, from the SAME discovery the scans used: a failed
+	// discovery means an unknown set of archives went unread (hard caveat,
+	// "coverage is unknown"); archives resolved means ArchivesPresent for the
+	// gate's fallback rule. Under --no-archive the fetcher resolves nothing,
+	// so archive_state is consulted only to say what the run excluded — a
+	// coverage decision the operator made, and a hard caveat, so `complete`
+	// never reads true over evidence deliberately unread (--allow-incomplete
+	// accepts it explicitly).
 	archivesExist := false
 	liveWindow := cascade.WindowProbe(db, dbName, fetcher)
-	if archives, aerr := query.ResolveArchiveSources(cmd.Context(), db); aerr != nil {
-		caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
-	} else if len(archives) > 0 {
+	if srcs, serr := fetcher.Sources(cmd.Context()); serr != nil {
+		caveats = append(caveats, "archive discovery failed ("+serr.Error()+"), so the scans ran against the live index only; coverage is unknown")
+	} else if len(srcs) > 0 {
 		archivesExist = true
-		// Excluding archives that exist is a coverage decision the operator
-		// made, and the result is partial by that decision: a hard caveat,
-		// so `complete` never reads true over evidence deliberately unread
-		// (--allow-incomplete accepts it explicitly).
-		if rcNoArchive {
+	}
+	if rcNoArchive {
+		if archives, aerr := query.ResolveArchiveSources(cmd.Context(), db); aerr != nil {
+			caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
+		} else if len(archives) > 0 {
+			archivesExist = true
 			if len(parentEvents) == 0 {
 				caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, and --no-archive excluded the index's archived partitions; the changed parent may be archived")
 			} else {

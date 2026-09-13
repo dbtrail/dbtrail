@@ -381,19 +381,23 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 	//   - archives exist AND parents found → a child whose events were archived
 	//     could be missed → a server log only, NOT a caveat (else every archived
 	//     deployment trips INCOMPLETE on every run).
+	// Coverage posture from the SAME discovery the scans used (see the CLI
+	// for the rationale); archive_state is consulted only on a no-archive
+	// server, to name what it excluded — a hard caveat.
 	archivesExist := false
-	if archives, aerr := query.ResolveArchiveSources(ctx, b.db); aerr != nil {
-		caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
-	} else if len(archives) > 0 {
+	if srcs, serr := fetcher.Sources(ctx); serr != nil {
+		caveats = append(caveats, "archive discovery failed ("+serr.Error()+"), so the scans ran against the live index only; coverage is unknown")
+	} else if len(srcs) > 0 {
 		archivesExist = true
-		// Since #1615 the scans READ the archives; these caveats apply only
-		// when the bundle excludes them (--no-archive or a profile).
-		if b.noArchive {
+	}
+	if b.noArchive {
+		if archives, aerr := query.ResolveArchiveSources(ctx, b.db); aerr != nil {
+			caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
+		} else if len(archives) > 0 {
+			archivesExist = true
 			if len(parentEvents) == 0 {
 				caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, and this server excludes its archived partitions (no-archive); the changed parent may be archived")
 			} else {
-				// A coverage decision, so a hard caveat: complete must never
-				// read true over evidence this server deliberately does not read.
 				caveats = append(caveats, "the index has archived partitions and this server excludes them (no-archive); a child whose events were archived is not reconstructed")
 			}
 		}

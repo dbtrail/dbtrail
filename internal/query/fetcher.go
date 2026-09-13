@@ -76,9 +76,12 @@ type MergedFetcher struct {
 	gapMu  sync.Mutex
 	gaps   map[time.Time]struct{} // hours no scan so far could serve (see GapHours)
 	elided bool                   // some scan proved the archives could not change it (#1353)
-	// preIndex is the earliest hour any scan's planner knew the index ever
-	// held; gap hours before it never rotated away (the index did not exist
-	// yet, #1126) and are worded as such by GapNote.
+	// preIndex is the earliest hour any scan's planner saw held — live, or
+	// archived when the scan opens archives. When archives are opened, a gap
+	// hour before it never rotated away (the index did not exist yet, #1126)
+	// and GapNote says so; under NoArchive the planner's floor is only the
+	// oldest LIVE hour (the rotation edge), which proves nothing about the
+	// index's origin, so the note does not make that claim there.
 	preIndex time.Time
 }
 
@@ -149,7 +152,7 @@ func (m *MergedFetcher) GapNote() string {
 	if m.NoArchive {
 		cause = "rotated out of the live index, and archives are excluded on this run"
 	}
-	if !m.preIndex.IsZero() && gaps[0].Before(m.preIndex) {
+	if !m.NoArchive && !m.preIndex.IsZero() && gaps[0].Before(m.preIndex) {
 		cause += ", or before the index existed"
 	}
 	return fmt.Sprintf("%d hour(s) inside the scanned windows are not held by this scan (%s): %s – %s; "+

@@ -986,6 +986,9 @@ func TestIntegrationRecoverCascade_childOnlyInArchiveRecovered(t *testing.T) {
 	if !resp.Complete {
 		t.Errorf("an archive-covered scan is complete; incomplete=%v", resp.Incomplete)
 	}
+	if !strings.Contains(strings.Join(resp.Warnings, " "), "not held by this scan") {
+		t.Errorf("the fetcher's gap note must reach the response warnings: %v", resp.Warnings)
+	}
 
 	// A no-archive server on the same index: live scan only, the archived
 	// child is invisible and the response says archives were excluded.
@@ -998,6 +1001,9 @@ func TestIntegrationRecoverCascade_childOnlyInArchiveRecovered(t *testing.T) {
 	}
 	if resp2.VictimCount != 2 || strings.Contains(resp2.SQL, "archived-12") {
 		t.Errorf("a no-archive server must not read the archive; victim_count=%d\n---\n%s", resp2.VictimCount, resp2.SQL)
+	}
+	if resp2.Complete || !strings.Contains(strings.Join(resp2.Incomplete, " "), "excludes them (no-archive)") {
+		t.Errorf("excluding archives that exist is a hard caveat: complete=%v incomplete=%v", resp2.Complete, resp2.Incomplete)
 	}
 }
 

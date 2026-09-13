@@ -313,18 +313,26 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 		//   - archives exist AND parents found → a child whose events were
 		//     archived could be missed → advisory only, or every archived
 		//     deployment would trip INCOMPLETE on every run.
+		// Coverage posture from the SAME discovery the scans used — on the
+		// standalone server that is the BINTRAIL_ARCHIVE_S3/BINTRAIL_ID pair,
+		// not archive_state, and a half-set pair is a discovery failure the
+		// client must see (#1285): hard caveat, "coverage is unknown".
+		// archive_state is consulted only on a no-archive server, to name
+		// what it excluded — a hard caveat (allow_incomplete accepts it).
 		archivesExist := false
-		if archives, aerr := query.ResolveArchiveSources(ctx, t.DB); aerr != nil {
-			caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
-		} else if len(archives) > 0 {
+		if srcs, serr := fetcher.Sources(ctx); serr != nil {
+			caveats = append(caveats, "archive discovery failed ("+serr.Error()+"), so the scans ran against the live index only; coverage is unknown")
+		} else if len(srcs) > 0 {
 			archivesExist = true
-			// Since #1615 the scans READ the archives; these caveats apply
-			// only when this server excludes them (NoArchive).
-			if t.NoArchive {
+		}
+		if t.NoArchive {
+			if archives, aerr := query.ResolveArchiveSources(ctx, t.DB); aerr != nil {
+				caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
+			} else if len(archives) > 0 {
+				archivesExist = true
 				if len(parentEvents) == 0 {
 					caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, and this server excludes its archived partitions (no-archive); the changed parent may be archived")
 				} else {
-					// A coverage decision, so a hard caveat (allow_incomplete accepts it).
 					caveats = append(caveats,
 						"the index has archived partitions and this server excludes them (no-archive); a child whose events were archived is not reconstructed")
 				}

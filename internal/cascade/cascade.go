@@ -656,10 +656,13 @@ func SynthesizeVictims(
 	// the pre-#1615 one: any archive at all may gap. A FAILED probe is "may
 	// gap" — never "contiguous" by default.
 	//
-	// Memoized per hour-truncated (snapshot, T): the probe costs a partition
-	// listing, an archive_state read and a stream_state read, and scanChildren
-	// runs per (edge, parent key) — a batch of a thousand roots over a
-	// five-level graph must not issue thousands of identical probes.
+	// Memoized per EXACT (snapshot, T): the probe costs a partition listing,
+	// an archive_state read and a stream_state read, and scanChildren runs
+	// per (edge, parent key) — one root's five edges must not probe five
+	// times. Not hour-truncated: the capture-loss half of the probe is
+	// second-precise (a gap_lost_at at 10:42 sits inside (10:40, 10:45] and
+	// outside (10:15, 10:20]), so two roots in the same hour can carry
+	// different verdicts.
 	type gapVerdict struct {
 		gap bool
 		err error
@@ -669,7 +672,7 @@ func SynthesizeVictims(
 		if opts.WindowCovered == nil {
 			return opts.ArchivesPresent, nil
 		}
-		key := [2]time.Time{snapshot.UTC().Truncate(time.Hour), until.UTC().Truncate(time.Hour)}
+		key := [2]time.Time{snapshot.UTC(), until.UTC()}
 		if v, ok := gapMemo[key]; ok {
 			return v.gap, v.err
 		}
@@ -959,8 +962,17 @@ func SynthesizeVictims(
 					reason = fmt.Sprintf("index has archived partitions that may gap the [snapshot, T] window for %s.%s "+
 						"(the window check could not run: the index database name is unknown)", fk.Schema, fk.Table)
 				}
-				addIncomplete("baseline-skip-archived:"+fk.Schema+"."+fk.Table,
-					reason+"; skipped baseline augmentation to avoid resurrecting rows whose deletion/re-parent the scan cannot see (rotated out, unreadable or lost)")
+				msg := reason + "; skipped baseline augmentation to avoid resurrecting rows whose deletion/re-parent the scan cannot see (rotated out, unreadable or lost)"
+				if baseTrunc {
+					// The widened scan is normally filtered by the baseline's
+					// membership; a truncated baseline cannot filter, so the
+					// plain lookback scan stands and the claim above does not
+					// hold for rows absent from the snapshot.
+					msg += fmt.Sprintf("; the baseline for %s.%s is truncated (more than %d children), so it could not filter the widened scan: "+
+						"children whose last change predates the snapshot and that the snapshot no longer lists may be resurrected",
+						fk.Schema, fk.Table, opts.CandidateLimit)
+				}
+				addIncomplete("baseline-skip-archived:"+fk.Schema+"."+fk.Table, msg)
 			default:
 				// #618: the stale-baseline advisory belongs HERE — this is the only
 				// branch where a baseline row actually reaches the output. Firing it
@@ -2052,6 +2064,14 @@ func WindowProbe(db *sql.DB, dbName string, f query.Fetcher) func(ctx context.Co
 func afterSnapshot(ev query.ResultRow, snap time.Time, pos *query.BinlogPos) bool {
 	if pos != nil && ev.BinlogFile != "" {
 		if ev.BinlogFile != pos.File {
+			// Length first, then lexicographic — the #840 rollover rule every
+			// binlog-file comparison in the tree uses (query.SincePos/UntilPos,
+			// streamrun, parquetquery): MySQL pads the suffix to six digits,
+			// so mysql-bin.1000000 follows mysql-bin.999999 and a plain
+			// string compare would invert the cut.
+			if len(ev.BinlogFile) != len(pos.File) {
+				return len(ev.BinlogFile) > len(pos.File)
+			}
 			return ev.BinlogFile > pos.File
 		}
 		return ev.StartPos >= pos.Pos

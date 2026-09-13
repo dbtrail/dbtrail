@@ -947,6 +947,19 @@ func TestPhase2_skipModeBaselineIsAMembershipFilter(t *testing.T) {
 		t.Fatalf("want 11 (in snapshot) and 12 (after the recorded position), never 10 (gone by the snapshot); got %v", res.Victims)
 	}
 
+	// No recorded position (a pre-#797 baseline): the timestamp decides, and
+	// the pre-snapshot INSERT absent from the snapshot is still dropped.
+	fbNoPos := &fakeBaseline{ok: true, snap: snap,
+		rows: []cascade.BaselineRow{{PKValues: "11", Row: map[string]any{"id": int64(11), "pid": int64(1)}}}}
+	res, err = cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
+		cascade.Options{Baseline: fbNoPos, WindowCovered: gapped.probe})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims (no pos): %v", err)
+	}
+	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:11"] {
+		t.Fatalf("without a recorded position the timestamp decides: only 11 (in snapshot); got %v", res.Victims)
+	}
+
 	// Truncated baseline: no filter, plain Phase-1 — 10 comes back (flagged).
 	fbTrunc := &fakeBaseline{ok: true, snap: snap, trunc: true,
 		rows: []cascade.BaselineRow{{PKValues: "11", Row: map[string]any{"id": int64(11), "pid": int64(1)}}}}
@@ -955,14 +968,17 @@ func TestPhase2_skipModeBaselineIsAMembershipFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SynthesizeVictims (trunc): %v", err)
 	}
-	if len(res.Victims) != 3 || res.Complete() {
-		t.Errorf("a truncated baseline cannot filter: plain Phase-1 scan, flagged; got %d victims, complete=%v", len(res.Victims), res.Complete())
+	if len(res.Victims) != 3 || res.Complete() || !strings.Contains(strings.Join(res.Incomplete, " "), "could not filter the widened scan") {
+		t.Errorf("a truncated baseline cannot filter: plain Phase-1 scan, and the caveat must SAY rows may be resurrected; got %d victims, complete=%v, Incomplete=%v", len(res.Victims), res.Complete(), res.Incomplete)
 	}
 }
 
-// TestPhase2_probeMemoizedPerWindowHour pins that the coverage probe runs once
-// per hour-truncated (snapshot, T), not once per (edge, parent key).
-func TestPhase2_probeMemoizedPerWindowHour(t *testing.T) {
+// TestPhase2_probeMemoizedPerExactWindow pins that the coverage probe runs
+// once per EXACT (snapshot, T) — one root's edges share it — and never across
+// roots whose windows differ, even inside the same hour: the capture-loss half
+// of the probe is second-precise, so an hour-keyed memo would hand a clean
+// verdict to a window containing a stamped loss.
+func TestPhase2_probeMemoizedPerExactWindow(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	db, dbName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
@@ -970,6 +986,18 @@ func TestPhase2_probeMemoizedPerWindowHour(t *testing.T) {
 	T := time.Now().UTC().Truncate(time.Hour).Add(30 * time.Minute)
 	fb := &fakeBaseline{ok: true, snap: T.Add(-10 * time.Minute)}
 	probe := &liveWindowProbe{ok: true}
+	twoEdges := append(cascadeFK(dbName), cascade.CascadeFK{
+		Schema: dbName, Table: "child2", ConstraintName: "fk2", Column: "pid",
+		ReferencedSchema: dbName, ReferencedTable: "parent", ReferencedColumn: "id", DeleteRule: "CASCADE"})
+	if _, err := cascade.SynthesizeVictims(context.Background(), eng, twoEdges, parentDelete(dbName, T),
+		cascade.Options{Baseline: fb, WindowCovered: probe.probe}); err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if probe.calls != 1 {
+		t.Errorf("one root's two edges share one probe; calls=%d", probe.calls)
+	}
+	// Two roots five minutes apart, same hour, same snapshot: two windows.
+	probe.calls = 0
 	roots := append(parentDelete(dbName, T), parentDelete(dbName, T.Add(5*time.Minute))...)
 	roots[1].PKValues = "2"
 	roots[1].RowBefore = map[string]any{"id": json.Number("2")}
@@ -977,7 +1005,7 @@ func TestPhase2_probeMemoizedPerWindowHour(t *testing.T) {
 		cascade.Options{Baseline: fb, WindowCovered: probe.probe}); err != nil {
 		t.Fatalf("SynthesizeVictims: %v", err)
 	}
-	if probe.calls != 1 {
-		t.Errorf("two roots in the same hour must share one probe; calls=%d", probe.calls)
+	if probe.calls != 2 {
+		t.Errorf("roots with different T must each be probed, even in the same hour; calls=%d", probe.calls)
 	}
 }
