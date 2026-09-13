@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **`recover-cascade` reads the Parquet archives** (#1615, second half; CLI, MCP
+  and the console). The parent and child scans now go through the same
+  discovery + planner routing + merge that `recover` uses (`query.MergedFetcher`
+  behind a `query.Fetcher` the cascade engine takes), so a cascade whose evidence
+  rotated out of the live index — the case the feature is most needed in — is
+  reconstructed instead of returning the parent alone. The window-coverage probe
+  behind the baseline gate credits archived hours accordingly
+  (`query.WindowCovered`, `cascade.WindowProbe`). `--no-archive` (new on
+  `recover-cascade`, with the DuckDB tuning flags) or a no-archive console/MCP
+  server confines the scan to the live index and keeps the old
+  archives-excluded caveats. An archive that resolved but cannot be read makes
+  the scan refuse, like `recover`, rather than emit a script missing part of the
+  evidence; a failed discovery proceeds live-only and is reported as unknown
+  coverage, as before.
 - **The schema-drift refusal names the schema-era cause, and what it costs**
   (#1617). `recover` refuses to emit reversal SQL that would name a column the
   latest schema snapshot no longer has (#601). The refusal is right; its

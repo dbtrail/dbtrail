@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/buffer"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -176,10 +179,65 @@ func cleanCascadeFlags(dsn, dbName, out string) {
 	rcOutput, rcDryRun, rcFormat = out, false, "text"
 	rcLookback, rcMaxDepth, rcLimit, rcAllowIncomplete = "30d", 5, 1000, false
 	rcBaselineDir, rcBaselineS3 = "", ""
+	rcNoArchive = false
+}
+
+// writeArchivedEvents writes rows as ONE Parquet archive file per hour under
+// base (a bintrail_id=… directory) and registers each hour in archive_state
+// with its local path. Rows of the same hour share a file.
+func writeArchivedEvents(t *testing.T, db *sql.DB, base string, rows ...query.ResultRow) {
+	t.Helper()
+	byHour := map[time.Time][]query.ResultRow{}
+	for _, r := range rows {
+		h := r.EventTimestamp.UTC().Truncate(time.Hour)
+		byHour[h] = append(byHour[h], r)
+	}
+	for h, rs := range byHour {
+		hourDir := filepath.Join(base, "event_date="+h.Format("2006-01-02"), "event_hour="+h.Format("15"))
+		if err := os.MkdirAll(hourDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		pq := filepath.Join(hourDir, "events.parquet")
+		if _, err := buffer.WriteParquet(rs, pq, "none"); err != nil {
+			t.Fatalf("WriteParquet: %v", err)
+		}
+		testutil.MustExec(t, db, `INSERT INTO archive_state
+			(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key, s3_uploaded_at)
+			VALUES (?, 'bt', ?, ?, NULL, NULL, NULL)`, "p_"+h.Format("2006010215"), pq, len(rs))
+	}
+}
+
+// archivedChildInsert / archivedParentDelete are the two row shapes the
+// archived-cascade tests need (child pid=1; parent id=1).
+func archivedChildInsert(dbName, pk string, at time.Time) query.ResultRow {
+	id, _ := strconv.ParseInt(pk, 10, 64)
+	return query.ResultRow{
+		EventID: uint64(900000 + id), BinlogFile: "b.000001", StartPos: 4, EndPos: 40,
+		EventTimestamp: at.UTC(), SchemaName: dbName, TableName: "child",
+		EventType: 1 /*INSERT*/, PKValues: pk,
+		RowAfter: map[string]any{"id": id, "pid": int64(1), "payload": "archived-" + pk},
+	}
+}
+
+func archivedParentDelete(dbName string, at time.Time) query.ResultRow {
+	return query.ResultRow{
+		EventID: 800001, BinlogFile: "b.000001", StartPos: 41, EndPos: 80,
+		EventTimestamp: at.UTC(), SchemaName: dbName, TableName: "parent",
+		EventType: 3 /*DELETE*/, PKValues: "1",
+		RowBefore: map[string]any{"id": int64(1)},
+	}
+}
+
+// writeArchivedChildInsert writes ONE child INSERT (pid=1) as a Parquet
+// archive for an hour the live index does NOT hold (#1615: evidence that
+// rotated out of the live index).
+func writeArchivedChildInsert(t *testing.T, db *sql.DB, dbName, pk string, at time.Time) {
+	t.Helper()
+	writeArchivedEvents(t, db, filepath.Join(t.TempDir(), "bintrail_id=bt"), archivedChildInsert(dbName, pk, at))
 }
 
 // TestRecoverCascade_incompleteExit proves the dangerous "nothing found" case:
-// 0 live parents matched BUT the index has archived partitions (not searched) →
+// 0 live parents matched BUT the index has archived partitions --no-archive excluded →
 // flagged incomplete, exit non-zero unless --allow-incomplete; SQL still written.
 func TestRecoverCascade_incompleteExit(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
@@ -188,7 +246,8 @@ func TestRecoverCascade_incompleteExit(t *testing.T) {
 
 	out := t.TempDir() + "/cascade.sql"
 	cleanCascadeFlags(dsn, dbName, out)
-	rcPK = "999" // matches no live parent → the "nothing found, but archives exist" trap
+	rcPK = "999"       // matches no live parent → the "nothing found, but archives exist" trap
+	rcNoArchive = true // the caveat under test is the one --no-archive keeps (#1615 reads archives otherwise)
 
 	rcAllowIncomplete = false
 	err := runCascadeCmd(t)
@@ -223,7 +282,8 @@ func TestRecoverCascade_archivesWithParentsNotBlocking(t *testing.T) {
 
 	out := t.TempDir() + "/cascade.sql"
 	cleanCascadeFlags(dsn, dbName, out)
-	rcPK = "1" // matches the seeded parent delete → parents found
+	rcPK = "1"         // matches the seeded parent delete → parents found
+	rcNoArchive = true // the caveat under test is the one --no-archive keeps (#1615 reads archives otherwise)
 
 	if err := runCascadeCmd(t); err != nil {
 		t.Fatalf("archives present but parents found must NOT block (cry-wolf), got: %v", err)
@@ -245,7 +305,8 @@ func TestRecoverCascade_jsonExitParity(t *testing.T) {
 	out := t.TempDir() + "/cascade.sql"
 	cleanCascadeFlags(dsn, dbName, out)
 	rcFormat = "json"
-	rcPK = "999" // 0 parents + archives → incomplete
+	rcPK = "999"       // 0 parents + archives → incomplete
+	rcNoArchive = true // the caveat under test is the one --no-archive keeps (#1615 reads archives otherwise)
 
 	rcAllowIncomplete = false
 	if err := runCascadeCmd(t); err == nil {
@@ -605,7 +666,7 @@ func TestRecoverCascade_archivesOutsideWindowKeepBaseline(t *testing.T) {
 	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
 	parentTs := h.Add(30 * time.Minute).Format("2006-01-02 15:04:05")
 	testutil.InsertEvent(t, db, "b.000001", 10, 20, parentTs, nil, dbName, "parent", 3 /*DELETE*/, "1", nil, []byte(`{"id":1}`), nil)
-	addArchiveRow(t, db) // p_2026010100: real, and nowhere near the window
+	writeArchivedChildInsert(t, db, dbName, "77", time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC)) // readable, nowhere near the window
 
 	// Snapshot dated inside the live hour, before the parent delete.
 	baselineDir := t.TempDir()
@@ -635,6 +696,9 @@ func TestRecoverCascade_archivesOutsideWindowKeepBaseline(t *testing.T) {
 	}
 	if strings.Contains(sql, "INCOMPLETE RECOVERY") || strings.Contains(sql, "skipped baseline augmentation") {
 		t.Errorf("a live-contiguous window must be complete\n---\n%s", sql)
+	}
+	if strings.Contains(sql, "archived-77") {
+		t.Errorf("child 77 was archived months before this parent's window and must not be recovered\n---\n%s", sql)
 	}
 }
 
@@ -694,5 +758,134 @@ func TestRecoverCascade_baselineOlderThanIndexSkipsAugmentation(t *testing.T) {
 		if !strings.Contains(sql, want) {
 			t.Errorf("output missing %q\n---\n%s", want, sql)
 		}
+	}
+}
+
+// TestRecoverCascade_childOnlyInArchiveRecovered is the second half of #1615
+// end to end on the CLI: the child's INSERT rotated out of the live index into
+// a Parquet archive (no live partition holds its hour), the parent DELETE is
+// live, no baseline. The cascade scan reads the archive and the child is
+// recovered, complete. Before this the scan was live-only: parent only.
+func TestRecoverCascade_childOnlyInArchiveRecovered(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	snapTs := "2026-06-01 00:00:00"
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "parent", "id", 1, "PRI", "int", "NO")
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "child", "id", 1, "PRI", "int", "NO")
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "child", "pid", 2, "", "int", "YES")
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "child", "payload", 3, "", "varchar", "YES")
+	testutil.MustExec(t, db, `INSERT INTO fk_constraints
+		(snapshot_id, constraint_name, schema_name, table_name, column_name, ordinal_position,
+		 referenced_schema_name, referenced_table_name, referenced_column_name, delete_rule, update_rule)
+		VALUES (1, 'fk', ?, 'child', 'pid', 1, ?, 'parent', 'id', 'CASCADE', 'RESTRICT')`, dbName, dbName)
+
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h}) // only the parent's hour is live
+	parentTs := h.Add(30 * time.Minute).Format("2006-01-02 15:04:05")
+	testutil.InsertEvent(t, db, "b.000001", 10, 20, parentTs, nil, dbName, "parent", 3 /*DELETE*/, "1", nil, []byte(`{"id":1}`), nil)
+	writeArchivedChildInsert(t, db, dbName, "10", h.Add(-3*time.Hour+10*time.Minute)) // rotated out, archived
+
+	out := filepath.Join(t.TempDir(), "cascade.sql")
+	cleanCascadeFlags(testutil.IntegrationDSN(dbName), dbName, out)
+	rcPK = "1"
+	if err := runCascadeCmd(t); err != nil {
+		t.Fatalf("runRecoverCascade: %v", err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	sql := string(b)
+	if !strings.Contains(sql, "archived-10") {
+		t.Errorf("the archived child INSERT must be found by the merged scan\n---\n%s", sql)
+	}
+	if strings.Contains(sql, "INCOMPLETE RECOVERY") {
+		t.Errorf("an archive-covered scan is complete\n---\n%s", sql)
+	}
+
+	// --no-archive: same index, live scan only → the child is invisible and
+	// the operator is told archives were excluded.
+	rcNoArchive = true
+	if err := runCascadeCmd(t); err != nil {
+		t.Fatalf("runRecoverCascade --no-archive: %v", err)
+	}
+	b, _ = os.ReadFile(out)
+	if strings.Contains(string(b), "archived-10") {
+		t.Errorf("--no-archive must not read the archive\n---\n%s", string(b))
+	}
+}
+
+// TestRecoverCascade_unreadableArchiveRefuses: an archive_state row this host
+// cannot read (an S3 key with no credentials) makes the merged scan partial;
+// like `recover`, the command refuses rather than emit a script missing part
+// of the evidence, and names the escape hatch.
+func TestRecoverCascade_unreadableArchiveRefuses(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName, dsn := seedCascadeIndex(t)
+	addArchiveRow(t, db) // s3://bucket/bintrail_id=bt — unreadable here
+	out := t.TempDir() + "/cascade.sql"
+	cleanCascadeFlags(dsn, dbName, out)
+	rcPK = "1"
+	err := runCascadeCmd(t)
+	if err == nil {
+		t.Fatal("an unreadable archive source must refuse, not silently narrow the scan")
+	}
+	for _, want := range []string{"could not be read", "--no-archive"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q, got: %v", want, err)
+		}
+	}
+}
+
+// TestRecoverCascade_parentAndChildOnlyInArchiveRecovered is the booth case
+// that motivated #1615: a parent deleted days ago, its DELETE and its
+// children's INSERTs all rotated out to Parquet, nothing of it left in the
+// live index. Both scans read the archives: parent found, child recovered.
+func TestRecoverCascade_parentAndChildOnlyInArchiveRecovered(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	snapTs := "2026-06-01 00:00:00"
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "parent", "id", 1, "PRI", "int", "NO")
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "child", "id", 1, "PRI", "int", "NO")
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "child", "pid", 2, "", "int", "YES")
+	testutil.InsertSnapshot(t, db, 1, snapTs, dbName, "child", "payload", 3, "", "varchar", "YES")
+	testutil.MustExec(t, db, `INSERT INTO fk_constraints
+		(snapshot_id, constraint_name, schema_name, table_name, column_name, ordinal_position,
+		 referenced_schema_name, referenced_table_name, referenced_column_name, delete_rule, update_rule)
+		VALUES (1, 'fk', ?, 'child', 'pid', 1, ?, 'parent', 'id', 'CASCADE', 'RESTRICT')`, dbName, dbName)
+
+	h := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h}) // live hour holds nothing relevant
+	base := filepath.Join(t.TempDir(), "bintrail_id=bt")
+	writeArchivedEvents(t, db, base,
+		archivedChildInsert(dbName, "10", h.Add(-5*time.Hour+10*time.Minute)),
+		archivedParentDelete(dbName, h.Add(-4*time.Hour+30*time.Minute)))
+
+	out := filepath.Join(t.TempDir(), "cascade.sql")
+	cleanCascadeFlags(testutil.IntegrationDSN(dbName), dbName, out)
+	rcPK = "1"
+	if err := runCascadeCmd(t); err != nil {
+		t.Fatalf("runRecoverCascade: %v", err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	sql := string(b)
+	for _, want := range []string{"`" + dbName + "`.`parent`", "archived-10"} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("output missing %q: the archived parent and its archived child must both be found\n---\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "INCOMPLETE RECOVERY") {
+		t.Errorf("an archive-covered scan is complete\n---\n%s", sql)
 	}
 }

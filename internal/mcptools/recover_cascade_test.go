@@ -148,11 +148,13 @@ func TestRecoverCascadeRefusesActiveProfile(t *testing.T) {
 	assertToolError(t, res, "access-control profile is active")
 }
 
-// cascadeMockConfig wires a sqlmock DB with the handler's real query sequence:
-// the parent DELETE fetch, the parent UPDATE fetch (both empty), then the
-// archive-coverage probe, whose outcome the caller picks — probeErr non-nil
-// makes coverage unknown, the one caveat class reachable without a live FK
-// topology.
+// cascadeMockConfig wires a sqlmock DB with the handler's real queries: the
+// merged fetcher's one archive discovery (#1615), the parent DELETE fetch, the
+// parent UPDATE fetch (both empty), and the archive-coverage probe. Discovery
+// and probe read archive_state the same way, and the caller picks their
+// shared outcome — probeErr non-nil makes coverage unknown, the one caveat
+// class reachable without a live FK topology. Order is not asserted: the
+// two archive_state reads are indistinguishable to the mock.
 func cascadeMockConfig(t *testing.T, probeErr error) (Config, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
@@ -162,11 +164,14 @@ func cascadeMockConfig(t *testing.T, probeErr error) (Config, sqlmock.Sqlmock) {
 	t.Cleanup(func() { db.Close() })
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(sqlmock.NewRows(recoverToolMockCols))
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(sqlmock.NewRows(recoverToolMockCols))
-	probe := mock.ExpectQuery("FROM archive_state")
-	if probeErr != nil {
-		probe.WillReturnError(probeErr)
-	} else {
-		probe.WillReturnRows(sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}))
+	mock.MatchExpectationsInOrder(false)
+	for range 2 { // merged-fetcher discovery + coverage probe
+		probe := mock.ExpectQuery("FROM archive_state")
+		if probeErr != nil {
+			probe.WillReturnError(probeErr)
+		} else {
+			probe.WillReturnRows(sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}))
+		}
 	}
 	cfg := Config{
 		Resolve: func(ctx context.Context, _ string) (*Target, error) {
@@ -272,8 +277,11 @@ func TestRecoverCascadeRoutedSurfaceNoBaseline(t *testing.T) {
 	defer db.Close()
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(sqlmock.NewRows(recoverToolMockCols))
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(sqlmock.NewRows(recoverToolMockCols))
-	mock.ExpectQuery("FROM archive_state").WillReturnRows(
-		sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}))
+	mock.MatchExpectationsInOrder(false)
+	for range 2 { // merged-fetcher discovery + coverage probe
+		mock.ExpectQuery("FROM archive_state").WillReturnRows(
+			sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}))
+	}
 	cfg := Config{
 		Resolve: func(ctx context.Context, _ string) (*Target, error) {
 			return &Target{DB: db, ResolverLoaded: true, BaselineConfigured: false}, nil

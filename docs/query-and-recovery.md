@@ -479,11 +479,23 @@ bintrail recover-cascade --index-dsn "..." \
   window are visible. Point at a `bintrail baseline` snapshot and those untouched
   children are recovered from it too, and the binlog window is widened to the
   snapshot time. Tables not covered by the baseline are flagged incomplete.
+- **Archives are searched.** The parent and child scans read the Parquet
+  archives auto-discovered via `archive_state`, merged with the live index the
+  same way `recover` does, so a cascade whose evidence rotated out of the live
+  index is still reconstructed. `--no-archive` confines the scan to the live
+  index; an archive the host cannot read makes the command refuse (a reversal
+  missing part of the evidence is a partial undo), naming `--no-archive` as the
+  escape hatch. The DuckDB tuning flags (`--ultrafast`, `--duckdb-threads`,
+  `--duckdb-memory-limit`) apply to the archive reads.
 - **Still best-effort:** baseline augmentation is skipped (and flagged) for a
-  table when the index has archived partitions (which the live scan can't see, so
-  a child re-parented or deleted in the gap can't be told apart from an untouched
-  one) or when one parent has more cascade victims than the per-parent cap. A
-  table with no baseline keeps the Phase-1 window limit. When the result is
+  table when the scan cannot serve every hour of the `[snapshot, T]` window —
+  an hour rotated out with no readable archive (or with archives excluded), an
+  hour before the index existed, or a permanent capture loss stamped inside it —
+  because a child re-parented or deleted in that gap can't be told apart from an
+  untouched one; and when one parent has more cascade victims than the
+  per-parent cap. When augmentation is skipped the child scan falls back to the
+  plain lookback window. A table with no baseline keeps the Phase-1 window
+  limit. When the result is
   provably partial the output is flagged `INCOMPLETE RECOVERY` and the command
   exits non-zero unless `--allow-incomplete` is given. If you have already
   re-created a deleted parent, remove its `INSERT` from the output —

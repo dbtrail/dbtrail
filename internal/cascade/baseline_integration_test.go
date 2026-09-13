@@ -4,13 +4,19 @@ package cascade_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/buffer"
 	"github.com/dbtrail/dbtrail/internal/cascade"
+	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -440,7 +446,7 @@ func TestPhase2_setNullUntouchedBaselineChild(t *testing.T) {
 	}
 }
 
-// contiguous / notContiguous / probeFails are canned Options.LiveWindowContiguous
+// contiguous / notContiguous / probeFails are canned Options.WindowCovered
 // answers for the #1615 gate tests; each records the window it was asked about.
 type liveWindowProbe struct {
 	ok    bool
@@ -473,7 +479,7 @@ func TestPhase2_archivesOutsideWindowKeepBaseline(t *testing.T) {
 		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1), "payload": "keep"}}}}
 	probe := &liveWindowProbe{ok: true}
 	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
-		cascade.Options{Baseline: fb, ArchivesPresent: true, LiveWindowContiguous: probe.probe})
+		cascade.Options{Baseline: fb, ArchivesPresent: true, WindowCovered: probe.probe})
 	if err != nil {
 		t.Fatalf("SynthesizeVictims: %v", err)
 	}
@@ -515,7 +521,7 @@ func TestPhase2_archivesInWindowSkipBaselineButScanWidened(t *testing.T) {
 		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1), "payload": "seeded"}}}}
 	probe := &liveWindowProbe{ok: false}
 	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
-		cascade.Options{Baseline: fb, ArchivesPresent: true, LiveWindowContiguous: probe.probe})
+		cascade.Options{Baseline: fb, ArchivesPresent: true, WindowCovered: probe.probe})
 	if err != nil {
 		t.Fatalf("SynthesizeVictims: %v", err)
 	}
@@ -552,7 +558,7 @@ func TestPhase2_deletedBeforeSnapshotNotResurrected(t *testing.T) {
 	fb := &fakeBaseline{ok: true, snap: T.Add(-30 * time.Minute)} // row 10 gone by the snapshot
 	probe := &liveWindowProbe{ok: true}
 	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
-		cascade.Options{Baseline: fb, ArchivesPresent: true, LiveWindowContiguous: probe.probe})
+		cascade.Options{Baseline: fb, ArchivesPresent: true, WindowCovered: probe.probe})
 	if err != nil {
 		t.Fatalf("SynthesizeVictims: %v", err)
 	}
@@ -578,7 +584,7 @@ func TestPhase2_liveWindowProbeErrorSkipsBaseline(t *testing.T) {
 		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1)}}}}
 	probe := &liveWindowProbe{err: errors.New("partition list unreadable")}
 	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
-		cascade.Options{Baseline: fb, ArchivesPresent: true, LiveWindowContiguous: probe.probe})
+		cascade.Options{Baseline: fb, ArchivesPresent: true, WindowCovered: probe.probe})
 	if err != nil {
 		t.Fatalf("SynthesizeVictims: %v", err)
 	}
@@ -638,7 +644,7 @@ func TestPhase2_probeGapWithoutArchivesSkipsBaseline(t *testing.T) {
 		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1)}}}}
 	probe := &liveWindowProbe{ok: false}
 	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
-		cascade.Options{Baseline: fb, ArchivesPresent: false, LiveWindowContiguous: probe.probe})
+		cascade.Options{Baseline: fb, ArchivesPresent: false, WindowCovered: probe.probe})
 	if err != nil {
 		t.Fatalf("SynthesizeVictims: %v", err)
 	}
@@ -653,11 +659,11 @@ func TestPhase2_probeGapWithoutArchivesSkipsBaseline(t *testing.T) {
 	}
 }
 
-// TestLiveWindowProbe_captureGap pins the second half of the wired probe: with
+// TestWindowProbe_captureGap pins the second half of the wired probe: with
 // every hourly partition present, a permanent capture loss stamped inside the
 // window (#765) still makes the window non-contiguous, and a legacy
 // stream_state that cannot be evaluated is never read as clean.
-func TestLiveWindowProbe_captureGap(t *testing.T) {
+func TestWindowProbe_captureGap(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	db, dbName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
@@ -665,7 +671,7 @@ func TestLiveWindowProbe_captureGap(t *testing.T) {
 	h := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Hour)
 	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h, h.Add(time.Hour), h.Add(2 * time.Hour)})
 	since, until := h.Add(10*time.Minute), h.Add(2*time.Hour+10*time.Minute)
-	probe := cascade.LiveWindowProbe(db, dbName)
+	probe := cascade.WindowProbe(db, dbName, true)
 
 	if ok, err := probe(ctx, since, until); err != nil || !ok {
 		t.Fatalf("empty stream_state (file-mode index) must be contiguous: %v, %v", ok, err)
@@ -691,7 +697,7 @@ func TestLiveWindowProbe_captureGap(t *testing.T) {
 	if ok, err := probe(ctx, h.Add(time.Hour+time.Minute), until); err != nil || ok {
 		t.Errorf("an unevaluable capture-gap state must not be read as contiguous: %v, %v", ok, err)
 	}
-	if cascade.LiveWindowProbe(db, "") != nil || cascade.LiveWindowProbe(nil, dbName) != nil {
+	if cascade.WindowProbe(db, "", true) != nil || cascade.WindowProbe(nil, dbName, true) != nil {
 		t.Errorf("no database name or no handle must yield no probe (fail-closed default), not a probe that cannot run")
 	}
 }
@@ -719,7 +725,7 @@ func TestPhase2_skipModeDropsSincePosUnlessSnapshotIsTheBound(t *testing.T) {
 		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1)}}}}
 	probe := &liveWindowProbe{ok: false}
 	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
-		cascade.Options{Baseline: fb, LiveWindowContiguous: probe.probe})
+		cascade.Options{Baseline: fb, WindowCovered: probe.probe})
 	if err != nil {
 		t.Fatalf("SynthesizeVictims: %v", err)
 	}
@@ -733,7 +739,7 @@ func TestPhase2_skipModeDropsSincePosUnlessSnapshotIsTheBound(t *testing.T) {
 	fb2 := &fakeBaseline{ok: true, snap: h, pos: past,
 		rows: []cascade.BaselineRow{{PKValues: "10", Row: map[string]any{"id": int64(10), "pid": int64(1), "payload": "from-baseline"}}}}
 	res, err = cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
-		cascade.Options{Baseline: fb2, LiveWindowContiguous: (&liveWindowProbe{ok: true}).probe})
+		cascade.Options{Baseline: fb2, WindowCovered: (&liveWindowProbe{ok: true}).probe})
 	if err != nil {
 		t.Fatalf("SynthesizeVictims (augment): %v", err)
 	}
@@ -760,11 +766,133 @@ func TestPhase2_skipModeWidensToOlderSnapshot(t *testing.T) {
 
 	fb := &fakeBaseline{ok: true, snap: T.Add(-3 * time.Hour)} // older than the 1h lookback; row 10 not in it
 	res, err := cascade.SynthesizeVictims(context.Background(), eng, cascadeFK(dbName), parentDelete(dbName, T),
-		cascade.Options{Baseline: fb, Lookback: time.Hour, LiveWindowContiguous: (&liveWindowProbe{ok: false}).probe})
+		cascade.Options{Baseline: fb, Lookback: time.Hour, WindowCovered: (&liveWindowProbe{ok: false}).probe})
 	if err != nil {
 		t.Fatalf("SynthesizeVictims: %v", err)
 	}
 	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:10"] {
 		t.Fatalf("skip mode must widen to an older snapshot; got %v", res.Victims)
+	}
+}
+
+// writeArchivedEvents writes rows as ONE Parquet archive file per hour under
+// base (a bintrail_id=… directory) and registers each hour in archive_state
+// with its local path. Rows of the same hour share a file.
+func writeArchivedEvents(t *testing.T, db *sql.DB, base string, rows ...query.ResultRow) {
+	t.Helper()
+	byHour := map[time.Time][]query.ResultRow{}
+	for _, r := range rows {
+		h := r.EventTimestamp.UTC().Truncate(time.Hour)
+		byHour[h] = append(byHour[h], r)
+	}
+	for h, rs := range byHour {
+		hourDir := filepath.Join(base, "event_date="+h.Format("2006-01-02"), "event_hour="+h.Format("15"))
+		if err := os.MkdirAll(hourDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		pq := filepath.Join(hourDir, "events.parquet")
+		if _, err := buffer.WriteParquet(rs, pq, "none"); err != nil {
+			t.Fatalf("WriteParquet: %v", err)
+		}
+		testutil.MustExec(t, db, `INSERT INTO archive_state
+			(partition_name, bintrail_id, local_path, row_count, s3_bucket, s3_key, s3_uploaded_at)
+			VALUES (?, 'bt', ?, ?, NULL, NULL, NULL)`, "p_"+h.Format("2006010215"), pq, len(rs))
+	}
+}
+
+// archivedChildInsert / archivedParentDelete are the two row shapes the
+// archived-cascade tests need (child pid=1; parent id=1).
+func archivedChildInsert(dbName, pk string, at time.Time) query.ResultRow {
+	id, _ := strconv.ParseInt(pk, 10, 64)
+	return query.ResultRow{
+		EventID: uint64(900000 + id), BinlogFile: "b.000001", StartPos: 4, EndPos: 40,
+		EventTimestamp: at.UTC(), SchemaName: dbName, TableName: "child",
+		EventType: 1 /*INSERT*/, PKValues: pk,
+		RowAfter: map[string]any{"id": id, "pid": int64(1), "payload": "archived-" + pk},
+	}
+}
+
+func archivedParentDelete(dbName string, at time.Time) query.ResultRow {
+	return query.ResultRow{
+		EventID: 800001, BinlogFile: "b.000001", StartPos: 41, EndPos: 80,
+		EventTimestamp: at.UTC(), SchemaName: dbName, TableName: "parent",
+		EventType: 3 /*DELETE*/, PKValues: "1",
+		RowBefore: map[string]any{"id": int64(1)},
+	}
+}
+
+// writeArchivedChildInsert writes ONE child INSERT (pid=1) as a Parquet
+// archive for an hour the live index does NOT hold (#1615: evidence that
+// rotated out of the live index).
+func writeArchivedChildInsert(t *testing.T, db *sql.DB, dbName, pk string, at time.Time) {
+	t.Helper()
+	writeArchivedEvents(t, db, filepath.Join(t.TempDir(), "bintrail_id=bt"), archivedChildInsert(dbName, pk, at))
+}
+
+// TestPhase1_childOnlyInArchiveFoundByMergedFetcher is the #1615 second half at
+// the engine boundary: with a MergedFetcher the child scan reads the Parquet
+// archive that holds the rotated-out INSERT, and the coverage probe credits
+// the archived hour, so a baseline-covered window over it is NOT a gap.
+func TestPhase1_childOnlyInArchiveFoundByMergedFetcher(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	T := time.Now().UTC()
+	h := T.Add(-1 * time.Hour).Truncate(time.Hour)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{h})
+	// The hour right before the live one, so [archivedAt, T] has no third,
+	// un-held hour between the archive and the live partition.
+	archivedAt := h.Add(-time.Hour + 10*time.Minute)
+	writeArchivedChildInsert(t, db, dbName, "10", archivedAt)
+
+	live := query.New(db)
+	merged := &query.MergedFetcher{DB: db, Engine: live, DBName: dbName, ArchiveFetcher: parquetquery.Fetch}
+	res, err := cascade.SynthesizeVictims(context.Background(), merged, cascadeFK(dbName), parentDelete(dbName, T), cascade.Options{})
+	if err != nil {
+		t.Fatalf("SynthesizeVictims: %v", err)
+	}
+	if k := victimKeys(res.Victims); len(res.Victims) != 1 || !k["child:10"] {
+		t.Fatalf("the merged scan must find the archived INSERT; got %v", res.Victims)
+	}
+	if res.Victims[0].RowBefore["payload"] != "archived-10" {
+		t.Errorf("victim must carry the archived image, got %v", res.Victims[0].RowBefore)
+	}
+	// The live engine alone cannot see it — the contrast that makes the
+	// assertion above discriminating.
+	res, err = cascade.SynthesizeVictims(context.Background(), live, cascadeFK(dbName), parentDelete(dbName, T), cascade.Options{})
+	if err != nil || len(res.Victims) != 0 {
+		t.Fatalf("live-only scan must not see the archive: %v, %v", res.Victims, err)
+	}
+
+	// Coverage probe: the archived hour counts when the scan reads archives,
+	// and is a gap when it does not.
+	if ok, err := cascade.WindowProbe(db, dbName, false)(context.Background(), archivedAt, T); err != nil || !ok {
+		t.Errorf("archived hour must be covered for an archive-reading scan: %v, %v", ok, err)
+	}
+	if ok, err := cascade.WindowProbe(db, dbName, true)(context.Background(), archivedAt, T); err != nil || ok {
+		t.Errorf("archived hour must be a gap for a live-only scan: %v, %v", ok, err)
+	}
+}
+
+// TestPhase1_unreadableArchiveIsAnOperationalFailure: an archive source the
+// merged fetcher cannot read makes the child scan an ERROR (recorded as
+// provably partial), never a silently narrower scan.
+func TestPhase1_unreadableArchiveIsAnOperationalFailure(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	T := time.Now().UTC()
+	testutil.MustExec(t, db, `INSERT INTO archive_state (bintrail_id, partition_name, s3_bucket, s3_key)
+		VALUES ('bt', 'p_2026010100', 'bucket', 'bintrail_id=bt/p_2026010100/data.parquet')`)
+	failing := func(_ context.Context, _ query.Options, src string) ([]query.ResultRow, error) {
+		return nil, errors.New("no credentials for " + src)
+	}
+	merged := &query.MergedFetcher{DB: db, Engine: query.New(db), DBName: dbName, ArchiveFetcher: failing}
+	res, err := cascade.SynthesizeVictims(context.Background(), merged, cascadeFK(dbName), parentDelete(dbName, T), cascade.Options{})
+	if err == nil || !strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("an unreadable archive must surface as an operational error, got err=%v", err)
+	}
+	if res.Complete() || !strings.Contains(strings.Join(res.Incomplete, " "), "partial") {
+		t.Errorf("the result must be flagged partial; Incomplete=%v", res.Incomplete)
 	}
 }

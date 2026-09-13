@@ -3,6 +3,7 @@ package mcptools
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 )
@@ -247,14 +249,25 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 		eng := query.New(t.DB)
 		del := event.EventDelete
 		upd := event.EventUpdate
+		// Every scan — parents and children — goes through the merged read
+		// (#1615), with this server's own archive discovery (archive_state,
+		// or the BINTRAIL_ARCHIVE_S3 environment on the standalone surface)
+		// and its NoArchive posture; the coverage probe is told the same.
+		fetcher := &query.MergedFetcher{DB: t.DB, Engine: eng, DBName: t.DBName, NoArchive: t.NoArchive, ArchiveFetcher: parquetquery.Fetch,
+			SourceResolver: func(ctx context.Context, _ *sql.DB) ([]string, error) {
+				srcs, discoveryFailed := t.archiveSources(ctx)
+				if discoveryFailed {
+					return nil, errors.New("archive source discovery failed")
+				}
+				return srcs, nil
+			}}
 
 		// TWO fetches, not one un-filtered one (mirrors the CLI and console):
 		// query.Options.EventType holds a single type, and an all-types fetch
 		// would let INSERTs (which never cascade) eat the limit budget the
-		// DELETE/UPDATE roots need. Live index only — cascade recovery never
-		// searches archives; the probe below turns that into caveats instead.
+		// DELETE/UPDATE roots need.
 		fetchRoots := func(et *event.EventType) ([]query.ResultRow, error) {
-			return eng.Fetch(ctx, query.Options{
+			return fetcher.Fetch(ctx, query.Options{
 				Schema:     args.Schema,
 				Table:      args.Table,
 				PKValues:   args.PK,
@@ -303,11 +316,15 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 			caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
 		} else if len(archives) > 0 {
 			archivesExist = true
-			if len(parentEvents) == 0 {
-				caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, but the index has archived partitions (cascade recovery does NOT search them); the changed parent may be archived")
-			} else {
-				toolWarnings = append(toolWarnings,
-					"the index has archived partitions, which cascade recovery does NOT search (live index only); a child whose events were archived may be missed")
+			// Since #1615 the scans READ the archives; these caveats apply
+			// only when this server excludes them (NoArchive).
+			if t.NoArchive {
+				if len(parentEvents) == 0 {
+					caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, and this server excludes its archived partitions (no-archive); the changed parent may be archived")
+				} else {
+					toolWarnings = append(toolWarnings,
+						"this server excludes its archived partitions (no-archive), so cascade recovery searched the live index only; a child whose events were archived may be missed")
+				}
 			}
 		}
 
@@ -337,13 +354,13 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 			caveats = append(caveats, fkCaveats...)
 			results := make([]cascade.Result, 0, len(groups))
 			for _, g := range groups {
-				r, serr := cascade.SynthesizeVictims(ctx, eng, g.FKs, g.Roots, cascade.Options{
-					Lookback:             lookback,
-					MaxDepth:             maxDepth,
-					Baseline:             baselineProvider,
-					ArchivesPresent:      archivesExist,
-					LiveWindowContiguous: cascade.LiveWindowProbe(t.DB, t.DBName),
-					PKMetas:              cascade.PKMetasFromResolver(resolver),
+				r, serr := cascade.SynthesizeVictims(ctx, fetcher, g.FKs, g.Roots, cascade.Options{
+					Lookback:        lookback,
+					MaxDepth:        maxDepth,
+					Baseline:        baselineProvider,
+					ArchivesPresent: archivesExist,
+					WindowCovered:   cascade.WindowProbe(t.DB, t.DBName, t.NoArchive),
+					PKMetas:         cascade.PKMetasFromResolver(resolver),
 				})
 				results = append(results, r)
 				if serr != nil {

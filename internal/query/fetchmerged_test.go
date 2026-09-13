@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -364,5 +365,43 @@ func TestFetchMergedFull_reportsDivergedDuplicates(t *testing.T) {
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestFetchMergedFull_sourceResolverOverridesDiscovery pins the #1615 seam the
+// standalone MCP server relies on: a SourceResolver names the archives to
+// open, archive_state is not consulted, and the archive fetcher is handed
+// exactly those sources.
+func TestFetchMergedFull_sourceResolverOverridesDiscovery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("FROM binlog_events").WillReturnRows(sqlmock.NewRows([]string{"event_id"}))
+
+	var opened []string
+	fetcher := func(_ context.Context, _ Options, src string) ([]ResultRow, error) {
+		opened = append(opened, src)
+		return nil, nil
+	}
+	resolver := func(context.Context, *sql.DB) ([]string, error) { return []string{"/env/bintrail_id=x"}, nil }
+	_, _, skipped, _, _, err := FetchMergedFull(context.Background(), db, New(db), FetchMergedOptions{
+		Opts:           Options{Schema: "s", Table: "t"},
+		AllowGaps:      true,
+		ArchiveFetcher: fetcher,
+		SourceResolver: resolver,
+	})
+	if err != nil {
+		t.Fatalf("FetchMergedFull: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("no source failed, got skipped=%v", skipped)
+	}
+	if len(opened) != 1 || opened[0] != "/env/bintrail_id=x" {
+		t.Errorf("the archive fetcher must be handed the resolver's sources, got %v", opened)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("archive_state must not be read when a resolver is supplied: %v", err)
 	}
 }

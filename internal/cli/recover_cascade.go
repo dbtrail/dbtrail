@@ -98,6 +98,7 @@ var (
 	rcAllowIncomplete bool
 	rcBaselineDir     string
 	rcBaselineS3      string
+	rcNoArchive       bool
 )
 
 func init() {
@@ -118,6 +119,8 @@ func init() {
 	f.BoolVar(&rcAllowIncomplete, "allow-incomplete", false, "Exit 0 even when the reconstruction is provably partial (coverage gaps only; an operational failure still exits non-zero)")
 	f.StringVar(&rcBaselineDir, "baseline-dir", "", "Local baseline-snapshot directory for Phase-2 fallback (also recovers children present in the snapshot but untouched since it)")
 	f.StringVar(&rcBaselineS3, "baseline-s3", "", "S3 baseline-snapshot prefix (s3://bucket/prefix) for Phase-2 fallback; alternative to --baseline-dir")
+	f.BoolVar(&rcNoArchive, "no-archive", false, "Search the live index only; Parquet archives auto-discovered via archive_state are read otherwise, so children whose events rotated out are still found")
+	AddDuckDBTuningFlags(recoverCascadeCmd)
 	_ = recoverCascadeCmd.MarkFlagRequired("index-dsn")
 	_ = recoverCascadeCmd.MarkFlagRequired("schema")
 	_ = recoverCascadeCmd.MarkFlagRequired("table")
@@ -185,14 +188,36 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	del := event.EventDelete
 	upd := event.EventUpdate
 
-	// ── Fetch the parent events (live index only) ─────────────────────────────
+	// The index database name drives the planner behind the merged read and
+	// the window-coverage probe. A DSN without one keeps both off: the read
+	// still merges every archive (no routing proofs) and the gate falls back
+	// to its existence rule (#1615), and the operator is told.
+	var dbName string
+	if cfg, perr := mysqldriver.ParseDSN(rcIndexDSN); perr != nil {
+		slog.Warn("could not parse the index DSN; the window-coverage check is off and any archive skips baseline augmentation (#1615)", "error", perr)
+	} else if cfg.DBName == "" {
+		slog.Warn("index DSN carries no database name; the window-coverage check is off and any archive skips baseline augmentation (#1615)")
+	} else {
+		dbName = cfg.DBName
+	}
+	duckTuning, err := DuckDBTuningFromFlags(cmd)
+	if err != nil {
+		return err
+	}
+	// Every scan — parents and children — goes through the merged read, the
+	// same discovery + planner routing + merge that recover uses (#1615): a
+	// cascade nobody noticed for a week is exactly the one whose evidence has
+	// rotated out of the live index.
+	fetcher := &query.MergedFetcher{DB: db, Engine: eng, DBName: dbName, NoArchive: rcNoArchive, ArchiveFetcher: TunedArchiveFetcher(duckTuning)}
+
+	// ── Fetch the parent events (live index + archives unless --no-archive) ───
 	// TWO fetches, not one un-filtered one: query.Options.EventType is a single
 	// type, and an all-types fetch would let INSERTs (which never cascade) eat
 	// the --limit budget the DELETE/UPDATE roots need. Both root sets are owned
 	// end-to-end by this command and both are emitted, so there is no subset
 	// invariant to preserve between them (unlike the console's auto-detect path,
 	// which must derive its parents from the rows the recover already returned).
-	parentDeletes, err := eng.Fetch(cmd.Context(), query.Options{
+	parentDeletes, err := fetcher.Fetch(cmd.Context(), query.Options{
 		Schema:     rcSchema,
 		Table:      rcTable,
 		PKValues:   rcPK,
@@ -204,14 +229,14 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 		Limit:      rcLimit,
 	})
 	if err != nil {
-		return fmt.Errorf("fetch parent deletes: %w", err)
+		return fmt.Errorf("fetch parent deletes: %w (pass --no-archive to search the live index only)", err)
 	}
 	// Parent UPDATEs are CANDIDATES only: the synthesis keeps just the ones that
 	// actually moved a referenced key protected by an ON UPDATE CASCADE / SET
 	// NULL edge (cascade.Result.KeyUpdateParents). An UPDATE of unrelated columns
 	// is never reversed here — that would undo a change the operator never asked
 	// about.
-	parentUpdates, err := eng.Fetch(cmd.Context(), query.Options{
+	parentUpdates, err := fetcher.Fetch(cmd.Context(), query.Options{
 		Schema:     rcSchema,
 		Table:      rcTable,
 		PKValues:   rcPK,
@@ -223,7 +248,7 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 		Limit:      rcLimit,
 	})
 	if err != nil {
-		return fmt.Errorf("fetch parent updates: %w", err)
+		return fmt.Errorf("fetch parent updates: %w (pass --no-archive to search the live index only)", err)
 	}
 	parentEvents := append(append([]query.ResultRow{}, parentDeletes...), parentUpdates...)
 
@@ -246,23 +271,22 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	//     archived could still be missed → a visible warning, NOT a hard caveat:
 	//     otherwise every archived deployment trips INCOMPLETE on every run and
 	//     --allow-incomplete becomes routine, masking the real coverage gaps.
+	// Since #1615 the scans above and below READ the archives, so the
+	// archived-parent / archived-child caveats apply only when --no-archive
+	// excluded them. ArchivesPresent still feeds the gate's fallback rule
+	// for a surface with no coverage probe.
 	archivesExist := false
-	var liveWindow func(context.Context, time.Time, time.Time) (bool, error)
-	if cfg, perr := mysqldriver.ParseDSN(rcIndexDSN); perr != nil {
-		slog.Warn("could not parse the index DSN; the cascade live-window check is off and any archive skips baseline augmentation (#1615)", "error", perr)
-	} else if cfg.DBName == "" {
-		slog.Warn("index DSN carries no database name; the cascade live-window check is off and any archive skips baseline augmentation (#1615)")
-	} else {
-		liveWindow = cascade.LiveWindowProbe(db, cfg.DBName)
-	}
+	liveWindow := cascade.WindowProbe(db, dbName, rcNoArchive)
 	if archives, aerr := query.ResolveArchiveSources(cmd.Context(), db); aerr != nil {
 		caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
 	} else if len(archives) > 0 {
 		archivesExist = true
-		if len(parentEvents) == 0 {
-			caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, but the index has archived partitions (cascade recovery does NOT search them); the changed parent may be archived")
-		} else {
-			slog.Warn("index has archived partitions, which cascade recovery does NOT search (live index only); a child whose events were archived may be missed")
+		if rcNoArchive {
+			if len(parentEvents) == 0 {
+				caveats = append(caveats, "no parent DELETE or UPDATE matched in the live index, and --no-archive excluded the index's archived partitions; the changed parent may be archived")
+			} else {
+				slog.Warn("--no-archive: the index's archived partitions are not searched; a child whose events were archived may be missed")
+			}
 		}
 	}
 
@@ -304,13 +328,13 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 		caveats = append(caveats, fkCaveats...)
 		results := make([]cascade.Result, 0, len(groups))
 		for _, g := range groups {
-			r, serr := cascade.SynthesizeVictims(cmd.Context(), eng, g.FKs, g.Roots, cascade.Options{
-				Lookback:             lookback,
-				MaxDepth:             rcMaxDepth,
-				Baseline:             baselineProvider,
-				ArchivesPresent:      archivesExist,
-				LiveWindowContiguous: liveWindow,
-				PKMetas:              cascade.PKMetasFromResolver(resolver),
+			r, serr := cascade.SynthesizeVictims(cmd.Context(), fetcher, g.FKs, g.Roots, cascade.Options{
+				Lookback:        lookback,
+				MaxDepth:        rcMaxDepth,
+				Baseline:        baselineProvider,
+				ArchivesPresent: archivesExist,
+				WindowCovered:   liveWindow,
+				PKMetas:         cascade.PKMetasFromResolver(resolver),
 			})
 			results = append(results, r)
 			if serr != nil {
