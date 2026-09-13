@@ -344,6 +344,28 @@ try {
   !form.advOpen ? ok("form: advanced section collapsed for a source entry") : bad("form: advanced section collapsed for a source entry", "auto-expanded");
   form.srcVisible ? ok("form: source fields visible") : bad("form: source fields visible", "hidden");
 
+  // #1605 / #1608: the form answers where the operator is looking. The message
+  // and the startup-check cards precede the button row in the DOM, and Test
+  // writes its result into the row's own slot, beside its button, within a
+  // few seconds; nothing lands below the buttons.
+  const order = await page.evaluate(() => {
+    const foot = document.querySelector("#server-form-mount .modal-foot");
+    const msg = document.getElementById("server-form-msg");
+    const cards = document.getElementById("doctor-cards");
+    const slot = document.getElementById("server-test-result");
+    const before = (n) => !!(n && foot && (n.compareDocumentPosition(foot) & Node.DOCUMENT_POSITION_FOLLOWING));
+    return { msg: before(msg), cards: before(cards), slotInFoot: !!(slot && foot && foot.contains(slot)) };
+  });
+  order.msg && order.cards ? ok("form: message and check cards precede the button row") : bad("form: message and check cards precede the button row", JSON.stringify(order));
+  order.slotInFoot ? ok("form: Test result slot sits in the button row") : bad("form: Test result slot sits in the button row", JSON.stringify(order));
+  await page.click("#server-test");
+  let testText = "";
+  for (let i = 0; i < 40 && !/[✓✗○]/.test(testText); i++) {
+    await page.waitForTimeout(250);
+    testText = await page.evaluate(() => (document.getElementById("server-test-result") || {}).textContent || "");
+  }
+  /[✓✗○]/.test(testText) ? ok("form: Test connection answers beside its button") : bad("form: Test connection answers beside its button", `slot=${JSON.stringify(testText)}`);
+
   // Scenario 4 — the REAL missing-index path (not a fabricated string): query
   // a data endpoint against the default (unprovisioned wp) server, take the
   // ACTUAL backend error, and feed it to renderError. This proves the backend

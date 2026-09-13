@@ -8539,6 +8539,9 @@ function serverRow(s) {
   if (s.reconstruct) item.append(el("span", { class: "chip chip-tt", text: "TT", title: "Backup configured: Time-travel available" }));
   if (s.monitor_state) item.append(el("span", { class: "chip chip-mon", text: s.monitor_state.replace("_", " ").toUpperCase(), title: MON_STATE_TITLES[s.monitor_state] || ("monitoring " + s.monitor_state) }));
   if (s.flavor && s.flavor !== "mysql") item.append(el("span", { class: "chip", text: s.flavor === "postgres" ? "PG" : s.flavor.toUpperCase(), title: "Source type: " + s.flavor }));
+  // A registry entry with no source connection under a capturing console
+  // never streams; the mark says so where the Start button would be (#1607).
+  if (s.kind !== "ephemeral" && capsCache.monitor && !s.has_source) item.append(el("span", { class: "chip chip-nosrc", text: "NO SOURCE", title: "No source connection: nothing is captured from this server. Edit it and add one." }));
 
   let desc;
   if (s.has_source && s.source_host) desc = "watching " + s.source_user + "@" + s.source_host + ":" + (s.source_port || (s.flavor === "postgres" ? "5432" : "3306")) + (s.source_database ? "/" + s.source_database : "") + (s.schemas ? " [" + s.schemas + "]" : "");
@@ -8682,13 +8685,19 @@ function buildServerForm() {
   adv.append(idx);
   form.append(adv);
 
+  // The form's answers sit ABOVE the button row (#1605, #1608): appended
+  // after it, a failed startup check or a test result rendered below the
+  // eyeline of the button that caused it, at the bottom of a long modal the
+  // scrim scrolls, and the button read as dead. The Test result goes beside
+  // its own button, the way the saved-server row already shows it.
+  form.append(el("div", { id: "server-form-msg", class: "form-msg" }));
+  form.append(el("div", { id: "doctor-cards", class: "doctor-cards" }));
   const foot = el("div", { class: "modal-foot filter-actions" });
   foot.append(el("button", { class: "btn btn-primary", type: "submit", text: "Save" }));
   foot.append(el("button", { class: "btn", type: "button", id: "server-test", text: "Test connection" }));
+  foot.append(el("span", { class: "srv-status", id: "server-test-result" }));
   foot.append(el("button", { class: "btn btn-ghost", type: "button", id: "server-cancel", text: "Cancel" }));
   form.append(foot);
-  form.append(el("div", { id: "server-form-msg", class: "form-msg" }));
-  form.append(el("div", { id: "doctor-cards", class: "doctor-cards" }));
   return form;
 }
 
@@ -8799,14 +8808,49 @@ async function saveServer(form) {
     const res = await startMonitor(saved.id);
     await refreshServersList();
     if (res && res.started && !doctorWarnings(res.doctor)) { hideServerForm(); toast("Monitoring started. Events will appear within a minute"); }
-    else if (res && res.started) { renderDoctor(res.doctor); formMsg("Monitoring started; review the warnings below", false); }
-    else if (res) { renderDoctor(res.doctor); formMsg("Startup checks failed: fix the items below and save again", true); }
+    else if (res && res.started) { renderDoctor(res.doctor); formMsg("Monitoring started; review the warnings above", false); }
+    else if (res) { renderDoctor(res.doctor); formMsg("Startup checks failed: fix the items above and save again", true); scrollDoctorIntoView(); }
     else { formMsg("Could not start monitoring; check the notification for details and try again", true); } // startMonitor returned null (transport error)
+    // Save stays enabled on a failure: it IS the retry once the operator has
+    // fixed the server (most checks are fixed on the database side, with the
+    // same form values), so disabling it would leave no way to run the
+    // checks again. Warnings never block.
     return;
   }
   hideServerForm();
   await refreshServersList();
-  toast(id ? "Server updated" : "Server added");
+  // A server that will never stream is saved, but the save must not read as
+  // capture (#1607): the reason and the one action for it land on the row's
+  // status slot, where they last, next to the row's own mark.
+  const why = noCaptureReason(saved);
+  if (why) noteServerRow(saved.id, why);
+  toast((id ? "Server updated" : "Server added") + (why ? "; it will not capture changes yet" : ""));
+}
+
+// noCaptureReason names why a saved server will not stream, or null when it
+// will (or already does, or is the CLI entry). Two cases, each with its one
+// remedy: this console runs as `serve`, which never captures; or the entry
+// has no source connection.
+function noCaptureReason(s) {
+  if (!s || s.kind === "ephemeral" || isLiveMonitorState(s.monitor_state)) return null;
+  if (!capsCache.monitor) return "will not capture: this console was started as serve, which reads an index and never captures. Run bintrail-console watch to capture from this server";
+  if (!s.has_source) return "will not capture: no source connection. Edit this server and add one";
+  return null;
+}
+
+function noteServerRow(id, text) {
+  const slot = document.getElementById("srv-status-" + id);
+  if (!slot) return;
+  slot.className = "srv-status pending";
+  slot.textContent = "○ " + text;
+}
+
+// scrollDoctorIntoView brings the first failing check to the eye: the cards
+// sit above the button row, which on a long form the operator has scrolled
+// past.
+function scrollDoctorIntoView() {
+  const c = document.querySelector("#doctor-cards .doctor-card.fail") || document.getElementById("doctor-cards");
+  if (c && c.scrollIntoView) c.scrollIntoView({ block: "nearest" });
 }
 
 async function deleteServer(s) {
@@ -8839,11 +8883,17 @@ function testResultText(res) {
 async function testServerForm(form) {
   const id = form.elements.id.value;
   const body = serverFormBody(form);
-  formMsg("testing…", false);
+  const btn = form.querySelector("#server-test");
+  const slot = document.getElementById("server-test-result");
+  const show = (cls, text) => { if (slot) { slot.className = "srv-status " + cls; slot.textContent = text; } };
+  formMsg("", false);
+  if (btn) btn.disabled = true;
+  show("", "testing…");
   try {
     const res = await api(id ? "/api/servers/" + encodeURIComponent(id) + "/test" : "/api/servers/test", { method: "POST", body });
-    formMsg(testResultText(res), !res.ok && !res.provision_pending);
-  } catch (err) { formMsg((err && err.message) || String(err), true); }
+    show(res.provision_pending ? "pending" : (res.ok ? "ok" : "err"), testResultText(res));
+  } catch (err) { show("err", "✗ " + ((err && err.message) || err)); }
+  finally { if (btn) btn.disabled = false; }
 }
 
 async function testServerRow(id) {
@@ -8889,7 +8939,8 @@ async function startMonitorRow(id) {
   const opened = await editServer(id);
   if (opened) {
     renderDoctor(res.doctor);
-    formMsg(res.started ? "Monitoring started; review the warnings below" : "Startup checks failed: fix the items below, save, and start again", !res.started);
+    formMsg(res.started ? "Monitoring started; review the warnings above" : "Startup checks failed: fix the items above, save, and start again", !res.started);
+    if (!res.started) scrollDoctorIntoView();
   } else if (res.started) { toast("Monitoring started, with warnings"); }
   else { toastError("Startup checks failed"); }
 }
