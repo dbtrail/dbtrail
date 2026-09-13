@@ -337,7 +337,7 @@ func TestDeliverScript_oversizedStatementNoteSaysSo(t *testing.T) {
 	if !d.Served || d.From != 1 || d.To != 1 {
 		t.Fatalf("the oversized statement did not come back alone: %+v", d)
 	}
-	if !strings.Contains(d.Note, "over the usual") || !strings.Contains(d.Note, "one statement alone") {
+	if !strings.Contains(d.Note, "over the usual") || !strings.Contains(d.Note, "cannot be split further") {
 		t.Errorf("the note does not explain the oversized response: %s", d.Note)
 	}
 }
@@ -351,6 +351,7 @@ func TestDeliverScript_refusesMisalignedOffsets(t *testing.T) {
 		"one byte short":      {ends[0] - 1, ends[1], ends[2]},
 		"inside the preamble": {5, ends[1], ends[2]},
 		"not increasing":      {ends[1], ends[0], ends[2]},
+		"duplicate":           {ends[0], ends[0], ends[2]},
 		"past the end":        {ends[0], ends[1], len(text) + 3},
 	}
 	for name, bad := range cases {
@@ -362,5 +363,187 @@ func TestDeliverScript_refusesMisalignedOffsets(t *testing.T) {
 	}
 	if _, err := deliverScript(cascadeCLI, text, ends, false, 0, 1); err != nil {
 		t.Fatalf("well-formed offsets refused: %v", err)
+	}
+	// A whole return does not depend on the offsets and is served regardless:
+	// a bad list must not take the non-chunked path down with it.
+	if d, err := deliverScript(cascadeCLI, text, cases["inside the preamble"], false, 0, 0); err != nil || !d.Served {
+		t.Errorf("a whole return was refused over offsets it does not use: %v", err)
+	}
+}
+
+// A page the size cap cut short says "reduced" even when the ask overshoots
+// the end of the script: "give me everything" answered with half and no word
+// about it is the silent reduction the schema text promises never happens.
+func TestDeliverScript_reducedIsSaidWhenTheAskOvershootsTheEnd(t *testing.T) {
+	big, ends := buildFixture(4000)
+	d, err := deliverScript(cascadeCLI, big, ends, false, 0, 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.More || !strings.Contains(d.Note, "reduced") {
+		t.Errorf("the cap cut the page but the note does not say reduced: more=%v note=%s", d.More, d.Note)
+	}
+}
+
+// Paging from a late offset fits statements by the bytes remaining FROM that
+// offset, not from the start of the script; and an ordinary under-cap chunk
+// never gets the oversized-statement note.
+func TestDeliverScript_pagesFromALateOffsetByRemainingBytes(t *testing.T) {
+	big, ends := buildFixture(4000)
+	d, err := deliverScript(cascadeCLI, big, ends, false, 3000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.More || d.To != 4000 || d.From != 3001 {
+		t.Fatalf("late offset did not page by the bytes remaining from it: %+v", d)
+	}
+	if strings.Contains(d.Note, "cannot be split further") {
+		t.Errorf("a late, under-cap chunk got the oversized-statement note: %s", d.Note)
+	}
+	if d.NextOffset != 0 {
+		t.Errorf("the last chunk offers a next offset: %d", d.NextOffset)
+	}
+}
+
+// "chunk i of n" is computed on the ASKED limit and only while the walk is
+// uniform: dividing by what was given said "chunk 6 of 6" on the third and
+// last of three pages.
+func TestChunkNote_ordinalCountsTheAskedLimit(t *testing.T) {
+	// 12 statements, sql_limit 5: pages 1-5, 6-10, 11-12. The last page is
+	// short, and 10 % 2 == 0 would have made it "chunk 6 of 6".
+	last := chunkNote(10, 12, 12, 5, 2, "abc123def456")
+	if !strings.Contains(last, "chunk 3 of 3") {
+		t.Errorf("the short last page lost or miscounted its ordinal: %q", last)
+	}
+	if strings.Contains(last, "reduced") {
+		t.Errorf("the short last page claims a size reduction: %q", last)
+	}
+	// A page the cap cut short mid-walk offers no ordinal: later offsets are
+	// no longer multiples of the asked limit.
+	cut := chunkNote(0, 3, 12, 5, 3, "abc123def456")
+	if strings.Contains(cut, "at this sql_limit") {
+		t.Errorf("a cap-reduced page got an ordinal it cannot support: %q", cut)
+	}
+	if !strings.Contains(cut, "reduced to 3") {
+		t.Errorf("a cap-reduced page does not say so: %q", cut)
+	}
+	// A ragged final page (offset 9 is no multiple of the asked 5, gave 3)
+	// has no ordinal either, even though 9 happens to divide by what was
+	// given.
+	ragged := chunkNote(9, 12, 12, 5, 3, "abc123def456")
+	if strings.Contains(ragged, "at this sql_limit") {
+		t.Errorf("a ragged last page got an ordinal computed on what it gave: %q", ragged)
+	}
+}
+
+// The cap is measured on what crosses the wire: the chunk rides a JSON
+// string, and escaping grows it (every backslash doubles). A script whose raw
+// bytes fit but whose escaped bytes do not is withheld, and asked for by
+// chunk it comes back alone with the oversized note.
+func TestDeliverScript_sizesTheChunkOnTheWire(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("BEGIN;\n")
+	b.WriteString("INSERT INTO `t` VALUES ('" + strings.Repeat(`\`, InlineScriptBytes*3/5) + "');\n")
+	e1 := b.Len()
+	b.WriteString("DELETE FROM `t` WHERE `id` = 1;\n")
+	e2 := b.Len()
+	b.WriteString("COMMIT;\n")
+	text := b.String()
+	if len(text) > InlineScriptBytes || wireLen(text) <= InlineScriptBytes {
+		t.Fatalf("fixture must fit raw (%d) and not on the wire (%d)", len(text), wireLen(text))
+	}
+	d, err := deliverScript(cascadeCLI, text, []int{e1, e2}, false, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Served {
+		t.Fatalf("a script over the cap on the wire was served inline (%d raw, %d wire)", len(text), wireLen(text))
+	}
+	d, err = deliverScript(cascadeCLI, text, []int{e1, e2}, false, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.To != 1 || !d.More {
+		t.Fatalf("the escaped-oversized statement was not paged alone: %+v", d)
+	}
+	if !strings.Contains(d.Note, "on the wire") {
+		t.Errorf("the oversized note does not explain the wire size: %s", d.Note)
+	}
+}
+
+// The trailer rides the last page and counts toward its size, so two
+// statements that end just under the cap do not overflow it with COMMIT and
+// the appended notes; and the note never blames a single statement for what
+// the trailer did.
+func TestDeliverScript_lastPageCountsTheTrailer(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("BEGIN;\n")
+	stmt := "INSERT INTO `t` VALUES ('" + strings.Repeat("x", InlineScriptBytes/2-40) + "');\n"
+	b.WriteString(stmt)
+	e1 := b.Len()
+	b.WriteString(stmt)
+	e2 := b.Len()
+	b.WriteString("\nCOMMIT;\n-- 2 reversal statement(s) generated.\n")
+	text := b.String()
+	if e2 > InlineScriptBytes || len(text) <= InlineScriptBytes {
+		t.Fatalf("fixture must fit without the trailer (%d) and not with it (%d)", e2, len(text))
+	}
+	d, err := deliverScript(cascadeCLI, text, []int{e1, e2}, false, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Served {
+		t.Fatal("served inline although the trailer pushes it over the cap")
+	}
+	d, err = deliverScript(cascadeCLI, text, []int{e1, e2}, false, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.To != 1 || !d.More || strings.Contains(d.Note, "cannot be split further") {
+		t.Fatalf("the trailer was not counted on the last page, or a statement was blamed for it: %+v", d)
+	}
+}
+
+// An explicit page over a script with no statements is refused whichever of
+// the two parameters made it explicit.
+func TestDeliverScript_offsetAloneOnNoStatementsIsRefused(t *testing.T) {
+	const noEvents = "-- No events matched the specified criteria.\n"
+	if _, err := deliverScript(cascadeCLI, noEvents, nil, false, 1, 0); err == nil {
+		t.Error("sql_offset alone on a statement-less script was not refused")
+	}
+}
+
+// A shrunken script (the build moved) lands on the past-the-end refusal; it
+// carries the script id, the client's first chance to see why.
+func TestDeliverScript_pastTheEndNamesTheScriptID(t *testing.T) {
+	text, ends := buildFixture(3)
+	_, err := deliverScript(cascadeCLI, text, ends, false, 7, 1)
+	if err == nil || !strings.Contains(err.Error(), scriptFingerprint(text)) {
+		t.Errorf("the past-the-end refusal does not carry the script id: %v", err)
+	}
+}
+
+// The fingerprint skips exactly one stamp line, by position: a captured value
+// that starts a line with the same prefix is content and must change the id.
+// The two scripts here differ ONLY inside that mimicking line, so a
+// fingerprint that skipped every matching line would call them the same.
+func TestScriptFingerprint_skipsOnlyTheFirstStampLine(t *testing.T) {
+	text, _ := buildFixture(2)
+	mimic := func(when string) string {
+		return strings.Replace(text, "DELETE FROM `t` WHERE `id` = 1;\n",
+			"UPDATE `t` SET `note` = 'x\n-- Generated by bintrail recover at "+when+"' WHERE `id` = 1;\n", 1)
+	}
+	a, b := mimic("1999-01-01 00:00:00 UTC"), mimic("2000-01-01 00:00:00 UTC")
+	if a == b || a == text {
+		t.Fatal("fixture unchanged")
+	}
+	if scriptFingerprint(a) == scriptFingerprint(b) {
+		t.Error("a value line that mimics the stamp was excluded from the fingerprint")
+	}
+	// And the real stamp line is still excluded: the same content a second
+	// apart shares an id.
+	c := strings.Replace(a, "2026-09-02 10:00:00 UTC", "2026-09-02 10:00:01 UTC", 1)
+	if scriptFingerprint(a) != scriptFingerprint(c) {
+		t.Error("the generator's own stamp line changed the fingerprint")
 	}
 }

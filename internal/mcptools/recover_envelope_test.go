@@ -118,12 +118,14 @@ func TestRecoverTool_auditFollowsTheBytes(t *testing.T) {
 	}
 
 	_, cfg = twoInsertRows(t)
-	MakeRecoverTool(cfg)(ctx, nil, RecoverArgs{Schema: "app", Table: "users", SQLOffset: 1, SQLLimit: 1})
+	// Offset 0 of 2: From, To and n differ, so the range cannot pass by
+	// coincidence with the wrong field in a slot.
+	MakeRecoverTool(cfg)(ctx, nil, RecoverArgs{Schema: "app", Table: "users", SQLOffset: 0, SQLLimit: 1})
 	events := rec.Events()
 	if len(events) != 1 || events[0].Action != "recover.generate" {
 		t.Fatalf("a chunk fetch recorded %+v, want one recover.generate", events)
 	}
-	if got := events[0].Detail["chunk"]; got != "statements 2-2 of 2" {
+	if got := events[0].Detail["chunk"]; got != "statements 1-1 of 2" {
 		t.Errorf("chunk range in the audit detail = %q", got)
 	}
 	if events[0].Detail["script_id"] == "" {

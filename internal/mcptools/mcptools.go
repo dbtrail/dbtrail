@@ -1044,6 +1044,9 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		// What this response carries of the script (#1438). The notes appended
 		// above sit past the last statement's end offset, so they ride the FINAL
 		// chunk and concatenating the chunks reproduces `text` exactly.
+		if len(stmtEnds) != n {
+			return ErrorResult(fmt.Errorf("internal error: %d reversal statement(s) rendered but %d statement offset(s) recorded; refusing to page the script. Call again without sql_offset/sql_limit, or write it whole from the CLI, and report this", n, len(stmtEnds))), nil, nil
+		}
 		script, serr := deliverScript("bintrail recover", text, stmtEnds, args.SummaryOnly, args.SQLOffset, args.SQLLimit)
 		if serr != nil {
 			return ErrorResult(serr), nil, nil

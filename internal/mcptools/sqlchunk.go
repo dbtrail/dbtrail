@@ -3,6 +3,7 @@ package mcptools
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -59,8 +60,13 @@ type scriptDelivery struct {
 // case a client must not concatenate across.
 func scriptFingerprint(text string) string {
 	h := sha256.New()
+	skipped := false
 	for line := range strings.SplitSeq(text, "\n") {
-		if strings.HasPrefix(line, generatedAtPrefix) {
+		// Only the FIRST such line is the generator's stamp; a captured value
+		// that happens to start a line with the same prefix (PostgreSQL
+		// literals carry raw newlines) is content and stays in the hash.
+		if !skipped && strings.HasPrefix(line, generatedAtPrefix) {
+			skipped = true
 			continue
 		}
 		h.Write([]byte(line))
@@ -100,8 +106,12 @@ func deliverScript(cli, text string, ends []int, summaryOnly bool, offset, limit
 	// concatenation of the chunks STILL equals the script — any increasing
 	// offset list reassembles. This is the check that sees it, and it refuses
 	// rather than serving a chunk that starts inside a comment or a value.
-	if err := checkStatementEnds(text, ends); err != nil {
-		return d, err
+	// Only a cut depends on the offsets: a whole return or a summary is served
+	// regardless, so a bad list never takes the non-chunked paths down too.
+	if explicit {
+		if err := checkStatementEnds(text, ends); err != nil {
+			return d, err
+		}
 	}
 
 	if offset < 0 || limit < 0 {
@@ -111,7 +121,10 @@ func deliverScript(cli, text string, ends []int, summaryOnly bool, offset, limit
 		return d, fmt.Errorf("this recovery generated no statements, so there is nothing to page through; call again without sql_offset/sql_limit")
 	}
 	if offset >= total && total > 0 {
-		return d, fmt.Errorf("sql_offset %d is past the end of the script: it has %d statement(s), so the last valid sql_offset is %d", offset, total, total-1)
+		// The id rides the refusal: a script that SHRANK between two chunk
+		// calls lands here, and this is the client's first chance to see that
+		// the build moved rather than that it miscounted.
+		return d, fmt.Errorf("sql_offset %d is past the end of the script: it has %d statement(s), so the last valid sql_offset is %d (script id %s; if your earlier chunks carry a different id, the build moved and the fetch must restart at sql_offset 0)", offset, total, total-1, d.ScriptID)
 	}
 
 	if summaryOnly {
@@ -129,7 +142,7 @@ func deliverScript(cli, text string, ends []int, summaryOnly bool, offset, limit
 		return d, nil
 	}
 
-	if !explicit && len(text) <= InlineScriptBytes {
+	if !explicit && wireLen(text) <= InlineScriptBytes {
 		d.SQL, d.Served = text, true
 		d.From, d.To = 1, total
 		return d, nil
@@ -144,20 +157,29 @@ func deliverScript(cli, text string, ends []int, summaryOnly bool, offset, limit
 		return d, nil
 	}
 
-	// How many statements fit the response cap from here. At least one, always:
-	// a single statement larger than the cap is still the only way to ever see
-	// it, and the note then says the response is over the usual size (see the
-	// oversized clause below).
+	// How many statements fit the response cap from here, measured as the
+	// bytes that CROSS THE WIRE (the chunk rides a JSON string, and escaping
+	// grows it: every newline and backslash doubles, `<` becomes six bytes),
+	// with the trailer counted on the last page since it rides that chunk. At
+	// least one statement, always: a single statement larger than the cap is
+	// still the only way to ever see it, and the note then says the response
+	// is over the usual size (see the oversized clause below).
 	start := 0
 	if offset > 0 {
 		start = ends[offset-1]
 	}
-	fits := 0
+	fits, acc, prev := 0, 0, start
 	for i := offset; i < total; i++ {
-		if ends[i]-start > InlineScriptBytes && fits > 0 {
+		segEnd := ends[i]
+		if i == total-1 {
+			segEnd = len(text)
+		}
+		acc += wireLen(text[prev:segEnd])
+		if acc > InlineScriptBytes && fits > 0 {
 			break
 		}
 		fits++
+		prev = segEnd
 	}
 	want := limit
 	if want == 0 || want > fits {
@@ -176,11 +198,27 @@ func deliverScript(cli, text string, ends []int, summaryOnly bool, offset, limit
 		d.NextOffset = last
 	}
 	d.Note = chunkNote(offset, last, total, limit, want, d.ScriptID)
-	if end-start > InlineScriptBytes {
-		d.Note += fmt.Sprintf(". This chunk is %d bytes, over the usual %d-byte response size, because one statement alone is that large; it cannot be split further",
-			end-start, InlineScriptBytes)
+	// Only a lone statement can be over the cap here: the fits loop measures
+	// every page on the wire, trailer included, and stops before overflowing
+	// unless the first statement alone already does.
+	if wireLen(d.SQL) > InlineScriptBytes {
+		d.Note += fmt.Sprintf(". This chunk is %d bytes on the wire, over the usual %d-byte response size: one statement (with the closing lines, on the last chunk) cannot be split further",
+			wireLen(d.SQL), InlineScriptBytes)
 	}
 	return d, nil
+}
+
+// wireLen is the size of s once it sits inside the JSON envelope: the escaped
+// string body, without the quotes. It is what a client's result cap actually
+// sees, and it can be well over len(s) for HTML-heavy or newline-heavy rows.
+// Escaping is per character, so the wire length of a concatenation is the sum
+// of its parts, which is what lets the fits loop accumulate per statement.
+func wireLen(s string) int {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return len(s) // unreachable for a Go string; never smaller than the raw size
+	}
+	return len(b) - 2
 }
 
 // checkStatementEnds verifies that every recorded statement end sits just
@@ -206,13 +244,14 @@ func checkStatementEnds(text string, ends []int) error {
 func chunkNote(offset, last, total, askedLimit, gave int, id string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "statements %d-%d of %d (script id %s)", offset+1, last, total, id)
-	if i, n, ok := chunkOrdinal(offset, gave, total); ok {
+	if i, n, ok := chunkOrdinal(offset, askedLimit, gave, last, total); ok {
 		fmt.Fprintf(&b, ", chunk %d of %d at this sql_limit", i, n)
 	}
-	// "Reduced" only when the size cap cut the page short. On the last chunk
-	// gave < askedLimit merely because the script ended, and saying the cap
-	// did it would send a client looking for bytes that never existed.
-	if askedLimit > 0 && gave < askedLimit && offset+askedLimit <= total {
+	// "Reduced" only when the size cap cut the page short: fewer than asked
+	// AND fewer than remained. On the last chunk gave < askedLimit merely
+	// because the script ended, and saying the cap did it would send a client
+	// looking for bytes that never existed.
+	if avail := total - offset; askedLimit > 0 && gave < min(askedLimit, avail) {
 		fmt.Fprintf(&b, ". sql_limit %d was reduced to %d so the response fits its size limit; nothing was dropped",
 			askedLimit, gave)
 	}
@@ -228,13 +267,20 @@ func chunkNote(offset, last, total, askedLimit, gave int, id string) string {
 }
 
 // chunkOrdinal is the "chunk i of n" framing, reported only where it is true.
-// It is well defined solely when the pages are uniform, and a client is free
-// to change sql_limit between calls: with a first page of 300 and a second of
-// 50 there is no honest i of n, so none is offered rather than one computed
-// from an assumption the caller never made.
-func chunkOrdinal(offset, gave, total int) (int, int, bool) {
-	if gave <= 0 || offset%gave != 0 {
+// It is well defined solely when the pages are uniform at the ASKED limit: a
+// client is free to change sql_limit between calls (a first page of 300 and a
+// second of 50 have no honest i of n), and a page the size cap cut short
+// breaks the grid for every later offset. Dividing by what was GIVEN instead
+// produced "chunk 6 of 6" on the third and last of three pages, whenever the
+// short tail happened to divide the offset. Once a reduction happens
+// mid-walk the ordinal simply disappears for the rest of the fetch; the
+// statement range carries the progress on its own.
+func chunkOrdinal(offset, askedLimit, gave, last, total int) (int, int, bool) {
+	if askedLimit <= 0 || offset%askedLimit != 0 {
 		return 0, 0, false
 	}
-	return offset/gave + 1, (total + gave - 1) / gave, true
+	if gave != askedLimit && last != total {
+		return 0, 0, false
+	}
+	return offset/askedLimit + 1, (total + askedLimit - 1) / askedLimit, true
 }
