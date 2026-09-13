@@ -813,6 +813,14 @@ func writeHeader(b *strings.Builder, in Input) {
 		b.WriteString("--   (no baseline source given: pass --baseline-dir or --baseline-s3)\n")
 	case len(in.Baselines) == 0:
 		fmt.Fprintf(b, "--   (none discoverable under %s)\n", commentSafe(in.BaselineSource))
+		if in.BaselineUnreadable > 0 {
+			// "None discoverable" over a directory that could not be opened
+			// is the issue's shape at its worst: the file asserts no backup is
+			// there while one exists (#1601).
+			fmt.Fprintf(b, "--   NOTE: %d snapshot director(y/ies) under this location could not be read\n"+
+				"--   (the log has the error), so a snapshot may exist there that this file\n"+
+				"--   does not name.\n", in.BaselineUnreadable)
+		}
 	case in.SnapshotScoped && in.BaselineSource == ".":
 		// The tarball's copy (#1583): paths spelled "./schema/table.parquet".
 		// Guarded by INTENT, not by the path value alone: `bintrail views
@@ -845,7 +853,7 @@ func writeHeader(b *strings.Builder, in Input) {
 			// snapshot in a directory the console could not read would then
 			// be found by nobody.
 			fmt.Fprintf(b, "--   NOTE: %d snapshot director(y/ies) under this location could not be read\n"+
-				"--   (the console log has the error), so a newer snapshot than the one pinned\n"+
+				"--   (the log has the error), so a newer snapshot than the one pinned\n"+
 				"--   above may exist there.\n", in.BaselineUnreadable)
 		}
 		switch {

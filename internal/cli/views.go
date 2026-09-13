@@ -384,10 +384,14 @@ func resolveBaselineViews(ctx context.Context, in *views.Input) error {
 	}
 	in.BaselineSource = src
 
-	files, err := reconstruct.ListBaselines(ctx, src)
+	files, skipped, err := reconstruct.ListBaselinesReport(ctx, src)
 	if err != nil {
 		return fmt.Errorf("list baseline snapshots under %s: %w", src, err)
 	}
+	// A directory the walk could not open is skipped and counted (#1601);
+	// the header says so, since a file that pins a snapshot and says nothing
+	// reads as "this is the newest one here".
+	in.BaselineUnreadable = skipped
 	if len(files) == 0 {
 		return nil
 	}

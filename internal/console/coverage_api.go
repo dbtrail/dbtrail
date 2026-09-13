@@ -438,7 +438,7 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 		// directories skipped is a partial answer too: reconstruct now reports
 		// the skips, so this guard sees them.
 		if merged.Listed < len(merged.Sources) || merged.Listed == 0 || merged.Skipped > 0 {
-			slog.Warn("console: coverage card could not list every backup location; the verdict is unknown rather than graded against a partial view",
+			slog.Warn("console: coverage card could not list every backup location in full; the verdict is unknown rather than graded against a partial view",
 				"server", serverID(r), "listed", merged.Listed, "configured", len(merged.Sources), "unreadable_directories", merged.Skipped)
 			resp.FullTableStatus = "unknown"
 			break

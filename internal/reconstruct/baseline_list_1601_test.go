@@ -13,6 +13,11 @@ import (
 func unreadable(t *testing.T, dir string) {
 	t.Helper()
 	if os.Geteuid() == 0 {
+		// Under CI a root runner would turn every #1601 test green by skip
+		// with no signal; fail there so the loss of coverage is seen.
+		if os.Getenv("CI") != "" {
+			t.Fatal("running as root under CI: the mode-000 fixture is a no-op and this coverage would silently vanish")
+		}
 		t.Skip("root bypasses directory read permissions; the mode-000 fixture is a no-op")
 	}
 	if err := os.Chmod(dir, 0); err != nil {

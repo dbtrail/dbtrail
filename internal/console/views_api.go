@@ -115,6 +115,7 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		}
 	}
 	baseSrc := b.baselineSrc
+	baseUnreadable := 0
 	if req.PortableBaseline && b.baselineFallbackSrc != "" {
 		// Read from the bundle, never from the request: the two locations this
 		// server actually has are the only two it can be asked for, so a
@@ -131,6 +132,7 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		// snapshot this file pins may not be the newest one there. Carried
 		// into the header, since silence reads as "this is the newest".
 		in.BaselineUnreadable = skipped
+		baseUnreadable = skipped
 		if len(files) > 0 {
 			newest := files[0].SnapshotTime // ListBaselines returns newest first
 			in.BaselineSnapshot = newest
@@ -149,11 +151,8 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 					// question for THIS purpose (#1601): the snapshot it could
 					// not read may be the newer one. A newer snapshot it DID
 					// read is still reported below, as the more useful fact.
-					if oerr == nil {
-						oerr = fmt.Errorf("%d unreadable snapshot director(y/ies) skipped", oskipped)
-					}
-					slog.Warn("console: could not check the other backup location for a newer snapshot; the generated file says the check did not answer",
-						"source", other, "error", oerr)
+					slog.Warn("console: could not check the other backup location in full for a newer snapshot; the generated file says the check did not answer",
+						"source", other, "error", oerr, "unreadable_directories", oskipped)
 					// Carried into the file, not swallowed: a header that says
 					// nothing reads as "the other location holds nothing
 					// newer", and that reader stops looking.
@@ -198,6 +197,12 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 		}
 	}
 	if len(in.ArchiveSources) == 0 && len(in.Baselines) == 0 {
+		if baseUnreadable > 0 {
+			// Not "nothing here": the location holds snapshot directories
+			// this process could not open (#1601). "No baseline yet" would
+			// send the operator to take a backup they already have.
+			return views.Input{}, fmt.Errorf("list baselines: %d snapshot director(y/ies) under %s could not be read (the console log has the error); nothing readable to generate views over", baseUnreadable, baseSrc)
+		}
 		if archiveErr != nil {
 			// Not "nothing archived": the registry could not be read, and
 			// with no baseline half to carry the file there is nothing

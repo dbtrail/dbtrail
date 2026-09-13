@@ -18,6 +18,11 @@ import (
 func unreadableDir(t *testing.T, dir string) {
 	t.Helper()
 	if os.Geteuid() == 0 {
+		// Under CI a root runner would turn every #1601 test green by skip
+		// with no signal; fail there so the loss of coverage is seen.
+		if os.Getenv("CI") != "" {
+			t.Fatal("running as root under CI: the mode-000 fixture is a no-op and this coverage would silently vanish")
+		}
 		t.Skip("root bypasses directory read permissions; the mode-000 fixture is a no-op")
 	}
 	if err := os.Chmod(dir, 0); err != nil {
@@ -158,5 +163,49 @@ func TestViewsFile_namesAPartiallyReadableOwnLocation(t *testing.T) {
 	}
 	if !strings.Contains(sql, "under this location could not be read") {
 		t.Errorf("the header does not say the location was read in part:\n%s", firstLines(sql, 25))
+	}
+}
+
+// A newer snapshot the other location DID list is still named, even when a
+// directory beside it could not be read: the found fact is the more useful
+// one, and "could not be read" would send the operator looking for a
+// snapshot the header already knows.
+func TestViewsFile_newerSnapshotReadBesideAnUnreadableOne(t *testing.T) {
+	local, bucketish := t.TempDir(), t.TempDir()
+	writeBaselineFixture(t, local, "2026-06-03T12-00-00Z", "shop", "orders.parquet")
+	writeBaselineFixture(t, bucketish, "2026-06-10T12-00-00Z", "shop", "orders.parquet")
+	writeBaselineFixture(t, bucketish, "2026-06-12T12-00-00Z", "shop", "orders.parquet")
+	unreadableDir(t, filepath.Join(bucketish, "2026-06-12T12-00-00Z"))
+
+	srv := newBaselineServerWithFallback(t, local, bucketish)
+	rec, body := doServersReq(t, srv, "GET", "/api/views.sql", "")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d, body = %s", rec.Code, firstLines(string(body), 8))
+	}
+	sql := string(body)
+	if !strings.Contains(sql, "NOTE: a newer snapshot") || !strings.Contains(sql, "2026-06-10T12:00:00Z") {
+		t.Errorf("a newer snapshot that WAS read is not named:\n%s", firstLines(sql, 25))
+	}
+	if strings.Contains(sql, "holds a newer snapshot could not be read") {
+		t.Errorf("the header says the check did not answer although it found a newer snapshot:\n%s", firstLines(sql, 25))
+	}
+}
+
+// When EVERY snapshot directory under the file's own location is unreadable
+// and nothing is archived, the answer is not "no baseline yet" (which sends
+// the operator to take a backup they already have) but a refusal naming the
+// unreadable count.
+func TestViewsFile_allUnreadableIsNotNothingHere(t *testing.T) {
+	local := t.TempDir()
+	writeBaselineFixture(t, local, "2026-06-10T12-00-00Z", "shop", "orders.parquet")
+	unreadableDir(t, filepath.Join(local, "2026-06-10T12-00-00Z"))
+
+	srv := newBaselineServerWithFallback(t, local, "")
+	rec, body := doServersReq(t, srv, "GET", "/api/views.sql", "")
+	if rec.Code == 404 || rec.Code == 200 {
+		t.Fatalf("code = %d, body = %s; an unreadable location must be neither \"nothing here\" nor a file", rec.Code, firstLines(string(body), 8))
+	}
+	if !strings.Contains(string(body), "could not be read") {
+		t.Errorf("the refusal does not name the unreadable directory: %s", body)
 	}
 }
