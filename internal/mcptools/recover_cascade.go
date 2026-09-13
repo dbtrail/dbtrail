@@ -338,11 +338,12 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 			results := make([]cascade.Result, 0, len(groups))
 			for _, g := range groups {
 				r, serr := cascade.SynthesizeVictims(ctx, eng, g.FKs, g.Roots, cascade.Options{
-					Lookback:        lookback,
-					MaxDepth:        maxDepth,
-					Baseline:        baselineProvider,
-					ArchivesPresent: archivesExist,
-					PKMetas:         cascade.PKMetasFromResolver(resolver),
+					Lookback:             lookback,
+					MaxDepth:             maxDepth,
+					Baseline:             baselineProvider,
+					ArchivesPresent:      archivesExist,
+					LiveWindowContiguous: cascade.LiveWindowProbe(t.DB, t.DBName),
+					PKMetas:              cascade.PKMetasFromResolver(resolver),
 				})
 				results = append(results, r)
 				if serr != nil {

@@ -429,11 +429,12 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 		results := make([]cascade.Result, 0, len(groups))
 		for _, g := range groups {
 			r, serr := cascade.SynthesizeVictims(ctx, b.engine, g.FKs, g.Roots, cascade.Options{
-				Lookback:        p.Lookback,
-				MaxDepth:        p.MaxDepth,
-				Baseline:        baselineProvider,
-				ArchivesPresent: archivesExist,
-				PKMetas:         cascade.PKMetasFromResolver(b.resolver),
+				Lookback:             p.Lookback,
+				MaxDepth:             p.MaxDepth,
+				Baseline:             baselineProvider,
+				ArchivesPresent:      archivesExist,
+				LiveWindowContiguous: cascade.LiveWindowProbe(b.db, b.dbName),
+				PKMetas:              cascade.PKMetasFromResolver(b.resolver),
 			})
 			results = append(results, r)
 			if serr != nil {

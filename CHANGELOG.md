@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   captured it. The window advice is spelled `since/until` rather than `--since`,
   because this error is raised inside `GenerateSQLFromRows` and so reaches MCP
   and console clients too, and an agent handed a CLI flag cannot pass it.
+### Fixed
+- `recover-cascade` (CLI, MCP and the console) skipped baseline augmentation whenever the index had ANY archived partition, even one from months ago that could not touch the `[snapshot, T]` window, and the child scan was then confined to that window. With frequent backups (a snapshot landing between the children's INSERTs and the parent DELETE) this returned the parent row alone while every child sat in both the live index and the baseline. The gate now asks whether the live partitions hold every hour of `[snapshot, T]` (`query.LiveWindowContiguous`; a failing check skips, never passes, and a surface without the check keeps the old any-archive-skips rule), and when augmentation IS skipped the scan falls back to the plain `[T-lookback, T]` Phase-1 window instead of `[snapshot, T]`. The caveat now says which of the three happened. The probe runs whether or not an archive is registered, so two windows that used to be trusted silently are now skipped and flagged: rotation that drops partitions without archiving, and a baseline snapshot older than the oldest live partition (hours the index never held). It also treats a permanent capture loss stamped inside the window (`stream_state.gap_lost_at`) as a gap. (#1615, first half; the cascade scan still does not read Parquet archives.)
 
 ## [0.81.0] - 2026-09-10
 

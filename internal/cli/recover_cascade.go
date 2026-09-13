@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/ext"
@@ -246,6 +247,14 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	//     otherwise every archived deployment trips INCOMPLETE on every run and
 	//     --allow-incomplete becomes routine, masking the real coverage gaps.
 	archivesExist := false
+	var liveWindow func(context.Context, time.Time, time.Time) (bool, error)
+	if cfg, perr := mysqldriver.ParseDSN(rcIndexDSN); perr != nil {
+		slog.Warn("could not parse the index DSN; the cascade live-window check is off and any archive skips baseline augmentation (#1615)", "error", perr)
+	} else if cfg.DBName == "" {
+		slog.Warn("index DSN carries no database name; the cascade live-window check is off and any archive skips baseline augmentation (#1615)")
+	} else {
+		liveWindow = cascade.LiveWindowProbe(db, cfg.DBName)
+	}
 	if archives, aerr := query.ResolveArchiveSources(cmd.Context(), db); aerr != nil {
 		caveats = append(caveats, "could not determine whether archived partitions exist (probe failed: "+aerr.Error()+"); coverage is unknown")
 	} else if len(archives) > 0 {
@@ -296,11 +305,12 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 		results := make([]cascade.Result, 0, len(groups))
 		for _, g := range groups {
 			r, serr := cascade.SynthesizeVictims(cmd.Context(), eng, g.FKs, g.Roots, cascade.Options{
-				Lookback:        lookback,
-				MaxDepth:        rcMaxDepth,
-				Baseline:        baselineProvider,
-				ArchivesPresent: archivesExist,
-				PKMetas:         cascade.PKMetasFromResolver(resolver),
+				Lookback:             lookback,
+				MaxDepth:             rcMaxDepth,
+				Baseline:             baselineProvider,
+				ArchivesPresent:      archivesExist,
+				LiveWindowContiguous: liveWindow,
+				PKMetas:              cascade.PKMetasFromResolver(resolver),
 			})
 			results = append(results, r)
 			if serr != nil {
