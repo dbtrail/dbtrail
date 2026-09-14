@@ -1,4 +1,4 @@
-# dbtrail — Upload Command
+# DBTrail — Upload Command
 
 The `bintrail upload` command uploads local Parquet files to S3, independently of the pipeline that generated them. This is useful when files were created by `baseline` or `rotate --archive-dir` without the S3 flags — for example, because the network was down, AWS credentials weren't configured, or S3 wasn't needed at the time.
 

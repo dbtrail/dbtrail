@@ -75,7 +75,7 @@ die()  { { cerr; printf 'ERROR:'; crst; printf ' %s\n' "$*"; } >&2; exit 1; }
 # violet, #FF4D8D → #FF8A3D → #7C5CFF) topped by a gold "sun" node on a
 # gradient bar. Per-char gradient in truecolor/256; a flat bold accent in basic.
 sunset_word() {
-  word=dbtrail; n=${#word}; i=0
+  word=DBTrail; n=${#word}; i=0
   while [ "$i" -lt "$n" ]; do
     ch=$(printf '%s' "$word" | cut -c $((i + 1)))
     t=$(( i * 100 / (n - 1) ))           # position 0..100 along the gradient
@@ -232,13 +232,13 @@ fi
 
 # ── 5. next steps — the whole point of this script ──────────────────────
 say ""
-fg 14 170 110 32; printf '%s✓ dbtrail is up.%s\n' "$B" "$RST"   # green check
+fg 14 170 110 32; printf '%s✓ DBTrail is up.%s\n' "$B" "$RST"   # green check
 say ""
 say "${B}Next steps${RST}"
 say "  ${B}1.${RST} Open the console:    ${B}${CONSOLE_URL}${RST}"
 say "  ${B}2.${RST} Create your console ${B}username + password${RST} (first-run screen)."
 say "  ${B}3.${RST} Click ${B}+ Add server${RST} and paste the MySQL you want to watch —"
-say "     host, user, password. dbtrail runs the preflight, provisions an"
+say "     host, user, password. DBTrail runs the preflight, provisions an"
 say "     index for it, and starts streaming. Watch it from a MySQL on this"
 say "     same machine? Use host ${B}host.docker.internal${RST}."
 say ""

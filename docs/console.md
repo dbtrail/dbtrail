@@ -230,7 +230,7 @@ no page of their own show no link.
 ## Managing servers
 
 The header has a server switcher and a **Servers** button: add, edit, and
-remove named connections to dbtrail index databases, and switch every view
+remove named connections to DBTrail index databases, and switch every view
 between them. The registry is a **local YAML file on the console host**
 (`~/.config/bintrail/console-servers.yaml` by default, override with
 `--servers-file` / `BINTRAIL_CONSOLE_SERVERS`) — adding a server registers a
@@ -273,7 +273,7 @@ How it behaves:
   single-baseline-dir deployment without extra configuration.
 - **Test connection.** Each server (saved or being typed) has a write-free
   probe: ping, MySQL version, latency, whether the database looks like a
-  dbtrail index, and whether its schema is current.
+  DBTrail index, and whether its schema is current.
 
 Security notes specific to the registry:
 
@@ -299,7 +299,7 @@ Security notes specific to the registry:
   everything else.
 
 The registry file is versioned and forward-compatible: fields written by a
-newer dbtrail survive load→edit→save round-trips on an older binary, and a
+newer DBTrail survive load→edit→save round-trips on an older binary, and a
 file written by a newer *schema* version loads read-only rather than being
 rewritten lossily.
 
@@ -317,7 +317,7 @@ immediately; warnings (e.g. short binlog retention) show but don't block.
 
 The **source user** you paste into the form needs `REPLICATION SLAVE,
 REPLICATION CLIENT, SELECT` on the source MySQL — the form spells out the
-exact `CREATE USER` / `GRANT` to copy. dbtrail never writes to the source, and
+exact `CREATE USER` / `GRANT` to copy. DBTrail never writes to the source, and
 capture never locks it. The **Create backup** button needs one privilege
 more, `LOCK TABLES`, because a baseline is point-consistent by default; without
 it capture keeps running and only the baseline is refused, naming the exact
@@ -535,7 +535,7 @@ an empty Backup dir field, indistinguishable from a server with no backup
 location at all.
 
 The page shows the three kinds of setting instead of describing them (#1603).
-Two section labels split it: **Change here** and **Set when dbtrail starts**.
+Two section labels split it: **Change here** and **Set when DBTrail starts**.
 
 - **Backups & disk space** (change here) — the carry-forward toggle, moved
   here from the Backups page; it applies live. What it does is drawn: two
@@ -559,7 +559,7 @@ Two section labels split it: **Change here** and **Set when dbtrail starts**.
   rule (#1622), schedule or not, since the Create backup button, a restore
   and the daemon-wide refresh upload too: about how many full backups
   reach the bucket every 30 days at the schedule's rate (or that every one
-  stays, without a schedule), and that dbtrail never removes one. Under
+  stays, without a schedule), and that DBTrail never removes one. Under
   **Bucket rule to expire old backups** the page generates a lifecycle rule
   scoped to the backup prefix only, with the two commands to read the
   bucket's current rules and to apply the merged set, and says what such a
@@ -577,7 +577,7 @@ Two section labels split it: **Change here** and **Set when dbtrail starts**.
   written. The rule also expires noncurrent versions after the same number
   of days, since on a versioned bucket an expiration alone only writes a
   delete marker; under an Object Lock retention nothing expires before it
-  ends. dbtrail itself never deletes from S3 and never sets a bucket rule;
+  ends. DBTrail itself never deletes from S3 and never sets a bucket rule;
   the rule is the operator's to apply.
 - **Set at startup** — the nine daemon-wide values (`--baseline-dir`,
   `--baseline-s3`, `--baseline-retain`, `--baseline-refresh-interval`,
@@ -712,7 +712,7 @@ works and lands on Retention.
   Iceberg copy of each table from the same baseline plus the change history
   (archives and live index), kept current run after run; it is a scheduler command, not a console feature, and it
   never runs inside `watch`. See [Iceberg export](iceberg-export.md).
-- **Usage telemetry** — the current state of dbtrail's metadata-only usage
+- **Usage telemetry** — the current state of DBTrail's metadata-only usage
   telemetry and a one-click opt-out. Turning it off stops this `watch` daemon's
   beacons immediately (no restart) and records the machine-wide choice, exactly
   like `bintrail telemetry off`. When an environment variable (`DO_NOT_TRACK`,
@@ -895,7 +895,7 @@ A running server accepts it on the next login; no restart needed.
   shell first.
 - The credential lives in a 0600 YAML file (`version`, `username`, a
   bcrypt-cost-12 `password_bcrypt`, `updated_at`) — same envelope and atomic
-  write as the server registry. One user; multi-user/RBAC/SSO is dbtrail.
+  write as the server registry. One user; multi-user/RBAC/SSO is DBTrail.
 - A successful login (or first-run setup) mints an **in-memory session token**
   (24 h absolute, 8 h idle, max 16 concurrent) the SPA uses as its Bearer
   credential. Sessions die on logout, on password change (which revokes all

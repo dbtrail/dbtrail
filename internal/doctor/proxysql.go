@@ -21,7 +21,7 @@ const (
 	proxySQLRuleIDLast  = 990006
 )
 
-const proxySQLRulesRemediation = "Re-apply the dbtrail routing rules and persist them across ProxySQL restarts:\n\n" +
+const proxySQLRulesRemediation = "Re-apply the DBTrail routing rules and persist them across ProxySQL restarts:\n\n" +
 	"  bintrail proxysql-config --out proxysql-setup.sql\n" +
 	"  mysql -u admin -p -h <proxysql-host> -P 6032 < proxysql-setup.sql\n\n" +
 	"The generated script LOADs the rules to runtime and SAVEs them to disk.\n" +

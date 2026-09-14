@@ -1,19 +1,19 @@
 # DDL Tracking and Auto-Snapshot
 
-This page explains how dbtrail detects DDL statements (schema changes) in the binlog stream, automatically takes new schema snapshots, and tracks restore coverage so you know what can be recovered and how far back.
+This page explains how DBTrail detects DDL statements (schema changes) in the binlog stream, automatically takes new schema snapshots, and tracks restore coverage so you know what can be recovered and how far back.
 
 ---
 
 ## The Problem
 
-dbtrail maps binlog row events to column names using a schema snapshot — a point-in-time copy of `information_schema.COLUMNS` stored in the index database (see [indexing.md](indexing.md) for details). When someone runs `ALTER TABLE` on the source, the snapshot becomes stale: new columns don't have names, removed columns cause mismatches, and the parser starts skipping events. (In stream mode those skips are warn-only; file-based `bintrail index` now fails loud with a `schema gap` error instead — see [indexing.md](indexing.md).)
+DBTrail maps binlog row events to column names using a schema snapshot — a point-in-time copy of `information_schema.COLUMNS` stored in the index database (see [indexing.md](indexing.md) for details). When someone runs `ALTER TABLE` on the source, the snapshot becomes stale: new columns don't have names, removed columns cause mismatches, and the parser starts skipping events. (In stream mode those skips are warn-only; file-based `bintrail index` now fails loud with a `schema gap` error instead — see [indexing.md](indexing.md).)
 
 Before DDL tracking, the only solution was to notice the "column count mismatch" warnings in the logs, manually run `bintrail snapshot`, and hope you didn't miss too many events in between. In stream mode (continuous replication), an unattended schema change could silently break indexing for hours.
 
 DDL tracking solves three problems:
 
 1. **Detection**: The parser identifies DDL statements (`ALTER TABLE`, `CREATE TABLE`, `DROP TABLE`, `RENAME TABLE`, `TRUNCATE TABLE`) and emits them as events instead of just logging warnings.
-2. **Auto-snapshot**: When a DDL is detected and a source database connection is available, dbtrail automatically takes a new snapshot and hot-swaps the resolver — no manual intervention needed. This works in both stream mode (always has source connection) and file mode (when `--source-dsn` is provided).
+2. **Auto-snapshot**: When a DDL is detected and a source database connection is available, DBTrail automatically takes a new snapshot and hot-swaps the resolver — no manual intervention needed. This works in both stream mode (always has source connection) and file mode (when `--source-dsn` is provided).
 3. **Restore coverage**: The `status` command shows the time range of indexed events and warns about DDLs that weren't followed by a snapshot — whether from file-mode indexing without `--source-dsn` or from a failed auto-snapshot — so you know where recovery gaps might exist.
 
 ---
@@ -22,7 +22,7 @@ DDL tracking solves three problems:
 
 In stream mode (`bintrail stream`), a DDL means the source schema just changed. Since we're connected to the live server, `information_schema` already reflects the new schema — the perfect moment to take a snapshot.
 
-When a DDL is detected, dbtrail automatically takes a new snapshot from the live server, swaps the parser over to the fresh schema, and records the DDL in the `schema_changes` table with the new `snapshot_id`. No manual intervention is needed.
+When a DDL is detected, DBTrail automatically takes a new snapshot from the live server, swaps the parser over to the fresh schema, and records the DDL in the `schema_changes` table with the new `snapshot_id`. No manual intervention is needed.
 
 ### Error handling
 
@@ -51,7 +51,7 @@ When `--source-dsn` points to the source MySQL server, file mode behaves identic
 > Without it, `index` aborts because `--source-dsn` is required; the silent
 > no-source skip was removed so a non-`FULL` source can't be indexed by accident.
 
-When no source connection is available (e.g., indexing binlogs from a decommissioned server), dbtrail records the DDL in `schema_changes` and logs a warning:
+When no source connection is available (e.g., indexing binlogs from a decommissioned server), DBTrail records the DDL in `schema_changes` and logs a warning:
 
 ```
 WARN DDL detected but --source-dsn not provided; run `bintrail snapshot` if schema changed.

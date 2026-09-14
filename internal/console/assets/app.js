@@ -112,7 +112,7 @@ const DOCS_PAGES = {
 const MON_STATE_TITLES = {
   failed: "connection is failing and retrying automatically; press Start for details",
   stalled: "connected, but hasn't made progress for several minutes",
-  lost_position: "some old changes were deleted before dbtrail could capture them; those are permanently lost, but current changes are still being captured",
+  lost_position: "some old changes were deleted before DBTrail could capture them; those are permanently lost, but current changes are still being captured",
 };
 
 // Static decorative SVGs (module constants — parsed by svgEl via DOMParser).
@@ -409,7 +409,7 @@ function showLoginOverlay(opts) {
   // over an authenticated workspace, so it keeps the ordinary translucent scrim.
   const scrim = el("div", { class: "modal-scrim show login-gate" });
   const panel = el("div", { class: "modal login-panel", role: "dialog", "aria-label": opts.setup ? "Set up console" : "Sign in" });
-  panel.append(el("h2", { class: "modal-title", text: "dbtrail console" }));
+  panel.append(el("h2", { class: "modal-title", text: "DBTrail console" }));
 
   if (opts.setup) {
     panel.append(el("p", { class: "modal-desc", text: "First run: create a username and password for this console." }));
@@ -4243,8 +4243,8 @@ function s3RetentionBox(srv, servers, daemonS3) {
   const minutes = srv.schedule_every_minutes || 0;
   const n = minutes > 0 && !srv.schedule_refusal ? Math.floor(30 * 1440 / minutes) : 0;
   wrap.append(el("p", { class: "form-hint", text:
-    (n ? "About " + n + " backup" + (n === 1 ? "" : "s") + " every 30 days reach S3 at this rate, each a full copy of every table, and dbtrail never removes one: the bucket grows by that much until a rule in the bucket expires old backups."
-       : "Every backup sent to S3 is a full copy of every table, and dbtrail never removes one: each stays in the bucket until a rule in the bucket expires old backups.") }));
+    (n ? "About " + n + " backup" + (n === 1 ? "" : "s") + " every 30 days reach S3 at this rate, each a full copy of every table, and DBTrail never removes one: the bucket grows by that much until a rule in the bucket expires old backups."
+       : "Every backup sent to S3 is a full copy of every table, and DBTrail never removes one: each stays in the bucket until a rule in the bucket expires old backups.") }));
   if (!s) {
     wrap.append(el("p", { class: "form-msg err", text:
       "This is not an s3://bucket/prefix destination, so no backup can be uploaded to it and no bucket rule applies." }));
@@ -4315,7 +4315,7 @@ function s3RetentionBox(srv, servers, daemonS3) {
       "The rule applies to " + s.prefix + "/ only, and to no archived changes configured on this page. It expires by age alone: it cannot spare the only complete copy, nor a backup a restore is reading, and if the schedule stops it keeps expiring until none is left." }),
     el("p", { class: "form-hint", text:
       "On a bucket with versioning the rule also expires old versions after the same number of days; under an Object Lock retention nothing can be expired before that retention ends." }),
-    el("p", { class: "form-hint", text: "dbtrail never deletes from S3 and never changes a bucket's rules; this one is yours to apply." }));
+    el("p", { class: "form-hint", text: "DBTrail never deletes from S3 and never changes a bucket's rules; this one is yours to apply." }));
   details.append(body);
   wrap.append(details);
   return wrap;
@@ -4368,7 +4368,7 @@ function backupRefreshCard(br) {
   // stays outside the compact block. Liveness is decided at boot: with no
   // consumer there is no restore path either, so waiting changes nothing.
   if (!br.enabled) {
-    say("Nothing uses this yet. It starts working the next time dbtrail runs with backups or restores turned on.");
+    say("Nothing uses this yet. It starts working the next time DBTrail runs with backups or restores turned on.");
   }
   // What the skipped servers CANNOT do, not what they will do: an update from
   // the recorded changes writes Parquet to a local directory, which is the very
@@ -4413,10 +4413,10 @@ function backupRefreshCard(br) {
   }
   say("This one setting covers every server that keeps backups on this machine.");
   say(br.source === "override"
-    ? "You chose this here. It replaces the setting dbtrail started with."
-    : "This is the setting dbtrail started with.");
+    ? "You chose this here. It replaces the setting DBTrail started with."
+    : "This is the setting DBTrail started with.");
   more.append(docsMore("guides/backup-settings", "backups--disk-space", "the disk-space switch"),
-    docsMore("guides/backup-strategy", "", "how dbtrail backs up your database"));
+    docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
   card.append(more);
   return card;
 }
@@ -4452,7 +4452,7 @@ async function saveBackupRefresh(body) {
   // what changes and lets the card carry the condition.
   toast((now && now.enabled)
     ? (on ? "Saved. Unchanged tables can now keep their last file" : "Every table will be written again")
-    : "Saved. Nothing uses it yet, so it starts working the next time dbtrail runs with backups or restores turned on.");
+    : "Saved. Nothing uses it yet, so it starts working the next time DBTrail runs with backups or restores turned on.");
   renderRoute();
 }
 
@@ -4495,7 +4495,7 @@ async function renderBackupSettings() {
 function buildBackupSettings(settings, refresh) {
   const v = VIEW(); clear(v);
   v.append(pageHead("Backup settings", el("p", { class: "page-sub", text: capsCache.monitor
-    ? "Where backups go, and what this dbtrail was started with."
+    ? "Where backups go, and what this DBTrail was started with."
     : "Where each server keeps its backups." })));
   const broken = settings && settings.error;
   if (broken) v.append(el("div", { class: "error-box", text: "Could not load settings: " + settings.error }));
@@ -4514,7 +4514,7 @@ function buildBackupSettings(settings, refresh) {
   }
   if (!broken) v.append(backupServersPanel(settings));
   if (capsCache.monitor && !broken) {
-    v.append(sect("Set when dbtrail starts"));
+    v.append(sect("Set when DBTrail starts"));
     v.append(backupDaemonCard(settings.daemon || []));
   }
   viewEnter();
@@ -4592,7 +4592,7 @@ function backupDaemonCard(rows) {
   }
   card.append(cnFine("More about changing these",
     el("p", { class: "form-hint", text:
-      "These come from the command line or the environment of the dbtrail process. Change the flag or variable shown under the row, then restart dbtrail." }),
+      "These come from the command line or the environment of the DBTrail process. Change the flag or variable shown under the row, then restart DBTrail." }),
     docsMore("guides/backup-settings", "set-at-startup", "settings that need a restart")));
   return card;
 }
@@ -4770,7 +4770,7 @@ function credentialsCard(storage) {
     card.append(el("p", { class: "form-hint", text: "Could not read the daemon's credential signals" + (storage && storage.error ? ": " + storage.error : ".") }));
     return card;
   }
-  let summary = "No credentials set directly; dbtrail relies on your AWS environment (for example, an EC2 instance role) to provide them automatically.";
+  let summary = "No credentials set directly; DBTrail relies on your AWS environment (for example, an EC2 instance role) to provide them automatically.";
   // Presence, not use: this arm reports the signal it saw and nothing about
   // whether that signal is what the AWS chain resolves to. AccessKeyEnv is
   // AWS_ACCESS_KEY_ID ALONE (storage_api.go), so an ID exported without its
@@ -6683,7 +6683,7 @@ function backupSQLLane(cur, b, sqlSt) {
     return lane;
   }
   body.append(el("p", { class: "form-hint", text:
-    "Plain SQL files in mydumper format, ready for myloader. Loading them back needs nothing from dbtrail, and your database is never touched: the console starts from the backup before that moment and replays the changes it already recorded." }));
+    "Plain SQL files in mydumper format, ready for myloader. Loading them back needs nothing from DBTrail, and your database is never touched: the console starts from the backup before that moment and replays the changes it already recorded." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
@@ -8199,7 +8199,7 @@ function bundleCard() {
     card.append(el("div", { class: "cn-links" },
       el("a", { class: "btn btn-sm", href: "https://github.com/dbtrail/dbtrail/releases/download/v" + ver + "/" + asset, target: "_blank", rel: "noopener", text: "Download the installer" }),
       el("a", { class: "btn btn-sm btn-ghost", href: relTag, target: "_blank", rel: "noopener", text: "All downloads" })));
-    card.append(el("p", { class: "stg-hint", text: "Claude opens and asks to install dbtrail; accept, then fill in two things:" }));
+    card.append(el("p", { class: "stg-hint", text: "Claude opens and asks to install DBTrail; accept, then fill in two things:" }));
     card.append(claudeAskMock());
     card.append(askExample());
     card.append(cnFine("Intel Mac, Windows, or claude.ai in the browser?",
@@ -8218,7 +8218,7 @@ function bundleCard() {
     card.append(el("p", { class: "stg-hint", text: "Get the Claude Desktop app (claude.ai/download), then download the newest installer for this computer and double-click it:" }));
     card.append(el("div", { class: "cn-links" },
       el("a", { class: "btn btn-sm", href: "https://github.com/dbtrail/dbtrail/releases", target: "_blank", rel: "noopener", text: "Open the releases page" })));
-    card.append(el("p", { class: "stg-hint", text: "Claude opens and asks to install dbtrail; accept, then fill in two things:" }));
+    card.append(el("p", { class: "stg-hint", text: "Claude opens and asks to install DBTrail; accept, then fill in two things:" }));
     card.append(claudeAskMock());
     card.append(askExample());
     card.append(cnFine("Which file is for this computer?",
@@ -8646,10 +8646,10 @@ function buildServersModal() {
   const head = el("div", { class: "modal-head" });
   head.append(el("h2", { class: "modal-title", text: "Servers" }));
   const desc = el("p", { class: "modal-desc" },
-    "The servers you're monitoring with dbtrail, saved in a file on this machine. ");
+    "The servers you're monitoring with DBTrail, saved in a file on this machine. ");
   desc.append(el("span", { "data-capability": "monitor" },
     "This process can also ", el("b", { text: "monitor" }),
-    " a new MySQL database for you: add one below and dbtrail checks it's ready, sets up its index, and starts capturing changes; no terminal needed."));
+    " a new MySQL database for you: add one below and DBTrail checks it's ready, sets up its index, and starts capturing changes; no terminal needed."));
   head.append(desc);
   head.append(el("button", { class: "modal-x", type: "button", text: "✕", onclick: closeServersModal }));
   modal.append(head);
@@ -8854,7 +8854,7 @@ function buildServerForm() {
 
   const mon = el("fieldset", { class: "form-section", "data-capability": "monitor" });
   mon.append(el("legend", { class: "form-legend", text: "Monitor a source database" }));
-  mon.append(el("p", { class: "form-hint", text: "Paste the server you want to watch. dbtrail checks that it is ready, creates an index database for it, and starts capturing changes. Nothing else to fill in beyond a name." }));
+  mon.append(el("p", { class: "form-hint", text: "Paste the server you want to watch. DBTrail checks that it is ready, creates an index database for it, and starts capturing changes. Nothing else to fill in beyond a name." }));
   const monGrid = el("div", { class: "form-grid" });
   // Source family selector — reveals the PostgreSQL-only fields below.
   monGrid.append(el("label", { class: "field" },
@@ -9144,7 +9144,7 @@ function testResultText(res) {
   if (res.server_version) s += " · MySQL " + res.server_version;
   // has_index/schema_current are tri-state: absent = the metadata lookup itself
   // failed (unknown) — never render that as the confident negative.
-  if (res.has_index === false) s += " · doesn't look like a dbtrail index (missing the binlog_events table)";
+  if (res.has_index === false) s += " · doesn't look like a DBTrail index (missing the binlog_events table)";
   else if (res.has_index === undefined || res.schema_current === undefined) s += " · index metadata unavailable";
   else if (res.schema_current === false) s += " · index schema outdated (run bintrail index/stream once)";
   return s;

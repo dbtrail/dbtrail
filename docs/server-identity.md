@@ -8,9 +8,9 @@ This page explains two related features that help you manage multi-server deploy
 
 ### The Problem
 
-When multiple source MySQL servers share a single dbtrail index database, it becomes impossible to tell which indexed events came from which server — the `binlog_events` table stores filenames like `binlog.000042` which are identical across unrelated servers.
+When multiple source MySQL servers share a single DBTrail index database, it becomes impossible to tell which indexed events came from which server — the `binlog_events` table stores filenames like `binlog.000042` which are identical across unrelated servers.
 
-The server identity system assigns a stable UUID (`bintrail_id`) to each source server and records it alongside every piece of state that dbtrail writes.
+The server identity system assigns a stable UUID (`bintrail_id`) to each source server and records it alongside every piece of state that DBTrail writes.
 
 ### How It Works
 
@@ -26,7 +26,7 @@ The result is one of five outcomes ("resolution rules"):
 | 4. **New server** | No matching record | Insert new row; assign fresh UUID |
 | 5. **Conflict** | Same host+port+user, different UUID with a different existing record | **Error — refuses to auto-resolve** |
 
-Rule 5 (conflict) detects a cloned server — two physical machines presenting the same connection string but different UUIDs. This is almost certainly a misconfiguration and dbtrail refuses to guess which server is authoritative. You must manually resolve the conflict in `bintrail_servers`.
+Rule 5 (conflict) detects a cloned server — two physical machines presenting the same connection string but different UUIDs. This is almost certainly a misconfiguration and DBTrail refuses to guess which server is authoritative. You must manually resolve the conflict in `bintrail_servers`.
 
 ### Database Tables
 

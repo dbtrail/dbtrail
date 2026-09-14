@@ -1,6 +1,6 @@
 # Connect an AI assistant in 5 minutes
 
-You run dbtrail. You'd like to ask your database's change history questions in
+You run DBTrail. You'd like to ask your database's change history questions in
 plain English — from **Claude Desktop**, claude.ai, or any MCP-capable client:
 
 > "What got deleted from `orders` in the last hour?"

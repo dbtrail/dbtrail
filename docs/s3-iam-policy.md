@@ -1,9 +1,9 @@
 # S3 IAM Policy (copy-paste)
 
-One IAM policy that covers every dbtrail feature that touches S3 — archiving
+One IAM policy that covers every DBTrail feature that touches S3 — archiving
 rotated partitions, baseline snapshots, `bintrail upload`, and querying/
 time-traveling against archived data. Attach it to the IAM user or role that
-runs dbtrail, swap in your bucket name, and every `--archive-s3` /
+runs DBTrail, swap in your bucket name, and every `--archive-s3` /
 `--baseline-s3` / `--s3-bucket` flag in the docs will work without further
 tuning.
 
@@ -60,7 +60,7 @@ bucket-level action (alongside `s3:ListBucket`) if you use the check.
 
 **`s3:GetBucketLocation`** is not in the policy above. It's only needed if
 your archive/baseline bucket lives in a **different AWS region** than the
-one dbtrail otherwise resolves for its credentials (env vars, `~/.aws`
+one DBTrail otherwise resolves for its credentials (env vars, `~/.aws`
 profile, or EC2/ECS/EKS instance metadata). Without it, `bintrail query
 --archive-s3` just uses the region it already resolved — same-region setups
 (the common case) work fine. See [S3

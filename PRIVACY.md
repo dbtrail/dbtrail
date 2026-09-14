@@ -1,15 +1,15 @@
-# Privacy Policy — dbtrail Claude Desktop extension (`dbtrail.mcpb`)
+# Privacy Policy — DBTrail Claude Desktop extension (`dbtrail.mcpb`)
 
 *Last updated: 2026-07-21*
 
-This policy covers the **dbtrail desktop extension** — the `.mcpb` bundle that
+This policy covers the **DBTrail desktop extension** — the `.mcpb` bundle that
 connects Claude Desktop to a self-hosted bintrail/dbtrail deployment — and the
 `bintrail-mcp` bridge binary it runs. It also describes, for completeness, how
 data moves when you use it.
 
 ## The short version
 
-The extension is a local bridge to **your own infrastructure**. dbtrail (the
+The extension is a local bridge to **your own infrastructure**. DBTrail (the
 project and its maintainers) operates no servers in this flow, and **collects
 nothing**: no telemetry, no analytics, no crash reports, no account, no
 phone-home of any kind.
@@ -31,7 +31,7 @@ is documented in full, including how to turn it off, in
 - **Where it connects.** The bundled binary makes network connections to
   exactly one place: the console/MCP endpoint URL **you** configure at install
   time (your own bintrail console, on your machine, LAN, VPN, or server). It
-  never connects to dbtrail, Anthropic, or any other third party on its own.
+  never connects to DBTrail, Anthropic, or any other third party on its own.
 - **Your access token** is entered once in Claude Desktop's configuration form
   and stored by Claude Desktop as a sensitive value (in the operating system's
   credential store). The extension sends it only to the endpoint you
@@ -46,7 +46,7 @@ is documented in full, including how to turn it off, in
 
 **We collect nothing.** There is no data collection practice to describe
 beyond that: the extension has no telemetry and transmits nothing to the
-dbtrail project. All indexed database history lives in the deployment you
+DBTrail project. All indexed database history lives in the deployment you
 operate, under your control and your retention rules (see the
 [rotation documentation](docs/rotation-and-status.md)).
 
@@ -56,7 +56,7 @@ None by the extension. One flow you should be aware of, because it is inherent
 to using any AI assistant: tool results that enter your Claude conversation
 are processed by **Anthropic** as conversation content, under
 [Anthropic's own privacy policy](https://www.anthropic.com/legal/privacy).
-If your change history contains sensitive row data, dbtrail's
+If your change history contains sensitive row data, DBTrail's
 [RBAC profiles](docs/query-and-recovery.md) and the console's redaction rules
 let you limit what the MCP surface can return before it ever reaches a
 conversation.

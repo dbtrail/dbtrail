@@ -1,12 +1,12 @@
 {
   "manifest_version": "0.4",
   "name": "dbtrail",
-  "display_name": "dbtrail",
+  "display_name": "DBTrail",
   "version": "__MCPB_VERSION__",
   "description": "Ask your database change history anything: search indexed row changes, generate recovery SQL, and check index status on a self-hosted bintrail deployment.",
   "long_description": "Connects Claude Desktop to a self-hosted bintrail deployment through its MCP endpoint (a bintrail console `/mcp` URL or a `bintrail-mcp --http` server). The bundled binary runs locally as a stdio↔HTTP bridge, so a LAN/VPN/tunneled deployment works without public exposure. All tools are read-only: recovery SQL is generated, never executed.",
   "author": {
-    "name": "dbtrail",
+    "name": "DBTrail",
     "url": "https://github.com/dbtrail/dbtrail"
   },
   "repository": {
