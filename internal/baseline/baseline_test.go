@@ -2631,3 +2631,37 @@ func TestSnapshotComplete_legacyMarkerless(t *testing.T) {
 		t.Fatal("a marker-absent (legacy) snapshot must be complete-by-default")
 	}
 }
+
+// TestDiscoverBaselinesReport_datesTheFoldersItSkipped (#1639): the status
+// grading needs WHEN a skipped folder is from, which its name still says.
+func TestDiscoverBaselinesReport_datesTheFoldersItSkipped(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory read permissions")
+	}
+	root := t.TempDir()
+	older, newer := "2026-09-01T06-00-00Z", "2026-09-02T06-00-00Z"
+	for _, d := range []string{filepath.Join(root, older, "shop"), filepath.Join(root, newer, "shop"), filepath.Join(root, newer, "crm")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{filepath.Join(root, older), filepath.Join(root, newer, "crm")} {
+		if err := os.Chmod(dir, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	}
+	_, unreadable, err := DiscoverBaselinesReport(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"2026-09-01T06:00:00Z": true, "2026-09-02T06:00:00Z": true}
+	if len(unreadable) != 2 {
+		t.Fatalf("unreadable = %v, want both skipped folders", unreadable)
+	}
+	for _, u := range unreadable {
+		if !want[u.UTC().Format(time.RFC3339)] {
+			t.Fatalf("unreadable = %v", unreadable)
+		}
+	}
+}

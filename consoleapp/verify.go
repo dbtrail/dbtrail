@@ -20,6 +20,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/pgverifysource"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/verify"
 )
 
@@ -493,6 +494,27 @@ func (s *verifySupervisor) run(req console.VerifyRequest, baselineSrc string) {
 func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baselineSrc string, indexDB *sql.DB, resolver *metadata.Resolver, dbName, flavor string) error {
 	ctx := s.ctx
 	pairs, unpaired, prevOnly, err := verify.FindBaselinePair(ctx, baselineSrc)
+	if errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
+		// #1639: a folder the walk could not read sits at or after the pair,
+		// so no pair can be trusted. Every table in scope is inconclusive with
+		// the cause, never graded over an older pair.
+		filter, _ := tableFilter(req.Tables)
+		n := 0
+		for _, tm := range resolver.AllTables() {
+			if filter != nil && !filter[tm.Schema+"."+tm.Table] {
+				continue
+			}
+			n++
+			s.appendResult(req.ServerID, toWireResult(verify.TableResult{
+				Schema: tm.Schema, Table: tm.Table, Status: verify.StatusInconclusive,
+				Detail: "not verified: " + err.Error(),
+			}, false))
+		}
+		if n == 0 {
+			return fmt.Errorf("list baselines: %w", err)
+		}
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("list baselines: %w", err)
 	}

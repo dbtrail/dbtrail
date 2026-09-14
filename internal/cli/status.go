@@ -139,7 +139,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	// Discover baseline Parquet files if --baseline-dir is provided.
 	if stBaselineDir != "" {
-		baselines, bErr := baseline.DiscoverBaselines(stBaselineDir)
+		baselines, unreadable, bErr := baseline.DiscoverBaselinesReport(stBaselineDir)
+		if bErr == nil {
+			bErr = unreadableNewestBaseline(baselines, unreadable)
+		}
 		if bErr != nil {
 			slog.Warn("could not discover baselines", "dir", stBaselineDir, "error", bErr)
 			// A configured-but-unreadable dir must not render like "no
@@ -317,6 +320,27 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if age > stFailOnLag {
 			return fmt.Errorf("stream freshness: newest indexed event is %s old, over the %s threshold (on a source with quiet periods this can be idleness, not lag; bintrail_stream_index_commit_latency_seconds on the daemon distinguishes them)",
 				age.Round(time.Second), stFailOnLag)
+		}
+	}
+	return nil
+}
+
+// unreadableNewestBaseline refuses to grade a partial baseline walk (#1639):
+// a folder that could not be read at or after the newest readable snapshot may
+// be the real newest, and grading the older one would report "aging" or
+// "broken" for a table that is current. The caller then reports the baselines
+// as unavailable, the verdict a wholly unreadable directory already gets. A
+// skipped folder older than the newest changes nothing.
+func unreadableNewestBaseline(baselines []baseline.BaselineInfo, unreadable []time.Time) error {
+	var newest time.Time
+	for _, b := range baselines {
+		if b.SnapshotTime.After(newest) {
+			newest = b.SnapshotTime
+		}
+	}
+	for _, u := range unreadable {
+		if !u.Before(newest) {
+			return fmt.Errorf("a baseline folder from %s could not be read, and it is not older than the newest readable one", u.UTC().Format(time.RFC3339))
 		}
 	}
 	return nil

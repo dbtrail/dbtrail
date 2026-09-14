@@ -383,6 +383,47 @@ func TestChooseBackupMethod_unreadableDirIsNotNoBackup(t *testing.T) {
 	}
 }
 
+// #1639: the directory reads, but the NEWEST snapshot folder in it does not.
+// Before, the walk answered from the older folder and chose "update", folding
+// from the wrong anchor; with no older folder it answered "no previous backup"
+// and took a full read of production. Both now refuse, naming the folder.
+func TestChooseBackupMethod_unreadableNewestSnapshotRefuses(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads a mode-000 directory")
+	}
+	for name, older := range map[string]bool{"with an older snapshot": true, "only snapshot": false} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			mk := func(ts time.Time) string {
+				d := filepath.Join(dir, reconstruct.SnapshotDirName(ts))
+				if err := os.MkdirAll(filepath.Join(d, "shop"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(d, "shop", "a.parquet"), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return d
+			}
+			if older {
+				mk(time.Date(2026, 9, 1, 6, 0, 0, 0, time.UTC))
+			}
+			newest := mk(time.Date(2026, 9, 2, 6, 0, 0, 0, time.UTC))
+			if err := os.Chmod(newest, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(newest, 0o755) })
+			method, why, err := ChooseBackupMethod(context.Background(), ServerEntry{DSN: "idx", SourceDSN: "src", BaselineDir: dir},
+				BackupScheduleGates{LoopRunning: true, FullBackups: true})
+			if !errors.Is(err, reconstruct.ErrUnreadableSnapshot) || !strings.Contains(err.Error(), filepath.Base(newest)) {
+				t.Fatalf("method=%q why=%q err=%v; want a refusal naming %s", method, why, err, filepath.Base(newest))
+			}
+			if strings.Contains(err.Error(), "backup location") {
+				t.Fatalf("err = %v blames the location, which read fine", err)
+			}
+		})
+	}
+}
+
 // Same verdict for a path that is a FILE (ENOTDIR): this one runs as root
 // too, where a mode-000 directory reads fine and the test above skips.
 func TestChooseBackupMethod_fileAsDirIsNotNoBackup(t *testing.T) {

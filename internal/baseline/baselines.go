@@ -31,10 +31,20 @@ type BaselineInfo struct {
 // path-only) for the console's listing — keep the two in sync if the layout
 // ever changes.
 func DiscoverBaselines(dir string) ([]BaselineInfo, error) {
+	infos, _, err := DiscoverBaselinesReport(dir)
+	return infos, err
+}
+
+// DiscoverBaselinesReport is DiscoverBaselines plus the snapshot times of the
+// folders it skipped because they could not be read (a snapshot folder, or a
+// schema folder inside one). A caller that grades the newest snapshot must
+// not grade over a skipped folder at or after it (#1639).
+func DiscoverBaselinesReport(dir string) ([]BaselineInfo, []time.Time, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	var unreadable []time.Time
 
 	var results []BaselineInfo
 	for _, entry := range entries {
@@ -57,6 +67,7 @@ func DiscoverBaselines(dir string) ([]BaselineInfo, error) {
 		dbEntries, err := os.ReadDir(snapshotDir)
 		if err != nil {
 			slog.Warn("could not read baseline snapshot directory", "path", snapshotDir, "error", err)
+			unreadable = append(unreadable, ts)
 			continue
 		}
 		for _, dbEntry := range dbEntries {
@@ -68,6 +79,7 @@ func DiscoverBaselines(dir string) ([]BaselineInfo, error) {
 			tableFiles, err := os.ReadDir(tableDir)
 			if err != nil {
 				slog.Warn("could not read baseline table directory", "path", tableDir, "error", err)
+				unreadable = append(unreadable, ts)
 				continue
 			}
 			for _, tf := range tableFiles {
@@ -98,7 +110,7 @@ func DiscoverBaselines(dir string) ([]BaselineInfo, error) {
 			}
 		}
 	}
-	return results, nil
+	return results, unreadable, nil
 }
 
 // parseBaselineDirTimestamp converts a baseline directory name like
