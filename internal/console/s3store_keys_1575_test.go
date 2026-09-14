@@ -511,6 +511,12 @@ func TestServersTest_rowTestFlagsAStoreNotInUse(t *testing.T) {
 			t.Errorf("the form testing the saved store (%q): %s, want not_applied", secret, raw)
 		}
 	}
+	// The saved store with a bucket the saved server does not name is a new
+	// setting for that bucket: the table cannot be expected to hold it.
+	pb, raw = doProbe(t, srv, path, `{"archive_s3":"s3://probe-u/s/","baseline_s3":"s3://probe-new/b/","s3_endpoint":"`+host.srv.URL+`","s3_access_key_id":"AKIASAVED","s3_secret_access_key":"SavedSecretValue"}`)
+	if len(pb.S3) != 2 || pb.S3[1].Bucket != "probe-new" || pb.S3[1].NotApplied {
+		t.Errorf("a new bucket on the saved store flagged not_applied: %s", raw)
+	}
 	// A form test of different values is of unsaved settings; the table
 	// cannot be expected to hold them.
 	pb, raw = doProbe(t, srv, path, `{"archive_s3":"s3://probe-u/s/","s3_endpoint":"`+host.srv.URL+`","s3_access_key_id":"AKIATYPED","s3_secret_access_key":"TypedSecretValue"}`)
