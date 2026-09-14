@@ -452,6 +452,19 @@ func TestServersTest_rowTestFlagsAStoreNotInUse(t *testing.T) {
 	if len(pb.S3) != 1 || !pb.S3[0].NotApplied {
 		t.Errorf("a saved store the daemon does not use: %s, want not_applied", raw)
 	}
+	// The table holds a store for the bucket, but not this one (other keys).
+	other, err := storage.NewBucketStore(host.srv.URL, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other, err = other.WithKeys("AKIAOTHER", "OtherSecretValue"); err != nil {
+		t.Fatal(err)
+	}
+	storage.SetBucketStores(map[string]storage.BucketStore{"probe-u": other})
+	pb, raw = doProbe(t, srv, path, `{}`)
+	if len(pb.S3) != 1 || !pb.S3[0].NotApplied {
+		t.Errorf("the daemon applies a different store to the bucket: %s, want not_applied", raw)
+	}
 	// A form test is of unsaved values; the table cannot be expected to hold them.
 	pb, raw = doProbe(t, srv, path, `{"archive_s3":"s3://probe-u/s/","s3_endpoint":"`+host.srv.URL+`","s3_access_key_id":"AKIASAVED","s3_secret_access_key":"SavedSecretValue"}`)
 	if len(pb.S3) != 1 || pb.S3[0].NotApplied {
