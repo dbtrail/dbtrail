@@ -2,6 +2,7 @@ package console
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,8 +33,18 @@ func TestS3OnlyBackupWarning_1659(t *testing.T) {
 	grid, c, m, sched := strings.Index(row, "box.append(grid);"), strings.Index(row, call), strings.Index(row, mount), strings.Index(row, "if (srv.schedule_every)")
 	if grid < 0 || c < 0 || m < 0 || sched < 0 || !(grid < c && c < m && m < sched) {
 		t.Errorf("the S3-only warning is not computed and mounted in red between the fields and the schedule block (grid %d, call %d, mount %d, schedule %d)", grid, c, m, sched)
+	} else if depth := strings.Count(row[grid:m], "{") - strings.Count(row[grid:m], "}"); depth != strings.Count(row[grid:m], "({") {
+		// Every brace opened between the fields and the mount must be an
+		// object literal closed on its own line; an unclosed block brace means
+		// the warning went back inside a condition, the regression #1659 removed.
+		t.Errorf("the S3-only warning is mounted inside a block (%d unclosed braces between the fields and the mount)", depth)
 	}
-	if strings.Contains(row, "As set up, each scheduled run takes a full backup") {
+	// Saving repaints the row, which is what takes the warning down once a
+	// Backup dir is saved.
+	if save := strings.Index(row, `toast("Saved for " + (srv.name || srv.id));`); save < 0 || !strings.HasPrefix(strings.TrimSpace(stripLineComments(row[save+len(`toast("Saved for " + (srv.name || srv.id));`):])), "renderRoute();") {
+		t.Error("a successful save no longer repaints the row, so the S3-only warning would stay up after a Backup dir is saved")
+	}
+	if strings.Contains(jsFunctionSpan(t, js, "backupServerRow"), "As set up, each scheduled run takes a full backup") {
 		t.Error("the old schedule-gated grey hint is still rendered next to the new red line")
 	}
 	// The last-run remedy is not repeated in grey under the red next-run one.
@@ -52,6 +63,8 @@ func TestS3OnlyBackupWarning_1659(t *testing.T) {
 		functionBody(t, js, "function s3OnlyBackupWarning("),
 		// Runs to the next function, so it carries BACKUP_WHY_EVERY_RUN too.
 		functionBody(t, js, "const BACKUP_WHY_REMEDY = {"),
+		functionBody(t, js, "function backupFoldError("),
+		functionBody(t, js, "function backupWhyLine("),
 	}, "\n") + `
 const lines = [];
 const el = (tag, o) => ({ class: o.class, text: o.text });
@@ -60,6 +73,13 @@ function nextRun(sch) {
   let alarm = false, everyRunCode = "";
   ` + nextRunBranch(t, card) + `
   return [alarm, everyRunCode];
+}
+const utcLabel = (s) => s, reusedCopiedNote = () => "";
+function lastRun(sch, everyRunCode) {
+  const out = [], body = { append: (n) => out.push(n.text) };
+  let alarm = false;
+  ` + lastRunBlock(t, card) + `
+  return out.length;
 }
 const srv = (o) => Object.assign({ baseline_dir: "", baseline_s3: "", full_backup_possible: true }, o);
 const out = {
@@ -77,8 +97,14 @@ const out = {
     nextRun({ runnable: true, next_method: "refresh", next_method_why: "no load on your database" }),
     nextRun({ runnable: true, next_method: "full", next_method_why: "this server has no index connection to read the recorded changes from", next_method_why_code: "no_index" }),
     nextRun({ runnable: true, next_method: "refresh", next_method_why: "x", next_method_why_code: "no_local_dir" }),
+    nextRun({ runnable: true, next_method: "full", next_method_why: "the previous backup could not be read", next_method_why_code: "previous_unreadable" }),
   ],
   lines,
+  lastRun: [
+    lastRun({ last_run: { ok: true, method: "full", why: "an update needs a local backup directory", why_code: "no_local_dir" } }, "no_local_dir"),
+    lastRun({ last_run: { ok: true, method: "full", why: "an update needs a local backup directory", why_code: "no_local_dir" } }, "no_index"),
+    lastRun({ last_run: { ok: true, method: "full", why: "an update needs a local backup directory", why_code: "no_local_dir" } }, ""),
+  ],
 };
 console.log(JSON.stringify(out));
 `
@@ -91,9 +117,10 @@ console.log(JSON.stringify(out));
 		t.Fatalf("node: %v\n%s", err, raw)
 	}
 	var got struct {
-		Warn   []string
-		Alarms [][]any
-		Lines  []struct{ Class, Text string }
+		Warn    []string
+		Alarms  [][]any
+		Lines   []struct{ Class, Text string }
+		LastRun []int
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
@@ -112,18 +139,18 @@ console.log(JSON.stringify(out));
 	}
 	// Where no full backup is possible either, nothing runs: saying every run
 	// reads the database would be false.
-	if w := got.Warn[4]; w == "" || w == fullRead || !strings.Contains(w, "cannot run") || !strings.Contains(w, "Backup dir") {
+	if w := got.Warn[4]; w != "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Backup dir. Add one." {
 		t.Errorf("S3 without a folder on a daemon that cannot take a full backup: %q", w)
 	}
-	wantAlarm := []bool{true, false, false, true, false}
-	wantCode := []string{"no_local_dir", "", "", "no_index", ""}
+	wantAlarm := []bool{true, false, false, true, false, false}
+	wantCode := []string{"no_local_dir", "", "", "no_index", "", ""}
 	for i := range wantAlarm {
 		if len(got.Alarms) <= i || got.Alarms[i][0] != wantAlarm[i] || got.Alarms[i][1] != wantCode[i] {
 			t.Errorf("next-run case %d: alarm/code = %v, want %v %q", i, got.Alarms, wantAlarm[i], wantCode[i])
 		}
 	}
-	if len(got.Lines) != 5 {
-		t.Fatalf("rendered %d next-run lines, want 5: %+v", len(got.Lines), got.Lines)
+	if len(got.Lines) != 6 {
+		t.Fatalf("rendered %d next-run lines, want 6: %+v", len(got.Lines), got.Lines)
 	}
 	for i, l := range got.Lines {
 		t.Logf("next-run line %d [%s]: %s", i, l.Class, l.Text)
@@ -139,12 +166,41 @@ console.log(JSON.stringify(out));
 	if got.Lines[0].Class != "form-msg err" || !strings.Contains(got.Lines[0].Text, "Set a Backup dir for this server") {
 		t.Errorf("no Backup dir: not a red line naming the setting: %+v", got.Lines[0])
 	}
-	if got.Lines[1].Class != "form-hint" || got.Lines[2].Class != "form-hint" || got.Lines[4].Class != "form-hint" {
+	if got.Lines[1].Class != "form-hint" || got.Lines[2].Class != "form-hint" || got.Lines[4].Class != "form-hint" || got.Lines[5].Class != "form-hint" {
 		t.Errorf("a first backup or an update is not a hint: %+v", got.Lines)
 	}
 	if got.Lines[3].Class != "form-msg err" || !strings.Contains(got.Lines[3].Text, "Set an index connection") {
 		t.Errorf("no index connection: not a red line naming the setting: %+v", got.Lines[3])
 	}
+	// The last run's full-backup reason is skipped only when the next-run warning
+	// already carries the same remedy: one line (the run) when the codes match,
+	// two (the run and its reason) otherwise.
+	if want := []int{1, 2, 2}; len(got.LastRun) != 3 || got.LastRun[0] != want[0] || got.LastRun[1] != want[1] || got.LastRun[2] != want[2] {
+		t.Errorf("last-run lines = %v, want %v", got.LastRun, want)
+	}
+}
+
+// lastRunBlock cuts the last-run block out of backupScheduleCard.
+func lastRunBlock(t *testing.T, card string) string {
+	t.Helper()
+	start := strings.Index(card, "if (run) {")
+	end := strings.Index(card, "    if (fb) {")
+	if start < 0 || end < 0 || end < start {
+		t.Fatalf("could not find the last-run block in backupScheduleCard")
+	}
+	return "const run = sch.last_run, fb = sch.last_fallback;\n" + card[start:end]
+}
+
+// stripLineComments drops whole-line // comments so a check for the statement
+// after another is not defeated by the comment between them.
+func stripLineComments(s string) string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(l), "//") {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // nextRunBranch cuts the next-run `else if` branch out of backupScheduleCard so
@@ -173,11 +229,18 @@ func TestBackupSettings_fullBackupPossibleReachesTheWire(t *testing.T) {
 		{"full backups enabled", &stubScheduleReporter{full: true}, true},
 		{"full backups off on this daemon", &stubScheduleReporter{full: false}, false},
 		{"no schedule loop (read-only console)", nil, false},
+		// Per-server: the daemon may take full backups, this server cannot.
+		{"no source connection on this server", &stubScheduleReporter{full: true}, false},
+		{"full backups refused on this daemon", &stubScheduleReporter{full: true, refusal: errors.New("lock mode refused")}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := newScheduleServer(t, tc.rep)
+			source := "src:pw@tcp(127.0.0.1:3306)/"
+			if tc.name == "no source connection on this server" {
+				source = ""
+			}
 			s3only, err := srv.cm.reg.Add(ServerEntry{Name: "s3only", DSN: "idx:pw@tcp(127.0.0.1:3306)/idx3",
-				SourceDSN: "src:pw@tcp(127.0.0.1:3306)/", BaselineS3: "s3://bucket/backups"})
+				SourceDSN: source, BaselineS3: "s3://bucket/backups"})
 			if err != nil {
 				t.Fatal(err)
 			}
