@@ -298,7 +298,13 @@ func bucketStoresOf(entries []ServerEntry) (map[string]storage.BucketStore, []bu
 	conflicted := map[string]bool{}
 	for _, e := range entries {
 		st, err := e.BucketStore()
-		if err != nil || st.IsZero() {
+		if err != nil {
+			// Only a hand-edited file gets here: Add/Update refuse the shape.
+			slog.Warn("server registry: this server's S3 store settings are invalid and are ignored; its buckets use the ambient endpoint",
+				"server", e.Name, "error", err)
+			continue
+		}
+		if st.IsZero() {
 			continue
 		}
 		for _, b := range e.s3Buckets() {
@@ -329,6 +335,14 @@ func (r *Registry) syncBucketStores() {
 			"bucket", c.Bucket, "server_a", c.ServerA, "server_b", c.ServerB)
 	}
 	storage.SetBucketStores(table)
+}
+
+// storeInputsChanged reports whether an edit touches anything the bucket
+// store depends on: the three store fields or the S3 locations they apply
+// to. Whitespace-only differences count (the check normalizes them away).
+func storeInputsChanged(old, e ServerEntry) bool {
+	return old.S3Endpoint != e.S3Endpoint || old.S3PathStyle != e.S3PathStyle || old.S3Region != e.S3Region ||
+		old.ArchiveS3 != e.ArchiveS3 || old.BaselineS3 != e.BaselineS3
 }
 
 // checkBucketStore validates e's S3 store fields, normalizes them in place,
@@ -498,12 +512,19 @@ func (r *Registry) Update(e ServerEntry) error {
 	if err := r.checkName(e.Name, e.ID); err != nil {
 		return err
 	}
-	if err := r.checkBucketStore(&e, e.ID); err != nil {
-		return err
-	}
 	for i, old := range r.file.Servers {
 		if old.ID != e.ID {
 			continue
+		}
+		// The store is re-validated only when the edit TOUCHES it (the three
+		// fields or the S3 locations they apply to). A hand-edited file with
+		// an invalid s3_endpoint is warned about at load; refusing every
+		// other save of that entry over it would block "stop monitoring" and
+		// the backup schedule until the YAML is fixed.
+		if storeInputsChanged(old, e) {
+			if err := r.checkBucketStore(&e, e.ID); err != nil {
+				return err
+			}
 		}
 		if e.Extra == nil {
 			e.Extra = old.Extra // preserve forward-compat fields across edits

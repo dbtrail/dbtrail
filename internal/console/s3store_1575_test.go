@@ -181,6 +181,43 @@ func TestRegistryS3Store_syncsTheTable(t *testing.T) {
 	}
 }
 
+// A hand-edited file with an invalid store: the entry loads, the store is
+// ignored (warned at load), and an edit that does NOT touch the store or
+// its buckets still saves, so "stop monitoring" and the backup schedule are
+// not held hostage by a typo in the YAML. An edit that touches it is refused.
+func TestRegistryS3Store_invalidHandEditDoesNotBlockUnrelatedSaves(t *testing.T) {
+	clearStores(t)
+	file := "version: 1\nservers:\n  - id: aaaaaaaaaaaaaaaa\n    name: A\n    index_dsn: u:p@tcp(h:3306)/a\n    archive_s3: s3://arch/a/\n    s3_endpoint: minio:9000\n"
+	path := filepath.Join(t.TempDir(), "servers.yaml")
+	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ok := r.Get("aaaaaaaaaaaaaaaa")
+	if !ok {
+		t.Fatal("entry did not load")
+	}
+	if _, routed := storage.BucketStoreFor("arch"); routed {
+		t.Error("an invalid store must not route the bucket")
+	}
+	a.MonitorDesired = true
+	if err := r.Update(a); err != nil {
+		t.Fatalf("an unrelated edit was refused over the hand-edited store: %v", err)
+	}
+	a.S3Region = "us-east-1" // touches the store: now the invalid endpoint is checked
+	if err := r.Update(a); !errors.Is(err, storage.ErrBucketStoreConfig) {
+		t.Fatalf("an edit touching the store must re-validate it: err = %v", err)
+	}
+	a.S3Region = ""
+	a.ArchiveS3 = "s3://other/a/" // a new bucket for the same (invalid) store: checked too
+	if err := r.Update(a); !errors.Is(err, storage.ErrBucketStoreConfig) {
+		t.Fatalf("an edit changing the buckets must re-validate the store: err = %v", err)
+	}
+}
+
 // The HTTP surface: the three values round-trip through the masked DTO,
 // a bad value is a 400 that names the field, a conflict is a 422, and a PUT
 // that leaves them blank clears them (the form always sends them).
