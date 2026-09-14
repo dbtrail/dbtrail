@@ -87,6 +87,10 @@ type BaselineRequest struct {
 	// BaselineRunTriggerScheduled when the backup schedule started this job,
 	// empty for the Create backup button.
 	Trigger string
+	// Why is the reason the backup schedule chose a FULL backup for this
+	// run (#1604), persisted on the run record so the page can say what was
+	// missing; empty for a manual backup.
+	Why string
 }
 
 // BaselineRequestFor builds the in-process job description for a registry

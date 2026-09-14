@@ -296,16 +296,64 @@ func BaselineFoldSource(e ServerEntry) string {
 // attempted for e (the fold itself may still refuse), and why not.
 func rebuildPossible(e ServerEntry) error {
 	if e.DSN == "" {
-		return errors.New("this server has no index connection to read the recorded changes from")
+		return errors.New(BackupWhyNoIndex)
 	}
 	if e.BaselineDir == "" {
 		// The fold WRITES Parquet to a filesystem, so it needs the server's
 		// own local directory. Its READ may be remote (see BaselineFoldSource);
 		// only the write is the constraint. The refresh loop refuses on the
 		// same condition.
-		return errors.New("an update from the recorded changes needs a local backup directory")
+		return errors.New(BackupWhyNoLocalDir)
 	}
 	return nil
+}
+
+// The reasons a scheduled run takes a FULL backup instead of updating the
+// previous one (#1604). They are persisted on the run record at run time,
+// never recomputed for a past run: recomputed live, a bucket error that has
+// since cleared shows the cheap producer for a run that read production in
+// full. The first two are permanent until a setting changes, which is why
+// the page turns them into the setting to change.
+const (
+	BackupWhyNoIndex     = "this server has no index connection to read the recorded changes from"
+	BackupWhyNoLocalDir  = "an update from the recorded changes needs a local backup directory"
+	BackupWhyFirstBackup = "no previous backup to update"
+	// BackupWhyUnreadablePrefix starts the reason for a full backup taken
+	// because the previous one could not be read (the rest names the error).
+	BackupWhyUnreadablePrefix = "the previous backup could not be read"
+	// BackupWhyFoldRefusedPrefix / BackupWhyFoldCrashedPrefix start the reason
+	// for a full backup that stands in for an update the fold refused or that
+	// crashed (the rest names the refusal or the panic).
+	BackupWhyFoldRefusedPrefix = "the update from the recorded changes was refused"
+	BackupWhyFoldCrashedPrefix = "the update from the recorded changes hit an internal error"
+)
+
+// BackupWhyCode classifies a persisted full-backup reason for the page, so
+// the remedy is chosen by a stable code and not by matching prose that may
+// be reworded later. Classified when the record is WRITTEN, so an old
+// record keeps the code its wording had then; the loop's live view of a
+// job classifies the same captured wording again in the same build, which
+// is the only surface for a full backup that panicked and wrote no record.
+// Empty for a reason this build does not know (an update, or a newer
+// daemon's wording).
+func BackupWhyCode(why string) string {
+	switch {
+	case why == "":
+		return ""
+	case why == BackupWhyNoIndex:
+		return "no_index"
+	case why == BackupWhyNoLocalDir:
+		return "no_local_dir"
+	case why == BackupWhyFirstBackup:
+		return "first_backup"
+	case strings.HasPrefix(why, BackupWhyUnreadablePrefix):
+		return "previous_unreadable"
+	case strings.HasPrefix(why, BackupWhyFoldRefusedPrefix):
+		return "fold_refused"
+	case strings.HasPrefix(why, BackupWhyFoldCrashedPrefix):
+		return "fold_crashed"
+	}
+	return ""
 }
 
 // CheckBackupSchedule reports whether e's schedule can run on a daemon with
@@ -409,14 +457,14 @@ func ChooseBackupMethod(ctx context.Context, e ServerEntry, gates BackupSchedule
 		if fullErr != nil || !strings.HasPrefix(source, "s3://") {
 			return BackupMethodFull, "", fmt.Errorf("the backup location %s could not be read: %w", source, listErr)
 		}
-		return BackupMethodFull, "the previous backup could not be read from the backup destination (" +
+		return BackupMethodFull, BackupWhyUnreadablePrefix + " from the backup destination (" +
 			listErr.Error() + "), so a full backup is taken instead", nil
 	}
 	if len(tables) == 0 {
 		if fullErr != nil {
 			return BackupMethodFull, "", fmt.Errorf("no previous backup to update under %s, and a full backup cannot start: %w", source, fullErr)
 		}
-		return BackupMethodFull, "no previous backup to update", nil
+		return BackupMethodFull, BackupWhyFirstBackup, nil
 	}
 	return BackupMethodRefresh, "no load on your database", nil
 }
@@ -434,6 +482,9 @@ type BackupScheduleState struct {
 	LastStartedAt string
 	// LastMethod is that job's producer (BackupMethodFull/Refresh).
 	LastMethod string
+	// LastWhy is why that job was a full backup (#1604), as decided when it
+	// started; empty for an update.
+	LastWhy string
 	// Last is the supervisor's status for THAT job: live while it is in the
 	// slot, afterwards the copy ScheduleState took when it saw the job
 	// terminal (so a later manual job taking the slot does not erase it),

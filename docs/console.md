@@ -494,8 +494,17 @@ panel that answers whether a restore would work, far below the fold.
   the reason, and one already saved is reported as not runnable on the
   page, never silently skipped.
   `PUT`/`DELETE /api/servers/{id}/backup-schedule`; state on `GET /api/baselines`
-  (`schedule`). The daemon-wide `--baseline-refresh-interval` below is
-  independent and can run alongside.
+  (`schedule`). Every scheduled run on record says how it was made
+  (`last_run.method`: `refresh` is an update from the recorded changes,
+  `backup` a full read of the source) and, for a full backup, why an update
+  was not possible when it ran (`last_run.why`, with a stable `why_code`:
+  `no_index`, `no_local_dir`, `first_backup`, `previous_unreadable`,
+  `fold_refused`, `fold_crashed`). The reason is persisted with the run,
+  never recomputed later, so a cleared bucket error cannot show the cheap
+  producer for a run that read production in full (#1604); the snapshot
+  detail carries the same on `run.why`. The page turns the two permanent
+  reasons into the setting to change. The daemon-wide
+  `--baseline-refresh-interval` below is independent and can run alongside.
 - **Automatic baseline refresh** — when `--baseline-refresh-interval` is set,
   the panel reports the daemon's last automatic refresh for the selected
   server: how many tables it published, or that it published nothing and why.

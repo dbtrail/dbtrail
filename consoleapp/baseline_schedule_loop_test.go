@@ -726,7 +726,7 @@ func TestBackupScheduler_startFullKeepsTheBecause(t *testing.T) {
 	e := addScheduled(t, reg, true)
 	sup.configErr = errors.New("bad lock mode")
 	now := time.Date(2026, 8, 28, 9, 0, 7, 0, time.UTC)
-	if b.startFull(e, now.Format(time.RFC3339), now, "the update was refused (capture gap)") {
+	if b.startFull(e, now.Format(time.RFC3339), now, "the update was refused (capture gap)", "") {
 		t.Fatal("a refused trigger reported a started job")
 	}
 	if st := b.ScheduleState(e.ID); !strings.HasPrefix(st.LastSkipReason, "the update was refused (capture gap); ") || !strings.Contains(st.LastSkipReason, "bad lock mode") {

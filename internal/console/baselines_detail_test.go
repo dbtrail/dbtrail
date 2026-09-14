@@ -81,6 +81,33 @@ func TestBaselineFiles_localDetail(t *testing.T) {
 	if got.Files != 4 || got.TotalBytes != 25 {
 		t.Fatalf("files/bytes = %d/%d, want 4/25", got.Files, got.TotalBytes)
 	}
+	if got.Run != nil {
+		t.Fatalf("no history: run must be absent, got %+v", got.Run)
+	}
+
+	// With this daemon's record of the run, the detail joins it by snapshot
+	// time and carries the exact duration and the reason it was a full
+	// backup (#1604).
+	h, err := OpenBaselineHistory(filepath.Join(t.TempDir(), "h.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Append(BaselineRunRecord{ServerID: bootServerID, Kind: BaselineRunDump, Trigger: BaselineRunTriggerScheduled,
+		SnapshotTime: "2026-06-10T12:00:00Z", StartedAt: "2026-06-10T11:58:30Z", FinishedAt: "2026-06-10T12:00:00Z",
+		Why: BackupWhyNoLocalDir, WhyCode: "no_local_dir"}); err != nil {
+		t.Fatal(err)
+	}
+	srv.baselineHistory = h
+	rec, body = doServersReq(t, srv, "GET", "/api/baselines/files"+detailQuery(detailSnapAt), "")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d, body = %s", rec.Code, body)
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Run == nil || got.Run.Kind != BaselineRunDump || got.Run.Seconds != 90 || got.Run.Why != BackupWhyNoLocalDir || got.Run.WhyCode != "no_local_dir" {
+		t.Fatalf("run = %+v, want the recorded dump, 90 s, and its reason", got.Run)
+	}
 	// Span runs from the first parquet to the markers: 120s.
 	if got.WriteSpanSeconds != 120 || got.WroteFrom != "2026-06-10 12:00:00" || got.WroteTo != "2026-06-10 12:02:00" {
 		t.Fatalf("span = %v (%s → %s), want 120s", got.WriteSpanSeconds, got.WroteFrom, got.WroteTo)

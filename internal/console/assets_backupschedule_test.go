@@ -16,7 +16,7 @@ func TestBackupScheduleWireNamesMatchTheFrontend(t *testing.T) {
 	raw, err := json.Marshal(backupScheduleDTO{
 		Every: "1d", At: "03:00", NextRun: "x", NextMethod: BackupMethodRefresh, NextMethodWhy: "w", NextMethodError: "e",
 		Runnable: false, Reason: "r", Running: true, HistoryUnavailable: true,
-		LastRun:      &backupScheduleRunDTO{Method: BackupMethodRefresh, FinishedAt: "f", Error: "e", Tables: 1, Carried: 1, CarriedCopied: 1, Uploaded: 1},
+		LastRun:      &backupScheduleRunDTO{Method: BackupMethodRefresh, Why: "w", WhyCode: "c", FinishedAt: "f", Error: "e", Tables: 1, Carried: 1, CarriedCopied: 1, Uploaded: 1},
 		LastSkipped:  &backupScheduleSkipDTO{At: "a", Reason: "r"},
 		LastFallback: &backupScheduleSkipDTO{At: "a", Reason: "r"},
 	})
@@ -36,7 +36,7 @@ func TestBackupScheduleWireNamesMatchTheFrontend(t *testing.T) {
 		}
 	}
 	run := wire["last_run"].(map[string]any)
-	for _, key := range []string{"method", "finished_at", "ok", "error", "tables", "carried", "carried_copied", "uploaded"} {
+	for _, key := range []string{"method", "why", "why_code", "finished_at", "ok", "error", "tables", "carried", "carried_copied", "uploaded"} {
 		if _, ok := run[key]; !ok {
 			t.Errorf("last_run does not serialise %q (got %s)", key, raw)
 		}

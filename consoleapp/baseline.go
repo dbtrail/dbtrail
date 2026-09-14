@@ -152,6 +152,9 @@ func (s *baselineSupervisor) run(req console.BaselineRequest) {
 	rec := console.BaselineRunRecord{
 		Kind: console.BaselineRunDump, Trigger: req.Trigger, StartedAt: started.Format(time.RFC3339),
 		Tables: stats.TablesProcessed, Rows: stats.RowsWritten, Uploaded: uploaded,
+		// The reason this was a full backup travels with the run (#1604):
+		// recomputed later it would name whatever is true THEN.
+		Why: req.Why, WhyCode: console.BackupWhyCode(req.Why),
 	}
 	if err == nil && !snapTime.IsZero() {
 		rec.SnapshotTime = snapTime.UTC().Format(time.RFC3339)

@@ -5649,6 +5649,54 @@ function fmtSeconds(sec) {
 
 const BACKUP_KIND_LABEL = { dump: "full copy of the source", refresh: "automatic refresh", restore: "point-in-time restore" };
 
+// Why a scheduled run read the database in full instead of updating the
+// previous backup (#1604), keyed by the code the daemon fixed when the run
+// happened. The first two are the setting to change, said as such; the
+// rest carry the run's own reason, which names the error.
+const BACKUP_WHY_REMEDY = {
+  no_index: "Set an index connection for this server (Servers) and the next run updates from the recorded changes instead of reading your database in full; without one there are no recorded changes to update from.",
+  no_local_dir: "Set a Backup dir for this server (Backup settings) and the next run updates from the recorded changes instead of reading your database in full.",
+  first_backup: "First backup: there was nothing to update from yet. The next run updates from it.",
+};
+// The same three, as a FACT about a past run, for the detail of a backup
+// that may be months old: "the next run updates" is false there (it ran
+// long ago) and "this server has no index connection" may no longer hold.
+const BACKUP_WHY_FACT = {
+  no_index: "Full backup: this server had no index connection at the time, so there were no recorded changes to update from.",
+  no_local_dir: "Full backup: an update from the recorded changes needed a local backup directory, which this server did not have at the time.",
+  first_backup: "Full backup: the first one, with nothing to update from yet.",
+};
+// remedy: true on the schedule card (this IS the last run, and the setting
+// to change is the point); false on a snapshot's detail (the fact only).
+function backupWhyLine(why, code, remedy) {
+  if (!why) return "";
+  const fixed = (remedy ? BACKUP_WHY_REMEDY : BACKUP_WHY_FACT)[code];
+  if (fixed) return fixed;
+  // The fold's own refusal rides inside the parentheses of a fallback
+  // reason; it is the part backupFoldError knows how to say (its bare
+  // --allow-gaps hint is a CLI flag), the wrapper is said here.
+  // [\s\S], not ".": a fold refused on several tables joins one line per
+  // table, and "." stops at the first newline, which skipped this branch
+  // and showed the raw text (a CLI flag inside) for the common gap case.
+  const inner = /^[^(]*\(([\s\S]*)\)$/.exec(why);
+  // The fold's message follows as its own sentence rather than inside
+  // parentheses: backupFoldError may turn it into two sentences. Its
+  // "pick a later moment" advice is Time-travel's, not a schedule's.
+  const said = (t) => backupFoldError(t).replace(/; pick a later moment\.?(?=\n|$)/g, ".");
+  let out;
+  if (code === "fold_refused" && inner) {
+    out = "The update from the recorded changes was refused, so a full backup was taken instead. Reason: " + said(inner[1]);
+  } else if (code === "fold_crashed" && inner) {
+    out = "The update from the recorded changes hit an internal error, so a full backup was taken instead. Error: " + said(inner[1].replace(/^internal error:?\s*/, ""));
+  } else if (code === "previous_unreadable") {
+    out = why.charAt(0).toUpperCase() + why.slice(1);
+  } else {
+    out = "Full backup because " + why;
+  }
+  if (!/[.!?]$/.test(out.trim())) out = out.trim() + ".";
+  return out;
+}
+
 // loadBackupDetail fills a row's expansion: tables with sizes, total weight,
 // and duration. The recorded run (this daemon performed it) gives the exact
 // duration; otherwise the file timestamps bound it, labeled as such.
@@ -5702,6 +5750,9 @@ async function loadBackupDetail(at, box) {
     facts.append(el("span", { class: "stg-dest", text:
       "files written over about " + fmtSeconds(d.write_span_seconds) + " (from file timestamps; the real run took longer)" }));
   }
+  // Outside the duration branch: a run stamped within one second has no
+  // duration to show and still has its reason (#1604).
+  if (d.run && d.run.why) facts.append(el("span", { class: "stg-dest", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
   const dl = el("button", { class: "btn", type: "button",
     text: "Download (.tar.gz) · " + humanBytes(d.total_bytes || 0) });
   if (d.incomplete) dl.disabled = true;
@@ -6077,6 +6128,15 @@ function backupScheduleCard(cur, b) {
             " The backup is on disk and can be restored from. The next scheduled run folds a new one."
           : "Last scheduled backup failed " + when + " (" + what + "): " + backupFoldError(run.error || "unknown error") +
             " Nothing was overwritten; the next scheduled run tries again." }));
+      }
+      // The reason a full backup was taken, as recorded when it ran, and
+      // the setting that turns the next one into an update (#1604). After
+      // BOTH branches: a full read that then failed is the run whose
+      // operator most needs to know why it was a full read.
+      // Not for a fallback: the red alarm below already carries the same
+      // refusal, and the card is in alarm precisely then.
+      if (run.method !== "refresh" && run.why && !(fb && (run.why_code === "fold_refused" || run.why_code === "fold_crashed"))) {
+        body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code, true) }));
       }
     }
     if (fb) {
