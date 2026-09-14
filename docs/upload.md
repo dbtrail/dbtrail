@@ -177,7 +177,17 @@ every store. What the setting does:
   A store with neither is refused, and so is one beside a location that is
   not an `s3://bucket/prefix/` URL. A server with no Backups location of its
   own reads the daemon's `--baseline-s3`; that bucket keeps the process-wide
-  behaviour, whatever the server's store says.
+  behaviour, whatever the server's store says, and a store on a server that
+  names that bucket itself is refused (HTTP 422): it would take over every
+  server that inherits it.
+- The store follows the server's **current** locations. Archives written to
+  a bucket before the server's `Archive to S3` moved elsewhere, or before its
+  store was cleared, are read through whatever routes that bucket now: keep a
+  server naming that bucket with the same store for as long as those archives
+  are read.
+- Without DuckDB's aws extension, a bucket whose endpoint-only secret cannot
+  be created fails the whole read session, not only reads under that bucket,
+  since sending that bucket's reads to AWS instead would be worse.
 - The DuckDB half gets one secret **scoped to the bucket**
   (`SCOPE 's3://<bucket>/'`), which DuckDB picks over the general one for
   paths under it. `views.sql` carries the same scoped secrets, still

@@ -214,6 +214,10 @@ type Registry struct {
 	// readOnly is set when the on-disk version is newer than this binary
 	// understands; see ErrRegistryReadOnly.
 	readOnly bool
+	// processBuckets are buckets the daemon itself reads with the
+	// process-wide endpoint (bucket → the setting's name), which no per-server
+	// store may claim; see SetProcessS3Location. Guarded by mu.
+	processBuckets map[string]string
 }
 
 // DefaultRegistryPath returns ~/.config/bintrail/console-servers.yaml, with
@@ -292,11 +296,23 @@ type bucketStoreConflict struct {
 // file. An entry whose store fields do not parse counts as store-less (its
 // buckets use the ambient endpoint, as its warning says); a store naming no
 // bucket of its own is reported and routes nothing.
-func bucketStoresOf(entries []ServerEntry) (map[string]storage.BucketStore, []bucketStoreConflict) {
+//
+// process holds the daemon's own store-less buckets (bucket → setting name):
+// they are seen first, as a reader with no store.
+func bucketStoresOf(entries []ServerEntry, process map[string]string) (map[string]storage.BucketStore, []bucketStoreConflict) {
 	seen := map[string]storage.BucketStore{}
 	owner := map[string]string{}
 	conflicted := map[string]bool{}
 	var conflicts []bucketStoreConflict
+	processNames := make([]string, 0, len(process))
+	for b := range process {
+		processNames = append(processNames, b)
+	}
+	slices.Sort(processNames)
+	for _, b := range processNames {
+		seen[b] = storage.BucketStore{}
+		owner[b] = process[b]
+	}
 	for _, e := range entries {
 		st, err := e.BucketStore()
 		if err != nil {
@@ -339,12 +355,32 @@ func bucketStoresOf(entries []ServerEntry) (map[string]storage.BucketStore, []bu
 // reads it. Called on load and after every successful save. Callers hold
 // r.mu (or own r exclusively, as LoadRegistry does).
 func (r *Registry) syncBucketStores() {
-	table, conflicts := bucketStoresOf(r.file.Servers)
+	table, conflicts := bucketStoresOf(r.file.Servers, r.processBuckets)
 	for _, c := range conflicts {
 		slog.Warn("server registry: two servers read the same S3 bucket from different stores (one of them may have no store set); the bucket uses the ambient endpoint until they agree",
 			"bucket", c.Bucket, "server_a", c.ServerA, "server_b", c.ServerB)
 	}
 	storage.SetBucketStores(table)
+}
+
+// SetProcessS3Location registers an S3 location the daemon reads for servers
+// with none of their own: the --baseline-s3 fallback (withBaselineDefaults)
+// that every server with no Backups location inherits, and that the boot
+// entry reads. Its bucket counts as a bucket with no store: a server naming
+// it with a store is refused, and a hand-edited one leaves it unrouted. label
+// names the setting in refusals and warnings. Called before serving.
+func (r *Registry) SetProcessS3Location(label, loc string) {
+	bucket, _, err := storage.ParseS3URL(strings.TrimSpace(loc))
+	if err != nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.processBuckets == nil {
+		r.processBuckets = map[string]string{}
+	}
+	r.processBuckets[bucket] = label
+	r.syncBucketStores()
 }
 
 // storeInputsChanged reports whether an edit touches anything the bucket
@@ -389,13 +425,23 @@ func (r *Registry) checkBucketStore(e *ServerEntry, selfID string) error {
 		}
 	}
 	for _, b := range e.s3Buckets() {
+		if label, ok := r.processBuckets[b]; ok && !st.IsZero() {
+			return fmt.Errorf("%w: bucket %q is %s, which servers with no Backups S3 location of their own read from AWS or the process-wide endpoint; a per-server store would take them all over, so use another bucket, or set BINTRAIL_S3_ENDPOINT for the whole process",
+				ErrS3StoreConflict, b, label)
+		}
 		for _, other := range r.file.Servers {
 			if other.ID == selfID || !slices.Contains(other.s3Buckets(), b) {
 				continue
 			}
 			ost, err := other.BucketStore()
 			if err != nil {
-				ost = storage.BucketStore{} // loads as store-less, see bucketStoresOf
+				// It loads as store-less (bucketStoresOf). Say why: the
+				// operator would otherwise copy settings that are ignored.
+				if st.IsZero() {
+					continue
+				}
+				return fmt.Errorf("%w: bucket %q is also used by server %q, whose S3 store settings are invalid and ignored (%v), so it reads the bucket from AWS or the process-wide endpoint; fix that server's S3 store first",
+					ErrS3StoreConflict, b, other.Name, err)
 			}
 			if ost.Equal(st) {
 				continue

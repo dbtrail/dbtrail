@@ -8883,7 +8883,7 @@ function buildServerForm() {
       opt("", "Path style (default with an endpoint)"), opt("path", "Path style: host/bucket/key"), opt("vhost", "Virtual-hosted: bucket.host/key"))));
   monGrid.append(srvField("S3 region", "s3_region", { placeholder: "(optional) us-east-1; MinIO ignores it, Wasabi wants its endpoint's" }));
   mon.append(monGrid);
-  mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to this server's Archive and Backups buckets, for uploads and reads alike; a bucket has one store, so two servers sharing a bucket must agree." }));
+  mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Backups locations set on this server, for uploads and reads alike, not to the daemon's default Backups location; a bucket has one store, so two servers sharing a bucket must agree." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
   // SELECT covers the information_schema snapshot of columns/PKs/FKs.

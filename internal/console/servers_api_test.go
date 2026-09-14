@@ -23,6 +23,7 @@ const secretPW = "s3cr3t-hunter2"
 // surface end to end.
 func newRegistryServer(t *testing.T) *Server {
 	t.Helper()
+	clearStores(t)
 	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
 	if err != nil {
 		t.Fatal(err)

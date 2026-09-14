@@ -334,6 +334,16 @@ func TestApplyBucketStoreSecrets_errorNeverCarriesTheKeys(t *testing.T) {
 	if !strings.Contains(err.Error(), `"b"`) {
 		t.Errorf("the error does not name the bucket: %v", err)
 	}
+
+	// DuckDB can echo a WINDOW of the statement, cutting a key in the middle,
+	// which no whole-value replacement recognizes.
+	fragment := func(_ context.Context, stmt string) error {
+		return errors.New("Parser Error: syntax error at end of input\nLINE 1: ...KEY_ID 'AKIAEX', SECRET 'sup3rs")
+	}
+	err = applyBucketStoreSecrets(context.Background(), fragment, stores, true)
+	if err == nil || strings.Contains(err.Error(), "sup3rs") || strings.Contains(err.Error(), "AKIAEX") {
+		t.Errorf("a truncated echo of the statement reaches the error: %v", err)
+	}
 }
 
 // Measured: a scoped secret with no REGION signs with whatever s3_region the

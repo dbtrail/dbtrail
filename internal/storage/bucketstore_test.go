@@ -278,3 +278,11 @@ func TestBucketStore_SigningRegion(t *testing.T) {
 		}
 	}
 }
+
+// Regions are lowercase everywhere they are checked; a store that validates
+// the signing region rejects US-EAST-1.
+func TestNewBucketStore_regionIsLowercased(t *testing.T) {
+	if got := mustStore(t, "", "", " EU-Central-1 ").Region; got != "eu-central-1" {
+		t.Errorf("Region = %q, want eu-central-1", got)
+	}
+}

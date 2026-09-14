@@ -194,7 +194,7 @@ func execOn(db *sql.DB) func(context.Context, string) error {
 // Credentials are best-effort, routing is not: a bucket whose fallback cannot
 // be created fails the session, because its reads would otherwise go to the
 // ambient endpoint (AWS, for a MinIO bucket). The error names the bucket and
-// never carries the statement, which holds the environment's keys.
+// never carries DuckDB's message when the statement holds the environment's keys.
 func applyBucketStoreSecrets(ctx context.Context, exec func(context.Context, string) error, stores map[string]storage.BucketStore, tryChain bool) error {
 	keyID, secret, token := os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), os.Getenv("AWS_SESSION_TOKEN")
 	for _, b := range sortedBuckets(stores) {
@@ -205,27 +205,26 @@ func applyBucketStoreSecrets(ctx context.Context, exec func(context.Context, str
 				continue
 			}
 			slog.Warn("duckdb: AWS credential chain resolved no usable credentials for a bucket with its own store; routing it by endpoint alone",
-				"bucket", b, "error", scrubKeys(err.Error(), keyID, secret, token))
+				"bucket", b, "error", err)
 		}
 		if err := exec(ctx, bucketStoreSecret(b, st, configProvider(keyID, secret, token))); err != nil {
 			return fmt.Errorf("route DuckDB S3 reads for bucket %q to its own store (is httpfs loaded?): %s",
-				b, scrubKeys(err.Error(), keyID, secret, token))
+				b, withholdIfKeyed(err, keyID, secret, token))
 		}
 	}
 	return nil
 }
 
-// scrubKeys blanks every non-empty value in vals out of msg, in its plain and
-// its SQL-quoted spelling: DuckDB echoes a statement it cannot parse.
-func scrubKeys(msg string, vals ...string) string {
-	for _, v := range vals {
-		if v == "" {
-			continue
+// withholdIfKeyed renders the error of a statement that carried keys: not at
+// all. DuckDB echoes a statement it cannot parse, sometimes as a WINDOW that
+// cuts a key in the middle, where no replacement of the whole value finds it.
+func withholdIfKeyed(err error, keys ...string) string {
+	for _, k := range keys {
+		if k != "" {
+			return "DuckDB's message is withheld because the statement carries AWS keys from the environment"
 		}
-		msg = strings.ReplaceAll(msg, strings.ReplaceAll(v, "'", "''"), "<redacted>")
-		msg = strings.ReplaceAll(msg, v, "<redacted>")
 	}
-	return msg
+	return err.Error()
 }
 
 const chainProvider = ", PROVIDER credential_chain"

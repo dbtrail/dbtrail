@@ -12,6 +12,7 @@ import (
 // daemon-wide defaults the page reports.
 func newBackupSettingsServer(t *testing.T, defaults BackupSettingsDefaults, baselineDir, baselineS3 string) *Server {
 	t.Helper()
+	clearStores(t)
 	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
 	if err != nil {
 		t.Fatal(err)

@@ -1,8 +1,11 @@
 package console
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,9 +187,18 @@ func TestRegistryS3Store_syncsTheTable(t *testing.T) {
 	if err := os.WriteFile(cpath, []byte(conflict), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	var logged bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
 	cr, err := LoadRegistry(cpath)
+	slog.SetDefault(prevLog)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, want := range []string{"bucket=shared", "server_a=A", "server_b=B"} {
+		if !strings.Contains(logged.String(), want) {
+			t.Errorf("the conflict warning does not carry %s: %s", want, logged.String())
+		}
 	}
 	if cr.Len() != 3 {
 		t.Fatalf("loaded %d entries, want 3", cr.Len())
@@ -260,6 +272,24 @@ func TestRegistryS3Store_storeNeedsItsOwnLocation(t *testing.T) {
 	if _, ok := storage.BucketStoreFor("arch"); !ok {
 		t.Error("the refused update unrouted the bucket")
 	}
+
+	// A hand-edited store with no location loads, and says it routes nothing.
+	path := filepath.Join(t.TempDir(), "nowhere.yaml")
+	file := "version: 1\nservers:\n  - id: aaaaaaaaaaaaaaaa\n    name: nowhere\n    index_dsn: u:p@tcp(h:3306)/n\n    s3_endpoint: http://minio:9000\n"
+	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logged bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	_, err = LoadRegistry(path)
+	slog.SetDefault(prevLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logged.String(), "routes nothing") || !strings.Contains(logged.String(), "server=nowhere") {
+		t.Errorf("no warning for a store that routes nothing: %s", logged.String())
+	}
 }
 
 // A hand-edited file with an invalid store: the entry loads, the store is
@@ -299,9 +329,10 @@ func TestRegistryS3Store_invalidHandEditDoesNotBlockUnrelatedSaves(t *testing.T)
 		t.Fatalf("an edit changing the buckets must re-validate the store: err = %v", err)
 	}
 	_, err = r.Add(ServerEntry{Name: "C", DSN: "u:p@tcp(h:3306)/c", ArchiveS3: "s3://arch/c/", S3Endpoint: "http://minio:9000"})
-	if !errors.Is(err, ErrS3StoreConflict) || !strings.Contains(err.Error(), `"A"`) {
+	if !errors.Is(err, ErrS3StoreConflict) || !strings.Contains(err.Error(), `"A"`) || !strings.Contains(err.Error(), "invalid") {
 		t.Fatalf("a store on a bucket a server with an invalid store names: err = %v, want ErrS3StoreConflict naming A", err)
 	}
+	t.Log(err)
 }
 
 // The HTTP surface: the three values round-trip through the masked DTO,
@@ -351,6 +382,13 @@ func TestServersAPI_s3Store(t *testing.T) {
 		t.Errorf("conflict: %d %s, want 422 naming server a", rec.Code, body)
 	}
 
+	rec, body = doServersReq(t, srv, "PUT", "/api/servers/"+a.ID,
+		`{"name":"a","host":"h","port":"3306","user":"u","dbname":"a","archive_s3":"s3://shared/a/","baseline_s3":" s3://shared/bb/ ",`+
+			`"s3_endpoint":"http://minio:9000","s3_path_style":"","s3_region":"us-east-1"}`)
+	if rec.Code != 200 || !strings.Contains(string(body), `"baseline_s3":"s3://shared/bb/"`) {
+		t.Errorf("an edit with a padded Backups S3 location: %d %s, want 200 with it trimmed", rec.Code, body)
+	}
+
 	// A PUT with the fields blank clears the store, and the table follows.
 	rec, body = doServersReq(t, srv, "PUT", "/api/servers/"+a.ID,
 		`{"name":"a","host":"h","port":"3306","user":"u","dbname":"a","archive_s3":"s3://shared/a/","s3_endpoint":"","s3_path_style":"","s3_region":""}`)
@@ -392,5 +430,71 @@ func TestServerFormCarriesTheS3StoreFields(t *testing.T) {
 		if !strings.Contains(body, send) {
 			t.Errorf("serverFormBody does not send %s; the PUT would clear it", send)
 		}
+	}
+}
+
+// The daemon's --baseline-s3 is what every server with no Backups location
+// of its own reads, from AWS or the process-wide endpoint: a server naming
+// that bucket with a store would take them all over.
+func TestRegistryS3Store_daemonDefaultBucketHasNoStore(t *testing.T) {
+	clearStores(t)
+	srv := newBackupSettingsServer(t, BackupSettingsDefaults{}, "", "s3://daemon/baselines/")
+	r := srv.cm.reg
+	_, err := r.Add(ServerEntry{Name: "A", DSN: "u:p@tcp(h:3306)/a", BaselineS3: "s3://daemon/a/", S3Endpoint: "http://minio:9000"})
+	if !errors.Is(err, ErrS3StoreConflict) || !strings.Contains(err.Error(), "--baseline-s3") {
+		t.Fatalf("a store on the daemon's default Backups bucket: err = %v, want ErrS3StoreConflict naming --baseline-s3", err)
+	}
+	t.Log(err)
+	if _, err := r.Add(ServerEntry{Name: "B", DSN: "u:p@tcp(h:3306)/b", ArchiveS3: "s3://daemon/b/"}); err != nil {
+		t.Fatalf("a store-less server on the default bucket: %v", err)
+	}
+	if _, err := r.Add(ServerEntry{Name: "C", DSN: "u:p@tcp(h:3306)/c", ArchiveS3: "s3://elsewhere/c/", S3Endpoint: "http://minio:9000"}); err != nil {
+		t.Fatalf("a store on another bucket: %v", err)
+	}
+
+	file := "version: 1\nservers:\n  - id: aaaaaaaaaaaaaaaa\n    name: A\n    index_dsn: u:p@tcp(h:3306)/a\n    baseline_s3: s3://daemon/a/\n    s3_endpoint: http://minio:9000\n"
+	path := filepath.Join(t.TempDir(), "servers.yaml")
+	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineS3: "s3://daemon/baselines/"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := storage.BucketStoreFor("daemon"); ok {
+		t.Error("a hand-edited store on the daemon's default Backups bucket must not route it")
+	}
+}
+
+// The backup-settings page edits the Backups S3 location, so its save can now
+// be refused like the servers form's.
+func TestBackupSettings_s3StoreRefusals(t *testing.T) {
+	clearStores(t)
+	srv := newBackupSettingsServer(t, BackupSettingsDefaults{}, "", "")
+	a, err := srv.cm.reg.Add(ServerEntry{Name: "A", DSN: "u:p@tcp(h:3306)/a", BaselineS3: "s3://bk/a/", S3Endpoint: "http://minio:9000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.cm.reg.Add(ServerEntry{Name: "O", DSN: "u:p@tcp(h:3306)/o", ArchiveS3: "s3://taken/o/"}); err != nil {
+		t.Fatal(err)
+	}
+	put := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("PUT", "/api/backup-settings/servers/"+a.ID, strings.NewReader(body))
+		req.SetPathValue("id", a.ID)
+		srv.handleBackupSettingsServerUpdate(rec, req)
+		return rec
+	}
+	if rec := put(`{"baseline_s3":""}`); rec.Code != 400 {
+		t.Errorf("clearing the only location under a store: %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if rec := put(`{"baseline_s3":"s3://taken/a/"}`); rec.Code != 422 || !strings.Contains(rec.Body.String(), `\"O\"`) {
+		t.Errorf("moving Backups onto a store-less server's bucket: %d %s, want 422 naming O", rec.Code, rec.Body.String())
+	}
+	if _, ok := storage.BucketStoreFor("bk"); !ok {
+		t.Error("a refused backup-settings save unrouted the bucket")
 	}
 }

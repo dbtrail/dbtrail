@@ -179,3 +179,37 @@ func TestViewsAPI_pinsNothingForAGuessedRegion(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// Wiring guard for #1575: the downloaded file carries the bucket stores this
+// process reads with. The renderer is tested on its own, which says nothing
+// about whether buildViewsInput hands it the table.
+func TestViewsAPI_carriesTheBucketStores(t *testing.T) {
+	t.Setenv(storage.EnvS3PathStyle, "")
+	t.Setenv(storage.EnvS3Endpoint, "")
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("FROM archive_state").WillReturnRows(
+		sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}).
+			AddRow("aaaa", nil, "bkt", "events/bintrail_id=aaaa/f.parquet"))
+	srv := newViewsServer(t, "", false)
+	srv.cm.boot.db = db
+	st, err := storage.NewBucketStore("http://minio:9000", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.SetBucketStores(map[string]storage.BucketStore{"bkt": st})
+	t.Cleanup(func() { storage.SetBucketStores(nil) })
+
+	rec, body := doServersReq(t, srv, "GET", "/api/views.sql?include_events=1", "")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d, body = %s", rec.Code, body)
+	}
+	if !strings.Contains(string(body), "SCOPE 's3://bkt/'") {
+		t.Errorf("the downloaded file does not carry the bucket's store:\n%s", body)
+	}
+}

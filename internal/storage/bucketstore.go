@@ -55,7 +55,7 @@ var regionShape = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 func NewBucketStore(endpoint, style, region string) (BucketStore, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	style = strings.ToLower(strings.TrimSpace(style))
-	region = strings.TrimSpace(region)
+	region = strings.ToLower(strings.TrimSpace(region))
 	var s BucketStore
 	if endpoint != "" {
 		u, err := NormalizeEndpointURL(endpoint)
