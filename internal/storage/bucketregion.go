@@ -32,8 +32,10 @@ func DetectBucketRegion(ctx context.Context, cfg aws.Config, bucket string) (str
 	// to the AMBIENT endpoint, which for a MinIO bucket is AWS, where a bucket
 	// of the same name may belong to someone else. The operator's region is
 	// the answer when they typed one (a fact worth publishing); with none the
-	// store signs as us-east-1, and that is a default, not a detection.
-	if store, ok := BucketStoreFor(bucket); ok && store.Endpoint.Set() {
+	// store signs as us-east-1, and that is a default, not a detection. A
+	// store with keys is not asked either: its bucket is another account's,
+	// and the question would be signed with the daemon's credentials.
+	if store, ok := BucketStoreFor(bucket); ok && (store.Endpoint.Set() || store.HasKeys()) {
 		if store.Region != "" {
 			return store.Region, true
 		}

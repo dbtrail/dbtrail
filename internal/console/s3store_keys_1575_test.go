@@ -503,10 +503,19 @@ func TestServersTest_rowTestFlagsAStoreNotInUse(t *testing.T) {
 	if len(pb.S3) != 1 || !pb.S3[0].NotApplied {
 		t.Errorf("the daemon applies a different store to the bucket: %s, want not_applied", raw)
 	}
-	// A form test is of unsaved values; the table cannot be expected to hold them.
-	pb, raw = doProbe(t, srv, path, `{"archive_s3":"s3://probe-u/s/","s3_endpoint":"`+host.srv.URL+`","s3_access_key_id":"AKIASAVED","s3_secret_access_key":"SavedSecretValue"}`)
+	// The edit form testing the saved store unchanged (secret blank, or typed
+	// again) is the same question: flagged too.
+	for _, secret := range []string{``, `,"s3_secret_access_key":"SavedSecretValue"`} {
+		pb, raw = doProbe(t, srv, path, `{"archive_s3":"s3://probe-u/s/","s3_endpoint":"`+host.srv.URL+`","s3_access_key_id":"AKIASAVED"`+secret+`}`)
+		if len(pb.S3) != 1 || !pb.S3[0].NotApplied {
+			t.Errorf("the form testing the saved store (%q): %s, want not_applied", secret, raw)
+		}
+	}
+	// A form test of different values is of unsaved settings; the table
+	// cannot be expected to hold them.
+	pb, raw = doProbe(t, srv, path, `{"archive_s3":"s3://probe-u/s/","s3_endpoint":"`+host.srv.URL+`","s3_access_key_id":"AKIATYPED","s3_secret_access_key":"TypedSecretValue"}`)
 	if len(pb.S3) != 1 || pb.S3[0].NotApplied {
-		t.Errorf("a form test flagged not_applied: %s", raw)
+		t.Errorf("a form test of other keys flagged not_applied: %s", raw)
 	}
 }
 
@@ -706,10 +715,22 @@ func TestServersTest_s3ProbeTimesOut(t *testing.T) {
 	t.Cleanup(hang.Close)
 	t.Cleanup(func() { close(release) })
 	srv := newRegistryServer(t)
-	start := time.Now()
-	pb, raw := doProbe(t, srv, "/api/servers/test", `{`+deadDSN+`,"archive_s3":"s3://probe-hang/x/","s3_endpoint":"`+hang.URL+`","s3_access_key_id":"AKIATYPED","s3_secret_access_key":"TypedSecretValue"}`)
-	if took := time.Since(start); took > 3*time.Second {
-		t.Errorf("the probe took %v against a store that never answers", took)
+	// The request runs aside with a deadline of its own: without the probe's
+	// timeout it would never return, and the test must fail, not hang.
+	done := make(chan []byte, 1)
+	go func() {
+		_, raw := doServersReq(t, srv, "POST", "/api/servers/test", `{`+deadDSN+`,"archive_s3":"s3://probe-hang/x/","s3_endpoint":"`+hang.URL+`","s3_access_key_id":"AKIATYPED","s3_secret_access_key":"TypedSecretValue"}`)
+		done <- raw
+	}()
+	var raw []byte
+	select {
+	case raw = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the probe did not return against a store that never answers")
+	}
+	var pb probeBody
+	if err := json.Unmarshal(raw, &pb); err != nil {
+		t.Fatal(err)
 	}
 	if len(pb.S3) != 1 || pb.S3[0].OK || pb.S3[0].Error == "" {
 		t.Errorf("a hanging store: %s", raw)

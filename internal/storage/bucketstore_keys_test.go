@@ -67,6 +67,9 @@ func TestBucketStore_keysInIsZeroAndEqual(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if (BucketStore{AccessKeyID: "AKIASTORE", SecretKey: "secret"}).IsZero() {
+		t.Error("a store built with keys and nothing else must not be zero: it would be dropped from the table and sign with the ambient chain")
+	}
 	if keysOnly.IsZero() {
 		t.Error("a store with keys alone must not be the zero store: it signs differently from the ambient chain")
 	}
@@ -205,6 +208,26 @@ func TestNewS3ClientForBucket_keysOnlyStoreSignsAtTheAmbientEndpoint(t *testing.
 	headBucket(t, c, "other-account")
 	if !strings.Contains(ambient.seen(), "Credential=AKIAKEYSONLY/") || !strings.Contains(ambient.seen(), "/eu-west-1/s3/") {
 		t.Errorf("a keys-only store did not sign with its keys and region at the ambient endpoint:\n%s", ambient.seen())
+	}
+}
+
+// A keys-only store's bucket belongs to another account: GetBucketLocation
+// with the daemon's credentials would be refused or, worse, answered about a
+// different bucket. The store's own region is the answer.
+func TestDetectBucketRegion_keysOnlyStoreIsNotAsked(t *testing.T) {
+	isolateAWSEnv(t)
+	keysOnly, err := mustStore(t, "", "", "ap-south-1").WithKeys("AKIAKEYSONLY", "keysonlysecret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withBucketStores(t, map[string]BucketStore{"acct": keysOnly})
+	asked := newFakeS3(t)
+	cfg := aws.Config{Region: "us-west-2", BaseEndpoint: aws.String(asked.srv.URL)}
+	if r, ok := DetectBucketRegion(context.Background(), cfg, "acct"); r != "ap-south-1" || !ok {
+		t.Errorf("keys-only store: (%q, %v), want (ap-south-1, true)", r, ok)
+	}
+	if asked.seen() != "" {
+		t.Errorf("region detection asked about a keyed bucket with the daemon's credentials:\n%s", asked.seen())
 	}
 }
 

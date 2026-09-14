@@ -671,7 +671,7 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := probeServer(r, dsn, monitored)
 	candidate, typed, hold := s3ProbeCandidate(req, sent, saved, hasSaved)
-	resp.S3 = probeS3Store(r.Context(), candidate, typed, hold)
+	resp.S3 = probeS3Store(r.Context(), candidate, typed && !sameSavedStore(candidate, saved, hasSaved), hold)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -778,12 +778,26 @@ func s3ProbeCandidate(req serverRequest, sent map[string]json.RawMessage, saved 
 
 // sameS3Endpoint reports whether a and b send their requests to the same
 // place: endpoint and addressing as the store normalizes them. Region is left
-// out: it changes the signature, not where it goes.
+// out: it changes the signature, and on AWS only which regional host of the
+// same bucket answers.
 func sameS3Endpoint(a, b ServerEntry) bool {
 	sa, errA := storage.NewBucketStore(a.S3Endpoint, a.S3PathStyle, "")
 	sb, errB := storage.NewBucketStore(b.S3Endpoint, b.S3PathStyle, "")
 	return errA == nil && errB == nil &&
 		sa.Endpoint.URL == sb.Endpoint.URL && sa.Endpoint.PathStyle == sb.Endpoint.PathStyle
+}
+
+// sameSavedStore reports a typed candidate that is the saved server's store
+// unchanged (the saved secret filled in, or typed again): testing it is the
+// row's question, so a store the daemon is not applying is flagged there too.
+func sameSavedStore(candidate, saved ServerEntry, hasSaved bool) bool {
+	if !hasSaved {
+		return false
+	}
+	c, errC := candidate.BucketStore()
+	s, errS := saved.BucketStore()
+	return errC == nil && errS == nil && !s.IsZero() && c.Equal(s) &&
+		slices.Equal(candidate.s3Buckets(), saved.s3Buckets())
 }
 
 // sameS3Store is sameS3Endpoint with the same access key.

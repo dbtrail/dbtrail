@@ -443,6 +443,51 @@ func TestBucketStoreSecret_regionOnlyKeepsTheProcessEndpoint_DuckDB(t *testing.T
 	}
 }
 
+// The same measurement for a store with keys and no endpoint, through the
+// real path (applyBucketStoreSecrets): its PROVIDER config secret carries no
+// ENDPOINT, and the read still goes to the process-wide endpoint, where the
+// SDK half uploads.
+func TestBucketStoreSecret_keysOnlyKeepsTheProcessEndpoint_DuckDB(t *testing.T) {
+	t.Setenv(storage.EnvS3Endpoint, "http://127.0.0.1:1")
+	t.Setenv(storage.EnvS3PathStyle, "")
+	ctx := context.Background()
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := LoadHTTPFS(ctx, db); err != nil {
+		t.Skip("httpfs unavailable (offline host)")
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ep, err := storage.S3EndpointFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range append(S3SettingStatements("", ep), "SET http_retries=0") {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	keysOnly, err := store(t, "", "", "ap-south-1").WithKeys("AKIAKEYSONLY", "keysonlysecret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := func(ctx context.Context, stmt string) error { _, err := conn.ExecContext(ctx, stmt); return err }
+	if err := applyBucketStoreSecrets(ctx, exec, map[string]storage.BucketStore{"acct": keysOnly}, true); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	err = conn.QueryRowContext(ctx, "SELECT count(*) FROM read_parquet('s3://acct/x.parquet')").Scan(&n)
+	if err == nil || !strings.Contains(err.Error(), "127.0.0.1:1") {
+		t.Errorf("a keys-only bucket's read did not go to the process-wide endpoint: %v", err)
+	}
+}
+
 // Keys in the environment do not make every message dangerous: only one that
 // echoes the statement is. The usual failure (no httpfs) names no key and is
 // the only diagnostic there is.
