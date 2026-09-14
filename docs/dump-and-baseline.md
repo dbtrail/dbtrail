@@ -188,8 +188,8 @@ In practice this skew is almost always absorbed by DBTrail's idempotent delta re
 `reconstruct` merges binlog deltas onto, so a snapshot stitched from several instants yields a table
 that never existed at any point in time, and every downstream answer — `reconstruct`, `verify`,
 `drill` — inherits it with nothing saying so. That is not something an operator should get by not
-choosing, which is why `--lock-mode` (CLI) and `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (console)
-default to `ftwrl` and the weaker modes must be asked for by name.
+choosing, which is why `--lock-mode` (CLI) and `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (console;
+`BASELINE_LOCK_MODE` in the compose `.env`) default to `ftwrl` and the weaker modes must be asked for by name.
 
 | `--lock-mode` | mydumper mode | Point-consistent? | Works on a write-active source? | Privileges |
 |---|---|---|---|---|
@@ -197,6 +197,9 @@ default to `ftwrl` and the weaker modes must be asked for by name.
 | `lock-all` | `LOCK_ALL` | yes | yes | `LOCK TABLES` |
 | `safe-no-lock` | `SAFE_NO_LOCK` | yes — or it aborts | **usually not** | `SELECT` + `REPLICATION CLIENT` |
 | `no-lock` | `NO_LOCK` | **no** | yes | `SELECT` + `REPLICATION CLIENT` |
+
+Every mode also needs `SHOW VIEW` when the dumped schemas hold views: mydumper stops the whole dump
+at the first view it cannot read (`SHOW VIEW command denied`), including under `no-lock`.
 
 **On managed MySQL, use `lock-all`.** RDS (and equivalents) will not grant
 `BACKUP_ADMIN` at all — `GRANT BACKUP_ADMIN ON *.* TO CURRENT_USER()` is refused

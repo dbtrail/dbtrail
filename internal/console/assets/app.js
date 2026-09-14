@@ -8891,11 +8891,10 @@ function buildServerForm() {
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
   // SELECT covers the information_schema snapshot of columns/PKs/FKs.
   //
-  // LOCK TABLES is listed here too, commented, because omitting it is a
-  // DELAYED failure: capture starts clean and only Create baseline refuses,
-  // hours or days later. The form is the last place anyone reads a grant list
-  // before pasting it, so the line has to exist here even though the stream
-  // does not need it.
+  // The backup line is here even though the stream does not need it, because
+  // omitting it is a DELAYED failure: capture starts clean and only Create
+  // backup refuses, hours or days later. The form is the last place anyone
+  // reads a grant list before pasting it.
   //
   // The backup line is what the DEFAULT lock mode (ftwrl) checks for
   // (internal/mydumperlock/privileges.go): RELOAD, plus BACKUP_ADMIN on
@@ -8909,8 +8908,11 @@ function buildServerForm() {
   const grantBase =
     "CREATE USER 'dbtrail'@'%' IDENTIFIED BY 'strong-password';\n" +
     "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';\n";
-  const grantLockAll =
-    "-- RDS and Aurora: instead of the line above, grant LOCK TABLES and set the lock mode to lock-all\n" +
+  // Managed services cannot use the default lock mode (no BACKUP_ADMIN on
+  // managed MySQL; RDS MariaDB's RELOAD excludes FLUSH TABLES WITH READ LOCK),
+  // so they switch to lock-all, which locks tables instead of the instance.
+  const grantLockAll = (who) =>
+    "-- " + who + ": the default lock mode is not available. Run the line below instead of GRANT RELOAD and set the lock mode to lock-all\n" +
     "-- (BASELINE_LOCK_MODE=lock-all in .env on the compose install, BINTRAIL_CONSOLE_BASELINE_LOCK_MODE otherwise).\n" +
     "-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';";
   // SHOW VIEW is on every backup line: mydumper stops at the first view it
@@ -8920,9 +8922,9 @@ function buildServerForm() {
   mon.append(tagFlavor(el("pre", { class: "form-code", text: grantBase + grantBackups +
     "-- BACKUP_ADMIN is MySQL/Percona 8.0 or later. On MySQL 5.7 run this instead:\n" +
     "-- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" +
-    "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" + grantLockAll }), "mysql"));
+    "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" + grantLockAll("Managed MySQL (RDS, Aurora, Cloud SQL)") }), "mysql"));
   mon.append(tagFlavor(el("pre", { class: "form-code", text: grantBase + grantBackups +
-    "GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" + grantLockAll }), "mariadb"));
+    "GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" + grantLockAll("RDS for MariaDB") }), "mariadb"));
   // PostgreSQL prerequisites — the console reads them, it never runs CREATE
   // PUBLICATION / ALTER SYSTEM (validate-don't-create; capture is pgoutput-only).
   const pgHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "postgres");

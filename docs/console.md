@@ -336,8 +336,8 @@ because a baseline is point-consistent by default. Without the lock privileges
 capture keeps running and only the baseline is refused, naming the exact
 `GRANT`; without `SHOW VIEW` the dump itself stops at the first view with
 mydumper's `SHOW VIEW command denied`. On
-RDS/Aurora grant `LOCK TABLES` instead of `RELOAD` and set the lock mode to
-`lock-all` (`BASELINE_LOCK_MODE` in the compose `.env`,
+managed MySQL (RDS, Aurora, Cloud SQL) the default lock mode is not available:
+grant `LOCK TABLES` and set the lock mode to `lock-all` (`BASELINE_LOCK_MODE` in the compose `.env`,
 `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` otherwise) —
 `ftwrl` needs `BACKUP_ADMIN`, which managed MySQL will not grant. Full
 per-privilege breakdown and the least-privilege (schema-scoped `SELECT`)
