@@ -23,16 +23,23 @@ That is the complete, minimal set. Each privilege maps to exactly one thing DBTr
 
 DBTrail **never writes to the source**, and nothing on the capture path ever locks it. Capture does not need `RELOAD`, `LOCK TABLES`, `PROCESS`, `SHOW VIEW`, or `EXECUTE`.
 
-### If you also want baselines: add `LOCK TABLES`
+### If you also want baselines: add a lock privilege and `SHOW VIEW`
 
 Capture alone gives you the change history. A **baseline** — the full-table
 snapshot that `reconstruct`, Time-travel and the console's **Create baseline**
-button merge those changes onto — is a `mydumper` run, and it needs one more
-privilege:
+button merge those changes onto — is a `mydumper` run, and it needs more:
 
 ```sql
-GRANT LOCK TABLES ON *.* TO 'dbtrail'@'%';   -- only if you want baselines
+-- Only if you want baselines. MySQL/Percona 8.0 or later:
+GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+-- MariaDB and MySQL 5.7 (BACKUP_ADMIN does not exist there):
+-- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';
 ```
+
+`SHOW VIEW` lets the dump copy views: mydumper stops the whole baseline at the
+first view it cannot read (`SHOW VIEW command denied`). The lock privilege
+depends on the lock mode below; RDS and Aurora grant `LOCK TABLES` instead of
+`RELOAD`.
 
 Baselines are **point-consistent by default**: every worker thread opens its
 snapshot at the same instant, so the result represents one moment rather than a

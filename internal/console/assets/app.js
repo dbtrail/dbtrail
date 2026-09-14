@@ -8896,19 +8896,33 @@ function buildServerForm() {
   // hours or days later. The form is the last place anyone reads a grant list
   // before pasting it, so the line has to exist here even though the stream
   // does not need it.
+  //
+  // The backup line is what the DEFAULT lock mode (ftwrl) checks for
+  // (internal/mydumperlock/privileges.go): RELOAD, plus BACKUP_ADMIN on
+  // MySQL and Percona 8.0 or later. LOCK TABLES is only what lock-all needs,
+  // which is the RDS/Aurora path, so it is the commented alternative (#1658).
   const grantHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "mysql mariadb");
   grantHint.append("Source user needs ");
   grantHint.append(el("code", { text: "REPLICATION SLAVE, REPLICATION CLIENT, SELECT" }));
-  grantHint.append(" to capture, plus ");
-  grantHint.append(el("code", { text: "LOCK TABLES" }));
-  grantHint.append(" if you want backups. Create one on the source MySQL; copy and run:");
+  grantHint.append(" to capture, plus the backup line if you want backups. Create one on the source; copy and run:");
   mon.append(grantHint);
-  mon.append(tagFlavor(el("pre", { class: "form-code", text:
+  const grantBase =
     "CREATE USER 'dbtrail'@'%' IDENTIFIED BY 'strong-password';\n" +
-    "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';\n" +
-    "-- Backups only (point-consistent by default). On RDS/Aurora also set\n" +
-    "-- BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all.\n" +
-    "GRANT LOCK TABLES ON *.* TO 'dbtrail'@'%';" }), "mysql mariadb"));
+    "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';\n";
+  const grantLockAll =
+    "-- RDS and Aurora: instead of the line above, grant LOCK TABLES and set the lock mode to lock-all\n" +
+    "-- (BASELINE_LOCK_MODE=lock-all in .env on the compose install, BINTRAIL_CONSOLE_BASELINE_LOCK_MODE otherwise).\n" +
+    "-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';";
+  // SHOW VIEW is on every backup line: mydumper stops at the first view it
+  // cannot read ("SHOW VIEW command denied"), so a schema holding one view
+  // fails the whole backup on RELOAD alone.
+  const grantBackups = "-- Backups (point-consistent by default). SHOW VIEW lets the backup copy views.\n";
+  mon.append(tagFlavor(el("pre", { class: "form-code", text: grantBase + grantBackups +
+    "-- BACKUP_ADMIN is MySQL/Percona 8.0 or later. On MySQL 5.7 run this instead:\n" +
+    "-- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" +
+    "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" + grantLockAll }), "mysql"));
+  mon.append(tagFlavor(el("pre", { class: "form-code", text: grantBase + grantBackups +
+    "GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" + grantLockAll }), "mariadb"));
   // PostgreSQL prerequisites — the console reads them, it never runs CREATE
   // PUBLICATION / ALTER SYSTEM (validate-don't-create; capture is pgoutput-only).
   const pgHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "postgres");

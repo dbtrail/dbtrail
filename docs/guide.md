@@ -36,7 +36,7 @@ Before you start:
 
 **If you are using managed MySQL** (RDS, Aurora, Cloud SQL — no binlog file access):
 - [ ] Use `bintrail stream` instead of `bintrail index` — it connects over the replication protocol
-- [ ] Replication user with `REPLICATION SLAVE` and `REPLICATION CLIENT` privileges on the source (plus `LOCK TABLES` for baselines; on RDS/Aurora use `--lock-mode lock-all`, since `BACKUP_ADMIN` cannot be granted there)
+- [ ] Replication user with `REPLICATION SLAVE` and `REPLICATION CLIENT` privileges on the source (plus `LOCK TABLES` and `SHOW VIEW` for baselines; on RDS/Aurora use `--lock-mode lock-all`, since `BACKUP_ADMIN` cannot be granted there)
 - [ ] Source DSN uses TCP: `user:pass@tcp(host:3306)/` (unix socket is not supported for replication)
 
 ---

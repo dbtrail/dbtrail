@@ -20,10 +20,9 @@ the **command line**. Both need a source MySQL user first.
   GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';
   -- Only if you want baselines (Time-travel / reconstruct): they are
   -- point-consistent by default, and that guarantee needs a lock.
-  GRANT LOCK TABLES ON *.* TO 'dbtrail'@'%';
-  -- Baselines are point-consistent by default and need these too.
   -- BACKUP_ADMIN is MySQL/Percona 8.0+ only; omit it on MariaDB and MySQL 5.7.
-  GRANT RELOAD, BACKUP_ADMIN ON *.* TO 'dbtrail'@'%';
+  -- SHOW VIEW lets the dump copy views.
+  GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
   -- On RDS/Aurora, BACKUP_ADMIN cannot be granted at all. Use LOCK TABLES
   -- and BASELINE_LOCK_MODE=lock-all instead — see below.
   ```

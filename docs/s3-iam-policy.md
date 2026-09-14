@@ -69,6 +69,71 @@ explanation, or add `"s3:GetBucketLocation"` to the `Action` list above (as
 a bucket-level permission, alongside `s3:ListBucket`) if your bucket is
 cross-region.
 
+## Read-only access for people who query the Parquet copy
+
+The policy above is DBTrail's own: it writes and deletes. Someone who only
+queries the Parquet copy (for example with the DuckDB `views.sql` file) needs
+read access, and should not get the hourly change archives:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListTheBucket",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::my-bucket"
+    },
+    {
+      "Sid": "ReadSnapshots",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::my-bucket/*"
+    },
+    {
+      "Sid": "NoChangeArchives",
+      "Effect": "Deny",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::my-bucket/*bintrail_id=*"
+    }
+  ]
+}
+```
+
+What each part does:
+
+- **The Deny keeps the change archives out of reach.** Hourly archives are
+  written under a `bintrail_id=<id>/` path segment, next to that source's
+  `index-meta.json`. Each archived row carries the MySQL connection id and,
+  when the source logs it, the original SQL statement (`query_text`). The
+  console deliberately does not show either.
+- **It only covers keys that carry the segment.** `rotate` and the console
+  always write it. `bintrail upload --source` pointed at a folder INSIDE
+  `bintrail_id=<id>/` uploads keys without it, and this rule does not cover
+  those objects. Upload archives from the folder that holds `bintrail_id=<id>/`.
+- **It matches the segment, not a prefix.** Archive and backup prefixes are
+  chosen by the operator and can be the same or nested, so a prefix-based
+  Deny can miss the archives or also block the snapshots. In an S3 resource
+  ARN, `*` matches across `/`, so `*bintrail_id=*` covers the segment wherever
+  it sits in the key. An explicit Deny wins over the Allow above it.
+- **Listing still shows names.** `s3:ListBucket` lets the reader see archive
+  object keys (dates and hours), not their contents.
+- **The change log views stop working.** A `views.sql` downloaded with
+  **Include the change log** reads the archives, so its events view fails with
+  `AccessDenied`. The `state_<schema>_<table>` views keep working.
+
+Two things a reader with this policy can still see, stated plainly:
+
+- **Every column of every table.** A snapshot holds full rows. Console access
+  rules (data profiles, redaction, EE roles) apply to the console, not to the
+  files in the bucket.
+- **What changed between two snapshots.** Comparing two consecutive snapshots
+  of a table shows which rows changed, even without the archives.
+
+Add `s3:GetBucketLocation` on `arn:aws:s3:::my-bucket` if the reader's
+credentials resolve to a different region than the bucket.
+
 ## Tighter scope (optional)
 
 The policy above grants access to the whole bucket. If you want to scope it

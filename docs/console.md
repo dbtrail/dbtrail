@@ -330,10 +330,13 @@ immediately; warnings (e.g. short binlog retention) show but don't block.
 The **source user** you paste into the form needs `REPLICATION SLAVE,
 REPLICATION CLIENT, SELECT` on the source MySQL — the form spells out the
 exact `CREATE USER` / `GRANT` to copy. DBTrail never writes to the source, and
-capture never locks it. The **Create backup** button needs one privilege
-more, `LOCK TABLES`, because a baseline is point-consistent by default; without
-it capture keeps running and only the baseline is refused, naming the exact
-`GRANT`. On RDS/Aurora set `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all` —
+capture never locks it. The **Create backup** button needs more,
+`RELOAD` plus `BACKUP_ADMIN` on MySQL/Percona 8.0+ and `SHOW VIEW` for views,
+because a baseline is point-consistent by default; without them capture keeps
+running and only the baseline is refused, naming the exact `GRANT`. On
+RDS/Aurora grant `LOCK TABLES` instead of `RELOAD` and set the lock mode to
+`lock-all` (`BASELINE_LOCK_MODE` in the compose `.env`,
+`BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` otherwise) —
 `ftwrl` needs `BACKUP_ADMIN`, which managed MySQL will not grant. Full
 per-privilege breakdown and the least-privilege (schema-scoped `SELECT`)
 variant: [streaming.md](streaming.md#the-source-mysql-user).
