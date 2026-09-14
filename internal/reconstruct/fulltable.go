@@ -612,7 +612,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// the snapshot at a coordinate later than the events it actually folded, and
 	// the next refresh would skip everything in between.
 	if parquetMode {
-		cut, cutErr := resolveSnapshotCut(ctx, db, cfg.At)
+		cut, cutErr := ResolveSnapshotCut(ctx, db, cfg.At)
 		if cutErr != nil {
 			return nil, cutErr
 		}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,8 +33,9 @@ import (
 //     writing during a refresh "to now", and a second resolution lands later.
 //   - The footers equal the cut for the target time, binlog.000001:300, the
 //     START of the third event rather than the end of the index. A cut taken
-//     from the wall clock instead of the target anchors at the end (the
-//     fixture sits an hour in the future so that holds at any time of day).
+//     from the wall clock instead of the target lands elsewhere: the fixture
+//     sits an hour in the future, so the clock is before every event and the
+//     cut lands at the first one (100), at any time of day.
 //   - Table a holds a fourth event that EXECUTED before the target time but
 //     was written after the cut. Event timestamps are execution time, so only
 //     the positional bound keeps it out; without it a holds id 4.
@@ -104,14 +106,14 @@ func TestRefresh_everyFoldedTableSharesOneCut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveSnapshotCut: %v", err)
 	}
-	// Fixture sanity: the cut sits between the batches. Were it the end of the
-	// index, a fold that resolved "now" would anchor at the same place and the
-	// assertions below could not tell the two apart.
+	// Fixture sanity: the cut sits between the batches, so neither a cut at the
+	// first event (a wall-clock read, see above) nor one at the end of the index
+	// could equal it and pass the footer checks below.
 	if cut == nil || cut.File != "binlog.000001" || cut.Pos != 300 {
 		t.Fatalf("cut for the target time = %+v, want binlog.000001:300 (the start of the third event)", cut)
 	}
 
-	calls := 0
+	var calls atomic.Int32
 	t.Cleanup(reconstruct.CountSnapshotCutsForTest(&calls))
 	if _, err := reconstruct.ReconstructTables(ctx, reconstruct.FullTableConfig{
 		IndexDSN:     testutil.BaseDSN() + "/" + dbName,
@@ -124,8 +126,8 @@ func TestRefresh_everyFoldedTableSharesOneCut(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	if calls != 1 {
-		t.Errorf("the fold resolved the snapshot cut %d times for two tables, want once", calls)
+	if n := calls.Load(); n != 1 {
+		t.Errorf("the fold resolved the snapshot cut %d times for two tables, want once", n)
 	}
 
 	published := map[string]string{}

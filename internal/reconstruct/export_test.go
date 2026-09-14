@@ -3,6 +3,7 @@ package reconstruct
 import (
 	"context"
 	"database/sql"
+	"sync/atomic"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -25,10 +26,13 @@ func StubLinkFileForTest(fn func(oldname, newname string) error) (restore func()
 // external test can assert one fold resolves exactly one cut (#1635). A second
 // resolution against a quiet index returns the same coordinate and is
 // otherwise invisible.
-func CountSnapshotCutsForTest(calls *int) (restore func()) {
+//
+// The counter is atomic: tables fold concurrently, and a regression that
+// resolved once per table would bump it from several goroutines at once.
+func CountSnapshotCutsForTest(calls *atomic.Int32) (restore func()) {
 	prev := resolveSnapshotCut
 	resolveSnapshotCut = func(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
-		*calls++
+		calls.Add(1)
 		return prev(ctx, db, at)
 	}
 	return func() { resolveSnapshotCut = prev }
