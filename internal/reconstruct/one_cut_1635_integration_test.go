@@ -24,13 +24,19 @@ import (
 // means, and today it holds only because the cut is resolved once, before the
 // table loop.
 //
-// The fixture puts events on table a, then on b, then on a again, and targets
-// the fold between the second and third batch. The cut is therefore the START
-// of the third event, not the end of the index, so a fold that resolved the
-// cut at any other moment (per table, lazily after a fetch, or against the
-// wall clock) anchors at a different coordinate and fails the equality below.
-// A table that folded the third event would also carry a row the target time
-// excludes, which the last assertion checks.
+// Three guards, because one alone cannot see every way to break it:
+//
+//   - The resolver is counted: two tables, one call. Re-resolving per table (or
+//     again after a fetch) against this quiet index returns the same
+//     coordinate, so only the count sees it. In production capture keeps
+//     writing during a refresh "to now", and a second resolution lands later.
+//   - The footers equal the cut for the target time, binlog.000001:300, the
+//     START of the third event rather than the end of the index. A cut taken
+//     from the wall clock instead of the target anchors at the end (the
+//     fixture sits an hour in the future so that holds at any time of day).
+//   - Table a holds a fourth event that EXECUTED before the target time but
+//     was written after the cut. Event timestamps are execution time, so only
+//     the positional bound keeps it out; without it a holds id 4.
 func TestRefresh_everyFoldedTableSharesOneCut(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	ctx := context.Background()
@@ -43,7 +49,10 @@ func TestRefresh_everyFoldedTableSharesOneCut(t *testing.T) {
 	if err := indexer.EnsureSchema(db); err != nil {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
-	base := time.Now().UTC().Truncate(time.Hour)
+	// An hour ahead: were base the current hour, a wall-clock cut taken 20 to
+	// 40 seconds past it would also land at 300 and the clock mutation would
+	// pass. The index's hourly partitions already cover the next hour.
+	base := time.Now().UTC().Truncate(time.Hour).Add(time.Hour)
 	at := base.Add(30 * time.Second)
 	ts := func(d time.Duration) string { return base.Add(d).Format("2006-01-02 15:04:05") }
 
@@ -62,10 +71,10 @@ func TestRefresh_everyFoldedTableSharesOneCut(t *testing.T) {
 			Compression:  "none",
 			RowGroupSize: 100,
 			Metadata: map[string]string{
-				baseline.MetaKeyCreateTableSQL: createSQL,
-				baseline.MetaKeyBinlogFile:     "binlog.000001",
-				baseline.MetaKeyBinlogPos:      "4",
-				"bintrail.snapshot_timestamp":  base.Format(time.RFC3339),
+				baseline.MetaKeyCreateTableSQL:    createSQL,
+				baseline.MetaKeyBinlogFile:        "binlog.000001",
+				baseline.MetaKeyBinlogPos:         "4",
+				baseline.MetaKeySnapshotTimestamp: base.Format(time.RFC3339),
 			},
 		})
 		if err != nil {
@@ -88,6 +97,8 @@ func TestRefresh_everyFoldedTableSharesOneCut(t *testing.T) {
 		schema, "b", 1, "2", nil, nil, []byte(`{"id":2,"v":"second"}`))
 	testutil.InsertEvent(t, db, "binlog.000001", 300, 400, ts(40*time.Second), nil,
 		schema, "a", 1, "3", nil, nil, []byte(`{"id":3,"v":"third"}`))
+	testutil.InsertEvent(t, db, "binlog.000001", 400, 500, ts(25*time.Second), nil,
+		schema, "a", 1, "4", nil, nil, []byte(`{"id":4,"v":"skew"}`))
 
 	cut, err := reconstruct.ResolveSnapshotCut(ctx, db, at)
 	if err != nil {
@@ -100,6 +111,8 @@ func TestRefresh_everyFoldedTableSharesOneCut(t *testing.T) {
 		t.Fatalf("cut for the target time = %+v, want binlog.000001:300 (the start of the third event)", cut)
 	}
 
+	calls := 0
+	t.Cleanup(reconstruct.CountSnapshotCutsForTest(&calls))
 	if _, err := reconstruct.ReconstructTables(ctx, reconstruct.FullTableConfig{
 		IndexDSN:     testutil.BaseDSN() + "/" + dbName,
 		BaselineSrc:  root,
@@ -110,6 +123,9 @@ func TestRefresh_everyFoldedTableSharesOneCut(t *testing.T) {
 		Parallelism:  2,
 	}); err != nil {
 		t.Fatalf("refresh: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("the fold resolved the snapshot cut %d times for two tables, want once", calls)
 	}
 
 	published := map[string]string{}
@@ -136,7 +152,7 @@ func TestRefresh_everyFoldedTableSharesOneCut(t *testing.T) {
 	}
 
 	if got, want := readIDs(t, published["a"]), []string{"1", "2"}; strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("table a holds ids %v, want %v: the event past the cut was folded", got, want)
+		t.Errorf("table a holds ids %v, want %v (id 3 is past the target time, id 4 past the cut)", got, want)
 	}
 	if got, want := readIDs(t, published["b"]), []string{"1", "2"}; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("table b holds ids %v, want %v", got, want)

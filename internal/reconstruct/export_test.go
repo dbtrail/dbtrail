@@ -1,5 +1,13 @@
 package reconstruct
 
+import (
+	"context"
+	"database/sql"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/query"
+)
+
 // StubLinkFileForTest swaps the hard-link primitive carryForward tries first,
 // so an external test can force the copy fallback through the REAL fold. Every
 // test machine has one filesystem, so without the stub os.Link always succeeds
@@ -11,4 +19,17 @@ func StubLinkFileForTest(fn func(oldname, newname string) error) (restore func()
 	prev := linkFile
 	linkFile = fn
 	return func() { linkFile = prev }
+}
+
+// CountSnapshotCutsForTest wraps the cut resolver the fold calls, so an
+// external test can assert one fold resolves exactly one cut (#1635). A second
+// resolution against a quiet index returns the same coordinate and is
+// otherwise invisible.
+func CountSnapshotCutsForTest(calls *int) (restore func()) {
+	prev := resolveSnapshotCut
+	resolveSnapshotCut = func(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
+		*calls++
+		return prev(ctx, db, at)
+	}
+	return func() { resolveSnapshotCut = prev }
 }

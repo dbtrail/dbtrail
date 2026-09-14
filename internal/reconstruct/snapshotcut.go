@@ -79,6 +79,10 @@ var ErrNoIndexedCoordinates = errors.New("no indexed event carries a binlog file
 //
 // Returns (nil, nil) when the index holds no events at all — there is nothing to
 // fold, and the caller keeps the source baseline's own coordinates.
+// resolveSnapshotCut is the call the fold makes, indirected so a test can count
+// it (#1635): one run resolves one cut, whatever the number of tables.
+var resolveSnapshotCut = ResolveSnapshotCut
+
 func ResolveSnapshotCut(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
 	// Rows with a NULL coordinate (#318 drift rows) are unusable as an anchor and
 	// are skipped on both branches; they are also not events the position
