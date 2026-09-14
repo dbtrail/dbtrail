@@ -9153,14 +9153,16 @@ async function deleteServer(s) {
 // test / doctor / monitor -----------------------------------------------------
 
 // s3TestText renders the S3 half of a Test connection result, one entry per
-// bucket of the server's S3 store. needs_secret was not probed: the saved
-// secret is only reused for the same store, so the operator types it.
+// bucket of the server's S3 store. needs_secret and needs_keys were not
+// probed: the probe signs with credentials nobody typed only where the saved
+// server already sends them. not_applied: the saved store is not in use.
 function s3TestText(res) {
   return (res.s3 || []).map((b) => {
     const name = b.bucket ? "S3 " + b.bucket : "S3 store";
     if (b.needs_secret) return "○ " + name + ": type the S3 secret key to test these keys";
-    if (!b.ok) return "✗ " + name + ": " + (b.error || "unreachable");
-    return "✓ " + name + " · " + b.latency_ms + " ms";
+    if (b.needs_keys) return "○ " + name + ": save the server, or type S3 keys, to test a new endpoint";
+    const probed = b.ok ? "✓ " + name + " · " + b.latency_ms + " ms" : "✗ " + name + ": " + (b.error || "unreachable");
+    return b.not_applied ? probed + " · ! " + name + " is saved but the daemon is not using it; its log says why" : probed;
   }).join(" · ");
 }
 
@@ -9187,9 +9189,9 @@ function testResultText(res) {
 // created yet, a secret to type), green otherwise.
 function testResultClass(res) {
   const s3 = res.s3 || [];
-  if (s3.some((b) => !b.ok && !b.needs_secret)) return "err";
+  if (s3.some((b) => b.not_applied || (!b.ok && !b.needs_secret && !b.needs_keys))) return "err";
   if (!res.ok && !res.provision_pending) return "err";
-  if (res.provision_pending || s3.some((b) => b.needs_secret)) return "pending";
+  if (res.provision_pending || s3.some((b) => b.needs_secret || b.needs_keys)) return "pending";
   return "ok";
 }
 

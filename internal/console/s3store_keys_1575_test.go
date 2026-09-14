@@ -349,6 +349,116 @@ type probeBody struct {
 	S3 []s3ProbeResult `json:"s3"`
 }
 
+// The probe signs with credentials the operator did not type (the daemon's
+// own chain, a saved secret) only toward what the saved server already sends
+// them to. Both test routes are servers:read.
+func TestServersTest_probeNeverSignsForANewDestination(t *testing.T) {
+	isolateProbeEnv(t)
+	srv := newRegistryServer(t)
+	savedHost, newHost, keyedHost := newProbeFake(t, 200), newProbeFake(t, 200), newProbeFake(t, 200)
+	plain, err := srv.cm.reg.Add(ServerEntry{Name: "plain", DSN: "u:p@tcp(h:3306)/p", ArchiveS3: "s3://probe-p/p/", S3Endpoint: savedHost.srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyed, err := srv.cm.reg.Add(keyedEntry("keyed", "s3://probe-k/k/", keyedHost.srv.URL, "AKIASAVED", "SavedSecretValue"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyless := func(endpoint, bucket string) string {
+		return `{` + deadDSN + `,"archive_s3":"s3://` + bucket + `/x/","s3_endpoint":"` + endpoint + `","s3_path_style":"","s3_region":"","s3_access_key_id":""}`
+	}
+	held := func(name string, pb probeBody, raw string) {
+		t.Helper()
+		if len(pb.S3) != 1 || !pb.S3[0].NeedsKeys || pb.S3[0].OK {
+			t.Errorf("%s: %s, want needs_keys and nothing probed", name, raw)
+		}
+	}
+
+	// A new endpoint, no keys, from the create form: nothing is signed.
+	pb, raw := doProbe(t, srv, "/api/servers/test", keyless(newHost.srv.URL, "probe-n"))
+	held("create form, new endpoint", pb, raw)
+	// The saved server's own endpoint, no keys: the daemon's credentials
+	// already go there.
+	pb, raw = doProbe(t, srv, "/api/servers/"+plain.ID+"/test", keyless(savedHost.srv.URL, "probe-p"))
+	if len(pb.S3) != 1 || !pb.S3[0].OK || !strings.Contains(savedHost.seen(), "Credential=AKIAAMBIENT/") {
+		t.Errorf("saved keyless endpoint: %s\n%s", raw, savedHost.seen())
+	}
+	// Another endpoint typed over that saved server: held.
+	pb, raw = doProbe(t, srv, "/api/servers/"+plain.ID+"/test", keyless(newHost.srv.URL, "probe-p"))
+	held("edit form, new endpoint", pb, raw)
+	// Keys cleared on the form over a keyed saved store: the daemon's
+	// credentials never went to that host.
+	pb, raw = doProbe(t, srv, "/api/servers/"+keyed.ID+"/test", keyless(keyedHost.srv.URL, "probe-k"))
+	held("edit form, keys cleared", pb, raw)
+	if newHost.count() != 0 || keyedHost.count() != 0 {
+		t.Errorf("a held probe reached a store: new=%d keyed=%d", newHost.count(), keyedHost.count())
+	}
+
+	// No endpoint (a region pin): the ambient destination, where the
+	// daemon's credentials go anyway.
+	ambient := newProbeFake(t, 200)
+	t.Setenv(storage.EnvS3Endpoint, ambient.srv.URL)
+	pb, raw = doProbe(t, srv, "/api/servers/test", `{`+deadDSN+`,"archive_s3":"s3://probe-r/x/","s3_endpoint":"","s3_region":"eu-west-1","s3_access_key_id":""}`)
+	if len(pb.S3) != 1 || !pb.S3[0].OK || !strings.Contains(ambient.seen(), "Credential=AKIAAMBIENT/") {
+		t.Errorf("region-only store on the ambient endpoint: %s\n%s", raw, ambient.seen())
+	}
+}
+
+// The saved secret signs only for the buckets the saved server names: an
+// unchanged store with another bucket typed would otherwise check any bucket
+// name with keys the reader never saw.
+func TestServersTest_savedSecretOnlyForSavedBuckets(t *testing.T) {
+	isolateProbeEnv(t)
+	srv := newRegistryServer(t)
+	host := newProbeFake(t, 200)
+	e, err := srv.cm.reg.Add(keyedEntry("s", "s3://probe-own/s/", host.srv.URL, "AKIASAVED", "SavedSecretValue"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, raw := doProbe(t, srv, "/api/servers/"+e.ID+"/test",
+		`{"archive_s3":"s3://probe-own/s/","baseline_s3":"s3://probe-other/b/","s3_endpoint":"`+host.srv.URL+`","s3_path_style":"","s3_region":"","s3_access_key_id":"AKIASAVED"}`)
+	if len(pb.S3) != 2 {
+		t.Fatalf("results: %s", raw)
+	}
+	if pb.S3[0].Bucket != "probe-own" || !pb.S3[0].OK {
+		t.Errorf("the saved bucket: %+v", pb.S3[0])
+	}
+	if pb.S3[1].Bucket != "probe-other" || !pb.S3[1].NeedsSecret || pb.S3[1].OK {
+		t.Errorf("a bucket the saved server does not name: %+v, want needs_secret", pb.S3[1])
+	}
+	if strings.Contains(host.seen(), "probe-other") || host.count() != 1 {
+		t.Errorf("the saved secret signed for another bucket:\n%s", host.seen())
+	}
+}
+
+// The row's Test checks the SAVED store; when the daemon is not applying it
+// (a hand-edited conflict, a bucket reserved for --baseline-s3), a green
+// check would say the opposite of what uploads and reads do.
+func TestServersTest_rowTestFlagsAStoreNotInUse(t *testing.T) {
+	isolateProbeEnv(t)
+	srv := newRegistryServer(t)
+	host := newProbeFake(t, 200)
+	e, err := srv.cm.reg.Add(keyedEntry("s", "s3://probe-u/s/", host.srv.URL, "AKIASAVED", "SavedSecretValue"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/servers/" + e.ID + "/test"
+	pb, raw := doProbe(t, srv, path, `{}`)
+	if len(pb.S3) != 1 || !pb.S3[0].OK || pb.S3[0].NotApplied {
+		t.Errorf("an applied store: %s", raw)
+	}
+	storage.SetBucketStores(nil)
+	pb, raw = doProbe(t, srv, path, `{}`)
+	if len(pb.S3) != 1 || !pb.S3[0].NotApplied {
+		t.Errorf("a saved store the daemon does not use: %s, want not_applied", raw)
+	}
+	// A form test is of unsaved values; the table cannot be expected to hold them.
+	pb, raw = doProbe(t, srv, path, `{"archive_s3":"s3://probe-u/s/","s3_endpoint":"`+host.srv.URL+`","s3_access_key_id":"AKIASAVED","s3_secret_access_key":"SavedSecretValue"}`)
+	if len(pb.S3) != 1 || pb.S3[0].NotApplied {
+		t.Errorf("a form test flagged not_applied: %s", raw)
+	}
+}
+
 func doProbe(t *testing.T, srv *Server, path, body string) (probeBody, string) {
 	t.Helper()
 	rec, raw := doServersReq(t, srv, "POST", path, body)
@@ -415,7 +525,7 @@ func TestServersTest_s3ProbeFailsFastAndReports(t *testing.T) {
 	isolateProbeEnv(t)
 	srv := newRegistryServer(t)
 	failing := newProbeFake(t, 500)
-	pb, raw := doProbe(t, srv, "/api/servers/test", `{`+deadDSN+`,"archive_s3":"s3://probe-f/c/","s3_endpoint":"`+failing.srv.URL+`"}`)
+	pb, raw := doProbe(t, srv, "/api/servers/test", `{`+deadDSN+`,"archive_s3":"s3://probe-f/c/","s3_endpoint":"`+failing.srv.URL+`","s3_access_key_id":"AKIATYPED","s3_secret_access_key":"TypedSecretValue"}`)
 	if len(pb.S3) != 1 || pb.S3[0].OK || pb.S3[0].Error == "" || pb.S3[0].NeedsSecret {
 		t.Fatalf("failing store: %s", raw)
 	}

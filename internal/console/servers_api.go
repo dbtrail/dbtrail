@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -184,6 +185,8 @@ type s3ProbeResult struct {
 	OK          bool   `json:"ok"`
 	Error       string `json:"error,omitempty"`
 	NeedsSecret bool   `json:"needs_secret,omitempty"`
+	NeedsKeys   bool   `json:"needs_keys,omitempty"`
+	NotApplied  bool   `json:"not_applied,omitempty"`
 	LatencyMS   int64  `json:"latency_ms"`
 }
 
@@ -667,8 +670,8 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := probeServer(r, dsn, monitored)
-	candidate, needsSecret := s3ProbeCandidate(req, sent, saved, hasSaved)
-	resp.S3 = probeS3Store(r.Context(), candidate, needsSecret)
+	candidate, typed, hold := s3ProbeCandidate(req, sent, saved, hasSaved)
+	resp.S3 = probeS3Store(r.Context(), candidate, typed, hold)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -693,17 +696,35 @@ func resolveS3Keys(req serverRequest, oldID, oldSecret string) (id, secret strin
 // s3ProbeFields are the request fields that describe a server's S3 store.
 var s3ProbeFields = []string{"archive_s3", "baseline_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "s3_secret_access_key"}
 
-// s3ProbeCandidate is the S3 store Test connection probes. A body with none of
+// s3Hold says whether Test connection may sign a request for one bucket.
+type s3Hold int
+
+const (
+	s3Probe         s3Hold = iota
+	s3HoldForSecret        // an access key whose secret is not typed and may not be reused
+	s3HoldForKeys          // no keys, toward a host the daemon's own credentials do not already go to
+)
+
+func s3ProbeAll(string) s3Hold { return s3Probe }
+
+// s3ProbeCandidate is the S3 store Test connection probes, whether the body
+// typed it, and which of its buckets may be signed for. A body with none of
 // the S3 fields (the row's button sends {}) tests the saved server's store.
 // A body with them tests what the form holds, saved or not.
 //
-// The saved secret fills a blank secret field only for the SAME store: same
-// endpoint, same addressing, same access key. Both test routes are
-// servers:read, so a reader could otherwise point a saved secret's signed
-// requests at a host of their choosing. Anything else asks the operator to
-// type the secret (needsSecret), and nothing is contacted.
-func s3ProbeCandidate(req serverRequest, sent map[string]json.RawMessage, saved ServerEntry, hasSaved bool) (candidate ServerEntry, needsSecret bool) {
-	typed := false
+// Both test routes are servers:read, and the body picks the endpoint and the
+// buckets. So credentials the operator did not type sign only toward where the
+// saved server already sends them:
+//   - a typed secret signs for anything: those are the operator's own keys;
+//   - a blank secret reuses the saved one only for the same endpoint,
+//     addressing and access key, and only for the buckets the saved server
+//     names (otherwise any bucket name could be checked with those keys);
+//   - no keys at all signs with the daemon's own chain only toward the
+//     ambient endpoint (AWS or BINTRAIL_S3_ENDPOINT, where it goes anyway) or
+//     the endpoint of a saved server that also has no keys.
+//
+// A held bucket is not contacted; its result says what to do.
+func s3ProbeCandidate(req serverRequest, sent map[string]json.RawMessage, saved ServerEntry, hasSaved bool) (candidate ServerEntry, typed bool, hold func(bucket string) s3Hold) {
 	for _, f := range s3ProbeFields {
 		if _, ok := sent[f]; ok {
 			typed = true
@@ -711,7 +732,7 @@ func s3ProbeCandidate(req serverRequest, sent map[string]json.RawMessage, saved 
 		}
 	}
 	if !typed {
-		return saved, false
+		return saved, false, s3ProbeAll
 	}
 	candidate = ServerEntry{
 		Name:          saved.Name,
@@ -725,24 +746,41 @@ func s3ProbeCandidate(req serverRequest, sent map[string]json.RawMessage, saved 
 	switch {
 	case req.S3SecretAccessKey != nil:
 		candidate.S3SecretAccessKey = strings.TrimSpace(*req.S3SecretAccessKey)
-	case candidate.S3AccessKeyID == "":
-	case hasSaved && sameS3Store(candidate, saved):
+		return candidate, true, s3ProbeAll
+	case candidate.S3AccessKeyID != "":
+		if !hasSaved || !sameS3Store(candidate, saved) {
+			return candidate, true, func(string) s3Hold { return s3HoldForSecret }
+		}
 		candidate.S3SecretAccessKey = saved.S3SecretAccessKey
+		savedBuckets := saved.s3Buckets()
+		return candidate, true, func(b string) s3Hold {
+			if slices.Contains(savedBuckets, b) {
+				return s3Probe
+			}
+			return s3HoldForSecret
+		}
+	case candidate.S3Endpoint == "":
+		return candidate, true, s3ProbeAll
+	case hasSaved && strings.TrimSpace(saved.S3AccessKeyID) == "" && sameS3Endpoint(candidate, saved):
+		return candidate, true, s3ProbeAll
 	default:
-		needsSecret = true
+		return candidate, true, func(string) s3Hold { return s3HoldForKeys }
 	}
-	return candidate, needsSecret
 }
 
-// sameS3Store reports whether a and b send their requests to the same place
-// with the same access key: endpoint and addressing as the store normalizes
-// them. Region is left out: it changes the signature, not where it goes.
-func sameS3Store(a, b ServerEntry) bool {
+// sameS3Endpoint reports whether a and b send their requests to the same
+// place: endpoint and addressing as the store normalizes them. Region is left
+// out: it changes the signature, not where it goes.
+func sameS3Endpoint(a, b ServerEntry) bool {
 	sa, errA := storage.NewBucketStore(a.S3Endpoint, a.S3PathStyle, "")
 	sb, errB := storage.NewBucketStore(b.S3Endpoint, b.S3PathStyle, "")
 	return errA == nil && errB == nil &&
-		sa.Endpoint.URL == sb.Endpoint.URL && sa.Endpoint.PathStyle == sb.Endpoint.PathStyle &&
-		strings.TrimSpace(a.S3AccessKeyID) == strings.TrimSpace(b.S3AccessKeyID)
+		sa.Endpoint.URL == sb.Endpoint.URL && sa.Endpoint.PathStyle == sb.Endpoint.PathStyle
+}
+
+// sameS3Store is sameS3Endpoint with the same access key.
+func sameS3Store(a, b ServerEntry) bool {
+	return sameS3Endpoint(a, b) && strings.TrimSpace(a.S3AccessKeyID) == strings.TrimSpace(b.S3AccessKeyID)
 }
 
 // s3ProbeTimeout bounds each bucket's HeadBucket. Longer than the index dial
@@ -750,15 +788,18 @@ func sameS3Store(a, b ServerEntry) bool {
 const s3ProbeTimeout = 5 * time.Second
 
 // probeS3Store runs a HeadBucket through e's S3 store for every bucket its
-// locations name. No store: nil. A store that does not validate, or names no
-// bucket, is one result carrying why, never a 400: the rest of the probe still
-// answers.
-func probeS3Store(ctx context.Context, e ServerEntry, needsSecret bool) []s3ProbeResult {
+// locations name that hold allows. No store: nil. A store that does not
+// validate, or names no bucket, is one result carrying why, never a 400: the
+// rest of the probe still answers. For the saved server (typed false), a
+// bucket whose applied store differs from the saved one is flagged: the
+// daemon is not using what the form shows.
+func probeS3Store(ctx context.Context, e ServerEntry, typed bool, hold func(bucket string) s3Hold) []s3ProbeResult {
+	// A typed access key with no secret to pair it with: only the routing is
+	// built, to validate it and list the buckets, and nothing is signed.
+	missingSecret := typed && strings.TrimSpace(e.S3AccessKeyID) != "" && e.S3SecretAccessKey == ""
 	var st storage.BucketStore
 	var err error
-	if needsSecret {
-		// No secret to pair with the access key: only the routing is built,
-		// to validate it and list the buckets.
+	if missingSecret {
 		st, err = storage.NewBucketStore(e.S3Endpoint, e.S3PathStyle, e.S3Region)
 	} else {
 		st, err = e.BucketStore()
@@ -766,7 +807,7 @@ func probeS3Store(ctx context.Context, e ServerEntry, needsSecret bool) []s3Prob
 	if err != nil {
 		return []s3ProbeResult{{Error: err.Error()}}
 	}
-	if st.IsZero() && !needsSecret {
+	if st.IsZero() && !missingSecret {
 		return nil
 	}
 	buckets := e.s3Buckets()
@@ -775,11 +816,20 @@ func probeS3Store(ctx context.Context, e ServerEntry, needsSecret bool) []s3Prob
 	}
 	out := make([]s3ProbeResult, 0, len(buckets))
 	for _, b := range buckets {
-		if needsSecret {
+		switch h := hold(b); {
+		case h == s3HoldForSecret || missingSecret:
 			out = append(out, s3ProbeResult{Bucket: b, NeedsSecret: true})
-			continue
+		case h == s3HoldForKeys:
+			out = append(out, s3ProbeResult{Bucket: b, NeedsKeys: true})
+		default:
+			res := probeS3Bucket(ctx, st, b)
+			if !typed {
+				if applied, ok := storage.BucketStoreFor(b); !ok || !applied.Equal(st) {
+					res.NotApplied = true
+				}
+			}
+			out = append(out, res)
 		}
-		out = append(out, probeS3Bucket(ctx, st, b))
 	}
 	return out
 }

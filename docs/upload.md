@@ -229,10 +229,16 @@ What the setting does:
   the store until you are done.
 - `Test connection` also tests the store: a `HeadBucket` for each bucket
   the server's locations name, signed the way uploads are, one attempt, 5
-  seconds at most. The row's Test button tests the saved server. On the form,
-  a blank secret uses the saved one only while the endpoint, addressing and
-  access key are unchanged; otherwise the result asks you to type it, and
-  nothing is contacted.
+  seconds at most. The row's Test button tests the saved server, and says so
+  when the daemon is not using that saved store (the startup log says why).
+  Testing is open to users who can only read servers, so it signs with
+  credentials you did not type only where the saved server already sends
+  them. On the form, a blank secret uses the saved one only while the
+  endpoint, addressing and access key are unchanged, and only for the buckets
+  the saved server names. With no keys, the daemon's own credentials sign
+  only toward AWS, the process-wide endpoint, or the saved server's own
+  endpoint; for a new endpoint, save the server or type keys. In every held
+  case the result says what to do, and nothing is contacted.
 
 ### Minimum IAM permissions
 
