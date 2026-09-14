@@ -406,7 +406,7 @@ var (
 	// ErrTouchedRowBudget: the window changes more distinct rows than the
 	// caller's MaxTouchedRows lets one update hold in memory. Remedy: a full
 	// backup, which streams the table instead of holding its changes.
-	ErrTouchedRowBudget = errors.New("too many changed rows for an update from the recorded changes")
+	ErrTouchedRowBudget = errors.New("too many changed rows to build this from the recorded changes")
 )
 
 // TableFailure is one table's refusal, kept separate from the joined error so a

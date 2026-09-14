@@ -292,9 +292,7 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 			// No remedy here: it differs per surface (a scheduled update falls
 			// back to a full backup, a restore needs a closer moment), and the
 			// surfaces add their own.
-			foldErr = fmt.Errorf("%w: more than %s distinct rows changed between the backup this starts from and the target moment, "+
-				"more than one table may hold in memory while %d tables are processed at once",
-				ErrTouchedRowBudget, groupThousands(limit), max(fc.Parallelism, 1))
+			foldErr = TouchedRowBudgetError(limit, fc.Parallelism)
 			return foldErr
 		}
 
@@ -364,4 +362,17 @@ func groupThousands(n int64) string {
 		return "-" + b.String()
 	}
 	return b.String()
+}
+
+// TouchedRowBudgetError is the refusal foldEventWindow returns once one
+// table's changes pass limit while tables tables fold at once. Exported so
+// the console's page tests render the exact text the daemon produces.
+func TouchedRowBudgetError(limit int64, tables int) error {
+	if tables <= 1 {
+		return fmt.Errorf("%w: more than %s distinct rows changed between the backup this starts from and the target moment, "+
+			"the most this run may hold in memory", ErrTouchedRowBudget, groupThousands(limit))
+	}
+	return fmt.Errorf("%w: more than %s distinct rows changed between the backup this starts from and the target moment, "+
+		"the most one table may hold in memory while %d tables are processed at once",
+		ErrTouchedRowBudget, groupThousands(limit), tables)
 }
