@@ -78,7 +78,7 @@ On-demand (DBA workstation):
 
 ### Replication user
 
-`bintrail` connects to the source as a replication client. The required grants (`REPLICATION SLAVE`, `REPLICATION CLIENT`, plus `SELECT` for schema snapshots and preflight checks) and the minimal-permissions guidance are in [streaming.md → The Source MySQL User](streaming.md#the-source-mysql-user). Baselines need `LOCK TABLES` on top of those — capture works without it, only the snapshot is refused.
+`bintrail` connects to the source as a replication client. The required grants (`REPLICATION SLAVE`, `REPLICATION CLIENT`, plus `SELECT` for schema snapshots and preflight checks) and the minimal-permissions guidance are in [streaming.md → The Source MySQL User](streaming.md#the-source-mysql-user). Baselines need `RELOAD` (plus `BACKUP_ADMIN` on MySQL/Percona 8.0+) and `SHOW VIEW` on top of those, or `LOCK TABLES` and `SHOW VIEW` with the `lock-all` mode on managed MySQL — capture works without them, only the snapshot is refused.
 
 ### Managed MySQL (RDS / Aurora / Cloud SQL)
 

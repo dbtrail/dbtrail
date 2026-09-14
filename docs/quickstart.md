@@ -20,16 +20,17 @@ the **command line**. Both need a source MySQL user first.
   GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';
   -- Only if you want baselines (Time-travel / reconstruct): they are
   -- point-consistent by default, and that guarantee needs a lock.
-  GRANT LOCK TABLES ON *.* TO 'dbtrail'@'%';
-  -- Baselines are point-consistent by default and need these too.
-  -- BACKUP_ADMIN is MySQL/Percona 8.0+ only; omit it on MariaDB and MySQL 5.7.
-  GRANT RELOAD, BACKUP_ADMIN ON *.* TO 'dbtrail'@'%';
-  -- On RDS/Aurora, BACKUP_ADMIN cannot be granted at all. Use LOCK TABLES
-  -- and BASELINE_LOCK_MODE=lock-all instead — see below.
+  -- SHOW VIEW lets the dump copy views.
+  GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+  -- MariaDB and MySQL 5.7 have no BACKUP_ADMIN; run this instead:
+  -- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+  -- Managed MySQL (RDS, Aurora, Cloud SQL) and RDS for MariaDB cannot use the
+  -- default lock mode; run this instead, with BASELINE_LOCK_MODE=lock-all:
+  -- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';
   ```
 
   `RELOAD`/`BACKUP_ADMIN` let the baseline dump take a point-in-time snapshot.
-  **On managed MySQL (RDS/Aurora), `GRANT BACKUP_ADMIN` is refused outright**, so grant `LOCK TABLES` and set `BASELINE_LOCK_MODE=lock-all` — equally point-consistent, and the mode mydumper itself names for RDS. If you would rather grant nothing extra on a self-hosted source, `BASELINE_LOCK_MODE=safe-no-lock` never writes a torn snapshot, but it refuses on a write-active source.
+  **On managed MySQL (RDS, Aurora, Cloud SQL), `BACKUP_ADMIN` cannot be granted**, so grant `LOCK TABLES, SHOW VIEW` and set `BASELINE_LOCK_MODE=lock-all` — equally point-consistent, and the mode mydumper itself names for RDS. If you would rather grant nothing extra on a self-hosted source, `BASELINE_LOCK_MODE=safe-no-lock` never writes a torn snapshot, but it refuses on a write-active source.
   `REPLICATION SLAVE`/`REPLICATION CLIENT` drive the binlog stream; `SELECT` lets
   DBTrail snapshot the schema. DBTrail never writes to or locks the source.
   (Least-privilege variant: [streaming.md](streaming.md#the-source-mysql-user).)

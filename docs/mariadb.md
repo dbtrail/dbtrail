@@ -53,7 +53,7 @@ Identical to a MySQL source (see [Streaming → The Source MySQL User](streaming
 | `binlog_format = ROW` | Validated at preflight; `bintrail` refuses to start otherwise. |
 | `binlog_row_image = FULL` | Set it **server-wide** (`SHOW VARIABLES LIKE 'binlog_row_image';`). MariaDB defaults to `FULL`, but verify. |
 | `log_bin = ON` | Binary logging must be enabled. |
-| Source user grants | `REPLICATION SLAVE, REPLICATION CLIENT, SELECT` — the same set as MySQL. Add `LOCK TABLES` for baselines. MariaDB has no `BACKUP_ADMIN` and never issues `LOCK INSTANCE FOR BACKUP`, so the default `ftwrl` mode needs only `RELOAD`/`FLUSH_TABLES` there. |
+| Source user grants | `REPLICATION SLAVE, REPLICATION CLIENT, SELECT` — the same set as MySQL. Add `RELOAD, SHOW VIEW` for baselines (`LOCK TABLES, SHOW VIEW` with `lock-all` on managed MariaDB). MariaDB has no `BACKUP_ADMIN` and never issues `LOCK INSTANCE FOR BACKUP`, so on a self-hosted MariaDB the default `ftwrl` mode needs only `RELOAD`/`FLUSH_TABLES`. RDS for MariaDB is different: its `RELOAD` does not allow `FLUSH TABLES WITH READ LOCK`, so use `lock-all` there. |
 
 > MariaDB does not have a `server_uuid` system variable. bintrail detects this
 > and emits a benign `WARN … MariaDB source has no @@server_uuid; synthesized a

@@ -15,9 +15,9 @@ it's the first section — the same four lines as the README.
   `binlog_row_image = FULL`. Don't guess: `bintrail doctor` checks everything
   and prints copy-pasteable remediation for whatever is missing.
 - A MySQL user on the source with `REPLICATION SLAVE`, `REPLICATION CLIENT`,
-  and `SELECT` — plus `LOCK TABLES` if you want baselines (they are
-  point-consistent by default; see
-  [streaming.md](./streaming.md#if-you-also-want-baselines-add-lock-tables)).
+  and `SELECT` — plus, if you want baselines (point-consistent by default),
+  `RELOAD` (and `BACKUP_ADMIN` on MySQL/Percona 8.0+) and `SHOW VIEW`; see
+  [streaming.md](./streaming.md#if-you-also-want-baselines-add-a-lock-privilege-and-show-view).
 - An **index MySQL 8.0+** database for DBTrail's data (the Compose stack
   bundles one).
 - **Other sources:** besides MySQL, DBTrail can also capture from **MariaDB**

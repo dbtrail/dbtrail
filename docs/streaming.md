@@ -23,16 +23,23 @@ That is the complete, minimal set. Each privilege maps to exactly one thing DBTr
 
 DBTrail **never writes to the source**, and nothing on the capture path ever locks it. Capture does not need `RELOAD`, `LOCK TABLES`, `PROCESS`, `SHOW VIEW`, or `EXECUTE`.
 
-### If you also want baselines: add `LOCK TABLES`
+### If you also want baselines: add a lock privilege and `SHOW VIEW`
 
 Capture alone gives you the change history. A **baseline** — the full-table
 snapshot that `reconstruct`, Time-travel and the console's **Create baseline**
-button merge those changes onto — is a `mydumper` run, and it needs one more
-privilege:
+button merge those changes onto — is a `mydumper` run, and it needs more:
 
 ```sql
-GRANT LOCK TABLES ON *.* TO 'dbtrail'@'%';   -- only if you want baselines
+-- Only if you want baselines. MySQL/Percona 8.0 or later:
+GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+-- MariaDB and MySQL 5.7 (BACKUP_ADMIN does not exist there):
+-- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';
 ```
+
+`SHOW VIEW` lets the dump copy views: mydumper stops the whole baseline at the
+first view it cannot read (`SHOW VIEW command denied`), in every lock mode.
+The lock privilege depends on the lock mode below: managed MySQL cannot use the
+default one, so it uses `lock-all`, which needs `LOCK TABLES`.
 
 Baselines are **point-consistent by default**: every worker thread opens its
 snapshot at the same instant, so the result represents one moment rather than a
@@ -45,8 +52,10 @@ Two ways to satisfy it, both point-consistent:
 
 | Lock mode | Privileges | Use when |
 |---|---|---|
-| `lock-all` | `LOCK TABLES` (global, or on the dumped schemas) | **Anywhere.** The only option on RDS/Aurora — see below. |
-| `ftwrl` (default) | `RELOAD` or `FLUSH_TABLES`, **plus** `BACKUP_ADMIN` on MySQL/Percona 8.0+ | Self-hosted, when you would rather not grant `LOCK TABLES`. |
+| `ftwrl` (default) | `RELOAD` or `FLUSH_TABLES`, **plus** `BACKUP_ADMIN` on MySQL/Percona 8.0+ | Self-hosted MySQL, Percona and MariaDB. |
+| `lock-all` | `LOCK TABLES` (global, or on the dumped schemas) | Anywhere, and the only option on managed MySQL and RDS for MariaDB — see below. |
+
+Both also need `SHOW VIEW` when the dumped schemas hold views.
 
 **On Amazon RDS and Aurora, use `lock-all`.** `BACKUP_ADMIN` cannot be granted
 there at all (`GRANT BACKUP_ADMIN` fails with *"ERROR 1227 … you need the
@@ -54,7 +63,8 @@ RDSADMIN USER privilege"*), and `ftwrl` issues `LOCK INSTANCE FOR BACKUP` first,
 so it cannot work no matter what else you grant. mydumper says so itself: *"We
 support LOCK_ALL and SAFE_NO_LOCK modes for RDS/Aurora."* Select it with
 `bintrail dump --lock-mode lock-all`, or
-`BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all` for the console.
+`BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all` for the console
+(`BASELINE_LOCK_MODE=lock-all` in `.env` on the compose install).
 
 If you grant neither, capture keeps working normally and only the baseline is
 refused — with a message naming the exact `GRANT` to run. It never quietly falls
