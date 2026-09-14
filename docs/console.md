@@ -273,7 +273,11 @@ How it behaves:
   single-baseline-dir deployment without extra configuration.
 - **Test connection.** Each server (saved or being typed) has a write-free
   probe: ping, MySQL version, latency, whether the database looks like a
-  DBTrail index, and whether its schema is current. When the server has an
+  DBTrail index, and whether its schema is current. Testing a saved server
+  reuses its stored password only for the stored host, port and user; testing
+  a different host, port or user requires the password to be re-entered, so
+  the saved credential is never sent to a destination the operator did not
+  configure. When the server has an
   [S3 store](upload.md#a-store-per-server-from-the-console), it also sends a
   `HeadBucket` for each of its buckets through that store.
 
