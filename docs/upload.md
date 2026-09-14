@@ -161,9 +161,10 @@ Notes:
 servers keep their buckets in different places (one in MinIO, one in AWS, one
 in Wasabi's `eu-central-1`), the console sets the store **per server**
 instead: the server form's `S3 endpoint`, `S3 addressing` and `S3 region`
-fields (registry keys `s3_endpoint`, `s3_path_style`, `s3_region`). The
-values are locations, never keys: the daemon's credential chain signs for
-every store. What the setting does:
+fields (registry keys `s3_endpoint`, `s3_path_style`, `s3_region`), plus
+optional `S3 access key` and `S3 secret key` (`s3_access_key_id`,
+`s3_secret_access_key`). Without keys, the daemon's credential chain signs.
+What the setting does:
 
 - It applies **per bucket**. Every bucket the server's `Archive to S3` and
   Backups S3 locations name is routed to that store, for the SDK uploads
@@ -205,9 +206,33 @@ every store. What the setting does:
   endpoint's name. With an endpoint and no region, uploads and DuckDB reads
   both sign as `us-east-1`.
 - Buckets without a store keep the process-wide behaviour above.
-- Keys per server and a `Test connection` that exercises the store are not
-  part of this: the per-server setting covers where the store is, the
-  ambient chain covers who signs.
+- Keys belong to the bucket, like the endpoint: a bucket has one pair of
+  keys. Two servers naming the same bucket with different keys is refused
+  (HTTP 422, "with different S3 keys", never a key value). Keys alone, with no
+  endpoint, are a store too: an AWS bucket in another account.
+- With keys, uploads sign with them, and DuckDB gets a `PROVIDER config`
+  secret for that bucket holding exactly those keys, in memory for the
+  session. The daemon's credential chain and the environment's AWS keys are
+  not used for that bucket. `views.sql` never carries the keys: its secret
+  for that bucket stays `credential_chain`, so wherever you run the file,
+  the credential chain must hold keys that store accepts. The file says so.
+- The secret key is saved in the registry file (`0600`) and never sent back:
+  the form shows that one is saved. Leaving the secret blank on an edit keeps
+  it. Clearing the access key removes both keys. A new access key needs its
+  secret typed with it.
+- Rotating the keys of a bucket two servers share takes three edits, since
+  each one alone would disagree with the other server: remove the bucket's
+  location and the S3 store fields from all but one server, change the keys
+  on that one, then put the others back with the new keys. While a server has
+  no `Archive to S3`, its rotation drops partitions without archiving them, so
+  do the three edits back to back, or keep both old and new keys valid in
+  the store until you are done.
+- `Test connection` also tests the store: a `HeadBucket` for each bucket
+  the server's locations name, signed the way uploads are, one attempt, 5
+  seconds at most. The row's Test button tests the saved server. On the form,
+  a blank secret uses the saved one only while the endpoint, addressing and
+  access key are unchanged; otherwise the result asks you to type it, and
+  nothing is contacted.
 
 ### Minimum IAM permissions
 

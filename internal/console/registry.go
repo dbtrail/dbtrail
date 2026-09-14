@@ -116,11 +116,18 @@ type ServerEntry struct {
 	// this store, whichever server asked. Two servers naming the same bucket
 	// with different stores is refused (ErrS3StoreConflict). S3PathStyle is
 	// "", "path" or "vhost"; "" means path style, what MinIO needs. Locations,
-	// not secrets: serialized to the masked DTO. Keys are NOT here; the
-	// ambient credential chain signs for every store.
+	// not secrets: serialized to the masked DTO.
 	S3Endpoint  string `yaml:"s3_endpoint,omitempty"`
 	S3PathStyle string `yaml:"s3_path_style,omitempty"`
 	S3Region    string `yaml:"s3_region,omitempty"`
+	// S3AccessKeyID / S3SecretAccessKey sign requests for those buckets
+	// instead of the ambient credential chain. Both or neither. They belong
+	// to the bucket like the endpoint: two servers on one bucket must carry
+	// the same pair. The secret is at rest here like the DSN passwords (file
+	// 0600) and never leaves the process: the DTO carries the access key and
+	// has_s3_secret_access_key only.
+	S3AccessKeyID     string `yaml:"s3_access_key_id,omitempty"`
+	S3SecretAccessKey string `yaml:"s3_secret_access_key,omitempty"`
 	// MonitorDesired records the operator's intent to monitor this source.
 	// The supervisor reconciles running streams against it at boot and on
 	// every edit; nothing reads it until phase 3.
@@ -260,9 +267,14 @@ func LoadRegistry(path string) (*Registry, error) {
 }
 
 // BucketStore builds the per-bucket store this entry's S3 settings describe.
-// The zero store (no endpoint, no region) means the ambient configuration.
+// The zero store (no endpoint, no region, no keys) means the ambient
+// configuration.
 func (e ServerEntry) BucketStore() (storage.BucketStore, error) {
-	return storage.NewBucketStore(e.S3Endpoint, e.S3PathStyle, e.S3Region)
+	st, err := storage.NewBucketStore(e.S3Endpoint, e.S3PathStyle, e.S3Region)
+	if err != nil {
+		return storage.BucketStore{}, err
+	}
+	return st.WithKeys(e.S3AccessKeyID, e.S3SecretAccessKey)
 }
 
 // s3Buckets lists the buckets this entry's S3 locations name, deduplicated.
@@ -401,10 +413,11 @@ func (r *Registry) SetProcessS3Location(label, loc string) {
 }
 
 // storeInputsChanged reports whether an edit touches anything the bucket
-// store depends on: the three store fields or the S3 locations they apply
-// to. Whitespace-only differences count (the check normalizes them away).
+// store depends on: the store fields, keys included, or the S3 locations they
+// apply to. Whitespace-only differences count (the check normalizes them away).
 func storeInputsChanged(old, e ServerEntry) bool {
 	return old.S3Endpoint != e.S3Endpoint || old.S3PathStyle != e.S3PathStyle || old.S3Region != e.S3Region ||
+		old.S3AccessKeyID != e.S3AccessKeyID || old.S3SecretAccessKey != e.S3SecretAccessKey ||
 		old.ArchiveS3 != e.ArchiveS3 || old.BaselineS3 != e.BaselineS3
 }
 
@@ -428,6 +441,7 @@ func (r *Registry) checkBucketStore(e *ServerEntry, selfID string) error {
 	e.S3Endpoint = st.Endpoint.URL
 	e.S3PathStyle = strings.ToLower(strings.TrimSpace(e.S3PathStyle))
 	e.S3Region = st.Region
+	e.S3AccessKeyID, e.S3SecretAccessKey = st.AccessKeyID, st.SecretKey
 	if !st.IsZero() {
 		for _, loc := range []struct{ field, value string }{{"Archive to S3", e.ArchiveS3}, {"Backups S3", e.BaselineS3}} {
 			if loc.value == "" {
@@ -471,13 +485,15 @@ func (r *Registry) checkBucketStore(e *ServerEntry, selfID string) error {
 }
 
 // storeDifference says how other's store differs from this one's, in the
-// server form's words.
+// server form's words. Never a key value.
 func storeDifference(this, other storage.BucketStore) string {
 	switch {
 	case other.IsZero():
 		return "which has no S3 store set and reads it from AWS or the process-wide endpoint"
 	case this.IsZero():
 		return "which reads it from its own S3 store"
+	case this.SameRouting(other):
+		return "with different S3 keys"
 	default:
 		return "with a different S3 endpoint, addressing or region"
 	}

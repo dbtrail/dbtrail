@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -269,4 +270,119 @@ func envOr(name, def string) string {
 		return v
 	}
 	return def
+}
+
+// TestS3Compat_MinIO_bucketStoreKeys is the #1575 keys leg: the environment
+// holds NO keys and no credential files, so the only credentials anywhere are
+// the bucket store's own. Both halves must sign with them: an upload through
+// NewS3Backend, a read back through DuckDB's bucket-scoped secret, and the
+// console probe's client. A store with a wrong secret must fail on both
+// halves, which proves the keys are what signed and not something ambient.
+func TestS3Compat_MinIO_bucketStoreKeys(t *testing.T) {
+	endpoint := os.Getenv("BINTRAIL_TEST_MINIO_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("BINTRAIL_TEST_MINIO_ENDPOINT not set")
+	}
+	accessKey := envOr("BINTRAIL_TEST_MINIO_ACCESS_KEY", "bintrail")
+	secretKey := envOr("BINTRAIL_TEST_MINIO_SECRET_KEY", "bintrail-it-secret")
+	for k, v := range map[string]string{
+		"AWS_ACCESS_KEY_ID": "", "AWS_SECRET_ACCESS_KEY": "", "AWS_SESSION_TOKEN": "",
+		"AWS_REGION": "", "AWS_DEFAULT_REGION": "", "AWS_PROFILE": "", "AWS_EC2_METADATA_DISABLED": "true",
+		"AWS_CONFIG_FILE": "/nonexistent/aws-config", "AWS_SHARED_CREDENTIALS_FILE": "/nonexistent/aws-credentials",
+		"BINTRAIL_DUCKDB_NO_AWS_EXT": "", "AWS_ENDPOINT_URL_S3": "", "AWS_ENDPOINT_URL": "",
+		storage.EnvS3PathStyle: "", storage.EnvS3Endpoint: "",
+	} {
+		t.Setenv(k, v)
+	}
+	ctx := context.Background()
+	const bucket = "bintrail-it-keys"
+	base, err := storage.NewBucketStore(endpoint, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyed, err := base.WithKeys(accessKey, secretKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.SetBucketStores(map[string]storage.BucketStore{bucket: keyed})
+	t.Cleanup(func() { storage.SetBucketStores(nil) })
+
+	admin, err := storage.NewS3ClientForBucket(ctx, bucket, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		var owned *types.BucketAlreadyOwnedByYou
+		var exists *types.BucketAlreadyExists
+		if !errors.As(err, &owned) && !errors.As(err, &exists) {
+			t.Fatalf("create bucket with the store's keys: %v", err)
+		}
+	}
+	local := filepath.Join(t.TempDir(), "t.parquet")
+	gen, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gen.ExecContext(ctx, "COPY (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3) TO '"+local+"' (FORMAT PARQUET)"); err != nil {
+		t.Fatal(err)
+	}
+	gen.Close()
+	backend, err := storage.NewS3Backend(ctx, storage.S3Config{Bucket: bucket, Prefix: "keys/"})
+	if err != nil {
+		t.Fatalf("NewS3Backend with the store's keys: %v", err)
+	}
+	f, err := os.Open(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := backend.Put(ctx, "t.parquet", f); err != nil {
+		t.Fatalf("upload with the store's keys: %v", err)
+	}
+
+	read := func() (int, error) {
+		db, err := sql.Open("duckdb", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
+			t.Fatalf("httpfs: %v", err)
+		}
+		if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
+			return 0, err
+		}
+		var n int
+		err = db.QueryRowContext(ctx, "SELECT count(*) FROM read_parquet('s3://"+bucket+"/keys/t.parquet')").Scan(&n)
+		return n, err
+	}
+	if n, err := read(); err != nil || n != 3 {
+		t.Fatalf("DuckDB read with the store's keys: n=%d err=%v", n, err)
+	}
+	probe, err := storage.NewS3ClientForStore(ctx, keyed, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := probe.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		t.Fatalf("probe client with the store's keys: %v", err)
+	}
+
+	// The same store with a wrong secret: both halves fail.
+	wrong, err := base.WithKeys(accessKey, secretKey+"-wrong")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.SetBucketStores(map[string]storage.BucketStore{bucket: wrong})
+	if _, err := read(); err == nil {
+		t.Error("DuckDB read with a wrong store secret succeeded: something other than the store's keys signed")
+	} else if strings.Contains(err.Error(), secretKey) {
+		t.Errorf("the failed read carries the secret: %v", err)
+	}
+	bad, err := storage.NewS3ClientForBucket(ctx, bucket, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bad.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)}); err == nil {
+		t.Error("SDK HeadBucket with a wrong store secret succeeded")
+	}
 }

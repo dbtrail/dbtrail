@@ -8872,18 +8872,21 @@ function buildServerForm() {
   monGrid.append(tagFlavor(srvField("Publication", "source_publication", { placeholder: "bintrail_pub" }), "postgres"));
   monGrid.append(srvField("Schemas", "schemas", { placeholder: "(optional) shop,billing" }));
   monGrid.append(srvField("Archive to S3", "archive_s3", { placeholder: "(optional) s3://bucket/prefix/" }));
-  // S3 store (#1575): where this server's buckets live when that is not AWS.
-  // Three plain values, no keys: the daemon's credential chain signs for every
-  // store. They apply per BUCKET, to uploads and reads alike, for the Archive
-  // bucket above and the Backups bucket on the settings page.
+  // S3 store (#1575): where this server's buckets live when that is not AWS,
+  // and optionally the keys that sign for them (without keys, the daemon's
+  // credential chain signs). They apply per BUCKET, to uploads and reads
+  // alike, for the Archive bucket above and the Backups bucket on the
+  // settings page. The secret is never prefilled: blank keeps the saved one.
   monGrid.append(srvField("S3 endpoint", "s3_endpoint", { placeholder: "(optional) http://minio:9000 for MinIO, Wasabi, LocalStack" }));
   monGrid.append(el("label", { class: "field" },
     el("span", { class: "field-label", text: "S3 addressing" }),
     el("select", { class: "input", name: "s3_path_style" },
       opt("", "Path style (default with an endpoint)"), opt("path", "Path style: host/bucket/key"), opt("vhost", "Virtual-hosted: bucket.host/key"))));
   monGrid.append(srvField("S3 region", "s3_region", { placeholder: "(optional) us-east-1; MinIO ignores it, Wasabi wants its endpoint's" }));
+  monGrid.append(srvField("S3 access key", "s3_access_key_id", { placeholder: "(optional) blank uses the daemon's own credentials", autocomplete: "off" }));
+  monGrid.append(srvField("S3 secret key", "s3_secret_access_key", { type: "password", autocomplete: "new-password" }));
   mon.append(monGrid);
-  mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Backups locations set on this server, for uploads and reads alike, not to the daemon's default Backups location; a bucket has one store, so two servers sharing a bucket must agree." }));
+  mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Backups locations set on this server, for uploads and reads alike, not to the daemon's default Backups location. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
   // SELECT covers the information_schema snapshot of columns/PKs/FKs.
@@ -9005,12 +9008,13 @@ function showServerForm(prefill) {
 
   if (prefill) {
     form.elements.id.value = prefill.id || "";
-    ["name", "host", "port", "user", "dbname", "baseline_dir", "baseline_s3", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "source_host", "source_port", "source_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
+    ["name", "host", "port", "user", "dbname", "baseline_dir", "baseline_s3", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "source_host", "source_port", "source_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
       if (form.elements[k] && prefill[k] != null) form.elements[k].value = prefill[k];
     });
     if (form.elements.no_archive) form.elements.no_archive.checked = !!prefill.no_archive;
     form.elements.password.placeholder = prefill.has_password ? "(unchanged; leave blank to keep)" : "(none)";
     form.elements.source_password.placeholder = prefill.has_source_password ? "(unchanged; leave blank to keep)" : "";
+    form.elements.s3_secret_access_key.placeholder = prefill.has_s3_secret_access_key ? "(unchanged; leave blank to keep)" : "";
   }
   // Flavor init runs for both add and edit; it's immutable after create (the
   // backend rejects a change on PUT), so disable the selector when editing.
@@ -9045,6 +9049,7 @@ function serverFormBody(form) {
     no_archive: !!f.no_archive.checked,
     archive_s3: f.archive_s3.value.trim(),
     s3_endpoint: f.s3_endpoint.value.trim(), s3_path_style: f.s3_path_style.value, s3_region: f.s3_region.value.trim(),
+    s3_access_key_id: f.s3_access_key_id.value.trim(),
     source_host: f.source_host.value.trim(), source_port: f.source_port.value.trim(),
     source_user: f.source_user.value.trim(), schemas: f.schemas.value.trim(),
     source_database: f.source_database.value.trim(),
@@ -9052,6 +9057,7 @@ function serverFormBody(form) {
   };
   if (f.password.value !== "") body.password = f.password.value;
   if (f.source_password.value !== "") body.source_password = f.source_password.value;
+  if (f.s3_secret_access_key.value !== "") body.s3_secret_access_key = f.s3_secret_access_key.value;
   return body;
 }
 
@@ -9146,12 +9152,26 @@ async function deleteServer(s) {
 
 // test / doctor / monitor -----------------------------------------------------
 
+// s3TestText renders the S3 half of a Test connection result, one entry per
+// bucket of the server's S3 store. needs_secret was not probed: the saved
+// secret is only reused for the same store, so the operator types it.
+function s3TestText(res) {
+  return (res.s3 || []).map((b) => {
+    const name = b.bucket ? "S3 " + b.bucket : "S3 store";
+    if (b.needs_secret) return "○ " + name + ": type the S3 secret key to test these keys";
+    if (!b.ok) return "✗ " + name + ": " + (b.error || "unreachable");
+    return "✓ " + name + " · " + b.latency_ms + " ms";
+  }).join(" · ");
+}
+
 function testResultText(res) {
+  const s3 = s3TestText(res);
+  const withS3 = (text) => (s3 ? text + " · " + s3 : text);
   // provision_pending: a monitored source whose per-source index isn't created
   // yet (Start creates it). Reachable server, normal pre-Start state — render
   // it as a neutral hint, not a red failure.
-  if (res.provision_pending) return "○ " + (res.error || "index not created yet; click Start");
-  if (!res.ok) return "✗ " + (res.error || "unreachable");
+  if (res.provision_pending) return withS3("○ " + (res.error || "index not created yet; click Start"));
+  if (!res.ok) return withS3("✗ " + (res.error || "unreachable"));
   let s = "✓ ok · " + res.latency_ms + " ms";
   if (res.server_version) s += " · MySQL " + res.server_version;
   // has_index/schema_current are tri-state: absent = the metadata lookup itself
@@ -9159,7 +9179,18 @@ function testResultText(res) {
   if (res.has_index === false) s += " · doesn't look like a DBTrail index (missing the binlog_events table)";
   else if (res.has_index === undefined || res.schema_current === undefined) s += " · index metadata unavailable";
   else if (res.schema_current === false) s += " · index schema outdated (run bintrail index/stream once)";
-  return s;
+  return withS3(s);
+}
+
+// testResultClass colors a Test connection result: red when the index or any
+// bucket failed, neutral while something waits on the operator (index not
+// created yet, a secret to type), green otherwise.
+function testResultClass(res) {
+  const s3 = res.s3 || [];
+  if (s3.some((b) => !b.ok && !b.needs_secret)) return "err";
+  if (!res.ok && !res.provision_pending) return "err";
+  if (res.provision_pending || s3.some((b) => b.needs_secret)) return "pending";
+  return "ok";
 }
 
 async function testServerForm(form) {
@@ -9173,7 +9204,7 @@ async function testServerForm(form) {
   show("", "testing…");
   try {
     const res = await api(id ? "/api/servers/" + encodeURIComponent(id) + "/test" : "/api/servers/test", { method: "POST", body });
-    show(res.provision_pending ? "pending" : (res.ok ? "ok" : "err"), testResultText(res));
+    show(testResultClass(res), testResultText(res));
   } catch (err) { show("err", "✗ " + ((err && err.message) || err)); }
   finally { if (btn) btn.disabled = false; }
 }
@@ -9184,7 +9215,7 @@ async function testServerRow(id) {
   try {
     const res = await api("/api/servers/" + encodeURIComponent(id) + "/test", { method: "POST", body: {} });
     const note = noCaptureNotes[id]; // the row rebuild re-derives it; here it only needs to survive the test result
-    if (slot) { slot.className = "srv-status " + (res.provision_pending ? "pending" : (res.ok ? "ok" : "err")); slot.textContent = testResultText(res) + (note ? " · ○ " + note : ""); }
+    if (slot) { slot.className = "srv-status " + testResultClass(res); slot.textContent = testResultText(res) + (note ? " · ○ " + note : ""); }
   } catch (err) { if (slot) { slot.className = "srv-status err"; slot.textContent = "✗ " + ((err && err.message) || err); } }
 }
 

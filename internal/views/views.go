@@ -978,6 +978,10 @@ func writeS3Preamble(b *strings.Builder, region string, ep storage.S3Endpoint, a
 		b.WriteString("-- Buckets that live in a store of their own (set per server in the console).\n")
 		b.WriteString("-- Each secret below is scoped to one bucket and is the one DuckDB picks for\n")
 		b.WriteString("-- paths under it; the general secret above covers every other bucket.\n")
+		if anyStoreHasKeys(stores) {
+			b.WriteString("-- Some of these buckets sign with keys set in the console, which this file never carries:\n")
+			b.WriteString("-- the credential chain where you run it must hold keys each of those stores accepts.\n")
+		}
 		for _, stmt := range scoped {
 			fmt.Fprintf(b, "%s;\n", stmt)
 		}
@@ -2162,4 +2166,15 @@ func trimTrailingComma(b *strings.Builder) {
 		b.Reset()
 		b.WriteString(strings.TrimSuffix(s, ",\n"))
 	}
+}
+
+// anyStoreHasKeys reports a bucket store that signs with keys of its own, which
+// views.sql renders as credential_chain like every other secret.
+func anyStoreHasKeys(stores map[string]storage.BucketStore) bool {
+	for _, st := range stores {
+		if st.HasKeys() {
+			return true
+		}
+	}
+	return false
 }
