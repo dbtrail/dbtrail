@@ -112,6 +112,9 @@ What each part does:
   always write it. `bintrail upload --source` pointed at a folder INSIDE
   `bintrail_id=<id>/` uploads keys without it, and this rule does not cover
   those objects. Upload archives from the folder that holds `bintrail_id=<id>/`.
+  The same goes for the agent's bring-your-own-storage files
+  (`<server_id>/<schema>.<table>/<date>/events_*.parquet`, full before and
+  after row images): keep them out of a bucket this reader can open.
 - **It matches the segment, not a prefix.** Archive and backup prefixes are
   chosen by the operator and can be the same or nested, so a prefix-based
   Deny can miss the archives or also block the snapshots. In an S3 resource
@@ -126,7 +129,7 @@ What each part does:
 Two things a reader with this policy can still see, stated plainly:
 
 - **Every column of every table.** A snapshot holds full rows. Console access
-  rules (data profiles, redaction, EE roles) apply to the console, not to the
+  rules (data profiles, redaction, roles) apply to the console, not to the
   files in the bucket.
 - **What changed between two snapshots.** Comparing two consecutive snapshots
   of a table shows which rows changed, even without the archives.
@@ -136,7 +139,7 @@ credentials resolve to a different region than the bucket.
 
 ## Tighter scope (optional)
 
-The policy above grants access to the whole bucket. If you want to scope it
+DBTrail's own policy at the top of this page grants access to the whole bucket. If you want to scope it
 to a prefix instead (e.g. only `archives/*` inside a bucket shared with
 other tools), see [upload.md — Minimum IAM
 permissions](upload.md#minimum-iam-permissions) for a prefix-scoped example

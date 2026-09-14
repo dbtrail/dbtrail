@@ -332,8 +332,10 @@ REPLICATION CLIENT, SELECT` on the source MySQL — the form spells out the
 exact `CREATE USER` / `GRANT` to copy. DBTrail never writes to the source, and
 capture never locks it. The **Create backup** button needs more,
 `RELOAD` plus `BACKUP_ADMIN` on MySQL/Percona 8.0+ and `SHOW VIEW` for views,
-because a baseline is point-consistent by default; without them capture keeps
-running and only the baseline is refused, naming the exact `GRANT`. On
+because a baseline is point-consistent by default. Without the lock privileges
+capture keeps running and only the baseline is refused, naming the exact
+`GRANT`; without `SHOW VIEW` the dump itself stops at the first view with
+mydumper's `SHOW VIEW command denied`. On
 RDS/Aurora grant `LOCK TABLES` instead of `RELOAD` and set the lock mode to
 `lock-all` (`BASELINE_LOCK_MODE` in the compose `.env`,
 `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` otherwise) —

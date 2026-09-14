@@ -1,6 +1,7 @@
 package console
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,21 +95,15 @@ console.log(JSON.stringify(blocks));`
 // blockFor reads one flavor's text out of the JSON the script printed.
 func blockFor(t *testing.T, js, flavor string) string {
 	t.Helper()
-	key := `"` + flavor + `":"`
-	i := strings.Index(js, key)
-	if i < 0 {
+	var blocks map[string]string
+	if err := json.Unmarshal([]byte(js), &blocks); err != nil {
+		t.Fatalf("decode %q: %v", js, err)
+	}
+	b, ok := blocks[flavor]
+	if !ok {
 		t.Fatalf("no %s block rendered: %s", flavor, js)
 	}
-	rest := js[i+len(key):]
-	j := strings.Index(rest, `"`)
-	for j > 0 && rest[j-1] == '\\' {
-		k := strings.Index(rest[j+1:], `"`)
-		if k < 0 {
-			break
-		}
-		j += k + 1
-	}
-	return strings.ReplaceAll(rest[:j], `\n`, "\n")
+	return b
 }
 
 // activeLine reports whether a line starting with prefix is present and not
