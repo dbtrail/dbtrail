@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/img/dbtrail _ header.png" alt="dbtrail: the open-source time-travel flashback for MySQL. Every change leaves a trail. Follow it back." width="100%">
+<img src="docs/img/dbtrail _ header.png" alt="DBTrail: the open-source time-travel flashback for MySQL. Every change leaves a trail. Follow it back." width="100%">
 
 **See every row change in MySQL and PostgreSQL, and undo the ones you didn't want. No restore, no locks, no schema changes.**
 
@@ -14,7 +14,7 @@ SELECT * FROM orders WHERE id = 123 AS OF '2026-05-20 14:00:00'
 
 *That query runs against production MySQL or Postgres. DBTrail makes it work.*
 
-<img src="docs/img/console-overview.png" alt="dbtrail console: recent changes across every table, deletes surfaced first" width="850">
+<img src="docs/img/console-overview.png" alt="DBTrail console: recent changes across every table, deletes surfaced first" width="850">
 
 </div>
 

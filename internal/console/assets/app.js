@@ -8258,7 +8258,7 @@ function otherClientsPanel(servers) {
   const url = mcpURL(servers);
   const snippet = JSON.stringify({
     mcpServers: {
-      DBTrail: { command: "bintrail-mcp", args: ["--connect", url, "--token", "YOUR_CONSOLE_TOKEN"] },
+      dbtrail: { command: "bintrail-mcp", args: ["--connect", url, "--token", "YOUR_CONSOLE_TOKEN"] },
     },
   }, null, 2);
   const panel = el("section", { class: "ov-panel cn-other", style: "margin-top:18px" });
