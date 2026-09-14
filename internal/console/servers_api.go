@@ -671,6 +671,11 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 		// capture it during the handshake. Require it to be re-typed instead.
 		// A raw dsn carries its own secret, so the stored one is never merged
 		// there; a stored entry with no password has nothing to protect.
+		//
+		// A hard 400, unlike the S3 half of this probe, which HOLDS a bucket
+		// and returns a per-bucket needs_secret result: the index connection
+		// is the probe's whole payload, so there is nothing to return once its
+		// destination is refused, and a single result cannot carry a hold.
 		if req.DSN == "" && req.Password == nil && movesStoredPassword(stored, built) {
 			writeJSONError(w, http.StatusBadRequest, "re-enter the password to test a different host, port or user")
 			return
