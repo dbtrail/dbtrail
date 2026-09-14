@@ -451,6 +451,9 @@ serves virtual-hosted URLs, `BINTRAIL_S3_PATH_STYLE=false`) on every bintrail
 process, including the console. The bundled Compose file passes both through.
 Details and the full list of surfaces the endpoint covers are in
 [upload.md → S3-compatible stores](upload.md#s3-compatible-stores-minio-wasabi-localstack).
+When servers keep their buckets in different stores, the console sets the
+endpoint, addressing style and region **per server** instead; see
+[upload.md → A store per server](upload.md#a-store-per-server-from-the-console).
 
 ### S3 archive bucket: abort orphaned multipart uploads
 

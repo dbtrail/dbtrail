@@ -14,6 +14,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // testConnectTimeout is the dial timeout injected into test-connection probes
@@ -39,6 +40,11 @@ type serverDTO struct {
 	BaselineS3  string            `json:"baseline_s3,omitempty"`
 	NoArchive   bool              `json:"no_archive"`
 	ArchiveS3   string            `json:"archive_s3,omitempty"`
+	// S3 store (#1575): where this server's buckets live when not AWS. Not
+	// secret (locations), so they round-trip; keys never travel here.
+	S3Endpoint  string `json:"s3_endpoint,omitempty"`
+	S3PathStyle string `json:"s3_path_style,omitempty"`
+	S3Region    string `json:"s3_region,omitempty"`
 	// Source-monitoring config (control plane). HasSource reports whether a
 	// source DSN is configured at all; the parts are its masked view — the
 	// source DSN itself (replication credentials) never leaves the process.
@@ -101,6 +107,11 @@ type serverRequest struct {
 	BaselineS3  string  `json:"baseline_s3"`
 	NoArchive   bool    `json:"no_archive"`
 	ArchiveS3   string  `json:"archive_s3"`
+	// S3 store (#1575). Always resent by the form, like Schemas: an omitted
+	// field clears it, which is what a form that shows it must do.
+	S3Endpoint  string `json:"s3_endpoint"`
+	S3PathStyle string `json:"s3_path_style"`
+	S3Region    string `json:"s3_region"`
 
 	SourceDSN      *string `json:"source_dsn"`
 	SourceHost     string  `json:"source_host"`
@@ -229,6 +240,9 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		BaselineS3:        req.BaselineS3,
 		NoArchive:         req.NoArchive,
 		ArchiveS3:         strings.TrimSpace(req.ArchiveS3),
+		S3Endpoint:        strings.TrimSpace(req.S3Endpoint),
+		S3PathStyle:       strings.TrimSpace(req.S3PathStyle),
+		S3Region:          strings.TrimSpace(req.S3Region),
 		SourceDSN:         sourceDSN,
 		SourceServerID:    req.SourceServerID,
 		Schemas:           req.Schemas,
@@ -322,6 +336,9 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		BaselineS3:  req.BaselineS3,
 		NoArchive:   req.NoArchive,
 		ArchiveS3:   strings.TrimSpace(req.ArchiveS3),
+		S3Endpoint:  strings.TrimSpace(req.S3Endpoint),
+		S3PathStyle: strings.TrimSpace(req.S3PathStyle),
+		S3Region:    strings.TrimSpace(req.S3Region),
 		SourceDSN:   sourceDSN,
 		// The verbs that flip monitoring intent arrive with the supervisor
 		// (phase 3); a plain edit must not silently start or stop anything.
@@ -867,6 +884,9 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		BaselineS3:        e.BaselineS3,
 		NoArchive:         e.NoArchive,
 		ArchiveS3:         e.ArchiveS3,
+		S3Endpoint:        e.S3Endpoint,
+		S3PathStyle:       e.S3PathStyle,
+		S3Region:          e.S3Region,
 		Reconstruct:       s.cm.capability(e),
 		Editable:          !s.cm.reg.ReadOnly(),
 		Deletable:         !s.cm.reg.ReadOnly(),
@@ -985,6 +1005,10 @@ func registryErrStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, ErrUnknownServer):
 		return http.StatusNotFound
+	case errors.Is(err, storage.ErrBucketStoreConfig):
+		return http.StatusBadRequest
+	case errors.Is(err, ErrS3StoreConflict):
+		return http.StatusUnprocessableEntity
 	default:
 		if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "reserved") {
 			return http.StatusBadRequest

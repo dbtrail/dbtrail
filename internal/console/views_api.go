@@ -229,6 +229,11 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 			return views.Input{}, fmt.Errorf("S3 endpoint configuration: %w", err)
 		}
 		in.S3Endpoint = ep
+		// Every bucket store the daemon knows, not only this server's: the
+		// endpoints are locations, the file is what a reader on another
+		// machine has, and a secret for a bucket the file never reads costs
+		// nothing.
+		in.BucketStores = storage.BucketStores()
 		// The region for this layout, when it was actually DETECTED (#1462).
 		// Not "the region our own reads use": those fall back to the ambient
 		// one and are right to, since they fail here and loudly. A file that

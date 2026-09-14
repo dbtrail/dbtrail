@@ -45,7 +45,7 @@ func Upload(ctx context.Context, outputDir, s3URL, region string, retry bool) (i
 		return 0, fmt.Errorf("invalid upload URL: %w", err)
 	}
 
-	client, err := storage.NewS3Client(ctx, region)
+	client, err := storage.NewS3ClientForBucket(ctx, bucket, region)
 	if err != nil {
 		return 0, err
 	}

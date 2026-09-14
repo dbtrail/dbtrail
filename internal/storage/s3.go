@@ -75,25 +75,40 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 	return newS3BackendFromClient(ctx, client, cfg)
 }
 
-// newS3Client creates an S3 client from config.
+// newS3Client creates an S3 client from config. The region the SDK config
+// loads with is the caller's, then the bucket store's (#1575), then whatever
+// the ambient chain resolves; a store with an endpoint and no region signs as
+// us-east-1, which is also DuckDB's default for a secret that pins none.
 func newS3Client(ctx context.Context, cfg S3Config) (*s3.Client, error) {
-	awsCfg, err := LoadAWSConfig(ctx, cfg.Region)
+	region, ep := resolveBucketRouting(cfg.Bucket, cfg.Region)
+	awsCfg, err := LoadAWSConfig(ctx, region)
 	if err != nil {
 		return nil, fmt.Errorf("storage: %w", err)
 	}
 
-	// An explicit S3Config.Endpoint wins over the environment's; with none,
-	// NewS3ClientFromConfig applies the shared BINTRAIL_S3_ENDPOINT routing
-	// so this backend and every other client agree on where S3 is (#1453).
-	var s3Opts []func(*s3.Options)
+	// An explicit S3Config.Endpoint wins over everything: the caller owns the
+	// routing, and the bucket table is not consulted.
 	if cfg.Endpoint != "" {
-		s3Opts = append(s3Opts, func(o *s3.Options) {
+		return NewS3ClientFromConfig(awsCfg, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 			o.UsePathStyle = true // required for MinIO / LocalStack
-		})
+		}), nil
 	}
-
-	return NewS3ClientFromConfig(awsCfg, s3Opts...), nil
+	// A bucket with its own store (#1575) is routed there, as a CLIENT option:
+	// the SDK resolves AWS_ENDPOINT_URL_S3 over cfg.BaseEndpoint, and the
+	// option is what wins over both. No "unmirrored" warning for this shape:
+	// the DuckDB half carries the same store as a secret scoped to the bucket.
+	// With none, NewS3ClientFromConfig applies the shared BINTRAIL_S3_ENDPOINT
+	// routing so this backend and every other client agree on where S3 is
+	// (#1453).
+	if ep != nil {
+		url, pathStyle := ep.URL, ep.PathStyle
+		return newS3ClientRouted(awsCfg, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(url)
+			o.UsePathStyle = pathStyle
+		}), nil
+	}
+	return NewS3ClientFromConfig(awsCfg), nil
 }
 
 // newS3BackendFromClient creates an S3Backend from an existing s3API client.

@@ -162,6 +162,108 @@ func TestS3Compat_MinIO(t *testing.T) {
 	})
 }
 
+// TestS3Compat_MinIO_bucketStore is the #1575 leg: NO process-wide endpoint,
+// a store registered for ONE bucket (what the console does from its
+// per-server settings), and the same object written through the SDK half
+// (NewS3Backend, the type rotation and baseline upload go through) and read
+// back through the DuckDB half's bucket-scoped secret. A second bucket with
+// no store is left on the ambient configuration, which here is AWS with
+// dummy settings: a read of it must fail, not quietly reach MinIO.
+func TestS3Compat_MinIO_bucketStore(t *testing.T) {
+	endpoint := os.Getenv("BINTRAIL_TEST_MINIO_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("BINTRAIL_TEST_MINIO_ENDPOINT not set")
+	}
+	t.Setenv("AWS_ACCESS_KEY_ID", envOr("BINTRAIL_TEST_MINIO_ACCESS_KEY", "bintrail"))
+	t.Setenv("AWS_SECRET_ACCESS_KEY", envOr("BINTRAIL_TEST_MINIO_SECRET_KEY", "bintrail-it-secret"))
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	t.Setenv("AWS_CONFIG_FILE", "/nonexistent/aws-config")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/aws-credentials")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("BINTRAIL_DUCKDB_NO_AWS_EXT", "")
+	t.Setenv(storage.EnvS3PathStyle, "")
+	t.Setenv(storage.EnvS3Endpoint, "")
+	t.Setenv("AWS_ENDPOINT_URL_S3", "")
+	t.Setenv("AWS_ENDPOINT_URL", "")
+	ctx := context.Background()
+
+	const bucket = "bintrail-it-store"
+	minio, err := storage.NewBucketStore(endpoint, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.SetBucketStores(map[string]storage.BucketStore{bucket: minio})
+	t.Cleanup(func() { storage.SetBucketStores(nil) })
+
+	// The bucket has to exist before NewS3Backend's HeadBucket; create it
+	// through a bucket-routed client.
+	admin, err := storage.NewS3ClientForBucket(ctx, bucket, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := admin.Options(); got.BaseEndpoint == nil || *got.BaseEndpoint != minio.Endpoint.URL || !got.UsePathStyle {
+		t.Fatalf("bucket client not routed to MinIO: endpoint=%v pathStyle=%v", got.BaseEndpoint, got.UsePathStyle)
+	}
+	if _, err := admin.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		var owned *types.BucketAlreadyOwnedByYou
+		var exists *types.BucketAlreadyExists
+		if !errors.As(err, &owned) && !errors.As(err, &exists) {
+			t.Fatalf("create bucket on MinIO: %v", err)
+		}
+	}
+	local := filepath.Join(t.TempDir(), "t.parquet")
+	gen, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gen.ExecContext(ctx, "COPY (SELECT 1 AS id, 'one' AS name UNION ALL SELECT 2, 'two') TO '"+local+"' (FORMAT PARQUET)"); err != nil {
+		t.Fatal(err)
+	}
+	gen.Close()
+	backend, err := storage.NewS3Backend(ctx, storage.S3Config{Bucket: bucket, Prefix: "store/"})
+	if err != nil {
+		t.Fatalf("NewS3Backend through the bucket store: %v", err)
+	}
+	f, err := os.Open(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := backend.Put(ctx, "t.parquet", f); err != nil {
+		t.Fatalf("upload through the SDK half: %v", err)
+	}
+	if ok, err := storage.S3ObjectExists(ctx, admin, bucket, "store/t.parquet"); err != nil || !ok {
+		t.Fatalf("object not visible after upload: ok=%v err=%v", ok, err)
+	}
+
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
+		t.Fatalf("httpfs: %v", err)
+	}
+	if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM read_parquet('s3://"+bucket+"/store/t.parquet')").Scan(&n); err != nil {
+		t.Fatalf("DuckDB read through the bucket-scoped secret: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("rows = %d, want 2", n)
+	}
+	// A bucket with no store stays on the ambient configuration (AWS here,
+	// with dummy keys and no network to it): the read must NOT reach MinIO.
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM read_parquet('s3://bintrail-it-other/store/t.parquet')").Scan(&n); err == nil {
+		t.Fatal("a bucket without a store read through the MinIO store")
+	}
+}
+
 func envOr(name, def string) string {
 	if v := os.Getenv(name); v != "" {
 		return v

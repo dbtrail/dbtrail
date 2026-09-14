@@ -306,6 +306,33 @@ func parquetColumnsFromFiles(ctx context.Context, db *sql.DB, files []string) (m
 	return cols, nil
 }
 
+// s3ClientForBucket builds the client the archive listing and downloads use,
+// and the region it signs with. A bucket with its own store (#1575) goes
+// there, with the store's endpoint, style and region, and no detection call
+// is made against the ambient endpoint (for a MinIO bucket that is AWS,
+// where a same-named bucket may be someone else's). Any other bucket keeps
+// the detected region on the ambient configuration.
+func s3ClientForBucket(ctx context.Context, bucket string) (*s3.Client, string, error) {
+	if _, routed := storage.BucketStoreFor(bucket); routed {
+		client, err := storage.NewS3ClientForBucket(ctx, bucket, "")
+		if err != nil {
+			return nil, "", err
+		}
+		return client, client.Options().Region, nil
+	}
+	cfg, err := storage.LoadAWSConfig(ctx, "")
+	if err != nil {
+		return nil, "", err
+	}
+	// The read path ignores the detected flag on purpose: it is about to
+	// read, so a wrong guess fails here and loudly.
+	bucketRegion, _ := storage.DetectBucketRegion(ctx, cfg, bucket)
+	client := storage.NewS3ClientFromConfig(cfg, func(o *s3.Options) {
+		o.Region = bucketRegion
+	})
+	return client, bucketRegion, nil
+}
+
 // listS3ParquetScoped lists .parquet files under an S3 prefix, optionally scoping
 // to date-specific prefixes when since/until are provided and span ≤31 days.
 // This avoids listing all files in the archive when only a narrow time range is needed.
@@ -317,18 +344,10 @@ func listS3ParquetScoped(ctx context.Context, source string, since, until *time.
 		return nil, 0, "", nil, err
 	}
 
-	cfg, err := storage.LoadAWSConfig(ctx, "")
+	client, bucketRegion, err := s3ClientForBucket(ctx, bucket)
 	if err != nil {
 		return nil, 0, "", nil, err
 	}
-
-	// The read path ignores the detected flag on purpose: it is about to read,
-	// so a wrong guess fails here and loudly.
-	bucketRegion, _ := storage.DetectBucketRegion(ctx, cfg, bucket)
-
-	client = storage.NewS3ClientFromConfig(cfg, func(o *s3.Options) {
-		o.Region = bucketRegion
-	})
 
 	// Generate date-scoped prefixes when time range is narrow enough.
 	// This avoids listing thousands of irrelevant files for large archives.

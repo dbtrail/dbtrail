@@ -155,6 +155,37 @@ Notes:
 - Object Lock and `s3:GetBucketLocation` behave as the store implements
   them; `doctor --archive-s3` reports what it can query.
 
+#### A store per server, from the console
+
+`BINTRAIL_S3_ENDPOINT` is one setting for the whole process. When different
+servers keep their buckets in different places (one in MinIO, one in AWS, one
+in Wasabi's `eu-central-1`), the console sets the store **per server**
+instead: the server form's `S3 endpoint`, `S3 addressing` and `S3 region`
+fields (registry keys `s3_endpoint`, `s3_path_style`, `s3_region`). The
+values are locations, never keys: the daemon's credential chain signs for
+every store. What the setting does:
+
+- It applies **per bucket**. Every bucket the server's `Archive to S3` and
+  Backups S3 locations name is routed to that store, for the SDK uploads
+  (rotation's archiving, baseline upload and prune) and for every DuckDB
+  read alike, whichever server asked for it. A bucket has one store: two
+  servers naming the same bucket with different settings is refused (HTTP
+  422), a server with no store on a routed bucket follows the bucket.
+- The DuckDB half gets one secret **scoped to the bucket**
+  (`SCOPE 's3://<bucket>/'`), which DuckDB picks over the general one for
+  paths under it. `views.sql` carries the same scoped secrets, still
+  `credential_chain`, still no keys.
+- `S3 addressing` defaults to path style when an endpoint is set (MinIO,
+  LocalStack); `vhost` is for a store that only serves `bucket.host` URLs.
+  A style without an endpoint is refused. `S3 region` alone (no endpoint)
+  is allowed: it pins the signing region for a bucket outside the default
+  one on AWS. MinIO ignores the region; Wasabi wants the one in its
+  endpoint's name.
+- Buckets without a store keep the process-wide behaviour above.
+- Keys per server and a `Test connection` that exercises the store are not
+  part of this: the per-server setting covers where the store is, the
+  ambient chain covers who signs.
+
 ### Minimum IAM permissions
 
 > Want one policy that covers `upload` **and** archiving/baselines/queries

@@ -5,11 +5,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 
 	yaml "go.yaml.in/yaml/v2"
+
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // registryVersion is the registry file schema version this binary writes and
@@ -34,6 +39,10 @@ var (
 	// ErrRegistryReadOnly is returned for mutating operations when the on-disk
 	// file was written by a newer bintrail (version > registryVersion).
 	ErrRegistryReadOnly = errors.New("server registry was written by a newer bintrail; upgrade bintrail to edit it")
+	// ErrS3StoreConflict: two servers name the same bucket but route it to
+	// different stores (#1575). The store is per bucket, so one of them would
+	// silently get the other's endpoint; the edit is refused instead.
+	ErrS3StoreConflict = errors.New("S3 store conflict")
 )
 
 // ServerEntry is one named index connection in the registry. DSN holds the
@@ -98,6 +107,20 @@ type ServerEntry struct {
 	// role); a local staging dir is used transiently. Non-secret (a bucket
 	// URL): unlike DSNs it is serialized to the masked HTTP responses.
 	ArchiveS3 string `yaml:"archive_s3,omitempty"`
+	// ── S3 store (#1575) ──
+	// S3Endpoint / S3PathStyle / S3Region say where this server's S3 buckets
+	// (ArchiveS3 and BaselineS3) live when that is not AWS or the process-wide
+	// BINTRAIL_S3_ENDPOINT: an S3-compatible store (MinIO, Wasabi), a pinned
+	// region, or both. Applied PER BUCKET at runtime (storage.BucketStore):
+	// every upload to and every DuckDB read of a bucket named here goes to
+	// this store, whichever server asked. Two servers naming the same bucket
+	// with different stores is refused (ErrS3StoreConflict). S3PathStyle is
+	// "", "path" or "vhost"; "" means path style, what MinIO needs. Locations,
+	// not secrets: serialized to the masked DTO. Keys are NOT here; the
+	// ambient credential chain signs for every store.
+	S3Endpoint  string `yaml:"s3_endpoint,omitempty"`
+	S3PathStyle string `yaml:"s3_path_style,omitempty"`
+	S3Region    string `yaml:"s3_region,omitempty"`
 	// MonitorDesired records the operator's intent to monitor this source.
 	// The supervisor reconciles running streams against it at boot and on
 	// every edit; nothing reads it until phase 3.
@@ -228,7 +251,113 @@ func LoadRegistry(path string) (*Registry, error) {
 		// Unset/zero version: a hand-written file; normalize on the next save.
 		r.file.Version = registryVersion
 	}
+	r.syncBucketStores()
 	return r, nil
+}
+
+// BucketStore builds the per-bucket store this entry's S3 settings describe.
+// The zero store (no endpoint, no region) means the ambient configuration.
+func (e ServerEntry) BucketStore() (storage.BucketStore, error) {
+	return storage.NewBucketStore(e.S3Endpoint, e.S3PathStyle, e.S3Region)
+}
+
+// s3Buckets lists the buckets this entry's S3 locations name, deduplicated.
+// A location that does not parse names no bucket: it is refused elsewhere or
+// ignored, and either way routes nothing.
+func (e ServerEntry) s3Buckets() []string {
+	var out []string
+	for _, loc := range []string{e.ArchiveS3, e.BaselineS3} {
+		if loc == "" {
+			continue
+		}
+		b, _, err := storage.ParseS3URL(loc)
+		if err != nil || b == "" || slices.Contains(out, b) {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// bucketStoreConflict is one bucket two entries route differently.
+type bucketStoreConflict struct {
+	Bucket, ServerA, ServerB string
+}
+
+// bucketStoresOf derives the bucket→store table from entries: every bucket
+// an entry with a store names gets that store. A bucket two entries route
+// DIFFERENTLY is a conflict and is left OUT of the table, so neither server
+// silently wins; Add/Update refuse that shape, so it can only come from a
+// hand-edited file. An entry whose store fields do not parse contributes
+// nothing (same reason, same origin). Entries with no store contribute
+// nothing and still get the table's routing for a bucket they share.
+func bucketStoresOf(entries []ServerEntry) (map[string]storage.BucketStore, []bucketStoreConflict) {
+	table := map[string]storage.BucketStore{}
+	owner := map[string]string{}
+	var conflicts []bucketStoreConflict
+	conflicted := map[string]bool{}
+	for _, e := range entries {
+		st, err := e.BucketStore()
+		if err != nil || st.IsZero() {
+			continue
+		}
+		for _, b := range e.s3Buckets() {
+			if conflicted[b] {
+				continue
+			}
+			if prev, ok := table[b]; ok && !prev.Equal(st) {
+				conflicts = append(conflicts, bucketStoreConflict{Bucket: b, ServerA: owner[b], ServerB: e.Name})
+				conflicted[b] = true
+				delete(table, b)
+				continue
+			}
+			table[b] = st
+			owner[b] = e.Name
+		}
+	}
+	return table, conflicts
+}
+
+// syncBucketStores publishes the registry's bucket→store table to the
+// storage package, where every S3 client and DuckDB session in this process
+// reads it. Called on load and after every successful save. Callers hold
+// r.mu (or own r exclusively, as LoadRegistry does).
+func (r *Registry) syncBucketStores() {
+	table, conflicts := bucketStoresOf(r.file.Servers)
+	for _, c := range conflicts {
+		slog.Warn("server registry: two servers route the same S3 bucket to different stores; neither applies and the bucket uses the ambient endpoint until one is changed",
+			"bucket", c.Bucket, "server_a", c.ServerA, "server_b", c.ServerB)
+	}
+	storage.SetBucketStores(table)
+}
+
+// checkBucketStore validates e's S3 store fields, normalizes them in place,
+// and refuses a store that disagrees with another entry's over a shared
+// bucket. selfID exempts the entry being updated. Callers hold r.mu.
+func (r *Registry) checkBucketStore(e *ServerEntry, selfID string) error {
+	st, err := e.BucketStore()
+	if err != nil {
+		return err
+	}
+	e.S3Endpoint = st.Endpoint.URL
+	e.S3PathStyle = strings.ToLower(strings.TrimSpace(e.S3PathStyle))
+	e.S3Region = st.Region
+	if st.IsZero() {
+		return nil
+	}
+	for _, b := range e.s3Buckets() {
+		for _, other := range r.file.Servers {
+			if other.ID == selfID || !slices.Contains(other.s3Buckets(), b) {
+				continue
+			}
+			ost, err := other.BucketStore()
+			if err != nil || ost.IsZero() || ost.Equal(st) {
+				continue
+			}
+			return fmt.Errorf("%w: bucket %q is also used by server %q, with a different endpoint, addressing style or region; a bucket has one store, so give both servers the same settings or use another bucket", ErrS3StoreConflict, b, other.Name)
+		}
+	}
+	return nil
 }
 
 // List returns a copy of the entries, in file order. The copy is shallow:
@@ -340,6 +469,9 @@ func (r *Registry) Add(e ServerEntry) (ServerEntry, error) {
 	if err := r.checkName(e.Name, ""); err != nil {
 		return ServerEntry{}, err
 	}
+	if err := r.checkBucketStore(&e, ""); err != nil {
+		return ServerEntry{}, err
+	}
 	id, err := genServerID()
 	if err != nil {
 		return ServerEntry{}, fmt.Errorf("generate server id: %w", err)
@@ -364,6 +496,9 @@ func (r *Registry) Update(e ServerEntry) error {
 		return ErrRegistryReadOnly
 	}
 	if err := r.checkName(e.Name, e.ID); err != nil {
+		return err
+	}
+	if err := r.checkBucketStore(&e, e.ID); err != nil {
 		return err
 	}
 	for i, old := range r.file.Servers {
@@ -428,6 +563,7 @@ func (r *Registry) checkName(name, selfID string) error {
 // directory 0700 — it holds DSN passwords (same class as shim.yaml/dump.key).
 func (r *Registry) save() error {
 	if r.path == "" {
+		r.syncBucketStores()
 		return nil // in-memory registry
 	}
 	data, err := yaml.Marshal(&r.file)
@@ -461,6 +597,7 @@ func (r *Registry) save() error {
 	if err := os.Rename(tmp.Name(), r.path); err != nil {
 		return fmt.Errorf("replace server registry %s: %w", r.path, err)
 	}
+	r.syncBucketStores()
 	return nil
 }
 

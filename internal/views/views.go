@@ -242,6 +242,11 @@ type Input struct {
 	// not a credential, and belongs in the file: a reader on another machine
 	// has no other way to learn that s3:// here does not mean AWS.
 	S3Endpoint storage.S3Endpoint
+	// BucketStores are the buckets that live in a store of their own,
+	// configured per server in the console (#1575). Each becomes a secret
+	// scoped to that bucket, chosen over the general one for paths under it.
+	// Locations only, like S3Endpoint: the credential chain stays the reader's.
+	BucketStores map[string]storage.BucketStore
 
 	// BaselineSource is the root the snapshot below was discovered under, for
 	// the header. BaselineSnapshot is that snapshot's timestamp.
@@ -400,7 +405,7 @@ func Generate(in Input) string {
 		// after it — including purely local state views, on a layout whose
 		// baselines are local and whose archives are on S3. The degrade
 		// documented below is about the ATTACH, not about credentials.
-		writeS3Preamble(&b, region, in.S3Endpoint, in.RegionAmbiguous)
+		writeS3Preamble(&b, region, in.S3Endpoint, in.RegionAmbiguous, in.BucketStores)
 	}
 	// The state views FIRST, then the ATTACH, then the events view that needs
 	// it.
@@ -936,7 +941,7 @@ func writeTimeZone(b *strings.Builder) {
 	b.WriteString("SET TimeZone = 'UTC';\n\n")
 }
 
-func writeS3Preamble(b *strings.Builder, region string, ep storage.S3Endpoint, ambiguousRegion bool) {
+func writeS3Preamble(b *strings.Builder, region string, ep storage.S3Endpoint, ambiguousRegion bool, stores map[string]storage.BucketStore) {
 	b.WriteString("-- S3 setup, mirroring what bintrail's own DuckDB sessions configure.\n")
 	if ep.Set() {
 		fmt.Fprintf(b, "-- s3:// paths here live in an S3-compatible store at %s, not in AWS.\n", ep.URL)
@@ -966,6 +971,17 @@ func writeS3Preamble(b *strings.Builder, region string, ep storage.S3Endpoint, a
 	secret := "CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain" +
 		duckdbutil.S3SecretClauses(region, ep) + ");\n"
 	b.WriteString(secret)
+	// Per-bucket stores, from duckdbutil's own renderer for the same reason
+	// as the settings above: the file must name the store this process reads
+	// each bucket from, and a second copy of that list would drift.
+	if scoped := duckdbutil.BucketStoreSecretStatements(stores); len(scoped) > 0 {
+		b.WriteString("-- Buckets that live in a store of their own (set per server in the console).\n")
+		b.WriteString("-- Each secret below is scoped to one bucket and is the one DuckDB picks for\n")
+		b.WriteString("-- paths under it; the general secret above covers every other bucket.\n")
+		for _, stmt := range scoped {
+			fmt.Fprintf(b, "%s;\n", stmt)
+		}
+	}
 	// The secret is TEMPORARY on purpose, and the file says so where the
 	// operator will look when a reopened database file cannot read S3. The
 	// PERSISTENT form is not offered: DuckDB resolves the credential chain at

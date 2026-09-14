@@ -6,9 +6,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/storage"
@@ -137,8 +139,9 @@ func EnableS3CredentialChainRegion(ctx context.Context, db *sql.DB, region strin
 		return err
 	}
 
+	stores := storage.BucketStores()
 	if os.Getenv("BINTRAIL_DUCKDB_NO_AWS_EXT") != "" {
-		return nil
+		return applyBucketStoresWithoutAWSExt(ctx, db, stores)
 	}
 	ensureWritableHome()
 	if _, err := db.ExecContext(ctx, "INSTALL aws; LOAD aws;"); err != nil {
@@ -149,7 +152,7 @@ func EnableS3CredentialChainRegion(ctx context.Context, db *sql.DB, region strin
 			slog.Warn("duckdb: aws extension unavailable and no AWS env keys set — profile/role credentials will NOT apply to this S3 read; expect an authentication failure",
 				"error", err)
 		}
-		return nil
+		return applyBucketStoresWithoutAWSExt(ctx, db, stores)
 	}
 	// The secret repeats the endpoint the settings applied above already carry.
 	// DuckDB's secrets manager can take precedence over a SET for matching
@@ -167,7 +170,111 @@ func EnableS3CredentialChainRegion(ctx context.Context, db *sql.DB, region strin
 		slog.Warn("duckdb: AWS credential chain resolved no usable credentials for S3 reads",
 			"error", err)
 	}
+	// One more secret per bucket that lives in its own store (#1575), scoped
+	// to that bucket: DuckDB picks the secret with the longest matching scope,
+	// so for s3://<bucket>/... this one wins over bintrail_s3_chain and over
+	// the SET GLOBAL routing above, which is exactly the precedence the
+	// per-server setting needs. Credentials are the same chain. The scope
+	// ends in '/': the match is a plain string prefix, so 's3://prod' would
+	// also capture every read of 's3://prod-archive' (measured).
+	for _, stmt := range BucketStoreSecretStatements(stores) {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			// The chain resolved nothing (DuckDB validates it at CREATE, and
+			// the general secret above failed the same way). Credentials stay
+			// best-effort, as they are for that secret; ROUTING does not:
+			// without a scoped secret the bucket's reads go to the ambient
+			// endpoint, and an unrouted read succeeds against the wrong
+			// store. So the bucket gets an endpoint-only secret instead, and
+			// the store's own authentication error is what surfaces.
+			slog.Warn("duckdb: AWS credential chain resolved no usable credentials for a bucket with its own store; routing it by endpoint alone",
+				"error", err)
+			return applyBucketStoresWithoutAWSExt(ctx, db, stores)
+		}
+	}
 	return nil
+}
+
+// applyBucketStoresWithoutAWSExt is the per-bucket routing for a session
+// that has no aws extension (the escape hatch, or an install that failed):
+// httpfs alone can hold a secret, with PROVIDER config, and the environment's
+// static keys are what plain httpfs would have used anyway. No keys is not a
+// reason to skip it: the endpoint is then right and the store's own
+// authentication error is what surfaces, instead of a read of the ambient
+// endpoint that succeeds with the wrong data. The keys live in this session's
+// memory only, never in a file.
+func applyBucketStoresWithoutAWSExt(ctx context.Context, db *sql.DB, stores map[string]storage.BucketStore) error {
+	stmts := bucketStoreConfigSecretStatements(stores,
+		os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), os.Getenv("AWS_SESSION_TOKEN"))
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("route DuckDB S3 reads for a bucket with its own store (is httpfs loaded?): %w", err)
+		}
+	}
+	return nil
+}
+
+// BucketStoreSecretStatements renders one credential_chain secret per bucket
+// store, scoped to its bucket, in bucket order. Shared with the downloadable
+// views.sql, which must configure exactly what this process configures, and
+// which carries no keys: the chain resolves them where the file runs. nil for
+// no stores.
+func BucketStoreSecretStatements(stores map[string]storage.BucketStore) []string {
+	return renderBucketStoreSecrets(stores, ", PROVIDER credential_chain")
+}
+
+// bucketStoreConfigSecretStatements is the same set of secrets with PROVIDER
+// config and the given static keys (each omitted when empty), for a session
+// without the aws extension.
+func bucketStoreConfigSecretStatements(stores map[string]storage.BucketStore, keyID, secret, token string) []string {
+	provider := ", PROVIDER config"
+	if keyID != "" {
+		provider += ", KEY_ID " + sqlQuote(keyID)
+	}
+	if secret != "" {
+		provider += ", SECRET " + sqlQuote(secret)
+	}
+	if token != "" {
+		provider += ", SESSION_TOKEN " + sqlQuote(token)
+	}
+	return renderBucketStoreSecrets(stores, provider)
+}
+
+func renderBucketStoreSecrets(stores map[string]storage.BucketStore, provider string) []string {
+	if len(stores) == 0 {
+		return nil
+	}
+	buckets := make([]string, 0, len(stores))
+	for b := range stores {
+		buckets = append(buckets, b)
+	}
+	sort.Strings(buckets)
+	stmts := make([]string, 0, len(buckets))
+	for _, b := range buckets {
+		st := stores[b]
+		stmts = append(stmts, "CREATE OR REPLACE SECRET "+bucketSecretName(b)+" (TYPE s3"+provider+
+			", SCOPE "+sqlQuote("s3://"+b+"/")+S3SecretClauses(st.Region, st.Endpoint)+")")
+	}
+	return stmts
+}
+
+// bucketSecretName is a stable identifier for a bucket's secret: the bucket
+// with everything but [a-z0-9] folded to '_' (bucket names may carry dots
+// and hyphens, identifiers may not), plus a short hash so "a-b" and "a.b"
+// do not collide.
+func bucketSecretName(bucket string) string {
+	var b strings.Builder
+	b.WriteString("bintrail_s3_bucket_")
+	for _, r := range bucket {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	h := fnv.New32a()
+	h.Write([]byte(bucket))
+	fmt.Fprintf(&b, "_%08x", h.Sum32())
+	return b.String()
 }
 
 // applyS3Routing pins WHERE this session's s3:// requests go, as session
