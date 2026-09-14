@@ -90,8 +90,26 @@ func TestRegistryS3Store_conflictRefused(t *testing.T) {
 	}
 	// Same bucket, NO store on the newcomer: accepted; it gets the bucket's
 	// routing, which is the documented per-bucket rule.
-	if _, err := r.Add(ServerEntry{Name: "C", DSN: "u:p@tcp(h:3306)/c", ArchiveS3: "s3://shared/c/"}); err != nil {
-		t.Fatalf("a store-less server on a routed bucket must be accepted: %v", err)
+	// A server with no store reads the bucket from the ambient endpoint, so
+	// it cannot join a bucket that has a store.
+	_, err = r.Add(ServerEntry{Name: "C", DSN: "u:p@tcp(h:3306)/c", ArchiveS3: "s3://shared/c/"})
+	if !errors.Is(err, ErrS3StoreConflict) || !strings.Contains(err.Error(), `"A"`) {
+		t.Fatalf("a store-less server on a routed bucket: err = %v, want ErrS3StoreConflict naming A", err)
+	}
+	t.Log(err)
+
+	// The other order: a store on a bucket a store-less server already uses
+	// would take that server over, and deleting the store would hand it back.
+	if _, err := r.Add(ServerEntry{Name: "E", DSN: "u:p@tcp(h:3306)/e", ArchiveS3: "s3://plain/e/"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.Add(ServerEntry{Name: "F", DSN: "u:p@tcp(h:3306)/f", BaselineS3: "s3://plain/f/", S3Endpoint: "http://minio:9000"})
+	if !errors.Is(err, ErrS3StoreConflict) || !strings.Contains(err.Error(), `"E"`) {
+		t.Fatalf("a store on a bucket a store-less server uses: err = %v, want ErrS3StoreConflict naming E", err)
+	}
+	t.Log(err)
+	if _, ok := storage.BucketStoreFor("plain"); ok {
+		t.Error("the refused store was published")
 	}
 	// A different bucket is nobody's business.
 	if _, err := r.Add(ServerEntry{Name: "D", DSN: "u:p@tcp(h:3306)/d", ArchiveS3: "s3://other/d/", S3Endpoint: "https://s3.wasabisys.com", S3Region: "eu-central-1"}); err != nil {
@@ -179,6 +197,69 @@ func TestRegistryS3Store_syncsTheTable(t *testing.T) {
 	if st, ok := storage.BucketStoreFor("own"); !ok || st.Region != "eu-central-1" {
 		t.Errorf("the unconflicted bucket lost its store: %+v, %v", st, ok)
 	}
+
+	mixed := "version: 1\nservers:\n" +
+		"  - id: bbbbbbbbbbbbbbbb\n    name: B\n    index_dsn: u:p@tcp(h:3306)/b\n    archive_s3: s3://mixed/b/\n" +
+		"  - id: aaaaaaaaaaaaaaaa\n    name: A\n    index_dsn: u:p@tcp(h:3306)/a\n    archive_s3: s3://mixed/a/\n    s3_endpoint: http://minio:9000\n"
+	mpath := filepath.Join(t.TempDir(), "mixed.yaml")
+	if err := os.WriteFile(mpath, []byte(mixed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRegistry(mpath); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := storage.BucketStoreFor("mixed"); ok {
+		t.Error("a bucket a store-less server also names must not be routed to the other server's store")
+	}
+	// The other order: the store first, the store-less server second.
+	reversed := "version: 1\nservers:\n" +
+		"  - id: aaaaaaaaaaaaaaaa\n    name: A\n    index_dsn: u:p@tcp(h:3306)/a\n    archive_s3: s3://mixed/a/\n    s3_endpoint: http://minio:9000\n" +
+		"  - id: bbbbbbbbbbbbbbbb\n    name: B\n    index_dsn: u:p@tcp(h:3306)/b\n    archive_s3: s3://mixed/b/\n"
+	rpath := filepath.Join(t.TempDir(), "reversed.yaml")
+	if err := os.WriteFile(rpath, []byte(reversed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRegistry(rpath); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := storage.BucketStoreFor("mixed"); ok {
+		t.Error("store first, store-less second: the bucket must not be routed either")
+	}
+}
+
+func TestRegistryS3Store_storeNeedsItsOwnLocation(t *testing.T) {
+	clearStores(t)
+	r, err := LoadRegistry("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.Add(ServerEntry{Name: "nowhere", DSN: "u:p@tcp(h:3306)/n", S3Endpoint: "http://minio:9000"})
+	if !errors.Is(err, storage.ErrBucketStoreConfig) || !strings.Contains(err.Error(), "Archive to S3") {
+		t.Fatalf("a store with no location of its own: err = %v, want ErrBucketStoreConfig naming the fields to set", err)
+	}
+	t.Log(err)
+	_, err = r.Add(ServerEntry{Name: "malformed", DSN: "u:p@tcp(h:3306)/m", ArchiveS3: "s3://ok/a/", BaselineS3: "bucket/b/", S3Region: "eu-west-1"})
+	if !errors.Is(err, storage.ErrBucketStoreConfig) || !strings.Contains(err.Error(), `"bucket/b/"`) {
+		t.Fatalf("a store beside a malformed location: err = %v, want ErrBucketStoreConfig naming it", err)
+	}
+	t.Log(err)
+	if r.Len() != 0 {
+		t.Fatal("a refused entry was stored")
+	}
+	if _, err := r.Add(ServerEntry{Name: "plain", DSN: "u:p@tcp(h:3306)/p"}); err != nil {
+		t.Fatalf("a server with no store needs no location: %v", err)
+	}
+	a, err := r.Add(ServerEntry{Name: "a", DSN: "u:p@tcp(h:3306)/a", ArchiveS3: "s3://arch/a/", S3Endpoint: "http://minio:9000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.ArchiveS3 = ""
+	if err := r.Update(a); !errors.Is(err, storage.ErrBucketStoreConfig) {
+		t.Fatalf("clearing the only location under a store: err = %v, want ErrBucketStoreConfig", err)
+	}
+	if _, ok := storage.BucketStoreFor("arch"); !ok {
+		t.Error("the refused update unrouted the bucket")
+	}
 }
 
 // A hand-edited file with an invalid store: the entry loads, the store is
@@ -187,7 +268,8 @@ func TestRegistryS3Store_syncsTheTable(t *testing.T) {
 // not held hostage by a typo in the YAML. An edit that touches it is refused.
 func TestRegistryS3Store_invalidHandEditDoesNotBlockUnrelatedSaves(t *testing.T) {
 	clearStores(t)
-	file := "version: 1\nservers:\n  - id: aaaaaaaaaaaaaaaa\n    name: A\n    index_dsn: u:p@tcp(h:3306)/a\n    archive_s3: s3://arch/a/\n    s3_endpoint: minio:9000\n"
+	file := "version: 1\nservers:\n  - id: aaaaaaaaaaaaaaaa\n    name: A\n    index_dsn: u:p@tcp(h:3306)/a\n    archive_s3: s3://arch/a/\n    s3_endpoint: minio:9000\n" +
+		"  - id: bbbbbbbbbbbbbbbb\n    name: B\n    index_dsn: u:p@tcp(h:3306)/b\n    archive_s3: s3://arch/b/\n    s3_endpoint: http://minio:9000\n"
 	path := filepath.Join(t.TempDir(), "servers.yaml")
 	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
 		t.Fatal(err)
@@ -201,7 +283,7 @@ func TestRegistryS3Store_invalidHandEditDoesNotBlockUnrelatedSaves(t *testing.T)
 		t.Fatal("entry did not load")
 	}
 	if _, routed := storage.BucketStoreFor("arch"); routed {
-		t.Error("an invalid store must not route the bucket")
+		t.Error("an invalid store counts as no store, so the bucket it shares with B's store must not be routed")
 	}
 	a.MonitorDesired = true
 	if err := r.Update(a); err != nil {
@@ -215,6 +297,10 @@ func TestRegistryS3Store_invalidHandEditDoesNotBlockUnrelatedSaves(t *testing.T)
 	a.ArchiveS3 = "s3://other/a/" // a new bucket for the same (invalid) store: checked too
 	if err := r.Update(a); !errors.Is(err, storage.ErrBucketStoreConfig) {
 		t.Fatalf("an edit changing the buckets must re-validate the store: err = %v", err)
+	}
+	_, err = r.Add(ServerEntry{Name: "C", DSN: "u:p@tcp(h:3306)/c", ArchiveS3: "s3://arch/c/", S3Endpoint: "http://minio:9000"})
+	if !errors.Is(err, ErrS3StoreConflict) || !strings.Contains(err.Error(), `"A"`) {
+		t.Fatalf("a store on a bucket a server with an invalid store names: err = %v, want ErrS3StoreConflict naming A", err)
 	}
 }
 
@@ -243,6 +329,14 @@ func TestServersAPI_s3Store(t *testing.T) {
 	}
 	if _, ok := storage.BucketStoreFor("shared"); !ok {
 		t.Error("the create did not publish the store")
+	}
+	rec, body = doServersReq(t, srv, "POST", "/api/servers",
+		`{"name":"t","host":"h","port":"3306","user":"u","password":"p","dbname":"t","baseline_s3":" s3://trimmed/t/ ","s3_region":"eu-west-1"}`)
+	if rec.Code != 201 || !strings.Contains(string(body), `"baseline_s3":"s3://trimmed/t/"`) {
+		t.Errorf("a padded Backups S3 location: %d %s, want 201 with it trimmed", rec.Code, body)
+	}
+	if _, ok := storage.BucketStoreFor("trimmed"); !ok {
+		t.Error("a padded Backups S3 location left its bucket unrouted")
 	}
 
 	rec, body = doServersReq(t, srv, "POST", "/api/servers",

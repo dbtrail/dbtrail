@@ -384,7 +384,9 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   `eu-central-1` for Wasabi. Locations only, no keys: the daemon's ambient
   credential chain signs for every store. Applied **per bucket** to the
   Archive and Backups buckets, for uploads and DuckDB reads alike; two
-  servers naming one bucket with different stores is refused (422). Details
+  servers naming one bucket with different stores, one of them possibly
+  none, is refused (422), and a store needs this server's own Archive or
+  Backups location. Details
   in [upload.md → A store per server](upload.md#a-store-per-server-from-the-console).
 - Registry fields: `source_dsn` (replication credentials — a secret with the
   same masking/keep-password discipline as the index DSN; `source_dsn: ""`

@@ -284,41 +284,51 @@ type bucketStoreConflict struct {
 	Bucket, ServerA, ServerB string
 }
 
-// bucketStoresOf derives the bucket→store table from entries: every bucket
-// an entry with a store names gets that store. A bucket two entries route
-// DIFFERENTLY is a conflict and is left OUT of the table, so neither server
-// silently wins; Add/Update refuse that shape, so it can only come from a
-// hand-edited file. An entry whose store fields do not parse contributes
-// nothing (same reason, same origin). Entries with no store contribute
-// nothing and still get the table's routing for a bucket they share.
+// bucketStoresOf derives the bucket→store table from entries. A bucket has
+// ONE store, and "no store" counts as one (the ambient endpoint): a bucket two
+// entries read from different stores, a store-less entry included, is a
+// conflict and is left OUT of the table, so no server silently takes another
+// over. Add/Update refuse that shape, so it can only come from a hand-edited
+// file. An entry whose store fields do not parse counts as store-less (its
+// buckets use the ambient endpoint, as its warning says); a store naming no
+// bucket of its own is reported and routes nothing.
 func bucketStoresOf(entries []ServerEntry) (map[string]storage.BucketStore, []bucketStoreConflict) {
-	table := map[string]storage.BucketStore{}
+	seen := map[string]storage.BucketStore{}
 	owner := map[string]string{}
-	var conflicts []bucketStoreConflict
 	conflicted := map[string]bool{}
+	var conflicts []bucketStoreConflict
 	for _, e := range entries {
 		st, err := e.BucketStore()
 		if err != nil {
 			// Only a hand-edited file gets here: Add/Update refuse the shape.
 			slog.Warn("server registry: this server's S3 store settings are invalid and are ignored; its buckets use the ambient endpoint",
 				"server", e.Name, "error", err)
-			continue
+			st = storage.BucketStore{}
 		}
-		if st.IsZero() {
-			continue
+		buckets := e.s3Buckets()
+		if !st.IsZero() && len(buckets) == 0 {
+			slog.Warn("server registry: this server has S3 store settings but no Archive to S3 or Backups S3 location of its own; the store routes nothing",
+				"server", e.Name)
 		}
-		for _, b := range e.s3Buckets() {
+		for _, b := range buckets {
 			if conflicted[b] {
 				continue
 			}
-			if prev, ok := table[b]; ok && !prev.Equal(st) {
-				conflicts = append(conflicts, bucketStoreConflict{Bucket: b, ServerA: owner[b], ServerB: e.Name})
-				conflicted[b] = true
-				delete(table, b)
+			if prev, ok := seen[b]; ok {
+				if !prev.Equal(st) {
+					conflicts = append(conflicts, bucketStoreConflict{Bucket: b, ServerA: owner[b], ServerB: e.Name})
+					conflicted[b] = true
+				}
 				continue
 			}
-			table[b] = st
+			seen[b] = st
 			owner[b] = e.Name
+		}
+	}
+	table := map[string]storage.BucketStore{}
+	for b, st := range seen {
+		if !conflicted[b] && !st.IsZero() {
+			table[b] = st
 		}
 	}
 	return table, conflicts
@@ -331,7 +341,7 @@ func bucketStoresOf(entries []ServerEntry) (map[string]storage.BucketStore, []bu
 func (r *Registry) syncBucketStores() {
 	table, conflicts := bucketStoresOf(r.file.Servers)
 	for _, c := range conflicts {
-		slog.Warn("server registry: two servers route the same S3 bucket to different stores; neither applies and the bucket uses the ambient endpoint until one is changed",
+		slog.Warn("server registry: two servers read the same S3 bucket from different stores (one of them may have no store set); the bucket uses the ambient endpoint until they agree",
 			"bucket", c.Bucket, "server_a", c.ServerA, "server_b", c.ServerB)
 	}
 	storage.SetBucketStores(table)
@@ -346,8 +356,17 @@ func storeInputsChanged(old, e ServerEntry) bool {
 }
 
 // checkBucketStore validates e's S3 store fields, normalizes them in place,
-// and refuses a store that disagrees with another entry's over a shared
-// bucket. selfID exempts the entry being updated. Callers hold r.mu.
+// and refuses a shape that would save and then route a bucket somewhere its
+// servers do not agree on. selfID exempts the entry being updated. Callers
+// hold r.mu. Three refusals:
+//   - a store with no S3 location of its own routes nothing. A location-less
+//     server's Backups read the daemon's --baseline-s3 at run time, and that
+//     bucket is not this server's to route;
+//   - a store beside a location that does not parse would route only the
+//     half that does;
+//   - a bucket another server reads from a different store, "no store"
+//     included: a store-less server on a routed bucket would be taken over,
+//     then handed back when the store's server is deleted.
 func (r *Registry) checkBucketStore(e *ServerEntry, selfID string) error {
 	st, err := e.BucketStore()
 	if err != nil {
@@ -356,8 +375,18 @@ func (r *Registry) checkBucketStore(e *ServerEntry, selfID string) error {
 	e.S3Endpoint = st.Endpoint.URL
 	e.S3PathStyle = strings.ToLower(strings.TrimSpace(e.S3PathStyle))
 	e.S3Region = st.Region
-	if st.IsZero() {
-		return nil
+	if !st.IsZero() {
+		for _, loc := range []struct{ field, value string }{{"Archive to S3", e.ArchiveS3}, {"Backups S3", e.BaselineS3}} {
+			if loc.value == "" {
+				continue
+			}
+			if _, _, err := storage.ParseS3URL(loc.value); err != nil {
+				return fmt.Errorf("%w: the %s location %q is not an s3://bucket/prefix/ URL, so the S3 store cannot apply to it", storage.ErrBucketStoreConfig, loc.field, loc.value)
+			}
+		}
+		if len(e.s3Buckets()) == 0 {
+			return fmt.Errorf("%w: an S3 store applies to this server's own buckets; set its Archive to S3 or Backups S3 location, or clear the S3 store fields", storage.ErrBucketStoreConfig)
+		}
 	}
 	for _, b := range e.s3Buckets() {
 		for _, other := range r.file.Servers {
@@ -365,13 +394,30 @@ func (r *Registry) checkBucketStore(e *ServerEntry, selfID string) error {
 				continue
 			}
 			ost, err := other.BucketStore()
-			if err != nil || ost.IsZero() || ost.Equal(st) {
+			if err != nil {
+				ost = storage.BucketStore{} // loads as store-less, see bucketStoresOf
+			}
+			if ost.Equal(st) {
 				continue
 			}
-			return fmt.Errorf("%w: bucket %q is also used by server %q, with a different endpoint, addressing style or region; a bucket has one store, so give both servers the same settings or use another bucket", ErrS3StoreConflict, b, other.Name)
+			return fmt.Errorf("%w: bucket %q is also used by server %q, %s; a bucket has one store, so give both servers the same S3 store settings or use another bucket",
+				ErrS3StoreConflict, b, other.Name, storeDifference(st, ost))
 		}
 	}
 	return nil
+}
+
+// storeDifference says how other's store differs from this one's, in the
+// server form's words.
+func storeDifference(this, other storage.BucketStore) string {
+	switch {
+	case other.IsZero():
+		return "which has no S3 store set and reads it from AWS or the process-wide endpoint"
+	case this.IsZero():
+		return "which reads it from its own S3 store"
+	default:
+		return "with a different S3 endpoint, addressing or region"
+	}
 }
 
 // List returns a copy of the entries, in file order. The copy is shallow:

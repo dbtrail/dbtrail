@@ -168,9 +168,16 @@ every store. What the setting does:
 - It applies **per bucket**. Every bucket the server's `Archive to S3` and
   Backups S3 locations name is routed to that store, for the SDK uploads
   (rotation's archiving, baseline upload and prune) and for every DuckDB
-  read alike, whichever server asked for it. A bucket has one store: two
-  servers naming the same bucket with different settings is refused (HTTP
-  422), a server with no store on a routed bucket follows the bucket.
+  read alike, whichever server asked for it. A bucket has one store, and
+  "no store" counts as one: two servers naming the same bucket with
+  different settings is refused (HTTP 422), including when one of them has
+  no store set, since that one reads the bucket from AWS or the process-wide
+  endpoint.
+- A store needs the server's **own** `Archive to S3` or Backups S3 location.
+  A store with neither is refused, and so is one beside a location that is
+  not an `s3://bucket/prefix/` URL. A server with no Backups location of its
+  own reads the daemon's `--baseline-s3`; that bucket keeps the process-wide
+  behaviour, whatever the server's store says.
 - The DuckDB half gets one secret **scoped to the bucket**
   (`SCOPE 's3://<bucket>/'`), which DuckDB picks over the general one for
   paths under it. `views.sql` carries the same scoped secrets, still
@@ -180,7 +187,8 @@ every store. What the setting does:
   A style without an endpoint is refused. `S3 region` alone (no endpoint)
   is allowed: it pins the signing region for a bucket outside the default
   one on AWS. MinIO ignores the region; Wasabi wants the one in its
-  endpoint's name.
+  endpoint's name. With an endpoint and no region, uploads and DuckDB reads
+  both sign as `us-east-1`.
 - Buckets without a store keep the process-wide behaviour above.
 - Keys per server and a `Test connection` that exercises the store are not
   part of this: the per-server setting covers where the store is, the

@@ -61,6 +61,14 @@ func (s *Server) archiveRegion(ctx context.Context, in views.Input) (region stri
 		missed bool
 	)
 	for _, b := range buckets {
+		// A bucket with its own store (#1575) is signed by its scoped secret,
+		// which always names a region, so it has no say in this pin. Asking
+		// would go to the ambient endpoint (AWS, for a MinIO bucket), and a
+		// cached answer from before the store was set would keep speaking for
+		// it.
+		if _, routed := storage.BucketStoreFor(b); routed {
+			continue
+		}
 		r, ok := s.cachedBucketRegion(ctx, &cfg, &loaded, b)
 		if !ok {
 			// Contributes neither a pin nor an ambiguity claim: an

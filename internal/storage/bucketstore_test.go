@@ -263,3 +263,18 @@ func TestDetectBucketRegion_bucketStore(t *testing.T) {
 		t.Errorf("untyped: (%q, %v), want (us-east-1, false)", r, ok)
 	}
 }
+
+// The SDK half and the DuckDB half must sign a store's requests with the same
+// region; SigningRegion is the one answer both read.
+func TestBucketStore_SigningRegion(t *testing.T) {
+	for _, tc := range []struct{ endpoint, region, want string }{
+		{"http://minio:9000", "", "us-east-1"},
+		{"http://minio:9000", "eu-central-1", "eu-central-1"},
+		{"", "ap-south-1", "ap-south-1"},
+		{"", "", ""},
+	} {
+		if got := mustStore(t, tc.endpoint, "", tc.region).SigningRegion(); got != tc.want {
+			t.Errorf("endpoint=%q region=%q: SigningRegion = %q, want %q", tc.endpoint, tc.region, got, tc.want)
+		}
+	}
+}

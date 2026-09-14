@@ -3,6 +3,8 @@ package duckdbutil
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,7 +46,7 @@ func TestBucketStoreSecretStatements(t *testing.T) {
 		"CREATE OR REPLACE SECRET bintrail_s3_bucket_pinned_" + hashOf("pinned") +
 			" (TYPE s3, PROVIDER credential_chain, SCOPE 's3://pinned/', REGION 'ap-south-1')",
 		"CREATE OR REPLACE SECRET bintrail_s3_bucket_zeta_minio_" + hashOf("zeta.minio") +
-			" (TYPE s3, PROVIDER credential_chain, SCOPE 's3://zeta.minio/', ENDPOINT 'minio:9000', URL_STYLE 'path', USE_SSL false)",
+			" (TYPE s3, PROVIDER credential_chain, SCOPE 's3://zeta.minio/', REGION 'us-east-1', ENDPOINT 'minio:9000', URL_STYLE 'path', USE_SSL false)",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d statements, want %d: %q", len(got), len(want), got)
@@ -271,5 +273,100 @@ func TestEnableS3CredentialChain_bucketStoreNeedsHTTPFS(t *testing.T) {
 	_ = db.QueryRow("SELECT count(*) FROM duckdb_secrets() WHERE name = ?", bucketSecretName("minio-b")).Scan(&n)
 	if err == nil && n == 0 {
 		t.Fatal("no error and no scoped secret: the bucket's reads would go to the ambient endpoint")
+	}
+}
+
+// One bucket whose credential-chain secret fails falls back alone: the
+// buckets whose secret was created keep it.
+func TestApplyBucketStoreSecrets_fallsBackPerBucket(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sup3rs3cret")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	stores := map[string]storage.BucketStore{
+		"good": store(t, "http://minio:9000", "", ""),
+		"bad":  store(t, "https://s3.wasabisys.com", "", "eu-central-1"),
+	}
+	var ran []string
+	exec := func(_ context.Context, stmt string) error {
+		if strings.Contains(stmt, "credential_chain") && strings.Contains(stmt, "'s3://bad/'") {
+			return errors.New("Secret Validation Failure")
+		}
+		ran = append(ran, stmt)
+		return nil
+	}
+	if err := applyBucketStoreSecrets(context.Background(), exec, stores, true); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(ran, "\n")
+	if len(ran) != 2 {
+		t.Fatalf("ran %d statements, want one per bucket:\n%s", len(ran), got)
+	}
+	for _, want := range []string{
+		"PROVIDER credential_chain, SCOPE 's3://good/'",
+		"PROVIDER config, KEY_ID 'AKIAEXAMPLE', SECRET 'sup3rs3cret', SCOPE 's3://bad/'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("no statement carries %q:\n%s", want, got)
+		}
+	}
+}
+
+// DuckDB echoes a statement it cannot parse, and the fallback statement
+// carries the environment's keys: the error must name the bucket, never them.
+func TestApplyBucketStoreSecrets_errorNeverCarriesTheKeys(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sup3rs3cret")
+	t.Setenv("AWS_SESSION_TOKEN", "tok3n")
+	stores := map[string]storage.BucketStore{"b": store(t, "http://minio:9000", "", "")}
+	exec := func(_ context.Context, stmt string) error {
+		return fmt.Errorf("Parser Error: syntax error at or near %q", stmt)
+	}
+	err := applyBucketStoreSecrets(context.Background(), exec, stores, true)
+	if err == nil {
+		t.Fatal("a fallback that cannot be created must fail the session")
+	}
+	t.Log(err)
+	for _, leak := range []string{"AKIAEXAMPLE", "sup3rs3cret", "tok3n"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("the error carries %s: %v", leak, err)
+		}
+	}
+	if !strings.Contains(err.Error(), `"b"`) {
+		t.Errorf("the error does not name the bucket: %v", err)
+	}
+}
+
+// Measured: a scoped secret with no REGION signs with whatever s3_region the
+// session has, while the SDK signs the same store's uploads as us-east-1.
+func TestBucketStoreSecret_signsLikeTheSDK_DuckDB(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := LoadHTTPFS(ctx, db); err != nil {
+		t.Skip("httpfs unavailable (offline host)")
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET GLOBAL s3_region='ap-south-1'"); err != nil {
+		t.Fatal(err)
+	}
+	stores := map[string]storage.BucketStore{"minio-b": store(t, "http://minio:9000", "", "")}
+	for _, stmt := range bucketStoreConfigSecretStatements(stores, "k", "s", "") {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var desc string
+	if err := conn.QueryRowContext(ctx, "SELECT secret_string FROM duckdb_secrets() WHERE name = ?", bucketSecretName("minio-b")).Scan(&desc); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(desc, "region=us-east-1") {
+		t.Errorf("the scoped secret does not sign as us-east-1, the region the same store's uploads sign with: %s", desc)
 	}
 }

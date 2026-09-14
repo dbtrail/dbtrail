@@ -279,7 +279,7 @@ func TestGenerate_bucketStores(t *testing.T) {
 	in.BucketStores = stores
 	got := Generate(in)
 	for _, want := range []string{
-		"SCOPE 's3://minio-b/', ENDPOINT 'minio:9000', URL_STYLE 'path', USE_SSL false);",
+		"SCOPE 's3://minio-b/', REGION 'us-east-1', ENDPOINT 'minio:9000', URL_STYLE 'path', USE_SSL false);",
 		"SCOPE 's3://pinned/', REGION 'ap-south-1');",
 		"PROVIDER credential_chain, SCOPE",
 		"-- Buckets that live in a store of their own",

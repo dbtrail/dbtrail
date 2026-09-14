@@ -103,6 +103,19 @@ func (s BucketStore) Equal(o BucketStore) bool {
 	return s.Endpoint.URL == o.Endpoint.URL && s.Endpoint.PathStyle == o.Endpoint.PathStyle && s.Region == o.Region
 }
 
+// SigningRegion is the region requests for this bucket are signed with, the
+// ONE answer both halves use: the SDK client and the DuckDB scoped secret.
+// The typed region when there is one; us-east-1 for an endpoint with none (a
+// custom store needs SOME region, and MinIO accepts any); "" for no store.
+// Measured: a DuckDB secret left without REGION signs with the session's
+// s3_region instead, so the two halves would sign differently.
+func (s BucketStore) SigningRegion() string {
+	if s.Region == "" && s.Endpoint.Set() {
+		return "us-east-1"
+	}
+	return s.Region
+}
+
 // NormalizeEndpointURL is the validation BINTRAIL_S3_ENDPOINT gets, exported
 // so a store typed into the console is held to the same shape:
 // scheme://host[:port], no path, query or credentials, trailing slash dropped.
@@ -163,12 +176,9 @@ func resolveBucketRouting(bucket, region string) (effectiveRegion string, ep *S3
 		return region, nil
 	}
 	if region == "" {
-		region = store.Region
+		region = store.SigningRegion()
 	}
 	if store.Endpoint.Set() {
-		if region == "" {
-			region = "us-east-1"
-		}
 		e := store.Endpoint
 		return region, &e
 	}
