@@ -627,6 +627,7 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 	// and a stale true there is a skipped backup.
 	st.Published = foldPublished(err)
 	st.TooManyChanges = errors.Is(err, reconstruct.ErrTouchedRowBudget)
+	st.DiskRefused = errors.Is(err, errFoldDiskFull)
 	if err != nil {
 		st.State = "failed"
 		st.LastError = err.Error()
@@ -813,6 +814,9 @@ func countReuse(reports []*reconstruct.TableReport) (tally reuseTally) {
 // setting, because asking for reuse is not getting it: a table with changes,
 // with a capture gap, or on the S3 path is folded anyway.
 func (s *baselineSupervisor) foldSnapshot(req refreshRequest, at time.Time, tableList []string) (tables, refused int, reuse reuseTally, err error) {
+	if err := checkFoldDisk(s.ctx, baselineFoldSource(req), req.BaselineDir, at, tableList); err != nil {
+		return 0, 0, reuseTally{}, err
+	}
 	reports, failures, runErr := foldTables(s.ctx, refreshFoldConfig(req, at, tableList))
 	return foldOutcome(tableList, reports, failures, runErr)
 }

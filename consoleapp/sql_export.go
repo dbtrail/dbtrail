@@ -901,6 +901,9 @@ func (s *baselineSupervisor) executeSQLExport(req console.SQLExportRequest, dir 
 		return 0, 0, 0, fmt.Errorf("create build directory: %w", err)
 	}
 
+	if err := checkFoldDisk(s.ctx, req.BaselineSrc, dir, req.At, tableList); err != nil {
+		return 0, 0, 0, err
+	}
 	reports, _, runErr := foldTables(s.ctx, sqlExportFoldConfig(req, dir, tableList))
 	for _, rep := range reports {
 		rows += rep.RowsWritten

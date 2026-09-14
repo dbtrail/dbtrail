@@ -833,3 +833,10 @@ func humanBytes(b float64) string {
 	}
 	return fmt.Sprintf("%.1f EB", v/unit)
 }
+
+// DiskFree reports the bytes available to non-root users on the filesystem
+// holding path, the probe the capacity card uses. Exported for the backup
+// disk preflight (#1614), so there is one statfs in the tree.
+func DiskFree(path string) (uint64, error) {
+	return diskFree(path)
+}
