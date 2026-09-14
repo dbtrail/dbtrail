@@ -329,6 +329,15 @@ func captureGapLines(in mergeInput) string {
 // re-dump is the only correct answer, so the message says so instead of
 // offering a flag.
 func checkBaselineSchemaCurrent(createSQL string, tm *metadata.TableMeta, schema, table string) error {
+	return checkBaselineSchema(createSQL, tm, schema, table, true)
+}
+
+// checkBaselineSchema is checkBaselineSchemaCurrent with the type comparison
+// optional. The Iceberg export passes false: it never publishes the carried
+// CREATE TABLE, and it compares the types it maps to Iceberg itself
+// (icebergexport.sameTableTypes), so a type change that does not move the
+// exported value (an ENUM relabel, a longer VARCHAR) must not refuse there.
+func checkBaselineSchema(createSQL string, tm *metadata.TableMeta, schema, table string, compareTypes bool) error {
 	if strings.TrimSpace(createSQL) == "" || tm == nil {
 		// A missing CREATE TABLE is already refused upstream with its own
 		// message; a nil TableMeta cannot happen on this path (the resolver
@@ -339,20 +348,27 @@ func checkBaselineSchemaCurrent(createSQL string, tm *metadata.TableMeta, schema
 	if err != nil {
 		return fmt.Errorf("parse the baseline's embedded CREATE TABLE for %s.%s: %w", schema, table, err)
 	}
-	inBaseline := make(map[string]bool, len(cols))
+	inBaseline := make(map[string]baseline.Column, len(cols))
 	for _, c := range cols {
-		inBaseline[strings.ToLower(c.Name)] = true
+		inBaseline[strings.ToLower(c.Name)] = c
 	}
 	current := make(map[string]bool, len(tm.Columns))
+	// retyped is in the snapshot's ordinal order, which is already stable.
+	var retyped []string
 	for _, c := range tm.Columns {
 		if c.IsGenerated {
 			continue
 		}
 		current[strings.ToLower(c.Name)] = true
+		if b, ok := inBaseline[strings.ToLower(c.Name)]; ok && compareTypes {
+			if was, now, changed := columnTypeChanged(b.DeclaredType, c); changed {
+				retyped = append(retyped, fmt.Sprintf("%s (%s -> %s)", c.Name, was, now))
+			}
+		}
 	}
 	var added, dropped []string
 	for name := range current {
-		if !inBaseline[name] {
+		if _, ok := inBaseline[name]; !ok {
 			added = append(added, name)
 		}
 	}
@@ -361,17 +377,70 @@ func checkBaselineSchemaCurrent(createSQL string, tm *metadata.TableMeta, schema
 			dropped = append(dropped, name)
 		}
 	}
-	if len(added) == 0 && len(dropped) == 0 {
+	if len(added) == 0 && len(dropped) == 0 && len(retyped) == 0 {
 		return nil
 	}
 	sort.Strings(added)
 	sort.Strings(dropped)
 	return fmt.Errorf(
-		"%s.%s changed shape since its baseline was taken (added since: %s; gone since: %s) — "+
-			"a snapshot emitted from it would carry the OLD CREATE TABLE forward and project every row onto the old columns, "+
+		"%s.%s changed shape since its baseline was taken (added since: %s; gone since: %s; type changed since: %s) — "+
+			"a snapshot emitted from it would carry the OLD CREATE TABLE forward and project every row onto the old columns and types, "+
 			"so every reconstruct anchored on it would be wrong. Take a real snapshot instead: `bintrail dump` + `bintrail baseline`. "+
 			"(If the schema snapshot is what is stale, run `bintrail snapshot` first and retry.): %w",
-		schema, table, strings.Join(orNone(added), ", "), strings.Join(orNone(dropped), ", "), ErrSchemaChanged)
+		schema, table, strings.Join(orNone(added), ", "), strings.Join(orNone(dropped), ", "),
+		strings.Join(orNone(retyped), ", "), ErrSchemaChanged)
+}
+
+// columnTypeChanged reports whether a column's type in the schema snapshot is
+// no longer the type its baseline's CREATE TABLE declares (#1651). The emitted
+// snapshot carries that CREATE TABLE forward, and it is what a restore loads:
+// reconstruct's mydumper output, the SQL export and drill all write it as the
+// table definition. So any real change refuses, not only one that moves the
+// Parquet value. An INT widened to BIGINT fails the write past INT's range
+// (#1652); a VARCHAR(32) widened to VARCHAR(64), or an ENUM given a new label,
+// publishes and then refuses the row at load ("Data too long", "Data
+// truncated"); a DATETIME given fractional seconds loads and silently rounds
+// them. Only spelling is ignored (baseline.ComparableColumnType), so a display
+// width a server upgrade dropped is not a change.
+//
+// The cost of refusing is bounded: the stream takes a new schema snapshot on
+// every DDL, and a scheduled refresh that refuses falls back to a full backup
+// (where the daemon may take one), which dumps the current CREATE TABLE, so
+// the next refresh compares equal again.
+//
+// When the snapshot lacks COLUMN_TYPE (taken before column_type was captured)
+// only the DATA_TYPE token is compared: INT to BIGINT is seen, a length, a
+// scale or a sign change is not. With neither (a PostgreSQL snapshot, which
+// carries no MySQL types) nothing is compared, because a missing type is not a
+// change.
+func columnTypeChanged(declared string, c metadata.ColumnMeta) (was, now string, changed bool) {
+	if strings.TrimSpace(declared) == "" {
+		return "", "", false
+	}
+	switch {
+	case strings.TrimSpace(c.ColumnType) != "":
+		was, now = baseline.ComparableColumnType(declared), baseline.ComparableColumnType(c.ColumnType)
+	case strings.TrimSpace(c.DataType) != "":
+		was, now = typeToken(baseline.ComparableColumnType(declared)), typeToken(baseline.ComparableColumnType(c.DataType))
+	default:
+		return "", "", false
+	}
+	return strings.TrimSpace(declared), strings.TrimSpace(firstNonEmpty(c.ColumnType, c.DataType)), was != now
+}
+
+// typeToken is the leading type word of a ComparableColumnType spelling.
+func typeToken(comparable string) string {
+	if n := strings.IndexAny(comparable, "( "); n >= 0 {
+		return comparable[:n]
+	}
+	return comparable
+}
+
+func firstNonEmpty(a, b string) string {
+	if strings.TrimSpace(a) != "" {
+		return a
+	}
+	return b
 }
 
 // checkSchemaMatchesBaseline refuses when the CREATE TABLE embedded in the
