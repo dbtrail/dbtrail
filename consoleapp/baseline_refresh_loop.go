@@ -715,6 +715,17 @@ const (
 	// before). Anyone tuning it is tuning both.
 	daemonFoldParallelism = 2
 
+	// daemonFoldMaxTouchedRows caps the distinct changed rows one daemon fold
+	// may hold in memory, per run, divided by daemonFoldParallelism (#1107):
+	// 1,000,000 per table here. Measured on TPC-C, a five-minute window touched
+	// at most 898,655 rows of one table (3.6 GB of resident memory at about
+	// 4 KB a row) and folded fine, while a two-hour window after a capture
+	// outage grew past a 16 GB host. Rows are a proxy for bytes: at the widest
+	// measured row (about 19 KB) the same cap is about four times the memory.
+	// A scheduled update that hits it falls back to a full backup, which
+	// streams the table instead of holding its changes.
+	daemonFoldMaxTouchedRows = 2_000_000
+
 	// daemonFoldRemediation replaces the volume warning's default advice, which
 	// names --at, --parallelism and --warn-event-threshold. bintrail-console
 	// registers none of the three: its only persistent flags are --log-level and
@@ -752,6 +763,7 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		CarryForwardUnchanged: req.CarryForwardUnchanged,
 		Parallelism:           daemonFoldParallelism,
 		WarnEventThreshold:    daemonFoldWarnEventThreshold,
+		MaxTouchedRows:        daemonFoldMaxTouchedRows,
 		RemediationHint:       daemonFoldRemediation,
 		// AllowGaps stays FALSE. An unattended job must never publish a
 		// knowingly-incomplete baseline: accepting a permanent capture loss is a

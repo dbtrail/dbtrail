@@ -182,6 +182,9 @@ type foldConfig struct {
 	// WarnEventThreshold / Parallelism drive the #654/#842 volume warning.
 	WarnEventThreshold int64
 	Parallelism        int
+	// MaxTouchedRows is FullTableConfig.MaxTouchedRows, divided by Parallelism
+	// at the check.
+	MaxTouchedRows int64
 
 	// RemediationHint is the advice attached to that warning; empty uses the
 	// attended-CLI wording. See FullTableConfig.RemediationHint.
@@ -279,6 +282,14 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		if err := foldPage(page, fc.Schema, fc.Table, fc.PKCols, res); err != nil {
 			foldErr = err
 			return err
+		}
+		// Per page, not after the window: the memory is spent as the map
+		// grows, so a check at the end would come after the harm (#1107).
+		if limit := scaledEventThreshold(fc.MaxTouchedRows, fc.Parallelism); limit > 0 && int64(len(res.Changes)) > limit {
+			foldErr = fmt.Errorf("%s.%s: more than %d distinct rows changed since the backup this update starts from, "+
+				"the most one table may hold in memory while %d fold at once: %w",
+				fc.Schema, fc.Table, limit, max(fc.Parallelism, 1), ErrTouchedRowBudget)
+			return foldErr
 		}
 
 		res.Total += int64(len(page))

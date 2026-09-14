@@ -103,6 +103,7 @@ func TestEveryConsoleappFoldConfigIsBounded(t *testing.T) {
 	wantConst := map[string]string{
 		"Parallelism":        "daemonFoldParallelism",
 		"WarnEventThreshold": "daemonFoldWarnEventThreshold",
+		"MaxTouchedRows":     "daemonFoldMaxTouchedRows",
 		"RemediationHint":    "daemonFoldRemediation",
 	}
 
