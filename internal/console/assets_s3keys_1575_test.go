@@ -76,6 +76,8 @@ const cases = {
   needsSecret: { ...db, s3: [{ bucket: "arch", ok: false, needs_secret: true, latency_ms: 0 }] },
   needsKeys: { ...db, s3: [{ bucket: "arch", ok: false, needs_keys: true, latency_ms: 0 }] },
   notApplied: { ...db, s3: [{ bucket: "arch", ok: true, not_applied: true, latency_ms: 7 }] },
+  notAppliedFail: { ...db, s3: [{ bucket: "arch", ok: false, error: "Forbidden", not_applied: true, latency_ms: 7 }] },
+  secretAndFail: { ...db, s3: [{ bucket: "arch", ok: false, needs_secret: true, latency_ms: 0 }, { bucket: "bk", ok: false, error: "NoSuchBucket", latency_ms: 3 }] },
   noLocation: { ...db, s3: [{ bucket: "", ok: false, error: "no Archive to S3 or Backups S3 location to test the store with", latency_ms: 0 }] },
   dbDown: { ok: false, error: "dial tcp: refused", latency_ms: 1, s3: [{ bucket: "arch", ok: true, latency_ms: 2 }] },
   pending: { ok: false, provision_pending: true, error: "index database \"x\" not provisioned yet", latency_ms: 1, s3: [{ bucket: "arch", ok: true, latency_ms: 2 }] },
@@ -108,16 +110,18 @@ console.log(JSON.stringify(out));
 		contains []string
 		absent   []string
 	}{
-		"noStore":       {"ok", []string{"✓ ok · 5 ms · MySQL 8.0.36"}, []string{"S3"}},
-		"s3ok":          {"ok", []string{"✓ ok · 5 ms", "✓ S3 arch · 12 ms", "✓ S3 bk · 3 ms"}, nil},
-		"s3fail":        {"err", []string{"✓ S3 arch · 12 ms", "✗ S3 bk: Forbidden"}, nil},
-		"needsSecret":   {"pending", []string{"○ S3 arch: type the S3 secret key to test these keys"}, []string{"✗"}},
-		"noLocation":    {"err", []string{"✗ S3 store: no Archive to S3"}, nil},
-		"needsKeys":     {"pending", []string{"○ S3 arch: save the server, or type S3 keys, to test a new endpoint"}, []string{"✗"}},
-		"notApplied":    {"err", []string{"✓ S3 arch · 7 ms", "! S3 arch is saved but the daemon is not using it; its log says why"}, nil},
-		"dbDown":        {"err", []string{"✗ dial tcp: refused", "✓ S3 arch · 2 ms"}, nil},
-		"pending":       {"pending", []string{"○ index database", "✓ S3 arch · 2 ms"}, nil},
-		"pendingS3fail": {"err", []string{"✗ S3 arch: NoSuchBucket"}, nil},
+		"noStore":        {"ok", []string{"✓ ok · 5 ms · MySQL 8.0.36"}, []string{"S3"}},
+		"s3ok":           {"ok", []string{"✓ ok · 5 ms", "✓ S3 arch · 12 ms", "✓ S3 bk · 3 ms"}, nil},
+		"s3fail":         {"err", []string{"✓ S3 arch · 12 ms", "✗ S3 bk: Forbidden"}, nil},
+		"needsSecret":    {"pending", []string{"○ S3 arch: type the S3 secret key to test these keys"}, []string{"✗"}},
+		"noLocation":     {"err", []string{"✗ S3 store: no Archive to S3"}, nil},
+		"notAppliedFail": {"err", []string{"✗ S3 arch: Forbidden", "! S3 arch is saved but the daemon is not using it"}, nil},
+		"secretAndFail":  {"err", []string{"○ S3 arch: type the S3 secret key", "✗ S3 bk: NoSuchBucket"}, nil},
+		"needsKeys":      {"pending", []string{"○ S3 arch: save the server, or type S3 keys, to test these settings"}, []string{"✗"}},
+		"notApplied":     {"err", []string{"✓ S3 arch · 7 ms", "! S3 arch is saved but the daemon is not using it; its log says why"}, nil},
+		"dbDown":         {"err", []string{"✗ dial tcp: refused", "✓ S3 arch · 2 ms"}, nil},
+		"pending":        {"pending", []string{"○ index database", "✓ S3 arch · 2 ms"}, nil},
+		"pendingS3fail":  {"err", []string{"✗ S3 arch: NoSuchBucket"}, nil},
 	}
 	for k, w := range want {
 		g, ok := got[k]

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
@@ -56,8 +57,13 @@ func TestRegistryS3Keys_validationAndPersistence(t *testing.T) {
 	if r.Len() != 0 {
 		t.Fatalf("a refused entry was stored: %d", r.Len())
 	}
-	// Keys alone on an AWS bucket (another account): a store.
-	added, err := r.Add(keyedEntry("aws-other-account", "s3://k/a/", "", " "+keyID+" ", " "+keySecret+" "))
+	// Keys alone on an AWS bucket (another account) need the bucket's region.
+	if _, err := r.Add(keyedEntry("aws-no-region", "s3://k/a/", "", keyID, keySecret)); !errors.Is(err, storage.ErrBucketStoreConfig) {
+		t.Errorf("keys with no endpoint and no region: err = %v, want ErrBucketStoreConfig", err)
+	}
+	withRegion := keyedEntry("aws-other-account", "s3://k/a/", "", " "+keyID+" ", " "+keySecret+" ")
+	withRegion.S3Region = "eu-west-1"
+	added, err := r.Add(withRegion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +151,12 @@ func TestRegistryS3Keys_conflictAndRotation(t *testing.T) {
 	b, err := r.Add(keyedEntry("B", "s3://shared/b/", "http://minio:9000", keyID, keySecret))
 	if err != nil {
 		t.Fatalf("same keys on a shared bucket: %v", err)
+	}
+	// An edit that changes only the access key is a store change too.
+	otherID := a
+	otherID.S3AccessKeyID = "AKIAOTHERKEY"
+	if err := r.Update(otherID); !errors.Is(err, ErrS3StoreConflict) {
+		t.Fatalf("changing only the access key on a shared bucket: err = %v, want ErrS3StoreConflict", err)
 	}
 
 	// An edit that changes only the secret is a store change: re-checked,
@@ -247,7 +259,7 @@ func TestServersAPI_s3Keys(t *testing.T) {
 		t.Error("a refused edit changed the access key")
 	}
 	// A secret with no access key: refused, never silently dropped.
-	if rec, body := put(a.ID, `,"s3_access_key_id":"","s3_secret_access_key":"LoneSecretValue"`); rec.Code != 400 {
+	if rec, body := put(a.ID, `,"s3_access_key_id":"","s3_secret_access_key":"LoneSecretValue"`); rec.Code != 400 || !strings.Contains(string(body), "needs its access key") {
 		t.Errorf("secret without an access key: %d %s, want 400", rec.Code, body)
 	} else {
 		assertNoSecret(t, "PUT lone secret", body, "LoneSecretValue")
@@ -394,13 +406,39 @@ func TestServersTest_probeNeverSignsForANewDestination(t *testing.T) {
 		t.Errorf("a held probe reached a store: new=%d keyed=%d", newHost.count(), keyedHost.count())
 	}
 
-	// No endpoint (a region pin): the ambient destination, where the
-	// daemon's credentials go anyway.
+	// The saved keyless server's endpoint, but a bucket it does not name: the
+	// daemon's role would answer for any bucket name. Held.
+	before := savedHost.count()
+	pb, raw = doProbe(t, srv, "/api/servers/"+plain.ID+"/test", keyless(savedHost.srv.URL, "probe-elsewhere"))
+	held("edit form, another bucket", pb, raw)
+	if savedHost.count() != before {
+		t.Error("the daemon's credentials signed for a bucket the saved server does not name")
+	}
+	// An empty or blank secret is not typed keys.
+	for _, blank := range []string{`""`, `"   "`} {
+		body := strings.TrimSuffix(keyless(newHost.srv.URL, "probe-n"), "}") + `,"s3_secret_access_key":` + blank + `}`
+		pb, raw = doProbe(t, srv, "/api/servers/test", body)
+		held("secret "+blank, pb, raw)
+	}
+	if newHost.count() != 0 || keyedHost.count() != 0 {
+		t.Errorf("a held probe reached a store: new=%d keyed=%d", newHost.count(), keyedHost.count())
+	}
+
+	// No endpoint (a region pin): the ambient destination. From the create
+	// form it is held like any other; from the saved server, for its bucket,
+	// the daemon's credentials go there anyway.
 	ambient := newProbeFake(t, 200)
 	t.Setenv(storage.EnvS3Endpoint, ambient.srv.URL)
-	pb, raw = doProbe(t, srv, "/api/servers/test", `{`+deadDSN+`,"archive_s3":"s3://probe-r/x/","s3_endpoint":"","s3_region":"eu-west-1","s3_access_key_id":""}`)
+	regionOnly := `{` + deadDSN + `,"archive_s3":"s3://probe-r/x/","s3_endpoint":"","s3_region":"eu-west-1","s3_access_key_id":""}`
+	pb, raw = doProbe(t, srv, "/api/servers/test", regionOnly)
+	held("create form, region only", pb, raw)
+	pinned, err := srv.cm.reg.Add(ServerEntry{Name: "pinned", DSN: "u:p@tcp(h:3306)/r", ArchiveS3: "s3://probe-r/x/", S3Region: "eu-west-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, raw = doProbe(t, srv, "/api/servers/"+pinned.ID+"/test", regionOnly)
 	if len(pb.S3) != 1 || !pb.S3[0].OK || !strings.Contains(ambient.seen(), "Credential=AKIAAMBIENT/") {
-		t.Errorf("region-only store on the ambient endpoint: %s\n%s", raw, ambient.seen())
+		t.Errorf("saved region-only store: %s\n%s", raw, ambient.seen())
 	}
 }
 
@@ -579,11 +617,14 @@ func TestServersTest_storedSecretOnlyForTheSameStore(t *testing.T) {
 	if len(pb.S3) != 1 || !pb.S3[0].OK || !strings.Contains(stored.seen(), "Credential=AKIASAVED/") {
 		t.Fatalf("row test of a saved keyed store: %s\n%s", raw, stored.seen())
 	}
-	// The form, unchanged, secret left blank: the saved secret is used.
-	before := stored.count()
-	pb, raw = doProbe(t, srv, path, form(stored.srv.URL, "", "AKIASAVED"))
-	if len(pb.S3) != 1 || !pb.S3[0].OK || pb.S3[0].NeedsSecret || stored.count() != before+1 {
-		t.Errorf("unchanged form, blank secret: %s", raw)
+	// The form, unchanged, secret left blank: the saved secret is used, also
+	// when the endpoint is spelled differently but normalizes the same.
+	for _, spelling := range []string{stored.srv.URL, stored.srv.URL + "/", " " + strings.ToUpper(stored.srv.URL[:4]) + stored.srv.URL[4:] + " "} {
+		before := stored.count()
+		pb, raw = doProbe(t, srv, path, form(spelling, "", "AKIASAVED"))
+		if len(pb.S3) != 1 || !pb.S3[0].OK || pb.S3[0].NeedsSecret || stored.count() != before+1 {
+			t.Errorf("unchanged form (%q), blank secret: %s", spelling, raw)
+		}
 	}
 
 	for name, body := range map[string]string{
@@ -613,6 +654,65 @@ func TestServersTest_storedSecretOnlyForTheSameStore(t *testing.T) {
 	}
 	if strings.Contains(raw, "SavedSecretValue") || strings.Contains(raw, "TypedSecretValue") {
 		t.Error("a probe response carries a secret")
+	}
+}
+
+// A saved keys-only store (no endpoint) signs at the ambient endpoint with its
+// own keys, from the row and from the unchanged form; another endpoint typed
+// over it holds for the secret.
+func TestServersTest_keysOnlyStore(t *testing.T) {
+	isolateProbeEnv(t)
+	ambient, other := newProbeFake(t, 200), newProbeFake(t, 200)
+	t.Setenv(storage.EnvS3Endpoint, ambient.srv.URL)
+	srv := newRegistryServer(t)
+	e := keyedEntry("acct", "s3://probe-acct/a/", "", "AKIASAVED", "SavedSecretValue")
+	e.S3Region = "eu-west-1"
+	saved, err := srv.cm.reg.Add(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/servers/" + saved.ID + "/test"
+	if pb, raw := doProbe(t, srv, path, `{}`); len(pb.S3) != 1 || !pb.S3[0].OK || pb.S3[0].NotApplied {
+		t.Errorf("row test: %s", raw)
+	}
+	form := func(endpoint string) string {
+		return `{"archive_s3":"s3://probe-acct/a/","s3_endpoint":"` + endpoint + `","s3_region":"eu-west-1","s3_access_key_id":"AKIASAVED"}`
+	}
+	if pb, raw := doProbe(t, srv, path, form("")); len(pb.S3) != 1 || !pb.S3[0].OK {
+		t.Errorf("unchanged form: %s", raw)
+	}
+	if n := strings.Count(ambient.seen(), "Credential=AKIASAVED/"); n != 2 || strings.Contains(ambient.seen(), "AKIAAMBIENT") {
+		t.Errorf("keys-only store requests signed with its keys = %d, want 2:\n%s", n, ambient.seen())
+	}
+	if pb, raw := doProbe(t, srv, path, form(other.srv.URL)); len(pb.S3) != 1 || !pb.S3[0].NeedsSecret || other.count() != 0 {
+		t.Errorf("another endpoint over a keys-only store, blank secret: %s", raw)
+	}
+}
+
+// A store that accepts the connection and never answers ends the probe at
+// the timeout, as that bucket's failure.
+func TestServersTest_s3ProbeTimesOut(t *testing.T) {
+	isolateProbeEnv(t)
+	prev := s3ProbeTimeout
+	s3ProbeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { s3ProbeTimeout = prev })
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(hang.Close)
+	t.Cleanup(func() { close(release) })
+	srv := newRegistryServer(t)
+	start := time.Now()
+	pb, raw := doProbe(t, srv, "/api/servers/test", `{`+deadDSN+`,"archive_s3":"s3://probe-hang/x/","s3_endpoint":"`+hang.URL+`","s3_access_key_id":"AKIATYPED","s3_secret_access_key":"TypedSecretValue"}`)
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("the probe took %v against a store that never answers", took)
+	}
+	if len(pb.S3) != 1 || pb.S3[0].OK || pb.S3[0].Error == "" {
+		t.Errorf("a hanging store: %s", raw)
 	}
 }
 

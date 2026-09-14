@@ -62,6 +62,23 @@ func TestApplyBucketStoreSecrets_keyedBucketUsesItsOwnKeys(t *testing.T) {
 	}
 }
 
+// A keys-only store's secret names its region: without one DuckDB signs as
+// us-east-1 while the SDK signs with the store's region.
+func TestApplyBucketStoreSecrets_keysOnlyStoreNamesItsRegion(t *testing.T) {
+	st, err := store(t, "", "", "eu-west-1").WithKeys("AKIASTORE", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ran []string
+	exec := func(_ context.Context, stmt string) error { ran = append(ran, stmt); return nil }
+	if err := applyBucketStoreSecrets(context.Background(), exec, map[string]storage.BucketStore{"acct": st}, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(ran) != 1 || !strings.Contains(ran[0], "SCOPE 's3://acct/', REGION 'eu-west-1')") || strings.Contains(ran[0], "ENDPOINT") {
+		t.Errorf("keys-only secret: %v", ran)
+	}
+}
+
 // The environment holds NO keys here, so a withhold that only counts the
 // environment's keys would pass DuckDB's echo of the statement straight
 // through, the store's secret with it.

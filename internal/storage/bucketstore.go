@@ -93,6 +93,7 @@ func NewBucketStore(endpoint, style, region string) (BucketStore, error) {
 // trimmed; both blank means no keys. One without the other is refused, and so
 // is a key with a space or a control character inside: no provider issues
 // one, and a pasted line break would otherwise save a key that never signs.
+// Keys with no endpoint need a region.
 // The errors never carry a key value.
 func (s BucketStore) WithKeys(id, secret string) (BucketStore, error) {
 	id, secret = strings.TrimSpace(id), strings.TrimSpace(secret)
@@ -108,6 +109,11 @@ func (s BucketStore) WithKeys(id, secret string) (BucketStore, error) {
 		return BucketStore{}, fmt.Errorf("%w: the access key contains a space or a control character", ErrBucketStoreConfig)
 	case strings.IndexFunc(secret, badKeyRune) >= 0:
 		return BucketStore{}, fmt.Errorf("%w: the secret key contains a space or a control character", ErrBucketStoreConfig)
+	}
+	if !s.Endpoint.Set() && s.Region == "" {
+		// Nothing else names a region both halves agree on: the DuckDB
+		// secret would sign as us-east-1 and the SDK with the daemon's.
+		return BucketStore{}, fmt.Errorf("%w: S3 keys with no endpoint (an AWS bucket in another account) need the bucket's region", ErrBucketStoreConfig)
 	}
 	s.AccessKeyID, s.SecretKey = id, secret
 	return s, nil

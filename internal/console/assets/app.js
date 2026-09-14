@@ -9160,7 +9160,7 @@ function s3TestText(res) {
   return (res.s3 || []).map((b) => {
     const name = b.bucket ? "S3 " + b.bucket : "S3 store";
     if (b.needs_secret) return "○ " + name + ": type the S3 secret key to test these keys";
-    if (b.needs_keys) return "○ " + name + ": save the server, or type S3 keys, to test a new endpoint";
+    if (b.needs_keys) return "○ " + name + ": save the server, or type S3 keys, to test these settings";
     const probed = b.ok ? "✓ " + name + " · " + b.latency_ms + " ms" : "✗ " + name + ": " + (b.error || "unreachable");
     return b.not_applied ? probed + " · ! " + name + " is saved but the daemon is not using it; its log says why" : probed;
   }).join(" · ");

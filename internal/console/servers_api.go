@@ -713,17 +713,18 @@ func s3ProbeAll(string) s3Hold { return s3Probe }
 // A body with them tests what the form holds, saved or not.
 //
 // Both test routes are servers:read, and the body picks the endpoint and the
-// buckets. So credentials the operator did not type sign only toward where the
-// saved server already sends them:
-//   - a typed secret signs for anything: those are the operator's own keys;
+// buckets. So credentials the operator did not type sign only for the saved
+// server's own buckets, toward the saved server's own endpoint:
+//   - a typed (non-blank) secret signs for anything: those are the
+//     operator's own keys;
 //   - a blank secret reuses the saved one only for the same endpoint,
-//     addressing and access key, and only for the buckets the saved server
-//     names (otherwise any bucket name could be checked with those keys);
-//   - no keys at all signs with the daemon's own chain only toward the
-//     ambient endpoint (AWS or BINTRAIL_S3_ENDPOINT, where it goes anyway) or
-//     the endpoint of a saved server that also has no keys.
+//     addressing and access key;
+//   - no keys at all signs with the daemon's own chain only when the saved
+//     server has no keys either and the same endpoint and addressing.
 //
-// A held bucket is not contacted; its result says what to do.
+// Otherwise a reader could send those credentials' signatures to a host of
+// their choosing, or learn which bucket names they can reach. A held bucket
+// is not contacted; its result says what to do.
 func s3ProbeCandidate(req serverRequest, sent map[string]json.RawMessage, saved ServerEntry, hasSaved bool) (candidate ServerEntry, typed bool, hold func(bucket string) s3Hold) {
 	for _, f := range s3ProbeFields {
 		if _, ok := sent[f]; ok {
@@ -743,26 +744,33 @@ func s3ProbeCandidate(req serverRequest, sent map[string]json.RawMessage, saved 
 		S3Region:      strings.TrimSpace(req.S3Region),
 		S3AccessKeyID: strings.TrimSpace(req.S3AccessKeyID),
 	}
-	switch {
-	case req.S3SecretAccessKey != nil:
+	if req.S3SecretAccessKey != nil {
 		candidate.S3SecretAccessKey = strings.TrimSpace(*req.S3SecretAccessKey)
+	}
+	if candidate.S3SecretAccessKey != "" {
 		return candidate, true, s3ProbeAll
+	}
+	var savedBuckets []string
+	if hasSaved {
+		savedBuckets = saved.s3Buckets()
+	}
+	onlySaved := func(heldAs s3Hold) func(string) s3Hold {
+		return func(b string) s3Hold {
+			if slices.Contains(savedBuckets, b) {
+				return s3Probe
+			}
+			return heldAs
+		}
+	}
+	switch {
 	case candidate.S3AccessKeyID != "":
 		if !hasSaved || !sameS3Store(candidate, saved) {
 			return candidate, true, func(string) s3Hold { return s3HoldForSecret }
 		}
 		candidate.S3SecretAccessKey = saved.S3SecretAccessKey
-		savedBuckets := saved.s3Buckets()
-		return candidate, true, func(b string) s3Hold {
-			if slices.Contains(savedBuckets, b) {
-				return s3Probe
-			}
-			return s3HoldForSecret
-		}
-	case candidate.S3Endpoint == "":
-		return candidate, true, s3ProbeAll
+		return candidate, true, onlySaved(s3HoldForSecret)
 	case hasSaved && strings.TrimSpace(saved.S3AccessKeyID) == "" && sameS3Endpoint(candidate, saved):
-		return candidate, true, s3ProbeAll
+		return candidate, true, onlySaved(s3HoldForKeys)
 	default:
 		return candidate, true, func(string) s3Hold { return s3HoldForKeys }
 	}
@@ -785,7 +793,7 @@ func sameS3Store(a, b ServerEntry) bool {
 
 // s3ProbeTimeout bounds each bucket's HeadBucket. Longer than the index dial
 // timeout: a store across a WAN answers slower than a MySQL next door.
-const s3ProbeTimeout = 5 * time.Second
+var s3ProbeTimeout = 5 * time.Second
 
 // probeS3Store runs a HeadBucket through e's S3 store for every bucket its
 // locations name that hold allows. No store: nil. A store that does not

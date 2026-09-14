@@ -209,7 +209,9 @@ What the setting does:
 - Keys belong to the bucket, like the endpoint: a bucket has one pair of
   keys. Two servers naming the same bucket with different keys is refused
   (HTTP 422, "with different S3 keys", never a key value). Keys alone, with no
-  endpoint, are a store too: an AWS bucket in another account.
+  endpoint, are a store too (an AWS bucket in another account), and they need
+  the bucket's `S3 region`: nothing else gives uploads and DuckDB reads the
+  same region to sign with.
 - With keys, uploads sign with them, and DuckDB gets a `PROVIDER config`
   secret for that bucket holding exactly those keys, in memory for the
   session. The daemon's credential chain and the environment's AWS keys are
@@ -231,14 +233,13 @@ What the setting does:
   the server's locations name, signed the way uploads are, one attempt, 5
   seconds at most. The row's Test button tests the saved server, and says so
   when the daemon is not using that saved store (the startup log says why).
-  Testing is open to users who can only read servers, so it signs with
-  credentials you did not type only where the saved server already sends
-  them. On the form, a blank secret uses the saved one only while the
-  endpoint, addressing and access key are unchanged, and only for the buckets
-  the saved server names. With no keys, the daemon's own credentials sign
-  only toward AWS, the process-wide endpoint, or the saved server's own
-  endpoint; for a new endpoint, save the server or type keys. In every held
-  case the result says what to do, and nothing is contacted.
+  Testing is open to users who can only read servers, so credentials you did
+  not type (a saved secret, or the daemon's own) sign only for the saved
+  server's buckets, at the saved server's endpoint. On the form, a blank
+  secret uses the saved one only while the endpoint, addressing and access
+  key are unchanged; with no keys, the daemon's credentials sign only when
+  the saved server has no keys either. For anything else, save the server or
+  type the keys. A held bucket says what to do, and nothing is contacted.
 
 ### Minimum IAM permissions
 

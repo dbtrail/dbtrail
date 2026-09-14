@@ -56,16 +56,22 @@ func TestBucketStore_WithKeys(t *testing.T) {
 }
 
 func TestBucketStore_keysInIsZeroAndEqual(t *testing.T) {
-	keysOnly, err := BucketStore{}.WithKeys("AKIASTORE", "secret")
+	// An AWS bucket in another account: no endpoint, its own keys, and the
+	// bucket's region. Without an endpoint nothing else names a region both
+	// halves agree on: DuckDB's secret would sign as us-east-1 and the SDK
+	// with the daemon's region.
+	if _, err := (BucketStore{}).WithKeys("AKIASTORE", "secret"); !errors.Is(err, ErrBucketStoreConfig) || !strings.Contains(err.Error(), "region") {
+		t.Errorf("keys with no endpoint and no region: err = %v, want a refusal naming the region", err)
+	}
+	keysOnly, err := mustStore(t, "", "", "eu-west-1").WithKeys("AKIASTORE", "secret")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// An AWS bucket in another account: no endpoint, no region, its own keys.
 	if keysOnly.IsZero() {
 		t.Error("a store with keys alone must not be the zero store: it signs differently from the ambient chain")
 	}
-	if got := keysOnly.SigningRegion(); got != "" {
-		t.Errorf("a keys-only store signs with region %q, want the ambient one (\"\")", got)
+	if got := keysOnly.SigningRegion(); got != "eu-west-1" {
+		t.Errorf("a keys-only store signs with region %q, want its own", got)
 	}
 	base := mustStore(t, "http://minio:9000", "", "")
 	a, _ := base.WithKeys("AKIASTORE", "secret")
@@ -175,6 +181,30 @@ func TestNewS3ClientForBucket_signsWithTheStoreKeys(t *testing.T) {
 	}
 	if !strings.Contains(got[1], "Credential=testdummykey/") {
 		t.Errorf("a store without keys must sign with the ambient chain: %s", got[1])
+	}
+}
+
+// A store with keys and no endpoint (an AWS bucket in another account) signs
+// with its keys wherever the ambient endpoint is, at its own region.
+func TestNewS3ClientForBucket_keysOnlyStoreSignsAtTheAmbientEndpoint(t *testing.T) {
+	isolateAWSEnv(t)
+	ambient := newFakeS3(t)
+	t.Setenv(EnvS3Endpoint, ambient.srv.URL)
+	keysOnly, err := mustStore(t, "", "", "eu-west-1").WithKeys("AKIAKEYSONLY", "keysonlysecret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withBucketStores(t, map[string]BucketStore{"other-account": keysOnly})
+	c, err := NewS3ClientForBucket(context.Background(), "other-account", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Options().Region != "eu-west-1" {
+		t.Errorf("region = %q, want the store's", c.Options().Region)
+	}
+	headBucket(t, c, "other-account")
+	if !strings.Contains(ambient.seen(), "Credential=AKIAKEYSONLY/") || !strings.Contains(ambient.seen(), "/eu-west-1/s3/") {
+		t.Errorf("a keys-only store did not sign with its keys and region at the ambient endpoint:\n%s", ambient.seen())
 	}
 }
 

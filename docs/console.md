@@ -288,8 +288,8 @@ Security notes specific to the registry:
   Responses carry the access key and `has_s3_secret_access_key` only, and a
   blank secret on an edit keeps the stored one. A user who can only read
   servers can run `Test connection`, so it signs with a stored secret, or
-  with the daemon's own credentials, only toward where the saved server
-  already sends them.
+  with the daemon's own credentials, only for the saved server's buckets at
+  the saved server's endpoint.
 - **The console never migrates servers added in the UI.** The one schema
   migration (`EnsureSchema`, an idempotent ALTER) runs at startup on the DSN
   you typed on the command line — never on a DSN typed into a browser form. A
