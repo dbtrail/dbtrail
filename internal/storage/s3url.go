@@ -55,6 +55,46 @@ func NewS3ClientForBucket(ctx context.Context, bucket, region string) (*s3.Clien
 	return newS3Client(ctx, S3Config{Bucket: bucket, Region: region})
 }
 
+// NewS3ClientForStore builds a client for store alone, never consulting the
+// bucket table: the console's Test connection probes a store the operator
+// typed and has not saved, which the table does not hold, or holds as a
+// different store. It signs with the store's keys when it has them, else with
+// the ambient chain, and at the store's SigningRegion. extra options apply
+// last and win.
+func NewS3ClientForStore(ctx context.Context, store BucketStore, extra ...func(*s3.Options)) (*s3.Client, error) {
+	return newStoreClient(ctx, store, store.SigningRegion(), extra...)
+}
+
+// newStoreClient is the client for one bucket store at region. An endpoint
+// store is built without the unmirrored-endpoint warning: the DuckDB half
+// carries the same store as a secret scoped to the bucket, and a probe of an
+// unsaved candidate is one HeadBucket that DuckDB never reads through. A store
+// with no endpoint (a region pin, keys alone) goes through the shared
+// constructor, which applies the process-wide endpoint like any other client.
+func newStoreClient(ctx context.Context, store BucketStore, region string, extra ...func(*s3.Options)) (*s3.Client, error) {
+	awsCfg, err := LoadAWSConfig(ctx, region)
+	if err != nil {
+		return nil, fmt.Errorf("storage: %w", err)
+	}
+	if store.HasKeys() {
+		// Static, per client: a plain provider func, so the ambient chain
+		// (environment, profile, instance role) is never asked.
+		id, secret := store.AccessKeyID, store.SecretKey
+		awsCfg.Credentials = aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+			return aws.Credentials{AccessKeyID: id, SecretAccessKey: secret, Source: "bintrail S3 store keys"}, nil
+		})
+	}
+	if !store.Endpoint.Set() {
+		return NewS3ClientFromConfig(awsCfg, extra...), nil
+	}
+	url, pathStyle := store.Endpoint.URL, store.Endpoint.PathStyle
+	opts := append([]func(*s3.Options){func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(url)
+		o.UsePathStyle = pathStyle
+	}}, extra...)
+	return newS3ClientRouted(awsCfg, opts...), nil
+}
+
 // NewS3ClientFromConfig is the one constructor every S3 client in the tree
 // goes through (#1453). It carries the addressing style that goes with a
 // custom endpoint: the SDK config can hold the endpoint URL itself

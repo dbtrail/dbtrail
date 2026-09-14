@@ -1,6 +1,8 @@
 package console
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,9 +10,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/config"
@@ -45,6 +50,10 @@ type serverDTO struct {
 	S3Endpoint  string `json:"s3_endpoint,omitempty"`
 	S3PathStyle string `json:"s3_path_style,omitempty"`
 	S3Region    string `json:"s3_region,omitempty"`
+	// S3 keys: the access key round-trips like the fields above; the secret
+	// never does, only whether one is saved.
+	S3AccessKeyID        string `json:"s3_access_key_id,omitempty"`
+	HasS3SecretAccessKey bool   `json:"has_s3_secret_access_key,omitempty"`
 	// Source-monitoring config (control plane). HasSource reports whether a
 	// source DSN is configured at all; the parts are its masked view — the
 	// source DSN itself (replication credentials) never leaves the process.
@@ -112,6 +121,12 @@ type serverRequest struct {
 	S3Endpoint  string `json:"s3_endpoint"`
 	S3PathStyle string `json:"s3_path_style"`
 	S3Region    string `json:"s3_region"`
+	// S3 keys. The access key is always resent like the fields above, and ""
+	// clears BOTH keys. The secret is a *string like Password: omitted keeps
+	// the saved one, a value replaces it. A new access key with the secret
+	// omitted is refused (resolveS3Keys): it would pair with the old secret.
+	S3AccessKeyID     string  `json:"s3_access_key_id"`
+	S3SecretAccessKey *string `json:"s3_secret_access_key"`
 
 	SourceDSN      *string `json:"source_dsn"`
 	SourceHost     string  `json:"source_host"`
@@ -155,6 +170,24 @@ type testResponse struct {
 	// Start, so this is the normal pre-Start state, not a connection failure.
 	// The frontend renders it neutrally (a hint, not a red error).
 	ProvisionPending bool `json:"provision_pending,omitempty"`
+	// S3: one result per bucket of the tested server's S3 store (#1575).
+	// Absent when there is no store. Independent of OK, which is the index
+	// connection's.
+	S3 []s3ProbeResult `json:"s3,omitempty"`
+}
+
+// s3ProbeResult is Test connection's answer for one bucket of the server's S3
+// store: a HeadBucket through the store, signed with its keys. NeedsSecret is
+// not a failure and was not probed: the form left the secret blank for a
+// store other than the saved one, so there is no secret to sign with.
+type s3ProbeResult struct {
+	Bucket      string `json:"bucket"`
+	OK          bool   `json:"ok"`
+	Error       string `json:"error,omitempty"`
+	NeedsSecret bool   `json:"needs_secret,omitempty"`
+	NeedsKeys   bool   `json:"needs_keys,omitempty"`
+	NotApplied  bool   `json:"not_applied,omitempty"`
+	LatencyMS   int64  `json:"latency_ms"`
 }
 
 // handleServersList serves GET /api/servers.
@@ -233,6 +266,11 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s3KeyID, s3Secret, err := resolveS3Keys(req, "", "")
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	entry := ServerEntry{
 		Name:              strings.TrimSpace(req.Name),
 		DSN:               dsn,
@@ -243,6 +281,8 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		S3Endpoint:        strings.TrimSpace(req.S3Endpoint),
 		S3PathStyle:       strings.TrimSpace(req.S3PathStyle),
 		S3Region:          strings.TrimSpace(req.S3Region),
+		S3AccessKeyID:     s3KeyID,
+		S3SecretAccessKey: s3Secret,
 		SourceDSN:         sourceDSN,
 		SourceServerID:    req.SourceServerID,
 		Schemas:           req.Schemas,
@@ -328,6 +368,11 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusConflict, "this server is being monitored; stop monitoring before changing its source")
 		return
 	}
+	s3KeyID, s3Secret, err := resolveS3Keys(req, old.S3AccessKeyID, old.S3SecretAccessKey)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	entry := ServerEntry{
 		ID:          id,
 		Name:        strings.TrimSpace(req.Name),
@@ -339,7 +384,11 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		S3Endpoint:  strings.TrimSpace(req.S3Endpoint),
 		S3PathStyle: strings.TrimSpace(req.S3PathStyle),
 		S3Region:    strings.TrimSpace(req.S3Region),
-		SourceDSN:   sourceDSN,
+		// Resolved over the stored keys: this entry is built fresh, so a
+		// secret the form left blank would otherwise be wiped.
+		S3AccessKeyID:     s3KeyID,
+		S3SecretAccessKey: s3Secret,
+		SourceDSN:         sourceDSN,
 		// The verbs that flip monitoring intent arrive with the supervisor
 		// (phase 3); a plain edit must not silently start or stop anything.
 		MonitorDesired: old.MonitorDesired,
@@ -571,6 +620,10 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 	// per-source index DB only exists after a successful Start, so an
 	// Unknown-database probe error is "not started yet", not "unreachable".
 	monitored := false
+	// saved is the registry entry under test, when there is one: its S3 store
+	// is what the row's Test button probes.
+	var saved ServerEntry
+	hasSaved := false
 	if id != "" && id != bootServerID {
 		e, ok := s.cm.reg.Get(id)
 		if !ok {
@@ -579,16 +632,28 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 		}
 		stored = e.DSN
 		monitored = e.SourceDSN != ""
+		saved, hasSaved = e, true
 	}
 	if id == bootServerID {
 		_, stored = s.cm.bootInfo()
 	}
 
 	// An empty body means "test the stored DSN as-is"; anything else must parse.
-	var req serverRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+	// Read whole, and decoded twice: the S3 half needs to know which fields
+	// were SENT, since the form sends every S3 field and the row's button none.
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeBodyDecodeError(w, err)
 		return
+	}
+	var req serverRequest
+	var sent map[string]json.RawMessage
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if err := json.Unmarshal(raw, &req); err != nil {
+			writeBodyDecodeError(w, err)
+			return
+		}
+		_ = json.Unmarshal(raw, &sent) // an object: req decoded from it
 	}
 
 	dsn := stored
@@ -604,7 +669,229 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "nothing to test: no stored DSN and no candidate supplied")
 		return
 	}
-	writeJSON(w, http.StatusOK, probeServer(r, dsn, monitored))
+	resp := probeServer(r, dsn, monitored)
+	candidate, typed, hold := s3ProbeCandidate(req, sent, saved, hasSaved)
+	resp.S3 = probeS3Store(r.Context(), candidate, typed && !sameSavedStore(candidate, saved, hasSaved), hold)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// resolveS3Keys merges a create/update request's S3 keys over the saved ones
+// (both "" on create). The secret, when sent, is taken as typed: half a pair
+// is refused by the registry, never dropped. When omitted it is kept, but only
+// for the same access key: a new access key paired with the old secret would
+// save keys that never sign, and a cleared access key clears both.
+func resolveS3Keys(req serverRequest, oldID, oldSecret string) (id, secret string, err error) {
+	id = strings.TrimSpace(req.S3AccessKeyID)
+	switch {
+	case req.S3SecretAccessKey != nil:
+		return id, strings.TrimSpace(*req.S3SecretAccessKey), nil
+	case id == "":
+		return "", "", nil
+	case id != strings.TrimSpace(oldID):
+		return "", "", errors.New("type the S3 secret key that goes with the new S3 access key")
+	}
+	return id, oldSecret, nil
+}
+
+// s3ProbeFields are the request fields that describe a server's S3 store.
+var s3ProbeFields = []string{"archive_s3", "baseline_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "s3_secret_access_key"}
+
+// s3Hold says whether Test connection may sign a request for one bucket.
+type s3Hold int
+
+const (
+	s3Probe         s3Hold = iota
+	s3HoldForSecret        // an access key whose secret is not typed and may not be reused
+	s3HoldForKeys          // no keys, toward a host the daemon's own credentials do not already go to
+)
+
+func s3ProbeAll(string) s3Hold { return s3Probe }
+
+// s3ProbeCandidate is the S3 store Test connection probes, whether the body
+// typed it, and which of its buckets may be signed for. A body with none of
+// the S3 fields (the row's button sends {}) tests the saved server's store.
+// A body with them tests what the form holds, saved or not.
+//
+// Both test routes are servers:read, and the body picks the endpoint and the
+// buckets. So credentials the operator did not type sign only for the saved
+// server's own buckets, toward the saved server's own endpoint:
+//   - a typed (non-blank) secret signs for anything: those are the
+//     operator's own keys;
+//   - a blank secret reuses the saved one only for the same endpoint,
+//     addressing and access key;
+//   - no keys at all signs with the daemon's own chain only when the saved
+//     server has no keys either and the same endpoint and addressing.
+//
+// Otherwise a reader could send those credentials' signatures to a host of
+// their choosing, or learn which bucket names they can reach. A held bucket
+// is not contacted; its result says what to do.
+func s3ProbeCandidate(req serverRequest, sent map[string]json.RawMessage, saved ServerEntry, hasSaved bool) (candidate ServerEntry, typed bool, hold func(bucket string) s3Hold) {
+	for _, f := range s3ProbeFields {
+		if _, ok := sent[f]; ok {
+			typed = true
+			break
+		}
+	}
+	if !typed {
+		return saved, false, s3ProbeAll
+	}
+	candidate = ServerEntry{
+		Name:          saved.Name,
+		ArchiveS3:     strings.TrimSpace(req.ArchiveS3),
+		BaselineS3:    strings.TrimSpace(req.BaselineS3),
+		S3Endpoint:    strings.TrimSpace(req.S3Endpoint),
+		S3PathStyle:   strings.TrimSpace(req.S3PathStyle),
+		S3Region:      strings.TrimSpace(req.S3Region),
+		S3AccessKeyID: strings.TrimSpace(req.S3AccessKeyID),
+	}
+	if req.S3SecretAccessKey != nil {
+		candidate.S3SecretAccessKey = strings.TrimSpace(*req.S3SecretAccessKey)
+	}
+	if candidate.S3SecretAccessKey != "" {
+		return candidate, true, s3ProbeAll
+	}
+	var savedBuckets []string
+	if hasSaved {
+		savedBuckets = saved.s3Buckets()
+	}
+	onlySaved := func(heldAs s3Hold) func(string) s3Hold {
+		return func(b string) s3Hold {
+			if slices.Contains(savedBuckets, b) {
+				return s3Probe
+			}
+			return heldAs
+		}
+	}
+	switch {
+	case candidate.S3AccessKeyID != "":
+		if !hasSaved || !sameS3Store(candidate, saved) {
+			return candidate, true, func(string) s3Hold { return s3HoldForSecret }
+		}
+		candidate.S3SecretAccessKey = saved.S3SecretAccessKey
+		return candidate, true, onlySaved(s3HoldForSecret)
+	case hasSaved && strings.TrimSpace(saved.S3AccessKeyID) == "" && sameS3Endpoint(candidate, saved):
+		return candidate, true, onlySaved(s3HoldForKeys)
+	default:
+		return candidate, true, func(string) s3Hold { return s3HoldForKeys }
+	}
+}
+
+// sameS3Endpoint reports whether a and b send their requests to the same
+// place: endpoint and addressing as the store normalizes them. Region is left
+// out: it changes the signature, and on AWS only which regional host of the
+// same bucket answers.
+func sameS3Endpoint(a, b ServerEntry) bool {
+	sa, errA := storage.NewBucketStore(a.S3Endpoint, a.S3PathStyle, "")
+	sb, errB := storage.NewBucketStore(b.S3Endpoint, b.S3PathStyle, "")
+	return errA == nil && errB == nil &&
+		sa.Endpoint.URL == sb.Endpoint.URL && sa.Endpoint.PathStyle == sb.Endpoint.PathStyle
+}
+
+// sameSavedStore reports a typed candidate that is the saved server's store
+// unchanged (the saved secret filled in, or typed again): testing it is the
+// row's question, so a store the daemon is not applying is flagged there too.
+func sameSavedStore(candidate, saved ServerEntry, hasSaved bool) bool {
+	if !hasSaved {
+		return false
+	}
+	c, errC := candidate.BucketStore()
+	s, errS := saved.BucketStore()
+	return errC == nil && errS == nil && !s.IsZero() && c.Equal(s) &&
+		slices.Equal(candidate.s3Buckets(), saved.s3Buckets())
+}
+
+// sameS3Store is sameS3Endpoint with the same access key.
+func sameS3Store(a, b ServerEntry) bool {
+	return sameS3Endpoint(a, b) && strings.TrimSpace(a.S3AccessKeyID) == strings.TrimSpace(b.S3AccessKeyID)
+}
+
+// s3ProbeTimeout bounds each bucket's HeadBucket. Longer than the index dial
+// timeout: a store across a WAN answers slower than a MySQL next door.
+var s3ProbeTimeout = 5 * time.Second
+
+// probeS3Store runs a HeadBucket through e's S3 store for every bucket its
+// locations name that hold allows. No store: nil. A store that does not
+// validate, or names no bucket, is one result carrying why, never a 400: the
+// rest of the probe still answers. For the saved server (typed false), a
+// bucket whose applied store differs from the saved one is flagged: the
+// daemon is not using what the form shows.
+func probeS3Store(ctx context.Context, e ServerEntry, typed bool, hold func(bucket string) s3Hold) []s3ProbeResult {
+	// A typed access key with no secret to pair it with: only the routing is
+	// built, to validate it and list the buckets, and nothing is signed.
+	missingSecret := typed && strings.TrimSpace(e.S3AccessKeyID) != "" && e.S3SecretAccessKey == ""
+	var st storage.BucketStore
+	var err error
+	if missingSecret {
+		st, err = storage.NewBucketStore(e.S3Endpoint, e.S3PathStyle, e.S3Region)
+	} else {
+		st, err = e.BucketStore()
+	}
+	if err != nil {
+		return []s3ProbeResult{{Error: err.Error()}}
+	}
+	if st.IsZero() && !missingSecret {
+		return nil
+	}
+	buckets := e.s3Buckets()
+	if len(buckets) == 0 {
+		return []s3ProbeResult{{Error: "no Archive to S3 or Backups S3 location to test the S3 store with"}}
+	}
+	out := make([]s3ProbeResult, 0, len(buckets))
+	for _, b := range buckets {
+		switch h := hold(b); {
+		case h == s3HoldForSecret || missingSecret:
+			out = append(out, s3ProbeResult{Bucket: b, NeedsSecret: true})
+		case h == s3HoldForKeys:
+			out = append(out, s3ProbeResult{Bucket: b, NeedsKeys: true})
+		default:
+			res := probeS3Bucket(ctx, st, b)
+			if !typed {
+				if applied, ok := storage.BucketStoreFor(b); !ok || !applied.Equal(st) {
+					res.NotApplied = true
+				}
+			}
+			out = append(out, res)
+		}
+	}
+	return out
+}
+
+// probeS3Bucket is one HeadBucket, one attempt (the SDK would retry a dead
+// store three times, tripling the wait), bounded by s3ProbeTimeout. Logged
+// like the index probe (#848): bucket and endpoint, never a key.
+func probeS3Bucket(ctx context.Context, st storage.BucketStore, bucket string) s3ProbeResult {
+	ctx, cancel := context.WithTimeout(ctx, s3ProbeTimeout)
+	defer cancel()
+	res := s3ProbeResult{Bucket: bucket}
+	start := time.Now()
+	client, err := storage.NewS3ClientForStore(ctx, st, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
+	if err == nil {
+		_, err = client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
+	}
+	res.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		res.Error = s3ProbeError(err, st.SecretKey)
+	} else {
+		res.OK = true
+	}
+	endpoint := st.Endpoint.URL
+	if endpoint == "" {
+		endpoint = "(ambient)"
+	}
+	slog.Info("console: S3 store test probe",
+		"bucket", bucket, "endpoint", endpoint, "has_keys", st.HasKeys(),
+		"ok", res.OK, "latency_ms", res.LatencyMS, "error", res.Error)
+	return res
+}
+
+// s3ProbeError renders a probe failure with the secret removed. The SDK does
+// not put the secret in its errors today; this does not rely on that.
+func s3ProbeError(err error, secret string) string {
+	msg := err.Error()
+	if secret != "" {
+		msg = strings.ReplaceAll(msg, secret, "<redacted>")
+	}
+	return msg
 }
 
 // isUnknownDatabase reports whether err is MySQL 1049 (ER_BAD_DB_ERROR) —
@@ -887,18 +1174,20 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		S3Endpoint:  e.S3Endpoint,
 		// Lowercased: a hand-edited VHOST loads, but the form's dropdown only
 		// matches vhost, and an unrelated edit would submit "" (path style).
-		S3PathStyle:       strings.ToLower(strings.TrimSpace(e.S3PathStyle)),
-		S3Region:          e.S3Region,
-		Reconstruct:       s.cm.capability(e),
-		Editable:          !s.cm.reg.ReadOnly(),
-		Deletable:         !s.cm.reg.ReadOnly(),
-		Connected:         s.cm.cached(e.ID),
-		SourceServerID:    e.SourceServerID,
-		Schemas:           e.Schemas,
-		MonitorDesired:    e.MonitorDesired,
-		Flavor:            e.SourceFlavor(),
-		SourceSlot:        e.SourceSlot,
-		SourcePublication: e.SourcePublication,
+		S3PathStyle:          strings.ToLower(strings.TrimSpace(e.S3PathStyle)),
+		S3Region:             e.S3Region,
+		S3AccessKeyID:        e.S3AccessKeyID,
+		HasS3SecretAccessKey: e.S3SecretAccessKey != "",
+		Reconstruct:          s.cm.capability(e),
+		Editable:             !s.cm.reg.ReadOnly(),
+		Deletable:            !s.cm.reg.ReadOnly(),
+		Connected:            s.cm.cached(e.ID),
+		SourceServerID:       e.SourceServerID,
+		Schemas:              e.Schemas,
+		MonitorDesired:       e.MonitorDesired,
+		Flavor:               e.SourceFlavor(),
+		SourceSlot:           e.SourceSlot,
+		SourcePublication:    e.SourcePublication,
 	}
 	fillDSNParts(&dto, e.DSN)
 	fillSourceDSNParts(&dto, e.SourceDSN, e.SourceFlavor())

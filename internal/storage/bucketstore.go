@@ -3,9 +3,11 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // A BucketStore says where ONE bucket lives when that is not the ambient
@@ -26,6 +28,11 @@ type BucketStore struct {
 	// resolves (a custom store needs SOME region to sign with, and MinIO
 	// accepts any).
 	Region string
+	// AccessKeyID and SecretKey sign requests for this bucket instead of the
+	// ambient credential chain. Both or neither (WithKeys). The secret never
+	// renders: String, GoString and LogValue mask it, and JSON skips it.
+	AccessKeyID string
+	SecretKey   string `json:"-"`
 }
 
 // ErrBucketStoreConfig marks an endpoint, addressing style or region value a
@@ -82,8 +89,45 @@ func NewBucketStore(endpoint, style, region string) (BucketStore, error) {
 	return s, nil
 }
 
-// IsZero reports a store that routes nothing: no endpoint and no region.
-func (s BucketStore) IsZero() bool { return !s.Endpoint.Set() && s.Region == "" }
+// WithKeys returns s signing with its own access key and secret key. Both are
+// trimmed; both blank means no keys. One without the other is refused, and so
+// is a key with a space or a control character inside: no provider issues
+// one, and a pasted line break would otherwise save a key that never signs.
+// Keys with no endpoint need a region.
+// The errors never carry a key value.
+func (s BucketStore) WithKeys(id, secret string) (BucketStore, error) {
+	id, secret = strings.TrimSpace(id), strings.TrimSpace(secret)
+	switch {
+	case id == "" && secret == "":
+		s.AccessKeyID, s.SecretKey = "", ""
+		return s, nil
+	case id == "":
+		return BucketStore{}, fmt.Errorf("%w: a secret key needs its access key", ErrBucketStoreConfig)
+	case secret == "":
+		return BucketStore{}, fmt.Errorf("%w: an access key needs its secret key", ErrBucketStoreConfig)
+	case strings.IndexFunc(id, badKeyRune) >= 0:
+		return BucketStore{}, fmt.Errorf("%w: the access key contains a space or a control character", ErrBucketStoreConfig)
+	case strings.IndexFunc(secret, badKeyRune) >= 0:
+		return BucketStore{}, fmt.Errorf("%w: the secret key contains a space or a control character", ErrBucketStoreConfig)
+	}
+	if !s.Endpoint.Set() && s.Region == "" {
+		// Nothing else names a region both halves agree on: the DuckDB
+		// secret would sign as us-east-1 and the SDK with the daemon's.
+		return BucketStore{}, fmt.Errorf("%w: S3 keys with no endpoint (an AWS bucket in another account) need the bucket's region", ErrBucketStoreConfig)
+	}
+	s.AccessKeyID, s.SecretKey = id, secret
+	return s, nil
+}
+
+func badKeyRune(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }
+
+// HasKeys reports a store that signs with its own keys.
+func (s BucketStore) HasKeys() bool { return s.AccessKeyID != "" }
+
+// IsZero reports a store that changes nothing: no endpoint, no region and no
+// keys. A store with keys alone is not zero: it signs differently from the
+// ambient chain (an AWS bucket in another account).
+func (s BucketStore) IsZero() bool { return !s.Endpoint.Set() && s.Region == "" && !s.HasKeys() }
 
 // Style renders the addressing mode the way the console stores it.
 func (s BucketStore) Style() string {
@@ -96,11 +140,39 @@ func (s BucketStore) Style() string {
 	return PathStyleVHost
 }
 
-// Equal compares what matters for routing: the URL, the effective addressing
-// style and the region. Whether the style was typed or defaulted is not a
-// routing difference.
+// Equal compares what a bucket's reads and writes depend on: the routing
+// (SameRouting) and the keys. A bucket has one pair of keys, as it has one
+// endpoint.
 func (s BucketStore) Equal(o BucketStore) bool {
+	return s.SameRouting(o) && s.AccessKeyID == o.AccessKeyID && s.SecretKey == o.SecretKey
+}
+
+// SameRouting compares the URL, the effective addressing style and the
+// region. Whether the style was typed or defaulted is not a routing
+// difference.
+func (s BucketStore) SameRouting(o BucketStore) bool {
 	return s.Endpoint.URL == o.Endpoint.URL && s.Endpoint.PathStyle == o.Endpoint.PathStyle && s.Region == o.Region
+}
+
+// String renders the store with the secret masked: an exported field would
+// otherwise print with %v in any log line or error that formats a store.
+func (s BucketStore) String() string {
+	return fmt.Sprintf("BucketStore{endpoint=%q style=%q region=%q access_key_id=%q secret_key=%s}",
+		s.Endpoint.URL, s.Style(), s.Region, s.AccessKeyID, maskSecret(s.SecretKey))
+}
+
+// GoString is String for %#v.
+func (s BucketStore) GoString() string { return s.String() }
+
+// LogValue keeps slog handlers, the JSON one included, from walking the
+// exported fields.
+func (s BucketStore) LogValue() slog.Value { return slog.StringValue(s.String()) }
+
+func maskSecret(secret string) string {
+	if secret == "" {
+		return `""`
+	}
+	return "<redacted>"
 }
 
 // SigningRegion is the region requests for this bucket are signed with, the
@@ -163,24 +235,4 @@ func BucketStores() map[string]BucketStore {
 		cp[b] = s
 	}
 	return cp
-}
-
-// resolveBucketRouting is what a client built for one bucket applies on top
-// of the ambient configuration: the region to load the SDK config with, and
-// the endpoint (nil when the ambient one stands). region, when the caller
-// passed one, wins over the store's: it is more specific (a detected or
-// flag-given value for this very call).
-func resolveBucketRouting(bucket, region string) (effectiveRegion string, ep *S3Endpoint) {
-	store, ok := BucketStoreFor(bucket)
-	if !ok {
-		return region, nil
-	}
-	if region == "" {
-		region = store.SigningRegion()
-	}
-	if store.Endpoint.Set() {
-		e := store.Endpoint
-		return region, &e
-	}
-	return region, nil
 }

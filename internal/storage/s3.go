@@ -80,15 +80,19 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 // the ambient chain resolves; a store with an endpoint and no region signs as
 // us-east-1, which is also DuckDB's default for a secret that pins none.
 func newS3Client(ctx context.Context, cfg S3Config) (*s3.Client, error) {
-	region, ep := resolveBucketRouting(cfg.Bucket, cfg.Region)
-	awsCfg, err := LoadAWSConfig(ctx, region)
-	if err != nil {
-		return nil, fmt.Errorf("storage: %w", err)
-	}
-
+	store, routed := BucketStoreFor(cfg.Bucket)
 	// An explicit S3Config.Endpoint wins over everything: the caller owns the
-	// routing, and the bucket table is not consulted.
+	// routing. Only the store's region is taken; its keys belong to the
+	// store's endpoint and are never sent to another host.
 	if cfg.Endpoint != "" {
+		region := cfg.Region
+		if region == "" && routed {
+			region = store.SigningRegion()
+		}
+		awsCfg, err := LoadAWSConfig(ctx, region)
+		if err != nil {
+			return nil, fmt.Errorf("storage: %w", err)
+		}
 		return NewS3ClientFromConfig(awsCfg, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 			o.UsePathStyle = true // required for MinIO / LocalStack
@@ -96,17 +100,21 @@ func newS3Client(ctx context.Context, cfg S3Config) (*s3.Client, error) {
 	}
 	// A bucket with its own store (#1575) is routed there, as a CLIENT option:
 	// the SDK resolves AWS_ENDPOINT_URL_S3 over cfg.BaseEndpoint, and the
-	// option is what wins over both. No "unmirrored" warning for this shape:
-	// the DuckDB half carries the same store as a secret scoped to the bucket.
-	// With none, NewS3ClientFromConfig applies the shared BINTRAIL_S3_ENDPOINT
-	// routing so this backend and every other client agree on where S3 is
-	// (#1453).
-	if ep != nil {
-		url, pathStyle := ep.URL, ep.PathStyle
-		return newS3ClientRouted(awsCfg, func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(url)
-			o.UsePathStyle = pathStyle
-		}), nil
+	// option is what wins over both. It signs with the store's keys when it
+	// has them. The caller's region, when given, is more specific than the
+	// store's. With no store, NewS3ClientFromConfig applies the shared
+	// BINTRAIL_S3_ENDPOINT routing so this backend and every other client
+	// agree on where S3 is (#1453).
+	if routed {
+		region := cfg.Region
+		if region == "" {
+			region = store.SigningRegion()
+		}
+		return newStoreClient(ctx, store, region)
+	}
+	awsCfg, err := LoadAWSConfig(ctx, cfg.Region)
+	if err != nil {
+		return nil, fmt.Errorf("storage: %w", err)
 	}
 	return NewS3ClientFromConfig(awsCfg), nil
 }

@@ -273,7 +273,9 @@ How it behaves:
   single-baseline-dir deployment without extra configuration.
 - **Test connection.** Each server (saved or being typed) has a write-free
   probe: ping, MySQL version, latency, whether the database looks like a
-  DBTrail index, and whether its schema is current.
+  DBTrail index, and whether its schema is current. When the server has an
+  [S3 store](upload.md#a-store-per-server-from-the-console), it also sends a
+  `HeadBucket` for each of its buckets through that store.
 
 Security notes specific to the registry:
 
@@ -282,6 +284,12 @@ Security notes specific to the registry:
 - Passwords never travel to the browser. List/get responses carry parsed
   non-secret fields plus `has_password`; leaving the password blank on an edit
   keeps the stored one.
+- The registry file also stores each server's S3 secret key, when one is set.
+  Responses carry the access key and `has_s3_secret_access_key` only, and a
+  blank secret on an edit keeps the stored one. A user who can only read
+  servers can run `Test connection`, so it signs with a stored secret, or
+  with the daemon's own credentials, only for the saved server's buckets at
+  the saved server's endpoint.
 - **The console never migrates servers added in the UI.** The one schema
   migration (`EnsureSchema`, an idempotent ALTER) runs at startup on the DSN
   you typed on the command line — never on a DSN typed into a browser form. A

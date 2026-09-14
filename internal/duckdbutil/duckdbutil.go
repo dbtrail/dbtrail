@@ -191,14 +191,27 @@ func execOn(db *sql.DB) func(context.Context, string) error {
 // holds, so the buckets that did get a chain secret keep it. Without tryChain
 // (no aws extension) every bucket gets the config secret directly.
 //
+// A bucket whose store has keys of its own gets a PROVIDER config secret with
+// exactly those keys, and nothing else: no credential_chain attempt first (it
+// would sign with the daemon's credentials and win), no environment keys, no
+// session token (one from the environment belongs to the environment's keys).
+//
 // Credentials are best-effort, routing is not: a bucket whose fallback cannot
 // be created fails the session, because its reads would otherwise go to the
 // ambient endpoint (AWS, for a MinIO bucket). The error names the bucket and
-// never carries DuckDB's message when the statement holds the environment's keys.
+// never carries DuckDB's message when the statement holds keys, the store's
+// or the environment's.
 func applyBucketStoreSecrets(ctx context.Context, exec func(context.Context, string) error, stores map[string]storage.BucketStore, tryChain bool) error {
 	keyID, secret, token := os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), os.Getenv("AWS_SESSION_TOKEN")
 	for _, b := range sortedBuckets(stores) {
 		st := stores[b]
+		if st.HasKeys() {
+			if err := exec(ctx, bucketStoreSecret(b, st, configProvider(st.AccessKeyID, st.SecretKey, ""))); err != nil {
+				return fmt.Errorf("route DuckDB S3 reads for bucket %q to its own store with its own keys (is httpfs loaded?): %s",
+					b, withholdIfKeyed(err, "the S3 store's keys", st.AccessKeyID, st.SecretKey))
+			}
+			continue
+		}
 		if tryChain {
 			err := exec(ctx, bucketStoreSecret(b, st, chainProvider))
 			if err == nil {
@@ -209,19 +222,19 @@ func applyBucketStoreSecrets(ctx context.Context, exec func(context.Context, str
 		}
 		if err := exec(ctx, bucketStoreSecret(b, st, configProvider(keyID, secret, token))); err != nil {
 			return fmt.Errorf("route DuckDB S3 reads for bucket %q to its own store (is httpfs loaded?): %s",
-				b, withholdIfKeyed(err, keyID, secret, token))
+				b, withholdIfKeyed(err, "AWS keys from the environment", keyID, secret, token))
 		}
 	}
 	return nil
 }
 
-// withholdIfKeyed renders the error of a statement that may carry keys from
-// the environment. Key values are removed wherever they appear whole; and a
+// withholdIfKeyed renders the error of a statement that may carry keys; source
+// says whose, for the message. Key values are removed wherever they appear whole; and a
 // message that echoes the statement at all is withheld, because DuckDB can
 // echo a WINDOW of it that cuts a key in the middle, where no replacement of
 // the whole value finds it. Anything else passes: the usual failure (httpfs
 // not loaded) names no key and is the one diagnostic the operator has.
-func withholdIfKeyed(err error, keys ...string) string {
+func withholdIfKeyed(err error, source string, keys ...string) string {
 	msg := err.Error()
 	keyed := false
 	for _, k := range keys {
@@ -237,7 +250,7 @@ func withholdIfKeyed(err error, keys ...string) string {
 	}
 	for _, marker := range []string{"LINE ", "KEY_ID", "SECRET", "SESSION_TOKEN", "SCOPE", "PROVIDER"} {
 		if strings.Contains(msg, marker) {
-			return "DuckDB's message is withheld because it echoes the statement, which carries AWS keys from the environment"
+			return "DuckDB's message is withheld because it echoes the statement, which carries " + source
 		}
 	}
 	// Nothing of the statement is echoed: the message is safe, and it is the diagnostic.

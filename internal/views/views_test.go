@@ -305,6 +305,32 @@ func TestGenerate_bucketStores(t *testing.T) {
 		}
 	}
 
+	// A store with keys of its own (set in the console) still gets
+	// credential_chain here: the file leaves the process, the keys never do.
+	// The note says what the reader of the file needs instead.
+	keyed, err := minio.WithKeys("AKIASTOREKEY", "storesecretvalue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withKeys := goldenInput()
+	withKeys.BucketStores = map[string]storage.BucketStore{"keyed-b": keyed}
+	keyedOut := Generate(withKeys)
+	for _, leak := range []string{"AKIASTOREKEY", "storesecretvalue"} {
+		if strings.Contains(keyedOut, leak) {
+			t.Errorf("views.sql carries a store key (%s):\n%s", leak, keyedOut)
+		}
+	}
+	if !strings.Contains(keyedOut, "PROVIDER credential_chain, SCOPE 's3://keyed-b/'") {
+		t.Errorf("a keyed bucket lost its scoped secret:\n%s", keyedOut)
+	}
+	const keyNote = "-- Some of these buckets sign with keys set in the console, which this file never carries:"
+	if !strings.Contains(keyedOut, keyNote) {
+		t.Errorf("a keyed bucket without the note on keys:\n%s", keyedOut)
+	}
+	if strings.Contains(got, keyNote) {
+		t.Error("the note on keys appears with no keyed bucket")
+	}
+
 	local := Input{
 		GeneratedAt:    time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
 		ArchiveSources: []string{"/data/archives/bintrail_id=abc"},
