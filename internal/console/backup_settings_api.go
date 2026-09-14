@@ -104,6 +104,11 @@ type backupSettingsServerDTO struct {
 	// not possible either, "every run reads your whole database" would be
 	// false; nothing runs at all.
 	FullBackupPossible bool `json:"full_backup_possible"`
+	// ScheduleLoop is whether this process runs scheduled backups at all. A
+	// read-only console, or a daemon without the backup loop, answers false
+	// for full_backup_possible for a reason no setting on this server fixes,
+	// so the S3-only warning must not say "cannot run on this server" there.
+	ScheduleLoop bool `json:"schedule_loop"`
 }
 
 // The three provenance verdicts a server's backup location can have. The
@@ -187,6 +192,7 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 		dto.Source = backupSourceNone
 	}
 	dto.FullBackupPossible = FullBackupPossible(e, s.scheduleGates()) == nil
+	dto.ScheduleLoop = s.backupSchedules != nil
 	if e.BackupSchedule != nil {
 		dto.ScheduleEvery = e.BackupSchedule.Every
 		dto.ScheduleAt = e.BackupSchedule.At

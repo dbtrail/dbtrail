@@ -4666,7 +4666,10 @@ function backupServersPanel(settings) {
 // and where this daemon cannot take one either, nothing runs at all. The
 // values are compared as stored, untrimmed, the way the daemon reads them.
 function s3OnlyBackupWarning(srv) {
-  if (!srv || srv.baseline_dir || !srv.baseline_s3) return "";
+  // A saved schedule that cannot run already says why, more precisely.
+  if (!srv || srv.baseline_dir || !srv.baseline_s3 || srv.schedule_refusal) return "";
+  // Where this process runs no scheduled backups, only the setting is known.
+  if (!srv.schedule_loop) return "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Backup dir.";
   if (!srv.full_backup_possible) {
     return "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Backup dir. Add one.";
   }
@@ -6342,7 +6345,9 @@ function backupScheduleCard(cur, b) {
       // Nor when the next-run warning above already says the same remedy.
       if (run.method !== "refresh" && run.why && run.why_code !== everyRunCode &&
           !(fb && (run.why_code === "fold_refused" || run.why_code === "fold_crashed"))) {
-        body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code, true) }));
+        // In the past tense when the next-run warning carries a remedy: a
+        // second remedy for a different setting would read as a contradiction.
+        body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code, !everyRunCode) }));
       }
     }
     if (fb) {

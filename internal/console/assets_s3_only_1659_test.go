@@ -25,20 +25,6 @@ func TestS3OnlyBackupWarning_1659(t *testing.T) {
 	row := jsFunctionBody(t, js, "backupServerRow")
 	card := functionBody(t, js, "function backupScheduleCard(")
 
-	// Mounted right after the fields, from the SAVED entry, outside every
-	// schedule branch, and in red: the exact lines, because the class and the
-	// call also occur elsewhere in the row.
-	const call = `const s3Only = s3OnlyBackupWarning(srv);`
-	const mount = `if (s3Only) box.append(el("p", { class: "form-msg err", text: s3Only }));`
-	grid, c, m, sched := strings.Index(row, "box.append(grid);"), strings.Index(row, call), strings.Index(row, mount), strings.Index(row, "if (srv.schedule_every)")
-	if grid < 0 || c < 0 || m < 0 || sched < 0 || !(grid < c && c < m && m < sched) {
-		t.Errorf("the S3-only warning is not computed and mounted in red between the fields and the schedule block (grid %d, call %d, mount %d, schedule %d)", grid, c, m, sched)
-	} else if depth := strings.Count(row[grid:m], "{") - strings.Count(row[grid:m], "}"); depth != strings.Count(row[grid:m], "({") {
-		// Every brace opened between the fields and the mount must be an
-		// object literal closed on its own line; an unclosed block brace means
-		// the warning went back inside a condition, the regression #1659 removed.
-		t.Errorf("the S3-only warning is mounted inside a block (%d unclosed braces between the fields and the mount)", depth)
-	}
 	// Saving repaints the row, which is what takes the warning down once a
 	// Backup dir is saved.
 	if save := strings.Index(row, `toast("Saved for " + (srv.name || srv.id));`); save < 0 || !strings.HasPrefix(strings.TrimSpace(stripLineComments(row[save+len(`toast("Saved for " + (srv.name || srv.id));`):])), "renderRoute();") {
@@ -79,9 +65,9 @@ function lastRun(sch, everyRunCode) {
   const out = [], body = { append: (n) => out.push(n.text) };
   let alarm = false;
   ` + lastRunBlock(t, card) + `
-  return out.length;
+  return out;
 }
-const srv = (o) => Object.assign({ baseline_dir: "", baseline_s3: "", full_backup_possible: true }, o);
+const srv = (o) => Object.assign({ baseline_dir: "", baseline_s3: "", full_backup_possible: true, schedule_loop: true }, o);
 const out = {
   warn: [
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p" })),
@@ -90,6 +76,8 @@ const out = {
     s3OnlyBackupWarning(srv({ baseline_dir: "/d" })),
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", full_backup_possible: false })),
     s3OnlyBackupWarning(null),
+    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_loop: false, full_backup_possible: false })),
+    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_refusal: "creating backups from the console is turned off" })),
   ],
   alarms: [
     nextRun({ runnable: true, next_method: "full", next_method_why: "an update from the recorded changes needs a local backup directory", next_method_why_code: "no_local_dir" }),
@@ -120,7 +108,7 @@ console.log(JSON.stringify(out));
 		Warn    []string
 		Alarms  [][]any
 		Lines   []struct{ Class, Text string }
-		LastRun []int
+		LastRun [][]string
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
@@ -132,7 +120,7 @@ console.log(JSON.stringify(out));
 	if got.Warn[0] != fullRead {
 		t.Errorf("S3 without a folder is not warned with the agreed sentence: %q", got.Warn[0])
 	}
-	for _, i := range []int{1, 2, 3, 5} {
+	for _, i := range []int{1, 2, 3, 5, 7} {
 		if got.Warn[i] != "" {
 			t.Errorf("case %d warned where it must not: %q", i, got.Warn[i])
 		}
@@ -172,11 +160,18 @@ console.log(JSON.stringify(out));
 	if got.Lines[3].Class != "form-msg err" || !strings.Contains(got.Lines[3].Text, "Set an index connection") {
 		t.Errorf("no index connection: not a red line naming the setting: %+v", got.Lines[3])
 	}
-	// The last run's full-backup reason is skipped only when the next-run warning
-	// already carries the same remedy: one line (the run) when the codes match,
-	// two (the run and its reason) otherwise.
-	if want := []int{1, 2, 2}; len(got.LastRun) != 3 || got.LastRun[0] != want[0] || got.LastRun[1] != want[1] || got.LastRun[2] != want[2] {
-		t.Errorf("last-run lines = %v, want %v", got.LastRun, want)
+	// Where this process runs no scheduled backups, only the setting is known.
+	if got.Warn[6] != "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Backup dir." {
+		t.Errorf("no schedule loop: %q", got.Warn[6])
+	}
+	// The last run's full-backup reason: skipped when the next-run warning
+	// carries the same remedy, in the past tense when it carries another, and
+	// with its remedy when there is no warning.
+	if len(got.LastRun) != 3 || len(got.LastRun[0]) != 1 || len(got.LastRun[1]) != 2 || len(got.LastRun[2]) != 2 {
+		t.Fatalf("last-run lines = %q", got.LastRun)
+	}
+	if strings.Contains(got.LastRun[1][1], "Set a Backup dir") || !strings.Contains(got.LastRun[2][1], "Set a Backup dir") {
+		t.Errorf("last-run reason tense: next-run warning elsewhere %q, no warning %q", got.LastRun[1][1], got.LastRun[2][1])
 	}
 }
 
@@ -251,6 +246,9 @@ func TestBackupSettings_fullBackupPossibleReachesTheWire(t *testing.T) {
 				if row.FullBackupPossible != tc.want {
 					t.Errorf("full_backup_possible = %v, want %v", row.FullBackupPossible, tc.want)
 				}
+				if row.ScheduleLoop != (tc.rep != nil) {
+					t.Errorf("schedule_loop = %v with reporter %v", row.ScheduleLoop, tc.rep != nil)
+				}
 				raw, _ := json.Marshal(row)
 				if !strings.Contains(string(raw), `"full_backup_possible":`) {
 					t.Errorf("the row does not serialise full_backup_possible: %s", raw)
@@ -259,5 +257,99 @@ func TestBackupSettings_fullBackupPossibleReachesTheWire(t *testing.T) {
 			}
 			t.Fatal("the S3-only server is not in the listing")
 		})
+	}
+}
+
+// TestBackupServerRow_s3OnlyWarningRendered renders the real Backup settings
+// row: the whole app.js in a node VM with fake page elements. A shape check on
+// the source could not tell a warning mounted inside a condition from one that
+// is not; the rendered row can.
+func TestBackupServerRow_s3OnlyWarningRendered(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv(requireNodeEnv) != "" {
+			t.Fatalf("%s is set and node is not on PATH", requireNodeEnv)
+		}
+		t.Skip("node is not installed")
+	}
+	appJS, err := filepath.Abs("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `const fs = require("fs"), vm = require("vm");
+class FakeEl {
+  constructor(tag) { this.tag = tag; this.children = []; this.className = ""; this._text = ""; this.attrs = {}; this.hidden = false; this.nodeType = 1; this.value = ""; this.checked = false; this.style = {}; this.dataset = {};
+    this.classList = { add: (c) => { this.className += " " + c; }, remove() {}, toggle() {}, contains: () => false }; }
+  set textContent(v) { this._text = String(v); this.children = []; }
+  get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
+  append(...k) { for (const x of k) if (x != null) this.children.push(x); }
+  appendChild(x) { this.children.push(x); return x; }
+  prepend(...k) { this.children.unshift(...k); }
+  replaceChildren(...k) { this.children = k; }
+  setAttribute(k, v) { this.attrs[k] = v; if (k === "value") this.value = v; }
+  getAttribute(k) { return this.attrs[k]; }
+  addEventListener() {} removeEventListener() {}
+  querySelector() { return null; } querySelectorAll() { return []; }
+  set innerHTML(v) { this._text = String(v); }
+}
+const permissive = () => new Proxy(function () {}, { get: (t, p) => p === Symbol.toPrimitive ? () => "" : (p === "then" ? undefined : permissive()), apply: () => permissive(), construct: () => permissive() });
+const document = { createElement: (t) => new FakeEl(t), createTextNode: (s) => ({ nodeType: 3, textContent: String(s) }), addEventListener() {}, querySelector: () => null, querySelectorAll: () => [], body: new FakeEl("body"), documentElement: new FakeEl("html"), getElementById: () => null, createElementNS: (n, t) => new FakeEl(t) };
+const ctx = { document, console, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, URLSearchParams, URL, Intl, Date, Math, JSON, Set, Map, RegExp, Promise,
+  location: { pathname: "/settings", search: "", hash: "", origin: "http://x" }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, sessionStorage: { getItem: () => null, setItem() {} },
+  navigator: permissive(), history: permissive(), fetch: () => new Promise(() => {}), matchMedia: () => ({ matches: false, addEventListener() {} }), DOMParser: function () { this.parseFromString = () => ({ documentElement: new FakeEl("svg") }); },
+  requestAnimationFrame: () => 0, MutationObserver: function () { this.observe = () => {}; }, ResizeObserver: function () { this.observe = () => {}; }, IntersectionObserver: function () { this.observe = () => {}; }, getComputedStyle: () => ({}), CSS: { supports: () => false }, performance: { now: () => 0 }, EventSource: function () {} };
+ctx.window = ctx; ctx.globalThis = ctx; ctx.self = ctx;
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "\n;globalThis.__row = backupServerRow;", ctx);
+function red(n, out = []) {
+  if (!n || n.nodeType === 3) return out;
+  if (n.tag === "p" && /form-msg/.test(n.className) && /err/.test(n.className) && !n.hidden) { out.push(n.textContent); return out; }
+  for (const c of n.children || []) red(c, out);
+  return out;
+}
+const base = { id: "a", name: "a", kind: "registry", baseline_dir: "", baseline_s3: "s3://b/p", full_backup_possible: true, schedule_loop: true };
+const rows = {
+  noSchedule: base,
+  withSchedule: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440 }),
+  refused: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440, schedule_refusal: "creating backups from the console is turned off" }),
+  noLoop: Object.assign({}, base, { schedule_loop: false, full_backup_possible: false }),
+  withDir: Object.assign({}, base, { baseline_dir: "/var/lib/bintrail/baselines/a" }),
+};
+const out = {};
+for (const [k, r] of Object.entries(rows)) out[k] = red(ctx.__row(r, false, [r], ""));
+console.log(JSON.stringify(out));
+`
+	path := filepath.Join(t.TempDir(), "row.js")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := exec.Command(node, path, appJS).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, raw)
+	}
+	var got map[string][]string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	const fullRead = "With S3 only, every scheduled backup reads your whole database. Add a Backup dir so runs update from the recorded changes."
+	has := func(lines []string, want string) bool {
+		for _, l := range lines {
+			if l == want {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(got["noSchedule"], fullRead) || !has(got["withSchedule"], fullRead) {
+		t.Errorf("the S3-only warning is not rendered in red with and without a schedule: %q", got)
+	}
+	if has(got["refused"], fullRead) || len(got["refused"]) != 1 || !strings.Contains(got["refused"][0], "creating backups from the console is turned off") {
+		t.Errorf("a refused schedule shows the S3-only line next to its own reason: %q", got["refused"])
+	}
+	if !has(got["noLoop"], "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Backup dir.") {
+		t.Errorf("no schedule loop: %q", got["noLoop"])
+	}
+	if len(got["withDir"]) != 0 {
+		t.Errorf("a server with a Backup dir is warned: %q", got["withDir"])
 	}
 }
