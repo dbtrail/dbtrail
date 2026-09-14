@@ -313,6 +313,13 @@ func (b *bundle) findBaseline(ctx context.Context, schema, table string, at time
 		// the snapshot it hides; ask it before refusing or settling for an
 		// older local one, and say why the answer came from there.
 		fpath, ftime, fstale, ferr := reconstruct.FindBaseline(ctx, b.baselineFallbackSrc, schema, table, at)
+		if ferr != nil && !errors.Is(ferr, reconstruct.ErrNoBaseline) {
+			// Kept to the log: the local answer (or its refusal) still stands
+			// and says why, but a destination that cannot be read is a second
+			// problem nobody would otherwise see.
+			slog.Warn("backup lookup: the backup destination could not be read either",
+				"table", schema+"."+table, "destination", b.baselineFallbackSrc, "err", ferr)
+		}
 		if ferr != nil || (err == nil && !ftime.After(snapshotTime)) {
 			return path, snapshotTime, stale, err
 		}
@@ -322,7 +329,7 @@ func (b *bundle) findBaseline(ctx context.Context, schema, table string, at time
 				cause = err.Error()
 			}
 			fstale = reconstruct.StaleWarning{
-				Message:        "read from the backup destination because a local backup folder could not be read: " + cause,
+				Message:        "read from the backup destination because a local backup folder could not be read, so a newer backup may exist there: " + cause,
 				UsingSnapshot:  ftime,
 				NewestSnapshot: ftime,
 				Unreadable:     true,

@@ -24,7 +24,8 @@ func TestUnreadableNewestBaseline(t *testing.T) {
 	}{
 		{"nothing skipped", readable, nil, false},
 		{"older skipped", readable, []time.Time{older.Add(-time.Hour)}, false},
-		{"skipped between two readable ones", readable, []time.Time{older.Add(time.Hour)}, false},
+		{"skipped between two readable ones, both tables in the newest", append(readable, baseline.BaselineInfo{SnapshotTime: newest, Database: "shop", Table: "a"}), []time.Time{older.Add(time.Hour)}, false},
+		{"skipped after the newest copy of one table (a --tables snapshot holds the other)", readable, []time.Time{older.Add(time.Hour)}, true},
 		{"newer skipped", readable, []time.Time{newest.Add(time.Hour)}, true},
 		{"schema folder of the newest skipped", readable, []time.Time{newest}, true},
 		{"nothing readable, something skipped", nil, []time.Time{older}, true},

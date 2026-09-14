@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +60,43 @@ func TestBundleFindBaseline_unreadableLocalAsksTheDurableCopy(t *testing.T) {
 		path, at, _, err := b.findBaseline(context.Background(), "shop", "a", t2.Add(time.Hour))
 		if err != nil || !strings.HasPrefix(path, durable) || !at.Equal(t2) {
 			t.Fatalf("path=%s at=%v err=%v; want the newer snapshot from the durable copy", path, at, err)
+		}
+	})
+	t.Run("durable copy cannot be read either: keep the local answer and its warning", func(t *testing.T) {
+		local, durable := t.TempDir(), t.TempDir()
+		mk(t, local, t1)
+		lock(t, mk(t, local, t2))
+		lock(t, mk(t, durable, t2))
+		b := &bundle{baselineSrc: local, baselineFallbackSrc: durable}
+		path, at, stale, err := b.findBaseline(context.Background(), "shop", "a", t2.Add(time.Hour))
+		if err != nil || !strings.HasPrefix(path, local) || !at.Equal(t1) || !stale.Unreadable {
+			t.Fatalf("path=%s at=%v stale=%+v err=%v; want the local answer, not the destination's error", path, at, stale, err)
+		}
+	})
+	t.Run("only local folder unreadable, durable copy empty: the refusal, not no-baseline", func(t *testing.T) {
+		local, durable := t.TempDir(), t.TempDir()
+		lock(t, mk(t, local, t2))
+		b := &bundle{baselineSrc: local, baselineFallbackSrc: durable}
+		_, _, _, err := b.findBaseline(context.Background(), "shop", "a", t2.Add(time.Hour))
+		if !errors.Is(err, reconstruct.ErrUnreadableSnapshot) || errors.Is(err, reconstruct.ErrNoBaseline) {
+			t.Fatalf("err = %v; want the unreadable-folder refusal", err)
+		}
+	})
+	t.Run("newest local readable but without the table: the stale local answer, destination not asked", func(t *testing.T) {
+		local, durable := t.TempDir(), t.TempDir()
+		mk(t, local, t1)
+		other := filepath.Join(local, reconstruct.SnapshotDirName(t2), "shop")
+		if err := os.MkdirAll(other, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(other, "b.parquet"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mk(t, durable, t2)
+		b := &bundle{baselineSrc: local, baselineFallbackSrc: durable}
+		path, at, stale, err := b.findBaseline(context.Background(), "shop", "a", t2.Add(time.Hour))
+		if err != nil || !strings.HasPrefix(path, local) || !at.Equal(t1) || !stale.Stale() || stale.Unreadable {
+			t.Fatalf("path=%s at=%v stale=%+v err=%v; want the stale local answer", path, at, stale, err)
 		}
 	})
 	t.Run("durable copy is no newer: keep the local answer and its warning", func(t *testing.T) {

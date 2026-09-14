@@ -327,21 +327,31 @@ func runStatus(cmd *cobra.Command, args []string) error {
 }
 
 // unreadableNewestBaseline refuses to grade a partial baseline walk (#1639):
-// a folder that could not be read at or after the newest readable snapshot may
-// be the real newest, and grading the older one would report "aging" or
-// "broken" for a table that is current. The caller then reports the baselines
-// as unavailable, the verdict a wholly unreadable directory already gets. A
-// skipped folder older than the newest changes nothing.
+// a folder that could not be read at or after a table's newest readable
+// snapshot may hold a newer copy of that table, and grading the older one
+// would report "aging" or "broken" for a table that is current. Staleness is
+// graded per table, so the floor is the OLDEST of the per-table newest
+// snapshots: a `--tables` snapshot holding one table must not vouch for the
+// others. The caller then reports the baselines as unavailable, the verdict a
+// wholly unreadable directory already gets. A skipped folder older than every
+// table's newest changes nothing.
 func unreadableNewestBaseline(baselines []baseline.BaselineInfo, unreadable []time.Time) error {
-	var newest time.Time
+	newest := make(map[string]time.Time)
 	for _, b := range baselines {
-		if b.SnapshotTime.After(newest) {
-			newest = b.SnapshotTime
+		key := b.Database + "." + b.Table
+		if b.SnapshotTime.After(newest[key]) {
+			newest[key] = b.SnapshotTime
+		}
+	}
+	var floor time.Time
+	for _, at := range newest {
+		if floor.IsZero() || at.Before(floor) {
+			floor = at
 		}
 	}
 	for _, u := range unreadable {
-		if !u.Before(newest) {
-			return fmt.Errorf("a baseline folder from %s could not be read, and it is not older than the newest readable one", u.UTC().Format(time.RFC3339))
+		if !u.Before(floor) {
+			return fmt.Errorf("a baseline folder from %s could not be read, and it is not older than the newest readable baseline of every table", u.UTC().Format(time.RFC3339))
 		}
 	}
 	return nil

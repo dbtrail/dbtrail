@@ -262,7 +262,7 @@ func TestListBaselinesMerged_marksEveryFileTheBucketListed(t *testing.T) {
 
 // A STALE LOCAL COPY SHADOWS THE FRESH OFFSITE ONE, and that is broken, not
 // unreachable, on a server whose Restore reads the local directory.
-// bundle.findBaseline falls back to the bucket only on ErrNoBaseline (#766); a
+// bundle.findBaseline falls back to the bucket only on ErrNoBaseline (#766) or an unreadable local folder (#1639); a
 // table with any local snapshot at-or-before the instant gets a nil error, so
 // the fallback never fires and time travel resolves the stale copy. No console
 // surface reaches the fresh S3 sibling.

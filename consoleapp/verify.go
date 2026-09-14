@@ -498,16 +498,28 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 		// #1639: a folder the walk could not read sits at or after the pair,
 		// so no pair can be trusted. Every table in scope is inconclusive with
 		// the cause, never graded over an older pair.
-		filter, _ := tableFilter(req.Tables)
+		filter, seen := tableFilter(req.Tables)
 		n := 0
 		for _, tm := range resolver.AllTables() {
-			if filter != nil && !filter[tm.Schema+"."+tm.Table] {
+			key := tm.Schema + "." + tm.Table
+			if filter != nil && !filter[key] {
 				continue
 			}
+			delete(seen, key)
 			n++
 			s.appendResult(req.ServerID, toWireResult(verify.TableResult{
 				Schema: tm.Schema, Table: tm.Table, Status: verify.StatusInconclusive,
 				Detail: "not verified: " + err.Error(),
+			}, false))
+		}
+		// A requested table the schema snapshot does not know is an error,
+		// as on the normal path and in the CLI, never silently dropped.
+		for key := range seen {
+			schema, table, _ := strings.Cut(key, ".")
+			n++
+			s.appendResult(req.ServerID, toWireResult(verify.TableResult{
+				Schema: schema, Table: table, Status: verify.StatusError,
+				Detail: "requested via the tables filter but not present in the schema snapshot",
 			}, false))
 		}
 		if n == 0 {

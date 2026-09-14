@@ -820,7 +820,7 @@ func writeBaselinesUnavailable(w io.Writer, err error) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "=== Baselines ===")
 	fmt.Fprintf(w, "Unavailable: %v\n", err)
-	fmt.Fprintln(w, "Baseline staleness is NOT evaluated; fix the folder permissions and run status again.")
+	fmt.Fprintln(w, "⚠ BASELINE STALENESS NOT EVALUABLE: fix the cause above and run status again.")
 }
 
 // writeStreamUnavailable renders a visible Stream block when stream_state could not

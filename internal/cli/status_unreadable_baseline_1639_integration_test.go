@@ -90,7 +90,7 @@ func TestRunStatus_unreadableNewestBaselineIsNotGraded(t *testing.T) {
 	var textErr error
 	text := captureStdout(t, func() { textErr = runStatus(statusCmd, nil) })
 	stFormat = "json"
-	if textErr != nil || !strings.Contains(text, "=== Baselines ===") || !strings.Contains(text, "could not be read") || !strings.Contains(text, "NOT evaluated") {
+	if textErr != nil || !strings.Contains(text, "=== Baselines ===") || !strings.Contains(text, "could not be read") || !strings.Contains(text, "BASELINE STALENESS NOT EVALUABLE") {
 		t.Errorf("text report with the newest folder unreadable (err %v):\n%s", textErr, text)
 	}
 
