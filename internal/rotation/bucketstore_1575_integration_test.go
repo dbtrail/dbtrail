@@ -28,6 +28,10 @@ func TestPerformRotation_archiveUploadUsesTheBucketStore(t *testing.T) {
 	t.Setenv(storage.EnvS3PathStyle, "")
 	t.Setenv("AWS_ENDPOINT_URL_S3", "")
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
 	st, err := storage.NewBucketStore("http://minio:9000", "", "")
 	if err != nil {
 		t.Fatal(err)

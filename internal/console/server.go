@@ -543,7 +543,7 @@ func New(cfg Config) (*Server, error) {
 	// Every server that inherits that bucket reads it with the process-wide
 	// endpoint, so no per-server store may claim it (#1575).
 	if cfg.Registry != nil && cfg.BaselineS3 != "" {
-		cfg.Registry.SetProcessS3Location("the daemon's --baseline-s3 default", cfg.BaselineS3)
+		cfg.Registry.SetProcessS3Location(DaemonBaselineS3Label, cfg.BaselineS3)
 	}
 
 	// Seed the ephemeral boot bundle when the caller supplied a command-line

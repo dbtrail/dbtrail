@@ -145,6 +145,11 @@ func TestEnableS3CredentialChain_bucketStores(t *testing.T) {
 	t.Setenv("AWS_SESSION_TOKEN", "")
 	t.Setenv(storage.EnvS3PathStyle, "")
 	t.Setenv(storage.EnvS3Endpoint, "")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
 	ctx := context.Background()
 
 	check := func(t *testing.T, db *sql.DB, wantProvider string) {
@@ -378,5 +383,98 @@ func TestBucketStoreSecret_signsLikeTheSDK_DuckDB(t *testing.T) {
 	}
 	if !strings.Contains(desc, "region=us-east-1") {
 		t.Errorf("the scoped secret does not sign as us-east-1, the region the same store's uploads sign with: %s", desc)
+	}
+}
+
+// With no keys in the environment (an instance role, the common deployment)
+// nothing needs hiding, and DuckDB's message is the only diagnostic there is.
+func TestApplyBucketStoreSecrets_messageKeptWithoutKeys(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	stores := map[string]storage.BucketStore{"b": store(t, "http://minio:9000", "", "")}
+	exec := func(_ context.Context, stmt string) error { return errors.New("Catalog Error: httpfs not loaded") }
+	err := applyBucketStoreSecrets(context.Background(), exec, stores, false)
+	if err == nil || !strings.Contains(err.Error(), "httpfs not loaded") {
+		t.Errorf("a keyless session lost DuckDB's message: %v", err)
+	}
+}
+
+// A store with only a region (no endpoint) on a process with a process-wide
+// endpoint: uploads keep that endpoint (TestNewS3Client_explicitEndpointAndEnvPrecedence),
+// so reads must too. Measured on DuckDB: a scoped secret without ENDPOINT
+// falls back to the session's s3_endpoint setting.
+func TestBucketStoreSecret_regionOnlyKeepsTheProcessEndpoint_DuckDB(t *testing.T) {
+	t.Setenv(storage.EnvS3Endpoint, "http://127.0.0.1:1")
+	t.Setenv(storage.EnvS3PathStyle, "")
+	ctx := context.Background()
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := LoadHTTPFS(ctx, db); err != nil {
+		t.Skip("httpfs unavailable (offline host)")
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ep, err := storage.S3EndpointFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range append(S3SettingStatements("", ep), "SET http_retries=0") {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	stores := map[string]storage.BucketStore{"pinned": store(t, "", "", "ap-south-1")}
+	for _, stmt := range bucketStoreConfigSecretStatements(stores, "k", "s", "") {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var n int
+	err = conn.QueryRowContext(ctx, "SELECT count(*) FROM read_parquet('s3://pinned/x.parquet')").Scan(&n)
+	if err == nil || !strings.Contains(err.Error(), "127.0.0.1:1") {
+		t.Errorf("a region-only bucket's read did not go to the process-wide endpoint: %v", err)
+	}
+}
+
+// Keys in the environment do not make every message dangerous: only one that
+// echoes the statement is. The usual failure (no httpfs) names no key and is
+// the only diagnostic there is.
+func TestApplyBucketStoreSecrets_plainMessageKeptWithKeys(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sup3rs3cret")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	stores := map[string]storage.BucketStore{"b": store(t, "http://minio:9000", "", "")}
+	exec := func(_ context.Context, stmt string) error {
+		return errors.New("Invalid Input Error: Secret type 's3' not found, try loading httpfs")
+	}
+	err := applyBucketStoreSecrets(context.Background(), exec, stores, false)
+	if err == nil || !strings.Contains(err.Error(), "try loading httpfs") {
+		t.Errorf("a message that names no key was withheld: %v", err)
+	}
+}
+
+// A message that does not echo the statement passes, but never with a key
+// value in it: a store's own error can quote the key it rejected, spelled as
+// typed or as the statement SQL-quoted it (a quote doubled).
+func TestApplyBucketStoreSecrets_keyValueRemovedFromAPlainMessage(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s'cr3t")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	stores := map[string]storage.BucketStore{"b": store(t, "http://minio:9000", "", "")}
+	for name, spelled := range map[string]string{"as typed": "s'cr3t", "SQL-quoted": "s''cr3t"} {
+		exec := func(_ context.Context, stmt string) error {
+			return errors.New("HTTP Error: access denied for secret " + spelled)
+		}
+		err := applyBucketStoreSecrets(context.Background(), exec, stores, false)
+		if err == nil || strings.Contains(err.Error(), "cr3t") || !strings.Contains(err.Error(), "access denied") {
+			t.Errorf("%s: want the message kept with the key removed: %v", name, err)
+		}
 	}
 }

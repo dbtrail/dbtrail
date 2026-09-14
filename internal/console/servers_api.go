@@ -877,15 +877,17 @@ func buildMySQLSourceDSN(req serverRequest, stored string) (string, error) {
 // plus has_password. The DSN string itself never leaves the process.
 func (s *Server) entryDTO(e ServerEntry) serverDTO {
 	dto := serverDTO{
-		ID:                e.ID,
-		Name:              e.Name,
-		Kind:              "registry",
-		BaselineDir:       e.BaselineDir,
-		BaselineS3:        e.BaselineS3,
-		NoArchive:         e.NoArchive,
-		ArchiveS3:         e.ArchiveS3,
-		S3Endpoint:        e.S3Endpoint,
-		S3PathStyle:       e.S3PathStyle,
+		ID:          e.ID,
+		Name:        e.Name,
+		Kind:        "registry",
+		BaselineDir: e.BaselineDir,
+		BaselineS3:  e.BaselineS3,
+		NoArchive:   e.NoArchive,
+		ArchiveS3:   e.ArchiveS3,
+		S3Endpoint:  e.S3Endpoint,
+		// Lowercased: a hand-edited VHOST loads, but the form's dropdown only
+		// matches vhost, and an unrelated edit would submit "" (path style).
+		S3PathStyle:       strings.ToLower(strings.TrimSpace(e.S3PathStyle)),
 		S3Region:          e.S3Region,
 		Reconstruct:       s.cm.capability(e),
 		Editable:          !s.cm.reg.ReadOnly(),

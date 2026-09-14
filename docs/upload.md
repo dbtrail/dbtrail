@@ -179,7 +179,12 @@ every store. What the setting does:
   own reads the daemon's `--baseline-s3`; that bucket keeps the process-wide
   behaviour, whatever the server's store says, and a store on a server that
   names that bucket itself is refused (HTTP 422): it would take over every
-  server that inherits it.
+  server that inherits it. A store saved before the daemon was started with
+  that bucket as its `--baseline-s3` stops applying, with a warning at
+  startup naming the bucket.
+- The server form still shows a store that is saved but not applied (a
+  hand-edited conflict, or a store on a bucket that later became the
+  daemon's `--baseline-s3`). The startup log names the bucket and the reason.
 - The store follows the server's **current** locations. Archives written to
   a bucket before the server's `Archive to S3` moved elsewhere, or before its
   store was cleared, are read through whatever routes that bucket now: keep a

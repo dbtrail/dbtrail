@@ -215,16 +215,33 @@ func applyBucketStoreSecrets(ctx context.Context, exec func(context.Context, str
 	return nil
 }
 
-// withholdIfKeyed renders the error of a statement that carried keys: not at
-// all. DuckDB echoes a statement it cannot parse, sometimes as a WINDOW that
-// cuts a key in the middle, where no replacement of the whole value finds it.
+// withholdIfKeyed renders the error of a statement that may carry keys from
+// the environment. Key values are removed wherever they appear whole; and a
+// message that echoes the statement at all is withheld, because DuckDB can
+// echo a WINDOW of it that cuts a key in the middle, where no replacement of
+// the whole value finds it. Anything else passes: the usual failure (httpfs
+// not loaded) names no key and is the one diagnostic the operator has.
 func withholdIfKeyed(err error, keys ...string) string {
+	msg := err.Error()
+	keyed := false
 	for _, k := range keys {
-		if k != "" {
-			return "DuckDB's message is withheld because the statement carries AWS keys from the environment"
+		if k == "" {
+			continue
+		}
+		keyed = true
+		msg = strings.ReplaceAll(msg, strings.ReplaceAll(k, "'", "''"), "<redacted>")
+		msg = strings.ReplaceAll(msg, k, "<redacted>")
+	}
+	if !keyed {
+		return err.Error()
+	}
+	for _, marker := range []string{"LINE ", "KEY_ID", "SECRET", "SESSION_TOKEN", "SCOPE", "PROVIDER"} {
+		if strings.Contains(msg, marker) {
+			return "DuckDB's message is withheld because it echoes the statement, which carries AWS keys from the environment"
 		}
 	}
-	return err.Error()
+	// Nothing of the statement is echoed: the message is safe, and it is the diagnostic.
+	return msg
 }
 
 const chainProvider = ", PROVIDER credential_chain"

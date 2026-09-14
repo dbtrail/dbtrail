@@ -357,11 +357,22 @@ func bucketStoresOf(entries []ServerEntry, process map[string]string) (map[strin
 func (r *Registry) syncBucketStores() {
 	table, conflicts := bucketStoresOf(r.file.Servers, r.processBuckets)
 	for _, c := range conflicts {
-		slog.Warn("server registry: two servers read the same S3 bucket from different stores (one of them may have no store set); the bucket uses the ambient endpoint until they agree",
+		if label, ok := r.processBuckets[c.Bucket]; ok && label == c.ServerA {
+			// Not a disagreement two servers can resolve: a store on this
+			// bucket is refused outright (checkBucketStore).
+			slog.Warn("server registry: a server's S3 store names the daemon's --baseline-s3 bucket, which servers with no Backups location of their own read with the process-wide endpoint; the store is not applied to that bucket. Give the server another bucket, or set BINTRAIL_S3_ENDPOINT for the whole process",
+				"bucket", c.Bucket, "server", c.ServerB)
+			continue
+		}
+		slog.Warn("server registry: the same S3 bucket is read from different stores (one side may have no store set, or be the daemon's --baseline-s3 default); the bucket uses the ambient endpoint until they agree",
 			"bucket", c.Bucket, "server_a", c.ServerA, "server_b", c.ServerB)
 	}
 	storage.SetBucketStores(table)
 }
+
+// DaemonBaselineS3Label names the daemon's --baseline-s3 bucket in refusals
+// and warnings about a store claiming it.
+const DaemonBaselineS3Label = "the daemon's --baseline-s3 default"
 
 // SetProcessS3Location registers an S3 location the daemon reads for servers
 // with none of their own: the --baseline-s3 fallback (withBaselineDefaults)
@@ -370,8 +381,14 @@ func (r *Registry) syncBucketStores() {
 // it with a store is refused, and a hand-edited one leaves it unrouted. label
 // names the setting in refusals and warnings. Called before serving.
 func (r *Registry) SetProcessS3Location(label, loc string) {
-	bucket, _, err := storage.ParseS3URL(strings.TrimSpace(loc))
+	// Parsed as typed: the daemon's readers test the raw value for an s3://
+	// prefix, so a padded one is a local directory to them, not a bucket.
+	bucket, _, err := storage.ParseS3URL(loc)
 	if err != nil {
+		if loc != "" {
+			slog.Warn("server registry: the daemon's default S3 location is not an s3://bucket/prefix/ URL, so no bucket is reserved for it",
+				"setting", label, "location", loc, "error", err)
+		}
 		return
 	}
 	r.mu.Lock()

@@ -160,7 +160,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if serversPath == "" {
 		serversPath = console.DefaultRegistryPath()
 	}
-	registry, err := console.LoadRegistry(serversPath)
+	registry, err := loadConsoleRegistry(serversPath, conBaselineS3)
 	if err != nil {
 		return err
 	}

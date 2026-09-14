@@ -461,8 +461,21 @@ func TestRegistryS3Store_daemonDefaultBucketHasNoStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineS3: "s3://daemon/baselines/"}); err != nil {
+	var logged bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	_, err = New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineS3: "s3://daemon/baselines/"})
+	slog.SetDefault(prevLog)
+	if err != nil {
 		t.Fatal(err)
+	}
+	for _, want := range []string{"bucket=daemon", "server=A", "--baseline-s3", "BINTRAIL_S3_ENDPOINT"} {
+		if !strings.Contains(logged.String(), want) {
+			t.Errorf("the warning for a store on the daemon's bucket does not carry %s: %s", want, logged.String())
+		}
+	}
+	if strings.Contains(logged.String(), "until they agree") {
+		t.Errorf("the warning says the sides can agree, but a store on the daemon's bucket is always refused: %s", logged.String())
 	}
 	if _, ok := storage.BucketStoreFor("daemon"); ok {
 		t.Error("a hand-edited store on the daemon's default Backups bucket must not route it")
@@ -496,5 +509,51 @@ func TestBackupSettings_s3StoreRefusals(t *testing.T) {
 	}
 	if _, ok := storage.BucketStoreFor("bk"); !ok {
 		t.Error("a refused backup-settings save unrouted the bucket")
+	}
+}
+
+// A hand-edited style in capitals loads (the store lowercases it), and the
+// form must get it back in the spelling its dropdown matches: otherwise an
+// unrelated edit submits "" and silently switches the bucket to path style.
+func TestServersAPI_s3PathStyleNormalizedForTheForm(t *testing.T) {
+	clearStores(t)
+	file := "version: 1\nservers:\n  - id: aaaaaaaaaaaaaaaa\n    name: A\n    index_dsn: u:p@tcp(h:3306)/a\n    archive_s3: s3://arch/a/\n    s3_endpoint: http://minio:9000\n    s3_path_style: VHOST\n"
+	path := filepath.Join(t.TempDir(), "servers.yaml")
+	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, body := doServersReq(t, srv, "GET", "/api/servers/aaaaaaaaaaaaaaaa", "")
+	if rec.Code != 200 || !strings.Contains(string(body), `"s3_path_style":"vhost"`) {
+		t.Errorf("GET: %d %s, want s3_path_style vhost", rec.Code, body)
+	}
+}
+
+// The daemon's readers take --baseline-s3 as typed (a value that does not
+// start with s3:// is a local directory to them), so the registry parses it
+// the same way, and says so when it reserves nothing.
+func TestRegistry_SetProcessS3LocationParsesLikeItsReaders(t *testing.T) {
+	clearStores(t)
+	r, err := LoadRegistry("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	r.SetProcessS3Location(DaemonBaselineS3Label, " s3://padded/b/")
+	slog.SetDefault(prevLog)
+	if !strings.Contains(logged.String(), "padded") {
+		t.Errorf("no warning for a default location that reserves no bucket: %s", logged.String())
+	}
+	if _, err := r.Add(ServerEntry{Name: "A", DSN: "u:p@tcp(h:3306)/a", ArchiveS3: "s3://padded/a/", S3Endpoint: "http://minio:9000"}); err != nil {
+		t.Errorf("a default location the readers never treat as S3 blocked a store: %v", err)
 	}
 }
