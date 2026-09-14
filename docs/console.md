@@ -377,10 +377,23 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   does stop shrinking, so fix the bucket/credentials. The archived Parquet is
   unencrypted; rely on bucket-level SSE/policy. Archive to S3 ≠ Baseline S3
   (the latter is read-side Time-travel input).
+- **S3 store** (the `S3 endpoint`, `S3 addressing` and `S3 region` fields
+  under Archive to S3): where this server's buckets live when that is not
+  AWS or the process-wide `BINTRAIL_S3_ENDPOINT`, e.g. `http://minio:9000`
+  for MinIO or `https://s3.eu-central-1.wasabisys.com` + region
+  `eu-central-1` for Wasabi. Locations only, no keys: the daemon's ambient
+  credential chain signs for every store. Applied **per bucket** to the
+  Archive and Backups buckets, for uploads and DuckDB reads alike; two
+  servers naming one bucket with different stores, one of them possibly
+  none, is refused (422), and a store needs this server's own Archive or
+  Backups location, never the daemon's `--baseline-s3` bucket. Details
+  in [upload.md → A store per server](upload.md#a-store-per-server-from-the-console).
 - Registry fields: `source_dsn` (replication credentials — a secret with the
   same masking/keep-password discipline as the index DSN; `source_dsn: ""`
   clears it), `source_server_id` (0 = derived), `schemas`, `monitor_desired`,
   `archive_s3` (the bucket above — non-secret, round-trips in the masked DTO),
+  `s3_endpoint` / `s3_path_style` (`path`, `vhost` or empty = path with an
+  endpoint) / `s3_region` (the S3 store above — non-secret, round-trip too),
   and per-source TLS: `ssl_mode` / `ssl_ca` / `ssl_cert` / `ssl_key` (same
   semantics as `bintrail stream`'s `--ssl-*` flags — see
   [streaming.md → TLS/SSL for managed MySQL](streaming.md#tlsssl-for-managed-mysql-rds-aurora-cloud-sql)).

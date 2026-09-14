@@ -155,6 +155,60 @@ Notes:
 - Object Lock and `s3:GetBucketLocation` behave as the store implements
   them; `doctor --archive-s3` reports what it can query.
 
+#### A store per server, from the console
+
+`BINTRAIL_S3_ENDPOINT` is one setting for the whole process. When different
+servers keep their buckets in different places (one in MinIO, one in AWS, one
+in Wasabi's `eu-central-1`), the console sets the store **per server**
+instead: the server form's `S3 endpoint`, `S3 addressing` and `S3 region`
+fields (registry keys `s3_endpoint`, `s3_path_style`, `s3_region`). The
+values are locations, never keys: the daemon's credential chain signs for
+every store. What the setting does:
+
+- It applies **per bucket**. Every bucket the server's `Archive to S3` and
+  Backups S3 locations name is routed to that store, for the SDK uploads
+  (rotation's archiving, baseline upload and prune) and for every DuckDB
+  read alike, whichever server asked for it. A bucket has one store, and
+  "no store" counts as one: two servers naming the same bucket with
+  different settings is refused (HTTP 422), including when one of them has
+  no store set, since that one reads the bucket from AWS or the process-wide
+  endpoint.
+- A store needs the server's **own** `Archive to S3` or Backups S3 location.
+  A store with neither is refused, and so is one beside a location that is
+  not an `s3://bucket/prefix/` URL. A server with no Backups location of its
+  own reads the daemon's `--baseline-s3`; that bucket keeps the process-wide
+  behaviour, whatever the server's store says, and a store on a server that
+  names that bucket itself is refused (HTTP 422): it would take over every
+  server that inherits it. A store saved before the daemon was started with
+  that bucket as its `--baseline-s3` stops applying, with a warning at
+  startup naming the bucket.
+- The server form still shows a store that is saved but not applied (a
+  hand-edited conflict, or a store on a bucket that later became the
+  daemon's `--baseline-s3`). The startup log names the bucket and the reason.
+- The store follows the server's **current** locations. Archives written to
+  a bucket before the server's `Archive to S3` moved elsewhere, or before its
+  store was cleared, are read through whatever routes that bucket now: keep a
+  server naming that bucket with the same store for as long as those archives
+  are read.
+- Without DuckDB's aws extension, a bucket whose endpoint-only secret cannot
+  be created fails the whole read session, not only reads under that bucket,
+  since sending that bucket's reads to AWS instead would be worse.
+- The DuckDB half gets one secret **scoped to the bucket**
+  (`SCOPE 's3://<bucket>/'`), which DuckDB picks over the general one for
+  paths under it. `views.sql` carries the same scoped secrets, still
+  `credential_chain`, still no keys.
+- `S3 addressing` defaults to path style when an endpoint is set (MinIO,
+  LocalStack); `vhost` is for a store that only serves `bucket.host` URLs.
+  A style without an endpoint is refused. `S3 region` alone (no endpoint)
+  is allowed: it pins the signing region for a bucket outside the default
+  one on AWS. MinIO ignores the region; Wasabi wants the one in its
+  endpoint's name. With an endpoint and no region, uploads and DuckDB reads
+  both sign as `us-east-1`.
+- Buckets without a store keep the process-wide behaviour above.
+- Keys per server and a `Test connection` that exercises the store are not
+  part of this: the per-server setting covers where the store is, the
+  ambient chain covers who signs.
+
 ### Minimum IAM permissions
 
 > Want one policy that covers `upload` **and** archiving/baselines/queries

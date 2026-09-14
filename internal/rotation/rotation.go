@@ -126,7 +126,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 					if err != nil {
 						return Result{}, fmt.Errorf("invalid --archive-s3: %w", err)
 					}
-					s3Client, err = storage.NewS3Client(ctx, opts.ArchiveS3Region)
+					s3Client, err = storage.NewS3ClientForBucket(ctx, s3Bucket, opts.ArchiveS3Region)
 					if err != nil {
 						return Result{}, fmt.Errorf("init S3 client: %w", err)
 					}

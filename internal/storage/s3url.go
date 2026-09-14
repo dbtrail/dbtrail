@@ -38,13 +38,21 @@ func ParseS3URL(u string) (bucket, prefix string, err error) {
 
 // NewS3Client creates an S3 client using the default AWS credential chain.
 // region is optional — if empty, the SDK resolves it from AWS_REGION env var
-// or ~/.aws/config.
+// or ~/.aws/config. A caller that knows which bucket it is about to touch
+// uses NewS3ClientForBucket instead, so a per-bucket store applies.
 func NewS3Client(ctx context.Context, region string) (*s3.Client, error) {
 	awsCfg, err := LoadAWSConfig(ctx, region)
 	if err != nil {
 		return nil, err
 	}
 	return NewS3ClientFromConfig(awsCfg), nil
+}
+
+// NewS3ClientForBucket is NewS3Client for one bucket: when the console has
+// registered a store for it (#1575), the client goes there, with that store's
+// addressing style and region. With no store it is NewS3Client exactly.
+func NewS3ClientForBucket(ctx context.Context, bucket, region string) (*s3.Client, error) {
+	return newS3Client(ctx, S3Config{Bucket: bucket, Region: region})
 }
 
 // NewS3ClientFromConfig is the one constructor every S3 client in the tree
@@ -55,9 +63,17 @@ func NewS3Client(ctx context.Context, region string) (*s3.Client, error) {
 // bare s3.NewFromConfig would reach MinIO at a virtual-hosted URL and fail on
 // DNS. extra options are applied AFTER the addressing option and win.
 func NewS3ClientFromConfig(cfg aws.Config, extra ...func(*s3.Options)) *s3.Client {
-	client := s3.NewFromConfig(cfg, append(S3ClientOptions(), extra...)...)
+	client := newS3ClientRouted(cfg, extra...)
 	warnIfEndpointUnmirrored(client)
 	return client
+}
+
+// newS3ClientRouted is NewS3ClientFromConfig without the unmirrored-endpoint
+// warning, for a client whose endpoint came from a bucket store: that store
+// IS mirrored to DuckDB, as a secret scoped to the bucket, so the warning
+// would be false there.
+func newS3ClientRouted(cfg aws.Config, extra ...func(*s3.Options)) *s3.Client {
+	return s3.NewFromConfig(cfg, append(S3ClientOptions(), extra...)...)
 }
 
 // warnIfEndpointUnmirrored reports an endpoint the SDK resolved that bintrail

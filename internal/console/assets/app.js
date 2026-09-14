@@ -8872,7 +8872,18 @@ function buildServerForm() {
   monGrid.append(tagFlavor(srvField("Publication", "source_publication", { placeholder: "bintrail_pub" }), "postgres"));
   monGrid.append(srvField("Schemas", "schemas", { placeholder: "(optional) shop,billing" }));
   monGrid.append(srvField("Archive to S3", "archive_s3", { placeholder: "(optional) s3://bucket/prefix/" }));
+  // S3 store (#1575): where this server's buckets live when that is not AWS.
+  // Three plain values, no keys: the daemon's credential chain signs for every
+  // store. They apply per BUCKET, to uploads and reads alike, for the Archive
+  // bucket above and the Backups bucket on the settings page.
+  monGrid.append(srvField("S3 endpoint", "s3_endpoint", { placeholder: "(optional) http://minio:9000 for MinIO, Wasabi, LocalStack" }));
+  monGrid.append(el("label", { class: "field" },
+    el("span", { class: "field-label", text: "S3 addressing" }),
+    el("select", { class: "input", name: "s3_path_style" },
+      opt("", "Path style (default with an endpoint)"), opt("path", "Path style: host/bucket/key"), opt("vhost", "Virtual-hosted: bucket.host/key"))));
+  monGrid.append(srvField("S3 region", "s3_region", { placeholder: "(optional) us-east-1; MinIO ignores it, Wasabi wants its endpoint's" }));
   mon.append(monGrid);
+  mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Backups locations set on this server, for uploads and reads alike, not to the daemon's default Backups location; a bucket has one store, so two servers sharing a bucket must agree." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
   // SELECT covers the information_schema snapshot of columns/PKs/FKs.
@@ -8994,7 +9005,7 @@ function showServerForm(prefill) {
 
   if (prefill) {
     form.elements.id.value = prefill.id || "";
-    ["name", "host", "port", "user", "dbname", "baseline_dir", "baseline_s3", "archive_s3", "source_host", "source_port", "source_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
+    ["name", "host", "port", "user", "dbname", "baseline_dir", "baseline_s3", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "source_host", "source_port", "source_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
       if (form.elements[k] && prefill[k] != null) form.elements[k].value = prefill[k];
     });
     if (form.elements.no_archive) form.elements.no_archive.checked = !!prefill.no_archive;
@@ -9033,6 +9044,7 @@ function serverFormBody(form) {
     baseline_dir: f.baseline_dir.value.trim(), baseline_s3: f.baseline_s3.value.trim(),
     no_archive: !!f.no_archive.checked,
     archive_s3: f.archive_s3.value.trim(),
+    s3_endpoint: f.s3_endpoint.value.trim(), s3_path_style: f.s3_path_style.value, s3_region: f.s3_region.value.trim(),
     source_host: f.source_host.value.trim(), source_port: f.source_port.value.trim(),
     source_user: f.source_user.value.trim(), schemas: f.schemas.value.trim(),
     source_database: f.source_database.value.trim(),

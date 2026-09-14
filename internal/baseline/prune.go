@@ -151,7 +151,7 @@ func PruneLocal(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("baseline prune: invalid S3 URL %q: %w", opts.S3URL, err)
 	}
-	client, err := storage.NewS3Client(ctx, opts.S3Region)
+	client, err := storage.NewS3ClientForBucket(ctx, bucket, opts.S3Region)
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("baseline prune: %w", err)
 	}

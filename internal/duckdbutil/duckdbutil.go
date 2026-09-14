@@ -6,9 +6,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/storage"
@@ -137,8 +139,9 @@ func EnableS3CredentialChainRegion(ctx context.Context, db *sql.DB, region strin
 		return err
 	}
 
+	stores := storage.BucketStores()
 	if os.Getenv("BINTRAIL_DUCKDB_NO_AWS_EXT") != "" {
-		return nil
+		return applyBucketStoreSecrets(ctx, execOn(db), stores, false)
 	}
 	ensureWritableHome()
 	if _, err := db.ExecContext(ctx, "INSTALL aws; LOAD aws;"); err != nil {
@@ -149,7 +152,7 @@ func EnableS3CredentialChainRegion(ctx context.Context, db *sql.DB, region strin
 			slog.Warn("duckdb: aws extension unavailable and no AWS env keys set — profile/role credentials will NOT apply to this S3 read; expect an authentication failure",
 				"error", err)
 		}
-		return nil
+		return applyBucketStoreSecrets(ctx, execOn(db), stores, false)
 	}
 	// The secret repeats the endpoint the settings applied above already carry.
 	// DuckDB's secrets manager can take precedence over a SET for matching
@@ -167,7 +170,157 @@ func EnableS3CredentialChainRegion(ctx context.Context, db *sql.DB, region strin
 		slog.Warn("duckdb: AWS credential chain resolved no usable credentials for S3 reads",
 			"error", err)
 	}
+	return applyBucketStoreSecrets(ctx, execOn(db), stores, true)
+}
+
+// execOn adapts a *sql.DB to the statement runner applyBucketStoreSecrets
+// takes (a seam, so a per-bucket failure can be tested without a DuckDB that
+// fails for one bucket and not another).
+func execOn(db *sql.DB) func(context.Context, string) error {
+	return func(ctx context.Context, stmt string) error {
+		_, err := db.ExecContext(ctx, stmt)
+		return err
+	}
+}
+
+// applyBucketStoreSecrets creates one secret per bucket with its own store
+// (#1575), bucket by bucket. With tryChain each bucket first gets a
+// credential_chain secret; a bucket whose chain secret fails (DuckDB refuses
+// one that resolves no credentials, at CREATE) falls back ALONE to an
+// endpoint-only PROVIDER config secret carrying whatever keys the environment
+// holds, so the buckets that did get a chain secret keep it. Without tryChain
+// (no aws extension) every bucket gets the config secret directly.
+//
+// Credentials are best-effort, routing is not: a bucket whose fallback cannot
+// be created fails the session, because its reads would otherwise go to the
+// ambient endpoint (AWS, for a MinIO bucket). The error names the bucket and
+// never carries DuckDB's message when the statement holds the environment's keys.
+func applyBucketStoreSecrets(ctx context.Context, exec func(context.Context, string) error, stores map[string]storage.BucketStore, tryChain bool) error {
+	keyID, secret, token := os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), os.Getenv("AWS_SESSION_TOKEN")
+	for _, b := range sortedBuckets(stores) {
+		st := stores[b]
+		if tryChain {
+			err := exec(ctx, bucketStoreSecret(b, st, chainProvider))
+			if err == nil {
+				continue
+			}
+			slog.Warn("duckdb: AWS credential chain resolved no usable credentials for a bucket with its own store; routing it by endpoint alone",
+				"bucket", b, "error", err)
+		}
+		if err := exec(ctx, bucketStoreSecret(b, st, configProvider(keyID, secret, token))); err != nil {
+			return fmt.Errorf("route DuckDB S3 reads for bucket %q to its own store (is httpfs loaded?): %s",
+				b, withholdIfKeyed(err, keyID, secret, token))
+		}
+	}
 	return nil
+}
+
+// withholdIfKeyed renders the error of a statement that may carry keys from
+// the environment. Key values are removed wherever they appear whole; and a
+// message that echoes the statement at all is withheld, because DuckDB can
+// echo a WINDOW of it that cuts a key in the middle, where no replacement of
+// the whole value finds it. Anything else passes: the usual failure (httpfs
+// not loaded) names no key and is the one diagnostic the operator has.
+func withholdIfKeyed(err error, keys ...string) string {
+	msg := err.Error()
+	keyed := false
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		keyed = true
+		msg = strings.ReplaceAll(msg, strings.ReplaceAll(k, "'", "''"), "<redacted>")
+		msg = strings.ReplaceAll(msg, k, "<redacted>")
+	}
+	if !keyed {
+		return err.Error()
+	}
+	for _, marker := range []string{"LINE ", "KEY_ID", "SECRET", "SESSION_TOKEN", "SCOPE", "PROVIDER"} {
+		if strings.Contains(msg, marker) {
+			return "DuckDB's message is withheld because it echoes the statement, which carries AWS keys from the environment"
+		}
+	}
+	// Nothing of the statement is echoed: the message is safe, and it is the diagnostic.
+	return msg
+}
+
+const chainProvider = ", PROVIDER credential_chain"
+
+// configProvider is PROVIDER config with whichever environment keys are set.
+func configProvider(keyID, secret, token string) string {
+	provider := ", PROVIDER config"
+	if keyID != "" {
+		provider += ", KEY_ID " + sqlQuote(keyID)
+	}
+	if secret != "" {
+		provider += ", SECRET " + sqlQuote(secret)
+	}
+	if token != "" {
+		provider += ", SESSION_TOKEN " + sqlQuote(token)
+	}
+	return provider
+}
+
+// BucketStoreSecretStatements renders one credential_chain secret per bucket
+// with its own store, in bucket order: what views.sql carries (never keys).
+func BucketStoreSecretStatements(stores map[string]storage.BucketStore) []string {
+	return renderBucketStoreSecrets(stores, chainProvider)
+}
+
+// bucketStoreConfigSecretStatements is the same set with PROVIDER config and
+// the given keys: the endpoint-only fallback.
+func bucketStoreConfigSecretStatements(stores map[string]storage.BucketStore, keyID, secret, token string) []string {
+	return renderBucketStoreSecrets(stores, configProvider(keyID, secret, token))
+}
+
+func renderBucketStoreSecrets(stores map[string]storage.BucketStore, provider string) []string {
+	if len(stores) == 0 {
+		return nil
+	}
+	stmts := make([]string, 0, len(stores))
+	for _, b := range sortedBuckets(stores) {
+		stmts = append(stmts, bucketStoreSecret(b, stores[b], provider))
+	}
+	return stmts
+}
+
+func sortedBuckets(stores map[string]storage.BucketStore) []string {
+	buckets := make([]string, 0, len(stores))
+	for b := range stores {
+		buckets = append(buckets, b)
+	}
+	sort.Strings(buckets)
+	return buckets
+}
+
+// bucketStoreSecret renders one bucket's secret. The SCOPE ends in "/": the
+// match is a string prefix, and s3://prod would otherwise capture every read
+// of s3://prod-archive. REGION is the store's SigningRegion, never left out:
+// a secret without one signs with the session's s3_region, not the us-east-1
+// the SDK signs the same store's uploads with.
+func bucketStoreSecret(bucket string, st storage.BucketStore, provider string) string {
+	return "CREATE OR REPLACE SECRET " + bucketSecretName(bucket) + " (TYPE s3" + provider +
+		", SCOPE " + sqlQuote("s3://"+bucket+"/") + S3SecretClauses(st.SigningRegion(), st.Endpoint) + ")"
+}
+
+// bucketSecretName is a stable identifier for a bucket's secret: the bucket
+// with everything but [a-z0-9] folded to '_' (bucket names may carry dots
+// and hyphens, identifiers may not), plus a short hash so "a-b" and "a.b"
+// do not collide.
+func bucketSecretName(bucket string) string {
+	var b strings.Builder
+	b.WriteString("bintrail_s3_bucket_")
+	for _, r := range bucket {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	h := fnv.New32a()
+	h.Write([]byte(bucket))
+	fmt.Fprintf(&b, "_%08x", h.Sum32())
+	return b.String()
 }
 
 // applyS3Routing pins WHERE this session's s3:// requests go, as session

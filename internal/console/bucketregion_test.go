@@ -8,6 +8,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 
+	"github.com/dbtrail/dbtrail/internal/storage"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
@@ -153,5 +154,34 @@ func TestCachedBucketRegion_failureExpiresButDetectionDoesNot(t *testing.T) {
 	s.cachedBucketRegion(ctx, &cfg, &loaded, "stale-miss")
 	if s.bucketRegions["stale-miss"].at.Equal(before) {
 		t.Error("a failed detection older than the TTL was never retried; a transient cause would stick forever")
+	}
+}
+
+// A bucket with its own store is signed by its own scoped secret, which
+// always names a region; it has no say in the file-wide pin. Asking would go
+// to the ambient endpoint (AWS for a MinIO bucket), and a cached answer from
+// before the store was set would keep speaking for it.
+func TestArchiveRegion_skipsBucketsWithTheirOwnStore(t *testing.T) {
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	st, err := storage.NewBucketStore("http://minio:9000", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.SetBucketStores(map[string]storage.BucketStore{"archives": st})
+	t.Cleanup(func() { storage.SetBucketStores(nil) })
+	layout := views.Input{
+		ArchiveSources: []string{"s3://archives/events/bintrail_id=aaa"},
+		Baselines:      []views.BaselineTable{{Path: "s3://baselines/x/shop/orders.parquet"}},
+	}
+	for name, seed := range map[string]bucketRegionEntry{
+		"a stale detection": detected("us-west-2"),
+		"a guess":           fellBack("us-east-1"),
+	} {
+		s := &Server{bucketRegions: map[string]bucketRegionEntry{"archives": seed, "baselines": detected("eu-central-1")}}
+		region, ambiguous := s.archiveRegion(context.Background(), layout)
+		if region != "eu-central-1" || ambiguous {
+			t.Errorf("%s cached for the routed bucket: got (%q, %v), want (eu-central-1, false)", name, region, ambiguous)
+		}
 	}
 }

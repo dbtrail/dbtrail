@@ -342,7 +342,15 @@ func sharedS3Client(ctx context.Context) (*s3.Client, error) {
 }
 
 func sdkOpenS3Object(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
-	client, err := sharedS3Client(ctx)
+	var client *s3.Client
+	var err error
+	if _, routed := storage.BucketStoreFor(bucket); routed {
+		// A bucket with its own store (#1575) cannot share the default-region
+		// client: it has its own endpoint and region.
+		client, err = storage.NewS3ClientForBucket(ctx, bucket, "")
+	} else {
+		client, err = sharedS3Client(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}

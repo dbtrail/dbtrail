@@ -28,6 +28,17 @@ import (
 // where nothing is pinned, that reader's own credential chain resolves the
 // right region on its own. Guessing is strictly worse than silence there.
 func DetectBucketRegion(ctx context.Context, cfg aws.Config, bucket string) (string, bool) {
+	// A bucket with its own store (#1575) is not asked: the question would go
+	// to the AMBIENT endpoint, which for a MinIO bucket is AWS, where a bucket
+	// of the same name may belong to someone else. The operator's region is
+	// the answer when they typed one (a fact worth publishing); with none the
+	// store signs as us-east-1, and that is a default, not a detection.
+	if store, ok := BucketStoreFor(bucket); ok && store.Endpoint.Set() {
+		if store.Region != "" {
+			return store.Region, true
+		}
+		return "us-east-1", false
+	}
 	locClient := NewS3ClientFromConfig(cfg, func(o *s3.Options) {
 		o.Region = "us-east-1"
 	})

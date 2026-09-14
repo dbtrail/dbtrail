@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 const secretPW = "s3cr3t-hunter2"
@@ -21,6 +23,7 @@ const secretPW = "s3cr3t-hunter2"
 // surface end to end.
 func newRegistryServer(t *testing.T) *Server {
 	t.Helper()
+	clearStores(t)
 	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -873,6 +876,8 @@ func TestRegistryErrStatus(t *testing.T) {
 		{errors.New("server name is required"), 400},
 		{errors.New(`"default" is reserved for the command-line server`), 400},
 		{errors.New("disk exploded"), 500},
+		{fmt.Errorf("%w: endpoint: bad", storage.ErrBucketStoreConfig), 400},
+		{fmt.Errorf("%w: bucket x", ErrS3StoreConflict), 422},
 	}
 	for _, tc := range cases {
 		if got := registryErrStatus(tc.err); got != tc.want {

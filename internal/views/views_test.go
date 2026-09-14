@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/archive"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // goldenInput is the fixture layout: one local archive source and one S3 one
@@ -256,5 +257,62 @@ func TestGenerate_aNewlineInAPathCannotEscapeTheHeaderComment(t *testing.T) {
 					"comment, leaving this line for DuckDB to execute: %q", name, line)
 			}
 		}
+	}
+}
+
+// TestGenerate_bucketStores: a bucket with its own store (#1575) gets a
+// secret scoped to it, credential_chain like the general one, with the
+// store's endpoint and region and never a key. A file with no S3 paths
+// emits none even when stores are configured.
+func TestGenerate_bucketStores(t *testing.T) {
+	minio, err := storage.NewBucketStore("http://minio:9000", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := storage.NewBucketStore("", "", "ap-south-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stores := map[string]storage.BucketStore{"minio-b": minio, "pinned": pinned}
+
+	in := goldenInput()
+	in.BucketStores = stores
+	got := Generate(in)
+	for _, want := range []string{
+		"SCOPE 's3://minio-b/', REGION 'us-east-1', ENDPOINT 'minio:9000', URL_STYLE 'path', USE_SSL false);",
+		"SCOPE 's3://pinned/', REGION 'ap-south-1');",
+		"PROVIDER credential_chain, SCOPE",
+		"-- Buckets that live in a store of their own",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// The scoped secrets come AFTER the general one: an interactive DuckDB
+	// runs statements in order, and CREATE OR REPLACE of the general secret
+	// does not touch the scoped ones, but the reader looks for them together.
+	if strings.Index(got, "bintrail_s3_chain (") > strings.Index(got, "SCOPE 's3://minio-b/'") {
+		t.Error("scoped secrets rendered before the general one")
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		for _, forbidden := range []string{"KEY_ID '", "SECRET '", "SESSION_TOKEN"} {
+			if strings.Contains(line, forbidden) {
+				t.Errorf("executable line carries %q: %s", forbidden, line)
+			}
+		}
+	}
+
+	local := Input{
+		GeneratedAt:    time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		ArchiveSources: []string{"/data/archives/bintrail_id=abc"},
+		BaselineSource: "/data/baselines",
+		Baselines:      []BaselineTable{{Schema: "shop", Table: "orders", Path: "/data/baselines/2026-04-30T03-00-00Z/shop/orders.parquet"}},
+		BucketStores:   stores,
+	}
+	if out := Generate(local); strings.Contains(out, "SCOPE 's3://") {
+		t.Errorf("a local-only file emitted a bucket secret:\n%s", out)
 	}
 }
