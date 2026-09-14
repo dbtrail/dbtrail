@@ -36,7 +36,7 @@ func PKChangingUpdateError(schema, table, before, after string) error {
 // not publish the carried CREATE TABLE, and it checks the types it exports
 // itself (sameTableTypes).
 func CheckBaselineSchemaCurrent(createSQL string, tm *metadata.TableMeta, schema, table string) error {
-	return checkBaselineSchema(createSQL, tm, schema, table, false)
+	return checkBaselineSchema(createSQL, tm, nil, schema, table)
 }
 
 // MaterializeBaselineLocal returns a local path for a baseline Parquet file:

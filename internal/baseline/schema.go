@@ -255,8 +255,8 @@ func declaredType(s string) string {
 // present (MySQL prints ZEROFILL only together with UNSIGNED), and the byte
 // offset where the declaration ends.
 //
-// Single-quoted strings inside the arguments are skipped whole (” is how SHOW
-// CREATE TABLE escapes a quote, and it reads as two adjacent strings here,
+// Single-quoted strings inside the arguments are skipped whole (a doubled
+// single quote is how SHOW CREATE TABLE escapes one, and it reads as two adjacent strings here,
 // which skips the same bytes), so an ENUM or SET label holding ')' does not end
 // the list. An argument list that never closes runs to the end of s: callers
 // compare spellings, and an unterminated one can only compare unequal.

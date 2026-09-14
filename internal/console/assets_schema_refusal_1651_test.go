@@ -18,7 +18,9 @@ import (
 // for a terminal ("bintrail dump + bintrail baseline", "bintrail snapshot"),
 // which a console user cannot run. The text comes from the real refusal, not a
 // copy of it, so a rewording on the Go side fails here instead of leaking the
-// commands back onto the page.
+// commands back onto the page. The whole sentence is pinned: the Go text around
+// the remedy (the reasoning aimed at a terminal user, the sentinel's own words
+// after a colon) read as a broken sentence on the page.
 func TestBackupFoldError_schemaRefusalNamesNoCommand(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -53,9 +55,10 @@ func TestBackupFoldError_schemaRefusalNamesNoCommand(t *testing.T) {
 			t.Errorf("rendered refusal still contains %q:\n%s", banned, got)
 		}
 	}
-	for _, want := range []string{"gone since: gone", "Only a full backup taken after that change can be updated from the recorded changes.", "schema changed"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("rendered refusal lacks %q:\n%s", want, got)
-		}
+	const want = "reconstruct shop.orders: shop.orders changed shape since its baseline was taken " +
+		"(added since: none; gone since: gone; type changed since: none). " +
+		"Updating it from the recorded changes needs a backup taken after that change."
+	if got != want {
+		t.Errorf("rendered refusal:\n got %s\nwant %s", got, want)
 	}
 }

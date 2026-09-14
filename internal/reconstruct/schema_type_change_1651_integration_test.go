@@ -26,15 +26,24 @@ import (
 // that fit, published INT in the footer (#1651). The refusal must be the
 // schema-change refusal, raised before anything is written.
 //
-// The control is the same shape with `int(11)` in the baseline and `int` in the
-// schema: a display width a server upgrade dropped is not a type change, and a
-// refresh over it must publish.
+// Types are compared against the schema snapshot in effect at the target, and
+// only when it was taken after the baseline. Three controls pin that: a
+// display width a server upgrade dropped is not a change; a type change after
+// the target does not refuse a fold that stops before it (a restore to an
+// earlier moment); and a snapshot older than the baseline says nothing about
+// the baseline's types, so a stale one cannot refuse every run.
 func TestRefresh_columnTypeChange(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	ctx := context.Background()
 	const schema, table = "shop", "t"
 
-	run := func(t *testing.T, baselineCType, snapshotCType, value string) (string, string, []reconstruct.TableFailure, error) {
+	// snap is one schema snapshot: when it was taken, relative to the
+	// baseline, and the type it records for c.
+	type snap struct {
+		offset time.Duration
+		ctype  string
+	}
+	run := func(t *testing.T, baselineCType string, snaps []snap, value string) (string, string, []reconstruct.TableFailure, error) {
 		t.Helper()
 		db, dbName := testutil.CreateTestDB(t)
 		if err := indexer.CreateIndexTables(ctx, db, 48, false, nil); err != nil {
@@ -46,16 +55,18 @@ func TestRefresh_columnTypeChange(t *testing.T) {
 		base := time.Now().UTC().Truncate(time.Hour)
 		cut := base.Add(30 * time.Second)
 
-		ts := base.Format("2006-01-02 15:04:05")
-		for _, c := range []struct{ name, key, dataType, columnType string }{
-			{"id", "PRI", "int", "int"},
-			{"c", "", strings.SplitN(snapshotCType, "(", 2)[0], snapshotCType},
-		} {
-			testutil.MustExec(t, db, `INSERT INTO schema_snapshots
-				(snapshot_id, snapshot_time, schema_name, table_name, column_name,
-				 ordinal_position, column_key, data_type, column_type, is_nullable)
-				VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 'YES')`,
-				ts, schema, table, c.name, map[string]int{"id": 1, "c": 2}[c.name], c.key, c.dataType, c.columnType)
+		for i, s := range snaps {
+			ts := base.Add(s.offset).Format("2006-01-02 15:04:05")
+			for _, c := range []struct{ name, key, dataType, columnType string }{
+				{"id", "PRI", "int", "int"},
+				{"c", "", strings.SplitN(s.ctype, "(", 2)[0], s.ctype},
+			} {
+				testutil.MustExec(t, db, `INSERT INTO schema_snapshots
+					(snapshot_id, snapshot_time, schema_name, table_name, column_name,
+					 ordinal_position, column_key, data_type, column_type, is_nullable)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'YES')`,
+					i+1, ts, schema, table, c.name, map[string]int{"id": 1, "c": 2}[c.name], c.key, c.dataType, c.columnType)
+			}
 		}
 		testutil.InsertEvent(t, db, "binlog.000001", 100, 200,
 			base.Add(10*time.Second).Format("2006-01-02 15:04:05"), nil,
@@ -76,10 +87,10 @@ func TestRefresh_columnTypeChange(t *testing.T) {
 			Compression:  "none",
 			RowGroupSize: 100,
 			Metadata: map[string]string{
-				baseline.MetaKeyCreateTableSQL: createSQL,
-				baseline.MetaKeyBinlogFile:     "binlog.000001",
-				baseline.MetaKeyBinlogPos:      "4",
-				"bintrail.snapshot_timestamp":  base.Format(time.RFC3339),
+				baseline.MetaKeyCreateTableSQL:    createSQL,
+				baseline.MetaKeyBinlogFile:        "binlog.000001",
+				baseline.MetaKeyBinlogPos:         "4",
+				baseline.MetaKeySnapshotTimestamp: base.Format(time.RFC3339),
 			},
 		})
 		if err != nil {
@@ -115,9 +126,18 @@ func TestRefresh_columnTypeChange(t *testing.T) {
 		}
 		return source, newest, failures, runErr
 	}
+	mustPublish := func(t *testing.T, source, newest string, failures []reconstruct.TableFailure, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("refresh refused: %v (%+v)", err, failures)
+		}
+		if newest == source {
+			t.Fatal("the refresh reported success but published no new snapshot")
+		}
+	}
 
 	t.Run("int widened to bigint with a value past int refuses as a schema change", func(t *testing.T) {
-		source, newest, failures, err := run(t, "int", "bigint", "3000000000")
+		source, newest, failures, err := run(t, "int", []snap{{5 * time.Second, "bigint"}}, "3000000000")
 		if err == nil {
 			t.Fatal("a refresh over a column whose type changed since the baseline was published")
 		}
@@ -133,12 +153,24 @@ func TestRefresh_columnTypeChange(t *testing.T) {
 	})
 
 	t.Run("display width dropped by an upgrade is not a type change", func(t *testing.T) {
-		source, newest, failures, err := run(t, "int(11)", "int", "5")
-		if err != nil {
-			t.Fatalf("refresh refused over a display-width-only difference: %v (%+v)", err, failures)
-		}
-		if newest == source {
-			t.Fatal("the refresh reported success but published no new snapshot")
-		}
+		source, newest, failures, err := run(t, "int(11)", []snap{{5 * time.Second, "int"}}, "5")
+		mustPublish(t, source, newest, failures, err)
+	})
+
+	t.Run("a type change after the target does not refuse a fold that stops before it", func(t *testing.T) {
+		source, newest, failures, err := run(t, "int", []snap{{5 * time.Second, "int"}, {time.Minute, "bigint"}}, "5")
+		mustPublish(t, source, newest, failures, err)
+	})
+
+	t.Run("a target older than every schema snapshot compares no types", func(t *testing.T) {
+		// EpochAt answers the first snapshot for such a target, and that one
+		// describes a schema from after it.
+		source, newest, failures, err := run(t, "int", []snap{{time.Minute, "bigint"}}, "5")
+		mustPublish(t, source, newest, failures, err)
+	})
+
+	t.Run("a schema snapshot older than the baseline does not speak for its types", func(t *testing.T) {
+		source, newest, failures, err := run(t, "bigint", []snap{{-10 * time.Minute, "int"}}, "3000000000")
+		mustPublish(t, source, newest, failures, err)
 	})
 }

@@ -12,7 +12,7 @@ import (
 // snapshot would carry the baseline's CREATE TABLE forward with the old type.
 // The cases that must NOT refuse matter as much: a display width that only a
 // server upgrade removed, and a snapshot too old (or too foreign) to know the
-// type, which must degrade to today's name-only check rather than cry wolf.
+// type, which compares the base type word only, or nothing.
 func TestCheckBaselineSchemaCurrent_typeChange(t *testing.T) {
 	createSQL := "CREATE TABLE `orders` (\n" +
 		"  `id` int(11) NOT NULL,\n" +
@@ -86,7 +86,7 @@ func TestCheckBaselineSchemaCurrent_typeChange(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tm := &metadata.TableMeta{Schema: "mydb", Table: "orders", Columns: tc.current}
-			err := checkBaselineSchemaCurrent(createSQL, tm, "mydb", "orders")
+			err := checkBaselineSchemaCurrent(createSQL, tm, tm, "mydb", "orders")
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("unexpected refusal: %v", err)
@@ -118,11 +118,67 @@ func TestCheckBaselineSchemaCurrent_exportComparesNamesOnly(t *testing.T) {
 	if err := CheckBaselineSchemaCurrent(createSQL, relabeled, "s", "n"); err != nil {
 		t.Errorf("the export refused an ENUM relabel it decodes per epoch: %v", err)
 	}
-	if err := checkBaselineSchemaCurrent(createSQL, relabeled, "s", "n"); err == nil || !isSchemaChanged(err) {
+	if err := checkBaselineSchemaCurrent(createSQL, relabeled, relabeled, "s", "n"); err == nil || !isSchemaChanged(err) {
 		t.Errorf("the fold did not refuse the same relabel, which it would carry forward under the old CREATE TABLE: %v", err)
 	}
 	dropped := &metadata.TableMeta{Schema: "s", Table: "n", Columns: []metadata.ColumnMeta{{Name: "id", DataType: "int", ColumnType: "int"}}}
 	if err := CheckBaselineSchemaCurrent(createSQL, dropped, "s", "n"); err == nil || !isSchemaChanged(err) {
 		t.Errorf("the export no longer refuses a dropped column: %v", err)
+	}
+}
+
+// TestCheckBaselineSchemaCurrent_mixedCaseColumn: MySQL column names are case
+// insensitive, and the baseline and the snapshot can spell one differently.
+// The lookup must fold both sides, or a same-type column reads as added and
+// gone, and a real type change on it is missed.
+func TestCheckBaselineSchemaCurrent_mixedCaseColumn(t *testing.T) {
+	createSQL := "CREATE TABLE `orders` (\n  `id` int NOT NULL,\n  `Amount` decimal(10,2) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	for _, tc := range []struct {
+		name, col, columnType, wantErr string
+	}{
+		{"same spelling, same type", "Amount", "decimal(10,2)", ""},
+		{"other spelling, same type", "amount", "decimal(10,2)", ""},
+		{"same spelling, type changed", "Amount", "decimal(12,4)", "Amount (decimal(10,2) -> decimal(12,4))"},
+		{"other spelling, type changed", "AMOUNT", "decimal(12,4)", "AMOUNT (decimal(10,2) -> decimal(12,4))"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := &metadata.TableMeta{Schema: "mydb", Table: "orders", Columns: []metadata.ColumnMeta{
+				{Name: "id", DataType: "int", ColumnType: "int"},
+				{Name: tc.col, DataType: "decimal", ColumnType: tc.columnType},
+			}}
+			err := checkBaselineSchemaCurrent(createSQL, tm, tm, "mydb", "orders")
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected refusal: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || strings.Contains(err.Error(), "added since: amount") {
+				t.Fatalf("err = %v, want only the type change %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestCheckBaselineSchemaCurrent_typesAgainstTheSnapshotInEffect: names come
+// from the latest snapshot, types only from the one the caller passes (the
+// snapshot in effect at the target, taken after the baseline), and nil
+// compares no types. A later type change must not refuse a fold that stops
+// before it.
+func TestCheckBaselineSchemaCurrent_typesAgainstTheSnapshotInEffect(t *testing.T) {
+	createSQL := "CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `c` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	meta := func(ctype string) *metadata.TableMeta {
+		return &metadata.TableMeta{Schema: "s", Table: "t", Columns: []metadata.ColumnMeta{
+			{Name: "id", DataType: "int", ColumnType: "int"}, {Name: "c", DataType: ctype, ColumnType: ctype}}}
+	}
+	latest := meta("bigint")
+	if err := checkBaselineSchemaCurrent(createSQL, latest, nil, "s", "t"); err != nil {
+		t.Errorf("no snapshot in effect after the baseline: refused on the latest snapshot's type: %v", err)
+	}
+	if err := checkBaselineSchemaCurrent(createSQL, latest, meta("int"), "s", "t"); err != nil {
+		t.Errorf("the snapshot in effect still says int: refused on a later change: %v", err)
+	}
+	if err := checkBaselineSchemaCurrent(createSQL, meta("int"), meta("bigint"), "s", "t"); err == nil || !strings.Contains(err.Error(), "c (int -> bigint)") {
+		t.Errorf("the snapshot in effect says bigint: err = %v", err)
 	}
 }

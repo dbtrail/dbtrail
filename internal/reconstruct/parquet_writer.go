@@ -328,16 +328,25 @@ func captureGapLines(in mergeInput) string {
 // projected onto the old column set — a dump that loads and is wrong. A real
 // re-dump is the only correct answer, so the message says so instead of
 // offering a flag.
-func checkBaselineSchemaCurrent(createSQL string, tm *metadata.TableMeta, schema, table string) error {
-	return checkBaselineSchema(createSQL, tm, schema, table, true)
+//
+// Column TYPES (#1651) are compared against typesTM, not tm, and only when the
+// caller has one: the schema snapshot in effect at the fold's target instant,
+// and only when that snapshot was taken after the baseline. An older snapshot
+// says nothing about the baseline's types (the baseline's own CREATE TABLE,
+// dumped from the live table, is newer), and a snapshot taken after the target
+// describes a change the fold does not reach, which a restore to an earlier
+// moment must not refuse over. nil compares names only.
+func checkBaselineSchemaCurrent(createSQL string, tm, typesTM *metadata.TableMeta, schema, table string) error {
+	return checkBaselineSchema(createSQL, tm, typesTM, schema, table)
 }
 
-// checkBaselineSchema is checkBaselineSchemaCurrent with the type comparison
-// optional. The Iceberg export passes false: it never publishes the carried
-// CREATE TABLE, and it compares the types it maps to Iceberg itself
-// (icebergexport.sameTableTypes), so a type change that does not move the
-// exported value (an ENUM relabel, a longer VARCHAR) must not refuse there.
-func checkBaselineSchema(createSQL string, tm *metadata.TableMeta, schema, table string, compareTypes bool) error {
+// checkBaselineSchema compares column names against tm and, when typesTM is
+// not nil, declared types against typesTM. The Iceberg export passes nil: it
+// never publishes the carried CREATE TABLE, and it compares the types it maps
+// to Iceberg itself (icebergexport.sameTableTypes), so a type change that does
+// not move the exported value (an ENUM relabel, a longer VARCHAR) must not
+// refuse there.
+func checkBaselineSchema(createSQL string, tm, typesTM *metadata.TableMeta, schema, table string) error {
 	if strings.TrimSpace(createSQL) == "" || tm == nil {
 		// A missing CREATE TABLE is already refused upstream with its own
 		// message; a nil TableMeta cannot happen on this path (the resolver
@@ -353,16 +362,22 @@ func checkBaselineSchema(createSQL string, tm *metadata.TableMeta, schema, table
 		inBaseline[strings.ToLower(c.Name)] = c
 	}
 	current := make(map[string]bool, len(tm.Columns))
-	// retyped is in the snapshot's ordinal order, which is already stable.
-	var retyped []string
 	for _, c := range tm.Columns {
-		if c.IsGenerated {
-			continue
+		if !c.IsGenerated {
+			current[strings.ToLower(c.Name)] = true
 		}
-		current[strings.ToLower(c.Name)] = true
-		if b, ok := inBaseline[strings.ToLower(c.Name)]; ok && compareTypes {
-			if was, now, changed := columnTypeChanged(b.DeclaredType, c); changed {
-				retyped = append(retyped, fmt.Sprintf("%s (%s -> %s)", c.Name, was, now))
+	}
+	// retyped is in typesTM's ordinal order, which is already stable.
+	var retyped []string
+	if typesTM != nil {
+		for _, c := range typesTM.Columns {
+			if c.IsGenerated {
+				continue
+			}
+			if b, ok := inBaseline[strings.ToLower(c.Name)]; ok {
+				if was, now, changed := columnTypeChanged(b.DeclaredType, c); changed {
+					retyped = append(retyped, fmt.Sprintf("%s (%s -> %s)", c.Name, was, now))
+				}
 			}
 		}
 	}
@@ -403,10 +418,13 @@ func checkBaselineSchema(createSQL string, tm *metadata.TableMeta, schema, table
 // them. Only spelling is ignored (baseline.ComparableColumnType), so a display
 // width a server upgrade dropped is not a change.
 //
-// The cost of refusing is bounded: the stream takes a new schema snapshot on
-// every DDL, and a scheduled refresh that refuses falls back to a full backup
-// (where the daemon may take one), which dumps the current CREATE TABLE, so
-// the next refresh compares equal again.
+// The cost of refusing is bounded: a scheduled backup that refuses falls back
+// to a full backup where the daemon may take one, which dumps the current
+// CREATE TABLE and so compares equal from then on. The daemon-wide refresh
+// interval and a restore have no such fallback; they refuse until a full
+// backup exists. A type change the stream saw no DDL for (TRUNCATE is skipped,
+// and so is a statement parseDDL does not recognize) leaves no newer snapshot,
+// and then nothing is compared at all.
 //
 // When the snapshot lacks COLUMN_TYPE (taken before column_type was captured)
 // only the DATA_TYPE token is compared: INT to BIGINT is seen, a length, a

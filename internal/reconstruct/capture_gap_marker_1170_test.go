@@ -155,7 +155,7 @@ func TestCheckBaselineSchemaCurrent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tm := &metadata.TableMeta{Schema: "mydb", Table: "orders", Columns: tc.current}
-			err := checkBaselineSchemaCurrent(createSQL, tm, "mydb", "orders")
+			err := checkBaselineSchemaCurrent(createSQL, tm, tm, "mydb", "orders")
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("unexpected refusal: %v", err)
