@@ -6173,6 +6173,8 @@ function backupFoldError(msg) {
     .replace(/;?[ \t]*pass --allow-gaps to proceed[^.;\n]*/g,
       ". The recorded history has a permanent gap in that window, so the backup would be incomplete; pick a later moment")
     .replace(/,?[ \t]*or target a different instant with --at/g, ", or pick another second")
+    .replace(/ \u2014 a snapshot emitted from it would carry the OLD CREATE TABLE forward and project every row onto the old columns and types, so every reconstruct anchored on it would be wrong\. Take a real snapshot instead: `bintrail dump` \+ `bintrail baseline`\. \(If the schema snapshot is what is stale, run `bintrail snapshot` first and retry\.\): schema changed since the baseline/g,
+      ". Updating it from the recorded changes needs a backup taken after that change")
     .replace(/\u2014/g, "-");
   if (!/[.!?]$/.test(out.trim())) out = out.trim() + ".";
   return out;

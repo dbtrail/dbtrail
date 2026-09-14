@@ -70,6 +70,17 @@ type Column struct {
 	// the server's.
 	DecimalPrecision int
 	DecimalScale     int
+
+	// DeclaredType is the column's type exactly as the CREATE TABLE declares
+	// it: the type token, its parenthesized arguments and a trailing
+	// UNSIGNED/ZEROFILL, e.g. "decimal(12,4)", "int(10) unsigned",
+	// "enum('a)','b')". Nothing else from the line (DEFAULT, COLLATE,
+	// COMMENT) is kept. It is the spelling information_schema reports as
+	// COLUMN_TYPE, which is what lets a producer that carries this CREATE
+	// TABLE forward notice that the source's column type moved since (#1651).
+	// The arguments are read quote-aware, unlike colRe's group 3, so an enum
+	// label holding ')' is not cut short.
+	DeclaredType string
 }
 
 // DecimalColumn names one decimal/numeric column of a baseline table and the
@@ -196,10 +207,11 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 			trimmed == ");" || trimmed == ")" {
 			break
 		}
-		m := colRe.FindStringSubmatch(line)
-		if m == nil {
+		loc := colRe.FindStringSubmatchIndex(line)
+		if loc == nil {
 			continue
 		}
+		m := colRe.FindStringSubmatch(line)
 		if generatedRe.MatchString(line) || rowPeriodRe.MatchString(line) {
 			// STORED/VIRTUAL generated column, or a system-versioning period
 			// column (#863) — mydumper never dumps its value, so it must not
@@ -217,6 +229,7 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 			ParquetType:      mysqlToParquetNode(typeToken, unsigned),
 			DecimalPrecision: precision,
 			DecimalScale:     scale,
+			DeclaredType:     declaredType(line[loc[4]:]),
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -226,6 +239,117 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 		return nil, errors.New("no columns found in schema SQL")
 	}
 	return cols, nil
+}
+
+// declaredType reads a column's declared type from the text that starts at its
+// type token and returns exactly that span; see splitDeclaredType.
+func declaredType(s string) string {
+	_, _, _, end := splitDeclaredType(s)
+	return s[:end]
+}
+
+// splitDeclaredType reads a type declaration from the start of s: the type
+// token, a parenthesized argument list when one follows, and any run of
+// UNSIGNED/ZEROFILL words after it. It returns the lowercased token, the raw
+// arguments (without the parentheses), whether UNSIGNED or ZEROFILL was
+// present (MySQL prints ZEROFILL only together with UNSIGNED), and the byte
+// offset where the declaration ends.
+//
+// Single-quoted strings inside the arguments are skipped whole (a doubled
+// single quote is how SHOW CREATE TABLE escapes one, and it reads as two adjacent strings here,
+// which skips the same bytes), so an ENUM or SET label holding ')' does not end
+// the list. An argument list that never closes runs to the end of s: callers
+// compare spellings, and an unterminated one can only compare unequal.
+func splitDeclaredType(s string) (token, args string, unsigned bool, end int) {
+	i := 0
+	for i < len(s) && (s[i] == '_' || s[i] >= 'a' && s[i] <= 'z' || s[i] >= 'A' && s[i] <= 'Z' || s[i] >= '0' && s[i] <= '9') {
+		i++
+	}
+	token = strings.ToLower(s[:i])
+	end = i
+	j := i
+	for j < len(s) && s[j] == ' ' {
+		j++
+	}
+	if j < len(s) && s[j] == '(' {
+		end = len(s)
+		args = s[j+1:]
+		inQuote := false
+		for k := j + 1; k < len(s); k++ {
+			if s[k] == '\'' {
+				inQuote = !inQuote
+			} else if s[k] == ')' && !inQuote {
+				args, end = s[j+1:k], k+1
+				break
+			}
+		}
+	}
+	for {
+		rest := s[end:]
+		trimmed := strings.TrimLeft(rest, " ")
+		word := trimmed
+		if n := strings.IndexAny(word, " ,"); n >= 0 {
+			word = word[:n]
+		}
+		if !strings.EqualFold(word, "unsigned") && !strings.EqualFold(word, "zerofill") {
+			break
+		}
+		unsigned = true
+		end += len(rest) - len(trimmed) + len(word)
+	}
+	return token, args, unsigned, end
+}
+
+// integerDisplayWidthTypes are the types whose parenthesized argument is a
+// display width, which changes nothing about the values stored. MySQL 8.0.19
+// stopped printing it (int(11) became int), so a baseline dumped before a
+// server upgrade and a schema read after it spell the same column differently.
+var integerDisplayWidthTypes = map[string]bool{
+	"tinyint": true, "smallint": true, "mediumint": true, "int": true, "integer": true, "bigint": true,
+	"year": true,
+}
+
+// ComparableColumnType turns a type declaration into a spelling on which two
+// declarations of the same column type compare equal: the one a CREATE TABLE
+// carries (Column.DeclaredType) and the one information_schema reports as
+// COLUMN_TYPE (#1651). Only what is spelling is folded:
+//
+//   - the token is lowercased, and the aliases MySQL canonicalizes are folded
+//     (integer is int, numeric is decimal);
+//   - an integer or YEAR display width is dropped;
+//   - a decimal's arguments get MySQL's defaults (decimal is decimal(10,0));
+//   - ZEROFILL is dropped (display only), UNSIGNED is kept;
+//   - every other argument list is kept byte for byte: a length, a
+//     fractional-seconds precision and an ENUM label list are part of the
+//     type, and labels are case-sensitive, so they are not lowercased.
+//
+// Attributes after the type (DEFAULT, COLLATE, COMMENT) never reach the
+// result, so a character set change is invisible here, as it is in
+// COLUMN_TYPE.
+func ComparableColumnType(declared string) string {
+	token, args, unsigned, _ := splitDeclaredType(strings.TrimSpace(declared))
+	switch token {
+	case "integer":
+		token = "int"
+	case "numeric":
+		token = "decimal"
+	}
+	switch {
+	case integerDisplayWidthTypes[token]:
+		args = ""
+	case token == "decimal":
+		if p, sc := decimalPrecisionScale(token, args); p > 0 {
+			args = strconv.Itoa(p) + "," + strconv.Itoa(sc)
+		}
+	}
+	out := token
+	if args != "" {
+		out += "(" + args + ")"
+	}
+	if unsigned {
+		out += " unsigned"
+	}
+	return out
 }
 
 // decimalPrecisionScale reads the (p,s) out of a decimal or numeric column's

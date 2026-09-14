@@ -124,6 +124,8 @@ type DumpMetadata struct {
 	// is that (internal/snapshotdir) — and the disagreement between the two is
 	// how a carried-forward table is recognised. See ProvenanceOf.
 	SnapshotTimestamp time.Time
+	// CreateTableAsOf is MetaKeyCreateTableAsOf; zero when absent.
+	CreateTableAsOf time.Time
 	// MydumperFormat is MetaKeyMydumperFormat, written only by the mydumper
 	// dump path. Carried here as the one positive signal that dates a
 	// pre-#1545 MySQL dump.

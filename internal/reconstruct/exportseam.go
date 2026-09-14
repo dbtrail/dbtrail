@@ -32,9 +32,11 @@ func PKChangingUpdateError(schema, table, before, after string) error {
 
 // CheckBaselineSchemaCurrent refuses with ErrSchemaChanged when the table's
 // current schema snapshot has columns the baseline's embedded CREATE TABLE
-// lacks, or the reverse.
+// lacks, or the reverse. Column names only: unlike the fold, the export does
+// not publish the carried CREATE TABLE, and it checks the types it exports
+// itself (sameTableTypes).
 func CheckBaselineSchemaCurrent(createSQL string, tm *metadata.TableMeta, schema, table string) error {
-	return checkBaselineSchemaCurrent(createSQL, tm, schema, table)
+	return checkBaselineSchema(createSQL, tm, nil, schema, table)
 }
 
 // MaterializeBaselineLocal returns a local path for a baseline Parquet file:
