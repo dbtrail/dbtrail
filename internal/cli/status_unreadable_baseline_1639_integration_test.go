@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/indexer"
@@ -82,6 +83,15 @@ func TestRunStatus_unreadableNewestBaselineIsNotGraded(t *testing.T) {
 	lock(mk(newer, "2026-09-02T06-00-00Z"))
 	if r := run(newer); r.BaselineStaleness != "unknown" || len(r.Baselines) != 0 {
 		t.Errorf("newest unreadable: staleness=%q baselines=%d; want unknown and none graded", r.BaselineStaleness, len(r.Baselines))
+	}
+	// The text report says so too, instead of printing no Baselines section.
+	stFormat = "text"
+	stBaselineDir = newer
+	var textErr error
+	text := captureStdout(t, func() { textErr = runStatus(statusCmd, nil) })
+	stFormat = "json"
+	if textErr != nil || !strings.Contains(text, "=== Baselines ===") || !strings.Contains(text, "could not be read") || !strings.Contains(text, "NOT evaluated") {
+		t.Errorf("text report with the newest folder unreadable (err %v):\n%s", textErr, text)
 	}
 
 	older := t.TempDir()

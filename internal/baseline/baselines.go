@@ -1,6 +1,8 @@
 package baseline
 
 import (
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -65,6 +67,9 @@ func DiscoverBaselinesReport(dir string) ([]BaselineInfo, []time.Time, error) {
 			continue
 		}
 		dbEntries, err := os.ReadDir(snapshotDir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // removed while walking
+		}
 		if err != nil {
 			slog.Warn("could not read baseline snapshot directory", "path", snapshotDir, "error", err)
 			unreadable = append(unreadable, ts)
@@ -77,6 +82,9 @@ func DiscoverBaselinesReport(dir string) ([]BaselineInfo, []time.Time, error) {
 			dbName := dbEntry.Name()
 			tableDir := filepath.Join(snapshotDir, dbName)
 			tableFiles, err := os.ReadDir(tableDir)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			if err != nil {
 				slog.Warn("could not read baseline table directory", "path", tableDir, "error", err)
 				unreadable = append(unreadable, ts)

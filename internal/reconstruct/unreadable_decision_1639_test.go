@@ -199,3 +199,39 @@ func TestFindBaseline_missingTableIsStillNoBaseline(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// A file where a schema folder would be is absence, not an unreadable folder:
+// the stat fails with ENOTDIR, and a refusal would disable the binlog-only
+// and other-location fallbacks for a table that simply is not there.
+func TestFindBaseline_fileInPlaceOfSchemaFolderIsAbsence(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, SnapshotDirName(t1639a))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shop"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err := FindBaseline(context.Background(), root, "shop", "a", t1639b)
+	if !errors.Is(err, ErrNoBaseline) || errors.Is(err, ErrUnreadableSnapshot) {
+		t.Fatalf("err = %v, want ErrNoBaseline", err)
+	}
+}
+
+// The warning for an older pick behind an unreadable folder is marked, so a
+// caller with a second location knows to ask it.
+func TestFindBaseline_unreadableWarningIsMarked(t *testing.T) {
+	root := t.TempDir()
+	snapshot1639(t, root, t1639a, "shop.a")
+	unreadable(t, snapshot1639(t, root, t1639b, "shop.a"))
+	_, _, stale, err := FindBaseline(context.Background(), root, "shop", "a", t1639c)
+	if err != nil || !stale.Unreadable {
+		t.Fatalf("stale=%+v err=%v", stale, err)
+	}
+	other := t.TempDir()
+	snapshot1639(t, other, t1639a, "shop.a")
+	snapshot1639(t, other, t1639b, "shop.other")
+	if _, _, stale, _ := FindBaseline(context.Background(), other, "shop", "a", t1639c); stale.Unreadable {
+		t.Fatalf("a table absent from a readable newer snapshot is marked unreadable: %+v", stale)
+	}
+}

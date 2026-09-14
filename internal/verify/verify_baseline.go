@@ -367,11 +367,10 @@ func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair,
 			break
 		}
 	}
-	oldestPicked := tPrev
-	if oldestPicked.IsZero() {
-		oldestPicked = tNew // one readable snapshot (or none: then every unreadable folder counts)
-	}
-	if err := reconstruct.UnreadableAtOrAfter(unreadable, oldestPicked, time.Time{}); err != nil {
+	// tPrev is zero with fewer than two readable snapshots, and then every
+	// skipped folder counts: "only one baseline, nothing to verify yet" would
+	// be a false exit 0 while the predecessor exists and cannot be read.
+	if err := reconstruct.UnreadableAtOrAfter(unreadable, tPrev, time.Time{}); err != nil {
 		return nil, nil, nil, err
 	}
 	if tNew.IsZero() || tPrev.IsZero() {

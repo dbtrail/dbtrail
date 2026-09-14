@@ -149,6 +149,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			// baselines configured" in JSON — a monitor watching
 			// baseline_staleness would read absence as healthy.
 			data.BaselinesUnavailable = true
+			data.BaselinesErr = bErr
 		} else {
 			for _, b := range baselines {
 				var size int64

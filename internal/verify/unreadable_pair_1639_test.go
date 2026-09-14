@@ -72,15 +72,28 @@ func TestFindBaselinePair_middleUnreadableRefuses(t *testing.T) {
 	}
 }
 
-// One readable snapshot and an older unreadable one: still the benign "only
-// one baseline" answer, not a refusal.
-func TestFindBaselinePair_olderUnreadableChangesNothing(t *testing.T) {
+// One readable snapshot and an older unreadable one: the unreadable one is
+// the predecessor, so "only one baseline, nothing to verify yet" would be a
+// false exit 0.
+func TestFindBaselinePair_oneReadableWithOlderUnreadableRefuses(t *testing.T) {
 	root := t.TempDir()
 	unreadable1639(t, snapshot1639(t, root, v1639a))
 	snapshot1639(t, root, v1639b)
-	pairs, unpaired, prevOnly, err := FindBaselinePair(context.Background(), root)
-	if err != nil || pairs != nil || unpaired != nil || prevOnly != nil {
-		t.Fatalf("pairs=%v unpaired=%v prevOnly=%v err=%v; want nothing to verify, no error", pairs, unpaired, prevOnly, err)
+	if _, _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
+		t.Fatalf("err = %v, want a refusal", err)
+	}
+}
+
+// Two readable snapshots and an older unreadable one: the pair is the two
+// newest, and the old folder changes nothing. (The files are empty, so the
+// pair's footer read fails; what matters is that it is not the refusal.)
+func TestFindBaselinePair_unreadableOlderThanThePairChangesNothing(t *testing.T) {
+	root := t.TempDir()
+	unreadable1639(t, snapshot1639(t, root, v1639a))
+	snapshot1639(t, root, v1639b)
+	snapshot1639(t, root, v1639c)
+	if _, _, _, err := FindBaselinePair(context.Background(), root); errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
+		t.Fatalf("err = %v: an unreadable folder older than the pair refused it", err)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -78,6 +79,10 @@ type StaleWarning struct {
 	Message        string    // human-readable, empty when not stale
 	UsingSnapshot  time.Time // snapshot the table was actually read from
 	NewestSnapshot time.Time // newest eligible snapshot (lacks the table)
+	// Unreadable: the newer snapshot is a folder that could not be read
+	// (#1639), not one that lacks the table. A caller with a second location
+	// should ask it before settling for the older snapshot.
+	Unreadable bool
 }
 
 // Stale reports whether the baseline was a stale fallback.
@@ -440,6 +445,9 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 			continue
 		}
 		dbDirs, err := os.ReadDir(snapDir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // removed while listing (pruning renames it away first)
+		}
 		if err != nil {
 			slog.Warn("baseline listing: skipping unreadable snapshot directory", "path", snapDir, "error", err)
 			skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: snapDir, Err: err})
@@ -451,6 +459,9 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 			}
 			schemaDir := filepath.Join(snapDir, dbDir.Name())
 			files, err := os.ReadDir(schemaDir)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			if err != nil {
 				slog.Warn("baseline listing: skipping unreadable schema directory", "path", schemaDir, "error", err)
 				skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: schemaDir, Err: err})
@@ -590,7 +601,8 @@ func findBaselineLocal(baselineDir, schema, table string, at time.Time) (string,
 			// folder that cannot be read (SnapshotComplete above cannot tell:
 			// both marker stats fail and it reads as a legacy snapshot) may
 			// hold it, so an older pick must say so (#1639).
-			if !errors.Is(err, fs.ErrNotExist) {
+			// ENOTDIR is absence too: a file where the schema folder would be.
+			if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
 				unreadable = append(unreadable, UnreadableSnapshot{SnapshotTime: t, Path: filepath.Join(baselineDir, entry.Name()), Err: err})
 			}
 			continue
@@ -635,6 +647,7 @@ func unreadableFallback(schema, table string, using time.Time, unreadable []Unre
 			schema, table, newest.Path, newest.Err, usingStr),
 		UsingSnapshot:  using,
 		NewestSnapshot: newest.SnapshotTime,
+		Unreadable:     true,
 	}
 }
 
