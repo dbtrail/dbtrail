@@ -20,7 +20,9 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 	page := jsFunctionBody(t, js, "buildBackupSettings") +
 		jsFunctionBody(t, js, "backupDaemonCard") +
 		jsFunctionBody(t, js, "backupServersPanel") +
-		jsFunctionBody(t, js, "backupServerRow")
+		jsFunctionBody(t, js, "backupServerRow") +
+		jsFunctionBody(t, js, "s3RetentionBox") +
+		jsFunctionBody(t, js, "s3RetentionConflicts")
 	// Dotted READS, not bare tokens: "value" also matches dir.value.trim()
 	// and "baseline_dir" matches the input's name: attribute, so a renamed
 	// JSON tag stayed green while the page rendered blanks. The dotted form
@@ -31,6 +33,7 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		"srv.baseline_dir", "srv.baseline_s3", "srv.no_archive",
 		"srv.resolved_dir", "srv.resolved_s3", "srv.source",
 		"srv.schedule_every", "srv.schedule_at", "srv.schedule_refusal",
+		"srv.schedule_every_minutes", "srv.archive_s3",
 	} {
 		if !strings.Contains(page, read) {
 			t.Errorf("the page never reads %q; the server emits it and the page renders a blank instead", read)
@@ -333,7 +336,7 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	// jsFunctionBody fails open, because that helper truncates each line at
 	// its first "//" and a URL literal ("s3://...") hides everything after
 	// it on the line. Comments carrying a dash ring here on purpose.
-	for _, name := range []string{"backupRefreshCard", "backupDaemonCard", "backupServerRow", "buildBackupSettings", "cfShape", "blCase"} {
+	for _, name := range []string{"backupRefreshCard", "backupDaemonCard", "backupServerRow", "buildBackupSettings", "cfShape", "blCase", "s3RetentionBox"} {
 		body := jsFunctionSpan(t, js, name)
 		for _, m := range regexp.MustCompile(`"([^"\n]*)"`).FindAllStringSubmatch(body, -1) {
 			if strings.Contains(m[1], "—") {

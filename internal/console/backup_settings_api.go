@@ -89,6 +89,14 @@ type backupSettingsServerDTO struct {
 	// the row read `resolved` values while the schedule reads the raw entry,
 	// so clearing a dir here left a row promising runs that will all refuse.
 	ScheduleRefusal string `json:"schedule_refusal,omitempty"`
+	// ScheduleEveryMinutes is the interval as Go parses it (#1622): the page
+	// must not re-parse the schedule grammar, or a spelling Go accepts and
+	// the page does not silently turns a warning off.
+	ScheduleEveryMinutes int `json:"schedule_every_minutes,omitempty"`
+	// ArchiveS3 is the server's RAW archive destination (#1622): the S3
+	// retention rule the page generates must never cover it, and the page
+	// can only refuse what it can see.
+	ArchiveS3 string `json:"archive_s3,omitempty"`
 }
 
 // The three provenance verdicts a server's backup location can have. The
@@ -161,6 +169,7 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 		NoArchive:   e.NoArchive,
 		ResolvedDir: resolved.BaselineDir,
 		ResolvedS3:  resolved.BaselineS3,
+		ArchiveS3:   e.ArchiveS3,
 	}
 	switch {
 	case e.BaselineDir != "" || e.BaselineS3 != "":
@@ -177,6 +186,9 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 		// reads e.BaselineDir/e.BaselineS3, never the resolved fallback).
 		if err := CheckBackupSchedule(e, *e.BackupSchedule, s.scheduleGates()); err != nil {
 			dto.ScheduleRefusal = RefusalReason(err)
+		}
+		if p, err := e.BackupSchedule.Parse(); err == nil {
+			dto.ScheduleEveryMinutes = int(p.Every.Minutes())
 		}
 	}
 	return dto

@@ -555,6 +555,30 @@ Two section labels split it: **Change here** and **Set when dbtrail starts**.
   things stand shows the refusal above the compact block; the schedule
   itself and the full-backup note sit inside it. Save wakes up when a field
   differs from what was loaded.
+  A server with its own S3 destination also gets the growth line and the
+  rule (#1622), schedule or not, since the Create backup button, a restore
+  and the daemon-wide refresh upload too: about how many full backups
+  reach the bucket every 30 days at the schedule's rate (or that every one
+  stays, without a schedule), and that dbtrail never removes one. Under
+  **Bucket rule to expire old backups** the page generates a lifecycle rule
+  scoped to the backup prefix only, with the two commands to read the
+  bucket's current rules and to apply the merged set, and says what such a
+  rule cannot do: it expires by age alone, so it cannot spare the only
+  complete copy or a backup a restore is reading, and a stopped schedule
+  under an age rule reaches zero backups. Three refusals, in red: a
+  retention shorter than the schedule (the newest complete backup would
+  expire before the next one exists; no rule is shown), backups at the
+  bucket root (an empty prefix would expire everything in the bucket), and
+  archived changes stored under the same prefix as the backups (the rule
+  would expire the evidence recovery is built from). Another server's
+  backups nested under the prefix are named, since they would expire under
+  this rule. The prefix is spelled exactly as the daemon builds object
+  keys, spaces and slashes included, so the rule matches what was really
+  written. The rule also expires noncurrent versions after the same number
+  of days, since on a versioned bucket an expiration alone only writes a
+  delete marker; under an Object Lock retention nothing expires before it
+  ends. dbtrail itself never deletes from S3 and never sets a bucket rule;
+  the rule is the operator's to apply.
 - **Set at startup** — the nine daemon-wide values (`--baseline-dir`,
   `--baseline-s3`, `--baseline-retain`, `--baseline-refresh-interval`,
   `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE`, `BINTRAIL_CONSOLE_BASELINE_TRIGGER`,
