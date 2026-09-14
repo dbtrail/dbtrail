@@ -5210,7 +5210,9 @@ function baselineRefreshNote(rf) {
         : "Automatic refresh published nothing" + (when ? " at " + when : "") +
           (rf.refused ? "; " + rf.refused + " table(s) refused" : "") +
           (rf.last_error ? ": " + backupFoldError(rf.last_error) : "") +
-          " Nothing was overwritten; the next run retries.";
+          (rf.too_many_changes
+            ? " Nothing was overwritten. The next automatic refresh starts from the same backup and would be refused again: take a full backup."
+            : " Nothing was overwritten; the next run retries.");
       break;
     default:
       return el("p", { class: "form-hint", text: "Automatic refresh is enabled; it has not run yet." });
@@ -6430,7 +6432,7 @@ function backupRestoreCard(cur, b, restoreSt) {
     // backup is in the list below and can be restored from.
     body.append(el("p", { class: "form-msg err", text: rst.published
       ? "Last restore wrote the backup on this machine but could not send it to S3: " + backupFoldError(rst.last_error || "unknown error") + " The backup is in the list below. A full backup sends it along with the rest."
-      : "Last restore published nothing: " + backupFoldError(rst.last_error || "unknown error") + " Nothing was overwritten." }));
+      : "Last restore published nothing: " + backupFoldError(rst.last_error || "unknown error") + (rst.too_many_changes ? " Nothing was overwritten. Pick a moment closer to an existing backup." : " Nothing was overwritten.") }));
     details.open = true;
   } else if (rst && rst.state === "succeeded") {
     // The reused count belongs here for the same reason it belongs on the

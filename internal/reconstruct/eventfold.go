@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -286,9 +288,13 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		// Per page, not after the window: the memory is spent as the map
 		// grows, so a check at the end would come after the harm (#1107).
 		if limit := scaledEventThreshold(fc.MaxTouchedRows, fc.Parallelism); limit > 0 && int64(len(res.Changes)) > limit {
-			foldErr = fmt.Errorf("%s.%s: more than %d distinct rows changed since the backup this update starts from, "+
-				"the most one table may hold in memory while %d fold at once: %w",
-				fc.Schema, fc.Table, limit, max(fc.Parallelism, 1), ErrTouchedRowBudget)
+			// No table prefix: the run's error adds "schema.table: ".
+			// No remedy here: it differs per surface (a scheduled update falls
+			// back to a full backup, a restore needs a closer moment), and the
+			// surfaces add their own.
+			foldErr = fmt.Errorf("%w: more than %s distinct rows changed between the backup this starts from and the target moment, "+
+				"more than one table may hold in memory while %d tables are processed at once",
+				ErrTouchedRowBudget, groupThousands(limit), max(fc.Parallelism, 1))
 			return foldErr
 		}
 
@@ -338,4 +344,24 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		"schema", fc.Schema, "table", fc.Table,
 		"events", res.Total, "touched_pks", len(res.Changes))
 	return res, nil
+}
+
+// groupThousands renders n with comma separators, for a limit a person reads.
+func groupThousands(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
 }

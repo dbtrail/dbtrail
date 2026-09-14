@@ -626,6 +626,7 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 	// scheduled watcher reads to decide whether a full backup is still owed,
 	// and a stale true there is a skipped backup.
 	st.Published = foldPublished(err)
+	st.TooManyChanges = errors.Is(err, reconstruct.ErrTouchedRowBudget)
 	if err != nil {
 		st.State = "failed"
 		st.LastError = err.Error()

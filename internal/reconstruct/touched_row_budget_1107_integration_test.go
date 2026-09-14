@@ -121,8 +121,11 @@ func TestRefresh_touchedRowBudget(t *testing.T) {
 		if err == nil || published || !refusedByBudget(failures, "a") {
 			t.Fatalf("published=%v err=%v failures=%+v; want the budget refusal and no snapshot", published, err, failures)
 		}
-		if msg := failures[0].Err.Error(); !strings.Contains(msg, "shop.a") || !strings.Contains(msg, "more than 2 distinct rows") {
-			t.Errorf("refusal does not name the table and the limit: %q", msg)
+		if msg := failures[0].Err.Error(); failures[0].Table != "a" || !strings.Contains(msg, "more than 2 distinct rows") || strings.Contains(msg, "shop.a") {
+			t.Errorf("refusal for table %q does not state the limit once, unprefixed: %q", failures[0].Table, msg)
+		}
+		if !strings.Contains(err.Error(), "shop.a: too many changed rows for an update from the recorded changes: more than 2 distinct rows") {
+			t.Errorf("the run's error does not name the table once: %v", err)
 		}
 	})
 	t.Run("a row changed many times counts once", func(t *testing.T) {
