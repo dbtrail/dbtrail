@@ -78,7 +78,7 @@ On-demand (DBA workstation):
 
 ### Replication user
 
-`bintrail` connects to the source as a replication client. The required grants (`REPLICATION SLAVE`, `REPLICATION CLIENT`, plus `SELECT` for schema snapshots and preflight checks) and the minimal-permissions guidance are in [streaming.md → The Source MySQL User](streaming.md#the-source-mysql-user). Baselines need `LOCK TABLES` on top of those — capture works without it, only the snapshot is refused.
+`bintrail` connects to the source as a replication client. The required grants (`REPLICATION SLAVE`, `REPLICATION CLIENT`, plus `SELECT` for schema snapshots and preflight checks) and the minimal-permissions guidance are in [streaming.md → The Source MySQL User](streaming.md#the-source-mysql-user). Baselines need `RELOAD` (plus `BACKUP_ADMIN` on MySQL/Percona 8.0+) and `SHOW VIEW` on top of those, or `LOCK TABLES` and `SHOW VIEW` with the `lock-all` mode on managed MySQL — capture works without them, only the snapshot is refused.
 
 ### Managed MySQL (RDS / Aurora / Cloud SQL)
 
@@ -297,6 +297,32 @@ spec:
 ```
 
 > **Important:** Always run exactly one replica of `bintrail stream` per source MySQL. Multiple replicas would index duplicate events with different `server_id` values. If you need HA, use a leader-election sidecar or rely on the systemd/Kubernetes restart mechanism.
+
+
+### When the host dies
+
+This applies to `bintrail-console watch`, the daemon that captures and serves the console. (Standalone `bintrail stream` has no lock at all; see the Kubernetes note above.)
+
+A **process** crash recovers on its own: the daemon restarts (systemd `Restart=`, compose `restart: unless-stopped`) and every stream resumes from its checkpoint in the index. Losing the **host** does not: DBTrail has no automatic failover today, and someone starts it on another machine by hand. What that takes, and what to plan for:
+
+- **Keep the index off the host.** The index MySQL holds the capture state (events, checkpoints, archive and snapshot bookkeeping). On the same machine it is lost with it.
+- **Move the console's files.** A new host needs the server registry (`console-servers.yaml`), console auth (`console-auth.yaml`) and the MCP token (`console-mcp-token.yaml`). The binary keeps them under `~/.config/bintrail/`; the compose stack keeps them under `/var/lib/bintrail` in the `bintrail-state` volume. On DBTrail EE the users, roles and access-rules stores stay in the console user's home directory (`~/.config/bintrail/`) even under compose, in a separate volume, so move that one too: without it every console user is gone. Without the registry the new host starts with no servers to monitor.
+- **The previous snapshot can come from the bucket.** The new host still needs a local Backup dir configured, because updates are written there, but with a Backup S3 set it reads the previous snapshot from the bucket.
+- **Source binlog retention decides what is lost.** The new host resumes from the checkpoint in the index. If the source purged those binlogs while nobody was capturing, capture continues from the oldest binlog the source still has, the changes in between are permanently lost, and the server shows **LOST POSITION** in the console. That badge stays across restarts until you press **Stop** and then **Start** on the server; it does not mean capture is still broken.
+- **Make sure the old host is really off before starting the new one.** Servers added in the console are guarded by a MySQL lock on the index (`GET_LOCK`): a second daemon marks such a server `failed` ("another bintrail process is already monitoring this server") instead of capturing twice. The hover text on that badge says it retries; for this refusal it does not. Press **Start** on the server, or restart the daemon, once the first host is gone. The source passed with `--source-dsn` (compose `SOURCE_DSN`) takes no lock at all, so two hosts started with it both capture into the same index.
+- **A dead host can hold that lock for hours.** The lock lives in the dead daemon's idle session on the index, and MySQL drops an idle session only after `wait_timeout` (28800 seconds by default) or its TCP keepalive. To take over sooner, list the lock holders on the index:
+
+  ```sql
+  SELECT m.OBJECT_NAME, t.PROCESSLIST_ID
+  FROM performance_schema.metadata_locks m
+  JOIN performance_schema.threads t ON t.THREAD_ID = m.OWNER_THREAD_ID
+  WHERE m.OBJECT_TYPE = 'USER LEVEL LOCK'
+    AND m.OBJECT_NAME LIKE 'bintrail\_monitor\_%';
+  ```
+
+  and `KILL <PROCESSLIST_ID>` (on RDS or Aurora, `CALL mysql.rds_kill(<PROCESSLIST_ID>)`). Run it as the account the daemon uses, or one with `CONNECTION_ADMIN`; any other account gets `ERROR 1095`. Only do this once the old host is powered off or cut off from both the source and the index: the daemon never checks the lock again after taking it, so a host that was only unreachable keeps capturing when it comes back, alongside the new one. Do not lower `wait_timeout` instead: the lock session is idle on a healthy daemon too, so MySQL would drop it and let a second daemon capture the same source.
+
+Automatic failover (a lease the standby can take over, with writes from a stale holder rejected) is tracked in [#1648](https://github.com/dbtrail/dbtrail/issues/1648).
 
 ## 6. Initial Setup Procedure
 

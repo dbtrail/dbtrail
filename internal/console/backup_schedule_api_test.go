@@ -508,3 +508,34 @@ func TestBackupScheduleAPI_listingResolvesThePrimedEntry(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestBackupScheduleAPI_nextMethodWhyCodeReachesTheWire (#1659): the red
+// next-run warning on the Backups page keys on next_method_why_code, not on
+// the sentence. Driven through the real handler so a DTO that stops filling
+// the code (or fills it with the sentence) fails here, not only in a page
+// test fed hand-written values.
+func TestBackupScheduleAPI_nextMethodWhyCodeReachesTheWire(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		s3only bool
+		want   string
+	}{
+		{"no backup yet", false, "first_backup"},
+		{"S3 without a Backup dir", true, "no_local_dir"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, id := newScheduleServer(t, &stubScheduleReporter{full: true})
+			if tc.s3only {
+				s3Only(t, srv, id)
+			}
+			rec, body := doServersReq(t, srv, "PUT", "/api/servers/"+id+"/backup-schedule", `{"every":"1d","at":"03:00"}`)
+			if rec.Code != 200 {
+				t.Fatalf("PUT code=%d body=%s", rec.Code, body)
+			}
+			got := scheduleOf(t, body)
+			if got == nil || got.NextMethod != BackupMethodFull || got.NextMethodWhyCode != tc.want {
+				t.Fatalf("schedule = %+v, want a full backup with why code %q", got, tc.want)
+			}
+		})
+	}
+}

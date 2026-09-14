@@ -188,8 +188,8 @@ In practice this skew is almost always absorbed by DBTrail's idempotent delta re
 `reconstruct` merges binlog deltas onto, so a snapshot stitched from several instants yields a table
 that never existed at any point in time, and every downstream answer — `reconstruct`, `verify`,
 `drill` — inherits it with nothing saying so. That is not something an operator should get by not
-choosing, which is why `--lock-mode` (CLI) and `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (console)
-default to `ftwrl` and the weaker modes must be asked for by name.
+choosing, which is why `--lock-mode` (CLI) and `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (console;
+`BASELINE_LOCK_MODE` in the compose `.env`) default to `ftwrl` and the weaker modes must be asked for by name.
 
 | `--lock-mode` | mydumper mode | Point-consistent? | Works on a write-active source? | Privileges |
 |---|---|---|---|---|
@@ -197,6 +197,9 @@ default to `ftwrl` and the weaker modes must be asked for by name.
 | `lock-all` | `LOCK_ALL` | yes | yes | `LOCK TABLES` |
 | `safe-no-lock` | `SAFE_NO_LOCK` | yes — or it aborts | **usually not** | `SELECT` + `REPLICATION CLIENT` |
 | `no-lock` | `NO_LOCK` | **no** | yes | `SELECT` + `REPLICATION CLIENT` |
+
+Every mode also needs `SHOW VIEW` when the dumped schemas hold views: mydumper stops the whole dump
+at the first view it cannot read (`SHOW VIEW command denied`), including under `no-lock`.
 
 **On managed MySQL, use `lock-all`.** RDS (and equivalents) will not grant
 `BACKUP_ADMIN` at all — `GRANT BACKUP_ADMIN ON *.* TO CURRENT_USER()` is refused
@@ -409,7 +412,7 @@ Why this matters beyond convenience: reconstructing from a **fresh** snapshot re
 | Refusal | What happened | What fixes it |
 |---|---|---|
 | `refused-gap` | The window spans events the index permanently lost, or the index is too old to rule that out | `--allow-gaps` to accept the loss knowingly, or a fresh dump |
-| `refused-ddl` | The table's columns moved since the baseline, or a `TRUNCATE`/`DROP`/`RENAME` landed in the window | `bintrail dump` + `bintrail baseline` — no flag helps |
+| `refused-ddl` | The table's columns, or their declared types, changed since the baseline, or a `TRUNCATE`/`DROP`/`RENAME` landed in the window | `bintrail dump` + `bintrail baseline` (on the console, a full backup) — no flag helps |
 | `refused` | Anything else (no baseline for the table, no primary key, a PK-changing `UPDATE` in the window) | Named in the message |
 
 A table with no baseline is refused rather than degraded to the binlog-only fallback: a snapshot folded from deltas alone would silently omit every row the window never touched.

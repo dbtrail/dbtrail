@@ -21,6 +21,7 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		jsFunctionBody(t, js, "backupDaemonCard") +
 		jsFunctionBody(t, js, "backupServersPanel") +
 		jsFunctionBody(t, js, "backupServerRow") +
+		jsFunctionBody(t, js, "s3OnlyBackupWarning") +
 		jsFunctionBody(t, js, "s3RetentionBox") +
 		jsFunctionBody(t, js, "s3RetentionConflicts")
 	// Dotted READS, not bare tokens: "value" also matches dir.value.trim()
@@ -33,7 +34,7 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		"srv.baseline_dir", "srv.baseline_s3", "srv.no_archive",
 		"srv.resolved_dir", "srv.resolved_s3", "srv.source",
 		"srv.schedule_every", "srv.schedule_at", "srv.schedule_refusal",
-		"srv.schedule_every_minutes", "srv.archive_s3",
+		"srv.schedule_every_minutes", "srv.archive_s3", "srv.full_backup_possible",
 	} {
 		if !strings.Contains(page, read) {
 			t.Errorf("the page never reads %q; the server emits it and the page renders a blank instead", read)

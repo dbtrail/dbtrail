@@ -175,9 +175,11 @@ annotated template.)
 Notes:
 
 - `SOURCE_DSN` is the MySQL you want to watch. The user needs
-  `REPLICATION SLAVE`, `REPLICATION CLIENT`, and `SELECT`, plus `LOCK TABLES`
-  if you want baselines (point-consistent by default; on RDS/Aurora also set
-  `BASELINE_LOCK_MODE=lock-all`). A MySQL on the
+  `REPLICATION SLAVE`, `REPLICATION CLIENT`, and `SELECT`, plus, for
+  baselines (point-consistent by default), `RELOAD` (and `BACKUP_ADMIN` on
+  MySQL/Percona 8.0+) and `SHOW VIEW`. On managed MySQL (RDS, Aurora,
+  Cloud SQL) the default lock mode is not available: grant `LOCK TABLES` and
+  `SHOW VIEW` and set `BASELINE_LOCK_MODE=lock-all`. A MySQL on the
   same machine is reachable from inside Docker as `host.docker.internal`.
 - The console is published on the **host loopback only** (`127.0.0.1:8090`),
   which is why first-run browser setup is allowed (the compose sets

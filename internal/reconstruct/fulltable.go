@@ -125,8 +125,14 @@ type FullTableConfig struct {
 	// anchored at (nil when the index holds no events); see ResolveSnapshotCut.
 	snapshotDir string
 	cut         *query.BinlogPos
-	Parallelism int  // max concurrent tables (0 → runtime.NumCPU())
-	AllowGaps   bool // false = strict abort on gaps (default for reconstruct)
+	// schemaAt is the schema snapshot in effect at At, and schemaAtTime when it
+	// was taken (#1651): the column-type check compares against it, not the
+	// latest snapshot, and only for a baseline older than it. nil when the
+	// snapshot history cannot be read; the check then compares names only.
+	schemaAt     *metadata.Resolver
+	schemaAtTime time.Time
+	Parallelism  int  // max concurrent tables (0 → runtime.NumCPU())
+	AllowGaps    bool // false = strict abort on gaps (default for reconstruct)
 
 	// CarryForwardUnchanged publishes a table that had NO events in the window
 	// by carrying its previous Parquet file forward (a hard link where the
@@ -645,6 +651,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 			slog.Info("snapshot anchored", "binlog_file", cut.File, "binlog_pos", cut.Pos,
 				"at", cfg.At.UTC().Format(time.RFC3339))
 		}
+		cfg.schemaAt, cfg.schemaAtTime = schemaSnapshotAt(db, cfg.At, resolver)
 	}
 
 	// Resolve archive sources once — the same set is used for every table.
@@ -1031,7 +1038,26 @@ func ReconstructTable(
 	// chose, while a baseline is picked up automatically by every later
 	// reconstruct.
 	if cfg.OutputFormat == OutputFormatParquet {
-		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, tm, schema, table); err != nil {
+		// Types only against a schema snapshot taken after this baseline and in
+		// effect at the target (see checkBaselineSchemaCurrent).
+		// Against when the CREATE TABLE was read, not the directory time: a
+		// fold carries the statement unchanged, so a snapshot stamped at or
+		// after the fold's own instant can still postdate the definition.
+		// Same second counts (!Before): both are whole seconds.
+		asOf := bmeta.CreateTableAsOf
+		if asOf.IsZero() {
+			asOf = snapshotTime
+		}
+		var typesTM *metadata.TableMeta
+		if cfg.schemaAt != nil && !cfg.schemaAtTime.Before(asOf) {
+			if t, rerr := cfg.schemaAt.Resolve(schema, table); rerr == nil {
+				typesTM = t
+			} else {
+				slog.Warn("the schema snapshot in effect at the target does not describe this table; column types are not compared",
+					"schema", schema, "table", table, "error", rerr)
+			}
+		}
+		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, tm, typesTM, schema, table); err != nil {
 			return nil, err
 		}
 		// A gapped ancestor taints every descendant: the events it lost are
@@ -2601,4 +2627,40 @@ func rowAfterOrdered(rowAfter map[string]any, colNames []string, schema, table s
 		out[i] = v
 	}
 	return out
+}
+
+// schemaSnapshotAt loads the schema snapshot in effect at at: the newest one
+// taken at or before it. A target older than every snapshot has none (EpochAt
+// would answer the first, which describes a later schema). Failures degrade to
+// nil with a warning, which makes the type check compare nothing: refusing a
+// fold because the snapshot history is unreadable would stop every backup.
+func schemaSnapshotAt(db *sql.DB, at time.Time, latest *metadata.Resolver) (*metadata.Resolver, time.Time) {
+	epochs, err := metadata.LoadSnapshotEpochs(db)
+	if err != nil {
+		slog.Warn("could not read the schema snapshot history; column types are not compared this run", "error", err)
+		return nil, time.Time{}
+	}
+	id, ok := metadata.EpochAt(epochs, at)
+	if !ok {
+		return nil, time.Time{}
+	}
+	var taken time.Time
+	for _, e := range epochs {
+		if e.ID == id {
+			taken = e.At
+		}
+	}
+	if taken.After(at) {
+		return nil, time.Time{}
+	}
+	if latest != nil && latest.SnapshotID() == id {
+		return latest, taken // the usual case: no second load
+	}
+	r, err := metadata.NewResolver(db, id)
+	if err != nil {
+		slog.Warn("could not load the schema snapshot in effect at the target; column types are not compared this run",
+			"snapshot_id", id, "error", err)
+		return nil, time.Time{}
+	}
+	return r, taken
 }
