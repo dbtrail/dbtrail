@@ -18,7 +18,7 @@ You grant to the Maintainer a perpetual, worldwide, non-exclusive, irrevocable, 
  
 - Reproduce, prepare derivative works of, publicly display, publicly perform, and distribute your Contribution and any derivative works.
 - Sublicense any or all of the above rights to third parties.
-- Use your Contribution in any product, service, or project, including commercial products and services (such as **DBTrail**), without restriction.
+- Use your Contribution in any product, service, or project, including commercial products and services (such as **dbtrail**), without restriction.
  
 ## 3. Copyright Ownership
  
