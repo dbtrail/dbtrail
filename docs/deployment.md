@@ -298,6 +298,20 @@ spec:
 
 > **Important:** Always run exactly one replica of `bintrail stream` per source MySQL. Multiple replicas would index duplicate events with different `server_id` values. If you need HA, use a leader-election sidecar or rely on the systemd/Kubernetes restart mechanism.
 
+
+### When the host dies
+
+A **process** crash recovers on its own: the daemon restarts (systemd `Restart=`, compose `restart: unless-stopped`) and every stream resumes from its checkpoint in the index. Losing the **host** does not: DBTrail has no automatic failover today, and someone starts it on another machine by hand. What that takes, and what to plan for:
+
+- **Keep the index off the host.** The index MySQL holds the capture state (events, checkpoints, archive and snapshot bookkeeping). On the same machine it is lost with it.
+- **Move the console's local files.** A new host needs the server registry (`console-servers.yaml`), console auth (`console-auth.yaml`), the MCP token (`console-mcp-token.yaml`) and, on DBTrail EE, the users, roles and access-rules stores, all under `~/.config/bintrail/` by default. Without them it starts with no servers to monitor. Keep them on a volume you can attach elsewhere, or back them up.
+- **Local snapshot folders are optional.** With a Backup S3 set, the new host reads the latest snapshot from the bucket. Its first update from the recorded changes then rewrites every table, because files in S3 cannot be reused by hard link; later updates reuse the local copy again.
+- **Source binlog retention must cover the takeover.** The new host resumes from the checkpoint. Binlogs the source purged while nobody was capturing are gone, and the stream reports a lost position instead of resuming.
+- **A second daemon is refused, and does not take over.** Each monitored server is guarded by a MySQL lock on its index (`GET_LOCK`), so a second daemon pointed at the same registry and index marks the server `failed` ("another bintrail process is already monitoring this server") instead of indexing twice. It does not retry: start the server again from the console, or restart the daemon, once the first host is gone.
+- **A dead host can hold that lock for hours.** The lock lives in the dead daemon's session on the index, and the index MySQL only drops an idle session after `wait_timeout` (28800 seconds by default) or its TCP keepalive. To take over sooner, kill that session on the index (`SHOW PROCESSLIST`, then `KILL <id>`), or lower `wait_timeout` for the DBTrail user.
+
+Automatic failover (a lease the standby can take over, with writes from a stale holder rejected) is tracked in [#1648](https://github.com/dbtrail/dbtrail/issues/1648).
+
 ## 6. Initial Setup Procedure
 
 Bring-up order (the [Quickstart](quickstart.md) shows `init`/`snapshot` with expected output):
