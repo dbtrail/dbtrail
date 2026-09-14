@@ -31,6 +31,13 @@ const (
 	// name is (see internal/snapshotdir) — and the gap between the two is what
 	// identifies a carried-forward table. See TableProvenance.
 	MetaKeySnapshotTimestamp = "bintrail.snapshot_timestamp"
+	// MetaKeyCreateTableAsOf is when the embedded CREATE TABLE was read from
+	// the live table (#1651). A dump reads it at the snapshot instant; a fold
+	// carries its ancestor's value forward with the statement itself, so a
+	// chain of folds still knows how old its table definition is. Absent on
+	// dumps and on folds written before the key existed: readers fall back to
+	// the snapshot's own time.
+	MetaKeyCreateTableAsOf = "bintrail.create_table_as_of"
 	// MetaKeyMydumperFormat is written only by the mydumper dump path. Kept as
 	// a named constant because it is the one POSITIVE signal that dates a
 	// pre-#1545 MySQL dump, which carries no producer key at all.
@@ -160,6 +167,9 @@ func readProvenance(path string, m *DumpMetadata, lookup func(string) (string, b
 	}
 	if v, ok := lookup(MetaKeySnapshotTimestamp); ok {
 		m.SnapshotTimestamp = parseFooterTime(path, MetaKeySnapshotTimestamp, v)
+	}
+	if v, ok := lookup(MetaKeyCreateTableAsOf); ok {
+		m.CreateTableAsOf = parseFooterTime(path, MetaKeyCreateTableAsOf, v)
 	}
 }
 

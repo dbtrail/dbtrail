@@ -630,7 +630,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 			slog.Info("snapshot anchored", "binlog_file", cut.File, "binlog_pos", cut.Pos,
 				"at", cfg.At.UTC().Format(time.RFC3339))
 		}
-		cfg.schemaAt, cfg.schemaAtTime = schemaSnapshotAt(db, cfg.At)
+		cfg.schemaAt, cfg.schemaAtTime = schemaSnapshotAt(db, cfg.At, resolver)
 	}
 
 	// Resolve archive sources once — the same set is used for every table.
@@ -1019,10 +1019,21 @@ func ReconstructTable(
 	if cfg.OutputFormat == OutputFormatParquet {
 		// Types only against a schema snapshot taken after this baseline and in
 		// effect at the target (see checkBaselineSchemaCurrent).
+		// Against when the CREATE TABLE was read, not the directory time: a
+		// fold carries the statement unchanged, so a snapshot stamped at or
+		// after the fold's own instant can still postdate the definition.
+		// Same second counts (!Before): both are whole seconds.
+		asOf := bmeta.CreateTableAsOf
+		if asOf.IsZero() {
+			asOf = snapshotTime
+		}
 		var typesTM *metadata.TableMeta
-		if cfg.schemaAt != nil && cfg.schemaAtTime.After(snapshotTime) {
+		if cfg.schemaAt != nil && !cfg.schemaAtTime.Before(asOf) {
 			if t, rerr := cfg.schemaAt.Resolve(schema, table); rerr == nil {
 				typesTM = t
+			} else {
+				slog.Warn("the schema snapshot in effect at the target does not describe this table; column types are not compared",
+					"schema", schema, "table", table, "error", rerr)
 			}
 		}
 		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, tm, typesTM, schema, table); err != nil {
@@ -2602,7 +2613,7 @@ func rowAfterOrdered(rowAfter map[string]any, colNames []string, schema, table s
 // would answer the first, which describes a later schema). Failures degrade to
 // nil with a warning, which makes the type check compare nothing: refusing a
 // fold because the snapshot history is unreadable would stop every backup.
-func schemaSnapshotAt(db *sql.DB, at time.Time) (*metadata.Resolver, time.Time) {
+func schemaSnapshotAt(db *sql.DB, at time.Time, latest *metadata.Resolver) (*metadata.Resolver, time.Time) {
 	epochs, err := metadata.LoadSnapshotEpochs(db)
 	if err != nil {
 		slog.Warn("could not read the schema snapshot history; column types are not compared this run", "error", err)
@@ -2620,6 +2631,9 @@ func schemaSnapshotAt(db *sql.DB, at time.Time) (*metadata.Resolver, time.Time) 
 	}
 	if taken.After(at) {
 		return nil, time.Time{}
+	}
+	if latest != nil && latest.SnapshotID() == id {
+		return latest, taken // the usual case: no second load
 	}
 	r, err := metadata.NewResolver(db, id)
 	if err != nil {

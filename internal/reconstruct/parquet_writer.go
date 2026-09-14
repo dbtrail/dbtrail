@@ -230,6 +230,7 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 		MetaKeySnapshotProducer:           SnapshotProducerReconstruct,
 		MetaKeyDerivedFrom:                in.SourceBaseline.Time.UTC().Format(time.RFC3339),
 		MetaKeyDerivedFromPath:            in.SourceBaseline.Path,
+		baseline.MetaKeyCreateTableAsOf:   createTableAsOf(in.SourceBaseline).UTC().Format(time.RFC3339),
 	}
 	if line := captureGapLines(in); line != "" {
 		md[baseline.MetaKeyCaptureGap] = line
@@ -417,6 +418,10 @@ func checkBaselineSchema(createSQL string, tm, typesTM *metadata.TableMeta, sche
 // truncated"); a DATETIME given fractional seconds loads and silently rounds
 // them. Only spelling is ignored (baseline.ComparableColumnType), so a display
 // width a server upgrade dropped is not a change.
+//
+// The check runs in Parquet mode only, so it keeps a refresh from carrying a
+// wrong definition forward; a mydumper-mode reconstruct or SQL export writes
+// the source baseline's CREATE TABLE as it is and is not refused here.
 //
 // The cost of refusing is bounded: a scheduled backup that refuses falls back
 // to a full backup where the daemon may take one, which dumps the current
@@ -624,4 +629,18 @@ func formatFloatForColumn(f float64, col baseline.Column, bitSize int) string {
 	// through JSON) is stored as text verbatim; avoid an exponent so the stored
 	// string still looks like the number MySQL would print.
 	return strconv.FormatFloat(f, 'f', -1, bitSize)
+}
+
+// createTableAsOf is when the source baseline's CREATE TABLE was read from the
+// live table: its own footer value when a fold carried one, else the source
+// snapshot's time, which is exact for a dump and the best a pre-#1651 fold
+// can offer. The column-type check compares the schema snapshot against it,
+// not against the folded snapshot's directory time: a fold copies the CREATE
+// TABLE unchanged, so its directory time says nothing about the definition's
+// age.
+func createTableAsOf(src baselineMeta) time.Time {
+	if !src.Metadata.CreateTableAsOf.IsZero() {
+		return src.Metadata.CreateTableAsOf
+	}
+	return src.Time
 }
