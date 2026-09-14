@@ -13,8 +13,7 @@ BINTRAIL_TELEMETRY=off      # this environment, e.g. in a systemd unit
 bintrail --telemetry=off …  # this one invocation
 ```
 
-Or, if you run the web console (`bintrail-console watch`): open **Storage →
-Usage telemetry** and click the toggle. It stops the running daemon's beacons
+Or, if you run the web console (`bintrail-console watch`): open **Settings → This daemon → Usage telemetry** and click the toggle. It stops the running daemon's beacons
 immediately (no restart) and records the same machine-wide choice as
 `bintrail telemetry off`.
 
@@ -25,7 +24,7 @@ bintrail telemetry show
 bintrail telemetry status   # is it on, and what decided that
 ```
 
-The web console shows the same event: on **Storage → Usage telemetry**, open
+The web console shows the same event: on **Settings → This daemon → Usage telemetry**, open
 **Show a sample event**. The daemon renders it through the same function the
 command uses, so the fields and their form are the same; the values are the
 daemon's own (each render draws a fresh `run_id`), and opening it sends
@@ -202,7 +201,7 @@ one did.
 | `DO_NOT_TRACK=1` | Off. Checked before any file is read or written |
 | `--telemetry=on\|off` | Off (or on) for this invocation |
 | `BINTRAIL_TELEMETRY=on\|off` | Off (or on) for this environment |
-| `~/.config/bintrail/telemetry.json` | Written by `bintrail telemetry on\|off`, or by the web console's **Storage → Usage telemetry** toggle |
+| `~/.config/bintrail/telemetry.json` | Written by `bintrail telemetry on\|off`, or by the web console's **Settings → This daemon → Usage telemetry** toggle |
 | *(nothing set)* | **On** |
 
 The console toggle writes that same file (so every bintrail process on the
