@@ -1,10 +1,10 @@
-# Installing dbtrail
+# Installing DBTrail
 
-Every way to install and first-run dbtrail, from the zero-friction Docker
+Every way to install and first-run DBTrail, from the zero-friction Docker
 Compose stack to building from source. If you just want the fastest path,
 it's the first section — the same four lines as the README.
 
-> **Naming note:** the project is **dbtrail**; the binaries, packages, and
+> **Naming note:** the project is **DBTrail**; the binaries, packages, and
 > images keep the original engine name **`bintrail`** (`bintrail`,
 > `bintrail-console`, `ghcr.io/dbtrail/bintrail`, `BINTRAIL_*` env vars).
 > Existing installs, scripts, and services stay valid as-is.
@@ -18,9 +18,9 @@ it's the first section — the same four lines as the README.
   and `SELECT` — plus `LOCK TABLES` if you want baselines (they are
   point-consistent by default; see
   [streaming.md](./streaming.md#if-you-also-want-baselines-add-lock-tables)).
-- An **index MySQL 8.0+** database for dbtrail's data (the Compose stack
+- An **index MySQL 8.0+** database for DBTrail's data (the Compose stack
   bundles one).
-- **Other sources:** besides MySQL, dbtrail can also capture from **MariaDB**
+- **Other sources:** besides MySQL, DBTrail can also capture from **MariaDB**
   ([alpha](./mariadb.md) — 10.6+, 11.4 is the CI-tested target) and
   **PostgreSQL** ([GA](./postgres.md) — 14+). Both are first-class sources in
   the web console (**+ Add server** → pick the source type); PostgreSQL also
@@ -68,7 +68,7 @@ fresh install): pick the **source type** (MySQL, MariaDB, or PostgreSQL) and
 paste the database to watch — host, user, password, optional schema filter
 (`host.docker.internal` reaches a database on this same machine from inside
 Docker; a PostgreSQL source adds database/slot/publication fields —
-see [postgres.md](./postgres.md)). dbtrail runs the preflight (failures come
+see [postgres.md](./postgres.md)). DBTrail runs the preflight (failures come
 back as remediation cards), provisions a dedicated index for that source, and
 starts streaming. Repeat per server; everything you add resumes automatically when
 the container restarts.
@@ -79,7 +79,7 @@ in a `.env` next to the compose file — that's optional now, not required.
 **The bundled index is a pinned MySQL 8.4** with a generated password — it
 holds the forensic record, so **it is your system of record, not a throwaway:
 back up its volumes** (`bintrail-index-data` + `bintrail-index-secret`
-together; volume loss means re-indexing). dbtrail **ships** that MySQL but
+together; volume loss means re-indexing). DBTrail **ships** that MySQL but
 does not **operate** it — disk, backups, and upgrades are yours, as is sizing
 (see [Capacity Planning](./capacity.md)). The ship-vs-operate boundary triage
 cites is [SUPPORT.md](./SUPPORT.md). See [docker.md](./docker.md) for the
@@ -87,7 +87,7 @@ credential mechanism and the `8.0→8.4` upgrade note.
 
 **Bring your own index MySQL** (co-equal path, not an afterthought): set
 `INDEX_DSN` in `.env` to a MySQL 8.0+ you operate, and remove the bundled
-`index-init` + `index-mysql` services. Same split — dbtrail installs and
+`index-init` + `index-mysql` services. Same split — DBTrail installs and
 migrates only its schema on whatever server you point it at; the contract
 floor stays MySQL 8.0+ (only the *bundled* index is 8.4). Want it operated for
 you? That's the managed service at [dbtrail.com](https://dbtrail.com).
@@ -206,7 +206,7 @@ package — install it only on hosts that capture from PostgreSQL.
 go install github.com/dbtrail/dbtrail/cmd/bintrail@latest
 ```
 
-Requires CGO (dbtrail embeds DuckDB for Parquet archive queries).
+Requires CGO (DBTrail embeds DuckDB for Parquet archive queries).
 
 ## Build from source
 
@@ -289,7 +289,7 @@ For cron, systemd units, and Ansible recipes, see [deployment.md](./deployment.m
 | `snapshot` | Capture table and column metadata from the source server |
 | `index` | Parse binlog files from disk and write row events to the index |
 | `stream` | Connect as a replica and index row events in real-time |
-| `agent` | Connect to dbtrail and listen for commands |
+| `agent` | Connect to DBTrail and listen for commands |
 | `query` | Search the index with flexible filters (schema, table, PK, time range, GTID) |
 | `recover` | Generate reversal SQL for matching events |
 | `recover-cascade` | Generate reversal SQL for rows hit by a foreign-key ON DELETE / ON UPDATE CASCADE / SET NULL |

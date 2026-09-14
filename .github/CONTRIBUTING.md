@@ -1,4 +1,4 @@
-# Contributing to dbtrail
+# Contributing to DBTrail
 
 Thank you for your interest in contributing. This document covers how to get set up, the conventions used in the codebase, and the pull request process.
 

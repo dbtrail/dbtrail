@@ -1,6 +1,6 @@
-# dbtrail Quickstart
+# DBTrail Quickstart
 
-dbtrail records every INSERT, UPDATE, and DELETE from MySQL into a searchable
+DBTrail records every INSERT, UPDATE, and DELETE from MySQL into a searchable
 index — so when something goes wrong you can find exactly what changed and
 generate SQL to undo it.
 
@@ -12,8 +12,8 @@ the **command line**. Both need a source MySQL user first.
 ## Prerequisites
 
 - A MySQL **source** with `binlog_format = ROW` and `binlog_row_image = FULL`.
-  (dbtrail's preflight checks this and shows the exact fix if it's missing.)
-- A user on the source for dbtrail to read from — create it on the source:
+  (DBTrail's preflight checks this and shows the exact fix if it's missing.)
+- A user on the source for DBTrail to read from — create it on the source:
 
   ```sql
   CREATE USER 'dbtrail'@'%' IDENTIFIED BY 'strong-password';
@@ -31,11 +31,11 @@ the **command line**. Both need a source MySQL user first.
   `RELOAD`/`BACKUP_ADMIN` let the baseline dump take a point-in-time snapshot.
   **On managed MySQL (RDS/Aurora), `GRANT BACKUP_ADMIN` is refused outright**, so grant `LOCK TABLES` and set `BASELINE_LOCK_MODE=lock-all` — equally point-consistent, and the mode mydumper itself names for RDS. If you would rather grant nothing extra on a self-hosted source, `BASELINE_LOCK_MODE=safe-no-lock` never writes a torn snapshot, but it refuses on a write-active source.
   `REPLICATION SLAVE`/`REPLICATION CLIENT` drive the binlog stream; `SELECT` lets
-  dbtrail snapshot the schema. dbtrail never writes to or locks the source.
+  DBTrail snapshot the schema. DBTrail never writes to or locks the source.
   (Least-privilege variant: [streaming.md](streaming.md#the-source-mysql-user).)
 
 Works with self-managed MySQL **and** managed services (RDS, Aurora, Cloud SQL) —
-dbtrail streams over the replication protocol and never needs the binlog files on
+DBTrail streams over the replication protocol and never needs the binlog files on
 disk.
 
 ---
@@ -55,7 +55,7 @@ and starts it. (Equivalent manual steps are in the [README](../README.md).)
 username and password — that's your login from now on.
 
 **3. Add the server to watch:** click **+ Add server** and paste the source MySQL
-host, user, and password. dbtrail runs the preflight (any failure comes back as a
+host, user, and password. DBTrail runs the preflight (any failure comes back as a
 fix-this card), provisions an index for it, and starts streaming — you'll see
 changes within the minute.
 
@@ -129,7 +129,7 @@ mysql -u root -p mydb < recovery.sql
 ```
 
 The script is wrapped in `BEGIN`/`COMMIT` and reverses events most-recent-first.
-dbtrail never applies it for you. Check progress any time with
+DBTrail never applies it for you. Check progress any time with
 `bintrail status --index-dsn "$IDX"`.
 
 > Same query + recover screens, read-only, without the full stack:

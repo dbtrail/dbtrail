@@ -85,7 +85,7 @@ func runAgentValidate(ctx context.Context) error {
 
 	// ── dbtrail API check ───────────────────────────────────────────────
 	detail, err := checkAPI(ctx)
-	printCheck("dbtrail API", detail, err)
+	printCheck("DBTrail API", detail, err)
 	if err != nil {
 		failed++
 	}

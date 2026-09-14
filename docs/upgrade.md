@@ -1,6 +1,6 @@
-# Upgrading dbtrail
+# Upgrading DBTrail
 
-How to move an existing install to a newer dbtrail version, whichever way you
+How to move an existing install to a newer DBTrail version, whichever way you
 installed it. The short version: **pull the new binaries/images, restart —
 the index schema migrates itself.** The rest of this page covers what's
 automatic, what to check first, and the handful of version-specific gotchas

@@ -56,7 +56,7 @@ func init() {
 	doctorCmd.Flags().StringVar(&docSchemas, "schemas", "", "Comma-separated schemas to check (default: all user schemas)")
 	doctorCmd.Flags().StringVar(&docFormat, "format", "text", "Output format: text or json")
 	doctorCmd.Flags().StringVar(&docRetain, "retain", "30d", "Retention window assumed by the index capacity projection and the --archive-s3 Object Lock retention comparison (Nd/Nh; \"off\" if you don't rotate)")
-	doctorCmd.Flags().StringVar(&docProxySQLAdmin, "proxysql-admin", "", "ProxySQL admin DSN, e.g. admin:pass@tcp(127.0.0.1:6032)/ (optional; verifies the dbtrail time-travel routing rules are live; advisory WARN only)")
+	doctorCmd.Flags().StringVar(&docProxySQLAdmin, "proxysql-admin", "", "ProxySQL admin DSN, e.g. admin:pass@tcp(127.0.0.1:6032)/ (optional; verifies the DBTrail time-travel routing rules are live; advisory WARN only)")
 	doctorCmd.Flags().StringVar(&docArchiveS3, "archive-s3", "", "S3 archive destination, e.g. s3://bucket/prefix (optional; reports the bucket's Object Lock ransomware posture; advisory WARN only)")
 	doctorCmd.Flags().StringVar(&docArchiveS3Reg, "archive-s3-region", "", "AWS region for --archive-s3 (optional; the SDK resolves it when empty)")
 	_ = doctorCmd.MarkFlagRequired("source-dsn")

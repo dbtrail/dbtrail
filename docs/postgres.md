@@ -61,7 +61,7 @@ setup](#postgresql-side-setup) below first, then:
 3. Fill in host, port, user, password, the database, the slot name (created for
    you on first run), and the publication (the one you created above).
    Optionally restrict **Schemas**.
-4. **Save.** dbtrail provisions a dedicated MySQL index for that source and
+4. **Save.** DBTrail provisions a dedicated MySQL index for that source and
    starts capturing **in-process** (the console runs the same PostgreSQL
    preflight as `bintrail-pg doctor` — `wal_level`, publication coverage,
    `REPLICA IDENTITY FULL`, slot health — and surfaces any failure as a

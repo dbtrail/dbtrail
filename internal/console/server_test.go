@@ -93,7 +93,7 @@ func TestMuxServesAssets(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("/ code = %d, want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "dbtrail console") {
+	if !strings.Contains(rec.Body.String(), "DBTrail console") {
 		t.Error("index.html (with 'dbtrail console') was not served at /")
 	}
 }
@@ -109,7 +109,7 @@ func TestMuxSPAFallback(t *testing.T) {
 		if rec.Code != 200 {
 			t.Errorf("%s code = %d, want 200", p, rec.Code)
 		}
-		if !strings.Contains(rec.Body.String(), "dbtrail console") {
+		if !strings.Contains(rec.Body.String(), "DBTrail console") {
 			t.Errorf("%s did not serve the index.html shell", p)
 		}
 	}

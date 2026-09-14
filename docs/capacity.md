@@ -2,14 +2,14 @@
 
 How much disk the index MySQL needs, how to estimate it before you deploy, and how to monitor it afterwards.
 
-This page covers the math; the *operation* of the index MySQL — provisioning the disk, watching it, backing it up — is the operator's responsibility, as spelled out in [SUPPORT.md](./SUPPORT.md). It applies to whatever MySQL 8.0+ your `--index-dsn` points at. (Want the index sized, monitored, and operated for you? That is what [dbtrail](https://dbtrail.com) is.)
+This page covers the math; the *operation* of the index MySQL — provisioning the disk, watching it, backing it up — is the operator's responsibility, as spelled out in [SUPPORT.md](./SUPPORT.md). It applies to whatever MySQL 8.0+ your `--index-dsn` points at. (Want the index sized, monitored, and operated for you? That is what [DBTrail](https://dbtrail.com) is.)
 
 ## What one event costs
 
 Every row change becomes one row in `binlog_events`. Its size has two parts:
 
 1. **A fixed floor** (~0.8 KB measured) — the event metadata (binlog coordinates, GTID, schema/table names, `pk_values`) plus the secondary indexes (~0.5 KB of the floor is index entries alone). The largest single contributor is `pk_hash`, a 64-character SHA-256 hex string stored twice: once in the row, once in the PK-lookup index. This floor is the same whether the source row is 3 columns or 40.
-2. **The row image(s)** — JSON copies of the row, stored in `row_before` / `row_after`. Because dbtrail requires `binlog_row_image=FULL`, every image contains **all** columns, with **column names as JSON keys**. Numeric values are nearly free (they inline into the JSON binary format); strings cost their byte length; long column names tax every single event.
+2. **The row image(s)** — JSON copies of the row, stored in `row_before` / `row_after`. Because DBTrail requires `binlog_row_image=FULL`, every image contains **all** columns, with **column names as JSON keys**. Numeric values are nearly free (they inline into the JSON binary format); strings cost their byte length; long column names tax every single event.
 
 The event type decides how many images are stored:
 
@@ -75,7 +75,7 @@ Adding a server from the console is a disk decision, not just a connection — b
 
 ### Estimating `events_per_day` before you have history
 
-If dbtrail isn't streaming yet, ask the source itself. On the production MySQL:
+If DBTrail isn't streaming yet, ask the source itself. On the production MySQL:
 
 ```sql
 SHOW GLOBAL STATUS LIKE 'Innodb_rows_%';
@@ -142,7 +142,7 @@ Prevention is rotation: without a scheduled `rotate`, `binlog_events` grows **un
 
 ## Monitoring
 
-The index is a regular MySQL table — every tool you already have works. The primitives dbtrail exposes:
+The index is a regular MySQL table — every tool you already have works. The primitives DBTrail exposes:
 
 - **`bintrail doctor --retain <window>`** — runs this page's math for you: it measures events/day and bytes/event from the last 24 hours of partition statistics and projects the steady-state size over the retention window. When it can also measure the index's free disk space — FAIL when the projection exceeds it, WARN above 70%. Two ways it measures that: when the index MySQL is on the same host (loopback/socket DSN) and its `@@hostname` matches this host's; or, on the bundled `docker-compose.yml` stack, via a dedicated read-only mount of the index's datadir volume into the daemon container (the index runs in its own container there, reachable only over TCP, so the loopback check alone could never fire — see [docker.md](./docker.md)). BYO index deployments that hit neither path get a SKIP, with the projection and the ≥30% headroom guidance instead of a hard number — it never goes silent-green without saying so, and it names which path was missing (no read-only datadir mount, a mount it cannot read, an index at another address, or an index on a local address whose server it cannot confirm is this host) instead of assuming where your index runs. The same check runs in `bintrail up`'s preflight with your actual `--rotate-retain`.
 - **The console's Status page** shows the same check for the selected server, as an **Index disk** card (index size, write rate, the size it settles at for the configured retention, free space and how long it lasts at the current rate) plus a warning box on the doctor's warn and fail grades. Under `bintrail-console watch` the retention is the daemon's effective rotation policy (override or `--rotate-retain` default; rotation off grades as unbounded growth, since that daemon is the one that would rotate). The standalone `bintrail-console serve` runs no rotation, so it reports the window as not known and projects no steady-state size; only the free-space floor (under 3 days of writes) still warns there. Free space follows the same two measurement paths as `doctor`; when neither applies the card says "not measurable from here" rather than showing a number, and names which path was missing: no read-only mount of the index data directory (the fix is `BINTRAIL_INDEX_DATADIR_RO` plus the mount, as the bundled `docker-compose.yml` wires them), a mount configured at a path the console cannot read, an index reached at another address, where it suggests no local mount at all because that would measure the wrong volume, or an index on a local address whose server it cannot confirm is this machine (what a port-forward or a tunnel looks like), where the mount is suggested with the warning to point it at the index's own data directory and nothing else. See [console.md](./console.md).

@@ -1,7 +1,7 @@
-# dbtrail demo — 30-second evaluation
+# DBTrail demo — 30-second evaluation
 
 `ghcr.io/dbtrail/bintrail-demo` is a **single-container, evaluation-only**
-demo: Percona Server 8.0 (a drop-in MySQL), dbtrail, ProxySQL, and a traffic
+demo: Percona Server 8.0 (a drop-in MySQL), DBTrail, ProxySQL, and a traffic
 generator, preconfigured so your first Time Travel SQL query is one
 `docker run` away.
 

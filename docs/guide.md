@@ -1,12 +1,12 @@
-# dbtrail — Practical Guide for DBAs
+# DBTrail — Practical Guide for DBAs
 
-dbtrail indexes every INSERT, UPDATE, and DELETE from MySQL ROW-format binary logs into a queryable MySQL database, and generates reversal SQL for recovery — without needing the original binlog files. This guide is for DBAs who need scenario-driven walkthroughs and troubleshooting help.
+DBTrail indexes every INSERT, UPDATE, and DELETE from MySQL ROW-format binary logs into a queryable MySQL database, and generates reversal SQL for recovery — without needing the original binlog files. This guide is for DBAs who need scenario-driven walkthroughs and troubleshooting help.
 
 ---
 
-## 0. Where to run dbtrail
+## 0. Where to run DBTrail
 
-dbtrail ingests changes two ways:
+DBTrail ingests changes two ways:
 
 - **`bintrail stream`** (and `bintrail up`, which wraps it) connects over the MySQL **replication protocol** — no access to binlog files on disk. This is the default, the only option for managed MySQL (RDS, Aurora, Cloud SQL), and runs anywhere with a TCP path to the source. See [Streaming](streaming.md). A **MariaDB** source is supported in alpha — see [MariaDB](mariadb.md). A **PostgreSQL** source is supported in beta via the separate `bintrail-pg` binary — see [PostgreSQL](postgres.md).
 - **`bintrail index`** reads binlog **files** from a local path (`--binlog-dir`). Use it to **backfill** historical files on self-managed MySQL; it never reads remote, SSH, or object-storage paths, and it opens files read-only. See [Indexing](indexing.md).
@@ -27,7 +27,7 @@ Use both together if you like: `index` to backfill old files, then `stream` for 
 Before you start:
 
 - [ ] Source MySQL server has `binlog_format = ROW` and `binlog_row_image = FULL` **server-wide** (a per-session `SET SESSION binlog_row_image = MINIMAL`/`NOBLOB` writes partial images that aren't supported), and `binlog_row_value_options` does **not** include `PARTIAL_JSON`
-- [ ] A separate database (or schema) is available for the dbtrail index — it can be on the same server or a different one
+- [ ] A separate database (or schema) is available for the DBTrail index — it can be on the same server or a different one
 - [ ] `bintrail` binary is installed and on your `$PATH`
 - [ ] Your index DSN includes the database name: `user:pass@tcp(host:3306)/binlog_index`
 
@@ -368,11 +368,11 @@ bintrail up \
 
 ---
 
-### Scenario K: Using dbtrail from Claude (AI-assisted investigation)
+### Scenario K: Using DBTrail from Claude (AI-assisted investigation)
 
 **Situation:** You want to investigate database changes in natural language from Claude — Claude Code, Claude Desktop, or claude.ai — instead of typing CLI commands.
 
-dbtrail ships an MCP server that exposes `query`, `recover`, `recover_cascade`, `status`, `list_schema_changes`, and `reconstruct` as AI tools. Once connected, you can ask:
+DBTrail ships an MCP server that exposes `query`, `recover`, `recover_cascade`, `status`, `list_schema_changes`, and `reconstruct` as AI tools. Once connected, you can ask:
 
 ```
 "What tables had deletions in the last hour?"
@@ -385,7 +385,7 @@ dbtrail ships an MCP server that exposes `query`, `recover`, `recover_cascade`, 
 Claude calls the tools automatically and presents the results. Setup depends on where Claude runs:
 
 - **Claude Code, same machine** (stdio) and **Claude Desktop, remote** (the `proxy.py` bridge): see [mcp-server.md → Connect Claude](mcp-server.md#connect-claude).
-- **claude.ai / Claude mobile** (the network Connector, via a gateway you self-host or dbtrail's hosted one — an advanced path): see [mcp-server.md → claude.ai and Claude mobile](mcp-server.md#claudeai-and-claude-mobile).
+- **claude.ai / Claude mobile** (the network Connector, via a gateway you self-host or DBTrail's hosted one — an advanced path): see [mcp-server.md → claude.ai and Claude mobile](mcp-server.md#claudeai-and-claude-mobile).
 
 ---
 
@@ -514,10 +514,10 @@ for the continuity signal.
 
 ### Scenario O: Feed a reporting engine without touching production
 
-Reporting queries against the source hurt the source. dbtrail already keeps
+Reporting queries against the source hurt the source. DBTrail already keeps
 two things as plain Parquet, on disk or in S3: the archived change history
 (every hour that aged past retention) and the baseline snapshots. Both are
-readable by any DuckDB, Spark, Trino or Athena with no dbtrail involved.
+readable by any DuckDB, Spark, Trino or Athena with no DBTrail involved.
 
 **Files, queried by name.** `bintrail views` writes a DuckDB schema over them:
 one `state_<schema>_<table>` view per table in the newest baseline, plus — with
@@ -580,7 +580,7 @@ itself stays plain Parquet: [Parquet reference](parquet-debugging.md#the-archive
 
 ---
 
-## 4. Keeping dbtrail Running (Day-to-Day)
+## 4. Keeping DBTrail Running (Day-to-Day)
 
 **Re-indexing new binlog files:** Just run `index --all` again. Files already marked `completed` are skipped automatically — re-running is always safe.
 
@@ -615,7 +615,7 @@ bintrail status --index-dsn "user:pass@tcp(127.0.0.1:3306)/binlog_index"
 | `--index-dsn must include a database name` | DSN is missing the `/database` component | Use format `user:pass@tcp(host:3306)/binlog_index`. The database name is required. |
 | `warning: p_future partition contains data` (printed by rotate) | Events arrived beyond the last named partition | Run `bintrail rotate --add-future N` to extend the partition range. |
 | `no binlog files found in "/path/to/dir"` | Wrong `--binlog-dir` or binlog files not yet copied | Verify the path with `ls /path/to/dir`. Binlog files are typically named `binlog.000001` etc. Use `docker cp` if the files are inside a container. |
-| Recovery SQL uses `WHERE col1 = ? AND col2 = ?` for all columns (verbose) | No schema snapshot available, so dbtrail falls back to matching all columns | Run `bintrail snapshot` — once a snapshot is available, recovery uses the primary key only. |
+| Recovery SQL uses `WHERE col1 = ? AND col2 = ?` for all columns (verbose) | No schema snapshot available, so DBTrail falls back to matching all columns | Run `bintrail snapshot` — once a snapshot is available, recovery uses the primary key only. |
 | `failed to connect to index database: ...` | Wrong DSN, MySQL not running, or network issue | Verify the DSN is correct and test connectivity: `mysql -u user -p -h host -P 3306 binlog_index`. |
 | Index files stuck as `in_progress` | Previous `index` run crashed or was killed | Re-run `bintrail index` — `in_progress` files are retried automatically. |
 | `auto-discover binlog position: ...` on `bintrail stream` first run | The default auto-discovery (`SHOW BINARY LOG STATUS` / `SHOW MASTER STATUS`) failed — usually because `log_bin=OFF` on the source, or the user lacks `REPLICATION CLIENT` | Enable binary logging on the source (or override with an explicit `--start-file`/`--start-pos` or `--start-gtid`). On RDS, set `binlog_format=ROW` in the parameter group and ensure `backup-retention-period > 0`. |
@@ -641,7 +641,7 @@ appuser:p@ssw0rd@tcp(db.internal:3306)/binlog_index
 
 **Special characters in passwords** must be URL-encoded. For example, `p@ss#word` becomes `p%40ss%23word`. When in doubt, wrap passwords in single quotes in shell scripts and use a password without special characters for the index DSN.
 
-**Source DSN** (used with `--source-dsn`) does not require a database name since dbtrail reads from `information_schema`:
+**Source DSN** (used with `--source-dsn`) does not require a database name since DBTrail reads from `information_schema`:
 
 ```
 root:secret@tcp(source-db:3306)/

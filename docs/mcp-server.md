@@ -1,6 +1,6 @@
-# Using Claude with dbtrail (MCP)
+# Using Claude with DBTrail (MCP)
 
-dbtrail ships an MCP server, `bintrail-mcp`, that lets **Claude** — in Claude
+DBTrail ships an MCP server, `bintrail-mcp`, that lets **Claude** — in Claude
 Code, Claude Desktop, or claude.ai — search your change history and draft
 recoveries in plain English. Once connected, you can ask:
 
@@ -33,7 +33,7 @@ You need two things on the machine where Claude runs:
    ```sh
    go install github.com/dbtrail/dbtrail/cmd/bintrail-mcp@latest
    ```
-2. **Your index DSN** — the same `BINTRAIL_INDEX_DSN` your dbtrail stack uses,
+2. **Your index DSN** — the same `BINTRAIL_INDEX_DSN` your DBTrail stack uses,
    e.g. `user:pass@tcp(127.0.0.1:3306)/binlog_index`.
 
 Using the [one-click bundle](#claude-desktop-one-click) or
@@ -66,7 +66,7 @@ everywhere):
 Restart Claude Code. The `query`, `recover`, `recover_cascade`, `status`,
 `list_schema_changes`, and `reconstruct` tools appear — now ask: *"What changed in the orders table in the last hour?"*
 
-> Working inside the dbtrail **source repo**? Use
+> Working inside the DBTrail **source repo**? Use
 > `"command": "go", "args": ["run", "./cmd/bintrail-mcp"]` instead — no separate
 > install needed.
 
@@ -162,9 +162,9 @@ optional** setup. Most people use Claude Code or Claude Desktop above instead;
 those reach a private index over stdio or bridge mode and need no public
 endpoint at all.
 
-- **dbtrail's hosted gateway (managed-service customers).** dbtrail operates one
+- **DBTrail's hosted gateway (managed-service customers).** DBTrail operates one
   at `https://mcp.dbtrail.com/mcp` and provisions your tenant. This requires a
-  dbtrail account — it is a managed service, not part of this repository.
+  DBTrail account — it is a managed service, not part of this repository.
 - **Your own gateway.** This repository does not ship one. The binaries here are
   `bintrail`, `bintrail-console`, `bintrail-mcp`, and `bintrail-pg` — none of
   them terminate OAuth. If you want the claude.ai path on your own

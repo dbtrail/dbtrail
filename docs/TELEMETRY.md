@@ -173,7 +173,7 @@ appends one line to a local file. Delivery happens on a *later* run.
   by an atomic rename, so a batch is never sent twice or lost between them.
 
 Delivery goes to `https://telemetry.dbtrail.com` — a host separate from the
-authenticated dbtrail API, so telemetry traffic cannot be correlated with an
+authenticated DBTrail API, so telemetry traffic cannot be correlated with an
 account at the network layer. The request carries **no `Authorization` header,
 no cookie, and no account identifier**.
 
@@ -322,7 +322,7 @@ be attributed to a customer, a company, or a person even in principle.
 
 ## Legal basis and your rights
 
-- **Controller**: dbtrail. Contact via the repository issue tracker or the
+- **Controller**: DBTrail. Contact via the repository issue tracker or the
   address published at <https://dbtrail.com>.
 - **Purposes**: deciding what to build next (which commands are actually used)
   and finding reliability problems (which error classes are rising).

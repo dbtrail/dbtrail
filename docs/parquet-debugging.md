@@ -384,7 +384,7 @@ DuckDB pushes certain filters into the Parquet reader so it can skip entire row 
 
 | Filter | Pushdown? | Notes |
 |--------|-----------|-------|
-| `event_timestamp >= ?` / `<= ?` | Yes | Effective when data is sorted by timestamp (dbtrail writes in timestamp order) |
+| `event_timestamp >= ?` / `<= ?` | Yes | Effective when data is sorted by timestamp (DBTrail writes in timestamp order) |
 | `schema_name = ?` | Yes | Pushed as a predicate on the string column |
 | `table_name = ?` | Yes | Same as above |
 | `pk_values = ?` | Partial | Pushed down, but row groups contain many distinct PKs so few groups are skipped |
@@ -580,4 +580,4 @@ bintrail query --index-dsn "..." --archive-s3 s3://... --bintrail-id <uuid> \
   --since "2026-02-01 00:00:00" --log-level debug 2>&1 | grep -i parquet
 ```
 
-Copy the generated `SELECT ... FROM parquet_scan(...)` into the DuckDB CLI with the same filters and compare. The two should produce identical results; if they don't, the discrepancy is either (a) a filter-translation bug in dbtrail (worth filing), or (b) a DuckDB version mismatch between dbtrail's embedded DuckDB and your CLI install.
+Copy the generated `SELECT ... FROM parquet_scan(...)` into the DuckDB CLI with the same filters and compare. The two should produce identical results; if they don't, the discrepancy is either (a) a filter-translation bug in DBTrail (worth filing), or (b) a DuckDB version mismatch between DBTrail's embedded DuckDB and your CLI install.

@@ -238,7 +238,7 @@ func (ch *Channel) connectAndListen(ctx context.Context) error {
 	}
 	defer conn.CloseNow()
 
-	ch.logger.Info("connected to dbtrail", "endpoint", ch.cfg.Endpoint)
+	ch.logger.Info("connected to DBTrail", "endpoint", ch.cfg.Endpoint)
 
 	// Start heartbeat goroutine. It exits when hbCtx is cancelled (on
 	// connection drop or parent ctx cancellation).

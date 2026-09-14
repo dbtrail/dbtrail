@@ -1,16 +1,16 @@
 # Support scope
 
-This document is the canonical statement of what the dbtrail project does
+This document is the canonical statement of what the DBTrail project does
 and does not support. Issue triage links here; reports outside this scope
 are closed with a pointer to this file.
 
 ## The contract
 
-dbtrail's contract with your infrastructure is one line:
+DBTrail's contract with your infrastructure is one line:
 
 > **A reachable MySQL 8.0+ via `--index-dsn`.**
 
-dbtrail installs and versions **its own schema** on that server — databases
+DBTrail installs and versions **its own schema** on that server — databases
 (`CREATE DATABASE IF NOT EXISTS`), tables, and idempotent migrations, via
 `init`, `up`, and the console control plane. The **bintrail binary** never
 installs, supervises, or operates a mysqld **on the host** (no apt/yum
@@ -27,7 +27,7 @@ ship-vs-operate boundary below.
 - The bintrail binaries and their commands, flags, and documented behavior.
 - The index **schema**: its tables, migrations, and data correctness
   (every row event, full before/after images).
-- dbtrail's own tooling for operating the index *data*: `rotate`, `status`,
+- DBTrail's own tooling for operating the index *data*: `rotate`, `status`,
   `doctor`, `archive reconcile`, Parquet archives and their queries.
 - The recovery and consistency tooling: `query`, `recover`, `recover-cascade`,
   `reconstruct`, `baseline`, and `verify` (the data-consistency check that
@@ -88,7 +88,7 @@ The boundary triage cites:
 
 ## Source server configuration (required for correct capture)
 
-dbtrail captures changes from your **source** database — **MySQL**, **MariaDB**
+DBTrail captures changes from your **source** database — **MySQL**, **MariaDB**
 (alpha), or **PostgreSQL**; see [Supported source families](#supported-source-families)
 below. The requirements here cover a **MySQL** (and MariaDB) source's ROW-format
 binary logs; PostgreSQL's capture requirements (logical replication, `wal_level`,
@@ -98,13 +98,13 @@ requires the source to be configured **server-wide** (not just per-session):
 - `binlog_format = ROW`.
 - `binlog_row_image = FULL`. Partial images (`MINIMAL`/`NOBLOB`) — **including from
   a per-session `SET SESSION binlog_row_image = MINIMAL`** while the global is `FULL`
-  — are **out of scope**: dbtrail indexes incomplete before/after images as if
+  — are **out of scope**: DBTrail indexes incomplete before/after images as if
   complete, so `recover` emits NULLs for unchanged columns and its `WHERE` clause
   matches nothing.
 - `binlog_row_value_options` must **not** include `PARTIAL_JSON` — partial JSON
   updates log only a diff, leaving no complete after-image to recover from.
 
-dbtrail's startup preflight and `bintrail doctor` validate the `binlog_row_image`
+DBTrail's startup preflight and `bintrail doctor` validate the `binlog_row_image`
 they see on bintrail's own connection; bintrail can't observe what other
 application sessions set, so preventing per-session overrides is the operator's
 responsibility. Data captured while the source violated these requirements is out
@@ -114,7 +114,7 @@ and re-index.
 
 ## Supported source families
 
-dbtrail captures from three source families. **All of them index into the same
+DBTrail captures from three source families. **All of them index into the same
 MySQL index** — there is no per-source index store, and the index schema is
 identical across sources (that portability is deliberate). Pointing `--index-dsn`
 at a non-MySQL server is **not** supported.
@@ -125,9 +125,9 @@ at a non-MySQL server is **not** supported.
 | **MariaDB** (target 11.4) | Alpha | ROW-format binlog (MariaDB GTID) | [mariadb.md](./mariadb.md) |
 | **PostgreSQL** | Supported — via the separate `bintrail-pg` binary | Logical replication (`pgoutput`) | [postgres.md](./postgres.md) |
 
-**We install nothing in your source database.** dbtrail connects as an ordinary
+**We install nothing in your source database.** DBTrail connects as an ordinary
 read-only replication client. For PostgreSQL specifically, capture uses the
-**built-in `pgoutput`** logical-decoding plugin only — dbtrail never installs a
+**built-in `pgoutput`** logical-decoding plugin only — DBTrail never installs a
 custom output plugin, runs `CREATE EXTENSION`, adds an event trigger, or places
 any other server-side component in your source, and it never writes to the
 source. This keeps managed PostgreSQL (RDS/Aurora/Cloud SQL) in scope. We
@@ -136,7 +136,7 @@ publication); we never create it for you.
 
 **Operating the source-side capture prerequisites is the operator's
 responsibility** — the same ship-vs-operate split as the index. In particular, a
-PostgreSQL logical replication **slot retains WAL** until dbtrail consumes it: if
+PostgreSQL logical replication **slot retains WAL** until DBTrail consumes it: if
 `bintrail-pg` is stopped long enough, the slot can fill the source's disk. Sizing
 `max_slot_wal_keep_size`, monitoring slot lag, and the source's own disk are
 yours (`bintrail-pg doctor` reports slot/WAL health — see
@@ -145,7 +145,7 @@ yours (`bintrail-pg doctor` reports slot/WAL health — see
 
 ## Reporting issues
 
-Bugs in dbtrail's binaries, schema, tooling, console, or docs: please open
+Bugs in DBTrail's binaries, schema, tooling, console, or docs: please open
 an issue with reproduction steps — those are always in scope. If your report
 is about the index MySQL server's own operation (disk, backups, upgrades,
 corruption), or about data captured under an unsupported source configuration

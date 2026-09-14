@@ -6,7 +6,7 @@ This walkthrough takes you from zero to running a working time-travel query agai
 SELECT * FROM _flashback.orders AS OF '2026-05-02 10:00:00' WHERE id = 12345;
 ```
 
-The query is answered by `bintrail shim`, an in-process MySQL-protocol server (a subcommand of the `bintrail` binary) that intercepts the virtual `_flashback`, `_diff`, and `_snapshot` schemas and resolves them against your dbtrail index plus any rotated archives (local directory or `s3://` prefix). ProxySQL sits in front of both your real MySQL and the shim, routing each query to the right backend. The shim only cares that the index exists and `archive_state` is current — whatever keeps `binlog_events` populated (typically `bintrail stream`).
+The query is answered by `bintrail shim`, an in-process MySQL-protocol server (a subcommand of the `bintrail` binary) that intercepts the virtual `_flashback`, `_diff`, and `_snapshot` schemas and resolves them against your DBTrail index plus any rotated archives (local directory or `s3://` prefix). ProxySQL sits in front of both your real MySQL and the shim, routing each query to the right backend. The shim only cares that the index exists and `archive_state` is current — whatever keeps `binlog_events` populated (typically `bintrail stream`).
 
 ```
 ┌─────────────┐     :6033       ┌──────────┐    real query     ┌────────────┐
@@ -138,7 +138,7 @@ paths — see **Step 6 — Run a time-travel query** below.
 
 ---
 
-The ProxySQL walkthrough below takes about 10 minutes on a fresh Ubuntu 22.04 or Amazon Linux 2023 host that already has a populated dbtrail index.
+The ProxySQL walkthrough below takes about 10 minutes on a fresh Ubuntu 22.04 or Amazon Linux 2023 host that already has a populated DBTrail index.
 
 ---
 
@@ -146,7 +146,7 @@ The ProxySQL walkthrough below takes about 10 minutes on a fresh Ubuntu 22.04 or
 
 Before starting, you need:
 
-- **A populated dbtrail index.** Some process is keeping `binlog_events` current — typically `bintrail stream`. If rotated hours have been archived, `archive_state` points at the local directory or `s3://` prefix where the Parquet files live. If you haven't set any of this up yet, see [`docs/streaming.md`](streaming.md) and [`docs/rotation-and-status.md`](rotation-and-status.md).
+- **A populated DBTrail index.** Some process is keeping `binlog_events` current — typically `bintrail stream`. If rotated hours have been archived, `archive_state` points at the local directory or `s3://` prefix where the Parquet files live. If you haven't set any of this up yet, see [`docs/streaming.md`](streaming.md) and [`docs/rotation-and-status.md`](rotation-and-status.md).
 - **A `.bintrail.env` file** with `BINTRAIL_SOURCE_DSN`, `BINTRAIL_INDEX_DSN`, and `BINTRAIL_SERVER_ID` set. `bintrail config init` scaffolds one.
 - **The `bintrail` binary** on the host. The shim is a subcommand — there is no second binary to download.
 - **Root or `sudo` access** on the host.
@@ -329,7 +329,7 @@ StandardError=journal
 WantedBy=multi-user.target
 ```
 
-> A copy of this unit ships at `deploy/bintrail-shim.service` in the dbtrail repo.
+> A copy of this unit ships at `deploy/bintrail-shim.service` in the DBTrail repo.
 
 The unit reads `BINTRAIL_INDEX_DSN` from `/etc/bintrail/.bintrail.env` (the same file your other `bintrail` commands use) so the shim can answer queries against your index. The DSN must include the index database name (e.g. `…/bintrail_index`) — the shim refuses to start otherwise. Append `--allow-gaps` to `ExecStart` to warn-and-continue on archive failures or coverage gaps instead of returning a MySQL error to the client; the default is strict because the wire protocol has no warning channel.
 
@@ -341,7 +341,7 @@ ExecStart=/usr/local/bin/bintrail shim --shim-config /etc/bintrail/shim.yaml --a
 
 Requires ProxySQL **2.7+** between the application and the shim — the LTS 2.6 line isn't verified to negotiate SHA2 against backends, so operators on 2.6 keep the default (`mysql_native_password`). The application user used by ProxySQL must match the chosen scheme: `IDENTIFIED WITH mysql_native_password BY '<password>'` for the default path, `IDENTIFIED WITH caching_sha2_password BY '<password>'` for the opt-in. `sha256_password` is also accepted by `--auth-method` if your environment requires it. The same 2.7+ requirement applies when ProxySQL fronts an **8.4 source** directly (its `caching_sha2_password` backend), set via `proxysql-config --backend-auth-plugin caching_sha2_password`.
 
-> **dbtrail's own connections to MySQL 8.4 need no auth flag.** The ProxySQL requirement above is only about ProxySQL negotiating `caching_sha2_password` to a backend. dbtrail's *index* connection (`--index-dsn`) and its *source replication* handshake (`bintrail stream`/`up`) both complete `caching_sha2_password` over a plaintext network on their own — with no flag, no TLS, and no ProxySQL in the path. This is what the bundled MySQL 8.4 index uses by default.
+> **DBTrail's own connections to MySQL 8.4 need no auth flag.** The ProxySQL requirement above is only about ProxySQL negotiating `caching_sha2_password` to a backend. DBTrail's *index* connection (`--index-dsn`) and its *source replication* handshake (`bintrail stream`/`up`) both complete `caching_sha2_password` over a plaintext network on their own — with no flag, no TLS, and no ProxySQL in the path. This is what the bundled MySQL 8.4 index uses by default.
 
 Enable and start:
 
@@ -445,7 +445,7 @@ SELECT * FROM _diff.orders BETWEEN '2026-05-01' AND '2026-05-02' WHERE id = 1234
 > bintrail doctor --source-dsn "$SRC" --proxysql-admin 'admin:<pass>@tcp(127.0.0.1:6032)/'
 > ```
 >
-> The check confirms all six dbtrail rules are live in
+> The check confirms all six DBTrail rules are live in
 > `runtime_mysql_query_rules` (advisory `WARN` when they aren't — it never
 > changes doctor's exit code).
 
@@ -465,13 +465,13 @@ SELECT id, email, name FROM _flashback.users AS OF TIMESTAMP '2026-05-02 10:00:0
 
 The column list accepts bare identifiers only; backticks, schema-qualified columns (`users.id`), and aliases (`id AS user_id`) are not yet parsed and surface as `ER_PARSE_ERROR`. Columns the row image is missing (e.g. dropped post-event) come back as `NULL` — matching MySQL's behaviour after an `ALTER TABLE DROP COLUMN`.
 
-For a **full-table** `SELECT *` (no column list), dbtrail unions the columns present across the reconstructed rows, so a column that existed at the queried time but was **dropped afterward** still appears — with its historical values — rather than being silently hidden by the current (narrower) schema. (The one exception is the uncapped streaming `_snapshot` path described below: it fixes the column set from the table's *current* schema before the first row is sent, so a since-dropped column is not surfaced there — the shim logs a warning naming the omitted column, and adding a `LIMIT` forces the buffered path that surfaces it.)
+For a **full-table** `SELECT *` (no column list), DBTrail unions the columns present across the reconstructed rows, so a column that existed at the queried time but was **dropped afterward** still appears — with its historical values — rather than being silently hidden by the current (narrower) schema. (The one exception is the uncapped streaming `_snapshot` path described below: it fixes the column set from the table's *current* schema before the first row is sent, so a since-dropped column is not surfaced there — the shim logs a warning naming the omitted column, and adding a `LIMIT` forces the buffered path that surfaces it.)
 
 The WHERE column must match the table's primary key. A WHERE on a non-PK column is rejected with a parser error rather than silently returning the wrong row.
 
 Single-row `_flashback` / `_snapshot` point-lookups cut at the **transaction boundary**, not the individual event: if the row's most recent change belongs to a multi-statement transaction whose other statements commit *after* the AS OF instant, that whole transaction is excluded and the row resolves to its state *before* it — never a half-applied image that never existed at any real instant. (Full-table `AS OF` still cuts per row; see the transaction-boundary note in `query-and-recovery.md`.)
 
-`SHOW TABLES FROM _flashback / _diff / _snapshot` returns every table in the current schema that dbtrail has schema knowledge of (the newest snapshot per table, so PostgreSQL-source indexes — which record one table per snapshot — list all their tables too). A table that was since dropped at the source still appears: its indexed history remains queryable with `AS OF`. This lets an interactive `mysql>` session explore the virtual schemas:
+`SHOW TABLES FROM _flashback / _diff / _snapshot` returns every table in the current schema that DBTrail has schema knowledge of (the newest snapshot per table, so PostgreSQL-source indexes — which record one table per snapshot — list all their tables too). A table that was since dropped at the source still appears: its indexed history remains queryable with `AS OF`. This lets an interactive `mysql>` session explore the virtual schemas:
 
 ```sql
 USE myapp;
@@ -486,7 +486,7 @@ Full-table `_snapshot` with **no** `LIMIT`, run over a live shim (`bintrail shim
 
 DELETE events are correctly suppressed — rows that did not exist at the AS OF instant don't appear in the resultset (same semantic as Oracle's `AS OF`). For ad-hoc filtering, joins, or aggregations, pipe the resultset to `duckdb`, `pandas`, or any tool that consumes a `SELECT *` stream — the shim deliberately stays a forensic point-lookup + full-table tool, not a SQL planner.
 
-The shim resolves the row by replaying the relevant binlog events from your dbtrail MySQL index. If the timestamp falls outside the index's retention (because hourly partitions have been rotated to S3), the shim auto-discovers the Parquet archives via `archive_state` and merges results from both sources — same machinery `bintrail query` and `bintrail recover` already use.
+The shim resolves the row by replaying the relevant binlog events from your DBTrail MySQL index. If the timestamp falls outside the index's retention (because hourly partitions have been rotated to S3), the shim auto-discovers the Parquet archives via `archive_state` and merges results from both sources — same machinery `bintrail query` and `bintrail recover` already use.
 
 ---
 
@@ -556,11 +556,11 @@ To distinguish cases 1 and 2, query `_diff` for the per-PK history: it returns e
 journalctl -u bintrail-stream -n 200
 ```
 
-The dbtrail index retains the most recent hours via partition rotation; older data is in S3 (auto-discovered via `archive_state`). See [`docs/rotation-and-status.md`](rotation-and-status.md) for rotation and archive cadence.
+The DBTrail index retains the most recent hours via partition rotation; older data is in S3 (auto-discovered via `archive_state`). See [`docs/rotation-and-status.md`](rotation-and-status.md) for rotation and archive cadence.
 
 ### Operator already has users in hostgroup 990
 
-`bintrail proxysql-config` scopes its DELETE to `mysql_users WHERE default_hostgroup = 990` — any pre-existing user in that hostgroup will be removed when the script is applied. If you have application users you want to keep separate from dbtrail-managed routing, place them in a different hostgroup before running the script. Hostgroup 990 is reserved for dbtrail; see the comment header at the top of the generated `proxysql-setup.sql` for the full list of resources the script manages.
+`bintrail proxysql-config` scopes its DELETE to `mysql_users WHERE default_hostgroup = 990` — any pre-existing user in that hostgroup will be removed when the script is applied. If you have application users you want to keep separate from dbtrail-managed routing, place them in a different hostgroup before running the script. Hostgroup 990 is reserved for DBTrail; see the comment header at the top of the generated `proxysql-setup.sql` for the full list of resources the script manages.
 
 ---
 
@@ -573,6 +573,6 @@ The dbtrail index retains the most recent hours via partition rotation; older da
 - **`_snapshot` refuses across a TRUNCATE/DROP/RENAME.** `TRUNCATE TABLE`/`DROP TABLE`/`RENAME TABLE` emit no row events, so a baseline merge spanning one of these statements would silently resurrect pre-DDL rows as if they still existed at AS OF. Both the single-row and full-table `_snapshot` paths check `schema_changes` for such a statement between the baseline snapshot and AS OF and return `ER_UNKNOWN_ERROR` (1105) naming the DDL type and timestamp instead ([#764](https://github.com/dbtrail/dbtrail/issues/764)); re-baseline the table after the DDL to resume. `_flashback` is unaffected — it never reads a baseline.
 - **No JOINs, aggregations, or non-PK WHERE filters inside the shim.** Run them outside on the resultset (`duckdb`, `pandas`, `awk`). The shim's job is to deliver correct historical row state; SQL execution against that state is the operator's tool of choice.
 - **ENUM/SET labels are decoded with the snapshot in effect at each event.** Binlog row images store ENUMs as ordinals and SETs as bitmasks; the shim (and the console Time-travel / `bintrail reconstruct` surfaces) map them back to labels using the schema snapshot whose capture time most recently precedes the event — so an enum reshaped between two events renders each event under its own definition. Remaining caveats: events older than the *first* snapshot decode with that first snapshot, and a change made between an ALTER and the next snapshot decodes with the pre-ALTER definition (stream mode auto-snapshots on DDL, so that window is normally seconds). An ordinal beyond the selected definition is returned as the raw number — the forensic ground truth, also visible in `bintrail query`'s JSON output, which is deliberately left unmapped.
-- **ProxySQL itself is not provisioned by dbtrail.** `bintrail proxysql-config` only writes routing rules; you install and harden ProxySQL itself (admin password, frontend TLS, monitoring) using the standard ProxySQL docs.
+- **ProxySQL itself is not provisioned by DBTrail.** `bintrail proxysql-config` only writes routing rules; you install and harden ProxySQL itself (admin password, frontend TLS, monitoring) using the standard ProxySQL docs.
 - **The bare `AS OF` rule (990006) has a small residual false-positive surface.** The rule is end-anchored — only statements that *finish* with `AS OF '<text>'` route to the shim, so `AS OF` inside a string literal mid-query stays on passthrough (covered by an e2e guard test against real ProxySQL). The irreducible residue: a benign statement whose **final token** is a string literal of the exact form `AS OF '<text>'` would route to the shim and fail (the shim has no passthrough). If you hit that in practice, parenthesise or reorder the predicate — or delete rule 990006 from `mysql_query_rules` and use the `_flashback.`/hint forms instead. Note ProxySQL's `$` anchor assumes the default `re_modifiers` (CASELESS, no multiline); adding `GLOBAL`/multiline modifiers to the rule weakens the anchor to end-of-line.
 - **The bare `AS OF` form is `*`-only and trailing-only.** Column lists stay on the `_flashback`/`_snapshot` virtual schemas, and the AS OF clause must end the statement (an AS-OF-before-WHERE variant would forfeit the end anchor — the false-positive defense above). The bare form rewrites to `_flashback` (binlog-only); for baseline-aware lookups use `_snapshot`.

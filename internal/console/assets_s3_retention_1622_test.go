@@ -21,8 +21,8 @@ func TestS3RetentionBlockKeepsThePromises(t *testing.T) {
 	row := jsFunctionBody(t, js, "backupServerRow")
 
 	for _, want := range []string{
-		"dbtrail never removes one",
-		"dbtrail never deletes from S3 and never changes a bucket's rules",
+		"DBTrail never removes one",
+		"DBTrail never deletes from S3 and never changes a bucket's rules",
 		"the second command replaces every rule on the bucket",
 		"cannot spare the only complete copy",
 		"if the schedule stops it keeps expiring until none is left",

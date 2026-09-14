@@ -14,12 +14,12 @@ with no column names — those live in `information_schema` on the source server
 `bintrail snapshot` captures that column metadata (and foreign-key
 relationships) into the index so events can be decoded into named columns.
 
-- **No extra grants.** The privileges that let dbtrail read
+- **No extra grants.** The privileges that let DBTrail read
   `information_schema.COLUMNS` also cover the FK metadata
   (`KEY_COLUMN_USAGE`, `REFERENTIAL_CONSTRAINTS`) — MySQL's metadata visibility
   is row-level, so if you can see a table's columns you can see its constraints.
 - **Re-snapshot after a schema change.** If an `ALTER TABLE` runs after the
-  snapshot, the binlog column count no longer matches; dbtrail **skips that
+  snapshot, the binlog column count no longer matches; DBTrail **skips that
   table's events** rather than corrupting data. When such a skip (diverging
   column count, or a table missing from the snapshot entirely) hits events
   **at or after the snapshot's creation time**, `bintrail index` fails the
@@ -41,7 +41,7 @@ relationships) into the index so events can be decoded into named columns.
   column names. If the source sets `binlog_row_metadata=FULL` (MySQL 8.0+,
   MariaDB 10.5+ — `bintrail doctor` reports it), every row event's TABLE_MAP
   carries the table's real column names (a handful of extra bytes per column
-  per TABLE_MAP event) and dbtrail verifies the snapshot against them,
+  per TABLE_MAP event) and DBTrail verifies the snapshot against them,
   **stopping with a loud error** instead of indexing corrupt data:
 
   ```sql

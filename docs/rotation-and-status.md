@@ -94,7 +94,7 @@ Each hourly partition is named `p_YYYYMMDDHH` in UTC (e.g. `p_2026021914`); the 
 
 ## Archiving Partitions to Parquet
 
-Before dropping old partitions, dbtrail can serialize each partition's events to a Parquet file. This gives you a long-term queryable record outside the index database — without requiring the original binlog files.
+Before dropping old partitions, DBTrail can serialize each partition's events to a Parquet file. This gives you a long-term queryable record outside the index database — without requiring the original binlog files.
 
 ### Archiving to a local directory
 
@@ -215,9 +215,9 @@ s3://my-bintrail-archives/events/
       ...
 ```
 
-The `bintrail_id` partition key is the stable UUID of the dbtrail server instance that indexed the data (see [Server Identity](server-identity.md)). Multiple dbtrail instances indexing different MySQL sources can share the same S3 prefix without collision.
+The `bintrail_id` partition key is the stable UUID of the DBTrail server instance that indexed the data (see [Server Identity](server-identity.md)). Multiple DBTrail instances indexing different MySQL sources can share the same S3 prefix without collision.
 
-**AWS credentials**: dbtrail uses the standard credential chain — environment variables (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), `~/.aws/credentials`, or EC2/ECS instance metadata. `--archive-s3-region` is optional if `AWS_REGION` is already set.
+**AWS credentials**: DBTrail uses the standard credential chain — environment variables (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), `~/.aws/credentials`, or EC2/ECS instance metadata. `--archive-s3-region` is optional if `AWS_REGION` is already set.
 
 ### Querying archived events
 
@@ -550,7 +550,7 @@ archived or pruned on the rotation schedule until capture is started again.
 
 ### Sections in detail
 
-**Indexed Files** — shows every row in `index_state`. The `BINTRAIL_ID` column identifies which dbtrail server instance indexed each file:
+**Indexed Files** — shows every row in `index_state`. The `BINTRAIL_ID` column identifies which DBTrail server instance indexed each file:
 
 ```
 === Indexed Files ===
@@ -602,7 +602,7 @@ Server (unknown)
   Events: 999 indexed
 ```
 
-Files with a NULL `bintrail_id` are grouped under `Server (unknown)`. This is common when a shared index database receives files from multiple dbtrail instances (e.g. one per replica), or when upgrading from a version predating the server identity feature.
+Files with a NULL `bintrail_id` are grouped under `Server (unknown)`. This is common when a shared index database receives files from multiple DBTrail instances (e.g. one per replica), or when upgrading from a version predating the server identity feature.
 
 The row counts in the partitions section are **estimates** from `information_schema.PARTITIONS.TABLE_ROWS`. InnoDB doesn't maintain exact row counts, so these are good approximations for capacity planning but not for exact totals. For turning these estimates into a disk forecast, see [Capacity Planning](./capacity.md).
 
