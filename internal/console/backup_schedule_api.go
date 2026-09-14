@@ -23,6 +23,10 @@ type backupScheduleDTO struct {
 	// by which producer ran.
 	NextMethod    string `json:"next_method,omitempty"`
 	NextMethodWhy string `json:"next_method_why,omitempty"`
+	// NextMethodWhyCode is BackupWhyCode(NextMethodWhy): the page warns on
+	// the codes that mean "every run reads the database until a setting
+	// changes" (#1659) by code, not by matching the sentence.
+	NextMethodWhyCode string `json:"next_method_why_code,omitempty"`
 	// NextMethodError is set when the schedule is runnable in principle but
 	// the next run cannot start as things stand (a rebuild-only server with
 	// no backup to rebuild from yet, an unreadable backup directory): the
@@ -133,6 +137,7 @@ func (s *Server) backupScheduleDTO(ctx context.Context, e ServerEntry, now time.
 			dto.NextMethodError = err.Error()
 		} else {
 			dto.NextMethodWhy = why
+			dto.NextMethodWhyCode = BackupWhyCode(why)
 		}
 	}
 	// Unavailable means a daemon that runs the loop could not open its
