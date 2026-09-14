@@ -447,7 +447,7 @@ func docsNoWrap(t *testing.T) string {
 func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
 	body := jsFunctionBody(t, readAsset(t, "app.js"), "backupScheduleCard")
 
-	const clause = "A run updates from the recorded changes, without reading your database, when the server has an index connection, a Backup dir and a previous backup."
+	const clause = "A run updates from the recorded changes, without reading your database, only when the server has an index connection, a Backup dir and a previous backup."
 	i := strings.Index(body, clause)
 	if i < 0 {
 		t.Fatalf("the intro does not say a run is usually built from the recorded changes, so an empty "+

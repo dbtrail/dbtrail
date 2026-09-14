@@ -4660,12 +4660,16 @@ function backupServersPanel(settings) {
 }
 
 // s3OnlyBackupWarning is the Backup settings warning for a server whose own
-// location is a bucket with no folder (#1659), or "" when it does not apply.
-// Both values are this server's raw ones, as typed: an update from the
-// recorded changes writes files, so it needs this server's Backup dir, and
-// without one every scheduled run is a full read of the database.
-function s3OnlyBackupWarning(dirValue, s3Value) {
-  if (String(dirValue || "").trim() || !String(s3Value || "").trim()) return "";
+// saved location is a bucket with no folder (#1659), or "" when it does not
+// apply. An update from the recorded changes writes files, so it needs this
+// server's Backup dir; without one a scheduled run can only be a full backup,
+// and where this daemon cannot take one either, nothing runs at all. The
+// values are compared as stored, untrimmed, the way the daemon reads them.
+function s3OnlyBackupWarning(srv) {
+  if (!srv || srv.baseline_dir || !srv.baseline_s3) return "";
+  if (!srv.full_backup_possible) {
+    return "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Backup dir. Add one.";
+  }
   return "With S3 only, every scheduled backup reads your whole database. Add a Backup dir so runs update from the recorded changes.";
 }
 
@@ -4680,19 +4684,12 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
     el("label", { class: "field" }, el("span", { class: "field-label", text: "Backup S3" }), s3));
   box.append(grid);
   // S3 without a folder (#1659): said in red next to the two fields, schedule
-  // or not, and from what is TYPED, because the schedule reads this server's
-  // own two values (rebuildPossible): a daemon default folder does not save
-  // it, and waiting for a saved schedule told the operator after the fact.
-  const s3Only = el("p", { class: "form-msg err" });
-  const showS3Only = () => {
-    const msg = s3OnlyBackupWarning(dir.value, s3.value);
-    s3Only.textContent = msg;
-    s3Only.hidden = !msg;
-  };
-  dir.addEventListener("input", showS3Only);
-  s3.addEventListener("input", showS3Only);
-  showS3Only();
-  box.append(s3Only);
+  // or not. From the SAVED values, the ones the schedule reads
+  // (rebuildPossible): a daemon default folder does not save this server,
+  // and a warning that followed the typing would vanish on a save that
+  // failed. The page redraws after a successful save.
+  const s3Only = s3OnlyBackupWarning(srv);
+  if (s3Only) box.append(el("p", { class: "form-msg err", text: s3Only }));
   const noArch = el("input", { type: "checkbox", name: "no_archive" });
   noArch.checked = !!srv.no_archive;
   box.append(el("label", { class: "check" }, noArch,
@@ -6226,7 +6223,7 @@ function backupScheduleCard(cur, b) {
   // filling in an empty form would read that as a full read of the database
   // every time.
   body.append(el("p", { class: "form-hint", text:
-    "Takes a backup on a fixed timetable while the daemon runs. A run updates from the recorded changes, without reading your database, when the server has an index connection, a Backup dir and a previous backup. " +
+    "Takes a backup on a fixed timetable while the daemon runs. A run updates from the recorded changes, without reading your database, only when the server has an index connection, a Backup dir and a previous backup. " +
     "A time missed while it was stopped is not made up." }));
 
   if (!canEdit) {
@@ -6282,7 +6279,7 @@ function backupScheduleCard(cur, b) {
   // shown when it is the newest fact: a slot that could not start after
   // the last good run is exactly what the operator needs to see.
   if (sch) {
-    let alarm = false;
+    let alarm = false, everyRunCode = "";
     if (sch.runnable && sch.next_method_error) {
       // Runnable in principle, but the next slot will be skipped as things
       // stand: said in red BEFORE the slot, not discovered after it.
@@ -6295,7 +6292,10 @@ function backupScheduleCard(cur, b) {
       // connection) is a warning, not the grey of a healthy prediction
       // (#1659); a first backup or a one-off unreadable bucket stays a hint.
       const everyRun = sch.next_method !== "refresh" && BACKUP_WHY_EVERY_RUN.has(sch.next_method_why_code);
-      if (everyRun) alarm = true;
+      if (everyRun) {
+        alarm = true;
+        everyRunCode = sch.next_method_why_code;
+      }
       body.append(el("p", { class: everyRun ? "form-msg err" : "form-hint", text:
         "Next run " + how + (sch.next_method_why ? " (" + sch.next_method_why + ")." : ".") +
         (everyRun ? " " + BACKUP_WHY_REMEDY[sch.next_method_why_code] : "") }));
@@ -6339,7 +6339,9 @@ function backupScheduleCard(cur, b) {
       // operator most needs to know why it was a full read.
       // Not for a fallback: the red alarm below already carries the same
       // refusal, and the card is in alarm precisely then.
-      if (run.method !== "refresh" && run.why && !(fb && (run.why_code === "fold_refused" || run.why_code === "fold_crashed"))) {
+      // Nor when the next-run warning above already says the same remedy.
+      if (run.method !== "refresh" && run.why && run.why_code !== everyRunCode &&
+          !(fb && (run.why_code === "fold_refused" || run.why_code === "fold_crashed"))) {
         body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code, true) }));
       }
     }
