@@ -657,10 +657,27 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dsn := stored
-	if req.DSN != "" || req.Host != "" || req.User != "" || req.DBName != "" || req.Password != nil {
+	if req.DSN != "" || req.Host != "" || req.Port != "" || req.User != "" || req.DBName != "" || req.Password != nil {
 		built, err := buildDSN(req, stored)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// This probe is open to servers:read (authz.go), and the body picks
+		// the destination. The stored password (kept when the body omits it)
+		// must reach only the stored server's own host and user: a changed
+		// host with the password left out would forward the saved credential
+		// to a server the caller chose, where a hostile MySQL endpoint can
+		// capture it during the handshake. Require it to be re-typed instead.
+		// A raw dsn carries its own secret, so the stored one is never merged
+		// there; a stored entry with no password has nothing to protect.
+		//
+		// A hard 400, unlike the S3 half of this probe, which HOLDS a bucket
+		// and returns a per-bucket needs_secret result: the index connection
+		// is the probe's whole payload, so there is nothing to return once its
+		// destination is refused, and a single result cannot carry a hold.
+		if req.DSN == "" && req.Password == nil && movesStoredPassword(stored, built) {
+			writeJSONError(w, http.StatusBadRequest, "re-enter the password to test a different host, port or user")
 			return
 		}
 		dsn = built
@@ -987,6 +1004,27 @@ func shortTimeoutDSN(dsn string) (string, string, error) {
 		cfg.Timeout = testConnectTimeout
 	}
 	return cfg.FormatDSN(), cfg.DBName, nil
+}
+
+// movesStoredPassword reports whether the built probe DSN would carry the
+// stored entry's password to a different destination or identity than the
+// stored entry's own: a different host:port, or a different user. It is the
+// guard on reusing a saved secret in a read-open probe. A stored entry with
+// no password has nothing to protect; an unparseable stored DSN fails closed
+// (treated as a move), though buildDSN has already parsed it by here.
+func movesStoredPassword(stored, built string) bool {
+	sc, err := mysql.ParseDSN(stored)
+	if err != nil {
+		return true
+	}
+	if sc.Passwd == "" {
+		return false
+	}
+	bc, err := mysql.ParseDSN(built)
+	if err != nil {
+		return true
+	}
+	return bc.Addr != sc.Addr || bc.User != sc.User
 }
 
 // buildDSN assembles the stored DSN for a create/update request. Either a raw
