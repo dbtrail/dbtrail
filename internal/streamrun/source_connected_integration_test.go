@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -18,7 +19,8 @@ import (
 // binlog settings fail validation has not been connected to for capture, so
 // the first-run list shows the failure on "Connect to the source".
 func TestIntegrationSourceConnectedWaitsForValidation(t *testing.T) {
-	_, indexName := testutil.CreateTestDB(t)
+	indexDB, indexName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
 	deps := testStreamDeps()
 	deps.ValidateBinlogFormat = func(*sql.DB) error { return errors.New("binlog_format is STATEMENT") }
 	var connected atomic.Bool
@@ -35,8 +37,10 @@ func TestIntegrationSourceConnectedWaitsForValidation(t *testing.T) {
 		Deps:       deps,
 		Hooks:      &Hooks{OnSourceConnected: func() { connected.Store(true) }},
 	})
-	if err == nil {
-		t.Fatal("One accepted a source that failed binlog validation")
+	// The error must be the validation's own, or the run stopped before it
+	// and this test would pass without reaching the check.
+	if err == nil || !strings.Contains(err.Error(), "binlog_format is STATEMENT") {
+		t.Fatalf("One = %v, want the validation error", err)
 	}
 	if connected.Load() {
 		t.Error("OnSourceConnected fired for a source that failed validation")
