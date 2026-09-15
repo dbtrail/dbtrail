@@ -2,6 +2,7 @@ package parser
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,6 +42,15 @@ func TestParseDDL_shapesItUsedToMiss(t *testing.T) {
 		{"a comment with no space around it", "ALTER/**/TABLE t ADD COLUMN c INT", DDLAlterTable, "", "t"},
 		{"mysqldump executable comment around IF NOT EXISTS", "CREATE TABLE /*!32312 IF NOT EXISTS*/ `t` (id INT)", DDLCreateTable, "", "t"},
 		{"backticked name holding comment markers", "ALTER TABLE `a/*b` ADD COLUMN c INT", DDLAlterTable, "", "a/*b"},
+		// Shapes the old prefix check caught, which must stay caught.
+		{"unquoted name with a non-ASCII letter", "ALTER TABLE ñandú ADD COLUMN c INT", DDLAlterTable, "", "ñandú"},
+		{"unquoted name with an accent inside", "ALTER TABLE shop.categoría ADD COLUMN c INT", DDLAlterTable, "shop", "categoría"},
+		{"ANSI_QUOTES double-quoted names", `ALTER TABLE "shop"."orders" ADD COLUMN c INT`, DDLAlterTable, "shop", "orders"},
+		{"no space before a backtick", "DROP TABLE`t`", DDLDropTable, "", "t"},
+		{"DROP TABLES", "DROP TABLES t", DDLDropTable, "", "t"},
+		{"RENAME TABLES", "RENAME TABLES a TO b", DDLRenameTable, "", "a"},
+		{"TRUNCATE a table whose name starts with table", "TRUNCATE tables_log", DDLTruncateTable, "", "tables_log"},
+		{"the verb with a name it cannot read is still DDL", "DROP TABLE", DDLDropTable, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ev, ok := parseDDL(logger, "binlog.000001", 100, ts, "", tc.query, "", 0)
@@ -68,6 +78,9 @@ func TestParseDDL_notTableDDL(t *testing.T) {
 
 	for _, query := range []string{
 		"DROP /*!40005 TEMPORARY */ TABLE IF EXISTS `t`",
+		// mysqldump wraps every table's rows in these; they change no definition.
+		"/*!40000 ALTER TABLE `t` DISABLE KEYS */",
+		"ALTER TABLE t ENABLE KEYS;",
 		"DROP TEMPORARY TABLE IF EXISTS t",
 		"CREATE TEMPORARY TABLE t (id INT)",
 		"CREATE /*M!100000 TEMPORARY */ TABLE t (id INT)",
@@ -86,5 +99,21 @@ func TestParseDDL_notTableDDL(t *testing.T) {
 		if ev, ok := parseDDL(logger, "binlog.000001", 100, ts, "", query, "", 0); ok {
 			t.Errorf("parseDDL(%q) = %s %q.%q, want not DDL", query, ev.DDLType, ev.Schema, ev.Table)
 		}
+	}
+}
+
+// TestNormalizeDDL_boundedOnHugeStatements: parseDDL runs on every QUERY_EVENT,
+// including statement-format DML many megabytes long, and only the head of a
+// statement can name a DDL verb and its table.
+func TestNormalizeDDL_boundedOnHugeStatements(t *testing.T) {
+	huge := "INSERT INTO t VALUES ('" + strings.Repeat("x", 8<<20) + "')"
+	if got := normalizeDDL(huge); len(got) > 2*ddlHeadLimit {
+		t.Fatalf("normalized %d bytes of an 8 MiB statement, want at most %d", len(got), 2*ddlHeadLimit)
+	}
+	long := "ALTER TABLE `" + strings.Repeat("n", 64) + "`.`" + strings.Repeat("m", 64) + "` ADD COLUMN c INT"
+	var buf bytes.Buffer
+	ev, ok := parseDDL(newTestLogger(&buf), "binlog.000001", 100, time.Now(), "", long, "", 0)
+	if !ok || ev.Table != strings.Repeat("m", 64) {
+		t.Fatalf("a statement with the longest names MySQL allows: ok=%v table=%q", ok, ev.Table)
 	}
 }
