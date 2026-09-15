@@ -1,0 +1,311 @@
+//go:build integration
+
+package reconstruct_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/testutil"
+)
+
+type epochCol struct{ name, ctype string }
+
+// epochSnap is one schema snapshot, with offsets relative to the baseline.
+type epochSnap struct {
+	taken    time.Duration  // schema_snapshots.snapshot_time
+	detected *time.Duration // schema_changes.detected_at of the DDL it was taken for; nil: no row
+	cols     []epochCol
+	// table the snapshot describes, and the schema and table its DDL row
+	// names; "" means shop.t, and "-" an empty schema_name.
+	table, ddlSchema, ddlTable string
+}
+
+// foldOpts are the rarer knobs of foldWithSnapshots.
+type foldOpts struct {
+	createTableAsOf   *time.Duration // the baseline's MetaKeyCreateTableAsOf; nil: absent
+	dropSchemaChanges bool
+}
+
+func orDefault(v, def string) string {
+	switch v {
+	case "":
+		return def
+	case "-":
+		return ""
+	}
+	return v
+}
+
+func ddlAt(d time.Duration) *time.Duration { return &d }
+
+// foldWithSnapshots publishes a Parquet fold of shop.t at base+target from a
+// baseline with baselineCols taken at base, the given snapshot history, and one
+// INSERT at base+eventAt.
+func foldWithSnapshots(t *testing.T, baselineCols []epochCol, snaps []epochSnap, eventAt, target time.Duration, opts ...foldOpts) ([]reconstruct.TableFailure, error) {
+	t.Helper()
+	ctx := context.Background()
+	const schema, table = "shop", "t"
+	db, dbName := testutil.CreateTestDB(t)
+	if err := indexer.CreateIndexTables(ctx, db, 48, false, nil); err != nil {
+		t.Fatalf("CreateIndexTables: %v", err)
+	}
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	base := time.Now().UTC().Truncate(time.Hour)
+	stamp := func(d time.Duration) string { return base.Add(d).Format("2006-01-02 15:04:05") }
+
+	for i, s := range snaps {
+		for j, c := range s.cols {
+			key, nullable := "", "YES"
+			if c.name == "id" {
+				key, nullable = "PRI", "NO"
+			}
+			testutil.MustExec(t, db, `INSERT INTO schema_snapshots
+				(snapshot_id, snapshot_time, schema_name, table_name, column_name,
+				 ordinal_position, column_key, data_type, column_type, is_nullable)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				i+1, stamp(s.taken), schema, orDefault(s.table, table), c.name, j+1, key, strings.SplitN(c.ctype, "(", 2)[0], c.ctype, nullable)
+		}
+		if s.detected != nil {
+			testutil.MustExec(t, db, `INSERT INTO schema_changes
+				(detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query, snapshot_id)
+				VALUES (?, 'binlog.000001', 150, ?, ?, 'ALTER TABLE', 'ALTER TABLE t', ?)`,
+				stamp(*s.detected), orDefault(s.ddlSchema, schema), orDefault(s.ddlTable, table), i+1)
+		}
+	}
+	var opt foldOpts
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	if opt.dropSchemaChanges {
+		testutil.MustExec(t, db, "DROP TABLE schema_changes")
+	}
+	testutil.InsertEvent(t, db, "binlog.000001", 100, 200, stamp(eventAt), nil,
+		schema, table, 1, "3", nil, nil, []byte(`{"id":3,"c":5}`))
+
+	defs := make([]string, 0, len(baselineCols))
+	for _, c := range baselineCols {
+		null := "DEFAULT NULL"
+		if c.name == "id" {
+			null = "NOT NULL"
+		}
+		defs = append(defs, fmt.Sprintf("  `%s` %s %s", c.name, c.ctype, null))
+	}
+	createSQL := "CREATE TABLE `t` (\n" + strings.Join(defs, ",\n") + ",\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n"
+	root := t.TempDir()
+	snapDir := filepath.Join(root, strings.ReplaceAll(base.Format(time.RFC3339), ":", "-"))
+	meta := map[string]string{
+		baseline.MetaKeyCreateTableSQL:    createSQL,
+		baseline.MetaKeyBinlogFile:        "binlog.000001",
+		baseline.MetaKeyBinlogPos:         "4",
+		baseline.MetaKeySnapshotTimestamp: base.Format(time.RFC3339),
+	}
+	if opt.createTableAsOf != nil {
+		meta[baseline.MetaKeyCreateTableAsOf] = base.Add(*opt.createTableAsOf).Format(time.RFC3339)
+	}
+	cols, err := baseline.ParseSchemaText(createSQL)
+	if err != nil {
+		t.Fatalf("ParseSchemaText: %v", err)
+	}
+	w, err := baseline.NewWriter(filepath.Join(snapDir, schema, table+".parquet"), cols, baseline.WriterConfig{
+		Compression: "none", RowGroupSize: 100,
+		Metadata: meta,
+	})
+	if err != nil {
+		t.Fatalf("baseline.NewWriter: %v", err)
+	}
+	row, nulls := make([]string, len(cols)), make([]bool, len(cols))
+	for i := range row {
+		row[i] = "1"
+	}
+	if err := w.WriteRow(row, nulls); err != nil {
+		t.Fatalf("WriteRow: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := baseline.WriteSuccessMarker(snapDir); err != nil {
+		t.Fatalf("WriteSuccessMarker: %v", err)
+	}
+	_, failures, err := reconstruct.ReconstructTablesDetailed(ctx, reconstruct.FullTableConfig{
+		IndexDSN:     testutil.BaseDSN() + "/" + dbName,
+		BaselineSrc:  root,
+		Tables:       []string{schema + "." + table},
+		At:           base.Add(target),
+		OutputDir:    root,
+		OutputFormat: reconstruct.OutputFormatParquet,
+	})
+	return failures, err
+}
+
+// TestFold_schemaInEffectAtTheTarget is #1667: a fold compares the baseline's
+// column types with the snapshot taken for a DDL that ran before the target
+// even when capture recorded it after the target, and names still with the
+// latest snapshot.
+func TestFold_schemaInEffectAtTheTarget(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	intCols := []epochCol{{"id", "int"}, {"c", "int"}}
+	bigCols := []epochCol{{"id", "int"}, {"c", "bigint"}}
+
+	refuses := func(t *testing.T, failures []reconstruct.TableFailure, err error, want string) {
+		t.Helper()
+		if err == nil || len(failures) != 1 || !errors.Is(failures[0].Err, reconstruct.ErrSchemaChanged) ||
+			!strings.Contains(failures[0].Err.Error(), want) {
+			t.Fatalf("fold: err=%v failures=%+v; want the schema-change refusal naming %q", err, failures, want)
+		}
+	}
+	publishes := func(t *testing.T, failures []reconstruct.TableFailure, err error) {
+		t.Helper()
+		if err != nil || len(failures) != 0 {
+			t.Fatalf("fold: err=%v failures=%+v; want it published", err, failures)
+		}
+	}
+
+	t.Run("capture behind: a type change that ran before the target is seen though its snapshot was recorded after", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(20 * time.Second), cols: bigCols},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
+	t.Run("control: a snapshot with no recorded DDL counts from when it was taken", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 100 * time.Second, cols: bigCols},
+		}, 40*time.Second, 60*time.Second)
+		publishes(t, failures, err)
+	})
+	t.Run("a DDL in the same second the baseline was read is compared", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(0), cols: bigCols},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
+	t.Run("a DDL in the same second as the target is compared", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(60 * time.Second), cols: bigCols},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
+	t.Run("the DDL's snapshot adds a comparison and never replaces the one in effect", func(t *testing.T) {
+		// bigint at +20s; a manual snapshot at +50s sees it; the type goes
+		// back to int at +70s; capture takes the +20s DDL's snapshot at +100s.
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 50 * time.Second, cols: bigCols},
+			{taken: 100 * time.Second, detected: ddlAt(20 * time.Second), cols: intCols},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
+	t.Run("the DDL's snapshot is loaded when a later one is the latest", func(t *testing.T) {
+		// bigint at +20s, snapshotted at +100s; back to int at +120s, after
+		// the target, snapshotted at +150s.
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(20 * time.Second), cols: bigCols},
+			{taken: 150 * time.Second, detected: ddlAt(120 * time.Second), cols: intCols},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
+	t.Run("the window starts when the baseline's CREATE TABLE was read, not at its directory time", func(t *testing.T) {
+		// A fold carries its source's CREATE TABLE, read 30s before.
+		asOf := -30 * time.Second
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Hour, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(-10 * time.Second), cols: bigCols},
+		}, 40*time.Second, 60*time.Second, foldOpts{createTableAsOf: &asOf})
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
+	t.Run("a DDL row indexed before #1435 with no schema is compared", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(20 * time.Second), cols: bigCols, ddlSchema: "-"},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
+	t.Run("a DDL on another table is not compared", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(20 * time.Second), cols: bigCols, ddlTable: "x"},
+		}, 40*time.Second, 60*time.Second)
+		publishes(t, failures, err)
+	})
+	t.Run("a DDL on the same table in another schema is not compared", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(20 * time.Second), cols: bigCols, ddlSchema: "other"},
+		}, 40*time.Second, 60*time.Second)
+		publishes(t, failures, err)
+	})
+	t.Run("the DDL's snapshot is compared when the one in effect does not describe the table", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 20 * time.Second, detected: ddlAt(10 * time.Second), cols: bigCols},
+			{taken: 30 * time.Second, cols: intCols, table: "x"},
+			{taken: 200 * time.Second, cols: bigCols},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
+	t.Run("a DDL snapshot that does not describe the table compares nothing", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(20 * time.Second), cols: intCols, table: "x"},
+			{taken: 200 * time.Second, cols: intCols},
+		}, 40*time.Second, 60*time.Second)
+		publishes(t, failures, err)
+	})
+	t.Run("an index without schema_changes compares nothing more", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+		}, 40*time.Second, 60*time.Second, foldOpts{dropSchemaChanges: true})
+		publishes(t, failures, err)
+	})
+	t.Run("a DDL that ran after the target is not compared", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(61 * time.Second), cols: bigCols},
+		}, 40*time.Second, 60*time.Second)
+		publishes(t, failures, err)
+	})
+	t.Run("a DDL that ran before the baseline was read is not compared", func(t *testing.T) {
+		// The baseline already holds the bigint. The DDL's snapshot was taken
+		// late, after the type went back to int by a DDL with no row at +50s.
+		failures, err := foldWithSnapshots(t, bigCols, []epochSnap{
+			{taken: -time.Hour, cols: intCols},
+			{taken: 100 * time.Second, detected: ddlAt(-30 * time.Second), cols: intCols},
+		}, 20*time.Second, 40*time.Second)
+		publishes(t, failures, err)
+	})
+	t.Run("a DDL snapshot older than the one in effect and compared is not compared", func(t *testing.T) {
+		// The type went back by a DDL with no row; the snapshot at 40s saw it.
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Minute, cols: intCols},
+			{taken: 20 * time.Second, detected: ddlAt(10 * time.Second), cols: bigCols},
+			{taken: 40 * time.Second, cols: intCols},
+		}, 50*time.Second, 60*time.Second)
+		publishes(t, failures, err)
+	})
+	t.Run("names are compared with the latest snapshot, which records a DDL with no snapshot of its own", func(t *testing.T) {
+		// A post-baseline snapshot is in effect at the target; d is added at
+		// +15m with no snapshot (file mode without --source-dsn, a failed
+		// snapshot, a DDL the parser missed); a manual snapshot at +2h has it.
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{taken: -time.Hour, cols: intCols},
+			{taken: 20 * time.Second, cols: intCols},
+			{taken: 2 * time.Hour, cols: []epochCol{{"id", "int"}, {"c", "int"}, {"d", "int"}}},
+		}, 10*time.Minute, 30*time.Minute)
+		refuses(t, failures, err, "added since: d")
+	})
+}

@@ -1061,9 +1061,10 @@ func ReconstructTable(
 			asOf = snapshotTime
 		}
 		var typesTM *metadata.TableMeta
+		typesFrom := 0
 		if cfg.schemaAt != nil && !cfg.schemaAtTime.Before(asOf) {
 			if t, rerr := cfg.schemaAt.Resolve(schema, table); rerr == nil {
-				typesTM = t
+				typesTM, typesFrom = t, cfg.schemaAt.SnapshotID()
 			} else {
 				slog.Warn("the schema snapshot in effect at the target does not describe this table; column types are not compared",
 					"schema", schema, "table", table, "error", rerr)
@@ -1071,6 +1072,28 @@ func ReconstructTable(
 		}
 		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, tm, typesTM, schema, table); err != nil {
 			return nil, err
+		}
+		// A DDL on this table that ran between the CREATE TABLE and the target
+		// but was recorded after the target (capture behind, #1667) is not in
+		// effect by snapshot time, so types are also compared with the newest
+		// snapshot taken for such a DDL, when it is newer than the one compared
+		// above (or none was). It read the schema after the DDL, maybe after
+		// later ones too, so it is an extra comparison and never replaces the
+		// one above: a difference can refuse a restore that would have been
+		// right, never publish one that is wrong. Decoding keeps snapshot
+		// times: dating a snapshot at its DDL would decode the rows between
+		// that DDL and a later one it already holds with the wrong definition.
+		ddlSnap, err := snapshotForDDLInWindow(ctx, db, schema, table, asOf, cfg.At)
+		if err != nil {
+			return nil, err
+		}
+		if ddlSnap > typesFrom {
+			if t, rerr := resolveSnapshotTable(db, resolver, ddlSnap, schema, table); rerr != nil {
+				slog.Warn("the schema snapshot taken for a DDL before the target does not describe this table; column types are not compared with it",
+					"schema", schema, "table", table, "snapshot_id", ddlSnap, "error", rerr)
+			} else if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, tm, t, schema, table); err != nil {
+				return nil, err
+			}
 		}
 		// A gapped ancestor taints every descendant: the events it lost are
 		// still lost. Warn on READ as well as stamping on write, so an operator
@@ -2832,6 +2855,41 @@ func schemaSnapshotAt(db *sql.DB, at time.Time, latest *metadata.Resolver) (*met
 		return nil, time.Time{}
 	}
 	return r, taken
+}
+
+// snapshotForDDLInWindow returns the newest snapshot taken for a DDL on
+// schema.table that ran in [since, until], or 0. The same second as since
+// counts, as in the #1651 gate: both are whole seconds. Rows indexed before #1435
+// carry an empty schema_name and match too, as in CheckDestructiveDDL: that can only
+// add a comparison. Source time on detected_at against since, the host time the
+// CREATE TABLE was read: clock skew moves the window by the skew.
+func snapshotForDDLInWindow(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time) (int, error) {
+	var id sql.NullInt64
+	err := db.QueryRowContext(ctx, `SELECT MAX(snapshot_id) FROM schema_changes
+		WHERE (schema_name = ? OR schema_name = '') AND table_name = ?
+		AND detected_at >= ? AND detected_at <= ? AND snapshot_id IS NOT NULL`,
+		schema, table, since, until).Scan(&id)
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) && myErr.Number == 1146 {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("check schema_changes for a DDL on %s.%s before the target: %w", schema, table, err)
+	}
+	return int(id.Int64), nil
+}
+
+// resolveSnapshotTable describes schema.table in snapshot id, reusing latest
+// when it is that snapshot.
+func resolveSnapshotTable(db *sql.DB, latest *metadata.Resolver, id int, schema, table string) (*metadata.TableMeta, error) {
+	r := latest
+	if r == nil || r.SnapshotID() != id {
+		var err error
+		if r, err = metadata.NewResolver(db, id); err != nil {
+			return nil, err
+		}
+	}
+	return r.Resolve(schema, table)
 }
 
 // s3DownloadCopySQL is the statement that downloads an S3 baseline to a local
