@@ -7,6 +7,153 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.82.0] - 2026-09-15
+
+### Added
+- **Backups the daemon builds from the recorded changes check free disk before
+  each file they write** (#1614, #1670). The scheduled update, the automatic
+  refresh, a point-in-time restore and the `.sql` backup used to write without
+  asking, fail partway with `ENOSPC` and fill the disk of the host that also
+  runs capture. They now refuse before creating a file the disk cannot hold
+  with 1 GiB kept free on top: `not enough free disk space for this backup:
+  <dir> has 2.1 GiB free, and the next file needs about 3.3 GiB plus 1.0 GiB
+  kept free, 4.3 GiB in all`. A table reused by a hard link is not counted.
+  The refusal is recorded like any other (the backup status gains
+  `disk_refused`), and a scheduled update refused for disk, or whose write
+  hits `ENOSPC` anyway, does not fall back to a full backup, which would write
+  into the same disk. When free space cannot be measured the build proceeds
+  and logs one warning. Full backups, DuckDB's temp directory and the CLI are
+  not checked.
+- **The Overview shows a Getting started list for a new server until it
+  captures its first change** (#1606, #1678). After adding a server on
+  `bintrail-console watch`, the Overview used to show empty numbers with
+  nothing saying how far setup had got. It now lists the steps (Create the
+  index database, Connect to the source, Read the table structure for MySQL
+  and MariaDB, Start capturing changes, Capture the first change, and Take the
+  first backup when console backups are enabled and the server has a baseline
+  location), each waiting, running, done or failed. A step is marked done from
+  evidence in the server's own index, not from the supervisor's word alone. A
+  failed step shows the error and the fix: "Capture retries on its own" only
+  when the supervisor is actually retrying, otherwise press Start. A source
+  with no changes yet reads as running ("A quiet database is normal"). The
+  list refreshes every 3 to 15 seconds and goes away once a change is indexed.
+  The data comes from the new `GET /api/servers/{id}/first-run`
+  (`servers:read`), which returns `{complete, steps, check_error}`; an index
+  that cannot be read returns only `check_error`, never a list that would draw
+  a working server as new. `GET /api/servers/{id}/monitor` gains
+  `source_connected` and `retrying`. Limit: the backup step still needs
+  `BINTRAIL_CONSOLE_BASELINE_TRIGGER=1`, and without it the step is not
+  listed.
+- **Each console server can use its own S3-compatible store and its own S3
+  keys** (#1575, #1644, #1656). S3 settings were process-wide
+  (`BINTRAIL_S3_ENDPOINT` and the daemon's credential chain), so one daemon
+  could not archive one server to MinIO and another to AWS. The server form
+  now has `S3 endpoint`, `S3 addressing` (path style or virtual-hosted, only
+  with an endpoint), `S3 region`, `S3 access key` and `S3 secret key`, stored
+  in the registry as `s3_endpoint`, `s3_path_style`, `s3_region`,
+  `s3_access_key_id` and `s3_secret_access_key` (file mode `0600`). The
+  secret is never returned: the server DTO carries `s3_access_key_id` and
+  `has_s3_secret_access_key`, and a blank secret on edit keeps the saved one.
+  A store belongs to a bucket, not a server, so uploads, rotation, backup
+  prune, the integrity reader and DuckDB reads of the same bucket all use the
+  same endpoint and keys. Two servers naming one bucket with different stores
+  or keys (including one with no store) are refused with HTTP 422, and so is
+  a store on the daemon's `--baseline-s3` bucket. An endpoint with no region
+  signs as `us-east-1`; keys with no endpoint need a region. `Test
+  connection` now also sends one `HeadBucket` per bucket and shows a line per
+  bucket; saved credentials sign it only for the saved server's own buckets
+  and endpoint, otherwise it asks for the keys. Limits: rotating keys on a
+  shared bucket takes several edits (`docs/upload.md`), `bintrail doctor
+  --archive-s3` does not see a console store, and older builds do not apply
+  saved keys.
+- **Backup settings shows how fast S3 backups pile up and generates the
+  bucket rule that expires them** (#1622, #1642). Every scheduled backup to
+  S3 uploads a full copy of every table and DBTrail never deletes one, and
+  the page did not say so. A server whose backups go to S3 now shows about
+  how many backups reach the bucket every 30 days, and under "Bucket rule to
+  expire old backups" a days field (default 30), a lifecycle rule scoped to
+  that server's backup prefix, and the command to apply it. DBTrail still
+  never deletes from S3 and never sets the rule; the operator applies it. The
+  page says what the rule cannot do (it expires by age only, so it cannot
+  spare the last complete copy or a backup a restore is reading) and that the
+  apply command replaces every rule on the bucket. The rule is withheld when
+  the retention is shorter than the schedule, when backups sit at the bucket
+  root, or when any server's archived changes sit under the backup prefix;
+  other servers' backups nested under it are named. The settings DTO gains
+  `archive_s3` and `schedule_every_minutes`.
+- **The Backups page says how each scheduled backup was made and why a full
+  copy was needed** (#1604, #1641). The page used to work the reason out
+  again every time it was opened, so a bucket error that had since cleared
+  made a full read of the database look like a cheap update. The reason is
+  now saved with the run and never recomputed: `last_run.why` and
+  `last_run.why_code` on the schedule card, `run.why` and `run.why_code` on
+  the snapshot detail. The schedule card turns the two lasting causes into
+  the setting to change (no Backup dir, no index connection) and notes a
+  first backup had nothing to update from; the detail of an older backup
+  states the reason as a past fact. Runs recorded before this change carry
+  no reason.
+- **`docs/s3-iam-policy.md` has a read-only policy for people who query the
+  Parquet copy** (#1655, #1663). It grants `s3:ListBucket` and `s3:GetObject`
+  with a Deny on `*bintrail_id=*`, which keeps out the hourly change archives
+  (connection ids and SQL text). The section states what it does not cover:
+  object names still show in listings, the change log views in `views.sql`
+  stop working, snapshots still hold every column and console access rules
+  do not apply to files, and keys uploaded by `bintrail upload --source` from
+  inside `bintrail_id=<id>/` lack the segment the Deny matches.
+- **A large reversal script over MCP comes back as a summary plus
+  statement-aligned chunks, and past 64 KiB it is withheld, never truncated**
+  (#1438, #1597). The `recover` and `recover_cascade` tools used to put the
+  whole script in one response, and a real cascade (69 parent events already
+  made about 64 KB) outgrew what MCP clients accept, so the client refused or
+  cut the one artifact the call exists to produce. Now a script larger than
+  `InlineScriptBytes` (64 KiB, measured as the JSON-escaped bytes that
+  actually ship) is replaced by its statement count, its size and how to
+  fetch it. `summary_only` returns the counts and size (on
+  `recover_cascade`, the whole coverage report) with no script. `sql_offset`
+  / `sql_limit` fetch the script by **statement**, never splitting one, and
+  the chunks concatenate in order into the exact script, preamble and closing
+  lines included once each; no chunk is runnable on its own. Every response
+  carries `script_id`: chunks are rebuilt on each call, so if an event was
+  indexed or archives rotated in between, the id changes and the fetch must
+  restart at `sql_offset: 0`. When a page would overflow the response,
+  `sql_limit` is reduced, and the result says so and gives
+  `next_sql_offset`. A script that fits comes back as before: `recover` still
+  returns plain SQL text for a whole script and uses a JSON envelope (the
+  exact bytes in `sql`, plus `warnings`) only for a summary or a chunk; on
+  `recover_cascade`, `sql` is omitted when the script is not carried, so "no
+  statements" and "not sent here" differ. Every response that returns script
+  bytes, chunks included, is audited with its statement range and
+  `script_id`; a summary serves no row data and records nothing. For scripts
+  too large for MCP, `bintrail recover` and `bintrail recover-cascade` still
+  write the whole script to a file.
+- **Undoing a delete warns about cascading child rows over MCP and in the
+  console, not only in the CLI** (#1616, #1640). MySQL deletes or re-points
+  child rows of an `ON DELETE` / `ON UPDATE` `CASCADE` or `SET NULL` foreign
+  key without writing them to the binary log, so a plain undo re-creates the
+  parent and looks complete. The CLI has logged this for a long time. The
+  MCP `recover` tool now adds a `warnings` entry that names the child tables
+  and points at the `recover_cascade` tool, when the undo holds a DELETE or a
+  key UPDATE on such a table (an INSERT-only undo stays quiet). In the
+  console, undoing one table already detected the cascade and repaired the
+  children; a schema-wide `POST /api/recover` with no table now gets the same
+  warning and is told to undo the parent table on its own. Names are matched
+  without regard to case, like the row fetch. A check that fails says "could
+  not check" instead of staying silent; an index that never recorded foreign
+  keys still answers "no children".
+- **The deployment guide says what a manual takeover needs when the host
+  running the daemon dies** (#1648, #1666). A process crash recovers on its
+  own; losing the host needs a manual start elsewhere, since there is no
+  automatic failover yet. The new "When the host dies" section of
+  `docs/deployment.md` covers keeping the index MySQL off the host, which
+  console files to move (`console-servers.yaml`, `console-auth.yaml`,
+  `console-mcp-token.yaml`), how source binlog retention decides what is
+  lost, why a second daemon marks a server `failed` and does not retry, and
+  how to end a dead host's `GET_LOCK` session on the index before
+  `wait_timeout` does, and only once the old host is really off.
+- **The Iceberg export reference shows how to run it on a timetable**
+  (#1565): a cron example for `bintrail export iceberg` in
+  `docs/iceberg-export.md`, and why it never runs inside the capture daemon.
+
 ### Changed
 - **`recover-cascade` reads the Parquet archives** (#1615, second half; CLI, MCP
   and the console). The parent and child scans now go through the same
@@ -44,8 +191,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   captured it. The window advice is spelled `since/until` rather than `--since`,
   because this error is raised inside `GenerateSQLFromRows` and so reaches MCP
   and console clients too, and an agent handed a CLI flag cannot pass it.
+- **The local copy of a backup table downloaded from S3 is written as zstd**
+  (#1670). DuckDB wrote that copy (CLI `reconstruct` with `--baseline-s3`, the
+  shim's `_snapshot`, `verify`, daemon folds) with its default snappy
+  compression. It now uses zstd, like the backups themselves, so the disk
+  check can size a rebuilt table on it. Same rows and row groups; a bit more
+  CPU per download and less temp disk.
+- **Backup settings warns in red when a server's backups go to S3 with no
+  Backup dir** (#1659, #1661). Without a Backup dir a scheduled backup cannot
+  update from the recorded changes, so every run reads the whole source
+  database; the console said this late and in grey. Backup settings now shows
+  a red line beside the two fields whether or not a schedule exists, and
+  where this daemon cannot take a full backup either it says that nothing
+  runs at all. On the Backups page the next-run line turns red, with the
+  remedy, when a setting makes every run a full read (no Backup dir, or no
+  index connection); a first backup and an update stay grey. The schedule
+  DTO gains `next_method_why_code` and each `GET /api/backup-settings` row
+  gains `full_backup_possible`. The warning reads the server's saved
+  `baseline_dir` and `baseline_s3`, since a daemon default folder never
+  applies to a server with its own S3 location.
+- **Console: the add-server form shows its answers where you are looking**
+  (#1605, #1607, #1608, #1636). Test connection on a new server shows its
+  result beside the Test button, with a busy state while it runs, as the
+  saved-server row already did. The form message and the startup-check cards
+  sit above the button row instead of below a long form, and the first
+  failing card scrolls into view. Save stays enabled after a failed check,
+  since saving again is how the checks re-run, and that retry now updates
+  the saved entry instead of being refused as a duplicate name. A server
+  that will not capture says why on its row, with the one remedy: the
+  console was started as `serve` (run `bintrail-console watch`), it has no
+  source connection (edit it and add one), or the capability check failed
+  (reload the page). A source-less server under a capturing console carries
+  a `NO SOURCE` mark.
+- **The product name is written DBTrail in user-facing text** (#1647): the
+  console, CLI help and messages, installer output, package metadata and the
+  docs. Binary names, commands, URLs, image names and identifiers are
+  unchanged.
+
 ### Fixed
 - `recover-cascade` (CLI, MCP and the console) skipped baseline augmentation whenever the index had ANY archived partition, even one from months ago that could not touch the `[snapshot, T]` window, and the child scan was then confined to that window. With frequent backups (a snapshot landing between the children's INSERTs and the parent DELETE) this returned the parent row alone while every child sat in both the live index and the baseline. The gate now asks whether the live partitions hold every hour of `[snapshot, T]` (`query.LiveWindowContiguous`; a failing check skips, never passes, and a surface without the check keeps the old any-archive-skips rule), and when augmentation IS skipped the scan falls back to the plain `[T-lookback, T]` Phase-1 window instead of `[snapshot, T]`. The caveat now says which of the three happened. The probe runs whether or not an archive is registered, so two windows that used to be trusted silently are now skipped and flagged: rotation that drops partitions without archiving, and a baseline snapshot older than the oldest live partition (hours the index never held). It also treats a permanent capture loss stamped inside the window (`stream_state.gap_lost_at`) as a gap. (#1615, first half; the cascade scan still does not read Parquet archives.)
+- **A backup update after a long capture outage no longer uses all of the
+  host's memory** (#1107, #1669, #1671). A fold held one full row image per
+  changed row in memory until it merged, which after a long outage grew past
+  the memory of the host that also runs capture. Daemon folds (scheduled
+  update, automatic refresh, point-in-time restore, `.sql` backup) now keep at
+  most 2,000,000 changed rows per run in memory, divided by the tables folding
+  at once (1,000,000 per table at the daemon's two). Past that, a table's
+  changes go to 64 files under the system temp directory and the merge reads
+  as many as fit, one pass over the source backup per set: the same rows are
+  published, at the cost of time and temp disk. The run refuses and publishes
+  nothing (`ErrTouchedRowBudget`, and `too_many_changes` in the backup status)
+  only when one file alone passes the limit, about 64 times the limit, or at
+  the limit itself for a table with no backup to merge over; a scheduled
+  update then takes a full backup when one can start. The limit counts rows,
+  not bytes. CLI `baseline refresh`, `reconstruct` and `drill` set no limit,
+  as before.
+- **A backup update or point-in-time restore refuses when a column's declared
+  type changed since the backup it starts from** (#1651, #1652, #1662, #1667,
+  #1676). After a change such as `int` to `bigint` or a new enum label, a
+  Parquet fold either failed with a raw conversion error (`strconv.ParseInt:
+  ... value out of range`) or published a snapshot whose carried CREATE TABLE
+  could not hold its rows. It now compares the baseline's CREATE TABLE with
+  the snapshot's `COLUMN_TYPE` and refuses with `ErrSchemaChanged`
+  (`refused-ddl`), naming the column under `type changed since:` (`c (int ->
+  bigint)`); a scheduled backup answers with one full backup. Only spellings
+  that never change storage are ignored (integer display width, `zerofill`,
+  `integer`/`numeric`, `decimal` as `decimal(10,0)`); a narrowing or a removed
+  or reordered enum label refuses. The snapshot compared is the one in effect
+  at the target and taken after the baseline, and, when capture was behind,
+  also the snapshot recorded for a DDL on the table between the baseline's
+  schema read and the target. Column names still compare against the latest
+  snapshot, so a restore to before a later ADD COLUMN refuses (#1675);
+  mydumper-format output is not checked.
+- **A backup update refuses when a column's NULL-ness changed since the backup
+  it starts from** (#1665, #1672). A backup taken with `c int NOT NULL`,
+  followed by `ALTER TABLE t MODIFY c int NULL` and a row set to NULL,
+  published a Parquet snapshot whose CREATE TABLE still said `NOT NULL`, and a
+  restore loaded in strict mode (as `drill` does) failed with `ERROR 1048
+  Column 'c' cannot be null`. The type check above now also compares the
+  baseline's `NOT NULL` with the snapshot's `IS_NULLABLE`, in both directions,
+  and refuses as `refused-ddl` under the same `type changed since:` label (`c
+  (int NOT NULL -> int NULL)`). Character set and collation are not compared.
+  On an index from before #844 whose snapshot holds two rows for one column
+  that differ only in `IS_NULLABLE`, that snapshot now fails to load for every
+  command with the corrupt-snapshot error.
+- **A backup folder the daemon cannot open no longer makes a decision quietly
+  use an older backup** (#1639, #1668). When a skipped folder is at or after
+  the backup a decision would pick: the scheduled update, the automatic
+  refresh, a restore, the SQL and Iceberg exports and `baseline refresh`
+  refuse with `ErrUnreadableSnapshot`, naming the folder, instead of folding
+  from an older backup or taking a full read of the source; Time-travel, MCP
+  `reconstruct` and `_snapshot` return the older backup with a warning (the
+  console first tries the server's S3 destination) and refuse when nothing is
+  readable; `verify` without `--source-dsn` marks every table `inconclusive`
+  and exits non-zero, where it could print `match` over two older backups; and
+  `status --baseline-dir` reports `baseline_staleness: unknown`. A skipped
+  folder older than the pick changes nothing. The trade: a permission mistake
+  on the newest backup folder stops that server's scheduled backups until it
+  is fixed.
+- **Capture recognizes schema changes written with comments, modifiers or line
+  breaks, including MariaDB's `CREATE OR REPLACE TABLE`** (#1664, #1673). A
+  statement was recognized by its first words, so `/* app */ ALTER TABLE t`, a
+  line break between `ALTER` and `TABLE`, gh-ost's `rename /* gh-ost */
+  table`, the `IF EXISTS` forms and `CREATE OR REPLACE TABLE` took no schema
+  snapshot, so later events were decoded against the old definition, and a
+  TRUNCATE, DROP or RENAME written that way never refused a restore over it.
+  Mixed quoting such as ``TRUNCATE db.`t` `` was recorded under the wrong
+  table name. Each shape now takes a snapshot, records its table, and refuses
+  a restore when destructive. `CREATE OR REPLACE TABLE` is stored as its own
+  `ddl_type` and refuses like a DROP, since it removes the rows without row
+  events; a `ddl_type` filter of `CREATE TABLE` does not match it.
+  `ALTER`/`CREATE`/`DROP TABLESPACE` and `ALTER TABLE t DISABLE KEYS`/`ENABLE
+  KEYS` are no longer recorded as table DDL. A statement naming several tables
+  still records only the first.
+- **The backup grants in the + Add server form work as pasted** (#1658,
+  #1663). The form told MySQL and MariaDB users to grant `LOCK TABLES`, but
+  the default lock mode (`ftwrl`) needs `RELOAD` plus `BACKUP_ADMIN` on
+  MySQL and Percona 8.0 or later, so a source set up as written had its first
+  backup refused. The MySQL block now grants `RELOAD, BACKUP_ADMIN, SHOW
+  VIEW` with a commented MySQL 5.7 line (no `BACKUP_ADMIN`), MariaDB grants
+  `RELOAD, SHOW VIEW`, and managed services (RDS, Aurora, Cloud SQL, RDS for
+  MariaDB) get a commented `LOCK TABLES, SHOW VIEW` line with the lock mode
+  set to `lock-all`. `SHOW VIEW` is on every line because mydumper stops the
+  whole backup at the first view it cannot read. The comment names both
+  `BASELINE_LOCK_MODE` (in `.env` for the compose install) and
+  `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE`. The same advice is corrected in
+  `.env.example` and the docs.
+- **Recovery refusals no longer tell MCP and console clients to use CLI
+  flags** (#1618, #1640). The refusal raised inside the shared SQL generator
+  said "narrow with --since/--until", which an MCP client cannot pass. It now
+  reads "since/until, pk/pks", which every surface can act on. The
+  `recover-cascade` script header likewise no longer says "pass
+  --baseline-dir/--baseline-s3"; it says to point the recovery at a baseline.
+- **A backup listing that could not read a snapshot or schema directory says
+  so, and the coverage card no longer grades it green** (#1601, #1637). The
+  listing used to skip an unreadable directory, log a warning and return as
+  if it had listed everything, so the Restore Coverage card could show a
+  table as covered when its only backup sat in the folder it could not open.
+  Now the skipped directories are counted. `GET /api/coverage` reports
+  `full_table_status: "unknown"` for a location that answered only in part;
+  `GET /api/baselines` sets `incomplete` and gives each source a `skipped`
+  count, and the Backups page marks that location "listed in part". The
+  `views.sql` header from `bintrail views` and the console names the count,
+  and the console refuses instead of answering "no baseline yet" when every
+  snapshot directory was unreadable. The baseline staleness notifier does not
+  grade a partial listing, so it neither fires nor resolves `baseline_stale`
+  over one.
+
+### Security
+- **The console's `Test connection` no longer reuses a saved MySQL password
+  for a different destination** (#1657). The probe is available to
+  `servers:read`, and when a request changed the host, port or user but left
+  the password out, it used to connect with the server's stored password. It
+  now refuses with HTTP 400 `re-enter the password to test a different host,
+  port or user` and connects to nothing. Testing a saved server without
+  changing host, port or user still reuses the stored password, as does a
+  change to the database name only. A request that types its own password or
+  sends a full `dsn` is allowed, since it carries its own secret. A change of
+  port alone is now applied to the probe and checked the same way. TLS on the
+  probe connection remains the operator's DSN choice.
 
 ## [0.81.0] - 2026-09-10
 
