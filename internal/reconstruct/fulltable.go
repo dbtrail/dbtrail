@@ -1282,6 +1282,11 @@ func ReconstructTable(
 // leaves nothing on disk. Shared by both output formats — the drift they detect
 // is a property of the reconstruction, not of the artifact it is written into,
 // and a guard that ran for one format only would make the other silently wrong.
+//
+// A spilled fold (#1107) is the exception for #602: its change map is empty
+// here, so that guard runs per pass inside the merge, after the writer opened
+// and possibly after earlier passes wrote rows; the writers' discard still
+// leaves nothing behind, but the refusal can come late in a long run.
 func prepareMerge(ctx context.Context, in mergeInput) ([]string, error) {
 	colNames, err := readBaselineColumns(ctx, in.LocalBaselinePath, in.DuckDBTuning)
 	if err != nil {
@@ -1648,7 +1653,9 @@ func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string
 // What differs from the in-memory merge is only the ORDER of the output: rows
 // come grouped by pass, and each pass's inserts follow its own scan. Nothing
 // that reads a backup depends on row order (verify's digest is
-// order-independent).
+// order-independent). It does cost lookups: rows written in pass order spread
+// every row group over the whole key range, so a later single-row read of that
+// snapshot, or of one folded from it, prunes fewer row groups.
 func mergeSpilledPasses(ctx context.Context, ddb *sql.DB, in mergeCore, emit func(map[string]any) error, stats *mergeStats) error {
 	var owns [spillBuckets]bool
 	pass := map[string]*query.ResultRow{}
@@ -1686,7 +1693,11 @@ func mergeSpilledPasses(ctx context.Context, ddb *sql.DB, in mergeCore, emit fun
 		maps.Copy(pass, group)
 		owns[b] = true
 	}
-	return run()
+	if err := run(); err != nil {
+		return err
+	}
+	slog.Info("reconstruct: merged the changes from disk", "schema", in.Schema, "table", in.Table, "passes", stats.Passes)
+	return nil
 }
 
 // scanBaselinePass streams the local baseline Parquet once and applies

@@ -312,6 +312,15 @@ func (r *foldResult) close() {
 // would make those calls unconditionally pass while still reading as guards.
 func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 	res := &foldResult{Changes: make(map[string]*query.ResultRow)}
+	// A spill is deleted on every way out but success, a panic included: the
+	// per-table recover in ReconstructTables keeps the daemon running, and a
+	// spill left behind can hold gigabytes of temp disk.
+	done := false
+	defer func() {
+		if !done {
+			res.close()
+		}
+	}()
 	warned := false
 	// Captured so the error path can tell a refusal from the fold apart from a
 	// fetch failure; FetchMergedStream returns fn's error verbatim, which makes
@@ -374,7 +383,6 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		return nil
 	})
 	if err != nil {
-		res.close()
 		// Only a TRANSPORT failure gets the "fetch events" label. fn's errors
 		// are the #592/#782 refusals, which FetchMergedStream propagates
 		// unchanged — prefixing those sends the operator to check DB/S3
@@ -396,7 +404,6 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 
 	if res.Spill != nil {
 		if err := res.Spill.finish(); err != nil {
-			res.close()
 			return nil, err
 		}
 	}
@@ -415,6 +422,7 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 	slog.Debug("event window folded",
 		"schema", fc.Schema, "table", fc.Table,
 		"events", res.Total, "changes", res.changeCount(), "on_disk", res.Spill != nil)
+	done = true
 	return res, nil
 }
 

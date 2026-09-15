@@ -25,7 +25,8 @@ import (
 // refusing: every change goes to one of spillBuckets files chosen by a hash of
 // its pk_values, and the merge then reads a few groups at a time, as many as
 // fit under the same limit, making one pass over the baseline per set. Peak
-// memory stays near the limit however many rows the window changed; the price
+// memory stays near the limit, plus about one group while a pass is built,
+// however many rows the window changed; the price
 // is one baseline read per pass, and disk in the system temp directory for the
 // changes.
 //
@@ -188,8 +189,8 @@ func (s *changeSpill) load(b int) (map[string]*query.ResultRow, error) {
 	}
 }
 
-// restoreEmpty undoes gob's one loss on a row image: it sends an empty []byte,
-// map or slice and hands back a nil one, which would turn an empty BLOB into
+// restoreEmpty undoes gob's one loss on a row image: it can send an empty
+// []byte, map or slice and hand back a nil one, which would turn an empty BLOB into
 // NULL and a JSON [] or {} into null. A decoded image never holds a nil one of
 // these (JSON null is a nil interface, and base64 decoding returns a non-nil
 // slice), so every nil one here was an empty one.

@@ -734,7 +734,8 @@ const (
 	// measured row (about 19 KB) the same cap is about four times the memory.
 	// Past it a fold writes that table's changes to disk and merges them in
 	// passes (internal/reconstruct/changespill.go), so this bounds memory, not
-	// the window; the fold refuses only at about 64 times it.
+	// the window; a fold over a backup refuses only at about 64 times it (a table
+	// with no backup still refuses at it).
 	daemonFoldMaxTouchedRows = 2_000_000
 
 	// daemonFoldRemediation replaces the volume warning's default advice, which
