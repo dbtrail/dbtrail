@@ -49,13 +49,17 @@ type firstRunInput struct {
 	// as after a reset, which zeroes the counter and keeps the rows.
 	HasEvents  bool
 	CheckError string
+	// Postgres: the source is PostgreSQL, whose stream saves the table
+	// structure only when changes arrive.
+	Postgres bool
 	// Backup is the first-backup job, nil when the console cannot create one
 	// for this server.
 	Backup *BaselineStatus
 }
 
-// firstRunSteps computes the list. Each capture step is done from evidence in
-// the index, and a later step's evidence implies the earlier ones. The first
+// firstRunSteps computes the list. Each capture step is done from evidence: the
+// index database, the supervisor's report that this run reached the source,
+// and what the index holds. A later step's evidence implies the earlier ones. The first
 // step not done takes the supervisor's state: running while it works, failed
 // with its error and a fix, waiting for Start when capture is stopped. The
 // steps after it wait. "Running" is not "stuck": a started stream with no
@@ -67,23 +71,36 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 		// index server refused one connection.
 		return FirstRunReport{CheckError: in.CheckError}
 	}
-	names := []string{"Create the index database", "Read the table structure", "Start capturing changes", "Capture the first change"}
-	working := []string{
-		"Creating it now.",
-		"Reading which tables and columns to capture.",
-		"Connecting to the source and saving the first position.",
-		"Capture is running and waiting for the first change on the source. A quiet database is normal.",
+	type stepDef struct {
+		name, working string
+		done          bool
 	}
-	done := []bool{in.IndexExists != nil && *in.IndexExists, in.SnapshotTaken, in.StreamStarted, in.EventsIndexed > 0 || in.HasEvents}
-	for i := len(done) - 2; i >= 0; i-- {
-		done[i] = done[i] || done[i+1]
+	// Attached counts as started only once this run reached the source: a
+	// PostgreSQL stream's ticker reports progress before the capturer connects.
+	attached := in.Monitor.SourceConnected &&
+		(in.Monitor.State == "running" || in.Monitor.State == "stalled" || in.Monitor.State == "lost_position")
+	defs := []stepDef{
+		{"Create the index database", "Creating it now.", in.IndexExists != nil && *in.IndexExists},
+		{"Connect to the source", "Connecting to the source database.", in.Monitor.SourceConnected},
 	}
-	rep := FirstRunReport{Complete: done[len(done)-1], CheckError: in.CheckError}
+	if !in.Postgres {
+		// A PostgreSQL stream saves the table structure when the first
+		// changes arrive, so the step would sit unfinished on a quiet source.
+		defs = append(defs, stepDef{"Read the table structure", "Reading which tables and columns to capture.", in.SnapshotTaken})
+	}
+	defs = append(defs,
+		stepDef{"Start capturing changes", "Saving the first position to start from.", in.StreamStarted || attached},
+		stepDef{"Capture the first change", "Capture is running and waiting for the first change on the source. A quiet database is normal.", in.EventsIndexed > 0 || in.HasEvents},
+	)
+	for i := len(defs) - 2; i >= 0; i-- {
+		defs[i].done = defs[i].done || defs[i+1].done
+	}
+	rep := FirstRunReport{Complete: defs[len(defs)-1].done}
 	current := -1
-	for i, name := range names {
-		step := FirstRunStep{Name: name, State: firstRunWaiting}
+	for i, d := range defs {
+		step := FirstRunStep{Name: d.name, State: firstRunWaiting}
 		switch {
-		case done[i]:
+		case d.done:
 			step.State = firstRunDone
 		case current < 0:
 			current = i
@@ -95,7 +112,7 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 				step.State, step.Detail = firstRunFailed, in.Monitor.LastError
 				step.Fix = "Stop and start capture on this server in Servers."
 			case "pending", "running":
-				step.State, step.Detail = firstRunRunning, working[i]
+				step.State, step.Detail = firstRunRunning, d.working
 			case "lost_position":
 				// Still capturing, but events were skipped for good: say which.
 				step.State, step.Detail = firstRunRunning, in.Monitor.LastError
@@ -195,7 +212,7 @@ func (s *Server) handleFirstRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusConflict, "this server has no source connection, so nothing is captured from it")
 		return
 	}
-	in := firstRunInput{Monitor: s.monitorCtrl.Status(e.ID)}
+	in := firstRunInput{Monitor: s.monitorCtrl.Status(e.ID), Postgres: e.IsPostgres()}
 	loadFirstRunIndex(r.Context(), e.DSN, &in)
 	if s.baselineCtrl != nil && baselineTriggerPrecheck(e) == nil {
 		b := s.baselineCtrl.Status(e.ID)

@@ -182,6 +182,29 @@ func TestMonitorJobHooks_pendingFlipsToRunning(t *testing.T) {
 		t.Fatalf("state = %q, want running after first indexed batch", st.State)
 	}
 
+	// OnSourceConnected marks this run as having reached the source without
+	// flipping pending, and the next run starts unconnected again (#1606).
+	job4 := &monitorJob{}
+	job4.set("pending", "")
+	job4.streamHooks().OnSourceConnected()
+	if st := job4.snapshot(); st.State != "pending" || !st.SourceConnected {
+		t.Fatalf("after OnSourceConnected: %+v, want pending and connected", st)
+	}
+	job4.set("failed", "boom (retrying)")
+	if st := job4.snapshot(); !st.SourceConnected {
+		t.Fatalf("a failure of the run that connected forgot it: %+v", st)
+	}
+	job4.set("pending", "")
+	if st := job4.snapshot(); st.SourceConnected {
+		t.Fatalf("a new run starts connected: %+v", st)
+	}
+	job5 := &monitorJob{}
+	job5.set("pending", "")
+	job5.pgStreamHooks().OnSourceConnected()
+	if st := job5.snapshot(); !st.SourceConnected {
+		t.Fatalf("the PostgreSQL hook does not mark the run connected: %+v", st)
+	}
+
 	// OnGapAutoAdvance alone must NOT flip pending (it fires during startup,
 	// before the stream is attached).
 	job3 := &monitorJob{}

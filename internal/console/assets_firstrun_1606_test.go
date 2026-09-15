@@ -31,7 +31,7 @@ func TestFirstRunCardRendersTheReport(t *testing.T) {
 		return string(b)
 	}
 	failed := marshal(firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "Access denied for user 'repl'"}, IndexExists: &yes})
-	working := marshal(firstRunInput{Monitor: MonitorStatus{State: "running"}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true,
+	working := marshal(firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true,
 		Backup: &BaselineStatus{State: "idle"}})
 	checkErr := marshal(firstRunInput{Monitor: MonitorStatus{State: "pending"}, CheckError: "dial tcp 10.0.0.1:3306: connection refused"})
 	complete := marshal(firstRunInput{Monitor: MonitorStatus{State: "running"}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true, EventsIndexed: 3})
@@ -81,8 +81,8 @@ console.log(JSON.stringify({
 		}
 	}
 
-	if n := len(got.Failed.Rows); n != 4 {
-		t.Fatalf("failed: %d step rows, want 4: %+v", n, got.Failed.Rows)
+	if n := len(got.Failed.Rows); n != 5 {
+		t.Fatalf("failed: %d step rows, want 5: %+v", n, got.Failed.Rows)
 	}
 	f := got.Failed.Rows[1]
 	if !strings.Contains(f.Cls, "failed") || !strings.Contains(f.Text, "Access denied for user 'repl'") || !strings.Contains(f.Text, "Capture retries on its own") {
@@ -97,13 +97,13 @@ console.log(JSON.stringify({
 		}
 	}
 
-	if n := len(got.Working.Rows); n != 5 {
-		t.Fatalf("working: %d step rows, want 5 with the backup: %+v", n, got.Working.Rows)
+	if n := len(got.Working.Rows); n != 6 {
+		t.Fatalf("working: %d step rows, want 6 with the backup: %+v", n, got.Working.Rows)
 	}
-	if r := got.Working.Rows[3]; !strings.Contains(r.Cls, "running") || !strings.Contains(r.Text, "A quiet database is normal") {
+	if r := got.Working.Rows[4]; !strings.Contains(r.Cls, "running") || !strings.Contains(r.Text, "A quiet database is normal") {
 		t.Errorf("capture waiting for its first change is not drawn as running and normal: %+v", r)
 	}
-	if r := got.Working.Rows[4]; !strings.Contains(r.Cls, "waiting") || !strings.Contains(r.Text, "Backups page") {
+	if r := got.Working.Rows[5]; !strings.Contains(r.Cls, "waiting") || !strings.Contains(r.Text, "Backups page") {
 		t.Errorf("the backup step does not say where to create one: %+v", r)
 	}
 

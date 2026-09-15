@@ -52,6 +52,10 @@ type MonitorStatus struct {
 	// still reflects the running transition, not when the stream stalled or
 	// lost its position.
 	Since string `json:"since,omitempty"`
+	// SourceConnected: the current run's stream has opened the source
+	// connection. False before that, and again from each retry until it
+	// reconnects (#1606).
+	SourceConnected bool `json:"source_connected,omitempty"`
 }
 
 // MonitorController is the control-plane supervisor as the console sees it.

@@ -1680,6 +1680,11 @@ type Hooks struct {
 	// OnGapAutoAdvance fires when an unfillable binlog gap forced the stream
 	// to advance past purged events — data in the gap is permanently lost.
 	OnGapAutoAdvance func(detail string)
+	// OnSourceConnected fires once per run, after the source connection is
+	// open and its binlog settings pass validation, before the schema
+	// snapshot: the console's first-run list shows the connection as its own
+	// step (#1606).
+	OnSourceConnected func()
 }
 
 // Deps are the host-supplied functions One needs that are NOT part of the
@@ -1851,6 +1856,10 @@ func One(ctx context.Context, cfg Config) error {
 	if detected := metadata.DetectFlavor(sourceDB); detected != "" && detected != cfg.Flavor {
 		slog.Warn("source flavor mismatch: configured flavor differs from the detected server flavor \u2014 GTID handling may misbehave; set --source-flavor to match",
 			"configured", cfg.Flavor, "detected", detected)
+	}
+
+	if cfg.Hooks != nil && cfg.Hooks.OnSourceConnected != nil {
+		cfg.Hooks.OnSourceConnected()
 	}
 
 	// ── 3. Resolve server identity ────────────────────────────────────────────

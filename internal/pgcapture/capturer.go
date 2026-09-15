@@ -54,6 +54,9 @@ type Config struct {
 	// (timeout/3, floor 1s), falling back to defaultStandbyInterval. Tests set it low.
 	StandbyInterval time.Duration
 	Logger          *slog.Logger
+	// OnStarted, when set, is called once replication has started on the
+	// slot: both source connections are open and the stream is attached.
+	OnStarted func()
 }
 
 // Capturer decodes a PostgreSQL logical-replication stream into event.Event. It
@@ -163,6 +166,9 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	// already durably indexed (first run = ConsistentPoint, nothing precedes it).
 	c.lastAcked.Store(uint64(startLSN))
 	c.logger.Info("pgcapture: started", "slot", c.cfg.SlotName, "publication", c.cfg.Publication, "start_lsn", startLSN)
+	if c.cfg.OnStarted != nil {
+		c.cfg.OnStarted()
+	}
 
 	// Catalog-backed PKResolver over the query conn, bounded by the Run ctx (+ a
 	// timeout) so a hung catalog lookup cannot wedge or outlive the stream.

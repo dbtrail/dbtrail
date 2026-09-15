@@ -25,46 +25,61 @@ func TestFirstRunSteps(t *testing.T) {
 	}{
 		{"never started: the first step waits for Start, which is not a failure",
 			firstRunInput{Monitor: MonitorStatus{State: "stopped"}},
-			want{states: "wwww", fixText: "Start"}},
+			want{states: "wwwww", fixText: "Start"}},
 		{"starting, no index database yet",
 			firstRunInput{Monitor: MonitorStatus{State: "pending"}, IndexExists: &no},
-			want{states: "rwww"}},
-		{"index created, reading the table structure",
+			want{states: "rwwww"}},
+		{"index created, connecting to the source",
 			firstRunInput{Monitor: MonitorStatus{State: "pending"}, IndexExists: &yes},
-			want{states: "drww"}},
-		{"structure read, capture connecting",
-			firstRunInput{Monitor: MonitorStatus{State: "pending"}, IndexExists: &yes, SnapshotTaken: true},
-			want{states: "ddrw"}},
+			want{states: "drwww"}},
+		{"connected, reading the table structure",
+			firstRunInput{Monitor: MonitorStatus{State: "pending", SourceConnected: true}, IndexExists: &yes},
+			want{states: "ddrww"}},
+		{"structure read, saving the first position",
+			firstRunInput{Monitor: MonitorStatus{State: "pending", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true},
+			want{states: "dddrw"}},
 		{"capture running with no change on the source yet is running, not stuck",
-			firstRunInput{Monitor: MonitorStatus{State: "running"}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true},
-			want{states: "dddr"}},
-		{"a saved position means the table structure was read, whatever the snapshot table holds",
+			firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true},
+			want{states: "ddddr"}},
+		{"a saved position means the earlier steps were done, whatever this run reports",
 			firstRunInput{Monitor: MonitorStatus{State: "running"}, IndexExists: &yes, StreamStarted: true},
-			want{states: "dddr"}},
+			want{states: "ddddr"}},
 		{"one change indexed completes the list",
-			firstRunInput{Monitor: MonitorStatus{State: "running"}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true, EventsIndexed: 1},
-			want{states: "dddd", complete: true}},
+			firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true, EventsIndexed: 1},
+			want{states: "ddddd", complete: true}},
 		{"a failure before the index exists lands on the first step",
 			firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "Access denied for user"}, IndexExists: &no},
-			want{states: "fwww", failText: "Access denied", fixText: "retr"}},
+			want{states: "fwwww", failText: "Access denied", fixText: "retr"}},
+		{"a source that cannot be reached lands on the connection",
+			firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "dial tcp 10.0.0.5:3306: connection refused"}, IndexExists: &yes},
+			want{states: "dfwww", failText: "connection refused"}},
 		{"a failure after the structure was read lands on capture",
 			firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "binlog not found"}, IndexExists: &yes, SnapshotTaken: true},
-			want{states: "ddfw", failText: "binlog not found"}},
+			want{states: "dddfw", failText: "binlog not found"}},
 		{"stalled with the stream started lands on the first change",
-			firstRunInput{Monitor: MonitorStatus{State: "stalled", LastError: "no progress for 6m0s"}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true},
-			want{states: "dddf", failText: "no progress"}},
-		{"stopped after the index was created waits for Start on the next step",
+			firstRunInput{Monitor: MonitorStatus{State: "stalled", LastError: "no progress for 6m0s", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true},
+			want{states: "ddddf", failText: "no progress"}},
+		{"stopped after the structure was read waits for Start on the next step",
 			firstRunInput{Monitor: MonitorStatus{State: "stopped"}, IndexExists: &yes, SnapshotTaken: true},
-			want{states: "ddww", fixText: "Start"}},
+			want{states: "dddww", fixText: "Start"}},
 		{"the index could not be checked: no step is claimed, done or not",
 			firstRunInput{Monitor: MonitorStatus{State: "running"}, CheckError: "Error 1226: max_user_connections"},
 			want{states: ""}},
 		{"a reset counter with changes still in the index completes the list",
 			firstRunInput{Monitor: MonitorStatus{State: "running"}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true, HasEvents: true},
-			want{states: "dddd", complete: true}},
+			want{states: "ddddd", complete: true}},
 		{"events after a later failure still complete the list",
 			firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "x"}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true, EventsIndexed: 5},
-			want{states: "dddd", complete: true}},
+			want{states: "ddddd", complete: true}},
+		{"PostgreSQL has no structure step: a quiet source waits for its first change",
+			firstRunInput{Postgres: true, Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes},
+			want{states: "dddr"}},
+		{"PostgreSQL reporting progress before it reached the source is still connecting",
+			firstRunInput{Postgres: true, Monitor: MonitorStatus{State: "running"}, IndexExists: &yes},
+			want{states: "drww"}},
+		{"PostgreSQL connected and starting",
+			firstRunInput{Postgres: true, Monitor: MonitorStatus{State: "pending", SourceConnected: true}, IndexExists: &yes},
+			want{states: "ddrw"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -109,18 +124,18 @@ func TestFirstRunSteps(t *testing.T) {
 // create one and this server has somewhere to put it.
 func TestFirstRunBackupStep(t *testing.T) {
 	yes := true
-	base := firstRunInput{Monitor: MonitorStatus{State: "running"}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true}
+	base := firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true}
 	for _, c := range []struct {
 		name   string
 		backup *BaselineStatus
 		states string
 	}{
-		{"not offered: no backup step", nil, "dddr"},
-		{"offered, none yet: waiting", &BaselineStatus{State: "idle"}, "dddrw"},
-		{"running", &BaselineStatus{State: "running"}, "dddrr"},
-		{"published", &BaselineStatus{State: "succeeded", Published: true}, "dddrd"},
-		{"failed", &BaselineStatus{State: "failed", LastError: "mydumper not found"}, "dddrf"},
-		{"the fold published and only the upload failed: the backup exists", &BaselineStatus{State: "failed", Published: true, LastError: "upload"}, "dddrd"},
+		{"not offered: no backup step", nil, "ddddr"},
+		{"offered, none yet: waiting", &BaselineStatus{State: "idle"}, "ddddrw"},
+		{"running", &BaselineStatus{State: "running"}, "ddddrr"},
+		{"published", &BaselineStatus{State: "succeeded", Published: true}, "ddddrd"},
+		{"failed", &BaselineStatus{State: "failed", LastError: "mydumper not found"}, "ddddrf"},
+		{"the fold published and only the upload failed: the backup exists", &BaselineStatus{State: "failed", Published: true, LastError: "upload"}, "ddddrd"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			in := base
@@ -142,9 +157,9 @@ func TestFirstRunBackupStep(t *testing.T) {
 // database is normal".
 func TestFirstRunLostPositionIsShown(t *testing.T) {
 	yes := true
-	got := firstRunSteps(firstRunInput{Monitor: MonitorStatus{State: "lost_position", LastError: "binlog.000003 was purged; events before it are lost"},
+	got := firstRunSteps(firstRunInput{Monitor: MonitorStatus{State: "lost_position", LastError: "binlog.000003 was purged; events before it are lost", SourceConnected: true},
 		IndexExists: &yes, SnapshotTaken: true, StreamStarted: true})
-	s := got.Steps[3]
+	s := got.Steps[4]
 	if s.State != firstRunRunning || !strings.Contains(s.Detail, "events before it are lost") || strings.Contains(s.Detail, "quiet") {
 		t.Fatalf("step = %+v", s)
 	}

@@ -115,6 +115,9 @@ type monitorJob struct {
 	// lastProgress is when the stream last proved liveness (checkpoint saved
 	// or batch flushed) — feeds the derived "stalled" state.
 	lastProgress time.Time
+	// sourceConnected: this run's stream has opened the source connection
+	// (the OnSourceConnected hook). Every new run starts false.
+	sourceConnected bool
 	// lostPosition, when non-empty, records that an unfillable binlog gap
 	// forced an auto-advance: events were permanently lost. The fact is
 	// also persisted in stream_state (gap_lost_at/_detail) and re-hydrated
@@ -127,6 +130,9 @@ type monitorJob struct {
 func (j *monitorJob) set(state, lastErr string) {
 	j.mu.Lock()
 	j.state, j.lastErr, j.since = state, lastErr, time.Now().UTC()
+	if state == "pending" {
+		j.sourceConnected = false // every run connects again
+	}
 	j.mu.Unlock()
 }
 
@@ -152,6 +158,13 @@ func (j *monitorJob) progress() {
 	j.mu.Unlock()
 }
 
+// markSourceConnected records that this run's stream reached the source.
+func (j *monitorJob) markSourceConnected() {
+	j.mu.Lock()
+	j.sourceConnected = true
+	j.mu.Unlock()
+}
+
 func (j *monitorJob) markLostPosition(detail string) {
 	j.mu.Lock()
 	j.lostPosition = detail
@@ -161,9 +174,10 @@ func (j *monitorJob) markLostPosition(detail string) {
 // streamHooks wires this job as its MySQL stream's liveness observer.
 func (j *monitorJob) streamHooks() *streamrun.Hooks {
 	return &streamrun.Hooks{
-		OnCheckpoint:     j.progress,
-		OnIndexed:        func(int64) { j.progress() },
-		OnGapAutoAdvance: j.markLostPosition,
+		OnCheckpoint:      j.progress,
+		OnIndexed:         func(int64) { j.progress() },
+		OnGapAutoAdvance:  j.markLostPosition,
+		OnSourceConnected: j.markSourceConnected,
 	}
 }
 
@@ -173,8 +187,9 @@ func (j *monitorJob) streamHooks() *streamrun.Hooks {
 // gap_lost_detail persisted by the capturer is re-hydrated by Start instead.
 func (j *monitorJob) pgStreamHooks() *pgstreamrun.Hooks {
 	return &pgstreamrun.Hooks{
-		OnCheckpoint: j.progress,
-		OnIndexed:    func(int64) { j.progress() },
+		OnCheckpoint:      j.progress,
+		OnIndexed:         func(int64) { j.progress() },
+		OnSourceConnected: j.markSourceConnected,
 	}
 }
 
@@ -189,7 +204,7 @@ func (j *monitorJob) pgStreamHooks() *pgstreamrun.Hooks {
 func (j *monitorJob) snapshot() console.MonitorStatus {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	st := console.MonitorStatus{State: j.state, LastError: j.lastErr}
+	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected}
 	if j.state == "running" {
 		if idle := time.Since(j.lastProgress); !j.lastProgress.IsZero() && idle > monitorStalledAfter {
 			st.State = "stalled"

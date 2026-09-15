@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,8 +125,17 @@ func runOneUntil(t *testing.T, cfg Config, waitAttached bool, writes func(), don
 	t.Helper()
 
 	var once sync.Once
+	var connected atomic.Bool
 	attached := make(chan struct{})
-	cfg.Hooks = &Hooks{OnCheckpoint: func() { once.Do(func() { close(attached) }) }}
+	cfg.Hooks = &Hooks{
+		OnSourceConnected: func() { connected.Store(true) },
+		OnCheckpoint: func() {
+			if !connected.Load() {
+				t.Error("OnCheckpoint fired before OnSourceConnected: the first-run list would show capture started before the connection")
+			}
+			once.Do(func() { close(attached) })
+		},
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
