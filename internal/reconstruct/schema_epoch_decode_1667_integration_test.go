@@ -10,11 +10,12 @@ import (
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
-// TestEventDecoder_snapshotReadAfterALaterDDL is #1667: a snapshot reads the
-// live schema, so one taken after a second DDL already holds it. Dating it at
-// its own DDL would decode the events between the two with the later
-// definition: a VARCHAR value written before a change to TEXT would be
-// base64-decoded into garbage.
+// TestEventDecoder_snapshotReadAfterALaterDDL pins why #1667 leaves decoding on
+// snapshot times: a snapshot reads the live schema, so one taken after a second
+// DDL already holds it, and that DDL may not be recorded yet. Dating it at its
+// own DDL would decode the events between the two with the later definition: a
+// VARCHAR value written before a change to TEXT would be base64-decoded into
+// garbage.
 func TestEventDecoder_snapshotReadAfterALaterDDL(t *testing.T) {
 	base := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
 	st := func(d time.Duration) string { return base.Add(d).Format("2006-01-02 15:04:05") }
@@ -58,6 +59,15 @@ func TestEventDecoder_snapshotReadAfterALaterDDL(t *testing.T) {
 			{3, 10*time.Minute + time.Second, "text", d(5 * time.Minute)},
 		}, time.Minute)
 		t.Logf("c = %q", got)
+		if got != "test" {
+			t.Errorf("plain VARCHAR value %q was base64-decoded into %q", "test", got)
+		}
+	})
+	t.Run("capture lag spans two DDLs and the later one is not recorded yet", func(t *testing.T) {
+		got := run(t, []sn{
+			{1, -2 * time.Hour, "varchar", nil},
+			{2, 10 * time.Minute, "text", d(10 * time.Second)},
+		}, time.Minute)
 		if got != "test" {
 			t.Errorf("plain VARCHAR value %q was base64-decoded into %q", "test", got)
 		}

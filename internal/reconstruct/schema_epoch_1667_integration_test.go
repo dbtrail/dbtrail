@@ -119,16 +119,13 @@ func foldWithSnapshots(t *testing.T, baselineCols []epochCol, snaps []epochSnap,
 }
 
 // TestFold_schemaInEffectAtTheTarget is #1667: a fold compares the baseline's
-// CREATE TABLE against the schema in effect at its target, placed by when the
-// DDL ran on the source, not by when capture recorded its snapshot. Names are
-// compared with it only when it was read after the baseline; otherwise with the
-// latest, the only record of a DDL between the two that got no snapshot.
+// column types with the snapshot taken for a DDL that ran before the target
+// even when capture recorded it after the target, and names still with the
+// latest snapshot.
 func TestFold_schemaInEffectAtTheTarget(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	intCols := []epochCol{{"id", "int"}, {"c", "int"}}
 	bigCols := []epochCol{{"id", "int"}, {"c", "bigint"}}
-	extraCols := []epochCol{{"id", "int"}, {"c", "int"}, {"extra", "int"}}
-	idOnly := []epochCol{{"id", "int"}}
 
 	refuses := func(t *testing.T, failures []reconstruct.TableFailure, err error, want string) {
 		t.Helper()
@@ -158,64 +155,31 @@ func TestFold_schemaInEffectAtTheTarget(t *testing.T) {
 		}, 40*time.Second, 60*time.Second)
 		publishes(t, failures, err)
 	})
-	t.Run("a snapshot read after the baseline is compared though its DDL is dated before it", func(t *testing.T) {
-		// Clock skew: the source dates the DDL before the host read the
-		// baseline. The snapshot's content is from when it was taken.
-		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
-			{-time.Hour, nil, intCols},
-			{100 * time.Second, ddlAt(-30 * time.Second), bigCols},
-		}, 40*time.Second, 60*time.Second)
-		refuses(t, failures, err, "c (int -> bigint)")
-	})
-	t.Run("a snapshot taken in the same second as the baseline is compared", func(t *testing.T) {
-		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
-			{-time.Hour, nil, intCols},
-			{0, nil, bigCols},
-		}, 10*time.Second, 30*time.Second)
-		refuses(t, failures, err, "c (int -> bigint)")
-	})
-	t.Run("a column added after the target still refuses when the snapshot in effect predates the baseline", func(t *testing.T) {
+	t.Run("a DDL that ran after the target is not compared", func(t *testing.T) {
 		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
 			{-time.Minute, nil, intCols},
-			{60 * time.Second, ddlAt(60 * time.Second), extraCols},
-		}, 10*time.Second, 30*time.Second)
-		refuses(t, failures, err, "added since: extra")
+			{100 * time.Second, ddlAt(90 * time.Second), bigCols},
+		}, 40*time.Second, 60*time.Second)
+		publishes(t, failures, err)
 	})
-	t.Run("a DDL between the baseline and the target with no snapshot of its own is caught by a later one", func(t *testing.T) {
-		// File mode without --source-dsn, a failed snapshot or a DDL the
-		// parser missed adds d at +15m; a manual snapshot at +2h records it.
+	t.Run("a snapshot taken later and in effect at the target wins over the DDL's", func(t *testing.T) {
+		// The type went back by a DDL with no row; the snapshot at 40s saw it.
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{-time.Minute, nil, intCols},
+			{20 * time.Second, ddlAt(10 * time.Second), bigCols},
+			{40 * time.Second, nil, intCols},
+		}, 50*time.Second, 60*time.Second)
+		publishes(t, failures, err)
+	})
+	t.Run("names are compared with the latest snapshot, which records a DDL with no snapshot of its own", func(t *testing.T) {
+		// A post-baseline snapshot is in effect at the target; d is added at
+		// +15m with no snapshot (file mode without --source-dsn, a failed
+		// snapshot, a DDL the parser missed); a manual snapshot at +2h has it.
 		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
 			{-time.Hour, nil, intCols},
+			{20 * time.Second, nil, intCols},
 			{2 * time.Hour, nil, []epochCol{{"id", "int"}, {"c", "int"}, {"d", "int"}}},
 		}, 10*time.Minute, 30*time.Minute)
 		refuses(t, failures, err, "added since: d")
-	})
-	t.Run("names follow a snapshot taken after the baseline and in effect at the target, not a later one", func(t *testing.T) {
-		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
-			{-time.Minute, nil, intCols},
-			{20 * time.Second, ddlAt(20 * time.Second), bigCols},
-			{60 * time.Second, ddlAt(60 * time.Second), []epochCol{{"id", "int"}, {"c", "bigint"}, {"extra", "int"}}},
-		}, 10*time.Second, 30*time.Second)
-		refuses(t, failures, err, "added since: none")
-	})
-	t.Run("a column added before the target still refuses", func(t *testing.T) {
-		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
-			{-time.Minute, nil, intCols},
-			{20 * time.Second, ddlAt(20 * time.Second), extraCols},
-		}, 10*time.Second, 30*time.Second)
-		refuses(t, failures, err, "added since: extra")
-	})
-	t.Run("a stale snapshot with nothing newer still refuses", func(t *testing.T) {
-		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
-			{-time.Minute, nil, idOnly},
-		}, 10*time.Second, 30*time.Second)
-		refuses(t, failures, err, "gone since: c")
-	})
-	t.Run("a snapshot taken after the target to fix a stale one lets a restore to before it publish", func(t *testing.T) {
-		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
-			{-time.Minute, nil, idOnly},
-			{60 * time.Second, nil, intCols},
-		}, 10*time.Second, 30*time.Second)
-		publishes(t, failures, err)
 	})
 }

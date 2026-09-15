@@ -133,11 +133,10 @@ type FullTableConfig struct {
 	// anchored at (nil when the index holds no events); see ResolveSnapshotCut.
 	snapshotDir string
 	cut         *query.BinlogPos
-	// schemaAt is the schema snapshot in effect at At (#1651, #1667), and
-	// schemaAtTime when it read the live schema, on the same host clock as a
-	// baseline's CREATE TABLE: names and types are compared against it, not
-	// the latest snapshot, only for a baseline older than it. nil when the
-	// snapshot history cannot be read; names are then compared with the latest.
+	// schemaAt is the schema snapshot in effect at At, and schemaAtTime when it
+	// was taken (#1651): the column-type check compares against it, not the
+	// latest snapshot, and only for a baseline older than it. nil when the
+	// snapshot history cannot be read; the check then compares names only.
 	schemaAt     *metadata.Resolver
 	schemaAtTime time.Time
 	Parallelism  int  // max concurrent tables (0 → runtime.NumCPU())
@@ -1061,26 +1060,37 @@ func ReconstructTable(
 		if asOf.IsZero() {
 			asOf = snapshotTime
 		}
-		//
-		// Names (#1667) against that same snapshot, which describes the table
-		// at the target and postdates the baseline. Otherwise against the
-		// latest: a snapshot older than the baseline says nothing about a DDL
-		// between the baseline and the target that got no snapshot of its own
-		// (file mode without --source-dsn, a failed snapshot, a DDL the parser
-		// missed), and the latest is the only record of it. That refuses a
-		// restore to before a column added later, which a snapshot taken after
-		// the baseline and before the target clears.
-		namesTM := tm
 		var typesTM *metadata.TableMeta
+		typesFrom := 0
 		if cfg.schemaAt != nil && !cfg.schemaAtTime.Before(asOf) {
 			if t, rerr := cfg.schemaAt.Resolve(schema, table); rerr == nil {
-				typesTM, namesTM = t, t
+				typesTM, typesFrom = t, cfg.schemaAt.SnapshotID()
 			} else {
 				slog.Warn("the schema snapshot in effect at the target does not describe this table; column types are not compared",
 					"schema", schema, "table", table, "error", rerr)
 			}
 		}
-		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, namesTM, typesTM, schema, table); err != nil {
+		// A DDL on this table that ran between the CREATE TABLE and the target
+		// but was recorded after the target (capture behind, #1667) is not in
+		// effect by snapshot time, so types are compared with the snapshot
+		// taken for it. It read the schema after the DDL, maybe after later
+		// ones too: a difference can refuse a restore that would have been
+		// right, never publish one that is wrong. Decoding keeps snapshot
+		// times: dating a snapshot at its DDL would decode the rows between
+		// that DDL and a later one it already holds with the wrong definition.
+		ddlSnap, err := snapshotForDDLInWindow(ctx, db, schema, table, asOf, cfg.At)
+		if err != nil {
+			return nil, err
+		}
+		if ddlSnap > typesFrom {
+			if t, rerr := resolveSnapshotTable(db, resolver, ddlSnap, schema, table); rerr == nil {
+				typesTM = t
+			} else {
+				slog.Warn("the schema snapshot taken for a DDL before the target does not describe this table; column types are not compared with it",
+					"schema", schema, "table", table, "snapshot_id", ddlSnap, "error", rerr)
+			}
+		}
+		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, tm, typesTM, schema, table); err != nil {
 			return nil, err
 		}
 		// A gapped ancestor taints every descendant: the events it lost are
@@ -2809,9 +2819,8 @@ func rowAfterOrdered(rowAfter map[string]any, colNames []string, schema, table s
 	return out
 }
 
-// schemaSnapshotAt loads the schema snapshot in effect at at, and when it was
-// taken: the newest one in effect at or before it (metadata.LoadSnapshotEpochs).
-// A target older than every snapshot has none (EpochAt
+// schemaSnapshotAt loads the schema snapshot in effect at at: the newest one
+// taken at or before it. A target older than every snapshot has none (EpochAt
 // would answer the first, which describes a later schema). Failures degrade to
 // nil with a warning, which makes the type check compare nothing: refusing a
 // fold because the snapshot history is unreadable would stop every backup.
@@ -2825,13 +2834,13 @@ func schemaSnapshotAt(db *sql.DB, at time.Time, latest *metadata.Resolver) (*met
 	if !ok {
 		return nil, time.Time{}
 	}
-	var from, taken time.Time
+	var taken time.Time
 	for _, e := range epochs {
 		if e.ID == id {
-			from, taken = e.At, e.Taken
+			taken = e.At
 		}
 	}
-	if from.After(at) {
+	if taken.After(at) {
 		return nil, time.Time{}
 	}
 	if latest != nil && latest.SnapshotID() == id {
@@ -2844,6 +2853,40 @@ func schemaSnapshotAt(db *sql.DB, at time.Time, latest *metadata.Resolver) (*met
 		return nil, time.Time{}
 	}
 	return r, taken
+}
+
+// snapshotForDDLInWindow returns the newest snapshot taken for a DDL on
+// schema.table that ran in (since, until], or 0. Rows indexed before #1435
+// carry an empty schema_name and match too, as in CheckDestructiveDDL: that can only
+// add a comparison. Source time on detected_at against since, the host time the
+// CREATE TABLE was read: clock skew moves the window by the skew.
+func snapshotForDDLInWindow(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time) (int, error) {
+	var id sql.NullInt64
+	err := db.QueryRowContext(ctx, `SELECT MAX(snapshot_id) FROM schema_changes
+		WHERE (schema_name = ? OR schema_name = '') AND table_name = ?
+		AND detected_at > ? AND detected_at <= ? AND snapshot_id IS NOT NULL`,
+		schema, table, since, until).Scan(&id)
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) && myErr.Number == 1146 {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("check schema_changes for a DDL on %s.%s before the target: %w", schema, table, err)
+	}
+	return int(id.Int64), nil
+}
+
+// resolveSnapshotTable describes schema.table in snapshot id, reusing latest
+// when it is that snapshot.
+func resolveSnapshotTable(db *sql.DB, latest *metadata.Resolver, id int, schema, table string) (*metadata.TableMeta, error) {
+	r := latest
+	if r == nil || r.SnapshotID() != id {
+		var err error
+		if r, err = metadata.NewResolver(db, id); err != nil {
+			return nil, err
+		}
+	}
+	return r.Resolve(schema, table)
 }
 
 // s3DownloadCopySQL is the statement that downloads an S3 baseline to a local

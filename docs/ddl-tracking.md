@@ -61,15 +61,13 @@ The `snapshot_id` column is NULL for these DDLs, which the status command uses t
 
 ---
 
-## When a Snapshot Takes Effect
+## Restoring to Before a Snapshot Was Recorded
 
-A snapshot is taken when capture reaches the DDL, which can be minutes or hours after the DDL ran on the source (capture behind, or catching up after a restart). So a snapshot taken for a recorded DDL counts from when the DDL ran, the `detected_at` of its `schema_changes` row, not from when it was taken. That is the instant compared with an event's timestamp (to decode ENUM, SET and BLOB values, and the width of a `BINARY` key) and with a restore target: a restore to a moment after the DDL uses the new definition even if capture recorded it later.
+A snapshot is taken when capture reaches the DDL, which can be minutes or hours after the DDL ran on the source (capture behind, or catching up after a restart). When a backup is updated or restored to a moment, a DDL on the table that ran after the backup's `CREATE TABLE` was read and before that moment (the `detected_at` of its `schema_changes` row) counts even if its snapshot was taken later: the table's column types are compared with that snapshot, and a difference refuses.
 
-Only when no other recorded DDL ran between the DDL and the snapshot. A snapshot reads the table definitions as they are when it is taken, so one taken late already holds every DDL that ran before that; counting it from the earlier DDL would decode the rows written between the two with a definition they were not written under. Capture behind across two DDLs, and re-indexing an old binlog with `--source-dsn`, both take such snapshots, and they count from when they were taken.
+That snapshot read the table after the DDL, and maybe after later DDLs too, so it can refuse a restore that would have been right, never let a wrong one through. Clock skew between the source and the DBTrail host moves this window by the skew.
 
-A snapshot with no `schema_changes` row (the first one, a manual `bintrail snapshot`, one taken at startup) counts from when it was taken. Snapshots are ordered by these instants, not by id: a snapshot taken at a restart reads the live schema, so it already holds the DDLs the catch-up records after it. Clock skew between the source and the DBTrail host shifts a DDL snapshot against a manual one, and the check above, by that skew. When `schema_changes` cannot be read, every snapshot counts from when it was taken.
-
-When a backup is updated or restored to a moment, the table's columns and types in the backup are compared with the snapshot in effect at that moment if that snapshot was taken after the backup. Otherwise column names are compared with the latest snapshot, the only record of a DDL between the backup and the moment that got no snapshot of its own, so a restore to before a column added later refuses unless a snapshot taken between the backup and the moment is in effect.
+Decoding old rows (ENUM and SET labels, BLOB values, the width of a `BINARY` key) still uses the snapshot in effect by when each snapshot was taken. Counting a snapshot from its DDL there would decode the rows written between that DDL and a later one the snapshot already holds with the wrong definition, and capture may not have recorded the later DDL yet.
 
 ---
 
