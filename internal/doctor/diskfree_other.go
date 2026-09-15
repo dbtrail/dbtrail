@@ -9,3 +9,7 @@ import "errors"
 func diskFree(path string) (uint64, error) {
 	return 0, errors.New("free-space probe not supported on this platform")
 }
+
+func diskSpace(path string) (free, total uint64, err error) {
+	return 0, 0, errors.New("free-space probe not supported on this platform")
+}

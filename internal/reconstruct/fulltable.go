@@ -103,6 +103,11 @@ type FullTableConfig struct {
 	At          time.Time // target point-in-time
 	OutputDir   string    // output root: the mydumper dump directory, or the baselines root under OutputFormatParquet
 	ChunkSize   int64     // per-chunk SQL file size (0 → 256 MiB)
+	// ChunkSpace, when set, is called before each SQL chunk file is opened
+	// (mydumper output only) with the directory and the chunk size; an error
+	// stops that table, whose files are then removed. The daemon's .sql backup
+	// checks free disk with it one file at a time (#1614).
+	ChunkSpace func(dir string, next int64) error
 
 	// OutputFormat selects the artifact the run produces. The zero value means
 	// "not specified" and resolves to OutputFormatMydumper, matching this
@@ -1228,6 +1233,7 @@ func ReconstructTable(
 		CurrentGenerated:  generatedByName(tm.Columns),
 		OutputDir:         cfg.OutputDir,
 		ChunkSize:         cfg.ChunkSize,
+		ChunkSpace:        cfg.ChunkSpace,
 		DuckDBTuning:      cfg.DuckDBTuning,
 	}
 	if cfg.OutputFormat == OutputFormatParquet {
@@ -1369,6 +1375,7 @@ type mergeInput struct {
 	CurrentGenerated map[string]bool
 	OutputDir        string
 	ChunkSize        int64
+	ChunkSpace       func(dir string, next int64) error
 
 	// SnapshotDir / SnapshotAt / Cut / SourceBaseline are set only under
 	// OutputFormatParquet and drive mergeBaselineIntoParquet: where the snapshot
@@ -1443,6 +1450,7 @@ func mergeBaselineIntoWriter(ctx context.Context, in mergeInput, rep *TableRepor
 	if err != nil {
 		return fmt.Errorf("open mydumper writer: %w", err)
 	}
+	mw.spaceCheck = in.ChunkSpace
 	// Success finalizes via the explicit Close below (before capturing
 	// rep.Files); ANY error return instead discards every file this writer
 	// wrote — see the #1162 note in the function comment. The discard also
@@ -2064,7 +2072,7 @@ func reconstructBinlogOnly(
 	}
 
 	rep.BinlogOnly = true
-	if err := writeBinlogOnlyChanges(cfg.OutputDir, schema, table, pkCols, colNames, cfg.ChunkSize, createSQL, changes, rep); err != nil {
+	if err := writeBinlogOnlyChanges(cfg.OutputDir, schema, table, pkCols, colNames, cfg.ChunkSize, cfg.ChunkSpace, createSQL, changes, rep); err != nil {
 		return nil, err
 	}
 	rep.Duration = time.Since(start)
@@ -2139,6 +2147,7 @@ func writeBinlogOnlyChanges(
 	pkCols []metadata.ColumnMeta,
 	colNames []string,
 	chunkSize int64,
+	chunkSpace func(dir string, next int64) error,
 	createSQL string,
 	changes map[string]*query.ResultRow,
 	rep *TableReport,
@@ -2154,6 +2163,7 @@ func writeBinlogOnlyChanges(
 	if err != nil {
 		return fmt.Errorf("open mydumper writer: %w", err)
 	}
+	mw.spaceCheck = chunkSpace
 	// Same #1162 error-path discard as mergeBaselineIntoWriter: this path has
 	// no pre-writer guards at all, so any mid-write failure would otherwise
 	// finalize a loadable, silently-truncated chunk plus the schema file.

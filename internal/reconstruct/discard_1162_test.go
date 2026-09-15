@@ -255,7 +255,7 @@ func TestWriteBinlogOnlyChanges_errorLeavesNoArtifacts(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(outDir, 0o755) })
 
 	rep := &TableReport{Schema: "mydb", Table: "orders"}
-	err := writeBinlogOnlyChanges(outDir, "mydb", "orders", pkColsIntID(), []string{"id", "status"}, 0,
+	err := writeBinlogOnlyChanges(outDir, "mydb", "orders", pkColsIntID(), []string{"id", "status"}, 0, nil,
 		"-- schema", map[string]*query.ResultRow{}, rep)
 	if err == nil {
 		t.Skip("running as a user unaffected by directory permissions; nothing to assert")

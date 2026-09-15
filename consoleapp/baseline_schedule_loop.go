@@ -565,8 +565,10 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 		// and a full backup would have to clear the same upload gate that just
 		// refused it. Falling back there answers one S3 permission error with a
 		// full lock-and-read of production that publishes nothing new (#1539).
-		// DiskRefused too: a full backup writes into the same disk that just
-		// refused the update (#1614), and would fill it under capture.
+		// DiskRefused too (#1614): a full backup stages its dump and then writes
+		// the converted backup into the same directory that just refused the
+		// update, so on that disk it would fail the same way, after reading the
+		// source in full.
 		if method == console.BackupMethodRefresh && st.Last.State == "failed" && !st.Last.Published && !st.Last.DiskRefused {
 			b.fallBack(e, st.Last.LastError)
 		}

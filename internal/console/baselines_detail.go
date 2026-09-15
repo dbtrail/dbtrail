@@ -186,6 +186,28 @@ func (ss *snapshotSource) files(ctx context.Context, dirName string) ([]baseline
 	return out, nil
 }
 
+// BaselineSnapshotFileSizes returns the stored size of every file of one
+// snapshot directory of src, a local directory or an s3:// source, keyed by
+// its path relative to src (`<dirName>/<schema>/<table>.parquet`). The backup
+// disk preflight (#1614) sizes the snapshot a fold starts from with it, the
+// same enumeration the files listing shows. fs.ErrNotExist when the snapshot
+// holds nothing.
+func BaselineSnapshotFileSizes(ctx context.Context, src, dirName string) (map[string]int64, error) {
+	ss, err := openSnapshotSource(ctx, src)
+	if err != nil {
+		return nil, err
+	}
+	files, err := ss.files(ctx, dirName)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(files))
+	for _, f := range files {
+		out[f.RelPath] = f.Size
+	}
+	return out, nil
+}
+
 // open returns a reader for one file previously returned by files. relPath is
 // trusted — it came from our own enumeration, never from the request.
 func (ss *snapshotSource) open(ctx context.Context, relPath string) (io.ReadCloser, error) {

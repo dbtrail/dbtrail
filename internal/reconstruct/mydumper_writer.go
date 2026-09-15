@@ -35,6 +35,9 @@ type MydumperWriter struct {
 	schema    string
 	table     string
 	chunkSize int64
+	// spaceCheck, when set, runs before each chunk file is created
+	// (FullTableConfig.ChunkSpace).
+	spaceCheck func(dir string, next int64) error
 
 	// insertPrefix is the "INSERT INTO `db`.`tab` (`c1`, `c2`, ...) VALUES\n"
 	// header emitted once at the top of each chunk file.
@@ -254,6 +257,11 @@ func (w *MydumperWriter) Discard() error {
 // openChunk creates the next <db>.<table>.NNNNN.sql file and writes the
 // INSERT prefix. Called on first WriteRow and after each rotation.
 func (w *MydumperWriter) openChunk() error {
+	if w.spaceCheck != nil {
+		if err := w.spaceCheck(w.outputDir, w.chunkSize); err != nil {
+			return err
+		}
+	}
 	name := fmt.Sprintf("%s.%s.%05d.sql", w.schema, w.table, w.chunkIdx)
 	path := filepath.Join(w.outputDir, name)
 	f, err := os.Create(path)
