@@ -162,6 +162,15 @@ func TestFold_schemaInEffectAtTheTarget(t *testing.T) {
 		}, 40*time.Second, 60*time.Second)
 		publishes(t, failures, err)
 	})
+	t.Run("a DDL that ran before the baseline was read is not compared", func(t *testing.T) {
+		// The baseline already holds the bigint. The DDL's snapshot was taken
+		// late, after the type went back to int by a DDL with no row at +50s.
+		failures, err := foldWithSnapshots(t, bigCols, []epochSnap{
+			{-time.Hour, nil, intCols},
+			{100 * time.Second, ddlAt(-30 * time.Second), intCols},
+		}, 20*time.Second, 40*time.Second)
+		publishes(t, failures, err)
+	})
 	t.Run("a snapshot taken later and in effect at the target wins over the DDL's", func(t *testing.T) {
 		// The type went back by a DDL with no row; the snapshot at 40s saw it.
 		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
