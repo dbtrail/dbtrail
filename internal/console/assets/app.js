@@ -1242,6 +1242,8 @@ function ovFrame() {
   v.append(pageHead("Overview", sub));
 
   const f = {};
+  f.firstRunSlot = el("div");
+  v.append(f.firstRunSlot);
   f.covSlot = el("div");
   f.covSlot.append(ovPendingCard("Restore coverage", "computing restore coverage…", "cov-card"));
   v.append(f.covSlot);
@@ -1405,6 +1407,8 @@ function renderOverview() {
   // not the backend. Every fill re-checks the generation guards so a server
   // switch or navigation mid-flight drops the late payload instead of
   // painting over the new view.
+  watchFirstRun(f, live);
+
   api("/api/status").catch(() => null)
     .then((status) => { if (live()) fillOvStatus(f, status); });
   // Only the Recent-changes list needs event ROWS, and it renders 8 of them.
@@ -1434,6 +1438,60 @@ function renderOverview() {
 // into incident channels without the page around them (#1300): "N deletes"
 // beside "N changes indexed" invites reading the first as a share of the
 // second, and before this they were different denominators.
+// firstRunCard draws the steps from adding a server to its first indexed
+// change (#1606) as GET /api/servers/{id}/first-run computes them, or nothing
+// once the list is complete. Waiting is its own mark, so a step that has not
+// started never looks like one that failed.
+function firstRunCard(rep) {
+  if (!rep || rep.complete || !Array.isArray(rep.steps)) return null;
+  const marks = { done: "✓", running: "…", waiting: "○", failed: "✗" };
+  const card = el("section", { class: "ov-panel fr-card" });
+  card.append(el("div", { class: "ov-panel-head" },
+    el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Getting started" }))));
+  const list = el("ol", { class: "fr-steps" });
+  rep.steps.forEach((s) => {
+    const state = marks[s.state] ? s.state : "waiting";
+    const body = el("div", { class: "dc-body" }, el("div", { class: "dc-name", text: s.name }));
+    if (s.detail) body.append(el("div", { class: "fr-detail", text: s.detail }));
+    if (s.fix) body.append(el("div", { class: "fr-fix", text: s.fix }));
+    list.append(el("li", { class: "fr-step " + state }, el("span", { class: "dc-mark", text: marks[state], "aria-label": state }), body));
+  });
+  card.append(list);
+  if (rep.check_error) {
+    card.append(el("div", { class: "warn-item" }, icon("warn"),
+      el("span", { text: "Could not check the index database: " + rep.check_error })));
+  }
+  return card;
+}
+
+// watchFirstRun shows the first-run steps at the top of the Overview while the
+// selected server has not indexed a change, and polls until it has; then the
+// page renders again with its numbers. Only a supervisor console answers the
+// endpoint. A server with no source, the command-line server or a read-only
+// console answer with an error, which draws nothing; once the card is up, an
+// error keeps it and tries again.
+function watchFirstRun(f, live) {
+  const id = currentServer || defaultServerId;
+  if (!capsCache.monitor || !id) return;
+  let shown = false;
+  const tick = () => {
+    if (!live()) return;
+    api("/api/servers/" + encodeURIComponent(id) + "/first-run").then((rep) => {
+      if (!live()) return;
+      const card = firstRunCard(rep);
+      clear(f.firstRunSlot);
+      if (card) {
+        f.firstRunSlot.append(card);
+        shown = true;
+        setTimeout(tick, 3000);
+      } else if (shown) {
+        renderRoute();
+      }
+    }, () => { if (live() && shown) setTimeout(tick, 3000); });
+  };
+  tick();
+}
+
 function buildOverview(status, eventsData, coverage, activity) {
   const f = ovFrame();
   fillOvStatus(f, status);
