@@ -152,6 +152,16 @@ func TestMergeSpilled_passCheck(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
+	t.Run("changes left in memory beside the spill refuse", func(t *testing.T) {
+		var emitted int
+		_, err := mergeBaselineImages(context.Background(), mergeCore{
+			LocalBaselinePath: path, Schema: "mydb", Table: "orders", PKCols: pkColsIntID(),
+			Spill: spillOf(t, 1000, cloneChanges(changes)), Changes: randomChanges(5), CheckPass: noPassCheck,
+		}, func(map[string]any) error { emitted++; return nil })
+		if err == nil || emitted != 0 {
+			t.Fatalf("a merge with changes both on disk and in memory ran: err=%v emitted=%d", err, emitted)
+		}
+	})
 	t.Run("missing refuses", func(t *testing.T) {
 		var emitted int
 		_, err := mergeBaselineImages(context.Background(), mergeCore{

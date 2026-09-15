@@ -109,9 +109,9 @@ func TestChangeSpill_lastWriteWinsAcrossDrains(t *testing.T) {
 	}
 }
 
-// A value the spill cannot bring back exactly is an error, never a silent
-// change to the backup.
-func TestChangeSpill_refusesAValueItCannotRoundTrip(t *testing.T) {
+// A value of a type the spill was not taught to carry is an error, never a
+// silent change to the backup.
+func TestChangeSpill_refusesAValueTypeItDoesNotKnow(t *testing.T) {
 	s, err := newChangeSpill(10)
 	if err != nil {
 		t.Fatal(err)

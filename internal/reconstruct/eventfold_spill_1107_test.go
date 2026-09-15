@@ -59,9 +59,9 @@ func TestFoldResult_admitPage(t *testing.T) {
 		if reflect.ValueOf(r.Changes).UnsafePointer() == before {
 			t.Error("the map was cleared in place, which keeps its memory; it must be replaced")
 		}
-		// The next page overwrites rows 5..15, and stays under the limit on its
-		// own: once spilling, every page goes to disk.
-		r.Changes = pageOf(5, 15, "b")
+		// The next page overwrites rows 5..14 and adds none: 10 rows, at the
+		// limit, so it reaches disk only because the fold is already spilling.
+		r.Changes = pageOf(5, 14, "b")
 		if err := r.admitPage(10, 1, true); err != nil || len(r.Changes) != 0 {
 			t.Fatalf("err=%v changes=%d", err, len(r.Changes))
 		}
@@ -72,10 +72,10 @@ func TestFoldResult_admitPage(t *testing.T) {
 			t.Error("a spilled fold reports no changes, so its table would be carried forward unchanged")
 		}
 		all := loadAll(t, r.Spill)
-		if len(all) != 15 {
-			t.Fatalf("read back %d rows, want 15", len(all))
+		if len(all) != 14 {
+			t.Fatalf("read back %d rows, want 14", len(all))
 		}
-		for id := 1; id <= 15; id++ {
+		for id := 1; id <= 14; id++ {
 			want := "a"
 			if id >= 5 {
 				want = "b"

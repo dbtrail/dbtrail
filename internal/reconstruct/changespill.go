@@ -52,8 +52,8 @@ import (
 
 // spillBuckets is the number of groups. The merge refuses a table only when
 // one group alone passes the limit, which takes about spillBuckets times the
-// limit of changed rows; a scheduled daemon fold (1,000,000 per table) gets
-// there at about 64 million rows of one table.
+// limit of changed rows; a daemon fold with two tables folding at once
+// (1,000,000 per table) gets there at about 64 million rows of one table.
 const spillBuckets = 64
 
 func init() {
@@ -97,7 +97,7 @@ type changeSpill struct {
 func newChangeSpill(limit int64) (*changeSpill, error) {
 	dir, err := os.MkdirTemp("", "bintrail-fold-*")
 	if err != nil {
-		return nil, fmt.Errorf("create a directory for changed rows on disk: %w", err)
+		return nil, fmt.Errorf("create a directory for changed rows in the temporary directory %s: %w", os.TempDir(), err)
 	}
 	return &changeSpill{dir: dir, limit: limit}, nil
 }
@@ -124,7 +124,7 @@ func (s *changeSpill) drain(changes map[string]*query.ResultRow) error {
 		if s.encs[b] == nil {
 			f, err := os.OpenFile(s.path(b), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 			if err != nil {
-				return fmt.Errorf("write changed rows to disk: %w", err)
+				return fmt.Errorf("write changed rows to the temporary directory %s: %w", s.dir, err)
 			}
 			s.files[b] = f
 			s.bufs[b] = bufio.NewWriterSize(f, 64<<10)
@@ -132,7 +132,7 @@ func (s *changeSpill) drain(changes map[string]*query.ResultRow) error {
 			s.written[b] = true
 		}
 		if err := s.encs[b].Encode(spillRecord{PK: pk, Type: ev.EventType, ID: ev.EventID, After: ev.RowAfter}); err != nil {
-			return fmt.Errorf("write changed row %q to disk: %w", pk, err)
+			return fmt.Errorf("write changed row %q to the temporary directory %s: %w", pk, s.dir, err)
 		}
 		s.records++
 	}
@@ -147,10 +147,10 @@ func (s *changeSpill) finish() error {
 			continue
 		}
 		if err := s.bufs[b].Flush(); err != nil {
-			errs = append(errs, fmt.Errorf("write changed rows to disk: %w", err))
+			errs = append(errs, fmt.Errorf("write changed rows to the temporary directory %s: %w", s.dir, err))
 		}
 		if err := s.files[b].Close(); err != nil {
-			errs = append(errs, fmt.Errorf("write changed rows to disk: %w", err))
+			errs = append(errs, fmt.Errorf("write changed rows to the temporary directory %s: %w", s.dir, err))
 		}
 		s.files[b], s.bufs[b] = nil, nil
 	}

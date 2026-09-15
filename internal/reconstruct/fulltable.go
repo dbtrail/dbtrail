@@ -1621,6 +1621,11 @@ func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string
 	if in.Spill != nil && in.CheckPass == nil {
 		return stats, fmt.Errorf("internal: %s.%s would merge its changes from disk without the per-pass column check", in.Schema, in.Table)
 	}
+	// A spilled merge reads only the disk: a change still in the map would be
+	// dropped without a word.
+	if in.Spill != nil && len(in.Changes) > 0 {
+		return stats, fmt.Errorf("internal: %s.%s has %d changes in memory beside the ones on disk, which the merge would drop", in.Schema, in.Table, len(in.Changes))
+	}
 
 	ddb, err := sql.Open("duckdb", "")
 	if err != nil {
