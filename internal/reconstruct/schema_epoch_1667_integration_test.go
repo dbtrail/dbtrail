@@ -155,10 +155,34 @@ func TestFold_schemaInEffectAtTheTarget(t *testing.T) {
 		}, 40*time.Second, 60*time.Second)
 		publishes(t, failures, err)
 	})
+	t.Run("a DDL in the same second the baseline was read is compared", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{-time.Minute, nil, intCols},
+			{100 * time.Second, ddlAt(0), bigCols},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
+	t.Run("a DDL in the same second as the target is compared", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{-time.Minute, nil, intCols},
+			{100 * time.Second, ddlAt(60 * time.Second), bigCols},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
+	t.Run("the DDL's snapshot adds a comparison and never replaces the one in effect", func(t *testing.T) {
+		// bigint at +20s; a manual snapshot at +50s sees it; the type goes
+		// back to int at +70s; capture takes the +20s DDL's snapshot at +100s.
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{-time.Minute, nil, intCols},
+			{50 * time.Second, nil, bigCols},
+			{100 * time.Second, ddlAt(20 * time.Second), intCols},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
 	t.Run("a DDL that ran after the target is not compared", func(t *testing.T) {
 		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
 			{-time.Minute, nil, intCols},
-			{100 * time.Second, ddlAt(90 * time.Second), bigCols},
+			{100 * time.Second, ddlAt(61 * time.Second), bigCols},
 		}, 40*time.Second, 60*time.Second)
 		publishes(t, failures, err)
 	})
@@ -171,7 +195,7 @@ func TestFold_schemaInEffectAtTheTarget(t *testing.T) {
 		}, 20*time.Second, 40*time.Second)
 		publishes(t, failures, err)
 	})
-	t.Run("a snapshot taken later and in effect at the target wins over the DDL's", func(t *testing.T) {
+	t.Run("a DDL snapshot older than the one in effect is not compared", func(t *testing.T) {
 		// The type went back by a DDL with no row; the snapshot at 40s saw it.
 		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
 			{-time.Minute, nil, intCols},
