@@ -228,6 +228,12 @@ type BaselineStatus struct {
 	// a correct fail-closed verdict — so it reports succeeded=false with this
 	// count rather than an opaque error.
 	Refused int `json:"refused,omitempty"`
+	// TooManyChanges: the run refused because the recorded changes touch more
+	// rows than one update may hold in memory (#1107). The next automatic
+	// refresh starts from the same backup over a longer window and would be
+	// refused again, so the page asks for a full backup instead of promising
+	// a retry.
+	TooManyChanges bool `json:"too_many_changes,omitempty"`
 }
 
 // handleBaselineTrigger enqueues an in-process baseline for the selected server.

@@ -5189,6 +5189,43 @@ function reusedCopiedNote(copied) {
   return " (" + copied + " of them written in full, which saved no disk; the daemon log says why)";
 }
 
+// budgetRefusedTail (#1107): an update refused for too many changed rows
+// starts again from the same backup over a LONGER window, so "the next run
+// retries" would be false. Worded as a condition, not an order: it stays true
+// after the operator takes that full backup, and on a console that cannot
+// create one it does not point at a button that is not there.
+// The subject is "update", not "automatic refresh": a scheduled update writes
+// the same status slot.
+function budgetRefusedTail() {
+  return " Nothing was overwritten. Until a newer full backup exists, every update from the recorded changes" +
+    " starts from the same backup and is refused again" +
+    (capsCache.baseline_trigger ? "." : "; creating backups from the console is turned off here.");
+}
+
+// scheduleSkipTail: a skipped slot retries at the next one, which falls back
+// to a full backup on its own when it may. The one skip that repeats is a
+// budget refusal whose full backup cannot start here: its reason already says
+// why, so the tail does not repeat it.
+function scheduleSkipTail(reason) {
+  return touchedRowBudgetText(reason) && /a full backup cannot start here/.test(reason || "")
+    ? " Until a newer full backup exists, every scheduled update is refused the same way."
+    : " It will try again at the next scheduled time.";
+}
+
+// touchedRowBudgetText: the schedule's skips keep only the error text, not
+// the status flag, so the skip line matches the refusal's fixed opening (reconstruct.ErrTouchedRowBudget), pinned by a test that
+// feeds this the Go error.
+function touchedRowBudgetText(s) {
+  return /too many changed rows to build this from the recorded changes/.test(s || "");
+}
+
+// restoreRefusedLine: a restore that published nothing. A budget refusal
+// needs a closer moment, which is this card's own input.
+function restoreRefusedLine(rst) {
+  return "Last restore published nothing: " + backupFoldError(rst.last_error || "unknown error") +
+    (rst.too_many_changes ? " Nothing was overwritten. Pick a moment closer to an existing backup." : " Nothing was overwritten.");
+}
+
 // baselineRefreshNote renders the last automatic refresh for the selected
 // server.
 function baselineRefreshNote(rf) {
@@ -5226,7 +5263,9 @@ function baselineRefreshNote(rf) {
         : "Automatic refresh published nothing" + (when ? " at " + when : "") +
           (rf.refused ? "; " + rf.refused + " table(s) refused" : "") +
           (rf.last_error ? ": " + backupFoldError(rf.last_error) : "") +
-          " Nothing was overwritten; the next run retries.";
+          (rf.too_many_changes
+            ? budgetRefusedTail()
+            : " Nothing was overwritten; the next run retries.");
       break;
     default:
       return el("p", { class: "form-hint", text: "Automatic refresh is enabled; it has not run yet." });
@@ -6375,7 +6414,7 @@ function backupScheduleCard(cur, b) {
       // with its bare --allow-gaps hint.
       body.append(el("p", { class: "form-msg err", text:
         "Did not run at " + utcLabel(skip.at) + ": " + backupFoldError(skip.reason) +
-        " It will try again at the next scheduled time." }));
+        scheduleSkipTail(skip.reason) }));
     }
     if (!run && !skip && !sch.running && !sch.history_unavailable) {
       body.append(el("p", { class: "form-hint", text: "It has not run yet." }));
@@ -6465,7 +6504,7 @@ function backupRestoreCard(cur, b, restoreSt) {
     // backup is in the list below and can be restored from.
     body.append(el("p", { class: "form-msg err", text: rst.published
       ? "Last restore wrote the backup on this machine but could not send it to S3: " + backupFoldError(rst.last_error || "unknown error") + " The backup is in the list below. A full backup sends it along with the rest."
-      : "Last restore published nothing: " + backupFoldError(rst.last_error || "unknown error") + " Nothing was overwritten." }));
+      : restoreRefusedLine(rst) }));
     details.open = true;
   } else if (rst && rst.state === "succeeded") {
     // The reused count belongs here for the same reason it belongs on the

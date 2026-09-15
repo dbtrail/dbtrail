@@ -160,6 +160,22 @@ type FullTableConfig struct {
 	// while their per-table triggers differ.
 	WarnEventThreshold int64
 
+	// MaxTouchedRows refuses a table whose event window changes more distinct
+	// rows than this, before anything is written (#1107). The change map holds
+	// one full row image per distinct changed row until the merge, and paging
+	// the fetch does not bound it; on a host that also runs capture, a fold
+	// after a long outage grew past the machine's memory.
+	//
+	// Like WarnEventThreshold it is a per-RUN figure divided by the effective
+	// parallelism, because peak memory is the sum of the maps of the tables
+	// folding at once. It counts rows, not bytes: the cost of a row is its
+	// width, and measured maps ran from about 4 KB to about 19 KB per row, so
+	// the same count can mean a fourfold difference in memory.
+	//
+	// 0 = no limit, the zero value: attended CLI runs do not set it. The
+	// refusal wraps ErrTouchedRowBudget.
+	MaxTouchedRows int64
+
 	// RemediationHint replaces the advice attached to that warning.
 	//
 	// Empty uses the wording for the attended CLI commands, which names the
@@ -356,6 +372,7 @@ func maybeWarnEventVolume(schema, table string, n int64, threshold int64, parall
 func withFoldBudgets(cfg FullTableConfig, fc foldConfig) foldConfig {
 	fc.BatchSize = cfg.FetchBatchSize
 	fc.WarnEventThreshold = cfg.WarnEventThreshold
+	fc.MaxTouchedRows = cfg.MaxTouchedRows
 	// The DIVISOR, not the raw field: effectiveParallelism clamps to
 	// len(cfg.Tables), so a single-table run is not divided by a parallelism it
 	// can never reach.
@@ -392,6 +409,10 @@ var (
 	// target — an ALTER, a destructive DDL, or delta events disagreeing with
 	// the baseline's columns. Remedy: a real re-dump; no flag helps.
 	ErrSchemaChanged = errors.New("schema changed since the baseline")
+	// ErrTouchedRowBudget: the window changes more distinct rows than the
+	// caller's MaxTouchedRows lets one update hold in memory. Remedy: a full
+	// backup, which streams the table instead of holding its changes.
+	ErrTouchedRowBudget = errors.New("too many changed rows to build this from the recorded changes")
 )
 
 // TableFailure is one table's refusal, kept separate from the joined error so a

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -182,6 +184,9 @@ type foldConfig struct {
 	// WarnEventThreshold / Parallelism drive the #654/#842 volume warning.
 	WarnEventThreshold int64
 	Parallelism        int
+	// MaxTouchedRows is FullTableConfig.MaxTouchedRows, divided by Parallelism
+	// at the check.
+	MaxTouchedRows int64
 
 	// RemediationHint is the advice attached to that warning; empty uses the
 	// attended-CLI wording. See FullTableConfig.RemediationHint.
@@ -280,6 +285,16 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 			foldErr = err
 			return err
 		}
+		// Per page, not after the window: the memory is spent as the map
+		// grows, so a check at the end would come after the harm (#1107).
+		if limit := scaledEventThreshold(fc.MaxTouchedRows, fc.Parallelism); limit > 0 && int64(len(res.Changes)) > limit {
+			// No table prefix: the run's error adds "schema.table: ".
+			// No remedy here: it differs per surface (a scheduled update falls
+			// back to a full backup, a restore needs a closer moment), and the
+			// surfaces add their own.
+			foldErr = TouchedRowBudgetError(limit, fc.Parallelism)
+			return foldErr
+		}
 
 		res.Total += int64(len(page))
 		// Warn as soon as the running total crosses, not after the last page:
@@ -327,4 +342,37 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		"schema", fc.Schema, "table", fc.Table,
 		"events", res.Total, "touched_pks", len(res.Changes))
 	return res, nil
+}
+
+// groupThousands renders n with comma separators, for a limit a person reads.
+func groupThousands(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
+}
+
+// TouchedRowBudgetError is the refusal foldEventWindow returns once one
+// table's changes pass limit while tables tables fold at once. Exported so
+// the console's page tests render the exact text the daemon produces.
+func TouchedRowBudgetError(limit int64, tables int) error {
+	if tables <= 1 {
+		return fmt.Errorf("%w: more than %s distinct rows changed between the backup this starts from and the target moment, "+
+			"the most this run may hold in memory", ErrTouchedRowBudget, groupThousands(limit))
+	}
+	return fmt.Errorf("%w: more than %s distinct rows changed between the backup this starts from and the target moment, "+
+		"the most one table may hold in memory while %d tables are processed at once",
+		ErrTouchedRowBudget, groupThousands(limit), tables)
 }
