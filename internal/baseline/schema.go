@@ -250,22 +250,45 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 }
 
 // declaredNotNull reports whether a column's attributes, the text after its
-// declared type, say NOT NULL. Words inside single-quoted strings are skipped
-// (a doubled quote or a backslash escape stays inside the string), and a
-// string counts as a word of its own, so DEFAULT 'NOT NULL' or a COMMENT
-// holding the words is not read as the attribute.
+// declared type, say NOT NULL. Only words at the top level count: words inside
+// single-quoted strings (a doubled quote or a backslash escape stays inside the
+// string), backticked names and parentheses are skipped, and each of those
+// counts as a separator, so DEFAULT 'NOT NULL', a COMMENT holding the words, a
+// MariaDB column CHECK (`c` is not null) or an expression DEFAULT is not read as
+// the attribute.
 func declaredNotNull(attrs string) bool {
 	var words []string
 	var w strings.Builder
+	depth := 0
 	flush := func() {
 		if w.Len() > 0 {
 			words = append(words, strings.ToUpper(w.String()))
 			w.Reset()
 		}
 	}
+	separate := func() {
+		flush()
+		if depth == 0 {
+			words = append(words, "")
+		}
+	}
 	for i := 0; i < len(attrs); i++ {
 		ch := attrs[i]
 		switch {
+		case ch == '`':
+			flush()
+			for i++; i < len(attrs) && attrs[i] != '`'; i++ {
+			}
+			separate()
+		case ch == '(':
+			separate()
+			depth++
+		case ch == ')':
+			flush()
+			if depth > 0 {
+				depth--
+			}
+			separate()
 		case ch == '\'':
 			flush()
 			for i++; i < len(attrs); i++ {
@@ -281,9 +304,11 @@ func declaredNotNull(attrs string) bool {
 					break
 				}
 			}
-			words = append(words, "")
+			separate()
 		case ch == '_' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9':
-			w.WriteByte(ch)
+			if depth == 0 {
+				w.WriteByte(ch)
+			}
 		default:
 			flush()
 		}

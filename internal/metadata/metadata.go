@@ -284,8 +284,8 @@ func scanSnapshotRows(rows *sql.Rows, tables map[string]*TableMeta) (snapshotSca
 				dupRows[key]++
 				continue
 			}
-			return stats, fmt.Errorf("snapshot is corrupt: %s has two different columns at ordinal_position %d (%q %s vs %q %s) — re-run `bintrail snapshot` to write a clean snapshot; if the table no longer exists at the source, delete that snapshot's rows from schema_snapshots instead",
-				key, ordinalPosition, tm.Columns[n-1].Name, tm.Columns[n-1].ColumnType, columnName, columnType)
+			return stats, fmt.Errorf("snapshot is corrupt: %s has two different columns at ordinal_position %d (%q %s nullable=%s vs %q %s nullable=%s) — re-run `bintrail snapshot` to write a clean snapshot; if the table no longer exists at the source, delete that snapshot's rows from schema_snapshots instead",
+				key, ordinalPosition, tm.Columns[n-1].Name, tm.Columns[n-1].ColumnType, tm.Columns[n-1].IsNullable, columnName, columnType, isNullable)
 		}
 
 		if columnType != "" {

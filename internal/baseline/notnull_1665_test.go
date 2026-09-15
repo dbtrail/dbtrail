@@ -26,6 +26,12 @@ func TestParseSchemaText_notNull(t *testing.T) {
 		{"inside an enum label", "`c` enum('NOT NULL','x') DEFAULT NULL,", false},
 		{"NOT NULL after a string that holds a quote", "`c` varchar(20) DEFAULT 'it''s' NOT NULL,", true},
 		{"a longer word starting with NULL", "`c` int NOT NULLS,", false},
+		// Expressions in parentheses are not the column's own attribute.
+		{"inside a MariaDB column CHECK", "`c` int(11) DEFAULT NULL CHECK (`c` is not null or `d` > 0),", false},
+		{"inside an expression default", "`f` tinyint DEFAULT (if((`a` is not null),1,0)),", false},
+		{"before a MariaDB JSON check", "`doc` longtext NOT NULL CHECK (json_valid(`doc`)),", true},
+		{"after an expression default", "`f` tinyint DEFAULT (1) NOT NULL,", true},
+		{"a backticked name holding a parenthesis inside a check", "`c` int DEFAULT NULL CHECK (`a(b` is not null),", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cols, err := ParseSchemaText("CREATE TABLE `t` (\n  `id` int NOT NULL,\n  " + tc.line + "\n  PRIMARY KEY (`id`)\n);\n")
