@@ -63,11 +63,11 @@ The `snapshot_id` column is NULL for these DDLs, which the status command uses t
 
 ## Restoring to Before a Snapshot Was Recorded
 
-A snapshot is taken when capture reaches the DDL, which can be minutes or hours after the DDL ran on the source (capture behind, or catching up after a restart). When a backup is updated or restored to a moment, a DDL on the table that ran after the backup's `CREATE TABLE` was read and before that moment (the `detected_at` of its `schema_changes` row) counts even if its snapshot was taken later: the table's column types are compared with that snapshot, and a difference refuses.
+A snapshot is taken when capture reaches the DDL, which can be minutes or hours after the DDL ran on the source (capture behind, or catching up after a restart). When a backup is updated, or a Parquet snapshot is written for a moment (`reconstruct --output-format parquet`), DDLs on the table that ran at or after the second the backup's `CREATE TABLE` was read and at or before that moment (by the `detected_at` of their `schema_changes` rows) are checked: if the newest snapshot taken for such a DDL is newer than the one in effect at that moment, the column types are also compared with it, and a difference refuses.
 
-That snapshot read the table after the DDL, and maybe after later DDLs too, so it can refuse a restore that would have been right, never let a wrong one through. Clock skew between the source and the DBTrail host moves this window by the skew.
+That snapshot read the table after the DDL, and maybe after later DDLs too, so this extra comparison can only add refusals: it may refuse a restore that would have been right, but it never lets through one the existing check would have refused. Clock skew between the source and the DBTrail host moves this window by the skew.
 
-Decoding old rows (ENUM and SET labels, BLOB values, the width of a `BINARY` key) still uses the snapshot in effect by when each snapshot was taken. Counting a snapshot from its DDL there would decode the rows written between that DDL and a later one the snapshot already holds with the wrong definition, and capture may not have recorded the later DDL yet.
+Decoding old rows (ENUM and SET labels, BLOB values, the width of a `BINARY` key) still uses, for each row, the newest snapshot taken at or before the row was written. Dating a snapshot at its DDL instead would be wrong under capture lag: the snapshot reads the table when capture reaches the DDL, so it can already include a later DDL. Rows written between the two DDLs would then be decoded with the later definition, and that later DDL may not be recorded yet.
 
 ---
 

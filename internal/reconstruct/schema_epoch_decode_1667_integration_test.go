@@ -25,6 +25,8 @@ func TestEventDecoder_snapshotReadAfterALaterDDL(t *testing.T) {
 		ctype    string
 		detected *time.Duration
 	}, eventAt time.Duration) any {
+		// The decoder never reads schema_changes: the rows are there so a
+		// design that dates snapshots by detected_at would see them.
 		db, _ := testutil.CreateTestDB(t)
 		testutil.InitIndexTables(t, db)
 		for _, s := range snaps {

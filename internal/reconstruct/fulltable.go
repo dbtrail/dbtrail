@@ -1075,8 +1075,9 @@ func ReconstructTable(
 		}
 		// A DDL on this table that ran between the CREATE TABLE and the target
 		// but was recorded after the target (capture behind, #1667) is not in
-		// effect by snapshot time, so types are also compared with the
-		// snapshot taken for it. It read the schema after the DDL, maybe after
+		// effect by snapshot time, so types are also compared with the newest
+		// snapshot taken for such a DDL, when it is newer than the one compared
+		// above (or none was). It read the schema after the DDL, maybe after
 		// later ones too, so it is an extra comparison and never replaces the
 		// one above: a difference can refuse a restore that would have been
 		// right, never publish one that is wrong. Decoding keeps snapshot

@@ -179,6 +179,16 @@ func TestFold_schemaInEffectAtTheTarget(t *testing.T) {
 		}, 40*time.Second, 60*time.Second)
 		refuses(t, failures, err, "c (int -> bigint)")
 	})
+	t.Run("the DDL's snapshot is loaded when a later one is the latest", func(t *testing.T) {
+		// bigint at +20s, snapshotted at +100s; back to int at +120s, after
+		// the target, snapshotted at +150s.
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{-time.Minute, nil, intCols},
+			{100 * time.Second, ddlAt(20 * time.Second), bigCols},
+			{150 * time.Second, ddlAt(120 * time.Second), intCols},
+		}, 40*time.Second, 60*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
 	t.Run("a DDL that ran after the target is not compared", func(t *testing.T) {
 		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
 			{-time.Minute, nil, intCols},
@@ -195,7 +205,7 @@ func TestFold_schemaInEffectAtTheTarget(t *testing.T) {
 		}, 20*time.Second, 40*time.Second)
 		publishes(t, failures, err)
 	})
-	t.Run("a DDL snapshot older than the one in effect is not compared", func(t *testing.T) {
+	t.Run("a DDL snapshot older than the one in effect and compared is not compared", func(t *testing.T) {
 		// The type went back by a DDL with no row; the snapshot at 40s saw it.
 		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
 			{-time.Minute, nil, intCols},
