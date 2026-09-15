@@ -732,8 +732,10 @@ const (
 	// 4 KB a row) and folded fine, while a two-hour window after a capture
 	// outage grew past a 16 GB host. Rows are a proxy for bytes: at the widest
 	// measured row (about 19 KB) the same cap is about four times the memory.
-	// A scheduled update that hits it falls back to a full backup, which
-	// streams the table instead of holding its changes.
+	// Past it a fold writes that table's changes to disk and merges them in
+	// passes (internal/reconstruct/changespill.go), so this bounds memory, not
+	// the window; a fold over a backup refuses only at about 64 times its per-table
+	// share (a table with no backup still refuses at the share).
 	daemonFoldMaxTouchedRows = 2_000_000
 
 	// daemonFoldRemediation replaces the volume warning's default advice, which

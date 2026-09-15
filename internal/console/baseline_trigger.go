@@ -228,8 +228,10 @@ type BaselineStatus struct {
 	// a correct fail-closed verdict — so it reports succeeded=false with this
 	// count rather than an opaque error.
 	Refused int `json:"refused,omitempty"`
-	// TooManyChanges: the run refused because the recorded changes touch more
-	// rows than one update may hold in memory (#1107). The next automatic
+	// TooManyChanges: the run refused for too many changed rows
+	// (reconstruct.ErrTouchedRowBudget, #1107): one of a table's on-disk groups
+	// of changes passed the per-table limit, or a table with no backup passed
+	// the limit itself. The next automatic
 	// refresh starts from the same backup over a longer window and would be
 	// refused again, so the page asks for a full backup instead of promising
 	// a retry.
