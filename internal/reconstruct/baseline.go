@@ -6,12 +6,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -27,6 +29,46 @@ import (
 // for the requested table at or before the target time.
 var ErrNoBaseline = errors.New("no baseline snapshot found")
 
+// ErrUnreadableSnapshot marks a decision refused because a backup folder the
+// local walk could not read sorts at or after the snapshot the decision would
+// have picked (#1639): the answer would come from an older backup while
+// looking current. A folder older than the pick changes nothing and never
+// produces it. It is deliberately NOT ErrNoBaseline, which callers answer with
+// a binlog-only table or another location.
+var ErrUnreadableSnapshot = errors.New("a backup folder could not be read")
+
+// UnreadableSnapshot is a snapshot folder, or a schema folder inside one, that
+// the local walk skipped because it could not be read. The time comes from the
+// folder name, which stays readable when its contents do not.
+type UnreadableSnapshot struct {
+	SnapshotTime time.Time
+	Path         string
+	Err          error
+}
+
+// UnreadableAtOrAfter returns an ErrUnreadableSnapshot error naming the newest
+// unreadable folder whose time is at or after from and, when until is
+// non-zero, at or before until; nil when there is none. from is the snapshot a
+// decision picked (zero when it found none, which makes every unreadable
+// folder up to until count).
+func UnreadableAtOrAfter(unreadable []UnreadableSnapshot, from, until time.Time) error {
+	var worst *UnreadableSnapshot
+	for i := range unreadable {
+		u := &unreadable[i]
+		if u.SnapshotTime.Before(from) || (!until.IsZero() && u.SnapshotTime.After(until)) {
+			continue
+		}
+		if worst == nil || u.SnapshotTime.After(worst.SnapshotTime) {
+			worst = u
+		}
+	}
+	if worst == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %s (%v); deciding from the folders that could be read would use an older backup",
+		ErrUnreadableSnapshot, worst.Path, worst.Err)
+}
+
 // StaleWarning describes a baseline that was selected by falling back to an
 // older snapshot because the table is absent from a newer one (#461/#466).
 // Empty Message means "not stale" — the table is present in the newest eligible
@@ -37,6 +79,10 @@ type StaleWarning struct {
 	Message        string    // human-readable, empty when not stale
 	UsingSnapshot  time.Time // snapshot the table was actually read from
 	NewestSnapshot time.Time // newest eligible snapshot (lacks the table)
+	// Unreadable: the newer snapshot is a folder that could not be read
+	// (#1639), not one that lacks the table. A caller with a second location
+	// should ask it before settling for the older snapshot.
+	Unreadable bool
 }
 
 // Stale reports whether the baseline was a stale fallback.
@@ -252,15 +298,25 @@ type BaselineFile struct {
 // strict successor of the one it was folded from, and a table absent from the
 // source has nothing to fold onto — inventing an entry for it would publish a
 // snapshot claiming coverage it does not have.
+//
+// A folder the walk could not read at or after the newest readable snapshot
+// (or at all, when none is readable) refuses with ErrUnreadableSnapshot
+// (#1639): the list would be an older snapshot's, or a short one.
 func NewestSnapshotTables(ctx context.Context, source string) ([]string, error) {
-	files, err := ListBaselines(ctx, source)
+	files, unreadable, err := ListBaselinesUnreadable(ctx, source)
 	if err != nil {
+		return nil, err
+	}
+	var newest time.Time
+	if len(files) > 0 {
+		newest = files[0].SnapshotTime // newest first
+	}
+	if err := UnreadableAtOrAfter(unreadable, newest, time.Time{}); err != nil {
 		return nil, err
 	}
 	if len(files) == 0 {
 		return nil, nil
 	}
-	newest := files[0].SnapshotTime // ListBaselines returns newest first
 	seen := map[string]bool{}
 	var out []string
 	for _, f := range files {
@@ -293,8 +349,11 @@ func SnapshotTablesAt(ctx context.Context, source string, at time.Time) ([]strin
 // time of the newest discoverable snapshot at or before at (zero when none is
 // that old). A caller that is about to PUBLISH a snapshot named by at needs
 // the anchor to notice that one already exists at exactly that instant.
+//
+// Like NewestSnapshotTables it refuses with ErrUnreadableSnapshot when a folder
+// it could not read sits between the anchor and at (#1639).
 func SnapshotAt(ctx context.Context, source string, at time.Time) (tables []string, anchor time.Time, err error) {
-	files, err := ListBaselines(ctx, source)
+	files, unreadable, err := ListBaselinesUnreadable(ctx, source)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -316,6 +375,9 @@ func SnapshotAt(ctx context.Context, source string, at time.Time) (tables []stri
 		}
 		seen[entry] = true
 		out = append(out, entry)
+	}
+	if err := UnreadableAtOrAfter(unreadable, anchor, at); err != nil {
+		return nil, time.Time{}, err
 	}
 	sort.Strings(out)
 	return out, anchor, nil
@@ -345,20 +407,28 @@ func ListBaselines(ctx context.Context, source string) ([]BaselineFile, error) {
 // burst under load. An s3 listing is one query and either answers whole or
 // fails, so it reports zero.
 func ListBaselinesReport(ctx context.Context, source string) (files []BaselineFile, skipped int, err error) {
+	files, unreadable, err := ListBaselinesUnreadable(ctx, source)
+	return files, len(unreadable), err
+}
+
+// ListBaselinesUnreadable is ListBaselinesReport with the skipped folders
+// named and dated, for a caller that DECIDES on the listing rather than shows
+// it (#1639): pass them to UnreadableAtOrAfter with the snapshot it picked.
+func ListBaselinesUnreadable(ctx context.Context, source string) ([]BaselineFile, []UnreadableSnapshot, error) {
 	if strings.HasPrefix(source, "s3://") {
-		files, err = listBaselinesS3(ctx, source)
-		return files, 0, err
+		files, err := listBaselinesS3(ctx, source)
+		return files, nil, err
 	}
 	return listBaselinesLocal(source)
 }
 
-func listBaselinesLocal(baselineDir string) ([]BaselineFile, int, error) {
+func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapshot, error) {
 	entries, err := os.ReadDir(baselineDir)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read baseline directory %q: %w", baselineDir, err)
+		return nil, nil, fmt.Errorf("read baseline directory %q: %w", baselineDir, err)
 	}
 	var out []BaselineFile
-	skipped := 0
+	var skipped []UnreadableSnapshot
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -375,9 +445,12 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, int, error) {
 			continue
 		}
 		dbDirs, err := os.ReadDir(snapDir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // removed while listing (pruning renames it away first)
+		}
 		if err != nil {
 			slog.Warn("baseline listing: skipping unreadable snapshot directory", "path", snapDir, "error", err)
-			skipped++
+			skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: snapDir, Err: err})
 			continue
 		}
 		for _, dbDir := range dbDirs {
@@ -386,22 +459,41 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, int, error) {
 			}
 			schemaDir := filepath.Join(snapDir, dbDir.Name())
 			files, err := os.ReadDir(schemaDir)
-			if err != nil {
-				slog.Warn("baseline listing: skipping unreadable schema directory", "path", schemaDir, "error", err)
-				skipped++
+			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
+			if err != nil {
+				slog.Warn("baseline listing: skipping unreadable schema directory", "path", schemaDir, "error", err)
+				skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: schemaDir, Err: err})
+				continue
+			}
+			var tables []BaselineFile
 			for _, f := range files {
 				if f.IsDir() || !strings.HasSuffix(f.Name(), ".parquet") {
 					continue
 				}
-				out = append(out, BaselineFile{
+				path := filepath.Join(schemaDir, f.Name())
+				// Listing a folder needs read permission, opening its files
+				// needs execute. The lookup stats the file, so the listing
+				// does too: a folder that lists but cannot be entered must
+				// not read as holding tables the lookup cannot reach.
+				if _, err := os.Stat(path); err != nil {
+					if errors.Is(err, fs.ErrNotExist) {
+						continue
+					}
+					slog.Warn("baseline listing: skipping unreadable schema directory", "path", schemaDir, "error", err)
+					skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: schemaDir, Err: err})
+					tables = nil
+					break
+				}
+				tables = append(tables, BaselineFile{
 					SnapshotTime: ts,
 					Schema:       dbDir.Name(),
 					Table:        strings.TrimSuffix(f.Name(), ".parquet"),
-					Path:         filepath.Join(schemaDir, f.Name()),
+					Path:         path,
 				})
 			}
+			out = append(out, tables...)
 		}
 	}
 	sortBaselineFiles(out)
@@ -502,6 +594,7 @@ func findBaselineLocal(baselineDir, schema, table string, at time.Time) (string,
 	}
 	var candidates []candidate
 	var newestSnap time.Time // newest eligible snapshot, whether or not it has the table
+	var unreadable []UnreadableSnapshot
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -520,18 +613,64 @@ func findBaselineLocal(baselineDir, schema, table string, at time.Time) (string,
 		}
 		p := filepath.Join(baselineDir, entry.Name(), schema, table+".parquet")
 		if _, err := os.Stat(p); err != nil {
-			continue // table not in this snapshot
+			// Only a missing file means the table is not in this snapshot. A
+			// folder that cannot be read (SnapshotComplete above cannot tell:
+			// both marker stats fail and it reads as a legacy snapshot) may
+			// hold it, so an older pick must say so (#1639).
+			// ENOTDIR is absence too: a file where the schema folder would be.
+			if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+				unreadable = append(unreadable, UnreadableSnapshot{SnapshotTime: t, Path: filepath.Join(baselineDir, entry.Name()), Err: err})
+			}
+			continue
 		}
 		candidates = append(candidates, candidate{t: t, path: p})
 	}
 	if len(candidates) == 0 {
+		// Only a folder at or after the newest snapshot counts: an older one
+		// could hold the table only if every newer backup dropped it, while
+		// refusing on it would break every table created after the last
+		// backup, whose answer is "no baseline" (the binlog-only and
+		// other-location fallbacks). newestSnap includes an unreadable newest
+		// folder, which does count.
+		if err := UnreadableAtOrAfter(unreadable, newestSnap, at); err != nil {
+			return "", time.Time{}, StaleWarning{}, fmt.Errorf("%s.%s at or before %s: %w", schema, table, at.UTC().Format(time.RFC3339), err)
+		}
 		return "", time.Time{}, StaleWarning{}, fmt.Errorf("%w: %s.%s at or before %s in %q",
 			ErrNoBaseline, schema, table, at.UTC().Format(time.RFC3339), baselineDir)
 	}
 	slices.SortFunc(candidates, func(a, b candidate) int { return b.t.Compare(a.t) })
 	best := candidates[0]
+	if w := unreadableFallback(schema, table, best.t, unreadable); w.Stale() {
+		return best.path, best.t, w, nil
+	}
 	stale := staleFallback(schema, table, best.t, newestSnap)
 	return best.path, best.t, stale, nil
+}
+
+// unreadableFallback is staleFallback's sibling for #1639: the chosen snapshot
+// is older than a folder that could not be read, which may hold the table.
+// Warn with that cause; "absent from the newest snapshot" would send the
+// operator to re-dump a table that is there.
+func unreadableFallback(schema, table string, using time.Time, unreadable []UnreadableSnapshot) StaleWarning {
+	var newest *UnreadableSnapshot
+	for i := range unreadable {
+		if u := &unreadable[i]; u.SnapshotTime.After(using) && (newest == nil || u.SnapshotTime.After(newest.SnapshotTime)) {
+			newest = u
+		}
+	}
+	if newest == nil {
+		return StaleWarning{}
+	}
+	usingStr := using.UTC().Format(time.RFC3339)
+	slog.Warn("baseline: a newer backup folder could not be read; using an older snapshot",
+		"schema", schema, "table", table, "using", usingStr, "unreadable", newest.Path, "error", newest.Err)
+	return StaleWarning{
+		Message: fmt.Sprintf("baseline for %s.%s may be stale: a newer backup folder could not be read (%s: %v); reconstructing from an older snapshot (%s)",
+			schema, table, newest.Path, newest.Err, usingStr),
+		UsingSnapshot:  using,
+		NewestSnapshot: newest.SnapshotTime,
+		Unreadable:     true,
+	}
 }
 
 // staleFallback builds the staleness warning (and logs it) when the table is

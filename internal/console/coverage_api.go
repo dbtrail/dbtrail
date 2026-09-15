@@ -147,7 +147,8 @@ type tableAnchors struct {
 	// a stale one refuses the whole restore (capture gap), and the fresh copy
 	// in the other location does not help the button — under "dir" because
 	// bundle.findBaseline falls back to the bucket only on ErrNoBaseline
-	// (#766), so time travel resolves the stale local copy too and no console
+	// (#766) or an unreadable local folder (#1639), never on a merely stale
+	// copy, so time travel resolves the stale local copy too and no console
 	// surface reaches the bucket; under "s3" because the fold reads the bucket
 	// and the local-only fresh copy (a failed upload, the daemon-wide refresh)
 	// was never sent there. Both are broken, not unreachable: the remedy is a

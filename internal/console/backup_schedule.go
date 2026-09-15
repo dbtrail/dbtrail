@@ -454,6 +454,10 @@ func ChooseBackupMethod(ctx context.Context, e ServerEntry, gates BackupSchedule
 		// where a bucket error is usually not. Degrading there would trade a
 		// precise red alarm for a full read of production that then fails on
 		// the way out, reporting something else.
+		if errors.Is(listErr, reconstruct.ErrUnreadableSnapshot) {
+			// The location read; one folder inside it did not (#1639).
+			return BackupMethodFull, "", fmt.Errorf("the newest backup under %s could not be checked: %w", source, listErr)
+		}
 		if fullErr != nil || !strings.HasPrefix(source, "s3://") {
 			return BackupMethodFull, "", fmt.Errorf("the backup location %s could not be read: %w", source, listErr)
 		}

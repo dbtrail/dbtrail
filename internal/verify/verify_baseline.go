@@ -296,16 +296,20 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 // via reconstruct — just not verifiable against the current two-snapshot
 // window. Callers use this to distinguish that from a table with zero
 // baselines at any point in time, which reconstruct genuinely cannot serve.
-func EverBaselinedTables(ctx context.Context, source string) (map[string]bool, error) {
-	files, err := reconstruct.ListBaselines(ctx, source)
+//
+// It also returns the folders the walk could not read (#1639): a table absent
+// from the set may be in one of them, so the caller must not call it "never
+// baselined" while any exist.
+func EverBaselinedTables(ctx context.Context, source string) (map[string]bool, []reconstruct.UnreadableSnapshot, error) {
+	files, unreadable, err := reconstruct.ListBaselinesUnreadable(ctx, source)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make(map[string]bool, len(files))
 	for _, f := range files {
 		out[f.Schema+"."+f.Table] = true
 	}
-	return out, nil
+	return out, unreadable, nil
 }
 
 // AnyBaseline reports whether at least one complete baseline snapshot exists
@@ -341,8 +345,13 @@ func AnyBaseline(ctx context.Context, source string) (bool, error) {
 //
 // Returns nil, nil, nil, nil (nothing to verify) when fewer than two snapshots
 // exist.
+//
+// A folder the walk could not read at or after the older snapshot of the pair
+// refuses with reconstruct.ErrUnreadableSnapshot (#1639): the pair would be two
+// older backups, or a short one, and a "match" over it is worse than no
+// verify. An unreadable folder older than the pair changes nothing.
 func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair, unpaired, prevOnly []query.SchemaTable, err error) {
-	files, err := reconstruct.ListBaselines(ctx, source)
+	files, unreadable, err := reconstruct.ListBaselinesUnreadable(ctx, source)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -357,6 +366,12 @@ func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair,
 			tPrev = f.SnapshotTime
 			break
 		}
+	}
+	// tPrev is zero with fewer than two readable snapshots, and then every
+	// skipped folder counts: "only one baseline, nothing to verify yet" would
+	// be a false exit 0 while the predecessor exists and cannot be read.
+	if err := reconstruct.UnreadableAtOrAfter(unreadable, tPrev, time.Time{}); err != nil {
+		return nil, nil, nil, err
 	}
 	if tNew.IsZero() || tPrev.IsZero() {
 		return nil, nil, nil, nil // fewer than two snapshots: nothing to verify yet

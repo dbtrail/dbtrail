@@ -302,10 +302,49 @@ func newBundleDerived(db *sql.DB, dbName string, entry ServerEntry, profileActiv
 // see the baselineFallbackSrc field doc (#766).
 func (b *bundle) findBaseline(ctx context.Context, schema, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
 	path, snapshotTime, stale, err := reconstruct.FindBaseline(ctx, b.baselineSrc, schema, table, at)
-	if b.baselineFallbackSrc == "" || !errors.Is(err, reconstruct.ErrNoBaseline) {
+	if b.baselineFallbackSrc == "" {
 		return path, snapshotTime, stale, err
 	}
-	return reconstruct.FindBaseline(ctx, b.baselineFallbackSrc, schema, table, at)
+	switch {
+	case errors.Is(err, reconstruct.ErrNoBaseline):
+		return reconstruct.FindBaseline(ctx, b.baselineFallbackSrc, schema, table, at)
+	case errors.Is(err, reconstruct.ErrUnreadableSnapshot), err == nil && stale.Unreadable:
+		// #1639: a local folder could not be read. The durable copy may hold
+		// the snapshot it hides; ask it before refusing or settling for an
+		// older local one, and say why the answer came from there.
+		fpath, ftime, fstale, ferr := reconstruct.FindBaseline(ctx, b.baselineFallbackSrc, schema, table, at)
+		if ferr != nil && !errors.Is(ferr, reconstruct.ErrNoBaseline) {
+			// Kept to the log: the local answer (or its refusal) still stands
+			// and says why, but a destination that cannot be read is a second
+			// problem nobody would otherwise see.
+			slog.Warn("backup lookup: the backup destination could not be read either",
+				"table", schema+"."+table, "destination", b.baselineFallbackSrc, "err", ferr)
+		}
+		if ferr != nil || (err == nil && !ftime.After(snapshotTime)) {
+			return path, snapshotTime, stale, err
+		}
+		cause := stale.Message
+		if err != nil {
+			cause = err.Error()
+		}
+		why := "read from the backup destination because a local backup folder could not be read, so a newer backup may exist there: " + cause
+		if fstale.Stale() {
+			// The destination's own answer is stale too: keep both, or the
+			// operator sees a stale warning without the reason it came from
+			// the destination.
+			fstale.Message = why + "; " + fstale.Message
+			fstale.Unreadable = true
+		} else {
+			fstale = reconstruct.StaleWarning{
+				Message:        why,
+				UsingSnapshot:  ftime,
+				NewestSnapshot: ftime,
+				Unreadable:     true,
+			}
+		}
+		return fpath, ftime, fstale, nil
+	}
+	return path, snapshotTime, stale, err
 }
 
 // loadResolver loads the latest schema snapshot, best-effort: a missing

@@ -66,8 +66,9 @@ func TestResolveFoldSource(t *testing.T) {
 			refreshRequest{BaselineDir: "/b", BaselineS3: "s3://bucket/x/", FoldSource: "/elsewhere"}, nil, nil, "", "/elsewhere"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			orig := listBaselines
-			t.Cleanup(func() { listBaselines = orig })
+			orig, origU := listBaselines, listLocalUnreadable
+			t.Cleanup(func() { listBaselines, listLocalUnreadable = orig, origU })
+			listLocalUnreadable = func(context.Context, string) ([]reconstruct.UnreadableSnapshot, error) { return nil, nil }
 			var calls []string
 			listBaselines = func(_ context.Context, source string) ([]reconstruct.BaselineFile, error) {
 				calls = append(calls, source)
@@ -111,5 +112,38 @@ func TestBaselineFoldSource_honoursTheResolvedSource(t *testing.T) {
 	req.FoldSource = ""
 	if got := baselineFoldSource(req); got != "s3://bucket/x/" {
 		t.Fatalf("unresolved request must keep the standing rule, got %q", got)
+	}
+}
+
+// TestResolveFoldSource_unreadableLocalFolderKeepsTheBucket (#1639): a local
+// copy that matches the bucket is still not folded from when a local folder
+// at or after it could not be read: the fold would refuse over the local
+// directory, and the scheduler would fall back to a full read of the source.
+func TestResolveFoldSource_unreadableLocalFolderKeepsTheBucket(t *testing.T) {
+	t0 := time.Date(2026, 9, 9, 21, 45, 35, 0, time.UTC)
+	t1 := t0.Add(5 * time.Minute)
+	req := refreshRequest{ServerName: "abirds", BaselineDir: "/b", BaselineS3: "s3://bucket/abirds/"}
+	same := []reconstruct.BaselineFile{{SnapshotTime: t1, Schema: "demo", Table: "orders"}}
+	for _, tc := range []struct {
+		name       string
+		unreadable []reconstruct.UnreadableSnapshot
+		err        error
+		want       string
+	}{
+		{"nothing skipped: the local copy", nil, nil, "/b"},
+		{"an older folder skipped: the local copy", []reconstruct.UnreadableSnapshot{{SnapshotTime: t0, Path: "/b/old", Err: errors.New("permission denied")}}, nil, "/b"},
+		{"the same snapshot's folder skipped: the bucket", []reconstruct.UnreadableSnapshot{{SnapshotTime: t1, Path: "/b/same", Err: errors.New("permission denied")}}, nil, "s3://bucket/abirds/"},
+		{"a newer folder skipped: the bucket", []reconstruct.UnreadableSnapshot{{SnapshotTime: t1.Add(time.Minute), Path: "/b/new", Err: errors.New("permission denied")}}, nil, "s3://bucket/abirds/"},
+		{"the check fails: the bucket", nil, errors.New("read dir"), "s3://bucket/abirds/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig, origU := listBaselines, listLocalUnreadable
+			t.Cleanup(func() { listBaselines, listLocalUnreadable = orig, origU })
+			listBaselines = func(context.Context, string) ([]reconstruct.BaselineFile, error) { return same, nil }
+			listLocalUnreadable = func(context.Context, string) ([]reconstruct.UnreadableSnapshot, error) { return tc.unreadable, tc.err }
+			if got := resolveFoldSource(context.Background(), req); got != tc.want {
+				t.Fatalf("resolveFoldSource = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

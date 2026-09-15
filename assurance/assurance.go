@@ -226,6 +226,14 @@ func ListBaselines(ctx context.Context, source string) ([]BaselineFile, error) {
 	return reconstruct.ListBaselines(ctx, source)
 }
 
+// ListBaselinesReport is ListBaselines plus the number of snapshot or schema
+// folders the local walk could not read and skipped (#1601, #1639). A caller
+// that grades or picks from the listing must treat skipped > 0 as "listed in
+// part": the newest snapshot may be among the skipped ones.
+func ListBaselinesReport(ctx context.Context, source string) (files []BaselineFile, skipped int, err error) {
+	return reconstruct.ListBaselinesReport(ctx, source)
+}
+
 // DefaultRegistryPath returns the console server-registry path used when
 // neither --servers-file (serve) nor --console-servers-file (watch) is set.
 // Re-exported because the history is located relative to it: without this a
