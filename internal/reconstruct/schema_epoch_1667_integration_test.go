@@ -167,6 +167,13 @@ func TestFold_schemaInEffectAtTheTarget(t *testing.T) {
 		}, 40*time.Second, 60*time.Second)
 		refuses(t, failures, err, "c (int -> bigint)")
 	})
+	t.Run("a snapshot taken in the same second as the baseline is compared", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{-time.Hour, nil, intCols},
+			{0, nil, bigCols},
+		}, 10*time.Second, 30*time.Second)
+		refuses(t, failures, err, "c (int -> bigint)")
+	})
 	t.Run("a column added after the target still refuses when the snapshot in effect predates the baseline", func(t *testing.T) {
 		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
 			{-time.Minute, nil, intCols},
