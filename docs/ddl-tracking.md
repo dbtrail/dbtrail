@@ -12,7 +12,7 @@ Before DDL tracking, the only solution was to notice the "column count mismatch"
 
 DDL tracking solves three problems:
 
-1. **Detection**: The parser identifies DDL statements (`ALTER TABLE`, `CREATE TABLE`, `DROP TABLE`, `RENAME TABLE`, `TRUNCATE TABLE`) and emits them as events instead of just logging warnings.
+1. **Detection**: The parser identifies DDL statements (`ALTER TABLE`, `CREATE TABLE`, MariaDB's `CREATE OR REPLACE TABLE`, `DROP TABLE`, `RENAME TABLE`, `TRUNCATE TABLE`) and emits them as events instead of just logging warnings.
 2. **Auto-snapshot**: When a DDL is detected and a source database connection is available, DBTrail automatically takes a new snapshot and hot-swaps the resolver — no manual intervention needed. This works in both stream mode (always has source connection) and file mode (when `--source-dsn` is provided).
 3. **Restore coverage**: The `status` command shows the time range of indexed events and warns about DDLs that weren't followed by a snapshot — whether from file-mode indexing without `--source-dsn` or from a failed auto-snapshot — so you know where recovery gaps might exist.
 
@@ -83,7 +83,7 @@ Key fields:
 
 | Field | Description |
 |---|---|
-| `ddl_type` | One of `ALTER TABLE`, `CREATE TABLE`, `DROP TABLE`, `RENAME TABLE`, `TRUNCATE TABLE` |
+| `ddl_type` | One of `ALTER TABLE`, `CREATE TABLE`, `CREATE OR REPLACE TABLE`, `DROP TABLE`, `RENAME TABLE`, `TRUNCATE TABLE` |
 | `ddl_query` | The full DDL statement from the binlog |
 | `snapshot_id` | The snapshot taken after this DDL. NULL when none was taken: file mode without `--source-dsn`, a failed auto-snapshot, or `TRUNCATE TABLE` (which changes no table structure, so no snapshot is needed — by design, in every mode) |
 

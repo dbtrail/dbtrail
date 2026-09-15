@@ -2257,16 +2257,17 @@ func binlogOnlySchemaPlaceholder(schema, table string) string {
 }
 
 // findCapturedCreateTableDDL looks up the most recent CREATE TABLE statement
+// (a CREATE OR REPLACE TABLE counts: it defines the table the same way)
 // the schema-drift guard (#700) recorded for schema.table at-or-before at, in
 // schema_changes.ddl_query. found is false (with a nil error) when no such
 // row exists — the caller falls back to binlogOnlySchemaPlaceholder.
 func findCapturedCreateTableDDL(ctx context.Context, db *sql.DB, schema, table string, at time.Time) (ddl string, found bool, err error) {
 	row := db.QueryRowContext(ctx, `
 		SELECT ddl_query FROM schema_changes
-		WHERE schema_name = ? AND table_name = ? AND ddl_type = ? AND detected_at <= ?
+		WHERE schema_name = ? AND table_name = ? AND ddl_type IN (?, ?) AND detected_at <= ?
 		ORDER BY detected_at DESC, id DESC
 		LIMIT 1`,
-		schema, table, event.DDLCreateTable, at)
+		schema, table, event.DDLCreateTable, event.DDLReplaceTable, at)
 	if err := row.Scan(&ddl); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", false, nil

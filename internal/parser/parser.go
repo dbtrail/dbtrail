@@ -974,6 +974,7 @@ const (
 	DDLDropTable     = event.DDLDropTable
 	DDLRenameTable   = event.DDLRenameTable
 	DDLTruncateTable = event.DDLTruncateTable
+	DDLReplaceTable  = event.DDLReplaceTable
 )
 
 // ddlVerbRe recognizes a table DDL statement by its verb, matched against
@@ -982,7 +983,7 @@ const (
 //
 // Covered (#1664), MySQL and MariaDB:
 //
-//	ALTER [ONLINE|OFFLINE] [IGNORE] TABLE
+//	ALTER [ONLINE] [IGNORE] TABLE
 //	CREATE [OR REPLACE] TABLE
 //	DROP TABLE[S]
 //	RENAME TABLE[S]
@@ -992,8 +993,11 @@ const (
 // TABLESPACE out. A TEMPORARY table is deliberately not matched: it is in no
 // schema snapshot, and a DROP TABLE event refuses every reconstruct over its
 // window.
+// The s flag in ddlVerbRe and ddlNameRe is load-bearing: normalizeDDL copies
+// quoted strings verbatim, line breaks included, and the trailing .* must run
+// past them.
 var ddlVerbRe = regexp.MustCompile(
-	"(?is)^(ALTER(?: ONLINE| OFFLINE)?(?: IGNORE)? TABLE|CREATE(?: OR REPLACE)? TABLE|DROP TABLES?|RENAME TABLES?|TRUNCATE(?: TABLE)?)" +
+	"(?is)^(ALTER(?: ONLINE)?(?: IGNORE)? TABLE|CREATE(?: OR REPLACE)? TABLE|DROP TABLES?|RENAME TABLES?|TRUNCATE(?: TABLE)?)" +
 		"((?:[^\\w$\\x{80}-\\x{10FFFF}].*)?)$")
 
 // ddlNameRe reads the first table after the verb: an optional IF [NOT] EXISTS,
@@ -1272,6 +1276,8 @@ func parseDDL(logger *slog.Logger, filename string, logPos uint32, timestamp tim
 	switch verb := strings.ToUpper(m[1]); {
 	case strings.HasPrefix(verb, "ALTER"):
 		ddlType = DDLAlterTable
+	case strings.HasPrefix(verb, "CREATE OR REPLACE"):
+		ddlType = DDLReplaceTable
 	case strings.HasPrefix(verb, "CREATE"):
 		ddlType = DDLCreateTable
 	case strings.HasPrefix(verb, "DROP"):

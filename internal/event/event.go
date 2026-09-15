@@ -446,4 +446,8 @@ const (
 	DDLDropTable     DDLKind = "DROP TABLE"
 	DDLRenameTable   DDLKind = "RENAME TABLE"
 	DDLTruncateTable DDLKind = "TRUNCATE TABLE"
+	// DDLReplaceTable is MariaDB's CREATE OR REPLACE TABLE: on an existing
+	// table it is a DROP and a CREATE in one statement, so it refuses a
+	// reconstruct over its window like a DROP (#1664).
+	DDLReplaceTable DDLKind = "CREATE OR REPLACE TABLE"
 )
