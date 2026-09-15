@@ -182,6 +182,29 @@ func TestMonitorJobHooks_pendingFlipsToRunning(t *testing.T) {
 		t.Fatalf("state = %q, want running after first indexed batch", st.State)
 	}
 
+	// OnSourceConnected marks this run as having reached the source without
+	// flipping pending, and the next run starts unconnected again (#1606).
+	job4 := &monitorJob{}
+	job4.set("pending", "")
+	job4.streamHooks().OnSourceConnected()
+	if st := job4.snapshot(); st.State != "pending" || !st.SourceConnected {
+		t.Fatalf("after OnSourceConnected: %+v, want pending and connected", st)
+	}
+	job4.set("failed", "boom (retrying)")
+	if st := job4.snapshot(); !st.SourceConnected {
+		t.Fatalf("a failure of the run that connected forgot it: %+v", st)
+	}
+	job4.set("pending", "")
+	if st := job4.snapshot(); st.SourceConnected {
+		t.Fatalf("a new run starts connected: %+v", st)
+	}
+	job5 := &monitorJob{}
+	job5.set("pending", "")
+	job5.pgStreamHooks().OnSourceConnected()
+	if st := job5.snapshot(); !st.SourceConnected {
+		t.Fatalf("the PostgreSQL hook does not mark the run connected: %+v", st)
+	}
+
 	// OnGapAutoAdvance alone must NOT flip pending (it fires during startup,
 	// before the stream is attached).
 	job3 := &monitorJob{}
@@ -228,8 +251,44 @@ func TestMonitorRun_circuitBreakerGivesUp(t *testing.T) {
 	if !strings.Contains(st.LastError, "gave up") {
 		t.Errorf("LastError = %q, want a gave-up explanation", st.LastError)
 	}
+	if st.Retrying {
+		t.Errorf("a failure the supervisor gave up on reports retrying: %+v", st)
+	}
 	if !strings.Contains(st.LastError, "boom") {
 		t.Errorf("LastError = %q, want the underlying error preserved", st.LastError)
+	}
+}
+
+// TestMonitorRun_retryingFailureSaysSo: a failure the loop will retry is
+// reported as retrying while it waits, and a stop clears it (#1606).
+func TestMonitorRun_retryingFailureSaysSo(t *testing.T) {
+	oldBase, oldCap := monitorBackoffBase, monitorBackoffCap
+	monitorBackoffBase, monitorBackoffCap = time.Hour, time.Hour
+	defer func() { monitorBackoffBase, monitorBackoffCap = oldBase, oldCap }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &monitorSupervisor{
+		baseCtx:  ctx,
+		jobs:     map[string]*monitorJob{},
+		streamFn: func(context.Context, streamrun.Config) error { return errors.New("boom: cannot connect") },
+	}
+	job := &monitorJob{cancel: cancel, done: make(chan struct{})}
+	job.set("pending", "")
+	m.wg.Add(1)
+	go m.run(ctx, job, console.ServerEntry{ID: "e9", Name: "retry"}, console.FlavorMySQL, func(c context.Context) error { return m.streamFn(c, streamrun.Config{}) })
+
+	deadline := time.Now().Add(5 * time.Second)
+	for job.snapshot().State != "failed" && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st := job.snapshot(); st.State != "failed" || !st.Retrying {
+		t.Fatalf("while waiting to retry: %+v, want failed and retrying", st)
+	}
+	cancel()
+	<-job.done
+	if st := job.snapshot(); st.State != "stopped" || st.Retrying {
+		t.Fatalf("after stop: %+v, want stopped and not retrying", st)
 	}
 }
 

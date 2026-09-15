@@ -72,7 +72,7 @@ type Config struct {
 	Hooks *Hooks
 }
 
-// Hooks are liveness callbacks a supervisor attaches to one PG stream. Both are
+// Hooks are liveness callbacks a supervisor attaches to one PG stream. All are
 // optional and invoked synchronously from the stream loop — keep them fast.
 type Hooks struct {
 	// OnCheckpoint fires after each successful checkpoint tick, INCLUDING an
@@ -82,6 +82,19 @@ type Hooks struct {
 	OnCheckpoint func()
 	// OnIndexed fires after a batch flush that wrote rows.
 	OnIndexed func(n int64)
+	// OnSourceConnected fires once per run, when replication has started on
+	// the slot (#1606). Unlike OnCheckpoint, which the ticker fires even
+	// before the capturer connects, it means the source was reached.
+	OnSourceConnected func()
+}
+
+// sourceConnectedHook adapts Hooks.OnSourceConnected to the capturer's
+// OnStarted callback; nil when unset.
+func sourceConnectedHook(h *Hooks) func() {
+	if h == nil {
+		return nil
+	}
+	return h.OnSourceConnected
 }
 
 // pgStreamState mirrors the streamrun checkpoint row, scoped to what a PG source
@@ -154,6 +167,7 @@ func One(ctx context.Context, cfg Config) error {
 		Filters:            cliutil.BuildIndexFilters(cfg.Schemas, cfg.Tables),
 		StartLSN:           pglogrepl.LSN(startLSN),
 		ExpectExistingSlot: saved != nil, // resuming → the slot must still exist + be valid
+		OnStarted:          sourceConnectedHook(cfg.Hooks),
 		Logger:             logger,
 	})
 	idx := indexer.New(indexDB, cfg.BatchSize)

@@ -88,7 +88,17 @@ top (see [Managing servers](#managing-servers)) and a **⌘K command palette**
 (also reachable from the "Search & commands" button) for jumping between views
 and searching events:
 
-1. **Overview** (landing) — what changed recently and where: a **Restore
+1. **Overview** (landing) — what changed recently and where. While the
+   selected server (on `bintrail-console watch`) has not indexed its first
+   change, a **Getting started** list at the top shows each step from adding
+   it: create the index database, connect to the source, read the table
+   structure (not for PostgreSQL, whose stream saves it when changes arrive),
+   start capturing changes, capture the first change, and a first backup when
+   the console can create one for that server (a baseline location, and for
+   PostgreSQL a replication slot and publication). Each step is waiting, running, done or failed;
+   a failure shows the error and what to do, and capture with no change on the
+   source yet is shown as running, not stuck. The list goes away once a change
+   is indexed. Then a **Restore
    coverage** card answering "to when can I restore, right now?" — any point
    between the delta-coverage floor and the last *indexed* event (never the
    wall clock; the capture-lag chip says how close to now that edge is), the
@@ -1347,7 +1357,8 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `POST /api/servers/{id}/test`, `POST /api/servers/test` | Write-free reachability probe (short timeout): `{ok, server_version, dbname, latency_ms, has_index, schema_current}`. Accepts an unsaved candidate body; with `{id}`, a blank password merges the stored one. |
 | `POST /api/servers/{id}/monitor/start` | Supervisor only (403 on the standalone console): doctor preflight → on green, record intent + provision + stream. Returns `{doctor, started, monitor}`. |
 | `POST /api/servers/{id}/monitor/stop` | Supervisor only: clear intent, drain the stream (final checkpoint), release the advisory lock. |
-| `GET /api/servers/{id}/monitor` | Supervisor only: `{monitor: {state, last_error, since}}` — `stopped\|pending\|running\|stalled\|lost_position\|failed`. |
+| `GET /api/servers/{id}/monitor` | Supervisor only: `{monitor: {state, last_error, since, source_connected, retrying}}` — `stopped\|pending\|running\|stalled\|lost_position\|failed`. |
+| `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a change is indexed. A first-backup step is included only when console backups are enabled and the server has a baseline location (and, for PostgreSQL, a slot and publication). `check_error` means the index database could not be read, and nothing is marked done from it. |
 | `GET /api/rotation` | Effective global rotation policy: `{retain, interval, add_future, source, enabled}` — `source` is `"override"` (console-saved) or `"default"` (daemon `--rotate-*`). |
 | `PUT /api/rotation` | Supervisor only (403 on the standalone console): save a global rotation override `{retain, interval, add_future}` (validated; `off` rejected). Applies live on the next cycle. |
 | `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. |

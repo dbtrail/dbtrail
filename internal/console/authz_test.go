@@ -55,6 +55,7 @@ var registeredAPIPatterns = []struct{ method, pattern string }{
 	{"POST", "/api/servers/{}/monitor/start"},
 	{"POST", "/api/servers/{}/monitor/stop"},
 	{"GET", "/api/servers/{}/monitor"},
+	{"GET", "/api/servers/{}/first-run"},
 	{"POST", "/api/servers/{}/baseline"},
 	{"GET", "/api/servers/{}/baseline"},
 	{"POST", "/api/servers/{}/baseline/restore"},
@@ -363,5 +364,13 @@ func TestCapabilitiesReportsScopedPermissions(t *testing.T) {
 		if !caps.Permissions[string(p)] {
 			t.Errorf("policy-less capabilities missing %q=true", p)
 		}
+	}
+}
+
+// TestFirstRunRouteIsARead: the Getting started list is a read, so a read-only
+// role keeps it (#1606); a 403 would stop the page's loop without a word.
+func TestFirstRunRouteIsARead(t *testing.T) {
+	if p, ok := permForRoute("GET", "/api/servers/x/first-run"); !ok || p != ext.PermServersRead {
+		t.Fatalf("permForRoute = %q, %v; want %q", p, ok, ext.PermServersRead)
 	}
 }

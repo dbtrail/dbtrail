@@ -1949,6 +1949,17 @@ button { font-family: inherit; }
 .doctor-card.fail .dc-mark { color: var(--delete); }
 .doctor-card.warn .dc-mark { color: var(--orange-2); }
 .dc-body { flex: 1; min-width: 0; }
+/* First-run steps (#1606): waiting is a muted ring, never the failure red. */
+.fr-card { margin-bottom: 16px; }
+.fr-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.fr-step { display: flex; gap: 10px; align-items: flex-start; }
+.fr-step.done .dc-mark { color: var(--insert); }
+.fr-step.running .dc-mark { color: var(--orange-2); }
+.fr-step.waiting .dc-mark { color: var(--ink-4); }
+.fr-step.waiting .dc-name { color: var(--ink-3); }
+.fr-step.failed .dc-mark { color: var(--delete); }
+.fr-detail { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; overflow-wrap: anywhere; }
+.fr-fix { font-size: 12.5px; color: var(--ink); margin-top: 4px; }
 .dc-name { font-family: var(--f-ui); font-size: 13px; color: var(--ink); }
 .dc-rem {
   font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2);

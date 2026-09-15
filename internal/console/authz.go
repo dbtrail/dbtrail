@@ -106,6 +106,7 @@ var apiRoutePerms = []routePerm{
 	// Literal-segment routes precede the {} ones at the same depth.
 	{"POST", "/api/servers/test", ext.PermServersRead},
 	{"GET", "/api/servers/{}/monitor", ext.PermServersRead},
+	{"GET", "/api/servers/{}/first-run", ext.PermServersRead},
 	{"POST", "/api/servers/{}/monitor/start", ext.PermServersWrite},
 	{"POST", "/api/servers/{}/monitor/stop", ext.PermServersWrite},
 	// See the note above the maintenance block: this one restarts capture.

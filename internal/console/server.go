@@ -674,6 +674,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("POST /api/servers/{id}/monitor/start", s.handleMonitorStart)
 	api.HandleFunc("POST /api/servers/{id}/monitor/stop", s.handleMonitorStop)
 	api.HandleFunc("GET /api/servers/{id}/monitor", s.handleMonitorStatus)
+	api.HandleFunc("GET /api/servers/{id}/first-run", s.handleFirstRun)
 	// Baseline trigger: enqueue an in-process baseline (dump→convert→upload) for
 	// a monitored server. 403 unless the watch daemon opted in
 	// (BINTRAIL_CONSOLE_BASELINE_TRIGGER=1). GET polls the running/last state.

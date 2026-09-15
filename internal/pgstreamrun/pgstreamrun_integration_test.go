@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,6 +85,8 @@ func TestOne_EndToEnd_PostgresToIndexToRecovery(t *testing.T) {
 		BatchSize:   100,
 		Checkpoint:  200 * time.Millisecond,
 	}
+	var connected atomic.Bool
+	cfg.Hooks = &pgstreamrun.Hooks{OnSourceConnected: func() { connected.Store(true) }}
 	runErr := make(chan error, 1)
 	go func() { runErr <- pgstreamrun.One(runCtx, cfg) }()
 
@@ -96,6 +99,8 @@ func TestOne_EndToEnd_PostgresToIndexToRecovery(t *testing.T) {
 		}
 		return active
 	}, "replication slot active")
+	// The first-run list's connection step (#1606) follows replication start.
+	waitFor(t, 15*time.Second, connected.Load, "OnSourceConnected fired")
 
 	bigVal := strings.Repeat("X", bigSize)
 	mustExec(fmt.Sprintf("INSERT INTO %s VALUES (1, 'orig', $1)", tbl), bigVal)

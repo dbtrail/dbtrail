@@ -1242,6 +1242,8 @@ function ovFrame() {
   v.append(pageHead("Overview", sub));
 
   const f = {};
+  f.firstRunSlot = el("div");
+  v.append(f.firstRunSlot);
   f.covSlot = el("div");
   f.covSlot.append(ovPendingCard("Restore coverage", "computing restore coverage…", "cov-card"));
   v.append(f.covSlot);
@@ -1405,6 +1407,8 @@ function renderOverview() {
   // not the backend. Every fill re-checks the generation guards so a server
   // switch or navigation mid-flight drops the late payload instead of
   // painting over the new view.
+  watchFirstRun(f, live);
+
   api("/api/status").catch(() => null)
     .then((status) => { if (live()) fillOvStatus(f, status); });
   // Only the Recent-changes list needs event ROWS, and it renders 8 of them.
@@ -1424,6 +1428,76 @@ function renderOverview() {
   // live retention (#1352) and names it in the payload's label.
   api("/api/activity").catch((err) => { console.error("activity fetch failed", err); return null; })
     .then((activity) => { if (live()) fillOvActivity(f, activity); });
+}
+
+// firstRunCard draws the steps from adding a server to its first indexed
+// change (#1606) as GET /api/servers/{id}/first-run computes them, or nothing
+// once the list is complete. Waiting is its own mark, so a step that has not
+// started never looks like one that failed.
+function firstRunCard(rep) {
+  if (!rep || rep.complete || !Array.isArray(rep.steps)) return null;
+  const marks = { done: "✓", running: "…", waiting: "○", failed: "✗" };
+  const card = el("section", { class: "ov-panel fr-card" });
+  card.append(el("div", { class: "ov-panel-head" },
+    el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Getting started" }))));
+  const list = el("ol", { class: "fr-steps" });
+  rep.steps.forEach((s) => {
+    const state = marks[s.state] ? s.state : "waiting";
+    const body = el("div", { class: "dc-body" }, el("div", { class: "dc-name", text: s.name }));
+    if (s.detail) body.append(el("div", { class: "fr-detail", text: s.detail }));
+    if (s.fix) body.append(el("div", { class: "fr-fix", text: s.fix }));
+    list.append(el("li", { class: "fr-step " + state }, el("span", { class: "dc-mark", text: marks[state], "aria-label": state }), body));
+  });
+  card.append(list);
+  return card;
+}
+
+// watchFirstRun shows the first-run steps at the top of the Overview while the
+// selected server has not indexed a change, and polls until it has; then the
+// page renders again with its numbers. Only a supervisor console answers the
+// endpoint: a server with no source, the command-line server, a read-only
+// console or a session without the permission answer with an error that
+// stops the loop and draws nothing. Any other failure (a 502, a network blip,
+// an index that could not be read) tries again, so a first request that fails
+// does not hide the list for good. A list already up stays, with a note that
+// it could not be refreshed: right away when the index could not be read,
+// after three failed requests in a row otherwise. The wait between requests
+// goes 3, 6, 12, then 15 seconds, and back to 3 when the list changes.
+function watchFirstRun(f, live) {
+  const id = currentServer || defaultServerId;
+  if (!capsCache.monitor || !id) return;
+  let shown = false, last = "", delay = 3000, failures = 0;
+  const again = () => { setTimeout(tick, delay); delay = Math.min(delay * 2, 15000); };
+  const stale = (msg) => {
+    if (!shown) return;
+    const card = f.firstRunSlot.children[0];
+    clear(f.firstRunSlot);
+    f.firstRunSlot.append(card, el("div", { class: "warn-item fr-stale" }, icon("warn"),
+      el("span", { text: "Could not refresh this list: " + msg })));
+  };
+  const tick = () => {
+    if (!live()) return;
+    api("/api/servers/" + encodeURIComponent(id) + "/first-run").then((rep) => {
+      if (!live()) return;
+      if (rep && rep.check_error) { stale(rep.check_error); again(); return; }
+      failures = 0;
+      const card = firstRunCard(rep);
+      if (!card) { if (shown) renderRoute(); return; }
+      const key = JSON.stringify(rep);
+      if (key !== last) delay = 3000;
+      last = key;
+      clear(f.firstRunSlot);
+      f.firstRunSlot.append(card);
+      shown = true;
+      again();
+    }, (err) => {
+      if (!live()) return;
+      if ([401, 403, 404, 409].includes(err && err.status)) return;
+      if (++failures >= 3) stale((err && err.message) || String(err));
+      again();
+    });
+  };
+  tick();
 }
 
 // buildOverview renders the dashboard from already-fetched payloads — the
@@ -8751,7 +8825,13 @@ function openServersModal() {
   focusModal(mount);
   refreshServersList();
 }
-function closeServersModal() { document.getElementById("modal").replaceChildren(); }
+// Closing the dialog renders the Overview again, so a server just added or
+// started shows its Getting started list when it is the selected server, as
+// the first server on a fresh install is (#1606).
+function closeServersModal() {
+  document.getElementById("modal").replaceChildren();
+  if (routeFromLocation() === "overview") renderRoute();
+}
 
 // ── rotation settings ────────────────────────────────────────────────────────
 
@@ -9472,7 +9552,13 @@ function globalKeydown(e) {
     // SAME Escape that closed the palette lands here with the cmdk check
     // above already passing.
     if (modalMount && modalMount.querySelector(".busy-modal")) return;
-    if (modalMount && modalMount.firstChild) { e.preventDefault(); modalMount.replaceChildren(); }
+    if (modalMount && modalMount.firstChild) {
+      e.preventDefault();
+      // The servers dialog closes through its own close, which renders the
+      // Overview again for a server just added (#1606).
+      if (modalMount.querySelector("#servers-list")) closeServersModal();
+      else modalMount.replaceChildren();
+    }
     return;
   }
   // ⌘K / Ctrl+K opens the palette anywhere.
