@@ -57,8 +57,9 @@ WHAT IT REFUSES
   schema change   The table's columns changed since it was exported (or since
                   its baseline was taken). Remove the table directory to reload
                   it from a fresh baseline.
-  destructive DDL A TRUNCATE / DROP / RENAME in the window emits no row events,
-                  so folding over it would resurrect rows that no longer exist.
+  destructive DDL A TRUNCATE / DROP / RENAME (or MariaDB's CREATE OR REPLACE) in
+                  the window emits no row events, so folding over it would
+                  resurrect rows that no longer exist.
   no primary key  Equality deletes name rows by key; a table without one, or
                   with a FLOAT, DOUBLE, TIME, BIT, JSON or spatial key, cannot
                   be exported.

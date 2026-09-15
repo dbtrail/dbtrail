@@ -114,7 +114,7 @@ table did not end current. The vocabulary is the same as `baseline refresh`.
 | verdict | when | what to do |
 |---|---|---|
 | `refused-gap` | the window spans events the index permanently lost, or hours rotated out without an archive | there is no flag for this; the missing events are missing. Take a fresh baseline and remove the table directory so the next run reloads from it |
-| `refused-ddl` | the table changed shape since it was exported (a column added, dropped or retyped), or a TRUNCATE / DROP / RENAME sits in the window; on a first load, the baseline is older than the table's current schema | remove the table directory and let the next run reload it from a baseline taken after the change; on a first load, take a fresh baseline |
+| `refused-ddl` | the table changed shape since it was exported (a column added, dropped or retyped), or a TRUNCATE / DROP / RENAME (or MariaDB's CREATE OR REPLACE TABLE) sits in the window; on a first load, the baseline is older than the table's current schema | remove the table directory and let the next run reload it from a baseline taken after the change; on a first load, take a fresh baseline |
 | `refused` | anything else; the detail line says what | read the detail line |
 
 Four more shapes are refused rather than guessed at, all `refused-gap` or

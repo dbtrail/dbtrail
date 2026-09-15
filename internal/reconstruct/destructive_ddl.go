@@ -10,12 +10,12 @@ import (
 )
 
 // ErrDestructiveDDL is wrapped into the error CheckDestructiveDDL returns
-// when it finds a TRUNCATE/DROP/RENAME on the target table inside the
-// reconstruction window (#764).
+// when it finds a TRUNCATE/DROP/RENAME/CREATE OR REPLACE on the target table
+// inside the reconstruction window (#764).
 var ErrDestructiveDDL = errors.New("destructive DDL in reconstruction window")
 
 // CheckDestructiveDDL queries schema_changes for a TRUNCATE TABLE, DROP
-// TABLE, or RENAME TABLE detected on schema.table in (since, until] — the
+// TABLE, RENAME TABLE or CREATE OR REPLACE TABLE detected on schema.table in (since, until] — the
 // exact window a baseline+delta merge replays (since is the baseline's
 // snapshot time, until is the requested --at / AsOf instant).
 //
@@ -31,6 +31,9 @@ var ErrDestructiveDDL = errors.New("destructive DDL in reconstruction window")
 // RENAME TABLE is included because it moves the table's row-event stream to
 // a new name; the baseline for the old name can no longer be trusted to
 // represent schema.table's state either.
+//
+// MariaDB's CREATE OR REPLACE TABLE is included because on an existing table
+// it drops the rows with no row events, exactly like DROP then CREATE (#1664).
 //
 // A missing schema_changes table (a pre-DDL-tracking index, or a caller that
 // hasn't run indexer.EnsureSchema) is treated as "nothing to check" rather
@@ -49,7 +52,7 @@ func CheckDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, 
 	// over-cautious refusal on historical rows), never narrow one.
 	const q = `SELECT ddl_type, detected_at FROM schema_changes
 		WHERE (schema_name = ? OR schema_name = '') AND table_name = ?
-		AND ddl_type IN ('TRUNCATE TABLE', 'DROP TABLE', 'RENAME TABLE')
+		AND ddl_type IN ('TRUNCATE TABLE', 'DROP TABLE', 'RENAME TABLE', 'CREATE OR REPLACE TABLE')
 		AND detected_at > ? AND detected_at <= ?
 		ORDER BY detected_at ASC LIMIT 1`
 

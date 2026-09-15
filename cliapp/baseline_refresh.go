@@ -45,8 +45,9 @@ one is not a bad output — it is a wrong answer to every future question.
   schema change The table's columns moved since the baseline. The snapshot
                 would carry the old CREATE TABLE forward and project rows onto
                 the old shape. Only a real re-dump fixes this.
-  destructive   A TRUNCATE / DROP / RENAME in the window emits no row events,
-      DDL       so the fold would resurrect rows that no longer exist.
+  destructive   A TRUNCATE / DROP / RENAME (or MariaDB's CREATE OR REPLACE) in
+      DDL       the window emits no row events, so the fold would resurrect
+                rows that no longer exist.
 
 Publication is all-or-nothing: if any table refuses, NOTHING is published and
 the exit status is non-zero. A half-refreshed snapshot would be a set of tables

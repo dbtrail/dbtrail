@@ -628,10 +628,10 @@ func TestFindCapturedCreateTableDDL_found(t *testing.T) {
 	defer db.Close()
 
 	at := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	mock.ExpectQuery("SELECT ddl_query FROM schema_changes").
-		WithArgs("mydb", "orders", string(event.DDLCreateTable), at).
-		WillReturnRows(sqlmock.NewRows([]string{"ddl_query"}).
-			AddRow("CREATE TABLE `orders` (`id` int NOT NULL, PRIMARY KEY (`id`))"))
+	mock.ExpectQuery("SELECT ddl_type, ddl_query FROM schema_changes").
+		WithArgs("mydb", "orders", string(event.DDLCreateTable), string(event.DDLReplaceTable), at).
+		WillReturnRows(sqlmock.NewRows([]string{"ddl_type", "ddl_query"}).
+			AddRow("CREATE TABLE", "CREATE TABLE `orders` (`id` int NOT NULL, PRIMARY KEY (`id`))"))
 
 	ddl, found, err := findCapturedCreateTableDDL(context.Background(), db, "mydb", "orders", at)
 	if err != nil {
@@ -648,6 +648,36 @@ func TestFindCapturedCreateTableDDL_found(t *testing.T) {
 	}
 }
 
+// TestFindCapturedCreateTableDDL_replaceIsWrittenAsCreate is #1664: the
+// fallback writes the statement as the schema file myloader runs, and MariaDB's
+// CREATE OR REPLACE TABLE would drop a table that already exists on the target.
+func TestFindCapturedCreateTableDDL_replaceIsWrittenAsCreate(t *testing.T) {
+	for _, tc := range []struct {
+		name, logged, want string
+		found              bool
+	}{
+		{"plain", "CREATE OR REPLACE TABLE `orders` (`id` int)", "CREATE TABLE `orders` (`id` int)", true},
+		{"leading comments kept", "/* app */ -- m\nCREATE OR REPLACE TABLE t (id int)", "/* app */ -- m\nCREATE TABLE t (id int)", true},
+		{"lower case and line breaks", "create or  replace\ntable t (id int)", "CREATE TABLE t (id int)", true},
+		{"a shape it cannot rewrite gets the placeholder", "CREATE /* x */ OR REPLACE TABLE t (id int)", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SELECT ddl_type, ddl_query FROM schema_changes").
+				WillReturnRows(sqlmock.NewRows([]string{"ddl_type", "ddl_query"}).
+					AddRow(string(event.DDLReplaceTable), tc.logged))
+			ddl, found, err := findCapturedCreateTableDDL(context.Background(), db, "mydb", "orders", time.Now())
+			if err != nil || found != tc.found || ddl != tc.want {
+				t.Errorf("findCapturedCreateTableDDL = %q found=%v err=%v, want %q found=%v", ddl, found, err, tc.want, tc.found)
+			}
+		})
+	}
+}
+
 // TestFindCapturedCreateTableDDL_notFound verifies that no matching row
 // (sql.ErrNoRows) reports found=false with a nil error, so the caller falls
 // back to the placeholder rather than treating "never captured" as a fault.
@@ -658,8 +688,8 @@ func TestFindCapturedCreateTableDDL_notFound(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectQuery("SELECT ddl_query FROM schema_changes").
-		WillReturnRows(sqlmock.NewRows([]string{"ddl_query"}))
+	mock.ExpectQuery("SELECT ddl_type, ddl_query FROM schema_changes").
+		WillReturnRows(sqlmock.NewRows([]string{"ddl_type", "ddl_query"}))
 
 	ddl, found, err := findCapturedCreateTableDDL(context.Background(), db, "mydb", "orders", time.Now())
 	if err != nil {
@@ -680,7 +710,7 @@ func TestFindCapturedCreateTableDDL_realErrorSurfaces(t *testing.T) {
 	defer db.Close()
 
 	forcedErr := errors.New("connection reset")
-	mock.ExpectQuery("SELECT ddl_query FROM schema_changes").WillReturnError(forcedErr)
+	mock.ExpectQuery("SELECT ddl_type, ddl_query FROM schema_changes").WillReturnError(forcedErr)
 
 	_, found, err := findCapturedCreateTableDDL(context.Background(), db, "mydb", "orders", time.Now())
 	if err == nil {

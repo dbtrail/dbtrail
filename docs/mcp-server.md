@@ -391,7 +391,7 @@ auto-discovery above).** A hole in the
 captured history makes a reconstruction *silently wrong* (a state that never
 existed), not merely incomplete, so the tool aborts with an actionable error and
 you opt in explicitly. It also refuses outright — no override — when a
-`TRUNCATE`/`DROP`/`RENAME` hit the table inside the window: no archive can refill
+`TRUNCATE`/`DROP`/`RENAME` (or MariaDB's `CREATE OR REPLACE TABLE`) hit the table inside the window: no archive can refill
 that, and the fold would resurrect rows that are gone.
 
 The same `allow_gaps: false` default covers two further refusals, both of which
