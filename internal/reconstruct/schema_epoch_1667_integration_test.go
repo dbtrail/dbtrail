@@ -171,6 +171,14 @@ func TestFold_schemaInEffectAtTheTarget(t *testing.T) {
 		}, 10*time.Second, 30*time.Second)
 		publishes(t, failures, err)
 	})
+	t.Run("names follow a snapshot taken after the baseline and in effect at the target, not a later one", func(t *testing.T) {
+		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
+			{-time.Minute, nil, intCols},
+			{20 * time.Second, ddlAt(20 * time.Second), bigCols},
+			{60 * time.Second, ddlAt(60 * time.Second), []epochCol{{"id", "int"}, {"c", "bigint"}, {"extra", "int"}}},
+		}, 10*time.Second, 30*time.Second)
+		refuses(t, failures, err, "added since: none")
+	})
 	t.Run("a column added before the target still refuses", func(t *testing.T) {
 		failures, err := foldWithSnapshots(t, intCols, []epochSnap{
 			{-time.Minute, nil, intCols},
