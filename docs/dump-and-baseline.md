@@ -412,7 +412,7 @@ Why this matters beyond convenience: reconstructing from a **fresh** snapshot re
 | Refusal | What happened | What fixes it |
 |---|---|---|
 | `refused-gap` | The window spans events the index permanently lost, or the index is too old to rule that out | `--allow-gaps` to accept the loss knowingly, or a fresh dump |
-| `refused-ddl` | The table's columns, their declared types, or whether they allow NULL changed since the baseline, or a `TRUNCATE`/`DROP`/`RENAME` landed in the window | `bintrail dump` + `bintrail baseline` (on the console, a full backup) — no flag helps |
+| `refused-ddl` | The table's columns, their declared types, or whether they allow NULL changed since the baseline, or a `TRUNCATE`/`DROP`/`RENAME` (or MariaDB's `CREATE OR REPLACE TABLE`) landed in the window | `bintrail dump` + `bintrail baseline` (on the console, a full backup) — no flag helps |
 | `refused` | Anything else (no baseline for the table, no primary key, a PK-changing `UPDATE` in the window) | Named in the message |
 
 A table with no baseline is refused rather than degraded to the binlog-only fallback: a snapshot folded from deltas alone would silently omit every row the window never touched.

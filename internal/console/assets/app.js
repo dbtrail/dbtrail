@@ -7520,10 +7520,12 @@ function verifyDiffValue(v) {
 
 const SC_DDL_TYPES = ["CREATE", "ALTER", "DROP", "RENAME", "TRUNCATE"];
 // Badge tint by what the statement does to the table: something new, a change
-// in place, or something gone. Anything else keeps the neutral tint.
-const SC_BADGE_CLASS = { CREATE: "b-insert", ALTER: "b-update", RENAME: "b-update", DROP: "b-delete", TRUNCATE: "b-delete" };
+// in place, or something gone. Anything else keeps the neutral tint. MariaDB's
+// CREATE OR REPLACE TABLE drops an existing table's rows, so it reads as REPLACE.
+const SC_BADGE_CLASS = { CREATE: "b-insert", ALTER: "b-update", RENAME: "b-update", DROP: "b-delete", TRUNCATE: "b-delete", REPLACE: "b-delete" };
 function scBadge(ddlType) {
-  const word = String(ddlType || "").split(/\s+/)[0].toUpperCase();
+  const upper = String(ddlType || "").toUpperCase();
+  const word = /^CREATE\s+OR\s+REPLACE\b/.test(upper) ? "REPLACE" : upper.split(/\s+/)[0];
   return el("span", { class: "badge " + (SC_BADGE_CLASS[word] || "b-baseline"), text: word || "DDL", title: ddlType || null });
 }
 

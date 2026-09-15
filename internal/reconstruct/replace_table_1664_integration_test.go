@@ -16,7 +16,7 @@ import (
 // real schema_changes table: MariaDB's CREATE OR REPLACE TABLE drops an
 // existing table's rows with no row events, so it refuses a reconstruct over
 // its window like a DROP, and it is the newest definition the binlog-only
-// fallback can write.
+// fallback can write, as a plain CREATE TABLE so loading it cannot drop a table.
 func TestIntegrationCreateOrReplace_refusesAndDefinesTheTable(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	db, _ := testutil.CreateTestDB(t)
@@ -47,7 +47,7 @@ func TestIntegrationCreateOrReplace_refusesAndDefinesTheTable(t *testing.T) {
 		t.Errorf("CheckDestructiveDDL after the replace = %v, want nil", err)
 	}
 	ddl, found, err := findCapturedCreateTableDDL(ctx, db, "shop", "t", at)
-	if err != nil || !found || ddl != replace {
-		t.Errorf("findCapturedCreateTableDDL = %q found=%v err=%v, want the replace statement", ddl, found, err)
+	if want := "CREATE TABLE t (id INT PRIMARY KEY, c INT)"; err != nil || !found || ddl != want {
+		t.Errorf("findCapturedCreateTableDDL = %q found=%v err=%v, want %q", ddl, found, err, want)
 	}
 }

@@ -10,12 +10,12 @@ import (
 )
 
 // ErrDestructiveDDL is wrapped into the error CheckDestructiveDDL returns
-// when it finds a TRUNCATE/DROP/RENAME on the target table inside the
-// reconstruction window (#764).
+// when it finds a TRUNCATE/DROP/RENAME/CREATE OR REPLACE on the target table
+// inside the reconstruction window (#764).
 var ErrDestructiveDDL = errors.New("destructive DDL in reconstruction window")
 
 // CheckDestructiveDDL queries schema_changes for a TRUNCATE TABLE, DROP
-// TABLE, or RENAME TABLE detected on schema.table in (since, until] — the
+// TABLE, RENAME TABLE or CREATE OR REPLACE TABLE detected on schema.table in (since, until] — the
 // exact window a baseline+delta merge replays (since is the baseline's
 // snapshot time, until is the requested --at / AsOf instant).
 //

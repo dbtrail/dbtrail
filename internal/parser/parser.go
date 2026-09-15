@@ -991,8 +991,8 @@ const (
 //
 // The verb must end at a character that cannot continue a name, which keeps
 // TABLESPACE out. A TEMPORARY table is deliberately not matched: it is in no
-// schema snapshot, and a DROP TABLE event refuses every reconstruct over its
-// window.
+// schema snapshot, and a DROP TABLE event refuses every reconstruct of a table
+// with that name over its window.
 // The s flag in ddlVerbRe and ddlNameRe is load-bearing: normalizeDDL copies
 // quoted strings verbatim, line breaks included, and the trailing .* must run
 // past them.

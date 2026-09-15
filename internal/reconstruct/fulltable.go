@@ -2257,25 +2257,43 @@ func binlogOnlySchemaPlaceholder(schema, table string) string {
 }
 
 // findCapturedCreateTableDDL looks up the most recent CREATE TABLE statement
-// (a CREATE OR REPLACE TABLE counts: it defines the table the same way)
+// (a CREATE OR REPLACE TABLE counts, rewritten to a plain CREATE TABLE so that
+// loading the schema file cannot drop a table that already exists)
 // the schema-drift guard (#700) recorded for schema.table at-or-before at, in
 // schema_changes.ddl_query. found is false (with a nil error) when no such
 // row exists — the caller falls back to binlogOnlySchemaPlaceholder.
 func findCapturedCreateTableDDL(ctx context.Context, db *sql.DB, schema, table string, at time.Time) (ddl string, found bool, err error) {
 	row := db.QueryRowContext(ctx, `
-		SELECT ddl_query FROM schema_changes
+		SELECT ddl_type, ddl_query FROM schema_changes
 		WHERE schema_name = ? AND table_name = ? AND ddl_type IN (?, ?) AND detected_at <= ?
 		ORDER BY detected_at DESC, id DESC
 		LIMIT 1`,
 		schema, table, event.DDLCreateTable, event.DDLReplaceTable, at)
-	if err := row.Scan(&ddl); err != nil {
+	var kind string
+	if err := row.Scan(&kind, &ddl); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", false, nil
 		}
 		return "", false, err
 	}
+	if kind == string(event.DDLReplaceTable) {
+		// The fallback writes this statement as the schema file myloader runs.
+		// As logged, on MariaDB it would drop a table that already exists on
+		// the target, rows included; as a plain CREATE TABLE it defines the same
+		// table and stops at "table exists". A shape the rewrite cannot read
+		// gets the placeholder rather than a statement that can drop a table.
+		loc := replaceTableHeadRe.FindStringSubmatchIndex(ddl)
+		if loc == nil {
+			return "", false, nil
+		}
+		ddl = ddl[:loc[3]] + "CREATE TABLE" + ddl[loc[1]:]
+	}
 	return ddl, true, nil
 }
+
+// replaceTableHeadRe matches MariaDB's CREATE OR REPLACE TABLE at the start of a
+// captured statement, past any leading comments. Group 1 is the comments.
+var replaceTableHeadRe = regexp.MustCompile(`(?is)^((?:\s+|/\*.*?\*/|--[^\n]*(?:\n|$)|#[^\n]*(?:\n|$))*)CREATE\s+OR\s+REPLACE\s+TABLE\b`)
 
 // writeBinlogOnlyChanges writes the reconstructBinlogOnly output: a schema
 // file (createSQL — either a real captured CREATE TABLE or the explanatory

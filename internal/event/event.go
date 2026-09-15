@@ -112,7 +112,7 @@ type Event struct {
 	RowAfter      map[string]any // nil for DELETE
 	SchemaVersion uint32         // actual snapshot_id from schema_snapshots; updated by SwapResolver on DDL
 	DDLQuery      string         // original DDL statement (EventDDL only)
-	DDLType       DDLKind        // ALTER TABLE, CREATE TABLE, DROP TABLE, RENAME TABLE, TRUNCATE TABLE (EventDDL only)
+	DDLType       DDLKind        // ALTER TABLE, CREATE TABLE, CREATE OR REPLACE TABLE, DROP TABLE, RENAME TABLE, TRUNCATE TABLE (EventDDL only)
 	// Relation carries a PostgreSQL relation's shape (EventRelation only); the
 	// consumer persists it as a schema snapshot and stamps subsequent rows'
 	// SchemaVersion. nil for every other event type; never written to binlog_events.
