@@ -56,9 +56,12 @@ func TestFirstRunSteps(t *testing.T) {
 		{"stopped after the index was created waits for Start on the next step",
 			firstRunInput{Monitor: MonitorStatus{State: "stopped"}, IndexExists: &yes, SnapshotTaken: true},
 			want{states: "ddww", fixText: "Start"}},
-		{"the index could not be checked: nothing is claimed done from it",
-			firstRunInput{Monitor: MonitorStatus{State: "running"}, CheckError: "dial tcp: connection refused"},
-			want{states: "rwww"}},
+		{"the index could not be checked: no step is claimed, done or not",
+			firstRunInput{Monitor: MonitorStatus{State: "running"}, CheckError: "Error 1226: max_user_connections"},
+			want{states: ""}},
+		{"a reset counter with changes still in the index completes the list",
+			firstRunInput{Monitor: MonitorStatus{State: "running"}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true, HasEvents: true},
+			want{states: "dddd", complete: true}},
 		{"events after a later failure still complete the list",
 			firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "x"}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true, EventsIndexed: 5},
 			want{states: "dddd", complete: true}},
@@ -131,5 +134,18 @@ func TestFirstRunBackupStep(t *testing.T) {
 				t.Fatalf("states = %s, want %s (%+v)", states.String(), c.states, got.Steps)
 			}
 		})
+	}
+}
+
+// TestFirstRunLostPositionIsShown: capture that skipped events for good is
+// still running, and the step says what was lost instead of "A quiet
+// database is normal".
+func TestFirstRunLostPositionIsShown(t *testing.T) {
+	yes := true
+	got := firstRunSteps(firstRunInput{Monitor: MonitorStatus{State: "lost_position", LastError: "binlog.000003 was purged; events before it are lost"},
+		IndexExists: &yes, SnapshotTaken: true, StreamStarted: true})
+	s := got.Steps[3]
+	if s.State != firstRunRunning || !strings.Contains(s.Detail, "events before it are lost") || strings.Contains(s.Detail, "quiet") {
+		t.Fatalf("step = %+v", s)
 	}
 }

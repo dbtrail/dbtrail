@@ -1457,37 +1457,52 @@ function firstRunCard(rep) {
     list.append(el("li", { class: "fr-step " + state }, el("span", { class: "dc-mark", text: marks[state], "aria-label": state }), body));
   });
   card.append(list);
-  if (rep.check_error) {
-    card.append(el("div", { class: "warn-item" }, icon("warn"),
-      el("span", { text: "Could not check the index database: " + rep.check_error })));
-  }
   return card;
 }
 
 // watchFirstRun shows the first-run steps at the top of the Overview while the
 // selected server has not indexed a change, and polls until it has; then the
 // page renders again with its numbers. Only a supervisor console answers the
-// endpoint. A server with no source, the command-line server or a read-only
-// console answer with an error, which draws nothing; once the card is up, an
-// error keeps it and tries again.
+// endpoint: a server with no source, the command-line server, a read-only
+// console or a session without the permission answer with an error that
+// stops the loop and draws nothing. Any other failure (a 502, a network blip,
+// an index that could not be read) tries again, so a first request that fails
+// does not hide the list for good, and once the list is up it stays with a
+// note that it could not be refreshed. Polling slows from 3 to 15 seconds
+// while nothing changes.
 function watchFirstRun(f, live) {
   const id = currentServer || defaultServerId;
   if (!capsCache.monitor || !id) return;
-  let shown = false;
+  let shown = false, last = "", delay = 3000, failures = 0;
+  const again = () => { setTimeout(tick, delay); delay = Math.min(delay * 2, 15000); };
+  const stale = (msg) => {
+    if (!shown) return;
+    const card = f.firstRunSlot.children[0];
+    clear(f.firstRunSlot);
+    f.firstRunSlot.append(card, el("div", { class: "warn-item fr-stale" }, icon("warn"),
+      el("span", { text: "Could not refresh this list: " + msg })));
+  };
   const tick = () => {
     if (!live()) return;
     api("/api/servers/" + encodeURIComponent(id) + "/first-run").then((rep) => {
       if (!live()) return;
+      if (rep && rep.check_error) { stale(rep.check_error); again(); return; }
+      failures = 0;
       const card = firstRunCard(rep);
+      if (!card) { if (shown) renderRoute(); return; }
+      const key = JSON.stringify(rep);
+      if (key !== last) delay = 3000;
+      last = key;
       clear(f.firstRunSlot);
-      if (card) {
-        f.firstRunSlot.append(card);
-        shown = true;
-        setTimeout(tick, 3000);
-      } else if (shown) {
-        renderRoute();
-      }
-    }, () => { if (live() && shown) setTimeout(tick, 3000); });
+      f.firstRunSlot.append(card);
+      shown = true;
+      again();
+    }, (err) => {
+      if (!live()) return;
+      if ([401, 403, 404, 409].includes(err && err.status)) return;
+      if (++failures >= 3) stale((err && err.message) || String(err));
+      again();
+    });
   };
   tick();
 }
@@ -8809,7 +8824,12 @@ function openServersModal() {
   focusModal(mount);
   refreshServersList();
 }
-function closeServersModal() { document.getElementById("modal").replaceChildren(); }
+// Closing the dialog renders the Overview again: a server added or started
+// there is the one the Getting started list is for (#1606).
+function closeServersModal() {
+  document.getElementById("modal").replaceChildren();
+  if (routeFromLocation() === "overview") renderRoute();
+}
 
 // ── rotation settings ────────────────────────────────────────────────────────
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -65,7 +66,14 @@ func TestIntegrationLoadFirstRunIndex(t *testing.T) {
 			t.Fatalf("got %+v", in)
 		}
 	})
-	testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, last_checkpoint, server_id) VALUES (1, 'position', '2026-09-15 10:00:05', 1)`)
+	// What a PostgreSQL daemon's health poll writes before any commit.
+	testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, flavor, last_checkpoint, server_id, source_health) VALUES (1, 'gtid', 'postgres', UTC_TIMESTAMP(), 1, '{}')`)
+	t.Run("a row with no saved position is not a started stream", func(t *testing.T) {
+		if in := load(dsn); in.StreamStarted || in.CheckError != "" {
+			t.Fatalf("got %+v", in)
+		}
+	})
+	testutil.MustExec(t, db, `UPDATE stream_state SET binlog_position = 23456789`)
 	t.Run("first position saved, no change yet", func(t *testing.T) {
 		if in := load(dsn); !in.StreamStarted || in.EventsIndexed != 0 || in.CheckError != "" {
 			t.Fatalf("got %+v", in)
@@ -75,6 +83,15 @@ func TestIntegrationLoadFirstRunIndex(t *testing.T) {
 	t.Run("changes indexed", func(t *testing.T) {
 		in := load(dsn)
 		if in.EventsIndexed != 7 || !firstRunSteps(in).Complete {
+			t.Fatalf("got %+v", in)
+		}
+	})
+	testutil.MustExec(t, db, `UPDATE stream_state SET events_indexed = 0`)
+	testutil.InsertEvent(t, db, "binlog.000001", 100, 200, time.Now().UTC().Format("2006-01-02 15:04:05"), nil,
+		"shop", "t", 1, "1", nil, nil, []byte(`{"id":1}`))
+	t.Run("a reset counter with changes in the index still completes", func(t *testing.T) {
+		in := load(dsn)
+		if in.EventsIndexed != 0 || !in.HasEvents || !firstRunSteps(in).Complete {
 			t.Fatalf("got %+v", in)
 		}
 	})

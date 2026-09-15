@@ -9,7 +9,6 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/config"
-	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // First-run step states (#1606). Waiting is a step that has not started, which
@@ -46,7 +45,10 @@ type firstRunInput struct {
 	SnapshotTaken bool
 	StreamStarted bool
 	EventsIndexed int64
-	CheckError    string
+	// HasEvents: binlog_events holds a change though the counter says none,
+	// as after a reset, which zeroes the counter and keeps the rows.
+	HasEvents  bool
+	CheckError string
 	// Backup is the first-backup job, nil when the console cannot create one
 	// for this server.
 	Backup *BaselineStatus
@@ -59,6 +61,12 @@ type firstRunInput struct {
 // steps after it wait. "Running" is not "stuck": a started stream with no
 // change yet is healthy, and the supervisor reports "stalled" when it is not.
 func firstRunSteps(in firstRunInput) FirstRunReport {
+	if in.CheckError != "" {
+		// Nothing is claimed from an index that could not be read: a server
+		// with months of changes must not read "Creating it now" because its
+		// index server refused one connection.
+		return FirstRunReport{CheckError: in.CheckError}
+	}
 	names := []string{"Create the index database", "Read the table structure", "Start capturing changes", "Capture the first change"}
 	working := []string{
 		"Creating it now.",
@@ -66,7 +74,7 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 		"Connecting to the source and saving the first position.",
 		"Capture is running and waiting for the first change on the source. A quiet database is normal.",
 	}
-	done := []bool{in.IndexExists != nil && *in.IndexExists, in.SnapshotTaken, in.StreamStarted, in.EventsIndexed > 0}
+	done := []bool{in.IndexExists != nil && *in.IndexExists, in.SnapshotTaken, in.StreamStarted, in.EventsIndexed > 0 || in.HasEvents}
 	for i := len(done) - 2; i >= 0; i-- {
 		done[i] = done[i] || done[i+1]
 	}
@@ -86,8 +94,11 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 			case "stalled":
 				step.State, step.Detail = firstRunFailed, in.Monitor.LastError
 				step.Fix = "Stop and start capture on this server in Servers."
-			case "pending", "running", "lost_position":
+			case "pending", "running":
 				step.State, step.Detail = firstRunRunning, working[i]
+			case "lost_position":
+				// Still capturing, but events were skipped for good: say which.
+				step.State, step.Detail = firstRunRunning, in.Monitor.LastError
 			default:
 				step.Fix = "Press Start on this server in Servers."
 			}
@@ -124,36 +135,51 @@ func loadFirstRunIndex(ctx context.Context, dsn string, in *firstRunInput) {
 		in.CheckError = scrubDSNError(err, dsn)
 		return
 	}
+	scrub := func(err error) string { return config.ScrubDSNError(err, short, dsn) }
 	db, err := config.Connect(short)
 	if err != nil {
 		if isUnknownDatabase(err) {
 			in.IndexExists = &no
 			return
 		}
-		in.CheckError = scrubDSNError(err, dsn)
+		in.CheckError = scrub(err)
 		return
 	}
 	defer db.Close()
 	in.IndexExists = &yes
 
-	var taken sql.NullTime
-	err = db.QueryRowContext(ctx, "SELECT MAX(snapshot_time) FROM schema_snapshots").Scan(&taken)
 	var me *mysql.MySQLError
-	switch {
+	missingTable := func(err error) bool { return errors.As(err, &me) && me.Number == 1146 }
+	var taken sql.NullTime
+	switch err := db.QueryRowContext(ctx, "SELECT MAX(snapshot_time) FROM schema_snapshots").Scan(&taken); {
 	case err == nil:
 		in.SnapshotTaken = taken.Valid
-	case errors.As(err, &me) && me.Number == 1146:
-	default:
-		in.CheckError = scrubDSNError(err, dsn)
+	case !missingTable(err):
+		in.CheckError = scrub(err)
 		return
 	}
-	stream, err := status.LoadStreamState(ctx, db)
-	switch {
-	case err != nil && !(errors.As(err, &me) && me.Number == 1146):
-		in.CheckError = scrubDSNError(err, dsn)
-	case stream != nil:
-		in.StreamStarted = !stream.LastCheckpoint.IsZero()
-		in.EventsIndexed = stream.EventsIndexed
+	// Started means a position was saved. The row alone is not enough: a
+	// PostgreSQL daemon's health poll creates it with no position before any
+	// commit (the rule loadStreamStatePG applies to resume).
+	var file, gtid string
+	var pos uint64
+	switch err := db.QueryRowContext(ctx,
+		"SELECT binlog_file, binlog_position, COALESCE(gtid_set, ''), events_indexed FROM stream_state WHERE id = 1",
+	).Scan(&file, &pos, &gtid, &in.EventsIndexed); {
+	case err == nil:
+		in.StreamStarted = file != "" || pos > 0 || gtid != ""
+	case !errors.Is(err, sql.ErrNoRows) && !missingTable(err):
+		in.CheckError = scrub(err)
+		return
+	}
+	if in.EventsIndexed == 0 {
+		var any bool
+		switch err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM binlog_events)").Scan(&any); {
+		case err == nil:
+			in.HasEvents = any
+		case !missingTable(err):
+			in.CheckError = scrub(err)
+		}
 	}
 }
 
