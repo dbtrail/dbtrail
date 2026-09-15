@@ -55,6 +55,7 @@ var registeredAPIPatterns = []struct{ method, pattern string }{
 	{"POST", "/api/servers/{}/monitor/start"},
 	{"POST", "/api/servers/{}/monitor/stop"},
 	{"GET", "/api/servers/{}/monitor"},
+	{"GET", "/api/servers/{}/first-run"},
 	{"POST", "/api/servers/{}/baseline"},
 	{"GET", "/api/servers/{}/baseline"},
 	{"POST", "/api/servers/{}/baseline/restore"},
