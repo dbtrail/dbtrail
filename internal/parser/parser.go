@@ -976,14 +976,109 @@ const (
 	DDLTruncateTable = event.DDLTruncateTable
 )
 
-// ddlTableRe extracts the schema and table name from DDL statements.
-// Handles: ALTER TABLE [schema.]table, CREATE TABLE [IF NOT EXISTS] [schema.]table,
-// DROP TABLE [IF EXISTS] [schema.]table, RENAME TABLE [schema.]table,
-// TRUNCATE [TABLE] [schema.]table.
-// Backtick-quoted identifiers are supported via `([^`]+)`.
-var ddlTableRe = regexp.MustCompile(
-	`(?i)(?:ALTER\s+TABLE|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|RENAME\s+TABLE|TRUNCATE(?:\s+TABLE)?)\s+` +
-		"(?:`([^`]+)`\\.`([^`]+)`|`([^`]+)`|(\\w+)\\.(\\w+)|(\\w+))")
+// ddlHeadRe recognizes a table DDL statement and its first table, matched
+// against normalizeDDL's output (comments gone, whitespace collapsed to one
+// space), anchored at the start. Groups: 1 = the verb, 2 = the schema, 3 = the
+// table; either name may be backticked.
+//
+// Covered (#1664), MySQL and MariaDB:
+//
+//	ALTER [ONLINE|OFFLINE] [IGNORE] TABLE [IF EXISTS] name
+//	CREATE [OR REPLACE] TABLE [IF NOT EXISTS] name
+//	DROP TABLE [IF EXISTS] name
+//	RENAME TABLE [IF EXISTS] name
+//	TRUNCATE [TABLE] name
+//
+// A TEMPORARY table is deliberately not matched: it is in no schema snapshot,
+// and a DROP TABLE event refuses every reconstruct over its window. The single
+// space the pattern needs after TABLE is what keeps TABLESPACE out.
+var ddlHeadRe = regexp.MustCompile(
+	"(?i)^(ALTER(?: ONLINE| OFFLINE)?(?: IGNORE)? TABLE|CREATE(?: OR REPLACE)? TABLE|DROP TABLE|RENAME TABLE|TRUNCATE(?: TABLE)?)" +
+		"(?: IF(?: NOT)? EXISTS)? " +
+		"(?:(`[^`]+`|[\\w$]+) ?\\. ?)?(`[^`]+`|[\\w$]+)")
+
+// normalizeDDL returns queryStr as the server reads it for recognizing a DDL
+// verb: plain comments (/* */, -- and #) removed, the body of an executable
+// comment (/*!NNNNN ... */, MariaDB's /*M!NNNNN ... */) kept without its
+// markers, and every run of whitespace or removed comment turned into one
+// space. Quoted strings and backticked names are copied verbatim, so text
+// inside them is never taken for a comment or a keyword.
+//
+// MySQL writes DDL to the binlog as the client sent it, comments included
+// (a migration tool's /* app */, gh-ost's rename /* gh-ost */ table), and
+// logs the implicit drop of a temporary table as
+// DROP /*!40005 TEMPORARY */ TABLE, which must keep its TEMPORARY.
+func normalizeDDL(queryStr string) string {
+	var b strings.Builder
+	pending := false // a space is owed before the next copied byte
+	open := 0        // executable comments whose closing */ is still ahead
+	gap := func() { pending = b.Len() > 0 }
+	for i := 0; i < len(queryStr); {
+		rest := queryStr[i:]
+		switch c := queryStr[i]; {
+		case isSQLSpace(c):
+			gap()
+			i++
+		case strings.HasPrefix(rest, "/*!") || strings.HasPrefix(rest, "/*M!"):
+			i += strings.Index(rest, "!") + 1
+			for i < len(queryStr) && queryStr[i] >= '0' && queryStr[i] <= '9' {
+				i++
+			}
+			open++
+			gap()
+		case strings.HasPrefix(rest, "*/") && open > 0:
+			open--
+			i += 2
+			gap()
+		case strings.HasPrefix(rest, "/*"):
+			end := strings.Index(rest[2:], "*/")
+			if end < 0 {
+				return b.String()
+			}
+			i += 2 + end + 2
+			gap()
+		case c == '#' || strings.HasPrefix(rest, "--") && (len(rest) == 2 || isSQLSpace(rest[2])):
+			nl := strings.IndexByte(rest, '\n')
+			if nl < 0 {
+				return b.String()
+			}
+			i += nl + 1
+			gap()
+		case c == '\'' || c == '"' || c == '`':
+			if pending {
+				b.WriteByte(' ')
+				pending = false
+			}
+			j := i + 1
+			for j < len(queryStr) {
+				if queryStr[j] == '\\' && c != '`' {
+					j += 2
+					continue
+				}
+				if queryStr[j] == c {
+					if j+1 < len(queryStr) && queryStr[j+1] == c {
+						j += 2
+						continue
+					}
+					j++
+					break
+				}
+				j++
+			}
+			j = min(j, len(queryStr))
+			b.WriteString(queryStr[i:j])
+			i = j
+		default:
+			if pending {
+				b.WriteByte(' ')
+				pending = false
+			}
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
+}
 
 // dmlKeywords are the statement prefixes that, under binlog_format=ROW, would
 // have been logged as ROW events (and captured). Seeing one as a QUERY_EVENT
@@ -993,9 +1088,9 @@ var ddlTableRe = regexp.MustCompile(
 // always statement-logged and never produces row events under any binlog_format,
 // so it is not a "row-DML that ROW format would have captured" and must never
 // trip this loss detector (a false increment of statement_dml_dropped reads as
-// data loss when nothing was lost). parseDDL claims TRUNCATE as DDL in the
-// no-comment case; a comment-prefixed TRUNCATE that slips past parseDDL must
-// still fall through here silently — again, nothing was lost.
+// data loss when nothing was lost). parseDDL claims TRUNCATE as DDL, comments
+// and all (#1664); a TRUNCATE it still does not recognize must fall through
+// here silently — again, nothing was lost.
 var dmlKeywords = []string{"INSERT", "UPDATE", "DELETE", "REPLACE", "LOAD DATA"}
 
 // statementDML reports whether queryStr is a data-modifying statement logged in
@@ -1128,39 +1223,24 @@ func isSQLSpace(b byte) bool {
 // before. Historical rows are NOT backfilled: the original session's default
 // is unrecoverable, and matching empty rows against any filter would lie.
 func parseDDL(logger *slog.Logger, filename string, logPos uint32, timestamp time.Time, gtid, queryStr, defaultSchema string, schemaVersion uint32) (Event, bool) {
-	upper := strings.ToUpper(strings.TrimSpace(queryStr))
-
-	var ddlType DDLKind
-	switch {
-	case strings.HasPrefix(upper, "ALTER TABLE"):
-		ddlType = DDLAlterTable
-	case strings.HasPrefix(upper, "CREATE TABLE"):
-		ddlType = DDLCreateTable
-	case strings.HasPrefix(upper, "DROP TABLE"):
-		ddlType = DDLDropTable
-	case strings.HasPrefix(upper, "RENAME TABLE"):
-		ddlType = DDLRenameTable
-	case strings.HasPrefix(upper, "TRUNCATE"):
-		ddlType = DDLTruncateTable
-	default:
+	m := ddlHeadRe.FindStringSubmatch(normalizeDDL(queryStr))
+	if m == nil {
 		return Event{}, false
 	}
-
-	// Extract schema and table from the DDL query.
-	var schema, table string
-	m := ddlTableRe.FindStringSubmatch(queryStr)
-	if m != nil {
-		switch {
-		case m[1] != "" && m[2] != "": // `schema`.`table`
-			schema, table = m[1], m[2]
-		case m[3] != "": // `table` (no schema)
-			table = m[3]
-		case m[4] != "" && m[5] != "": // schema.table (unquoted)
-			schema, table = m[4], m[5]
-		case m[6] != "": // table (unquoted, no schema)
-			table = m[6]
-		}
+	var ddlType DDLKind
+	switch verb := strings.ToUpper(m[1]); {
+	case strings.HasPrefix(verb, "ALTER"):
+		ddlType = DDLAlterTable
+	case strings.HasPrefix(verb, "CREATE"):
+		ddlType = DDLCreateTable
+	case strings.HasPrefix(verb, "DROP"):
+		ddlType = DDLDropTable
+	case strings.HasPrefix(verb, "RENAME"):
+		ddlType = DDLRenameTable
+	default:
+		ddlType = DDLTruncateTable
 	}
+	schema, table := strings.Trim(m[2], "`"), strings.Trim(m[3], "`")
 	if schema == "" {
 		schema = defaultSchema
 	}
