@@ -39,7 +39,8 @@ func TestRefresh_touchedRowBudget(t *testing.T) {
 	// run seeds a baseline of tables a and b holding ids 1..seedRows, applies
 	// events (table -> pk values, one UPDATE-shaped event each, v = "x"+pk),
 	// and folds with the given budget.
-	run := func(t *testing.T, seedRows int, events map[string][]string, tables []string, budget int64, parallelism int) outcome {
+	run := func(t *testing.T, seedRows int, events map[string][]string, tables []string, budget int64, parallelism int,
+		tweak func(db *sql.DB, ts func(time.Duration) string, cfg *reconstruct.FullTableConfig)) outcome {
 		t.Helper()
 		db, dbName := testutil.CreateTestDB(t)
 		if err := indexer.CreateIndexTables(ctx, db, 48, false, nil); err != nil {
@@ -103,7 +104,7 @@ func TestRefresh_touchedRowBudget(t *testing.T) {
 		tmp := t.TempDir()
 		t.Setenv("TMPDIR", tmp)
 		var out outcome
-		_, out.failures, out.err = reconstruct.ReconstructTablesDetailed(ctx, reconstruct.FullTableConfig{
+		cfg := reconstruct.FullTableConfig{
 			IndexDSN:       testutil.BaseDSN() + "/" + dbName,
 			BaselineSrc:    root,
 			Tables:         want,
@@ -115,7 +116,11 @@ func TestRefresh_touchedRowBudget(t *testing.T) {
 			// On, so a fold whose changes all went to disk is not mistaken for
 			// one with no changes and carried forward unchanged.
 			CarryForwardUnchanged: true,
-		})
+		}
+		if tweak != nil {
+			tweak(db, ts, &cfg)
+		}
+		_, out.failures, out.err = reconstruct.ReconstructTablesDetailed(ctx, cfg)
 		if left, _ := filepath.Glob(filepath.Join(tmp, "bintrail-fold-*")); len(left) > 0 {
 			t.Errorf("the fold left its changes on disk: %v", left)
 		}
@@ -155,11 +160,11 @@ func TestRefresh_touchedRowBudget(t *testing.T) {
 	t.Run("past the limit merges from disk and publishes what an unlimited fold does", func(t *testing.T) {
 		// 40 seeded rows; the window changes 30 of them and inserts 20 more.
 		events := map[string][]string{"a": pks(11, 60)}
-		limited := run(t, 40, events, []string{"a"}, 8, 1)
+		limited := run(t, 40, events, []string{"a"}, 8, 1, nil)
 		if limited.err != nil || !limited.published {
 			t.Fatalf("published=%v err=%v failures=%+v", limited.published, limited.err, limited.failures)
 		}
-		unlimited := run(t, 40, events, []string{"a"}, 0, 1)
+		unlimited := run(t, 40, events, []string{"a"}, 0, 1, nil)
 		if !slices.Equal(limited.rows["a"], unlimited.rows["a"]) {
 			t.Fatalf("the fold from disk published different rows:\n got %v\nwant %v", limited.rows["a"], unlimited.rows["a"])
 		}
@@ -169,7 +174,7 @@ func TestRefresh_touchedRowBudget(t *testing.T) {
 	})
 	t.Run("a group past the limit refuses and publishes nothing", func(t *testing.T) {
 		// 65 changed rows over 64 groups with a limit of 1: some group holds two.
-		out := run(t, 1, map[string][]string{"a": pks(2, 66)}, []string{"a"}, 1, 1)
+		out := run(t, 1, map[string][]string{"a": pks(2, 66)}, []string{"a"}, 1, 1, nil)
 		if out.err == nil || out.published || !refusedByBudget(out.failures, "a") {
 			t.Fatalf("published=%v err=%v failures=%+v; want the budget refusal and no snapshot", out.published, out.err, out.failures)
 		}
@@ -180,8 +185,24 @@ func TestRefresh_touchedRowBudget(t *testing.T) {
 			t.Errorf("the run's error does not name the table once: %v", out.err)
 		}
 	})
+	t.Run("a fold refused after its changes went to disk leaves nothing on disk", func(t *testing.T) {
+		// Pages of 5 with a limit of 1: the first page goes to disk, and a later
+		// page carries an UPDATE that changes the row's key, which the fold
+		// refuses. That refusal returns from the fold itself, before the merge,
+		// so only the fold's own cleanup can remove what it wrote; run checks
+		// the temp directory afterwards.
+		out := run(t, 1, map[string][]string{"a": pks(2, 11)}, []string{"a"}, 1, 1,
+			func(db *sql.DB, ts func(time.Duration) string, cfg *reconstruct.FullTableConfig) {
+				testutil.InsertEvent(t, db, "binlog.000001", 9000, 9100, ts(30*time.Minute), nil,
+					schema, "a", 2, "2", nil, []byte(`{"id":2,"v":"x2"}`), []byte(`{"id":99,"v":"moved"}`))
+				cfg.FetchBatchSize = 5
+			})
+		if out.err == nil || out.published || errors.Is(out.err, reconstruct.ErrTouchedRowBudget) || !strings.Contains(out.err.Error(), "99") {
+			t.Fatalf("published=%v err=%v; want the fold's key-change refusal", out.published, out.err)
+		}
+	})
 	t.Run("a row changed many times counts once", func(t *testing.T) {
-		out := run(t, 1, map[string][]string{"a": {"2", "2", "2", "2", "2"}}, []string{"a"}, 1, 1)
+		out := run(t, 1, map[string][]string{"a": {"2", "2", "2", "2", "2"}}, []string{"a"}, 1, 1, nil)
 		if out.err != nil || !out.published {
 			t.Fatalf("published=%v err=%v failures=%+v", out.published, out.err, out.failures)
 		}
@@ -189,7 +210,7 @@ func TestRefresh_touchedRowBudget(t *testing.T) {
 	t.Run("the limit is shared by the tables folding at once", func(t *testing.T) {
 		// 4 for the run, two tables at once: 2 per table, so a's 3 changes go to
 		// disk and b's 1 stays in memory; both publish.
-		out := run(t, 1, map[string][]string{"a": {"2", "3", "4"}, "b": {"2"}}, []string{"a", "b"}, 4, 2)
+		out := run(t, 1, map[string][]string{"a": {"2", "3", "4"}, "b": {"2"}}, []string{"a", "b"}, 4, 2, nil)
 		if out.err != nil || !out.published {
 			t.Fatalf("published=%v err=%v failures=%+v", out.published, out.err, out.failures)
 		}

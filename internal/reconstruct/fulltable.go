@@ -1285,8 +1285,10 @@ func ReconstructTable(
 //
 // A spilled fold (#1107) is the exception for #602: its change map is empty
 // here, so that guard runs per pass inside the merge, after the writer opened
-// and possibly after earlier passes wrote rows; the writers' discard still
-// leaves nothing behind, but the refusal can come late in a long run.
+// and possibly after earlier passes wrote rows. The changed-rows refusal of a
+// group over the limit is found the same way, when its pass comes. The
+// writers' discard still leaves nothing behind, but either refusal can come
+// late in a long run.
 func prepareMerge(ctx context.Context, in mergeInput) ([]string, error) {
 	colNames, err := readBaselineColumns(ctx, in.LocalBaselinePath, in.DuckDBTuning)
 	if err != nil {
