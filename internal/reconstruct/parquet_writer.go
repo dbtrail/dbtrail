@@ -348,7 +348,7 @@ func captureGapLines(in mergeInput) string {
 // re-dump is the only correct answer, so the message says so instead of
 // offering a flag.
 //
-// Column TYPES (#1651) are compared against typesTM, not tm, and only when the
+// Column TYPES (#1651) and NULL-ness (#1665) are compared against typesTM, not tm, and only when the
 // caller has one: the schema snapshot in effect at the fold's target instant,
 // and only when that snapshot was taken after the baseline. An older snapshot
 // says nothing about the baseline's types (the baseline's own CREATE TABLE,
@@ -360,7 +360,7 @@ func checkBaselineSchemaCurrent(createSQL string, tm, typesTM *metadata.TableMet
 }
 
 // checkBaselineSchema compares column names against tm and, when typesTM is
-// not nil, declared types against typesTM. The Iceberg export passes nil: it
+// not nil, declared types and NULL-ness (#1665) against typesTM. The Iceberg export passes nil: it
 // never publishes the carried CREATE TABLE, and it compares the types it maps
 // to Iceberg itself (icebergexport.sameTableTypes), so a type change that does
 // not move the exported value (an ENUM relabel, a longer VARCHAR) must not

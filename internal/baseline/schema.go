@@ -83,7 +83,8 @@ type Column struct {
 	DeclaredType string
 
 	// NotNull is true when the column's definition says NOT NULL (#1665): the
-	// two words after the type, outside any quoted DEFAULT or COMMENT string.
+	// two words after the type, at the top level of the line (not inside a
+	// quoted string, a backticked name or parentheses; see declaredNotNull).
 	// A producer that carries this CREATE TABLE forward compares it with the
 	// source's IS_NULLABLE, because a restore loads the carried definition.
 	NotNull bool

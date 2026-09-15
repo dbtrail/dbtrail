@@ -25,6 +25,8 @@ func TestParseSchemaText_notNull(t *testing.T) {
 		{"inside a comment", "`c` int DEFAULT NULL COMMENT 'kept NOT NULL by the app',", false},
 		{"inside an enum label", "`c` enum('NOT NULL','x') DEFAULT NULL,", false},
 		{"NOT NULL after a string that holds a quote", "`c` varchar(20) DEFAULT 'it''s' NOT NULL,", true},
+		{"NOT NULL after a string with a backslash-escaped quote", "`c` varchar(9) DEFAULT 'a\\'b' NOT NULL,", true},
+		{"the words inside a string with a backslash-escaped quote", "`c` varchar(9) DEFAULT 'a\\' NOT NULL',", false},
 		{"a longer word starting with NULL", "`c` int NOT NULLS,", false},
 		// Expressions in parentheses are not the column's own attribute.
 		{"inside a MariaDB column CHECK", "`c` int(11) DEFAULT NULL CHECK (`c` is not null or `d` > 0),", false},
