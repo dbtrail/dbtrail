@@ -366,3 +366,11 @@ func TestCapabilitiesReportsScopedPermissions(t *testing.T) {
 		}
 	}
 }
+
+// TestFirstRunRouteIsARead: the Getting started list is a read, so a read-only
+// role keeps it (#1606); a 403 would stop the page's loop without a word.
+func TestFirstRunRouteIsARead(t *testing.T) {
+	if p, ok := permForRoute("GET", "/api/servers/x/first-run"); !ok || p != ext.PermServersRead {
+		t.Fatalf("permForRoute = %q, %v; want %q", p, ok, ext.PermServersRead)
+	}
+}

@@ -148,6 +148,10 @@ func TestWatchFirstRunKeepsTrying(t *testing.T) {
 	running := string(b)
 	b, _ = json.Marshal(firstRunSteps(firstRunInput{Monitor: MonitorStatus{State: "running"}, IndexExists: &yes, StreamStarted: true, EventsIndexed: 1}))
 	complete := string(b)
+	b, _ = json.Marshal(firstRunSteps(firstRunInput{CheckError: "Error 1045: Access denied for user 'idx'"}))
+	checkErr := string(b)
+	b, _ = json.Marshal(firstRunSteps(firstRunInput{Monitor: MonitorStatus{State: "pending", SourceConnected: true}, IndexExists: &yes}))
+	moved := string(b)
 	appJS, err := filepath.Abs("assets/app.js")
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +162,7 @@ const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.
   if (n._text) out.push(n._text); for (const c of n.children || []) flat(c, out); return out; };
 (async () => {
   const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
-  const timers = []; ctx.setTimeout = (fn) => { timers.push(fn); return 1; };
+  const timers = [], delays = []; ctx.setTimeout = (fn, ms) => { timers.push(fn); delays.push(ms); return 1; };
   let queue = [], calls = 0;
   ctx.nextApi = () => { calls++; const s = queue.shift(); return s instanceof Error ? Promise.reject(s) : Promise.resolve(s); };
   ctx.rendered = 0;
@@ -187,6 +191,44 @@ const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.
   for (let i = 0; i < 3; i++) { timers.shift()(); await flush(); }
   out.staleText = flat(f.firstRunSlot).join(" ");
   out.stillPolling = timers.length;
+
+  // A report the index could not be read for tries again before the list is up...
+  timers.length = 0; queue = [` + checkErr + `, ` + running + `];
+  f = { firstRunSlot: new FakeEl("div") };
+  watch(f, () => true); await flush();
+  out.retryAfterCheckError = timers.length;
+  timers.shift()(); await flush();
+  out.cardAfterCheckError = f.firstRunSlot.children.length;
+
+  // ...and notes it right away once the list is up, without rendering the page.
+  timers.length = 0; ctx.rendered = 0; queue = [` + running + `, ` + checkErr + `];
+  f = { firstRunSlot: new FakeEl("div") };
+  watch(f, () => true); await flush();
+  timers.shift()(); await flush();
+  out.checkErrorNote = flat(f.firstRunSlot).join(" ");
+  out.checkErrorRendered = ctx.rendered; out.checkErrorTimers = timers.length;
+
+  out.refusals = {};
+  for (const status of [401, 403, 404]) {
+    timers.length = 0; queue = [fail(status)];
+    watch({ firstRunSlot: new FakeEl("div") }, () => true); await flush();
+    out.refusals[status] = timers.length;
+  }
+
+  // The wait doubles while the list is unchanged and goes back to 3s when it changes.
+  timers.length = 0; delays.length = 0; queue = [` + running + `, ` + running + `, ` + moved + `];
+  watch({ firstRunSlot: new FakeEl("div") }, () => true); await flush();
+  timers.shift()(); await flush();
+  timers.shift()(); await flush();
+  out.delays = delays.slice();
+
+  // A view that is gone stops the loop: no request and no new timer.
+  timers.length = 0; calls = 0; queue = [` + running + `, ` + running + `];
+  let alive = true;
+  watch({ firstRunSlot: new FakeEl("div") }, () => alive); await flush();
+  alive = false;
+  timers.shift()(); await flush();
+  out.goneCalls = calls; out.goneTimers = timers.length;
   console.log(JSON.stringify(out));
 })();
 `
@@ -200,7 +242,10 @@ const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.
 	}
 	var got struct {
 		RetryAfterFirstFailure, CardAfterRetry, Rendered, TimersAfterComplete, TimersAfterRefusal, StillPolling int
-		StaleText                                                                                               string
+		RetryAfterCheckError, CardAfterCheckError, CheckErrorRendered, CheckErrorTimers, GoneCalls, GoneTimers  int
+		StaleText, CheckErrorNote                                                                               string
+		Refusals                                                                                                map[string]int
+		Delays                                                                                                  []int
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
@@ -216,6 +261,23 @@ const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.
 	}
 	if !strings.Contains(got.StaleText, "Could not refresh this list") || !strings.Contains(got.StaleText, "Getting started") || got.StillPolling != 1 {
 		t.Errorf("a list already up does not stay with a refresh note while it keeps trying: %+v", got)
+	}
+	if got.RetryAfterCheckError != 1 || got.CardAfterCheckError != 1 {
+		t.Errorf("an unreadable index before the list is up does not try again: %+v", got)
+	}
+	if !strings.Contains(got.CheckErrorNote, "Could not refresh this list: Error 1045") || got.CheckErrorRendered != 0 || got.CheckErrorTimers != 1 {
+		t.Errorf("an unreadable index with the list up does not note it at once and keep trying: %+v", got)
+	}
+	for _, status := range []string{"401", "403", "404"} {
+		if n, ok := got.Refusals[status]; !ok || n != 0 {
+			t.Errorf("a %s keeps polling: %+v", status, got.Refusals)
+		}
+	}
+	if len(got.Delays) != 3 || got.Delays[0] != 3000 || got.Delays[1] != 6000 || got.Delays[2] != 3000 {
+		t.Errorf("waits = %v, want [3000 6000 3000]: doubling while unchanged, back to 3s on a change", got.Delays)
+	}
+	if got.GoneCalls != 1 || got.GoneTimers != 0 {
+		t.Errorf("a loop outlives its view: %d requests, %d timers", got.GoneCalls, got.GoneTimers)
 	}
 }
 

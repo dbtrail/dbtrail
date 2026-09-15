@@ -1,6 +1,7 @@
 package console
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -65,6 +66,9 @@ func TestFirstRunSteps(t *testing.T) {
 		{"stopped after the structure was read waits for Start on the next step",
 			firstRunInput{Monitor: MonitorStatus{State: "stopped"}, IndexExists: &yes, SnapshotTaken: true},
 			want{states: "dddww", fixText: "Start"}},
+		{"a run that stalled before saving a position lands on the first change",
+			firstRunInput{Monitor: MonitorStatus{State: "stalled", LastError: "no progress for 6m0s", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true},
+			want{states: "ddddf", failText: "no progress"}},
 		{"the index could not be checked: no step is claimed, done or not",
 			firstRunInput{Monitor: MonitorStatus{State: "running"}, CheckError: "Error 1226: max_user_connections"},
 			want{states: ""}},
@@ -187,4 +191,75 @@ func TestFirstRunFixMatchesTheRetry(t *testing.T) {
 			t.Errorf("%q retrying=%v: fix = %q", c.lastErr, c.retrying, fix)
 		}
 	}
+}
+
+// TestHandleFirstRun drives GET /api/servers/{id}/first-run through the real
+// router (#1606): which servers answer, which steps each kind of server gets,
+// and that an unreadable index answers with a scrubbed error and no steps.
+func TestHandleFirstRun(t *testing.T) {
+	srv, _ := newBaselineTriggerServer(t)
+	srv.monitorCtrl.(*stubMonitorCtrl).status = MonitorStatus{State: "stopped"}
+	add := func(e ServerEntry) string {
+		t.Helper()
+		got, err := srv.cm.reg.Add(e)
+		if err != nil {
+			t.Fatalf("add %s: %v", e.Name, err)
+		}
+		return got.ID
+	}
+	get := func(id string) (int, string, FirstRunReport) {
+		t.Helper()
+		rec, body := doServersReq(t, srv, "GET", "/api/servers/"+id+"/first-run", "")
+		var rep FirstRunReport
+		if rec.Code == 200 {
+			if err := json.Unmarshal(body, &rep); err != nil {
+				t.Fatalf("decode %s: %v", body, err)
+			}
+		}
+		return rec.Code, string(body), rep
+	}
+	names := func(rep FirstRunReport) string {
+		var n []string
+		for _, s := range rep.Steps {
+			n = append(n, s.Name)
+		}
+		return strings.Join(n, " | ")
+	}
+
+	t.Run("an unknown server is a 404", func(t *testing.T) {
+		if code, body, _ := get("nope"); code != 404 {
+			t.Fatalf("code = %d, body = %s", code, body)
+		}
+	})
+	t.Run("a server with no source is a 409", func(t *testing.T) {
+		id := add(ServerEntry{Name: "nosrc", DSN: "idx:idxpw@tcp(127.0.0.1:1)/bintrail_idx_nosrc"})
+		if code, body, _ := get(id); code != 409 {
+			t.Fatalf("code = %d, body = %s", code, body)
+		}
+	})
+	t.Run("a MySQL server gets the structure step and no backup step without a location", func(t *testing.T) {
+		id := add(ServerEntry{Name: "my", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/"})
+		code, body, rep := get(id)
+		if code != 200 || len(rep.Steps) != 5 || !strings.Contains(names(rep), "Read the table structure") || strings.Contains(names(rep), "backup") {
+			t.Fatalf("code = %d, steps = %s, body = %s", code, names(rep), body)
+		}
+		if !strings.Contains(body, `"name":"Create the index database"`) || !strings.Contains(body, `"state":"waiting"`) {
+			t.Errorf("the wire shape changed: %s", body)
+		}
+	})
+	t.Run("a PostgreSQL server with a location gets no structure step and a backup step", func(t *testing.T) {
+		id := add(ServerEntry{Name: "pg", Flavor: FlavorPostgres, SourceDSN: "postgres://u:pw@127.0.0.1:2/db",
+			SourceSlot: "s", SourcePublication: "p", BaselineDir: t.TempDir()})
+		code, body, rep := get(id)
+		if code != 200 || strings.Contains(names(rep), "Read the table structure") || !strings.Contains(names(rep), "Take the first backup") {
+			t.Fatalf("code = %d, steps = %s, body = %s", code, names(rep), body)
+		}
+	})
+	t.Run("an index that cannot be read answers with its error, scrubbed, and no steps", func(t *testing.T) {
+		id := add(ServerEntry{Name: "unreach", DSN: "idx:idxpw@tcp(127.0.0.1:1)/bintrail_idx_unreach", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/"})
+		code, body, rep := get(id)
+		if code != 200 || len(rep.Steps) != 0 || !strings.Contains(body, `"check_error":`) || !strings.Contains(rep.CheckError, "127.0.0.1:1") || strings.Contains(body, "idxpw") {
+			t.Fatalf("code = %d, body = %s", code, body)
+		}
+	})
 }
