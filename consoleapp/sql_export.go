@@ -941,7 +941,7 @@ func sqlExportFoldConfig(req console.SQLExportRequest, dir string, tableList []s
 		WarnEventThreshold: daemonFoldWarnEventThreshold,
 		MaxTouchedRows:     daemonFoldMaxTouchedRows,
 		RemediationHint:    daemonFoldRemediation,
-		ChunkSpace:         checkChunkDisk,
+		SpaceCheck:         newDiskSpaceCheck(),
 		// AllowGaps stays FALSE: a dump the operator will load somewhere is
 		// the last artifact that may be knowingly incomplete.
 	}

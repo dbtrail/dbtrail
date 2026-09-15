@@ -36,8 +36,8 @@ type MydumperWriter struct {
 	table     string
 	chunkSize int64
 	// spaceCheck, when set, runs before each chunk file is created
-	// (FullTableConfig.ChunkSpace).
-	spaceCheck func(dir string, next int64) error
+	// (FullTableConfig.SpaceCheck).
+	spaceCheck func(dir string, need int64) error
 
 	// insertPrefix is the "INSERT INTO `db`.`tab` (`c1`, `c2`, ...) VALUES\n"
 	// header emitted once at the top of each chunk file.

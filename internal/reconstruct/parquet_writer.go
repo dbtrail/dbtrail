@@ -249,6 +249,19 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 		md[baseline.MetaKeyBinlogPos] = strconv.FormatInt(in.SourceBaseline.Metadata.BinlogPos, 10)
 	}
 
+	// The disk check (#1614) runs here, not before the fold: a table carried
+	// forward unchanged never gets this far, so only a table that is really
+	// rewritten counts, sized on the file it is rebuilt from, already local.
+	if in.SpaceCheck != nil {
+		fi, err := os.Stat(in.LocalBaselinePath)
+		if err != nil {
+			return fmt.Errorf("size the backup file %s.%s is rebuilt from: %w", in.Schema, in.Table, err)
+		}
+		if err := in.SpaceCheck(in.SnapshotDir, fi.Size()); err != nil {
+			return err
+		}
+	}
+
 	path := filepath.Join(in.SnapshotDir, in.Schema, in.Table+".parquet")
 	w, err := newParquetTableWriter(path, cols, md)
 	if err != nil {
