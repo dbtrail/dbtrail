@@ -133,10 +133,11 @@ type FullTableConfig struct {
 	// anchored at (nil when the index holds no events); see ResolveSnapshotCut.
 	snapshotDir string
 	cut         *query.BinlogPos
-	// schemaAt is the schema snapshot in effect at At, and schemaAtTime when it
-	// came into effect (#1651; the DDL's source time since #1667): the column-type check compares against it, not the
-	// latest snapshot, and only for a baseline older than it. nil when the
-	// snapshot history cannot be read; the check then compares names only.
+	// schemaAt is the schema snapshot in effect at At (#1651, #1667), and
+	// schemaAtTime when it read the live schema, on the same host clock as a
+	// baseline's CREATE TABLE: names and types are compared against it, not
+	// the latest snapshot, only for a baseline older than it. nil when the
+	// snapshot history cannot be read; names are then compared with the latest.
 	schemaAt     *metadata.Resolver
 	schemaAtTime time.Time
 	Parallelism  int  // max concurrent tables (0 → runtime.NumCPU())
@@ -1061,15 +1062,14 @@ func ReconstructTable(
 			asOf = snapshotTime
 		}
 		//
-		// Names (#1667) against that same snapshot. When the snapshot in
-		// effect at the target is older than the baseline and a newer one
-		// exists, none describes the table at the target: the newer one
-		// describes a change past it (a restore to before an added column must
-		// not refuse), and the older one may be a stale snapshot an operator
-		// has since replaced, as the refusal tells them to. The baseline's own
-		// CREATE TABLE is then the newest description, so names are skipped.
-		// With no newer snapshot the latest is the one in effect and is
-		// compared as before, so a stale snapshot still refuses.
+		// Names (#1667) against that same snapshot, which describes the table
+		// at the target and postdates the baseline. Otherwise against the
+		// latest: a snapshot older than the baseline says nothing about a DDL
+		// between the baseline and the target that got no snapshot of its own
+		// (file mode without --source-dsn, a failed snapshot, a DDL the parser
+		// missed), and the latest is the only record of it. That refuses a
+		// restore to before a column added later, which a snapshot taken after
+		// the baseline and before the target clears.
 		namesTM := tm
 		var typesTM *metadata.TableMeta
 		if cfg.schemaAt != nil && !cfg.schemaAtTime.Before(asOf) {
@@ -1079,8 +1079,6 @@ func ReconstructTable(
 				slog.Warn("the schema snapshot in effect at the target does not describe this table; column types are not compared",
 					"schema", schema, "table", table, "error", rerr)
 			}
-		} else if cfg.schemaAt != nil && cfg.schemaAt.SnapshotID() != resolver.SnapshotID() {
-			namesTM = nil
 		}
 		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, namesTM, typesTM, schema, table); err != nil {
 			return nil, err
@@ -2811,8 +2809,9 @@ func rowAfterOrdered(rowAfter map[string]any, colNames []string, schema, table s
 	return out
 }
 
-// schemaSnapshotAt loads the schema snapshot in effect at at: the newest one
-// in effect at or before it (metadata.LoadSnapshotEpochs). A target older than every snapshot has none (EpochAt
+// schemaSnapshotAt loads the schema snapshot in effect at at, and when it was
+// taken: the newest one in effect at or before it (metadata.LoadSnapshotEpochs).
+// A target older than every snapshot has none (EpochAt
 // would answer the first, which describes a later schema). Failures degrade to
 // nil with a warning, which makes the type check compare nothing: refusing a
 // fold because the snapshot history is unreadable would stop every backup.
@@ -2826,13 +2825,13 @@ func schemaSnapshotAt(db *sql.DB, at time.Time, latest *metadata.Resolver) (*met
 	if !ok {
 		return nil, time.Time{}
 	}
-	var taken time.Time
+	var from, taken time.Time
 	for _, e := range epochs {
 		if e.ID == id {
-			taken = e.At
+			from, taken = e.At, e.Taken
 		}
 	}
-	if taken.After(at) {
+	if from.After(at) {
 		return nil, time.Time{}
 	}
 	if latest != nil && latest.SnapshotID() == id {

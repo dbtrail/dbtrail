@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math"
 	"slices"
 	"strconv"
@@ -113,42 +114,60 @@ func (m *EnumLabelMapper) MapImage(image map[string]any) {
 
 // ─── Snapshot epochs (#475) ─────────────────────────────────────────────────
 
-// SnapshotEpoch is one schema snapshot's identity and the instant it came
-// into effect. Epochs order the snapshot history so a binlog event can be
-// decoded with the table definition in effect when it happened.
+// SnapshotEpoch is one schema snapshot's identity, the instant it came into
+// effect, and when its content was read. Epochs order the snapshot history so
+// a binlog event can be decoded with the table definition in effect when it
+// happened.
 type SnapshotEpoch struct {
 	ID int
+	// At is when the snapshot came into effect, a source instant when it was
+	// taken for a recorded DDL (#1667); EpochAt selects on it.
 	At time.Time
+	// Taken is when the snapshot read the live schema, on the bintrail host's
+	// clock. Its content is the schema at Taken, whatever At says.
+	Taken time.Time
 }
 
-// LoadSnapshotEpochs returns every snapshot's (id, in effect from) ascending by
-// that instant. The result is small (one row per snapshot) and snapshots are
-// immutable, so callers may cache per-ID resolvers indefinitely — only this
-// list grows.
+// LoadSnapshotEpochs returns every snapshot's epoch ascending by At. The result
+// is small (one row per snapshot) and snapshots are immutable, so callers may
+// cache per-ID resolvers indefinitely — only this list grows.
 //
-// A snapshot taken for a recorded DDL is in effect from when the DDL ran on the
-// source, schema_changes.detected_at (#1667). Every caller compares epochs with
-// a source instant, an event timestamp or a restore target, and capture can
-// reach a DDL minutes or hours after it ran; snapshot_time is when capture got
-// there. Any other snapshot (the first, a manual one, one taken at startup)
-// has no earlier instant and counts from when it was taken.
+// A snapshot counts from when it was taken, except one taken for a recorded
+// DDL, which counts from when the DDL ran on the source,
+// schema_changes.detected_at (#1667): every caller compares epochs with a
+// source instant (an event timestamp or a restore target), and capture can
+// reach a DDL minutes or hours after it ran.
 //
-// Sorted by that instant, not by id: a snapshot taken at a restart reads the
-// live schema, so it already holds the DDLs the catch-up records after it, and
-// those snapshots belong before it. The cost is clock skew between the source
-// and the bintrail host, which can order a DDL snapshot against a manual one
-// the wrong way by the skew.
+// Only when no other recorded DDL ran between the two instants. A snapshot
+// reads the live schema, so one taken late already holds every DDL that ran
+// before it was taken; dating it at the earlier DDL would decode the events
+// between the two with a definition they were not written under, and a TEXT
+// column turned from VARCHAR base64-decodes a plain value into garbage.
+// Capture behind across two DDLs, and re-indexing an old binlog with
+// --source-dsn, both take such snapshots. The check compares a source instant
+// with a host one, so clock skew between the two moves it by the skew.
 //
-// An index without schema_changes keeps the snapshot times.
+// Sorted by At, not by id: a snapshot taken at a restart reads the live schema,
+// so it already holds the DDLs the catch-up records after it, and those
+// snapshots belong before it.
+//
+// When schema_changes cannot be read (no table, no SELECT on it), every
+// snapshot counts from when it was taken.
 func LoadSnapshotEpochs(db *sql.DB) ([]SnapshotEpoch, error) {
-	rows, err := db.Query(`SELECT s.snapshot_id, s.taken, c.detected
+	rows, err := db.Query(`SELECT s.snapshot_id, s.taken,
+			CASE WHEN NOT EXISTS (SELECT 1 FROM schema_changes o
+				WHERE o.detected_at > c.detected AND o.detected_at <= s.taken
+				AND NOT (o.snapshot_id <=> s.snapshot_id)) THEN c.detected END
 		FROM (SELECT snapshot_id, MIN(snapshot_time) AS taken
 			FROM schema_snapshots GROUP BY snapshot_id) s
 		LEFT JOIN (SELECT snapshot_id, MIN(detected_at) AS detected
 			FROM schema_changes WHERE snapshot_id IS NOT NULL GROUP BY snapshot_id) c
 		ON c.snapshot_id = s.snapshot_id`)
-	var myErr *mysql.MySQLError
-	if errors.As(err, &myErr) && myErr.Number == 1146 {
+	if err != nil {
+		var myErr *mysql.MySQLError
+		if !errors.As(err, &myErr) || myErr.Number != 1146 {
+			slog.Warn("could not read schema_changes; schema snapshots count from when they were taken", "error", err)
+		}
 		rows, err = db.Query(`SELECT snapshot_id, MIN(snapshot_time), NULL
 			FROM schema_snapshots GROUP BY snapshot_id`)
 	}
@@ -160,9 +179,10 @@ func LoadSnapshotEpochs(db *sql.DB) ([]SnapshotEpoch, error) {
 	for rows.Next() {
 		var e SnapshotEpoch
 		var detected sql.NullTime
-		if err := rows.Scan(&e.ID, &e.At, &detected); err != nil {
+		if err := rows.Scan(&e.ID, &e.Taken, &detected); err != nil {
 			return nil, err
 		}
+		e.At = e.Taken
 		if detected.Valid {
 			e.At = detected.Time
 		}
