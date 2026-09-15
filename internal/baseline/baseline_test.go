@@ -2636,6 +2636,9 @@ func TestSnapshotComplete_legacyMarkerless(t *testing.T) {
 // grading needs WHEN a skipped folder is from, which its name still says.
 func TestDiscoverBaselinesReport_datesTheFoldersItSkipped(t *testing.T) {
 	if os.Geteuid() == 0 {
+		if os.Getenv("CI") != "" {
+			t.Fatal("running as root under CI: the mode-000 fixture is a no-op and this coverage would silently vanish")
+		}
 		t.Skip("root bypasses directory read permissions")
 	}
 	root := t.TempDir()
@@ -2663,5 +2666,45 @@ func TestDiscoverBaselinesReport_datesTheFoldersItSkipped(t *testing.T) {
 		if !want[u.UTC().Format(time.RFC3339)] {
 			t.Fatalf("unreadable = %v", unreadable)
 		}
+	}
+}
+
+// TestDiscoverBaselinesReport_listableButNotEnterableIsSkipped (#1639): a
+// table folder that lists but cannot be entered is unreadable to status too,
+// as it is to the lookups.
+func TestDiscoverBaselinesReport_listableButNotEnterableIsSkipped(t *testing.T) {
+	if os.Geteuid() == 0 {
+		if os.Getenv("CI") != "" {
+			t.Fatal("running as root under CI: the permission fixture is a no-op and this coverage would silently vanish")
+		}
+		t.Skip("root bypasses directory permissions")
+	}
+	root := t.TempDir()
+	older, newer := "2026-09-01T06-00-00Z", "2026-09-02T06-00-00Z"
+	for _, d := range []string{older, newer} {
+		dir := filepath.Join(root, d, "shop")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "a.parquet"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shop := filepath.Join(root, newer, "shop")
+	if err := os.Chmod(shop, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(shop, 0o755) })
+	infos, unreadable, err := DiscoverBaselinesReport(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range infos {
+		if in.SnapshotTime.Format("2006-01-02") == "2026-09-02" {
+			t.Fatalf("listed a table from a folder that cannot be entered: %+v", in)
+		}
+	}
+	if len(unreadable) != 1 || unreadable[0].Format("2006-01-02") != "2026-09-02" {
+		t.Fatalf("unreadable = %v, want the newer folder", unreadable)
 	}
 }

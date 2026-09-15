@@ -96,6 +96,14 @@ func DiscoverBaselinesReport(dir string) ([]BaselineInfo, []time.Time, error) {
 				}
 				tableName := strings.TrimSuffix(tf.Name(), ".parquet")
 				filePath := filepath.Join(tableDir, tf.Name())
+				// A folder that lists but cannot be entered (#1639): its files
+				// cannot be opened, so it counts as unreadable, as it does for
+				// the lookups.
+				if _, err := os.Stat(filePath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					slog.Warn("could not read baseline table directory", "path", tableDir, "error", err)
+					unreadable = append(unreadable, ts)
+					break
+				}
 
 				info := BaselineInfo{
 					SnapshotTime: ts,

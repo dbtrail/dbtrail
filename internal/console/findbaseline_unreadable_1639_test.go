@@ -18,6 +18,9 @@ import (
 // the durable copy must still be asked, with the answer saying why.
 func TestBundleFindBaseline_unreadableLocalAsksTheDurableCopy(t *testing.T) {
 	if os.Geteuid() == 0 {
+		if os.Getenv("CI") != "" {
+			t.Fatal("running as root under CI: the mode-000 fixture is a no-op and this coverage would silently vanish")
+		}
 		t.Skip("root bypasses directory read permissions")
 	}
 	t1 := time.Date(2026, 9, 1, 6, 0, 0, 0, time.UTC)
@@ -60,6 +63,25 @@ func TestBundleFindBaseline_unreadableLocalAsksTheDurableCopy(t *testing.T) {
 		path, at, _, err := b.findBaseline(context.Background(), "shop", "a", t2.Add(time.Hour))
 		if err != nil || !strings.HasPrefix(path, durable) || !at.Equal(t2) {
 			t.Fatalf("path=%s at=%v err=%v; want the newer snapshot from the durable copy", path, at, err)
+		}
+	})
+	t.Run("durable copy's own answer is stale: both causes are kept", func(t *testing.T) {
+		local, durable := t.TempDir(), t.TempDir()
+		mk(t, local, t1)
+		lock(t, mk(t, local, t2))
+		mid := t1.Add(12 * time.Hour)
+		mk(t, durable, mid)
+		other := filepath.Join(durable, reconstruct.SnapshotDirName(t2), "shop")
+		if err := os.MkdirAll(other, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(other, "b.parquet"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		path, at, stale, err := b0(local, durable).findBaseline(context.Background(), "shop", "a", t2.Add(time.Hour))
+		if err != nil || !strings.HasPrefix(path, durable) || !at.Equal(mid) || !stale.Unreadable ||
+			!strings.Contains(stale.Message, "could not be read") || !strings.Contains(stale.Message, "absent from the newest") {
+			t.Fatalf("path=%s at=%v stale=%+v err=%v; want the durable answer with both causes", path, at, stale, err)
 		}
 	})
 	t.Run("durable copy cannot be read either: keep the local answer and its warning", func(t *testing.T) {
@@ -110,4 +132,8 @@ func TestBundleFindBaseline_unreadableLocalAsksTheDurableCopy(t *testing.T) {
 			t.Fatalf("path=%s at=%v stale=%+v err=%v", path, at, stale, err)
 		}
 	})
+}
+
+func b0(local, durable string) *bundle {
+	return &bundle{baselineSrc: local, baselineFallbackSrc: durable}
 }

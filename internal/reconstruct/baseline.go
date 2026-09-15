@@ -467,17 +467,33 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 				skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: schemaDir, Err: err})
 				continue
 			}
+			var tables []BaselineFile
 			for _, f := range files {
 				if f.IsDir() || !strings.HasSuffix(f.Name(), ".parquet") {
 					continue
 				}
-				out = append(out, BaselineFile{
+				path := filepath.Join(schemaDir, f.Name())
+				// Listing a folder needs read permission, opening its files
+				// needs execute. The lookup stats the file, so the listing
+				// does too: a folder that lists but cannot be entered must
+				// not read as holding tables the lookup cannot reach.
+				if _, err := os.Stat(path); err != nil {
+					if errors.Is(err, fs.ErrNotExist) {
+						continue
+					}
+					slog.Warn("baseline listing: skipping unreadable schema directory", "path", schemaDir, "error", err)
+					skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: schemaDir, Err: err})
+					tables = nil
+					break
+				}
+				tables = append(tables, BaselineFile{
 					SnapshotTime: ts,
 					Schema:       dbDir.Name(),
 					Table:        strings.TrimSuffix(f.Name(), ".parquet"),
-					Path:         filepath.Join(schemaDir, f.Name()),
+					Path:         path,
 				})
 			}
+			out = append(out, tables...)
 		}
 	}
 	sortBaselineFiles(out)
@@ -610,7 +626,13 @@ func findBaselineLocal(baselineDir, schema, table string, at time.Time) (string,
 		candidates = append(candidates, candidate{t: t, path: p})
 	}
 	if len(candidates) == 0 {
-		if err := UnreadableAtOrAfter(unreadable, time.Time{}, at); err != nil {
+		// Only a folder at or after the newest snapshot counts: an older one
+		// could hold the table only if every newer backup dropped it, while
+		// refusing on it would break every table created after the last
+		// backup, whose answer is "no baseline" (the binlog-only and
+		// other-location fallbacks). newestSnap includes an unreadable newest
+		// folder, which does count.
+		if err := UnreadableAtOrAfter(unreadable, newestSnap, at); err != nil {
 			return "", time.Time{}, StaleWarning{}, fmt.Errorf("%s.%s at or before %s: %w", schema, table, at.UTC().Format(time.RFC3339), err)
 		}
 		return "", time.Time{}, StaleWarning{}, fmt.Errorf("%w: %s.%s at or before %s in %q",

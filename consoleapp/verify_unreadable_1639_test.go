@@ -20,6 +20,9 @@ import (
 // on the normal path.
 func TestRunBaselineAnchored_unreadableFolderIsInconclusive(t *testing.T) {
 	if os.Geteuid() == 0 {
+		if os.Getenv("CI") != "" {
+			t.Fatal("running as root under CI: the mode-000 fixture is a no-op and this coverage would silently vanish")
+		}
 		t.Skip("root bypasses directory read permissions")
 	}
 	root := t.TempDir()

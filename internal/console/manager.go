@@ -323,13 +323,20 @@ func (b *bundle) findBaseline(ctx context.Context, schema, table string, at time
 		if ferr != nil || (err == nil && !ftime.After(snapshotTime)) {
 			return path, snapshotTime, stale, err
 		}
-		if !fstale.Stale() {
-			cause := stale.Message
-			if err != nil {
-				cause = err.Error()
-			}
+		cause := stale.Message
+		if err != nil {
+			cause = err.Error()
+		}
+		why := "read from the backup destination because a local backup folder could not be read, so a newer backup may exist there: " + cause
+		if fstale.Stale() {
+			// The destination's own answer is stale too: keep both, or the
+			// operator sees a stale warning without the reason it came from
+			// the destination.
+			fstale.Message = why + "; " + fstale.Message
+			fstale.Unreadable = true
+		} else {
 			fstale = reconstruct.StaleWarning{
-				Message:        "read from the backup destination because a local backup folder could not be read, so a newer backup may exist there: " + cause,
+				Message:        why,
 				UsingSnapshot:  ftime,
 				NewestSnapshot: ftime,
 				Unreadable:     true,
