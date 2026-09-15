@@ -394,8 +394,8 @@ func checkBaselineSchema(createSQL string, tm, typesTM *metadata.TableMeta, sche
 				continue
 			}
 			if b, ok := inBaseline[strings.ToLower(c.Name)]; ok {
-				if was, now, changed := columnTypeChanged(b.DeclaredType, c); changed {
-					retyped = append(retyped, fmt.Sprintf("%s (%s -> %s)", c.Name, was, now))
+				if change, changed := columnDefinitionChanged(b, c); changed {
+					retyped = append(retyped, fmt.Sprintf("%s (%s)", c.Name, change))
 				}
 			}
 		}
@@ -467,6 +467,51 @@ func columnTypeChanged(declared string, c metadata.ColumnMeta) (was, now string,
 		return "", "", false
 	}
 	return strings.TrimSpace(declared), strings.TrimSpace(firstNonEmpty(c.ColumnType, c.DataType)), was != now
+}
+
+// columnDefinitionChanged is one column's entry in the type-change refusal:
+// its declared type (columnTypeChanged) and whether it allows NULL
+// (columnNullabilityChanged, #1665), as "was -> now". When only the NULL-ness
+// moved, the type is shown unchanged on both sides as each side spells it, or
+// left out when the snapshot carries no type.
+func columnDefinitionChanged(b baseline.Column, c metadata.ColumnMeta) (string, bool) {
+	was, now, typeChanged := columnTypeChanged(b.DeclaredType, c)
+	nullWas, nullNow, nullChanged := columnNullabilityChanged(b.NotNull, c)
+	if !typeChanged && !nullChanged {
+		return "", false
+	}
+	if !typeChanged {
+		was, now = strings.TrimSpace(b.DeclaredType), strings.TrimSpace(firstNonEmpty(c.ColumnType, c.DataType))
+		if now == "" {
+			was = ""
+		}
+	}
+	if nullChanged {
+		was, now = strings.TrimSpace(was+" "+nullWas), strings.TrimSpace(now+" "+nullNow)
+	}
+	return was + " -> " + now, true
+}
+
+// columnNullabilityChanged reports whether a column's IS_NULLABLE in the
+// schema snapshot disagrees with the NOT NULL its baseline's CREATE TABLE
+// declares (#1665). Same reason as a type change: the carried CREATE TABLE is
+// what a restore loads, so a column made nullable and then set to NULL
+// publishes a backup that fails at load ("Column cannot be null"), and one made
+// NOT NULL publishes a definition the source no longer has. A snapshot that
+// does not know (an empty value, as a PostgreSQL snapshot stores) is not a
+// change.
+func columnNullabilityChanged(notNull bool, c metadata.ColumnMeta) (was, now string, changed bool) {
+	switch strings.ToUpper(strings.TrimSpace(c.IsNullable)) {
+	case "YES":
+		if notNull {
+			return "NOT NULL", "NULL", true
+		}
+	case "NO":
+		if !notNull {
+			return "NULL", "NOT NULL", true
+		}
+	}
+	return "", "", false
 }
 
 // typeToken is the leading type word of a ComparableColumnType spelling.
