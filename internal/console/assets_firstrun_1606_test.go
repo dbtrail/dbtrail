@@ -30,7 +30,7 @@ func TestFirstRunCardRendersTheReport(t *testing.T) {
 		}
 		return string(b)
 	}
-	failed := marshal(firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "Access denied for user 'repl' (retrying)"}, IndexExists: &yes})
+	failed := marshal(firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "Access denied for user 'repl' (retrying)", Retrying: true}, IndexExists: &yes})
 	working := marshal(firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true,
 		Backup: &BaselineStatus{State: "idle"}})
 	checkErr := marshal(firstRunInput{Monitor: MonitorStatus{State: "pending"}, CheckError: "dial tcp 10.0.0.1:3306: connection refused"})
@@ -222,8 +222,15 @@ const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.
 // TestClosingServersRendersOverview: a server added or started in the dialog
 // gets its Getting started list without leaving the page.
 func TestClosingServersRendersOverview(t *testing.T) {
-	body := jsFunctionBody(t, readAsset(t, "app.js"), "closeServersModal")
+	js := readAsset(t, "app.js")
+	body := jsFunctionBody(t, js, "closeServersModal")
 	if !strings.Contains(body, `routeFromLocation() === "overview"`) || !strings.Contains(body, "renderRoute()") {
 		t.Error("closing the servers dialog does not render the Overview again")
+	}
+	// Escape empties the shared dialog slot itself; for the servers dialog it
+	// must go through the same close.
+	keys := jsFunctionBody(t, js, "globalKeydown")
+	if !strings.Contains(keys, `querySelector("#servers-list")`) || !strings.Contains(keys, "closeServersModal()") {
+		t.Error("Escape closes the servers dialog without rendering the Overview again")
 	}
 }

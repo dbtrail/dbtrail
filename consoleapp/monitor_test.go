@@ -251,8 +251,44 @@ func TestMonitorRun_circuitBreakerGivesUp(t *testing.T) {
 	if !strings.Contains(st.LastError, "gave up") {
 		t.Errorf("LastError = %q, want a gave-up explanation", st.LastError)
 	}
+	if st.Retrying {
+		t.Errorf("a failure the supervisor gave up on reports retrying: %+v", st)
+	}
 	if !strings.Contains(st.LastError, "boom") {
 		t.Errorf("LastError = %q, want the underlying error preserved", st.LastError)
+	}
+}
+
+// TestMonitorRun_retryingFailureSaysSo: a failure the loop will retry is
+// reported as retrying while it waits, and a stop clears it (#1606).
+func TestMonitorRun_retryingFailureSaysSo(t *testing.T) {
+	oldBase, oldCap := monitorBackoffBase, monitorBackoffCap
+	monitorBackoffBase, monitorBackoffCap = time.Hour, time.Hour
+	defer func() { monitorBackoffBase, monitorBackoffCap = oldBase, oldCap }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &monitorSupervisor{
+		baseCtx:  ctx,
+		jobs:     map[string]*monitorJob{},
+		streamFn: func(context.Context, streamrun.Config) error { return errors.New("boom: cannot connect") },
+	}
+	job := &monitorJob{cancel: cancel, done: make(chan struct{})}
+	job.set("pending", "")
+	m.wg.Add(1)
+	go m.run(ctx, job, console.ServerEntry{ID: "e9", Name: "retry"}, console.FlavorMySQL, func(c context.Context) error { return m.streamFn(c, streamrun.Config{}) })
+
+	deadline := time.Now().Add(5 * time.Second)
+	for job.snapshot().State != "failed" && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st := job.snapshot(); st.State != "failed" || !st.Retrying {
+		t.Fatalf("while waiting to retry: %+v, want failed and retrying", st)
+	}
+	cancel()
+	<-job.done
+	if st := job.snapshot(); st.State != "stopped" || st.Retrying {
+		t.Fatalf("after stop: %+v, want stopped and not retrying", st)
 	}
 }
 

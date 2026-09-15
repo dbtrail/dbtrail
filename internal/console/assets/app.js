@@ -9552,7 +9552,13 @@ function globalKeydown(e) {
     // SAME Escape that closed the palette lands here with the cmdk check
     // above already passing.
     if (modalMount && modalMount.querySelector(".busy-modal")) return;
-    if (modalMount && modalMount.firstChild) { e.preventDefault(); modalMount.replaceChildren(); }
+    if (modalMount && modalMount.firstChild) {
+      e.preventDefault();
+      // The servers dialog closes through its own close, which renders the
+      // Overview again for a server just added (#1606).
+      if (modalMount.querySelector("#servers-list")) closeServersModal();
+      else modalMount.replaceChildren();
+    }
     return;
   }
   // ⌘K / Ctrl+K opens the palette anywhere.

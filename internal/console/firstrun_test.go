@@ -48,7 +48,7 @@ func TestFirstRunSteps(t *testing.T) {
 			firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true, EventsIndexed: 1},
 			want{states: "ddddd", complete: true}},
 		{"a failure before the index exists lands on the first step",
-			firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "Access denied for user (retrying)"}, IndexExists: &no},
+			firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "Access denied for user (retrying)", Retrying: true}, IndexExists: &no},
 			want{states: "fwwww", failText: "Access denied", fixText: "retries on its own"}},
 		{"a failure the supervisor gave up on asks for Start, not a retry",
 			firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "Access denied (gave up after 6h0m0s of crash-looping; fix the issue, then press Start to retry)"}, IndexExists: &yes},
@@ -169,21 +169,22 @@ func TestFirstRunLostPositionIsShown(t *testing.T) {
 }
 
 // TestFirstRunFixMatchesTheRetry: only a failure the supervisor is retrying
-// says capture retries on its own.
+// says capture retries on its own; the error text is not what decides it.
 func TestFirstRunFixMatchesTheRetry(t *testing.T) {
 	yes := true
 	for _, c := range []struct {
-		lastErr string
-		retries bool
+		lastErr  string
+		retrying bool
 	}{
 		{"dial tcp: connection refused (retrying)", true},
 		{"dial tcp: connection refused (gave up after 6h0m0s of crash-looping; fix the issue, then press Start to retry)", false},
 		{"create index database: Access denied", false},
+		{"a message that happens to end in (retrying)", false},
 	} {
-		got := firstRunSteps(firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: c.lastErr}, IndexExists: &yes})
+		got := firstRunSteps(firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: c.lastErr, Retrying: c.retrying}, IndexExists: &yes})
 		fix := got.Steps[1].Fix
-		if strings.Contains(fix, "retries on its own") != c.retries {
-			t.Errorf("%q: fix = %q", c.lastErr, fix)
+		if strings.Contains(fix, "retries on its own") != c.retrying || (!c.retrying && !strings.Contains(fix, "then press Start")) {
+			t.Errorf("%q retrying=%v: fix = %q", c.lastErr, c.retrying, fix)
 		}
 	}
 }

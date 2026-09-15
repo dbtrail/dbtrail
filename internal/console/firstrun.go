@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -110,10 +109,10 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 			switch in.Monitor.State {
 			case "failed":
 				step.State, step.Detail = firstRunFailed, in.Monitor.LastError
-				// The supervisor marks a failure it will retry; one it gave up
-				// on, or a Start that failed while setting up, waits for Start.
+				// Only a failure the supervisor will retry says so; one it gave
+				// up on, or a Start that failed while setting up, waits for Start.
 				step.Fix = "Fix the cause above, then press Start on this server in Servers."
-				if strings.HasSuffix(in.Monitor.LastError, "(retrying)") {
+				if in.Monitor.Retrying {
 					step.Fix = "Capture retries on its own. Fix the cause above, or press Start on this server in Servers to run the startup checks."
 				}
 			case "stalled":

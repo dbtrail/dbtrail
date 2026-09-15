@@ -56,6 +56,10 @@ type MonitorStatus struct {
 	// (#1606). It resets when a run starts, and keeps that run's value while
 	// the run waits to retry or after it stops.
 	SourceConnected bool `json:"source_connected,omitempty"`
+	// Retrying: a failed state the supervisor will retry on its own after a
+	// backoff. False for a failure it gave up on and for a Start that failed
+	// while setting up, which both wait for Start (#1606).
+	Retrying bool `json:"retrying,omitempty"`
 }
 
 // MonitorController is the control-plane supervisor as the console sees it.

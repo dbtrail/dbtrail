@@ -118,6 +118,9 @@ type monitorJob struct {
 	// sourceConnected: this run's stream has opened the source connection
 	// (the OnSourceConnected hook). Every new run starts false.
 	sourceConnected bool
+	// retrying: the stored failure is one run() will retry after its backoff,
+	// not a setup failure in Start or a give-up. Any other set clears it.
+	retrying bool
 	// lostPosition, when non-empty, records that an unfillable binlog gap
 	// forced an auto-advance: events were permanently lost. The fact is
 	// also persisted in stream_state (gap_lost_at/_detail) and re-hydrated
@@ -130,6 +133,7 @@ type monitorJob struct {
 func (j *monitorJob) set(state, lastErr string) {
 	j.mu.Lock()
 	j.state, j.lastErr, j.since = state, lastErr, time.Now().UTC()
+	j.retrying = false
 	if state == "pending" {
 		j.sourceConnected = false // every run connects again
 	}
@@ -155,6 +159,13 @@ func (j *monitorJob) progress() {
 	if j.state == "pending" {
 		j.state, j.lastErr, j.since = "running", "", j.lastProgress
 	}
+	j.mu.Unlock()
+}
+
+// setRetrying stores a failure the run loop will retry after its backoff.
+func (j *monitorJob) setRetrying(lastErr string) {
+	j.mu.Lock()
+	j.state, j.lastErr, j.since, j.retrying = "failed", lastErr, time.Now().UTC(), true
 	j.mu.Unlock()
 }
 
@@ -204,7 +215,7 @@ func (j *monitorJob) pgStreamHooks() *pgstreamrun.Hooks {
 func (j *monitorJob) snapshot() console.MonitorStatus {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected}
+	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected, Retrying: j.retrying}
 	if j.state == "running" {
 		if idle := time.Since(j.lastProgress); !j.lastProgress.IsZero() && idle > monitorStalledAfter {
 			st.State = "stalled"
@@ -640,7 +651,7 @@ func (m *monitorSupervisor) run(ctx context.Context, job *monitorJob, e console.
 		}
 		slog.Warn("monitored stream failed; retrying with backoff",
 			"server", e.Name, "entry", e.ID, "delay", delay, "error", scrubbed)
-		job.set("failed", scrubbed+" (retrying)")
+		job.setRetrying(scrubbed + " (retrying)")
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
