@@ -2282,8 +2282,7 @@ func materializeBaselineLocal(ctx context.Context, path string, tuning duckdbuti
 	}
 	safeSrc := strings.ReplaceAll(path, "'", "''")
 	safeDst := strings.ReplaceAll(tmpPath, "'", "''")
-	copyQ := fmt.Sprintf("COPY (SELECT * FROM parquet_scan('%s')) TO '%s' (FORMAT PARQUET)", safeSrc, safeDst)
-	if _, err := db.ExecContext(ctx, copyQ); err != nil {
+	if _, err := db.ExecContext(ctx, s3DownloadCopySQL(safeSrc, safeDst)); err != nil {
 		os.RemoveAll(tmpDir)
 		return "", nil, fmt.Errorf("download s3 baseline: %w", err)
 	}
@@ -2675,4 +2674,14 @@ func schemaSnapshotAt(db *sql.DB, at time.Time, latest *metadata.Resolver) (*met
 		return nil, time.Time{}
 	}
 	return r, taken
+}
+
+// s3DownloadCopySQL is the statement that downloads an S3 baseline to a local
+// temp file. The copy is written with the same compression as the snapshot
+// the fold writes, so the daemon's disk check (#1614), which sizes a table on
+// this file, compares like with like; DuckDB's default would be larger. Both
+// paths arrive already quote-escaped.
+func s3DownloadCopySQL(safeSrc, safeDst string) string {
+	return fmt.Sprintf("COPY (SELECT * FROM parquet_scan('%s')) TO '%s' (FORMAT PARQUET, COMPRESSION '%s')",
+		safeSrc, safeDst, ParquetWriterCompression)
 }
