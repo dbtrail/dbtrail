@@ -322,7 +322,7 @@ A **process** crash recovers on its own: the daemon restarts (systemd `Restart=`
 
   and `KILL <PROCESSLIST_ID>` (on RDS or Aurora, `CALL mysql.rds_kill(<PROCESSLIST_ID>)`). Run it as the account the daemon uses, or one with `CONNECTION_ADMIN`; any other account gets `ERROR 1095`. Only do this once the old host is powered off or cut off from both the source and the index: the daemon never checks the lock again after taking it, so a host that was only unreachable keeps capturing when it comes back, alongside the new one. Do not lower `wait_timeout` instead: the lock session is idle on a healthy daemon too, so MySQL would drop it and let a second daemon capture the same source.
 
-Automatic failover (a lease the standby can take over, with writes from a stale holder rejected) is tracked in [#1648](https://github.com/dbtrail/dbtrail/issues/1648).
+Automatic failover (a lease the standby can take over, with writes from a stale holder rejected) is not built. The design discussion, including why the lock alone cannot do it, is in [#1648](https://github.com/dbtrail/dbtrail/issues/1648).
 
 ## 6. Initial Setup Procedure
 
