@@ -1,12 +1,17 @@
 package metadata
 
 import (
+	"cmp"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // EnumLabelMapper rewrites ENUM and SET ordinals stored in binlog row
@@ -108,23 +113,45 @@ func (m *EnumLabelMapper) MapImage(image map[string]any) {
 
 // ─── Snapshot epochs (#475) ─────────────────────────────────────────────────
 
-// SnapshotEpoch is one schema snapshot's identity and the instant it was
-// taken. Epochs order the snapshot history so a binlog event can be
+// SnapshotEpoch is one schema snapshot's identity and the instant it came
+// into effect. Epochs order the snapshot history so a binlog event can be
 // decoded with the table definition in effect when it happened.
 type SnapshotEpoch struct {
 	ID int
 	At time.Time
 }
 
-// LoadSnapshotEpochs returns every snapshot's (id, taken-at) ascending by
-// time. The result is small (one row per `bintrail snapshot` run) and
-// snapshots are immutable, so callers may cache per-ID resolvers
-// indefinitely — only this list grows.
+// LoadSnapshotEpochs returns every snapshot's (id, in effect from) ascending by
+// that instant. The result is small (one row per snapshot) and snapshots are
+// immutable, so callers may cache per-ID resolvers indefinitely — only this
+// list grows.
+//
+// A snapshot taken for a recorded DDL is in effect from when the DDL ran on the
+// source, schema_changes.detected_at (#1667). Every caller compares epochs with
+// a source instant, an event timestamp or a restore target, and capture can
+// reach a DDL minutes or hours after it ran; snapshot_time is when capture got
+// there. Any other snapshot (the first, a manual one, one taken at startup)
+// has no earlier instant and counts from when it was taken.
+//
+// Sorted by that instant, not by id: a snapshot taken at a restart reads the
+// live schema, so it already holds the DDLs the catch-up records after it, and
+// those snapshots belong before it. The cost is clock skew between the source
+// and the bintrail host, which can order a DDL snapshot against a manual one
+// the wrong way by the skew.
+//
+// An index without schema_changes keeps the snapshot times.
 func LoadSnapshotEpochs(db *sql.DB) ([]SnapshotEpoch, error) {
-	rows, err := db.Query(`SELECT snapshot_id, MIN(snapshot_time)
-		FROM schema_snapshots
-		GROUP BY snapshot_id
-		ORDER BY MIN(snapshot_time), snapshot_id`)
+	rows, err := db.Query(`SELECT s.snapshot_id, s.taken, c.detected
+		FROM (SELECT snapshot_id, MIN(snapshot_time) AS taken
+			FROM schema_snapshots GROUP BY snapshot_id) s
+		LEFT JOIN (SELECT snapshot_id, MIN(detected_at) AS detected
+			FROM schema_changes WHERE snapshot_id IS NOT NULL GROUP BY snapshot_id) c
+		ON c.snapshot_id = s.snapshot_id`)
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) && myErr.Number == 1146 {
+		rows, err = db.Query(`SELECT snapshot_id, MIN(snapshot_time), NULL
+			FROM schema_snapshots GROUP BY snapshot_id`)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -132,12 +159,25 @@ func LoadSnapshotEpochs(db *sql.DB) ([]SnapshotEpoch, error) {
 	var epochs []SnapshotEpoch
 	for rows.Next() {
 		var e SnapshotEpoch
-		if err := rows.Scan(&e.ID, &e.At); err != nil {
+		var detected sql.NullTime
+		if err := rows.Scan(&e.ID, &e.At, &detected); err != nil {
 			return nil, err
+		}
+		if detected.Valid {
+			e.At = detected.Time
 		}
 		epochs = append(epochs, e)
 	}
-	return epochs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slices.SortStableFunc(epochs, func(a, b SnapshotEpoch) int {
+		if c := a.At.Compare(b.At); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
+	return epochs, nil
 }
 
 // EpochAt returns the snapshot in effect at t: the latest epoch taken
@@ -299,8 +339,8 @@ func setString(mask uint64, members []string) (string, bool) {
 // parseEnumSetLabels extracts the member labels from an
 // information_schema COLUMN_TYPE declaration like
 // `enum('pending','shipped')` or `set('a','b')`. Members are
-// single-quoted with embedded quotes doubled (`'it''s'`), and may
-// legitimately be empty (`enum('','a')`) or contain commas. MySQL
+// single-quoted with embedded quotes doubled (`'it”s'`), and may
+// legitimately be empty (`enum(”,'a')`) or contain commas. MySQL
 // additionally renders backslashes and control characters inside
 // members with C-style escapes (verified on 8.0: `\\`, `\n`, `\r`,
 // `\0`); those are decoded so the label's bytes match the live

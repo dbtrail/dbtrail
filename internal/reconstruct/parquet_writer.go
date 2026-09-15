@@ -355,21 +355,24 @@ func captureGapLines(in mergeInput) string {
 // dumped from the live table, is newer), and a snapshot taken after the target
 // describes a change the fold does not reach, which a restore to an earlier
 // moment must not refuse over. nil compares names only.
+//
+// Names are compared against tm, which the fold also picks by target (#1667):
+// nil when no snapshot describes the table at the target, which skips names.
 func checkBaselineSchemaCurrent(createSQL string, tm, typesTM *metadata.TableMeta, schema, table string) error {
 	return checkBaselineSchema(createSQL, tm, typesTM, schema, table)
 }
 
-// checkBaselineSchema compares column names against tm and, when typesTM is
+// checkBaselineSchema compares column names against tm (nil skips them) and, when typesTM is
 // not nil, declared types and NULL-ness (#1665) against typesTM. The Iceberg export passes nil: it
 // never publishes the carried CREATE TABLE, and it compares the types it maps
 // to Iceberg itself (icebergexport.sameTableTypes), so a type change that does
 // not move the exported value (an ENUM relabel, a longer VARCHAR) must not
 // refuse there.
 func checkBaselineSchema(createSQL string, tm, typesTM *metadata.TableMeta, schema, table string) error {
-	if strings.TrimSpace(createSQL) == "" || tm == nil {
+	if strings.TrimSpace(createSQL) == "" || (tm == nil && typesTM == nil) {
 		// A missing CREATE TABLE is already refused upstream with its own
-		// message; a nil TableMeta cannot happen on this path (the resolver
-		// errored earlier). Neither is this check's story to tell.
+		// message, and with no snapshot on either side there is nothing to
+		// compare. Neither is this check's story to tell.
 		return nil
 	}
 	cols, err := baseline.ParseSchemaText(createSQL)
@@ -379,12 +382,6 @@ func checkBaselineSchema(createSQL string, tm, typesTM *metadata.TableMeta, sche
 	inBaseline := make(map[string]baseline.Column, len(cols))
 	for _, c := range cols {
 		inBaseline[strings.ToLower(c.Name)] = c
-	}
-	current := make(map[string]bool, len(tm.Columns))
-	for _, c := range tm.Columns {
-		if !c.IsGenerated {
-			current[strings.ToLower(c.Name)] = true
-		}
 	}
 	// retyped is in typesTM's ordinal order, which is already stable.
 	var retyped []string
@@ -401,14 +398,22 @@ func checkBaselineSchema(createSQL string, tm, typesTM *metadata.TableMeta, sche
 		}
 	}
 	var added, dropped []string
-	for name := range current {
-		if _, ok := inBaseline[name]; !ok {
-			added = append(added, name)
+	if tm != nil {
+		current := make(map[string]bool, len(tm.Columns))
+		for _, c := range tm.Columns {
+			if !c.IsGenerated {
+				current[strings.ToLower(c.Name)] = true
+			}
 		}
-	}
-	for name := range inBaseline {
-		if !current[name] {
-			dropped = append(dropped, name)
+		for name := range current {
+			if _, ok := inBaseline[name]; !ok {
+				added = append(added, name)
+			}
+		}
+		for name := range inBaseline {
+			if !current[name] {
+				dropped = append(dropped, name)
+			}
 		}
 	}
 	if len(added) == 0 && len(dropped) == 0 && len(retyped) == 0 {

@@ -134,7 +134,7 @@ type FullTableConfig struct {
 	snapshotDir string
 	cut         *query.BinlogPos
 	// schemaAt is the schema snapshot in effect at At, and schemaAtTime when it
-	// was taken (#1651): the column-type check compares against it, not the
+	// came into effect (#1651; the DDL's source time since #1667): the column-type check compares against it, not the
 	// latest snapshot, and only for a baseline older than it. nil when the
 	// snapshot history cannot be read; the check then compares names only.
 	schemaAt     *metadata.Resolver
@@ -1060,16 +1060,29 @@ func ReconstructTable(
 		if asOf.IsZero() {
 			asOf = snapshotTime
 		}
+		//
+		// Names (#1667) against that same snapshot. When the snapshot in
+		// effect at the target is older than the baseline and a newer one
+		// exists, none describes the table at the target: the newer one
+		// describes a change past it (a restore to before an added column must
+		// not refuse), and the older one may be a stale snapshot an operator
+		// has since replaced, as the refusal tells them to. The baseline's own
+		// CREATE TABLE is then the newest description, so names are skipped.
+		// With no newer snapshot the latest is the one in effect and is
+		// compared as before, so a stale snapshot still refuses.
+		namesTM := tm
 		var typesTM *metadata.TableMeta
 		if cfg.schemaAt != nil && !cfg.schemaAtTime.Before(asOf) {
 			if t, rerr := cfg.schemaAt.Resolve(schema, table); rerr == nil {
-				typesTM = t
+				typesTM, namesTM = t, t
 			} else {
 				slog.Warn("the schema snapshot in effect at the target does not describe this table; column types are not compared",
 					"schema", schema, "table", table, "error", rerr)
 			}
+		} else if cfg.schemaAt != nil && cfg.schemaAt.SnapshotID() != resolver.SnapshotID() {
+			namesTM = nil
 		}
-		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, tm, typesTM, schema, table); err != nil {
+		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, namesTM, typesTM, schema, table); err != nil {
 			return nil, err
 		}
 		// A gapped ancestor taints every descendant: the events it lost are
@@ -2799,7 +2812,7 @@ func rowAfterOrdered(rowAfter map[string]any, colNames []string, schema, table s
 }
 
 // schemaSnapshotAt loads the schema snapshot in effect at at: the newest one
-// taken at or before it. A target older than every snapshot has none (EpochAt
+// in effect at or before it (metadata.LoadSnapshotEpochs). A target older than every snapshot has none (EpochAt
 // would answer the first, which describes a later schema). Failures degrade to
 // nil with a warning, which makes the type check compare nothing: refusing a
 // fold because the snapshot history is unreadable would stop every backup.

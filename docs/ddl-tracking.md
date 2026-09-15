@@ -61,6 +61,16 @@ The `snapshot_id` column is NULL for these DDLs, which the status command uses t
 
 ---
 
+## When a Snapshot Takes Effect
+
+A snapshot is taken when capture reaches the DDL, which can be minutes or hours after the DDL ran on the source (capture behind, or catching up after a restart). So a snapshot taken for a recorded DDL counts from when the DDL ran, the `detected_at` of its `schema_changes` row, not from when it was taken. That is the instant compared with an event's timestamp (to decode ENUM, SET and BLOB values, and the width of a `BINARY` key) and with a restore target: a restore to a moment after the DDL uses the new definition even if capture recorded it later.
+
+A snapshot with no `schema_changes` row (the first one, a manual `bintrail snapshot`, one taken at startup) counts from when it was taken. Snapshots are ordered by these instants, not by id: a snapshot taken at a restart reads the live schema, so it already holds the DDLs the catch-up records after it. Clock skew between the source and the DBTrail host shifts a DDL snapshot against a manual one by that skew. An index with no `schema_changes` table uses when each snapshot was taken.
+
+When a backup is updated or restored to a moment, the table's columns and types in the backup are compared with the snapshot in effect at that moment. A column added after the moment does not refuse it. If the snapshot in effect is older than the backup and a newer one exists, no snapshot describes the table at that moment, and the backup's own definition is used without a comparison.
+
+---
+
 ## The schema_changes Table
 
 ```sql
