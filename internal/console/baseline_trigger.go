@@ -234,6 +234,10 @@ type BaselineStatus struct {
 	// refused again, so the page asks for a full backup instead of promising
 	// a retry.
 	TooManyChanges bool `json:"too_many_changes,omitempty"`
+	// DiskRefused: the run stopped for disk space (#1614), refused before a
+	// file it could not hold, or a write that found the disk full. A scheduled update refused this way must NOT
+	// fall back to a full backup: that one writes into the same directory.
+	DiskRefused bool `json:"disk_refused,omitempty"`
 }
 
 // handleBaselineTrigger enqueues an in-process baseline for the selected server.

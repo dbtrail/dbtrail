@@ -900,7 +900,6 @@ func (s *baselineSupervisor) executeSQLExport(req console.SQLExportRequest, dir 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return 0, 0, 0, fmt.Errorf("create build directory: %w", err)
 	}
-
 	reports, _, runErr := foldTables(s.ctx, sqlExportFoldConfig(req, dir, tableList))
 	for _, rep := range reports {
 		rows += rep.RowsWritten
@@ -942,6 +941,7 @@ func sqlExportFoldConfig(req console.SQLExportRequest, dir string, tableList []s
 		WarnEventThreshold: daemonFoldWarnEventThreshold,
 		MaxTouchedRows:     daemonFoldMaxTouchedRows,
 		RemediationHint:    daemonFoldRemediation,
+		SpaceCheck:         newDiskSpaceCheck(),
 		// AllowGaps stays FALSE: a dump the operator will load somewhere is
 		// the last artifact that may be knowingly incomplete.
 	}

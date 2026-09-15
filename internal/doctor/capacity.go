@@ -833,3 +833,12 @@ func humanBytes(b float64) string {
 	}
 	return fmt.Sprintf("%.1f EB", v/unit)
 }
+
+// DiskSpace reports the bytes available to non-root users and the total size
+// of the filesystem holding path, the probe the capacity card uses. Exported
+// for the backup disk check (#1614), so there is one statfs in the tree.
+// A total of zero is what a mount that cannot answer reports; a full disk
+// reports zero free with a real total.
+func DiskSpace(path string) (free, total uint64, err error) {
+	return diskSpace(path)
+}

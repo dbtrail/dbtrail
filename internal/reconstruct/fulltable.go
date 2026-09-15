@@ -103,6 +103,13 @@ type FullTableConfig struct {
 	At          time.Time // target point-in-time
 	OutputDir   string    // output root: the mydumper dump directory, or the baselines root under OutputFormatParquet
 	ChunkSize   int64     // per-chunk SQL file size (0 → 256 MiB)
+	// SpaceCheck, when set, is called right before a file is created, with its
+	// directory and the bytes it is expected to need: before each SQL chunk
+	// (the chunk size), and before a table's Parquet file (the size of the
+	// backup file it is rebuilt from). A table carried forward unchanged never
+	// reaches it. An error stops that table, whose files are then removed. The
+	// daemon checks free disk with it (#1614).
+	SpaceCheck func(dir string, need int64) error
 
 	// OutputFormat selects the artifact the run produces. The zero value means
 	// "not specified" and resolves to OutputFormatMydumper, matching this
@@ -1228,6 +1235,7 @@ func ReconstructTable(
 		CurrentGenerated:  generatedByName(tm.Columns),
 		OutputDir:         cfg.OutputDir,
 		ChunkSize:         cfg.ChunkSize,
+		SpaceCheck:        cfg.SpaceCheck,
 		DuckDBTuning:      cfg.DuckDBTuning,
 	}
 	if cfg.OutputFormat == OutputFormatParquet {
@@ -1369,6 +1377,7 @@ type mergeInput struct {
 	CurrentGenerated map[string]bool
 	OutputDir        string
 	ChunkSize        int64
+	SpaceCheck       func(dir string, need int64) error
 
 	// SnapshotDir / SnapshotAt / Cut / SourceBaseline are set only under
 	// OutputFormatParquet and drive mergeBaselineIntoParquet: where the snapshot
@@ -1443,6 +1452,7 @@ func mergeBaselineIntoWriter(ctx context.Context, in mergeInput, rep *TableRepor
 	if err != nil {
 		return fmt.Errorf("open mydumper writer: %w", err)
 	}
+	mw.spaceCheck = in.SpaceCheck
 	// Success finalizes via the explicit Close below (before capturing
 	// rep.Files); ANY error return instead discards every file this writer
 	// wrote — see the #1162 note in the function comment. The discard also
@@ -2064,7 +2074,7 @@ func reconstructBinlogOnly(
 	}
 
 	rep.BinlogOnly = true
-	if err := writeBinlogOnlyChanges(cfg.OutputDir, schema, table, pkCols, colNames, cfg.ChunkSize, createSQL, changes, rep); err != nil {
+	if err := writeBinlogOnlyChanges(cfg.OutputDir, schema, table, pkCols, colNames, cfg.ChunkSize, cfg.SpaceCheck, createSQL, changes, rep); err != nil {
 		return nil, err
 	}
 	rep.Duration = time.Since(start)
@@ -2139,6 +2149,7 @@ func writeBinlogOnlyChanges(
 	pkCols []metadata.ColumnMeta,
 	colNames []string,
 	chunkSize int64,
+	spaceCheck func(dir string, need int64) error,
 	createSQL string,
 	changes map[string]*query.ResultRow,
 	rep *TableReport,
@@ -2154,6 +2165,7 @@ func writeBinlogOnlyChanges(
 	if err != nil {
 		return fmt.Errorf("open mydumper writer: %w", err)
 	}
+	mw.spaceCheck = spaceCheck
 	// Same #1162 error-path discard as mergeBaselineIntoWriter: this path has
 	// no pre-writer guards at all, so any mid-write failure would otherwise
 	// finalize a loadable, silently-truncated chunk plus the schema file.
@@ -2270,8 +2282,7 @@ func materializeBaselineLocal(ctx context.Context, path string, tuning duckdbuti
 	}
 	safeSrc := strings.ReplaceAll(path, "'", "''")
 	safeDst := strings.ReplaceAll(tmpPath, "'", "''")
-	copyQ := fmt.Sprintf("COPY (SELECT * FROM parquet_scan('%s')) TO '%s' (FORMAT PARQUET)", safeSrc, safeDst)
-	if _, err := db.ExecContext(ctx, copyQ); err != nil {
+	if _, err := db.ExecContext(ctx, s3DownloadCopySQL(safeSrc, safeDst)); err != nil {
 		os.RemoveAll(tmpDir)
 		return "", nil, fmt.Errorf("download s3 baseline: %w", err)
 	}
@@ -2663,4 +2674,14 @@ func schemaSnapshotAt(db *sql.DB, at time.Time, latest *metadata.Resolver) (*met
 		return nil, time.Time{}
 	}
 	return r, taken
+}
+
+// s3DownloadCopySQL is the statement that downloads an S3 baseline to a local
+// temp file. The copy is written with the same compression as the snapshot
+// the fold writes, so the daemon's disk check (#1614), which sizes a table on
+// this file, compares like with like; DuckDB's default would be larger. Both
+// paths arrive already quote-escaped.
+func s3DownloadCopySQL(safeSrc, safeDst string) string {
+	return fmt.Sprintf("COPY (SELECT * FROM parquet_scan('%s')) TO '%s' (FORMAT PARQUET, COMPRESSION '%s')",
+		safeSrc, safeDst, ParquetWriterCompression)
 }

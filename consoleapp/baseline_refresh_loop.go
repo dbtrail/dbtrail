@@ -635,6 +635,7 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 	// and a stale true there is a skipped backup.
 	st.Published = foldPublished(err)
 	st.TooManyChanges = errors.Is(err, reconstruct.ErrTouchedRowBudget)
+	st.DiskRefused = foldDiskRefused(err)
 	if err != nil {
 		st.State = "failed"
 		st.LastError = err.Error()
@@ -774,6 +775,7 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		WarnEventThreshold:    daemonFoldWarnEventThreshold,
 		MaxTouchedRows:        daemonFoldMaxTouchedRows,
 		RemediationHint:       daemonFoldRemediation,
+		SpaceCheck:            newDiskSpaceCheck(),
 		// AllowGaps stays FALSE. An unattended job must never publish a
 		// knowingly-incomplete baseline: accepting a permanent capture loss is a
 		// decision with consequences for every future reconstruct, and nobody is
