@@ -106,9 +106,13 @@ func TestParseDDL_notTableDDL(t *testing.T) {
 // including statement-format DML many megabytes long, and only the head of a
 // statement can name a DDL verb and its table.
 func TestNormalizeDDL_boundedOnHugeStatements(t *testing.T) {
-	huge := "INSERT INTO t VALUES ('" + strings.Repeat("x", 8<<20) + "')"
-	if got := normalizeDDL(huge); len(got) > 2*ddlHeadLimit {
-		t.Fatalf("normalized %d bytes of an 8 MiB statement, want at most %d", len(got), 2*ddlHeadLimit)
+	for name, huge := range map[string]string{
+		"inside a string": "INSERT INTO t VALUES ('" + strings.Repeat("x", 8<<20) + "')",
+		"outside strings": "INSERT INTO t VALUES " + strings.Repeat("(1),", 2<<20) + "(1)",
+	} {
+		if got := normalizeDDL(huge); len(got) > 2*ddlHeadLimit {
+			t.Fatalf("%s: normalized %d bytes of an 8 MiB statement, want at most %d", name, len(got), 2*ddlHeadLimit)
+		}
 	}
 	long := "ALTER TABLE `" + strings.Repeat("n", 64) + "`.`" + strings.Repeat("m", 64) + "` ADD COLUMN c INT"
 	var buf bytes.Buffer
