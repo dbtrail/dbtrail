@@ -83,12 +83,20 @@ func TestSpaceCheck_parquetMergeSizesTheFileItRebuildsFrom(t *testing.T) {
 		full := errors.New("disk full")
 		var gotDir string
 		var gotNeed int64
+		var existed bool
 		err := mergeBaselineIntoParquet(t.Context(), input(snapDir, func(dir string, need int64) error {
 			gotDir, gotNeed = dir, need
+			// Asked while the file does not exist yet: a refusal after creating it
+			// would also leave nothing behind, because a failed table is discarded.
+			_, serr := os.Stat(filepath.Join(snapDir, "mydb", "orders.parquet"))
+			existed = serr == nil
 			return full
 		}), &TableReport{Schema: "mydb", Table: "orders"})
 		if !errors.Is(err, full) {
 			t.Fatalf("err = %v, want the disk refusal", err)
+		}
+		if existed {
+			t.Fatal("the check ran after the table's file was created; on a full disk that creation fails first, with no readable refusal")
 		}
 		if gotDir != snapDir || gotNeed != fi.Size() {
 			t.Fatalf("checked (%q, %d), want (%q, %d): the size of the file the table is rebuilt from", gotDir, gotNeed, snapDir, fi.Size())

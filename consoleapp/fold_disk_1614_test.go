@@ -221,8 +221,8 @@ func TestBackupScheduler_diskRefusedUpdateDoesNotFallBack(t *testing.T) {
 	}
 }
 
-// The .sql backup checks the disk before each file it writes, not with an
-// estimate from the compressed backup it reads (#1614).
+// The .sql backup's fold carries the per-file disk check (#1614): it writes
+// plain SQL, so a file is checked at the chunk size, with the margin.
 func TestSQLExport_checksDiskPerFile(t *testing.T) {
 	var space func(string, int64) error
 	holdFold(t, func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
@@ -234,9 +234,7 @@ func TestSQLExport_checksDiskPerFile(t *testing.T) {
 	writeFakeSnapshot(t, root)
 	dir := filepath.Join(t.TempDir(), "srv", "build")
 	stubDisk(t, 1, nil)
-	if _, _, _, err := sup.executeSQLExport(console.SQLExportRequest{ServerID: "srv", BaselineSrc: root, At: time.Now().UTC()}, dir); errors.Is(err, errFoldDiskFull) {
-		t.Fatalf("the .sql backup refused up front from an estimate: %v", err)
-	}
+	_, _, _, _ = sup.executeSQLExport(console.SQLExportRequest{ServerID: "srv", BaselineSrc: root, At: time.Now().UTC()}, dir)
 	if space == nil {
 		t.Fatal("the .sql backup's fold has no per-file disk check")
 	}

@@ -836,7 +836,7 @@ func humanBytes(b float64) string {
 
 // DiskSpace reports the bytes available to non-root users and the total size
 // of the filesystem holding path, the probe the capacity card uses. Exported
-// for the backup disk preflight (#1614), so there is one statfs in the tree.
+// for the backup disk check (#1614), so there is one statfs in the tree.
 // A total of zero is what a mount that cannot answer reports; a full disk
 // reports zero free with a real total.
 func DiskSpace(path string) (free, total uint64, err error) {
