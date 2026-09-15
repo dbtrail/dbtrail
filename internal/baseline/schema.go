@@ -81,6 +81,13 @@ type Column struct {
 	// The arguments are read quote-aware, unlike colRe's group 3, so an enum
 	// label holding ')' is not cut short.
 	DeclaredType string
+
+	// NotNull is true when the column's definition says NOT NULL (#1665): the
+	// two words after the type, at the top level of the line (not inside a
+	// quoted string, a backticked name or parentheses; see declaredNotNull).
+	// A producer that carries this CREATE TABLE forward compares it with the
+	// source's IS_NULLABLE, because a restore loads the carried definition.
+	NotNull bool
 }
 
 // DecimalColumn names one decimal/numeric column of a baseline table and the
@@ -222,6 +229,7 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 		typeToken := strings.ToLower(m[2])
 		unsigned := strings.EqualFold(m[4], "unsigned")
 		precision, scale := decimalPrecisionScale(typeToken, m[3])
+		declared := declaredType(line[loc[4]:])
 		cols = append(cols, Column{
 			Name:             name,
 			MySQLType:        typeToken,
@@ -229,7 +237,8 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 			ParquetType:      mysqlToParquetNode(typeToken, unsigned),
 			DecimalPrecision: precision,
 			DecimalScale:     scale,
-			DeclaredType:     declaredType(line[loc[4]:]),
+			DeclaredType:     declared,
+			NotNull:          declaredNotNull(line[loc[4]+len(declared):]),
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -239,6 +248,79 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 		return nil, errors.New("no columns found in schema SQL")
 	}
 	return cols, nil
+}
+
+// declaredNotNull reports whether a column's attributes, the text after its
+// declared type, say NOT NULL. Only words at the top level count: words inside
+// single-quoted strings (a doubled quote or a backslash escape stays inside the
+// string), backticked names and parentheses are skipped, and each of those
+// counts as a separator, so DEFAULT 'NOT NULL', a COMMENT holding the words, a
+// MariaDB column CHECK (`c` is not null) or an expression DEFAULT is not read as
+// the attribute.
+func declaredNotNull(attrs string) bool {
+	var words []string
+	var w strings.Builder
+	depth := 0
+	flush := func() {
+		if w.Len() > 0 {
+			words = append(words, strings.ToUpper(w.String()))
+			w.Reset()
+		}
+	}
+	separate := func() {
+		flush()
+		if depth == 0 {
+			words = append(words, "")
+		}
+	}
+	for i := 0; i < len(attrs); i++ {
+		ch := attrs[i]
+		switch {
+		case ch == '`':
+			flush()
+			for i++; i < len(attrs) && attrs[i] != '`'; i++ {
+			}
+			separate()
+		case ch == '(':
+			separate()
+			depth++
+		case ch == ')':
+			flush()
+			if depth > 0 {
+				depth--
+			}
+			separate()
+		case ch == '\'':
+			flush()
+			for i++; i < len(attrs); i++ {
+				if attrs[i] == '\\' {
+					i++
+					continue
+				}
+				if attrs[i] == '\'' {
+					if i+1 < len(attrs) && attrs[i+1] == '\'' {
+						i++
+						continue
+					}
+					break
+				}
+			}
+			separate()
+		case ch == '_' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9':
+			if depth == 0 {
+				w.WriteByte(ch)
+			}
+		default:
+			flush()
+		}
+	}
+	flush()
+	for i := 0; i+1 < len(words); i++ {
+		if words[i] == "NOT" && words[i+1] == "NULL" {
+			return true
+		}
+	}
+	return false
 }
 
 // declaredType reads a column's declared type from the text that starts at its

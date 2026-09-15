@@ -64,8 +64,8 @@ func TestRefresh_columnTypeChange(t *testing.T) {
 				testutil.MustExec(t, db, `INSERT INTO schema_snapshots
 					(snapshot_id, snapshot_time, schema_name, table_name, column_name,
 					 ordinal_position, column_key, data_type, column_type, is_nullable)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'YES')`,
-					i+1, ts, schema, table, c.name, map[string]int{"id": 1, "c": 2}[c.name], c.key, c.dataType, c.columnType)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, IF(? = 'PRI', 'NO', 'YES'))`,
+					i+1, ts, schema, table, c.name, map[string]int{"id": 1, "c": 2}[c.name], c.key, c.dataType, c.columnType, c.key)
 			}
 		}
 		testutil.InsertEvent(t, db, "binlog.000001", 100, 200,
@@ -205,8 +205,8 @@ func TestRefresh_columnTypeChange(t *testing.T) {
 					testutil.MustExec(t, db, `INSERT INTO schema_snapshots
 					(snapshot_id, snapshot_time, schema_name, table_name, column_name,
 					 ordinal_position, column_key, data_type, column_type, is_nullable)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'YES')`,
-						id, at.Format("2006-01-02 15:04:05"), schema, table, c.name, map[string]int{"id": 1, "c": 2}[c.name], c.key, c.dataType, c.columnType)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, IF(? = 'PRI', 'NO', 'YES'))`,
+						id, at.Format("2006-01-02 15:04:05"), schema, table, c.name, map[string]int{"id": 1, "c": 2}[c.name], c.key, c.dataType, c.columnType, c.key)
 				}
 			}
 			snapshot(1, base.Add(-time.Minute), "int")

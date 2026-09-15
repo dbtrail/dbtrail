@@ -612,7 +612,7 @@ func TestHasReplPrivileges(t *testing.T) {
 var snapshotCols = []string{
 	"schema_name", "table_name", "column_name", "ordinal_position",
 	"column_key", "data_type", "column_type",
-	"is_generated", "is_identity_always", "character_set_name",
+	"is_generated", "is_identity_always", "character_set_name", "is_nullable",
 }
 
 func TestNewResolver_dedupesIdenticalDuplicateRows(t *testing.T) {
@@ -625,16 +625,16 @@ func TestNewResolver_dedupesIdenticalDuplicateRows(t *testing.T) {
 	// Pre-#844 concurrent writers: every column double-inserted verbatim.
 	rows := sqlmock.NewRows(snapshotCols)
 	for range 2 {
-		rows.AddRow("mydb", "wp_options", "option_id", 1, "PRI", "bigint", "bigint unsigned", false, false, "")
+		rows.AddRow("mydb", "wp_options", "option_id", 1, "PRI", "bigint", "bigint unsigned", false, false, "", "YES")
 	}
 	for range 2 {
-		rows.AddRow("mydb", "wp_options", "option_name", 2, "", "varchar", "varchar(191)", false, false, "utf8mb4")
+		rows.AddRow("mydb", "wp_options", "option_name", 2, "", "varchar", "varchar(191)", false, false, "utf8mb4", "YES")
 	}
 	for range 2 {
-		rows.AddRow("mydb", "wp_options", "option_value", 3, "", "longtext", "longtext", false, false, "utf8mb4")
+		rows.AddRow("mydb", "wp_options", "option_value", 3, "", "longtext", "longtext", false, false, "utf8mb4", "YES")
 	}
 	for range 2 {
-		rows.AddRow("mydb", "wp_options", "autoload", 4, "", "varchar", "varchar(20)", false, false, "utf8mb4")
+		rows.AddRow("mydb", "wp_options", "autoload", 4, "", "varchar", "varchar(20)", false, false, "utf8mb4", "YES")
 	}
 	mock.ExpectQuery("SELECT schema_name, table_name").WithArgs(12).WillReturnRows(rows)
 	mock.ExpectQuery(`SELECT MIN\(snapshot_time\)`).WithArgs(12).
@@ -664,9 +664,9 @@ func TestNewResolver_conflictingDuplicateRowsFailLoud(t *testing.T) {
 	defer db.Close()
 
 	rows := sqlmock.NewRows(snapshotCols).
-		AddRow("mydb", "orders", "id", 1, "PRI", "int", "int", false, false, "").
-		AddRow("mydb", "orders", "name", 2, "", "varchar", "varchar(50)", false, false, "utf8mb4").
-		AddRow("mydb", "orders", "renamed", 2, "", "varchar", "varchar(50)", false, false, "utf8mb4")
+		AddRow("mydb", "orders", "id", 1, "PRI", "int", "int", false, false, "", "YES").
+		AddRow("mydb", "orders", "name", 2, "", "varchar", "varchar(50)", false, false, "utf8mb4", "YES").
+		AddRow("mydb", "orders", "renamed", 2, "", "varchar", "varchar(50)", false, false, "utf8mb4", "YES")
 	mock.ExpectQuery("SELECT schema_name, table_name").WithArgs(13).WillReturnRows(rows)
 	mock.ExpectQuery(`SELECT MIN\(snapshot_time\)`).WithArgs(13).
 		WillReturnRows(sqlmock.NewRows([]string{"MIN(snapshot_time)"}).AddRow(time.Date(2026, 7, 4, 15, 2, 39, 0, time.UTC)))
@@ -692,9 +692,9 @@ func TestNewResolver_sameNameDifferentTypeDuplicateFailsLoud(t *testing.T) {
 	// Pins the full-struct comparison — a name-only dedupe would silently
 	// load the wrong signedness/charset.
 	rows := sqlmock.NewRows(snapshotCols).
-		AddRow("mydb", "orders", "id", 1, "PRI", "int", "int", false, false, "").
-		AddRow("mydb", "orders", "qty", 2, "", "int", "int", false, false, "").
-		AddRow("mydb", "orders", "qty", 2, "", "int", "int unsigned", false, false, "")
+		AddRow("mydb", "orders", "id", 1, "PRI", "int", "int", false, false, "", "YES").
+		AddRow("mydb", "orders", "qty", 2, "", "int", "int", false, false, "", "YES").
+		AddRow("mydb", "orders", "qty", 2, "", "int", "int unsigned", false, false, "", "YES")
 	mock.ExpectQuery("SELECT schema_name, table_name").WithArgs(14).WillReturnRows(rows)
 	mock.ExpectQuery(`SELECT MIN\(snapshot_time\)`).WithArgs(14).
 		WillReturnRows(sqlmock.NewRows([]string{"MIN(snapshot_time)"}).AddRow(time.Date(2026, 7, 4, 15, 2, 39, 0, time.UTC)))

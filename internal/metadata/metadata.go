@@ -61,6 +61,10 @@ type ColumnMeta struct {
 	// value cannot be safely transcoded and MapRow fails loud on it rather than
 	// let json.Marshal replace it with U+FFFD.
 	CharacterSet string
+	// IsNullable is information_schema.COLUMNS.IS_NULLABLE as the snapshot
+	// stored it: "YES", "NO", or "" when not known (a PostgreSQL snapshot).
+	// The backup refresh compares it with the carried CREATE TABLE (#1665).
+	IsNullable string
 	// IsIdentityAlways marks a PostgreSQL GENERATED ALWAYS AS IDENTITY column (#557).
 	// Recovery keeps it on a reverse-INSERT (with OVERRIDING SYSTEM VALUE) but omits
 	// it from a reverse-UPDATE SET (PostgreSQL rejects SET on it). Always false for
@@ -148,7 +152,8 @@ func NewResolver(db *sql.DB, snapshotID int) (*Resolver, error) {
 		SELECT schema_name, table_name, column_name, ordinal_position,
 		       column_key, data_type, COALESCE(column_type, '') AS column_type,
 		       is_generated, is_identity_always,
-		       COALESCE(character_set_name, '') AS character_set_name
+		       COALESCE(character_set_name, '') AS character_set_name,
+		       is_nullable
 		FROM schema_snapshots
 		WHERE snapshot_id = ?
 		ORDER BY schema_name, table_name, ordinal_position`,
@@ -239,11 +244,11 @@ func scanSnapshotRows(rows *sql.Rows, tables map[string]*TableMeta) (snapshotSca
 	dupRows := make(map[string]int) // "schema.table" → identical duplicate rows dropped
 
 	for rows.Next() {
-		var schemaName, tableName, columnName, columnKey, dataType, columnType, characterSet string
+		var schemaName, tableName, columnName, columnKey, dataType, columnType, characterSet, isNullable string
 		var ordinalPosition int
 		var isGenerated, isIdentityAlways bool
 
-		if err := rows.Scan(&schemaName, &tableName, &columnName, &ordinalPosition, &columnKey, &dataType, &columnType, &isGenerated, &isIdentityAlways, &characterSet); err != nil {
+		if err := rows.Scan(&schemaName, &tableName, &columnName, &ordinalPosition, &columnKey, &dataType, &columnType, &isGenerated, &isIdentityAlways, &characterSet, &isNullable); err != nil {
 			return stats, fmt.Errorf("failed to scan snapshot row: %w", err)
 		}
 
@@ -263,6 +268,7 @@ func scanSnapshotRows(rows *sql.Rows, tables map[string]*TableMeta) (snapshotSca
 			IsGenerated:      isGenerated,
 			IsIdentityAlways: isIdentityAlways,
 			CharacterSet:     characterSet,
+			IsNullable:       isNullable,
 		}
 		// Duplicate (schema, table, ordinal_position) rows within one snapshot:
 		// pre-#844 concurrent snapshot writers could share a snapshot_id and
@@ -278,8 +284,8 @@ func scanSnapshotRows(rows *sql.Rows, tables map[string]*TableMeta) (snapshotSca
 				dupRows[key]++
 				continue
 			}
-			return stats, fmt.Errorf("snapshot is corrupt: %s has two different columns at ordinal_position %d (%q %s vs %q %s) — re-run `bintrail snapshot` to write a clean snapshot; if the table no longer exists at the source, delete that snapshot's rows from schema_snapshots instead",
-				key, ordinalPosition, tm.Columns[n-1].Name, tm.Columns[n-1].ColumnType, columnName, columnType)
+			return stats, fmt.Errorf("snapshot is corrupt: %s has two different columns at ordinal_position %d (%q %s nullable=%s vs %q %s nullable=%s) — re-run `bintrail snapshot` to write a clean snapshot; if the table no longer exists at the source, delete that snapshot's rows from schema_snapshots instead",
+				key, ordinalPosition, tm.Columns[n-1].Name, tm.Columns[n-1].ColumnType, tm.Columns[n-1].IsNullable, columnName, columnType, isNullable)
 		}
 
 		if columnType != "" {
@@ -379,7 +385,8 @@ func NewLatestPerTableResolver(db *sql.DB) (*Resolver, error) {
 		SELECT s.schema_name, s.table_name, s.column_name, s.ordinal_position,
 		       s.column_key, s.data_type, COALESCE(s.column_type, '') AS column_type,
 		       s.is_generated, s.is_identity_always,
-		       COALESCE(s.character_set_name, '') AS character_set_name
+		       COALESCE(s.character_set_name, '') AS character_set_name,
+		       s.is_nullable
 		FROM schema_snapshots s
 		JOIN (
 			SELECT schema_name, table_name, MAX(snapshot_id) AS snapshot_id
