@@ -2,8 +2,10 @@ package cli
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/verify"
 )
 
@@ -202,6 +205,9 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 // recent baselines (#642). It reads no live source.
 func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metadata.Resolver, indexDBName, baselineSrc string, duckTuning duckdbutil.Tuning, flavor string) error {
 	pairs, unpaired, prevOnly, err := verify.FindBaselinePair(cmd.Context(), baselineSrc)
+	if errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
+		return emitUnreadablePairReport(cmd, resolver, baselineSrc, err)
+	}
 	if err != nil {
 		return fmt.Errorf("discover baseline pair: %w", err)
 	}
@@ -319,12 +325,17 @@ func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metada
 		// baselines ever, which reconstruct genuinely cannot serve, so the
 		// message doesn't send an operator into unnecessary re-baselining
 		// panic for a table that's actually fine (just stale).
-		everBaselined, err := verify.EverBaselinedTables(cmd.Context(), baselineSrc)
+		everBaselined, unreadableFolders, err := verify.EverBaselinedTables(cmd.Context(), baselineSrc)
 		if err != nil {
 			return fmt.Errorf("list baselines: %w", err)
 		}
 		for _, tm := range uncovered {
 			detail := "never baselined; unrecoverable via reconstruct (extend the baseline job to cover this table)"
+			if len(unreadableFolders) > 0 {
+				// #1639: the walk skipped folders it could not read, and the
+				// table may be in one of them.
+				detail = "not in any readable baseline; " + strconv.Itoa(len(unreadableFolders)) + " baseline folder(s) could not be read (first: " + unreadableFolders[0].Path + "), so it may be there"
+			}
 			if everBaselined[tm.Schema+"."+tm.Table] {
 				detail = "not covered by the two most recent baselines; reconstruct will fall back to an older snapshot (stale)"
 			}
@@ -725,4 +736,45 @@ func writeVerifyText(out io.Writer, rep *verify.Report) {
 	}
 	fmt.Fprintf(out, "\n%d match, %d mismatch, %d inconclusive, %d error\n",
 		rep.Summary.Match, rep.Summary.Mismatch, rep.Summary.Inconclusive, rep.Summary.Error)
+}
+
+// emitUnreadablePairReport is the baseline-pair verdict when a folder the walk
+// could not read sits at or after the pair it would have picked (#1639). No
+// pair can be trusted, so every table in scope is reported inconclusive with
+// the cause, through the same report and exit decision as any other run: a
+// --format json consumer still gets a document, and an all-inconclusive run
+// still exits non-zero.
+func emitUnreadablePairReport(cmd *cobra.Command, resolver *metadata.Resolver, baselineSrc string, cause error) error {
+	want, err := verifyTableFilter()
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	var results []verify.TableResult
+	for _, tm := range resolver.AllTables() {
+		key := tm.Schema + "." + tm.Table
+		if want != nil && !want[key] {
+			continue
+		}
+		seen[key] = true
+		results = append(results, verify.TableResult{
+			Schema: tm.Schema, Table: tm.Table, Status: verify.StatusInconclusive,
+			Detail: "not verified: " + cause.Error(),
+		})
+	}
+	for key := range want {
+		if !seen[key] {
+			schema, table, _ := strings.Cut(key, ".")
+			results = append(results, verify.TableResult{
+				Schema: schema, Table: table, Status: verify.StatusError,
+				Detail: "requested via --tables but not present in the latest schema snapshot",
+			})
+		}
+	}
+	if len(results) == 0 {
+		return fmt.Errorf("discover baseline pair: %w", cause)
+	}
+	rep := verify.NewReport(verify.ModeBaselinePair, results)
+	rep.BaselineSource = baselineSrc
+	return emitVerifyReport(cmd, rep)
 }

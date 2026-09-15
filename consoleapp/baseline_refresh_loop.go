@@ -254,6 +254,14 @@ func resolveFoldSource(ctx context.Context, req refreshRequest) string {
 	}
 	remoteAt, remoteTables := newestSnapshotOf(remote)
 	localAt, localTables := newestSnapshotOf(local)
+	// #1639: a local folder the listing skipped at or after that snapshot may
+	// be a newer one, and the fold would refuse over the local directory.
+	// The bucket has no such folder, so it stays the source.
+	if unreadable, err := listLocalUnreadable(ctx, req.BaselineDir); err != nil || reconstruct.UnreadableAtOrAfter(unreadable, localAt, time.Time{}) != nil {
+		slog.Debug("baseline refresh: a local backup folder could not be read, reading the bucket",
+			"server", req.ServerName, "dir", req.BaselineDir)
+		return standing
+	}
 	if !localAt.Equal(remoteAt) {
 		slog.Debug("baseline refresh: local copy is not the bucket's newest snapshot, reading the bucket",
 			"server", req.ServerName, "local", localAt.UTC().Format(time.RFC3339), "bucket", remoteAt.UTC().Format(time.RFC3339))
@@ -847,6 +855,12 @@ var (
 	// listBaselines feeds resolveFoldSource; it addresses the bucket on an
 	// S3-backed server, same rule as the two above.
 	listBaselines = reconstruct.ListBaselines
+	// listLocalUnreadable: the folders a local listing skipped, for
+	// resolveFoldSource.
+	listLocalUnreadable = func(ctx context.Context, dir string) ([]reconstruct.UnreadableSnapshot, error) {
+		_, unreadable, err := reconstruct.ListBaselinesUnreadable(ctx, dir)
+		return unreadable, err
+	}
 )
 
 // foldOutcome is everything foldSnapshot decides once the fold has run, split

@@ -650,6 +650,9 @@ type StatusData struct {
 	// be read, so Baselines is empty for a BAD reason — JSON must report
 	// baseline_staleness "unknown", not omit it as if nothing were configured.
 	BaselinesUnavailable bool
+	// BaselinesErr is why, for the text report (#1639): the JSON carries the
+	// unknown verdict, and the text report had nothing at all.
+	BaselinesErr error
 	// StreamErr records a failure to READ stream_state (transient timeout, revoked
 	// permission, an unexpected loadSourceHealth error) — as distinct from an empty
 	// table (Stream==nil, StreamErr==nil = no active stream). When set, the continuity
@@ -804,7 +807,20 @@ func (d *StatusData) Write(w io.Writer) {
 	if d.Coverage == nil && d.CoverageErr != nil {
 		writeCoverageUnavailable(w, d.CoverageErr)
 	}
+	if d.BaselinesUnavailable && len(d.Baselines) == 0 && d.BaselinesErr != nil {
+		writeBaselinesUnavailable(w, d.BaselinesErr)
+	}
 	writeBaselines(w, d.Baselines)
+}
+
+// writeBaselinesUnavailable renders a visible Baselines block when the
+// baseline directory could not be read in full, so the staleness verdict the
+// JSON reports as unknown is not an absence in the text report.
+func writeBaselinesUnavailable(w io.Writer, err error) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "=== Baselines ===")
+	fmt.Fprintf(w, "Unavailable: %v\n", err)
+	fmt.Fprintln(w, "⚠ BASELINE STALENESS NOT EVALUABLE: fix the cause above and run status again.")
 }
 
 // writeStreamUnavailable renders a visible Stream block when stream_state could not

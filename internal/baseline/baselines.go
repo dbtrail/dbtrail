@@ -1,6 +1,8 @@
 package baseline
 
 import (
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -31,10 +33,20 @@ type BaselineInfo struct {
 // path-only) for the console's listing — keep the two in sync if the layout
 // ever changes.
 func DiscoverBaselines(dir string) ([]BaselineInfo, error) {
+	infos, _, err := DiscoverBaselinesReport(dir)
+	return infos, err
+}
+
+// DiscoverBaselinesReport is DiscoverBaselines plus the snapshot times of the
+// folders it skipped because they could not be read (a snapshot folder, or a
+// schema folder inside one). A caller that grades the newest snapshot must
+// not grade over a skipped folder at or after it (#1639).
+func DiscoverBaselinesReport(dir string) ([]BaselineInfo, []time.Time, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	var unreadable []time.Time
 
 	var results []BaselineInfo
 	for _, entry := range entries {
@@ -55,8 +67,12 @@ func DiscoverBaselines(dir string) ([]BaselineInfo, error) {
 			continue
 		}
 		dbEntries, err := os.ReadDir(snapshotDir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // removed while walking
+		}
 		if err != nil {
 			slog.Warn("could not read baseline snapshot directory", "path", snapshotDir, "error", err)
+			unreadable = append(unreadable, ts)
 			continue
 		}
 		for _, dbEntry := range dbEntries {
@@ -66,8 +82,12 @@ func DiscoverBaselines(dir string) ([]BaselineInfo, error) {
 			dbName := dbEntry.Name()
 			tableDir := filepath.Join(snapshotDir, dbName)
 			tableFiles, err := os.ReadDir(tableDir)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			if err != nil {
 				slog.Warn("could not read baseline table directory", "path", tableDir, "error", err)
+				unreadable = append(unreadable, ts)
 				continue
 			}
 			for _, tf := range tableFiles {
@@ -76,6 +96,14 @@ func DiscoverBaselines(dir string) ([]BaselineInfo, error) {
 				}
 				tableName := strings.TrimSuffix(tf.Name(), ".parquet")
 				filePath := filepath.Join(tableDir, tf.Name())
+				// A folder that lists but cannot be entered (#1639): its files
+				// cannot be opened, so it counts as unreadable, as it does for
+				// the lookups.
+				if _, err := os.Stat(filePath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					slog.Warn("could not read baseline table directory", "path", tableDir, "error", err)
+					unreadable = append(unreadable, ts)
+					break
+				}
 
 				info := BaselineInfo{
 					SnapshotTime: ts,
@@ -98,7 +126,7 @@ func DiscoverBaselines(dir string) ([]BaselineInfo, error) {
 			}
 		}
 	}
-	return results, nil
+	return results, unreadable, nil
 }
 
 // parseBaselineDirTimestamp converts a baseline directory name like
