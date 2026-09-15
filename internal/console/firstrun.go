@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -59,11 +60,13 @@ type firstRunInput struct {
 
 // firstRunSteps computes the list. Each capture step is done from evidence: the
 // index database, the supervisor's report that this run reached the source,
-// and what the index holds. A later step's evidence implies the earlier ones. The first
-// step not done takes the supervisor's state: running while it works, failed
-// with its error and a fix, waiting for Start when capture is stopped. The
-// steps after it wait. "Running" is not "stuck": a started stream with no
-// change yet is healthy, and the supervisor reports "stalled" when it is not.
+// and what the index holds. A later step's evidence implies the earlier ones.
+// The first step not done takes the supervisor's state: running while it
+// works (with what was lost when events were skipped for good), failed with
+// its error and a fix when it failed or stalled, waiting for Start when
+// capture is stopped. The steps after it wait. "Running" is not "stuck": a
+// started stream with no change yet is healthy, and the supervisor reports
+// "stalled" when it is not.
 func firstRunSteps(in firstRunInput) FirstRunReport {
 	if in.CheckError != "" {
 		// Nothing is claimed from an index that could not be read: a server
@@ -89,8 +92,8 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 		defs = append(defs, stepDef{"Read the table structure", "Reading which tables and columns to capture.", in.SnapshotTaken})
 	}
 	defs = append(defs,
-		stepDef{"Start capturing changes", "Saving the first position to start from.", in.StreamStarted || attached},
-		stepDef{"Capture the first change", "Capture is running and waiting for the first change on the source. A quiet database is normal.", in.EventsIndexed > 0 || in.HasEvents},
+		stepDef{"Start capturing changes", "Finding where to start reading changes.", in.StreamStarted || attached},
+		stepDef{"Capture the first change", "Waiting for the first change on the source. A quiet database is normal.", in.EventsIndexed > 0 || in.HasEvents},
 	)
 	for i := len(defs) - 2; i >= 0; i-- {
 		defs[i].done = defs[i].done || defs[i+1].done
@@ -107,7 +110,12 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 			switch in.Monitor.State {
 			case "failed":
 				step.State, step.Detail = firstRunFailed, in.Monitor.LastError
-				step.Fix = "Capture retries on its own. Fix the cause above, or press Start on this server in Servers to run the startup checks."
+				// The supervisor marks a failure it will retry; one it gave up
+				// on, or a Start that failed while setting up, waits for Start.
+				step.Fix = "Fix the cause above, then press Start on this server in Servers."
+				if strings.HasSuffix(in.Monitor.LastError, "(retrying)") {
+					step.Fix = "Capture retries on its own. Fix the cause above, or press Start on this server in Servers to run the startup checks."
+				}
 			case "stalled":
 				step.State, step.Detail = firstRunFailed, in.Monitor.LastError
 				step.Fix = "Stop and start capture on this server in Servers."
@@ -138,9 +146,10 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 }
 
 // loadFirstRunIndex reads the evidence from the server's own index database,
-// which does not exist until Start creates it. Each probe opens and closes its
-// own short-timeout connection, like the Test connection probe: the bundle
-// cache pings on selection and cannot open a database that is not there yet.
+// which does not exist until Start creates it. Each request opens one
+// connection with a short connect timeout, like the Test connection probe,
+// runs its queries on it and closes it: the bundle cache pings on selection
+// and cannot open a database that is not there yet.
 func loadFirstRunIndex(ctx context.Context, dsn string, in *firstRunInput) {
 	no, yes := false, true
 	if dsn == "" {

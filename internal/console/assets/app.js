@@ -1430,14 +1430,6 @@ function renderOverview() {
     .then((activity) => { if (live()) fillOvActivity(f, activity); });
 }
 
-// buildOverview renders the dashboard from already-fetched payloads — the
-// composition seam the e2e fixture drives directly, sharing every fill with
-// the progressive path above. status and activity may each be null (their
-// fetches are best-effort); when one is, the tiles it feeds read "—". Every
-// tile carries its OWN scope line, because these numbers get screenshotted
-// into incident channels without the page around them (#1300): "N deletes"
-// beside "N changes indexed" invites reading the first as a share of the
-// second, and before this they were different denominators.
 // firstRunCard draws the steps from adding a server to its first indexed
 // change (#1606) as GET /api/servers/{id}/first-run computes them, or nothing
 // once the list is complete. Waiting is its own mark, so a step that has not
@@ -1467,9 +1459,10 @@ function firstRunCard(rep) {
 // console or a session without the permission answer with an error that
 // stops the loop and draws nothing. Any other failure (a 502, a network blip,
 // an index that could not be read) tries again, so a first request that fails
-// does not hide the list for good, and once the list is up it stays with a
-// note that it could not be refreshed. Polling slows from 3 to 15 seconds
-// while nothing changes.
+// does not hide the list for good. A list already up stays, with a note that
+// it could not be refreshed: right away when the index could not be read,
+// after three failed requests in a row otherwise. The wait between requests
+// goes 3, 6, 12, then 15 seconds, and back to 3 when the list changes.
 function watchFirstRun(f, live) {
   const id = currentServer || defaultServerId;
   if (!capsCache.monitor || !id) return;
@@ -1507,6 +1500,14 @@ function watchFirstRun(f, live) {
   tick();
 }
 
+// buildOverview renders the dashboard from already-fetched payloads — the
+// composition seam the e2e fixture drives directly, sharing every fill with
+// the progressive path above. status and activity may each be null (their
+// fetches are best-effort); when one is, the tiles it feeds read "—". Every
+// tile carries its OWN scope line, because these numbers get screenshotted
+// into incident channels without the page around them (#1300): "N deletes"
+// beside "N changes indexed" invites reading the first as a share of the
+// second, and before this they were different denominators.
 function buildOverview(status, eventsData, coverage, activity) {
   const f = ovFrame();
   fillOvStatus(f, status);
@@ -8824,8 +8825,9 @@ function openServersModal() {
   focusModal(mount);
   refreshServersList();
 }
-// Closing the dialog renders the Overview again: a server added or started
-// there is the one the Getting started list is for (#1606).
+// Closing the dialog renders the Overview again, so a server just added or
+// started shows its Getting started list when it is the selected server, as
+// the first server on a fresh install is (#1606).
 function closeServersModal() {
   document.getElementById("modal").replaceChildren();
   if (routeFromLocation() === "overview") renderRoute();

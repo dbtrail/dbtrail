@@ -52,9 +52,9 @@ type MonitorStatus struct {
 	// still reflects the running transition, not when the stream stalled or
 	// lost its position.
 	Since string `json:"since,omitempty"`
-	// SourceConnected: the current run's stream has opened the source
-	// connection. False before that, and again from each retry until it
-	// reconnects (#1606).
+	// SourceConnected: the latest run's stream opened the source connection
+	// (#1606). It resets when a run starts, and keeps that run's value while
+	// the run waits to retry or after it stops.
 	SourceConnected bool `json:"source_connected,omitempty"`
 }
 

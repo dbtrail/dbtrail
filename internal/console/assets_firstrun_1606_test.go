@@ -30,7 +30,7 @@ func TestFirstRunCardRendersTheReport(t *testing.T) {
 		}
 		return string(b)
 	}
-	failed := marshal(firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "Access denied for user 'repl'"}, IndexExists: &yes})
+	failed := marshal(firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "Access denied for user 'repl' (retrying)"}, IndexExists: &yes})
 	working := marshal(firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true,
 		Backup: &BaselineStatus{State: "idle"}})
 	checkErr := marshal(firstRunInput{Monitor: MonitorStatus{State: "pending"}, CheckError: "dial tcp 10.0.0.1:3306: connection refused"})

@@ -72,7 +72,7 @@ type Config struct {
 	Hooks *Hooks
 }
 
-// Hooks are liveness callbacks a supervisor attaches to one PG stream. Both are
+// Hooks are liveness callbacks a supervisor attaches to one PG stream. All are
 // optional and invoked synchronously from the stream loop — keep them fast.
 type Hooks struct {
 	// OnCheckpoint fires after each successful checkpoint tick, INCLUDING an
