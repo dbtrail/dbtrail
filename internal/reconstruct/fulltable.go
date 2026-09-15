@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -167,8 +168,10 @@ type FullTableConfig struct {
 	// while their per-table triggers differ.
 	WarnEventThreshold int64
 
-	// MaxTouchedRows refuses a table whose event window changes more distinct
-	// rows than this, before anything is written (#1107). The change map holds
+	// MaxTouchedRows is how many distinct changed rows a table's fold may hold
+	// in memory (#1107). Past it, the merge over a baseline moves the changes to
+	// disk and runs in passes (changespill.go), refusing only when one of its
+	// groups alone passes this; the binlog-only fallback refuses past it. The change map holds
 	// one full row image per distinct changed row until the merge, and paging
 	// the fetch does not bound it; on a host that also runs capture, a fold
 	// after a long outage grew past the machine's memory.
@@ -417,8 +420,10 @@ var (
 	// the baseline's columns. Remedy: a real re-dump; no flag helps.
 	ErrSchemaChanged = errors.New("schema changed since the baseline")
 	// ErrTouchedRowBudget: the window changes more distinct rows than the
-	// caller's MaxTouchedRows lets one update hold in memory. Remedy: a full
-	// backup, which streams the table instead of holding its changes.
+	// caller's MaxTouchedRows lets one update rebuild (#1107): past it on the
+	// binlog-only fallback, or past it in one on-disk group of a baseline merge.
+	// Remedy: a full backup, which streams the table instead of holding its
+	// changes.
 	ErrTouchedRowBudget = errors.New("too many changed rows to build this from the recorded changes")
 )
 
@@ -1161,10 +1166,14 @@ func ReconstructTable(
 		Opts:           fetchOpts,
 		AllowGaps:      cfg.AllowGaps,
 		ArchiveFetcher: fetcher,
+		// This path merges over a baseline, the one merge that reads a spill.
+		SpillOverBudget: true,
 	}))
 	if err != nil {
 		return nil, err
 	}
+	// Deletes the changes a spilled fold wrote to disk, on every return below.
+	defer fold.close()
 	rep.EventsApplied = fold.Total
 	changes := fold.Changes
 
@@ -1193,7 +1202,7 @@ func ReconstructTable(
 	// capGap is passed in because step 3c does NOT refuse under --allow-gaps:
 	// it returns the finding and lets the run proceed. See carryForwardEligible
 	// for why a known gap disqualifies a table from being carried at all.
-	if carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, baselinePath, len(changes), capGap) {
+	if carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, baselinePath, fold.changeCount(), capGap) {
 		linked, cerr := carryForward(ctx, baselinePath, cfg.snapshotDir, schema, table)
 		if cerr != nil {
 			return nil, fmt.Errorf("carry %s.%s forward unchanged: %w", schema, table, cerr)
@@ -1230,6 +1239,7 @@ func ReconstructTable(
 		Table:             table,
 		PKCols:            pkCols,
 		Changes:           changes,
+		Spill:             fold.Spill,
 		ImageColumns:      fold.ImageColumns,
 		SawImage:          fold.SawImage,
 		CurrentGenerated:  generatedByName(tm.Columns),
@@ -1296,35 +1306,8 @@ func prepareMerge(ctx context.Context, in mergeInput) ([]string, error) {
 	// right thing: the server recomputes it on load, and the baseline never
 	// held it (baseline.parseSchemaFrom leaves it out of the columns it reads
 	// the dump with).
-	extra := postBaselineColumns(in.Changes, colNames)
-	if gen := generatedColumnsIn(in.CreateTableSQL); len(gen) > 0 && len(extra) > 0 {
-		kept := extra[:0]
-		var dropped []string
-		for _, col := range extra {
-			if _, ok := gen[col]; ok {
-				if cur, known := in.CurrentGenerated[col]; known && !cur {
-					return nil, fmt.Errorf(
-						"full-table reconstruct: %s.%s column %s was a generated column when the baseline was taken and is a plain column now; "+
-							"the baseline holds no value for it — re-run `bintrail baseline` to capture a snapshot that includes it: %w",
-						in.Schema, in.Table, col, ErrSchemaChanged)
-				}
-				dropped = append(dropped, col)
-				continue
-			}
-			kept = append(kept, col)
-		}
-		extra = kept
-		if len(dropped) > 0 {
-			slog.Debug("full-table reconstruct: generated column(s) in delta events left out of the output, the server recomputes them",
-				"schema", in.Schema, "table", in.Table, "columns", strings.Join(dropped, ", "))
-		}
-	}
-	if len(extra) > 0 {
-		return nil, fmt.Errorf(
-			"full-table reconstruct: %s.%s has column(s) %s present in delta events but absent from the baseline schema "+
-				"(added after the baseline snapshot); their values cannot be emitted without dropping data silently — "+
-				"re-run `bintrail baseline` to capture a snapshot that includes the new column(s): %w",
-			in.Schema, in.Table, strings.Join(extra, ", "), ErrSchemaChanged)
+	if err := checkPostBaselineColumns(in, in.Changes, colNames); err != nil {
+		return nil, err
 	}
 
 	// Fail loud on a baseline column DROPPED after the baseline (#843), the
@@ -1349,6 +1332,43 @@ func prepareMerge(ctx context.Context, in mergeInput) ([]string, error) {
 	return colNames, nil
 }
 
+// checkPostBaselineColumns is prepareMerge's #602 guard over one change map:
+// the whole fold's in memory, or one pass's in a spilled merge (#1107), where
+// the fold's own map is empty.
+func checkPostBaselineColumns(in mergeInput, changes map[string]*query.ResultRow, colNames []string) error {
+	extra := postBaselineColumns(changes, colNames)
+	if gen := generatedColumnsIn(in.CreateTableSQL); len(gen) > 0 && len(extra) > 0 {
+		kept := extra[:0]
+		var dropped []string
+		for _, col := range extra {
+			if _, ok := gen[col]; ok {
+				if cur, known := in.CurrentGenerated[col]; known && !cur {
+					return fmt.Errorf(
+						"full-table reconstruct: %s.%s column %s was a generated column when the baseline was taken and is a plain column now; "+
+							"the baseline holds no value for it — re-run `bintrail baseline` to capture a snapshot that includes it: %w",
+						in.Schema, in.Table, col, ErrSchemaChanged)
+				}
+				dropped = append(dropped, col)
+				continue
+			}
+			kept = append(kept, col)
+		}
+		extra = kept
+		if len(dropped) > 0 {
+			slog.Debug("full-table reconstruct: generated column(s) in delta events left out of the output, the server recomputes them",
+				"schema", in.Schema, "table", in.Table, "columns", strings.Join(dropped, ", "))
+		}
+	}
+	if len(extra) > 0 {
+		return fmt.Errorf(
+			"full-table reconstruct: %s.%s has column(s) %s present in delta events but absent from the baseline schema "+
+				"(added after the baseline snapshot); their values cannot be emitted without dropping data silently — "+
+				"re-run `bintrail baseline` to capture a snapshot that includes the new column(s): %w",
+			in.Schema, in.Table, strings.Join(extra, ", "), ErrSchemaChanged)
+	}
+	return nil
+}
+
 // mergeInput bundles everything mergeBaselineIntoWriter needs. Extracted so
 // unit tests can exercise the merge loop without standing up MySQL.
 type mergeInput struct {
@@ -1362,6 +1382,9 @@ type mergeInput struct {
 	// and the query-text fields), which is why no guard reading a before-image
 	// may run against this map — see the note above mergeBaselineIntoWriter.
 	Changes map[string]*query.ResultRow
+	// Spill holds the changes on disk when the fold passed its in-memory limit
+	// (#1107), and Changes is then empty. See mergeCore.Spill.
+	Spill *changeSpill
 	// ImageColumns/SawImage come from foldResult and carry the #843 signal the
 	// trimmed Changes map can no longer provide (see droppedBaselineColumns).
 	ImageColumns map[string]struct{}
@@ -1493,7 +1516,11 @@ func mergeBaselineIntoWriter(ctx context.Context, in mergeInput, rep *TableRepor
 		Table:             in.Table,
 		PKCols:            in.PKCols,
 		Changes:           in.Changes,
-		DuckDBTuning:      in.DuckDBTuning,
+		Spill:             in.Spill,
+		CheckPass: func(m map[string]*query.ResultRow) error {
+			return checkPostBaselineColumns(in, m, colNames)
+		},
+		DuckDBTuning: in.DuckDBTuning,
 	}, func(rowMap map[string]any) error {
 		return mw.WriteRow(rowAfterOrdered(rowMap, colNames, in.Schema, in.Table))
 	})
@@ -1523,6 +1550,15 @@ type mergeCore struct {
 	Table             string
 	PKCols            []metadata.ColumnMeta
 	Changes           map[string]*query.ResultRow
+	// Spill, when set, holds the changes on disk instead of Changes (#1107):
+	// the merge then runs in passes, each over the groups that fit under the
+	// fold's in-memory limit. See changespill.go.
+	Spill *changeSpill
+	// CheckPass runs on each pass's changes before that pass scans the
+	// baseline. Required with Spill: the writers' #602 added-column guard reads
+	// the change map, which a spilled fold leaves empty, so it has to run on
+	// each pass's map instead. A spilled merge without it refuses.
+	CheckPass func(map[string]*query.ResultRow) error
 	// PGTextPK skips the MySQL PK canonicalizer for a PostgreSQL source (text
 	// PK on both baseline and delta sides). See SnapshotFullTableInput.PGTextPK.
 	PGTextPK bool
@@ -1539,6 +1575,9 @@ type mergeStats struct {
 	UpdatesApplied int64
 	InsertsEmitted int64
 	DeletesSkipped int64
+	// Passes is how many baseline scans a spilled merge made (#1107); 0 for
+	// a merge held in memory.
+	Passes int
 }
 
 // mergeBaselineImages streams the local baseline Parquet via DuckDB, applies
@@ -1574,6 +1613,9 @@ type mergeStats struct {
 // now decodes before this function ever sees a value.
 func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string]any) error) (mergeStats, error) {
 	var stats mergeStats
+	if in.Spill != nil && in.CheckPass == nil {
+		return stats, fmt.Errorf("internal: %s.%s would merge its changes from disk without the per-pass column check", in.Schema, in.Table)
+	}
 
 	ddb, err := sql.Open("duckdb", "")
 	if err != nil {
@@ -1582,20 +1624,89 @@ func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string
 	defer ddb.Close()
 	applyDuckDBTuning(ctx, ddb, in.DuckDBTuning)
 
+	warnUndetectableBinaryPK(in.Schema, in.Table, in.PKCols)
+
+	if in.Spill != nil {
+		err := mergeSpilledPasses(ctx, ddb, in, emit, &stats)
+		return stats, err
+	}
+	if err := scanBaselinePass(ctx, ddb, in, in.Changes, nil, emit, &stats); err != nil {
+		return stats, err
+	}
+	err = emitLeftoverChanges(in, in.Changes, emit, &stats)
+	return stats, err
+}
+
+// mergeSpilledPasses is the merge over a fold whose changes went to disk
+// (#1107). It reads the groups in order into one pass map while they fit under
+// the fold's in-memory limit, predicting the next group's size from the last
+// one (the hash spreads rows evenly), then runs the pass: the per-pass check,
+// one scan of the baseline limited to the pass's groups, and that pass's
+// leftover inserts. Every group belongs to exactly one pass, empty ones
+// included, so every baseline row is emitted exactly once.
+//
+// What differs from the in-memory merge is only the ORDER of the output: rows
+// come grouped by pass, and each pass's inserts follow its own scan. Nothing
+// that reads a backup depends on row order (verify's digest is
+// order-independent).
+func mergeSpilledPasses(ctx context.Context, ddb *sql.DB, in mergeCore, emit func(map[string]any) error, stats *mergeStats) error {
+	var owns [spillBuckets]bool
+	pass := map[string]*query.ResultRow{}
+	run := func() error {
+		if err := in.CheckPass(pass); err != nil {
+			return err
+		}
+		if err := scanBaselinePass(ctx, ddb, in, pass, &owns, emit, stats); err != nil {
+			return err
+		}
+		if err := emitLeftoverChanges(in, pass, emit, stats); err != nil {
+			return err
+		}
+		stats.Passes++
+		owns = [spillBuckets]bool{}
+		pass = map[string]*query.ResultRow{}
+		return nil
+	}
+	last := 0
+	for b := range spillBuckets {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(pass) > 0 && int64(len(pass)+last) > in.Spill.limit {
+			if err := run(); err != nil {
+				return err
+			}
+		}
+		group, err := in.Spill.load(b)
+		if err != nil {
+			return err
+		}
+		last = len(group)
+		// Groups hold disjoint keys, so nothing here overwrites.
+		maps.Copy(pass, group)
+		owns[b] = true
+	}
+	return run()
+}
+
+// scanBaselinePass streams the local baseline Parquet once and applies
+// changes to it. owns, when set, limits the pass to the baseline rows whose
+// key falls in the groups it marks (a spilled merge, #1107); nil is the whole
+// table. Matched entries are removed from changes.
+func scanBaselinePass(ctx context.Context, ddb *sql.DB, in mergeCore, changes map[string]*query.ResultRow,
+	owns *[spillBuckets]bool, emit func(map[string]any) error, stats *mergeStats) error {
 	safePath := strings.ReplaceAll(in.LocalBaselinePath, "'", "''")
 	q := fmt.Sprintf("SELECT * FROM parquet_scan('%s')", safePath)
 	drows, err := ddb.QueryContext(ctx, q)
 	if err != nil {
-		return stats, fmt.Errorf("duckdb baseline query: %w", err)
+		return fmt.Errorf("duckdb baseline query: %w", err)
 	}
 	defer drows.Close()
 
 	dcols, err := drows.Columns()
 	if err != nil {
-		return stats, fmt.Errorf("duckdb columns: %w", err)
+		return fmt.Errorf("duckdb columns: %w", err)
 	}
-
-	warnUndetectableBinaryPK(in.Schema, in.Table, in.PKCols)
 
 	scan := make([]any, len(dcols))
 	ptrs := make([]any, len(dcols))
@@ -1605,7 +1716,7 @@ func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string
 
 	for drows.Next() {
 		if err := drows.Scan(ptrs...); err != nil {
-			return stats, fmt.Errorf("scan baseline row: %w", err)
+			return fmt.Errorf("scan baseline row: %w", err)
 		}
 		// zipMap reads the scanned values into a fresh map; database/sql
 		// clones []byte into the *any destinations and reassigns (never
@@ -1629,7 +1740,7 @@ func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string
 		if !in.PGTextPK {
 			var err error
 			if pkMap, err = canonicalizePKMap(rowMap, in.PKCols); err != nil {
-				return stats, fmt.Errorf("canonicalize baseline PK for %s.%s: %w", in.Schema, in.Table, err)
+				return fmt.Errorf("canonicalize baseline PK for %s.%s: %w", in.Schema, in.Table, err)
 			}
 		}
 		pk := event.BuildPKValues(in.PKCols, pkMap)
@@ -1637,21 +1748,29 @@ func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string
 		// Before deciding what claims this row, check the ONE other spelling
 		// its key could carry (#1158) — see altFixedBinaryPK.
 		//
-		// Hoisted above the branch on purpose. in.Changes is keyed by STRING,
+		// Hoisted above the branch on purpose. changes is keyed by STRING,
 		// so two spellings of one logical row are two INDEPENDENT entries: an
 		// entry under the canonical spelling would send this row down the
 		// claimed branch while a sibling entry under the alternate one
 		// survives the scan and lands in the leftover tail, where a DELETE is
 		// dropped without a word. Checking only the unclaimed branch would
 		// leave exactly the resurrection this guard exists to stop.
-		if alt, ok := altFixedBinaryPK(in.PKCols, pkMap); ok {
-			if ev, pending := in.Changes[alt]; pending {
-				return stats, pkSpellingJoinErr(in.Schema, in.Table, pk, alt, ev.EventType)
+		//
+		// In a spilled merge the two spellings hash to different groups, so
+		// they can be merged in different passes. The lookup therefore runs in
+		// the pass that holds the ALTERNATE's group, whichever pass owns the
+		// row itself; above the ownership skip for that reason.
+		if alt, ok := altFixedBinaryPK(in.PKCols, pkMap); ok && (owns == nil || owns[spillBucket(alt)]) {
+			if ev, pending := changes[alt]; pending {
+				return pkSpellingJoinErr(in.Schema, in.Table, pk, alt, ev.EventType)
 			}
 		}
+		if owns != nil && !owns[spillBucket(pk)] {
+			continue
+		}
 
-		if ev, ok := in.Changes[pk]; ok {
-			delete(in.Changes, pk)
+		if ev, ok := changes[pk]; ok {
+			delete(changes, pk)
 			switch ev.EventType {
 			case event.EventDelete:
 				stats.DeletesSkipped++
@@ -1667,31 +1786,34 @@ func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string
 					continue
 				}
 				if err := emit(ev.RowAfter); err != nil {
-					return stats, err
+					return err
 				}
 				stats.UpdatesApplied++
 			}
 		} else {
 			if err := emit(rowMap); err != nil {
-				return stats, err
+				return err
 			}
 			stats.BaselineRows++
 		}
 	}
 	if err := drows.Err(); err != nil {
-		return stats, fmt.Errorf("iterate baseline rows: %w", err)
+		return fmt.Errorf("iterate baseline rows: %w", err)
 	}
+	return nil
+}
 
-	// Append events for PKs that weren't in the baseline (rows inserted
-	// after the snapshot). Deterministic order: sort by PK string so tests
-	// can assert on the output without flakiness.
-	newPKs := make([]string, 0, len(in.Changes))
-	for pk := range in.Changes {
+// emitLeftoverChanges appends the events for PKs that weren't in the baseline
+// (rows inserted after the snapshot). Deterministic order: sort by PK string so
+// tests can assert on the output without flakiness.
+func emitLeftoverChanges(in mergeCore, changes map[string]*query.ResultRow, emit func(map[string]any) error, stats *mergeStats) error {
+	newPKs := make([]string, 0, len(changes))
+	for pk := range changes {
 		newPKs = append(newPKs, pk)
 	}
 	sort.Strings(newPKs)
 	for _, pk := range newPKs {
-		ev := in.Changes[pk]
+		ev := changes[pk]
 		if ev.EventType == event.EventDelete {
 			continue
 		}
@@ -1702,12 +1824,11 @@ func mergeBaselineImages(ctx context.Context, in mergeCore, emit func(map[string
 			continue
 		}
 		if err := emit(ev.RowAfter); err != nil {
-			return stats, err
+			return err
 		}
 		stats.InsertsEmitted++
 	}
-
-	return stats, nil
+	return nil
 }
 
 // SnapshotFullTableInput drives SnapshotFullTableImages.

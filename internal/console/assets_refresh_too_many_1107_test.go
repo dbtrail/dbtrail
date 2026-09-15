@@ -32,8 +32,8 @@ func TestBudgetRefusalLines(t *testing.T) {
 		}
 		return string(b)
 	}
-	two := "shop.a: " + reconstruct.TouchedRowBudgetError(1_000_000, 2).Error()
-	one := "shop.a: " + reconstruct.TouchedRowBudgetError(2_000_000, 1).Error()
+	two := "shop.a: " + reconstruct.TouchedRowBudgetError(1_000_000, 2, true).Error()
+	one := "shop.a: " + reconstruct.TouchedRowBudgetError(2_000_000, 1, true).Error()
 	budget := BaselineStatus{State: "failed", Refused: 1, LastError: two, TooManyChanges: true}
 	gap := BaselineStatus{State: "failed", Refused: 1, LastError: "shop.a: capture gap"}
 
@@ -132,7 +132,7 @@ func TestBudgetRefusalCardsRendered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refusal := "shop.a: " + reconstruct.TouchedRowBudgetError(1_000_000, 2).Error()
+	refusal := "shop.a: " + reconstruct.TouchedRowBudgetError(1_000_000, 2, true).Error()
 	restore, err := json.Marshal(map[string]any{"restore": BaselineStatus{State: "failed", Refused: 1, LastError: refusal, TooManyChanges: true}})
 	if err != nil {
 		t.Fatal(err)

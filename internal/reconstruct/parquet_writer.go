@@ -16,6 +16,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/query"
 )
 
 // ParquetWriterCompression / ParquetWriterRowGroupSize are the codec and row
@@ -286,7 +287,11 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 		Table:             in.Table,
 		PKCols:            in.PKCols,
 		Changes:           in.Changes,
-		DuckDBTuning:      in.DuckDBTuning,
+		Spill:             in.Spill,
+		CheckPass: func(m map[string]*query.ResultRow) error {
+			return checkPostBaselineColumns(in, m, colNames)
+		},
+		DuckDBTuning: in.DuckDBTuning,
 	}, func(rowMap map[string]any) error {
 		return w.WriteRow(rowMap, in.Schema, in.Table)
 	})

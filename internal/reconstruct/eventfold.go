@@ -27,8 +27,9 @@ import (
 //
 // So the fetch is paged and folded incrementally: peak memory moves from
 // "every event in the window" to "one page + one entry per distinct touched
-// PK". The map itself is still unbounded in the number of touched PKs — see
-// #1107, which bounds that half by hash-partitioning the join.
+// PK". Past the fold's in-memory limit, the map moves to disk in hash groups
+// and the merge reads them a few at a time (#1107, changespill.go, which also
+// says why DuckDB does not do this join).
 
 // retainEvent returns a heap copy of ev trimmed to what the merge downstream
 // actually reads, for storing in the change map.
@@ -187,6 +188,10 @@ type foldConfig struct {
 	// MaxTouchedRows is FullTableConfig.MaxTouchedRows, divided by Parallelism
 	// at the check.
 	MaxTouchedRows int64
+	// SpillOverBudget moves the changes to disk past MaxTouchedRows instead of
+	// refusing (#1107). Only the merge over a baseline reads a spill; the
+	// binlog-only fallback keeps the refusal.
+	SpillOverBudget bool
 
 	// RemediationHint is the advice attached to that warning; empty uses the
 	// attended-CLI wording. See FullTableConfig.RemediationHint.
@@ -229,6 +234,61 @@ type foldResult struct {
 	// Bounded by the table's column count, not by events or PKs.
 	ImageColumns map[string]struct{}
 	SawImage     bool
+
+	// Spill holds the changes on disk once they passed the fold's in-memory
+	// limit (#1107), and Changes is then empty. Set only under
+	// foldConfig.SpillOverBudget; the caller removes it with close.
+	Spill *changeSpill
+}
+
+// admitPage runs after each page is folded into r.Changes. Up to limit
+// distinct changed rows (0 = no limit) the changes stay in memory. Past it,
+// with spill allowed, every change moves to disk and the map is replaced,
+// and every later page follows it there; without spill it is the refusal.
+//
+// The map is replaced, not cleared: a cleared Go map keeps the memory it grew
+// to, which is the memory this exists to give back.
+func (r *foldResult) admitPage(limit int64, tables int, spill bool) error {
+	if r.Spill == nil {
+		if limit <= 0 || int64(len(r.Changes)) <= limit {
+			return nil
+		}
+		if !spill {
+			return TouchedRowBudgetError(limit, tables, false)
+		}
+		s, err := newChangeSpill(limit)
+		if err != nil {
+			return err
+		}
+		s.tables = tables
+		r.Spill = s
+	}
+	if err := r.Spill.drain(r.Changes); err != nil {
+		return err
+	}
+	r.Changes = make(map[string]*query.ResultRow)
+	return nil
+}
+
+// changeCount is how many changes the fold kept: the map's size, or what a
+// spilled fold wrote to disk (at least one per distinct changed row). Zero
+// means the window changed nothing.
+func (r *foldResult) changeCount() int {
+	if r.Spill != nil {
+		return int(r.Spill.records)
+	}
+	return len(r.Changes)
+}
+
+// close deletes a spilled fold's changes from disk. Safe on any fold result.
+func (r *foldResult) close() {
+	if r.Spill == nil {
+		return
+	}
+	if err := r.Spill.remove(); err != nil {
+		slog.Warn("reconstruct: could not remove changed rows written to disk", "dir", r.Spill.dir, "error", err)
+	}
+	r.Spill = nil
 }
 
 // foldEventWindow streams the event window described by fc and folds it into a
@@ -287,13 +347,19 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		}
 		// Per page, not after the window: the memory is spent as the map
 		// grows, so a check at the end would come after the harm (#1107).
-		if limit := scaledEventThreshold(fc.MaxTouchedRows, fc.Parallelism); limit > 0 && int64(len(res.Changes)) > limit {
+		limit := scaledEventThreshold(fc.MaxTouchedRows, fc.Parallelism)
+		spilling := res.Spill != nil
+		if err := res.admitPage(limit, fc.Parallelism, fc.SpillOverBudget); err != nil {
 			// No table prefix: the run's error adds "schema.table: ".
-			// No remedy here: it differs per surface (a scheduled update falls
-			// back to a full backup, a restore needs a closer moment), and the
-			// surfaces add their own.
-			foldErr = TouchedRowBudgetError(limit, fc.Parallelism)
+			// No remedy here: it differs per surface (a restore needs a closer
+			// moment, a scheduled update a full backup), and the surfaces add
+			// their own.
+			foldErr = err
 			return foldErr
+		}
+		if !spilling && res.Spill != nil {
+			slog.Info("reconstruct: more changed rows than this fold holds in memory; writing them to disk and merging in passes",
+				"schema", fc.Schema, "table", fc.Table, "limit", limit, "dir", res.Spill.dir)
 		}
 
 		res.Total += int64(len(page))
@@ -308,6 +374,7 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		return nil
 	})
 	if err != nil {
+		res.close()
 		// Only a TRANSPORT failure gets the "fetch events" label. fn's errors
 		// are the #592/#782 refusals, which FetchMergedStream propagates
 		// unchanged — prefixing those sends the operator to check DB/S3
@@ -327,6 +394,13 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		return nil, fmt.Errorf("fetch events: %w", err)
 	}
 
+	if res.Spill != nil {
+		if err := res.Spill.finish(); err != nil {
+			res.close()
+			return nil, err
+		}
+	}
+
 	// The decoder degrades to leaving BLOB/TEXT as stored base64 when no
 	// snapshot epoch covers an event or its resolver won't load. Until now that
 	// was a Debug line and the verdict was discarded, so a dump could carry
@@ -340,7 +414,7 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 
 	slog.Debug("event window folded",
 		"schema", fc.Schema, "table", fc.Table,
-		"events", res.Total, "touched_pks", len(res.Changes))
+		"events", res.Total, "changes", res.changeCount(), "on_disk", res.Spill != nil)
 	return res, nil
 }
 
@@ -364,15 +438,28 @@ func groupThousands(n int64) string {
 	return b.String()
 }
 
-// TouchedRowBudgetError is the refusal foldEventWindow returns once one
-// table's changes pass limit while tables tables fold at once. Exported so
-// the console's page tests render the exact text the daemon produces.
-func TouchedRowBudgetError(limit int64, tables int) error {
+// TouchedRowBudgetError is the changed-rows refusal, exported so the
+// console's page tests render the exact text the daemon produces.
+//
+// Without spilled, limit is what one table may hold in memory and the fold
+// refused past it. With spilled, the changes went to disk and one of the
+// spillBuckets groups alone passed limit when read back, which takes about
+// spillBuckets times limit changed rows (#1107).
+func TouchedRowBudgetError(limit int64, tables int, spilled bool) error {
+	during := ""
+	if tables > 1 {
+		during = fmt.Sprintf(" while %d tables are processed at once", tables)
+	}
+	if spilled {
+		return fmt.Errorf("%w: about %s or more distinct rows changed between the backup this starts from and the target moment, "+
+			"more than this run can rebuild from the recorded changes holding at most %s of them in memory at a time%s",
+			ErrTouchedRowBudget, groupThousands(limit*spillBuckets), groupThousands(limit), during)
+	}
 	if tables <= 1 {
 		return fmt.Errorf("%w: more than %s distinct rows changed between the backup this starts from and the target moment, "+
 			"the most this run may hold in memory", ErrTouchedRowBudget, groupThousands(limit))
 	}
 	return fmt.Errorf("%w: more than %s distinct rows changed between the backup this starts from and the target moment, "+
-		"the most one table may hold in memory while %d tables are processed at once",
-		ErrTouchedRowBudget, groupThousands(limit), tables)
+		"the most one table may hold in memory%s",
+		ErrTouchedRowBudget, groupThousands(limit), during)
 }
