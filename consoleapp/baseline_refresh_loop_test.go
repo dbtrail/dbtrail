@@ -291,10 +291,12 @@ func TestReportRefreshDuration_warnsOnlyOnOverrun(t *testing.T) {
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
+	// Window zero throughout: this test is about the interval threshold, and
+	// which READING an overrun gets is TestGradeRefresh's subject.
 	capture := func(level slog.Level, interval, took time.Duration) string {
 		var buf bytes.Buffer
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level})))
-		reportRefreshDuration("srv", interval, took)
+		reportRefreshDuration("srv", refreshRun{interval: interval, took: took}, refreshPace{})
 		return buf.String()
 	}
 

@@ -48,12 +48,12 @@ func stubS3Fold(t *testing.T, bucketTables []string, uploadErr error) (*[]upload
 	stubBucketListing(t)
 
 	var listed []string
-	newestSnapshotTables = func(ctx context.Context, src string) ([]string, error) {
+	newestSnapshotTables = func(ctx context.Context, src string) (time.Time, []string, error) {
 		if !strings.HasPrefix(src, "s3://") {
 			return realList(ctx, src)
 		}
 		listed = append(listed, src)
-		return bucketTables, nil
+		return time.Time{}, bucketTables, nil
 	}
 	var uploads []uploadCall
 	uploadSnapshot = func(_ context.Context, outputDir, dest, _ string, _ bool) (int, error) {
@@ -260,11 +260,11 @@ func TestRunRefresh_recordsHowManyFilesReachedTheDestination(t *testing.T) {
 	realList, realUpload := newestSnapshotTables, uploadSnapshot
 	t.Cleanup(func() { newestSnapshotTables, uploadSnapshot = realList, realUpload })
 	stubBucketListing(t)
-	newestSnapshotTables = func(ctx context.Context, src string) ([]string, error) {
+	newestSnapshotTables = func(ctx context.Context, src string) (time.Time, []string, error) {
 		if !strings.HasPrefix(src, "s3://") {
 			return realList(ctx, src)
 		}
-		return []string{"shop.orders"}, nil
+		return time.Time{}, []string{"shop.orders"}, nil
 	}
 	uploadSnapshot = func(context.Context, string, string, string, bool) (int, error) { return 7, nil }
 	injectFold(t, 0, nil)

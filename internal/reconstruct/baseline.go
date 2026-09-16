@@ -303,19 +303,37 @@ type BaselineFile struct {
 // (or at all, when none is readable) refuses with ErrUnreadableSnapshot
 // (#1639): the list would be an older snapshot's, or a short one.
 func NewestSnapshotTables(ctx context.Context, source string) ([]string, error) {
+	_, tables, err := NewestSnapshot(ctx, source)
+	return tables, err
+}
+
+// NewestSnapshot is NewestSnapshotTables plus the snapshot's own instant, for
+// a caller that folds forward FROM it and needs to know how much time that
+// fold covered (#1693). The instant is the directory's timestamp; zero when
+// there is no snapshot.
+//
+// It reads that instant off files[0], which rests on sortBaselineFiles having
+// put the newest first, on the local and the S3 path alike. Worth reconciling
+// with consoleapp's newestSnapshotOf, which deliberately does NOT trust the
+// order and takes a maximum instead: that function compares TWO independent
+// listings for equality, where trusting the order lets an older instant the
+// two sides happen to share read as a match. There is one listing here and
+// nothing to match it against, so the sort is the whole contract. A caller
+// that starts comparing this instant across sources wants the maximum form.
+func NewestSnapshot(ctx context.Context, source string) (time.Time, []string, error) {
 	files, unreadable, err := ListBaselinesUnreadable(ctx, source)
 	if err != nil {
-		return nil, err
+		return time.Time{}, nil, err
 	}
 	var newest time.Time
 	if len(files) > 0 {
 		newest = files[0].SnapshotTime // newest first
 	}
 	if err := UnreadableAtOrAfter(unreadable, newest, time.Time{}); err != nil {
-		return nil, err
+		return time.Time{}, nil, err
 	}
 	if len(files) == 0 {
-		return nil, nil
+		return time.Time{}, nil, nil
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -331,7 +349,7 @@ func NewestSnapshotTables(ctx context.Context, source string) ([]string, error) 
 		out = append(out, entry)
 	}
 	sort.Strings(out)
-	return out, nil
+	return newest, out, nil
 }
 
 // SnapshotTablesAt returns the schema.table entries of the newest

@@ -112,6 +112,19 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// sits on the near side of the `go` in TriggerRefresh, so it guards the
 	// dispatch and not the fold. See recoverBaselineJob.
 	defer s.recoverBaselineJob(baselineJobRefresh, req.ServerID, req.ServerName)
+	// Read and REMOVED in one step, before anything here can fail. Every exit
+	// that publishes nothing has to leave no sample behind, and the refusal
+	// branch is not the only such exit: the deferred recover above catches a
+	// panic in THIS goroutine's own frames (#1472) and unwinds past the store
+	// at the end of this function, which would leave the previous run's sample
+	// standing. The next published run would then compare against it over a
+	// window that grew because something crashed. Taking the sample out here
+	// and putting one back only on publish means no exit has to remember.
+	// A panic inside one of the fold's per-table goroutines is a different
+	// shape and needs nothing here: recoverTableFold turns it into an ordinary
+	// table failure, so it arrives as an error and leaves by the refusal
+	// branch. See recoverBaselineJob's own note on how far a recover reaches.
+	prevPace := s.takeRefreshPace(req.ServerID)
 	started := time.Now().UTC()
 	// Separate capture for the ELAPSED time, and the duplication is not
 	// redundant: t.UTC() strips the monotonic reading, so time.Since(started)
@@ -129,7 +142,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// fold has run its own files are in there too. See claimSnapshotDir.
 	unclaimed := claimSnapshotDir(refreshSnapshotDir(req, at))
 	req.FoldSource = resolveFoldSource(s.ctx, req)
-	tables, refused, reuse, err := s.executeRefresh(req, at)
+	prev, tables, refused, reuse, err := s.executeRefresh(req, at)
 	// Publishing is not finished until the snapshot is where this server's
 	// backups live. A fold that wrote a perfect local snapshot for a server
 	// whose destination is S3 has produced a copy on one box, which is not
@@ -144,8 +157,20 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// _SUCCESS last, so a crash mid-upload leaves the remote copy excluded from
 	// discovery rather than half-visible.
 	var uploaded int
+	// Timed apart from the run (#1693). The overrun reading compares the WHOLE
+	// run against the window, because the single-flight means the next refresh
+	// cannot start until the upload has finished either. But the advice that
+	// comes with that reading points at the fold, so an operator whose time is
+	// actually going to the destination has to be able to see that on the same
+	// line. Measured AROUND the upload rather than as the difference between
+	// two whole-run readings: as a difference it is never exactly zero, and a
+	// server with no destination would report a few nanoseconds of upload it
+	// never performed.
+	var uploadTook time.Duration
 	if err == nil && req.BaselineS3 != "" {
+		uploadStarted := time.Now()
 		uploaded, err = uploadRefreshedSnapshot(s.ctx, req, at)
+		uploadTook = time.Since(uploadStarted)
 	}
 	// Measured HERE, on the far side of the `go` in TriggerRefresh, because
 	// this is where the fold actually happens. Timing the dispatch loop
@@ -179,14 +204,20 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	applyFoldStatus(st, tables, refused, reuse, err)
 	if err != nil {
 		// The refusal itself was already reported above, before this lock was
-		// taken. What happens HERE is deliberately nothing: no duration report.
-		// reportRefreshDuration's advice is "raise the interval, or refresh
-		// fewer tables", which is the wrong remediation for a run that
-		// published nothing: a capture gap, a schema change or a shutdown
-		// mid-fold are not fixed by scheduling. The fan-out runs every table to
-		// completion before it reports a refusal, so a refusal costs about what
-		// a success costs and WOULD trip the overrun threshold, printing tuning
-		// advice above the actual cause.
+		// taken. What happens HERE is almost nothing: no duration report. Every
+		// remediation reportRefreshDuration offers is about scheduling and
+		// cost, and none of them is the fix for a run that published nothing:
+		// a capture gap, a schema change or a shutdown mid-fold are not fixed
+		// by an interval. The fan-out runs every table to completion before it
+		// reports a refusal, so a refusal costs about what a success costs and
+		// WOULD trip the overrun threshold, printing that advice above the
+		// actual cause.
+		//
+		// No pace sample is put back either. A refused run publishes nothing,
+		// so the NEXT run folds a window that reaches back past it, and that
+		// window grew for a reason which is not the fold's cost. Comparing
+		// across the gap would read the refusal as the source outrunning the
+		// fold (#1693). takeRefreshPace already removed the old one.
 		return
 	}
 	pub := []any{"server", req.ServerName, "id", req.ServerID, "tables", tables,
@@ -201,7 +232,48 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		pub = append(pub, "reuse_unchanged", "not applicable: the previous backup is read from S3, and reusing a file means linking it on disk")
 	}
 	slog.Info("baseline refresh: published", pub...)
-	reportRefreshDuration(req.ServerName, interval, took)
+	// ONE value for both, deliberately. Built twice, the sample this run leaves
+	// and the run it reports could disagree, and the disagreement would only
+	// ever show up a run later, in a reading nobody could reproduce.
+	finished := refreshRun{
+		interval: interval, took: took, upload: uploadTook, window: foldWindow(prev, at), cost: reuse,
+		reuseEnabled: req.CarryForwardUnchanged,
+	}
+	reportRefreshDuration(req.ServerName, finished, prevPace)
+	s.refreshPaces[req.ServerID] = refreshSample(finished)
+}
+
+// takeRefreshPace hands this run the previous published run's sample and takes
+// it out of the map in the same critical section, so the only way a sample
+// survives a run is for that run to publish and store a new one. See the call
+// in runRefresh for why removing it up front beats clearing it on each exit.
+func (s *baselineSupervisor) takeRefreshPace(serverID string) refreshPace {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.refreshPaces[serverID]
+	delete(s.refreshPaces, serverID)
+	return p
+}
+
+// foldWindow is how much time this refresh folded forward: from the snapshot
+// it read to the instant it anchored at. Zero when the previous snapshot's
+// instant is unknown or not before this one, and zero means "cannot tell",
+// never "instant".
+//
+// It is a LOWER bound on what some tables folded, not an exact span for all of
+// them. A snapshot's directory timestamp is not necessarily every table's
+// anchor: carrying a table forward reuses its previous file and keeps that
+// file's OLDER anchor (carryForward, internal/reconstruct/carryforward.go), and
+// FindBaseline falls back to an older snapshot for a table the newest one does
+// not carry. Either way the table's real window reaches further back than this
+// number. So a run this says is past its window may not be past every table's,
+// which is one more reason a single run is not enough to call anything a
+// runaway. See gradeRefresh.
+func foldWindow(prev, at time.Time) time.Duration {
+	if prev.IsZero() || !prev.Before(at) {
+		return 0
+	}
+	return at.Sub(prev)
 }
 
 // baselineFoldSource is where this request's fold reads the PREVIOUS snapshot
@@ -663,7 +735,11 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 // OPPOSITE for Parallelism (zero means runtime.NumCPU()) and for
 // WarnEventThreshold (zero means the volume warning never fires). Those two are
 // therefore set explicitly in refreshFoldConfig; see the constants above it.
-func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (tables, refused int, reuse reuseTally, err error) {
+// Returns, in order: the instant of the snapshot the fold READ (zero on every
+// error, and the anchor the overrun reading measures its window from), the
+// table count, the number of tables that refused, the reuse and cost tally,
+// and the error.
+func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (prev time.Time, tables, refused int, reuse reuseTally, err error) {
 	// Listed where the fold READS (refreshFoldConfig's BaselineSrc), not where
 	// it writes. On an S3-backed server those differ, and listing the local
 	// directory here would refuse with "no baseline snapshot" on exactly the
@@ -671,14 +747,30 @@ func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (t
 	// snapshots live in the bucket, and the local directory holds only what
 	// this daemon has folded since it started.
 	src := baselineFoldSource(req)
-	tableList, err := newestSnapshotTables(s.ctx, src)
+	prev, tableList, err := newestSnapshotTables(s.ctx, src)
 	if err != nil {
-		return 0, 0, reuseTally{}, fmt.Errorf("list the snapshot to refresh: %w", err)
+		// Zero prev on every error path, here and at the fold below, even
+		// where a real instant was read. Zero is this return's word for "no
+		// window", and a caller handed an error alongside a usable-looking
+		// instant has to decide which of the two conventions holds. Today the
+		// only caller returns before it would ask; that is not a reason to
+		// make it answerable later.
+		return time.Time{}, 0, 0, reuseTally{}, fmt.Errorf("list the snapshot to refresh: %w", err)
 	}
 	if len(tableList) == 0 {
-		return 0, 0, reuseTally{}, fmt.Errorf("no baseline snapshot to refresh under %s", src)
+		return time.Time{}, 0, 0, reuseTally{}, fmt.Errorf("no baseline snapshot to refresh under %s", src)
 	}
-	return s.foldSnapshot(req, at, tableList)
+	tables, refused, reuse, err = s.foldSnapshot(req, at, tableList)
+	if err != nil {
+		// The fold's own refusals (a capture gap, a schema change, the touched
+		// row budget) are the COMMON error here, and they arrive with a real
+		// listed instant in hand. Zeroed like the two listing errors above, so
+		// the convention holds on every path and not on most of them: an
+		// instant beside an error is a value a caller has to have a rule for,
+		// and the rule is cheaper than the rule.
+		prev = time.Time{}
+	}
+	return prev, tables, refused, reuse, err
 }
 
 // The bounded knobs EVERY in-daemon fold shares: the periodic refresh, the
@@ -794,10 +886,33 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 type reuseTally struct {
 	reused int
 	copied int
+	// The four below are the fold's measured cost, carried on the same value
+	// because it already travels from the per-table reports to the call site
+	// that reports the run, and they are what the overrun warning names
+	// instead of guessing (#1693). The three below the count are zero when no
+	// report carried a duration, which is what the equality checks in the
+	// reuse tests rely on; events is summed unconditionally, so a report
+	// carrying events and no duration does leave a non-zero tally.
+	events      int64         // events applied across every folded table
+	slowest     string        // schema.table that took longest
+	slowestTook time.Duration // how long that one table took
+	// slowestCarried says the slowest table was carried forward, so its time
+	// went to reading the events that showed it had none (#1689: the scan runs
+	// before the carry decision), to copying the previous file, or to both.
+	// Not "to nothing": carrying forward hard-links where it can and COPIES
+	// byte for byte when the previous snapshot is on another device, which is
+	// what the copied count beside it exists to distinguish. Either way the
+	// table was not REBUILT, which is the part the advice about a table's
+	// cost gets wrong if nobody says so.
+	slowestCarried bool
 }
 
 // countReuse tallies the tables a fold published by reusing the previous
-// snapshot's file.
+// snapshot's file, and, on the same pass, what the fold cost: the events it
+// applied, and the slowest table with its duration and whether it was carried
+// forward. The cost half is tallied here because this is the last place the
+// per-table reports exist as reports; past it they are counts, and the overrun
+// warning would have nothing measured to name (#1693).
 //
 // A separate function for the same reason refreshFoldConfig is one: this is the
 // last hop of the reuse feature and the only evidence it produced anything, and
@@ -806,11 +921,20 @@ type reuseTally struct {
 // that does not call this directly.
 func countReuse(reports []*reconstruct.TableReport) (tally reuseTally) {
 	for _, rep := range reports {
-		if rep != nil && rep.CarriedForward {
+		if rep == nil {
+			continue
+		}
+		if rep.CarriedForward {
 			tally.reused++
 			if !rep.CarriedByLink {
 				tally.copied++
 			}
+		}
+		tally.events += rep.EventsApplied
+		if rep.Duration > tally.slowestTook {
+			tally.slowestTook = rep.Duration
+			tally.slowest = rep.Schema + "." + rep.Table
+			tally.slowestCarried = rep.CarriedForward
 		}
 	}
 	return tally
@@ -854,7 +978,7 @@ var foldTables = reconstruct.ReconstructTablesDetailed
 // and a unit test that reached a bucket would be neither hermetic nor
 // offline-safe.
 var (
-	newestSnapshotTables = reconstruct.NewestSnapshotTables
+	newestSnapshotTables = reconstruct.NewestSnapshot
 	uploadSnapshot       = baseline.Upload
 	// listBaselines feeds resolveFoldSource; it addresses the bucket on an
 	// S3-backed server, same rule as the two above.
@@ -982,6 +1106,154 @@ func startBaselineRefreshLoop(ctx context.Context, reg *console.Registry, sup *b
 	return nil
 }
 
+// refreshRun is what ONE published refresh measured, gathered on one value so
+// the grading and the line that reports it read the same numbers.
+type refreshRun struct {
+	interval time.Duration // what the schedule asked for; zero when the run had no schedule
+	took     time.Duration // the whole run, fold and upload, which is what the next run waits on
+	upload   time.Duration // the slice of took spent uploading; exactly zero when no upload ran
+	window   time.Duration // foldWindow: how much time this run folded forward; zero means unknown
+	cost     reuseTally    // the per-table numbers the fold returned
+	// reuseEnabled says this server asked for unchanged tables to be carried
+	// forward, which is what makes cost.reused worth printing even at zero.
+	// A run that carried 18 tables and then carries 0 costs far more for a
+	// reason that has nothing to do with the window, and the two lines put
+	// side by side are the only place that is visible at Warn: the listing
+	// failure that sent the fold to the bucket, where carrying forward is
+	// refused outright, is reported at Debug.
+	reuseEnabled bool
+}
+
+// refreshPace is the previous PUBLISHED refresh's two numbers for one server.
+// It is the second sample gradeRefresh needs, and nothing else reads it.
+//
+// In memory on the supervisor, and deliberately: a daemon restart resets it,
+// and the first refresh after a restart then reports a single overrun as
+// exactly that instead of as a runaway. The evidence for a runaway is two
+// runs, a restarted daemon has seen one, and saying so is the honest reading.
+// A refusal clears it for a different reason, spelled out in runRefresh.
+type refreshPace struct {
+	window time.Duration
+	took   time.Duration
+	// fold is took minus the upload. It does NOT decide the reading, which
+	// runs on took: the next run waits for the upload too, so an upload that
+	// grows makes the backup fall behind exactly as a fold that grows does,
+	// and a reading that dropped the upload would stay silent through a
+	// server whose destination is what is running away. fold is here so the
+	// line can say which of the two grew more, which is a different question
+	// from whether anything grew. Note that even the fold is not the
+	// destination-free half: on an S3-backed server it DOWNLOADS the previous
+	// snapshot's Parquet (materializeBaselineLocal), so a bucket that got
+	// slower moves both numbers and the attribution only says which moved
+	// more.
+	fold time.Duration
+}
+
+// refreshSample is what a published run leaves for the next one to compare
+// against: nothing at all unless the window was measured, so a run whose
+// window could not be read never becomes half of a two-run claim.
+func refreshSample(run refreshRun) refreshPace {
+	if run.window <= 0 {
+		return refreshPace{}
+	}
+	return refreshPace{window: run.window, took: run.took, fold: run.took - run.upload}
+}
+
+// The readings one published refresh can support. Only refreshOnTime is quiet.
+type refreshVerdict int
+
+const (
+	refreshOnTime        refreshVerdict = iota // inside the interval it was given, or given none
+	refreshCadence                             // over the interval, inside the window it folded
+	refreshOverWindow                          // over the window it folded, without two runs saying the cost rises with it
+	refreshFallingBehind                       // over the window it folded, and costing more than the run before it did over less
+	refreshWindowUnknown                       // the window could not be measured, so no reading is available
+)
+
+// gradeRefresh decides which reading one published refresh supports, from the
+// numbers it measured and the numbers the previous published run left behind.
+//
+// The tempting rule is a single comparison: it took longer than the window of
+// changes it folded, therefore it is falling behind. That does not follow, and
+// the case it gets wrong is the ordinary one. A refresh rewrites every table
+// that changed in full, however little of it changed, and with carry-forward
+// off (the flag default in watch.go) the unchanged ones too. Either way the
+// run has a FLOOR that does not move with the window. Take a five minute
+// interval and a floor of eight minutes: the first run folds a five minute
+// window in eight, which is past its window; the next folds the ten minutes
+// that accumulated meanwhile, in the same eight, which is inside it. Nothing
+// is falling behind. A one-comparison rule would call the first run a runaway
+// and the second one healthy, minutes apart, and the runaway is the false one.
+//
+// Two runs are necessary and still not enough, because CONVERGENCE also grows
+// both numbers. Climbing toward that eight minute floor from a five minute
+// window, every step has a larger window than the one before AND a longer
+// duration, right up to the step that lands inside its window and stops. A
+// rule that asks only "did both grow" prints a runaway on the way up and a
+// clean bill at the top, which is the same pair of contradictory lines in a
+// slower costume.
+//
+// What tells them apart is the SLOPE, not the direction. Write the run as a
+// map from the window it folds to what that costs. The next window is about
+// this run's duration (the next refresh cannot start before this one ends), so
+// the daemon is iterating that map, and the iteration settles exactly where
+// the map's slope is under one. Measured between two runs the slope is the
+// change in cost over the change in window, so it exceeds one when the cost
+// grew by MORE than the window did. That is the condition below, and on the
+// series behind #1693 it holds (94 seconds of cost for 65 seconds of window)
+// while on the convergence above it does not (90 seconds of cost for five
+// minutes of window).
+//
+// The slope runs on took, the whole run, because that is what the next window
+// is made of. Splitting the upload out of the READING would be a mistake in
+// the expensive direction: on a server that uploads, more window means more
+// tables changed means more files sent, so the upload is part of the same
+// function of the window, and a reading blind to it understates the slope by
+// the destination's whole share and can stay silent while a server runs away.
+// Where the fold and the upload matter is AFTERWARDS, in saying which of the
+// two grew more, and reportRefreshDuration puts that on the line as a measured
+// number rather than assuming it was the fold.
+//
+// One run past its own window is still worth saying, because the next window
+// is already larger than this one's. It gets a reading of its own rather than
+// being folded into either of the other two.
+func gradeRefresh(run refreshRun, prev refreshPace) refreshVerdict {
+	if run.interval <= 0 || run.took <= run.interval {
+		return refreshOnTime
+	}
+	if run.window <= 0 {
+		return refreshWindowUnknown
+	}
+	if run.took <= run.window {
+		// Equality belongs here: the next window is then the same size as this
+		// one, so the lag holds where it is. Calling that a runaway would be
+		// wrong in the direction that costs an operator the most.
+		return refreshCadence
+	}
+	// prev.window > 0 is NOT what rejects a zero pace: no previous run, a
+	// restart or a refusal since all leave refreshPace{}, and 0 > 0 already
+	// fails on the next conjunct. It is decisive for exactly one shape, a
+	// sample carrying a duration and no window, which refreshSample cannot
+	// produce today. It stays as the belt: refreshSample is one edit away from
+	// storing a took whose window was never measured, and the reading that
+	// would then confirm itself is the strongest one this function has.
+	//
+	// run.window > prev.window is likewise not about the normal path, where it
+	// follows from the two runs being contiguous. It is what refuses to read
+	// an anchor that MOVED (a full backup, a restore, a CLI baseline between
+	// the two runs) as growth, and against a window that shrank the slope
+	// below would be a division by a negative number wearing a subtraction's
+	// clothes.
+	// No separate "and it took longer than the run before it": with the window
+	// having grown, a slope above one already forces it. A conjunct that
+	// cannot see red is a guard in name only.
+	if prev.window > 0 && prev.took > prev.window && run.window > prev.window &&
+		run.took-prev.took > run.window-prev.window {
+		return refreshFallingBehind
+	}
+	return refreshOverWindow
+}
+
 // reportRefreshDuration states how long ONE server's refresh took, and says so
 // when it took longer than the interval that was asked for.
 //
@@ -995,25 +1267,112 @@ func startBaselineRefreshLoop(ctx context.Context, reg *console.Registry, sup *b
 // Fires once per PUBLISHED refresh. Not per completed one: a run that refused
 // costs about what a success costs, because the fan-out runs every table to
 // completion before it reports the refusal, so reporting an overrun for it
-// would put "raise the interval" above the capture gap that actually stopped
+// would put a scheduling remedy above the capture gap that actually stopped
 // it. And not per tick: a tick only dispatches.
 //
-// The duration is also the honest measure of what a full rewrite costs on real
-// data: a refresh rewrites every table that CHANGED in full, however little of
-// it
-// changed. An estimate of that is a guess about someone else's data; this is
-// theirs.
-func reportRefreshDuration(server string, interval, took time.Duration) {
-	if interval <= 0 || took <= interval {
-		slog.Debug("baseline refresh finished", "server", server, "took", took, "interval", interval)
+// The wording this replaced said one thing for every overrun: that the cost
+// was the full-table rewrite, and that raising the interval would fix it.
+// Measured on a sustained write load (#1693), both were wrong for the case
+// that matters, and the line repeated itself ten times while the refreshes
+// grew by a factor of 3.7. Each branch below now names what was measured and
+// stops there. Which branch is taken is gradeRefresh's decision, not this
+// function's.
+func reportRefreshDuration(server string, run refreshRun, prev refreshPace) {
+	verdict := gradeRefresh(run, prev)
+	if verdict == refreshOnTime {
+		slog.Debug("baseline refresh finished", "server", server, "took", run.took, "interval", run.interval)
 		return
 	}
-	slog.Warn("baseline refresh: this server's refresh took longer than the configured interval, so it cannot "+
-		"run as often as requested. A refresh rewrites every table that changed in full, however little of it "+
-		"changed (a table with no events at all is carried forward instead), "+
-		"so this is the cost of the rewrite, not of the schedule. Raise the interval to match, or refresh "+
-		"fewer tables.",
-		"server", server, "took", took, "interval", interval)
+	attrs := []any{"server", server, "took", run.took, "interval", run.interval}
+	if run.window > 0 {
+		attrs = append(attrs, "window", run.window)
+	}
+	// Omitted at zero rather than printed as 0s. Zero here means no upload ran
+	// at all, which is every server whose backups stay on disk, and
+	// "upload_took=0s" on those lines would read as a measured upload that
+	// happened to be instant.
+	if run.upload > 0 {
+		attrs = append(attrs, "upload_took", run.upload)
+	}
+	if run.cost.slowest != "" {
+		attrs = append(attrs, "slowest_table", run.cost.slowest, "slowest_took", run.cost.slowestTook)
+		// A carried-forward table was not REBUILT, so its time went to the
+		// event scan that decided it had none (#1689), to copying the previous
+		// file on a cross-device destination, or to both. Either way the
+		// advice about what a table costs to rebuild does not apply to it, and
+		// saying which table it was costs one attribute.
+		if run.cost.slowestCarried {
+			attrs = append(attrs, "slowest_carried_forward", true)
+		}
+	}
+	if run.cost.events > 0 {
+		attrs = append(attrs, "events_applied", run.cost.events)
+	}
+	// Printed at zero, unlike everything above it, and only for a server that
+	// asked for reuse: here zero is the measurement, not its absence.
+	if run.reuseEnabled {
+		attrs = append(attrs, "reused", run.cost.reused, "reused_copied", run.cost.copied)
+	}
+	switch verdict {
+	case refreshFallingBehind:
+		// Both samples on the line: this reading is a claim about a trend, and
+		// a trend nobody can see the other end of is a claim to take on faith.
+		//
+		// And the trend is split into its two halves, MEASURED. The reading is
+		// over the whole run, so the growth can sit in the fold or in the
+		// upload, and the difference decides where an operator spends the
+		// afternoon. Naming the slowest table without this would send someone
+		// to a table whose own time never moved while the bucket was the
+		// answer, which is the failure the split exists to prevent.
+		foldGrew := run.took - run.upload - prev.fold
+		uploadGrew := run.upload - (prev.took - prev.fold)
+		where := "the fold"
+		if uploadGrew > foldGrew {
+			where = "the upload to this server's destination"
+		}
+		attrs = append(attrs, "previous_window", prev.window, "previous_took", prev.took,
+			"fold_grew_by", foldGrew, "upload_grew_by", uploadGrew, "growth_mostly_in", where)
+		slog.Warn("baseline refresh: this server's refresh took longer than the configured interval, and it is "+
+			"the second published run in a row to outlast the window of changes it folded. This one folded a "+
+			"larger window than the run before it and took longer doing it, so the run is growing faster than "+
+			"the window is, and this refresh left the backup further behind than the one before it did. A "+
+			"longer interval does not change "+
+			"that: the next refresh cannot start until this one ends, and it inherits everything that arrived "+
+			"while it ran. Taking a full backup does change it, because a full backup reads the source instead "+
+			"of folding, and the refreshes after it start from the moment that backup BEGAN, which means the "+
+			"first of them still folds the time the backup itself took. Otherwise reduce what a run costs, "+
+			"and start where growth_mostly_in on this line points: this reading is over the whole run, so a "+
+			"destination that slowed down reaches it exactly as a fold that did, and fold_grew_by against "+
+			"upload_grew_by is which of the two actually happened here.", attrs...)
+	case refreshOverWindow:
+		// The previous sample goes on the line whenever there IS one. This is
+		// the reading a run gets when the strong test was actually RUN and
+		// came out negative, not only when there was nothing to run it
+		// against, and a line that mentions no comparison reads as the second
+		// when it is usually the first.
+		if prev.window > 0 {
+			attrs = append(attrs, "previous_window", prev.window, "previous_took", prev.took)
+		}
+		slog.Warn("baseline refresh: this server's refresh took longer than the configured interval, and longer "+
+			"than the window of changes it folded, so the next refresh starts with a larger window than this "+
+			"one had. On its own that is not falling behind. A refresh rewrites every table that changed in "+
+			"full, however little of it changed, which puts a floor under the run that does not move with the "+
+			"window, and a run standing on that floor absorbs the larger window at about the same duration. "+
+			"Falling behind is the run growing by MORE than its window does, across two published runs, and "+
+			"that is not what this pair of runs shows. Settling can take several published lines.", attrs...)
+	case refreshCadence:
+		slog.Warn("baseline refresh: this server's refresh took longer than the configured interval, so scheduled "+
+			"ticks are skipped while it runs, but it finished inside the window of changes it folded, so the "+
+			"next window is no larger than this one and the lag is not growing. Raise the interval to at least "+
+			"the time the refresh takes to stop the skipped ticks, or reduce what a run costs: where this "+
+			"line names a slowest table, or an upload, those are the parts that were measured.", attrs...)
+	default:
+		slog.Warn("baseline refresh: this server's refresh took longer than the configured interval, so it "+
+			"cannot run as often as requested. Whether it still keeps up with the source could not be told for "+
+			"this run: the snapshot it folded from is stamped at or after this run's own instant, which is "+
+			"what a clock that moved or a snapshot directory carrying a future timestamp looks like from "+
+			"here.", attrs...)
+	}
 }
 
 // diskArgs builds the disk warning's attributes, omitting the projection when

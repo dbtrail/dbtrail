@@ -460,8 +460,12 @@ func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBa
 		Trigger:               console.BaselineRunTriggerScheduled,
 	}
 	// The interval is what the overrun warning measures against and names;
-	// for a scheduled rebuild that is the schedule's own `every`, which is
-	// where "raise the interval" is acted on.
+	// for a scheduled rebuild that is the schedule's own `every`. Passing the
+	// wrong one here does not only mislabel a log attribute: it decides
+	// whether the warning fires at all, since every reading past
+	// refreshOnTime is gated on took exceeding it. Note the remedy the
+	// warning offers is NOT always this setting; a refresh whose cost is
+	// rising with its window is not fixed by any `every`. See gradeRefresh.
 	if err := b.sup.TriggerRefresh(req, p.Every); err != nil {
 		return err
 	}
