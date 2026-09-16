@@ -9,13 +9,15 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/go-sql-driver/mysql"
 )
 
-// The partition bound on the snapshot-cut query (#1692). Without it, the
-// first query walks binlog_events' PRIMARY key upward from the oldest row,
-// and MySQL keeps the OLDEST partition in the plan whatever the time filter
-// says, so every refresh read that whole partition before it could see that
-// nothing was past `at`.
+// The partition bound on the snapshot-cut query (#1692). Without it, on
+// MySQL 8.4 the first query walked binlog_events' PRIMARY key upward from the
+// oldest row and the plan kept the OLDEST partition whatever the time filter
+// said, so every refresh read that whole partition before it could see that
+// nothing was past `at`. These tests pin the clause and the fallbacks with
+// sqlmock; the real plan is checked in the integration test.
 
 func TestPartitionsAtOrAfter(t *testing.T) {
 	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
@@ -90,7 +92,7 @@ func TestCutBoundClause(t *testing.T) {
 	if got := none.clause(); got != "" {
 		t.Errorf("nil bound clause = %q, want empty", got)
 	}
-	if got := (&cutBound{names: []string{"p_2026091614"}}).clause(); got != "" {
+	if got := (&cutBound{}).clause(); got != "" {
 		t.Errorf("empty keep clause = %q, want empty", got)
 	}
 	if got, want := (&cutBound{keep: []string{"p_2026091620", "p_future"}}).clause(),
@@ -127,9 +129,6 @@ func TestListCutBound(t *testing.T) {
 		}
 		if want := " PARTITION (p_2026091620, p_future)"; bound.clause() != want {
 			t.Errorf("clause = %q, want %q", bound.clause(), want)
-		}
-		if want := []string{"p_2026091614", "p_2026091619", "p_2026091620", "p_future"}; !slices.Equal(bound.names, want) {
-			t.Errorf("names = %v, want the full listing %v", bound.names, want)
 		}
 	})
 
@@ -338,6 +337,169 @@ func TestResolveSnapshotCut_repeatsTheSearchWhenTheLayoutMoved(t *testing.T) {
 	}
 }
 
+// Rotation drops partitions older than at's hour one by one. Those cannot
+// hold a row past at, so a listing that lost one is not a moved candidate set
+// and the result stands without a second search.
+func TestResolveSnapshotCut_anOldPartitionDroppedMidSearchNeedsNoRepeat(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	warns := captureWarns(t)
+	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
+
+	mock.ExpectQuery(listPartitionsRE).
+		WillReturnRows(partitionRows("p_2026091614", "p_2026091619", "p_2026091620", "p_future"))
+	mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).
+		WillReturnRows(cutRows("mysql-bin.000203", 37210222))
+	// p_2026091614 was dropped meanwhile; the candidate set is unchanged.
+	mock.ExpectQuery(listPartitionsRE).
+		WillReturnRows(partitionRows("p_2026091619", "p_2026091620", "p_future"))
+
+	cut, err := ResolveSnapshotCut(context.Background(), db, at)
+	if err != nil {
+		t.Fatalf("ResolveSnapshotCut: %v", err)
+	}
+	if cut == nil || cut.Pos != 37210222 {
+		t.Errorf("cut = %+v, want the bounded search's row", cut)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if warns.Len() != 0 {
+		t.Errorf("unexpected warnings: %s", warns.String())
+	}
+}
+
+// A partition the clause named can be dropped between the listing and the
+// search (a restore at a past instant racing rotation): MySQL refuses the
+// statement with error 1735. That is a moved layout, not a broken table, so
+// the search repeats on the new one instead of failing the whole run.
+func TestResolveSnapshotCut_aNamedPartitionDroppedMidSearchRepeats(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	warns := captureWarns(t)
+	at := time.Date(2026, 9, 16, 19, 5, 27, 0, time.UTC) // a past instant: p_19 is a candidate
+
+	mock.ExpectQuery(listPartitionsRE).
+		WillReturnRows(partitionRows("p_2026091619", "p_2026091620", "p_future"))
+	mock.ExpectQuery(`PARTITION \(p_2026091619, p_2026091620, p_future\)`).WithArgs(at).
+		WillReturnError(&mysql.MySQLError{Number: 1735, Message: "Unknown partition 'p_2026091619'"})
+	mock.ExpectQuery(listPartitionsRE).
+		WillReturnRows(partitionRows("p_2026091620", "p_future"))
+	mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).
+		WillReturnRows(cutRows("mysql-bin.000203", 42))
+	mock.ExpectQuery(listPartitionsRE).
+		WillReturnRows(partitionRows("p_2026091620", "p_future"))
+
+	cut, err := ResolveSnapshotCut(context.Background(), db, at)
+	if err != nil {
+		t.Fatalf("ResolveSnapshotCut: %v", err)
+	}
+	if cut == nil || cut.Pos != 42 {
+		t.Errorf("cut = %+v, want the repeated search's row", cut)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if warns.Len() != 0 {
+		t.Errorf("one repeat is the designed path and must not warn, got: %s", warns.String())
+	}
+}
+
+// Any other error from the bounded search is returned as is.
+func TestResolveSnapshotCut_otherSearchErrorsAreReturned(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
+	boom := &mysql.MySQLError{Number: 1146, Message: "Table 'x.binlog_events' doesn't exist"}
+
+	mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows("p_2026091620", "p_future"))
+	mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).WillReturnError(boom)
+
+	if _, err := ResolveSnapshotCut(context.Background(), db, at); !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want %v", err, boom)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// The confirming listing can fail too. A plain error falls back to the
+// unbounded search, loudly; a stopping daemon returns as is, with no warning
+// and no further statement.
+func TestResolveSnapshotCut_confirmingListingFailure(t *testing.T) {
+	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
+
+	t.Run("plain error falls back loudly", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+		warns := captureWarns(t)
+
+		mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows("p_2026091620", "p_future"))
+		mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).
+			WillReturnRows(cutRows("mysql-bin.000203", 1))
+		mock.ExpectQuery(listPartitionsRE).WillReturnError(errors.New("connection reset"))
+		mock.ExpectQuery(`FROM binlog_events\s+WHERE TO_SECONDS`).WithArgs(at).
+			WillReturnRows(cutRows("mysql-bin.000203", 1))
+
+		cut, err := ResolveSnapshotCut(context.Background(), db, at)
+		if err != nil {
+			t.Fatalf("ResolveSnapshotCut: %v", err)
+		}
+		if cut == nil || cut.Pos != 1 {
+			t.Errorf("cut = %+v, want the unbounded search's row", cut)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+		if !strings.Contains(warns.String(), "cannot confirm") || !strings.Contains(warns.String(), "connection reset") {
+			t.Errorf("the fallback must be logged with its cause, got: %s", warns.String())
+		}
+	})
+
+	t.Run("cancelled context returns as is", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+		warns := captureWarns(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows("p_2026091620", "p_future"))
+		mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).
+			WillReturnRows(cutRows("mysql-bin.000203", 1))
+		// The confirming listing outlives the deadline.
+		mock.ExpectQuery(listPartitionsRE).WillDelayFor(2 * time.Second).
+			WillReturnRows(partitionRows("p_2026091620", "p_future"))
+
+		// sqlmock reports the cancellation with its own error, so only the
+		// shape is asserted: an error came back, nothing was logged, and no
+		// statement followed.
+		if _, err := ResolveSnapshotCut(ctx, db, at); err == nil {
+			t.Fatal("expected the deadline to surface as an error, got nil")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+		if warns.Len() != 0 {
+			t.Errorf("a cancelled context must not be logged as a fallback, got: %s", warns.String())
+		}
+	})
+}
+
 // A layout that keeps changing is not rotation. After a few attempts the
 // search runs unbounded, which is always complete, and the log says so.
 func TestResolveSnapshotCut_givesUpOnAShiftingLayoutAndSearchesEverything(t *testing.T) {
@@ -374,8 +536,46 @@ func TestResolveSnapshotCut_givesUpOnAShiftingLayoutAndSearchesEverything(t *tes
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)
 	}
-	if !strings.Contains(warns.String(), "kept changing") {
+	if !strings.Contains(warns.String(), "could not be confirmed after repeated attempts") {
 		t.Errorf("giving up on the bound must be logged, got: %s", warns.String())
+	}
+}
+
+// A search refused for a partition the listing still shows is an
+// inconsistency this code cannot resolve. It must never be read as "nothing
+// past at": the empty result of a refused attempt is not a result. After the
+// attempts run out the search goes unbounded, loudly.
+func TestResolveSnapshotCut_aRefusedSearchIsNeverAcceptedAsEmpty(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	warns := captureWarns(t)
+	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
+	layout := []string{"p_2026091620", "p_future"}
+	refused := &mysql.MySQLError{Number: 1735, Message: "Unknown partition 'p_2026091620'"}
+
+	mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows(layout...))
+	for i := 0; i < maxCutBoundAttempts; i++ {
+		mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).WillReturnError(refused)
+		mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows(layout...))
+	}
+	mock.ExpectQuery(`FROM binlog_events\s+WHERE TO_SECONDS`).WithArgs(at).
+		WillReturnRows(cutRows("mysql-bin.000203", 9))
+
+	cut, err := ResolveSnapshotCut(context.Background(), db, at)
+	if err != nil {
+		t.Fatalf("ResolveSnapshotCut: %v", err)
+	}
+	if cut == nil || cut.Pos != 9 {
+		t.Errorf("cut = %+v, want the unbounded search's row, never nil from a refused attempt", cut)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if !strings.Contains(warns.String(), "refused=true") {
+		t.Errorf("giving up must be logged and say the search was refused, got: %s", warns.String())
 	}
 }
 

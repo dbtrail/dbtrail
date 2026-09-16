@@ -65,7 +65,7 @@ func TestResolveSnapshotCut_hourlyLayoutLeavesTheOldestPartitionOut(t *testing.T
 		testutil.InsertEvent(t, db, "mysql-bin.000001", pos, pos+100,
 			ts.Format("2006-01-02 15:04:05"), nil, "shop", "orders", 1, "1", nil, nil, []byte(`{"id":1}`))
 	}
-	ins(10, h.Add(-5*time.Hour))              // before the oldest partition's hour: lands in it all the same
+	ins(10, h.Add(-5*time.Hour))                // before the oldest partition's hour: lands in it all the same
 	ins(20, h.Add(-2*time.Hour+10*time.Minute)) // inside the oldest partition's own hour
 	ins(30, h.Add(-time.Hour+10*time.Minute))   // the middle partition
 	ins(40, h.Add(3*time.Minute))               // at's hour, before at
@@ -77,7 +77,7 @@ func TestResolveSnapshotCut_hourlyLayoutLeavesTheOldestPartitionOut(t *testing.T
 		t.Fatalf("listCutBound: %v", err)
 	}
 	if want := []string{"p_2026091620", "p_future"}; !slices.Equal(bound.keep, want) {
-		t.Fatalf("bound.keep = %v, want %v (listing: %v)", bound.keep, want, bound.names)
+		t.Fatalf("bound.keep = %v, want %v", bound.keep, want)
 	}
 
 	bounded := explainPartitions(t, db, firstEventPastSQL(at, bound.clause()), at)

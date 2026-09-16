@@ -12,6 +12,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/query"
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 // toSecondsEpoch converts a Go time to MySQL's TO_SECONDS() domain (seconds
@@ -22,15 +23,16 @@ import (
 // the integration test that asserts the resolved cut against real rows.
 //
 // It is inlined as a literal into the WHERE clause rather than bound as a
-// parameter because MySQL cannot prune partitions from a parameterised
-// comparison — the identical trick query.buildQuery uses for its Since/Until
-// hints. Measured on MySQL 8.4 (#1692), that hint prunes NOTHING: the
-// predicate is on an expression of the column, not the column, so it only
-// filters rows the scan already visits. What did prune there was the plain
-// `event_timestamp > ?` comparison, parameter and all — and even that keeps
-// the table's OLDEST partition in the plan whatever the value. What bounds
-// the snapshot-cut scan is the explicit PARTITION clause built below; the
-// hint stays as a harmless filter until every such hint is audited on 8.0.
+// parameter on the premise that MySQL cannot prune partitions from a
+// parameterised comparison — the same premise behind query.buildQuery's
+// Since/Until hints. Measured on MySQL 8.4 (#1692), that premise did not
+// hold for this statement: the TO_SECONDS hint pruned nothing, while the
+// plain `event_timestamp > ?` comparison, parameter and all, did prune —
+// though it kept the table's OLDEST partition for every value tried. What
+// bounds the snapshot-cut scan is therefore the explicit PARTITION clause
+// firstEventPast builds. The hint is kept as a redundant filter: dropping it
+// belongs with the same measurement of buildQuery's hints on 8.0, which
+// #1692 asks for and which has not been made.
 const toSecondsEpochOffset = 62167219200
 
 func toSeconds(t time.Time) int64 { return t.UTC().Unix() + toSecondsEpochOffset }
@@ -78,7 +80,7 @@ var ErrNoIndexedCoordinates = errors.New("no indexed event carries a binlog file
 // "now"), the cut is the end_pos of the newest event: everything indexed is
 // folded, and the next fold resumes exactly after it.
 //
-// # The one assumption
+// # Assumptions
 //
 // Commit order is read as ascending event_id. event_id is AUTO_INCREMENT and the
 // capturer inserts in stream order, so it tracks binlog order — the same
@@ -86,6 +88,12 @@ var ErrNoIndexedCoordinates = errors.New("no indexed event carries a binlog file
 // starting coordinate. It can be violated by `bintrail index` fed explicit
 // --files out of order; such an index is not a supported input for a
 // self-refreshing baseline chain.
+//
+// The partition bound trusts names: p_YYYYMMDDHH is taken to be VALUES LESS
+// THAN the next hour and p_future the MAXVALUE catch-all — the layout init,
+// rotation and restore-index write. firstEventPast never reads
+// PARTITION_DESCRIPTION, so a hand-made partition carrying one of those names
+// with a different bound would silently shrink the search.
 //
 // Returns (nil, nil) when the index holds no events at all — there is nothing to
 // fold, and the caller keeps the source baseline's own coordinates.
@@ -98,10 +106,8 @@ func ResolveSnapshotCut(ctx context.Context, db *sql.DB, at time.Time) (*query.B
 // spells (#1635): one fold resolves one cut, whatever the number of tables.
 var resolveSnapshotCut = resolveSnapshotCutOnce
 
-// partitionDateOrFuture recognises the two partition names binlog_events can
-// carry: the hourly p_YYYYMMDDHH and the p_future catch-all. Anything else
-// makes the caller give up on the bound, which also keeps an unexpected name
-// out of the SQL it is interpolated into.
+// partitionDateOrFuture recognises the two shapes of partition name
+// binlog_events carries: the hourly p_YYYYMMDDHH and the p_future catch-all.
 func partitionDateOrFuture(name string) (time.Time, bool) {
 	if name == "p_future" {
 		return time.Time{}, true
@@ -119,17 +125,17 @@ var errUnrecognisedPartition = errors.New("binlog_events carries a partition nam
 // order, the ones that can hold an event whose timestamp is past at: the
 // partition of at's hour, every later one, and p_future.
 //
-// That set is exact, not a heuristic. A partition p_H holds the events with
-// timestamps in [H, H+1h), except the OLDEST one, whose lower bound is open
-// and which therefore also holds everything before its hour. An event past at
-// cannot sit in a partition whose upper bound H+1h is at or before at, and for
-// the oldest partition that is the same test. So dropping every partition
-// before at's hour never drops a candidate, and it drops the one partition
-// MySQL's own pruning keeps regardless of the filter (#1692).
+// That set never loses a candidate. A partition p_H is VALUES LESS THAN H+1h:
+// its upper bound is H+1h and its lower bound is the previous partition's
+// upper bound — open for the OLDEST one, which therefore also holds everything
+// before its hour, and wider than an hour after a gap in the names. An event
+// past at cannot sit in a partition whose upper bound is at or before at,
+// whatever its lower bound. So dropping every partition named before at's
+// hour never drops a candidate, and it drops the oldest one, which the
+// server's own pruning kept on MySQL 8.4 (#1692).
 //
-// The reasoning holds only for the names init and rotation produce, so any
-// other name is an error naming it, and nothing else is ever interpolated
-// into a statement.
+// The reasoning holds only for those two name shapes; any other name is
+// errUnrecognisedPartition, and nothing unrecognised is interpolated into SQL.
 func partitionsAtOrAfter(names []string, at time.Time) ([]string, error) {
 	floor := at.UTC().Truncate(time.Hour)
 	var keep []string
@@ -145,11 +151,9 @@ func partitionsAtOrAfter(names []string, at time.Time) ([]string, error) {
 	return keep, nil
 }
 
-// cutBound is the partition layout one snapshot-cut search was bounded by:
-// every partition as listed, and the subset the clause names.
+// cutBound is the set of partitions one snapshot-cut search was bounded to.
 type cutBound struct {
-	names []string
-	keep  []string
+	keep []string
 }
 
 // clause is the ` PARTITION (...)` selector for the bound, or "" when there is
@@ -165,6 +169,12 @@ func (b *cutBound) clause() string {
 // listCutBound reads binlog_events' partitions and derives the bound for at.
 // A listing error and an unrecognised name are both returned as errors; the
 // caller decides that searching the whole table is the right fallback.
+//
+// The listing is scoped with DATABASE() rather than a dbName parameter, unlike
+// the sibling listings in status and rotation: the search statements this
+// bound feeds name `binlog_events` unqualified, so both resolve against the
+// connection's default database and cannot disagree about which table they
+// mean.
 func listCutBound(ctx context.Context, db *sql.DB, at time.Time) (*cutBound, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT PARTITION_NAME FROM information_schema.PARTITIONS
@@ -190,13 +200,24 @@ func listCutBound(ctx context.Context, db *sql.DB, at time.Time) (*cutBound, err
 	if err != nil {
 		return nil, err
 	}
-	return &cutBound{names: names, keep: keep}, nil
+	return &cutBound{keep: keep}, nil
 }
 
-// maxCutBoundAttempts bounds how many times firstEventPast re-reads the
-// partition layout after it moved under a bounded search. Rotation adds
-// partitions once per run, so a layout that keeps changing is not rotation.
+// maxCutBoundAttempts caps the bounded searches firstEventPast runs before it
+// gives up on the bound. A search whose candidate set moved underneath it is
+// retried on the new set. One rotation run changes the layout several times
+// (one DROP per archived partition, then one REORGANIZE of p_future), but only
+// the REORGANIZE touches the candidate set for a refresh targeting "now", so a
+// set still moving after this many attempts is treated as unknowable and the
+// search runs unbounded, which is slower but complete.
 const maxCutBoundAttempts = 3
+
+// isUnknownPartition reports MySQL error 1735 (ER_UNKNOWN_PARTITION): a
+// partition the statement named no longer exists.
+func isUnknownPartition(err error) bool {
+	var me *mysqldriver.MySQLError
+	return errors.As(err, &me) && me.Number == 1735
+}
 
 // firstEventPast returns the coordinate of the first event, in commit order,
 // whose timestamp is past at, or nil when the index holds none.
@@ -205,11 +226,11 @@ const maxCutBoundAttempts = 3
 // this statement walks PRIMARY upward from the oldest row and stops at the
 // first match, and in the ordinary case (a refresh targeting "now") there is
 // no match at all, so without a bound it reads to the end of every partition
-// in the plan. MySQL's pruning drops the partitions between the oldest and
-// at's hour but never the oldest one itself, and on a real index that
-// partition was ~10 GB read on every refresh before any table was folded.
-// Naming the partitions is the exact bound; see partitionsAtOrAfter for why
-// it cannot lose a candidate.
+// in the plan. On MySQL 8.4 (#1692) the server's own pruning dropped the
+// partitions between the oldest and at's hour but kept the oldest one, and
+// on the measured index that partition was ~10 GB read on every refresh
+// before any table was folded. Naming the partitions is a bound that cannot
+// lose a candidate; see partitionsAtOrAfter for why.
 //
 // # The layout can move between the listing and the search
 //
@@ -219,23 +240,33 @@ const maxCutBoundAttempts = 3
 // "nothing past at", the cut would land after that row, and the row would be
 // dropped by this fold's time filter and skipped by the next fold's positional
 // lower bound: the silent loss ResolveSnapshotCut's doc explains. So after a
-// bounded search the layout is listed again, and only an unchanged listing
-// proves the clause saw every candidate. A changed one repeats the search on
-// the new layout, a few times; past that, or when the layout cannot be read
-// at all, the search runs unbounded, which is slower and always complete.
+// bounded search the layout is listed again, and only an unchanged candidate
+// set proves the clause saw every candidate. (The full listing is not
+// compared: rotation also drops partitions older than at's hour, one by one,
+// and those can hold nothing past at.) A changed set repeats the search on
+// the new one, a few times; so does a search refused because a partition it
+// named was dropped meanwhile. Past that, or when the layout cannot be read
+// at all, the search runs unbounded, which is slower and always complete. An
+// empty clause (an unpartitioned table) runs unbounded without a warning:
+// there is nothing to bound by and no layout to confirm.
 func firstEventPast(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
+	atStamp := at.UTC().Format(time.RFC3339)
 	bound, err := listCutBound(ctx, db, at)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, err
 		}
 		slog.Warn("resolve snapshot cut: cannot bound the search to partitions; searching the whole table",
-			"error", err)
+			"at", atStamp, "error", err)
 		bound = nil
 	}
 	for attempt := 1; ; attempt++ {
 		cut, err := firstEventPastIn(ctx, db, at, bound.clause())
-		if err != nil {
+		// A partition the clause named was dropped between the listing and
+		// the search. The layout moved and this attempt saw nothing; it is
+		// retried below like any other move, never accepted.
+		moved := err != nil && bound.clause() != "" && isUnknownPartition(err)
+		if err != nil && !moved {
 			return nil, err
 		}
 		if bound.clause() == "" {
@@ -247,16 +278,16 @@ func firstEventPast(ctx context.Context, db *sql.DB, at time.Time) (*query.Binlo
 				return nil, err
 			}
 			slog.Warn("resolve snapshot cut: cannot confirm the partition layout after a bounded search; searching the whole table",
-				"error", err)
+				"at", atStamp, "error", err)
 			bound = nil
 			continue
 		}
-		if slices.Equal(again.names, bound.names) {
+		if !moved && slices.Equal(again.keep, bound.keep) {
 			return cut, nil
 		}
 		if attempt >= maxCutBoundAttempts {
-			slog.Warn("resolve snapshot cut: the partition layout kept changing during the search; searching the whole table",
-				"attempts", attempt)
+			slog.Warn("resolve snapshot cut: the bounded search could not be confirmed after repeated attempts; searching the whole table",
+				"at", atStamp, "attempts", attempt, "refused", moved, "was", bound.keep, "now", again.keep)
 			bound = nil
 			continue
 		}
@@ -265,7 +296,11 @@ func firstEventPast(ctx context.Context, db *sql.DB, at time.Time) (*query.Binlo
 }
 
 // firstEventPastSQL is the statement firstEventPastIn runs, with at bound as
-// its one parameter. Shared with the integration test that EXPLAINs it.
+// its one parameter. Shared with the integration test that EXPLAINs it. Rows
+// with a NULL coordinate (#318 drift rows) are unusable as an anchor and are
+// skipped here and by the newest-event statement alike; they are also not
+// events the position predicates could ever admit, so skipping them changes
+// no window.
 func firstEventPastSQL(at time.Time, partClause string) string {
 	return fmt.Sprintf(
 		`SELECT binlog_file, start_pos FROM binlog_events%s
@@ -295,9 +330,6 @@ func firstEventPastIn(ctx context.Context, db *sql.DB, at time.Time, partClause 
 }
 
 func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
-	// Rows with a NULL coordinate (#318 drift rows) are unusable as an anchor and
-	// are skipped on both branches; they are also not events the position
-	// predicates could ever admit, so skipping them changes no window.
 	cut, err := firstEventPast(ctx, db, at)
 	if err != nil {
 		return nil, err
