@@ -273,7 +273,7 @@ func TestDeleteEventsSinceCheckpoint_rolloverSafe(t *testing.T) {
 	testutil.InsertEvent(t, db, "mysql-bin.1000000", 100, 200, ts, nil, "mydb", "orders", 1, "2", nil, nil, []byte(`{"id":2}`)) // checkpoint file, below pos (must survive)
 	testutil.InsertEvent(t, db, "mysql-bin.1000000", 300, 400, ts, nil, "mydb", "orders", 1, "3", nil, nil, []byte(`{"id":3}`)) // checkpoint file, at-or-beyond pos (the straggler; must be deleted)
 
-	n, err := deleteEventsSinceCheckpoint(db, "mysql-bin.1000000", 300)
+	n, err := deleteEventsSinceCheckpoint(db, "mysql-bin.1000000", 300, noDedupFloor)
 	if err != nil {
 		t.Fatalf("deleteEventsSinceCheckpoint: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestDeleteEventsSinceCheckpointGTID_rolloverSafe(t *testing.T) {
 		t.Fatalf("parse saved set: %v", err)
 	}
 
-	n, err := deleteEventsSinceCheckpointGTID(db, "mysql-bin.1000000", 300, savedSet, gomysql.MySQLFlavor)
+	n, err := deleteEventsSinceCheckpointGTID(db, "mysql-bin.1000000", 300, savedSet, gomysql.MySQLFlavor, noDedupFloor)
 	if err != nil {
 		t.Fatalf("deleteEventsSinceCheckpointGTID: %v", err)
 	}

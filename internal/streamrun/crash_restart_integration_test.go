@@ -608,7 +608,7 @@ func TestIntegrationDedupBoundaryIsEventStart(t *testing.T) {
 
 	t.Run("checkpoint at the boundary between the two events", func(t *testing.T) {
 		seedBoundaryEvents(t, db, nil, nil)
-		n, err := deleteEventsSinceCheckpoint(db, "binlog.000007", 200)
+		n, err := deleteEventsSinceCheckpoint(db, "binlog.000007", 200, noDedupFloor)
 		if err != nil {
 			t.Fatalf("deleteEventsSinceCheckpoint: %v", err)
 		}
@@ -621,7 +621,7 @@ func TestIntegrationDedupBoundaryIsEventStart(t *testing.T) {
 
 	t.Run("checkpoint past both events deletes nothing", func(t *testing.T) {
 		seedBoundaryEvents(t, db, nil, nil)
-		n, err := deleteEventsSinceCheckpoint(db, "binlog.000007", 300)
+		n, err := deleteEventsSinceCheckpoint(db, "binlog.000007", 300, noDedupFloor)
 		if err != nil {
 			t.Fatalf("deleteEventsSinceCheckpoint: %v", err)
 		}
@@ -633,7 +633,7 @@ func TestIntegrationDedupBoundaryIsEventStart(t *testing.T) {
 
 	t.Run("checkpoint at the first event's start deletes both", func(t *testing.T) {
 		seedBoundaryEvents(t, db, nil, nil)
-		n, err := deleteEventsSinceCheckpoint(db, "binlog.000007", 100)
+		n, err := deleteEventsSinceCheckpoint(db, "binlog.000007", 100, noDedupFloor)
 		if err != nil {
 			t.Fatalf("deleteEventsSinceCheckpoint: %v", err)
 		}
@@ -666,7 +666,7 @@ func TestIntegrationDedupBoundaryIsEventStartGTID(t *testing.T) {
 
 	t.Run("committed transaction below the checkpoint survives", func(t *testing.T) {
 		seedBoundaryEvents(t, db, &committed, &committed)
-		n, err := deleteEventsSinceCheckpointGTID(db, "binlog.000007", 200, savedSet, gomysql.MySQLFlavor)
+		n, err := deleteEventsSinceCheckpointGTID(db, "binlog.000007", 200, savedSet, gomysql.MySQLFlavor, noDedupFloor)
 		if err != nil {
 			t.Fatalf("deleteEventsSinceCheckpointGTID: %v", err)
 		}
@@ -682,7 +682,7 @@ func TestIntegrationDedupBoundaryIsEventStartGTID(t *testing.T) {
 		// saved set — the mid-transaction checkpoint case (#491) that the
 		// position-keyed delete alone cannot reach.
 		seedBoundaryEvents(t, db, &stillOpen, &stillOpen)
-		n, err := deleteEventsSinceCheckpointGTID(db, "binlog.000007", 200, savedSet, gomysql.MySQLFlavor)
+		n, err := deleteEventsSinceCheckpointGTID(db, "binlog.000007", 200, savedSet, gomysql.MySQLFlavor, noDedupFloor)
 		if err != nil {
 			t.Fatalf("deleteEventsSinceCheckpointGTID: %v", err)
 		}

@@ -493,7 +493,7 @@ func TestStreamLoop_mariadbResumeDedupDoesNotDeleteIndexedRows(t *testing.T) {
 
 	// The exact resume-time cut One performs on restart, both modes. With sane
 	// start_pos values, nothing sits at-or-beyond the checkpoint.
-	n, err := deleteEventsSinceCheckpointGTID(indexDB, saved.binlogFile, saved.binlogPos, savedSet, gomysql.MariaDBFlavor)
+	n, err := deleteEventsSinceCheckpointGTID(indexDB, saved.binlogFile, saved.binlogPos, savedSet, gomysql.MariaDBFlavor, saved.dedupFloorID)
 	if err != nil {
 		t.Fatalf("deleteEventsSinceCheckpointGTID: %v", err)
 	}
