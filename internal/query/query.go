@@ -178,6 +178,30 @@ type BinlogPos struct {
 	Pos  uint64
 }
 
+// AtOrBefore reports whether p is at or before q in binlog order, by the same
+// rule buildQuery's SincePos/UntilPos predicates use BELOW in this file: the
+// file by name length first, then lexicographically (the #840 rollover), then
+// the position. In SQL that rule is applied to start_pos for the lower bound
+// and to end_pos for the upper one; here it compares two coordinates as such.
+//
+// Two packages carry their own copy: cascade.afterSnapshot compares a whole
+// ResultRow against a coordinate, and icebergexport.binlogBefore is this same
+// two-coordinate comparison spelled as four loose scalars (and strict, not
+// at-or-before). This is the method form, and it lives here because the rule is
+// part of what BinlogPos means.
+//
+// len() counts bytes where MySQL's CHAR_LENGTH and DuckDB's length count
+// characters; identical for the ASCII basenames a binlog actually carries.
+func (p BinlogPos) AtOrBefore(q BinlogPos) bool {
+	if len(p.File) != len(q.File) {
+		return len(p.File) < len(q.File)
+	}
+	if p.File != q.File {
+		return p.File < q.File
+	}
+	return p.Pos <= q.Pos
+}
+
 // Options specifies the filter criteria for querying binlog_events.
 // All fields are optional; nil / zero values are ignored when building SQL.
 type Options struct {

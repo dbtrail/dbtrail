@@ -1117,8 +1117,9 @@ func ReconstructTable(
 	// ── 3c. Refuse/warn on a stamped capture gap inside the window (#765) ──
 	// stream_state.gap_lost_at records an irreparable capture gap (source
 	// binlogs purged before the stream caught up); unlike the archive-coverage
-	// gap the fetch below already guards against, no amount of archive
-	// resolution can fill this — it must be checked directly.
+	// gap the fetch below guards against — and that step 5 runs on its own when
+	// it skips that fetch — no amount of archive resolution can fill this, so it
+	// must be checked directly.
 	// The finding is kept, not just acted on: under --allow-gaps the run
 	// proceeds over a known permanent loss, and a Parquet snapshot published
 	// that way must carry the fact in its own metadata (#1170). A log line
@@ -1174,11 +1175,26 @@ func ReconstructTable(
 	// page before trimming it into the map — see its doc comment for why those
 	// guards MUST live there and not on the finished map.
 	//
-	// NoArchive is passed false unconditionally and the stream decides whether
-	// to query archives — it already handles the empty-archive case in its fast
-	// path. The pre-#1097 `len(archSources)==0` gate was wrong: it disabled
-	// archive routing even when the fetch could have resolved sources itself.
-	fold, err := foldEventWindow(ctx, withFoldBudgets(cfg, foldConfig{
+	// Skipped entirely when the positional window cannot hold an event (#1689).
+	// The fetch is bounded below by the baseline's anchor and above by the run's
+	// cut, so a cut that has not passed the anchor leaves no room between them
+	// and the query can only come back empty — after walking the index to find
+	// that out, which on a real index was the bulk of a refresh that applied
+	// nothing. Placed HERE, after steps 3a-bis/3b/3c: every refusal that does
+	// not depend on events still runs, so a TRUNCATE or a schema change is
+	// caught on a table this skips. The per-event refusals that live INSIDE the
+	// fold (#592, #782, the touched-row budget) do not run, and cannot fire on
+	// a window with no events.
+	//
+	// The refusal that does not survive on its own is the archive-coverage
+	// check, because the fetch is where it lives, so the skip runs it. That is
+	// not belt-and-braces. The proof says the query returns nothing, which is
+	// true whatever coverage says — but reading that as "nothing changed" is
+	// only sound over a window that could be READ. An hour nobody can read may
+	// have held events above the anchor, events that would also have carried
+	// the cut past it. This path runs unattended, where AllowGaps is false
+	// precisely because nobody is watching it publish.
+	fc := withFoldBudgets(cfg, foldConfig{
 		DB:             db,
 		Engine:         engine,
 		DBName:         dbName,
@@ -1191,9 +1207,34 @@ func ReconstructTable(
 		ArchiveFetcher: fetcher,
 		// This path merges over a baseline, the one merge that reads a spill.
 		SpillOverBudget: true,
-	}))
-	if err != nil {
-		return nil, err
+	})
+	fold := &foldResult{Changes: map[string]*query.ResultRow{}}
+	if windowEmptyByPosition(fetchOpts.SincePos, fetchOpts.UntilPos) {
+		if cerr := verifyFoldCoverage(ctx, fc); cerr != nil {
+			// Wrapped exactly as the fetch wraps it, so the remediation an
+			// operator reads does not depend on which path ran.
+			return nil, annotateFoldFetchError(cerr, fc)
+		}
+		// Info, not Debug: this is the operator's fact, at the same level as
+		// the per-table line the run ends with either way ("table carried
+		// forward unchanged" under CarryForwardUnchanged, "table reconstructed"
+		// otherwise).
+		//
+		// The message states the two coordinates and stops there. The cut is
+		// resolved ONCE PER RUN over the whole index while the anchor is per
+		// table, so "capture is behind" is the usual cause but not one this
+		// comparison establishes — same reason query.GapRange exists.
+		slog.Info("skipping the event fetch: the run's cut is at or before this baseline's anchor, "+
+			"so the window cannot hold an event",
+			"schema", schema, "table", table,
+			"anchor", fetchOpts.SincePos.File+":"+strconv.FormatUint(fetchOpts.SincePos.Pos, 10),
+			"cut", fetchOpts.UntilPos.File+":"+strconv.FormatUint(fetchOpts.UntilPos.Pos, 10))
+	} else {
+		var ferr error
+		fold, ferr = foldWindow(ctx, fc)
+		if ferr != nil {
+			return nil, ferr
+		}
 	}
 	// Deletes the changes a spilled fold wrote to disk, on every return below.
 	defer fold.close()
@@ -2186,7 +2227,7 @@ func reconstructBinlogOnly(
 	// this fallback has no baseline to bound the window, so it is if anything
 	// the more exposed of the two — it fetches the WHOLE retained binlog
 	// history for the table.
-	fold, err := foldEventWindow(ctx, withFoldBudgets(cfg, foldConfig{
+	fold, err := foldWindow(ctx, withFoldBudgets(cfg, foldConfig{
 		DB:       db,
 		Engine:   engine,
 		DBName:   dbName,
