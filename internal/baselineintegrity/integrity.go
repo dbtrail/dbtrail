@@ -78,13 +78,23 @@ func CRC32CFile(path string) (string, error) {
 	return fmt.Sprintf("%08x", h.Sum32()), nil
 }
 
+// manifested reports whether a snapshot file is covered by the manifest: every
+// table file, and both files of a table delta (#1638), which are Parquet under
+// another suffix (baseline.TableDeltaPosdelSuffix / TableDeltaUpsertsSuffix;
+// spelled out here because baseline imports this package). A delta is folded
+// into a rewritten table at compaction, so an unverified one would be the one
+// route by which corrupt bytes reach a freshly certified file.
+func manifested(name string) bool {
+	return strings.HasSuffix(name, ".parquet") || strings.HasSuffix(name, ".posdel") || strings.HasSuffix(name, ".upserts")
+}
+
 // WriteManifest hashes every .parquet file under snapshotDir and writes the
 // integrity manifest. It is called on full baseline success, before the _SUCCESS
 // marker, so a snapshot that has _SUCCESS also has its manifest.
 func WriteManifest(snapshotDir string) error {
 	m := Manifest{Version: manifestVersion, Algo: "crc32c", Files: map[string]string{}}
 	err := filepath.WalkDir(snapshotDir, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".parquet") {
+		if walkErr != nil || d.IsDir() || !manifested(d.Name()) {
 			return walkErr
 		}
 		crc, err := CRC32CFile(p)

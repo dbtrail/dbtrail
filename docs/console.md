@@ -676,6 +676,8 @@ the download. On a read-only console (`serve`, where the Backups page does
 not exist) the card still renders on Connect. The old `/storage` link still
 works and lands on Retention.
 
+- **Table deltas are not on this page.** `--baseline-table-deltas` (#1638), which makes a refresh keep a changed table's file and write its changes beside it, is a daemon flag only (`BINTRAIL_BASELINE_TABLE_DELTAS`) and has no card here. It changes the files every refresh publishes; [Dump and baseline](dump-and-baseline.md) describes the layout, who reads it, and what to do with DuckDB views when turning it on or off.
+
 - **Backups & disk space** (#1528/#1543, formerly *File reuse for unchanged
   tables*, and before that *Automatic backup refresh*; on the **Backups &
   snapshots** settings page since #1582) — the one behaviour behind

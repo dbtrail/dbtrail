@@ -30,6 +30,10 @@ type Config struct {
 	Compression  string    // "zstd", "snappy", "gzip", "none"
 	RowGroupSize int       // rows per row group
 	Retry        bool      // skip tables whose output Parquet file already exists
+	// TableDeltas: also write an EMPTY table delta beside every table (#1638),
+	// so a full backup taken by a daemon running with table deltas has the
+	// layout of the refreshes around it. See WriteEmptyTableDeltas.
+	TableDeltas bool
 }
 
 // Stats describes the outcome of a baseline run.
@@ -267,6 +271,12 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	// (pre-#636) snapshot, so later corruption of its data would go unnoticed.
 	// Re-run rather than publish one. (A read-time rotted manifest is a different
 	// case — handled gracefully in ValidateLocalFile, not here.)
+	// Before the manifest, which covers the pair like any other file.
+	if cfg.TableDeltas {
+		if err := WriteEmptyTableDeltas(snapDir); err != nil {
+			return stats, err
+		}
+	}
 	if err := baselineintegrity.WriteManifest(snapDir); err != nil {
 		return stats, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err)
 	}

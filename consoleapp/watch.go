@@ -83,6 +83,7 @@ var (
 	upConsoleBaselineRetain string
 	upBaselineRefreshEvery  string
 	upBaselineCarryForward  bool
+	upBaselineTableDeltas   bool
 	upConsoleServersFile    string
 	upConsoleAuthFile       string
 	upConsoleMCPTokenFile   string
@@ -225,6 +226,11 @@ func init() {
 			"it (hard link where possible). Off by default: the rows are identical either way, but it links two "+
 			"snapshots to one file, so disk-usage and prune figures then count space they will not reclaim. "+
 			"Editable from the console settings panel, which overrides this flag.")
+	watchCmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", false,
+		"Off by default. A refresh does not rewrite a table that changed: it keeps the previous Parquet file and writes the changed rows as two small "+
+			"files beside it (<table>.posdel, <table>.upserts), and writes the table again in full when those pass a quarter of its size or the chain is a "+
+			"day old. The generated DuckDB views read the pair; every other reader uses the table file and the index, as before. A snapshot written this way "+
+			"must not be read by a bintrail older than this one. Turning it off needs nothing else: the next refresh writes every table in full. Generate the DuckDB views again after turning it on or off.")
 	watchCmd.Flags().StringVar(&upBaselineRefreshEvery, "baseline-refresh-interval", "", "Periodically refresh each server's newest baseline snapshot from the index (Nm/Nh/Nd; default: off). Runs with the conservative DuckDB budget, folds at most 2 tables at a time, and never publishes over a known capture gap.")
 	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, "baseline-retain", "", "Periodically prune local --baseline-dir snapshots older than this (Nd/Nh) once a durable copy exists in --baseline-s3 (never deletes the only copy or the newest snapshot per table)")
 	watchCmd.Flags().StringVar(&upConsoleServersFile, "console-servers-file", "", "Path to the console server registry YAML (default ~/.config/bintrail/console-servers.yaml)")
@@ -905,6 +911,16 @@ func mainSourceJobInfo(sourceDSN, indexDSN, streamFlavor string) ext.SourceJobIn
 func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string) *baselineSupervisor {
 	sup := newBaselineSupervisor(ctx, stagingDir, upConsoleBaselineLockMode)
 	sup.configErr = upConsoleBaselineLockModeErr
+	sup.tableDeltas = upBaselineTableDeltas
+	if upBaselineTableDeltas {
+		// Once per boot, because the failure it prevents is silent: a DuckDB
+		// view generated before this was on reads a table's file alone, and
+		// from the first refresh that file is the table as it was when its
+		// chain of deltas started.
+		slog.Warn("table deltas are ON: a refresh keeps a changed table's file and writes its changes beside it. " +
+			"DuckDB views generated before this was turned on must be generated again, or they show tables as of the last full rewrite. " +
+			"The views.sql inside each snapshot, the console download and the SQL panel are generated per snapshot and need nothing.")
+	}
 	// The download TTL for staged .sql builds (#1448) needs a clock nobody
 	// is polling: the Backups page expires lazily only while it is open.
 	go sup.runSQLExportReaper()
@@ -967,6 +983,9 @@ func resolveUpConsoleEnv(cmd *cobra.Command) error {
 		if v := os.Getenv("BINTRAIL_BASELINE_REFRESH_INTERVAL"); v != "" {
 			upBaselineRefreshEvery = v
 		}
+	}
+	if !cmd.Flags().Changed("baseline-table-deltas") {
+		upBaselineTableDeltas = envBoolOr("BINTRAIL_BASELINE_TABLE_DELTAS", upBaselineTableDeltas)
 	}
 	if !cmd.Flags().Changed("baseline-carry-forward-unchanged") {
 		upBaselineCarryForward = envBoolOr("BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED", upBaselineCarryForward)

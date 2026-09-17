@@ -100,8 +100,12 @@ type BaselinePair struct {
 	PrevPath      string
 	NewPath       string
 	PrevSnapshot  time.Time
-	NewSnapshot   time.Time // new baseline's snapshot time — the coarse time bound paired with NewAnchor
-	NewAnchor     query.BinlogPos
+	// NewHasDelta: the new snapshot stores this table as its previous file
+	// plus a table delta (#1638). See VerifyBaselinePair for what that does to
+	// the verdict.
+	NewHasDelta bool
+	NewSnapshot time.Time // new baseline's snapshot time — the coarse time bound paired with NewAnchor
+	NewAnchor   query.BinlogPos
 	// PrevAnchor is the PREVIOUS baseline's own recorded binlog position —
 	// where ITS deltas begin (#797). Zero value (File=="" or Pos==0) when the
 	// previous baseline predates position recording; callers must check before
@@ -173,6 +177,19 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	}
 	if !p.PrevSnapshot.Before(p.NewSnapshot) {
 		return inconclusive(res, "baseline pair is not in prev→new order (prev snapshot is not before new)"), nil
+	}
+	// A table stored as a delta (#1638) keeps its previous FILE: both sides of
+	// this pair are then the same bytes under the same anchor, the window
+	// between them is empty, and the two fingerprints agree whatever happened
+	// to the table. That is not a match, it is nothing checked, and the table
+	// DID change (its changes are in the delta, which this comparison does not
+	// read). A carried-forward table looks the same and is a fair match,
+	// because there the table really did not change. Different anchors mean
+	// the new side was rewritten, and that pair is verified as usual.
+	if p.NewHasDelta && p.PrevAnchor == p.NewAnchor && p.PrevLSN == p.NewLSN {
+		return inconclusive(res, "the newest backup keeps this table's previous file and stores its changes beside it (table deltas); "+
+			"verify compares table files, and this one did not change, so nothing was checked. "+
+			"The table is verified again the next time it is written in full"), nil
 	}
 
 	// Hash exactly the columns the baseline Parquet holds. mydumper excludes true
@@ -408,12 +425,33 @@ func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair,
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("read prev baseline metadata %s: %w", pf.Path, err)
 		}
+		// A previous base with a table delta beside it (#1638) has events of
+		// its own between its chain's start and its directory's time, so the
+		// fetch is bounded from the chain's start. Same rule, and same reason,
+		// as reconstruct.FindBaseline, which this listing does not go through.
+		prevSince := tPrev
+		chainStart, err := reconstruct.DeltaChainStart(ctx, pf.Path)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("prev baseline %s: %w", pf.Path, err)
+		}
+		if !chainStart.IsZero() && chainStart.Before(prevSince) {
+			prevSince = chainStart
+		}
+		// Half a pair counts: the table is stored as a delta, damaged or not.
+		newHasDelta, err := baseline.HasTableDelta(ctx, nf.Path)
+		if errors.Is(err, baseline.ErrHalfTableDelta) {
+			newHasDelta, err = true, nil
+		}
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("new baseline %s: %w", nf.Path, err)
+		}
 		pairs = append(pairs, BaselinePair{
 			Schema:       nf.Schema,
 			Table:        nf.Table,
 			PrevPath:     pf.Path,
 			NewPath:      nf.Path,
-			PrevSnapshot: tPrev,
+			PrevSnapshot: prevSince,
+			NewHasDelta:  newHasDelta,
 			NewSnapshot:  tNew,
 			NewAnchor:    query.BinlogPos{File: meta.BinlogFile, Pos: uint64(meta.BinlogPos)},
 			PrevAnchor:   query.BinlogPos{File: prevMeta.BinlogFile, Pos: uint64(prevMeta.BinlogPos)},

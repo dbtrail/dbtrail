@@ -111,6 +111,13 @@ type DumpMetadata struct {
 	RowCount       int64  // rows ingested into this table's baseline; valid only when ContentDigest != ""
 	LSN            uint64 // PostgreSQL WAL LSN delta-replay floor, inclusive (MetaKeyLSN, see its doc comment / #771); 0 = absent (MySQL baseline, or pre-#593 PG baseline)
 	RenderGUCs     string // pinned rendering-GUC stamp (MetaKeyRenderGUCs, #593 slice D); "" = pre-pin PG baseline or MySQL baseline
+	// DeltaChainStart / DeltaBaseAnchor / DeltaBaseSize are set only on the two
+	// files of a table delta (#1638, tabledelta.go): when the chain over the
+	// base started, and which exact base the row numbers were computed against.
+	// Zero on every table file.
+	DeltaChainStart time.Time
+	DeltaBaseAnchor string
+	DeltaBaseSize   int64
 	// Producer is MetaKeySnapshotProducer: which code path wrote these bytes
 	// ("dump" | "reconstruct"). Empty on any snapshot written before #1545
 	// stamped it on the dump path; see ProvenanceOf, which does not guess.
@@ -313,6 +320,15 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 		m.CaptureGap = v
 	}
 	readProvenance(path, &m, func(k string) (string, bool) { return pf.Lookup(k) })
+	if v, ok := pf.Lookup(MetaKeyDeltaChainStart); ok {
+		m.DeltaChainStart = parseFooterTime(path, MetaKeyDeltaChainStart, v)
+	}
+	if v, ok := pf.Lookup(MetaKeyDeltaBaseAnchor); ok {
+		m.DeltaBaseAnchor = v
+	}
+	if v, ok := pf.Lookup(MetaKeyDeltaBaseSize); ok {
+		m.DeltaBaseSize = parseDeltaBaseSize(path, v)
+	}
 	if v, ok := pf.Lookup(MetaKeyRowCount); ok {
 		n, parseErr := strconv.ParseInt(v, 10, 64)
 		if parseErr != nil {
@@ -419,6 +435,12 @@ func ReadParquetMetadataAny(ctx context.Context, path string) (DumpMetadata, err
 			m.DerivedFrom = parseFooterTime(path, MetaKeyDerivedFrom, val)
 		case MetaKeySnapshotTimestamp:
 			m.SnapshotTimestamp = parseFooterTime(path, MetaKeySnapshotTimestamp, val)
+		case MetaKeyDeltaChainStart:
+			m.DeltaChainStart = parseFooterTime(path, MetaKeyDeltaChainStart, val)
+		case MetaKeyDeltaBaseAnchor:
+			m.DeltaBaseAnchor = val
+		case MetaKeyDeltaBaseSize:
+			m.DeltaBaseSize = parseDeltaBaseSize(path, val)
 		case MetaKeyRowCount:
 			if n, parseErr := strconv.ParseInt(val, 10, 64); parseErr == nil {
 				m.RowCount = n
@@ -447,4 +469,17 @@ func unquote(s string) string {
 		return s[1 : len(s)-1]
 	}
 	return s
+}
+
+// parseDeltaBaseSize reads MetaKeyDeltaBaseSize. A value that does not parse
+// comes back as -1, never 0: the reader compares it against a real file size,
+// and -1 can match none, so a corrupt footer fails the pairing check instead of
+// passing it for an empty base.
+func parseDeltaBaseSize(path, raw string) int64 {
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		slog.Warn("corrupt delta_base_size in Parquet metadata", "path", path, "raw_value", raw, "error", err)
+		return -1
+	}
+	return n
 }

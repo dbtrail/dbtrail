@@ -152,6 +152,15 @@ type FullTableConfig struct {
 	// carryForwardEligible for the trade-offs an operator is agreeing to.
 	CarryForwardUnchanged bool
 
+	// TableDeltas stops a refresh from rewriting a changed table (#1638): the
+	// table's Parquet file is carried forward and the change is written as two
+	// small files beside it. OutputFormatParquet only. See tabledelta.go.
+	//
+	// OPT-IN, and turning it back off needs nothing else: the next run folds
+	// from each base alone, rewrites every table the old way and writes no
+	// delta, so the snapshot after it has today's layout again.
+	TableDeltas bool
+
 	// WarnEventThreshold logs a loud warning when a table's fetched event count
 	// exceeds it. The event window itself is PAGED since #1097, so the resident
 	// cost this warns about is the change map: one entry per touched PK, which
@@ -296,6 +305,16 @@ type TableReport struct {
 	// consumer that renders "reused" as a disk saving must count THIS, not
 	// CarriedForward, or it confirms a saving the daemon log denies.
 	CarriedByLink bool
+
+	// TableDelta is true when the table was published as its previous file
+	// plus a delta beside it instead of being rewritten (#1638). DeltaDeadRows
+	// and DeltaUpsertRows are what the delta holds in total, not what this run
+	// added. DeltaCompacted, when set, says why a run with deltas on rewrote
+	// the table anyway. All zero with deltas off.
+	TableDelta      bool
+	DeltaDeadRows   int64
+	DeltaUpsertRows int64
+	DeltaCompacted  string
 }
 
 // shouldWarnEvents reports whether a fetched event count should trigger the
@@ -984,6 +1003,25 @@ func ReconstructTable(
 			baselinePath)
 	}
 
+	// ── 2b. Table deltas (#1638): resume from the delta, not from the base ──
+	// snapshotTime is already the chain's START when the base has a delta
+	// beside it (FindBaseline), which is the bound every window-wide check
+	// below wants. The event fetch is the one thing that resumes later: from
+	// the delta's own anchor, because the delta already holds everything
+	// before it. With deltas off the delta is never read, so the fetch starts
+	// at the base's anchor and the run rewrites the table from the base alone.
+	var prevDelta *tableDelta
+	fetchSince, anchorMeta := snapshotTime, bmeta
+	if cfg.TableDeltas && cfg.OutputFormat == OutputFormatParquet && !strings.HasPrefix(baselinePath, "s3://") {
+		if prevDelta, err = readTableDelta(ctx, baselinePath, bmeta); err != nil {
+			return nil, err
+		}
+		if prevDelta != nil {
+			fetchSince = prevDelta.Meta.SnapshotTimestamp
+			anchorMeta.BinlogFile, anchorMeta.BinlogPos = prevDelta.Meta.BinlogFile, prevDelta.Meta.BinlogPos
+		}
+	}
+
 	// ── 3. Resolve PK columns from the schema resolver ─────────────────────
 	tm, err := resolver.Resolve(schema, table)
 	if err != nil {
@@ -1133,7 +1171,7 @@ func ReconstructTable(
 	fetchOpts := query.Options{
 		Schema: schema,
 		Table:  table,
-		Since:  &snapshotTime,
+		Since:  &fetchSince,
 		Until:  &cfg.At,
 		// No PKValues filter — we want every event for this table.
 	}
@@ -1145,8 +1183,8 @@ func ReconstructTable(
 	// reconstruction. Older baselines that never recorded a position
 	// (BinlogFile=="" or BinlogPos==0, the established "absent" convention —
 	// see baseline.DumpMetadata) fall back to the plain Since-only fetch.
-	if bmeta.BinlogFile != "" && bmeta.BinlogPos > 0 {
-		fetchOpts.SincePos = &query.BinlogPos{File: bmeta.BinlogFile, Pos: uint64(bmeta.BinlogPos)}
+	if anchorMeta.BinlogFile != "" && anchorMeta.BinlogPos > 0 {
+		fetchOpts.SincePos = &query.BinlogPos{File: anchorMeta.BinlogFile, Pos: uint64(anchorMeta.BinlogPos)}
 	}
 	// In Parquet mode the window's upper bound is the run's binlog cut, not just
 	// the target time. This is what makes the emitted snapshot a valid anchor:
@@ -1251,7 +1289,23 @@ func ReconstructTable(
 	if fold.First != nil {
 		flavor := query.SourceFlavor(db)
 		start, startOK := query.OldestIndexedEvent(db)
-		WarnBaselineFirstEventGap(flavor, bmeta, *fold.First, start, startOK, schema, table)
+		WarnBaselineFirstEventGap(flavor, anchorMeta, *fold.First, start, startOK, schema, table)
+	}
+
+	// ── 5a. Table deltas (#1638) take over publication entirely ────────────
+	// Behind every refusal above, for the reason 5b states for itself.
+	if cfg.TableDeltas && cfg.OutputFormat == OutputFormatParquet {
+		err := publishWithTableDelta(ctx, tableDeltaPublish{
+			cfg: cfg, schema: schema, table: table,
+			basePath: baselinePath, chainStart: snapshotTime, baseMeta: bmeta, anchorMeta: anchorMeta,
+			prev: prevDelta, fold: fold, capGap: capGap, pkCols: pkCols,
+			currentGenerated: generatedByName(tm.Columns),
+		}, rep)
+		if err != nil {
+			return nil, err
+		}
+		rep.Duration = time.Since(start)
+		return rep, nil
 	}
 
 	// ── 5b. Nothing changed: publish the previous file instead of rewriting ─

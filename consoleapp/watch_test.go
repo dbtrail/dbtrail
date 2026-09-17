@@ -840,3 +840,75 @@ func TestRunBaselinePruneCycle_reportsWhatItCouldNotReclaim(t *testing.T) {
 		t.Errorf("the report does not name the destination the copies are missing from: %s", out)
 	}
 }
+
+// TestWatchTableDeltasFlagIsOffByDefault: against the real command, as for the
+// carry-forward flag above. Table deltas (#1638) change the on-disk layout of
+// every snapshot the daemon publishes.
+func TestWatchTableDeltasFlagIsOffByDefault(t *testing.T) {
+	f := watchCmd.Flags().Lookup("baseline-table-deltas")
+	if f == nil {
+		t.Fatal("--baseline-table-deltas is gone from watch; this guard covers nothing")
+	}
+	if f.DefValue != "false" {
+		t.Fatalf("default = %q, want \"false\"", f.DefValue)
+	}
+}
+
+// TestResolveUpConsoleEnv_tableDeltasPrecedence: the same table the
+// carry-forward setting is held to. A value that is not true/false is never
+// read as consent, and an explicit flag beats the environment both ways.
+func TestResolveUpConsoleEnv_tableDeltasPrecedence(t *testing.T) {
+	prev := upBaselineTableDeltas
+	t.Cleanup(func() { upBaselineTableDeltas = prev })
+
+	newCmd := func() *cobra.Command {
+		cmd := &cobra.Command{Use: "watch"}
+		cmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", false, "")
+		return cmd
+	}
+	for _, tc := range []struct {
+		name    string
+		env     string
+		flagSet string
+		want    bool
+	}{
+		{"env on, no flag", "true", "", true},
+		{"env 1, no flag", "1", "", true},
+		{"env off, no flag", "false", "", false},
+		{"unset, no flag", "", "", false},
+		{"env says yes, no flag", "yes", "", false},
+		{"env typo, no flag", "ture", "", false},
+		{"env on, flag says false", "true", "false", false},
+		{"env off, flag says true", "false", "true", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upBaselineTableDeltas = false
+			t.Setenv("BINTRAIL_BASELINE_TABLE_DELTAS", tc.env)
+			cmd := newCmd()
+			if tc.flagSet != "" {
+				if err := cmd.Flags().Set("baseline-table-deltas", tc.flagSet); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := resolveUpConsoleEnv(cmd); err != nil {
+				t.Fatalf("resolveUpConsoleEnv: %v", err)
+			}
+			if upBaselineTableDeltas != tc.want {
+				t.Errorf("table deltas = %v, want %v (env=%q flag=%q)", upBaselineTableDeltas, tc.want, tc.env, tc.flagSet)
+			}
+		})
+	}
+}
+
+// TestRefreshFoldConfig_carriesTableDeltas: the last hop from the daemon flag
+// to the fold. A restore shares foldSnapshot and must NOT inherit it, which is
+// why the request carries it instead of the config reading the flag.
+func TestRefreshFoldConfig_carriesTableDeltas(t *testing.T) {
+	at := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	for _, on := range []bool{false, true} {
+		cfg := refreshFoldConfig(refreshRequest{IndexDSN: "dsn", BaselineDir: "/b", TableDeltas: on}, at, []string{"s.t"})
+		if cfg.TableDeltas != on {
+			t.Errorf("TableDeltas = %v, want %v", cfg.TableDeltas, on)
+		}
+	}
+}

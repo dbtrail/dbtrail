@@ -29,6 +29,10 @@ type refreshRequest struct {
 	// rather than at boot so a change made in the settings panel takes effect
 	// on the next tick, the same way a rotation override does.
 	CarryForwardUnchanged bool
+	// TableDeltas is the daemon's --baseline-table-deltas (#1638), stamped onto
+	// the request by executeRefresh. Not resolved per server and not read by a
+	// restore: it changes how a REFRESH stores a table, nothing else.
+	TableDeltas bool
 	// Trigger is stamped onto the history record: BaselineRunTriggerScheduled
 	// when the per-server backup schedule started this fold, empty for the
 	// daemon-wide interval loop.
@@ -1036,6 +1040,7 @@ func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (p
 	if len(tableList) == 0 {
 		return time.Time{}, 0, 0, reuseTally{}, fmt.Errorf("no baseline snapshot to refresh under %s", src)
 	}
+	req.TableDeltas = s.tableDeltas
 	tables, refused, reuse, err = s.foldSnapshot(req, at, tableList)
 	if err != nil {
 		// The fold's own refusals (a capture gap, a schema change, the touched
@@ -1141,6 +1146,7 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		OutputDir:             req.BaselineDir,
 		OutputFormat:          reconstruct.OutputFormatParquet,
 		CarryForwardUnchanged: req.CarryForwardUnchanged,
+		TableDeltas:           req.TableDeltas,
 		Parallelism:           daemonFoldParallelism,
 		WarnEventThreshold:    daemonFoldWarnEventThreshold,
 		MaxTouchedRows:        daemonFoldMaxTouchedRows,

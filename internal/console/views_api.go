@@ -180,6 +180,13 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 					Schema: f.Schema, Table: f.Table, Path: f.Path,
 				})
 			}
+			// Table deltas (#1638), while Path is still the real path. Not
+			// best-effort: without the mark a table with a delta renders as
+			// the file alone, which is the table as it was when its chain
+			// started, presented as the snapshot's state.
+			if err := views.MarkTableDeltas(ctx, in.Baselines); err != nil {
+				return views.Input{}, err
+			}
 			// Column types for the state views' decimal casts. Best-effort and
 			// memoized per snapshot; serves the download and the SQL panel
 			// alike, both of which reach the same Parquet through the same

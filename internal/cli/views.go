@@ -408,6 +408,10 @@ func resolveBaselineViews(ctx context.Context, in *views.Input) error {
 			Path:   f.Path,
 		})
 	}
+	// Table deltas (#1638), while Path is still the real path.
+	if err := views.MarkTableDeltas(ctx, in.Baselines); err != nil {
+		return err
+	}
 	// Decimals BEFORE the rewrite, and the ordering is load-bearing in the
 	// opposite direction from how it first looked. Following only happens when
 	// the pointer names the snapshot just discovered, so both spellings resolve

@@ -53,6 +53,10 @@ type baselineSupervisor struct {
 	// as audit readability gating nothing in the capture path.
 	configErr error
 
+	// tableDeltas is --baseline-table-deltas (#1638): a refresh keeps a changed
+	// table's file and writes the change beside it. Read by executeRefresh.
+	tableDeltas bool
+
 	mu   sync.Mutex
 	jobs map[string]*console.BaselineStatus
 	// restores tracks point-in-time restore jobs, keyed by server id —
@@ -297,6 +301,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (baseline.Stat
 		OutputDir:   outputDir,
 		Compression: "zstd",
 		Timestamp:   dumpStartedAt,
+		TableDeltas: s.tableDeltas,
 	})
 	if err != nil {
 		return baseline.Stats{}, 0, time.Time{}, fmt.Errorf("convert: %w", err)

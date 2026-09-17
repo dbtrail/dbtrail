@@ -222,33 +222,7 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 		return err
 	}
 
-	md := map[string]string{
-		baseline.MetaKeySnapshotTimestamp: in.SnapshotAt.UTC().Format(time.RFC3339),
-		"bintrail.source_database":        in.Schema,
-		"bintrail.source_table":           in.Table,
-		"bintrail.bintrail_version":       baseline.Version,
-		baseline.MetaKeyCreateTableSQL:    in.CreateTableSQL,
-		MetaKeySnapshotProducer:           SnapshotProducerReconstruct,
-		MetaKeyDerivedFrom:                in.SourceBaseline.Time.UTC().Format(time.RFC3339),
-		MetaKeyDerivedFromPath:            in.SourceBaseline.Path,
-		baseline.MetaKeyCreateTableAsOf:   createTableAsOf(in.SourceBaseline).UTC().Format(time.RFC3339),
-	}
-	if line := captureGapLines(in); line != "" {
-		md[baseline.MetaKeyCaptureGap] = line
-	}
-	switch {
-	case in.Cut != nil:
-		md[baseline.MetaKeyBinlogFile] = in.Cut.File
-		md[baseline.MetaKeyBinlogPos] = strconv.FormatUint(in.Cut.Pos, 10)
-	case in.SourceBaseline.Metadata.BinlogFile != "":
-		// No cut means the index holds no events, so nothing was folded and the
-		// source's anchor is still exactly where deltas resume. Carrying it over
-		// keeps the chain unbroken; omitting it would strand the new snapshot with
-		// no anchor at all and force the next fetch back onto the imprecise
-		// timestamp bound (#797).
-		md[baseline.MetaKeyBinlogFile] = in.SourceBaseline.Metadata.BinlogFile
-		md[baseline.MetaKeyBinlogPos] = strconv.FormatInt(in.SourceBaseline.Metadata.BinlogPos, 10)
-	}
+	md := snapshotFileMetadata(in)
 
 	// The disk check (#1614) runs here, not before the fold: a table carried
 	// forward unchanged never gets this far, so only a table that is really
@@ -309,6 +283,41 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 	rep.Files = []string{filepath.Join(in.Schema, in.Table+".parquet")}
 	rep.RowsWritten = w.Rows()
 	return nil
+}
+
+// snapshotFileMetadata is the footer every file a Parquet-mode run writes
+// carries: a rewritten table, and both files of a table delta (#1638). One
+// builder so the anchor a delta resumes from is derived exactly the way a
+// table's is.
+func snapshotFileMetadata(in mergeInput) map[string]string {
+	md := map[string]string{
+		baseline.MetaKeySnapshotTimestamp: in.SnapshotAt.UTC().Format(time.RFC3339),
+		"bintrail.source_database":        in.Schema,
+		"bintrail.source_table":           in.Table,
+		"bintrail.bintrail_version":       baseline.Version,
+		baseline.MetaKeyCreateTableSQL:    in.CreateTableSQL,
+		MetaKeySnapshotProducer:           SnapshotProducerReconstruct,
+		MetaKeyDerivedFrom:                in.SourceBaseline.Time.UTC().Format(time.RFC3339),
+		MetaKeyDerivedFromPath:            in.SourceBaseline.Path,
+		baseline.MetaKeyCreateTableAsOf:   createTableAsOf(in.SourceBaseline).UTC().Format(time.RFC3339),
+	}
+	if line := captureGapLines(in); line != "" {
+		md[baseline.MetaKeyCaptureGap] = line
+	}
+	switch {
+	case in.Cut != nil:
+		md[baseline.MetaKeyBinlogFile] = in.Cut.File
+		md[baseline.MetaKeyBinlogPos] = strconv.FormatUint(in.Cut.Pos, 10)
+	case in.SourceBaseline.Metadata.BinlogFile != "":
+		// No cut means the index holds no events, so nothing was folded and the
+		// source's anchor is still exactly where deltas resume. Carrying it over
+		// keeps the chain unbroken; omitting it would strand the new snapshot with
+		// no anchor at all and force the next fetch back onto the imprecise
+		// timestamp bound (#797).
+		md[baseline.MetaKeyBinlogFile] = in.SourceBaseline.Metadata.BinlogFile
+		md[baseline.MetaKeyBinlogPos] = strconv.FormatInt(in.SourceBaseline.Metadata.BinlogPos, 10)
+	}
+	return md
 }
 
 // captureGapLines builds the snapshot's MetaKeyCaptureGap value: what it
