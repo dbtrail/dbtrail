@@ -224,6 +224,68 @@ func loadCaptureSkips(db *sql.DB) (string, error) {
 	return raw.String, nil
 }
 
+// beginResumeCleanup announces the resume-time dedup and returns the function
+// that closes it out. It exists because of what #1690 measured: on a 48 GB
+// index the step took 28 minutes, said nothing at all while it ran, and then
+// deleted zero rows — from the outside, indistinguishable from a hung daemon.
+// So the start line is unconditional, and so is the end line: "it deleted
+// nothing" is the answer an operator most often needs and the one today's
+// rows>0 warning never gave.
+//
+// The returned closure is called with whatever the pass produced, error
+// included, so the phase is always cleared — a failed cleanup must not leave a
+// supervisor reporting "resume_cleanup" forever.
+func beginResumeCleanup(hooks *Hooks, mode, anchor, file string, pos uint64) func(rows int64, err error) {
+	if hooks != nil && hooks.OnPhase != nil {
+		hooks.OnPhase(PhaseResumeCleanup)
+	}
+	started := time.Now()
+	// One keeps a running checklist on stdout ("Source: ... \u2713", "Snapshot: ...",
+	// "Streaming from ..."), and that is what an operator actually watches scroll
+	// by. Before this, the longest step in the whole sequence was the only one
+	// that wrote nothing to it, leaving a silent hole between "Snapshot:" and
+	// "Streaming from" \u2014 the shape that reads as hung. It goes to stdout rather
+	// than only to slog on purpose: the two lines that matter here are Info
+	// level, so `--log-level warn` would silence exactly the "it started" and
+	// "it deleted nothing" readings while leaving the noisy ones. Same reasoning
+	// as the always-visible messages in docs/rotation-and-status.md.
+	fmt.Printf("Cleanup: removing indexed events at or beyond %s:%d before capture starts (minutes on a large index)\n", file, pos)
+	slog.Info("dedup-on-resume: deleting any events at or beyond the resume point before capture starts; "+
+		"this reads binlog_events and can take minutes on a large index, and no events are captured until it finishes",
+		"mode", mode, "anchor", anchor, "file", file, "pos", pos)
+	return func(rows int64, err error) {
+		if hooks != nil && hooks.OnPhase != nil {
+			hooks.OnPhase("")
+		}
+		took := time.Since(started).Round(time.Millisecond)
+		if err == nil {
+			fmt.Printf("Cleanup: removed %d events in %s \u2713\n", rows, took)
+		} else {
+			fmt.Printf("Cleanup: FAILED after %s\n", took)
+		}
+		switch {
+		case err != nil:
+			// rows is whatever landed before the failure: the position delete
+			// can succeed and the GTID straggler pass still fail, and those
+			// rows are gone either way. The error is returned as well, and the
+			// caller logs it again; this line is here for the duration, which
+			// the returned error cannot carry and which separates "refused at
+			// once" from "died twelve minutes in".
+			slog.Error("dedup-on-resume: failed; capture will not start",
+				"mode", mode, "anchor", anchor, "file", file, "pos", pos,
+				"rows_deleted", rows, "duration", took, "error", err)
+		case rows > 0:
+			slog.Warn("dedup-on-resume: deleted events at or beyond the resume point to avoid re-insert duplicates",
+				"mode", mode, "anchor", anchor, "file", file, "pos", pos,
+				"rows_deleted", rows, "duration", took)
+		default:
+			slog.Info("dedup-on-resume: finished, nothing to delete",
+				"mode", mode, "anchor", anchor, "file", file, "pos", pos,
+				"rows_deleted", 0, "duration", took)
+		}
+	}
+}
+
 // deleteEventsSinceCheckpoint removes rows at or beyond (file, pos) from
 // binlog_events — the resume-time dedup for #759 (see the call site in One).
 // file == "" (no prior checkpoint) is a no-op. "Later file" is
@@ -270,10 +332,20 @@ func deleteEventsSinceCheckpoint(db *sql.DB, file string, pos uint64) (int64, er
 // open transaction's rows always live in the file the checkpoint was last
 // written against.
 func deleteEventsSinceCheckpointGTID(db *sql.DB, file string, pos uint64, savedSet gomysql.GTIDSet, flavor string) (int64, error) {
+	posStarted := time.Now()
 	n, err := deleteEventsSinceCheckpoint(db, file, pos)
 	if err != nil || file == "" || savedSet == nil {
 		return n, err
 	}
+
+	// The straggler scan is a SECOND pass over the same table, and #1690
+	// measured it taking LONGER than the delete before it (18 minutes against
+	// 10). Splitting the two in the log is what lets an operator tell which of
+	// them a silent daemon is sitting in.
+	slog.Info("dedup-on-resume: position pass done; now scanning the checkpoint's binlog file "+
+		"for open-transaction stragglers (a second pass over binlog_events)",
+		"file", file, "pos", pos,
+		"position_pass_rows", n, "position_pass_duration", time.Since(posStarted).Round(time.Millisecond))
 
 	rows, err := db.Query(`
 		SELECT DISTINCT gtid FROM binlog_events
@@ -1685,7 +1757,21 @@ type Hooks struct {
 	// snapshot: the console's first-run list shows the connection as its own
 	// step (#1606).
 	OnSourceConnected func()
+	// OnPhase names a startup step that runs BEFORE capture and can take
+	// minutes, so a supervisor shows what the stream is doing instead of an
+	// unqualified "pending" (#1690). Fires with a Phase* constant when the
+	// step starts and with "" when it ends — including on the error path, so
+	// a failed step never leaves a phase stuck. Only steps that can outlast
+	// an operator's patience get one; the fast ones stay silent.
+	OnPhase func(phase string)
 }
+
+// PhaseResumeCleanup is the OnPhase value for the resume-time dedup: the
+// delete (and, in GTID mode, the open-transaction straggler pass) that runs
+// before StartSync so a replayed window cannot double-index. On a large index
+// it is minutes of work with no events flowing, which is exactly the window
+// #1690 found indistinguishable from a hung daemon.
+const PhaseResumeCleanup = "resume_cleanup"
 
 // Deps are the host-supplied functions One needs that are NOT part of the
 // streaming engine itself — source preflight/validation, server-identity
@@ -1872,6 +1958,51 @@ func One(ctx context.Context, cfg Config) error {
 	} else {
 		slog.Info("server identity resolved", "bintrail_id", bintrailID)
 	}
+
+	// ── 3a. Prometheus series + optional metrics HTTP server ─────────────────
+	// This sits HERE, not with the rest of the metrics wiring below, because of
+	// #1690: the resume-time dedup between this point and the stream loop ran
+	// for 28 minutes on a 48 GB index, and while it did, the bintrail_stream_*
+	// series did not exist. A scrape found nothing — not a stale value, nothing
+	// — so the only two readings available were "the daemon is starting up" and
+	// "the daemon is gone", with no way to tell them apart. Registering the
+	// series first means a restart is visible as a target that answers with
+	// zeros instead of a target that vanished. (Gap detection also sits in this
+	// span but is NOT part of the reason: it queries the SOURCE, not the index,
+	// under --gap-timeout.)
+	//
+	// "Answers with zeros" is every handle ForSource builds with
+	// WithLabelValues, which is all of them but one: Errors is curried, and
+	// bintrail_stream_errors_total still appears only once something increments
+	// it. That is the normal Prometheus treatment of an error counter and not
+	// something this move changes.
+	//
+	// Alerting consequence, deliberate: a fresh process in this window used to
+	// have no target at all, so `up == 0` fired. Now the target answers and
+	// last_flush_timestamp reads 0. Alert on staleness of
+	// bintrail_stream_last_flush_timestamp_seconds (docs/deployment.md §7
+	// already does), never on the target's absence.
+	//
+	// It needs bintrailID, which is why it cannot move any earlier than this.
+	//
+	// Under `bintrail-console watch` the daemon serves one endpoint for all
+	// streams instead (cfg.MetricsAddr is empty there) — the registry is
+	// process-global, so one handler exposes every per-source series.
+	if cfg.MetricsAddr != "" {
+		stopMetrics, err := StartMetricsServer(cfg.MetricsAddr)
+		if err != nil {
+			return err
+		}
+		defer stopMetrics()
+	}
+
+	// All stream metrics carry a "source" label: the supervisor's entry ID
+	// when monitored, else the resolved bintrail_id ("default" if unknown).
+	metricsSource := cfg.MetricsSource
+	if metricsSource == "" {
+		metricsSource = bintrailID
+	}
+	metrics := observe.ForSource(metricsSource)
 
 	// ── 4. Schema snapshot + resolver ─────────────────────────────────────────
 	resolver, err := cfg.Deps.EnsureResolver(indexDB, sourceDB, cfg.Deps.ParseSchemaList(cfg.Schemas))
@@ -2126,11 +2257,11 @@ func One(ctx context.Context, cfg Config) error {
 	// action, not the crash-replay case this fix targets, and the saved
 	// binlog coordinates don't correspond to the newly chosen start point.
 	if saved != nil && saved.mode == mode && mode == "position" {
-		if n, err := deleteEventsSinceCheckpoint(indexDB, startFile, uint64(startPos)); err != nil {
+		done := beginResumeCleanup(cfg.Hooks, mode, "replay start", startFile, uint64(startPos))
+		n, err := deleteEventsSinceCheckpoint(indexDB, startFile, uint64(startPos))
+		done(n, err)
+		if err != nil {
 			return fmt.Errorf("failed to dedup events since checkpoint: %w", err)
-		} else if n > 0 {
-			slog.Warn("deleted events at or beyond the replay start to avoid re-insert duplicates on resume",
-				"file", startFile, "pos", startPos, "rows_deleted", n)
 		}
 	} else if saved != nil && saved.mode == mode && mode == "gtid" {
 		if gtidAdvanced {
@@ -2138,11 +2269,13 @@ func One(ctx context.Context, cfg Config) error {
 				"re-received events in this window may be duplicated — this is a known, " +
 				"accepted trade-off (deleting on the pre-advance coordinates would destroy " +
 				"already-captured rows below the purge floor); see docs/streaming.md")
-		} else if n, err := deleteEventsSinceCheckpointGTID(indexDB, saved.binlogFile, saved.binlogPos, accGTID, cfg.Flavor); err != nil {
-			return fmt.Errorf("failed to dedup events since checkpoint: %w", err)
-		} else if n > 0 {
-			slog.Warn("deleted events at or beyond the saved checkpoint (incl. any open-transaction stragglers) to avoid re-insert duplicates on resume",
-				"file", saved.binlogFile, "pos", saved.binlogPos, "rows_deleted", n)
+		} else {
+			done := beginResumeCleanup(cfg.Hooks, mode, "saved checkpoint", saved.binlogFile, saved.binlogPos)
+			n, err := deleteEventsSinceCheckpointGTID(indexDB, saved.binlogFile, saved.binlogPos, accGTID, cfg.Flavor)
+			done(n, err)
+			if err != nil {
+				return fmt.Errorf("failed to dedup events since checkpoint: %w", err)
+			}
 		}
 	}
 
@@ -2303,26 +2436,7 @@ func One(ctx context.Context, cfg Config) error {
 	// honors ctx, so a supervisor can run several instances under one
 	// lifecycle without competing signal handlers.)
 
-	// ── 9. Optional Prometheus metrics HTTP server ─────────────────────────
-	// Under `bintrail-console watch` the daemon serves one endpoint for all streams
-	// instead (cfg.MetricsAddr is empty there) — the registry is process-
-	// global, so one handler exposes every per-source series.
-	if cfg.MetricsAddr != "" {
-		stopMetrics, err := StartMetricsServer(cfg.MetricsAddr)
-		if err != nil {
-			return err
-		}
-		defer stopMetrics()
-	}
-
-	// All stream metrics carry a "source" label: the supervisor's entry ID
-	// when monitored, else the resolved bintrail_id ("default" if unknown).
-	metricsSource := cfg.MetricsSource
-	if metricsSource == "" {
-		metricsSource = bintrailID
-	}
-	metrics := observe.ForSource(metricsSource)
-
+	// ── 9. Index-state gauges ──────────────────────────────────────────────
 	// Index-state gauges (bintrail_index_*, #351): refresh periodically from a
 	// status snapshot whenever metrics are exposed — standalone --metrics-addr,
 	// a supervisor-launched stream (MetricsSource set), or the watch daemon's

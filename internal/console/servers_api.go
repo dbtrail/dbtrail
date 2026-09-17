@@ -78,6 +78,12 @@ type serverDTO struct {
 	// stalled|lost_position|failed — see console.MonitorStatus); present only
 	// on a supervisor process for entries with a source.
 	MonitorState string `json:"monitor_state,omitempty"`
+	// MonitorPhase names the long startup step a "pending" stream is inside
+	// (#1690), so the row can say WHY it is still pending instead of leaving
+	// the operator to guess whether the daemon is working or hung. Empty
+	// whenever no such step is running. It refines MonitorState and never
+	// replaces it: the state vocabulary every caller switches on is unchanged.
+	MonitorPhase string `json:"monitor_phase,omitempty"`
 	// Reconstruct is the per-server Time-travel capability, derived from pure
 	// config (no connection is opened to compute it).
 	Reconstruct bool `json:"reconstruct"`
@@ -1230,7 +1236,8 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 	fillDSNParts(&dto, e.DSN)
 	fillSourceDSNParts(&dto, e.SourceDSN, e.SourceFlavor())
 	if s.monitorCtrl != nil && e.SourceDSN != "" {
-		dto.MonitorState = s.monitorCtrl.Status(e.ID).State
+		st := s.monitorCtrl.Status(e.ID)
+		dto.MonitorState, dto.MonitorPhase = st.State, st.Phase
 	}
 	return dto
 }

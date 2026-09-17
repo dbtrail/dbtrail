@@ -115,6 +115,22 @@ const MON_STATE_TITLES = {
   lost_position: "some old changes were deleted before DBTrail could capture them; those are permanently lost, but current changes are still being captured",
 };
 
+// A startup step a "pending" stream can sit in for minutes. It replaces the
+// chip's word so the row says what is happening instead of "PENDING" for half
+// an hour; the underlying state is untouched, so Start/Stop still behave as
+// they do for any pending stream.
+const MON_PHASES = {
+  resume_cleanup: { text: "CLEANING UP", title: "clearing changes the previous run had already saved, so they are not counted twice; capture starts when it finishes. On a large index this takes minutes." },
+};
+
+// monitorChip renders the monitoring chip for a server row, phase included.
+// Both the Servers list and the Settings list call it, so the two cannot drift.
+function monitorChip(s) {
+  const phase = s.monitor_phase && MON_PHASES[s.monitor_phase];
+  if (phase) return el("span", { class: "chip chip-mon", text: phase.text, title: phase.title });
+  return el("span", { class: "chip chip-mon", text: s.monitor_state.replace("_", " ").toUpperCase(), title: MON_STATE_TITLES[s.monitor_state] || ("monitoring " + s.monitor_state) });
+}
+
 // Static decorative SVGs (module constants — parsed by svgEl via DOMParser).
 const ICONS = {
   search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>`,
@@ -5240,7 +5256,7 @@ function archivingPanel(servers, serversErr) {
       const row = el("div", { class: "stg-row" });
       row.append(el("span", { class: "stg-name", text: s.name }));
       row.append(el("span", { class: "stg-dest" + (s.archive_s3 ? "" : " muted"), text: s.archive_s3 || "not archived: old data gets deleted, not saved" }));
-      if (s.monitor_state) row.append(el("span", { class: "chip chip-mon", text: s.monitor_state.replace("_", " ").toUpperCase(), title: MON_STATE_TITLES[s.monitor_state] || ("monitoring " + s.monitor_state) }));
+      if (s.monitor_state) row.append(monitorChip(s));
       row.append(el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Configure",
         onclick: () => { openServersModal(); editServer(s.id); } }));
       list.append(row);
@@ -8924,8 +8940,22 @@ async function submitRotation(form, msg, cur) {
   toast(cur.enabled ? "Rotation settings saved" : "Saved. Rotation is off, so this takes effect when the daemon restarts");
 }
 
+// Nothing else in this dialog polls: the list is fetched when it opens and
+// after an operator action. That is fine for a state, and wrong for a PHASE
+// (#1690), because a phase names a step that ends. A frozen CLEANING UP would
+// assert the daemon is still stuck in that exact step half an hour after it
+// finished, which is the misreading the chip exists to prevent — worse than
+// the vague frozen PENDING it replaced, because it is specific.
+//
+// So the list re-fetches itself only while some row reports a phase. The timer
+// exists exactly as long as a phase does, and the guard below stops it the
+// moment the list leaves the DOM.
+let serversPhaseTimer = null;
+const serversPhaseInterval = 5000;
+
 async function refreshServersList() {
   const list = document.getElementById("servers-list");
+  if (serversPhaseTimer) { clearTimeout(serversPhaseTimer); serversPhaseTimer = null; }
   if (!list) return;
   let servers;
   try { servers = await loadServers(); }
@@ -8933,6 +8963,7 @@ async function refreshServersList() {
   clear(list);
   if (!servers.length) { list.append(el("div", { class: "ev-empty", text: "No servers yet. Add your first connection." })); return; }
   servers.forEach((s) => list.append(serverRow(s)));
+  if (servers.some((s) => s.monitor_phase)) serversPhaseTimer = setTimeout(refreshServersList, serversPhaseInterval);
 }
 
 function isLiveMonitorState(st) { return st === "running" || st === "pending" || st === "stalled" || st === "lost_position"; }
@@ -8945,7 +8976,7 @@ function serverRow(s) {
   item.append(nm);
   if (s.kind === "ephemeral") item.append(el("span", { class: "chip chip-cli", text: "CLI", title: "Set from the command line with --index-dsn" }));
   if (s.reconstruct) item.append(el("span", { class: "chip chip-tt", text: "TT", title: "Backup configured: Time-travel available" }));
-  if (s.monitor_state) item.append(el("span", { class: "chip chip-mon", text: s.monitor_state.replace("_", " ").toUpperCase(), title: MON_STATE_TITLES[s.monitor_state] || ("monitoring " + s.monitor_state) }));
+  if (s.monitor_state) item.append(monitorChip(s));
   if (s.flavor && s.flavor !== "mysql") item.append(el("span", { class: "chip", text: s.flavor === "postgres" ? "PG" : s.flavor.toUpperCase(), title: "Source type: " + s.flavor }));
   // A registry entry with no source connection under a capturing console
   // never streams; the mark says so where the Start button would be (#1607).

@@ -481,3 +481,48 @@ func TestMonitorRun_healthyRunResetsBreaker(t *testing.T) {
 		t.Fatalf("state = %q, want stopped after cancel", st.State)
 	}
 }
+
+// A stream can sit in the resume-time dedup for minutes before it captures
+// anything (#1690). The supervisor carries that step as a PHASE next to the
+// unchanged "pending" state, so the row can say what is happening without
+// moving any state every caller already switches on — notably
+// isLiveMonitorState, which keeps the Stop button on the row.
+func TestMonitorJobPhase(t *testing.T) {
+	job := &monitorJob{}
+	job.set("pending", "")
+	hooks := job.streamHooks()
+
+	hooks.OnPhase(streamrun.PhaseResumeCleanup)
+	st := job.snapshot()
+	if st.State != "pending" || st.Phase != streamrun.PhaseResumeCleanup {
+		t.Fatalf("during the cleanup: %+v, want pending with the resume_cleanup phase", st)
+	}
+
+	hooks.OnPhase("")
+	if st := job.snapshot(); st.Phase != "" {
+		t.Fatalf("the phase outlived the step it names: %+v", st)
+	}
+
+	// Every state transition clears it too. A phase describes the run that is
+	// executing, so a crash mid-cleanup must not leave the row claiming the
+	// daemon is still cleaning up while it waits out a retry backoff — which
+	// is exactly the "looks alive but isn't" reading #1690 set out to remove.
+	for _, tc := range []struct {
+		name string
+		move func()
+	}{
+		{"a failure the supervisor will retry", func() { job.setRetrying("boom (retrying)") }},
+		{"a terminal failure", func() { job.set("failed", "gave up") }},
+		{"a stop", func() { job.set("stopped", "") }},
+		{"the next run starting", func() { job.set("pending", "") }},
+		// The fifth transition, and the one set()/setRetrying() do not cover:
+		// pending→running happens inside progress(), not set().
+		{"capture producing its first batch", func() { job.set("pending", ""); job.setPhase(streamrun.PhaseResumeCleanup); job.progress() }},
+	} {
+		job.setPhase(streamrun.PhaseResumeCleanup)
+		tc.move()
+		if st := job.snapshot(); st.Phase != "" {
+			t.Errorf("%s left a stale phase: %+v", tc.name, st)
+		}
+	}
+}

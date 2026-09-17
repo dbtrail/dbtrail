@@ -118,6 +118,17 @@ type monitorJob struct {
 	// sourceConnected: this run's stream has opened the source connection
 	// (the OnSourceConnected hook). Every new run starts false.
 	sourceConnected bool
+	// phase is the long startup step the stream is inside right now (the
+	// OnPhase hook), "" when none. EVERY transition out of it clears it —
+	// set, setRetrying and the pending→running flip in progress() — because a
+	// phase only ever describes the run that is executing, and must not
+	// survive a failure, a retry wait, a stop, or capture actually starting
+	// (#1690). progress() is belt: the only phase today is announced before
+	// StartSync and cleared before it, so no checkpoint or flush can land
+	// while one is set. A phase added LATER in startup would not have that
+	// luxury, and a row reading CLEANING UP over a capturing stream is the
+	// exact kind of stale reassurance this change exists to remove.
+	phase string
 	// retrying: the stored failure is one run() will retry after its backoff,
 	// not a setup failure in Start or a give-up. Any other set clears it.
 	retrying bool
@@ -134,6 +145,7 @@ func (j *monitorJob) set(state, lastErr string) {
 	j.mu.Lock()
 	j.state, j.lastErr, j.since = state, lastErr, time.Now().UTC()
 	j.retrying = false
+	j.phase = "" // a state change ends whatever startup step was running
 	if state == "pending" {
 		j.sourceConnected = false // every run connects again
 	}
@@ -158,6 +170,7 @@ func (j *monitorJob) progress() {
 	j.lastProgress = time.Now().UTC()
 	if j.state == "pending" {
 		j.state, j.lastErr, j.since = "running", "", j.lastProgress
+		j.phase = "" // capture is producing: no startup step is still running
 	}
 	j.mu.Unlock()
 }
@@ -166,6 +179,7 @@ func (j *monitorJob) progress() {
 func (j *monitorJob) setRetrying(lastErr string) {
 	j.mu.Lock()
 	j.state, j.lastErr, j.since, j.retrying = "failed", lastErr, time.Now().UTC(), true
+	j.phase = ""
 	j.mu.Unlock()
 }
 
@@ -173,6 +187,13 @@ func (j *monitorJob) setRetrying(lastErr string) {
 func (j *monitorJob) markSourceConnected() {
 	j.mu.Lock()
 	j.sourceConnected = true
+	j.mu.Unlock()
+}
+
+// setPhase records the long startup step the stream is inside ("" = none).
+func (j *monitorJob) setPhase(phase string) {
+	j.mu.Lock()
+	j.phase = phase
 	j.mu.Unlock()
 }
 
@@ -189,6 +210,7 @@ func (j *monitorJob) streamHooks() *streamrun.Hooks {
 		OnIndexed:         func(int64) { j.progress() },
 		OnGapAutoAdvance:  j.markLostPosition,
 		OnSourceConnected: j.markSourceConnected,
+		OnPhase:           j.setPhase,
 	}
 }
 
@@ -196,6 +218,9 @@ func (j *monitorJob) streamHooks() *streamrun.Hooks {
 // No OnGapAutoAdvance: a lost PG slot is fatal (pgstreamrun.One returns it and
 // the supervisor reconnects), not a continue-after-loss — the durable
 // gap_lost_detail persisted by the capturer is re-hydrated by Start instead.
+// No OnPhase either: the phase that exists (#1690) is the MySQL resume-time
+// dedup, and PG capture has no equivalent — it resumes from the slot's
+// confirmed LSN, so there is no replayed window to delete first.
 func (j *monitorJob) pgStreamHooks() *pgstreamrun.Hooks {
 	return &pgstreamrun.Hooks{
 		OnCheckpoint:      j.progress,
@@ -215,7 +240,7 @@ func (j *monitorJob) pgStreamHooks() *pgstreamrun.Hooks {
 func (j *monitorJob) snapshot() console.MonitorStatus {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected, Retrying: j.retrying}
+	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected, Retrying: j.retrying, Phase: j.phase}
 	if j.state == "running" {
 		if idle := time.Since(j.lastProgress); !j.lastProgress.IsZero() && idle > monitorStalledAfter {
 			st.State = "stalled"
