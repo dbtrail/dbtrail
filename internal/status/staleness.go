@@ -38,6 +38,13 @@ const (
 // before it ever mattered.
 const baselineAgingFraction = 0.8
 
+// BaselineAgingFraction is the same band, exported for a caller that has to
+// bound something against it without a floor to grade — see the baseline
+// refresh gate, which caps how long it will leave a backup unrepublished
+// against the CONFIGURED retention rather than against the partitions that
+// happen to exist at that moment.
+const BaselineAgingFraction = baselineAgingFraction
+
 // BaselineStalenessFor grades one snapshot anchor against the oldest instant
 // deltas are available from.
 func BaselineStalenessFor(snapshotTime, oldestDelta, now time.Time) BaselineStalenessVerdict {

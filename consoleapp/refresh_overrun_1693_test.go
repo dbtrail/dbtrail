@@ -688,6 +688,9 @@ func TestExecuteRefresh_anErrorNeverCarriesAnInstant(t *testing.T) {
 // matters because a refused run publishes nothing, so the next window reaches
 // back past it for a reason that has nothing to do with the fold's cost.
 func TestRunRefresh_theSampleIsKeptOnPublishAndDroppedOnRefusal(t *testing.T) {
+	// Asserts on a Warn buffer; the gate's blindness warning must not be able
+	// to satisfy it. See stubGateReads.
+	stubGateReads(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	sup := newBaselineSupervisor(ctx, t.TempDir(), baseline.DefaultLockMode)
