@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A refresh can leave a changed table's file alone and write the change
+  beside it** (#1638). Off by default: `bintrail baseline refresh
+  --table-deltas`, `bintrail-console watch --baseline-table-deltas` or
+  `BINTRAIL_BASELINE_TABLE_DELTAS`. Until now a refresh rewrote every table
+  that changed in full, however little of it changed. With this on, the
+  previous Parquet file is published untouched (a hard link) and two small
+  files go next to it: `<table>.posdel`, the row numbers of its rows that are
+  no longer current, and `<table>.upserts`, the current version of every
+  changed or new row. Each refresh extends the pair and reads only the events
+  since the previous one. The table is written again in full when `.upserts`
+  passes a quarter of it, when the chain is a day old, when a window did not
+  fit in memory, over a capture gap, or when the previous snapshot is read
+  from S3. The generated DuckDB `state_*` views read all three files. Every
+  other reader keeps using the table file and the index and stays correct;
+  for such a table it starts its event window where the chain started, which
+  `FindBaseline` now reports instead of the snapshot's directory time. A
+  snapshot written this way must not be read by an older bintrail, which
+  would start that window too late and skip changes, and the pair has to
+  travel with its table file (`bintrail upload` now carries it, and
+  `_MANIFEST` covers it). `verify` reports a table stored this way as
+  `inconclusive`, since the table file it compares did not change. Generate
+  the DuckDB views again after turning the option on or off. Turning it off
+  needs nothing else: the next refresh writes every table in full.
+
 ## [0.82.0] - 2026-09-15
 
 ### Added

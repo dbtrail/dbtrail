@@ -99,9 +99,44 @@ func (s StaleWarning) Stale() bool { return s.Message != "" }
 //   - An S3 URL prefix (e.g. "s3://bucket/baselines")
 func FindBaseline(ctx context.Context, source, schema, table string, at time.Time) (path string, snapshotTime time.Time, stale StaleWarning, err error) {
 	if strings.HasPrefix(source, "s3://") {
-		return findBaselineS3(ctx, source, schema, table, at)
+		path, snapshotTime, stale, err = findBaselineS3(ctx, source, schema, table, at)
+	} else {
+		path, snapshotTime, stale, err = findBaselineLocal(source, schema, table, at)
 	}
-	return findBaselineLocal(source, schema, table, at)
+	if err != nil {
+		return "", time.Time{}, StaleWarning{}, err
+	}
+	// A base with a table delta beside it (#1638) was carried forward from the
+	// snapshot its chain started at, and this table has events between that
+	// instant and the directory it was found in. Every caller bounds its event
+	// fetch, and its DDL and capture-gap checks, from the time returned here,
+	// so the time returned is the chain's START. The directory time would put
+	// the fetch's coarse floor (query.Options.SincePos) after events the base
+	// does not hold, and they would be dropped without an error.
+	//
+	// Only ever earlier: a chain start cannot be after the directory that holds
+	// it, and a footer claiming otherwise is ignored rather than trusted.
+	start, derr := deltaChainStart(ctx, path)
+	if derr != nil {
+		// The delta is there and cannot say where its chain began (half a
+		// pair, an unreadable footer). The delta is optional; the bound is
+		// not. The base's own footer records when the base was WRITTEN, which
+		// is never after the chain's start, so it is a safe bound that needs
+		// nothing but the base. It is not the everyday bound only because it
+		// can be far earlier (a base carried forward for days), and a window
+		// that wide is slow and can trip over rotated hours.
+		bm, merr := baseline.ReadParquetMetadataAny(ctx, path)
+		if merr != nil || bm.SnapshotTimestamp.IsZero() {
+			return "", time.Time{}, StaleWarning{}, fmt.Errorf("%s.%s: %w; and the table file records no time of its own to bound the read from instead — take a full backup to replace this snapshot", schema, table, derr)
+		}
+		slog.Warn("the table delta beside this backup file cannot be read, so the file is read alone, from the time it was written",
+			"schema", schema, "table", table, "path", path, "since", bm.SnapshotTimestamp.UTC().Format(time.RFC3339), "error", derr)
+		start = bm.SnapshotTimestamp
+	}
+	if !start.IsZero() && start.Before(snapshotTime) {
+		snapshotTime = start
+	}
+	return path, snapshotTime, stale, nil
 }
 
 // ReadBaselineRow opens the Parquet file at path using DuckDB and returns the

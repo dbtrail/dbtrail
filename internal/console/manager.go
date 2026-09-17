@@ -320,7 +320,18 @@ func (b *bundle) findBaseline(ctx context.Context, schema, table string, at time
 			slog.Warn("backup lookup: the backup destination could not be read either",
 				"table", schema+"."+table, "destination", b.baselineFallbackSrc, "err", ferr)
 		}
-		if ferr != nil || (err == nil && !ftime.After(snapshotTime)) {
+		// Which copy is NEWER is a question about snapshot directories. The
+		// times FindBaseline returns are read bounds, and for a table with a
+		// delta (#1638) that is its chain's start, which can be earlier than a
+		// destination snapshot that is in fact older than the local one.
+		localDir, fallbackDir := snapshotTime, ftime
+		if t, ok := reconstruct.SnapshotDirTime(path); ok {
+			localDir = t
+		}
+		if t, ok := reconstruct.SnapshotDirTime(fpath); ok {
+			fallbackDir = t
+		}
+		if ferr != nil || (err == nil && !fallbackDir.After(localDir)) {
 			return path, snapshotTime, stale, err
 		}
 		cause := stale.Message

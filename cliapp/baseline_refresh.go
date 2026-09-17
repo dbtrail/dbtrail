@@ -80,6 +80,7 @@ var (
 	brAt           string
 	brAllowGaps    bool
 	brCarryForward bool
+	brTableDeltas  bool
 	brParallelism  int
 	brFetchBatch   int
 	brWarnEvents   int64
@@ -98,6 +99,11 @@ func init() {
 		"When a table had no changes, publish its previous Parquet file instead of rewriting it (hard link "+
 			"where possible). Off by default: the rows are identical either way, but it links two snapshots "+
 			"to one file, so disk-usage and prune figures then count space they will not reclaim")
+	f.BoolVar(&brTableDeltas, "table-deltas", false,
+		"Off by default. Do not rewrite a table that changed: keep its previous file and write the changed rows as two small files beside it "+
+			"(<table>.posdel, <table>.upserts). The table is written again in full when those two files pass a quarter of its size or the chain is a day old. "+
+			"`bintrail views` reads the pair; every other command reads the table file and the index, as before. "+
+			"A snapshot written this way must not be read by a bintrail older than this one. Turning it off again needs nothing else: the next run writes every table in full. Generate the DuckDB views again after turning it on or off")
 	f.IntVar(&brParallelism, "parallelism", 0, "Max tables refreshed concurrently (0 = one per CPU)")
 	f.IntVar(&brFetchBatch, "fetch-batch-size", 0, "Event page size for the delta fold (0 = default)")
 	f.Int64Var(&brWarnEvents, "warn-event-threshold", 5_000_000, "Warn when a table's delta window exceeds this many events (0 disables)")
@@ -178,6 +184,7 @@ func runBaselineRefresh(cmd *cobra.Command, _ []string) error {
 		OutputFormat:          reconstruct.OutputFormatParquet,
 		AllowGaps:             brAllowGaps,
 		CarryForwardUnchanged: brCarryForward,
+		TableDeltas:           brTableDeltas,
 		Parallelism:           brParallelism,
 		FetchBatchSize:        brFetchBatch,
 		WarnEventThreshold:    brWarnEvents,
@@ -245,10 +252,21 @@ func buildRefreshOutcomes(tables []string, reports []*reconstruct.TableReport, f
 	// most wants to see here — which tables are actually costing them a full
 	// rewrite each cycle.
 	unchanged := make(map[string]bool, len(reports))
+	// With --table-deltas (#1638) "refreshed" alone would say the opposite of
+	// what happened for most tables: the file was NOT rewritten. The verdict
+	// stays "refreshed" (the table is current), and the detail says how.
+	deltaDetail := make(map[string]string, len(reports))
 	for _, r := range reports {
 		k := r.Schema + "." + r.Table
 		done[k] = true
 		unchanged[k] = r.CarriedForward
+		switch {
+		case r.TableDelta:
+			deltaDetail[k] = fmt.Sprintf("the previous file was kept and the change written beside it (%d rows replaced or removed, %d current rows)",
+				r.DeltaDeadRows, r.DeltaUpsertRows)
+		case r.DeltaCompacted != "":
+			deltaDetail[k] = "written again in full: " + r.DeltaCompacted
+		}
 	}
 
 	out := make([]refreshOutcome, 0, len(tables))
@@ -263,7 +281,7 @@ func buildRefreshOutcomes(tables []string, reports []*reconstruct.TableReport, f
 		case done[t] && unchanged[t]:
 			out = append(out, refreshOutcome{t, "unchanged", "no events in the window; the previous file was published as-is"})
 		case done[t]:
-			out = append(out, refreshOutcome{t, "refreshed", ""})
+			out = append(out, refreshOutcome{t, "refreshed", deltaDetail[t]})
 		default:
 			// Requested, neither reported nor failed: the run was cancelled
 			// before this table started. Not "fine" — say so.

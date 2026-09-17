@@ -2,6 +2,7 @@ package cliapp
 
 import (
 	"fmt"
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -115,7 +116,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		if walkErr != nil || d.IsDir() {
 			return walkErr
 		}
-		if !strings.HasSuffix(strings.ToLower(path), ".parquet") {
+		if !uploadable(path) {
 			return nil
 		}
 
@@ -227,4 +228,18 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// uploadable reports whether `bintrail upload` sends a file: Parquet, and the
+// two files of a table delta (#1638), which are Parquet under another suffix.
+//
+// The delta travels WITH its table, and that is not a nicety. A table file
+// uploaded without it is not a smaller backup, it is a wrong one: the file is
+// the table as it was when its chain of deltas started, under a directory that
+// says otherwise, and a reader bounds its event window by that directory.
+func uploadable(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".parquet") ||
+		strings.HasSuffix(lower, baseline.TableDeltaPosdelSuffix) ||
+		strings.HasSuffix(lower, baseline.TableDeltaUpsertsSuffix)
 }

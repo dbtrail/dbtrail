@@ -448,6 +448,31 @@ These properties are deliberate:
 
   The console setting overrides the daemon flag and applies on the next cycle without a restart. Once you have saved one there, the card grows a **Use the default** button that clears it again.
 
+- **A table that changed can be left as it is too, with its changes written beside it (opt-in, off by default, #1638).** Without this, a refresh rewrites every table that changed in full, however little of it changed. With it, the table's previous Parquet file is published into the new snapshot untouched (a hard link, as above) and the change goes into two small files next to it:
+
+  ```
+  <snapshot>/<schema>/<table>.parquet   the table as it was when the chain of deltas started
+  <snapshot>/<schema>/<table>.posdel    row numbers of the rows in that file that are no longer current
+  <snapshot>/<schema>/<table>.upserts   the current version of every changed or new row
+  ```
+
+  Both small files are Parquet; they carry another suffix so that nothing that lists `.parquet` files can take one for a table. The table's state at the snapshot is the first file minus the rows `.posdel` names, plus `.upserts`. A deleted row is a row number with no upsert, an updated row is a row number plus an upsert, a new row is an upsert alone. Each refresh extends the pair from where the pair itself left off, so it reads only the events since the previous refresh, and what it writes grows with the rows changed since the last full rewrite, not with the table.
+
+  The table is written again in full, and the pair starts over empty, when the `.upserts` file passes a quarter of the table's file (tables whose `.upserts` is under 1 MiB are left alone), when the chain is a day old, when a window's changes did not fit in memory, when the run went over a known capture gap, or when the previous snapshot is read from S3. A schema change refuses the refresh exactly as it does without this option, and the full backup that follows starts a new chain. With the option on, every table in the snapshot has the pair, empty for a table just rewritten.
+
+  **Who reads the pair.** The generated DuckDB views do: a `state_<schema>_<table>` view over such a table reads all three files, so it shows the snapshot's rows. A query through it costs more than a query over one file, because the big file is read with its row numbers; on a 40M-row table a full-table sum went from 0.03 s to 0.12 s in the measurement on #1638. Everything else (`reconstruct`, `recover-cascade`, the shim's `_snapshot`, `verify`, `drill`, a restore, the Iceberg export) keeps reading the table file and the index, and stays correct because the index still holds every change since that file was written. Those readers fetch a longer window for such a table, up to the age of its chain, which is why the chain ends after a day. `verify` compares table files: for a table whose newest backup is its previous file plus a pair there is nothing for it to compare, so it reports that table as `inconclusive` and says why, and verifies it again the next time the table is written in full. The backup-age verdict in `status` and on the console is graded on the snapshot's time, not on the start of the chain, so with a retention shorter than a day it can read `ok` for a table those readers can no longer rebuild; they refuse with a coverage error in that case, they do not return wrong rows.
+
+  **Two things to know before turning it on.** A snapshot written this way must not be read by a bintrail older than the one that wrote it: an older build takes the snapshot's directory time as the start of its event window, and for a table with a pair the window has to start where the chain did, so it would skip changes without an error. And the pair has to travel with its table file. The daemon's own upload and `bintrail upload` both carry it, and the snapshot's `_MANIFEST` covers it; a copy made some other way that takes only `*.parquet` leaves a table file that is older than its directory says, and a reader of that copy skips changes without an error. Uploads still send the table's file again under each new snapshot prefix, so this saves local writes, not upload. If one of the two small files is lost or damaged, the refresh sets the pair aside and rebuilds from the table file, and the other readers keep working from the time that file was written.
+
+  A full backup the daemon takes while this is on writes an empty pair beside every table, so the layout does not change from one snapshot to the next.
+
+  **Turning it off needs nothing else.** The next refresh reads each table file and the index, writes every table in full and writes no pair, and the snapshot after it has the plain layout again. **Generate the DuckDB views again after turning it on, and again after turning it off.** A view's shape is fixed when it is generated. Views generated while it was off read the table file alone, and once tables have a pair that file is the table as it was when the chain started, with no error to say so. Views generated while it was on name the pair and fail once it is gone. The `views.sql` published inside each snapshot, the console download and the console SQL panel are generated per snapshot and are always right.
+
+  | Where | How |
+  |---|---|
+  | `bintrail baseline refresh` | `--table-deltas` |
+  | `bintrail-console watch` | `--baseline-table-deltas`, or `BINTRAIL_BASELINE_TABLE_DELTAS` (a true/false value) |
+
 - **An interval shorter than a refresh is a request, not a schedule.** A refresh rewrites every table that changed in full, however little of it changed, so it has a cost the interval cannot go below. Asking for less does not queue refreshes up: a server whose previous refresh is still folding is skipped for that tick, and the tick says so.
 
   Each refresh also logs its own duration, and one that outran the configured interval says so explicitly, naming the server. Read that line before reaching for the interval, because it distinguishes two cases that look alike:

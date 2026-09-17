@@ -387,17 +387,34 @@ func (s *Server) snapshotViewsRelative(ctx context.Context, ss *snapshotSource, 
 	if src == "" {
 		src = ss.localRoot
 	}
+	// The download carries every file of the snapshot, a table's delta (#1638)
+	// included, so the mark is read off the list already in hand.
+	rels := make(map[string]bool, len(files))
+	for _, f := range files {
+		rels[f.RelPath] = true
+	}
 	var tables []views.BaselineTable
 	for _, f := range files {
 		parts := strings.Split(f.RelPath, "/")
 		if len(parts) != 3 || !strings.HasSuffix(parts[2], ".parquet") {
 			continue
 		}
+		posdel, upserts := baseline.TableDeltaPaths(f.RelPath)
+		if rels[posdel] != rels[upserts] {
+			// No views.sql rather than a wrong one: with half a pair there is
+			// no state to describe, and a view over the file alone would show
+			// the table as it was when its chain started. The files themselves
+			// still download.
+			slog.Warn("snapshot download: a table has only one of its two delta files, so no views.sql is included",
+				"snapshot", ts.UTC().Format(time.RFC3339), "table_file", f.RelPath)
+			return ""
+		}
 		tables = append(tables, views.BaselineTable{
 			Schema: parts[1],
 			Table:  strings.TrimSuffix(parts[2], ".parquet"),
 			Path:   ss.realPath(f.RelPath),
 			Rel:    parts[1] + "/" + parts[2],
+			Delta:  rels[posdel] && rels[upserts],
 		})
 	}
 	if len(tables) == 0 {
