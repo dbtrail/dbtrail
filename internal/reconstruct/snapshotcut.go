@@ -166,6 +166,16 @@ func (b *cutBound) clause() string {
 	return " PARTITION (" + strings.Join(b.keep, ", ") + ")"
 }
 
+// partitions is the candidate set the clause names. Nil-safe like clause, so
+// firstEventPast's logging cannot depend on which of its branches already
+// proved the bound non-nil.
+func (b *cutBound) partitions() []string {
+	if b == nil {
+		return nil
+	}
+	return b.keep
+}
+
 // listCutBound reads binlog_events' partitions and derives the bound for at.
 // A listing error and an unrecognised name are both returned as errors; the
 // caller decides that searching the whole table is the right fallback.
@@ -282,12 +292,13 @@ func firstEventPast(ctx context.Context, db *sql.DB, at time.Time) (*query.Binlo
 			bound = nil
 			continue
 		}
-		if !moved && slices.Equal(again.keep, bound.keep) {
+		if !moved && slices.Equal(again.partitions(), bound.partitions()) {
 			return cut, nil
 		}
 		if attempt >= maxCutBoundAttempts {
 			slog.Warn("resolve snapshot cut: the bounded search could not be confirmed after repeated attempts; searching the whole table",
-				"at", atStamp, "attempts", attempt, "refused", moved, "was", bound.keep, "now", again.keep)
+				"at", atStamp, "attempts", attempt, "refused", moved,
+				"was", bound.partitions(), "now", again.partitions())
 			bound = nil
 			continue
 		}
