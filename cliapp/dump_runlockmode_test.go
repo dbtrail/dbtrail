@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -19,18 +19,19 @@ import (
 // fakeMydumperModern writes a fake mydumper that reports a version NEW ENOUGH to
 // accept --sync-thread-lock-mode, and records the argv it was called with.
 //
-// The version string is the whole point. Every pre-existing runDump test uses a
-// fake reporting 0.15.0, which sets supportsLockMode=false and makes the entire
-// lock-mode region of runDump structurally unreachable — so none of it was
-// covered, including the privilege preflight that exists to keep mydumper from
-// segfaulting.
-// The version string carries the "v" prefix on purpose (#1686). It used to read
-// "mydumper 0.18.0 (built with foo)", which is impossible twice over: no 0.18.0
-// was ever released (see mydumperSupportsLockMode) and every build measured from
-// 0.16.3 up prints the prefix. Using a real shape makes the three tests below
-// regression tests for the primary half of #1686 — before the parser fix they
-// all go red, because a v-prefixed version was read as "very old mydumper" and
-// the whole lock-mode region became unreachable.
+// The version string is the whole point, twice over.
+//
+// It must be new enough: the pre-existing runDump tests use a fake reporting
+// 0.15.0, which sets supportsLockMode=false and makes the entire lock-mode
+// region of runDump structurally unreachable — so none of it was covered,
+// including the privilege preflight that keeps mydumper from segfaulting.
+//
+// And it must be a REAL shape (#1686). It used to read "mydumper 0.18.0 (built
+// with foo)", impossible twice over: no 0.18.0 was ever released (see
+// mydumperSupportsLockMode) and every build measured from 0.16.3 up carries the
+// "v" prefix. With a string a binary actually prints, the three tests below
+// become regression tests for the parser half — revert the "v" strip and they
+// go red, because the version reads as "very old mydumper" again.
 func fakeMydumperModern(t *testing.T, dir string) (bin, record string) {
 	t.Helper()
 	return fakeMydumperVersion(t, dir, "mydumper v0.18.1, built against MySQL 8.0.36 with SSL support")
@@ -191,14 +192,46 @@ func fakeMydumperVersion(t *testing.T, dir, versionLine string) (bin, record str
 	t.Helper()
 	bin = filepath.Join(dir, "mydumper")
 	record = filepath.Join(dir, "argv.txt")
+	// SINGLE-quoted, not strconv.Quote into a double-quoted string. Go escaping
+	// is not bash escaping: inside "..." a $, a backtick or a backslash stays
+	// live, so a pasted --version line containing one would make the fake print
+	// something the test never asked for — a false green in the one helper
+	// whose entire job is fidelity to real mydumper output. Single quotes are
+	// inert in bash; the only character needing care is the quote itself.
 	script := "#!/bin/bash\n" +
-		"if [ \"$1\" = \"--version\" ]; then echo " + strconv.Quote(versionLine) + "; exit 0; fi\n" +
+		"if [ \"$1\" = \"--version\" ]; then printf '%s\\n' '" +
+		strings.ReplaceAll(versionLine, "'", `'\''`) + "'; exit 0; fi\n" +
 		"echo \"$@\" > " + record + "\n" +
 		"exit 0\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake mydumper: %v", err)
 	}
 	return bin, record
+}
+
+// TestFakeMydumperVersionReportsVerbatim guards the fixture itself. Every
+// version string in this file is now pasted from a real `mydumper --version`,
+// so if the fake alters what it was handed, the tests below assert against
+// output no binary ever produced — and they still pass, which is the worst
+// shape a test can have. The metacharacters are the point: under the previous
+// double-quoted form bash would have expanded them.
+func TestFakeMydumperVersionReportsVerbatim(t *testing.T) {
+	for _, want := range []string{
+		"mydumper v1.0.5-1, built against MariaDB 10.8.8 with SSL support",
+		`mydumper v1.0.5-1, built from $HOME/src with "quotes" and a \backslash`,
+		"mydumper v1.0.5-1, built in `pwd` with 100% coverage",
+		"mydumper v1.0.5-1, O'Brien build",
+	} {
+		dir := t.TempDir()
+		bin, _ := fakeMydumperVersion(t, dir, want)
+		out, err := exec.Command(bin, "--version").Output()
+		if err != nil {
+			t.Fatalf("run fake mydumper: %v", err)
+		}
+		if got := strings.TrimRight(string(out), "\n"); got != want {
+			t.Errorf("fake printed %q, want %q — the fixture is not faithful to what it was given", got, want)
+		}
+	}
 }
 
 // TestRunDumpUnreadableVersionStillChecksPrivileges pins the half of #1686 that
