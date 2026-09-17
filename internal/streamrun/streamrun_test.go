@@ -1678,7 +1678,7 @@ func TestClassifyResetDiscard_sameModeNoopUnchanged(t *testing.T) {
 // db) when there is no prior checkpoint file — the first-run case where
 // dedup does not apply.
 func TestDeleteEventsSinceCheckpoint_noPriorCheckpointIsNoop(t *testing.T) {
-	n, err := deleteEventsSinceCheckpoint(nil, "", 0)
+	n, err := deleteEventsSinceCheckpoint(nil, "", 0, noDedupFloor)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1701,7 +1701,7 @@ func TestDeleteEventsSinceCheckpoint_deletesAtOrBeyond(t *testing.T) {
 		WithArgs("mysql-bin.000005", "mysql-bin.000005", "mysql-bin.000005", "mysql-bin.000005", uint64(1234)).
 		WillReturnResult(sqlmock.NewResult(0, 3))
 
-	n, err := deleteEventsSinceCheckpoint(db, "mysql-bin.000005", 1234)
+	n, err := deleteEventsSinceCheckpoint(db, "mysql-bin.000005", 1234, noDedupFloor)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1736,7 +1736,7 @@ func TestDeleteEventsSinceCheckpointGTID_noStragglers(t *testing.T) {
 		WithArgs("mysql-bin.000005", uint64(1234)).
 		WillReturnRows(sqlmock.NewRows([]string{"gtid"}).AddRow(uuid + ":50"))
 
-	n, err := deleteEventsSinceCheckpointGTID(db, "mysql-bin.000005", 1234, savedSet, gomysql.MySQLFlavor)
+	n, err := deleteEventsSinceCheckpointGTID(db, "mysql-bin.000005", 1234, savedSet, gomysql.MySQLFlavor, noDedupFloor)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1776,7 +1776,7 @@ func TestDeleteEventsSinceCheckpointGTID_deletesStragglers(t *testing.T) {
 		WithArgs(stragglerGTID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	n, err := deleteEventsSinceCheckpointGTID(db, "mysql-bin.000005", 1234, savedSet, gomysql.MySQLFlavor)
+	n, err := deleteEventsSinceCheckpointGTID(db, "mysql-bin.000005", 1234, savedSet, gomysql.MySQLFlavor, noDedupFloor)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1874,3 +1874,10 @@ func TestCheckpointPosition_positionFallback(t *testing.T) {
 		t.Fatalf("unseeded safe* must fall back to binlog*, got %s:%d", f, p)
 	}
 }
+
+// noDedupFloor is the floor value that reduces both resume-dedup passes to the
+// unbounded statements they were before #1690 — what a checkpoint written by
+// an older build carries, and what every test predating the floor asserts
+// against. Named rather than a bare 0 so a reader of those call sites sees
+// which behaviour is being pinned.
+const noDedupFloor = int64(0)

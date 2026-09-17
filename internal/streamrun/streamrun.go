@@ -46,8 +46,35 @@ type streamState struct {
 	// but works for non-GTID sources too (which emit no EventCommit). Unused in
 	// GTID mode (that path keeps checkpointing the per-event binlogPos, which
 	// deleteEventsSinceCheckpointGTID relies on).
-	safeFile      string
-	safePos       uint64
+	safeFile string
+	safePos  uint64
+	// dedupFloorID is a LOWER BOUND on the event_id of every row the next
+	// resume's dedup would delete, persisted with the checkpoint so that
+	// delete is a primary-key range instead of a full table scan (#1690).
+	//
+	// The rule that makes it valid, and the only one that does: it advances at
+	// the SAME event that advances the coordinate the checkpoint persists.
+	// checkpointPosition already branches on mode for that reason, and this
+	// branches with it — position mode at the statement/commit/DDL boundary
+	// that moves safePos, GTID mode at the commit that moves gtidSet. Getting
+	// that pairing wrong does not merely slow the delete down, it makes it
+	// miss rows:
+	//
+	//   - Keyed on the checkpoint INSTANT instead: in position mode safePos
+	//     trails binlogPos, so rows between them are already in the table and
+	//     already match the delete. A floor taken at the instant sits above
+	//     them and they survive as duplicates.
+	//   - Keyed on the position boundary in GTID mode: STMT_END_F fires INSIDE
+	//     an open transaction, so the floor would climb past that
+	//     transaction's earlier statements — the exact rows the straggler pass
+	//     exists to find.
+	//
+	// Zero means "no floor", which reduces both passes to the unbounded
+	// statements they were before: a checkpoint written by an older build, a
+	// run that has not flushed a batch yet, and every checkpoint-shaped writer
+	// that builds a bare streamState (--reset, the gap auto-advance stamp) all
+	// land there. Slower, never wrong.
+	dedupFloorID  int64
 	gtidSet       string // serialized GTID set (GTID mode only)
 	flavor        string // source flavor: "mysql" (default) or "mariadb"; selects the GTID parser on resume
 	eventsIndexed int64
@@ -76,12 +103,19 @@ type streamState struct {
 func loadStreamState(db *sql.DB) (*streamState, error) {
 	var s streamState
 	var gtidSet, bintrailID sql.NullString
+	// dedup_floor_event_id is NULL on every checkpoint an older build wrote,
+	// and that has to read as 0 = no floor, not as an error: the whole point
+	// is that an index nobody has migrated still resumes, just with the
+	// unbounded delete it always had (#1690).
+	var dedupFloor sql.NullInt64
 	err := db.QueryRow(`
 		SELECT mode, binlog_file, binlog_position, gtid_set, flavor,
-		       events_indexed, last_event_time, server_id, bintrail_id
+		       events_indexed, last_event_time, server_id, bintrail_id,
+		       dedup_floor_event_id
 		FROM stream_state WHERE id = 1`).Scan(
 		&s.mode, &s.binlogFile, &s.binlogPos, &gtidSet, &s.flavor,
-		&s.eventsIndexed, &s.lastEventTime, &s.serverID, &bintrailID)
+		&s.eventsIndexed, &s.lastEventTime, &s.serverID, &bintrailID,
+		&dedupFloor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -94,7 +128,22 @@ func loadStreamState(db *sql.DB) (*streamState, error) {
 	if bintrailID.Valid {
 		s.bintrailID = bintrailID.String
 	}
+	if dedupFloor.Valid && dedupFloor.Int64 > 0 {
+		s.dedupFloorID = dedupFloor.Int64
+	}
 	return &s, nil
+}
+
+// noteDedupFloor raises the resume-dedup floor, never lowers it. Monotone
+// because every caller passes the newest id the indexer has assigned, and a
+// floor that moved DOWN would still be a valid lower bound while a floor that
+// moved UP past rows it must cover would not — so the guard is really about
+// the zero an Indexer reports before its first flush, which must not undo a
+// floor a later restart already earned.
+func (s *streamState) noteDedupFloor(id int64) {
+	if id > s.dedupFloorID {
+		s.dedupFloorID = id
+	}
 }
 
 // checkpointPosition returns the (binlog_file, binlog_position) to persist for a
@@ -178,6 +227,17 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		captureSkips = snap
 	}
 	args = append(args, captureSkips)
+	// NULL when there is no floor, so the column reads as "no daemon has
+	// written one" rather than as a floor of zero. Unlike capture_skips this
+	// is deliberately NOT COALESCEd: a checkpoint-shaped writer with a bare
+	// streamState (--reset, the gap auto-advance stamp) MUST clear a stale
+	// floor rather than preserve it, because the floor it left behind belongs
+	// to coordinates that writer just discarded (#1690).
+	var dedupFloor any
+	if state.dedupFloorID > 0 {
+		dedupFloor = state.dedupFloorID
+	}
+	args = append(args, dedupFloor)
 	// mode is in the UPDATE arm for the cross-mode --reset path (#1079): the
 	// reset no longer DELETEs the row, so the mode switch must land through
 	// this upsert. For every other caller mode is invariant across the run.
@@ -190,8 +250,8 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		INSERT INTO stream_state
 		    (id, mode, binlog_file, binlog_position, gtid_set, flavor,
 		     events_indexed, last_event_time, last_checkpoint, server_id, bintrail_id,
-		     capture_skips)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?)
+		     capture_skips, dedup_floor_event_id)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 		    mode            = VALUES(mode),
 		    binlog_file     = VALUES(binlog_file),
@@ -203,7 +263,8 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		    last_checkpoint = UTC_TIMESTAMP(),
 		    server_id       = VALUES(server_id),
 		    bintrail_id     = VALUES(bintrail_id),
-		    capture_skips   = COALESCE(VALUES(capture_skips), capture_skips)`,
+		    capture_skips   = COALESCE(VALUES(capture_skips), capture_skips),
+		    dedup_floor_event_id = VALUES(dedup_floor_event_id)`,
 		args...)
 	return err
 }
@@ -296,18 +357,38 @@ func beginResumeCleanup(hooks *Hooks, mode, anchor, file string, pos uint64) fun
 // pre-rollover file "greater" and wrongly deletes already-indexed rows on
 // every resume that straddles a rollover. Equal-length names — the same
 // padded width — keep the plain string comparison as the fast path.
-// binlog_events is partitioned by event_timestamp, not binlog_file, so this
-// is a full scan on every resume.
-func deleteEventsSinceCheckpoint(db *sql.DB, file string, pos uint64) (int64, error) {
+// binlog_events is partitioned by event_timestamp, not binlog_file, so nothing
+// here can prune a partition and no index covers binlog_file or start_pos.
+// floor is what keeps that from being a full table scan (#1690): it is a lower
+// bound on the event_id of every row this predicate can match, and event_id
+// leads the PRIMARY KEY, so `event_id >= floor` turns the statement into a
+// range on it. floor <= 0 omits the term and runs the original statement.
+//
+// The floor PRUNES; it never SELECTS. The position predicate below is
+// untouched and remains the exact filter, so a floor that is too low only
+// widens the range — and a floor is only ever too low, because it is taken
+// before the rows it bounds are written (see streamState.dedupFloorID).
+// Measured on a 300k-row, 49-partition fixture: 300,000 table row reads
+// without it, 0 with it (51 index descents, one per partition, plus 901
+// index-order reads), deleting the identical 802 rows.
+func deleteEventsSinceCheckpoint(db *sql.DB, file string, pos uint64, floor int64) (int64, error) {
 	if file == "" {
 		return 0, nil
 	}
-	res, err := db.Exec(`
-		DELETE FROM binlog_events
-		WHERE (CHAR_LENGTH(binlog_file) > CHAR_LENGTH(?)
+	where := `(CHAR_LENGTH(binlog_file) > CHAR_LENGTH(?)
 		    OR (CHAR_LENGTH(binlog_file) = CHAR_LENGTH(?) AND binlog_file > ?))
-		    OR (binlog_file = ? AND start_pos >= ?)`,
-		file, file, file, file, pos)
+		    OR (binlog_file = ? AND start_pos >= ?)`
+	args := []any{file, file, file, file, pos}
+	if floor > 0 {
+		// Parenthesised: the position predicate is a top-level OR, and ANDing
+		// the floor onto it without brackets would bind to the last branch
+		// only and leave the "later file" branch unbounded — deleting rows a
+		// floor was supposed to exclude is not the failure here, but a silent
+		// full scan on the common path is.
+		where = `event_id >= ? AND (` + where + `)`
+		args = append([]any{floor}, args...)
+	}
+	res, err := db.Exec(`DELETE FROM binlog_events WHERE `+where, args...)
 	if err != nil {
 		return 0, fmt.Errorf("delete events since checkpoint %s:%d: %w", file, pos, err)
 	}
@@ -331,9 +412,9 @@ func deleteEventsSinceCheckpoint(db *sql.DB, file string, pos uint64) (int64, er
 // Scoped to one file: a transaction never spans a binlog rotation, so an
 // open transaction's rows always live in the file the checkpoint was last
 // written against.
-func deleteEventsSinceCheckpointGTID(db *sql.DB, file string, pos uint64, savedSet gomysql.GTIDSet, flavor string) (int64, error) {
+func deleteEventsSinceCheckpointGTID(db *sql.DB, file string, pos uint64, savedSet gomysql.GTIDSet, flavor string, floor int64) (int64, error) {
 	posStarted := time.Now()
-	n, err := deleteEventsSinceCheckpoint(db, file, pos)
+	n, err := deleteEventsSinceCheckpoint(db, file, pos, floor)
 	if err != nil || file == "" || savedSet == nil {
 		return n, err
 	}
@@ -347,10 +428,27 @@ func deleteEventsSinceCheckpointGTID(db *sql.DB, file string, pos uint64, savedS
 		"file", file, "pos", pos,
 		"position_pass_rows", n, "position_pass_duration", time.Since(posStarted).Round(time.Millisecond))
 
-	rows, err := db.Query(`
-		SELECT DISTINCT gtid FROM binlog_events
-		WHERE binlog_file = ? AND start_pos < ? AND gtid IS NOT NULL`,
-		file, pos)
+	// The floor matters MORE here than in the pass above. Left unbounded this
+	// query does not merely scan the table, it picks a worse plan than one:
+	// DISTINCT is delivered by idx_gtid, so MySQL walks that whole index and
+	// fetches the clustered row behind every entry just to test binlog_file
+	// and start_pos, throwing away 98% of them. Measured in production at
+	// 42.6M rows (type: index, key: idx_gtid, filtered: 1.67) it took 18
+	// minutes and read twice the table, against 10 minutes for the full-table
+	// DELETE before it. The same fixture that reproduces that plan at 300k
+	// rows flips to a PRIMARY range of 1,728 rows once the floor is present.
+	//
+	// Valid here for the same reason as above, by a different route: the rows
+	// this looks for belong to transactions the checkpoint's gtid_set does not
+	// cover, i.e. transactions after the last commit — and the floor was taken
+	// AT that commit.
+	stragglerWhere := `binlog_file = ? AND start_pos < ? AND gtid IS NOT NULL`
+	stragglerArgs := []any{file, pos}
+	if floor > 0 {
+		stragglerWhere = `event_id >= ? AND ` + stragglerWhere
+		stragglerArgs = append([]any{floor}, stragglerArgs...)
+	}
+	rows, err := db.Query(`SELECT DISTINCT gtid FROM binlog_events WHERE `+stragglerWhere, stragglerArgs...)
 	if err != nil {
 		return n, fmt.Errorf("scan pre-checkpoint gtids for stragglers: %w", err)
 	}
@@ -1603,6 +1701,11 @@ func streamLoop(
 			return
 		}
 		state.gtidSet = state.accGTID.String()
+		// AFTER the Update succeeded, never before. If the set did not
+		// advance, this transaction is still uncommitted as far as the
+		// checkpoint is concerned, so its rows are stragglers the next resume
+		// must delete — and the floor has to stay below them to find them.
+		state.noteDedupFloor(idx.FirstIDOfLastBatch())
 	}
 
 	for {
@@ -1636,6 +1739,15 @@ func streamLoop(
 			// binlogPos above stays for metrics/display and GTID-mode checkpointing.
 			if isPositionCheckpointBoundary(ev) {
 				state.safeFile, state.safePos = state.binlogFile, ev.EndPos
+				// The floor travels with the coordinate the checkpoint
+				// persists, and in position mode that is safePos, right here.
+				// GTID mode deliberately does NOT take it here: this fires at
+				// STMT_END_F too, which is mid-transaction, and would push the
+				// floor past the straggler rows. It takes it at the commit
+				// instead (advanceGTID below).
+				if state.mode == "position" {
+					state.noteDedupFloor(idx.FirstIDOfLastBatch())
+				}
 			}
 			if !ev.Timestamp.IsZero() {
 				state.lastEventTime = sql.NullTime{Time: ev.Timestamp, Valid: true}
@@ -2180,6 +2292,14 @@ func One(ctx context.Context, cfg Config) error {
 					bintrailID:    bintrailID,
 					eventsIndexed: saved.eventsIndexed,
 					lastEventTime: saved.lastEventTime,
+					// Carried, unlike every other bare checkpoint writer. The
+					// advance only ever moves FORWARD past purged binlogs, so a
+					// row at or beyond the advanced start was read after the
+					// saved checkpoint and therefore inserted above its floor —
+					// the bound still holds. Dropping it would hand a daemon
+					// already recovering from a purge a full-table scan on top
+					// (#1690).
+					dedupFloorID: saved.dedupFloorID,
 				}
 				if err := persistGapAutoAdvance(indexDB, advancedState, gap.Message); err != nil {
 					return err
@@ -2258,7 +2378,7 @@ func One(ctx context.Context, cfg Config) error {
 	// binlog coordinates don't correspond to the newly chosen start point.
 	if saved != nil && saved.mode == mode && mode == "position" {
 		done := beginResumeCleanup(cfg.Hooks, mode, "replay start", startFile, uint64(startPos))
-		n, err := deleteEventsSinceCheckpoint(indexDB, startFile, uint64(startPos))
+		n, err := deleteEventsSinceCheckpoint(indexDB, startFile, uint64(startPos), saved.dedupFloorID)
 		done(n, err)
 		if err != nil {
 			return fmt.Errorf("failed to dedup events since checkpoint: %w", err)
@@ -2271,7 +2391,7 @@ func One(ctx context.Context, cfg Config) error {
 				"already-captured rows below the purge floor); see docs/streaming.md")
 		} else {
 			done := beginResumeCleanup(cfg.Hooks, mode, "saved checkpoint", saved.binlogFile, saved.binlogPos)
-			n, err := deleteEventsSinceCheckpointGTID(indexDB, saved.binlogFile, saved.binlogPos, accGTID, cfg.Flavor)
+			n, err := deleteEventsSinceCheckpointGTID(indexDB, saved.binlogFile, saved.binlogPos, accGTID, cfg.Flavor, saved.dedupFloorID)
 			done(n, err)
 			if err != nil {
 				return fmt.Errorf("failed to dedup events since checkpoint: %w", err)
@@ -2298,6 +2418,17 @@ func One(ctx context.Context, cfg Config) error {
 	}
 	if saved != nil {
 		state.eventsIndexed = saved.eventsIndexed
+		// Carry the floor across the restart. Valid because event_id only ever
+		// grows (MySQL 8.0+ persists the AUTO_INCREMENT counter across server
+		// restarts, and rotation drops the OLDEST partitions, which hold the
+		// lowest ids) — so every row this run writes lands above it.
+		//
+		// Load-bearing, not tidiness: the ticker checkpoints even with zero
+		// events, so without this the first checkpoint of a quiet resume would
+		// persist a floor of 0 and throw away the one the previous run earned.
+		// A crash right after that leaves the next resume scanning the whole
+		// table, which is the outage this change exists to remove.
+		state.dedupFloorID = saved.dedupFloorID
 	}
 	if startGTIDStr != "" {
 		state.gtidSet = startGTIDStr

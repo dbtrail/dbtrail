@@ -99,6 +99,15 @@ type Indexer struct {
 	db        *sql.DB
 	batchSize int
 	onDDL     func(ev event.Event) error
+	// firstIDOfLastBatch is the auto-increment event_id MySQL assigned to the
+	// FIRST row of the most recent successful batch INSERT — LastInsertId's
+	// documented value for a multi-row insert. The stream resume-dedup uses it
+	// as a floor so its DELETE is a primary-key range instead of a full table
+	// scan (#1690). The FIRST id, not the last, on purpose: it needs no
+	// assumption about the ids in one statement being consecutive, and being
+	// one batch too low only widens the range, which is the safe direction.
+	// Zero until a batch has landed, which reads as "no floor".
+	firstIDOfLastBatch int64
 	// digestWarnOnce rate-limits the STATEMENT_DIGEST-unavailable warning to
 	// one line per Indexer — without it a non-8.0 index would warn every batch.
 	digestWarnOnce sync.Once
@@ -305,8 +314,29 @@ func (idx *Indexer) insertBatch(batch []event.Event) (int64, error) {
 		return 0, fmt.Errorf("batch INSERT of %d events failed: %w", len(batch), err)
 	}
 	n, _ := result.RowsAffected()
+	// Monotone on its own: AUTO_INCREMENT only grows and this is the single
+	// writer for the index, so every successful batch reports a first id above
+	// the last one. The guard that matters is not here but in the consumer
+	// (streamState.noteDedupFloor), which CAN be handed a zero — the value
+	// this method returns before any batch has landed (#1690).
+	if id, err := result.LastInsertId(); err == nil {
+		idx.firstIDOfLastBatch = id
+	}
 	return n, nil
 }
+
+// FirstIDOfLastBatch reports the event_id of the first row of the most recent
+// successful batch INSERT, or 0 if none has landed in this Indexer's lifetime.
+//
+// It is a LOWER BOUND on every event_id written after that batch, which is the
+// only property the resume-time dedup needs from it (#1690): rows it must
+// delete were all read after the checkpoint, so they were inserted after this
+// batch and carry larger ids. Single-writer per index database, so nothing
+// else can interleave ids.
+//
+// Called from the same goroutine as InsertBatch (streamLoop's select is one
+// goroutine and owns both the flush and the checkpoint), so it needs no lock.
+func (idx *Indexer) FirstIDOfLastBatch() int64 { return idx.firstIDOfLastBatch }
 
 // checkPKValuesLength guards against a PK value that would overflow
 // binlog_events.pk_values (VARCHAR(512), event.MaxPKValuesLen). Without this
@@ -741,6 +771,12 @@ func EnsureSchema(db *sql.DB) error {
 	// parses the saved gtid_set with the correct GTID parser. NOT NULL DEFAULT
 	// 'mysql' means existing rows read back as mysql with no data migration,
 	// keeping every pre-MariaDB install unchanged.
+	if err := ensureColumn(db, "stream_state", "dedup_floor_event_id",
+		`ALTER TABLE stream_state ADD COLUMN dedup_floor_event_id BIGINT UNSIGNED DEFAULT NULL COMMENT 'lower bound on the event_id of every row the next resume-time dedup must delete (#1690), so that DELETE is a PRIMARY range instead of a full scan of binlog_events; NULL = no floor, and both passes run unbounded exactly as before' AFTER capture_skips_ack`,
+	); err != nil {
+		return err
+	}
+
 	if err := ensureColumn(db, "stream_state", "flavor",
 		`ALTER TABLE stream_state ADD COLUMN flavor VARCHAR(16) NOT NULL DEFAULT 'mysql' COMMENT 'source flavor: mysql or mariadb; selects the GTID parser on resume' AFTER gtid_set`,
 	); err != nil {
