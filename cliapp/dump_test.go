@@ -128,6 +128,11 @@ func TestParseMydumperVersion(t *testing.T) {
 		output                          string
 		wantMajor, wantMinor, wantPatch int
 		wantErr                         bool
+		// wantErrContains pins text the refusal must quote back. Without it
+		// the error branch only asserts non-nil, and the deliberate choice to
+		// quote the RAW field rather than the post-strip value is unpinned —
+		// a refactor reporting "ersion" for a "version" field stays green.
+		wantErrContains string
 	}{
 		{
 			name:      "standard_0.10.0",
@@ -140,14 +145,64 @@ func TestParseMydumperVersion(t *testing.T) {
 			wantMajor: 0, wantMinor: 11, wantPatch: 5,
 		},
 		{
-			name:      "standard_0.16.3_with_suffix",
-			output:    "mydumper 0.16.3-6, built against MySQL 8.4.3\n",
+			// Captured from `mydumper --version` in the mydumper/mydumper
+			// v0.16.3-6 image. It used to read "mydumper 0.16.3-6, built
+			// against MySQL 8.4.3" — a shape no binary prints, which made the
+			// "v is a 1.x thing" story look measured when it was not. The real
+			// string carries the prefix, so 0.16.3 was ALSO unreadable before
+			// this fix; the outcome happened to be unchanged there, because
+			// 0.16 is below the flag floor either way.
+			name:      "v_prefixed_0.16.3_with_suffix",
+			output:    "mydumper v0.16.3-6, built against MySQL 8.4.1 with SSL support\n",
 			wantMajor: 0, wantMinor: 16, wantPatch: 3,
 		},
 		{
 			name:      "future_major_1",
 			output:    "mydumper 1.0.0, built against MySQL 9.0.0\n",
 			wantMajor: 1, wantMinor: 0, wantPatch: 0,
+		},
+		{
+			// The shape current releases actually print (#1686). No 1.x build
+			// ever shipped the bare "1.0.0" above, so that case passed all
+			// along while every real 1.x install failed to parse — and a failed
+			// parse is read as "very old mydumper", which skips the privilege
+			// preflight, refuses an explicit --lock-mode and dumps under
+			// heavier locks than the operator asked for.
+			name:      "v_prefixed_1.0.5_with_package_suffix",
+			output:    "mydumper v1.0.5-1, built against MariaDB 10.8.8 with SSL support\n",
+			wantMajor: 1, wantMinor: 0, wantPatch: 5,
+		},
+		{
+			// The build internal/baseline/lockmode.go records its measured
+			// lock-mode findings against, so it has to be readable here.
+			name:      "v_prefixed_pinned_1.0.3",
+			output:    "mydumper v1.0.3-1, built against MySQL 8.4.9 with SSL support\n",
+			wantMajor: 1, wantMinor: 0, wantPatch: 3,
+		},
+		{
+			// The exact floor mydumperSupportsLockMode gates on: no 0.18.0 was
+			// ever released, so 0.18.1 is the first build accepting the flags.
+			name:      "floor_0.18.1",
+			output:    "mydumper 0.18.1, built against MySQL 8.0.36\n",
+			wantMajor: 0, wantMinor: 18, wantPatch: 1,
+		},
+		{
+			// Stripping the "v" must not turn a version-less field into 0.0.0:
+			// mydumperSupportsLockMode would read that as a pre-0.18 build and
+			// proceed against it silently, instead of reporting it unreadable.
+			name:    "bare_v_no_digits",
+			output:  "mydumper v\n",
+			wantErr: true,
+		},
+		{
+			// An unrecognised SHAPE (version not in the second field) must stay
+			// an error rather than be guessed at. runDump now runs the privilege
+			// preflight on exactly this outcome — see
+			// TestRunDumpUnreadableVersionStillChecksPrivileges.
+			name:            "version_not_in_second_field",
+			output:          "mydumper version v1.0.5-1\n",
+			wantErr:         true,
+			wantErrContains: `"version"`,
 		},
 		{
 			name:    "empty_output",
@@ -170,7 +225,11 @@ func TestParseMydumperVersion(t *testing.T) {
 			major, minor, patch, err := parseMydumperVersion(tc.output)
 			if tc.wantErr {
 				if err == nil {
-					t.Errorf("expected error but got %d.%d.%d", major, minor, patch)
+					t.Fatalf("expected error but got %d.%d.%d", major, minor, patch)
+				}
+				if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Errorf("error = %q, want it to quote %s — the refusal must name what mydumper actually printed",
+						err, tc.wantErrContains)
 				}
 				return
 			}
