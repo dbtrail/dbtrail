@@ -17,6 +17,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
+	"github.com/dbtrail/dbtrail/internal/notify"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 )
 
@@ -90,6 +91,60 @@ type baselineSupervisor struct {
 	// tell a refresh that is falling behind from one whose cost is a floor it
 	// settles on. One run cannot tell them apart; see refreshPace (#1693).
 	refreshPaces map[string]refreshPace
+	// foldedMarks is what the last fold of each server saw and left behind
+	// (#1689): how far the index had been written, and when the snapshot it
+	// published is dated. A cycle whose marks match this, and whose published
+	// snapshot is still inside the window the index can fold from, has nothing
+	// to do and does not start.
+	//
+	// Written only by a cycle that read its mark AND finished clean — the error
+	// it checks covers the fold, the snapshot listing and the upload alike, so an
+	// upload failure leaves no memo even though a local snapshot was published.
+	// Every omission costs at most one fold that applies nothing.
+	//
+	// A refusal leaves it alone on purpose: a capture gap or a schema change does
+	// not move the index, so memoizing a refused cycle would silence the retry
+	// AND the refusal with it, and the operator's only standing signal would
+	// vanish.
+	//
+	// In memory, not on disk. The cost of losing it is one fold that applies
+	// nothing after a daemon restart, which corrects itself; persisting it
+	// would add a durable file whose staleness is a new failure of its own.
+	foldedMarks map[string]foldMemo
+	// refreshPrior is the status TriggerRefresh displaced when it claimed a
+	// server's refresh slot, dropped by both of that cycle's normal exits; a
+	// panicking cycle leaves it for the next TriggerRefresh to overwrite (#1689).
+	//
+	// It exists because the claim has to happen BEFORE the cycle knows whether
+	// it has anything to do. Claiming is what makes the single-flight work —
+	// busyLocked reads that slot — and it happens under s.mu, which the gate
+	// cannot run under: the gate opens the index. So the cycle claims first,
+	// and a cycle the gate then skips puts back what it displaced instead of
+	// writing a terminal status for a run that never happened.
+	refreshPrior map[string]*console.BaselineStatus
+	// refreshGateSkips names the claim the #1689 gate last released for each
+	// server, by the Since stamp TriggerRefresh wrote on it.
+	//
+	// It exists for one reader: the backup schedule watches the job it
+	// dispatched and reads the outcome off the refresh slot, so a gated cycle —
+	// which restores the slot instead of writing an outcome — looks to it like
+	// a job whose end nobody saw, and it files a skip blaming another job for
+	// taking the server. The skip is right and the reason is wrong, so what
+	// this carries is the reason.
+	refreshGateSkips map[string]string
+	// gateEdge rate-limits the two things the #1689 gate says about itself, so
+	// a condition that persists for months is one line a day per server rather
+	// than one per cycle. Both are conditions, not events: "I cannot evaluate
+	// this server" and "I am re-anchoring this backup and the fold keeps
+	// refusing" are states, and a daemon at a five-minute interval would print
+	// either of them 288 times a day. That is the shape that teaches an
+	// operator to stop reading the log.
+	gateEdge *notify.Edge
+	// retainInForce reports the retention the operator has CONFIGURED, read
+	// fresh per call so a console edit applies on the next cycle. nil on a
+	// supervisor that does not run rotation, which means no policy cap and the
+	// observed partitions as the only bound. See withinRetentionPolicy.
+	retainInForce func() time.Duration
 }
 
 // newBaselineSupervisor builds a supervisor bound to the daemon context. The
@@ -102,16 +157,20 @@ type baselineSupervisor struct {
 func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode baseline.LockMode) *baselineSupervisor {
 	sweepSQLExportStaging(stagingDir)
 	return &baselineSupervisor{
-		ctx:           ctx,
-		stagingDir:    stagingDir,
-		lockMode:      lockMode,
-		jobs:          make(map[string]*console.BaselineStatus),
-		refreshes:     make(map[string]*console.BaselineStatus),
-		refreshPaces:  make(map[string]refreshPace),
-		restores:      make(map[string]*console.BaselineStatus),
-		exports:       make(map[string]*console.BaselineStatus),
-		exportRuns:    make(map[string]*sqlExportRun),
-		exportOrphans: make(map[string]map[string]string),
+		ctx:              ctx,
+		stagingDir:       stagingDir,
+		lockMode:         lockMode,
+		jobs:             make(map[string]*console.BaselineStatus),
+		refreshes:        make(map[string]*console.BaselineStatus),
+		refreshPaces:     make(map[string]refreshPace),
+		foldedMarks:      make(map[string]foldMemo),
+		refreshPrior:     make(map[string]*console.BaselineStatus),
+		refreshGateSkips: make(map[string]string),
+		gateEdge:         notify.NewEdge(notify.DefaultRepeatEvery),
+		restores:         make(map[string]*console.BaselineStatus),
+		exports:          make(map[string]*console.BaselineStatus),
+		exportRuns:       make(map[string]*sqlExportRun),
+		exportOrphans:    make(map[string]map[string]string),
 	}
 }
 

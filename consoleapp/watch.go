@@ -467,6 +467,12 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
 		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDir())
+		// The retention the #1689 gate bounds a skipped cycle against. Wired
+		// here rather than taken as a constructor argument because it is the
+		// same provider rotation reads, and because a supervisor without one
+		// still works: no policy cap, the observed partitions as the only
+		// bound.
+		baselineSup.retainInForce = retainInForceProvider(registry)
 	}
 	if upConsoleBaselineTrigger {
 		cfg.BaselineCtrl = baselineSup
@@ -689,6 +695,12 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
 		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDir())
+		// The retention the #1689 gate bounds a skipped cycle against. Wired
+		// here rather than taken as a constructor argument because it is the
+		// same provider rotation reads, and because a supervisor without one
+		// still works: no policy cap, the observed partitions as the only
+		// bound.
+		baselineSup.retainInForce = retainInForceProvider(registry)
 	}
 	if upConsoleBaselineTrigger {
 		cfg.BaselineCtrl = baselineSup
@@ -1501,11 +1513,11 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts) (console.Con
 	// the other, and once per process: it is a startup line, not a monitor.
 	composeDriftReporter(indexDSN, opts)
 	return console.Config{
-		DB:              db,
-		DBName:          cfg.DBName,
-		BootDSN:         indexDSN,
-		Listen:          opts.Listen,
-		Token:           opts.Token,
+		DB:      db,
+		DBName:  cfg.DBName,
+		BootDSN: indexDSN,
+		Listen:  opts.Listen,
+		Token:   opts.Token,
 
 		BaselineDir:     opts.BaselineDir,
 		BaselineS3:      opts.BaselineS3,
@@ -1615,6 +1627,15 @@ func rotateTargets(bootDSN string, sup *monitorSupervisor, reg *console.Registry
 // falls back to the defaults with a warning rather than silently disabling
 // rotation. The boot-index/per-source targets are unaffected: this governs the
 // daemon-global retain/interval/add-future only (the loop is one shared ticker).
+// retainInForceProvider exposes just the retention out of the same saved policy
+// rotation reads, for the baseline refresh gate. Read per call, so an edit in
+// the console's rotation panel bounds the very next refresh cycle rather than
+// only taking effect once partitions have already been dropped.
+func retainInForceProvider(reg *console.Registry) func() time.Duration {
+	settings := rotationSettingsProvider(reg)
+	return func() time.Duration { return settings().Retain }
+}
+
 func rotationSettingsProvider(reg *console.Registry) func() rotation.Settings {
 	return func() rotation.Settings {
 		if rc, ok := reg.Rotation(); ok {

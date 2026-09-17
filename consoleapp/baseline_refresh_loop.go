@@ -15,6 +15,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // refreshRequest is one server's periodic baseline refresh.
@@ -62,20 +63,34 @@ type refreshRequest struct {
 // is being written underneath it. ErrBaselineRunning here means "something else
 // is already producing this server's baseline" — the loop skips this tick and
 // tries again at the next one, which is exactly right for a periodic job.
-func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Duration) error {
+// It returns the Since stamp it claimed the slot with, which is how a caller
+// identifies the job it just started. Returned rather than read back off the
+// slot afterwards: the cycle runs in its own goroutine and a cycle the #1689
+// gate skips RESTORES the slot, so by the time a caller looked the stamp could
+// already be the previous job's — and which one it saw would depend on how
+// long the gate's index read took. The empty string comes back with an error.
+func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Duration) (string, error) {
 	s.mu.Lock()
 	if s.busyLocked(req.ServerID) {
 		s.mu.Unlock()
-		return console.ErrBaselineRunning
+		return "", console.ErrBaselineRunning
 	}
 	at := time.Now().UTC()
-	s.refreshes[req.ServerID] = &console.BaselineStatus{State: "running", Since: nowStamp(),
+	since := nowStamp()
+	// Saved before it is overwritten, so a cycle the #1689 gate skips can put
+	// it back exactly. It can never itself be "running": busyLocked above just
+	// refused this trigger if it were, so restoring it cannot leave the slot
+	// claimed. See releaseRefreshSlot.
+	s.refreshPrior[req.ServerID] = s.refreshes[req.ServerID]
+	// A new cycle, so any earlier gate skip stops speaking for this server.
+	delete(s.refreshGateSkips, req.ServerID)
+	s.refreshes[req.ServerID] = &console.BaselineStatus{State: "running", Since: since,
 		At: at.Format(time.RFC3339)}
 	s.mu.Unlock()
 
 	slog.Info("baseline refresh: starting", "server", req.ServerName, "id", req.ServerID)
 	go s.runRefresh(req, at, interval)
-	return nil
+	return since, nil
 }
 
 // RefreshStatus reports the last periodic refresh for a server.
@@ -112,14 +127,70 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// sits on the near side of the `go` in TriggerRefresh, so it guards the
 	// dispatch and not the fold. See recoverBaselineJob.
 	defer s.recoverBaselineJob(baselineJobRefresh, req.ServerID, req.ServerName)
-	// Read and REMOVED in one step, before anything here can fail. Every exit
-	// that publishes nothing has to leave no sample behind, and the refusal
-	// branch is not the only such exit: the deferred recover above catches a
-	// panic in THIS goroutine's own frames (#1472) and unwinds past the store
-	// at the end of this function, which would leave the previous run's sample
-	// standing. The next published run would then compare against it over a
-	// window that grew because something crashed. Taking the sample out here
-	// and putting one back only on publish means no exit has to remember.
+	// Every cycle, even one the gate below is about to skip: a staging
+	// directory a killed daemon left behind is invisible to every listing, so
+	// nothing else will ever mention it, and a server whose cycles all skip
+	// would keep it forever. Moved above the gate for exactly that reason.
+	sweepDiscardedSnapshots(req)
+
+	// #1689: a cycle with nothing to fold does not start.
+	//
+	// Asked before anything that leaves a trace of THIS cycle: a claimed
+	// directory, a pace sample taken, a run recorded, a status written. A quiet
+	// cycle leaves none of them, which is why no surface has to learn about a
+	// third kind of outcome. The sweep just above is the deliberate exception —
+	// it reclaims a PREVIOUS run's leftovers, so it has to run even on a cycle
+	// that will not.
+	//
+	// Not folding is the only thing this decides. It publishes nothing and
+	// refuses nothing, and the next cycle with something in it behaves exactly
+	// as before. It does SAY so: at Info here, and as the schedule's own skip
+	// reason.
+	mark, known := readIndexMark(s.ctx, req.IndexDSN)
+	s.reportGateBlind("mark", known, req,
+		"cannot tell whether anything has been indexed, so every cycle folds; this server is not "+
+			"being skipped and will not be until the index answers")
+	if known && s.refreshCanSkip(s.ctx, req, mark, time.Now().UTC()) {
+		// FIRST, before the log line and before anything can return early
+		// around it: until this runs, this server's dump, restore and SQL
+		// export are all refused as well.
+		// Every cycle, deliberately NOT rate-limited like the two lines the gate
+		// uses to describe conditions. A skipped cycle writes no run record, no
+		// status and no history entry — that invisibility is the design — so on
+		// the daemon-wide interval loop this line is the only evidence the loop
+		// is alive at all. Silence it and "this server has nothing to do" and
+		// "the refresh loop died three weeks ago" become the same picture, with
+		// the Backups page showing a successful run from before either.
+		slog.Info("baseline refresh: nothing has been indexed since the last fold; skipping this cycle",
+			"server", req.ServerName, "id", req.ServerID)
+		// LAST, so that releasing the slot is the last thing this cycle does.
+		// The slot going terminal is what every observer waits on — the backup
+		// schedule's watcher, the console's poll, the next tick's busyLocked —
+		// and anything after it means a cycle can still be writing output, or
+		// still reading a seam, after it has announced it is finished. It cost
+		// a day of flaky tests to learn that the announcement has to come last.
+		// The delay this adds to the release is one log line.
+		s.releaseRefreshSlot(req.ServerID)
+		return
+	}
+
+	// Read and REMOVED in one step, before anything below can fail. Every exit
+	// that FOLDED and published nothing has to leave no sample behind, and the
+	// refusal branch is not the only such exit: the deferred recover above
+	// catches a panic in THIS goroutine's own frames (#1472) and unwinds past
+	// the store at the end of this function, which would leave the previous
+	// run's sample standing. The next published run would then compare against
+	// it over a window that grew because something crashed. Taking the sample
+	// out here and putting one back only on publish means no exit has to
+	// remember.
+	//
+	// The #1689 gate's early return is deliberately NOT one of those exits, and
+	// that is why this sits below it rather than above: a skipped cycle never
+	// folded, so the standing sample still describes the last real fold and is
+	// the right thing to compare the next one against. It does mean the older
+	// invariant — that the only way a sample survives is for a run to publish —
+	// no longer holds.
+	//
 	// A panic inside one of the fold's per-table goroutines is a different
 	// shape and needs nothing here: recoverTableFold turns it into an ordinary
 	// table failure, so it arrives as an error and leaves by the refusal
@@ -133,10 +204,6 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// move the number this change exists to get right, in either direction.
 	// started stays for the RFC3339 stamp, which wants the wall clock.
 	elapsed := time.Now()
-	// Every cycle, not only a failing one: a staging directory a killed daemon
-	// left behind is invisible to every listing, so nothing else will ever
-	// mention it, and a server whose refusals stopped would keep it forever.
-	sweepDiscardedSnapshots(req)
 	// Asked BEFORE the fold, and it has to be: the question is whether the
 	// snapshot directory holds anything this run did not write, and once the
 	// fold has run its own files are in there too. See claimSnapshotDir.
@@ -197,9 +264,38 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.refreshes[req.ServerID]
-	if st == nil { // defensive; never cleared under lock
+	if st == nil { // defensive; the single-flight means this cycle's own claim is still here
 		st = &console.BaselineStatus{}
 		s.refreshes[req.ServerID] = st
+	}
+	// This cycle is writing its own terminal status, so the one it displaced is
+	// of no further use. Dropped under the same lock that stored it.
+	delete(s.refreshPrior, req.ServerID)
+	if err == nil && known {
+		// Memoized under the same lock that publishes the status, and only on
+		// the branch where the fold succeeded. The mark stored is the one read
+		// BEFORE the fold: an event indexed WHILE it ran was not folded, and
+		// storing the later value would skip it forever.
+		//
+		// That invariant holds for the fold's DURATION and NOT for the sliver
+		// before it. `at` is stamped in TriggerRefresh and is the fold's cut;
+		// the mark is read further down, after the staging sweep and two
+		// queries. Anything indexed in between is above the cut, so it was not
+		// folded, and it IS in the mark — the gate will count it as done. On a
+		// server where nothing else is ever indexed that defers the next
+		// cycle's work until the coverage question opens the gate, which at the
+		// default retention is up to 24 days. Nothing is lost: the deltas stay
+		// in the index and the next fold's window still starts at the previous
+		// snapshot's instant, so they are folded whenever a cycle does run.
+		// What is deferred is the WARNING a TRUNCATE in that sliver would have
+		// produced, since it writes a schema_changes row and no row event.
+		// Fixing it means anchoring the cut after the mark read instead of
+		// before; that is a wider change than this one and is filed separately.
+		// at, not time.Now(): it is the instant that NAMES the published
+		// snapshot directory, and the directory instant is the one the next
+		// fold's window starts from.
+		s.foldedMarks[req.ServerID] = foldMemo{mark: mark, publishedAt: at,
+			destination: refreshDestination(req), indexDSN: req.IndexDSN}
 	}
 	applyFoldStatus(st, tables, refused, reuse, err)
 	if err != nil {
@@ -390,6 +486,186 @@ func newestSnapshotOf(files []reconstruct.BaselineFile) (time.Time, map[string]s
 // A sentinel, not a message match: the verdict must not depend on wording that
 // an edit to a string can change.
 var errSnapshotNotUploaded = errors.New("the snapshot was not sent to the backup destination")
+
+// refreshCanSkip reports whether this cycle can be skipped in its entirety
+// (#1689). Both questions have to answer yes:
+//
+//  1. Nothing has been indexed since the last fold, so no table has anything to
+//     apply. A server with no remembered mark fails this one — the daemon may
+//     have restarted, and what the index holds relative to the newest snapshot
+//     is unknown here.
+//  2. The snapshot that fold published is still inside the window the index can
+//     fold from, so not republishing it costs nothing later.
+//
+// The order is the cheap question first: the second one goes back to the index,
+// and it is only worth asking about a cycle that would otherwise be skipped.
+//
+// Not folding is the only thing this decides. It publishes nothing and refuses
+// nothing — the cycle produces no snapshot, no run record and no status — and
+// the next cycle that answers no to either question behaves exactly as it did
+// before this gate existed. It does say so: at Info below, and as the backup
+// schedule's own skip reason.
+func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequest, mark indexMark, now time.Time) bool {
+	s.mu.Lock()
+	prev, seen := s.foldedMarks[req.ServerID]
+	s.mu.Unlock() // released BEFORE the index read below: s.mu is the lock every baseline job takes to start.
+	if !seen || prev.indexDSN != req.IndexDSN || prev.destination != refreshDestination(req) ||
+		!mark.unchangedSince(prev.mark) {
+		return false
+	}
+	// Two bounds, answering the same question from opposite ends: the observed
+	// one asks what the index still HOLDS, the policy one what the operator has
+	// told it to hold. A skip needs both.
+	covered, known := snapshotStillCovered(ctx, req.IndexDSN, prev.publishedAt, now)
+	covered = covered && s.withinRetentionPolicy(prev.publishedAt, now)
+	s.reportGateBlind("coverage", known, req,
+		"cannot tell how far the index still reaches, so every cycle folds; this server is not "+
+			"being skipped and will not be until the index answers")
+	if !known {
+		return false
+	}
+	if !covered {
+		// Said out loud, because an operator who was told this daemon skips
+		// quiet servers has to be able to see why this one did not — otherwise
+		// a fold on an idle server reads as the gate being broken. Behind an
+		// edge because it is a CONDITION: the memo only advances on a fold that
+		// finishes clean, so a re-anchoring fold that keeps refusing leaves this
+		// true every cycle, forever, and the line would say "folding to
+		// re-anchor it" while the re-anchoring fails each time.
+		//
+		// Deliberately not "aging out": this fires on every verdict that is not
+		// OK, which includes a backup already PAST the floor and one that could
+		// not be graded at all.
+		if s.gateEdge.Fire("reanchor:"+req.ServerID, prev.publishedAt.UTC().Format(time.RFC3339)) {
+			slog.Info("baseline refresh: nothing has been indexed, but the last backup is no longer "+
+				"safely inside the window the index still covers; folding to re-anchor it",
+				"server", req.ServerName, "id", req.ServerID,
+				"last_backup", prev.publishedAt.UTC().Format(time.RFC3339))
+		}
+		return false
+	}
+	s.gateEdge.Resolve("reanchor:" + req.ServerID)
+	return true
+}
+
+// withinRetentionPolicy bounds the skip against the retention the operator has
+// CONFIGURED, not only against the partitions that happen to exist right now.
+//
+// The observed floor is an observation of a policy, and the policy can change
+// under it in a step. The console's rotation panel writes a new retain, the
+// setting is read fresh on the next rotation tick, and rotation drops every
+// newly-expired partition in ONE statement. Going from 30 days to 7 — the most
+// ordinary reason anyone touches that setting — drops 23 days of partitions at
+// once, so a snapshot that graded ok on one cycle grades broken on the next,
+// never passing through the aging verdict the keepalive waits for. Same failure
+// as grading against the archive-extended floor, through a setting on the same
+// page as the ones that comment rules out.
+//
+// Asked against the POLICY because the policy acts BEFORE the drop. A refresh
+// cycle between the save and the next rotation tick already sees the new retain,
+// re-anchors, and is comfortably inside the window by the time the partitions
+// go. Detecting the step afterwards is too late by construction: the cycle that
+// notices is the cycle whose fold refuses.
+//
+// The same 0.8 band, so the two bounds cannot disagree about where aging starts.
+// A retain of zero means rotation is off or unreadable — nothing is being
+// dropped on a clock, so the policy has nothing to say and the observed floor is
+// the whole answer.
+func (s *baselineSupervisor) withinRetentionPolicy(publishedAt, now time.Time) bool {
+	if s.retainInForce == nil {
+		return true
+	}
+	retain := s.retainInForce()
+	if retain <= 0 {
+		return true
+	}
+	return now.Sub(publishedAt) < time.Duration(float64(retain)*status.BaselineAgingFraction)
+}
+
+// reportGateBlind says, at most once a day per server, that the gate cannot
+// answer one of its two questions — and resolves the condition when it can
+// again.
+//
+// At Warn, and this is the whole point of it. Failing toward folding is safe,
+// so nothing is lost; what IS lost is the feature, permanently and with no
+// symptom. Several of the reads that produce this are permanent rather than
+// transient — a missing SELECT grant, an index too old to have the table, an
+// unparseable archive row — and the operator was told this daemon skips quiet
+// servers. Folding every cycle on an idle one then reads as the gate being
+// broken, and the one line that explains it would be at Debug, which the
+// default log level does not print.
+func (s *baselineSupervisor) reportGateBlind(question string, known bool, req refreshRequest, why string) {
+	key := "gate-blind:" + question + ":" + req.ServerID
+	if known {
+		s.gateEdge.Resolve(key)
+		return
+	}
+	if s.gateEdge.Fire(key, "") {
+		slog.Warn("baseline refresh: "+why, "server", req.ServerName, "id", req.ServerID,
+			"question", question)
+	}
+}
+
+// refreshDestination names where a cycle would put what it publishes: the local
+// directory and the bucket together. It is the memo's identity alongside the
+// index, because a fold that reached one destination says nothing about another.
+func refreshDestination(req refreshRequest) string {
+	return req.BaselineDir + "\x00" + req.BaselineS3
+}
+
+// releaseRefreshSlot puts a server's refresh status back the way TriggerRefresh
+// found it, for a cycle that decided not to run (#1689).
+//
+// This is what lets the gate live inside the cycle's own goroutine. The slot is
+// claimed as "running" before the gate can ask its question, and "running" is
+// what busyLocked reads to refuse a SECOND baseline job on that server — not
+// just the next refresh, but the manual backup, the point-in-time restore and
+// the SQL export, which all share one single-flight. A cycle that returns
+// without writing a terminal status leaves that claim standing for the life of
+// the process: every baseline job on that server stops, and nothing but a
+// daemon restart clears it. That is a worse outage than the wasted fold this
+// gate exists to avoid, and it is invisible — the next tick reports only that a
+// refresh is already running, which reads as a refresh that is taking too long.
+//
+// It RESTORES rather than invents. Writing "succeeded" would mark a run that
+// never happened as published (applyFoldStatus sets Published, which suppresses
+// the schedule's fall-back), and any new value would be the third outcome this
+// whole design exists to avoid. The previous status is the truthful answer:
+// nothing has happened since the last run, so the last run is still the news.
+//
+// With nothing remembered the slot is CLEARED, which reads as idle — the state
+// a server that has never refreshed is already in. The fallback is deliberately
+// not "leave it alone": the invariant is that no exit from here leaves
+// "running" standing, and it has to hold on every path that reaches this
+// function, including one that did not come through TriggerRefresh.
+func (s *baselineSupervisor) releaseRefreshSlot(serverID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Read off the claim BEFORE it is replaced: it is what identifies this
+	// cycle to the backup schedule, which dispatched it and is watching.
+	if claim := s.refreshes[serverID]; claim != nil {
+		s.refreshGateSkips[serverID] = claim.Since
+	}
+	if prior := s.refreshPrior[serverID]; prior != nil {
+		s.refreshes[serverID] = prior
+	} else {
+		delete(s.refreshes, serverID)
+	}
+	delete(s.refreshPrior, serverID)
+}
+
+// refreshSkippedAsUnchanged reports whether the cycle claimed at this exact
+// Since was the one the gate skipped for having nothing to fold.
+//
+// By the claim's own stamp, not just by server: the slot is shared with manual
+// jobs, and answering "yes" about a DIFFERENT cycle would attribute one job's
+// silence to another's.
+func (s *baselineSupervisor) refreshSkippedAsUnchanged(serverID, since string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	got, ok := s.refreshGateSkips[serverID]
+	return ok && since != "" && got == since
+}
 
 // foldPublished reports whether a finished fold left a complete snapshot in the
 // server's local directory, which is true both when the run fully succeeded and
@@ -1508,7 +1784,7 @@ func runBaselineRefreshCycle(ctx context.Context, reg *console.Registry, sup *ba
 		return dispatched, skipped, carry
 	}
 	for _, req := range refreshTargetsWith(reg, globalDSN, globalBaselineDir, carry) {
-		switch err := sup.TriggerRefresh(req, interval); {
+		switch _, err := sup.TriggerRefresh(req, interval); {
 		case err == nil:
 			dispatched++
 		case errors.Is(err, console.ErrBaselineRunning):

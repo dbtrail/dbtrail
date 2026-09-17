@@ -466,10 +466,11 @@ func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBa
 	// refreshOnTime is gated on took exceeding it. Note the remedy the
 	// warning offers is NOT always this setting; a refresh whose cost is
 	// rising with its window is not fixed by any `every`. See gradeRefresh.
-	if err := b.sup.TriggerRefresh(req, p.Every); err != nil {
+	since, err := b.sup.TriggerRefresh(req, p.Every)
+	if err != nil {
 		return err
 	}
-	b.record(e, console.BackupMethodRefresh, stamp, b.sup.RefreshStatus(e.ID).Since, false, "")
+	b.record(e, console.BackupMethodRefresh, stamp, since, false, "")
 	return nil
 }
 
@@ -557,6 +558,25 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 			return
 		}
 		if st.Last == nil {
+			// A cycle the #1689 gate skipped leaves no outcome on the slot,
+			// deliberately: it restores what it displaced rather than
+			// reporting a run that never happened. To the branch below that
+			// reads exactly like a job whose end nobody saw, and the skip it
+			// files would name another job as the cause. The slot IS
+			// unproduced and a skip is the right record; only the reason
+			// differs, and on a quiet server this is the reason every period.
+			b.mu.Lock()
+			since := b.started[e.ID].since
+			b.mu.Unlock()
+			// Guarded on the method as well as the stamp. A scheduled FULL
+			// backup reads a different slot, so a stale gate-skip entry could
+			// otherwise explain a dump with "nothing had been indexed". Not
+			// reachable today; it costs nothing to make it structural.
+			if method == console.BackupMethodRefresh && b.sup.refreshSkippedAsUnchanged(e.ID, since) {
+				b.skip(e, time.Now().UTC(), "nothing had been indexed since the last backup, so this "+
+					"slot had nothing to add to it")
+				return
+			}
 			b.skip(e, time.Now().UTC(), "another backup job took the server before the scheduled "+jobNoun(method)+
 				" was seen finishing, so no full backup could stand in for it; its result is in the run history unless it crashed")
 			return

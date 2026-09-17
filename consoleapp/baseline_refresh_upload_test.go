@@ -90,6 +90,11 @@ func runRefreshFor(t *testing.T, req refreshRequest) (string, console.BaselineSt
 // uploaded — and it is the shape that used to make this refuse with "no
 // baseline snapshot to refresh" while the console listed dozens.
 func TestRunRefresh_S3BackedServerFoldsFromTheBucketAndUploads(t *testing.T) {
+	// These assert a warning-free refresh, and their index DSN is a placeholder
+	// that cannot be opened — so without this the #1689 gate correctly warns
+	// that it cannot evaluate this server. Stubbed rather than tolerated: the
+	// warning is right, and a test that accepts it stops noticing a real one.
+	stubGateReads(t)
 	local := t.TempDir()
 	uploads, listed := stubS3Fold(t, []string{"shop.orders"}, nil)
 	injectFold(t, 0, nil)
@@ -122,6 +127,11 @@ func TestRunRefresh_S3BackedServerFoldsFromTheBucketAndUploads(t *testing.T) {
 // runRefresh that stores the resolved source leaves TestResolveFoldSource
 // green and turns this red.
 func TestRunRefresh_readsTheLocalCopyWhenItIsTheBucketsNewest(t *testing.T) {
+	// These assert a warning-free refresh, and their index DSN is a placeholder
+	// that cannot be opened — so without this the #1689 gate correctly warns
+	// that it cannot evaluate this server. Stubbed rather than tolerated: the
+	// warning is right, and a test that accepts it stops noticing a real one.
+	stubGateReads(t)
 	local := stageBaselineRoot(t)
 	uploads, _ := stubS3Fold(t, []string{"shop.orders"}, nil)
 	realLB := listBaselines
@@ -167,6 +177,11 @@ func TestRunRefresh_readsTheLocalCopyWhenItIsTheBucketsNewest(t *testing.T) {
 // point of gating on the request's own field rather than on a mode: the flag
 // documents that its snapshots stay local.
 func TestRunRefresh_withoutAnS3DestinationUploadsNothing(t *testing.T) {
+	// These assert a warning-free refresh, and their index DSN is a placeholder
+	// that cannot be opened — so without this the #1689 gate correctly warns
+	// that it cannot evaluate this server. Stubbed rather than tolerated: the
+	// warning is right, and a test that accepts it stops noticing a real one.
+	stubGateReads(t)
 	uploads, _ := stubS3Fold(t, nil, nil)
 	injectFold(t, 0, nil)
 
@@ -190,6 +205,9 @@ func TestRunRefresh_withoutAnS3DestinationUploadsNothing(t *testing.T) {
 // local snapshot (it is finished, and it is the operator's whole remaining
 // result), and a report that says the fold worked and the sending did not.
 func TestRunRefresh_failedUploadFailsTheRunAndKeepsTheSnapshot(t *testing.T) {
+	// Asserts on a Warn buffer, so the gate's own "cannot evaluate this server"
+	// warning must not be able to satisfy it. Its DSN is a placeholder.
+	stubGateReads(t)
 	local := t.TempDir()
 	_, _ = stubS3Fold(t, []string{"shop.orders"}, errors.New("AccessDenied"))
 	injectFold(t, 0, nil)

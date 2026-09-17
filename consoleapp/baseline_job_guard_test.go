@@ -102,10 +102,11 @@ func TestBaselineJobGoroutines_survivePanicAndReportFailure(t *testing.T) {
 			name:   "refresh",
 			inject: injectFoldPanic,
 			trigger: func(sup *baselineSupervisor, serverID, dir string) error {
-				return sup.TriggerRefresh(refreshRequest{
+				_, err := sup.TriggerRefresh(refreshRequest{
 					ServerID: serverID, ServerName: "srv", IndexDSN: "u:p@tcp(127.0.0.1:3306)/idx",
 					BaselineDir: dir,
 				}, time.Hour)
+				return err
 			},
 			read: func(sup *baselineSupervisor, serverID string) console.BaselineStatus {
 				return sup.RefreshStatus(serverID)
