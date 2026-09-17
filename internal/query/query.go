@@ -251,11 +251,10 @@ type Options struct {
 	//
 	// UNLIKE UntilPos, SincePos does not merely refine the paired Since time
 	// bound — it REPLACES its exact-filter role. When SincePos is set, buildQuery
-	// drops the exact `event_timestamp >= ?` filter and widens Since's coarse
-	// TO_SECONDS partition-pruning hint by one extra hour of lookback (see
-	// buildQuery), because that hint is keyed on the very execution-time column
-	// whose skew this field exists to route around — a too-tight time hint could
-	// prune away the very partition holding the row this field is meant to
+	// drops the exact filter and widens Since's coarse lower bound by one extra
+	// hour of lookback (see buildQuery), because that bound is keyed on the very
+	// execution-time column whose skew this field exists to route around — a
+	// too-tight time bound could exclude the very row this field is meant to
 	// recover. The exact correctness gate is the position comparison alone.
 	// nil = no position bound; older baselines that never recorded one fall back
 	// to the plain Since time filter.
@@ -572,9 +571,14 @@ func DigestCaptureInWindow(ctx context.Context, db *sql.DB, opts Options) (bool,
 		where = append(where, "table_name = ?")
 		args = append(args, opts.Table)
 	}
-	// Hour-aligned TO_SECONDS literals for partition pruning, same as
-	// buildQuery: a parameterised datetime comparison prunes nothing, and
-	// pruning is the entire cost control here.
+	// Hour-aligned TO_SECONDS literals, inherited from buildQuery. WARNING,
+	// measured on MySQL 8.0.46 and 8.4.9 (#1689): a TO_SECONDS(col) >= n
+	// predicate prunes NO partitions — MySQL matches a pruning predicate against
+	// the partitioning COLUMN, not against the partitioning FUNCTION — while a
+	// plain comparison does. These two lines are this probe's only bounds and
+	// neither prunes, so the partition scan the doc comment above warns about is
+	// currently unbounded. Adding the plain comparisons beside them is #1692's
+	// pass, not this change.
 	if opts.Since != nil {
 		where = append(where, fmt.Sprintf("TO_SECONDS(event_timestamp) >= %d", mysqlToSeconds(opts.Since.Truncate(time.Hour))))
 	}
@@ -735,15 +739,89 @@ func buildQuery(opts Options) (string, []any) {
 			// its binlog position) after it can have its row physically stored
 			// in an EARLIER partition than the anchor's own hour. See
 			// SincePos's doc comment.
-			outerSince := mysqlToSeconds(since.Truncate(time.Hour).Add(-time.Hour))
-			where = append(where, fmt.Sprintf("TO_SECONDS(event_timestamp) >= %d", outerSince))
-			// Deliberately no exact `event_timestamp >= ?` filter here — see
-			// SincePos.
+			//
+			// Spelled as a PLAIN COLUMN COMPARISON, not TO_SECONDS(col) >= n,
+			// and that is the whole of #1689's second half. The two admit
+			// exactly the same rows HERE, and the reason is narrower than it
+			// looks — and it is about the FLOOR, not about the column.
+			// TO_SECONDS returns an integer, so the function form compares
+			// SECONDS while this one compares the full value, and the integer
+			// was built by mysqlToSeconds, which is t.UTC().Unix() and DISCARDS
+			// any fraction. A floor of 14:00:00.5 therefore becomes 14:00:00 on
+			// the function side and stays 14:00:00.5 here: the function form
+			// would admit a 14:00:00 row and this one would not.
+			// event_timestamp is DATETIME(0) today so no stored value carries a
+			// fraction, but that is not what makes this safe. What makes it safe
+			// is that the floor is INTEGER-SECOND ALIGNED, which
+			// Truncate(time.Hour) below guarantees — an argument that holds for
+			// a DATETIME(n>0) column too, so it survives a precision change.
+			//
+			// TWO INDEPENDENT RULES, do not merge them. (1) The two spellings
+			// agree only while the floor is second-aligned; un-aligning it makes
+			// this a change to the window rather than a restatement. (2) #797
+			// forbids tightening this floor AT ALL, aligned or not — the extra
+			// hour of lookback IS the margin, and anything tighter drops the
+			// execute-before / commit-after transaction this branch exists to
+			// catch. An aligned tightening satisfies (1) and still breaks (2).
+			//
+			// Bound as a parameter, so the driver renders it in the connection's
+			// location; config.Connect pins that to UTC, which is what makes it
+			// safe. Note precisely what changed: the TO_SECONDS literal this
+			// replaces was built by mysqlToSeconds, which forces t.UTC(), so
+			// this bound used to be immune to a non-UTC loc and no longer is.
+			// Under a caller that builds its own *sql.DB with a non-UTC loc the
+			// PARAMETERS in this statement shift and the inlined TO_SECONDS
+			// literals do not, so the two would describe different windows and
+			// AND together; the Parquet leg's floor
+			// (parquetquery.sinceLowerBoundHint) would not shift with either.
+			// The harmful direction is a zone AHEAD of UTC: it renders the floor
+			// as a LATER wall clock, which moves the bound up and drops rows —
+			// the excluding direction #797's extra hour exists to prevent. A
+			// zone behind UTC only over-includes. No test can see this: the
+			// integration DSN carries no loc=, so every fixture connection is
+			// UTC by construction.
+			//
+			// Wrapping the column in a function costs the
+			// optimizer both of the things this bound exists to give it: it
+			// cannot seek idx_row_lookup (schema_name, table_name,
+			// event_timestamp) to the floor, so the range is bounded on the
+			// UPPER side only and the scan starts at the table's first indexed
+			// entry; and it prunes no partitions, which leaves the plain
+			// `event_timestamp <= ?` from the Until block as the only predicate
+			// that does. So the opened set is every retained partition from the
+			// OLDEST one up through until's hour — not the window's, and on an
+			// index keeping a week of hourly partitions that is ~168 of them.
+			//
+			// Measured on MySQL 8.0.46 and 8.4.9, same on both, in two parts.
+			// Pruning, on the four-hour fixture in
+			// lowerbound_1689_integration_test.go: the function form opens 4 of
+			// 4, this form opens 2, same result set — and that test EXPLAINs the
+			// prepared form, so it also pins that a parameter prunes and the
+			// value needs no inlining. Range bounding was measured separately,
+			// on a plan that chooses idx_row_lookup (the production EXPLAIN in
+			// #1689): the function form leaves the range bounded above only,
+			// this form bounds both. No test pins that half; the integration
+			// test says why it declines to.
+			floor := since.Truncate(time.Hour).Add(-time.Hour)
+			where = append(where, "event_timestamp >= ?")
+			args = append(args, floor)
+			// Still deliberately NOT the exact Since instant — see SincePos.
+			// This is a restatement of the same coarse floor in a form the
+			// index can use, never a tightening of it.
 		} else {
-			// Add an hour-aligned lower bound as a TO_SECONDS integer literal so
-			// MySQL can prune to the correct partition(s) at parse time. This hint
-			// is always required — MySQL cannot infer partition pruning from
-			// parameterised datetime comparisons, even when the value is hour-aligned.
+			// The exact filter below is what bounds this branch; the
+			// hour-aligned TO_SECONDS literal beside it is inherited and, on
+			// the supported versions, inert. Measured on MySQL 8.0.46 and
+			// 8.4.9 (#1689): a TO_SECONDS(col) >= n predicate prunes NO
+			// partitions, while the plain `event_timestamp >= ?` on the next
+			// line prunes them correctly, parameter or not. The claim this
+			// comment used to carry — that MySQL cannot prune from a
+			// parameterised datetime comparison — is false on both. The
+			// literal is left in place here rather than removed in this change:
+			// this branch serves every caller that sets Since without a
+			// SincePos, which is all of them but the baseline-anchored fetch
+			// above (a Since-less fetch reaches neither branch), so retiring the
+			// inherited hints is its own pass (#1692).
 			outerSince := mysqlToSeconds(since.Truncate(time.Hour))
 			where = append(where, fmt.Sprintf("TO_SECONDS(event_timestamp) >= %d", outerSince))
 			where = append(where, "event_timestamp >= ?")
@@ -805,13 +883,16 @@ func buildQuery(opts Options) (string, []any) {
 		args = append(args, opts.EventAnchor.Timestamp, opts.EventAnchor.EventID)
 	}
 	if opts.AfterEvent != nil {
-		// Hour-aligned TO_SECONDS literal so MySQL can prune partitions at parse
-		// time, exactly like the Since/Until hints above — a parameterised
-		// datetime comparison alone prunes nothing. Safe by construction: every
-		// row still to be returned sorts at-or-after the cursor, so its
-		// event_timestamp is >= the cursor's, and flooring to the hour only
-		// widens that. As the cursor advances across pages this hint tightens
-		// with it, so later pages scan fewer partitions rather than more.
+		// Hour-aligned TO_SECONDS literal, inherited from the Since/Until hints
+		// above. Safe by construction: every row still to be returned sorts
+		// at-or-after the cursor, so its event_timestamp is >= the cursor's, and
+		// flooring to the hour only widens that.
+		//
+		// Later pages DO scan fewer partitions rather than more, but not because
+		// of this literal: measured on 8.0 and 8.4 (#1689) a TO_SECONDS(col)
+		// predicate prunes nothing, so the tightening comes from the plain
+		// `event_timestamp > ?` keyset cut below. Retiring the literal is
+		// #1692's pass.
 		outerAfter := mysqlToSeconds(opts.AfterEvent.Timestamp.Truncate(time.Hour))
 		where = append(where, fmt.Sprintf("TO_SECONDS(event_timestamp) >= %d", outerAfter))
 		// The exact keyset cut on the composite sort key. Kept as a separate
