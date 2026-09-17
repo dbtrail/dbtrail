@@ -245,16 +245,28 @@ func runDump(cmd *cobra.Command, args []string) error {
 		return lmErr
 	}
 	supportsLockMode := true
+	// knownOldMydumper is true ONLY when the --version probe ANSWERED and named
+	// a build below the floor. It is deliberately not the negation of
+	// supportsLockMode: that flag also drops when the version could not be read
+	// at all, and the two states carry opposite evidence — one is "this build is
+	// old", the other is "we know nothing about this build". The privilege
+	// preflight below is the caller that must tell them apart (#1686).
+	knownOldMydumper := false
+	// Kept so a refusal can quote the REASON the version is unknown instead of
+	// blaming an age nothing measured.
+	var versionErr error
 	if res.mode == dumpModeLocal {
 		major, minor, patch, verErr := mydumperVersion(res.path)
 		if verErr != nil {
 			slog.Warn("could not determine mydumper version; omitting --sync-thread-lock-mode and --trx-tables for safety",
 				"error", verErr)
 			supportsLockMode = false
+			versionErr = verErr
 		} else if !mydumperSupportsLockMode(major, minor) {
 			slog.Warn("mydumper version is older than 0.18; omitting --sync-thread-lock-mode and --trx-tables — the dump may hold heavier locks",
 				"version", fmt.Sprintf("%d.%d.%d", major, minor, patch))
 			supportsLockMode = false
+			knownOldMydumper = true
 		}
 	}
 	// Refuse rather than silently ignore an explicit choice. Dropping the flag
@@ -264,9 +276,26 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// FTWRL needs, or no-lock because they knowingly accept skew. Honouring
 	// neither while reporting success is the silent-wrong-answer this whole
 	// change exists to remove.
+	//
+	// The refusal splits by the SAME evidence the preflight below uses (#1686).
+	// One message for both states asserted "this build does not accept
+	// --sync-thread-lock-mode" about a binary whose version was never read —
+	// which is how a modern mydumper came to be told it needed an upgrade. It
+	// also matters that the preflight's own refusals offer `--lock-mode <mode>`
+	// as the way out: an operator who takes that advice lands HERE, so this
+	// text is the second half of that conversation and has to say something
+	// true about why the flag cannot be sent.
 	if !supportsLockMode && cmd.Flags().Changed("lock-mode") {
-		return fmt.Errorf("--lock-mode %s needs mydumper 0.18 or newer (this build does not accept --sync-thread-lock-mode); "+
-			"upgrade mydumper, or point --mydumper-image at a newer pinned image", lockMode)
+		if knownOldMydumper {
+			return fmt.Errorf("--lock-mode %s needs mydumper 0.18 or newer (this build does not accept --sync-thread-lock-mode); "+
+				"upgrade mydumper, or point --mydumper-image at a newer pinned image", lockMode)
+		}
+		// Deliberately NOT suggesting --mydumper-image: reaching Docker mode
+		// requires NO mydumper on $PATH (see resolveMydumper), so an operator
+		// who got here through a local binary cannot act on it.
+		return fmt.Errorf("--lock-mode %s cannot be honored: this mydumper's version could not be read (%w), so "+
+			"--sync-thread-lock-mode is not being sent and mydumper would choose its own sync mode rather than %s. "+
+			"Point --mydumper-path at a build whose --version this release can read", lockMode, versionErr, lockMode)
 	}
 	// Probe privileges BEFORE launching mydumper. Granting BACKUP_ADMIN without
 	// RELOAD/FLUSH_TABLES does not make mydumper fail cleanly — the pinned build
@@ -274,8 +303,28 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// reported. This check used to live only on the console because the CLI
 	// always passed NO_LOCK and could not reach the crash; #1377 made the
 	// point-consistent mode the default here too, so the guard has to come
-	// with it. Skipped when the flag is not being sent at all.
-	if supportsLockMode && lockMode.NeedsElevatedPrivileges() {
+	// with it.
+	//
+	// Gated on knownOldMydumper, NOT on supportsLockMode (#1686). An UNREADABLE
+	// version used to skip this, which inverted the guard: the case where we
+	// know least about the binary switched off the check that exists precisely
+	// because the failure is a crash and not a message. Anything reaching here
+	// on that path is the DEFAULT mode, since an explicit --lock-mode was
+	// already refused above.
+	//
+	// Be honest about what that costs: this refusal names `--lock-mode <mode>`
+	// as the way out, and on the unreadable path that flag is exactly what the
+	// refusal above rejects — so the operator needs TWO messages to learn the
+	// real remedy is a readable mydumper. That is the deliberate trade: a
+	// two-step but true chain, against a segfault that says nothing at all. It
+	// is also why the refusal above had to stop claiming the build is old.
+	//
+	// A build we positively READ as pre-0.18 keeps skipping, on purpose:
+	// requiresBackupAdmin decides from the SERVER's version, not mydumper's, so
+	// demanding BACKUP_ADMIN from an old build that may never issue LOCK
+	// INSTANCE FOR BACKUP would refuse a dump that works today. That is a
+	// live configuration — Ubuntu 24.04 and Debian bookworm both package 0.10.1.
+	if !knownOldMydumper && lockMode.NeedsElevatedPrivileges() {
 		if err := checkMydumperPrivileges(cmd.Context(), dmpSourceDSN, lockMode, mydumperlock.RemedyCLI, schemas); err != nil {
 			return err
 		}
@@ -554,8 +603,17 @@ func (p *dumpDirPrep) rollback() {
 }
 
 // mydumperVersion runs `<path> --version` and parses the version triple via
-// parseMydumperVersion. Returns (0, 0, 0, err) on any failure — the caller
-// should treat an unparseable version conservatively (assume oldest).
+// parseMydumperVersion. Returns (0, 0, 0, err) on any failure.
+//
+// An error means the version is UNKNOWN, which is NOT the same as "old" — this
+// comment used to say the caller should assume oldest, and acting on that is
+// #1686: it switched off the privilege preflight for the builds we know least
+// about. runDump keeps the two apart (see knownOldMydumper); do not collapse
+// them back by defaulting a failure to 0.0.0 here.
+//
+// NOTE: a failed exec and an unparseable line are still merged into one error.
+// Both mean "unknown", which is all the caller acts on today, but a broken
+// binary and an unrecognised format have different remedies.
 func mydumperVersion(path string) (major, minor, patch int, err error) {
 	out, err := exec.Command(path, "--version").CombinedOutput()
 	if err != nil {
@@ -565,19 +623,44 @@ func mydumperVersion(path string) (major, minor, patch int, err error) {
 }
 
 // parseMydumperVersion extracts the major.minor.patch triple from mydumper
-// --version output (e.g. "mydumper 0.10.0, built against MySQL 8.0.36"
-// → 0, 10, 0). Extracted from mydumperVersion so the parsing logic is
-// directly unit-testable without shelling out to a real binary.
+// --version output. TWO shapes ship in the wild and both have to parse — newer
+// builds prefix the version with "v" (#1686):
+//
+//	mydumper 0.10.0, built against MySQL 8.0.36                      → 0, 10, 0
+//	mydumper v1.0.5-1, built against MariaDB 10.8.8 with SSL support → 1,  0, 5
+//
+// The prefix is NOT 1.x-only. #1686 assumed it was, which understates the
+// damage. Measured directly: the mydumper/mydumper images v0.16.3-6 and
+// v1.0.3-1 and a current Homebrew build all print it, while the 0.10.x builds
+// Ubuntu 24.04 and Debian bookworm package do not. So every build from at least
+// 0.16.3 on was unreadable here — including the 0.18 series, the FIRST that
+// accepts the very flags this version gate exists to decide about. The oldest
+// tag that prints it was NOT pinned down: no image below 0.16.3-6 is published
+// to measure, so this says "from at least" rather than naming a boundary.
+//
+// That prefix is the ONLY thing needing removal. Sscanf stops at the "-" by
+// itself, so the "-N" package-revision suffix already parses — measured, and
+// pinned by the table cases that carry one. Do not add code for it: a guard
+// that cannot fire reads as protection and is none.
+//
+// A version that does not parse is reported as such rather than defaulted, so
+// the caller can tell "this build is old" from "this build is unreadable" —
+// runDump treats those two differently at the privilege preflight.
+//
+// Extracted from mydumperVersion so the parsing logic is directly unit-testable
+// without shelling out to a real binary.
 func parseMydumperVersion(output string) (major, minor, patch int, err error) {
 	line := strings.SplitN(output, "\n", 2)[0]
 	parts := strings.Fields(line)
 	if len(parts) < 2 {
 		return 0, 0, 0, fmt.Errorf("unexpected --version output: %q", line)
 	}
-	ver := strings.TrimRight(parts[1], ",")
-	n, scanErr := fmt.Sscanf(ver, "%d.%d.%d", &major, &minor, &patch)
+	// raw is kept for the error message: quoting the post-strip value would
+	// report a string mydumper never printed ("ersion" for a "version" field).
+	raw := strings.TrimRight(parts[1], ",")
+	n, scanErr := fmt.Sscanf(strings.TrimPrefix(raw, "v"), "%d.%d.%d", &major, &minor, &patch)
 	if scanErr != nil || n != 3 {
-		return 0, 0, 0, fmt.Errorf("cannot parse version %q from %q", ver, line)
+		return 0, 0, 0, fmt.Errorf("cannot parse version %q from %q", raw, line)
 	}
 	return major, minor, patch, nil
 }
