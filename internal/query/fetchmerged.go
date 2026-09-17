@@ -754,6 +754,36 @@ type mergeSources struct {
 	misfiledHours []time.Time
 }
 
+// VerifyMergedCoverage runs the prologue of a merged fetch — option
+// validation, archive discovery, the query planner, and gap enforcement under
+// o.AllowGaps — and reads no events. It exists for a caller that has PROVEN
+// its window can return nothing and wants to skip the fetch (#1689): the fetch
+// is also where coverage is enforced, so skipping it drops the refusal along
+// with the rows.
+//
+// What this preserves is the REFUSAL, not the arithmetic. "This window returns
+// no rows" is a fact about the predicate and holds whatever coverage says. What
+// does not hold is the reading of it: an hour nobody can read may have held
+// events above the lower bound, events that would also have carried the upper
+// bound past it, so acting on emptiness over an unreadable window publishes
+// "nothing changed" over a window that is merely unreadable. The converse is
+// NOT implied — complete coverage does not mean the index has caught up with
+// the source, and a bound far behind with no gap at all is the ordinary shape.
+//
+// It cannot stand in for the whole fetch. TWO errors belong to the archive READ
+// and are therefore unreachable here, because nothing is opened: a
+// *SourceEmptyError from a stale archive_state registration (#383), and the
+// strict-mode refusal for a source that is registered but broken (S3 denies it,
+// a Parquet file is corrupt). A caller reading no archives loses no correctness
+// with them, but it does lose them as an incidental health check.
+func VerifyMergedCoverage(ctx context.Context, db *sql.DB, o FetchMergedOptions) error {
+	if err := o.validate(); err != nil {
+		return err
+	}
+	_, err := resolveMergeSources(ctx, db, o)
+	return err
+}
+
 // resolveMergeSources discovers archive sources, runs the coverage planner and
 // enforces gaps according to o.AllowGaps. The returned plan is non-nil whenever
 // the planner ran, INCLUDING on the error path, so callers can surface it.

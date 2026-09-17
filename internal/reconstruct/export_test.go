@@ -37,3 +37,23 @@ func CountSnapshotCutsForTest(calls *atomic.Int32) (restore func()) {
 	}
 	return func() { resolveSnapshotCut = prev }
 }
+
+// CountFoldWindowsForTest wraps the window fold, so an external test can assert
+// that a table whose positional window is empty by construction never queries
+// the index (#1689). The empty change map such a fetch would return is
+// indistinguishable from the skip in every report field, which is why the call
+// itself has to be counted.
+//
+// It wraps BOTH fold call sites — the baseline merge and the binlog-only
+// fallback — so a run that falls back counts too.
+//
+// Atomic for the same reason as CountSnapshotCutsForTest: tables fold
+// concurrently.
+func CountFoldWindowsForTest(calls *atomic.Int32) (restore func()) {
+	prev := foldWindow
+	foldWindow = func(ctx context.Context, fc foldConfig) (*foldResult, error) {
+		calls.Add(1)
+		return prev(ctx, fc)
+	}
+	return func() { foldWindow = prev }
+}

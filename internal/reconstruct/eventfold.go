@@ -291,6 +291,109 @@ func (r *foldResult) close() {
 	r.Spill = nil
 }
 
+// foldWindow is foldEventWindow behind a variable so a test can count the
+// index fetches one fold runs (#1689): a table whose positional window is
+// empty by construction must not query the index at all, and "the fold
+// returned no events" is true with or without that skip, so nothing else
+// discriminates. Same seam, and the same reason, as resolveSnapshotCut
+// (#1635).
+var foldWindow = foldEventWindow
+
+// windowEmptyByPosition reports whether the positional window a fold would
+// fetch can hold no event at all, so querying the index for it is pure cost.
+//
+// The window admits an event whose start_pos is at-or-after since and whose
+// end_pos is at-or-before until. On a MySQL/MariaDB source every event ends
+// strictly after it starts, so when until is at-or-before since there is no
+// room between the two bounds: no row can satisfy both predicates, whatever the
+// index holds, and the time filters are conjunctive so they can only narrow the
+// window further.
+//
+// That strictness is a SOURCE property, not a schema one, and it is held up by
+// two belts elsewhere rather than by the column types. pgcapture writes
+// StartPos == EndPos == the commit LSN for every row of a transaction
+// (internal/pgcapture/decoder.go), so a PG-sourced index holds rows a
+// since==until window would ADMIT; what keeps this sound is ReconstructTable's
+// PG refusal (#597), which runs long before this is consulted. A MariaDB 11.4+
+// row with a zero LogPos would underflow into a ~2^64 start_pos, which is why
+// the parser refuses to index one (#1117) — a belt that is prospective, so rows
+// an older build already wrote are not covered by it. Do not move this call
+// ahead of the PG gate, and do not reuse it where neither belt runs.
+//
+// This is not a rare corner. A refresh anchors on the previous backup's
+// coordinate and cuts at the newest indexed event, so any refresh that runs
+// while capture is behind that coordinate has an empty window for every table
+// anchored on that coordinate, and before #1689 each one walked the index to
+// apply nothing. (Tables carried forward keep an older snapshot's footer, so
+// one snapshot directory can hold several anchors.)
+//
+// Both bounds have to be known: mydumper output never sets a cut, and a
+// baseline that recorded no coordinate has no anchor. Neither can be shown
+// empty this way, so neither is skipped.
+func windowEmptyByPosition(since, until *query.BinlogPos) bool {
+	return since != nil && until != nil && until.AtOrBefore(*since)
+}
+
+// foldFetchOptions is the merged-fetch configuration a fold runs under, built
+// in ONE place because two paths need it to be IDENTICAL: the fetch, and the
+// coverage check that runs alone when the fetch is skipped (#1689). A second
+// literal would let the check drift to a different window, a different set of
+// archive sources or a different strictness than the fetch it stands in for —
+// and a coverage check over the wrong window is worse than none, because it
+// reads as proof.
+//
+// The builder equalises OPTIONS, not validation: FetchMergedStream also
+// rejects a preset cursor, a DESC order and a row cap, and the coverage check
+// has no counterpart for those. Unreachable today (a fold sets none of them),
+// but a future cap on the fold's options would refuse loudly on one path and
+// pass quietly on the other.
+//
+// NoArchive is false unconditionally, and it means something different to each
+// consumer. For the fetch it lets the stream decide whether to query archives,
+// which already handles the empty-archive case in its fast path (the pre-#1097
+// `len(archSources)==0` gate was wrong: it disabled archive routing even when
+// the fetch could have resolved sources itself). For the coverage check, which
+// opens nothing, it is what tells the planner to count archived hours as
+// COVERED instead of as gaps — buildPlan drops archivedHours under noArchive —
+// so flipping it would refuse runs whose archives are perfectly readable.
+func foldFetchOptions(fc foldConfig) query.FetchMergedOptions {
+	return query.FetchMergedOptions{
+		Opts:           fc.Opts,
+		DBName:         fc.DBName,
+		NoArchive:      false,
+		AllowGaps:      fc.AllowGaps,
+		ArchiveFetcher: fc.ArchiveFetcher,
+	}
+}
+
+// annotateFoldFetchError puts the operator's next step onto an error raised
+// while gathering the window's events. Shared by the fetch and by the coverage
+// check that replaces it when the window is provably empty (#1689): both raise
+// the SAME *query.GapError, and wrapping only one of them would make the
+// guidance an operator receives depend on whether capture happened to be behind
+// that minute. baseline refresh puts this string in its per-table summary, so
+// the difference is not only a log line.
+//
+// A coverage gap in a window anchored at the baseline usually means the
+// baseline went STALE — its anchor slid past rotation retention. Name the fix
+// (#1193): no flag recovers hours that were rotated out unarchived.
+func annotateFoldFetchError(err error, fc foldConfig) error {
+	var gapErr *query.GapError
+	if errors.As(err, &gapErr) && fc.Opts.Since != nil {
+		return fmt.Errorf("fetch events: %w — the delta window starts at this table's newest usable baseline anchor (%s); if archive_state drifted, `bintrail archive reconcile --repair` is the cheap fix, and if the missing hours were rotated out unarchived, take a fresh baseline (bintrail dump + bintrail baseline)",
+			err, fc.Opts.Since.UTC().Format(time.RFC3339))
+	}
+	return fmt.Errorf("fetch events: %w", err)
+}
+
+// verifyFoldCoverage runs the half of a fold that happens BEFORE any event is
+// read: archive discovery, the coverage planner and gap enforcement. A caller
+// that skips the fetch calls this instead, because the fetch is the only thing
+// on the full-table path that checks coverage at all.
+func verifyFoldCoverage(ctx context.Context, fc foldConfig) error {
+	return query.VerifyMergedCoverage(ctx, fc.DB, foldFetchOptions(fc))
+}
+
 // foldEventWindow streams the event window described by fc and folds it into a
 // change map, running the per-event correctness guards on the way.
 //
@@ -332,13 +435,7 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 	// page. Its typed-ness accumulates across pages for the same reason.
 	dec := newEventDecoder(fc.DB, fc.Schema, fc.Table, fc.Resolver)
 
-	_, err := query.FetchMergedStream(ctx, fc.DB, fc.Engine, query.FetchMergedOptions{
-		Opts:           fc.Opts,
-		DBName:         fc.DBName,
-		NoArchive:      false,
-		AllowGaps:      fc.AllowGaps,
-		ArchiveFetcher: fc.ArchiveFetcher,
-	}, fc.BatchSize, func(page []query.ResultRow) error {
+	_, err := query.FetchMergedStream(ctx, fc.DB, fc.Engine, foldFetchOptions(fc), fc.BatchSize, func(page []query.ResultRow) error {
 		if len(page) == 0 {
 			return nil
 		}
@@ -390,16 +487,7 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		if foldErr != nil {
 			return nil, foldErr
 		}
-		// A coverage gap in a window anchored at the baseline usually means
-		// the baseline went STALE — its anchor slid past rotation retention.
-		// Name the fix (#1193): no flag recovers hours that were rotated out
-		// unarchived.
-		var gapErr *query.GapError
-		if errors.As(err, &gapErr) && fc.Opts.Since != nil {
-			return nil, fmt.Errorf("fetch events: %w — the delta window starts at this table's newest usable baseline anchor (%s); if archive_state drifted, `bintrail archive reconcile --repair` is the cheap fix, and if the missing hours were rotated out unarchived, take a fresh baseline (bintrail dump + bintrail baseline)",
-				err, fc.Opts.Since.UTC().Format(time.RFC3339))
-		}
-		return nil, fmt.Errorf("fetch events: %w", err)
+		return nil, annotateFoldFetchError(err, fc)
 	}
 
 	if res.Spill != nil {
