@@ -60,6 +60,13 @@ type MonitorStatus struct {
 	// backoff. False for a failure it gave up on and for a Start that failed
 	// while setting up, which both wait for Start (#1606).
 	Retrying bool `json:"retrying,omitempty"`
+	// Phase names a long startup step the stream is inside right now, so
+	// "pending" can say WHICH part of starting up it is stuck on (#1690).
+	// Currently only "resume_cleanup": the pre-capture delete of events a
+	// replayed window would re-index, minutes of work on a large index.
+	// Empty whenever no such step is running — including between retries and
+	// for a stream that never reached one.
+	Phase string `json:"phase,omitempty"`
 }
 
 // MonitorController is the control-plane supervisor as the console sees it.

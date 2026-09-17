@@ -169,6 +169,16 @@ daemon or a quiet source:
 time() - bintrail_stream_last_flush_timestamp_seconds > 300
 ```
 
+Expect this to fire during the resume-time cleanup a restart runs before
+capture starts. The stream's series are now registered before that step rather
+than after it (#1690), so the flush timestamp exists and reads zero for as long
+as the cleanup takes — minutes, on a large index. That reading is correct:
+nothing is becoming recoverable yet. What changed is the timing, not the
+verdict — before, the series did not exist during the cleanup, so the same
+restart stayed silent until it finished. The daemon logs `dedup-on-resume:
+deleting ...` while it happens and the console shows `CLEANING UP`, which is
+how you tell this apart from a stream that is actually stuck.
+
 **Alerting on a lag gauge alone is the mistake this metric exists to prevent.**
 `bintrail_stream_availability_lag_seconds > 300` looks equivalent and is not: a
 stream that dies leaves the gauge at whatever it last was, so a healthy-looking
