@@ -85,6 +85,11 @@ type baselineSupervisor struct {
 	// so a manual dump cannot erase the evidence that the automatic refresh has
 	// been failing. Both share the single-flight (busyLocked).
 	refreshes map[string]*console.BaselineStatus
+	// refreshPaces is what the previous PUBLISHED refresh of each server
+	// measured, keyed by server id, and it exists so the overrun warning can
+	// tell a refresh that is falling behind from one whose cost is a floor it
+	// settles on. One run cannot tell them apart; see refreshPace (#1693).
+	refreshPaces map[string]refreshPace
 }
 
 // newBaselineSupervisor builds a supervisor bound to the daemon context. The
@@ -102,6 +107,7 @@ func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode base
 		lockMode:      lockMode,
 		jobs:          make(map[string]*console.BaselineStatus),
 		refreshes:     make(map[string]*console.BaselineStatus),
+		refreshPaces:  make(map[string]refreshPace),
 		restores:      make(map[string]*console.BaselineStatus),
 		exports:       make(map[string]*console.BaselineStatus),
 		exportRuns:    make(map[string]*sqlExportRun),

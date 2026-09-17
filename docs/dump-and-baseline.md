@@ -448,7 +448,12 @@ These properties are deliberate:
 
   The console setting overrides the daemon flag and applies on the next cycle without a restart. Once you have saved one there, the card grows a **Use the default** button that clears it again.
 
-- **An interval shorter than a refresh is a request, not a schedule.** A refresh rewrites every table that changed in full, however little of it changed, so it has a cost the interval cannot go below. Asking for less does not queue refreshes up: a server whose previous refresh is still folding is skipped for that tick, and the tick says so. Each refresh also logs its own duration, and one that outran the configured interval says so explicitly, naming the server. That duration is the honest measure of what a refresh costs on your data, which is the number to size a shorter interval against.
+- **An interval shorter than a refresh is a request, not a schedule.** A refresh rewrites every table that changed in full, however little of it changed, so it has a cost the interval cannot go below. Asking for less does not queue refreshes up: a server whose previous refresh is still folding is skipped for that tick, and the tick says so.
+
+  Each refresh also logs its own duration, and one that outran the configured interval says so explicitly, naming the server. Read that line before reaching for the interval, because it distinguishes two cases that look alike:
+
+  - **It finished inside the window of changes it folded.** The refresh is slower than you asked for but not slower than the source. Raising the interval to at least the duration on the line stops the skipped ticks, and nothing else has to change.
+  - **It took longer than that window.** Each run then hands the next one a larger window. If that keeps up across two published runs, with the run growing by more than its window did, the line says the backup is falling further behind and a longer interval will not fix it, because the next refresh cannot start until this one ends and it inherits everything that arrived meanwhile. The way out is a full backup, which reads the source instead of folding and re-anchors the refreshes that follow to the moment it began, plus reducing what a run costs. The line names the slowest table, how long the upload took, and which of the two grew.
 
 It shares its single-flight with the console's **Create baseline** button, so a refresh and a dump never run against the same server at once. The last outcome per server shows up on the console's **Protect -> Backups** page and in `GET /api/baselines`.
 

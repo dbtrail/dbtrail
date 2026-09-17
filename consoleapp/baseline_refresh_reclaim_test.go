@@ -22,7 +22,7 @@ import (
 var refreshAt = time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
 
 // stageBaselineRoot writes one PUBLISHED snapshot, which is what
-// executeRefresh's NewestSnapshotTables needs before a fold is even attempted.
+// executeRefresh's NewestSnapshot needs before a fold is even attempted.
 func stageBaselineRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

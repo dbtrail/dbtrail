@@ -1199,11 +1199,11 @@ func TestStartRebuild_carriesTheDestinationIntoTheFold(t *testing.T) {
 	realList := newestSnapshotTables
 	t.Cleanup(func() { newestSnapshotTables = realList })
 	stubBucketListing(t)
-	newestSnapshotTables = func(ctx context.Context, src string) ([]string, error) {
+	newestSnapshotTables = func(ctx context.Context, src string) (time.Time, []string, error) {
 		if !strings.HasPrefix(src, "s3://") {
 			return realList(ctx, src)
 		}
-		return []string{"shop.orders"}, nil
+		return time.Time{}, []string{"shop.orders"}, nil
 	}
 	got := make(chan string, 1)
 	holdFold(t, func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
