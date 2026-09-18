@@ -102,6 +102,7 @@ func (s *Server) scheduleGates() BackupScheduleGates {
 		if refusal != nil {
 			g.FullBackupsErr = refusal.Error()
 		}
+		g.Window = s.backupSchedules.WindowProbe()
 	}
 	return g
 }

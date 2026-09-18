@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // BaselineRunHistoryCap is how many baseline runs are kept per server. Old
@@ -71,6 +72,124 @@ type BaselineRunRecord struct {
 	// it, fixed at write time. Empty on updates and manual backups.
 	Why     string `json:"why,omitempty"`
 	WhyCode string `json:"why_code,omitempty"`
+	// Events is how far the index high-water mark moved between this
+	// daemon's previous fold of the snapshot an update started from and
+	// this one (every source writing to the index counts, and so do rows a
+	// resumed capture re-inserted), UpdateSeconds how long the whole update
+	// run took, upload included, like the full backup duration it is
+	// compared against (#1721), and IndexMark the high-water mark read
+	// before the fold: the base the NEXT update's Events are counted from,
+	// kept here so the count survives a daemon restart. Zero when not
+	// measured (a full backup, a restore, a fold with no previous mark).
+	Events        int64   `json:"events,omitempty"`
+	UpdateSeconds float64 `json:"update_seconds,omitempty"`
+	IndexMark     uint64  `json:"index_mark,omitempty"`
+}
+
+// measuredFoldRuns is how many recent updates the update model fits.
+const measuredFoldRuns = 5
+
+// UpdateModel fits what an update costs for serverID from its last few
+// measured successful updates: fixed seconds every update pays, taken as
+// the shortest run in the sample, plus a rate in events per second from
+// what the OTHER runs applied and took BEYOND that run (its events are
+// paid for inside the fixed cost, so counting them again would read the
+// rate too fast and the estimate too cheap). A run that took longer but
+// applied no more events (a slow disk that day) says nothing about the
+// per-event cost and is left out. The rate is zero (unknown) with fewer
+// than two samples, or when the time beyond the fixed cost is under a tenth
+// of the sample's total: then every update cost about the same whatever it
+// applied, the per-event cost is not distinguishable, and a rate read off
+// such runs would be a small number that makes any burst look like hours.
+func (h *BaselineRunHistory) UpdateModel(serverID string) (fixed time.Duration, rate float64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	recs := h.servers[serverID]
+	var sample []BaselineRunRecord
+	for i := len(recs) - 1; i >= 0 && len(sample) < measuredFoldRuns; i-- {
+		if r := recs[i]; measuredUpdate(r) {
+			sample = append(sample, r)
+		}
+	}
+	if len(sample) == 0 {
+		return 0, 0
+	}
+	minSec, minEvents, total := sample[0].UpdateSeconds, sample[0].Events, 0.0
+	for _, r := range sample {
+		if r.UpdateSeconds < minSec {
+			minSec, minEvents = r.UpdateSeconds, r.Events
+		}
+		total += r.UpdateSeconds
+	}
+	fixed = time.Duration(minSec * float64(time.Second))
+	if len(sample) < 2 {
+		return fixed, 0
+	}
+	var events int64
+	var beyond float64
+	for _, r := range sample {
+		if r.UpdateSeconds > minSec && r.Events > minEvents {
+			events += r.Events - minEvents
+			beyond += r.UpdateSeconds - minSec
+		}
+	}
+	if beyond < total/10 || events <= 0 {
+		return fixed, 0
+	}
+	return fixed, float64(events) / beyond
+}
+
+func measuredUpdate(r BaselineRunRecord) bool {
+	return r.Kind == BaselineRunRefresh && r.Error == "" && r.SkipReason == "" && r.Events > 0 && r.UpdateSeconds > 0
+}
+
+// ProvenUpdate is the most events any recorded successful update for
+// serverID applied in less than within: what the history proves an update
+// can do cheaper than that. Zero when nothing on record qualifies.
+func (h *BaselineRunHistory) ProvenUpdate(serverID string, within time.Duration) int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var proven int64
+	for _, r := range h.servers[serverID] {
+		if measuredUpdate(r) && r.UpdateSeconds < within.Seconds() {
+			proven = max(proven, r.Events)
+		}
+	}
+	return proven
+}
+
+// IndexMarkFor is the index high-water mark read before the successful
+// update that published the snapshot named snapshotTime (RFC3339 UTC), and
+// whether one is on record: the base an update from that snapshot counts
+// its events from, after a restart emptied the in-memory memo.
+func (h *BaselineRunHistory) IndexMarkFor(serverID, snapshotTime string) (uint64, bool) {
+	rec := h.FindBySnapshot(serverID, snapshotTime)
+	if rec == nil || rec.Kind != BaselineRunRefresh || rec.Error != "" || rec.IndexMark == 0 {
+		return 0, false
+	}
+	return rec.IndexMark, true
+}
+
+// LastFullBackup is how long the newest successful full backup for serverID
+// took, start to finish (the upload included: that is what the schedule
+// waits for); zero when there is none on record or its stamps do not parse.
+func (h *BaselineRunHistory) LastFullBackup(serverID string) time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	recs := h.servers[serverID]
+	for i := len(recs) - 1; i >= 0; i-- {
+		r := recs[i]
+		if r.Kind != BaselineRunDump || r.Error != "" || r.SkipReason != "" {
+			continue
+		}
+		started, err1 := time.Parse(time.RFC3339, r.StartedAt)
+		finished, err2 := time.Parse(time.RFC3339, r.FinishedAt)
+		if err1 != nil || err2 != nil || !finished.After(started) {
+			return 0
+		}
+		return finished.Sub(started)
+	}
+	return 0
 }
 
 type baselineHistoryFile struct {

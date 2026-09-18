@@ -6035,6 +6035,10 @@ function backupWhyLine(why, code, remedy) {
     out = "The update from the recorded changes hit an internal error, so a full backup was taken instead. Error: " + said(inner[1].replace(/^internal error:?\s*/, ""));
   } else if (code === "previous_unreadable") {
     out = why.charAt(0).toUpperCase() + why.slice(1);
+  } else if (code === "window_measured" || code === "window_age") {
+    // The daemon's own numbers (#1721): events, the estimate, the last full
+    // backup's duration or the anchor's age. Said as recorded.
+    out = "Full backup instead of an update: " + why;
   } else {
     out = "Full backup because " + why;
   }
