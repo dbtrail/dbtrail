@@ -124,7 +124,7 @@ func readTableDeltaReason(ctx context.Context, basePath string, bmeta baseline.D
 	}
 	// One pair's footers, checked against the base and, for a numbered pair,
 	// against its own name.
-	readPair := func(posdel, upserts string, seq int) (um baseline.DumpMetadata, why string) {
+	readPair := func(posdel, upserts string, lo, seq int) (um baseline.DumpMetadata, why string) {
 		um, err := baseline.ReadParquetMetadata(upserts)
 		if err != nil {
 			return um, "its upserts file cannot be read (" + err.Error() + ")"
@@ -150,6 +150,16 @@ func readTableDeltaReason(ctx context.Context, basePath string, bmeta baseline.D
 			return um, "its two files were not written by the same run"
 		case seq != baseline.TableDeltaLegacySeq && um.DeltaSeq != seq:
 			return um, fmt.Sprintf("the file named sequence %d records sequence %d in its footer", seq, um.DeltaSeq)
+		case seq != baseline.TableDeltaLegacySeq && lo != seq && um.DeltaSeqLo != lo:
+			// A range pair (#1723) records both ends; one that records
+			// another low end, or none, was not written for this name.
+			return um, fmt.Sprintf("the file named sequences %d-%d records low end %d in its footer", lo, seq, um.DeltaSeqLo)
+		case seq != baseline.TableDeltaLegacySeq && lo == seq && um.DeltaSeqLo >= 0 && um.DeltaSeqLo != seq:
+			return um, fmt.Sprintf("the file named sequence %d records a range starting at %d in its footer", seq, um.DeltaSeqLo)
+		case pm.DeltaSeqLo != um.DeltaSeqLo:
+			// Its own message: the same-run case above already compared
+			// the sequence, so this one can only be the low end.
+			return um, fmt.Sprintf("its two files record different low ends (%d and %d)", pm.DeltaSeqLo, um.DeltaSeqLo)
 		}
 		return um, ""
 	}
@@ -166,7 +176,7 @@ func readTableDeltaReason(ctx context.Context, basePath string, bmeta baseline.D
 	}
 
 	if chain.Legacy {
-		um, why := readPair(chain.LegacyPosdel, chain.LegacyUpserts, baseline.TableDeltaLegacySeq)
+		um, why := readPair(chain.LegacyPosdel, chain.LegacyUpserts, baseline.TableDeltaLegacySeq, baseline.TableDeltaLegacySeq)
 		if why != "" {
 			return setAside(why)
 		}
@@ -181,7 +191,7 @@ func readTableDeltaReason(ctx context.Context, basePath string, bmeta baseline.D
 	var last baseline.DumpMetadata
 	var total int64
 	for i, f := range chain.Files {
-		um, why := readPair(f.Posdel, f.Upserts, f.Seq)
+		um, why := readPair(f.Posdel, f.Upserts, f.SeqLo, f.Seq)
 		if why != "" {
 			return setAside(fmt.Sprintf("pair %d: %s", f.Seq, why))
 		}
@@ -793,8 +803,17 @@ func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelt
 	if d.Legacy {
 		state = baseline.LegacyTableDeltaStateSQL(lit(basePath), lit(d.Chain.LegacyPosdel), lit(d.Chain.LegacyUpserts), "")
 	} else {
-		posdel, upserts := baseline.TableDeltaGlobs(basePath)
-		state = baseline.TableDeltaStateSQL(lit(basePath), lit(posdel), lit(upserts), "")
+		// Exact file lists, not the glob: the chain is in hand, a list of
+		// literal paths never over-matches, and union_by_name over a
+		// neighbouring table's pair (a table named "<stem>.000001x") would
+		// otherwise merge its COLUMNS into the state at bind time before
+		// the name filter drops its rows.
+		var posdels, upserts []string
+		for _, f := range d.Chain.Files {
+			posdels = append(posdels, lit(f.Posdel))
+			upserts = append(upserts, lit(f.Upserts))
+		}
+		state = baseline.TableDeltaStateSQL(lit(basePath), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", basePath, "")
 	}
 	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s')", state, lit(tmpPath), ParquetWriterCompression)
 	if _, err := ddb.ExecContext(ctx, q); err != nil {
@@ -923,10 +942,19 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		chainStart = p.baseMeta.SnapshotTimestamp
 	}
 	copied := 0
+	adopted := ""
+	var files []baseline.TableDeltaFile
+	var adoptedRange baseline.TableDeltaFile
 	if p.prev != nil {
 		chainStart, seq, spaceHint = p.prev.Meta.DeltaChainStart, p.prev.Meta.DeltaSeq+1, p.prev.UpsertsSize
-		for _, f := range p.prev.Chain.Files {
-			dstPosdel, dstUpserts := baseline.TableDeltaPaths(newBase, f.Seq)
+		files = p.prev.Chain.Files
+		if p.cfg.CompactDir != "" {
+			if r, dir, ok := adoptCompaction(p.cfg.CompactDir, p.schema, p.table, p.prev); ok {
+				files, adopted, adoptedRange = spliceRange(files, r), dir, r
+			}
+		}
+		for _, f := range files {
+			dstPosdel, dstUpserts := f.PathsUnder(newBase)
 			pairCopied := false
 			for _, pair := range [][2]string{{f.Posdel, dstPosdel}, {f.Upserts, dstUpserts}} {
 				wasLinked, err := carryForwardFile(ctx, pair[0], pair[1], false)
@@ -973,6 +1001,16 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	if err != nil || chain == nil || chain.Last().Seq != seq {
 		return fail(fmt.Errorf("the chain just published beside %s.%s cannot be read back as ending at sequence %d (chain=%v err=%v)",
 			p.schema, p.table, seq, chain, err))
+	}
+	if adopted != "" {
+		// Linked into the new snapshot and read back as its chain: the
+		// staging has done its job. Older snapshots keep their plain pairs.
+		if err := os.RemoveAll(adopted); err != nil {
+			slog.Warn("could not remove an adopted compaction", "dir", adopted, "error", err)
+		}
+		rep.DeltaCompactedRange = fmt.Sprintf("%d-%d", adoptedRange.SeqLo, adoptedRange.Seq)
+		slog.Info("table delta compaction adopted: the chain's first pairs travel as one range pair from this snapshot on",
+			"schema", p.schema, "table", p.table, "range", rep.DeltaCompactedRange)
 	}
 	rep.TableDelta, rep.DeltaPairWritten = true, written
 	rep.DeltaSeq = seq

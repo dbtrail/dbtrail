@@ -466,7 +466,8 @@ func TestBaselineDownload_viewsSQLReadsTheChain(t *testing.T) {
 		return vsql[i : i+j]
 	}
 	if v := view("state_shop_orders"); !strings.Contains(v, "bintrail_latest") ||
-		!strings.Contains(v, "./shop/orders.[0-9][0-9][0-9][0-9][0-9][0-9].upserts") {
+		!strings.Contains(v, "./shop/orders.[0-9][0-9][0-9][0-9][0-9][0-9]*.upserts") || // the #1723 glob: plain and range pairs
+		!strings.Contains(v, `regexp_matches(filename, '(^|[/\\])orders\.[0-9]{6}(-[0-9]{6})?\.upserts$')`) {
 		t.Errorf("orders view does not read the chain:\n%s", v)
 	}
 	if v := view("state_shop_users"); strings.Contains(v, "bintrail_latest") || !strings.Contains(v, "./shop/users.upserts") {

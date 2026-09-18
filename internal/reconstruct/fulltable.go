@@ -160,6 +160,10 @@ type FullTableConfig struct {
 	// from each base alone, rewrites every table the old way and writes no
 	// delta, so the snapshot after it has today's layout again.
 	TableDeltas bool
+	// CompactDir is where a compaction job leaves range pairs for a refresh
+	// to adopt (#1723): "<CompactDir>/<schema>/<table>/<chain start>/", one
+	// complete range pair plus a _SUCCESS marker. Empty: nothing is adopted.
+	CompactDir string
 
 	// WarnEventThreshold logs a loud warning when a table's fetched event count
 	// exceeds it. The event window itself is PAGED since #1097, so the resident
@@ -338,6 +342,9 @@ type TableReport struct {
 	DeltaChainFiles  int
 	DeltaChainCopied int
 	DeltaCompacted   string
+	// DeltaCompactedRange is "<lo>-<hi>" when this run adopted a compaction
+	// job's range pair in place of the chain's first pairs (#1723).
+	DeltaCompactedRange string
 }
 
 // fetchFloor decides where a run with deltas on fetches from: the chain's last

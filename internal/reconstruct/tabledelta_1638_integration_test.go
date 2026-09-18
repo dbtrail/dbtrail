@@ -31,7 +31,7 @@ func readOrdersState(t *testing.T, base string) []string {
 		t.Fatalf("open duckdb: %v", err)
 	}
 	defer ddb.Close()
-	q := "SELECT id, status FROM (" + baseline.TableDeltaStateSQL("'"+base+"'", "'"+posdel+"'", "'"+upserts+"'", "") + ")"
+	q := "SELECT id, status FROM (" + baseline.TableDeltaStateSQL("'"+base+"'", "'"+posdel+"'", "'"+upserts+"'", base, "") + ")"
 	rows, err := ddb.Query(q)
 	if err != nil {
 		t.Fatalf("state of %s: %v", base, err)

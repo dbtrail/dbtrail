@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The daemon merges a long chain of table deltas into one range pair,
+  outside the refresh** (#1723, first half). With table deltas on, every
+  refresh adds one pair beside a changed table; every reader opens every
+  pair and every upload sends every pair again. Once a chain lists 16
+  entries (16 plain pairs the first time; a range plus 15 pairs after
+  that), `bintrail-console watch` runs a compaction job right after the
+  refresh has released the server's slot (never inside the refresh's own
+  time): a DuckDB-only merge of all but the last pair into one range pair
+  named `<table>.000000-000014.posdel` / `.upserts` (the union of the dead
+  positions, the newest version of every key), whose footer is the last
+  merged pair's with the two ends added. The result waits under
+  `<backup dir>/.compact/<schema>/<table>/<chain start>/`, and the NEXT
+  refresh links it forward in place of the pairs it merged, so the chain
+  reads `000000-000014, 000015, 000016, ...` from that snapshot on while
+  older snapshots keep their plain pairs. The table file is never touched
+  by this job; folding the chain into it stays the refresh's rewrite path
+  (the second half of #1723). Every input pair is checked against the
+  snapshot's manifest first, a result the refresh cannot adopt (another
+  chain, another base, footers that do not name its range) is removed with
+  a warning, an unfinished one is swept at the next refresh cycle, and a
+  refresh that finds none carries the chain forward as before. The job
+  shares the per-server single-flight with every other backup job and is
+  recorded in the daemon log and the on-disk run history file
+  (`kind: compact`; a repeating failure is one record); it does not appear
+  on the Backups page, which lists the runs that produced a snapshot. The generated DuckDB
+  views, the console's backup detail and `verify` read a range pair like
+  any other; a snapshot holding one must not be read by a bintrail older
+  than the one that wrote it.
+
 ### Changed
 - **Table deltas are on by default** (#1729). A refresh keeps a changed
   table's Parquet file and writes that refresh's changed rows as one

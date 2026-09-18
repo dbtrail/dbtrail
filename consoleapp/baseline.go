@@ -71,6 +71,10 @@ type baselineSupervisor struct {
 	// exports tracks custom .sql backup builds, keyed by server id — the
 	// fourth job kind under the shared single-flight.
 	exports map[string]*console.BaselineStatus
+	// compacts is the table-delta compaction job's slot (#1723), one per
+	// server, sharing the single-flight: it reads the chain a refresh would
+	// extend and a full backup would replace.
+	compacts map[string]*console.BaselineStatus
 	// exportRuns is each server's CURRENT build: its directory (unique per
 	// build; see sqlExportRoot for why builds never share a path), the
 	// downloads streaming it, and the removal it is owed.
@@ -188,6 +192,7 @@ func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode base
 		gateEdge:         notify.NewEdge(notify.DefaultRepeatEvery),
 		restores:         make(map[string]*console.BaselineStatus),
 		exports:          make(map[string]*console.BaselineStatus),
+		compacts:         make(map[string]*console.BaselineStatus),
 		exportRuns:       make(map[string]*sqlExportRun),
 		exportOrphans:    make(map[string]map[string]string),
 	}
