@@ -435,7 +435,7 @@ func TestBackupScheduler_cutsOverOnAgeInTheRealSlot(t *testing.T) {
 	fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC)) // eight days later, on an hourly schedule (cut-over 6 h)
 	st := waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
 	if console.BackupWhyCode(st.LastWhy) != "window_age" ||
-		!strings.Contains(st.LastWhy, "no count of the changes since it, no measured update rate, no full backup on record") {
+		!strings.Contains(st.LastWhy, "no count of the changes since it, no usable update rate (none measured, or the measured updates all cost about the same), no full backup on record") {
 		t.Fatalf("the slot did not cut over on age: %+v", st)
 	}
 	if run, _ := sup.history.LastScheduled(e.ID); run == nil || run.Kind != console.BaselineRunDump || run.WhyCode != "window_age" {

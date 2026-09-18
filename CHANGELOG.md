@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A steady load no longer turns the backup schedule into a full backup
+  every slot** (#1736). The cut-over rule (#1721) estimated an update's
+  cost from a marginal rate, events beyond the shortest recent update per
+  second beyond it; under a constant load every update applies about the
+  same number of events and their durations differ by noise, so the slope
+  collapsed (196 events over 44 s read as 4 events/s, and a five-minute
+  window as "59h 17m"), and once the full backup it chose had run the
+  count only grew, so the rule kept choosing it. The model now declares
+  the rate unknown when the events beyond the shortest run are under a
+  tenth of a typical run's (as it already did for flat durations), and
+  when the marginal rate is under a tenth of the shortest run's whole
+  rate, its events over all its seconds, a floor no true per-event rate
+  is below. Without a rate one thing is still decided from the fixed cost
+  alone: an update whose cheapest recent run took longer than the last
+  full backup is cut over, since the age rule could never say so on a
+  server whose every update succeeds. The "proven cheaper" lock has a margin (1.5x the largest
+  update proven cheaper than a full backup) instead of a strict
+  comparison, is read off the same five recent updates as the model
+  rather than the whole history, and says so in the log when it
+  overrides an estimate above the full backup's duration. With no rate
+  the age rule decides, as for a quiet server: a fresh anchor is an
+  update; its reason line now says "no usable update rate" instead of
+  "no measured update rate", since the updates may well be measured.
+
 ## [0.84.0] - 2026-09-18
 
 ### Added
