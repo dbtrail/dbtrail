@@ -19,6 +19,7 @@ const (
 	BaselineRunDump    = "dump"    // mydumper (or pgbaseline) snapshot of the source
 	BaselineRunRefresh = "refresh" // periodic fold of the newest snapshot forward
 	BaselineRunRestore = "restore" // operator-chosen point-in-time fold (#backups)
+	BaselineRunCompact = "compact" // table-delta chains merged by the daemon's compaction job (#1723)
 )
 
 // BaselineRunTriggerScheduled marks a run (or a skip) the per-server backup
@@ -334,6 +335,28 @@ func (h *BaselineRunHistory) LastScheduled(serverID string) (run, skip *Baseline
 		}
 	}
 	return run, skip
+}
+
+// AppendCompact records a table-delta compaction run (#1723). When the run
+// failed and the newest record for the server is a compaction that failed
+// the same way, that record's end moves to this run instead of a new record
+// being added, for the reason AppendSkip gives: the job is retried at every
+// refresh, so a persistent failure would otherwise append an identical
+// record every cycle and push the refreshes off the capped history. A
+// success, or a different error, is a new record. Returns whether a NEW
+// record was added.
+func (h *BaselineRunHistory) AppendCompact(rec BaselineRunRecord) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rec.Kind = BaselineRunCompact
+	recs := h.servers[rec.ServerID]
+	if n := len(recs); n > 0 && rec.Error != "" && recs[n-1].Kind == BaselineRunCompact && recs[n-1].Error == rec.Error {
+		recs[n-1].FinishedAt = rec.FinishedAt
+		recs[n-1].Tables, recs[n-1].Refused = rec.Tables, rec.Refused
+		return false, h.save()
+	}
+	h.servers[rec.ServerID] = capRecords(append(recs, rec))
+	return true, h.save()
 }
 
 // AppendSkip records a scheduled slot that did not start. When the newest

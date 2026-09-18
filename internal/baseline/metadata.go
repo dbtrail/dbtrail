@@ -125,8 +125,11 @@ type DumpMetadata struct {
 	DeltaBaseAnchor string
 	DeltaBaseSize   int64
 	// DeltaSeq is MetaKeyDeltaSeq (#1718): the pair's sequence in its chain.
-	// -1 when absent (a table file, or a v0.83.0 pair).
-	DeltaSeq int
+	// -1 when absent (a table file, or a v0.83.0 pair). DeltaSeqLo is
+	// MetaKeyDeltaSeqLo (#1723), the low end of a range pair; -1 when
+	// absent (a plain pair: its low end is DeltaSeq).
+	DeltaSeq   int
+	DeltaSeqLo int
 	// LastEventID is MetaKeyLastEventID; 0 when absent.
 	LastEventID uint64
 	// Producer is MetaKeySnapshotProducer: which code path wrote these bytes
@@ -223,7 +226,7 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 	}
 	defer f.Close()
 
-	m := DumpMetadata{DeltaSeq: -1}
+	m := DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1}
 	markerStartedAt, haveMarker := readStartedAtMarker(inputDir)
 	if haveMarker {
 		m.StartedAt = markerStartedAt
@@ -293,7 +296,7 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 		return DumpMetadata{}, fmt.Errorf("open parquet file: %w", err)
 	}
 
-	m := DumpMetadata{DeltaSeq: -1}
+	m := DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1}
 	if v, ok := pf.Lookup(MetaKeyBinlogFile); ok {
 		m.BinlogFile = v
 	}
@@ -342,6 +345,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	}
 	if v, ok := pf.Lookup(MetaKeyDeltaSeq); ok {
 		m.DeltaSeq = parseDeltaSeq(path, v)
+	}
+	if v, ok := pf.Lookup(MetaKeyDeltaSeqLo); ok {
+		m.DeltaSeqLo = parseDeltaSeq(path, v)
 	}
 	if v, ok := pf.Lookup(MetaKeyLastEventID); ok {
 		m.LastEventID = parseLastEventID(path, v)
@@ -404,7 +410,7 @@ func ReadParquetMetadataAny(ctx context.Context, path string) (DumpMetadata, err
 	}
 	defer rows.Close()
 
-	m := DumpMetadata{DeltaSeq: -1}
+	m := DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1}
 	var rowCountCorrupt bool
 	for rows.Next() {
 		// DuckDB returns key/value as BLOB (BYTE_ARRAY) when the Parquet
@@ -482,6 +488,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.DeltaBaseSize = parseDeltaBaseSize(path, val)
 	case MetaKeyDeltaSeq:
 		m.DeltaSeq = parseDeltaSeq(path, val)
+	case MetaKeyDeltaSeqLo:
+		m.DeltaSeqLo = parseDeltaSeq(path, val)
 	case MetaKeyLastEventID:
 		m.LastEventID = parseLastEventID(path, val)
 	case MetaKeyRowCount:

@@ -93,7 +93,13 @@ func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Du
 	s.mu.Unlock()
 
 	slog.Info("baseline refresh: starting", "server", req.ServerName, "id", req.ServerID)
-	go s.runRefresh(req, at, interval)
+	go func() {
+		s.runRefresh(req, at, interval)
+		// After the refresh has released its slot: a chain that grew long
+		// is merged by the compaction job, which claims the slot for itself
+		// (#1723). Never inside the refresh's own time.
+		s.maybeCompact(req)
+	}()
 	return since, nil
 }
 
@@ -123,6 +129,9 @@ func (s *baselineSupervisor) busyLocked(serverID string) bool {
 	if st, ok := s.exports[serverID]; ok && st.State == "running" {
 		return true
 	}
+	if st, ok := s.compacts[serverID]; ok && st.State == "running" {
+		return true
+	}
 	return false
 }
 
@@ -136,6 +145,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// nothing else will ever mention it, and a server whose cycles all skip
 	// would keep it forever. Moved above the gate for exactly that reason.
 	sweepDiscardedSnapshots(req)
+	sweepCompactStaging(req)
 
 	// #1689: a cycle with nothing to fold does not start.
 	//
@@ -1196,6 +1206,7 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		OutputFormat:          reconstruct.OutputFormatParquet,
 		CarryForwardUnchanged: req.CarryForwardUnchanged,
 		TableDeltas:           req.TableDeltas,
+		CompactDir:            compactDirFor(req.BaselineDir),
 		Parallelism:           daemonFoldParallelism,
 		WarnEventThreshold:    daemonFoldWarnEventThreshold,
 		MaxTouchedRows:        daemonFoldMaxTouchedRows,

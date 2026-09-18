@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
+	"regexp"
 )
 
 // A table delta (#1638, #1718) is a CHAIN of small file pairs a `baseline
@@ -111,13 +112,26 @@ const (
 	MetaKeyDeltaBaseSize   = "bintrail.delta_base_size"
 	// MetaKeyDeltaSeq is the pair's sequence in its chain, the same number the
 	// file name carries; a footer that disagrees with its name is a damaged pair.
-	MetaKeyDeltaSeq = "bintrail.delta_seq"
+	// On a RANGE pair (#1723, a minor compaction of pairs lo..hi) it is the
+	// HIGH end, and MetaKeyDeltaSeqLo the low one; absent on a plain pair.
+	MetaKeyDeltaSeq   = "bintrail.delta_seq"
+	MetaKeyDeltaSeqLo = "bintrail.delta_seq_lo"
 )
 
 // TableDeltaPaths returns where the pair of sequence seq of a table's delta
 // sits, given the path (or s3:// URL) of its base .parquet file.
 func TableDeltaPaths(basePath string, seq int) (posdel, upserts string) {
 	stem := strings.TrimSuffix(basePath, ".parquet") + "." + fmt.Sprintf("%0*d", TableDeltaSeqWidth, seq)
+	return stem + TableDeltaPosdelSuffix, stem + TableDeltaUpsertsSuffix
+}
+
+// TableDeltaRangePaths returns where the RANGE pair covering sequences
+// lo..hi (#1723) sits: "<stem>.<lo>-<hi>.posdel" / ".upserts", both ends
+// zero-padded, so the name sorts by its low end among plain names and the
+// state SQL's order by file name stays sequence order.
+func TableDeltaRangePaths(basePath string, lo, hi int) (posdel, upserts string) {
+	stem := strings.TrimSuffix(basePath, ".parquet") + "." +
+		fmt.Sprintf("%0*d-%0*d", TableDeltaSeqWidth, lo, TableDeltaSeqWidth, hi)
 	return stem + TableDeltaPosdelSuffix, stem + TableDeltaUpsertsSuffix
 }
 
@@ -135,35 +149,93 @@ func legacyTableDeltaPaths(basePath string) (posdel, upserts string) {
 // The pattern always holds a wildcard, and that is not a detail: verified
 // against DuckDB 1.5.5, glob() over an s3:// pattern with NO wildcard makes no
 // request and returns the pattern itself as its one row.
+//
+// Since #1723 the glob is "<stem>.<6 digits>*<suffix>": it admits the plain
+// pairs and the range pairs a minor compaction writes. It is deliberately
+// WIDER than the layout (it would also match the pairs of a table named
+// "<stem>.000001x"), because DuckDB offers no exact alternative: a glob has
+// no alternation, a list of globs fails as a whole when one of them matches
+// nothing (a chain with no range pair yet is the normal case), and a table
+// function cannot take a subquery. TableDeltaStateSQL narrows the match
+// back to the layout with TableDeltaNameFilter on the file name: the
+// neighbour's ROWS never reach the state. Its COLUMNS can: read_parquet
+// unifies the column set and types (union_by_name) at bind time, before any
+// row is filtered, so a neighbour with an extra column, or the same column
+// in another type, changes the shape of what the glob reads. Every reader
+// that has the chain in hand (reconstruct, a pinned view) names the files
+// exactly instead; the globs are for the following views, which read
+// whatever chain is beside the table when they are queried.
 func TableDeltaGlobs(basePath string) (posdel, upserts string) {
-	stem := escapeGlob(strings.TrimSuffix(basePath, ".parquet")) + "." + strings.Repeat("[0-9]", TableDeltaSeqWidth)
+	stem := escapeGlob(strings.TrimSuffix(basePath, ".parquet")) + "." + strings.Repeat("[0-9]", TableDeltaSeqWidth) + "*"
 	return stem + TableDeltaPosdelSuffix, stem + TableDeltaUpsertsSuffix
 }
 
+// TableDeltaNameFilter is the SQL predicate that narrows what TableDeltaGlobs
+// matched to exactly the table's chain: the file NAME (the path after its
+// last "/") is the table's stem, a plain or a range sequence, the suffix.
+// It reads the `filename` column read_parquet adds.
+func TableDeltaNameFilter(basePath, suffix string) string {
+	stem := strings.TrimSuffix(basePath, ".parquet")
+	if i := strings.LastIndexAny(stem, "/\\"); i >= 0 {
+		stem = stem[i+1:]
+	}
+	six := fmt.Sprintf("[0-9]{%d}", TableDeltaSeqWidth)
+	// Anchored at the start OR after a separator: a relative glob run from
+	// inside the directory gives a bare file name, and a "/" anchor there
+	// would drop every pair and read the base alone, without an error.
+	re := `(^|[/\\])` + regexp.QuoteMeta(stem) + `\.` + six + "(-" + six + ")?" + regexp.QuoteMeta(suffix) + "$"
+	return "regexp_matches(filename, '" + strings.ReplaceAll(re, "'", "''") + "')"
+}
+
 // ParseTableDeltaName reads a file NAME (no directory) as a delta file:
-// "<stem>.<seq>.posdel" / ".upserts" with a TableDeltaSeqWidth-digit seq, or
-// the v0.83.0 "<stem>.posdel" / ".upserts" (seq == TableDeltaLegacySeq). stem
-// is the table's file name without ".parquet". ok is false for anything else.
+// "<stem>.<seq>.posdel" / ".upserts" with a TableDeltaSeqWidth-digit seq, a
+// range "<stem>.<lo>-<hi>.posdel" (#1723; seq is then the HIGH end, the
+// sequence the chain has reached through it), or the v0.83.0
+// "<stem>.posdel" / ".upserts" (seq == TableDeltaLegacySeq). stem is the
+// table's file name without ".parquet". ok is false for anything else.
 func ParseTableDeltaName(name string) (stem string, seq int, suffix string, ok bool) {
+	stem, _, seq, suffix, ok = ParseTableDeltaRange(name)
+	return stem, seq, suffix, ok
+}
+
+// ParseTableDeltaRange is ParseTableDeltaName with both ends: lo == hi for a
+// plain pair, both TableDeltaLegacySeq for the v0.83.0 shape. A middle
+// segment that is not exactly "<6 digits>" or "<6 digits>-<6 digits>" with
+// lo < hi is part of the table's name.
+func ParseTableDeltaRange(name string) (stem string, lo, hi int, suffix string, ok bool) {
 	switch {
 	case strings.HasSuffix(name, TableDeltaPosdelSuffix):
 		suffix = TableDeltaPosdelSuffix
 	case strings.HasSuffix(name, TableDeltaUpsertsSuffix):
 		suffix = TableDeltaUpsertsSuffix
 	default:
-		return "", 0, "", false
+		return "", 0, 0, "", false
 	}
 	rest := strings.TrimSuffix(name, suffix)
 	if rest == "" || strings.HasPrefix(rest, ".") {
 		// Nothing, or a dotfile: never snapshot data.
-		return "", 0, "", false
+		return "", 0, 0, "", false
 	}
-	if i := strings.LastIndexByte(rest, '.'); i > 0 && len(rest)-i-1 == TableDeltaSeqWidth {
-		if n, err := strconv.Atoi(rest[i+1:]); err == nil && n >= 0 && isDigits(rest[i+1:]) {
-			return rest[:i], n, suffix, true
+	if i := strings.LastIndexByte(rest, '.'); i > 0 {
+		seg := rest[i+1:]
+		switch len(seg) {
+		case TableDeltaSeqWidth:
+			if isDigits(seg) {
+				n, _ := strconv.Atoi(seg)
+				return rest[:i], n, n, suffix, true
+			}
+		case 2*TableDeltaSeqWidth + 1:
+			a, b := seg[:TableDeltaSeqWidth], seg[TableDeltaSeqWidth+1:]
+			if seg[TableDeltaSeqWidth] == '-' && isDigits(a) && isDigits(b) {
+				l, _ := strconv.Atoi(a)
+				h, _ := strconv.Atoi(b)
+				if l < h {
+					return rest[:i], l, h, suffix, true
+				}
+			}
 		}
 	}
-	return rest, TableDeltaLegacySeq, suffix, true
+	return rest, TableDeltaLegacySeq, TableDeltaLegacySeq, suffix, true
 }
 
 func isDigits(s string) bool {
@@ -175,10 +247,25 @@ func isDigits(s string) bool {
 	return s != ""
 }
 
-// TableDeltaFile is one pair of a chain.
+// TableDeltaFile is one pair of a chain: a plain pair (SeqLo == Seq) or a
+// range pair covering sequences SeqLo..Seq (#1723). Seq is the sequence the
+// chain has reached through this file.
 type TableDeltaFile struct {
 	Seq             int
+	SeqLo           int
 	Posdel, Upserts string
+}
+
+// Range reports whether the file is a range pair.
+func (f TableDeltaFile) Range() bool { return f.SeqLo != f.Seq }
+
+// PathsUnder is where this file's pair sits beside another base path (the
+// same table in a newer snapshot): the carry-forward destination.
+func (f TableDeltaFile) PathsUnder(basePath string) (posdel, upserts string) {
+	if f.Range() {
+		return TableDeltaRangePaths(basePath, f.SeqLo, f.Seq)
+	}
+	return TableDeltaPaths(basePath, f.Seq)
 }
 
 // TableDeltaChain is what sits beside one base: its numbered pairs, ascending
@@ -240,10 +327,13 @@ func MarkTableDeltaFiles(dir string, names []string) (map[string]*TableDeltaChai
 		}
 		return filepath.Join(dir, name)
 	}
-	type half struct{ posdel, upserts string }
+	type half struct {
+		posdel, upserts string
+		lo              int
+	}
 	byStem := map[string]map[int]*half{}
 	for _, name := range names {
-		stem, seq, suffix, ok := ParseTableDeltaName(name)
+		stem, lo, seq, suffix, ok := ParseTableDeltaRange(name)
 		if !ok {
 			continue
 		}
@@ -254,8 +344,14 @@ func MarkTableDeltaFiles(dir string, names []string) (map[string]*TableDeltaChai
 		}
 		h := seqs[seq]
 		if h == nil {
-			h = &half{}
+			h = &half{lo: lo}
 			seqs[seq] = h
+		}
+		if h.lo != lo {
+			// "000001-000006" and "000006" both end at 6: two files claim
+			// the same sequence, and neither can be the chain's.
+			h.posdel, h.upserts = "", ""
+			continue
 		}
 		if suffix == TableDeltaPosdelSuffix {
 			h.posdel = join(name)
@@ -278,7 +374,7 @@ func MarkTableDeltaFiles(dir string, names []string) (map[string]*TableDeltaChai
 				c.Legacy, c.LegacyPosdel, c.LegacyUpserts = true, h.posdel, h.upserts
 				continue
 			}
-			c.Files = append(c.Files, TableDeltaFile{Seq: seq, Posdel: h.posdel, Upserts: h.upserts})
+			c.Files = append(c.Files, TableDeltaFile{Seq: seq, SeqLo: h.lo, Posdel: h.posdel, Upserts: h.upserts})
 		}
 		sort.Slice(c.Files, func(i, j int) bool { return c.Files[i].Seq < c.Files[j].Seq })
 		switch {
@@ -290,12 +386,17 @@ func MarkTableDeltaFiles(dir string, names []string) (map[string]*TableDeltaChai
 			// empty window writes nothing and does not consume a number), so
 			// a hole is a whole pair LOST, and reading around it would drop
 			// that window's changes from the state without an error. Worse
-			// than half a pair, and refused the same way.
-			for i, f := range c.Files {
-				if f.Seq != i {
+			// than half a pair, and refused the same way. With range pairs
+			// (#1723) the rule is tiling: the first file starts at 0 and each
+			// starts right after the previous one ends; an overlap means two
+			// files carry the same window's changes twice.
+			next := 0
+			for _, f := range c.Files {
+				if f.SeqLo != next {
 					bad = true
 					break
 				}
+				next = f.Seq + 1
 			}
 		}
 		if bad {
@@ -461,19 +562,26 @@ func escapeGlob(s string) string {
 // subquery makes the predicate unknown for every row and the base vanishes
 // from the state without an error. The writer never writes a NULL position;
 // the filter is for a file it did not write.
-func TableDeltaStateSQL(base, posdelGlob, upsertsGlob, replace string) string {
+//
+// base, posdelGlob and upsertsGlob are SQL expressions (a quoted path, or the
+// producer's variable-prefixed one); basePath is the table file's path as a
+// plain string, for the name filter (#1723) that narrows the wider glob
+// back to the chain. "<lo>-<hi>" sorts by its low end against a plain name,
+// so the order by file name stays sequence order (verified against DuckDB
+// 1.5.5).
+func TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, replace string) string {
 	star := "*"
 	if replace != "" {
 		star = "* REPLACE (" + replace + ")"
 	}
-	return fmt.Sprintf("WITH bintrail_delta AS (SELECT * FROM read_parquet(%s, filename=true, union_by_name=true)), "+
+	return fmt.Sprintf("WITH bintrail_delta AS (SELECT * FROM read_parquet(%s, filename=true, union_by_name=true) WHERE %s), "+
 		"bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta "+
 		"QUALIFY row_number() OVER (PARTITION BY \"%s\" ORDER BY filename DESC) = 1) "+
 		"SELECT %s FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) "+
-		"WHERE file_row_number NOT IN (SELECT \"%s\" FROM read_parquet(%s) WHERE \"%s\" IS NOT NULL) "+
+		"WHERE file_row_number NOT IN (SELECT \"%s\" FROM read_parquet(%s, filename=true) WHERE %s AND \"%s\" IS NOT NULL) "+
 		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM bintrail_latest WHERE \"%s\" = '%s')",
-		upsertsGlob, TableDeltaPKColumn,
-		star, base, TableDeltaPosColumn, posdelGlob, TableDeltaPosColumn,
+		upsertsGlob, TableDeltaNameFilter(basePath, TableDeltaUpsertsSuffix), TableDeltaPKColumn,
+		star, base, TableDeltaPosColumn, posdelGlob, TableDeltaNameFilter(basePath, TableDeltaPosdelSuffix), TableDeltaPosColumn,
 		TableDeltaPKColumn, TableDeltaOpColumn, TableDeltaOpColumn, TableDeltaOpUpsert)
 }
 
@@ -801,6 +909,14 @@ func WritePosdel(path string, md map[string]string, dead []int64) (n int64, retE
 		return 0, fmt.Errorf("close table delta %s: %w", path, err)
 	}
 	return n, nil
+}
+
+// WithDeltaSeqRange returns md plus the two ends of a range pair (#1723);
+// md is not modified.
+func WithDeltaSeqRange(md map[string]string, lo, hi int) map[string]string {
+	out := WithDeltaSeq(md, hi)
+	out[MetaKeyDeltaSeqLo] = strconv.Itoa(lo)
+	return out
 }
 
 // WithDeltaSeq returns md plus MetaKeyDeltaSeq; md is not modified.

@@ -18,6 +18,7 @@ const (
 	baselineJobRefresh baselineJobKind = "baseline refresh"
 	baselineJobRestore baselineJobKind = "baseline restore"
 	baselineJobExport  baselineJobKind = "sql export"
+	baselineJobCompact baselineJobKind = "baseline compact"
 )
 
 // statusSlotLocked returns the status map a job kind publishes to. Callers
@@ -40,6 +41,8 @@ func (s *baselineSupervisor) statusSlotLocked(kind baselineJobKind) map[string]*
 		return s.restores
 	case baselineJobExport:
 		return s.exports
+	case baselineJobCompact:
+		return s.compacts
 	default:
 		slog.Error("baseline supervisor: job kind has no status slot, so its failure cannot be recorded "+
 			"and this server's backup jobs will stay blocked until the daemon restarts. This is a bug: "+

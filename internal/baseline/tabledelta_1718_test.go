@@ -106,7 +106,11 @@ func TestTableDeltaGlobs(t *testing.T) {
 		}
 		got = append(got, filepath.Base(f))
 	}
-	want := []string{"or[d]ers.000000.upserts", "or[d]ers.000012.upserts"}
+	// The glob is wider than the layout since #1723 (it admits range pairs,
+	// and with them anything after six digits); TableDeltaNameFilter is what
+	// narrows the read back to the chain, and TestTableDeltaNameFilter pins
+	// that against DuckDB.
+	want := []string{"or[d]ers.000000.upserts", "or[d]ers.0000001.upserts", "or[d]ers.000012.upserts"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("glob matched %v, want exactly %v", got, want)
 	}
