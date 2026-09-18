@@ -307,14 +307,24 @@ type TableReport struct {
 	CarriedByLink bool
 
 	// TableDelta is true when the table was published as its previous file
-	// plus a delta beside it instead of being rewritten (#1638). DeltaDeadRows
-	// and DeltaUpsertRows are what the delta holds in total, not what this run
-	// added. DeltaCompacted, when set, says why a run with deltas on rewrote
-	// the table anyway. All zero with deltas off.
-	TableDelta      bool
-	DeltaDeadRows   int64
-	DeltaUpsertRows int64
-	DeltaCompacted  string
+	// plus a chain of deltas beside it instead of being rewritten (#1638,
+	// #1718). DeltaPairWritten says whether this run wrote a pair at all (an
+	// empty window over an existing chain writes none). DeltaSeq is the
+	// sequence of the pair this run wrote (or of the chain's last pair when
+	// none was written);
+	// DeltaDeadRows and DeltaUpsertRows are what THIS run's pair holds, its
+	// window and nothing accumulated; DeltaChainFiles is how many pairs the
+	// chain has now and DeltaChainCopied how many of the carried pairs had to
+	// be copied because a hard link failed. DeltaCompacted, when set, says why
+	// a run with deltas on rewrote the table anyway. All zero with deltas off.
+	TableDelta       bool
+	DeltaPairWritten bool
+	DeltaSeq         int
+	DeltaDeadRows    int64
+	DeltaUpsertRows  int64
+	DeltaChainFiles  int
+	DeltaChainCopied int
+	DeltaCompacted   string
 }
 
 // shouldWarnEvents reports whether a fetched event count should trigger the
@@ -1019,6 +1029,14 @@ func ReconstructTable(
 		if prevDelta != nil {
 			fetchSince = prevDelta.Meta.SnapshotTimestamp
 			anchorMeta.BinlogFile, anchorMeta.BinlogPos = prevDelta.Meta.BinlogFile, prevDelta.Meta.BinlogPos
+		} else if !bmeta.SnapshotTimestamp.IsZero() && bmeta.SnapshotTimestamp.Before(fetchSince) {
+			// A chain set aside as computed against ANOTHER base (someone put
+			// an older table file under the chain's name): FindBaseline took
+			// the chain's start from the chain, but the fold now runs from
+			// this base's own anchor, and the coarse time floor must not sit
+			// after events that anchor has yet to see. The base's own stamp
+			// is the floor its anchor pairs with (#1718).
+			fetchSince = bmeta.SnapshotTimestamp
 		}
 	}
 

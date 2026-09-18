@@ -98,6 +98,9 @@ type BaselineTable struct {
 	// are derived from Path (and Rel) at render time, so they follow whatever
 	// respelling the producer applies to those.
 	Delta bool
+	// DeltaLegacy marks the v0.83.0 layout (one pair, no sequence): read with
+	// the legacy state body while the snapshot is retained.
+	DeltaLegacy bool
 }
 
 // MarkTableDeltas sets Delta on every table that has one, with one listing per
@@ -108,18 +111,20 @@ type BaselineTable struct {
 // file alone would show a table as it was at the start of its chain and call
 // it the snapshot's state.
 func MarkTableDeltas(ctx context.Context, tables []BaselineTable) error {
-	bySnapshot := map[string]map[string]bool{}
+	bySnapshot := map[string]map[string]*baseline.TableDeltaChain{}
 	for i := range tables {
 		snap := snapshotDirOf(tables[i].Path)
 		deltas, ok := bySnapshot[snap]
 		if !ok {
 			var err error
-			if deltas, err = baseline.SnapshotTableDeltas(ctx, snap); err != nil {
+			if deltas, err = baseline.SnapshotTableDeltaChains(ctx, snap); err != nil {
 				return err
 			}
 			bySnapshot[snap] = deltas
 		}
-		tables[i].Delta = deltas[tables[i].Path]
+		c := deltas[tables[i].Path]
+		tables[i].Delta = c != nil
+		tables[i].DeltaLegacy = c != nil && c.Legacy
 	}
 	return nil
 }
@@ -1872,17 +1877,14 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 			continue
 		}
 		if t.Delta {
-			posdel, upserts := baseline.TableDeltaPaths(t.Path)
-			fmt.Fprintf(b, "  %s;\n", baseline.TableDeltaStateSQL(
-				sqlString(t.Path), sqlString(posdel), sqlString(upserts), decimalReplaceClause(t)))
+			fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Path, sqlString))
 			continue
 		}
 		// Only a view that FOLLOWS can meet a snapshot it was not generated
 		// against; a pinned one reads the same files forever.
 		guard := ""
 		if in.Follow.follows() {
-			guard = "\n  " + deltaAppearedGuard(sqlString(globLiteral(strings.TrimSuffix(t.Path, ".parquet"))+"[.]"+
-				strings.TrimPrefix(baseline.TableDeltaUpsertsSuffix, ".")), t)
+			guard = "\n  " + deltaAppearedGuard(sqlString(deltaAppearedPattern(t.Path)), t)
 		}
 		if replace := decimalReplaceClause(t); replace != "" {
 			fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
@@ -2165,14 +2167,13 @@ func writeNewestStateBody(b *strings.Builder, t BaselineTable) {
 			newestVar, sqlString(newestVarUnsetMsg), newestVar, sqlString(rel))
 	}
 	if t.Delta {
-		posdel, upserts := baseline.TableDeltaPaths(t.Rel)
-		fmt.Fprintf(b, "  %s;\n", baseline.TableDeltaStateSQL(path(t.Rel), path(posdel), path(upserts), decimalReplaceClause(t)))
+		fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path))
 		return
 	}
 	// The guard's pattern is built beside the variable, not through path():
 	// an unset variable is already reported by the read itself.
 	guard := "\n  " + deltaAppearedGuard(fmt.Sprintf("getvariable('%s') || %s", newestVar,
-		sqlString(globLiteral(strings.TrimSuffix(t.Rel, ".parquet"))+"[.]"+strings.TrimPrefix(baseline.TableDeltaUpsertsSuffix, "."))), t)
+		sqlString(deltaAppearedPattern(t.Rel))), t)
 	read := "read_parquet(" + path(t.Rel) + ")" + guard
 	if replace := decimalReplaceClause(t); replace != "" {
 		fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
@@ -2180,6 +2181,29 @@ func writeNewestStateBody(b *strings.Builder, t BaselineTable) {
 		return
 	}
 	fmt.Fprintf(b, "  SELECT * FROM %s;\n", read)
+}
+
+// deltaStateBody is the state view's body for a table with a delta: the
+// chain's state (baseline.TableDeltaStateSQL over the chain's globs) or, for
+// a snapshot written by v0.83.0, the one pair's state. p is the table file's
+// path or Rel, and expr turns such a string into the SQL expression the
+// producer's following mode wants (a literal, or the variable-prefixed CASE).
+func deltaStateBody(t BaselineTable, p string, expr func(string) string) string {
+	if t.DeltaLegacy {
+		stem := strings.TrimSuffix(p, ".parquet")
+		return baseline.LegacyTableDeltaStateSQL(expr(p), expr(stem+baseline.TableDeltaPosdelSuffix),
+			expr(stem+baseline.TableDeltaUpsertsSuffix), decimalReplaceClause(t))
+	}
+	posdel, upserts := baseline.TableDeltaGlobs(p)
+	return baseline.TableDeltaStateSQL(expr(p), expr(posdel), expr(upserts), decimalReplaceClause(t))
+}
+
+// deltaAppearedPattern is the glob deltaAppearedGuard counts: every numbered
+// upserts file of the table's chain (#1718). It always holds a wildcard (the
+// digit classes), which the guard needs over S3.
+func deltaAppearedPattern(p string) string {
+	return globLiteral(strings.TrimSuffix(p, ".parquet")) + "." + strings.Repeat("[0-9]", baseline.TableDeltaSeqWidth) +
+		baseline.TableDeltaUpsertsSuffix
 }
 
 // deltaAppearedGuard is the WHERE clause a FOLLOWING state view over a table
@@ -2198,7 +2222,7 @@ func writeNewestStateBody(b *strings.Builder, t BaselineTable) {
 // Three things verified against DuckDB 1.5.5 rather than assumed. The guard
 // survives in a persisted view and fires per query. error() behind a CASE whose
 // condition is a subquery is not folded at bind time, so a healthy view binds.
-// And the pattern must hold a wildcard ("[.]"): a glob over an exact s3:// key
+// And the pattern must hold a wildcard (the digit classes): a glob over an exact s3:// key
 // lists nothing and reports the key as found. On a 40M-row file the guard adds
 // nothing measurable to a full-table sum.
 func deltaAppearedGuard(pattern string, t BaselineTable) string {

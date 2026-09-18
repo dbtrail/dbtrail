@@ -261,9 +261,12 @@ func buildRefreshOutcomes(tables []string, reports []*reconstruct.TableReport, f
 		done[k] = true
 		unchanged[k] = r.CarriedForward
 		switch {
+		case r.TableDelta && !r.DeltaPairWritten:
+			deltaDetail[k] = fmt.Sprintf("no events in the window; the previous file and its %d delta pairs were kept as they are (last pair %d)",
+				r.DeltaChainFiles, r.DeltaSeq)
 		case r.TableDelta:
-			deltaDetail[k] = fmt.Sprintf("the previous file was kept and the change written beside it (%d rows replaced or removed, %d current rows)",
-				r.DeltaDeadRows, r.DeltaUpsertRows)
+			deltaDetail[k] = fmt.Sprintf("the previous file was kept and this window's change written beside it as pair %d of %d (%d rows replaced or removed, %d changed or new rows)",
+				r.DeltaSeq, r.DeltaChainFiles, r.DeltaDeadRows, r.DeltaUpsertRows)
 		case r.DeltaCompacted != "":
 			deltaDetail[k] = "written again in full: " + r.DeltaCompacted
 		}

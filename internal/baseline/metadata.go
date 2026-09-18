@@ -118,6 +118,9 @@ type DumpMetadata struct {
 	DeltaChainStart time.Time
 	DeltaBaseAnchor string
 	DeltaBaseSize   int64
+	// DeltaSeq is MetaKeyDeltaSeq (#1718): the pair's sequence in its chain.
+	// -1 when absent (a table file, or a v0.83.0 pair).
+	DeltaSeq int
 	// Producer is MetaKeySnapshotProducer: which code path wrote these bytes
 	// ("dump" | "reconstruct"). Empty on any snapshot written before #1545
 	// stamped it on the dump path; see ProvenanceOf, which does not guess.
@@ -212,7 +215,7 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 	}
 	defer f.Close()
 
-	var m DumpMetadata
+	m := DumpMetadata{DeltaSeq: -1}
 	markerStartedAt, haveMarker := readStartedAtMarker(inputDir)
 	if haveMarker {
 		m.StartedAt = markerStartedAt
@@ -282,7 +285,7 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 		return DumpMetadata{}, fmt.Errorf("open parquet file: %w", err)
 	}
 
-	var m DumpMetadata
+	m := DumpMetadata{DeltaSeq: -1}
 	if v, ok := pf.Lookup(MetaKeyBinlogFile); ok {
 		m.BinlogFile = v
 	}
@@ -328,6 +331,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	}
 	if v, ok := pf.Lookup(MetaKeyDeltaBaseSize); ok {
 		m.DeltaBaseSize = parseDeltaBaseSize(path, v)
+	}
+	if v, ok := pf.Lookup(MetaKeyDeltaSeq); ok {
+		m.DeltaSeq = parseDeltaSeq(path, v)
 	}
 	if v, ok := pf.Lookup(MetaKeyRowCount); ok {
 		n, parseErr := strconv.ParseInt(v, 10, 64)
@@ -387,7 +393,7 @@ func ReadParquetMetadataAny(ctx context.Context, path string) (DumpMetadata, err
 	}
 	defer rows.Close()
 
-	var m DumpMetadata
+	m := DumpMetadata{DeltaSeq: -1}
 	var rowCountCorrupt bool
 	for rows.Next() {
 		// DuckDB returns key/value as BLOB (BYTE_ARRAY) when the Parquet
@@ -441,6 +447,8 @@ func ReadParquetMetadataAny(ctx context.Context, path string) (DumpMetadata, err
 			m.DeltaBaseAnchor = val
 		case MetaKeyDeltaBaseSize:
 			m.DeltaBaseSize = parseDeltaBaseSize(path, val)
+		case MetaKeyDeltaSeq:
+			m.DeltaSeq = parseDeltaSeq(path, val)
 		case MetaKeyRowCount:
 			if n, parseErr := strconv.ParseInt(val, 10, 64); parseErr == nil {
 				m.RowCount = n
@@ -475,6 +483,17 @@ func unquote(s string) string {
 // comes back as -1, never 0: the reader compares it against a real file size,
 // and -1 can match none, so a corrupt footer fails the pairing check instead of
 // passing it for an empty base.
+// parseDeltaSeq reads MetaKeyDeltaSeq. A value that does not parse is -1,
+// which readTableDelta treats as "not this layout" and sets the pair aside.
+func parseDeltaSeq(path, raw string) int {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		slog.Warn("baseline footer: unreadable table delta sequence; the pair will be set aside", "path", path, "value", raw)
+		return -1
+	}
+	return n
+}
+
 func parseDeltaBaseSize(path, raw string) int64 {
 	n, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || n < 0 {

@@ -120,24 +120,24 @@ CREATE OR REPLACE VIEW "state_legacy_db_audit_log" AS
   SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     ELSE getvariable('bintrail_newest_snapshot') || 'Legacy-DB/Audit Log.parquet' END)
-  WHERE CASE WHEN (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'Legacy-DB/Audit Log[.]upserts')) > 0 THEN error('bintrail views: Legacy-DB.Audit Log now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
+  WHERE CASE WHEN (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'Legacy-DB/Audit Log.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: Legacy-DB.Audit Log now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
 CREATE OR REPLACE VIEW "state_shop_order_items" AS
   SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     ELSE getvariable('bintrail_newest_snapshot') || 'shop/order_items.parquet' END)
-  WHERE CASE WHEN (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'shop/order_items[.]upserts')) > 0 THEN error('bintrail views: shop.order_items now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
+  WHERE CASE WHEN (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'shop/order_items.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: shop.order_items now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
 CREATE OR REPLACE VIEW "state_shop_orders" AS
   SELECT * REPLACE (CAST("total" AS DECIMAL(10,2)) AS "total", CAST("tax_rate" AS DECIMAL(6,4)) AS "tax_rate")
   FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     ELSE getvariable('bintrail_newest_snapshot') || 'shop/orders.parquet' END)
-  WHERE CASE WHEN (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'shop/orders[.]upserts')) > 0 THEN error('bintrail views: shop.orders now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
+  WHERE CASE WHEN (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'shop/orders.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: shop.orders now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
 -- state_shop_order_items_2: weight is DECIMAL(65,30), wider than DuckDB's 38 digits (left as text)
 CREATE OR REPLACE VIEW "state_shop_order_items_2" AS
   SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')
     ELSE getvariable('bintrail_newest_snapshot') || 'shop_order/items.parquet' END)
-  WHERE CASE WHEN (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'shop_order/items[.]upserts')) > 0 THEN error('bintrail views: shop_order.items now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
+  WHERE CASE WHEN (SELECT count(*) FROM glob(getvariable('bintrail_newest_snapshot') || 'shop_order/items.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: shop_order.items now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
 
 -- events: every archived binlog event, across all archive sources.
 --
