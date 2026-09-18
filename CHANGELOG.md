@@ -31,6 +31,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the age rule decides, as for a quiet server: a fresh anchor is an
   update; its reason line now says "no usable update rate" instead of
   "no measured update rate", since the updates may well be measured.
+- **The Backups page no longer sweeps the whole S3 prefix, four times,
+  per request** (#1679). Listing an s3:// backup location was two DuckDB
+  globs over every object under the prefix (the markers, then every table
+  file), one ListObjectsV2 request per 1,000 objects each and nothing
+  reused between them, and the page's schedule probe listed the same
+  bucket again the same way: on a prefix of 550 snapshots and 11,000
+  objects the page took over five seconds in region and 26 out of it,
+  growing with the inventory rather than with the fifty snapshots it
+  shows. The listing is now two SDK requests: the snapshot directories (a
+  delimiter listing) and the objects of only the newest snapshots wanted,
+  from the oldest of those on. The page asks for one more than it shows,
+  so it still says when older ones exist; the schedule's probe reads the
+  newest few and widens only while they are incomplete; `verify`, `views`
+  and the other whole-inventory readers list everything in a fraction of
+  the time (3.7 s out of region against 26). The `_SUCCESS`/`_INCOMPLETE`
+  filter is unchanged in meaning and read off the same listing; a listing
+  error is still the caller's error, never a shorter answer, and the page
+  says older snapshots exist whenever the listing knows they do, even
+  when an incomplete one among the newest leaves the page short of its
+  cap, and a page whose newest snapshots are all incomplete widens until
+  it holds one rather than coming back empty. The schedule leg of the page now runs under the same 15-second
+  bound as the listing. Two things to know: the page's staleness headline
+  now grades the snapshots it reads, so a table dropped from the backup
+  set long ago no longer grades it (the CLI's `status` still walks every
+  snapshot); and the listing and the snapshot detail open the bucket
+  without the HeadBucket probe a writer makes, so a read-only role
+  granted `s3:ListBucket` under a prefix condition keeps listing, and with no region configured the
+  bucket's own region is asked for, then us-east-1, as DuckDB assumed.
 
 ## [0.84.0] - 2026-09-18
 

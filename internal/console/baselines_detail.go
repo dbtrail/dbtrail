@@ -111,7 +111,7 @@ var newBaselineObjectStore = func(ctx context.Context, src string) (baselineObje
 	if err != nil {
 		return nil, err
 	}
-	return storage.NewS3Backend(ctx, storage.S3Config{Bucket: bucket, Prefix: prefix})
+	return storage.NewS3BackendUnprobed(ctx, storage.S3Config{Bucket: bucket, Prefix: prefix})
 }
 
 // snapshotSource reads one baseline source's files, local directory or S3.

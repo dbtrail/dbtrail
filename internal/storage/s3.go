@@ -63,6 +63,44 @@ type S3Backend struct {
 	prefix string
 }
 
+// NewS3BackendUnprobed is NewS3Backend without the HeadBucket probe, for a
+// reader that only lists (#1679). HeadBucket sends no prefix, so a policy
+// that grants s3:ListBucket under a prefix condition (a read-only role over
+// someone else's bucket, the common shape) refuses it while the prefixed
+// listing it guards is allowed; the listing itself fails loudly when it is
+// really forbidden, so the probe added a requirement, not a check. And when
+// no region resolves from the environment (keys alone, off EC2), the
+// bucket's own region is asked for, then us-east-1: what DuckDB's httpfs
+// defaulted to, so a read-only console that listed yesterday lists today.
+func NewS3BackendUnprobed(ctx context.Context, cfg S3Config) (*S3Backend, error) {
+	if cfg.Bucket == "" {
+		return nil, fmt.Errorf("storage: S3 bucket name is required")
+	}
+	client, err := newS3Client(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Endpoint == "" && client.Options().Region == "" {
+		awsCfg, err := LoadAWSConfig(ctx, "")
+		if err != nil {
+			return nil, fmt.Errorf("storage: %w", err)
+		}
+		region, ok := DetectBucketRegion(ctx, awsCfg, cfg.Bucket)
+		if !ok {
+			region = "us-east-1"
+		}
+		cfg.Region = region
+		if client, err = newS3Client(ctx, cfg); err != nil {
+			return nil, err
+		}
+	}
+	prefix := cfg.Prefix
+	if prefix != "" {
+		prefix = strings.TrimSuffix(prefix, "/") + "/"
+	}
+	return &S3Backend{client: client, bucket: cfg.Bucket, prefix: prefix}, nil
+}
+
 // NewS3Backend creates an S3Backend and validates that the credentials and
 // bucket are accessible by issuing a HeadBucket request. Returns an error
 // if the bucket does not exist or credentials are invalid.
@@ -250,6 +288,45 @@ func (b *S3Backend) Get(ctx context.Context, key string) (io.ReadCloser, error) 
 	return resp.Body, nil
 }
 
+// ListDirs returns the names of the "directories" directly under prefix: the
+// next path segment of the keys there, each once, in byte order, without the
+// objects inside them. One ListObjectsV2 request per 1,000 directories
+// (Delimiter "/"), against one per 1,000 OBJECTS for a listing that walks
+// them all (#1679): a baseline prefix of 550 snapshots and 11,000 objects is
+// one request here and eleven there.
+func (b *S3Backend) ListDirs(ctx context.Context, prefix string) ([]string, error) {
+	full := b.fullKey(prefix)
+	if full != "" && !strings.HasSuffix(full, "/") {
+		full += "/"
+	}
+	var out []string
+	var continuationToken *string
+	for {
+		resp, err := b.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(b.bucket),
+			Prefix:            aws.String(full),
+			Delimiter:         aws.String("/"),
+			ContinuationToken: continuationToken,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("storage: list directories under %q (after %d): %w", prefix, len(out), err)
+		}
+		for _, cp := range resp.CommonPrefixes {
+			if cp.Prefix == nil {
+				continue
+			}
+			if name := strings.TrimSuffix(strings.TrimPrefix(*cp.Prefix, full), "/"); name != "" {
+				out = append(out, name)
+			}
+		}
+		if !aws.ToBool(resp.IsTruncated) {
+			break
+		}
+		continuationToken = resp.NextContinuationToken
+	}
+	return out, nil
+}
+
 // List returns all keys under the given prefix.
 func (b *S3Backend) List(ctx context.Context, prefix string) ([]string, error) {
 	infos, err := b.ListInfo(ctx, prefix)
@@ -268,14 +345,29 @@ func (b *S3Backend) List(ctx context.Context, prefix string) ([]string, error) {
 // fields on every page; List used to drop them, and the console's backup
 // detail/download surfaces need them without one HeadObject per file.
 func (b *S3Backend) ListInfo(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	return b.ListInfoFrom(ctx, prefix, "")
+}
+
+// ListInfoFrom is ListInfo starting AFTER the key startAfter (relative to the
+// backend's prefix like every key here; "" starts at the beginning). S3 lists
+// keys in byte order, so a caller that knows which keys it needs can skip
+// every page that sorts before them (#1679): the newest snapshot directories
+// of a baseline prefix are its last keys, and a listing that starts at the
+// oldest one wanted costs one page instead of the whole inventory.
+func (b *S3Backend) ListInfoFrom(ctx context.Context, prefix, startAfter string) ([]ObjectInfo, error) {
 	fullPrefix := b.fullKey(prefix)
 	var infos []ObjectInfo
 
 	var continuationToken *string
+	var after *string
+	if startAfter != "" {
+		after = aws.String(b.fullKey(startAfter))
+	}
 	for {
 		resp, err := b.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(b.bucket),
 			Prefix:            aws.String(fullPrefix),
+			StartAfter:        after,
 			ContinuationToken: continuationToken,
 		})
 		if err != nil {
@@ -293,7 +385,10 @@ func (b *S3Backend) ListInfo(ctx context.Context, prefix string) ([]ObjectInfo, 
 		if !aws.ToBool(resp.IsTruncated) {
 			break
 		}
-		continuationToken = resp.NextContinuationToken
+		// The token carries the position from here on. AWS ignores a
+		// StartAfter beside a token; a compatible store may not, and one
+		// that honoured it would restart the listing at the same key.
+		continuationToken, after = resp.NextContinuationToken, nil
 	}
 
 	return infos, nil
