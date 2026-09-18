@@ -5419,10 +5419,18 @@ function baselineContextStrip(b, cur) {
   if (uniform !== null) strip.append(item("TABLES", uniform + " per backup"));
   strip.append(item("TIME-TRAVEL", b.reconstruct ? "enabled" : "off (archives disabled)"));
   // The page's primary action, at page level — not a list-header costume.
-  if (capsCache.baseline_trigger && cur && cur.id && cur.kind === "registry" && b.configured) {
-    const btn = el("button", { class: "btn ctx-action", type: "button", text: "Create backup" });
-    btn.onclick = () => createBaseline(cur.id, btn);
-    strip.append(btn);
+  if (cur && cur.id && cur.kind === "registry" && b.configured) {
+    if (capsCache.baseline_trigger) {
+      const btn = el("button", { class: "btn ctx-action", type: "button", text: "Create backup" });
+      btn.onclick = () => createBaseline(cur.id, btn);
+      strip.append(btn);
+    } else {
+      // Where the button would be, say why it is not (#1677): a missing
+      // button reads as a page that has no such action. Named the way the
+      // Backup settings page labels the setting; the console shows no
+      // variables.
+      strip.append(item("CREATE BACKUP", "off, set when DBTrail starts (Backup settings page)"));
+    }
   }
   return strip;
 }

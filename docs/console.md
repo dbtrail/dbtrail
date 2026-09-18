@@ -93,9 +93,13 @@ and searching events:
    change, a **Getting started** list at the top shows each step from adding
    it: create the index database, connect to the source, read the table
    structure (not for PostgreSQL, whose stream saves it when changes arrive),
-   start capturing changes, capture the first change, and a first backup when
-   the console can create one for that server (a baseline location, and for
-   PostgreSQL a replication slot and publication). Each step is waiting, running, done or failed;
+   start capturing changes, capture the first change, and take the first
+   backup. When the console cannot create that backup, the step still shows,
+   waiting, with the reason: creating backups is turned off for the daemon
+   (see `BINTRAIL_CONSOLE_BASELINE_TRIGGER` below), or the server has no
+   backup location of its own. It is left out only for a PostgreSQL server
+   with no replication slot or publication (the server form refuses to save
+   one), whose capture steps already fail naming what is missing. Each step is waiting, running, done or failed;
    a failure shows the error and what to do, and capture with no change on the
    source yet is shown as running, not stuck. The list goes away once a change
    is indexed. Then a **Restore
@@ -472,7 +476,9 @@ panel that answers whether a restore would work, far below the fold.
   count, and (local sources) the binlog coordinates its deltas start from. The
   empty states explain how to produce a first baseline (`bintrail dump` →
   `bintrail baseline`). When the **Create baseline** button is enabled it sits
-  in this panel's header.
+  in this panel's header. When creating backups is turned off for the daemon,
+  that spot reads **CREATE BACKUP: off, set when DBTrail starts** instead, for
+  a server with its own backup location.
 - **Keep it current with Iceberg** (#1466) — a display-only panel at the
   bottom of the page that prints the exact `bintrail export iceberg` command
   for the selected server, with its index connection and its resolved backup
@@ -886,6 +892,14 @@ longer does anything. Remove it.
   see [Protect → Baselines](#the-protect-pages)). Off by default for a bare
   `watch` invocation; the bundled compose stack sets this on by default (see
   [docker.md](docker.md) — `BASELINE_TRIGGER=0` in `.env` opts out there).
+  The bare default stays off on purpose (#1677): the `bintrail-console`
+  deb/rpm package does not install `mydumper`, so a default-on button would
+  fail on first use, and a full backup reads every table in scope on the
+  source, which is load an operator should choose. It also lets a scheduled
+  update that a schema change refuses fall back to a full backup on its own.
+  When it is off, the Overview's Getting started list and the Backups page
+  both say so and point at the Backup settings page, where the setting is
+  listed under the settings read when DBTrail starts.
 - `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — local staging dir for
   S3-destined baselines created by that button (default a temp subdir).
 - `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — `ftwrl` (default),
@@ -1378,7 +1392,7 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `POST /api/servers/{id}/monitor/start` | Supervisor only (403 on the standalone console): doctor preflight → on green, record intent + provision + stream. Returns `{doctor, started, monitor}`. |
 | `POST /api/servers/{id}/monitor/stop` | Supervisor only: clear intent, drain the stream (final checkpoint), release the advisory lock. |
 | `GET /api/servers/{id}/monitor` | Supervisor only: `{monitor: {state, last_error, since, source_connected, retrying, phase}}` — `stopped\|pending\|running\|stalled\|lost_position\|failed`. `phase` names a long startup step a `pending` stream is inside, currently only `resume_cleanup` (the pre-capture delete of changes a replayed window would save twice); absent when none is running. |
-| `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a change is indexed. A first-backup step is included only when console backups are enabled and the server has a baseline location (and, for PostgreSQL, a slot and publication). `check_error` means the index database could not be read, and nothing is marked done from it. |
+| `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a change is indexed. A first-backup step follows the capture steps: with its job's state when console backups are enabled and the server has its own baseline location, and as `waiting` with a `detail` and `fix` when backups are turned off for the daemon or the server has no baseline location of its own (#1677). It is left out only for a PostgreSQL server with no slot or publication (the server form refuses to save one), whose capture steps fail naming what is missing. `check_error` means the index database could not be read, and nothing is marked done from it. |
 | `GET /api/rotation` | Effective global rotation policy: `{retain, interval, add_future, source, enabled}` — `source` is `"override"` (console-saved) or `"default"` (daemon `--rotate-*`). |
 | `PUT /api/rotation` | Supervisor only (403 on the standalone console): save a global rotation override `{retain, interval, add_future}` (validated; `off` rejected). Applies live on the next cycle. |
 | `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. |

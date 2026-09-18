@@ -2330,11 +2330,15 @@ try {
     capsCache.baseline_trigger = keepCap;
     currentServer = keepCur;
     const hasBtn = (n) => Array.from(n.querySelectorAll("button")).some((b) => b.textContent === "Create backup");
+    // #1677: where the button would be, the strip says creation is off.
+    const offNote = (n) => /CREATE BACKUP/.test(n.textContent) && /set when DBTrail starts/.test(n.textContent);
     return {
       cfgOffBtn: hasBtn(cfgOff) || hasBtn(cfgOffStrip),
       cfgOffEmpty: /No backups configured/.test(cfgOff.textContent),
+      cfgOffNote: offNote(cfgOffStrip),
       capOffBtn: hasBtn(capOff) || hasBtn(capOffStrip),
       capOffEmpty: /no backups found/.test(capOff.textContent),
+      capOffNote: offNote(capOffStrip),
     };
   });
   (!gates.cfgOffBtn && gates.cfgOffEmpty)
@@ -2343,6 +2347,9 @@ try {
   (!gates.capOffBtn && gates.capOffEmpty)
     ? ok("baselines: baseline_trigger off → no button even with a destination")
     : bad("baselines: baseline_trigger off → no button even with a destination", JSON.stringify(gates));
+  (gates.capOffNote && !gates.cfgOffNote && !/CREATE BACKUP/.test(stg.stripText))
+    ? ok("baselines: baseline_trigger off → the strip says creation is off where the button would be, and only then")
+    : bad("baselines: baseline_trigger off → the strip says creation is off where the button would be, and only then", JSON.stringify({ gates, live: stg.stripText }));
 
   // Scenario 15e — the Backups feature set: rename, per-row detail with real
   // sizes, the tar.gz download wire, the restore card's gate + inline refusal,

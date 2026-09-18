@@ -127,26 +127,32 @@ func TestFirstRunSteps(t *testing.T) {
 	}
 }
 
-// TestFirstRunBackupStep: a first backup is listed only when the console can
-// create one and this server has somewhere to put it.
+// TestFirstRunBackupStep: the first backup is listed with its job's state when
+// the console can create one, and as waiting, with the reason, when it cannot
+// (#1677). It is left out only when neither applies.
 func TestFirstRunBackupStep(t *testing.T) {
 	yes := true
 	base := firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true}
 	for _, c := range []struct {
-		name   string
-		backup *BaselineStatus
-		states string
+		name       string
+		backup     *BaselineStatus
+		off, noLoc bool
+		states     string
 	}{
-		{"not offered: no backup step", nil, "ddddr"},
-		{"offered, none yet: waiting", &BaselineStatus{State: "idle"}, "ddddrw"},
-		{"running", &BaselineStatus{State: "running"}, "ddddrr"},
-		{"published", &BaselineStatus{State: "succeeded", Published: true}, "ddddrd"},
-		{"failed", &BaselineStatus{State: "failed", LastError: "mydumper not found"}, "ddddrf"},
-		{"the fold published and only the upload failed: the backup exists", &BaselineStatus{State: "failed", Published: true, LastError: "upload"}, "ddddrd"},
+		{"not offered and nothing blocks it: no backup step", nil, false, false, "ddddr"},
+		{"turned off in this process: waiting", nil, true, false, "ddddrw"},
+		{"turned off and no location: waiting", nil, true, true, "ddddrw"},
+		{"no location of its own: waiting", nil, false, true, "ddddrw"},
+		{"offered, none yet: waiting", &BaselineStatus{State: "idle"}, false, false, "ddddrw"},
+		{"running", &BaselineStatus{State: "running"}, false, false, "ddddrr"},
+		{"published", &BaselineStatus{State: "succeeded", Published: true}, false, false, "ddddrd"},
+		{"failed", &BaselineStatus{State: "failed", LastError: "mydumper not found"}, false, false, "ddddrf"},
+		{"the fold published and only the upload failed: the backup exists", &BaselineStatus{State: "failed", Published: true, LastError: "upload"}, false, false, "ddddrd"},
+		{"a job's state outranks a reason", &BaselineStatus{State: "running"}, true, true, "ddddrr"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			in := base
-			in.Backup = c.backup
+			in.Backup, in.BackupOff, in.BackupNoLocation = c.backup, c.off, c.noLoc
 			got := firstRunSteps(in)
 			var states strings.Builder
 			for _, s := range got.Steps {
@@ -154,6 +160,76 @@ func TestFirstRunBackupStep(t *testing.T) {
 			}
 			if states.String() != c.states {
 				t.Fatalf("states = %s, want %s (%+v)", states.String(), c.states, got.Steps)
+			}
+		})
+	}
+}
+
+// TestFirstRunBackupStepSaysWhyItCannotRun is #1677: a first backup the
+// console cannot create is listed with the reason and what to do, in words.
+// The step used to vanish, and a list with no backup step reads as an install
+// that needs none. The daemon setting is named the way the Backup settings
+// page labels it, never as a variable: the console shows no commands.
+// mydumper is named only for MySQL, whose full backup runs it; a PostgreSQL
+// full backup runs inside DBTrail.
+func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
+	yes := true
+	base := firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true}
+	for _, c := range []struct {
+		name              string
+		off, noLoc, pg    bool
+		detailHas, fixHas []string
+		fixLacks          []string
+	}{
+		{"off, MySQL, location set", true, false, false,
+			[]string{"turned off", "whole table"},
+			[]string{"Create-backup button", "Set when DBTrail starts", "Backup settings page", "restart DBTrail", "reads every table", "mydumper"},
+			[]string{"backup location"}},
+		{"off, MySQL, no location: both fixes", true, true, false,
+			[]string{"turned off"},
+			[]string{"Create-backup button", "mydumper", "its own backup location"},
+			nil},
+		{"off, PostgreSQL: no mydumper", true, false, true,
+			[]string{"turned off"},
+			[]string{"Create-backup button", "reads every table"},
+			[]string{"mydumper", "backup location"}},
+		{"on, no location of its own", false, true, false,
+			[]string{"no backup location of its own"},
+			[]string{"Backup dir or Backup S3", "Backup settings page", "Backups page"},
+			[]string{"Create-backup button", "mydumper", "restart"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			in := base
+			in.BackupOff, in.BackupNoLocation, in.Postgres = c.off, c.noLoc, c.pg
+			if c.pg {
+				in.SnapshotTaken = false
+			}
+			got := firstRunSteps(in)
+			s := got.Steps[len(got.Steps)-1]
+			if s.Name != "Take the first backup" || s.State != firstRunWaiting {
+				t.Fatalf("last step = %+v", s)
+			}
+			for _, w := range c.detailHas {
+				if !strings.Contains(s.Detail, w) {
+					t.Errorf("detail %q lacks %q", s.Detail, w)
+				}
+			}
+			for _, w := range c.fixHas {
+				if !strings.Contains(s.Fix, w) {
+					t.Errorf("fix %q lacks %q", s.Fix, w)
+				}
+			}
+			for _, w := range c.fixLacks {
+				if strings.Contains(s.Fix, w) {
+					t.Errorf("fix %q holds %q", s.Fix, w)
+				}
+			}
+			for _, text := range []string{s.Detail, s.Fix} {
+				for _, bad := range []string{"—", "BINTRAIL_", "--", "=1", " here", "this page", "  ", ".."} {
+					if strings.Contains(text, bad) {
+						t.Errorf("%q holds %q", text, bad)
+					}
+				}
 			}
 		})
 	}
@@ -237,14 +313,31 @@ func TestHandleFirstRun(t *testing.T) {
 			t.Fatalf("code = %d, body = %s", code, body)
 		}
 	})
-	t.Run("a MySQL server gets the structure step and no backup step without a location", func(t *testing.T) {
+	t.Run("a MySQL server gets the structure step, and a backup step saying it has no location", func(t *testing.T) {
 		id := add(ServerEntry{Name: "my", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/"})
 		code, body, rep := get(id)
-		if code != 200 || len(rep.Steps) != 5 || !strings.Contains(names(rep), "Read the table structure") || strings.Contains(names(rep), "backup") {
+		if code != 200 || len(rep.Steps) != 6 || !strings.Contains(names(rep), "Read the table structure") {
 			t.Fatalf("code = %d, steps = %s, body = %s", code, names(rep), body)
+		}
+		if s := rep.Steps[5]; s.Name != "Take the first backup" || s.State != firstRunWaiting || !strings.Contains(s.Detail, "no backup location of its own") {
+			t.Fatalf("backup step = %+v", s)
 		}
 		if !strings.Contains(body, `"name":"Create the index database"`) || !strings.Contains(body, `"state":"waiting"`) {
 			t.Errorf("the wire shape changed: %s", body)
+		}
+	})
+	t.Run("a MySQL server with a location gets its backup job's state", func(t *testing.T) {
+		id := add(ServerEntry{Name: "myloc", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineS3: "s3://b/p"})
+		_, body, rep := get(id)
+		if s := rep.Steps[len(rep.Steps)-1]; s.Name != "Take the first backup" || s.Fix != "Create one on the Backups page." {
+			t.Fatalf("backup step = %+v, body = %s", s, body)
+		}
+	})
+	t.Run("a PostgreSQL server with no slot gets no backup step: capture fails first and says why", func(t *testing.T) {
+		id := add(ServerEntry{Name: "pgnoslot", Flavor: FlavorPostgres, SourceDSN: "postgres://<redacted>/db", BaselineDir: t.TempDir()})
+		code, body, rep := get(id)
+		if code != 200 || strings.Contains(names(rep), "backup") {
+			t.Fatalf("code = %d, steps = %s, body = %s", code, names(rep), body)
 		}
 	})
 	t.Run("a PostgreSQL server with a location gets no structure step and a backup step", func(t *testing.T) {
@@ -262,4 +355,47 @@ func TestHandleFirstRun(t *testing.T) {
 			t.Fatalf("code = %d, body = %s", code, body)
 		}
 	})
+}
+
+// TestHandleFirstRunWithBackupsOff is #1677 through the real router: on a
+// daemon that cannot create full backups, the backup step is listed and says
+// so, where it used to be left out. The location sentence rides along only
+// when the server also has none of its own.
+func TestHandleFirstRunWithBackupsOff(t *testing.T) {
+	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg,
+		MonitorCtrl: &stubMonitorCtrl{status: MonitorStatus{State: "stopped"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name        string
+		entry       ServerEntry
+		wantLocText bool
+	}{
+		{"with a location", ServerEntry{Name: "loc", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineDir: t.TempDir()}, false},
+		{"with none", ServerEntry{Name: "noloc", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/"}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, err := srv.cm.reg.Add(c.entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec, body := doServersReq(t, srv, "GET", "/api/servers/"+e.ID+"/first-run", "")
+			var rep FirstRunReport
+			if rec.Code != 200 || json.Unmarshal(body, &rep) != nil || len(rep.Steps) == 0 {
+				t.Fatalf("code = %d, body = %s", rec.Code, body)
+			}
+			s := rep.Steps[len(rep.Steps)-1]
+			if s.Name != "Take the first backup" || s.State != firstRunWaiting || !strings.Contains(s.Detail, "turned off") {
+				t.Fatalf("backup step = %+v", s)
+			}
+			if got := strings.Contains(s.Fix, "backup location"); got != c.wantLocText {
+				t.Errorf("fix names the location = %v, want %v: %q", got, c.wantLocText, s.Fix)
+			}
+		})
+	}
 }

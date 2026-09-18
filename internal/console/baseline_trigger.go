@@ -119,13 +119,21 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 	if e.SourceDSN == "" {
 		return errors.New("this server has no source configured; set the source connection first")
 	}
-	if e.BaselineDir == "" && e.BaselineS3 == "" {
+	if !hasOwnBackupLocation(e) {
 		return errors.New("this server has no baseline location set up; set a baseline directory or S3 location first (Backup settings page)")
 	}
 	if e.IsPostgres() && (e.SourceSlot == "" || e.SourcePublication == "") {
 		return errors.New("this PostgreSQL server has no replication slot/publication configured; set them first (Edit → Source)")
 	}
 	return nil
+}
+
+// hasOwnBackupLocation: the server has a backup location of its own, the one
+// a console-created backup writes to. The daemon-wide default does not count:
+// backups and restores refuse the shared store. The precheck and the
+// Getting started list's reason both read it, so they cannot disagree.
+func hasOwnBackupLocation(e ServerEntry) bool {
+	return e.BaselineDir != "" || e.BaselineS3 != ""
 }
 
 // BaselineStatus is the pollable state of a server's most recent baseline job.

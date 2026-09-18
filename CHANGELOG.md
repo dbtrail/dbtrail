@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The console says why a server has no first backup, instead of leaving
+  the step out** (#1677). The Overview's Getting started list dropped its
+  "Take the first backup" step whenever the console could not create one,
+  and the Backups page dropped the Create backup button without a word, so
+  a new install that never took a backup looked like one that needed none.
+  The step now shows, waiting, with the reason and the fix: creating
+  backups is turned off for the daemon (turn on the Create-backup button
+  setting, listed on the Backup settings page among the settings read when
+  DBTrail starts, and restart; for MySQL, mydumper must be installed), or
+  the server has no backup location of its own. `GET
+  /api/servers/{id}/first-run` returns that step with a `detail` and a
+  `fix`. The Backups page shows `CREATE BACKUP: off, set when DBTrail
+  starts` where the button would be. Decided in #1677 and unchanged: a bare
+  `bintrail-console watch` keeps console full backups off by default
+  (`BINTRAIL_CONSOLE_BASELINE_TRIGGER`), and the compose stack keeps them
+  on (`BASELINE_TRIGGER=0` opts out). The deb/rpm package does not install
+  mydumper, so a default-on button would fail on first use, and a full
+  backup reads every table in scope on the source.
+
 ### Fixed
 - **A steady load no longer turns the backup schedule into a full backup
   every slot** (#1736). The cut-over rule (#1721) estimated an update's
