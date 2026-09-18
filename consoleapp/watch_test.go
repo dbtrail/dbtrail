@@ -434,14 +434,26 @@ func TestRotateTargets(t *testing.T) {
 	}
 	t.Cleanup(func() { resolveBintrailIDFunc = prev })
 
-	targets := rotateTargets("boot-dsn", sup, reg, "/stage")
+	targets := rotateTargets("boot-dsn", bootIdle, sup, reg, "/stage")
 	byDSN := map[string]rotation.RotateTarget{}
 	for _, tg := range targets {
 		byDSN[tg.DSN] = tg
 	}
 
-	if boot := byDSN["boot-dsn"]; boot.ArchiveS3 != "" {
-		t.Errorf("boot index must be drop-only, got ArchiveS3=%q", boot.ArchiveS3)
+	if boot := byDSN["boot-dsn"]; boot.ArchiveS3 != "" || !boot.NoWriter {
+		t.Errorf("boot index of a source-less watch must be drop-only and marked writerless, got %+v", boot)
+	}
+	// Every per-source index has a writer.
+	for _, dsn := range []string{"dsn-arch", "dsn-plain", "dsn-pending", "dsn-ghost"} {
+		if byDSN[dsn].NoWriter {
+			t.Errorf("%s: a per-source index has a writer", dsn)
+		}
+	}
+	// With the main stream writing the boot index, nothing is writerless.
+	for _, tg := range rotateTargets("boot-dsn", bootStreamed, sup, reg, "/stage") {
+		if tg.NoWriter {
+			t.Errorf("source-ful watch: %s marked writerless", tg.DSN)
+		}
 	}
 	a := byDSN["dsn-arch"]
 	if a.ArchiveS3 != "s3://bucket/prefix/" || a.BintrailID != "uuid-dsn-arch" {

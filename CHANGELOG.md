@@ -31,6 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `integrity manifest written` log line reports `files_hashed` and
   `files_reused`. The one validation read a carried file gets before it is
   linked stays.
+- **Rotation log lines name the database, and an idle, empty boot index
+  is rotated as housekeeping rather than logged as freed space** (#1715).
+  A source-less `watch` keeps the boot index's full partition layout with
+  no writer, and the built-in rotation dropped its empty partitions every
+  cycle, logging `dropped partition` an hour before the same names were
+  dropped from the source's real index, where the space actually was, with
+  nothing on the line to tell the two apart. `dropped partition`,
+  `rotation complete` and the `p_future` lines now carry `db=<database>`.
+  On the boot index of a source-less `watch`, while it holds no events, the
+  per-partition drop lines go to debug and `rotation complete` says
+  `index_empty=true` (the attribute appears only when the index was
+  probed); the drops and the future-partition top-up still run,
+  so the layout stays current for a later source-ful start and never grows
+  toward the partition cap. Once that index holds events, or on a
+  source-ful `watch`, it is rotated and logged like any other.
 - **A refresh reads a table's events in index order instead of looking each
   one up on its own** (#1720). The fetch behind `baseline refresh`, a
   scheduled update and `reconstruct --output-format parquet` used the query

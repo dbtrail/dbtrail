@@ -160,6 +160,7 @@ func TestPerformRotation_PendingS3BlocksDrop(t *testing.T) {
 		indexer.PartitionName(h2), bintrailID, outPath2)
 
 	// Run rotation WITHOUT --archive-s3, WITH --retry (so it skips re-archiving).
+	logs := captureSlog(t)
 	res, err := Perform(context.Background(), db, dbName, Options{
 		RetainDur:          24 * time.Hour,
 		ArchiveDir:         archiveDir,
@@ -171,6 +172,10 @@ func TestPerformRotation_PendingS3BlocksDrop(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Perform failed: %v", err)
+	}
+	// The archive-then-drop site names the database too (#1715).
+	if !logs.hasAttr("dropped partition", "db", dbName) {
+		t.Error("the archive path's drop line does not name the database")
 	}
 
 	// First partition should NOT be dropped (pending S3 upload).

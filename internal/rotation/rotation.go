@@ -63,6 +63,14 @@ type Options struct {
 	// built-in rotation must not be the first to destroy data an archiving flow
 	// would preserve. The explicit rotate command leaves this false.
 	ProtectUnarchived bool
+	// QuietEmpty marks a cycle over an index that holds no events and has no
+	// writer (a source-less daemon's boot index, #1715): its drops and
+	// top-ups are housekeeping over empty partitions, so the per-partition
+	// lines go to Debug and the completion line says index_empty=true. The
+	// work itself is unchanged: the layout must stay current for the day a
+	// stream starts writing it, and it must not grow toward MySQL's
+	// partition cap.
+	QuietEmpty bool
 	// PruneLocalAfterUpload removes the local staging Parquet once it has been
 	// uploaded to S3 and the partition dropped. The unattended built-in loop
 	// sets this so a container's staging dir doesn't grow without bound; the
@@ -400,7 +408,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 						return Result{}, fmt.Errorf("failed to drop partition %s: %w", name, err)
 					}
 					droppedCount++
-					slog.Info("dropped partition", "partition", name)
+					slog.Log(ctx, dropLevel(opts), "dropped partition", "db", dbName, "partition", name)
 					if opts.Format != "json" {
 						fmt.Fprintf(os.Stdout, "dropped partition %s\n", name)
 					}
@@ -472,7 +480,7 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 					// slog (not just stdout): rotation destroys data by design,
 					// so the durable log must answer "what did rotation drop" —
 					// mirrors the archive path's per-partition Info.
-					slog.Info("dropped partition", "partition", name)
+					slog.Log(ctx, dropLevel(opts), "dropped partition", "db", dbName, "partition", name)
 					if opts.Format != "json" {
 						fmt.Fprintf(os.Stdout, "dropped partition %s\n", name)
 					}
@@ -490,9 +498,9 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 	// ── Warn if p_future already holds data ───────────────────────────────────
 	hasFutureData, err := partitionHasData(ctx, db, dbName)
 	if err != nil {
-		slog.Warn("could not check p_future data", "error", err)
+		slog.Warn("could not check p_future data", "db", dbName, "error", err)
 	} else if hasFutureData {
-		slog.Warn("p_future partition contains data — events are arriving outside all named partition ranges; consider adding more future partitions with --add-future")
+		slog.Warn("p_future partition contains data — events are arriving outside all named partition ranges; consider adding more future partitions with --add-future", "db", dbName)
 	}
 
 	// ── Add new future partitions ─────────────────────────────────────────────
@@ -515,13 +523,30 @@ func Perform(ctx context.Context, db *sql.DB, dbName string, opts Options) (Resu
 		}
 	}
 
-	slog.Info("rotation complete",
+	// index_empty appears only when it was measured (Options.QuietEmpty): a
+	// "false" on every other line would claim a state nobody checked.
+	completeAttrs := []any{"db", dbName}
+	if opts.QuietEmpty {
+		completeAttrs = append(completeAttrs, "index_empty", true)
+	}
+	completeAttrs = append(completeAttrs,
 		"partitions_dropped", droppedCount,
 		"partitions_added", toAdd,
 		"partitions_deferred", deferredCount,
 		"duration_ms", time.Since(start).Milliseconds())
+	slog.Info("rotation complete", completeAttrs...)
 
 	return Result{Dropped: droppedCount, Added: toAdd, Deferred: deferredCount}, nil
+}
+
+// dropLevel is the level of a "dropped partition" line: Info, the durable
+// record of destroyed data, unless the cycle is housekeeping over an index
+// that holds nothing (Options.QuietEmpty).
+func dropLevel(opts Options) slog.Level {
+	if opts.QuietEmpty {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
 }
 
 // uploadFileFunc is the function used to upload a file to S3. It defaults to
