@@ -217,6 +217,19 @@ type foldResult struct {
 	// (#781) needs it and the page it came from is long gone by then.
 	First *query.ResultRow
 
+	// LastEventID is the highest event_id folded, 0 for an empty window. It
+	// is stamped into the files this fold writes (baseline.MetaKeyLastEventID)
+	// so the next fold can floor its fetch on it (#1720).
+	LastEventID uint64
+
+	// FetchDuration and FoldDuration split the window's wall time between
+	// waiting on the fetch (MySQL and archives) and folding pages in Go, so a
+	// slow table can be attributed without external sampling (#1714, #1720).
+	// The fold side includes the page decoders, which read schema_snapshots
+	// the first time a page brings a new schema epoch: a slow snapshot read
+	// lands in fold time, not fetch time.
+	FetchDuration, FoldDuration time.Duration
+
 	// ImageColumns is the INTERSECTION of the column key-sets of every non-nil
 	// row image seen in the window, and SawImage reports whether any image was
 	// seen at all (an intersection over nothing is not "everything").
@@ -435,16 +448,24 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 	// page. Its typed-ness accumulates across pages for the same reason.
 	dec := newEventDecoder(fc.DB, fc.Schema, fc.Table, fc.Resolver)
 
+	walkStart := time.Now()
 	_, err := query.FetchMergedStream(ctx, fc.DB, fc.Engine, foldFetchOptions(fc), fc.BatchSize, func(page []query.ResultRow) error {
 		if len(page) == 0 {
 			return nil
 		}
+		foldStart := time.Now()
+		defer func() { res.FoldDuration += time.Since(foldStart) }()
 		dec.mapEnums(page)
 		dec.decodeBinaries(page)
 
 		if res.First == nil {
 			first := page[0]
 			res.First = &first
+		}
+		for i := range page {
+			if page[i].EventID > res.LastEventID {
+				res.LastEventID = page[i].EventID
+			}
 		}
 
 		if err := foldPage(page, fc.Schema, fc.Table, fc.PKCols, res); err != nil {
@@ -479,6 +500,7 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		}
 		return nil
 	})
+	res.FetchDuration = time.Since(walkStart) - res.FoldDuration
 	if err != nil {
 		// Only a TRANSPORT failure gets the "fetch events" label. fn's errors
 		// are the #592/#782 refusals, which FetchMergedStream propagates

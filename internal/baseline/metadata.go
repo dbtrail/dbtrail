@@ -88,6 +88,12 @@ const (
 	// Absent on every snapshot taken from a real dump, and on any reconstructed
 	// snapshot whose window was verifiably gap-free.
 	MetaKeyCaptureGap = "bintrail.capture_gap"
+	// MetaKeyLastEventID is the highest binlog_events.event_id the fold that
+	// wrote this file applied (#1720), carried forward unchanged by a run that
+	// applied none. The next baseline-anchored fetch uses it as an index floor
+	// (query.Options.SinceEventID) when the index was written by a stream.
+	// Absent on a dump, and on any file written before this key existed.
+	MetaKeyLastEventID = "bintrail.last_event_id"
 )
 
 // RenderGUCsPinned is the canonical value the capture side stamps under
@@ -121,6 +127,8 @@ type DumpMetadata struct {
 	// DeltaSeq is MetaKeyDeltaSeq (#1718): the pair's sequence in its chain.
 	// -1 when absent (a table file, or a v0.83.0 pair).
 	DeltaSeq int
+	// LastEventID is MetaKeyLastEventID; 0 when absent.
+	LastEventID uint64
 	// Producer is MetaKeySnapshotProducer: which code path wrote these bytes
 	// ("dump" | "reconstruct"). Empty on any snapshot written before #1545
 	// stamped it on the dump path; see ProvenanceOf, which does not guess.
@@ -335,6 +343,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	if v, ok := pf.Lookup(MetaKeyDeltaSeq); ok {
 		m.DeltaSeq = parseDeltaSeq(path, v)
 	}
+	if v, ok := pf.Lookup(MetaKeyLastEventID); ok {
+		m.LastEventID = parseLastEventID(path, v)
+	}
 	if v, ok := pf.Lookup(MetaKeyRowCount); ok {
 		n, parseErr := strconv.ParseInt(v, 10, 64)
 		if parseErr != nil {
@@ -404,59 +415,8 @@ func ReadParquetMetadataAny(ctx context.Context, path string) (DumpMetadata, err
 		}
 		key := string(keyBytes)
 		val := string(valBytes)
-		switch key {
-		case MetaKeyBinlogFile:
-			m.BinlogFile = val
-		case MetaKeyBinlogPos:
-			if pos, parseErr := strconv.ParseInt(val, 10, 64); parseErr == nil {
-				m.BinlogPos = pos
-			} else {
-				slog.Warn("corrupt baseline_binlog_position in S3 Parquet metadata",
-					"path", path, "raw_value", val, "error", parseErr)
-			}
-		case MetaKeyLSN:
-			if lsn, parseErr := strconv.ParseUint(val, 10, 64); parseErr == nil {
-				m.LSN = lsn
-			} else {
-				slog.Warn("corrupt baseline_lsn in S3 Parquet metadata",
-					"path", path, "raw_value", val, "error", parseErr)
-			}
-		case MetaKeyGTIDSet:
-			m.GTIDSet = val
-		case MetaKeyCreateTableSQL:
-			m.CreateTableSQL = val
-		case MetaKeyContentDigest:
-			m.ContentDigest = val
-		case MetaKeyRenderGUCs:
-			m.RenderGUCs = val
-		case MetaKeyCaptureGap:
-			m.CaptureGap = val
-		case MetaKeySnapshotProducer:
-			m.Producer = val
-		case MetaKeyDerivedFromPath:
-			m.DerivedFromPath = val
-		case MetaKeyMydumperFormat:
-			m.MydumperFormat = val
-		case MetaKeyDerivedFrom:
-			m.DerivedFrom = parseFooterTime(path, MetaKeyDerivedFrom, val)
-		case MetaKeySnapshotTimestamp:
-			m.SnapshotTimestamp = parseFooterTime(path, MetaKeySnapshotTimestamp, val)
-		case MetaKeyDeltaChainStart:
-			m.DeltaChainStart = parseFooterTime(path, MetaKeyDeltaChainStart, val)
-		case MetaKeyDeltaBaseAnchor:
-			m.DeltaBaseAnchor = val
-		case MetaKeyDeltaBaseSize:
-			m.DeltaBaseSize = parseDeltaBaseSize(path, val)
-		case MetaKeyDeltaSeq:
-			m.DeltaSeq = parseDeltaSeq(path, val)
-		case MetaKeyRowCount:
-			if n, parseErr := strconv.ParseInt(val, 10, 64); parseErr == nil {
-				m.RowCount = n
-			} else {
-				slog.Warn("corrupt baseline_row_count in S3 Parquet metadata",
-					"path", path, "raw_value", val, "error", parseErr)
-				rowCountCorrupt = true
-			}
+		if applyS3FooterKV(&m, path, key, val) {
+			rowCountCorrupt = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -469,6 +429,71 @@ func ReadParquetMetadataAny(ctx context.Context, path string) (DumpMetadata, err
 		m.ContentDigest = ""
 	}
 	return m, nil
+}
+
+// applyS3FooterKV applies one footer key/value pair to m, the way the S3
+// reader sees them: as rows, in arbitrary order. It reports whether the pair
+// was a corrupt row count, which the caller resolves after the loop (the
+// digest may arrive before the count). Pure, so the S3 reader's key set is
+// testable without S3; the local reader looks keys up by name instead.
+func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
+	switch key {
+	case MetaKeyBinlogFile:
+		m.BinlogFile = val
+	case MetaKeyBinlogPos:
+		if pos, parseErr := strconv.ParseInt(val, 10, 64); parseErr == nil {
+			m.BinlogPos = pos
+		} else {
+			slog.Warn("corrupt baseline_binlog_position in S3 Parquet metadata",
+				"path", path, "raw_value", val, "error", parseErr)
+		}
+	case MetaKeyLSN:
+		if lsn, parseErr := strconv.ParseUint(val, 10, 64); parseErr == nil {
+			m.LSN = lsn
+		} else {
+			slog.Warn("corrupt baseline_lsn in S3 Parquet metadata",
+				"path", path, "raw_value", val, "error", parseErr)
+		}
+	case MetaKeyGTIDSet:
+		m.GTIDSet = val
+	case MetaKeyCreateTableSQL:
+		m.CreateTableSQL = val
+	case MetaKeyContentDigest:
+		m.ContentDigest = val
+	case MetaKeyRenderGUCs:
+		m.RenderGUCs = val
+	case MetaKeyCaptureGap:
+		m.CaptureGap = val
+	case MetaKeySnapshotProducer:
+		m.Producer = val
+	case MetaKeyDerivedFromPath:
+		m.DerivedFromPath = val
+	case MetaKeyMydumperFormat:
+		m.MydumperFormat = val
+	case MetaKeyDerivedFrom:
+		m.DerivedFrom = parseFooterTime(path, MetaKeyDerivedFrom, val)
+	case MetaKeySnapshotTimestamp:
+		m.SnapshotTimestamp = parseFooterTime(path, MetaKeySnapshotTimestamp, val)
+	case MetaKeyDeltaChainStart:
+		m.DeltaChainStart = parseFooterTime(path, MetaKeyDeltaChainStart, val)
+	case MetaKeyDeltaBaseAnchor:
+		m.DeltaBaseAnchor = val
+	case MetaKeyDeltaBaseSize:
+		m.DeltaBaseSize = parseDeltaBaseSize(path, val)
+	case MetaKeyDeltaSeq:
+		m.DeltaSeq = parseDeltaSeq(path, val)
+	case MetaKeyLastEventID:
+		m.LastEventID = parseLastEventID(path, val)
+	case MetaKeyRowCount:
+		if n, parseErr := strconv.ParseInt(val, 10, 64); parseErr == nil {
+			m.RowCount = n
+		} else {
+			slog.Warn("corrupt baseline_row_count in S3 Parquet metadata",
+				"path", path, "raw_value", val, "error", parseErr)
+			corrupt = true
+		}
+	}
+	return corrupt
 }
 
 // unquote strips surrounding double quotes from s, if present.
@@ -499,6 +524,17 @@ func parseDeltaBaseSize(path, raw string) int64 {
 	if err != nil || n < 0 {
 		slog.Warn("corrupt delta_base_size in Parquet metadata", "path", path, "raw_value", raw, "error", err)
 		return -1
+	}
+	return n
+}
+
+// parseLastEventID reads MetaKeyLastEventID. A value that does not parse is
+// 0, "absent": the fetch then keeps its coarse time floor, which is always safe.
+func parseLastEventID(path, raw string) uint64 {
+	n, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		slog.Warn("baseline footer: unreadable last event id; the next fetch keeps its time floor", "path", path, "value", raw)
+		return 0
 	}
 	return n
 }
