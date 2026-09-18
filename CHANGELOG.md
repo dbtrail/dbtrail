@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.83.0] - 2026-09-17
+
 ### Added
 - **A refresh can leave a changed table's file alone and write the change
   beside it** (#1638). Off by default: `bintrail baseline refresh
@@ -31,6 +33,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `inconclusive`, since the table file it compares did not change. Generate
   the DuckDB views again after turning the option on or off. Turning it off
   needs nothing else: the next refresh writes every table in full.
+- **A scheduled refresh with nothing new to fold does not start** (#1689,
+  #1703). Each cycle first asks whether anything was indexed since the last
+  fold (the newest event id and the newest schema change, not the binlog
+  position, which does not move when older binlogs are indexed after the
+  fact) and whether the snapshot that fold published is still inside the
+  window the index can fold from. Only when the answer is "nothing new" and
+  "still inside" does it skip; otherwise it behaves exactly as before. A quiet
+  server no longer republishes the same rows under a new anchor every
+  interval.
+- **The startup cleanup says what it is doing, and shows as `CLEANING UP` on
+  the Servers list** (#1690, #1702). On resume, capture deletes the rows a
+  replayed window would index twice before reading an event. On a large index
+  that took half an hour with no log line, no metrics and a silent hole in
+  the startup checklist, so a starting daemon looked like a dead one. The
+  checklist now prints the step and its outcome (rows removed and duration,
+  zero included), the console row shows the phase and re-fetches while it
+  lasts, and the stream metrics are registered before the step, so a
+  restarting process is a scrape target that answers with zeros instead of
+  one that vanished. Alert on staleness of
+  `bintrail_stream_last_flush_timestamp_seconds`, not on `up`.
+
+### Changed
+- **The resume-time cleanup no longer reads the whole index** (#1690, #1704).
+  Its predicate is keyed on `binlog_file` and `start_pos`, which no index
+  covers, so MySQL read every row: 28 minutes of capture down on a 48 GB
+  index, to delete zero rows. Every row it must remove was written after the
+  checkpoint, so the checkpoint now also records the event id it was taken
+  at (`stream_state.dedup_floor_event_id`) and the delete seeks the primary
+  key from there. On the fixture the rows touched went from 20,002 to 201
+  for the delete and from 59,606 to 203 for the GTID straggler pass, with the
+  same rows deleted.
+- **A refresh whose window cannot hold an event skips the event fetch**
+  (#1689, #1697). The fetch is bounded below by the previous backup's anchor
+  and above by the run's cut; when the cut has not passed the anchor the
+  query can only come back empty, after walking the index to find out, which
+  on a real index was the bulk of a refresh that applied nothing. The
+  archive-coverage refusal the fetch used to carry still runs on the skipped
+  path, so an unreadable hour still refuses instead of reading as "nothing
+  changed".
+- **The baseline-anchored event fetch bounds its lower side in a form the
+  index can use** (#1689, #1701). The floor was written as
+  `TO_SECONDS(event_timestamp) >= n`, which MySQL cannot seek to and cannot
+  prune partitions by, so every refresh walked each table's events from the
+  oldest retained partition. The same instant is now a plain comparison,
+  which admits exactly the same rows; measured on MySQL 8.0.46 and 8.4.9,
+  the query opens 2 partitions instead of 4 and reaches its first row in
+  0.14 ms instead of 2.2 ms.
+- **Resolving the snapshot cut no longer reads the oldest partition in full**
+  (#1692, #1694). The search for the first event past `at` now names the
+  partitions that can hold one (the hour of `at` and later, plus
+  `p_future`) instead of relying on a hint MySQL does not prune by, which
+  read the whole oldest partition on every refresh. If rotation moves the
+  layout between the listing and the search, the search is repeated; if the
+  layout cannot be listed or carries a name this build does not recognise,
+  it warns and runs unbounded, as before.
+- **The overrun warning of a scheduled refresh tells a refresh that is
+  falling behind from one that is slower than the interval** (#1693, #1696).
+  It said the same thing for every overrun, blamed the rewrite and prescribed
+  a longer interval, which under a sustained write load is not the cause and
+  not the fix. It now grades two published runs: over the interval but
+  inside its own window means ticks are skipped and a longer interval is the
+  fix; two runs both past their window with the run grown by more than the
+  window means the backup is falling further behind, a longer interval does
+  not help, and a full backup re-anchors it. The line names the slowest
+  table, how long the upload took, and which of the two grew.
+
+### Fixed
+- **`bintrail dump` reads the `v` prefix current mydumper builds print in
+  `--version`, and keeps the privilege preflight when the version cannot be
+  read** (#1686, #1698). Every mydumper from at least 0.16.3 prints
+  `mydumper v0.16.3-6, ...`, which the parser could not read; the failure
+  was then taken for a very old build, which skipped the privilege preflight
+  and refused an explicit `--lock-mode` with a message about a build newer
+  than the one running. "Old" and "unreadable" are now separate: an
+  unreadable version runs the preflight, and the `--lock-mode` refusal says
+  which of the two it is about.
+
 
 ## [0.82.0] - 2026-09-15
 
