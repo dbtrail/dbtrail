@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
@@ -310,41 +311,110 @@ func reservedDeltaColumn(cols []baseline.Column) string {
 	return ""
 }
 
-// lookupBasePositions scans the base's PRIMARY KEY columns and returns the row
-// number of every row whose key is in changes, ascending.
-//
-// The key is built exactly the way scanBaselinePass builds it —
-// canonicalizePKMap then event.BuildPKValues — so this lookup and the merge
-// agree on which base row a change belongs to by construction. It reads the
-// change map and never drains it: the upserts writer runs after this and needs
-// every entry.
-//
-// This is the one per-refresh cost proportional to the BASE, not the window
-// (#1716): every key of the base goes through Go, once per refresh.
+// lookupBasePositions returns the row numbers, ascending, of the base rows
+// whose PRIMARY KEY the window touched. For integer keys the touched keys go
+// to DuckDB as a table and the base is semi-joined against it, so only the
+// matching rows cross into Go (#1716); every other key type scans the base's
+// key columns through Go, as the merge does. Either way the canonical check
+// (canonicalizePKMap + event.BuildPKValues against the change map) is what
+// decides: the join only narrows what Go looks at, and it is taken only when
+// every touched key is either handed to DuckDB exactly or provably outside
+// what its column can hold. It reads the change map and never drains it: the
+// upserts writer runs after this and needs every entry.
 func lookupBasePositions(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta,
 	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning) ([]int64, error) {
+	out, _, err := lookupBasePositionsWith(ctx, basePath, schema, table, pkCols, changes, tuning, true)
+	return out, err
+}
+
+// lookupStats says how a lookup went: whether the join was taken and how
+// many base rows crossed into Go. A test pins Examined, because a join that
+// silently stopped narrowing would still return the right positions.
+type lookupStats struct {
+	Joined   bool
+	Examined int
+}
+
+// lookupBasePositionsWith is lookupBasePositions with the join switchable
+// and the outcome reported, so a test can pin both paths against each other
+// on the same base.
+func lookupBasePositionsWith(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta,
+	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning, allowJoin bool) (out []int64, st lookupStats, err error) {
 	if len(changes) == 0 {
-		return nil, nil
+		return nil, st, nil
 	}
 	ddb, err := sql.Open("duckdb", "")
 	if err != nil {
-		return nil, fmt.Errorf("open duckdb: %w", err)
+		return nil, st, fmt.Errorf("open duckdb: %w", err)
 	}
 	defer ddb.Close()
 	applyDuckDBTuning(ctx, ddb, tuning)
 
 	names := make([]string, len(pkCols))
+	quoted := make([]string, len(pkCols))
 	sel := make([]string, len(pkCols))
 	for i, c := range pkCols {
 		names[i] = c.Name
-		q := `"` + strings.ReplaceAll(c.Name, `"`, `""`) + `"`
-		sel[i] = q + " AS " + q
+		quoted[i] = `"` + strings.ReplaceAll(c.Name, `"`, `""`) + `"`
+		sel[i] = "b." + quoted[i] + " AS " + quoted[i]
 	}
-	q := fmt.Sprintf("SELECT %s, file_row_number FROM parquet_scan('%s', file_row_number=true)",
-		strings.Join(sel, ", "), strings.ReplaceAll(basePath, "'", "''"))
+	scanSQL := fmt.Sprintf("parquet_scan('%s', file_row_number=true)", strings.ReplaceAll(basePath, "'", "''"))
+	q := "SELECT " + strings.Join(sel, ", ") + ", b.file_row_number FROM " + scanSQL + " AS b"
+
+	if allowJoin {
+		types, why, err := integerKeyTypes(ctx, ddb, scanSQL, quoted)
+		if err != nil {
+			return nil, st, err
+		}
+		var csvPath string
+		var n int
+		if why != "" {
+			// A property of the table, the same on every refresh: Debug.
+			slog.Debug("base positions: scanning the base's key columns through Go", "schema", schema, "table", table, "reason", why)
+		} else {
+			csvPath, n, why, err = writeIntegerKeyCSV(pkCols, types, changes)
+			switch {
+			case err != nil:
+				// The file is what the join needs and the scan does not: a
+				// temp directory that is full or read-only costs the fast
+				// path, never the refresh.
+				slog.Warn("base positions: touched-keys file could not be written; scanning the base",
+					"schema", schema, "table", table, "error", err)
+				why = "touched-keys file: " + err.Error()
+			case why != "":
+				// A property of this window's keys: worth an Info line, since
+				// the next window may join again.
+				slog.Info("base positions: scanning the base's key columns through Go", "schema", schema, "table", table, "reason", why)
+			}
+		}
+		if why == "" {
+			defer os.Remove(csvPath)
+			st.Joined = true
+			// A key column that holds NULL — a baseline written before #522
+			// lost unsigned values past the signed range that way — is a
+			// row the scan refuses when it reaches it. The join would never
+			// reach it (NULL matches nothing), so it is refused here.
+			if err := refuseNullKeys(ctx, ddb, scanSQL, quoted, schema, table); err != nil {
+				return nil, st, err
+			}
+			if n == 0 {
+				// Every touched key is outside what the columns can hold: no
+				// base row can carry one, so there is nothing to look up.
+				return nil, st, nil
+			}
+			on := make([]string, len(quoted))
+			cols := make([]string, len(quoted))
+			for i, c := range quoted {
+				on[i] = "b." + c + " = t." + c
+				cols[i] = "'" + strings.ReplaceAll(names[i], "'", "''") + "': '" + types[i] + "'"
+			}
+			q += fmt.Sprintf(" SEMI JOIN read_csv('%s', header=false, auto_detect=false, delim=',', new_line='\\n', columns={%s}) AS t ON %s",
+				strings.ReplaceAll(csvPath, "'", "''"), strings.Join(cols, ", "), strings.Join(on, " AND "))
+		}
+	}
 	rows, err := ddb.QueryContext(ctx, q)
 	if err != nil {
-		return nil, fmt.Errorf("scan the base's key columns: %w", err)
+		return nil, st, fmt.Errorf("scan the base's key columns: %w", err)
 	}
 	defer rows.Close()
 
@@ -353,26 +423,27 @@ func lookupBasePositions(ctx context.Context, basePath, schema, table string, pk
 	for i := range scan {
 		ptrs[i] = &scan[i]
 	}
-	var out []int64
 	for rows.Next() {
+		st.Examined++
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, fmt.Errorf("scan base key row: %w", err)
+			return nil, st, fmt.Errorf("scan base key row: %w", err)
 		}
 		pos, ok := scan[len(pkCols)].(int64)
 		if !ok {
-			return nil, fmt.Errorf("internal: file_row_number came back as %T, not int64", scan[len(pkCols)])
+			return nil, st, fmt.Errorf("internal: file_row_number came back as %T, not int64", scan[len(pkCols)])
 		}
 		pkMap, err := canonicalizePKMap(zipMap(names, scan[:len(pkCols)]), pkCols)
 		if err != nil {
-			return nil, fmt.Errorf("canonicalize baseline PK for %s.%s: %w", schema, table, err)
+			return nil, st, fmt.Errorf("canonicalize baseline PK for %s.%s: %w", schema, table, err)
 		}
 		pk := event.BuildPKValues(pkCols, pkMap)
 		// Same #1158 refusal as scanBaselinePass, for the same reason: a change
 		// filed under the key's OTHER spelling would miss this row here and
-		// land in the upserts as a new one, publishing the row twice.
+		// land in the upserts as a new one, publishing the row twice. Fixed
+		// BINARY keys never take the join, so the scan still sees every row.
 		if alt, ok := altFixedBinaryPK(pkCols, pkMap); ok {
 			if ev, pending := changes[alt]; pending {
-				return nil, pkSpellingJoinErr(schema, table, pk, alt, ev.EventType)
+				return nil, st, pkSpellingJoinErr(schema, table, pk, alt, ev.EventType)
 			}
 		}
 		if _, ok := changes[pk]; ok {
@@ -380,10 +451,197 @@ func lookupBasePositions(ctx context.Context, basePath, schema, table string, pk
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate base key rows: %w", err)
+		return nil, st, fmt.Errorf("iterate base key rows: %w", err)
 	}
 	slices.Sort(out)
-	return out, nil
+	return out, st, nil
+}
+
+// duckDBIntegerWidths is the DuckDB type of an integer key column as the
+// base's Parquet reads back (DESCRIBE), with the bit width the value must fit
+// and whether it is unsigned. Only the three types the baseline writer
+// produces (INT32, INT64 and UINT64 physical columns): a base written by
+// anything else keeps the scan, because a width that was wrong here would
+// drop an in-range key from the join with no error, and that row would be
+// published twice.
+var duckDBIntegerWidths = map[string]struct {
+	bits     int
+	unsigned bool
+}{
+	"INTEGER": {32, false}, "BIGINT": {64, false}, "UBIGINT": {64, true},
+}
+
+// integerKeyTypes reads the base's DuckDB types for the key columns and
+// returns them when every one is an integer type; otherwise why says which
+// column is not, and the caller scans. The Parquet side, not the MySQL
+// DATA_TYPE, decides: it is the type the join compares.
+func integerKeyTypes(ctx context.Context, ddb *sql.DB, scanSQL string, quoted []string) (types []string, why string, err error) {
+	rows, err := ddb.QueryContext(ctx, "DESCRIBE SELECT "+strings.Join(quoted, ", ")+" FROM "+scanSQL)
+	if err != nil {
+		return nil, "", fmt.Errorf("describe the base's key columns: %w", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, "", err
+	}
+	nameIdx, typeIdx := -1, -1
+	for i, c := range cols {
+		switch c {
+		case "column_name":
+			nameIdx = i
+		case "column_type":
+			typeIdx = i
+		}
+	}
+	if typeIdx < 0 {
+		return nil, "DESCRIBE returned no column_type", nil
+	}
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, "", err
+		}
+		typ, _ := vals[typeIdx].(string)
+		if _, ok := duckDBIntegerWidths[typ]; !ok {
+			name := ""
+			if nameIdx >= 0 {
+				name, _ = vals[nameIdx].(string)
+			}
+			return nil, fmt.Sprintf("key column %q is %s in the file, not an integer type", name, typ), nil
+		}
+		types = append(types, typ)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	if len(types) != len(quoted) {
+		return nil, fmt.Sprintf("DESCRIBE returned %d key columns, expected %d", len(types), len(quoted)), nil
+	}
+	return types, "", nil
+}
+
+// refuseNullKeys fails the lookup the way the scan does when a key column
+// holds NULL in the base (canonicalizePKValue's nil refusal), because a semi
+// join never reaches such a row. One probe in DuckDB, stopping at the first
+// such row and naming the column that is NULL in it, as the scan would.
+func refuseNullKeys(ctx context.Context, ddb *sql.DB, scanSQL string, quoted []string, schema, table string) error {
+	preds := make([]string, len(quoted))
+	for i, c := range quoted {
+		preds[i] = c + " IS NULL"
+	}
+	flags := make([]bool, len(quoted))
+	ptrs := make([]any, len(quoted))
+	for i := range flags {
+		ptrs[i] = &flags[i]
+	}
+	err := ddb.QueryRowContext(ctx, "SELECT "+strings.Join(preds, ", ")+" FROM "+scanSQL+" WHERE "+strings.Join(preds, " OR ")+" LIMIT 1").Scan(ptrs...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("probe the base's key columns for NULL: %w", err)
+	}
+	col := quoted[0]
+	for i, isNull := range flags {
+		if isNull {
+			col = quoted[i]
+			break
+		}
+	}
+	return fmt.Errorf("canonicalize baseline PK for %s.%s: key column %s holds NULL in the base file (MySQL forbids NULL in PK columns; a baseline written before #522 lost unsigned values past the signed range this way — take a fresh baseline)",
+		schema, table, col)
+}
+
+// writeIntegerKeyCSV writes the touched keys as one CSV row each, typed for
+// the join. It reads the change map and never removes an entry, not even
+// one it leaves out of the file: the upserts writer drains the map after
+// this and needs every entry. why is set (and no file left) when any key is not spelled as the
+// plain integer event.BuildPKValues writes for these columns (a stray
+// escape, a sign, a blank, a leading zero, the wrong number of parts): the
+// caller then scans, so the join never decides on a key it could not hand
+// over exactly. A key outside the column's range is left out (no base row
+// can hold it); n is the rows written.
+func writeIntegerKeyCSV(pkCols []metadata.ColumnMeta, types []string, changes map[string]*query.ResultRow) (path string, n int, why string, err error) {
+	f, err := os.CreateTemp("", "bintrail-touched-keys-*.csv")
+	if err != nil {
+		return "", 0, "", fmt.Errorf("create: %w", err)
+	}
+	path = f.Name()
+	w := bufio.NewWriter(f)
+	fail := func(reason string) (string, int, string, error) {
+		f.Close()
+		os.Remove(path)
+		return "", 0, reason, nil
+	}
+	for key := range changes {
+		parts := strings.Split(key, "|")
+		if len(parts) != len(pkCols) {
+			return fail(fmt.Sprintf("key %q has %d parts, the key has %d columns", key, len(parts), len(pkCols)))
+		}
+		inRange := true
+		for i, part := range parts {
+			if !plainInteger(part) {
+				return fail(fmt.Sprintf("key %q is not a plain integer", key))
+			}
+			width := duckDBIntegerWidths[types[i]]
+			if width.unsigned {
+				if _, perr := strconv.ParseUint(part, 10, width.bits); perr != nil {
+					inRange = false
+				}
+			} else if _, perr := strconv.ParseInt(part, 10, width.bits); perr != nil {
+				inRange = false
+			}
+		}
+		if !inRange {
+			continue
+		}
+		w.WriteString(strings.Join(parts, ","))
+		w.WriteByte('\n')
+		n++
+	}
+	if err := w.Flush(); err != nil {
+		f.Close()
+		os.Remove(path)
+		return "", 0, "", fmt.Errorf("write: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return "", 0, "", fmt.Errorf("close: %w", err)
+	}
+	return path, n, "", nil
+}
+
+// plainInteger: the one spelling %v gives an integer — an optional minus,
+// then digits with no leading zero ("0" itself is fine, "-0" and "007" are
+// not) — which is what the change map's keys carry for integer columns. A
+// spelling DuckDB would also parse but Go would not equate ("007" is not
+// "7" to the canonical check) is refused, so the join hands over exactly
+// what it will accept.
+func plainInteger(s string) bool {
+	if s == "" {
+		return false
+	}
+	neg := s[0] == '-'
+	if neg {
+		s = s[1:]
+		if s == "" {
+			return false
+		}
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	if s[0] == '0' && (len(s) > 1 || neg) {
+		return false
+	}
+	return true
 }
 
 // tableDeltaInput is what writing one pair of a table's chain needs.

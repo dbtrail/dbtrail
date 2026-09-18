@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A refresh with table deltas on no longer reads every row of a table's
+  key through Go to find the rows a window touched** (#1716). For a table
+  whose primary key is made of integer columns (the common case), the
+  touched keys are handed to DuckDB as a table and the table file is joined
+  against it there, so only the matching rows reach Go, where the same
+  check as before decides. Measured on a 5-million-row table with a
+  100,000-row window: 2.0 s down to 0.1 s. Keys of any other type keep the
+  full scan, and so does a window holding a key that cannot be spelled as
+  a plain integer. Either way the final check is the same one as before,
+  done in Go: the join only cuts down how many rows have to reach it.
 - **A refresh reads a table's events in index order instead of looking each
   one up on its own** (#1720). The fetch behind `baseline refresh`, a
   scheduled update and `reconstruct --output-format parquet` used the query
