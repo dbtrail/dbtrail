@@ -103,7 +103,14 @@ func (s *baselineSupervisor) statusSlotLocked(kind baselineJobKind) map[string]*
 // Backups page's run list. The server's status card shows failed with the
 // panic value, and the daemon log carries the stack.
 func (s *baselineSupervisor) recoverBaselineJob(kind baselineJobKind, serverID, serverName string) {
-	r := recover()
+	s.failPanickedJob(kind, serverID, serverName, recover())
+}
+
+// failPanickedJob is recoverBaselineJob after the recover() call, for a guard
+// that has to be a closure (the dump's, which reads a value set during the
+// run): recover() returns nil unless the DEFERRED function itself calls it,
+// so a closure passes recover()'s result in. r == nil is "no panic".
+func (s *baselineSupervisor) failPanickedJob(kind baselineJobKind, serverID, serverName string, r any) {
 	if r == nil {
 		return
 	}
@@ -131,6 +138,7 @@ func (s *baselineSupervisor) recoverBaselineJob(kind baselineJobKind, serverID, 
 	// progress to the status API ({state:"failed", rows:12000} looks
 	// half-done). Same reasoning the sql export's ordinary failure path
 	// spells out. Since and At are kept — they identify the run.
-	st.Tables, st.Refused, st.Carried, st.CarriedCopied, st.Uploaded = 0, 0, 0, 0, 0
+	st.Tables, st.Refused, st.Carried, st.CarriedCopied, st.Uploaded, st.Swept = 0, 0, 0, 0, 0, 0
 	st.Rows, st.Bytes = 0, 0
+	st.Uploading = false
 }

@@ -3,10 +3,13 @@ package consoleapp
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +22,8 @@ import (
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
 	"github.com/dbtrail/dbtrail/internal/notify"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // checkMydumperPrivileges is mydumperlock.CheckPrivileges behind a seam, so a
@@ -86,6 +91,16 @@ type baselineSupervisor struct {
 	// restore) so the backups page can report exact durations. Failures to
 	// save are logged, never returned: history must not fail a run.
 	history *console.BaselineRunHistory
+
+	// produce runs the production half of a full backup (mydumper → Parquet)
+	// and hands the outcome to completeDump: execute in the daemon (set by
+	// newBaselineSupervisor; nil falls back to it), a fake in the tests that
+	// drive Trigger → run past the publish without a mydumper.
+	produce func(console.BaselineRequest) (dumpOutcome, error)
+	// uploading: snapshots this process is sending to a destination right
+	// now, keyed "<server id>/<snapshot dir name>", so a sweep does not send
+	// one a second time (#1725). Guarded by mu.
+	uploading map[string]bool
 	// refreshes tracks the PERIODIC refresh jobs (#1171), kept apart from jobs
 	// so a manual dump cannot erase the evidence that the automatic refresh has
 	// been failing. Both share the single-flight (busyLocked).
@@ -160,7 +175,7 @@ type baselineSupervisor struct {
 // ticker goroutine.
 func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode baseline.LockMode) *baselineSupervisor {
 	sweepSQLExportStaging(stagingDir)
-	return &baselineSupervisor{
+	s := &baselineSupervisor{
 		ctx:              ctx,
 		stagingDir:       stagingDir,
 		lockMode:         lockMode,
@@ -176,6 +191,8 @@ func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode base
 		exportRuns:       make(map[string]*sqlExportRun),
 		exportOrphans:    make(map[string]map[string]string),
 	}
+	s.produce = s.execute
+	return s
 }
 
 // Trigger starts a baseline in the background; returns console.ErrBaselineRunning
@@ -215,63 +232,373 @@ func (s *baselineSupervisor) Status(serverID string) console.BaselineStatus {
 }
 
 func (s *baselineSupervisor) run(req console.BaselineRequest) {
-	defer s.recoverBaselineJob(baselineJobDump, req.ServerID, req.ServerName)
+	// The guard reads own at panic time (a closure, not a bound argument):
+	// once the run has published, the map entry may belong to a later
+	// backup, and the guard must then fail THIS run's entry, not that one.
+	var own dumpOwn
+	// recover() is called by the deferred closure itself: called one frame
+	// deeper (inside recoverDumpJob) it would return nil and catch nothing.
+	defer func() { s.recoverDumpJob(req, &own, recover()) }()
 	started := time.Now().UTC()
-	stats, uploaded, snapTime, err := s.execute(req)
+	if req.Flavor == console.FlavorPostgres {
+		// The PG producer uploads inside executePG and stamps the snapshot
+		// server-side; it keeps the one-phase shape.
+		stats, uploaded, err := s.executePG(req)
+		s.finishDump(req, started, dumpOutcome{stats: stats}, nil, uploaded, 0, err)
+		return
+	}
+	produce := s.produce
+	if produce == nil {
+		produce = s.execute
+	}
+	out, err := produce(req)
+	s.completeDump(req, started, out, err, &own)
+}
+
+// dumpOwn is what a full backup owns once it has published: its status
+// entry (nil before the publish, when the map entry is still its own and
+// the generic guard applies) and how far its upload got, so the panic guard
+// can say what is true about the snapshot.
+type dumpOwn struct {
+	st *console.BaselineStatus
+	// uploaded: this run's OWN upload returned nil; a later panic is in the
+	// sweep of older snapshots, and the destination has this one.
+	uploaded bool
+}
+
+// recoverDumpJob is recoverBaselineJob for the dump, which alone can be past
+// its publish when it panics: the map entry then reads "succeeded" (or
+// belongs to a later backup that claimed the free slot), and the generic
+// guard would either leave Uploading set forever or fail the later backup's
+// entry, freeing the slot under a running job. With own.st set, the guard
+// fails this run's own entry, wherever it is, and only that — and only
+// while that entry is still mid-upload: finishDump clears Uploading as its
+// first status write, so a panic in its tail (a log argument, say) must
+// not report a completed backup as failed while its files sit on disk and
+// in the bucket. r is recover()'s result, taken by the deferred closure
+// (see run).
+func (s *baselineSupervisor) recoverDumpJob(req console.BaselineRequest, own *dumpOwn, r any) {
+	if own == nil || own.st == nil {
+		s.failPanickedJob(baselineJobDump, req.ServerID, req.ServerName, r)
+		return
+	}
+	if r == nil {
+		return
+	}
+	phase, what := "the upload", "the local snapshot is complete and the next full backup sends it"
+	if own.uploaded {
+		phase, what = "the sweep of older snapshots", "this run's own snapshot had already reached the destination; the next full backup sweeps again"
+	}
+	slog.Error(string(baselineJobDump)+": "+phase+" hit an internal error and stopped after the snapshot was published. Capture and the console keep "+
+		"running; "+what+". Please report this with the stack recorded here.",
+		"server", req.ServerName, "id", req.ServerID, "panic", r, "stack", string(debug.Stack()))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !own.st.Uploading {
+		// finishDump already wrote this run's terminal status; the panic
+		// came after it. The log above is the record.
+		return
+	}
+	own.st.State = "failed"
+	own.st.Uploading = false
+	own.st.LastError = fmt.Sprintf("internal error during %s: %v", phase, r)
+	own.st.FinishedAt = nowStamp()
+}
+
+// dumpOutcome is what producing a full backup leaves behind for publication:
+// the snapshot directory (persistent under the server's local directory, or
+// staged under a temp dir when the destination is S3 only), its instant, and
+// the cleanup that removes the staging.
+type dumpOutcome struct {
+	stats   baseline.Stats
+	snapDir string
+	at      time.Time
+	// staged: snapDir lives under a temp dir removed by cleanup (S3-only).
+	staged  bool
+	cleanup func()
+}
+
+// completeDump is the second half of a full backup: publish, upload, record.
+//
+// With a local directory the snapshot IS published once it is complete on
+// disk (#1725): the status says so and the server's job slot is free before
+// the upload starts, so a scheduled refresh runs alongside the upload — it
+// reads the local copy (resolveFoldSource) — instead of being skipped for as
+// long as the copy takes to reach the destination. S3-only keeps the slot
+// through the upload: its staging is temporary, and nothing is published
+// until the destination has it.
+//
+// own receives the status entry this run owns once it has published (see
+// finishDump) and how far its upload got; the caller's panic guard reads it.
+func (s *baselineSupervisor) completeDump(req console.BaselineRequest, started time.Time, out dumpOutcome, err error, own *dumpOwn) {
+	if err != nil {
+		s.finishDump(req, started, out, nil, 0, 0, err)
+		return
+	}
+	if out.cleanup != nil {
+		defer out.cleanup()
+	}
+	if req.S3 == "" {
+		s.finishDump(req, started, out, nil, 0, 0, nil)
+		return
+	}
+	if req.LocalDir != "" {
+		own.st = s.publishDump(req, out)
+	}
+	root := strings.TrimSuffix(req.S3, "/")
+	name := reconstruct.SnapshotDirName(out.at)
+	uploaded, err := s.uploadDump(req, out, root+"/"+name)
+	swept := 0
+	if err == nil {
+		own.uploaded = true
+		if req.LocalDir != "" {
+			swept = s.sweepUnuploaded(req, root, name)
+		}
+	}
+	s.finishDump(req, started, out, own.st, uploaded, swept, err)
+}
+
+// publishDump marks a full backup published: its snapshot is complete in the
+// server's local directory, the upload is still to come, and the job slot is
+// free (busyLocked reads "running" only).
+//
+// Returns the status entry this run owns: once the slot is free a later full
+// backup may claim the map entry for itself, and this run's completion must
+// then not write over it (finishDump).
+func (s *baselineSupervisor) publishDump(req console.BaselineRequest, out dumpOutcome) *console.BaselineStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.dumpStatusLocked(req.ServerID)
+	st.State = "succeeded"
+	st.Published = true
+	st.Uploading = true
+	st.LastError = ""
+	st.Tables = out.stats.TablesProcessed
+	st.Rows = out.stats.RowsWritten
+	st.FinishedAt = nowStamp()
+	slog.Info("baseline: snapshot published locally; uploading it to the backup destination in the background",
+		"server", req.ServerName, "id", req.ServerID, "snapshot", out.snapDir, "destination", req.S3)
+	return st
+}
+
+func (s *baselineSupervisor) dumpStatusLocked(serverID string) *console.BaselineStatus {
+	st := s.jobs[serverID]
+	if st == nil { // defensive: never overwritten away under lock, but don't panic
+		st = &console.BaselineStatus{}
+		s.jobs[serverID] = st
+	}
+	return st
+}
+
+// uploadDump sends the new snapshot to the destination — exactly that
+// snapshot, to its own key under the destination root, the way the refresh
+// does; handing the uploader the local ROOT re-sent every snapshot on disk on
+// every full backup (#1725: 3,822 objects for 13 new files) — and then, with a
+// local directory, sweeps up any other complete local snapshot the
+// destination lacks, which is what the refresh's failed-upload message
+// promises will happen.
+func (s *baselineSupervisor) uploadDump(req console.BaselineRequest, out dumpOutcome, dest string) (int, error) {
+	uploaded, err := s.uploadMarked(req.ServerID, reconstruct.SnapshotDirName(out.at), out.snapDir, dest, false)
+	if err != nil {
+		if out.staged {
+			// The staging is removed on return: naming it would send the
+			// operator to a directory that no longer exists.
+			return 0, fmt.Errorf("upload: %w", err)
+		}
+		return 0, fmt.Errorf("upload: the snapshot was written to %s but could not be uploaded to %s; the next full backup sends it: %w",
+			out.snapDir, dest, err)
+	}
+	return uploaded, nil
+}
+
+// uploadMarked sends one snapshot directory with its in-flight mark held for
+// exactly the duration of the upload. The release is DEFERRED: an upload
+// that panics must not leave the mark behind, or every later sweep would
+// skip that snapshot for as long as the daemon runs.
+func (s *baselineSupervisor) uploadMarked(serverID, name, dir, dest string, skipExisting bool) (int, error) {
+	release := s.markUploading(serverID, name)
+	defer release()
+	return uploadSnapshot(s.ctx, dir, dest, "", skipExisting)
+}
+
+// markUploading registers a snapshot this process is sending to the
+// destination, so a sweep running alongside (this dump's, another dump's)
+// does not send it a second time; the returned func unregisters it. Keyed by
+// server and snapshot directory name.
+func (s *baselineSupervisor) markUploading(serverID, name string) (release func()) {
+	key := serverID + "/" + name
+	s.mu.Lock()
+	if s.uploading == nil {
+		s.uploading = map[string]bool{}
+	}
+	s.uploading[key] = true
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		delete(s.uploading, key)
+		s.mu.Unlock()
+	}
+}
+
+func (s *baselineSupervisor) isUploading(serverID, name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.uploading[serverID+"/"+name]
+}
+
+// sweepUnuploaded sends every complete local snapshot other than the one
+// named own whose _SUCCESS the destination does not have, skipping objects
+// already there and snapshots this process is sending right now (a refresh
+// running alongside this upload sends its own). A probe or an upload that
+// fails is logged and skipped: the full backup's own upload succeeded, and
+// the next full backup sweeps again. Compared by directory NAME: the
+// snapshot instant on disk has second resolution, the run's has nanoseconds.
+func (s *baselineSupervisor) sweepUnuploaded(req console.BaselineRequest, root, own string) int {
+	files, err := listBaselines(s.ctx, req.LocalDir)
+	if err != nil {
+		slog.Warn("baseline: could not list the local backups to sweep unuploaded snapshots", "server", req.ServerName, "error", err)
+		return 0
+	}
+	seen := map[string]bool{own: true}
+	swept := 0
+	for _, f := range files {
+		if s.ctx.Err() != nil {
+			// Shutdown: what is left is the next full backup's, and one line
+			// says so instead of one warning per snapshot.
+			slog.Info("baseline: sweep of unuploaded snapshots interrupted by shutdown; the next full backup continues it", "server", req.ServerName)
+			return swept
+		}
+		name := reconstruct.SnapshotDirName(f.SnapshotTime)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if s.isUploading(req.ServerID, name) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(req.LocalDir, name, baseline.SuccessMarker)); err != nil {
+			// The listing admits a snapshot with NEITHER marker (written
+			// before the markers existed) and the uploader refuses one
+			// without _SUCCESS, so this one can never be sent: say so
+			// instead of probing and failing on every full backup.
+			slog.Info("baseline: a local snapshot has no _SUCCESS marker (written by an older build) and cannot be sent to the destination; re-create it to have it there",
+				"server", req.ServerName, "snapshot", name)
+			continue
+		}
+		dest := root + "/" + name
+		present, err := s3ObjectPresent(s.ctx, dest+"/"+baseline.SuccessMarker)
+		if err != nil {
+			slog.Warn("baseline: could not tell whether the destination has a local snapshot; not swept this time (a HEAD on a missing key needs s3:ListBucket to answer 404 rather than 403)",
+				"server", req.ServerName, "snapshot", name, "error", err)
+			continue
+		}
+		if present {
+			continue
+		}
+		n, err := s.uploadMarked(req.ServerID, name, filepath.Join(req.LocalDir, name), dest, true)
+		if err != nil {
+			slog.Warn("baseline: a local snapshot the destination lacks could not be sent; the next full backup tries again",
+				"server", req.ServerName, "snapshot", name, "error", err)
+			continue
+		}
+		slog.Info("baseline: sent a local snapshot the destination lacked", "server", req.ServerName, "snapshot", name, "uploaded", n)
+		swept++
+	}
+	return swept
+}
+
+// finishDump records the run and writes the terminal status. A failed upload
+// after a local publish is a failed run that KEEPS the snapshot (Published
+// stays true): the local copy is what the schedule now reads, and the error
+// names where it is and where it did not get to.
+//
+// own is the status entry a published run owns (nil before a publish, when
+// the run still holds the slot and the map entry is its own). If a later
+// full backup has since claimed the map entry — the slot was free — this
+// run's outcome goes to its own detached entry and the log, never over the
+// running one: writing "succeeded" there would free the slot under a job
+// that is still running.
+func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started time.Time, out dumpOutcome, own *console.BaselineStatus, uploaded, swept int, err error) {
 	rec := console.BaselineRunRecord{
 		Kind: console.BaselineRunDump, Trigger: req.Trigger, StartedAt: started.Format(time.RFC3339),
-		Tables: stats.TablesProcessed, Rows: stats.RowsWritten, Uploaded: uploaded,
+		Tables: out.stats.TablesProcessed, Rows: out.stats.RowsWritten, Uploaded: uploaded,
 		// The reason this was a full backup travels with the run (#1604):
 		// recomputed later it would name whatever is true THEN.
 		Why: req.Why, WhyCode: console.BackupWhyCode(req.Why),
 	}
-	if err == nil && !snapTime.IsZero() {
-		rec.SnapshotTime = snapTime.UTC().Format(time.RFC3339)
+	// A snapshot instant is recorded when a snapshot was published: a
+	// success, or a local publish whose upload failed.
+	if !out.at.IsZero() && (err == nil || (out.snapDir != "" && !out.staged)) {
+		rec.SnapshotTime = out.at.UTC().Format(time.RFC3339)
 	}
 	s.recordRun(req.ServerID, req.ServerName, rec, err)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.jobs[req.ServerID]
-	if st == nil { // defensive: never overwritten away under lock, but don't panic
-		st = &console.BaselineStatus{}
-		s.jobs[req.ServerID] = st
+	st := s.dumpStatusLocked(req.ServerID)
+	if own != nil && st != own {
+		slog.Info("baseline: a later full backup took over this server's status while the upload ran; this run's outcome is recorded in the history only",
+			"server", req.ServerName, "id", req.ServerID, "snapshot", out.snapDir)
+		st = own
 	}
 	st.FinishedAt = nowStamp()
+	st.Uploading = false
 	if err != nil {
 		st.State = "failed"
 		st.LastError = err.Error()
+		if st.Published {
+			if errors.Is(err, context.Canceled) {
+				// A routine restart, not a lost backup: the local snapshot is
+				// complete and the next full backup sends it.
+				slog.Warn("baseline: the upload was interrupted by daemon shutdown; the local snapshot is complete and the next full backup sends it",
+					"server", req.ServerName, "id", req.ServerID, "snapshot", out.snapDir)
+				return
+			}
+			slog.Error("baseline: the snapshot was written but not sent to the backup destination",
+				"server", req.ServerName, "id", req.ServerID, "snapshot", out.snapDir, "error", err)
+			return
+		}
 		slog.Error("baseline: snapshot failed", "server", req.ServerName, "id", req.ServerID, "error", err)
 		return
 	}
 	st.State = "succeeded"
 	st.LastError = ""
-	st.Tables = stats.TablesProcessed
-	st.Rows = stats.RowsWritten
+	st.Tables = out.stats.TablesProcessed
+	st.Rows = out.stats.RowsWritten
 	st.Uploaded = uploaded
+	st.Swept = swept
+	st.Published = st.Published || out.snapDir != ""
 	slog.Info("baseline: snapshot complete", "server", req.ServerName, "id", req.ServerID,
-		"tables", stats.TablesProcessed, "rows", stats.RowsWritten, "uploaded", uploaded)
+		"tables", out.stats.TablesProcessed, "rows", out.stats.RowsWritten, "uploaded", uploaded, "swept", swept)
 }
 
-// execute runs the full pipeline: mydumper → baseline.Run → (S3) baseline.Upload.
-// For a local-dir destination the Parquet is written there persistently and not
-// uploaded; for an S3 destination it is staged under a fresh temp dir, uploaded,
-// and the staging removed (so a re-run never re-uploads an old snapshot).
-// The third return is the published snapshot's anchor instant (its directory
-// name), zero when unknown: the PG producer stamps the snapshot server-side,
-// out of this process's sight, and a failed run published nothing.
-func (s *baselineSupervisor) execute(req console.BaselineRequest) (baseline.Stats, int, time.Time, error) {
-	if req.Flavor == console.FlavorPostgres {
-		stats, uploaded, err := s.executePG(req)
-		return stats, uploaded, time.Time{}, err
+// s3ObjectPresent reports whether one object exists at an s3:// URL — the
+// sweep's "does the destination have this snapshot" probe on its _SUCCESS.
+// A variable so tests answer it without S3.
+var s3ObjectPresent = func(ctx context.Context, url string) (bool, error) {
+	bucket, key, err := storage.ParseS3URL(url)
+	if err != nil {
+		return false, err
 	}
+	client, err := storage.NewS3ClientForBucket(ctx, bucket, "")
+	if err != nil {
+		return false, err
+	}
+	return storage.S3ObjectExists(ctx, client, bucket, key)
+}
+
+// execute runs the production half of a full backup: mydumper → baseline.Run.
+// For a local-dir destination the Parquet is written there persistently; for
+// an S3-only destination it is staged under a fresh temp dir that the returned
+// cleanup removes once the upload is done. The upload itself is completeDump's.
+func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, error) {
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
-		return baseline.Stats{}, 0, time.Time{}, fmt.Errorf("create staging dir: %w", err)
+		return dumpOutcome{}, fmt.Errorf("create staging dir: %w", err)
 	}
 
 	dumpDir, err := os.MkdirTemp(s.stagingDir, "dump-")
 	if err != nil {
-		return baseline.Stats{}, 0, time.Time{}, fmt.Errorf("create dump dir: %w", err)
+		return dumpOutcome{}, fmt.Errorf("create dump dir: %w", err)
 	}
 	defer os.RemoveAll(dumpDir)
 
@@ -284,16 +611,18 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (baseline.Stat
 	// host's UTC offset (#768).
 	dumpStartedAt := time.Now().UTC()
 	if err := runMydumper(s.ctx, req.SourceDSN, req.Schemas, dumpDir, s.lockMode); err != nil {
-		return baseline.Stats{}, 0, time.Time{}, fmt.Errorf("dump: %w", err)
+		return dumpOutcome{}, fmt.Errorf("dump: %w", err)
 	}
 
+	out := dumpOutcome{at: dumpStartedAt, cleanup: func() {}}
 	outputDir := req.LocalDir
-	if outputDir == "" { // S3-only: stage then upload, discard staging
+	if outputDir == "" { // S3-only: stage, upload, discard the staging
 		outputDir, err = os.MkdirTemp(s.stagingDir, "baseline-")
 		if err != nil {
-			return baseline.Stats{}, 0, time.Time{}, fmt.Errorf("create baseline staging dir: %w", err)
+			return dumpOutcome{}, fmt.Errorf("create baseline staging dir: %w", err)
 		}
-		defer os.RemoveAll(outputDir)
+		out.staged = true
+		out.cleanup = func() { os.RemoveAll(outputDir) }
 	}
 
 	stats, err := baseline.Run(s.ctx, baseline.Config{
@@ -304,19 +633,12 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (baseline.Stat
 		TableDeltas: s.tableDeltas,
 	})
 	if err != nil {
-		return baseline.Stats{}, 0, time.Time{}, fmt.Errorf("convert: %w", err)
+		out.cleanup()
+		return dumpOutcome{}, fmt.Errorf("convert: %w", err)
 	}
-
-	var uploaded int
-	if req.S3 != "" {
-		// Region/credentials come from the ambient AWS chain (env / ~/.aws / IAM
-		// role), like every other S3 read the console does.
-		uploaded, err = baseline.Upload(s.ctx, outputDir, req.S3, "", false)
-		if err != nil {
-			return baseline.Stats{}, 0, time.Time{}, fmt.Errorf("upload: %w", err)
-		}
-	}
-	return stats, uploaded, dumpStartedAt, nil
+	out.stats = stats
+	out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(dumpStartedAt))
+	return out, nil
 }
 
 // executePG produces a PostgreSQL baseline in-process via internal/pgbaseline —

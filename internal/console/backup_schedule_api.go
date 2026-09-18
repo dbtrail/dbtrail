@@ -208,8 +208,8 @@ func scheduleRunFromStatus(st BackupScheduleState) *backupScheduleRunDTO {
 		// whose upload failed DID publish one locally (#1539), and the
 		// history path names it too (publishedSnapshotTime), so reading
 		// State alone gave the same run two answers depending on whether the
-		// history file opened. Published cannot replace ok either — the dump
-		// path does not set it.
+		// history file opened. Published cannot replace ok either — the PG
+		// dump path does not set it.
 		snapshot = cur.At
 	}
 	return &backupScheduleRunDTO{

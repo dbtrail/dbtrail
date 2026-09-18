@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A full backup with a local directory is published as soon as its
+  snapshot is complete on disk; the copy to S3 no longer blocks the
+  schedule, and it sends only the new snapshot** (#1725). The daemon held
+  the server's single backup job for the whole upload, so scheduled updates
+  were skipped for as long as the copy took; and the uploader was handed the
+  backups directory rather than the new snapshot, so every full backup
+  re-sent every snapshot on disk (3,822 objects for 13 new files, 15
+  minutes for 671 MB). Now the status says `published` with the upload
+  still running (`uploading`), a scheduled update runs alongside it and
+  reads the local copy (the console log says so when the local copy is
+  newer than the bucket's), the upload sends the new snapshot to its own
+  key, and then sends any other complete local snapshot the destination
+  lacks (an update whose upload had failed), reported as `swept`. An upload
+  that fails after the local publish is a failed run that keeps the
+  snapshot and names where it is. With no local directory (S3 only) the
+  job keeps the slot through the upload, as before: its staging is
+  temporary and nothing is published until the destination has it. The
+  Backups page shows the "saved on this machine, still copying" state,
+  the backup schedule counts such a run as in flight until the copy is
+  done, and a local snapshot written by an older build without a
+  `_SUCCESS` marker is named once in the log instead of being retried on
+  every full backup (the uploader refuses it).
 - **A refresh with table deltas on no longer reads every row of a table's
   key through Go to find the rows a window touched** (#1716). For a table
   whose primary key is made of integer columns (the common case), the

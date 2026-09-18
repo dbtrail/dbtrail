@@ -221,7 +221,12 @@ func (b *backupScheduler) ScheduleState(serverID string) console.BackupScheduleS
 		// The slot is shared with manual jobs of the same kind. Only the job
 		// whose Since is exactly the one read back at trigger time is ours.
 		out.Last = &cur
-		out.Running = cur.State == "running"
+		// A full backup published locally while its copy to the destination
+		// still runs (#1725) is in flight for the schedule too: the copy
+		// below is taken once, so taking it now would freeze "uploaded: 0"
+		// as the run's record, and the fallback alarm would end on a
+		// backup the destination does not have yet.
+		out.Running = cur.State == "running" || cur.Uploading
 		if !out.Running {
 			// Keep the outcome: a later manual job overwrites the slot, and
 			// a job that panicked has no history record, so this copy is
