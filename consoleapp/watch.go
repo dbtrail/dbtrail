@@ -526,7 +526,8 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// lives in the latter. Settings are a live provider so the console can
 	// retune retain/interval/add-future without a restart.
 	rotation.StartLoop(ctx, rotationSettingsProvider(registry), func() []rotation.RotateTarget {
-		return rotateTargets(upIndexDSN, supervisor, registry, archiveStagingDir())
+		// No source streams into the boot index here (#1715).
+		return rotateTargets(upIndexDSN, bootIdle, supervisor, registry, archiveStagingDir())
 	}, rotationCycleHooks(notifier)...)
 
 	// Reclaim local baseline snapshots that already have a durable S3 copy (#616):
@@ -753,7 +754,8 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// plane provisions, on the daemon lifecycle. Live settings provider so the
 	// console can retune retain/interval/add-future without a restart.
 	rotation.StartLoop(ctx, rotationSettingsProvider(registry), func() []rotation.RotateTarget {
-		return rotateTargets(upIndexDSN, supervisor, registry, archiveStagingDir())
+		// The main stream writes the boot index.
+		return rotateTargets(upIndexDSN, bootStreamed, supervisor, registry, archiveStagingDir())
 	}, rotationCycleHooks(notifier)...)
 
 	// Reclaim local baseline snapshots that already have a durable S3 copy (#616):
@@ -1603,14 +1605,28 @@ func archiveStagingDir() string {
 	return filepath.Join(os.TempDir(), "bintrail-archive-staging")
 }
 
+// bootRole says whether the main stream writes the boot index: a source-ful
+// `watch` streams into it, a source-less one leaves it idle, and rotation
+// logs an idle, empty boot index as housekeeping rather than freed space
+// (#1715). A named type so the call sites read as a role, not a bare bool
+// (an untyped literal still converts; the wiring test pins which runner
+// passes which).
+type bootRole bool
+
+const (
+	bootStreamed bootRole = true
+	bootIdle     bootRole = false
+)
+
 // rotateTargets assembles the built-in rotation's per-cycle targets: the boot
 // index (drop-only — the ephemeral default entry has no registry archive
-// config) plus every supervised source. A source whose registry entry carries
+// config; NoWriter when idle, #1715) plus every supervised source. A source
+// whose registry entry carries
 // an Archive S3 bucket archives-then-drops to it, but ONLY once its bintrail_id
 // is resolved (read from stream_state) — until then it rotates drop-only and
 // the engine's protect-unarchived guard keeps it from losing data.
-func rotateTargets(bootDSN string, sup *monitorSupervisor, reg *console.Registry, stagingBase string) []rotation.RotateTarget {
-	targets := []rotation.RotateTarget{{DSN: bootDSN}}
+func rotateTargets(bootDSN string, boot bootRole, sup *monitorSupervisor, reg *console.Registry, stagingBase string) []rotation.RotateTarget {
+	targets := []rotation.RotateTarget{{DSN: bootDSN, NoWriter: boot == bootIdle}}
 	for _, j := range sup.ActiveJobs() {
 		t := rotation.RotateTarget{DSN: j.IndexDSN}
 		if entry, ok := reg.Get(j.EntryID); ok && entry.ArchiveS3 != "" {
