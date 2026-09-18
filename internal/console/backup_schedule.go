@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -269,16 +270,25 @@ type BackupWindow struct {
 	// FoldFixed and FoldRate model what an update costs from the run
 	// history: fixed seconds every update pays (starting DuckDB, reading
 	// every table's previous Parquet, fetching it from the bucket) plus one
-	// second per FoldRate events. Zero when unknown: a rate needs at least
-	// two measured updates whose times differ, or the per-event cost is
-	// not distinguishable from the fixed one (a quiet server's updates all
-	// take the fixed cost, and a rate read off them would be an artefact
-	// that cuts over on every burst).
+	// second per FoldRate events. Zero when unknown, which UpdateModel
+	// decides three ways: fewer than two measured updates, or the runs'
+	// times beyond the shortest under a tenth of their total (a quiet
+	// server: every update costs the fixed cost), or their events beyond
+	// the shortest under a tenth of a typical run's (a steady load: every
+	// update applies the same), or a marginal rate under a tenth of the
+	// shortest run's whole rate (noise in the denominator, #1736). A rate
+	// read off any of those would be an artefact that cuts over on every
+	// burst, or on every slot. FoldFixed alone still decides one thing
+	// without a rate: an update whose cheapest measured run already took
+	// longer than the last full backup.
 	FoldFixed time.Duration
 	FoldRate  float64
-	// Proven is the largest number of events a recorded update applied in
-	// less time than the last full backup took. An update that small has
-	// been done cheaper, so it is never cut over: evidence beats the model.
+	// Proven is the largest number of events one of the newest five
+	// measured updates (the model's own sample) applied in less time than
+	// the last full backup took. An update up to BackupProvenMargin times
+	// that size is not cut over on the estimate: evidence beats the model,
+	// with a margin for the few thousand events each window carries over
+	// the last (#1736).
 	Proven int64
 	// LastFull is how long the last successful full backup took; zero when
 	// there is none on record.
@@ -304,6 +314,15 @@ func BackupCutoverAge(interval time.Duration) time.Duration {
 	return max(BackupCutoverMinAge, 6*interval)
 }
 
+// BackupProvenMargin is how far past the largest update proven cheaper
+// than a full backup (BackupWindow.Proven) the count may go before the
+// estimate is believed over that evidence (#1736). A strict "more events
+// than ever proven" was passed by a few thousand events at every slot of a
+// steady load, where each window carries slightly more than the last, and
+// the estimate it then believed was an artefact; within this margin the
+// proven cost is the better evidence.
+const BackupProvenMargin = 1.5
+
 // CutoverToFull is the #1721 rule: the why for a FULL backup instead of an
 // update, or "" to update. Measured first: with the events since the
 // anchor, a measured fold rate and a last full backup on record, the
@@ -315,9 +334,6 @@ func BackupCutoverAge(interval time.Duration) time.Duration {
 // producers, not a schedule.
 func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string {
 	if w.Events >= 0 && w.FoldRate > 0 && w.LastFull > 0 {
-		if w.Events <= w.Proven {
-			return ""
-		}
 		// Compared in float seconds: a Duration conversion of a huge
 		// estimate (a tiny rate, a long stop) overflows to a NEGATIVE
 		// value, which would read as cheaper than any full backup.
@@ -325,8 +341,24 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 		if estSec <= w.LastFull.Seconds() {
 			return ""
 		}
+		if float64(w.Events) <= BackupProvenMargin*float64(w.Proven) {
+			// Evidence over the model, said so: the two disagree by a
+			// lot here, and which one to believe is what an operator
+			// reading the log would want to know.
+			slog.Info("backup schedule: updating although the estimate exceeds the last full backup; an update of about this size was done cheaper",
+				"events", w.Events, "estimate", roundSeconds(estSec), "last_full", roundDuration(w.LastFull), "proven_events", w.Proven)
+			return ""
+		}
 		return fmt.Sprintf("%s: %s events since the previous backup would take about %s to apply at the measured rate, and the last full backup took %s",
 			BackupWhyWindowPrefix, formatCount(w.Events), roundSeconds(estSec), roundDuration(w.LastFull))
+	}
+	// No rate, but the fixed cost alone decides (#1736's review): when even
+	// the cheapest measured update took longer than the last full backup,
+	// no estimate is needed, and the age rule below could never say so on
+	// a server whose every update succeeds (each one renews the anchor).
+	if w.Events != 0 && w.FoldRate <= 0 && w.FoldFixed > 0 && w.LastFull > 0 && w.FoldFixed > w.LastFull {
+		return fmt.Sprintf("%s: the cheapest recent update took %s, longer than the last full backup's %s",
+			BackupWhyWindowPrefix, roundDuration(w.FoldFixed), roundDuration(w.LastFull))
 	}
 	if w.Anchor.IsZero() {
 		return ""
@@ -344,7 +376,7 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 		missing = append(missing, "no count of the changes since it")
 	}
 	if w.FoldRate <= 0 {
-		missing = append(missing, "no measured update rate")
+		missing = append(missing, "no usable update rate (none measured, or the measured updates all cost about the same)")
 	}
 	if w.LastFull <= 0 {
 		missing = append(missing, "no full backup on record")

@@ -102,6 +102,18 @@ const measuredFoldRuns = 5
 // of the sample's total: then every update cost about the same whatever it
 // applied, the per-event cost is not distinguishable, and a rate read off
 // such runs would be a small number that makes any burst look like hours.
+// Two more ways to no rate (#1736). When the events beyond the shortest
+// run are under a tenth of a typical run's (the sample's mean), every
+// update applied about the same however long it took (a steady load, where
+// the durations differ by noise), the slope has no lever arm, and the rate
+// is unknown too; the scale is a run's size, not the sample's total, so
+// the guard does not loosen as the sample fills. And when the marginal
+// rate comes out under a tenth of the shortest run's whole rate (its
+// events over all its seconds, a floor no true per-event rate is below),
+// it is noise in the denominator whatever the spread. Not a whole-run rate
+// in place of the unknown one: on a loaded server that would be near the
+// truth, on a quiet one the fixed cost divided by a handful of events, and
+// the model cannot tell the two apart.
 func (h *BaselineRunHistory) UpdateModel(serverID string) (fixed time.Duration, rate float64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -116,11 +128,13 @@ func (h *BaselineRunHistory) UpdateModel(serverID string) (fixed time.Duration, 
 		return 0, 0
 	}
 	minSec, minEvents, total := sample[0].UpdateSeconds, sample[0].Events, 0.0
+	var sampleEvents int64
 	for _, r := range sample {
 		if r.UpdateSeconds < minSec {
 			minSec, minEvents = r.UpdateSeconds, r.Events
 		}
 		total += r.UpdateSeconds
+		sampleEvents += r.Events
 	}
 	fixed = time.Duration(minSec * float64(time.Second))
 	if len(sample) < 2 {
@@ -137,22 +151,45 @@ func (h *BaselineRunHistory) UpdateModel(serverID string) (fixed time.Duration, 
 	if beyond < total/10 || events <= 0 {
 		return fixed, 0
 	}
-	return fixed, float64(events) / beyond
+	if float64(events) < float64(sampleEvents)/float64(len(sample))/10 {
+		return fixed, 0
+	}
+	rate = float64(events) / beyond
+	// Plausibility (#1736, the review's check): the shortest run's whole
+	// rate, its events over ALL its seconds, fixed cost included, is a
+	// floor under the true per-event rate. A marginal rate a tenth of
+	// that or slower is not a slow disk, it is noise in the denominator
+	// (the rig's 4 events/s against a floor of 27,000; the spread guard
+	// alone is passed by a sample one notch noisier).
+	if minSec > 0 && rate < float64(minEvents)/minSec/10 {
+		return fixed, 0
+	}
+	return fixed, rate
 }
 
 func measuredUpdate(r BaselineRunRecord) bool {
 	return r.Kind == BaselineRunRefresh && r.Error == "" && r.SkipReason == "" && r.Events > 0 && r.UpdateSeconds > 0
 }
 
-// ProvenUpdate is the most events any recorded successful update for
-// serverID applied in less than within: what the history proves an update
-// can do cheaper than that. Zero when nothing on record qualifies.
+// ProvenUpdate is the most events any of the newest measuredFoldRuns
+// measured successful updates for serverID applied in less than within:
+// what the history proves an update can do cheaper than that. The same
+// sample the model fits (#1736): a fast day months back is not evidence
+// about this disk today, and the margin CutoverToFull allows past the
+// proven size makes stale evidence reach further. Zero when nothing in
+// the sample qualifies.
 func (h *BaselineRunHistory) ProvenUpdate(serverID string, within time.Duration) int64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var proven int64
-	for _, r := range h.servers[serverID] {
-		if measuredUpdate(r) && r.UpdateSeconds < within.Seconds() {
+	recs := h.servers[serverID]
+	for i, seen := len(recs)-1, 0; i >= 0 && seen < measuredFoldRuns; i-- {
+		r := recs[i]
+		if !measuredUpdate(r) {
+			continue
+		}
+		seen++
+		if r.UpdateSeconds < within.Seconds() {
 			proven = max(proven, r.Events)
 		}
 	}
