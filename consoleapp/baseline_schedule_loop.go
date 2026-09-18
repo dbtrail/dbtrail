@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/go-sql-driver/mysql"
 )
 
 // Per-server backup schedule (#1442). The loop ticks once a minute, reads the
@@ -44,6 +46,16 @@ const backupScheduleTick = time.Minute
 type backupScheduler struct {
 	sup *baselineSupervisor
 	reg *console.Registry
+	// windows caches each server's last measured window (#1721) for
+	// windowCacheFor, so the Backups page, which asks on every load, does
+	// not open the index once per server per load.
+	windows map[string]windowSample
+	// window is the probe both the loop's and the API's gates carry:
+	// measureWindow in the daemon; nil in the scheduler tests whose fixture
+	// snapshot is dated weeks before their slots (the age rule would turn
+	// every one of their updates into a full backup), set back by the
+	// tests OF the cut-over.
+	window console.BackupWindowProbe
 	// fullBackups: the daemon's baseline-creation opt-in. Without it a slot
 	// whose chosen producer is a full backup is skipped and recorded as
 	// such; an update from the recorded changes does not need it.
@@ -119,7 +131,7 @@ type scheduledFallback struct {
 }
 
 func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBackups, carryDefault bool) *backupScheduler {
-	return &backupScheduler{
+	b := &backupScheduler{
 		sup: sup, reg: reg, fullBackups: fullBackups, carryDefault: carryDefault,
 		seen:     make(map[string]seenSlot),
 		started:  make(map[string]scheduledStart),
@@ -127,6 +139,8 @@ func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBack
 		fallback: make(map[string]scheduledFallback),
 		warned:   make(map[string]bool),
 	}
+	b.window = b.measureWindow
+	return b
 }
 
 // newBackupScheduleReporter is the watch daemon's wiring in one place: nil
@@ -147,6 +161,133 @@ func newBackupScheduleReporter(sup *baselineSupervisor, reg *console.Registry, f
 // is one.
 func (b *backupScheduler) FullBackups() (bool, error) {
 	return b.fullBackups, b.sup.configErr
+}
+
+// WindowProbe measures what an update would fold for one server (#1721).
+func (b *backupScheduler) WindowProbe() console.BackupWindowProbe {
+	return b.window
+}
+
+// windowProbeTimeout bounds the one index read the probe makes: it runs on
+// every schedule decision AND every load of the Backups page, so an index
+// that does not answer must cost a bounded wait and an "unknown", never a
+// hung page.
+const windowProbeTimeout = 3 * time.Second
+
+// windowCacheFor is how long a measured window is reused before the index
+// is read again: the loop ticks once a minute, and a page reloaded five
+// times in that minute should cost one index read, not five.
+const windowCacheFor = time.Minute
+
+type windowSample struct {
+	anchor time.Time
+	at     time.Time
+	w      console.BackupWindow
+}
+
+// measureWindow answers ChooseBackupMethod's question for e: how far the
+// index has moved since the previous snapshot, how fast recent updates
+// folded, and how long the last full backup took. Each part is unknown on
+// its own terms, and the rule (console.CutoverToFull) says what it can
+// decide with what it has:
+//
+//   - the events since the anchor need the index mark this daemon read when
+//     it folded THAT snapshot (foldedMarks, in memory, so gone at a restart
+//     and absent after a full backup, which folds nothing) and one read of
+//     the current mark; an anchor with no memo, a memo for another snapshot,
+//     a mark that went backwards (an index rebuilt) or an index that did not
+//     answer all leave it unknown;
+//   - the update model, what the history proves an update can do, and the
+//     last full backup's duration come from the run history, and are
+//     unknown without one. The history also keeps the mark each update
+//     read, so after a restart the count falls back to the record of the
+//     update that published the anchor.
+func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEntry, anchor time.Time) console.BackupWindow {
+	b.mu.Lock()
+	if c, ok := b.windows[e.ID]; ok && c.anchor.Equal(anchor) && time.Since(c.at) < windowCacheFor {
+		b.mu.Unlock()
+		return c.w
+	}
+	b.mu.Unlock()
+	w := console.BackupWindow{Anchor: anchor, Events: -1}
+	base, known := b.windowBase(e, anchor)
+	if b.sup.history != nil {
+		w.FoldFixed, w.FoldRate = b.sup.history.UpdateModel(e.ID)
+		w.LastFull = b.sup.history.LastFullBackup(e.ID)
+		if w.LastFull > 0 {
+			w.Proven = b.sup.history.ProvenUpdate(e.ID, w.LastFull)
+		}
+	}
+	if known {
+		ctx, cancel := context.WithTimeout(ctx, windowProbeTimeout)
+		defer cancel()
+		cur, answered := readIndexMark(ctx, probeDSN(e.DSN))
+		b.reportWindowBlind(e, answered)
+		if answered && cur.events >= base {
+			w.Events = int64(cur.events - base)
+		}
+	}
+	b.mu.Lock()
+	if b.windows == nil {
+		b.windows = map[string]windowSample{}
+	}
+	b.windows[e.ID] = windowSample{anchor: anchor, at: time.Now(), w: w}
+	b.mu.Unlock()
+	return w
+}
+
+// probeDSN bounds the DIAL of the probe's index connection too: the context
+// above bounds the queries only, and config.Connect pings with the DSN's own
+// dial budget (ten seconds by default), so a host that accepts the
+// connection and goes silent would hold a page load for that long before
+// the three seconds started. Same shape as the console's test-connection
+// probe. A DSN that does not parse is handed on as is: the read then fails
+// for its own reason.
+func probeDSN(dsn string) string {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return dsn
+	}
+	if cfg.Timeout == 0 || cfg.Timeout > windowProbeTimeout {
+		cfg.Timeout = windowProbeTimeout
+	}
+	return cfg.FormatDSN()
+}
+
+// windowBase is the index mark an update from anchor counts its events from:
+// the in-memory memo of this daemon's fold that published it, or, after a
+// restart emptied the memo, the mark the run history recorded for it.
+func (b *backupScheduler) windowBase(e console.ServerEntry, anchor time.Time) (uint64, bool) {
+	if anchor.IsZero() {
+		return 0, false
+	}
+	b.sup.mu.Lock()
+	memo, seen := b.sup.foldedMarks[e.ID]
+	b.sup.mu.Unlock()
+	if seen && memo.indexDSN == e.DSN && reconstruct.SnapshotDirName(memo.publishedAt) == reconstruct.SnapshotDirName(anchor) {
+		return memo.mark.events, true
+	}
+	if b.sup.history != nil {
+		return b.sup.history.IndexMarkFor(e.ID, anchor.UTC().Format(time.RFC3339))
+	}
+	return 0, false
+}
+
+// reportWindowBlind says once, at Warn, that the index stopped answering
+// the window probe: from then on the cut-over runs on the age of the
+// previous backup alone, and a full read of production on age would
+// otherwise be diagnosed as the rule misfiring. Resolved when it answers.
+func (b *backupScheduler) reportWindowBlind(e console.ServerEntry, answered bool) {
+	key := "window-probe:" + e.ID
+	if answered {
+		b.sup.gateEdge.Resolve(key)
+		return
+	}
+	if b.sup.gateEdge.Fire(key, "") {
+		slog.Warn("backup schedule: the index did not answer the update-size probe in time; until it does, the choice between "+
+			"an update and a full backup falls back to the age of the previous backup alone",
+			"server", e.Name, "id", e.ID, "timeout", windowProbeTimeout)
+	}
 }
 
 // Observe implements console.BackupScheduleReporter: the API calls it when a
@@ -398,7 +539,7 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 		b.skip(e, now, console.RefusalReason(err))
 		return
 	}
-	method, why, err := console.ChooseBackupMethod(b.sup.ctx, e, gates)
+	method, why, err := console.ChooseBackupMethodAt(b.sup.ctx, e, gates, now)
 	if err != nil {
 		b.skip(e, now, err.Error())
 		return
@@ -413,6 +554,14 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 	if method == console.BackupMethodFull && strings.HasPrefix(why, console.BackupWhyUnreadablePrefix) {
 		degraded = why
 		slog.Warn("backup schedule: taking a full backup because the previous one could not be read",
+			"server", e.Name, "id", e.ID, "reason", why)
+	}
+	// The #1721 cut-over is the plan working as designed, not a degradation,
+	// but it is the expensive producer replacing the cheap one, so it is
+	// said in the log with the numbers the decision was made on, before the
+	// run starts and not only on the page afterwards.
+	if code := console.BackupWhyCode(why); method == console.BackupMethodFull && (code == "window_measured" || code == "window_age") {
+		slog.Info("backup schedule: taking a full backup instead of an update from the recorded changes; the update would cost more, or its starting point is too old to fold cheaply",
 			"server", e.Name, "id", e.ID, "reason", why)
 	}
 	stamp := now.Format(time.RFC3339)
@@ -446,7 +595,7 @@ func (b *backupScheduler) watch(e console.ServerEntry, stamp, method string) {
 // gates is what the checker needs to know about this daemon.
 func (b *backupScheduler) gates() console.BackupScheduleGates {
 	enabled, refusal := b.FullBackups()
-	g := console.BackupScheduleGates{LoopRunning: true, FullBackups: enabled}
+	g := console.BackupScheduleGates{LoopRunning: true, FullBackups: enabled, Window: b.window}
 	if refusal != nil {
 		g.FullBackupsErr = refusal.Error()
 	}
@@ -662,6 +811,7 @@ func (b *backupScheduler) Forget(serverID string) {
 	delete(b.started, serverID)
 	delete(b.skipped, serverID)
 	delete(b.fallback, serverID)
+	delete(b.windows, serverID)
 	b.mu.Unlock()
 }
 
@@ -692,8 +842,10 @@ func (b *backupScheduler) skip(e console.ServerEntry, now time.Time, reason stri
 	if b.sup.history == nil {
 		return
 	}
-	// Filed under the dump kind whatever the producer would have been;
-	// nothing reads a skip's Kind today (runMethod applies to runs).
+	// Filed under the dump kind whatever the producer would have been. The
+	// history's LastFullBackup walks records by this kind and relies on its
+	// SkipReason guard to pass these over (#1721): a skip must never read
+	// as a full backup's duration.
 	_, err := b.sup.history.AppendSkip(console.BaselineRunRecord{
 		ServerID: e.ID, ServerName: e.Name, Kind: console.BaselineRunDump, SkipReason: reason,
 		StartedAt: stamp, FinishedAt: stamp,

@@ -255,7 +255,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// instead measures how long it takes to spawn a goroutine, which is
 	// microseconds no matter what the refresh costs.
 	took := time.Since(elapsed)
-	s.recordRun(req.ServerID, req.ServerName, foldRunCounts(console.BaselineRunRecord{
+	rec := console.BaselineRunRecord{
 		Kind: console.BaselineRunRefresh, Trigger: req.Trigger, StartedAt: started.Format(time.RFC3339),
 		SnapshotTime: publishedSnapshotTime(at, err),
 		// Zero means "nothing was sent" for a server with no destination AND
@@ -263,7 +263,19 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		// makes a successful upload visible at all: without it the only
 		// evidence the snapshot got there is the absence of a failure line.
 		Uploaded: uploaded,
-	}, tables, refused, reuse), err)
+	}
+	if err == nil {
+		// What the #1721 cut-over estimates from: the events this update
+		// applied, the whole run's time (upload included, like the full
+		// backup it is compared against), and the mark the next update's
+		// count starts from.
+		rec.Events = s.measuredEvents(req, mark, known, prev)
+		rec.UpdateSeconds = took.Seconds()
+		if known {
+			rec.IndexMark = mark.events
+		}
+	}
+	s.recordRun(req.ServerID, req.ServerName, foldRunCounts(rec, tables, refused, reuse), err)
 	if err != nil {
 		// Reported and reclaimed OUTSIDE s.mu. Deleting a directory is
 		// filesystem work of unbounded duration, and s.mu is the lock every
@@ -982,6 +994,28 @@ func foldRunCounts(rec console.BaselineRunRecord, tables, refused int, reuse reu
 	return rec
 }
 
+// measuredEvents is how many row events a fold that started from prev applied,
+// as far as the index marks can tell: the mark read before this fold against
+// the one this daemon read before folding prev. Zero ("not measured") unless
+// the memo is for exactly that snapshot on the same index — after a full
+// backup the memo names an older snapshot, and its delta would count the
+// full backup's window too, inflating the rate the cut-over estimates from —
+// or when the mark went backwards (an index rebuilt).
+func (s *baselineSupervisor) measuredEvents(req refreshRequest, mark indexMark, known bool, prev time.Time) int64 {
+	if !known || prev.IsZero() {
+		return 0
+	}
+	s.mu.Lock()
+	memo, seen := s.foldedMarks[req.ServerID]
+	s.mu.Unlock()
+	if !seen || memo.indexDSN != req.IndexDSN || memo.destination != refreshDestination(req) ||
+		reconstruct.SnapshotDirName(memo.publishedAt) != reconstruct.SnapshotDirName(prev) ||
+		mark.events < memo.mark.events {
+		return 0
+	}
+	return int64(mark.events - memo.mark.events)
+}
+
 // applyFoldStatus writes a finished fold's outcome onto the status the console
 // polls. Shared by the refresh and the restore, which had byte-identical copies
 // of it.
@@ -1637,7 +1671,9 @@ func reportRefreshDuration(server string, run refreshRun, prev refreshPace) {
 			"that: the next refresh cannot start until this one ends, and it inherits everything that arrived "+
 			"while it ran. Taking a full backup does change it, because a full backup reads the source instead "+
 			"of folding, and the refreshes after it start from the moment that backup BEGAN, which means the "+
-			"first of them still folds the time the backup itself took. Otherwise reduce what a run costs, "+
+			"first of them still folds the time the backup itself took; the backup schedule does this on its "+
+			"own once an update is measured to cost more than a full backup, or when its starting point is "+
+			"past the cut-over age with nothing measured. Otherwise reduce what a run costs, "+
 			"and start where growth_mostly_in on this line points: this reading is over the whole run, so a "+
 			"destination that slowed down reaches it exactly as a fold that did, and fold_grew_by against "+
 			"upload_grew_by is which of the two actually happened here.", attrs...)

@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **After a long stop the backup schedule takes a full backup instead of
+  folding hours of changes one page at a time** (#1721). Before each
+  scheduled slot the daemon now measures what an update would have to
+  fold: how far the index's high-water mark moved since the previous
+  snapshot (counted from the mark it read when it made that snapshot;
+  every update's run now records `events`, `update_seconds` and
+  `index_mark`, so the count survives a restart), against a cost model
+  fitted on its last five measured updates (a fixed cost every update
+  pays, plus a rate over the time beyond it; no rate is read off a quiet
+  server whose updates all cost the same, because that number would be an
+  artefact of the fixed cost and cut over on every burst) and the
+  duration of the last full backup on record. When the update is
+  estimated to cost more, and no recorded update that large was done in
+  less time than that full backup, a full backup is taken instead, with
+  the numbers as the run's reason (`why_code: window_measured`). When one
+  of the three is unknown (no full backup on record, no rate yet, an
+  index that did not answer the probe in time, which is warned once)
+  the rule is the age of the previous snapshot alone: older than two
+  hours or six schedule intervals, whichever is longer (`window_age`, the
+  reason naming what was missing). Both are said in the daemon log before
+  the run starts and on the Backups page afterwards, where the same
+  measurement (cached for a minute) shows the next slot's method. A
+  server whose full backups cannot start keeps updating, however long it
+  takes: that is the producer that can. The measured case never yields to
+  the age one: an old anchor whose update is estimated cheaper than a full
+  backup is updated.
 - **A full backup with a local directory is published as soon as its
   snapshot is complete on disk; the copy to S3 no longer blocks the
   schedule, and it sends only the new snapshot** (#1725). The daemon held

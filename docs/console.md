@@ -539,7 +539,25 @@ panel that answers whether a restore would work, far below the fold.
   `backup` a full read of the source) and, for a full backup, why an update
   was not possible when it ran (`last_run.why`, with a stable `why_code`:
   `no_index`, `no_local_dir`, `first_backup`, `previous_unreadable`,
-  `fold_refused`, `fold_crashed`). The reason is persisted with the run,
+  `fold_refused`, `fold_crashed`, `window_measured`, `window_age`). The
+  last two are the cut-over after a long stop (#1721): before each slot the
+  daemon measures what an update would have to fold (how far the index's
+  high-water mark moved since the previous snapshot, against a cost model
+  fitted on its last five measured updates, a fixed cost plus a per-event
+  rate, and the duration of the last full backup on record) and takes a
+  full backup instead when the update is estimated to cost more and no
+  recorded update that large was done in less time; when one of the three
+  is unknown (no full backup on record, no rate yet because every recent
+  update cost about the same, an index that did not answer the probe) it
+  cuts over on age alone, once the previous snapshot is older than two
+  hours or six schedule intervals, whichever is longer, and the reason
+  names what was missing. Both say so in the daemon log with the numbers
+  and on the page as the run's reason (the page's next-slot method uses the
+  same measurement, cached for a minute); neither applies when a full
+  backup cannot start (the creation opt-in off), where the update runs
+  however long it takes, being the producer that can. Every update's run
+  records `events`, `update_seconds` and `index_mark`, which is what the
+  model and the count after a restart are read from. The reason is persisted with the run,
   never recomputed later, so a cleared bucket error cannot show the cheap
   producer for a run that read production in full (#1604); the snapshot
   detail carries the same on `run.why`. The page turns the two permanent
