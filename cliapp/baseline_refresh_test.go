@@ -277,3 +277,31 @@ func TestBaselineRefreshTableDeltasIsOffByDefault(t *testing.T) {
 		t.Fatalf("default = %q, want \"false\"", f.DefValue)
 	}
 }
+
+// TestBuildRefreshOutcomes_tableDeltaDetail (#1718): the detail names this
+// window's pair and rows, an empty window says no pair was written (the case
+// order is load-bearing: TableDelta alone would claim "pair N of M (0 rows)"),
+// and a compaction says why.
+func TestBuildRefreshOutcomes_tableDeltaDetail(t *testing.T) {
+	got := buildRefreshOutcomes(
+		[]string{"shop.a", "shop.b", "shop.c"},
+		[]*reconstruct.TableReport{
+			{Schema: "shop", Table: "a", TableDelta: true, DeltaPairWritten: true, DeltaSeq: 3, DeltaChainFiles: 4, DeltaDeadRows: 7, DeltaUpsertRows: 9},
+			{Schema: "shop", Table: "b", TableDelta: true, DeltaPairWritten: false, DeltaSeq: 2, DeltaChainFiles: 3},
+			{Schema: "shop", Table: "c", DeltaCompacted: "the chain is 25h0m0s old"},
+		}, nil)
+	byTable := map[string]refreshOutcome{}
+	for _, o := range got {
+		byTable[o.Table] = o
+	}
+	if d := byTable["shop.a"].Detail; !strings.Contains(d, "pair 3 of 4") || !strings.Contains(d, "7 rows replaced or removed, 9 changed or new rows") {
+		t.Errorf("shop.a detail = %q", d)
+	}
+	if d := byTable["shop.b"].Detail; !strings.Contains(d, "no events in the window") || !strings.Contains(d, "3 delta pairs") ||
+		!strings.Contains(d, "last pair 2") || strings.Contains(d, "pair 2 of") {
+		t.Errorf("shop.b detail = %q", d)
+	}
+	if d := byTable["shop.c"].Detail; d != "written again in full: the chain is 25h0m0s old" {
+		t.Errorf("shop.c detail = %q", d)
+	}
+}

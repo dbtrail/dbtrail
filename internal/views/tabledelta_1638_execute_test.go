@@ -159,7 +159,7 @@ func TestStateView_readsTheTableDelta(t *testing.T) {
 // files, so one wrong ordering would show in all of them.
 func TestStateView_chainLastVersionWinsAndTombstonesHide(t *testing.T) {
 	const stamp = "2026-04-30T03-00-00Z"
-	want := []string{"1=v3", "2=back", "3=c"}
+	want := []string{"1=v10", "2=back", "3=c"}
 	for _, mode := range followModes {
 		t.Run(mode.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -167,8 +167,13 @@ func TestStateView_chainLastVersionWinsAndTombstonesHide(t *testing.T) {
 			writeDeltaPair(t, base, 0, nil, nil)
 			writeDeltaPair(t, base, 1, []int64{0, 1}, [][3]string{{"1", "v2", "u"}, {"2", "", "d"}, {"9", "nine", "u"}})
 			writeDeltaPair(t, base, 2, []int64{0}, [][3]string{{"1", "v3", "u"}, {"9", "", "d"}, {"2", "back", "u"}})
-			// Sequence 10 sorts after 2 under zero padding, and not before it.
-			writeDeltaPair(t, base, 10, nil, nil)
+			// Sequence 10 sorts after 2 under zero padding, and not before
+			// it: its version of key 1 must be the one that wins. (The chain
+			// has to be contiguous, so 3..9 are written empty.)
+			for seq := 3; seq <= 9; seq++ {
+				writeDeltaPair(t, base, seq, nil, nil)
+			}
+			writeDeltaPair(t, base, 10, nil, [][3]string{{"1", "v10", "u"}})
 			tables := []BaselineTable{{Schema: "shop", Table: "orders", Path: base, Rel: "shop/orders.parquet", SchemaKnown: true}}
 			sqlText := generateFor(t, root, stamp, mode.follow, tables)
 			if got := stateRows(t, sqlText); !reflect.DeepEqual(got, want) {

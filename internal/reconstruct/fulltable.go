@@ -327,6 +327,27 @@ type TableReport struct {
 	DeltaCompacted   string
 }
 
+// fetchFloor decides where a run with deltas on fetches from: the chain's last
+// pair when there is a usable chain (its anchor, and its own stamp as the
+// coarse time floor), else the base's own anchor. In that second case the
+// floor is the EARLIER of FindBaseline's time and the base's own stamp: a
+// chain set aside as computed against ANOTHER base (someone put an older
+// table file under the chain's name) still made FindBaseline report the
+// chain's start, and a floor derived from it would sit after events the
+// base's anchor has yet to see, which the fetch would then drop without an
+// error (#1718). Pure, so the rule is testable without an index.
+func fetchFloor(snapshotTime time.Time, bmeta baseline.DumpMetadata, prev *tableDelta) (since time.Time, anchor baseline.DumpMetadata) {
+	since, anchor = snapshotTime, bmeta
+	switch {
+	case prev != nil:
+		since = prev.Meta.SnapshotTimestamp
+		anchor.BinlogFile, anchor.BinlogPos = prev.Meta.BinlogFile, prev.Meta.BinlogPos
+	case !bmeta.SnapshotTimestamp.IsZero() && bmeta.SnapshotTimestamp.Before(since):
+		since = bmeta.SnapshotTimestamp
+	}
+	return since, anchor
+}
+
 // shouldWarnEvents reports whether a fetched event count should trigger the
 // large-window memory warning (#654). threshold <= 0 disables the warning, so
 // the zero-value FullTableConfig stays silent for direct library callers.
@@ -1026,18 +1047,7 @@ func ReconstructTable(
 		if prevDelta, err = readTableDelta(ctx, baselinePath, bmeta); err != nil {
 			return nil, err
 		}
-		if prevDelta != nil {
-			fetchSince = prevDelta.Meta.SnapshotTimestamp
-			anchorMeta.BinlogFile, anchorMeta.BinlogPos = prevDelta.Meta.BinlogFile, prevDelta.Meta.BinlogPos
-		} else if !bmeta.SnapshotTimestamp.IsZero() && bmeta.SnapshotTimestamp.Before(fetchSince) {
-			// A chain set aside as computed against ANOTHER base (someone put
-			// an older table file under the chain's name): FindBaseline took
-			// the chain's start from the chain, but the fold now runs from
-			// this base's own anchor, and the coarse time floor must not sit
-			// after events that anchor has yet to see. The base's own stamp
-			// is the floor its anchor pairs with (#1718).
-			fetchSince = bmeta.SnapshotTimestamp
-		}
+		fetchSince, anchorMeta = fetchFloor(snapshotTime, bmeta, prevDelta)
 	}
 
 	// ── 3. Resolve PK columns from the schema resolver ─────────────────────

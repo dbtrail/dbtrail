@@ -115,8 +115,8 @@ func TestTableDeltaGlobs(t *testing.T) {
 func TestMarkTableDeltaFiles(t *testing.T) {
 	chains, err := MarkTableDeltaFiles("/snap/shop", []string{
 		"orders.parquet", "orders.000000.posdel", "orders.000000.upserts",
-		"orders.000002.posdel", "orders.000002.upserts", // a gap at 1 is fine: an empty window writes nothing
-		"orders.000001.posdel", "orders.000001.upserts", // listed out of order
+		"orders.000002.posdel", "orders.000002.upserts", // listed out of order
+		"orders.000001.posdel", "orders.000001.upserts",
 		"plain.parquet",
 		"old.parquet", "old.posdel", "old.upserts",
 	})
@@ -164,8 +164,29 @@ func TestMarkTableDeltaFiles(t *testing.T) {
 	}
 	// A chain with no sequence 0 has no start marker: the file a full backup
 	// or a compaction writes. Refused for the same reason as half a pair.
-	if _, err := MarkTableDeltaFiles("/snap/shop", []string{"orders.parquet", "orders.000001.posdel", "orders.000001.upserts"}); err == nil {
-		t.Error("a chain without its sequence-0 pair was accepted")
+	if _, err := MarkTableDeltaFiles("/snap/shop", []string{"orders.parquet", "orders.000001.posdel", "orders.000001.upserts"}); !errors.Is(err, ErrHalfTableDelta) {
+		t.Errorf("a chain without its sequence-0 pair was accepted (err=%v)", err)
+	}
+	// A hole in the middle is a whole pair LOST: the writer never skips a
+	// sequence (an empty window writes nothing and consumes no number), so
+	// reading around the hole would silently drop that window's changes.
+	if _, err := MarkTableDeltaFiles("/snap/shop", []string{"orders.parquet",
+		"orders.000000.posdel", "orders.000000.upserts", "orders.000002.posdel", "orders.000002.upserts"}); !errors.Is(err, ErrHalfTableDelta) {
+		t.Errorf("a chain missing a whole pair was accepted (err=%v)", err)
+	}
+	// s3:// directories join with "/" and keep the scheme's double slash.
+	s3, err := MarkTableDeltaFiles("s3://b/snap/shop/", []string{"orders.000000.posdel", "orders.000000.upserts", "orders.000001.posdel", "orders.000001.upserts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := s3["s3://b/snap/shop/orders.parquet"]; c == nil || c.Last().Seq != 1 || c.Files[1].Posdel != "s3://b/snap/shop/orders.000001.posdel" {
+		t.Fatalf("s3 chain = %+v (keys %v)", c, func() []string {
+			var ks []string
+			for k := range s3 {
+				ks = append(ks, k)
+			}
+			return ks
+		}())
 	}
 }
 
@@ -183,8 +204,8 @@ func TestSnapshotTableDeltas_numbered(t *testing.T) {
 	touch("shop/orders.parquet")
 	touch("shop/orders.000000.posdel")
 	touch("shop/orders.000000.upserts")
-	touch("shop/orders.000003.posdel")
-	touch("shop/orders.000003.upserts")
+	touch("shop/orders.000001.posdel")
+	touch("shop/orders.000001.upserts")
 	touch("shop/plain.parquet")
 	got, err := SnapshotTableDeltas(t.Context(), snap)
 	if err != nil {
@@ -194,7 +215,7 @@ func TestSnapshotTableDeltas_numbered(t *testing.T) {
 		t.Fatalf("SnapshotTableDeltas = %v, want only shop/orders", got)
 	}
 	chain, err := ListTableDelta(t.Context(), filepath.Join(snap, "shop/orders.parquet"))
-	if err != nil || chain == nil || len(chain.Files) != 2 || chain.Last().Seq != 3 {
+	if err != nil || chain == nil || len(chain.Files) != 2 || chain.Last().Seq != 1 {
 		t.Fatalf("ListTableDelta = %+v, %v", chain, err)
 	}
 	if c, err := ListTableDelta(t.Context(), filepath.Join(snap, "shop/plain.parquet")); err != nil || c != nil {

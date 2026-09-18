@@ -92,21 +92,29 @@ func baseAnchorString(m baseline.DumpMetadata) string {
 // afresh, so an unverified pair would be the one route by which corrupt bytes
 // reach a freshly certified file.
 func readTableDelta(ctx context.Context, basePath string, bmeta baseline.DumpMetadata) (*tableDelta, error) {
-	setAside := func(why string) (*tableDelta, error) {
+	d, why, err := readTableDeltaReason(ctx, basePath, bmeta)
+	if why != "" {
 		slog.Warn("table delta set aside: "+why+". Folding from the base alone, which is correct and reads a longer window.",
 			"base", basePath)
-		return nil, nil
 	}
+	return d, err
+}
+
+// readTableDeltaReason is readTableDelta with the set-aside reason returned
+// instead of logged (empty when the chain is usable or absent), so a test can
+// pin WHICH check refused a chain.
+func readTableDeltaReason(ctx context.Context, basePath string, bmeta baseline.DumpMetadata) (*tableDelta, string, error) {
+	setAside := func(why string) (*tableDelta, string, error) { return nil, why, nil }
 	chain, err := baseline.ListTableDelta(ctx, basePath)
 	if errors.Is(err, baseline.ErrHalfTableDelta) {
 		return setAside("its files do not form whole pairs")
 	}
 	if err != nil || chain == nil {
-		return nil, err
+		return nil, "", err
 	}
 	baseInfo, err := os.Stat(basePath)
 	if err != nil {
-		return nil, fmt.Errorf("size the base of a table delta: %w", err)
+		return nil, "", fmt.Errorf("size the base of a table delta: %w", err)
 	}
 	for _, f := range chain.Paths() {
 		if err := baselineintegrity.ValidateLocalFile(f); err != nil {
@@ -163,10 +171,10 @@ func readTableDelta(ctx context.Context, basePath string, bmeta baseline.DumpMet
 		}
 		pair, err := size(chain.LegacyPosdel, chain.LegacyUpserts)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		ups, _ := size(chain.LegacyUpserts)
-		return &tableDelta{Chain: chain, Meta: um, PairSize: pair, UpsertsSize: ups, Legacy: true}, nil
+		return &tableDelta{Chain: chain, Meta: um, PairSize: pair, UpsertsSize: ups, Legacy: true}, "", nil
 	}
 
 	var last baseline.DumpMetadata
@@ -182,16 +190,16 @@ func readTableDelta(ctx context.Context, basePath string, bmeta baseline.DumpMet
 		}
 		n, err := size(f.Posdel, f.Upserts)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		total += n
 		last = um
 	}
 	ups, err := size(chain.Last().Upserts)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return &tableDelta{Chain: chain, Meta: last, PairSize: total, UpsertsSize: ups}, nil
+	return &tableDelta{Chain: chain, Meta: last, PairSize: total, UpsertsSize: ups}, "", nil
 }
 
 // DeltaChainStart is deltaChainStart for the one reader that pairs a base with

@@ -235,31 +235,47 @@ func TestTableDelta_compactionStartsTheChainAtZero(t *testing.T) {
 // compact.
 func TestTableDelta_sizeRuleCountsTheWholeChain(t *testing.T) {
 	noSizeFloor(t)
-	prev := tableDeltaMaxFraction
-	tableDeltaMaxFraction = 0.75 // one window's pair is under it; three are over
-	t.Cleanup(func() { tableDeltaMaxFraction = prev })
-
 	rows, nulls := zooRows()
 	src := writeZooBaseline(t, rows, nulls)
 	root := t.TempDir()
 	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	base, prevTime := src, t0
-	var compactedAt int
-	for i := 1; i <= 6; i++ {
+
+	// Measure one pair against the base, then set the fraction so that TWO
+	// pairs are under it and THREE are over. The rule looks at the chain a
+	// window STARTS from, so with pairs 0..2 in place it fires at window 4: a
+	// rule that only counted the last pair would never fire.
+	noCompaction(t)
+	at1 := t0.Add(5 * time.Minute)
+	base1, _, err := deltaWindow(t, root, src, t0, changeMap(upd(1, "v1")), at1, &query.BinlogPos{File: "binlog.000009", Pos: 1000}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bmeta, _ := baseline.ReadParquetMetadata(base1)
+	d, err := readTableDelta(context.Background(), base1, bmeta)
+	if err != nil || d == nil {
+		t.Fatalf("d=%v err=%v", d, err)
+	}
+	bi, _ := os.Stat(base1)
+	onePair := float64(d.PairSize) / float64(bi.Size()) // pair 0 alone; every window's pair is about this size
+	tableDeltaMaxFraction = 2.5 * onePair
+
+	base, prevTime := base1, at1
+	for i := 2; i <= 5; i++ {
 		at := t0.Add(time.Duration(i) * 5 * time.Minute)
 		nb, rep, err := deltaWindow(t, root, base, prevTime, changeMap(upd(1, fmt.Sprintf("v%d", i))), at,
 			&query.BinlogPos{File: "binlog.000009", Pos: uint64(1000 * i)}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if rep.DeltaCompacted != "" {
-			compactedAt = i
-			break
+		switch {
+		case i < 4 && rep.DeltaCompacted != "":
+			t.Fatalf("window %d compacted (%q): the rule fired with at most two pairs, under the threshold", i, rep.DeltaCompacted)
+		case i == 4 && !strings.Contains(rep.DeltaCompacted, "passed"):
+			t.Fatalf("window 4: want a compaction by size over the chain's three pairs, got TableDelta=%v compacted=%q", rep.TableDelta, rep.DeltaCompacted)
+		case i == 5 && rep.DeltaCompacted != "":
+			t.Fatalf("window 5 compacted (%q) right after a compaction: the chain was not reset", rep.DeltaCompacted)
 		}
 		base, prevTime = nb, at
-	}
-	if compactedAt < 2 {
-		t.Fatalf("compacted at window %d: the rule fired on one window's pair, or never", compactedAt)
 	}
 }
 
@@ -331,6 +347,16 @@ func TestReadTableDelta_setsAsideDamage(t *testing.T) {
 		bmeta, _ := baseline.ReadParquetMetadata(base)
 		return readTableDelta(context.Background(), base, bmeta)
 	}
+	// setAsideFor asserts the chain is set aside for the reason named, not
+	// for an earlier check that happens to fire first.
+	setAsideFor := func(t *testing.T, base, want string) {
+		t.Helper()
+		bmeta, _ := baseline.ReadParquetMetadata(base)
+		d, why, err := readTableDeltaReason(context.Background(), base, bmeta)
+		if err != nil || d != nil || !strings.Contains(why, want) {
+			t.Fatalf("d=%v why=%q err=%v, want set aside for %q", d, why, err, want)
+		}
+	}
 
 	t.Run("control", func(t *testing.T) {
 		base := build(t)
@@ -350,10 +376,7 @@ func TestReadTableDelta_setsAsideDamage(t *testing.T) {
 		if err := os.WriteFile(base, data, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		bmeta, _ := baseline.ReadParquetMetadata(base)
-		if d, err := readTableDelta(context.Background(), base, bmeta); err != nil || d != nil {
-			t.Fatalf("a chain computed against another base was accepted (d=%v err=%v)", d, err)
-		}
+		setAsideFor(t, base, "computed against another base")
 	})
 	t.Run("half a pair in the middle", func(t *testing.T) {
 		base := build(t)
@@ -361,9 +384,22 @@ func TestReadTableDelta_setsAsideDamage(t *testing.T) {
 		if err := os.Remove(posdel); err != nil {
 			t.Fatal(err)
 		}
-		if d, err := usable(t, base); err != nil || d != nil {
-			t.Fatalf("half a pair must be set aside for the fold (d=%v err=%v)", d, err)
+		setAsideFor(t, base, "whole pairs")
+		if _, err := baseline.HasTableDelta(context.Background(), base); !errors.Is(err, baseline.ErrHalfTableDelta) {
+			t.Fatalf("HasTableDelta: err = %v, want ErrHalfTableDelta", err)
 		}
+	})
+	t.Run("a whole pair lost in the middle", func(t *testing.T) {
+		base := build(t)
+		posdel, upserts := baseline.TableDeltaPaths(base, 1)
+		for _, f := range []string{posdel, upserts} {
+			if err := os.Remove(f); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// The writer never skips a sequence, so a hole is a lost window:
+		// reading around it would publish a state missing those changes.
+		setAsideFor(t, base, "whole pairs")
 		if _, err := baseline.HasTableDelta(context.Background(), base); !errors.Is(err, baseline.ErrHalfTableDelta) {
 			t.Fatalf("HasTableDelta: err = %v, want ErrHalfTableDelta", err)
 		}
@@ -389,21 +425,30 @@ func TestReadTableDelta_setsAsideDamage(t *testing.T) {
 		if err := baseline.WriteTableDeltaPair(base, 1, cols, md, nil, nil); err != nil {
 			t.Fatal(err)
 		}
-		if d, err := usable(t, base); err != nil || d != nil {
-			t.Fatalf("a chain with a pair of another chain was accepted (d=%v err=%v)", d, err)
-		}
+		setAsideFor(t, base, "belongs to another chain")
 	})
 	t.Run("a pair whose footer disagrees with its name", func(t *testing.T) {
 		base := build(t)
-		_, ups2 := baseline.TableDeltaPaths(base, 2)
-		_, ups1 := baseline.TableDeltaPaths(base, 1)
-		data, _ := os.ReadFile(ups1)
-		os.Remove(ups2)
-		if err := os.WriteFile(ups2, data, 0o644); err != nil {
-			t.Fatal(err)
+		// BOTH files of pair 1 under pair 2's names: the two agree with each
+		// other, so the only check that can refuse is name-vs-footer.
+		for _, kind := range []int{0, 1} {
+			from := [2]string{}
+			from[0], from[1] = baseline.TableDeltaPaths(base, 1)
+			to := [2]string{}
+			to[0], to[1] = baseline.TableDeltaPaths(base, 2)
+			data, _ := os.ReadFile(from[kind])
+			os.Remove(to[kind])
+			if err := os.WriteFile(to[kind], data, 0o644); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if d, err := usable(t, base); err != nil || d != nil {
-			t.Fatalf("a pair with sequence 1 in its footer under name 2 was accepted (d=%v err=%v)", d, err)
+		setAsideFor(t, base, "records sequence 1 in its footer")
+	})
+	t.Run("usable chains report no reason", func(t *testing.T) {
+		base := build(t)
+		bmeta, _ := baseline.ReadParquetMetadata(base)
+		if d, why, err := readTableDeltaReason(context.Background(), base, bmeta); err != nil || d == nil || why != "" {
+			t.Fatalf("d=%v why=%q err=%v", d, why, err)
 		}
 	})
 }
@@ -526,29 +571,198 @@ func TestTableDelta_copyWhenTheLinkFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Two more healthy windows, so the chain has pairs 0, 1, 2 when the link
+	// starts failing: the count is per PAIR (3), not per file (6) and not a
+	// flag (1).
+	at2 := t0.Add(10 * time.Minute)
+	_, ref2, _ := emitSnapshot(t, ref1, changeMap(upd(1, "v2")), &query.BinlogPos{File: "binlog.000009", Pos: 2000}, at2)
+	base2, _, err := deltaWindow(t, root, base1, at1, changeMap(upd(1, "v2")), at2, &query.BinlogPos{File: "binlog.000009", Pos: 2000}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at3 := t0.Add(15 * time.Minute)
+	_, ref3, _ := emitSnapshot(t, ref2, changeMap(upd(3, "v3")), &query.BinlogPos{File: "binlog.000009", Pos: 3000}, at3)
+	base3, _, err := deltaWindow(t, root, base2, at2, changeMap(upd(3, "v3")), at3, &query.BinlogPos{File: "binlog.000009", Pos: 3000}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	prev := linkFile
 	linkFile = func(_, _ string) error { return errors.New("EXDEV: cross-device link") }
 	t.Cleanup(func() { linkFile = prev })
 
-	at2 := t0.Add(10 * time.Minute)
-	_, ref2, _ := emitSnapshot(t, ref1, changeMap(ins(9, "nine")), &query.BinlogPos{File: "binlog.000009", Pos: 2000}, at2)
-	base2, rep, err := deltaWindow(t, root, base1, at1, changeMap(ins(9, "nine")), at2, &query.BinlogPos{File: "binlog.000009", Pos: 2000}, nil)
+	at4 := t0.Add(20 * time.Minute)
+	_, ref4, _ := emitSnapshot(t, ref3, changeMap(ins(9, "nine")), &query.BinlogPos{File: "binlog.000009", Pos: 4000}, at4)
+	base4, rep, err := deltaWindow(t, root, base3, at3, changeMap(ins(9, "nine")), at4, &query.BinlogPos{File: "binlog.000009", Pos: 4000}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !rep.TableDelta || rep.DeltaChainCopied != 1 {
-		t.Fatalf("report = TableDelta %v, copied %d; want a delta with one copied pair", rep.TableDelta, rep.DeltaChainCopied)
+	if !rep.TableDelta || rep.DeltaChainCopied != 3 || rep.DeltaChainFiles != 4 {
+		t.Fatalf("report = TableDelta %v, copied %d of %d; want a delta with three copied pairs of four", rep.TableDelta, rep.DeltaChainCopied, rep.DeltaChainFiles)
 	}
-	if sameFile(base1, base2) {
+	if sameFile(base3, base4) {
 		t.Error("the base was linked although the link fails")
 	}
-	want, got := byID(readSnapshotRows(t, ref2)), byID(deltaState(t, base2))
+	want, got := byID(readSnapshotRows(t, ref4)), byID(deltaState(t, base4))
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("state after a copied chain differs from the full rewrite\n got: %v\nwant: %v", got, want)
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(base2), "orders.000000.posdel")); err != nil {
-		t.Fatalf("pair 0 was not copied: %v", err)
+	for seq := range 3 {
+		p, _ := baseline.TableDeltaPaths(base4, seq)
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("pair %d was not copied: %v", seq, err)
+		}
 	}
+}
+
+// TestFetchFloor pins the rule ReconstructTable applies with deltas on: with
+// a usable chain, resume from its last pair; without one, from the base's own
+// anchor, with a time floor no later than the base's own stamp even when
+// FindBaseline reported a later chain start (a chain set aside as computed
+// against another base).
+func TestFetchFloor(t *testing.T) {
+	t0 := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	base := baseline.DumpMetadata{BinlogFile: "binlog.000007", BinlogPos: 4, SnapshotTimestamp: t0}
+	chainStart := t0.Add(3 * time.Hour)
+
+	since, anchor := fetchFloor(chainStart, base, nil)
+	if !since.Equal(t0) || anchor.BinlogFile != "binlog.000007" || anchor.BinlogPos != 4 {
+		t.Fatalf("set aside: since=%s anchor=%s:%d, want the base's own stamp %s and anchor", since, anchor.BinlogFile, anchor.BinlogPos, t0)
+	}
+	// A base with no stamp of its own cannot lower the floor to zero.
+	since, _ = fetchFloor(chainStart, baseline.DumpMetadata{BinlogFile: "binlog.000007", BinlogPos: 4}, nil)
+	if !since.Equal(chainStart) {
+		t.Fatalf("unstamped base: since=%s, want FindBaseline's %s", since, chainStart)
+	}
+	// The ordinary case: the chain's start is the base's stamp, nothing moves.
+	since, _ = fetchFloor(t0, base, nil)
+	if !since.Equal(t0) {
+		t.Fatalf("ordinary: since=%s", since)
+	}
+	// With a chain: its last pair's stamp and anchor.
+	prev := &tableDelta{Meta: baseline.DumpMetadata{BinlogFile: "binlog.000009", BinlogPos: 3000, SnapshotTimestamp: t0.Add(2 * time.Hour)}}
+	since, anchor = fetchFloor(t0, base, prev)
+	if !since.Equal(t0.Add(2*time.Hour)) || anchor.BinlogPos != 3000 || anchor.BinlogFile != "binlog.000009" {
+		t.Fatalf("with chain: since=%s anchor=%s:%d", since, anchor.BinlogFile, anchor.BinlogPos)
+	}
+}
+
+// TestTableDelta_spilledWindowCompactsFromTheSpill: a window whose changes did
+// not fit in memory (#1107) is folded through the spill into a full rewrite,
+// and the chain restarts at 0.
+func TestTableDelta_spilledWindowCompactsFromTheSpill(t *testing.T) {
+	noCompaction(t)
+	rows, nulls := zooRows()
+	src := writeZooBaseline(t, rows, nulls)
+	root := t.TempDir()
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	at1 := t0.Add(5 * time.Minute)
+	base1, _, err := deltaWindow(t, root, src, t0, changeMap(upd(1, "v1")), at1, &query.BinlogPos{File: "binlog.000009", Pos: 1000}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at2 := t0.Add(10 * time.Minute)
+	w2 := changeMap(upd(3, "three"), ins(10, "ten"))
+	_, ref2, _ := emitSnapshot(t, func() string {
+		_, r, _ := emitSnapshot(t, src, changeMap(upd(1, "v1")), &query.BinlogPos{File: "binlog.000009", Pos: 1000}, at1)
+		return r
+	}(), cloneChanges(w2), &query.BinlogPos{File: "binlog.000009", Pos: 2000}, at2)
+	base2, rep, err := deltaWindow(t, root, base1, at1, map[string]*query.ResultRow{}, at2, &query.BinlogPos{File: "binlog.000009", Pos: 2000},
+		func(p *tableDeltaPublish) { p.fold.Spill = spillOf(t, 1, cloneChanges(w2)) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.TableDelta || !strings.Contains(rep.DeltaCompacted, "did not fit in memory") {
+		t.Fatalf("want a compaction for the spill, got TableDelta=%v compacted=%q", rep.TableDelta, rep.DeltaCompacted)
+	}
+	want, got := byID(readSnapshotRows(t, ref2)), byID(readSnapshotRows(t, base2))
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("state after a spilled compaction differs from the full rewrite\n got: %v\nwant: %v", got, want)
+	}
+	chain, err := baseline.ListTableDelta(context.Background(), base2)
+	if err != nil || chain == nil || len(chain.Files) != 1 || chain.Files[0].Seq != 0 {
+		t.Fatalf("chain after a spilled compaction = %+v, %v", chain, err)
+	}
+}
+
+// TestWriteEmptyTableDeltas_skipsWhatCannotAnchor: a table whose footer
+// cannot anchor a delta, or whose columns collide with the technical ones,
+// leaves the full backup WITHOUT a chain (logged, not an error), and the
+// refresh that follows handles it: no anchor → rewrite; reserved column →
+// rewrite. Neither is set aside as damage.
+func TestWriteEmptyTableDeltas_skipsWhatCannotAnchor(t *testing.T) {
+	noCompaction(t)
+	root := t.TempDir()
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	// No stamp, no anchor: writeZooBaseline writes no footer at all.
+	rows, nulls := zooRows()
+	src := writeZooBaseline(t, rows, nulls)
+	snap := filepath.Join(root, SnapshotDirName(t0), "mydb")
+	if err := os.MkdirAll(snap, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(src)
+	base := filepath.Join(snap, "orders.parquet")
+	if err := os.WriteFile(base, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := baseline.WriteEmptyTableDeltas(filepath.Dir(snap)); err != nil {
+		t.Fatalf("WriteEmptyTableDeltas over an unanchored table: %v", err)
+	}
+	if c, err := baseline.ListTableDelta(context.Background(), base); err != nil || c != nil {
+		t.Fatalf("an unanchored table got a chain (%+v, %v)", c, err)
+	}
+	if _, err := os.Stat(base); err != nil {
+		t.Fatalf("the table file itself is gone: %v", err)
+	}
+	// A refresh over it starts a chain at 0 (the cut gives it an anchor).
+	nb, rep, err := deltaWindow(t, root, base, t0, changeMap(del(2)), t0.Add(5*time.Minute), &query.BinlogPos{File: "binlog.000009", Pos: 1000}, nil)
+	if err != nil || !rep.TableDelta || rep.DeltaSeq != 0 {
+		t.Fatalf("refresh over an unanchored table: err=%v delta=%v seq=%d", err, rep.TableDelta, rep.DeltaSeq)
+	}
+	if got, want := ids(deltaState(t, nb)), []string{"1", "3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("state = %v, want %v", got, want)
+	}
+
+	// A reserved column name.
+	root2 := t.TempDir()
+	base2 := writeStampedBaselineWithSQL(t, root2, t0, "CREATE TABLE `orders` (\n  `id` int NOT NULL,\n  `bintrail_op` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);")
+	if err := baseline.WriteEmptyTableDeltas(filepath.Dir(filepath.Dir(base2))); err != nil {
+		t.Fatalf("WriteEmptyTableDeltas over a reserved column: %v", err)
+	}
+	if c, err := baseline.ListTableDelta(context.Background(), base2); err != nil || c != nil {
+		t.Fatalf("a table with a reserved column got a chain (%+v, %v)", c, err)
+	}
+}
+
+// writeStampedBaselineWithSQL is writeStampedBaseline with another CREATE
+// TABLE in the footer (the rows are still the zoo's; only the footer matters
+// to the check under test).
+func writeStampedBaselineWithSQL(t *testing.T, root string, at time.Time, createSQL string) string {
+	t.Helper()
+	rows, nulls := zooRows()
+	path := filepath.Join(root, SnapshotDirName(at), "mydb", "orders.parquet")
+	w, err := baseline.NewWriter(path, zooColumns(t), baseline.WriterConfig{
+		Compression: "none", RowGroupSize: 10,
+		Metadata: map[string]string{
+			baseline.MetaKeyCreateTableSQL:    createSQL,
+			baseline.MetaKeyBinlogFile:        "binlog.000007",
+			baseline.MetaKeyBinlogPos:         "4",
+			baseline.MetaKeySnapshotTimestamp: at.UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range rows {
+		if err := w.WriteRow(r, nulls[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // TestWriteEmptyTableDeltas_1718: a full backup taken with table deltas on

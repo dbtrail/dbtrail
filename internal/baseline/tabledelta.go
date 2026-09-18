@@ -207,8 +207,9 @@ func (c *TableDeltaChain) Paths() []string {
 }
 
 // ErrHalfTableDelta is the sentinel every HalfTableDeltaError matches: a
-// sequence of a table's chain has only one of its two files, the chain has no
-// sequence 0, or a table has both the numbered and the v0.83.0 layout. A pair
+// sequence of a table's chain has only one of its two files, the chain does
+// not run contiguously from sequence 0 (a whole pair is missing), or a table
+// has both the numbered and the v0.83.0 layout. A pair
 // is written together and published together, so half of it is a damaged
 // snapshot, not a smaller delta: applying dead positions with no upserts
 // deletes every row that sequence updated, and the reverse duplicates them.
@@ -284,8 +285,18 @@ func MarkTableDeltaFiles(dir string, names []string) (map[string]*TableDeltaChai
 		case bad:
 		case c.Legacy && len(c.Files) > 0:
 			bad = true // two layouts at once
-		case !c.Legacy && c.Files[0].Seq != 0:
-			bad = true // no start marker
+		default:
+			// Sequences are contiguous from 0: the writer never skips one (an
+			// empty window writes nothing and does not consume a number), so
+			// a hole is a whole pair LOST, and reading around it would drop
+			// that window's changes from the state without an error. Worse
+			// than half a pair, and refused the same way.
+			for i, f := range c.Files {
+				if f.Seq != i {
+					bad = true
+					break
+				}
+			}
 		}
 		if bad {
 			damaged = append(damaged, base)
