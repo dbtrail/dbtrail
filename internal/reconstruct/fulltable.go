@@ -307,14 +307,45 @@ type TableReport struct {
 	CarriedByLink bool
 
 	// TableDelta is true when the table was published as its previous file
-	// plus a delta beside it instead of being rewritten (#1638). DeltaDeadRows
-	// and DeltaUpsertRows are what the delta holds in total, not what this run
-	// added. DeltaCompacted, when set, says why a run with deltas on rewrote
-	// the table anyway. All zero with deltas off.
-	TableDelta      bool
-	DeltaDeadRows   int64
-	DeltaUpsertRows int64
-	DeltaCompacted  string
+	// plus a chain of deltas beside it instead of being rewritten (#1638,
+	// #1718). DeltaPairWritten says whether this run wrote a pair at all (an
+	// empty window over an existing chain writes none). DeltaSeq is the
+	// sequence of the pair this run wrote (or of the chain's last pair when
+	// none was written);
+	// DeltaDeadRows and DeltaUpsertRows are what THIS run's pair holds, its
+	// window and nothing accumulated; DeltaChainFiles is how many pairs the
+	// chain has now and DeltaChainCopied how many of the carried pairs had to
+	// be copied because a hard link failed. DeltaCompacted, when set, says why
+	// a run with deltas on rewrote the table anyway. All zero with deltas off.
+	TableDelta       bool
+	DeltaPairWritten bool
+	DeltaSeq         int
+	DeltaDeadRows    int64
+	DeltaUpsertRows  int64
+	DeltaChainFiles  int
+	DeltaChainCopied int
+	DeltaCompacted   string
+}
+
+// fetchFloor decides where a run with deltas on fetches from: the chain's last
+// pair when there is a usable chain (its anchor, and its own stamp as the
+// coarse time floor), else the base's own anchor. In that second case the
+// floor is the EARLIER of FindBaseline's time and the base's own stamp: a
+// chain set aside as computed against ANOTHER base (someone put an older
+// table file under the chain's name) still made FindBaseline report the
+// chain's start, and a floor derived from it would sit after events the
+// base's anchor has yet to see, which the fetch would then drop without an
+// error (#1718). Pure, so the rule is testable without an index.
+func fetchFloor(snapshotTime time.Time, bmeta baseline.DumpMetadata, prev *tableDelta) (since time.Time, anchor baseline.DumpMetadata) {
+	since, anchor = snapshotTime, bmeta
+	switch {
+	case prev != nil:
+		since = prev.Meta.SnapshotTimestamp
+		anchor.BinlogFile, anchor.BinlogPos = prev.Meta.BinlogFile, prev.Meta.BinlogPos
+	case !bmeta.SnapshotTimestamp.IsZero() && bmeta.SnapshotTimestamp.Before(since):
+		since = bmeta.SnapshotTimestamp
+	}
+	return since, anchor
 }
 
 // shouldWarnEvents reports whether a fetched event count should trigger the
@@ -1016,10 +1047,7 @@ func ReconstructTable(
 		if prevDelta, err = readTableDelta(ctx, baselinePath, bmeta); err != nil {
 			return nil, err
 		}
-		if prevDelta != nil {
-			fetchSince = prevDelta.Meta.SnapshotTimestamp
-			anchorMeta.BinlogFile, anchorMeta.BinlogPos = prevDelta.Meta.BinlogFile, prevDelta.Meta.BinlogPos
-		}
+		fetchSince, anchorMeta = fetchFloor(snapshotTime, bmeta, prevDelta)
 	}
 
 	// ── 3. Resolve PK columns from the schema resolver ─────────────────────

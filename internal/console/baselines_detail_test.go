@@ -433,3 +433,64 @@ func TestBaselineDownload_midStreamAbort(t *testing.T) {
 		t.Fatalf("audit detail = %v, want aborted=true, 4 bytes, 2 files handed over (never the snapshot inventory)", got.Detail)
 	}
 }
+
+// TestBaselineDownload_viewsSQLReadsTheChain (#1718): the tarball's views.sql
+// marks a table with a numbered chain (the chain body, over the digit glob), a
+// table with the v0.83.0 pair (the legacy body), and a table with none (the
+// file alone). Only the NAMES matter to the mark, so the delta files are
+// stand-ins like the table files of the fixture.
+func TestBaselineDownload_viewsSQLReadsTheChain(t *testing.T) {
+	dir := newDetailFixture(t)
+	base := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	for _, n := range []string{"orders.000000.posdel", "orders.000000.upserts", "orders.000001.posdel", "orders.000001.upserts",
+		"users.posdel", "users.upserts"} {
+		writeBaselineFile(t, dir, "d", base, detailSnapDir, "shop", n)
+	}
+	writeBaselineFile(t, dir, "cc", base, detailSnapDir, "shop", "plain.parquet")
+	srv := newBaselineServer(t, dir, true)
+	rec, body := doServersReq(t, srv, "GET", "/api/baselines/download"+detailQuery(detailSnapAt), "")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d, body = %s", rec.Code, body)
+	}
+	got := untarAll(t, body)
+	vsql := got[detailSnapDir+"/"+views.SnapshotFileName]
+	if vsql == "" {
+		t.Fatalf("no generated %s in the archive; entries = %v", views.SnapshotFileName, keysOf(got))
+	}
+	view := func(name string) string {
+		i := strings.Index(vsql, "CREATE OR REPLACE VIEW \""+name+"\"")
+		if i < 0 {
+			t.Fatalf("no view %s in:\n%s", name, vsql)
+		}
+		j := strings.Index(vsql[i:], ";")
+		return vsql[i : i+j]
+	}
+	if v := view("state_shop_orders"); !strings.Contains(v, "bintrail_latest") ||
+		!strings.Contains(v, "./shop/orders.[0-9][0-9][0-9][0-9][0-9][0-9].upserts") {
+		t.Errorf("orders view does not read the chain:\n%s", v)
+	}
+	if v := view("state_shop_users"); strings.Contains(v, "bintrail_latest") || !strings.Contains(v, "./shop/users.upserts") {
+		t.Errorf("users view does not read the legacy pair:\n%s", v)
+	}
+	if v := view("state_shop_plain"); strings.Contains(v, "upserts") || strings.Contains(v, "file_row_number") {
+		t.Errorf("plain view got a delta body:\n%s", v)
+	}
+	for _, name := range []string{"shop/orders.000001.posdel", "shop/users.posdel"} {
+		if _, ok := got[detailSnapDir+"/"+name]; !ok {
+			t.Errorf("delta file %s not in the archive; entries = %v", name, keysOf(got))
+		}
+	}
+
+	// Half a pair: the files still download, the views file is left out.
+	if err := os.Remove(filepath.Join(dir, detailSnapDir, "shop", "orders.000001.upserts")); err != nil {
+		t.Fatal(err)
+	}
+	rec, body = doServersReq(t, srv, "GET", "/api/baselines/download"+detailQuery(detailSnapAt), "")
+	if rec.Code != 200 {
+		t.Fatalf("half a pair: code = %d, body = %s", rec.Code, body)
+	}
+	got = untarAll(t, body)
+	if _, ok := got[detailSnapDir+"/"+views.SnapshotFileName]; ok {
+		t.Fatalf("half a pair still produced a %s; entries = %v", views.SnapshotFileName, keysOf(got))
+	}
+}

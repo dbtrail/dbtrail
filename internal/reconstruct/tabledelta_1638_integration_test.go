@@ -24,7 +24,7 @@ import (
 // the way `bintrail views` does for a table with a delta beside it.
 func readOrdersState(t *testing.T, base string) []string {
 	t.Helper()
-	posdel, upserts := baseline.TableDeltaPaths(base)
+	posdel, upserts := baseline.TableDeltaGlobs(base)
 	ddb, err := sql.Open("duckdb", "")
 	if err != nil {
 		t.Fatalf("open duckdb: %v", err)

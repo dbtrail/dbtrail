@@ -227,9 +227,9 @@ func init() {
 			"snapshots to one file, so disk-usage and prune figures then count space they will not reclaim. "+
 			"Editable from the console settings panel, which overrides this flag.")
 	watchCmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", false,
-		"Off by default. A refresh does not rewrite a table that changed: it keeps the previous Parquet file and writes the changed rows as two small "+
-			"files beside it (<table>.posdel, <table>.upserts), and writes the table again in full when those pass a quarter of its size or the chain is a "+
-			"day old. The generated DuckDB views read the pair; every other reader uses the table file and the index, as before. A snapshot written this way "+
+		"Off by default. A refresh does not rewrite a table that changed: it keeps the previous Parquet file and writes that refresh's changed rows as one numbered "+
+			"pair of small files beside it (<table>.000001.posdel, <table>.000001.upserts, then 000002, ...), linking the earlier pairs forward, and writes the table again in full when the chain's files together pass a quarter of its size or the chain is a "+
+			"day old. The generated DuckDB views read the chain; every other reader uses the table file and the index, as before. A snapshot written this way "+
 			"must not be read by a bintrail older than this one. Turning it off needs nothing else: the next refresh writes every table in full. Generate the DuckDB views again after turning it on or off.")
 	watchCmd.Flags().StringVar(&upBaselineRefreshEvery, "baseline-refresh-interval", "", "Periodically refresh each server's newest baseline snapshot from the index (Nm/Nh/Nd; default: off). Runs with the conservative DuckDB budget, folds at most 2 tables at a time, and never publishes over a known capture gap.")
 	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, "baseline-retain", "", "Periodically prune local --baseline-dir snapshots older than this (Nd/Nh) once a durable copy exists in --baseline-s3 (never deletes the only copy or the newest snapshot per table)")
