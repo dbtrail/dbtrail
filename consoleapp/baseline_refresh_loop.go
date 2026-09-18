@@ -240,7 +240,14 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	var uploadTook time.Duration
 	if err == nil && req.BaselineS3 != "" {
 		uploadStarted := time.Now()
-		uploaded, err = uploadRefreshedSnapshot(s.ctx, req, at)
+		// Marked in flight so a full backup's sweep (#1725) does not send
+		// this snapshot a second time; released by defer so a panic here
+		// cannot leave the mark behind.
+		uploaded, err = func() (int, error) {
+			release := s.markUploading(req.ServerID, reconstruct.SnapshotDirName(at))
+			defer release()
+			return uploadRefreshedSnapshot(s.ctx, req, at)
+		}()
 		uploadTook = time.Since(uploadStarted)
 	}
 	// Measured HERE, on the far side of the `go` in TriggerRefresh, because
@@ -433,6 +440,14 @@ func resolveFoldSource(ctx context.Context, req refreshRequest) string {
 		slog.Debug("baseline refresh: a local backup folder could not be read, reading the bucket",
 			"server", req.ServerName, "dir", req.BaselineDir)
 		return standing
+	}
+	if localAt.After(remoteAt) {
+		// A full backup published locally whose upload is still in flight, or
+		// failed (#1725): the local copy is AHEAD of the bucket, and folding
+		// from the bucket's older snapshot would redo work the local one has.
+		slog.Info("baseline refresh: the local copy is newer than the bucket's newest snapshot (its upload is pending or failed); reading it instead of the bucket",
+			"server", req.ServerName, "local", localAt.UTC().Format(time.RFC3339), "bucket", remoteAt.UTC().Format(time.RFC3339), "dir", req.BaselineDir)
+		return req.BaselineDir
 	}
 	if !localAt.Equal(remoteAt) {
 		slog.Debug("baseline refresh: local copy is not the bucket's newest snapshot, reading the bucket",
@@ -698,8 +713,8 @@ func uploadRefreshedSnapshot(ctx context.Context, req refreshRequest, at time.Ti
 		// complete, and an operator reading this needs to know the run's work
 		// still exists rather than that a backup was lost.
 		return 0, fmt.Errorf("%w: it was written to %s but could not be uploaded to %s. The next update folds a NEW "+
-			"snapshot rather than re-sending this one; a full backup uploads the whole directory, so one of those "+
-			"sweeps it up: %w",
+			"snapshot rather than re-sending this one; the next full backup sends every local snapshot the destination "+
+			"lacks, so it sweeps this one up: %w",
 			errSnapshotNotUploaded, refreshSnapshotDir(req, at), dest, err)
 	}
 	return n, nil

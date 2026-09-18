@@ -2446,6 +2446,19 @@ try {
     ? ok("backups: every running kind renders a live chip, words, and the motion strip")
     : bad("backups: every running kind renders a live chip, words, and the motion strip", JSON.stringify(bkRun));
 
+  // 15e-3b (#1725): a full backup that is published on this machine while
+  // its copy to the destination still runs is in flight too, in different
+  // words: it must not read as "still creating" (a refresh may start now)
+  // nor vanish from the region as if it were done.
+  const bkUp = await page.evaluate(() => {
+    const runs = backupRunsInFlight({ baseline: { state: "succeeded", uploading: true, tables: 4 } }, null, null, null);
+    const settled = backupRunsInFlight({ baseline: { state: "succeeded", tables: 4 } }, null, null, null);
+    return { count: runs.length, kind: runs[0] && runs[0].kind, text: runs[0] && runs[0].text, settled: settled.length };
+  });
+  (bkUp.count === 1 && bkUp.kind === "dump" && /saved on this machine: 4 table/.test(bkUp.text) && /copying it to the backup destination/.test(bkUp.text) && !/Creating a backup/.test(bkUp.text) && bkUp.settled === 0)
+    ? ok("backups: a published backup still uploading is in flight in its own words, and settles once uploaded")
+    : bad("backups: a published backup still uploading is in flight in its own words, and settles once uploaded", JSON.stringify(bkUp));
+
   // 15e-4: fold refusals are rewritten for this page. The engine's errors are
   // per-table and newline-joined; the rewrite must strip every CLI remedy
   // WITHOUT eating the next table's identity (the first draft's non-global,

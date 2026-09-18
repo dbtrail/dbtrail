@@ -184,7 +184,14 @@ type BaselineStatus struct {
 	// exactly the case where asking "did it fail?" gives the wrong answer to
 	// "is a backup still owed?".
 	Published bool `json:"published,omitempty"`
-	Tables    int  `json:"tables,omitempty"`
+	// Uploading: the snapshot is published locally and its copy to the backup
+	// destination is still in flight (#1725). The server's job slot is
+	// already free; Uploaded is filled in when the copy completes.
+	Uploading bool `json:"uploading,omitempty"`
+	// Swept counts OTHER local snapshots a full backup sent to the destination
+	// because the destination lacked them (a refresh whose upload failed).
+	Swept  int `json:"swept,omitempty"`
+	Tables int `json:"tables,omitempty"`
 	// Carried counts tables published by reusing the previous snapshot's file
 	// rather than folding them again (refresh and restore only). It is the
 	// ONLY confirmation the operator gets that the reuse setting did anything:
