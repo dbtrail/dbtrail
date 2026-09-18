@@ -84,11 +84,13 @@ func deltaWindow(t *testing.T, root, prevBase string, prevDirTime time.Time, cha
 	if merr != nil {
 		t.Fatalf("readTableDelta: %v", merr)
 	}
-	chainStart, anchorMeta := prevDirTime, bmeta
+	// The anchor comes from fetchFloor, as in ReconstructTable, so what the
+	// writer carries forward (position and stamp) is what production gives it.
+	chainStart := prevDirTime
 	if prev != nil {
 		chainStart = prev.Meta.DeltaChainStart
-		anchorMeta.BinlogFile, anchorMeta.BinlogPos = prev.Meta.BinlogFile, prev.Meta.BinlogPos
 	}
+	_, anchorMeta := fetchFloor(prevDirTime, bmeta, prev)
 	snapDir := filepath.Join(root, SnapshotDirName(at))
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -98,6 +100,7 @@ func deltaWindow(t *testing.T, root, prevBase string, prevDirTime time.Time, cha
 		schema: "mydb", table: "orders",
 		basePath: prevBase, chainStart: chainStart, baseMeta: bmeta, anchorMeta: anchorMeta,
 		prev: prev, fold: &foldResult{Changes: changes}, pkCols: pkColsIntID(),
+		streamCaptured: true,
 	}
 	if mutate != nil {
 		mutate(&p)

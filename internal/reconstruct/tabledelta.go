@@ -559,11 +559,14 @@ type tableDeltaPublish struct {
 	chainStart time.Time
 	baseMeta   baseline.DumpMetadata
 	// anchorMeta is baseMeta with the anchor the fetch actually resumed from.
-	anchorMeta       baseline.DumpMetadata
-	prev             *tableDelta
-	fold             *foldResult
-	capGap           *CaptureGap
-	pkCols           []metadata.ColumnMeta
+	anchorMeta baseline.DumpMetadata
+	prev       *tableDelta
+	fold       *foldResult
+	capGap     *CaptureGap
+	pkCols     []metadata.ColumnMeta
+	// streamCaptured: a stream wrote the index, so the files this publish
+	// writes may carry an event-id stamp (#1720, lastEventIDFor).
+	streamCaptured   bool
 	currentGenerated map[string]bool
 }
 
@@ -587,6 +590,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		PKCols:           p.pkCols,
 		Changes:          p.fold.Changes,
 		Spill:            p.fold.Spill,
+		LastEventID:      lastEventIDFor(p.fold, p.anchorMeta, p.streamCaptured),
 		ImageColumns:     p.fold.ImageColumns,
 		SawImage:         p.fold.SawImage,
 		CurrentGenerated: p.currentGenerated,
@@ -720,13 +724,15 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	if !written {
 		slog.Info("table published as its previous file and chain, unchanged: no events in the window",
 			"schema", p.schema, "table", p.table, "last_seq", seq, "chain_files", len(chain.Files), "chain_copied", copied,
-			"base_linked", linked, "chain_start", chainStart.UTC().Format(time.RFC3339))
+			"base_linked", linked, "chain_start", chainStart.UTC().Format(time.RFC3339),
+			"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds())
 		return nil
 	}
 	slog.Info("table published as a delta over its previous file",
 		"schema", p.schema, "table", p.table, "events_applied", rep.EventsApplied,
 		"seq", seq, "dead_rows", dead, "upsert_rows", ups, "chain_files", len(chain.Files), "chain_copied", copied,
-		"base_linked", linked, "chain_start", chainStart.UTC().Format(time.RFC3339))
+		"base_linked", linked, "chain_start", chainStart.UTC().Format(time.RFC3339),
+		"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds())
 	return nil
 }
 
@@ -779,7 +785,8 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 	}
 	rep.DeltaChainFiles = 1
 	slog.Info("table rewritten in full with deltas on", "schema", p.schema, "table", p.table,
-		"reason", reason, "events_applied", rep.EventsApplied, "rows_written", rep.RowsWritten)
+		"reason", reason, "events_applied", rep.EventsApplied, "rows_written", rep.RowsWritten,
+		"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds())
 	return nil
 }
 

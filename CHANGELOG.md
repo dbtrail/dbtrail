@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A refresh reads a table's events in index order instead of looking each
+  one up on its own** (#1720). The fetch behind `baseline refresh`, a
+  scheduled update and `reconstruct --output-format parquet` used the query
+  shape every other reader shares: pick the page's keys with a sort, then
+  fetch each row by primary key. Under load, with the index's pages out of
+  memory, that was one disk read per row, measured at about 1.7 ms each and
+  100,000 per page. The table-window fetch (one table, an anchored start, a
+  page limit, oldest first) now scans the `(schema, table, timestamp)` index
+  in the order it needs and reads the rows as it goes; no sort, no lookup.
+  Every other query keeps its shape (the Iceberg export pages the same
+  window and takes the same plan). On an index written by `bintrail stream`
+  or the daemon, each file a refresh writes also records the highest event
+  id it applied (`bintrail.last_event_id` in the Parquet footer), and the
+  next refresh reads no row below that id: the scan still starts the hour
+  before its anchor, the safety margin for a transaction that executed
+  before the anchor and committed after it, but the rows that hour holds
+  below the id are skipped in the index instead of read. An index built
+  with `bintrail index --files` gets neither the stamp nor the floor,
+  because there ids follow the order the files were given. The per-table
+  log lines (`table reconstructed`, `table carried forward unchanged`,
+  `table published as a delta`, `table published as its previous file and
+  chain, unchanged` and `table rewritten in full`) now carry `fetch_ms`
+  (time waiting on the index and archives) and `fold_ms` (time applying the
+  rows), so a slow table says which side it lost the time on, including a
+  table that spent its time in the index and changed nothing.
 - **A refresh with table deltas on no longer rewrites the chain's accumulated
   changes on every refresh** (#1718). v0.83.0 kept one pair of delta files per
   table and rewrote it each refresh, so the cost of a refresh grew with

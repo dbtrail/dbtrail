@@ -18,6 +18,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	drivermysql "github.com/go-sql-driver/mysql"
+
 	"github.com/dbtrail/dbtrail/internal/event"
 )
 
@@ -259,6 +261,24 @@ type Options struct {
 	// nil = no position bound; older baselines that never recorded one fall back
 	// to the plain Since time filter.
 	SincePos *BinlogPos
+	// SinceEventID, when non-zero, restricts results to events with an
+	// event_id strictly greater than it (#1720). It is a FLOOR for the index,
+	// not a correctness gate: SincePos stays the exact gate. It is correct
+	// only where event_id order is binlog order, which holds for an index
+	// written by `stream` (one capture, ids assigned in binlog order; a resume
+	// deletes and re-inserts its replay, so the order survives) and is NOT
+	// guaranteed for `bintrail index --files` given files out of order. The
+	// baseline-anchored fold sets it from the anchor's recorded last event id
+	// only when stream_state shows a stream wrote the index
+	// (query.StreamCaptured), and never otherwise.
+	//
+	// What it buys: idx_row_lookup (schema_name, table_name, event_timestamp)
+	// carries the PRIMARY's event_id as its extension, so MySQL evaluates this
+	// floor INSIDE the index range and never reads the row of an entry below
+	// it — the lookback hour(s) SincePos's coarse time floor opens (#797) cost
+	// index entries, not clustered-page reads. Measured on 8.4.9: the floor
+	// appears in the range itself ("... AND 4500 < event_id").
+	SinceEventID uint64
 	// AfterEvent, when set, restricts results to events strictly AFTER this
 	// point in the (event_timestamp, event_id) sort order — the keyset cursor
 	// that makes a windowed fetch pageable without OFFSET (#1097).
@@ -463,19 +483,20 @@ func (e *Engine) Fetch(ctx context.Context, opts Options) ([]ResultRow, error) {
 	q, args := buildQuery(opts)
 	rows, err := e.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", err)
+		return nil, fmt.Errorf("query failed: %w", annotateMissingLookupIndex(err, opts))
 	}
 	defer rows.Close()
 	results, err := scanRows(rows)
 	if err != nil {
 		return nil, err
 	}
-	// buildQuery deliberately omits the outer ORDER BY (see there for why), so
-	// the JOIN may hand rows back in any order. Re-establish the total
+	// The JOIN form deliberately omits the outer ORDER BY (see buildQuery for
+	// why), so it may hand rows back in any order. Re-establish the total
 	// (event_timestamp, event_id) ordering here — the result set is already
 	// capped by the inner LIMIT, so this Go-side sort is cheap and keeps the
 	// "Fetch returns ordered rows" contract that recovery.GenerateSQL and the
-	// formatters rely on.
+	// formatters rely on. The stream shape (#1720) arrives in that order
+	// already, so for it the stable sort is a no-op.
 	sortResults(results, OrderDirection(opts.Order))
 	// Redaction also fires on DenyTables-only profiles — and on a named
 	// profile with ZERO rules (ProfileActive): query_text is per-STATEMENT,
@@ -841,6 +862,12 @@ func buildQuery(opts Options) (string, []any) {
 			" OR (binlog_file = ? AND start_pos >= ?))")
 		args = append(args, opts.SincePos.File, opts.SincePos.File, opts.SincePos.File, opts.SincePos.File, opts.SincePos.Pos)
 	}
+	if opts.SinceEventID > 0 {
+		// See Options.SinceEventID: an index-evaluable floor under the exact
+		// position gate above, never a gate of its own.
+		where = append(where, "event_id > ?")
+		args = append(args, opts.SinceEventID)
+	}
 	if opts.Until != nil {
 		until := *opts.Until
 		// Add an hour-aligned upper bound (exclusive) as a TO_SECONDS literal
@@ -1026,6 +1053,28 @@ func buildQuery(opts Options) (string, []any) {
 		whereSQL = " WHERE " + strings.Join(where, " AND ")
 	}
 
+	if isStreamShape(opts) {
+		// The paged, position-anchored table window — the baseline refresh's
+		// fold, and the Iceberg export, which pages the same way — is the
+		// one shape whose ORDER BY the index itself satisfies (#1720):
+		// idx_row_lookup is (schema_name, table_name, event_timestamp) and
+		// InnoDB extends every secondary index with the PRIMARY's columns, so
+		// with schema and table pinned by equality the entries come out in
+		// (event_timestamp, event_id) order already. Read in that order with
+		// the wide columns in the same pass and stop at the LIMIT: no
+		// filesort (so no 1038 cliff, the reason the JOIN below exists), no
+		// materialised key set, and no second lookup of every row on PRIMARY,
+		// which under a cold buffer pool was one synchronous disk read per
+		// event (#1720 measured ~1.7 ms each, 100k per page).
+		//
+		// FORCE INDEX is load-bearing: left to itself the optimizer picks
+		// idx_pk_hash for the equality prefix and then sorts (measured on
+		// 8.4.9 in the shape test's EXPLAIN), which is the plan this replaces.
+		// The position bounds stay a filter on the scanned rows, as before.
+		return "SELECT " + strings.ReplaceAll(cols, "be.", "") + " FROM binlog_events FORCE INDEX (idx_row_lookup)" + whereSQL +
+			" ORDER BY event_timestamp " + dir + ", event_id " + dir + " LIMIT ?", append(args, opts.Limit)
+	}
+
 	var keys string
 	if opts.LimitPerPK > 0 {
 		// Per-PK cap via ROW_NUMBER over the narrow keys only. Inner ORDER BY
@@ -1051,6 +1100,32 @@ func buildQuery(opts Options) (string, []any) {
 		" ON be.event_id = k.event_id AND be.event_timestamp = k.event_timestamp"
 
 	return q, args
+}
+
+// annotateMissingLookupIndex names the fix when the stream shape's FORCE INDEX
+// meets an index without idx_row_lookup (MySQL 1176). Every index `bintrail
+// init` ever wrote has it, so only a hand-built one gets here; without the
+// hint the error reads as a bug in the refresh rather than a missing key.
+func annotateMissingLookupIndex(err error, opts Options) error {
+	var me *drivermysql.MySQLError
+	if isStreamShape(opts) && errors.As(err, &me) && me.Number == 1176 {
+		return fmt.Errorf("%w — binlog_events has no idx_row_lookup, which every index created by `bintrail init` carries; add it with `ALTER TABLE binlog_events ADD INDEX idx_row_lookup (schema_name, table_name, event_timestamp)`", err)
+	}
+	return err
+}
+
+// isStreamShape reports whether opts is the baseline-anchored table-window
+// page (#1720): one table, an exact anchor, a page limit, ascending, and
+// nothing that wants another index (a key lookup) or a window function (a
+// per-PK cap) or a backward walk. Every condition is load-bearing, and the
+// shape test pins each one: outside it buildQuery keeps the JOIN form.
+func isStreamShape(opts Options) bool {
+	return opts.Schema != "" && opts.Table != "" &&
+		opts.Since != nil && opts.SincePos != nil &&
+		opts.Limit > 0 && opts.LimitPerPK == 0 &&
+		opts.PKValues == "" && len(opts.PKValuesIn) == 0 && opts.PKRange == nil &&
+		opts.EventAnchor == nil && opts.BeforeEvent == nil &&
+		OrderDirection(opts.Order) == "ASC"
 }
 
 // applyRedaction nulls out denied column values in RowBefore and RowAfter maps.
