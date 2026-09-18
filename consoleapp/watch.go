@@ -226,8 +226,8 @@ func init() {
 			"it (hard link where possible). Off by default: the rows are identical either way, but it links two "+
 			"snapshots to one file, so disk-usage and prune figures then count space they will not reclaim. "+
 			"Editable from the console settings panel, which overrides this flag.")
-	watchCmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", false,
-		"Off by default. A refresh does not rewrite a table that changed: it keeps the previous Parquet file and writes that refresh's changed rows as one numbered "+
+	watchCmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", true,
+		"On by default (--baseline-table-deltas=false or BINTRAIL_BASELINE_TABLE_DELTAS=false turns it off). A refresh does not rewrite a table that changed: it keeps the previous Parquet file and writes that refresh's changed rows as one numbered "+
 			"pair of small files beside it (<table>.000001.posdel, <table>.000001.upserts, then 000002, ...), linking the earlier pairs forward, and writes the table again in full when the chain's files together pass a quarter of its size or the chain is a "+
 			"day old. The generated DuckDB views read the chain; every other reader uses the table file and the index, as before. A snapshot written this way "+
 			"must not be read by a bintrail older than this one. Turning it off needs nothing else: the next refresh writes every table in full. Generate the DuckDB views again after turning it on or off.")

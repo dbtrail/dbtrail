@@ -265,16 +265,17 @@ func TestBaselineRefreshCarryForwardIsOffByDefault(t *testing.T) {
 	}
 }
 
-// TestBaselineRefreshTableDeltasIsOffByDefault: table deltas (#1638) change how
-// a snapshot is stored and who can read it, so they are asked for, never
-// landed on. Against the REAL command, for the reason the twin above gives.
-func TestBaselineRefreshTableDeltasIsOffByDefault(t *testing.T) {
+// TestBaselineRefreshTableDeltasIsOnByDefault: table deltas (#1638) are the
+// default since #1729 (a refresh proportional to the changes, not to the
+// tables touched); the flag exists to turn them OFF. Against the REAL
+// command, for the reason the twin above gives.
+func TestBaselineRefreshTableDeltasIsOnByDefault(t *testing.T) {
 	f := baselineRefreshCmd.Flags().Lookup("table-deltas")
 	if f == nil {
 		t.Fatal("--table-deltas is gone from baseline refresh; this guard covers nothing")
 	}
-	if f.DefValue != "false" {
-		t.Fatalf("default = %q, want \"false\"", f.DefValue)
+	if f.DefValue != "true" {
+		t.Fatalf("default = %q, want \"true\"", f.DefValue)
 	}
 }
 

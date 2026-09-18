@@ -99,8 +99,8 @@ func init() {
 		"When a table had no changes, publish its previous Parquet file instead of rewriting it (hard link "+
 			"where possible). Off by default: the rows are identical either way, but it links two snapshots "+
 			"to one file, so disk-usage and prune figures then count space they will not reclaim")
-	f.BoolVar(&brTableDeltas, "table-deltas", false,
-		"Off by default. Do not rewrite a table that changed: keep its previous file and write this run's changed rows as one numbered pair of small files beside it "+
+	f.BoolVar(&brTableDeltas, "table-deltas", true,
+		"On by default (--table-deltas=false turns it off). Do not rewrite a table that changed: keep its previous file and write this run's changed rows as one numbered pair of small files beside it "+
 			"(<table>.000001.posdel, <table>.000001.upserts, then 000002, ...), linking the earlier pairs forward. The table is written again in full when the chain's files together pass a quarter of its size or the chain is a day old. "+
 			"`bintrail views` reads the chain; every other command reads the table file and the index, as before. "+
 			"A snapshot written this way must not be read by a bintrail older than this one. Turning it off again needs nothing else: the next run writes every table in full. Generate the DuckDB views again after turning it on or off")
