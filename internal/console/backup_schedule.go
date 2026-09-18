@@ -647,7 +647,7 @@ func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupSchedu
 		// with the page naming a cause that did not happen.
 		//
 		// A REMOTE source must not cost the slot either: this probe reaches the
-		// network on an S3-backed server (a DuckDB httpfs listing), and before
+		// network on an S3-backed server (two S3 listing requests, #1679), and before
 		// #1539 those servers were guaranteed a full backup every slot without
 		// touching it. Losing the night's backup to a throttled ListObjectsV2
 		// would be a worse trade than an expensive backup, so the producer that

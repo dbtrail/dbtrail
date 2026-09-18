@@ -356,9 +356,26 @@ func NewestSnapshotTables(ctx context.Context, source string) ([]string, error) 
 // nothing to match it against, so the sort is the whole contract. A caller
 // that starts comparing this instant across sources wants the maximum form.
 func NewestSnapshot(ctx context.Context, source string) (time.Time, []string, error) {
-	files, unreadable, err := ListBaselinesUnreadable(ctx, source)
-	if err != nil {
-		return time.Time{}, nil, err
+	// On S3, a window of the newest few snapshots, widened while every one
+	// in it is incomplete (#1679): the answer is in the newest complete
+	// one, and reading the whole inventory to find it cost the schedule's
+	// probe as much as the Backups page. Locally the directory read is
+	// cheap and the unreadable folders it reports are the point (#1639).
+	var files []BaselineFile
+	var unreadable []UnreadableSnapshot
+	if strings.HasPrefix(source, "s3://") {
+		x, err := openS3SnapshotIndex(ctx, source)
+		if err != nil {
+			return time.Time{}, nil, err
+		}
+		if files, err = x.filesComplete(ctx, newestSnapshotProbe); err != nil {
+			return time.Time{}, nil, err
+		}
+	} else {
+		var err error
+		if files, unreadable, err = listBaselinesLocal(source); err != nil {
+			return time.Time{}, nil, err
+		}
 	}
 	var newest time.Time
 	if len(files) > 0 {
@@ -436,6 +453,10 @@ func SnapshotAt(ctx context.Context, source string, at time.Time) (tables []stri
 	return out, anchor, nil
 }
 
+// newestSnapshotProbe is how many of the newest snapshots NewestSnapshot
+// reads first; it widens by four while all of them are incomplete.
+const newestSnapshotProbe = 8
+
 // ListBaselines enumerates every baseline snapshot file under source (a local
 // directory or an s3:// prefix), newest snapshot first (then schema/table for
 // a stable render order). Entries that don't match the
@@ -464,15 +485,47 @@ func ListBaselinesReport(ctx context.Context, source string) (files []BaselineFi
 	return files, len(unreadable), err
 }
 
+// ListBaselinesNewestReport is ListBaselinesReport bounded to the newest
+// `newest` snapshots (0 = all), for a surface that shows a page of them
+// (#1679): the work follows what is returned, not the inventory. more says
+// whether older snapshots exist beyond the window. Local sources read the
+// whole directory listing anyway (cheap) and cut; an s3:// source fetches
+// only the window's objects.
+func ListBaselinesNewestReport(ctx context.Context, source string, newest int) (files []BaselineFile, skipped int, more bool, err error) {
+	files, unreadable, more, err := listBaselinesNewestUnreadable(ctx, source, newest)
+	return files, len(unreadable), more, err
+}
+
 // ListBaselinesUnreadable is ListBaselinesReport with the skipped folders
 // named and dated, for a caller that DECIDES on the listing rather than shows
 // it (#1639): pass them to UnreadableAtOrAfter with the snapshot it picked.
 func ListBaselinesUnreadable(ctx context.Context, source string) ([]BaselineFile, []UnreadableSnapshot, error) {
+	files, unreadable, _, err := listBaselinesNewestUnreadable(ctx, source, 0)
+	return files, unreadable, err
+}
+
+func listBaselinesNewestUnreadable(ctx context.Context, source string, newest int) ([]BaselineFile, []UnreadableSnapshot, bool, error) {
 	if strings.HasPrefix(source, "s3://") {
-		files, err := listBaselinesS3(ctx, source)
-		return files, nil, err
+		files, more, err := listBaselinesS3Newest(ctx, source, newest)
+		return files, nil, more, err
 	}
-	return listBaselinesLocal(source)
+	files, unreadable, err := listBaselinesLocal(source)
+	if err != nil || newest <= 0 {
+		return files, unreadable, false, err
+	}
+	// Newest first already; cut after the newest-th distinct snapshot.
+	seen := 0
+	var last time.Time
+	for i, f := range files {
+		if i == 0 || !f.SnapshotTime.Equal(last) {
+			seen++
+			last = f.SnapshotTime
+			if seen > newest {
+				return files[:i], unreadable, true, nil
+			}
+		}
+	}
+	return files, unreadable, false, nil
 }
 
 func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapshot, error) {
@@ -551,74 +604,6 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 	}
 	sortBaselineFiles(out)
 	return out, skipped, nil
-}
-
-func listBaselinesS3(ctx context.Context, s3URL string) ([]BaselineFile, error) {
-	db, err := sql.Open("duckdb", "")
-	if err != nil {
-		return nil, fmt.Errorf("open duckdb: %w", err)
-	}
-	defer db.Close()
-	if err := pinDuckDBSessionUTC(ctx, db); err != nil {
-		return nil, err
-	}
-	if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
-		return nil, fmt.Errorf("load httpfs extension: %w", err)
-	}
-	if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
-		return nil, err
-	}
-
-	prefix := strings.TrimSuffix(s3URL, "/")
-
-	// Exclude partially-converted snapshots (#467) so the listing doesn't
-	// advertise an incomplete snapshot as the latest baseline.
-	incomplete, err := s3IncompleteSnapshots(ctx, db, prefix)
-	if err != nil {
-		return nil, err
-	}
-
-	safeGlob := strings.ReplaceAll(prefix+"/*/*/*.parquet", "'", "''")
-	rows, err := db.QueryContext(ctx, "SELECT * FROM glob('"+safeGlob+"')")
-	if err != nil {
-		return nil, fmt.Errorf("list S3 baseline snapshots: %w", err)
-	}
-	defer rows.Close()
-
-	var out []BaselineFile
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			// The glob returns exactly one VARCHAR column; a Scan failure is a
-			// driver/DuckDB fault, never an expected layout condition — and
-			// rows.Err() below would NOT catch it. Fail loud rather than let a
-			// listing whose purpose is observability silently drop snapshots.
-			return nil, fmt.Errorf("scan S3 baseline path: %w", err)
-		}
-		rest := strings.TrimPrefix(path, prefix+"/")
-		parts := strings.Split(rest, "/")
-		if len(parts) != 3 || !strings.HasSuffix(parts[2], ".parquet") {
-			continue
-		}
-		ts, ok := parseDirTimestamp(parts[0])
-		if !ok {
-			continue
-		}
-		if incomplete[ts.UTC().Format(time.RFC3339)] {
-			continue
-		}
-		out = append(out, BaselineFile{
-			SnapshotTime: ts,
-			Schema:       parts[1],
-			Table:        strings.TrimSuffix(parts[2], ".parquet"),
-			Path:         path,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate S3 baseline list: %w", err)
-	}
-	sortBaselineFiles(out)
-	return out, nil
 }
 
 func sortBaselineFiles(files []BaselineFile) {
@@ -758,8 +743,8 @@ func staleFallback(schema, table string, using, newestSnap time.Time) StaleWarni
 // warns when the result is an older-snapshot fallback (#466): the prior
 // table-scoped glob made snapshots lacking the table invisible, so it could
 // never compute a "newest eligible snapshot" to compare against. We resolve
-// that by running ONE broader listing (prefix/*/*/*.parquet, the same glob
-// listBaselinesS3 uses) — bounding the listing cost to a single extra glob —
+// that by running ONE broader listing (prefix/*/*/*.parquet, the glob the
+// listing used before #1679) — bounding the listing cost to a single extra glob —
 // to derive the newest complete snapshot at-or-before `at`, and ONE marker glob
 // (prefix/*/_SUCCESS and _INCOMPLETE) to exclude partial snapshots (#467).
 //
@@ -927,7 +912,7 @@ func s3IncompleteSnapshots(ctx context.Context, db *sql.DB, prefix string) (map[
 			// demote its partial snapshot to complete-by-default (residual #467).
 			// Fail loud — the safe-on-error direction for a marker filter is
 			// "treat as incomplete / surface the error", never silently complete.
-			// Mirrors the hardened listBaselinesS3 Scan branch (#524 review).
+			// Mirrors the hardened Scan branch the listing had before #1679 (#524 review).
 			return nil, fmt.Errorf("scan S3 baseline marker path: %w", err)
 		}
 		rest := strings.TrimPrefix(path, prefix+"/")
