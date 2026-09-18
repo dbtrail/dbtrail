@@ -268,11 +268,17 @@ func applyDuckDBTuning(ctx context.Context, db *sql.DB, t duckdbutil.Tuning) {
 	duckdbutil.SetTempDirectory(ctx, db)
 }
 
-// TableReport carries the per-table outcome stats that the CLI summary prints.
+// TableReport carries the per-table outcome stats that the CLI summary prints,
+// plus what the run needs from each table afterwards (SourceSnapshotDir).
 type TableReport struct {
 	Schema, Table string
-	BaselineRows  int64 // rows streamed through from the baseline unchanged
-	EventsApplied int64 // total events observed from the event index
+	// SourceSnapshotDir is the LOCAL snapshot directory the table's baseline
+	// was read from ("" for S3 or no baseline). The manifest writer takes the
+	// digests of files linked forward from it instead of hashing them again
+	// (#1717).
+	SourceSnapshotDir string
+	BaselineRows      int64 // rows streamed through from the baseline unchanged
+	EventsApplied     int64 // total events observed from the event index
 	// FetchDuration / FoldDuration split the event window's wall time between
 	// waiting on the fetch (archive discovery and the planner included) and
 	// folding pages in Go (#1720). A carried-forward table walked its window
@@ -845,8 +851,12 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// the run is otherwise clean; a failed run stays _INCOMPLETE and needs no
 	// manifest.
 	if parquetMode && ctx.Err() == nil && len(errs) == 0 {
-		if err := baselineintegrity.WriteManifest(cfg.snapshotDir); err != nil {
+		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports))
+		if err != nil {
 			errs = append(errs, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err))
+		} else {
+			slog.Info("integrity manifest written", "snapshot", cfg.snapshotDir,
+				"files_hashed", st.Hashed, "files_reused", st.Reused)
 		}
 	}
 
@@ -854,6 +864,35 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		return reports, err
 	}
 	return reports, nil
+}
+
+// manifestWriter is baselineintegrity.WriteManifestFrom behind a variable so
+// a test can see what a run reused (#1717).
+var manifestWriter = baselineintegrity.WriteManifestFrom
+
+// localSnapshotDir is the snapshot directory a local table file lives in
+// (<snapshot>/<schema>/<table>.parquet), "" for an S3 path or no path.
+func localSnapshotDir(tablePath string) string {
+	if tablePath == "" || strings.HasPrefix(tablePath, "s3://") {
+		return ""
+	}
+	return filepath.Dir(filepath.Dir(tablePath))
+}
+
+// manifestPriorDirs lists, in report order and without repeats, the local
+// snapshot directories this run's tables were read from: the places its
+// linked-forward files come from, whose manifests can vouch for them.
+func manifestPriorDirs(reports []*TableReport) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, r := range reports {
+		if r == nil || r.SourceSnapshotDir == "" || seen[r.SourceSnapshotDir] {
+			continue
+		}
+		seen[r.SourceSnapshotDir] = true
+		out = append(out, r.SourceSnapshotDir)
+	}
+	return out
 }
 
 // snapshotDirLeftovers lists what an existing snapshot directory holds that a
@@ -975,6 +1014,9 @@ func ReconstructTable(
 	// ── 1. Find the baseline snapshot ──────────────────────────────────────
 	// FindBaseline already logs a stale-fallback warning (#466) server-side.
 	baselinePath, snapshotTime, _, err := FindBaseline(ctx, cfg.BaselineSrc, schema, table, cfg.At)
+	if err == nil {
+		rep.SourceSnapshotDir = localSnapshotDir(baselinePath)
+	}
 	if err != nil {
 		if !errors.Is(err, ErrNoBaseline) {
 			return nil, fmt.Errorf("find baseline: %w", err)
