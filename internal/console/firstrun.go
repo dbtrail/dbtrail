@@ -163,7 +163,7 @@ func blockedBackupStep(in firstRunInput) (FirstRunStep, bool) {
 	switch {
 	case in.BackupOff:
 		step.Detail = "Creating full backups from the console is turned off. Restoring a whole table to a past moment needs a full backup."
-		step.Fix = "To turn it on, find Create-backup button under Set when DBTrail starts on the Backup settings page, and restart DBTrail after the change. A full backup reads every table on the source"
+		step.Fix = "On the Backup settings page, under Set when DBTrail starts, the Create-backup button row shows how to turn it on. Restart DBTrail after changing it. A full backup reads every table this server captures"
 		if in.Postgres {
 			step.Fix += "."
 		} else {
@@ -259,11 +259,12 @@ func (s *Server) handleFirstRun(w http.ResponseWriter, r *http.Request) {
 	}
 	in := firstRunInput{Monitor: s.monitorCtrl.Status(e.ID), Postgres: e.IsPostgres()}
 	loadFirstRunIndex(r.Context(), e.DSN, &in)
-	// A precheck failure other than the location (a PostgreSQL server with no
-	// slot or publication, which the server form refuses to save) lists no
-	// backup step: capture cannot start either, and the capture steps above
-	// already fail naming what is missing.
+	// A PostgreSQL server with no slot or publication lists no backup step,
+	// whether or not backups are on: capture cannot start either, and the
+	// capture steps above already fail naming what is missing. Checked first,
+	// because the precheck reports a missing location before the slot.
 	switch {
+	case pgSourceIncomplete(e):
 	case s.baselineCtrl == nil:
 		in.BackupOff, in.BackupNoLocation = true, !hasOwnBackupLocation(e)
 	case baselineTriggerPrecheck(e) == nil:

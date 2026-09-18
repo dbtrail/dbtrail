@@ -5420,16 +5420,26 @@ function baselineContextStrip(b, cur) {
   strip.append(item("TIME-TRAVEL", b.reconstruct ? "enabled" : "off (archives disabled)"));
   // The page's primary action, at page level — not a list-header costume.
   if (cur && cur.id && cur.kind === "registry" && b.configured) {
-    if (capsCache.baseline_trigger) {
+    // cur is the RAW registry entry, while b.configured also counts the
+    // daemon-wide default, which a backup refuses to write to (the restore
+    // card's rule). The precheck reads the raw fields, so this does too: a
+    // button on a server with no location of its own is refused on click.
+    const ownLoc = !!(cur.baseline_dir || cur.baseline_s3);
+    const off = !capsCache.baseline_trigger;
+    if (!off && ownLoc) {
       const btn = el("button", { class: "btn ctx-action", type: "button", text: "Create backup" });
       btn.onclick = () => createBaseline(cur.id, btn);
       strip.append(btn);
-    } else {
-      // Where the button would be, say why it is not (#1677): a missing
-      // button reads as a page that has no such action. Named the way the
-      // Backup settings page labels the setting; the console shows no
-      // variables.
-      strip.append(item("CREATE BACKUP", "off, set when DBTrail starts (Backup settings page)"));
+    } else if (cur.has_source) {
+      // Where the button would be, say why it is not (#1677), the same two
+      // reasons the Getting started list gives: a missing button reads as a
+      // page with no such action. Named the way the Backup settings page
+      // labels them; the console shows no variables. A server with no source
+      // is never backed up from the console, so it gets no note.
+      const why = [];
+      if (off) why.push("off, set when DBTrail starts");
+      if (!ownLoc) why.push("needs this server's own backup location");
+      strip.append(item("CREATE BACKUP", why.join(", and ") + " (Backup settings page)"));
     }
   }
   return strip;

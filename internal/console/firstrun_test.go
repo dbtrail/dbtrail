@@ -183,7 +183,7 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 	}{
 		{"off, MySQL, location set", true, false, false,
 			[]string{"turned off", "whole table"},
-			[]string{"Create-backup button", "Set when DBTrail starts", "Backup settings page", "restart DBTrail", "reads every table", "mydumper"},
+			[]string{"Create-backup button", "Set when DBTrail starts", "Backup settings page", "Restart DBTrail", "reads every table this server captures", "mydumper"},
 			[]string{"backup location"}},
 		{"off, MySQL, no location: both fixes", true, true, false,
 			[]string{"turned off"},
@@ -398,4 +398,20 @@ func TestHandleFirstRunWithBackupsOff(t *testing.T) {
 			}
 		})
 	}
+	// Off or on, a PostgreSQL server with no slot gets no backup step: its
+	// capture steps fail first, and turning backups on would not help.
+	t.Run("PostgreSQL with no slot", func(t *testing.T) {
+		e, err := srv.cm.reg.Add(ServerEntry{Name: "pgnoslot", Flavor: FlavorPostgres, SourceDSN: "postgres://<redacted>/db"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, body := doServersReq(t, srv, "GET", "/api/servers/"+e.ID+"/first-run", "")
+		var rep FirstRunReport
+		if rec.Code != 200 || json.Unmarshal(body, &rep) != nil || len(rep.Steps) == 0 {
+			t.Fatalf("code = %d, body = %s", rec.Code, body)
+		}
+		if strings.Contains(string(body), "backup") {
+			t.Fatalf("backup step listed: %s", body)
+		}
+	})
 }

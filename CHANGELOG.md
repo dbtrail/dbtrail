@@ -19,8 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DBTrail starts, and restart; for MySQL, mydumper must be installed), or
   the server has no backup location of its own. `GET
   /api/servers/{id}/first-run` returns that step with a `detail` and a
-  `fix`. The Backups page shows `CREATE BACKUP: off, set when DBTrail
-  starts` where the button would be. Decided in #1677 and unchanged: a bare
+  `fix`. The Backups page gives the same reasons where the button would be
+  (`CREATE BACKUP: off, set when DBTrail starts`, `needs this server's own
+  backup location`, or both), and no longer offers the button for a server
+  whose only location is the daemon-wide default: a backup refuses to
+  write there, so the click was refused. Decided in #1677 and unchanged: a bare
   `bintrail-console watch` keeps console full backups off by default
   (`BINTRAIL_CONSOLE_BASELINE_TRIGGER`), and the compose stack keeps them
   on (`BASELINE_TRIGGER=0` opts out). The deb/rpm package does not install

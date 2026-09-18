@@ -122,7 +122,7 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 	if !hasOwnBackupLocation(e) {
 		return errors.New("this server has no baseline location set up; set a baseline directory or S3 location first (Backup settings page)")
 	}
-	if e.IsPostgres() && (e.SourceSlot == "" || e.SourcePublication == "") {
+	if pgSourceIncomplete(e) {
 		return errors.New("this PostgreSQL server has no replication slot/publication configured; set them first (Edit → Source)")
 	}
 	return nil
@@ -134,6 +134,13 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 // Getting started list's reason both read it, so they cannot disagree.
 func hasOwnBackupLocation(e ServerEntry) bool {
 	return e.BaselineDir != "" || e.BaselineS3 != ""
+}
+
+// pgSourceIncomplete: a PostgreSQL server with no replication slot or
+// publication, which the server form refuses to save. Neither capture nor a
+// backup can run for it.
+func pgSourceIncomplete(e ServerEntry) bool {
+	return e.IsPostgres() && (e.SourceSlot == "" || e.SourcePublication == "")
 }
 
 // BaselineStatus is the pollable state of a server's most recent baseline job.

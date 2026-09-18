@@ -12,10 +12,10 @@ import (
 // TestBackupOffIsSaidWhereTheActionWouldBe is #1677, drawn by the real page
 // code: when the console cannot create a full backup, the Getting started card
 // lists the backup step with the reason (from a report Go actually marshals),
-// and the Backups page strip says creation is off where the Create backup
-// button would be. The strip says it only for a registry server with a backup
-// location: without one the button is missing for another reason, which the
-// page already states.
+// and the Backups page strip says why where the Create backup button would be:
+// creation is off, the server has no backup location of its own (the daemon's
+// shared default counts for listing backups, not for writing one), or both.
+// A server with no source gets no note, and the command-line server none.
 func TestBackupOffIsSaidWhereTheActionWouldBe(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -46,7 +46,9 @@ const card = vm.runInContext("firstRunCard", ctx);
 const strip = vm.runInContext("baselineContextStrip", ctx);
 const buttons = (n, out = []) => { if (!n) return out; if (n.tag === "button") out.push(n._text); (n.children || []).forEach((c) => buttons(c, out)); return out; };
 const drawStrip = (caps, b, cur) => { vm.runInContext("capsCache = " + JSON.stringify(caps) + ";", ctx); const s = strip(b, cur); return { text: flat(s).join(" "), buttons: buttons(s) }; };
-const reg = { id: "s1", name: "prod", kind: "registry" };
+const reg = { id: "s1", name: "prod", kind: "registry", has_source: true, baseline_dir: "/var/lib/bintrail/baselines" };
+const shared = { id: "s2", name: "shared", kind: "registry", has_source: true };
+const nosrc = { id: "s3", name: "byo", kind: "registry", baseline_dir: "/var/lib/bintrail/baselines" };
 const cfg = { configured: true, source: "/var/lib/bintrail/baselines", snapshots: [] };
 console.log(JSON.stringify({
   off: last(card(` + marshal(true, false, false) + `)),
@@ -55,8 +57,12 @@ console.log(JSON.stringify({
   noLoc: last(card(` + marshal(false, true, false) + `)),
   stripOff: drawStrip({ monitor: true, baseline_trigger: false }, cfg, reg),
   stripOn: drawStrip({ monitor: true, baseline_trigger: true }, cfg, reg),
-  stripOffBoot: drawStrip({ monitor: true, baseline_trigger: false }, cfg, { id: "default", name: "cli", kind: "ephemeral" }),
+  stripOffBoot: drawStrip({ monitor: true, baseline_trigger: false }, cfg, { id: "default", name: "cli", kind: "ephemeral", has_source: true, baseline_dir: "/var/lib/bintrail/baselines" }),
   stripOffUnconfigured: drawStrip({ monitor: true, baseline_trigger: false }, { configured: false }, reg),
+  stripOnShared: drawStrip({ monitor: true, baseline_trigger: true }, cfg, shared),
+  stripOffShared: drawStrip({ monitor: true, baseline_trigger: false }, cfg, shared),
+  stripOffNoSource: drawStrip({ monitor: true, baseline_trigger: false }, cfg, nosrc),
+  stripOnNoSource: drawStrip({ monitor: true, baseline_trigger: true }, cfg, nosrc),
 }));
 `
 	path := filepath.Join(t.TempDir(), "backupoff.js")
@@ -73,8 +79,9 @@ console.log(JSON.stringify({
 		Buttons []string
 	}
 	var got struct {
-		Off, OffNoLoc, OffPG, NoLoc                           *row
-		StripOff, StripOn, StripOffBoot, StripOffUnconfigured drawnStrip
+		Off, OffNoLoc, OffPG, NoLoc                                      *row
+		StripOff, StripOn, StripOffBoot, StripOffUnconfigured            drawnStrip
+		StripOnShared, StripOffShared, StripOffNoSource, StripOnNoSource drawnStrip
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
@@ -85,6 +92,8 @@ console.log(JSON.stringify({
 	t.Logf("off, PG:    %s", got.OffPG.Text)
 	t.Logf("no loc:     %s", got.NoLoc.Text)
 	t.Logf("strip off:  %s", got.StripOff.Text)
+	t.Logf("strip on, shared location:  %s", got.StripOnShared.Text)
+	t.Logf("strip off, shared location: %s", got.StripOffShared.Text)
 
 	for name, r := range map[string]*row{"off": got.Off, "off+no loc": got.OffNoLoc, "off, PG": got.OffPG, "no loc": got.NoLoc} {
 		if r == nil || !strings.Contains(r.Text, "Take the first backup") || !strings.Contains(r.Cls, "waiting") {
@@ -125,9 +134,31 @@ console.log(JSON.stringify({
 		t.Errorf("the note shows where the button is missing for another reason: boot %q, unconfigured %q",
 			got.StripOffBoot.Text, got.StripOffUnconfigured.Text)
 	}
-	for _, bad := range []string{"—", "BINTRAIL_", "--", " here", "this page"} {
-		if strings.Contains(got.StripOff.Text, bad) {
-			t.Errorf("strip holds %q: %s", bad, got.StripOff.Text)
+	const loc = "needs this server's own backup location"
+	if strings.Contains(got.StripOff.Text, loc) {
+		t.Errorf("a server with its own location is told it needs one: %s", got.StripOff.Text)
+	}
+	// The daemon's shared default lists backups but a backup refuses to write
+	// to it: no button that is refused on click, and the reason instead.
+	if len(got.StripOnShared.Buttons) != 0 || !strings.Contains(got.StripOnShared.Text, loc) || strings.Contains(got.StripOnShared.Text, note) {
+		t.Errorf("creation on, shared location only: want the location reason and no button: %+v", got.StripOnShared)
+	}
+	if !strings.Contains(got.StripOffShared.Text, note) || !strings.Contains(got.StripOffShared.Text, loc) || len(got.StripOffShared.Buttons) != 0 {
+		t.Errorf("creation off, shared location only: want both reasons: %+v", got.StripOffShared)
+	}
+	// No source: nothing a backup could read, so no note either way. The
+	// button stays where it was (the page's live test pins it).
+	if !strings.Contains(got.StripOffNoSource.Text, "SOURCE") || strings.Contains(got.StripOffNoSource.Text, "CREATE BACKUP") {
+		t.Errorf("a server with no source gets a note: %q", got.StripOffNoSource.Text)
+	}
+	if len(got.StripOnNoSource.Buttons) != 1 {
+		t.Errorf("the button moved for a server with no source and its own location: %+v", got.StripOnNoSource)
+	}
+	for _, s := range []drawnStrip{got.StripOff, got.StripOnShared, got.StripOffShared} {
+		for _, bad := range []string{"—", "BINTRAIL_", "--", " here", "this page"} {
+			if strings.Contains(s.Text, bad) {
+				t.Errorf("strip holds %q: %s", bad, s.Text)
+			}
 		}
 	}
 }

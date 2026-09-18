@@ -475,10 +475,13 @@ panel that answers whether a restore would work, far below the fold.
   (`baseline_dir` / `baseline_s3`): each snapshot's timestamp, age, table
   count, and (local sources) the binlog coordinates its deltas start from. The
   empty states explain how to produce a first baseline (`bintrail dump` →
-  `bintrail baseline`). When the **Create baseline** button is enabled it sits
-  in this panel's header. When creating backups is turned off for the daemon,
-  that spot reads **CREATE BACKUP: off, set when DBTrail starts** instead, for
-  a server with its own backup location.
+  `bintrail baseline`). When the **Create backup** button is enabled it sits
+  on the page's top strip, for a server with a backup location of its own (the
+  daemon-wide default lists backups, but a backup refuses to write to it).
+  When the button cannot be used for a server with a source, that spot says
+  why instead: **CREATE BACKUP: off, set when DBTrail starts** when creating
+  backups is turned off for the daemon, **needs this server's own backup
+  location** when it has none, or both.
 - **Keep it current with Iceberg** (#1466) — a display-only panel at the
   bottom of the page that prints the exact `bintrail export iceberg` command
   for the selected server, with its index connection and its resolved backup
@@ -895,8 +898,9 @@ longer does anything. Remove it.
   The bare default stays off on purpose (#1677): the `bintrail-console`
   deb/rpm package does not install `mydumper`, so a default-on button would
   fail on first use, and a full backup reads every table in scope on the
-  source, which is load an operator should choose. It also lets a scheduled
-  update that a schema change refuses fall back to a full backup on its own.
+  source, which is load an operator should choose. Turning it on also lets a
+  scheduled update that a schema change refuses fall back to a full backup on
+  its own.
   When it is off, the Overview's Getting started list and the Backups page
   both say so and point at the Backup settings page, where the setting is
   listed under the settings read when DBTrail starts.

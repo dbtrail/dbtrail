@@ -2314,7 +2314,9 @@ try {
   // sets a default --baseline-dir): no destination → no button + the setup
   // empty state; capability off → no button even with a destination.
   const gates = await page.evaluate(() => {
-    const servers = [{ id: "srv-fix", name: "fixture", kind: "registry" }];
+    // Own location and a source (#1677): the strip's note needs both, like
+    // the button, and neither changes the button checks below.
+    const servers = [{ id: "srv-fix", name: "fixture", kind: "registry", has_source: true, baseline_dir: "/tmp/baselines" }];
     const cur = servers[0];
     const keepCur = currentServer;
     currentServer = "srv-fix";
