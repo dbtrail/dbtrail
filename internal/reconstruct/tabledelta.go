@@ -608,7 +608,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		reserved = reservedDeltaColumn(cols)
 	}
 	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.fold.Spill != nil, p.capGap, p.cfg.At, hasAnchor, reserved); reason != "" {
-		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, rep)
+		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
 	}
 
 	// The guards a rewrite runs before it opens its output (#602, #843) are
@@ -653,6 +653,13 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	}
 	published = append(published, newBase)
 	chainStart, seq, spaceHint := p.chainStart, 0, int64(0)
+	if p.prev == nil && !p.baseMeta.SnapshotTimestamp.IsZero() && p.baseMeta.SnapshotTimestamp.Before(chainStart) {
+		// Same rule as fetchFloor, on the side that STAMPS: a chain that
+		// starts over a base whose own stamp is earlier than FindBaseline's
+		// time (a table file replaced by hand under a set-aside chain) must
+		// declare a start no later than the events it holds.
+		chainStart = p.baseMeta.SnapshotTimestamp
+	}
 	copied := 0
 	if p.prev != nil {
 		chainStart, seq, spaceHint = p.prev.Meta.DeltaChainStart, p.prev.Meta.DeltaSeq+1, p.prev.UpsertsSize
@@ -727,7 +734,12 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 // WITH its chain applied when there is one, followed by the empty sequence-0
 // pair that starts the next chain at this snapshot. The old chain's files are
 // not carried forward.
-func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInput, newBase, reason string, rep *TableReport) error {
+//
+// noChain skips the empty pair: the table cannot have one (a column under a
+// reserved name), so it is published rewritten and bare, and every refresh
+// rewrites it again for the same reason. Writing the pair anyway would fail
+// on exactly the check that sent the table here, and fail the whole run.
+func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInput, newBase, reason string, noChain bool, rep *TableReport) error {
 	var cleanup func()
 	var err error
 	if p.prev != nil {
@@ -745,6 +757,12 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 	if err := mergeBaselineIntoParquet(ctx, in, rep); err != nil {
 		return err
 	}
+	rep.DeltaCompacted = reason
+	if noChain {
+		slog.Info("table rewritten in full with deltas on, and left without a chain", "schema", p.schema, "table", p.table,
+			"reason", reason, "events_applied", rep.EventsApplied, "rows_written", rep.RowsWritten)
+		return nil
+	}
 	newMeta, err := baseline.ReadParquetMetadata(newBase)
 	if err != nil {
 		return fmt.Errorf("read back the rewritten backup file of %s.%s: %w", p.schema, p.table, err)
@@ -759,7 +777,6 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 		}
 		return err
 	}
-	rep.DeltaCompacted = reason
 	rep.DeltaChainFiles = 1
 	slog.Info("table rewritten in full with deltas on", "schema", p.schema, "table", p.table,
 		"reason", reason, "events_applied", rep.EventsApplied, "rows_written", rep.RowsWritten)

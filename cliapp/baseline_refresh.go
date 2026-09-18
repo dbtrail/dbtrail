@@ -100,9 +100,9 @@ func init() {
 			"where possible). Off by default: the rows are identical either way, but it links two snapshots "+
 			"to one file, so disk-usage and prune figures then count space they will not reclaim")
 	f.BoolVar(&brTableDeltas, "table-deltas", false,
-		"Off by default. Do not rewrite a table that changed: keep its previous file and write the changed rows as two small files beside it "+
-			"(<table>.posdel, <table>.upserts). The table is written again in full when those two files pass a quarter of its size or the chain is a day old. "+
-			"`bintrail views` reads the pair; every other command reads the table file and the index, as before. "+
+		"Off by default. Do not rewrite a table that changed: keep its previous file and write this run's changed rows as one numbered pair of small files beside it "+
+			"(<table>.000001.posdel, <table>.000001.upserts, then 000002, ...), linking the earlier pairs forward. The table is written again in full when the chain's files together pass a quarter of its size or the chain is a day old. "+
+			"`bintrail views` reads the chain; every other command reads the table file and the index, as before. "+
 			"A snapshot written this way must not be read by a bintrail older than this one. Turning it off again needs nothing else: the next run writes every table in full. Generate the DuckDB views again after turning it on or off")
 	f.IntVar(&brParallelism, "parallelism", 0, "Max tables refreshed concurrently (0 = one per CPU)")
 	f.IntVar(&brFetchBatch, "fetch-batch-size", 0, "Event page size for the delta fold (0 = default)")
@@ -265,7 +265,7 @@ func buildRefreshOutcomes(tables []string, reports []*reconstruct.TableReport, f
 			deltaDetail[k] = fmt.Sprintf("no events in the window; the previous file and its %d delta pairs were kept as they are (last pair %d)",
 				r.DeltaChainFiles, r.DeltaSeq)
 		case r.TableDelta:
-			deltaDetail[k] = fmt.Sprintf("the previous file was kept and this window's change written beside it as pair %d of %d (%d rows replaced or removed, %d changed or new rows)",
+			deltaDetail[k] = fmt.Sprintf("the previous file was kept and this window's change written beside it as pair %d; the chain now has %d pairs (%d rows replaced or removed, %d changed or new rows)",
 				r.DeltaSeq, r.DeltaChainFiles, r.DeltaDeadRows, r.DeltaUpsertRows)
 		case r.DeltaCompacted != "":
 			deltaDetail[k] = "written again in full: " + r.DeltaCompacted

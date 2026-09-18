@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -724,14 +726,104 @@ func TestWriteEmptyTableDeltas_skipsWhatCannotAnchor(t *testing.T) {
 		t.Fatalf("state = %v, want %v", got, want)
 	}
 
-	// A reserved column name.
+	// A reserved column name: no chain from the full backup either.
 	root2 := t.TempDir()
-	base2 := writeStampedBaselineWithSQL(t, root2, t0, "CREATE TABLE `orders` (\n  `id` int NOT NULL,\n  `bintrail_op` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);")
+	base2 := writeFilenameBaseline(t, root2, t0)
 	if err := baseline.WriteEmptyTableDeltas(filepath.Dir(filepath.Dir(base2))); err != nil {
 		t.Fatalf("WriteEmptyTableDeltas over a reserved column: %v", err)
 	}
 	if c, err := baseline.ListTableDelta(context.Background(), base2); err != nil || c != nil {
 		t.Fatalf("a table with a reserved column got a chain (%+v, %v)", c, err)
+	}
+}
+
+// filenameCreateTableSQL is a realistic table that a delta cannot describe:
+// `filename` is the column DuckDB synthesises when the chain is read.
+const filenameCreateTableSQL = "CREATE TABLE `attachments` (\n  `id` int NOT NULL,\n  `filename` varchar(255) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);"
+
+// writeFilenameBaseline writes a stamped, anchored two-row baseline of
+// filenameCreateTableSQL into a snapshot directory, with the Parquet columns
+// and the CREATE TABLE in agreement (so a refresh over it is refused, if it
+// is, by the reserved-name check and not by the schema check).
+func writeFilenameBaseline(t *testing.T, root string, at time.Time) string {
+	t.Helper()
+	cols, err := baseline.ParseSchemaText(filenameCreateTableSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, SnapshotDirName(at), "mydb", "attachments.parquet")
+	w, err := baseline.NewWriter(path, cols, baseline.WriterConfig{
+		Compression: "none", RowGroupSize: 10,
+		Metadata: map[string]string{
+			baseline.MetaKeyCreateTableSQL:    filenameCreateTableSQL,
+			baseline.MetaKeyBinlogFile:        "binlog.000007",
+			baseline.MetaKeyBinlogPos:         "4",
+			baseline.MetaKeySnapshotTimestamp: at.UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range [][]string{{"1", "a.png"}, {"2", "b.png"}} {
+		if err := w.WriteRow(r, []bool{false, false}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestTableDelta_reservedColumnIsRewrittenWithoutAChain: a table with a column
+// a delta reserves is published by full rewrite and left WITHOUT a chain, on
+// every refresh, and the run succeeds. The first version of #1718 sent such a
+// table to the rewrite and then wrote the empty pair anyway, which failed on
+// exactly the check that had sent it there, and the whole refresh with it.
+func TestTableDelta_reservedColumnIsRewrittenWithoutAChain(t *testing.T) {
+	noCompaction(t)
+	root := t.TempDir()
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	base := writeFilenameBaseline(t, root, t0)
+	prevBase, prevTime := base, t0
+	for i := 1; i <= 2; i++ {
+		at := t0.Add(time.Duration(i) * 5 * time.Minute)
+		changes := map[string]*query.ResultRow{pkStrForInt(2): {PKValues: pkStrForInt(2), EventType: event.EventUpdate,
+			RowAfter: map[string]any{"id": float64(2), "filename": fmt.Sprintf("b%d.png", i)}}}
+		snapDir := filepath.Join(root, SnapshotDirName(at))
+		if err := os.MkdirAll(snapDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		bmeta, _ := baseline.ReadParquetMetadata(prevBase)
+		prev, err := readTableDelta(context.Background(), prevBase, bmeta)
+		if err != nil || prev != nil {
+			t.Fatalf("refresh %d: prev=%v err=%v, want no chain", i, prev, err)
+		}
+		rep := &TableReport{Schema: "mydb", Table: "attachments"}
+		err = publishWithTableDelta(context.Background(), tableDeltaPublish{
+			cfg:    FullTableConfig{At: at, OutputFormat: OutputFormatParquet, TableDeltas: true, snapshotDir: snapDir, cut: &query.BinlogPos{File: "binlog.000009", Pos: uint64(1000 * i)}},
+			schema: "mydb", table: "attachments", basePath: prevBase, chainStart: prevTime, baseMeta: bmeta, anchorMeta: bmeta,
+			fold: &foldResult{Changes: changes}, pkCols: pkColsIntID(),
+		}, rep)
+		if err != nil {
+			t.Fatalf("refresh %d over a table with a reserved column failed the run: %v", i, err)
+		}
+		newBase := filepath.Join(snapDir, "mydb", "attachments.parquet")
+		if rep.TableDelta || !strings.Contains(rep.DeltaCompacted, "filename") || rep.DeltaChainFiles != 0 {
+			t.Fatalf("refresh %d: report = delta %v, compacted %q, chain files %d; want a bare rewrite naming the column", i, rep.TableDelta, rep.DeltaCompacted, rep.DeltaChainFiles)
+		}
+		if c, err := baseline.ListTableDelta(context.Background(), newBase); err != nil || c != nil {
+			t.Fatalf("refresh %d left a chain beside a table that cannot have one (%+v, %v)", i, c, err)
+		}
+		var got []string
+		for _, r := range readSnapshotRows(t, newBase) {
+			got = append(got, fmt.Sprintf("%v=%v", r["id"], r["filename"]))
+		}
+		sort.Strings(got)
+		if want := []string{"1=a.png", fmt.Sprintf("2=b%d.png", i)}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("refresh %d: rows = %v, want %v", i, got, want)
+		}
+		prevBase, prevTime = newBase, at
 	}
 }
 

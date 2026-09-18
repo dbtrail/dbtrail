@@ -294,11 +294,11 @@ func TestBuildRefreshOutcomes_tableDeltaDetail(t *testing.T) {
 	for _, o := range got {
 		byTable[o.Table] = o
 	}
-	if d := byTable["shop.a"].Detail; !strings.Contains(d, "pair 3 of 4") || !strings.Contains(d, "7 rows replaced or removed, 9 changed or new rows") {
+	if d := byTable["shop.a"].Detail; !strings.Contains(d, "pair 3;") || !strings.Contains(d, "now has 4 pairs") || !strings.Contains(d, "7 rows replaced or removed, 9 changed or new rows") {
 		t.Errorf("shop.a detail = %q", d)
 	}
 	if d := byTable["shop.b"].Detail; !strings.Contains(d, "no events in the window") || !strings.Contains(d, "3 delta pairs") ||
-		!strings.Contains(d, "last pair 2") || strings.Contains(d, "pair 2 of") {
+		!strings.Contains(d, "last pair 2") || strings.Contains(d, "written beside it") {
 		t.Errorf("shop.b detail = %q", d)
 	}
 	if d := byTable["shop.c"].Detail; d != "written again in full: the chain is 25h0m0s old" {
