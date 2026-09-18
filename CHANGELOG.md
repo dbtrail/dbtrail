@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Table deltas are on by default** (#1729). A refresh keeps a changed
+  table's Parquet file and writes that refresh's changed rows as one
+  numbered pair of small files beside it, so its cost follows the changes
+  and not the tables touched (#1638, #1718, #1719, #1722, #1724, #1726).
+  `bintrail baseline refresh --table-deltas=false`,
+  `bintrail-console watch --baseline-table-deltas=false` or
+  `BINTRAIL_BASELINE_TABLE_DELTAS=false` turn it off; the environment
+  variable's other values keep the default. Upgrading needs nothing: the
+  next refresh starts a chain beside each table that changed and says so in
+  the log once per table; a v0.83.0 single-pair snapshot is compacted once
+  with its changes. Generate the DuckDB views again after upgrading: views
+  generated while deltas were off read a table's file alone, which with a
+  chain beside it is the table as it was when the chain started, with no
+  error to say so (`views.sql` inside each snapshot and the console's
+  downloads are generated per snapshot and are always right). A snapshot
+  written this way must not be read by a bintrail older than the one that wrote it.
+
 ### Fixed
 - **After a long stop the backup schedule takes a full backup instead of
   folding hours of changes one page at a time** (#1721). Before each
