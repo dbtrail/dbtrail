@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.84.0] - 2026-09-18
+
 ### Added
 - **The daemon merges a long chain of table deltas into one range pair,
   outside the refresh** (#1723, first half). With table deltas on, every
