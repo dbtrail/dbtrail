@@ -5,10 +5,12 @@ package reconstruct_test
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
@@ -267,7 +269,11 @@ func TestReconstructParquet_plainTablesCarryTheStampToo(t *testing.T) {
 	}
 	// A carried-forward table (no events, carry-forward on) keeps the
 	// previous file, stamp included, and reports the fetch it made with no
-	// fold behind it.
+	// fold behind it. Its manifest takes the previous snapshot's digest for
+	// the linked file and hashes nothing (#1717): the plain carry-forward
+	// path, not only a delta chain, feeds the manifest its priors.
+	var manifest baselineintegrity.ManifestStats
+	defer reconstruct.CountManifestReuseForTest(&manifest)()
 	reps, err := reconstruct.ReconstructTables(r.ctx, reconstruct.FullTableConfig{
 		IndexDSN: r.dsn, BaselineSrc: r.root, Tables: []string{r.schema + ".orders"},
 		At: hour(1, 50*time.Minute), OutputDir: r.root, OutputFormat: reconstruct.OutputFormatParquet,
@@ -278,6 +284,12 @@ func TestReconstructParquet_plainTablesCarryTheStampToo(t *testing.T) {
 	}
 	if !reps[0].CarriedForward || reps[0].FoldDuration != 0 {
 		t.Fatalf("carry-forward: CarriedForward=%v fold=%s, want carried with no fold time", reps[0].CarriedForward, reps[0].FoldDuration)
+	}
+	if manifest.Reused != 1 || manifest.Hashed != 0 {
+		t.Fatalf("carry-forward manifest: reused %d, hashed %d; want the linked file's digest reused and nothing hashed", manifest.Reused, manifest.Hashed)
+	}
+	if want := filepath.Dir(filepath.Dir(base)); reps[0].SourceSnapshotDir != want {
+		t.Fatalf("SourceSnapshotDir = %q, want %q", reps[0].SourceSnapshotDir, want)
 	}
 	carried, _, _, err := reconstruct.FindBaseline(r.ctx, r.root, r.schema, "orders", hour(1, 50*time.Minute))
 	if err != nil {

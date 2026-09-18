@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full scan, and so does a window holding a key that cannot be spelled as
   a plain integer. Either way the final check is the same one as before,
   done in Go: the join only cuts down how many rows have to reach it.
+- **A refresh no longer re-hashes the files it links forward unchanged when
+  it writes the snapshot's integrity manifest** (#1717). With
+  carry-forward or table deltas on, most of a snapshot's files are the
+  previous snapshot's files (hard links), and the manifest read and
+  checksummed all of them again on every refresh: a full read of the
+  snapshot, competing with capture for the disk, to certify bytes that had
+  not changed. A file that is the same file as in the snapshot it was read
+  from (the same inode, so the same bytes) now takes that snapshot's
+  recorded digest; a copy, a rewritten file, a new file, or a source whose
+  manifest is absent or unreadable is hashed as before. The
+  `integrity manifest written` log line reports `files_hashed` and
+  `files_reused`. The one validation read a carried file gets before it is
+  linked stays.
 - **A refresh reads a table's events in index order instead of looking each
   one up on its own** (#1720). The fetch behind `baseline refresh`, a
   scheduled update and `reconstruct --output-format parquet` used the query

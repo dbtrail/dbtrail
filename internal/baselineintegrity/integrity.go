@@ -39,6 +39,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // ManifestName is the per-snapshot integrity sidecar, written under the snapshot
@@ -88,34 +89,143 @@ func manifested(name string) bool {
 	return strings.HasSuffix(name, ".parquet") || strings.HasSuffix(name, ".posdel") || strings.HasSuffix(name, ".upserts")
 }
 
-// WriteManifest hashes every .parquet file under snapshotDir and writes the
-// integrity manifest. It is called on full baseline success, before the _SUCCESS
-// marker, so a snapshot that has _SUCCESS also has its manifest.
+// WriteManifest hashes every manifested file (.parquet, .posdel, .upserts)
+// under snapshotDir and writes the integrity manifest. It is called on full
+// baseline success, before the _SUCCESS marker, so a snapshot that has
+// _SUCCESS also has its manifest. WriteManifestFrom with no priors.
 func WriteManifest(snapshotDir string) error {
+	_, err := WriteManifestFrom(snapshotDir, nil)
+	return err
+}
+
+// ManifestStats says how a manifest was built: files whose digest was taken
+// from a prior snapshot's manifest, and files hashed here.
+type ManifestStats struct {
+	Reused, Hashed int
+}
+
+// WriteManifestFrom is WriteManifest for a snapshot that links files forward
+// from earlier snapshots (a refresh with carry-forward or table deltas): a
+// file that IS a prior snapshot's file — the same inode, so the same bytes
+// by definition — takes the digest that snapshot's manifest recorded for the
+// same relative path, and only the rest is hashed (#1717). Anything the
+// prior cannot vouch for exactly is hashed as before: a copy rather than a
+// link, a prior with no manifest or one this build does not recognise, an
+// entry missing from it, a prior that is not there. Priors are tried in
+// order; the snapshot itself is never its own prior.
+//
+// The same inode makes a reused digest unable to CERTIFY rotten bytes (the
+// bytes are the prior's, and the digest was computed over the prior's
+// bytes, so rot still fails the read). What makes it CORRECT for a good
+// file is that the caller validated that file against that same prior
+// manifest before linking it: reconstruct does so for a carried table
+// (carryForward) and for every pair of a chain (readTableDelta). A caller
+// that linked a file it never validated would not launder corruption, but
+// it could carry a stale digest into a fresh snapshot and refuse a good
+// file on read.
+func WriteManifestFrom(snapshotDir string, priorDirs []string) (ManifestStats, error) {
+	var st ManifestStats
+	priors := loadPriors(snapshotDir, priorDirs)
 	m := Manifest{Version: manifestVersion, Algo: "crc32c", Files: map[string]string{}}
 	err := filepath.WalkDir(snapshotDir, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil || d.IsDir() || !manifested(d.Name()) {
 			return walkErr
 		}
-		crc, err := CRC32CFile(p)
-		if err != nil {
-			return fmt.Errorf("crc32c %s: %w", p, err)
-		}
 		rel, err := filepath.Rel(snapshotDir, p)
 		if err != nil {
 			return err
 		}
+		if crc, ok := priorDigest(priors, p, rel); ok {
+			st.Reused++
+			m.Files[filepath.ToSlash(rel)] = crc
+			return nil
+		}
+		crc, err := CRC32CFile(p)
+		if err != nil {
+			return fmt.Errorf("crc32c %s: %w", p, err)
+		}
+		st.Hashed++
 		m.Files[filepath.ToSlash(rel)] = crc
 		return nil
 	})
 	if err != nil {
-		return err
+		return st, err
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
-		return err
+		return st, err
 	}
-	return os.WriteFile(filepath.Join(snapshotDir, ManifestName), b, 0o644)
+	return st, os.WriteFile(filepath.Join(snapshotDir, ManifestName), b, 0o644)
+}
+
+// priorSnapshot is a prior snapshot whose manifest this build can read.
+type priorSnapshot struct {
+	dir string
+	m   *Manifest
+}
+
+// loadPriors reads the manifests of the priors that can vouch for anything:
+// present, readable, of this build's version and algo. A prior that cannot
+// is left out silently — the outcome is a hash, not a failure.
+func loadPriors(snapshotDir string, priorDirs []string) []priorSnapshot {
+	var out []priorSnapshot
+	for _, dir := range priorDirs {
+		if dir == "" || dir == snapshotDir {
+			continue
+		}
+		m, ok, err := LoadManifest(dir)
+		switch {
+		case err != nil:
+			// The read paths already Warn about this sidecar; here it only
+			// costs the reuse, so Debug names why files_reused stays low.
+			slog.Debug("integrity manifest of a prior snapshot is unreadable; its files are hashed again", "snapshot", dir, "error", err)
+			continue
+		case !ok:
+			continue // no manifest: a snapshot from before #636
+		case m.Version != manifestVersion || m.Algo != "crc32c":
+			slog.Debug("integrity manifest of a prior snapshot is of another version; its files are hashed again",
+				"snapshot", dir, "version", m.Version, "algo", m.Algo)
+			continue
+		}
+		out = append(out, priorSnapshot{dir: dir, m: m})
+	}
+	return out
+}
+
+// priorDigest returns the digest a prior recorded for rel when the prior's
+// file at that path is the same file as p (os.SameFile: same device and
+// inode). Same bytes are not enough: a copy is hashed.
+func priorDigest(priors []priorSnapshot, p, rel string) (string, bool) {
+	if len(priors) == 0 {
+		return "", false
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		return "", false
+	}
+	key := filepath.ToSlash(rel)
+	for _, pr := range priors {
+		crc, ok := pr.m.Files[key]
+		if !ok {
+			continue
+		}
+		prevInfo, err := os.Stat(filepath.Join(pr.dir, rel))
+		if err != nil {
+			// ENOTDIR is absence too (a file where the schema folder would
+			// be), as findBaselineLocal reads it. Anything else — a
+			// permission problem on the prior — turns every refresh back
+			// into a full re-hash, so it is at least said.
+			if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+				slog.Debug("prior snapshot file cannot be stat'ed; hashing again", "path", filepath.Join(pr.dir, rel), "error", err)
+			}
+			continue
+		}
+		if !os.SameFile(info, prevInfo) {
+			continue
+		}
+		return crc, true
+	}
+	return "", false
 }
 
 // LoadManifest reads the integrity manifest from snapshotDir. ok=false with a nil

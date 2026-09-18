@@ -113,6 +113,11 @@ func carryForward(ctx context.Context, srcPath, snapshotDir, schema, table strin
 // same way. validate runs the manifest check on the source first; a caller
 // that just validated the file (readTableDelta, over every pair of a chain)
 // passes false rather than hash the same bytes twice per refresh.
+// A caller passing validate=false asserts that srcPath was already validated
+// against its snapshot's manifest in this run (readTableDelta does, for every
+// pair of a chain): the manifest writer reuses that manifest's digest for the
+// linked file (#1717), which is only right for a file that was checked
+// against it.
 func carryForwardFile(ctx context.Context, srcPath, dst string, validate bool) (linked bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
