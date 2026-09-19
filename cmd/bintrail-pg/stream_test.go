@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pglogrepl"
 
+	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 )
 
@@ -198,7 +200,7 @@ func TestPGStreamCmd_defaults(t *testing.T) {
 		{"batch-size", "1000"},
 		{"checkpoint", "5"},
 		{"partitions", "48"},
-		{"rotate-retain", "30d"},
+		{"rotate-retain", indexer.DefaultRotateRetain},
 		{"rotate-interval", "1h"},
 		{"rotate-add-future", "3"},
 	}
@@ -216,10 +218,15 @@ func TestPGStreamCmd_defaults(t *testing.T) {
 
 // TestPGStreamCmd_rotationDefaultsEnableRetention pins the load-bearing #951
 // contract: the registered --rotate-* flag defaults must parse into an ENABLED
-// 30d rotation, so a fresh `bintrail-pg stream` bounds its own index without any
+// rotation, so a fresh `bintrail-pg stream` bounds its own index without any
 // operator action (a PG install has no `up` command — stream is its only
 // daemon). explicit=false (running on the built-in default, not operator-set)
 // arms the upgrade guard that protects a pre-existing index's deep history.
+//
+// The WINDOW is asserted against indexer.DefaultRotateRetain rather than a
+// literal (#1709): it moved from 30 days to 48 hours, and each index now
+// records the one it was created under, so a literal here would pin this
+// binary to a number the rotation loop no longer uses.
 func TestPGStreamCmd_rotationDefaultsEnableRetention(t *testing.T) {
 	retain := streamCmd.Flag("rotate-retain").DefValue
 	interval := streamCmd.Flag("rotate-interval").DefValue
@@ -234,8 +241,12 @@ func TestPGStreamCmd_rotationDefaultsEnableRetention(t *testing.T) {
 	if !s.Enabled {
 		t.Error("built-in rotation must be enabled by default (safe-by-default retention, #951)")
 	}
-	if s.Retain != 30*24*time.Hour {
-		t.Errorf("default retain = %v, want 720h (30d)", s.Retain)
+	wantRetain, err := cliutil.ParseRetain(indexer.DefaultRotateRetain)
+	if err != nil {
+		t.Fatalf("the built-in default must parse: %v", err)
+	}
+	if s.Retain != wantRetain {
+		t.Errorf("default retain = %v, want %v (%s)", s.Retain, wantRetain, indexer.DefaultRotateRetain)
 	}
 	if s.AddFuture != 3 {
 		t.Errorf("default add-future = %d, want 3", s.AddFuture)
