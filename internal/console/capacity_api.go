@@ -8,6 +8,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/doctor"
+	"github.com/dbtrail/dbtrail/internal/rotation"
 )
 
 // capacityProbeFunc is the seam GET /api/capacity reads its inputs through:
@@ -34,6 +35,13 @@ type capacityRetentionDTO struct {
 	// when Known is false.
 	Retain string `json:"retain,omitempty"`
 	Source string `json:"source,omitempty"`
+	// Basis is where an unconfigured window came from, for the one phrase the
+	// card puts beside the number (#1709): "recorded" (the retention this
+	// index was created under), "legacy" (an index older than that record,
+	// keeping what every such index kept), or "unreadable" (its record could
+	// not be read, so the legacy window is used). Empty under an override, or
+	// when this console cannot ask the index.
+	Basis string `json:"basis,omitempty"`
 	// Enabled is the rotation loop's boot-time liveness. Known && !Enabled
 	// is the "grows without limit" state: this daemon is the one that
 	// would rotate, and it runs with rotation off.
@@ -94,7 +102,7 @@ func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
 	if b == nil {
 		return
 	}
-	retain, retention := s.capacityRetention()
+	retain, retention := s.capacityRetention(r.Context(), b)
 	probe := s.capacityProbe
 	if probe == nil {
 		probe = doctor.ProbeCapacity
@@ -119,11 +127,25 @@ func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
 // policy (GET /api/rotation): a loop that is not running is a zero window,
 // which the doctor grades as unbounded growth — this daemon IS the one that
 // would rotate.
-func (s *Server) capacityRetention() (time.Duration, capacityRetentionDTO) {
+func (s *Server) capacityRetention(ctx context.Context, b *bundle) (time.Duration, capacityRetentionDTO) {
 	if s.monitorCtrl == nil {
 		return 0, capacityRetentionDTO{}
 	}
 	rot := s.effectiveRotation()
+	// No saved override: the loop drops on the window THIS index records, not
+	// on the daemon's default (#1709), so the projection has to ask the same
+	// index the probe just measured. Asking costs one row; projecting over the
+	// daemon's number would put a size on screen for a window this index does
+	// not use — and after the default moved to 48h, that is out by 15x on an
+	// index created before it.
+	if rot.Source == "default" && rot.Enabled && b != nil && b.db != nil {
+		if eff := rotation.ResolveEffective(ctx, b.db, b.dbName); eff.Retain > 0 {
+			return eff.Retain, capacityRetentionDTO{
+				Known: true, Retain: eff.Raw, Source: rot.Source,
+				Basis: string(eff.Source), Enabled: rot.Enabled,
+			}
+		}
+	}
 	dto := capacityRetentionDTO{Known: true, Retain: rot.Retain, Source: rot.Source, Enabled: rot.Enabled}
 	if !rot.Enabled {
 		return 0, dto

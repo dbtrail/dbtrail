@@ -123,12 +123,24 @@ func StartLoop(ctx context.Context, settings func() Settings, targets func() []R
 		close(done)
 		return done
 	}
+	// The window is per index when the operator set none: each index rotates
+	// on the retention it was created under (#1709). Saying only the running
+	// default would misdescribe every index created before it changed — which
+	// is exactly the upgrade this banner is read during.
+	perIndex := ""
+	if !s0.Explicit {
+		perIndex = fmt.Sprintf(
+			"  An index created before %s became the default keeps the window it was created under (%s for one this build has no record of); each cycle says which it used.\n",
+			s0.RetainRaw, LegacyRetain)
+	}
 	fmt.Fprintf(os.Stderr,
 		"Built-in rotation: dropping index partitions older than %s every %s, keeping %d future partitions ready.\n"+
+			"%s"+
 			"  Tune with --rotate-retain / --rotate-interval (or BINTRAIL_ROTATE_RETAIN), or live from the console; disable with --rotate-retain off.\n",
-		s0.RetainRaw, s0.Interval, s0.AddFuture)
+		s0.RetainRaw, s0.Interval, s0.AddFuture, perIndex)
 	slog.Info("built-in rotation enabled",
-		"retain", s0.RetainRaw, "interval", s0.Interval.String(), "add_future", s0.AddFuture)
+		"retain", s0.RetainRaw, "interval", s0.Interval.String(), "add_future", s0.AddFuture,
+		"per_index_records", !s0.Explicit)
 
 	go func() {
 		defer close(done)

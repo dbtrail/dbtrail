@@ -16,7 +16,19 @@ import (
 // and that record, not this constant, is what the rotation loop reads from
 // then on: changing this value moves the indexes created afterwards and never
 // one that already exists.
-const DefaultRotateRetain = "30d"
+//
+// 48 hours, lowered from 30 days in the release this comment ships in. The
+// index is a change log that grows with the source's write rate, so at 30 days
+// nobody who did not set the flag was protected from filling the disk:
+// measured at ~180 transactions a second, 13 GB of binlog_events per hour, 158
+// GB after two days on a 200 GB disk, with rotation running every cycle and
+// dropping nothing, because two days is less than thirty. The restore path
+// does not need a month of the LIVE index — a backup update folds from the
+// newest backup forward, and an archive tier keeps everything older as Parquet
+// that query and reconstruct read anyway. 48 rather than 12 hours so a chain
+// of table deltas (capped at 24h) plus a day of margin fits inside it out of
+// the box.
+const DefaultRotateRetain = "48h"
 
 // DDLRotationPolicy is the single-row record of the retention an index started
 // with. The CHECK constraint needs its own name: MySQL scopes those names to

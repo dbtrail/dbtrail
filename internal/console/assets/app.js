@@ -3440,6 +3440,20 @@ function statusCard(title, rows) {
 // limit" verdict (retention.known is false there). Both pure and
 // fixture-drivable, like continuityBox.
 
+// retentionBasis is the phrase beside a retention window that says where it
+// came from. With no console override, each server's index keeps the window it
+// was created under, so the number alone would read as the daemon's setting
+// for every server (#1709).
+function retentionBasis(ret) {
+  if (!ret || ret.source === "override") return "";
+  switch (ret.basis) {
+    case "recorded": return " (set when this server was added)";
+    case "legacy": return " (kept from before the default changed)";
+    case "unreadable": return " (its own setting could not be read, so the older default is used)";
+    default: return " (daemon default)";
+  }
+}
+
 function daysText(d) {
   if (d === null || d === undefined || !isFinite(d)) return "";
   if (d < 1) return "under a day";
@@ -3530,7 +3544,7 @@ function capacityCard(cap) {
   rows.push(["write rate", cap.measured
     ? humanBytes(cap.growth_bytes_per_day) + " a day (" + Math.round(cap.events_per_day).toLocaleString() + " events)"
     : "not enough history yet"]);
-  rows.push(["keeps for", !ret.known ? "not known here" : (ret.enabled ? ret.retain + (ret.source === "override" ? "" : " (daemon default)") : "rotation is off")]);
+  rows.push(["keeps for", !ret.known ? "not known here" : (ret.enabled ? ret.retain + retentionBasis(ret) : "rotation is off")]);
   if (cap.measured && cap.projected_bytes > 0) rows.push(["steady size", humanBytes(cap.projected_bytes)]);
   rows.push(["free on disk", cap.free_known ? humanBytes(cap.free_bytes) : "not measurable from here"]);
   if (cap.days_until_full !== null && cap.days_until_full !== undefined) rows.push(["free space lasts", daysText(cap.days_until_full) + " at this rate"]);
@@ -3582,7 +3596,7 @@ function capacityBox(cap) {
       head = "⚠ Nothing caps the index: it grows without limit";
       body = "This daemon runs with rotation off, so the index grows by " + growth + " at the current rate" +
         (cap.free_known ? ", and the disk fills in " + days + " (" + free + " free)" : "") + "." + stops;
-      help = "Turn rotation on (CLI: --rotate-retain 30d) so old partitions are dropped and the index stays bounded. Archive to Parquet first to keep the history.";
+      help = "Turn rotation on (CLI: --rotate-retain 48h) so old partitions are dropped and the index stays bounded. Archive to Parquet first to keep the history.";
       break;
     default:
       return null;
@@ -4140,7 +4154,10 @@ function rotationCard(rot) {
     card.append(el("p", { class: "form-hint", text: "Could not load the rotation policy" + (rot && rot.error ? ": " + rot.error : ".") }));
     return card;
   }
-  kvRow(card, "retention", rot.retain);
+  kvRow(card, "retention", rot.retain + (rot.source === "override" ? "" : " for a new server"));
+  if (rot.source !== "override" && rot.index_retain && rot.index_retain !== rot.retain) {
+    kvRow(card, "this server keeps", rot.index_retain + retentionBasis({ source: rot.source, basis: rot.index_basis }));
+  }
   kvRow(card, "interval", rot.interval);
   kvRow(card, "future partitions", rot.add_future);
   kvRow(card, "policy", rot.source === "override"

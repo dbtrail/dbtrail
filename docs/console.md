@@ -455,7 +455,12 @@ editing flags or restarting:
 - **Override vs default:** the saved policy lives in the local console registry
   (`console-servers.yaml` — the only file the console writes). When nothing is saved the panel shows the
   daemon's `--rotate-retain` / `--rotate-interval` / `--rotate-add-future`
-  (`BINTRAIL_ROTATE_*`) values as the **effective default**.
+  (`BINTRAIL_ROTATE_*`) values as the **effective default**, which describes a
+  server added from now on: with no override saved, each index keeps the
+  retention it was created under, so the panel also shows what the selected
+  server keeps whenever that differs (an index created before the default
+  became 48 hours keeps the 30 days it was created under until someone sets a
+  retention). Saving an override applies to every index, and overrides that.
 - **Disabling** rotation entirely stays a daemon-level decision
   (`--rotate-retain off`); the panel tunes a running loop rather than turning it
   off. A retain like `off` is rejected at save.

@@ -17,7 +17,7 @@ func TestRunDoctorToWiresObjectLockCheck(t *testing.T) {
 	badDSN := "nouser:nopass@tcp(127.0.0.1:1)/"
 
 	var with bytes.Buffer
-	_ = runDoctorTo(context.Background(), &with, "text", badDSN, "", "", 0, "", "not-an-s3-url", "")
+	_ = runDoctorTo(context.Background(), &with, "text", badDSN, "", "", 0, "", "", "not-an-s3-url", "")
 	if !strings.Contains(with.String(), doctor.ObjectLockCheckName) {
 		t.Fatalf("report does not contain %q:\n%s", doctor.ObjectLockCheckName, with.String())
 	}
@@ -26,7 +26,7 @@ func TestRunDoctorToWiresObjectLockCheck(t *testing.T) {
 	}
 
 	var without bytes.Buffer
-	_ = runDoctorTo(context.Background(), &without, "text", badDSN, "", "", 0, "", "", "")
+	_ = runDoctorTo(context.Background(), &without, "text", badDSN, "", "", 0, "", "", "", "")
 	if strings.Contains(without.String(), doctor.ObjectLockCheckName) {
 		t.Fatalf("check present without --archive-s3:\n%s", without.String())
 	}

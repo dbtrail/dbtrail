@@ -19,7 +19,7 @@ func TestCheckIndexCapacity_skipsWithoutHistory(t *testing.T) {
 	db, dbName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 
-	r := checkIndexCapacity(context.Background(), testutil.IntegrationDSN(dbName), dbName, 30*24*time.Hour)
+	r := checkIndexCapacity(context.Background(), testutil.IntegrationDSN(dbName), dbName, 30*24*time.Hour, "")
 	if r.Status != StatusSkip {
 		t.Fatalf("status = %s, want skip on an empty index (detail: %s)", r.Status, r.Detail)
 	}
@@ -64,7 +64,7 @@ func TestCheckIndexCapacity_projectsAndSkipsUnmeasurableDisk(t *testing.T) {
 	// ambient environment must not decide the branch this case asserts.
 	t.Setenv(datadirMountEnv, "")
 
-	r := checkIndexCapacity(context.Background(), testutil.IntegrationDSN(dbName), dbName, 30*24*time.Hour)
+	r := checkIndexCapacity(context.Background(), testutil.IntegrationDSN(dbName), dbName, 30*24*time.Hour, "")
 	// #948: the index MySQL is a separate container here, so the disk-free volume
 	// is not measurable from this host — the check SKIPs rather than reporting a
 	// PASS/WARN/FAIL verdict, but it still computes and carries the size
@@ -162,7 +162,7 @@ func TestCheckIndexCapacity_queryErrorFails(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	r := checkIndexCapacity(ctx, testutil.IntegrationDSN(dbName), dbName, 30*24*time.Hour)
+	r := checkIndexCapacity(ctx, testutil.IntegrationDSN(dbName), dbName, 30*24*time.Hour, "")
 	if r.Status != StatusFail {
 		t.Fatalf("status = %s, want fail on a query error (detail: %s)", r.Status, r.Detail)
 	}
@@ -179,7 +179,7 @@ func TestCheckIndexCapacity_uninitializedIndexExplainsItself(t *testing.T) {
 	db, dbName := testutil.CreateTestDB(t)
 	_ = db // database exists, but binlog_events was never created
 
-	r := checkIndexCapacity(context.Background(), testutil.IntegrationDSN(dbName), dbName, 30*24*time.Hour)
+	r := checkIndexCapacity(context.Background(), testutil.IntegrationDSN(dbName), dbName, 30*24*time.Hour, "")
 	if r.Status != StatusSkip {
 		t.Fatalf("status = %s, want skip (detail: %s)", r.Status, r.Detail)
 	}
@@ -216,7 +216,7 @@ func TestCheckIndexCapacity_noRetentionWarnsUnbounded(t *testing.T) {
 	}
 	testutil.MustExec(t, db, fmt.Sprintf("ANALYZE TABLE `%s`.`binlog_events`", dbName))
 
-	r := checkIndexCapacity(context.Background(), testutil.IntegrationDSN(dbName), dbName, 0)
+	r := checkIndexCapacity(context.Background(), testutil.IntegrationDSN(dbName), dbName, 0, "")
 	if r.Status != StatusWarn {
 		t.Fatalf("status = %s, want warn for retain=0 (detail: %s)", r.Status, r.Detail)
 	}

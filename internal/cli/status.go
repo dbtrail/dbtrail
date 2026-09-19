@@ -16,6 +16,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
 
@@ -133,6 +134,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	data, err := status.CollectStatus(cmd.Context(), db, dbName)
+	if data != nil {
+		// Which window this index rotates on while nobody sets one, and where
+		// it came from (#1709). Resolved HERE, by the package that owns the
+		// decision, and passed in: status reports, it does not decide.
+		data.Retention = rotation.ResolveEffective(cmd.Context(), db, dbName).StatusInfo()
+	}
 	if err != nil {
 		return err
 	}

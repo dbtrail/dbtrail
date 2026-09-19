@@ -118,7 +118,7 @@ func TestRunDoctorToRendersRegisteredCheck(t *testing.T) {
 		var buf bytes.Buffer
 		// The built-in checks fail against the unreachable DSN, so the
 		// returned error is expected; the rendered report is what matters.
-		_ = runDoctorTo(context.Background(), &buf, format, badDSN, "", "", 0, "", "", "")
+		_ = runDoctorTo(context.Background(), &buf, format, badDSN, "", "", 0, "", "", "", "")
 		if !strings.Contains(buf.String(), name) {
 			t.Errorf("%s output does not contain the registered check %q:\n%s", format, name, buf.String())
 		}

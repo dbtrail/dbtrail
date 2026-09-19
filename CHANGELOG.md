@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the built-in rotation default is now 48 hours, not 30 days
+- **A new index keeps 48 hours of history instead of 30 days** (#1709). The
+  index is a change log that grows with the source's write rate, so at 30
+  days nobody who never set `--rotate-retain` was protected from filling the
+  disk: measured at about 180 transactions a second, 13 GB of `binlog_events`
+  per hour, 158 GB after two days on a 200 GB disk, with rotation running
+  every cycle and dropping nothing, because two days is less than thirty.
+  Disk-full on the index is an outage of capture, not a degradation. The
+  restore path does not need a month of the LIVE index: a backup update folds
+  from the newest backup forward, and an archive tier (`--archive-dir` /
+  `--archive-s3`) keeps everything older as Parquet that `query` and
+  `reconstruct` read anyway. 48 rather than 12 hours so a chain of table
+  deltas (capped at 24h) plus a day of margin fits out of the box.
+
+  **An index that already exists is not moved.** Each index records the
+  retention it was created under, and the loop drops on that record, so
+  upgrading changes nothing for an index created before this release: it
+  keeps 30 days until someone chooses. The daemon says so once per index, on
+  that index's next rotation cycle, naming the window it keeps and the
+  current default; `bintrail status` and `doctor` now name the window in
+  force and where it came from, the console's capacity card projects over it
+  instead of over the daemon's number, and the rotation panel says what the
+  selected server keeps when that differs. An index created empty and then
+  filled with older history (a restored index, `bintrail index` over old
+  binlog files) stays under the upgrade guard, which refuses to drop that
+  history until a retention is set explicitly.
+
+  To keep the old window everywhere, set `--rotate-retain 30d` (or
+  `BINTRAIL_ROTATE_RETAIN=30d`, or the console's rotation settings); an
+  explicit value has always won and still does.
+
 ### Fixed
 - **The CLI no longer reports "no history" without pointing at the database
   that has it** (#1731). A daemon that monitors sources from the console
@@ -42,6 +73,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   why. Setting
   `--rotate-retain`, `BINTRAIL_ROTATE_RETAIN` or the console's rotation
   settings overrides the record, unchanged.
+### Fixed
+- **A warning printed before mydumper's version no longer makes a current
+  build look unreadable** (#1700). The version probe reads what mydumper
+  writes to both of its output streams, so a dynamic-loader or locale
+  warning could arrive ahead of the version line and put a build new enough
+  for every lock mode on the "version unknown" path — which also switches the
+  privilege check on, turning a harmless warning into a refusal naming
+  `BACKUP_ADMIN`. Every line is now considered, and the first one carrying a
+  version wins; output with no version anywhere is still reported as
+  unreadable, never as an old build.
 
 ### Changed
 - **The console says why a server has no first backup, instead of leaving

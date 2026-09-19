@@ -11,10 +11,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	mysql "github.com/go-sql-driver/mysql"
+
 	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/rotation"
 )
 
 var doctorCmd = &cobra.Command{
@@ -73,7 +77,15 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return runDoctorTo(cmd.Context(), os.Stdout, docFormat, docSourceDSN, docIndexDSN, docSchemas, retain, docProxySQLAdmin, docArchiveS3, docArchiveS3Reg)
+	// With no --retain of their own, the projection must assume the window the
+	// index ACTUALLY rotates on, which each index records when it is created
+	// (#1709) — not this flag's default. Asking the index costs one row and
+	// keeps the number on screen from describing a window nothing uses.
+	note := ""
+	if !cmd.Flags().Changed("retain") && docIndexDSN != "" {
+		retain, note = assumedRetain(cmd.Context(), docIndexDSN, retain)
+	}
+	return runDoctorTo(cmd.Context(), os.Stdout, docFormat, docSourceDSN, docIndexDSN, docSchemas, retain, note, docProxySQLAdmin, docArchiveS3, docArchiveS3Reg)
 }
 
 // parseDocRetain maps doctor's --retain value to the capacity projection's
@@ -100,8 +112,8 @@ func parseDocRetain(s string) (time.Duration, error) {
 // code). Callers wanting to route output (e.g. `bintrail
 // up` sending preflight output to stderr to keep stdout clean for streaming)
 // pass their own writer here instead of going through the cobra entry point.
-func runDoctorTo(parent context.Context, w io.Writer, format, sourceDSN, indexDSN, schemasCSV string, indexRetain time.Duration, proxysqlAdminDSN, archiveS3, archiveS3Region string) error {
-	report := doctor.Build(parent, sourceDSN, indexDSN, schemasCSV, indexRetain)
+func runDoctorTo(parent context.Context, w io.Writer, format, sourceDSN, indexDSN, schemasCSV string, indexRetain time.Duration, retainNote, proxysqlAdminDSN, archiveS3, archiveS3Region string) error {
+	report := doctor.Build(parent, sourceDSN, indexDSN, schemasCSV, indexRetain, doctor.WithRetainNote(retainNote))
 	if proxysqlAdminDSN != "" {
 		report.Add(doctor.CheckProxySQLRules(parent, proxysqlAdminDSN))
 	}
@@ -180,4 +192,26 @@ func extCheckResult(c ext.DoctorCheck) doctor.CheckResult {
 			"check", c.Name, "status", c.Status)
 	}
 	return doctor.CheckResult{Name: c.Name, Status: status, Detail: detail, Remediation: c.Remediation}
+}
+
+// assumedRetain asks the index which window it rotates on while nobody sets
+// one, and returns it with the sentence that names where it came from. Any
+// failure keeps the flag's value: a projection over a slightly wrong window is
+// still useful, and a doctor that refuses to run because it could not read one
+// row would be worse than the number it protects.
+func assumedRetain(ctx context.Context, indexDSN string, fallback time.Duration) (time.Duration, string) {
+	cfg, err := mysql.ParseDSN(indexDSN)
+	if err != nil || cfg.DBName == "" {
+		return fallback, ""
+	}
+	db, err := config.Connect(indexDSN)
+	if err != nil {
+		return fallback, ""
+	}
+	defer db.Close()
+	eff := rotation.ResolveEffective(ctx, db, cfg.DBName)
+	if eff.Retain <= 0 {
+		return fallback, ""
+	}
+	return eff.Retain, eff.DescribeSource()
 }
