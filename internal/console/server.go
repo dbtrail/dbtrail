@@ -713,6 +713,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("PUT /api/rotation", s.handleRotationUpdate)
 	api.HandleFunc("GET /api/backup-settings", s.handleBackupSettingsGet)
 	api.HandleFunc("PUT /api/backup-settings/servers/{id}", s.handleBackupSettingsServerUpdate)
+	api.HandleFunc("PUT /api/backup-settings/daemon/{key}", s.handleBackupSettingsDaemonUpdate)
 	// Global baseline-refresh policy. Same split as rotation: read the
 	// effective settings, PUT an override the running loop picks up next cycle.
 	api.HandleFunc("GET /api/baseline-refresh", s.handleBaselineRefreshGet)

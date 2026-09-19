@@ -30,7 +30,7 @@ func TestUpConsoleConfig_backupSettingsDefaultsReachTheConsole(t *testing.T) {
 	upConsoleBaselineLockMode, upConsoleBaselineTrigger = baseline.LockModeNoLock, true
 	upBaselineStageDir, upVerifyInterval, upVerifyTables = "/stage", "24h", "shop.orders"
 
-	cfg, err := upConsoleConfig(nil, dsn, opts)
+	cfg, err := upConsoleConfig(nil, dsn, opts, nil)
 	if err != nil {
 		t.Fatalf("upConsoleConfig: %v", err)
 	}

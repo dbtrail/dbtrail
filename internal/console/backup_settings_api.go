@@ -2,7 +2,9 @@ package console
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -40,6 +42,18 @@ type BackupSettingsDefaults struct {
 	StagingDir     string // BINTRAIL_CONSOLE_BASELINE_STAGING
 	VerifyInterval string // --verify-interval
 	VerifyTables   string // --verify-tables
+	// Live names the keys THIS process applies without a restart, because
+	// only the process knows: liveness is a property of how the daemon reads
+	// the value (a provider consulted per job) and not of the setting. The
+	// read-only `serve` passes none, which is correct — it runs no loops.
+	// Keeping this here rather than hardcoding a list in the page is what
+	// stops the interface from promising a live edit a daemon never applies.
+	Live []string
+}
+
+// live reports whether this process applies key without a restart.
+func (d BackupSettingsDefaults) live(key string) bool {
+	return slices.Contains(d.Live, key)
 }
 
 // backupSettingRow is one daemon-wide value on the wire: what it is, where it
@@ -53,6 +67,18 @@ type backupSettingRow struct {
 	On           *bool  `json:"on,omitempty"` // set for boolean rows; Value stays empty
 	CLI          string `json:"cli"`
 	NeedsRestart bool   `json:"needs_restart"`
+	// Editable marks a row the interface may save (#1682). False keeps the
+	// row where it always was: shown, with the flag name to change it under.
+	Editable bool `json:"editable,omitempty"`
+	// Source is where the value in force came from: "saved" (this file, set
+	// from the interface) or "startup" (the flag or environment variable).
+	// The page needs both because an operator who saved a value has to be
+	// able to see that it is the saved one that is winning, and to get back.
+	Source string `json:"source,omitempty"`
+	// Startup is the flag/env value a saved row is overriding, so the page
+	// can offer "use the startup value" without a second request. Empty when
+	// nothing is saved (the value IS the startup one).
+	Startup string `json:"startup,omitempty"`
 	// Err is a per-row rejection: the configured value was refused and the
 	// shown Value is NOT in force (today: an invalid lock mode, which
 	// disables MySQL dumps while the daemon keeps running). Without it this
@@ -147,17 +173,27 @@ func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request)
 	dto := backupSettingsDTO{
 		RegistryReadOnly: s.cm.reg != nil && s.cm.reg.ReadOnly(),
 		Daemon: []backupSettingRow{
+			// The two backup locations stay startup-only here ON PURPOSE:
+			// #1684 deletes the process-wide fallback outright, so making
+			// them editable would build an interface for a setting that is
+			// being removed, and migrate operators onto it first.
 			{Key: "baseline_dir", Value: s.cm.defaultBaselineDir, CLI: "--baseline-dir", NeedsRestart: true},
 			{Key: "baseline_s3", Value: s.cm.defaultBaselineS3, CLI: "--baseline-s3", NeedsRestart: true},
-			{Key: "baseline_retain", Value: d.BaselineRetain, CLI: "--baseline-retain", NeedsRestart: true},
+			s.backupSettingRow(BackupSettingBaselineRetain, d.BaselineRetain, "--baseline-retain"),
 			{Key: "refresh_every", Value: d.RefreshEvery, CLI: "--baseline-refresh-interval", NeedsRestart: true},
-			{Key: "lock_mode", Value: d.LockMode, Err: lockModeRowErr(d.LockModeErr), CLI: "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE", NeedsRestart: true},
+			s.backupSettingRow(BackupSettingLockMode, d.LockMode, "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE"),
 			{Key: "trigger", On: on(d.TriggerOn), CLI: "BINTRAIL_CONSOLE_BASELINE_TRIGGER", NeedsRestart: true},
-			{Key: "staging_dir", Value: d.StagingDir, CLI: "BINTRAIL_CONSOLE_BASELINE_STAGING", NeedsRestart: true},
+			s.backupSettingRow(BackupSettingStagingDir, d.StagingDir, "BINTRAIL_CONSOLE_BASELINE_STAGING"),
 			{Key: "verify_interval", Value: d.VerifyInterval, CLI: "--verify-interval", NeedsRestart: true},
-			{Key: "verify_tables", Value: d.VerifyTables, CLI: "--verify-tables", NeedsRestart: true},
+			s.backupSettingRow(BackupSettingVerifyTables, d.VerifyTables, "--verify-tables"),
 		},
 		Servers: []backupSettingsServerDTO{},
+	}
+	// The lock-mode rejection rides on whichever row ended up carrying it.
+	for i := range dto.Daemon {
+		if dto.Daemon[i].Key == BackupSettingLockMode && dto.Daemon[i].Source != backupSettingSaved {
+			dto.Daemon[i].Err = lockModeRowErr(d.LockModeErr)
+		}
 	}
 	if s.cm.reg != nil {
 		for _, e := range s.cm.reg.List() {
@@ -255,4 +291,103 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	// as a baseline-only edit through the servers form.
 	s.cm.rebuildDerived(entry)
 	writeJSON(w, http.StatusOK, s.backupSettingsServerDTO(entry))
+}
+
+// The two provenances a daemon-wide row can have.
+const (
+	backupSettingSaved   = "saved"
+	backupSettingStartup = "startup"
+)
+
+// backupSettingRow builds one editable row: the value in force, where it came
+// from, and whether this process applies a change without a restart.
+//
+// A saved value WINS over the flag. That order is the point of the file — an
+// operator who cannot restart the daemon has to be able to change the setting
+// — and it is why the row also carries the startup value it is overriding:
+// "use the startup value" has to be reachable from the page, or saving once
+// would silence the flag forever.
+//
+// Editable does NOT imply live. A row can be saved and still need a restart
+// (the daemon reads it once at boot), and saying so per row is what keeps the
+// page honest; the alternative, a page-wide chip, could only ever describe
+// the majority.
+func (s *Server) backupSettingRow(key, startup, cli string) backupSettingRow {
+	row := backupSettingRow{
+		Key:          key,
+		Value:        startup,
+		CLI:          cli,
+		Editable:     s.cm.reg != nil && !s.cm.reg.ReadOnly(),
+		Source:       backupSettingStartup,
+		NeedsRestart: !s.backupSettingsDefaults.live(key),
+	}
+	if s.cm.reg == nil {
+		return row
+	}
+	if v, ok := s.cm.reg.BackupSettings().Get(key); ok {
+		row.Value = v
+		row.Source = backupSettingSaved
+		row.Startup = startup
+	}
+	return row
+}
+
+// backupSettingUpdateRequest is the PUT body for one daemon-wide row.
+// UseStartup is a separate field rather than a null Value because the two say
+// different things: an empty Value is "save this setting as empty" (turn the
+// behaviour off), UseStartup is "forget what I saved" (hand it back to the
+// flag). Collapsing them would make clearing a value the same as never having
+// set one, which is exactly the tri-state the store exists to keep.
+type backupSettingUpdateRequest struct {
+	Value      *string `json:"value"`
+	UseStartup bool    `json:"use_startup"`
+}
+
+// handleBackupSettingsDaemonUpdate serves PUT /api/backup-settings/daemon/{key}.
+func (s *Server) handleBackupSettingsDaemonUpdate(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	if s.cm.reg == nil {
+		writeJSONError(w, http.StatusConflict,
+			"this console has no settings file to save into; it was started without a server registry")
+		return
+	}
+	// The key is checked BEFORE the body: a key this build does not model is
+	// "no such setting" (404), not "your value is wrong" (400), and answering
+	// 400 there would send an operator looking at a value that was fine.
+	if !slices.Contains(BackupSettingKeys(), key) {
+		writeJSONError(w, http.StatusNotFound, ErrUnknownBackupSetting.Error()+": "+key)
+		return
+	}
+	var req backupSettingUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeBodyDecodeError(w, err)
+		return
+	}
+	var value *string
+	if !req.UseStartup {
+		if req.Value == nil {
+			writeJSONError(w, http.StatusBadRequest,
+				"send a value, or use_startup to go back to the value this process was started with")
+			return
+		}
+		trimmed := strings.TrimSpace(*req.Value)
+		// Validated BEFORE it is stored: a value the daemon cannot parse
+		// would be saved, shown as in force, and then silently ignored by
+		// the loop that falls back to the flag — a setting that reads as
+		// changed and is not.
+		if err := ValidateBackupSetting(key, trimmed); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		value = &trimmed
+	}
+	if err := s.cm.reg.SetBackupSetting(key, value); err != nil {
+		status := registryErrStatus(err)
+		if errors.Is(err, ErrUnknownBackupSetting) {
+			status = http.StatusNotFound
+		}
+		writeJSONError(w, status, err.Error())
+		return
+	}
+	s.handleBackupSettingsGet(w, r)
 }

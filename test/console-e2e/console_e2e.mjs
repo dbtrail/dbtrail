@@ -4402,7 +4402,10 @@ try {
   // with the harness's daemon flags; the nine rows' labels and flag names
   // are most of it) and ~25% below the pre-#1603 page (1719 measured by the
   // same method with zero compact blocks, RED verified), so a copy edit
-  // breathes but a wall of text rings.
+  // breathes but a wall of text rings. #1682 moved four rows into an editable
+  // card: measured 906 before it, ~1084 projected after (the four rows cost
+  // their provenance sentence instead of their (CLI: ...) suffix), so the cap
+  // still has room and did not move.
   await page.evaluate(() => navigate("backup-settings"));
   // Options are the THIRD waitForFunction parameter; an options object in
   // the arg slot is serialized to the predicate and silently discarded
@@ -4426,6 +4429,13 @@ try {
       nav: (document.querySelector('.nav-item[data-route="backup-settings"] span:last-child') || {}).textContent || "",
       docsLink: !!view.querySelector(".page-docs"),
       rows: rows.length,
+      // The daemon-wide rows this interface can save (#1682): one input and
+      // a Save each, with the sentence that says which value is winning.
+      editRows: Array.from(view.querySelectorAll(".bks-erow")).map((r) => ({
+        input: !!r.querySelector("input.input"),
+        save: Array.from(r.querySelectorAll("button")).some((b) => b.textContent === "Save"),
+        why: (r.querySelector(".form-hint") || {}).textContent || "",
+      })),
       rowChips: rows.reduce((n, r) => n + r.chips, 0),
       cardChips: boot ? boot.querySelectorAll(".card-title .bks-restart").length : -1,
       bootInGrid: !!view.querySelector(".cards .bks-boot"),
@@ -4454,9 +4464,20 @@ try {
   (bks.head === "Backup settings" && bks.nav === "Backup settings" && bks.docsLink)
     ? ok("backup-settings: named Backup settings in the nav and the head, with a Docs link")
     : bad("backup-settings: named Backup settings in the nav and the head, with a Docs link", JSON.stringify({ head: bks.head, nav: bks.nav, docsLink: bks.docsLink }));
-  (bks.rows === 9 && bks.allNamed && bks.configuredValued && !bks.notSet)
-    ? ok("backup-settings: nine daemon rows, each named, the configured one valued, none reading not set")
-    : bad("backup-settings: nine daemon rows, each named, the configured one valued, none reading not set", JSON.stringify(bks));
+  // Five startup rows since #1682 moved the four savable ones into their own
+  // card: the two backup locations (#1684 deletes that fallback, so they are
+  // deliberately not editable here) plus the three that start or stop a loop
+  // at boot.
+  (bks.rows === 5 && bks.allNamed && bks.configuredValued && !bks.notSet)
+    ? ok("backup-settings: five startup rows, each named, the configured one valued, none reading not set")
+    : bad("backup-settings: five startup rows, each named, the configured one valued, none reading not set", JSON.stringify(bks));
+  // The half the page gained: four rows an operator can change without
+  // stopping capture, each with the sentence naming where its value comes
+  // from. A row with an input and no provenance is the failure this catches —
+  // an editor that does not say what it is overriding.
+  (bks.editRows.length === 4 && bks.editRows.every((r) => r.input && r.save && r.why.length > 0))
+    ? ok("backup-settings: four savable daemon rows, each with an input, a Save and its provenance")
+    : bad("backup-settings: four savable daemon rows, each with an input, a Save and its provenance", JSON.stringify(bks.editRows));
   (bks.cardChips === 1 && bks.rowChips === 0 && !bks.bootInGrid && bks.sections.length === 2)
     ? ok("backup-settings: the three kinds are drawn apart: two sections, one card-level restart chip, the daemon card outside the tinted grid")
     : bad("backup-settings: the three kinds are drawn apart: two sections, one card-level restart chip, the daemon card outside the tinted grid",

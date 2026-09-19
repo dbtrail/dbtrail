@@ -94,7 +94,7 @@ func TestManagedTokenLandsAtTheConfiguredPath(t *testing.T) {
 	if err := resolveUpConsoleEnv(cmd); err != nil {
 		t.Fatalf("resolveUpConsoleEnv: %v", err)
 	}
-	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", upConsoleOpts())
+	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", upConsoleOpts(), nil)
 	if err != nil {
 		t.Fatalf("upConsoleConfig: %v", err)
 	}
