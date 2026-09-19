@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 // TestCheckDestructiveDDL_truncateInWindowRefuses is the regression for #764:
@@ -117,9 +118,36 @@ func TestCheckDestructiveDDL_missingTableIsNotFatal(t *testing.T) {
 
 	mock.ExpectQuery("SELECT ddl_type, detected_at FROM schema_changes").
 		WithArgs("mydb", "orders", since, until).
-		WillReturnError(errors.New("Error 1146: Table 'bintrail_index.schema_changes' doesn't exist"))
+		WillReturnError(&mysqldriver.MySQLError{Number: 1146, Message: "Table 'bintrail_index.schema_changes' doesn't exist"})
 
 	if err := CheckDestructiveDDL(context.Background(), db, "mydb", "orders", since, until); err != nil {
 		t.Errorf("expected nil error for a missing schema_changes table, got: %v", err)
+	}
+}
+
+// A tablespace that is gone (1932, "Table ... doesn't exist IN ENGINE") is a
+// BROKEN check, not an absent one, and its message carries the same words as
+// 1146. Reading it as "no destructive DDL" would answer a damaged index with
+// a clean verdict — and on the binlog-only path that verdict is all that
+// stands between a TRUNCATE and rows coming back.
+func TestCheckDestructiveDDL_brokenTablespaceIsNotAMissingTable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	since := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("SELECT ddl_type, detected_at FROM schema_changes").
+		WithArgs("mydb", "orders", since, until).
+		WillReturnError(&mysqldriver.MySQLError{Number: 1932, Message: "Table 'bintrail_index.schema_changes' doesn't exist in engine"})
+
+	err = CheckDestructiveDDL(context.Background(), db, "mydb", "orders", since, until)
+	if err == nil {
+		t.Fatal("a missing tablespace was answered as \"nothing to check\"")
+	}
+	if errors.Is(err, errSchemaChangesMissing) {
+		t.Errorf("1932 was graded as a missing table: %v", err)
 	}
 }

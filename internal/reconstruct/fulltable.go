@@ -2372,7 +2372,9 @@ func warnUndetectableBinaryPK(schema, table string, pkCols []metadata.ColumnMeta
 // the shim's binlog-only degrade (internal/shim/snapshot.go
 // runSnapshotFullTable falling back to runFullTable): fetch every event for
 // the table up to cfg.At and emit the latest surviving row per PK, skipping
-// DELETEs. There is no baseline Parquet to read a CREATE TABLE statement
+// DELETEs. Unlike the shim's degrade, it refuses a window holding a TRUNCATE,
+// DROP, RENAME or CREATE OR REPLACE on the table (#1674); the shim's
+// binlog-only paths do not check that yet. There is no baseline Parquet to read a CREATE TABLE statement
 // from, and fabricating one from schema_snapshots column metadata risks
 // silently shipping a wrong PK/engine/charset/index definition as fact — so
 // the schema file records why it's missing instead, and the caller must
@@ -2451,6 +2453,36 @@ func reconstructBinlogOnly(
 	rep.FetchDuration, rep.FoldDuration = fold.FetchDuration, fold.FoldDuration
 	changes := fold.Changes
 
+	// Refuse a TRUNCATE/DROP/RENAME/CREATE OR REPLACE inside the window this
+	// fallback read (#1674), as the baseline path does at step 3b. Such a
+	// statement emits no row events, and the changes folded here still hold
+	// the rows it removed, so the output would bring them back as if they
+	// existed at cfg.At. The window has no fixed lower bound: it starts at the
+	// oldest change still retained, fold.First. A statement older than that
+	// cannot bring anything back, so it is no reason to refuse. The bound is
+	// one second earlier because both clocks are whole seconds and a statement
+	// in the same second may follow that change: refusing there is the
+	// recoverable mistake, a resurrected row is not.
+	if fold.First != nil {
+		since := fold.First.EventTimestamp.Add(-time.Second)
+		ddlType, detectedAt, found, err := findDestructiveDDL(ctx, db, schema, table, since, cfg.At)
+		switch {
+		case errors.Is(err, errSchemaChangesMissing):
+			// An index too old to record DDL. The baseline paths treat this
+			// as nothing to check, because a baseline still anchors their
+			// merge; here it is the ONLY thing standing between a TRUNCATE
+			// and rows coming back, so it is said out loud rather than
+			// skipped in silence.
+			slog.Warn("reconstruct: this index does not record DDL, so a TRUNCATE, DROP or RENAME inside the rebuilt window could not be checked for; rows such a statement removed may appear in the output as if they still existed",
+				"schema", schema, "table", table,
+				"action", "re-run after `bintrail snapshot` has recorded schema changes, or rebuild from a baseline taken after the statement")
+		case err != nil:
+			return nil, err
+		case found:
+			return nil, binlogOnlyDestructiveDDLErr(schema, table, ddlType, detectedAt, fold.First.EventTimestamp)
+		}
+	}
+
 	// A table that only ever existed after the last baseline was very likely
 	// CREATEd during the retained binlog window, and the schema-drift guard
 	// (#700) records every CREATE TABLE's exact DDL text in schema_changes.
@@ -2490,6 +2522,20 @@ func reconstructBinlogOnly(
 		"deletes_skipped", rep.DeletesSkipped)
 
 	return rep, nil
+}
+
+// binlogOnlyDestructiveDDLErr is the #1674 refusal. It wraps ErrDestructiveDDL
+// like the baseline path's, so a caller that grades by sentinel (refused-ddl)
+// reads it the same way, but it names this path's own situation: there is no
+// backup, and the recorded changes still hold the removed rows.
+func binlogOnlyDestructiveDDLErr(schema, table, ddlType string, detectedAt, firstChange time.Time) error {
+	return fmt.Errorf(
+		"%w: %s.%s has no backup, so it would be rebuilt from its recorded changes alone, starting at %s. "+
+			"A %s at %s lies inside those changes, and it wrote no row changes of its own, so the rows it removed "+
+			"would come back in the output as if they still existed. Rebuild the table to a moment before %s, "+
+			"or take a backup of it: a backup taken after the %s lets a later moment be rebuilt from that backup",
+		ErrDestructiveDDL, schema, table, firstChange.UTC().Format(time.RFC3339),
+		ddlType, detectedAt.UTC().Format(time.RFC3339), detectedAt.UTC().Format(time.RFC3339), ddlType)
 }
 
 // binlogOnlySchemaPlaceholder is the schema-file text used when no captured
