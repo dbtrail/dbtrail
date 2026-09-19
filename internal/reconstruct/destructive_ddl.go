@@ -40,6 +40,23 @@ var ErrDestructiveDDL = errors.New("destructive DDL in reconstruction window")
 // than a hard failure: this is an additive safety net on top of the existing
 // reconstruct contract, not a new hard dependency.
 func CheckDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time) error {
+	ddlType, detectedAt, found, err := findDestructiveDDL(ctx, db, schema, table, since, until)
+	if err != nil || !found {
+		return err
+	}
+	return fmt.Errorf(
+		"%w: %s on %s.%s detected at %s (between the baseline snapshot and the requested point-in-time) "+
+			"emits no row-level binlog events to replay — reconstructing to this point-in-time would silently "+
+			"resurrect pre-%s rows as if they still existed; re-baseline the table after this DDL and "+
+			"reconstruct from the new baseline instead",
+		ErrDestructiveDDL, ddlType, schema, table, detectedAt.UTC().Format(time.RFC3339), strings.ToLower(ddlType))
+}
+
+// findDestructiveDDL is CheckDestructiveDDL's query without its message, for a
+// caller whose window is not "since the baseline snapshot" (the binlog-only
+// fallback, #1674). found is false with a nil error when there is none, and
+// when schema_changes does not exist.
+func findDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time) (ddlType string, detectedAt time.Time, found bool, err error) {
 	// schema_name = '' is matched too, and the arm is NOT removable. Since
 	// #1435 parseDDL resolves an unqualified statement ("TRUNCATE TABLE
 	// orders" after "USE mydb") against the QUERY_EVENT's session default
@@ -56,23 +73,16 @@ func CheckDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, 
 		AND detected_at > ? AND detected_at <= ?
 		ORDER BY detected_at ASC LIMIT 1`
 
-	var ddlType string
-	var detectedAt time.Time
-	err := db.QueryRowContext(ctx, q, schema, table, since, until).Scan(&ddlType, &detectedAt)
+	err = db.QueryRowContext(ctx, q, schema, table, since, until).Scan(&ddlType, &detectedAt)
 	switch {
 	case err == nil:
-		return fmt.Errorf(
-			"%w: %s on %s.%s detected at %s (between the baseline snapshot and the requested point-in-time) "+
-				"emits no row-level binlog events to replay — reconstructing to this point-in-time would silently "+
-				"resurrect pre-%s rows as if they still existed; re-baseline the table after this DDL and "+
-				"reconstruct from the new baseline instead",
-			ErrDestructiveDDL, ddlType, schema, table, detectedAt.UTC().Format(time.RFC3339), strings.ToLower(ddlType))
+		return ddlType, detectedAt, true, nil
 	case errors.Is(err, sql.ErrNoRows):
-		return nil
+		return "", time.Time{}, false, nil
 	default:
 		if strings.Contains(err.Error(), "doesn't exist") || strings.Contains(err.Error(), "1146") {
-			return nil
+			return "", time.Time{}, false, nil
 		}
-		return fmt.Errorf("check schema_changes for destructive DDL on %s.%s: %w", schema, table, err)
+		return "", time.Time{}, false, fmt.Errorf("check schema_changes for destructive DDL on %s.%s: %w", schema, table, err)
 	}
 }
