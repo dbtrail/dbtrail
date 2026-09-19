@@ -343,6 +343,8 @@ All three baseline-merging entry points — `reconstruct` single-row, `reconstru
 
 A table with **no baseline** is rebuilt by `reconstruct --output-format mydumper` from its recorded changes alone (the binlog-only fallback), and it gets the same refusal ([#1674](https://github.com/dbtrail/dbtrail/issues/1674)). Its window starts at the oldest change the index or its archives still hold, so a statement older than that is no reason to refuse: nothing it removed is left to bring back. The window starts one second before that oldest change, because both times are whole seconds and a statement in the same second may follow it.
 
+The shim's binlog-only answers do **not** run this check yet: `_flashback` (single-row and full-table), and `_snapshot` when it has no baseline to start from. Over a window holding one of these statements they can still show rows it removed. Use `reconstruct`, which refuses, for those tables and moments.
+
 This is an offline/`_snapshot` concern only — `_flashback` and `bintrail query`/`recover` read the row-event history directly and never claim a never-touched row still exists.
 
 ### PK-changing UPDATE in the reconstruction window

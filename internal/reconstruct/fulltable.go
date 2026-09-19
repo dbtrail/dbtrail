@@ -2372,7 +2372,9 @@ func warnUndetectableBinaryPK(schema, table string, pkCols []metadata.ColumnMeta
 // the shim's binlog-only degrade (internal/shim/snapshot.go
 // runSnapshotFullTable falling back to runFullTable): fetch every event for
 // the table up to cfg.At and emit the latest surviving row per PK, skipping
-// DELETEs. There is no baseline Parquet to read a CREATE TABLE statement
+// DELETEs. Unlike the shim's degrade, it refuses a window holding a TRUNCATE,
+// DROP, RENAME or CREATE OR REPLACE on the table (#1674); the shim's
+// binlog-only paths do not check that yet. There is no baseline Parquet to read a CREATE TABLE statement
 // from, and fabricating one from schema_snapshots column metadata risks
 // silently shipping a wrong PK/engine/charset/index definition as fact — so
 // the schema file records why it's missing instead, and the caller must
