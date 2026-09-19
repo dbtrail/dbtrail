@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
 )
 
@@ -324,5 +325,40 @@ func TestBaselineWiringWarnsAboutAnUnusableMydumperAtBoot(t *testing.T) {
 		if warned != trigger {
 			t.Errorf("trigger=%v: boot warning present = %v, want %v; log:\n%s", trigger, warned, trigger, buf.String())
 		}
+	}
+}
+
+// TestExecuteRefusesADumpWithNoBinlogPosition is the half the pre-push review
+// found (#1688): with the old-build fallback, mydumper 0.10 against MySQL 8.4
+// exits 0 and writes metadata with no position (measured). Published, that
+// snapshot has no anchor. The run must fail, name why, and publish nothing.
+func TestExecuteRefusesADumpWithNoBinlogPosition(t *testing.T) {
+	dir := t.TempDir()
+	// The metadata 0.10 wrote against MySQL 8.4, verbatim: no position lines.
+	script := "#!/bin/bash\n" +
+		"if [ \"$1\" = \"--version\" ]; then printf '%s\\n' '" + versionDistro + "'; exit 0; fi\n" +
+		"out=\"${@: -1}\"\n" +
+		"printf 'Started dump at: 2026-09-19 18:14:40\\nFinished dump at: 2026-09-19 18:14:40\\n' > \"$out/metadata\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "mydumper"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	stubPreflight(t, nil)
+
+	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.LockModeFTWRL)
+	local := t.TempDir()
+	_, err := sup.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: "u:p@tcp(127.0.0.1:1)/", LocalDir: local})
+	if !errors.Is(err, baseline.ErrDumpNotAnchored) {
+		t.Fatalf("execute err = %v, want ErrDumpNotAnchored", err)
+	}
+	for _, want := range []string{"no binlog position", "0.18.1", "MySQL 8.4"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the run's error %q does not say %q", err, want)
+		}
+	}
+	entries, _ := os.ReadDir(local)
+	if len(entries) != 0 {
+		t.Errorf("an unanchored dump was converted anyway: %d entries in the backup directory", len(entries))
 	}
 }

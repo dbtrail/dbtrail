@@ -618,6 +618,18 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	if err := runMydumper(s.ctx, req.SourceDSN, req.Schemas, dumpDir, s.lockMode); err != nil {
 		return dumpOutcome{}, fmt.Errorf("dump: %w", err)
 	}
+	// A dump that cannot be anchored is refused here, never published (#1688).
+	// mydumper older than 0.18.1 exits 0 against MySQL 8.4 with no position in
+	// its metadata (measured), and baseline.Run would convert that with an Info
+	// line; the next update from such a snapshot would fall back to timestamps
+	// with no warning. Metadata that cannot be read at all is refused the same
+	// way: this daemon is unattended, and nobody reads that Info line.
+	if err := baseline.RequireDumpPosition(dumpDir); err != nil {
+		if errors.Is(err, baseline.ErrDumpNotAnchored) {
+			return dumpOutcome{}, fmt.Errorf("dump: %w", err)
+		}
+		return dumpOutcome{}, fmt.Errorf("dump: cannot read mydumper's metadata, so the backup cannot be anchored to a binlog position: %w", err)
+	}
 
 	out := dumpOutcome{at: dumpStartedAt, cleanup: func() {}}
 	outputDir := req.LocalDir
@@ -714,9 +726,9 @@ func pgBaselineConfig(req console.BaselineRequest, outputDir string) (pgbaseline
 // mydumperPlan is what the mydumper on this host can do for one lock mode
 // (#1688). The console used to pass --sync-thread-lock-mode unconditionally, so
 // on a host whose mydumper came from the distribution (Ubuntu 24.04 packages
-// 0.10.1, which prints "mydumper 0.10.0") every scheduled backup, every Create
-// backup and every restore died on "Unknown option", once per slot, while
-// capture kept the daemon looking healthy.
+// 0.10.1, which prints "mydumper 0.10.0") every scheduled full backup and every
+// Create backup died on "Unknown option", once per slot, while capture kept the
+// daemon looking healthy.
 type mydumperPlan struct {
 	path          string // the binary probed; the dump runs this same file
 	sendLockFlags bool   // --sync-thread-lock-mode and --trx-tables
@@ -732,10 +744,15 @@ type mydumperPlan struct {
 // BINTRAIL_CONSOLE_BASELINE_LOCK_MODE names another. The split here is by what
 // the mode MEANS rather than by where it came from: a build below 0.18 takes
 // FTWRL by default (its --help: "--lock-all-tables  Use LOCK TABLE for all,
-// instead of FTWRL"), so dropping the flag still honours ftwrl, with the lock
-// held longer. For any other mode, dropping the flag would dump under a lock
-// the operator did not choose, which is the silent wrong answer the CLI's
-// refusal exists to prevent, so the run refuses and names the remedy.
+// instead of FTWRL"), so dropping the flag keeps ftwrl's kind of lock. How long
+// that build holds it is its own business and was not measured here, and
+// without --trx-tables it no longer refuses a non-transactional table. What it
+// can get wrong silently, a dump with no binlog position (MySQL 8.4 removed the
+// statement it reads the position with), is refused after the dump by
+// baseline.RequireDumpPosition in execute. For any other mode, dropping the
+// flag would dump under a lock the operator did not choose, which is the silent
+// wrong answer the CLI's refusal exists to prevent, so the run refuses and
+// names the remedy.
 func planMydumper(lockMode baseline.LockMode) (mydumperPlan, error) {
 	path, err := exec.LookPath("mydumper")
 	if err != nil {

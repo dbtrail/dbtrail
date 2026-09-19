@@ -465,3 +465,54 @@ func TestRunDumpBrokenBinaryIsNamedNotAPrivilegeGap(t *testing.T) {
 		t.Error("mydumper was launched after its --version failed to run")
 	}
 }
+
+// TestRunDumpRefusesADumpWithNoPositionAndKeepsThePreviousOne (#1688): mydumper
+// older than 0.18.1 exits 0 against MySQL 8.4 with no binlog position in its
+// metadata (measured). That dump cannot seed a baseline anything is folded onto,
+// so `bintrail dump` must fail, and must not replace the previous good dump.
+func TestRunDumpRefusesADumpWithNoPositionAndKeepsThePreviousOne(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "mydumper")
+	script := "#!/bin/bash\n" +
+		"if [ \"$1\" = \"--version\" ]; then printf 'mydumper 0.10.0, built against MySQL 8.0.36\\n'; exit 0; fi\n" +
+		"out=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"--outputdir\" ]; then out=\"$a\"; fi; prev=\"$a\"; done\n" +
+		"mkdir -p \"$out\"\n" +
+		"printf 'Started dump at: 2026-09-19 18:14:40\\nFinished dump at: 2026-09-19 18:14:40\\n' > \"$out/metadata\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The previous, good dump, which must survive the refusal.
+	out := filepath.Join(dir, "out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const good = "Started dump at: 2026-09-18 03:00:00\nSHOW MASTER STATUS:\n\tLog: binlog.000001\n\tPos: 4\n\nFinished dump at: 2026-09-18 03:00:01\n"
+	if err := os.WriteFile(filepath.Join(out, "metadata"), []byte(good), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stubPingSource(t)
+	dumpLockDir = func() string { return dir }
+	t.Cleanup(func() { dumpLockDir = os.TempDir })
+
+	dmpSourceDSN = "u:p@tcp(127.0.0.1:1)/"
+	dmpOutputDir = out
+	dmpMydumperPath = bin
+	dmpFormat = "text"
+	t.Cleanup(func() { dmpLockMode = "ftwrl"; dmpSourceDSN = ""; dmpOutputDir = "" })
+
+	cmd := newDumpCmdForTest(t)
+	if err := cmd.Flags().Set("mydumper-path", bin); err != nil {
+		t.Fatal(err)
+	}
+	err := runDump(cmd, nil)
+	if !errors.Is(err, baseline.ErrDumpNotAnchored) {
+		t.Fatalf("runDump err = %v, want ErrDumpNotAnchored", err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(out, "metadata"))
+	if readErr != nil || string(got) != good {
+		t.Errorf("the previous dump was not restored after the refusal (read err %v): metadata now %q", readErr, got)
+	}
+}
