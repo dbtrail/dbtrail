@@ -99,7 +99,7 @@ func init() {
 	// long-running daemon and must keep the index bounded itself (#951). Names,
 	// defaults, and env vars (BINTRAIL_ROTATE_*, already in cli.EnvBindings) match
 	// `up` so operators tune rotation identically across binaries.
-	streamCmd.Flags().StringVar(&pgRotateRetain, "rotate-retain", "30d", "Built-in rotation: drop index partitions older than this (Nd/Nh; \"off\" disables)")
+	streamCmd.Flags().StringVar(&pgRotateRetain, "rotate-retain", indexer.DefaultRotateRetain, "Built-in rotation: drop index partitions older than this (Nd/Nh; \"off\" disables)")
 	streamCmd.Flags().StringVar(&pgRotateInterval, "rotate-interval", "1h", "Built-in rotation: how often to run a rotation cycle")
 	streamCmd.Flags().IntVar(&pgRotateAddFuture, "rotate-add-future", 3, "Built-in rotation: keep at least N future hourly partitions ready")
 	// index-dsn and server-id live in cli.EnvBindings, so BindCommandEnv both

@@ -21,6 +21,16 @@ func CreateIndexTables(ctx context.Context, db *sql.DB, partitions int, encrypt 
 		logTable = func(string) {}
 	}
 
+	// The retention record comes before binlog_events: see
+	// recordInitialRetainIfNew for why the order matters.
+	if _, err := db.ExecContext(ctx, DDLRotationPolicy); err != nil {
+		return fmt.Errorf("failed to create rotation_policy: %w", err)
+	}
+	if err := recordInitialRetainIfNew(ctx, db); err != nil {
+		return err
+	}
+	logTable("rotation_policy")
+
 	// Create binlog_events with dynamic hourly partitions.
 	if err := createBinlogEventsTable(db, partitions, encrypt); err != nil {
 		return fmt.Errorf("failed to create binlog_events: %w", err)

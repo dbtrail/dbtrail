@@ -161,3 +161,21 @@ CREATE TABLE IF NOT EXISTS index_state (
 CREATE TABLE IF NOT EXISTS snapshot_id_seq (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY
 ) ENGINE=InnoDB;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Rotation policy (#1709)
+-- The built-in rotation retention this index was created under, recorded once
+-- when the index is created and read only while the operator sets none
+-- (--rotate-retain / BINTRAIL_ROTATE_RETAIN / the console's rotation settings).
+-- Changing the built-in default in a later release therefore moves the indexes
+-- created from then on, and never shortens the window an existing index has
+-- been running on. NO ROW (or no table) means an index created before this
+-- record existed: it keeps 30d, the default every such index ran under, and
+-- stays under the upgrade guard. See internal/indexer.DDLRotationPolicy.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS rotation_policy (
+    id             INT UNSIGNED PRIMARY KEY DEFAULT 1,
+    initial_retain VARCHAR(16)  NOT NULL,
+    recorded_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT rotation_policy_single_row CHECK (id = 1)
+) ENGINE=InnoDB;

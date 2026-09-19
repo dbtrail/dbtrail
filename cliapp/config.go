@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/dbtrail/dbtrail/internal/indexer"
 )
 
 // ─── Parent command ───────────────────────────────────────────────────────────
@@ -191,7 +193,7 @@ var envSections = []envSection{
 	{
 		Header: "Built-in rotation (used by bintrail up)",
 		Bindings: []envTemplateEntry{
-			{"BINTRAIL_ROTATE_RETAIN", "30d"},
+			{"BINTRAIL_ROTATE_RETAIN", indexer.DefaultRotateRetain},
 			{"BINTRAIL_ROTATE_INTERVAL", "1h"},
 			{"BINTRAIL_ROTATE_ADD_FUTURE", "3"},
 		},
