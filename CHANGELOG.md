@@ -59,6 +59,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is told apart from a real failure by the server's error number, not by
   its wording — a missing or corrupt tablespace (error 1932) says "doesn't
   exist" too, and used to read as a clean answer.
+- **Console backups work with the mydumper a Linux distribution packages**
+  (#1688). The console always passed `--sync-thread-lock-mode` and
+  `--trx-tables`, which mydumper accepts only from 0.18.1 on, so on a host
+  whose mydumper came from the distribution (Ubuntu 24.04 packages 0.10.1)
+  every scheduled backup, every Create backup and every restore failed with
+  "Unknown option", once per slot, while capture kept the daemon looking
+  healthy. The console now reads the version first, as `bintrail dump`
+  already did. With the default lock mode (`ftwrl`) an older build dumps
+  without the two flags and takes its own FTWRL, held longer. Any other mode
+  set in `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` is refused before mydumper
+  starts, with a message naming the installed version and 0.18.1, because
+  dropping the flag would dump under a lock nobody chose. The daemon says the
+  same at startup when backups are enabled, instead of once per failed slot.
+- **A mydumper binary that does not run is named as such** (#1699). `bintrail
+  dump` and the console used to treat a binary that failed to start, or
+  exited without printing a version (a missing shared library exits 127),
+  as one whose version could not be read. On that path the first hard error
+  was a privilege refusal naming `BACKUP_ADMIN`. Both now stop with the
+  binary's path and its own error.
 - **A steady load no longer turns the backup schedule into a full backup
   every slot** (#1736). The cut-over rule (#1721) estimated an update's
   cost from a marginal rate, events beyond the shortest recent update per
