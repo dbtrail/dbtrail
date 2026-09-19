@@ -4,9 +4,12 @@ package reconstruct_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,7 +31,7 @@ func TestBinlogOnly_destructiveDDLInsideTheWindowRefuses(t *testing.T) {
 	base := time.Now().UTC().Truncate(time.Hour)
 	at := base.Add(50 * time.Minute)
 
-	run := func(t *testing.T, truncateAt time.Time) (*reconstruct.TableReport, error) {
+	run := func(t *testing.T, truncateAt time.Time, prep ...func(*sql.DB)) (*reconstruct.TableReport, error) {
 		t.Helper()
 		db, dbName := testutil.CreateTestDB(t)
 		if err := indexer.CreateIndexTables(ctx, db, 48, false, nil); err != nil {
@@ -81,6 +84,10 @@ func TestBinlogOnly_destructiveDDLInsideTheWindowRefuses(t *testing.T) {
 			t.Fatalf("seed schema_changes: %v", err)
 		}
 
+		for _, p := range prep {
+			p(db)
+		}
+
 		reports, failures, err := reconstruct.ReconstructTablesDetailed(ctx, reconstruct.FullTableConfig{
 			IndexDSN:    testutil.BaseDSN() + "/" + dbName,
 			BaselineSrc: root,
@@ -118,6 +125,32 @@ func TestBinlogOnly_destructiveDDLInsideTheWindowRefuses(t *testing.T) {
 		}
 	}
 
+	// An index too old to record DDL cannot answer the question. Rebuilding
+	// is still allowed — a refusal there would deny every such index the
+	// fallback — but the operator is told, because this check is the only
+	// thing standing between a TRUNCATE and rows coming back.
+	t.Run("an index that records no DDL says it could not check", func(t *testing.T) {
+		logs := &warnCapture{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(logs))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		rep, err := run(t, base.Add(20*time.Minute), func(db *sql.DB) {
+			if _, err := db.Exec("DROP TABLE schema_changes"); err != nil {
+				t.Fatalf("drop schema_changes: %v", err)
+			}
+		})
+		if err != nil {
+			t.Fatalf("an index without schema_changes must still rebuild, got: %v", err)
+		}
+		if rep == nil {
+			t.Fatal("no report for shop.t")
+		}
+		if !logs.saw("could not be checked") {
+			t.Error("the rebuild could not check for a TRUNCATE and said nothing: " + logs.text())
+		}
+	})
+
 	t.Run("inside the window read", func(t *testing.T) {
 		_, err := run(t, base.Add(20*time.Minute))
 		refuses(t, err)
@@ -145,4 +178,38 @@ func TestBinlogOnly_destructiveDDLInsideTheWindowRefuses(t *testing.T) {
 			t.Errorf("InsertsEmitted = %d, want 2", rep.InsertsEmitted)
 		}
 	})
+}
+
+// warnCapture records slog messages so a test can assert on a line that must
+// be said. Level-agnostic: what matters is that the operator is told.
+type warnCapture struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (c *warnCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (c *warnCapture) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.msgs = append(c.msgs, r.Message)
+	return nil
+}
+func (c *warnCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *warnCapture) WithGroup(string) slog.Handler      { return c }
+
+func (c *warnCapture) saw(substr string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range c.msgs {
+		if strings.Contains(m, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *warnCapture) text() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.msgs, " | ")
 }

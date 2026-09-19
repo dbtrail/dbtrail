@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 // ErrDestructiveDDL is wrapped into the error CheckDestructiveDDL returns
@@ -41,6 +43,9 @@ var ErrDestructiveDDL = errors.New("destructive DDL in reconstruction window")
 // reconstruct contract, not a new hard dependency.
 func CheckDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time) error {
 	ddlType, detectedAt, found, err := findDestructiveDDL(ctx, db, schema, table, since, until)
+	if errors.Is(err, errSchemaChangesMissing) {
+		return nil // nothing to check, as this has always answered
+	}
 	if err != nil || !found {
 		return err
 	}
@@ -52,10 +57,18 @@ func CheckDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, 
 		ErrDestructiveDDL, ddlType, schema, table, detectedAt.UTC().Format(time.RFC3339), strings.ToLower(ddlType))
 }
 
+// errSchemaChangesMissing marks an index that has no schema_changes table at
+// all — one that predates DDL tracking, or a caller that has not run
+// indexer.EnsureSchema. It is an ANSWER, not a failure, but callers must say
+// what they do with it: the baseline paths have always treated it as "nothing
+// to check", while the binlog-only fallback says out loud that it could not
+// check.
+var errSchemaChangesMissing = errors.New("this index has no schema_changes table")
+
 // findDestructiveDDL is CheckDestructiveDDL's query without its message, for a
 // caller whose window is not "since the baseline snapshot" (the binlog-only
 // fallback, #1674). found is false with a nil error when there is none, and
-// when schema_changes does not exist.
+// errSchemaChangesMissing when the table does not exist.
 func findDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time) (ddlType string, detectedAt time.Time, found bool, err error) {
 	// schema_name = '' is matched too, and the arm is NOT removable. Since
 	// #1435 parseDDL resolves an unqualified statement ("TRUNCATE TABLE
@@ -80,8 +93,16 @@ func findDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, s
 	case errors.Is(err, sql.ErrNoRows):
 		return "", time.Time{}, false, nil
 	default:
-		if strings.Contains(err.Error(), "doesn't exist") || strings.Contains(err.Error(), "1146") {
-			return "", time.Time{}, false, nil
+		// Graded on the ERROR NUMBER, never on its text. 1146 is "no such
+		// table", the index too old to have schema_changes; 1932 is "table
+		// doesn't exist IN ENGINE", a missing or corrupt tablespace — the
+		// check is BROKEN, not absent. Their messages share the words
+		// "doesn't exist", so a string match reads a damaged index as a clean
+		// one, and on the binlog-only path this lookup is the whole defense
+		// against resurrecting removed rows.
+		var me *mysqldriver.MySQLError
+		if errors.As(err, &me) && me.Number == 1146 {
+			return "", time.Time{}, false, errSchemaChangesMissing
 		}
 		return "", time.Time{}, false, fmt.Errorf("check schema_changes for destructive DDL on %s.%s: %w", schema, table, err)
 	}

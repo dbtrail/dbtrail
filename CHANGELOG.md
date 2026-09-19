@@ -53,7 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from a backup refused. It now refuses the same way when such a statement
   lies between the oldest change it read and the target time, and says the
   table has no backup and how to get one. A statement older than every
-  retained change is no reason to refuse.
+  retained change is no reason to refuse. An index too old to record DDL
+  at all cannot be checked: the rebuild still runs, and now says so
+  instead of passing quietly. The "this index does not record DDL" case
+  is told apart from a real failure by the server's error number, not by
+  its wording — a missing or corrupt tablespace (error 1932) says "doesn't
+  exist" too, and used to read as a clean answer.
 - **A steady load no longer turns the backup schedule into a full backup
   every slot** (#1736). The cut-over rule (#1721) estimated an update's
   cost from a marginal rate, events beyond the shortest recent update per

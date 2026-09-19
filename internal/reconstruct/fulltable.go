@@ -2466,10 +2466,19 @@ func reconstructBinlogOnly(
 	if fold.First != nil {
 		since := fold.First.EventTimestamp.Add(-time.Second)
 		ddlType, detectedAt, found, err := findDestructiveDDL(ctx, db, schema, table, since, cfg.At)
-		if err != nil {
+		switch {
+		case errors.Is(err, errSchemaChangesMissing):
+			// An index too old to record DDL. The baseline paths treat this
+			// as nothing to check, because a baseline still anchors their
+			// merge; here it is the ONLY thing standing between a TRUNCATE
+			// and rows coming back, so it is said out loud rather than
+			// skipped in silence.
+			slog.Warn("reconstruct: this index does not record DDL, so a TRUNCATE, DROP or RENAME inside the rebuilt window could not be checked for; rows such a statement removed may appear in the output as if they still existed",
+				"schema", schema, "table", table,
+				"action", "re-run after `bintrail snapshot` has recorded schema changes, or rebuild from a baseline taken after the statement")
+		case err != nil:
 			return nil, err
-		}
-		if found {
+		case found:
 			return nil, binlogOnlyDestructiveDDLErr(schema, table, ddlType, detectedAt, fold.First.EventTimestamp)
 		}
 	}

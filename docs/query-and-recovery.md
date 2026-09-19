@@ -345,7 +345,7 @@ A table with **no baseline** is rebuilt by `reconstruct --output-format mydumper
 
 The shim's binlog-only answers do **not** run this check yet: `_flashback` (single-row and full-table), and `_snapshot` when it has no baseline to start from. Over a window holding one of these statements they can still show rows it removed. Use `reconstruct`, which refuses, for those tables and moments.
 
-This is an offline/`_snapshot` concern only — `_flashback` and `bintrail query`/`recover` read the row-event history directly and never claim a never-touched row still exists.
+`bintrail query` and `recover` are not affected at all: they read the row-event history directly and never claim a never-touched row still exists. `_flashback` reads it directly too, but it can be asked to rebuild a whole table from it — see the paragraph above for what that cannot see.
 
 ### PK-changing UPDATE in the reconstruction window
 
