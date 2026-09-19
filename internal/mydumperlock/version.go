@@ -177,18 +177,36 @@ func firstLines(s string) string {
 // A version that does not parse is reported as such rather than defaulted, so
 // the caller can tell "this build is old" from "this build is unreadable".
 func ParseVersion(output string) (Version, error) {
-	line := strings.SplitN(output, "\n", 2)[0]
-	parts := strings.Fields(line)
-	if len(parts) < 2 {
-		return Version{}, fmt.Errorf("unexpected --version output: %q", line)
+	// Every line, not just the first (#1700). The probe reads stdout and
+	// stderr together, so anything the process prints ahead of its version —
+	// a dynamic-loader or locale warning, glib noise — would otherwise land a
+	// perfectly readable build on the "version unknown" path, which since
+	// #1688 also switches the privilege preflight on and can turn a warning
+	// line into a refusal naming BACKUP_ADMIN.
+	first, firstRaw := "", ""
+	for _, line := range strings.Split(output, "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		if first == "" {
+			first, firstRaw = line, strings.TrimRight(parts[1], ",")
+		}
+		// raw is kept for the error message: quoting the post-strip value
+		// would report a string mydumper never printed ("ersion" for a
+		// "version" field).
+		raw := strings.TrimRight(parts[1], ",")
+		var v Version
+		if n, err := fmt.Sscanf(strings.TrimPrefix(raw, "v"), "%d.%d.%d", &v.Major, &v.Minor, &v.Patch); err == nil && n == 3 {
+			return v, nil
+		}
 	}
-	// raw is kept for the error message: quoting the post-strip value would
-	// report a string mydumper never printed ("ersion" for a "version" field).
-	raw := strings.TrimRight(parts[1], ",")
-	var v Version
-	n, scanErr := fmt.Sscanf(strings.TrimPrefix(raw, "v"), "%d.%d.%d", &v.Major, &v.Minor, &v.Patch)
-	if scanErr != nil || n != 3 {
-		return Version{}, fmt.Errorf("cannot parse version %q from %q", raw, line)
+	if first == "" {
+		return Version{}, fmt.Errorf("unexpected --version output: %q", strings.SplitN(output, "\n", 2)[0])
 	}
-	return v, nil
+	// No line carried a version: still UNKNOWN, never "old" — the caller's
+	// whole decision rests on telling those two apart. The message quotes the
+	// FIRST candidate line, which is what a build printing one unreadable
+	// line printed, and what an operator will compare against.
+	return Version{}, fmt.Errorf("cannot parse version %q from %q", firstRaw, first)
 }

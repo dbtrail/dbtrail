@@ -144,6 +144,38 @@ func writeScript(t *testing.T, body string) string {
 // TestProbeVersionSeparatesNotRunnableFromUnreadable pins #1699: a binary that
 // did not run and a binary that printed something unreadable are different
 // facts with different remedies, so only the first may wrap ErrNotRunnable.
+// A line printed AHEAD of the version line must not make a readable build
+// unknown (#1700). The probe reads stdout and stderr together, so a loader or
+// locale warning lands in the same string — and since #1688 "unknown" also
+// switches the privilege preflight on, turning a warning into a refusal that
+// names BACKUP_ADMIN for a build that is new enough.
+func TestParseVersion_ignoresNoisePrintedBeforeTheVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   Version
+	}{
+		{"loader warning first", "mydumper: /lib/libcrypto.so.3: no version information available\nmydumper v1.0.5-1, built against MariaDB 10.8.8\n", Version{1, 0, 5}},
+		{"locale noise first", "bash: warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8)\nmydumper 0.10.1, built against MySQL 8.0.36\n", Version{0, 10, 1}},
+		{"noise after the version does not win", "mydumper 0.10.1, built against MySQL 8.0.36\nsome later line 9.9.9\n", Version{0, 10, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseVersion(tc.output)
+			if err != nil || got != tc.want {
+				t.Fatalf("ParseVersion = %v, %v; want %v, nil", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// Nothing version-shaped anywhere is still UNKNOWN, never "old": the whole
+// lock-mode decision rests on telling those two apart.
+func TestParseVersion_noVersionAnywhereStaysUnknown(t *testing.T) {
+	if _, err := ParseVersion("mydumper: error while loading shared libraries\nsecond line of noise\n"); err == nil {
+		t.Fatal("output with no version parsed as one")
+	}
+}
+
 func TestProbeVersionSeparatesNotRunnableFromUnreadable(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-mydumper")
 

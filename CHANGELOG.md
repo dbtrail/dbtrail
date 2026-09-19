@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   why. Setting
   `--rotate-retain`, `BINTRAIL_ROTATE_RETAIN` or the console's rotation
   settings overrides the record, unchanged.
+### Fixed
+- **A warning printed before mydumper's version no longer makes a current
+  build look unreadable** (#1700). The version probe reads what mydumper
+  writes to both of its output streams, so a dynamic-loader or locale
+  warning could arrive ahead of the version line and put a build new enough
+  for every lock mode on the "version unknown" path — which also switches the
+  privilege check on, turning a harmless warning into a refusal naming
+  `BACKUP_ADMIN`. Every line is now considered, and the first one carrying a
+  version wins; output with no version anywhere is still reported as
+  unreadable, never as an old build.
 
 ### Changed
 - **The console says why a server has no first backup, instead of leaving
