@@ -5418,11 +5418,32 @@ function baselineContextStrip(b, cur) {
   const uniform = snapshotTablesUniform(snaps, b.truncated);
   if (uniform !== null) strip.append(item("TABLES", uniform + " per backup"));
   strip.append(item("TIME-TRAVEL", b.reconstruct ? "enabled" : "off (archives disabled)"));
-  // The page's primary action, at page level — not a list-header costume.
-  if (capsCache.baseline_trigger && cur && cur.id && cur.kind === "registry" && b.configured) {
-    const btn = el("button", { class: "btn ctx-action", type: "button", text: "Create backup" });
-    btn.onclick = () => createBaseline(cur.id, btn);
-    strip.append(btn);
+  // The page's primary action, at page level (not a list-header costume),
+  // or, where the action is unavailable, the reason.
+  if (cur && cur.id && cur.kind === "registry" && b.configured) {
+    // cur is the RAW registry entry, while b.configured also counts the
+    // daemon-wide default, which a backup refuses to write to, as a restore
+    // does (the restore card is stricter: it needs a local Backup dir; the
+    // button takes either location). The precheck reads the raw fields
+    // (hasOwnBackupLocation), so this does too: a button on a server with no
+    // location of its own is refused on click.
+    const ownLoc = !!(cur.baseline_dir || cur.baseline_s3);
+    const off = !capsCache.baseline_trigger;
+    if (!off && ownLoc) {
+      const btn = el("button", { class: "btn ctx-action", type: "button", text: "Create backup" });
+      btn.onclick = () => createBaseline(cur.id, btn);
+      strip.append(btn);
+    } else if (cur.has_source) {
+      // Where the button would be, say why it is not (#1677), the same two
+      // reasons the Getting started list gives: a missing button reads as a
+      // page with no such action. Points at the Backup settings page, whose
+      // row carries the variable; this note names none. A server with no
+      // source is never backed up from the console, so it gets no note.
+      const why = [];
+      if (off) why.push("turned off at startup");
+      if (!ownLoc) why.push("needs this server's own backup location");
+      strip.append(item("CREATE BACKUP", why.join(", and ") + " (Backup settings page)"));
+    }
   }
   return strip;
 }

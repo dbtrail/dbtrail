@@ -2278,8 +2278,10 @@ try {
 
   // Scenario 15b — Baselines page live (#686, moved off Storage by #1384):
   // with the daemon opted in (BINTRAIL_CONSOLE_BASELINE_TRIGGER=1) and this
-  // server baseline-configured, the Create-baseline button must render
-  // enabled, and the fixture snapshot (1 table, anchored at
+  // server carrying a backup location of its own (byo-idx is created with
+  // baseline_dir; since #1677 the daemon-level --baseline-dir alone lists
+  // backups but does not offer the button), the Create backup button must
+  // render enabled, and the fixture snapshot (1 table, anchored at
   // binlog.000001:50) must be listed.
   await page.evaluate(() => navigate("baselines"));
   await page.waitForFunction(() => Array.from(document.querySelectorAll(".stg-row")).some((r) => r.textContent.includes("binlog.000001:50")));
@@ -2310,11 +2312,17 @@ try {
     : bad("baselines: the newest row wears the treatment, carries relative age, and drops the constant column", stg.rowText);
 
   // Scenario 15c — the button's other gate arms, fixture-driven through the
-  // REAL baselinesPanel (destination-missing can't exist live once the daemon
-  // sets a default --baseline-dir): no destination → no button + the setup
-  // empty state; capability off → no button even with a destination.
+  // REAL baselinesPanel (a server with no location at all can't exist live
+  // once the daemon sets a default --baseline-dir; the daemon-default-only
+  // arm is pinned by TestBackupOffIsSaidWhereTheActionWouldBe): no
+  // destination → no button + the setup empty state; capability off → no
+  // button even with a destination, and the strip says why (#1677).
   const gates = await page.evaluate(() => {
-    const servers = [{ id: "srv-fix", name: "fixture", kind: "registry" }];
+    // A source and a location of its own (#1677): the source is what makes
+    // the strip draw its CREATE BACKUP note, and the own location keeps the
+    // capability-off check honest, since without one the button is withheld
+    // for the location and that check would pass even with creation on.
+    const servers = [{ id: "srv-fix", name: "fixture", kind: "registry", has_source: true, baseline_dir: "/tmp/baselines" }];
     const cur = servers[0];
     const keepCur = currentServer;
     currentServer = "srv-fix";
@@ -2330,11 +2338,15 @@ try {
     capsCache.baseline_trigger = keepCap;
     currentServer = keepCur;
     const hasBtn = (n) => Array.from(n.querySelectorAll("button")).some((b) => b.textContent === "Create backup");
+    // #1677: where the button would be, the strip says creation is off.
+    const offNote = (n) => /CREATE BACKUP/.test(n.textContent) && /turned off at startup/.test(n.textContent);
     return {
       cfgOffBtn: hasBtn(cfgOff) || hasBtn(cfgOffStrip),
       cfgOffEmpty: /No backups configured/.test(cfgOff.textContent),
+      cfgOffNote: offNote(cfgOffStrip),
       capOffBtn: hasBtn(capOff) || hasBtn(capOffStrip),
       capOffEmpty: /no backups found/.test(capOff.textContent),
+      capOffNote: offNote(capOffStrip),
     };
   });
   (!gates.cfgOffBtn && gates.cfgOffEmpty)
@@ -2343,6 +2355,9 @@ try {
   (!gates.capOffBtn && gates.capOffEmpty)
     ? ok("baselines: baseline_trigger off → no button even with a destination")
     : bad("baselines: baseline_trigger off → no button even with a destination", JSON.stringify(gates));
+  (gates.capOffNote && !gates.cfgOffNote && !/CREATE BACKUP/.test(stg.stripText))
+    ? ok("baselines: baseline_trigger off → the strip says creation is off where the button would be, and only then")
+    : bad("baselines: baseline_trigger off → the strip says creation is off where the button would be, and only then", JSON.stringify({ gates, live: stg.stripText }));
 
   // Scenario 15e — the Backups feature set: rename, per-row detail with real
   // sizes, the tar.gz download wire, the restore card's gate + inline refusal,

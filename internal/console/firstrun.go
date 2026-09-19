@@ -55,6 +55,13 @@ type firstRunInput struct {
 	// Backup is the first-backup job, nil when the console cannot create one
 	// for this server.
 	Backup *BaselineStatus
+	// BackupOff: this process cannot create full backups at all (the creation
+	// opt-in is off). BackupNoLocation: the server has no backup location of
+	// its own. Either one lists the backup step with its reason instead of
+	// leaving it out (#1677): a list with no backup step reads as an install
+	// that needs none.
+	BackupOff        bool
+	BackupNoLocation bool
 }
 
 // firstRunSteps computes the list. Each capture step is done from evidence: the
@@ -140,8 +147,40 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 			step.State, step.Detail, step.Fix = firstRunFailed, b.LastError, "Try again on the Backups page."
 		}
 		rep.Steps = append(rep.Steps, step)
+	} else if step, ok := blockedBackupStep(in); ok {
+		rep.Steps = append(rep.Steps, step)
 	}
 	return rep
+}
+
+// blockedBackupStep is the backup step for a server whose first backup the
+// console cannot create, with the reason and what to do (#1677). The daemon
+// setting is named as the Backup settings page labels it, never as a
+// variable. mydumper is named for every source but PostgreSQL (MySQL and
+// MariaDB): a PostgreSQL full backup runs inside DBTrail. The step can never
+// be done while backups are off, which is why Complete reads only the
+// capture steps.
+func blockedBackupStep(in firstRunInput) (FirstRunStep, bool) {
+	step := FirstRunStep{Name: "Take the first backup", State: firstRunWaiting}
+	switch {
+	case in.BackupOff:
+		step.Detail = "Creating full backups from the console is turned off. Restoring a whole table to a past moment needs a full backup."
+		step.Fix = "On the Backup settings page, under Set when DBTrail starts, the Create-backup button row names the setting to change. Restart DBTrail after changing it. A full backup reads every table this server captures"
+		if in.Postgres {
+			step.Fix += "."
+		} else {
+			step.Fix += ", and mydumper must be installed where DBTrail runs."
+		}
+		if in.BackupNoLocation {
+			step.Fix += " This server also needs its own backup location, set on the Backup settings page."
+		}
+	case in.BackupNoLocation:
+		step.Detail = "This server has no backup location of its own, so no backup can be written for it."
+		step.Fix = "Set a Backup dir or Backup S3 for this server on the Backup settings page, then create one on the Backups page."
+	default:
+		return FirstRunStep{}, false
+	}
+	return step, true
 }
 
 // loadFirstRunIndex reads the evidence from the server's own index database,
@@ -222,9 +261,21 @@ func (s *Server) handleFirstRun(w http.ResponseWriter, r *http.Request) {
 	}
 	in := firstRunInput{Monitor: s.monitorCtrl.Status(e.ID), Postgres: e.IsPostgres()}
 	loadFirstRunIndex(r.Context(), e.DSN, &in)
-	if s.baselineCtrl != nil && baselineTriggerPrecheck(e) == nil {
+	// A PostgreSQL server with no slot or publication lists no backup step,
+	// whether or not backups are on: capture cannot run for it either, so the
+	// capture steps are what is stuck, and a backup reason would point at the
+	// wrong fix. Checked first, because the precheck reports a missing
+	// location before the slot. A refusal this list has no words for lists no
+	// step rather than blame the location.
+	switch {
+	case pgSourceIncomplete(e):
+	case s.baselineCtrl == nil:
+		in.BackupOff, in.BackupNoLocation = true, !hasOwnBackupLocation(e)
+	case baselineTriggerPrecheck(e) == nil:
 		b := s.baselineCtrl.Status(e.ID)
 		in.Backup = &b
+	case !hasOwnBackupLocation(e):
+		in.BackupNoLocation = true
 	}
 	writeJSON(w, http.StatusOK, firstRunSteps(in))
 }
