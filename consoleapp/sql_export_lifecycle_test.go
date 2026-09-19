@@ -121,9 +121,11 @@ func TestSQLExportTTL_expiresAndRemovesTheBuild(t *testing.T) {
 }
 
 // TestSQLExportReaper_expiresAnUnwatchedBuild: with nobody polling, the
-// background loop alone removes a build past its deadline. The test never
-// reads the status until the directory is gone, so a lazy expiry on a read
-// cannot be what removed it.
+// background loop alone removes a build past its deadline. What keeps that
+// claim true is the DIRECT map read below, not the order of the waits:
+// SQLExportStatus expires a slot lazily when it is read, so polling through
+// it would be indistinguishable from the reaper having run. Moving this test
+// to SQLExportStatus would silently stop proving anything.
 func TestSQLExportReaper_expiresAnUnwatchedBuild(t *testing.T) {
 	sup, clk, cancel := newClockedSupervisor(t)
 	defer cancel()

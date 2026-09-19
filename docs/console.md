@@ -761,7 +761,8 @@ works and lands on Retention.
   decided from the backup named in the file's header, so download again after a
   table is added or dropped or a column changes type. Tick **Pin to the backup
   that exists now** for a fixed point in time instead; a backup destination in
-  S3 has no pointer to follow and is always pinned, and the generated file says
+  S3 has no `current` pointer to follow, so it follows the newest completed
+  backup instead, resolved when the file is read, and the generated file says
   which of the two it did. The download gives you one view per table by
   default; tick **Include the change log** for a view over every archived
   change, which takes longer to open the further back your archive goes because
