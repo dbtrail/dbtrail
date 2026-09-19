@@ -122,127 +122,6 @@ func TestBuildMydumperArgs_lockAndTrx_unsupported(t *testing.T) {
 	}
 }
 
-func TestParseMydumperVersion(t *testing.T) {
-	cases := []struct {
-		name                            string
-		output                          string
-		wantMajor, wantMinor, wantPatch int
-		wantErr                         bool
-		// wantErrContains pins text the refusal must quote back. Without it
-		// the error branch only asserts non-nil, and the deliberate choice to
-		// quote the RAW field rather than the post-strip value is unpinned —
-		// a refactor reporting "ersion" for a "version" field stays green.
-		wantErrContains string
-	}{
-		{
-			name:      "standard_0.10.0",
-			output:    "mydumper 0.10.0, built against MySQL 8.0.36\n",
-			wantMajor: 0, wantMinor: 10, wantPatch: 0,
-		},
-		{
-			name:      "standard_0.11.5",
-			output:    "mydumper 0.11.5, built against MySQL 8.0.37\n",
-			wantMajor: 0, wantMinor: 11, wantPatch: 5,
-		},
-		{
-			// Captured from `mydumper --version` in the mydumper/mydumper
-			// v0.16.3-6 image. It used to read "mydumper 0.16.3-6, built
-			// against MySQL 8.4.3" — a shape no binary prints, which made the
-			// "v is a 1.x thing" story look measured when it was not. The real
-			// string carries the prefix, so 0.16.3 was ALSO unreadable before
-			// this fix; the outcome happened to be unchanged there, because
-			// 0.16 is below the flag floor either way.
-			name:      "v_prefixed_0.16.3_with_suffix",
-			output:    "mydumper v0.16.3-6, built against MySQL 8.4.1 with SSL support\n",
-			wantMajor: 0, wantMinor: 16, wantPatch: 3,
-		},
-		{
-			name:      "future_major_1",
-			output:    "mydumper 1.0.0, built against MySQL 9.0.0\n",
-			wantMajor: 1, wantMinor: 0, wantPatch: 0,
-		},
-		{
-			// The shape current releases actually print (#1686). No 1.x build
-			// ever shipped the bare "1.0.0" above, so that case passed all
-			// along while every real 1.x install failed to parse — and a failed
-			// parse is read as "very old mydumper", which skips the privilege
-			// preflight, refuses an explicit --lock-mode and dumps under
-			// heavier locks than the operator asked for.
-			name:      "v_prefixed_1.0.5_with_package_suffix",
-			output:    "mydumper v1.0.5-1, built against MariaDB 10.8.8 with SSL support\n",
-			wantMajor: 1, wantMinor: 0, wantPatch: 5,
-		},
-		{
-			// The build internal/baseline/lockmode.go records its measured
-			// lock-mode findings against, so it has to be readable here.
-			name:      "v_prefixed_pinned_1.0.3",
-			output:    "mydumper v1.0.3-1, built against MySQL 8.4.9 with SSL support\n",
-			wantMajor: 1, wantMinor: 0, wantPatch: 3,
-		},
-		{
-			// The exact floor mydumperSupportsLockMode gates on: no 0.18.0 was
-			// ever released, so 0.18.1 is the first build accepting the flags.
-			name:      "floor_0.18.1",
-			output:    "mydumper 0.18.1, built against MySQL 8.0.36\n",
-			wantMajor: 0, wantMinor: 18, wantPatch: 1,
-		},
-		{
-			// Stripping the "v" must not turn a version-less field into 0.0.0:
-			// mydumperSupportsLockMode would read that as a pre-0.18 build and
-			// proceed against it silently, instead of reporting it unreadable.
-			name:    "bare_v_no_digits",
-			output:  "mydumper v\n",
-			wantErr: true,
-		},
-		{
-			// An unrecognised SHAPE (version not in the second field) must stay
-			// an error rather than be guessed at. runDump now runs the privilege
-			// preflight on exactly this outcome — see
-			// TestRunDumpUnreadableVersionStillChecksPrivileges.
-			name:            "version_not_in_second_field",
-			output:          "mydumper version v1.0.5-1\n",
-			wantErr:         true,
-			wantErrContains: `"version"`,
-		},
-		{
-			name:    "empty_output",
-			output:  "",
-			wantErr: true,
-		},
-		{
-			name:    "garbage",
-			output:  "not a version string at all\n",
-			wantErr: true,
-		},
-		{
-			name:    "single_word",
-			output:  "mydumper\n",
-			wantErr: true,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			major, minor, patch, err := parseMydumperVersion(tc.output)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error but got %d.%d.%d", major, minor, patch)
-				}
-				if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
-					t.Errorf("error = %q, want it to quote %s — the refusal must name what mydumper actually printed",
-						err, tc.wantErrContains)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if major != tc.wantMajor || minor != tc.wantMinor || patch != tc.wantPatch {
-				t.Errorf("got %d.%d.%d, want %d.%d.%d", major, minor, patch, tc.wantMajor, tc.wantMinor, tc.wantPatch)
-			}
-		})
-	}
-}
-
 // TestBuildMydumperArgs_neverPassword asserts the source password is NEVER put
 // on argv, regardless of whether a defaults-file is used — the whole point of
 // #811 (a password on argv is world-readable via ps aux / /proc/cmdline). The
@@ -617,7 +496,7 @@ func TestRunDump_capturesStderrOnFailure(t *testing.T) {
 	// caller doesn't bail out before invoking the dump.
 	script := `#!/bin/bash
 if [ "$1" = "--version" ]; then
-  echo "mydumper 0.15.0 (built with foo)"
+  echo "mydumper 0.10.1 (built with foo)"
   exit 0
 fi
 echo "CRITICAL: simulated mydumper failure (auth plugin caching_sha2_password)" >&2
@@ -1050,7 +929,7 @@ func TestRunDump_localDeliversPasswordViaEnvNotArgv(t *testing.T) {
 	fakeBin := filepath.Join(dir, "mydumper")
 	script := `#!/bin/bash
 if [ "$1" = "--version" ]; then
-  echo "mydumper 0.15.0"
+  echo "mydumper 0.10.1"
   exit 0
 fi
 { echo "ARGS: $@"; echo "MYSQL_PWD=${MYSQL_PWD}"; } > "$BINTRAIL_TEST_RECORD"
@@ -1362,24 +1241,5 @@ func assertArgsContainPair(t *testing.T, args []string, key, val string) {
 			got = args[idx+1]
 		}
 		t.Errorf("expected %q after %q, got %q", val, key, got)
-	}
-}
-
-func TestMydumperSupportsLockMode(t *testing.T) {
-	cases := []struct {
-		major, minor int
-		want         bool
-	}{
-		{0, 10, false}, // Ubuntu 24.04 / Debian bookworm apt builds
-		{0, 11, false}, // had --no-locks/--trx-consistency-only, NOT these flags
-		{0, 17, false}, // last minor before the flags landed
-		{0, 18, true},  // --sync-thread-lock-mode/--trx-tables introduced (0.18.1)
-		{0, 21, true},
-		{1, 0, true},
-	}
-	for _, tc := range cases {
-		if got := mydumperSupportsLockMode(tc.major, tc.minor); got != tc.want {
-			t.Errorf("mydumperSupportsLockMode(%d, %d) = %v, want %v", tc.major, tc.minor, got, tc.want)
-		}
 	}
 }

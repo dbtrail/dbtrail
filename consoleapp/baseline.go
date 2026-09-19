@@ -618,6 +618,19 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	if err := runMydumper(s.ctx, req.SourceDSN, req.Schemas, dumpDir, s.lockMode); err != nil {
 		return dumpOutcome{}, fmt.Errorf("dump: %w", err)
 	}
+	// A dump that cannot be anchored is refused here, never published (#1688).
+	// mydumper exits 0 with no position in its metadata when binary logging is
+	// off, when the dump user cannot read it, and (measured) for a build older
+	// than 0.16.3 against MySQL 8.4; baseline.Run would convert that dump with a
+	// warning at most, and the next update from it would fall back to
+	// timestamps. Metadata that cannot be read at all is refused the same way,
+	// where baseline.Run only logs at Info: this daemon is unattended.
+	if err := baseline.RequireDumpPosition(dumpDir); err != nil {
+		if errors.Is(err, baseline.ErrDumpNotAnchored) {
+			return dumpOutcome{}, fmt.Errorf("dump: %w", err)
+		}
+		return dumpOutcome{}, fmt.Errorf("dump: cannot read mydumper's metadata, so the backup cannot be anchored to a binlog position: %w", err)
+	}
 
 	out := dumpOutcome{at: dumpStartedAt, cleanup: func() {}}
 	outputDir := req.LocalDir
@@ -711,23 +724,184 @@ func pgBaselineConfig(req console.BaselineRequest, outputDir string) (pgbaseline
 	}, nil
 }
 
-// runMydumper invokes the bundled mydumper binary against the source DSN, writing
-// a dump (with binlog coordinates in its metadata, which baseline.Run reads) into
-// dumpDir. The image pins the SAME mydumper version the compose baseline-dump
-// pipeline uses, so a console-created baseline matches a CLI/compose one exactly.
-// lockMode selects the sync mode — see buildConsoleMydumperArgs.
+// mydumperPlan is what the mydumper on this host can do for one lock mode
+// (#1688). The console used to pass --sync-thread-lock-mode unconditionally, so
+// on a host whose mydumper came from the distribution (Ubuntu 24.04 packages
+// 0.10.1, which prints "mydumper 0.10.0") every scheduled full backup and every
+// Create backup died on "Unknown option", once per slot, while capture kept the
+// daemon looking healthy.
+type mydumperPlan struct {
+	path          string // the binary probed; the dump runs this same file
+	sendLockFlags bool   // --sync-thread-lock-mode and --trx-tables
+	preflight     bool   // run the privilege preflight before launching
+	fallback      string // non-empty: the dump proceeds without the flags; log why
+	// version is what --version printed, when it could be read. runMydumper
+	// uses it to refuse, before any lock is taken, a build that cannot record
+	// the binlog position on the source's MySQL version.
+	version      mydumperlock.Version
+	versionKnown bool
+}
+
+// sourceServerVersion reads SELECT VERSION() from the source. A seam, so the
+// tests need no server.
+var sourceServerVersion = func(ctx context.Context, dsn string) (string, error) {
+	db, err := config.Connect(dsn)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var v string
+	err = db.QueryRowContext(qctx, "SELECT VERSION()").Scan(&v)
+	return v, err
+}
+
+// planMydumper reads the version of the mydumper on PATH and decides, the way
+// `bintrail dump` does (#219, #460, #1686), what this run can ask of it.
+//
+// The CLI refuses an EXPLICIT --lock-mode it cannot send and falls back for the
+// default. The console has no flag; its mode is ftwrl unless
+// BINTRAIL_CONSOLE_BASELINE_LOCK_MODE names another. The split here is by what
+// the mode MEANS rather than by where it came from: a build below 0.18 takes
+// FTWRL by default (its --help: "--lock-all-tables  Use LOCK TABLE for all,
+// instead of FTWRL"), so dropping the flag keeps ftwrl's kind of lock. How long
+// that build holds it is its own business and was not measured here, and
+// without --trx-tables it no longer refuses a non-transactional table. What it
+// can get wrong silently, a dump with no binlog position, is refused twice: by
+// runMydumper before the dump when the build is older than 0.16.3 and the
+// source is MySQL 8.4 or newer (the case measured), and by
+// baseline.RequireDumpPosition in execute after any dump. For any other mode, dropping the
+// flag would dump under a lock the operator did not choose, which is the silent
+// wrong answer the CLI's refusal exists to prevent, so the run refuses and
+// names the remedy.
+func planMydumper(lockMode baseline.LockMode) (mydumperPlan, error) {
+	path, err := exec.LookPath("mydumper")
+	if err != nil {
+		return mydumperPlan{}, fmt.Errorf("mydumper is not installed where DBTrail can run it (%v). "+
+			"Full backups of MySQL and MariaDB servers run the mydumper on the PATH of the DBTrail process; "+
+			"install mydumper %s or newer, which supports every lock mode",
+			err, mydumperlock.LockModeFloor)
+	}
+	v, verErr := mydumperlock.ProbeVersion(path)
+	ftwrl := lockMode == baseline.LockModeFTWRL
+	switch {
+	case errors.Is(verErr, mydumperlock.ErrNotRunnable):
+		// #1699: a binary that does not run is not an "unknown version", and
+		// routing it there would make the first error a privilege refusal.
+		return mydumperPlan{}, fmt.Errorf("%w. Full backups run that same binary, so fix or replace it with mydumper %s or newer",
+			verErr, mydumperlock.LockModeFloor)
+	case verErr != nil:
+		if !ftwrl {
+			return mydumperPlan{}, fmt.Errorf("lock mode %s cannot be used: the version of %s could not be read (%v), "+
+				"so DBTrail cannot tell whether it accepts --sync-thread-lock-mode. "+
+				"Install mydumper %s or newer, or remove BINTRAIL_CONSOLE_BASELINE_LOCK_MODE to back up with ftwrl",
+				lockMode, path, verErr, mydumperlock.LockModeFloor)
+		}
+		return mydumperPlan{path: path, sendLockFlags: false, preflight: true,
+			fallback: fmt.Sprintf("could not read the mydumper version (%v), so the dump runs without "+
+				"--sync-thread-lock-mode and --trx-tables, after the privilege check", verErr)}, nil
+	case !v.SupportsLockMode():
+		if !ftwrl {
+			return mydumperPlan{}, fmt.Errorf("lock mode %s needs mydumper %s or newer, and %s is mydumper %s, "+
+				"which does not accept --sync-thread-lock-mode. Install mydumper %s or newer (distribution packages are often older), "+
+				"or remove BINTRAIL_CONSOLE_BASELINE_LOCK_MODE to back up with ftwrl, which this build uses by default",
+				lockMode, mydumperlock.LockModeFloor, path, v, mydumperlock.LockModeFloor)
+		}
+		fallback := fmt.Sprintf("mydumper %s is older than %s, so the dump runs without --sync-thread-lock-mode "+
+			"and --trx-tables and takes that build's own FTWRL", v, mydumperlock.LockModeFloor)
+		if v.Less(mydumperlock.PositionFloor) {
+			fallback += fmt.Sprintf("; against MySQL 8.4 and newer a build older than %s cannot record the binlog position, "+
+				"so backups of those sources are refused before they start", mydumperlock.PositionFloor)
+		}
+		// The #800 privilege check is skipped only for a build that takes no
+		// backup lock (measured: the packaged 0.10 does not; 0.16.3 and 1.0.3
+		// do). Skipping it for every pre-0.18 build would switch the check off
+		// for a whole band that DOES take the lock, and that check exists
+		// because the failure it prevents is a segfault.
+		return mydumperPlan{path: path, sendLockFlags: false,
+			preflight: v.TakesBackupLock() && lockMode.NeedsElevatedPrivileges(),
+			fallback:  fallback, version: v, versionKnown: true}, nil
+	default:
+		return mydumperPlan{path: path, sendLockFlags: true, preflight: lockMode.NeedsElevatedPrivileges(),
+			version: v, versionKnown: true}, nil
+	}
+}
+
+// mydumperBootWarning is the startup line for a daemon that may take full
+// backups (#1688): the verdict every run will reach, said once before the first
+// slot as well as by each run. Empty when the local mydumper accepts the
+// configured mode as is.
+func mydumperBootWarning(lockMode baseline.LockMode) string {
+	plan, err := planMydumper(lockMode)
+	switch {
+	case err != nil:
+		return "full backups of MySQL and MariaDB servers will fail until this is fixed: " + err.Error()
+	case plan.fallback != "":
+		return "full backups of MySQL and MariaDB servers will run, but " + plan.fallback
+	default:
+		return ""
+	}
+}
+
+// runMydumper invokes the mydumper on the PATH against the source DSN, writing a
+// dump (with binlog coordinates in its metadata, which baseline.Run reads) into
+// dumpDir. In the console image that is the pinned build the compose
+// baseline-dump pipeline also uses; on a native install it is whatever the host
+// has, which is why planMydumper reads its version first (#1688). lockMode
+// selects the sync mode when the build accepts it; see buildConsoleMydumperArgs.
 func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDir string, lockMode baseline.LockMode) error {
 	host, port, user, password, err := config.ParseSourceDSN(sourceDSN)
 	if err != nil {
 		return err
 	}
 
+	// Probed on every run, not once at boot: the fix for an old or broken
+	// mydumper is to install another one, and that has to take effect without
+	// restarting the process that also captures changes. One exec of
+	// --version costs nothing next to a dump.
+	plan, err := planMydumper(lockMode)
+	if err != nil {
+		return err
+	}
+	if plan.fallback != "" {
+		slog.Warn("baseline: "+plan.fallback, "mydumper", plan.path, "lock_mode", string(lockMode))
+	}
+	// A build older than 0.16.3 exits 0 against MySQL 8.4 with no position in
+	// its metadata (measured). execute refuses that dump afterwards; refusing
+	// here instead spares the source a full dump under FTWRL that would be
+	// thrown away. A source whose version cannot be read goes ahead: the
+	// after-dump check still guards it.
+	if plan.versionKnown && plan.version.Less(mydumperlock.PositionFloor) {
+		sv, verr := sourceServerVersion(ctx, sourceDSN)
+		if verr != nil {
+			// The dump still runs and its own metadata is checked afterwards,
+			// but that check comes AFTER a full dump: say why the cheap
+			// refusal could not be made instead of dropping it in silence.
+			slog.Warn("console backup: could not read the source server's version, so an old mydumper cannot be refused before it dumps",
+				"mydumper", plan.version.String(), "error", verr)
+		}
+		if verr == nil && !plan.version.RecordsPositionOn(sv) {
+			return fmt.Errorf("mydumper %s cannot record the binlog position on MySQL %s: builds older than %s read it "+
+				"with SHOW MASTER STATUS, which MySQL 8.4 removed, so the backup would be refused after a full dump and "+
+				"the dump was not started. Install mydumper %s or newer",
+				plan.version, sv, mydumperlock.PositionFloor, mydumperlock.LockModeFloor)
+		}
+	}
+
 	if lockMode.NeedsElevatedPrivileges() {
 		// Hard gate, unlike the NO_LOCK warning below: granting BACKUP_ADMIN
 		// without RELOAD/FLUSH_TABLES does not fail cleanly in mydumper — it
-		// SEGFAULTS (verified against the pinned build, #800). Never skipped.
-		if err := checkMydumperPrivileges(ctx, sourceDSN, lockMode, mydumperlock.RemedyConsole, schemas); err != nil {
-			return err
+		// SEGFAULTS (verified against the pinned build, #800). Skipped ONLY for
+		// a build READ as older than mydumperlock.LockInstanceExemptBelow:
+		// requiresBackupAdmin decides from the SERVER's version, so demanding
+		// BACKUP_ADMIN from a 0.10 build, which takes no backup lock at all,
+		// would refuse a dump that works — while 0.16 and 0.17 DO take it and
+		// keep the gate. An unreadable version keeps the gate too.
+		if plan.preflight {
+			if err := checkMydumperPrivileges(ctx, sourceDSN, lockMode, mydumperlock.RemedyConsole, schemas); err != nil {
+				return err
+			}
 		}
 	} else if lockMode == baseline.LockModeNoLock {
 		// Only for no-lock. safe-no-lock reaches this branch too, but it
@@ -739,8 +913,10 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 		warnIfMultiTableNoLock(ctx, sourceDSN, schemas)
 	}
 
-	args := buildConsoleMydumperArgs(host, port, user, schemas, dumpDir, lockMode)
-	cmd := exec.CommandContext(ctx, "mydumper", args...)
+	args := buildConsoleMydumperArgs(host, port, user, schemas, dumpDir, lockMode, plan.sendLockFlags)
+	// plan.path, not the bare name: the dump must run the very binary whose
+	// version was just read.
+	cmd := exec.CommandContext(ctx, plan.path, args...)
 	// Deliver the source password out of band via MYSQL_PWD (honored by the
 	// MySQL client library mydumper links against) so it never lands on argv,
 	// where it would be world-readable in `ps aux` / /proc/<pid>/cmdline. The
@@ -769,8 +945,9 @@ const systemSchemaExcludeRegex = `^(?!(mysql|sys|performance_schema|information_
 // buildConsoleMydumperArgs builds the mydumper argument slice for the console's
 // in-process dump. It mirrors `bintrail dump` / the compose baseline-dump
 // invocation for the shared flags; lockMode picks --sync-thread-lock-mode
-// (#800, #1377). internal/baseline.LockMode carries the measured comparison of
-// the three modes; the two consequences specific to THIS call site:
+// (#800, #1377) when sendLockFlags is true. internal/baseline.LockMode carries
+// the measured comparison of the three modes; the two consequences specific to
+// THIS call site, both about a build that receives the flags:
 //
 //   - EVERY point-consistent mode covers TRANSACTIONAL tables only — LOCK_ALL
 //     exactly as much as FTWRL, verified for each — and --trx-tables makes
@@ -786,9 +963,14 @@ const systemSchemaExcludeRegex = `^(?!(mysql|sys|performance_schema|information_
 //     MySQL/Percona 8.0+ (for LOCK INSTANCE FOR BACKUP). Granting BACKUP_ADMIN
 //     WITHOUT RELOAD does not fail cleanly — the pinned build SEGFAULTS — which
 //     is why mydumperlock.CheckPrivileges runs first and never lets mydumper
-//     attempt it half-privileged, and why this code never silently falls back.
-func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []string, dumpDir string, lockMode baseline.LockMode) []string {
-	syncMode := lockMode.MydumperValue()
+//     attempt it half-privileged. The one fallback, a build that cannot take
+//     the flags, is planMydumper's, and it is logged.
+//
+// sendLockFlags is false when the mydumper is older than 0.18.1, which rejects
+// both --sync-thread-lock-mode and --trx-tables with "Unknown option", or when
+// its version could not be read and the mode is ftwrl (#1688); see
+// planMydumper for when the dump may proceed without them.
+func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []string, dumpDir string, lockMode baseline.LockMode, sendLockFlags bool) []string {
 	args := []string{
 		"--host", host,
 		"--port", strconv.Itoa(int(port)),
@@ -796,7 +978,9 @@ func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []s
 		"--threads", "4",
 		"--compress-protocol",
 		"--complete-insert",
-		"--sync-thread-lock-mode", syncMode, "--trx-tables",
+	}
+	if sendLockFlags {
+		args = append(args, "--sync-thread-lock-mode", lockMode.MydumperValue(), "--trx-tables")
 	}
 	switch {
 	case len(schemas) == 1:

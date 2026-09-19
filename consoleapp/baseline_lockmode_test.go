@@ -36,7 +36,7 @@ func TestBuildConsoleMydumperArgsCarriesLockMode(t *testing.T) {
 		{baseline.LockModeSafeNoLock, "SAFE_NO_LOCK"},
 		{baseline.LockModeNoLock, "NO_LOCK"},
 	} {
-		args := buildConsoleMydumperArgs("127.0.0.1", 3306, "root", []string{"demo"}, "/tmp/d", tc.mode)
+		args := buildConsoleMydumperArgs("127.0.0.1", 3306, "root", []string{"demo"}, "/tmp/d", tc.mode, true)
 		i := slices.Index(args, "--sync-thread-lock-mode")
 		if i < 0 || i+1 >= len(args) {
 			t.Fatalf("mode %s: no --sync-thread-lock-mode in argv", tc.mode)
@@ -66,6 +66,9 @@ func TestRunMydumperForwardsTheSelectedModeToThePreflight(t *testing.T) {
 		return sentinel
 	}
 	t.Cleanup(func() { checkMydumperPrivileges = mydumperlock.CheckPrivileges })
+	// A modern mydumper on PATH: the version probe (#1688) runs before the
+	// preflight, and with no binary at all the run would stop there instead.
+	fakeConsoleMydumper(t, printsVersion(versionModern))
 
 	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/db", []string{"appdb"},
 		t.TempDir(), baseline.LockModeLockAll)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -232,9 +233,55 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 		m.StartedAt = markerStartedAt
 	}
 
+	// Where a line sits matters (#1744). The legacy format (0.10 to 0.13) puts
+	// this server's position under "SHOW MASTER STATUS:" and, on a replica, the
+	// UPSTREAM server's under "SHOW SLAVE STATUS:" with the same tab-indented
+	// keys; reading every block let the last one win, anchoring a replica's
+	// backup on another server's binlog. 0.16.x writes the position as
+	// File/Position/Executed_Gtid_Set under an INI "[master]" section.
+	var (
+		legacyBlock string // header of the current "SHOW ...:" block
+		iniSection  string // name of the current "[...]" section
+		gtidCont    bool   // the legacy GTID set continues on the next line
+	)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		// A legacy GTID set with several server UUIDs spans lines, and the
+		// continuation lines are NOT indented (measured, 0.10):
+		//	\tGTID:uuid-a:1-12,
+		//	uuid-b:1-5
+		if gtidCont {
+			if cont := strings.TrimSpace(line); cont != "" && !strings.HasPrefix(line, "\t") {
+				m.GTIDSet += cont
+				gtidCont = strings.HasSuffix(cont, ",")
+				continue
+			}
+			gtidCont = false
+		}
+		if strings.HasPrefix(line, "SHOW ") && strings.HasSuffix(line, ":") {
+			legacyBlock = line
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			iniSection = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+		}
+		// This server's own block: mydumper's legacy "SHOW MASTER STATUS:", or
+		// the "[master]" section reconstruct.WriteMetadataFile writes with the
+		// same tab-indented keys (read back by the round-trip test there).
+		inMasterBlock := legacyBlock == "SHOW MASTER STATUS:" || (legacyBlock == "" && iniSection == "master")
+
+		// The same rule for the 1.0.x keys. That format writes THIS server's
+		// position commented under "[source]" and, with --replica-data, the
+		// UPSTREAM server's UNCOMMENTED under "[replication]" — same key
+		// names, later in the file (measured against mydumper 1.0.3 dumping a
+		// real MySQL 8.0 replica: [source] carried replica-bin.000003, and
+		// [replication] carried the primary's primary-bin.000003, so the last
+		// writer won and anchored the backup on another server's binlog).
+		// An allow-list, not an exclusion: a channel's section is named
+		// "[replication.<channel>]", which an equality test would miss. The
+		// empty section keeps a headerless file readable.
+		inSourceBlock := iniSection == "" || iniSection == "source" || iniSection == "master"
 
 		// New mydumper format (0.16+) prefixes lines with "# ".
 		trimmed := strings.TrimPrefix(line, "# ")
@@ -247,23 +294,36 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 				}
 				m.StartedAt = t
 			}
-		} else if after, ok := strings.CutPrefix(line, "\tLog: "); ok {
+		} else if after, ok := strings.CutPrefix(line, "\tLog: "); ok && inMasterBlock {
 			m.BinlogFile = strings.TrimSpace(after)
-		} else if after, ok := strings.CutPrefix(line, "\tPos: "); ok {
+		} else if after, ok := strings.CutPrefix(line, "\tPos: "); ok && inMasterBlock {
 			pos, err := strconv.ParseInt(strings.TrimSpace(after), 10, 64)
 			if err == nil {
 				m.BinlogPos = pos
 			}
-		} else if after, ok := strings.CutPrefix(line, "\tGTID: "); ok {
+		} else if after, ok := strings.CutPrefix(line, "\tGTID:"); ok && inMasterBlock {
+			// No space after the colon in the legacy format (0.10 to at least
+			// 0.13, "\tGTID:uuid:1-10", measured on Ubuntu 24.04's 0.10);
+			// matching "\tGTID: " lost every such dump's GTID set (#1688).
 			m.GTIDSet = strings.TrimSpace(after)
-		} else if after, ok := strings.CutPrefix(trimmed, "SOURCE_LOG_FILE = "); ok {
-			m.BinlogFile = unquote(strings.TrimSpace(after))
-		} else if after, ok := strings.CutPrefix(trimmed, "SOURCE_LOG_POS = "); ok {
+			gtidCont = strings.HasSuffix(m.GTIDSet, ",")
+		} else if after, ok := strings.CutPrefix(line, "File = "); ok && iniSection == "master" {
+			m.BinlogFile = strings.TrimSpace(after)
+		} else if after, ok := strings.CutPrefix(line, "Position = "); ok && iniSection == "master" {
 			pos, err := strconv.ParseInt(strings.TrimSpace(after), 10, 64)
 			if err == nil {
 				m.BinlogPos = pos
 			}
-		} else if after, ok := strings.CutPrefix(trimmed, "executed_gtid_set = "); ok {
+		} else if after, ok := strings.CutPrefix(line, "Executed_Gtid_Set = "); ok && iniSection == "master" {
+			m.GTIDSet = strings.TrimSpace(after)
+		} else if after, ok := strings.CutPrefix(trimmed, "SOURCE_LOG_FILE = "); ok && inSourceBlock {
+			m.BinlogFile = unquote(strings.TrimSpace(after))
+		} else if after, ok := strings.CutPrefix(trimmed, "SOURCE_LOG_POS = "); ok && inSourceBlock {
+			pos, err := strconv.ParseInt(strings.TrimSpace(after), 10, 64)
+			if err == nil {
+				m.BinlogPos = pos
+			}
+		} else if after, ok := strings.CutPrefix(trimmed, "executed_gtid_set = "); ok && inSourceBlock {
 			m.GTIDSet = unquote(strings.TrimSpace(after))
 		}
 	}
@@ -274,6 +334,53 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 		return DumpMetadata{}, fmt.Errorf("metadata file missing 'Started dump at:' line")
 	}
 	return m, nil
+}
+
+// RefusedDumpMarkerFile is written into a dump directory `bintrail dump`
+// refused (#1744). When there was no previous dump to restore, the refused one
+// stays on disk; Run reads this file and refuses to convert it.
+const RefusedDumpMarkerFile = "bintrail_dump_refused"
+
+// WriteRefusedDumpMarker records why the dump in dir was refused.
+func WriteRefusedDumpMarker(dir, reason string) error {
+	return os.WriteFile(filepath.Join(dir, RefusedDumpMarkerFile), []byte(reason+"\n"), 0o644)
+}
+
+// ReadRefusedDumpMarker reports whether dir holds a refused dump, and why.
+func ReadRefusedDumpMarker(dir string) (reason string, refused bool) {
+	b, err := os.ReadFile(filepath.Join(dir, RefusedDumpMarkerFile))
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(b)), true
+}
+
+// ErrDumpNotAnchored marks a dump whose metadata was read and names no binlog
+// position (#1688). A baseline converted from it has nothing to anchor the next
+// fold on, which would fall back to timestamps (#797's loss class) with no
+// warning, so a caller that publishes backups must refuse it.
+var ErrDumpNotAnchored = errors.New("the dump recorded no binlog position")
+
+// RequireDumpPosition reads inputDir's mydumper metadata and returns
+// ErrDumpNotAnchored when it names no binlog position. mydumper only warns and
+// exits 0 when it cannot read the position: binary logging off, a dump user
+// without REPLICATION CLIENT, or (measured with 0.10) a build older than 0.16.3
+// against MySQL 8.4, which removed SHOW MASTER STATUS. An unreadable
+// or missing metadata file is returned as ParseMetadata's own error, not as
+// ErrDumpNotAnchored, so each caller decides what an unverifiable dump means.
+func RequireDumpPosition(inputDir string) error {
+	m, err := ParseMetadata(inputDir)
+	if err != nil {
+		return err
+	}
+	if m.BinlogFile == "" {
+		return fmt.Errorf("%w: mydumper exited successfully, but its metadata names no binlog position, "+
+			"so a backup made from it could not be updated from recorded changes. Three things cause this: "+
+			"binary logging is off on the source; the dump user cannot read the position (it needs REPLICATION CLIENT, "+
+			"or BINLOG MONITOR on MariaDB); or mydumper is older than 0.16.3 and the source is MySQL 8.4 or newer, "+
+			"which removed the statement those builds read the position with", ErrDumpNotAnchored)
+	}
+	return nil
 }
 
 // ReadParquetMetadata opens a local Parquet file and extracts the baseline

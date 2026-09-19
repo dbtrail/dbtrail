@@ -59,6 +59,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is told apart from a real failure by the server's error number, not by
   its wording — a missing or corrupt tablespace (error 1932) says "doesn't
   exist" too, and used to read as a clean answer.
+- **Console backups work with the mydumper a Linux distribution packages**
+  (#1688). The console always passed `--sync-thread-lock-mode` and
+  `--trx-tables`, which mydumper accepts only from 0.18.1 on, so on a host
+  whose mydumper came from the distribution (Ubuntu 24.04 packages 0.10.1)
+  every scheduled full backup and every Create backup failed with "Unknown
+  option", once per slot, while capture kept the daemon looking healthy. The
+  console now reads the version first, as `bintrail dump` already did. With
+  the default lock mode (`ftwrl`) an older build dumps without the two flags
+  and takes its own FTWRL. Any other mode set in
+  `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` is refused before mydumper starts,
+  with a message naming the installed version and 0.18.1, because dropping
+  the flag would dump under a lock nobody chose. A build that does not run,
+  or does not answer `--version` within ten seconds, is refused with its path
+  and its own error. The daemon also says all this once at startup when
+  backups are enabled, besides each run saying it.
+- **A dump with no binlog position is refused instead of published**
+  (#1688). mydumper exits 0 with no position in its metadata when binary
+  logging is off on the source, when the dump user lacks `REPLICATION
+  CLIENT`, and for a build older than 0.16.3 against MySQL 8.4, which removed
+  the statement those builds read it with (measured with Ubuntu's 0.10; 0.16.3
+  records it). A backup converted from such a dump had nothing to anchor the
+  next update on, which then fell back to timestamps with no warning. Console
+  backups and `bintrail dump` now fail and name the three causes; `bintrail
+  dump` keeps the previous dump in place, and when there was none it marks
+  the refused one, which `bintrail baseline` then refuses to convert. Console
+  backups also refuse a dump whose metadata cannot be read, and a console
+  backup with a build older than 0.16.3 against MySQL 8.4 or newer is refused
+  before it starts, instead of after a full dump under FTWRL. `bintrail
+  baseline` still converts a hand-made dump with no position, and now warns
+  that it has none.
+- **mydumper metadata is read from the right place** (#1688). Builds 0.10 to
+  at least 0.13 write `GTID:` with no space before the set, and the parser
+  expected one, so every such baseline lost its GTID set without a word; a set
+  with several server UUIDs also continues on unindented lines, which are now
+  joined. On a replica those builds write the upstream server's coordinates
+  after the replica's own, in a `SHOW SLAVE STATUS:` block, and the parser
+  kept the last ones it read, anchoring the backup on another server's
+  binlog; only the `SHOW MASTER STATUS:` block is read now. mydumper 0.16.x
+  writes the position as `File`/`Position`/`Executed_Gtid_Set` under
+  `[master]`, which was not read at all. mydumper 1.0.x repeats the same
+  keys twice when it dumps a replica with `--replica-data`: this server's
+  position under `[source]` and the upstream server's under `[replication]`,
+  later in the file. The last one used to win, which anchored a replica's
+  backup on the primary's binlog; only this server's own section is read now.
+- **A mydumper binary that does not run is named as such** (#1699). `bintrail
+  dump` treated a binary that failed to start, or exited non-zero without a
+  readable version (a missing shared library exits 127), as one whose version
+  could not be read, so its first hard error could be a privilege refusal
+  naming `BACKUP_ADMIN`. It now stops with the binary's path and its own
+  error, and so does the console, which never read the version before.
+- **The backup-privilege check is no longer skipped for mydumper 0.16 and
+  0.17** (#1688). That check exists because granting `BACKUP_ADMIN` without
+  `RELOAD` makes mydumper crash rather than fail with a message, and it was
+  skipped for every build older than 0.18.1 on the grounds that an old build
+  may never take MySQL's backup lock. Measured: the 0.10 that Ubuntu 24.04
+  and Debian bookworm package takes no such lock, but 0.16.3 and 1.0.3 both
+  do. Only builds older than 0.11 are exempt now, in `bintrail dump` and in
+  the console alike.
+- **A baseline with no binlog position says so even when the dump's metadata
+  cannot be read** (#1688). Converting a dump with an explicit timestamp
+  logged that case at Info while the read-but-empty case warned, although
+  both publish a baseline that an update or restore can only anchor by
+  time.
 - **A steady load no longer turns the backup schedule into a full backup
   every slot** (#1736). The cut-over rule (#1721) estimated an update's
   cost from a marginal rate, events beyond the shortest recent update per

@@ -28,7 +28,7 @@ import (
 //
 // And it must be a REAL shape (#1686). It used to read "mydumper 0.18.0 (built
 // with foo)", impossible twice over: no 0.18.0 was ever released (see
-// mydumperSupportsLockMode) and every build measured from 0.16.3 up carries the
+// mydumperlock.Version.SupportsLockMode) and every build measured from 0.16.3 up carries the
 // "v" prefix. With a string a binary actually prints, the three tests below
 // become regression tests for the parser half — revert the "v" strip and they
 // go red, because the version reads as "very old mydumper" again.
@@ -244,7 +244,7 @@ func TestFakeMydumperVersionReportsVerbatim(t *testing.T) {
 // the shape we have SEEN; this fixes what the next unrecognised shape does.
 //
 // The mode is left at the ftwrl default deliberately: setting --lock-mode would
-// trip the "needs mydumper 0.18 or newer" refusal earlier in runDump and the
+// trip the "needs mydumper 0.18.1 or newer" refusal earlier in runDump and the
 // test would pass without ever reaching the preflight.
 func TestRunDumpUnreadableVersionStillChecksPrivileges(t *testing.T) {
 	dir := t.TempDir()
@@ -310,13 +310,13 @@ func TestRunDumpLockModeRefusalNamesTheRealReason(t *testing.T) {
 			version:     "mydumper built from source",
 			wantContain: "version could not be read",
 			// The false assertion this split exists to remove.
-			wantAbsent: "0.18 or newer",
+			wantAbsent: "0.18.1 or newer",
 		},
 		{
 			name:    "positively_old_build_still_says_upgrade",
 			version: "mydumper 0.15.0 (built with foo)",
 			// Unchanged for a build we actually read: upgrading IS the remedy.
-			wantContain: "0.18 or newer",
+			wantContain: "0.18.1 or newer",
 			wantAbsent:  "could not be read",
 		},
 	}
@@ -372,7 +372,9 @@ func TestRunDumpLockModeRefusalNamesTheRealReason(t *testing.T) {
 // flag with no suite going red.
 func TestRunDumpKnownOldMydumperStillSkipsPreflight(t *testing.T) {
 	dir := t.TempDir()
-	bin, record := fakeMydumperVersion(t, dir, "mydumper 0.15.0 (built with foo)")
+	// 0.10 is the shape Ubuntu 24.04 and Debian bookworm package, and the one
+	// MEASURED to issue no LOCK INSTANCE FOR BACKUP at all.
+	bin, record := fakeMydumperVersion(t, dir, "mydumper 0.10.1 (built with foo)")
 
 	stubPingSource(t)
 	dumpLockDir = func() string { return dir }
@@ -404,13 +406,199 @@ func TestRunDumpKnownOldMydumperStillSkipsPreflight(t *testing.T) {
 	// assertion is fatal, and if the preflight ran it fails with the stub's own
 	// error, hiding the real diagnostic behind an unrelated message.
 	if called {
-		t.Fatal("the privilege preflight ran for a build positively read as pre-0.18; it may be judged against " +
-			"BACKUP_ADMIN, which such a build need never use — that refuses a dump that works today")
+		t.Fatal("the privilege preflight ran for a build measured to take no backup lock; it is judged against " +
+			"BACKUP_ADMIN, which such a build never uses — that refuses a dump that works today")
 	}
 	if err != nil {
-		t.Fatalf("a pre-0.18 mydumper was blocked by a preflight it does not need: %v", err)
+		t.Fatalf("a 0.10 mydumper was blocked by a preflight it does not need: %v", err)
 	}
 	if _, statErr := os.Stat(record); statErr != nil {
 		t.Errorf("mydumper never ran: %v", statErr)
+	}
+}
+
+// TestRunDumpBrokenBinaryIsNamedNotAPrivilegeGap pins #1699: a mydumper that
+// does not run at all used to fall into the "version unknown" branch, which
+// runs the privilege preflight, so the first hard error named BACKUP_ADMIN for a
+// binary that never executed. It must now be refused as what it is, before the
+// preflight and before anything is launched.
+func TestRunDumpBrokenBinaryIsNamedNotAPrivilegeGap(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "mydumper")
+	record := filepath.Join(dir, "argv.txt")
+	// What a build whose dynamic linker cannot resolve a library does: the
+	// loader complains on stderr and the process exits 127 before main runs.
+	script := "#!/bin/bash\n" +
+		"if [ \"$1\" = \"--version\" ]; then printf 'mydumper: error while loading shared libraries: libmysqlclient.so.21: cannot open shared object file\\n' >&2; exit 127; fi\n" +
+		"echo \"$@\" > " + record + "\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stubPingSource(t)
+	dumpLockDir = func() string { return dir }
+	t.Cleanup(func() { dumpLockDir = os.TempDir })
+
+	called := false
+	checkMydumperPrivileges = func(_ context.Context, _ string, _ baseline.LockMode, _ mydumperlock.Remedy, _ []string) error {
+		called = true
+		return errors.New("missing BACKUP_ADMIN")
+	}
+	t.Cleanup(func() { checkMydumperPrivileges = mydumperlock.CheckPrivileges })
+
+	dmpSourceDSN = "u:p@tcp(127.0.0.1:1)/"
+	dmpOutputDir = filepath.Join(dir, "out")
+	dmpMydumperPath = bin
+	dmpFormat = "text"
+	t.Cleanup(func() { dmpLockMode = "ftwrl"; dmpSourceDSN = ""; dmpOutputDir = "" })
+
+	cmd := newDumpCmdForTest(t)
+	if err := cmd.Flags().Set("mydumper-path", bin); err != nil {
+		t.Fatal(err)
+	}
+	err := runDump(cmd, nil)
+	if called {
+		t.Fatal("a mydumper that does not run reached the privilege preflight; the operator is told about BACKUP_ADMIN instead of the broken binary")
+	}
+	if !errors.Is(err, mydumperlock.ErrNotRunnable) || !strings.Contains(err.Error(), "libmysqlclient.so.21") {
+		t.Fatalf("runDump err = %v, want a refusal carrying the loader's own complaint", err)
+	}
+	if _, statErr := os.Stat(record); statErr == nil {
+		t.Error("mydumper was launched after its --version failed to run")
+	}
+}
+
+// TestRunDumpRefusesADumpWithNoPositionAndKeepsThePreviousOne (#1688): mydumper
+// older than 0.16.3 exits 0 against MySQL 8.4 with no binlog position in its
+// metadata (measured). That dump cannot seed a baseline anything is folded onto,
+// so `bintrail dump` must fail, and must not replace the previous good dump.
+func TestRunDumpRefusesADumpWithNoPositionAndKeepsThePreviousOne(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "mydumper")
+	script := "#!/bin/bash\n" +
+		"if [ \"$1\" = \"--version\" ]; then printf 'mydumper 0.10.0, built against MySQL 8.0.36\\n'; exit 0; fi\n" +
+		"out=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"--outputdir\" ]; then out=\"$a\"; fi; prev=\"$a\"; done\n" +
+		"mkdir -p \"$out\"\n" +
+		"printf 'Started dump at: 2026-09-19 18:14:40\\nFinished dump at: 2026-09-19 18:14:40\\n' > \"$out/metadata\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The previous, good dump, which must survive the refusal.
+	out := filepath.Join(dir, "out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const good = "Started dump at: 2026-09-18 03:00:00\nSHOW MASTER STATUS:\n\tLog: binlog.000001\n\tPos: 4\n\nFinished dump at: 2026-09-18 03:00:01\n"
+	if err := os.WriteFile(filepath.Join(out, "metadata"), []byte(good), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stubPingSource(t)
+	dumpLockDir = func() string { return dir }
+	t.Cleanup(func() { dumpLockDir = os.TempDir })
+
+	dmpSourceDSN = "u:p@tcp(127.0.0.1:1)/"
+	dmpOutputDir = out
+	dmpMydumperPath = bin
+	dmpFormat = "text"
+	t.Cleanup(func() { dmpLockMode = "ftwrl"; dmpSourceDSN = ""; dmpOutputDir = "" })
+
+	cmd := newDumpCmdForTest(t)
+	if err := cmd.Flags().Set("mydumper-path", bin); err != nil {
+		t.Fatal(err)
+	}
+	err := runDump(cmd, nil)
+	if !errors.Is(err, baseline.ErrDumpNotAnchored) {
+		t.Fatalf("runDump err = %v, want ErrDumpNotAnchored", err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(out, "metadata"))
+	if readErr != nil || string(got) != good {
+		t.Errorf("the previous dump was not restored after the refusal (read err %v): metadata now %q", readErr, got)
+	}
+}
+
+// TestRunDumpMarksARefusedFirstDump (#1744): with no previous dump to restore,
+// the refused one stays in --output-dir. It is marked, so `bintrail baseline`
+// refuses it instead of publishing a baseline with no position.
+func TestRunDumpMarksARefusedFirstDump(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "mydumper")
+	script := "#!/bin/bash\n" +
+		"if [ \"$1\" = \"--version\" ]; then printf 'mydumper 0.10.0, built against MySQL 8.0.36\\n'; exit 0; fi\n" +
+		"out=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"--outputdir\" ]; then out=\"$a\"; fi; prev=\"$a\"; done\n" +
+		"mkdir -p \"$out\"\n" +
+		"printf 'Started dump at: 2026-09-19 18:14:40\\nFinished dump at: 2026-09-19 18:14:40\\n' > \"$out/metadata\"\n" +
+		"printf 'CREATE TABLE `t` (\\n  `id` int NOT NULL,\\n  PRIMARY KEY (`id`)\\n) ENGINE=InnoDB;\\n' > \"$out/appdb.t-schema.sql\"\n" +
+		"printf 'INSERT INTO `t` VALUES(1);\\n' > \"$out/appdb.t.00000.sql\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out") // nothing here yet: a first dump
+
+	stubPingSource(t)
+	dumpLockDir = func() string { return dir }
+	t.Cleanup(func() { dumpLockDir = os.TempDir })
+	dmpSourceDSN = "u:p@tcp(127.0.0.1:1)/"
+	dmpOutputDir = out
+	dmpMydumperPath = bin
+	dmpFormat = "text"
+	t.Cleanup(func() { dmpLockMode = "ftwrl"; dmpSourceDSN = ""; dmpOutputDir = "" })
+
+	cmd := newDumpCmdForTest(t)
+	if err := cmd.Flags().Set("mydumper-path", bin); err != nil {
+		t.Fatal(err)
+	}
+	if err := runDump(cmd, nil); !errors.Is(err, baseline.ErrDumpNotAnchored) {
+		t.Fatalf("runDump err = %v, want ErrDumpNotAnchored", err)
+	}
+	if _, refused := baseline.ReadRefusedDumpMarker(out); !refused {
+		t.Fatal("the refused first dump was left unmarked, so bintrail baseline would convert it")
+	}
+	if _, err := baseline.Run(context.Background(), baseline.Config{InputDir: out, OutputDir: t.TempDir(), Compression: "none"}); err == nil {
+		t.Error("bintrail baseline converted a dump bintrail dump refused")
+	}
+}
+
+// TestRunDumpOldBuildThatTakesTheBackupLockStillChecksPrivileges is the other
+// half of the skip above. The exemption is about the BACKUP LOCK, not about
+// being old: 0.16.3 is below the --sync-thread-lock-mode floor and still
+// issues LOCK INSTANCE FOR BACKUP (measured 2026-09-19 against MySQL 8.0 with
+// the general log on), so the #800 check — which exists because granting
+// BACKUP_ADMIN without RELOAD SEGFAULTS mydumper — must run for it.
+func TestRunDumpOldBuildThatTakesTheBackupLockStillChecksPrivileges(t *testing.T) {
+	dir := t.TempDir()
+	bin, _ := fakeMydumperVersion(t, dir, "mydumper v0.16.3-6, built against MySQL 8.4.1 with SSL support")
+
+	stubPingSource(t)
+	dumpLockDir = func() string { return dir }
+	t.Cleanup(func() { dumpLockDir = os.TempDir })
+
+	called := false
+	checkMydumperPrivileges = func(_ context.Context, _ string, _ baseline.LockMode, _ mydumperlock.Remedy, _ []string) error {
+		called = true
+		return errStopAfterPreflight
+	}
+	t.Cleanup(func() { checkMydumperPrivileges = mydumperlock.CheckPrivileges })
+
+	dmpSourceDSN = "u:p@tcp(127.0.0.1:1)/"
+	dmpOutputDir = filepath.Join(dir, "out")
+	dmpMydumperPath = bin
+	dmpFormat = "text"
+	t.Cleanup(func() { dmpLockMode = "ftwrl"; dmpSourceDSN = ""; dmpOutputDir = "" })
+
+	cmd := newDumpCmdForTest(t)
+	if err := cmd.Flags().Set("mydumper-path", bin); err != nil {
+		t.Fatal(err)
+	}
+	err := runDump(cmd, nil)
+	if !called {
+		t.Fatal("the privilege preflight was skipped for a build that takes the backup lock: the check that " +
+			"prevents a segfault is off for every 0.16/0.17 install")
+	}
+	if !errors.Is(err, errStopAfterPreflight) {
+		t.Fatalf("err = %v, want the preflight stub's error (the dump must not start)", err)
 	}
 }

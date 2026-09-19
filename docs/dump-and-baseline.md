@@ -54,7 +54,13 @@ If you prefer to install mydumper as a local binary instead of using Docker:
 wget https://github.com/mydumper/mydumper/releases/download/v1.0.3-1/mydumper_1.0.3-1.jammy_amd64.deb
 sudo dpkg -i mydumper_*.deb
 
-# Or from the system repository (may be older)
+# Or from the system repository. Ubuntu 24.04 packages 0.10.1, older than
+# 0.18.1, the first build that accepts --sync-thread-lock-mode. With such a
+# build the default lock mode runs with mydumper's own FTWRL; any explicit
+# `bintrail dump --lock-mode` (even ftwrl) and a console lock mode other than
+# ftwrl are refused, naming the installed version. It is also older than
+# 0.16.3, so against MySQL 8.4 and newer it cannot record the binlog position
+# and its dumps are refused whatever the lock mode.
 sudo apt-get install mydumper
 ```
 

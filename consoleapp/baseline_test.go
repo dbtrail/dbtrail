@@ -21,7 +21,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 		// These let a least-privilege replication user (no BACKUP_ADMIN/RELOAD)
 		// dump consistently — verified against a real Percona 8.0 source. Their
 		// absence is the bug that produced a schema-only dump.
-		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"x"}, "/out", baseline.LockModeNoLock)
+		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"x"}, "/out", baseline.LockModeNoLock, true)
 		if valueAfter(args, "--sync-thread-lock-mode") != "NO_LOCK" {
 			t.Errorf("missing --sync-thread-lock-mode NO_LOCK: %v", args)
 		}
@@ -39,7 +39,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 	// stays present: it shortens the FTWRL hold for transactional tables and is
 	// documented as compatible with any --sync-thread-lock-mode value.
 	t.Run("point-consistent mode uses FTWRL", func(t *testing.T) {
-		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"x"}, "/out", baseline.LockModeFTWRL)
+		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"x"}, "/out", baseline.LockModeFTWRL, true)
 		if valueAfter(args, "--sync-thread-lock-mode") != "FTWRL" {
 			t.Errorf("missing --sync-thread-lock-mode FTWRL: %v", args)
 		}
@@ -52,7 +52,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 	})
 
 	t.Run("no schema filter excludes system schemas", func(t *testing.T) {
-		args := buildConsoleMydumperArgs("h", 3306, "u", nil, "/out", baseline.LockModeNoLock)
+		args := buildConsoleMydumperArgs("h", 3306, "u", nil, "/out", baseline.LockModeNoLock, true)
 		if has(args, "--database") {
 			t.Errorf("no schema filter must not use --database: %v", args)
 		}
@@ -65,7 +65,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 	})
 
 	t.Run("single schema uses --database", func(t *testing.T) {
-		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"wordpress"}, "/out", baseline.LockModeNoLock)
+		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"wordpress"}, "/out", baseline.LockModeNoLock, true)
 		if v := valueAfter(args, "--database"); v != "wordpress" {
 			t.Errorf("--database = %q, want wordpress: %v", v, args)
 		}
@@ -75,7 +75,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 	})
 
 	t.Run("multiple schemas use anchored --regex", func(t *testing.T) {
-		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"a", "b"}, "/out", baseline.LockModeNoLock)
+		args := buildConsoleMydumperArgs("h", 3306, "u", []string{"a", "b"}, "/out", baseline.LockModeNoLock, true)
 		if v := valueAfter(args, "--regex"); v != "^(a|b)\\." {
 			t.Errorf("--regex = %q, want ^(a|b)\\. : %v", v, args)
 		}
@@ -87,7 +87,7 @@ func TestBuildConsoleMydumperArgs(t *testing.T) {
 	t.Run("password never appears on argv (#811)", func(t *testing.T) {
 		for _, schemas := range [][]string{nil, {"wordpress"}, {"a", "b"}} {
 			for _, lockMode := range baseline.LockModeValues {
-				args := buildConsoleMydumperArgs("h", 3306, "u", schemas, "/out", lockMode)
+				args := buildConsoleMydumperArgs("h", 3306, "u", schemas, "/out", lockMode, true)
 				if has(args, "--password") {
 					t.Errorf("schemas=%v lockMode=%v: --password must never appear on argv: %v", schemas, lockMode, args)
 				}
@@ -169,7 +169,10 @@ func TestRunMydumper_deliversPasswordViaEnvNotArgv(t *testing.T) {
 	// Fake `mydumper` resolved via PATH. Uses only bash builtins (printf,
 	// redirection) so it needs nothing else on PATH.
 	fakeBin := filepath.Join(dir, "mydumper")
+	// It answers --version like the build the console image bundles: since
+	// #1688 runMydumper reads the version before it dumps.
 	script := `#!/bin/bash
+if [ "$1" = "--version" ]; then printf 'mydumper v1.0.3-1, built against MySQL 8.4.9 with SSL support\n'; exit 0; fi
 printf 'ARGS: %s\n' "$*" > "$BINTRAIL_TEST_RECORD"
 printf 'MYSQL_PWD=%s\n' "$MYSQL_PWD" >> "$BINTRAIL_TEST_RECORD"
 exit 0
@@ -228,7 +231,9 @@ func TestRunMydumper_pointConsistentPreflightBlocksExecution(t *testing.T) {
 	// If this fake mydumper ever runs, it proves the preflight gate was
 	// bypassed — the record file's mere existence is the failure signal.
 	fakeBin := filepath.Join(dir, "mydumper")
-	script := "#!/bin/bash\nprintf 'RAN\\n' > \"$BINTRAIL_TEST_RECORD\"\nexit 0\n"
+	// Answers --version (modern build) without touching the record: only a
+	// real launch may create it.
+	script := "#!/bin/bash\nif [ \"$1\" = \"--version\" ]; then printf 'mydumper v1.0.3-1, built against MySQL 8.4.9 with SSL support\\n'; exit 0; fi\nprintf 'RAN\\n' > \"$BINTRAIL_TEST_RECORD\"\nexit 0\n"
 	if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake mydumper: %v", err)
 	}

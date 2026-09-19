@@ -2,6 +2,7 @@ package cliapp
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -255,18 +256,28 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// Kept so a refusal can quote the REASON the version is unknown instead of
 	// blaming an age nothing measured.
 	var versionErr error
+	var probed mydumperlock.Version // what --version printed, when knownOldMydumper
 	if res.mode == dumpModeLocal {
-		major, minor, patch, verErr := mydumperVersion(res.path)
-		if verErr != nil {
+		v, verErr := mydumperlock.ProbeVersion(res.path)
+		switch {
+		case errors.Is(verErr, mydumperlock.ErrNotRunnable):
+			// A binary that cannot run --version will not complete a dump
+			// either, so failing here loses nothing. Routing it into the
+			// "unknown version" branch instead would make the first hard error
+			// a privilege refusal naming BACKUP_ADMIN, for a binary that does
+			// not execute at all (#1699).
+			return fmt.Errorf("%w; fix or replace that binary (--mydumper-path), a dump runs the same executable", verErr)
+		case verErr != nil:
 			slog.Warn("could not determine mydumper version; omitting --sync-thread-lock-mode and --trx-tables for safety",
 				"error", verErr)
 			supportsLockMode = false
 			versionErr = verErr
-		} else if !mydumperSupportsLockMode(major, minor) {
+		case !v.SupportsLockMode():
 			slog.Warn("mydumper version is older than 0.18; omitting --sync-thread-lock-mode and --trx-tables — the dump may hold heavier locks",
-				"version", fmt.Sprintf("%d.%d.%d", major, minor, patch))
+				"version", v.String())
 			supportsLockMode = false
 			knownOldMydumper = true
+			probed = v
 		}
 	}
 	// Refuse rather than silently ignore an explicit choice. Dropping the flag
@@ -287,8 +298,8 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// true about why the flag cannot be sent.
 	if !supportsLockMode && cmd.Flags().Changed("lock-mode") {
 		if knownOldMydumper {
-			return fmt.Errorf("--lock-mode %s needs mydumper 0.18 or newer (this build does not accept --sync-thread-lock-mode); "+
-				"upgrade mydumper, or point --mydumper-image at a newer pinned image", lockMode)
+			return fmt.Errorf("--lock-mode %s needs mydumper %s or newer (this build is %s and does not accept --sync-thread-lock-mode); "+
+				"upgrade mydumper, or point --mydumper-image at a newer pinned image", lockMode, mydumperlock.LockModeFloor, probed)
 		}
 		// Deliberately NOT suggesting --mydumper-image: reaching Docker mode
 		// requires NO mydumper on $PATH (see resolveMydumper), so an operator
@@ -319,12 +330,15 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// two-step but true chain, against a segfault that says nothing at all. It
 	// is also why the refusal above had to stop claiming the build is old.
 	//
-	// A build we positively READ as pre-0.18 keeps skipping, on purpose:
-	// requiresBackupAdmin decides from the SERVER's version, not mydumper's, so
-	// demanding BACKUP_ADMIN from an old build that may never issue LOCK
-	// INSTANCE FOR BACKUP would refuse a dump that works today. That is a
-	// live configuration — Ubuntu 24.04 and Debian bookworm both package 0.10.1.
-	if !knownOldMydumper && lockMode.NeedsElevatedPrivileges() {
+	// A build we positively READ as taking no backup lock keeps skipping, on
+	// purpose: requiresBackupAdmin decides from the SERVER's version, not
+	// mydumper's, so demanding BACKUP_ADMIN from a build that never issues LOCK
+	// INSTANCE FOR BACKUP would refuse a dump that works today. That is a live
+	// configuration — Ubuntu 24.04 and Debian bookworm both package 0.10.1.
+	// The skip used to cover every pre-0.18 build, which was wider than its own
+	// reason: 0.16.3 and 1.0.3 both issue the lock (measured), so only builds
+	// older than mydumperlock.LockInstanceExemptBelow are exempt now.
+	if (!knownOldMydumper || probed.TakesBackupLock()) && lockMode.NeedsElevatedPrivileges() {
 		if err := checkMydumperPrivileges(cmd.Context(), dmpSourceDSN, lockMode, mydumperlock.RemedyCLI, schemas); err != nil {
 			return err
 		}
@@ -359,7 +373,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 
 	// 6. Probe mydumper version and build args.
 	// --sync-thread-lock-mode and --trx-tables require mydumper >= 0.18 (see
-	// mydumperSupportsLockMode). Distro apt packages ship older builds —
+	// mydumperlock.Version.SupportsLockMode). Distro apt packages ship older builds —
 	// Ubuntu 24.04 and Debian bookworm both package upstream 0.10.1, whose
 	// binary self-reports 0.10.0 — so we must not pass the flags
 	// unconditionally or the dump fails (#219, #460). Docker mode is NOT
@@ -425,6 +439,28 @@ func runDump(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("mydumper failed: %w; stderr: %s", runErr, stderr)
 		}
 		return fmt.Errorf("mydumper failed: %w", runErr)
+	}
+
+	// A dump with no binlog position cannot seed a baseline anything is ever
+	// folded onto (#1688): mydumper exits 0 with no position when binary logging
+	// is off, when the dump user cannot read it, and (measured) for a build older
+	// than 0.16.3 against MySQL 8.4. Returning here, before dumpSucceeded,
+	// restores the previous dump if there was one. When there was none the
+	// refused dump stays in place, so it is marked, and `bintrail baseline`
+	// refuses to convert it (#1744). Metadata missing altogether, or without a
+	// "Started dump at" line, is only warned about: that is not a shape any
+	// measured build writes, and `bintrail baseline` without --timestamp
+	// refuses it on its own.
+	switch err := baseline.RequireDumpPosition(dmpOutputDir); {
+	case errors.Is(err, baseline.ErrDumpNotAnchored):
+		if mErr := baseline.WriteRefusedDumpMarker(dmpOutputDir, err.Error()); mErr != nil {
+			slog.Warn("could not mark the refused dump; do not convert it with bintrail baseline",
+				"output_dir", dmpOutputDir, "error", mErr)
+		}
+		return err
+	case err != nil:
+		slog.Warn("could not read the dump's metadata to confirm it records a binlog position",
+			"output_dir", dmpOutputDir, "error", err)
 	}
 
 	slog.Info("dump complete", "output_dir", dmpOutputDir)
@@ -602,85 +638,10 @@ func (p *dumpDirPrep) rollback() {
 	}
 }
 
-// mydumperVersion runs `<path> --version` and parses the version triple via
-// parseMydumperVersion. Returns (0, 0, 0, err) on any failure.
-//
-// An error means the version is UNKNOWN, which is NOT the same as "old" — this
-// comment used to say the caller should assume oldest, and acting on that is
-// #1686: it switched off the privilege preflight for the builds we know least
-// about. runDump keeps the two apart (see knownOldMydumper); do not collapse
-// them back by defaulting a failure to 0.0.0 here.
-//
-// NOTE: a failed exec and an unparseable line are still merged into one error.
-// Both mean "unknown", which is all the caller acts on today, but a broken
-// binary and an unrecognised format have different remedies.
-func mydumperVersion(path string) (major, minor, patch int, err error) {
-	out, err := exec.Command(path, "--version").CombinedOutput()
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("run %s --version: %w", path, err)
-	}
-	return parseMydumperVersion(string(out))
-}
-
-// parseMydumperVersion extracts the major.minor.patch triple from mydumper
-// --version output. TWO shapes ship in the wild and both have to parse — newer
-// builds prefix the version with "v" (#1686):
-//
-//	mydumper 0.10.0, built against MySQL 8.0.36                      → 0, 10, 0
-//	mydumper v1.0.5-1, built against MariaDB 10.8.8 with SSL support → 1,  0, 5
-//
-// The prefix is NOT 1.x-only. #1686 assumed it was, which understates the
-// damage. Measured directly: the mydumper/mydumper images v0.16.3-6 and
-// v1.0.3-1 and a current Homebrew build all print it, while the 0.10.x builds
-// Ubuntu 24.04 and Debian bookworm package do not. So every build from at least
-// 0.16.3 on was unreadable here — including the 0.18 series, the FIRST that
-// accepts the very flags this version gate exists to decide about. The oldest
-// tag that prints it was NOT pinned down: no image below 0.16.3-6 is published
-// to measure, so this says "from at least" rather than naming a boundary.
-//
-// That prefix is the ONLY thing needing removal. Sscanf stops at the "-" by
-// itself, so the "-N" package-revision suffix already parses — measured, and
-// pinned by the table cases that carry one. Do not add code for it: a guard
-// that cannot fire reads as protection and is none.
-//
-// A version that does not parse is reported as such rather than defaulted, so
-// the caller can tell "this build is old" from "this build is unreadable" —
-// runDump treats those two differently at the privilege preflight.
-//
-// Extracted from mydumperVersion so the parsing logic is directly unit-testable
-// without shelling out to a real binary.
-func parseMydumperVersion(output string) (major, minor, patch int, err error) {
-	line := strings.SplitN(output, "\n", 2)[0]
-	parts := strings.Fields(line)
-	if len(parts) < 2 {
-		return 0, 0, 0, fmt.Errorf("unexpected --version output: %q", line)
-	}
-	// raw is kept for the error message: quoting the post-strip value would
-	// report a string mydumper never printed ("ersion" for a "version" field).
-	raw := strings.TrimRight(parts[1], ",")
-	n, scanErr := fmt.Sscanf(strings.TrimPrefix(raw, "v"), "%d.%d.%d", &major, &minor, &patch)
-	if scanErr != nil || n != 3 {
-		return 0, 0, 0, fmt.Errorf("cannot parse version %q from %q", raw, line)
-	}
-	return major, minor, patch, nil
-}
-
-// mydumperSupportsLockMode reports whether a mydumper version understands
-// --sync-thread-lock-mode and --trx-tables. The flags landed in mydumper
-// 0.18.1 — NOT 0.11, whose light-locking options were --less-locking /
-// --trx-consistency-only (which --trx-tables replaced; --no-locks survives
-// in modern versions). The gate previously sat at 0.11, handing 0.11–0.17
-// builds flags they reject with "unknown option" (#460). No 0.18.0 was ever
-// released — the 0.18 series starts at 0.18.1 — so gating on (major, minor)
-// alone is exact.
-func mydumperSupportsLockMode(major, minor int) bool {
-	return major > 0 || minor >= 18
-}
-
 // buildMydumperArgs constructs the argument slice for a mydumper invocation.
 // --compress-protocol and --complete-insert are always included.
 // When supportsLockMode is true (mydumper >= 0.18, see
-// mydumperSupportsLockMode), --sync-thread-lock-mode and --trx-tables are
+// mydumperlock.Version.SupportsLockMode), --sync-thread-lock-mode and --trx-tables are
 // included for lighter locking. When false (older builds, e.g. distro apt
 // packages), they are omitted so the dump works without error (#219, #460).
 // Schema filtering: single schema → --database; multiple → --regex.
