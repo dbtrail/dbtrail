@@ -49,6 +49,7 @@ const drawStrip = (caps, b, cur) => { vm.runInContext("capsCache = " + JSON.stri
 const reg = { id: "s1", name: "prod", kind: "registry", has_source: true, baseline_dir: "/var/lib/bintrail/baselines" };
 const shared = { id: "s2", name: "shared", kind: "registry", has_source: true };
 const nosrc = { id: "s3", name: "byo", kind: "registry", baseline_dir: "/var/lib/bintrail/baselines" };
+const s3only = { id: "s4", name: "s3only", kind: "registry", has_source: true, baseline_s3: "s3://b/p" };
 const cfg = { configured: true, source: "/var/lib/bintrail/baselines", snapshots: [] };
 console.log(JSON.stringify({
   off: last(card(` + marshal(true, false, false) + `)),
@@ -63,6 +64,8 @@ console.log(JSON.stringify({
   stripOffShared: drawStrip({ monitor: true, baseline_trigger: false }, cfg, shared),
   stripOffNoSource: drawStrip({ monitor: true, baseline_trigger: false }, cfg, nosrc),
   stripOnNoSource: drawStrip({ monitor: true, baseline_trigger: true }, cfg, nosrc),
+  stripOnS3Only: drawStrip({ monitor: true, baseline_trigger: true }, cfg, s3only),
+  stripOffS3Only: drawStrip({ monitor: true, baseline_trigger: false }, cfg, s3only),
 }));
 `
 	path := filepath.Join(t.TempDir(), "backupoff.js")
@@ -82,6 +85,7 @@ console.log(JSON.stringify({
 		Off, OffNoLoc, OffPG, NoLoc                                      *row
 		StripOff, StripOn, StripOffBoot, StripOffUnconfigured            drawnStrip
 		StripOnShared, StripOffShared, StripOffNoSource, StripOnNoSource drawnStrip
+		StripOnS3Only, StripOffS3Only                                    drawnStrip
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
@@ -118,7 +122,7 @@ console.log(JSON.stringify({
 		t.Errorf("no location: %s", got.NoLoc.Text)
 	}
 
-	const note = "set when DBTrail starts"
+	const note = "turned off at startup"
 	if !strings.Contains(got.StripOff.Text, "CREATE BACKUP") || !strings.Contains(got.StripOff.Text, note) ||
 		!strings.Contains(got.StripOff.Text, "Backup settings page") || len(got.StripOff.Buttons) != 0 {
 		t.Errorf("creation off: the strip does not say so where the button would be: %+v", got.StripOff)
@@ -138,7 +142,7 @@ console.log(JSON.stringify({
 	if strings.Contains(got.StripOff.Text, loc) {
 		t.Errorf("a server with its own location is told it needs one: %s", got.StripOff.Text)
 	}
-	// The daemon's shared default lists backups but a backup refuses to write
+	// The daemon's shared default lists backups, but a backup refuses to write
 	// to it: no button that is refused on click, and the reason instead.
 	if len(got.StripOnShared.Buttons) != 0 || !strings.Contains(got.StripOnShared.Text, loc) || strings.Contains(got.StripOnShared.Text, note) {
 		t.Errorf("creation on, shared location only: want the location reason and no button: %+v", got.StripOnShared)
@@ -150,6 +154,14 @@ console.log(JSON.stringify({
 	// button stays where it was (the page's live test pins it).
 	if !strings.Contains(got.StripOffNoSource.Text, "SOURCE") || strings.Contains(got.StripOffNoSource.Text, "CREATE BACKUP") {
 		t.Errorf("a server with no source gets a note: %q", got.StripOffNoSource.Text)
+	}
+	// A bucket is a location of the server's own, like a directory: the
+	// precheck takes either, and so must the strip.
+	if len(got.StripOnS3Only.Buttons) != 1 || strings.Contains(got.StripOnS3Only.Text, loc) {
+		t.Errorf("creation on, S3 only: want the button and no location reason: %+v", got.StripOnS3Only)
+	}
+	if !strings.Contains(got.StripOffS3Only.Text, note) || strings.Contains(got.StripOffS3Only.Text, loc) {
+		t.Errorf("creation off, S3 only: want only the off reason: %+v", got.StripOffS3Only)
 	}
 	if len(got.StripOnNoSource.Buttons) != 1 {
 		t.Errorf("the button moved for a server with no source and its own location: %+v", got.StripOnNoSource)

@@ -2,6 +2,7 @@ package console
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -163,15 +164,30 @@ func TestFirstRunBackupStep(t *testing.T) {
 			}
 		})
 	}
+	// Backups off is the bare default, and its step can never be done: the
+	// list must still complete on the first captured change, or the card
+	// would sit on every such Overview for good, polling.
+	t.Run("a backup step that cannot be done does not hold the list open", func(t *testing.T) {
+		in := base
+		in.EventsIndexed, in.BackupOff = 1, true
+		got := firstRunSteps(in)
+		var states strings.Builder
+		for _, s := range got.Steps {
+			states.WriteByte(s.State[0])
+		}
+		if states.String() != "dddddw" || !got.Complete {
+			t.Fatalf("states = %s, complete = %v, want dddddw and complete", states.String(), got.Complete)
+		}
+	})
 }
 
 // TestFirstRunBackupStepSaysWhyItCannotRun is #1677: a first backup the
 // console cannot create is listed with the reason and what to do, in words.
 // The step used to vanish, and a list with no backup step reads as an install
 // that needs none. The daemon setting is named the way the Backup settings
-// page labels it, never as a variable: the console shows no commands.
-// mydumper is named only for MySQL, whose full backup runs it; a PostgreSQL
-// full backup runs inside DBTrail.
+// page labels it, never as a variable: the step shows no commands.
+// mydumper is named for MySQL and MariaDB, whose full backup runs it; a
+// PostgreSQL full backup runs inside DBTrail.
 func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 	yes := true
 	base := firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true}
@@ -196,7 +212,7 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 		{"on, no location of its own", false, true, false,
 			[]string{"no backup location of its own"},
 			[]string{"Backup dir or Backup S3", "Backup settings page", "Backups page"},
-			[]string{"Create-backup button", "mydumper", "restart"}},
+			[]string{"Create-backup button", "mydumper", "Restart"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			in := base
@@ -333,13 +349,17 @@ func TestHandleFirstRun(t *testing.T) {
 			t.Fatalf("backup step = %+v, body = %s", s, body)
 		}
 	})
-	t.Run("a PostgreSQL server with no slot gets no backup step: capture fails first and says why", func(t *testing.T) {
-		id := add(ServerEntry{Name: "pgnoslot", Flavor: FlavorPostgres, SourceDSN: "postgres://<redacted>/db", BaselineDir: t.TempDir()})
-		code, body, rep := get(id)
-		if code != 200 || strings.Contains(names(rep), "backup") {
-			t.Fatalf("code = %d, steps = %s, body = %s", code, names(rep), body)
-		}
-	})
+	// Both with and without a location: the precheck reports a missing
+	// location before the slot, so the one with none is what pins the order.
+	for _, loc := range []string{t.TempDir(), ""} {
+		t.Run("a PostgreSQL server with no slot gets no backup step: capture cannot run for it (location "+strconv.Quote(loc)+")", func(t *testing.T) {
+			id := add(ServerEntry{Name: "pgnoslot" + strconv.Itoa(len(loc)), Flavor: FlavorPostgres, SourceDSN: "postgres://<redacted>/db", BaselineDir: loc})
+			code, body, rep := get(id)
+			if code != 200 || len(rep.Steps) == 0 || strings.Contains(names(rep), "backup") {
+				t.Fatalf("code = %d, steps = %s, body = %s", code, names(rep), body)
+			}
+		})
+	}
 	t.Run("a PostgreSQL server with a location gets no structure step and a backup step", func(t *testing.T) {
 		id := add(ServerEntry{Name: "pg", Flavor: FlavorPostgres, SourceDSN: "postgres://u:pw@127.0.0.1:2/db",
 			SourceSlot: "s", SourcePublication: "p", BaselineDir: t.TempDir()})
@@ -398,8 +418,8 @@ func TestHandleFirstRunWithBackupsOff(t *testing.T) {
 			}
 		})
 	}
-	// Off or on, a PostgreSQL server with no slot gets no backup step: its
-	// capture steps fail first, and turning backups on would not help.
+	// Off or on, a PostgreSQL server with no slot gets no backup step: capture
+	// cannot run for it, and turning backups on would not help.
 	t.Run("PostgreSQL with no slot", func(t *testing.T) {
 		e, err := srv.cm.reg.Add(ServerEntry{Name: "pgnoslot", Flavor: FlavorPostgres, SourceDSN: "postgres://<redacted>/db"})
 		if err != nil {

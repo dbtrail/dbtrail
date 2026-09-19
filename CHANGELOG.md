@@ -16,12 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The step now shows, waiting, with the reason and the fix: creating
   backups is turned off for the daemon (turn on the Create-backup button
   setting, listed on the Backup settings page among the settings read when
-  DBTrail starts, and restart; for MySQL, mydumper must be installed), or
-  the server has no backup location of its own. `GET
+  DBTrail starts, and restart; for MySQL and MariaDB, mydumper must be
+  installed), or the server has no backup location of its own. `GET
   /api/servers/{id}/first-run` returns that step with a `detail` and a
-  `fix`. The Backups page gives the same reasons where the button would be
-  (`CREATE BACKUP: off, set when DBTrail starts`, `needs this server's own
-  backup location`, or both), and no longer offers the button for a server
+  `fix`. When the Backups page has a location to list for the server, it
+  gives the same reasons where the button would be (`CREATE BACKUP: turned
+  off at startup`, `needs this server's own backup location`, or both), and
+  no longer offers the button for a server
   whose only location is the daemon-wide default: a backup refuses to
   write there, so the click was refused. Decided in #1677 and unchanged: a bare
   `bintrail-console watch` keeps console full backups off by default

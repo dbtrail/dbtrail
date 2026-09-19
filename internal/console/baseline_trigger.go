@@ -130,8 +130,11 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 
 // hasOwnBackupLocation: the server has a backup location of its own, the one
 // a console-created backup writes to. The daemon-wide default does not count:
-// backups and restores refuse the shared store. The precheck and the
-// Getting started list's reason both read it, so they cannot disagree.
+// a backup refuses the shared store. The precheck and the Getting started
+// list's reason call it, and the Backups page strip (baselineContextStrip in
+// app.js) repeats the same raw emptiness test, so change them together. A
+// restore also refuses the shared store but needs a local Backup dir, and
+// does not use this.
 func hasOwnBackupLocation(e ServerEntry) bool {
 	return e.BaselineDir != "" || e.BaselineS3 != ""
 }
