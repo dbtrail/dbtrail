@@ -134,6 +134,50 @@ func TestInvalidTables_versionedTablesAreValidated(t *testing.T) {
 	}
 }
 
+// TestInvalidTables_versionedTablesAreValidatedWithNoSchemaFilter is the same
+// invariant on the OTHER branch of invalidTables — the one an operator
+// monitoring every schema takes, which is the default configuration (#1611).
+// Both branches carry their own copy of the TABLE_TYPE filter, and only the
+// scoped one was tested: narrowing this one back to 'BASE TABLE' left the
+// whole package green, so the fix could ship to the default configuration
+// while the guarded branch kept it.
+func TestInvalidTables_versionedTablesAreValidatedWithNoSchemaFilter(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	// No WithArgs: the unscoped branch passes no parameters, and its query
+	// excludes the system schemas by name instead.
+	mock.ExpectQuery("SYSTEM VERSIONED").WillReturnRows(
+		sqlmock.NewRows([]string{"TABLE_SCHEMA", "TABLE_NAME", "ENGINE", "TABLE_TYPE"}).
+			AddRow("svdb", "imp", "InnoDB", "SYSTEM VERSIONED").
+			AddRow("svdb", "nopk", "InnoDB", "SYSTEM VERSIONED").
+			AddRow("svdb", "plain", "InnoDB", "BASE TABLE"))
+
+	columns := []columnRow{
+		{schemaName: "svdb", tableName: "imp", columnName: "id", ordinalPosition: 1, columnKey: "PRI"},
+		{schemaName: "svdb", tableName: "nopk", columnName: "x", ordinalPosition: 1},
+		{schemaName: "svdb", tableName: "plain", columnName: "id", ordinalPosition: 1, columnKey: "PRI"},
+	}
+	nonInnoDB, noPK, versioned, err := invalidTables(db, nil, columns)
+	if err != nil {
+		t.Fatalf("invalidTables: %v", err)
+	}
+	if len(nonInnoDB) != 0 {
+		t.Errorf("nonInnoDB = %v, want empty", nonInnoDB)
+	}
+	if len(noPK) != 1 || noPK[0] != "svdb.nopk" {
+		t.Fatalf("noPK = %v, want [svdb.nopk] — with no schema filter, a PK-less VERSIONED table must not bypass validation either", noPK)
+	}
+	if len(versioned) != 2 || versioned[0] != (tableRef{"svdb", "imp"}) || versioned[1] != (tableRef{"svdb", "nopk"}) {
+		t.Fatalf("versioned = %v, want [svdb.imp svdb.nopk] — the synthesis reads this set", versioned)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
 // TestAddImplicitPeriodColumns_agentResolverPath pins the exported
 // capture-surface sibling (the agent BYOS path, which builds its resolver
 // straight from information_schema and never sees the snapshot synthesis):

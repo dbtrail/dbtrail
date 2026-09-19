@@ -121,9 +121,11 @@ func TestSQLExportTTL_expiresAndRemovesTheBuild(t *testing.T) {
 }
 
 // TestSQLExportReaper_expiresAnUnwatchedBuild: with nobody polling, the
-// background loop alone removes a build past its deadline. The test never
-// reads the status until the directory is gone, so a lazy expiry on a read
-// cannot be what removed it.
+// background loop alone removes a build past its deadline. What keeps that
+// claim true is the DIRECT map read below, not the order of the waits:
+// SQLExportStatus expires a slot lazily when it is read, so polling through
+// it would be indistinguishable from the reaper having run. Moving this test
+// to SQLExportStatus would silently stop proving anything.
 func TestSQLExportReaper_expiresAnUnwatchedBuild(t *testing.T) {
 	sup, clk, cancel := newClockedSupervisor(t)
 	defer cancel()
@@ -132,18 +134,30 @@ func TestSQLExportReaper_expiresAnUnwatchedBuild(t *testing.T) {
 	go sup.runSQLExportReaper()
 
 	clk.advance(sqlExportTTL + time.Second)
+	// Wait on the LAST thing the reaper does, not the first (#1628).
+	// removeSQLExportBuild deletes the directory outside the supervisor mutex
+	// — deliberately, since the removal is slow and must not hold it — and
+	// only then takes the lock to flip the slot. Waiting on the directory
+	// lands inside that window and reads "succeeded" from a reaper that is
+	// working correctly. The read stays the direct map read: going through
+	// SQLExportStatus would expire the slot lazily and prove nothing about
+	// the background loop.
 	deadline := time.Now().Add(5 * time.Second)
-	for onDisk(dir) && time.Now().Before(deadline) {
+	state := ""
+	for time.Now().Before(deadline) {
+		sup.mu.Lock()
+		state = sup.exports["srv1"].State
+		sup.mu.Unlock()
+		if state == "expired" {
+			break
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if onDisk(dir) {
-		t.Fatalf("the reaper never removed %s", dir)
-	}
-	sup.mu.Lock()
-	state := sup.exports["srv1"].State
-	sup.mu.Unlock()
 	if state != "expired" {
 		t.Fatalf("state = %s after the reaper ran, want expired", state)
+	}
+	if onDisk(dir) {
+		t.Fatalf("the reaper marked the build expired but left %s on disk", dir)
 	}
 }
 

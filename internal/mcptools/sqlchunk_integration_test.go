@@ -83,8 +83,17 @@ func TestIntegrationRecoverCascadeChunking(t *testing.T) {
 	if chunks != 3 {
 		t.Fatalf("%d chunk(s) for a 3-statement script", chunks)
 	}
-	if got.String() != whole.SQL {
+	// Compared with the generated-at line set aside, the same way the script
+	// id is computed (#1643). The two fetches build the script twice, so a
+	// clock tick between them changes that one line and nothing else — a red
+	// check that means nothing. Length is asserted separately, so a chunk
+	// boundary that dropped or duplicated bytes still fails even if the
+	// normalisation ever became too generous.
+	if stampless(got.String()) != stampless(whole.SQL) {
 		t.Errorf("the reassembled chunks are not the script.\n got %q\nwant %q", got.String(), whole.SQL)
+	}
+	if len(got.String()) != len(whole.SQL) {
+		t.Errorf("the reassembled chunks are %d bytes, the whole script is %d", len(got.String()), len(whole.SQL))
 	}
 
 	// summary_only builds the same script and returns none of it.
@@ -152,4 +161,18 @@ func TestIntegrationRecoverCascadeChunkAuditing(t *testing.T) {
 	if _, ok := events[1].Detail["chunk"]; ok {
 		t.Error("a whole-script return carries a chunk range; a reader could not tell it from a partial fetch")
 	}
+}
+
+// stampless replaces the one line that carries the generation time with the
+// prefix alone, so two builds of the same script compare equal — the same line
+// scriptFingerprint skips when it computes the id a client compares.
+func stampless(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, generatedAtPrefix) {
+			lines[i] = generatedAtPrefix
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
 }
