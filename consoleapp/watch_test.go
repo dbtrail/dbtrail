@@ -434,14 +434,26 @@ func TestRotateTargets(t *testing.T) {
 	}
 	t.Cleanup(func() { resolveBintrailIDFunc = prev })
 
-	targets := rotateTargets("boot-dsn", sup, reg, "/stage")
+	targets := rotateTargets("boot-dsn", bootIdle, sup, reg, "/stage")
 	byDSN := map[string]rotation.RotateTarget{}
 	for _, tg := range targets {
 		byDSN[tg.DSN] = tg
 	}
 
-	if boot := byDSN["boot-dsn"]; boot.ArchiveS3 != "" {
-		t.Errorf("boot index must be drop-only, got ArchiveS3=%q", boot.ArchiveS3)
+	if boot := byDSN["boot-dsn"]; boot.ArchiveS3 != "" || !boot.NoWriter {
+		t.Errorf("boot index of a source-less watch must be drop-only and marked writerless, got %+v", boot)
+	}
+	// Every per-source index has a writer.
+	for _, dsn := range []string{"dsn-arch", "dsn-plain", "dsn-pending", "dsn-ghost"} {
+		if byDSN[dsn].NoWriter {
+			t.Errorf("%s: a per-source index has a writer", dsn)
+		}
+	}
+	// With the main stream writing the boot index, nothing is writerless.
+	for _, tg := range rotateTargets("boot-dsn", bootStreamed, sup, reg, "/stage") {
+		if tg.NoWriter {
+			t.Errorf("source-ful watch: %s marked writerless", tg.DSN)
+		}
 	}
 	a := byDSN["dsn-arch"]
 	if a.ArchiveS3 != "s3://bucket/prefix/" || a.BintrailID != "uuid-dsn-arch" {
@@ -841,29 +853,30 @@ func TestRunBaselinePruneCycle_reportsWhatItCouldNotReclaim(t *testing.T) {
 	}
 }
 
-// TestWatchTableDeltasFlagIsOffByDefault: against the real command, as for the
-// carry-forward flag above. Table deltas (#1638) change the on-disk layout of
-// every snapshot the daemon publishes.
-func TestWatchTableDeltasFlagIsOffByDefault(t *testing.T) {
+// TestWatchTableDeltasFlagIsOnByDefault: against the real command, as for the
+// carry-forward flag above. Table deltas (#1638) are the default since #1729;
+// the flag and the environment variable exist to turn them off.
+func TestWatchTableDeltasFlagIsOnByDefault(t *testing.T) {
 	f := watchCmd.Flags().Lookup("baseline-table-deltas")
 	if f == nil {
 		t.Fatal("--baseline-table-deltas is gone from watch; this guard covers nothing")
 	}
-	if f.DefValue != "false" {
-		t.Fatalf("default = %q, want \"false\"", f.DefValue)
+	if f.DefValue != "true" {
+		t.Fatalf("default = %q, want \"true\"", f.DefValue)
 	}
 }
 
 // TestResolveUpConsoleEnv_tableDeltasPrecedence: the same table the
-// carry-forward setting is held to. A value that is not true/false is never
-// read as consent, and an explicit flag beats the environment both ways.
+// carry-forward setting is held to, with the default now ON (#1729): a value
+// that is not true/false keeps the default (it is never read as a refusal
+// either), and an explicit flag beats the environment both ways.
 func TestResolveUpConsoleEnv_tableDeltasPrecedence(t *testing.T) {
 	prev := upBaselineTableDeltas
 	t.Cleanup(func() { upBaselineTableDeltas = prev })
 
 	newCmd := func() *cobra.Command {
 		cmd := &cobra.Command{Use: "watch"}
-		cmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", false, "")
+		cmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", true, "")
 		return cmd
 	}
 	for _, tc := range []struct {
@@ -875,14 +888,15 @@ func TestResolveUpConsoleEnv_tableDeltasPrecedence(t *testing.T) {
 		{"env on, no flag", "true", "", true},
 		{"env 1, no flag", "1", "", true},
 		{"env off, no flag", "false", "", false},
-		{"unset, no flag", "", "", false},
-		{"env says yes, no flag", "yes", "", false},
-		{"env typo, no flag", "ture", "", false},
+		{"env 0, no flag", "0", "", false},
+		{"unset, no flag", "", "", true},
+		{"env says no, no flag", "no", "", true},
+		{"env typo, no flag", "flase", "", true},
 		{"env on, flag says false", "true", "false", false},
 		{"env off, flag says true", "false", "true", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			upBaselineTableDeltas = false
+			upBaselineTableDeltas = true
 			t.Setenv("BINTRAIL_BASELINE_TABLE_DELTAS", tc.env)
 			cmd := newCmd()
 			if tc.flagSet != "" {
