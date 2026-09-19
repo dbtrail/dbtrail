@@ -40,6 +40,20 @@ func (c *logCapture) has(level slog.Level, substr string) bool {
 	return false
 }
 
+// count reports how many records at level carry substr in their message —
+// the assertion for a line that must be said once, not once per cycle.
+func (c *logCapture) count(level slog.Level, substr string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, r := range c.records {
+		if r.Level == level && strings.Contains(r.Message, substr) {
+			n++
+		}
+	}
+	return n
+}
+
 // hasAttr reports whether a record with message msg carries key=val.
 func (c *logCapture) hasAttr(msg, key, val string) bool {
 	c.mu.Lock()
@@ -101,7 +115,7 @@ func captureSlog(t *testing.T) *logCapture {
 func TestLoopOptions(t *testing.T) {
 	s := Settings{Enabled: true, Retain: 30 * 24 * time.Hour, RetainRaw: "30d", AddFuture: 3}
 	// A drop-only target (no ArchiveS3) is the default, data-loss-safe shape.
-	o := loopOptions(7*24*time.Hour, s, RotateTarget{DSN: "x"}, false)
+	o := loopOptions(7*24*time.Hour, "7d", s, RotateTarget{DSN: "x"}, false)
 
 	if !o.ProtectUnarchived {
 		t.Error("ProtectUnarchived must be armed — without it the built-in rotation drops unarchived data")
@@ -109,7 +123,7 @@ func TestLoopOptions(t *testing.T) {
 	if o.QuietEmpty {
 		t.Error("QuietEmpty must be off unless the probe found a writerless index empty (#1715)")
 	}
-	if q := loopOptions(7*24*time.Hour, s, RotateTarget{DSN: "x"}, true); !q.QuietEmpty {
+	if q := loopOptions(7*24*time.Hour, "7d", s, RotateTarget{DSN: "x"}, true); !q.QuietEmpty {
 		t.Error("QuietEmpty must carry through from the probe's verdict")
 	}
 	if o.NoReplace {
@@ -128,8 +142,11 @@ func TestLoopOptions(t *testing.T) {
 	if o.AddFuture != 3 {
 		t.Errorf("AddFuture = %d, want 3", o.AddFuture)
 	}
-	if o.RetainRaw != "30d" {
-		t.Errorf("RetainRaw = %q, want 30d", o.RetainRaw)
+	// The spelling travels WITH the duration (#1709): they describe one
+	// window, and "no partitions older than 30d to drop" over a 7d cut is a
+	// line the operator cannot act on.
+	if o.RetainRaw != "7d" {
+		t.Errorf("RetainRaw = %q, want 7d — the raw form must describe RetainDur, not the settings default", o.RetainRaw)
 	}
 	if o.RetainDur != 7*24*time.Hour {
 		t.Errorf("RetainDur = %v, want 168h (the guard-adjusted retain, not s.Retain)", o.RetainDur)
@@ -141,7 +158,7 @@ func TestLoopOptions(t *testing.T) {
 // prune all wired through from the target.
 func TestLoopOptionsArchive(t *testing.T) {
 	s := Settings{Enabled: true, Retain: 30 * 24 * time.Hour, RetainRaw: "30d", AddFuture: 3}
-	o := loopOptions(s.Retain, s, RotateTarget{
+	o := loopOptions(s.Retain, s.RetainRaw, s, RotateTarget{
 		DSN:                "x",
 		ArchiveDir:         "/staging/abc",
 		ArchiveS3:          "s3://bucket/prefix/",

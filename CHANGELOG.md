@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Each index records the rotation retention it was created under** (#1709).
+  A new `rotation_policy` table, written once when `init` (or `up`, `watch`,
+  or the console control plane) creates the index, holds the built-in
+  rotation default in force at that moment. While you set no retention
+  yourself, the built-in rotation loop drops on that record instead of on
+  the running binary's default, so changing the default in a later release
+  moves the indexes created from then on and cannot shorten the window an
+  existing index has been running on. An index created before the record
+  existed carries none: it keeps 30 days — the default every such index ran
+  under — and stays under the upgrade guard as before. When a kept window
+  and the current default ever differ, the daemon says so once per index, on
+  that index's next rotation cycle; today they are both 30 days, so no index
+  is in that position yet. An index created empty and then filled with older
+  history (a restored index, or `bintrail index` over old binlog files) is
+  NOT exempt from the guard: the record says nothing about history older
+  than itself. An unreadable record falls back to the same 30 days and logs
+  why. Setting
+  `--rotate-retain`, `BINTRAIL_ROTATE_RETAIN` or the console's rotation
+  settings overrides the record, unchanged.
+
 ### Changed
 - **The console says why a server has no first backup, instead of leaving
   the step out** (#1677). The Overview's Getting started list dropped its
