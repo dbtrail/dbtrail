@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backup reads every table in scope on the source.
 
 ### Fixed
+- **An event indexed while a backup update picks its cut is no longer
+  folded into no backup** (#1695). The cut came from two statements: the
+  first event past the target time, and, when there was none, the newest
+  indexed event. An event past the target that capture indexed between the
+  two became the newest one, so the cut landed at its end: that update
+  dropped it by time and the next one skipped it by position, and nothing
+  said so. The newest event is now read first and the search runs after it,
+  over a table that holds at least everything that read saw, so such an
+  event is either found (the cut lands at its start) or comes after the
+  newest one and belongs to the next update. Re-checking the newest event's
+  time after the old order would not have been enough: the recorded time is
+  when a statement ran, not when it committed, so an event past the target
+  can commit ahead of an older-stamped one.
 - **A steady load no longer turns the backup schedule into a full backup
   every slot** (#1736). The cut-over rule (#1721) estimated an update's
   cost from a marginal rate, events beyond the shortest recent update per

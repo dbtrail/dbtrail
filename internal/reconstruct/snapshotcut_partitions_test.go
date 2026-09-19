@@ -200,6 +200,16 @@ func cutRows(file string, pos uint64) *sqlmock.Rows {
 
 func noCutRows() *sqlmock.Rows { return sqlmock.NewRows([]string{"binlog_file", "start_pos"}) }
 
+// expectNewest expects the newest-event read, which ResolveSnapshotCut runs
+// FIRST since #1695, before any partition listing or search. sqlmock matches in
+// order, so every test built on it also pins that order.
+func expectNewest(mock sqlmock.Sqlmock) { expectNewestAt(mock, "mysql-bin.000203", 99999999) }
+
+func expectNewestAt(mock sqlmock.Sqlmock, file string, pos uint64) {
+	mock.ExpectQuery(`ORDER BY event_id DESC LIMIT 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"binlog_file", "end_pos"}).AddRow(file, pos))
+}
+
 // The first query must carry the bound, and the layout must be confirmed
 // unchanged afterwards. This is the guard for the bug itself: with the clause
 // absent the query is byte-for-byte the pre-#1692 one.
@@ -213,6 +223,7 @@ func TestResolveSnapshotCut_firstQueryIsBoundToPartitions(t *testing.T) {
 	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
 	layout := []string{"p_2026091614", "p_2026091619", "p_2026091620", "p_future"}
 
+	expectNewest(mock)
 	mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows(layout...))
 	mock.ExpectQuery(`FROM binlog_events PARTITION \(p_2026091620, p_future\)\s+WHERE TO_SECONDS`).
 		WithArgs(at).
@@ -245,14 +256,12 @@ func TestResolveSnapshotCut_listingFailureFallsBackToTheWholeTable(t *testing.T)
 	warns := captureWarns(t)
 	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
 
+	expectNewestAt(mock, "mysql-bin.000203", 40000000)
 	mock.ExpectQuery(listPartitionsRE).WillReturnError(errors.New("access denied"))
 	// No PARTITION clause: the table name is followed directly by WHERE.
 	mock.ExpectQuery(`FROM binlog_events\s+WHERE TO_SECONDS`).
 		WithArgs(at).
 		WillReturnRows(noCutRows())
-	mock.ExpectQuery(`ORDER BY event_id DESC LIMIT 1`).
-		WillReturnRows(sqlmock.NewRows([]string{"binlog_file", "end_pos"}).
-			AddRow("mysql-bin.000203", uint64(40000000)))
 
 	cut, err := ResolveSnapshotCut(context.Background(), db, at)
 	if err != nil {
@@ -281,6 +290,7 @@ func TestResolveSnapshotCut_unknownPartitionNameDisablesTheBoundLoudly(t *testin
 	warns := captureWarns(t)
 	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
 
+	expectNewest(mock)
 	mock.ExpectQuery(listPartitionsRE).
 		WillReturnRows(partitionRows("p_2026091620", "p_odd; DROP TABLE x", "p_future"))
 	mock.ExpectQuery(`FROM binlog_events\s+WHERE TO_SECONDS`).
@@ -313,6 +323,7 @@ func TestResolveSnapshotCut_repeatsTheSearchWhenTheLayoutMoved(t *testing.T) {
 	before := []string{"p_2026091619", "p_2026091620", "p_future"}
 	after := []string{"p_2026091619", "p_2026091620", "p_2026091621", "p_future"}
 
+	expectNewest(mock)
 	mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows(before...))
 	// The row past at sat in p_future when this ran; the reorganisation moved
 	// it into p_2026091621 before the search reached it.
@@ -349,6 +360,7 @@ func TestResolveSnapshotCut_anOldPartitionDroppedMidSearchNeedsNoRepeat(t *testi
 	warns := captureWarns(t)
 	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
 
+	expectNewest(mock)
 	mock.ExpectQuery(listPartitionsRE).
 		WillReturnRows(partitionRows("p_2026091614", "p_2026091619", "p_2026091620", "p_future"))
 	mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).
@@ -385,6 +397,7 @@ func TestResolveSnapshotCut_aNamedPartitionDroppedMidSearchRepeats(t *testing.T)
 	warns := captureWarns(t)
 	at := time.Date(2026, 9, 16, 19, 5, 27, 0, time.UTC) // a past instant: p_19 is a candidate
 
+	expectNewest(mock)
 	mock.ExpectQuery(listPartitionsRE).
 		WillReturnRows(partitionRows("p_2026091619", "p_2026091620", "p_future"))
 	mock.ExpectQuery(`PARTITION \(p_2026091619, p_2026091620, p_future\)`).WithArgs(at).
@@ -421,6 +434,7 @@ func TestResolveSnapshotCut_otherSearchErrorsAreReturned(t *testing.T) {
 	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
 	boom := &mysql.MySQLError{Number: 1146, Message: "Table 'x.binlog_events' doesn't exist"}
 
+	expectNewest(mock)
 	mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows("p_2026091620", "p_future"))
 	mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).WillReturnError(boom)
 
@@ -446,6 +460,7 @@ func TestResolveSnapshotCut_confirmingListingFailure(t *testing.T) {
 		defer db.Close()
 		warns := captureWarns(t)
 
+		expectNewest(mock)
 		mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows("p_2026091620", "p_future"))
 		mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).
 			WillReturnRows(cutRows("mysql-bin.000203", 1))
@@ -478,6 +493,7 @@ func TestResolveSnapshotCut_confirmingListingFailure(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 
+		expectNewest(mock)
 		mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows("p_2026091620", "p_future"))
 		mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).
 			WillReturnRows(cutRows("mysql-bin.000203", 1))
@@ -517,6 +533,7 @@ func TestResolveSnapshotCut_givesUpOnAShiftingLayoutAndSearchesEverything(t *tes
 		{"p_2026091620", "p_2026091621", "p_2026091622", "p_future"},
 		{"p_2026091620", "p_2026091621", "p_2026091622", "p_2026091623", "p_future"},
 	}
+	expectNewest(mock)
 	for i := 0; i < maxCutBoundAttempts; i++ {
 		mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows(layouts[i]...))
 		mock.ExpectQuery(`PARTITION \(`).WithArgs(at).WillReturnRows(noCutRows())
@@ -556,6 +573,7 @@ func TestResolveSnapshotCut_aRefusedSearchIsNeverAcceptedAsEmpty(t *testing.T) {
 	layout := []string{"p_2026091620", "p_future"}
 	refused := &mysql.MySQLError{Number: 1735, Message: "Unknown partition 'p_2026091620'"}
 
+	expectNewest(mock)
 	mock.ExpectQuery(listPartitionsRE).WillReturnRows(partitionRows(layout...))
 	for i := 0; i < maxCutBoundAttempts; i++ {
 		mock.ExpectQuery(`PARTITION \(p_2026091620, p_future\)`).WithArgs(at).WillReturnError(refused)
@@ -592,8 +610,40 @@ func TestResolveSnapshotCut_cancelledContextIsNotAFallback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	// No expectation on purpose: database/sql refuses a cancelled context
-	// before any statement reaches the driver, so the listing fails with
-	// context.Canceled and nothing may follow it.
+	// before any statement reaches the driver, so the first read (the newest
+	// event, #1695) fails with context.Canceled and nothing may follow it.
+
+	if _, err := ResolveSnapshotCut(ctx, db, at); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if warns.Len() != 0 {
+		t.Errorf("a cancelled context must not be logged as a fallback, got: %s", warns.String())
+	}
+}
+
+// A daemon stopping between the newest-event read and the search: the first
+// partition listing sees the cancelled context, and that is not a listing
+// failure either. Since #1695 moved the newest-event read first, the test above
+// no longer reaches the listing, so this one cancels in the gap between them.
+func TestResolveSnapshotCut_cancelledBeforeTheSearchIsNotAFallback(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	warns := captureWarns(t)
+	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	expectNewest(mock)
+	// Nothing after it: database/sql refuses the cancelled context before the
+	// listing reaches the driver.
+	afterNewestEventForTest = cancel
+	t.Cleanup(func() { afterNewestEventForTest = func() {} })
 
 	if _, err := ResolveSnapshotCut(ctx, db, at); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)

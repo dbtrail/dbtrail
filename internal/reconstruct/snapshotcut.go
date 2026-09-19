@@ -80,6 +80,32 @@ var ErrNoIndexedCoordinates = errors.New("no indexed event carries a binlog file
 // "now"), the cut is the end_pos of the newest event: everything indexed is
 // folded, and the next fold resumes exactly after it.
 //
+// # Why the newest event is read FIRST (#1695)
+//
+// Capture keeps inserting while the cut is resolved (`watch` runs both in one
+// process), so the two statements can see different tables. They used to run
+// search-first: an event past at, inserted between the search (which then
+// found nothing) and the newest-event read, became the newest event, so the cut
+// landed at its END. This fold's time filter dropped it and the next fold's
+// positional lower bound skipped it: folded into no snapshot, silently.
+//
+// Reading the newest event first closes that window. The search then runs over
+// a table that holds at least everything the first read saw (the one thing that
+// deletes indexed rows meanwhile is the resume-time cleanup after a stream
+// restart, which re-captures what it deleted; the fold's own fetch is exposed
+// to it under either order, and the cut now is too, for the length of the
+// search: a cleanup landing right after the newest read can pin the cut above
+// rows this fold does not carry, and the next fold starts past them. That
+// window is seconds wide and only opens on a restart, while the one this
+// ordering closes opens on every insert), so if
+// any event up to the newest one is past at, the search finds it (or an
+// earlier one) and the cut lands at its start. An event inserted after the
+// first read comes after the newest one in the binlog, so the newest one's
+// end_pos leaves it for the next fold. Re-checking the newest event's timestamp
+// after a search-first pass would NOT be enough: event_timestamp is execution
+// time, so an event past at can commit ahead of an older-stamped one, and a
+// check on the newest row alone would miss it.
+//
 // # Assumptions
 //
 // Commit order is read as ascending event_id. event_id is AUTO_INCREMENT and the
@@ -340,7 +366,19 @@ func firstEventPastIn(ctx context.Context, db *sql.DB, at time.Time, partClause 
 	}
 }
 
+// afterNewestEventForTest runs between the newest-event read and the search for
+// the first event past at. Tests use it to insert an event exactly in that gap
+// (#1695); production leaves it a no-op.
+var afterNewestEventForTest = func() {}
+
 func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time) (*query.BinlogPos, error) {
+	// Newest FIRST, then the search: see "Why the newest event is read FIRST"
+	// on ResolveSnapshotCut. Swapping these two back reopens #1695.
+	newest, err := newestIndexedEvent(ctx, db)
+	if err != nil || newest == nil {
+		return newest, err
+	}
+	afterNewestEventForTest()
 	cut, err := firstEventPast(ctx, db, at)
 	if err != nil {
 		return nil, err
@@ -348,13 +386,20 @@ func resolveSnapshotCutOnce(ctx context.Context, db *sql.DB, at time.Time) (*que
 	if cut != nil {
 		return cut, nil
 	}
+	// Nothing indexed past at, up to and including the newest event read above:
+	// fold everything, and resume after that event.
+	return newest, nil
+}
 
-	// Nothing indexed past at: fold everything, and resume after the newest event.
+// newestIndexedEvent returns the end coordinate of the newest indexed event
+// that carries one. nil, nil means the index is empty; ErrNoIndexedCoordinates
+// means it holds events but none with a coordinate.
+func newestIndexedEvent(ctx context.Context, db *sql.DB) (*query.BinlogPos, error) {
 	var (
 		file string
 		pos  uint64
 	)
-	err = db.QueryRowContext(ctx,
+	err := db.QueryRowContext(ctx,
 		`SELECT binlog_file, end_pos FROM binlog_events
 		  WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
 		  ORDER BY event_id DESC LIMIT 1`).Scan(&file, &pos)
