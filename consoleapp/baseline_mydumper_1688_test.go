@@ -324,7 +324,7 @@ func TestBaselineWiringWarnsAboutAnUnusableMydumperAtBoot(t *testing.T) {
 		upConsoleBaselineTrigger = true
 		upConsoleBaselineLockModeErr = errors.New("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: bad value")
 		ctx, cancel := context.WithCancel(context.Background())
-		newBaselineSupervisorFromConfig(ctx, t.TempDir())
+		newBaselineSupervisorFromConfig(ctx, t.TempDir(), nil)
 		cancel()
 		upConsoleBaselineLockModeErr = nil
 		if strings.Contains(buf.String(), "full backups of MySQL and MariaDB servers") {
@@ -336,7 +336,7 @@ func TestBaselineWiringWarnsAboutAnUnusableMydumperAtBoot(t *testing.T) {
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 		upConsoleBaselineTrigger = trigger
 		ctx, cancel := context.WithCancel(context.Background())
-		newBaselineSupervisorFromConfig(ctx, t.TempDir())
+		newBaselineSupervisorFromConfig(ctx, t.TempDir(), nil)
 		cancel() // stops the reaper goroutine the constructor starts
 		warned := strings.Contains(buf.String(), "full backups of MySQL and MariaDB servers will fail") &&
 			strings.Contains(buf.String(), "0.10.0")

@@ -247,3 +247,126 @@ func TestBackupSettings_updateRefusals(t *testing.T) {
 		t.Errorf("unknown id: code = %d, want 404", rec.Code)
 	}
 }
+
+// ── daemon-wide rows the interface can save (#1682) ──────────────────────────
+
+func backupSettingsPut(t *testing.T, srv *Server, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/api/backup-settings/daemon/"+key, strings.NewReader(body))
+	req.SetPathValue("key", key)
+	srv.handleBackupSettingsDaemonUpdate(rec, req)
+	return rec
+}
+
+func daemonRow(t *testing.T, dto backupSettingsDTO, key string) backupSettingRow {
+	t.Helper()
+	for _, r := range dto.Daemon {
+		if r.Key == key {
+			return r
+		}
+	}
+	t.Fatalf("no %q row on the page", key)
+	return backupSettingRow{}
+}
+
+// The round trip the page is for: save a value, and the page reports it as in
+// force, says it came from the file, and keeps the startup value reachable so
+// the operator can go back.
+func TestBackupSettingsDaemon_savedValueWinsAndKeepsTheWayBack(t *testing.T) {
+	srv := newBackupSettingsServer(t, BackupSettingsDefaults{
+		BaselineRetain: "30d",
+		Live:           []string{BackupSettingBaselineRetain},
+	}, "", "")
+
+	row := daemonRow(t, backupSettingsGet(t, srv), BackupSettingBaselineRetain)
+	if row.Value != "30d" || row.Source != backupSettingStartup || !row.Editable {
+		t.Fatalf("before any save: %+v", row)
+	}
+	if row.NeedsRestart {
+		t.Error("a row this daemon applies live is marked restart-to-change")
+	}
+
+	if rec := backupSettingsPut(t, srv, BackupSettingBaselineRetain, `{"value":"7d"}`); rec.Code != 200 {
+		t.Fatalf("PUT: %d %s", rec.Code, rec.Body.String())
+	}
+	row = daemonRow(t, backupSettingsGet(t, srv), BackupSettingBaselineRetain)
+	if row.Value != "7d" || row.Source != backupSettingSaved {
+		t.Fatalf("after saving: %+v", row)
+	}
+	if row.Startup != "30d" {
+		t.Errorf("startup = %q, want the value being overridden — without it the page cannot "+
+			"offer 'use the startup value' and saving once is a one-way door", row.Startup)
+	}
+
+	if rec := backupSettingsPut(t, srv, BackupSettingBaselineRetain, `{"use_startup":true}`); rec.Code != 200 {
+		t.Fatalf("PUT use_startup: %d %s", rec.Code, rec.Body.String())
+	}
+	row = daemonRow(t, backupSettingsGet(t, srv), BackupSettingBaselineRetain)
+	if row.Value != "30d" || row.Source != backupSettingStartup {
+		t.Errorf("after use_startup: %+v, want the flag's value back", row)
+	}
+}
+
+// A row this daemon does NOT apply live is still savable, and still says a
+// restart is needed. Editable and live are different facts.
+func TestBackupSettingsDaemon_savableRowCanStillNeedARestart(t *testing.T) {
+	srv := newBackupSettingsServer(t, BackupSettingsDefaults{StagingDir: "/tmp/x"}, "", "")
+	row := daemonRow(t, backupSettingsGet(t, srv), BackupSettingStagingDir)
+	if !row.Editable || !row.NeedsRestart {
+		t.Fatalf("%+v: want editable AND restart-to-change", row)
+	}
+}
+
+// A value the daemon could not act on is refused BEFORE it is stored: a
+// stored one would show as in force while every consumer fell back.
+func TestBackupSettingsDaemon_refusesAValueTheDaemonCannotRead(t *testing.T) {
+	srv := newBackupSettingsServer(t, BackupSettingsDefaults{}, "", "")
+	cases := []struct{ key, body string }{
+		{BackupSettingBaselineRetain, `{"value":"soon"}`},
+		{BackupSettingLockMode, `{"value":"lock-everything"}`},
+		{BackupSettingStagingDir, `{"value":"staging"}`},
+		{BackupSettingVerifyTables, `{"value":"orders"}`},
+	}
+	for _, c := range cases {
+		rec := backupSettingsPut(t, srv, c.key, c.body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s %s: code = %d, want 400", c.key, c.body, rec.Code)
+		}
+		if row := daemonRow(t, backupSettingsGet(t, srv), c.key); row.Source == backupSettingSaved {
+			t.Errorf("%s: the refused value was stored anyway", c.key)
+		}
+	}
+}
+
+// An empty value IS storable: emptiness is how a setting is turned off, and
+// it must not read as "never saved".
+func TestBackupSettingsDaemon_emptyIsSavable(t *testing.T) {
+	srv := newBackupSettingsServer(t, BackupSettingsDefaults{BaselineRetain: "30d"}, "", "")
+	if rec := backupSettingsPut(t, srv, BackupSettingBaselineRetain, `{"value":""}`); rec.Code != 200 {
+		t.Fatalf("PUT empty: %d %s", rec.Code, rec.Body.String())
+	}
+	row := daemonRow(t, backupSettingsGet(t, srv), BackupSettingBaselineRetain)
+	if row.Source != backupSettingSaved || row.Value != "" {
+		t.Errorf("%+v: an emptied setting must read as saved-empty, not as the flag's value", row)
+	}
+}
+
+func TestBackupSettingsDaemon_unknownKeyIs404(t *testing.T) {
+	srv := newBackupSettingsServer(t, BackupSettingsDefaults{}, "", "")
+	if rec := backupSettingsPut(t, srv, "not_a_setting", `{"value":"x"}`); rec.Code != http.StatusNotFound {
+		t.Errorf("code = %d, want 404", rec.Code)
+	}
+}
+
+// The two backup-location rows stay startup-only: #1684 deletes the
+// process-wide fallback, so an interface for it would migrate operators onto
+// a setting that is being removed.
+func TestBackupSettingsDaemon_backupLocationsAreNotEditableHere(t *testing.T) {
+	srv := newBackupSettingsServer(t, BackupSettingsDefaults{}, "/b", "s3://b/p/")
+	for _, key := range []string{"baseline_dir", "baseline_s3"} {
+		if row := daemonRow(t, backupSettingsGet(t, srv), key); row.Editable {
+			t.Errorf("%s is editable", key)
+		}
+	}
+}

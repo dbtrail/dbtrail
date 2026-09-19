@@ -51,6 +51,10 @@ type baselineSupervisor struct {
 	// BINTRAIL_CONSOLE_BASELINE_LOCK_MODE. No effect on PostgreSQL baselines
 	// (executePG uses pgoutput's own consistent-point LSN unconditionally).
 	lockMode baseline.LockMode
+	// reg is the settings store a saved lock mode is read from, per job
+	// (#1682). nil in tests and on a console with no registry, which is what
+	// makes the boot value above the fallback rather than an alternative.
+	reg *console.Registry
 	// configErr, when set, makes every MySQL/MariaDB Trigger refuse with it. A misconfigured
 	// lock mode must disable BASELINES, never the daemon: under `watch` this
 	// process is also the capture plane, and refusing to boot over a baseline
@@ -200,6 +204,15 @@ func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode base
 	return s
 }
 
+// lockModeNow resolves the lock mode for THIS job: a value saved from the
+// interface wins over the one this process started with, and an unreadable
+// saved value falls back to it. The error is the boot misconfiguration that
+// refuses MySQL dumps — cleared when a readable value is saved, which is the
+// whole point of the setting being editable while the daemon runs.
+func (s *baselineSupervisor) lockModeNow() (baseline.LockMode, error) {
+	return effectiveLockMode(s.reg, s.lockMode, s.configErr)
+}
+
 // Trigger starts a baseline in the background; returns console.ErrBaselineRunning
 // if one is already in flight for this server.
 func (s *baselineSupervisor) Trigger(req console.BaselineRequest) error {
@@ -207,8 +220,8 @@ func (s *baselineSupervisor) Trigger(req console.BaselineRequest) error {
 	// consistent-point LSN and never consults lockMode, so refusing a
 	// Postgres baseline over a MySQL-only knob would take away a working
 	// button for a setting that cannot affect it.
-	if s.configErr != nil && req.Flavor != console.FlavorPostgres {
-		return s.configErr
+	if _, err := s.lockModeNow(); err != nil && req.Flavor != console.FlavorPostgres {
+		return err
 	}
 	s.mu.Lock()
 	// Shared with the periodic refresh (#1171): a dump writing a new snapshot
@@ -615,7 +628,11 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	// otherwise be misread as UTC verbatim, skewing the replay window by the
 	// host's UTC offset (#768).
 	dumpStartedAt := time.Now().UTC()
-	if err := runMydumper(s.ctx, req.SourceDSN, req.Schemas, dumpDir, s.lockMode); err != nil {
+	// Resolved HERE, not at boot: a lock mode saved from the interface governs
+	// the very next dump. Trigger already refused an unreadable one, so the
+	// error is spent — taking the mode alone keeps this call site to one line.
+	lockMode, _ := s.lockModeNow()
+	if err := runMydumper(s.ctx, req.SourceDSN, req.Schemas, dumpDir, lockMode); err != nil {
 		return dumpOutcome{}, fmt.Errorf("dump: %w", err)
 	}
 	// A dump that cannot be anchored is refused here, never published (#1688).

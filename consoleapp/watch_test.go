@@ -30,7 +30,7 @@ func assertStr(t *testing.T, name, got, want string) {
 }
 
 func TestUpConsoleConfig(t *testing.T) {
-	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", consoleOpts{Listen: "127.0.0.1:8090", Token: "tok", BaselineDir: "/baselines", BaselineS3: "s3://bucket/prefix/", AuthFile: "/auth.yaml", TLSCert: "/c.pem", TLSKey: "/k.pem", AllowedHosts: []string{"console.internal"}, FlashbackListen: "127.0.0.1:3308"})
+	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", consoleOpts{Listen: "127.0.0.1:8090", Token: "tok", BaselineDir: "/baselines", BaselineS3: "s3://bucket/prefix/", AuthFile: "/auth.yaml", TLSCert: "/c.pem", TLSKey: "/k.pem", AllowedHosts: []string{"console.internal"}, FlashbackListen: "127.0.0.1:3308"}, nil)
 	if err != nil {
 		t.Fatalf("upConsoleConfig: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestUpConsoleConfig(t *testing.T) {
 	prevReporter := composeDriftReporter
 	composeDriftReporter = func(dsn string, opts consoleOpts) { gotDSN, gotOpts = dsn, opts }
 	_, err = upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index",
-		consoleOpts{Listen: "127.0.0.1:8090", AuthFile: "/auth.yaml", ServersFile: "/servers.yaml"})
+		consoleOpts{Listen: "127.0.0.1:8090", AuthFile: "/auth.yaml", ServersFile: "/servers.yaml"}, nil)
 	composeDriftReporter = prevReporter
 	if err != nil {
 		t.Fatalf("upConsoleConfig (drift): %v", err)
@@ -94,7 +94,7 @@ func TestUpConsoleConfig(t *testing.T) {
 
 	// Without baseline flags the Phase 1 default is preserved: empty baselines
 	// keep the reconstruct surface gated off.
-	cfg, err = upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", consoleOpts{Listen: "127.0.0.1:8090", Token: "tok"})
+	cfg, err = upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", consoleOpts{Listen: "127.0.0.1:8090", Token: "tok"}, nil)
 	if err != nil {
 		t.Fatalf("upConsoleConfig (no baseline): %v", err)
 	}
@@ -103,12 +103,12 @@ func TestUpConsoleConfig(t *testing.T) {
 	}
 
 	// Invalid DSN (no '/') must error, not silently produce an empty dbName.
-	if _, err := upConsoleConfig(nil, "invalid", consoleOpts{Listen: "127.0.0.1:8090"}); err == nil {
+	if _, err := upConsoleConfig(nil, "invalid", consoleOpts{Listen: "127.0.0.1:8090"}, nil); err == nil {
 		t.Error("invalid --index-dsn should error")
 	}
 	// A DSN with no database name must error (parity with runServe) rather
 	// than starting a console that feeds an empty schema to the planner.
-	if _, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/", consoleOpts{Listen: "127.0.0.1:8090"}); err == nil {
+	if _, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/", consoleOpts{Listen: "127.0.0.1:8090"}, nil); err == nil {
 		t.Error("--index-dsn without a database name should error")
 	}
 }
@@ -705,7 +705,7 @@ func TestUpConsoleConfig_baselineRefreshDefaultsReachTheConsole(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			upBaselineCarryForward, upBaselineRefreshEvery = tc.carry, tc.every
 			upConsoleBaselineTrigger = tc.trigger
-			cfg, err := upConsoleConfig(nil, dsn, opts)
+			cfg, err := upConsoleConfig(nil, dsn, opts, nil)
 			if err != nil {
 				t.Fatalf("upConsoleConfig: %v", err)
 			}
