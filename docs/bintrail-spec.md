@@ -77,7 +77,7 @@ bintrail index \
   --binlog-dir /var/lib/mysql \
   --files "binlog.000042,binlog.000043"   # specific files, or:
   --all                                    # all binlog files in the directory
-  --batch-size 1000                        # events per batch INSERT (default: 1000)
+  --batch-size 1000                        # events per batch INSERT (default: 1000, max 3855)
   --schemas "mydb1,mydb2"                  # optional filter: only index these schemas
   --tables "mydb1.orders,mydb1.items"      # optional filter: only index these tables
 ```

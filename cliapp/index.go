@@ -77,7 +77,7 @@ func init() {
 	indexCmd.Flags().StringVar(&idxBinlogDir, "binlog-dir", "", "Directory containing binlog files (required)")
 	indexCmd.Flags().StringVar(&idxFiles, "files", "", "Comma-separated binlog filenames (e.g. binlog.000042,binlog.000043)")
 	indexCmd.Flags().BoolVar(&idxAll, "all", false, "Index all binlog files found in --binlog-dir")
-	indexCmd.Flags().IntVar(&idxBatchSize, "batch-size", 1000, "Events per batch INSERT")
+	indexCmd.Flags().IntVar(&idxBatchSize, "batch-size", 1000, indexer.BatchSizeHelp())
 	indexCmd.Flags().StringVar(&idxSchemas, "schemas", "", "Only index events from these schemas (comma-separated)")
 	indexCmd.Flags().StringVar(&idxTables, "tables", "", "Only index these tables (comma-separated, e.g. mydb.orders,mydb.items)")
 	indexCmd.Flags().StringVar(&idxFormat, "format", "text", "Output format: text or json")

@@ -17,7 +17,7 @@ func TestSourcePGStreamConfig(t *testing.T) {
 		Schemas:           "public",
 		Flavor:            "postgres",
 	}
-	cfg, err := sourcePGStreamConfig(e, 42)
+	cfg, err := sourcePGStreamConfig(e, 42, 0)
 	if err != nil {
 		t.Fatalf("sourcePGStreamConfig: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestSourcePGStreamConfig(t *testing.T) {
 
 func TestSourcePGStreamConfig_badDSN(t *testing.T) {
 	// A DSN already carrying replication is rejected by PGReplDSN (would double it).
-	if _, err := sourcePGStreamConfig(console.ServerEntry{SourceDSN: "postgres://h:5432/db?replication=database"}, 1); err == nil {
+	if _, err := sourcePGStreamConfig(console.ServerEntry{SourceDSN: "postgres://h:5432/db?replication=database"}, 1, 0); err == nil {
 		t.Error("expected error for a repl-carrying DSN")
 	}
 }
