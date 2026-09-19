@@ -12,8 +12,9 @@ import (
 
 // TestResolveFoldSource pins #1626: on a server that backs up to S3 AND keeps
 // a local directory, the fold reads the local copy only when it is the
-// bucket's newest snapshot, table for table. Every other state keeps the
-// bucket, so a stale local directory is never folded from.
+// bucket's newest snapshot, table for table, or newer than it (#1725). Every
+// other state keeps the bucket, so a stale local directory is never folded
+// from.
 func TestResolveFoldSource(t *testing.T) {
 	t0 := time.Date(2026, 9, 9, 21, 45, 35, 0, time.UTC)
 	t1 := t0.Add(5 * time.Minute)
@@ -39,8 +40,13 @@ func TestResolveFoldSource(t *testing.T) {
 			both, files(t0, "orders"), files(t0, "orders", "customers"), "", "/b"},
 		{"local is older: the bucket",
 			both, files(t1, "orders"), files(t0, "orders"), "", "s3://bucket/abirds/"},
-		{"local is newer than the bucket (upload pending): the bucket",
-			both, files(t0, "orders"), files(t1, "orders"), "", "s3://bucket/abirds/"},
+		// #1725: a full backup is published locally before its upload, so
+		// "local newer than the bucket" is the ordinary state for minutes
+		// after every full backup, and after an update whose upload failed.
+		// Folding from the bucket's older snapshot would redo a window the
+		// local copy already covers.
+		{"local is newer than the bucket (upload pending or failed): the local copy",
+			both, files(t0, "orders"), files(t1, "orders"), "", "/b"},
 		{"local copy is missing a table the bucket has: the bucket",
 			both, files(t0, "orders", "customers"), files(t0, "orders"), "", "s3://bucket/abirds/"},
 		{"local is one generation behind but shares an older snapshot: the bucket",

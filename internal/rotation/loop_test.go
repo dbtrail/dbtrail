@@ -40,6 +40,48 @@ func (c *logCapture) has(level slog.Level, substr string) bool {
 	return false
 }
 
+// hasAttr reports whether a record with message msg carries key=val.
+func (c *logCapture) hasAttr(msg, key, val string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range c.records {
+		if r.Message != msg {
+			continue
+		}
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key && a.Value.String() == val {
+				found = true
+			}
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// hasKey reports whether a record with message msg carries key at all.
+func (c *logCapture) hasKey(msg, key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range c.records {
+		if r.Message != msg {
+			continue
+		}
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			found = found || a.Key == key
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
 // captureSlog swaps the default logger for a capturing one until cleanup.
 func captureSlog(t *testing.T) *logCapture {
 	t.Helper()
@@ -59,10 +101,16 @@ func captureSlog(t *testing.T) *logCapture {
 func TestLoopOptions(t *testing.T) {
 	s := Settings{Enabled: true, Retain: 30 * 24 * time.Hour, RetainRaw: "30d", AddFuture: 3}
 	// A drop-only target (no ArchiveS3) is the default, data-loss-safe shape.
-	o := loopOptions(7*24*time.Hour, s, RotateTarget{DSN: "x"})
+	o := loopOptions(7*24*time.Hour, s, RotateTarget{DSN: "x"}, false)
 
 	if !o.ProtectUnarchived {
 		t.Error("ProtectUnarchived must be armed — without it the built-in rotation drops unarchived data")
+	}
+	if o.QuietEmpty {
+		t.Error("QuietEmpty must be off unless the probe found a writerless index empty (#1715)")
+	}
+	if q := loopOptions(7*24*time.Hour, s, RotateTarget{DSN: "x"}, true); !q.QuietEmpty {
+		t.Error("QuietEmpty must carry through from the probe's verdict")
 	}
 	if o.NoReplace {
 		t.Error("NoReplace must be false (dropped partitions are replaced)")
@@ -100,7 +148,7 @@ func TestLoopOptionsArchive(t *testing.T) {
 		ArchiveS3Region:    "us-east-1",
 		BintrailID:         "uuid-123",
 		ArchiveCompression: "zstd",
-	})
+	}, false)
 	if o.ArchiveDir != "/staging/abc" || o.ArchiveS3 != "s3://bucket/prefix/" || o.BintrailID != "uuid-123" {
 		t.Errorf("archive config not threaded through: %+v", o)
 	}

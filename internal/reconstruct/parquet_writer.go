@@ -304,6 +304,9 @@ func snapshotFileMetadata(in mergeInput) map[string]string {
 	if line := captureGapLines(in); line != "" {
 		md[baseline.MetaKeyCaptureGap] = line
 	}
+	if in.LastEventID > 0 {
+		md[baseline.MetaKeyLastEventID] = strconv.FormatUint(in.LastEventID, 10)
+	}
 	switch {
 	case in.Cut != nil:
 		md[baseline.MetaKeyBinlogFile] = in.Cut.File

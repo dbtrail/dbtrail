@@ -5418,11 +5418,32 @@ function baselineContextStrip(b, cur) {
   const uniform = snapshotTablesUniform(snaps, b.truncated);
   if (uniform !== null) strip.append(item("TABLES", uniform + " per backup"));
   strip.append(item("TIME-TRAVEL", b.reconstruct ? "enabled" : "off (archives disabled)"));
-  // The page's primary action, at page level — not a list-header costume.
-  if (capsCache.baseline_trigger && cur && cur.id && cur.kind === "registry" && b.configured) {
-    const btn = el("button", { class: "btn ctx-action", type: "button", text: "Create backup" });
-    btn.onclick = () => createBaseline(cur.id, btn);
-    strip.append(btn);
+  // The page's primary action, at page level (not a list-header costume),
+  // or, where the action is unavailable, the reason.
+  if (cur && cur.id && cur.kind === "registry" && b.configured) {
+    // cur is the RAW registry entry, while b.configured also counts the
+    // daemon-wide default, which a backup refuses to write to, as a restore
+    // does (the restore card is stricter: it needs a local Backup dir; the
+    // button takes either location). The precheck reads the raw fields
+    // (hasOwnBackupLocation), so this does too: a button on a server with no
+    // location of its own is refused on click.
+    const ownLoc = !!(cur.baseline_dir || cur.baseline_s3);
+    const off = !capsCache.baseline_trigger;
+    if (!off && ownLoc) {
+      const btn = el("button", { class: "btn ctx-action", type: "button", text: "Create backup" });
+      btn.onclick = () => createBaseline(cur.id, btn);
+      strip.append(btn);
+    } else if (cur.has_source) {
+      // Where the button would be, say why it is not (#1677), the same two
+      // reasons the Getting started list gives: a missing button reads as a
+      // page with no such action. Points at the Backup settings page, whose
+      // row carries the variable; this note names none. A server with no
+      // source is never backed up from the console, so it gets no note.
+      const why = [];
+      if (off) why.push("turned off at startup");
+      if (!ownLoc) why.push("needs this server's own backup location");
+      strip.append(item("CREATE BACKUP", why.join(", and ") + " (Backup settings page)"));
+    }
   }
   return strip;
 }
@@ -5926,11 +5947,22 @@ async function createBaseline(id, btn) {
   }
   toast("Backup started: copying your data and uploading it…");
   if (location.pathname === "/baselines") renderBaselines();
-  const done = await pollBaseline(id);
+  let done = await pollBaseline(id, false);
+  if (done && done.state === "succeeded" && done.uploading) {
+    // Published locally; the copy to the destination is still running and
+    // no longer holds the schedule (#1725). Say so, and wait for it.
+    toast("Backup saved locally: " + (done.tables || 0) + " table(s). Still copying it to the backup destination…");
+    if (location.pathname === "/baselines") renderBaselines();
+    done = await pollBaseline(id, true);
+  }
   restore();
-  if (done && done.state === "succeeded") {
+  if (done && done.state === "succeeded" && !done.uploading) {
     toast("Backup complete: " + (done.tables || 0) + " table(s)" +
-      (done.uploaded ? ", " + done.uploaded + " file(s) uploaded" : ""));
+      (done.uploaded ? ", " + done.uploaded + " file(s) uploaded" : "") +
+      (done.swept ? ", " + done.swept + " earlier backup(s) sent too" : ""));
+  } else if (done && done.uploading) {
+    // The poll's cap hit mid-copy: say what is true, not "complete".
+    toast("Backup saved on this machine. The copy to the backup destination is still running; the Backups page shows when it finishes.");
   } else if (done) {
     toastError("Backup failed: " + (done.last_error || "unknown error"));
   } else {
@@ -5944,10 +5976,15 @@ async function createBaseline(id, btn) {
 }
 
 // pollBaseline polls the per-server baseline status until it leaves "running"
-// (or a ~20-minute cap). Returns the terminal status, or null if it never
-// settled within the cap. Transient poll errors are ignored and retried.
-async function pollBaseline(id) {
+// (or a ~20-minute cap). With throughUpload, a status published with the
+// upload still running (#1725) is waited out too, so the caller can say
+// "saved locally" the moment it is true and "complete" only once it is.
+// Returns the settled status — with `uploading` still set if the cap hits
+// during the upload — or null if it never left "running" within the cap.
+// Transient poll errors are ignored and retried.
+async function pollBaseline(id, throughUpload) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let last = null;
   for (let i = 0; i < 600; i++) {
     await sleep(2000);
     let st;
@@ -5956,9 +5993,11 @@ async function pollBaseline(id) {
     } catch (_) {
       continue; // a blip mid-dump shouldn't abort the wait
     }
-    if (st && st.state !== "running") return st;
+    if (!st || st.state === "running") continue;
+    last = st;
+    if (!throughUpload || !st.uploading) return st;
   }
-  return null;
+  return last;
 }
 
 // ── Backups: per-row detail, download, point-in-time restore (#backups) ──
@@ -6017,6 +6056,10 @@ function backupWhyLine(why, code, remedy) {
     out = "The update from the recorded changes hit an internal error, so a full backup was taken instead. Error: " + said(inner[1].replace(/^internal error:?\s*/, ""));
   } else if (code === "previous_unreadable") {
     out = why.charAt(0).toUpperCase() + why.slice(1);
+  } else if (code === "window_measured" || code === "window_age") {
+    // The daemon's own numbers (#1721): events, the estimate, the last full
+    // backup's duration or the anchor's age. Said as recorded.
+    out = "Full backup instead of an update: " + why;
   } else {
     out = "Full backup because " + why;
   }
@@ -6177,6 +6220,12 @@ function backupRunsInFlight(dumpSt, restoreSt, b, sqlSt) {
   const dump = dumpSt && dumpSt.baseline;
   if (dump && dump.state === "running") {
     running.push({ kind: "dump", text: "Creating a backup: copying your data" + (dump.since ? ", since " + utcLabel(dump.since) : "") + "…" });
+  } else if (dump && dump.state === "succeeded" && dump.uploading) {
+    // Published on this machine; the copy to the backup destination is still
+    // running and no longer holds the schedule (#1725): a refresh may start
+    // meanwhile, so this line must not read as "the backup is still running".
+    running.push({ kind: "dump", text: "Backup saved on this machine" + (dump.tables ? ": " + dump.tables + " table(s)" : "") +
+      ". Still copying it to the backup destination…" });
   }
   const rst = restoreSt && restoreSt.restore;
   if (rst && rst.state === "running") {
@@ -6235,7 +6284,9 @@ async function watchBackupRuns(id, vgen, kinds) {
     if (kinds.includes("dump")) {
       try {
         const st = await api("/api/servers/" + encodeURIComponent(id) + "/baseline");
-        if (st.baseline && st.baseline.state === "running") busy = true;
+        // Still in flight while the published snapshot is being copied to
+        // the destination (#1725): the region's line changes, not ends.
+        if (st.baseline && (st.baseline.state === "running" || (st.baseline.state === "succeeded" && st.baseline.uploading))) busy = true;
       } catch (e) { if (unknown(e)) pollFailed = true; }
     }
     if (kinds.includes("restore")) {

@@ -43,7 +43,13 @@ func newScheduleFixture(t *testing.T, fullBackups bool) (*backupScheduler, *cons
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newBackupScheduler(sup, reg, fullBackups, false), reg, sup
+	b := newBackupScheduler(sup, reg, fullBackups, false)
+	// The fixture snapshot (writeFakeSnapshot) is dated 2026-08-20 and the
+	// slots fire weeks later: with the #1721 probe on, the age rule would
+	// make every scheduled update here a full backup. Off by default; the
+	// cut-over's own tests turn it back on.
+	b.window = nil
+	return b, reg, sup
 }
 
 // addScheduled adds an hourly schedule on a server with a source and a
@@ -435,6 +441,7 @@ func TestBackupScheduler_noFallbackDuringShutdown(t *testing.T) {
 	sup.history = h
 	reg, _ := console.LoadRegistry("")
 	b := newBackupScheduler(sup, reg, true, false)
+	b.window = nil // see newScheduleFixture: the fixture snapshot is weeks old
 	e := addScheduled(t, reg, true)
 	e.SourceDSN = "src:pw@tcp(127.0.0.1:3306)/"
 	if err := reg.Update(e); err != nil {

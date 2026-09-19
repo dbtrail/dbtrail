@@ -177,6 +177,25 @@ func runOneUntil(t *testing.T, cfg Config, waitAttached bool, writes func(), don
 
 // ─── Assertions ──────────────────────────────────────────────────────────────
 
+// assertIDsFollowPositions pins the premise the refresh's event-id floor
+// (#1720) and the snapshot cut rest on: on an index a stream wrote, ascending
+// event_id is binlog order, ACROSS a crash and its replay. The floor is ANDed
+// with the position gate, so a violation here would be skipped rows in every
+// later refresh with nothing in the log; this is the guard next to the
+// writer. File names compare by length first, as the readers do (#840).
+func assertIDsFollowPositions(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM binlog_events a JOIN binlog_events b
+		ON a.event_id < b.event_id
+		AND (CHAR_LENGTH(a.binlog_file), a.binlog_file, a.start_pos) > (CHAR_LENGTH(b.binlog_file), b.binlog_file, b.start_pos)`).Scan(&n); err != nil {
+		t.Fatalf("id/position order probe: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("%d event pairs have a lower id at a later binlog position: the stream no longer writes ids in binlog order", n)
+	}
+}
+
 // indexedPKs returns pk_values → row count for one source table. Counting per
 // PK (not a bare COUNT(*)) is what makes this an exactly-once assertion: a
 // total alone cannot tell one duplicate plus one lost row from a clean run.
@@ -375,6 +394,7 @@ func TestIntegrationCrashRestartExactlyOnce_position(t *testing.T) {
 	}
 
 	assertExactlyOnce(t, indexedPKs(t, indexDB, sourceName, "orders"), pkRange(1, 12))
+	assertIDsFollowPositions(t, indexDB)
 
 	// No-loss also means the payload survived the delete/re-insert round trip.
 	var amount sql.NullString

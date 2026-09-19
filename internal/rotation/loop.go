@@ -3,6 +3,7 @@ package rotation
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -75,7 +76,19 @@ func ParseSettings(retain, interval string, addFuture int, explicit bool) (Setti
 // provider (cmd/bintrail-console) is responsible for only setting the archive
 // fields once BintrailID is known (resolved from the source's stream_state).
 type RotateTarget struct {
-	DSN                string
+	DSN string
+	// NoWriter: as far as this daemon knows, nothing streams into this
+	// index (the boot index of a source-less `watch`, #1715). The daemon
+	// cannot verify that — another process may point at the same DSN — which
+	// is why the mark alone decides nothing: a per-cycle probe of the events
+	// table does. While it holds no events its rotation is
+	// housekeeping over empty partitions — still done, so the layout stays
+	// current for the day a stream starts writing it and never grows toward
+	// the partition cap — but logged as such (Options.QuietEmpty) instead of
+	// as freed space. A per-source index always has a writer and never sets
+	// this. Once such an index holds events (a source-ful era left them) it
+	// is rotated and logged like any other.
+	NoWriter           bool
 	ArchiveDir         string
 	ArchiveS3          string
 	ArchiveS3Region    string
@@ -217,6 +230,20 @@ func dedupeTargets(in []RotateTarget) []RotateTarget {
 	return out
 }
 
+// indexHoldsNoEvents reports whether binlog_events has no rows at all. One
+// row is enough to answer, so this is an index probe, not a count.
+func indexHoldsNoEvents(ctx context.Context, db *sql.DB, dbName string) (bool, error) {
+	var one int
+	err := db.QueryRowContext(ctx, "SELECT 1 FROM `"+dbName+"`.binlog_events LIMIT 1").Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("probe binlog_events: %w", err)
+	}
+	return false, nil
+}
+
 // loopOptions builds the Perform Options for one built-in-rotation cycle. It
 // ALWAYS arms ProtectUnarchived so the loop can never be the first to destroy
 // data an external archiving flow would preserve; Format "json" suppresses
@@ -224,7 +251,7 @@ func dedupeTargets(in []RotateTarget) []RotateTarget {
 // carries an ArchiveS3 bucket, the cycle archives-then-drops (and prunes the
 // local staging copy after upload); otherwise ArchiveDir is empty and it
 // drops-and-tops-up only — the historical behavior.
-func loopOptions(retain time.Duration, s Settings, t RotateTarget) Options {
+func loopOptions(retain time.Duration, s Settings, t RotateTarget, quietEmpty bool) Options {
 	o := Options{
 		RetainDur:         retain,
 		RetainRaw:         s.RetainRaw,
@@ -232,6 +259,7 @@ func loopOptions(retain time.Duration, s Settings, t RotateTarget) Options {
 		NoReplace:         false,
 		Format:            "json",
 		ProtectUnarchived: true,
+		QuietEmpty:        quietEmpty,
 	}
 	if t.ArchiveS3 != "" {
 		o.ArchiveDir = t.ArchiveDir
@@ -268,6 +296,29 @@ func rotateOneIndex(ctx context.Context, t RotateTarget, s Settings) (int, error
 	}
 	defer db.Close()
 
+	// The probe runs BEFORE Perform on purpose: an index being drained by
+	// retention logs its last real drops at Info only because it still held
+	// events when it was asked. Probed after the drops, they would go to
+	// Debug.
+	quietEmpty := false
+	if t.NoWriter {
+		empty, err := indexHoldsNoEvents(ctx, db, cfg.DBName)
+		if err != nil {
+			if ctx.Err() != nil {
+				// Shutdown mid-cycle: not a failure of this target, as the
+				// Perform path below reads it.
+				return 0, nil
+			}
+			slog.Warn("built-in rotation: could not tell whether the index holds events; counting this cycle as failed",
+				"db", cfg.DBName, "error", config.ScrubDSNText(err.Error(), dsn))
+			return 0, err
+		}
+		if empty {
+			slog.Debug("built-in rotation: index holds no events and has no writer; rotating its empty partitions as housekeeping", "db", cfg.DBName)
+			quietEmpty = true
+		}
+	}
+
 	retain := s.Retain
 	if !s.Explicit {
 		// Upgrade guard: an operator running on the IMPLICIT default never
@@ -293,7 +344,7 @@ func rotateOneIndex(ctx context.Context, t RotateTarget, s Settings) (int, error
 		}
 	}
 
-	res, err := Perform(ctx, db, cfg.DBName, loopOptions(retain, s, t))
+	res, err := Perform(ctx, db, cfg.DBName, loopOptions(retain, s, t, quietEmpty))
 	if err != nil && ctx.Err() == nil {
 		slog.Warn("built-in rotation cycle failed",
 			"db", cfg.DBName, "error", config.ScrubDSNText(err.Error(), dsn))

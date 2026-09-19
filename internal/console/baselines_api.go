@@ -1,6 +1,7 @@
 package console
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -15,6 +16,11 @@ import (
 // Storage panel is a recency view ("do I have a usable baseline, how stale is
 // it"), not an inventory dump.
 const baselinesMaxSnapshots = 50
+
+// listBaselinesForPage is reconstruct.ListBaselinesNewestReport, indirected
+// so a test can pin the bound the page asks for (#1679): the cap above used
+// to cap the RESPONSE while every location was still listed whole.
+var listBaselinesForPage = reconstruct.ListBaselinesNewestReport
 
 // baselineSnapshotDTO is one snapshot (one timestamped dump) in the listing:
 // the grouped view of its per-table Parquet files.
@@ -128,7 +134,13 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if e, ok := s.cm.reg.Get(s.selectedServerID(r)); ok && e.BackupSchedule != nil {
-		resp.Schedule = s.backupScheduleDTO(r.Context(), e, time.Now().UTC())
+		// Bounded like the listing below: this probe lists the newest
+		// snapshot of the fold source, which on an S3-backed server is the
+		// bucket (#1679); an unbounded leg beside a bounded one is the
+		// handler pinned by the half nobody timed.
+		sctx, cancel := context.WithTimeout(r.Context(), baselineListTimeout)
+		resp.Schedule = s.backupScheduleDTO(sctx, e, time.Now().UTC())
+		cancel()
 	}
 	if b.baselineSrc == "" {
 		writeJSON(w, http.StatusOK, resp)
@@ -147,7 +159,20 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	// once retention pruned the local copies, the page showed nothing while the
 	// bucket held dozens, and Time-travel resolved tables from a bucket the page
 	// behind it did not list.
-	merged := listBaselinesMerged(r.Context(), baselineSourcesOf(b), reconstruct.ListBaselinesReport)
+	// One more than the cap, so the loop below still learns there were
+	// more (Truncated) without reading them (#1679); and the listing's own
+	// word for it, because a window whose newest snapshots include an
+	// incomplete one comes back SHORTER than the cap with older ones
+	// unread, and the loop alone would call that everything.
+	anyMore := false
+	merged := listBaselinesMerged(r.Context(), baselineSourcesOf(b), func(ctx context.Context, src string) ([]reconstruct.BaselineFile, int, error) {
+		files, skipped, more, err := listBaselinesForPage(ctx, src, baselinesMaxSnapshots+1)
+		if err == nil && more {
+			anyMore = true
+		}
+		return files, skipped, err
+	})
+	resp.Truncated = anyMore
 	resp.Sources = merged.Sources
 	if merged.Listed == 0 {
 		// Nothing could be read anywhere. Still a hard failure, and the message
@@ -215,9 +240,13 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		}
 		cur.Tables = append(cur.Tables, f.Schema+"."+f.Table)
 	}
-	// Headline over ALL files (not just the listed page), delegated to the
-	// status package's newest-per-table rollup so the console and the CLI can
-	// never rank verdicts differently.
+	// Headline over the files of the snapshots the page reads (the cap plus
+	// one, #1679), delegated to the status package's newest-per-table
+	// rollup. The CLI's status walks every snapshot, so the two can differ
+	// on one shape: a table whose newest baseline is older than the page
+	// window (dropped from the backup set long ago) grades the CLI's
+	// headline and not this one. Reading the whole inventory for that
+	// grade is the cost this bound removes.
 	infos := make([]status.BaselineInfo, len(files))
 	for i, f := range files {
 		infos[i] = status.BaselineInfo{Database: f.Schema, Table: f.Table, SnapshotTime: f.SnapshotTime}
