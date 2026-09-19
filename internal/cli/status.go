@@ -140,7 +140,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// the CLI with the daemon's own env file (#1731): the events are in the
 	// per-source database the control plane provisioned, not in the one the
 	// daemon was started with.
-	defer HintSiblingIndexes(cmd.Context(), db, dbName, cmd.OutOrStdout())
+	//
+	// STDERR, like every other surface that prints this hint: under
+	// `--format json` stdout is a document, and prose appended to it is not a
+	// parse error the caller can diagnose — CI caught exactly that, three
+	// status tests failing on "invalid character 'N' after top-level value",
+	// the N of "Note:".
+	defer HintSiblingIndexes(cmd.Context(), db, dbName, cmd.ErrOrStderr())
 
 	// Discover baseline Parquet files if --baseline-dir is provided.
 	if stBaselineDir != "" {
