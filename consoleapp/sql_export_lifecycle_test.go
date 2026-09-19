@@ -132,18 +132,30 @@ func TestSQLExportReaper_expiresAnUnwatchedBuild(t *testing.T) {
 	go sup.runSQLExportReaper()
 
 	clk.advance(sqlExportTTL + time.Second)
+	// Wait on the LAST thing the reaper does, not the first (#1628).
+	// removeSQLExportBuild deletes the directory outside the supervisor mutex
+	// — deliberately, since the removal is slow and must not hold it — and
+	// only then takes the lock to flip the slot. Waiting on the directory
+	// lands inside that window and reads "succeeded" from a reaper that is
+	// working correctly. The read stays the direct map read: going through
+	// SQLExportStatus would expire the slot lazily and prove nothing about
+	// the background loop.
 	deadline := time.Now().Add(5 * time.Second)
-	for onDisk(dir) && time.Now().Before(deadline) {
+	state := ""
+	for time.Now().Before(deadline) {
+		sup.mu.Lock()
+		state = sup.exports["srv1"].State
+		sup.mu.Unlock()
+		if state == "expired" {
+			break
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if onDisk(dir) {
-		t.Fatalf("the reaper never removed %s", dir)
-	}
-	sup.mu.Lock()
-	state := sup.exports["srv1"].State
-	sup.mu.Unlock()
 	if state != "expired" {
 		t.Fatalf("state = %s after the reaper ran, want expired", state)
+	}
+	if onDisk(dir) {
+		t.Fatalf("the reaper marked the build expired but left %s on disk", dir)
 	}
 }
 
