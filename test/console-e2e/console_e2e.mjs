@@ -4818,7 +4818,7 @@ try {
   await skelPaint();
   const skelPhases = [];
   for (const phase of [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]) {
-    const froze = await page.evaluate((p) => {
+    const froze = await page.evaluate(async (p) => {
       let name = "none", frozen = true;
       for (const b of document.querySelectorAll(".ev-skel-bar")) {
         const before = getComputedStyle(b);
@@ -4830,6 +4830,15 @@ try {
         if (after.animationPlayState !== "paused") frozen = false;
         if (Math.abs(parseFloat(after.animationDelay) + p * secs) > 1e-6) frozen = false;
       }
+      // Wait for the browser to PAINT the frozen frame before the photograph
+      // (#1753). Computed style answers immediately; the pixels do not, and
+      // the screenshot that follows reads pixels. Without this the first
+      // phase photographed whatever was on screen when the freeze was set —
+      // which produced the impossible reading that made this visible: the
+      // BRIGHTEST phase (0, opacity 1) measuring 1.069 while the dimmest
+      // (0.5, opacity .45) measured 1.22. Two frames, because a style change
+      // applied during one frame is painted in the next.
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       return { name, frozen };
     }, phase);
     skelPhases.push({ phase, ...froze, ...(skelWorst(await skelShot()) || {}) });
@@ -4896,6 +4905,21 @@ try {
     skelPulseWorst.ratio >= 1.15)
     ? ok("events skeleton: the pulse's dimmest phase stays above where the bar started")
     : bad("events skeleton: the pulse's dimmest phase stays above where the bar started", skelDetail());
+  // The instrument, not the pulse (#1753). This keyframe is symmetric around
+  // its midpoint, so phase 0 is its BRIGHTEST frame and must photograph at
+  // least as contrasty as phase 0.5, its dimmest. Measuring the opposite is
+  // impossible for any animation this shape, and it happened: the screenshot
+  // was taken before the frozen frame was painted, and the whole scenario
+  // reported a contrast regression that did not exist. Checked separately
+  // from the floor above so the two failures cannot be mistaken for each
+  // other. Skipped where there is no animation to be symmetric about.
+  const skelAt = (at) => skelPhases.find((p) => p.phase === at);
+  const skelBright = skelAt(0), skelDim = skelAt(0.5);
+  (skelPhases.every((p) => p.name === "none") ||
+    (skelBright && skelDim && skelBright.ratio != null && skelDim.ratio != null &&
+      skelBright.ratio >= skelDim.ratio))
+    ? ok("events skeleton: the pulse is photographed after the frozen frame is painted")
+    : bad("events skeleton: the pulse is photographed after the frozen frame is painted", skelDetail());
 
   // ── Scenario 18 — advisory severity split on the archive fixture (#1365) ──
   // The archive-elision record must render in the INFO register (muted line,
