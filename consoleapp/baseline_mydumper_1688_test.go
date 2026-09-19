@@ -313,6 +313,21 @@ func TestBaselineWiringWarnsAboutAnUnusableMydumperAtBoot(t *testing.T) {
 	})
 	upConsoleBaselineLockMode, upConsoleBaselineLockModeErr = baseline.LockModeLockAll, nil
 
+	// A lock-mode typo already refuses every run with its own error; a boot
+	// line about the default mode would describe a daemon that does not exist.
+	t.Run("invalid lock mode config", func(t *testing.T) {
+		var buf bytes.Buffer
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		upConsoleBaselineTrigger = true
+		upConsoleBaselineLockModeErr = errors.New("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: bad value")
+		ctx, cancel := context.WithCancel(context.Background())
+		newBaselineSupervisorFromConfig(ctx, t.TempDir())
+		cancel()
+		upConsoleBaselineLockModeErr = nil
+		if strings.Contains(buf.String(), "full backups of MySQL and MariaDB servers") {
+			t.Errorf("a mydumper boot line was printed over an invalid lock-mode setting:\n%s", buf.String())
+		}
+	})
 	for _, trigger := range []bool{true, false} {
 		var buf bytes.Buffer
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -335,16 +350,13 @@ func TestBaselineWiringWarnsAboutAnUnusableMydumperAtBoot(t *testing.T) {
 func TestExecuteRefusesADumpWithNoBinlogPosition(t *testing.T) {
 	dir := t.TempDir()
 	// The metadata 0.10 wrote against MySQL 8.4, verbatim: no position lines.
-	script := "#!/bin/bash\n" +
-		"if [ \"$1\" = \"--version\" ]; then printf '%s\\n' '" + versionDistro + "'; exit 0; fi\n" +
-		"out=\"${@: -1}\"\n" +
-		"printf 'Started dump at: 2026-09-19 18:14:40\\nFinished dump at: 2026-09-19 18:14:40\\n' > \"$out/metadata\"\n" +
-		"exit 0\n"
+	script := fakeDumpScript(versionDistro, "Started dump at: 2026-09-19 18:14:40\\nFinished dump at: 2026-09-19 18:14:40\\n")
 	if err := os.WriteFile(filepath.Join(dir, "mydumper"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
 	stubPreflight(t, nil)
+	stubSourceVersion(t, "8.0.36", nil)
 
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.LockModeFTWRL)
 	local := t.TempDir()
@@ -352,7 +364,7 @@ func TestExecuteRefusesADumpWithNoBinlogPosition(t *testing.T) {
 	if !errors.Is(err, baseline.ErrDumpNotAnchored) {
 		t.Fatalf("execute err = %v, want ErrDumpNotAnchored", err)
 	}
-	for _, want := range []string{"no binlog position", "0.18.1", "MySQL 8.4"} {
+	for _, want := range []string{"no binlog position", "binary logging", "REPLICATION CLIENT"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the run's error %q does not say %q", err, want)
 		}
@@ -361,4 +373,131 @@ func TestExecuteRefusesADumpWithNoBinlogPosition(t *testing.T) {
 	if len(entries) != 0 {
 		t.Errorf("an unanchored dump was converted anyway: %d entries in the backup directory", len(entries))
 	}
+}
+
+// fakeDumpScript is a fake mydumper that answers --version with versionLine and
+// otherwise writes a dump that converts: metadata (printf-escaped) plus one
+// real table, appdb.t, so a check that fails to refuse lets a snapshot through.
+func fakeDumpScript(versionLine, metadata string) string {
+	return "#!/bin/bash\n" +
+		"if [ \"$1\" = \"--version\" ]; then printf '%s\\n' '" + versionLine + "'; exit 0; fi\n" +
+		"out=\"${@: -1}\"\n" +
+		"printf '" + metadata + "' > \"$out/metadata\"\n" +
+		"printf 'CREATE TABLE `t` (\\n  `id` int NOT NULL,\\n  PRIMARY KEY (`id`)\\n) ENGINE=InnoDB;\\n' > \"$out/appdb.t-schema.sql\"\n" +
+		"printf 'INSERT INTO `t` VALUES(1),(2);\\n' > \"$out/appdb.t.00000.sql\"\n" +
+		"exit 0\n"
+}
+
+// stubSourceVersion replaces the SELECT VERSION() probe.
+func stubSourceVersion(t *testing.T, version string, err error) *int {
+	t.Helper()
+	calls := new(int)
+	prev := sourceServerVersion
+	sourceServerVersion = func(context.Context, string) (string, error) {
+		*calls++
+		return version, err
+	}
+	t.Cleanup(func() { sourceServerVersion = prev })
+	return calls
+}
+
+func installFake(t *testing.T, script string) (record string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mydumper"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	return filepath.Join(dir, "never-written")
+}
+
+// TestExecuteConvertsAHealthyDumpFromAnOldBuild is the other side of the
+// refusal: 0.10 against MySQL 8.0 records its position, so the fallback's dump
+// is converted and published. Without this, a check that refused everything
+// would pass the refusal tests.
+func TestExecuteConvertsAHealthyDumpFromAnOldBuild(t *testing.T) {
+	installFake(t, fakeDumpScript(versionDistro,
+		"Started dump at: 2026-09-19 18:14:40\\nSHOW MASTER STATUS:\\n\\tLog: binlog.000002\\n\\tPos: 1374\\n\\tGTID:\\n\\nFinished dump at: 2026-09-19 18:14:40\\n"))
+	stubPreflight(t, nil)
+	stubSourceVersion(t, "8.0.36", nil)
+
+	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.LockModeFTWRL)
+	local := t.TempDir()
+	out, err := sup.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: "u:p@tcp(127.0.0.1:1)/", LocalDir: local})
+	if err != nil {
+		t.Fatalf("execute refused a dump that records its position: %v", err)
+	}
+	defer out.cleanup()
+	if _, statErr := os.Stat(filepath.Join(out.snapDir, "appdb", "t.parquet")); statErr != nil {
+		t.Errorf("no converted table in %s: %v", out.snapDir, statErr)
+	}
+}
+
+// TestExecuteRefusesADumpWhoseMetadataCannotBeRead: the console refuses what it
+// cannot anchor, including a dump with no readable metadata, where the
+// conversion would only log at Info (the CLI only warns there, on purpose).
+func TestExecuteRefusesADumpWhoseMetadataCannotBeRead(t *testing.T) {
+	installFake(t, fakeDumpScript(versionModern, "not mydumper metadata\\n"))
+	stubPreflight(t, nil)
+
+	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.LockModeSafeNoLock)
+	local := t.TempDir()
+	_, err := sup.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: "u:p@tcp(127.0.0.1:1)/", LocalDir: local})
+	if err == nil || !strings.Contains(err.Error(), "cannot read mydumper's metadata") {
+		t.Fatalf("execute err = %v, want a refusal naming the unreadable metadata", err)
+	}
+	if entries, _ := os.ReadDir(local); len(entries) != 0 {
+		t.Errorf("a dump with unreadable metadata was converted anyway: %d entries", len(entries))
+	}
+}
+
+// TestRunMydumperOldBuildIsRefusedBeforeDumpingMySQL84: a build older than
+// 0.16.3 against MySQL 8.4 would dump everything under FTWRL and then be
+// refused for having no position, so the run stops before mydumper starts.
+// MariaDB, 8.0, and a source whose version cannot be read go ahead.
+func TestRunMydumperOldBuildIsRefusedBeforeDumpingMySQL84(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		server  string
+		err     error
+		refused bool
+	}{
+		{"mysql 8.4", "8.4.9", nil, true},
+		{"mysql 8.0", "8.0.36", nil, false},
+		{"mariadb", "11.4.12-MariaDB-ubu2404-log", nil, false},
+		{"version unreadable", "", errors.New("connection refused"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record := fakeConsoleMydumper(t, printsVersion(versionDistro))
+			stubPreflight(t, nil)
+			calls := stubSourceVersion(t, tc.server, tc.err)
+			err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL)
+			if *calls != 1 {
+				t.Errorf("source version read %d time(s), want once for a build older than 0.16.3", *calls)
+			}
+			if tc.refused {
+				if err == nil || !strings.Contains(err.Error(), "8.4.9") || !strings.Contains(err.Error(), "0.16.3") {
+					t.Fatalf("err = %v, want a refusal naming the server version and 0.16.3", err)
+				}
+				assertNeverLaunched(t, record)
+				return
+			}
+			if err != nil {
+				t.Fatalf("runMydumper: %v", err)
+			}
+			recordedArgs(t, record)
+		})
+	}
+
+	t.Run("a build from 0.16.3 on is not asked", func(t *testing.T) {
+		fakeConsoleMydumper(t, printsVersion(versionModern))
+		stubPreflight(t, nil)
+		calls := stubSourceVersion(t, "8.4.9", nil)
+		if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, filepath.Join(t.TempDir(), "out"), baseline.LockModeSafeNoLock); err != nil {
+			t.Fatalf("runMydumper: %v", err)
+		}
+		if *calls != 0 {
+			t.Errorf("source version read for a build that records the position on every server")
+		}
+	})
 }

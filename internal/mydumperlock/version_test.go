@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseVersion(t *testing.T) {
@@ -226,5 +227,48 @@ func TestSupportsLockModeFloor(t *testing.T) {
 	}
 	if LockModeFloor != "0.18.1" {
 		t.Errorf("LockModeFloor = %q; the refusals quote it, so it must name the first build that accepts the flags", LockModeFloor)
+	}
+}
+
+// TestRecordsPositionOn pins the pre-dump shortcut (#1744): only a build older
+// than 0.16.3 against MySQL (or Percona Server) 8.4 and newer cannot record the
+// position. MariaDB kept SHOW MASTER STATUS; 0.16.3 against 8.4 records it
+// (both measured).
+func TestRecordsPositionOn(t *testing.T) {
+	for _, tc := range []struct {
+		v      Version
+		server string
+		want   bool
+	}{
+		{Version{0, 10, 0}, "8.4.9", false},
+		{Version{0, 10, 0}, "9.1.0", false},
+		{Version{0, 16, 2}, "8.4.9", false},
+		{Version{0, 10, 0}, "8.0.36", true},
+		{Version{0, 10, 0}, "8.0.36-28", true}, // Percona Server 8.0
+		{Version{0, 10, 0}, "11.4.12-MariaDB-ubu2404-log", true},
+		{Version{0, 16, 3}, "8.4.9", true},
+		{Version{1, 0, 3}, "8.4.9", true},
+		{Version{0, 10, 0}, "not a version", true}, // unknown: the after-dump check guards it
+	} {
+		if got := tc.v.RecordsPositionOn(tc.server); got != tc.want {
+			t.Errorf("%s.RecordsPositionOn(%q) = %v, want %v", tc.v, tc.server, got, tc.want)
+		}
+	}
+}
+
+// TestProbeVersionGivesUpOnABinaryThatNeverAnswers: the console's startup line
+// probes before capture starts, so a hung binary must not hold the daemon up.
+func TestProbeVersionGivesUpOnABinaryThatNeverAnswers(t *testing.T) {
+	prev := ProbeTimeout
+	ProbeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { ProbeTimeout = prev })
+	hung := writeScript(t, "exec sleep 30\n")
+	start := time.Now()
+	_, err := ProbeVersion(hung)
+	if !errors.Is(err, ErrNotRunnable) || !strings.Contains(err.Error(), "did not answer") {
+		t.Fatalf("err = %v, want ErrNotRunnable saying it did not answer", err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("the probe waited %s for a binary that never answers", took)
 	}
 }

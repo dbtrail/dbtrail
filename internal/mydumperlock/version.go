@@ -1,18 +1,32 @@
 package mydumperlock
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // LockModeFloor is the first mydumper build that accepts --sync-thread-lock-mode
 // and --trx-tables. No 0.18.0 was ever released, so the 0.18 series starts here.
 const LockModeFloor = "0.18.1"
 
+// ProbeTimeout bounds `mydumper --version`. The console's startup line runs the
+// probe before capture starts, so a binary that never answers must not hold
+// the daemon up. A variable so a test can shorten it.
+var ProbeTimeout = 10 * time.Second
+
+// PositionFloor is the first mydumper that reads the binlog position on MySQL
+// 8.2 and newer (SHOW BINARY LOG STATUS). An older build uses SHOW MASTER
+// STATUS, which MySQL 8.4 removed; it ignores the error, exits 0 and writes no
+// position (measured with 0.10 against 8.4; 0.16.3 against 8.4 records it).
+var PositionFloor = Version{0, 16, 3}
+
 // ErrNotRunnable marks a mydumper binary that did not run at all (#1699): it
-// could not be started, or it exited without printing a version. That is a
+// could not be started, or it exited non-zero without a readable version. That is a
 // different fact from "it ran and printed a version this release cannot read",
 // and it has a different remedy: fix or replace the binary, which will not
 // complete a dump either.
@@ -36,6 +50,38 @@ func (v Version) SupportsLockMode() bool {
 	return v.Major > 0 || v.Minor >= 18
 }
 
+// Less reports whether v is an older build than w.
+func (v Version) Less(w Version) bool {
+	if v.Major != w.Major {
+		return v.Major < w.Major
+	}
+	if v.Minor != w.Minor {
+		return v.Minor < w.Minor
+	}
+	return v.Patch < w.Patch
+}
+
+// RecordsPositionOn reports whether this build can record the binlog position
+// on a server whose SELECT VERSION() is serverVersion. Only MySQL (and Percona
+// Server) 8.4 and newer lack SHOW MASTER STATUS; MariaDB kept it. A version
+// string that does not parse is answered true: this is a pre-dump shortcut, and
+// the dump's own metadata is checked afterwards either way.
+func (v Version) RecordsPositionOn(serverVersion string) bool {
+	if !v.Less(PositionFloor) || strings.Contains(strings.ToLower(serverVersion), "mariadb") {
+		return true
+	}
+	parts := strings.SplitN(serverVersion, ".", 3)
+	if len(parts) < 2 {
+		return true
+	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(strings.TrimFunc(parts[1], func(r rune) bool { return r < '0' || r > '9' }))
+	if err1 != nil || err2 != nil {
+		return true
+	}
+	return major < 8 || (major == 8 && minor < 4)
+}
+
 // ProbeVersion runs `<path> --version` and parses what it prints.
 //
 // Three outcomes, and callers must keep them apart:
@@ -50,7 +96,12 @@ func (v Version) SupportsLockMode() bool {
 // A build that prints a readable version and then exits non-zero still told us
 // what it is, so the version wins over the exit status.
 func ProbeVersion(path string) (Version, error) {
-	out, err := exec.Command(path, "--version").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), ProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
+	if ctx.Err() != nil {
+		return Version{}, fmt.Errorf("%w: %s --version did not answer within %s", ErrNotRunnable, path, ProbeTimeout)
+	}
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

@@ -256,6 +256,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// Kept so a refusal can quote the REASON the version is unknown instead of
 	// blaming an age nothing measured.
 	var versionErr error
+	var probed mydumperlock.Version // what --version printed, when knownOldMydumper
 	if res.mode == dumpModeLocal {
 		v, verErr := mydumperlock.ProbeVersion(res.path)
 		switch {
@@ -276,6 +277,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 				"version", v.String())
 			supportsLockMode = false
 			knownOldMydumper = true
+			probed = v
 		}
 	}
 	// Refuse rather than silently ignore an explicit choice. Dropping the flag
@@ -296,8 +298,8 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// true about why the flag cannot be sent.
 	if !supportsLockMode && cmd.Flags().Changed("lock-mode") {
 		if knownOldMydumper {
-			return fmt.Errorf("--lock-mode %s needs mydumper 0.18 or newer (this build does not accept --sync-thread-lock-mode); "+
-				"upgrade mydumper, or point --mydumper-image at a newer pinned image", lockMode)
+			return fmt.Errorf("--lock-mode %s needs mydumper %s or newer (this build is %s and does not accept --sync-thread-lock-mode); "+
+				"upgrade mydumper, or point --mydumper-image at a newer pinned image", lockMode, mydumperlock.LockModeFloor, probed)
 		}
 		// Deliberately NOT suggesting --mydumper-image: reaching Docker mode
 		// requires NO mydumper on $PATH (see resolveMydumper), so an operator
@@ -437,13 +439,21 @@ func runDump(cmd *cobra.Command, args []string) error {
 	}
 
 	// A dump with no binlog position cannot seed a baseline anything is ever
-	// folded onto (#1688): mydumper older than 0.18.1 exits 0 against MySQL 8.4
-	// with no position in its metadata (measured). Returning here, before
-	// dumpSucceeded, restores the previous dump if there was one. Metadata that
-	// cannot be read (an encrypted dump, an unknown shape) is only warned about:
-	// `bintrail baseline` reads it again and fails loudly on a missing file.
+	// folded onto (#1688): mydumper exits 0 with no position when binary logging
+	// is off, when the dump user cannot read it, and (measured) for a build older
+	// than 0.16.3 against MySQL 8.4. Returning here, before dumpSucceeded,
+	// restores the previous dump if there was one. When there was none the
+	// refused dump stays in place, so it is marked, and `bintrail baseline`
+	// refuses to convert it (#1744). Metadata missing altogether, or without a
+	// "Started dump at" line, is only warned about: that is not a shape any
+	// measured build writes, and `bintrail baseline` without --timestamp
+	// refuses it on its own.
 	switch err := baseline.RequireDumpPosition(dmpOutputDir); {
 	case errors.Is(err, baseline.ErrDumpNotAnchored):
+		if mErr := baseline.WriteRefusedDumpMarker(dmpOutputDir, err.Error()); mErr != nil {
+			slog.Warn("could not mark the refused dump; do not convert it with bintrail baseline",
+				"output_dir", dmpOutputDir, "error", mErr)
+		}
 		return err
 	case err != nil:
 		slog.Warn("could not read the dump's metadata to confirm it records a binlog position",

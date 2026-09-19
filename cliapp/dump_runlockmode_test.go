@@ -244,7 +244,7 @@ func TestFakeMydumperVersionReportsVerbatim(t *testing.T) {
 // the shape we have SEEN; this fixes what the next unrecognised shape does.
 //
 // The mode is left at the ftwrl default deliberately: setting --lock-mode would
-// trip the "needs mydumper 0.18 or newer" refusal earlier in runDump and the
+// trip the "needs mydumper 0.18.1 or newer" refusal earlier in runDump and the
 // test would pass without ever reaching the preflight.
 func TestRunDumpUnreadableVersionStillChecksPrivileges(t *testing.T) {
 	dir := t.TempDir()
@@ -310,13 +310,13 @@ func TestRunDumpLockModeRefusalNamesTheRealReason(t *testing.T) {
 			version:     "mydumper built from source",
 			wantContain: "version could not be read",
 			// The false assertion this split exists to remove.
-			wantAbsent: "0.18 or newer",
+			wantAbsent: "0.18.1 or newer",
 		},
 		{
 			name:    "positively_old_build_still_says_upgrade",
 			version: "mydumper 0.15.0 (built with foo)",
 			// Unchanged for a build we actually read: upgrading IS the remedy.
-			wantContain: "0.18 or newer",
+			wantContain: "0.18.1 or newer",
 			wantAbsent:  "could not be read",
 		},
 	}
@@ -467,7 +467,7 @@ func TestRunDumpBrokenBinaryIsNamedNotAPrivilegeGap(t *testing.T) {
 }
 
 // TestRunDumpRefusesADumpWithNoPositionAndKeepsThePreviousOne (#1688): mydumper
-// older than 0.18.1 exits 0 against MySQL 8.4 with no binlog position in its
+// older than 0.16.3 exits 0 against MySQL 8.4 with no binlog position in its
 // metadata (measured). That dump cannot seed a baseline anything is folded onto,
 // so `bintrail dump` must fail, and must not replace the previous good dump.
 func TestRunDumpRefusesADumpWithNoPositionAndKeepsThePreviousOne(t *testing.T) {
@@ -514,5 +514,48 @@ func TestRunDumpRefusesADumpWithNoPositionAndKeepsThePreviousOne(t *testing.T) {
 	got, readErr := os.ReadFile(filepath.Join(out, "metadata"))
 	if readErr != nil || string(got) != good {
 		t.Errorf("the previous dump was not restored after the refusal (read err %v): metadata now %q", readErr, got)
+	}
+}
+
+// TestRunDumpMarksARefusedFirstDump (#1744): with no previous dump to restore,
+// the refused one stays in --output-dir. It is marked, so `bintrail baseline`
+// refuses it instead of publishing a baseline with no position.
+func TestRunDumpMarksARefusedFirstDump(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "mydumper")
+	script := "#!/bin/bash\n" +
+		"if [ \"$1\" = \"--version\" ]; then printf 'mydumper 0.10.0, built against MySQL 8.0.36\\n'; exit 0; fi\n" +
+		"out=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"--outputdir\" ]; then out=\"$a\"; fi; prev=\"$a\"; done\n" +
+		"mkdir -p \"$out\"\n" +
+		"printf 'Started dump at: 2026-09-19 18:14:40\\nFinished dump at: 2026-09-19 18:14:40\\n' > \"$out/metadata\"\n" +
+		"printf 'CREATE TABLE `t` (\\n  `id` int NOT NULL,\\n  PRIMARY KEY (`id`)\\n) ENGINE=InnoDB;\\n' > \"$out/appdb.t-schema.sql\"\n" +
+		"printf 'INSERT INTO `t` VALUES(1);\\n' > \"$out/appdb.t.00000.sql\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out") // nothing here yet: a first dump
+
+	stubPingSource(t)
+	dumpLockDir = func() string { return dir }
+	t.Cleanup(func() { dumpLockDir = os.TempDir })
+	dmpSourceDSN = "u:p@tcp(127.0.0.1:1)/"
+	dmpOutputDir = out
+	dmpMydumperPath = bin
+	dmpFormat = "text"
+	t.Cleanup(func() { dmpLockMode = "ftwrl"; dmpSourceDSN = ""; dmpOutputDir = "" })
+
+	cmd := newDumpCmdForTest(t)
+	if err := cmd.Flags().Set("mydumper-path", bin); err != nil {
+		t.Fatal(err)
+	}
+	if err := runDump(cmd, nil); !errors.Is(err, baseline.ErrDumpNotAnchored) {
+		t.Fatalf("runDump err = %v, want ErrDumpNotAnchored", err)
+	}
+	if _, refused := baseline.ReadRefusedDumpMarker(out); !refused {
+		t.Fatal("the refused first dump was left unmarked, so bintrail baseline would convert it")
+	}
+	if _, err := baseline.Run(context.Background(), baseline.Config{InputDir: out, OutputDir: t.TempDir(), Compression: "none"}); err == nil {
+		t.Error("bintrail baseline converted a dump bintrail dump refused")
 	}
 }
