@@ -50,7 +50,7 @@ func TestImplicitRetainFrom(t *testing.T) {
 			want: legacyRetainDur, wantRaw: LegacyRetain, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := implicitRetainFrom(tc.value, tc.found, tc.readErr)
+			got, err := implicitRetainFrom(tc.value, time.Now(), tc.found, tc.readErr)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -78,7 +78,7 @@ func TestImplicitRetainFrom_uncertainIsNeverRecorded(t *testing.T) {
 
 func mustImplicit(t *testing.T, value string, found bool, readErr error) implicitRetain {
 	t.Helper()
-	imp, _ := implicitRetainFrom(value, found, readErr)
+	imp, _ := implicitRetainFrom(value, time.Now(), found, readErr)
 	return imp
 }
 

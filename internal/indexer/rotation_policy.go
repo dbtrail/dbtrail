@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
 )
@@ -55,22 +56,28 @@ func recordInitialRetainIfNew(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// ReadInitialRetain returns the retention recorded when the index was created.
-// found is false when there is no record, which is also what a missing table
-// means: both are an index an older build created. The value comes back as
-// stored (trimmed); parsing it is the caller's job.
-func ReadInitialRetain(ctx context.Context, db *sql.DB, dbName string) (retain string, found bool, err error) {
+// ReadInitialRetain returns the retention recorded when the index was created,
+// and WHEN it was recorded. found is false when there is no record, which is
+// also what a missing table means: both are an index an older build created.
+// The value comes back as stored (trimmed); parsing it is the caller's job.
+//
+// recordedAt is not decoration: it is what separates an index whose history
+// accumulated under the recorded window from one that was created empty and
+// then FILLED with older history (restore-index rebuilding an index from the
+// archives, or `bintrail index` over months of old binlog files). The rotation
+// loop needs that difference — see rotation.rotateOneIndex.
+func ReadInitialRetain(ctx context.Context, db *sql.DB, dbName string) (retain string, recordedAt time.Time, found bool, err error) {
 	err = db.QueryRowContext(ctx,
-		"SELECT initial_retain FROM `"+dbName+"`.rotation_policy WHERE id = 1").Scan(&retain)
+		"SELECT initial_retain, recorded_at FROM `"+dbName+"`.rotation_policy WHERE id = 1").Scan(&retain, &recordedAt)
 	var me *mysql.MySQLError
 	switch {
 	case err == nil:
-		return strings.TrimSpace(retain), true, nil
+		return strings.TrimSpace(retain), recordedAt, true, nil
 	case errors.Is(err, sql.ErrNoRows):
-		return "", false, nil
+		return "", time.Time{}, false, nil
 	case errors.As(err, &me) && me.Number == 1146: // ER_NO_SUCH_TABLE
-		return "", false, nil
+		return "", time.Time{}, false, nil
 	default:
-		return "", false, fmt.Errorf("read rotation_policy: %w", err)
+		return "", time.Time{}, false, fmt.Errorf("read rotation_policy: %w", err)
 	}
 }

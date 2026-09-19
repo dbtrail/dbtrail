@@ -31,6 +31,12 @@ type implicitRetain struct {
 	// could not be read — which keeps LegacyRetain and stays under the upgrade
 	// guard, exactly as it did before this record existed.
 	recorded bool
+	// recordedAt is when that record was written, i.e. when the index was
+	// created. History OLDER than this instant did not accumulate under the
+	// recorded window: it was loaded in afterwards (restore-index rebuilding
+	// an index from the archives, `bintrail index` over old binlog files), so
+	// the record says nothing about it and the upgrade guard still applies.
+	recordedAt time.Time
 }
 
 // implicitRetainFrom is the pure decision behind the implicit retention: what
@@ -41,7 +47,7 @@ type implicitRetain struct {
 // zero all describe an index we know nothing reliable about, and keeping more
 // data than the policy asks for is recoverable while dropping it is not. The
 // returned error is for the log line; the retention is usable either way.
-func implicitRetainFrom(value string, found bool, readErr error) (implicitRetain, error) {
+func implicitRetainFrom(value string, recordedAt time.Time, found bool, readErr error) (implicitRetain, error) {
 	legacy := implicitRetain{retain: legacyRetainDur, raw: LegacyRetain}
 	switch {
 	case readErr != nil:
@@ -56,7 +62,7 @@ func implicitRetainFrom(value string, found bool, readErr error) (implicitRetain
 	if d <= 0 {
 		return legacy, fmt.Errorf("recorded retention %q is not a positive window", value)
 	}
-	return implicitRetain{retain: d, raw: value, recorded: true}, nil
+	return implicitRetain{retain: d, raw: value, recorded: true, recordedAt: recordedAt}, nil
 }
 
 // keptRetainNoticed remembers which indexes this process has already told the

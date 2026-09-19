@@ -5,6 +5,7 @@ package indexer
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -22,9 +23,14 @@ func TestCreateIndexTables_recordsTheDefaultOnANewIndex(t *testing.T) {
 	if err := CreateIndexTables(ctx, db, 2, false, nil); err != nil {
 		t.Fatalf("CreateIndexTables: %v", err)
 	}
-	got, found, err := ReadInitialRetain(ctx, db, dbName)
+	got, recordedAt, found, err := ReadInitialRetain(ctx, db, dbName)
 	if err != nil || !found || got != DefaultRotateRetain {
 		t.Fatalf("ReadInitialRetain = %q, %v, %v; want %q, true, nil", got, found, err, DefaultRotateRetain)
+	}
+	// The rotation loop keys the upgrade-guard exemption on this timestamp, so
+	// a zero one would exempt an index whose history predates its own record.
+	if recordedAt.IsZero() || time.Since(recordedAt) > time.Hour {
+		t.Errorf("recorded_at = %v, want the moment the index was created", recordedAt)
 	}
 }
 
@@ -42,7 +48,7 @@ func TestCreateIndexTables_keepsTheFirstRecord(t *testing.T) {
 	if err := CreateIndexTables(ctx, db, 2, false, nil); err != nil {
 		t.Fatalf("CreateIndexTables again: %v", err)
 	}
-	got, found, err := ReadInitialRetain(ctx, db, dbName)
+	got, _, found, err := ReadInitialRetain(ctx, db, dbName)
 	if err != nil || !found || got != "7d" {
 		t.Fatalf("ReadInitialRetain = %q, %v, %v; want the first record 7d kept", got, found, err)
 	}
@@ -63,7 +69,7 @@ func TestCreateIndexTables_existingIndexGetsNoRecord(t *testing.T) {
 	if err := CreateIndexTables(ctx, db, 2, false, nil); err != nil {
 		t.Fatalf("CreateIndexTables over an existing index: %v", err)
 	}
-	got, found, err := ReadInitialRetain(ctx, db, dbName)
+	got, _, found, err := ReadInitialRetain(ctx, db, dbName)
 	if err != nil {
 		t.Fatalf("ReadInitialRetain: %v", err)
 	}
@@ -78,7 +84,7 @@ func TestReadInitialRetain_missingTableIsNoRecord(t *testing.T) {
 	db, dbName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 
-	got, found, err := ReadInitialRetain(context.Background(), db, dbName)
+	got, _, found, err := ReadInitialRetain(context.Background(), db, dbName)
 	if err != nil || found || got != "" {
 		t.Fatalf("ReadInitialRetain = %q, %v, %v; want \"\", false, nil", got, found, err)
 	}
@@ -90,7 +96,7 @@ func TestReadInitialRetain_returnsTheStoredValue(t *testing.T) {
 	testutil.MustExec(t, db, DDLRotationPolicy)
 	testutil.MustExec(t, db, "INSERT INTO rotation_policy (id, initial_retain) VALUES (1, ' 48h ')")
 
-	got, found, err := ReadInitialRetain(context.Background(), db, dbName)
+	got, _, found, err := ReadInitialRetain(context.Background(), db, dbName)
 	if err != nil || !found || got != "48h" {
 		t.Fatalf("ReadInitialRetain = %q, %v, %v; want \"48h\", true, nil", got, found, err)
 	}

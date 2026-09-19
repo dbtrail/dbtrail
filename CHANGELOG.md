@@ -17,9 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moves the indexes created from then on and cannot shorten the window an
   existing index has been running on. An index created before the record
   existed carries none: it keeps 30 days — the default every such index ran
-  under — stays under the upgrade guard as before, and the daemon says so
-  once per index at startup, naming that window and the current default. An
-  unreadable record falls back to the same 30 days and logs why. Setting
+  under — and stays under the upgrade guard as before. When a kept window
+  and the current default ever differ, the daemon says so once per index, on
+  that index's next rotation cycle; today they are both 30 days, so no index
+  is in that position yet. An index created empty and then filled with older
+  history (a restored index, or `bintrail index` over old binlog files) is
+  NOT exempt from the guard: the record says nothing about history older
+  than itself. An unreadable record falls back to the same 30 days and logs
+  why. Setting
   `--rotate-retain`, `BINTRAIL_ROTATE_RETAIN` or the console's rotation
   settings overrides the record, unchanged.
 

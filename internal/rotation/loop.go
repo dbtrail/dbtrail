@@ -327,8 +327,8 @@ func rotateOneIndex(ctx context.Context, t RotateTarget, s Settings) (int, error
 		// by its absence and keeps LegacyRetain, the window it has been
 		// running on all along. Changing the default must never shorten an
 		// existing index's window behind the operator's back.
-		value, found, readErr := indexer.ReadInitialRetain(ctx, db, cfg.DBName)
-		imp, err := implicitRetainFrom(value, found, readErr)
+		value, recordedAt, found, readErr := indexer.ReadInitialRetain(ctx, db, cfg.DBName)
+		imp, err := implicitRetainFrom(value, recordedAt, found, readErr)
 		if err != nil {
 			if ctx.Err() != nil {
 				return 0, nil // shutdown mid-cycle, not a failure
@@ -340,34 +340,40 @@ func rotateOneIndex(ctx context.Context, t RotateTarget, s Settings) (int, error
 		}
 		retain, retainRaw = imp.retain, imp.raw
 
-		if !imp.recorded {
-			// Upgrade guard, for an index that records nothing: its operator
-			// never chose a retention AND no build of ours wrote down which
-			// window it started on. If the oldest partition extends far
-			// beyond that window — the signature of a pre-existing deployment
-			// that predates built-in rotation — refuse to drop it and demand
-			// an explicit choice.
-			//
-			// An index that DOES carry a record is exempt: its whole history
-			// accumulated under the window it records, so depth beyond it is
-			// the daemon having been stopped, not an upgrade changing the
-			// rules. Guarding it would turn any outage longer than the window
-			// into a refusal to drop anything — while the catch-up that
-			// follows writes the fastest the index ever grows.
-			guarded, oldest, err := upgradeGuardTrips(ctx, db, cfg.DBName, retain)
-			if err != nil {
-				slog.Warn("built-in rotation: could not evaluate the upgrade guard; skipping drops this cycle",
-					"db", cfg.DBName, "error", config.ScrubDSNText(err.Error(), dsn))
-				return 0, err
-			}
-			if guarded {
-				slog.Error("built-in rotation: existing history extends far beyond the default retention — refusing to drop it without an explicit choice",
-					"db", cfg.DBName,
-					"oldest_partition", oldest.UTC().Format("2006-01-02 15:04"),
-					"default_retain", retainRaw,
-					"action", "set --rotate-retain explicitly (e.g. 30d to confirm, 90d to keep more, off to disable) or BINTRAIL_ROTATE_RETAIN")
-				retain = 0 // still top up future partitions; no drops
-			}
+		// Upgrade guard: the operator never chose a retention, so history far
+		// beyond the window — the signature of a deployment that predates
+		// built-in rotation — is not dropped until they do choose.
+		//
+		// An index is exempt only while its history actually accumulated under
+		// the window it records. Depth beyond the window is then the daemon
+		// having been stopped, not an upgrade changing the rules, and guarding
+		// it would turn any outage longer than the window into a refusal to
+		// drop anything — while the catch-up that follows writes the fastest
+		// the index ever grows.
+		//
+		// That is NOT the same as "the index carries a record". An index
+		// created empty and then FILLED with older history — restore-index
+		// rebuilding it from the archives, or `bintrail index` over months of
+		// old binlog files — is new by schema and old by content, and its
+		// record describes none of that history. Exempting it would let the
+		// first cycle silently undo a restore the operator had just finished.
+		// The record's own timestamp is the exact test.
+		guarded, oldest, err := upgradeGuardTrips(ctx, db, cfg.DBName, retain)
+		if err != nil {
+			slog.Warn("built-in rotation: could not evaluate the upgrade guard; skipping drops this cycle",
+				"db", cfg.DBName, "error", config.ScrubDSNText(err.Error(), dsn))
+			return 0, err
+		}
+		exempt := imp.recorded && !oldest.IsZero() && !oldest.Before(imp.recordedAt)
+		if guarded && !exempt {
+			predates := imp.recorded // recorded, yet holding history older than the record
+			slog.Error("built-in rotation: existing history extends far beyond the default retention — refusing to drop it without an explicit choice",
+				"db", cfg.DBName,
+				"oldest_partition", oldest.UTC().Format("2006-01-02 15:04"),
+				"default_retain", retainRaw,
+				"history_predates_record", predates,
+				"action", "set --rotate-retain explicitly (e.g. 30d to confirm, 90d to keep more, off to disable) or BINTRAIL_ROTATE_RETAIN")
+			retain = 0 // still top up future partitions; no drops
 		}
 	}
 

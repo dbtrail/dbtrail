@@ -19,12 +19,22 @@ import (
 // older build left behind — so "no record" needs no undoing.
 func implicitRig(t *testing.T, recorded string, hours ...time.Time) (db *sql.DB, dsn, dbName string) {
 	t.Helper()
+	// recorded_at BEFORE every partition: an index that has simply been
+	// running under its record. The opposite shape — history older than the
+	// record — is what implicitRigRecordedAt builds, and the guard tells them
+	// apart.
+	return implicitRigRecordedAt(t, recorded, time.Now().UTC().Add(-365*24*time.Hour), hours...)
+}
+
+func implicitRigRecordedAt(t *testing.T, recorded string, recordedAt time.Time, hours ...time.Time) (db *sql.DB, dsn, dbName string) {
+	t.Helper()
 	db, dbName = testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 	testutil.SetupPartitionedTable(t, db, dbName, hours)
 	if recorded != "" {
 		testutil.MustExec(t, db, indexer.DDLRotationPolicy)
-		testutil.MustExec(t, db, "INSERT INTO rotation_policy (id, initial_retain) VALUES (1, ?)", recorded)
+		testutil.MustExec(t, db, "INSERT INTO rotation_policy (id, initial_retain, recorded_at) VALUES (1, ?, ?)",
+			recorded, recordedAt.UTC().Format("2006-01-02 15:04:05"))
 	}
 	return db, testutil.IntegrationDSN(dbName), dbName
 }
@@ -128,27 +138,6 @@ func TestRotateOneIndex_upgradeGuardStillMeasuredAgainstTheLegacyWindow(t *testi
 	}
 }
 
-// A recorded index is exempt from the guard: history deeper than its window is
-// the daemon having been stopped, not an upgrade changing the rules. Guarding
-// it would freeze drops after any outage longer than the window.
-func TestRotateOneIndex_recordedIndexIsNotGuardedAfterAnOutage(t *testing.T) {
-	stale := time.Now().UTC().Add(-6 * 24 * time.Hour).Truncate(time.Hour) // 6 days > 2x48h
-	current := time.Now().UTC().Truncate(time.Hour)
-	db, dsn, dbName := implicitRig(t, "48h", stale, current)
-	logs := captureSlog(t)
-
-	if _, err := rotateOneIndex(context.Background(), RotateTarget{DSN: dsn}, implicitSettings()); err != nil {
-		t.Fatalf("rotateOneIndex: %v", err)
-	}
-	if partitionNames(t, db, dbName)[indexer.PartitionName(stale)] {
-		t.Errorf("partition %s survived: a recorded index rotates on its own window after an outage",
-			indexer.PartitionName(stale))
-	}
-	if logs.has(slog.LevelError, "refusing to drop it without an explicit choice") {
-		t.Error("the upgrade guard tripped on an index that records its window")
-	}
-}
-
 // An explicit choice wins over the record — and says nothing about it.
 func TestRotateOneIndex_explicitChoiceIgnoresTheRecord(t *testing.T) {
 	old := time.Now().UTC().Add(-72 * time.Hour).Truncate(time.Hour)
@@ -195,5 +184,56 @@ func TestRotateOneIndex_unreadableRecordKeepsTheLegacyWindow(t *testing.T) {
 	}
 	if !logs.has(slog.LevelWarn, "could not read which retention this index was created under") {
 		t.Error("the fallback was silent")
+	}
+}
+
+// An index created EMPTY and then filled with older history — restore-index
+// rebuilding it from the archives, or `bintrail index` over months of old
+// binlog files — is new by schema and old by content. Its record describes
+// none of that history, so the upgrade guard must still refuse: exempting it
+// would let the first cycle silently undo a restore that had just finished.
+func TestRotateOneIndex_recordedIndexFilledWithOlderHistoryIsStillGuarded(t *testing.T) {
+	restored := time.Now().UTC().Add(-90 * 24 * time.Hour).Truncate(time.Hour)
+	current := time.Now().UTC().Truncate(time.Hour)
+	// The record was written when the index was created, minutes ago; the
+	// partitions it now holds came from the archives and are months older.
+	db, dsn, dbName := implicitRigRecordedAt(t, "48h", time.Now().UTC().Add(-5*time.Minute), restored, current)
+	logs := captureSlog(t)
+
+	if _, err := rotateOneIndex(context.Background(), RotateTarget{DSN: dsn}, implicitSettings()); err != nil {
+		t.Fatalf("rotateOneIndex: %v", err)
+	}
+	if !partitionNames(t, db, dbName)[indexer.PartitionName(restored)] {
+		t.Errorf("partition %s was dropped: 90 days of history loaded into a freshly created index must wait for an explicit choice, "+
+			"or the first cycle undoes the restore that just put it there", indexer.PartitionName(restored))
+	}
+	if !logs.has(slog.LevelError, "refusing to drop it without an explicit choice") {
+		t.Error("the refusal was silent")
+	}
+	if !logs.hasAttr("built-in rotation: existing history extends far beyond the default retention — refusing to drop it without an explicit choice",
+		"history_predates_record", "true") {
+		t.Error("the refusal does not say the history is older than the index's own record")
+	}
+}
+
+// The mirror case: an index whose history is entirely newer than its record —
+// an outage longer than the window — stays exempt. Without this, the guard
+// would freeze drops after every long stop while the catch-up writes the
+// fastest the index ever grows.
+func TestRotateOneIndex_recordedIndexWithHistoryNewerThanTheRecordStaysExempt(t *testing.T) {
+	stale := time.Now().UTC().Add(-6 * 24 * time.Hour).Truncate(time.Hour) // 6 days > 2x48h
+	current := time.Now().UTC().Truncate(time.Hour)
+	db, dsn, dbName := implicitRigRecordedAt(t, "48h", stale.Add(-time.Hour), stale, current)
+	logs := captureSlog(t)
+
+	if _, err := rotateOneIndex(context.Background(), RotateTarget{DSN: dsn}, implicitSettings()); err != nil {
+		t.Fatalf("rotateOneIndex: %v", err)
+	}
+	if partitionNames(t, db, dbName)[indexer.PartitionName(stale)] {
+		t.Errorf("partition %s survived: history younger than the record is this index's own, and its 48h window applies",
+			indexer.PartitionName(stale))
+	}
+	if logs.has(slog.LevelError, "refusing to drop it without an explicit choice") {
+		t.Error("the upgrade guard tripped on an index whose history is entirely newer than its record")
 	}
 }
