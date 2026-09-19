@@ -341,6 +341,8 @@ At the default `100000`, an hour holding 100k events costs ~1 fetch (no amplific
 
 All three baseline-merging entry points — `reconstruct` single-row, `reconstruct --output-format mydumper` (full-table), and the shim's `_snapshot` (both single-row and full-table) — now query `schema_changes` for a `TRUNCATE TABLE`/`DROP TABLE`/`RENAME TABLE`/`CREATE OR REPLACE TABLE` on the target table in `(baseline snapshot time, --at]` and **refuse** the run with an error naming the DDL type and its detected timestamp, rather than silently resurrecting rows. Re-baseline the table after the DDL and reconstruct from the new baseline. A pre-DDL-tracking index (no `schema_changes` table) is not affected — the check treats a missing table as nothing to check, not a hard failure.
 
+A table with **no baseline** is rebuilt by `reconstruct --output-format mydumper` from its recorded changes alone (the binlog-only fallback), and it gets the same refusal ([#1674](https://github.com/dbtrail/dbtrail/issues/1674)). Its window starts at the oldest change the index or its archives still hold, so a statement older than that is no reason to refuse: nothing it removed is left to bring back. The window starts one second before that oldest change, because both times are whole seconds and a statement in the same second may follow it.
+
 This is an offline/`_snapshot` concern only — `_flashback` and `bintrail query`/`recover` read the row-event history directly and never claim a never-touched row still exists.
 
 ### PK-changing UPDATE in the reconstruction window

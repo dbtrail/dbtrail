@@ -45,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time after the old order would not have been enough: the recorded time is
   when a statement ran, not when it committed, so an event past the target
   can commit ahead of an older-stamped one.
+- **A table with no backup is no longer rebuilt with rows a TRUNCATE, DROP or
+  RENAME removed** (#1674). Full-table `reconstruct` rebuilds a table that
+  has no backup from its recorded changes alone, and that path never looked
+  for these statements, which write no row changes: the rows inserted before
+  one came back in the output, with no warning, while the paths that start
+  from a backup refused. It now refuses the same way when such a statement
+  lies between the oldest change it read and the target time, and says the
+  table has no backup and how to get one. A statement older than every
+  retained change is no reason to refuse.
 - **A steady load no longer turns the backup schedule into a full backup
   every slot** (#1736). The cut-over rule (#1721) estimated an update's
   cost from a marginal rate, events beyond the shortest recent update per
