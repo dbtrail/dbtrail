@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the built-in rotation default is now 48 hours, not 30 days
+- **A new index keeps 48 hours of history instead of 30 days** (#1709). The
+  index is a change log that grows with the source's write rate, so at 30
+  days nobody who never set `--rotate-retain` was protected from filling the
+  disk: measured at about 180 transactions a second, 13 GB of `binlog_events`
+  per hour, 158 GB after two days on a 200 GB disk, with rotation running
+  every cycle and dropping nothing, because two days is less than thirty.
+  Disk-full on the index is an outage of capture, not a degradation. The
+  restore path does not need a month of the LIVE index: a backup update folds
+  from the newest backup forward, and an archive tier (`--archive-dir` /
+  `--archive-s3`) keeps everything older as Parquet that `query` and
+  `reconstruct` read anyway. 48 rather than 12 hours so a chain of table
+  deltas (capped at 24h) plus a day of margin fits out of the box.
+
+  **An index that already exists is not moved.** Each index records the
+  retention it was created under, and the loop drops on that record, so
+  upgrading changes nothing for an index created before this release: it
+  keeps 30 days until someone chooses. The daemon says so once per index, on
+  that index's next rotation cycle, naming the window it keeps and the
+  current default; `bintrail status` and `doctor` now name the window in
+  force and where it came from, the console's capacity card projects over it
+  instead of over the daemon's number, and the rotation panel says what the
+  selected server keeps when that differs. An index created empty and then
+  filled with older history (a restored index, `bintrail index` over old
+  binlog files) stays under the upgrade guard, which refuses to drop that
+  history until a retention is set explicitly.
+
+  To keep the old window everywhere, set `--rotate-retain 30d` (or
+  `BINTRAIL_ROTATE_RETAIN=30d`, or the console's rotation settings); an
+  explicit value has always won and still does.
+
 ### Added
 - **Each index records the rotation retention it was created under** (#1709).
   A new `rotation_policy` table, written once when `init` (or `up`, `watch`,

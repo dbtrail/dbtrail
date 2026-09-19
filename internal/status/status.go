@@ -646,6 +646,13 @@ type StatusData struct {
 	Servers   []ServerInfo
 	Stream    *StreamStateInfo
 	Baselines []BaselineInfo
+	// Retention is the built-in rotation window this index runs on while its
+	// operator sets none, and where it came from (#1709). nil when it could
+	// not be read at all. It says nothing about whether a rotation loop is
+	// RUNNING — status reads an index, not a daemon — which is why the line
+	// it feeds names the window an unattended daemon would use, not a promise
+	// that one is.
+	Retention *RetentionInfo
 	// BaselinesUnavailable: a baseline location was configured but could not
 	// be read, so Baselines is empty for a BAD reason — JSON must report
 	// baseline_staleness "unknown", not omit it as if nothing were configured.
@@ -797,7 +804,7 @@ func LoadIndexSizeBytes(ctx context.Context, db *sql.DB, dbName string) (int64, 
 
 // Write writes the status data as a human-readable report to w.
 func (d *StatusData) Write(w io.Writer) {
-	WriteStatus(w, d.Files, d.Parts, d.Archives, d.Coverage, d.Servers, d.Stream)
+	WriteStatus(w, d.Files, d.Parts, d.Archives, d.Coverage, d.Servers, d.Stream, d.Retention)
 	if d.Stream == nil && d.StreamErr != nil {
 		writeStreamUnavailable(w, d.StreamErr)
 	}
@@ -866,11 +873,15 @@ func writeCoverageUnavailable(w io.Writer, err error) {
 
 // WriteJSON writes the status data as JSON to w.
 func (d *StatusData) WriteJSON(w io.Writer) error {
-	return writeStatusJSONFull(w, d.Files, d.Parts, d.Archives, d.Coverage, d.Servers, d.Stream, d.Baselines, d.BaselinesUnavailable, d.StreamErr, d.ArchivesErr, d.CoverageErr, d.TableVisible)
+	return writeStatusJSONFull(w, d.Files, d.Parts, d.Archives, d.Coverage, d.Servers, d.Stream, d.Baselines, d.BaselinesUnavailable, d.StreamErr, d.ArchivesErr, d.CoverageErr, d.TableVisible, d.Retention)
 }
 
 // WriteStatus writes a multi-section status report (Servers, Stream, Indexed Files, Partitions, Archives, Coverage, Summary) to w.
-func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, archives *ArchiveStats, coverage *CoverageInfo, servers []ServerInfo, stream *StreamStateInfo) {
+func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, archives *ArchiveStats, coverage *CoverageInfo, servers []ServerInfo, stream *StreamStateInfo, retentions ...*RetentionInfo) {
+	var retention *RetentionInfo
+	if len(retentions) > 0 {
+		retention = retentions[0]
+	}
 	// ── Section 0: Servers ───────────────────────────────────────────────────
 	if len(servers) > 0 {
 		fmt.Fprintln(w, "=== Servers ===")
@@ -1038,6 +1049,11 @@ func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, arch
 		}
 		tw.Flush()
 		fmt.Fprintf(w, "Total events (est.): %d\n", totalRows)
+	}
+	if retention != nil {
+		fmt.Fprintf(w, "Rotation window: %s — %s\n", retention.Raw, retention.Source)
+		fmt.Fprintln(w, "  (the window an unattended daemon drops on while nobody sets --rotate-retain;")
+		fmt.Fprintln(w, "   an explicit --rotate-retain, BINTRAIL_ROTATE_RETAIN or console setting overrides it)")
 	}
 
 	// ── Section 3: Archives ──────────────────────────────────────────────────
@@ -1292,7 +1308,11 @@ func WriteStatusJSON(w io.Writer, files []IndexStateRow, parts []PartitionStat, 
 
 // tableVisible scopes the capture-health table names (#1452); nil renders the
 // ledger verbatim. See StatusData.TableVisible.
-func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionStat, archives *ArchiveStats, coverage *CoverageInfo, servers []ServerInfo, stream *StreamStateInfo, baselines []BaselineInfo, baselinesUnavailable bool, streamErr, archivesErr, coverageErr error, tableVisible func(schema, table string) bool) error {
+func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionStat, archives *ArchiveStats, coverage *CoverageInfo, servers []ServerInfo, stream *StreamStateInfo, baselines []BaselineInfo, baselinesUnavailable bool, streamErr, archivesErr, coverageErr error, tableVisible func(schema, table string) bool, retentions ...*RetentionInfo) error {
+	var retention *RetentionInfo
+	if len(retentions) > 0 {
+		retention = retentions[0]
+	}
 	type jsonFile struct {
 		BinlogFile    string  `json:"binlog_file"`
 		Status        string  `json:"status"`
@@ -1508,6 +1528,10 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 		// BaselineStaleness is the worst per-table-newest verdict — the same
 		// headline the text banner keys on (#1193).
 		BaselineStaleness string `json:"baseline_staleness,omitempty"`
+		// Retention is the built-in rotation window this index runs on while
+		// nobody sets one, with basis recorded|legacy|unreadable (#1709).
+		// Absent when it could not be read.
+		Retention *RetentionInfo `json:"retention,omitempty"`
 	}
 
 	jf := make([]jsonFile, len(files))
@@ -1560,7 +1584,7 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 		js = append(js, srv)
 	}
 
-	out := jsonSummary{Servers: js, Files: jf, Parts: jp, Total: total}
+	out := jsonSummary{Servers: js, Files: jf, Parts: jp, Total: total, Retention: retention}
 	if stream != nil {
 		jstr := &jsonStream{
 			Mode:           stream.Mode,
@@ -1816,4 +1840,14 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 		fmt.Fprintln(w, "delta coverage: reconstructing those tables through the missing window is")
 		fmt.Fprintln(w, "impossible. Take a fresh baseline (bintrail dump + bintrail baseline).")
 	}
+}
+
+// RetentionInfo is the built-in rotation window one index runs on while its
+// operator sets none, with the sentence that says where it came from.
+type RetentionInfo struct {
+	Raw    string `json:"retain"`
+	Source string `json:"source"`
+	// Basis is the machine-readable form of Source: recorded | legacy |
+	// unreadable. JSON consumers grade on this, never on the sentence.
+	Basis string `json:"basis"`
 }
