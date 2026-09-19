@@ -4255,7 +4255,7 @@ try {
               // backups only in S3" wording cannot false-positive.
               hiddenSkip: fine.includes(skipped + " server(s) keep backups only in S3"),
               compactSaving: fine.includes("only when the last backup is read from this machine"),
-              compactChose: fine.includes("You chose this here"),
+              compactChose: fine.includes("You chose this in the web interface"),
               on, enabled, scheduled, source, targets, skipped,
               alarm: t.includes("no server can be refreshed"),
               // The count is read back, not just the sentence: a card that
@@ -4276,7 +4276,7 @@ try {
               pill: (el.querySelector(".bkr-state") || {}).textContent || "",
               dormant: t.includes("Nothing uses this yet"),
               middle: t.includes("Nothing refreshes all servers on one timer"),
-              chose: t.includes("You chose this here"),
+              chose: t.includes("You chose this in the web interface"),
               saving: t.includes("only when the last backup is read from this machine"),
               // A WORD test, not the literal "(live". The old shape put the
               // word in parentheses, so a check for that string passes on a pill

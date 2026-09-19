@@ -62,14 +62,14 @@
   "user_config": {
     "console_url": {
       "type": "string",
-      "title": "Console / MCP endpoint URL",
-      "description": "URL of your bintrail console MCP endpoint or a bintrail-mcp --http server, e.g. http://localhost:8090/mcp",
+      "title": "Web address / MCP endpoint",
+      "description": "URL of your DBTrail MCP endpoint or a bintrail-mcp --http server, e.g. http://localhost:8090/mcp",
       "required": true
     },
     "token": {
       "type": "string",
       "title": "Access token",
-      "description": "The console access token; sent as an Authorization: Bearer header",
+      "description": "The DBTrail access token; sent as an Authorization: Bearer header",
       "required": true,
       "sensitive": true
     }
