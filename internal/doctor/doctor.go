@@ -124,7 +124,24 @@ func connectWithoutDB(dsn string) (*sql.DB, error) {
 // report without rendering it — the seam the control-plane supervisor uses to
 // surface doctor results as cards in the console UI (runDoctorTo keeps the
 // CLI's write-and-exit behavior on top of it).
-func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, indexRetain time.Duration) *Report {
+// BuildOption tunes what Build reports without widening its signature for
+// every caller that does not care.
+type BuildOption func(*buildConfig)
+
+type buildConfig struct{ retainNote string }
+
+// WithRetainNote names WHERE the retention window came from, for the capacity
+// projection to print beside it (#1709): with no --retain set, the window is
+// the one each index was created under, not the running default.
+func WithRetainNote(note string) BuildOption {
+	return func(c *buildConfig) { c.retainNote = note }
+}
+
+func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, indexRetain time.Duration, opts ...BuildOption) *Report {
+	var cfg buildConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 
@@ -181,7 +198,7 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 			report.add(checkSourceIndexColocation(sourceDSN, indexDSN))
 			report.add(checkIndexConnection(ctx, indexDSN, indexCfg.DBName))
 			report.add(checkIndexWriteAccess(ctx, indexDSN, indexCfg.DBName))
-			report.add(checkIndexCapacity(ctx, indexDSN, indexCfg.DBName, indexRetain))
+			report.add(checkIndexCapacity(ctx, indexDSN, indexCfg.DBName, indexRetain, cfg.retainNote))
 		}
 	} else {
 		report.add(CheckResult{

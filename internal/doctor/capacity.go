@@ -398,12 +398,12 @@ func classifyCapacity(p capacityProjection, ok bool, retain time.Duration, retai
 // capacityVerdict turns a measurement into the check outcome — the
 // classification above rendered as the CLI check's text.
 func capacityVerdict(p capacityProjection, retain time.Duration, free uint64, freeKnown bool, freeReason CapacityFreeReason) CheckResult {
-	return capacityCheckResult(classifyCapacity(p, true, retain, true, free, freeKnown, freeReason), "")
+	return capacityCheckResult(classifyCapacity(p, true, retain, true, free, freeKnown, freeReason), "", "")
 }
 
 // capacityCheckResult renders a measurement as the doctor's CheckResult.
 // dbName is only needed for the not-initialized message.
-func capacityCheckResult(m CapacityMeasurement, dbName string) CheckResult {
+func capacityCheckResult(m CapacityMeasurement, dbName, retainNote string) CheckResult {
 	switch m.Reason {
 	case CapacityNotInitialized:
 		return CheckResult{
@@ -435,14 +435,22 @@ func capacityCheckResult(m CapacityMeasurement, dbName string) CheckResult {
 			Name:   CapacityCheckName,
 			Status: StatusWarn,
 			Detail: detail,
-			Remediation: "Configure rotation so the live index stays bounded: `bintrail up` rotates by default (--rotate-retain 30d),\n" +
+			Remediation: "Configure rotation so the live index stays bounded: `bintrail up` rotates by default (--rotate-retain " + indexer.DefaultRotateRetain + "),\n" +
 				"or schedule `bintrail rotate --retain <window>` (archive to Parquet first with --archive-dir to keep history cheaply).\n" +
 				"Sizing math: docs/capacity.md",
 		}
 	}
 
+	// retainNote names WHERE the window came from (#1709): with no --retain of
+	// their own, each index rotates on the retention it was created under, so
+	// a projection that named only the number would describe a window this
+	// index may not use.
+	window := m.Retain.String()
+	if retainNote != "" {
+		window += " (" + retainNote + ")"
+	}
 	projected := fmt.Sprintf("projected steady-state %s over the %s retention window (measured %.0f events/day × %s/event, InnoDB estimates); current size %s",
-		humanBytes(m.ProjectedBytes), m.Retain, m.EventsPerDay, humanBytes(m.BytesPerEvent), humanBytes(float64(m.CurrentBytes)))
+		humanBytes(m.ProjectedBytes), window, m.EventsPerDay, humanBytes(m.BytesPerEvent), humanBytes(float64(m.CurrentBytes)))
 	free := humanBytes(float64(m.FreeBytes))
 
 	switch m.Reason {
@@ -522,7 +530,7 @@ func freeUnmeasurableDetail(reason CapacityFreeReason) string {
 // checkIndexCapacity runs the capacity projection against the index server.
 // retain is the configured rotation window (0 = no rotation / unknown). It
 // connects server-level (the index database may not exist yet on first run).
-func checkIndexCapacity(ctx context.Context, dsn, dbName string, retain time.Duration) CheckResult {
+func checkIndexCapacity(ctx context.Context, dsn, dbName string, retain time.Duration, retainNote string) CheckResult {
 	db, err := connectWithoutDB(dsn)
 	if err != nil {
 		// checkIndexConnection (which runs first) already FAILs a dead
@@ -547,7 +555,7 @@ func checkIndexCapacity(ctx context.Context, dsn, dbName string, retain time.Dur
 		}
 		return CheckResult{Name: CapacityCheckName, Status: StatusFail, Detail: err.Error()}
 	}
-	return capacityCheckResult(EvaluateCapacity(probe, retain, true, time.Now()), dbName)
+	return capacityCheckResult(EvaluateCapacity(probe, retain, true, time.Now()), dbName, retainNote)
 }
 
 // tableVisible reports whether the table exists AND is visible to this user

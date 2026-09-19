@@ -1,12 +1,16 @@
 package rotation
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // LegacyRetain is what an index keeps while its operator sets no retention and
@@ -82,4 +86,73 @@ func noticeKeptRetain(key, dbName, kept, current string) {
 	slog.Warn("built-in rotation: this index keeps the retention it was created under, not the current default",
 		"db", dbName, "keeps", kept, "current_default", current,
 		"action", "set --rotate-retain (or BINTRAIL_ROTATE_RETAIN, or the console's rotation settings) to choose one yourself")
+}
+
+// RetainSource says where an implicit window came from, for a surface that
+// reports it to an operator.
+type RetainSource string
+
+const (
+	// RetainRecorded: the index carries the retention it was created under.
+	RetainRecorded RetainSource = "recorded"
+	// RetainLegacy: the index carries no record, so it keeps the window every
+	// such index ran under before the record existed.
+	RetainLegacy RetainSource = "legacy"
+	// RetainUnreadable: the record could not be read, so the legacy window is
+	// used — same window as RetainLegacy, different reason, and a surface must
+	// not present a failed read as a fact about the index.
+	RetainUnreadable RetainSource = "unreadable"
+)
+
+// Effective is the window one index rotates on while the operator sets none,
+// and where it came from. It is what every SURFACE should report (doctor's
+// projection, the console's capacity card and rotation panel, status), so a
+// screen cannot name a window the loop does not use.
+type Effective struct {
+	Retain time.Duration
+	Raw    string
+	Source RetainSource
+	// Err is set when Source is RetainUnreadable, for the log line; the window
+	// is usable either way.
+	Err error
+}
+
+// ResolveEffective answers for one index database, exactly as the rotation
+// loop does. It never fails: an index it cannot ask keeps the legacy window,
+// which is the same direction the loop takes.
+func ResolveEffective(ctx context.Context, db *sql.DB, dbName string) Effective {
+	value, recordedAt, found, readErr := indexer.ReadInitialRetain(ctx, db, dbName)
+	imp, err := implicitRetainFrom(value, recordedAt, found, readErr)
+	switch {
+	case err != nil:
+		return Effective{Retain: imp.retain, Raw: imp.raw, Source: RetainUnreadable, Err: err}
+	case imp.recorded:
+		return Effective{Retain: imp.retain, Raw: imp.raw, Source: RetainRecorded}
+	default:
+		return Effective{Retain: imp.retain, Raw: imp.raw, Source: RetainLegacy}
+	}
+}
+
+// DescribeSource is the one sentence a surface puts beside the window, so the
+// three of them cannot drift into three wordings.
+func (e Effective) DescribeSource() string {
+	switch e.Source {
+	case RetainRecorded:
+		return "the retention this index was created under"
+	case RetainUnreadable:
+		return "the retention indexes kept before it was recorded (this index's own record could not be read)"
+	default:
+		return "the retention indexes kept before it was recorded"
+	}
+}
+
+// StatusInfo renders this answer for the status report, which says which
+// window is in effect and where it came from. It lives here so the screen and
+// the loop cannot drift: one decision, two surfaces (#1709). nil when there is
+// no usable window to report.
+func (e Effective) StatusInfo() *status.RetentionInfo {
+	if e.Retain <= 0 {
+		return nil
+	}
+	return &status.RetentionInfo{Raw: e.Raw, Source: e.DescribeSource(), Basis: string(e.Source)}
 }
