@@ -98,13 +98,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept the last ones it read, anchoring the backup on another server's
   binlog; only the `SHOW MASTER STATUS:` block is read now. mydumper 0.16.x
   writes the position as `File`/`Position`/`Executed_Gtid_Set` under
-  `[master]`, which was not read at all.
+  `[master]`, which was not read at all. mydumper 1.0.x repeats the same
+  keys twice when it dumps a replica with `--replica-data`: this server's
+  position under `[source]` and the upstream server's under `[replication]`,
+  later in the file. The last one used to win, which anchored a replica's
+  backup on the primary's binlog; only this server's own section is read now.
 - **A mydumper binary that does not run is named as such** (#1699). `bintrail
   dump` treated a binary that failed to start, or exited non-zero without a
   readable version (a missing shared library exits 127), as one whose version
   could not be read, so its first hard error could be a privilege refusal
   naming `BACKUP_ADMIN`. It now stops with the binary's path and its own
   error, and so does the console, which never read the version before.
+- **The backup-privilege check is no longer skipped for mydumper 0.16 and
+  0.17** (#1688). That check exists because granting `BACKUP_ADMIN` without
+  `RELOAD` makes mydumper crash rather than fail with a message, and it was
+  skipped for every build older than 0.18.1 on the grounds that an old build
+  may never take MySQL's backup lock. Measured: the 0.10 that Ubuntu 24.04
+  and Debian bookworm package takes no such lock, but 0.16.3 and 1.0.3 both
+  do. Only builds older than 0.11 are exempt now, in `bintrail dump` and in
+  the console alike.
+- **A baseline with no binlog position says so even when the dump's metadata
+  cannot be read** (#1688). Converting a dump with an explicit timestamp
+  logged that case at Info while the read-but-empty case warned, although
+  both publish a baseline that an update or restore can only anchor by
+  time.
 - **A steady load no longer turns the backup schedule into a full backup
   every slot** (#1736). The cut-over rule (#1721) estimated an update's
   cost from a marginal rate, events beyond the shortest recent update per

@@ -71,6 +71,7 @@ func waitForTerminalState(t *testing.T, read func() console.BaselineStatus) cons
 // simply never having run: that leaves the slot "running" with an empty
 // LastError, and both checks fail.
 func TestBaselineJobGoroutines_survivePanicAndReportFailure(t *testing.T) {
+	installWorkingMydumper(t)
 	for _, tc := range []struct {
 		name string
 		// inject makes the job's own work panic and returns the restore.

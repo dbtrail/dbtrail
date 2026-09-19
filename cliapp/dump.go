@@ -330,12 +330,15 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// two-step but true chain, against a segfault that says nothing at all. It
 	// is also why the refusal above had to stop claiming the build is old.
 	//
-	// A build we positively READ as pre-0.18 keeps skipping, on purpose:
-	// requiresBackupAdmin decides from the SERVER's version, not mydumper's, so
-	// demanding BACKUP_ADMIN from an old build that may never issue LOCK
-	// INSTANCE FOR BACKUP would refuse a dump that works today. That is a
-	// live configuration — Ubuntu 24.04 and Debian bookworm both package 0.10.1.
-	if !knownOldMydumper && lockMode.NeedsElevatedPrivileges() {
+	// A build we positively READ as taking no backup lock keeps skipping, on
+	// purpose: requiresBackupAdmin decides from the SERVER's version, not
+	// mydumper's, so demanding BACKUP_ADMIN from a build that never issues LOCK
+	// INSTANCE FOR BACKUP would refuse a dump that works today. That is a live
+	// configuration — Ubuntu 24.04 and Debian bookworm both package 0.10.1.
+	// The skip used to cover every pre-0.18 build, which was wider than its own
+	// reason: 0.16.3 and 1.0.3 both issue the lock (measured), so only builds
+	// older than mydumperlock.LockInstanceExemptBelow are exempt now.
+	if (!knownOldMydumper || probed.TakesBackupLock()) && lockMode.NeedsElevatedPrivileges() {
 		if err := checkMydumperPrivileges(cmd.Context(), dmpSourceDSN, lockMode, mydumperlock.RemedyCLI, schemas); err != nil {
 			return err
 		}

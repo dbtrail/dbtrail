@@ -52,7 +52,10 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	}
 
 	// Resolve timestamp and binlog position from mydumper metadata.
-	var meta DumpMetadata
+	var (
+		meta        DumpMetadata
+		metaReadErr error // only the Timestamp-override path continues past one
+	)
 	ts := cfg.Timestamp
 	if ts.IsZero() {
 		var err error
@@ -63,12 +66,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		ts = meta.StartedAt
 	} else {
 		// Best-effort: try to get binlog position even with timestamp override.
-		var metaErr error
-		meta, metaErr = ParseMetadata(cfg.InputDir)
-		if metaErr != nil {
-			slog.Info("could not read mydumper metadata for binlog position — Parquet files will lack baseline position",
-				"input_dir", cfg.InputDir, "error", metaErr)
-		}
+		meta, metaReadErr = ParseMetadata(cfg.InputDir)
 	}
 	// Read, but no position (#1744): mydumper exits 0 when binary logging is
 	// off, when the dump user cannot read the position, and for a build older
@@ -76,11 +74,19 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	// hand for another purpose is not this code's to refuse), but it must not
 	// be silent: an update or restore from this baseline falls back to
 	// timestamps.
-	if meta.BinlogFile == "" && !meta.StartedAt.IsZero() {
+	// Unreadable metadata lands here too, with an explicit Timestamp: it also
+	// produces a baseline with no position, and used to say so at Info while
+	// the read-but-empty case warned — the louder line belongs to both, since
+	// the consequence is identical.
+	if meta.BinlogFile == "" {
+		attrs := []any{"input_dir", cfg.InputDir}
+		if metaReadErr != nil {
+			attrs = append(attrs, "error", metaReadErr)
+		}
 		slog.Warn("this dump records no binlog position, so the baseline will carry none and an update or restore "+
 			"from it falls back to timestamps; check that binary logging is on, that the dump user has REPLICATION CLIENT, "+
 			"and that mydumper is 0.16.3 or newer on MySQL 8.4 and later",
-			"input_dir", cfg.InputDir)
+			attrs...)
 	}
 
 	// Discover tables.

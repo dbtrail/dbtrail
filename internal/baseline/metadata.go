@@ -271,6 +271,18 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 		// same tab-indented keys (read back by the round-trip test there).
 		inMasterBlock := legacyBlock == "SHOW MASTER STATUS:" || (legacyBlock == "" && iniSection == "master")
 
+		// The same rule for the 1.0.x keys. That format writes THIS server's
+		// position commented under "[source]" and, with --replica-data, the
+		// UPSTREAM server's UNCOMMENTED under "[replication]" — same key
+		// names, later in the file (measured against mydumper 1.0.3 dumping a
+		// real MySQL 8.0 replica: [source] carried replica-bin.000003, and
+		// [replication] carried the primary's primary-bin.000003, so the last
+		// writer won and anchored the backup on another server's binlog).
+		// An allow-list, not an exclusion: a channel's section is named
+		// "[replication.<channel>]", which an equality test would miss. The
+		// empty section keeps a headerless file readable.
+		inSourceBlock := iniSection == "" || iniSection == "source" || iniSection == "master"
+
 		// New mydumper format (0.16+) prefixes lines with "# ".
 		trimmed := strings.TrimPrefix(line, "# ")
 
@@ -304,14 +316,14 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 			}
 		} else if after, ok := strings.CutPrefix(line, "Executed_Gtid_Set = "); ok && iniSection == "master" {
 			m.GTIDSet = strings.TrimSpace(after)
-		} else if after, ok := strings.CutPrefix(trimmed, "SOURCE_LOG_FILE = "); ok {
+		} else if after, ok := strings.CutPrefix(trimmed, "SOURCE_LOG_FILE = "); ok && inSourceBlock {
 			m.BinlogFile = unquote(strings.TrimSpace(after))
-		} else if after, ok := strings.CutPrefix(trimmed, "SOURCE_LOG_POS = "); ok {
+		} else if after, ok := strings.CutPrefix(trimmed, "SOURCE_LOG_POS = "); ok && inSourceBlock {
 			pos, err := strconv.ParseInt(strings.TrimSpace(after), 10, 64)
 			if err == nil {
 				m.BinlogPos = pos
 			}
-		} else if after, ok := strings.CutPrefix(trimmed, "executed_gtid_set = "); ok {
+		} else if after, ok := strings.CutPrefix(trimmed, "executed_gtid_set = "); ok && inSourceBlock {
 			m.GTIDSet = unquote(strings.TrimSpace(after))
 		}
 	}

@@ -116,11 +116,14 @@ func TestPlanMydumperByVersionAndMode(t *testing.T) {
 			},
 		},
 		{
-			// v-prefixed and still below the floor: read, and old.
+			// v-prefixed and still below the floor: read, and old. It takes
+			// MySQL's backup lock all the same (measured), so the #800
+			// privilege check RUNS for it — unlike the 0.10 row above, which
+			// takes no lock and would be refused for a privilege it never uses.
 			name:    "0.16 with the v prefix",
 			version: printsVersion("mydumper v0.16.3-6, built against MySQL 8.4.1 with SSL support"),
 			want: map[baseline.LockMode]want{
-				baseline.LockModeFTWRL:      {fallback: true},
+				baseline.LockModeFTWRL:      {preflight: true, fallback: true},
 				baseline.LockModeLockAll:    {refuse: []string{"0.16.3"}},
 				baseline.LockModeSafeNoLock: {refuse: []string{"0.16.3"}},
 				baseline.LockModeNoLock:     {refuse: []string{"0.16.3"}},
@@ -399,6 +402,17 @@ func stubSourceVersion(t *testing.T, version string, err error) *int {
 	}
 	t.Cleanup(func() { sourceServerVersion = prev })
 	return calls
+}
+
+// installWorkingMydumper puts a mydumper on PATH that answers --version and
+// exits 0. For tests whose subject is the scheduler or the job guard, not
+// mydumper: since #1688 the plan (find the binary, read its version) runs
+// BEFORE the privilege check, so a host with no mydumper at all is refused
+// there — which on a CI runner without mydumper made those tests fail while
+// passing on a laptop that happens to have one installed.
+func installWorkingMydumper(t *testing.T) {
+	t.Helper()
+	installFake(t, "#!/bin/bash\nif [ \"$1\" = \"--version\" ]; then "+printsVersion(versionModern)+"; fi\nexit 0\n")
 }
 
 func installFake(t *testing.T, script string) (record string) {

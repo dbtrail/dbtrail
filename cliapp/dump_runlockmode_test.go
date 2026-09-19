@@ -372,7 +372,9 @@ func TestRunDumpLockModeRefusalNamesTheRealReason(t *testing.T) {
 // flag with no suite going red.
 func TestRunDumpKnownOldMydumperStillSkipsPreflight(t *testing.T) {
 	dir := t.TempDir()
-	bin, record := fakeMydumperVersion(t, dir, "mydumper 0.15.0 (built with foo)")
+	// 0.10 is the shape Ubuntu 24.04 and Debian bookworm package, and the one
+	// MEASURED to issue no LOCK INSTANCE FOR BACKUP at all.
+	bin, record := fakeMydumperVersion(t, dir, "mydumper 0.10.1 (built with foo)")
 
 	stubPingSource(t)
 	dumpLockDir = func() string { return dir }
@@ -404,11 +406,11 @@ func TestRunDumpKnownOldMydumperStillSkipsPreflight(t *testing.T) {
 	// assertion is fatal, and if the preflight ran it fails with the stub's own
 	// error, hiding the real diagnostic behind an unrelated message.
 	if called {
-		t.Fatal("the privilege preflight ran for a build positively read as pre-0.18; it may be judged against " +
-			"BACKUP_ADMIN, which such a build need never use — that refuses a dump that works today")
+		t.Fatal("the privilege preflight ran for a build measured to take no backup lock; it is judged against " +
+			"BACKUP_ADMIN, which such a build never uses — that refuses a dump that works today")
 	}
 	if err != nil {
-		t.Fatalf("a pre-0.18 mydumper was blocked by a preflight it does not need: %v", err)
+		t.Fatalf("a 0.10 mydumper was blocked by a preflight it does not need: %v", err)
 	}
 	if _, statErr := os.Stat(record); statErr != nil {
 		t.Errorf("mydumper never ran: %v", statErr)
@@ -557,5 +559,46 @@ func TestRunDumpMarksARefusedFirstDump(t *testing.T) {
 	}
 	if _, err := baseline.Run(context.Background(), baseline.Config{InputDir: out, OutputDir: t.TempDir(), Compression: "none"}); err == nil {
 		t.Error("bintrail baseline converted a dump bintrail dump refused")
+	}
+}
+
+// TestRunDumpOldBuildThatTakesTheBackupLockStillChecksPrivileges is the other
+// half of the skip above. The exemption is about the BACKUP LOCK, not about
+// being old: 0.16.3 is below the --sync-thread-lock-mode floor and still
+// issues LOCK INSTANCE FOR BACKUP (measured 2026-09-19 against MySQL 8.0 with
+// the general log on), so the #800 check — which exists because granting
+// BACKUP_ADMIN without RELOAD SEGFAULTS mydumper — must run for it.
+func TestRunDumpOldBuildThatTakesTheBackupLockStillChecksPrivileges(t *testing.T) {
+	dir := t.TempDir()
+	bin, _ := fakeMydumperVersion(t, dir, "mydumper v0.16.3-6, built against MySQL 8.4.1 with SSL support")
+
+	stubPingSource(t)
+	dumpLockDir = func() string { return dir }
+	t.Cleanup(func() { dumpLockDir = os.TempDir })
+
+	called := false
+	checkMydumperPrivileges = func(_ context.Context, _ string, _ baseline.LockMode, _ mydumperlock.Remedy, _ []string) error {
+		called = true
+		return errStopAfterPreflight
+	}
+	t.Cleanup(func() { checkMydumperPrivileges = mydumperlock.CheckPrivileges })
+
+	dmpSourceDSN = "u:p@tcp(127.0.0.1:1)/"
+	dmpOutputDir = filepath.Join(dir, "out")
+	dmpMydumperPath = bin
+	dmpFormat = "text"
+	t.Cleanup(func() { dmpLockMode = "ftwrl"; dmpSourceDSN = ""; dmpOutputDir = "" })
+
+	cmd := newDumpCmdForTest(t)
+	if err := cmd.Flags().Set("mydumper-path", bin); err != nil {
+		t.Fatal(err)
+	}
+	err := runDump(cmd, nil)
+	if !called {
+		t.Fatal("the privilege preflight was skipped for a build that takes the backup lock: the check that " +
+			"prevents a segfault is off for every 0.16/0.17 install")
+	}
+	if !errors.Is(err, errStopAfterPreflight) {
+		t.Fatalf("err = %v, want the preflight stub's error (the dump must not start)", err)
 	}
 }

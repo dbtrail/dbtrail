@@ -814,8 +814,14 @@ func planMydumper(lockMode baseline.LockMode) (mydumperPlan, error) {
 			fallback += fmt.Sprintf("; against MySQL 8.4 and newer a build older than %s cannot record the binlog position, "+
 				"so backups of those sources are refused before they start", mydumperlock.PositionFloor)
 		}
-		return mydumperPlan{path: path, sendLockFlags: false, preflight: false, fallback: fallback,
-			version: v, versionKnown: true}, nil
+		// The #800 privilege check is skipped only for a build that takes no
+		// backup lock (measured: the packaged 0.10 does not; 0.16.3 and 1.0.3
+		// do). Skipping it for every pre-0.18 build would switch the check off
+		// for a whole band that DOES take the lock, and that check exists
+		// because the failure it prevents is a segfault.
+		return mydumperPlan{path: path, sendLockFlags: false,
+			preflight: v.TakesBackupLock() && lockMode.NeedsElevatedPrivileges(),
+			fallback:  fallback, version: v, versionKnown: true}, nil
 	default:
 		return mydumperPlan{path: path, sendLockFlags: true, preflight: lockMode.NeedsElevatedPrivileges(),
 			version: v, versionKnown: true}, nil
@@ -867,7 +873,15 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 	// thrown away. A source whose version cannot be read goes ahead: the
 	// after-dump check still guards it.
 	if plan.versionKnown && plan.version.Less(mydumperlock.PositionFloor) {
-		if sv, verr := sourceServerVersion(ctx, sourceDSN); verr == nil && !plan.version.RecordsPositionOn(sv) {
+		sv, verr := sourceServerVersion(ctx, sourceDSN)
+		if verr != nil {
+			// The dump still runs and its own metadata is checked afterwards,
+			// but that check comes AFTER a full dump: say why the cheap
+			// refusal could not be made instead of dropping it in silence.
+			slog.Warn("console backup: could not read the source server's version, so an old mydumper cannot be refused before it dumps",
+				"mydumper", plan.version.String(), "error", verr)
+		}
+		if verr == nil && !plan.version.RecordsPositionOn(sv) {
 			return fmt.Errorf("mydumper %s cannot record the binlog position on MySQL %s: builds older than %s read it "+
 				"with SHOW MASTER STATUS, which MySQL 8.4 removed, so the backup would be refused after a full dump and "+
 				"the dump was not started. Install mydumper %s or newer",
@@ -879,11 +893,11 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 		// Hard gate, unlike the NO_LOCK warning below: granting BACKUP_ADMIN
 		// without RELOAD/FLUSH_TABLES does not fail cleanly in mydumper — it
 		// SEGFAULTS (verified against the pinned build, #800). Skipped ONLY for
-		// a build whose version was READ as pre-0.18, the CLI's rule (#1686):
+		// a build READ as older than mydumperlock.LockInstanceExemptBelow:
 		// requiresBackupAdmin decides from the SERVER's version, so demanding
-		// BACKUP_ADMIN from a 0.10 build that never issues LOCK INSTANCE FOR
-		// BACKUP would refuse a dump that works. An unreadable version keeps
-		// the gate.
+		// BACKUP_ADMIN from a 0.10 build, which takes no backup lock at all,
+		// would refuse a dump that works — while 0.16 and 0.17 DO take it and
+		// keep the gate. An unreadable version keeps the gate too.
 		if plan.preflight {
 			if err := checkMydumperPrivileges(ctx, sourceDSN, lockMode, mydumperlock.RemedyConsole, schemas); err != nil {
 				return err

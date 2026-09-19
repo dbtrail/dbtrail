@@ -496,7 +496,7 @@ func TestRunDump_capturesStderrOnFailure(t *testing.T) {
 	// caller doesn't bail out before invoking the dump.
 	script := `#!/bin/bash
 if [ "$1" = "--version" ]; then
-  echo "mydumper 0.15.0 (built with foo)"
+  echo "mydumper 0.10.1 (built with foo)"
   exit 0
 fi
 echo "CRITICAL: simulated mydumper failure (auth plugin caching_sha2_password)" >&2
@@ -929,7 +929,7 @@ func TestRunDump_localDeliversPasswordViaEnvNotArgv(t *testing.T) {
 	fakeBin := filepath.Join(dir, "mydumper")
 	script := `#!/bin/bash
 if [ "$1" = "--version" ]; then
-  echo "mydumper 0.15.0"
+  echo "mydumper 0.10.1"
   exit 0
 fi
 { echo "ARGS: $@"; echo "MYSQL_PWD=${MYSQL_PWD}"; } > "$BINTRAIL_TEST_RECORD"

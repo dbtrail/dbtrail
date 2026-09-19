@@ -50,6 +50,24 @@ func (v Version) SupportsLockMode() bool {
 	return v.Major > 0 || v.Minor >= 18
 }
 
+// LockInstanceExemptBelow is the boundary under which a build is known NOT to
+// take MySQL 8.0's backup lock. MEASURED 2026-09-19 against MySQL 8.0 with the
+// general log on: the 0.10.1 Ubuntu 24.04 and Debian bookworm package issues
+// no LOCK INSTANCE FOR BACKUP at all, while 0.16.3 and 1.0.3 both issue one.
+//
+// Everything from 0.11 up is treated as issuing it, INCLUDING the 0.11-0.15
+// band nobody publishes an image of, so it could not be measured. That is the
+// safe direction: treating a build that issues the lock as if it did not skips
+// the privilege check that exists because the failure it prevents is a
+// SEGFAULT, not a message (#800), while the opposite mistake costs an
+// actionable refusal naming the grant.
+var LockInstanceExemptBelow = Version{0, 11, 0}
+
+// TakesBackupLock reports whether this build issues LOCK INSTANCE FOR BACKUP,
+// the step that needs BACKUP_ADMIN on MySQL 8.0 and newer. Only a build read
+// as older than LockInstanceExemptBelow is exempt.
+func (v Version) TakesBackupLock() bool { return !v.Less(LockInstanceExemptBelow) }
+
 // Less reports whether v is an older build than w.
 func (v Version) Less(w Version) bool {
 	if v.Major != w.Major {

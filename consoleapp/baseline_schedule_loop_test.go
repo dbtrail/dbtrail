@@ -649,6 +649,7 @@ func TestBackupScheduler_panicWhileFiringIsASkip(t *testing.T) {
 // sup.Status, not ScheduleState, because ScheduleState is the copy the
 // watcher exists to make.
 func TestBackupScheduler_fallbackFullBackupIsWatched(t *testing.T) {
+	installWorkingMydumper(t)
 	holdFold(t, func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
 		return nil, nil, errors.New("capture gap in the reconstruction window")
 	})
@@ -999,6 +1000,7 @@ func TestBackupScheduler_attributesOnlyTheJobItStarted(t *testing.T) {
 // the privilege-check seam so the job is observably in flight, then released
 // and observed finished.
 func TestBackupScheduler_runningAfterARealFire(t *testing.T) {
+	installWorkingMydumper(t)
 	b, reg, sup := newScheduleFixture(t, true)
 	e := addScheduled(t, reg, false)
 	e.SourceDSN = "src:pw@tcp(127.0.0.1:3306)/" // parseable, so the dump reaches the seam

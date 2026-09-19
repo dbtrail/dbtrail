@@ -179,6 +179,11 @@ func TestParseMetadata_theShapesRealBuildsWrite(t *testing.T) {
 		{"0.16.3 [master] against 8.4", metadataMydumper0163MySQL84, "binlog.000002", 1326, ""},
 		{"0.16.3 [master] replica", metadataMydumper0163Replica, "binlog.000002", 2999718, twoUUIDs},
 		{"1.0.3 [source] against 8.4", metadataMydumper103MySQL84, "binlog.000002", 839, ""},
+		// Its own replica-bin.000003, never the primary's primary-bin.000003:2063
+		// that "[replication]" repeats further down the same file.
+		{"1.0.3 replica with --replica-data keeps its own position", metadataMydumper103Replica,
+			"replica-bin.000003", 2999911,
+			"57846b4f-b46d-11f1-ab2e-eed9fdedc351:1-13,57a1fa5f-b46d-11f1-bc65-9256e59c2242:1-5"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -273,3 +278,37 @@ func TestRunSaysWhenADumpHasNoPosition(t *testing.T) {
 		}
 	}
 }
+
+// metadataMydumper103Replica is mydumper 1.0.3 dumping a real MySQL 8.0
+// REPLICA with --replica-data, captured 2026-09-19. The [config] and
+// [myloader_session_variables] blocks and most of the commented Replica-status
+// tail are trimmed; every line that carries a coordinate is verbatim.
+//
+// Two sections carry the SAME keys. "[source]" holds THIS server's position
+// (commented), and "[replication]" holds the UPSTREAM server's — uncommented
+// and LATER in the file. Read without a section guard the last one wins, so a
+// replica's backup would be anchored on the primary's binlog: the wrong-server
+// anchor #1744 fixes for the legacy shape, in the newest one.
+const metadataMydumper103Replica = `# Started dump at: 2026-09-19 21:02:11
+[source]
+# Channel_Name = '' # It can be use to setup replication FOR CHANNEL
+# executed_gtid_set = "57846b4f-b46d-11f1-ab2e-eed9fdedc351:1-13,57a1fa5f-b46d-11f1-bc65-9256e59c2242:1-5"
+# SOURCE_LOG_FILE = "replica-bin.000003"
+# SOURCE_LOG_POS = 2999911
+[replication]
+Executed_Gtid_Set = "57846b4f-b46d-11f1-ab2e-eed9fdedc351:1-13,57a1fa5f-b46d-11f1-bc65-9256e59c2242:1-5"
+SOURCE_LOG_FILE = "primary-bin.000003"
+SOURCE_LOG_POS = 2063
+#SOURCE_AUTO_POSITION = {0|1}
+# Source_Log_File = 'primary-bin.000003'
+# Read_Source_Log_Pos = 2063
+#SOURCE_SSL = {0|1}
+myloader_exec_reset_replica = 0
+myloader_exec_change_source = 0
+myloader_exec_start_replica = 0
+real_table_name=t
+rows = 2
+schema_checksum = acf496de
+indexes_checksum = 1f09d0e1
+schema_checksum = 95DC8DDE
+`
