@@ -266,7 +266,10 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			iniSection = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
 		}
-		inMasterBlock := legacyBlock == "SHOW MASTER STATUS:"
+		// This server's own block: mydumper's legacy "SHOW MASTER STATUS:", or
+		// the "[master]" section reconstruct.WriteMetadataFile writes with the
+		// same tab-indented keys (read back by the round-trip test there).
+		inMasterBlock := legacyBlock == "SHOW MASTER STATUS:" || (legacyBlock == "" && iniSection == "master")
 
 		// New mydumper format (0.16+) prefixes lines with "# ".
 		trimmed := strings.TrimPrefix(line, "# ")
