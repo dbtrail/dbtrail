@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -254,7 +255,10 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 			if err == nil {
 				m.BinlogPos = pos
 			}
-		} else if after, ok := strings.CutPrefix(line, "\tGTID: "); ok {
+		} else if after, ok := strings.CutPrefix(line, "\tGTID:"); ok {
+			// No space after the colon on mydumper 0.10 ("\tGTID:uuid:1-10",
+			// measured on Ubuntu 24.04's package); matching "\tGTID: " lost
+			// every such dump's GTID set without a word (#1688).
 			m.GTIDSet = strings.TrimSpace(after)
 		} else if after, ok := strings.CutPrefix(trimmed, "SOURCE_LOG_FILE = "); ok {
 			m.BinlogFile = unquote(strings.TrimSpace(after))
@@ -274,6 +278,31 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 		return DumpMetadata{}, fmt.Errorf("metadata file missing 'Started dump at:' line")
 	}
 	return m, nil
+}
+
+// ErrDumpNotAnchored marks a dump whose metadata was read and names no binlog
+// position (#1688). A baseline converted from it has nothing to anchor the next
+// fold on, which would fall back to timestamps (#797's loss class) with no
+// warning, so a caller that publishes backups must refuse it.
+var ErrDumpNotAnchored = errors.New("the dump recorded no binlog position")
+
+// RequireDumpPosition reads inputDir's mydumper metadata and returns
+// ErrDumpNotAnchored when it names no binlog position. The measured way to get
+// there: a mydumper older than 0.18.1 reads the position with SHOW MASTER
+// STATUS, which MySQL 8.4 removed, ignores the error and exits 0. An unreadable
+// or missing metadata file is returned as ParseMetadata's own error, not as
+// ErrDumpNotAnchored, so each caller decides what an unverifiable dump means.
+func RequireDumpPosition(inputDir string) error {
+	m, err := ParseMetadata(inputDir)
+	if err != nil {
+		return err
+	}
+	if m.BinlogFile == "" {
+		return fmt.Errorf("%w: mydumper exited successfully, but its metadata names no binlog position. "+
+			"mydumper builds older than 0.18.1 read it with SHOW MASTER STATUS, which MySQL 8.4 and newer removed; "+
+			"install mydumper 0.18.1 or newer", ErrDumpNotAnchored)
+	}
+	return nil
 }
 
 // ReadParquetMetadata opens a local Parquet file and extracts the baseline

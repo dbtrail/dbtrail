@@ -28,7 +28,7 @@ import (
 //
 // And it must be a REAL shape (#1686). It used to read "mydumper 0.18.0 (built
 // with foo)", impossible twice over: no 0.18.0 was ever released (see
-// mydumperSupportsLockMode) and every build measured from 0.16.3 up carries the
+// mydumperlock.Version.SupportsLockMode) and every build measured from 0.16.3 up carries the
 // "v" prefix. With a string a binary actually prints, the three tests below
 // become regression tests for the parser half — revert the "v" strip and they
 // go red, because the version reads as "very old mydumper" again.
@@ -412,5 +412,107 @@ func TestRunDumpKnownOldMydumperStillSkipsPreflight(t *testing.T) {
 	}
 	if _, statErr := os.Stat(record); statErr != nil {
 		t.Errorf("mydumper never ran: %v", statErr)
+	}
+}
+
+// TestRunDumpBrokenBinaryIsNamedNotAPrivilegeGap pins #1699: a mydumper that
+// does not run at all used to fall into the "version unknown" branch, which
+// runs the privilege preflight, so the first hard error named BACKUP_ADMIN for a
+// binary that never executed. It must now be refused as what it is, before the
+// preflight and before anything is launched.
+func TestRunDumpBrokenBinaryIsNamedNotAPrivilegeGap(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "mydumper")
+	record := filepath.Join(dir, "argv.txt")
+	// What a build whose dynamic linker cannot resolve a library does: the
+	// loader complains on stderr and the process exits 127 before main runs.
+	script := "#!/bin/bash\n" +
+		"if [ \"$1\" = \"--version\" ]; then printf 'mydumper: error while loading shared libraries: libmysqlclient.so.21: cannot open shared object file\\n' >&2; exit 127; fi\n" +
+		"echo \"$@\" > " + record + "\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stubPingSource(t)
+	dumpLockDir = func() string { return dir }
+	t.Cleanup(func() { dumpLockDir = os.TempDir })
+
+	called := false
+	checkMydumperPrivileges = func(_ context.Context, _ string, _ baseline.LockMode, _ mydumperlock.Remedy, _ []string) error {
+		called = true
+		return errors.New("missing BACKUP_ADMIN")
+	}
+	t.Cleanup(func() { checkMydumperPrivileges = mydumperlock.CheckPrivileges })
+
+	dmpSourceDSN = "u:p@tcp(127.0.0.1:1)/"
+	dmpOutputDir = filepath.Join(dir, "out")
+	dmpMydumperPath = bin
+	dmpFormat = "text"
+	t.Cleanup(func() { dmpLockMode = "ftwrl"; dmpSourceDSN = ""; dmpOutputDir = "" })
+
+	cmd := newDumpCmdForTest(t)
+	if err := cmd.Flags().Set("mydumper-path", bin); err != nil {
+		t.Fatal(err)
+	}
+	err := runDump(cmd, nil)
+	if called {
+		t.Fatal("a mydumper that does not run reached the privilege preflight; the operator is told about BACKUP_ADMIN instead of the broken binary")
+	}
+	if !errors.Is(err, mydumperlock.ErrNotRunnable) || !strings.Contains(err.Error(), "libmysqlclient.so.21") {
+		t.Fatalf("runDump err = %v, want a refusal carrying the loader's own complaint", err)
+	}
+	if _, statErr := os.Stat(record); statErr == nil {
+		t.Error("mydumper was launched after its --version failed to run")
+	}
+}
+
+// TestRunDumpRefusesADumpWithNoPositionAndKeepsThePreviousOne (#1688): mydumper
+// older than 0.18.1 exits 0 against MySQL 8.4 with no binlog position in its
+// metadata (measured). That dump cannot seed a baseline anything is folded onto,
+// so `bintrail dump` must fail, and must not replace the previous good dump.
+func TestRunDumpRefusesADumpWithNoPositionAndKeepsThePreviousOne(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "mydumper")
+	script := "#!/bin/bash\n" +
+		"if [ \"$1\" = \"--version\" ]; then printf 'mydumper 0.10.0, built against MySQL 8.0.36\\n'; exit 0; fi\n" +
+		"out=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"--outputdir\" ]; then out=\"$a\"; fi; prev=\"$a\"; done\n" +
+		"mkdir -p \"$out\"\n" +
+		"printf 'Started dump at: 2026-09-19 18:14:40\\nFinished dump at: 2026-09-19 18:14:40\\n' > \"$out/metadata\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The previous, good dump, which must survive the refusal.
+	out := filepath.Join(dir, "out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const good = "Started dump at: 2026-09-18 03:00:00\nSHOW MASTER STATUS:\n\tLog: binlog.000001\n\tPos: 4\n\nFinished dump at: 2026-09-18 03:00:01\n"
+	if err := os.WriteFile(filepath.Join(out, "metadata"), []byte(good), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stubPingSource(t)
+	dumpLockDir = func() string { return dir }
+	t.Cleanup(func() { dumpLockDir = os.TempDir })
+
+	dmpSourceDSN = "u:p@tcp(127.0.0.1:1)/"
+	dmpOutputDir = out
+	dmpMydumperPath = bin
+	dmpFormat = "text"
+	t.Cleanup(func() { dmpLockMode = "ftwrl"; dmpSourceDSN = ""; dmpOutputDir = "" })
+
+	cmd := newDumpCmdForTest(t)
+	if err := cmd.Flags().Set("mydumper-path", bin); err != nil {
+		t.Fatal(err)
+	}
+	err := runDump(cmd, nil)
+	if !errors.Is(err, baseline.ErrDumpNotAnchored) {
+		t.Fatalf("runDump err = %v, want ErrDumpNotAnchored", err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(out, "metadata"))
+	if readErr != nil || string(got) != good {
+		t.Errorf("the previous dump was not restored after the refusal (read err %v): metadata now %q", readErr, got)
 	}
 }

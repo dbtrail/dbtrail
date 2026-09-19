@@ -32,6 +32,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backup reads every table in scope on the source.
 
 ### Fixed
+- **Console backups work with the mydumper a Linux distribution packages**
+  (#1688). The console always passed `--sync-thread-lock-mode` and
+  `--trx-tables`, which mydumper accepts only from 0.18.1 on, so on a host
+  whose mydumper came from the distribution (Ubuntu 24.04 packages 0.10.1)
+  every scheduled full backup and every Create backup failed with "Unknown
+  option", once per slot, while capture kept the daemon looking healthy. The
+  console now reads the version first, as `bintrail dump` already did. With
+  the default lock mode (`ftwrl`) an older build dumps without the two flags
+  and takes its own FTWRL. Any other mode set in
+  `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` is refused before mydumper starts,
+  with a message naming the installed version and 0.18.1, because dropping
+  the flag would dump under a lock nobody chose. The daemon says the same at
+  startup when backups are enabled, instead of once per failed slot.
+- **A dump with no binlog position is refused instead of published**
+  (#1688). mydumper older than 0.18.1 reads the position with `SHOW MASTER
+  STATUS`, which MySQL 8.4 removed, ignores the error and exits 0, so its
+  dump carries no position (measured with Ubuntu's 0.10 against MySQL 8.4).
+  A backup converted from it had nothing to anchor the next update on, which
+  then fell back to timestamps with no warning. Console backups and `bintrail
+  dump` now fail with the reason and the remedy, and `bintrail dump` keeps the
+  previous dump in place. Console backups also refuse a dump whose metadata
+  cannot be read.
+- **The GTID set of a mydumper 0.10 dump is kept** (#1688). That build writes
+  `GTID:` with no space before the set, and the parser expected one, so every
+  such baseline lost its GTID set without a word.
+- **A mydumper binary that does not run is named as such** (#1699). `bintrail
+  dump` and the console used to treat a binary that failed to start, or
+  exited without printing a version (a missing shared library exits 127),
+  as one whose version could not be read. On that path the first hard error
+  was a privilege refusal naming `BACKUP_ADMIN`. Both now stop with the
+  binary's path and its own error.
 - **A steady load no longer turns the backup schedule into a full backup
   every slot** (#1736). The cut-over rule (#1721) estimated an update's
   cost from a marginal rate, events beyond the shortest recent update per
