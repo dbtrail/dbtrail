@@ -136,6 +136,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// An index with nothing in it is the shape an operator reaches by running
+	// the CLI with the daemon's own env file (#1731): the events are in the
+	// per-source database the control plane provisioned, not in the one the
+	// daemon was started with.
+	defer HintSiblingIndexes(cmd.Context(), db, dbName, cmd.OutOrStdout())
 
 	// Discover baseline Parquet files if --baseline-dir is provided.
 	if stBaselineDir != "" {

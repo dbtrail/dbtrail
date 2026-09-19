@@ -596,6 +596,11 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		"snapshot", snapshotTime.UTC().Format(time.RFC3339),
 		"events_applied", len(events),
 		"duration_ms", time.Since(start).Milliseconds())
+	if len(events) == 0 {
+		if cfg, err := mysqldriver.ParseDSN(recIndexDSN); err == nil {
+			HintSiblingIndexes(cmd.Context(), db, cfg.DBName, os.Stderr)
+		}
+	}
 	return nil
 }
 
