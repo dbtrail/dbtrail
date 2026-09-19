@@ -38,6 +38,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BINTRAIL_ROTATE_RETAIN=30d`, or the console's rotation settings); an
   explicit value has always won and still does.
 
+### Fixed
+- **The CLI no longer reports "no history" without pointing at the database
+  that has it** (#1731). A daemon that monitors sources from the console
+  writes each source's events into its own database, not into the one it was
+  started with, so an operator running `query`, `recover`, `reconstruct` or
+  `status` with the daemon's env file reached an empty index and got zero of
+  everything — read, in an incident, as "there is no history for this table",
+  while the console showed the events. When the index holds no events at all
+  and the same server has others that do, the command now adds one line
+  naming them, fullest first with their row estimates, and says to point
+  `--index-dsn` at the one for the source in question. It stays silent when
+  the index holds events, when there are no others, and when either
+  catalogue read fails. `bintrail-console watch` also logs each source's
+  index database (name and address, never a password) when it provisions it.
+
 ### Added
 - **Each index records the rotation retention it was created under** (#1709).
   A new `rotation_policy` table, written once when `init` (or `up`, `watch`,

@@ -508,6 +508,11 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		"format", qFormat,
 		"duration_ms", time.Since(start).Milliseconds())
 	auditQueryRun(cmd.Context(), n)
+	if n == 0 {
+		if cfg, err := mysqldriver.ParseDSN(qIndexDSN); err == nil {
+			HintSiblingIndexes(cmd.Context(), db, cfg.DBName, os.Stderr)
+		}
+	}
 	if qFormat == "table" && n > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d row(s)\n", n)
 	}

@@ -452,6 +452,17 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 		idxDB.Close()
 		return fail(fmt.Errorf("schema migration: %w", err))
 	}
+	// Say WHERE this source's events will land (#1731). The operator runs the
+	// CLI with the daemon's own env file, which names the boot index, and gets
+	// zero of everything — during an incident that reads as "no history for
+	// this table". The name is in the console's API and in a collapsed part of
+	// the edit form; neither is where anyone looks first. No password: the
+	// database name and the server's address are what someone needs to point
+	// --index-dsn at it.
+	slog.Info("source index database ready",
+		"server", e.Name, "server_id", e.ID,
+		"index_database", idxCfg.DBName, "index_address", idxCfg.Addr,
+		"note", "run the CLI against THIS database to see this source's events")
 	// Re-hydrate a durable gap-loss record (#402): once the stream persisted
 	// its advanced checkpoint, a restarted daemon sees no gap and the hook
 	// never re-fires — the lost_position state must be restored from

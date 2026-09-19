@@ -493,6 +493,9 @@ func runRecover(cmd *cobra.Command, args []string) error {
 
 	if n == 0 {
 		fmt.Fprintln(os.Stderr, "No events matched the specified criteria.")
+		if cfg, err := mysqldriver.ParseDSN(rIndexDSN); err == nil {
+			HintSiblingIndexes(cmd.Context(), db, cfg.DBName, os.Stderr)
+		}
 	} else {
 		fmt.Fprintf(os.Stderr, "%d reversal statement(s) written to %s\n", n, rOutput)
 	}
