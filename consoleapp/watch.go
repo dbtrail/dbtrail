@@ -923,6 +923,13 @@ func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string) *ba
 			"DuckDB views generated before this was turned on must be generated again, or they show tables as of the last full rewrite. " +
 			"The views.sql inside each snapshot, the console download and the SQL panel are generated per snapshot and need nothing.")
 	}
+	// Only the creation opt-in runs mydumper; a refresh-only daemon never does,
+	// and a lock-mode typo already has its own refusal (configErr).
+	if upConsoleBaselineTrigger && upConsoleBaselineLockModeErr == nil {
+		if msg := mydumperBootWarning(upConsoleBaselineLockMode); msg != "" {
+			slog.Warn("console: " + msg)
+		}
+	}
 	// The download TTL for staged .sql builds (#1448) needs a clock nobody
 	// is polling: the Backups page expires lazily only while it is open.
 	go sup.runSQLExportReaper()
