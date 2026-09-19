@@ -436,6 +436,20 @@ func runDump(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("mydumper failed: %w", runErr)
 	}
 
+	// A dump with no binlog position cannot seed a baseline anything is ever
+	// folded onto (#1688): mydumper older than 0.18.1 exits 0 against MySQL 8.4
+	// with no position in its metadata (measured). Returning here, before
+	// dumpSucceeded, restores the previous dump if there was one. Metadata that
+	// cannot be read (an encrypted dump, an unknown shape) is only warned about:
+	// `bintrail baseline` reads it again and fails loudly on a missing file.
+	switch err := baseline.RequireDumpPosition(dmpOutputDir); {
+	case errors.Is(err, baseline.ErrDumpNotAnchored):
+		return err
+	case err != nil:
+		slog.Warn("could not read the dump's metadata to confirm it records a binlog position",
+			"output_dir", dmpOutputDir, "error", err)
+	}
+
 	slog.Info("dump complete", "output_dir", dmpOutputDir)
 	// The dump succeeded: the deferred cleanup may now delete the moved-aside
 	// previous dump (dir.old) instead of restoring it (#809).
