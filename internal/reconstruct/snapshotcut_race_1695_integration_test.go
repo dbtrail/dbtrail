@@ -33,11 +33,13 @@ func TestResolveSnapshotCut_anEventIndexedBetweenTheTwoReadsIsNeverLost(t *testi
 	// Already indexed, at or before at: this fold's.
 	testutil.InsertEvent(t, db, "binlog.000007", 100, 200, ts(-10*time.Second), nil, "shop", "orders", 2, "1", nil, nil, []byte(`{"id":1}`))
 
-	// Indexed in the gap, past at, next in the binlog: the next fold's.
-	const lateStart = 200
+	// Indexed in the gap, past at, later in the binlog: the next fold's. A gap
+	// between the two positions (200 -> 250) lets the assertion below tell a
+	// search that saw this event (cut 250) from one that did not (cut 200).
+	const lateStart = 250
 	inserted := false
 	afterNewestEventForTest = func() {
-		testutil.InsertEvent(t, db, "binlog.000007", lateStart, 300, ts(time.Second), nil, "shop", "orders", 2, "2", nil, nil, []byte(`{"id":2}`))
+		testutil.InsertEvent(t, db, "binlog.000007", lateStart, 350, ts(time.Second), nil, "shop", "orders", 2, "2", nil, nil, []byte(`{"id":2}`))
 		inserted = true
 	}
 	t.Cleanup(func() { afterNewestEventForTest = func() {} })
@@ -55,5 +57,9 @@ func TestResolveSnapshotCut_anEventIndexedBetweenTheTwoReadsIsNeverLost(t *testi
 	if cut.Pos > lateStart {
 		t.Fatalf("cut = %d, past the start (%d) of an event indexed past at: this fold drops it by time and the next skips it by position, so it is folded into no snapshot",
 			cut.Pos, lateStart)
+	}
+	// The search runs after the insert, so it must have found the event.
+	if cut.Pos != lateStart {
+		t.Errorf("cut = %d, want %d: the search did not see an event indexed before it ran", cut.Pos, lateStart)
 	}
 }

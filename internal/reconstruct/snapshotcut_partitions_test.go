@@ -624,6 +624,38 @@ func TestResolveSnapshotCut_cancelledContextIsNotAFallback(t *testing.T) {
 	}
 }
 
+// A daemon stopping between the newest-event read and the search: the first
+// partition listing sees the cancelled context, and that is not a listing
+// failure either. Since #1695 moved the newest-event read first, the test above
+// no longer reaches the listing, so this one cancels in the gap between them.
+func TestResolveSnapshotCut_cancelledBeforeTheSearchIsNotAFallback(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	warns := captureWarns(t)
+	at := time.Date(2026, 9, 16, 20, 5, 27, 0, time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	expectNewest(mock)
+	// Nothing after it: database/sql refuses the cancelled context before the
+	// listing reaches the driver.
+	afterNewestEventForTest = cancel
+	t.Cleanup(func() { afterNewestEventForTest = func() {} })
+
+	if _, err := ResolveSnapshotCut(ctx, db, at); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if warns.Len() != 0 {
+		t.Errorf("a cancelled context must not be logged as a fallback, got: %s", warns.String())
+	}
+}
+
 func TestPartitionDateOrFuture(t *testing.T) {
 	for _, n := range []string{"p_2026091620", "p_future"} {
 		if _, ok := partitionDateOrFuture(n); !ok {

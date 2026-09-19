@@ -89,10 +89,12 @@ var ErrNoIndexedCoordinates = errors.New("no indexed event carries a binlog file
 // landed at its END. This fold's time filter dropped it and the next fold's
 // positional lower bound skipped it: folded into no snapshot, silently.
 //
-// Reading the newest event first closes that window by construction. The
-// search then runs over a table that holds at least everything the first read
-// saw, so if any event up to the newest one is past at, the search finds it (or
-// an earlier one) and the cut lands at its start. An event inserted after the
+// Reading the newest event first closes that window. The search then runs over
+// a table that holds at least everything the first read saw (nothing deletes
+// indexed rows meanwhile, except the resume-time cleanup after a stream
+// restart, which the fold's own fetch is exposed to under either order), so if
+// any event up to the newest one is past at, the search finds it (or an
+// earlier one) and the cut lands at its start. An event inserted after the
 // first read comes after the newest one in the binlog, so the newest one's
 // end_pos leaves it for the next fold. Re-checking the newest event's timestamp
 // after a search-first pass would NOT be enough: event_timestamp is execution
