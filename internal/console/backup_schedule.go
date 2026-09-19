@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -245,6 +246,186 @@ type BackupScheduleGates struct {
 	// ReadOnlyConsole: this process is the standalone `serve` console, which
 	// runs no loop of any kind; names the daemon in the reason.
 	ReadOnlyConsole bool
+	// Window measures what an update would have to fold for one server, so
+	// ChooseBackupMethod can cut over to a full backup when the update is
+	// the dearer producer (#1721). Nil: never cut over (a process with no
+	// measurements, or a test).
+	Window BackupWindowProbe
+}
+
+// BackupWindow is what a scheduled update would have to fold, as the daemon
+// measured it. Every field may be unknown, and the rule (CutoverToFull)
+// says which combinations it can decide on.
+type BackupWindow struct {
+	// Anchor is the previous snapshot's instant (the one an update would
+	// start from); zero when unknown.
+	Anchor time.Time
+	// Events is how far the index's high-water mark has moved since the
+	// anchor; negative when unknown (no mark on record for THIS anchor, or
+	// the index did not answer). It counts every source writing to that
+	// index and any rows a resumed capture re-inserted, not the rows this
+	// server's fold would apply: the same over-count is in the rate, so the
+	// two cancel while the traffic mix holds.
+	Events int64
+	// FoldFixed and FoldRate model what an update costs from the run
+	// history: fixed seconds every update pays (starting DuckDB, reading
+	// every table's previous Parquet, fetching it from the bucket) plus one
+	// second per FoldRate events. Zero when unknown, which UpdateModel
+	// decides three ways: fewer than two measured updates, or the runs'
+	// times beyond the shortest under a tenth of their total (a quiet
+	// server: every update costs the fixed cost), or their events beyond
+	// the shortest under a tenth of a typical run's (a steady load: every
+	// update applies the same), or a marginal rate under a tenth of the
+	// shortest run's whole rate (noise in the denominator, #1736). A rate
+	// read off any of those would be an artefact that cuts over on every
+	// burst, or on every slot. FoldFixed alone still decides one thing
+	// without a rate: an update whose cheapest measured run already took
+	// longer than the last full backup.
+	FoldFixed time.Duration
+	FoldRate  float64
+	// Proven is the largest number of events one of the newest five
+	// measured updates (the model's own sample) applied in less time than
+	// the last full backup took. An update up to BackupProvenMargin times
+	// that size is not cut over on the estimate: evidence beats the model,
+	// with a margin for the few thousand events each window carries over
+	// the last (#1736).
+	Proven int64
+	// LastFull is how long the last successful full backup took; zero when
+	// there is none on record.
+	LastFull time.Duration
+}
+
+// BackupWindowProbe measures the window for e whose previous snapshot is
+// anchor. It runs on every decision, page loads included, so it must be
+// cheap and must answer "unknown" rather than block.
+type BackupWindowProbe func(ctx context.Context, e ServerEntry, anchor time.Time) BackupWindow
+
+// BackupCutoverMinAge is the floor of the age rule: an update whose anchor is
+// older than this (or than six schedule intervals, whichever is longer) is
+// replaced by a full backup when nothing was measured. Six intervals so a
+// daily schedule's normal one-day window is never "too old"; two hours so a
+// five-minute schedule that fell hours behind (a long stop, #1721) does
+// not fold the whole gap one page at a time.
+const BackupCutoverMinAge = 2 * time.Hour
+
+// BackupCutoverAge is the anchor age past which the age rule cuts over, for
+// a schedule that fires every interval (zero interval: the floor).
+func BackupCutoverAge(interval time.Duration) time.Duration {
+	return max(BackupCutoverMinAge, 6*interval)
+}
+
+// BackupProvenMargin is how far past the largest update proven cheaper
+// than a full backup (BackupWindow.Proven) the count may go before the
+// estimate is believed over that evidence (#1736). A strict "more events
+// than ever proven" was passed by a few thousand events at every slot of a
+// steady load, where each window carries slightly more than the last, and
+// the estimate it then believed was an artefact; within this margin the
+// proven cost is the better evidence.
+const BackupProvenMargin = 1.5
+
+// CutoverToFull is the #1721 rule: the why for a FULL backup instead of an
+// update, or "" to update. Measured first: with the events since the
+// anchor, a measured fold rate and a last full backup on record, the
+// update is cut over when its estimate exceeds the full backup's duration,
+// and NOT cut over otherwise, however old the anchor (the estimate is the
+// better evidence). Only without one of the three does the age rule apply:
+// an anchor older than BackupCutoverAge(interval). The estimate is crude on
+// purpose (events × rate, as the issue asked): it decides between two
+// producers, not a schedule.
+func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string {
+	if w.Events >= 0 && w.FoldRate > 0 && w.LastFull > 0 {
+		// Compared in float seconds: a Duration conversion of a huge
+		// estimate (a tiny rate, a long stop) overflows to a NEGATIVE
+		// value, which would read as cheaper than any full backup.
+		estSec := w.FoldFixed.Seconds() + float64(w.Events)/w.FoldRate
+		if estSec <= w.LastFull.Seconds() {
+			return ""
+		}
+		if float64(w.Events) <= BackupProvenMargin*float64(w.Proven) {
+			// Evidence over the model, said so: the two disagree by a
+			// lot here, and which one to believe is what an operator
+			// reading the log would want to know.
+			slog.Info("backup schedule: updating although the estimate exceeds the last full backup; an update of about this size was done cheaper",
+				"events", w.Events, "estimate", roundSeconds(estSec), "last_full", roundDuration(w.LastFull), "proven_events", w.Proven)
+			return ""
+		}
+		return fmt.Sprintf("%s: %s events since the previous backup would take about %s to apply at the measured rate, and the last full backup took %s",
+			BackupWhyWindowPrefix, formatCount(w.Events), roundSeconds(estSec), roundDuration(w.LastFull))
+	}
+	// No rate, but the fixed cost alone decides (#1736's review): when even
+	// the cheapest measured update took longer than the last full backup,
+	// no estimate is needed, and the age rule below could never say so on
+	// a server whose every update succeeds (each one renews the anchor).
+	if w.Events != 0 && w.FoldRate <= 0 && w.FoldFixed > 0 && w.LastFull > 0 && w.FoldFixed > w.LastFull {
+		return fmt.Sprintf("%s: the cheapest recent update took %s, longer than the last full backup's %s",
+			BackupWhyWindowPrefix, roundDuration(w.FoldFixed), roundDuration(w.LastFull))
+	}
+	if w.Anchor.IsZero() {
+		return ""
+	}
+	age := now.Sub(w.Anchor)
+	if age <= BackupCutoverAge(interval) {
+		return ""
+	}
+	// The parenthetical names what is actually missing: the history keeps
+	// the rate, the full backup and (IndexMark) the count's base across
+	// restarts, so "no rate" would be false on the common shape, an anchor
+	// no update of this build published (the count alone is unknown).
+	var missing []string
+	if w.Events < 0 {
+		missing = append(missing, "no count of the changes since it")
+	}
+	if w.FoldRate <= 0 {
+		missing = append(missing, "no usable update rate (none measured, or the measured updates all cost about the same)")
+	}
+	if w.LastFull <= 0 {
+		missing = append(missing, "no full backup on record")
+	}
+	return fmt.Sprintf("%s: it is %s old and the cut-over is %s (%s, so the update could not be estimated)",
+		BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)), strings.Join(missing, ", "))
+}
+
+// roundSeconds is roundDuration for a float second count, clamped so a
+// value past what a Duration holds renders as the maximum instead of
+// wrapping.
+func roundSeconds(sec float64) string {
+	const maxSec = float64(1<<63-1) / float64(time.Second)
+	if sec >= maxSec {
+		return roundDuration(time.Duration(1<<63 - 1))
+	}
+	return roundDuration(time.Duration(sec * float64(time.Second)))
+}
+
+// roundDuration renders a duration for a reason line: seconds under a
+// minute, minutes under an hour, hours and minutes above.
+func roundDuration(d time.Duration) string {
+	switch {
+	case d.Round(time.Second) < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Round(time.Second)/time.Second))
+	case d.Round(time.Minute) < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Round(time.Minute)/time.Minute))
+	}
+	h := int(d / time.Hour)
+	m := int((d - time.Duration(h)*time.Hour).Round(time.Minute) / time.Minute)
+	if m == 60 {
+		h, m = h+1, 0
+	}
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh %02dm", h, m)
+}
+
+// formatCount renders an event count with thousands separators.
+func formatCount(n int64) string {
+	s := fmt.Sprintf("%d", n)
+	if n < 0 {
+		return s
+	}
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 // FullBackupPossible reports whether a full backup can start for e on a
@@ -326,6 +507,12 @@ const (
 	// crashed (the rest names the refusal or the panic).
 	BackupWhyFoldRefusedPrefix = "the update from the recorded changes was refused"
 	BackupWhyFoldCrashedPrefix = "the update from the recorded changes hit an internal error"
+	// BackupWhyWindowPrefix / BackupWhyStaleAnchorPrefix start the reason for
+	// a full backup chosen over an update the daemon measured (#1721): the
+	// update was estimated dearer than a full backup, or its anchor is past
+	// the cut-over age with nothing measured. The rest carries the numbers.
+	BackupWhyWindowPrefix      = "an update from the recorded changes would take longer than a full backup"
+	BackupWhyStaleAnchorPrefix = "the previous backup is too old to update from"
 )
 
 // BackupWhyCode classifies a persisted full-backup reason for the page, so
@@ -352,6 +539,10 @@ func BackupWhyCode(why string) string {
 		return "fold_refused"
 	case strings.HasPrefix(why, BackupWhyFoldCrashedPrefix):
 		return "fold_crashed"
+	case strings.HasPrefix(why, BackupWhyWindowPrefix):
+		return "window_measured"
+	case strings.HasPrefix(why, BackupWhyStaleAnchorPrefix):
+		return "window_age"
 	}
 	return ""
 }
@@ -385,11 +576,12 @@ func CheckBackupSchedule(e ServerEntry, sched BackupSchedule, gates BackupSchedu
 	return nil
 }
 
-// newestSnapshotTables is reconstruct.NewestSnapshotTables, indirected so the
-// decision can be tested without a bucket: since #1539 the probe runs against
+// newestSnapshot is reconstruct.NewestSnapshot, indirected so the decision
+// can be tested without a bucket: since #1539 the probe runs against
 // BaselineFoldSource, which is an s3:// URL on an S3-backed server, and a unit
 // test that reached the network would be neither hermetic nor offline-safe.
-var newestSnapshotTables = reconstruct.NewestSnapshotTables
+// Its instant is the anchor the #1721 window is measured from.
+var newestSnapshot = reconstruct.NewestSnapshot
 
 // ChooseBackupMethod decides how the next scheduled run for e will be made,
 // and why, on a daemon with these gates. The rule, in order:
@@ -401,6 +593,12 @@ var newestSnapshotTables = reconstruct.NewestSnapshotTables
 //     cannot be READ is its own error, never "no backup yet". The previous
 //     backup is looked for where the fold would READ it (BaselineFoldSource),
 //     which is the bucket on an S3-backed server;
+//   - a server whose update the daemon measured as dearer than a full
+//     backup, or whose previous backup is past the cut-over age with
+//     nothing measured (#1721, CutoverToFull), gets a FULL backup with the
+//     numbers as the why — only when a full backup can start; otherwise
+//     the update runs, slow as it may be, because it is the producer that
+//     can;
 //   - otherwise the newest backup is UPDATED from the recorded changes, with
 //     no load on the source. If that update fails (a capture gap, a schema
 //     change, a crash), the loop takes a full backup at the same slot when
@@ -409,6 +607,13 @@ var newestSnapshotTables = reconstruct.NewestSnapshotTables
 // A rule that picks a producer the daemon cannot run (the opt-in off, no
 // source) is reported as such; the caller decides whether that is a skip.
 func ChooseBackupMethod(ctx context.Context, e ServerEntry, gates BackupScheduleGates) (method, why string, err error) {
+	return ChooseBackupMethodAt(ctx, e, gates, time.Now())
+}
+
+// ChooseBackupMethodAt is ChooseBackupMethod deciding for a slot at now: the
+// loop passes its tick, so the age rule reads the slot's clock and a test
+// can pin it.
+func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupScheduleGates, now time.Time) (method, why string, err error) {
 	fullErr := FullBackupPossible(e, gates)
 	rebuildErr := rebuildPossible(e)
 	if rebuildErr != nil {
@@ -428,7 +633,7 @@ func ChooseBackupMethod(ctx context.Context, e ServerEntry, gates BackupSchedule
 	// an S3-only server that refusal is what keeps the old behaviour, and its
 	// message is what tells the operator which setting unlocks the cheap path.
 	source := BaselineFoldSource(e)
-	tables, listErr := newestSnapshotTables(ctx, source)
+	anchor, tables, listErr := newestSnapshot(ctx, source)
 	if listErr != nil && errors.Is(listErr, fs.ErrNotExist) {
 		// A directory the first full backup has not created yet IS "no
 		// backup yet". Local sources only: an S3 listing answers with an
@@ -442,7 +647,7 @@ func ChooseBackupMethod(ctx context.Context, e ServerEntry, gates BackupSchedule
 		// with the page naming a cause that did not happen.
 		//
 		// A REMOTE source must not cost the slot either: this probe reaches the
-		// network on an S3-backed server (a DuckDB httpfs listing), and before
+		// network on an S3-backed server (two S3 listing requests, #1679), and before
 		// #1539 those servers were guaranteed a full backup every slot without
 		// touching it. Losing the night's backup to a throttled ListObjectsV2
 		// would be a worse trade than an expensive backup, so the producer that
@@ -469,6 +674,22 @@ func ChooseBackupMethod(ctx context.Context, e ServerEntry, gates BackupSchedule
 			return BackupMethodFull, "", fmt.Errorf("no previous backup to update under %s, and a full backup cannot start: %w", source, fullErr)
 		}
 		return BackupMethodFull, BackupWhyFirstBackup, nil
+	}
+	if gates.Window != nil && fullErr == nil {
+		var interval time.Duration
+		if e.BackupSchedule != nil {
+			// Both callers validated the schedule already; a parse failure
+			// here is an error, not a silent fall to the two-hour floor
+			// (which would cut a daily schedule over after two hours).
+			p, err := e.BackupSchedule.Parse()
+			if err != nil {
+				return BackupMethodFull, "", fmt.Errorf("the backup schedule could not be read: %w", err)
+			}
+			interval = p.Every
+		}
+		if why := CutoverToFull(gates.Window(ctx, e, anchor), interval, now); why != "" {
+			return BackupMethodFull, why, nil
+		}
 	}
 	return BackupMethodRefresh, "no load on your database", nil
 }
@@ -530,4 +751,7 @@ type BackupScheduleReporter interface {
 	// Forget tells the loop the schedule for serverID was removed, so its
 	// observation and last outcome are dropped now, not at the next tick.
 	Forget(serverID string)
+	// WindowProbe measures what an update would fold (#1721), for
+	// ChooseBackupMethod; nil when this process measures nothing.
+	WindowProbe() BackupWindowProbe
 }

@@ -119,13 +119,31 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 	if e.SourceDSN == "" {
 		return errors.New("this server has no source configured; set the source connection first")
 	}
-	if e.BaselineDir == "" && e.BaselineS3 == "" {
+	if !hasOwnBackupLocation(e) {
 		return errors.New("this server has no baseline location set up; set a baseline directory or S3 location first (Backup settings page)")
 	}
-	if e.IsPostgres() && (e.SourceSlot == "" || e.SourcePublication == "") {
+	if pgSourceIncomplete(e) {
 		return errors.New("this PostgreSQL server has no replication slot/publication configured; set them first (Edit → Source)")
 	}
 	return nil
+}
+
+// hasOwnBackupLocation: the server has a backup location of its own, the one
+// a console-created backup writes to. The daemon-wide default does not count:
+// a backup refuses the shared store. The precheck and the Getting started
+// list's reason call it, and the Backups page strip (baselineContextStrip in
+// app.js) repeats the same raw emptiness test, so change them together. A
+// restore also refuses the shared store but needs a local Backup dir, and
+// does not use this.
+func hasOwnBackupLocation(e ServerEntry) bool {
+	return e.BaselineDir != "" || e.BaselineS3 != ""
+}
+
+// pgSourceIncomplete: a PostgreSQL server with no replication slot or
+// publication, which the server form refuses to save. Neither capture nor a
+// backup can run for it.
+func pgSourceIncomplete(e ServerEntry) bool {
+	return e.IsPostgres() && (e.SourceSlot == "" || e.SourcePublication == "")
 }
 
 // BaselineStatus is the pollable state of a server's most recent baseline job.
@@ -184,7 +202,14 @@ type BaselineStatus struct {
 	// exactly the case where asking "did it fail?" gives the wrong answer to
 	// "is a backup still owed?".
 	Published bool `json:"published,omitempty"`
-	Tables    int  `json:"tables,omitempty"`
+	// Uploading: the snapshot is published locally and its copy to the backup
+	// destination is still in flight (#1725). The server's job slot is
+	// already free; Uploaded is filled in when the copy completes.
+	Uploading bool `json:"uploading,omitempty"`
+	// Swept counts OTHER local snapshots a full backup sent to the destination
+	// because the destination lacked them (a refresh whose upload failed).
+	Swept  int `json:"swept,omitempty"`
+	Tables int `json:"tables,omitempty"`
 	// Carried counts tables published by reusing the previous snapshot's file
 	// rather than folding them again (refresh and restore only). It is the
 	// ONLY confirmation the operator gets that the reuse setting did anything:

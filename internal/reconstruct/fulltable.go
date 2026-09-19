@@ -160,6 +160,10 @@ type FullTableConfig struct {
 	// from each base alone, rewrites every table the old way and writes no
 	// delta, so the snapshot after it has today's layout again.
 	TableDeltas bool
+	// CompactDir is where a compaction job leaves range pairs for a refresh
+	// to adopt (#1723): "<CompactDir>/<schema>/<table>/<chain start>/", one
+	// complete range pair plus a _SUCCESS marker. Empty: nothing is adopted.
+	CompactDir string
 
 	// WarnEventThreshold logs a loud warning when a table's fetched event count
 	// exceeds it. The event window itself is PAGED since #1097, so the resident
@@ -268,14 +272,27 @@ func applyDuckDBTuning(ctx context.Context, db *sql.DB, t duckdbutil.Tuning) {
 	duckdbutil.SetTempDirectory(ctx, db)
 }
 
-// TableReport carries the per-table outcome stats that the CLI summary prints.
+// TableReport carries the per-table outcome stats that the CLI summary prints,
+// plus what the run needs from each table afterwards (SourceSnapshotDir).
 type TableReport struct {
-	Schema, Table  string
-	BaselineRows   int64 // rows streamed through from the baseline unchanged
-	EventsApplied  int64 // total events observed from the event index
-	InsertsEmitted int64 // rows appended after the baseline pass (new PKs)
-	UpdatesApplied int64 // baseline rows whose PK matched an UPDATE/INSERT event
-	DeletesSkipped int64 // baseline rows whose PK matched a DELETE event
+	Schema, Table string
+	// SourceSnapshotDir is the LOCAL snapshot directory the table's baseline
+	// was read from ("" for S3 or no baseline). The manifest writer takes the
+	// digests of files linked forward from it instead of hashing them again
+	// (#1717).
+	SourceSnapshotDir string
+	BaselineRows      int64 // rows streamed through from the baseline unchanged
+	EventsApplied     int64 // total events observed from the event index
+	// FetchDuration / FoldDuration split the event window's wall time between
+	// waiting on the fetch (archive discovery and the planner included) and
+	// folding pages in Go (#1720). A carried-forward table walked its window
+	// too (that is how it learned it had no events), so it carries a real
+	// FetchDuration and a FoldDuration of zero: no page, no fold. A window
+	// empty by position, or a refusal before the fetch, leaves both zero.
+	FetchDuration, FoldDuration time.Duration
+	InsertsEmitted              int64 // rows appended after the baseline pass (new PKs)
+	UpdatesApplied              int64 // baseline rows whose PK matched an UPDATE/INSERT event
+	DeletesSkipped              int64 // baseline rows whose PK matched a DELETE event
 	// RowsWritten counts the row tuples actually written into chunk files —
 	// the writer's own tally, exact by construction (not derived from the
 	// baseline/insert/delete counters). `bintrail drill` loads the dump and
@@ -307,14 +324,51 @@ type TableReport struct {
 	CarriedByLink bool
 
 	// TableDelta is true when the table was published as its previous file
-	// plus a delta beside it instead of being rewritten (#1638). DeltaDeadRows
-	// and DeltaUpsertRows are what the delta holds in total, not what this run
-	// added. DeltaCompacted, when set, says why a run with deltas on rewrote
-	// the table anyway. All zero with deltas off.
-	TableDelta      bool
-	DeltaDeadRows   int64
-	DeltaUpsertRows int64
-	DeltaCompacted  string
+	// plus a chain of deltas beside it instead of being rewritten (#1638,
+	// #1718). DeltaPairWritten says whether this run wrote a pair at all (an
+	// empty window over an existing chain writes none). DeltaSeq is the
+	// sequence of the pair this run wrote (or of the chain's last pair when
+	// none was written);
+	// DeltaDeadRows and DeltaUpsertRows are what THIS run's pair holds, its
+	// window and nothing accumulated; DeltaChainFiles is how many pairs the
+	// chain has now and DeltaChainCopied how many of the carried pairs had to
+	// be copied because a hard link failed. DeltaCompacted, when set, says why
+	// a run with deltas on rewrote the table anyway. All zero with deltas off.
+	TableDelta       bool
+	DeltaPairWritten bool
+	DeltaSeq         int
+	DeltaDeadRows    int64
+	DeltaUpsertRows  int64
+	DeltaChainFiles  int
+	DeltaChainCopied int
+	DeltaCompacted   string
+	// DeltaCompactedRange is "<lo>-<hi>" when this run adopted a compaction
+	// job's range pair in place of the chain's first pairs (#1723).
+	DeltaCompactedRange string
+}
+
+// fetchFloor decides where a run with deltas on fetches from: the chain's last
+// pair when there is a usable chain (its anchor, and its own stamp as the
+// coarse time floor), else the base's own anchor. In that second case the
+// floor is the EARLIER of FindBaseline's time and the base's own stamp: a
+// chain set aside as computed against ANOTHER base (someone put an older
+// table file under the chain's name) still made FindBaseline report the
+// chain's start, and a floor derived from it would sit after events the
+// base's anchor has yet to see, which the fetch would then drop without an
+// error (#1718). Pure, so the rule is testable without an index.
+func fetchFloor(snapshotTime time.Time, bmeta baseline.DumpMetadata, prev *tableDelta) (since time.Time, anchor baseline.DumpMetadata) {
+	since, anchor = snapshotTime, bmeta
+	switch {
+	case prev != nil:
+		since = prev.Meta.SnapshotTimestamp
+		// Position and id come from the SAME footer: a stamp names the last
+		// id applied up to that position, and pairing it with another file's
+		// position would floor the fetch on an id that position never saw.
+		anchor.BinlogFile, anchor.BinlogPos, anchor.LastEventID = prev.Meta.BinlogFile, prev.Meta.BinlogPos, prev.Meta.LastEventID
+	case !bmeta.SnapshotTimestamp.IsZero() && bmeta.SnapshotTimestamp.Before(since):
+		since = bmeta.SnapshotTimestamp
+	}
+	return since, anchor
 }
 
 // shouldWarnEvents reports whether a fetched event count should trigger the
@@ -804,8 +858,12 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// the run is otherwise clean; a failed run stays _INCOMPLETE and needs no
 	// manifest.
 	if parquetMode && ctx.Err() == nil && len(errs) == 0 {
-		if err := baselineintegrity.WriteManifest(cfg.snapshotDir); err != nil {
+		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports))
+		if err != nil {
 			errs = append(errs, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err))
+		} else {
+			slog.Info("integrity manifest written", "snapshot", cfg.snapshotDir,
+				"files_hashed", st.Hashed, "files_reused", st.Reused)
 		}
 	}
 
@@ -813,6 +871,35 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		return reports, err
 	}
 	return reports, nil
+}
+
+// manifestWriter is baselineintegrity.WriteManifestFrom behind a variable so
+// a test can see what a run reused (#1717).
+var manifestWriter = baselineintegrity.WriteManifestFrom
+
+// localSnapshotDir is the snapshot directory a local table file lives in
+// (<snapshot>/<schema>/<table>.parquet), "" for an S3 path or no path.
+func localSnapshotDir(tablePath string) string {
+	if tablePath == "" || strings.HasPrefix(tablePath, "s3://") {
+		return ""
+	}
+	return filepath.Dir(filepath.Dir(tablePath))
+}
+
+// manifestPriorDirs lists, in report order and without repeats, the local
+// snapshot directories this run's tables were read from: the places its
+// linked-forward files come from, whose manifests can vouch for them.
+func manifestPriorDirs(reports []*TableReport) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, r := range reports {
+		if r == nil || r.SourceSnapshotDir == "" || seen[r.SourceSnapshotDir] {
+			continue
+		}
+		seen[r.SourceSnapshotDir] = true
+		out = append(out, r.SourceSnapshotDir)
+	}
+	return out
 }
 
 // snapshotDirLeftovers lists what an existing snapshot directory holds that a
@@ -934,6 +1021,9 @@ func ReconstructTable(
 	// ── 1. Find the baseline snapshot ──────────────────────────────────────
 	// FindBaseline already logs a stale-fallback warning (#466) server-side.
 	baselinePath, snapshotTime, _, err := FindBaseline(ctx, cfg.BaselineSrc, schema, table, cfg.At)
+	if err == nil {
+		rep.SourceSnapshotDir = localSnapshotDir(baselinePath)
+	}
 	if err != nil {
 		if !errors.Is(err, ErrNoBaseline) {
 			return nil, fmt.Errorf("find baseline: %w", err)
@@ -1016,10 +1106,7 @@ func ReconstructTable(
 		if prevDelta, err = readTableDelta(ctx, baselinePath, bmeta); err != nil {
 			return nil, err
 		}
-		if prevDelta != nil {
-			fetchSince = prevDelta.Meta.SnapshotTimestamp
-			anchorMeta.BinlogFile, anchorMeta.BinlogPos = prevDelta.Meta.BinlogFile, prevDelta.Meta.BinlogPos
-		}
+		fetchSince, anchorMeta = fetchFloor(snapshotTime, bmeta, prevDelta)
 	}
 
 	// ── 3. Resolve PK columns from the schema resolver ─────────────────────
@@ -1186,6 +1273,16 @@ func ReconstructTable(
 	if anchorMeta.BinlogFile != "" && anchorMeta.BinlogPos > 0 {
 		fetchOpts.SincePos = &query.BinlogPos{File: anchorMeta.BinlogFile, Pos: uint64(anchorMeta.BinlogPos)}
 	}
+	// Whether a stream wrote this index decides both halves of the event-id
+	// floor (#1720): whether the anchor's stamp may floor THIS fetch, and
+	// whether this fold may leave a stamp for the next one. See eventIDFloor.
+	// CheckCaptureGapStatus above already read stream_state on this path, so
+	// an error here is the same failure it would have raised, named.
+	captured, serr := query.StreamCaptured(ctx, db)
+	if serr != nil {
+		return nil, fmt.Errorf("%s.%s: read stream_state for the event-id floor: %w", schema, table, serr)
+	}
+	fetchOpts.SinceEventID = eventIDFloor(anchorMeta, captured)
 	// In Parquet mode the window's upper bound is the run's binlog cut, not just
 	// the target time. This is what makes the emitted snapshot a valid anchor:
 	// the set folded here (end_pos <= cut) and the set the NEXT reconstruct
@@ -1277,6 +1374,7 @@ func ReconstructTable(
 	// Deletes the changes a spilled fold wrote to disk, on every return below.
 	defer fold.close()
 	rep.EventsApplied = fold.Total
+	rep.FetchDuration, rep.FoldDuration = fold.FetchDuration, fold.FoldDuration
 	changes := fold.Changes
 
 	// Warn on a gap between the baseline anchor and the first indexed event.
@@ -1299,7 +1397,7 @@ func ReconstructTable(
 			cfg: cfg, schema: schema, table: table,
 			basePath: baselinePath, chainStart: snapshotTime, baseMeta: bmeta, anchorMeta: anchorMeta,
 			prev: prevDelta, fold: fold, capGap: capGap, pkCols: pkCols,
-			currentGenerated: generatedByName(tm.Columns),
+			currentGenerated: generatedByName(tm.Columns), streamCaptured: captured,
 		}, rep)
 		if err != nil {
 			return nil, err
@@ -1337,7 +1435,8 @@ func ReconstructTable(
 		// CarriedByLink (#1578) so the console's disk claim can count only
 		// the arm that saved disk. carryForward logs the cause of a copy.
 		slog.Info("table carried forward unchanged", "schema", schema, "table", table,
-			"reason", "no events in the window", "linked", linked)
+			"reason", "no events in the window", "linked", linked,
+			"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds())
 		return rep, nil
 	}
 
@@ -1358,6 +1457,7 @@ func ReconstructTable(
 		PKCols:            pkCols,
 		Changes:           changes,
 		Spill:             fold.Spill,
+		LastEventID:       lastEventIDFor(fold, anchorMeta, captured),
 		ImageColumns:      fold.ImageColumns,
 		SawImage:          fold.SawImage,
 		CurrentGenerated:  generatedByName(tm.Columns),
@@ -1391,8 +1491,50 @@ func ReconstructTable(
 		"updates_applied", rep.UpdatesApplied,
 		"inserts_emitted", rep.InsertsEmitted,
 		"deletes_skipped", rep.DeletesSkipped,
+		"fetch_ms", rep.FetchDuration.Milliseconds(),
+		"fold_ms", rep.FoldDuration.Milliseconds(),
 		"duration_ms", rep.Duration.Milliseconds())
 	return rep, nil
+}
+
+// eventIDFloor is the event_id floor a fetch may take from its anchor
+// (#1720): the anchor's recorded last event id, and only when a stream wrote
+// the index. The floor is a hint under the premise that ascending event_id is
+// binlog order — the premise ResolveSnapshotCut already makes — and the exact
+// gate stays the position (SincePos). `bintrail index --files` assigns ids in
+// the order the files were given, so there the floor could sit above a
+// later-position event and skip it for good.
+//
+// The same premise gates the STAMP (lastEventIDFor), not only its use: a
+// stamp made while files were being indexed out of order, then trusted once
+// a stream starts on that same index, would floor the fetch on a file-era id
+// with no error anywhere. A fold leaves a stamp only on an index a stream
+// wrote, so no file-era id ever reaches a stream-era floor. What the gate
+// does NOT cover is `--files` handed out of order while the stream exists:
+// that index is already outside what a refresh chain supports, for the cut
+// before the floor (see ResolveSnapshotCut's assumptions). Files indexed
+// after the stream started, in order, are harmless: their ids are higher,
+// so the floor admits them, and the position gate decides as before.
+func eventIDFloor(anchor baseline.DumpMetadata, streamCaptured bool) uint64 {
+	if !streamCaptured {
+		return 0
+	}
+	return anchor.LastEventID
+}
+
+// lastEventIDFor is what a fold stamps as baseline.MetaKeyLastEventID: the
+// highest id it applied, or, for a window that applied none, the anchor's own
+// value carried forward — and nothing at all unless a stream wrote the index
+// (see eventIDFloor). Never lower than the anchor's: a floor must not move
+// backwards, and a fold reads only events after its anchor.
+func lastEventIDFor(fold *foldResult, anchor baseline.DumpMetadata, streamCaptured bool) uint64 {
+	if !streamCaptured {
+		return 0
+	}
+	if fold != nil && fold.LastEventID > anchor.LastEventID {
+		return fold.LastEventID
+	}
+	return anchor.LastEventID
 }
 
 // prepareMerge reads the baseline's column list and runs the two schema-drift
@@ -1510,6 +1652,9 @@ type mergeInput struct {
 	// Spill holds the changes on disk when the fold passed its in-memory limit
 	// (#1107), and Changes is then empty. See mergeCore.Spill.
 	Spill *changeSpill
+	// LastEventID is stamped as baseline.MetaKeyLastEventID on every file
+	// this merge writes (#1720); 0 leaves the key out.
+	LastEventID uint64
 	// ImageColumns/SawImage come from foldResult and carry the #843 signal the
 	// trimmed Changes map can no longer provide (see droppedBaselineColumns).
 	ImageColumns map[string]struct{}
@@ -2303,6 +2448,7 @@ func reconstructBinlogOnly(
 		return nil, err
 	}
 	rep.EventsApplied = fold.Total
+	rep.FetchDuration, rep.FoldDuration = fold.FetchDuration, fold.FoldDuration
 	changes := fold.Changes
 
 	// A table that only ever existed after the last baseline was very likely

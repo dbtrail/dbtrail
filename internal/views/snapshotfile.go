@@ -243,28 +243,31 @@ func snapshotTables(snapshotDir string) ([]BaselineTable, error) {
 		if err != nil {
 			return nil, err
 		}
-		names := make(map[string]bool, len(files))
+		names := make([]string, 0, len(files))
 		for _, f := range files {
 			if !f.IsDir() {
-				names[f.Name()] = true
+				names = append(names, f.Name())
 			}
+		}
+		// The listing is already in hand, so the chain (#1638, #1718) is read
+		// off it. Half a pair is refused for the reason MarkTableDeltas gives.
+		chains, err := baseline.MarkTableDeltaFiles(filepath.Join(snapshotDir, e.Name()), names)
+		if err != nil {
+			return nil, err
 		}
 		for _, f := range files {
 			if f.IsDir() || !strings.HasSuffix(f.Name(), ".parquet") {
 				continue
 			}
-			// The listing is already in hand, so the delta (#1638) is read off
-			// it. Half a pair is refused for the reason MarkTableDeltas gives.
-			posdel, upserts := baseline.TableDeltaPaths(f.Name())
-			if names[posdel] != names[upserts] {
-				return nil, fmt.Errorf("%w beside %s", baseline.ErrHalfTableDelta, filepath.Join(snapshotDir, e.Name(), f.Name()))
-			}
+			path := filepath.Join(snapshotDir, e.Name(), f.Name())
+			c := chains[path]
 			out = append(out, BaselineTable{
-				Schema: e.Name(),
-				Table:  strings.TrimSuffix(f.Name(), ".parquet"),
-				Path:   filepath.Join(snapshotDir, e.Name(), f.Name()),
-				Rel:    e.Name() + "/" + f.Name(),
-				Delta:  names[posdel],
+				Schema:      e.Name(),
+				Table:       strings.TrimSuffix(f.Name(), ".parquet"),
+				Path:        path,
+				Rel:         e.Name() + "/" + f.Name(),
+				Delta:       c != nil,
+				DeltaLegacy: c != nil && c.Legacy,
 			})
 		}
 	}

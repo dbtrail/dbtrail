@@ -226,10 +226,10 @@ func init() {
 			"it (hard link where possible). Off by default: the rows are identical either way, but it links two "+
 			"snapshots to one file, so disk-usage and prune figures then count space they will not reclaim. "+
 			"Editable from the console settings panel, which overrides this flag.")
-	watchCmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", false,
-		"Off by default. A refresh does not rewrite a table that changed: it keeps the previous Parquet file and writes the changed rows as two small "+
-			"files beside it (<table>.posdel, <table>.upserts), and writes the table again in full when those pass a quarter of its size or the chain is a "+
-			"day old. The generated DuckDB views read the pair; every other reader uses the table file and the index, as before. A snapshot written this way "+
+	watchCmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", true,
+		"On by default (--baseline-table-deltas=false or BINTRAIL_BASELINE_TABLE_DELTAS=false turns it off). A refresh does not rewrite a table that changed: it keeps the previous Parquet file and writes that refresh's changed rows as one numbered "+
+			"pair of small files beside it (<table>.000001.posdel, <table>.000001.upserts, then 000002, ...), linking the earlier pairs forward, and writes the table again in full when the chain's files together pass a quarter of its size or the chain is a "+
+			"day old. The generated DuckDB views read the chain; every other reader uses the table file and the index, as before. A snapshot written this way "+
 			"must not be read by a bintrail older than this one. Turning it off needs nothing else: the next refresh writes every table in full. Generate the DuckDB views again after turning it on or off.")
 	watchCmd.Flags().StringVar(&upBaselineRefreshEvery, "baseline-refresh-interval", "", "Periodically refresh each server's newest baseline snapshot from the index (Nm/Nh/Nd; default: off). Runs with the conservative DuckDB budget, folds at most 2 tables at a time, and never publishes over a known capture gap.")
 	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, "baseline-retain", "", "Periodically prune local --baseline-dir snapshots older than this (Nd/Nh) once a durable copy exists in --baseline-s3 (never deletes the only copy or the newest snapshot per table)")
@@ -526,7 +526,8 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// lives in the latter. Settings are a live provider so the console can
 	// retune retain/interval/add-future without a restart.
 	rotation.StartLoop(ctx, rotationSettingsProvider(registry), func() []rotation.RotateTarget {
-		return rotateTargets(upIndexDSN, supervisor, registry, archiveStagingDir())
+		// No source streams into the boot index here (#1715).
+		return rotateTargets(upIndexDSN, bootIdle, supervisor, registry, archiveStagingDir())
 	}, rotationCycleHooks(notifier)...)
 
 	// Reclaim local baseline snapshots that already have a durable S3 copy (#616):
@@ -753,7 +754,8 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// plane provisions, on the daemon lifecycle. Live settings provider so the
 	// console can retune retain/interval/add-future without a restart.
 	rotation.StartLoop(ctx, rotationSettingsProvider(registry), func() []rotation.RotateTarget {
-		return rotateTargets(upIndexDSN, supervisor, registry, archiveStagingDir())
+		// The main stream writes the boot index.
+		return rotateTargets(upIndexDSN, bootStreamed, supervisor, registry, archiveStagingDir())
 	}, rotationCycleHooks(notifier)...)
 
 	// Reclaim local baseline snapshots that already have a durable S3 copy (#616):
@@ -1603,14 +1605,28 @@ func archiveStagingDir() string {
 	return filepath.Join(os.TempDir(), "bintrail-archive-staging")
 }
 
+// bootRole says whether the main stream writes the boot index: a source-ful
+// `watch` streams into it, a source-less one leaves it idle, and rotation
+// logs an idle, empty boot index as housekeeping rather than freed space
+// (#1715). A named type so the call sites read as a role, not a bare bool
+// (an untyped literal still converts; the wiring test pins which runner
+// passes which).
+type bootRole bool
+
+const (
+	bootStreamed bootRole = true
+	bootIdle     bootRole = false
+)
+
 // rotateTargets assembles the built-in rotation's per-cycle targets: the boot
 // index (drop-only — the ephemeral default entry has no registry archive
-// config) plus every supervised source. A source whose registry entry carries
+// config; NoWriter when idle, #1715) plus every supervised source. A source
+// whose registry entry carries
 // an Archive S3 bucket archives-then-drops to it, but ONLY once its bintrail_id
 // is resolved (read from stream_state) — until then it rotates drop-only and
 // the engine's protect-unarchived guard keeps it from losing data.
-func rotateTargets(bootDSN string, sup *monitorSupervisor, reg *console.Registry, stagingBase string) []rotation.RotateTarget {
-	targets := []rotation.RotateTarget{{DSN: bootDSN}}
+func rotateTargets(bootDSN string, boot bootRole, sup *monitorSupervisor, reg *console.Registry, stagingBase string) []rotation.RotateTarget {
+	targets := []rotation.RotateTarget{{DSN: bootDSN, NoWriter: boot == bootIdle}}
 	for _, j := range sup.ActiveJobs() {
 		t := rotation.RotateTarget{DSN: j.IndexDSN}
 		if entry, ok := reg.Get(j.EntryID); ok && entry.ArchiveS3 != "" {

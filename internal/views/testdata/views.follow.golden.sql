@@ -106,18 +106,18 @@ SET VARIABLE bintrail_tables_checked = (SELECT CASE WHEN getvariable('bintrail_m
 -- state_legacy_db_audit_log: this file carries no column types, so nothing is cast; decimal columns read as text
 CREATE OR REPLACE VIEW "state_legacy_db_audit_log" AS
   SELECT * FROM read_parquet('/data/baselines/current/Legacy-DB/Audit Log.parquet')
-  WHERE CASE WHEN (SELECT count(*) FROM glob('/data/baselines/current/Legacy-DB/Audit Log[.]upserts')) > 0 THEN error('bintrail views: Legacy-DB.Audit Log now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
+  WHERE CASE WHEN (SELECT count(*) FROM glob('/data/baselines/current/Legacy-DB/Audit Log.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) + (SELECT count(*) FROM glob('/data/baselines/current/Legacy-DB/Audit Log.[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: Legacy-DB.Audit Log now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
 CREATE OR REPLACE VIEW "state_shop_order_items" AS
   SELECT * FROM read_parquet('/data/baselines/current/shop/order_items.parquet')
-  WHERE CASE WHEN (SELECT count(*) FROM glob('/data/baselines/current/shop/order_items[.]upserts')) > 0 THEN error('bintrail views: shop.order_items now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
+  WHERE CASE WHEN (SELECT count(*) FROM glob('/data/baselines/current/shop/order_items.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) + (SELECT count(*) FROM glob('/data/baselines/current/shop/order_items.[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: shop.order_items now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
 CREATE OR REPLACE VIEW "state_shop_orders" AS
   SELECT * REPLACE (CAST("total" AS DECIMAL(10,2)) AS "total", CAST("tax_rate" AS DECIMAL(6,4)) AS "tax_rate")
   FROM read_parquet('/data/baselines/current/shop/orders.parquet')
-  WHERE CASE WHEN (SELECT count(*) FROM glob('/data/baselines/current/shop/orders[.]upserts')) > 0 THEN error('bintrail views: shop.orders now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
+  WHERE CASE WHEN (SELECT count(*) FROM glob('/data/baselines/current/shop/orders.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) + (SELECT count(*) FROM glob('/data/baselines/current/shop/orders.[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: shop.orders now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
 -- state_shop_order_items_2: weight is DECIMAL(65,30), wider than DuckDB's 38 digits (left as text)
 CREATE OR REPLACE VIEW "state_shop_order_items_2" AS
   SELECT * FROM read_parquet('/data/baselines/current/shop_order/items.parquet')
-  WHERE CASE WHEN (SELECT count(*) FROM glob('/data/baselines/current/shop_order/items[.]upserts')) > 0 THEN error('bintrail views: shop_order.items now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
+  WHERE CASE WHEN (SELECT count(*) FROM glob('/data/baselines/current/shop_order/items.[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) + (SELECT count(*) FROM glob('/data/baselines/current/shop_order/items.[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].upserts')) > 0 THEN error('bintrail views: shop_order.items now has a table delta beside its file, and this view reads the file alone, so it would show the table as it was when it was last written in full. Generate the views again') ELSE true END;
 
 -- events: every archived binlog event, across all archive sources.
 --

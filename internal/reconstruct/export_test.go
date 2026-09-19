@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -56,4 +57,18 @@ func CountFoldWindowsForTest(calls *atomic.Int32) (restore func()) {
 		return prev(ctx, fc)
 	}
 	return func() { foldWindow = prev }
+}
+
+// CountManifestReuseForTest wraps the manifest writer so an external test can
+// see, per run, how many files' digests came from a prior snapshot and how
+// many were hashed (#1717). The writer runs once per run on the caller's
+// goroutine, after the folds, so a plain variable is enough.
+func CountManifestReuseForTest(into *baselineintegrity.ManifestStats) (restore func()) {
+	prev := manifestWriter
+	manifestWriter = func(dir string, priors []string) (baselineintegrity.ManifestStats, error) {
+		st, err := prev(dir, priors)
+		*into = st
+		return st, err
+	}
+	return func() { manifestWriter = prev }
 }

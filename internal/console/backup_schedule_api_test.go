@@ -1,6 +1,7 @@
 package console
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 type stubScheduleReporter struct {
 	full      bool
 	refusal   error
+	probe     BackupWindowProbe // what WindowProbe answers; nil = no cut-over
 	state     map[string]BackupScheduleState
 	observed  []string // "<id> <identity>" per Observe call
 	forgotten []string // ids per Forget call
@@ -22,7 +24,8 @@ type stubScheduleReporter struct {
 func (s *stubScheduleReporter) ScheduleState(id string) BackupScheduleState {
 	return s.state[id]
 }
-func (s *stubScheduleReporter) FullBackups() (bool, error) { return s.full, s.refusal }
+func (s *stubScheduleReporter) FullBackups() (bool, error)     { return s.full, s.refusal }
+func (s *stubScheduleReporter) WindowProbe() BackupWindowProbe { return s.probe }
 func (s *stubScheduleReporter) Observe(id string, sched BackupSchedule, _ time.Time) {
 	s.observed = append(s.observed, id+" "+sched.Identity())
 }
@@ -514,6 +517,53 @@ func TestBackupScheduleAPI_listingResolvesThePrimedEntry(t *testing.T) {
 // the sentence. Driven through the real handler so a DTO that stops filling
 // the code (or fills it with the sentence) fails here, not only in a page
 // test fed hand-written values.
+// #1721: the API's gates carry the loop's probe, so the page's next-slot
+// method is the daemon's decision, not a prediction that disagrees with it.
+func TestBackupScheduleAPI_windowProbeReachesTheWire(t *testing.T) {
+	var asked time.Time
+	dear := func(_ context.Context, _ ServerEntry, anchor time.Time) BackupWindow {
+		asked = anchor
+		return BackupWindow{Anchor: anchor, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}
+	}
+	for _, tc := range []struct {
+		name       string
+		probe      BackupWindowProbe
+		wantMethod string
+		wantCode   string
+	}{
+		{"probe measures a dear update: full", dear, BackupMethodFull, "window_measured"},
+		{"no probe: update", nil, BackupMethodRefresh, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asked = time.Time{}
+			srv, id := newScheduleServer(t, &stubScheduleReporter{full: true, probe: tc.probe})
+			e, _ := srv.cm.reg.Get(id)
+			fakeSnapshot(t, e.BaselineDir)
+			rec, body := doServersReq(t, srv, "PUT", "/api/servers/"+id+"/backup-schedule", `{"every":"1h","at":"00:00"}`)
+			if rec.Code != 200 {
+				t.Fatalf("PUT code=%d body=%s", rec.Code, body)
+			}
+			got := scheduleOf(t, body)
+			if got == nil || got.NextMethod != tc.wantMethod || got.NextMethodWhyCode != tc.wantCode {
+				t.Fatalf("schedule = %+v, want %s with why code %q", got, tc.wantMethod, tc.wantCode)
+			}
+			if tc.probe != nil {
+				if !strings.Contains(got.NextMethodWhy, "17,000,000 events") {
+					t.Fatalf("next_method_why = %q, want the numbers", got.NextMethodWhy)
+				}
+				if want := time.Date(2026, 8, 27, 3, 0, 0, 0, time.UTC); !asked.Equal(want) {
+					t.Fatalf("the probe was asked with %s, want the newest snapshot's instant %s", asked, want)
+				}
+			}
+			// The listing renders the same DTO through the same gates.
+			_, body = doServersReqHeader(t, srv, "GET", "/api/baselines", "", id)
+			if got = scheduleOf(t, body); got == nil || got.NextMethod != tc.wantMethod || got.NextMethodWhyCode != tc.wantCode {
+				t.Fatalf("GET /api/baselines schedule = %+v, want %s with why code %q", got, tc.wantMethod, tc.wantCode)
+			}
+		})
+	}
+}
+
 func TestBackupScheduleAPI_nextMethodWhyCodeReachesTheWire(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
