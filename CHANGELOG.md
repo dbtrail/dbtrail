@@ -7,6 +7,269 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The console says why a server has no first backup, instead of leaving
+  the step out** (#1677). The Overview's Getting started list dropped its
+  "Take the first backup" step whenever the console could not create one,
+  and the Backups page dropped the Create backup button without a word, so
+  a new install that never took a backup looked like one that needed none.
+  The step now shows, waiting, with the reason and the fix: creating
+  backups is turned off for the daemon (turn on the Create-backup button
+  setting, listed on the Backup settings page among the settings read when
+  DBTrail starts, and restart; for MySQL and MariaDB, mydumper must be
+  installed), or the server has no backup location of its own. `GET
+  /api/servers/{id}/first-run` returns that step with a `detail` and a
+  `fix`. When the Backups page has a location to list for the server, it
+  gives the same reasons where the button would be (`CREATE BACKUP: turned
+  off at startup`, `needs this server's own backup location`, or both), and
+  no longer offers the button for a server
+  whose only location is the daemon-wide default: a backup refuses to
+  write there, so the click was refused. Decided in #1677 and unchanged: a bare
+  `bintrail-console watch` keeps console full backups off by default
+  (`BINTRAIL_CONSOLE_BASELINE_TRIGGER`), and the compose stack keeps them
+  on (`BASELINE_TRIGGER=0` opts out). The deb/rpm package does not install
+  mydumper, so a default-on button would fail on first use, and a full
+  backup reads every table in scope on the source.
+
+### Fixed
+- **A steady load no longer turns the backup schedule into a full backup
+  every slot** (#1736). The cut-over rule (#1721) estimated an update's
+  cost from a marginal rate, events beyond the shortest recent update per
+  second beyond it; under a constant load every update applies about the
+  same number of events and their durations differ by noise, so the slope
+  collapsed (196 events over 44 s read as 4 events/s, and a five-minute
+  window as "59h 17m"), and once the full backup it chose had run the
+  count only grew, so the rule kept choosing it. The model now declares
+  the rate unknown when the events beyond the shortest run are under a
+  tenth of a typical run's (as it already did for flat durations), and
+  when the marginal rate is under a tenth of the shortest run's whole
+  rate, its events over all its seconds, a floor no true per-event rate
+  is below. Without a rate one thing is still decided from the fixed cost
+  alone: an update whose cheapest recent run took longer than the last
+  full backup is cut over, since the age rule could never say so on a
+  server whose every update succeeds. The "proven cheaper" lock has a margin (1.5x the largest
+  update proven cheaper than a full backup) instead of a strict
+  comparison, is read off the same five recent updates as the model
+  rather than the whole history, and says so in the log when it
+  overrides an estimate above the full backup's duration. With no rate
+  the age rule decides, as for a quiet server: a fresh anchor is an
+  update; its reason line now says "no usable update rate" instead of
+  "no measured update rate", since the updates may well be measured.
+- **The Backups page no longer sweeps the whole S3 prefix, four times,
+  per request** (#1679). Listing an s3:// backup location was two DuckDB
+  globs over every object under the prefix (the markers, then every table
+  file), one ListObjectsV2 request per 1,000 objects each and nothing
+  reused between them, and the page's schedule probe listed the same
+  bucket again the same way: on a prefix of 550 snapshots and 11,000
+  objects the page took over five seconds in region and 26 out of it,
+  growing with the inventory rather than with the fifty snapshots it
+  shows. The listing is now two SDK requests: the snapshot directories (a
+  delimiter listing) and the objects of only the newest snapshots wanted,
+  from the oldest of those on. The page asks for one more than it shows,
+  so it still says when older ones exist; the schedule's probe reads the
+  newest few and widens only while they are incomplete; `verify`, `views`
+  and the other whole-inventory readers list everything in a fraction of
+  the time (3.7 s out of region against 26). The `_SUCCESS`/`_INCOMPLETE`
+  filter is unchanged in meaning and read off the same listing; a listing
+  error is still the caller's error, never a shorter answer, and the page
+  says older snapshots exist whenever the listing knows they do, even
+  when an incomplete one among the newest leaves the page short of its
+  cap, and a page whose newest snapshots are all incomplete widens until
+  it holds one rather than coming back empty. The schedule leg of the page now runs under the same 15-second
+  bound as the listing. Two things to know: the page's staleness headline
+  now grades the snapshots it reads, so a table dropped from the backup
+  set long ago no longer grades it (the CLI's `status` still walks every
+  snapshot); and the listing and the snapshot detail open the bucket
+  without the HeadBucket probe a writer makes, so a read-only role
+  granted `s3:ListBucket` under a prefix condition keeps listing, and with no region configured the
+  bucket's own region is asked for, then us-east-1, as DuckDB assumed.
+
+## [0.84.0] - 2026-09-18
+
+### Added
+- **The daemon merges a long chain of table deltas into one range pair,
+  outside the refresh** (#1723, first half). With table deltas on, every
+  refresh adds one pair beside a changed table; every reader opens every
+  pair and every upload sends every pair again. Once a chain lists 16
+  entries (16 plain pairs the first time; a range plus 15 pairs after
+  that), `bintrail-console watch` runs a compaction job right after the
+  refresh has released the server's slot (never inside the refresh's own
+  time): a DuckDB-only merge of all but the last pair into one range pair
+  named `<table>.000000-000014.posdel` / `.upserts` (the union of the dead
+  positions, the newest version of every key), whose footer is the last
+  merged pair's with the two ends added. The result waits under
+  `<backup dir>/.compact/<schema>/<table>/<chain start>/`, and the NEXT
+  refresh links it forward in place of the pairs it merged, so the chain
+  reads `000000-000014, 000015, 000016, ...` from that snapshot on while
+  older snapshots keep their plain pairs. The table file is never touched
+  by this job; folding the chain into it stays the refresh's rewrite path
+  (the second half of #1723). Every input pair is checked against the
+  snapshot's manifest first, a result the refresh cannot adopt (another
+  chain, another base, footers that do not name its range) is removed with
+  a warning, an unfinished one is swept at the next refresh cycle, and a
+  refresh that finds none carries the chain forward as before. The job
+  shares the per-server single-flight with every other backup job and is
+  recorded in the daemon log and the on-disk run history file
+  (`kind: compact`; a repeating failure is one record); it does not appear
+  on the Backups page, which lists the runs that produced a snapshot. The generated DuckDB
+  views, the console's backup detail and `verify` read a range pair like
+  any other; a snapshot holding one must not be read by a bintrail older
+  than the one that wrote it.
+
+### Changed
+- **Table deltas are on by default** (#1729). A refresh keeps a changed
+  table's Parquet file and writes that refresh's changed rows as one
+  numbered pair of small files beside it, so its cost follows the changes
+  and not the tables touched (#1638, #1718, #1719, #1722, #1724, #1726).
+  `bintrail baseline refresh --table-deltas=false`,
+  `bintrail-console watch --baseline-table-deltas=false` or
+  `BINTRAIL_BASELINE_TABLE_DELTAS=false` turn it off; the environment
+  variable's other values keep the default. Upgrading needs nothing: the
+  next refresh starts a chain beside each table that changed and says so in
+  the log once per table; a v0.83.0 single-pair snapshot is compacted once
+  with its changes. Generate the DuckDB views again after upgrading: views
+  generated while deltas were off read a table's file alone, which with a
+  chain beside it is the table as it was when the chain started, with no
+  error to say so (`views.sql` inside each snapshot and the console's
+  downloads are generated per snapshot and are always right). A snapshot
+  written this way must not be read by a bintrail older than the one that wrote it.
+
+### Fixed
+- **After a long stop the backup schedule takes a full backup instead of
+  folding hours of changes one page at a time** (#1721). Before each
+  scheduled slot the daemon now measures what an update would have to
+  fold: how far the index's high-water mark moved since the previous
+  snapshot (counted from the mark it read when it made that snapshot;
+  every update's run now records `events`, `update_seconds` and
+  `index_mark`, so the count survives a restart), against a cost model
+  fitted on its last five measured updates (a fixed cost every update
+  pays, plus a rate over the time beyond it; no rate is read off a quiet
+  server whose updates all cost the same, because that number would be an
+  artefact of the fixed cost and cut over on every burst) and the
+  duration of the last full backup on record. When the update is
+  estimated to cost more, and no recorded update that large was done in
+  less time than that full backup, a full backup is taken instead, with
+  the numbers as the run's reason (`why_code: window_measured`). When one
+  of the three is unknown (no full backup on record, no rate yet, an
+  index that did not answer the probe in time, which is warned once)
+  the rule is the age of the previous snapshot alone: older than two
+  hours or six schedule intervals, whichever is longer (`window_age`, the
+  reason naming what was missing). Both are said in the daemon log before
+  the run starts and on the Backups page afterwards, where the same
+  measurement (cached for a minute) shows the next slot's method. A
+  server whose full backups cannot start keeps updating, however long it
+  takes: that is the producer that can. The measured case never yields to
+  the age one: an old anchor whose update is estimated cheaper than a full
+  backup is updated.
+- **A full backup with a local directory is published as soon as its
+  snapshot is complete on disk; the copy to S3 no longer blocks the
+  schedule, and it sends only the new snapshot** (#1725). The daemon held
+  the server's single backup job for the whole upload, so scheduled updates
+  were skipped for as long as the copy took; and the uploader was handed the
+  backups directory rather than the new snapshot, so every full backup
+  re-sent every snapshot on disk (3,822 objects for 13 new files, 15
+  minutes for 671 MB). Now the status says `published` with the upload
+  still running (`uploading`), a scheduled update runs alongside it and
+  reads the local copy (the console log says so when the local copy is
+  newer than the bucket's), the upload sends the new snapshot to its own
+  key, and then sends any other complete local snapshot the destination
+  lacks (an update whose upload had failed), reported as `swept`. An upload
+  that fails after the local publish is a failed run that keeps the
+  snapshot and names where it is. With no local directory (S3 only) the
+  job keeps the slot through the upload, as before: its staging is
+  temporary and nothing is published until the destination has it. The
+  Backups page shows the "saved on this machine, still copying" state,
+  the backup schedule counts such a run as in flight until the copy is
+  done, and a local snapshot written by an older build without a
+  `_SUCCESS` marker is named once in the log instead of being retried on
+  every full backup (the uploader refuses it).
+- **A refresh with table deltas on no longer reads every row of a table's
+  key through Go to find the rows a window touched** (#1716). For a table
+  whose primary key is made of integer columns (the common case), the
+  touched keys are handed to DuckDB as a table and the table file is joined
+  against it there, so only the matching rows reach Go, where the same
+  check as before decides. Measured on a 5-million-row table with a
+  100,000-row window: 2.0 s down to 0.1 s. Keys of any other type keep the
+  full scan, and so does a window holding a key that cannot be spelled as
+  a plain integer. Either way the final check is the same one as before,
+  done in Go: the join only cuts down how many rows have to reach it.
+- **A refresh no longer re-hashes the files it links forward unchanged when
+  it writes the snapshot's integrity manifest** (#1717). With
+  carry-forward or table deltas on, most of a snapshot's files are the
+  previous snapshot's files (hard links), and the manifest read and
+  checksummed all of them again on every refresh: a full read of the
+  snapshot, competing with capture for the disk, to certify bytes that had
+  not changed. A file that is the same file as in the snapshot it was read
+  from (the same inode, so the same bytes) now takes that snapshot's
+  recorded digest; a copy, a rewritten file, a new file, or a source whose
+  manifest is absent or unreadable is hashed as before. The
+  `integrity manifest written` log line reports `files_hashed` and
+  `files_reused`. The one validation read a carried file gets before it is
+  linked stays.
+- **Rotation log lines name the database, and an idle, empty boot index
+  is rotated as housekeeping rather than logged as freed space** (#1715).
+  A source-less `watch` keeps the boot index's full partition layout with
+  no writer, and the built-in rotation dropped its empty partitions every
+  cycle, logging `dropped partition` an hour before the same names were
+  dropped from the source's real index, where the space actually was, with
+  nothing on the line to tell the two apart. `dropped partition`,
+  `rotation complete` and the `p_future` lines now carry `db=<database>`.
+  On the boot index of a source-less `watch`, while it holds no events, the
+  per-partition drop lines go to debug and `rotation complete` says
+  `index_empty=true` (the attribute appears only when the index was
+  probed); the drops and the future-partition top-up still run,
+  so the layout stays current for a later source-ful start and never grows
+  toward the partition cap. Once that index holds events, or on a
+  source-ful `watch`, it is rotated and logged like any other.
+- **A refresh reads a table's events in index order instead of looking each
+  one up on its own** (#1720). The fetch behind `baseline refresh`, a
+  scheduled update and `reconstruct --output-format parquet` used the query
+  shape every other reader shares: pick the page's keys with a sort, then
+  fetch each row by primary key. Under load, with the index's pages out of
+  memory, that was one disk read per row, measured at about 1.7 ms each and
+  100,000 per page. The table-window fetch (one table, an anchored start, a
+  page limit, oldest first) now scans the `(schema, table, timestamp)` index
+  in the order it needs and reads the rows as it goes; no sort, no lookup.
+  Every other query keeps its shape (the Iceberg export pages the same
+  window and takes the same plan). On an index written by `bintrail stream`
+  or the daemon, each file a refresh writes also records the highest event
+  id it applied (`bintrail.last_event_id` in the Parquet footer), and the
+  next refresh reads no row below that id: the scan still starts the hour
+  before its anchor, the safety margin for a transaction that executed
+  before the anchor and committed after it, but the rows that hour holds
+  below the id are skipped in the index instead of read. An index built
+  with `bintrail index --files` gets neither the stamp nor the floor,
+  because there ids follow the order the files were given. The per-table
+  log lines (`table reconstructed`, `table carried forward unchanged`,
+  `table published as a delta`, `table published as its previous file and
+  chain, unchanged` and `table rewritten in full`) now carry `fetch_ms`
+  (time waiting on the index and archives) and `fold_ms` (time applying the
+  rows), so a slow table says which side it lost the time on, including a
+  table that spent its time in the index and changed nothing.
+- **A refresh with table deltas on no longer rewrites the chain's accumulated
+  changes on every refresh** (#1718). v0.83.0 kept one pair of delta files per
+  table and rewrote it each refresh, so the cost of a refresh grew with
+  everything accumulated since the last full rewrite (measured at 28 µs per
+  accumulated row per refresh under a steady load, until the 5-minute
+  schedule could not be kept). Now each refresh writes ONE numbered pair
+  holding its own window (`<table>.000001.posdel` / `.upserts`, then
+  `000002`, and so on) and links every earlier pair into the new snapshot
+  untouched; a full backup or a full rewrite starts the chain with an empty
+  `000000` pair. The `.upserts` files carry two technical columns,
+  `bintrail_pk` and `bintrail_op` (`u` for a current row, `d` for a tombstone),
+  which is what lets a row added in one refresh and deleted in a later one
+  disappear without touching the earlier file; a table with a column under
+  either name, or under `filename` or `file_row_number`, is published without a
+  delta. The generated DuckDB `state_*` views read the whole chain (newest
+  version of each key wins). A snapshot written by v0.83.0 is still described
+  by `bintrail views` while it is retained, and the first refresh that finds
+  its one pair folds it into a full rewrite and starts a numbered chain.
+  Following views generated by v0.83.0 for a table that had no delta yet do
+  not notice a numbered chain appearing beside it: generate them again after
+  upgrading. Per-table `delta` details in `baseline refresh` output and the
+  `table published as a delta` log line now report this window's rows and
+  the pair's sequence, not the chain's totals.
+
 ## [0.83.0] - 2026-09-17
 
 ### Added

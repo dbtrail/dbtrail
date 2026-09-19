@@ -1,8 +1,10 @@
 package query
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 )
 
@@ -47,4 +49,22 @@ func SourceFlavorDetail(db *sql.DB) (flavor string, noStream bool) {
 		return "", false
 	}
 	return flavor, false
+}
+
+// StreamCaptured reports whether a `stream` (or `watch`) wrote this index:
+// stream_state has its row. That is the condition under which event_id order
+// is binlog order, which Options.SinceEventID relies on (#1720). A file-mode
+// index (`bintrail index`, no stream_state row) answers false; a read failure
+// answers false too, with the error, so a caller never takes the floor on a
+// guess.
+func StreamCaptured(ctx context.Context, db *sql.DB) (bool, error) {
+	var one int
+	err := db.QueryRowContext(ctx, "SELECT 1 FROM stream_state WHERE id = 1").Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read stream_state: %w", err)
+	}
+	return true, nil
 }

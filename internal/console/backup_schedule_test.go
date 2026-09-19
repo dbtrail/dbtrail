@@ -313,8 +313,8 @@ func TestChooseBackupMethod(t *testing.T) {
 		{"no destination at all: nothing can run", ServerEntry{DSN: "idx", SourceDSN: "src"}, live, BackupMethodFull, "", "no baseline location", nil, nil, ""},
 		{"lock mode misconfigured with a backup on disk: rebuild", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineDir: withSnap}, BackupScheduleGates{LoopRunning: true, FullBackups: true, FullBackupsErr: "bad lock"}, BackupMethodRefresh, "no load", "", nil, nil, ""},
 	}
-	real := newestSnapshotTables
-	t.Cleanup(func() { newestSnapshotTables = real })
+	real := newestSnapshot
+	t.Cleanup(func() { newestSnapshot = real })
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			// Only the bucket is stubbed; a local source still runs the real
@@ -324,12 +324,12 @@ func TestChooseBackupMethod(t *testing.T) {
 			// that answered for any source would let a case pass while the
 			// decision read the wrong place.
 			var probed string
-			newestSnapshotTables = func(ctx context.Context, src string) ([]string, error) {
+			newestSnapshot = func(ctx context.Context, src string) (time.Time, []string, error) {
 				if !strings.HasPrefix(src, "s3://") {
 					return real(ctx, src)
 				}
 				probed = src
-				return c.s3Has, c.s3Err
+				return time.Time{}, c.s3Has, c.s3Err
 			}
 			method, why, err := ChooseBackupMethod(context.Background(), c.e, c.gates)
 			if probed != c.wantProbe {

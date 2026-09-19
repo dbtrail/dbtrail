@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
@@ -24,13 +25,13 @@ import (
 // the way `bintrail views` does for a table with a delta beside it.
 func readOrdersState(t *testing.T, base string) []string {
 	t.Helper()
-	posdel, upserts := baseline.TableDeltaPaths(base)
+	posdel, upserts := baseline.TableDeltaGlobs(base)
 	ddb, err := sql.Open("duckdb", "")
 	if err != nil {
 		t.Fatalf("open duckdb: %v", err)
 	}
 	defer ddb.Close()
-	q := "SELECT id, status FROM (" + baseline.TableDeltaStateSQL("'"+base+"'", "'"+posdel+"'", "'"+upserts+"'", "") + ")"
+	q := "SELECT id, status FROM (" + baseline.TableDeltaStateSQL("'"+base+"'", "'"+posdel+"'", "'"+upserts+"'", base, "") + ")"
 	rows, err := ddb.Query(q)
 	if err != nil {
 		t.Fatalf("state of %s: %v", base, err)
@@ -101,6 +102,9 @@ func TestReconstructParquet_tableDeltaChainAcrossHours(t *testing.T) {
 
 	root := t.TempDir()
 	seedSourceBaseline(t, root, h0, schema)
+	// #1717: what each run's manifest reused from the snapshot it read.
+	var manifest baselineintegrity.ManifestStats
+	defer reconstruct.CountManifestReuseForTest(&manifest)()
 	run := func(at time.Time, deltas bool) {
 		t.Helper()
 		if _, err := reconstruct.ReconstructTables(ctx, reconstruct.FullTableConfig{
@@ -145,6 +149,17 @@ func TestReconstructParquet_tableDeltaChainAcrossHours(t *testing.T) {
 		if !since.Equal(h0) {
 			t.Fatalf("hour %d: FindBaseline time = %s, want the chain's start %s", n, since, h0)
 		}
+		// The manifest hashed this window's pair (2 files) and took the
+		// linked files' digests from the previous snapshot: the base and
+		// every earlier pair. The seed snapshot has no manifest, so hour 0
+		// also hashes the base it links from it.
+		wantReused, wantHashed := 1+2*n, 2 // base + pairs 0..n-1; the new pair
+		if n == 0 {
+			wantReused, wantHashed = 0, 3
+		}
+		if manifest.Reused != wantReused || manifest.Hashed != wantHashed {
+			t.Fatalf("hour %d: manifest reused %d, hashed %d; want %d reused, %d hashed", n, manifest.Reused, manifest.Hashed, wantReused, wantHashed)
+		}
 	}
 
 	// verify over the two newest snapshots of the chain: both hold the SAME
@@ -183,5 +198,10 @@ func TestReconstructParquet_tableDeltaChainAcrossHours(t *testing.T) {
 	}
 	if has, err := baseline.HasTableDelta(ctx, base); err != nil || has {
 		t.Fatalf("a run with deltas off left a delta beside the table (has=%v err=%v)", has, err)
+	}
+	// Rewritten in full at the same relative path as the linked prior: the
+	// inode differs, so it is hashed. Inode, not path, decides (#1717).
+	if manifest.Reused != 0 || manifest.Hashed != 1 {
+		t.Fatalf("rewritten table: manifest reused %d, hashed %d; want 0 / 1", manifest.Reused, manifest.Hashed)
 	}
 }

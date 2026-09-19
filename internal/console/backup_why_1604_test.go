@@ -23,6 +23,8 @@ func TestBackupWhyCode(t *testing.T) {
 		{BackupWhyUnreadablePrefix + " from the backup destination (boom), so a full backup is taken instead", "previous_unreadable"},
 		{BackupWhyFoldRefusedPrefix + " (capture gap)", "fold_refused"},
 		{BackupWhyFoldCrashedPrefix + " (internal error: nil map)", "fold_crashed"},
+		{BackupWhyWindowPrefix + ": 17,000,000 events since the previous backup would take about 1h 10m to apply at the measured rate, and the last full backup took 8m", "window_measured"},
+		{BackupWhyStaleAnchorPrefix + ": it is 5h 30m old and the cut-over is 2h (no count of the changes since it, so the update could not be estimated)", "window_age"},
 		{"no load on your database", ""},
 		{"some wording a newer daemon wrote", ""},
 	}
@@ -89,7 +91,8 @@ func TestBackupWhyRemedyKeysMatchTheCodes(t *testing.T) {
 	line := jsFunctionBody(t, js, "backupWhyLine")
 	produced := map[string]bool{}
 	for _, why := range []string{BackupWhyNoIndex, BackupWhyNoLocalDir, BackupWhyFirstBackup,
-		BackupWhyUnreadablePrefix + " (x)", BackupWhyFoldRefusedPrefix + " (x)", BackupWhyFoldCrashedPrefix + " (x)"} {
+		BackupWhyUnreadablePrefix + " (x)", BackupWhyFoldRefusedPrefix + " (x)", BackupWhyFoldCrashedPrefix + " (x)",
+		BackupWhyWindowPrefix + ": x", BackupWhyStaleAnchorPrefix + ": x"} {
 		produced[BackupWhyCode(why)] = true
 	}
 	// Every code has a rendering: a fixed remedy, or its own sentence.
@@ -127,7 +130,7 @@ func TestBackupWhyRemedyKeysMatchTheCodes(t *testing.T) {
 	if strings.Join(rk, ",") != strings.Join(fk, ",") {
 		t.Errorf("remedy keys %v and fact keys %v differ", rk, fk)
 	}
-	for _, own := range []string{"previous_unreadable", "fold_refused", "fold_crashed"} {
+	for _, own := range []string{"previous_unreadable", "fold_refused", "fold_crashed", "window_measured", "window_age"} {
 		if strings.Contains(block, own+":") || strings.Contains(fact, own+":") {
 			t.Errorf("code %q has a fixed sentence; it must render the run's own reason", own)
 		}
@@ -197,6 +200,8 @@ const out = {
   crash: backupWhyLine("` + BackupWhyFoldCrashedPrefix + ` (internal error: nil map)", "fold_crashed", false),
   unknown: backupWhyLine("something a newer daemon wrote", "", true),
   empty: backupWhyLine("", "no_index", true),
+  window: backupWhyLine("` + BackupWhyWindowPrefix + `: 17,000,000 events since the previous backup would take about 1h 10m to apply at the measured rate, and the last full backup took 8m", "window_measured", true),
+  age: backupWhyLine("` + BackupWhyStaleAnchorPrefix + `: it is 5h 30m old and the cut-over is 2h (no count of the changes since it, so the update could not be estimated)", "window_age", false),
 };
 console.log(JSON.stringify(out));
 `
@@ -208,7 +213,7 @@ console.log(JSON.stringify(out));
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, out)
 	}
-	var got struct{ Remedy, Fact, Unreadable, Gap, Crash, Unknown, Empty string }
+	var got struct{ Remedy, Fact, Unreadable, Gap, Crash, Unknown, Empty, Window, Age string }
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
@@ -228,7 +233,16 @@ console.log(JSON.stringify(out));
 	if got.Unknown != "Full backup because something a newer daemon wrote." || got.Empty != "" {
 		t.Errorf("unknown=%q empty=%q", got.Unknown, got.Empty)
 	}
-	for k, v := range map[string]string{"remedy": got.Remedy, "fact": got.Fact, "unreadable": got.Unreadable, "gap": got.Gap, "crash": got.Crash, "unknown": got.Unknown} {
+	// The #1721 reasons carry the daemon's numbers and are said as recorded,
+	// on the card and in the detail alike.
+	if !strings.HasPrefix(got.Window, "Full backup instead of an update: an update from the recorded changes would take longer") ||
+		!strings.Contains(got.Window, "17,000,000 events") || !strings.HasSuffix(got.Window, "took 8m.") {
+		t.Errorf("window = %q", got.Window)
+	}
+	if !strings.HasPrefix(got.Age, "Full backup instead of an update: the previous backup is too old") || !strings.HasSuffix(got.Age, "estimated).") {
+		t.Errorf("age = %q", got.Age)
+	}
+	for k, v := range map[string]string{"remedy": got.Remedy, "fact": got.Fact, "unreadable": got.Unreadable, "gap": got.Gap, "crash": got.Crash, "unknown": got.Unknown, "window": got.Window, "age": got.Age} {
 		if strings.Contains(v, "..") || strings.Contains(v, "\u2014") {
 			t.Errorf("%s: double period or em dash: %q", k, v)
 		}

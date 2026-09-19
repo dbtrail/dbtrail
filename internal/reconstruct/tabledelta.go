@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,150 +24,193 @@ import (
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
-// Table deltas (#1638): with FullTableConfig.TableDeltas on, a refresh stops
-// rewriting a changed table. It carries the table's Parquet file forward
-// untouched and writes two small files beside it — the row numbers of the base
-// rows that are no longer current, and the current version of every changed or
-// new row. baseline/tabledelta.go describes the layout and why every reader
-// that predates it stays correct.
+// Table deltas (#1638, #1718): a `baseline refresh` with deltas on publishes a
+// changed table as its previous file, carried forward untouched, plus ONE new
+// pair of small files holding this window's changes, with every earlier pair
+// of the chain carried forward beside it. The layout and the state definition
+// live in package baseline (tabledelta.go); this file is the refresh side:
+// reading the chain, computing which base rows this window kills, writing the
+// pair, and deciding when to stop extending and rewrite the table instead.
 //
-// # The chain, and what ends it
+// # What a refresh pays
 //
-// Each refresh EXTENDS the previous delta: it fetches only the events since the
-// delta's own anchor, adds the base rows they touch to the dead positions, and
-// merges them into the upserts. The base is rewritten ("compacted") when
-// extending stops being the cheap option or stops being safe:
+// Its own window, and nothing accumulated. The previous layout (v0.83.0)
+// rewrote one accumulated pair per refresh; #1718 measured that at 28 µs per
+// accumulated row per refresh, which under a constant load grows without
+// bound until the chain compacts. Here the previous pairs are hard links, the
+// new pair is built from the change map alone, and the one cost that is still
+// proportional to the whole chain is validating it (the CRC of every pair,
+// same bytes the previous layout validated) — #1717 is about that.
 //
-//   - the pair has grown past tableDeltaMaxFraction of the base (and
-//     past tableDeltaMinCompactBytes, so small tables are left alone);
-//   - the chain is older than tableDeltaMaxAge — a reader that ignores the delta
-//     folds the index over the base from the chain's start, so the chain's age
-//     is that reader's cost, and the index has to keep those events;
-//   - the fold spilled to disk (#1107): the position lookup wants the whole
-//     change map, and a window that large is a rewrite's worth of change anyway;
-//   - the run proceeded over a known capture gap, which only the rewrite path
-//     stamps into the footer (#1170);
-//   - the previous snapshot is read from S3, where there is no file to link.
+// # When the table is rewritten anyway
 //
-// A schema change never reaches this code: steps 3a-bis and 3b of
-// ReconstructTable refuse first, exactly as they do with deltas off.
-//
-// # Every table gets the pair, even an empty one
-//
-// With deltas on, every table a run publishes has both files, empty after a
-// compaction. `bintrail views` decides a state view's SHAPE from whether the
-// pair exists, and a view that follows the `current` pointer is generated once
-// and read across many snapshots: a pair that came and went with each
-// compaction would break that view at every compaction.
+// tableDeltaCompactReason: the chain is a day old; every pair together has
+// passed tableDeltaMaxFraction of the base (and tableDeltaMinCompactBytes, so
+// small tables are left alone); the window's changes spilled to disk; the run
+// crossed a known capture gap; the previous snapshot is on S3; the table has
+// no binlog anchor to resume from or a column whose name a delta reserves;
+// the previous pair was written by v0.83.0; the sequence is exhausted. A
+// rewrite leaves with the EMPTY sequence-0 pair that starts the next chain.
 const tableDeltaMaxAge = 24 * time.Hour
 
-// The size rule: rewrite once the upserts pass tableDeltaMaxFraction of the
-// base, but never for upserts under tableDeltaMinCompactBytes. The floor is for
-// small tables, where a fraction means nothing: an EMPTY Parquet file is over a
-// kilobyte, which is already more than a quarter of a fifty-row table, so
-// without it every small table would be rewritten on every run and the log
-// would say the changed rows had outgrown it. Under the floor the age rule
-// still ends the chain.
-//
-// Both are vars only so a test over a three-row fixture can reach either side
-// of the rule; nothing in the program assigns them.
+// The size rule: rewrite once the chain's files together pass
+// tableDeltaMaxFraction of the base, but never while they are under
+// tableDeltaMinCompactBytes. The floor is for small tables: a 40 KB base with a
+// 12 KB pair is not a table worth rewriting, and without the floor every
+// second refresh would rewrite it. Vars, not consts, so tests can reach the
+// rule with a three-row fixture.
 var (
 	tableDeltaMaxFraction           = 0.25
 	tableDeltaMinCompactBytes int64 = 1 << 20
 )
 
-// tableDelta is the delta found beside a base in the snapshot being folded from.
+// tableDelta is what readTableDelta learned about the chain beside a base.
 type tableDelta struct {
-	Posdel  string
-	Upserts string
-	// Meta is the UPSERTS file's footer: the delta's own anchor (where the next
-	// fetch resumes), the instant it was written, and the chain's start.
+	Chain *baseline.TableDeltaChain
+	// Meta is the footer of the LAST pair: the binlog anchor the fetch resumes
+	// from, the chain's start, the pair's sequence.
 	Meta baseline.DumpMetadata
-	// UpsertsSize is the upserts file's size (the disk check sizes the next
-	// one from it). PairSize adds the dead positions: the size rule measures
-	// both, or a table that only ever deletes would grow its .posdel with no
-	// ceiling but the chain's age.
-	UpsertsSize int64
-	PairSize    int64
+	// PairSize is the size of every file of the chain together (the size rule);
+	// UpsertsSize is the last pair's upserts (the space estimate for the next).
+	PairSize, UpsertsSize int64
+	// Legacy marks a v0.83.0 pair: read for its anchor and chain start, folded
+	// once into a rewrite, never extended.
+	Legacy bool
 }
 
 func baseAnchorString(m baseline.DumpMetadata) string {
 	return m.BinlogFile + ":" + strconv.FormatInt(m.BinlogPos, 10)
 }
 
-// readTableDelta returns the delta beside basePath, or nil when there is none
-// or when the one that is there was not computed against this base.
+// readTableDelta reads the chain beside basePath, or returns nil when there is
+// none, or when there is one that cannot be used: damaged, computed against
+// another base, or with pairs of more than one chain. Setting a chain aside is
+// safe — the fold starts from the base and reads a longer window — so it is a
+// warning and nil, not an error. An error is only for "could not look".
 //
-// A mismatch is not an error, and that is deliberate. The base alone plus the
-// index is always a correct source; the delta is an optimisation over it. So a
-// delta that cannot be trusted is set aside with a warning and the caller folds
-// from the base's own anchor, which costs a longer fetch and is right. Refusing
-// instead would turn a recoverable oddity (a base replaced by hand, a partial
-// copy) into a refresh that fails forever.
-//
-// Local bases only: the caller has already excluded S3.
+// Every file is validated against the snapshot's manifest, like any file a
+// fold reads: a compaction folds these bytes into a table it then certifies
+// afresh, so an unverified pair would be the one route by which corrupt bytes
+// reach a freshly certified file.
 func readTableDelta(ctx context.Context, basePath string, bmeta baseline.DumpMetadata) (*tableDelta, error) {
-	setAside := func(why string) (*tableDelta, error) {
+	d, why, err := readTableDeltaReason(ctx, basePath, bmeta)
+	if why != "" {
 		slog.Warn("table delta set aside: "+why+". Folding from the base alone, which is correct and reads a longer window.",
 			"base", basePath)
-		return nil, nil
 	}
-	has, err := baseline.HasTableDelta(ctx, basePath)
+	return d, err
+}
+
+// readTableDeltaReason is readTableDelta with the set-aside reason returned
+// instead of logged (empty when the chain is usable or absent), so a test can
+// pin WHICH check refused a chain.
+func readTableDeltaReason(ctx context.Context, basePath string, bmeta baseline.DumpMetadata) (*tableDelta, string, error) {
+	setAside := func(why string) (*tableDelta, string, error) { return nil, why, nil }
+	chain, err := baseline.ListTableDelta(ctx, basePath)
 	if errors.Is(err, baseline.ErrHalfTableDelta) {
-		return setAside("only one of its two files is present")
+		return setAside("its files do not form whole pairs")
 	}
-	if err != nil || !has {
-		return nil, err
+	if err != nil || chain == nil {
+		return nil, "", err
 	}
-	posdel, upserts := baseline.TableDeltaPaths(basePath)
-	// Validated against the snapshot's manifest like any file a fold reads: a
-	// compaction folds these bytes into a table it then certifies afresh.
-	for _, f := range []string{posdel, upserts} {
+	baseInfo, err := os.Stat(basePath)
+	if err != nil {
+		return nil, "", fmt.Errorf("size the base of a table delta: %w", err)
+	}
+	for _, f := range chain.Paths() {
 		if err := baselineintegrity.ValidateLocalFile(f); err != nil {
 			return setAside("it fails the snapshot's integrity check (" + err.Error() + ")")
 		}
 	}
-	um, err := baseline.ReadParquetMetadata(upserts)
+	// One pair's footers, checked against the base and, for a numbered pair,
+	// against its own name.
+	readPair := func(posdel, upserts string, lo, seq int) (um baseline.DumpMetadata, why string) {
+		um, err := baseline.ReadParquetMetadata(upserts)
+		if err != nil {
+			return um, "its upserts file cannot be read (" + err.Error() + ")"
+		}
+		pm, err := baseline.ReadParquetMetadata(posdel)
+		if err != nil {
+			return um, "its dead-positions file cannot be read (" + err.Error() + ")"
+		}
+		switch {
+		case um.DeltaChainStart.IsZero():
+			return um, "its upserts file records no chain start"
+		case um.BinlogFile == "" || um.BinlogPos <= 0:
+			// Without its own anchor there is nowhere to resume the fetch from.
+			return um, "its upserts file records no binlog anchor"
+		case um.SnapshotTimestamp.IsZero():
+			return um, "its upserts file records no snapshot time"
+		case um.DeltaBaseAnchor != baseAnchorString(bmeta) || um.DeltaBaseSize != baseInfo.Size():
+			return um, fmt.Sprintf("it was computed against another base (anchor %s, %d bytes; this base is %s, %d bytes)",
+				um.DeltaBaseAnchor, um.DeltaBaseSize, baseAnchorString(bmeta), baseInfo.Size())
+		case pm.DeltaBaseAnchor != um.DeltaBaseAnchor || pm.DeltaBaseSize != um.DeltaBaseSize ||
+			!pm.DeltaChainStart.Equal(um.DeltaChainStart) || pm.BinlogFile != um.BinlogFile || pm.BinlogPos != um.BinlogPos ||
+			pm.DeltaSeq != um.DeltaSeq:
+			return um, "its two files were not written by the same run"
+		case seq != baseline.TableDeltaLegacySeq && um.DeltaSeq != seq:
+			return um, fmt.Sprintf("the file named sequence %d records sequence %d in its footer", seq, um.DeltaSeq)
+		case seq != baseline.TableDeltaLegacySeq && lo != seq && um.DeltaSeqLo != lo:
+			// A range pair (#1723) records both ends; one that records
+			// another low end, or none, was not written for this name.
+			return um, fmt.Sprintf("the file named sequences %d-%d records low end %d in its footer", lo, seq, um.DeltaSeqLo)
+		case seq != baseline.TableDeltaLegacySeq && lo == seq && um.DeltaSeqLo >= 0 && um.DeltaSeqLo != seq:
+			return um, fmt.Sprintf("the file named sequence %d records a range starting at %d in its footer", seq, um.DeltaSeqLo)
+		case pm.DeltaSeqLo != um.DeltaSeqLo:
+			// Its own message: the same-run case above already compared
+			// the sequence, so this one can only be the low end.
+			return um, fmt.Sprintf("its two files record different low ends (%d and %d)", pm.DeltaSeqLo, um.DeltaSeqLo)
+		}
+		return um, ""
+	}
+	size := func(paths ...string) (int64, error) {
+		var n int64
+		for _, p := range paths {
+			fi, err := os.Stat(p)
+			if err != nil {
+				return 0, fmt.Errorf("size a table delta: %w", err)
+			}
+			n += fi.Size()
+		}
+		return n, nil
+	}
+
+	if chain.Legacy {
+		um, why := readPair(chain.LegacyPosdel, chain.LegacyUpserts, baseline.TableDeltaLegacySeq, baseline.TableDeltaLegacySeq)
+		if why != "" {
+			return setAside(why)
+		}
+		pair, err := size(chain.LegacyPosdel, chain.LegacyUpserts)
+		if err != nil {
+			return nil, "", err
+		}
+		ups, _ := size(chain.LegacyUpserts)
+		return &tableDelta{Chain: chain, Meta: um, PairSize: pair, UpsertsSize: ups, Legacy: true}, "", nil
+	}
+
+	var last baseline.DumpMetadata
+	var total int64
+	for i, f := range chain.Files {
+		um, why := readPair(f.Posdel, f.Upserts, f.SeqLo, f.Seq)
+		if why != "" {
+			return setAside(fmt.Sprintf("pair %d: %s", f.Seq, why))
+		}
+		if i > 0 && (!um.DeltaChainStart.Equal(last.DeltaChainStart) || um.DeltaBaseAnchor != last.DeltaBaseAnchor) {
+			return setAside(fmt.Sprintf("pair %d belongs to another chain (start %s, previous pairs %s)",
+				f.Seq, um.DeltaChainStart.UTC().Format(time.RFC3339), last.DeltaChainStart.UTC().Format(time.RFC3339)))
+		}
+		n, err := size(f.Posdel, f.Upserts)
+		if err != nil {
+			return nil, "", err
+		}
+		total += n
+		last = um
+	}
+	ups, err := size(chain.Last().Upserts)
 	if err != nil {
-		return setAside("its upserts file cannot be read (" + err.Error() + ")")
+		return nil, "", err
 	}
-	pm, err := baseline.ReadParquetMetadata(posdel)
-	if err != nil {
-		return setAside("its dead-positions file cannot be read (" + err.Error() + ")")
-	}
-	baseInfo, err := os.Stat(basePath)
-	if err != nil {
-		return nil, fmt.Errorf("size the base of a table delta: %w", err)
-	}
-	upsInfo, err := os.Stat(upserts)
-	if err != nil {
-		return nil, fmt.Errorf("size a table delta: %w", err)
-	}
-	posInfo, err := os.Stat(posdel)
-	if err != nil {
-		return nil, fmt.Errorf("size a table delta: %w", err)
-	}
-	var why string
-	switch {
-	case um.DeltaChainStart.IsZero():
-		why = "its upserts file records no chain start"
-	case um.BinlogFile == "" || um.BinlogPos <= 0:
-		// Without its own anchor there is nowhere to resume the fetch from.
-		why = "its upserts file records no binlog anchor"
-	case um.SnapshotTimestamp.IsZero():
-		why = "its upserts file records no snapshot time"
-	case um.DeltaBaseAnchor != baseAnchorString(bmeta) || um.DeltaBaseSize != baseInfo.Size():
-		why = fmt.Sprintf("it was computed against another base (anchor %s, %d bytes; this base is %s, %d bytes)",
-			um.DeltaBaseAnchor, um.DeltaBaseSize, baseAnchorString(bmeta), baseInfo.Size())
-	case pm.DeltaBaseAnchor != um.DeltaBaseAnchor || pm.DeltaBaseSize != um.DeltaBaseSize ||
-		!pm.DeltaChainStart.Equal(um.DeltaChainStart) || pm.BinlogFile != um.BinlogFile || pm.BinlogPos != um.BinlogPos:
-		why = "its two files were not written by the same run"
-	}
-	if why != "" {
-		return setAside(why)
-	}
-	return &tableDelta{Posdel: posdel, Upserts: upserts, Meta: um,
-		UpsertsSize: upsInfo.Size(), PairSize: upsInfo.Size() + posInfo.Size()}, nil
+	return &tableDelta{Chain: chain, Meta: last, PairSize: total, UpsertsSize: ups}, "", nil
 }
 
 // DeltaChainStart is deltaChainStart for the one reader that pairs a base with
@@ -175,12 +220,6 @@ func DeltaChainStart(ctx context.Context, basePath string) (time.Time, error) {
 	return deltaChainStart(ctx, basePath)
 }
 
-// deltaChainStart is what FindBaseline needs from a delta: the instant a reader
-// that ignores it must bound its event fetch from. Zero when there is no delta.
-//
-// No pairing check here, unlike readTableDelta, and the asymmetry is safe: this
-// value only ever moves a lower bound EARLIER, so a delta that turns out not to
-// match its base costs a wider fetch and cannot drop an event.
 func deltaChainStart(ctx context.Context, basePath string) (time.Time, error) {
 	// Over S3 every lookup is a DuckDB session and a bucket listing, on paths
 	// that run per client query (the shim, the console). A published snapshot
@@ -204,11 +243,16 @@ func deltaChainStart(ctx context.Context, basePath string) (time.Time, error) {
 var s3ChainStarts sync.Map
 
 func readDeltaChainStart(ctx context.Context, basePath string) (time.Time, error) {
-	has, err := baseline.HasTableDelta(ctx, basePath)
-	if err != nil || !has {
+	chain, err := baseline.ListTableDelta(ctx, basePath)
+	if err != nil || chain == nil {
 		return time.Time{}, err
 	}
-	_, upserts := baseline.TableDeltaPaths(basePath)
+	// Every pair of a chain carries the same start; the last one is read
+	// because it is the one a refresh resumes from, so the two agree.
+	upserts := chain.LegacyUpserts
+	if !chain.Legacy {
+		upserts = chain.Last().Upserts
+	}
 	um, err := baseline.ReadParquetMetadataAny(ctx, upserts)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read table delta %s: %w", upserts, err)
@@ -224,8 +268,9 @@ func readDeltaChainStart(ctx context.Context, basePath string) (time.Time, error
 }
 
 // tableDeltaCompactReason says why a run must rewrite the base instead of
-// extending (or starting) a delta. Empty means a delta can be written.
-func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, spilled bool, capGap *CaptureGap, at time.Time, hasAnchor, reservedColumn bool) string {
+// extending (or starting) a chain. Empty means a pair can be written. reserved
+// is the name of a table column a delta reserves, or "" (reservedDeltaColumn).
+func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, spilled bool, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string) string {
 	switch {
 	case strings.HasPrefix(basePath, "s3://"):
 		return "the previous snapshot is read from S3"
@@ -234,10 +279,11 @@ func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, 
 		// set it aside, start over from the base and write another one: a
 		// chain that never ends and re-reads a window that only grows.
 		return "there is no binlog position to resume a delta from"
-	case reservedColumn:
-		// The state is read with DuckDB's file_row_number, which a table
-		// column of that name would shadow.
-		return "the table has a column named file_row_number"
+	case reserved != "":
+		// The state is read with DuckDB's file_row_number and partitioned on
+		// the technical key column; a table column under either name would
+		// shadow them.
+		return "the table has a column named " + reserved
 	case capGap != nil:
 		return "the run proceeded over a known capture gap"
 	case spilled:
@@ -245,6 +291,12 @@ func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, 
 	}
 	if prev == nil {
 		return ""
+	}
+	if prev.Legacy {
+		return "the previous delta was written in an older layout (one rewritten pair per table); folding it in once"
+	}
+	if prev.Meta.DeltaSeq >= baseline.TableDeltaMaxSeq {
+		return fmt.Sprintf("the chain's sequence reached %d", baseline.TableDeltaMaxSeq)
 	}
 	if age := at.Sub(prev.Meta.DeltaChainStart); age > tableDeltaMaxAge {
 		return fmt.Sprintf("the chain is %s old", age.Round(time.Minute))
@@ -256,38 +308,123 @@ func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, 
 	return ""
 }
 
-// lookupBasePositions scans the base's PRIMARY KEY columns and returns the row
-// number of every row whose key is in changes, ascending.
-//
-// The key is built exactly the way scanBaselinePass builds it —
-// canonicalizePKMap then event.BuildPKValues — so this lookup and the merge
-// agree on which base row a change belongs to by construction. It reads the
-// change map and never drains it: the upserts merge runs after this and needs
-// every entry.
+// reservedDeltaColumn returns the first column of cols whose name a table
+// delta reserves, or "".
+func reservedDeltaColumn(cols []baseline.Column) string {
+	for _, c := range cols {
+		for _, r := range baseline.TableDeltaReservedColumns {
+			if strings.EqualFold(c.Name, r) {
+				return c.Name
+			}
+		}
+	}
+	return ""
+}
+
+// lookupBasePositions returns the row numbers, ascending, of the base rows
+// whose PRIMARY KEY the window touched. For integer keys the touched keys go
+// to DuckDB as a table and the base is semi-joined against it, so only the
+// matching rows cross into Go (#1716); every other key type scans the base's
+// key columns through Go, as the merge does. Either way the canonical check
+// (canonicalizePKMap + event.BuildPKValues against the change map) is what
+// decides: the join only narrows what Go looks at, and it is taken only when
+// every touched key is either handed to DuckDB exactly or provably outside
+// what its column can hold. It reads the change map and never drains it: the
+// upserts writer runs after this and needs every entry.
 func lookupBasePositions(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta,
 	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning) ([]int64, error) {
+	out, _, err := lookupBasePositionsWith(ctx, basePath, schema, table, pkCols, changes, tuning, true)
+	return out, err
+}
+
+// lookupStats says how a lookup went: whether the join was taken and how
+// many base rows crossed into Go. A test pins Examined, because a join that
+// silently stopped narrowing would still return the right positions.
+type lookupStats struct {
+	Joined   bool
+	Examined int
+}
+
+// lookupBasePositionsWith is lookupBasePositions with the join switchable
+// and the outcome reported, so a test can pin both paths against each other
+// on the same base.
+func lookupBasePositionsWith(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta,
+	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning, allowJoin bool) (out []int64, st lookupStats, err error) {
 	if len(changes) == 0 {
-		return nil, nil
+		return nil, st, nil
 	}
 	ddb, err := sql.Open("duckdb", "")
 	if err != nil {
-		return nil, fmt.Errorf("open duckdb: %w", err)
+		return nil, st, fmt.Errorf("open duckdb: %w", err)
 	}
 	defer ddb.Close()
 	applyDuckDBTuning(ctx, ddb, tuning)
 
 	names := make([]string, len(pkCols))
+	quoted := make([]string, len(pkCols))
 	sel := make([]string, len(pkCols))
 	for i, c := range pkCols {
 		names[i] = c.Name
-		q := `"` + strings.ReplaceAll(c.Name, `"`, `""`) + `"`
-		sel[i] = q + " AS " + q
+		quoted[i] = `"` + strings.ReplaceAll(c.Name, `"`, `""`) + `"`
+		sel[i] = "b." + quoted[i] + " AS " + quoted[i]
 	}
-	q := fmt.Sprintf("SELECT %s, file_row_number FROM parquet_scan('%s', file_row_number=true)",
-		strings.Join(sel, ", "), strings.ReplaceAll(basePath, "'", "''"))
+	scanSQL := fmt.Sprintf("parquet_scan('%s', file_row_number=true)", strings.ReplaceAll(basePath, "'", "''"))
+	q := "SELECT " + strings.Join(sel, ", ") + ", b.file_row_number FROM " + scanSQL + " AS b"
+
+	if allowJoin {
+		types, why, err := integerKeyTypes(ctx, ddb, scanSQL, quoted)
+		if err != nil {
+			return nil, st, err
+		}
+		var csvPath string
+		var n int
+		if why != "" {
+			// A property of the table, the same on every refresh: Debug.
+			slog.Debug("base positions: scanning the base's key columns through Go", "schema", schema, "table", table, "reason", why)
+		} else {
+			csvPath, n, why, err = writeIntegerKeyCSV(pkCols, types, changes)
+			switch {
+			case err != nil:
+				// The file is what the join needs and the scan does not: a
+				// temp directory that is full or read-only costs the fast
+				// path, never the refresh.
+				slog.Warn("base positions: touched-keys file could not be written; scanning the base",
+					"schema", schema, "table", table, "error", err)
+				why = "touched-keys file: " + err.Error()
+			case why != "":
+				// A property of this window's keys: worth an Info line, since
+				// the next window may join again.
+				slog.Info("base positions: scanning the base's key columns through Go", "schema", schema, "table", table, "reason", why)
+			}
+		}
+		if why == "" {
+			defer os.Remove(csvPath)
+			st.Joined = true
+			// A key column that holds NULL — a baseline written before #522
+			// lost unsigned values past the signed range that way — is a
+			// row the scan refuses when it reaches it. The join would never
+			// reach it (NULL matches nothing), so it is refused here.
+			if err := refuseNullKeys(ctx, ddb, scanSQL, quoted, schema, table); err != nil {
+				return nil, st, err
+			}
+			if n == 0 {
+				// Every touched key is outside what the columns can hold: no
+				// base row can carry one, so there is nothing to look up.
+				return nil, st, nil
+			}
+			on := make([]string, len(quoted))
+			cols := make([]string, len(quoted))
+			for i, c := range quoted {
+				on[i] = "b." + c + " = t." + c
+				cols[i] = "'" + strings.ReplaceAll(names[i], "'", "''") + "': '" + types[i] + "'"
+			}
+			q += fmt.Sprintf(" SEMI JOIN read_csv('%s', header=false, auto_detect=false, delim=',', new_line='\\n', columns={%s}) AS t ON %s",
+				strings.ReplaceAll(csvPath, "'", "''"), strings.Join(cols, ", "), strings.Join(on, " AND "))
+		}
+	}
 	rows, err := ddb.QueryContext(ctx, q)
 	if err != nil {
-		return nil, fmt.Errorf("scan the base's key columns: %w", err)
+		return nil, st, fmt.Errorf("scan the base's key columns: %w", err)
 	}
 	defer rows.Close()
 
@@ -296,26 +433,27 @@ func lookupBasePositions(ctx context.Context, basePath, schema, table string, pk
 	for i := range scan {
 		ptrs[i] = &scan[i]
 	}
-	var out []int64
 	for rows.Next() {
+		st.Examined++
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, fmt.Errorf("scan base key row: %w", err)
+			return nil, st, fmt.Errorf("scan base key row: %w", err)
 		}
 		pos, ok := scan[len(pkCols)].(int64)
 		if !ok {
-			return nil, fmt.Errorf("internal: file_row_number came back as %T, not int64", scan[len(pkCols)])
+			return nil, st, fmt.Errorf("internal: file_row_number came back as %T, not int64", scan[len(pkCols)])
 		}
 		pkMap, err := canonicalizePKMap(zipMap(names, scan[:len(pkCols)]), pkCols)
 		if err != nil {
-			return nil, fmt.Errorf("canonicalize baseline PK for %s.%s: %w", schema, table, err)
+			return nil, st, fmt.Errorf("canonicalize baseline PK for %s.%s: %w", schema, table, err)
 		}
 		pk := event.BuildPKValues(pkCols, pkMap)
 		// Same #1158 refusal as scanBaselinePass, for the same reason: a change
 		// filed under the key's OTHER spelling would miss this row here and
-		// land in the upserts as a new one, publishing the row twice.
+		// land in the upserts as a new one, publishing the row twice. Fixed
+		// BINARY keys never take the join, so the scan still sees every row.
 		if alt, ok := altFixedBinaryPK(pkCols, pkMap); ok {
 			if ev, pending := changes[alt]; pending {
-				return nil, pkSpellingJoinErr(schema, table, pk, alt, ev.EventType)
+				return nil, st, pkSpellingJoinErr(schema, table, pk, alt, ev.EventType)
 			}
 		}
 		if _, ok := changes[pk]; ok {
@@ -323,40 +461,228 @@ func lookupBasePositions(ctx context.Context, basePath, schema, table string, pk
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate base key rows: %w", err)
+		return nil, st, fmt.Errorf("iterate base key rows: %w", err)
 	}
 	slices.Sort(out)
-	return out, nil
+	return out, st, nil
 }
 
-// tableDeltaInput is what writing (or rewriting) a table's delta needs.
+// duckDBIntegerWidths is the DuckDB type of an integer key column as the
+// base's Parquet reads back (DESCRIBE), with the bit width the value must fit
+// and whether it is unsigned. Only the three types the baseline writer
+// produces (INT32, INT64 and UINT64 physical columns): a base written by
+// anything else keeps the scan, because a width that was wrong here would
+// drop an in-range key from the join with no error, and that row would be
+// published twice.
+var duckDBIntegerWidths = map[string]struct {
+	bits     int
+	unsigned bool
+}{
+	"INTEGER": {32, false}, "BIGINT": {64, false}, "UBIGINT": {64, true},
+}
+
+// integerKeyTypes reads the base's DuckDB types for the key columns and
+// returns them when every one is an integer type; otherwise why says which
+// column is not, and the caller scans. The Parquet side, not the MySQL
+// DATA_TYPE, decides: it is the type the join compares.
+func integerKeyTypes(ctx context.Context, ddb *sql.DB, scanSQL string, quoted []string) (types []string, why string, err error) {
+	rows, err := ddb.QueryContext(ctx, "DESCRIBE SELECT "+strings.Join(quoted, ", ")+" FROM "+scanSQL)
+	if err != nil {
+		return nil, "", fmt.Errorf("describe the base's key columns: %w", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, "", err
+	}
+	nameIdx, typeIdx := -1, -1
+	for i, c := range cols {
+		switch c {
+		case "column_name":
+			nameIdx = i
+		case "column_type":
+			typeIdx = i
+		}
+	}
+	if typeIdx < 0 {
+		return nil, "DESCRIBE returned no column_type", nil
+	}
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, "", err
+		}
+		typ, _ := vals[typeIdx].(string)
+		if _, ok := duckDBIntegerWidths[typ]; !ok {
+			name := ""
+			if nameIdx >= 0 {
+				name, _ = vals[nameIdx].(string)
+			}
+			return nil, fmt.Sprintf("key column %q is %s in the file, not an integer type", name, typ), nil
+		}
+		types = append(types, typ)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	if len(types) != len(quoted) {
+		return nil, fmt.Sprintf("DESCRIBE returned %d key columns, expected %d", len(types), len(quoted)), nil
+	}
+	return types, "", nil
+}
+
+// refuseNullKeys fails the lookup the way the scan does when a key column
+// holds NULL in the base (canonicalizePKValue's nil refusal), because a semi
+// join never reaches such a row. One probe in DuckDB, stopping at the first
+// such row and naming the column that is NULL in it, as the scan would.
+func refuseNullKeys(ctx context.Context, ddb *sql.DB, scanSQL string, quoted []string, schema, table string) error {
+	preds := make([]string, len(quoted))
+	for i, c := range quoted {
+		preds[i] = c + " IS NULL"
+	}
+	flags := make([]bool, len(quoted))
+	ptrs := make([]any, len(quoted))
+	for i := range flags {
+		ptrs[i] = &flags[i]
+	}
+	err := ddb.QueryRowContext(ctx, "SELECT "+strings.Join(preds, ", ")+" FROM "+scanSQL+" WHERE "+strings.Join(preds, " OR ")+" LIMIT 1").Scan(ptrs...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("probe the base's key columns for NULL: %w", err)
+	}
+	col := quoted[0]
+	for i, isNull := range flags {
+		if isNull {
+			col = quoted[i]
+			break
+		}
+	}
+	return fmt.Errorf("canonicalize baseline PK for %s.%s: key column %s holds NULL in the base file (MySQL forbids NULL in PK columns; a baseline written before #522 lost unsigned values past the signed range this way — take a fresh baseline)",
+		schema, table, col)
+}
+
+// writeIntegerKeyCSV writes the touched keys as one CSV row each, typed for
+// the join. It reads the change map and never removes an entry, not even
+// one it leaves out of the file: the upserts writer drains the map after
+// this and needs every entry. why is set (and no file left) when any key is not spelled as the
+// plain integer event.BuildPKValues writes for these columns (a stray
+// escape, a sign, a blank, a leading zero, the wrong number of parts): the
+// caller then scans, so the join never decides on a key it could not hand
+// over exactly. A key outside the column's range is left out (no base row
+// can hold it); n is the rows written.
+func writeIntegerKeyCSV(pkCols []metadata.ColumnMeta, types []string, changes map[string]*query.ResultRow) (path string, n int, why string, err error) {
+	f, err := os.CreateTemp("", "bintrail-touched-keys-*.csv")
+	if err != nil {
+		return "", 0, "", fmt.Errorf("create: %w", err)
+	}
+	path = f.Name()
+	w := bufio.NewWriter(f)
+	fail := func(reason string) (string, int, string, error) {
+		f.Close()
+		os.Remove(path)
+		return "", 0, reason, nil
+	}
+	for key := range changes {
+		parts := strings.Split(key, "|")
+		if len(parts) != len(pkCols) {
+			return fail(fmt.Sprintf("key %q has %d parts, the key has %d columns", key, len(parts), len(pkCols)))
+		}
+		inRange := true
+		for i, part := range parts {
+			if !plainInteger(part) {
+				return fail(fmt.Sprintf("key %q is not a plain integer", key))
+			}
+			width := duckDBIntegerWidths[types[i]]
+			if width.unsigned {
+				if _, perr := strconv.ParseUint(part, 10, width.bits); perr != nil {
+					inRange = false
+				}
+			} else if _, perr := strconv.ParseInt(part, 10, width.bits); perr != nil {
+				inRange = false
+			}
+		}
+		if !inRange {
+			continue
+		}
+		w.WriteString(strings.Join(parts, ","))
+		w.WriteByte('\n')
+		n++
+	}
+	if err := w.Flush(); err != nil {
+		f.Close()
+		os.Remove(path)
+		return "", 0, "", fmt.Errorf("write: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return "", 0, "", fmt.Errorf("close: %w", err)
+	}
+	return path, n, "", nil
+}
+
+// plainInteger: the one spelling %v gives an integer — an optional minus,
+// then digits with no leading zero ("0" itself is fine, "-0" and "007" are
+// not) — which is what the change map's keys carry for integer columns. A
+// spelling DuckDB would also parse but Go would not equate ("007" is not
+// "7" to the canonical check) is refused, so the join hands over exactly
+// what it will accept.
+func plainInteger(s string) bool {
+	if s == "" {
+		return false
+	}
+	neg := s[0] == '-'
+	if neg {
+		s = s[1:]
+		if s == "" {
+			return false
+		}
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	if s[0] == '0' && (len(s) > 1 || neg) {
+		return false
+	}
+	return true
+}
+
+// tableDeltaInput is what writing one pair of a table's chain needs.
 type tableDeltaInput struct {
 	merge mergeInput
 	// basePath is the base the positions refer to: the file this run linked or
 	// wrote into its own snapshot directory.
 	basePath string
 	baseMeta baseline.DumpMetadata
-	// prev is the delta being extended; nil starts a chain or writes the empty
-	// pair that follows a rewrite.
-	prev       *tableDelta
+	// seq is the pair's sequence: 0 starts a chain (a refresh over a base with
+	// no chain, or the empty pair after a rewrite), otherwise the previous
+	// pair's sequence plus one.
+	seq        int
 	chainStart time.Time
 	// newDead are the base rows this window's changes touch, ascending.
 	newDead []int64
+	// spaceHint is the previous pair's upserts size, the estimate the space
+	// check is given for this one; 0 skips the check.
+	spaceHint int64
 }
 
-// posdelColumns is the one-column schema of a .posdel file, built through the
-// same parser every table schema goes through so the writer sees nothing new.
-func posdelColumns() ([]baseline.Column, error) {
-	return baseline.ParseSchemaText("CREATE TABLE `posdel` (\n  `" + baseline.TableDeltaPosColumn + "` bigint NOT NULL\n);")
-}
-
-// writeTableDelta writes both files of a table's delta beside in.basePath and
-// returns how many dead positions and upsert rows they hold. On any error both
-// files are removed: half a pair is worse than none (baseline.ErrHalfTableDelta).
+// writeTableDelta writes ONE pair of sequence in.seq beside in.basePath from
+// the change map and returns how many dead positions and upsert rows it holds
+// (tombstones included). On any error both files are removed: half a pair is
+// worse than none (baseline.ErrHalfTableDelta).
 //
-// Drains in.merge.Changes.
+// The upserts are the window's changes and nothing else: an image with op "u"
+// for every INSERT/UPDATE, a tombstone with op "d" for every DELETE, in key
+// order. Drains in.merge.Changes.
 func writeTableDelta(ctx context.Context, in tableDeltaInput) (dead, upsertRows int64, retErr error) {
-	posdelPath, upsertsPath := baseline.TableDeltaPaths(in.basePath)
+	posdelPath, upsertsPath := baseline.TableDeltaPaths(in.basePath, in.seq)
 	defer func() {
 		if retErr == nil {
 			return
@@ -376,21 +702,15 @@ func writeTableDelta(ctx context.Context, in tableDeltaInput) (dead, upsertRows 
 	md[baseline.MetaKeyDeltaChainStart] = in.chainStart.UTC().Format(time.RFC3339)
 	md[baseline.MetaKeyDeltaBaseAnchor] = baseAnchorString(in.baseMeta)
 	md[baseline.MetaKeyDeltaBaseSize] = strconv.FormatInt(baseInfo.Size(), 10)
+	md = baseline.WithDeltaSeq(md, in.seq)
 
-	if in.merge.SpaceCheck != nil && in.prev != nil {
-		if err := in.merge.SpaceCheck(filepath.Dir(in.basePath), in.prev.UpsertsSize); err != nil {
+	if in.merge.SpaceCheck != nil && in.spaceHint > 0 {
+		if err := in.merge.SpaceCheck(filepath.Dir(in.basePath), in.spaceHint); err != nil {
 			return 0, 0, err
 		}
 	}
 
-	ddb, err := sql.Open("duckdb", "")
-	if err != nil {
-		return 0, 0, fmt.Errorf("open duckdb: %w", err)
-	}
-	defer ddb.Close()
-	applyDuckDBTuning(ctx, ddb, in.merge.DuckDBTuning)
-
-	if dead, err = writePosdel(ctx, ddb, posdelPath, md, in.prev, in.newDead); err != nil {
+	if dead, err = baseline.WritePosdel(posdelPath, md, in.newDead); err != nil {
 		return 0, 0, err
 	}
 
@@ -398,7 +718,11 @@ func writeTableDelta(ctx context.Context, in tableDeltaInput) (dead, upsertRows 
 	if err != nil {
 		return 0, 0, fmt.Errorf("parse the baseline's embedded CREATE TABLE for %s.%s: %w", in.merge.Schema, in.merge.Table, err)
 	}
-	w, err := newParquetTableWriter(upsertsPath, cols, md)
+	upsCols, err := baseline.TableDeltaColumns(cols)
+	if err != nil {
+		return 0, 0, err
+	}
+	w, err := newParquetTableWriter(upsertsPath, upsCols, md)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -407,23 +731,9 @@ func writeTableDelta(ctx context.Context, in tableDeltaInput) (dead, upsertRows 
 			_ = w.Discard()
 		}
 	}()
-	emit := func(row map[string]any) error { return w.WriteRow(row, in.merge.Schema, in.merge.Table) }
-	core := mergeCore{
-		Schema: in.merge.Schema, Table: in.merge.Table, PKCols: in.merge.PKCols,
-		Changes: in.merge.Changes, DuckDBTuning: in.merge.DuckDBTuning,
-	}
-	var stats mergeStats
-	if in.prev != nil {
-		// The previous upserts play the baseline's part in the ordinary merge:
-		// a row changed again is replaced, one deleted is dropped, the rest
-		// pass through. What is left in the map afterwards is everything this
-		// window touched that was not already an upsert.
-		core.LocalBaselinePath = in.prev.Upserts
-		if err := scanBaselinePass(ctx, ddb, core, core.Changes, nil, emit, &stats); err != nil {
-			return 0, 0, err
-		}
-	}
-	if err := emitLeftoverChanges(core, core.Changes, emit, &stats); err != nil {
+	if err := emitWindowChanges(in.merge, cols, in.merge.Changes, func(row map[string]any) error {
+		return w.WriteRow(row, in.merge.Schema, in.merge.Table)
+	}); err != nil {
 		return 0, 0, err
 	}
 	if err := w.Close(); err != nil {
@@ -432,84 +742,48 @@ func writeTableDelta(ctx context.Context, in tableDeltaInput) (dead, upsertRows 
 	return dead, w.Rows(), nil
 }
 
-// writePosdel writes the union of the previous dead positions and this
-// window's, ascending and without duplicates. The previous file is streamed,
-// so what is held in memory is bounded by ONE window's changes, not the chain's.
-func writePosdel(ctx context.Context, ddb *sql.DB, path string, md map[string]string, prev *tableDelta, newDead []int64) (n int64, retErr error) {
-	cols, err := posdelColumns()
-	if err != nil {
-		return 0, fmt.Errorf("internal: posdel schema: %w", err)
+// emitWindowChanges renders the change map as delta rows, in key order: the
+// row_after image under op "u" for an INSERT or UPDATE, a tombstone (every
+// table column NULL) under op "d" for a DELETE. Drains changes.
+func emitWindowChanges(in mergeInput, cols []baseline.Column, changes map[string]*query.ResultRow, emit func(map[string]any) error) error {
+	pks := make([]string, 0, len(changes))
+	for pk := range changes {
+		pks = append(pks, pk)
 	}
-	w, err := baseline.NewWriter(path, cols, baseline.WriterConfig{
-		Compression: ParquetWriterCompression, RowGroupSize: ParquetWriterRowGroupSize, Metadata: md,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("create table delta %s: %w", path, err)
-	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = w.Close()
-		}
-	}()
-	last := int64(-1)
-	put := func(pos int64) error {
-		if pos == last {
-			return nil
-		}
-		if pos < last {
-			return fmt.Errorf("internal: dead positions out of order (%d after %d)", pos, last)
-		}
-		last = pos
-		n++
-		return w.WriteRow([]string{strconv.FormatInt(pos, 10)}, []bool{false})
-	}
-	i := 0
-	if prev != nil {
-		q := fmt.Sprintf(`SELECT "%s" FROM parquet_scan('%s') ORDER BY 1`,
-			baseline.TableDeltaPosColumn, strings.ReplaceAll(prev.Posdel, "'", "''"))
-		rows, err := ddb.QueryContext(ctx, q)
-		if err != nil {
-			return 0, fmt.Errorf("read the previous dead positions: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var old sql.NullInt64
-			if err := rows.Scan(&old); err != nil {
-				return 0, fmt.Errorf("scan a dead position: %w", err)
+	sort.Strings(pks)
+	for _, pk := range pks {
+		ev := changes[pk]
+		delete(changes, pk)
+		var row map[string]any
+		if ev.EventType == event.EventDelete {
+			row = make(map[string]any, len(cols)+2)
+			for _, c := range cols {
+				row[c.Name] = nil
 			}
-			if !old.Valid {
-				return 0, errors.New("the previous table delta holds a NULL row number")
+			row[baseline.TableDeltaOpColumn] = baseline.TableDeltaOpDelete
+		} else {
+			if ev.RowAfter == nil {
+				slog.Error("event has nil RowAfter; skipping to avoid emitting all-NULL tuple",
+					"schema", in.Schema, "table", in.Table, "pk", pk,
+					"event_type", ev.EventType, "event_id", ev.EventID)
+				continue
 			}
-			for ; i < len(newDead) && newDead[i] < old.Int64; i++ {
-				if err := put(newDead[i]); err != nil {
-					return 0, err
-				}
-			}
-			if err := put(old.Int64); err != nil {
-				return 0, err
-			}
+			row = ev.RowAfter
+			row[baseline.TableDeltaOpColumn] = baseline.TableDeltaOpUpsert
 		}
-		if err := rows.Err(); err != nil {
-			return 0, fmt.Errorf("iterate the previous dead positions: %w", err)
-		}
-	}
-	for ; i < len(newDead); i++ {
-		if err := put(newDead[i]); err != nil {
-			return 0, err
+		row[baseline.TableDeltaPKColumn] = pk
+		if err := emit(row); err != nil {
+			return err
 		}
 	}
-	closed = true
-	if err := w.Close(); err != nil {
-		return 0, fmt.Errorf("close table delta %s: %w", path, err)
-	}
-	return n, nil
+	return nil
 }
 
-// materializeBaseWithDelta writes base+delta out as ONE temporary Parquet file,
-// so a compaction can hand it to the ordinary merge as if it were the baseline.
-// DuckDB re-encodes; that is the same trip an S3 baseline already makes through
-// materializeBaselineLocal before every merge, so the merge sees nothing new.
+// materializeBaseWithDelta writes base+chain out as ONE temporary Parquet
+// file, so a compaction can hand it to the ordinary merge as if it were the
+// baseline. DuckDB re-encodes; that is the same trip an S3 baseline already
+// makes through materializeBaselineLocal before every merge, so the merge sees
+// nothing new.
 func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelta, tuning duckdbutil.Tuning) (string, func(), error) {
 	tmpDir, err := os.MkdirTemp("", "bintrail-compact-*")
 	if err != nil {
@@ -524,10 +798,24 @@ func materializeBaseWithDelta(ctx context.Context, basePath string, d *tableDelt
 	}
 	defer ddb.Close()
 	applyDuckDBTuning(ctx, ddb, tuning)
-	esc := func(s string) string { return strings.ReplaceAll(s, "'", "''") }
-	q := fmt.Sprintf("COPY (%s) TO '%s' (FORMAT PARQUET, COMPRESSION '%s')",
-		baseline.TableDeltaStateSQL("'"+esc(basePath)+"'", "'"+esc(d.Posdel)+"'", "'"+esc(d.Upserts)+"'", ""),
-		esc(tmpPath), ParquetWriterCompression)
+	lit := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	var state string
+	if d.Legacy {
+		state = baseline.LegacyTableDeltaStateSQL(lit(basePath), lit(d.Chain.LegacyPosdel), lit(d.Chain.LegacyUpserts), "")
+	} else {
+		// Exact file lists, not the glob: the chain is in hand, a list of
+		// literal paths never over-matches, and union_by_name over a
+		// neighbouring table's pair (a table named "<stem>.000001x") would
+		// otherwise merge its COLUMNS into the state at bind time before
+		// the name filter drops its rows.
+		var posdels, upserts []string
+		for _, f := range d.Chain.Files {
+			posdels = append(posdels, lit(f.Posdel))
+			upserts = append(upserts, lit(f.Upserts))
+		}
+		state = baseline.TableDeltaStateSQL(lit(basePath), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", basePath, "")
+	}
+	q := fmt.Sprintf("COPY (%s) TO %s (FORMAT PARQUET, COMPRESSION '%s')", state, lit(tmpPath), ParquetWriterCompression)
 	if _, err := ddb.ExecContext(ctx, q); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("apply the table delta to its base: %w", err)
@@ -548,17 +836,21 @@ type tableDeltaPublish struct {
 	chainStart time.Time
 	baseMeta   baseline.DumpMetadata
 	// anchorMeta is baseMeta with the anchor the fetch actually resumed from.
-	anchorMeta       baseline.DumpMetadata
-	prev             *tableDelta
-	fold             *foldResult
-	capGap           *CaptureGap
-	pkCols           []metadata.ColumnMeta
+	anchorMeta baseline.DumpMetadata
+	prev       *tableDelta
+	fold       *foldResult
+	capGap     *CaptureGap
+	pkCols     []metadata.ColumnMeta
+	// streamCaptured: a stream wrote the index, so the files this publish
+	// writes may carry an event-id stamp (#1720, lastEventIDFor).
+	streamCaptured   bool
 	currentGenerated map[string]bool
 }
 
 // publishWithTableDelta publishes one table of a run with deltas on: as its
-// previous file plus a delta, or rewritten when tableDeltaCompactReason says
-// so. Either way the table leaves with both delta files beside it.
+// previous file plus the chain plus one new pair, or rewritten when
+// tableDeltaCompactReason says so. Either way the table leaves with a chain
+// beside it.
 func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableReport) error {
 	var baseSize int64
 	if !strings.HasPrefix(p.basePath, "s3://") {
@@ -575,6 +867,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		PKCols:           p.pkCols,
 		Changes:          p.fold.Changes,
 		Spill:            p.fold.Spill,
+		LastEventID:      lastEventIDFor(p.fold, p.anchorMeta, p.streamCaptured),
 		ImageColumns:     p.fold.ImageColumns,
 		SawImage:         p.fold.SawImage,
 		CurrentGenerated: p.currentGenerated,
@@ -591,14 +884,12 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	newBase := filepath.Join(p.cfg.snapshotDir, p.schema, p.table+".parquet")
 
 	hasAnchor := p.cfg.cut != nil || (p.anchorMeta.BinlogFile != "" && p.anchorMeta.BinlogPos > 0)
-	reserved := false
+	reserved := ""
 	if cols, err := baseline.ParseSchemaText(in.CreateTableSQL); err == nil {
-		for _, c := range cols {
-			reserved = reserved || strings.EqualFold(c.Name, "file_row_number")
-		}
+		reserved = reservedDeltaColumn(cols)
 	}
 	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.fold.Spill != nil, p.capGap, p.cfg.At, hasAnchor, reserved); reason != "" {
-		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, rep)
+		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
 	}
 
 	// The guards a rewrite runs before it opens its output (#602, #843) are
@@ -617,45 +908,140 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		return err
 	}
 
-	// Positions BEFORE anything is written, and before the upserts merge
+	// Positions BEFORE anything is written, and before the upserts writer
 	// drains the change map.
 	newDead, err := lookupBasePositions(ctx, p.basePath, p.schema, p.table, p.pkCols, in.Changes, p.cfg.DuckDBTuning)
 	if err != nil {
+		return err
+	}
+
+	// Carry the base and every earlier pair forward. What was published in the
+	// new snapshot so far is removed on failure: a base or a partial chain
+	// alone in the new snapshot would publish the table as it was at the
+	// chain's start, or at some pair of it.
+	var published []string
+	fail := func(err error) error {
+		for _, f := range published {
+			if rerr := os.Remove(f); rerr != nil && !os.IsNotExist(rerr) {
+				slog.Warn("could not remove a carried file of a failed table", "path", f, "error", rerr)
+			}
+		}
 		return err
 	}
 	linked, err := carryForward(ctx, p.basePath, p.cfg.snapshotDir, p.schema, p.table)
 	if err != nil {
 		return fmt.Errorf("carry the backup file of %s.%s forward: %w", p.schema, p.table, err)
 	}
-	chainStart := p.chainStart
+	published = append(published, newBase)
+	chainStart, seq, spaceHint := p.chainStart, 0, int64(0)
+	if p.prev == nil && !p.baseMeta.SnapshotTimestamp.IsZero() && p.baseMeta.SnapshotTimestamp.Before(chainStart) {
+		// Same rule as fetchFloor, on the side that STAMPS: a chain that
+		// starts over a base whose own stamp is earlier than FindBaseline's
+		// time (a table file replaced by hand under a set-aside chain) must
+		// declare a start no later than the events it holds.
+		chainStart = p.baseMeta.SnapshotTimestamp
+	}
+	copied := 0
+	adopted := ""
+	var files []baseline.TableDeltaFile
+	var adoptedRange baseline.TableDeltaFile
 	if p.prev != nil {
-		chainStart = p.prev.Meta.DeltaChainStart
-	}
-	dead, ups, err := writeTableDelta(ctx, tableDeltaInput{
-		merge: in, basePath: newBase, baseMeta: p.baseMeta, prev: p.prev, chainStart: chainStart, newDead: newDead,
-	})
-	if err != nil {
-		// The linked base must not outlive its delta: alone in the new
-		// snapshot it would publish the table as it was at the chain's start.
-		if rerr := os.Remove(newBase); rerr != nil && !os.IsNotExist(rerr) {
-			slog.Warn("could not remove the carried backup file of a failed table", "path", newBase, "error", rerr)
+		chainStart, seq, spaceHint = p.prev.Meta.DeltaChainStart, p.prev.Meta.DeltaSeq+1, p.prev.UpsertsSize
+		files = p.prev.Chain.Files
+		if p.cfg.CompactDir != "" {
+			if r, dir, ok := adoptCompaction(p.cfg.CompactDir, p.schema, p.table, p.prev); ok {
+				files, adopted, adoptedRange = spliceRange(files, r), dir, r
+			}
 		}
-		return err
+		for _, f := range files {
+			dstPosdel, dstUpserts := f.PathsUnder(newBase)
+			pairCopied := false
+			for _, pair := range [][2]string{{f.Posdel, dstPosdel}, {f.Upserts, dstUpserts}} {
+				wasLinked, err := carryForwardFile(ctx, pair[0], pair[1], false)
+				if err != nil {
+					return fail(fmt.Errorf("carry table delta %s forward: %w", pair[0], err))
+				}
+				published = append(published, pair[1])
+				pairCopied = pairCopied || !wasLinked
+			}
+			if pairCopied {
+				copied++
+			}
+		}
+	} else {
+		// A following view generated by v0.83.0 while this table had no
+		// delta guards against `<table>.upserts` appearing, not against the
+		// numbered chain that starts here; it would read the base alone from
+		// now on, without an error (#1718).
+		slog.Warn("starting a chain of table deltas beside a table that had none: DuckDB views generated by bintrail "+
+			"0.83.0 that follow the newest snapshot read this table stale from now on; generate them again",
+			"schema", p.schema, "table", p.table)
 	}
-	rep.TableDelta = true
+
+	// Decided BEFORE the writer drains the map. An empty window over an
+	// existing chain writes nothing: the chain's last pair stays the last, and
+	// the next fetch resumes from its anchor and reads this empty window again.
+	// A refresh that STARTS a chain writes sequence 0 even when empty: that
+	// pair is the chain's start marker.
+	var dead, ups int64
+	written := !(p.prev != nil && len(in.Changes) == 0 && in.Spill == nil)
+	if !written {
+		seq = p.prev.Meta.DeltaSeq
+	} else {
+		newPosdel, newUpserts := baseline.TableDeltaPaths(newBase, seq)
+		published = append(published, newPosdel, newUpserts)
+		if dead, ups, err = writeTableDelta(ctx, tableDeltaInput{
+			merge: in, basePath: newBase, baseMeta: p.baseMeta, seq: seq, chainStart: chainStart,
+			newDead: newDead, spaceHint: spaceHint,
+		}); err != nil {
+			return fail(err)
+		}
+	}
+	chain, err := baseline.ListTableDelta(ctx, newBase)
+	if err != nil || chain == nil || chain.Last().Seq != seq {
+		return fail(fmt.Errorf("the chain just published beside %s.%s cannot be read back as ending at sequence %d (chain=%v err=%v)",
+			p.schema, p.table, seq, chain, err))
+	}
+	if adopted != "" {
+		// Linked into the new snapshot and read back as its chain: the
+		// staging has done its job. Older snapshots keep their plain pairs.
+		if err := os.RemoveAll(adopted); err != nil {
+			slog.Warn("could not remove an adopted compaction", "dir", adopted, "error", err)
+		}
+		rep.DeltaCompactedRange = fmt.Sprintf("%d-%d", adoptedRange.SeqLo, adoptedRange.Seq)
+		slog.Info("table delta compaction adopted: the chain's first pairs travel as one range pair from this snapshot on",
+			"schema", p.schema, "table", p.table, "range", rep.DeltaCompactedRange)
+	}
+	rep.TableDelta, rep.DeltaPairWritten = true, written
+	rep.DeltaSeq = seq
 	rep.DeltaDeadRows, rep.DeltaUpsertRows = dead, ups
+	rep.DeltaChainFiles, rep.DeltaChainCopied = len(chain.Files), copied
 	rep.Files = []string{filepath.Join(p.schema, p.table+".parquet")}
+	if !written {
+		slog.Info("table published as its previous file and chain, unchanged: no events in the window",
+			"schema", p.schema, "table", p.table, "last_seq", seq, "chain_files", len(chain.Files), "chain_copied", copied,
+			"base_linked", linked, "chain_start", chainStart.UTC().Format(time.RFC3339),
+			"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds())
+		return nil
+	}
 	slog.Info("table published as a delta over its previous file",
 		"schema", p.schema, "table", p.table, "events_applied", rep.EventsApplied,
-		"dead_rows", dead, "upsert_rows", ups, "base_linked", linked,
-		"chain_start", chainStart.UTC().Format(time.RFC3339))
+		"seq", seq, "dead_rows", dead, "upsert_rows", ups, "chain_files", len(chain.Files), "chain_copied", copied,
+		"base_linked", linked, "chain_start", chainStart.UTC().Format(time.RFC3339),
+		"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds())
 	return nil
 }
 
 // rewriteWithEmptyDelta is the compaction: the ordinary rewrite, fed the base
-// WITH its delta applied when there is one, followed by the empty pair that
-// starts the next chain at this snapshot.
-func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInput, newBase, reason string, rep *TableReport) error {
+// WITH its chain applied when there is one, followed by the empty sequence-0
+// pair that starts the next chain at this snapshot. The old chain's files are
+// not carried forward.
+//
+// noChain skips the empty pair: the table cannot have one (a column under a
+// reserved name), so it is published rewritten and bare, and every refresh
+// rewrites it again for the same reason. Writing the pair anyway would fail
+// on exactly the check that sent the table here, and fail the whole run.
+func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInput, newBase, reason string, noChain bool, rep *TableReport) error {
 	var cleanup func()
 	var err error
 	if p.prev != nil {
@@ -673,6 +1059,12 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 	if err := mergeBaselineIntoParquet(ctx, in, rep); err != nil {
 		return err
 	}
+	rep.DeltaCompacted = reason
+	if noChain {
+		slog.Info("table rewritten in full with deltas on, and left without a chain", "schema", p.schema, "table", p.table,
+			"reason", reason, "events_applied", rep.EventsApplied, "rows_written", rep.RowsWritten)
+		return nil
+	}
 	newMeta, err := baseline.ReadParquetMetadata(newBase)
 	if err != nil {
 		return fmt.Errorf("read back the rewritten backup file of %s.%s: %w", p.schema, p.table, err)
@@ -680,16 +1072,17 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 	empty := in
 	empty.Changes, empty.Spill = map[string]*query.ResultRow{}, nil
 	if _, _, err := writeTableDelta(ctx, tableDeltaInput{
-		merge: empty, basePath: newBase, baseMeta: newMeta, chainStart: p.cfg.At,
+		merge: empty, basePath: newBase, baseMeta: newMeta, seq: 0, chainStart: p.cfg.At,
 	}); err != nil {
 		if rerr := os.Remove(newBase); rerr != nil && !os.IsNotExist(rerr) {
 			slog.Warn("could not remove the rewritten backup file of a failed table", "path", newBase, "error", rerr)
 		}
 		return err
 	}
-	rep.DeltaCompacted = reason
+	rep.DeltaChainFiles = 1
 	slog.Info("table rewritten in full with deltas on", "schema", p.schema, "table", p.table,
-		"reason", reason, "events_applied", rep.EventsApplied, "rows_written", rep.RowsWritten)
+		"reason", reason, "events_applied", rep.EventsApplied, "rows_written", rep.RowsWritten,
+		"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds())
 	return nil
 }
 
