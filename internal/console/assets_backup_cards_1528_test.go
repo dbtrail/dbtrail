@@ -151,6 +151,67 @@ func TestBackupScheduleAlarmReachesTheStateLine(t *testing.T) {
 		wantAlarm: true,
 		wantWords: "An update was refused, so a full backup ran instead.",
 	}, {
+		// The tie, which is not a corner case: baseline_schedule_loop.go
+		// formats ONE stamp and gives it to both the fallback record and the
+		// run it starts, so a full backup that fails inside its starting
+		// second collides exactly. Two minutes apart (the row above) never
+		// exercises it.
+		name: "a fallback and its failed backup in the same second",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
+			"last_fallback": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "schema changed since the baseline"},
+			"last_run":      map[string]any{"method": "dump", "ok": false, "started_at": "2026-09-19T03:00:00Z", "finished_at": "2026-09-19T03:00:00Z", "error": "mydumper: connection refused"}},
+		wantAlarm:   true,
+		wantWords:   "The last run failed.",
+		rejectWords: "full backup ran instead",
+	}, {
+		// Same tie reached the other way: no finished_at, so the run is dated
+		// by started_at, which IS the fallback's stamp.
+		name: "a fallback and its failed backup, dated by started_at",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
+			"last_fallback": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "schema changed since the baseline"},
+			"last_run":      map[string]any{"method": "dump", "ok": false, "started_at": "2026-09-19T03:00:00Z", "error": "mydumper: connection refused"}},
+		wantAlarm:   true,
+		wantWords:   "The last run failed.",
+		rejectWords: "full backup ran instead",
+	}, {
+		// The upload-failure variant of the same tie: "ran instead" would
+		// read as done and shipped, while the backup never left the machine.
+		name: "a fallback whose backup could not be sent, same second",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
+			"last_fallback": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "schema changed since the baseline"},
+			"last_run": map[string]any{"method": "dump", "ok": false, "started_at": "2026-09-19T03:00:00Z", "finished_at": "2026-09-19T03:00:00Z",
+				"snapshot_time": "2026-09-19 03:00:00", "error": "s3: access denied"}},
+		wantAlarm:   true,
+		wantWords:   "The last run could not send its backup.",
+		rejectWords: "full backup ran instead",
+	}, {
+		// The three forward-looking and knowledge-gap notes, which arrived
+		// with no test of their own: each is a new user-visible string, and
+		// deleting any one of them left the whole package green.
+		name: "the next run cannot start",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
+			"next_method_error": "the previous backup could not be read"},
+		wantAlarm: true,
+		wantWords: "The next run cannot start.",
+	}, {
+		name: "every run reads the database in full",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
+			"next_method": "dump", "next_method_why": "this server has no index connection", "next_method_why_code": "no_index"},
+		wantAlarm: true,
+		wantWords: "Every run reads your database in full.",
+	}, {
+		name: "the run history could not be opened",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
+			"history_unavailable": true},
+		wantAlarm: true,
+		wantWords: "The run history could not be opened.",
+	}, {
 		// Two sentences on one line: the daemon's refusal reasons end bare,
 		// so the note used to run straight on from the reason.
 		name: "a refusal and a note on the same line",
@@ -190,8 +251,12 @@ console.log(JSON.stringify(line ? { found: true, cls: line.className, text: line
 			if err := json.Unmarshal(raw, &got); err != nil {
 				t.Fatalf("decode %q: %v", raw, err)
 			}
+			// find() selects BY the class, so this covers both a state line
+			// that stopped being rendered and one whose class was rebuilt by
+			// hand (a className rewrite drops the token carrying its gutter).
+			// An assertion on the class after this one could never fail.
 			if !got.Found {
-				t.Fatal("the schedule card renders no state line at all")
+				t.Fatal("no element carries bk-card-state: the schedule card renders no state line, or its class was rewritten instead of added to")
 			}
 			if alarm := strings.Contains(got.Cls, "alarm"); alarm != tc.wantAlarm {
 				t.Errorf("state line alarm = %v, want %v (class %q, text %q)", alarm, tc.wantAlarm, got.Cls, got.Text)
@@ -202,10 +267,10 @@ console.log(JSON.stringify(line ? { found: true, cls: line.className, text: line
 			if tc.rejectWords != "" && strings.Contains(got.Text, tc.rejectWords) {
 				t.Errorf("the state line claims %q, which the body contradicts: %q", tc.rejectWords, got.Text)
 			}
-			// The gutter comes from the line's own class; a className rewrite
-			// would drop it exactly when the card is in alarm.
-			if !strings.Contains(got.Cls, "bk-card-state") {
-				t.Errorf("the state line lost bk-card-state (class %q)", got.Cls)
+			// The line keeps the UI font: .form-msg would jump a one-sentence
+			// line to monospace, which style.css already had to undo once.
+			if strings.Contains(got.Cls, "form-msg") {
+				t.Errorf("the state line borrows .form-msg, which changes the typeface, not only the colour (class %q)", got.Cls)
 			}
 		})
 	}

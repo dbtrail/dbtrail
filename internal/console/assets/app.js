@@ -6594,14 +6594,24 @@ function backupScheduleCard(cur, b) {
     // written. A false all-clear on the backups page is worse than the
     // wordless red this note exists to replace.
     //
-    // noteAt takes the first timestamped alarm unconditionally, so a raised
-    // alarm can never end up with no words at all. `>=` not `>`: the stamps
-    // are whole seconds, and on a tie the later branch is the newer fact,
-    // the same rule the skip below already applies against a run that
-    // finished in that second.
-    let alarm = false, alarmNote = "", alarmAt = "", everyRunCode = "";
-    const noteAt = (at, note) => {
-      if (!alarmAt || (at || "") >= alarmAt) { alarmNote = note; alarmAt = at || ""; }
+    // noteAt takes the first alarm unconditionally, so a raised alarm can
+    // never end up with no words at all. After that the stamps decide, and
+    // on a TIE the outcome beats the start. The stamps are whole seconds
+    // (RFC3339, no fraction) and the daemon writes ONE stamp for both the
+    // fallback and the run it starts, so a fallback whose own full backup
+    // fails inside that second ties exactly, every time, not by luck. The
+    // fallback therefore needs a strictly newer stamp to speak (startsRun),
+    // while every other fact needs only an equal one: a skip recorded in the
+    // second a run finished is the newer fact, which is the rule the skip
+    // branch below was already written with.
+    //
+    // alarmAt starts null, not "": an undated fact must not leave the slot
+    // looking empty, or the next one would overwrite it and the ranking
+    // would quietly fall back to whoever is written last in this function.
+    let alarm = false, alarmNote = "", alarmAt = null, everyRunCode = "";
+    const noteAt = (at, note, startsRun) => {
+      const a = at || "";
+      if (alarmAt === null || (startsRun ? a > alarmAt : a >= alarmAt)) { alarmNote = note; alarmAt = a; }
     };
     if (sch.runnable && sch.next_method_error) {
       // Runnable in principle, but the next slot will be skipped as things
@@ -6683,7 +6693,9 @@ function backupScheduleCard(cur, b) {
       // named as one, not as a refusal. The daemon records a fallback only
       // once the full backup actually started, so "started" is a fact.
       alarm = true;
-      noteAt(fb.at, "An update was refused, so a full backup ran instead.");
+      // startsRun: this stamp is when the full backup STARTED, so it must
+      // never outrank that backup's own outcome recorded in the same second.
+      noteAt(fb.at, "An update was refused, so a full backup ran instead.", true);
       const crashed = /^internal error/.test(fb.reason || "");
       const why = backupFoldError(crashed ? fb.reason.replace(/^internal error:?\s*/, "") : fb.reason);
       body.append(el("p", { class: "form-msg err", text:
