@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Four backup settings can be changed from the interface, without
+  restarting** (#1682). How long local backups are kept, the lock taken while
+  dumping, the folder `.sql` exports are assembled in, and which tables the
+  verification loop checks used to exist only as flags and environment of the
+  process — so changing one meant editing how the container is launched and
+  restarting it, and on this product a restart stops change capture. They are
+  now saved in DBTrail's own settings file, which wins over the flag, with
+  "use the startup value" to go back.
+
+  The file is the one that already holds the server list: its envelope
+  carried daemon-wide sections the interface writes (rotation, backup
+  refresh) before this, so the settings live beside them rather than in a
+  second file with the same job. A saved value the daemon cannot read falls
+  back to the flag with a warning and never stops backups.
+
+  **Saved and applied are different facts, and the page says which per row.**
+  The lock mode is re-read per dump, the verification filter per cycle, the
+  retention per prune sweep; the staging folder is read once at startup (that
+  folder is swept at boot for what a previous run left behind), so its row
+  still says a restart is needed. A row is only reported as live when the loop
+  that would pick it up is actually running in this daemon. The two backup
+  locations stay startup-only on purpose: #1684 removes that process-wide
+  fallback, and building an editor for it would migrate operators onto a
+  setting that is being deleted.
+
 ### Changed
 - **The web interface stops calling itself a console** (#1683). To someone who
   has not read the source, "console" is a terminal, and the word was on the

@@ -77,7 +77,7 @@ func TestBaselineWiringCarriesConfigError(t *testing.T) {
 	if err := resolveUpConsoleEnv(&cobra.Command{}); err != nil {
 		t.Fatalf("startup failed over a baseline setting: %v", err)
 	}
-	sup := newBaselineSupervisorFromConfig(context.Background(), t.TempDir())
+	sup := newBaselineSupervisorFromConfig(context.Background(), t.TempDir(), nil)
 	if err := sup.Trigger(console.BaselineRequest{ServerID: "s1"}); err == nil {
 		t.Fatal("a baseline ran under a mode the operator did not ask for; the config error never reached the supervisor")
 	}

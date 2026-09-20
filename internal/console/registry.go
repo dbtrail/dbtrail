@@ -201,7 +201,14 @@ type registryFile struct {
 	// console that had never been touched from one that had explicitly turned
 	// the behaviour off.
 	BaselineRefresh *BaselineRefreshConfig `yaml:"baseline_refresh,omitempty"`
-	Servers         []ServerEntry          `yaml:"servers"`
+	// BackupSettings is the optional daemon-wide backup settings section
+	// (#1682): the values the Backup settings page used to show read-only
+	// because they existed only as flags and environment of the process.
+	// Same additive story as the two sections above, and the same reason for
+	// living here rather than in a file of its own — see the BackupSettings
+	// type for why a second home would have been the wrong shape.
+	BackupSettings *BackupSettings `yaml:"backup_settings,omitempty"`
+	Servers        []ServerEntry   `yaml:"servers"`
 	// Extra preserves any FUTURE envelope-level key a (future) older binary
 	// doesn't model, exactly as ServerEntry.Extra does at the entry level — so
 	// the next additive envelope field is downgrade-safe from here on. (It does
