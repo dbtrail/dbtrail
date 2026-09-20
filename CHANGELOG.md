@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **An index upgraded in place now grows `rotation_policy` too** (#1709
+  follow-up). The table that records the rotation window an index was created
+  under shipped in the fresh-install path only, so the same build read two
+  different schemas depending on how the index was born: a new index had the
+  table, an existing one never grew it.
+
+  Nothing was broken by its absence, which is why it went unnoticed: the
+  reader already treats "no such table" and "no row" as the same answer. The
+  table is created empty on upgrade, and deliberately stays empty. Its EMPTY
+  row is the signal that this index predates the record and must keep its old
+  retention window; writing a row there would tell the rotation loop that an
+  index whose history accumulated under the old thirty-day window was created
+  under today's 48 hours, and the next cycle would drop partitions nobody
+  asked it to drop.
+
 ## [0.85.0] - 2026-09-20
 
 ### Added
