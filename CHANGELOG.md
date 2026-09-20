@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.85.0] - 2026-09-20
+
 ### Added
 - **Four backup settings can be changed from the interface, without
   restarting** (#1682). How long local backups are kept, the lock taken while
