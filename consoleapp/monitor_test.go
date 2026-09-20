@@ -3,6 +3,8 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/dbtrail/dbtrail/internal/indexer"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +48,7 @@ func TestSourceStreamConfig(t *testing.T) {
 	// Default: no TLS config on the entry → "preferred", empty cert/key paths.
 	def := sourceStreamConfig(console.ServerEntry{
 		ID: "e1", DSN: "idx-dsn", SourceDSN: "src-dsn", Schemas: "shop",
-	}, 42)
+	}, 42, 0)
 	if def.SSLMode != "preferred" {
 		t.Errorf("SSLMode = %q, want preferred (unset default)", def.SSLMode)
 	}
@@ -70,7 +72,7 @@ func TestSourceStreamConfig(t *testing.T) {
 	got := sourceStreamConfig(console.ServerEntry{
 		ID: "e2", DSN: "idx-dsn", SourceDSN: "src-dsn",
 		SSLMode: "verify-ca", SSLCA: "/ca.pem", SSLCert: "/cert.pem", SSLKey: "/key.pem",
-	}, 7)
+	}, 7, 0)
 	if got.SSLMode != "verify-ca" || got.SSLCA != "/ca.pem" || got.SSLCert != "/cert.pem" || got.SSLKey != "/key.pem" {
 		t.Errorf("registry TLS did not propagate to the stream config: %+v", got)
 	}
@@ -79,7 +81,7 @@ func TestSourceStreamConfig(t *testing.T) {
 	// GTID parser — the stream Flavor and the ext source job's flavor must agree.
 	maria := sourceStreamConfig(console.ServerEntry{
 		ID: "e3", DSN: "idx-dsn", SourceDSN: "src-dsn", Flavor: console.FlavorMariaDB,
-	}, 9)
+	}, 9, 0)
 	if maria.Flavor != console.FlavorMariaDB {
 		t.Errorf("Flavor = %q, want mariadb", maria.Flavor)
 	}
@@ -524,5 +526,52 @@ func TestMonitorJobPhase(t *testing.T) {
 		if st := job.snapshot(); st.Phase != "" {
 			t.Errorf("%s left a stale phase: %+v", tc.name, st)
 		}
+	}
+}
+
+// #1747: the daemon's --batch-size has to reach the sources added from the
+// interface. It used to reach ONLY the --source-dsn stream typed on the
+// command line, which is not the deployment the product documents: a daemon
+// with no source, every source added from the web interface. The documented
+// remedy for replication lag is to raise this flag, and for those sources it
+// could not be followed at all.
+func TestSourceStreamConfig_carriesTheDaemonBatchSize(t *testing.T) {
+	e := console.ServerEntry{DSN: "u:p@tcp(i)/idx", SourceDSN: "u:p@tcp(s)/db"}
+
+	if got := sourceStreamConfig(e, 1, 2500).BatchSize; got != 2500 {
+		t.Errorf("BatchSize = %d, want the daemon's 2500 — the flag does not reach a supervised "+
+			"source, so the documented fix for replication lag cannot be applied there", got)
+	}
+	// Zero is not a batch of zero: it means the caller never parsed the flag.
+	if got := sourceStreamConfig(e, 1, 0).BatchSize; got != defaultStreamBatchSize {
+		t.Errorf("BatchSize = %d with no flag, want the built-in %d", got, defaultStreamBatchSize)
+	}
+	if got := sourceStreamConfig(e, 1, -5).BatchSize; got != defaultStreamBatchSize {
+		t.Errorf("BatchSize = %d for a negative flag, want the built-in %d", got, defaultStreamBatchSize)
+	}
+}
+
+// The same for a PostgreSQL source: one flag, both source families.
+func TestSourcePGStreamConfig_carriesTheDaemonBatchSize(t *testing.T) {
+	e := console.ServerEntry{
+		DSN: "u:p@tcp(i)/idx", SourceDSN: "postgres://u:p@h:5432/db",
+		SourceSlot: "s", SourcePublication: "p",
+	}
+	cfg, err := sourcePGStreamConfig(e, 1, 2500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BatchSize != 2500 {
+		t.Errorf("BatchSize = %d, want the daemon's 2500", cfg.BatchSize)
+	}
+}
+
+// The ceiling is named where the operator reads the flag. It used to be
+// nowhere: the indexer clamped anything larger and logged a warning, while
+// the flag help, the spec and the troubleshooting table all said "raise it".
+func TestBatchSizeHelpNamesTheCeiling(t *testing.T) {
+	help := indexer.BatchSizeHelp()
+	if !strings.Contains(help, fmt.Sprint(indexer.MaxBatchSize)) {
+		t.Errorf("the --batch-size help does not name the ceiling %d: %q", indexer.MaxBatchSize, help)
 	}
 }

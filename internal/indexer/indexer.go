@@ -88,6 +88,17 @@ const (
 	MaxBatchSize = maxPreparedStmtParams / insertColumnCount
 )
 
+// BatchSizeHelp is the --batch-size flag's help text, for every binary that
+// registers one. It names the ceiling New() enforces: the flag used to
+// advertise an unbounded number while anything larger was silently clamped
+// with a warning in the log, and docs/guide.md tells an operator whose
+// replication lag is growing to raise this very flag (#1747). Built from the
+// constant, so adding a column to the INSERT lowers the documented number
+// with the real one.
+func BatchSizeHelp() string {
+	return fmt.Sprintf("Events per batch INSERT (values above %d are clamped to it: MySQL's placeholder limit)", MaxBatchSize)
+}
+
 // rowPlaceholders is one row's "(?,...,?)" tuple, derived from
 // insertColumnCount so the placeholder count and MaxBatchSize stay in
 // lockstep.

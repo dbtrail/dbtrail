@@ -90,7 +90,7 @@ func init() {
 	streamCmd.Flags().StringVar(&pgStartLSN, "start-lsn", "", "Explicit start LSN (e.g. 0/1A2B3C4); first run only, ignored once a checkpoint exists (env BINTRAIL_PG_START_LSN)")
 	streamCmd.Flags().StringVar(&pgSchemas, "schemas", "", "Only index changes from these schemas (comma-separated)")
 	streamCmd.Flags().StringVar(&pgTables, "tables", "", "Only index these tables (comma-separated, e.g. public.orders)")
-	streamCmd.Flags().IntVar(&pgBatchSize, "batch-size", 1000, "Events per batch INSERT")
+	streamCmd.Flags().IntVar(&pgBatchSize, "batch-size", 1000, indexer.BatchSizeHelp())
 	streamCmd.Flags().DurationVar(&indexer.WriteTimeout, "write-timeout", indexer.DefaultWriteTimeout, "Deadline for each index write (batch INSERT, checkpoint, schema snapshot). A mid-statement network stall surfaces as an error within this window instead of freezing the stream on kernel TCP retransmission (~13-16 min). Raise for very large batches over a slow link")
 	streamCmd.Flags().IntVar(&pgCheckpoint, "checkpoint", 5, "Checkpoint interval in seconds")
 	streamCmd.Flags().IntVar(&pgPartitions, "partitions", 48, "binlog_events partitions for the one-time index bootstrap")

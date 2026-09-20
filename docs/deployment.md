@@ -620,7 +620,7 @@ bintrail status --index-dsn "$INDEX_DSN"
 mysql -h index-mysql -e "SHOW GLOBAL STATUS LIKE 'Innodb_row_lock_waits'"
 ```
 
-Causes: index MySQL under heavy load, batch size too small (increase `--batch-size`), network latency to source.
+Causes: index MySQL under heavy load, batch size too small (increase `--batch-size`, up to 3855), network latency to source.
 
 ### Disk full on index MySQL
 

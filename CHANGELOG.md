@@ -46,6 +46,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads differently depending on whether you are looking at the screen or at
   the documentation page with the same name, so it now says where.
 
+### Fixed
+- **`--batch-size` now reaches the sources added from the web interface**
+  (#1747). It only ever reached the source typed on the command line, so on
+  the deployment the product documents — a daemon started with no source,
+  every source added from the interface — those sources always captured with
+  a fixed batch of 1000 and nothing could change it. The batch is the unit of
+  the index INSERT, so it is the first thing to raise when replication lag
+  grows, which is exactly what the troubleshooting guide says to do.
+- **The batch-size ceiling is named where the flag is read.** Anything above
+  3855 (MySQL's placeholder limit divided by the columns in the INSERT) was
+  clamped with a warning in the log, while the flag help, the spec and the
+  troubleshooting guide all said "raise it" without naming a limit. The help
+  text is now built from the constant, so a column added to the INSERT lowers
+  the documented number with the real one.
+
 ### Changed — the built-in rotation default is now 48 hours, not 30 days
 - **A new index keeps 48 hours of history instead of 30 days** (#1709). The
   index is a change log that grows with the source's write rate, so at 30

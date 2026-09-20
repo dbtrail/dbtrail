@@ -519,7 +519,7 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 	var runOnce func(context.Context) error
 	switch flavor {
 	case console.FlavorPostgres:
-		pgcfg, cErr := sourcePGStreamConfig(e, serverID)
+		pgcfg, cErr := sourcePGStreamConfig(e, serverID, upBatchSize)
 		if cErr != nil {
 			lockDB.Close()
 			return fail(cErr)
@@ -527,7 +527,7 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 		pgcfg.Hooks = job.pgStreamHooks()
 		runOnce = func(c context.Context) error { return m.pgStreamFn(c, pgcfg) }
 	default:
-		cfg := sourceStreamConfig(e, serverID)
+		cfg := sourceStreamConfig(e, serverID, upBatchSize)
 		cfg.Hooks = job.streamHooks()
 		runOnce = func(c context.Context) error { return m.streamFn(c, cfg) }
 	}
@@ -579,7 +579,7 @@ func (m *monitorSupervisor) deriveSourceIdentity(e console.ServerEntry, flavor s
 // derived from the stored query DSN (console.PGReplDSN adds replication=database
 // — the one place that derivation lives); the slot and publication are the
 // operator-supplied stored fields. Pure — unit-testable without a live DB.
-func sourcePGStreamConfig(e console.ServerEntry, serverID uint32) (pgstreamrun.Config, error) {
+func sourcePGStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) (pgstreamrun.Config, error) {
 	replDSN, err := console.PGReplDSN(e.SourceDSN)
 	if err != nil {
 		return pgstreamrun.Config{}, err
@@ -591,7 +591,7 @@ func sourcePGStreamConfig(e console.ServerEntry, serverID uint32) (pgstreamrun.C
 		SlotName:    e.SourceSlot,
 		Publication: e.SourcePublication,
 		ServerID:    serverID,
-		BatchSize:   1000,
+		BatchSize:   streamBatchSize(batchSize),
 		Schemas:     e.Schemas,
 		Checkpoint:  10 * time.Second,
 	}, nil
@@ -608,7 +608,7 @@ func sourcePGStreamConfig(e console.ServerEntry, serverID uint32) (pgstreamrun.C
 // source job was told a flavor the pipeline did not actually run with. Pure —
 // extracted from Start so the entry→config fan-out (SSL especially) is
 // unit-testable without a live DB.
-func sourceStreamConfig(e console.ServerEntry, serverID uint32) streamrun.Config {
+func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) streamrun.Config {
 	sslMode := e.SSLMode
 	if sslMode == "" {
 		sslMode = "preferred"
@@ -618,7 +618,7 @@ func sourceStreamConfig(e console.ServerEntry, serverID uint32) streamrun.Config
 		SourceDSN: e.SourceDSN,
 		ServerID:  serverID,
 		Flavor:    e.SourceFlavor(),
-		BatchSize: 1000,
+		BatchSize: streamBatchSize(batchSize),
 		Schemas:   e.Schemas,
 		// MetricsSource keys this stream's Prometheus series; MetricsAddr
 		// stays empty on purpose — the daemon serves ONE /metrics endpoint
@@ -869,4 +869,27 @@ func (m *monitorSupervisor) Shutdown() {
 	}
 	m.mu.Unlock()
 	m.wg.Wait()
+}
+
+// defaultStreamBatchSize is what a supervised source captured with before
+// --batch-size reached it (#1747), and what it still captures with when the
+// flag is left at zero by a caller that never parsed it (tests, and any
+// future entry point).
+const defaultStreamBatchSize = 1000
+
+// streamBatchSize turns the daemon's --batch-size into the batch a supervised
+// stream uses. The flag used to reach ONLY the --source-dsn stream typed on
+// the command line, so on the deployment the console documents — a daemon
+// with no source, every source added from the interface — the documented
+// remedy for replication lag ("raise --batch-size") could not be followed at
+// all.
+//
+// No ceiling here on purpose: indexer.New clamps anything above
+// indexer.MaxBatchSize and says so, and a second ceiling in a second place is
+// how the two drift.
+func streamBatchSize(n int) int {
+	if n <= 0 {
+		return defaultStreamBatchSize
+	}
+	return n
 }
