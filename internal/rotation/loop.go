@@ -136,7 +136,7 @@ func StartLoop(ctx context.Context, settings func() Settings, targets func() []R
 	fmt.Fprintf(os.Stderr,
 		"Built-in rotation: dropping index partitions older than %s every %s, keeping %d future partitions ready.\n"+
 			"%s"+
-			"  Tune with --rotate-retain / --rotate-interval (or BINTRAIL_ROTATE_RETAIN), or live from the console; disable with --rotate-retain off.\n",
+			"  Tune with --rotate-retain / --rotate-interval (or BINTRAIL_ROTATE_RETAIN), or live from the web interface; disable with --rotate-retain off.\n",
 		s0.RetainRaw, s0.Interval, s0.AddFuture, perIndex)
 	slog.Info("built-in rotation enabled",
 		"retain", s0.RetainRaw, "interval", s0.Interval.String(), "add_future", s0.AddFuture,

@@ -30,11 +30,11 @@ On start it prints the URL to open. On a fresh console the first visit is a
 after that, you sign in:
 
 ```
-Bintrail console (read-only) is running. Open:
+The DBTrail web interface (read-only) is running. Open:
 
     http://127.0.0.1:8090/
 
-First run: open the URL and create your console username and password.
+First run: open the URL and create your username and password.
 ```
 
 Or serve it **alongside a live stream** in one process with
@@ -972,9 +972,9 @@ sign-in. (Prefer the terminal, or setting it up before first launch? Run
 
 ```console
 $ bintrail-console user set-password
-New console password: ********
+New password: ********
 Retype to confirm: ********
-Console password set for user "admin" (~/.config/bintrail/console-auth.yaml).
+Web interface password set for user "admin" (~/.config/bintrail/console-auth.yaml).
 A running server accepts it on the next login; no restart needed.
 ```
 

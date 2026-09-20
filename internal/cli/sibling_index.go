@@ -55,7 +55,7 @@ func HintSiblingIndexes(ctx context.Context, db *sql.DB, dbName string, w io.Wri
 	}
 	fmt.Fprintf(w, "\nNote: %s holds no events. This server also has %s.\n",
 		dbName, describeSiblings(siblings))
-	fmt.Fprintln(w, "  A daemon that monitors sources from the console writes each source's events into its own")
+	fmt.Fprintln(w, "  A daemon that monitors sources from the web interface writes each source's events into its own")
 	fmt.Fprintln(w, "  database, not into the one it was started with. Point --index-dsn (or BINTRAIL_INDEX_DSN)")
 	fmt.Fprintln(w, "  at the database for the source you are asking about.")
 }

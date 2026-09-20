@@ -29,7 +29,7 @@ import (
 // `bintrail recover-cascade` CLI flags and the console's POST
 // /api/recover-cascade body — the same synthesis engine sits behind all three.
 type RecoverCascadeArgs struct {
-	IndexDSN string   `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the console /mcp endpoint)."`
+	IndexDSN string   `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the web interface's /mcp endpoint)."`
 	Schema   string   `json:"schema" jsonschema:"Schema of the parent table whose change cascaded (required)"`
 	Table    string   `json:"table" jsonschema:"Parent table whose ON DELETE / ON UPDATE cascade touched children (required)"`
 	PK       string   `json:"pk,omitempty" jsonschema:"Restrict to a single changed parent primary key (pipe-delimited for composite keys)"`
@@ -43,7 +43,7 @@ type RecoverCascadeArgs struct {
 	// provably partial synthesis is an ERROR (carrying the reasons) unless the
 	// caller explicitly opts into receiving the partial script.
 	AllowIncomplete bool   `json:"allow_incomplete,omitempty" jsonschema:"Return the reversal script even when the synthesis is provably partial. Defaults to false: any coverage caveat makes the call fail, with the caveats reported in the error. When set, the caveats come back in the result's incomplete list instead."`
-	BaselineDir     string `json:"baseline_dir,omitempty" jsonschema:"Local directory of baseline Parquet snapshots for Phase-2 fallback (also recovers children untouched within the lookback window). Overrides BINTRAIL_BASELINE_DIR env var. Rejected on servers that configure the baseline themselves (the console /mcp endpoint)."`
+	BaselineDir     string `json:"baseline_dir,omitempty" jsonschema:"Local directory of baseline Parquet snapshots for Phase-2 fallback (also recovers children untouched within the lookback window). Overrides BINTRAIL_BASELINE_DIR env var. Rejected on servers that configure the baseline themselves (the web interface's /mcp endpoint)."`
 	BaselineS3      string `json:"baseline_s3,omitempty" jsonschema:"S3 prefix of baseline Parquet snapshots (s3://bucket/prefix) for Phase-2 fallback. Overrides BINTRAIL_BASELINE_S3 env var. Used only when baseline_dir is unset. Rejected on servers that configure the baseline themselves."`
 	// The transport parameters (#1438). They change what this response CARRIES,
 	// never what is generated: the script is built the same way whichever is

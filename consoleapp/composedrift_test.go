@@ -143,7 +143,7 @@ func wiredStack(t *testing.T) driftInputs {
 		stateInDir: consoleStateInDir,
 		mounts:     composeStackMounts(t),
 		state: []statePath{
-			{what: "your console username and password", path: composeStateEnv(t, "BINTRAIL_CONSOLE_AUTH")},
+			{what: "your username and password", path: composeStateEnv(t, "BINTRAIL_CONSOLE_AUTH")},
 			{what: "the servers you added", path: composeStateEnv(t, "BINTRAIL_CONSOLE_SERVERS")},
 			{what: "the AI connection token", path: composeStateEnv(t, "BINTRAIL_CONSOLE_MCP_TOKEN_FILE")},
 		},
@@ -207,12 +207,12 @@ func TestComposeDriftFindsAStaleStack(t *testing.T) {
 
 	got := composeDriftFindings(in)
 	if len(got) != 2 {
-		t.Fatalf("want 2 findings (disk space, console settings), got %d: %v", len(got), got)
+		t.Fatalf("want 2 findings (disk space, saved settings), got %d: %v", len(got), got)
 	}
 	joined := fmt.Sprint(got)
 	for _, want := range []string{
 		"free disk space for the index cannot be measured",
-		"console settings are stored inside the container",
+		"the settings saved in the web interface are stored inside the container",
 		"console-mcp-token.yaml",
 		"docker-compose.yml",
 	} {
@@ -285,7 +285,7 @@ func TestComposeDriftStaysSilentWhereItCannotTell(t *testing.T) {
 		in.mounts = []mountEntry{{point: "/", fstype: "overlay"}}
 		in.configDir = t.TempDir()
 		for _, f := range composeDriftFindings(in) {
-			if strings.Contains(f.msg, "console settings are stored") {
+			if strings.Contains(f.msg, "settings saved in the web interface are stored") {
 				t.Errorf("reported console state loss with no durable mount anywhere to compare against: %s", f.msg)
 			}
 		}

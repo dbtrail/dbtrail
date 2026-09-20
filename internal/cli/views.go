@@ -74,7 +74,7 @@ in that case --index-dsn is not needed at all.
 
 Only the events view reads an archive source, so a baselines-only file needs
 neither: --baseline-dir/--baseline-s3 on its own is enough. That is what a
-snapshot downloaded from the console arrives as, and it can be queried on a
+snapshot downloaded from the web interface arrives as, and it can be queried on a
 machine that cannot reach the index at all.
 
 The file is a snapshot of the LAYOUT, not of the rows. The state views reach a

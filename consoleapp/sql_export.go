@@ -561,7 +561,7 @@ func (s *baselineSupervisor) reapSQLExportsGuarded() {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("sql export: the staging reaper hit an internal error and skipped a tick. Capture and the "+
-				"console keep running. Please report this with the stack recorded here.",
+				"web interface keep running. Please report this with the stack recorded here.",
 				"panic", r, "stack", string(debug.Stack()))
 		}
 	}()

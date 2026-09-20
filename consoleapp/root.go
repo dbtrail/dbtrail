@@ -50,14 +50,14 @@ var tel cli.TelemetryHook
 
 var rootCmd = &cobra.Command{
 	Use:   "bintrail-console",
-	Short: "Read-only web console over the Bintrail binlog index",
+	Short: "Read-only web interface over the DBTrail binlog index",
 	Long: `bintrail-console serves a local, read-only web UI over the binlog index:
 browse indexed row events with full before/after diffs, generate recovery
 (undo) SQL, and run point-in-time reconstruct when baselines are configured.
 
-It is the web console's own binary (formerly the core CLI's "console"
-command), shipped separately so the core bintrail CLI carries no web UI. The
-console NEVER executes SQL; recover produces a script you review and apply
+It is the web interface's own binary (formerly the core CLI's "console"
+command), shipped separately so the core bintrail CLI carries no web UI. It
+NEVER executes SQL; recover produces a script you review and apply
 yourself.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		observe.Setup(os.Stderr, logFormat, logLevel)

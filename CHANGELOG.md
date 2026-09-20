@@ -68,6 +68,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads differently depending on whether you are looking at the screen or at
   the documentation page with the same name, so it now says where.
 
+  The terminal followed. The startup banner said "Bintrail console", with the
+  old spelling of the name as well as the wrong word for the thing; `--help`
+  offered "the console login password" and "a single-operator web console";
+  `bintrail-console user` prompted for a "New console password"; the
+  compose-drift warning called the settings you saved "console settings";
+  `bintrail status` and the built-in rotation line both explained retention
+  with "or console setting"; the refusal on a non-loopback bind told you to
+  "set a console password"; and the DuckDB schema `bintrail views` writes told
+  you to download the file "again from the console"; the MCP bridge's setup
+  errors and the MCP tools' own parameter descriptions said it too. Those now
+  say web interface, or name the daemon or the run where that is what was
+  meant. The pages that transcribe
+  this output (`docs/install.md`, `docs/console.md`, `docs/docker.md`) were
+  updated with it, so what the docs show is what the binary prints.
+
+  What did NOT change: the binary, the flags, the environment variables, the
+  file names, and the `console:` prefix on log lines, which tags a component
+  rather than reading as prose. `docker-compose.yml` still explains itself in
+  the old word; its comments, and the six stack-check fixtures that copy them,
+  are a slice of their own.
+
 ### Fixed
 - **`--batch-size` now reaches the sources added from the web interface**
   (#1747). It only ever reached the source typed on the command line, so on

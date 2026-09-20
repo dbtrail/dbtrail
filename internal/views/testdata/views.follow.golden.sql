@@ -7,8 +7,8 @@
 -- on its own. What does NOT follow is this file's idea of the SHAPE of the
 -- data: which views exist, and how each DECIMAL column is read, were decided
 -- from the snapshot named below. Re-run `bintrail views` (or download the file
--- again from the console) after a table is added or dropped, after a column
--- changes type, and whenever archive sources are added or removed.
+-- again from the web interface) after a table is added or dropped, after a
+-- column changes type, and whenever archive sources are added or removed.
 --
 -- Which of those you will notice follows one rule: this file names only the
 -- PATHS and the DECIMAL columns, so only those two can fail. A table that
@@ -46,8 +46,8 @@
 
 -- Timestamps are recorded in UTC, and the archives carry the zone, so the
 -- session's setting decides how they print and where date_trunc puts a day
--- boundary. Pinned to UTC here so the numbers match the console. Change it if
--- you would rather read in your own zone.
+-- boundary. Pinned to UTC here so the numbers match the web interface. Change
+-- it if you would rather read in your own zone.
 SET TimeZone = 'UTC';
 
 -- S3 setup, mirroring what bintrail's own DuckDB sessions configure.

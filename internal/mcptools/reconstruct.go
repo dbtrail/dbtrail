@@ -65,13 +65,13 @@ const reconstructTSFormat = "2006-01-02 15:04:05"
 
 // ReconstructArgs are the reconstruct tool's parameters.
 type ReconstructArgs struct {
-	IndexDSN    string `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the console /mcp endpoint)."`
+	IndexDSN    string `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the web interface's /mcp endpoint)."`
 	Schema      string `json:"schema" jsonschema:"Database schema name (required)"`
 	Table       string `json:"table" jsonschema:"Table name (required)"`
 	PK          string `json:"pk" jsonschema:"Primary key value of the row to reconstruct (pipe-delimited for composite keys e.g. 123 or 123|2) (required)"`
 	At          string `json:"at,omitempty" jsonschema:"Point in time to reconstruct the row at (YYYY-MM-DD HH:MM:SS or RFC 3339). Defaults to now."`
 	History     bool   `json:"history,omitempty" jsonschema:"Return every state transition from the baseline up to the target time instead of a single point-in-time state"`
-	BaselineDir string `json:"baseline_dir,omitempty" jsonschema:"Local directory of baseline Parquet snapshots produced by bintrail baseline. Overrides BINTRAIL_BASELINE_DIR env var. Rejected on servers that configure the baseline themselves (the console /mcp endpoint)."`
+	BaselineDir string `json:"baseline_dir,omitempty" jsonschema:"Local directory of baseline Parquet snapshots produced by bintrail baseline. Overrides BINTRAIL_BASELINE_DIR env var. Rejected on servers that configure the baseline themselves (the web interface's /mcp endpoint)."`
 	BaselineS3  string `json:"baseline_s3,omitempty" jsonschema:"S3 prefix of baseline Parquet snapshots (s3://bucket/prefix). Overrides BINTRAIL_BASELINE_S3 env var. Used only when baseline_dir is unset. Rejected on servers that configure the baseline themselves."`
 	AllowGaps   bool   `json:"allow_gaps,omitempty" jsonschema:"Proceed even when part of the window is missing from the captured history. Defaults to false: a coverage gap, or a permanent capture loss recorded by the stream, aborts the reconstruction rather than returning a silently wrong row state. When set, what was overridden is reported back in warnings."`
 }
@@ -127,7 +127,7 @@ func rejectBaselineParams(cfg Config, baselineDir, baselineS3 string) *mcp.CallT
 	if !cfg.AllowBaselineParams && (baselineDir != "" || baselineS3 != "") {
 		return ErrorResult(errors.New(
 			"baseline_dir/baseline_s3 are not accepted here: this server configures the baseline itself " +
-				"(set it per connection in the console, or with --baseline-dir / --baseline-s3 on the serving process)"))
+				"(set it per connection in the web interface, or with --baseline-dir / --baseline-s3 on the serving process)"))
 	}
 	return nil
 }

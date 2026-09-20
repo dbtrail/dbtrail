@@ -45,7 +45,7 @@ func configPath(name string) string {
 	return filepath.Join(home, ".config", "bintrail", name)
 }
 
-// warnHomelessConfigDir reports, once, that console state is anchored beside
+// warnHomelessConfigDir reports, once, that the saved state is anchored beside
 // the working directory instead of a config directory.
 //
 // This is not decoration. Every reader on this path is quiet by design: a
@@ -62,7 +62,7 @@ func configPath(name string) string {
 // boot over where its own state file landed.
 func warnHomelessConfigDir(dir string) {
 	configPathWarnOnce.Do(func() {
-		slog.Warn("no home directory could be resolved, so console state is anchored beside the working directory instead of a config directory. An existing registry elsewhere will not be found and the console will come up with no servers, as if it had never been configured",
+		slog.Warn("no home directory could be resolved, so the saved state is anchored beside the working directory instead of a config directory. An existing registry elsewhere will not be found and the web interface will come up with no servers, as if it had never been configured",
 			"dir", dir,
 			"fix", "set HOME for the service, or pass explicit paths (CLI: --servers-file on serve, --console-servers-file on watch, or BINTRAIL_CONSOLE_SERVERS; --auth-file or BINTRAIL_CONSOLE_AUTH; --mcp-token-file, --console-mcp-token-file on watch, or BINTRAIL_CONSOLE_MCP_TOKEN_FILE)")
 	})

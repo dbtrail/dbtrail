@@ -35,7 +35,7 @@ func printJSON(v any) error {
 
 var userCmd = &cobra.Command{
 	Use:   "user",
-	Short: "Manage the console's password login (single-user)",
+	Short: "Manage the web interface's password login (single-user)",
 }
 
 var (
@@ -49,31 +49,31 @@ var (
 
 var userSetPasswordCmd = &cobra.Command{
 	Use:   "set-password",
-	Short: "Set (or rotate) the console login password",
-	Long: `Sets the console's username+password credential, enabling password login.
+	Short: "Set (or rotate) the web interface login password",
+	Long: `Sets the web interface's username+password credential, enabling password login.
 
 Prompts twice on a terminal; use --password-stdin to read one line from stdin
 in scripts. A running server honors the new password on the next login
 attempt without a restart (live sessions survive a CLI rotation; rotate from
-the console UI to also revoke them).`,
+the web interface to also revoke them).`,
 	RunE: runUserSetPassword,
 }
 
 var userRemoveCmd = &cobra.Command{
 	Use:   "remove",
-	Short: "Remove the password credential (console reverts to token-only auth)",
+	Short: "Remove the password credential (the web interface reverts to token-only auth)",
 	RunE:  runUserRemove,
 }
 
 var userStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show the configured console user (never prints secrets)",
+	Short: "Show the configured web interface user (never prints secrets)",
 	RunE:  runUserStatus,
 }
 
 func init() {
 	for _, c := range []*cobra.Command{userSetPasswordCmd, userRemoveCmd, userStatusCmd} {
-		c.Flags().StringVar(&usrAuthFile, "auth-file", "", "Path to the console auth file (default ~/.config/bintrail/console-auth.yaml)")
+		c.Flags().StringVar(&usrAuthFile, "auth-file", "", "Path to the web interface auth file (default ~/.config/bintrail/console-auth.yaml)")
 	}
 	userSetPasswordCmd.Flags().StringVar(&usrUsername, "username", "", `Login username (default "admin", or the currently configured one)`)
 	userSetPasswordCmd.Flags().BoolVar(&usrPasswordStdin, "password-stdin", false, "Read the password from the first line of stdin (for scripts)")
@@ -151,12 +151,12 @@ func runUserSetPassword(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Console password set for user %q (%s).\nA running server accepts it on the next login; no restart needed.\n", a.Username, path)
+	fmt.Fprintf(os.Stderr, "Web interface password set for user %q (%s).\nA running server accepts it on the next login; no restart needed.\n", a.Username, path)
 	return nil
 }
 
 func promptPasswordTwice() (string, error) {
-	fmt.Fprint(os.Stderr, "New console password: ")
+	fmt.Fprint(os.Stderr, "New password: ")
 	p1, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
@@ -181,20 +181,20 @@ func runUserRemove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if a == nil {
-		fmt.Fprintf(os.Stderr, "No console password is configured (%s); nothing to remove.\n", path)
+		fmt.Fprintf(os.Stderr, "No password is configured (%s); nothing to remove.\n", path)
 		return nil
 	}
 	if !usrYes {
-		fmt.Fprintf(os.Stderr, "Remove the password credential for user %q (%s)? The console reverts to token-only auth. [y/N] ", a.Username, path)
+		fmt.Fprintf(os.Stderr, "Remove the password credential for user %q (%s)? The web interface reverts to token-only auth. [y/N] ", a.Username, path)
 		sc := bufio.NewScanner(os.Stdin)
 		if !sc.Scan() || !strings.EqualFold(strings.TrimSpace(sc.Text()), "y") {
 			return errors.New("aborted")
 		}
 	}
 	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("remove console auth file %s: %w", path, err)
+		return fmt.Errorf("remove the web interface auth file %s: %w", path, err)
 	}
-	fmt.Fprintf(os.Stderr, "Password credential removed (%s). The console now requires its access token.\n", path)
+	fmt.Fprintf(os.Stderr, "Password credential removed (%s). The web interface now requires its access token.\n", path)
 	fmt.Fprintln(os.Stderr, "NOTE: a running server stops accepting NEW password logins immediately, but")
 	fmt.Fprintln(os.Stderr, "live sessions ride out their TTL; restart it to revoke them. A server bound")
 	fmt.Fprintln(os.Stderr, "to a non-loopback address with no --token will refuse its next restart.")
