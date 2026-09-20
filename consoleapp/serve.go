@@ -23,16 +23,16 @@ import (
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Serve a read-only web UI over the index (browse events, generate undo SQL)",
-	Long: `Starts a local, read-only, single-operator web console over the binlog index.
+	Long: `Starts a local, read-only, single-operator web interface over the binlog index.
 
 It is the MCP server with a web face: browse indexed row events with full
-before/after diffs, and generate recovery (undo) SQL, all from a browser. The
-console NEVER executes SQL; recover produces a script you review and apply
+before/after diffs, and generate recovery (undo) SQL, all from a browser. It
+NEVER executes SQL; recover produces a script you review and apply
 yourself.
 
 Security:
   - Binds to loopback (127.0.0.1) by default. Username+password login is the
-    primary credential: on a fresh loopback console the first visit creates
+    primary credential: on a fresh loopback daemon the first visit creates
     the password in the browser (or set it up front with 'user set-password').
   - A non-loopback bind needs a credential: a configured password, an explicit
     --token (opt-in automation), or --allow-setup (assert the bind is
@@ -69,8 +69,8 @@ func init() {
 	serveCmd.Flags().StringSliceVar(&conAllowedHosts, "allowed-hosts", nil, "Extra hostnames allowed in the Host header (for reverse-proxy setups; IP literals and localhost are always allowed)")
 	serveCmd.Flags().StringVar(&conBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots; enables the point-in-time Reconstruct surface")
 	serveCmd.Flags().StringVar(&conBaselineS3, "baseline-s3", "", "S3 prefix of baseline Parquet snapshots (s3://bucket/prefix/); enables Reconstruct")
-	serveCmd.Flags().StringVar(&conServersFile, "servers-file", "", "Path to the server registry YAML managed by the UI (default ~/.config/bintrail/console-servers.yaml)")
-	serveCmd.Flags().StringVar(&conAuthFile, "auth-file", "", "Path to the console auth file enabling password login (default ~/.config/bintrail/console-auth.yaml; created with `bintrail-console user set-password`)")
+	serveCmd.Flags().StringVar(&conServersFile, "servers-file", "", "Path to the server registry YAML managed by the web interface (default ~/.config/bintrail/console-servers.yaml)")
+	serveCmd.Flags().StringVar(&conAuthFile, "auth-file", "", "Path to the web interface auth file enabling password login (default ~/.config/bintrail/console-auth.yaml; created with `bintrail-console user set-password`)")
 	serveCmd.Flags().StringVar(&conMCPTokenFile, "mcp-token-file", "", "Path to the managed MCP token file written by Settings → Connect AI (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the daemon runs in a container.")
 	serveCmd.Flags().StringVar(&conTLSCert, "tls-cert", "", "TLS certificate file (PEM); serve the web interface over HTTPS (requires --tls-key)")
 	serveCmd.Flags().StringVar(&conTLSKey, "tls-key", "", "TLS private key file (PEM; requires --tls-cert)")
@@ -348,7 +348,7 @@ func warnSQLPanelRetired() {
 	// operators to a page without the card.
 	slog.Warn("BINTRAIL_CONSOLE_SQL_PANEL is set but no longer does anything: " +
 		"the SQL page and POST /api/sql were removed. Download a DuckDB schema " +
-		"from the Backups page (Connect, on a read-only daemon) and query " +
+		"from the Backups page (named Connect on a read-only `serve`) and query " +
 		"the same Parquet in your own DuckDB. " +
 		"Remove the variable; a future release stops reading it")
 }

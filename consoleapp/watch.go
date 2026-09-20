@@ -38,11 +38,11 @@ var watchCmd = &cobra.Command{
 	Short: "Watch one or more MySQL servers: stream + web interface + control plane in one daemon",
 	Long: `Runs the combined capture-and-observe daemon (the standalone successor to
 'bintrail up --console'): preflight checks, index initialization, the live
-replication stream, AND the read-only web console with its control plane,
+replication stream, AND the read-only web interface with its control plane,
 all in one process sharing one SIGINT/SIGTERM lifecycle.
 
 --source-dsn is optional: without it the daemon starts source-less (the
-zero-config install) serving the console + control plane only, and sources
+zero-config install) serving the web interface + control plane only, and sources
 are added from the UI ("+ Add server" runs the preflight, provisions a
 per-source index database, and starts streaming).
 
@@ -234,7 +234,7 @@ func init() {
 	watchCmd.Flags().StringVar(&upBaselineRefreshEvery, "baseline-refresh-interval", "", "Periodically refresh each server's newest baseline snapshot from the index (Nm/Nh/Nd; default: off). Runs with the conservative DuckDB budget, folds at most 2 tables at a time, and never publishes over a known capture gap.")
 	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, "baseline-retain", "", "Periodically prune local --baseline-dir snapshots older than this (Nd/Nh) once a durable copy exists in --baseline-s3 (never deletes the only copy or the newest snapshot per table)")
 	watchCmd.Flags().StringVar(&upConsoleServersFile, "console-servers-file", "", "Path to the server registry YAML managed by the web interface (default ~/.config/bintrail/console-servers.yaml)")
-	watchCmd.Flags().StringVar(&upConsoleAuthFile, "console-auth-file", "", "Path to the console auth file enabling password login (default ~/.config/bintrail/console-auth.yaml; created with `bintrail-console user set-password`)")
+	watchCmd.Flags().StringVar(&upConsoleAuthFile, "console-auth-file", "", "Path to the web interface auth file enabling password login (default ~/.config/bintrail/console-auth.yaml; created with `bintrail-console user set-password`)")
 	watchCmd.Flags().StringVar(&upConsoleMCPTokenFile, "console-mcp-token-file", "", "Path to the managed MCP token file written by Settings → Connect AI (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the daemon runs in a container.")
 	watchCmd.Flags().StringVar(&upConsoleTLSCert, "console-tls-cert", "", "TLS certificate file (PEM); serve the web interface over HTTPS (requires --console-tls-key)")
 	watchCmd.Flags().StringVar(&upConsoleTLSKey, "console-tls-key", "", "TLS private key file (PEM; requires --console-tls-cert)")
@@ -600,7 +600,7 @@ func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error
 		return func() {}, nil
 	}
 	if srv.Token() == "" {
-		return nil, fmt.Errorf("--flashback-listen %s requires a console token: set --console-token or BINTRAIL_CONSOLE_TOKEN (MySQL-protocol auth cannot use the console password)", upConsoleFlashbackListen)
+		return nil, fmt.Errorf("--flashback-listen %s requires the access token: set --console-token or BINTRAIL_CONSOLE_TOKEN (MySQL-protocol auth cannot use the web interface password)", upConsoleFlashbackListen)
 	}
 	ln, err := net.Listen("tcp", upConsoleFlashbackListen)
 	if err != nil {
@@ -1262,7 +1262,7 @@ func runScheduledVerifyCycle(ctx context.Context, sup *verifySupervisor, registr
 		// Loud, every cycle: "loop running, verifying nothing" must not
 		// look like "verifying everything". The schedule covers registry
 		// servers; the command-line boot stream is not in the registry.
-		slog.Warn("scheduled verify: no registry servers to verify — the schedule covers servers added in the web interface; a source configured only via command-line flags/env is not covered")
+		slog.Warn("scheduled verify: no registry servers to verify: the schedule covers servers added in the web interface; a source configured only via command-line flags/env is not covered")
 		return
 	}
 	for _, e := range entries {

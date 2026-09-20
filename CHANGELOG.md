@@ -70,15 +70,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The terminal followed. The startup banner said "Bintrail console", with the
   old spelling of the name as well as the wrong word for the thing; `--help`
-  offered "the console login password" and "the console's password login";
+  offered "the console login password" and "a single-operator web console";
   `bintrail-console user` prompted for a "New console password"; the
-  compose-drift warning called the settings you saved "console settings"; and
-  the DuckDB schema `bintrail views` writes told you to download the file
-  "again from the console". All of it now says web interface, or names the
-  daemon where that is what was meant. What did NOT change: the binary, the
-  flags, the environment variables, the file names, and the `console:` prefix
-  on log lines, which is a component tag rather than a word anyone reads as
-  prose.
+  compose-drift warning called the settings you saved "console settings";
+  `bintrail status` explained retention with "or console setting overrides
+  it"; and the DuckDB schema `bintrail views` writes told you to download the
+  file "again from the console". Those now say web interface, or name the
+  daemon or the run where that is what was meant. The pages that transcribe
+  this output (`docs/install.md`, `docs/console.md`, `docs/docker.md`) were
+  updated with it, so what the docs show is what the binary prints.
+
+  What did NOT change: the binary, the flags, the environment variables, the
+  file names, and the `console:` prefix on log lines, which tags a component
+  rather than reading as prose. `docker-compose.yml` still explains itself in
+  the old word; its comments, and the six stack-check fixtures that copy them,
+  are a slice of their own.
 
 ### Fixed
 - **`--batch-size` now reaches the sources added from the web interface**

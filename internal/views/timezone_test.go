@@ -31,11 +31,14 @@ func TestGenerate_pinsTheSessionToUTC(t *testing.T) {
 	// It says what it did. This changes the reader's session rather than
 	// describing the layout, which is the one thing the rest of the file never
 	// does, so the file has to own it and say how to undo it.
-	// The needle avoids the line break: the sentence is wrapped into fixed
-	// width comment lines, so a phrase spanning the wrap point pins the
-	// WRAPPING rather than the meaning, and re-flowing the paragraph would
-	// fail a guard that has no opinion about it.
-	if !strings.Contains(got, "you would rather read in your own zone") {
+	// Asserted against the flattened prose, not the raw file: these are
+	// fixed-width comment lines, so ANY needle long enough to be meaningful
+	// can straddle a wrap point, and then the guard is pinning the WRAPPING
+	// instead of the sentence. Re-flowing a paragraph would fail a guard with
+	// no opinion about it. copy_test.go's header() does this for the header
+	// block; this one cannot reuse it, because the zone note sits past the
+	// first blank line.
+	if !strings.Contains(prose(got), "Change it if you would rather read in your own zone") {
 		t.Error("the file sets the reader's session zone without saying they can change it")
 	}
 
@@ -47,4 +50,16 @@ func TestGenerate_pinsTheSessionToUTC(t *testing.T) {
 	if !strings.Contains(Generate(local), "SET TimeZone = 'UTC';") {
 		t.Error("a file over local paths does not pin the session zone")
 	}
+}
+
+// prose flattens a whole generated file's comment lines into one line of
+// words: the "-- " prefixes dropped and every run of whitespace collapsed. It
+// is header() without the cut at the first blank line, for assertions about
+// sentences that sit further down the file.
+func prose(out string) string {
+	var words []string
+	for _, line := range strings.Split(out, "\n") {
+		words = append(words, strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "--"))...)
+	}
+	return strings.Join(words, " ")
 }

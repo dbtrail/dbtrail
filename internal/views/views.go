@@ -760,8 +760,8 @@ func writeHeader(b *strings.Builder, in Input) {
 		b.WriteString("-- a query over the most recent hours simply returns nothing for them.\n")
 		b.WriteString("-- Regenerate this file on the schedule your rotation archives on, and after\n")
 		b.WriteString("-- taking or refreshing a baseline, and whenever archive sources are added or\n")
-		b.WriteString("-- removed. Re-run `bintrail views`, or download the file again from the web\n")
-		b.WriteString("-- interface.\n")
+		b.WriteString("-- removed. Re-run `bintrail views`, or download the file again from the\n")
+		b.WriteString("-- web interface.\n")
 	} else if in.rendersEvents() {
 		// The one self-following half of the file, and only the events view
 		// has it: its globs are evaluated per query. Claimed only when that
@@ -874,7 +874,7 @@ func writeHeader(b *strings.Builder, in Input) {
 		b.WriteString("--   with; `bintrail views` writes the file that also reads the archived\n")
 		b.WriteString("--   change log)\n")
 	case in.ArchiveDiscoveryFailed:
-		b.WriteString("--   (could not be read from archive_state; the daemon log has the error)\n")
+		b.WriteString("--   (could not be read from archive_state; the log of the run that wrote\n--   this file has the error)\n")
 	case len(in.ArchiveSources) == 0:
 		b.WriteString("--   (none registered in archive_state: no rotated partitions have been archived yet)\n")
 	}
@@ -943,7 +943,7 @@ func writeHeader(b *strings.Builder, in Input) {
 			// from "the other location holds nothing newer", and the two lead
 			// to opposite actions. Same shape as the archive half above.
 			fmt.Fprintf(b, "--   (whether %s holds a newer snapshot could not be read; the\n"+
-				"--   daemon log has the error)\n", commentSafe(in.NewerElsewhereUnchecked))
+				"--   log of the run that wrote this file has the error)\n", commentSafe(in.NewerElsewhereUnchecked))
 		}
 		switch in.Follow {
 		case FollowPointer:
@@ -1044,12 +1044,14 @@ func writeS3Preamble(b *strings.Builder, region string, ep storage.S3Endpoint, a
 	// as the settings above: the file must name the store this process reads
 	// each bucket from, and a second copy of that list would drift.
 	if scoped := duckdbutil.BucketStoreSecretStatements(stores); len(scoped) > 0 {
-		b.WriteString("-- Buckets that live in a store of their own (set per server in the web\n-- interface).\n")
-		b.WriteString("-- Each secret below is scoped to one bucket and is the one DuckDB picks for\n")
-		b.WriteString("-- paths under it; the general secret above covers every other bucket.\n")
+		b.WriteString("-- Buckets that live in a store of their own (set per server in the web\n")
+		b.WriteString("-- interface). Each secret below is scoped to one bucket and is the one\n")
+		b.WriteString("-- DuckDB picks for paths under it; the general secret above covers every\n")
+		b.WriteString("-- other bucket.\n")
 		if anyStoreHasKeys(stores) {
-			b.WriteString("-- Some of these buckets sign with keys set in the web interface, which this file never carries:\n")
-			b.WriteString("-- the credential chain where you run it must hold keys each of those stores accepts.\n")
+			b.WriteString("-- Some of these buckets sign with keys set in the web interface, which this\n")
+			b.WriteString("-- file never carries: the credential chain where you run it must hold keys\n")
+			b.WriteString("-- each of those stores accepts.\n")
 		}
 		for _, stmt := range scoped {
 			fmt.Fprintf(b, "%s;\n", stmt)
@@ -1319,8 +1321,8 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 		b.WriteString("-- events: not part of this file.\n")
 		b.WriteString("--\n")
 		b.WriteString("-- This file describes the snapshot it sits in. The archived change log is a\n")
-		b.WriteString("-- different tier; `bintrail views` (or the DuckDB schema download in the web\n-- interface)\n")
-		b.WriteString("-- writes the file that reads both.\n\n")
+		b.WriteString("-- different tier; `bintrail views` (or the DuckDB schema download in the\n")
+		b.WriteString("-- web interface) writes the file that reads both.\n\n")
 		return false
 	}
 	// Left out on purpose, which is a DIFFERENT fact from the skip branches
@@ -1339,7 +1341,7 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 		b.WriteString("--\n")
 		b.WriteString("-- Defining it opens one Parquet footer per archived file before it returns\n")
 		b.WriteString("-- a row, so it is left out unless asked for. Add it with `bintrail views\n")
-		b.WriteString("-- --include-events`, or the matching box on the download in the web\n-- interface.\n\n")
+		b.WriteString("-- --include-events`, or the matching box in the web interface.\n\n")
 		return false
 	}
 	// Whether the view EXISTS is definesEvents' question, asked below. These two
@@ -1859,8 +1861,8 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		// because the file is served by two producers and the console reader
 		// has no command line to pass a flag on.
 		b.WriteString("-- the snapshot are not in this file. `bintrail views --include-events`\n")
-		b.WriteString("-- adds the view that holds them, as does the change-log box on the\n")
-		b.WriteString("-- download in the web interface.\n")
+		b.WriteString("-- adds the view that holds them, as does the change-log box in the\n")
+		b.WriteString("-- web interface.\n")
 	} else {
 		// There is nothing to define the view FROM (no archive source, or a
 		// registry that could not be read). Naming --include-events here would

@@ -55,9 +55,9 @@ var rootCmd = &cobra.Command{
 browse indexed row events with full before/after diffs, generate recovery
 (undo) SQL, and run point-in-time reconstruct when baselines are configured.
 
-It is the web console's own binary (formerly the core CLI's "console"
-command), shipped separately so the core bintrail CLI carries no web UI. The
-console NEVER executes SQL; recover produces a script you review and apply
+It is the web interface's own binary (formerly the core CLI's "console"
+command), shipped separately so the core bintrail CLI carries no web UI. It
+NEVER executes SQL; recover produces a script you review and apply
 yourself.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		observe.Setup(os.Stderr, logFormat, logLevel)

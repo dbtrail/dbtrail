@@ -456,7 +456,7 @@ func New(cfg Config) (*Server, error) {
 	// path — i.e. a token is configured (password login genuinely disabled until
 	// the file exists), which usually means a typo'd path.
 	if explicitAuthPath && !passwordCfg && !willSetup {
-		slog.Warn("console auth file not found — password login disabled until it is created with `bintrail-console user set-password`", "path", authPath)
+		slog.Warn("web interface auth file not found — password login disabled until it is created with `bintrail-console user set-password`", "path", authPath)
 	}
 
 	var tlsConf *tls.Config
@@ -476,13 +476,13 @@ func New(cfg Config) (*Server, error) {
 	// termination at a reverse proxy (with --allowed-hosts) is a legitimate,
 	// documented topology.
 	if passwordCfg && tlsConf == nil && !isLoopbackAddr(listen) {
-		slog.Warn("the console password will transit plain HTTP on a non-loopback address — set --tls-cert/--tls-key or terminate TLS at a reverse proxy", "listen", listen)
+		slog.Warn("the web interface password will transit plain HTTP on a non-loopback address — set --tls-cert/--tls-key or terminate TLS at a reverse proxy", "listen", listen)
 	}
 	// First-run setup is open until a password exists. On a non-loopback bind
 	// that means anyone who can reach this port could claim the password — a
 	// one-time, first-run-only message (it stops once the password is set).
 	if noCredential && !isLoopbackAddr(listen) && cfg.AllowSetup {
-		slog.Warn("first-run password setup is OPEN — create the console password before this port is reachable from untrusted networks", "listen", listen)
+		slog.Warn("first-run password setup is OPEN — create the web interface password before this port is reachable from untrusted networks", "listen", listen)
 	}
 
 	// Safety coupling enforced here so it holds for every caller, not just the

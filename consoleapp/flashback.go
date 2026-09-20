@@ -96,7 +96,7 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 		// The UI-managed MCP token (#1052) is deliberately NOT accepted here:
 		// only its SHA-256 is stored, which cannot drive mysql_native_password
 		// authentication — this port needs the STATIC token specifically.
-		return errors.New("flashback port requires the static automation token: set --token or BINTRAIL_CONSOLE_TOKEN (the console password store and the UI-managed MCP token cannot drive MySQL-protocol authentication)")
+		return errors.New("flashback port requires the static automation token: set --token or BINTRAIL_CONSOLE_TOKEN (the web interface password store and the UI-managed MCP token cannot drive MySQL-protocol authentication)")
 	}
 	cfg = cfg.withDefaults()
 

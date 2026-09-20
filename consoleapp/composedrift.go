@@ -451,7 +451,7 @@ func consoleStateFinding(in driftInputs) (driftFinding, bool) {
 			}
 		}
 		if len(held) > 0 {
-			lost = append(lost, "settings saved in the web interface, in "+in.configDir+" ("+strings.Join(held, ", ")+")")
+			lost = append(lost, "settings saved in the web interface in "+in.configDir+" ("+strings.Join(held, ", ")+")")
 		}
 	}
 	if len(lost) == 0 {

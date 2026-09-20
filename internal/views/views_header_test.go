@@ -29,7 +29,7 @@ func TestGenerate_discoveryErrorInHeader(t *testing.T) {
 	in.ArchiveSources = nil
 	in.ArchiveDiscoveryFailed = true
 	out := Generate(in)
-	if !strings.Contains(out, "--   (could not be read from archive_state; the daemon log has the error)") {
+	if !strings.Contains(out, "--   (could not be read from archive_state; the log of the run that wrote") {
 		t.Errorf("header does not name the read failure:\n%s", out)
 	}
 	// Header and body must agree: neither may claim an empty registry.

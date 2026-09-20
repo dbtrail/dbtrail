@@ -47,8 +47,8 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 --
 -- These are the SNAPSHOT's rows, not the table's current state: changes after
 -- the snapshot are not in this file. `bintrail views --include-events`
--- adds the view that holds them, as does the change-log box on the
--- download in the web interface.
+-- adds the view that holds them, as does the change-log box in the
+-- web interface.
 -- To materialize a later point in time, use `bintrail reconstruct`. Folding
 -- the deltas back onto a baseline is what that command does, and it is not
 -- expressible as a view.
@@ -82,6 +82,5 @@ CREATE OR REPLACE VIEW "state_shop_order_items_2" AS
 --
 -- Defining it opens one Parquet footer per archived file before it returns
 -- a row, so it is left out unless asked for. Add it with `bintrail views
--- --include-events`, or the matching box on the download in the web
--- interface.
+-- --include-events`, or the matching box in the web interface.
 

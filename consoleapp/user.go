@@ -50,12 +50,12 @@ var (
 var userSetPasswordCmd = &cobra.Command{
 	Use:   "set-password",
 	Short: "Set (or rotate) the web interface login password",
-	Long: `Sets the console's username+password credential, enabling password login.
+	Long: `Sets the web interface's username+password credential, enabling password login.
 
 Prompts twice on a terminal; use --password-stdin to read one line from stdin
 in scripts. A running server honors the new password on the next login
 attempt without a restart (live sessions survive a CLI rotation; rotate from
-the console UI to also revoke them).`,
+the web interface to also revoke them).`,
 	RunE: runUserSetPassword,
 }
 

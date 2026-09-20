@@ -305,7 +305,7 @@ func TestGenerate_bucketStores(t *testing.T) {
 		}
 	}
 
-	// A store with keys of its own (set in the console) still gets
+	// A store with keys of its own (set in the web interface) still gets
 	// credential_chain here: the file leaves the process, the keys never do.
 	// The note says what the reader of the file needs instead.
 	keyed, err := minio.WithKeys("AKIASTOREKEY", "storesecretvalue")
@@ -323,7 +323,7 @@ func TestGenerate_bucketStores(t *testing.T) {
 	if !strings.Contains(keyedOut, "PROVIDER credential_chain, SCOPE 's3://keyed-b/'") {
 		t.Errorf("a keyed bucket lost its scoped secret:\n%s", keyedOut)
 	}
-	const keyNote = "-- Some of these buckets sign with keys set in the web interface, which this file never carries:"
+	const keyNote = "keys set in the web interface"
 	if !strings.Contains(keyedOut, keyNote) {
 		t.Errorf("a keyed bucket without the note on keys:\n%s", keyedOut)
 	}
