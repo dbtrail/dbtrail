@@ -192,7 +192,7 @@ func runUserRemove(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("remove console auth file %s: %w", path, err)
+		return fmt.Errorf("remove the web interface auth file %s: %w", path, err)
 	}
 	fmt.Fprintf(os.Stderr, "Password credential removed (%s). The web interface now requires its access token.\n", path)
 	fmt.Fprintln(os.Stderr, "NOTE: a running server stops accepting NEW password logins immediately, but")

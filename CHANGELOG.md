@@ -73,10 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offered "the console login password" and "a single-operator web console";
   `bintrail-console user` prompted for a "New console password"; the
   compose-drift warning called the settings you saved "console settings";
-  `bintrail status` explained retention with "or console setting overrides
-  it"; and the DuckDB schema `bintrail views` writes told you to download the
-  file "again from the console". Those now say web interface, or name the
-  daemon or the run where that is what was meant. The pages that transcribe
+  `bintrail status` and the built-in rotation line both explained retention
+  with "or console setting"; the refusal on a non-loopback bind told you to
+  "set a console password"; and the DuckDB schema `bintrail views` writes told
+  you to download the file "again from the console". Those now say web
+  interface, or name the daemon or the run where that is what was meant. The pages that transcribe
   this output (`docs/install.md`, `docs/console.md`, `docs/docker.md`) were
   updated with it, so what the docs show is what the binary prints.
 

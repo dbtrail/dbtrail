@@ -56,7 +56,7 @@ docker compose logs -f bintrail
 The logs print the console URL:
 
 ```
-The web interface is running: open it and add the MySQL servers to watch:
+The DBTrail web interface is running: open it and add the MySQL servers to watch:
 
     http://127.0.0.1:8090/
 

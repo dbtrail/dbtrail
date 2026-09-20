@@ -138,8 +138,12 @@ func TestOmitEvents_namesBothRoutes(t *testing.T) {
 	in.OmitEvents = true
 	out := Generate(in)
 
-	for _, want := range []string{"--include-events", "box in the web interface"} {
-		if !strings.Contains(out, want) {
+	// Asserted against the STATE BLOCK's own sentence, not the whole file:
+	// the events-skip branch names the same two routes a few lines earlier,
+	// so a whole-file search passed with the state block's remedy deleted.
+	// Proved by deleting it: the old needles stayed green.
+	for _, want := range []string{"`bintrail views --include-events`", "as does the change-log box in the web interface"} {
+		if !strings.Contains(prose(out), want) {
 			t.Errorf("the state block does not name the %q route:\n%s", want, out)
 		}
 	}

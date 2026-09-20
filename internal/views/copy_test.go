@@ -88,10 +88,18 @@ func TestGenerate_noEmDashesInTheGeneratedFile(t *testing.T) {
 		"no baselines":     func() Input { in := goldenInput(); in.Baselines = nil; return in }(),
 		"region ambiguous": func() Input { in := goldenInput(); in.RegionAmbiguous = true; return in }(),
 		"console download": func() Input { in := goldenInput(); in.LiveLegUnavailable = true; return in }(),
-		// The copy written INTO a snapshot, which no golden file covers: its
-		// header is a branch of its own, and a branch nothing renders is where
-		// a dash, or a sentence broken across a re-wrap, survives unseen.
-		"snapshot scoped": func() Input { in := goldenInput(); in.SnapshotScoped = true; return in }(),
+		// The copy written INTO a snapshot, which no golden file covers.
+		// Built through the REAL constructor, not goldenInput with the flag
+		// flipped: that kept ArchiveSources, so rendersEvents() won at
+		// writeHeader and the SnapshotScoped header branch stayed unrendered
+		// (while the file it produced contradicted itself, promising globs
+		// that follow rotation above a body saying events are not in it).
+		// A branch nothing renders is where a dash survives unseen.
+		"snapshot scoped": func() Input {
+			in := SnapshotScopedInput(goldenInput().BaselineSnapshot, goldenInput().Baselines)
+			in.RespellBaselines("/data/baselines/2026-04-30T03-00-00Z")
+			return in
+		}(),
 		// The S3-compatible-store prose in writeS3Preamble is the one branch no
 		// other shape reaches, and an unrendered branch is exactly where a dash
 		// survives.

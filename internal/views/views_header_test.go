@@ -29,7 +29,10 @@ func TestGenerate_discoveryErrorInHeader(t *testing.T) {
 	in.ArchiveSources = nil
 	in.ArchiveDiscoveryFailed = true
 	out := Generate(in)
-	if !strings.Contains(out, "--   (could not be read from archive_state; the log of the run that wrote") {
+	// Flattened: the needle is a whole clause, and a clause long enough to
+	// mean something straddles the wrap. Pinning the wrap is the failure the
+	// time-zone guard was rewritten to avoid, and this one had it too.
+	if !strings.Contains(prose(out), "(could not be read from archive_state; the log of the run that wrote this file has the error)") {
 		t.Errorf("header does not name the read failure:\n%s", out)
 	}
 	// Header and body must agree: neither may claim an empty registry.

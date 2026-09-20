@@ -449,7 +449,7 @@ func New(cfg Config) (*Server, error) {
 	noCredential := token == "" && !passwordCfg && ext.ConsoleCredential() == nil
 	willSetup := noCredential && (isLoopbackAddr(listen) || cfg.AllowSetup)
 	if noCredential && !willSetup && ext.ConsoleAuth() == nil {
-		return nil, fmt.Errorf("authentication is required when binding to a non-loopback address %q: set a console password with `bintrail-console user set-password`, set --token / BINTRAIL_CONSOLE_TOKEN for automation, or pass --allow-setup if this bind is access-controlled (e.g. published only on the host's loopback)", listen)
+		return nil, fmt.Errorf("authentication is required when binding to a non-loopback address %q: set a web interface password with `bintrail-console user set-password`, set --token / BINTRAIL_CONSOLE_TOKEN for automation, or pass --allow-setup if this bind is access-controlled (e.g. published only on the host's loopback)", listen)
 	}
 	// A missing auth file is the EXPECTED first-run state (browser setup creates
 	// it). Only warn about a missing explicit --auth-file when setup is NOT the

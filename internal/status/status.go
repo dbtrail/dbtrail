@@ -1053,7 +1053,8 @@ func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, arch
 	if retention != nil {
 		fmt.Fprintf(w, "Rotation window: %s — %s\n", retention.Raw, retention.Source)
 		fmt.Fprintln(w, "  (the window an unattended daemon drops on while nobody sets --rotate-retain;")
-		fmt.Fprintln(w, "   an explicit --rotate-retain, BINTRAIL_ROTATE_RETAIN or a setting saved in the web interface overrides it)")
+		fmt.Fprintln(w, "   an explicit --rotate-retain, BINTRAIL_ROTATE_RETAIN, or a setting saved in")
+		fmt.Fprintln(w, "   the web interface, overrides it)")
 	}
 
 	// ── Section 3: Archives ──────────────────────────────────────────────────

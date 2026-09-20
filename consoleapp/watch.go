@@ -574,7 +574,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	printConsoleBanner(srv, "The web interface is running: open it and add the MySQL servers to watch:")
+	printConsoleBanner(srv, "The DBTrail web interface is running: open it and add the MySQL servers to watch:")
 	go supervisor.Reconcile(registry)
 
 	serveErr := srv.Serve(ctx, ln)
@@ -821,7 +821,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 		}
 		consoleDone <- struct{}{}
 	}()
-	printConsoleBanner(srv, "The web interface (read-only) is running. Open:")
+	printConsoleBanner(srv, "The DBTrail web interface (read-only) is running. Open:")
 
 	// Resume whatever the operator had monitoring before the restart —
 	// desired state lives in the registry, positions in each per-source
@@ -1262,7 +1262,7 @@ func runScheduledVerifyCycle(ctx context.Context, sup *verifySupervisor, registr
 		// Loud, every cycle: "loop running, verifying nothing" must not
 		// look like "verifying everything". The schedule covers registry
 		// servers; the command-line boot stream is not in the registry.
-		slog.Warn("scheduled verify: no registry servers to verify: the schedule covers servers added in the web interface; a source configured only via command-line flags/env is not covered")
+		slog.Warn("scheduled verify: no registry servers to verify. The schedule covers servers added in the web interface; a source configured only via command-line flags/env is not covered")
 		return
 	}
 	for _, e := range entries {
