@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.85.1] - 2026-09-20
+
 ### Fixed
 - **An index upgraded in place now grows `rotation_policy` too** (#1709
   follow-up). The table that records the rotation window an index was created
