@@ -6476,19 +6476,26 @@ function backupScheduleCard(cur, b) {
   const sch = b.schedule || null;
   const canEdit = !!capsCache.backup_schedule;
   if (!sch && !canEdit) return null;
-  const details = el("details", { class: "form-advanced bk-restore bk-schedule" });
-  const summary = el("summary", { class: "form-adv-summary" });
-  details.append(summary);
+  // A card, not a fold (#1528). Putting backups on a timetable is the thing
+  // this page is named after, and it sat behind a line of small caps that had
+  // to be clicked. What the summary carried is now the card's state line, so
+  // the fact that used to be readable in passing is still readable in
+  // passing, and the form behind it no longer costs a click to find.
+  const card = el("section", { class: "ov-panel bk-restore bk-schedule" });
+  card.append(el("div", { class: "ov-panel-head" },
+    el("h2", { class: "ov-panel-title", text: "Scheduled backups" })));
+  const state = el("p", { class: "form-hint bk-schedule-state" });
+  card.append(state);
   const body = el("div", { class: "bk-restore-body" });
 
-  // Summary: one line an operator can read in passing.
+  // The state line: what an operator reads without stopping.
   if (!sch) {
-    summary.textContent = "Scheduled backups: none";
+    state.textContent = "None yet.";
   } else {
-    let line = "Scheduled backups: every " + sch.every + " at " + sch.at + " UTC.";
+    let line = "Every " + sch.every + " at " + sch.at + " UTC.";
     if (sch.runnable && sch.next_run) line += " Next: " + utcLabel(sch.next_run) + ".";
     if (!sch.runnable) line += " Cannot run: " + plainWords(sch.reason || "unknown reason");
-    summary.textContent = line;
+    state.textContent = line;
   }
 
   // Two lines, not a lecture (#1528). The general explanation of the producer
@@ -6507,13 +6514,12 @@ function backupScheduleCard(cur, b) {
 
   if (!canEdit) {
     // The read-only console, or a daemon with every backup feature off:
-    // nothing here can change the schedule, and the summary already says
+    // nothing here can change the schedule, and the state line already says
     // why it is not running.
     body.append(el("p", { class: "form-hint", text:
       "This schedule can be changed from the watch daemon's web interface (CLI: bintrail-console watch) once its backup features are on." }));
-    details.open = true;
-    details.append(body);
-    return details;
+    card.append(body);
+    return card;
   }
 
   // The form. Prefilled from the saved schedule, else a sane daily default.
@@ -6654,10 +6660,14 @@ function backupScheduleCard(cur, b) {
     if (!run && !skip && !sch.running && !sch.history_unavailable) {
       body.append(el("p", { class: "form-hint", text: "It has not run yet." }));
     }
-    if (!sch.runnable || alarm) details.open = true;
+    // Nothing to open any more, so the alarm moves to the state line: a
+    // schedule whose last word is a refusal must not be summarised in the
+    // grey of a healthy one, and the red line at the top is what a reader
+    // scanning the page sees before any of the detail below it.
+    if (!sch.runnable || alarm) state.className = "form-msg err bk-schedule-state";
   }
-  details.append(body);
-  return details;
+  card.append(body);
+  return card;
 }
 
 async function saveBackupSchedule(id, sched, btn, msgEl) {
@@ -6697,8 +6707,10 @@ async function removeBackupSchedule(id, btn, msgEl) {
 }
 
 // backupRestoreCard offers the point-in-time restore: pick a past moment, get
-// a NEW backup showing every table as it was then. Collapsed by default; the
-// last restore's outcome renders inside so a failure is not toast-only.
+// a NEW backup showing every table as it was then. A card, not a fold
+// (#1528): behind a summary, the one sentence that says your database is not
+// touched was the thing a reader had to click to find, and a failed restore
+// announced itself only in a toast that had already gone.
 function backupRestoreCard(cur, b, restoreSt) {
   // Registry servers only: the CLI (ephemeral) entry is refused by the
   // monitor verbs with a message about monitoring, not restores.
@@ -6718,8 +6730,9 @@ function backupRestoreCard(cur, b, restoreSt) {
   if (!usable.length) return null;
   const rst = restoreSt && restoreSt.restore;
   if (rst && rst.state === "running") return null; // the run region owns it
-  const details = el("details", { class: "form-advanced bk-restore" },
-    el("summary", { class: "form-adv-summary", text: "Restore to a moment (builds a new backup)" }));
+  const card = el("section", { class: "ov-panel bk-restore" });
+  card.append(el("div", { class: "ov-panel-head" },
+    el("h2", { class: "ov-panel-title", text: "Restore to a moment" })));
   const body = el("div", { class: "bk-restore-body" });
   body.append(el("p", { class: "form-hint", text:
     "Pick a past moment. DBTrail rebuilds every table as it was then, from your backups plus the recorded changes, and saves the result as a new backup in the list below. Your database is not touched." }));
@@ -6740,7 +6753,6 @@ function backupRestoreCard(cur, b, restoreSt) {
     body.append(el("p", { class: "form-msg err", text: rst.published
       ? "Last restore wrote the backup on this machine but could not send it to S3: " + backupFoldError(rst.last_error || "unknown error") + " The backup is in the list below. A full backup sends it along with the rest."
       : restoreRefusedLine(rst) }));
-    details.open = true;
   } else if (rst && rst.state === "succeeded") {
     // The reused count belongs here for the same reason it belongs on the
     // refresh note: a restore consumes the same reuse setting, and without the
@@ -6749,8 +6761,8 @@ function backupRestoreCard(cur, b, restoreSt) {
       "Last restore finished" + (rst.at ? ": the backup at " + utcLabel(rst.at) : "") + " is in the list below." +
       (rst.carried ? " " + rst.carried + " table(s) reused an unchanged file" + reusedCopiedNote(rst.carried_copied || 0) + "." : "") }));
   }
-  details.append(body);
-  return details;
+  card.append(body);
+  return card;
 }
 
 async function startBackupRestore(id, at, btn, msgEl) {

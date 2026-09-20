@@ -2415,14 +2415,14 @@ try {
   const bkRestore = await page.evaluate(async () => {
     const out = { cap: !!capsCache.baseline_restore };
     const v = document.querySelector(".view");
-    // Two cards wear .bk-restore since the sql-export card landed; pick the
-    // restore one by its summary or this guard drifts to the wrong card the
-    // first time their gates diverge.
+    // Two cards wear .bk-restore (the schedule is the other one); pick the
+    // restore one by its heading or this guard drifts to the wrong card the
+    // first time their gates diverge. Its own title since #1528 turned both
+    // folds into cards — no summary to click, and nothing to open.
     const card = Array.from(v.querySelectorAll(".bk-restore")).find((c) =>
-      /Restore to a moment/.test((c.querySelector(".form-adv-summary") || {}).textContent || ""));
+      /Restore to a moment/.test((c.querySelector(".ov-panel-title") || {}).textContent || ""));
     out.card = !!card;
     if (!card) return out;
-    card.open = true;
     const input = card.querySelector("input");
     out.prefilled = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(input.value);
     input.value = "not-a-time";

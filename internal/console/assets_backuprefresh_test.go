@@ -355,8 +355,12 @@ func TestBackupRefreshCard_titleSaysWhatItDoes(t *testing.T) {
 	if !strings.Contains(low, "disk") {
 		t.Errorf("the card title %q does not name what the control trades (disk space)", title)
 	}
-	if !strings.Contains(js, `"Scheduled backups: none"`) {
-		t.Fatal("the schedule summary is no longer called Scheduled backups; the collision was resolved from " +
+	// The timetable's own name, read from the card that carries it. It was a
+	// <summary> line ("Scheduled backups: none") until #1528 turned the fold
+	// into a card with a heading; scoping the check to the function is what
+	// keeps it from passing on the same words somewhere else in the file.
+	if !strings.Contains(jsFunctionBody(t, js, "backupScheduleCard"), `text: "Scheduled backups"`) {
+		t.Fatal("the schedule card is no longer titled Scheduled backups; the collision was resolved from " +
 			"the wrong side, and this guard would have passed on a renamed timetable")
 	}
 }
