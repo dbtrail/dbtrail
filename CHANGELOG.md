@@ -40,9 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now cards, like everything else on the page: the schedule's state ("Every 1d
   at 03:00 UTC. Next: ...") is the card's own line, and the sentence that says
   your database is never touched by a restore is visible without opening
-  anything. A schedule that cannot run, was skipped or failed used to force
-  the fold open; now it turns that state line red, so it is the first thing
-  read on the card instead of the first thing found.
+  anything, and the outcome of the last restore is that card's own state
+  line instead of the last paragraph in it.
+
+  A schedule that cannot run, was skipped or failed used to force the fold
+  open. Now it turns that state line red **and says which**: "Every 1d at
+  03:00 UTC. Next: ... The last run failed." Colour alone would be a verdict
+  a screen reader cannot read out and a colour-blind operator cannot see,
+  and the body below still carries each reason in full.
 
   The five rules this came from are written down in `CONTRIBUTING.md`, so the
   interface does not grow back the same way: a card earns its place by

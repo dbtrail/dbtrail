@@ -84,14 +84,17 @@ Two corollaries, each bought with a defect:
   detail: raw signals, a glossary, an advanced field, the technical variant.
   The page's own subject is a card. Scheduling a backup and restoring to a
   moment both sat behind a line of small caps on the Backups page, with prose
-  above them (#1528); a guard in `assets_backup_cards_1528_test.go` pins those
-  two.
+  above them (#1528); `internal/console/assets_backup_cards_1528_test.go`
+  pins those two, and pins that a card in alarm says so in words and not in
+  red alone.
 - **Name the screen. Never "here", never "this page".** The documentation page
   and the screen it describes carry the same name, so a deictic word resolves
   differently depending on which side the reader is standing on. Say "on the
   Backup settings screen". In user-facing text the product is **DBTrail** and
   the thing on screen is the **web interface**, never "the console". That is
   the binary's name (`bintrail-console`), and a user does not read it (#1683).
+  No test enforces this one, unlike the corollary above it: it is a habit, and
+  a string sweep is where a word quietly comes back.
 
 The measure of a change here is fewer words on screen and fewer clicks to the
 same answer, not more features.
@@ -100,7 +103,7 @@ same answer, not more features.
 
 - **Never insert `pk_hash` explicitly** — it is a generated stored column (`SHA2(pk_values, 256)`).
 - **PK lookups** must use both `pk_hash = SHA2(?, 256)` (for the index scan) and `pk_values = ?` (as a hash collision guard).
-- **Partitions**: partitioned by `RANGE (TO_DAYS(event_timestamp))` — use `TO_DAYS()`, not `UNIX_TIMESTAMP()` (MySQL 8.0 rejects timezone-dependent functions when `time_zone=SYSTEM`). The catch-all `p_future VALUES LESS THAN MAXVALUE` must always exist. When adding new partitions use `REORGANIZE PARTITION p_future INTO (... new partitions ..., PARTITION p_future VALUES LESS THAN MAXVALUE)`.
+- **Partitions**: partitioned by `RANGE (TO_SECONDS(event_timestamp))` — use `TO_SECONDS()`, not `UNIX_TIMESTAMP()` (MySQL 8.0 rejects timezone-dependent functions when `time_zone=SYSTEM`). The catch-all `p_future VALUES LESS THAN MAXVALUE` must always exist. When adding new partitions use `REORGANIZE PARTITION p_future INTO (... new partitions ..., PARTITION p_future VALUES LESS THAN MAXVALUE)`.
 - **`schema_snapshots`**: `snapshot_id` is a group identifier (shared by all rows of one snapshot), not the auto-increment row PK (`id`). `NewResolver(db, 0)` loads the latest snapshot.
 
 ### JSON and type handling

@@ -34,7 +34,10 @@ func TestS3OnlyBackupWarning_1659(t *testing.T) {
 		t.Error("the old schedule-gated grey hint is still rendered next to the new red line")
 	}
 	// The last-run remedy is not repeated in grey under the red next-run one.
-	if !strings.Contains(card, `run.why_code !== everyRunCode`) || !strings.Contains(card, `let alarm = false, everyRunCode = "";`) {
+	// Matched on the declaration of everyRunCode rather than the whole `let`
+	// line: #1528 added a third variable to it (alarmNote), and pinning the
+	// line verbatim failed for a change that left this mechanism untouched.
+	if !strings.Contains(card, `run.why_code !== everyRunCode`) || !strings.Contains(card, `everyRunCode = ""`) {
 		t.Error("the last-run reason line no longer skips the remedy the next-run warning already shows")
 	}
 

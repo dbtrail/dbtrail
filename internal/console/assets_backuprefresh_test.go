@@ -407,14 +407,17 @@ func TestBackupRefreshCard_prose(t *testing.T) {
 	}
 }
 
-// TestBackupScheduleCard_introIsNotAnEssay (#1528): the fold's opening
+// TestBackupScheduleCard_introIsNotAnEssay (#1528): the card's opening
 // paragraph explained the producer choice in general terms directly above the
 // line that names the producer for the NEXT run specifically. The general half
 // is docs material; the specific half is the state the operator acts on.
+// (It was a fold when this guard was written; #1528 made it a card, and the
+// paragraph it watches is now always on screen, which is the stronger reason
+// for it to stay short.)
 func TestBackupScheduleCard_introIsNotAnEssay(t *testing.T) {
 	body := jsFunctionBody(t, readAsset(t, "app.js"), "backupScheduleCard")
 	if strings.Contains(body, "with no load on your database") {
-		t.Error("the fold explains the producer choice in general above the line that names it for the next run")
+		t.Error("the card explains the producer choice in general above the line that names it for the next run")
 	}
 	// The specific half must survive the cut.
 	if !strings.Contains(body, "will update the latest backup from the recorded changes") {

@@ -6454,11 +6454,13 @@ function backupFoldError(msg) {
   return out;
 }
 
-// backupScheduleCard (#1442): the per-server backup timer. The summary line
-// carries the schedule and the next run so the state reads without opening
-// the card; the body is the form plus what the schedule last did. A failed
-// or skipped scheduled run opens the card and says so in red: a schedule
-// that fails quietly is worse than none.
+// backupScheduleCard (#1442): the per-server backup timer. The state line
+// under the heading carries the schedule and the next run, so the state
+// reads without going into the body; the body is the form plus what the
+// schedule last did. A run that cannot start, was skipped or failed turns
+// that line red AND names the fact on it: a schedule that fails quietly is
+// worse than none, and a red line whose words say nothing is wrong is the
+// same silence in a louder colour.
 //
 // The operator picks WHEN. How each run is made (a full backup from the
 // database, or updating the latest backup from the recorded changes) is the
@@ -6484,9 +6486,9 @@ function backupScheduleCard(cur, b) {
   const card = el("section", { class: "ov-panel bk-restore bk-schedule" });
   card.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: "Scheduled backups" })));
-  const state = el("p", { class: "form-hint bk-schedule-state" });
+  const state = el("p", { class: "form-hint bk-card-state" });
   card.append(state);
-  const body = el("div", { class: "bk-restore-body" });
+  const body = el("div", { class: "bk-card-body" });
 
   // The state line: what an operator reads without stopping.
   if (!sch) {
@@ -6496,6 +6498,10 @@ function backupScheduleCard(cur, b) {
     if (sch.runnable && sch.next_run) line += " Next: " + utcLabel(sch.next_run) + ".";
     if (!sch.runnable) line += " Cannot run: " + plainWords(sch.reason || "unknown reason");
     state.textContent = line;
+    // Red here, BEFORE the read-only return below. That path renders no run
+    // history at all, so a refusal is the only alarm it can carry, and it is
+    // the exact case the comment above says this card exists for.
+    if (!sch.runnable) state.classList.add("alarm");
   }
 
   // Two lines, not a lecture (#1528). The general explanation of the producer
@@ -6564,11 +6570,19 @@ function backupScheduleCard(cur, b) {
   // shown when it is the newest fact: a slot that could not start after
   // the last good run is exactly what the operator needs to see.
   if (sch) {
-    let alarm = false, everyRunCode = "";
+    // alarmNote is the few words the STATE LINE gets when one of these
+    // branches raises the alarm. The red alone used to mean "the fold below
+    // is open, the reason is in it"; with the body always visible the colour
+    // would be a verdict with no words, which is the noise CONTRIBUTING's
+    // rule 4 names. Assignments run oldest fact to newest, and the last one
+    // wins, so the line carries the newest reason while the body keeps all
+    // of them in full.
+    let alarm = false, alarmNote = "", everyRunCode = "";
     if (sch.runnable && sch.next_method_error) {
       // Runnable in principle, but the next slot will be skipped as things
       // stand: said in red BEFORE the slot, not discovered after it.
       alarm = true;
+      alarmNote = "The next run cannot start.";
       body.append(el("p", { class: "form-msg err", text:
         "The next run cannot start: " + plainWords(sch.next_method_error) + (/[.!?]$/.test(sch.next_method_error) ? "" : ".") }));
     } else if (sch.runnable && sch.next_method) {
@@ -6579,6 +6593,7 @@ function backupScheduleCard(cur, b) {
       const everyRun = sch.next_method !== "refresh" && BACKUP_WHY_EVERY_RUN.has(sch.next_method_why_code);
       if (everyRun) {
         alarm = true;
+        alarmNote = "Every run reads your database in full.";
         everyRunCode = sch.next_method_why_code;
       }
       body.append(el("p", { class: everyRun ? "form-msg err" : "form-hint", text:
@@ -6589,6 +6604,7 @@ function backupScheduleCard(cur, b) {
       // Without the run history only what this daemon started since boot is
       // known; "it has not run yet" would be a guess, so say what is missing.
       alarm = true;
+      alarmNote = "The run history could not be opened.";
       body.append(el("p", { class: "form-msg err", text:
         "The backup run history could not be opened, so runs from before this daemon started are not shown. Check the daemon log." }));
     }
@@ -6607,6 +6623,7 @@ function backupScheduleCard(cur, b) {
           (run.uploaded ? ", " + run.uploaded + " file(s) uploaded" : "") + "." }));
       } else {
         alarm = true;
+        alarmNote = run.snapshot_time ? "The last run could not send its backup." : "The last run failed.";
         // A failed run that still names a snapshot is the one shape where the
         // backup exists: the fold finished and only the upload failed. Telling
         // that operator nothing was written would send them looking for a
@@ -6640,6 +6657,7 @@ function backupScheduleCard(cur, b) {
       // named as one, not as a refusal. The daemon records a fallback only
       // once the full backup actually started, so "started" is a fact.
       alarm = true;
+      alarmNote = "An update was refused, so a full backup ran instead.";
       const crashed = /^internal error/.test(fb.reason || "");
       const why = backupFoldError(crashed ? fb.reason.replace(/^internal error:?\s*/, "") : fb.reason);
       body.append(el("p", { class: "form-msg err", text:
@@ -6651,6 +6669,7 @@ function backupScheduleCard(cur, b) {
     // newer fact, not an older one.
     if (skip && (!run || skip.at >= (run.finished_at || ""))) {
       alarm = true;
+      alarmNote = "A scheduled run did not start.";
       // backupFoldError, not plainWords: a fold error rides in here too,
       // with its bare --allow-gaps hint.
       body.append(el("p", { class: "form-msg err", text:
@@ -6663,8 +6682,14 @@ function backupScheduleCard(cur, b) {
     // Nothing to open any more, so the alarm moves to the state line: a
     // schedule whose last word is a refusal must not be summarised in the
     // grey of a healthy one, and the red line at the top is what a reader
-    // scanning the page sees before any of the detail below it.
-    if (!sch.runnable || alarm) state.className = "form-msg err bk-schedule-state";
+    // scanning the page sees before any of the detail below it. The note
+    // goes with the colour, never instead of it: colour alone is a verdict
+    // a screen reader cannot read out and a colour-blind operator cannot
+    // see. classList.add, not a className rewrite: the line's own class
+    // carries its gutter, and rebuilding the list by hand would drop
+    // whatever is added at the top of this function later.
+    if (alarm) state.classList.add("alarm");
+    if (alarmNote) state.textContent += " " + alarmNote;
   }
   card.append(body);
   return card;
@@ -6709,8 +6734,11 @@ async function removeBackupSchedule(id, btn, msgEl) {
 // backupRestoreCard offers the point-in-time restore: pick a past moment, get
 // a NEW backup showing every table as it was then. A card, not a fold
 // (#1528): behind a summary, the one sentence that says your database is not
-// touched was the thing a reader had to click to find, and a failed restore
-// announced itself only in a toast that had already gone.
+// touched was the thing a reader had to click to find. The last restore's
+// outcome is the card's state line, under the heading, where the fold used
+// to force itself open on a failure; as a card it has no open to force, and
+// leaving that line at the bottom of the body would have put the failure in
+// the least-read place on the card.
 function backupRestoreCard(cur, b, restoreSt) {
   // Registry servers only: the CLI (ephemeral) entry is refused by the
   // monitor verbs with a message about monitoring, not restores.
@@ -6733,7 +6761,10 @@ function backupRestoreCard(cur, b, restoreSt) {
   const card = el("section", { class: "ov-panel bk-restore" });
   card.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: "Restore to a moment" })));
-  const body = el("div", { class: "bk-restore-body" });
+  const state = el("p", { class: "form-hint bk-card-state" });
+  state.hidden = true;
+  card.append(state);
+  const body = el("div", { class: "bk-card-body" });
   body.append(el("p", { class: "form-hint", text:
     "Pick a past moment. DBTrail rebuilds every table as it was then, from your backups plus the recorded changes, and saves the result as a new backup in the list below. Your database is not touched." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
@@ -6750,16 +6781,19 @@ function backupRestoreCard(cur, b, restoreSt) {
     // published means the fold finished and the snapshot is on disk, and only
     // sending it to S3 failed (#1541). "Published nothing" there is false: the
     // backup is in the list below and can be restored from.
-    body.append(el("p", { class: "form-msg err", text: rst.published
+    state.hidden = false;
+    state.classList.add("alarm");
+    state.textContent = rst.published
       ? "Last restore wrote the backup on this machine but could not send it to S3: " + backupFoldError(rst.last_error || "unknown error") + " The backup is in the list below. A full backup sends it along with the rest."
-      : restoreRefusedLine(rst) }));
+      : restoreRefusedLine(rst);
   } else if (rst && rst.state === "succeeded") {
     // The reused count belongs here for the same reason it belongs on the
     // refresh note: a restore consumes the same reuse setting, and without the
     // number nothing on this page confirms the setting did anything.
-    body.append(el("p", { class: "form-hint", text:
+    state.hidden = false;
+    state.textContent =
       "Last restore finished" + (rst.at ? ": the backup at " + utcLabel(rst.at) : "") + " is in the list below." +
-      (rst.carried ? " " + rst.carried + " table(s) reused an unchanged file" + reusedCopiedNote(rst.carried_copied || 0) + "." : "") }));
+      (rst.carried ? " " + rst.carried + " table(s) reused an unchanged file" + reusedCopiedNote(rst.carried_copied || 0) + "." : "");
   }
   card.append(body);
   return card;
@@ -6786,8 +6820,10 @@ async function startBackupRestore(id, at, btn, msgEl) {
 //
 // This page had two downloads and neither could be found. The Parquet
 // .tar.gz sat inside a row's expand with nothing saying the row opened, and
-// the .sql builder was a <details> summary in small caps below three other
-// folds. A reader who wants a copy arrives with one question -- what do I
+// the .sql builder was a <details> summary in small caps below the page's
+// other folds (#1528 has since made two of those cards, leaving the count
+// here as history rather than a description of the page). A reader who
+// wants a copy arrives with one question -- what do I
 // download to open this in DuckDB, what do I download to load it into MySQL
 // -- and had to open two folds to learn there was an answer at all.
 //

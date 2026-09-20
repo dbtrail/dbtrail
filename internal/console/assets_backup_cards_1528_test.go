@@ -1,6 +1,10 @@
 package console
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -12,34 +16,157 @@ import (
 // with prose above them. A fold reintroduced here compiles, renders, and
 // passes every other test in this package, because nothing else asserts on
 // the element these functions build.
+//
+// jsFunctionSpan, NOT jsFunctionBody: these are must-NOT-contain checks, and
+// jsFunctionBody cuts every line at its first `//`, so a fold written on the
+// same line as any string holding a `//` (a https:// URL is enough, and
+// app.js has several) would be truncated out of the needle and the guard
+// would pass with the fold on screen. That failure direction is documented
+// on the helper itself.
+//
+// Known limits, so nobody reads more coverage into this than it has: it
+// matches source text, so `document.createElement("details")` or single
+// quotes would slip past, and the span starts at the opening brace, so the
+// header comment above each function is not covered by the loop (the
+// separate check below covers the one claim that matters there).
 func TestBackupsPageDoesNotFoldItsOwnSubject(t *testing.T) {
 	js := readAsset(t, "app.js")
 	for _, fn := range []string{"backupScheduleCard", "backupRestoreCard"} {
-		// Comments stripped: both functions explain in prose why they are no
-		// longer folds, and the words "details" and "summary" appear there.
-		body := stripJSLineComments(jsFunctionBody(t, js, fn))
-		if strings.Contains(body, `el("details"`) || strings.Contains(body, `el("summary"`) {
+		span := jsFunctionSpan(t, js, fn)
+		if strings.Contains(span, `el("details"`) || strings.Contains(span, `el("summary"`) {
 			t.Errorf("%s builds a fold again; the Backups page's own subject is a card (#1528)", fn)
 		}
-		if !strings.Contains(body, `el("section", { class: "ov-panel`) {
+		if !strings.Contains(span, `el("section", { class: "ov-panel`) {
 			t.Errorf("%s no longer builds a panel section, so it does not look like the cards around it", fn)
 		}
-		if strings.Contains(body, ".open = true") {
+		if strings.Contains(span, ".open = true") {
 			t.Errorf("%s still opens a fold, so one was reintroduced somewhere this guard cannot see", fn)
+		}
+	}
+	// The header comment is the first thing a reader meets and the last thing
+	// a rewrite updates: this one described the fold for the whole of #1528's
+	// review. It sits outside jsFunctionSpan, so it needs its own look.
+	for _, fn := range []string{"backupScheduleCard", "backupRestoreCard"} {
+		i := strings.Index(js, "function "+fn+"(")
+		if i < 0 {
+			t.Fatalf("%s is gone", fn)
+		}
+		head := js[max(0, i-1200):i]
+		if j := strings.LastIndex(head, "\n\n"); j >= 0 {
+			head = head[j:]
+		}
+		for _, stale := range []string{"opens the card", "opening the card", "Collapsed by default", "The summary line"} {
+			if strings.Contains(head, stale) {
+				t.Errorf("%s's header comment still describes the fold (%q)", fn, stale)
+			}
 		}
 	}
 }
 
-// The alarm survived the unfolding. A failed, skipped or not-runnable
-// schedule used to force the fold OPEN; with the card always visible that
-// signal has to land somewhere, or a schedule whose last word is a refusal
-// reads in the same grey as a healthy one.
-func TestBackupScheduleAlarmMarksTheStateLine(t *testing.T) {
-	body := stripJSLineComments(jsFunctionBody(t, readAsset(t, "app.js"), "backupScheduleCard"))
-	if !strings.Contains(body, `state.className = "form-msg err`) {
-		t.Error("a schedule in alarm no longer marks the card's state line, so the alarm is invisible above the fold that used to open (#1528)")
+// The alarm survived the unfolding, and it survived it in WORDS. A failed,
+// skipped or not-runnable schedule used to force the fold OPEN; with the card
+// always visible that signal has to land somewhere, and colour alone is a
+// verdict a screen reader cannot read out.
+//
+// This renders the real function in node rather than searching the source,
+// because the source-level version of this guard passed green against
+// `if (false) state.classList.add(...)` and against deleting five of the six
+// alarm branches: strings.Contains proves a needle EXISTS, never that it
+// runs.
+func TestBackupScheduleAlarmReachesTheStateLine(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv(requireNodeEnv) != "" {
+			t.Fatalf("%s is set and node is not on PATH", requireNodeEnv)
+		}
+		t.Skip("node is not installed")
 	}
-	if !strings.Contains(body, "alarm = true") {
-		t.Error("backupScheduleCard no longer raises an alarm at all")
+	appJS, err := filepath.Abs("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name      string
+		caps      string
+		schedule  map[string]any
+		wantAlarm bool
+		wantWords string // must appear in the state line itself
+	}{{
+		name:      "healthy",
+		caps:      "{ backup_schedule: true }",
+		schedule:  map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z"},
+		wantAlarm: false,
+	}, {
+		// The case the card exists for: a saved schedule on a daemon that
+		// cannot run it. It returns before the run-history block, so if the
+		// alarm were raised only there this would render grey.
+		name:      "not runnable, read-only daemon",
+		caps:      "{ backup_schedule: false }",
+		schedule:  map[string]any{"every": "1d", "at": "03:00", "runnable": false, "reason": "backup features are off on this daemon"},
+		wantAlarm: true,
+		wantWords: "Cannot run:",
+	}, {
+		// Runnable, next run predicted, but the last one failed: the state
+		// line used to go red while its words stayed healthy.
+		name: "last run failed",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
+			"last_run": map[string]any{"method": "refresh", "ok": false, "finished_at": "2026-09-19T03:01:00Z", "error": "disk full"}},
+		wantAlarm: true,
+		wantWords: "The last run failed.",
+	}, {
+		name: "a slot was skipped",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
+			"last_skipped": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "no previous backup"}},
+		wantAlarm: true,
+		wantWords: "A scheduled run did not start.",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sched, err := json.Marshal(tc.schedule)
+			if err != nil {
+				t.Fatal(err)
+			}
+			script := renderHarnessJS + `
+vm.runInContext("capsCache = ` + tc.caps + `;", ctx);
+const find = (n) => { if (!n) return null; if (String(n.className || "").includes("bk-card-state")) return n; for (const c of n.children || []) { const f = find(c); if (f) return f; } return null; };
+const cur = { id: "a", name: "a", kind: "registry", baseline_dir: "/var/lib/bintrail/baselines/a" };
+const card = vm.runInContext("backupScheduleCard", ctx)(cur, { configured: true, snapshots: [], schedule: ` + string(sched) + ` });
+const line = find(card);
+console.log(JSON.stringify(line ? { found: true, cls: line.className, text: line.textContent } : { found: false }));
+`
+			path := filepath.Join(t.TempDir(), "state.js")
+			if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := exec.Command(node, path, appJS).CombinedOutput()
+			if err != nil {
+				t.Fatalf("node: %v\n%s", err, raw)
+			}
+			var got struct {
+				Found     bool
+				Cls, Text string
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("decode %q: %v", raw, err)
+			}
+			if !got.Found {
+				t.Fatal("the schedule card renders no state line at all")
+			}
+			if alarm := strings.Contains(got.Cls, "alarm"); alarm != tc.wantAlarm {
+				t.Errorf("state line alarm = %v, want %v (class %q, text %q)", alarm, tc.wantAlarm, got.Cls, got.Text)
+			}
+			if tc.wantWords != "" && !strings.Contains(got.Text, tc.wantWords) {
+				t.Errorf("the state line is red but its words do not say why: want %q in %q", tc.wantWords, got.Text)
+			}
+			// The gutter comes from the line's own class; a className rewrite
+			// would drop it exactly when the card is in alarm.
+			if !strings.Contains(got.Cls, "bk-card-state") {
+				t.Errorf("the state line lost bk-card-state (class %q)", got.Cls)
+			}
+		})
 	}
 }
