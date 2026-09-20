@@ -4612,17 +4612,27 @@ function buildBackupSettings(settings, refresh) {
   // install. The per-server panel is the page's serve-reachable half — the
   // only editor of the registry's backup fields. The section labels exist
   // only where there are two kinds to tell apart.
+  const daemonRows = (settings && settings.daemon) || [];
+  // The split is now by WHERE THE VALUE LIVES, which is what the operator can
+  // act on: rows this interface can save sit under "Change here" beside the
+  // other editable settings; only what still lives in the launch command is
+  // under "Set when DBTrail starts". The second card disappears when it is
+  // empty (#1682).
+  const editableRows = daemonRows.filter((row) => row.editable);
+  const startupRows = daemonRows.filter((row) => !row.editable);
   if (capsCache.monitor) {
     v.append(sect("Change here"));
     // The carry-forward card moved here from the Backups page: it is a setting,
     // and this page is where settings live; the Backups page keeps the work
     // (schedules, runs, downloads) beside the data it reports on.
-    v.append(el("div", { class: "cards" }, backupRefreshCard(refresh)));
+    const cards = el("div", { class: "cards" }, backupRefreshCard(refresh));
+    if (!broken && editableRows.length) cards.append(backupDaemonEditCard(editableRows));
+    v.append(cards);
   }
   if (!broken) v.append(backupServersPanel(settings));
-  if (capsCache.monitor && !broken) {
+  if (capsCache.monitor && !broken && startupRows.length) {
     v.append(sect("Set when DBTrail starts"));
-    v.append(backupDaemonCard(settings.daemon || []));
+    v.append(backupDaemonCard(startupRows));
   }
   viewEnter();
 }
@@ -4703,6 +4713,73 @@ function backupDaemonCard(rows) {
     docsMore("guides/backup-settings", "set-at-startup", "settings that need a restart")));
   return card;
 }
+
+// backupDaemonEditCard renders the daemon-wide rows this interface can save
+// (#1682). One row, one input, one Save — and, when a value is saved, the way
+// back to what the process was started with, because a setting that can only
+// be overridden once is a trap.
+//
+// "Restart to change" survives here per row: saving a value and applying it
+// are different facts. A row this daemon reads per job says nothing; a row it
+// read once at boot says so beside its input, under its own value, so the
+// operator knows the save landed and the effect has not.
+function backupDaemonEditCard(rows) {
+  const card = el("div", { class: "card" });
+  card.append(el("div", { class: "card-title" }, el("span", { text: "Backups and checks" })));
+  for (const row of rows) {
+    card.append(backupDaemonEditRow(row));
+  }
+  card.append(cnFine("More about these settings",
+    el("p", { class: "form-hint", text:
+      "Saved here, in DBTrail's own settings file, which wins over the command line and the environment. " +
+      "Use the startup value to go back to what the process was started with." }),
+    docsMore("guides/backup-settings", "set-at-startup", "settings that need a restart")));
+  return card;
+}
+
+function backupDaemonEditRow(row) {
+  const label = BACKUP_DAEMON_ROWS[row.key] || row.key;
+  const wrap = el("div", { class: "bks-erow" });
+  const head = el("label", { class: "form-label", for: "bks-" + row.key }, label);
+  if (row.needs_restart) head.append(el("span", { class: "tag-pill bks-restart", text: "restart to apply" }));
+  wrap.append(head);
+  const input = el("input", { class: "input", id: "bks-" + row.key, type: "text",
+    value: row.value || "", placeholder: BACKUP_DAEMON_EMPTY[row.key] || "" });
+  const msg = el("p", { class: "form-msg" });
+  const save = el("button", { class: "btn btn-sm", type: "button", text: "Save" });
+  const revert = row.source === "saved"
+    ? el("button", { class: "btn btn-ghost btn-sm", type: "button", text: "Use the startup value" })
+    : null;
+  const send = async (body, button) => {
+    button.disabled = true;
+    if (revert) revert.disabled = true;
+    save.disabled = true;
+    try {
+      await api("/api/backup-settings/daemon/" + encodeURIComponent(row.key), {
+        method: "PUT", body: JSON.stringify(body) });
+      await renderBackupSettings();
+    } catch (err) {
+      msg.className = "form-msg err";
+      msg.textContent = (err && err.message) || String(err);
+      save.disabled = false;
+      if (revert) revert.disabled = false;
+    }
+  };
+  save.addEventListener("click", () => send({ value: input.value }, save));
+  if (revert) revert.addEventListener("click", () => send({ use_startup: true }, revert));
+  wrap.append(el("div", { class: "bks-erow-in" }, input, save, revert));
+  // Provenance, in one line: what is winning, and what it is winning over.
+  wrap.append(el("p", { class: "form-hint", text: row.source === "saved"
+    ? "Saved here. The command line says " + (row.startup || "nothing") + "."
+    : "From the command line or the environment (" + row.cli + ")." }));
+  if (row.err) {
+    wrap.append(el("p", { class: "form-msg err", text:
+      "The value you set was refused and is not in force: " + row.err }));
+  }
+  wrap.append(msg);
+  return wrap;
+}
+
 
 // BACKUP_SOURCE_CASES draws the three answers to "which backup location is
 // in force for this server", keyed by the EXACT Source values

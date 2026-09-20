@@ -138,6 +138,9 @@ var apiRoutePerms = []routePerm{
 	// carries the servers-write tier the entry's own editor does.
 	{"GET", "/api/backup-settings", ext.PermSettingsRead},
 	{"PUT", "/api/backup-settings/servers/{}", ext.PermServersWrite},
+	// The daemon-wide rows are process settings, not one server's connection,
+	// so they sit behind settings:write rather than servers:write.
+	{"PUT", "/api/backup-settings/daemon/{}", ext.PermSettingsWrite},
 	// Baseline refresh, graded exactly like rotation: reading the effective
 	// policy is a settings read, changing what the daemon's loop does is a
 	// control-plane write.

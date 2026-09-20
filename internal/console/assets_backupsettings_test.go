@@ -19,6 +19,8 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 	js := readAsset(t, "app.js")
 	page := jsFunctionBody(t, js, "buildBackupSettings") +
 		jsFunctionBody(t, js, "backupDaemonCard") +
+		jsFunctionBody(t, js, "backupDaemonEditCard") +
+		jsFunctionBody(t, js, "backupDaemonEditRow") +
 		jsFunctionBody(t, js, "backupServersPanel") +
 		jsFunctionBody(t, js, "backupServerRow") +
 		jsFunctionBody(t, js, "s3OnlyBackupWarning") +
@@ -31,6 +33,11 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 	for _, read := range []string{
 		"settings.daemon", "settings.servers", "settings.registry_read_only",
 		"row.key", "row.value", "row.on", "row.cli", "row.needs_restart", "row.err",
+		// The editable daemon rows (#1682). row.editable decides which card a
+		// row lands in, row.source which sentence it gets, row.startup what
+		// "use the startup value" would restore — a blank there would offer
+		// the way back without saying where it goes.
+		"row.editable", "row.source", "row.startup",
 		"srv.baseline_dir", "srv.baseline_s3", "srv.no_archive",
 		"srv.resolved_dir", "srv.resolved_s3", "srv.source",
 		"srv.schedule_every", "srv.schedule_at", "srv.schedule_refusal",

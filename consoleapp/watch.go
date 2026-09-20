@@ -431,7 +431,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 		return fmt.Errorf("console: %w", err)
 	}
 
-	cfg, err := upConsoleConfig(db, upIndexDSN, upConsoleOpts())
+	cfg, err := upConsoleConfig(db, upIndexDSN, upConsoleOpts(), registry)
 	if err != nil {
 		return err
 	}
@@ -469,10 +469,10 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// The sweep runs regardless of the supervisor decision below: with both
 	// baseline features off, no supervisor would ever remove a previous
 	// process's staged dump.
-	sweepSQLExportStaging(baselineStagingDir())
+	sweepSQLExportStaging(baselineStagingDirFor(registry))
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
-		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDir())
+		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDirFor(registry), registry)
 		// The retention the #1689 gate bounds a skipped cycle against. Wired
 		// here rather than taken as a constructor argument because it is the
 		// same provider rotation reads, and because a supervisor without one
@@ -664,7 +664,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("console: %w", err)
 	}
 
-	cfg, err := upConsoleConfig(db, upIndexDSN, upConsoleOpts())
+	cfg, err := upConsoleConfig(db, upIndexDSN, upConsoleOpts(), registry)
 	if err != nil {
 		return err
 	}
@@ -698,10 +698,10 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// The sweep runs regardless of the supervisor decision below: with both
 	// baseline features off, no supervisor would ever remove a previous
 	// process's staged dump.
-	sweepSQLExportStaging(baselineStagingDir())
+	sweepSQLExportStaging(baselineStagingDirFor(registry))
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
-		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDir())
+		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDirFor(registry), registry)
 		// The retention the #1689 gate bounds a skipped cycle against. Wired
 		// here rather than taken as a constructor argument because it is the
 		// same provider rotation reads, and because a supervisor without one
@@ -910,9 +910,11 @@ func mainSourceJobInfo(sourceDSN, indexDSN, streamFlavor string) ext.SourceJobIn
 // supervisor. Dropping that assignment is invisible at either call site — the
 // daemon still boots and baselines still run, in a mode the operator did not
 // ask for — so it is asserted here rather than duplicated there.
-func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string) *baselineSupervisor {
+func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string, reg *console.Registry) *baselineSupervisor {
 	sup := newBaselineSupervisor(ctx, stagingDir, upConsoleBaselineLockMode)
 	sup.configErr = upConsoleBaselineLockModeErr
+	// The settings store the lock mode is re-read from per job (#1682).
+	sup.reg = reg
 	sup.tableDeltas = upBaselineTableDeltas
 	if upBaselineTableDeltas {
 		// Once per boot, because the failure it prevents is silent: a DuckDB
@@ -1106,6 +1108,16 @@ func baselineStagingDir() string {
 	return filepath.Join(os.TempDir(), "bintrail-baseline-staging")
 }
 
+// baselineStagingDirFor is baselineStagingDir with a saved setting (#1682)
+// taking precedence. Resolved at BOOT rather than per job on purpose: the
+// directory is swept once at startup for what a previous process left behind,
+// so a switch while running would leave those files with nothing looking at
+// them again. The row on the page says "restart to change" for that reason,
+// and saying it per row is what keeps the page honest about the difference.
+func baselineStagingDirFor(reg *console.Registry) string {
+	return effectiveStagingDir(reg, baselineStagingDir())
+}
+
 // wireVerify wires the in-process verify supervisor and, when
 // --verify-interval is set, the scheduled verification loop (#1191). The
 // supervisor (and with it the manual trigger endpoints) is enabled by either
@@ -1136,7 +1148,7 @@ func wireVerify(ctx context.Context, cfg *console.Config, registry *console.Regi
 	cfg.VerifyCtrl = sup
 	cfg.VerifyHistory = history
 	if interval > 0 {
-		startVerifyLoop(ctx, sup, registry, history, interval, splitVerifyTables(upVerifyTables))
+		startVerifyLoop(ctx, sup, registry, history, interval, func() []string { return effectiveVerifyTables(registry, upVerifyTables) })
 	}
 	return nil
 }
@@ -1205,25 +1217,17 @@ func seedVerifyGauges(registry *console.Registry, history *console.VerifyHistory
 
 // splitVerifyTables parses the comma-separated --verify-tables list; empty
 // entries are dropped, an empty flag means no filter (nil).
-func splitVerifyTables(raw string) []string {
-	var out []string
-	for _, t := range strings.Split(raw, ",") {
-		if t = strings.TrimSpace(t); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
-}
+func splitVerifyTables(raw string) []string { return console.SplitVerifyTables(raw) }
 
 // startVerifyLoop runs one scheduled verification cycle per interval (#1191):
 // every registry server, sequentially — one verify (one DuckDB budget) at a
 // time. Mirrors startBaselinePruneLoop's shape: recover-guarded, first cycle
 // shortly after startup, stops with the daemon context.
-func startVerifyLoop(ctx context.Context, sup *verifySupervisor, registry *console.Registry, history *console.VerifyHistory, interval time.Duration, tables []string) {
+func startVerifyLoop(ctx context.Context, sup *verifySupervisor, registry *console.Registry, history *console.VerifyHistory, interval time.Duration, tables func() []string) {
 	slog.Info("scheduled verification enabled", "interval", interval)
 	go func() {
 		if ctx.Err() == nil {
-			runScheduledVerifyCycle(ctx, sup, registry, history, tables)
+			runScheduledVerifyCycle(ctx, sup, registry, history, tables())
 		}
 		t := time.NewTicker(interval)
 		defer t.Stop()
@@ -1232,7 +1236,7 @@ func startVerifyLoop(ctx context.Context, sup *verifySupervisor, registry *conso
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				runScheduledVerifyCycle(ctx, sup, registry, history, tables)
+				runScheduledVerifyCycle(ctx, sup, registry, history, tables())
 			}
 		}
 	}()
@@ -1405,12 +1409,25 @@ func runBaselinePruneCycle(ctx context.Context, targets []baselinePruneTarget, r
 // --baseline-retain value is a fatal misconfiguration returned BEFORE the
 // goroutine starts, so a typo fails the daemon fast rather than spinning.
 func startBaselinePruneLoop(ctx context.Context, reg *console.Registry, globalDir, globalS3, retainRaw string, interval time.Duration) error {
-	if retainRaw == "" {
-		return nil // retention not configured — leave baselines untouched
+	// The FLAG is validated first and still fails the daemon fast: a typo on
+	// the command line is a misconfiguration the operator can see and fix
+	// there, and swallowing it into "retention off" would turn a typo into a
+	// disk that silently never gets reclaimed.
+	if retainRaw != "" {
+		if _, err := cliutil.ParseRetain(retainRaw); err != nil {
+			return fmt.Errorf("--baseline-retain: %w", err)
+		}
 	}
-	retain, err := cliutil.ParseRetain(retainRaw)
-	if err != nil {
-		return fmt.Errorf("--baseline-retain: %w", err)
+	// The BOOT gate stays a gate: with nothing configured and nothing saved,
+	// no goroutine is started, and a retention saved later is dormant until a
+	// restart — which is exactly what the page reports, because
+	// backupSettingsLive only names this key when this loop is running. A
+	// saved value that this build cannot read has already warned inside
+	// effectiveRetain; it leaves the loop off rather than failing the daemon,
+	// because a file edited by hand must never stop capture.
+	bootRetain, _ := effectiveRetain(reg, retainRaw)
+	if bootRetain <= 0 {
+		return nil // retention not configured — leave baselines untouched
 	}
 	if globalDir != "" && globalS3 == "" {
 		// The operator pointed retention at a local dir with no durable S3 source;
@@ -1421,33 +1438,9 @@ func startBaselinePruneLoop(ctx context.Context, reg *console.Registry, globalDi
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	slog.Info("baseline prune loop enabled", "retain", retainRaw, "interval", interval)
+	slog.Info("baseline prune loop enabled", "retain", bootRetain, "interval", interval)
+	runOnce := func() { baselinePruneSweep(ctx, reg, globalDir, globalS3, retainRaw, baseline.PruneLocal) }
 	go func() {
-		runOnce := func() {
-			// Recover-guard the cycle: a panic in PruneLocal (live S3 calls, fs
-			// walks) must NEVER take down the daemon's primary forensic capture —
-			// this optional disk-reclaim feature shares the process with the
-			// stream. Mirrors rotation.StartLoop's guard (internal/rotation).
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Error("baseline prune cycle panicked; retention continues next tick", "panic", r)
-				}
-			}()
-			var entries []console.ServerEntry
-			if reg != nil {
-				entries = reg.List()
-			}
-			// A per-server local baseline dir with no S3 prefix is the only copy —
-			// skipped, but warn (matching the global/CLI signal) so its unbounded
-			// growth isn't silent.
-			for _, e := range entries {
-				if e.BaselineDir != "" && e.BaselineS3 == "" {
-					slog.Warn("baseline-retain: server has a local baseline dir but no S3 prefix; its baselines are the only copy and will not be pruned",
-						"server", e.Name, "dir", e.BaselineDir)
-				}
-			}
-			runBaselinePruneCycle(ctx, baselinePruneTargets(entries, globalDir, globalS3), retain, baseline.PruneLocal)
-		}
 		// One sweep shortly after startup (the min-age floor protects any
 		// just-created snapshot), then on the interval — unless the daemon is
 		// already shutting down.
@@ -1528,7 +1521,7 @@ func errString(err error) string {
 	return err.Error()
 }
 
-func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts) (console.Config, error) {
+func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console.Registry) (console.Config, error) {
 	cfg, err := mysql.ParseDSN(indexDSN)
 	if err != nil {
 		return console.Config{}, fmt.Errorf("invalid --index-dsn: %w", err)
@@ -1581,6 +1574,16 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts) (console.Con
 			StagingDir:     upBaselineStageDir,
 			VerifyInterval: upVerifyInterval,
 			VerifyTables:   upVerifyTables,
+			// Which of those rows THIS daemon applies without a restart
+			// (#1682). Computed from the same expressions that gate the
+			// consumers below — the caveat BaselineRefreshDefaults already
+			// carries: gate and report must move together, or the page
+			// promises a live edit the daemon never picks up.
+			Live: backupSettingsLive(
+				pruneLoopRuns(reg),
+				verifyLoopRuns(),
+				upConsoleBaselineTrigger || upBaselineRefreshEvery != "",
+			),
 		},
 		BaselineRefreshDefaults: console.BaselineRefreshDefaults{
 			CarryForwardUnchanged: upBaselineCarryForward,
@@ -1717,4 +1720,62 @@ func resolveBintrailID(indexDSN string) (string, error) {
 		return "", fmt.Errorf("read stream_state: %w", err)
 	}
 	return id.String, nil
+}
+
+// pruneLoopRuns and verifyLoopRuns mirror the boot gates of the two loops
+// whose settings this daemon can re-read. They exist so the page's per-row
+// "restart to change" is decided by the same condition that decides whether
+// the goroutine exists — a loop that never started cannot pick anything up,
+// and saying otherwise would be the one lie this page cannot afford.
+func pruneLoopRuns(reg *console.Registry) bool {
+	d, on := effectiveRetain(reg, upConsoleBaselineRetain)
+	return on && d > 0
+}
+
+func verifyLoopRuns() bool {
+	if upVerifyInterval == "" {
+		return false
+	}
+	d, err := cliutil.ParseRetain(upVerifyInterval)
+	return err == nil && d > 0
+}
+
+// baselinePruneSweep is ONE prune cycle. A named function rather than a
+// closure inside the loop so the wiring is testable: the thing that must hold
+// is that the retention is resolved HERE, per cycle, and not captured when the
+// goroutine started (#1682) — a closure over a parsed duration was exactly the
+// shape that made the setting inert.
+func baselinePruneSweep(ctx context.Context, reg *console.Registry, globalDir, globalS3, retainRaw string,
+	pruneFn func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error)) {
+	// Recover-guard the cycle: a panic in PruneLocal (live S3 calls, fs walks)
+	// must NEVER take down the daemon's primary forensic capture — this
+	// optional disk-reclaim feature shares the process with the stream.
+	// Mirrors rotation.StartLoop's guard (internal/rotation).
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("baseline prune cycle panicked; retention continues next tick", "panic", r)
+		}
+	}()
+	// Re-read per cycle: a retention saved from the interface bounds the very
+	// next sweep instead of waiting for a restart. A value saved as empty
+	// stops pruning, which is a real answer — and why this reads the flag
+	// rather than treating a zero duration as "unset".
+	retain, on := effectiveRetain(reg, retainRaw)
+	if !on {
+		return
+	}
+	var entries []console.ServerEntry
+	if reg != nil {
+		entries = reg.List()
+	}
+	// A per-server local baseline dir with no S3 prefix is the only copy —
+	// skipped, but warn (matching the global/CLI signal) so its unbounded
+	// growth isn't silent.
+	for _, e := range entries {
+		if e.BaselineDir != "" && e.BaselineS3 == "" {
+			slog.Warn("baseline-retain: server has a local baseline dir but no S3 prefix; its baselines are the only copy and will not be pruned",
+				"server", e.Name, "dir", e.BaselineDir)
+		}
+	}
+	runBaselinePruneCycle(ctx, baselinePruneTargets(entries, globalDir, globalS3), retain, pruneFn)
 }

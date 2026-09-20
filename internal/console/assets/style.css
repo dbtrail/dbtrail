@@ -2919,6 +2919,11 @@ button { font-family: inherit; }
   align-items: baseline; padding: 10px 0; border-bottom: 1px dotted var(--line);
 }
 .bks-row:last-child { border-bottom: none; }
+/* An editable daemon-wide row (#1682): label, input + buttons, provenance. */
+.bks-erow { padding: 12px 0; border-bottom: 1px dotted var(--line); }
+.bks-erow:last-child { border-bottom: none; }
+.bks-erow-in { display: flex; gap: 8px; align-items: center; margin: 4px 0 6px; flex-wrap: wrap; }
+.bks-erow-in .input { flex: 1 1 220px; min-width: 0; }
 .bks-label { font-size: 13px; color: var(--ink-2); }
 .bks-value {
   font-family: var(--f-mono); font-size: 13px; color: var(--ink);
