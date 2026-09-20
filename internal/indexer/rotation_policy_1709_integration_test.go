@@ -101,3 +101,63 @@ func TestReadInitialRetain_returnsTheStoredValue(t *testing.T) {
 		t.Fatalf("ReadInitialRetain = %q, %v, %v; want \"48h\", true, nil", got, found, err)
 	}
 }
+
+// An index an OLDER build created grows the table on the next startup, and
+// grows it EMPTY (#1709 shipped the table in CreateIndexTables only, so a
+// fresh index had it and a migrated one did not; the same build then read two
+// different schemas depending on how the index was born).
+//
+// Both halves are asserted because they mean opposite things. The table must
+// appear, or an upgraded index can never record anything and tooling has to
+// special-case a missing table forever. The ROW must NOT, because its absence
+// is what tells the rotation loop this index predates the record and must keep
+// its old window: writing one here would claim an index whose history
+// accumulated under a thirty-day retention was created under today's 48h, and
+// the next cycle would drop partitions nobody asked it to drop.
+func TestEnsureSchema_addsRotationPolicyToALegacyIndexButNotItsRow(t *testing.T) {
+	db, dbName := testutil.CreateTestDB(t)
+	ctx := context.Background()
+
+	// The index as an older build left it: every table except this one.
+	if err := CreateIndexTables(ctx, db, 2, false, nil); err != nil {
+		t.Fatalf("CreateIndexTables: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "DROP TABLE rotation_policy"); err != nil {
+		t.Fatalf("drop rotation_policy to simulate a legacy index: %v", err)
+	}
+	// Proves the drop worked, so the assertions below cannot pass on a table
+	// that was simply never removed.
+	if _, _, found, err := ReadInitialRetain(ctx, db, dbName); err != nil || found {
+		t.Fatalf("after the drop: found=%v err=%v, want found=false and no error", found, err)
+	}
+
+	if err := EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema on a legacy index: %v", err)
+	}
+
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.TABLES
+		  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'rotation_policy'`, dbName).Scan(&n); err != nil {
+		t.Fatalf("look for the table: %v", err)
+	}
+	if n != 1 {
+		t.Error("EnsureSchema did not create rotation_policy, so an upgraded index keeps a different schema from a fresh one")
+	}
+
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rotation_policy").Scan(&n); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if n != 0 {
+		t.Error("EnsureSchema recorded a retention on an index it did not create; the rotation loop would read today's default as this index's own and drop partitions under the old window")
+	}
+	// The read path must still answer the way it did before the table existed.
+	if _, _, found, err := ReadInitialRetain(ctx, db, dbName); err != nil || found {
+		t.Errorf("ReadInitialRetain on the migrated index: found=%v err=%v, want found=false", found, err)
+	}
+
+	// Idempotent, like every other step in EnsureSchema.
+	if err := EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema twice: %v", err)
+	}
+}

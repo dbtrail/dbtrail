@@ -856,6 +856,28 @@ func EnsureSchema(db *sql.DB) error {
 			return fmt.Errorf("failed to create snapshot_exclusions: %w", err)
 		}
 	}
+
+	// rotation_policy (#1709) shipped in CreateIndexTables only, so an index
+	// an older build created never grew it and a fresh one did: the same
+	// build reads two different schemas depending on how the index was born.
+	//
+	// The TABLE is created here. The ROW is NOT, and that is the whole point
+	// of doing it this way: ReadInitialRetain already treats "no such table"
+	// and "no row" as the same answer, an index created before the record
+	// existed, and the rotation loop keeps such an index on its old window
+	// instead of the built-in default. Writing a row here would tell that
+	// loop the index was created under today's default, on an index whose
+	// history accumulated under a thirty-day one, and the next cycle would
+	// drop partitions the operator never asked it to drop.
+	hasRotationPolicy, err := tableExists(db, "rotation_policy")
+	if err != nil {
+		return err
+	}
+	if !hasRotationPolicy {
+		if _, err := db.Exec(DDLRotationPolicy); err != nil {
+			return fmt.Errorf("failed to create rotation_policy: %w", err)
+		}
+	}
 	return nil
 }
 
