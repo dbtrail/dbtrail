@@ -323,7 +323,7 @@ func TestGenerate_bucketStores(t *testing.T) {
 	if !strings.Contains(keyedOut, "PROVIDER credential_chain, SCOPE 's3://keyed-b/'") {
 		t.Errorf("a keyed bucket lost its scoped secret:\n%s", keyedOut)
 	}
-	const keyNote = "-- Some of these buckets sign with keys set in the console, which this file never carries:"
+	const keyNote = "-- Some of these buckets sign with keys set in the web interface, which this file never carries:"
 	if !strings.Contains(keyedOut, keyNote) {
 		t.Errorf("a keyed bucket without the note on keys:\n%s", keyedOut)
 	}

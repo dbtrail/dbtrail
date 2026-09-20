@@ -68,6 +68,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads differently depending on whether you are looking at the screen or at
   the documentation page with the same name, so it now says where.
 
+  The terminal followed. The startup banner said "Bintrail console", with the
+  old spelling of the name as well as the wrong word for the thing; `--help`
+  offered "the console login password" and "the console's password login";
+  `bintrail-console user` prompted for a "New console password"; the
+  compose-drift warning called the settings you saved "console settings"; and
+  the DuckDB schema `bintrail views` writes told you to download the file
+  "again from the console". All of it now says web interface, or names the
+  daemon where that is what was meant. What did NOT change: the binary, the
+  flags, the environment variables, the file names, and the `console:` prefix
+  on log lines, which is a component tag rather than a word anyone reads as
+  prose.
+
 ### Fixed
 - **`--batch-size` now reaches the sources added from the web interface**
   (#1747). It only ever reached the source typed on the command line, so on

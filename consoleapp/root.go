@@ -50,7 +50,7 @@ var tel cli.TelemetryHook
 
 var rootCmd = &cobra.Command{
 	Use:   "bintrail-console",
-	Short: "Read-only web console over the Bintrail binlog index",
+	Short: "Read-only web interface over the DBTrail binlog index",
 	Long: `bintrail-console serves a local, read-only web UI over the binlog index:
 browse indexed row events with full before/after diffs, generate recovery
 (undo) SQL, and run point-in-time reconstruct when baselines are configured.

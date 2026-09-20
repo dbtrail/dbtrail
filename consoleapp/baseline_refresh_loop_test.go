@@ -613,8 +613,8 @@ func TestCarryForwardProvenance(t *testing.T) {
 	}{
 		{"no registry at all falls back to the flag", nil, true, true, "daemon flag or environment"},
 		{"no override, flag off", nil, false, false, "daemon flag or environment"},
-		{"override true over a flag saying false", boolPtr(true), false, true, "console setting, which overrides the daemon flag"},
-		{"override FALSE over a flag saying true", boolPtr(false), true, false, "console setting, which overrides the daemon flag"},
+		{"override true over a flag saying false", boolPtr(true), false, true, "setting saved in the web interface, which overrides the daemon flag"},
+		{"override FALSE over a flag saying true", boolPtr(false), true, false, "setting saved in the web interface, which overrides the daemon flag"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

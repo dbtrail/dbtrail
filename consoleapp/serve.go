@@ -63,7 +63,7 @@ var (
 func init() {
 	serveCmd.Flags().StringVar(&conIndexDSN, "index-dsn", "", "DSN for the index MySQL database (required unless the server registry has entries)")
 	serveCmd.Flags().StringVar(&conListen, "listen", "127.0.0.1:8090", "Address to listen on (host:port)")
-	serveCmd.Flags().StringVar(&conToken, "token", "", "Opt-in static token for API automation (never generated; humans use the console password)")
+	serveCmd.Flags().StringVar(&conToken, "token", "", "Opt-in static token for API automation (never generated; humans use the password)")
 	serveCmd.Flags().BoolVar(&conNoArchive, "no-archive", false, "Disable Parquet archive auto-discovery (MySQL-only)")
 	serveCmd.Flags().StringVar(&conProfile, "profile", "", "RBAC profile: deny tables / redact columns; forces --no-archive")
 	serveCmd.Flags().StringSliceVar(&conAllowedHosts, "allowed-hosts", nil, "Extra hostnames allowed in the Host header (for reverse-proxy setups; IP literals and localhost are always allowed)")
@@ -71,8 +71,8 @@ func init() {
 	serveCmd.Flags().StringVar(&conBaselineS3, "baseline-s3", "", "S3 prefix of baseline Parquet snapshots (s3://bucket/prefix/); enables Reconstruct")
 	serveCmd.Flags().StringVar(&conServersFile, "servers-file", "", "Path to the server registry YAML managed by the UI (default ~/.config/bintrail/console-servers.yaml)")
 	serveCmd.Flags().StringVar(&conAuthFile, "auth-file", "", "Path to the console auth file enabling password login (default ~/.config/bintrail/console-auth.yaml; created with `bintrail-console user set-password`)")
-	serveCmd.Flags().StringVar(&conMCPTokenFile, "mcp-token-file", "", "Path to the managed MCP token file written by Settings → Connect AI (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the console runs in a container.")
-	serveCmd.Flags().StringVar(&conTLSCert, "tls-cert", "", "TLS certificate file (PEM); serve the console over HTTPS (requires --tls-key)")
+	serveCmd.Flags().StringVar(&conMCPTokenFile, "mcp-token-file", "", "Path to the managed MCP token file written by Settings → Connect AI (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the daemon runs in a container.")
+	serveCmd.Flags().StringVar(&conTLSCert, "tls-cert", "", "TLS certificate file (PEM); serve the web interface over HTTPS (requires --tls-key)")
 	serveCmd.Flags().StringVar(&conTLSKey, "tls-key", "", "TLS private key file (PEM; requires --tls-cert)")
 	serveCmd.Flags().BoolVar(&conAllowSetup, "allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
 	rootCmd.AddCommand(serveCmd)
@@ -280,7 +280,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// command event doesn't (no run_id, one per UTC day).
 	go tel.Client().RunDaemon(ctx, cmd.Name())
 
-	printConsoleBanner(srv, "Bintrail console (read-only) is running. Open:")
+	printConsoleBanner(srv, "The DBTrail web interface (read-only) is running. Open:")
 	slog.Info("console listening", "addr", conListen, "no_archive", conNoArchive || conProfile != "")
 
 	if err := srv.Run(ctx); err != nil {
@@ -299,9 +299,9 @@ func printConsoleBanner(srv *console.Server, headline string) {
 	switch {
 	case srv.NeedsSetup():
 		// First run, loopback, no credential: the browser creates the password.
-		fmt.Fprintf(os.Stderr, "First run: open the URL and create your console username and password.\n\n")
+		fmt.Fprintf(os.Stderr, "First run: open the URL and create your username and password.\n\n")
 	case srv.PasswordLogin():
-		fmt.Fprintf(os.Stderr, "Sign in with your console username and password.\n")
+		fmt.Fprintf(os.Stderr, "Sign in with your username and password.\n")
 		if srv.Token() != "" {
 			fmt.Fprintf(os.Stderr, "(The configured access token also remains valid, for API automation.)\n")
 		}
@@ -347,8 +347,8 @@ func warnSQLPanelRetired() {
 	// serve-only fallback (#1581) — naming a single page here sends half the
 	// operators to a page without the card.
 	slog.Warn("BINTRAIL_CONSOLE_SQL_PANEL is set but no longer does anything: " +
-		"the console SQL page and POST /api/sql were removed. Download a DuckDB schema " +
-		"from the console's Backups page (Connect, on a read-only console) and query " +
+		"the SQL page and POST /api/sql were removed. Download a DuckDB schema " +
+		"from the Backups page (Connect, on a read-only daemon) and query " +
 		"the same Parquet in your own DuckDB. " +
 		"Remove the variable; a future release stops reading it")
 }

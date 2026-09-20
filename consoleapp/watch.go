@@ -35,7 +35,7 @@ import (
 
 var watchCmd = &cobra.Command{
 	Use:   "watch",
-	Short: "Watch one or more MySQL servers: stream + console + control plane in one daemon",
+	Short: "Watch one or more MySQL servers: stream + web interface + control plane in one daemon",
 	Long: `Runs the combined capture-and-observe daemon (the standalone successor to
 'bintrail up --console'): preflight checks, index initialization, the live
 replication stream, AND the read-only web console with its control plane,
@@ -217,15 +217,15 @@ func init() {
 	watchCmd.Flags().IntVar(&upPartitions, "partitions", 48, "Hourly partitions to create on first init")
 	watchCmd.Flags().BoolVar(&upSkipDoctor, "skip-doctor", false, "Skip the preflight checks (useful when you've already verified with `bintrail doctor`)")
 	watchCmd.Flags().StringVar(&upFormat, "format", "text", "Output format: text or json")
-	watchCmd.Flags().StringVar(&upConsoleListen, "console-listen", "127.0.0.1:8090", "Console bind address")
-	watchCmd.Flags().StringVar(&upConsoleToken, "console-token", "", "Opt-in static token for API automation (never generated; humans use the console password)")
-	watchCmd.Flags().StringVar(&upConsoleBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots; enables the console's point-in-time Reconstruct surface")
+	watchCmd.Flags().StringVar(&upConsoleListen, "console-listen", "127.0.0.1:8090", "Bind address for the web interface")
+	watchCmd.Flags().StringVar(&upConsoleToken, "console-token", "", "Opt-in static token for API automation (never generated; humans use the password)")
+	watchCmd.Flags().StringVar(&upConsoleBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots; enables the web interface's point-in-time Reconstruct surface")
 	watchCmd.Flags().StringVar(&upConsoleBaselineS3, "baseline-s3", "", "S3 prefix of baseline Parquet snapshots (s3://bucket/prefix/); enables Reconstruct")
 	watchCmd.Flags().BoolVar(&upBaselineCarryForward, "baseline-carry-forward-unchanged", false,
 		"When a refresh finds a table had no changes, publish its previous Parquet file instead of rewriting "+
 			"it (hard link where possible). Off by default: the rows are identical either way, but it links two "+
 			"snapshots to one file, so disk-usage and prune figures then count space they will not reclaim. "+
-			"Editable from the console settings panel, which overrides this flag.")
+			"Editable from the web interface's settings panel, which overrides this flag.")
 	watchCmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", true,
 		"On by default (--baseline-table-deltas=false or BINTRAIL_BASELINE_TABLE_DELTAS=false turns it off). A refresh does not rewrite a table that changed: it keeps the previous Parquet file and writes that refresh's changed rows as one numbered "+
 			"pair of small files beside it (<table>.000001.posdel, <table>.000001.upserts, then 000002, ...), linking the earlier pairs forward, and writes the table again in full when the chain's files together pass a quarter of its size or the chain is a "+
@@ -233,10 +233,10 @@ func init() {
 			"must not be read by a bintrail older than this one. Turning it off needs nothing else: the next refresh writes every table in full. Generate the DuckDB views again after turning it on or off.")
 	watchCmd.Flags().StringVar(&upBaselineRefreshEvery, "baseline-refresh-interval", "", "Periodically refresh each server's newest baseline snapshot from the index (Nm/Nh/Nd; default: off). Runs with the conservative DuckDB budget, folds at most 2 tables at a time, and never publishes over a known capture gap.")
 	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, "baseline-retain", "", "Periodically prune local --baseline-dir snapshots older than this (Nd/Nh) once a durable copy exists in --baseline-s3 (never deletes the only copy or the newest snapshot per table)")
-	watchCmd.Flags().StringVar(&upConsoleServersFile, "console-servers-file", "", "Path to the console server registry YAML (default ~/.config/bintrail/console-servers.yaml)")
+	watchCmd.Flags().StringVar(&upConsoleServersFile, "console-servers-file", "", "Path to the server registry YAML managed by the web interface (default ~/.config/bintrail/console-servers.yaml)")
 	watchCmd.Flags().StringVar(&upConsoleAuthFile, "console-auth-file", "", "Path to the console auth file enabling password login (default ~/.config/bintrail/console-auth.yaml; created with `bintrail-console user set-password`)")
-	watchCmd.Flags().StringVar(&upConsoleMCPTokenFile, "console-mcp-token-file", "", "Path to the managed MCP token file written by Settings → Connect AI (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the console runs in a container.")
-	watchCmd.Flags().StringVar(&upConsoleTLSCert, "console-tls-cert", "", "TLS certificate file (PEM); serve the console over HTTPS (requires --console-tls-key)")
+	watchCmd.Flags().StringVar(&upConsoleMCPTokenFile, "console-mcp-token-file", "", "Path to the managed MCP token file written by Settings → Connect AI (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the daemon runs in a container.")
+	watchCmd.Flags().StringVar(&upConsoleTLSCert, "console-tls-cert", "", "TLS certificate file (PEM); serve the web interface over HTTPS (requires --console-tls-key)")
 	watchCmd.Flags().StringVar(&upConsoleTLSKey, "console-tls-key", "", "TLS private key file (PEM; requires --console-tls-cert)")
 	watchCmd.Flags().StringSliceVar(&upConsoleAllowedHost, "console-allowed-hosts", nil, "Extra hostnames allowed in the Host header (for a TLS-terminating reverse proxy); IP literals and localhost are always allowed")
 	watchCmd.Flags().BoolVar(&upConsoleAllowSetup, "console-allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
@@ -286,7 +286,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// ── Phase 1: Preflight ──────────────────────────────────────────────────
 	if upSourceDSN == "" {
 		fmt.Fprintln(os.Stderr, "=== Phase 1/3: Preflight checks ===")
-		fmt.Fprintln(os.Stderr, "No source configured yet; the preflight runs when you add a server from the console.")
+		fmt.Fprintln(os.Stderr, "No source configured yet; the preflight runs when you add a server from the web interface.")
 		fmt.Fprintln(os.Stderr)
 	} else if !upSkipDoctor {
 		fmt.Fprintln(os.Stderr, "=== Phase 1/3: Preflight checks ===")
@@ -320,7 +320,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	// ── Phase 3: Stream + console (or console-only daemon when no source) ───
 	if upSourceDSN == "" {
-		fmt.Fprintln(os.Stderr, "=== Phase 3/3: Console + control plane ===")
+		fmt.Fprintln(os.Stderr, "=== Phase 3/3: Web interface + control plane ===")
 		return runUpConsoleOnly(cmd)
 	}
 	fmt.Fprintln(os.Stderr, "=== Phase 3/3: Streaming ===")
@@ -574,7 +574,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	printConsoleBanner(srv, "Console is running: open it and add the MySQL servers to watch:")
+	printConsoleBanner(srv, "The web interface is running: open it and add the MySQL servers to watch:")
 	go supervisor.Reconcile(registry)
 
 	serveErr := srv.Serve(ctx, ln)
@@ -613,7 +613,7 @@ func startFlashbackPort(ctx context.Context, srv *console.Server) (func(), error
 		}
 		close(done)
 	}()
-	fmt.Fprintf(os.Stderr, "Time-travel SQL (MySQL protocol) is listening on %s; connect a MySQL client with user=<server id or name>, password=<console token>.\n", ln.Addr())
+	fmt.Fprintf(os.Stderr, "Time-travel SQL (MySQL protocol) is listening on %s; connect a MySQL client with user=<server id or name>, password=<access token> (--console-token).\n", ln.Addr())
 	return func() { <-done }, nil
 }
 
@@ -821,7 +821,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 		}
 		consoleDone <- struct{}{}
 	}()
-	printConsoleBanner(srv, "Console (read-only) is running. Open:")
+	printConsoleBanner(srv, "The web interface (read-only) is running. Open:")
 
 	// Resume whatever the operator had monitoring before the restart —
 	// desired state lives in the registry, positions in each per-source
@@ -923,7 +923,7 @@ func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string, reg
 		// chain of deltas started.
 		slog.Warn("table deltas are ON: a refresh keeps a changed table's file and writes its changes beside it. " +
 			"DuckDB views generated before this was turned on must be generated again, or they show tables as of the last full rewrite. " +
-			"The views.sql inside each snapshot, the console download and the SQL panel are generated per snapshot and need nothing.")
+			"The views.sql inside each snapshot, the download in the web interface and the SQL panel are generated per snapshot and need nothing.")
 	}
 	// Only the creation opt-in runs mydumper; a refresh-only daemon never does,
 	// and a lock-mode typo already has its own refusal (configErr).
@@ -1262,7 +1262,7 @@ func runScheduledVerifyCycle(ctx context.Context, sup *verifySupervisor, registr
 		// Loud, every cycle: "loop running, verifying nothing" must not
 		// look like "verifying everything". The schedule covers registry
 		// servers; the command-line boot stream is not in the registry.
-		slog.Warn("scheduled verify: no registry servers to verify — the schedule covers servers added in the console UI; a source configured only via command-line flags/env is not covered")
+		slog.Warn("scheduled verify: no registry servers to verify — the schedule covers servers added in the web interface; a source configured only via command-line flags/env is not covered")
 		return
 	}
 	for _, e := range entries {
@@ -1688,7 +1688,7 @@ func rotationSettingsProvider(reg *console.Registry) func() rotation.Settings {
 			if err == nil && s.Enabled {
 				return s
 			}
-			slog.Warn("built-in rotation: ignoring invalid saved console policy; using daemon defaults", "error", err)
+			slog.Warn("built-in rotation: ignoring the invalid policy saved in the web interface; using daemon defaults", "error", err)
 		}
 		return upRotationCfg
 	}

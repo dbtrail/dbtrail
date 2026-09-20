@@ -31,7 +31,11 @@ func TestGenerate_pinsTheSessionToUTC(t *testing.T) {
 	// It says what it did. This changes the reader's session rather than
 	// describing the layout, which is the one thing the rest of the file never
 	// does, so the file has to own it and say how to undo it.
-	if !strings.Contains(got, "Change it if") {
+	// The needle avoids the line break: the sentence is wrapped into fixed
+	// width comment lines, so a phrase spanning the wrap point pins the
+	// WRAPPING rather than the meaning, and re-flowing the paragraph would
+	// fail a guard that has no opinion about it.
+	if !strings.Contains(got, "you would rather read in your own zone") {
 		t.Error("the file sets the reader's session zone without saying they can change it")
 	}
 

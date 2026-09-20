@@ -3,7 +3,7 @@
 --
 -- THIS FILE IS A SNAPSHOT OF THE LAYOUT, NOT A LIVE BINDING. The baseline state
 -- views point at ONE snapshot. Re-run `bintrail views` (or download the file
--- again from the console) after taking or refreshing a baseline.
+-- again from the web interface) after taking or refreshing a baseline.
 --
 -- A daemon running `bintrail-console watch --baseline-refresh-interval`
 -- publishes a new snapshot every interval, and nothing regenerates this file.
@@ -24,8 +24,8 @@
 
 -- Timestamps are recorded in UTC, and the archives carry the zone, so the
 -- session's setting decides how they print and where date_trunc puts a day
--- boundary. Pinned to UTC here so the numbers match the console. Change it if
--- you would rather read in your own zone.
+-- boundary. Pinned to UTC here so the numbers match the web interface. Change
+-- it if you would rather read in your own zone.
 SET TimeZone = 'UTC';
 
 -- S3 setup, mirroring what bintrail's own DuckDB sessions configure.
@@ -48,7 +48,7 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 -- These are the SNAPSHOT's rows, not the table's current state: changes after
 -- the snapshot are not in this file. `bintrail views --include-events`
 -- adds the view that holds them, as does the change-log box on the
--- console download.
+-- download in the web interface.
 -- To materialize a later point in time, use `bintrail reconstruct`. Folding
 -- the deltas back onto a baseline is what that command does, and it is not
 -- expressible as a view.
@@ -82,5 +82,6 @@ CREATE OR REPLACE VIEW "state_shop_order_items_2" AS
 --
 -- Defining it opens one Parquet footer per archived file before it returns
 -- a row, so it is left out unless asked for. Add it with `bintrail views
--- --include-events`, or the matching box on the console download.
+-- --include-events`, or the matching box on the download in the web
+-- interface.
 

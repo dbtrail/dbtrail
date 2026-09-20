@@ -4,8 +4,8 @@
 -- THIS FILE IS A SNAPSHOT OF THE LAYOUT, NOT A LIVE BINDING. The globs below
 -- keep picking up newly rotated partitions on their own, but the baseline
 -- state views point at ONE snapshot. Re-run `bintrail views` (or download the
--- file again from the console) after taking or refreshing a baseline, and
--- whenever archive sources are added or removed.
+-- file again from the web interface) after taking or refreshing a baseline,
+-- and whenever archive sources are added or removed.
 --
 -- A daemon running `bintrail-console watch --baseline-refresh-interval`
 -- publishes a new snapshot every interval, and nothing regenerates this file.
@@ -26,8 +26,8 @@
 
 -- Timestamps are recorded in UTC, and the archives carry the zone, so the
 -- session's setting decides how they print and where date_trunc puts a day
--- boundary. Pinned to UTC here so the numbers match the console. Change it if
--- you would rather read in your own zone.
+-- boundary. Pinned to UTC here so the numbers match the web interface. Change
+-- it if you would rather read in your own zone.
 SET TimeZone = 'UTC';
 
 -- S3 setup, mirroring what bintrail's own DuckDB sessions configure.

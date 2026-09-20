@@ -124,7 +124,7 @@ func (s *baselineSupervisor) failPanickedJob(kind baselineJobKind, serverID, ser
 	// below can recover a panic and leave no trace of it. It claims only what
 	// is already true at this point: the process is alive. Whether the job's
 	// slot could be freed is decided below, so the line does not promise it.
-	slog.Error(string(kind)+": the job hit an internal error and stopped. Capture and the console keep "+
+	slog.Error(string(kind)+": the job hit an internal error and stopped. Capture and the web interface keep "+
 		"running. Please report this with the stack recorded here.",
 		"server", serverName, "id", serverID, "panic", r, "stack", string(debug.Stack()))
 

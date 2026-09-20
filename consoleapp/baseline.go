@@ -307,7 +307,7 @@ func (s *baselineSupervisor) recoverDumpJob(req console.BaselineRequest, own *du
 	if own.uploaded {
 		phase, what = "the sweep of older snapshots", "this run's own snapshot had already reached the destination; the next full backup sweeps again"
 	}
-	slog.Error(string(baselineJobDump)+": "+phase+" hit an internal error and stopped after the snapshot was published. Capture and the console keep "+
+	slog.Error(string(baselineJobDump)+": "+phase+" hit an internal error and stopped after the snapshot was published. Capture and the web interface keep "+
 		"running; "+what+". Please report this with the stack recorded here.",
 		"server", req.ServerName, "id", req.ServerID, "panic", r, "stack", string(debug.Stack()))
 	s.mu.Lock()

@@ -138,7 +138,7 @@ func TestOmitEvents_namesBothRoutes(t *testing.T) {
 	in.OmitEvents = true
 	out := Generate(in)
 
-	for _, want := range []string{"--include-events", "console download"} {
+	for _, want := range []string{"--include-events", "download in the web"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the state block does not name the %q route:\n%s", want, out)
 		}

@@ -1829,7 +1829,7 @@ func carryForwardProvenance(reg *console.Registry, daemonDefault bool) (on bool,
 		return daemonDefault, "daemon flag or environment"
 	}
 	if bc, ok := reg.BaselineRefresh(); ok {
-		return bc.CarryForwardUnchanged, "console setting, which overrides the daemon flag"
+		return bc.CarryForwardUnchanged, "setting saved in the web interface, which overrides the daemon flag"
 	}
 	return daemonDefault, "daemon flag or environment"
 }

@@ -451,15 +451,15 @@ func consoleStateFinding(in driftInputs) (driftFinding, bool) {
 			}
 		}
 		if len(held) > 0 {
-			lost = append(lost, "console settings in "+in.configDir+" ("+strings.Join(held, ", ")+")")
+			lost = append(lost, "settings saved in the web interface, in "+in.configDir+" ("+strings.Join(held, ", ")+")")
 		}
 	}
 	if len(lost) == 0 {
 		return driftFinding{}, false
 	}
 	return driftFinding{
-		msg: "console settings are stored inside the container, so the next upgrade that recreates it " +
-			"deletes them. Nothing will report the loss: a console that starts with no saved settings " +
+		msg: "the settings saved in the web interface are stored inside the container, so the next upgrade that recreates it " +
+			"deletes them. Nothing will report the loss: a daemon that starts with no saved settings " +
 			"looks exactly like a fresh install",
 		attrs: []any{
 			"stored_in_the_container", strings.Join(lost, ", "),
@@ -545,7 +545,7 @@ func liveDriftInputs(indexDSN string, opts consoleOpts) driftInputs {
 		stateInDir: consoleStateInDir,
 		mounts:     readMountinfo(),
 		state: []statePath{
-			{what: "your console username and password", path: pick(opts.AuthFile, console.DefaultAuthPath)},
+			{what: "your username and password", path: pick(opts.AuthFile, console.DefaultAuthPath)},
 			{what: "the servers you added", path: pick(opts.ServersFile, console.DefaultRegistryPath)},
 			{what: "the AI connection token", path: pick(opts.MCPTokenFile, console.DefaultMCPTokenPath)},
 		},
