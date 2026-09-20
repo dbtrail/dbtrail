@@ -417,7 +417,7 @@ func mountExists(path string, mounts []mountEntry) bool {
 //     it already has. A deny-list of that one name would have closed the case
 //     and reopened it on the next writer that lands there, of which there are
 //     already others (`config init --global`, `generate-key`). The claim being
-//     made is "console state is at risk", so the evidence has to be console
+//     made is "saved state is at risk", so the evidence has to be console
 //     state.
 //
 //     Ordering limit, deliberately not fixed: right after the recreate that

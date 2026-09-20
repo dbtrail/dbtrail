@@ -462,7 +462,7 @@ func DSNTarget(resolve func(argDSN string) (string, error)) ResolveTarget {
 
 // QueryArgs are the query tool's parameters.
 type QueryArgs struct {
-	IndexDSN      string   `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the console /mcp endpoint)."`
+	IndexDSN      string   `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the web interface's /mcp endpoint)."`
 	Schema        string   `json:"schema,omitempty" jsonschema:"Filter by database schema name"`
 	Table         string   `json:"table,omitempty" jsonschema:"Filter by table name"`
 	PK            string   `json:"pk,omitempty" jsonschema:"Filter by primary key value (pipe-delimited for composite keys e.g. 123 or 123|2)"`
@@ -503,7 +503,7 @@ type QueryArgs struct {
 //   - query_hash: same shape-vs-instance reasoning — see
 //     TestRecoverArgs_hasNoQueryHashParam.
 type RecoverArgs struct {
-	IndexDSN   string   `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the console /mcp endpoint)."`
+	IndexDSN   string   `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the web interface's /mcp endpoint)."`
 	Schema     string   `json:"schema,omitempty" jsonschema:"Filter by database schema name"`
 	Table      string   `json:"table,omitempty" jsonschema:"Filter by table name"`
 	PK         string   `json:"pk,omitempty" jsonschema:"Filter by primary key value (pipe-delimited for composite keys)"`
@@ -556,12 +556,12 @@ type recoverResult struct {
 
 // StatusArgs are the status tool's parameters.
 type StatusArgs struct {
-	IndexDSN string `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the console /mcp endpoint)."`
+	IndexDSN string `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the web interface's /mcp endpoint)."`
 }
 
 // SchemaChangesArgs are the list_schema_changes tool's parameters.
 type SchemaChangesArgs struct {
-	IndexDSN string `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the console /mcp endpoint)."`
+	IndexDSN string `json:"index_dsn,omitempty" jsonschema:"MySQL DSN for the index database. Overrides BINTRAIL_INDEX_DSN env var. Rejected on servers that route connections themselves (the web interface's /mcp endpoint)."`
 	Schema   string `json:"schema,omitempty" jsonschema:"Filter by database schema name"`
 	Table    string `json:"table,omitempty" jsonschema:"Filter by table name"`
 	DDLType  string `json:"ddl_type,omitempty" jsonschema:"Filter by DDL type: CREATE ALTER DROP RENAME or TRUNCATE"`
@@ -581,7 +581,7 @@ func rejectSurfaceParams(cfg Config, indexDSN, profile string) *mcp.CallToolResu
 	if !cfg.AllowDSNParam && indexDSN != "" {
 		return ErrorResult(errors.New(
 			"index_dsn is not accepted here: this server routes connections itself " +
-				"(select a server via the /mcp/{id-or-name} URL path; connections are managed in the console)"))
+				"(select a server via the /mcp/{id-or-name} URL path; connections are managed in the web interface)"))
 	}
 	if !cfg.AllowProfileParam && profile != "" {
 		return ErrorResult(errors.New(
