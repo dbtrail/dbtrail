@@ -80,7 +80,7 @@ that Claude Desktop installs without any JSON editing:
 2. Double-click it (or Claude Desktop → **Settings → Extensions**, drop the
    file in).
 3. Fill in the two-field form:
-   - **Console / MCP endpoint URL** — your bintrail MCP endpoint, e.g.
+   - **Web address / MCP endpoint** — your bintrail MCP endpoint, e.g.
      `http://localhost:8090/mcp` (a `bintrail-mcp --http` server; keep the
      `/mcp` path)
    - **Access token** — sent as an `Authorization: Bearer` header; stored by

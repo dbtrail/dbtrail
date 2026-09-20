@@ -391,7 +391,7 @@ async function handleUnauthorized() {
 
 // clearAuthState drops every credential-scoped cache on sign-out. capsCache
 // MUST be cleared too: a stale capsCache.auth would keep the command palette
-// offering "Change console password…"/"Log out" in a signed-out tab, and
+// offering "Change password…"/"Log out" in a signed-out tab, and
 // running either evicts the gate from #login-mount.
 function clearAuthState() {
   TOKEN = "";
@@ -424,11 +424,11 @@ function showLoginOverlay(opts) {
   // showPasswordDialog() mounts its panel in the same slot but is a task modal
   // over an authenticated workspace, so it keeps the ordinary translucent scrim.
   const scrim = el("div", { class: "modal-scrim show login-gate" });
-  const panel = el("div", { class: "modal login-panel", role: "dialog", "aria-label": opts.setup ? "Set up console" : "Sign in" });
-  panel.append(el("h2", { class: "modal-title", text: "DBTrail console" }));
+  const panel = el("div", { class: "modal login-panel", role: "dialog", "aria-label": opts.setup ? "Set up DBTrail" : "Sign in" });
+  panel.append(el("h2", { class: "modal-title", text: "DBTrail" }));
 
   if (opts.setup) {
-    panel.append(el("p", { class: "modal-desc", text: "First run: create a username and password for this console." }));
+    panel.append(el("p", { class: "modal-desc", text: "First run: create a username and password for DBTrail." }));
     const form = el("form", { class: "login-form", id: "login-form" });
     form.append(el("label", { class: "field" },
       el("span", { class: "field-label", text: "Username" }),
@@ -471,7 +471,7 @@ function showLoginOverlay(opts) {
     return;
   }
 
-  panel.append(el("p", { class: "modal-desc", text: "Sign in to the read-only console." }));
+  panel.append(el("p", { class: "modal-desc", text: "Sign in. This DBTrail is read-only." }));
   const form = el("form", { class: "login-form", id: "login-form" });
   form.append(el("label", { class: "field" },
     el("span", { class: "field-label", text: "Username" }),
@@ -518,7 +518,7 @@ async function submitSetup(form, msg) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-  } catch (_) { loginMsg(msg, "Network error. Is the console still running?"); return; }
+  } catch (_) { loginMsg(msg, "Network error. Is DBTrail still running?"); return; }
   if (res.status === 403) {
     // Setup closed under us (a concurrent `user set-password`, another tab, or
     // a CLI set it first). Unlike login, the setup endpoint self-disables —
@@ -572,7 +572,7 @@ async function submitLogin(form, msg) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-  } catch (_) { loginMsg(msg, "Network error. Is the console still running?"); return; }
+  } catch (_) { loginMsg(msg, "Network error. Is DBTrail still running?"); return; }
   if (res.status === 429) {
     const retry = res.headers.get("Retry-After");
     loginMsg(msg, "Too many attempts; wait " + (retry ? retry + "s" : "a minute") + " and retry.");
@@ -627,8 +627,8 @@ function showPasswordDialog() {
   const firstSet = !(capsCache.auth && capsCache.auth.password_set);
   const mount = document.getElementById("login-mount");
   const scrim = el("div", { class: "modal-scrim show" });
-  const panel = el("div", { class: "modal login-panel", role: "dialog", "aria-label": "Console password" });
-  panel.append(el("h2", { class: "modal-title", text: firstSet ? "Set console password" : "Change console password" }));
+  const panel = el("div", { class: "modal login-panel", role: "dialog", "aria-label": "Password" });
+  panel.append(el("h2", { class: "modal-title", text: firstSet ? "Set password" : "Change password" }));
   panel.append(el("p", { class: "modal-desc", text: firstSet
     ? "Lets you sign in with a username and password instead of just the access token."
     : "Changing your password signs you out of every other open session." }));
@@ -679,7 +679,7 @@ async function submitPasswordChange(form, msg, firstSet) {
       headers,
       body: JSON.stringify(body),
     });
-  } catch (_) { loginMsg(msg, "Network error. Is the console still running?"); return; }
+  } catch (_) { loginMsg(msg, "Network error. Is DBTrail still running?"); return; }
   if (!res.ok) {
     let m = "HTTP " + res.status;
     try { m = (await res.json()).error || m; } catch (_) {}
@@ -3492,9 +3492,9 @@ function capacityNote(cap) {
     case "ok":
       return "Fits with room to spare: about " + humanBytes(cap.remaining_bytes) + " of growth ahead, " + humanBytes(cap.free_bytes) + " free. Rotation caps the index before the disk fills.";
     case "free_unknown":
-      return "Without free space this console cannot grade the disk. Keep about 30% headroom above the steady size on the index volume.";
+      return "Without free space DBTrail cannot grade the disk. Keep about 30% headroom above the steady size on the index volume.";
     case "retention_unknown":
-      return "This read-only console does not run rotation, so it cannot tell how long the index keeps history or what size it settles at. Run the check where rotation runs (CLI: bintrail doctor --retain).";
+      return "This DBTrail is read-only and does not run rotation, so it cannot tell how long the index keeps history or what size it settles at. Run the check where rotation runs (CLI: bintrail doctor --retain).";
     case "not_enough_history":
       return "A write rate needs at least 3 recent hours with events (" + (cap.sample_hours || 0) + " so far). Check back after a few hours of capture.";
     case "not_initialized":
@@ -3521,15 +3521,15 @@ function capacityFreeNote(cap) {
   if (!cap || cap.free_known) return "";
   switch (cap.free_reason) {
     case "mount_unset":
-      return "The console cannot see the index volume from here, and no read-only copy of the index data directory is set up. To measure free space, mount that directory into the console read-only and set BINTRAIL_INDEX_DATADIR_RO to the mount point. The bundled docker-compose.yml wires both.";
+      return "DBTrail cannot see the index volume from here, and no read-only copy of the index data directory is set up. To measure free space, mount that directory into DBTrail read-only and set BINTRAIL_INDEX_DATADIR_RO to the mount point. The bundled docker-compose.yml wires both.";
     case "mount_unusable":
-      return "BINTRAIL_INDEX_DATADIR_RO points at a path the console cannot read, so free space was not measured. Check that the index data directory is still mounted there.";
+      return "BINTRAIL_INDEX_DATADIR_RO points at a path DBTrail cannot read, so free space was not measured. Check that the index data directory is still mounted there.";
     case "host_unconfirmed":
-      return "The index answers on a local address, but the console cannot confirm the server runs on this machine, so it cannot tell whether the index data directory is here. If it is, mount that directory into the console read-only and set BINTRAIL_INDEX_DATADIR_RO to the mount point. Point it at the index's own data directory and nothing else: any other volume would be shown as the index's free space.";
+      return "The index answers on a local address, but DBTrail cannot confirm the server runs on this machine, so it cannot tell whether the index data directory is here. If it is, mount that directory into DBTrail read-only and set BINTRAIL_INDEX_DATADIR_RO to the mount point. Point it at the index's own data directory and nothing else: any other volume would be shown as the index's free space.";
     case "index_not_local":
-      return "The index answers at another address, so the console cannot see its volume, and measuring a disk here would report the wrong one. Watch free space where the index runs.";
+      return "The index answers at another address, so DBTrail cannot see its volume, and measuring a disk here would report the wrong one. Watch free space where the index runs.";
     default:
-      return "The console cannot see the index volume from here, so free space was not measured.";
+      return "DBTrail cannot see the index volume from here, so free space was not measured.";
   }
 }
 
@@ -4161,7 +4161,7 @@ function rotationCard(rot) {
   kvRow(card, "interval", rot.interval);
   kvRow(card, "future partitions", rot.add_future);
   kvRow(card, "policy", rot.source === "override"
-    ? ("console override" + (rot.enabled ? " (live)" : ""))
+    ? ("set in the web interface" + (rot.enabled ? " (live)" : ""))
     : "daemon defaults");
   if (!rot.enabled) card.append(el("p", { class: "form-hint", text: "Rotation is turned off. Changes you save here won't take effect until the daemon restarts." }));
   card.append(el("div", { class: "stg-cardfoot" },
@@ -4520,7 +4520,7 @@ function backupRefreshCard(br) {
   }
   say("This one setting covers every server that keeps backups on this machine.");
   say(br.source === "override"
-    ? "You chose this here. It replaces the setting DBTrail started with."
+    ? "You chose this in the web interface. It replaces the setting DBTrail started with."
     : "This is the setting DBTrail started with.");
   more.append(docsMore("guides/backup-settings", "backups--disk-space", "the disk-space switch"),
     docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
@@ -4806,7 +4806,7 @@ function blCase(source, current) {
     return el("div", { class: "bl-case bl-unknown" + (current ? " is-current" : ""), "data-source": source || "",
       "aria-current": current ? "true" : null },
       el("span", { class: "bl-name", text: "Unknown" }),
-      el("span", { class: "bl-lane", text: "this console cannot read this server's backup state; update it" }));
+      el("span", { class: "bl-lane", text: "DBTrail cannot read this server's backup state; update it" }));
   }
   const lane = (label, ok) => el("span", { class: "bl-lane " + (ok ? "on" : "no") },
     el("span", { class: "bl-mark", text: ok ? "✓" : "✗" }), label);
@@ -5383,7 +5383,7 @@ function reusedCopiedNote(copied) {
 function budgetRefusedTail() {
   return " Nothing was overwritten. Until a newer full backup exists, every update from the recorded changes" +
     " starts from the same backup and is refused again" +
-    (capsCache.baseline_trigger ? "." : "; creating backups from the console is turned off here.");
+    (capsCache.baseline_trigger ? "." : "; creating backups from the web interface is turned off here.");
 }
 
 // scheduleSkipTail: a skipped slot retries at the next one, which falls back
@@ -5754,15 +5754,15 @@ function icebergExportPanel(cur, baselines) {
       "of the process that captures changes so a long export can never slow capture down." }),
     el("p", { class: "form-hint", text:
       "The line carries the index host, port, database and user, and nothing else about the connection. " +
-      "If your index needs settings this console was given, such as TLS or a timeout, add them yourself." }),
+      "If your index needs settings DBTrail was given, such as TLS or a timeout, add them yourself." }),
     // The address and the path are as THIS process sees them, and in the
     // bundled stack both are container-scoped (index-mysql:3306,
     // /var/lib/bintrail/baselines): pasted into a host shell they resolve to
     // nothing. Same hazard the generated views.sql warns about for a loopback
     // index host, and the compose profile is the answer for that operator.
     el("p", { class: "form-hint", text:
-      "The address and folder above are the ones this console uses. Run the command somewhere that can reach " +
-      "both. If this console runs in Docker, run it there too, with the command below." }),
+      "The address and folder above are the ones DBTrail uses. Run the command somewhere that can reach " +
+      "both. If DBTrail runs in Docker, run it there too, with the command below." }),
     el("code", { class: "stg-code cn-snippet", text:
       "docker compose --profile iceberg-export run --rm iceberg-export" }),
     el("p", { class: "form-hint", text:
@@ -6510,7 +6510,7 @@ function backupScheduleCard(cur, b) {
     // nothing here can change the schedule, and the summary already says
     // why it is not running.
     body.append(el("p", { class: "form-hint", text:
-      "This schedule can be changed from the watch daemon's console (bintrail-console watch) once its backup features are on." }));
+      "This schedule can be changed from the watch daemon's web interface (CLI: bintrail-console watch) once its backup features are on." }));
     details.open = true;
     details.append(body);
     return details;
@@ -6722,7 +6722,7 @@ function backupRestoreCard(cur, b, restoreSt) {
     el("summary", { class: "form-adv-summary", text: "Restore to a moment (builds a new backup)" }));
   const body = el("div", { class: "bk-restore-body" });
   body.append(el("p", { class: "form-hint", text:
-    "Pick a past moment. The console rebuilds every table as it was then, from your backups plus the recorded changes, and saves the result as a new backup in the list below. Your database is not touched." }));
+    "Pick a past moment. DBTrail rebuilds every table as it was then, from your backups plus the recorded changes, and saves the result as a new backup in the list below. Your database is not touched." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
@@ -6892,7 +6892,7 @@ function backupDuckLane(b) {
   // so without it the first SUM a reader writes fails to bind.
   if (!hasViews) {
     lane.append(el("p", { class: "form-hint", text:
-      "The file that describes these tables is not offered here, because this console is set not to read archived data. " +
+      "The file that describes these tables is not offered here, because DBTrail is set not to read archived data. " +
       "DuckDB still opens the Parquet files, but decimal columns arrive as text, so totals will not add up until you cast them." }));
   }
   return lane;
@@ -6992,7 +6992,7 @@ function backupSQLLane(cur, b, sqlSt) {
     return lane;
   }
   body.append(el("p", { class: "form-hint", text:
-    "Plain SQL files in mydumper format, ready for myloader. Loading them back needs nothing from DBTrail, and your database is never touched: the console starts from the backup before that moment and replays the changes it already recorded." }));
+    "Plain SQL files in mydumper format, ready for myloader. Loading them back needs nothing from DBTrail, and your database is never touched: DBTrail starts from the backup before that moment and replays the changes it already recorded." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
@@ -7131,7 +7131,7 @@ function verifyRegions(servers, opts) {
   if (!capsCache.verify_trigger) {
     const card = el("section", { class: "tcard vfy-region" },
       el("div", { class: "stg-empty" },
-        el("p", { class: "stg-empty-lead", text: "Verification from the console is turned off." }),
+        el("p", { class: "stg-empty-lead", text: "Verification from the web interface is turned off." }),
         el("p", { class: "stg-empty-sub", text:
           "Ask whoever manages this server to turn it on (set BINTRAIL_CONSOLE_VERIFY_TRIGGER=1 and restart). Already on the default setup? Take the current docker-compose.yml beside yours and merge your edits in, because \"docker compose pull\" alone does not add new settings to a file you already have." })));
     return [card];
@@ -8426,14 +8426,14 @@ function mcpTokenCard(tok, minted) {
     }
     if (tok.read_only) {
       card.append(cnFine("Why is there no button here?",
-        el("p", { class: "form-hint", text: "This token was created by a newer version of bintrail. It keeps working, but this page cannot replace or delete it; upgrading the console brings those buttons back." })));
+        el("p", { class: "form-hint", text: "This token was created by a newer version of bintrail. It keeps working, but this page cannot replace or delete it; upgrading DBTrail brings those buttons back." })));
     } else {
       card.append(el("div", { class: "cn-links" },
         el("button", { class: "btn btn-sm", type: "button", text: "New token", onclick: () => mintMCPToken(true) }),
         el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Delete token", onclick: revokeMCPToken })));
     }
   } else if (!minted) {
-    card.append(el("p", { class: "stg-hint", text: "The token is Claude's password for this console. It is shown only once, so copy it right away." }));
+    card.append(el("p", { class: "stg-hint", text: "The token is Claude's password for DBTrail. It is shown only once, so copy it right away." }));
     card.append(el("div", { class: "cn-links" },
       el("button", { class: "btn btn-sm", type: "button", text: "Generate token", onclick: () => mintMCPToken(false) })));
   }
@@ -8453,13 +8453,13 @@ function mcpTokenCard(tok, minted) {
 function mcpEndpointCard(servers) {
   const card = cnCard(2, "Copy the address");
   if (!capsCache.mcp) {
-    card.append(el("p", { class: "stg-hint", text: "Finish step 1 first; this console's address then appears here, ready to copy." }));
+    card.append(el("p", { class: "stg-hint", text: "Finish step 1 first; DBTrail's address then appears below, ready to copy." }));
     return card;
   }
   const url = mcpURL(servers);
   card.append(el("div", { class: "cn-urlrow" },
     el("code", { class: "stg-code cn-url", text: url }),
-    el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(url, "Console address") })));
+    el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(url, "Web address") })));
   card.append(el("p", { class: "stg-hint", text: "Claude will ask for a URL; this is the one to paste." }));
   if ((servers || []).length > 1) {
     card.append(cnFine("Connecting a different server?",
@@ -8482,7 +8482,7 @@ function claudeAskMock() {
       el("span", { class: "cn-mock-paste", text: hint })));
   return el("div", { class: "cn-mock" },
     el("div", { class: "cn-mock-bar" }, el("span", { class: "cn-mock-dots" }), "Claude Desktop"),
-    field(2, "Console / MCP endpoint URL", "paste the address from step 2"),
+    field(2, "Web address / MCP endpoint", "paste the address from step 2"),
     field(1, "Access token", "paste the token from step 1"));
 }
 
@@ -8514,16 +8514,16 @@ function bundleCard() {
     card.append(claudeAskMock());
     card.append(askExample());
     card.append(cnFine("Intel Mac, Windows, or claude.ai in the browser?",
-      el("p", { class: "form-hint", text: "The download button guesses this computer from the browser, and Macs are assumed to have an Apple chip. On an Intel Mac, use All downloads and take dbtrail-darwin-amd64.mcpb (v" + ver + " matches this console)." }),
+      el("p", { class: "form-hint", text: "The download button guesses this computer from the browser, and Macs are assumed to have an Apple chip. On an Intel Mac, use All downloads and take dbtrail-darwin-amd64.mcpb (v" + ver + " matches DBTrail)." }),
       el("p", { class: "form-hint", text: "If the download lands on Not Found, that release shipped without the installer; take the newest release's file from All downloads instead." }),
-      el("p", { class: "form-hint", text: "Windows has no installer yet. Use claude.ai in the browser: if this console is reachable from the internet, open Settings, then Connectors, then Add custom connector, and paste the same address and token. On a private network (only reachable from inside), the browser path cannot reach it; use the desktop app on a Mac or Linux machine instead." })));
+      el("p", { class: "form-hint", text: "Windows has no installer yet. Use claude.ai in the browser: if DBTrail is reachable from the internet, open Settings, then Connectors, then Add custom connector, and paste the same address and token. On a private network (only reachable from inside), the browser path cannot reach it; use the desktop app on a Mac or Linux machine instead." })));
   } else if (released) {
     // Windows on a released build: the desktop bundle does not exist, so the
     // browser connector IS the path, not a footnote.
-    card.append(el("p", { class: "stg-hint", text: "There is no Windows installer yet. If this console is reachable from the internet, connect from claude.ai in the browser: open Settings, then Connectors, then Add custom connector, and paste the address and token from steps 1 and 2." }));
+    card.append(el("p", { class: "stg-hint", text: "There is no Windows installer yet. If DBTrail is reachable from the internet, connect from claude.ai in the browser: open Settings, then Connectors, then Add custom connector, and paste the address and token from steps 1 and 2." }));
     card.append(askExample());
-    card.append(cnFine("Console on a private network?",
-      el("p", { class: "form-hint", text: "On a private network (only reachable from inside), claude.ai cannot reach this console; install the desktop bundle on a Mac or Linux machine instead. All downloads below has the files." }),
+    card.append(cnFine("DBTrail on a private network?",
+      el("p", { class: "form-hint", text: "On a private network (only reachable from inside), claude.ai cannot reach DBTrail; install the desktop bundle on a Mac or Linux machine instead. All downloads below has the files." }),
       el("p", { class: "form-hint" }, el("a", { href: relTag, target: "_blank", rel: "noopener", text: "All downloads for v" + ver }))));
   } else if (plat) {
     card.append(el("p", { class: "stg-hint", text: "Get the Claude Desktop app (claude.ai/download), then download the newest installer for this computer and double-click it:" }));
@@ -8533,15 +8533,15 @@ function bundleCard() {
     card.append(claudeAskMock());
     card.append(askExample());
     card.append(cnFine("Which file is for this computer?",
-      el("p", { class: "form-hint", text: "This console is a development build, so there is no matching download link. In the newest release: Mac with Apple chip is dbtrail-darwin-arm64.mcpb, Intel Mac is dbtrail-darwin-amd64.mcpb, Linux is dbtrail-linux-amd64.mcpb (or -arm64). Windows has no installer yet." }),
-      el("p", { class: "form-hint", text: "Using claude.ai in the browser instead of the desktop app? If this console is reachable from the internet, open Settings, then Connectors, then Add custom connector, and paste the same address and token. On a private network (only reachable from inside), use the desktop app." })));
+      el("p", { class: "form-hint", text: "This is a development build, so there is no matching download link. In the newest release: Mac with Apple chip is dbtrail-darwin-arm64.mcpb, Intel Mac is dbtrail-darwin-amd64.mcpb, Linux is dbtrail-linux-amd64.mcpb (or -arm64). Windows has no installer yet." }),
+      el("p", { class: "form-hint", text: "Using claude.ai in the browser instead of the desktop app? If DBTrail is reachable from the internet, open Settings, then Connectors, then Add custom connector, and paste the same address and token. On a private network (only reachable from inside), use the desktop app." })));
   } else {
     // Development build ON WINDOWS: no installer exists at any version, so
     // the browser connector is the only path here too.
-    card.append(el("p", { class: "stg-hint", text: "There is no Windows installer. If this console is reachable from the internet, connect from claude.ai in the browser: open Settings, then Connectors, then Add custom connector, and paste the address and token from steps 1 and 2." }));
+    card.append(el("p", { class: "stg-hint", text: "There is no Windows installer. If DBTrail is reachable from the internet, connect from claude.ai in the browser: open Settings, then Connectors, then Add custom connector, and paste the address and token from steps 1 and 2." }));
     card.append(askExample());
-    card.append(cnFine("Console on a private network?",
-      el("p", { class: "form-hint", text: "On a private network (only reachable from inside), claude.ai cannot reach this console; install the desktop bundle on a Mac or Linux machine instead." }),
+    card.append(cnFine("DBTrail on a private network?",
+      el("p", { class: "form-hint", text: "On a private network (only reachable from inside), claude.ai cannot reach DBTrail; install the desktop bundle on a Mac or Linux machine instead." }),
       el("p", { class: "form-hint" }, el("a", { href: "https://github.com/dbtrail/dbtrail/releases", target: "_blank", rel: "noopener", text: "Open the releases page" }))));
   }
   return card;
@@ -8576,11 +8576,11 @@ function otherClientsPanel(servers) {
   const adv = el("details", { class: "form-advanced", style: "margin-top:0" },
     el("summary", { class: "form-adv-summary", text: "Other AI tools (technical)" }));
   adv.append(el("p", { class: "form-hint", text:
-    "For claude_desktop_config.json, or any client that launches stdio MCP servers: bintrail-mcp bridges stdio to this console. The token travels as an Authorization: Bearer header. Replace the placeholder with your console token:" }));
+    "For claude_desktop_config.json, or any client that launches stdio MCP servers: bintrail-mcp bridges stdio to DBTrail. The token travels as an Authorization: Bearer header. Replace the placeholder with your access token:" }));
   adv.append(el("pre", { class: "stg-code cn-snippet", text: snippet }));
   adv.append(el("button", { class: "btn btn-sm", type: "button", text: "Copy snippet", onclick: () => copyText(snippet, "Config snippet") }));
   adv.append(el("p", { class: "form-hint", text:
-    "If this console is reachable over public HTTPS, the same URL also works directly as a claude.ai custom connector; no bridge needed." }));
+    "If DBTrail is reachable over public HTTPS, the same URL also works directly as a claude.ai custom connector; no bridge needed." }));
   panel.append(adv);
   return panel;
 }
@@ -8634,7 +8634,7 @@ function sqlClientPanel(servers, fb) {
       // watch flag as "how to turn it on" would send the reader to a flag
       // this process does not have.
       body.append(el("p", { class: "cn-sql-row" },
-        "Not available from this read-only console. The time-travel port is part of the watch daemon (CLI: ",
+        "Not available here: this DBTrail is read-only. The time-travel port is part of the watch daemon (CLI: ",
         el("code", { text: "bintrail-console watch --flashback-listen" }),
         "). Run that daemon and your usual MySQL client can read any table as it was at a chosen moment."));
       return panel;
@@ -8644,7 +8644,7 @@ function sqlClientPanel(servers, fb) {
       el("p", { class: "form-hint" },
         "Start the daemon with a port address (CLI: ", el("code", { text: "--flashback-listen 127.0.0.1:3308" }),
         ", or the environment variable ", el("code", { text: "BINTRAIL_CONSOLE_FLASHBACK_LISTEN" }),
-        ") and a console token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }),
+        ") and an access token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }),
         "). This panel then shows the address and a ready to copy mysql line, and your usual MySQL client can read any table as it was at a chosen moment.")));
     return panel;
   }
@@ -8659,7 +8659,7 @@ function sqlClientPanel(servers, fb) {
     user ? el("code", { text: user }) : el("code", { text: "<server name>" }),
     user ? ", the server picked in the left sidebar" : ", the name of a server in the left sidebar (none yet)"));
   body.append(el("p", { class: "cn-sql-row" },
-    "Password: the console token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }), "), never shown here"));
+    "Password: the access token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }), "), never shown here"));
   if (fb.port) {
     const line = "mysql -h " + shellWord(flashbackHost(fb)) + " -P " + fb.port + " -u " + (user ? shellWord(user) : "<server-name>") + " -p";
     body.append(el("div", { class: "cn-urlrow" },
@@ -8673,7 +8673,7 @@ function sqlClientPanel(servers, fb) {
       " Use _snapshot for the whole table (needs a backup) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again."),
     el("p", { class: "form-hint", text: fb.host
       ? "The port answers on that address only. Run mysql where it can reach it (on the daemon's machine when it is 127.0.0.1), or open a tunnel to it."
-      : "The port answers on every network address of the daemon's machine; the command uses the name this page was opened with. If that name is a reverse proxy in front of the console, it does not pass this port through, so use the daemon machine's own name or address instead." })));
+      : "The port answers on every network address of the daemon's machine; the command uses the name this page was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use the daemon machine's own name or address instead." })));
   return panel;
 }
 
@@ -9476,7 +9476,7 @@ function noCaptureReason(s) {
   // that is not serve mode: telling a watch operator to restart as watch would
   // be a confident wrong remedy. The honest one there is a reload.
   if (!capsKnown) return "will not capture: the capability check failed when this page loaded, so nothing can be started from here. Reload the page";
-  if (!capsCache.monitor) return "will not capture: this console was started as serve, which reads an index and never captures. Run bintrail-console watch to capture from this server";
+  if (!capsCache.monitor) return "will not capture: DBTrail was started as serve, which reads an index and never captures. Run bintrail-console watch to capture from this server";
   if (!s.has_source) return "will not capture: no source connection. Edit this server and add one";
   return null;
 }
@@ -9640,7 +9640,7 @@ function cmdkCommands() {
   if (capsCache.auth) {
     cmds.push({
       group: "Actions",
-      label: capsCache.auth.password_set ? "Change console password…" : "Set console password…",
+      label: capsCache.auth.password_set ? "Change password…" : "Set password…",
       run: () => { closeCmdk(); showPasswordDialog(); },
     });
     if (capsCache.auth.auth_kind === "session") {

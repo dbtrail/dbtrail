@@ -58,7 +58,7 @@ const out = {
   matchTwo: touchedRowBudgetText(two),
   matchGap: touchedRowBudgetText(gap.last_error),
   scheduled: budgetRefusedTail(),
-  skipBlocked: scheduleSkipTail("the update from the recorded changes was refused (" + two + ") and a full backup cannot start here: creating backups from the console is turned off"),
+  skipBlocked: scheduleSkipTail("the update from the recorded changes was refused (" + two + ") and a full backup cannot start here: creating backups from the web interface is turned off"),
   skipBusy: scheduleSkipTail("the update from the recorded changes was refused (" + two + "); another backup job was running for this server when the full backup was tried"),
   skipGap: scheduleSkipTail("the update from the recorded changes was refused (shop.a: capture gap) and a full backup cannot start here: off"),
 };
@@ -92,7 +92,7 @@ console.log(JSON.stringify(out));
 	if !strings.HasSuffix(got.Refresh, "every update from the recorded changes starts from the same backup and is refused again.") {
 		t.Errorf("refresh budget refusal: %q", got.Refresh)
 	}
-	if !strings.HasSuffix(got.RefreshNoTrigger, "is refused again; creating backups from the console is turned off here.") {
+	if !strings.HasSuffix(got.RefreshNoTrigger, "is refused again; creating backups from the web interface is turned off here.") {
 		t.Errorf("refresh budget refusal without the create button: %q", got.RefreshNoTrigger)
 	}
 	if !strings.HasSuffix(got.RefreshGap, "Nothing was overwritten; the next run retries.") {
@@ -137,7 +137,7 @@ func TestBudgetRefusalCardsRendered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocked, _ := json.Marshal("the update from the recorded changes was refused (" + refusal + ") and a full backup cannot start here: creating backups from the console is turned off")
+	blocked, _ := json.Marshal("the update from the recorded changes was refused (" + refusal + ") and a full backup cannot start here: creating backups from the web interface is turned off")
 	errText, _ := json.Marshal(refusal)
 	script := renderHarnessJS + `
 vm.runInContext("capsCache = { backup_schedule: true, baseline_restore: true, baseline_trigger: false };", ctx);

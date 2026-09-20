@@ -93,11 +93,11 @@ func TestIcebergExportPanel(t *testing.T) {
 	// In the bundled stack both are container-scoped, so a line pasted into a
 	// host shell reaches neither: the panel has to say so and point at the
 	// compose profile, which is the answer for exactly that operator.
-	if !strings.Contains(panel, "the ones this console uses") {
-		t.Error("the panel does not warn that the address and folder are the console's own")
+	if !strings.Contains(panel, "the ones DBTrail uses") {
+		t.Error("the panel does not warn that the address and folder are DBTrail's own")
 	}
 	if !strings.Contains(panel, "--profile iceberg-export") {
-		t.Error("the panel does not offer the compose route for a console running in Docker")
+		t.Error("the panel does not offer the compose route for a DBTrail running in Docker")
 	}
 
 	// And it is actually on the page: a panel nothing calls is invisible, and
