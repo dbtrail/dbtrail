@@ -6496,7 +6496,15 @@ function backupScheduleCard(cur, b) {
   } else {
     let line = "Every " + sch.every + " at " + sch.at + " UTC.";
     if (sch.runnable && sch.next_run) line += " Next: " + utcLabel(sch.next_run) + ".";
-    if (!sch.runnable) line += " Cannot run: " + plainWords(sch.reason || "unknown reason");
+    if (!sch.runnable) {
+      // Terminated, the same way the next-run warning below terminates its
+      // reason: the daemon's refusals end bare, and since #1528 a note can
+      // follow this text on the same line, which ran the two sentences
+      // together ("... turned off (Backup settings page) The last run
+      // failed.").
+      const why = plainWords(sch.reason || "unknown reason");
+      line += " Cannot run: " + why + (/[.!?]$/.test(why) ? "" : ".");
+    }
     state.textContent = line;
     // Red here, BEFORE the read-only return below. That path renders no run
     // history at all, so a refusal is the only alarm it can carry, and it is
@@ -6574,10 +6582,27 @@ function backupScheduleCard(cur, b) {
     // branches raises the alarm. The red alone used to mean "the fold below
     // is open, the reason is in it"; with the body always visible the colour
     // would be a verdict with no words, which is the noise CONTRIBUTING's
-    // rule 4 names. Assignments run oldest fact to newest, and the last one
-    // wins, so the line carries the newest reason while the body keeps all
-    // of them in full.
-    let alarm = false, alarmNote = "", everyRunCode = "";
+    // rule 4 names.
+    //
+    // Only one note fits, and POSITION IN THIS FUNCTION MUST NOT DECIDE IT.
+    // The two forward-looking warnings are written first and any past alarm
+    // replaces them. The past ones carry a timestamp and go through noteAt,
+    // which keeps the NEWEST: the daemon records a fallback when the full
+    // backup STARTS, so a plain last-one-wins let the fallback outrank the
+    // FAILURE of that very backup, and the line read "a full backup ran
+    // instead" while the body said the backup failed and nothing was
+    // written. A false all-clear on the backups page is worse than the
+    // wordless red this note exists to replace.
+    //
+    // noteAt takes the first timestamped alarm unconditionally, so a raised
+    // alarm can never end up with no words at all. `>=` not `>`: the stamps
+    // are whole seconds, and on a tie the later branch is the newer fact,
+    // the same rule the skip below already applies against a run that
+    // finished in that second.
+    let alarm = false, alarmNote = "", alarmAt = "", everyRunCode = "";
+    const noteAt = (at, note) => {
+      if (!alarmAt || (at || "") >= alarmAt) { alarmNote = note; alarmAt = at || ""; }
+    };
     if (sch.runnable && sch.next_method_error) {
       // Runnable in principle, but the next slot will be skipped as things
       // stand: said in red BEFORE the slot, not discovered after it.
@@ -6623,7 +6648,8 @@ function backupScheduleCard(cur, b) {
           (run.uploaded ? ", " + run.uploaded + " file(s) uploaded" : "") + "." }));
       } else {
         alarm = true;
-        alarmNote = run.snapshot_time ? "The last run could not send its backup." : "The last run failed.";
+        noteAt(run.finished_at || run.started_at || "",
+          run.snapshot_time ? "The last run could not send its backup." : "The last run failed.");
         // A failed run that still names a snapshot is the one shape where the
         // backup exists: the fold finished and only the upload failed. Telling
         // that operator nothing was written would send them looking for a
@@ -6657,7 +6683,7 @@ function backupScheduleCard(cur, b) {
       // named as one, not as a refusal. The daemon records a fallback only
       // once the full backup actually started, so "started" is a fact.
       alarm = true;
-      alarmNote = "An update was refused, so a full backup ran instead.";
+      noteAt(fb.at, "An update was refused, so a full backup ran instead.");
       const crashed = /^internal error/.test(fb.reason || "");
       const why = backupFoldError(crashed ? fb.reason.replace(/^internal error:?\s*/, "") : fb.reason);
       body.append(el("p", { class: "form-msg err", text:
@@ -6669,7 +6695,7 @@ function backupScheduleCard(cur, b) {
     // newer fact, not an older one.
     if (skip && (!run || skip.at >= (run.finished_at || ""))) {
       alarm = true;
-      alarmNote = "A scheduled run did not start.";
+      noteAt(skip.at, "A scheduled run did not start.");
       // backupFoldError, not plainWords: a fold error rides in here too,
       // with its bare --allow-gaps hint.
       body.append(el("p", { class: "form-msg err", text:

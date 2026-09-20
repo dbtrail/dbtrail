@@ -87,11 +87,12 @@ func TestBackupScheduleAlarmReachesTheStateLine(t *testing.T) {
 	}
 
 	cases := []struct {
-		name      string
-		caps      string
-		schedule  map[string]any
-		wantAlarm bool
-		wantWords string // must appear in the state line itself
+		name        string
+		caps        string
+		schedule    map[string]any
+		wantAlarm   bool
+		wantWords   string // must appear in the state line itself
+		rejectWords string // must NOT: a note that contradicts the body
 	}{{
 		name:      "healthy",
 		caps:      "{ backup_schedule: true }",
@@ -122,6 +123,42 @@ func TestBackupScheduleAlarmReachesTheStateLine(t *testing.T) {
 			"last_skipped": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "no previous backup"}},
 		wantAlarm: true,
 		wantWords: "A scheduled run did not start.",
+	}, {
+		// TWO facts at once, which every row above is blind to: the note is
+		// one line, so the branches compete, and the fallback is recorded
+		// when the full backup STARTS. Last-one-wins handed the line to the
+		// fallback and said a full backup had run instead, while the body
+		// said that same backup failed and nothing was written. A false
+		// all-clear, on the backups page.
+		name: "a fallback whose full backup then failed",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
+			"last_fallback": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "schema changed since the baseline"},
+			"last_run":      map[string]any{"method": "dump", "ok": false, "finished_at": "2026-09-19T03:02:00Z", "error": "mydumper: connection refused"}},
+		wantAlarm: true,
+		wantWords: "The last run failed.",
+		rejectWords: "full backup ran instead",
+	}, {
+		// The mirror, and the reason the guard is a recency rule and not a
+		// suppression: with the fallback the newest fact it must still reach
+		// the line. Suppressing it whenever a run exists would leave the card
+		// red with no words, which is what the note exists to prevent.
+		name: "a fallback after a run that succeeded",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
+			"last_run":      map[string]any{"method": "refresh", "ok": true, "finished_at": "2026-09-18T03:01:00Z", "tables": 4},
+			"last_fallback": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "the recorded changes do not reach that far back"}},
+		wantAlarm: true,
+		wantWords: "An update was refused, so a full backup ran instead.",
+	}, {
+		// Two sentences on one line: the daemon's refusal reasons end bare,
+		// so the note used to run straight on from the reason.
+		name: "a refusal and a note on the same line",
+		caps: "{ backup_schedule: true }",
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": false, "reason": "creating backups from the web interface is turned off on this daemon (Backup settings page)",
+			"last_skipped": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "no previous backup"}},
+		wantAlarm: true,
+		wantWords: "(Backup settings page). A scheduled run did not start.",
 	}}
 
 	for _, tc := range cases {
@@ -161,6 +198,9 @@ console.log(JSON.stringify(line ? { found: true, cls: line.className, text: line
 			}
 			if tc.wantWords != "" && !strings.Contains(got.Text, tc.wantWords) {
 				t.Errorf("the state line is red but its words do not say why: want %q in %q", tc.wantWords, got.Text)
+			}
+			if tc.rejectWords != "" && strings.Contains(got.Text, tc.rejectWords) {
+				t.Errorf("the state line claims %q, which the body contradicts: %q", tc.rejectWords, got.Text)
 			}
 			// The gutter comes from the line's own class; a className rewrite
 			// would drop it exactly when the card is in alarm.
