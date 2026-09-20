@@ -83,7 +83,7 @@ Two things worth knowing (the page handles both for you):
    matching the machine where Claude Desktop runs.
 2. **Double-click it.** Claude Desktop opens an install dialog.
 3. Fill in the two fields:
-   - **Console / MCP endpoint URL** — the URL from step 2
+   - **Web address / MCP endpoint** — the URL from step 2
    - **Access token** — your console token (Claude Desktop stores it as a
      sensitive value)
 

@@ -33,6 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fallback, and building an editor for it would migrate operators onto a
   setting that is being deleted.
 
+### Changed
+- **The web interface stops calling itself a console** (#1683). To someone who
+  has not read the source, "console" is a terminal, and the word was on the
+  sign-in screen, the header, the Connect AI steps and about fifty other
+  places a new user reads first. In user-facing text the product is DBTrail
+  and the thing on screen is the web interface. The binary keeps its name
+  (`bintrail-console`), and so do the flags, the environment variables and the
+  files: whoever writes a compose file reads those, and a user does not.
+
+  Two deictic phrases went with it: a page that said "You chose this here"
+  reads differently depending on whether you are looking at the screen or at
+  the documentation page with the same name, so it now says where.
+
 ### Changed — the built-in rotation default is now 48 hours, not 30 days
 - **A new index keeps 48 hours of history instead of 30 days** (#1709). The
   index is a change log that grows with the source's write rate, so at 30
