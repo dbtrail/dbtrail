@@ -54,11 +54,56 @@ Read `CLAUDE.md` for a detailed map of the architecture, key patterns, and gotch
 - Use `strings.SplitSeq` (Go 1.24) where applicable.
 - Keep command files self-contained. Avoid creating shared packages for logic that is only used in one place.
 
+### The web interface: what earns a place on screen
+
+The browser interface (`internal/console/assets`) grew by accretion. Each
+feature arrived as a card with a paragraph explaining itself, and the result
+had to be studied rather than used: two settings whose names both promised
+"backups, automatically" for unrelated things, a card with two paragraphs of
+prose and two buttons whose difference was a third concept, a verdict with no
+remedy. Every one of them was defensible on its own; the sum was the problem.
+Five rules, so it does not grow back that way (#1528):
+
+1. **A card earns its place by answering a question the operator has at that
+   moment.** If it answers a question they would only have while reading the
+   documentation, it belongs in the documentation.
+2. **The name says what the control does.** If two controls need a paragraph
+   to be told apart, they are named wrong, or they should be one control.
+3. **Explanation is not documentation.** A line of help under a control is
+   fine. A paragraph means the control is not self-evident, and the fix is
+   the control, not the paragraph.
+4. **Every state names its remedy or says nothing.** A verdict the operator
+   cannot act on is noise.
+5. **Nothing new without something removed.** A new surface comes with a
+   proposal for what it replaces or absorbs. The one exemption is a first-run
+   surface that disappears after the first event (#1606).
+
+Two corollaries, each bought with a defect:
+
+- **Do not fold the thing the page is named after.** A `<details>` is for a
+  detail: raw signals, a glossary, an advanced field, the technical variant.
+  The page's own subject is a card. Scheduling a backup and restoring to a
+  moment both sat behind a line of small caps on the Backups page, with prose
+  above them (#1528); `internal/console/assets_backup_cards_1528_test.go`
+  pins those two, and pins that a card in alarm says so in words and not in
+  red alone.
+- **Name the screen. Never "here", never "this page".** The documentation page
+  and the screen it describes carry the same name, so a deictic word resolves
+  differently depending on which side the reader is standing on. Say "on the
+  Backup settings screen". In user-facing text the product is **DBTrail** and
+  the thing on screen is the **web interface**, never "the console". That is
+  the binary's name (`bintrail-console`), and a user does not read it (#1683).
+  No test enforces this one, unlike the corollary above it: it is a habit, and
+  a string sweep is where a word quietly comes back.
+
+The measure of a change here is fewer words on screen and fewer clicks to the
+same answer, not more features.
+
 ### Working with the database
 
 - **Never insert `pk_hash` explicitly** — it is a generated stored column (`SHA2(pk_values, 256)`).
 - **PK lookups** must use both `pk_hash = SHA2(?, 256)` (for the index scan) and `pk_values = ?` (as a hash collision guard).
-- **Partitions**: partitioned by `RANGE (TO_DAYS(event_timestamp))` — use `TO_DAYS()`, not `UNIX_TIMESTAMP()` (MySQL 8.0 rejects timezone-dependent functions when `time_zone=SYSTEM`). The catch-all `p_future VALUES LESS THAN MAXVALUE` must always exist. When adding new partitions use `REORGANIZE PARTITION p_future INTO (... new partitions ..., PARTITION p_future VALUES LESS THAN MAXVALUE)`.
+- **Partitions**: partitioned by `RANGE (TO_SECONDS(event_timestamp))` — use `TO_SECONDS()`, not `UNIX_TIMESTAMP()` (MySQL 8.0 rejects timezone-dependent functions when `time_zone=SYSTEM`). The catch-all `p_future VALUES LESS THAN MAXVALUE` must always exist. When adding new partitions use `REORGANIZE PARTITION p_future INTO (... new partitions ..., PARTITION p_future VALUES LESS THAN MAXVALUE)`.
 - **`schema_snapshots`**: `snapshot_id` is a group identifier (shared by all rows of one snapshot), not the auto-increment row PK (`id`). `NewResolver(db, 0)` loads the latest snapshot.
 
 ### JSON and type handling

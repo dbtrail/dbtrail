@@ -2024,6 +2024,24 @@ button { font-family: inherit; }
 .bk-table th { text-align: left; font-weight: 600; padding: 2px 18px 2px 0; color: var(--ink-3); }
 .bk-table td { padding: 2px 18px 2px 0; }
 .bk-restore-body { padding: 8px 2px 2px; }
+/* #1528: the schedule and the restore stopped being folds, so their body is
+   no longer indented by a <summary>, and they take the gutter every other
+   panel body takes (.stg-foot, .bk-lanes) to line their text up with the
+   heading. Their own class, not a selector scoped around .bk-restore-body:
+   the .sql builder reuses that class inside a .bk-lane, and a rule aimed at
+   these two would out-specify the lane's `padding: 0` the day a lane lands
+   inside one of them. A separate class cannot reach it at all.
+   The 18px gap is the one .form-advanced gave them as folds. .ov-panel sets
+   no vertical margin (the panels that stand alone set it inline in app.js,
+   see duckdbPanel and icebergExportPanel), so without this the cards would
+   touch the panel above them and each other. */
+section.bk-restore { margin-top: 18px; }
+.bk-card-body { padding: 0 14px 12px; }
+.bk-card-state { padding: 0 14px; margin: 0 0 2px; }
+/* The alarm keeps the UI font and changes colour only. Reusing .form-msg
+   would have jumped this one-sentence line to monospace, which style.css
+   already had to undo once for the login panel's "Signed out." */
+.bk-card-state.alarm { color: var(--delete); }
 .bk-restore-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
 .bk-restore-row .in { max-width: 260px; }
 

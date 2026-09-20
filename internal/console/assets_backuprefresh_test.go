@@ -355,8 +355,12 @@ func TestBackupRefreshCard_titleSaysWhatItDoes(t *testing.T) {
 	if !strings.Contains(low, "disk") {
 		t.Errorf("the card title %q does not name what the control trades (disk space)", title)
 	}
-	if !strings.Contains(js, `"Scheduled backups: none"`) {
-		t.Fatal("the schedule summary is no longer called Scheduled backups; the collision was resolved from " +
+	// The timetable's own name, read from the card that carries it. It was a
+	// <summary> line ("Scheduled backups: none") until #1528 turned the fold
+	// into a card with a heading; scoping the check to the function is what
+	// keeps it from passing on the same words somewhere else in the file.
+	if !strings.Contains(jsFunctionBody(t, js, "backupScheduleCard"), `text: "Scheduled backups"`) {
+		t.Fatal("the schedule card is no longer titled Scheduled backups; the collision was resolved from " +
 			"the wrong side, and this guard would have passed on a renamed timetable")
 	}
 }
@@ -403,14 +407,17 @@ func TestBackupRefreshCard_prose(t *testing.T) {
 	}
 }
 
-// TestBackupScheduleCard_introIsNotAnEssay (#1528): the fold's opening
+// TestBackupScheduleCard_introIsNotAnEssay (#1528): the card's opening
 // paragraph explained the producer choice in general terms directly above the
 // line that names the producer for the NEXT run specifically. The general half
 // is docs material; the specific half is the state the operator acts on.
+// (It was a fold when this guard was written; #1528 made it a card, and the
+// paragraph it watches is now always on screen, which is the stronger reason
+// for it to stay short.)
 func TestBackupScheduleCard_introIsNotAnEssay(t *testing.T) {
 	body := jsFunctionBody(t, readAsset(t, "app.js"), "backupScheduleCard")
 	if strings.Contains(body, "with no load on your database") {
-		t.Error("the fold explains the producer choice in general above the line that names it for the next run")
+		t.Error("the card explains the producer choice in general above the line that names it for the next run")
 	}
 	// The specific half must survive the cut.
 	if !strings.Contains(body, "will update the latest backup from the recorded changes") {
