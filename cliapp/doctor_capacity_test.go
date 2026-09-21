@@ -62,4 +62,15 @@ func TestUpPreflightOutcome(t *testing.T) {
 	if fatal, _ := upPreflightOutcome(mixed); fatal == nil {
 		t.Error("a non-advisory FAIL must block boot regardless of the capacity check")
 	}
+
+	// A missing primary key refuses `up` (#1766): it fails only while the
+	// first snapshot is pending, when the stream would refuse a moment later
+	// anyway.
+	pk := &doctor.Report{
+		Checks: []doctor.CheckResult{{Name: doctor.PrimaryKeyCheckName, Status: doctor.StatusFail}},
+		Failed: 1,
+	}
+	if fatal, _ := upPreflightOutcome(pk); fatal == nil {
+		t.Error("a missing primary key before the first snapshot must refuse up")
+	}
 }

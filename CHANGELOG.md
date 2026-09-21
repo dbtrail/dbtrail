@@ -31,6 +31,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes a full backup every 7d". A save that does not mention the field
   keeps the saved one, so a page loaded before the upgrade cannot remove it.
 
+### Changed
+- **What Save and Test connection did now opens in a dialog centered on the
+  screen** (#1769). The add-server and edit-server forms used to answer inside
+  themselves: a line beside Test, and a stack of check cards above the
+  buttons that on a first save held 18 cards, 14 of them green. Now a refused
+  save, a Test result, failed startup checks and a start with warnings each
+  open on top of the form, showing only the failures or only the warnings,
+  with every check one click away. Closing it (Escape, the button, a click
+  outside) goes back to the form as it was, and a line above the buttons keeps
+  a summary with a Show button. The row's Start button opens the same dialog.
+
+### Fixed
+- **Test connection on a new server tests the database you typed** (#1767).
+  It used to answer "nothing to test": it only ever looked at the index
+  connection, which a new server does not have until it is saved. It now runs
+  the source half of the startup checks Save runs, on the database as typed,
+  and shows them the way Save does: what fails, else what to check, else one
+  line saying the database is ready. It saves and starts nothing.
+- **A table without a primary key, or not on InnoDB, stops a new server's
+  capture with an error, not a warning** (#1766). Before a server's first
+  schema snapshot, one such table stops capture for every table, yet the key
+  check was a warning (and nothing checked the engine) while the form said
+  "Monitoring started". Both are now errors there, so Save says "Capture did
+  not start" and names the tables, and `bintrail up` and `bintrail-console
+  watch --source-dsn` refuse to start with the fix instead of failing a moment
+  later on the snapshot. On a server that already captures they stay
+  warnings: a later snapshot leaves those tables out and keeps the rest.
+- **The add-server form fits its dialog again** (#1765). Since 0.82.0 the
+  "Monitor a source database" block was wider than the dialog, which cut off
+  Source port, Schemas, S3 addressing and S3 secret key, on the add form and
+  the edit form alike and at every window width. A source on any port other
+  than 3306 could not be added from the web interface: the port field was
+  reachable only with the Tab key. The cause was one long line in the grants
+  box, which a `<fieldset>` grows to by default; the box now scrolls sideways
+  inside its own frame instead.
+
 ## [0.85.1] - 2026-09-20
 
 ### Fixed

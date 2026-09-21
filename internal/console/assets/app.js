@@ -415,6 +415,9 @@ function clearAuthState() {
 function showLoginOverlay(opts) {
   opts = opts || { passwordLogin: true };
   loginGateRaised = true;
+  // A notice would keep the gate inert under it (#1769): a 401 on Save or Test
+  // opens "Could not save" first and raises the gate a moment later.
+  closeNotice();
   // Clear the workspace: the prior session's events/recover SQL must not stay
   // readable behind the blurred scrim (or after the gate is dismissed by a
   // dialog mounted in the same slot).
@@ -794,6 +797,7 @@ function dismissToast() {
 function toastEscape(e) {
   if (e.key !== "Escape") return;
   if (loginGateRaised) return;
+  if (noticeOpen()) return;
   const cmdk = document.getElementById("cmdk-mount");
   if (cmdk && cmdk.firstChild) return;
   const modalMount = document.getElementById("modal");
@@ -1835,6 +1839,7 @@ function toggleDatePicker(input, trigger) {
   };
   const onKey = (e) => {
     if (!pop.isConnected) { document.removeEventListener("keydown", onKey, true); return; }
+    if (noticeOpen()) return; // the notice above owns Escape (#1769)
     if (e.key === "Escape") closeDatePicker();
   };
   const onDismiss = () => { if (pop.isConnected) closeDatePicker(); };
@@ -2635,6 +2640,9 @@ function openBusyModal(form, opts) {
   // form's buttons disabled. Tab is trapped inside the dialog.
   const onKey = (e) => {
     if (closed) return;
+    // A notice above this dialog owns the keys (#1769): Escape there must not
+    // cancel this request unseen.
+    if (noticeOpen()) return;
     // The ⌘K palette stacks ABOVE this dialog in its own mount and handles
     // its own keys (its Escape handler sits on the palette input, which this
     // capture-phase listener would otherwise beat to the event) — while it is
@@ -9487,17 +9495,15 @@ function buildServerForm() {
   adv.append(idx);
   form.append(adv);
 
-  // The form's answers sit ABOVE the button row (#1605, #1608): appended
-  // after it, a failed startup check or a test result rendered below the
-  // eyeline of the button that caused it, at the bottom of a long modal the
-  // scrim scrolls, and the button read as dead. The Test result goes beside
-  // its own button, the way the saved-server row already shows it.
-  form.append(el("div", { id: "doctor-cards", class: "doctor-cards" }));
+  // What Save and Test did opens in a notice centered on the screen, above
+  // this dialog (#1769). Answered inside the form, a result landed below the
+  // eyeline of the button that caused it (#1605, #1608), and a first save's
+  // 18 check cards, 14 of them green, hid the one that failed. The line
+  // above the buttons keeps a one-line summary with a way back to the notice.
   form.append(el("div", { id: "server-form-msg", class: "form-msg" }));
   const foot = el("div", { class: "modal-foot filter-actions" });
   foot.append(el("button", { class: "btn btn-primary", type: "submit", text: "Save" }));
   foot.append(el("button", { class: "btn", type: "button", id: "server-test", text: "Test connection" }));
-  foot.append(el("span", { class: "srv-status", id: "server-test-result" }));
   foot.append(el("button", { class: "btn btn-ghost", type: "button", id: "server-cancel", text: "Cancel" }));
   form.append(foot);
   return form;
@@ -9566,11 +9572,14 @@ function hideServerForm() {
   if (addWrap) addWrap.hidden = false;
 }
 
-function formMsg(text, isError) {
+// formMsg sets the one line above the form's buttons. reopen, when given,
+// adds a Show button that opens again the notice this line summarizes.
+function formMsg(text, isError, reopen) {
   const m = document.getElementById("server-form-msg");
   if (!m) return;
   m.className = "form-msg " + (isError ? "err" : "ok");
   m.textContent = text;
+  if (reopen) m.append(" ", el("button", { class: "btn btn-sm btn-ghost", type: "button", id: "server-form-reopen", text: "Show", onclick: reopen }));
 }
 
 // keep-password semantics: omit password fields when blank (= keep stored).
@@ -9602,8 +9611,7 @@ async function editServer(id) {
   let s;
   try { s = await api("/api/servers/" + encodeURIComponent(id)); }
   catch (err) { toastError("Could not load server: " + ((err && err.message) || err)); return false; }
-  showServerForm(s);
-  return true;
+  return showServerForm(s);
 }
 
 async function saveServer(form) {
@@ -9612,7 +9620,12 @@ async function saveServer(form) {
   let saved;
   try {
     saved = await api(id ? "/api/servers/" + encodeURIComponent(id) : "/api/servers", { method: id ? "PUT" : "POST", body });
-  } catch (err) { formMsg((err && err.message) || String(err), true); return; }
+  } catch (err) {
+    const why = (err && err.message) || String(err);
+    formMsg(why, true);
+    openNotice({ tone: "err", title: "Could not save", lines: [why], button: "Back to the form" });
+    return;
+  }
 
   // Zero-terminal auto-start: a monitor-capable process with a source DSN starts
   // streaming on save (after preflight). Doctor warnings keep the form open.
@@ -9626,17 +9639,17 @@ async function saveServer(form) {
     // same name, which the registry refuses as a duplicate. Save stays
     // enabled on a failure: it IS the retry once the operator has fixed the
     // server (most checks are fixed on the database side, with the same form
-    // values). showServerForm rebuilds the check cards, so it goes first.
+    // values). showServerForm rebuilds the form, so it goes before the notice
+    // and the summary line that points back to it.
     if (!showServerForm(saved)) {
       // The modal was closed while the checks ran: nothing on screen can
       // carry the outcome, so it goes to a toast that stays until dismissed.
-      if (res && res.started) toastError("Monitoring started for " + saved.name + ", with warnings; open Servers and press Start to review them");
+      if (!res || res.requestError) toastError("Could not start capture for " + saved.name + ": " + ((res && res.requestError) || "no answer"));
+      else if (res.started) toastError("Monitoring started for " + saved.name + ", with warnings; open Servers and press Start to review them");
       else toastError("Startup checks failed for " + saved.name + "; open Servers and press Start to see what to fix");
       return;
     }
-    if (res && res.started) { renderDoctor(res.doctor); formMsg("Monitoring started; review the warnings above", false); scrollDoctorIntoView(); }
-    else if (res) { renderDoctor(res.doctor); formMsg("Startup checks failed: fix the items above and save again", true); scrollDoctorIntoView(); }
-    else { formMsg("Could not start monitoring; check the notification for details and try again", true); } // startMonitor returned null (transport error)
+    showStartupOutcome(res);
     return;
   }
   hideServerForm();
@@ -9668,12 +9681,47 @@ function noCaptureReason(s) {
   return null;
 }
 
-// scrollDoctorIntoView brings the first failing check to the eye: the cards
-// sit above the button row, which on a long form the operator has scrolled
-// past.
-function scrollDoctorIntoView() {
-  const c = document.querySelector("#doctor-cards .doctor-card.fail") || document.getElementById("doctor-cards");
-  if (c && c.scrollIntoView) c.scrollIntoView({ block: "nearest" });
+// showStartupOutcome shows what Save or Start did when capture did not start
+// cleanly (#1769): a notice with the checks that failed, or with the warnings
+// a started capture carries, and a summary line on the form that opens it
+// again once it is closed.
+function showStartupOutcome(res) {
+  const n = startupNotice(res);
+  // Closing lands on Save, the retry, not on the Name field the rebuild
+  // focused.
+  const save = () => document.querySelector("#server-form-mount button[type=submit]");
+  formMsg(n.summary, n.tone === "err", () => openNotice(Object.assign(startupNotice(res), { returnFocus: save() })));
+  openNotice(Object.assign(n, { returnFocus: save() }));
+}
+
+// startupNotice builds that notice. Only the failures, or only the warnings,
+// are on top: every check, green ones included, sits one click away under
+// "All N checks", since 14 green cards around one red one is how the red one
+// got missed. Built fresh on every call, so Show reopens it whole.
+function startupNotice(res) {
+  if (!res || res.requestError) {
+    // The server may well have answered, with an error (the checks could not
+    // run, or the start failed after they passed): say what it said.
+    return { tone: "err", title: "Capture did not start", summary: "Capture did not start: the start request failed",
+      lines: ["The request to start capture failed: " + ((res && res.requestError) || "no answer") + ". Press Save to try again."],
+      button: "Back to the form" };
+  }
+  const checks = (res.doctor && res.doctor.checks) || [];
+  const picked = checks.filter((c) => c.status === (res.started ? "warn" : "fail"));
+  // A start refused with no failing check, or started with no warning card,
+  // is not a shape the server sends; show every check rather than nothing.
+  const shown = picked.length ? picked : checks;
+  const count = (k, one, many) => k + " " + (k === 1 ? one : many);
+  const all = el("details", { class: "notice-all" },
+    el("summary", { text: "All " + count(checks.length, "check", "checks") }), doctorCards(checks));
+  if (res.started) {
+    return { tone: "warn", title: "Capture started", summary: "Capture started, with " + count(picked.length, "warning", "warnings"),
+      lines: [picked.length === 1 ? "Check this when you can:" : "Check these when you can:"],
+      content: [doctorCards(shown), all], button: "OK" };
+  }
+  return { tone: "err", title: "Capture did not start", summary: "Capture did not start: " + count(picked.length, "check", "checks") + " failed",
+    lines: [picked.length === 1 ? "Fix this on the database, then press Save again." : "Fix these on the database, then press Save again."],
+    content: [doctorCards(shown), all], button: "Back to the form" };
 }
 
 async function deleteServer(s) {
@@ -9730,20 +9778,48 @@ function testResultClass(res) {
   return "ok";
 }
 
+// testServerForm answers in a notice (#1769). The button carries the busy
+// state itself, so the click reads as taken before any answer arrives.
 async function testServerForm(form) {
   const id = form.elements.id.value;
   const body = serverFormBody(form);
   const btn = form.querySelector("#server-test");
-  const slot = document.getElementById("server-test-result");
-  const show = (cls, text) => { if (slot) { slot.className = "srv-status " + cls; slot.textContent = text; } };
+  // Dropped when the form that asked is gone (Cancel, or another server's
+  // form took its place): over that form it would describe the wrong server.
+  const show = (notice) => { if (btn && btn.isConnected) openNotice(Object.assign({ title: "Test connection", button: "Back to the form", returnFocus: btn }, notice)); };
   formMsg("", false);
-  if (btn) btn.disabled = true;
-  show("", "testing…");
+  if (btn) { btn.disabled = true; btn.textContent = "Testing…"; }
   try {
     const res = await api(id ? "/api/servers/" + encodeURIComponent(id) + "/test" : "/api/servers/test", { method: "POST", body });
-    show(testResultClass(res), testResultText(res));
-  } catch (err) { show("err", "✗ " + ((err && err.message) || err)); }
-  finally { if (btn) btn.disabled = false; }
+    show(res.doctor ? unsavedTestNotice(res) : { tone: testResultClass(res), lines: [testResultText(res)] });
+  } catch (err) { show({ tone: "err", lines: ["✗ " + ((err && err.message) || err)] }); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = "Test connection"; } }
+}
+
+// unsavedTestNotice is Test's answer for a server not saved yet (#1767): the
+// source half of the startup checks Save runs, so Test cannot pass what Save
+// would refuse. The failures on top, else the warnings, else one line; every
+// check is one click away, and the S3 store's result follows when there is one.
+function unsavedTestNotice(res) {
+  const checks = res.doctor.checks || [];
+  const fails = checks.filter((c) => c.status === "fail");
+  const warns = checks.filter((c) => c.status === "warn");
+  const count = (k, one, many) => k + " " + (k === 1 ? one : many);
+  const all = el("details", { class: "notice-all" },
+    el("summary", { text: "All " + count(checks.length, "check", "checks") }), doctorCards(checks));
+  const s3 = s3TestText(res);
+  const s3Line = s3 ? [s3] : [];
+  if (fails.length) {
+    return { tone: "err", lines: [(fails.length === 1 ? "Capture cannot start from this database yet. Fix this first:" : "Capture cannot start from this database yet. Fix these first:")].concat(s3Line),
+      content: [doctorCards(fails), all] };
+  }
+  // A clean database with an S3 store that failed is still a red answer.
+  const s3Bad = testResultClass({ ok: true, s3: res.s3 }) === "err";
+  if (warns.length) {
+    return { tone: s3Bad ? "err" : "warn", lines: ["✓ The database is ready to capture. Check these when you can:"].concat(s3Line),
+      content: [doctorCards(warns), all] };
+  }
+  return { tone: s3Bad ? "err" : "ok", lines: ["✓ The database is ready to capture."].concat(s3Line), content: [all] };
 }
 
 async function testServerRow(id) {
@@ -9758,12 +9834,11 @@ async function testServerRow(id) {
 
 function doctorWarnings(report) { return !!(report && report.warnings > 0); }
 
-function renderDoctor(report) {
-  const box = document.getElementById("doctor-cards");
-  if (!box) return;
-  clear(box);
-  if (!report || !report.checks) return;
-  report.checks.forEach((chk) => {
+// doctorCards renders startup checks as cards: the check, its detail, and the
+// paste-ready fix doctor wrote for it.
+function doctorCards(checks) {
+  const box = el("div", { class: "doctor-cards" });
+  (checks || []).forEach((chk) => {
     const status = ["pass", "fail", "warn"].includes(chk.status) ? chk.status : "skip";
     const mark = { pass: "✓", fail: "✗", warn: "!", skip: "–" }[status];
     const card = el("div", { class: "doctor-card " + status });
@@ -9773,11 +9848,15 @@ function renderDoctor(report) {
     card.append(bodyEl);
     box.append(card);
   });
+  return box;
 }
 
+// startMonitor returns the start result, or { requestError } when the request
+// itself failed. The caller says so where the operator is looking: the Save
+// path in its notice, the row's Start in a lasting toast.
 async function startMonitor(id) {
   try { return await api("/api/servers/" + encodeURIComponent(id) + "/monitor/start", { method: "POST", body: {} }); }
-  catch (err) { toastError("Could not start: " + ((err && err.message) || err)); return null; }
+  catch (err) { return { requestError: (err && err.message) || String(err) }; }
 }
 
 async function startMonitorRow(id) {
@@ -9785,15 +9864,71 @@ async function startMonitorRow(id) {
   if (slot) { slot.className = "srv-status"; slot.textContent = "running checks…"; }
   const res = await startMonitor(id);
   await refreshServersList();
-  if (!res) return;
+  if (!res || res.requestError) { toastError("Could not start: " + ((res && res.requestError) || "no answer")); return; }
   if (res.started && !doctorWarnings(res.doctor)) { toast("Monitoring started"); return; }
+  // The same notice Save opens, over this server's form: Save there is the
+  // retry, since it starts a server that is not capturing yet.
   const opened = await editServer(id);
-  if (opened) {
-    renderDoctor(res.doctor);
-    formMsg(res.started ? "Monitoring started; review the warnings above" : "Startup checks failed: fix the items above, save, and start again", !res.started);
-    scrollDoctorIntoView();
-  } else if (res.started) { toast("Monitoring started, with warnings"); }
+  if (opened) showStartupOutcome(res);
+  else if (res.started) { toast("Monitoring started, with warnings"); }
   else { toastError("Startup checks failed"); }
+}
+
+// ── notice: an action's outcome, centered above the dialog that asked ──────
+//
+// Its own mount above #modal (#1769), the way ⌘K has its own: the servers
+// dialog and the form under it stay exactly as they were, every typed value
+// included, and closing the notice goes back to them. While it is up the rest
+// of the page is inert, so clicks, Tab and screen readers stay inside it;
+// Escape, the button and a click outside close only this layer.
+let noticeInerted = [];
+let noticeReturnFocus = null;
+
+function noticeOpen() {
+  const m = document.getElementById("notice-mount");
+  return !!(m && m.firstChild);
+}
+
+// openNotice shows { tone: ok|err|warn|pending, title, lines, content,
+// button, returnFocus }. A second call while one is up replaces its content
+// and keeps the first caller's focus target.
+function openNotice(opts) {
+  const mount = document.getElementById("notice-mount");
+  // The sign-in gate is the answer while it is up; nothing here can be saved.
+  if (!mount || loginGateRaised) return;
+  if (!noticeOpen()) noticeReturnFocus = opts.returnFocus || document.activeElement;
+  const box = el("div", { class: "notice " + (opts.tone || "pending"),
+    role: opts.tone === "err" ? "alertdialog" : "dialog", "aria-modal": "true", "aria-labelledby": "notice-title" });
+  box.append(el("div", { class: "notice-head" }, el("h2", { class: "modal-title", id: "notice-title", text: opts.title })));
+  const body = el("div", { class: "notice-body" });
+  for (const line of opts.lines || []) body.append(el("p", { class: "notice-line", text: line }));
+  for (const node of [].concat(opts.content || [])) body.append(node);
+  box.append(body);
+  // The button row sits outside the scrolling body, so a long list of checks
+  // never pushes the way back out of reach.
+  const close = el("button", { class: "btn btn-primary", type: "button", id: "notice-close", text: opts.button || "OK", onclick: closeNotice });
+  box.append(el("div", { class: "notice-foot" }, close));
+  const scrim = el("div", { class: "notice-scrim" }, box);
+  scrim.addEventListener("click", (e) => { if (e.target === scrim) closeNotice(); });
+  mount.replaceChildren(scrim);
+  if (!noticeInerted.length) {
+    noticeInerted = Array.from(document.body.children).filter((n) => n !== mount && !n.inert);
+    noticeInerted.forEach((n) => { n.inert = true; });
+  }
+  close.focus();
+}
+
+function closeNotice() {
+  const mount = document.getElementById("notice-mount");
+  if (!mount || !mount.firstChild) return;
+  mount.replaceChildren();
+  noticeInerted.forEach((n) => { n.inert = false; });
+  noticeInerted = [];
+  const back = noticeReturnFocus;
+  noticeReturnFocus = null;
+  // The Save button that asked was rebuilt with the form; land on the new one.
+  const target = back && back.isConnected ? back : document.querySelector("#server-form-mount button[type=submit]");
+  if (target && target.focus) target.focus();
 }
 
 async function stopMonitorRow(id) {
@@ -9901,6 +10036,12 @@ function cmdkKeydown(e) {
 function globalKeydown(e) {
   // The sign-in gate is modal: no shortcuts reach the workspace behind it.
   if (loginGateRaised) return;
+  // A notice sits above every dialog and owns the keyboard while it is up
+  // (#1769): Escape closes it and only it, never the form under it.
+  if (noticeOpen()) {
+    if (e.key === "Escape") { e.preventDefault(); closeNotice(); }
+    return;
+  }
   // Escape closes whatever dialog occupies the shared #modal slot (#968). The
   // ⌘K palette lives in its own mount and closes itself; the sign-in gate is
   // unreachable here (guard above), so it stays un-dismissable by design.

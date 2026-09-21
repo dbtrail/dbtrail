@@ -287,8 +287,13 @@ How it behaves:
   (when set), so servers added from the UI get Time-travel and verify under a
   single-baseline-dir deployment without extra configuration.
 - **Test connection.** Each server (saved or being typed) has a write-free
-  probe: ping, MySQL version, latency, whether the database looks like a
-  DBTrail index, and whether its schema is current. Testing a saved server
+  test. On a new server you are typing, it runs the source half of the startup
+  checks Save runs (connection, binlog settings, grants, tables without a
+  primary key or not on InnoDB) on the database as typed, and saves and starts nothing, so Test
+  cannot pass a database that Save would refuse. The index checks are left to
+  Save, because one of them creates a probe database. On a saved server it
+  probes the index: ping, MySQL version, latency, whether the database looks
+  like a DBTrail index, and whether its schema is current. Testing a saved server
   reuses its stored password only for the stored host, port and user; testing
   a different host, port or user requires the password to be re-entered, so
   the saved credential is never sent to a destination the operator did not
