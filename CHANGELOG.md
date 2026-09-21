@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`BINTRAIL_CONSOLE_URL` names the address people open the console at**
+  (#1784). Inside the container the console listens on 8090 while the host may
+  publish another port, so the startup banner in `docker compose logs` sent
+  people to 8090 after `DBTRAIL_PORT=8091`. The compose file now sets it, the
+  installer moves it with the port, and only the banner reads it. A compose
+  file from an older release, without the line, still installs.
 - **The Overview offers + Add server while no server is listed** (#1779). A
   console with no server showed a dashboard of zeros, with the add form behind
   Manage servers; the dialog that opens once on a first visit does not open
@@ -16,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and its + Add server opens the add form directly.
 
 ### Fixed
+- **Console texts no longer name command-line flags** (#1783). Adding a server
+  from the browser showed doctor text written for the terminal: "Verify
+  --source-dsn is reachable" with a fixed "port 3306", "`bintrail init` will
+  create it", "run `bintrail init`/`up`", "so `bintrail query` can show it" in
+  the warning shown after every Save, and "--source-dsn" in the server-id
+  check. They now name the source or index connection, say when DBTrail
+  creates the index database, and leave the port to the source. The
+  command-line output reads the same way. The sidebar note on a console with no
+  server says "DBTrail's built-in index" instead of "the daemon's own index".
 - **The Overview counts show the first change** (#1778). The deletes and
   tables-touched tiles and Activity by table were reused for 30 minutes
   whatever they cost, so a new index kept its first "0 deletes" beside its
