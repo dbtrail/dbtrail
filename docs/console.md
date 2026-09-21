@@ -916,7 +916,11 @@ longer does anything. Remove it.
   source, which is load an operator should choose. Turning it on also lets the
   backup schedule take a full backup on its own when an update cannot serve
   the server (no previous backup, no local Backup dir) or fails (a capture
-  gap, a schema change).
+  gap, a schema change), and it is what the schedule's **full backup every**
+  needs: without it, saving one is refused with the reason, and one saved
+  before the opt-in was turned off is shown in red and skipped at its slots
+  while the updates keep running
+  ([#1564](https://github.com/dbtrail/dbtrail/issues/1564)).
   When it is off, the Overview's Getting started list says so until the
   server's first change is indexed, and the Backups page says so for a server
   with a source and a location it can list. Both point at the Backup settings
