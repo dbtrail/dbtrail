@@ -545,6 +545,7 @@ type stubMonitorCtrl struct {
 	started   []string
 	stopped   []string
 	startErr  error
+	unsaved   []ServerEntry // entries DoctorUnsaved was asked about
 }
 
 func (c *stubMonitorCtrl) DeriveIndexDSN(entryID string) (string, error) {
@@ -557,6 +558,13 @@ func (c *stubMonitorCtrl) DeriveIndexDSN(entryID string) (string, error) {
 	return "mon:pw@tcp(idx:3306)/bintrail_idx_" + entryID, nil
 }
 func (c *stubMonitorCtrl) Doctor(_ context.Context, _ ServerEntry) (*DoctorReport, error) {
+	if c.report != nil {
+		return c.report, nil
+	}
+	return &DoctorReport{Passed: 1, Checks: []DoctorCheck{{Name: "ok", Status: "pass"}}}, nil
+}
+func (c *stubMonitorCtrl) DoctorUnsaved(_ context.Context, e ServerEntry) (*DoctorReport, error) {
+	c.unsaved = append(c.unsaved, e)
 	if c.report != nil {
 		return c.report, nil
 	}

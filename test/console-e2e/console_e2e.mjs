@@ -404,6 +404,32 @@ try {
     after.focus === "server-test" ? ok("notice: focus returns to the Test button") : bad("notice: focus returns to the Test button", JSON.stringify(after));
   }
 
+  // #1767: Test on a NEW server runs the source half of the startup checks
+  // Save runs, on the source as typed, instead of answering "nothing to
+  // test". A wrong password against the suite's own MySQL is deterministic:
+  // the source connection check fails, and the notice says capture cannot
+  // start, naming the check.
+  await page.click("#server-cancel");
+  await page.click("#server-add");
+  await page.waitForSelector('#server-form-mount input[name="source_host"]', { timeout: 5000 });
+  await page.fill('#server-form-mount input[name="name"]', "e2e-draft");
+  await page.fill('#server-form-mount input[name="source_host"]', "127.0.0.1");
+  await page.fill('#server-form-mount input[name="source_port"]', "13306");
+  await page.fill('#server-form-mount input[name="source_user"]', "root");
+  await page.fill('#server-form-mount input[name="source_password"]', "definitely-not-the-password");
+  await page.click("#server-test");
+  let draft = "";
+  for (let i = 0; i < 60 && !/Capture cannot start|ready to capture|nothing to test/.test(draft); i++) {
+    await page.waitForTimeout(250);
+    draft = await page.evaluate(() => (document.querySelector("#notice-mount .notice") || {}).textContent || "");
+  }
+  /Capture cannot start/.test(draft) && /Source MySQL connection/.test(draft) && !/nothing to test/.test(draft)
+    ? ok("form: Test on a new server runs the source checks")
+    : bad("form: Test on a new server runs the source checks", JSON.stringify(draft.slice(0, 300)));
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  await page.click("#server-cancel");
+
   // Scenario 4 — the REAL missing-index path (not a fabricated string): query
   // a data endpoint against the default (unprovisioned wp) server, take the
   // ACTUAL backend error, and feed it to renderError. This proves the backend

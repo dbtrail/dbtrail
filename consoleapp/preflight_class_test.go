@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/telemetry"
 )
@@ -34,5 +35,28 @@ func TestWatchPreflightRefusalClassifies(t *testing.T) {
 	only.Add(doctor.CheckResult{Name: doctor.CapacityCheckName, Status: doctor.StatusFail})
 	if fatal, warn := upPreflightOutcome(only); fatal != nil || !warn {
 		t.Errorf("capacity-only must warn, not refuse (fatal=%v warn=%v)", fatal, warn)
+	}
+
+	// A missing primary key before the first snapshot refuses boot (#1766):
+	// the main stream would refuse on it a moment later, and that ends this
+	// daemon too, so holding it advisory would only swap the fix for a stream
+	// error.
+	pk := &doctor.Report{}
+	pk.Add(doctor.CheckResult{Name: doctor.PrimaryKeyCheckName, Status: doctor.StatusFail})
+	if fatal, _ := upPreflightOutcome(pk); fatal == nil {
+		t.Error("a missing primary key before the first snapshot must refuse watch")
+	}
+}
+
+// tallyCheck counts a failed extra check as a failure (#1767): Test connection
+// on a new server answers Failed == 0, so a failure counted as a pass would
+// read as ready.
+func TestTallyCheckCountsAFailure(t *testing.T) {
+	out := &console.DoctorReport{}
+	for _, s := range []string{"fail", "warn", "skip", "pass"} {
+		tallyCheck(out, s)
+	}
+	if out.Failed != 1 || out.Warnings != 1 || out.Skipped != 1 || out.Passed != 1 {
+		t.Errorf("tally = %+v, want one of each", *out)
 	}
 }

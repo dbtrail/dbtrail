@@ -151,6 +151,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 // but the operator must hear about it (the caller prints the WARNING).
 // Extracted so the advisory semantics are unit-testable: losing either half
 // would silently change what blocks `up` or swallow the disk-full signal.
+//
+// A missing primary key or a table not on InnoDB is fatal like any FAIL: it
+// fails only while the first snapshot is pending (#1766), when the stream
+// would refuse on the same finding a moment later.
 func upPreflightOutcome(r *doctor.Report) (fatal error, warnCapacity bool) {
 	if err := r.ErrExcluding(doctor.CapacityCheckName); err != nil {
 		return err, false

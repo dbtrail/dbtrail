@@ -333,6 +333,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 // but the operator must hear about it (the caller prints the WARNING).
 // Duplicated from cmd/bintrail/up.go (6 lines, the PR-C replication
 // precedent): the advisory semantics are up-policy shared by both daemons.
+//
+// A missing primary key or a table not on InnoDB is fatal here as in core
+// `up`: it FAILS only while the index's first snapshot is pending (#1766), and
+// then the main stream's own snapshot refuses a moment later, which ends this
+// daemon too (only a write-deadline error restarts it). Refusing at the
+// preflight says why, with the fix.
 func upPreflightOutcome(r *doctor.Report) (fatal error, warnCapacity bool) {
 	if err := r.ErrExcluding(doctor.CapacityCheckName); err != nil {
 		return err, false
