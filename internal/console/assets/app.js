@@ -9274,7 +9274,7 @@ async function loadServers() {
         .concat(servers.filter((s) => s.kind === "ephemeral"));
       ordered.forEach((s) => {
         const o = opt(s.id, serverLabel(s) + (s.flavor && s.flavor !== "mysql" ? " · " + (s.flavor === "postgres" ? "PG" : "MariaDB") : ""));
-        if (s.kind === "ephemeral") o.title = "The daemon's own index database (set with --index-dsn on the command line)";
+        if (s.kind === "ephemeral") o.title = "DBTrail's own index database (set with --index-dsn on the command line)";
         sel.append(o);
       });
       sel.value = currentServer || defaultServerId;

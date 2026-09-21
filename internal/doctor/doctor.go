@@ -220,8 +220,12 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 			Name:   SourceConnectionCheckName,
 			Status: StatusFail,
 			Detail: err.Error(),
-			Remediation: "Verify --source-dsn is reachable: try `mysql -h<host> -P<port> -u<user> -p<pass>`.\n" +
-				"For RDS/Aurora: ensure the security group allows ingress from bintrail's IP on port 3306.",
+			// Worded for both the terminal and the console (#1783): the
+			// console has no --source-dsn to fix, and the port is whatever
+			// the source uses, not 3306.
+			Remediation: "Check that the source database answers from the machine DBTrail runs on:\n\n" +
+				"  mysql -h <host> -P <port> -u <user> -p\n\n" +
+				"On RDS or Aurora, its security group must allow inbound connections from that machine on the database's port.",
 		})
 		return report
 	}
@@ -587,7 +591,7 @@ func checkServerIDCollision(ctx context.Context, db *sql.DB, sourceDSN string) C
 		return CheckResult{
 			Name:   name,
 			Status: StatusWarn,
-			Detail: "could not derive replication server-id from --source-dsn: " + err.Error(),
+			Detail: "could not derive replication server-id from the source connection: " + err.Error(),
 		}
 	}
 	var srcRaw string
@@ -611,15 +615,15 @@ func checkServerIDCollision(ctx context.Context, db *sql.DB, sourceDSN string) C
 			Name:   name,
 			Status: StatusWarn,
 			Detail: fmt.Sprintf("derived replication server-id %d equals the source's own @@server_id — the replication connection would collide and MySQL would reject or flap the stream", derived),
-			Remediation: "The server-id is derived deterministically from --source-dsn (host|user|dbname). " +
-				"Vary the DSN's user or host form to shift the derived id off the source's @@server_id, " +
-				"or set an explicit --server-id on `stream`.",
+			Remediation: "The server-id is derived from the source connection's host, user and database. " +
+				"Connect with a different user, or a different spelling of the host, to move it off the source's @@server_id. " +
+				"On the command line, --server-id sets one explicitly.",
 		}
 	}
 	return CheckResult{
 		Name:   name,
 		Status: StatusPass,
-		Detail: fmt.Sprintf("derived server-id %d (source @@server_id=%d) — note: any bintrail instance on this same --source-dsn derives this SAME id and would collide on the replication connection", derived, srcID),
+		Detail: fmt.Sprintf("derived server-id %d (source @@server_id=%d); any other DBTrail capturing through this same source connection derives the same id, and the two would collide on the replication connection", derived, srcID),
 	}
 }
 
@@ -684,9 +688,9 @@ func checkStatementCapture(ctx context.Context, db *sql.DB) CheckResult {
 			Name:   name,
 			Status: StatusWarn,
 			Detail: "binlog_rows_query_log_events=OFF — events index without the originating SQL statement (query_text stays NULL)",
-			Remediation: "Optional: log the original statement with each row event so `bintrail query` can show it (dynamic, no restart; costs binlog bytes per statement):\n\n" +
+			Remediation: "Optional: log the original statement with each row event, so each change can show the SQL that made it (dynamic, no restart; costs binlog bytes per statement):\n\n" +
 				"  SET PERSIST binlog_rows_query_log_events = ON;\n\n" +
-				"Not retroactive: only events written AFTER the change carry text, so `query --query-hash` still matches nothing in the window before it (#1437).",
+				"Not retroactive: only events written AFTER the change carry the statement, so a search by statement finds nothing before it.",
 		}
 	}
 	if !isUnknownVar(err) {
@@ -713,10 +717,10 @@ func checkStatementCapture(ctx context.Context, db *sql.DB) CheckResult {
 			Name:   name,
 			Status: StatusWarn,
 			Detail: "binlog_annotate_row_events=OFF — events index without the originating SQL statement (query_text stays NULL)",
-			Remediation: "Optional: log the original statement with each row event so `bintrail query` can show it (stream capture also needs `--source-flavor mariadb`):\n\n" +
+			Remediation: "Optional: log the original statement with each row event, so each change can show the SQL that made it (capture also needs the source type set to MariaDB: `--source-flavor mariadb` on the command line):\n\n" +
 				"  SET GLOBAL binlog_annotate_row_events = ON;\n\n" +
 				"Persist it in my.cnf ([mysqld] binlog_annotate_row_events=ON) to survive restarts. " +
-				"Not retroactive: only events written AFTER the change carry text (#1437).",
+				"Not retroactive: only events written AFTER the change carry the statement.",
 		}
 	}
 	if !isUnknownVar(err) {
@@ -1188,14 +1192,14 @@ func checkIndexConnection(ctx context.Context, dsn, dbName string) CheckResult {
 					return CheckResult{
 						Name:   IndexConnectionCheckName,
 						Status: StatusPass,
-						Detail: fmt.Sprintf("MySQL %s, database=%s (does not exist yet — `bintrail init` will create it)", version, dbName),
+						Detail: fmt.Sprintf("MySQL %s, database=%s (does not exist yet; the console creates it when capture starts, and `bintrail init` or `bintrail up` on the command line)", version, dbName),
 					}
 				}
 				serverErr = vErr
 			}
 			// The database is absent AND the server-level probe failed too.
 			// Surface BOTH errors: 1049 alone would mislead — its remediation
-			// says "init will create it" — when the real, newer problem is
+			// says the database will be created — when the real, newer problem is
 			// e.g. max_user_connections, a timeout, or the server going away
 			// between the two connects. A diagnostic must not swallow the
 			// diagnostic.
@@ -1205,8 +1209,9 @@ func checkIndexConnection(ctx context.Context, dsn, dbName string) CheckResult {
 			Name:   IndexConnectionCheckName,
 			Status: StatusFail,
 			Detail: err.Error(),
-			Remediation: "Verify --index-dsn is reachable. The database does not need to exist yet — " +
-				"`bintrail init` will create it. But the user needs CREATE DATABASE if so.",
+			Remediation: "Check that the index server answers from the machine DBTrail runs on. " +
+				"The index database does not need to exist yet: the console creates it when capture starts, " +
+				"and on the command line `bintrail init` or `bintrail up` does. Either way the user needs CREATE DATABASE.",
 		}
 	}
 	defer db.Close()
@@ -1249,9 +1254,10 @@ func checkIndexWriteAccess(ctx context.Context, dsn, dbName string) CheckResult 
 			Name:   IndexWriteAccessCheckName,
 			Status: StatusFail,
 			Detail: err.Error(),
-			Remediation: "Could not connect to --index-dsn. Verify the host/port/user are correct " +
-				"and that the user has connect privileges. The database itself does not need to " +
-				"exist yet — `bintrail init` (or `bintrail up`) will create it given CREATE DATABASE.",
+			Remediation: "Could not connect to the index server. Check its host, port and user, " +
+				"and that the user may connect. The index database does not need to exist yet: " +
+				"the console creates it when capture starts, and on the command line `bintrail init` " +
+				"or `bintrail up` does. Either way the user needs CREATE DATABASE.",
 		}
 	}
 	defer db.Close()

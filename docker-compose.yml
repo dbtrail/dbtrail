@@ -258,6 +258,11 @@ services:
       # The console binds all interfaces INSIDE the container; the `ports`
       # mapping above is what controls actual exposure on the host.
       BINTRAIL_CONSOLE_LISTEN: 0.0.0.0:8090
+      # The address people open, for the startup banner only: the console
+      # listens on 8090 in here, and the host side of `ports:` may differ.
+      # install.sh moves both together; if you edit `ports:` by hand, edit
+      # this too, or the banner in `docker compose logs` names the old port.
+      BINTRAIL_CONSOLE_URL: http://127.0.0.1:8090/
       # Prometheus metrics for the watch daemon: stream lag/error counters for
       # every supervised source plus the bintrail_index_* gauges (all metrics
       # carry a "source" label). deployment.md §7 ships scrape config and

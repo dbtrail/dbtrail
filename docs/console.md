@@ -906,6 +906,12 @@ longer does anything. Remove it.
 - `BINTRAIL_CONSOLE_TLS_CERT` / `BINTRAIL_CONSOLE_TLS_KEY` — same as `--tls-cert` / `--tls-key`.
 - `BINTRAIL_CONSOLE_ALLOWED_HOSTS` — comma-separated, same as `--allowed-hosts`.
 - `BINTRAIL_CONSOLE_ALLOW_SETUP` — `1`/`true`, same as `--allow-setup`.
+- `BINTRAIL_CONSOLE_URL`: the address people open the console at, when it is not
+  the listen address (a container whose port is published as another, a reverse
+  proxy). Only the startup banner uses it; nothing listens or redirects
+  differently. The compose file sets it, and the installer moves it with
+  `DBTRAIL_PORT`. A value that is not an `http` or `https` URL with a host is
+  ignored with a warning.
 - `BINTRAIL_CONSOLE_SQL_PANEL` — retired. The SQL page and `POST /api/sql` were
   removed in 0.75.0 (see [The SQL panel (removed)](#the-sql-panel-removed)). The
   variable is still read for one release and warns that it does nothing; a later
