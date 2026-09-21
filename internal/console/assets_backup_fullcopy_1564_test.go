@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestBackupScheduleCard_fullBackupTimetable draws the real card (#1564) over
@@ -25,6 +26,11 @@ func TestBackupScheduleCard_fullBackupTimetable(t *testing.T) {
 	}
 	rep := &stubScheduleReporter{full: true}
 	srv, id := newScheduleServer(t, rep)
+	// A fixed now. The slots are anchored to the epoch, so on some days the
+	// next run of the 6h and 7d timetables below IS the next full backup and
+	// the card rightly writes no separate date for it: with the real clock
+	// this test failed once every three days (9h) and once a week (7d).
+	srv.scheduleNow = func() time.Time { return time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC) }
 	e, _ := srv.cm.reg.Get(id)
 	fakeSnapshot(t, e.BaselineDir)
 	put := func(body string) json.RawMessage {
@@ -55,6 +61,10 @@ func TestBackupScheduleCard_fullBackupTimetable(t *testing.T) {
 	daily := put(`{"every":"1d","at":"03:00","full_every":"1d"}`)
 	odd := put(`{"every":"6h","at":"03:00","full_every":"9h"}`)
 	weekly := put(`{"every":"6h","at":"03:00","full_every":"7d"}`)
+	// The listing reads the same fixed clock as the save.
+	if l := string(list()); !strings.Contains(l, `"next_run":"2026-09-21T15:00:00Z"`) {
+		t.Fatalf("the listing's next run is not the fixed clock's (15:00): %s", l)
+	}
 	// The records below are dated before today: they belong to this
 	// timetable only if it was set before them.
 	backdateFullSince(t, srv, id, "2026-09-01T00:00:00Z")
