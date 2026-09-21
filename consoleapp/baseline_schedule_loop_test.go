@@ -630,7 +630,7 @@ func TestBackupScheduler_panicWhileFiringIsASkip(t *testing.T) {
 	p, _ := e.BackupSchedule.Parse()
 	broken := e
 	broken.BackupSchedule = nil
-	b.fireGuarded(broken, p, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC))
+	b.fireGuarded(broken, p, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC), true, false)
 	st := b.ScheduleState(e.ID)
 	if !strings.HasPrefix(st.LastSkipReason, "internal error: ") {
 		t.Fatalf("a panic while firing left no skip: %+v", st)

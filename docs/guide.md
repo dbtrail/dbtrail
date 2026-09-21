@@ -481,8 +481,11 @@ See [Query & Recovery](query-and-recovery.md) for the full flag reference and th
 ### Scenario N: Prove a recovery would actually work — before you need it
 
 You don't want to discover a broken recovery chain *during* an incident. `bintrail
-verify` reconstructs your data from the baseline + indexed binlog and checks it
-reproduces the source — per table, `match` / `mismatch` / `inconclusive`.
+verify` reconstructs your data from the baseline + indexed binlog and compares
+it with a reference (the next baseline, or the live source) — per table,
+`match` / `mismatch` / `inconclusive`. The next baseline tests against your
+database only when it was read from it, not when a refresh built it from the
+recorded changes: [Verifying a recovery](verify.md#baseline-anchored-default-drift-free).
 
 **Run the drift-free check** (no live source, no production impact — safe on a
 schedule). It compares the two most recent baselines, reconstructing the older

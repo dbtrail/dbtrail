@@ -42,10 +42,19 @@ go next (and opens it in your browser when it can):
 curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | sh
 ```
 
-It drops the stack in `./dbtrail` (override with `DBTRAIL_DIR`), and if port
-8090 is already taken it tells you so up front — re-run with
-`DBTRAIL_PORT=9090 …` to publish the console somewhere else. Prefer to drive
-Compose yourself?
+It drops the stack in `./dbtrail` (override with `DBTRAIL_DIR`). If port 8090
+is already taken, it stops before touching anything and prints the command to
+run instead, on a port it found free:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | DBTRAIL_PORT=8091 sh
+```
+
+The variables go on `sh`, after the pipe: that is the side that runs the
+installer. The stack also publishes Prometheus metrics on 9090, which is
+Prometheus's own default port; when 9090 is taken the installer moves the
+metrics to the next free port and says so. Choose one yourself with
+`DBTRAIL_METRICS_PORT`. Prefer to drive Compose yourself?
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/dbtrail/dbtrail/main/docker-compose.yml

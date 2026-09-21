@@ -40,7 +40,7 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		"row.editable", "row.source", "row.startup",
 		"srv.baseline_dir", "srv.baseline_s3", "srv.no_archive",
 		"srv.resolved_dir", "srv.resolved_s3", "srv.source",
-		"srv.schedule_every", "srv.schedule_at", "srv.schedule_refusal",
+		"srv.schedule_every", "srv.schedule_at", "srv.schedule_refusal", "srv.schedule_full_every",
 		"srv.schedule_every_minutes", "srv.archive_s3", "srv.full_backup_possible",
 	} {
 		if !strings.Contains(page, read) {

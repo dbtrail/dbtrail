@@ -198,7 +198,15 @@ and searching events:
    [capacity planning](capacity.md#monitoring).
 7. **Protect** (under `watch` only) — **Backups** (the selected server's
    snapshot listing; each row expands to its tables, sizes and how long the
-   backup took, with a **Download (.tar.gz)** of the whole snapshot — the
+   backup took; for a backup in a local directory, how each table was made
+   (read from the database, built from the recorded changes, or reused
+   unchanged; with table deltas this is read from the newest file of the
+   chain beside the table, since the table file itself is carried forward
+   on every update) and one line saying when the database was last really
+   read under this backup, how long before it, and how many updates were
+   built on that read since, because a backup that looks recent can rest on
+   a read days older ([#1570](https://github.com/dbtrail/dbtrail/issues/1570));
+   and a **Download (.tar.gz)** of the whole snapshot — the
    archive includes a `views.sql` with relative paths, so unpacking it and
    running `duckdb -init views.sql` from inside the folder opens every table
    ([#1583](https://github.com/dbtrail/dbtrail/issues/1583)); plus
@@ -916,7 +924,11 @@ longer does anything. Remove it.
   source, which is load an operator should choose. Turning it on also lets the
   backup schedule take a full backup on its own when an update cannot serve
   the server (no previous backup, no local Backup dir) or fails (a capture
-  gap, a schema change).
+  gap, a schema change), and it is what the schedule's **full backup every**
+  needs: without it, saving one is refused with the reason, and one saved
+  before the opt-in was turned off is shown in red and skipped at its slots
+  while the updates keep running
+  ([#1564](https://github.com/dbtrail/dbtrail/issues/1564)).
   When it is off, the Overview's Getting started list says so until the
   server's first change is indexed, and the Backups page says so for a server
   with a source and a location it can list. Both point at the Backup settings

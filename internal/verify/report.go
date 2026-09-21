@@ -3,6 +3,8 @@ package verify
 import (
 	"fmt"
 	"sort"
+
+	"github.com/dbtrail/dbtrail/internal/verify/verdict"
 )
 
 // Mode names the comparison a run performed. Emitted so a scheduled consumer
@@ -18,21 +20,23 @@ const (
 	ModeRecoverInputs = "recover-inputs"
 )
 
-// Verdict is the run-level outcome — the exit code's reason, as a value.
+// Verdict is the run-level outcome — the exit code's reason, as a value. The
+// values and the rule that picks one live in internal/verify/verdict, which
+// the web interface shares (it cannot link this package).
 const (
 	// VerdictVerified: at least one table was proven and nothing diverged.
-	VerdictVerified = "verified"
+	VerdictVerified = verdict.Verified
 	// VerdictMismatch: at least one table diverged from the comparison.
-	VerdictMismatch = "mismatch"
+	VerdictMismatch = verdict.Mismatch
 	// VerdictError: no mismatch, but at least one table hit a hard error.
-	VerdictError = "error"
+	VerdictError = verdict.Error
 	// VerdictUnproven: tables were reported but none could be proven (all
 	// inconclusive). Fails the run — an all-inconclusive run must never read as
 	// "recovery verified".
-	VerdictUnproven = "unproven"
+	VerdictUnproven = verdict.Unproven
 	// VerdictNoPredecessor: the source has exactly one baseline, so there is no
 	// predecessor to compare against yet. Reported, not failed (exit 0).
-	VerdictNoPredecessor = "no_predecessor"
+	VerdictNoPredecessor = verdict.NoPredecessor
 )
 
 // Report is the machine-readable outcome of one verify run: the same per-table
@@ -272,17 +276,9 @@ func NormalizeStatus(s Status, detail string) (Status, string) {
 }
 
 // verdictOf collapses the counts into the run verdict, in the same precedence
-// the exit code uses.
+// the exit code uses (verdict.Of, shared with the web interface).
 func verdictOf(s Summary) string {
-	switch {
-	case s.Mismatch > 0:
-		return VerdictMismatch
-	case s.Error > 0:
-		return VerdictError
-	case s.Match == 0:
-		return VerdictUnproven
-	}
-	return VerdictVerified
+	return verdict.Of(s.Match, s.Mismatch, s.Error)
 }
 
 // ExitError returns the non-nil error that makes the run exit non-zero, or nil

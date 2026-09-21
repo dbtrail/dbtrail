@@ -86,6 +86,28 @@ type BackupSchedule struct {
 	// slots; an interval that does not divide a day evenly (5h, 36h) drifts
 	// through the day, and the page shows the next run so that is visible.
 	At string `yaml:"at,omitempty"`
+	// FullEvery is an optional second timetable (#1564), in the same grammar
+	// as Every and on the same At: at each of its slots the run is a full
+	// backup from the source, whatever ChooseBackupMethod would pick. The
+	// automatic choice only takes a full backup when an update cannot serve
+	// (a first backup, a gap, a schema change), which are faults or firsts;
+	// this is the operator asking for one: a read of the database on a stated
+	// cadence that does not rest on any earlier backup or on the recorded
+	// changes, which cuts the chain of updates and whatever it inherited.
+	// Empty for none. At least Every: a full copy takes a scheduled run's
+	// place, so asking for more of them than runs is asking for every run to
+	// be one, which Every already says.
+	FullEvery string `yaml:"full_every,omitempty"`
+	// FullSince is when the operator set FullEvery to its current value
+	// (RFC3339 UTC), stamped by the API, never by the operator. It bounds what
+	// the page reports about the timetable: a miss recorded under an earlier
+	// timetable, or before one existed, is not this one's, and a slot before
+	// it never belonged to it (the boot check that records a slot missed
+	// while the daemon was down relies on that). Empty on a schedule saved
+	// without it: nothing is bounded, and the boot check stays silent rather
+	// than guess. Not part of Identity: saving the same timetable again does
+	// not restart its grid.
+	FullSince string `yaml:"full_since,omitempty"`
 	// Extra preserves future keys the way ServerEntry.Extra does.
 	Extra map[string]any `yaml:",inline"`
 }
@@ -97,25 +119,51 @@ type BackupSchedule struct {
 // by their raw fields.
 func (b BackupSchedule) Identity() string {
 	if n, err := b.Normalized(); err == nil {
-		return n.Every + "|" + n.At
+		return n.Every + "|" + n.At + fullIdentity(n.FullEvery)
 	}
-	return b.Every + "|" + b.At
+	return b.Every + "|" + b.At + fullIdentity(b.FullEvery)
+}
+
+// fullIdentity is the full-copy half of Identity, empty without one so a
+// schedule that never had a full copy keeps the identity it always had.
+func fullIdentity(fullEvery string) string {
+	if fullEvery == "" {
+		return ""
+	}
+	return "|full " + fullEvery
 }
 
 // ParsedBackupSchedule is a validated schedule, ready for slot arithmetic.
 type ParsedBackupSchedule struct {
 	Every time.Duration
 	At    time.Duration // offset from midnight UTC
+	// FullEvery is the full-copy timetable (#1564); 0 for none.
+	FullEvery time.Duration
 }
 
 // BackupsPer30Days is how many backups this schedule publishes in 30 days:
 // every one a full-table snapshot, and on a server without an S3
-// destination none of them ever removed automatically.
+// destination none of them ever removed automatically. A full-backup
+// timetable (#1564) adds the full backups that do not land on a run (the two
+// grids share their anchor, so they coincide every lcm(Every, FullEvery)).
 func (p ParsedBackupSchedule) BackupsPer30Days() int64 {
 	if p.Every <= 0 {
 		return 0
 	}
-	return int64(30 * 24 * time.Hour / p.Every)
+	const month = 30 * 24 * time.Hour
+	n := int64(month / p.Every)
+	if p.FullEvery > 0 {
+		n += int64(month/p.FullEvery) - int64(month/lcmDuration(p.Every, p.FullEvery))
+	}
+	return n
+}
+
+func lcmDuration(a, b time.Duration) time.Duration {
+	x, y := a, b
+	for y != 0 {
+		x, y = y, x%y
+	}
+	return a / x * b
 }
 
 // Parse validates the schedule and resolves its defaults. Every error names
@@ -135,7 +183,17 @@ func (b BackupSchedule) Parse() (ParsedBackupSchedule, error) {
 	if err != nil {
 		return p, fmt.Errorf("at: %w", err)
 	}
-	return ParsedBackupSchedule{Every: every, At: at}, nil
+	var full time.Duration
+	if raw := strings.TrimSpace(b.FullEvery); raw != "" {
+		if full, err = cliutil.ParseInterval(raw); err != nil {
+			return p, fmt.Errorf("full backup every: %w", err)
+		}
+		if full < every {
+			return p, fmt.Errorf("full backup every: %s is more often than the schedule runs (every %s); set it to %s or more, or set every to %s",
+				raw, strings.TrimSpace(b.Every), strings.TrimSpace(b.Every), raw)
+		}
+	}
+	return ParsedBackupSchedule{Every: every, At: at, FullEvery: full}, nil
 }
 
 // Normalized returns the schedule with its defaults spelled out, for storage:
@@ -146,9 +204,11 @@ func (b BackupSchedule) Normalized() (BackupSchedule, error) {
 		return BackupSchedule{}, err
 	}
 	return BackupSchedule{
-		Every: strings.TrimSpace(b.Every),
-		At:    formatClockTime(p.At),
-		Extra: b.Extra,
+		Every:     strings.TrimSpace(b.Every),
+		At:        formatClockTime(p.At),
+		FullEvery: strings.TrimSpace(b.FullEvery),
+		FullSince: b.FullSince,
+		Extra:     b.Extra,
 	}, nil
 }
 
@@ -181,18 +241,52 @@ var scheduleEpoch = time.Unix(0, 0).UTC()
 
 // SlotAtOrBefore returns the latest slot at or before now.
 func (p ParsedBackupSchedule) SlotAtOrBefore(now time.Time) time.Time {
-	base := scheduleEpoch.Add(p.At)
-	elapsed := now.UTC().Sub(base)
-	k := elapsed / p.Every
-	if elapsed < 0 && elapsed%p.Every != 0 {
-		k-- // integer division truncates toward zero; the grid wants the floor
-	}
-	return base.Add(k * p.Every)
+	return gridSlotAtOrBefore(p.At, p.Every, now)
 }
 
 // NextRun returns the first slot strictly after now.
 func (p ParsedBackupSchedule) NextRun(now time.Time) time.Time {
 	return p.SlotAtOrBefore(now).Add(p.Every)
+}
+
+// FullSlotAtOrBefore and NextFullRun are SlotAtOrBefore and NextRun on the
+// full-copy timetable (#1564): the same fixed grid, anchored on the same At,
+// stepped by FullEvery. Zero without one. Because both grids share the
+// anchor, a FullEvery that is a whole multiple of Every lands every full copy
+// ON a scheduled run, and that run is the full copy; any other FullEvery puts
+// some full copies between runs, as runs of their own.
+func (p ParsedBackupSchedule) FullSlotAtOrBefore(now time.Time) time.Time {
+	if p.FullEvery <= 0 {
+		return time.Time{}
+	}
+	return gridSlotAtOrBefore(p.At, p.FullEvery, now)
+}
+
+func (p ParsedBackupSchedule) NextFullRun(now time.Time) time.Time {
+	if p.FullEvery <= 0 {
+		return time.Time{}
+	}
+	return p.FullSlotAtOrBefore(now).Add(p.FullEvery)
+}
+
+// FullCopiesPer30Days is how many full copies the full-copy timetable asks
+// for in 30 days: each one a full read of the source database.
+func (p ParsedBackupSchedule) FullCopiesPer30Days() int64 {
+	if p.FullEvery <= 0 {
+		return 0
+	}
+	return int64(30 * 24 * time.Hour / p.FullEvery)
+}
+
+// gridSlotAtOrBefore is the latest instant epoch + at + k*every at or before now.
+func gridSlotAtOrBefore(at, every time.Duration, now time.Time) time.Time {
+	base := scheduleEpoch.Add(at)
+	elapsed := now.UTC().Sub(base)
+	k := elapsed / every
+	if elapsed < 0 && elapsed%every != 0 {
+		k-- // integer division truncates toward zero; the grid wants the floor
+	}
+	return base.Add(k * every)
 }
 
 // ErrBackupScheduleNotRunnable is the class of every "this schedule cannot run
@@ -515,7 +609,43 @@ const (
 	// the cut-over age with nothing measured. The rest carries the numbers.
 	BackupWhyWindowPrefix      = "an update from the recorded changes would take longer than a full backup"
 	BackupWhyStaleAnchorPrefix = "the previous backup is too old to update from"
+	// BackupWhyFullCopyPrefix starts the reason for a full backup the
+	// schedule's own full-copy timetable asked for (#1564); the rest names
+	// the cadence. Not a fault, and the page does not treat it as one.
+	BackupWhyFullCopyPrefix = "the schedule takes a full backup"
 )
+
+// BackupWhyCodeFullCopy is BackupWhyCode's code for FullCopyWhy.
+const BackupWhyCodeFullCopy = "full_copy"
+
+// FullCopyWhy is the reason a scheduled full copy records (#1564).
+func FullCopyWhy(sched BackupSchedule) string {
+	return BackupWhyFullCopyPrefix + " every " + strings.TrimSpace(sched.FullEvery)
+}
+
+// BackupSkipFullCopyPrefix starts every skip recorded for a slot of the
+// full-backup timetable (#1564), whatever stopped it (a refusal, a job
+// holding the server). Its own prefix because the page keeps it apart from
+// the schedule's other skips: a skipped run is made up by the next run an
+// hour later, a skipped weekly full backup by nothing for a week, so its line
+// stays until a full backup starts again rather than until the next run ends.
+const BackupSkipFullCopyPrefix = "the full backup the schedule asks for did not start"
+
+// IsFullCopySkip reports whether a recorded skip reason is one of the
+// full-backup timetable's (BackupSkipFullCopyPrefix).
+func IsFullCopySkip(reason string) bool {
+	return strings.HasPrefix(reason, BackupSkipFullCopyPrefix)
+}
+
+// FullCopySkipReason is reason as a full-backup timetable skip records it.
+func FullCopySkipReason(reason string) string {
+	return BackupSkipFullCopyPrefix + ": " + reason
+}
+
+// fullCopySkipCause is what stopped the full backup, without the prefix.
+func fullCopySkipCause(reason string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(reason, BackupSkipFullCopyPrefix), ": ")
+}
 
 // BackupWhyCode classifies a persisted full-backup reason for the page, so
 // the remedy is chosen by a stable code and not by matching prose that may
@@ -545,6 +675,8 @@ func BackupWhyCode(why string) string {
 		return "window_measured"
 	case strings.HasPrefix(why, BackupWhyStaleAnchorPrefix):
 		return "window_age"
+	case strings.HasPrefix(why, BackupWhyFullCopyPrefix):
+		return BackupWhyCodeFullCopy
 	}
 	return ""
 }
@@ -575,6 +707,29 @@ func CheckBackupSchedule(e ServerEntry, sched BackupSchedule, gates BackupSchedu
 	// Only a rebuild is possible. That is a runnable schedule (it is what
 	// --baseline-refresh-interval does), but only once there is a backup to
 	// rebuild from; the loop reports that per slot.
+	return nil
+}
+
+// CheckFullCopy reports whether the full-copy timetable of e's schedule
+// (#1564) can take its full backups on a daemon with these gates, and why not;
+// nil without one. Separate from CheckBackupSchedule on purpose: a full copy
+// that cannot start must not stop the scheduled updates, which is what a
+// refusal there would do. It is REFUSED LOUDLY instead: a save is refused with
+// this reason, and a saved schedule the environment later invalidated (the
+// creation opt-in turned off at a restart) carries it on the page before the
+// slot, and records a skip naming it at the slot. Silence would be an
+// operator's weekly independent copy quietly never happening.
+//
+// A process that runs no loop is CheckBackupSchedule's refusal to report, and
+// nil here, so the page does not say the same thing twice.
+func CheckFullCopy(e ServerEntry, sched BackupSchedule, gates BackupScheduleGates) error {
+	p, err := sched.Parse()
+	if err != nil || p.FullEvery <= 0 || gates.ReadOnlyConsole || !gates.LoopRunning {
+		return nil
+	}
+	if err := FullBackupPossible(e, gates); err != nil {
+		return notRunnable("the full backup every " + strings.TrimSpace(sched.FullEvery) + " reads your database, and " + err.Error())
+	}
 	return nil
 }
 
@@ -725,6 +880,19 @@ type BackupScheduleState struct {
 	// could not start, empty if none. The history has the durable copy.
 	LastSkippedAt  string
 	LastSkipReason string
+	// LastFullMissedAt / LastFullMissedReason describe the last slot of the
+	// full-backup timetable that did not start (#1564), with the reason as
+	// recorded (BackupSkipFullCopyPrefix). Kept apart from LastSkipped and
+	// cleared only when a full backup of the timetable starts, not when the
+	// next run ends: this process only; the history has the durable copy.
+	LastFullMissedAt     string
+	LastFullMissedReason string
+	// FullOwed: a slot of the full-backup timetable found another job
+	// holding the server, so the next scheduled run takes the full backup
+	// instead of waiting a whole FullEvery for the next slot (#1564). This
+	// process only: a restart drops the debt, and the recorded miss then
+	// stays on the page until a full read of the database succeeds.
+	FullOwed bool
 	// LastFallbackAt / LastFallbackReason describe the last slot where the
 	// update from the recorded changes failed and a full backup was STARTED
 	// in its place (never a collision, which is a skip); cleared when a

@@ -14,7 +14,8 @@ func TestBackupScheduleWireNamesMatchTheFrontend(t *testing.T) {
 	body := jsFunctionBody(t, js, "backupScheduleCard")
 
 	raw, err := json.Marshal(backupScheduleDTO{
-		Every: "1d", At: "03:00", NextRun: "x", NextMethod: BackupMethodRefresh, NextMethodWhy: "w", NextMethodWhyCode: "c", NextMethodError: "e",
+		Every: "1d", At: "03:00", FullEvery: "7d", NextFullRun: "y", FullReason: "f",
+		NextRun: "x", NextMethod: BackupMethodRefresh, NextMethodWhy: "w", NextMethodWhyCode: "c", NextMethodError: "e",
 		Runnable: false, Reason: "r", Running: true, HistoryUnavailable: true,
 		LastRun:      &backupScheduleRunDTO{Method: BackupMethodRefresh, Why: "w", WhyCode: "c", FinishedAt: "f", Error: "e", Tables: 1, Carried: 1, CarriedCopied: 1, Uploaded: 1},
 		LastSkipped:  &backupScheduleSkipDTO{At: "a", Reason: "r"},
@@ -27,7 +28,7 @@ func TestBackupScheduleWireNamesMatchTheFrontend(t *testing.T) {
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"every", "at", "next_run", "next_method", "next_method_why", "next_method_why_code", "next_method_error", "runnable", "reason", "running", "history_unavailable", "last_run", "last_skipped", "last_fallback"} {
+	for _, key := range []string{"every", "at", "full_every", "next_full_run", "full_reason", "next_run", "next_method", "next_method_why", "next_method_why_code", "next_method_error", "runnable", "reason", "running", "history_unavailable", "last_run", "last_skipped", "last_fallback"} {
 		if _, ok := wire[key]; !ok {
 			t.Errorf("backupScheduleDTO does not serialise %q (got %s)", key, raw)
 		}
