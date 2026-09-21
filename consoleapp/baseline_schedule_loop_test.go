@@ -81,7 +81,8 @@ func addScheduled(t *testing.T, reg *console.Registry, withBackup bool) console.
 // had already removed (CI: "TempDir RemoveAll cleanup: directory not empty").
 func waitTerminal(t *testing.T, b *backupScheduler, id string) console.BackupScheduleState {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// A scheduled full backup with a parseable source probes mydumper --version.
+	deadline := time.Now().Add(fakeMydumperBound)
 	for {
 		st := b.ScheduleState(id)
 		if st.Last != nil && !st.Running {
@@ -661,7 +662,7 @@ func TestBackupScheduler_fallbackFullBackupIsWatched(t *testing.T) {
 	b, reg, sup := newScheduleFixture(t, true)
 	e := addScheduled(t, reg, true)
 	fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC))
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(fakeMydumperBound) // the fallback dump probes mydumper first
 	for {
 		if st := sup.Status(e.ID); st.State == "failed" {
 			break
@@ -1020,7 +1021,7 @@ func TestBackupScheduler_runningAfterARealFire(t *testing.T) {
 	// Restoring while the goroutine may still read it is a data race.
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(release) })
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(fakeMydumperBound)
 		for b.ScheduleState(e.ID).Running && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -1029,7 +1030,7 @@ func TestBackupScheduler_runningAfterARealFire(t *testing.T) {
 	fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC))
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(fakeMydumperBound): // the version probe runs before the check
 		t.Fatal("the scheduled dump never reached the privilege check")
 	}
 	if st := b.ScheduleState(e.ID); !st.Running || st.Last == nil || st.LastMethod != console.BackupMethodFull {
