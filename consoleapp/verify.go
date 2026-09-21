@@ -493,7 +493,7 @@ func (s *verifySupervisor) run(req console.VerifyRequest, baselineSrc string) {
 
 func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baselineSrc string, indexDB *sql.DB, resolver *metadata.Resolver, dbName, flavor string) error {
 	ctx := s.ctx
-	pairs, unpaired, prevOnly, err := verify.FindBaselinePair(ctx, baselineSrc)
+	pairs, prevOnly, err := verify.FindBaselinePair(ctx, baselineSrc)
 	if errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		// #1639: a folder the walk could not read sits at or after the pair,
 		// so no pair can be trusted. Every table in scope is inconclusive with
@@ -530,7 +530,7 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 	if err != nil {
 		return fmt.Errorf("list baselines: %w", err)
 	}
-	if len(pairs) == 0 && len(unpaired) == 0 {
+	if len(pairs) == 0 {
 		any, err := verify.AnyBaseline(ctx, baselineSrc)
 		if err != nil {
 			return fmt.Errorf("list baselines: %w", err)
@@ -577,17 +577,6 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 		}
 		s.appendResult(req.ServerID, toWireResult(res, res.Status == verify.StatusMismatch))
 	}
-	for _, st := range unpaired {
-		key := st.Schema + "." + st.Table
-		if filter != nil && !filter[key] {
-			continue
-		}
-		delete(seen, key)
-		s.appendResult(req.ServerID, toWireResult(verify.TableResult{
-			Schema: st.Schema, Table: st.Table, Status: verify.StatusInconclusive,
-			Detail: "new since the previous baseline; the older snapshot does not hold it, so there is nothing to compare",
-		}, false))
-	}
 	for _, st := range prevOnly {
 		key := st.Schema + "." + st.Table
 		if filter != nil && !filter[key] {
@@ -603,7 +592,7 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 		schema, table, _ := strings.Cut(key, ".")
 		s.appendResult(req.ServerID, toWireResult(verify.TableResult{
 			Schema: schema, Table: table, Status: verify.StatusError,
-			Detail: "requested via the tables filter but not present in the latest baseline pair",
+			Detail: "requested via the tables filter but not present in the newest snapshot",
 		}, false))
 	}
 	return nil

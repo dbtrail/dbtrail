@@ -201,17 +201,18 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 	return runVerifyBaselinePair(cmd, indexDB, resolver, indexDBName, baselineSrc, duckTuning, flavor)
 }
 
-// runVerifyBaselinePair is the default, drift-free mode: compare the two most
-// recent baselines (#642). It reads no live source.
+// runVerifyBaselinePair is the default, drift-free mode (#642): compare each
+// table's last read of the database with the snapshot before it
+// (verify.FindBaselinePair). It reads no live source.
 func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metadata.Resolver, indexDBName, baselineSrc string, duckTuning duckdbutil.Tuning, flavor string) error {
-	pairs, unpaired, prevOnly, err := verify.FindBaselinePair(cmd.Context(), baselineSrc)
+	pairs, prevOnly, err := verify.FindBaselinePair(cmd.Context(), baselineSrc)
 	if errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		return emitUnreadablePairReport(cmd, resolver, baselineSrc, err)
 	}
 	if err != nil {
 		return fmt.Errorf("discover baseline pair: %w", err)
 	}
-	if len(pairs) == 0 && len(unpaired) == 0 {
+	if len(pairs) == 0 {
 		// Two physically different causes reach here as "fewer than two
 		// baselines". A source with NO baselines at all is almost always a
 		// misconfiguration or a broken baseline job — exiting 0 there would let a
@@ -253,7 +254,7 @@ func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metada
 		DuckDBTuning: duckTuning,
 	}
 
-	results := make([]verify.TableResult, 0, len(pairs)+len(unpaired))
+	results := make([]verify.TableResult, 0, len(pairs)+len(prevOnly))
 	var toExplain []verify.BaselinePair // mismatched pairs to drill into when --explain
 	for _, p := range pairs {
 		if want != nil && !want[p.Schema+"."+p.Table] {
@@ -268,20 +269,11 @@ func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metada
 			toExplain = append(toExplain, p)
 		}
 	}
-	for _, u := range unpaired {
-		if want != nil && !want[u.Schema+"."+u.Table] {
-			continue
-		}
-		results = append(results, verify.TableResult{
-			Schema: u.Schema, Table: u.Table, Status: verify.StatusInconclusive,
-			Detail: "no predecessor baseline (new since the previous snapshot)",
-		})
-	}
 	// Tables in the previous baseline the newest snapshot no longer carries —
 	// dropped, or skipped by a subset ("--tables") re-baseline. Reported as
 	// inconclusive (not verified) so they appear instead of silently vanishing
-	// from a default all-tables run; the exit code is unchanged (inconclusive,
-	// like unpaired, does not by itself fail the run).
+	// from a default all-tables run; the exit code is unchanged (inconclusive
+	// does not by itself fail the run).
 	for _, d := range prevOnly {
 		if want != nil && !want[d.Schema+"."+d.Table] {
 			continue
@@ -298,12 +290,9 @@ func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metada
 	// — false assurance over precisely the tables reconstruct cannot materialize
 	// either (no baseline = no never-touched rows). Reported inconclusive, like
 	// prevOnly: visible, but not by itself a failure (#770).
-	covered := make(map[string]bool, len(pairs)+len(unpaired)+len(prevOnly))
+	covered := make(map[string]bool, len(pairs)+len(prevOnly))
 	for _, p := range pairs {
 		covered[p.Schema+"."+p.Table] = true
-	}
-	for _, u := range unpaired {
-		covered[u.Schema+"."+u.Table] = true
 	}
 	for _, d := range prevOnly {
 		covered[d.Schema+"."+d.Table] = true
@@ -345,8 +334,7 @@ func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metada
 			})
 		}
 	}
-	// A table named in --tables that is absent from the paired and unpaired
-	// sets AND the schema snapshot was never iterated above, so it would
+	// A table named in --tables that is absent from the pairs AND the schema snapshot was never iterated above, so it would
 	// silently vanish from the report while the run still exited 0 on the other
 	// tables' matches — the exact silent-omission this command exists to prevent
 	// (and asymmetric with live mode, where a bogus --tables entry reaches
@@ -364,7 +352,7 @@ func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metada
 			schema, table, _ := strings.Cut(key, ".")
 			results = append(results, verify.TableResult{
 				Schema: schema, Table: table, Status: verify.StatusError,
-				Detail: "requested via --tables but not present in the latest baseline pair or the latest schema snapshot",
+				Detail: "requested via --tables but not present in the newest snapshot or the latest schema snapshot",
 			})
 		}
 	}
@@ -723,6 +711,9 @@ func writeVerifyText(out io.Writer, rep *verify.Report) {
 			r.Schema, r.Table, r.Status, r.SourceRows, r.ReconstructRows, r.Reason)
 	}
 	w.Flush()
+	if line := comparedToLine(rep.Tables); line != "" {
+		fmt.Fprintln(out, "\n"+line)
+	}
 	// The inconclusive split (#1416): "20 inconclusive" was unreadable when
 	// 18 of them were quiet or append-only tables where zero assertions is
 	// the expected outcome. The parenthetical names the slice that deserves
@@ -736,6 +727,27 @@ func writeVerifyText(out io.Writer, rep *verify.Report) {
 	}
 	fmt.Fprintf(out, "\n%d match, %d mismatch, %d inconclusive, %d error\n",
 		rep.Summary.Match, rep.Summary.Mismatch, rep.Summary.Inconclusive, rep.Summary.Error)
+}
+
+// comparedToLine says which read of the database the compared tables were
+// checked against: the default check pairs each table's last read with the
+// snapshot before it, so the newest snapshot may be newer than the read.
+func comparedToLine(tables []verify.TableReport) string {
+	seen := map[string]bool{}
+	var times []string
+	for _, t := range tables {
+		if t.ComparedTo != "" && !seen[t.ComparedTo] {
+			seen[t.ComparedTo] = true
+			times = append(times, t.ComparedTo)
+		}
+	}
+	switch len(times) {
+	case 0:
+		return ""
+	case 1:
+		return "Compared against the last read of the database, at " + times[0] + "."
+	}
+	return fmt.Sprintf("Compared against each table's last read of the database, at %d different times (--format json lists each).", len(times))
 }
 
 // emitUnreadablePairReport is the baseline-pair verdict when a folder the walk

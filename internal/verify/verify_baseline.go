@@ -95,6 +95,10 @@ func baselineFetchOptions(p BaselinePair, pg bool) query.Options {
 // BaselinePair is one table's previous + new baseline, with the new baseline's
 // recorded binlog anchor and the previous baseline's snapshot time — everything
 // VerifyBaselinePair needs to reconstruct prev→anchor and compare to new.
+//
+// FindBaselinePair returns one per table of the newest snapshot. A table it
+// could not pair carries its answer in Settled instead, and VerifyBaselinePair
+// returns that answer as is.
 type BaselinePair struct {
 	Schema, Table string
 	PrevPath      string
@@ -116,6 +120,27 @@ type BaselinePair struct {
 	// PrevAnchor. 0 = a MySQL baseline or a pre-#593 PG baseline (no LSN).
 	NewLSN  uint64
 	PrevLSN uint64
+	// NewReadFromDatabase: the new side is a snapshot that read this table
+	// from the database (a dump), its file written there, not carried there.
+	// Set by FindBaselinePair, which picks no other new side (and so leaves
+	// NewHasDelta unset: a read starts its chain with an empty pair, and
+	// pairComparesNothing ignores it for a read).
+	NewReadFromDatabase bool
+	// Settled, when set, is this table's answer, decided while pairing: the
+	// read it needs is not kept, not on record, or has no earlier snapshot,
+	// or a footer the pairing needed would not open. Nothing is compared.
+	Settled *TableResult
+}
+
+// pairComparesNothing reports a pair whose new side keeps the previous file
+// under a table delta (#1638): both sides are the same bytes under the same
+// anchor, the window between them is empty, and the two fingerprints agree
+// whatever happened to the table (its changes are in the delta, which this
+// comparison does not read). A new side that is a read of the database never
+// does that: it wrote its own file, and two reads at the same position (no
+// write between them) are a real comparison.
+func pairComparesNothing(p BaselinePair) bool {
+	return p.NewHasDelta && !p.NewReadFromDatabase && p.PrevAnchor == p.NewAnchor && p.PrevLSN == p.NewLSN
 }
 
 // VerifyBaselinePair proves, drift-free, that the recovery chain reproduces a
@@ -129,6 +154,9 @@ type BaselinePair struct {
 // not taken from #633's persisted value). Neither side reads the live source, so
 // there is no snapshot drift, no off-peak requirement, and no production impact.
 func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair) (TableResult, error) {
+	if p.Settled != nil {
+		return *p.Settled, nil
+	}
 	pg := cfg.SourceFlavor == flavorPostgres
 	res := TableResult{Schema: p.Schema, Table: p.Table, Anchor: anchorLabel(pg, p)}
 
@@ -178,15 +206,11 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	if !p.PrevSnapshot.Before(p.NewSnapshot) {
 		return inconclusive(res, "baseline pair is not in prev→new order (prev snapshot is not before new)"), nil
 	}
-	// A table stored as a delta (#1638) keeps its previous FILE: both sides of
-	// this pair are then the same bytes under the same anchor, the window
-	// between them is empty, and the two fingerprints agree whatever happened
-	// to the table. That is not a match, it is nothing checked, and the table
-	// DID change (its changes are in the delta, which this comparison does not
-	// read). A carried-forward table looks the same and is a fair match,
-	// because there the table really did not change. Different anchors mean
-	// the new side was rewritten, and that pair is verified as usual.
-	if p.NewHasDelta && p.PrevAnchor == p.NewAnchor && p.PrevLSN == p.NewLSN {
+	// A table stored as a delta (#1638) keeps its previous FILE: that is not a
+	// match, it is nothing checked (pairComparesNothing). FindBaselinePair
+	// never builds such a pair (its new side is always a read of the
+	// database); a pair built by hand still gets the honest answer.
+	if pairComparesNothing(p) {
 		return inconclusive(res, "the newest backup keeps this table's previous file and stores its changes beside it (table deltas); "+
 			"verify compares table files, and this one did not change, so nothing was checked. "+
 			"The table is verified again the next time it is written in full"), nil
@@ -292,6 +316,11 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	res.ReconstructDigest = reconDigest
 	res.ReconstructRows = reconCount
 
+	// Named only where two fingerprints were compared: a table that stopped
+	// at an earlier gate (no key, no anchor, a gap) was checked against nothing.
+	if p.NewReadFromDatabase {
+		res.ComparedTo = p.NewSnapshot
+	}
 	res.Status, res.Detail = classify(newDigest, newCount, reconDigest, reconCount, deferredDetail)
 	return res, nil
 }
@@ -344,133 +373,213 @@ func AnyBaseline(ctx context.Context, source string) (bool, error) {
 	return len(files) > 0, nil
 }
 
-// FindBaselinePair builds the verifiable table pairs from the two most recent
-// baseline snapshots under source: for every table present in both, the prev +
-// new Parquet paths, the prev snapshot time, and the new baseline's binlog
-// anchor (read from its Parquet metadata).
+// FindBaselinePair builds the default check's pairs: for every table of the
+// newest snapshot, the snapshot that last READ it from the database (a dump)
+// and the snapshot before that one. The comparison then asks whether the older
+// snapshot, carried forward over the recorded changes to the read's exact
+// anchor, equals what the database held at that read.
 //
-// It also surfaces the two asymmetric "can't pair" sets so the caller reports
-// them instead of silently dropping either — an operator must be able to tell
-// "verified" from "not present to verify":
-//   - unpaired: present in the NEW snapshot, absent from the prev (new since the
-//     prev snapshot — no predecessor image to reconstruct from).
-//   - prevOnly: present in the PREV snapshot, absent from the new. Either a table
-//     dropped between the snapshots, or the newest baseline was a subset (e.g.
-//     "bintrail baseline --tables") that didn't re-snapshot it. Without this the
-//     table would produce no report row at all on a default all-tables run — a
-//     silent omission that could let "recovery verified" hide untouched tables.
+// Not the two newest snapshots: a snapshot built from the recorded changes (a
+// fold) never read the database, so comparing it with its predecessor tests
+// two computations over the same recorded changes, not the database. When the
+// newest snapshot IS a read, the pair is the two newest, as before.
 //
-// Returns nil, nil, nil, nil (nothing to verify) when fewer than two snapshots
+// The read is found from the newest snapshot's footer, which carries the
+// instant of the table's last read (baseline.SourceReadOf, #1570: inherited
+// through every fold, the base's under a delta chain). Both dump writers stamp
+// that instant from the same string that names the snapshot's directory, so it
+// is an equality lookup, not a scan. The read is the snapshot where the file
+// was WRITTEN (readHere): a later snapshot that carries the read's file by hard
+// link holds the same bytes, and taking it as the read would compare it with a
+// predecessor holding those bytes too, a file against itself.
+//
+// Every table of the newest snapshot gets exactly one pair. One that cannot be
+// paired carries its answer in Settled: its read is not on record, no longer
+// kept, or has no earlier snapshot, or a footer the pairing needed would not
+// open (that table is an error; the others are still checked). prevOnly holds
+// the tables the snapshot before the newest has and the newest does not
+// (dropped, or the newest was a subset), reported so they never vanish.
+//
+// Returns nil, nil, nil (nothing to verify) when fewer than two snapshots
 // exist.
 //
-// A folder the walk could not read at or after the older snapshot of the pair
-// refuses with reconstruct.ErrUnreadableSnapshot (#1639): the pair would be two
-// older backups, or a short one, and a "match" over it is worse than no
-// verify. An unreadable folder older than the pair changes nothing.
-func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair, unpaired, prevOnly []query.SchemaTable, err error) {
+// A folder the walk could not read at or after the oldest snapshot any answer
+// rests on (and at or after the second newest, as before) refuses with
+// reconstruct.ErrUnreadableSnapshot (#1639): the read a table needs, or the
+// snapshot before it, could be in it, and a "match" or a "not kept" over it is
+// worse than no verify. An unreadable folder older than all of that changes
+// nothing.
+func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair, prevOnly []query.SchemaTable, err error) {
 	files, unreadable, err := reconstruct.ListBaselinesUnreadable(ctx, source)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	// files are newest-snapshot-first; find the two most recent distinct times.
-	var tNew, tPrev time.Time
+	// files are newest-snapshot-first; the two most recent distinct times name
+	// the tables to answer for and the ones the newest no longer holds.
+	var tNew, tSecond time.Time
 	for _, f := range files {
 		if tNew.IsZero() {
 			tNew = f.SnapshotTime
 			continue
 		}
 		if !f.SnapshotTime.Equal(tNew) {
-			tPrev = f.SnapshotTime
+			tSecond = f.SnapshotTime
 			break
 		}
 	}
-	// tPrev is zero with fewer than two readable snapshots, and then every
-	// skipped folder counts: "only one baseline, nothing to verify yet" would
-	// be a false exit 0 while the predecessor exists and cannot be read.
-	if err := reconstruct.UnreadableAtOrAfter(unreadable, tPrev, time.Time{}); err != nil {
-		return nil, nil, nil, err
-	}
-	if tNew.IsZero() || tPrev.IsZero() {
-		return nil, nil, nil, nil // fewer than two snapshots: nothing to verify yet
+	if tNew.IsZero() || tSecond.IsZero() {
+		// Fewer than two readable snapshots, and then every skipped folder
+		// counts: "only one baseline, nothing to verify yet" would be a false
+		// exit 0 while the predecessor exists and cannot be read.
+		if err := reconstruct.UnreadableAtOrAfter(unreadable, time.Time{}, time.Time{}); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, nil
 	}
 
-	newByTable := map[string]reconstruct.BaselineFile{}
-	prevByTable := map[string]reconstruct.BaselineFile{}
+	// Each table's snapshots, newest first (the order files come in). Keyed
+	// by the pair, not "schema.table": a dot inside a name must not merge two
+	// tables.
+	byTable := map[query.SchemaTable][]reconstruct.BaselineFile{}
+	var keys []query.SchemaTable
 	for _, f := range files {
-		key := f.Schema + "." + f.Table
-		switch {
-		case f.SnapshotTime.Equal(tNew):
-			newByTable[key] = f
-		case f.SnapshotTime.Equal(tPrev):
-			prevByTable[key] = f
+		key := query.SchemaTable{Schema: f.Schema, Table: f.Table}
+		if _, ok := byTable[key]; !ok {
+			keys = append(keys, key)
 		}
+		byTable[key] = append(byTable[key], f)
 	}
 
-	for key, nf := range newByTable {
-		pf, ok := prevByTable[key]
-		if !ok {
-			// New since the previous snapshot: no predecessor image to compare.
-			unpaired = append(unpaired, query.SchemaTable{Schema: nf.Schema, Table: nf.Table})
-			continue
+	floor, everyFolder := tSecond, false
+	for _, key := range keys {
+		snaps := byTable[key]
+		switch {
+		case snaps[0].SnapshotTime.Equal(tNew):
+			p, used, allOlder := pairLastRead(ctx, snaps)
+			if !used.IsZero() && used.Before(floor) {
+				floor = used
+			}
+			// "No earlier snapshot" is a claim about every folder older
+			// than the read, the unreadable ones included.
+			everyFolder = everyFolder || allOlder
+			pairs = append(pairs, p)
+		case snaps[0].SnapshotTime.Equal(tSecond):
+			prevOnly = append(prevOnly, query.SchemaTable{Schema: snaps[0].Schema, Table: snaps[0].Table})
 		}
-		meta, err := baseline.ReadParquetMetadataAny(ctx, nf.Path)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("read new baseline metadata %s: %w", nf.Path, err)
-		}
-		// The previous baseline's OWN recorded binlog position — where ITS
-		// deltas begin (#797's PrevAnchor). A zero value (older baseline that
-		// never recorded one) is not an error; ReadParquetMetadataAny returns
-		// it directly and callers fall back to the timestamp bound.
-		prevMeta, err := baseline.ReadParquetMetadataAny(ctx, pf.Path)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("read prev baseline metadata %s: %w", pf.Path, err)
-		}
-		// A previous base with a table delta beside it (#1638) has events of
-		// its own between its chain's start and its directory's time, so the
-		// fetch is bounded from the chain's start. Same rule, and same reason,
-		// as reconstruct.FindBaseline, which this listing does not go through.
-		prevSince := tPrev
-		chainStart, err := reconstruct.DeltaChainStart(ctx, pf.Path)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("prev baseline %s: %w", pf.Path, err)
-		}
-		if !chainStart.IsZero() && chainStart.Before(prevSince) {
-			prevSince = chainStart
-		}
-		// Half a pair counts: the table is stored as a delta, damaged or not.
-		newHasDelta, err := baseline.HasTableDelta(ctx, nf.Path)
-		if errors.Is(err, baseline.ErrHalfTableDelta) {
-			newHasDelta, err = true, nil
-		}
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("new baseline %s: %w", nf.Path, err)
-		}
-		pairs = append(pairs, BaselinePair{
-			Schema:       nf.Schema,
-			Table:        nf.Table,
-			PrevPath:     pf.Path,
-			NewPath:      nf.Path,
-			PrevSnapshot: prevSince,
-			NewHasDelta:  newHasDelta,
-			NewSnapshot:  tNew,
-			NewAnchor:    query.BinlogPos{File: meta.BinlogFile, Pos: uint64(meta.BinlogPos)},
-			PrevAnchor:   query.BinlogPos{File: prevMeta.BinlogFile, Pos: uint64(prevMeta.BinlogPos)},
-			NewLSN:       meta.LSN,
-			PrevLSN:      prevMeta.LSN,
-		})
 	}
-	// Symmetric to unpaired: tables in the prev snapshot the new one no longer
-	// carries. Reported, never silently dropped.
-	for key, pf := range prevByTable {
-		if _, ok := newByTable[key]; ok {
-			continue
-		}
-		prevOnly = append(prevOnly, query.SchemaTable{Schema: pf.Schema, Table: pf.Table})
+	if everyFolder {
+		floor = time.Time{}
+	}
+	if err := reconstruct.UnreadableAtOrAfter(unreadable, floor, time.Time{}); err != nil {
+		return nil, nil, err
 	}
 	sortBaselinePairs(pairs)
-	sortSchemaTables(unpaired)
 	sortSchemaTables(prevOnly)
-	return pairs, unpaired, prevOnly, nil
+	return pairs, prevOnly, nil
+}
+
+// readHere reports whether the file at a snapshot of time dir is that
+// snapshot's own read of the database: written there by a dump, not carried
+// there. A carried file keeps its writer's instant, which is not dir.
+func readHere(dir time.Time, md baseline.DumpMetadata) bool {
+	return !md.SnapshotTimestamp.IsZero() && baseline.ProvenanceOf(dir, md).ProducedBy == baseline.ProducedByDump
+}
+
+// pairLastRead pairs one table, snaps being its snapshots newest first. used
+// is the oldest snapshot time the answer rests on (the older side of the pair,
+// or the read it looked for), zero when it rests on no snapshot but the
+// newest. allOlder: the answer rests on every folder older than that too
+// ("no earlier snapshot" is only true if none of them holds the table).
+func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile) (p BaselinePair, used time.Time, allOlder bool) {
+	newest := snaps[0]
+	p = BaselinePair{Schema: newest.Schema, Table: newest.Table}
+	settle := func(st Status, detail string) BaselinePair {
+		p.Settled = &TableResult{Schema: p.Schema, Table: p.Table, Status: st, Detail: detail}
+		return p
+	}
+	footer := func(f reconstruct.BaselineFile) (baseline.DumpMetadata, error) {
+		md, err := baseline.ReadParquetMetadataAny(ctx, f.Path)
+		if err != nil {
+			return md, fmt.Errorf("read the footer of %s: %w", f.Path, err)
+		}
+		return md, nil
+	}
+
+	md, err := footer(newest)
+	if err != nil {
+		return settle(StatusError, err.Error()), time.Time{}, false
+	}
+	n, nMeta := -1, md
+	if readHere(newest.SnapshotTime, md) {
+		n = 0
+	} else {
+		at := baseline.SourceReadOf(md).At
+		if at.IsZero() {
+			return settle(StatusInconclusive, "the newest copy of this table does not record when the database was last read for it. "+
+				"The next full backup makes it checkable"), time.Time{}, false
+		}
+		for i, f := range snaps {
+			if f.SnapshotTime.Equal(at) {
+				n = i
+				break
+			}
+		}
+		if n < 0 {
+			return settle(StatusInconclusive, fmt.Sprintf("the snapshot that last read this table from the database (%s) is no longer kept. "+
+				"The next full backup makes it checkable", at.UTC().Format(time.RFC3339))), at, false
+		}
+		if nMeta, err = footer(snaps[n]); err != nil {
+			return settle(StatusError, err.Error()), snaps[n].SnapshotTime, false
+		}
+		if !readHere(snaps[n].SnapshotTime, nMeta) {
+			// A copy of known making where the read should be: the records of
+			// the two snapshots contradict each other.
+			switch baseline.ProvenanceOf(snaps[n].SnapshotTime, nMeta).ProducedBy {
+			case baseline.ProducedByFold, baseline.ProducedByCarriedForward:
+				return settle(StatusError, fmt.Sprintf("the newest copy of this table says the database was last read at %s, "+
+					"but the snapshot of that time holds a copy that did not read it (%s)",
+					at.UTC().Format(time.RFC3339), snaps[n].Path)), at, false
+			}
+			return settle(StatusInconclusive, fmt.Sprintf("the newest copy of this table says the database was last read at %s, "+
+				"but the snapshot of that time does not say how its copy was made. The next full backup makes it checkable",
+				at.UTC().Format(time.RFC3339))), at, false
+		}
+	}
+	read := snaps[n]
+	if n == len(snaps)-1 {
+		return settle(StatusInconclusive, fmt.Sprintf("the last read of this table from the database (%s) is the oldest snapshot that holds it: "+
+			"there is no earlier snapshot to compare it with", read.SnapshotTime.UTC().Format(time.RFC3339))), read.SnapshotTime, true
+	}
+	prev := snaps[n+1]
+	prevMeta, err := footer(prev)
+	if err != nil {
+		return settle(StatusError, err.Error()), prev.SnapshotTime, false
+	}
+	// A previous base with a table delta beside it (#1638) has events of its
+	// own between its chain's start and its directory's time, so the fetch is
+	// bounded from the chain's start. Same rule, and same reason, as
+	// reconstruct.FindBaseline, which this listing does not go through.
+	prevSince := prev.SnapshotTime
+	chainStart, err := reconstruct.DeltaChainStart(ctx, prev.Path)
+	if err != nil {
+		return settle(StatusError, fmt.Sprintf("the chain beside %s: %v", prev.Path, err)), prev.SnapshotTime, false
+	}
+	if !chainStart.IsZero() && chainStart.Before(prevSince) {
+		prevSince = chainStart
+	}
+	return BaselinePair{
+		Schema:              read.Schema,
+		Table:               read.Table,
+		PrevPath:            prev.Path,
+		NewPath:             read.Path,
+		PrevSnapshot:        prevSince,
+		NewSnapshot:         read.SnapshotTime,
+		NewAnchor:           query.BinlogPos{File: nMeta.BinlogFile, Pos: uint64(nMeta.BinlogPos)},
+		PrevAnchor:          query.BinlogPos{File: prevMeta.BinlogFile, Pos: uint64(prevMeta.BinlogPos)},
+		NewLSN:              nMeta.LSN,
+		PrevLSN:             prevMeta.LSN,
+		NewReadFromDatabase: true,
+	}, prev.SnapshotTime, false
 }
 
 // sortBaselinePairs orders pairs by schema.table, in place.

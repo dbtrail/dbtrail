@@ -120,7 +120,7 @@ func TestRunVerifyBaselinePair_TablesAbsent(t *testing.T) {
 		t.Fatalf("want a non-nil error (non-zero exit) for an absent --tables request, got nil; output:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "1 error") ||
-		!strings.Contains(out.String(), "not present in the latest baseline pair") {
+		!strings.Contains(out.String(), "not present in the newest snapshot") {
 		t.Errorf("want the ghost table surfaced as an error, got output:\n%s", out.String())
 	}
 }
@@ -161,7 +161,7 @@ func TestRunVerifyBaselinePair_NeverBaselined(t *testing.T) {
 		!strings.Contains(out.String(), "1 inconclusive") {
 		t.Errorf("want mydb.payments reported inconclusive as never baselined, got output:\n%s", out.String())
 	}
-	if strings.Contains(out.String(), "not present in the latest baseline pair") {
+	if strings.Contains(out.String(), "not present in the newest snapshot") {
 		t.Errorf("a snapshot table must not hit the --tables-absent error path, got output:\n%s", out.String())
 	}
 }

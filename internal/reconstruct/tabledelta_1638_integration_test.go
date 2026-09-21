@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 	"github.com/dbtrail/dbtrail/internal/verify"
@@ -162,23 +164,23 @@ func TestReconstructParquet_tableDeltaChainAcrossHours(t *testing.T) {
 		}
 	}
 
-	// verify over the two newest snapshots of the chain: both hold the SAME
-	// table file, so there is nothing for it to compare. It must say so rather
-	// than report a match for a table that changed, and the pair's window must
-	// start where the chain did.
-	pairs, _, _, err := verify.FindBaselinePair(ctx, root)
-	if err != nil || len(pairs) != 1 {
-		t.Fatalf("FindBaselinePair: pairs=%d err=%v", len(pairs), err)
-	}
-	if !pairs[0].NewHasDelta || !pairs[0].PrevSnapshot.Equal(h0) {
-		t.Fatalf("pair = {NewHasDelta:%v PrevSnapshot:%s}, want a delta pair bounded from the chain's start %s",
-			pairs[0].NewHasDelta, pairs[0].PrevSnapshot, h0)
-	}
+	// Two snapshots of the chain hold the SAME table file. The default check
+	// never pairs them (its newer side is always a read of the database, below),
+	// but a pair built that way must still say nothing was checked rather than
+	// report a match for a table that changed.
+	prevBase, _ := newest(hour(2, 30*time.Minute))
+	lastBase, _ := newest(hour(3, 30*time.Minute))
 	resolver, err := metadata.NewResolver(db, 0)
 	if err != nil {
 		t.Fatalf("NewResolver: %v", err)
 	}
-	res, err := verify.VerifyBaselinePair(ctx, verify.BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName}, pairs[0])
+	vcfg := verify.BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
+	anchor := query.BinlogPos{File: "binlog.000001", Pos: 4}
+	res, err := verify.VerifyBaselinePair(ctx, vcfg, verify.BaselinePair{
+		Schema: schema, Table: "orders", PrevPath: prevBase, NewPath: lastBase,
+		PrevSnapshot: h0, NewSnapshot: hour(3, 30*time.Minute), NewHasDelta: true,
+		PrevAnchor: anchor, NewAnchor: anchor,
+	})
 	if err != nil {
 		t.Fatalf("VerifyBaselinePair: %v", err)
 	}
@@ -204,4 +206,71 @@ func TestReconstructParquet_tableDeltaChainAcrossHours(t *testing.T) {
 	if manifest.Reused != 0 || manifest.Hashed != 1 {
 		t.Fatalf("rewritten table: manifest reused %d, hashed %d; want 0 / 1", manifest.Reused, manifest.Hashed)
 	}
+
+	// The default check over this real tree: a read of the database after the
+	// folds, stamped the way baseline.Run stamps one, holding the table's true
+	// state at its anchor, and a real fold after it. The check must find that
+	// read through the newest snapshot's footer (the fold carries it) and
+	// compare it with the snapshot before it, the rewritten fold above.
+	readAt := hour(3, 50*time.Minute)
+	readPath := writeReadOfOrders(t, root, readAt, schema, 500, [][]string{{"1", "A2"}, {"3", "shipped"}, {"4", "D"}})
+	run(hour(3, 55*time.Minute), true)
+	pairs, _, err := verify.FindBaselinePair(ctx, root)
+	if err != nil || len(pairs) != 1 {
+		t.Fatalf("FindBaselinePair: pairs=%d err=%v", len(pairs), err)
+	}
+	p := pairs[0]
+	if p.Settled != nil || !p.NewReadFromDatabase || !p.NewSnapshot.Equal(readAt) || !p.PrevSnapshot.Equal(off) || p.NewPath != readPath {
+		t.Fatalf("pair = %+v (settled %v), want the read at %s compared with the snapshot at %s", p, p.Settled, readAt, off)
+	}
+	if res, err = verify.VerifyBaselinePair(ctx, vcfg, p); err != nil || res.Status != verify.StatusMatch || !res.ComparedTo.Equal(readAt) {
+		t.Fatalf("the read of the true state: %s (%q) compared to %s, err=%v; want a match against the read at %s", res.Status, res.Detail, res.ComparedTo, err, readAt)
+	}
+	// And the comparison is real: the same read holding a wrong row differs.
+	if err := os.Remove(readPath); err != nil {
+		t.Fatal(err)
+	}
+	writeReadOfOrders(t, root, readAt, schema, 500, [][]string{{"1", "A2"}, {"3", "shipped"}, {"4", "WRONG"}})
+	if res, err = verify.VerifyBaselinePair(ctx, vcfg, p); err != nil || res.Status != verify.StatusMismatch {
+		t.Fatalf("a read that differs from the recorded changes: %s (%q) err=%v, want a mismatch", res.Status, res.Detail, err)
+	}
+}
+
+// writeReadOfOrders writes a snapshot of the orders table the way a read of
+// the database lands (baseline.Run's footer: producer, its own instant as the
+// last read, zero folds, the dump's binlog position).
+func writeReadOfOrders(t *testing.T, root string, at time.Time, schema string, pos int, rows [][]string) string {
+	t.Helper()
+	ts := at.UTC().Format(time.RFC3339)
+	snapDir := filepath.Join(root, reconstruct.SnapshotDirName(at))
+	path := filepath.Join(snapDir, schema, "orders.parquet")
+	cols, err := baseline.ParseSchemaText(ordersCreateSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := baseline.NewWriter(path, cols, baseline.WriterConfig{Compression: "none", RowGroupSize: 100, Metadata: map[string]string{
+		baseline.MetaKeyCreateTableSQL:    ordersCreateSQL,
+		baseline.MetaKeySnapshotTimestamp: ts,
+		baseline.MetaKeyMydumperFormat:    "sql",
+		baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
+		baseline.MetaKeyLastDumpAt:        ts,
+		baseline.MetaKeyFoldGeneration:    "0",
+		baseline.MetaKeyBinlogFile:        "binlog.000001",
+		baseline.MetaKeyBinlogPos:         fmt.Sprint(pos),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if err := w.WriteRow(r, []bool{false, false}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := baseline.WriteSuccessMarker(snapDir); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

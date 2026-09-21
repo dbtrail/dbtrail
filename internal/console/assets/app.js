@@ -7493,7 +7493,7 @@ function verifyRegions(servers, opts) {
 // operator browses. Source of truth for the long form is the issue; keep
 // these three claims per entry: proof, prerequisite, cost.
 const VFY_MODE_HELP = {
-  "baseline-anchored": "Takes your two newest snapshots, replays the recorded changes from the older one forward, and compares the result with the newer one. It tests against your database only when the newer snapshot was read from it; a table the newer one stores as changes beside its previous file is reported as not checked. Needs two snapshots. Never touches your database.",
+  "baseline-anchored": "For each table, takes the last snapshot that read it from your database and the snapshot before that one, replays the recorded changes from the older one forward, and compares the result with what your database held at that read. A table whose last read is no longer kept, or has no snapshot before it, is reported as not checked. Never touches your database.",
   "live-source": "Rebuilds each table from a snapshot plus the recorded changes, then compares it row by row against the real table. The strongest content check, and the only one that reads your database: it takes time, adds load, and needs a quiet table, because writes that land during the scan show up as mismatches. Run it outside busy hours.",
   "recover-inputs": "Reads the index's own record of each change and checks that every row's history holds together from one change to the next. This is the data an undo script is built from. Needs no snapshot and never touches your database.",
 };
