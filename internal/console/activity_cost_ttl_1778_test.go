@@ -41,6 +41,7 @@ func primeActivity(c *activityCache, key string, resp activityResponse, age, cos
 	c.entries[key] = resp
 	c.stamps[key] = time.Now().Add(-age)
 	c.costs[key] = cost
+	c.prevCosts[key] = cost
 	c.mu.Unlock()
 }
 
@@ -255,9 +256,99 @@ func TestActivityEvictionDropsTheCost(t *testing.T) {
 	}
 	c.mu.Lock()
 	c.evictOverCapLocked()
-	ne, ns, nc := len(c.entries), len(c.stamps), len(c.costs)
+	ne, ns, nc, np := len(c.entries), len(c.stamps), len(c.costs), len(c.prevCosts)
 	c.mu.Unlock()
-	if ne != activityMaxProfiles || ns != ne || nc != ne {
-		t.Errorf("after eviction: %d entries, %d stamps, %d costs; want %d of each", ne, ns, nc, activityMaxProfiles)
+	if ne != activityMaxProfiles || ns != ne || nc != ne || np != ne {
+		t.Errorf("after eviction: %d entries, %d stamps, %d costs, %d previous costs; want %d of each", ne, ns, nc, np, activityMaxProfiles)
+	}
+}
+
+// TestActivityHungRefreshIsWaitedOnOnce: with the index hung, only the
+// requests in a flight's first inlineWait wait for it. A later request gets
+// the stale entry at once, as it did before #1778, instead of every page load
+// paying the full wait while the flight runs out its timeout.
+func TestActivityHungRefreshIsWaitedOnOnce(t *testing.T) {
+	c := newActivityCache()
+	c.inlineWait = 100 * time.Millisecond
+	primeActivity(c, "", activityResponse{Deletes: 4}, time.Minute, time.Millisecond)
+	release := make(chan struct{})
+	defer close(release)
+	hung := func(ctx context.Context) (activityResponse, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return activityResponse{}, errors.New("index hung")
+	}
+	if got, err := c.get(context.Background(), "", hung); err != nil || got.Deletes != 4 {
+		t.Fatalf("first get = %+v, %v; want the stale 4", got, err)
+	}
+	start := time.Now()
+	got, err := c.get(context.Background(), "", hung)
+	if err != nil || got.Deletes != 4 {
+		t.Fatalf("second get = %+v, %v; want the stale 4", got, err)
+	}
+	if waited := time.Since(start); waited >= c.inlineWait/2 {
+		t.Errorf("a request waited %v on a flight already past its wait", waited)
+	}
+}
+
+// TestActivityOneSlowSampleDoesNotFreezeACheapIndex: the TTL follows the
+// faster of the last two computes, so one slow sample on a small index (a
+// lock wait, a cold cache) does not hold its count for 30 minutes.
+func TestActivityOneSlowSampleDoesNotFreezeACheapIndex(t *testing.T) {
+	c := newActivityCache()
+	primeActivity(c, "", activityResponse{Deletes: 4}, 5*time.Second, 20*time.Second)
+	c.mu.Lock()
+	c.prevCosts[""] = 10 * time.Millisecond
+	c.mu.Unlock()
+	compute, _, _ := countingCompute(activityResponse{Deletes: 9}, nil)
+	got, err := c.get(context.Background(), "", compute)
+	if err != nil || got.Deletes != 9 {
+		t.Errorf("get = %+v, %v; one 20 s sample after a 10 ms one held the count", got, err)
+	}
+}
+
+// TestActivityTwoSlowSamplesKeepTheLongTTL: an index that is slow every time
+// keeps #1352's protection.
+func TestActivityTwoSlowSamplesKeepTheLongTTL(t *testing.T) {
+	c := newActivityCache()
+	primeActivity(c, "", activityResponse{Deletes: 4}, 10*time.Minute, 20*time.Second)
+	c.mu.Lock()
+	c.prevCosts[""] = 25 * time.Second
+	c.mu.Unlock()
+	compute, n, mu := countingCompute(activityResponse{Deletes: 9}, nil)
+	if got, _ := c.get(context.Background(), "", compute); got.Deletes != 4 {
+		t.Errorf("got %d, want the cached 4", got.Deletes)
+	}
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if *n != 0 {
+		t.Errorf("an index slow twice in a row was recomputed after 10 minutes")
+	}
+}
+
+// TestActivityKeepsThePreviousSample: each successful flight moves the last
+// cost to prevCosts, which is what lets one outlier be outvoted.
+func TestActivityKeepsThePreviousSample(t *testing.T) {
+	c := newActivityCache()
+	flight := func(d time.Duration) {
+		f := &activityFlight{done: make(chan struct{})}
+		c.mu.Lock()
+		c.flights[""] = f
+		c.mu.Unlock()
+		c.run("", f, func(context.Context) (activityResponse, error) {
+			time.Sleep(d)
+			return activityResponse{}, nil
+		}, false)
+	}
+	flight(30 * time.Millisecond)
+	flight(90 * time.Millisecond)
+	c.mu.Lock()
+	cur, prev := c.costs[""], c.prevCosts[""]
+	c.mu.Unlock()
+	if cur < 90*time.Millisecond || prev < 30*time.Millisecond || prev >= 90*time.Millisecond {
+		t.Errorf("costs = %v, prevCosts = %v; want the last and the one before it", cur, prev)
 	}
 }

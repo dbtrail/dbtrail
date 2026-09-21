@@ -7959,7 +7959,7 @@ async function openVerifyExplain(id, schema, table, btn) {
 
   const raw = el("details", { class: "form-advanced vfy-explain-raw" },
     el("summary", { class: "form-adv-summary", text: "Raw output" }));
-  raw.append(el("pre", { class: "dc-rem vfy-explain-pre", text: ex.rendered }));
+  raw.append(el("pre", { class: "vfy-explain-pre", text: ex.rendered }));
   modal.append(raw);
 
   const foot = el("div", { class: "modal-foot" });

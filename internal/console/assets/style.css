@@ -2283,7 +2283,14 @@ section.bk-restore { margin-top: 18px; }
 .vfy-diff-table tr:last-child td { border-bottom: none; }
 .vfy-null { color: var(--ink-4); font-style: italic; }
 .vfy-explain-raw { margin: 0 28px 16px; }
-.vfy-explain-pre { max-height: 26vh; overflow-y: auto; }
+/* The verify drill-down's raw output: tab-aligned rows, so monospace in a
+   wrapping code box (it borrowed .dc-rem until #1777 made that a container). */
+.vfy-explain-pre {
+  font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2);
+  background: var(--surface-3); border-radius: 4px; padding: 8px 10px;
+  margin: 6px 0 0; white-space: pre-wrap; overflow-x: auto;
+  max-height: 26vh; overflow-y: auto;
+}
 .stg-code {
   font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2);
   background: var(--surface-3); border-radius: 4px; padding: 7px 10px;

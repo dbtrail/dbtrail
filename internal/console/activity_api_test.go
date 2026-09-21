@@ -246,6 +246,7 @@ func TestActivityStaleCacheServesOldAndRefreshes(t *testing.T) {
 	for k := range c.stamps {
 		c.stamps[k] = c.stamps[k].Add(-activityRefreshTTL - time.Minute)
 		c.costs[k] = 40 * time.Second
+		c.prevCosts[k] = 40 * time.Second
 	}
 	c.mu.Unlock()
 

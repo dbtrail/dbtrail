@@ -35,8 +35,9 @@ import (
 // the aggregate cost to compute (activityTTL, #1778; at most activityRefreshTTL), and
 // every response carries refreshed_at, which the tile renders ("as of …") — a
 // frozen number that SAYS when it froze is disclosure, not a lie. The refresh
-// is lazy (recompute-on-request-if-stale, serving the previous aggregate while
-// one flight recomputes in the background), so an idle console runs no scans
+// is lazy (recompute-on-request-if-stale: a cheap aggregate while the request
+// waits, an expensive one in the background while the previous one is
+// served), so an idle console runs no scans
 // and no daemon loop is needed — the mechanism works identically under `serve`
 // and `watch`.
 //
@@ -210,9 +211,10 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 
 // activityFor returns the materialized aggregate for this server under the
 // given deny set, computing it when no cached copy exists (single-flight:
-// concurrent misses share one computation) and serving the cached copy —
-// with its original refreshed_at — while a stale one recomputes in the
-// background.
+// concurrent misses share one computation) and otherwise as activityCache.get
+// describes: a stale cheap copy is recomputed while the request waits, a stale
+// expensive one is served with its original refreshed_at while it recomputes
+// in the background.
 func (b *bundle) activityFor(ctx context.Context, deny, allow []query.SchemaTable) (activityResponse, error) {
 	compute := func(cctx context.Context) (activityResponse, error) {
 		return computeActivity(cctx, b.db, b.dbName, deny, allow)
@@ -341,10 +343,15 @@ type activityCache struct {
 	mu      sync.Mutex
 	entries map[string]activityResponse
 	stamps  map[string]time.Time
-	// costs is how long each entry's compute took; it picks the entry's TTL
-	// (activityTTL) and whether a stale read waits for the refresh.
-	costs   map[string]time.Duration
-	flights map[string]*activityFlight
+	// costs is how long each entry's last compute took, prevCosts the one
+	// before. The faster of the two (activityCache.costLocked) picks the
+	// entry's TTL and whether a stale read waits for the refresh, so one slow
+	// sample on a small index (a lock wait, a cold cache) cannot hold its
+	// count for 30 minutes, and an index that really grew is caught on the
+	// next compute.
+	costs     map[string]time.Duration
+	prevCosts map[string]time.Duration
+	flights   map[string]*activityFlight
 	// inlineWait is activityInlineWait; a field so tests can shorten it.
 	inlineWait time.Duration
 }
@@ -353,8 +360,12 @@ type activityCache struct {
 // before done is closed; waiters read them only after <-done.
 type activityFlight struct {
 	done chan struct{}
-	resp activityResponse
-	err  error
+	// started bounds the waiting: a request waits only for what is left of
+	// inlineWait since the flight began, so a hung index costs the wait once
+	// per flight rather than once per request.
+	started time.Time
+	resp    activityResponse
+	err     error
 }
 
 func newActivityCache() *activityCache {
@@ -362,6 +373,7 @@ func newActivityCache() *activityCache {
 		entries:    map[string]activityResponse{},
 		stamps:     map[string]time.Time{},
 		costs:      map[string]time.Duration{},
+		prevCosts:  map[string]time.Duration{},
 		flights:    map[string]*activityFlight{},
 		inlineWait: activityInlineWait,
 	}
@@ -374,12 +386,22 @@ func activityTTL(cost time.Duration) time.Duration {
 	return min(max(cost*activityCostFactor, activityMinTTL), activityRefreshTTL)
 }
 
+// costLocked is the cost that decides key's TTL: the faster of its last two
+// computes. Caller holds c.mu.
+func (c *activityCache) costLocked(key string) time.Duration {
+	cost := c.costs[key]
+	if prev, ok := c.prevCosts[key]; ok && prev < cost {
+		return prev
+	}
+	return cost
+}
+
 // get implements the read path described on handleActivity:
 //   - cached and within its TTL (activityTTL of its cost) → return it;
 //   - cached and stale, and cheap (cost under activityInlineCost) → join or
-//     start ONE recompute and wait for it, up to inlineWait; if it fails or
-//     takes longer, return the stale entry, whose refreshed_at discloses the
-//     age;
+//     start ONE recompute and wait for it, up to inlineWait from the moment
+//     that recompute began; if it fails or takes longer, return the stale
+//     entry, whose refreshed_at discloses the age;
 //   - cached and stale, and expensive → return it AS IS and start ONE
 //     background recompute for the next request;
 //   - not cached → compute now, single-flight (concurrent misses wait for the
@@ -391,18 +413,18 @@ func activityTTL(cost time.Duration) time.Duration {
 func (c *activityCache) get(ctx context.Context, key string, compute func(context.Context) (activityResponse, error)) (activityResponse, error) {
 	c.mu.Lock()
 	if resp, ok := c.entries[key]; ok {
-		cost := c.costs[key]
+		cost := c.costLocked(key)
 		if time.Since(c.stamps[key]) < activityTTL(cost) {
 			c.mu.Unlock()
 			return resp, nil
 		}
 		f := c.flights[key]
 		if f == nil {
-			f = &activityFlight{done: make(chan struct{})}
+			f = &activityFlight{done: make(chan struct{}), started: time.Now()}
 			c.flights[key] = f
 			go c.run(key, f, compute, true)
 		}
-		wait := c.inlineWait
+		wait := c.inlineWait - time.Since(f.started)
 		c.mu.Unlock()
 		if cost >= activityInlineCost {
 			return resp, nil
@@ -421,7 +443,7 @@ func (c *activityCache) get(ctx context.Context, key string, compute func(contex
 	}
 	f := c.flights[key]
 	if f == nil {
-		f = &activityFlight{done: make(chan struct{})}
+		f = &activityFlight{done: make(chan struct{}), started: time.Now()}
 		c.flights[key] = f
 		go c.run(key, f, compute, false)
 	}
@@ -448,6 +470,9 @@ func (c *activityCache) run(key string, f *activityFlight, compute func(context.
 	if err == nil {
 		c.entries[key] = resp
 		c.stamps[key] = time.Now()
+		if last, ok := c.costs[key]; ok {
+			c.prevCosts[key] = last
+		}
 		c.costs[key] = cost
 		c.evictOverCapLocked()
 	}
@@ -475,6 +500,7 @@ func (c *activityCache) evictOverCapLocked() {
 		delete(c.entries, oldestKey)
 		delete(c.stamps, oldestKey)
 		delete(c.costs, oldestKey)
+		delete(c.prevCosts, oldestKey)
 	}
 }
 

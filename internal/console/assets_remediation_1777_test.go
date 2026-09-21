@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -195,5 +196,30 @@ func TestDoctorCardsDrawTheFixAsBlocks(t *testing.T) {
 	}
 	if strings.Contains(draw, "innerHTML") {
 		t.Error("remediationEl writes markup")
+	}
+}
+
+// TestVerifyRawOutputKeepsItsCodeBox: .dc-rem became the container of a
+// drawn fix (#1777), so a pre that borrowed it lost its code box. The verify
+// drill-down's raw output is tab-aligned rows and needs the monospace,
+// wrapping box it had.
+func TestVerifyRawOutputKeepsItsCodeBox(t *testing.T) {
+	js := readAsset(t, "app.js")
+	if regexp.MustCompile(`el\("pre", \{ class: "[^"]*\bdc-rem\b`).MatchString(js) {
+		t.Error("a pre still carries dc-rem, which is now a container and styles no pre of its own")
+	}
+	if !strings.Contains(js, `el("pre", { class: "vfy-explain-pre", text: ex.rendered })`) {
+		t.Error("the verify raw output is no longer a pre.vfy-explain-pre")
+	}
+	css := readAsset(t, "style.css")
+	i := strings.Index(css, "\n.vfy-explain-pre {")
+	if i < 0 {
+		t.Fatal("no .vfy-explain-pre rule")
+	}
+	rule := css[i : i+strings.Index(css[i:], "}")]
+	for _, want := range []string{"var(--f-mono)", "white-space: pre-wrap", "background:", "padding:"} {
+		if !strings.Contains(rule, want) {
+			t.Errorf(".vfy-explain-pre lost %q", want)
+		}
 	}
 }
