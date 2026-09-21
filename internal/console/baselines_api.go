@@ -139,7 +139,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		// bucket (#1679); an unbounded leg beside a bounded one is the
 		// handler pinned by the half nobody timed.
 		sctx, cancel := context.WithTimeout(r.Context(), baselineListTimeout)
-		resp.Schedule = s.backupScheduleDTO(sctx, e, time.Now().UTC())
+		resp.Schedule = s.backupScheduleDTO(sctx, e, s.scheduleClock())
 		cancel()
 	}
 	if b.baselineSrc == "" {

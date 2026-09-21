@@ -149,6 +149,14 @@ func (s *Server) scheduleGates() BackupScheduleGates {
 // which writes no record; the loop watches every job it starts, so that
 // copy exists whether or not a page load caught the job in time). Neither
 // alone meets "a failed scheduled backup must be visible".
+// scheduleClock is now, as the backup-schedule handlers read it (scheduleNow).
+func (s *Server) scheduleClock() time.Time {
+	if s.scheduleNow != nil {
+		return s.scheduleNow().UTC()
+	}
+	return time.Now().UTC()
+}
+
 func (s *Server) backupScheduleDTO(ctx context.Context, e ServerEntry, now time.Time) *backupScheduleDTO {
 	sched := *e.BackupSchedule
 	dto := &backupScheduleDTO{Every: sched.Every, At: sched.At, FullEvery: sched.FullEvery}
@@ -415,7 +423,7 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	now := time.Now().UTC()
+	now := s.scheduleClock()
 	sameGrid, prevSince := false, ""
 	if e.BackupSchedule != nil {
 		sched.Extra = e.BackupSchedule.Extra

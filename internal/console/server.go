@@ -252,6 +252,11 @@ type BaselineRefreshDefaults struct {
 // gates) lives in a connManager bundle resolved per request from the
 // X-Bintrail-Server header.
 type Server struct {
+	// scheduleNow is the clock the backup-schedule handlers read (nil:
+	// time.Now). A test fixes it: the timetable's slots are anchored to the
+	// epoch, so whether the next run is also the next full backup depends on
+	// the day the test runs.
+	scheduleNow func() time.Time
 	// bucketRegions memoizes DetectBucketRegion per bucket: buildViewsInput
 	// runs on every SQL panel query, so a network round trip does not belong
 	// on that path in the steady state. A DETECTED region never expires (it is
