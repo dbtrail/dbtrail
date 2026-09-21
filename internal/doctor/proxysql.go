@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 const proxySQLRulesCheckName = "ProxySQL time-travel routing rules"
@@ -73,7 +75,7 @@ func connectProxySQLAdmin(ctx context.Context, dsn string) (*sql.DB, error) {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 10 * time.Second
 	}
-	db, err := sql.Open("mysql", cfg.FormatDSN())
+	db, err := config.OpenMySQL(cfg)
 	if err != nil {
 		return nil, err
 	}

@@ -1,10 +1,11 @@
 package indexer
 
 import (
-	"database/sql"
 	"fmt"
 
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 )
 
 // EnsureDatabase creates the index database if it does not already exist. cfg is
@@ -23,7 +24,7 @@ func EnsureDatabase(cfg *mysql.Config, dbName string, log func(string)) error {
 	serverCfg := *cfg
 	serverCfg.DBName = ""
 
-	db, err := sql.Open("mysql", serverCfg.FormatDSN())
+	db, err := config.OpenMySQL(&serverCfg)
 	if err != nil {
 		return fmt.Errorf("failed to open server connection: %w", err)
 	}
