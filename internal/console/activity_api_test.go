@@ -215,10 +215,13 @@ func TestActivityIsMaterializedAndDisclosesFreshness(t *testing.T) {
 	}
 }
 
-// TestActivityStaleCacheServesOldAndRefreshes pins the refresh mechanism: a
-// request against a stale cache returns the OLD aggregate immediately — with
-// its ORIGINAL refreshed_at, which is what makes the staleness visible — and
-// starts one background recompute, whose result the next request serves.
+// TestActivityStaleCacheServesOldAndRefreshes pins the refresh mechanism for
+// an EXPENSIVE aggregate, the large index #1352 was about: a request against a
+// stale cache returns the OLD aggregate immediately — with its ORIGINAL
+// refreshed_at, which is what makes the staleness visible — and starts one
+// background recompute, whose result the next request serves. A cheap one is
+// recomputed while the request waits instead (#1778, pinned in
+// activity_cost_ttl_1778_test.go).
 func TestActivityStaleCacheServesOldAndRefreshes(t *testing.T) {
 	db, mock, closeDB := newSQLMock(t)
 	defer closeDB()
@@ -236,11 +239,13 @@ func TestActivityStaleCacheServesOldAndRefreshes(t *testing.T) {
 		t.Fatalf("first deletes = %d, want 4", first.Deletes)
 	}
 
-	// Age the entry past the TTL.
+	// Age the entry past the TTL, and make it an aggregate that took long to
+	// compute: sqlmock answers in microseconds, which would make it a cheap one.
 	c := srv.cm.boot.activity
 	c.mu.Lock()
 	for k := range c.stamps {
 		c.stamps[k] = c.stamps[k].Add(-activityRefreshTTL - time.Minute)
+		c.costs[k] = 40 * time.Second
 	}
 	c.mu.Unlock()
 
