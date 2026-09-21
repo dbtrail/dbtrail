@@ -344,6 +344,26 @@ try {
   !form.advOpen ? ok("form: advanced section collapsed for a source entry") : bad("form: advanced section collapsed for a source entry", "auto-expanded");
   form.srcVisible ? ok("form: source fields visible") : bad("form: source fields visible", "hidden");
 
+  // #1765: no field reaches past the dialog's edge. The source fieldset once
+  // grew to the grants box's longest line, and the dialog's overflow-x: hidden
+  // left Source port and Schemas unreachable by mouse. Measured on the
+  // rendered form, with the advanced section closed and open: the trigger is
+  // the length of a string in app.js, which a check over the CSS cannot see.
+  const outsideDialog = () => page.evaluate(() => {
+    const dlg = document.getElementById("server-form-mount").closest(".modal").getBoundingClientRect();
+    return Array.from(document.querySelectorAll("#server-form-mount input, #server-form-mount select, #server-form-mount textarea"))
+      .filter((n) => n.type !== "hidden" && n.offsetParent !== null)
+      .map((n) => ({ name: n.name, r: n.getBoundingClientRect() }))
+      .filter((f) => f.r.right > dlg.right + 1 || f.r.left < dlg.left - 1)
+      .map((f) => `${f.name} at ${Math.round(f.r.left)}-${Math.round(f.r.right)}, dialog ${Math.round(dlg.left)}-${Math.round(dlg.right)}`);
+  });
+  let cutOff = await outsideDialog();
+  cutOff.length === 0 ? ok("form: every field fits inside the dialog") : bad("form: every field fits inside the dialog", cutOff.join("; "));
+  await page.evaluate(() => { document.getElementById("server-advanced").open = true; });
+  cutOff = await outsideDialog();
+  cutOff.length === 0 ? ok("form: every field fits inside the dialog, advanced open") : bad("form: every field fits inside the dialog, advanced open", cutOff.join("; "));
+  await page.evaluate(() => { document.getElementById("server-advanced").open = false; });
+
   // #1605 / #1608: the form answers where the operator is looking. The message
   // and the startup-check cards precede the button row in the DOM, and Test
   // writes its result into the row's own slot, beside its button, within a

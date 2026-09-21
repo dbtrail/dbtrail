@@ -1250,6 +1250,11 @@ button { font-family: inherit; }
 .form-section {
   border: 1px solid var(--line); border-radius: var(--radius);
   padding: 18px 18px 20px; margin-top: 18px; position: relative;
+  /* A <fieldset> defaults to min-inline-size: min-content, so one long line in
+     a white-space: pre child (the grants box) widened it past the dialog, whose
+     overflow-x: hidden then cut off Source port and Schemas (#1765). Zero lets
+     that child scroll inside its own frame instead. */
+  min-inline-size: 0;
 }
 .form-section > legend, .form-legend {
   font-family: var(--f-mono); font-size: 11px; font-weight: 600;

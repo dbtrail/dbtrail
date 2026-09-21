@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The add-server form fits its dialog again** (#1765). Since 0.82.0 the
+  "Monitor a source database" block was wider than the dialog, which cut off
+  Source port, Schemas, S3 addressing and S3 secret key, on the add form and
+  the edit form alike and at every window width. A source on any port other
+  than 3306 could not be added from the web interface: the port field was
+  reachable only with the Tab key. The cause was one long line in the grants
+  box, which a `<fieldset>` grows to by default; the box now scrolls sideways
+  inside its own frame instead.
+
 ## [0.85.1] - 2026-09-20
 
 ### Fixed

@@ -161,6 +161,20 @@ func TestServerThatWillNotStreamIsMarked(t *testing.T) {
 	}
 }
 
+// TestServerFormSectionsCannotOutgrowTheDialog (#1765): the source fieldset
+// grew to the width of the grants box's longest line, because a <fieldset>
+// defaults to min-inline-size: min-content, and the dialog's overflow-x:
+// hidden cut off Source port, Schemas and two S3 fields. This pins the reset
+// that stops it; the proof that nothing is cut off is geometric and lives in
+// the console e2e ("form: every field fits inside the dialog"), because what
+// triggers it is the length of a string in app.js, which no CSS check sees.
+func TestServerFormSectionsCannotOutgrowTheDialog(t *testing.T) {
+	css := readAsset(t, "style.css")
+	if rule := cssRule(t, css, ".form-section"); !strings.Contains(rule, "min-inline-size: 0;") {
+		t.Errorf(".form-section lost min-inline-size: 0; a long line in the grants box widens the form past the dialog again: %s", rule)
+	}
+}
+
 // TestIcebergStageCardsSitOnADifferentGround (#1573): the .ice-stage cards
 // were --surface-2 on a --surface-2 panel, a measured 1.000 contrast the
 // stylesheet's own comment admitted.
