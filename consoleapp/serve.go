@@ -323,23 +323,34 @@ func printConsoleBanner(srv *console.Server, headline string) {
 const consoleURLEnv = "BINTRAIL_CONSOLE_URL"
 
 // bannerURL is the address the startup banner prints: listenURL (the
-// console's own, carrying its ?token= in token mode) with its scheme, host
-// and path taken from public when public is set. A public value that is not
-// an http(s) URL with a host keeps listenURL and returns why.
+// console's own, carrying its ?token= in token mode) with its host and path,
+// and its scheme unless the console itself serves TLS, taken from public when
+// public is set. A user:password in public is dropped. A public value that is
+// not an http(s) URL with a host name, or a listenURL that does not parse,
+// keeps listenURL and returns why.
 func bannerURL(listenURL, public string) (string, error) {
 	public = strings.TrimSpace(public)
 	if public == "" {
 		return listenURL, nil
 	}
 	p, err := url.Parse(public)
-	if err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Host == "" {
+	if err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Hostname() == "" {
 		return listenURL, fmt.Errorf("%s=%q is not an http or https URL with a host", consoleURLEnv, public)
 	}
-	if l, err := url.Parse(listenURL); err == nil {
-		p.RawQuery = l.RawQuery
-	} else {
-		p.RawQuery = ""
+	l, err := url.Parse(listenURL)
+	if err != nil {
+		// Printing the public address without the listen address's query
+		// would drop the ?token= silently.
+		return listenURL, fmt.Errorf("the console address %q does not parse, so %s is not applied: %v", listenURL, consoleURLEnv, err)
 	}
+	// A TLS listener never answers plain http, whatever the value says (the
+	// compose file's is http://).
+	if l.Scheme == "https" {
+		p.Scheme = "https"
+	}
+	// The banner lands in logs; a credential in the value must not.
+	p.User = nil
+	p.RawQuery = l.RawQuery
 	p.Fragment = ""
 	if p.Path == "" {
 		p.Path = "/"

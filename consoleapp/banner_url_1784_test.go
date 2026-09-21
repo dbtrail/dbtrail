@@ -33,6 +33,16 @@ func TestBannerURL(t *testing.T) {
 		{"no scheme", listen, "127.0.0.1:8091", listen, true},
 		{"other scheme", listen, "ftp://127.0.0.1:8091/", listen, true},
 		{"no host", listen, "http:///x", listen, true},
+		{"port but no host name", listen, "http://:8091/", listen, true},
+		// A TLS listener never answers plain http: the compose file's http://
+		// must not send a browser to it once TLS is turned on.
+		{"TLS listener keeps https", "https://127.0.0.1:8090/?token=abc", "http://127.0.0.1:8091/", "https://127.0.0.1:8091/?token=abc", false},
+		{"proxy https over a plain listener", listen, "https://dbtrail.example.com/", "https://dbtrail.example.com/", false},
+		// A credential in the value never reaches the logs.
+		{"userinfo dropped", listen, "http://admin:secret@127.0.0.1:8091/", "http://127.0.0.1:8091/", false},
+		// A listen address that will not parse keeps it whole, token included,
+		// and says why, rather than printing the public address without it.
+		{"unparsable listen keeps its token", "http://127.0.0.1:8090/?token=a\x7f", "http://127.0.0.1:8091/", "http://127.0.0.1:8090/?token=a\x7f", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := bannerURL(tc.listen, tc.public)

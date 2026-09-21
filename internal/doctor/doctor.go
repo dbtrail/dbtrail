@@ -1192,7 +1192,7 @@ func checkIndexConnection(ctx context.Context, dsn, dbName string) CheckResult {
 					return CheckResult{
 						Name:   IndexConnectionCheckName,
 						Status: StatusPass,
-						Detail: fmt.Sprintf("MySQL %s, database=%s (does not exist yet; DBTrail creates it when it sets up the index)", version, dbName),
+						Detail: fmt.Sprintf("MySQL %s, database=%s (does not exist yet; the console creates it when capture starts, and `bintrail init` or `bintrail up` on the command line)", version, dbName),
 					}
 				}
 				serverErr = vErr
@@ -1210,8 +1210,8 @@ func checkIndexConnection(ctx context.Context, dsn, dbName string) CheckResult {
 			Status: StatusFail,
 			Detail: err.Error(),
 			Remediation: "Check that the index server answers from the machine DBTrail runs on. " +
-				"The index database does not need to exist yet: DBTrail creates it when it sets up the index, " +
-				"which needs CREATE DATABASE.",
+				"The index database does not need to exist yet: the console creates it when capture starts, " +
+				"and on the command line `bintrail init` or `bintrail up` does. Either way the user needs CREATE DATABASE.",
 		}
 	}
 	defer db.Close()
@@ -1256,7 +1256,8 @@ func checkIndexWriteAccess(ctx context.Context, dsn, dbName string) CheckResult 
 			Detail: err.Error(),
 			Remediation: "Could not connect to the index server. Check its host, port and user, " +
 				"and that the user may connect. The index database does not need to exist yet: " +
-				"DBTrail creates it when it sets up the index, which needs CREATE DATABASE.",
+				"the console creates it when capture starts, and on the command line `bintrail init` " +
+				"or `bintrail up` does. Either way the user needs CREATE DATABASE.",
 		}
 	}
 	defer db.Close()
