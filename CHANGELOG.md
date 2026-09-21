@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A backup says when your database was last really read** (#1570). An
+  update rebuilds a backup from the previous one and the recorded changes
+  without reading the database, so a chain of updates can go days without
+  one, and nothing said how long. Every backup file now records the instant
+  of the newest full backup its rows descend from (`bintrail.last_dump_at`)
+  and how many updates were built on it since (`bintrail.fold_generation`).
+  An update copies both from what it updated, so the date never moves
+  forward without a full backup; the count restarts from the file an update
+  starts from (table deltas turned off, a damaged chain set aside), so it can
+  go down, and the page never claims more than the files record. The Backups page shows, for each backup
+  in a local directory, the oldest such read among its tables, how long
+  before the backup it was, and the most updates since when every table
+  records its count (tables whose updates predate this version are counted
+  instead); each table's row says the same for that table. A backup made before this version reads as
+  its own instant when it was a full backup; an update made before it cannot
+  be dated, and the page counts it instead of guessing.
 - **A backup schedule can ask for full backups of its own** (#1564). The
   schedule used to take a full backup only when an update could not run (the
   first backup, a capture gap, a schema change), so an operator who wanted an
@@ -43,6 +59,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a summary with a Show button. The row's Start button opens the same dialog.
 
 ### Fixed
+- **The Backups page no longer calls a changed table "reused unchanged"**
+  (#1570). Since table deltas became the default (v0.84.0), an update keeps
+  each table file and writes the changes beside it, and it carries the table
+  file forward on every update, changed or not. The page read only that
+  file, so every table of every update was described as reused unchanged. It
+  now reads the newest file of the chain beside the table.
+- **An update that reads its previous backup from S3 keeps the age of the
+  table definition** (#1651 follow-up, found by #1570). The S3 reader of
+  backup file metadata did not read `bintrail.create_table_as_of`, which the
+  local reader did, so an update of an update read from the bucket dated the
+  carried `CREATE TABLE` by the previous backup's time instead, newer than it
+  was. That could skip the check that refuses an update when a column type
+  changed after the definition was read. A test now writes every metadata key
+  into a real file and requires both readers to return the same result.
 - **The installer's advice for a taken port works when pasted** (#1768).
   With port 8090 taken it suggested `DBTRAIL_PORT=9090 curl … | sh`, which
   failed twice: the variable was on `curl`, so the installer never saw it, and
@@ -65,6 +95,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   watch --source-dsn` refuse to start with the fix instead of failing a moment
   later on the snapshot. On a server that already captures they stay
   warnings: a later snapshot leaves those tables out and keeps the rest.
+- **A check that proved no table no longer shows as verified.** The
+  Verification page headed its history with LAST VERIFIED, and gave a
+  finished run a green DONE, even when every table came back "nothing was
+  checked". That is common since table deltas became the default (v0.84.0):
+  when the newer of the two compared snapshots was built from the recorded
+  changes, a table it stores as changes beside its previous file is not
+  compared. `bintrail verify`, the `verify_problem` webhook and the verify
+  metric already treated such a run as unproven; the page now uses the same
+  rule, from one place shared with the CLI, for past runs too. The history
+  reads LAST CHECK with what the run proved ("3 match · 9 not checked",
+  "nothing proven: 12 not checked"), and a finished run's chip says NOTHING
+  PROVEN, MISMATCH or ERRORS when that is what happened (NOTHING TO COMPARE
+  while there is only one snapshot). Only a verified run flashes green; a
+  difference, an error or nothing proven leaves a message that stays until
+  dismissed. The verify endpoints
+  carry a `verdict` field, and the `assurance` package fills it on every
+  history record (`VerifyVerdict*`, `VerifyStatus.WithVerdict`). Snapshots
+  and captured data are not affected. "Compare two saved snapshots" is no
+  longer marked recommended: it tests against your database only when the
+  newer snapshot was read from it, and its help and `docs/verify.md` now say
+  so.
 - **The add-server form fits its dialog again** (#1765). Since 0.82.0 the
   "Monitor a source database" block was wider than the dialog, which cut off
   Source port, Schemas, S3 addressing and S3 secret key, on the add form and
