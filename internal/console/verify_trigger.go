@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+
+	"github.com/dbtrail/dbtrail/internal/verify/verdict"
 )
 
 // ErrVerifyRunning is returned by VerifyController.Trigger when a verify run
@@ -181,6 +183,36 @@ type VerifyStatus struct {
 	Note    string              `json:"note,omitempty"`
 	Results []VerifyTableResult `json:"results,omitempty"`
 	Summary VerifySummary       `json:"summary"`
+	// Verdict is the run-level outcome of a succeeded run (verdict.Verified,
+	// Mismatch, Error, Unproven or NoPredecessor), empty for any other state.
+	// Computed where the status is READ, never stored (WithVerdict, applied by
+	// VerifyHistory.List and by every handler that serves a status): every
+	// run already on disk gets it too, and there is one rule for it, the one
+	// `bintrail verify` exits on. A run that finished without error but
+	// proved no table is "succeeded" with verdict "unproven", and the page
+	// must not call it verified.
+	Verdict string `json:"verdict,omitempty"`
+}
+
+// WithVerdict returns st with Verdict filled for a succeeded run, by the
+// shared rule (verdict.Of), and empty for any other state. Exported because
+// the type reaches embedders through the assurance facade, and a verdict
+// field they could read but not compute would be one that is always empty. A succeeded run with nothing tallied and a Note is the
+// one-baseline case: the supervisor sets a Note for that and nothing else
+// (consoleapp's setNote has one caller), so it is NoPredecessor, as the CLI
+// reports it, not Unproven.
+func (st VerifyStatus) WithVerdict() VerifyStatus {
+	st.Verdict = ""
+	if st.State != VerifyStateSucceeded {
+		return st
+	}
+	s := st.Summary
+	if s.Total == 0 && st.Note != "" {
+		st.Verdict = verdict.NoPredecessor
+		return st
+	}
+	st.Verdict = verdict.Of(s.Match, s.Mismatch, s.Error)
+	return st
 }
 
 // VerifyCellDiff is the wire view of verify.CellDiff.
@@ -300,7 +332,7 @@ func (s *Server) handleVerifyTrigger(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"verify": s.verifyCtrl.Status(e.ID)})
+	writeJSON(w, http.StatusAccepted, map[string]any{"verify": s.verifyCtrl.Status(e.ID).WithVerdict()})
 }
 
 // handleVerifyStatus reports the latest verify run state for the selected
@@ -328,7 +360,7 @@ func (s *Server) handleVerifyStatus(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"verify": s.verifyCtrl.Status(e.ID)})
+	writeJSON(w, http.StatusOK, map[string]any{"verify": s.verifyCtrl.Status(e.ID).WithVerdict()})
 }
 
 // handleVerifyExplain serves GET /api/servers/{id}/verify/explain?schema=&table=

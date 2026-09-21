@@ -2,8 +2,10 @@
 
 `bintrail verify` checks that reconstructing a table — merging a baseline
 snapshot with the indexed binlog deltas on top of it — reproduces the same
-row content as an independent reference (the next baseline, or the live
-source) at the specific anchor points being compared. It answers a narrower
+row content as a reference (the next baseline, or the live source) at the
+specific anchor points being compared. The next baseline is an independent
+reference only when it was read from your database: see
+[Baseline-anchored](#baseline-anchored-default-drift-free). It answers a narrower
 question than "would my recoveries work": *at these anchor points, for the
 tables and columns compared, does the full-table reconstruction/`_snapshot`
 merge agree with the reference?*
@@ -16,8 +18,9 @@ It is read-only and never writes to your source or your index.
   fingerprint** over each table's rows — not a cryptographic hash. An
   accidental collision (two different row sets producing the same digest) has
   roughly a 2⁻⁶⁴ chance, and the digest is trivially forgeable by anyone able
-  to write rows to the table being compared. A MATCH is strong evidence the
-  capture-and-reconstruct pipeline works; it is not tamper-evident or
+  to write rows to the table being compared. A MATCH against a reference read
+  from your database is strong evidence the capture-and-reconstruct pipeline
+  works; it is not tamper-evident or
   forensic-grade proof.
 - **The default (content) check does not exercise the `recover` path.** With
   `--check content` — the default — `verify` reconstructs full-table state from
@@ -79,7 +82,18 @@ Both sides are at-rest data (Parquet snapshots), so this mode reads **no live
 source** and has **no production impact**. Run it any time after a baseline — for
 example right after `bintrail baseline`, or on a schedule (cron/CI). Because
 neither side is the live table, it can't be fooled by drift that happened on the
-source after capture; it tests the capture-and-reconstruct chain itself.
+source after capture.
+
+**It tests against your database only when the newer baseline was read from
+it.** A baseline taken from a dump of the database (`bintrail baseline`, or a
+scheduled run that took a full copy) is an independent reference, and a match
+against it tests the capture-and-reconstruct chain. A baseline that a refresh
+built from the recorded changes never read the database, so comparing with it
+does not test against the database. And when the newer baseline keeps a table's
+previous file and stores its changes beside it (table deltas, the default for a
+local baseline directory since v0.84.0), that table is reported `inconclusive`:
+nothing was checked. A run where no table was proven exits non-zero. To cover
+those tables, run the check right after a baseline read from the database.
 
 ```sh
 # All tables, baselines on local disk

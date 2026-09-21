@@ -34,6 +34,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   watch --source-dsn` refuse to start with the fix instead of failing a moment
   later on the snapshot. On a server that already captures they stay
   warnings: a later snapshot leaves those tables out and keeps the rest.
+- **A check that proved no table no longer shows as verified.** The
+  Verification page headed its history with LAST VERIFIED, and gave a
+  finished run a green DONE, even when every table came back "nothing was
+  checked". That is common since table deltas became the default (v0.84.0):
+  when the newer of the two compared snapshots was built from the recorded
+  changes, a table it stores as changes beside its previous file is not
+  compared. `bintrail verify`, the `verify_problem` webhook and the verify
+  metric already treated such a run as unproven; the page now uses the same
+  rule, from one place shared with the CLI, for past runs too. The history
+  reads LAST CHECK with what the run proved ("3 match · 9 not checked",
+  "nothing proven: 12 not checked"), and a finished run's chip says NOTHING
+  PROVEN, MISMATCH or ERRORS when that is what happened (NOTHING TO COMPARE
+  while there is only one snapshot). Only a verified run flashes green; the
+  others leave a message that stays until dismissed. The verify endpoints
+  carry a `verdict` field, and the `assurance` package fills it on every
+  history record (`VerifyVerdict*`, `VerifyStatus.WithVerdict`). Snapshots
+  and captured data are not affected. "Compare two saved snapshots" is no
+  longer marked recommended: it tests against your database only when the
+  newer snapshot was read from it, and its help and `docs/verify.md` now say
+  so.
 - **The add-server form fits its dialog again** (#1765). Since 0.82.0 the
   "Monitor a source database" block was wider than the dialog, which cut off
   Source port, Schemas, S3 addressing and S3 secret key, on the add form and

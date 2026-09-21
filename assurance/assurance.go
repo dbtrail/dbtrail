@@ -120,6 +120,19 @@ const (
 	VerifyStateFailed      = console.VerifyStateFailed
 )
 
+// The run-level verdicts VerifyStatus.Verdict carries for a succeeded run,
+// by the rule `bintrail verify` exits on. "succeeded" only says a run reached
+// its end; a run that proved no table succeeds with VerifyVerdictUnproven.
+// VerifyHistory.List fills the field; VerifyStatus.WithVerdict computes it
+// for a status held any other way.
+const (
+	VerifyVerdictVerified      = verify.VerdictVerified
+	VerifyVerdictMismatch      = verify.VerdictMismatch
+	VerifyVerdictError         = verify.VerdictError
+	VerifyVerdictUnproven      = verify.VerdictUnproven
+	VerifyVerdictNoPredecessor = verify.VerdictNoPredecessor
+)
+
 // Verify modes (VerifyStatus.Mode).
 const (
 	VerifyModeBaselineAnchored = console.VerifyModeBaselineAnchored
