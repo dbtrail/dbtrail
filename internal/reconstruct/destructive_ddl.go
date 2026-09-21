@@ -65,6 +65,18 @@ func CheckDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, 
 // check.
 var errSchemaChangesMissing = errors.New("this index has no schema_changes table")
 
+// FindDestructiveDDL is CheckDestructiveDDL's finding without its message, for
+// a caller that is not reconstructing and says it in its own words (verify).
+// An index with no schema_changes table answers not found, as
+// CheckDestructiveDDL does.
+func FindDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time) (ddlType string, detectedAt time.Time, found bool, err error) {
+	ddlType, detectedAt, found, err = findDestructiveDDL(ctx, db, schema, table, since, until)
+	if errors.Is(err, errSchemaChangesMissing) {
+		return "", time.Time{}, false, nil
+	}
+	return ddlType, detectedAt, found, err
+}
+
 // findDestructiveDDL is CheckDestructiveDDL's query without its message, for a
 // caller whose window is not "since the baseline snapshot" (the binlog-only
 // fallback, #1674). found is false with a nil error when there is none, and

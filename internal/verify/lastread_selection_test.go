@@ -100,6 +100,29 @@ func lrWrite(t *testing.T, root string, at time.Time, table string, md map[strin
 	return path
 }
 
+// lrStartChain writes the empty sequence-0 pair a full backup starts a chain
+// with, stamped with the keys baseline's writeEmptyTableDelta stamps: the
+// base's own instant and anchor, and none of the dump's provenance keys.
+func lrStartChain(t *testing.T, base string, at time.Time, pos int64) {
+	t.Helper()
+	fi, err := os.Stat(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, p := at.UTC().Format(time.RFC3339), strconv.FormatInt(pos, 10)
+	if err := baseline.WriteTableDeltaPair(base, 0, lrCols(t), map[string]string{
+		baseline.MetaKeySnapshotTimestamp: ts,
+		baseline.MetaKeyBinlogFile:        "binlog.000001",
+		baseline.MetaKeyBinlogPos:         p,
+		baseline.MetaKeyCreateTableSQL:    lrCreateSQL,
+		baseline.MetaKeyDeltaChainStart:   ts,
+		baseline.MetaKeyDeltaBaseAnchor:   "binlog.000001:" + p,
+		baseline.MetaKeyDeltaBaseSize:     strconv.FormatInt(fi.Size(), 10),
+	}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // lrPair writes one table-delta pair beside base, stamped as a chain that
 // started at chainStart.
 func lrPair(t *testing.T, base string, seq int, chainStart time.Time, md map[string]string) {
@@ -241,7 +264,7 @@ func TestLastRead_deltaChainPointsAtItsRead(t *testing.T) {
 	root := t.TempDir()
 	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
 	base := lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
-	lrPair(t, base, 0, lr1, lrDump(lr1, 200)) // the empty pair a full backup starts a chain with
+	lrStartChain(t, base, lr1, 200) // the empty pair a full backup starts a chain with
 	carried := lrCarry(t, root, lr1, lr2, "orders", 0)
 	lrPair(t, carried, 1, lr1, lrFold(lr2, lr1, lr1, 1, 300))
 	pairs, _ := lrFind(t, root)
@@ -345,7 +368,7 @@ func TestLastRead_sameAnchorReadsAreCompared(t *testing.T) {
 	root := t.TempDir()
 	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
 	base := lrWrite(t, root, lr1, "orders", lrDump(lr1, 100))
-	lrPair(t, base, 0, lr1, lrDump(lr1, 100))
+	lrStartChain(t, base, lr1, 100)
 	pairs, _ := lrFind(t, root)
 	p := lrOne(t, pairs, "orders")
 	wantCompared(t, p, lr0, lr1, 100)
@@ -384,9 +407,10 @@ func TestLastRead_postgres(t *testing.T) {
 	}
 }
 
-// 13. An unreadable folder at or after the oldest snapshot a comparison uses
-// refuses the run (#1639), even when it is older than the second newest.
-func TestLastRead_unreadableInsideTheComparedSpanRefuses(t *testing.T) {
+// 13. The folder of the read the newest copy names cannot be read: the read
+// looks "no longer kept", and the run refuses (#1639) instead of saying so,
+// even though that folder is older than the second newest.
+func TestLastRead_unreadableReadFolderRefuses(t *testing.T) {
 	root := t.TempDir()
 	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
 	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
@@ -395,6 +419,23 @@ func TestLastRead_unreadableInsideTheComparedSpanRefuses(t *testing.T) {
 	unreadable1639(t, filepath.Join(root, reconstruct.SnapshotDirName(lr1)))
 	if _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		t.Fatalf("err = %v, want a refusal: the read this check needs sits in the unreadable folder", err)
+	}
+}
+
+// 13b. An unreadable folder between the older side and the read, with the
+// newest snapshot a fold: the snapshot before the read may be in it, so the
+// pair the listing would make (skipping it) is refused, not compared.
+func TestLastRead_unreadableInsideTheComparedSpanRefuses(t *testing.T) {
+	root := t.TempDir()
+	mid := lr0.Add(12 * time.Hour)
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, root, mid, "orders", lrDump(mid, 150))
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
+	lrWrite(t, root, lr3, "orders", lrFold(lr3, lr2, lr1, 2, 400))
+	unreadable1639(t, filepath.Join(root, reconstruct.SnapshotDirName(mid)))
+	if _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
+		t.Fatalf("err = %v, want a refusal: the snapshot before the read may be in the unreadable folder", err)
 	}
 }
 
@@ -419,7 +460,7 @@ func TestLastRead_unreadableOlderThanTheComparedSpan(t *testing.T) {
 func TestLastRead_previousIsAChain(t *testing.T) {
 	root := t.TempDir()
 	base := lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
-	lrPair(t, base, 0, lr0, lrDump(lr0, 100))
+	lrStartChain(t, base, lr0, 100)
 	carried := lrCarry(t, root, lr0, lr1, "orders", 0)
 	lrPair(t, carried, 1, lr0, lrFold(lr1, lr0, lr0, 1, 200))
 	lrWrite(t, root, lr2, "orders", lrDump(lr2, 300))
@@ -552,4 +593,146 @@ func TestLastRead_dottedNamesStayApart(t *testing.T) {
 			t.Errorf("unexpected answer %+v", p)
 		}
 	}
+}
+
+// Snapshots written before this build knew the read's keys: a dump before
+// v0.86.0 has no last_dump_at, one before #1569 no producer either (only the
+// mydumper format, or for PostgreSQL the WAL floor, dates it as a dump). They
+// are reads all the same, so an upgrade must not turn every table on disk into
+// "not on record". Each vintage: two dumps, the first fold after the upgrade
+// (which stamps the read it derives from the dump), and a later snapshot that
+// reuses the old dump's file unchanged.
+func TestLastRead_olderDumpsAreStillReads(t *testing.T) {
+	strip := func(md map[string]string, keys ...string) map[string]string {
+		for _, k := range keys {
+			delete(md, k)
+		}
+		return md
+	}
+	pg := func(md map[string]string, lsn int64) map[string]string {
+		md = strip(md, baseline.MetaKeyMydumperFormat, baseline.MetaKeyBinlogFile, baseline.MetaKeyBinlogPos)
+		md[baseline.MetaKeyLSN] = strconv.FormatInt(lsn, 10)
+		return md
+	}
+	noRead := func(at time.Time, pos int64) map[string]string {
+		return strip(lrDump(at, pos), baseline.MetaKeyLastDumpAt, baseline.MetaKeyFoldGeneration)
+	}
+	noProducer := func(at time.Time, pos int64) map[string]string {
+		return strip(noRead(at, pos), baseline.MetaKeySnapshotProducer)
+	}
+	vintages := []struct {
+		name string
+		dump func(time.Time, int64) map[string]string
+		fold func(at, from, read time.Time, gen int, pos int64) map[string]string
+	}{
+		{"before v0.86.0", noRead, lrFold},
+		{"before #1569", noProducer, lrFold},
+		{"postgres before #1569",
+			func(at time.Time, pos int64) map[string]string { return pg(noProducer(at, pos), pos) },
+			func(at, from, read time.Time, gen int, pos int64) map[string]string {
+				return pg(lrFold(at, from, read, gen, pos), pos)
+			}},
+	}
+	for _, v := range vintages {
+		check := func(t *testing.T, pairs []BaselinePair) {
+			t.Helper()
+			p := lrOne(t, pairs, "orders")
+			if p.Settled != nil || !p.NewSnapshot.Equal(lr1) || !p.PrevSnapshot.Equal(lr0) || !p.NewReadFromDatabase {
+				t.Fatalf("got %+v (settled %+v), want the older dump at %s compared with the read at %s", p, p.Settled, lr0, lr1)
+			}
+		}
+		t.Run(v.name+"/two dumps", func(t *testing.T) {
+			root := t.TempDir()
+			lrWrite(t, root, lr0, "orders", v.dump(lr0, 100))
+			lrWrite(t, root, lr1, "orders", v.dump(lr1, 200))
+			pairs, _ := lrFind(t, root)
+			check(t, pairs)
+		})
+		t.Run(v.name+"/first fold after the upgrade", func(t *testing.T) {
+			root := t.TempDir()
+			lrWrite(t, root, lr0, "orders", v.dump(lr0, 100))
+			lrWrite(t, root, lr1, "orders", v.dump(lr1, 200))
+			lrWrite(t, root, lr2, "orders", v.fold(lr2, lr1, lr1, 1, 300))
+			pairs, _ := lrFind(t, root)
+			check(t, pairs)
+		})
+		t.Run(v.name+"/old dump reused unchanged", func(t *testing.T) {
+			root := t.TempDir()
+			lrWrite(t, root, lr0, "orders", v.dump(lr0, 100))
+			lrWrite(t, root, lr1, "orders", v.dump(lr1, 200))
+			lrCarry(t, root, lr1, lr2, "orders")
+			pairs, _ := lrFind(t, root)
+			check(t, pairs)
+		})
+	}
+}
+
+// A newest footer that will not open is that table's error, naming the file:
+// not "not on record", which would send the operator to take a backup while a
+// corrupt file sits there, and would let the run pass on the other tables.
+func TestLastRead_newestFooterUnreadable(t *testing.T) {
+	root := t.TempDir()
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	broken := lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
+	if err := os.WriteFile(broken, []byte("not parquet"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusError, broken)
+}
+
+// The older side's footer will not open: an error, not a comparison that
+// falls back to a bound nobody read.
+func TestLastRead_previousFooterUnreadable(t *testing.T) {
+	root := t.TempDir()
+	broken := lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
+	if err := os.WriteFile(broken, []byte("not parquet"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusError, broken)
+}
+
+// The chain beside the older side will not open: an error, not a comparison
+// that starts at the older side's folder instead of where its chain did.
+func TestLastRead_previousChainUnreadable(t *testing.T) {
+	root := t.TempDir()
+	base := lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrStartChain(t, base, lr0, 100)
+	_, upserts := baseline.TableDeltaPaths(base, 0)
+	if err := os.WriteFile(upserts, []byte("not parquet"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusError, "the chain beside", base)
+}
+
+// A producer this build does not know (a newer version's) is not a read:
+// the table is not checked, and says why, rather than trusting an operation
+// nobody here knows the name of. Not an error either: nothing contradicts.
+func TestLastRead_unknownMakerIsNotARead(t *testing.T) {
+	root := t.TempDir()
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	md := lrDump(lr2, 300)
+	md[baseline.MetaKeySnapshotProducer] = "made-by-a-newer-version"
+	lrWrite(t, root, lr2, "orders", md)
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusInconclusive, "does not say how its copy was made")
+}
+
+// The newest copy names a read whose snapshot holds a file carried from an
+// earlier one: no writer produces this (a carried file keeps its ancestor's
+// read), so the records contradict each other and it is an error.
+func TestLastRead_carriedWhereTheReadShouldBeIsAnError(t *testing.T) {
+	root := t.TempDir()
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrCarry(t, root, lr0, lr1, "orders")
+	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300)) // claims a read at lr1
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusError, lr1.Format(time.RFC3339), lrPath(root, lr1, "orders"))
 }

@@ -66,7 +66,7 @@ passing or omitting `--source-dsn` selects **what it is compared against**.
 
 | | Reads | Answers |
 |---|---|---|
-| `--check content` (default), no `--source-dsn` | two baselines + index | does the reconstruction match the next baseline? |
+| `--check content` (default), no `--source-dsn` | two baselines + index | does the reconstruction match the table's last read of the database? |
 | `--check content` + `--source-dsn` | baseline + index + live source | does the reconstruction match the live table? |
 | `--check recover` | index only | are the before/after images `recover` consumes internally consistent? |
 
@@ -88,8 +88,8 @@ source after capture.
 **Why the last read and not the two newest baselines.** A baseline that a
 refresh built from the recorded changes never read the database, so it is not an
 independent reference. The read is. The check replays the recorded changes onto
-the older baseline, from that baseline's own starting point (the previous read,
-when a refresh kept the table's changes beside its file), up to the read's
+the older baseline, from that baseline's own starting point (where its chain
+started, when a refresh kept the table's changes beside its file), up to the read's
 anchor. A match therefore says the capture between the two is complete. It does
 not open the change files a refresh keeps beside a table (table deltas), and it
 covers the chain up to the last read, not the refreshes after it. A schedule

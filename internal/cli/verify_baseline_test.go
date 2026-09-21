@@ -17,10 +17,35 @@ import (
 )
 
 // writeMinimalBaseline writes one complete baseline snapshot (one table, one
-// row, plus the success marker) under baseDir. It needs no live database — the
+// row, plus the success marker) under baseDir, stamped as a read of the
+// database the way baseline.Run stamps a dump. It needs no live database — the
 // "nothing to verify" paths return before touching the index — so it lets the
 // single-baseline case be a fast unit test rather than an integration one.
 func writeMinimalBaseline(t *testing.T, baseDir, db, table string, ts time.Time) {
+	t.Helper()
+	stamp := ts.UTC().Format(time.RFC3339)
+	writeMinimalSnapshot(t, baseDir, db, table, ts, map[string]string{
+		baseline.MetaKeySnapshotTimestamp: stamp,
+		baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
+		baseline.MetaKeyMydumperFormat:    "sql",
+		baseline.MetaKeyLastDumpAt:        stamp,
+		baseline.MetaKeyFoldGeneration:    "0",
+	})
+}
+
+// writeMinimalFold writes the same table as a snapshot built from the recorded
+// changes, inheriting the read at read.
+func writeMinimalFold(t *testing.T, baseDir, db, table string, ts, read time.Time) {
+	t.Helper()
+	writeMinimalSnapshot(t, baseDir, db, table, ts, map[string]string{
+		baseline.MetaKeySnapshotTimestamp: ts.UTC().Format(time.RFC3339),
+		baseline.MetaKeySnapshotProducer:  baseline.ProducerReconstruct,
+		baseline.MetaKeyLastDumpAt:        read.UTC().Format(time.RFC3339),
+		baseline.MetaKeyFoldGeneration:    "1",
+	})
+}
+
+func writeMinimalSnapshot(t *testing.T, baseDir, db, table string, ts time.Time, provenance map[string]string) {
 	t.Helper()
 	snapDir := filepath.Join(baseDir, strings.ReplaceAll(ts.Format(time.RFC3339), ":", "-"))
 	if err := os.MkdirAll(filepath.Join(snapDir, db), 0o755); err != nil {
@@ -29,12 +54,16 @@ func writeMinimalBaseline(t *testing.T, baseDir, db, table string, ts time.Time)
 	cols := []baseline.Column{
 		{Name: "id", MySQLType: "int", ParquetType: baseline.MysqlToParquetNode("int")},
 	}
+	md := map[string]string{
+		baseline.MetaKeyCreateTableSQL: "CREATE TABLE `" + table + "` (`id` INT PRIMARY KEY);",
+		baseline.MetaKeyBinlogFile:     "binlog.000001",
+		baseline.MetaKeyBinlogPos:      "200",
+	}
+	for k, v := range provenance {
+		md[k] = v
+	}
 	bw, err := baseline.NewWriter(filepath.Join(snapDir, db, table+".parquet"), cols,
-		baseline.WriterConfig{Compression: "zstd", RowGroupSize: 100, Metadata: map[string]string{
-			baseline.MetaKeyCreateTableSQL: "CREATE TABLE `" + table + "` (`id` INT PRIMARY KEY);",
-			baseline.MetaKeyBinlogFile:     "binlog.000001",
-			baseline.MetaKeyBinlogPos:      "200",
-		}})
+		baseline.WriterConfig{Compression: "zstd", RowGroupSize: 100, Metadata: md})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +151,38 @@ func TestRunVerifyBaselinePair_TablesAbsent(t *testing.T) {
 	if !strings.Contains(out.String(), "1 error") ||
 		!strings.Contains(out.String(), "not present in the newest snapshot") {
 		t.Errorf("want the ghost table surfaced as an error, got output:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "mydb.orders") {
+		t.Errorf("a table --tables did not name was checked anyway, got output:\n%s", out.String())
+	}
+}
+
+// A table the pairing already answered (here: its last read of the database
+// is no longer kept, only the snapshots built after it are) is reported once,
+// with that answer: not dropped, and not a second time as a table the
+// snapshots do not cover. Nothing is proven, so the run exits non-zero. The
+// answer needs no index, so a nil DB is safe.
+func TestRunVerifyBaselinePair_SettledTableReportedOnce(t *testing.T) {
+	baseDir := t.TempDir()
+	read := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
+	writeMinimalFold(t, baseDir, "mydb", "orders", read.Add(24*time.Hour), read)
+	writeMinimalFold(t, baseDir, "mydb", "orders", read.Add(48*time.Hour), read)
+	resolver := metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{
+		"mydb.orders": {Schema: "mydb", Table: "orders"},
+	})
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	err := runVerifyBaselinePair(cmd, nil, resolver, "", baseDir, duckdbutil.Tuning{}, "")
+	s := out.String()
+	if err == nil {
+		t.Fatalf("want a non-zero exit (nothing proven), got nil; output:\n%s", s)
+	}
+	if strings.Count(s, "mydb.orders") != 1 || !strings.Contains(s, "no longer kept") || !strings.Contains(s, "1 inconclusive") {
+		t.Fatalf("want mydb.orders reported once, inconclusive because its read is no longer kept; output:\n%s", s)
 	}
 }
 

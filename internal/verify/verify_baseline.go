@@ -216,6 +216,20 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 			"The table is verified again the next time it is written in full"), nil
 	}
 
+	// A TRUNCATE, DROP, RENAME or CREATE OR REPLACE between the two sides
+	// writes no row events: the replay would keep rows the database no longer
+	// had at the read and report a mismatch that only a full backup clears.
+	// Every other surface that replays a window refuses on it (#764).
+	ddl, ddlAt, found, err := reconstruct.FindDestructiveDDL(ctx, cfg.IndexDB, p.Schema, p.Table, p.PrevSnapshot, p.NewSnapshot)
+	if err != nil {
+		return res, fmt.Errorf("look for a TRUNCATE, DROP or RENAME of %s.%s between the two snapshots: %w", p.Schema, p.Table, err)
+	}
+	if found {
+		return inconclusive(res, fmt.Sprintf("a %s on this table at %s, between the two compared snapshots, records no row changes to replay, "+
+			"so the older snapshot cannot be carried forward to the newer one. The next full backup makes the table checkable again",
+			ddl, ddlAt.UTC().Format(time.RFC3339))), nil
+	}
+
 	// Hash exactly the columns the baseline Parquet holds. mydumper excludes true
 	// STORED/VIRTUAL generated columns but keeps ordinary DEFAULT_GENERATED ones
 	// (created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, …), so the Parquet schema is
@@ -334,8 +348,9 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 // be recovered here.
 // EverBaselinedTables returns the set of "schema.table" keys that appear in
 // AT LEAST ONE baseline snapshot under source, at ANY snapshot time — not
-// just the two most recent ones FindBaselinePair uses to build its
-// pairs/unpaired/prevOnly sets. A table absent from that top-2 window but
+// just the two most recent ones whose tables FindBaselinePair answers for
+// (the newest) or reports as absent (the one before it). A table absent from
+// that top-2 window but
 // present here still has an older snapshot on disk/S3: reconstruct.FindBaseline
 // (the function `bintrail reconstruct` and the shim's `_snapshot` actually use)
 // will fall back to it and return a StaleWarning, so the table IS recoverable
@@ -380,9 +395,10 @@ func AnyBaseline(ctx context.Context, source string) (bool, error) {
 // anchor, equals what the database held at that read.
 //
 // Not the two newest snapshots: a snapshot built from the recorded changes (a
-// fold) never read the database, so comparing it with its predecessor tests
-// two computations over the same recorded changes, not the database. When the
-// newest snapshot IS a read, the pair is the two newest, as before.
+// fold) never read the database, so it is not an independent reference. When the
+// newest snapshot IS a read, the pair is usually the two newest, as before
+// (not when the snapshot before it lacks the table: the older side is the
+// newest one that holds it).
 //
 // The read is found from the newest snapshot's footer, which carries the
 // instant of the table's last read (baseline.SourceReadOf, #1570: inherited
@@ -584,9 +600,9 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile) (p Base
 
 // sortBaselinePairs orders pairs by schema.table, in place.
 //
-// FindBaselinePair accumulates pairs by ranging a map, and Go randomizes map
-// iteration order per run, so without this everything downstream inherits that
-// nondeterminism: the order VerifyBaselinePair is called in, and — visibly —
+// FindBaselinePair accumulates pairs in the order the listing hands tables
+// over, which is not schema.table order (and was map order once), so without
+// this everything downstream inherits whatever order that is: the order VerifyBaselinePair is called in, and — visibly —
 // the `explain[]` array of `verify --explain --format json`, which appends one
 // entry per mismatched pair in this order. Two identical runs could swap
 // explain[0] and explain[1] while `tables[]` (sorted in NewReport) stayed put.

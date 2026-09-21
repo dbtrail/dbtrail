@@ -68,7 +68,8 @@ type (
 	// VerifySummary is a run's match/mismatch/inconclusive tally.
 	VerifySummary = console.VerifySummary
 	// VerifyMode is which engine path a run used: baseline-anchored (compare
-	// the two newest baselines), live-source (compare against production) or
+	// each table's last read of the database with the baseline before it),
+	// live-source (compare against production) or
 	// recover-inputs (index-only chain walk). They assert different things —
 	// a summary that renders them alike lets the weakest inherit the
 	// strongest's meaning.

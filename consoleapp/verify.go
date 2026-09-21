@@ -108,8 +108,8 @@ func explainKey(serverID, schema, table string) string {
 // request to reopen a connection on demand. Re-deriving the pair via a fresh
 // internal/verify.FindBaselinePair call at explain time would risk explaining
 // a DIFFERENT pair than the one the displayed verdict came from, if a new
-// baseline landed in between (FindBaselinePair always picks the two MOST
-// RECENT snapshots).
+// baseline landed in between (FindBaselinePair pairs each table's newest read
+// of the database, which a new full backup replaces).
 //
 // Every field is read/written ONLY while holding verifySupervisor.mu — a
 // plain map (pairs) and a growing slice (status.Results) make an unlocked

@@ -699,6 +699,65 @@ func TestVerifyBaselinePair_UnchangedTable(t *testing.T) {
 	}
 }
 
+// TestVerifyBaselinePair_DestructiveDDLInTheWindow: a TRUNCATE between the two
+// compared snapshots writes no row events, so the older one carried forward
+// would keep rows the database no longer had at the read. Inconclusive, naming
+// the statement, never a mismatch that only a full backup clears (the default
+// check pairs every run with the same read until the next one).
+func TestVerifyBaselinePair_DestructiveDDLInTheWindow(t *testing.T) {
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	for _, c := range []struct {
+		name, key, dt, colType string
+		ord                    int
+	}{
+		{"id", "PRI", "int", "int", 1},
+		{"status", "", "varchar", "varchar(64)", 2},
+	} {
+		testutil.MustExec(t, db, `INSERT INTO schema_snapshots
+			(snapshot_id, snapshot_time, schema_name, table_name, column_name,
+			 ordinal_position, column_key, data_type, column_type, is_nullable, is_generated)
+			VALUES (1, UTC_TIMESTAMP(), ?, 'orders', ?, ?, ?, ?, ?, 'YES', 0)`,
+			dbName, c.name, c.ord, c.key, c.dt, c.colType)
+	}
+	baseDir := t.TempDir()
+	now := time.Now().UTC()
+	prevTS := now.Truncate(time.Hour).Add(-2 * time.Hour)
+	newTS := prevTS.Add(time.Hour)
+	createSQL := "CREATE TABLE `orders` (\n  `id` INT NOT NULL,\n  `status` VARCHAR(64),\n  PRIMARY KEY (`id`)\n);\n"
+	cols := []baseline.Column{
+		{Name: "id", MySQLType: "int", ParquetType: baseline.MysqlToParquetNode("int")},
+		{Name: "status", MySQLType: "varchar", ParquetType: baseline.MysqlToParquetNode("varchar")},
+	}
+	// Two rows before, none after: the table was truncated in between.
+	writeTestBaseline(t, baseDir, prevTS, dbName, "orders", createSQL, cols, [][]string{{"1", "a"}, {"2", "b"}}, "binlog.000001", 200)
+	writeTestBaseline(t, baseDir, newTS, dbName, "orders", createSQL, cols, nil, "binlog.000001", 300)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{prevTS, newTS, now.Truncate(time.Hour)})
+	testutil.MustExec(t, db, `INSERT INTO schema_changes (detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query)
+		VALUES (?, 'binlog.000001', 250, ?, 'orders', 'TRUNCATE TABLE', 'TRUNCATE TABLE orders')`,
+		prevTS.Add(30*time.Minute).Format("2006-01-02 15:04:05"), dbName)
+
+	resolver, err := metadata.NewResolver(db, 1)
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
+	pairs, _, err := FindBaselinePair(context.Background(), baseDir)
+	if err != nil || len(pairs) != 1 || pairs[0].Settled != nil {
+		t.Fatalf("FindBaselinePair: %v (pairs=%+v)", err, pairs)
+	}
+	got, err := VerifyBaselinePair(context.Background(), cfg, pairs[0])
+	if err != nil {
+		t.Fatalf("VerifyBaselinePair: %v", err)
+	}
+	if got.Status != StatusInconclusive || !strings.Contains(got.Detail, "TRUNCATE") || !got.ComparedTo.IsZero() {
+		t.Fatalf("truncated between the snapshots: %s (%q) compared_to=%s; want inconclusive naming the TRUNCATE, compared to nothing", got.Status, got.Detail, got.ComparedTo)
+	}
+}
+
 // TestVerifyBaselinePair_TextEventDecoded is the #672 regression: a TEXT
 // column's in-window event value (stored base64, since go-mysql delivers
 // TEXT as []byte and marshalRow base64-encodes it) must be decoded before

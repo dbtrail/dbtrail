@@ -76,8 +76,9 @@ type VerifyController interface {
 type VerifyMode string
 
 const (
-	// VerifyModeBaselineAnchored compares the two most recent baselines,
-	// drift-free — no live source read. The default.
+	// VerifyModeBaselineAnchored compares each table's last read of the
+	// database with the baseline before it, drift-free — no live source read.
+	// The default.
 	VerifyModeBaselineAnchored VerifyMode = "baseline-anchored"
 	// VerifyModeLiveSource reconstructs each table to a consistent snapshot of
 	// the live source and compares. Needs the server's source DSN and reads

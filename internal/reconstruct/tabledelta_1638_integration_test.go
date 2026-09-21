@@ -209,26 +209,48 @@ func TestReconstructParquet_tableDeltaChainAcrossHours(t *testing.T) {
 
 	// The default check over this real tree: a read of the database after the
 	// folds, stamped the way baseline.Run stamps one, holding the table's true
-	// state at its anchor, and a real fold after it. The check must find that
-	// read through the newest snapshot's footer (the fold carries it) and
-	// compare it with the snapshot before it, the rewritten fold above.
+	// state at its anchor, then two real folds after it. The first keeps the
+	// read's own file (deltas on: a chain beside it); the second rewrites the
+	// table (deltas off), so the newest file is one the fold writer stamped.
+	// The check must find the read from both, and compare it with the snapshot
+	// before it, the rewritten fold above.
 	readAt := hour(3, 50*time.Minute)
 	readPath := writeReadOfOrders(t, root, readAt, schema, 500, [][]string{{"1", "A2"}, {"3", "shipped"}, {"4", "D"}})
+	wantReadPair := func(when string) verify.BaselinePair {
+		t.Helper()
+		pairs, _, err := verify.FindBaselinePair(ctx, root)
+		if err != nil || len(pairs) != 1 {
+			t.Fatalf("%s: FindBaselinePair: pairs=%d err=%v", when, len(pairs), err)
+		}
+		p := pairs[0]
+		if p.Settled != nil || !p.NewReadFromDatabase || !p.NewSnapshot.Equal(readAt) || !p.PrevSnapshot.Equal(off) || p.NewPath != readPath {
+			t.Fatalf("%s: pair = %+v (settled %v), want the read at %s compared with the snapshot at %s", when, p, p.Settled, readAt, off)
+		}
+		return p
+	}
 	run(hour(3, 55*time.Minute), true)
-	pairs, _, err := verify.FindBaselinePair(ctx, root)
-	if err != nil || len(pairs) != 1 {
-		t.Fatalf("FindBaselinePair: pairs=%d err=%v", len(pairs), err)
+	wantReadPair("after a fold that keeps the read's file")
+	rewritten := hour(3, 58*time.Minute)
+	run(rewritten, false)
+	newestPath, _ := newest(rewritten)
+	md, err := baseline.ReadParquetMetadata(newestPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	p := pairs[0]
-	if p.Settled != nil || !p.NewReadFromDatabase || !p.NewSnapshot.Equal(readAt) || !p.PrevSnapshot.Equal(off) || p.NewPath != readPath {
-		t.Fatalf("pair = %+v (settled %v), want the read at %s compared with the snapshot at %s", p, p.Settled, readAt, off)
+	if md.Producer != baseline.ProducerReconstruct || !md.SnapshotTimestamp.Equal(rewritten) || !md.LastDumpAt.Equal(readAt) {
+		t.Fatalf("fixture: the newest file is not a fold written at %s carrying the read at %s (producer %q, written %s, read %s)",
+			rewritten, readAt, md.Producer, md.SnapshotTimestamp, md.LastDumpAt)
 	}
+	p := wantReadPair("after a fold that rewrote the table")
 	if res, err = verify.VerifyBaselinePair(ctx, vcfg, p); err != nil || res.Status != verify.StatusMatch || !res.ComparedTo.Equal(readAt) {
 		t.Fatalf("the read of the true state: %s (%q) compared to %s, err=%v; want a match against the read at %s", res.Status, res.Detail, res.ComparedTo, err, readAt)
 	}
 	// And the comparison is real: the same read holding a wrong row differs.
-	if err := os.Remove(readPath); err != nil {
-		t.Fatal(err)
+	posdel, upserts := baseline.TableDeltaPaths(readPath, 0)
+	for _, f := range []string{readPath, posdel, upserts} {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
 	}
 	writeReadOfOrders(t, root, readAt, schema, 500, [][]string{{"1", "A2"}, {"3", "shipped"}, {"4", "WRONG"}})
 	if res, err = verify.VerifyBaselinePair(ctx, vcfg, p); err != nil || res.Status != verify.StatusMismatch {
@@ -238,7 +260,8 @@ func TestReconstructParquet_tableDeltaChainAcrossHours(t *testing.T) {
 
 // writeReadOfOrders writes a snapshot of the orders table the way a read of
 // the database lands (baseline.Run's footer: producer, its own instant as the
-// last read, zero folds, the dump's binlog position).
+// last read, zero folds, the dump's binlog position), with the empty pair
+// baseline.Run writes beside every table when table deltas are on.
 func writeReadOfOrders(t *testing.T, root string, at time.Time, schema string, pos int, rows [][]string) string {
 	t.Helper()
 	ts := at.UTC().Format(time.RFC3339)
@@ -267,6 +290,9 @@ func writeReadOfOrders(t *testing.T, root string, at time.Time, schema string, p
 		}
 	}
 	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := baseline.WriteEmptyTableDeltas(snapDir); err != nil {
 		t.Fatal(err)
 	}
 	if err := baseline.WriteSuccessMarker(snapDir); err != nil {
