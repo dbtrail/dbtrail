@@ -219,8 +219,11 @@ else
   # asked for a different host port, rewrite that one line in OUR freshly
   # downloaded copy (the container side stays 8090). Portable in-place edit
   # (BSD/GNU sed differ on -i), so write-and-move.
+  # The console's startup banner address moves with it (#1784).
   if [ "$PORT" != "8090" ]; then
-    sed "s|127.0.0.1:8090:8090|127.0.0.1:${PORT}:8090|" docker-compose.yml > docker-compose.yml.tmp \
+    sed -e "s|127.0.0.1:8090:8090|127.0.0.1:${PORT}:8090|" \
+        -e "s|BINTRAIL_CONSOLE_URL: http://127.0.0.1:8090/|BINTRAIL_CONSOLE_URL: http://127.0.0.1:${PORT}/|" \
+        docker-compose.yml > docker-compose.yml.tmp \
       && mv docker-compose.yml.tmp docker-compose.yml
     # sed exits 0 even when nothing matched — verify the rewrite actually landed
     # rather than print a false "port set" and bind the wrong port.
@@ -228,6 +231,15 @@ else
       "Couldn't set the console port to ${PORT} — the compose file's published-port
     line isn't what this installer expected. Edit the 'ports:' line in
     ${DIR}/docker-compose.yml by hand, or report it."
+    # A compose file from before #1784 (an older DBTRAIL_REF) has no banner
+    # address to move; only the banner in its logs is then off, so that is
+    # not worth failing the install over.
+    if grep -q "BINTRAIL_CONSOLE_URL:" docker-compose.yml; then
+      grep -q "BINTRAIL_CONSOLE_URL: http://127.0.0.1:${PORT}/" docker-compose.yml || die \
+        "Couldn't point the console's startup banner at port ${PORT}: the
+    BINTRAIL_CONSOLE_URL line in ${DIR}/docker-compose.yml isn't what this
+    installer expected. Edit it by hand, or report it."
+    fi
     say "${DIM}    console port set to ${PORT}${RST}"
   fi
   # Same rewrite for the metrics mapping, verified the same way.
