@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.86.0] - 2026-09-21
+
 ### Added
 - **A backup says when your database was last really read** (#1570). An
   update rebuilds a backup from the previous one and the recorded changes
