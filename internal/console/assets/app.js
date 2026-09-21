@@ -4356,7 +4356,12 @@ function s3RetentionBox(srv, servers, daemonS3) {
   // transient (lock mode, read-only console), and a 1-day rule handed out
   // while it lasts is exactly the rule the gate exists to refuse.
   const minutes = srv.schedule_every_minutes || 0;
-  const n = minutes > 0 && !srv.schedule_refusal ? Math.floor(30 * 1440 / minutes) : 0;
+  const runs = minutes > 0 && !srv.schedule_refusal ? Math.floor(30 * 1440 / minutes) : 0;
+  // Full backups the timetable takes between two runs are backups of their
+  // own (#1564), counted the way the Backups page counts them; one refused
+  // takes none.
+  const fulls = runs && srv.schedule_full_every && !srv.schedule_full_refusal ? backupsPer30Days(srv.schedule_full_every) : 0;
+  const n = fulls ? runs + fulls - backupsPer30Days(lcmInterval(srv.schedule_every, srv.schedule_full_every)) : runs;
   wrap.append(el("p", { class: "form-hint", text:
     (n ? "About " + n + " backup" + (n === 1 ? "" : "s") + " every 30 days reach S3 at this rate, each a full copy of every table, and DBTrail never removes one: the bucket grows by that much until a rule in the bucket expires old backups."
        : "Every backup sent to S3 is a full copy of every table, and DBTrail never removes one: each stays in the bucket until a rule in the bucket expires old backups.") }));
@@ -4917,7 +4922,15 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   const p = (t) => el("p", { class: "form-hint", text: t });
   if (srv.schedule_every) {
     more.push(p("Scheduled backups: every " + srv.schedule_every + (srv.schedule_at ? " at " + srv.schedule_at : "") +
+      (srv.schedule_full_every ? ", with a full backup every " + srv.schedule_full_every : "") +
       ". The schedule is managed on the Backups page."));
+    // Red here as on the Backups page (#1564): a grey summary beside a red
+    // card would be two pages disagreeing about the same schedule.
+    if (srv.schedule_full_refusal && !srv.schedule_refusal) {
+      const why = String(srv.schedule_full_refusal);
+      more.push(el("p", { class: "form-msg err", text: why.charAt(0).toUpperCase() + why.slice(1) +
+        (/[.!?]$/.test(why) ? "" : ".") + " The full backups do not run until that changes; the other scheduled runs still do." }));
+    }
   } else {
     more.push(p("No scheduled backups. Set one on the Backups page."));
   }
@@ -6156,7 +6169,10 @@ function backupWhyLine(why, code, remedy) {
     out = "The update from the recorded changes was refused, so a full backup was taken instead. Reason: " + said(inner[1]);
   } else if (code === "fold_crashed" && inner) {
     out = "The update from the recorded changes hit an internal error, so a full backup was taken instead. Error: " + said(inner[1].replace(/^internal error:?\s*/, ""));
-  } else if (code === "previous_unreadable") {
+  } else if (code === "previous_unreadable" || code === "full_copy") {
+    // A full backup the schedule's own timetable asked for (#1564) is its
+    // own reason, not a fault: "Full backup because the schedule takes a
+    // full backup" would say the words twice.
     out = why.charAt(0).toUpperCase() + why.slice(1);
   } else if (code === "window_measured" || code === "window_age") {
     // The daemon's own numbers (#1721): events, the estimate, the last full
@@ -6194,11 +6210,79 @@ const MADE_BY = {
 function madeByCell(t) {
   const entry = MADE_BY[t.produced_by];
   if (!entry) return el("span", { class: "bk-made-none", text: "—" });
-  const cell = el("span", { class: "bk-made", title: entry[1], text: entry[0] });
-  // The ancestor is what makes the two derived verdicts actionable: it answers
-  // "how far back is the last copy that actually read the source".
-  if (t.from) cell.append(el("span", { class: "bk-made-from", text: " · " + t.from }));
+  // The two derived verdicts name WHEN the database was last really read
+  // (#1570), inherited through every update: that is the fact that says how
+  // much this copy rests on the recorded changes. The immediate ancestor,
+  // which is all the page could name before, is one step back and says
+  // nothing about the steps before it; it moves to the tooltip (a reused
+  // table: whose file, and so whose date; an update: the backup its file
+  // came from), and stays in the cell only for a backup too old to record a
+  // read. With changes kept beside the table (#1638) an update records the
+  // backup its chain started from, not the one just before it, so the
+  // sentence names the file plus the changes since, which is exact either
+  // way; when that backup IS the last read, the next sentence already says so.
+  let title = entry[1];
+  if (t.produced_by === "carried_forward" && t.from) title += " Reused from the backup of " + utcLabel(t.from) + ".";
+  if (t.produced_by === "fold" && t.from && t.from !== t.source_read_at) {
+    title += " Built from the backup of " + utcLabel(t.from) + " plus the changes recorded since.";
+  }
+  if (t.produced_by !== "dump" && t.source_read_at) {
+    title += " Last real read of the database: " + utcLabel(t.source_read_at) +
+      (t.folds_since_read > 0 ? ", updated " + timesText(t.folds_since_read) + " from the recorded changes since." : ".");
+  }
+  const cell = el("span", { class: "bk-made", title, text: entry[0] });
+  if (t.produced_by !== "dump" && t.source_read_at) {
+    cell.append(el("span", { class: "bk-made-from", text: " · last read " + t.source_read_at }));
+  } else if (t.from) {
+    // A backup written before the read was recorded still names the backup
+    // it came from, as it did before #1570: less than the last read, more
+    // than nothing.
+    cell.append(el("span", { class: "bk-made-from", text: " · " + t.from }));
+  }
   return cell;
+}
+
+// timesText says a count of updates in words: "once", "twice", "3 times".
+function timesText(n) {
+  return n === 1 ? "once" : n === 2 ? "twice" : n + " times";
+}
+
+// fmtAge is a distance in time for a sentence: seconds, minutes, hours, and
+// days once it passes two of them.
+function fmtAge(sec) {
+  if (sec < 90) return Math.round(sec) + "s";
+  if (sec < 5400) return Math.round(sec / 60) + "m";
+  if (sec < 172800) return Math.round(sec / 3600) + "h";
+  return Math.round(sec / 86400) + " days";
+}
+
+// sourceReadLine (#1570) is the snapshot's own line: how far back the last
+// real read of the database under this backup goes. An update rebuilds a
+// backup from the previous one and the recorded changes, never reading the
+// database, so a backup that looks recent can rest on a read days older, and
+// a check between two such backups proves less than between two full copies.
+// The oldest read among the tables is the one said, since the backup is only
+// as independent as its least recently read table, and tables that do not
+// record a read are counted, never spoken for. "" when nothing was looked up.
+function sourceReadLine(d) {
+  const missing = d.source_read_missing || 0;
+  const uncounted = d.source_read_uncounted || 0;
+  // Two different gaps, said apart: a table that does not record when it was
+  // read, and one that records when but not how many updates since (a chain
+  // written before the count existed). The maximum is left out whenever any
+  // table is uncounted, because a most that skips tables is not the most.
+  const tail = (missing ? " " + missing + (missing === 1 ? " table does" : " tables do") + " not record when." : "") +
+    (uncounted ? " How many updates were built since is not recorded for " + uncounted + (uncounted === 1 ? " table." : " tables.") : "");
+  if (!d.source_read_at) {
+    return missing ? "When your database was last read for this backup is not recorded." : "";
+  }
+  const age = d.source_read_age_seconds || 0;
+  const folds = d.max_folds_since_read;
+  if (age < 1 && folds === 0) return "Read from your database when it was taken." + tail;
+  return "Last real read of your database: " + utcLabel(d.source_read_at) +
+    (age >= 1 ? ", " + fmtAge(age) + " before this backup" : "") +
+    (folds > 0 ? ". Updated from the recorded changes " + (folds > 1 ? "up to " : "") + timesText(folds) + " since" : "") +
+    "." + tail;
 }
 
 async function loadBackupDetail(at, box) {
@@ -6225,6 +6309,8 @@ async function loadBackupDetail(at, box) {
   // Outside the duration branch: a run stamped within one second has no
   // duration to show and still has its reason (#1604).
   if (d.run && d.run.why) facts.append(el("span", { class: "stg-dest", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
+  const readLine = sourceReadLine(d);
+  if (readLine) facts.append(el("span", { class: "stg-dest", text: readLine }));
   const dl = el("button", { class: "btn", type: "button",
     text: "Download (.tar.gz) · " + humanBytes(d.total_bytes || 0) });
   if (d.incomplete) dl.disabled = true;
@@ -6437,10 +6523,26 @@ async function watchBackupRuns(id, vgen, kinds) {
 // grammar the form accepts (a whole number of m, h or d); 0 when it cannot
 // be read, and the server's refusal then says why.
 function backupsPer30Days(every) {
-  const m = /^\s*(\d+)\s*([mhd])\s*$/.exec(String(every || ""));
-  if (!m) return 0;
-  const minutes = Number(m[1]) * ({ m: 1, h: 60, d: 1440 })[m[2]];
+  const minutes = intervalMinutes(every);
   return minutes > 0 ? Math.floor(30 * 1440 / minutes) : 0;
+}
+
+// intervalMinutes reads the schedule grammar (a whole number of m, h or d)
+// as minutes; 0 when it cannot be read.
+function intervalMinutes(every) {
+  const m = /^\s*(\d+)\s*([mhd])\s*$/.exec(String(every || ""));
+  return m ? Number(m[1]) * ({ m: 1, h: 60, d: 1440 })[m[2]] : 0;
+}
+
+// lcmInterval is the least common multiple of two intervals, as an interval
+// ("Nm"): how often two timetables on the same anchor meet (#1564). "" when
+// either cannot be read, which backupsPer30Days reads as 0.
+function lcmInterval(a, b) {
+  const x = intervalMinutes(a), y = intervalMinutes(b);
+  if (!x || !y) return "";
+  let p = x, q = y;
+  while (q) [p, q] = [q, p % q];
+  return (x / p * y) + "m";
 }
 
 // plainWords is the copy rule for reasons the daemon assembles at runtime:
@@ -6499,10 +6601,23 @@ function backupScheduleCard(cur, b) {
   const body = el("div", { class: "bk-card-body" });
 
   // The state line: what an operator reads without stopping.
+  // The full backup a schedule asks for on its own timetable (#1564) and,
+  // when it cannot start, why: in red BEFORE its slot, in every view of the
+  // card, the read-only one included. The rest of the schedule keeps running,
+  // which the line says, so a refused full backup is not read as a stopped
+  // schedule.
+  let fullWarn = null;
+  if (sch && sch.runnable && sch.full_reason) {
+    const why = plainWords(sch.full_reason);
+    fullWarn = el("p", { class: "form-msg err", text:
+      why.charAt(0).toUpperCase() + why.slice(1) + (/[.!?]$/.test(why) ? "" : ".") +
+      " The full backups do not run until that changes; the other scheduled runs still do." });
+  }
   if (!sch) {
     state.textContent = "None yet.";
   } else {
-    let line = "Every " + sch.every + " at " + sch.at + " UTC.";
+    let line = "Every " + sch.every + " at " + sch.at + " UTC" +
+      (sch.full_every ? ", with a full backup every " + sch.full_every : "") + ".";
     if (sch.runnable && sch.next_run) line += " Next: " + utcLabel(sch.next_run) + ".";
     if (!sch.runnable) {
       // Terminated, the same way the next-run warning below terminates its
@@ -6518,6 +6633,7 @@ function backupScheduleCard(cur, b) {
     // history at all, so a refusal is the only alarm it can carry, and it is
     // the exact case the comment above says this card exists for.
     if (!sch.runnable) state.classList.add("alarm");
+    if (fullWarn) state.classList.add("alarm");
   }
 
   // Two lines, not a lecture (#1528). The general explanation of the producer
@@ -6538,6 +6654,12 @@ function backupScheduleCard(cur, b) {
     // The read-only console, or a daemon with every backup feature off:
     // nothing here can change the schedule, and the state line already says
     // why it is not running.
+    // No run history renders here, so the refusal's note goes on the state
+    // line directly (the editable view ranks it with the other alarms).
+    if (fullWarn) {
+      state.textContent += " The full backup cannot run.";
+      body.append(fullWarn);
+    }
     body.append(el("p", { class: "form-hint", text:
       "This schedule can be changed from the watch daemon's web interface (CLI: bintrail-console watch) once its backup features are on." }));
     card.append(body);
@@ -6551,21 +6673,28 @@ function backupScheduleCard(cur, b) {
   const at = el("input", { class: "in", type: "text", spellcheck: "false", placeholder: "03:00", "aria-label": "At (UTC)" });
   at.value = sch ? sch.at : "03:00";
   at.style.maxWidth = "90px";
+  // Optional (#1564): empty is no full backup of its own, the daemon then
+  // takes one only when an update cannot serve.
+  const fullEvery = el("input", { class: "in", type: "text", spellcheck: "false", placeholder: "none", "aria-label": "Full backup every" });
+  fullEvery.value = sch && sch.full_every ? sch.full_every : "";
+  fullEvery.style.maxWidth = "90px";
   const save = el("button", { class: "btn", type: "button", text: sch ? "Save schedule" : "Add schedule" });
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
-  save.onclick = () => saveBackupSchedule(cur.id, { every: every.value.trim(), at: at.value.trim() }, save, msg);
+  save.onclick = () => saveBackupSchedule(cur.id, { every: every.value.trim(), at: at.value.trim(), full_every: fullEvery.value.trim() }, save, msg);
   const row = el("div", { class: "bk-restore-row" },
     el("span", { class: "form-hint", text: "every" }), every,
     el("span", { class: "form-hint", text: "at" }), at,
-    el("span", { class: "form-hint", text: "UTC" }), save);
+    el("span", { class: "form-hint", text: "UTC, full backup every" }), fullEvery, save);
   if (sch) {
     const remove = el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Remove schedule" });
     remove.onclick = () => removeBackupSchedule(cur.id, remove, msg);
     row.append(remove);
   }
   body.append(row, el("p", { class: "form-hint", text:
-    "Every: minutes, hours or days (5m, 6h, 1d), at least 5m. At: the UTC time the timetable lines up on." }), msg);
+    "Every: minutes, hours or days (5m, 6h, 1d), at least 5m. At: the UTC time the timetable lines up on. " +
+    "Full backup every (optional, such as 7d): at those times the run reads your whole database instead of updating, " +
+    "so the backups do not rest only on the recorded changes. Leave it empty for none." }), msg);
   // The rate, before the disk finds out: every run is a full copy of every
   // table, and backups kept only on this machine are never removed on their
   // own (the daemon prunes only what it confirmed durable in S3). Same
@@ -6575,10 +6704,18 @@ function backupScheduleCard(cur, b) {
     const n = backupsPer30Days(every.value);
     if (!n) { rate.hidden = true; return; }
     rate.hidden = false;
-    rate.textContent = "About " + n + " backup" + (n === 1 ? "" : "s") + " every 30 days at this rate, each a full copy of every table." +
+    // The full backups the schedule asks for (#1564), said with the rate
+    // because each is a read of the whole database. Those that do not land
+    // on a run are runs of their own and add to the total (the two
+    // timetables meet every lcm of the two intervals).
+    const f = backupsPer30Days(fullEvery.value);
+    const total = f ? n + f - backupsPer30Days(lcmInterval(every.value, fullEvery.value)) : n;
+    rate.textContent = "About " + total + " backup" + (total === 1 ? "" : "s") + " every 30 days at this rate, each a full copy of every table." +
+      (f ? " About " + f + (f === 1 ? " is a full backup that reads" : " are full backups that read") + " your whole database." : "") +
       (cur.baseline_s3 ? "" : " Backups kept only on this machine are never removed automatically; make sure the disk has room.");
   };
   every.addEventListener("input", showRate);
+  fullEvery.addEventListener("input", showRate);
   showRate();
   body.append(rate);
 
@@ -6651,6 +6788,18 @@ function backupScheduleCard(cur, b) {
       body.append(el("p", { class: "form-msg err", text:
         "The backup run history could not be opened, so runs from before this daemon started are not shown. Check the daemon log." }));
     }
+    // The full backup the schedule asks for (#1564): its refusal, or when
+    // the next one is due if that is not the next run already said above.
+    // The refusal is forward-looking like the next-run warning: its note is
+    // kept only while no other alarm has claimed the line, and any past
+    // alarm replaces it.
+    if (fullWarn) {
+      alarm = true;
+      if (!alarmNote) alarmNote = "The full backup cannot run.";
+      body.append(fullWarn);
+    } else if (sch.runnable && sch.next_full_run && sch.next_full_run !== sch.next_run) {
+      body.append(el("p", { class: "form-hint", text: "Next full backup the schedule asks for: " + utcLabel(sch.next_full_run) + "." }));
+    }
     if (sch.running) {
       body.append(el("p", { class: "form-hint", text: "A scheduled backup is running now." }));
     }
@@ -6710,6 +6859,28 @@ function backupScheduleCard(cur, b) {
         "At " + utcLabel(fb.at) + " the update from the recorded changes " + (crashed ? "hit an internal error" : "was refused") +
         " (" + why + ") so a full backup was started instead. If this repeats, the recorded changes cannot be used for this server; check the reason." }));
     }
+    // A full backup of the schedule's own timetable that did not start, or
+    // started and failed (#1564): red until a full backup succeeds, not
+    // until the next run ends. A missed run is made up by the next one; a
+    // missed weekly full backup by nothing for a week, and a grey card
+    // saying when the next is due would hide that this one never happened.
+    // The next one's time only when it will run: a refused timetable already
+    // says in red that none will until that changes.
+    const fm = sch.last_full_missed;
+    if (fm) {
+      alarm = true;
+      noteAt(fm.at, fm.failed ? "The last full backup failed." : "The last full backup did not run.");
+      const cause = backupFoldError(fm.reason || "unknown reason");
+      const next = !(sch.runnable && !sch.full_reason && sch.next_full_run) ? ""
+        : sch.full_owed ? " The next scheduled run takes it, at " + utcLabel(sch.next_full_run) + "."
+        : " The next one is due at " + utcLabel(sch.next_full_run) + ".";
+      // Lowercased to continue the sentence, unless the first word is a name
+      // or an acronym ("DBTrail was not running..." must not read "dBTrail").
+      const lead = /^[A-Z][a-z]/.test(cause) ? cause.charAt(0).toLowerCase() + cause.slice(1) : cause;
+      body.append(el("p", { class: "form-msg err", text:
+        (fm.failed ? "The full backup that started at " + utcLabel(fm.at) + " failed: " : "The full backup due at " + utcLabel(fm.at) + " did not run: ") +
+        lead + next }));
+    }
     // >= not >: the stamps are whole seconds, and a skip recorded in the
     // same second a run finished (the fallback's collision case) is the
     // newer fact, not an older one.
@@ -6722,7 +6893,7 @@ function backupScheduleCard(cur, b) {
         "Did not run at " + utcLabel(skip.at) + ": " + backupFoldError(skip.reason) +
         scheduleSkipTail(skip.reason) }));
     }
-    if (!run && !skip && !sch.running && !sch.history_unavailable) {
+    if (!run && !skip && !fm && !sch.running && !sch.history_unavailable) {
       body.append(el("p", { class: "form-hint", text: "It has not run yet." }));
     }
     // Nothing to open any more, so the alarm moves to the state line: a

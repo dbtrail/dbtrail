@@ -1476,6 +1476,9 @@ func ReconstructTable(
 			Time:     snapshotTime,
 			Metadata: bmeta,
 		}
+		// With deltas off the fold resumes from the base's own anchor, a chain
+		// beside it or not, so the base alone is what it folds.
+		in.FoldedFrom = baseline.SourceReadOf(bmeta)
 		if err := mergeBaselineIntoParquet(ctx, in, rep); err != nil {
 			return nil, err
 		}
@@ -1681,6 +1684,14 @@ type mergeInput struct {
 	SnapshotAt     time.Time
 	Cut            *query.BinlogPos
 	SourceBaseline baselineMeta
+	// FoldedFrom is when the state this run folds last came from a real read
+	// of the source, and how many folds since (#1570). Every file the run
+	// writes stamps FoldedFrom.Next(). NOT derived from SourceBaseline: with
+	// table deltas the fold count lives on the chain's newest pair, which
+	// SourceBaseline does not carry (baseline.ChainSourceRead). The zero value
+	// stamps nothing, which reads back as not on record: a caller that forgets
+	// it makes the chain unknown, never fresher than it is.
+	FoldedFrom baseline.SourceRead
 	// CaptureGap is the permanent-loss finding this run OVERRODE under
 	// AllowGaps, or nil when the window was verifiably clean. Non-nil means the
 	// emitted snapshot is knowingly incomplete and must say so in its metadata.

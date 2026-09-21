@@ -847,6 +847,18 @@ type tableDeltaPublish struct {
 	currentGenerated map[string]bool
 }
 
+// foldedFromChain is the source read of the state a run with deltas on folds
+// (#1570): the base's read, counted to the chain's newest pair. Both a new
+// pair and a rewrite (which folds the chain into a new base) are one fold
+// past it.
+func foldedFromChain(p tableDeltaPublish) baseline.SourceRead {
+	if p.prev == nil {
+		return baseline.ChainSourceRead(p.baseMeta, nil)
+	}
+	last := p.prev.Meta
+	return baseline.ChainSourceRead(p.baseMeta, &last)
+}
+
 // publishWithTableDelta publishes one table of a run with deltas on: as its
 // previous file plus the chain plus one new pair, or rewritten when
 // tableDeltaCompactReason says so. Either way the table leaves with a chain
@@ -880,6 +892,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		Cut:              p.cfg.cut,
 		CaptureGap:       p.capGap,
 		SourceBaseline:   baselineMeta{Path: p.basePath, Time: p.chainStart, Metadata: p.anchorMeta},
+		FoldedFrom:       foldedFromChain(p),
 	}
 	newBase := filepath.Join(p.cfg.snapshotDir, p.schema, p.table+".parquet")
 

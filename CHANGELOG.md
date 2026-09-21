@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A backup says when your database was last really read** (#1570). An
+  update rebuilds a backup from the previous one and the recorded changes
+  without reading the database, so a chain of updates can go days without
+  one, and nothing said how long. Every backup file now records the instant
+  of the newest full backup its rows descend from (`bintrail.last_dump_at`)
+  and how many updates were built on it since (`bintrail.fold_generation`).
+  An update copies both from what it updated, so the date never moves
+  forward without a full backup; the count restarts from the file an update
+  starts from (table deltas turned off, a damaged chain set aside), so it can
+  go down, and the page never claims more than the files record. The Backups page shows, for each backup
+  in a local directory, the oldest such read among its tables, how long
+  before the backup it was, and the most updates since when every table
+  records its count (tables whose updates predate this version are counted
+  instead); each table's row says the same for that table. A backup made before this version reads as
+  its own instant when it was a full backup; an update made before it cannot
+  be dated, and the page counts it instead of guessing.
+- **A backup schedule can ask for full backups of its own** (#1564). The
+  schedule used to take a full backup only when an update could not run (the
+  first backup, a capture gap, a schema change), so an operator who wanted an
+  independent read of the database on a timetable, one that does not rest on
+  the previous backup or the recorded changes, had no way to ask. The
+  schedule now has an optional **full backup every** (for example `7d`),
+  a second timetable on the same grid and UTC time: at each of its slots the
+  run is a full backup, and it takes the place of a scheduled run that falls
+  on the same instant. It needs the creation opt-in
+  (`BINTRAIL_CONSOLE_BASELINE_TRIGGER`): a save asking for one without it is
+  refused with the reason, and if the opt-in is turned off later the Backups
+  page says so in red before the next one is due, each one is recorded as
+  skipped with the reason, and the updates keep running. A slot that finds
+  another job holding the server is taken by the next scheduled run instead
+  of a week later (unless the daemon restarts or the schedule is saved in
+  between), and a slot that passed while the daemon was stopped is
+  recorded as missed at the next start (never made up). A full backup that
+  did not start, or started and failed, stays on the card in red until a
+  full backup of the server succeeds after it, instead of disappearing when
+  the next ordinary run ends. The run's recorded reason reads "the schedule
+  takes a full backup every 7d". A save that does not mention the field
+  keeps the saved one, so a page loaded before the upgrade cannot remove it.
+
 ### Changed
 - **What Save and Test connection did now opens in a dialog centered on the
   screen** (#1769). The add-server and edit-server forms used to answer inside
@@ -19,6 +59,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a summary with a Show button. The row's Start button opens the same dialog.
 
 ### Fixed
+- **The Backups page no longer calls a changed table "reused unchanged"**
+  (#1570). Since table deltas became the default (v0.84.0), an update keeps
+  each table file and writes the changes beside it, and it carries the table
+  file forward on every update, changed or not. The page read only that
+  file, so every table of every update was described as reused unchanged. It
+  now reads the newest file of the chain beside the table.
+- **An update that reads its previous backup from S3 keeps the age of the
+  table definition** (#1651 follow-up, found by #1570). The S3 reader of
+  backup file metadata did not read `bintrail.create_table_as_of`, which the
+  local reader did, so an update of an update read from the bucket dated the
+  carried `CREATE TABLE` by the previous backup's time instead, newer than it
+  was. That could skip the check that refuses an update when a column type
+  changed after the definition was read. A test now writes every metadata key
+  into a real file and requires both readers to return the same result.
+- **The installer's advice for a taken port works when pasted** (#1768).
+  With port 8090 taken it suggested `DBTRAIL_PORT=9090 curl … | sh`, which
+  failed twice: the variable was on `curl`, so the installer never saw it, and
+  9090 is where the stack publishes its own metrics. It now prints the full
+  command with the variables on `sh` and a port it checked is free. A taken
+  9090 (Prometheus's default port) no longer ends in Docker's raw bind error:
+  the metrics move to the next free port, and `DBTRAIL_METRICS_PORT` picks one.
 - **Test connection on a new server tests the database you typed** (#1767).
   It used to answer "nothing to test": it only ever looked at the index
   connection, which a new server does not have until it is saved. It now runs
