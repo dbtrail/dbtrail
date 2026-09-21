@@ -189,10 +189,16 @@ func newBackupScheduleReporter(sup *baselineSupervisor, reg *console.Registry, f
 }
 
 // FullBackups implements console.BackupScheduleReporter: the opt-in, and the
-// supervisor's standing refusal (a lock-mode misconfiguration) when there
-// is one.
+// refusal a MySQL dump would hit right now (a lock-mode misconfiguration no
+// saved setting has fixed) when there is one.
 func (b *backupScheduler) FullBackups() (bool, error) {
-	return b.fullBackups, b.sup.configErr
+	// The lock mode the next dump would really use (lockModeNow), not the
+	// refusal this process started with: a bad lock mode fixed from the
+	// Backup settings page lets dumps through again at once, and the
+	// schedule's card, next-run prediction and gates must say so too rather
+	// than wait for a restart.
+	_, err := b.sup.lockModeNow()
+	return b.fullBackups, err
 }
 
 // WindowProbe measures what an update would fold for one server (#1721).
