@@ -128,6 +128,10 @@ func OpenVerifyHistory(path string) (*VerifyHistory, error) {
 func (h *VerifyHistory) Append(rec VerifyRunRecord) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// The verdict is computed on read (List), never stored: a record an
+	// embedder read and saved back would otherwise freeze a verdict, and a
+	// later build's rule would not reach it.
+	rec.Verdict = ""
 	old, hadOld := h.servers[rec.ServerID]
 	// Clone before appending: an in-place append could write into old's spare
 	// capacity, which would corrupt the rollback below.

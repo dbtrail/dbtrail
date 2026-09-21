@@ -13,7 +13,6 @@ func TestOf(t *testing.T) {
 		want                  string
 	}{
 		{"nothing tallied", 0, 0, 0, Unproven},
-		{"every table inconclusive (no counts here)", 0, 0, 0, Unproven},
 		{"one proven", 1, 0, 0, Verified},
 		{"some proven, the rest inconclusive", 3, 0, 0, Verified},
 		{"a divergence", 3, 1, 0, Mismatch},
@@ -29,8 +28,8 @@ func TestOf(t *testing.T) {
 }
 
 // The package exists so the web interface can share the rule without
-// linking the verify engine; the day it imports anything outside the
-// standard library, that reason is gone.
+// linking the verify engine, and it needs nothing to do that: any import,
+// the standard library's included, is a sign it grew beyond the rule.
 func TestImportsNothing(t *testing.T) {
 	out, err := exec.Command("go", "list", "-f", `{{join .Imports "\n"}}`, ".").CombinedOutput()
 	if err != nil {

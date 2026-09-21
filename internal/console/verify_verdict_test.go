@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -106,7 +107,14 @@ func TestVerifyEndpoints_serveTheVerdict(t *testing.T) {
 		{State: VerifyStateSucceeded, Note: "only one baseline exists for this server yet; nothing to compare"},
 		{State: VerifyStateFailed, LastError: "boom"},
 	}
-	for _, st := range stored {
+	for i, st := range stored {
+		// Saved back WITH a verdict, as a caller that listed a record and
+		// appended it again would, and the first one a wrong verdict: the
+		// file must not keep either, and what is served is recomputed.
+		st = st.WithVerdict()
+		if i == 0 {
+			st.Verdict = verdict.Verified
+		}
 		if err := hist.Append(VerifyRunRecord{ServerID: id, Trigger: VerifyTriggerScheduled, VerifyStatus: st}); err != nil {
 			t.Fatal(err)
 		}
@@ -140,7 +148,7 @@ func TestVerifyEndpoints_serveTheVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(raw), `"verdict"`) {
-		t.Fatal("serving the history wrote verdicts into the file; the rule belongs where it is served")
+		t.Fatal("the history file holds verdicts; the rule belongs where the history is read")
 	}
 }
 
@@ -259,9 +267,19 @@ runs.unknown = Object.assign({}, runs.clean, { verdict: "someday" });
 			t.Fatalf("fixture: %q is expected but was never drawn", name)
 		}
 	}
+	// Exact, after the "LAST CHECK <age>" lead: a suffix match would pass a
+	// clean run drawn as "nothing proven: 12 match", which is the prefix this
+	// headline exists to get right.
+	lead := regexp.MustCompile(`^LAST CHECK (?:[0-9]+[smh]|[0-9]+ days) ago`)
 	for name, want := range wantHead {
-		if !strings.HasSuffix(got[name].Headline, want) {
-			t.Errorf("%s: headline %q, want it to end with %q", name, got[name].Headline, want)
+		h := got[name].Headline
+		loc := lead.FindStringIndex(h)
+		if loc == nil {
+			t.Errorf("%s: headline %q does not start with LAST CHECK and an age", name, h)
+			continue
+		}
+		if rest := h[loc[1]:]; rest != want {
+			t.Errorf("%s: headline says %q after its age, want %q", name, rest, want)
 		}
 	}
 	wantChip := map[string][2]string{

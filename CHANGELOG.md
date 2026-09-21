@@ -46,8 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads LAST CHECK with what the run proved ("3 match · 9 not checked",
   "nothing proven: 12 not checked"), and a finished run's chip says NOTHING
   PROVEN, MISMATCH or ERRORS when that is what happened (NOTHING TO COMPARE
-  while there is only one snapshot). Only a verified run flashes green; the
-  others leave a message that stays until dismissed. The verify endpoints
+  while there is only one snapshot). Only a verified run flashes green; a
+  difference, an error or nothing proven leaves a message that stays until
+  dismissed. The verify endpoints
   carry a `verdict` field, and the `assurance` package fills it on every
   history record (`VerifyVerdict*`, `VerifyStatus.WithVerdict`). Snapshots
   and captured data are not affected. "Compare two saved snapshots" is no

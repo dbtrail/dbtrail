@@ -27,10 +27,11 @@ const (
 )
 
 // Of is the run verdict for the counts of one run, in the precedence the exit
-// code uses: a divergence outranks an error, and a run that proved no table
-// is unproven whatever else it holds. Inconclusive tables do not appear: they
-// neither prove nor disprove, so a run with some matches and some
-// inconclusive tables is Verified, and the counts say how much of it was.
+// code uses: a divergence outranks an error, and a run with neither that
+// proved no table is unproven, whatever inconclusive tables it holds.
+// Inconclusive tables do not appear here: they neither prove nor disprove, so
+// a run with some matches and some inconclusive tables is Verified, and the
+// counts say how much of it was.
 func Of(match, mismatch, errs int) string {
 	switch {
 	case mismatch > 0:

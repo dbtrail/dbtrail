@@ -70,11 +70,14 @@ func TestConstantsMatchTheCore(t *testing.T) {
 		{"VerifyTableMismatch", VerifyTableMismatch, string(verify.StatusMismatch)},
 		{"VerifyTableInconclusive", VerifyTableInconclusive, string(verify.StatusInconclusive)},
 		{"VerifyTableError", VerifyTableError, string(verify.StatusError)},
-		{"VerifyVerdictVerified", VerifyVerdictVerified, verify.VerdictVerified},
-		{"VerifyVerdictMismatch", VerifyVerdictMismatch, verify.VerdictMismatch},
-		{"VerifyVerdictError", VerifyVerdictError, verify.VerdictError},
-		{"VerifyVerdictUnproven", VerifyVerdictUnproven, verify.VerdictUnproven},
-		{"VerifyVerdictNoPredecessor", VerifyVerdictNoPredecessor, verify.VerdictNoPredecessor},
+		// The verdicts against their wire values, not against the constants
+		// they alias (which could not fail): the console page and embedders
+		// compare these strings.
+		{"VerifyVerdictVerified", VerifyVerdictVerified, "verified"},
+		{"VerifyVerdictMismatch", VerifyVerdictMismatch, "mismatch"},
+		{"VerifyVerdictError", VerifyVerdictError, "error"},
+		{"VerifyVerdictUnproven", VerifyVerdictUnproven, "unproven"},
+		{"VerifyVerdictNoPredecessor", VerifyVerdictNoPredecessor, "no_predecessor"},
 		{"VerifyModeBaselineAnchored", string(VerifyModeBaselineAnchored), string(console.VerifyModeBaselineAnchored)},
 		{"VerifyModeLiveSource", string(VerifyModeLiveSource), string(console.VerifyModeLiveSource)},
 		{"VerifyModeRecoverInputs", string(VerifyModeRecoverInputs), string(console.VerifyModeRecoverInputs)},

@@ -7458,8 +7458,8 @@ function vfyHeadline(rec) {
 
 const VFY_MODE_LABEL = { "baseline-anchored": "compared two saved snapshots", "live-source": "compared against the live database", "recover-inputs": "checked recovery inputs in the index" };
 
-// loadVerifyHistory renders the persisted run history into box: a "last
-// verified" headline plus the most recent runs (newest first; the server
+// loadVerifyHistory renders the persisted run history into box: a "LAST
+// CHECK" headline saying what the newest run proved, plus the most recent runs (newest first; the server
 // stores up to 20 per server, this list shows up to 8). Manual runs,
 // scheduled runs and scheduled skips all appear — the daemon's
 // --verify-interval loop writes the same store. On a fetch error (including
@@ -7589,10 +7589,9 @@ function renderVerifyResults(container, status, id, opts) {
   // A finished run wears its VERDICT, not its state: "succeeded" only means
   // it ran to the end, and a green DONE over a run that proved no table, or
   // found a difference, told the operator the opposite of the rows below.
-  // The verdict is the server's, the rule `bintrail verify` exits on and the
-  // verify_problem webhook agrees with; no second rule here, so a run whose
-  // tables all had nothing to check is NOTHING PROVEN on this page as it is
-  // a non-zero exit there. Green only for "verified": a verdict this page does
+  // The verdict is the server's, the rule `bintrail verify` exits on; no
+  // second rule here, so a run whose tables all had nothing to check is
+  // NOTHING PROVEN on this page as it is a non-zero exit there. Green only for "verified": a verdict this page does
   // not know is a neutral FINISHED, never a pass.
   const VERDICT_CHIP = {
     verified: ["chip chip-done", "DONE"],
