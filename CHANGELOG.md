@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The Overview offers + Add server while no server is listed** (#1779). A
+  console with no server showed a dashboard of zeros, with the add form behind
+  Manage servers; the dialog that opens once on a first visit does not open
+  after a password sign-in, which is how the installer's first visit goes. A
+  Getting started card now leads the Overview on a console that can monitor a
+  source, and its + Add server opens the add form directly.
+
+### Fixed
+- **The Overview counts show the first change** (#1778). The deletes and
+  tables-touched tiles and Activity by table were reused for 30 minutes
+  whatever they cost, so a new index kept its first "0 deletes" beside its
+  first delete for up to half an hour. They are now reused for a hundred times
+  what they took to compute, between one second and the same 30 minutes, and
+  a count that takes under a second is recomputed before the page draws it. A
+  large index, whose count takes tens of seconds, keeps the 30 minutes.
+- **Startup-check fixes read as text in the console** (#1777). A fix written
+  for an 80-column terminal was shown verbatim in a narrower box, so each
+  line broke twice and the primary-key fix read as a ragged block of monospace.
+  The console now shows the prose as paragraphs, the lists as lists, and only
+  the commands in a code box, exactly as written. `bintrail doctor` output is
+  unchanged.
+
 ## [0.86.1] - 2026-09-21
 
 ### Security
