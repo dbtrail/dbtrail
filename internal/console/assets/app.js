@@ -6191,11 +6191,17 @@ function madeByCell(t) {
   // much this copy rests on the recorded changes. The immediate ancestor,
   // which is all the page could name before, is one step back and says
   // nothing about the steps before it; it moves to the tooltip (a reused
-  // table: whose file, and so whose date; an update: the backup it built
-  // on), and stays in the cell only for a backup too old to record a read.
+  // table: whose file, and so whose date; an update: the backup its file
+  // came from), and stays in the cell only for a backup too old to record a
+  // read. With changes kept beside the table (#1638) an update records the
+  // backup its chain started from, not the one just before it, so the
+  // sentence names the file plus the changes since, which is exact either
+  // way; when that backup IS the last read, the next sentence already says so.
   let title = entry[1];
   if (t.produced_by === "carried_forward" && t.from) title += " Reused from the backup of " + utcLabel(t.from) + ".";
-  if (t.produced_by === "fold" && t.from) title += " Built on the backup of " + utcLabel(t.from) + ".";
+  if (t.produced_by === "fold" && t.from && t.from !== t.source_read_at) {
+    title += " Built from the backup of " + utcLabel(t.from) + " plus the changes recorded since.";
+  }
   if (t.produced_by !== "dump" && t.source_read_at) {
     title += " Last real read of the database: " + utcLabel(t.source_read_at) +
       (t.folds_since_read > 0 ? ", updated " + timesText(t.folds_since_read) + " from the recorded changes since." : ".");

@@ -347,16 +347,11 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 		Incomplete: snapshotIncomplete(files),
 	}
 	var oldest, newest time.Time
-	// The names of each schema directory, for the table deltas beside each
-	// table (#1638): with deltas on the table file is carried forward on
-	// every refresh, changed or not, and the run's own footer sits on the
-	// chain's newest pair, so a table cannot be described from its file alone.
-	namesByDir := map[string][]string{}
-	for _, f := range files {
-		if parts := strings.Split(f.RelPath, "/"); len(parts) == 3 {
-			namesByDir[parts[0]+"/"+parts[1]] = append(namesByDir[parts[0]+"/"+parts[1]], parts[2])
-		}
-	}
+	// Each table's delta files (#1638): with deltas on the table file is
+	// carried forward on every refresh, changed or not, and the run's own
+	// footer sits on the chain's newest pair, so a table cannot be described
+	// from its file alone.
+	deltaNames := tableDeltaNames(files)
 	reads := snapshotSourceReads{}
 	for _, f := range files {
 		resp.TotalBytes += f.Size
@@ -383,7 +378,7 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 		// up" rather than as unknown.
 		if src != nil && src.localRoot != "" {
 			dir := filepath.Join(src.localRoot, filepath.FromSlash(parts[0]), parts[1])
-			d := describeTable(filepath.Join(dir, parts[2]), dir, namesByDir[parts[0]+"/"+parts[1]], ts)
+			d := describeTable(filepath.Join(dir, parts[2]), dir, deltaNames[parts[0]+"/"+parts[1]+"/"+row.Table], ts)
 			row.ProducedBy, row.From = d.producedBy, d.from
 			// Every table looked at counts, the unreadable ones too: the
 			// snapshot's line must not speak for a table it could not date.
@@ -630,6 +625,26 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 	completed = true
 }
 
+// tableDeltaNames groups a snapshot's delta file names by table, keyed
+// "<tsdir>/<schema>/<table>", with the parser the chain reader filters by, so
+// each table is handed exactly the names it would have kept out of its whole
+// schema directory. Handing every table the whole directory made one listing
+// parse tables × files names.
+func tableDeltaNames(files []baselineSnapshotFile) map[string][]string {
+	out := map[string][]string{}
+	for _, f := range files {
+		parts := strings.Split(f.RelPath, "/")
+		if len(parts) != 3 {
+			continue
+		}
+		if stem, _, _, ok := baseline.ParseTableDeltaName(parts[2]); ok {
+			k := parts[0] + "/" + parts[1] + "/" + stem
+			out[k] = append(out[k], parts[2])
+		}
+	}
+	return out
+}
+
 // tableDescription is what describeTable found out about one table of a
 // snapshot. The zero value is "could not find out", which the page shows as
 // no verdict: a different answer from "the file records nothing".
@@ -640,7 +655,7 @@ type tableDescription struct {
 
 // describeTable reads one table's footers and derives how its rows reached
 // this snapshot (#1545) and when they last came from a read of the source
-// (#1570). dir and names are the table's schema directory and its file names,
+// (#1570). dir is the table's schema directory and names its delta files,
 // for the chain of table deltas beside it (#1638).
 //
 // With a chain, the table file alone describes nothing about THIS snapshot:

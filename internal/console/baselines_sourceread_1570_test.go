@@ -112,7 +112,7 @@ func TestBaselineFilesAPI_tableDeltasAndTheLastRead(t *testing.T) {
 		folds                  int // -1: absent
 	}
 	wants := map[string]want{
-		"orders": {baseline.ProducedByFold, "", "2026-06-01 03:00:00", 2},
+		"orders": {baseline.ProducedByFold, "2026-06-01 03:00:00", "2026-06-01 03:00:00", 2},
 		"quiet":  {baseline.ProducedByCarriedForward, "2026-06-01 09:00:00", "2026-06-01 03:00:00", 1},
 		"fresh":  {baseline.ProducedByDump, "", "2026-06-01 15:00:00", 0},
 		"old":    {baseline.ProducedByFold, "2026-06-01 09:00:00", "", -1},
@@ -176,17 +176,25 @@ func srChainFixture(t *testing.T) (root, snapshotAt string) {
 	srWritePair(t, at(s0, "orders"), 0, srFooter("", t0, nil))
 	srLink(t, at(s0, "orders"), at(s1, "orders"), 0)
 	one := dumpRead.Next()
-	srWritePair(t, at(s1, "orders"), 1, srFooter(baseline.ProducerReconstruct, t1, &one))
+	// A fold's pair records the backup its CHAIN started from as its source,
+	// not the one just before it (reconstruct: SourceBaseline.Time is the
+	// chain start), so both pairs name t0.
+	foldPair := func(at string, read *baseline.SourceRead) map[string]string {
+		md := srFooter(baseline.ProducerReconstruct, at, read)
+		md[baseline.MetaKeyDerivedFrom] = t0
+		return md
+	}
+	srWritePair(t, at(s1, "orders"), 1, foldPair(t1, &one))
 	srLink(t, at(s1, "orders"), at(s2, "orders"), 0, 1)
 	two := one.Next()
-	srWritePair(t, at(s2, "orders"), 2, srFooter(baseline.ProducerReconstruct, t2, &two))
+	srWritePair(t, at(s2, "orders"), 2, foldPair(t2, &two))
 
 	// quiet: the same chain up to t1, and nothing since, so at t2 its newest
 	// pair is carried: reused unchanged, from the t1 run.
 	srWriteTable(t, at(s0, "quiet"), srFooter(baseline.ProducerDump, t0, &dumpRead))
 	srWritePair(t, at(s0, "quiet"), 0, srFooter("", t0, nil))
 	srLink(t, at(s0, "quiet"), at(s1, "quiet"), 0)
-	srWritePair(t, at(s1, "quiet"), 1, srFooter(baseline.ProducerReconstruct, t1, &one))
+	srWritePair(t, at(s1, "quiet"), 1, foldPair(t1, &one))
 	srLink(t, at(s1, "quiet"), at(s2, "quiet"), 0, 1)
 
 	// fresh: a full backup of its own at t2, with its empty pair; it IS the
@@ -319,7 +327,7 @@ vm.runInContext("loadBackupDetail", ctx)("2026-06-01T15:00:00Z", box).then(() =>
 	}
 	var got struct {
 		ChainLine, FullLine, S3Line, UndatedLine, UncountedLine, QuietLine, Days, Detail string
-		Cells                                    map[string]struct{ Text, Title string }
+		Cells                                                                            map[string]struct{ Text, Title string }
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
@@ -377,6 +385,13 @@ vm.runInContext("loadBackupDetail", ctx)("2026-06-01T15:00:00Z", box).then(() =>
 	}
 	if !strings.Contains(got.Cells["orders"].Title, "updated twice from the recorded changes since") {
 		t.Errorf("orders tooltip = %q", got.Cells["orders"].Title)
+	}
+	// orders' chain started at the read itself: the read sentence says it all.
+	if strings.Contains(got.Cells["orders"].Title, "Built") {
+		t.Errorf("orders tooltip names its chain start twice: %q", got.Cells["orders"].Title)
+	}
+	if !strings.Contains(got.Cells["old"].Title, "Built from the backup of 2026-06-01 09:00:00 UTC plus the changes recorded since.") {
+		t.Errorf("the updated table's tooltip does not name the backup its file came from: %q", got.Cells["old"].Title)
 	}
 	for name, c := range got.Cells {
 		for _, bad := range []string{"— ", "fold", "carried", "undefined", "null", "NaN"} {
