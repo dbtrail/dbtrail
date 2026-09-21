@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A backup schedule can ask for full backups of its own** (#1564). The
+  schedule used to take a full backup only when an update could not run (the
+  first backup, a capture gap, a schema change), so an operator who wanted an
+  independent read of the database on a timetable, one that does not rest on
+  the previous backup or the recorded changes, had no way to ask. The
+  schedule now has an optional **full backup every** (for example `7d`),
+  a second timetable on the same grid and UTC time: at each of its slots the
+  run is a full backup, and it takes the place of a scheduled run that falls
+  on the same instant. It needs the creation opt-in
+  (`BINTRAIL_CONSOLE_BASELINE_TRIGGER`): a save asking for one without it is
+  refused with the reason, and if the opt-in is turned off later the Backups
+  page says so in red before the next one is due, each one is recorded as
+  skipped with the reason, and the updates keep running. A slot that finds
+  another job holding the server is taken by the next scheduled run instead
+  of a week later, and a slot that passed while the daemon was stopped is
+  recorded as missed at the next start (never made up). A full backup that
+  did not start, or started and failed, stays on the card in red until a
+  full backup of the server succeeds after it, instead of disappearing when
+  the next ordinary run ends. The run's recorded reason reads "the schedule
+  takes a full backup every 7d". A save that does not mention the field
+  keeps the saved one, so a page loaded before the upgrade cannot remove it.
+
 ## [0.85.1] - 2026-09-20
 
 ### Fixed

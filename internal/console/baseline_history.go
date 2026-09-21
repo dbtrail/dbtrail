@@ -305,22 +305,41 @@ func capRecords(recs []BaselineRunRecord) []BaselineRunRecord {
 	if excess <= 0 {
 		return recs
 	}
-	keepRun, keepSkip := -1, -1
-	for i := len(recs) - 1; i >= 0 && (keepRun < 0 || keepSkip < 0); i-- {
+	// The full-backup timetable's newest run and skip (#1564) are protected
+	// too, and for the same reason with more force: a weekly full backup's
+	// record is otherwise evicted within hours by a short schedule's runs.
+	// So is the newest successful full backup of any trigger (LastFullRead):
+	// it is what ends a miss's line, and evicting it while the miss stays
+	// would bring back an alarm that was already answered.
+	keepRun, keepSkip, keepFullRun, keepFullSkip, keepFullRead := -1, -1, -1, -1, -1
+	for i := len(recs) - 1; i >= 0; i-- {
+		if keepFullRead < 0 && recs[i].Kind == BaselineRunDump && recs[i].SkipReason == "" && recs[i].Error == "" {
+			keepFullRead = i
+		}
 		if recs[i].Trigger != BaselineRunTriggerScheduled {
 			continue
 		}
-		if recs[i].SkipReason != "" {
+		switch {
+		case IsFullCopySkip(recs[i].SkipReason):
+			if keepFullSkip < 0 {
+				keepFullSkip = i
+			}
+		case recs[i].SkipReason != "":
 			if keepSkip < 0 {
 				keepSkip = i
 			}
-		} else if keepRun < 0 {
-			keepRun = i
+		default:
+			if keepRun < 0 {
+				keepRun = i
+			}
+			if keepFullRun < 0 && recs[i].WhyCode == BackupWhyCodeFullCopy {
+				keepFullRun = i
+			}
 		}
 	}
 	out := make([]BaselineRunRecord, 0, BaselineRunHistoryCap)
 	for i, r := range recs {
-		if excess > 0 && i != keepRun && i != keepSkip {
+		if excess > 0 && i != keepRun && i != keepSkip && i != keepFullRun && i != keepFullSkip && i != keepFullRead {
 			excess--
 			continue
 		}
@@ -361,6 +380,10 @@ func (h *BaselineRunHistory) LastScheduled(serverID string) (run, skip *Baseline
 			continue
 		}
 		rec := recs[i]
+		if IsFullCopySkip(rec.SkipReason) {
+			// The full-backup timetable's own line (LastFullCopy).
+			continue
+		}
 		if rec.SkipReason != "" {
 			if skip == nil {
 				skip = &rec
@@ -369,6 +392,50 @@ func (h *BaselineRunHistory) LastScheduled(serverID string) (run, skip *Baseline
 		}
 		if run == nil {
 			run = &rec
+		}
+	}
+	return run, skip
+}
+
+// LastFullRead returns the newest full backup of the server that succeeded,
+// whatever started it (the full-backup timetable, the automatic choice, the
+// fallback for a failed update, a click), or nil. It is what ends the page's
+// "the full backup did not run" line (#1564): what the timetable asks for is
+// a real read of the database, and any successful one after the miss is one.
+func (h *BaselineRunHistory) LastFullRead(serverID string) *BaselineRunRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	recs := h.servers[serverID]
+	for i := len(recs) - 1; i >= 0; i-- {
+		rec := recs[i]
+		if rec.Kind == BaselineRunDump && rec.SkipReason == "" && rec.Error == "" {
+			return &rec
+		}
+	}
+	return nil
+}
+
+// LastFullCopy returns the newest scheduled full backup the full-backup
+// timetable started (#1564), whether it succeeded or not, and the newest of
+// its slots that did not start, either nil.
+func (h *BaselineRunHistory) LastFullCopy(serverID string) (run, skip *BaselineRunRecord) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	recs := h.servers[serverID]
+	for i := len(recs) - 1; i >= 0 && (run == nil || skip == nil); i-- {
+		rec := recs[i]
+		if rec.Trigger != BaselineRunTriggerScheduled {
+			continue
+		}
+		switch {
+		case IsFullCopySkip(rec.SkipReason):
+			if skip == nil {
+				skip = &rec
+			}
+		case rec.SkipReason == "" && rec.WhyCode == BackupWhyCodeFullCopy:
+			if run == nil {
+				run = &rec
+			}
 		}
 	}
 	return run, skip
