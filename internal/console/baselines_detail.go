@@ -47,6 +47,15 @@ type baselineTableSizeDTO struct {
 	ProducedBy string `json:"produced_by,omitempty"`
 	// From is the snapshot these rows came out of, for the two derived cases.
 	From string `json:"from,omitempty"`
+	// SourceReadAt is when these rows last came from a real read of the
+	// source database (#1570), and FoldsSinceRead how many folds were applied
+	// since: 0 for a table this backup read itself. Inherited through every
+	// fold, and for a carried table read off the reused file, which IS the
+	// older backup's bytes. Absent when the footer does not record it (a fold
+	// written before #1570 over files that did not either), or, like
+	// ProducedBy, when nothing was looked up.
+	SourceReadAt   string `json:"source_read_at,omitempty"`
+	FoldsSinceRead *int   `json:"folds_since_read,omitempty"`
 }
 
 type baselineFilesResponse struct {
@@ -63,6 +72,23 @@ type baselineFilesResponse struct {
 	WroteFrom        string  `json:"wrote_from,omitempty"`
 	WroteTo          string  `json:"wrote_to,omitempty"`
 	WriteSpanSeconds float64 `json:"write_span_seconds"`
+	// SourceReadAt is the OLDEST last read of the source among this backup's
+	// tables that record one (#1570): how far back the real evidence under
+	// this backup goes. SourceReadAgeSeconds is its distance from the backup's
+	// own time, MaxFoldsSinceRead the most folds any of those tables has had
+	// since its read (only when every dated table records its count), and
+	// SourceReadMissing how many tables could not be
+	// dated (the footer does not record it, or could not be read), so the
+	// line never speaks for them. All absent when no table was looked up (an
+	// S3 source).
+	SourceReadAt         string  `json:"source_read_at,omitempty"`
+	SourceReadAgeSeconds float64 `json:"source_read_age_seconds,omitempty"`
+	MaxFoldsSinceRead    *int    `json:"max_folds_since_read,omitempty"`
+	SourceReadMissing    int     `json:"source_read_missing,omitempty"`
+	// SourceReadUncounted is how many dated tables record no count of folds
+	// since their read. MaxFoldsSinceRead is absent whenever it is not zero:
+	// a maximum that leaves tables out is not the most.
+	SourceReadUncounted int `json:"source_read_uncounted,omitempty"`
 	// Incomplete marks a snapshot carrying an _INCOMPLETE marker without a
 	// _SUCCESS one (a failed or unfinished run). The listing excludes such
 	// snapshots, but the detail stays honest if one is addressed directly.
@@ -321,6 +347,17 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 		Incomplete: snapshotIncomplete(files),
 	}
 	var oldest, newest time.Time
+	// The names of each schema directory, for the table deltas beside each
+	// table (#1638): with deltas on the table file is carried forward on
+	// every refresh, changed or not, and the run's own footer sits on the
+	// chain's newest pair, so a table cannot be described from its file alone.
+	namesByDir := map[string][]string{}
+	for _, f := range files {
+		if parts := strings.Split(f.RelPath, "/"); len(parts) == 3 {
+			namesByDir[parts[0]+"/"+parts[1]] = append(namesByDir[parts[0]+"/"+parts[1]], parts[2])
+		}
+	}
+	reads := snapshotSourceReads{}
 	for _, f := range files {
 		resp.TotalBytes += f.Size
 		resp.Files++
@@ -340,14 +377,28 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		row := baselineTableSizeDTO{
 			Schema: parts[1], Table: strings.TrimSuffix(parts[2], ".parquet"), SizeBytes: f.Size}
-		// Local only. Over S3 this is one object read per table, which is the
-		// same latency the listing already declines to spend on footers, and a
-		// row with no verdict reads as "not looked up" rather than as unknown.
+		// Local only. Over S3 this is one object read per table, two with a
+		// chain, which is the same latency the listing already declines to
+		// spend on footers, and a row with no verdict reads as "not looked
+		// up" rather than as unknown.
 		if src != nil && src.localRoot != "" {
-			row.ProducedBy, row.From = tableProvenance(filepath.Join(src.localRoot, filepath.FromSlash(f.RelPath)), ts)
+			dir := filepath.Join(src.localRoot, filepath.FromSlash(parts[0]), parts[1])
+			d := describeTable(filepath.Join(dir, parts[2]), dir, namesByDir[parts[0]+"/"+parts[1]], ts)
+			row.ProducedBy, row.From = d.producedBy, d.from
+			// Every table looked at counts, the unreadable ones too: the
+			// snapshot's line must not speak for a table it could not date.
+			reads.add(d.read)
+			if d.read.Known() {
+				row.SourceReadAt = d.read.At.UTC().Format(consoleTSFormat)
+				if d.read.Folds >= 0 {
+					n := d.read.Folds
+					row.FoldsSinceRead = &n
+				}
+			}
 		}
 		resp.Tables = append(resp.Tables, row)
 	}
+	reads.fill(&resp, ts)
 	sort.Slice(resp.Tables, func(i, j int) bool {
 		if resp.Tables[i].Schema != resp.Tables[j].Schema {
 			return resp.Tables[i].Schema < resp.Tables[j].Schema
@@ -579,29 +630,124 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 	completed = true
 }
 
-// tableProvenance reads one table's footer and derives how its rows reached
-// this snapshot (#1545).
+// tableDescription is what describeTable found out about one table of a
+// snapshot. The zero value is "could not find out", which the page shows as
+// no verdict: a different answer from "the file records nothing".
+type tableDescription struct {
+	producedBy, from string
+	read             baseline.SourceRead
+}
+
+// describeTable reads one table's footers and derives how its rows reached
+// this snapshot (#1545) and when they last came from a read of the source
+// (#1570). dir and names are the table's schema directory and its file names,
+// for the chain of table deltas beside it (#1638).
 //
-// Best-effort, and quiet about it: a footer that will not open leaves the row
-// with NO verdict rather than "unknown". The two are different answers — one is
-// "we did not find out", the other is "the file carries no signal" — and a
-// listing that turned an unreadable file into a confident verdict would be the
-// same class of mistake the audit reader was fixed for (ee#115).
-func tableProvenance(path string, snapshotAt time.Time) (string, string) {
+// With a chain, the table file alone describes nothing about THIS snapshot:
+// it is carried forward on every refresh, changed or not, so on its own it
+// reads "reused unchanged" for a table this very run changed. The newest
+// pair is the run's footer when the run wrote one; the table file describes
+// the table only when it is at least as new (the empty pair a full backup or
+// a compaction starts a chain with shares the file's writer instant; a full
+// backup's carries no keys of its own).
+//
+// Best-effort, and quiet about it: a footer that will not open, or a chain
+// that does not form whole pairs, leaves the row with NO verdict rather than
+// "unknown". The two are different answers, one is "we did not find out",
+// the other is "the file carries no signal", and a listing that turned an
+// unreadable file into a confident verdict would be the same class of
+// mistake the audit reader was fixed for (ee#115).
+func describeTable(path, dir string, names []string, snapshotAt time.Time) tableDescription {
 	md, err := baseline.ReadParquetMetadata(path)
 	if err != nil {
 		slog.Warn("console: could not read a backup table's footer for provenance",
 			"path", path, "error", err)
-		// NOT ProducedByUnknown. "we could not find out" and "the file records
-		// nothing" are different answers, and collapsing them is the ee#115
-		// class this comment cites: the reader is handed a verdict nobody
-		// checked. An empty verdict renders as a dash.
-		return "", ""
+		// NOT ProducedByUnknown: see above. An empty verdict renders as a dash.
+		return tableDescription{}
 	}
-	p := baseline.ProvenanceOf(snapshotAt, md)
-	from := ""
+	chain, err := baseline.TableDeltaChainIn(dir, names, strings.TrimSuffix(filepath.Base(path), ".parquet"))
+	if err != nil {
+		slog.Warn("console: a backup table's delta files do not form a chain, so how it was made is not shown",
+			"path", path, "error", err)
+		return tableDescription{}
+	}
+	describing, last := md, (*baseline.DumpMetadata)(nil)
+	if chain != nil {
+		lm, err := baseline.ReadParquetMetadata(chain.LastFileUpserts())
+		if err != nil {
+			slog.Warn("console: could not read the newest delta of a backup table for provenance",
+				"path", chain.LastFileUpserts(), "error", err)
+			return tableDescription{}
+		}
+		last = &lm
+		if lm.SnapshotTimestamp.IsZero() {
+			// Every writer stamps a pair's instant, so a pair without one is
+			// damaged, and which file is newer cannot be told. Describing the
+			// table from its file alone would call it reused unchanged, the
+			// very answer this function exists to stop giving: no verdict.
+			// When the rows were last read is still the file's to say.
+			slog.Warn("console: the newest delta of a backup table records no writer instant, so how the table was made is not shown",
+				"path", chain.LastFileUpserts())
+			return tableDescription{read: baseline.ChainSourceRead(md, last)}
+		}
+		if lm.SnapshotTimestamp.After(md.SnapshotTimestamp) {
+			describing = lm
+		}
+	}
+	p := baseline.ProvenanceOf(snapshotAt, describing)
+	d := tableDescription{producedBy: p.ProducedBy, read: baseline.ChainSourceRead(md, last)}
 	if !p.From.IsZero() {
-		from = p.From.UTC().Format(consoleTSFormat)
+		d.from = p.From.UTC().Format(consoleTSFormat)
 	}
-	return p.ProducedBy, from
+	return d
+}
+
+// snapshotSourceReads folds the per-table source reads of one snapshot into
+// its line on the page: the oldest read, the most folds since one, how many
+// tables could not be dated, and how many were dated with no count of folds.
+//
+// The last one is its own counter because a maximum over the tables that DO
+// record a count says nothing about the ones that do not: after an upgrade a
+// table whose chain predates the keys keeps an unknown count until its next
+// full backup, and "updated once since" beside it would be the
+// fresher-than-true answer this feature exists to rule out.
+type snapshotSourceReads struct {
+	oldest    time.Time
+	maxFolds  int
+	anyFolds  bool
+	missing   int
+	uncounted int
+}
+
+func (r *snapshotSourceReads) add(read baseline.SourceRead) {
+	if !read.Known() {
+		r.missing++
+		return
+	}
+	if r.oldest.IsZero() || read.At.Before(r.oldest) {
+		r.oldest = read.At
+	}
+	if read.Folds < 0 {
+		r.uncounted++
+		return
+	}
+	if !r.anyFolds || read.Folds > r.maxFolds {
+		r.maxFolds, r.anyFolds = read.Folds, true
+	}
+}
+
+func (r *snapshotSourceReads) fill(resp *baselineFilesResponse, snapshotAt time.Time) {
+	resp.SourceReadMissing = r.missing
+	if r.oldest.IsZero() {
+		return
+	}
+	resp.SourceReadUncounted = r.uncounted
+	resp.SourceReadAt = r.oldest.UTC().Format(consoleTSFormat)
+	if age := snapshotAt.Sub(r.oldest); age > 0 {
+		resp.SourceReadAgeSeconds = age.Seconds()
+	}
+	if r.anyFolds && r.uncounted == 0 {
+		n := r.maxFolds
+		resp.MaxFoldsSinceRead = &n
+	}
 }

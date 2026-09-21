@@ -225,6 +225,10 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 				// #1545: say so, rather than leaving every reader to infer a
 				// dump from the ABSENCE of the fold's keys.
 				MetaKeySnapshotProducer: ProducerDump,
+				// #1570: a dump IS the read of the source that every fold
+				// descending from it inherits, zero folds from itself.
+				MetaKeyLastDumpAt:     tsStr,
+				MetaKeyFoldGeneration: "0",
 			}
 			if meta.BinlogFile != "" {
 				md[MetaKeyBinlogFile] = meta.BinlogFile
