@@ -1427,7 +1427,8 @@ function renderOverview() {
   // not the backend. Every fill re-checks the generation guards so a server
   // switch or navigation mid-flight drops the late payload instead of
   // painting over the new view.
-  watchFirstRun(f, live);
+  if (serversEmpty && capsCache.monitor) f.firstRunSlot.append(addServerCard());
+  else watchFirstRun(f, live);
 
   api("/api/status").catch(() => null)
     .then((status) => { if (live()) fillOvStatus(f, status); });
@@ -1448,6 +1449,23 @@ function renderOverview() {
   // live retention (#1352) and names it in the payload's label.
   api("/api/activity").catch((err) => { console.error("activity fetch failed", err); return null; })
     .then((activity) => { if (live()) fillOvActivity(f, activity); });
+}
+
+// addServerCard is the first step on a console that lists no server yet
+// (#1779). The installer and the guide both say to add one, and the page was a
+// dashboard of zeros with the form two clicks away, behind Manage servers.
+// The button opens that same dialog with the add form already open. Shown
+// only where a server can be monitored from here, like the sidebar note: a
+// read-only console cannot start capturing a new source.
+function addServerCard() {
+  const card = el("section", { class: "ov-panel fr-card add-first" });
+  card.append(el("div", { class: "ov-panel-head" },
+    el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Getting started" }))));
+  card.append(el("p", { class: "add-first-lead",
+    text: "Add the database you want to protect. DBTrail checks that it is ready, sets up its index and starts capturing its changes." }));
+  card.append(el("button", { class: "btn btn-primary", type: "button", id: "ov-add-server", text: "+ Add server",
+    onclick: () => { openServersModal(); showServerForm(null); } }));
+  return card;
 }
 
 // firstRunCard draws the steps from adding a server to its first indexed

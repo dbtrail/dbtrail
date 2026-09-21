@@ -1989,6 +1989,7 @@ button { font-family: inherit; }
 .dc-body { flex: 1; min-width: 0; }
 /* First-run steps (#1606): waiting is a muted ring, never the failure red. */
 .fr-card { margin-bottom: 16px; }
+.add-first-lead { font-size: 13.5px; color: var(--ink-2); margin: 0 0 12px; max-width: 62ch; }
 .fr-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .fr-step { display: flex; gap: 10px; align-items: flex-start; }
 .fr-step.done .dc-mark { color: var(--insert); }
