@@ -7,12 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
-- **bintrail's MySQL connections always turn local-file loading off.** A DSN
-  that set `allowAllFiles=true` kept it on the connections bintrail opened.
-  Nothing in bintrail loads a local file into MySQL, so the driver option is
-  now forced off on every connection, whatever the DSN says, and a test keeps
-  every MySQL connection going through the one place that does it.
+### Added
+- **A backup schedule can ask for full backups of its own** (#1564). The
+  schedule used to take a full backup only when an update could not run (the
+  first backup, a capture gap, a schema change), so an operator who wanted an
+  independent read of the database on a timetable, one that does not rest on
+  the previous backup or the recorded changes, had no way to ask. The
+  schedule now has an optional **full backup every** (for example `7d`),
+  a second timetable on the same grid and UTC time: at each of its slots the
+  run is a full backup, and it takes the place of a scheduled run that falls
+  on the same instant. It needs the creation opt-in
+  (`BINTRAIL_CONSOLE_BASELINE_TRIGGER`): a save asking for one without it is
+  refused with the reason, and if the opt-in is turned off later the Backups
+  page says so in red before the next one is due, each one is recorded as
+  skipped with the reason, and the updates keep running. A slot that finds
+  another job holding the server is taken by the next scheduled run instead
+  of a week later (unless the daemon restarts or the schedule is saved in
+  between), and a slot that passed while the daemon was stopped is
+  recorded as missed at the next start (never made up). A full backup that
+  did not start, or started and failed, stays on the card in red until a
+  full backup of the server succeeds after it, instead of disappearing when
+  the next ordinary run ends. The run's recorded reason reads "the schedule
+  takes a full backup every 7d". A save that does not mention the field
+  keeps the saved one, so a page loaded before the upgrade cannot remove it.
 
 ### Changed
 - **What Save and Test connection did now opens in a dialog centered on the
@@ -26,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a summary with a Show button. The row's Start button opens the same dialog.
 
 ### Fixed
+- **The installer's advice for a taken port works when pasted** (#1768).
+  With port 8090 taken it suggested `DBTRAIL_PORT=9090 curl … | sh`, which
+  failed twice: the variable was on `curl`, so the installer never saw it, and
+  9090 is where the stack publishes its own metrics. It now prints the full
+  command with the variables on `sh` and a port it checked is free. A taken
+  9090 (Prometheus's default port) no longer ends in Docker's raw bind error:
+  the metrics move to the next free port, and `DBTRAIL_METRICS_PORT` picks one.
 - **Test connection on a new server tests the database you typed** (#1767).
   It used to answer "nothing to test": it only ever looked at the index
   connection, which a new server does not have until it is saved. It now runs
@@ -49,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reachable only with the Tab key. The cause was one long line in the grants
   box, which a `<fieldset>` grows to by default; the box now scrolls sideways
   inside its own frame instead.
+
+### Security
+- **bintrail's MySQL connections always turn local-file loading off.** A DSN
+  that set `allowAllFiles=true` kept it on the connections bintrail opened.
+  Nothing in bintrail loads a local file into MySQL, so the driver option is
+  now forced off on every connection, whatever the DSN says, and a test keeps
+  every MySQL connection going through the one place that does it.
 
 ## [0.85.1] - 2026-09-20
 

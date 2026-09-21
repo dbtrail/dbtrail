@@ -171,6 +171,12 @@ func readProvenance(path string, m *DumpMetadata, lookup func(string) (string, b
 	if v, ok := lookup(MetaKeyCreateTableAsOf); ok {
 		m.CreateTableAsOf = parseFooterTime(path, MetaKeyCreateTableAsOf, v)
 	}
+	if v, ok := lookup(MetaKeyLastDumpAt); ok {
+		m.LastDumpAt = parseFooterTime(path, MetaKeyLastDumpAt, v)
+	}
+	if v, ok := lookup(MetaKeyFoldGeneration); ok {
+		m.FoldGeneration = parseFoldGeneration(path, v)
+	}
 }
 
 // parseFooterTime reads an RFC3339 footer value, warning rather than failing on

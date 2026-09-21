@@ -152,6 +152,14 @@ type DumpMetadata struct {
 	// dump path. Carried here as the one positive signal that dates a
 	// pre-#1545 MySQL dump.
 	MydumperFormat string
+	// LastDumpAt / FoldGeneration are MetaKeyLastDumpAt and
+	// MetaKeyFoldGeneration (#1570): the newest real read of the source these
+	// bytes descend from, and the folds since. Zero / -1 when absent (the
+	// readers set -1; a hand-built value's 0 is ignored while LastDumpAt is
+	// zero). Read them through SourceReadOf or ChainSourceRead, which derive
+	// the answer for a dump written before the keys existed.
+	LastDumpAt     time.Time
+	FoldGeneration int
 	// CaptureGap is MetaKeyCaptureGap: non-empty means this snapshot is KNOWINGLY
 	// incomplete — it was folded across a permanent capture gap under
 	// --allow-gaps, or inherited that state from the snapshot it was derived
@@ -227,7 +235,7 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 	}
 	defer f.Close()
 
-	m := DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1}
+	m := emptyFooterMetadata()
 	markerStartedAt, haveMarker := readStartedAtMarker(inputDir)
 	if haveMarker {
 		m.StartedAt = markerStartedAt
@@ -383,6 +391,15 @@ func RequireDumpPosition(inputDir string) error {
 	return nil
 }
 
+// emptyFooterMetadata is what every reader starts from: the keys whose
+// absence is not their zero value set to "absent" (-1). One constructor so a
+// reader cannot start from a different idea of absent: a FoldGeneration left
+// at 0 would read a file that records its source read but no count as the
+// read itself.
+func emptyFooterMetadata() DumpMetadata {
+	return DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1, FoldGeneration: -1}
+}
+
 // ReadParquetMetadata opens a local Parquet file and extracts the baseline
 // binlog position from its file-level key-value metadata. Returns a zero-value
 // DumpMetadata (no error) when the file lacks position metadata (older baselines).
@@ -403,7 +420,7 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 		return DumpMetadata{}, fmt.Errorf("open parquet file: %w", err)
 	}
 
-	m := DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1}
+	m := emptyFooterMetadata()
 	if v, ok := pf.Lookup(MetaKeyBinlogFile); ok {
 		m.BinlogFile = v
 	}
@@ -517,7 +534,7 @@ func ReadParquetMetadataAny(ctx context.Context, path string) (DumpMetadata, err
 	}
 	defer rows.Close()
 
-	m := DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1}
+	m := emptyFooterMetadata()
 	var rowCountCorrupt bool
 	for rows.Next() {
 		// DuckDB returns key/value as BLOB (BYTE_ARRAY) when the Parquet
@@ -585,6 +602,16 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.MydumperFormat = val
 	case MetaKeyDerivedFrom:
 		m.DerivedFrom = parseFooterTime(path, MetaKeyDerivedFrom, val)
+	case MetaKeyCreateTableAsOf:
+		// Missing from this switch from #1651 to #1570, while the local reader
+		// had it: a fold reading an S3-hosted fold dated the carried CREATE
+		// TABLE by the directory instead, newer than it was, which could skip
+		// the column-type comparison it exists for.
+		m.CreateTableAsOf = parseFooterTime(path, MetaKeyCreateTableAsOf, val)
+	case MetaKeyLastDumpAt:
+		m.LastDumpAt = parseFooterTime(path, MetaKeyLastDumpAt, val)
+	case MetaKeyFoldGeneration:
+		m.FoldGeneration = parseFoldGeneration(path, val)
 	case MetaKeySnapshotTimestamp:
 		m.SnapshotTimestamp = parseFooterTime(path, MetaKeySnapshotTimestamp, val)
 	case MetaKeyDeltaChainStart:

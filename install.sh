@@ -12,6 +12,8 @@
 #   DBTRAIL_DIR      where to put the stack        (default: ./dbtrail)
 #   DBTRAIL_REF      git ref for the compose file  (default: main)
 #   DBTRAIL_PORT     host port the console answers  (default: 8090)
+#   DBTRAIL_METRICS_PORT  host port for Prometheus /metrics (default: 9090,
+#                    or the next free one when 9090 is taken)
 #   DBTRAIL_NO_OPEN  set to 1 to NOT open a browser (default: opens best-effort)
 #
 # No root needed beyond whatever your Docker setup already requires.
@@ -21,6 +23,7 @@ set -eu
 DIR="${DBTRAIL_DIR:-./dbtrail}"
 REF="${DBTRAIL_REF:-main}"
 PORT="${DBTRAIL_PORT:-8090}"
+MPORT="${DBTRAIL_METRICS_PORT:-9090}"
 COMPOSE_URL="https://raw.githubusercontent.com/dbtrail/dbtrail/${REF}/docker-compose.yml"
 HEALTH_URL="http://127.0.0.1:${PORT}/api/healthz"
 CONSOLE_URL="http://127.0.0.1:${PORT}"
@@ -137,10 +140,52 @@ port_in_use() {
     return 1
   fi
 }
-if [ ! -f "$DIR/docker-compose.yml" ] && port_in_use "$PORT"; then
-  die "Port ${PORT} is already in use on this machine — the console can't bind it.
-    Free that port, or run the console on another one:
-        DBTRAIL_PORT=9090 curl -fsSL .../install.sh | sh"
+# first_free_port FROM TO [SKIP] prints the first port in FROM..TO that nothing
+# listens on and is not SKIP. With no probe tool every port reads as free.
+first_free_port() {
+  p=$1
+  while [ "$p" -le "$2" ]; do
+    if [ "$p" != "${3:-}" ] && ! port_in_use "$p"; then
+      printf '%s' "$p"
+      return 0
+    fi
+    p=$((p + 1))
+  done
+  return 1
+}
+
+# rerun_cmd PORT prints this installer's own command line with the console on
+# PORT, ready to paste: the variables go on `sh`, the side of the pipe that
+# reads them (on `curl` they never reach the installer, #1768), and the knobs
+# the operator already set ride along.
+rerun_cmd() {
+  envs="DBTRAIL_PORT=$1"
+  [ "$DIR" != "./dbtrail" ] && envs="DBTRAIL_DIR=$DIR $envs"
+  [ "$REF" != "main" ] && envs="DBTRAIL_REF=$REF $envs"
+  printf 'curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/%s/install.sh | %s sh' "$REF" "$envs"
+}
+
+if [ ! -f "$DIR/docker-compose.yml" ]; then
+  if port_in_use "$PORT"; then
+    free=$(first_free_port 8091 8099 "$PORT") || free=8091
+    die "Port ${PORT} is already in use on this machine, so the console can't use it.
+    Run the installer with the console on port ${free} instead:
+        $(rerun_cmd "$free")"
+  fi
+  # The stack also publishes Prometheus /metrics on 9090, which is also
+  # Prometheus's own default port. Metrics are secondary, so a taken 9090 moves
+  # them to the next free port instead of failing on Docker's raw bind error;
+  # a port the operator chose explicitly is theirs and is only checked.
+  if [ "$MPORT" = "$PORT" ] || port_in_use "$MPORT"; then
+    if [ -n "${DBTRAIL_METRICS_PORT:-}" ]; then
+      die "The metrics port ${MPORT} is already in use (or is the console's port).
+    Pick another one with DBTRAIL_METRICS_PORT, or leave it unset to have one chosen."
+    fi
+    MPORT=$(first_free_port 9091 9099 "$PORT") || die \
+      "Ports 9090 to 9099 are all in use, so there is nowhere to publish metrics.
+    Choose one with DBTRAIL_METRICS_PORT."
+    MPORT_MOVED=1
+  fi
 fi
 
 # Need curl or wget to fetch the compose file.
@@ -163,6 +208,8 @@ if [ -f docker-compose.yml ]; then
   warn "An existing file is never upgraded, and volumes and mounts can only come from it. If this is an upgrade, save your edits, delete the file, and re-run: docs/docker.md 'Upgrading the stack'."
   [ "$PORT" != "8090" ] && warn \
     "DBTRAIL_PORT=${PORT} ignored — reusing the existing docker-compose.yml (edit its ports: line by hand)."
+  [ -n "${DBTRAIL_METRICS_PORT:-}" ] && warn \
+    "DBTRAIL_METRICS_PORT=${DBTRAIL_METRICS_PORT} ignored: the existing docker-compose.yml is reused (edit its ports: line by hand)."
 else
   fetch "$COMPOSE_URL" docker-compose.yml \
     || die "Failed to download $COMPOSE_URL"
@@ -182,6 +229,20 @@ else
     line isn't what this installer expected. Edit the 'ports:' line in
     ${DIR}/docker-compose.yml by hand, or report it."
     say "${DIM}    console port set to ${PORT}${RST}"
+  fi
+  # Same rewrite for the metrics mapping, verified the same way.
+  if [ "$MPORT" != "9090" ]; then
+    sed "s|127.0.0.1:9090:9090|127.0.0.1:${MPORT}:9090|" docker-compose.yml > docker-compose.yml.tmp \
+      && mv docker-compose.yml.tmp docker-compose.yml
+    grep -q "127.0.0.1:${MPORT}:9090" docker-compose.yml || die \
+      "Couldn't set the metrics port to ${MPORT}: the compose file's published-port
+    line isn't what this installer expected. Edit the 'ports:' line in
+    ${DIR}/docker-compose.yml by hand, or report it."
+    if [ -n "${MPORT_MOVED:-}" ]; then
+      say "${DIM}    port 9090 is taken, so metrics are on ${MPORT}${RST}"
+    else
+      say "${DIM}    metrics port set to ${MPORT}${RST}"
+    fi
   fi
 fi
 

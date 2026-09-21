@@ -422,6 +422,9 @@ func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, t
 		// mydumper's. Without this it carries no producer key and only its LSN
 		// dates it.
 		baseline.MetaKeySnapshotProducer: baseline.ProducerDump,
+		// #1570: the read of the source every descendant inherits.
+		baseline.MetaKeyLastDumpAt:     tsStr,
+		baseline.MetaKeyFoldGeneration: "0",
 		// The LSN delta-replay floor (#593 slice A, corrected by #771): deltas
 		// for this table replay from AT OR AFTER this point — the slot's own
 		// confirmed_flush_lsn/restart_lsn (pgcapture.SlotFloorLSN), NOT the

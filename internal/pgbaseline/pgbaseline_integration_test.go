@@ -165,6 +165,13 @@ func TestPGBaseline_Integration(t *testing.T) {
 	if !ok {
 		t.Fatalf("MetaKeyLSN absent from %s metadata (%v)", pathA, md)
 	}
+	// #1570: a PostgreSQL baseline is its own read of the source, stamped
+	// with its own snapshot instant and zero updates since.
+	if md[baseline.MetaKeyLastDumpAt] == "" || md[baseline.MetaKeyLastDumpAt] != md[baseline.MetaKeySnapshotTimestamp] ||
+		md[baseline.MetaKeyFoldGeneration] != "0" {
+		t.Errorf("source read = %q / %q, want the snapshot's own instant %q and 0 updates",
+			md[baseline.MetaKeyLastDumpAt], md[baseline.MetaKeyFoldGeneration], md[baseline.MetaKeySnapshotTimestamp])
+	}
 	embeddedLSN, err := strconv.ParseUint(lsnStr, 10, 64)
 	if err != nil {
 		t.Fatalf("MetaKeyLSN %q is not a decimal uint64: %v", lsnStr, err)
