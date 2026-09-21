@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **What Save and Test connection did now opens in a dialog centered on the
+  screen** (#1769). The add-server and edit-server forms used to answer inside
+  themselves: a line beside Test, and a stack of check cards above the
+  buttons that on a first save held 18 cards, 14 of them green. Now a refused
+  save, a Test result, failed startup checks and a start with warnings each
+  open on top of the form, showing only the failures or only the warnings,
+  with every check one click away. Closing it (Escape, the button, a click
+  outside) goes back to the form as it was, and a line above the buttons keeps
+  a summary with a Show button. The row's Start button opens the same dialog.
+
 ### Fixed
 - **The add-server form fits its dialog again** (#1765). Since 0.82.0 the
   "Monitor a source database" block was wider than the dialog, which cut off
