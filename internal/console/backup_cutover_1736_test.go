@@ -76,27 +76,31 @@ func TestUpdateModel_flatEventsHaveNoRate(t *testing.T) {
 // rate; at or over it, the marginal rate as before.
 func TestUpdateModel_eventsSpreadThreshold(t *testing.T) {
 	// The slope is kept plausible on both sides (the shortest run's
-	// 100,000 in 60 s is 1,667/s, and the extra seconds match the extra
-	// events at that rate), so only the spread guard is being read.
+	// 1,000,000 in 60 s is 16,667/s, a tenth of it 1,667/s, under both
+	// slopes below), so only the spread guard is being read. A million
+	// rather than the hundred thousand this test had before #1738: every
+	// run here applies at least 20,000 events more than the shortest, so
+	// the per-run floor (measuredFoldMinEvents) passes too.
 	series := func(more int64, sec float64) []BaselineRunRecord {
-		out := []BaselineRunRecord{{Kind: BaselineRunRefresh, Events: 100_000, UpdateSeconds: 60}}
+		out := []BaselineRunRecord{{Kind: BaselineRunRefresh, Events: 1_000_000, UpdateSeconds: 60}}
 		for range 4 {
 			out = append(out, BaselineRunRecord{Kind: BaselineRunRefresh, Events: more, UpdateSeconds: sec})
 		}
 		return out
 	}
-	// Four runs of 102,000 in 70 s: 8,000 events beyond, mean 101,600, a
-	// tenth is 10,160: not distinguishable. The other two guards let this
-	// one through on purpose (40 s beyond is over a tenth of the total,
-	// and 200/s is over a tenth of the 1,667/s floor), so this is the
-	// band only the spread guard covers.
-	if fixed, rate := historyWith(t, series(102_000, 70)).UpdateModel("s"); rate != 0 || fixed != time.Minute {
+	// Four runs of 1,020,000 in 70 s: 80,000 events beyond, mean
+	// 1,016,000, a tenth is 101,600: not distinguishable. The other guards
+	// let this one through on purpose (40 s beyond is over a tenth of the
+	// total, 2,000/s is over a tenth of the 16,667/s floor, and each run
+	// applied 20,000 more than the shortest), so this is the band only the
+	// spread guard covers.
+	if fixed, rate := historyWith(t, series(1_020_000, 70)).UpdateModel("s"); rate != 0 || fixed != time.Minute {
 		t.Fatalf("under the tenth: fixed=%s rate=%v, want no rate", fixed, rate)
 	}
-	// Four runs of 120,000 in 72 s: 80,000 beyond, a tenth of the mean is
-	// 11,600: a rate, 80,000 events over 48 s.
-	if fixed, rate := historyWith(t, series(120_000, 72)).UpdateModel("s"); rate != 80_000/48.0 || fixed != time.Minute {
-		t.Fatalf("over the tenth: fixed=%s rate=%v, want 80000/48", fixed, rate)
+	// Four runs of 1,200,000 in 72 s: 800,000 beyond, a tenth of the mean
+	// is 116,000: a rate, 800,000 events over 48 s.
+	if fixed, rate := historyWith(t, series(1_200_000, 72)).UpdateModel("s"); rate != 800_000/48.0 || fixed != time.Minute {
+		t.Fatalf("over the tenth: fixed=%s rate=%v, want 800000/48", fixed, rate)
 	}
 	// Two runs of the same size on different days: nothing beyond, no rate
 	// (a whole-run rate here, 200,000/100 s, would look real on a loaded

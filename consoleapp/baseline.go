@@ -269,8 +269,33 @@ func (s *baselineSupervisor) run(req console.BaselineRequest) {
 	if produce == nil {
 		produce = s.execute
 	}
+	// Read BEFORE the dump: its anchor is stamped inside produce, and an
+	// event indexed between a later read and that anchor would be applied
+	// by the next update without being counted, reading the rate too slow,
+	// which is the direction that cuts over to full backups (#1737). Read
+	// earlier, the few events in between are counted and not applied.
+	mark := s.dumpIndexMark(req)
 	out, err := produce(req)
+	out.indexMark = mark
 	s.completeDump(req, started, out, err, &own)
+}
+
+// dumpIndexMark is the index's event high-water mark as a full backup
+// starts, or zero when the request names no index or the index does not
+// answer. Bounded like the window probe (windowProbeTimeout, dial included):
+// it delays a full backup, and an index that has gone silent must cost
+// seconds and a missing measurement, never the backup.
+func (s *baselineSupervisor) dumpIndexMark(req console.BaselineRequest) uint64 {
+	if req.IndexDSN == "" {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, windowProbeTimeout)
+	defer cancel()
+	mark, known := readIndexMark(ctx, probeDSN(req.IndexDSN))
+	if !known {
+		return 0
+	}
+	return mark.events
 }
 
 // dumpOwn is what a full backup owns once it has published: its status
@@ -334,6 +359,9 @@ type dumpOutcome struct {
 	// staged: snapDir lives under a temp dir removed by cleanup (S3-only).
 	staged  bool
 	cleanup func()
+	// indexMark is the index's event high-water mark read before the dump
+	// started (dumpIndexMark); zero when unknown.
+	indexMark uint64
 }
 
 // completeDump is the second half of a full backup: publish, upload, record.
@@ -548,6 +576,11 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	// success, or a local publish whose upload failed.
 	if !out.at.IsZero() && (err == nil || (out.snapDir != "" && !out.staged)) {
 		rec.SnapshotTime = out.at.UTC().Format(time.RFC3339)
+	}
+	// The base the next update from this snapshot counts its events from
+	// (#1737). Only on a success, the only record IndexMarkFor reads.
+	if err == nil && rec.SnapshotTime != "" {
+		rec.IndexMark = out.indexMark
 	}
 	s.recordRun(req.ServerID, req.ServerName, rec, err)
 

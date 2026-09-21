@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -235,11 +236,13 @@ type windowSample struct {
 //     the current mark; an anchor with no memo, a memo for another snapshot,
 //     a mark that went backwards (an index rebuilt) or an index that did not
 //     answer all leave it unknown;
-//   - the update model, what the history proves an update can do, and the
-//     last full backup's duration come from the run history, and are
-//     unknown without one. The history also keeps the mark each update
-//     read, so after a restart the count falls back to the record of the
-//     update that published the anchor.
+//   - the update model, what the history proves an update can do, the
+//     last full backup's duration and whether an update was measured
+//     after it come from the run history, and are unknown without one. The
+//     history also keeps the mark each update and each full backup read,
+//     so the count falls back to the record of the run that published the
+//     anchor: after a restart, and after a full backup (#1737), which the
+//     model then abstains on until an update is measured again.
 func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEntry, anchor time.Time) console.BackupWindow {
 	b.mu.Lock()
 	if c, ok := b.windows[e.ID]; ok && c.anchor.Equal(anchor) && time.Since(c.at) < windowCacheFor {
@@ -255,6 +258,7 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 		if w.LastFull > 0 {
 			w.Proven = b.sup.history.ProvenUpdate(e.ID, w.LastFull)
 		}
+		w.UnmeasuredSinceFull = !b.sup.history.MeasuredSinceFull(e.ID)
 	}
 	if known {
 		ctx, cancel := context.WithTimeout(ctx, windowProbeTimeout)
@@ -762,8 +766,11 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 	// said in the log with the numbers the decision was made on, before the
 	// run starts and not only on the page afterwards.
 	if code := console.BackupWhyCode(why); method == console.BackupMethodFull && (code == "window_measured" || code == "window_age") {
-		slog.Info("backup schedule: taking a full backup instead of an update from the recorded changes; the update would cost more, or its starting point is too old to fold cheaply",
-			"server", e.Name, "id", e.ID, "reason", why)
+		args := []any{"server", e.Name, "id", e.ID, "reason", why}
+		if code == "window_measured" {
+			args = append(args, b.modelLogArgs(e.ID, now)...)
+		}
+		slog.Info("backup schedule: taking a full backup instead of an update from the recorded changes; the update would cost more, or its starting point is too old to fold cheaply", args...)
 	}
 	stamp := now.Format(time.RFC3339)
 	if method == console.BackupMethodRefresh {
@@ -782,6 +789,26 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 	if b.startFull(e, stamp, now, degraded, why) {
 		b.watch(e, stamp, method)
 	}
+}
+
+// modelLogArgs is what the log says about the update model next to a full
+// backup it chose (#1737): the rate, the fixed cost, how many updates it was
+// fitted from and how old the newest of them is, so a model that stopped
+// learning is visible in the daemon log and not only in the reason on the
+// Backups page. Read from the history again rather than carried from the
+// decision: nothing is recorded between the two, one tick apart at most.
+func (b *backupScheduler) modelLogArgs(serverID string, now time.Time) []any {
+	h := b.sup.history
+	if h == nil {
+		return nil
+	}
+	fixed, rate := h.UpdateModel(serverID)
+	n, newest := h.UpdateSample(serverID)
+	args := []any{"fold_rate_events_per_second", math.Round(rate*100) / 100, "fold_fixed", fixed.Round(time.Second), "fold_samples", n}
+	if !newest.IsZero() {
+		args = append(args, "newest_sample_age", now.Sub(newest).Round(time.Second))
+	}
+	return args
 }
 
 // watch starts watchScheduled for the job at stamp, counted in watchers.
