@@ -263,8 +263,14 @@ func TestBackupScheduler_busyFullCopyIsTakenByTheNextRun(t *testing.T) {
 	b.tick(context.Background(), slot.Add(-30*time.Minute))
 	b.tick(context.Background(), slot.Add(5*time.Second))
 	st := b.ScheduleState(e.ID)
-	if !st.FullOwed || !strings.Contains(st.LastFullMissedReason, "the next scheduled run takes the full backup instead") {
-		t.Fatalf("a busy full-backup slot = %+v, want it owed and said so", st)
+	if !st.FullOwed || !strings.Contains(st.LastFullMissedReason, "another backup job was running") {
+		t.Fatalf("a busy full-backup slot = %+v, want it owed and the collision recorded", st)
+	}
+	// The recorded reason states the collision and nothing more: the debt is
+	// in memory, and a restart or a save drops it, which a promise written
+	// into the history would outlive. The page says it while it is live.
+	if strings.Contains(st.LastFullMissedReason, "next") {
+		t.Fatalf("the recorded reason promises what a restart can undo: %q", st.LastFullMissedReason)
 	}
 	delete(sup.jobs, e.ID)
 	b.tick(context.Background(), slot.Add(time.Hour+5*time.Second))

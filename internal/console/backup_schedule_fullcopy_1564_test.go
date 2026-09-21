@@ -363,7 +363,10 @@ func TestBackupScheduleAPI_fullBackupMissAndEdits(t *testing.T) {
 	}
 	backdateFullSince(t, srv, id, "2026-09-01T00:00:00Z")
 	h := srv.baselineHistory
-	sched := func(r BaselineRunRecord) BaselineRunRecord { r.ServerID, r.Trigger = id, BaselineRunTriggerScheduled; return r }
+	sched := func(r BaselineRunRecord) BaselineRunRecord {
+		r.ServerID, r.Trigger = id, BaselineRunTriggerScheduled
+		return r
+	}
 	if _, err := h.AppendSkip(sched(BaselineRunRecord{Kind: BaselineRunDump,
 		SkipReason: FullCopySkipReason("another backup job was running for this server at the scheduled time"),
 		StartedAt:  "2026-09-10T00:00:05Z", FinishedAt: "2026-09-10T00:00:05Z"})); err != nil {
@@ -504,12 +507,21 @@ func TestBackupScheduleAPI_fullSince(t *testing.T) {
 		t.Fatalf("full_since = %q, want a timestamp", first.FullSince)
 	}
 	backdateFullSince(t, srv, id, "2026-09-01T00:00:00Z")
-	if got := put(`{"every":"6h","at":"04:00"}`); got.FullEvery != "7d" || got.FullSince != "2026-09-01T00:00:00Z" {
-		t.Fatalf("an edit that did not mention the timetable: %+v, want it and its start kept", got)
+	// An edit that leaves the full backups on their slots keeps the start:
+	// every does not move them, nor does saving the same value again.
+	if got := put(`{"every":"12h","at":"03:00"}`); got.FullEvery != "7d" || got.FullSince != "2026-09-01T00:00:00Z" {
+		t.Fatalf("an edit that did not mention the timetable nor move it: %+v, want it and its start kept", got)
 	}
-	if got := put(`{"every":"6h","at":"04:00","full_every":" 7d "}`); got.FullSince != "2026-09-01T00:00:00Z" {
+	if got := put(`{"every":"6h","at":"03:00","full_every":" 7d "}`); got.FullSince != "2026-09-01T00:00:00Z" {
 		t.Fatalf("the same timetable saved again restarted it: %+v", got)
 	}
+	// Moving the time moves every full-backup slot: the timetable starts
+	// afresh, or the boot check would call a slot of the new grid before the
+	// edit (served by the old grid) missed.
+	if got := put(`{"every":"6h","at":"22:00"}`); got.FullEvery != "7d" || got.FullSince == "2026-09-01T00:00:00Z" || got.FullSince == "" {
+		t.Fatalf("a moved timetable kept the old start: %+v", got)
+	}
+	backdateFullSince(t, srv, id, "2026-09-01T00:00:00Z")
 	if got := put(`{"every":"6h","at":"04:00","full_every":"3d"}`); got.FullSince == "2026-09-01T00:00:00Z" || got.FullSince == "" {
 		t.Fatalf("a changed timetable kept the old start: %+v", got)
 	}
@@ -702,11 +714,11 @@ func TestBackupScheduleAPI_owedFullCopyIsTheNextRun(t *testing.T) {
 	now := time.Date(2026, 9, 21, 10, 30, 0, 0, time.UTC)
 	rep.state[id] = BackupScheduleState{FullOwed: true}
 	got := srv.backupScheduleDTO(context.Background(), e, now)
-	if got.NextRun != "2026-09-21T11:00:00Z" || got.NextFullRun != got.NextRun || got.NextMethod != BackupMethodFull || got.NextMethodWhyCode != "full_copy" {
+	if got.NextRun != "2026-09-21T11:00:00Z" || got.NextFullRun != got.NextRun || got.NextMethod != BackupMethodFull || got.NextMethodWhyCode != "full_copy" || !got.FullOwed {
 		t.Fatalf("owed: %+v, want the next run to be the full backup", got)
 	}
 	rep.full = false
-	if got := srv.backupScheduleDTO(context.Background(), e, now); got.NextMethod == BackupMethodFull || got.NextFullRun == got.NextRun {
+	if got := srv.backupScheduleDTO(context.Background(), e, now); got.NextMethod == BackupMethodFull || got.NextFullRun == got.NextRun || got.FullOwed {
 		t.Fatalf("owed but refused: %+v, want the update announced and the timetable's own next slot", got)
 	}
 }

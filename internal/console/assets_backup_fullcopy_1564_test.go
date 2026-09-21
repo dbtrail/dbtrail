@@ -64,7 +64,10 @@ func TestBackupScheduleCard_fullBackupTimetable(t *testing.T) {
 	rep.full = true
 	// A full backup that another job kept from starting, then an ordinary
 	// run that finished after it: the miss must still be drawn.
-	sched := func(r BaselineRunRecord) BaselineRunRecord { r.ServerID, r.Trigger = id, BaselineRunTriggerScheduled; return r }
+	sched := func(r BaselineRunRecord) BaselineRunRecord {
+		r.ServerID, r.Trigger = id, BaselineRunTriggerScheduled
+		return r
+	}
 	if _, err := srv.baselineHistory.AppendSkip(sched(BaselineRunRecord{Kind: BaselineRunDump,
 		SkipReason: FullCopySkipReason("another backup job was running for this server at the scheduled time"),
 		StartedAt:  "2026-09-17T03:00:05Z", FinishedAt: "2026-09-17T03:00:05Z"})); err != nil {
@@ -90,6 +93,19 @@ func TestBackupScheduleCard_fullBackupTimetable(t *testing.T) {
 		t.Fatal(err)
 	}
 	failed := list()
+	// The daemon was stopped at a slot: the reason starts with the product's
+	// name, which the sentence must not lowercase ("dBTrail").
+	if _, err := srv.baselineHistory.AppendSkip(sched(BaselineRunRecord{Kind: BaselineRunDump,
+		SkipReason: FullCopySkipReason("DBTrail was not running at the scheduled time, or stopped before the full backup finished"),
+		StartedAt:  "2026-09-18T09:30:00Z", FinishedAt: "2026-09-18T09:30:00Z"})); err != nil {
+		t.Fatal(err)
+	}
+	down := list()
+	// A busy slot the next run owes: the page says the next run takes it,
+	// and only while the loop still owes it.
+	rep.state = map[string]BackupScheduleState{id: {FullOwed: true}}
+	owed := list()
+	rep.state = nil
 	// The last run a full backup the timetable took, as the history renders it.
 	var withRun map[string]any
 	if err := json.Unmarshal(weekly, &withRun); err != nil {
@@ -126,6 +142,8 @@ console.log(JSON.stringify({
   odd: draw("{ backup_schedule: true }", ` + string(odd) + `),
   missed: draw("{ backup_schedule: true }", ` + string(missed) + `),
   failed: draw("{ backup_schedule: true }", ` + string(failed) + `),
+  down: draw("{ backup_schedule: true }", ` + string(down) + `),
+  owed: draw("{ backup_schedule: true }", ` + string(owed) + `),
   failedIsLast: draw("{ backup_schedule: true }", ` + string(failedIsLast) + `),
   refusedClean: draw("{ backup_schedule: true }", ` + string(refusedClean) + `),
   weekly: draw("{ backup_schedule: true }", ` + string(weekly) + `),
@@ -153,7 +171,7 @@ console.log(JSON.stringify({
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
 	}
-	for _, name := range []string{"daily", "odd", "weekly", "missed", "failed", "failedIsLast", "refusedClean", "refused", "refusedReadOnly", "lastRun"} {
+	for _, name := range []string{"daily", "odd", "weekly", "missed", "failed", "down", "owed", "failedIsLast", "refusedClean", "refused", "refusedReadOnly", "lastRun"} {
 		d := got[name]
 		t.Logf("%s state: %s", name, d.State)
 		for _, r := range d.Red {
@@ -218,6 +236,15 @@ console.log(JSON.stringify({
 	if !f.Alarm || !strings.HasSuffix(f.State, " The last full backup failed.") ||
 		!has(f.Red, "The full backup that started at 2026-09-18 03:00:05 UTC failed: mydumper: exit status 2. The next one is due at ") {
 		t.Errorf("failed: state %q (alarm %v), red %v", f.State, f.Alarm, f.Red)
+	}
+	if !has(got["down"].Red, "did not run: DBTrail was not running at the scheduled time") {
+		t.Errorf("down: the product's name was lowercased or the line is missing: %v", got["down"].Red)
+	}
+	if !has(got["owed"].Red, ". The next scheduled run takes it, at ") || has(got["owed"].Red, "The next one is due at") {
+		t.Errorf("owed: the card does not say the next run takes the full backup: %v", got["owed"].Red)
+	}
+	if has(got["down"].Red, "takes it") {
+		t.Errorf("down: the card promises a debt the loop does not hold: %v", got["down"].Red)
 	}
 	if fl := got["failedIsLast"]; strings.Count(strings.Join(fl.Red, "\n"), "mydumper: exit status 2") != 1 {
 		t.Errorf("failed and still the last run: the failure is said %d times, want once: %v",

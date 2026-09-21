@@ -870,7 +870,11 @@ func (b *backupScheduler) startFullBackup(e console.ServerEntry, stamp string, n
 			b.mu.Lock()
 			b.fullOwed[e.ID] = e.BackupSchedule.Identity()
 			b.mu.Unlock()
-			b.skip(e, now, skipText(prefix+"another backup job was running for this server "+when+"; the next scheduled run takes the full backup instead"))
+			// The reason states only the collision. That the next run takes
+			// the full backup is said by the page while the debt is live
+			// (FullOwed): the debt is in memory, and a restart or a save
+			// drops it, which a promise written into the history would outlive.
+			b.skip(e, now, skipText(prefix+"another backup job was running for this server "+when))
 			return false
 		}
 		b.skip(e, now, skipText(prefix+"another backup job was running for this server "+when))

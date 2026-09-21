@@ -6793,10 +6793,15 @@ function backupScheduleCard(cur, b) {
       alarm = true;
       noteAt(fm.at, fm.failed ? "The last full backup failed." : "The last full backup did not run.");
       const cause = backupFoldError(fm.reason || "unknown reason");
-      const next = sch.runnable && !sch.full_reason && sch.next_full_run ? " The next one is due at " + utcLabel(sch.next_full_run) + "." : "";
+      const next = !(sch.runnable && !sch.full_reason && sch.next_full_run) ? ""
+        : sch.full_owed ? " The next scheduled run takes it, at " + utcLabel(sch.next_full_run) + "."
+        : " The next one is due at " + utcLabel(sch.next_full_run) + ".";
+      // Lowercased to continue the sentence, unless the first word is a name
+      // or an acronym ("DBTrail was not running..." must not read "dBTrail").
+      const lead = /^[A-Z][a-z]/.test(cause) ? cause.charAt(0).toLowerCase() + cause.slice(1) : cause;
       body.append(el("p", { class: "form-msg err", text:
         (fm.failed ? "The full backup that started at " + utcLabel(fm.at) + " failed: " : "The full backup due at " + utcLabel(fm.at) + " did not run: ") +
-        cause.charAt(0).toLowerCase() + cause.slice(1) + next }));
+        lead + next }));
     }
     // >= not >: the stamps are whole seconds, and a skip recorded in the
     // same second a run finished (the fallback's collision case) is the

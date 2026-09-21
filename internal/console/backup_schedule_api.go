@@ -69,6 +69,11 @@ type backupScheduleDTO struct {
 	// missed weekly full backup by nothing for a week, so it must outlast
 	// the next run's end, which is when LastSkipped stops showing.
 	LastFullMissed *backupScheduleSkipDTO `json:"last_full_missed,omitempty"`
+	// FullOwed: a slot of the full-backup timetable found the server busy and
+	// the next scheduled run takes the full backup instead (the loop's debt).
+	// In memory only: a restart or a save drops it, and then the next full
+	// backup is the timetable's own next slot.
+	FullOwed bool `json:"full_owed,omitempty"`
 	// LastFallback is the last slot where the update from the recorded
 	// changes failed and a full backup was STARTED in its place (a collision
 	// there is a skip, not a fallback); cleared when a later scheduled job
@@ -175,6 +180,7 @@ func (s *Server) backupScheduleDTO(ctx context.Context, e ServerEntry, now time.
 	owed := st.FullOwed && perr == nil && p.FullEvery > 0 && fullErr == nil
 	if owed {
 		dto.NextFullRun = dto.NextRun
+		dto.FullOwed = true
 	}
 	if err := CheckBackupSchedule(e, sched, gates); err != nil {
 		dto.Reason = RefusalReason(err)
@@ -410,17 +416,22 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	now := time.Now().UTC()
-	prevFull, prevSince := "", ""
+	sameGrid, prevSince := false, ""
 	if e.BackupSchedule != nil {
 		sched.Extra = e.BackupSchedule.Extra
-		prevFull, prevSince = strings.TrimSpace(e.BackupSchedule.FullEvery), e.BackupSchedule.FullSince
+		prevSince = e.BackupSchedule.FullSince
+		sameGrid = sameFullGrid(*e.BackupSchedule, sched)
 	}
-	// When the operator asked for this timetable: kept across edits that
-	// leave it as it was, restarted when it changes, gone with it.
+	// Since when this full-backup timetable is in force: kept across edits
+	// that leave its slots where they were, restarted when they move, gone
+	// with it. Its slots are epoch + At + k*FullEvery, so moving At moves
+	// every one of them: a slot of the new grid before the edit never
+	// belonged to it, and the boot check would otherwise report one the old
+	// grid served as missed.
 	switch {
 	case sched.FullEvery == "":
 		sched.FullSince = ""
-	case sched.FullEvery == prevFull && prevSince != "":
+	case sameGrid && prevSince != "":
 		sched.FullSince = prevSince
 	default:
 		sched.FullSince = now.Format(time.RFC3339)
@@ -443,6 +454,15 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 			"full_every", p.FullEvery, "full_copies_per_30d", p.FullCopiesPer30Days())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"schedule": s.backupScheduleDTO(r.Context(), e, now)})
+}
+
+// sameFullGrid reports whether two schedules put their full backups on the
+// same slots: the same interval and the same UTC time. Every does not enter:
+// the full-backup grid is epoch + At + k*FullEvery.
+func sameFullGrid(a, b BackupSchedule) bool {
+	pa, errA := a.Parse()
+	pb, errB := b.Parse()
+	return errA == nil && errB == nil && pa.FullEvery > 0 && pa.FullEvery == pb.FullEvery && pa.At == pb.At
 }
 
 // handleBackupScheduleDelete serves DELETE /api/servers/{id}/backup-schedule.

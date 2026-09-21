@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page says so in red before the next one is due, each one is recorded as
   skipped with the reason, and the updates keep running. A slot that finds
   another job holding the server is taken by the next scheduled run instead
-  of a week later, and a slot that passed while the daemon was stopped is
+  of a week later (unless the daemon restarts or the schedule is saved in
+  between), and a slot that passed while the daemon was stopped is
   recorded as missed at the next start (never made up). A full backup that
   did not start, or started and failed, stays on the card in red until a
   full backup of the server succeeds after it, instead of disappearing when
