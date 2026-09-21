@@ -198,7 +198,15 @@ and searching events:
    [capacity planning](capacity.md#monitoring).
 7. **Protect** (under `watch` only) — **Backups** (the selected server's
    snapshot listing; each row expands to its tables, sizes and how long the
-   backup took, with a **Download (.tar.gz)** of the whole snapshot — the
+   backup took; for a backup in a local directory, how each table was made
+   (read from the database, built from the recorded changes, or reused
+   unchanged; with table deltas this is read from the newest file of the
+   chain beside the table, since the table file itself is carried forward
+   on every update) and one line saying when the database was last really
+   read under this backup, how long before it, and how many updates were
+   built on that read since, because a backup that looks recent can rest on
+   a read days older ([#1570](https://github.com/dbtrail/dbtrail/issues/1570));
+   and a **Download (.tar.gz)** of the whole snapshot — the
    archive includes a `views.sql` with relative paths, so unpacking it and
    running `duckdb -init views.sql` from inside the folder opens every table
    ([#1583](https://github.com/dbtrail/dbtrail/issues/1583)); plus

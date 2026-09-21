@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A backup says when your database was last really read** (#1570). An
+  update rebuilds a backup from the previous one and the recorded changes
+  without reading the database, so a chain of updates can go days without
+  one, and nothing said how long. Every backup file now records the instant
+  of the newest full backup its rows descend from (`bintrail.last_dump_at`)
+  and how many updates were built on it since (`bintrail.fold_generation`).
+  An update copies both from what it updated, so the date never moves
+  forward without a full backup; the count restarts from the file an update
+  starts from (table deltas turned off, a damaged chain set aside), so it can
+  go down, and the page never claims more than the files record. The Backups page shows, for each backup
+  in a local directory, the oldest such read among its tables, how long
+  before the backup it was, and the most updates since when every table
+  records its count (tables whose updates predate this version are counted
+  instead); each table's row says the same for that table. A backup made before this version reads as
+  its own instant when it was a full backup; an update made before it cannot
+  be dated, and the page counts it instead of guessing.
 - **A backup schedule can ask for full backups of its own** (#1564). The
   schedule used to take a full backup only when an update could not run (the
   first backup, a capture gap, a schema change), so an operator who wanted an
@@ -43,6 +59,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a summary with a Show button. The row's Start button opens the same dialog.
 
 ### Fixed
+- **The Backups page no longer calls a changed table "reused unchanged"**
+  (#1570). Since table deltas became the default (v0.84.0), an update keeps
+  each table file and writes the changes beside it, and it carries the table
+  file forward on every update, changed or not. The page read only that
+  file, so every table of every update was described as reused unchanged. It
+  now reads the newest file of the chain beside the table.
+- **An update that reads its previous backup from S3 keeps the age of the
+  table definition** (#1651 follow-up, found by #1570). The S3 reader of
+  backup file metadata did not read `bintrail.create_table_as_of`, which the
+  local reader did, so an update of an update read from the bucket dated the
+  carried `CREATE TABLE` by the previous backup's time instead, newer than it
+  was. That could skip the check that refuses an update when a column type
+  changed after the definition was read. A test now writes every metadata key
+  into a real file and requires both readers to return the same result.
 - **The installer's advice for a taken port works when pasted** (#1768).
   With port 8090 taken it suggested `DBTRAIL_PORT=9090 curl … | sh`, which
   failed twice: the variable was on `curl`, so the installer never saw it, and

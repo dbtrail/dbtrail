@@ -432,9 +432,15 @@ func ListTableDelta(ctx context.Context, basePath string) (*TableDeltaChain, err
 		return nil, fmt.Errorf("look for a table delta beside %s: %w", basePath, err)
 	}
 	stem := strings.TrimSuffix(filepath.Base(strings.ReplaceAll(basePath, "\\", "/")), ".parquet")
-	// Only THIS table's files: MarkTableDeltaFiles reports damage on every
-	// table of the directory, and a caller asking about one must not be
-	// refused for a sibling.
+	return TableDeltaChainIn(dir, names, stem)
+}
+
+// TableDeltaChainIn is ListTableDelta over a listing already in hand: the
+// chain beside <dir>/<stem>.parquet, read from the file names of dir, or nil
+// when there is none. Only THIS table's files count: MarkTableDeltaFiles
+// reports damage on every table of the directory, and a caller asking about
+// one must not be refused for a sibling.
+func TableDeltaChainIn(dir string, names []string, stem string) (*TableDeltaChain, error) {
 	mine := names[:0:0]
 	for _, n := range names {
 		if s, _, _, ok := ParseTableDeltaName(n); ok && s == stem {
@@ -446,6 +452,16 @@ func ListTableDelta(ctx context.Context, basePath string) (*TableDeltaChain, err
 		return nil, err
 	}
 	return chains[dirJoin(dir, stem+".parquet")], nil
+}
+
+// LastFileUpserts is the upserts file of the chain's newest pair, the one a
+// refresh resumes from and whose footer the newest fold stamped: the legacy
+// pair for the v0.83.0 layout.
+func (c *TableDeltaChain) LastFileUpserts() string {
+	if c.Legacy {
+		return c.LegacyUpserts
+	}
+	return c.Last().Upserts
 }
 
 func dirJoin(dir, name string) string {

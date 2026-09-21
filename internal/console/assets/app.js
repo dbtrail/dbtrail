@@ -6210,11 +6210,79 @@ const MADE_BY = {
 function madeByCell(t) {
   const entry = MADE_BY[t.produced_by];
   if (!entry) return el("span", { class: "bk-made-none", text: "—" });
-  const cell = el("span", { class: "bk-made", title: entry[1], text: entry[0] });
-  // The ancestor is what makes the two derived verdicts actionable: it answers
-  // "how far back is the last copy that actually read the source".
-  if (t.from) cell.append(el("span", { class: "bk-made-from", text: " · " + t.from }));
+  // The two derived verdicts name WHEN the database was last really read
+  // (#1570), inherited through every update: that is the fact that says how
+  // much this copy rests on the recorded changes. The immediate ancestor,
+  // which is all the page could name before, is one step back and says
+  // nothing about the steps before it; it moves to the tooltip (a reused
+  // table: whose file, and so whose date; an update: the backup its file
+  // came from), and stays in the cell only for a backup too old to record a
+  // read. With changes kept beside the table (#1638) an update records the
+  // backup its chain started from, not the one just before it, so the
+  // sentence names the file plus the changes since, which is exact either
+  // way; when that backup IS the last read, the next sentence already says so.
+  let title = entry[1];
+  if (t.produced_by === "carried_forward" && t.from) title += " Reused from the backup of " + utcLabel(t.from) + ".";
+  if (t.produced_by === "fold" && t.from && t.from !== t.source_read_at) {
+    title += " Built from the backup of " + utcLabel(t.from) + " plus the changes recorded since.";
+  }
+  if (t.produced_by !== "dump" && t.source_read_at) {
+    title += " Last real read of the database: " + utcLabel(t.source_read_at) +
+      (t.folds_since_read > 0 ? ", updated " + timesText(t.folds_since_read) + " from the recorded changes since." : ".");
+  }
+  const cell = el("span", { class: "bk-made", title, text: entry[0] });
+  if (t.produced_by !== "dump" && t.source_read_at) {
+    cell.append(el("span", { class: "bk-made-from", text: " · last read " + t.source_read_at }));
+  } else if (t.from) {
+    // A backup written before the read was recorded still names the backup
+    // it came from, as it did before #1570: less than the last read, more
+    // than nothing.
+    cell.append(el("span", { class: "bk-made-from", text: " · " + t.from }));
+  }
   return cell;
+}
+
+// timesText says a count of updates in words: "once", "twice", "3 times".
+function timesText(n) {
+  return n === 1 ? "once" : n === 2 ? "twice" : n + " times";
+}
+
+// fmtAge is a distance in time for a sentence: seconds, minutes, hours, and
+// days once it passes two of them.
+function fmtAge(sec) {
+  if (sec < 90) return Math.round(sec) + "s";
+  if (sec < 5400) return Math.round(sec / 60) + "m";
+  if (sec < 172800) return Math.round(sec / 3600) + "h";
+  return Math.round(sec / 86400) + " days";
+}
+
+// sourceReadLine (#1570) is the snapshot's own line: how far back the last
+// real read of the database under this backup goes. An update rebuilds a
+// backup from the previous one and the recorded changes, never reading the
+// database, so a backup that looks recent can rest on a read days older, and
+// a check between two such backups proves less than between two full copies.
+// The oldest read among the tables is the one said, since the backup is only
+// as independent as its least recently read table, and tables that do not
+// record a read are counted, never spoken for. "" when nothing was looked up.
+function sourceReadLine(d) {
+  const missing = d.source_read_missing || 0;
+  const uncounted = d.source_read_uncounted || 0;
+  // Two different gaps, said apart: a table that does not record when it was
+  // read, and one that records when but not how many updates since (a chain
+  // written before the count existed). The maximum is left out whenever any
+  // table is uncounted, because a most that skips tables is not the most.
+  const tail = (missing ? " " + missing + (missing === 1 ? " table does" : " tables do") + " not record when." : "") +
+    (uncounted ? " How many updates were built since is not recorded for " + uncounted + (uncounted === 1 ? " table." : " tables.") : "");
+  if (!d.source_read_at) {
+    return missing ? "When your database was last read for this backup is not recorded." : "";
+  }
+  const age = d.source_read_age_seconds || 0;
+  const folds = d.max_folds_since_read;
+  if (age < 1 && folds === 0) return "Read from your database when it was taken." + tail;
+  return "Last real read of your database: " + utcLabel(d.source_read_at) +
+    (age >= 1 ? ", " + fmtAge(age) + " before this backup" : "") +
+    (folds > 0 ? ". Updated from the recorded changes " + (folds > 1 ? "up to " : "") + timesText(folds) + " since" : "") +
+    "." + tail;
 }
 
 async function loadBackupDetail(at, box) {
@@ -6241,6 +6309,8 @@ async function loadBackupDetail(at, box) {
   // Outside the duration branch: a run stamped within one second has no
   // duration to show and still has its reason (#1604).
   if (d.run && d.run.why) facts.append(el("span", { class: "stg-dest", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
+  const readLine = sourceReadLine(d);
+  if (readLine) facts.append(el("span", { class: "stg-dest", text: readLine }));
   const dl = el("button", { class: "btn", type: "button",
     text: "Download (.tar.gz) · " + humanBytes(d.total_bytes || 0) });
   if (d.incomplete) dl.disabled = true;
