@@ -1989,6 +1989,7 @@ button { font-family: inherit; }
 .dc-body { flex: 1; min-width: 0; }
 /* First-run steps (#1606): waiting is a muted ring, never the failure red. */
 .fr-card { margin-bottom: 16px; }
+.add-first-lead { font-size: 13.5px; color: var(--ink-2); margin: 0 0 12px; max-width: 62ch; }
 .fr-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .fr-step { display: flex; gap: 10px; align-items: flex-start; }
 .fr-step.done .dc-mark { color: var(--insert); }
@@ -1999,11 +2000,22 @@ button { font-family: inherit; }
 .fr-detail { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; overflow-wrap: anywhere; }
 .fr-fix { font-size: 12.5px; color: var(--ink); margin-top: 4px; }
 .dc-name { font-family: var(--f-ui); font-size: 13px; color: var(--ink); }
+/* A doctor fix (#1777): prose and lists in the UI face, reflowing to the box;
+   only the commands keep their exact text, in a code box that wraps instead
+   of hiding its end past a scrollbar. */
 .dc-rem {
-  font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2);
-  background: var(--surface-3); border-radius: 4px; padding: 8px 10px;
-  margin: 6px 0 0; white-space: pre-wrap; overflow-x: auto;
+  font-family: var(--f-ui); font-size: 12.5px; line-height: 1.45; color: var(--ink-2);
+  margin: 6px 0 0; overflow-wrap: anywhere;
 }
+.dc-rem p { margin: 0 0 6px; }
+.dc-rem ul { margin: 0 0 6px; padding-left: 18px; }
+.dc-rem li { margin: 0 0 2px; }
+.dc-rem pre {
+  font-family: var(--f-mono); font-size: 11.5px; line-height: 1.4;
+  background: var(--surface-3); border-radius: 4px; padding: 8px 10px;
+  margin: 0 0 6px; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.dc-rem > :last-child { margin-bottom: 0; }
 
 /* toast — absent from the design system; small, unobtrusive */
 .toast {
@@ -2271,7 +2283,14 @@ section.bk-restore { margin-top: 18px; }
 .vfy-diff-table tr:last-child td { border-bottom: none; }
 .vfy-null { color: var(--ink-4); font-style: italic; }
 .vfy-explain-raw { margin: 0 28px 16px; }
-.vfy-explain-pre { max-height: 26vh; overflow-y: auto; }
+/* The verify drill-down's raw output: tab-aligned rows, so monospace in a
+   wrapping code box (it borrowed .dc-rem until #1777 made that a container). */
+.vfy-explain-pre {
+  font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2);
+  background: var(--surface-3); border-radius: 4px; padding: 8px 10px;
+  margin: 6px 0 0; white-space: pre-wrap; overflow-x: auto;
+  max-height: 26vh; overflow-y: auto;
+}
 .stg-code {
   font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2);
   background: var(--surface-3); border-radius: 4px; padding: 7px 10px;
