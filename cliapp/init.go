@@ -2,7 +2,6 @@ package cliapp
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
@@ -88,7 +88,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 2: Reconnect with the database name in the DSN.
-	db, err := sql.Open("mysql", initIndexDSN)
+	db, err := config.OpenMySQL(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to open index database connection: %w", err)
 	}

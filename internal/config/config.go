@@ -225,11 +225,33 @@ func buildDSN(dsn string) (string, error) {
 // returning the *mysql.Config so callers that need to attach a programmatic
 // *tls.Config (ConnectWithTLS) share the exact invariants without a DSN-string
 // round-trip.
+// ForbidLocalFiles turns the driver's local-file access (LOAD DATA LOCAL
+// INFILE) off on cfg, whatever the DSN asked for. bintrail never loads a local
+// file into MySQL, so a DSN that allows it is never a need, and every MySQL
+// connection bintrail opens goes through this package to get it applied.
+func ForbidLocalFiles(cfg *mysql.Config) { cfg.AllowAllFiles = false }
+
+// OpenMySQL opens cfg with local-file access forced off and nothing else
+// changed, for the callers that must not take Connect's other invariants:
+// ProxySQL's admin interface (no @@max_allowed_packet to probe), and the
+// server-level connections that create the index database. cfg itself is
+// left as the caller passed it.
+func OpenMySQL(cfg *mysql.Config) (*sql.DB, error) {
+	return sql.Open("mysql", openDSN(cfg))
+}
+
+func openDSN(cfg *mysql.Config) string {
+	c := cfg.Clone()
+	ForbidLocalFiles(c)
+	return c.FormatDSN()
+}
+
 func normalizeDSN(dsn string) (*mysql.Config, error) {
 	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("invalid DSN: %w", err)
 	}
+	ForbidLocalFiles(cfg)
 	cfg.ParseTime = true
 	cfg.Loc = time.UTC
 	if cfg.Timeout == 0 {

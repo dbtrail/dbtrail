@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **bintrail's MySQL connections always turn local-file loading off.** A DSN
+  that set `allowAllFiles=true` kept it on the connections bintrail opened.
+  Nothing in bintrail loads a local file into MySQL, so the driver option is
+  now forced off on every connection, whatever the DSN says, and a test keeps
+  every MySQL connection going through the one place that does it.
+
 ### Changed
 - **What Save and Test connection did now opens in a dialog centered on the
   screen** (#1769). The add-server and edit-server forms used to answer inside
