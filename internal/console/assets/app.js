@@ -9685,14 +9685,40 @@ async function testServerForm(form) {
   const btn = form.querySelector("#server-test");
   // Dropped when the form that asked is gone (Cancel, or another server's
   // form took its place): over that form it would describe the wrong server.
-  const show = (tone, text) => { if (btn && btn.isConnected) openNotice({ tone, title: "Test connection", lines: [text], button: "Back to the form", returnFocus: btn }); };
+  const show = (notice) => { if (btn && btn.isConnected) openNotice(Object.assign({ title: "Test connection", button: "Back to the form", returnFocus: btn }, notice)); };
   formMsg("", false);
   if (btn) { btn.disabled = true; btn.textContent = "Testing…"; }
   try {
     const res = await api(id ? "/api/servers/" + encodeURIComponent(id) + "/test" : "/api/servers/test", { method: "POST", body });
-    show(testResultClass(res), testResultText(res));
-  } catch (err) { show("err", "✗ " + ((err && err.message) || err)); }
+    show(res.doctor ? unsavedTestNotice(res) : { tone: testResultClass(res), lines: [testResultText(res)] });
+  } catch (err) { show({ tone: "err", lines: ["✗ " + ((err && err.message) || err)] }); }
   finally { if (btn) { btn.disabled = false; btn.textContent = "Test connection"; } }
+}
+
+// unsavedTestNotice is Test's answer for a server not saved yet (#1767): the
+// source half of the startup checks Save runs, so Test cannot pass what Save
+// would refuse. The failures on top, else the warnings, else one line; every
+// check is one click away, and the S3 store's result follows when there is one.
+function unsavedTestNotice(res) {
+  const checks = res.doctor.checks || [];
+  const fails = checks.filter((c) => c.status === "fail");
+  const warns = checks.filter((c) => c.status === "warn");
+  const count = (k, one, many) => k + " " + (k === 1 ? one : many);
+  const all = el("details", { class: "notice-all" },
+    el("summary", { text: "All " + count(checks.length, "check", "checks") }), doctorCards(checks));
+  const s3 = s3TestText(res);
+  const s3Line = s3 ? [s3] : [];
+  if (fails.length) {
+    return { tone: "err", lines: [(fails.length === 1 ? "Capture cannot start from this database yet. Fix this first:" : "Capture cannot start from this database yet. Fix these first:")].concat(s3Line),
+      content: [doctorCards(fails), all] };
+  }
+  // A clean database with an S3 store that failed is still a red answer.
+  const s3Bad = testResultClass({ ok: true, s3: res.s3 }) === "err";
+  if (warns.length) {
+    return { tone: s3Bad ? "err" : "warn", lines: ["✓ The database is ready to capture. Check these when you can:"].concat(s3Line),
+      content: [doctorCards(warns), all] };
+  }
+  return { tone: s3Bad ? "err" : "ok", lines: ["✓ The database is ready to capture."].concat(s3Line), content: [all] };
 }
 
 async function testServerRow(id) {

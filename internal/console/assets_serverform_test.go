@@ -264,3 +264,27 @@ func TestIcebergStageCardsSitOnADifferentGround(t *testing.T) {
 		t.Error("no direction sets --panel-bg to --surface-2 any more; re-check the .ice-stage card against its ground")
 	}
 }
+
+// TestServerFormTestShowsTheStartupChecksForANewServer (#1767): a new server's
+// Test comes back with the source half of the startup checks, and the notice
+// shows them the way Save's does: failures on top, else warnings, else one
+// line, with every check one click away.
+func TestServerFormTestShowsTheStartupChecksForANewServer(t *testing.T) {
+	js := readAsset(t, "app.js")
+	test := jsFunctionBody(t, js, "testServerForm")
+	if !strings.Contains(test, "res.doctor ? unsavedTestNotice(res)") {
+		t.Error("testServerForm does not show the startup checks a new server's Test returns")
+	}
+	n := jsFunctionBody(t, js, "unsavedTestNotice")
+	f, w := strings.Index(n, "if (fails.length)"), strings.Index(n, "if (warns.length)")
+	if f < 0 || w < 0 || f > w {
+		t.Errorf("unsavedTestNotice must put failures before warnings (fails at %d, warns at %d)", f, w)
+	}
+	if !strings.Contains(n, `"Capture cannot start from this database yet.`) || !strings.Contains(n, `el("summary", { text: "All "`) {
+		t.Error("unsavedTestNotice lost its failure line or the full list of checks")
+	}
+	// A failed S3 store keeps the answer red even over a clean database.
+	if strings.Count(n, `s3Bad ? "err"`) != 2 {
+		t.Error("a failed S3 store no longer turns a clean Test answer red")
+	}
+}

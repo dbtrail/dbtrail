@@ -180,6 +180,10 @@ type testResponse struct {
 	// Absent when there is no store. Independent of OK, which is the index
 	// connection's.
 	S3 []s3ProbeResult `json:"s3,omitempty"`
+	// Doctor: for a server not saved yet, the source half of the startup
+	// checks Save runs (#1767), in place of an index probe it has nothing to
+	// aim at. OK is then "no check failed".
+	Doctor *DoctorReport `json:"doctor,omitempty"`
 }
 
 // s3ProbeResult is Test connection's answer for one bucket of the server's S3
@@ -262,7 +266,7 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deriveIndex := req.DSN == "" && req.Host == "" && req.DBName == "" && sourceDSN != "" && s.monitorCtrl != nil
+	deriveIndex := indexIsDerived(req) && sourceDSN != "" && s.monitorCtrl != nil
 	var dsn string
 	if !deriveIndex {
 		dsn, err = buildDSN(req, "")
@@ -662,6 +666,17 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(raw, &sent) // an object: req decoded from it
 	}
 
+	// A new server on the monitor-first form carries only its SOURCE (#1767):
+	// its index is derived when it is saved, so there is no index DSN to probe
+	// and the path below answered "nothing to test". Test runs the source half
+	// of the startup checks Save runs instead, on the source as typed, saving
+	// and starting nothing: one implementation, so Test cannot pass what Save
+	// refuses. A form that names its own index keeps the index probe.
+	if id == "" && s.monitorCtrl != nil && indexIsDerived(req) {
+		s.testUnsavedSource(w, r, req, sent)
+		return
+	}
+
 	dsn := stored
 	if req.DSN != "" || req.Host != "" || req.Port != "" || req.User != "" || req.DBName != "" || req.Password != nil {
 		built, err := buildDSN(req, stored)
@@ -695,6 +710,56 @@ func (s *Server) handleServersTest(w http.ResponseWriter, r *http.Request) {
 	resp := probeServer(r, dsn, monitored)
 	candidate, typed, hold := s3ProbeCandidate(req, sent, saved, hasSaved)
 	resp.S3 = probeS3Store(r.Context(), candidate, typed && !sameSavedStore(candidate, saved, hasSaved), hold)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// indexIsDerived reports whether a create request leaves the index to be
+// derived for its source: no index DSN, host or database typed. Create and
+// Test share it, so a stray value in the folded index fields (a browser
+// autofilling the password) cannot make Test probe an index Save would not
+// use.
+func indexIsDerived(req serverRequest) bool {
+	return req.DSN == "" && req.Host == "" && req.DBName == ""
+}
+
+// testUnsavedSource answers Test connection for a server not saved yet
+// (#1767) with the source half of the startup checks. There is no stored
+// entry, so no saved credential for the body to send elsewhere: the
+// movesStoredPassword guard has nothing to protect here.
+func (s *Server) testUnsavedSource(w http.ResponseWriter, r *http.Request, req serverRequest, sent map[string]json.RawMessage) {
+	flavor, err := NormalizeFlavor(req.Flavor)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	sourceDSN, err := buildSourceDSN(req, "", flavor)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if sourceDSN == "" {
+		writeJSONError(w, http.StatusBadRequest, "fill in the source host, user and password to test them")
+		return
+	}
+	if err := validatePGSourceMonitorConfig(flavor, sourceDSN, req.SourceSlot, req.SourcePublication); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	report, err := s.monitorCtrl.DoctorUnsaved(r.Context(), ServerEntry{
+		Name:              strings.TrimSpace(req.Name),
+		SourceDSN:         sourceDSN,
+		Schemas:           req.Schemas,
+		Flavor:            flavor,
+		SourceSlot:        strings.TrimSpace(req.SourceSlot),
+		SourcePublication: strings.TrimSpace(req.SourcePublication),
+	})
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "the startup checks could not run: "+err.Error())
+		return
+	}
+	resp := testResponse{OK: report.Failed == 0, Doctor: report}
+	candidate, typed, hold := s3ProbeCandidate(req, sent, ServerEntry{}, false)
+	resp.S3 = probeS3Store(r.Context(), candidate, typed, hold)
 	writeJSON(w, http.StatusOK, resp)
 }
 
