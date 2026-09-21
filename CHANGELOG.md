@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against the database. The default check, and the console's "Compare two
   saved snapshots", now compare, per table, the last baseline that read it from
   the database with the baseline before that one; the JSON report names that
-  read (`compared_to`) and the text report says it. When the newest baseline is
+  read (`compared_to`), and the text report and the console say it. When the newest baseline is
   itself a read, each table is compared with the newest baseline before it that
   holds it, usually the same pair as before. A table whose read is no longer
   kept, has no baseline before it, or is not on record is `inconclusive`, and a

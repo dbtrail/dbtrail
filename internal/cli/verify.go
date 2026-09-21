@@ -52,20 +52,24 @@ var verifyCmd = &cobra.Command{
 	Long: `Prove the recovery chain (baseline + indexed binlog) faithfully reproduces
 the data. Two modes:
 
-  Baseline-anchored (default, drift-free): omit --source-dsn. Compares the two
-  most recent baselines: reconstructs the previous baseline forward to the new
-  baseline's exact binlog anchor and fingerprints it against the new baseline.
-  Both sides are at-rest, so it reads no live source; run it any time after a
-  baseline (e.g. right after "bintrail baseline", or on a schedule). No
-  production impact.
+  Baseline-anchored (default, drift-free): omit --source-dsn. For each table,
+  takes the last baseline that read it from the database (a full backup, not
+  a refresh built from the recorded changes) and the baseline before that one,
+  reconstructs the older one forward to the read's exact binlog anchor, and
+  fingerprints it against the read. Both sides are at-rest, so it reads no
+  live source; run it any time after a baseline (e.g. on a schedule). No
+  production impact. The report names the read each table was compared
+  against.
 
   Live-source: pass --source-dsn. Reconstructs each table to a consistent
   snapshot of the live source and compares. Reads the whole table off the live
   server, so run it off-peak.
 
 Results are per table: match, mismatch, or inconclusive (no predecessor
-baseline, index behind, unsupported PK, coverage gap, or a value class this
-version can't yet compare; never reported as a failure). The run exits non-zero
+baseline, the table's last read no longer kept or not on record, a TRUNCATE,
+DROP or RENAME between the two baselines, index behind, unsupported PK,
+coverage gap, or a value class this version can't yet compare; never reported
+as a failure). The run exits non-zero
 on any mismatch or error, or when comparable tables existed but none could be
 proven (all inconclusive). A source with only one baseline (no predecessor yet)
 is reported and exits zero.
@@ -84,7 +88,7 @@ event on the same key superseded. Pass --check recover for that:
 
 Add --explain (baseline-anchored mode) to print, below the report, a row-level
 drill-down of each mismatch: which primary keys diverged and, for changed rows,
-the differing columns with the reconstructed value vs the new baseline's. It
+the differing columns with the reconstructed value vs the read's. It
 re-runs the same reconstruction the verdict came from (byte-identical by
 construction); it needs no live source, scratch database, or external tool.
 

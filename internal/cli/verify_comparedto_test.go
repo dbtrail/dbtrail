@@ -40,3 +40,25 @@ func TestWriteVerifyText_namesTheRead(t *testing.T) {
 		}
 	}
 }
+
+// `bintrail verify --help` describes the check the command runs: each table's
+// last read of the database against the baseline before it, not the two
+// newest baselines, with the reasons that check can come back inconclusive.
+func TestVerifyHelp_describesTheLastRead(t *testing.T) {
+	help := strings.Join(strings.Fields(verifyCmd.Long), " ")
+	for _, want := range []string{
+		"takes the last baseline that read it from the database",
+		"the table's last read no longer kept or not on record",
+		"a TRUNCATE, DROP or RENAME between the two baselines",
+		"The report names the read each table was compared against.",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("verify --help does not say %q", want)
+		}
+	}
+	for _, stale := range []string{"two most recent baselines", "new baseline's"} {
+		if strings.Contains(help, stale) {
+			t.Errorf("verify --help still says %q, the check it no longer runs", stale)
+		}
+	}
+}

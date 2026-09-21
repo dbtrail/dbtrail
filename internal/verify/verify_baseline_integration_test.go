@@ -520,8 +520,9 @@ func TestExplainBaselinePairMismatch_DeferredDrift(t *testing.T) {
 }
 
 // TestFindBaselinePair_UnpairedAndSelection locks two things: a table present
-// only in the new snapshot lands in `unpaired` (not silently dropped), and the
-// pair is built from the two most recent snapshots, ignoring an older third.
+// only in the newest snapshot gets its own answer (not silently dropped), and
+// when the newest snapshot is a read the pair is the two newest, ignoring an
+// older third.
 func TestFindBaselinePair_UnpairedAndSelection(t *testing.T) {
 	baseDir := t.TempDir()
 	now := time.Now().UTC()
@@ -705,6 +706,42 @@ func TestVerifyBaselinePair_UnchangedTable(t *testing.T) {
 // the statement, never a mismatch that only a full backup clears (the default
 // check pairs every run with the same read until the next one).
 func TestVerifyBaselinePair_DestructiveDDLInTheWindow(t *testing.T) {
+	now := time.Now().UTC()
+	prevTS := now.Truncate(time.Hour).Add(-2 * time.Hour)
+	for _, c := range []struct {
+		name       string
+		detectedAt time.Time
+		refused    bool // inconclusive naming the TRUNCATE, instead of compared
+	}{
+		{"inside the window", prevTS.Add(30 * time.Minute), true},
+		// Whole seconds: the older snapshot's own second may be after its
+		// anchor, where the replay starts, so it counts.
+		{"the older snapshot's second", prevTS, true},
+		// Before the older snapshot: already in it, the comparison runs (and
+		// here finds the two rows the fixture's newer side lacks).
+		{"before the older snapshot", prevTS.Add(-time.Second), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := verifyTruncatedOrders(t, prevTS, c.detectedAt)
+			if c.refused {
+				if got.Status != StatusInconclusive || !strings.Contains(got.Detail, "TRUNCATE") || !got.ComparedTo.IsZero() {
+					t.Fatalf("TRUNCATE at %s: %s (%q) compared_to=%s; want inconclusive naming the TRUNCATE, compared to nothing",
+						c.detectedAt, got.Status, got.Detail, got.ComparedTo)
+				}
+				return
+			}
+			if got.Status != StatusMismatch || strings.Contains(got.Detail, "TRUNCATE") {
+				t.Fatalf("TRUNCATE at %s, before the older snapshot: %s (%q); want the comparison to run", c.detectedAt, got.Status, got.Detail)
+			}
+		})
+	}
+}
+
+// verifyTruncatedOrders verifies a pair whose older snapshot holds two rows
+// and whose newer one holds none, with a TRUNCATE of the table recorded at
+// detectedAt and no row events.
+func verifyTruncatedOrders(t *testing.T, prevTS, detectedAt time.Time) TableResult {
+	t.Helper()
 	db, dbName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 	if err := indexer.EnsureSchema(db); err != nil {
@@ -724,21 +761,18 @@ func TestVerifyBaselinePair_DestructiveDDLInTheWindow(t *testing.T) {
 			dbName, c.name, c.ord, c.key, c.dt, c.colType)
 	}
 	baseDir := t.TempDir()
-	now := time.Now().UTC()
-	prevTS := now.Truncate(time.Hour).Add(-2 * time.Hour)
 	newTS := prevTS.Add(time.Hour)
 	createSQL := "CREATE TABLE `orders` (\n  `id` INT NOT NULL,\n  `status` VARCHAR(64),\n  PRIMARY KEY (`id`)\n);\n"
 	cols := []baseline.Column{
 		{Name: "id", MySQLType: "int", ParquetType: baseline.MysqlToParquetNode("int")},
 		{Name: "status", MySQLType: "varchar", ParquetType: baseline.MysqlToParquetNode("varchar")},
 	}
-	// Two rows before, none after: the table was truncated in between.
 	writeTestBaseline(t, baseDir, prevTS, dbName, "orders", createSQL, cols, [][]string{{"1", "a"}, {"2", "b"}}, "binlog.000001", 200)
 	writeTestBaseline(t, baseDir, newTS, dbName, "orders", createSQL, cols, nil, "binlog.000001", 300)
-	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{prevTS, newTS, now.Truncate(time.Hour)})
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{prevTS.Add(-time.Hour), prevTS, newTS, time.Now().UTC().Truncate(time.Hour)})
 	testutil.MustExec(t, db, `INSERT INTO schema_changes (detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query)
 		VALUES (?, 'binlog.000001', 250, ?, 'orders', 'TRUNCATE TABLE', 'TRUNCATE TABLE orders')`,
-		prevTS.Add(30*time.Minute).Format("2006-01-02 15:04:05"), dbName)
+		detectedAt.Format("2006-01-02 15:04:05"), dbName)
 
 	resolver, err := metadata.NewResolver(db, 1)
 	if err != nil {
@@ -753,9 +787,7 @@ func TestVerifyBaselinePair_DestructiveDDLInTheWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifyBaselinePair: %v", err)
 	}
-	if got.Status != StatusInconclusive || !strings.Contains(got.Detail, "TRUNCATE") || !got.ComparedTo.IsZero() {
-		t.Fatalf("truncated between the snapshots: %s (%q) compared_to=%s; want inconclusive naming the TRUNCATE, compared to nothing", got.Status, got.Detail, got.ComparedTo)
-	}
+	return got
 }
 
 // TestVerifyBaselinePair_TextEventDecoded is the #672 regression: a TEXT

@@ -811,6 +811,10 @@ func tableFilter(tables []string) (filter map[string]bool, seen map[string]bool)
 // legacy #677 alias.
 func toWireResult(res verify.TableResult, explainable bool) console.VerifyTableResult {
 	status, reason := verify.NormalizeStatus(res.Status, res.Detail)
+	comparedTo := ""
+	if !res.ComparedTo.IsZero() {
+		comparedTo = res.ComparedTo.UTC().Format(time.RFC3339)
+	}
 	return console.VerifyTableResult{
 		Schema: res.Schema, Table: res.Table, Status: string(status),
 		Reason: reason, Detail: reason,
@@ -818,6 +822,7 @@ func toWireResult(res verify.TableResult, explainable bool) console.VerifyTableR
 		SourceRows:       res.SourceRows, ReconstructRows: res.ReconstructRows,
 		EventsChecked: res.EventsChecked, ChainsChecked: res.ChainsChecked,
 		Anchor:      res.Anchor,
+		ComparedTo:  comparedTo,
 		Explainable: explainable,
 	}
 }

@@ -7734,6 +7734,20 @@ function vfySortResults(results) {
   }).map((p) => p[0]);
 }
 
+// vfyComparedToLine says which read of the database the compared tables were
+// checked against, as the CLI's text report does: the newest snapshot can be
+// days newer than that read, so a "match" alone reads as "the newest snapshot
+// is verified". "" when no table was compared.
+function vfyComparedToLine(results) {
+  const times = [];
+  (results || []).forEach((r) => {
+    if (r.compared_to && !times.includes(r.compared_to)) times.push(r.compared_to);
+  });
+  if (!times.length) return "";
+  if (times.length === 1) return "Compared against the last read of your database, at " + utcLabel(times[0]) + ".";
+  return "Compared against each table's last read of your database, at " + times.length + " different times. Hover a table to see its read.";
+}
+
 // vfyCountsText: the per-table counters as a compact fixed column (#1419 §2).
 // The wire carries them only for recover-inputs rows (toWireResult copies the
 // walk's counters; the content modes never set them) — review caught the
@@ -7819,6 +7833,8 @@ function renderVerifyResults(container, status, id, opts) {
   if (status.state === "succeeded") {
     container.append(el("p", { class: "form-hint vfy-verdict-sentence", text: vfyVerdictSentence(s) }));
   }
+  const comparedTo = vfyComparedToLine(status.results);
+  if (comparedTo) container.append(el("p", { class: "form-hint vfy-compared-to", text: comparedTo }));
   if (status.note) container.append(el("p", { class: "form-hint", text: status.note }));
   if (status.last_error) container.append(el("p", { class: "form-msg err", text: status.last_error }));
 
@@ -7832,7 +7848,8 @@ function renderVerifyResults(container, status, id, opts) {
     const cls = vfyCardClass(r);
     const row = el("div", { class: "vfy-row " + cls });
     row.append(el("span", { class: "vfy-mark", text: VFY_STATUS_MARK[cls] || "?" }));
-    row.append(el("span", { class: "vfy-tbl", text: r.schema + "." + r.table }));
+    row.append(el("span", { class: "vfy-tbl", text: r.schema + "." + r.table,
+      title: r.compared_to ? "Compared against the read of " + utcLabel(r.compared_to) : null }));
     const verdict = r.status === "inconclusive" && VFY_BENIGN_KINDS[r.inconclusive_kind]
       ? "nothing to check" : r.status;
     row.append(el("span", { class: "vfy-verdict", text: verdict }));

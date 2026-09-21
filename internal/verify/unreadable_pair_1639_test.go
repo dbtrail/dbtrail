@@ -11,10 +11,9 @@ import (
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
-// #1639: verify compares the two newest backups. With the newest folder
-// unreadable it used to compare the two before it and could report "match";
-// it now refuses and names the folder. A folder older than the pair changes
-// nothing.
+// #1639: with the newest folder unreadable, verify used to decide from the
+// folders before it and could report "match"; it now refuses and names the
+// folder. A folder older than the pair changes nothing.
 
 // snapshot1639 writes a read of the database (a real dump footer), so what
 // a test sees is the unreadable-folder guard and not a footer that would not
