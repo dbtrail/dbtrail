@@ -1202,20 +1202,29 @@ func TakeSnapshotExcludingInvalid(sourceDB, indexDB *sql.DB, schemas []string) (
 // keys perfectly well. The table-type filter has the same hazard in the other
 // direction (#1272, see invalidTables).
 func TablesWithoutPrimaryKey(sourceDB *sql.DB, schemas []string) ([]string, error) {
+	noPK, _, err := TablesTheSnapshotRefuses(sourceDB, schemas)
+	return noPK, err
+}
+
+// TablesTheSnapshotRefuses reports both kinds of table the snapshot refuses
+// (strict) or excludes (degraded), each as "schema.table", sorted: those with
+// no primary key and those not on InnoDB. The same classifier call as
+// TablesWithoutPrimaryKey, for `doctor` to grade the second kind too (#1766).
+func TablesTheSnapshotRefuses(sourceDB *sql.DB, schemas []string) (noPK, nonInnoDB []string, err error) {
 	columns, err := fetchColumnRows(sourceDB, schemas)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(columns) == 0 {
 		// No columns visible is not "every table has a primary key". The
 		// caller decides what to say; it must not be the reassuring answer.
-		return nil, ErrNoColumnsVisible
+		return nil, nil, ErrNoColumnsVisible
 	}
-	_, noPK, _, err := invalidTables(sourceDB, schemas, columns)
+	nonInnoDB, noPK, _, err = invalidTables(sourceDB, schemas, columns)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return noPK, nil
+	return noPK, nonInnoDB, nil
 }
 
 // ErrNoColumnsVisible marks a source whose information_schema.COLUMNS answered

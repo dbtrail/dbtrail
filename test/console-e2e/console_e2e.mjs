@@ -344,37 +344,91 @@ try {
   !form.advOpen ? ok("form: advanced section collapsed for a source entry") : bad("form: advanced section collapsed for a source entry", "auto-expanded");
   form.srcVisible ? ok("form: source fields visible") : bad("form: source fields visible", "hidden");
 
-  // #1605 / #1608: the form answers where the operator is looking. The message
-  // and the startup-check cards precede the button row in the DOM, and Test
-  // writes its result into the row's own slot, beside its button, within a
-  // few seconds; nothing lands below the buttons.
-  const order = await page.evaluate(() => {
-    const foot = document.querySelector("#server-form-mount .modal-foot");
-    const msg = document.getElementById("server-form-msg");
-    const cards = document.getElementById("doctor-cards");
-    const slot = document.getElementById("server-test-result");
-    const before = (n) => !!(n && foot && (n.compareDocumentPosition(foot) & Node.DOCUMENT_POSITION_FOLLOWING));
-    return { msg: before(msg), cards: before(cards), slotInFoot: !!(slot && foot && foot.contains(slot)) };
+  // #1765: no field reaches past the dialog's edge. The source fieldset once
+  // grew to the grants box's longest line, and the dialog's overflow-x: hidden
+  // left Source port and Schemas unreachable by mouse. Measured on the
+  // rendered form, with the advanced section closed and open: the trigger is
+  // the length of a string in app.js, which a check over the CSS cannot see.
+  const outsideDialog = () => page.evaluate(() => {
+    const dlg = document.getElementById("server-form-mount").closest(".modal").getBoundingClientRect();
+    return Array.from(document.querySelectorAll("#server-form-mount input, #server-form-mount select, #server-form-mount textarea"))
+      .filter((n) => n.type !== "hidden" && n.offsetParent !== null)
+      .map((n) => ({ name: n.name, r: n.getBoundingClientRect() }))
+      .filter((f) => f.r.right > dlg.right + 1 || f.r.left < dlg.left - 1)
+      .map((f) => `${f.name} at ${Math.round(f.r.left)}-${Math.round(f.r.right)}, dialog ${Math.round(dlg.left)}-${Math.round(dlg.right)}`);
   });
-  order.msg && order.cards ? ok("form: message and check cards precede the button row") : bad("form: message and check cards precede the button row", JSON.stringify(order));
-  order.slotInFoot ? ok("form: Test result slot sits in the button row") : bad("form: Test result slot sits in the button row", JSON.stringify(order));
+  let cutOff = await outsideDialog();
+  cutOff.length === 0 ? ok("form: every field fits inside the dialog") : bad("form: every field fits inside the dialog", cutOff.join("; "));
+  await page.evaluate(() => { document.getElementById("server-advanced").open = true; });
+  cutOff = await outsideDialog();
+  cutOff.length === 0 ? ok("form: every field fits inside the dialog, advanced open") : bad("form: every field fits inside the dialog, advanced open", cutOff.join("; "));
+  await page.evaluate(() => { document.getElementById("server-advanced").open = false; });
+
+  // #1769, superseding the in-form placement of #1605/#1608: Test answers in
+  // a notice centered on the screen, above the form. Escape closes the notice
+  // and only it: the form under it keeps what was typed, the Test button is
+  // usable again, and focus goes back to it.
+  const typed = "e2e-typed-name";
+  await page.fill('#server-form-mount input[name="name"]', typed);
   await page.click("#server-test");
-  let testText = "";
-  for (let i = 0; i < 40 && !/[✓✗○]/.test(testText); i++) {
+  const readNotice = () => page.evaluate(() => {
+    const box = document.querySelector("#notice-mount .notice");
+    if (!box) return null;
+    const r = box.getBoundingClientRect();
+    return { text: box.textContent, dx: Math.round(r.left + r.width / 2 - innerWidth / 2), dy: Math.round(r.top + r.height / 2 - innerHeight / 2),
+      focusInside: box.contains(document.activeElement), formInert: !!document.getElementById("modal").inert };
+  });
+  let notice = null;
+  for (let i = 0; i < 40 && !(notice && /[✓✗○]/.test(notice.text)); i++) {
     await page.waitForTimeout(250);
-    testText = await page.evaluate(() => (document.getElementById("server-test-result") || {}).textContent || "");
+    notice = await readNotice();
   }
-  /[✓✗○]/.test(testText) ? ok("form: Test connection answers beside its button") : bad("form: Test connection answers beside its button", `slot=${JSON.stringify(testText)}`);
-  // Only meaningful once the answer arrived; sampled mid-flight these would
-  // blame the button for a slow request.
-  if (/[✓✗○]/.test(testText)) {
+  notice && /[✓✗○]/.test(notice.text) ? ok("form: Test connection answers in a notice") : bad("form: Test connection answers in a notice", JSON.stringify(notice));
+  if (notice) {
+    await page.waitForTimeout(450); // past the entrance animation, which shifts it 16px
+    notice = await readNotice();
+    Math.abs(notice.dx) <= 3 && Math.abs(notice.dy) <= 3 ? ok("notice: centered on the screen") : bad("notice: centered on the screen", JSON.stringify(notice));
+    notice.focusInside && notice.formInert ? ok("notice: holds the focus, the form under it is inert") : bad("notice: holds the focus, the form under it is inert", JSON.stringify(notice));
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(200);
     const after = await page.evaluate(() => ({
+      noticeGone: !document.getElementById("notice-mount").firstChild,
+      name: (document.querySelector('#server-form-mount input[name="name"]') || {}).value,
       enabled: !document.getElementById("server-test").disabled,
-      msg: (document.getElementById("server-form-msg") || {}).textContent || "",
+      label: document.getElementById("server-test").textContent,
+      focus: document.activeElement && document.activeElement.id,
+      formInert: !!document.getElementById("modal").inert,
     }));
-    after.enabled ? ok("form: Test button is usable again after the answer") : bad("form: Test button is usable again after the answer", "still disabled");
-    after.msg === "" ? ok("form: Test leaves the message line empty") : bad("form: Test leaves the message line empty", JSON.stringify(after.msg));
+    after.noticeGone && after.name === typed ? ok("notice: Escape closes it and leaves the form as typed") : bad("notice: Escape closes it and leaves the form as typed", JSON.stringify(after));
+    after.enabled && after.label === "Test connection" && !after.formInert ? ok("form: Test button is usable again after the answer") : bad("form: Test button is usable again after the answer", JSON.stringify(after));
+    after.focus === "server-test" ? ok("notice: focus returns to the Test button") : bad("notice: focus returns to the Test button", JSON.stringify(after));
   }
+
+  // #1767: Test on a NEW server runs the source half of the startup checks
+  // Save runs, on the source as typed, instead of answering "nothing to
+  // test". A wrong password against the suite's own MySQL is deterministic:
+  // the source connection check fails, and the notice says capture cannot
+  // start, naming the check.
+  await page.click("#server-cancel");
+  await page.click("#server-add");
+  await page.waitForSelector('#server-form-mount input[name="source_host"]', { timeout: 5000 });
+  await page.fill('#server-form-mount input[name="name"]', "e2e-draft");
+  await page.fill('#server-form-mount input[name="source_host"]', "127.0.0.1");
+  await page.fill('#server-form-mount input[name="source_port"]', "13306");
+  await page.fill('#server-form-mount input[name="source_user"]', "root");
+  await page.fill('#server-form-mount input[name="source_password"]', "definitely-not-the-password");
+  await page.click("#server-test");
+  let draft = "";
+  for (let i = 0; i < 60 && !/Capture cannot start|ready to capture|nothing to test/.test(draft); i++) {
+    await page.waitForTimeout(250);
+    draft = await page.evaluate(() => (document.querySelector("#notice-mount .notice") || {}).textContent || "");
+  }
+  /Capture cannot start/.test(draft) && /Source MySQL connection/.test(draft) && !/nothing to test/.test(draft)
+    ? ok("form: Test on a new server runs the source checks")
+    : bad("form: Test on a new server runs the source checks", JSON.stringify(draft.slice(0, 300)));
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  await page.click("#server-cancel");
 
   // Scenario 4 — the REAL missing-index path (not a fabricated string): query
   // a data endpoint against the default (unprovisioned wp) server, take the

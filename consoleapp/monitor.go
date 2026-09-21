@@ -294,6 +294,16 @@ func (m *monitorSupervisor) DeriveIndexDSN(entryID string) (string, error) {
 // The entry's index DB may not exist yet — doctor treats that as fine (init
 // creates it), per #384.
 func (m *monitorSupervisor) Doctor(ctx context.Context, e console.ServerEntry) (*console.DoctorReport, error) {
+	return m.doctor(ctx, e)
+}
+
+// DoctorUnsaved implements console.MonitorController: the same checks as
+// Doctor on a server not saved yet, source half only (#1767).
+func (m *monitorSupervisor) DoctorUnsaved(ctx context.Context, e console.ServerEntry) (*console.DoctorReport, error) {
+	return m.doctor(ctx, e, doctor.ForUnsavedServer())
+}
+
+func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, opts ...doctor.BuildOption) (*console.DoctorReport, error) {
 	if e.SourceDSN == "" {
 		return nil, errors.New("entry has no source configured")
 	}
@@ -314,7 +324,7 @@ func (m *monitorSupervisor) Doctor(ctx context.Context, e console.ServerEntry) (
 			Schemas:     e.Schemas,
 		})
 	default:
-		r = doctor.Build(ctx, e.SourceDSN, e.DSN, e.Schemas, m.rotateRetain)
+		r = doctor.Build(ctx, e.SourceDSN, e.DSN, e.Schemas, m.rotateRetain, opts...)
 	}
 	out := &console.DoctorReport{
 		Passed:   r.Passed,
@@ -345,16 +355,25 @@ func (m *monitorSupervisor) Doctor(ctx context.Context, e console.ServerEntry) (
 	if c := m.replicaOverlapCheck(ctx, e); c != nil {
 		c.Detail = config.ScrubDSNText(c.Detail, e.SourceDSN, e.DSN)
 		out.Checks = append(out.Checks, *c)
-		switch c.Status {
-		case "warn":
-			out.Warnings++
-		case "skip":
-			out.Skipped++
-		default:
-			out.Passed++
-		}
+		tallyCheck(out, c.Status)
 	}
 	return out, nil
+}
+
+// tallyCheck counts one appended check into the report's totals. A "fail" is
+// a failure: Test connection's answer for a new server is Failed == 0 (#1767),
+// so a failure counted as a pass would read as ready.
+func tallyCheck(out *console.DoctorReport, status string) {
+	switch status {
+	case "fail":
+		out.Failed++
+	case "warn":
+		out.Warnings++
+	case "skip":
+		out.Skipped++
+	default:
+		out.Passed++
+	}
 }
 
 // Start implements console.MonitorController: provision the per-source index

@@ -86,10 +86,10 @@ func TestIndexChecksWithAbsentDatabase(t *testing.T) {
 // report and CI would say nothing. Asserted through Build rather than by
 // reading the source, because what matters is that a real run produces it.
 //
-// It also pins the advisory contract the daemons depend on: whatever this
-// check answers on a healthy fixture, it must never be the FAIL that makes
-// watch and up refuse to boot (consoleapp/watch.go passes only the capacity
-// check to ErrExcluding, so any other FAIL is a boot refusal).
+// It also pins the advisory contract with no index to ask: with no index DSN
+// the first-snapshot state is unknown, and the check must not be the FAIL that
+// refuses `up` (#1766 grades a finding FAIL only while the index's first
+// snapshot is known to be pending; TestPrimaryKeyFindingFailsOnlyBeforeTheFirstSnapshot).
 func TestBuildRegistersThePrimaryKeyCheck(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 

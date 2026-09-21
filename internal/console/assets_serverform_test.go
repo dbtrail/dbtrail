@@ -1,96 +1,162 @@
 package console
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// TestServerFormAnswersAboveTheButtons pins the add/edit server form's layout
-// (#1605, #1608): the message and the startup-check cards are appended BEFORE
-// the button row, and the Test button writes its result to its own slot in
-// that row. Appended after the row, both landed below the eyeline of the
-// button that caused them, at the bottom of a modal the scrim scrolls, and a
-// working button read as dead on a fresh install.
-func TestServerFormAnswersAboveTheButtons(t *testing.T) {
+// TestServerFormAnswersInACenteredNotice pins where the add/edit server form
+// answers (#1769, superseding the in-form placement of #1605/#1608): Save and
+// Test open a notice centered on the screen, in its own mount ABOVE #modal,
+// so the form under it keeps every typed value. In-form answers landed below
+// the eyeline of the button that caused them, and a first save's 18 check
+// cards, 14 of them green, hid the one that failed.
+func TestServerFormAnswersInACenteredNotice(t *testing.T) {
 	js := readAsset(t, "app.js")
 	form := jsFunctionBody(t, js, "buildServerForm")
-	// LastIndex, and exactly one of each: a second copy appended after the
-	// row would pass a first-occurrence check and render below the buttons.
+	// The old in-form slots are gone; one summary line stays, above the row.
+	for _, gone := range []string{`id: "doctor-cards"`, `id: "server-test-result"`} {
+		if strings.Contains(form, gone) {
+			t.Errorf("buildServerForm still renders %s: the answer goes back inside the form", gone)
+		}
+	}
 	msg := strings.LastIndex(form, `id: "server-form-msg"`)
-	cards := strings.LastIndex(form, `id: "doctor-cards"`)
 	foot := strings.Index(form, `class: "modal-foot filter-actions"`)
-	if msg < 0 || cards < 0 || foot < 0 {
-		t.Fatalf("buildServerForm lost a node: msg=%d cards=%d foot=%d", msg, cards, foot)
+	if msg < 0 || foot < 0 || strings.Count(form, `id: "server-form-msg"`) != 1 || msg > foot {
+		t.Errorf("the form's summary line must exist once, above the button row (msg=%d foot=%d)", msg, foot)
 	}
-	if strings.Count(form, `id: "server-form-msg"`) != 1 || strings.Count(form, `id: "doctor-cards"`) != 1 {
-		t.Error("buildServerForm creates the message or the check cards more than once")
-	}
-	if msg > foot || cards > foot {
-		t.Errorf("the form message (%d) and the check cards (%d) are appended after the button row (%d); they render below the buttons again", msg, cards, foot)
-	}
-	if !strings.Contains(form, `id: "server-test-result"`) {
-		t.Error("the button row has no slot for the Test result; the answer goes back below the buttons")
-	}
+
 	test := jsFunctionBody(t, js, "testServerForm")
-	if !strings.Contains(test, `"server-test-result"`) {
-		t.Error("testServerForm does not write to the button-row slot")
+	if !strings.Contains(test, "openNotice(") {
+		t.Error("testServerForm does not answer in the notice")
 	}
-	if !strings.Contains(test, "btn.disabled = true") {
+	// The busy state lives on the button, restored in a finally, or a thrown
+	// request leaves Test disabled and reading "Testing" for the life of the
+	// dialog.
+	if !strings.Contains(test, `btn.disabled = true; btn.textContent = "Testing…";`) {
 		t.Error("testServerForm does not show a busy state on the Test button")
 	}
-	// Restored in a finally, or a thrown request leaves Test disabled for the
-	// life of the modal; and the error path writes to the slot, not back
-	// below the buttons.
-	if f := strings.Index(test, "finally {"); f < 0 || strings.Index(test, "btn.disabled = false") < f {
-		t.Error("Test's busy state is not restored in a finally; a thrown request leaves the button disabled")
+	if f := strings.Index(test, "finally {"); f < 0 || !strings.Contains(test[f:], `btn.disabled = false; btn.textContent = "Test connection";`) {
+		t.Error("Test's busy state is not restored in a finally")
 	}
 	if !strings.Contains(test, "catch (err) { show(") {
-		t.Error("testServerForm's error path does not write to the button-row slot")
+		t.Error("testServerForm's error path does not reach the notice")
 	}
-	// Save stays the retry: nothing in saveServer disables a control on a
-	// failed check; the failed first save re-shows the form FROM THE SAVED
-	// ENTRY so the next Save is a PUT of that id, not a second POST the
-	// registry refuses as a duplicate name; and the failure scrolls the first
-	// failing card into view. Negative checks run over the span, the view
-	// that does not fail open on a // inside a string.
+
+	// Save stays the retry: nothing in saveServer disables a control; a
+	// refused save says why in the notice; the failed first save re-shows the
+	// form FROM THE SAVED ENTRY (a PUT on the next Save, not a second POST the
+	// registry refuses as a duplicate name) BEFORE the notice, which the
+	// rebuild would otherwise leave pointing at a detached form.
 	saveSpan := jsFunctionSpan(t, js, "saveServer")
 	save := jsFunctionBody(t, js, "saveServer")
 	if strings.Contains(saveSpan, "disabled = true") {
 		t.Error("saveServer disables a control after a failed check; Save is how the checks are run again")
 	}
-	if !strings.Contains(save, "scrollDoctorIntoView()") {
-		t.Error("a failed startup check no longer scrolls its card into view")
+	if !strings.Contains(save, `openNotice({ tone: "err", title: "Could not save"`) {
+		t.Error("a refused save no longer says why in the notice")
 	}
-	if strings.Contains(saveSpan, "below") {
-		t.Error("saveServer still says the checks are below the buttons")
-	}
-	// The re-show precedes the warn/fail split (so BOTH branches get it) and
-	// every renderDoctor comes after it (showServerForm rebuilds the cards).
-	// First-occurrence checks let the re-show slide into the warn branch
-	// alone and the fail path lose it, which is the duplicate-POST bug.
-	sf, split, rdLast := strings.Index(save, "showServerForm(saved)"), strings.Index(save, "if (res && res.started)"), strings.LastIndex(save, "renderDoctor(res.doctor)")
-	if sf < 0 || split < 0 || rdLast < 0 || sf > split || sf > rdLast {
-		t.Errorf("the failed first save does not re-show the form from the saved entry ahead of both outcome branches (showServerForm at %d, split at %d, last renderDoctor at %d); Save would POST a duplicate", sf, split, rdLast)
-	}
-	// A modal closed mid-save leaves no form to speak through: the outcome
-	// goes to a lasting toast, never a thrown TypeError.
-	if !strings.Contains(save, "if (!showServerForm(saved))") {
-		t.Error("saveServer does not handle the modal being closed while the checks ran")
+	sf, out := strings.Index(save, "if (!showServerForm(saved))"), strings.Index(save, "showStartupOutcome(res);")
+	if sf < 0 || out < 0 || out < sf || strings.Count(save, "showStartupOutcome(res);") != 1 {
+		t.Errorf("the startup outcome must open once, after the form is re-shown from the saved entry (re-show at %d, outcome at %d)", sf, out)
 	}
 	show := jsFunctionBody(t, js, "showServerForm")
 	if !strings.Contains(show, "if (!addWrap || !mountEl) return false;") || !strings.Contains(show, "return true;") {
 		t.Error("showServerForm does not report a missing mount")
 	}
-	// Both the warn and the fail branch scroll the cards into view: the
-	// rebuild focuses the Name field at the top, and "review the warnings
-	// above" is only true if the warnings are in view.
-	if n := strings.Count(save, "scrollDoctorIntoView()"); n != 2 {
-		t.Errorf("saveServer scrolls the check cards into view on %d of the 2 outcome branches", n)
+	// The row's own Start reaches the same notice over the server's form, and
+	// a failed request still says so in a lasting toast.
+	row := jsFunctionBody(t, js, "startMonitorRow")
+	if !strings.Contains(row, "if (opened) showStartupOutcome(res);") || !strings.Contains(row, `toastError("Could not start: " + ((res && res.requestError) || "no answer"))`) {
+		t.Error("startMonitorRow lost the notice or the toast for a failed request")
 	}
-	// The row's own Start button path got the same treatment.
-	start := jsFunctionSpan(t, js, "startMonitorRow")
-	if strings.Contains(start, "below") || strings.Count(start, "scrollDoctorIntoView()") != 1 || strings.Contains(start, "if (!res.started) scrollDoctorIntoView") {
-		t.Error("startMonitorRow still points below the buttons or scrolls only the fail branch into view")
+
+	// Only failures, or only warnings, are on top; every check stays one
+	// click away. A warning is not dressed as a failure.
+	notice := jsFunctionBody(t, js, "startupNotice")
+	if !strings.Contains(notice, `c.status === (res.started ? "warn" : "fail")`) {
+		t.Error("startupNotice no longer puts only the failures (or only the warnings) on top")
+	}
+	if !strings.Contains(notice, `el("summary", { text: "All "`) {
+		t.Error("startupNotice dropped the full list of checks")
+	}
+	if !strings.Contains(notice, `tone: "warn", title: "Capture started"`) || !strings.Contains(notice, `tone: "err", title: "Capture did not start"`) {
+		t.Error("startupNotice lost the warn/fail split in its tone")
+	}
+
+	// Escape closes the notice and only it: globalKeydown must take it
+	// before the branch that empties #modal, and the error toast yields.
+	keys := jsFunctionBody(t, js, "globalKeydown")
+	n, modal := strings.Index(keys, "if (noticeOpen())"), strings.Index(keys, `getElementById("modal")`)
+	if n < 0 || modal < 0 || n > modal || !strings.Contains(keys, "closeNotice();") {
+		t.Errorf("globalKeydown does not close the notice before it can empty #modal (notice at %d, #modal at %d); one Escape would close the form too", n, modal)
+	}
+	if !strings.Contains(jsFunctionBody(t, js, "toastEscape"), "if (noticeOpen()) return;") {
+		t.Error("toastEscape does not yield to the notice")
+	}
+	// The rest of the page goes inert under the notice and comes back.
+	open, closeFn := jsFunctionBody(t, js, "openNotice"), jsFunctionBody(t, js, "closeNotice")
+	if !strings.Contains(open, "n.inert = true;") || !strings.Contains(closeFn, "n.inert = false;") {
+		t.Error("the notice no longer makes the page under it inert, or never gives it back")
+	}
+
+	// The sign-in gate and the notice never share the screen: under a notice
+	// the gate would be inert, and Escape stops at the gate's own guard. A
+	// 401 on Save opens "Could not save" first and raises the gate after.
+	if !strings.Contains(jsFunctionBody(t, js, "showLoginOverlay"), "closeNotice();") {
+		t.Error("showLoginOverlay does not close a notice; the sign-in gate would sit inert under it")
+	}
+	if !strings.Contains(open, "if (!mount || loginGateRaised) return;") {
+		t.Error("openNotice opens over a raised sign-in gate")
+	}
+	// A start request that failed is said as such, with what the server said,
+	// on the closed-dialog path too (the old toast from startMonitor is gone).
+	if !strings.Contains(save, `if (!res || res.requestError) toastError("Could not start capture for "`) {
+		t.Error("with the dialog closed, a failed start request is reported as failed checks")
+	}
+	if !strings.Contains(notice, "The request to start capture failed: ") || strings.Contains(notice, "did not answer") {
+		t.Error("startupNotice says DBTrail did not answer, also when it answered with an error")
+	}
+	if !strings.Contains(row, "if (!res || res.requestError)") {
+		t.Error("startMonitorRow lost its guard for an empty answer")
+	}
+	// A notice goes over a form only when one is on screen, and a Test answer
+	// whose form is gone is dropped rather than shown over another server.
+	if !strings.Contains(jsFunctionBody(t, js, "editServer"), "return showServerForm(s);") {
+		t.Error("editServer reports a form that may not be on screen")
+	}
+	if !strings.Contains(test, "if (btn && btn.isConnected) openNotice(") {
+		t.Error("a Test answer whose form is gone still opens, over whatever form is there now")
+	}
+	// Other capture-phase Escape handlers yield to the notice, so one Escape
+	// cannot cancel a hidden request or close a calendar behind it.
+	for _, fn := range []string{"openBusyModal", "toggleDatePicker"} {
+		if !strings.Contains(jsFunctionBody(t, js, fn), "if (noticeOpen()) return;") {
+			t.Errorf("%s's Escape handler does not yield to the notice", fn)
+		}
+	}
+
+	html := readAsset(t, "index.html")
+	if !strings.Contains(html, `<div id="notice-mount"></div>`) {
+		t.Fatal("index.html has no notice mount")
+	}
+	css := readAsset(t, "style.css")
+	scrim := cssRule(t, css, ".notice-scrim")
+	if !strings.Contains(scrim, "align-items: center; justify-content: center;") {
+		t.Errorf("the notice is not centered on the screen: %s", scrim)
+	}
+	zOf := func(rule string) int {
+		m := regexp.MustCompile(`z-index:\s*(\d+)`).FindStringSubmatch(rule)
+		if m == nil {
+			t.Fatalf("no z-index in %s", rule)
+		}
+		z, _ := strconv.Atoi(m[1])
+		return z
+	}
+	if z := zOf(scrim); z <= zOf(cssRule(t, css, ".modal-scrim")) || z <= zOf(cssRule(t, css, ".cmdk-scrim")) {
+		t.Errorf("the notice (z-index %d) does not stack above the servers dialog and the palette", z)
 	}
 }
 
@@ -161,6 +227,20 @@ func TestServerThatWillNotStreamIsMarked(t *testing.T) {
 	}
 }
 
+// TestServerFormSectionsCannotOutgrowTheDialog (#1765): the source fieldset
+// grew to the width of the grants box's longest line, because a <fieldset>
+// defaults to min-inline-size: min-content, and the dialog's overflow-x:
+// hidden cut off Source port, Schemas and two S3 fields. This pins the reset
+// that stops it; the proof that nothing is cut off is geometric and lives in
+// the console e2e ("form: every field fits inside the dialog"), because what
+// triggers it is the length of a string in app.js, which no CSS check sees.
+func TestServerFormSectionsCannotOutgrowTheDialog(t *testing.T) {
+	css := readAsset(t, "style.css")
+	if rule := cssRule(t, css, ".form-section"); !strings.Contains(rule, "min-inline-size: 0;") {
+		t.Errorf(".form-section lost min-inline-size: 0; a long line in the grants box widens the form past the dialog again: %s", rule)
+	}
+}
+
 // TestIcebergStageCardsSitOnADifferentGround (#1573): the .ice-stage cards
 // were --surface-2 on a --surface-2 panel, a measured 1.000 contrast the
 // stylesheet's own comment admitted.
@@ -182,5 +262,29 @@ func TestIcebergStageCardsSitOnADifferentGround(t *testing.T) {
 	}
 	if !strings.Contains(css, "--panel-bg: var(--surface-2);") {
 		t.Error("no direction sets --panel-bg to --surface-2 any more; re-check the .ice-stage card against its ground")
+	}
+}
+
+// TestServerFormTestShowsTheStartupChecksForANewServer (#1767): a new server's
+// Test comes back with the source half of the startup checks, and the notice
+// shows them the way Save's does: failures on top, else warnings, else one
+// line, with every check one click away.
+func TestServerFormTestShowsTheStartupChecksForANewServer(t *testing.T) {
+	js := readAsset(t, "app.js")
+	test := jsFunctionBody(t, js, "testServerForm")
+	if !strings.Contains(test, "res.doctor ? unsavedTestNotice(res)") {
+		t.Error("testServerForm does not show the startup checks a new server's Test returns")
+	}
+	n := jsFunctionBody(t, js, "unsavedTestNotice")
+	f, w := strings.Index(n, "if (fails.length)"), strings.Index(n, "if (warns.length)")
+	if f < 0 || w < 0 || f > w {
+		t.Errorf("unsavedTestNotice must put failures before warnings (fails at %d, warns at %d)", f, w)
+	}
+	if !strings.Contains(n, `"Capture cannot start from this database yet.`) || !strings.Contains(n, `el("summary", { text: "All "`) {
+		t.Error("unsavedTestNotice lost its failure line or the full list of checks")
+	}
+	// A failed S3 store keeps the answer red even over a clean database.
+	if strings.Count(n, `s3Bad ? "err"`) != 2 {
+		t.Error("a failed S3 store no longer turns a clean Test answer red")
 	}
 }

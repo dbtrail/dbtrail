@@ -128,13 +128,78 @@ func connectWithoutDB(dsn string) (*sql.DB, error) {
 // every caller that does not care.
 type BuildOption func(*buildConfig)
 
-type buildConfig struct{ retainNote string }
+type buildConfig struct {
+	retainNote string
+	snapshot   snapshotState
+	sourceOnly bool
+}
 
 // WithRetainNote names WHERE the retention window came from, for the capacity
 // projection to print beside it (#1709): with no --retain set, the window is
 // the one each index was created under, not the running default.
 func WithRetainNote(note string) BuildOption {
 	return func(c *buildConfig) { c.retainNote = note }
+}
+
+// ForUnsavedServer runs the source half of the checks for a server that is not
+// saved yet: the web interface's Test connection on a new server (#1767). Its
+// index does not exist, so the first schema snapshot is certainly still to be
+// taken, and the index checks are left out: the write-access check creates and
+// drops a probe database, and Test has to leave nothing behind. Save runs them.
+func ForUnsavedServer() BuildOption {
+	return func(c *buildConfig) {
+		c.snapshot = snapshotPending
+		c.sourceOnly = true
+	}
+}
+
+// snapshotState is what the index says about its first schema snapshot, the
+// one step where a table without a primary key stops capture for every table
+// (#1766). metadata.EnsureResolver takes that snapshot when schema_snapshots
+// holds none, and TakeSnapshot refuses it whole on such a table. Later
+// snapshots, after a schema change, exclude the table and keep the rest.
+type snapshotState int
+
+const (
+	snapshotUnknown snapshotState = iota // no index to ask, or asking failed
+	snapshotPending                      // the first snapshot is still to be taken
+	snapshotTaken                        // the index already holds one
+)
+
+// firstSnapshotState asks the index whether its first schema snapshot is still
+// to be taken, with EnsureResolver's own question. An index database that does
+// not exist yet (1049), or has no schema_snapshots table (1146), is pending:
+// init creates both and the first snapshot follows. Anything else it cannot
+// answer is unknown, which grades the missing-key finding a warning, as before.
+func firstSnapshotState(ctx context.Context, indexDSN string) snapshotState {
+	cfg, err := mysql.ParseDSN(indexDSN)
+	if err != nil || cfg.DBName == "" {
+		return snapshotUnknown
+	}
+	db, err := config.Connect(indexDSN)
+	if err != nil {
+		if isUnknownDatabaseErr(err) {
+			return snapshotPending
+		}
+		return snapshotUnknown
+	}
+	defer db.Close()
+	return snapshotStateOn(ctx, db)
+}
+
+func snapshotStateOn(ctx context.Context, db *sql.DB) snapshotState {
+	var id int64
+	err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(snapshot_id), 0) FROM schema_snapshots").Scan(&id)
+	var me *mysql.MySQLError
+	switch {
+	case errors.As(err, &me) && me.Number == 1146:
+		return snapshotPending
+	case err != nil:
+		return snapshotUnknown
+	case id == 0:
+		return snapshotPending
+	}
+	return snapshotTaken
 }
 
 func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, indexRetain time.Duration, opts ...BuildOption) *Report {
@@ -175,9 +240,17 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	report.add(checkServerIDCollision(ctx, sourceDB, sourceDSN))
 	report.add(checkFKCascades(sourceDB, schemas))
 	report.add(checkSchemaVisibility(ctx, sourceDB, schemas))
-	report.add(checkPrimaryKeys(sourceDB, schemas))
+	snapshot := cfg.snapshot
+	if snapshot == snapshotUnknown && indexDSN != "" {
+		snapshot = firstSnapshotState(ctx, indexDSN)
+	}
+	report.add(checkPrimaryKeys(sourceDB, schemas, snapshot))
+	report.add(checkInnoDB(sourceDB, schemas, snapshot))
 
 	// ── Index MySQL checks (optional) ─────────────────────────────────────────
+	if cfg.sourceOnly {
+		return report
+	}
 	if indexDSN != "" {
 		indexCfg, parseErr := mysql.ParseDSN(indexDSN)
 		if parseErr != nil {
@@ -843,9 +916,8 @@ func checkFKCascades(db *sql.DB, schemas []string) CheckResult {
 const pkNameLimit = 10
 
 // PrimaryKeyCheckName is the check that reports tables with no primary key.
-// Exported so the daemons can hold it advisory the way they hold the capacity
-// check: nothing here gates the snapshot, so a failure to ASK the question
-// must not refuse boot on a source that is capturing fine.
+// Its FAIL (only while the first snapshot is pending) refuses boot in both
+// daemons, like any other FAIL: the stream would refuse a moment later anyway.
 const PrimaryKeyCheckName = "Every table has a PRIMARY KEY"
 
 // checkPrimaryKeys reports tables the snapshot will not capture for lack of a
@@ -861,12 +933,16 @@ const PrimaryKeyCheckName = "Every table has a PRIMARY KEY"
 // MariaDB's SYSTEM VERSIONED tables, which is the one shape where the data
 // loss is total (#1272).
 //
-// WARN, never FAIL, on every path including its own errors. Nothing downstream
-// consumes this answer: the snapshot re-derives it and refuses or excludes on
-// its own. Failing here would let a transient information_schema error stop
-// capture on a source that is otherwise healthy, which is the trade
+// A finding is a FAIL while the index's first snapshot is still to be taken
+// (#1766): that snapshot refuses whole, so nothing is captured for ANY table
+// until every one has a key, and a warning let the web interface say "started"
+// over a stream that never would. Once a snapshot exists the finding is a WARN,
+// since later snapshots exclude the table and capture the rest, and failing
+// then would refuse to restart a server that captures fine. Unknown (no index
+// to ask) stays a WARN, and so does this check's own query error: a transient
+// information_schema error must not stop capture on a healthy source, the trade
 // checkIndexCapacity already refused to make.
-func checkPrimaryKeys(db *sql.DB, schemas []string) CheckResult {
+func checkPrimaryKeys(db *sql.DB, schemas []string, snapshot snapshotState) CheckResult {
 	tables, err := metadata.TablesWithoutPrimaryKey(db, schemas)
 	switch {
 	case errors.Is(err, metadata.ErrNoColumnsVisible):
@@ -905,9 +981,10 @@ func checkPrimaryKeys(db *sql.DB, schemas []string) CheckResult {
 	if len(schemas) > 0 {
 		scope = " --schemas " + strings.Join(schemas, ",")
 	}
+	status, verdict := firstSnapshotVerdict(snapshot, "they do")
 	return CheckResult{
 		Name:   PrimaryKeyCheckName,
-		Status: StatusWarn,
+		Status: status,
 		Detail: detail,
 		// States what HAPPENS, not what degrades. An earlier draft of this said
 		// the tables were captured but could not be addressed by row, which is
@@ -929,8 +1006,67 @@ func checkPrimaryKeys(db *sql.DB, schemas []string) CheckResult {
 			"  ALTER TABLE <schema>.<table> ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;\n\n" +
 			"To list them all yourself, in the same scope this check used:\n\n" +
 			"  bintrail doctor --source-dsn <dsn>" + scope + "\n\n" +
-			"This check is advisory: it does not block anything. The snapshot is what\n" +
-			"refuses, when it runs.",
+			verdict,
+	}
+}
+
+// firstSnapshotVerdict grades a finding the snapshot refuses (a table with no
+// primary key, a table not on InnoDB) by where the index stands (#1766), and
+// says why in the remediation's last lines. until completes "Capture cannot
+// start until ...".
+func firstSnapshotVerdict(snapshot snapshotState, until string) (CheckStatus, string) {
+	switch snapshot {
+	case snapshotPending:
+		return StatusFail, "Capture cannot start until " + until + ". This index has no schema snapshot\n" +
+			"yet, and the first one refuses such a table, so no table at all would be\n" +
+			"captured."
+	case snapshotTaken:
+		return StatusWarn, "This index already has a schema snapshot, so this does not stop capture,\n" +
+			"but these tables are not captured."
+	}
+	return StatusWarn, "This check is advisory: it does not block anything. The snapshot is what\n" +
+		"refuses, when it runs."
+}
+
+// InnoDBCheckName is the check that reports tables not on InnoDB, the other
+// kind the snapshot refuses beside a missing primary key.
+const InnoDBCheckName = "Every table uses InnoDB"
+
+// checkInnoDB reports tables the snapshot refuses for not being on InnoDB,
+// graded like checkPrimaryKeys (#1766): a FAIL while the first snapshot is
+// pending, since that snapshot refuses whole, a WARN otherwise, and a WARN on
+// its own query error. Same classifier as the snapshot, for the same reason.
+func checkInnoDB(db *sql.DB, schemas []string, snapshot snapshotState) CheckResult {
+	_, tables, err := metadata.TablesTheSnapshotRefuses(db, schemas)
+	switch {
+	case errors.Is(err, metadata.ErrNoColumnsVisible):
+		return CheckResult{Name: InnoDBCheckName, Status: StatusSkip,
+			Detail: "no tables are visible in the requested scope, so this was not checked"}
+	case err != nil:
+		return CheckResult{Name: InnoDBCheckName, Status: StatusWarn,
+			Detail: "could not be checked: " + err.Error(),
+			Remediation: "The account needs to read information_schema.COLUMNS and\n" +
+				"information_schema.TABLES for the monitored schemas."}
+	case len(tables) == 0:
+		return CheckResult{Name: InnoDBCheckName, Status: StatusPass}
+	}
+	names := tables
+	if len(names) > pkNameLimit {
+		names = names[:pkNameLimit]
+	}
+	detail := fmt.Sprintf("%d table(s) not on InnoDB: %s", len(tables), strings.Join(names, ", "))
+	if len(tables) > len(names) {
+		detail += fmt.Sprintf(", and %d more", len(tables)-len(names))
+	}
+	status, verdict := firstSnapshotVerdict(snapshot, "they are on InnoDB")
+	return CheckResult{
+		Name:   InnoDBCheckName,
+		Status: status,
+		Detail: detail,
+		Remediation: "These tables are NOT captured: bintrail reads row changes from InnoDB tables\n" +
+			"only. Convert each one (it rewrites the table, so pick a quiet moment):\n\n" +
+			"  ALTER TABLE <schema>.<table> ENGINE=InnoDB;\n\n" +
+			verdict,
 	}
 }
 

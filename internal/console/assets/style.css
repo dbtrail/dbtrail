@@ -1237,6 +1237,39 @@ button { font-family: inherit; }
 .modal-x:hover { background: var(--surface-2); color: var(--ink); }
 .modal-body { padding: 18px 28px 28px; }
 
+/* notice: an action's outcome, centered above the dialog that asked (#1769).
+   Above #modal (50) and the palette (60); the tone is a colored top edge, so a
+   warning reads as information and only a failure reads red. */
+.notice-scrim {
+  position: fixed; inset: 0; z-index: 70;
+  background: var(--scrim);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.notice {
+  width: 100%; max-width: 560px; max-height: calc(100vh - 48px);
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line); border-top: 4px solid var(--ink-3);
+  border-radius: 18px;
+  box-shadow: 0 30px 80px -24px oklch(0.3 0.03 305 / 0.45);
+  overflow: hidden;
+}
+.notice.ok { border-top-color: var(--insert); }
+.notice.err { border-top-color: var(--delete); }
+.notice.warn { border-top-color: var(--ochre); }
+@media (prefers-reduced-motion: no-preference) {
+  .notice { animation: modalin .32s var(--ease-out); }
+}
+.notice-head { padding: 22px 24px 4px; }
+.notice-head .modal-title { margin: 0; }
+/* The body scrolls; the button row below it never leaves the screen. */
+.notice-body { padding: 8px 24px 4px; overflow-y: auto; }
+.notice-line { margin: 0 0 10px; font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
+.notice-body .doctor-cards { margin-top: 4px; }
+.notice-all { margin: 14px 0 8px; font-size: 13px; color: var(--ink-2); }
+.notice-all > summary { cursor: pointer; }
+.notice-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 24px 20px; border-top: 1px solid var(--line-soft); }
+
 .srv-list { display: flex; flex-direction: column; }
 .srv-item {
   display: flex; align-items: center; gap: 12px;
@@ -1250,6 +1283,11 @@ button { font-family: inherit; }
 .form-section {
   border: 1px solid var(--line); border-radius: var(--radius);
   padding: 18px 18px 20px; margin-top: 18px; position: relative;
+  /* A <fieldset> defaults to min-inline-size: min-content, so one long line in
+     a white-space: pre child (the grants box) widened it past the dialog, whose
+     overflow-x: hidden then cut off Source port and Schemas (#1765). Zero lets
+     that child scroll inside its own frame instead. */
+  min-inline-size: 0;
 }
 .form-section > legend, .form-legend {
   font-family: var(--f-mono); font-size: 11px; font-weight: 600;

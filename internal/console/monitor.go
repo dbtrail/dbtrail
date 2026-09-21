@@ -81,6 +81,12 @@ type MonitorController interface {
 	// Doctor runs the preflight checks against the entry's source (and its
 	// index DSN, which may not exist yet — that is a pass, init creates it).
 	Doctor(ctx context.Context, e ServerEntry) (*DoctorReport, error)
+	// DoctorUnsaved runs the source half of those checks for a server that is
+	// not saved yet (#1767), the web interface's Test connection on a new
+	// server. It writes nothing anywhere: the index checks are left out (the
+	// write-access one creates a probe database), and the first schema
+	// snapshot counts as pending, since a new server's index does not exist.
+	DoctorUnsaved(ctx context.Context, e ServerEntry) (*DoctorReport, error)
 	// Start provisions the entry's index database (CREATE DATABASE + tables +
 	// schema migration — the supervisor is a WRITER, the same role the cmd
 	// layer plays for the boot DSN, so the console's never-migrates invariant
