@@ -3077,19 +3077,31 @@ try {
     if (sel.value !== "recover-inputs") { sel.value = "recover-inputs"; sel.dispatchEvent(new Event("change")); }
     document.querySelector(".vfy-run").click();
   });
-  await page.waitForFunction(() => document.querySelector(".vfy-results .chip-done") !== null, undefined, { timeout: 60000 });
+  // Finished is any terminal chip: the chip wears the run's VERDICT, and on
+  // this fixture the real run proves no table. Every row in run.sh has
+  // exactly one recorded change: an insert has nothing to check, and a lone
+  // UPDATE or DELETE has no earlier state in the window to compare its
+  // before-image with, so every table is inconclusive. It used to wear a
+  // green DONE all the same, which is the overpromise this leg now pins.
+  await page.waitForFunction(() => {
+    const c = document.querySelector(".vfy-results .vfy-summary .chip");
+    return c && !/RUNNING/.test(c.textContent);
+  }, undefined, { timeout: 60000 });
   const vfyDone = await page.evaluate(() => ({
     verdictSentence: (document.querySelector(".vfy-results .form-hint") || {}).textContent || "",
     rows: document.querySelectorAll(".vfy-results .vfy-row").length,
-    failChip: !!document.querySelector(".vfy-results .chip-fail"),
+    chip: (document.querySelector(".vfy-results .vfy-summary .chip") || {}).textContent || "",
+    counts: (document.querySelector(".vfy-results .vfy-summary .stg-age:last-child") || {}).textContent || "",
   }));
-  (vfyDone.rows > 0 && vfyDone.verdictSentence.length > 0 && !vfyDone.failChip)
-    ? ok("verification: a real recover-inputs run completes with structured rows and a verdict sentence")
-    : bad("verification: a real recover-inputs run completes with structured rows and a verdict sentence", JSON.stringify(vfyDone));
+  const provedSome = /^[1-9]\d* match/.test(vfyDone.counts);
+  (vfyDone.rows > 0 && vfyDone.verdictSentence.length > 0 && vfyDone.chip !== "FAILED"
+    && (provedSome ? vfyDone.chip === "DONE" : vfyDone.chip === "NOTHING PROVEN"))
+    ? ok("verification: a real recover-inputs run completes with structured rows, and its chip says what it proved")
+    : bad("verification: a real recover-inputs run completes with structured rows, and its chip says what it proved", JSON.stringify(vfyDone));
 
   // (e) history (#1417): the finished run is a disclosure row that expands to
   // its per-table detail — data the old renderer dropped on the floor — and
-  // LAST VERIFIED wears the age treatment, not the live one (#1420).
+  // LAST CHECK wears the age treatment, not the live one (#1420).
   await page.waitForFunction(() => document.querySelectorAll(".vfy-histrow").length > 0);
   const vfyHist = await page.evaluate(() => {
     const row = document.querySelector(".vfy-histrow");
@@ -3138,8 +3150,8 @@ try {
     ? ok("verification: Explain renders on a live run and never on a history record — even when the option is forgotten")
     : bad("verification: Explain renders on a live run and never on a history record — even when the option is forgotten", JSON.stringify(vfyDeadBtn));
   (vfyHist.lastChipAge && vfyHist.lastChipNotLive)
-    ? ok("verification: LAST VERIFIED wears the age treatment, distinct from RUNNING")
-    : bad("verification: LAST VERIFIED wears the age treatment, distinct from RUNNING", JSON.stringify(vfyHist));
+    ? ok("verification: LAST CHECK wears the age treatment, distinct from RUNNING")
+    : bad("verification: LAST CHECK wears the age treatment, distinct from RUNNING", JSON.stringify(vfyHist));
 
   // Storage became Retention (#1543). Navigating to the OLD route is the
   // check: it must land on the new page with the URL rewritten, or every

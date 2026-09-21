@@ -7416,7 +7416,7 @@ function verifyRegions(servers, opts) {
   control.append(el("div", { class: "vfy-region-head" },
     el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Run a check" }))));
   const modeSel = el("select", { class: "select vfy-mode" },
-    el("option", { value: "baseline-anchored", text: "Compare two saved snapshots (recommended)" }));
+    el("option", { value: "baseline-anchored", text: "Compare two saved snapshots" }));
   if (capsCache.verify_live_source) {
     modeSel.append(el("option", { value: "live-source", text: "Compare against your live database (slower)" }));
   }
@@ -7475,7 +7475,7 @@ function verifyRegions(servers, opts) {
 // operator browses. Source of truth for the long form is the issue; keep
 // these three claims per entry: proof, prerequisite, cost.
 const VFY_MODE_HELP = {
-  "baseline-anchored": "Takes your two newest snapshots, replays the recorded changes from the older one forward, and checks the result matches the newer one. Strong evidence your backup chain is sound. Needs two snapshots. Never touches your database.",
+  "baseline-anchored": "Takes your two newest snapshots, replays the recorded changes from the older one forward, and compares the result with the newer one. It tests against your database only when the newer snapshot was read from it; a table the newer one stores as changes beside its previous file is reported as not checked. Needs two snapshots. Never touches your database.",
   "live-source": "Rebuilds each table from a snapshot plus the recorded changes, then compares it row by row against the real table. The strongest content check, and the only one that reads your database: it takes time, adds load, and needs a quiet table, because writes that land during the scan show up as mismatches. Run it outside busy hours.",
   "recover-inputs": "Reads the index's own record of each change and checks that every row's history holds together from one change to the next. This is the data an undo script is built from. Needs no snapshot and never touches your database.",
 };
@@ -7503,18 +7503,31 @@ async function createVerify(id, mode, btn, resultsEl) {
   // justFinished: the running→done transition gets a one-shot highlight so
   // completion is perceptible off-chip (#1420); the toast below is the other
   // half for an operator who looked away.
-  if (done) renderVerifyResults(resultsEl, done, id, { justFinished: done.state === "succeeded" });
+  const signal = vfyFinishSignal(done);
+  if (done) renderVerifyResults(resultsEl, done, id, { justFinished: signal.flash });
   // The finished run is now in the persisted history too — refresh the list.
   const histBox = document.querySelector(".vfy-history");
   if (histBox) loadVerifyHistory(id, histBox);
-  if (done && done.state === "succeeded") {
-    const s = done.summary || {};
-    toast(done.note || ("Verification complete: " + vfySummaryText(s)));
-  } else if (done) {
-    toastError("Verification failed: " + (done.last_error || "unknown error"));
-  } else {
-    toast("Verification is still running. Check back shortly.");
+  (signal.sticky ? toastError : toast)(signal.message);
+}
+
+// vfyFinishSignal is how a run's end reaches an operator who looked away, by
+// its verdict: only a verified run gets the green flash, and a run that found
+// a difference, hit errors or proved nothing gets a message that stays until
+// dismissed. "succeeded" only says the run reached its end; a green flash and
+// a toast gone in two seconds over a mismatch said the opposite of the chip.
+function vfyFinishSignal(done) {
+  if (!done) return { flash: false, sticky: false, message: "Verification is still running. Check back shortly." };
+  if (done.state !== "succeeded") {
+    return { flash: false, sticky: true, message: "Verification failed: " + (done.last_error || "unknown error") };
   }
+  if (done.verdict === "verified") {
+    return { flash: true, sticky: false, message: "Verification complete: " + vfySummaryText(done.summary || {}) };
+  }
+  if (done.verdict === "no_predecessor") {
+    return { flash: false, sticky: false, message: done.note || "Only one snapshot so far, nothing to compare yet." };
+  }
+  return { flash: false, sticky: true, message: "Check finished, " + vfyHeadline(done) };
 }
 
 // pollVerify polls the per-server verify status until it leaves "running" (or
@@ -7589,10 +7602,35 @@ function vfyVerdictSentence(s) {
   return parts.join("; ") + ".";
 }
 
+// vfyHeadline says what one finished run proved, in counts, by the verdict
+// the server computed with the rule `bintrail verify` exits on (the record's
+// verdict field). Never a lone "verified": a run whose tables all came back
+// not checked says so, and one that proved some says how many were not.
+function vfyHeadline(rec) {
+  if (rec.state === "failed") return "failed: " + (rec.last_error || "unknown error");
+  const s = rec.summary || {};
+  const benign = s.inconclusive_nothing_to_check || 0;
+  const notChecked = (s.inconclusive || 0) - benign;
+  switch (rec.verdict) {
+    case "no_predecessor":
+      return "only one snapshot so far, nothing to compare yet";
+    case "mismatch":
+    case "error":
+      return [s.match + " match", s.mismatch + " mismatch", s.error + " error"]
+        .concat(notChecked > 0 ? [notChecked + " not checked"] : []).join(" · ");
+  }
+  const parts = [];
+  if (s.match > 0) parts.push(s.match + " match");
+  if (notChecked > 0) parts.push(notChecked + " not checked");
+  if (benign > 0) parts.push(benign + " nothing to check");
+  if (!parts.length) parts.push("no table was compared");
+  return (rec.verdict === "unproven" ? "nothing proven: " : "") + parts.join(" · ");
+}
+
 const VFY_MODE_LABEL = { "baseline-anchored": "compared two saved snapshots", "live-source": "compared against the live database", "recover-inputs": "checked recovery inputs in the index" };
 
-// loadVerifyHistory renders the persisted run history into box: a "last
-// verified" headline plus the most recent runs (newest first; the server
+// loadVerifyHistory renders the persisted run history into box: a "LAST
+// CHECK" headline saying what the newest run proved, plus the most recent runs (newest first; the server
 // stores up to 20 per server, this list shows up to 8). Manual runs,
 // scheduled runs and scheduled skips all appear — the daemon's
 // --verify-interval loop writes the same store. On a fetch error (including
@@ -7613,17 +7651,15 @@ async function loadVerifyHistory(id, box) {
   const latest = recs.find((r) => r.state === "succeeded" || r.state === "failed");
   if (latest && latest.finished_at) {
     const sec = (Date.now() - Date.parse(latest.finished_at)) / 1000;
-    const s = latest.summary || {};
     // chip-age, NOT chip-mon and NOT the live treatment: this is a staleness
     // age, and it used to wear the same amber as RUNNING (#1420) — a live
-    // state and an old fact were indistinguishable at a glance.
+    // state and an old fact were indistinguishable at a glance. LAST CHECK,
+    // not LAST VERIFIED: it headed runs that proved nothing too, while the
+    // CLI, the webhook and the metric all called them unproven. What the
+    // run proved is the text beside it (vfyHeadline), by the server's verdict.
     box.append(el("div", { class: "vfy-summary" },
-      el("span", { class: "chip chip-age", text: "LAST VERIFIED " + agoText(sec) }),
-      el("span", { class: "stg-age", text: latest.state === "failed"
-        ? "failed: " + (latest.last_error || "unknown error")
-        : ((s.mismatch || s.error)
-          ? s.match + " match · " + s.mismatch + " mismatch · " + s.error + " error"
-          : s.match + "/" + s.total + " match") })));
+      el("span", { class: "chip chip-age", text: "LAST CHECK " + agoText(sec) }),
+      el("span", { class: "stg-age", text: vfyHeadline(latest) })));
   }
   recs.slice(0, 8).forEach((r, i) => {
     const s = r.summary || {};
@@ -7721,8 +7757,23 @@ function renderVerifyResults(container, status, id, opts) {
   // from every age/staleness chip on the page (#1420): the old amber
   // chip-mon was also the LAST VERIFIED treatment, so a glance could not
   // tell "in flight" from "13h old".
-  const chipCls = { running: "chip chip-live", succeeded: "chip chip-done", failed: "chip chip-fail" }[status.state] || "chip chip-mon";
-  const stateLabel = { running: "RUNNING", succeeded: "DONE", failed: "FAILED" }[status.state] || status.state.toUpperCase();
+  // A finished run wears its VERDICT, not its state: "succeeded" only means
+  // it ran to the end, and a green DONE over a run that proved no table, or
+  // found a difference, told the operator the opposite of the rows below.
+  // The verdict is the server's, the rule `bintrail verify` exits on; no
+  // second rule here, so a run whose tables all had nothing to check is
+  // NOTHING PROVEN on this page as it is a non-zero exit there. Green only for "verified": a verdict this page does
+  // not know is a neutral FINISHED, never a pass.
+  const VERDICT_CHIP = {
+    verified: ["chip chip-done", "DONE"],
+    mismatch: ["chip chip-fail", "MISMATCH"],
+    error: ["chip chip-fail", "ERRORS"],
+    unproven: ["chip chip-fail", "NOTHING PROVEN"],
+    no_predecessor: ["chip chip-age", "NOTHING TO COMPARE"],
+  };
+  const byVerdict = status.state === "succeeded" && (VERDICT_CHIP[status.verdict] || ["chip chip-age", "FINISHED"]);
+  const chipCls = byVerdict ? byVerdict[0] : ({ running: "chip chip-live", succeeded: "chip chip-done", failed: "chip chip-fail" }[status.state] || "chip chip-mon");
+  const stateLabel = byVerdict ? byVerdict[1] : ({ running: "RUNNING", succeeded: "DONE", failed: "FAILED" }[status.state] || status.state.toUpperCase());
   const summaryRow = el("div", { class: "vfy-summary" + ((opts && opts.justFinished) ? " vfy-flash" : "") },
     el("span", { class: chipCls, text: stateLabel }));
   if (status.mode) summaryRow.append(el("span", { class: "stg-age", text: VFY_MODE_LABEL[status.mode] || status.mode }));

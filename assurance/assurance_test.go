@@ -70,6 +70,14 @@ func TestConstantsMatchTheCore(t *testing.T) {
 		{"VerifyTableMismatch", VerifyTableMismatch, string(verify.StatusMismatch)},
 		{"VerifyTableInconclusive", VerifyTableInconclusive, string(verify.StatusInconclusive)},
 		{"VerifyTableError", VerifyTableError, string(verify.StatusError)},
+		// The verdicts against their wire values, not against the constants
+		// they alias (which could not fail): the console page and embedders
+		// compare these strings.
+		{"VerifyVerdictVerified", VerifyVerdictVerified, "verified"},
+		{"VerifyVerdictMismatch", VerifyVerdictMismatch, "mismatch"},
+		{"VerifyVerdictError", VerifyVerdictError, "error"},
+		{"VerifyVerdictUnproven", VerifyVerdictUnproven, "unproven"},
+		{"VerifyVerdictNoPredecessor", VerifyVerdictNoPredecessor, "no_predecessor"},
 		{"VerifyModeBaselineAnchored", string(VerifyModeBaselineAnchored), string(console.VerifyModeBaselineAnchored)},
 		{"VerifyModeLiveSource", string(VerifyModeLiveSource), string(console.VerifyModeLiveSource)},
 		{"VerifyModeRecoverInputs", string(VerifyModeRecoverInputs), string(console.VerifyModeRecoverInputs)},
@@ -164,6 +172,13 @@ func TestVerifyHistoryRoundTripThroughTheFacade(t *testing.T) {
 	if err := writer.Append(rec); err != nil {
 		t.Fatal(err)
 	}
+	// A run that reached its end and proved no table: "succeeded" says only
+	// that it finished, and a consumer branching on the verdict must see it.
+	unproven := rec
+	unproven.Summary = console.VerifySummary{Inconclusive: 4, Total: 4}
+	if err := writer.Append(unproven); err != nil {
+		t.Fatal(err)
+	}
 
 	h, err := OpenVerifyHistory(path)
 	if err != nil {
@@ -177,12 +192,20 @@ func TestVerifyHistoryRoundTripThroughTheFacade(t *testing.T) {
 		t.Fatalf("ServerIDs() = %v, want [srv1]", ids)
 	}
 	got := h.List("srv1")
-	if len(got) != 1 {
-		t.Fatalf("List() returned %d records, want 1", len(got))
+	if len(got) != 2 {
+		t.Fatalf("List() returned %d records, want 2", len(got))
 	}
-	if got[0].State != VerifyStateSucceeded || got[0].Trigger != VerifyTriggerScheduled ||
-		got[0].Mode != VerifyModeRecoverInputs || got[0].Summary.Match != 3 {
-		t.Fatalf("record did not survive the facade: %+v", got[0])
+	if got[1].State != VerifyStateSucceeded || got[1].Trigger != VerifyTriggerScheduled ||
+		got[1].Mode != VerifyModeRecoverInputs || got[1].Summary.Match != 3 {
+		t.Fatalf("record did not survive the facade: %+v", got[1])
+	}
+	if got[0].Verdict != VerifyVerdictUnproven || got[1].Verdict != VerifyVerdictVerified {
+		t.Fatalf("verdicts through the facade: %q, %q; want %q, %q (newest first)",
+			got[0].Verdict, got[1].Verdict, VerifyVerdictUnproven, VerifyVerdictVerified)
+	}
+	held := VerifyStatus{State: VerifyStateSucceeded, Summary: VerifySummary{Mismatch: 1, Match: 2, Total: 3}}
+	if v := held.WithVerdict().Verdict; v != VerifyVerdictMismatch {
+		t.Fatalf("WithVerdict through the facade = %q, want %q", v, VerifyVerdictMismatch)
 	}
 }
 
