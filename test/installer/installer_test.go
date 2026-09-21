@@ -130,6 +130,55 @@ func TestInstaller_theConsoleOn9090MovesTheMetrics(t *testing.T) {
 	}
 }
 
+// The console banner names the host port (#1784): the container listens on
+// 8090 whatever the host publishes, so the compose file carries the address
+// people open, and the installer moves it with the port.
+func TestInstaller_aMovedConsoleTellsTheBannerItsPort(t *testing.T) {
+	r := install(t, "DBTRAIL_PORT=8095")
+	if r.failed {
+		t.Fatalf("install failed:\n%s", r.out)
+	}
+	c := r.compose(t)
+	if !strings.Contains(c, "BINTRAIL_CONSOLE_URL: http://127.0.0.1:8095/") {
+		t.Errorf("the banner address was not moved to 8095:\n%s", portLines(c))
+	}
+	if strings.Contains(c, "BINTRAIL_CONSOLE_URL: http://127.0.0.1:8090/") {
+		t.Error("the banner address still names 8090")
+	}
+	r = install(t)
+	if r.failed || !strings.Contains(r.compose(t), "BINTRAIL_CONSOLE_URL: http://127.0.0.1:8090/") {
+		t.Errorf("with nothing moved the banner address is not the published 8090:\n%s", portLines(r.compose(t)))
+	}
+}
+
+// A compose file from before #1784 (an older DBTRAIL_REF) has no banner
+// address; moving the console port must still install, not die on the missing
+// line.
+func TestInstaller_anOlderComposeWithoutTheBannerAddressStillInstalls(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if !strings.Contains(l, "BINTRAIL_CONSOLE_URL:") {
+			kept = append(kept, l)
+		}
+	}
+	old := filepath.Join(t.TempDir(), "docker-compose.yml")
+	if err := os.WriteFile(old, []byte(strings.Join(kept, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := install(t, "DBTRAIL_PORT=8095", "COMPOSE_SRC="+old)
+	if r.failed || !strings.Contains(r.compose(t), `"127.0.0.1:8095:8090"`) {
+		t.Errorf("an older compose file with the console on 8095 did not install:\n%s", r.out)
+	}
+}
+
 // A metrics port the operator chose is theirs: taken, it is refused, not moved.
 func TestInstaller_aChosenMetricsPortIsNeverMoved(t *testing.T) {
 	r := install(t, "BUSY_PORTS=9095", "DBTRAIL_METRICS_PORT=9095")

@@ -51,7 +51,9 @@ curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | D
 ```
 
 The variables go on `sh`, after the pipe: that is the side that runs the
-installer. The stack also publishes Prometheus metrics on 9090, which is
+installer. `DBTRAIL_PORT` also points the console's startup banner (in
+`docker compose logs`) at that port. If you change the `ports:` line of
+`docker-compose.yml` yourself, change `BINTRAIL_CONSOLE_URL` beside it too. The stack also publishes Prometheus metrics on 9090, which is
 Prometheus's own default port; when 9090 is taken the installer moves the
 metrics to the next free port and says so. Choose one yourself with
 `DBTRAIL_METRICS_PORT`. Prefer to drive Compose yourself?

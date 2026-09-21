@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -240,10 +241,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// the UI opt-out toggle must stop THIS running process and the state
 		// endpoint must report the live decision — while console actions stay
 		// unrecorded, per TELEMETRY.md.
-		Telemetry:     serveTelemetry{},
-		Registry:      registry,
-		Listen:        conListen,
-		Token:         conToken,
+		Telemetry: serveTelemetry{},
+		Registry:  registry,
+		Listen:    conListen,
+		Token:     conToken,
 
 		NoArchive:     conNoArchive || conProfile != "",
 		DenyTables:    denyTables,
@@ -295,7 +296,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 // belong in logs or shell history.
 
 func printConsoleBanner(srv *console.Server, headline string) {
-	fmt.Fprintf(os.Stderr, "\n%s\n\n    %s\n\n", headline, srv.URL())
+	u, err := bannerURL(srv.URL(), os.Getenv(consoleURLEnv))
+	if err != nil {
+		slog.Warn("console: the startup banner shows the listen address instead", "error", err)
+	}
+	fmt.Fprintf(os.Stderr, "\n%s\n\n    %s\n\n", headline, u)
 	switch {
 	case srv.NeedsSetup():
 		// First run, loopback, no credential: the browser creates the password.
@@ -307,6 +312,50 @@ func printConsoleBanner(srv *console.Server, headline string) {
 		}
 		fmt.Fprintln(os.Stderr)
 	}
+}
+
+// consoleURLEnv names the address people open the console at, when it is not
+// the listen address. Inside a container the console listens on 8090 while the
+// host may publish another port (the installer's DBTRAIL_PORT), so the banner
+// sent the operator to the wrong port (#1784). The compose file sets it and the
+// installer moves it with the port. It changes the banner only: nothing
+// listens, redirects or builds links from it.
+const consoleURLEnv = "BINTRAIL_CONSOLE_URL"
+
+// bannerURL is the address the startup banner prints: listenURL (the
+// console's own, carrying its ?token= in token mode) with its host and path,
+// and its scheme unless the console itself serves TLS, taken from public when
+// public is set. A user:password in public is dropped. A public value that is
+// not an http(s) URL with a host name, or a listenURL that does not parse,
+// keeps listenURL and returns why.
+func bannerURL(listenURL, public string) (string, error) {
+	public = strings.TrimSpace(public)
+	if public == "" {
+		return listenURL, nil
+	}
+	p, err := url.Parse(public)
+	if err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Hostname() == "" {
+		return listenURL, fmt.Errorf("%s=%q is not an http or https URL with a host", consoleURLEnv, public)
+	}
+	l, err := url.Parse(listenURL)
+	if err != nil {
+		// Printing the public address without the listen address's query
+		// would drop the ?token= silently.
+		return listenURL, fmt.Errorf("the console address %q does not parse, so %s is not applied: %v", listenURL, consoleURLEnv, err)
+	}
+	// A TLS listener never answers plain http, whatever the value says (the
+	// compose file's is http://).
+	if l.Scheme == "https" {
+		p.Scheme = "https"
+	}
+	// The banner lands in logs; a credential in the value must not.
+	p.User = nil
+	p.RawQuery = l.RawQuery
+	p.Fragment = ""
+	if p.Path == "" {
+		p.Path = "/"
+	}
+	return p.String(), nil
 }
 
 // serveTelemetry adapts the process's live telemetry client for the read-only
