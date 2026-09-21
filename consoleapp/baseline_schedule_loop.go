@@ -70,6 +70,11 @@ type backupScheduler struct {
 	// identity of the schedule it was observed under. A different identity
 	// is a first observation: that is what makes an edit silent.
 	seen map[string]seenSlot
+	// seenFull is seen for the full-copy timetable (#1564): its own grid, so
+	// its own observation, under the same identity rule. Kept apart from seen
+	// rather than under a suffixed key, which the cleanup loops (live ids
+	// only) would delete on every tick.
+	seenFull map[string]seenSlot
 	// started is the last job this schedule started per server: which
 	// supervisor slot to look at, the exact stamp the supervisor gave it (so
 	// a later manual job in the same slot is not mistaken for ours unless
@@ -81,6 +86,20 @@ type backupScheduler struct {
 	// The history has the durable copy; this one is what the page gets when
 	// the history is unavailable.
 	skipped map[string]scheduledSkip
+	// fullMissed is the last slot per server of the full-backup timetable
+	// that did not start (#1564), for the page when the history is
+	// unavailable; dropped when a full backup of the timetable starts.
+	fullMissed map[string]scheduledSkip
+	// fullOwed holds, per server, the identity of the schedule whose
+	// full-backup slot found another job holding the server (#1564): the
+	// next scheduled run takes the full backup instead of waiting a whole
+	// FullEvery for the next slot. A collision is usually the previous run
+	// still going, or the daemon-wide refresh loop, and on a weekly
+	// timetable "skip it" meant a week with no independent read. Dropped
+	// when a full backup of the timetable starts, when it cannot start at
+	// all (a refusal is not retried every run), on any save of the schedule,
+	// and with the schedule.
+	fullOwed map[string]string
 	// fallback is the last slot per server where the update from the
 	// recorded changes failed and a full backup was STARTED instead, for
 	// the page. Written only once the full backup's trigger returned nil:
@@ -118,6 +137,16 @@ type scheduledStart struct {
 	// Its success says nothing about the update path, so it does not end
 	// the fallback alarm; any other scheduled job that succeeds does.
 	fallback bool
+	// fullCopy: this is a full copy the full-copy timetable asked for
+	// (#1564). Same reason as fallback: a full backup that went through
+	// proves nothing about updates, so it does not end their alarm either,
+	// unless noUpdates.
+	fullCopy bool
+	// noUpdates: the schedule makes no updates at all (every run is a full
+	// backup, FullEvery == Every), so an alarm about refused updates is
+	// about a path this schedule no longer takes, and a full backup that
+	// went through does end it; otherwise nothing ever would.
+	noUpdates bool
 }
 
 type scheduledSkip struct {
@@ -133,11 +162,14 @@ type scheduledFallback struct {
 func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBackups, carryDefault bool) *backupScheduler {
 	b := &backupScheduler{
 		sup: sup, reg: reg, fullBackups: fullBackups, carryDefault: carryDefault,
-		seen:     make(map[string]seenSlot),
-		started:  make(map[string]scheduledStart),
-		skipped:  make(map[string]scheduledSkip),
-		fallback: make(map[string]scheduledFallback),
-		warned:   make(map[string]bool),
+		seen:       make(map[string]seenSlot),
+		seenFull:   make(map[string]seenSlot),
+		started:    make(map[string]scheduledStart),
+		skipped:    make(map[string]scheduledSkip),
+		fullMissed: make(map[string]scheduledSkip),
+		fullOwed:   make(map[string]string),
+		fallback:   make(map[string]scheduledFallback),
+		warned:     make(map[string]bool),
 	}
 	b.window = b.measureWindow
 	return b
@@ -304,6 +336,16 @@ func (b *backupScheduler) Observe(serverID string, sched console.BackupSchedule,
 	}
 	b.mu.Lock()
 	b.seen[serverID] = seenSlot{identity: sched.Identity(), slot: p.SlotAtOrBefore(at.UTC())}
+	// A save is a fresh start for the full-backup timetable: a debt from
+	// before it is not carried into it, and a removed timetable leaves no
+	// miss behind to come back if it is set again.
+	delete(b.fullOwed, serverID)
+	if p.FullEvery > 0 {
+		b.seenFull[serverID] = seenSlot{identity: sched.Identity(), slot: p.FullSlotAtOrBefore(at.UTC())}
+	} else {
+		delete(b.seenFull, serverID)
+		delete(b.fullMissed, serverID)
+	}
 	b.mu.Unlock()
 }
 
@@ -316,9 +358,40 @@ func (b *backupScheduler) observeAll(at time.Time) {
 			b.Observe(e.ID, *e.BackupSchedule, at)
 			if p, err := e.BackupSchedule.Parse(); err == nil {
 				warnBackupScheduleRate(e, p)
+				b.noteFullMissedWhileDown(e, p, at)
 			}
 		}
 	}
+}
+
+// noteFullMissedWhileDown records the full-backup slot that passed while the
+// daemon was not running (#1564). A missed slot is never made up (a full
+// read of production at boot is a surprise nobody scheduled), but for the
+// full-backup timetable it is not silent either: a weekly slot lost to a
+// restart is a week with no independent read, and the page says so the way
+// it says any other miss. Only the newest slot at or before boot, and only
+// when it belongs to the timetable in force: after FullSince, and not
+// already accounted for by a run or a skip of the timetable in the history.
+// Without FullSince, or without a history, nothing is recorded: a slot from
+// before the timetable existed must not be reported as its miss.
+func (b *backupScheduler) noteFullMissedWhileDown(e console.ServerEntry, p console.ParsedBackupSchedule, boot time.Time) {
+	if p.FullEvery <= 0 || b.sup == nil || b.sup.history == nil {
+		return
+	}
+	since, err := time.Parse(time.RFC3339, e.BackupSchedule.FullSince)
+	if err != nil {
+		return
+	}
+	slot := p.FullSlotAtOrBefore(boot.UTC())
+	if !slot.After(since) {
+		return
+	}
+	stamp := slot.Format(time.RFC3339)
+	run, skip := b.sup.history.LastFullCopy(e.ID)
+	if (run != nil && run.StartedAt >= stamp) || (skip != nil && skip.FinishedAt >= stamp) {
+		return
+	}
+	b.skip(e, slot, console.FullCopySkipReason("DBTrail was not running at the scheduled time, or stopped before the full backup finished"))
 }
 
 // warnBackupScheduleRate is the schedule's version of the refresh loop's
@@ -329,8 +402,9 @@ func (b *backupScheduler) observeAll(at time.Time) {
 // the disk does.
 func warnBackupScheduleRate(e console.ServerEntry, p console.ParsedBackupSchedule) {
 	slog.Warn("backup schedule: every run publishes a full-table snapshot",
-		"server", e.Name, "every", p.Every, "backups_per_30d", snapshotsPer30Days(p.Every),
-		"local_only", e.BaselineS3 == "", "dir", e.BaselineDir)
+		"server", e.Name, "every", p.Every, "backups_per_30d", p.BackupsPer30Days(),
+		"local_only", e.BaselineS3 == "", "dir", e.BaselineDir,
+		"full_every", p.FullEvery, "full_copies_per_30d", p.FullCopiesPer30Days())
 }
 
 // ScheduleState implements console.BackupScheduleReporter.
@@ -338,11 +412,17 @@ func (b *backupScheduler) ScheduleState(serverID string) console.BackupScheduleS
 	b.mu.Lock()
 	st, started := b.started[serverID]
 	sk, skipped := b.skipped[serverID]
+	fm, fullMissed := b.fullMissed[serverID]
+	_, owed := b.fullOwed[serverID]
 	fb, fell := b.fallback[serverID]
 	b.mu.Unlock()
 	var out console.BackupScheduleState
+	out.FullOwed = owed
 	if skipped {
 		out.LastSkippedAt, out.LastSkipReason = sk.at, sk.reason
+	}
+	if fullMissed {
+		out.LastFullMissedAt, out.LastFullMissedReason = fm.at, fm.reason
 	}
 	if fell {
 		out.LastFallbackAt, out.LastFallbackReason = fb.at, fb.reason
@@ -376,7 +456,7 @@ func (b *backupScheduler) ScheduleState(serverID string) console.BackupScheduleS
 			if cur2, ok := b.started[serverID]; ok && cur2.since == st.since {
 				cur2.last = &cur
 				b.started[serverID] = cur2
-				if !st.fallback && cur.State == "succeeded" {
+				if !st.fallback && (!st.fullCopy || st.noUpdates) && cur.State == "succeeded" {
 					// The fallback line is an alarm about the update path.
 					// A later scheduled job that went through, an update
 					// or a full backup the rule picked (the server now
@@ -459,10 +539,19 @@ func (b *backupScheduler) tick(ctx context.Context, now time.Time) {
 		b.mu.Lock()
 		delete(b.warned, e.ID)
 		b.mu.Unlock()
-		if !b.crossed(e.ID, e.BackupSchedule.Identity(), p.SlotAtOrBefore(now)) {
+		// Both grids are observed on every tick, whichever fires, so neither
+		// one's edge is lost to the other's.
+		regular := b.crossed(e.ID, e.BackupSchedule.Identity(), p.SlotAtOrBefore(now))
+		full := b.crossedFull(e.ID, e.BackupSchedule.Identity(), p, now)
+		if !regular && !full {
 			continue
 		}
-		b.fireGuarded(e, p, now)
+		// A full backup a busy server kept from starting is taken by the
+		// next run, not a whole FullEvery later.
+		if regular && !full && b.owesFull(e.ID, e.BackupSchedule.Identity()) {
+			full = true
+		}
+		b.fireGuarded(e, p, now, regular, full)
 	}
 	// Forget servers whose schedule is gone: a schedule removed and later
 	// re-added starts silent again rather than firing on a stale slot, and
@@ -472,6 +561,11 @@ func (b *backupScheduler) tick(ctx context.Context, now time.Time) {
 	for id := range b.seen {
 		if !live[id] {
 			delete(b.seen, id)
+		}
+	}
+	for id := range b.seenFull {
+		if !live[id] {
+			delete(b.seenFull, id)
 		}
 	}
 	for id := range b.warned {
@@ -487,6 +581,16 @@ func (b *backupScheduler) tick(ctx context.Context, now time.Time) {
 	for id := range b.skipped {
 		if !live[id] {
 			delete(b.skipped, id)
+		}
+	}
+	for id := range b.fullMissed {
+		if !live[id] {
+			delete(b.fullMissed, id)
+		}
+	}
+	for id := range b.fullOwed {
+		if !live[id] {
+			delete(b.fullOwed, id)
 		}
 	}
 	for id := range b.fallback {
@@ -509,6 +613,25 @@ func (b *backupScheduler) crossed(serverID, identity string, slot time.Time) boo
 	return ok && prev.identity == identity && slot.After(prev.slot)
 }
 
+// crossedFull is crossed on the full-copy timetable (#1564), with the same
+// rules: the first observation of an identity is silent, so adding or
+// editing the full copy never starts one on the spot. A schedule without one
+// forgets any observation, so one added later starts silent too.
+func (b *backupScheduler) crossedFull(serverID, identity string, p console.ParsedBackupSchedule, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if p.FullEvery <= 0 {
+		delete(b.seenFull, serverID)
+		delete(b.fullMissed, serverID)
+		delete(b.fullOwed, serverID)
+		return false
+	}
+	slot := p.FullSlotAtOrBefore(now)
+	prev, ok := b.seenFull[serverID]
+	b.seenFull[serverID] = seenSlot{identity: identity, slot: slot}
+	return ok && prev.identity == identity && slot.After(prev.slot)
+}
+
 // fireGuarded is fire with its own recover: a panic while firing one
 // server's slot must not cost the other servers this tick, and the slot,
 // already recorded as crossed, would otherwise vanish with no page
@@ -516,14 +639,86 @@ func (b *backupScheduler) crossed(serverID, identity string, slot time.Time) boo
 // and the log only: the history write is inside the region this recover
 // guards, and re-entering it from here could panic a second time, which
 // this recover could not catch (the same rule as recoverBaselineJob).
-func (b *backupScheduler) fireGuarded(e console.ServerEntry, p console.ParsedBackupSchedule, now time.Time) {
+func (b *backupScheduler) fireGuarded(e console.ServerEntry, p console.ParsedBackupSchedule, now time.Time, regular, full bool) {
+	// firingFull says which half panicked, so the skip lands on the line
+	// that outlasts the next run (the full-backup timetable's) only when it
+	// was the full backup that never started.
+	firingFull := false
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("backup schedule: firing a slot panicked", "server", e.Name, "panic", r, "stack", string(debug.Stack()))
-			b.noteSkip(e, now, fmt.Sprintf("internal error: %v", r))
+			reason := fmt.Sprintf("internal error: %v", r)
+			if firingFull {
+				reason = console.FullCopySkipReason(reason)
+			}
+			b.noteSkip(e, now, reason)
 		}
 	}()
-	b.fire(e, p, now)
+	if full {
+		firingFull = true
+		if b.fireFullCopy(e, p, now) {
+			// The full copy takes the slot: a run on the same instant is
+			// served by it, not queued behind it (one job per server).
+			return
+		}
+		firingFull = false
+	}
+	if regular {
+		b.fire(e, p, now)
+	}
+}
+
+// owesFull reports whether a full-backup slot of this schedule found the
+// server busy and is still owed (see fullOwed).
+func (b *backupScheduler) owesFull(serverID, identity string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	owed, ok := b.fullOwed[serverID]
+	if ok && owed != identity {
+		delete(b.fullOwed, serverID)
+		return false
+	}
+	return ok
+}
+
+// fireFullCopy starts the full copy the full-copy timetable asks for at this
+// slot (#1564), and reports whether the slot is taken care of: true when it
+// started, and when it could not start because another job holds the server
+// (a run at the same instant would hit the same wall). False when full
+// backups cannot start here at all: that is recorded as a skip naming the
+// reason, loudly, and the update a run on the same instant would make still
+// runs, since losing the scheduled backup because its weekly full copy
+// cannot start would be the wrong trade.
+func (b *backupScheduler) fireFullCopy(e console.ServerEntry, p console.ParsedBackupSchedule, now time.Time) bool {
+	gates := b.gates()
+	// Every skip here carries the timetable's own prefix, so the page keeps
+	// it on its own line until a full backup starts again (see
+	// console.BackupSkipFullCopyPrefix).
+	if err := console.CheckBackupSchedule(e, *e.BackupSchedule, gates); err != nil {
+		b.dropFullDebt(e.ID)
+		b.skip(e, now, console.FullCopySkipReason(console.RefusalReason(err)))
+		return true
+	}
+	if err := console.CheckFullCopy(e, *e.BackupSchedule, gates); err != nil {
+		// Not owed: a refusal would refuse the same way at every run, and
+		// the page already says so in red until it changes.
+		b.dropFullDebt(e.ID)
+		b.skip(e, now, console.FullCopySkipReason(console.RefusalReason(err)))
+		return false
+	}
+	why := console.FullCopyWhy(*e.BackupSchedule)
+	slog.Info("backup schedule: taking the full backup the schedule asks for", "server", e.Name, "id", e.ID, "reason", why)
+	stamp := now.Format(time.RFC3339)
+	if b.startFullCopy(e, stamp, now, why, p.FullEvery == p.Every) {
+		b.watch(e, stamp, console.BackupMethodFull)
+	}
+	return true
+}
+
+func (b *backupScheduler) dropFullDebt(serverID string) {
+	b.mu.Lock()
+	delete(b.fullOwed, serverID)
+	b.mu.Unlock()
 }
 
 // fire starts the scheduled job for e, or records why it could not. HOW is
@@ -634,6 +829,25 @@ func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBa
 // carries both facts. why is the reason a full backup was chosen at all
 // (#1604), carried on the request so the run record keeps it.
 func (b *backupScheduler) startFull(e console.ServerEntry, stamp string, now time.Time, because, why string) bool {
+	return b.startFullBackup(e, stamp, now, because, why, false, false)
+}
+
+// startFullCopy is startFull for the full-copy timetable (#1564). noUpdates:
+// the schedule makes no updates at all (see scheduledStart).
+func (b *backupScheduler) startFullCopy(e console.ServerEntry, stamp string, now time.Time, why string, noUpdates bool) bool {
+	return b.startFullBackup(e, stamp, now, "", why, true, noUpdates)
+}
+
+func (b *backupScheduler) startFullBackup(e console.ServerEntry, stamp string, now time.Time, because, why string, fullCopy, noUpdates bool) bool {
+	// A full-copy slot's skip carries the timetable's prefix, so a collision
+	// is recorded as the weekly full backup that did not happen, not as an
+	// ordinary missed run the next hour makes up.
+	skipText := func(s string) string {
+		if fullCopy {
+			return console.FullCopySkipReason(s)
+		}
+		return s
+	}
 	req := console.BaselineRequestFor(e)
 	req.Trigger = console.BaselineRunTriggerScheduled
 	req.Why = why
@@ -643,15 +857,29 @@ func (b *backupScheduler) startFull(e console.ServerEntry, stamp string, now tim
 	}
 	switch err := b.sup.Trigger(req); {
 	case err == nil:
-		b.record(e, console.BackupMethodFull, stamp, b.sup.Status(e.ID).Since, because != "", why)
+		b.recordStart(e, scheduledStart{method: console.BackupMethodFull, at: stamp, since: b.sup.Status(e.ID).Since,
+			fallback: because != "", fullCopy: fullCopy, noUpdates: noUpdates, why: why})
 		return true
 	case errors.Is(err, console.ErrBaselineRunning):
 		// The collision the issue names: a manual backup, restore or export
 		// (or the previous scheduled run) holds the server. Skip, do not
-		// queue: a queued dump would fire at an unscheduled moment.
-		b.skip(e, now, prefix+"another backup job was running for this server "+when)
+		// queue: a queued dump would fire at an unscheduled moment. The
+		// full-backup timetable's slot is owed to the next scheduled run
+		// instead, which is a moment the operator did schedule.
+		if fullCopy {
+			b.mu.Lock()
+			b.fullOwed[e.ID] = e.BackupSchedule.Identity()
+			b.mu.Unlock()
+			// The reason states only the collision. That the next run takes
+			// the full backup is said by the page while the debt is live
+			// (FullOwed): the debt is in memory, and a restart or a save
+			// drops it, which a promise written into the history would outlive.
+			b.skip(e, now, skipText(prefix+"another backup job was running for this server "+when))
+			return false
+		}
+		b.skip(e, now, skipText(prefix+"another backup job was running for this server "+when))
 	default:
-		b.skip(e, now, prefix+err.Error())
+		b.skip(e, now, skipText(prefix+err.Error()))
 	}
 	return false
 }
@@ -661,10 +889,20 @@ func (b *backupScheduler) startFull(e console.ServerEntry, stamp string, now tim
 // attributes the slot by, and the trigger returned, so the slot is ours
 // until the job finishes and something else claims it.
 func (b *backupScheduler) record(e console.ServerEntry, method, stamp, since string, fallback bool, why string) {
+	b.recordStart(e, scheduledStart{method: method, at: stamp, since: since, fallback: fallback, why: why})
+}
+
+func (b *backupScheduler) recordStart(e console.ServerEntry, st scheduledStart) {
 	b.mu.Lock()
-	b.started[e.ID] = scheduledStart{method: method, at: stamp, since: since, fallback: fallback, why: why}
+	b.started[e.ID] = st
+	if st.fullCopy {
+		// The timetable's full backup started: its missed-slot line ends,
+		// and whatever a busy server left owed is paid.
+		delete(b.fullMissed, e.ID)
+		delete(b.fullOwed, e.ID)
+	}
 	b.mu.Unlock()
-	slog.Info("backup schedule: started", "server", e.Name, "method", method, "every", e.BackupSchedule.Every)
+	slog.Info("backup schedule: started", "server", e.Name, "method", st.method, "every", e.BackupSchedule.Every, "full_copy", st.fullCopy)
 }
 
 // fallbackPoll is how often watchScheduled looks at its job. A var so tests
@@ -729,6 +967,14 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 			if method == console.BackupMethodRefresh && b.sup.refreshSkippedAsUnchanged(e.ID, since) {
 				b.skip(e, time.Now().UTC(), "nothing had been indexed since the last backup, so this "+
 					"slot had nothing to add to it")
+				return
+			}
+			b.mu.Lock()
+			fullCopy := b.started[e.ID].fullCopy
+			b.mu.Unlock()
+			if fullCopy {
+				b.skip(e, time.Now().UTC(), console.FullCopySkipReason("another backup job took the server before the full backup was "+
+					"seen finishing; its result is in the run history unless it crashed"))
 				return
 			}
 			b.skip(e, time.Now().UTC(), "another backup job took the server before the scheduled "+jobNoun(method)+
@@ -807,9 +1053,12 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, reason string) {
 func (b *backupScheduler) Forget(serverID string) {
 	b.mu.Lock()
 	delete(b.seen, serverID)
+	delete(b.seenFull, serverID)
 	delete(b.warned, serverID)
 	delete(b.started, serverID)
 	delete(b.skipped, serverID)
+	delete(b.fullMissed, serverID)
+	delete(b.fullOwed, serverID)
 	delete(b.fallback, serverID)
 	delete(b.windows, serverID)
 	b.mu.Unlock()
@@ -821,7 +1070,11 @@ func (b *backupScheduler) noteSkip(e console.ServerEntry, now time.Time, reason 
 	stamp := now.Format(time.RFC3339)
 	slog.Warn("backup schedule: scheduled backup did not start", "server", e.Name, "reason", reason)
 	b.mu.Lock()
-	b.skipped[e.ID] = scheduledSkip{at: stamp, reason: reason}
+	if console.IsFullCopySkip(reason) {
+		b.fullMissed[e.ID] = scheduledSkip{at: stamp, reason: reason}
+	} else {
+		b.skipped[e.ID] = scheduledSkip{at: stamp, reason: reason}
+	}
 	b.mu.Unlock()
 	return stamp
 }

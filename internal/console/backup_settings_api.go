@@ -108,6 +108,12 @@ type backupSettingsServerDTO struct {
 	// source database, and a settings listing must not dial every server.
 	ScheduleEvery string `json:"schedule_every,omitempty"`
 	ScheduleAt    string `json:"schedule_at,omitempty"`
+	// ScheduleFullEvery is the schedule's full-backup timetable (#1564), and
+	// ScheduleFullRefusal why its full backups cannot start as things stand
+	// (CheckFullCopy, IO-free like CheckBackupSchedule), so this page does
+	// not show in grey what the Backups page shows in red.
+	ScheduleFullEvery   string `json:"schedule_full_every,omitempty"`
+	ScheduleFullRefusal string `json:"schedule_full_refusal,omitempty"`
 	// ScheduleRefusal is why the configured schedule cannot run as things
 	// stand (this process, this entry), empty when it can. CheckBackupSchedule
 	// is IO-free, so listing it here does not violate the no-dialing rule the
@@ -232,6 +238,10 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	if e.BackupSchedule != nil {
 		dto.ScheduleEvery = e.BackupSchedule.Every
 		dto.ScheduleAt = e.BackupSchedule.At
+		dto.ScheduleFullEvery = e.BackupSchedule.FullEvery
+		if err := CheckFullCopy(e, *e.BackupSchedule, s.scheduleGates()); err != nil {
+			dto.ScheduleFullRefusal = RefusalReason(err)
+		}
 		// The RAW entry, matching what the loop checks (backup_schedule.go
 		// reads e.BaselineDir/e.BaselineS3, never the resolved fallback).
 		if err := CheckBackupSchedule(e, *e.BackupSchedule, s.scheduleGates()); err != nil {
