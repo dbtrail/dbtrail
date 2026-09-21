@@ -9955,6 +9955,57 @@ async function testServerRow(id) {
 
 function doctorWarnings(report) { return !!(report && report.warnings > 0); }
 
+// remediationBlocks splits a fix doctor wrote into paragraphs, lists and code
+// (#1777). doctor wraps its fixes at about 80 columns for a terminal, and shown
+// verbatim in a box narrower than that every prose line broke a second time.
+// It follows the convention every doctor fix is written to, the checks
+// registered through ext.RegisterDoctorCheck included: prose flush left,
+// commands and config indented, lists as "  - ".
+// Flush-left lines in a row are one paragraph and reflow. An indented run is a
+// list when each line is a "- " item or a deeper continuation of one, and code
+// otherwise, kept exactly as written minus its common indent, so a numbered
+// step with a command under it stays readable. Blank lines separate blocks.
+function remediationBlocks(text) {
+  const lines = String(text || "").split("\n");
+  const width = (l) => l.match(/^[ \t]*/)[0].replace(/\t/g, "    ").length;
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (!lines[i].trim()) { i++; continue; }
+    const run = [];
+    const flush = width(lines[i]) === 0;
+    while (i < lines.length && lines[i].trim() && (width(lines[i]) === 0) === flush) run.push(lines[i++]);
+    if (flush) { blocks.push({ kind: "p", text: run.map((l) => l.trim()).join(" ") }); continue; }
+    const base = Math.min(...run.map(width));
+    const items = [];
+    let list = true;
+    run.forEach((l) => {
+      const body = l.trim();
+      if (width(l) === base && body.startsWith("- ")) items.push(body.slice(2).trim());
+      else if (width(l) > base && items.length) items[items.length - 1] += " " + body;
+      else list = false;
+    });
+    blocks.push(list ? { kind: "list", items } :
+      { kind: "code", text: run.map((l) => " ".repeat(width(l) - base) + l.trim()).join("\n") });
+  }
+  return blocks;
+}
+
+// remediationEl draws remediationBlocks: paragraphs and lists in the page's
+// own type, code in a box whose exact text is what gets copied. Null when the
+// fix has nothing to show.
+function remediationEl(text) {
+  const blocks = remediationBlocks(text);
+  if (!blocks.length) return null;
+  const box = el("div", { class: "dc-rem" });
+  blocks.forEach((b) => {
+    if (b.kind === "p") box.append(el("p", { text: b.text }));
+    else if (b.kind === "list") box.append(el("ul", {}, ...b.items.map((it) => el("li", { text: it }))));
+    else box.append(el("pre", { text: b.text }));
+  });
+  return box;
+}
+
 // doctorCards renders startup checks as cards: the check, its detail, and the
 // paste-ready fix doctor wrote for it.
 function doctorCards(checks) {
@@ -9965,7 +10016,8 @@ function doctorCards(checks) {
     const card = el("div", { class: "doctor-card " + status });
     card.append(el("span", { class: "dc-mark", text: mark }));
     const bodyEl = el("div", { class: "dc-body" }, el("div", { class: "dc-name", text: chk.name + (chk.detail ? ": " + chk.detail : "") }));
-    if (chk.remediation) bodyEl.append(el("pre", { class: "dc-rem", text: chk.remediation }));
+    const rem = remediationEl(chk.remediation);
+    if (rem) bodyEl.append(rem);
     card.append(bodyEl);
     box.append(card);
   });
