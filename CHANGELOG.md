@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a summary with a Show button. The row's Start button opens the same dialog.
 
 ### Fixed
+- **The installer's advice for a taken port works when pasted** (#1768).
+  With port 8090 taken it suggested `DBTRAIL_PORT=9090 curl … | sh`, which
+  failed twice: the variable was on `curl`, so the installer never saw it, and
+  9090 is where the stack publishes its own metrics. It now prints the full
+  command with the variables on `sh` and a port it checked is free. A taken
+  9090 (Prometheus's default port) no longer ends in Docker's raw bind error:
+  the metrics move to the next free port, and `DBTRAIL_METRICS_PORT` picks one.
 - **Test connection on a new server tests the database you typed** (#1767).
   It used to answer "nothing to test": it only ever looked at the index
   connection, which a new server does not have until it is saved. It now runs
