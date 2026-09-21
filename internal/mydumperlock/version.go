@@ -16,7 +16,9 @@ const LockModeFloor = "0.18.1"
 
 // ProbeTimeout bounds `mydumper --version`. The console's startup line runs the
 // probe before capture starts, so a binary that never answers must not hold
-// the daemon up. A variable so a test can shorten it.
+// the daemon up. A variable so a test can shorten it, and so the packages that
+// probe fake mydumper scripts can widen it for a loaded test machine (their
+// TestMain); TestProbeTimeoutProductDefault pins this 10s.
 var ProbeTimeout = 10 * time.Second
 
 // PositionFloor is the first mydumper that reads the binlog position on MySQL

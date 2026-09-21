@@ -43,7 +43,8 @@ func writeFakeSnapshot(t *testing.T, dir string) {
 // test's later seam restore after the goroutine's last read of it.
 func waitForTerminalState(t *testing.T, read func() console.BaselineStatus) console.BaselineStatus {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// A dump job probes mydumper --version before its privilege check.
+	deadline := time.Now().Add(fakeMydumperBound)
 	for {
 		st := read()
 		if st.State != "running" {
