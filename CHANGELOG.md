@@ -29,7 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept, has no baseline before it, or is not on record is `inconclusive`, and a
   run where no table can be proven exits non-zero: a cron gate that passed
   while every recent baseline was built from the recorded changes can turn red
-  until the next full backup. The two compared baselines can be days older than the
+  until the next full backup. A TRUNCATE, DROP or RENAME of a table between its
+  two compared baselines records no row changes to replay, so that table is
+  `inconclusive` too, naming the statement, instead of a mismatch that blames
+  the capture. The two compared baselines can be days older than the
   newest, so a run can take longer and read more from the Parquet archives.
 
 ### Fixed

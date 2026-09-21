@@ -103,7 +103,10 @@ A table is reported `inconclusive` instead of compared when:
 - its last read is the oldest baseline that holds it, so there is nothing before
   it to compare with;
 - when the database was last read for it is not on record (a baseline that a
-  refresh built before DBTrail recorded that).
+  refresh built before DBTrail recorded that);
+- a TRUNCATE, DROP or RENAME of the table ran between the two baselines: it
+  records no row changes to replay, so the older baseline cannot be carried
+  forward to the read. The reason names the statement and when it ran.
 
 The next full backup makes such a table checkable. A run where no table was
 proven exits non-zero. The window between the two baselines can be days old, so
