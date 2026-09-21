@@ -409,7 +409,7 @@ func capacityCheckResult(m CapacityMeasurement, dbName, retainNote string) Check
 		return CheckResult{
 			Name:   CapacityCheckName,
 			Status: StatusSkip,
-			Detail: fmt.Sprintf("binlog_events is not visible in %q — the index is not initialized yet (run `bintrail init`/`up`), or this user lacks SELECT on it", dbName),
+			Detail: fmt.Sprintf("binlog_events is not visible in %q: either the index is not initialized yet, so there is nothing to size, or this user lacks SELECT on it", dbName),
 		}
 	case CapacityNotEnoughHistory:
 		return CheckResult{
