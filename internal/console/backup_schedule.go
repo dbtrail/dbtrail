@@ -325,7 +325,8 @@ const (
 )
 
 // BackupScheduleGates is what the daemon can do, as the schedule checker
-// needs to know it. All of it is decided at boot.
+// needs to know it. Decided at boot, except FullBackupsErr, which follows the
+// lock mode a dump would use each time the gates are built.
 type BackupScheduleGates struct {
 	// LoopRunning: this process runs the schedule loop at all (a watch daemon
 	// with a baseline supervisor).
@@ -335,7 +336,8 @@ type BackupScheduleGates struct {
 	FullBackups bool
 	// FullBackupsErr, when set, is why a full backup cannot START even with
 	// the opt-in on: the lock-mode misconfiguration the supervisor refuses
-	// every MySQL dump with.
+	// every MySQL dump with. Read when the gates are built, so a lock mode
+	// fixed from Backup settings clears it without a restart.
 	FullBackupsErr string
 	// ReadOnlyConsole: this process is the standalone `serve` console, which
 	// runs no loop of any kind; names the daemon in the reason.

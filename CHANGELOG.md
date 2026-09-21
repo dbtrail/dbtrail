@@ -116,6 +116,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer marked recommended: it tests against your database only when the
   newer snapshot was read from it, and its help and `docs/verify.md` now say
   so.
+- **The backup schedule stops saying full backups cannot run once the lock
+  mode is fixed from Backup settings.** A lock mode the daemon started with
+  and could not read refuses MySQL full backups; saving a valid one from the
+  Backup settings page lifted that refusal for the Create backup button at
+  once, but the schedule card and its next-run prediction kept saying full
+  backups could not run, and the schedule itself kept skipping the ones it
+  could now take, until a restart. They now read the lock mode a dump would
+  use.
 - **The add-server form fits its dialog again** (#1765). Since 0.82.0 the
   "Monitor a source database" block was wider than the dialog, which cut off
   Source port, Schemas, S3 addressing and S3 secret key, on the add form and
