@@ -38,7 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until the next full backup. A TRUNCATE, DROP or RENAME of a table between its
   two compared baselines records no row changes to replay, so that table is
   `inconclusive` too, naming the statement, instead of a mismatch that blames
-  the capture. The two compared baselines can be days older than the
+  the capture. A baseline folder that cannot be read, older than the second
+  newest baseline, makes only the tables whose check it could change
+  `inconclusive`, naming it (it may hold the baseline before a table's read,
+  the read itself, or an earlier baseline of a table read once); the other
+  tables are still checked. The two compared baselines can be days older than the
   newest, so a run can take longer and read more from the Parquet archives.
 
 ### Fixed

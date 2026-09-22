@@ -114,10 +114,12 @@ the events may come from the Parquet archives rather than the live index; with
 `--no-archive`, or after rotation dropped them unarchived, the table is
 `inconclusive` with the gap as the reason.
 
-A baseline folder that cannot be read at or after the oldest baseline any table
-is compared with (or older than a read with no earlier baseline, which that
-folder may hold) refuses the whole run and names the folder, whatever
-`--tables` selects: fix its permissions first.
+A baseline folder that cannot be read at or after the second newest baseline
+refuses the whole run and names the folder, whatever `--tables` selects: fix
+its permissions first. An older one affects only the tables whose check it
+could change (it may hold the baseline before a table's last read, that read
+itself, or an earlier baseline of a table read only once): those tables are
+`inconclusive`, naming the folder, and every other table is still checked.
 
 ```sh
 # All tables, baselines on local disk
