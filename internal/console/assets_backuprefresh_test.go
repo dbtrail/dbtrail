@@ -87,6 +87,24 @@ func TestBackupRefreshCard_neverClaimsLiveWhileDormant(t *testing.T) {
 	}
 }
 
+// TestBackupRefreshCard_hasNothingToClick (#1681): the card reports what the
+// daemon does with a table that did not change; the switch, its two buttons
+// and the save they called are gone. A control here would ask a question the
+// console can no longer answer, and the e2e's state matrix is the other half
+// of this (it renders the real card and counts buttons).
+func TestBackupRefreshCard_hasNothingToClick(t *testing.T) {
+	js := readAsset(t, "app.js")
+	body := jsFunctionBody(t, js, "backupRefreshCard")
+	for _, gone := range []string{"onclick", "stg-cardfoot", "saveBackupRefresh", "bkr-state"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("backupRefreshCard renders %q again; the setting is not editable from the console since #1681", gone)
+		}
+	}
+	if strings.Contains(js, "function saveBackupRefresh(") {
+		t.Error("saveBackupRefresh is back; there is no endpoint for it to call")
+	}
+}
+
 // TestBaselineRefreshNote_partitionsTheTables: reused and refreshed must ADD UP
 // to the run's table count, never overlap.
 //

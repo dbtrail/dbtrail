@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -740,6 +741,28 @@ func TestBackupScheduler_startFullKeepsTheBecause(t *testing.T) {
 	}
 	if st := b.ScheduleState(e.ID); !strings.HasPrefix(st.LastSkipReason, "the update was refused (capture gap); ") || !strings.Contains(st.LastSkipReason, "bad lock mode") {
 		t.Fatalf("skip reason = %q, want the because in front of the refusal", st.LastSkipReason)
+	}
+}
+
+// TestStartBackupScheduleLoop_namesReuse (#1681): a daemon that runs backup
+// schedules and no refresh interval never reaches the refresh loop's log line,
+// so this one is the only place that names what it does with a table that did
+// not change. Since reuse is on by default, a daemon that never reused now
+// does, and the log has to say so.
+func TestStartBackupScheduleLoop_namesReuse(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		b, _, _ := newScheduleFixture(t, true)
+		b.carryDefault = want
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		ctx, cancel := context.WithCancel(context.Background())
+		startBackupScheduleLoop(ctx, b)
+		cancel()
+		slog.SetDefault(prev)
+		if got := buf.String(); !strings.Contains(got, "reuse_unchanged="+strconv.FormatBool(want)) {
+			t.Errorf("the schedule loop did not report reuse_unchanged=%v at startup; on this daemon nothing else names it:\n%s", want, got)
+		}
 	}
 }
 
