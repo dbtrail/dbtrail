@@ -2968,7 +2968,8 @@ try {
     return {
       regionCount: regions.length,
       controlTinted: regions[0] ? regions[0].classList.contains("tcard-violet") : false,
-      subDescribesAll: !/prove a snapshot still reconstructs/i.test(document.querySelector(".page-sub").textContent),
+      // No subtitle since the #1573 redesign; the mode help below carries it.
+      subGone: !document.querySelector(".view .page-sub"),
       helpBefore, helpAfter: help ? help.textContent : "",
       // Measured, not scrollWidth: Chrome reports scrollWidth == clientWidth
       // for a <select> at ANY width (the closed control clips its text and
@@ -2993,6 +2994,9 @@ try {
       })(),
     };
   });
+  (vfyStruct.subGone)
+    ? ok("verification: no subtitle; the mode help says what each check does")
+    : bad("verification: no subtitle; the mode help says what each check does", "a .page-sub is back on /verification");
   (vfyStruct.regionCount >= 3 && vfyStruct.controlTinted)
     ? ok("verification: control / current / history are separate surfaces, control wears the structure tint")
     : bad("verification: control / current / history are separate surfaces, control wears the structure tint", JSON.stringify(vfyStruct));
@@ -4600,12 +4604,13 @@ try {
   // the API returned for it, held against the response rather than a list
   // typed here.
   const apiSources = (bksAPI.servers || []).map((s) => ({ name: s.name || s.id, source: s.source }));
-  const legendSet = bks.legend.slice().sort().join(",");
+  // The three-row legend is gone (#1573 redesign); each server still draws
+  // its own case, and that case is what the API reports.
   const currentMatches = apiSources.length > 0 && apiSources.length === bks.current.length
     && apiSources.every((s, i) => bks.current[i].name === s.name && bks.current[i].cases.length === 1 && bks.current[i].cases[0] === s.source);
-  (legendSet === "default,none,server" && currentMatches)
-    ? ok("backup-settings: the location drawing shows the three cases and marks each server's own as the API reports it")
-    : bad("backup-settings: the location drawing shows the three cases and marks each server's own as the API reports it",
+  (bks.legend.length === 0 && currentMatches)
+    ? ok("backup-settings: each server draws its own location case as the API reports it, with no three-row legend")
+    : bad("backup-settings: each server draws its own location case as the API reports it, with no three-row legend",
         JSON.stringify({ legend: bks.legend, api: apiSources, current: bks.current }));
   // Each compact block links to a page the Docs table carries, the table
   // the daily network check proves the site serves (#1645). Read from the
@@ -4655,9 +4660,9 @@ try {
   (bksStates.refused.marked && bksStates.refused.loud && bksStates.refused.outside)
     ? ok("backup-settings: a refused daemon value is marked and its reason stays in plain view")
     : bad("backup-settings: a refused daemon value is marked and its reason stays in plain view", JSON.stringify(bksStates.refused));
-  (bksStates.serve.sections === 0 && !bksStates.serve.boot && bksStates.serve.sub === "Where each server keeps its backups." && bksStates.serve.current && bksStates.serve.current.source === "none")
-    ? ok("backup-settings: on serve the page is the per-server half alone, with its own sub line")
-    : bad("backup-settings: on serve the page is the per-server half alone, with its own sub line", JSON.stringify(bksStates.serve));
+  (bksStates.serve.sections === 0 && !bksStates.serve.boot && bksStates.serve.sub === "" && bksStates.serve.current && bksStates.serve.current.source === "none")
+    ? ok("backup-settings: on serve the page is the per-server half alone, with no sub line")
+    : bad("backup-settings: on serve the page is the per-server half alone, with no sub line", JSON.stringify(bksStates.serve));
   // Restored the live page above; re-render it so the next assertion reads
   // the real thing, not the restored HTML with its listeners gone.
   await page.evaluate(() => renderRoute());
