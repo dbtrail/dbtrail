@@ -20,7 +20,14 @@
 //                   something copied, not a sentence, and is left out.
 //   alarms          the warning and error elements on that surface (below).
 //   primary         how far the step's primary button sits below the visible
-//                   area, in px (0 when fully visible), or missing.
+//                   area, in px (0 when fully visible), or missing, or off the
+//                   top or the side, which is not the same as visible.
+//   anchors         which of the elements this measurement reads were found.
+//                   Every count here is a lookup by selector, and a lookup
+//                   that matches nothing returns a clean, small number rather
+//                   than a complaint — on columns where smaller is better,
+//                   that reads as an improvement. The caller turns a missing
+//                   anchor into "not measurable" instead.
 (function () {
   // "Yellow or red" means the interface's own warning and error classes, not
   // a pixel colour. These are the classes style.css paints in the warning
@@ -172,10 +179,17 @@
 
   function primaryInfo(sel, label) {
     const el = typeof sel === "string" ? document.querySelector(sel) : sel;
+    const name = () => label || (el && (el.textContent || "").trim()) || String(sel);
     if (!el || !visible(el)) return { missing: true, belowFoldPx: null, label: label || String(sel) };
     const r = el.getBoundingClientRect();
     const clip = clipRect(el);
-    return { missing: false, belowFoldPx: Math.max(0, Math.round(r.bottom - clip.bottom)), label: label || (el.textContent || "").trim() };
+    // Scrolled off the TOP, or off to the side, is not "fully visible, 0 px
+    // below": reporting 0 there is a clean number for a button nobody can
+    // see, on a column where lower is better.
+    if (r.bottom <= clip.top || r.right <= clip.left || r.left >= clip.right) {
+      return { missing: false, above: true, belowFoldPx: null, label: name() };
+    }
+    return { missing: false, belowFoldPx: Math.max(0, Math.round(r.bottom - clip.bottom)), label: name() };
   }
 
   window.__firstRunMeasure = function (opts) {
@@ -226,15 +240,33 @@
         : scopes.flatMap((scope) => Array.from(scope.querySelectorAll(sel)));
       for (const el of found) {
         if (seen.has(el)) continue;
+        // Shown is what counts, not worded: an element whose whole content is
+        // an icon carries the same warning and used to be dropped for having
+        // no text. An element with NOTHING in it is still not an alarm —
+        // several of these classes sit on the page empty, waiting for a
+        // message that has not happened (.form-msg keeps a line of height so
+        // the form does not jump), and counting those would invent warnings.
         const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-        if (!text || !visible(el) || skip(el)) continue;
+        const hasContent = !!text || Array.from(el.children).some((c) => visible(c));
+        if (!hasContent || !visible(el) || skip(el)) continue;
         seen.add(el);
-        alarms.push({ selector: sel, text: text.length > 80 ? text.slice(0, 77) + "..." : text });
+        alarms.push({ selector: sel, text: text.length > 80 ? text.slice(0, 77) + "..." : (text || "(no text)") });
       }
     }
 
+    // What this measurement could and could not find. `view` is the one that
+    // decides whether the numbers mean anything: it is the element every word
+    // and every alarm on a page-level step is read from.
+    const anchors = {
+      view: !!document.getElementById("view"),
+      side: !!document.querySelector(".side"),
+      modal: !!document.getElementById("modal"),
+      notice: !!document.getElementById("notice-mount"),
+      login: !!document.getElementById("login-mount"),
+      toastError: !!document.getElementById("toast-error"),
+    };
     return {
-      layer, wordsAboveFold, wordsWhole, chunks, alarms,
+      layer, wordsAboveFold, wordsWhole, chunks, alarms, anchors,
       primary: opts.primary ? primaryInfo(opts.primary, opts.primaryLabel) : null,
     };
   };

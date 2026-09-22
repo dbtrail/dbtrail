@@ -123,6 +123,26 @@ passes, with a line asking the PR that improved it to lower the baseline in
 the same change. That is how a test that is red against the goal can still be
 green in CI.
 
+Three of the columns — the two word counts and the distance below the fold —
+depend on where text WRAPS, and that depends on the fonts of the machine that
+measured it. They are compared only against a baseline recorded on the same
+platform; anywhere else they are printed and marked "not compared", with the
+command to record them for that platform. Everything else counts things —
+clicks, fields, sentences, elements — and is compared everywhere.
+
+Two things the numbers mean precisely, because the labels are shorter than
+the rules:
+
+- **Yellow or red** counts SIGHTINGS, not distinct elements: a warning shown
+  on three measured screens counts three times, and a warning box inside a
+  warning notice counts both. That is deliberate — the question is how much
+  alarm a person walks through — and it is why the count rises when the walk
+  adds a second server.
+- **Clicks to the first snapshot** counts what this walk clicked, including
+  one reload it only needs while later changes do not appear on their own.
+  The minimum beside it is the same walk without the clicks a snapshot does
+  not need.
+
 ```sh
 FIRST_RUN_WALK_MODE=target make console-first-run-walk        # the goals: red today
 FIRST_RUN_WALK_MODE=write-baseline make console-first-run-walk # record what it measured

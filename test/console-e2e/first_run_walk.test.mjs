@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   countWords, bannedHits, normalizeChunk, bannedFromChunks,
-  deriveRun, compareRatchet, compareTarget, loadBaseline, baselineFrom, RUNS, NOT_MEASURABLE,
+  deriveRun, compareRatchet, compareTarget, loadBaseline, baselineFrom, layoutColumns, RUNS, NOT_MEASURABLE,
 } from "./first_run_scoreboard.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -178,6 +178,22 @@ describe("deriveRun edge cases", () => {
       assert.deepEqual(Object.keys(r.columns).sort(), [...def.columns].sort(), name);
     }
   });
+  test("a run that threw measures nothing, so a counter cannot read as an improvement", () => {
+    const r = deriveRun("clean", [
+      { kind: "click", label: "+ Add server", optional: false },
+      stepEv("connect", "step", { wordsAboveFold: 126 }),
+      { kind: "error", message: "the Save button was never found" },
+    ]);
+    for (const id of RUNS.clean.columns) {
+      assert.equal(r.columns[id].value, NOT_MEASURABLE, id);
+      assert.match(r.columns[id].reason, /did not finish: the Save button was never found/);
+    }
+    // And the ratchet calls every one of them worse, never better.
+    const base = { schema: 1, runs: { clean: Object.fromEntries(RUNS.clean.columns.map((c) => [c, 1])) } };
+    const cmp = compareRatchet({ runs: { clean: r } }, base);
+    assert.equal(cmp.loosened.length, 0);
+    assert.ok(cmp.failures.length >= RUNS.clean.columns.length - 1, JSON.stringify(cmp));
+  });
   test("an unknown run name is refused, not silently empty", () => {
     assert.throws(() => deriveRun("no-such-run", []), /unknown run/);
   });
@@ -241,6 +257,108 @@ describe("compareRatchet", () => {
   test("a timing column is shown but never ratcheted", () => {
     const r = compareRatchet(board({ changes_visible_within_5s: 0 }), base({ changes_visible_within_5s: 1 }), { only: ["changes_visible_within_5s"] });
     assert.deepEqual(r.failures, []);
+  });
+});
+
+describe("compareRatchet, not-measurable reasons", () => {
+  const nmBoard = (reason, improved) => ({ runs: { clean: { columns: { fields_typed: { value: NOT_MEASURABLE, reason, improved } } } } });
+  const nmBase = (reason) => ({ schema: 1, runs: { clean: { fields_typed: NOT_MEASURABLE } }, evidence: { clean: { fields_typed: reason } } });
+  test("the same reason on both sides passes", () => {
+    const r = compareRatchet(nmBoard("no block to copy was shown"), nmBase("no block to copy was shown"), { only: ["fields_typed"] });
+    assert.deepEqual(r.failures, []);
+    assert.equal(r.notMeasurable.length, 1);
+  });
+  test("a DIFFERENT reason fails, naming both", () => {
+    const r = compareRatchet(nmBoard("the page element was not found"), nmBase("no block to copy was shown"), { only: ["fields_typed"] });
+    assert.equal(r.failures.length, 1);
+    assert.match(r.failures[0], /different reason.*no block to copy.*page element/s);
+  });
+  test("a baseline with no recorded reason still passes, so an older file is not a failure", () => {
+    const base = { schema: 1, runs: { clean: { fields_typed: NOT_MEASURABLE } } };
+    assert.deepEqual(compareRatchet(nmBoard("anything"), base, { only: ["fields_typed"] }).failures, []);
+  });
+  test("a measurement that stopped happening because the product improved passes; any other loss fails", () => {
+    const base = { schema: 1, runs: { clean: { fields_typed: 71 } } };
+    const good = compareRatchet(nmBoard("no error screen: the folder is created for you", true), base, { only: ["fields_typed"] });
+    assert.deepEqual(good.failures, []);
+    assert.match(good.loosened[0], /no longer happens/);
+    const bad = compareRatchet(nmBoard("no screen was measured"), base, { only: ["fields_typed"] });
+    assert.equal(bad.failures.length, 1);
+  });
+});
+
+describe("deriveRun, a measurement that lost its grip", () => {
+  test("a step whose page element was not found makes every screen column not measurable", () => {
+    const r = deriveRun("clean", [stepEv("a", "step", { wordsAboveFold: 3, anchors: { view: false } })]);
+    for (const id of ["words_per_step_max", "words_per_error_max", "banned_words", "yellow_red"]) {
+      assert.equal(r.columns[id].value, NOT_MEASURABLE, id);
+      assert.match(r.columns[id].reason, /page element/);
+    }
+  });
+  test("a forced choice the walk looked for and could not read is not zero choices", () => {
+    const r = deriveRun("no-primary-key", [{ kind: "forced_choice_probe", what: "which ALTER TABLE form to run", count: 0 }]);
+    assert.equal(r.columns.forced_choices.value, NOT_MEASURABLE);
+    assert.match(r.columns.forced_choices.reason, /could not be read/);
+  });
+  test("a probe that DID find its choices still counts them", () => {
+    const r = deriveRun("no-primary-key", [{ kind: "forced_choice_probe", what: "x", count: 2 }, { kind: "forced_choice", label: "which of 2" }]);
+    assert.equal(r.columns.forced_choices.value, 1);
+  });
+  test("a copy that could not be compared is not a match", () => {
+    const r = deriveRun("clean", [{ kind: "copy_check", label: "the block", mismatch: null, detail: "it no longer names a password" }]);
+    assert.equal(r.columns.copied_differs_from_shown.value, NOT_MEASURABLE);
+    assert.match(r.columns.copied_differs_from_shown.reason, /no longer names a password/);
+  });
+  test("an error screen that no longer happens is an improvement, not a lost measurement", () => {
+    const r = deriveRun("clean", [stepEv("a", "step", {}), { kind: "condition_absent", what: "error", why: "the folder was there" }]);
+    assert.equal(r.columns.words_per_error_max.value, NOT_MEASURABLE);
+    assert.equal(r.columns.words_per_error_max.improved, true);
+  });
+  test("a primary button off the top of the page is not 0 px below the fold", () => {
+    const r = deriveRun("clean", [stepEv("a", "step", { primary: { belowFoldPx: null, missing: false, above: true, label: "Save" } })]);
+    assert.equal(r.columns.primary_below_fold_px.value, NOT_MEASURABLE);
+    assert.match(r.columns.primary_below_fold_px.reason, /outside the visible area/);
+  });
+});
+
+describe("compareRatchet across platforms", () => {
+  const board = (v) => ({ runs: { clean: { columns: { primary_below_fold_px: { value: v }, fields_typed: { value: 8 } } } } });
+  const base = (v, platform) => ({ schema: 1, platform, runs: { clean: { primary_below_fold_px: v, fields_typed: 8 } } });
+  test("a number that moves with the font is shown, not compared, on another platform", () => {
+    const r = compareRatchet(board(900), base(638, "darwin/x"), { platform: "linux/x", only: ["primary_below_fold_px", "fields_typed"] });
+    assert.deepEqual(r.failures, []);
+    assert.equal(r.notCompared.length, 1);
+    assert.match(r.notCompared[0], /900 here, 638 recorded on darwin/);
+  });
+  test("on the SAME platform it is compared like any other column", () => {
+    const r = compareRatchet(board(900), base(638, "linux/x"), { platform: "linux/x", only: ["primary_below_fold_px"] });
+    assert.equal(r.failures.length, 1);
+  });
+  test("the columns that count things are compared on any platform", () => {
+    const r = compareRatchet({ runs: { clean: { columns: { fields_typed: { value: 9 } } } } }, base(638, "darwin/x"),
+      { platform: "linux/x", only: ["fields_typed"] });
+    assert.equal(r.failures.length, 1);
+    assert.match(r.failures[0], /fields_typed/);
+  });
+  test("a baseline with no platform recorded is compared as before", () => {
+    const r = compareRatchet(board(900), base(638, undefined), { platform: "linux/x", only: ["primary_below_fold_px"] });
+    assert.equal(r.failures.length, 1);
+    assert.equal(r.notCompared.length, 0);
+  });
+  test("the layout-dependent set is exactly the three that the fold decides", () => {
+    assert.deepEqual(layoutColumns().sort(), ["primary_below_fold_px", "words_per_error_max", "words_per_step_max"]);
+  });
+});
+
+describe("deriveRun, a rule nobody put to the test", () => {
+  test("a sentence checked without setting the condition it depends on is not a green zero", () => {
+    const r = deriveRun("refused-update", [{ kind: "renewal_check", count: 0, exercised: false, detail: "nothing closed the door" }]);
+    assert.equal(r.columns.renewal_sentence_with_gate_open.value, NOT_MEASURABLE);
+    assert.match(r.columns.renewal_sentence_with_gate_open.reason, /nothing closed the door/);
+  });
+  test("once the condition IS set, the count is reported", () => {
+    const r = deriveRun("refused-update", [{ kind: "renewal_check", count: 2, exercised: true, detail: "the door was closed" }]);
+    assert.equal(r.columns.renewal_sentence_with_gate_open.value, 2);
   });
 });
 
@@ -474,6 +592,51 @@ describe("first_run_measure.js in a real browser", () => {
     assert.equal(m.primary.missing, true);
     assert.equal(m.primary.belowFoldPx, null);
   });
+  test("a primary button scrolled off the TOP is not 0 px below the fold", async () => {
+    await page.setContent(shell(`<div class="scroll" id="sc"><button class="go">Save</button><div style="height:600px"></div></div>`));
+    await page.addScriptTag({ content: MEASURE });
+    const m = await page.evaluate(() => {
+      document.getElementById("sc").scrollTop = 400;
+      return window.__firstRunMeasure({ primary: ".go" });
+    });
+    assert.equal(m.primary.above, true);
+    assert.equal(m.primary.belowFoldPx, null);
+    assert.equal(m.primary.missing, false);
+  });
+  test("an alarm whose only content is an icon still counts", async () => {
+    const m = await measure(shell(`<div class="warn-item"><svg width="16" height="16"></svg></div>`));
+    assert.equal(m.alarms.length, 1);
+    assert.equal(m.alarms[0].text, "(no text)");
+  });
+  test("the anchors it reads are reported, so a renamed one cannot pass as a small number", async () => {
+    const found = await measure(shell("<p>x</p>", { side: "<p>s</p>" }));
+    assert.deepEqual(found.anchors, { view: true, side: true, modal: true, notice: true, login: true, toastError: true });
+    // The page element renamed: every word and alarm would otherwise be read
+    // off <body> without a word of complaint.
+    await page.setContent(`<html><body><main><div id="renamed"><p>one two three</p></div></main></body></html>`);
+    await page.addScriptTag({ content: MEASURE });
+    const lost = await page.evaluate(() => window.__firstRunMeasure({}));
+    assert.equal(lost.anchors.view, false);
+    assert.equal(lost.anchors.side, false);
+  });
+});
+
+// The yellow-and-red list names classes in the console's own stylesheet and
+// frontend. A rename there would make every selector match nothing, and
+// "nothing is yellow" is exactly the score the redesign is aiming at — the
+// one wrong answer that looks like success. This reads the shipped assets.
+describe("the warning and error classes exist in the console", () => {
+  const assets = ["app.js", "style.css"]
+    .map((f) => readFileSync(path.join(HERE, "..", "..", "internal", "console", "assets", f), "utf8")).join("\n");
+  const list = readFileSync(path.join(HERE, "first_run_measure.js"), "utf8");
+  const selectors = [...list.slice(list.indexOf("const ALARMS = ["), list.indexOf("];", list.indexOf("const ALARMS = [")))
+    .toString().matchAll(/"\.([^"]+)"/g)].map((m) => m[1]);
+  test("the list was read", () => { assert.ok(selectors.length >= 20, "found " + selectors.length + " selectors"); });
+  for (const sel of selectors) {
+    test(sel + " is a class the console still uses", () => {
+      for (const cls of sel.split(".")) assert.ok(assets.includes(cls), cls + " appears nowhere in the console assets");
+    });
+  }
 });
 
 // ── the loud skip ──────────────────────────────────────────────────────────

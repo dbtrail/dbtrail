@@ -96,11 +96,18 @@ cleanup() {
       dbs="$dbs bintrail_idx_$id"
     done
   fi
-  for db in $dbs; do mysql_idx -e "DROP DATABASE IF EXISTS \`$db\`;" >/dev/null 2>&1 || true; done
+  # A drop that fails leaves a database on a server other suites share, so
+  # say so. Never stop the rest of the cleanup over it.
+  for db in $dbs; do
+    mysql_idx -e "DROP DATABASE IF EXISTS \`$db\`;" >/dev/null 2>&1 || echo "could not drop $db; remove it by hand" >&2
+  done
   if [ "${FIRST_RUN_WALK_KEEP:-}" = "1" ]; then echo "scratch kept: $SCRATCH"; else rm -rf "$SCRATCH"; fi
   exit "$status"
 }
-trap cleanup EXIT
+# INT and TERM as well as EXIT: a cancelled CI job, a job timeout or a Ctrl-C
+# would otherwise leave the source container and every database this run
+# created behind, on a MySQL other suites share.
+trap cleanup EXIT INT TERM
 
 echo "==> build bintrail-console"
 CONSOLE_BIN="${CONSOLE_BIN:-}"
@@ -153,13 +160,21 @@ mkdir -p "$SCRATCH/home" "$SCRATCH/tmp" "$SCRATCH/staging" "$SCRATCH/archives"
     --archive-staging-dir "$SCRATCH/archives" \
     --telemetry off) >"$E2E_ARTIFACT_DIR/first-run-walk-daemon.log" 2>&1 &
 DAEMON_PID=$!
+# A daemon that is alive but never answers must fail HERE, naming itself.
+# Falling through would run the walk against nothing and blame the walk.
+ready=0
 for _ in $(seq 1 60); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:$CONSOLE_PORT/api/healthz" 2>/dev/null; then break; fi
+  if curl -fsS -o /dev/null "http://127.0.0.1:$CONSOLE_PORT/api/healthz" 2>/dev/null; then ready=1; break; fi
   if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
     echo "the daemon exited early; its log:" >&2; cat "$E2E_ARTIFACT_DIR/first-run-walk-daemon.log" >&2; exit 1
   fi
   sleep 1
 done
+if [ "$ready" != 1 ]; then
+  echo "the daemon never answered on 127.0.0.1:$CONSOLE_PORT after 60s; its log:" >&2
+  cat "$E2E_ARTIFACT_DIR/first-run-walk-daemon.log" >&2
+  exit 1
+fi
 
 echo "==> walk"
 cd "$HERE"

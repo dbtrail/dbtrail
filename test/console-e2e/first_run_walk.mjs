@@ -16,6 +16,11 @@
 // may WAIT for the product (a person reads a notice for a few seconds) but
 // never acts for the person without logging it.
 //
+// One exemption, stated here because it is the only one: pressing a Copy
+// button is the test READING what that button puts on the clipboard, not a
+// step of the walk, and it is not counted as a click. Nothing else the walk
+// does to take a measurement touches the page.
+//
 // Modes (FIRST_RUN_WALK_MODE):
 //   ratchet         (default) fail when any column is worse than the
 //                   committed baseline, first_run_baseline.json
@@ -50,11 +55,14 @@ const SHOTS = process.env.FIRST_RUN_WALK_SHOTS || "";
 const BASELINE_FILE = process.env.FIRST_RUN_WALK_BASELINE || path.join(HERE, "first_run_baseline.json");
 const VIEWPORT = { width: 1280, height: 720 };
 // How long a change may take to show up on the Overview before it counts as
-// "not visible without reloading". The inventory waited 120 s. The first
-// change can honestly take ~25 s today: the Getting started list polls at up
-// to 15 s once it has been still for a while, and capture writes a small
-// batch on its 10 s tick. 45 s clears that with room for a slow CI machine.
-const CHANGE_WAIT_MS = 45000;
+// "not visible without reloading" — the same 120 s the walk recorded by hand
+// used. The first change honestly takes ~20 s today (the list polls at up to
+// 15 s once it has been still, and capture writes on its 10 s tick), so a
+// tighter window would turn one slow poll on a shared CI machine into "the
+// product stopped showing changes", which is the cry-wolf this column exists
+// to avoid. The latency itself is not lost: its 5 s sibling reports it, and
+// that one is shown rather than ratcheted.
+const CHANGE_WAIT_MS = 120000;
 // Where the walk asks for snapshots to be written. It does not exist yet: a
 // person types a new folder name, which is what the inventory did.
 const SNAP_DIR = path.join(SCRATCH, "snapshots");
@@ -124,13 +132,14 @@ const rec = (e) => { log.push(e); };
 const now = () => Date.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-let browser, context, page;
+let browser, context, page, chromiumVersion = "";
 const jsErrors = [];
 
 async function openBrowser() {
   browser = process.env.PW_WS_ENDPOINT
     ? await chromium.connect(process.env.PW_WS_ENDPOINT)
     : await chromium.launch({ headless: true, channel: process.env.PW_CHANNEL || undefined });
+  chromiumVersion = browser.version();
   context = await browser.newContext({ viewport: VIEWPORT });
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(CONSOLE_URL).origin }).catch(() => {});
   await context.addInitScript({ path: path.join(HERE, "first_run_measure.js") });
@@ -201,6 +210,11 @@ async function measure(name, stepKind, primary) {
     [handle, primary ? primary.label : "", !!primary]);
   m.settled = settled;
   rec({ kind: "step", name, stepKind, measure: m });
+  // A page still moving was measured mid-paint, and half a page is a SMALLER
+  // number on every column where smaller is better — it would read as an
+  // improvement. The run fails instead, which makes every one of its columns
+  // say it did not finish.
+  if (!settled) throw new Error('the page never stopped changing on step "' + name + '", so what was measured is not what a person would see');
   if (SHOTS) {
     mkdirSync(SHOTS, { recursive: true });
     await page.screenshot({ path: path.join(SHOTS, String(++shotN).padStart(2, "0") + "-" + log.run + "-" + name + ".png") });
@@ -228,7 +242,11 @@ async function serverId(name) {
 async function waitFor(fn, what, timeout) {
   const deadline = now() + timeout;
   for (;;) {
-    const v = await fn();
+    // A probe that throws is almost always a page repainting under it (an
+    // element detached, an evaluate whose context went away). That is a tick
+    // to retry, not the end of the run; only running out of time ends it.
+    let v = null;
+    try { v = await fn(); } catch (err) { if (err && err.__fatal) throw err; }
     if (v) return v;
     if (now() > deadline) throw new Error("timed out after " + Math.round(timeout / 1000) + " s waiting for " + what);
     await sleep(250);
@@ -259,15 +277,29 @@ async function copyChecks(step) {
       const mismatch = b.field === null || b.field !== b.password;
       rec({ kind: "copy_check", label: step + ": permissions block", mismatch,
         detail: mismatch ? `the block sets the password '${b.password}', the Password field holds ${b.field === null ? "no field" : b.field === "" ? "nothing" : "another value"}` : "" });
+    } else if (b.text.includes("CREATE USER")) {
+      // The block still creates a login but no longer says with which
+      // password, so the comparison this column exists for cannot be made.
+      // Silence here would read as "they match" — the defect fixed.
+      rec({ kind: "copy_check", label: step + ": permissions block", mismatch: null,
+        detail: "the block creates a login but no longer names a password on screen, so it cannot be compared with the form" });
     }
     if (b.copyButton) {
       const pre = page.locator(`pre[data-frw-pre="${b.i}"]`);
       await pre.locator("xpath=..").getByRole("button", { name: /^Copy/ }).first().click();
       await sleep(300);
-      const clip = await page.evaluate(() => navigator.clipboard.readText()).catch((e) => "(clipboard unreadable: " + e.message + ")");
+      let clip = null, unreadable = "";
+      try { clip = await page.evaluate(() => navigator.clipboard.readText()); }
+      catch (e) { unreadable = (e && e.message) || String(e); }
       const norm = (t) => String(t).replace(/[ \t]+$/gm, "").trim();
-      const mismatch = norm(clip) !== norm(b.text);
-      rec({ kind: "copy_check", label: step + ": Copy button", mismatch, detail: mismatch ? "the clipboard differs from the block on screen" : "" });
+      if (unreadable) {
+        // Not a mismatch: the comparison did not happen. Called a mismatch it
+        // would send a reviewer hunting a Copy button that works.
+        rec({ kind: "copy_check", label: step + ": Copy button", mismatch: null, detail: "the clipboard could not be read: " + unreadable });
+      } else {
+        const mismatch = norm(clip) !== norm(b.text);
+        rec({ kind: "copy_check", label: step + ": Copy button", mismatch, detail: mismatch ? "the clipboard differs from the block on screen" : "" });
+      }
       // Let the "copied" toast go before the next screen is read.
       await page.locator("#toast").waitFor({ state: "hidden", timeout: 10000 }).catch(() => {});
     }
@@ -285,13 +317,22 @@ function startRun(name) {
 // found by its NAME and its Save by the word on it inside the same card. Only
 // one server exists when the clean run reaches this, so there is one field.
 function snapshotLocation() {
-  const card = page.locator("form, section, div")
+  // Scoped to the page. The add-server form carries a HIDDEN input of the
+  // same name (it has to post the value back on save), so an unscoped lookup
+  // picks the visible one only by the order the two mounts happen to sit in
+  // the document — and a build that moves this editor into a dialog would
+  // silently start reading the hidden one, which answers "" to everything.
+  // The candidates are scoped to the page; the `has:` locators are NOT, on
+  // purpose — Playwright matches those relative to each candidate, so one
+  // built from #view would be looked for inside the card and never match.
+  const view = page.locator("#view");
+  const card = view.locator("form, section, div")
     .filter({ has: page.locator("input[name=baseline_dir]") })
     .filter({ has: page.getByRole("button", { name: /^Save$/ }) })
     .last();
   return {
-    dir: page.locator("input[name=baseline_dir]").first(),
-    s3: page.locator("input[name=baseline_s3]").first(),
+    dir: view.locator("input[name=baseline_dir]").first(),
+    s3: view.locator("input[name=baseline_s3]").first(),
     save: card.getByRole("button", { name: /^Save$/ }).first(),
   };
 }
@@ -354,10 +395,12 @@ async function waitCaptureSettled(id) {
   }, "capture's first checkpoint", 90000);
 }
 async function waitFirstRunList() {
-  // The Getting started list redraws itself while capture starts; wait for
-  // the four start-up steps to be done so every walk reads the same list.
-  await waitFor(async () => (await page.locator(".fr-card .fr-step.done").count()) >= 4 ||
-    (await page.locator(".ov-evlist .ov-ev").count()) > 0, "the Getting started list to finish starting", 90000);
+  // The Getting started list redraws itself while capture starts. ONE stated
+  // condition, not "this or a change already arrived": those are two
+  // different screens with different word counts, and whichever won the race
+  // would decide the number.
+  await waitFor(async () => (await page.locator(".fr-card .fr-step.done").count()) >= 4,
+    "the four start-up steps on the Getting started list to be done", 90000);
 }
 
 async function runClean(block) {
@@ -454,7 +497,13 @@ async function runClean(block) {
 
   await navTo(ROUTES.snapshotList, false, () => takeSnapshotButton().first().isVisible().catch(() => false));
   const create = takeSnapshotButton().first();
-  if (!(await create.isVisible().catch(() => false))) {
+  if (await create.isVisible().catch(() => false)) {
+    // The folder the location named did not have to exist for this to work,
+    // so there is no error screen in this run and no trip out of the browser.
+    // Recorded, so a lost error-screen measurement is told apart from one
+    // that no longer happens.
+    rec({ kind: "condition_absent", what: "error", why: "the snapshot could be taken without creating the folder first" });
+  } else {
     await measure("snapshot-folder-missing", "error");
     const text = await page.locator("#view").innerText();
     if (!/no such file or directory/i.test(text)) throw new Error("no way to take the first snapshot on this page: " + text.slice(0, 300));
@@ -482,7 +531,11 @@ async function runClean(block) {
   // good, makes this time out and say which half failed: whoever reshapes
   // that screen updates this step in the same change.
   await waitFor(async () => {
-    if (await page.locator("#toast-error").isVisible()) throw new Error("the snapshot failed: " + (await page.locator("#toast-error").innerText()));
+    if (await page.locator("#toast-error").isVisible()) {
+      const err = new Error("the snapshot failed: " + (await page.locator("#toast-error").innerText()));
+      err.__fatal = true; // not a repaint to retry: the product said it failed
+      throw err;
+    }
     const b = await harnessGet("/api/baselines", id);
     const newest = (b.snapshots || [])[0];
     if (!newest) return false;
@@ -524,7 +577,14 @@ function refusedUpdate(final) {
   startRun("refused-update");
   const re = /up to date from the changes|never reads all your tables again/gi;
   const hits = (final.finalText.match(re) || []).length;
-  rec({ kind: "renewal_check", count: hits, detail: hits ? "the sentence is on the final screen while full reads are on" : "not on the final screen" });
+  // What this reads is the final screen of the clean walk. That install
+  // allows full reads, so a sentence promising the snapshot keeps itself up
+  // to date would be false there — but the walk never CLOSED that door, so a
+  // zero is "the sentence was not on that screen", not "it is suppressed when
+  // it should be". It is reported as such until a run can set the door.
+  rec({ kind: "renewal_check", count: hits, exercised: false,
+    detail: hits ? "the sentence is on the final screen, where reading whole databases is allowed"
+      : "not on the final screen, but nothing here closed the door to reading whole databases, so this is not yet a test of the rule" });
   rec({ kind: "refusal_check", named: null, reason: "nothing on screen reports a snapshot update yet: an update that cannot be built from the changes today falls back to a full read, which this install allows, so there is no refusal to show" });
 }
 
@@ -599,8 +659,12 @@ async function noPrimaryKey(block) {
   await addAnotherServer("no-primary-key", "shop-audit", "dbtrail3", block, async () => {
     // What the refusal asks for: SQL on the database. When it offers more
     // than one statement for the same table, the person has to pick one.
-    const alters = await page.evaluate(() => Array.from(document.querySelectorAll("#notice-mount pre"))
+    const alters = await page.evaluate(() => Array.from(document.querySelectorAll("#notice-mount pre, #notice-mount code"))
       .filter((p) => p.getClientRects().length && /ALTER TABLE/i.test(p.innerText)).length);
+    // Always say what was seen, zero included: capture WAS refused for a
+    // table with no primary key, so a screen with no statement on it means
+    // this reading lost its footing, not that the choice went away.
+    rec({ kind: "forced_choice_probe", what: "which ALTER TABLE form to run", count: alters });
     if (alters >= 2) rec({ kind: "forced_choice", label: "which of " + alters + " ALTER TABLE forms to run" });
     outOfBrowser("add a primary key to shop.audit_log on MySQL", () =>
       srcSQL("ALTER TABLE shop.audit_log ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;\n"));
@@ -634,7 +698,12 @@ try {
 
 let commit = "";
 try { commit = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "--short", "HEAD"], { encoding: "utf8" }).trim(); } catch (_) { /* not a checkout */ }
-const scoreboard = { schema: 1, commit, viewport: VIEWPORT.width + "x" + VIEWPORT.height, runs: {} };
+// The platform the layout-dependent numbers were measured on. Fonts decide
+// where text wraps, wrapping decides what is above the fold, so a word count
+// or a below-the-fold distance from one machine is not evidence about
+// another. Recorded here and compared by the ratchet.
+const platform = process.platform + "/" + (chromiumVersion || "chromium");
+const scoreboard = { schema: 1, commit, platform, viewport: VIEWPORT.width + "x" + VIEWPORT.height, runs: {} };
 for (const name of Object.keys(RUNS)) {
   if (logs[name]) scoreboard.runs[name] = deriveRun(name, logs[name]);
 }
@@ -661,7 +730,7 @@ if (MODE === "write-baseline") {
   if (failed) {
     console.log("\nNot writing the baseline: the walk did not finish cleanly.");
   } else {
-    writeFileSync(BASELINE_FILE, JSON.stringify(baselineFrom(scoreboard, { measured_at_commit: commit, viewport: scoreboard.viewport }), null, 2) + "\n");
+    writeFileSync(BASELINE_FILE, JSON.stringify(baselineFrom(scoreboard, { measured_at_commit: commit, platform, viewport: scoreboard.viewport }), null, 2) + "\n");
     console.log("\nWrote " + BASELINE_FILE);
   }
 } else if (MODE === "target") {
@@ -673,10 +742,16 @@ if (MODE === "write-baseline") {
 } else if (baseline) {
   const r = compareRatchet(scoreboard, baseline);
   const t = compareTarget(scoreboard);
-  console.log(`\nRATCHET against ${path.basename(BASELINE_FILE)}: ${r.failures.length} worse, ${r.loosened.length} better, ${r.passed.length} unchanged, ${r.notMeasurable.length} not measurable`);
+  console.log(`\nRATCHET against ${path.basename(BASELINE_FILE)} (recorded on ${baseline.platform || "an unrecorded platform"}, running on ${platform}): ` +
+    `${r.failures.length} worse, ${r.loosened.length} better, ${r.passed.length} unchanged, ${r.notMeasurable.length} not measurable, ${r.notCompared.length} not compared`);
   for (const f of r.failures) console.log("  WORSE    " + f);
   for (const l of r.loosened) console.log("  BETTER   " + l);
   for (const n of r.notMeasurable) console.log("  N/M      " + n);
+  for (const n of r.notCompared) console.log("  SHOWN    " + n);
+  if (r.notCompared.length) {
+    console.log("  (to have those compared too, record a baseline on this platform:\n" +
+      "   FIRST_RUN_WALK_MODE=write-baseline make console-first-run-walk)");
+  }
   console.log(`(targets: ${t.passed.length} of ${t.passed.length + t.failures.length} met; FIRST_RUN_WALK_MODE=target lists them)`);
   if (r.failures.length) failed = true;
 }

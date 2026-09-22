@@ -7,6 +7,6 @@
     "drive": "node console_e2e.mjs"
   },
   "dependencies": {
-    "playwright": "^1.48.0"
+    "playwright": "1.63.0"
   }
 }

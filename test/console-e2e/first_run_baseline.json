@@ -1,6 +1,7 @@
 {
   "schema": 1,
-  "measured_at_commit": "9e0bd301",
+  "measured_at_commit": "0c9dd00d",
+  "platform": "darwin/153.0.8010.12",
   "viewport": "1280x720",
   "runs": {
     "clean": {
@@ -43,7 +44,7 @@
       "primary_below_fold_px": 671
     },
     "refused-update": {
-      "renewal_sentence_with_gate_open": 0,
+      "renewal_sentence_with_gate_open": "not measurable",
       "refused_update_named": "not measurable"
     }
   },
@@ -455,9 +456,7 @@
       }
     },
     "refused-update": {
-      "renewal_sentence_with_gate_open": {
-        "detail": "not on the final screen"
-      },
+      "renewal_sentence_with_gate_open": "not on the final screen, but nothing here closed the door to reading whole databases, so this is not yet a test of the rule",
       "refused_update_named": "nothing on screen reports a snapshot update yet: an update that cannot be built from the changes today falls back to a full read, which this install allows, so there is no refusal to show"
     }
   }

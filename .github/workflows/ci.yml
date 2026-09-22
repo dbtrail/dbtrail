@@ -55,6 +55,10 @@ jobs:
               - 'Makefile'
               - 'migrations/**'
               - 'test/console-e2e/**'
+              # The first-run walk runs the permissions block from the
+              # quickstart, read out of that file: a docs-only edit that
+              # reshapes it breaks the walk, so it has to be able to run.
+              - 'docs/quickstart.md'
               - '.github/workflows/ci.yml'
             console:
               - 'internal/console/**'
