@@ -77,11 +77,17 @@ First run: open the URL and create your username and password.
 Open it and use **+ Add server** (the Servers screen opens itself on a
 fresh install): pick the **source type** (MySQL, MariaDB, or PostgreSQL) and
 paste the database to watch — host, user, password, optional schema filter
-(`host.docker.internal` reaches a database on this same machine from inside
-Docker; a PostgreSQL source adds database/slot/publication fields —
-see [postgres.md](./postgres.md)). DBTrail runs the preflight (failures come
+(a PostgreSQL source adds database/slot/publication fields, see
+[postgres.md](./postgres.md)). DBTrail runs the preflight (failures come
 back as remediation cards), provisions a dedicated index for that source, and
-starts streaming. Repeat per server; everything you add resumes automatically when
+starts streaming.
+
+A database on this same machine is `host.docker.internal` from inside Docker.
+On Linux the compose maps that name with `host-gateway`, which needs Docker
+Engine 20.10 or later running as root; with rootless Docker, or Podman before
+4.7, set `HOST_GATEWAY` in `.env` to this machine's address. That database
+must also listen on more than `127.0.0.1`, and the user in the grant the
+add-server form shows (`'dbtrail'@'%'`) must be allowed from other hosts. Repeat per server; everything you add resumes automatically when
 the container restarts.
 
 Prefer to start streaming one source immediately at boot? Set `SOURCE_DSN`

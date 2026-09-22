@@ -58,3 +58,105 @@ down.
 
 Adding a scenario: append an `ok(...)`/`bad(...)` block in `console_e2e.mjs`.
 A non-zero exit fails CI and writes `console-e2e-failure.png` to the artifact dir.
+
+---
+
+# first-run walk — a scoreboard of a person's first hour (#1800)
+
+`console_e2e.mjs` above asks "does this still work?". The walk asks a
+different question: **how much work is it, the first time?** It drives a fresh
+`watch` daemon (no servers, no login yet) and a **stock** `mysql:8.4` it starts
+itself — no server flags at all, because "zero yellow or red on a stock MySQL"
+is only a real claim if nothing tuned it — and measures the walk from creating
+the login to the first snapshot.
+
+```sh
+# start the test MySQL if it isn't already (see above), then:
+make console-first-run-walk
+```
+
+It needs Docker, Node and `mydumper` on PATH (the first snapshot runs it).
+Anything missing and it **skips loudly**: exit 77 with a banner saying nothing
+was measured. `FIRST_RUN_WALK_ALLOW_SKIP=1` turns that into exit 0 for a local
+run; CI never sets it.
+
+## What it measures
+
+Five runs — a clean database; a reload in the middle of Connect; a second
+server; a server with a table that has no primary key; and a refused snapshot
+update — each reporting its own columns:
+
+| Column | What it counts |
+|---|---|
+| Clicks to the first snapshot | every click, dropdown choice and reload, walked and the minimum a snapshot needs |
+| Fields typed | fields the walk had to fill in (a value already there is not typed) |
+| Forced choices | places where nothing can proceed until the person picks |
+| Trips out of the browser | things that can only be done elsewhere (the permissions block, `mkdir`) |
+| Visible words per step | words **rendered above the fold** on the step's own surface, at 1280×720 |
+| Banned words and em dashes | the closed word list, counted once per distinct sentence on screen |
+| Yellow or red elements | the interface's **own** warning and error classes, never a pixel colour |
+| Changes visible without reloading | of three changes made on the database, how many appear on the Overview |
+| Primary button below the fold | how far the step's main button sits below the visible area, in px |
+| Final-screen window vs real retention | the sentence on the last screen against `/api/rotation` |
+| Copied text different from what is shown | the Copy button's clipboard, and whether the block's password is the one in the form |
+
+Rules worth knowing before changing a number:
+
+- **The word count reads the rendered page**, never a source file: a range per
+  word, so a paragraph cut by the fold counts only the lines above it, and
+  text scrolled out of a box does not count. Copyable SQL in a `<pre>` is not
+  prose and is left out of both counts.
+- **A folded `Details` placed after the step's primary button is skipped
+  whole**, summary included. That fold is allowed to name the mechanism; the
+  rule is written into the test so it is visible rather than assumed.
+- **A column whose feature does not exist yet reports "not measurable"**, with
+  the reason, and never "pass". Two do today: the final screen states no
+  retention, and nothing on screen reports a refused snapshot update.
+- The walk may WAIT for the product, but it never acts for the person without
+  recording the click.
+
+## The ratchet
+
+`first_run_baseline.json` holds what main measures today. The default mode
+fails when any number gets **worse** than that; a number that gets better
+passes, with a line asking the PR that improved it to lower the baseline in
+the same change. That is how a test that is red against the goal can still be
+green in CI.
+
+Three of the columns — the two word counts and the distance below the fold —
+depend on where text WRAPS, and that depends on the fonts of the machine that
+measured it. They are compared only against a baseline recorded on the same
+platform; anywhere else they are printed and marked "not compared", with the
+command to record them for that platform. Everything else counts things —
+clicks, fields, sentences, elements — and is compared everywhere.
+
+Two things the numbers mean precisely, because the labels are shorter than
+the rules:
+
+- **Yellow or red** counts SIGHTINGS, not distinct elements: a warning shown
+  on three measured screens counts three times, and a warning box inside a
+  warning notice counts both. That is deliberate — the question is how much
+  alarm a person walks through — and it is why the count rises when the walk
+  adds a second server.
+- **Clicks to the first snapshot** counts what this walk clicked, including
+  one reload it only needs while later changes do not appear on their own.
+  The minimum beside it is the same walk without the clicks a snapshot does
+  not need.
+
+```sh
+FIRST_RUN_WALK_MODE=target make console-first-run-walk        # the goals: red today
+FIRST_RUN_WALK_MODE=write-baseline make console-first-run-walk # record what it measured
+FIRST_RUN_WALK_SHOTS=/tmp/walk make console-first-run-walk     # a screenshot of every step
+```
+
+Every run writes `first-run-scoreboard.json` to the artifact directory with
+the evidence behind each number: the clicks in order, the fields typed, the
+words per step, the sentences that carried a banned word, and which element
+was yellow.
+
+The arithmetic, the ratchet and the counting rules have their own unit tests,
+which run first and need no Docker:
+
+```sh
+node --test test/console-e2e/first_run_walk.test.mjs
+```

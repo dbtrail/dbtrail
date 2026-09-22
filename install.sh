@@ -268,7 +268,9 @@ grep -q '^services:' docker-compose.yml || die \
 
 # ── 3. bring it up ──────────────────────────────────────────────────────
 step "Starting containers (first run pulls images — this can take a minute)"
-$COMPOSE up -d || die "\`$COMPOSE up -d\` failed. Check the output above."
+$COMPOSE up -d || die "\`$COMPOSE up -d\` failed. Check the output above.
+    Says \"invalid IP address in add-host\"? Your engine does not understand
+    host-gateway: put HOST_GATEWAY=<this machine's address> in ${DIR}/.env and re-run."
 
 # ── 4. wait for the console to actually answer ──────────────────────────
 # `up -d` already blocks until the bundled index MySQL is healthy (the bintrail
@@ -313,7 +315,8 @@ say "  ${B}2.${RST} Create your console ${B}username + password${RST} (first-run
 say "  ${B}3.${RST} Click ${B}+ Add server${RST} and paste the MySQL you want to watch —"
 say "     host, user, password. DBTrail runs the preflight, provisions an"
 say "     index for it, and starts streaming. Watch it from a MySQL on this"
-say "     same machine? Use host ${B}host.docker.internal${RST}."
+say "     same machine? Use host ${B}host.docker.internal${RST} (on Linux, that"
+say "     MySQL must listen on more than 127.0.0.1)."
 say ""
 say "${DIM}The stack lives in ${DIR}. Useful commands from there:${RST}"
 say "  ${COMPOSE} logs -f bintrail     ${DIM}# follow what it's doing${RST}"

@@ -192,17 +192,20 @@ mysql -h <RDS_ENDPOINT> -u admin -p
 
 ```sql
 -- For bintrail stream (reads binlogs + schema metadata)
-CREATE USER 'bintrail_reader'@'%' IDENTIFIED BY '<bintrail-reader-password>';
+CREATE USER 'bintrail_reader'@'%' IDENTIFIED BY <choose a password>;
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'bintrail_reader'@'%';
 GRANT SELECT ON demo.* TO 'bintrail_reader'@'%';
 GRANT SELECT ON sbtest.* TO 'bintrail_reader'@'%';
 
 -- For the traffic generator (DML on demo only)
-CREATE USER 'traffic'@'%' IDENTIFIED BY '<traffic-password>';
+CREATE USER 'traffic'@'%' IDENTIFIED BY <choose a password>;
 GRANT SELECT, INSERT, UPDATE, DELETE ON demo.* TO 'traffic'@'%';
 ```
 
-Use the passwords you chose here as `BINTRAIL_RDS_PASSWORD` and `TRAFFIC_RDS_PASSWORD` in `.env`.
+Put a password of your own in quotes where each line says `<choose a password>`.
+As written, MySQL refuses the line on purpose, so no account is created with a
+password copied from this page. Use the passwords you chose here as
+`BINTRAIL_RDS_PASSWORD` and `TRAFFIC_RDS_PASSWORD` in `.env`.
 
 ---
 
