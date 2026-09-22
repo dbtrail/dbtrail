@@ -524,6 +524,43 @@ func (h *BaselineRunHistory) LastFullRead(serverID string) *BaselineRunRecord {
 	return nil
 }
 
+// LastSourceRead is when the newest full backup that published a snapshot
+// at or before atOrBefore STARTED, zero when there is none on record or its
+// start does not parse: the instant the capture's dropped rows are dated
+// against (#1791). A full backup reads the source, so a row the capture
+// dropped before it is in its snapshot and in every update folded from it;
+// an update reads only the index, which never received that row, so an
+// update anchor proves nothing about it. The start, not the finish: the
+// dump's consistent read is taken as it starts, and a row dropped while it
+// ran is in neither. Only a full backup that succeeded counts: one that
+// failed after publishing may have reached only one of its destinations
+// (published here, the upload refused), and a fold reading the other one
+// descends from an older full backup, which never read those rows. Both
+// stamps come from this process's clock (the capture's skip ledger and the
+// run record); a ledger written by a capture on another host is only as
+// comparable as the two clocks.
+func (h *BaselineRunHistory) LastSourceRead(serverID string, atOrBefore time.Time) time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	recs := h.servers[serverID]
+	for i := len(recs) - 1; i >= 0; i-- {
+		r := recs[i]
+		if r.Kind != BaselineRunDump || r.SkipReason != "" || r.Error != "" || r.SnapshotTime == "" {
+			continue
+		}
+		snap, err := time.Parse(time.RFC3339, r.SnapshotTime)
+		if err != nil || snap.After(atOrBefore) {
+			continue
+		}
+		started, err := time.Parse(time.RFC3339, r.StartedAt)
+		if err != nil {
+			return time.Time{}
+		}
+		return started
+	}
+	return time.Time{}
+}
+
 // LastFullCopy returns the newest scheduled full backup the full-backup
 // timetable started (#1564), whether it succeeded or not, and the newest of
 // its slots that did not start, either nil.
