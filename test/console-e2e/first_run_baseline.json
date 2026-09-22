@@ -1,0 +1,464 @@
+{
+  "schema": 1,
+  "measured_at_commit": "9e0bd301",
+  "viewport": "1280x720",
+  "runs": {
+    "clean": {
+      "clicks_to_first_snapshot": 15,
+      "clicks_to_first_snapshot_minimum": 10,
+      "fields_typed": 8,
+      "forced_choices": 1,
+      "trips_out_of_browser": 2,
+      "words_per_step_max": 222,
+      "words_per_error_max": 71,
+      "banned_words": 114,
+      "yellow_red": 7,
+      "changes_visible_without_reload": 1,
+      "changes_visible_within_5s": 0,
+      "primary_below_fold_px": 638,
+      "final_window_matches_retention": "not measurable",
+      "copied_differs_from_shown": 1
+    },
+    "reload-mid-connect": {
+      "connect_fields_kept_after_reload": 0
+    },
+    "second-server": {
+      "clicks_to_capture": 6,
+      "fields_typed": 5,
+      "forced_choices": 0,
+      "trips_out_of_browser": 1,
+      "words_per_step_max": 150,
+      "banned_words": 52,
+      "yellow_red": 6,
+      "primary_below_fold_px": 606
+    },
+    "no-primary-key": {
+      "clicks_to_capture": 8,
+      "fields_typed": 5,
+      "forced_choices": 1,
+      "trips_out_of_browser": 2,
+      "words_per_step_max": 150,
+      "words_per_error_max": 199,
+      "banned_words": 54,
+      "primary_below_fold_px": 671
+    },
+    "refused-update": {
+      "renewal_sentence_with_gate_open": 0,
+      "refused_update_named": "not measurable"
+    }
+  },
+  "evidence": {
+    "clean": {
+      "clicks_to_first_snapshot": {
+        "clicks": [
+          "Create & sign in",
+          "+ Add server",
+          "Test connection (optional)",
+          "Back to the form (optional)",
+          "Save",
+          "OK",
+          "close the Servers dialog (✕)",
+          "reload the page (to see the later changes) (optional)",
+          "Undo (optional)",
+          "Backups (sidebar) (optional)",
+          "Backup settings (sidebar)",
+          "Save (the snapshot location)",
+          "Backups (sidebar)",
+          "reload the page (after creating the folder)",
+          "Create backup"
+        ]
+      },
+      "fields_typed": {
+        "fields": [
+          "sign-in: password",
+          "sign-in: confirm password",
+          "connect: name",
+          "connect: host",
+          "connect: port",
+          "connect: user",
+          "connect: password",
+          "snapshot-location: snapshot folder"
+        ]
+      },
+      "forced_choices": {
+        "choices": [
+          "a folder or a bucket for the snapshots: two empty places and no default"
+        ]
+      },
+      "trips_out_of_browser": {
+        "trips": [
+          "create the capture user: run the permissions block on MySQL",
+          "create the snapshot folder (mkdir)"
+        ]
+      },
+      "words_per_step_max": {
+        "worst": "snapshot-list-first-look",
+        "steps": [
+          {
+            "step": "sign-in",
+            "kind": "step",
+            "words_above_fold": 17,
+            "words_whole": 17,
+            "layer": "login"
+          },
+          {
+            "step": "after-sign-in",
+            "kind": "step",
+            "words_above_fold": 112,
+            "words_whole": 135,
+            "layer": "view"
+          },
+          {
+            "step": "connect",
+            "kind": "step",
+            "words_above_fold": 126,
+            "words_whole": 488,
+            "layer": "modal"
+          },
+          {
+            "step": "test-result",
+            "kind": "step",
+            "words_above_fold": 136,
+            "words_whole": 652,
+            "layer": "notice"
+          },
+          {
+            "step": "save-result",
+            "kind": "step",
+            "words_above_fold": 127,
+            "words_whole": 650,
+            "layer": "notice"
+          },
+          {
+            "step": "after-ok",
+            "kind": "step",
+            "words_above_fold": 150,
+            "words_whole": 495,
+            "layer": "modal"
+          },
+          {
+            "step": "first-change-waiting",
+            "kind": "step",
+            "words_above_fold": 150,
+            "words_whole": 215,
+            "layer": "view"
+          },
+          {
+            "step": "changes",
+            "kind": "step",
+            "words_above_fold": 123,
+            "words_whole": 126,
+            "layer": "view"
+          },
+          {
+            "step": "undo",
+            "kind": "step",
+            "words_above_fold": 151,
+            "words_whole": 248,
+            "layer": "view"
+          },
+          {
+            "step": "snapshot-list-first-look",
+            "kind": "step",
+            "words_above_fold": 222,
+            "words_whole": 239,
+            "layer": "view"
+          },
+          {
+            "step": "snapshot-location",
+            "kind": "step",
+            "words_above_fold": 84,
+            "words_whole": 185,
+            "layer": "view"
+          },
+          {
+            "step": "snapshot-location-saved",
+            "kind": "step",
+            "words_above_fold": 84,
+            "words_whole": 185,
+            "layer": "view"
+          },
+          {
+            "step": "snapshot-folder-missing",
+            "kind": "error",
+            "words_above_fold": 71,
+            "words_whole": 71,
+            "layer": "view"
+          },
+          {
+            "step": "snapshot-ready",
+            "kind": "step",
+            "words_above_fold": 210,
+            "words_whole": 351,
+            "layer": "view"
+          },
+          {
+            "step": "first-snapshot",
+            "kind": "step",
+            "words_above_fold": 161,
+            "words_whole": 487,
+            "layer": "view"
+          }
+        ]
+      },
+      "words_per_error_max": {
+        "worst": "snapshot-folder-missing"
+      },
+      "banned_words": {
+        "per_word": {
+          "backup": 55,
+          "baseline": 9,
+          "daemon": 7,
+          "em dash": 3,
+          "index": 17,
+          "monitor": 4,
+          "protect": 2,
+          "source": 14,
+          "stream": 1,
+          "watch": 2
+        },
+        "sentences_in": "the run's first-run-scoreboard.json"
+      },
+      "yellow_red": {
+        "elements": [
+          "test-result: .notice.warn \"Test connection ✓ The database is ready to capture. Check these when you can:...\"",
+          "test-result: .doctor-card.warn \"! Statement capture (query_text): binlog_rows_query_log_events=OFF — events i...\"",
+          "test-result: .doctor-card.warn \"! Schema-drift detection (binlog_row_metadata): binlog_row_metadata=MINIMAL —...\"",
+          "save-result: .notice.warn \"Capture started Check these when you can: ! Statement capture (query_text): b...\"",
+          "save-result: .doctor-card.warn \"! Statement capture (query_text): binlog_rows_query_log_events=OFF — events i...\"",
+          "save-result: .doctor-card.warn \"! Schema-drift detection (binlog_row_metadata): binlog_row_metadata=MINIMAL —...\"",
+          "after-ok: .chip-mon \"PENDING\""
+        ]
+      },
+      "changes_visible_without_reload": {
+        "changes": [
+          "INSERT: seen after 20.2 s",
+          "UPDATE: not seen",
+          "DELETE: not seen"
+        ]
+      },
+      "primary_below_fold_px": {
+        "worst": "connect",
+        "steps": [
+          "sign-in: 0 px (Create & sign in)",
+          "after-sign-in: 0 px (+ Add server)",
+          "connect: 638 px (Save)",
+          "test-result: 0 px (Back to the form)",
+          "save-result: 0 px (OK)",
+          "snapshot-location: 565 px (Save (the snapshot location))",
+          "snapshot-ready: 0 px (Create backup)"
+        ]
+      },
+      "final_window_matches_retention": "the final screen states no retention (no \"Changes are kept N days\" sentence)",
+      "copied_differs_from_shown": {
+        "blocks": [
+          "connect: permissions block: the block sets the password 'strong-password', the Password field holds nothing",
+          "undo: Copy button: matches"
+        ]
+      }
+    },
+    "reload-mid-connect": {
+      "connect_fields_kept_after_reload": {
+        "detail": "every typed field was lost"
+      }
+    },
+    "second-server": {
+      "clicks_to_capture": {
+        "clicks": [
+          "Manage servers",
+          "+ Add server",
+          "Save",
+          "OK",
+          "close the Servers dialog (✕)",
+          "choose shop-db-2 in the server selector"
+        ]
+      },
+      "fields_typed": {
+        "fields": [
+          "connect: name",
+          "connect: host",
+          "connect: port",
+          "connect: user",
+          "connect: password"
+        ]
+      },
+      "forced_choices": {
+        "choices": []
+      },
+      "trips_out_of_browser": {
+        "trips": [
+          "create the capture user dbtrail2: run the permissions block on MySQL"
+        ]
+      },
+      "words_per_step_max": {
+        "worst": "after-ok",
+        "steps": [
+          {
+            "step": "connect",
+            "kind": "step",
+            "words_above_fold": 128,
+            "words_whole": 494,
+            "layer": "modal"
+          },
+          {
+            "step": "save-result",
+            "kind": "step",
+            "words_above_fold": 127,
+            "words_whole": 663,
+            "layer": "notice"
+          },
+          {
+            "step": "after-ok",
+            "kind": "step",
+            "words_above_fold": 150,
+            "words_whole": 508,
+            "layer": "modal"
+          },
+          {
+            "step": "overview",
+            "kind": "step",
+            "words_above_fold": 150,
+            "words_whole": 215,
+            "layer": "view"
+          }
+        ]
+      },
+      "banned_words": {
+        "per_word": {
+          "backup": 13,
+          "daemon": 5,
+          "em dash": 3,
+          "index": 11,
+          "monitor": 4,
+          "protect": 1,
+          "source": 11,
+          "stream": 1,
+          "watch": 3
+        },
+        "sentences_in": "the run's first-run-scoreboard.json"
+      },
+      "yellow_red": {
+        "elements": [
+          "connect: .chip-mon \"RUNNING\"",
+          "save-result: .notice.warn \"Capture started Check these when you can: ! Statement capture (query_text): b...\"",
+          "save-result: .doctor-card.warn \"! Statement capture (query_text): binlog_rows_query_log_events=OFF — events i...\"",
+          "save-result: .doctor-card.warn \"! Schema-drift detection (binlog_row_metadata): binlog_row_metadata=MINIMAL —...\"",
+          "after-ok: .chip-mon \"RUNNING\"",
+          "after-ok: .chip-mon \"PENDING\""
+        ]
+      },
+      "primary_below_fold_px": {
+        "worst": "connect",
+        "steps": [
+          "connect: 606 px (Save)",
+          "save-result: 0 px (OK)"
+        ]
+      }
+    },
+    "no-primary-key": {
+      "clicks_to_capture": {
+        "clicks": [
+          "Manage servers",
+          "+ Add server",
+          "Save",
+          "Back to the form",
+          "Save",
+          "OK",
+          "close the Servers dialog (✕)",
+          "choose shop-audit in the server selector"
+        ]
+      },
+      "fields_typed": {
+        "fields": [
+          "connect: name",
+          "connect: host",
+          "connect: port",
+          "connect: user",
+          "connect: password"
+        ]
+      },
+      "forced_choices": {
+        "choices": [
+          "which of 2 ALTER TABLE forms to run"
+        ]
+      },
+      "trips_out_of_browser": {
+        "trips": [
+          "create the capture user dbtrail3: run the permissions block on MySQL",
+          "add a primary key to shop.audit_log on MySQL"
+        ]
+      },
+      "words_per_step_max": {
+        "worst": "after-ok",
+        "steps": [
+          {
+            "step": "connect",
+            "kind": "step",
+            "words_above_fold": 122,
+            "words_whole": 578,
+            "layer": "modal"
+          },
+          {
+            "step": "save-refused",
+            "kind": "error",
+            "words_above_fold": 199,
+            "words_whole": 824,
+            "layer": "notice"
+          },
+          {
+            "step": "save-result",
+            "kind": "step",
+            "words_above_fold": 127,
+            "words_whole": 747,
+            "layer": "notice"
+          },
+          {
+            "step": "after-ok",
+            "kind": "step",
+            "words_above_fold": 150,
+            "words_whole": 592,
+            "layer": "modal"
+          },
+          {
+            "step": "overview",
+            "kind": "step",
+            "words_above_fold": 150,
+            "words_whole": 215,
+            "layer": "view"
+          }
+        ]
+      },
+      "words_per_error_max": {
+        "worst": "save-refused"
+      },
+      "banned_words": {
+        "per_word": {
+          "backup": 13,
+          "daemon": 5,
+          "em dash": 3,
+          "index": 12,
+          "monitor": 4,
+          "protect": 1,
+          "source": 11,
+          "stream": 2,
+          "watch": 3
+        },
+        "sentences_in": "the run's first-run-scoreboard.json"
+      },
+      "primary_below_fold_px": {
+        "worst": "connect",
+        "steps": [
+          "connect: 671 px (Save)",
+          "save-refused: 0 px (Back to the form)",
+          "save-result: 0 px (OK)"
+        ]
+      }
+    },
+    "refused-update": {
+      "renewal_sentence_with_gate_open": {
+        "detail": "not on the final screen"
+      },
+      "refused_update_named": "nothing on screen reports a snapshot update yet: an update that cannot be built from the changes today falls back to a full read, which this install allows, so there is no refusal to show"
+    }
+  }
+}

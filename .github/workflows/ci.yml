@@ -651,6 +651,95 @@ jobs:
             ${{ runner.temp }}/console-e2e-daemon.log
           if-no-files-found: ignore
 
+  console-first-run-walk:
+    # The first-run walk (#1800): a person's first hour with DBTrail — sign in,
+    # add the server, first change, Undo, first snapshot — driven in headless
+    # Chrome against a fresh daemon and a STOCK mysql:8.4, and measured into a
+    # scoreboard: clicks, fields typed, forced choices, trips out of the
+    # browser, visible words per step, banned words, yellow or red elements,
+    # changes seen without reloading, and how far the primary button sits below
+    # the fold at 1280x720.
+    #
+    # It is a RATCHET, not a fixed expectation: the numbers today are the ones
+    # in test/console-e2e/first_run_baseline.json, and this job fails when any
+    # of them gets WORSE. Each onboarding slice lowers the baseline in its own
+    # PR, so the scoreboard in the log is the evidence that slice worked.
+    # FIRST_RUN_WALK_MODE=target compares with the targets instead; that is red
+    # on main today, on purpose.
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.go == 'true' || needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+
+      # The index server, the same manually-named 8.4 container the other jobs
+      # use. The database the walk CAPTURES is a separate, stock mysql:8.4 that
+      # the walk starts itself with no server flags at all — "zero yellow or
+      # red on a stock MySQL" is only true if nothing here tunes it.
+      - name: Start MySQL (bintrail-test-mysql, 8.4)
+        run: |
+          docker run -d --name bintrail-test-mysql \
+            -e MYSQL_ROOT_PASSWORD=testroot \
+            -p 13306:3306 \
+            mysql:8.4 \
+            --binlog-format=ROW --binlog-row-image=FULL --log-bin=binlog --server-id=1
+          # Host TCP with full auth + a real query, three times in a row: see
+          # the "integration" job's MySQL-start step for why (#949).
+          consecutive=0
+          for i in $(seq 1 60); do
+            if docker run --rm --network host mysql:8.4 \
+                 mysql --protocol=TCP -h 127.0.0.1 -P 13306 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
+              consecutive=$((consecutive + 1))
+              [ "$consecutive" -ge 3 ] && { echo "MySQL is ready."; exit 0; }
+            else
+              consecutive=0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready in time" >&2
+          docker logs bintrail-test-mysql >&2 || true
+          exit 1
+
+      # The first snapshot of the walk runs mydumper in-process, so the walk
+      # needs it on PATH. Same version the console image bundles (#613), so
+      # what CI exercises is what ships.
+      - name: Install mydumper (1.0.3-1, the version the console image ships)
+        run: |
+          wget -q https://github.com/mydumper/mydumper/releases/download/v1.0.3-1/mydumper_1.0.3-1.jammy_amd64.deb -O /tmp/mydumper.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq /tmp/mydumper.deb
+          mydumper --version
+
+      - name: Install playwright chromium (+ system deps)
+        run: |
+          npm --prefix test/console-e2e install --no-audit --no-fund
+          npx --prefix test/console-e2e playwright install --with-deps chromium
+
+      # No FIRST_RUN_WALK_ALLOW_SKIP here on purpose: everything the walk needs
+      # is installed above, so a skip in CI (exit 77) must fail the job rather
+      # than pass quietly.
+      - name: First-run walk (scoreboard, ratcheted)
+        run: make console-first-run-walk
+
+      - name: Upload the scoreboard and what failed
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: first-run-walk
+          path: |
+            ${{ runner.temp }}/first-run-scoreboard.json
+            ${{ runner.temp }}/first-run-walk-daemon.log
+            ${{ runner.temp }}/first-run-walk-failure-*.png
+          if-no-files-found: ignore
+
   # The .goreleaser.yaml signs block only ever executes on a tag push, so no
   # PR check can catch a broken flag set until a release run fails — the worst
   # possible moment (recovery is delete-tag, fix, re-tag; cosign v3 made the
