@@ -125,7 +125,7 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 		return errors.New("this server has no source configured; set the source connection first")
 	}
 	if !hasOwnBackupLocation(e) {
-		return errors.New("this server has no baseline location set up; set a baseline directory or S3 location first (Backup settings page)")
+		return errors.New("this server has no baseline location set up; set a baseline directory or S3 location first" + onPage(PageBackupSettings))
 	}
 	if pgSourceIncomplete(e) {
 		return errors.New("this PostgreSQL server has no replication slot/publication configured; set them first (Edit → Source)")
@@ -354,11 +354,11 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		// belongs to neither.
 		if e.BaselineS3 != "" {
 			writeJSONError(w, http.StatusBadRequest,
-				"this server keeps its backups only in S3; point-in-time restore needs a local backup directory (Backup settings page)")
+				"this server keeps its backups only in S3; point-in-time restore needs a local backup directory"+onPage(PageBackupSettings))
 			return
 		}
 		writeJSONError(w, http.StatusBadRequest,
-			"this server has no backup directory of its own; set one first (Backup settings page)")
+			"this server has no backup directory of its own; set one first"+onPage(PageBackupSettings))
 		return
 	}
 	var body struct {
