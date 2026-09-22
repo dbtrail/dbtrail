@@ -141,9 +141,13 @@ is what lets it open a replication connection and create the slot). It only ever
 reads.
 
 ```sql
-CREATE ROLE dbtrail WITH LOGIN REPLICATION PASSWORD 'change-me';
+CREATE ROLE dbtrail WITH LOGIN REPLICATION PASSWORD <choose a password>;
 GRANT CONNECT ON DATABASE shop TO dbtrail;
 ```
+
+Put a password of your own in quotes where it says `<choose a password>`. As
+written, PostgreSQL refuses the line on purpose, so no role is created with a
+password copied from this page.
 
 - The role does **not** need to be a superuser, and does **not** need `SELECT`
   on your tables to stream changes (logical replication delivers the row data
