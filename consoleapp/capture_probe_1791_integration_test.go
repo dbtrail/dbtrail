@@ -30,7 +30,7 @@ func TestIntegrationProbeCapture(t *testing.T) {
 
 	probe := func() captureProbeResult {
 		t.Helper()
-		return captureFromDBs(ctx, indexDSN, sourceDSN, anchor)
+		return captureFromDBs(ctx, indexDSN, sourceDSN, anchor, time.Time{})
 	}
 	// A file-mode index: no stream_state row.
 	if r := probe(); r.verdict != "" || r.detail != "the index has no live capture on record" {
@@ -46,11 +46,36 @@ func TestIntegrationProbeCapture(t *testing.T) {
 	if r := probe(); r.verdict != "" || r.detail != "the capture runs in binlog-position mode, which is not compared" {
 		t.Fatalf("position mode: %+v", r)
 	}
+	// Rows dropped an hour before the anchor, and no full backup on record:
+	// dated against the last read of the source (none), not the anchor.
+	testutil.MustExec(t, db, `REPLACE INTO stream_state (id, mode, binlog_file, binlog_position, gtid_set, flavor, last_checkpoint, server_id, capture_skips)
+		VALUES (1, 'gtid', 'binlog.000001', 4, ?, 'mysql', UTC_TIMESTAMP(), 1, ?)`,
+		"3e11fa47-71ca-11e1-9e33-c80aa9429562:1-10",
+		`{"column_count_mismatch":{"count":3,"last_at":"`+anchor.Add(-time.Hour).UTC().Format(time.RFC3339)+`"}}`)
+	if r := probe(); r.verdict != "" || r.detail != "the capture dropped events that no full backup has read from the source since" {
+		t.Fatalf("rows dropped before an update anchor: %+v", r)
+	}
 	// A GTID capture whose index is on the source server.
 	checkpoint("gtid", "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-10")
 	if r := probe(); r.verdict != "" || !strings.HasPrefix(r.detail, "the index lives on the source server") {
 		t.Fatalf("index on the source server: %+v", r)
 	}
+	// A capture gap is dated against the anchor: one before it passes to the
+	// source question (and stops at the same-server answer), one after it
+	// refuses from the index alone.
+	for _, c := range []struct {
+		lost time.Time
+		want string
+	}{
+		{anchor.Add(-time.Hour), "the index lives on the source server"},
+		{anchor.Add(time.Hour), "the capture lost events to a binlog gap after the previous backup"},
+	} {
+		testutil.MustExec(t, db, "UPDATE stream_state SET gap_lost_at = ?, gap_lost_detail = 'purged' WHERE id = 1", c.lost.UTC())
+		if r := probe(); r.verdict != "" || !strings.HasPrefix(r.detail, c.want) {
+			t.Fatalf("a gap at %s against the anchor %s: %+v, want %q", c.lost.UTC(), anchor.UTC(), r, c.want)
+		}
+	}
+	testutil.MustExec(t, db, "UPDATE stream_state SET gap_lost_at = NULL, gap_lost_detail = NULL WHERE id = 1")
 
 	// The source's GTID read, for real: empty with GTIDs off, a
 	// whitespace-free set that compares with itself once they are on.

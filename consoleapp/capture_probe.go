@@ -30,8 +30,10 @@ import (
 // captureComparable reports whether st can be compared with the source at
 // all, and why not: every condition that rules "caught up" out without
 // asking the source. st is the index's stream_state (nil: no row), anchor
-// the previous snapshot's instant. Each refusal keeps the full backup, the
-// direction that cannot lose data:
+// the previous snapshot's instant, sourceRead when the newest full backup
+// that read the source started (BaselineRunHistory.LastSourceRead; zero:
+// none on record). Each refusal keeps the full backup, the direction that
+// cannot lose data:
 //
 //   - no live capture on record (a file-mode index), or a loss record this
 //     index does not have (GapColumnsPresent false: unevaluable, not "no
@@ -40,16 +42,19 @@ import (
 //     past an unfillable gap reaches the head with the gap's events gone,
 //     and only a full backup reads them again;
 //   - a skip ledger that is unreadable (not clean: unevaluable), or holds a
-//     skip at or after the anchor: a capture that drops every row it reads
-//     (#1034) advances its checkpoint all the same and indexes nothing. An
-//     acknowledgement changes nothing here: it records that an operator saw
-//     the tally, not that the rows came back;
+//     skip no full backup has read the source after: a capture that drops
+//     every row it reads (#1034) advances its checkpoint all the same and
+//     indexes nothing. Dated against sourceRead, not the anchor: an update
+//     is folded from the index, which never received a dropped row, so only
+//     a read of the source brings one back; with none on record, any skip
+//     refuses. An acknowledgement changes nothing here: it records that an
+//     operator saw the tally, not that the rows came back;
 //   - position mode: on a source without GTIDs the parser emits no commit
 //     boundary for an anonymous transaction, so the checkpoint stops at the
 //     end of its last rows event, short of the Xid the source's head is
 //     past, and a healthy capture would read as behind forever;
 //   - no GTID set checkpointed.
-func captureComparable(st *status.StreamStateInfo, anchor time.Time) (ok bool, detail string) {
+func captureComparable(st *status.StreamStateInfo, anchor, sourceRead time.Time) (ok bool, detail string) {
 	switch {
 	case st == nil:
 		return false, "the index has no live capture on record"
@@ -63,8 +68,8 @@ func captureComparable(st *status.StreamStateInfo, anchor time.Time) (ok bool, d
 		return false, "the capture's record of dropped events is not readable"
 	}
 	for _, sk := range skips {
-		if sk.Count > 0 && (sk.LastAt.IsZero() || !sk.LastAt.Before(anchor)) {
-			return false, "the capture dropped events it read after the previous backup"
+		if sk.Count > 0 && (sourceRead.IsZero() || sk.LastAt.IsZero() || !sk.LastAt.Before(sourceRead)) {
+			return false, "the capture dropped events that no full backup has read from the source since"
 		}
 	}
 	if st.Mode != "gtid" {
@@ -128,18 +133,19 @@ var probeCapture = probeCaptureFromDBs
 // then answers slowly would otherwise hold a page for several of them. The
 // probe keeps running in the background after that, until those same
 // bounds end it; its answer is then dropped.
-func probeCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor time.Time) captureProbeResult {
+func probeCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, sourceRead time.Time) captureProbeResult {
 	return boundedCaptureProbe(ctx, windowProbeTimeout, func(ctx context.Context) captureProbeResult {
-		return captureFromDBs(ctx, indexDSN, sourceDSN, anchor)
+		return captureFromDBs(ctx, indexDSN, sourceDSN, anchor, sourceRead)
 	})
 }
 
 // boundedCaptureProbe runs probe and waits at most within for it. The
 // context is cancelled here, after the wait, never by the probe's goroutine:
 // cancelled there, an answer sent in time and the expired context would be
-// ready together, and the select below may take either.
-func boundedCaptureProbe(ctx context.Context, within time.Duration, probe func(context.Context) captureProbeResult) captureProbeResult {
-	ctx, cancel := context.WithTimeout(ctx, within)
+// ready together, and the select below may take either. A caller that went
+// away first is not a timeout, and is not reported as one.
+func boundedCaptureProbe(parent context.Context, within time.Duration, probe func(context.Context) captureProbeResult) captureProbeResult {
+	ctx, cancel := context.WithTimeout(parent, within)
 	defer cancel()
 	done := make(chan captureProbeResult, 1) // buffered: a late answer must not block the goroutine that sends it
 	go func() { done <- probe(ctx) }()
@@ -147,36 +153,51 @@ func boundedCaptureProbe(ctx context.Context, within time.Duration, probe func(c
 	case r := <-done:
 		return r
 	case <-ctx.Done():
+		if parent.Err() != nil {
+			return captureProbeResult{detail: "the request that asked was cancelled"}
+		}
 		return captureProbeResult{detail: "the probe did not finish in time", cause: "timed out after " + within.String()}
 	}
 }
 
 // captureFromDBs reads the capture's stream_state from the index
 // (status.LoadStreamState, which tolerates an index older than its newer
-// columns) and, only when it is comparable, the source's executed GTID set,
-// and compares them. Unknown on any failure: the caller keeps the full
-// backup. Each connection is bounded like the window probe
-// (windowProbeTimeout, dial and reads), and its queries by ctx.
-func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor time.Time) captureProbeResult {
-	fail := func(detail string, err error) captureProbeResult {
-		return captureProbeResult{detail: detail, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
-	}
+// columns) and hands it to compareCapture with a way to reach the source.
+// Unknown on any failure: the caller keeps the full backup. Each connection
+// is bounded like the window probe (windowProbeTimeout, dial and reads),
+// and its queries by ctx; a failure's cause is scrubbed of both DSNs.
+func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, sourceRead time.Time) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
-		return fail("the index did not answer", err)
+		return captureProbeResult{detail: "the index did not answer", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	defer idx.Close()
 	st, err := status.LoadStreamState(ctx, idx)
 	if err != nil {
-		return fail("the capture's checkpoint could not be read", err)
+		return captureProbeResult{detail: "the capture's checkpoint could not be read", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
-	// No connection to production for a verdict the index already settles.
-	if ok, detail := captureComparable(st, anchor); !ok {
-		return captureProbeResult{detail: detail}
-	}
-	src, err := config.Connect(sourceProbeDSN(sourceDSN))
+	r, err := compareCapture(ctx, idx, st, anchor, sourceRead, func() (*sql.DB, error) {
+		return config.Connect(sourceProbeDSN(sourceDSN))
+	})
 	if err != nil {
-		return fail("the source did not answer", err)
+		r.cause = config.ScrubDSNError(err, indexDSN, sourceDSN)
+	}
+	return r
+}
+
+// compareCapture is the verdict on st, the capture's stream_state read from
+// idx: refused without touching the source when captureComparable refuses,
+// else compared with the executed GTID set of the source openSource
+// connects to. A failed step returns its detail with the error, which the
+// caller scrubs; the source connection is closed here.
+func compareCapture(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo, anchor, sourceRead time.Time, openSource func() (*sql.DB, error)) (captureProbeResult, error) {
+	// No connection to production for a verdict the index already settles.
+	if ok, detail := captureComparable(st, anchor, sourceRead); !ok {
+		return captureProbeResult{detail: detail}, nil
+	}
+	src, err := openSource()
+	if err != nil {
+		return captureProbeResult{detail: "the source did not answer"}, err
 	}
 	defer src.Close()
 	// An index on the source server writes its own checkpoints there: each
@@ -185,17 +206,17 @@ func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor time
 	// said about a healthy capture forever.
 	same, err := sameServer(ctx, idx, src)
 	if err != nil {
-		return fail("the index and the source could not be told apart", err)
+		return captureProbeResult{detail: "the index and the source could not be told apart"}, err
 	}
 	if same {
-		return captureProbeResult{detail: "the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture"}
+		return captureProbeResult{detail: "the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture"}, nil
 	}
 	executed, err := readExecutedGTIDs(ctx, src)
 	if err != nil {
-		return fail("the source did not report its GTID set", err)
+		return captureProbeResult{detail: "the source did not report its GTID set"}, err
 	}
 	verdict, detail := compareGTIDSets(st.GTIDSet.String, executed)
-	return captureProbeResult{verdict: verdict, detail: detail}
+	return captureProbeResult{verdict: verdict, detail: detail}, nil
 }
 
 // readExecutedGTIDs is the source's @@GLOBAL.gtid_executed with its

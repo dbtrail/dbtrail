@@ -591,7 +591,12 @@ panel that answers whether a restore would work, far below the fold.
   yes only when the capture's checkpointed GTID set is EQUAL to the
   source's `@@GLOBAL.gtid_executed` (a capture holding more than its source
   means the source was reset, restored or replaced), with no capture gap
-  and no dropped rows recorded since the previous snapshot. Everything else
+  recorded since the previous snapshot, and no dropped rows (the capture's
+  skip ledger) recorded since the newest full backup started. Dropped rows
+  are dated against a full backup, not against the previous snapshot,
+  because an update is folded from the index, which never received them:
+  only a read of the source brings them back, and with no full backup in
+  the run history any dropped row keeps the full backup. Everything else
   keeps the full backup and the reason says why: the source is ahead (the
   capture may have stopped), or it cannot be asked (a capture in
   binlog-position mode, which is what a source without GTIDs runs, since
@@ -600,7 +605,11 @@ panel that answers whether a restore would work, far below the fold.
   source ahead; a source that does not answer; an index with no live
   capture). An index that records nothing while the source keeps writing
   is a capture that stopped, and a full backup is the one producer that
-  does not depend on it. After a full backup the
+  does not depend on it. One limit: stopping a source from the console
+  clears its capture-gap record (the Stop is the acknowledgement of the
+  loss), so a gap acknowledged that way before the cut-over no longer
+  keeps the full backup, and the rows it lost stay out of the backups
+  until the next full backup reads them. After a full backup the
   model may not choose another one until an update after it has been
   measured (it may still choose an update): each full backup records the
   index's high-water mark before it starts, so the update that follows it

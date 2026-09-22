@@ -40,63 +40,97 @@ func skipLedger(count int, at time.Time) sql.NullString {
 }
 
 func TestCaptureComparable(t *testing.T) {
+	// The anchor is an update, folded from the index at 06:00; the newest
+	// full backup that read the source started at 04:00.
 	anchor := time.Date(2026, 9, 22, 6, 0, 0, 0, time.UTC)
+	fullRead := anchor.Add(-2 * time.Hour)
 	cases := []struct {
-		name string
-		st   func(*status.StreamStateInfo) *status.StreamStateInfo
-		ok   bool
+		name   string
+		st     func(*status.StreamStateInfo) *status.StreamStateInfo
+		ok     bool
+		read   time.Time // overrides fullRead
+		noRead bool      // no full backup on record
 	}{
-		{"a healthy GTID capture", func(s *status.StreamStateInfo) *status.StreamStateInfo { return s }, true},
-		{"no row: a file-mode index, not a live capture", func(*status.StreamStateInfo) *status.StreamStateInfo { return nil }, false},
-		{"an index without the loss record: unevaluable, not no gap", func(s *status.StreamStateInfo) *status.StreamStateInfo { s.GapColumnsPresent = false; return s }, false},
+		{"a healthy GTID capture", func(s *status.StreamStateInfo) *status.StreamStateInfo { return s }, true, time.Time{}, false},
+		{"no row: a file-mode index, not a live capture", func(*status.StreamStateInfo) *status.StreamStateInfo { return nil }, false, time.Time{}, false},
+		{"an index without the loss record: unevaluable, not no gap", func(s *status.StreamStateInfo) *status.StreamStateInfo { s.GapColumnsPresent = false; return s }, false, time.Time{}, false},
 		{"a loss after the anchor", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.GapLostAt = sql.NullTime{Time: anchor.Add(time.Minute), Valid: true}
 			return s
-		}, false},
+		}, false, time.Time{}, false},
 		{"a loss exactly at the anchor", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.GapLostAt = sql.NullTime{Time: anchor, Valid: true}
 			return s
-		}, false},
-		{"a loss before the anchor: the backup was taken after it", func(s *status.StreamStateInfo) *status.StreamStateInfo {
+		}, false, time.Time{}, false},
+		// Unlike a dropped row, a loss before an update anchor was inside
+		// some earlier update's window, whose fold refuses a capture gap and
+		// falls back to a full backup: it is behind a read of the source.
+		{"a loss before the anchor, after the last full read", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.GapLostAt = sql.NullTime{Time: anchor.Add(-time.Minute), Valid: true}
 			return s
-		}, true},
-		{"no skip ledger (an older daemon): unevaluable, not clean", func(s *status.StreamStateInfo) *status.StreamStateInfo { s.CaptureSkips = sql.NullString{}; return s }, false},
+		}, true, time.Time{}, false},
+		{"no skip ledger (an older daemon): unevaluable, not clean", func(s *status.StreamStateInfo) *status.StreamStateInfo { s.CaptureSkips = sql.NullString{}; return s }, false, time.Time{}, false},
 		{"an unparsable skip ledger", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.CaptureSkips = sql.NullString{String: "{not json", Valid: true}
 			return s
-		}, false},
+		}, false, time.Time{}, false},
 		{"rows dropped after the anchor", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.CaptureSkips = skipLedger(12, anchor.Add(time.Hour))
 			return s
-		}, false},
+		}, false, time.Time{}, false},
 		{"rows dropped and acknowledged after the anchor: the rows did not come back", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.CaptureSkips = skipLedger(12, anchor.Add(time.Hour))
 			s.CaptureSkipsAck = sql.NullString{String: fmt.Sprintf(`{"column_count_mismatch":{"count":100,"at":%q}}`, anchor.Add(2*time.Hour).Format(time.RFC3339)), Valid: true}
 			return s
-		}, false},
+		}, false, time.Time{}, false},
 		{"rows dropped with no date", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.CaptureSkips = skipLedger(12, time.Time{})
 			return s
-		}, false},
-		{"rows dropped before the anchor", func(s *status.StreamStateInfo) *status.StreamStateInfo {
+		}, false, time.Time{}, false},
+		// The update anchor was folded from the index, which never received
+		// the rows: only a read of the source brings them back.
+		{"rows dropped before an update anchor, after the last full read", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.CaptureSkips = skipLedger(12, anchor.Add(-time.Hour))
 			return s
-		}, true},
+		}, false, time.Time{}, false},
+		{"rows dropped exactly as the last full backup started", func(s *status.StreamStateInfo) *status.StreamStateInfo {
+			s.CaptureSkips = skipLedger(12, fullRead)
+			return s
+		}, false, time.Time{}, false},
+		{"rows dropped before the last full backup started: it read them", func(s *status.StreamStateInfo) *status.StreamStateInfo {
+			s.CaptureSkips = skipLedger(12, fullRead.Add(-time.Minute))
+			return s
+		}, true, time.Time{}, false},
+		{"rows dropped before a full-backup anchor that read them", func(s *status.StreamStateInfo) *status.StreamStateInfo {
+			s.CaptureSkips = skipLedger(12, anchor.Add(-10*time.Minute))
+			return s
+		}, true, anchor.Add(-5 * time.Minute), false},
+		{"rows dropped, and no full backup on record", func(s *status.StreamStateInfo) *status.StreamStateInfo {
+			s.CaptureSkips = skipLedger(12, anchor.Add(-72*time.Hour))
+			return s
+		}, false, time.Time{}, true},
+		{"no full backup on record and nothing dropped", func(s *status.StreamStateInfo) *status.StreamStateInfo { return s }, true, time.Time{}, true},
 		{"a reason with a zero count is not a skip", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.CaptureSkips = skipLedger(0, anchor.Add(time.Hour))
 			return s
-		}, true},
-		{"position mode: a healthy capture stops short of each commit", func(s *status.StreamStateInfo) *status.StreamStateInfo { s.Mode = "position"; return s }, false},
-		{"no GTID set", func(s *status.StreamStateInfo) *status.StreamStateInfo { s.GTIDSet = sql.NullString{}; return s }, false},
+		}, true, time.Time{}, true},
+		{"position mode: a healthy capture stops short of each commit", func(s *status.StreamStateInfo) *status.StreamStateInfo { s.Mode = "position"; return s }, false, time.Time{}, false},
+		{"no GTID set", func(s *status.StreamStateInfo) *status.StreamStateInfo { s.GTIDSet = sql.NullString{}; return s }, false, time.Time{}, false},
 		{"a blank GTID set", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.GTIDSet = sql.NullString{String: " ", Valid: true}
 			return s
-		}, false},
+		}, false, time.Time{}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ok, detail := captureComparable(c.st(streamStateFor(uuidA+":1-10")), anchor)
+			read := fullRead
+			if !c.read.IsZero() {
+				read = c.read
+			}
+			if c.noRead {
+				read = time.Time{}
+			}
+			ok, detail := captureComparable(c.st(streamStateFor(uuidA+":1-10")), anchor, read)
 			if ok != c.ok {
 				t.Fatalf("comparable=%v (%s), want %v", ok, detail, c.ok)
 			}
@@ -152,8 +186,12 @@ func stubCaptureProbe(t *testing.T, r captureProbeResult) *[]string {
 	var asked []string
 	prev := probeCapture
 	t.Cleanup(func() { probeCapture = prev })
-	probeCapture = func(_ context.Context, indexDSN, sourceDSN string, anchor time.Time) captureProbeResult {
-		asked = append(asked, indexDSN+"|"+sourceDSN+"|"+anchor.UTC().Format(time.RFC3339))
+	probeCapture = func(_ context.Context, indexDSN, sourceDSN string, anchor, sourceRead time.Time) captureProbeResult {
+		read := "never"
+		if !sourceRead.IsZero() {
+			read = sourceRead.UTC().Format(time.RFC3339)
+		}
+		asked = append(asked, indexDSN+"|"+sourceDSN+"|"+anchor.UTC().Format(time.RFC3339)+"|"+read)
 		return r
 	}
 	return &asked
@@ -170,6 +208,14 @@ func TestMeasureWindow_asksTheSourceOnlyWhenNothingWasIndexedOnAnOldAnchor(t *te
 	setup := func(t *testing.T, e console.ServerEntry, anchor time.Time, base, current uint64, r captureProbeResult) (*backupScheduler, *[]string) {
 		t.Helper()
 		b, _, sup := newScheduleFixture(t, true)
+		// The full backup the anchor's updates descend from: it started an
+		// hour and a half before the anchor.
+		if err := sup.history.Append(console.BaselineRunRecord{ServerID: e.ID, Kind: console.BaselineRunDump,
+			SnapshotTime: anchor.Add(-time.Hour).UTC().Format(time.RFC3339),
+			StartedAt:    anchor.Add(-90 * time.Minute).UTC().Format(time.RFC3339),
+			FinishedAt:   anchor.Add(-time.Hour).UTC().Format(time.RFC3339)}); err != nil {
+			t.Fatal(err)
+		}
 		sup.foldedMarks[e.ID] = foldMemo{mark: indexMark{events: base}, publishedAt: anchor, indexDSN: e.DSN}
 		mark := indexMark{events: current}
 		stubIndexMark(t, &mark, true)
@@ -180,10 +226,11 @@ func TestMeasureWindow_asksTheSourceOnlyWhenNothingWasIndexedOnAnOldAnchor(t *te
 		b, asked := setup(t, e, anchor, base, current, r)
 		return b.measureWindow(context.Background(), e, anchor), *asked
 	}
-	t.Run("nothing indexed on an old anchor: asked, with the anchor, and the verdict carried", func(t *testing.T) {
+	t.Run("nothing indexed on an old anchor: asked, with the anchor and the last source read, and the verdict carried", func(t *testing.T) {
 		w, asked := run(t, e, old, 1000, 1000, captureProbeResult{verdict: console.CaptureBehind, detail: "the source reports transactions the capture's checkpoint does not include"})
-		if len(asked) != 1 || asked[0] != "idx|src|"+old.UTC().Format(time.RFC3339) || w.Capture != console.CaptureBehind || w.CaptureDetail == "" {
-			t.Fatalf("window=%+v asked=%v, want one probe of this server's index and source, from the anchor", w, asked)
+		want := "idx|src|" + old.UTC().Format(time.RFC3339) + "|" + old.Add(-90*time.Minute).UTC().Format(time.RFC3339)
+		if len(asked) != 1 || asked[0] != want || w.Capture != console.CaptureBehind || w.CaptureDetail == "" {
+			t.Fatalf("window=%+v asked=%v, want one probe %q", w, asked, want)
 		}
 	})
 	t.Run("something indexed: not asked", func(t *testing.T) {
@@ -239,6 +286,126 @@ func TestMeasureWindow_asksTheSourceOnlyWhenNothingWasIndexedOnAnOldAnchor(t *te
 			t.Fatal("a window measured for a cancelled request was cached")
 		}
 	})
+}
+
+// A caller that went away mid-probe learned nothing about the source: no
+// line, so a closed browser tab does not log a timeout that never happened.
+func TestCaptureVerdict_aCancelledCallerLogsNothing(t *testing.T) {
+	b, _, _ := newScheduleFixture(t, true)
+	e := console.ServerEntry{ID: "a", Name: "a", DSN: "idx", SourceDSN: "src"}
+	stubCaptureProbe(t, captureProbeResult{detail: "the request that asked was cancelled"})
+	logs := captureSlogFor(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	b.captureVerdict(ctx, e, time.Now().Add(-3*time.Hour), time.Time{})
+	if out := logs.String(); out != "" {
+		t.Fatalf("a cancelled caller logged %q", out)
+	}
+	b.captureVerdict(context.Background(), e, time.Now().Add(-3*time.Hour), time.Time{})
+	if out := logs.String(); !strings.Contains(out, "could not confirm it wrote nothing") {
+		t.Fatalf("a live caller logged %q, want the line", out)
+	}
+}
+
+// compareCapture from a real stream_state to the verdict, with both servers
+// mocked: the one step that turns data into "caught up", so every argument
+// it passes on is pinned here and not only by a two-server run.
+func TestCompareCapture(t *testing.T) {
+	anchor := time.Date(2026, 9, 22, 6, 0, 0, 0, time.UTC)
+	uuidQ := regexp.QuoteMeta("SELECT @@GLOBAL.server_uuid")
+	gtidQ := regexp.QuoteMeta("SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed")
+	uuidRow := func(u string) *sqlmock.Rows { return sqlmock.NewRows([]string{"u"}).AddRow(u) }
+	cases := []struct {
+		name      string
+		st        *status.StreamStateInfo
+		idx, src  func(sqlmock.Sqlmock)
+		openFails bool
+		verdict   string
+		detail    string // prefix
+		wantErr   bool
+		opened    bool
+	}{
+		{name: "the source at the capture's checkpoint: caught up", st: streamStateFor(uuidB + ":1-10"),
+			idx: func(m sqlmock.Sqlmock) { m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidA)) },
+			src: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidB))
+				m.ExpectQuery(gtidQ).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("ON", uuidB+":1-10"))
+			}, verdict: console.CaptureCaughtUp, opened: true},
+		{name: "the source past it: behind", st: streamStateFor(uuidB + ":1-10"),
+			idx: func(m sqlmock.Sqlmock) { m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidA)) },
+			src: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidB))
+				m.ExpectQuery(gtidQ).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("ON", uuidB+":1-11"))
+			}, verdict: console.CaptureBehind, detail: "the source reports transactions", opened: true},
+		{name: "the capture past the source: unknown", st: streamStateFor(uuidB + ":1-11"),
+			idx: func(m sqlmock.Sqlmock) { m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidA)) },
+			src: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidB))
+				m.ExpectQuery(gtidQ).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("ON", uuidB+":1-10"))
+			}, detail: "the capture holds transactions the source does not have", opened: true},
+		{name: "the index on the source server: unknown, and the set never read", st: streamStateFor(uuidB + ":1-10"),
+			idx: func(m sqlmock.Sqlmock) { m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidB)) },
+			src: func(m sqlmock.Sqlmock) { m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(strings.ToUpper(uuidB))) },
+			detail: "the index lives on the source server", opened: true},
+		{name: "a position-mode capture: settled from the index, the source never opened",
+			st: func() *status.StreamStateInfo { s := streamStateFor(uuidB + ":1-10"); s.Mode = "position"; return s }(),
+			detail: "the capture runs in binlog-position mode"},
+		{name: "the source does not answer", st: streamStateFor(uuidB + ":1-10"), openFails: true,
+			detail: "the source did not answer", wantErr: true, opened: true},
+		{name: "the index's server_uuid read fails", st: streamStateFor(uuidB + ":1-10"),
+			idx:    func(m sqlmock.Sqlmock) { m.ExpectQuery(uuidQ).WillReturnError(&mysql.MySQLError{Number: 1227, Message: "denied"}) },
+			detail: "the index and the source could not be told apart", wantErr: true, opened: true},
+		{name: "the source's GTID read fails", st: streamStateFor(uuidB + ":1-10"),
+			idx: func(m sqlmock.Sqlmock) { m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidA)) },
+			src: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidB))
+				m.ExpectQuery(gtidQ).WillReturnError(&mysql.MySQLError{Number: 1227, Message: "denied"})
+			}, detail: "the source did not report its GTID set", wantErr: true, opened: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			idx, im, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer idx.Close()
+			src, sm, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.idx != nil {
+				c.idx(im)
+			}
+			if c.src != nil {
+				c.src(sm)
+			}
+			sm.ExpectClose()
+			opened := false
+			r, err := compareCapture(context.Background(), idx, c.st, anchor, time.Time{}, func() (*sql.DB, error) {
+				opened = true
+				if c.openFails {
+					return nil, fmt.Errorf("dial tcp 10.0.0.1:3306: connect: connection refused")
+				}
+				return src, nil
+			})
+			if (err != nil) != c.wantErr || r.verdict != c.verdict || !strings.HasPrefix(r.detail, c.detail) || opened != c.opened {
+				t.Fatalf("got %+v err=%v opened=%v, want verdict %q detail %q… err=%v opened=%v", r, err, opened, c.verdict, c.detail, c.wantErr, c.opened)
+			}
+			if c.verdict != console.CaptureCaughtUp && r.detail == "" {
+				t.Fatal("anything but caught up must say why")
+			}
+			if err := im.ExpectationsWereMet(); err != nil {
+				t.Fatalf("index: %v", err)
+			}
+			if c.opened && !c.openFails {
+				if err := sm.ExpectationsWereMet(); err != nil {
+					t.Fatalf("source (closed too): %v", err)
+				}
+			} else {
+				src.Close()
+			}
+		})
+	}
 }
 
 // "Caught up" all the way to the decision: a quiet server past the cut-over
@@ -321,6 +488,15 @@ func TestBoundedCaptureProbe(t *testing.T) {
 		return captureProbeResult{verdict: console.CaptureBehind}
 	}); r.verdict != console.CaptureBehind {
 		t.Fatalf("prompt probe: %+v", r)
+	}
+	// A caller that went away is not a timeout, and has no cause to log.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if r = boundedCaptureProbe(ctx, time.Minute, func(context.Context) captureProbeResult {
+		<-release
+		return captureProbeResult{verdict: console.CaptureCaughtUp}
+	}); r.verdict != "" || r.detail != "the request that asked was cancelled" || r.cause != "" {
+		t.Fatalf("cancelled caller: %+v", r)
 	}
 }
 

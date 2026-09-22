@@ -277,7 +277,11 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 		}
 	}
 	if w.Events == 0 && pastCutover(e, w, time.Now()) {
-		w.Capture, w.CaptureDetail = b.captureVerdict(ctx, e, anchor)
+		var sourceRead time.Time
+		if b.sup.history != nil {
+			sourceRead = b.sup.history.LastSourceRead(e.ID, anchor)
+		}
+		w.Capture, w.CaptureDetail = b.captureVerdict(ctx, e, anchor, sourceRead)
 	}
 	if ctx.Err() != nil {
 		// The caller went away mid-probe (a page request aborted): what was
@@ -319,7 +323,10 @@ func pastCutover(e console.ServerEntry, w console.BackupWindow, now time.Time) b
 // captureVerdict asks whether the source wrote anything the capture has not
 // recorded since anchor (#1791, probeCapture), for the servers it can be
 // asked about, and says what it found in the log (reportCaptureProbe).
-func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEntry, anchor time.Time) (verdict, detail string) {
+// sourceRead is when the newest full backup that read the source started,
+// which the capture's dropped rows are dated against. A caller that went
+// away mid-probe learned nothing about the source, so nothing is logged.
+func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEntry, anchor, sourceRead time.Time) (verdict, detail string) {
 	var r captureProbeResult
 	switch {
 	case e.SourceDSN == "":
@@ -327,7 +334,10 @@ func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEn
 	case e.IsPostgres():
 		r.detail = "PostgreSQL sources are not compared yet"
 	default:
-		r = probeCapture(ctx, e.DSN, e.SourceDSN, anchor)
+		r = probeCapture(ctx, e.DSN, e.SourceDSN, anchor, sourceRead)
+	}
+	if ctx.Err() != nil {
+		return r.verdict, r.detail
 	}
 	b.reportCaptureProbe(e, anchor, r)
 	return r.verdict, r.detail

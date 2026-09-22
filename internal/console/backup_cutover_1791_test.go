@@ -59,3 +59,63 @@ func TestCutoverToFull_nothingIndexedAndTheSourceConfirmsIt(t *testing.T) {
 		t.Errorf("unknown reason %q, want the capture question and no rate talk", why)
 	}
 }
+
+// LastSourceRead: when the newest full backup at or before an anchor read
+// the source, the instant the capture's dropped rows are dated against.
+func TestLastSourceRead(t *testing.T) {
+	anchor := time.Date(2026, 9, 22, 6, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) string { return anchor.Add(d).Format(time.RFC3339) }
+	dump := func(snap, started string) BaselineRunRecord {
+		return BaselineRunRecord{ServerID: "a", Kind: BaselineRunDump, SnapshotTime: snap, StartedAt: started, FinishedAt: snap}
+	}
+	cases := []struct {
+		name string
+		recs []BaselineRunRecord
+		want time.Time
+	}{
+		{"nothing on record", nil, time.Time{}},
+		{"the newest full backup at or before the anchor: its start", []BaselineRunRecord{
+			dump(at(-5*time.Hour), at(-6*time.Hour)),
+			dump(at(-2*time.Hour), at(-3*time.Hour)),
+			{ServerID: "a", Kind: BaselineRunRefresh, SnapshotTime: at(0), StartedAt: at(-time.Minute)},
+		}, anchor.Add(-3 * time.Hour)},
+		{"the anchor itself a full backup", []BaselineRunRecord{dump(at(0), at(-20*time.Minute))}, anchor.Add(-20 * time.Minute)},
+		{"a full backup newer than the anchor is not its chain", []BaselineRunRecord{
+			dump(at(-2*time.Hour), at(-3*time.Hour)),
+			dump(at(time.Hour), at(30*time.Minute)),
+		}, anchor.Add(-3 * time.Hour)},
+		{"one that published nothing does not count", []BaselineRunRecord{
+			dump(at(-2*time.Hour), at(-3*time.Hour)),
+			{ServerID: "a", Kind: BaselineRunDump, StartedAt: at(-time.Hour), Error: "mydumper exited 2"},
+		}, anchor.Add(-3 * time.Hour)},
+		{"one that failed after publishing counts: its snapshot read the source", []BaselineRunRecord{
+			dump(at(-2*time.Hour), at(-3*time.Hour)),
+			{ServerID: "a", Kind: BaselineRunDump, SnapshotTime: at(-time.Hour), StartedAt: at(-80 * time.Minute), Error: "upload failed"},
+		}, anchor.Add(-80 * time.Minute)},
+		{"a slot that did not start is not a read", []BaselineRunRecord{
+			dump(at(-2*time.Hour), at(-3*time.Hour)),
+			{ServerID: "a", Kind: BaselineRunDump, SkipReason: "busy", SnapshotTime: at(-time.Hour), StartedAt: at(-time.Hour)},
+		}, anchor.Add(-3 * time.Hour)},
+		{"another server's full backup", []BaselineRunRecord{{ServerID: "b", Kind: BaselineRunDump, SnapshotTime: at(-time.Hour), StartedAt: at(-2 * time.Hour)}}, time.Time{}},
+		{"the newest one's start does not parse: never, not an older one", []BaselineRunRecord{
+			dump(at(-2*time.Hour), at(-3*time.Hour)),
+			dump(at(-time.Hour), "yesterday"),
+		}, time.Time{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h, err := OpenBaselineHistory(t.TempDir() + "/h.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range c.recs {
+				if err := h.Append(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := h.LastSourceRead("a", anchor); !got.Equal(c.want) {
+				t.Fatalf("got %s, want %s", got, c.want)
+			}
+		})
+	}
+}
