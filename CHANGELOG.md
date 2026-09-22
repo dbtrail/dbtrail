@@ -21,6 +21,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Getting started card now leads the Overview on a console that can monitor a
   source, and its + Add server opens the add form directly.
 
+### Changed
+- **`bintrail verify` checks each table against its last read of the
+  database, not against the newest baseline.** A baseline that a refresh built
+  from the recorded changes never read the database, so once a refresh had run
+  since the last full backup, comparing the two newest baselines did not test
+  against the database. The default check, and the console's "Compare two
+  saved snapshots", now compare, per table, the last baseline that read it from
+  the database with the baseline before that one; the JSON report names that
+  read (`compared_to`), and the text report and the console say it. When the newest baseline is
+  itself a read, each table is compared with the newest baseline before it that
+  holds it, usually the same pair as before. A table whose read is no longer
+  kept, has no baseline before it, or is not on record is `inconclusive`, and a
+  run where no table can be proven exits non-zero: a cron gate that passed
+  while every recent baseline was built from the recorded changes can turn red
+  until the next full backup. A TRUNCATE, DROP or RENAME of a table between its
+  two compared baselines records no row changes to replay, so that table is
+  `inconclusive` too, naming the statement, instead of a mismatch that blames
+  the capture. The two compared baselines can be days older than the
+  newest, so a run can take longer and read more from the Parquet archives.
+
 ### Fixed
 - **Console texts no longer name command-line flags** (#1783). Adding a server
   from the browser showed doctor text written for the terminal: "Verify

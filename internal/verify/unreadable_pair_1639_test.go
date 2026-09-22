@@ -11,21 +11,17 @@ import (
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
-// #1639: verify compares the two newest backups. With the newest folder
-// unreadable it used to compare the two before it and could report "match";
-// it now refuses and names the folder. A folder older than the pair changes
-// nothing.
+// #1639: with the newest folder unreadable, verify used to decide from the
+// folders before it and could report "match"; it now refuses and names the
+// folder. A folder older than the pair changes nothing.
 
+// snapshot1639 writes a read of the database (a real dump footer), so what
+// a test sees is the unreadable-folder guard and not a footer that would not
+// open.
 func snapshot1639(t *testing.T, root string, ts time.Time) string {
 	t.Helper()
-	dir := filepath.Join(root, reconstruct.SnapshotDirName(ts), "shop")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "a.parquet"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return filepath.Dir(dir)
+	path := lrWrite(t, root, ts, "a", lrDump(ts, 100))
+	return filepath.Dir(filepath.Dir(path))
 }
 
 func unreadable1639(t *testing.T, dir string) {
@@ -54,9 +50,9 @@ func TestFindBaselinePair_newestUnreadableRefuses(t *testing.T) {
 	snapshot1639(t, root, v1639b)
 	newest := snapshot1639(t, root, v1639c)
 	unreadable1639(t, newest)
-	pairs, unpaired, prevOnly, err := FindBaselinePair(context.Background(), root)
-	if !errors.Is(err, reconstruct.ErrUnreadableSnapshot) || pairs != nil || unpaired != nil || prevOnly != nil {
-		t.Fatalf("pairs=%v unpaired=%v prevOnly=%v err=%v; want a refusal", pairs, unpaired, prevOnly, err)
+	pairs, prevOnly, err := FindBaselinePair(context.Background(), root)
+	if !errors.Is(err, reconstruct.ErrUnreadableSnapshot) || pairs != nil || prevOnly != nil {
+		t.Fatalf("pairs=%v prevOnly=%v err=%v; want a refusal", pairs, prevOnly, err)
 	}
 }
 
@@ -67,7 +63,7 @@ func TestFindBaselinePair_middleUnreadableRefuses(t *testing.T) {
 	snapshot1639(t, root, v1639a)
 	unreadable1639(t, snapshot1639(t, root, v1639b))
 	snapshot1639(t, root, v1639c)
-	if _, _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
+	if _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		t.Fatalf("err = %v, want a refusal", err)
 	}
 }
@@ -79,21 +75,21 @@ func TestFindBaselinePair_oneReadableWithOlderUnreadableRefuses(t *testing.T) {
 	root := t.TempDir()
 	unreadable1639(t, snapshot1639(t, root, v1639a))
 	snapshot1639(t, root, v1639b)
-	if _, _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
+	if _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		t.Fatalf("err = %v, want a refusal", err)
 	}
 }
 
 // Two readable snapshots and an older unreadable one: the pair is the two
-// newest, and the old folder changes nothing. (The files are empty, so the
-// pair's footer read fails; what matters is that it is not the refusal.)
+// newest, and the old folder changes nothing.
 func TestFindBaselinePair_unreadableOlderThanThePairChangesNothing(t *testing.T) {
 	root := t.TempDir()
 	unreadable1639(t, snapshot1639(t, root, v1639a))
 	snapshot1639(t, root, v1639b)
 	snapshot1639(t, root, v1639c)
-	if _, _, _, err := FindBaselinePair(context.Background(), root); errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
-		t.Fatalf("err = %v: an unreadable folder older than the pair refused it", err)
+	pairs, _, err := FindBaselinePair(context.Background(), root)
+	if err != nil || len(pairs) != 1 || pairs[0].Settled != nil || !pairs[0].PrevSnapshot.Equal(v1639b) {
+		t.Fatalf("pairs=%+v err=%v: an unreadable folder older than the pair must change nothing", pairs, err)
 	}
 }
 
@@ -103,7 +99,7 @@ func TestFindBaselinePair_oneReadableWithNewerUnreadableRefuses(t *testing.T) {
 	root := t.TempDir()
 	snapshot1639(t, root, v1639a)
 	unreadable1639(t, snapshot1639(t, root, v1639b))
-	if _, _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
+	if _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		t.Fatalf("err = %v, want a refusal", err)
 	}
 }
@@ -113,7 +109,7 @@ func TestFindBaselinePair_oneReadableWithNewerUnreadableRefuses(t *testing.T) {
 func TestFindBaselinePair_onlyUnreadableRefuses(t *testing.T) {
 	root := t.TempDir()
 	unreadable1639(t, snapshot1639(t, root, v1639a))
-	if _, _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
+	if _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		t.Fatalf("FindBaselinePair err = %v, want a refusal", err)
 	}
 }

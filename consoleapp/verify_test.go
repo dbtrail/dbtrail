@@ -571,3 +571,16 @@ func TestVerifySupervisor_ExplainEvictsOnlyFinished(t *testing.T) {
 		t.Errorf("explains has %d entries after eviction, want 2 (the in-flight one plus the new request)", n)
 	}
 }
+
+// The read a table was compared against reaches the console under the CLI's
+// name and format, and a table compared to nothing carries none.
+func TestToWireResult_comparedTo(t *testing.T) {
+	read := time.Date(2026, 9, 2, 3, 0, 0, 0, time.FixedZone("ART", -3*3600))
+	got := toWireResult(verify.TableResult{Schema: "wp", Table: "posts", Status: verify.StatusMatch, ComparedTo: read}, false)
+	if got.ComparedTo != "2026-09-02T06:00:00Z" {
+		t.Errorf("compared_to = %q, want the read in RFC3339 UTC", got.ComparedTo)
+	}
+	if got := toWireResult(verify.TableResult{Schema: "wp", Table: "posts", Status: verify.StatusInconclusive}, false); got.ComparedTo != "" {
+		t.Errorf("compared_to = %q on a table compared to nothing, want empty", got.ComparedTo)
+	}
+}

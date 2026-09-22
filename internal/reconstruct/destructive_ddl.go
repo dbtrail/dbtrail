@@ -65,11 +65,36 @@ func CheckDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, 
 // check.
 var errSchemaChangesMissing = errors.New("this index has no schema_changes table")
 
+// FindDestructiveDDL is CheckDestructiveDDL's finding without its message, for
+// a caller that is not reconstructing and says it in its own words (verify).
+// An index with no schema_changes table answers not found, as
+// CheckDestructiveDDL does.
+//
+// Unlike CheckDestructiveDDL, since is INCLUSIVE. detected_at and the snapshot
+// times are whole seconds, so a statement stamped the same second as the older
+// snapshot may have run after that snapshot's anchor, where the replay starts.
+// Missing it gives the false mismatch this lookup exists to prevent; counting
+// it at worst leaves one table unchecked for one run. snapshotForDDLInWindow
+// takes the same second as inside for the same reason.
+func FindDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time) (ddlType string, detectedAt time.Time, found bool, err error) {
+	ddlType, detectedAt, found, err = queryDestructiveDDL(ctx, db, schema, table, since, until, true)
+	if errors.Is(err, errSchemaChangesMissing) {
+		return "", time.Time{}, false, nil
+	}
+	return ddlType, detectedAt, found, err
+}
+
 // findDestructiveDDL is CheckDestructiveDDL's query without its message, for a
 // caller whose window is not "since the baseline snapshot" (the binlog-only
 // fallback, #1674). found is false with a nil error when there is none, and
 // errSchemaChangesMissing when the table does not exist.
 func findDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time) (ddlType string, detectedAt time.Time, found bool, err error) {
+	return queryDestructiveDDL(ctx, db, schema, table, since, until, false)
+}
+
+// queryDestructiveDDL is the lookup behind both: detected_at in (since, until],
+// or [since, until] when sinceInclusive.
+func queryDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time, sinceInclusive bool) (ddlType string, detectedAt time.Time, found bool, err error) {
 	// schema_name = '' is matched too, and the arm is NOT removable. Since
 	// #1435 parseDDL resolves an unqualified statement ("TRUNCATE TABLE
 	// orders" after "USE mydb") against the QUERY_EVENT's session default
@@ -80,10 +105,14 @@ func findDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, s
 	// exactly the historical windows people reconstruct after an incident
 	// (#764's return path). The '' match can only widen a match (favoring an
 	// over-cautious refusal on historical rows), never narrow one.
-	const q = `SELECT ddl_type, detected_at FROM schema_changes
+	sinceOp := ">"
+	if sinceInclusive {
+		sinceOp = ">="
+	}
+	q := `SELECT ddl_type, detected_at FROM schema_changes
 		WHERE (schema_name = ? OR schema_name = '') AND table_name = ?
 		AND ddl_type IN ('TRUNCATE TABLE', 'DROP TABLE', 'RENAME TABLE', 'CREATE OR REPLACE TABLE')
-		AND detected_at > ? AND detected_at <= ?
+		AND detected_at ` + sinceOp + ` ? AND detected_at <= ?
 		ORDER BY detected_at ASC LIMIT 1`
 
 	err = db.QueryRowContext(ctx, q, schema, table, since, until).Scan(&ddlType, &detectedAt)

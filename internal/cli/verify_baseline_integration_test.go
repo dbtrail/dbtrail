@@ -33,6 +33,13 @@ func writeCLIBaseline(t *testing.T, baseDir string, ts time.Time, db, table, cre
 			baseline.MetaKeyCreateTableSQL: createSQL,
 			baseline.MetaKeyBinlogFile:     "binlog.000001",
 			baseline.MetaKeyBinlogPos:      strconv.FormatInt(anchorPos, 10),
+			// A read of the database, as baseline.Run stamps it: what the
+			// default check takes as its reference.
+			baseline.MetaKeySnapshotTimestamp: ts.UTC().Format(time.RFC3339),
+			baseline.MetaKeyMydumperFormat:    "sql",
+			baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
+			baseline.MetaKeyLastDumpAt:        ts.UTC().Format(time.RFC3339),
+			baseline.MetaKeyFoldGeneration:    "0",
 		}})
 	if err != nil {
 		t.Fatal(err)

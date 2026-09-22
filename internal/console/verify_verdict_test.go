@@ -335,17 +335,18 @@ runs.unknown = Object.assign({}, runs.clean, { verdict: "someday" });
 	}
 }
 
-// The mode that compares two snapshots is no longer called recommended, and
-// its help no longer promises strong evidence: it tests against the database
-// only when the newer snapshot was read from it.
+// The mode that compares snapshots is no longer called recommended, its help
+// no longer promises strong evidence, and it says what it compares: each
+// table's last read of the database with the snapshot before it, not the two
+// newest snapshots (a snapshot built from the recorded changes is not a read).
 func TestVerificationModes_doNotOverpromise(t *testing.T) {
 	js := readAsset(t, "app.js")
-	for _, bad := range []string{"Compare two saved snapshots (recommended)", "Strong evidence your backup chain is sound"} {
+	for _, bad := range []string{"Compare two saved snapshots (recommended)", "Strong evidence your backup chain is sound", "Takes your two newest snapshots"} {
 		if strings.Contains(js, bad) {
 			t.Errorf("the verification page still says %q", bad)
 		}
 	}
-	if !strings.Contains(js, "It tests against your database only when the newer snapshot was read from it") {
-		t.Error("the snapshot-comparison help does not say when it tests against the database")
+	if !strings.Contains(js, "takes the last snapshot that read it from your database and the snapshot before that one") {
+		t.Error("the snapshot-comparison help does not say it compares each table's last read of the database")
 	}
 }

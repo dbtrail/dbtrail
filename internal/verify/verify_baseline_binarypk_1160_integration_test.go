@@ -116,12 +116,12 @@ func seedBinaryPKPair(t *testing.T, kColumnType string) (BaselineConfig, Baselin
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 
-	pairs, unpaired, prevOnly, err := FindBaselinePair(context.Background(), baseDir)
+	pairs, prevOnly, err := FindBaselinePair(context.Background(), baseDir)
 	if err != nil {
 		t.Fatalf("FindBaselinePair: %v", err)
 	}
-	if len(pairs) != 1 || len(unpaired) != 0 || len(prevOnly) != 0 {
-		t.Fatalf("expected exactly one pair for bp, got pairs=%d unpaired=%v prevOnly=%v", len(pairs), unpaired, prevOnly)
+	if len(pairs) != 1 || pairs[0].Settled != nil || len(prevOnly) != 0 {
+		t.Fatalf("expected exactly one compared pair for bp, got pairs=%+v prevOnly=%v", pairs, prevOnly)
 	}
 	return cfg, pairs[0], writeNew
 }

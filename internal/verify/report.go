@@ -3,6 +3,7 @@ package verify
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/verify/verdict"
 )
@@ -93,6 +94,10 @@ type TableReport struct {
 	// Anchor is the point the comparison was anchored to: a GTID set
 	// (live-source) or a binlog coordinate file:pos (baseline pair).
 	Anchor string `json:"anchor,omitempty"`
+	// ComparedTo is the read of the database this table was checked against
+	// (RFC3339), baseline pair only: the default check compares each table's
+	// last read with the snapshot before it.
+	ComparedTo string `json:"compared_to,omitempty"`
 	// Reason is the detail behind an inconclusive/mismatch/error verdict, or a
 	// note carried on a match.
 	Reason string `json:"reason,omitempty"`
@@ -231,6 +236,7 @@ func NewReport(mode string, results []TableResult) *Report {
 			SourceDigest:      r.SourceDigest,
 			ReconstructDigest: r.ReconstructDigest,
 			Anchor:            r.Anchor,
+			ComparedTo:        comparedTo(r.ComparedTo),
 			Reason:            reason,
 
 			EventsChecked:      r.EventsChecked,
@@ -341,4 +347,12 @@ func (ex *MismatchExplanation) ReportEntry() ExplainReport {
 		}
 	}
 	return out
+}
+
+// comparedTo renders TableResult.ComparedTo for the report; empty when unset.
+func comparedTo(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
