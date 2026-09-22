@@ -161,6 +161,11 @@ type RotationConfig struct {
 	AddFuture int    `yaml:"add_future"`
 }
 
+// legacyBaselineRefreshKey is the envelope key an older console wrote for the
+// "reuse unchanged tables" override (#1681 removed it). It is only ever read
+// to warn that it is not read.
+const legacyBaselineRefreshKey = "baseline_refresh"
+
 // registryFile is the versioned on-disk envelope.
 type registryFile struct {
 	Version int `yaml:"version"`
@@ -175,7 +180,8 @@ type registryFile struct {
 	// There is no baseline_refresh section here any more (#1681): reusing the
 	// file of a table that did not change is always on, so the console has
 	// nothing to override. A `baseline_refresh:` key written by an older
-	// binary is carried by the Extra catch-all below and ignored.
+	// binary is carried by the Extra catch-all below, ignored, and warned
+	// about once at load (legacyBaselineRefreshKey).
 	// BackupSettings is the optional daemon-wide backup settings section
 	// (#1682): the values the Backup settings page used to show read-only
 	// because they existed only as flags and environment of the process.
@@ -243,6 +249,17 @@ func LoadRegistry(path string) (*Registry, error) {
 	if r.file.Version == 0 {
 		// Unset/zero version: a hand-written file; normalize on the next save.
 		r.file.Version = registryVersion
+	}
+	// An operator who turned reuse off in the old console has that choice in
+	// this file, and this build does not read it (#1681). Say so once, where
+	// the file is read: the daemon otherwise reuses files that operator asked
+	// it not to, the card says reuse is always on, and nothing connects the
+	// two. Same posture as envBoolOr, which warns when it ignores a value.
+	if _, ok := r.file.Extra[legacyBaselineRefreshKey]; ok {
+		slog.Warn("the saved 'reuse unchanged tables' setting is no longer read; reuse of a table that did not change is always on now",
+			"file", path, "key", legacyBaselineRefreshKey,
+			"turn_it_off_with", "--baseline-carry-forward-unchanged=false (or BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED=false)",
+			"note", "the block is left in the file untouched")
 	}
 	r.syncBucketStores()
 	return r, nil

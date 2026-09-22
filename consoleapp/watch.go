@@ -223,12 +223,14 @@ func init() {
 	watchCmd.Flags().StringVar(&upConsoleBaselineS3, "baseline-s3", "", "S3 prefix of baseline Parquet snapshots (s3://bucket/prefix/); enables Reconstruct")
 	watchCmd.Flags().BoolVar(&upBaselineCarryForward, "baseline-carry-forward-unchanged", true,
 		"When a refresh finds a table had no changes, publish its previous Parquet file instead of rewriting "+
-			"it (hard link where possible). On by default since #1681 (--baseline-carry-forward-unchanged=false "+
-			"or BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED=false turns it off): the rows are identical either way, "+
-			"and the checks that would make reuse wrong (destructive DDL, a capture gap, a failed _MANIFEST "+
-			"check) refuse before it. It links two snapshots to one file, so disk-usage and prune figures then "+
+			"it (hard link where possible). On by default since #1681: the rows are identical either way, and "+
+			"reuse never publishes a table it should not — a destructive DDL or a stale schema snapshot refuses "+
+			"the backup before it, and a known capture gap or a failed _MANIFEST check disqualifies the table "+
+			"inside the reuse path. It links two snapshots to one file, so disk-usage and prune figures then "+
 			"count space they will not reclaim while the newer snapshot references it. The web interface no "+
-			"longer asks: this flag is the only way to turn it off.")
+			"longer asks. --baseline-carry-forward-unchanged=false turns off THIS path; with "+
+			"--baseline-table-deltas on (the default) a table that did not change is still published by linking "+
+			"its previous file, so writing every table again needs both turned off.")
 	watchCmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", true,
 		"On by default (--baseline-table-deltas=false or BINTRAIL_BASELINE_TABLE_DELTAS=false turns it off). A refresh does not rewrite a table that changed: it keeps the previous Parquet file and writes that refresh's changed rows as one numbered "+
 			"pair of small files beside it (<table>.000001.posdel, <table>.000001.upserts, then 000002, ...), linking the earlier pairs forward, and writes the table again in full when the chain's files together pass a quarter of its size or the chain is a "+

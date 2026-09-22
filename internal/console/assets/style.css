@@ -2788,10 +2788,6 @@ section.bk-restore { margin-top: 18px; }
    it; the 1.15 survived only because both sides of THAT one come back as
    rgb(). */
 .bkr-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.bkr-state {
-  background: var(--surface); color: var(--ink);
-  border: 1px solid oklch(0.5 0.05 320 / 0.16);
-}
 .cn-num {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 50%; flex: none;

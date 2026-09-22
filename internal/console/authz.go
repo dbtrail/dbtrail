@@ -141,9 +141,9 @@ var apiRoutePerms = []routePerm{
 	// The daemon-wide rows are process settings, not one server's connection,
 	// so they sit behind settings:write rather than servers:write.
 	{"PUT", "/api/backup-settings/daemon/{}", ext.PermSettingsWrite},
-	// Baseline refresh, graded exactly like rotation: reading the effective
-	// policy is a settings read, changing what the daemon's loop does is a
-	// control-plane write.
+	// Baseline refresh: reading what the daemon does with an unchanged table
+	// is a settings read. There is no write since #1681 — the setting is the
+	// daemon's own flag, and the console does not edit it.
 	{"GET", "/api/baseline-refresh", ext.PermSettingsRead},
 	{"GET", "/api/baselines", ext.PermSettingsRead},
 	// The per-server backup schedule (#1442) is a control-plane setting like

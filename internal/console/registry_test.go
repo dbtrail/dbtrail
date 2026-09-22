@@ -1,7 +1,9 @@
 package console
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -343,6 +345,40 @@ func TestRegistrySetRotationRefusedReadOnly(t *testing.T) {
 	}
 	if err := r.SetRotation(RotationConfig{Retain: "7d", Interval: "1h", AddFuture: 3}); !errors.Is(err, ErrRegistryReadOnly) {
 		t.Fatalf("SetRotation on a read-only registry = %v, want ErrRegistryReadOnly", err)
+	}
+}
+
+// TestRegistryOldBaselineRefreshKeySaysItIsIgnored (#1681): an operator who
+// turned reuse off in the old console has that choice in this file, and this
+// build does not read it. Loading says so once, with the flag that still
+// turns reuse off: otherwise the daemon reuses files that operator asked it
+// not to, the card says reuse is always on, and nothing connects the two.
+func TestRegistryOldBaselineRefreshKeySaysItIsIgnored(t *testing.T) {
+	load := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "console-servers.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(prev)
+		if _, err := LoadRegistry(path); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	out := load(t, "version: 1\nbaseline_refresh:\n  carry_forward_unchanged: false\nservers: []\n")
+	for _, want := range []string{"no longer read", "--baseline-carry-forward-unchanged=false", "left in the file untouched"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("loading a registry with the old block did not warn about %q; the operator's saved choice is dropped in silence:\n%s", want, out)
+		}
+	}
+	// And a file without it says nothing: a warning on every start would be
+	// noise nobody can act on.
+	if out := load(t, "version: 1\nservers: []\n"); strings.Contains(out, "no longer read") {
+		t.Errorf("a registry without the old block warned anyway:\n%s", out)
 	}
 }
 

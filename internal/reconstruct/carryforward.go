@@ -165,16 +165,18 @@ func carryForwardFile(ctx context.Context, srcPath, dst string, validate bool) (
 // carryForwardEligible reports whether a table can be published by carrying its
 // previous file forward instead of folding.
 //
-// # Off unless asked for
+// # On unless turned off
 //
-// enabled is the operator's explicit opt-in, and the default is off. The output
+// enabled is the daemon's --baseline-carry-forward-unchanged, on by default
+// since #1681 (the one-shot CLI commands still opt in). The output
 // is the same rows either way, but the REPRESENTATION on disk is not: carrying
 // a file forward can leave two snapshots sharing one inode (a hard link where
 // the filesystem allows one, a copy otherwise), so a prune reports space it
 // will not reclaim while the newer snapshot references it, and one snapshot
-// ends up holding tables anchored at different binlog coordinates. Those are defensible trade-offs for a loop that would otherwise
-// rewrite terabytes to apply a handful of rows, and they are not something to
-// hand an operator without being asked.
+// ends up holding tables anchored at different binlog coordinates. Those are
+// reporting costs, not correctness ones, for a loop that would otherwise
+// rewrite terabytes to apply a handful of rows, which is why #1681 made them
+// the default rather than a question.
 //
 // # A known capture gap disqualifies the table
 //

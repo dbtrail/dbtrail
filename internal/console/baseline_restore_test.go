@@ -296,7 +296,6 @@ func TestBaselineRestore_carriesTheEffectiveReuseSetting(t *testing.T) {
 	}
 }
 
-
 // TestBaselineRestore_carriesTheServersS3Destination: the handler puts the
 // server's OWN S3 destination in the request, so the restore looks for the
 // backup to fold from where the scheduled update looks (#1541). Both shapes

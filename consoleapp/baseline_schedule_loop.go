@@ -603,7 +603,13 @@ func startBackupScheduleLoop(ctx context.Context, sched *backupScheduler) {
 		return
 	}
 	sched.observeAll(time.Now().UTC())
-	slog.Info("backup schedule loop enabled", "tick", backupScheduleTick, "full_backups", sched.fullBackups)
+	// reuse_unchanged is logged HERE and not only in the refresh loop: a
+	// daemon that runs backup schedules and no refresh interval never reaches
+	// that other line, so before #1681 flipped the default there was no
+	// surface at all naming what this daemon does with a table that did not
+	// change.
+	slog.Info("backup schedule loop enabled", "tick", backupScheduleTick, "full_backups", sched.fullBackups,
+		"reuse_unchanged", sched.carryDefault)
 	go func() {
 		t := time.NewTicker(backupScheduleTick)
 		defer t.Stop()

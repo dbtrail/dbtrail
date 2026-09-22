@@ -4531,7 +4531,10 @@ function backupRefreshCard(br) {
   card.append(cfShape(on));
   say(on
     ? "Tables with no changes keep their last file. The backup is still complete."
-    : "Every backup writes every table again.");
+    // NOT "every table is written again": with table deltas on (the default)
+    // a table that did not change is still published by linking its previous
+    // file, through the other path. This sentence speaks only for this one.
+    : "This DBTrail does not reuse the file of a table with no changes.");
   // The everything-running silence #1579 names: enabled and scheduled both
   // true reads as the healthy state, while the timer can be running over
   // ZERO refreshable servers (fresh install, or every server S3-only or
@@ -4553,7 +4556,7 @@ function backupRefreshCard(br) {
   // the recorded changes writes Parquet to a local directory, which is the very
   // field these servers lack, so the bucket is never read back into a cheaper
   // backup (#1579). Visible, not compact, because on THIS install it is the
-  // exception to the sentence above the button: a drawing that promises a
+  // exception to the sentence above: a drawing that promises a
   // saving must carry, in plain view, the servers it cannot save for. The
   // positive form would be a PREDICTION this card has no gate data for; the
   // per-server rows make it, after checking the refusal.
@@ -4562,7 +4565,7 @@ function backupRefreshCard(br) {
   }
   // Everything a reader does not need in order to act is compact, not cut:
   // the local-only rule, the S3 skip count (#1579), what consumes the
-  // setting, and whose choice the current value was.
+  // setting, and what the daemon does with an unchanged table.
   const more = cnFine("More about disk space");
   into = more;
   say("It saves disk only when the last backup is read from this machine. A server that keeps backups only in S3 reuses nothing, so every backup writes every table.");
@@ -4573,7 +4576,7 @@ function backupRefreshCard(br) {
   }
   say("This covers every server that keeps backups on this machine.");
   say(on
-    ? "DBTrail always reuses a table that did not change. Where that would be wrong, the backup is refused instead."
+    ? "DBTrail always reuses a table that did not change. Where reuse would be wrong, that table is written again, or the whole backup is refused."
     : "This DBTrail was started with reuse turned off (--baseline-carry-forward-unchanged=false).");
   more.append(docsMore("settings/backups", "backups--disk-space", "reusing unchanged tables"),
     docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
@@ -4596,7 +4599,7 @@ function backupRefreshCard(br) {
 // section label, the third under its own, on a plain card outside the
 // tinted grid with ONE restart chip at card level. Prose a reader does not
 // need in order to act is compact by default (cnFine), never cut, and the
-// two rules that used to be paragraphs are drawn: cfShape for the switch,
+// two rules that used to be paragraphs are drawn: cfShape for the reuse,
 // blCase for which backup location is in force.
 
 async function renderBackupSettings() {
@@ -4637,19 +4640,20 @@ function buildBackupSettings(settings, refresh) {
   // empty (#1682).
   const editableRows = daemonRows.filter((row) => row.editable);
   const startupRows = daemonRows.filter((row) => !row.editable);
-  if (capsCache.monitor) {
+  if (capsCache.monitor && !broken && editableRows.length) {
     v.append(sect("Change here"));
-    // The carry-forward card moved here from the Backups page: it is a setting,
-    // and this page is where settings live; the Backups page keeps the work
-    // (schedules, runs, downloads) beside the data it reports on.
-    const cards = el("div", { class: "cards" }, backupRefreshCard(refresh));
-    if (!broken && editableRows.length) cards.append(backupDaemonEditCard(editableRows));
-    v.append(cards);
+    v.append(el("div", { class: "cards" }, backupDaemonEditCard(editableRows)));
   }
   if (!broken) v.append(backupServersPanel(settings));
-  if (capsCache.monitor && !broken && startupRows.length) {
+  if (capsCache.monitor) {
     v.append(sect("Set when DBTrail starts"));
-    v.append(backupDaemonCard(startupRows));
+    // The disk-space card sits HERE since #1681: with its switch gone it
+    // reports what the daemon was started with, like the rows beside it, and
+    // leaving it under "Change here" would promise a control it no longer
+    // has. It is not one of the startup ROWS (it draws rather than lists), so
+    // it is appended beside that card rather than into it.
+    v.append(el("div", { class: "cards" }, backupRefreshCard(refresh)));
+    if (!broken && startupRows.length) v.append(backupDaemonCard(startupRows));
   }
   viewEnter();
 }

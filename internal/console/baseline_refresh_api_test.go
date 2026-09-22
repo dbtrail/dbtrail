@@ -2,6 +2,8 @@ package console
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -124,7 +126,15 @@ func TestBaselineRefreshGet_targetsAreLiveAndOmittedOffWatch(t *testing.T) {
 // be deleted. Built through New() instead, so dropping that line reports the
 // zero value: reuse off, no schedule, on a daemon running with both.
 func TestBaselineRefreshGet_defaultsTravelThroughNew(t *testing.T) {
-	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
+	// The registry carries the block an older console saved, saying the
+	// opposite of the daemon flag below: this build ignores it (#1681), so
+	// what the card reads is the flag. A reader is the only way to see that
+	// the ignoring is real rather than a missing field.
+	path := filepath.Join(t.TempDir(), "console-servers.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nbaseline_refresh:\n  carry_forward_unchanged: false\nservers: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := LoadRegistry(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +154,8 @@ func TestBaselineRefreshGet_defaultsTravelThroughNew(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !got.CarryForwardUnchanged {
-		t.Error("the daemon's reuse flag did not survive New(); the card would draw every table being rewritten")
+		t.Error("the daemon's reuse flag did not survive New() (or the old saved block beat it); the card " +
+			"would draw every table being rewritten while the daemon reuses them")
 	}
 	if !got.Enabled {
 		t.Error("the daemon's loop liveness did not survive New(); the panel would call a live setting dormant")
