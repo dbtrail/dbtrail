@@ -47,6 +47,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newest, so a run can take longer and read more from the Parquet archives.
 
 ### Fixed
+- **A DROP or RENAME of several tables records every one of them.** Capture
+  recorded only the first table a statement named, so after `DROP TABLE tmp,
+  orders` or `RENAME TABLE orders_new TO orders`, the checks that refuse a
+  reconstruct across a TRUNCATE, DROP or RENAME never saw `orders`: a
+  reconstruct of it could hand back rows from before the statement, and
+  `bintrail verify` blamed the capture for the difference. Each table a DROP
+  names, and both sides of every rename pair, now gets its own
+  `schema_changes` row, read from the whole statement however long. The
+  statement's text is kept on the first table's row only (the others say
+  which row carries it, so one long DROP does not repeat its text on every
+  row), and a DROP or RENAME longer than the column holds is cut to fit
+  instead of failing the whole record. `bintrail status` counts
+  these rows, like the list, so its warning now says "schema change(s)". A
+  statement recorded before this version keeps its single row. A table whose
+  quoted name contains a doubled quote (`` `a``b` ``) is now recorded under
+  its real name by a DROP or RENAME; before, it was recorded as `a` (ALTER,
+  CREATE and TRUNCATE still record it that way).
 - **Console texts no longer name command-line flags** (#1783). Adding a server
   from the browser showed doctor text written for the terminal: "Verify
   --source-dsn is reachable" with a fixed "port 3306", "`bintrail init` will
