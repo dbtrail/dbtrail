@@ -10,13 +10,6 @@ import (
 	"time"
 )
 
-// docsPage is one page of the docs site: its slug under DOCS_BASE and the
-// title text the served page carries in its <title>.
-type docsPage struct {
-	slug  string
-	title string
-}
-
 // expectedDocsPages is the route → page table the console must carry (#1450).
 //
 // The docs site, www.dbtrail.com/docs, is a separately authored tree and is
@@ -27,19 +20,21 @@ type docsPage struct {
 // catch-all shell (<title>dbtrail</title>) for ANY path under /docs/.
 //
 // So the offline half pins the table in app.js to this list exactly, and
-// TestDocsLinksResolveOnTheSite (BINTRAIL_CHECK_DOCS_LINKS=1) fetches each
-// page and requires its own title in the body, which the shell never has.
-// A page the site renames or removes is caught by that run, not by CI on
-// its own; run it when a docs slug changes or when the site is redeployed.
-var expectedDocsPages = map[string]docsPage{
-	"events":       {slug: "guides/recovery", title: "Recovery"},
-	"recover":      {slug: "guides/recovery", title: "Recovery"},
-	"baselines":    {slug: "guides/backup-strategy", title: "Backup Strategy"},
-	"verification": {slug: "guides/verify", title: "Verification"},
-	"storage":      {slug: "guides/capacity-planning", title: "Capacity Planning"},
-	"connect":      {slug: "claude/setup", title: "Claude Setup"},
+// TestDocsLinksResolveOnTheSite (BINTRAIL_CHECK_DOCS_LINKS=1, and a daily
+// workflow) fetches each page and requires the page's own identity tag,
+// <meta name="dbtrail-docs-page" content="<slug>">, which the shell never
+// has. Not the <title> (#1645): a retitled page is the same page, and the
+// title check broke on one. A page the site moves or removes fails that run.
+var expectedDocsPages = map[string]string{
+	"events":       "guides/recovery",
+	"recover":      "guides/recovery",
+	"baselines":    "guides/backup-strategy",
+	"verification": "guides/verify",
+	"storage":      "guides/capacity-planning",
+	"connect":      "claude/setup",
 	// #1603: the settings page had a docs page all along and no link to it.
-	"backup-settings": {slug: "guides/backup-settings", title: "Backup settings"},
+	// It moved to settings/backups; the old slug answers only through a 301.
+	"backup-settings": "settings/backups",
 }
 
 const docsBaseURL = "https://www.dbtrail.com/docs/"
@@ -80,19 +75,19 @@ func TestDocsLinksTableIsExact(t *testing.T) {
 		got, ok := pages[route]
 		if !ok {
 			t.Errorf("DOCS_PAGES has no entry for route %q (expected %q) — that view carries no Docs link",
-				route, want.slug)
+				route, want)
 			continue
 		}
-		if got != want.slug {
+		if got != want {
 			t.Errorf("DOCS_PAGES[%q] = %q, expected %q — update expectedDocsPages in the same change, "+
 				"then run BINTRAIL_CHECK_DOCS_LINKS=1 go test ./internal/console/ -run Docs to prove the "+
-				"site serves it", route, got, want.slug)
+				"site serves it", route, got, want)
 		}
 	}
 	for route, slug := range pages {
 		if _, ok := expectedDocsPages[route]; !ok {
 			t.Errorf("DOCS_PAGES has an entry this guard does not know: %q → %q. Add it to "+
-				"expectedDocsPages with the page's title so the network check covers it", route, slug)
+				"expectedDocsPages so the network check covers it", route, slug)
 		}
 		if !routes[route] {
 			t.Errorf("DOCS_PAGES key %q is not in the ROUTES list — pageHead looks the link up by route, "+
@@ -121,15 +116,6 @@ func TestDocsLinksTableIsExact(t *testing.T) {
 	}
 }
 
-// Every Docs link resolves to its page on the live site.
-//
-// Network-gated: set BINTRAIL_CHECK_DOCS_LINKS=1 to run it. The site is the
-// source of truth for the slugs and nothing in this repo mirrors it, so this
-// is the only check that can see a renamed or removed page. A status code
-// cannot: the site returns 200 with a catch-all shell for any /docs/ path.
-// The fingerprint is the page's own <title>; the shell's is "dbtrail". A
-// control fetch of a path that does not exist proves the fingerprint
-// discriminates before any real page is judged by it.
 // docsMoreRE reads one docsMore("slug", "section", ...) call: the compact
 // blocks' own links into the docs site (#1603).
 var docsMoreRE = regexp.MustCompile(`docsMore\("([^"]*)",\s*"([^"]*)"`)
@@ -161,6 +147,20 @@ func TestDocsMoreLinksArePagesTheTableCarries(t *testing.T) {
 	}
 }
 
+// docsPageTagRE reads the identity tag every docs page carries (#1645): the
+// page's own path, which a retitle does not change.
+var docsPageTagRE = regexp.MustCompile(`<meta name="dbtrail-docs-page" content="([^"]*)"`)
+
+// Every Docs link resolves to its page on the live site.
+//
+// Network-gated: set BINTRAIL_CHECK_DOCS_LINKS=1 to run it (a daily workflow
+// does). The site is the source of truth for the slugs and nothing in this
+// repo mirrors it, so this is the only check that can see a moved or removed
+// page. A status code cannot: the site returns 200 with a catch-all shell for
+// any /docs/ path. So each page must carry its identity tag naming its own
+// slug; the shell carries none, which a control fetch proves before any real
+// page is judged by the tag. A redirect fails too, naming where the page
+// went: following it would pass a link that works only through the CDN.
 func TestDocsLinksResolveOnTheSite(t *testing.T) {
 	if os.Getenv("BINTRAIL_CHECK_DOCS_LINKS") != "1" {
 		t.Skip("set BINTRAIL_CHECK_DOCS_LINKS=1 to fetch every Docs link from www.dbtrail.com")
@@ -171,7 +171,10 @@ func TestDocsLinksResolveOnTheSite(t *testing.T) {
 	}
 	pages := parseDocsPages(t, string(raw))
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{
+		Timeout:       20 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	fetch := func(url string) string {
 		t.Helper()
 		resp, err := client.Get(url)
@@ -179,6 +182,10 @@ func TestDocsLinksResolveOnTheSite(t *testing.T) {
 			t.Fatalf("GET %s: %v", url, err)
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			t.Fatalf("GET %s: HTTP %d to %s — the page moved; point DOCS_PAGES (and every docsMore call) "+
+				"at the new slug", url, resp.StatusCode, resp.Header.Get("Location"))
+		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		if err != nil {
 			t.Fatalf("GET %s: reading body: %v", url, err)
@@ -188,37 +195,26 @@ func TestDocsLinksResolveOnTheSite(t *testing.T) {
 		}
 		return string(body)
 	}
-	titleTag := func(p docsPage) string { return "<title>" + p.title }
 
-	control := fetch(docsBaseURL + "no-such-page-docs-links-guard/")
-	for _, p := range expectedDocsPages {
-		if strings.Contains(control, titleTag(p)) {
-			t.Fatalf("the site's catch-all shell contains %q, so a title fingerprint cannot tell a "+
-				"real page from the shell — this check would pass on a missing page", titleTag(p))
-		}
+	if m := docsPageTagRE.FindStringSubmatch(fetch(docsBaseURL + "no-such-page-docs-links-guard/")); m != nil {
+		t.Fatalf("the site's catch-all shell carries a page identity tag (%q), so the tag cannot tell a "+
+			"real page from the shell — this check would pass on a missing page", m[1])
 	}
 
 	checked := map[string]bool{}
 	for route, slug := range pages {
-		want, ok := expectedDocsPages[route]
-		if !ok {
-			t.Errorf("route %q is not in expectedDocsPages; no title to check it against", route)
-			continue
-		}
 		url := docsBaseURL + slug + "/"
 		if checked[url] {
 			continue
 		}
 		checked[url] = true
-		body := fetch(url)
-		if !strings.Contains(body, titleTag(want)) {
-			got := "(no <title>)"
-			if m := regexp.MustCompile(`<title>[^<]*</title>`).FindString(body); m != "" {
-				got = m
-			}
-			t.Errorf("%s does not serve the %q page: expected %q in the body, got %s (%d bytes) — "+
-				"the console's %s header links to a page the site no longer has",
-				url, want.title, titleTag(want), got, len(body), route)
+		got := "(none)"
+		if m := docsPageTagRE.FindStringSubmatch(fetch(url)); m != nil {
+			got = m[1]
+		}
+		if got != slug {
+			t.Errorf("%s does not serve its own page: identity tag %s, want %q — the console's %s "+
+				"header links to a page the site no longer has", url, got, slug, route)
 		}
 	}
 	// The compact blocks' section links (#1603): a heading id the site does
