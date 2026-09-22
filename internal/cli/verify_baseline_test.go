@@ -226,3 +226,52 @@ func TestRunVerifyBaselinePair_NeverBaselined(t *testing.T) {
 		t.Errorf("a snapshot table must not hit the --tables-absent error path, got output:\n%s", out.String())
 	}
 }
+
+// A table in no readable baseline, with backup folders that could not be
+// read: only folders that could hold it count (a whole snapshot folder, or its
+// own schema's), and the newest is named. Another schema's folder cannot hold
+// it, so with only that one the table is plainly never baselined.
+func TestRunVerifyBaselinePair_UncoveredNamesOnlyItsOwnFolders(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory read permissions")
+	}
+	for _, tc := range []struct {
+		name, lockSchema, want string
+	}{
+		{"another schema's folder", "crm", "never baselined"},
+		{"its own schema's folder", "mydb", "1 baseline folder(s) that may hold it could not be read (newest: "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			baseDir := t.TempDir()
+			base := time.Now().UTC().Truncate(time.Hour)
+			old := base.Add(-3 * time.Hour)
+			writeMinimalBaseline(t, baseDir, "mydb", "orders", old)
+			writeMinimalBaseline(t, baseDir, "crm", "leads", old)
+			writeMinimalBaseline(t, baseDir, "mydb", "orders", base.Add(-2*time.Hour))
+			writeMinimalBaseline(t, baseDir, "mydb", "orders", base.Add(-1*time.Hour))
+			locked := filepath.Join(baseDir, strings.ReplaceAll(old.Format(time.RFC3339), ":", "-"), tc.lockSchema)
+			if err := os.Chmod(locked, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+			resolver := metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{
+				"mydb.orders":   {Schema: "mydb", Table: "orders"},
+				"mydb.payments": {Schema: "mydb", Table: "payments"},
+			})
+			vfyTables = "mydb.payments"
+			t.Cleanup(func() { vfyTables = "" })
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			_ = runVerifyBaselinePair(cmd, nil, resolver, "", baseDir, duckdbutil.Tuning{}, "")
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("want %q in:\n%s", tc.want, out.String())
+			}
+			if tc.lockSchema == "mydb" && !strings.Contains(out.String(), locked) {
+				t.Fatalf("the reason does not name the folder %s:\n%s", locked, out.String())
+			}
+		})
+	}
+}
