@@ -64,6 +64,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quoted name contains a doubled quote (`` `a``b` ``) is now recorded under
   its real name by a DROP or RENAME; before, it was recorded as `a` (ALTER,
   CREATE and TRUNCATE still record it that way).
+- **A bookmark of an old console address opens the page that replaced it.**
+  `/storage` (now Retention) and `/sql` (now the DuckDB card on Backups, or
+  Connect without the watch daemon) opened from a bookmark, a link or Back
+  showed Overview under the old address: the console knew where they had
+  moved, but nothing that opens a page from its address asked. The address
+  bar is now rewritten to the new page. Retention needs the watch daemon, so
+  without it `/storage` still ends on Overview.
+- **An address ending in a slash no longer opens a blank console.** The page
+  named its script and styles relative to the address, so `/events/` or
+  `/storage/` asked for `/events/app.js`, which the server refuses, and
+  nothing loaded. They are named from the root now.
 - **Console texts no longer name command-line flags** (#1783). Adding a server
   from the browser showed doctor text written for the terminal: "Verify
   --source-dsn is reachable" with a fixed "port 3306", "`bintrail init` will
