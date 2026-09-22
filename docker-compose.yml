@@ -55,7 +55,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 1
+x-bintrail-compose-version: &compose_version 2
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -225,12 +225,15 @@ services:
     image: ghcr.io/dbtrail/bintrail-console:${BINTRAIL_TAG:-latest}
     # host.docker.internal: a database on this same machine, from inside the
     # container. Docker Desktop defines the name on its own; Docker Engine on
-    # Linux does not, so the installer's advice to use it failed there. The
-    # host-gateway mapping defines it on both. On Linux the host MySQL must
-    # also listen on more than 127.0.0.1 (bind-address), and its user must be
-    # allowed from the container's network.
+    # Linux does not, so it is mapped here with host-gateway (Docker Engine
+    # 20.10 or later, running as root). Where host-gateway does not point at
+    # this machine (rootless Docker) or is not understood (Podman before 4.7,
+    # which then refuses to start the stack), set HOST_GATEWAY in .env to this
+    # machine's address. On Linux the database must also listen on more than
+    # 127.0.0.1 (bind-address), and its DBTrail user must be allowed from other
+    # hosts ('dbtrail'@'%', as the add-server form creates it).
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
     # Building from a source checkout instead? Uncomment here AND on
     # index-init above (keep the image: lines — `docker compose build` tags
     # the local build with that name, so nothing is pulled):
@@ -484,7 +487,7 @@ services:
     image: ghcr.io/dbtrail/bintrail:${BINTRAIL_TAG:-latest}
     # Same mapping as the bintrail service: host.docker.internal on Linux too.
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
     ports:
       # Loopback only. The shim binds 0.0.0.0 INSIDE the container so this host
       # mapping can reach it (it logs a non-loopback Warn for that bind, which
@@ -585,7 +588,7 @@ services:
     image: mydumper/mydumper:v1.0.3-1
     # Same mapping as the bintrail service: host.docker.internal on Linux too.
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
     environment:
       BASELINE_SOURCE_DSN: ${BASELINE_SOURCE_DSN:-${SOURCE_DSN:-}}
       # Comma-separated schemas to snapshot (defaults to SCHEMAS; empty = all
@@ -737,6 +740,10 @@ services:
   iceberg-export:
     profiles: ["iceberg-export"]
     image: ghcr.io/dbtrail/bintrail:${BINTRAIL_TAG:-latest}
+    # Same mapping as the bintrail service: a brought-your-own INDEX_DSN may
+    # name host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
     # Root, for the same reason index-init is: a freshly created named volume
     # is root-owned, and there is no earlier step here to hand it to the
     # image's non-root uid. The tables it writes are therefore root-owned,

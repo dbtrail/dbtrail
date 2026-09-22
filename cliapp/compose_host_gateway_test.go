@@ -3,6 +3,7 @@ package cliapp
 import (
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"go.yaml.in/yaml/v2"
@@ -12,8 +13,8 @@ import (
 // machine to connect to host.docker.internal. Docker Desktop defines that
 // name on its own; Docker Engine on Linux does not, so on Linux the advice
 // failed with "no such host" until the compose mapped it with host-gateway.
-// Every service that connects to the user's database must carry the mapping,
-// including one added later.
+// Every service with a DSN variable (a source, or a brought-your-own index)
+// must carry the mapping, including one added later.
 func TestComposeSourceServicesMapHostDockerInternal(t *testing.T) {
 	raw, err := os.ReadFile(icebergComposePath)
 	if err != nil {
@@ -30,19 +31,25 @@ func TestComposeSourceServicesMapHostDockerInternal(t *testing.T) {
 	}
 	checked := 0
 	for name, svc := range f.Services {
-		_, src := svc.Environment["SOURCE_DSN"]
-		_, bsrc := svc.Environment["BASELINE_SOURCE_DSN"]
-		if !src && !bsrc {
+		// Any variable that holds a DSN can name host.docker.internal: the
+		// source ones, and a brought-your-own INDEX_DSN.
+		reaches := false
+		for k := range svc.Environment {
+			if strings.HasSuffix(k, "_DSN") {
+				reaches = true
+			}
+		}
+		if !reaches {
 			continue
 		}
 		checked++
-		if !slices.Contains(svc.ExtraHosts, "host.docker.internal:host-gateway") {
+		if !slices.Contains(svc.ExtraHosts, "host.docker.internal:${HOST_GATEWAY:-host-gateway}") {
 			t.Errorf("service %q connects to the user's database but does not map host.docker.internal; on Linux the name the installer recommends does not resolve", name)
 		}
 	}
-	// bintrail, shim and baseline-dump today. Fewer means the guard stopped
-	// recognising the services it exists for.
-	if checked < 3 {
-		t.Fatalf("only %d services read SOURCE_DSN or BASELINE_SOURCE_DSN; this guard covers less than it should", checked)
+	// bintrail, shim, baseline-dump and iceberg-export today. Fewer means the
+	// guard stopped recognising the services it exists for.
+	if checked < 4 {
+		t.Fatalf("only %d services read a *_DSN variable; this guard covers less than it should", checked)
 	}
 }
