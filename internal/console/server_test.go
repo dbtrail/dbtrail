@@ -102,7 +102,9 @@ func TestMuxSPAFallback(t *testing.T) {
 	srv := newTestServer(t)
 	// pushState routes must reload/deep-link to the shell, not 404. The
 	// trailing-slash form rides on path.Clean — a URL shape users produce.
-	for _, p := range []string{"/overview", "/events", "/timetravel", "/recover", "/status", "/events/", "/events?q=pk:1"} {
+	// The old addresses too (/storage, /sql): the shell is what translates a
+	// bookmark of one to its new page (TestOldAddressesLandOnTheirPage).
+	for _, p := range []string{"/overview", "/events", "/timetravel", "/recover", "/status", "/events/", "/events?q=pk:1", "/storage", "/sql"} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest("GET", "http://127.0.0.1:8090"+p, nil)
 		srv.Handler().ServeHTTP(rec, req)

@@ -286,11 +286,9 @@ func TestStorageSplit_eachHalfHoldsOnlyItsOwnConcern(t *testing.T) {
 			}
 		}
 	}
-	// The old route must keep resolving, or every existing link and bookmark
-	// lands on Overview with no explanation.
-	if !strings.Contains(js, `route === "storage"`) {
-		t.Error("nothing handles the old /storage route, so existing links break")
-	}
+	// The old /storage address landing on Retention (bookmark, Back, a stale
+	// navigate call) is TestOldAddressesLandOnTheirPage's, which drives the
+	// router instead of looking for the text that once did it.
 	// And the DuckDB schema download has to be mounted SOMEWHERE, not merely
 	// absent from the two halves above. Its home is Backups since #1581; this
 	// only pins that buildConnect still CALLS duckdbPanel at all — the gate on
