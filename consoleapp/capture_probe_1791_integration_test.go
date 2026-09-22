@@ -4,109 +4,133 @@ package consoleapp
 
 import (
 	"context"
+	"database/sql"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
-// #1791 against a real server: the index's real stream_state and the
-// source's real binlog status, so the probe's queries are read from the
-// other side of the seam rather than from a mock written to match them.
-// The test server is both the source and the index.
+// #1791 against a real server: the index's real stream_state read through
+// status.LoadStreamState, and the source's real variables, so the probe's
+// queries are read from the other side of the seam rather than from a mock
+// written to match them. One server plays both roles here, which is itself
+// one of the cases: an index on its source server is never compared, since
+// its own checkpoint writes keep the source ahead of any capture. The
+// caught-up path needs two servers; see the PR for that run.
 func TestIntegrationProbeCapture(t *testing.T) {
 	db, name := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 	indexDSN := testutil.DefaultDSN + "/" + name
 	sourceDSN := testutil.DefaultDSN + "/"
 	ctx := context.Background()
+	anchor := time.Now().Add(-3 * time.Hour)
 
-	// A file-mode index: no stream_state row.
-	if verdict, detail := probeCaptureFromDBs(ctx, indexDSN, sourceDSN); verdict != "" || detail != "the index has no live capture on record" {
-		t.Fatalf("no capture on record: verdict=%q detail=%q", verdict, detail)
-	}
-
-	if _, _, err := config.CurrentBinlogPosition(db); err != nil {
-		t.Skipf("the test server reports no binlog position: %v", err)
-	}
-	// The checkpoint is written with binary logging off for its session:
-	// written normally, the write itself would move the server's binlog past
-	// the position it records, and "caught up" could never be observed.
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
-		t.Skipf("cannot write the checkpoint outside the binlog: %v", err)
-	}
-	checkpoint := func(mode, file string, pos uint32, gtid any) {
+	probe := func() captureProbeResult {
 		t.Helper()
-		if _, err := conn.ExecContext(ctx, `REPLACE INTO stream_state (id, mode, binlog_file, binlog_position, gtid_set, flavor, last_checkpoint, server_id)
-			VALUES (1, ?, ?, ?, ?, 'mysql', UTC_TIMESTAMP(), 1)`, mode, file, pos, gtid); err != nil {
-			t.Fatal(err)
-		}
+		return captureFromDBs(ctx, indexDSN, sourceDSN, anchor)
 	}
-	// Other packages' tests write to the same server in parallel, so the
-	// head can move between reading it and probing: caught up has to be seen
-	// once in a few tries, behind is then forced by a write of our own.
-	var file string
-	var pos uint32
-	caught := false
-	for range 20 {
-		if file, pos, err = config.CurrentBinlogPosition(db); err != nil {
-			t.Fatal(err)
-		}
-		checkpoint("position", file, pos, nil)
-		if verdict, _ := probeCaptureFromDBs(ctx, indexDSN, sourceDSN); verdict == console.CaptureCaughtUp {
-			caught = true
-			break
-		}
+	// A file-mode index: no stream_state row.
+	if r := probe(); r.verdict != "" || r.detail != "the index has no live capture on record" {
+		t.Fatalf("no capture on record: %+v", r)
 	}
-	if !caught {
-		t.Fatal("position checkpointed at the source's head never read as caught up")
+	checkpoint := func(mode string, gtid any) {
+		t.Helper()
+		testutil.MustExec(t, db, `REPLACE INTO stream_state (id, mode, binlog_file, binlog_position, gtid_set, flavor, last_checkpoint, server_id, capture_skips)
+			VALUES (1, ?, 'binlog.000001', 4, ?, 'mysql', UTC_TIMESTAMP(), 1, '{}')`, mode, gtid)
 	}
-	// The source writes: its binlog moves past the checkpoint.
-	if _, err := db.Exec("CREATE TABLE moved (id INT PRIMARY KEY)"); err != nil {
-		t.Fatal(err)
+	// A position-mode capture: settled from the index alone.
+	checkpoint("position", nil)
+	if r := probe(); r.verdict != "" || r.detail != "the capture runs in binlog-position mode, which is not compared" {
+		t.Fatalf("position mode: %+v", r)
 	}
-	if verdict, detail := probeCaptureFromDBs(ctx, indexDSN, sourceDSN); verdict != console.CaptureBehind {
-		t.Fatalf("position after a write: verdict=%q detail=%q, want behind", verdict, detail)
+	// A GTID capture whose index is on the source server.
+	checkpoint("gtid", "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-10")
+	if r := probe(); r.verdict != "" || !strings.HasPrefix(r.detail, "the index lives on the source server") {
+		t.Fatalf("index on the source server: %+v", r)
 	}
 
-	// GTID mode: the answer depends on the server. With gtid_mode OFF the
-	// source reports no set and the verdict is unknown; with it ON, a set
-	// that contains gtid_executed is caught up.
-	executed, err := config.CurrentGTIDExecuted(db)
+	// The source's GTID read, for real: empty with GTIDs off, a
+	// whitespace-free set that compares with itself once they are on.
+	executed, err := readExecutedGTIDs(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if executed == "" {
-		checkpoint("gtid", file, pos, "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-10")
-		if verdict, detail := probeCaptureFromDBs(ctx, indexDSN, sourceDSN); verdict != "" || detail != "the source reported no GTID set" {
-			t.Fatalf("GTID capture, GTIDs off on the source: verdict=%q detail=%q", verdict, detail)
-		}
+	var mode string
+	if err := db.QueryRow("SELECT @@GLOBAL.gtid_mode").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(mode, "ON") && executed != "" {
+		t.Fatalf("gtid_mode=%s but the read returned %q, want empty", mode, executed)
+	}
+	if !stepGTIDModeOnForProbe(t, db) {
 		return
 	}
-	caught = false
-	for range 20 {
-		if executed, err = config.CurrentGTIDExecuted(db); err != nil {
-			t.Fatal(err)
-		}
-		checkpoint("gtid", file, pos, executed)
-		if verdict, _ := probeCaptureFromDBs(ctx, indexDSN, sourceDSN); verdict == console.CaptureCaughtUp {
-			caught = true
-			break
-		}
+	testutil.MustExec(t, db, "CREATE TABLE owns_a_gtid (id INT PRIMARY KEY)")
+	before, err := readExecutedGTIDs(ctx, db)
+	if err != nil || before == "" || strings.ContainsAny(before, " \n\t") {
+		t.Fatalf("executed set with GTIDs on = %q, %v; want a non-empty set with no whitespace", before, err)
 	}
-	if !caught {
-		t.Fatal("a GTID set equal to the source's never read as caught up")
+	if v, d := compareGTIDSets(before, before); v != console.CaptureCaughtUp {
+		t.Fatalf("the server's own set against itself: %q (%s)", v, d)
 	}
-	if _, err := db.Exec("CREATE TABLE moved_again (id INT PRIMARY KEY)"); err != nil {
+	testutil.MustExec(t, db, "CREATE TABLE owns_another (id INT PRIMARY KEY)")
+	after, err := readExecutedGTIDs(ctx, db)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if verdict, detail := probeCaptureFromDBs(ctx, indexDSN, sourceDSN); verdict != console.CaptureBehind {
-		t.Fatalf("GTID after a write: verdict=%q detail=%q, want behind", verdict, detail)
+	if v, d := compareGTIDSets(before, after); v != console.CaptureBehind {
+		t.Fatalf("a capture holding the set from before a write: %q (%s), want behind", v, d)
 	}
+	if v, d := compareGTIDSets(after, before); v != "" {
+		t.Fatalf("a capture holding more than the source (a reset): %q (%s), want unknown", v, d)
+	}
+}
+
+// stepGTIDModeOnForProbe is internal/streamrun's stepGTIDModeOn (the
+// online OFF → ON climb, walked back on cleanup), which is a test helper of
+// that package and cannot be imported. It reports false, with a log line,
+// when the server refuses the climb; with BINTRAIL_REQUIRE_MYSQL=1 that is a
+// failure instead, so CI cannot pass this part by skipping it.
+func stepGTIDModeOnForProbe(t *testing.T, db *sql.DB) bool {
+	t.Helper()
+	refuse := func(format string, args ...any) bool {
+		t.Helper()
+		if testutil.MySQLRequired() {
+			t.Fatalf(format, args...)
+		}
+		t.Logf(format, args...)
+		return false
+	}
+	var mode, enforce string
+	if err := db.QueryRow("SELECT @@GLOBAL.gtid_mode, @@GLOBAL.enforce_gtid_consistency").Scan(&mode, &enforce); err != nil {
+		return refuse("cannot read gtid_mode: %v", err)
+	}
+	if strings.EqualFold(mode, "ON") {
+		return true
+	}
+	if !strings.EqualFold(mode, "OFF") {
+		return refuse("gtid_mode=%s: not a state this test steps from", mode)
+	}
+	if _, err := db.Exec("SET GLOBAL enforce_gtid_consistency = ON"); err != nil {
+		return refuse("SET GLOBAL enforce_gtid_consistency refused: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, m := range []string{"ON_PERMISSIVE", "OFF_PERMISSIVE", "OFF"} {
+			db.Exec("SET GLOBAL gtid_mode = " + m)
+		}
+		db.Exec("SET GLOBAL enforce_gtid_consistency = " + enforce)
+		var restored string
+		if err := db.QueryRow("SELECT @@GLOBAL.gtid_mode").Scan(&restored); err == nil && !strings.EqualFold(restored, "OFF") {
+			t.Logf("WARNING: could not step gtid_mode back down (still %s); later position-mode tests on this server may misbehave", restored)
+		}
+	})
+	for _, m := range []string{"OFF_PERMISSIVE", "ON_PERMISSIVE", "ON"} {
+		if _, err := db.Exec("SET GLOBAL gtid_mode = " + m); err != nil {
+			return refuse("SET GLOBAL gtid_mode = %s refused: %v", m, err)
+		}
+	}
+	return true
 }

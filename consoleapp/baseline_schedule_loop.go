@@ -245,7 +245,11 @@ type windowSample struct {
 //     model then abstains on until an update is measured again.
 func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEntry, anchor time.Time) console.BackupWindow {
 	b.mu.Lock()
-	if c, ok := b.windows[e.ID]; ok && c.anchor.Equal(anchor) && time.Since(c.at) < windowCacheFor {
+	// Not across the cut-over (#1791): a window cached just before the anchor
+	// passed it carries no capture verdict, and reused past it would take a
+	// full backup the source could have ruled out.
+	if c, ok := b.windows[e.ID]; ok && c.anchor.Equal(anchor) && time.Since(c.at) < windowCacheFor &&
+		!(c.w.Events == 0 && c.w.Capture == "" && c.w.CaptureDetail == "" && pastCutover(e, c.w, time.Now())) {
 		b.mu.Unlock()
 		return c.w
 	}
@@ -273,7 +277,13 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 		}
 	}
 	if w.Events == 0 && pastCutover(e, w, time.Now()) {
-		w.Capture, w.CaptureDetail = b.captureVerdict(ctx, e)
+		w.Capture, w.CaptureDetail = b.captureVerdict(ctx, e, anchor)
+	}
+	if ctx.Err() != nil {
+		// The caller went away mid-probe (a page request aborted): what was
+		// read is its timeout, not an answer, and cached it would decide the
+		// loop's next slot for a minute.
+		return w
 	}
 	b.mu.Lock()
 	if b.windows == nil {
@@ -307,15 +317,55 @@ func pastCutover(e console.ServerEntry, w console.BackupWindow, now time.Time) b
 }
 
 // captureVerdict asks whether the source wrote anything the capture has not
-// recorded (#1791, probeCapture), for the servers it can be asked about.
-func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEntry) (verdict, detail string) {
+// recorded since anchor (#1791, probeCapture), for the servers it can be
+// asked about, and says what it found in the log (reportCaptureProbe).
+func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEntry, anchor time.Time) (verdict, detail string) {
+	var r captureProbeResult
 	switch {
 	case e.SourceDSN == "":
-		return "", "this server has no source to ask"
+		r.detail = "this server has no source to ask"
 	case e.IsPostgres():
-		return "", "PostgreSQL sources are not compared yet"
+		r.detail = "PostgreSQL sources are not compared yet"
+	default:
+		r = probeCapture(ctx, e.DSN, e.SourceDSN, anchor)
 	}
-	return probeCapture(ctx, e.DSN, e.SourceDSN)
+	b.reportCaptureProbe(e, anchor, r)
+	return r.verdict, r.detail
+}
+
+// reportCaptureProbe says, once per condition and server (gateEdge), why a
+// server that indexed nothing still takes a full backup on age, or that it
+// no longer does. The window probe runs on page loads too, so an unlimited
+// line would repeat every minute. Warn when a read failed or the source is
+// ahead, which is worth a look; Info when the reason is structural (a
+// position-mode capture, a PostgreSQL source), since those hold for the
+// server's lifetime and a daily warning about them would teach an operator
+// to ignore the line.
+func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.Time, r captureProbeResult) {
+	quiet := "capture-caught-up:" + e.ID
+	loud := "capture-probe:" + e.ID
+	if r.verdict == console.CaptureCaughtUp {
+		b.sup.gateEdge.Resolve(loud)
+		if b.sup.gateEdge.Fire(quiet, anchor.UTC().Format(time.RFC3339)) {
+			slog.Info("backup schedule: nothing was indexed since the previous backup and the source confirms it wrote nothing the capture has not recorded; updating instead of taking a full backup on age",
+				"server", e.Name, "id", e.ID, "previous_backup", anchor.UTC().Format(time.RFC3339))
+		}
+		return
+	}
+	b.sup.gateEdge.Resolve(quiet)
+	if !b.sup.gateEdge.Fire(loud, r.detail) {
+		return
+	}
+	args := []any{"server", e.Name, "id", e.ID, "reason", r.detail}
+	if r.cause != "" {
+		args = append(args, "error", r.cause)
+	}
+	msg := "backup schedule: nothing was indexed since the previous backup, but the source could not confirm it wrote nothing; the full backup on age stays in place"
+	if r.cause != "" || r.verdict == console.CaptureBehind {
+		slog.Warn(msg, args...)
+		return
+	}
+	slog.Info(msg, args...)
 }
 
 // probeDSN bounds the DIAL of the probe's index connection too: the context

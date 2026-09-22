@@ -586,15 +586,21 @@ panel that answers whether a restore would work, far below the fold.
   full backup did: its own duration is not the schedule falling behind),
   and the reason names what was missing. One exception (#1791): when
   nothing at all was indexed since the previous snapshot, the daemon asks
-  the source whether it wrote anything the capture has not recorded
-  (the capture's GTID set against `@@GLOBAL.gtid_executed`, or its binlog
-  position against the source's) and updates when it did not, since there
-  is nothing to fold. If the source is ahead, or cannot be asked
-  (PostgreSQL, MariaDB GTIDs, a source that does not answer, an index with
-  no live capture), the full backup is taken, and the reason says which:
-  an index that records nothing while the source keeps writing is a
-  capture that stopped, and a full backup is the one producer that does not
-  depend on it. After a full backup the
+  the source whether it wrote anything the capture has not recorded, and
+  updates when it did not, since there is nothing to fold. The answer is
+  yes only when the capture's checkpointed GTID set is EQUAL to the
+  source's `@@GLOBAL.gtid_executed` (a capture holding more than its source
+  means the source was reset, restored or replaced), with no capture gap
+  and no dropped rows recorded since the previous snapshot. Everything else
+  keeps the full backup and the reason says why: the source is ahead (the
+  capture may have stopped), or it cannot be asked (a capture in
+  binlog-position mode, which is what a source without GTIDs runs, since
+  its checkpoint stops short of each commit; PostgreSQL; MariaDB GTIDs; an
+  index on the source server itself, whose own checkpoint writes keep the
+  source ahead; a source that does not answer; an index with no live
+  capture). An index that records nothing while the source keeps writing
+  is a capture that stopped, and a full backup is the one producer that
+  does not depend on it. After a full backup the
   model may not choose another one until an update after it has been
   measured (it may still choose an update): each full backup records the
   index's high-water mark before it starts, so the update that follows it

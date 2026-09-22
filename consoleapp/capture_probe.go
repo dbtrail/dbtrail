@@ -4,14 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
-	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/status"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-sql-driver/mysql"
 )
@@ -29,104 +27,93 @@ import (
 // Only a definite "no" lets the update run; anything unanswered keeps the
 // full backup, which is what happened before.
 
-// captureCheckpoint is the index's stream_state row as the probe needs it.
-// present is false when the index has no row at all: a file-mode index
-// (`bintrail index`) that never had a live capture, which is neither caught
-// up nor dead, and is answered as unknown.
-type captureCheckpoint struct {
-	present bool
-	mode    string // "gtid" or "position"
-	file    string
-	pos     uint64
-	gtidSet string
-	flavor  string
+// captureComparable reports whether st can be compared with the source at
+// all, and why not: every condition that rules "caught up" out without
+// asking the source. st is the index's stream_state (nil: no row), anchor
+// the previous snapshot's instant. Each refusal keeps the full backup, the
+// direction that cannot lose data:
+//
+//   - no live capture on record (a file-mode index), or a loss record this
+//     index does not have (GapColumnsPresent false: unevaluable, not "no
+//     gap");
+//   - a loss stamped at or after the anchor: a capture that auto-advanced
+//     past an unfillable gap reaches the head with the gap's events gone,
+//     and only a full backup reads them again;
+//   - a skip ledger that is unreadable (not clean: unevaluable), or holds a
+//     skip at or after the anchor: a capture that drops every row it reads
+//     (#1034) advances its checkpoint all the same and indexes nothing. An
+//     acknowledgement changes nothing here: it records that an operator saw
+//     the tally, not that the rows came back;
+//   - position mode: on a source without GTIDs the parser emits no commit
+//     boundary for an anonymous transaction, so the checkpoint stops at the
+//     end of its last rows event, short of the Xid the source's head is
+//     past, and a healthy capture would read as behind forever;
+//   - no GTID set checkpointed.
+func captureComparable(st *status.StreamStateInfo, anchor time.Time) (ok bool, detail string) {
+	switch {
+	case st == nil:
+		return false, "the index has no live capture on record"
+	case !st.GapColumnsPresent:
+		return false, "the index predates the capture's loss record"
+	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(anchor):
+		return false, "the capture lost events to a binlog gap after the previous backup"
+	}
+	skips, readable := st.ParseCaptureSkips()
+	if !readable {
+		return false, "the capture's record of dropped events is not readable"
+	}
+	for _, sk := range skips {
+		if sk.Count > 0 && (sk.LastAt.IsZero() || !sk.LastAt.Before(anchor)) {
+			return false, "the capture dropped events it read after the previous backup"
+		}
+	}
+	if st.Mode != "gtid" {
+		return false, "the capture runs in binlog-position mode, which is not compared"
+	}
+	if !st.GTIDSet.Valid || strings.TrimSpace(st.GTIDSet.String) == "" {
+		return false, "the capture has no GTID checkpoint"
+	}
+	return true, ""
 }
 
-// sourceHead is where the source's binary log is now: its executed GTID set
-// (empty when GTIDs are not fully on) or its current file and position.
-type sourceHead struct {
-	gtid string
-	file string
-	pos  uint64
-}
-
-// compareCapture is the verdict, pure: console.CaptureCaughtUp,
-// console.CaptureBehind, or "" (unknown), and a clause saying why for
-// anything but caught up.
-func compareCapture(cp captureCheckpoint, src sourceHead) (verdict, detail string) {
-	if !cp.present {
-		return "", "the index has no live capture on record"
+// compareGTIDSets is the verdict on two GTID sets, pure:
+// console.CaptureCaughtUp, console.CaptureBehind, or "" (unknown), and a
+// clause saying why for anything but caught up. Caught up is EQUAL, not
+// "contains": a healthy capture of a source can only hold less (behind) or
+// the same, and holding more means the source's history changed under it
+// (reset, restored, or replaced by a server that has not written those
+// transactions), which is the stuck capture this check exists to catch.
+func compareGTIDSets(captured, executed string) (verdict, detail string) {
+	if strings.TrimSpace(executed) == "" {
+		return "", "the source reported no GTID set"
 	}
-	switch cp.mode {
-	case "gtid":
-		if cp.flavor == console.FlavorMariaDB {
-			return "", "MariaDB GTIDs are not compared yet"
-		}
-		if strings.TrimSpace(cp.gtidSet) == "" {
-			return "", "the capture has no GTID checkpoint"
-		}
-		if strings.TrimSpace(src.gtid) == "" {
-			return "", "the source reported no GTID set"
-		}
-		have, err := gomysql.ParseMysqlGTIDSet(cp.gtidSet)
-		if err != nil {
-			return "", "the capture's GTID set does not parse"
-		}
-		wrote, err := gomysql.ParseMysqlGTIDSet(src.gtid)
-		if err != nil {
-			return "", "the source's GTID set does not parse"
-		}
-		if have.Contain(wrote) {
-			return console.CaptureCaughtUp, ""
-		}
-		return console.CaptureBehind, "the capture's GTID set does not contain the source's"
-	case "position":
-		if cp.file == "" || src.file == "" {
-			return "", "no binlog position to compare"
-		}
-		capBase, capSeq, ok1 := binlogSequence(cp.file)
-		srcBase, srcSeq, ok2 := binlogSequence(src.file)
-		if !ok1 || !ok2 || capBase != srcBase {
-			return "", "the capture and the source name their binlogs differently"
-		}
-		if capSeq > srcSeq || (capSeq == srcSeq && cp.pos >= src.pos) {
-			return console.CaptureCaughtUp, ""
-		}
-		return console.CaptureBehind, fmt.Sprintf("the capture is at %s:%d, the source at %s:%d", cp.file, cp.pos, src.file, src.pos)
-	}
-	return "", "the capture's checkpoint mode is not one this build compares"
-}
-
-// binlogSequence splits "binlog.000012" into its base name and sequence
-// number, compared as a number so a suffix that grows a digit still orders.
-func binlogSequence(name string) (base string, seq uint64, ok bool) {
-	i := strings.LastIndexByte(name, '.')
-	if i <= 0 || i == len(name)-1 {
-		return "", 0, false
-	}
-	n, err := strconv.ParseUint(name[i+1:], 10, 64)
+	have, err := gomysql.ParseMysqlGTIDSet(captured)
 	if err != nil {
-		return "", 0, false
+		return "", "the capture's GTID set does not parse"
 	}
-	return name[:i], n, true
+	wrote, err := gomysql.ParseMysqlGTIDSet(executed)
+	if err != nil {
+		return "", "the source's GTID set does not parse"
+	}
+	switch {
+	case have.Equal(wrote):
+		return console.CaptureCaughtUp, ""
+	case wrote.Contain(have):
+		// Not necessarily stopped: a transaction in the last checkpoint
+		// interval, a trailing statement with no commit of its own (a GRANT
+		// the parser commits with the next GTID) or a tagged GTID (8.3+,
+		// which the parser does not record) read this way too. The
+		// direction is safe: the full backup stays.
+		return console.CaptureBehind, "the source reports transactions the capture's checkpoint does not include"
+	}
+	return "", "the capture holds transactions the source does not have: the source may have been reset, restored or replaced"
 }
 
-// captureCheckpointQuery reads the one stream_state row.
-const captureCheckpointQuery = "SELECT mode, binlog_file, binlog_position, gtid_set, flavor FROM stream_state WHERE id = 1"
-
-// readCaptureCheckpoint reads the index's checkpoint. known is false only
-// when the read failed; no row is a known answer (present false).
-func readCaptureCheckpoint(ctx context.Context, db *sql.DB) (cp captureCheckpoint, known bool) {
-	var gtid sql.NullString
-	err := db.QueryRowContext(ctx, captureCheckpointQuery).Scan(&cp.mode, &cp.file, &cp.pos, &gtid, &cp.flavor)
-	if errors.Is(err, sql.ErrNoRows) {
-		return captureCheckpoint{}, true
-	}
-	if err != nil {
-		return captureCheckpoint{}, false
-	}
-	cp.present, cp.gtidSet = true, gtid.String
-	return cp, true
+// captureProbeResult is one answer of the capture probe: the verdict and
+// its reason for the page, and, when a read failed, its cause for the log
+// only (scrubbed of both DSNs).
+type captureProbeResult struct {
+	verdict, detail, cause string
 }
 
 // probeCapture is a package variable for the reason readIndexMark is: it
@@ -141,9 +128,9 @@ var probeCapture = probeCaptureFromDBs
 // then answers slowly would otherwise hold a page for several of them. The
 // probe keeps running in the background after that, until those same
 // bounds end it; its answer is then dropped.
-func probeCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string) (verdict, detail string) {
-	return boundedCaptureProbe(ctx, windowProbeTimeout, func(ctx context.Context) (string, string) {
-		return captureFromDBs(ctx, indexDSN, sourceDSN)
+func probeCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor time.Time) captureProbeResult {
+	return boundedCaptureProbe(ctx, windowProbeTimeout, func(ctx context.Context) captureProbeResult {
+		return captureFromDBs(ctx, indexDSN, sourceDSN, anchor)
 	})
 }
 
@@ -151,68 +138,116 @@ func probeCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string) (verdi
 // context is cancelled here, after the wait, never by the probe's goroutine:
 // cancelled there, an answer sent in time and the expired context would be
 // ready together, and the select below may take either.
-func boundedCaptureProbe(ctx context.Context, within time.Duration, probe func(context.Context) (string, string)) (verdict, detail string) {
+func boundedCaptureProbe(ctx context.Context, within time.Duration, probe func(context.Context) captureProbeResult) captureProbeResult {
 	ctx, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
-	type answer struct{ verdict, detail string }
-	done := make(chan answer, 1) // buffered: a late answer must not block the goroutine that sends it
-	go func() {
-		v, d := probe(ctx)
-		done <- answer{v, d}
-	}()
+	done := make(chan captureProbeResult, 1) // buffered: a late answer must not block the goroutine that sends it
+	go func() { done <- probe(ctx) }()
 	select {
-	case a := <-done:
-		return a.verdict, a.detail
+	case r := <-done:
+		return r
 	case <-ctx.Done():
-		return "", "the probe did not finish in time"
+		return captureProbeResult{detail: "the probe did not finish in time", cause: "timed out after " + within.String()}
 	}
 }
 
-// captureFromDBs reads the capture's checkpoint from the index, then, only
-// when there is one, where the source's binary log is now, and compares
-// them. Unknown on any failure: the caller keeps the full backup. Each
-// connection is bounded like the window probe (windowProbeTimeout, dial and
-// reads); the source's reads go through config's helpers, which take no
-// context, so its DSN carries the read timeout too.
-func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string) (verdict, detail string) {
+// captureFromDBs reads the capture's stream_state from the index
+// (status.LoadStreamState, which tolerates an index older than its newer
+// columns) and, only when it is comparable, the source's executed GTID set,
+// and compares them. Unknown on any failure: the caller keeps the full
+// backup. Each connection is bounded like the window probe
+// (windowProbeTimeout, dial and reads), and its queries by ctx.
+func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor time.Time) captureProbeResult {
+	fail := func(detail string, err error) captureProbeResult {
+		return captureProbeResult{detail: detail, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
+	}
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
-		return "", "the index did not answer"
+		return fail("the index did not answer", err)
 	}
 	defer idx.Close()
-	cp, known := readCaptureCheckpoint(ctx, idx)
-	if !known {
-		return "", "the capture's checkpoint could not be read"
+	st, err := status.LoadStreamState(ctx, idx)
+	if err != nil {
+		return fail("the capture's checkpoint could not be read", err)
 	}
-	if !cp.present {
-		return compareCapture(cp, sourceHead{})
+	// No connection to production for a verdict the index already settles.
+	if ok, detail := captureComparable(st, anchor); !ok {
+		return captureProbeResult{detail: detail}
 	}
 	src, err := config.Connect(sourceProbeDSN(sourceDSN))
 	if err != nil {
-		// Never the error text on the page: it can carry the host, and the
-		// Debug line is enough to diagnose.
-		slog.Debug("backup schedule: the source did not answer the capture probe", "error", err)
-		return "", "the source did not answer"
+		return fail("the source did not answer", err)
 	}
 	defer src.Close()
-	var head sourceHead
-	if cp.mode == "gtid" {
-		head.gtid, err = config.CurrentGTIDExecuted(src)
-	} else {
-		var pos uint32
-		head.file, pos, err = config.CurrentBinlogPosition(src)
-		head.pos = uint64(pos)
-	}
+	// An index on the source server writes its own checkpoints there: each
+	// one is a transaction the capture can only record at the next
+	// checkpoint, so the two sets are never equal, and "behind" would be
+	// said about a healthy capture forever.
+	same, err := sameServer(ctx, idx, src)
 	if err != nil {
-		slog.Debug("backup schedule: the source did not report its binlog position", "error", err)
-		return "", "the source did not report where its binlog is"
+		return fail("the index and the source could not be told apart", err)
 	}
-	return compareCapture(cp, head)
+	if same {
+		return captureProbeResult{detail: "the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture"}
+	}
+	executed, err := readExecutedGTIDs(ctx, src)
+	if err != nil {
+		return fail("the source did not report its GTID set", err)
+	}
+	verdict, detail := compareGTIDSets(st.GTIDSet.String, executed)
+	return captureProbeResult{verdict: verdict, detail: detail}
 }
 
-// sourceProbeDSN is probeDSN plus read and write timeouts: config's source
-// helpers run their queries without a context, so the connection itself has
-// to bound them. A DSN that does not parse is handed on as is.
+// readExecutedGTIDs is the source's @@GLOBAL.gtid_executed with its
+// whitespace removed, or "" when GTIDs are not fully on (or the server has no
+// gtid_mode at all, MariaDB's 1193): config.CurrentGTIDExecuted's answer, read
+// here instead because that helper is the stream's start-position discovery.
+// It warns about starting in position mode on an empty set, which is not
+// this probe's news, and it takes no context.
+func readExecutedGTIDs(ctx context.Context, db *sql.DB) (string, error) {
+	var gtidMode, executed string
+	err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed").Scan(&gtidMode, &executed)
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 { // ER_UNKNOWN_SYSTEM_VARIABLE
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(gtidMode, "ON") {
+		return "", nil
+	}
+	return strings.Join(strings.Fields(executed), ""), nil
+}
+
+// sameServer reports whether a and b are the same MySQL server, by
+// @@server_uuid. A server without one (MariaDB, 1193) is never "the same":
+// this check only guards the GTID comparison, which MariaDB never reaches.
+func sameServer(ctx context.Context, a, b *sql.DB) (bool, error) {
+	ua, err := serverUUID(ctx, a)
+	if err != nil {
+		return false, err
+	}
+	ub, err := serverUUID(ctx, b)
+	if err != nil {
+		return false, err
+	}
+	return ua != "" && strings.EqualFold(ua, ub), nil
+}
+
+func serverUUID(ctx context.Context, db *sql.DB) (string, error) {
+	var uuid string
+	err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.server_uuid").Scan(&uuid)
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 { // ER_UNKNOWN_SYSTEM_VARIABLE
+		return "", nil
+	}
+	return uuid, err
+}
+
+// sourceProbeDSN is probeDSN plus read and write timeouts: config.Connect's
+// ping runs without the probe's context, so the connection itself bounds it
+// alongside the dial. A DSN that does not parse is handed on as is.
 func sourceProbeDSN(dsn string) string {
 	cfg, err := mysql.ParseDSN(probeDSN(dsn))
 	if err != nil {

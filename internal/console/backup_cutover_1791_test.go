@@ -44,13 +44,12 @@ func TestCutoverToFull_nothingIndexedAndTheSourceConfirmsIt(t *testing.T) {
 	}
 	// The reasons talk about the capture, not about a rate nobody needs to
 	// fold nothing.
+	// Behind says it once: the detail would only repeat it.
 	w := quiet(0, CaptureBehind)
-	w.CaptureDetail = "the capture's GTID set does not contain the source's"
+	w.CaptureDetail = "the source reports transactions the capture's checkpoint does not include"
 	why := CutoverToFull(w, 5*time.Minute, now)
-	for _, want := range []string{"it is 5h 30m old and the cut-over is 2h; nothing new was indexed since it, but the source has written past what the capture has recorded, so the capture may have stopped or fallen behind (the capture's GTID set does not contain the source's)"} {
-		if !strings.Contains(why, want) {
-			t.Errorf("behind reason %q lacks %q", why, want)
-		}
+	if want := "it is 5h 30m old and the cut-over is 2h; nothing new was indexed since it, but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"; !strings.HasSuffix(why, want) {
+		t.Errorf("behind reason %q, want it to end %q", why, want)
 	}
 	w = quiet(0, "")
 	w.CaptureDetail = "the source did not answer"

@@ -536,11 +536,12 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 		// The rate is beside the point with nothing to fold; what is in
 		// question is whether "nothing" is true. Said as that.
 		what := "and whether the source changed could not be checked"
-		if w.Capture == CaptureBehind {
-			what = "but the source has written past what the capture has recorded, so the capture may have stopped or fallen behind"
-		}
 		if w.CaptureDetail != "" {
 			what += " (" + w.CaptureDetail + ")"
+		}
+		if w.Capture == CaptureBehind {
+			// The detail would only repeat this.
+			what = "but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"
 		}
 		return fmt.Sprintf("%s: it is %s old and the cut-over is %s; nothing new was indexed since it, %s",
 			BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)), what)
