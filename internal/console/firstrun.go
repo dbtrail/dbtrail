@@ -4,11 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // First-run step states (#1606). Waiting is a step that has not started, which
@@ -28,8 +33,17 @@ type FirstRunStep struct {
 	Fix    string `json:"fix,omitempty"`
 }
 
-// FirstRunReport is GET /api/servers/{id}/first-run. Complete: the server has
-// indexed a change, and the list is no longer shown.
+// FirstRunReport is GET /api/servers/{id}/first-run. Complete: the list is no
+// longer shown, which is when a SNAPSHOT exists for the server and no capture
+// step has failed (#1801). The list used to end at the first captured change
+// and take its backup step with it, so from then on nothing on the Overview
+// mentioned backups.
+//
+// A captured change is deliberately NOT required: seeing your first change is
+// a step someone may skip, because nobody can be made to write to production
+// to get on, so a person who takes the snapshot instead has finished. The
+// backup step's own state is what says a snapshot exists, and a failure on
+// either side keeps the list up.
 type FirstRunReport struct {
 	Complete   bool           `json:"complete"`
 	Steps      []FirstRunStep `json:"steps"`
@@ -62,6 +76,14 @@ type firstRunInput struct {
 	// that needs none.
 	BackupOff        bool
 	BackupNoLocation bool
+	// SnapshotExists: a complete snapshot sits in one of the server's own
+	// backup locations, whoever made it (this process, one before a restart,
+	// the command line). The backup job's own state forgets a snapshot the
+	// moment the daemon restarts, so the list reads the locations too.
+	// SnapshotCheckError is why they could not be read; it is never taken to
+	// mean "no snapshot".
+	SnapshotExists     bool
+	SnapshotCheckError string
 }
 
 // firstRunSteps computes the list. Each capture step is done from evidence: the
@@ -136,21 +158,85 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 		}
 		rep.Steps = append(rep.Steps, step)
 	}
-	if b := in.Backup; b != nil {
-		step := FirstRunStep{Name: "Take the first backup", State: firstRunWaiting, Fix: "Create one on the " + PageSnapshots + " page."}
-		switch {
-		case b.Published || b.State == "succeeded":
-			step.State, step.Fix = firstRunDone, ""
-		case b.State == "running":
-			step.State, step.Fix = firstRunRunning, ""
-		case b.State == "failed":
-			step.State, step.Detail, step.Fix = firstRunFailed, b.LastError, "Try again on the "+PageSnapshots+" page."
-		}
-		rep.Steps = append(rep.Steps, step)
-	} else if step, ok := blockedBackupStep(in); ok {
-		rep.Steps = append(rep.Steps, step)
+	step, ok := backupStep(in)
+	if !ok {
+		// No backup step to wait for (a PostgreSQL server with no slot or
+		// publication, which cannot capture either): the older rule stands,
+		// the first indexed change.
+		return rep
 	}
+	rep.Steps = append(rep.Steps, step)
+	// A backup ends the list, whatever the capture steps are still doing: the
+	// step that can be left over, seeing the first change, is not one anybody
+	// can make happen. The one thing that keeps it up is a backup step that
+	// FAILED, which is not a done one, so an older snapshot cannot hide last
+	// night's failure.
+	//
+	// A capture step that failed does NOT keep it up, deliberately. This is a
+	// strip of setup steps, not a health indicator: the Overview says on its
+	// own when it has stopped updating, which is where a dead stream belongs,
+	// and a rule that held the strip open for one would bring a finished
+	// person's setup checklist back days after they watched it go. Capture
+	// failing BEFORE any backup exists still keeps the strip, by this same
+	// line, with no exception needed.
+	rep.Complete = step.State == firstRunDone
 	return rep
+}
+
+// backupStep is the list's last step, or false when the list has none.
+func backupStep(in firstRunInput) (FirstRunStep, bool) {
+	b := in.Backup
+	if b == nil {
+		step, ok := blockedBackupStep(in)
+		if ok && in.SnapshotExists {
+			// Backups are off here, or the server has no job of its own, and
+			// a snapshot exists anyway (the command line, an earlier setup):
+			// nothing is owed.
+			return FirstRunStep{Name: step.Name, State: firstRunDone}, true
+		}
+		if ok {
+			step.Detail = withCheckError(step.Detail, in.SnapshotCheckError)
+		}
+		return step, ok
+	}
+	step := FirstRunStep{Name: backupStepName, State: firstRunWaiting, Fix: "Create one on the " + PageSnapshots + " page."}
+	// This run's own outcome is read BEFORE an older snapshot. A backup that
+	// failed last night on a server backed up last week would otherwise read
+	// as done, and the list would take the error and its fix away with it.
+	// A run that published and only failed to send its copy on (#1725) did
+	// produce a backup, so it stays ahead of both.
+	switch {
+	case b.Published || b.State == "succeeded":
+		step.State, step.Fix = firstRunDone, ""
+	case b.State == "failed":
+		step.State, step.Detail, step.Fix = firstRunFailed, withCheckError(b.LastError, in.SnapshotCheckError), "Try again on the "+PageSnapshots+" page."
+	case b.State == "running":
+		step.State, step.Detail, step.Fix = firstRunRunning, withCheckError("", in.SnapshotCheckError), ""
+	case in.SnapshotExists:
+		step.State, step.Fix = firstRunDone, ""
+	default:
+		step.Detail = withCheckError("", in.SnapshotCheckError)
+	}
+	return step, true
+}
+
+// backupStepName is the last step's name, in one place: firstRunBackupIsNext
+// finds the step by it.
+const backupStepName = "Take the first backup"
+
+// withCheckError adds why the backup locations could not be read to a step's
+// detail. The step stays up and says so: an unreadable location is not a
+// location with no snapshot, and one that cannot be read is worth knowing
+// about before a restore needs it.
+func withCheckError(detail, checkErr string) string {
+	if checkErr == "" {
+		return detail
+	}
+	note := "Could not check for an existing backup: " + checkErr
+	if detail == "" {
+		return note
+	}
+	return detail + " " + note
 }
 
 // blockedBackupStep is the backup step for a server whose first backup the
@@ -158,10 +244,10 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 // setting is named as the Snapshots page labels it, never as a
 // variable. mydumper is named for every source but PostgreSQL (MySQL and
 // MariaDB): a PostgreSQL full backup runs inside DBTrail. The step can never
-// be done while backups are off, which is why Complete reads only the
-// capture steps.
+// be done from here while backups are off; it is done when a snapshot exists
+// anyway (backupStep), and until then the list stays up with it (#1801).
 func blockedBackupStep(in firstRunInput) (FirstRunStep, bool) {
-	step := FirstRunStep{Name: "Take the first backup", State: firstRunWaiting}
+	step := FirstRunStep{Name: backupStepName, State: firstRunWaiting}
 	switch {
 	case in.BackupOff:
 		step.Detail = "Creating full backups from the console is turned off. Restoring a whole table to a past moment needs a full backup."
@@ -277,5 +363,125 @@ func (s *Server) handleFirstRun(w http.ResponseWriter, r *http.Request) {
 	case !hasOwnBackupLocation(e):
 		in.BackupNoLocation = true
 	}
+	s.checkOwnSnapshot(r.Context(), e, &in)
 	writeJSON(w, http.StatusOK, firstRunSteps(in))
+}
+
+// snapshotCheckTTL is how long one answer about a server's own backup
+// locations is reused.
+//
+// A snapshot ends this list whatever the capture steps are doing, so the
+// locations have to be read while the list shows — and it is polled every few
+// seconds, while each answer costs a read of every location the server names,
+// which for an S3 one is a listing over the network. Reusing the answer for a
+// minute keeps that to one listing a minute per server instead of one every
+// three seconds. What it costs: a backup that appears from somewhere this
+// process cannot see (the schedule, the command line, another tab) is noticed
+// up to a minute late. A backup this process took is noticed at once, because
+// the job's own state answers before any location is read.
+const snapshotCheckTTL = time.Minute
+
+// snapshotCheck is one memoized answer: whether a location held a complete
+// snapshot, or why that could not be told. It carries the locations it was
+// read from, so an edited server is read again rather than answered from the
+// place it no longer uses. Keyed by the server alone, so an edit REPLACES the
+// answer instead of leaving the old one behind for the life of the process.
+type snapshotCheck struct {
+	dir   string
+	s3    string
+	found bool
+	err   string
+	at    time.Time
+}
+
+// checkOwnSnapshot fills in whether one of the server's own backup locations
+// holds a complete snapshot (#1801). Only its own: a backup made from here
+// writes nowhere else (hasOwnBackupLocation), and a daemon-wide location can
+// hold another server's snapshots. It answers without reading anything where
+// reading cannot help: an index that could not be read claims no step, a
+// PostgreSQL server with no slot lists no backup step, and a backup this
+// process published already says one exists. Everything else is read at most
+// once per snapshotCheckTTL, and each location is asked for its newest
+// snapshot only.
+func (s *Server) checkOwnSnapshot(ctx context.Context, e ServerEntry, in *firstRunInput) {
+	if in.CheckError != "" || pgSourceIncomplete(e) || (in.Backup != nil && (in.Backup.Published || in.Backup.State == "succeeded")) {
+		return
+	}
+	if c, ok := s.cachedSnapshotCheck(e); ok {
+		in.SnapshotExists, in.SnapshotCheckError = c.found, c.err
+		return
+	}
+	list := s.snapshotLister
+	if list == nil {
+		list = hasCompleteSnapshot
+	}
+	var errs []string
+	for _, src := range []string{e.BaselineDir, e.BaselineS3} {
+		if src == "" {
+			continue
+		}
+		ok, err := list(ctx, src)
+		if ok {
+			in.SnapshotExists, in.SnapshotCheckError = true, ""
+			s.storeSnapshotCheck(e, snapshotCheck{found: true})
+			return
+		}
+		if err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	in.SnapshotCheckError = strings.Join(errs, "; ")
+	s.storeSnapshotCheck(e, snapshotCheck{err: in.SnapshotCheckError})
+}
+
+// snapshotNowOr is the cache's clock (a test fixes it).
+func (s *Server) snapshotNowOr() time.Time {
+	if s.snapshotNow != nil {
+		return s.snapshotNow()
+	}
+	return time.Now()
+}
+
+func (s *Server) cachedSnapshotCheck(e ServerEntry) (snapshotCheck, bool) {
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+	c, ok := s.snapshotChecks[e.ID]
+	if !ok || c.dir != e.BaselineDir || c.s3 != e.BaselineS3 {
+		return snapshotCheck{}, false
+	}
+	if s.snapshotNowOr().Sub(c.at) >= snapshotCheckTTL {
+		return snapshotCheck{}, false
+	}
+	return c, true
+}
+
+func (s *Server) storeSnapshotCheck(e ServerEntry, c snapshotCheck) {
+	c.dir, c.s3, c.at = e.BaselineDir, e.BaselineS3, s.snapshotNowOr()
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+	if s.snapshotChecks == nil {
+		s.snapshotChecks = map[string]snapshotCheck{}
+	}
+	s.snapshotChecks[e.ID] = c
+}
+
+// hasCompleteSnapshot reports whether a backup location holds a complete
+// snapshot. A local folder that does not exist yet holds none, which is not
+// an error: the first backup creates it. A listing that found nothing but had
+// to skip folders it could not read has no answer, and says so.
+func hasCompleteSnapshot(ctx context.Context, source string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, baselineListTimeout)
+	defer cancel()
+	files, skipped, _, err := reconstruct.ListBaselinesNewestReport(ctx, source, 1)
+	switch {
+	case err != nil && baselineKindOf(source) == "dir" && errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, err
+	case len(files) > 0:
+		return true, nil
+	case skipped > 0:
+		return false, fmt.Errorf("%s: %d snapshot folder(s) could not be read", source, skipped)
+	}
+	return false, nil
 }

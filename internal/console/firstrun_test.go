@@ -1,17 +1,24 @@
 package console
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestFirstRunSteps is #1606: the first-run step list says, in order, what
 // has been done and what is happening now, from the supervisor's state and
 // what the server's own index database holds. A step that has not started is
 // waiting, never failed; a failure lands on the first step not done and says
-// what to do; the list is complete once one change is indexed.
+// what to do. None of these cases lists a backup step, so each is complete
+// once one change is indexed; the backup step's rule (#1801) is
+// TestFirstRunStaysUntilASnapshotExists.
 func TestFirstRunSteps(t *testing.T) {
 	type want struct {
 		states   string // one letter per step: w waiting, r running, d done, f failed
@@ -164,21 +171,151 @@ func TestFirstRunBackupStep(t *testing.T) {
 			}
 		})
 	}
-	// Backups off is the bare default, and its step can never be done: the
-	// list must still complete on the first captured change, or the card
-	// would sit on every such Overview for good, polling.
-	t.Run("a backup step that cannot be done does not hold the list open", func(t *testing.T) {
-		in := base
-		in.EventsIndexed, in.BackupOff = 1, true
-		got := firstRunSteps(in)
-		var states strings.Builder
-		for _, s := range got.Steps {
-			states.WriteByte(s.State[0])
-		}
-		if states.String() != "dddddw" || !got.Complete {
-			t.Fatalf("states = %s, complete = %v, want dddddw and complete", states.String(), got.Complete)
-		}
-	})
+}
+
+// TestFirstRunStaysUntilASnapshotExists is #1801. The list used to end at the
+// first captured change and took its backup step with it, so from then on
+// nothing on the Overview mentioned backups. It ends when a SNAPSHOT exists
+// for the server, which is the ratified rule ("la tira de pasos no desaparece
+// hasta que exista un snapshot"), and a captured change is not required: the
+// first-change step is skippable on purpose, because nobody can be made to
+// touch production to get on. A capture step that failed still keeps the list
+// up, and so does a backup step that failed. A server that lists no backup
+// step (a PostgreSQL server with no slot or publication) keeps the old rule,
+// its first indexed change.
+//
+// This amends a #1677 subtest, "a backup step that cannot be done does not
+// hold the list open", which ended the list at the first change with backups
+// off because the card would otherwise "sit on every such Overview for good,
+// polling". Staying is now the point (a missing snapshot stays named until it
+// exists), and the polling cost moved: the Overview keeps itself current on
+// its own, so the list no longer has to end for the page to show new changes.
+func TestFirstRunStaysUntilASnapshotExists(t *testing.T) {
+	yes := true
+	running := firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true}
+	failed := firstRunInput{Monitor: MonitorStatus{State: "failed", LastError: "binlog not found"}, IndexExists: &yes, SnapshotTaken: true}
+	with := func(in firstRunInput, f func(*firstRunInput)) firstRunInput { f(&in); return in }
+	cases := []struct {
+		name     string
+		in       firstRunInput
+		states   string
+		complete bool
+		detail   string // substring of the backup step's detail
+	}{
+		{"a first change with no snapshot keeps the list",
+			with(running, func(in *firstRunInput) { in.EventsIndexed = 1; in.Backup = &BaselineStatus{State: "idle"} }),
+			"dddddw", false, ""},
+		{"backups off with a first change keeps the list, and says why",
+			with(running, func(in *firstRunInput) { in.EventsIndexed = 1; in.BackupOff = true }),
+			"dddddw", false, "turned off"},
+		{"a snapshot with no first change yet ENDS the list: seeing a change is skippable",
+			with(running, func(in *firstRunInput) { in.Backup = &BaselineStatus{State: "idle"}; in.SnapshotExists = true }),
+			"ddddrd", true, ""},
+		{"a snapshot made elsewhere counts while backups are off",
+			with(running, func(in *firstRunInput) { in.BackupOff = true; in.SnapshotExists = true }),
+			"ddddrd", true, ""},
+		{"a snapshot in the server's own location counts when it has no job of its own",
+			with(running, func(in *firstRunInput) { in.BackupNoLocation = true; in.SnapshotExists = true }),
+			"ddddrd", true, ""},
+		{"a published backup ends the list",
+			with(running, func(in *firstRunInput) {
+				in.EventsIndexed = 1
+				in.Backup = &BaselineStatus{State: "succeeded", Published: true}
+			}),
+			"dddddd", true, ""},
+		{"a capture failure with no snapshot keeps the list, by the plain rule",
+			with(failed, func(in *firstRunInput) { in.Backup = &BaselineStatus{State: "idle"} }),
+			"dddfww", false, ""},
+		{"a backup that FAILED keeps the list up, with its error, though an older snapshot exists",
+			with(running, func(in *firstRunInput) {
+				in.EventsIndexed = 1
+				in.SnapshotExists = true
+				in.Backup = &BaselineStatus{State: "failed", LastError: "no space left on device"}
+			}),
+			"dddddf", false, "no space left on device"},
+		{"a snapshot ends the list even where capture FAILED: a dead stream is not this strip's job",
+			with(failed, func(in *firstRunInput) { in.SnapshotExists = true; in.Backup = &BaselineStatus{State: "idle"} }),
+			"dddfwd", true, ""},
+		{"a backup RUNNING outranks an older snapshot, so the list follows it",
+			with(running, func(in *firstRunInput) {
+				in.EventsIndexed = 1
+				in.SnapshotExists = true
+				in.Backup = &BaselineStatus{State: "running"}
+			}),
+			"dddddr", false, ""},
+		{"a run that published and only failed to upload is still a backup",
+			with(running, func(in *firstRunInput) {
+				in.EventsIndexed = 1
+				in.Backup = &BaselineStatus{State: "failed", Published: true, LastError: "upload refused"}
+			}),
+			"dddddd", true, ""},
+		{"a backup running says the location could not be checked",
+			with(running, func(in *firstRunInput) {
+				in.EventsIndexed = 1
+				in.Backup = &BaselineStatus{State: "running"}
+				in.SnapshotCheckError = "list s3://b/p: AccessDenied"
+			}),
+			"dddddr", false, "Could not check for an existing backup: list s3://b/p: AccessDenied"},
+		{"a backup that failed says both its own error and the location it could not check",
+			with(running, func(in *firstRunInput) {
+				in.EventsIndexed = 1
+				in.Backup = &BaselineStatus{State: "failed", LastError: "mydumper not found"}
+				in.SnapshotCheckError = "read baseline directory: permission denied"
+			}),
+			"dddddf", false, "mydumper not found Could not check for an existing backup: read baseline directory: permission denied"},
+		{"a snapshot with changes and a later failure ends the list: every step is done",
+			with(failed, func(in *firstRunInput) {
+				in.EventsIndexed = 5
+				in.StreamStarted = true
+				in.SnapshotExists = true
+				in.Backup = &BaselineStatus{State: "idle"}
+			}),
+			"dddddd", true, ""},
+		{"a location that could not be read is not a no: the list stays and says so",
+			with(running, func(in *firstRunInput) {
+				in.EventsIndexed = 1
+				in.Backup = &BaselineStatus{State: "idle"}
+				in.SnapshotCheckError = "list s3://b/p: AccessDenied"
+			}),
+			"dddddw", false, "Could not check for an existing backup: list s3://b/p: AccessDenied"},
+		{"a location that could not be read, with backups off, keeps both reasons",
+			with(running, func(in *firstRunInput) {
+				in.BackupOff = true
+				in.SnapshotCheckError = "read baseline directory: permission denied"
+			}),
+			"ddddrw", false, "turned off"},
+		{"no backup step listed: the first change still ends the list",
+			with(running, func(in *firstRunInput) { in.EventsIndexed = 1 }),
+			"ddddd", true, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := firstRunSteps(c.in)
+			var states strings.Builder
+			for _, s := range got.Steps {
+				states.WriteByte(s.State[0])
+			}
+			if states.String() != c.states || got.Complete != c.complete {
+				t.Fatalf("states = %s, complete = %v, want %s and %v (%+v)", states.String(), got.Complete, c.states, c.complete, got.Steps)
+			}
+			last := got.Steps[len(got.Steps)-1]
+			if c.detail != "" && !strings.Contains(last.Detail, c.detail) {
+				t.Errorf("backup step detail = %q, want it to carry %q", last.Detail, c.detail)
+			}
+			if last.Name == "Take the first backup" && last.State == firstRunDone && (last.Detail != "" || last.Fix != "") {
+				t.Errorf("a done backup step still carries a reason or a fix: %+v", last)
+			}
+		})
+	}
+	// Both reasons at once: the check error rides along with the off reason
+	// instead of replacing it.
+	got := firstRunSteps(with(running, func(in *firstRunInput) {
+		in.BackupOff = true
+		in.SnapshotCheckError = "read baseline directory: permission denied"
+	}))
+	if d := got.Steps[len(got.Steps)-1].Detail; !strings.Contains(d, "turned off") || !strings.Contains(d, "permission denied") {
+		t.Errorf("detail = %q, want the off reason and the check error", d)
+	}
 }
 
 // TestFirstRunBackupStepSaysWhyItCannotRun is #1677: a first backup the
@@ -292,8 +429,14 @@ func TestFirstRunFixMatchesTheRetry(t *testing.T) {
 // router (#1606): which servers answer, which steps each kind of server gets,
 // and that an unreadable index answers with a scrubbed error and no steps.
 func TestHandleFirstRun(t *testing.T) {
-	srv, _ := newBaselineTriggerServer(t)
+	srv, ctrl := newBaselineTriggerServer(t)
 	srv.monitorCtrl.(*stubMonitorCtrl).status = MonitorStatus{State: "stopped"}
+	// No test here reaches a real bucket: every location is answered here.
+	var listed []string
+	srv.snapshotLister = func(_ context.Context, source string) (bool, error) {
+		listed = append(listed, source)
+		return false, nil
+	}
 	add := func(e ServerEntry) string {
 		t.Helper()
 		got, err := srv.cm.reg.Add(e)
@@ -372,12 +515,284 @@ func TestHandleFirstRun(t *testing.T) {
 		}
 	})
 	t.Run("an index that cannot be read answers with its error, scrubbed, and no steps", func(t *testing.T) {
-		id := add(ServerEntry{Name: "unreach", DSN: "idx:idxpw@tcp(127.0.0.1:1)/bintrail_idx_unreach", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/"})
+		listed = nil
+		id := add(ServerEntry{Name: "unreach", DSN: "idx:idxpw@tcp(127.0.0.1:1)/bintrail_idx_unreach", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineS3: "s3://b/unreach"})
 		code, body, rep := get(id)
 		if code != 200 || len(rep.Steps) != 0 || !strings.Contains(body, `"check_error":`) || !strings.Contains(rep.CheckError, "127.0.0.1:1") || strings.Contains(body, "idxpw") {
 			t.Fatalf("code = %d, body = %s", code, body)
 		}
+		if len(listed) != 0 {
+			t.Errorf("a report that claims no step still listed the backup location: %v", listed)
+		}
 	})
+	// The server's own locations are read even while capture has not started,
+	// because a snapshot ends this list whatever the capture steps are doing.
+	// What keeps that from costing a listing every few seconds is the
+	// per-server window (TestSnapshotCheckIsReused), not a gate here.
+	t.Run("the backup locations are read even before capture starts, and once per window", func(t *testing.T) {
+		listed = nil
+		dir := t.TempDir()
+		id := add(ServerEntry{Name: "pending", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineDir: dir, BaselineS3: "s3://b/pending"})
+		code, body, rep := get(id)
+		if code != 200 || rep.Complete {
+			t.Fatalf("code = %d, complete = %v, body = %s", code, rep.Complete, body)
+		}
+		if strings.Join(listed, ",") != dir+",s3://b/pending" {
+			t.Fatalf("read %v, want the server's own folder and bucket", listed)
+		}
+		get(id)
+		get(id)
+		if strings.Join(listed, ",") != dir+",s3://b/pending" {
+			t.Errorf("three requests in a row read %v, want one pass over the locations", listed)
+		}
+	})
+	t.Run("a backup this process published needs no listing and is done", func(t *testing.T) {
+		listed = nil
+		ctrl.status = BaselineStatus{State: "succeeded", Published: true}
+		defer func() { ctrl.status = BaselineStatus{State: "idle"} }()
+		id := add(ServerEntry{Name: "published", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineS3: "s3://b/published"})
+		_, body, rep := get(id)
+		s := rep.Steps[len(rep.Steps)-1]
+		if s.State != firstRunDone || len(listed) != 0 {
+			t.Fatalf("backup step = %+v, listed %v, body = %s", s, listed, body)
+		}
+	})
+}
+
+// TestSnapshotCheckIsReused is #1801: the Getting started list is polled
+// every few seconds while it shows, and a snapshot ends it whatever the
+// capture steps are doing, so the locations have to be read while it shows.
+// One answer is reused for a minute, which keeps an S3 location to one
+// listing a minute per server instead of one every three seconds. An edit to
+// the locations is read again rather than answered from the old place, and a
+// backup this process published is never read for at all.
+func TestSnapshotCheckIsReused(t *testing.T) {
+	srv, _ := newBaselineTriggerServer(t)
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	srv.snapshotNow = func() time.Time { return now }
+	var read []string
+	srv.snapshotLister = func(_ context.Context, src string) (bool, error) {
+		read = append(read, src)
+		return false, nil
+	}
+	e := ServerEntry{ID: "srv1", BaselineDir: "/backups/one"}
+	ask := func() firstRunInput {
+		var in firstRunInput
+		srv.checkOwnSnapshot(context.Background(), e, &in)
+		return in
+	}
+	ask()
+	ask()
+	ask()
+	if len(read) != 1 {
+		t.Fatalf("three asks within the minute read %v, want one read", read)
+	}
+	now = now.Add(snapshotCheckTTL - time.Second)
+	ask()
+	if len(read) != 1 {
+		t.Errorf("an ask just inside the window read again: %v", read)
+	}
+	now = now.Add(2 * time.Second)
+	ask()
+	if len(read) != 2 {
+		t.Errorf("an ask past the window did not read again: %v", read)
+	}
+	// A different server with the same folder is its own answer, and an edit
+	// to this server's locations is read rather than reused.
+	read = nil
+	other := ServerEntry{ID: "srv2", BaselineDir: "/backups/one"}
+	srv.checkOwnSnapshot(context.Background(), other, &firstRunInput{})
+	e.BaselineS3 = "s3://b/p"
+	ask()
+	if len(read) != 3 {
+		t.Errorf("read %v; want the other server read on its own and the edited entry read again (folder then folder+bucket)", read)
+	}
+	// One entry per server, by construction: an edited location replaces the
+	// answer rather than leaving the old one behind for the life of the
+	// process.
+	if n := len(srv.snapshotChecks); n != 2 {
+		t.Errorf("two servers left %d remembered answers, want one each: %+v", n, srv.snapshotChecks)
+	}
+	// A backup that IS there is remembered too, which is the case that costs
+	// the most: a capture step that failed keeps this list up for as long as
+	// the operator leaves the page open, and every ask would otherwise list
+	// the bucket again.
+	srv.snapshotChecks = nil
+	read = nil
+	srv.snapshotLister = func(_ context.Context, src string) (bool, error) {
+		read = append(read, src)
+		return true, nil
+	}
+	if found := ask(); !found.SnapshotExists {
+		t.Fatalf("the first ask = %+v, want a backup found", found)
+	}
+	second := ask()
+	if !second.SnapshotExists || len(read) != 1 {
+		t.Errorf("the second ask = %+v after reading %v, want the same answer from one read", second, read)
+	}
+	// The answer itself is what comes back from the cache, error and all.
+	srv.snapshotChecks = nil
+	srv.snapshotLister = func(context.Context, string) (bool, error) { return false, errors.New("AccessDenied") }
+	first := ask()
+	srv.snapshotLister = func(context.Context, string) (bool, error) { t.Error("read again inside the window"); return true, nil }
+	again := ask()
+	if first.SnapshotCheckError == "" || again.SnapshotCheckError != first.SnapshotCheckError || again.SnapshotExists {
+		t.Errorf("the reused answer is %+v, want the same refusal as %+v", again, first)
+	}
+}
+
+// TestCheckOwnSnapshot drives the server's reading of a server's OWN backup
+// locations (#1801): both are read, in order, until one holds a snapshot; an
+// error on one never hides a snapshot on the other; every error is reported
+// and none is taken for "no snapshot"; and a backup this process published
+// needs no reading at all.
+func TestCheckOwnSnapshot(t *testing.T) {
+	srv, _ := newBaselineTriggerServer(t)
+	dir := t.TempDir()
+	for _, c := range []struct {
+		name      string
+		entry     ServerEntry
+		in        firstRunInput
+		lister    func(context.Context, string) (bool, error)
+		wantRead  []string
+		wantFound bool
+		wantErr   string
+	}{
+		{"both locations, in order, when neither holds one",
+			ServerEntry{BaselineDir: dir, BaselineS3: "s3://b/p"}, firstRunInput{},
+			func(context.Context, string) (bool, error) { return false, nil },
+			[]string{dir, "s3://b/p"}, false, ""},
+		{"the folder holds one: the bucket is not read",
+			ServerEntry{BaselineDir: dir, BaselineS3: "s3://b/p"}, firstRunInput{},
+			func(_ context.Context, src string) (bool, error) { return src == dir, nil },
+			[]string{dir}, true, ""},
+		{"the bucket holds one, the folder being empty",
+			ServerEntry{BaselineDir: dir, BaselineS3: "s3://b/p"}, firstRunInput{},
+			func(_ context.Context, src string) (bool, error) { return strings.HasPrefix(src, "s3://"), nil },
+			[]string{dir, "s3://b/p"}, true, ""},
+		{"a folder that cannot be read does not hide a snapshot in the bucket",
+			ServerEntry{BaselineDir: dir, BaselineS3: "s3://b/p"}, firstRunInput{},
+			func(_ context.Context, src string) (bool, error) {
+				if strings.HasPrefix(src, "s3://") {
+					return true, nil
+				}
+				return false, errors.New("read baseline directory: permission denied")
+			},
+			[]string{dir, "s3://b/p"}, true, ""},
+		{"neither could be read: both reasons, and never a no",
+			ServerEntry{BaselineDir: dir, BaselineS3: "s3://b/p"}, firstRunInput{},
+			func(_ context.Context, src string) (bool, error) { return false, errors.New("cannot read " + src) },
+			[]string{dir, "s3://b/p"}, false, "cannot read " + dir + "; cannot read s3://b/p"},
+		{"a backup this process published: nothing is read",
+			ServerEntry{BaselineDir: dir}, firstRunInput{Backup: &BaselineStatus{State: "succeeded", Published: true}},
+			func(context.Context, string) (bool, error) { return false, nil },
+			nil, false, ""},
+		{"a run that published and failed to upload: nothing is read either",
+			ServerEntry{BaselineDir: dir}, firstRunInput{Backup: &BaselineStatus{State: "failed", Published: true}},
+			func(context.Context, string) (bool, error) { return false, nil },
+			nil, false, ""},
+		{"a backup that failed outright: the locations still answer for an older one",
+			ServerEntry{BaselineDir: dir}, firstRunInput{Backup: &BaselineStatus{State: "failed", LastError: "disk full"}},
+			func(context.Context, string) (bool, error) { return true, nil },
+			[]string{dir}, true, ""},
+		{"a PostgreSQL server with no slot lists no backup step, so nothing is read",
+			ServerEntry{Flavor: FlavorPostgres, BaselineDir: dir}, firstRunInput{},
+			func(context.Context, string) (bool, error) { return true, nil },
+			nil, false, ""},
+		{"an index that could not be read claims nothing, so nothing is read",
+			ServerEntry{BaselineDir: dir}, firstRunInput{CheckError: "Error 1045: Access denied"},
+			func(context.Context, string) (bool, error) { return true, nil },
+			nil, false, ""},
+		{"a server with no location of its own has nothing to read",
+			ServerEntry{}, firstRunInput{},
+			func(context.Context, string) (bool, error) { return true, nil },
+			nil, false, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var read []string
+			// Each case is its own question; the reuse window is
+			// TestSnapshotCheckIsReused.
+			srv.snapshotChecks = nil
+			srv.snapshotLister = func(ctx context.Context, src string) (bool, error) {
+				read = append(read, src)
+				return c.lister(ctx, src)
+			}
+			in := c.in
+			srv.checkOwnSnapshot(context.Background(), c.entry, &in)
+			if strings.Join(read, ",") != strings.Join(c.wantRead, ",") {
+				t.Errorf("read %v, want %v", read, c.wantRead)
+			}
+			if in.SnapshotExists != c.wantFound {
+				t.Errorf("SnapshotExists = %v, want %v", in.SnapshotExists, c.wantFound)
+			}
+			if in.SnapshotCheckError != c.wantErr {
+				t.Errorf("SnapshotCheckError = %q, want %q", in.SnapshotCheckError, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestHasCompleteSnapshot reads REAL folders with the real listing (#1801):
+// a complete snapshot is found, one still being written is not, a folder the
+// first backup has not created yet is "no snapshot" and not a failure to
+// check, and a snapshot whose contents cannot be read is no answer at all.
+func TestHasCompleteSnapshot(t *testing.T) {
+	snapshot := func(root, marker string) {
+		t.Helper()
+		dir := filepath.Join(root, "2026-09-22T11-52-50Z")
+		if err := os.MkdirAll(filepath.Join(dir, "shop"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{filepath.Join(dir, "shop", "orders.parquet"), filepath.Join(dir, marker)} {
+			if err := os.WriteFile(f, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	done, partial, empty := t.TempDir(), t.TempDir(), t.TempDir()
+	missing := filepath.Join(t.TempDir(), "not-created-yet")
+	locked := t.TempDir()
+	snapshot(done, "_SUCCESS")
+	snapshot(partial, "_INCOMPLETE")
+	// A snapshot whose schema folder cannot be opened: the listing skips it,
+	// finds nothing else, and that is no answer rather than a "no".
+	snapshot(locked, "_SUCCESS")
+	lockedSchema := filepath.Join(locked, "2026-09-22T11-52-50Z", "shop")
+	if err := os.Chmod(lockedSchema, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lockedSchema, 0o755) })
+	_, lockedErr := os.ReadDir(lockedSchema)
+
+	for _, c := range []struct {
+		name       string
+		dir        string
+		want       bool
+		wantErr    string
+		skipAsRoot bool
+	}{
+		{"a complete snapshot", done, true, "", false},
+		{"a snapshot still being written", partial, false, "", false},
+		{"a folder with no snapshot in it", empty, false, "", false},
+		{"a folder the first backup has not created yet", missing, false, "", false},
+		{"a snapshot whose contents cannot be read", locked, false, "could not be read", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.skipAsRoot && lockedErr == nil {
+				t.Skip("this user reads a folder with no permissions (root)")
+			}
+			got, err := hasCompleteSnapshot(context.Background(), c.dir)
+			if got != c.want {
+				t.Errorf("hasCompleteSnapshot = %v, want %v (err %v)", got, c.want, err)
+			}
+			switch {
+			case c.wantErr == "" && err != nil:
+				t.Errorf("err = %v, want none", err)
+			case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
+				t.Errorf("err = %v, want one carrying %q", err, c.wantErr)
+			}
+		})
+	}
 }
 
 // TestHandleFirstRunWithBackupsOff is #1677 through the real router: on a

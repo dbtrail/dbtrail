@@ -1572,12 +1572,11 @@ button { font-family: inherit; }
    (review reproduced it; -3 clears only white and sun). */
 .ov-ev-pk { color: var(--ink-2); }
 .ov-ev-cols { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2); text-align: right; white-space: nowrap; }
-.ov-ev-undo { height: 27px; padding: 0 9px; font-size: 11.5px; opacity: 0; transition: opacity .14s; }
+/* Undo is drawn on every row (#1801). It used to appear only under the
+   mouse (and on keyboard focus, #968), so a first look at the list showed no
+   way to undo anything. */
+.ov-ev-undo { height: 27px; padding: 0 9px; font-size: 11.5px; }
 .ov-ev-undo svg { width: 12px; height: 12px; }
-.ov-ev:hover .ov-ev-undo { opacity: 1; }
-/* Keyboard focus must reveal the hover-only Undo (#968): an invisible
-   focused button is worse than none. */
-.ov-ev-undo:focus-visible { opacity: 1; }
 
 .ov-tables { display: flex; flex-direction: column; }
 .ov-tablerow {
