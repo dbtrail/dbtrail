@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -16,9 +17,9 @@ import (
 // an UNQUOTED <placeholder>, so the database refuses the statement and the
 // reader has to choose one.
 //
-// This guard is what keeps that true. It reads the pages a reader is handed —
-// docs/*.md and README.md — and fails on SQL that creates or changes a login
-// with a quoted password, in three forms:
+// This guard is what keeps that true. It reads every page a reader is handed —
+// every markdown file in the repo, not only docs/ — and fails on SQL that
+// creates or changes a login with a quoted password, in three forms:
 //
 //   - MySQL/MariaDB: IDENTIFIED BY '...', including IDENTIFIED WITH <plugin>
 //     BY '...' and the old IDENTIFIED BY PASSWORD '<hash>';
@@ -145,26 +146,101 @@ func TestFindPublishedPasswordsReportsWhereAndWhy(t *testing.T) {
 	}
 }
 
-// publishedPages is every page a reader is handed from this repo.
-func publishedPages(t *testing.T) []string {
-	t.Helper()
+// skipDirs are trees that are not pages anyone is handed: dependencies, git
+// internals, and this repo's own worktrees, whose copies would be reported
+// under a path no reviewer can act on.
+var skipDirs = map[string]bool{"node_modules": true, ".git": true, ".claude": true, "vendor": true}
+
+// markdownPages takes the root so the skip list can be exercised against a
+// tree built for the purpose: node_modules exists in a developer's checkout
+// and in the console-e2e job, but not in a fresh worktree, so a walk hardcoded
+// to ".." can never see its own skip run.
+func markdownPages(root string) ([]string, error) {
 	var pages []string
-	err := filepath.WalkDir(filepath.Join("..", "docs"), func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && strings.HasSuffix(path, ".md") {
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".md") {
 			pages = append(pages, path)
 		}
 		return nil
 	})
+	return pages, err
+}
+
+// publishedPages is every page a reader is handed from this repo: every
+// markdown file, not only docs/. A first version of this walk read docs/ and
+// the root README, and missed deploy/README.md, which walks a reader through
+// setting up RDS and creates two accounts with quoted placeholders.
+func publishedPages(t *testing.T) []string {
+	t.Helper()
+	pages, err := markdownPages("..")
 	if err != nil {
-		t.Fatalf("walking docs/: %v", err)
+		t.Fatalf("walking the repo: %v", err)
 	}
-	if len(pages) < 10 {
-		t.Fatalf("found only %d pages under docs/; the walk is looking in the wrong place", len(pages))
+	if len(pages) < 30 {
+		t.Fatalf("found only %d markdown pages; the walk is looking in the wrong place", len(pages))
 	}
-	return append(pages, filepath.Join("..", "README.md"))
+	return pages
+}
+
+func TestMarkdownPagesSkipsDependenciesAndInternals(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range []string{
+		"page.md", "sub/deeper.md", "notes.txt",
+		"node_modules/dep/readme.md", ".git/hooks/x.md", ".claude/worktrees/w/docs/a.md", "vendor/v/readme.md",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Every skipped file carries the offending text, so a skip that does
+		// not skip is caught by the rule as well as by the list.
+		if err := os.WriteFile(full, []byte("CREATE USER 'd'@'%' IDENTIFIED BY 'p';\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pages, err := markdownPages(root)
+	if err != nil {
+		t.Fatalf("markdownPages: %v", err)
+	}
+	var got []string
+	for _, p := range pages {
+		rel, _ := filepath.Rel(root, p)
+		got = append(got, filepath.ToSlash(rel))
+	}
+	slices.Sort(got)
+	if want := []string{"page.md", "sub/deeper.md"}; !slices.Equal(got, want) {
+		t.Errorf("markdownPages = %v, want %v", got, want)
+	}
+}
+
+// The corpus is the guard's reach, and a clean corpus cannot pin it: once the
+// pages below are fixed, narrowing the walk back to docs/ breaks nothing and
+// fails nothing. So the reach is pinned by name.
+func TestPublishedPagesReachOutsideDocs(t *testing.T) {
+	pages := publishedPages(t)
+	seen := make(map[string]bool, len(pages))
+	for _, p := range pages {
+		seen[filepath.ToSlash(p)] = true
+		if strings.Contains(p, "node_modules") {
+			t.Errorf("%s is a dependency's page, not one of ours", p)
+		}
+	}
+	// deploy/README.md is the one that was missed: it walks a reader through
+	// setting up RDS and creates two accounts.
+	for _, want := range []string{"../README.md", "../deploy/README.md", "../docs/quickstart.md", "../.github/CONTRIBUTING.md"} {
+		if !seen[want] {
+			t.Errorf("the walk does not reach %s; it must cover every page, not only docs/", want)
+		}
+	}
 }
 
 func TestPublishedPagesHandNoRunnablePassword(t *testing.T) {
