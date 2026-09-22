@@ -4568,9 +4568,16 @@ try {
     ? ok("backup-settings: the location drawing shows the three cases and marks each server's own as the API reports it")
     : bad("backup-settings: the location drawing shows the three cases and marks each server's own as the API reports it",
         JSON.stringify({ legend: bks.legend, api: apiSources, current: bks.current }));
-  (bks.moreLinks.length >= 3 && bks.moreLinks.every((h) => h.startsWith("https://www.dbtrail.com/docs/guides/")))
-    ? ok("backup-settings: the compact blocks link into the docs guides")
-    : bad("backup-settings: the compact blocks link into the docs guides", JSON.stringify(bks.moreLinks));
+  // Each compact block links to a page the Docs table carries, the table
+  // the daily network check proves the site serves (#1645). Read from the
+  // page, not typed here: a folder prefix typed here went stale the day the
+  // settings page moved out of guides/.
+  const [docsBase, docsSlugs] = await page.evaluate(() => [DOCS_BASE, Object.values(DOCS_PAGES)]);
+  const onTablePage = (h) => h.startsWith(docsBase)
+    && docsSlugs.includes(h.slice(docsBase.length).replace(/#.*$/, "").replace(/\/$/, ""));
+  (bks.moreLinks.length >= 3 && bks.moreLinks.every(onTablePage))
+    ? ok("backup-settings: the compact blocks link into pages the Docs table carries")
+    : bad("backup-settings: the compact blocks link into pages the Docs table carries", JSON.stringify({ links: bks.moreLinks, pages: docsSlugs }));
   // The states this harness never puts on screen, rendered DETACHED through
   // the real functions (#1603): the switch drawn ON (three kept, two written,
   // the kept swatch in the key) and OFF (five written, no kept swatch), a

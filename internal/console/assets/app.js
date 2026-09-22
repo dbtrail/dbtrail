@@ -92,7 +92,8 @@ const ROUTES = ["overview", "events", "schema-changes", "timetravel", "recover",
 // serve those, and it answers HTTP 200 with a small shell for ANY /docs/
 // path, so neither a repo file nor a status code proves a link resolves.
 // assets_docs_links_test.go pins this table exactly and, with
-// BINTRAIL_CHECK_DOCS_LINKS=1, fetches each page and checks its title.
+// BINTRAIL_CHECK_DOCS_LINKS=1 (and a daily workflow), fetches each page and
+// requires its identity tag naming that slug, refusing redirects (#1645).
 // pageHead renders one plain link beside the title. Nothing here fetches:
 // air-gapped consoles are a first-class deployment, and a link is inert
 // offline. A view without a page of its own gets NO link on purpose
