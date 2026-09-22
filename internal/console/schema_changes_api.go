@@ -109,7 +109,8 @@ type schemaChangesResponse struct {
 // Scoping notices, worded for the person reading the list.
 const (
 	schemaChangesScopeWarning = "Your access policy limits which tables you can read, so DDL recorded for other " +
-		"tables is not listed here. A DROP or RENAME that names several tables is listed under each of them."
+		"tables is not listed here. A DROP or RENAME that names several tables is listed under each of them " +
+		"(one recorded by an older version, under its first table only)."
 	schemaChangesWithheldWarning = "Statement text is withheld while an access profile is active, because DDL text " +
 		"can carry values and name other tables. Time, table, type and binlog position are shown."
 )

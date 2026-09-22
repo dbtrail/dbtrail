@@ -324,7 +324,8 @@ func NewServer(cfg Config) *mcp.Server {
 			"Returns the DDL statement, binlog coordinates, timestamp, and the " +
 			"covering snapshot_id (null = no schema snapshot was taken after the DDL) " +
 			"for each change; set uncovered_only to list just the changes without a snapshot. " +
-			"A DROP or RENAME naming several tables is one change per table: the statement's text is on the first table's, the others point to it." +
+			"A DROP or RENAME naming several tables is one change per table: the statement's text is on the first table's, the others point to it " +
+			"(one recorded by an older version has only its first table's)." +
 			" Results come back newest first; changes inside the same second are ordered by binlog file, then position. " +
 			"In an index fed by more than one source, or by a Postgres source (whose LSN file names are not zero-padded), " +
 			"same-second changes have a repeatable order, not their true one.",

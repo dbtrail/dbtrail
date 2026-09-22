@@ -94,7 +94,7 @@ Key fields:
 | Field | Description |
 |---|---|
 | `ddl_type` | One of `ALTER TABLE`, `CREATE TABLE`, `CREATE OR REPLACE TABLE`, `DROP TABLE`, `RENAME TABLE`, `TRUNCATE TABLE` |
-| `ddl_query` | The DDL statement from the binlog. For a `DROP` or `RENAME` that names several tables, it is on the first table's row (cut at 64 KiB, past which it is only more names); the other tables' rows say which row carries it |
+| `ddl_query` | The DDL statement from the binlog. For a `DROP` or `RENAME` that names several tables, it is on the first table's row, and the other tables' rows say which row carries it. A `DROP` or `RENAME` longer than the column's 65,535 bytes is cut to fit (past that it is only more names, each with its own row) |
 | `snapshot_id` | The snapshot taken after this DDL. NULL when none was taken: file mode without `--source-dsn`, a failed auto-snapshot, or `TRUNCATE TABLE` (which changes no table structure, so no snapshot is needed — by design, in every mode) |
 
 A `DROP TABLE` or `RENAME TABLE` that names several tables records one row per table, all at the statement's own position: every table a `DROP` names, and both sides of every rename pair (the old name stops holding its rows, the new one starts holding another table's). That is what lets the destructive-DDL checks, which look one table up at a time, see a table that was not named first. `bintrail status` and `list_schema_changes` count these rows, so a `DROP` of three tables is three schema changes.
