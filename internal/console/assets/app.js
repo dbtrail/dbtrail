@@ -406,7 +406,9 @@ function clearAuthState() {
   capsCache = {};
   capsKnown = false;
   routeArrivedFrom = "";
+  vfyEpoch++;
   vfyLive.clear();
+  vfyFollowing.clear();
   vfyAnnounce.clear();
   vfyView = null;
   applyAuthGate();
@@ -7582,10 +7584,17 @@ const VFY_MODE_HELP = {
 //                the operator is on.
 // Sign-out clears them (clearAuthState): a status can list tables the next
 // session's profile withholds, and the server refuses that session the read.
+// It also bumps vfyEpoch, and every answer is checked against the epoch its
+// request was sent in: a status that was in flight when one session signed
+// out lands after the clear, and without the check it would write that
+// session's run back for the next one to see. vfyFollowing maps a server to
+// its loop's token, so an old session's loop ending cannot unmark the new
+// session's loop for the same server.
 const vfyLive = new Map();
-const vfyFollowing = new Set();
+const vfyFollowing = new Map();
 const vfyAnnounce = new Set();
 let vfyView = null;
+let vfyEpoch = 0;
 
 // vfyDraw draws a server's state into a view: the box, and the button busy
 // while a run goes or back to what the chosen mode allows.
@@ -7623,19 +7632,22 @@ function vfyShow(id, opts) {
 // finished run and start a second loop. A 403 means the server will not show
 // this session the status, so the page drops what it holds too.
 async function vfyProbe(id) {
-  const before = vfyLive.get(id);
+  const before = vfyLive.get(id), epoch = vfyEpoch;
   let st;
   try {
     st = (await api("/api/servers/" + encodeURIComponent(id) + "/verify")).verify;
   } catch (err) {
+    if (vfyEpoch !== epoch) return;
     if (err && err.status === 403) {
       if (vfyLive.get(id) === before && before) { vfyLive.delete(id); vfyShow(id); }
       return;
     }
-    if (!(err && err.status === 404)) console.warn("could not read the verification status", err);
+    // 404: the server is gone. 409: the command-line server, which monitor
+    // verbs do not apply to. Neither is a failure to report.
+    if (!(err && (err.status === 404 || err.status === 409))) console.warn("could not read the verification status", err);
     return;
   }
-  if (!st || vfyLive.get(id) !== before) return;
+  if (vfyEpoch !== epoch || !st || vfyLive.get(id) !== before) return;
   if (st.state === "running") {
     vfyLive.set(id, st);
     vfyShow(id);
@@ -7657,13 +7669,17 @@ async function vfyProbe(id) {
 // that moment, and the ending (highlight, history, message) happens once.
 async function followVerify(id) {
   if (vfyFollowing.has(id)) return;
-  vfyFollowing.add(id);
+  const epoch = vfyEpoch, token = {};
+  const alive = () => vfyEpoch === epoch;
+  vfyFollowing.set(id, token);
   let done;
   try {
-    done = await pollVerify(id, (st) => { vfyLive.set(id, st); vfyShow(id); });
+    done = await pollVerify(id, (st) => { if (alive()) { vfyLive.set(id, st); vfyShow(id); } }, alive);
   } finally {
-    vfyFollowing.delete(id);
+    if (vfyFollowing.get(id) === token) vfyFollowing.delete(id);
   }
+  // Signed out meanwhile: this run belongs to the previous session.
+  if (!alive()) return;
   // The poll gives up after ~20 minutes. While the page shows this server,
   // follow on, or the box would freeze on RUNNING with the button disabled
   // after the run ends; off screen, stop, and the next paint's probe picks
@@ -7690,25 +7706,35 @@ async function followVerify(id) {
 // engine has no progress callback, so the console's own poll loop is the only
 // source of incremental updates.
 async function createVerify(id, mode) {
-  const view = vfyView;
+  const view = vfyView, epoch = vfyEpoch;
   if (view && view.id === id) { view.btn.disabled = true; view.btn.textContent = "Running…"; }
   let status;
   try {
     status = (await api("/api/servers/" + encodeURIComponent(id) + "/verify", { method: "POST", body: { mode } })).verify;
   } catch (err) {
+    if (vfyEpoch !== epoch) return;
+    // A 409 is a run already going (the schedule started one, or a second
+    // click) OR a server this page cannot run checks on (the command-line
+    // server refuses monitor verbs with its own reason). Ask which before
+    // saying anything.
     if (err && err.status === 409) {
-      // A run is already going (the schedule started one, or a second click):
-      // show that one and say when it ends.
-      toast("A verification is already running on this server. Showing it.");
-      vfyAnnounce.add(id);
-      vfyShow(id);
-      vfyProbe(id);
-      return;
+      let st = null;
+      try { st = (await api("/api/servers/" + encodeURIComponent(id) + "/verify")).verify; } catch (_) { st = null; }
+      if (vfyEpoch !== epoch) return;
+      if (st && st.state === "running") {
+        toast("A verification is already running on this server. Showing it.");
+        vfyAnnounce.add(id);
+        vfyLive.set(id, st);
+        vfyShow(id);
+        await followVerify(id);
+        return;
+      }
     }
     toastError("Verify failed: " + ((err && err.message) || err));
     vfyShow(id);
     return;
   }
+  if (vfyEpoch !== epoch) return;
   vfyLive.set(id, status);
   vfyShow(id);
   toast("Verification started…");
@@ -7739,10 +7765,11 @@ function vfyFinishSignal(done) {
 // a ~20-minute cap), invoking onTick after every poll so the caller can
 // re-render mid-run progress. Returns the terminal status, or null if it
 // never settled within the cap. Transient poll errors are ignored and retried.
-async function pollVerify(id, onTick) {
+async function pollVerify(id, onTick, alive) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   for (let i = 0; i < 600; i++) {
     await sleep(2000);
+    if (alive && !alive()) return null;
     let st;
     try {
       st = (await api("/api/servers/" + encodeURIComponent(id) + "/verify")).verify;

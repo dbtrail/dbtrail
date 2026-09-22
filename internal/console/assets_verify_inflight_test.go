@@ -37,7 +37,8 @@ const toasts = [];
 ctx.toast = (m) => toasts.push(m);
 ctx.toastError = (m) => toasts.push("ERR " + m);
 const queues = {}, gets = {}, forbid = {};
-let posts = 0, postGate = null, post409 = false, holdNextGet = null;
+let posts = 0, postGate = null, post409 = false, post409Msg = "a verify run is already in progress for this server", holdNextGet = null;
+const getConflict = {};
 ctx.__api = async (path, opts) => {
   if (path === "/api/servers") return { servers: [{ id: "a", name: "a" }, { id: "b", name: "b" }] };
   if (path.endsWith("/verify/history")) return { history: [] };
@@ -46,11 +47,12 @@ ctx.__api = async (path, opts) => {
   if (opts && opts.method === "POST") {
     posts++;
     if (postGate) await postGate.p;
-    if (post409) throw Object.assign(new Error("a verify run is already in progress for this server"), { status: 409 });
+    if (post409) throw Object.assign(new Error(post409Msg), { status: 409 });
     return { verify: { state: "running", since: "2026-09-22 10:00:00", mode: "recover-inputs", results: [] } };
   }
   gets[m[1]] = (gets[m[1]] || 0) + 1;
   if (forbid[m[1]]) throw Object.assign(new Error("verification isn't available while an access-control profile is active"), { status: 403 });
+  if (getConflict[m[1]]) throw Object.assign(new Error(post409Msg), { status: 409 });
   const q = queues[m[1]] || [{ state: "idle" }];
   const answer = { verify: q.length > 1 ? q.shift() : q[0] };
   // A held answer is read now and delivered late, after newer ones.
@@ -79,6 +81,8 @@ const reset = (caps) => {
   for (const k of Object.keys(queues)) delete queues[k];
   for (const k of Object.keys(gets)) delete gets[k];
   for (const k of Object.keys(forbid)) delete forbid[k];
+  for (const k of Object.keys(getConflict)) delete getConflict[k];
+  post409Msg = "a verify run is already in progress for this server";
   toasts.length = 0; posts = 0; postGate = null; post409 = false; holdNextGet = null; timers = [];
 };
 const out = {};
@@ -204,9 +208,9 @@ const out = {};
   post409 = true;
   const second = click();
   await flush();
-  await second;
   const runningBox = box(), runningBtn = btn();
   await drain();
+  await second;
   out.alreadyRunning = { runningBox, runningBtn, endBox: box(), endBtn: btn(), toasts: [...toasts] };
 
   // A run longer than the poll's ~20-minute cap, watched on screen: the page
@@ -252,6 +256,86 @@ const out = {};
   await drain();
   await moded;
   out.modeChange = { modeBtn };
+
+  // A status in flight when the session signs out lands after the clear:
+  // it must not write the old session's run back for the next one.
+  reset();
+  queues.a = [{ state: "idle" }, finished];
+  await paint("a");
+  const inflight = click();
+  await flush();
+  let releaseInflight;
+  holdNextGet = new Promise((r) => { releaseInflight = r; });
+  await tick();
+  ctx.applyAuthGate = () => {};
+  vm.runInContext("clearAuthState()", ctx);
+  vm.runInContext("capsCache = { monitor: true, verify_trigger: true, verify: true }; capsKnown = true;", ctx);
+  releaseInflight();
+  await flush();
+  await drain();
+  await inflight;
+  const heldAfter = vm.runInContext("vfyLive.size", ctx), loopsAfter = vm.runInContext("vfyFollowing.size", ctx);
+  let releaseNext;
+  holdNextGet = new Promise((r) => { releaseNext = r; });
+  away();
+  await paint("a");
+  out.inflightSignOut = { heldAfter, loopsAfter, box: box(), toasts: [...toasts] };
+  releaseNext();
+  await flush();
+
+  // The same for a paint's probe in flight at sign-out, and for a click
+  // whose start is in flight at sign-out.
+  reset();
+  queues.a = [running(1)];
+  let releaseProbeOut;
+  holdNextGet = new Promise((r) => { releaseProbeOut = r; });
+  await paint("a");
+  ctx.applyAuthGate = () => {};
+  vm.runInContext("clearAuthState()", ctx);
+  vm.runInContext("capsCache = { monitor: true, verify_trigger: true, verify: true }; capsKnown = true;", ctx);
+  releaseProbeOut();
+  await flush();
+  const probeHeld = vm.runInContext("vfyLive.size", ctx), probeLoops = vm.runInContext("vfyFollowing.size", ctx);
+  timers = [];
+  reset();
+  queues.a = [{ state: "idle" }, running(1), finished];
+  await paint("a");
+  let releasePost;
+  postGate = { p: new Promise((r) => { releasePost = r; }) };
+  const clickOut = click();
+  await flush();
+  vm.runInContext("clearAuthState()", ctx);
+  vm.runInContext("capsCache = { monitor: true, verify_trigger: true, verify: true }; capsKnown = true;", ctx);
+  releasePost();
+  await flush();
+  await drain();
+  await clickOut;
+  out.otherInflight = { probeHeld, probeLoops, postHeld: vm.runInContext("vfyLive.size", ctx), postAnnounced: vm.runInContext("vfyAnnounce.has('a')", ctx), toasts: [...toasts] };
+
+  // A 409 that is not a run going: the command-line server refuses monitor
+  // verbs, the status too. The page says the server's reason and claims no run.
+  reset();
+  post409Msg = "the command-line server is already streamed by this process; monitor verbs apply to registry servers";
+  post409 = true;
+  getConflict.a = true;
+  await paint("a");
+  const cli = click();
+  await flush();
+  await drain();
+  await cli;
+  out.cliServer = { box: box(), btn: btn(), toasts: [...toasts], announced: vm.runInContext("vfyAnnounce.has('a')", ctx) };
+
+  // A 409 whose run ended before the page asked: nothing is going, so the
+  // page claims nothing and marks nothing as its own.
+  reset();
+  post409 = true;
+  queues.a = [{ state: "idle" }, finished];
+  await paint("a");
+  const gone = click();
+  await flush();
+  await drain();
+  await gone;
+  out.runGone = { toasts: [...toasts], announced: vm.runInContext("vfyAnnounce.has('a')", ctx) };
 
   // The feature off: the page says so and asks nothing.
   reset({ monitor: true, verify_trigger: false });
@@ -347,8 +431,28 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 			Btn            *button
 			Toasts         []string
 		}
-		ModeChange struct{ ModeBtn *button }
-		Off        struct{ Gets int }
+		ModeChange      struct{ ModeBtn *button }
+		InflightSignOut struct {
+			HeldAfter, LoopsAfter int
+			Box                   string
+			Toasts                []string
+		}
+		OtherInflight struct {
+			ProbeHeld, ProbeLoops, PostHeld int
+			PostAnnounced                   bool
+			Toasts                          []string
+		}
+		CliServer struct {
+			Box       string
+			Btn       *button
+			Toasts    []string
+			Announced bool
+		}
+		RunGone struct {
+			Toasts    []string
+			Announced bool
+		}
+		Off struct{ Gets int }
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
@@ -460,6 +564,40 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 	if !strings.Contains(lp.Box, "DONE") || !ready(lp.Btn) || finishToasts(lp.Toasts) != 1 {
 		t.Errorf("a probe answer that lands after the run ended: box %q, button %+v, toasts %q; want the finished run kept, the button ready, one message",
 			lp.Box, lp.Btn, lp.Toasts)
+	}
+
+	is := got.InflightSignOut
+	if is.HeldAfter != 0 || is.LoopsAfter != 0 || !empty(is.Box) || finishToasts(is.Toasts) != 0 {
+		t.Errorf("a status in flight at sign-out: %d runs held, %d loops, box %q, toasts %q; want nothing of the old session kept, drawn or announced",
+			is.HeldAfter, is.LoopsAfter, is.Box, is.Toasts)
+	}
+
+	oi := got.OtherInflight
+	if oi.ProbeHeld != 0 || oi.ProbeLoops != 0 || oi.PostHeld != 0 || oi.PostAnnounced || finishToasts(oi.Toasts) != 0 {
+		t.Errorf("a probe or a start in flight at sign-out: probe left %d runs and %d loops, start left %d runs, marked %v, toasts %q; want nothing",
+			oi.ProbeHeld, oi.ProbeLoops, oi.PostHeld, oi.PostAnnounced, oi.Toasts)
+	}
+
+	claimed := func(ts []string) bool {
+		for _, m := range ts {
+			if strings.Contains(m, "already running on this server") {
+				return true
+			}
+		}
+		return false
+	}
+	cs := got.CliServer
+	said := false
+	for _, m := range cs.Toasts {
+		said = said || (strings.HasPrefix(m, "ERR ") && strings.Contains(m, "command-line server is already streamed"))
+	}
+	if !said || claimed(cs.Toasts) || cs.Announced || !empty(cs.Box) || !ready(cs.Btn) {
+		t.Errorf("a 409 from the command-line server: toasts %q, marked as this tab's run %v, box %q, button %+v; "+
+			"want the server's own reason, no claim of a run, nothing marked, the button ready", cs.Toasts, cs.Announced, cs.Box, cs.Btn)
+	}
+	if claimed(got.RunGone.Toasts) || got.RunGone.Announced {
+		t.Errorf("a 409 whose run ended before the page asked: toasts %q, marked %v; want no claim of a run and nothing marked",
+			got.RunGone.Toasts, got.RunGone.Announced)
 	}
 
 	if !busy(got.ModeChange.ModeBtn) {
