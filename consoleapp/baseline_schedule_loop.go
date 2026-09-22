@@ -259,6 +259,9 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 			w.Proven = b.sup.history.ProvenUpdate(e.ID, w.LastFull)
 		}
 		w.UnmeasuredSinceFull = !b.sup.history.MeasuredSinceFull(e.ID)
+		if !anchor.IsZero() {
+			w.AnchorFullFinished = b.sup.history.FullBackupFinished(e.ID, anchor.UTC().Format(time.RFC3339))
+		}
 	}
 	if known {
 		ctx, cancel := context.WithTimeout(ctx, windowProbeTimeout)

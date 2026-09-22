@@ -356,6 +356,16 @@ type BackupWindow struct {
 	// Anchor is the previous snapshot's instant (the one an update would
 	// start from); zero when unknown.
 	Anchor time.Time
+	// AnchorFullFinished is when the full backup that published Anchor
+	// finished, when one did and this daemon recorded it; zero otherwise. A
+	// full backup's snapshot is named for the instant its dump STARTED, so
+	// its anchor is already as old as the backup took when the next slot
+	// comes, and the age rule counts from here instead (#1737): the time a
+	// full backup took is not time the schedule fell behind. Without this a
+	// full backup longer than the cut-over age was followed by another one
+	// on age at every slot, and the update that would correct the model
+	// never ran.
+	AnchorFullFinished time.Time
 	// Events is how far the index's high-water mark has moved since the
 	// anchor; negative when unknown (no mark on record for THIS anchor, or
 	// the index did not answer). It counts every source writing to that
@@ -439,7 +449,9 @@ const BackupProvenMargin = 1.5
 // update is cut over when its estimate exceeds the full backup's duration,
 // and NOT cut over otherwise, however old the anchor (the estimate is the
 // better evidence). Only without one of the three does the age rule apply:
-// an anchor older than BackupCutoverAge(interval). The estimate is crude on
+// an anchor older than BackupCutoverAge(interval), counted from when the
+// full backup that published it finished when one did (AnchorFullFinished).
+// The estimate is crude on
 // purpose (events × rate, as the issue asked): it decides between two
 // producers, not a schedule.
 //
@@ -484,7 +496,11 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 	if w.Anchor.IsZero() {
 		return ""
 	}
-	age := now.Sub(w.Anchor)
+	since := w.Anchor
+	if w.AnchorFullFinished.After(since) {
+		since = w.AnchorFullFinished
+	}
+	age := now.Sub(since)
 	if age <= BackupCutoverAge(interval) {
 		return ""
 	}

@@ -582,7 +582,9 @@ panel that answers whether a restore would work, far below the fold.
   updates differ too little to read a per-event cost from, an index that
   did not answer the probe) it cuts over on age alone, once the previous
   snapshot is older than two hours or six schedule intervals, whichever is
-  longer, and the reason names what was missing. After a full backup the
+  longer (counted from when the full backup that made it finished, when a
+  full backup did: its own duration is not the schedule falling behind),
+  and the reason names what was missing. After a full backup the
   model may not choose another one until an update after it has been
   measured (it may still choose an update): each full backup records the
   index's high-water mark before it starts, so the update that follows it
@@ -592,9 +594,10 @@ panel that answers whether a restore would work, far below the fold.
   same measurement, cached for a minute); neither applies when a full
   backup cannot start (the creation opt-in off), where the update runs
   however long it takes, being the producer that can. Every update's run
-  records `events`, `update_seconds` and `index_mark`, and every full
-  backup `index_mark`, which is what the model and the count after a
-  restart or a full backup are read from. The reason is persisted with the run,
+  records `events`, `update_seconds` and `index_mark`, and every MySQL
+  full backup that published a snapshot `index_mark` (a PostgreSQL one
+  cannot: its snapshot is stamped by the database), which is what the model
+  and the count after a restart or a full backup are read from. The reason is persisted with the run,
   never recomputed later, so a cleared bucket error cannot show the cheap
   producer for a run that read production in full (#1604); the snapshot
   detail carries the same on `run.why`. The page turns the two permanent

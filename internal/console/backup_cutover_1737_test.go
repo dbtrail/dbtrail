@@ -153,3 +153,70 @@ func TestCutoverToFull_aStaleModelMayUpdateButNotChooseAFullBackup(t *testing.T)
 		t.Fatalf("age reason %q, want the missing count named", why)
 	}
 }
+
+// The age rule counts a full backup's anchor from when that backup finished
+// (the second pass's case): its snapshot is named for the instant its dump
+// started, so a full backup longer than the cut-over age left an anchor
+// already past it, and every slot after took another full backup on age.
+func TestCutoverToFull_ageCountsFromTheFullBackupsFinish(t *testing.T) {
+	now := time.Date(2026, 9, 18, 10, 30, 0, 0, time.UTC)
+	const took = 2*time.Hour + 30*time.Minute
+	// 50,000,000 events at 4,000/s is about 3h 28m, dearer than the 2h 30m
+	// full backup, so only the stale flag keeps the rate from choosing.
+	dear := func(started time.Time) BackupWindow {
+		return BackupWindow{Anchor: started, Events: 50_000_000, FoldRate: 4000, LastFull: took, UnmeasuredSinceFull: true}
+	}
+	recent := now.Add(-5*time.Minute - took) // started 2h 35m ago, finished five minutes ago
+	stopped := now.Add(-3*time.Hour - took)  // finished three hours ago: the daemon stopped since
+	unknownCount := BackupWindow{Anchor: recent, Events: -1}
+	cases := []struct {
+		name     string
+		w        BackupWindow
+		finished time.Time
+		want     string
+	}{
+		{"stale model, dear rate, finished five minutes ago: update", dear(recent), recent.Add(took), ""},
+		{"count unknown, finished five minutes ago: update", unknownCount, recent.Add(took), ""},
+		{"no finish on record: the anchor's age, as before", dear(recent), time.Time{}, "window_age"},
+		{"finished three hours ago (a stop since): full on age", dear(stopped), stopped.Add(took), "window_age"},
+		// An hour-old anchor whose recorded finish reads three hours ago:
+		// believed, the finish would make it too old; the anchor decides.
+		{"a finish before the anchor (a clock step) is not believed", dear(now.Add(-time.Hour)), now.Add(-3 * time.Hour), ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := c.w
+			w.AnchorFullFinished = c.finished
+			if got := BackupWhyCode(CutoverToFull(w, 5*time.Minute, now)); got != c.want {
+				t.Fatalf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+	w := dear(stopped)
+	w.AnchorFullFinished = stopped.Add(took)
+	if why := CutoverToFull(w, 5*time.Minute, now); !strings.Contains(why, "it is 3h old and the cut-over is 2h") {
+		t.Fatalf("age reason %q, want the age since the full backup finished", why)
+	}
+}
+
+func TestBaselineHistory_fullBackupFinished(t *testing.T) {
+	const snap = "2026-09-18T07:00:00Z"
+	want := time.Date(2026, 9, 18, 9, 30, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name string
+		rec  BaselineRunRecord
+		want time.Time
+	}{
+		{"full backup", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, FinishedAt: "2026-09-18T09:30:00Z"}, want},
+		{"full backup published locally, upload failed", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, FinishedAt: "2026-09-18T09:30:00Z", Error: "upload: denied"}, want},
+		{"an update's snapshot is not a full backup's", BaselineRunRecord{Kind: BaselineRunRefresh, SnapshotTime: snap, FinishedAt: "2026-09-18T09:30:00Z"}, time.Time{}},
+		{"unparsable stamp", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, FinishedAt: "later"}, time.Time{}},
+		{"another snapshot", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: "2026-09-18T06:00:00Z", FinishedAt: "2026-09-18T09:30:00Z"}, time.Time{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := historyWith(t, []BaselineRunRecord{c.rec}).FullBackupFinished("s", snap); !got.Equal(c.want) {
+				t.Fatalf("FullBackupFinished = %s, want %s", got, c.want)
+			}
+		})
+	}
+}

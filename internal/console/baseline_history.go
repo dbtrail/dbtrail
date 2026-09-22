@@ -238,8 +238,8 @@ func (h *BaselineRunHistory) ProvenUpdate(serverID string, within time.Duration)
 // when one was published, and an error beside that is the upload (or a
 // shutdown during it). The next update reads that local copy
 // (resolveFoldSource prefers it when it is ahead of the bucket), so its
-// mark is the right base. An update's record counts only when clean, as
-// before: a failed update records no mark.
+// mark is the right base. An update's record counts only without an error.
+// No other record counts (a skip names no snapshot at all).
 func (h *BaselineRunHistory) IndexMarkFor(serverID, snapshotTime string) (uint64, bool) {
 	rec := h.FindBySnapshot(serverID, snapshotTime)
 	if rec == nil || rec.IndexMark == 0 {
@@ -273,8 +273,8 @@ func (h *BaselineRunHistory) UpdateSample(serverID string) (n int, newest time.T
 }
 
 // MeasuredSinceFull reports whether a measured successful update for
-// serverID was recorded after its newest successful full backup, or there
-// is no full backup on record. False is the model deciding on evidence
+// serverID was recorded after its newest full backup (one that succeeded or
+// published a snapshot, see below), or there is no full backup on record. False is the model deciding on evidence
 // older than the last full backup, and CutoverToFull then lets the update
 // run (#1737): a full backup chosen on a rate that no update after it has
 // re-measured would choose the next one on the same rate, forever.
@@ -299,6 +299,22 @@ func (h *BaselineRunHistory) MeasuredSinceFull(serverID string) bool {
 		}
 	}
 	return true
+}
+
+// FullBackupFinished is when the full backup that published the snapshot
+// named snapshotTime (RFC3339 UTC) finished, zero when no full backup on
+// record published it or its stamp does not parse: what the age rule counts
+// an anchor's age from (BackupWindow.AnchorFullFinished).
+func (h *BaselineRunHistory) FullBackupFinished(serverID, snapshotTime string) time.Time {
+	rec := h.FindBySnapshot(serverID, snapshotTime)
+	if rec == nil || rec.Kind != BaselineRunDump {
+		return time.Time{}
+	}
+	finished, err := time.Parse(time.RFC3339, rec.FinishedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return finished
 }
 
 // LastFullBackup is how long the newest successful full backup for serverID

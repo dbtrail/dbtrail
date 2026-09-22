@@ -223,8 +223,9 @@ func TestMeasureWindow_afterAFullBackup(t *testing.T) {
 	mark := indexMark{events: 17_001_000}
 	stubIndexMark(t, &mark, true)
 	w := b.measureWindow(context.Background(), e, anchor)
-	if w.Events != 17_000_000 || !w.UnmeasuredSinceFull || w.FoldRate != 4000 || w.LastFull != 8*time.Minute {
-		t.Fatalf("window after a full backup = %+v, want 17,000,000 events, the model marked older than the full backup", w)
+	if w.Events != 17_000_000 || !w.UnmeasuredSinceFull || w.FoldRate != 4000 || w.LastFull != 8*time.Minute ||
+		!w.AnchorFullFinished.Equal(time.Date(2026, 9, 18, 5, 0, 0, 0, time.UTC)) {
+		t.Fatalf("window after a full backup = %+v, want 17,000,000 events, the model marked older than the full backup, the backup's finish", w)
 	}
 	// The rate alone would cut this over (about 71 minutes against 8); the
 	// rule abstains and the update runs.
