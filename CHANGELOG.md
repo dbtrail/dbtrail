@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newest, so a run can take longer and read more from the Parquet archives.
 
 ### Fixed
+- **A verification run stays on the Verification page when you leave and
+  come back.** The page wrote a run's progress into the box that was on
+  screen when it started. After going to another page and back, or switching
+  servers and back, the new box said "No run yet" and offered to start
+  another run while the first one was still going. The page now keeps each
+  server's run, asks the server whether one is going each time it opens, and
+  shows a run the verification schedule started, which it never did before.
 - **Console texts no longer name command-line flags** (#1783). Adding a server
   from the browser showed doctor text written for the terminal: "Verify
   --source-dsn is reachable" with a fixed "port 3306", "`bintrail init` will
