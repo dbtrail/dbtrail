@@ -210,7 +210,7 @@ HTTP, console-token auth, per-server routing by URL path) — if you already run
 `list_schema_changes` accepts `schema`, `table`, `ddl_type`
 (`CREATE`/`ALTER`/`DROP`/`RENAME`/`TRUNCATE`, prefix-matched so `ALTER` matches
 `ALTER TABLE`), `since`, `until`, `limit` (default 100), and `uncovered_only`
-(exactly the rows behind the `status` tool's "DDL(s) detected without
+(exactly the rows behind the `status` tool's "schema change(s) detected without
 auto-snapshot" warning — `snapshot_id` is `null` AND the DDL is not a
 `TRUNCATE TABLE`, whose null is by design since it changes no structure; a
 TRUNCATE row in the plain listing carries a `snapshot_note` saying so, and

@@ -973,19 +973,24 @@ func ensureColumn(db *sql.DB, table, column, alterSQL string) error {
 	return nil
 }
 
-// schemaChangeChunkRows and schemaChangeChunkBytes bound one INSERT of
-// schema_changes rows: nine placeholders a row, and the statement's text
-// repeated on every row. A variable so a test can force several INSERTs.
-var (
-	schemaChangeChunkRows  = 500
-	schemaChangeChunkBytes = 4 << 20
-)
+// schemaChangeChunkRows bounds one INSERT of schema_changes rows (nine
+// placeholders a row). A variable so a test can force several INSERTs.
+var schemaChangeChunkRows = 500
+
+// maxDDLQueryBytes is what schema_changes.ddl_query (TEXT) holds.
+const maxDDLQueryBytes = 65535
 
 // InsertSchemaChange records a DDL detection in the schema_changes table: one
 // row per table the statement names (ev.DDLTables, a repeat recorded once;
 // ev.Schema/ev.Table when there is no list), so the destructive-DDL guards,
 // which look one table up at a time, see every one. snapshotID may be nil
 // when no auto-snapshot was taken (file mode).
+//
+// The statement's text goes on the first table's row only; the others point
+// at that row, so a DROP of hundreds of tables neither repeats its text
+// hundreds of times nor floods the lists that show it. A DROP or RENAME's
+// text is cut to what the column holds: past that length it is only more
+// names, and every name has its own row.
 //
 // Several rows go in chunks, without a transaction on purpose: each row is a
 // fact of its own ("this table was dropped at this position"), so a failure
@@ -997,28 +1002,52 @@ func InsertSchemaChange(db *sql.DB, ev event.Event, snapshotID *int) error {
 		snapArg = *snapshotID
 	}
 	tables := schemaChangeTables(ev)
-	per := max(1, min(schemaChangeChunkRows, schemaChangeChunkBytes/(len(ev.DDLQuery)+512)))
+	text := ev.DDLQuery
+	if ev.DDLType == event.DDLDropTable || ev.DDLType == event.DDLRenameTable {
+		text = capDDLQuery(text)
+	}
+	pointer := fmt.Sprintf("(same %s statement as the row for %s.%s)", ev.DDLType, tables[0].Schema, tables[0].Table)
 	for done := 0; done < len(tables); {
-		chunk := tables[done:min(len(tables), done+per)]
+		chunk := tables[done:min(len(tables), done+schemaChangeChunkRows)]
 		q := `INSERT INTO schema_changes
 			(detected_at, binlog_file, binlog_pos, gtid, schema_name, table_name, ddl_type, ddl_query, snapshot_id)
 		VALUES ` + strings.TrimSuffix(strings.Repeat("(?, ?, ?, ?, ?, ?, ?, ?, ?), ", len(chunk)), ", ")
 		args := make([]any, 0, 9*len(chunk))
-		for _, n := range chunk {
+		for i, n := range chunk {
+			rowText := pointer
+			if done+i == 0 {
+				rowText = text
+			}
 			args = append(args, ev.Timestamp, ev.BinlogFile, ev.EndPos,
-				nullOrString(ev.GTID), n.Schema, n.Table, ev.DDLType, ev.DDLQuery, snapArg)
+				nullOrString(ev.GTID), n.Schema, n.Table, ev.DDLType, rowText, snapArg)
 		}
 		// #959: bound the DDL write like the other hot-loop index writes.
 		ctx, cancel := context.WithTimeout(context.Background(), WriteTimeout)
 		_, err := db.ExecContext(ctx, q, args...)
 		cancel()
 		if err != nil {
-			return fmt.Errorf("record %s at %s:%d: %d of %d tables recorded: %w",
+			// "At least": a write that timed out here may still commit there.
+			return fmt.Errorf("record %s at %s:%d: at least %d of %d tables recorded: %w",
 				ev.DDLType, ev.BinlogFile, ev.EndPos, done, len(tables), err)
 		}
 		done += len(chunk)
 	}
 	return nil
+}
+
+// capDDLQuery makes a statement's text fit ddl_query: valid UTF-8 (strict mode
+// refuses anything else) and at most maxDDLQueryBytes, cut at a rune boundary
+// with the truncation marker.
+func capDDLQuery(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if len(s) <= maxDDLQueryBytes {
+		return s
+	}
+	cut := maxDDLQueryBytes - len(event.QueryTextTruncationMarker)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + event.QueryTextTruncationMarker
 }
 
 // schemaChangeTables is the tables a DDL event's schema_changes rows name: its

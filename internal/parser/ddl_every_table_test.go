@@ -69,6 +69,9 @@ func TestParseDDL_everyTableItNames(t *testing.T) {
 		{"MariaDB RENAME IF EXISTS with WAIT", "RENAME TABLE IF EXISTS a WAIT 1 TO b", "db1", DDLRenameTable, []string{"db1.a", "db1.b"}},
 		{"MariaDB RENAME NOWAIT", "RENAME TABLE a NOWAIT TO b", "db1", DDLRenameTable, []string{"db1.a", "db1.b"}},
 		{"rename without TO keeps the source", "RENAME TABLE a", "db1", DDLRenameTable, []string{"db1.a"}},
+		{"MariaDB fractional WAIT", "RENAME TABLE a WAIT 1.5 TO b", "db1", DDLRenameTable, []string{"db1.a", "db1.b"}},
+		{"rename target in the session's database", "RENAME TABLE db1.a TO b", "d", DDLRenameTable, []string{"db1.a", "d.b"}},
+		{"an empty quoted name ends the list", "DROP TABLE a, ``, b", "db1", DDLDropTable, []string{"db1.a"}},
 
 		{"ALTER has no list", "ALTER TABLE a ADD COLUMN c INT", "db1", DDLAlterTable, nil},
 		{"CREATE has no list", "CREATE TABLE a (id INT)", "db1", DDLCreateTable, nil},

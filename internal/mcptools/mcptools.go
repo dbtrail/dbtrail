@@ -321,9 +321,10 @@ func NewServer(cfg Config) *mcp.Server {
 		Name: "list_schema_changes",
 		Description: "List DDL schema changes (CREATE, ALTER, DROP, RENAME, TRUNCATE) " +
 			"recorded during binlog indexing or streaming. " +
-			"Returns the full DDL statement, binlog coordinates, timestamp, and the " +
+			"Returns the DDL statement, binlog coordinates, timestamp, and the " +
 			"covering snapshot_id (null = no schema snapshot was taken after the DDL) " +
-			"for each change; set uncovered_only to list just the changes without a snapshot." +
+			"for each change; set uncovered_only to list just the changes without a snapshot. " +
+			"A DROP or RENAME naming several tables is one change per table: the statement's text is on the first table's, the others point to it." +
 			" Results come back newest first; changes inside the same second are ordered by binlog file, then position. " +
 			"In an index fed by more than one source, or by a Postgres source (whose LSN file names are not zero-padded), " +
 			"same-second changes have a repeatable order, not their true one.",
@@ -569,7 +570,7 @@ type SchemaChangesArgs struct {
 	Until    string `json:"until,omitempty" jsonschema:"Filter changes at or before this time (YYYY-MM-DD HH:MM:SS or RFC 3339)"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"Maximum number of changes to return (default: 100)"`
 	// UncoveredOnly narrows results to DDLs with no covering snapshot — the
-	// rows the status tool's "N DDL(s) detected without auto-snapshot" warning
+	// rows the status tool's "N schema change(s) detected without auto-snapshot" warning
 	// counts, so an agent can go straight from that warning to the exact rows.
 	UncoveredOnly bool `json:"uncovered_only,omitempty" jsonschema:"Return only changes with no covering schema snapshot; exactly the ones counted by the status tool's uncovered-DDL warning. TRUNCATE TABLE rows are excluded like the warning excludes them: TRUNCATE changes no table structure, so no snapshot is needed and their null snapshot_id is by design. To list TRUNCATEs, drop this flag or filter ddl_type TRUNCATE"`
 }
