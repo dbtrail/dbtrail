@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -112,24 +113,19 @@ func (s *Server) selectedServerID(r *http.Request) string {
 // from), grouped per snapshot timestamp, newest first. The listing is
 // path-derived; only local sources additionally read one Parquet footer per
 // snapshot for its binlog coordinates (best-effort — a missing/corrupt footer
-// just omits them).
-// fillBaselineLocation sets where a server's snapshots live, the one
-// resolution both the listing and its location_only answer use: the bundle's
-// source (the server's own directory, else its own bucket, else the daemon's,
-// directory winning over bucket).
-func fillBaselineLocation(resp *baselinesResponse, b *bundle) {
-	if b.baselineSrc == "" {
+// just omits them). With ?location_only=1 it answers where the snapshots live
+// instead (handleBaselineLocation).
+func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
+	if v, ok := r.URL.Query()["location_only"]; ok {
+		// Any other spelling is refused rather than read as "no": a caller
+		// that meant to skip the storage walk would otherwise pay for it.
+		if len(v) != 1 || v[0] != "1" {
+			writeJSONError(w, http.StatusBadRequest, "location_only takes the value 1")
+			return
+		}
+		s.handleBaselineLocation(w, r)
 		return
 	}
-	resp.Configured = true
-	resp.Source = b.baselineSrc
-	resp.Kind = "dir"
-	if strings.HasPrefix(b.baselineSrc, "s3://") {
-		resp.Kind = "s3"
-	}
-}
-
-func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	b := s.resolveOr(w, r)
 	if b == nil {
 		return
@@ -144,16 +140,6 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := baselinesResponse{Reconstruct: b.baselineConfigured, Snapshots: []baselineSnapshotDTO{}}
-	// location_only answers where this server's snapshots live and stops:
-	// no schedule probe and no listing, both of which reach the storage (on
-	// S3, paid listings, #1679). Connect AI asks it on every open to print the
-	// Iceberg export command. Same permission and same profile refusal as the
-	// listing, since the location sits beside the index address there.
-	if r.URL.Query().Get("location_only") == "1" {
-		fillBaselineLocation(&resp, b)
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
 	if s.baselineRefresh != nil {
 		if st := s.baselineRefresh.RefreshStatus(s.selectedServerID(r)); st.State != "idle" {
 			resp.Refresh = &st
@@ -172,7 +158,9 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	fillBaselineLocation(&resp, b)
+	resp.Configured = true
+	resp.Source = b.baselineSrc
+	resp.Kind = baselineKind(b.baselineSrc)
 
 	// Every configured location, not just the primary (#1542). A server with a
 	// local directory AND an S3 destination keeps the bucket as the bundle's
@@ -274,5 +262,54 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	}
 	status.AnnotateBaselineStaleness(infos, floor, now)
 	resp.Staleness = string(status.OverallBaselineStaleness(infos))
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// baselineKind names a baseline source's kind on the wire: "s3" for a
+// bucket URL, "dir" for anything else.
+func baselineKind(src string) string {
+	if strings.HasPrefix(src, "s3://") {
+		return "s3"
+	}
+	return "dir"
+}
+
+// baselineLocationResponse is GET /api/baselines?location_only=1: where the
+// selected server's snapshots live, and nothing read from there.
+type baselineLocationResponse struct {
+	Configured bool   `json:"configured"`
+	Source     string `json:"source,omitempty"`
+	Kind       string `json:"kind,omitempty"` // "dir" | "s3"
+}
+
+// handleBaselineLocation answers where the selected server's snapshots live,
+// the location its bundle carries (the listing's primary source), and stops
+// there: no schedule probe and no listing, both of which reach the storage (on
+// S3, paid listings, #1679), and no index connection either. Connect AI asks
+// it on every open to print the Iceberg export command (#1573); resolving
+// through the bundle would open a registry server's index, and a dead one
+// would hold the whole page on the connect timeout. Same permission (the route
+// table matches the path) and the same refusal for a session with a data
+// profile as the listing, in the same order.
+func (s *Server) handleBaselineLocation(w http.ResponseWriter, r *http.Request) {
+	src, err := s.cm.baselineLocation(r.Header.Get(serverHeader))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrUnknownServer) || errors.Is(err, errNoServers) {
+			status = http.StatusNotFound
+		}
+		writeJSONError(w, status, err.Error())
+		return
+	}
+	if sessionRestricted(r) {
+		recordProfileGateDeny(r, "baselines")
+		writeJSONError(w, http.StatusForbidden,
+			"backup listings are unavailable while an access-control profile is active: baseline reads aren't redacted")
+		return
+	}
+	resp := baselineLocationResponse{}
+	if src != "" {
+		resp.Configured, resp.Source, resp.Kind = true, src, baselineKind(src)
+	}
 	writeJSON(w, http.StatusOK, resp)
 }

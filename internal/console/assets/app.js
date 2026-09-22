@@ -5643,10 +5643,11 @@ function baselineContextStrip(b, cur) {
 // Apache Iceberg tables. It is shown as a command rather than a button on
 // purpose: it writes a new copy of the data, and it is deliberately kept out
 // of the process that captures changes, so nothing here can start one. The
-// panel is display only and needs no API of its own: everything in the
-// command comes from /api/servers and /api/baselines, which this page already
-// has. The password is elided the same way the SQL-client panel elides the
-// console token.
+// panel is display only: the command is built from /api/servers and from the
+// backup location Connect AI asks for (GET /api/baselines?location_only=1,
+// #1573), which reads neither the storage nor the server's index. The
+// password is elided the same way the SQL-client panel elides the console
+// token.
 
 // icebergExportCommand renders the command for the selected server, or null
 // when this page cannot write a correct one: no server, no backup destination,
@@ -8608,7 +8609,7 @@ function updateSrvNote() {
 let mcpMintedOnce = null;
 
 async function renderConnect() {
-  const gen = serverGen;
+  const gen = serverGen, vgen = viewGen;
   // Consume the one-time plaintext FIRST — before any await or early return —
   // so a server-switch mid-load can never leave it parked in the module
   // global to be re-displayed (stale) on a later visit.
@@ -8629,21 +8630,27 @@ async function renderConnect() {
   let fbStatus = null;
   try { fbStatus = await api("/api/flashback"); } catch (_) {}
   // Where the selected server's snapshots live, for the Iceberg export
-  // command (#1573). location_only: the same resolution the Backups listing
-  // uses, without walking the storage. Not asked when the session may not
-  // read settings: the server would refuse it, and audit it, on every open.
-  let bLoc = null;
-  if ((capsCache.permissions || {})["settings:read"] !== false) {
-    try { bLoc = await api("/api/baselines?location_only=1"); } catch (_) {}
+  // command (#1573): location_only is the Backups listing's own resolution,
+  // answered without reading the storage or opening the server's index. Not
+  // asked when the session may not read settings or a data profile is active:
+  // the server would refuse it on every visit (and audit a denial under a
+  // profile), and the command hands out unredacted data. A refusal draws no
+  // panel; any other failure says so in one line, so a missing panel never
+  // reads as "this server keeps no backups".
+  let bLoc = null, bLocFailed = false;
+  if ((capsCache.permissions || {})["settings:read"] !== false && !capsCache.data_profile) {
+    try { bLoc = await api("/api/baselines?location_only=1"); } catch (err) { bLocFailed = err.status !== 403; }
   }
-  if (gen !== serverGen) {
+  // vgen: navigating away while these requests are out must not let this
+  // page paint over the next one.
+  if (gen !== serverGen || vgen !== viewGen) {
     // The consumed plaintext cannot be re-shown; say so instead of losing it
     // silently (the user must rotate to get a usable value).
     if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
     return;
   }
   try {
-    buildConnect(servers, tokStatus, minted, fbStatus, bLoc);
+    buildConnect(servers, tokStatus, minted, fbStatus, bLoc, bLocFailed);
   } catch (err) {
     if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
     const v = VIEW(); clear(v); v.append(pageHead("Connect AI", null)); renderError(v, err);
@@ -8685,7 +8692,7 @@ function copyText(text, what) {
   clip.writeText(text).then(() => toast(what + " copied to clipboard"), () => toastError("Copy failed."));
 }
 
-function buildConnect(servers, tokStatus, minted, fbStatus, bLoc) {
+function buildConnect(servers, tokStatus, minted, fbStatus, bLoc, bLocFailed) {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "Three steps and Claude can answer questions about your database history. It can only read; it can never change anything.");
@@ -8713,6 +8720,10 @@ function buildConnect(servers, tokStatus, minted, fbStatus, bLoc) {
   const cur = (servers || []).find((s) => s.id === (currentServer || defaultServerId));
   const iceberg = icebergExportPanel(cur, bLoc);
   if (iceberg) v.append(iceberg);
+  else if (bLocFailed) {
+    v.append(el("p", { class: "form-hint cn-ice-err", style: "margin-top:18px", text:
+      "Could not check where this server's backups are kept, so the Iceberg export command is not shown. Reload the page to try again." }));
+  }
   viewEnter();
 }
 

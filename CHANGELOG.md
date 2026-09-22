@@ -27,9 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is for, and Backups is being reduced to its snapshots. Connect AI asks only
   where the selected server's snapshots are kept
   (`GET /api/baselines?location_only=1`, same permission and same refusal
-  for a session with a data profile as the listing), without reading the
-  storage. Because Connect AI also exists without the `watch` daemon, the panel now shows on
-  `bintrail-console serve` too when a backup location is configured.
+  for a session with a data profile as the listing), which reads neither the
+  storage nor the server's index, so a server whose index is down does not
+  hold the page. The page does not ask while a data profile is active (new
+  `data_profile` capability), and says so in one line when the lookup fails.
+  Because Connect AI also exists without the `watch` daemon, the panel now
+  shows on `bintrail-console serve` too when a backup location is configured.
 - **`bintrail verify` checks each table against its last read of the
   database, not against the newest baseline.** A baseline that a refresh built
   from the recorded changes never read the database, so once a refresh had run
