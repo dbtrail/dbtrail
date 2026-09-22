@@ -3106,9 +3106,12 @@ try {
   // yet", and when it ends the button ON SCREEN is ready again. Before, the
   // run kept writing into the box it saved at the start, off screen.
   // Tied to THIS run: the page forgets leg (d)'s finished run first, so a
-  // chip after the return can only be the new one, and History must gain a
-  // row when it ends.
-  const vfyHistBefore = await page.evaluate(() => document.querySelectorAll(".vfy-histrow").length);
+  // chip after the return can only be the new one, and the server's run
+  // history must gain an entry when it ends. Counted on the server, not in
+  // the page: leg (d)'s own history refresh may still be on its way.
+  const vfyHistCount = () => page.evaluate(async () =>
+    ((await api("/api/servers/" + encodeURIComponent(currentServer || defaultServerId) + "/verify/history")).history || []).length);
+  const vfyHistBefore = await vfyHistCount();
   await page.evaluate(() => {
     vfyLive.clear();
     document.querySelector(".vfy-run").click();
@@ -3129,8 +3132,7 @@ try {
       chip: (document.querySelector(".vfy-results .vfy-summary .chip") || {}).textContent || "",
       btn: b ? { disabled: b.disabled, text: b.textContent } : null };
   });
-  await page.waitForFunction((n) => document.querySelectorAll(".vfy-histrow").length > n, vfyHistBefore).catch(() => {});
-  vfyBack.histRows = await page.evaluate(() => document.querySelectorAll(".vfy-histrow").length);
+  vfyBack.histRows = await vfyHistCount();
   (vfyBackChip && !/No run yet/.test(vfyBack.box) && vfyBack.chip && !/RUNNING/.test(vfyBack.chip)
     && vfyBack.btn && !vfyBack.btn.disabled && vfyBack.btn.text === "Run verification" && vfyBack.histRows > vfyHistBefore)
     ? ok("verification: a run started, left and come back to still shows on the page, and its end readies the button on screen")

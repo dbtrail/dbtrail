@@ -260,7 +260,7 @@ const out = {};
   // A status in flight when the session signs out lands after the clear:
   // it must not write the old session's run back for the next one.
   reset();
-  queues.a = [{ state: "idle" }, finished];
+  queues.a = [{ state: "idle" }, running(1)];
   await paint("a");
   const inflight = click();
   await flush();
@@ -270,16 +270,20 @@ const out = {};
   ctx.applyAuthGate = () => {};
   vm.runInContext("clearAuthState()", ctx);
   vm.runInContext("capsCache = { monitor: true, verify_trigger: true, verify: true }; capsKnown = true;", ctx);
+  const getsAtSignOut = gets.a || 0;
   releaseInflight();
   await flush();
   await drain();
-  await inflight;
+  void inflight; // not awaited: a loop that never stops would hang the test instead of failing it
+  // The run is still going on the server; the old session's loop must stop
+  // asking (each ask would be refused, every 2 s, for up to 20 minutes).
+  const getsAfterSignOut = (gets.a || 0) - getsAtSignOut;
   const heldAfter = vm.runInContext("vfyLive.size", ctx), loopsAfter = vm.runInContext("vfyFollowing.size", ctx);
   let releaseNext;
   holdNextGet = new Promise((r) => { releaseNext = r; });
   away();
   await paint("a");
-  out.inflightSignOut = { heldAfter, loopsAfter, box: box(), toasts: [...toasts] };
+  out.inflightSignOut = { heldAfter, loopsAfter, getsAfterSignOut, box: box(), toasts: [...toasts] };
   releaseNext();
   await flush();
 
@@ -433,9 +437,9 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 		}
 		ModeChange      struct{ ModeBtn *button }
 		InflightSignOut struct {
-			HeldAfter, LoopsAfter int
-			Box                   string
-			Toasts                []string
+			HeldAfter, LoopsAfter, GetsAfterSignOut int
+			Box                                     string
+			Toasts                                  []string
 		}
 		OtherInflight struct {
 			ProbeHeld, ProbeLoops, PostHeld int
@@ -567,9 +571,10 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 	}
 
 	is := got.InflightSignOut
-	if is.HeldAfter != 0 || is.LoopsAfter != 0 || !empty(is.Box) || finishToasts(is.Toasts) != 0 {
-		t.Errorf("a status in flight at sign-out: %d runs held, %d loops, box %q, toasts %q; want nothing of the old session kept, drawn or announced",
-			is.HeldAfter, is.LoopsAfter, is.Box, is.Toasts)
+	if is.HeldAfter != 0 || is.LoopsAfter != 0 || !empty(is.Box) || finishToasts(is.Toasts) != 0 || is.GetsAfterSignOut > 0 {
+		t.Errorf("a status in flight at sign-out: %d runs held, %d loops, %d more asks after it, box %q, toasts %q; "+
+			"want nothing of the old session kept, drawn, announced or asked again",
+			is.HeldAfter, is.LoopsAfter, is.GetsAfterSignOut, is.Box, is.Toasts)
 	}
 
 	oi := got.OtherInflight
