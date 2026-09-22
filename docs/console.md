@@ -750,14 +750,13 @@ the data they report on.
 **Connect** (#1549) — `GET /api/views.sql` requires `settings:read`, while the
 SQL page is gated on `query:execute` and on the `sql` capability, so the
 download was unreachable for a role the endpoint would have authorized, and
-gone entirely on a daemon started with `BINTRAIL_CONSOLE_SQL_PANEL=0` — and
-finally to **Backups** (#1581), below the snapshot listing: the file describes
-the baseline snapshots, and the `.tar.gz` of the very same files downloads
-from that page, so the two halves of one task now share it. `GET
-/api/baselines` requires the same `settings:read`, so the move loses nobody
-the download. On a read-only console (`serve`, where the Backups page does
-not exist) the card still renders on Connect. The old `/storage` link still
-works and lands on Retention.
+gone entirely on a daemon started with `BINTRAIL_CONSOLE_SQL_PANEL=0` — then
+to **Backups** (#1581), below the snapshot listing, and back to **Connect AI**
+(#1573), with or without the daemon, beside the other ways to take the data
+somewhere else. The Backups take-away lane keeps a **Download views.sql**
+button that saves the default file (no change log) and shows the command to
+open it; the options stay on the card. The old `/storage` link still works
+and lands on Retention.
 
 - **Table deltas are not on this page.** Table deltas (#1638), which make a refresh keep a changed table's file and write its changes beside it, are on by default (#1729) and turned off with a daemon flag only (`--baseline-table-deltas=false`, or `BINTRAIL_BASELINE_TABLE_DELTAS=false`); there is no card here. It changes the files every refresh publishes; [Dump and baseline](dump-and-baseline.md) describes the layout, who reads it, and what to do with DuckDB views when turning it on or off.
 
@@ -790,7 +789,7 @@ works and lands on Retention.
   could not be removed stays listed with the reason (a previous build a
   newer one could not clear included) and is retried every minute. Shown
   only on a daemon that can build `.sql` backups.
-- **Download a DuckDB schema** (#1528, formerly *Query in DuckDB*; on Backups since #1581, below the snapshot listing) — a one-click download of `views.sql`: a ready-made
+- **Download a DuckDB schema** (#1528, formerly *Query in DuckDB*; on Connect AI since #1573, after the SQL client panel) — a one-click download of `views.sql`: a ready-made
   DuckDB schema over the selected server's own Parquet — one
   `state_<schema>_<table>` view per table in the newest baseline snapshot, plus
   an `events` view across every archive source registered in `archive_state`
@@ -920,7 +919,7 @@ way to learn the derived `state_*` names — built the whole catalog and hit tha
 budget, and the page's own example named `events`.
 
 Query the same Parquet in your own DuckDB instead. **Download a DuckDB schema**
-on the **Backups** page writes a `views.sql` over the same files, with no row
+on the **Connect AI** page writes a `views.sql` over the same files, with no row
 cap, no time limit and nothing running in the daemon. See
 [Query in DuckDB](https://www.dbtrail.com/docs/guides/query-in-duckdb/).
 
@@ -1432,6 +1431,9 @@ start-to-finish walkthrough (bundle install included), see
 [Connect an AI assistant](connect-ai.md). Below the three steps, the
 **Connect a SQL client** panel does the same for the embedded time-travel SQL
 port: see [Time-travel over the MySQL protocol](#time-travel-over-the-mysql-protocol-flashback-port).
+After it comes the **Download a DuckDB schema** card, when the server's
+Parquet can be described (the `views` capability), with or without the
+daemon (#1573).
 
 Last on the page, the **Keep it current with Iceberg** panel (#1466; on
 Connect AI since #1573, it used to sit at the bottom of Backups) prints the

@@ -2876,6 +2876,8 @@ section.bk-restore { margin-top: 18px; }
   padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px;
   background: var(--surface-1);
 }
+/* In the Backups take-away lane (#1573) the lane's own padding is the gutter. */
+.bk-lane .dk-run { margin: 0; }
 .dk-cmd { font-size: 11px; font-family: var(--mono, ui-monospace, monospace); color: var(--ink-2); word-break: break-all; flex: 1; }
 .dk-copy {
   font: inherit; font-size: 11px; flex: none; cursor: pointer;

@@ -248,7 +248,7 @@ What a stale compose file costs:
 | the console state paths on the `bintrail-state` volume | your username and password, the servers you added, and the AI connection token live inside the container, so the next `up -d` that recreates it deletes them | **Silent.** The console comes back asking you to create a password, exactly like a fresh install, and reports no loss. Fix this one first |
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
 | the `iceberg-export` profile and its volume | there is no one-shot Iceberg export to run | `docker compose --profile iceberg-export run ...` says the service does not exist |
-| `BINTRAIL_CONSOLE_SQL_PANEL` (the current file does not set it) | nothing: the SQL page was removed in 0.75.0 | Remove the variable. It is read for one release and warns; download a DuckDB schema from **Backups** and query the same Parquet yourself |
+| `BINTRAIL_CONSOLE_SQL_PANEL` (the current file does not set it) | nothing: the SQL page was removed in 0.75.0 | Remove the variable. It is read for one release and warns; download a DuckDB schema from **Connect AI** and query the same Parquet yourself |
 
 Two things make this easier to catch:
 
@@ -505,9 +505,9 @@ inconclusive results land, and drill into a mismatch — see
 
 **SQL over your Parquet** is not answered by the daemon. The console's SQL page
 was removed in 0.75.0 (see [The SQL panel
-(removed)](console.md#the-sql-panel-removed)). Open **Backups**, click
-**Download views.sql** on the **Download a DuckDB schema** card below the
-snapshot listing, and run the file in your own DuckDB: no row cap, no time
+(removed)](console.md#the-sql-panel-removed)). Open **Connect AI**, click
+**Download views.sql** on the **Download a DuckDB schema** card, and run the
+file in your own DuckDB: no row cap, no time
 limit, and nothing executing inside the process that captures.
 
 Notes:

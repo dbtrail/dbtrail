@@ -134,16 +134,17 @@ func TestOldAddressesLandOnTheirPage(t *testing.T) {
 		// itself: the translation must not skip that gate.
 		{"storage, serve", routeScenario{Start: "/storage", Steps: boot, Caps: serveCaps, Known: true, Real: []string{"renderRetention"}},
 			want{"/overview", []string{"replace /retention", "replace /overview"}, []string{"renderRetention", "renderOverview"}, "retention", "storage"}},
+		// /sql goes to Connect AI (#1573), which every console has, so the
+		// answer does not wait for the capability check.
 		{"sql, watch", routeScenario{Start: "/sql", Steps: boot, Caps: watchCaps, Known: true},
-			want{"/baselines", []string{"replace /baselines"}, []string{"renderBaselines"}, "baselines", "sql"}},
+			want{"/connect", []string{"replace /connect"}, []string{"renderConnect"}, "connect", "sql"}},
 		{"sql, serve", routeScenario{Start: "/sql", Steps: boot, Caps: serveCaps, Known: true},
 			want{"/connect", []string{"replace /connect"}, []string{"renderConnect"}, "connect", "sql"}},
-		// Where /sql and /storage go depends on the capability answer. With
-		// no answer (the check failed), they do not guess: a guess written
-		// into the bar would stick to that history entry after the check
-		// recovers.
 		{"sql, capabilities unknown", routeScenario{Start: "/sql", Steps: boot, Caps: serveCaps, Known: false},
-			want{"/sql", nil, []string{"renderOverview"}, "", ""}},
+			want{"/connect", []string{"replace /connect"}, []string{"renderConnect"}, "connect", "sql"}},
+		// Where /storage goes depends on the capability answer. With no answer
+		// (the check failed), it does not guess: a guess written into the bar
+		// would stick to that history entry after the check recovers.
 		{"storage, capabilities unknown", routeScenario{Start: "/storage", Steps: boot, Caps: serveCaps, Known: false, Real: []string{"renderRetention"}},
 			want{"/storage", nil, []string{"renderOverview"}, "", ""}},
 		{"timetravel", routeScenario{Start: "/timetravel", Steps: boot, Caps: watchCaps, Known: true},
