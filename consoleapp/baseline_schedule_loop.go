@@ -603,7 +603,17 @@ func startBackupScheduleLoop(ctx context.Context, sched *backupScheduler) {
 		return
 	}
 	sched.observeAll(time.Now().UTC())
-	slog.Info("backup schedule loop enabled", "tick", backupScheduleTick, "full_backups", sched.fullBackups)
+	// Logged HERE and not only in the refresh loop: a daemon that runs backup
+	// schedules and no refresh interval never reaches that other line, so
+	// before #1681 flipped the default there was no surface at all naming
+	// what this daemon does with a table that did not change.
+	//
+	// BOTH keys, because either one alone misleads: with table deltas on (the
+	// default) an unchanged table keeps its file whatever the reuse flag
+	// says, so a bare reuse_unchanged=false would read as "every table is
+	// rewritten" on a daemon that rewrites nothing.
+	slog.Info("backup schedule loop enabled", "tick", backupScheduleTick, "full_backups", sched.fullBackups,
+		"reuse_unchanged_path", sched.carryDefault, "table_deltas", sched.sup.tableDeltas)
 	go func() {
 		t := time.NewTicker(backupScheduleTick)
 		defer t.Stop()

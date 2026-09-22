@@ -1,7 +1,9 @@
 package console
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -346,25 +348,66 @@ func TestRegistrySetRotationRefusedReadOnly(t *testing.T) {
 	}
 }
 
-// TestRegistryBaselineRefreshRoundTripOnDisk pins the tri-state THROUGH a
-// save and a reload, which is the half that was untested and the half that can
-// silently break.
-//
-// The distinction only exists on disk: absent means the daemon's flag decides,
-// present-and-false means a console override beats a flag saying true. If YAML
-// dropped a pointer to a zero struct as empty, both would reload as absent, the
-// override would evaporate on the next daemon restart, and nothing in memory
-// would ever show it.
-func TestRegistryBaselineRefreshRoundTripOnDisk(t *testing.T) {
-	r, path := tmpRegistry(t)
-	if _, ok := r.BaselineRefresh(); ok {
-		t.Fatal("a fresh registry must carry no baseline-refresh override")
+// TestRegistryOldBaselineRefreshKeySaysItIsIgnored (#1681): an operator who
+// turned reuse off in the old console has that choice in this file, and this
+// build does not read it. Loading says so once, with the flag that still
+// turns reuse off: otherwise the daemon reuses files that operator asked it
+// not to, the card says reuse is always on, and nothing connects the two.
+func TestRegistryOldBaselineRefreshKeySaysItIsIgnored(t *testing.T) {
+	load := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "console-servers.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(prev)
+		if _, err := LoadRegistry(path); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
 	}
+	out := load(t, "version: 1\nbaseline_refresh:\n  carry_forward_unchanged: false\nservers: []\n")
+	for _, want := range []string{"no longer read", "--baseline-carry-forward-unchanged=false", "left in the file untouched", "file="} {
+		if !strings.Contains(out, want) {
+			t.Errorf("loading a registry with the old block did not warn about %q; the operator's saved choice is dropped in silence:\n%s", want, out)
+		}
+	}
+	// And nothing is said where nothing was discarded: a file without the
+	// block, and a block that asked for what this build already does. A
+	// warning nobody can act on is worse than none.
+	for _, quiet := range []string{
+		"version: 1\nservers: []\n",
+		"version: 1\nbaseline_refresh:\n  carry_forward_unchanged: true\nservers: []\n",
+	} {
+		if out := load(t, quiet); strings.Contains(out, "no longer read") {
+			t.Errorf("warned about a registry that discarded nothing (%q):\n%s", quiet, out)
+		}
+	}
+}
 
-	// The dangerous direction: an override whose value equals the zero value.
-	if err := r.SetBaselineRefresh(&BaselineRefreshConfig{CarryForwardUnchanged: false}); err != nil {
+// TestRegistryOldBaselineRefreshKeyIsIgnoredAndKept (#1681): the console's
+// saved "reuse unchanged tables" override is gone. A registry written by an
+// older binary still carries the block, and two things must hold: this build
+// ignores it (reuse is always on, decided by the daemon flag alone), and a
+// save does not silently drop it — the envelope's Extra catch-all carries it,
+// so an operator who goes back to an older binary finds their value intact.
+func TestRegistryOldBaselineRefreshKeyIsIgnoredAndKept(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "console-servers.yaml")
+	old := "version: 1\nbaseline_refresh:\n  carry_forward_unchanged: false\nservers: []\n"
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	r, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatalf("a registry with the old block must still load: %v", err)
+	}
+	if r.ReadOnly() {
+		t.Fatal("the old block made the file read-only; it is an ordinary version-1 file")
+	}
+	// A write of something else must carry the unknown block through.
 	if _, err := r.Add(ServerEntry{Name: "prod", DSN: "u:p@tcp(h:3306)/idx"}); err != nil {
 		t.Fatal(err)
 	}
@@ -373,59 +416,13 @@ func TestRegistryBaselineRefreshRoundTripOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(raw), "carry_forward_unchanged: false") {
-		t.Fatalf("an override of false was not written explicitly, so it cannot reload as an override:\n%s", raw)
+		t.Fatalf("saving dropped the old baseline_refresh block, so a downgrade loses the operator's value:\n%s", raw)
 	}
-
 	r2, err := LoadRegistry(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bc, ok := r2.BaselineRefresh()
-	if !ok {
-		t.Fatal("an override of false reloaded as ABSENT; the daemon flag would silently win over the operator's saved choice")
-	}
-	if bc.CarryForwardUnchanged {
-		t.Errorf("value did not round-trip: got %+v", bc)
-	}
 	if r2.Len() != 1 {
-		t.Errorf("server entry lost alongside the baseline_refresh block: len=%d", r2.Len())
-	}
-
-	// And back to absent. Without this the panel is a one-way door.
-	if err := r2.SetBaselineRefresh(nil); err != nil {
-		t.Fatal(err)
-	}
-	r3, err := LoadRegistry(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := r3.BaselineRefresh(); ok {
-		t.Fatal("clearing the override did not survive a reload; the daemon flag can never be heard again")
-	}
-	if r3.Len() != 1 {
-		t.Errorf("clearing the override dropped a server entry: len=%d", r3.Len())
-	}
-}
-
-// TestRegistrySetBaselineRefreshRefusedReadOnly: a newer-version file loads
-// read-only, so this mutation is refused like every other one. Both the write
-// and the clear, because the clear is also a write.
-func TestRegistrySetBaselineRefreshRefusedReadOnly(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "console-servers.yaml")
-	if err := os.WriteFile(path, []byte("version: 999\nservers: []\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r, err := LoadRegistry(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := r.SetBaselineRefresh(&BaselineRefreshConfig{CarryForwardUnchanged: true}); !errors.Is(err, ErrRegistryReadOnly) {
-		t.Fatalf("SetBaselineRefresh on a read-only registry = %v, want ErrRegistryReadOnly", err)
-	}
-	if err := r.SetBaselineRefresh(nil); !errors.Is(err, ErrRegistryReadOnly) {
-		t.Fatalf("clearing on a read-only registry = %v, want ErrRegistryReadOnly", err)
-	}
-	if _, ok := r.BaselineRefresh(); ok {
-		t.Fatal("a refused mutation left an override in memory")
+		t.Errorf("server entry lost alongside the old block: len=%d", r2.Len())
 	}
 }

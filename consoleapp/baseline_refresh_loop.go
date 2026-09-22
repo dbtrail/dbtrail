@@ -24,10 +24,10 @@ type refreshRequest struct {
 	ServerName  string
 	IndexDSN    string
 	BaselineDir string
-	// CarryForwardUnchanged is the EFFECTIVE setting for this cycle: a console
-	// override if one is saved, else the daemon's own flag. Resolved per cycle
-	// rather than at boot so a change made in the settings panel takes effect
-	// on the next tick, the same way a rotation override does.
+	// CarryForwardUnchanged is the setting for this cycle: the daemon's own
+	// flag, which since #1681 is the only source (on by default). Still
+	// resolved per cycle rather than cached at boot, so the value each request
+	// carries is the one in force when it was built.
 	CarryForwardUnchanged bool
 	// TableDeltas is the daemon's --baseline-table-deltas (#1638), stamped onto
 	// the request by executeRefresh. Not resolved per server and not read by a
@@ -355,8 +355,8 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// is indistinguishable from "this path cannot reuse anything" — and on an
 	// S3 source it is always the second (carryForwardEligible refuses any
 	// s3:// previous snapshot, since carrying a file forward means hard-linking
-	// it). The operator turned the setting on and the console said "Unchanged
-	// tables will be reused", so a count that CANNOT be nonzero has to say so.
+	// it). Reuse is on and the card says unchanged tables keep their file, so
+	// a count that CANNOT be nonzero here has to say so.
 	if req.CarryForwardUnchanged && strings.HasPrefix(baselineFoldSource(req), "s3://") {
 		pub = append(pub, "reuse_unchanged", "not applicable: the previous backup is read from S3, and reusing a file means linking it on disk")
 	}
@@ -1414,11 +1414,11 @@ func startBaselineRefreshLoop(ctx context.Context, reg *console.Registry, sup *b
 	}
 	targets, skipped := baselineRefreshTargets(registryEntries(reg), globalDSN, globalBaselineDir)
 	logSkippedRefreshTargets(skipped)
-	// Name the effective reuse setting AND where it came from, once, at the one
-	// moment an operator is reading the log to see whether their configuration
-	// took. A console override beats the command line silently by design, so
-	// without this line the only symptom of a stale saved toggle is work that
-	// keeps happening, or stops happening, for no stated reason.
+	// Name the reuse setting AND where it came from, once, at the one moment
+	// an operator is reading the log to see whether their configuration took.
+	// Since #1681 the source is always the flag, and the line stays: the
+	// alternative is work that keeps happening, or stops happening, for no
+	// stated reason.
 	carryOn, carrySource := carryForwardProvenance(reg, carryDefault)
 	slog.Info("baseline refresh loop enabled", "interval", interval, "servers", len(targets),
 		"reuse_unchanged", carryOn, "reuse_set_by", carrySource)
@@ -1823,36 +1823,23 @@ func refreshTargetsWith(reg *console.Registry, globalDSN, globalBaselineDir stri
 	return reqs
 }
 
-// effectiveCarryForward resolves what this cycle should do: a console-saved
-// override wins over the daemon's own flag.
+// effectiveCarryForward resolves what this cycle should do, which since #1681
+// is whatever the daemon flag says: the console-saved override is gone, and a
+// `baseline_refresh:` block left in an old registry file is ignored (the
+// registry warns about it once at load).
 //
-// Read per cycle, not cached at boot. A console override is meant to apply to a
-// loop that is already running, which is the same contract the rotation panel
-// has, and caching would make the panel look inert until a restart.
-//
-// A registry that cannot be consulted falls back to the daemon flag rather than
-// to false: the operator's explicit command line is a better answer than a
-// silent no.
+// The registry parameter is threaded through and unused, kept because both
+// call sites pass the registry they are already iterating and a future
+// per-server answer would be resolved here.
 func effectiveCarryForward(reg *console.Registry, daemonDefault bool) bool {
 	on, _ := carryForwardProvenance(reg, daemonDefault)
 	return on
 }
 
-// carryForwardProvenance resolves the same value and also names WHERE it came
-// from, which is the half that has to be logged.
-//
-// The two sources disagree silently by design: a saved override of false beats
-// a command line saying true, and that is the point of the tri-state. It also
-// means an operator can pass the flag, watch every table get rewritten, and
-// have nothing anywhere tell them a console toggle from months ago is the
-// reason. The provenance string exists so one log line can.
-func carryForwardProvenance(reg *console.Registry, daemonDefault bool) (on bool, source string) {
-	if reg == nil {
-		return daemonDefault, "daemon flag or environment"
-	}
-	if bc, ok := reg.BaselineRefresh(); ok {
-		return bc.CarryForwardUnchanged, "setting saved in the web interface, which overrides the daemon flag"
-	}
+// carryForwardProvenance names where the value came from, for the one log
+// line that reports it. Since #1681 there is only one source: the console's
+// saved override is gone, so the flag (on by default) always decides.
+func carryForwardProvenance(_ *console.Registry, daemonDefault bool) (on bool, source string) {
 	return daemonDefault, "daemon flag or environment"
 }
 

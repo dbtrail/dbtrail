@@ -262,30 +262,22 @@ func TestBaselineFiles_joinsRunHistory(t *testing.T) {
 //
 // Resolving at request time is deliberate. A restore runs asynchronously, so
 // binding the value the operator was looking at is more honest than re-reading
-// it whenever the fold happens to start. Both branches are asserted because the
-// override is the whole point: a daemon default of off with a saved override of
-// on must reach the restore as on.
+// it whenever the fold happens to start. Both branches are asserted because
+// false is the zero value: a restore that dropped the field entirely would
+// still pass the off leg.
 func TestBaselineRestore_carriesTheEffectiveReuseSetting(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		daemon   bool
-		override *bool
-		want     bool
+		name   string
+		daemon bool
+		want   bool
 	}{
-		{"daemon flag off, nothing saved", false, nil, false},
-		{"daemon flag on, nothing saved", true, nil, true},
-		{"override on beats a flag saying off", false, boolPtrRestore(true), true},
-		{"override off beats a flag saying on", true, boolPtrRestore(false), false},
+		{"daemon flag off", false, false},
+		{"daemon flag on", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := &stubRestorer{}
 			srv := newRestoreServer(t, stub)
 			srv.baselineRefreshDefaults = BaselineRefreshDefaults{CarryForwardUnchanged: tc.daemon, Enabled: true}
-			if tc.override != nil {
-				if err := srv.cm.reg.SetBaselineRefresh(&BaselineRefreshConfig{CarryForwardUnchanged: *tc.override}); err != nil {
-					t.Fatal(err)
-				}
-			}
 			id := addRestoreEntry(t, srv, t.TempDir())
 
 			rec, body := doServersReq(t, srv, "POST", "/api/servers/"+id+"/baseline/restore",
@@ -303,8 +295,6 @@ func TestBaselineRestore_carriesTheEffectiveReuseSetting(t *testing.T) {
 		})
 	}
 }
-
-func boolPtrRestore(b bool) *bool { return &b }
 
 // TestBaselineRestore_carriesTheServersS3Destination: the handler puts the
 // server's OWN S3 destination in the request, so the restore looks for the

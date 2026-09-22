@@ -2,13 +2,15 @@ package console
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
-// GET reports the injected daemon default until an override is saved, then the
-// override, and the source field flips so the panel can say which one an
-// operator is looking at.
-func TestBaselineRefreshGet_defaultThenOverride(t *testing.T) {
+// GET reports what the daemon runs, which since #1681 is its own flag and
+// nothing else: the console-saved override is gone, and so is the "source"
+// field that named which of the two had won.
+func TestBaselineRefreshGet_reportsTheDaemonFlag(t *testing.T) {
 	srv, _ := newSupervisorServer(t)
 	srv.baselineRefreshDefaults = BaselineRefreshDefaults{CarryForwardUnchanged: true, Enabled: true}
 
@@ -20,31 +22,49 @@ func TestBaselineRefreshGet_defaultThenOverride(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.CarryForwardUnchanged || got.Source != "default" || !got.Enabled {
-		t.Fatalf("before any override: %+v, want the daemon flag reported as the default", got)
+	if !got.CarryForwardUnchanged || !got.Enabled {
+		t.Fatalf("got %+v, want the daemon flag reported as it is", got)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["source"]; ok {
+		t.Errorf("the wire still carries a source field: %s; there is one source now, so naming it invites a reader to look for the other", body)
 	}
 
-	// An override that says FALSE is the case a value type could not express:
-	// it must be distinguishable from "nobody has saved anything", or turning
-	// the behaviour off in the panel would silently fall back to the flag that
-	// turns it on.
-	rec, body = doServersReq(t, srv, "PUT", "/api/baseline-refresh", `{"carry_forward_unchanged":false}`)
-	if rec.Code != 200 {
-		t.Fatalf("PUT code=%d body=%s", rec.Code, body)
-	}
+	// A daemon started with reuse off is the one case left where this is false.
+	srv.baselineRefreshDefaults = BaselineRefreshDefaults{CarryForwardUnchanged: false, Enabled: true}
+	_, body = doServersReq(t, srv, "GET", "/api/baseline-refresh", "")
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.CarryForwardUnchanged || got.Source != "override" {
-		t.Fatalf("after saving false: %+v, want the override to win over the daemon flag", got)
+	if got.CarryForwardUnchanged {
+		t.Errorf("got %+v, want the flag's own value: the card draws what the daemon does", got)
 	}
+}
 
-	rec, body = doServersReq(t, srv, "GET", "/api/baseline-refresh", "")
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatal(err)
+// TestBaselineRefreshUpdate_isGone (#1681): the console cannot write this
+// setting any more. The route is not registered, so the write a stale client
+// or an old bookmark sends is refused by the mux rather than half-handled.
+func TestBaselineRefreshUpdate_isGone(t *testing.T) {
+	srv, _ := newSupervisorServer(t)
+	rec, body := doServersReq(t, srv, "PUT", "/api/baseline-refresh", `{"carry_forward_unchanged":false}`)
+	if rec.Code < 400 {
+		t.Fatalf("PUT code=%d body=%s, want a refusal: the setting is not editable any more", rec.Code, body)
 	}
-	if got.CarryForwardUnchanged || got.Source != "override" {
-		t.Fatalf("the override did not survive a re-read: %+v (code=%d)", got, rec.Code)
+	// And the read still works, since the card still reports what the daemon does.
+	if rec, _ := doServersReq(t, srv, "GET", "/api/baseline-refresh", ""); rec.Code != 200 {
+		t.Errorf("GET code=%d, want 200", rec.Code)
+	}
+	// The read-only console, which runs no loop and takes no backups: same
+	// answers, and this is the only test that drives the route there.
+	ro := newRegistryServer(t)
+	if rec, body := doServersReq(t, ro, "PUT", "/api/baseline-refresh", `{}`); rec.Code < 400 {
+		t.Errorf("PUT on the read-only console: code=%d body=%s, want a refusal", rec.Code, body)
+	}
+	if rec, _ := doServersReq(t, ro, "GET", "/api/baseline-refresh", ""); rec.Code != 200 {
+		t.Errorf("GET on the read-only console: code=%d, want 200", rec.Code)
 	}
 }
 
@@ -89,147 +109,21 @@ func TestBaselineRefreshGet_targetsAreLiveAndOmittedOffWatch(t *testing.T) {
 			"keep the stale zero and the alarm would cry wolf forever", got)
 	}
 
-	// The counts must survive an OVERRIDE, on the PUT response and on every
-	// read after it. They are appended after the override branch for exactly
-	// this reason, and the browser-side render matrix cannot see a server-side
-	// branch: an early return there makes the alarm and the skip note vanish
-	// the moment an operator uses this card's own switch.
+	// The counts are appended after everything else the DTO carries, and a
+	// browser-side render matrix cannot see a server-side early return, so a
+	// third read pins that they keep coming back.
 	//
-	// Decoded into a FRESH struct each time, never the one above: Unmarshal
-	// leaves a field the payload omits at its previous value, so reusing `got`
-	// would carry the pointer from the read before and the assertion would pass
+	// Decoded into a FRESH struct, never the one above: Unmarshal leaves a
+	// field the payload omits at its previous value, so reusing `got` would
+	// carry the pointer from the read before and the assertion would pass
 	// against a response that dropped the key.
-	rec, body := doServersReq(t, srv, "PUT", "/api/baseline-refresh", `{"carry_forward_unchanged":true}`)
-	if rec.Code != 200 {
-		t.Fatalf("PUT code=%d body=%s", rec.Code, body)
-	}
-	var put baselineRefreshDTO
-	if err := json.Unmarshal(body, &put); err != nil {
-		t.Fatal(err)
-	}
-	if put.Source != "override" || put.Targets == nil || put.SkippedS3Only != 2 {
-		t.Fatalf("PUT response: %+v (%s), want the override plus both counts", put, body)
-	}
 	_, body = doServersReq(t, srv, "GET", "/api/baseline-refresh", "")
 	var after baselineRefreshDTO
 	if err := json.Unmarshal(body, &after); err != nil {
 		t.Fatal(err)
 	}
-	if after.Source != "override" || after.Targets == nil || after.SkippedS3Only != 2 {
-		t.Fatalf("read after the override: %+v (%s), want the override plus both counts", after, body)
-	}
-}
-
-// Enabled is the loop's boot-time liveness and must NOT be implied by the
-// presence of an override: a daemon started with no refresh schedule runs no
-// loop, so a saved setting is dormant until a restart and the panel has to keep
-// saying so.
-func TestBaselineRefreshGet_enabledIsNotImpliedByAnOverride(t *testing.T) {
-	srv, _ := newSupervisorServer(t)
-	srv.baselineRefreshDefaults = BaselineRefreshDefaults{Enabled: false}
-
-	if rec, body := doServersReq(t, srv, "PUT", "/api/baseline-refresh", `{"carry_forward_unchanged":true}`); rec.Code != 200 {
-		t.Fatalf("PUT code=%d body=%s", rec.Code, body)
-	}
-	_, body := doServersReq(t, srv, "GET", "/api/baseline-refresh", "")
-	var got baselineRefreshDTO
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Enabled {
-		t.Error("saving an override reported the loop as running; it is not, and the panel would stop " +
-			"warning that a restart is needed")
-	}
-	if !got.CarryForwardUnchanged {
-		t.Error("the override was lost")
-	}
-}
-
-// The read-only console runs no refresh loop, so there is nothing for a saved
-// setting to reach. Refusing is better than storing a value that will never be
-// consulted.
-func TestBaselineRefreshUpdate_refusedOnTheReadOnlyConsole(t *testing.T) {
-	srv := newRegistryServer(t) // no MonitorCtrl
-	rec, body := doServersReq(t, srv, "PUT", "/api/baseline-refresh", `{"carry_forward_unchanged":true}`)
-	if rec.Code != 403 {
-		t.Fatalf("PUT on the read-only console: code=%d body=%s, want 403", rec.Code, body)
-	}
-	// GET still works there: reading the effective policy leaks nothing and the
-	// panel needs it to render.
-	if rec, _ := doServersReq(t, srv, "GET", "/api/baseline-refresh", ""); rec.Code != 200 {
-		t.Errorf("GET on the read-only console: code=%d, want 200", rec.Code)
-	}
-}
-
-// A body with the key missing decodes to false, which is the conservative
-// value. Pinned because the alternative reading (treat absent as "leave it
-// alone") would make a truncated request silently turn the behaviour ON when
-// the daemon flag has it on.
-func TestBaselineRefreshUpdate_missingKeyMeansOff(t *testing.T) {
-	srv, _ := newSupervisorServer(t)
-	srv.baselineRefreshDefaults = BaselineRefreshDefaults{CarryForwardUnchanged: true, Enabled: true}
-
-	_, body := doServersReq(t, srv, "PUT", "/api/baseline-refresh", `{}`)
-	var got baselineRefreshDTO
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.CarryForwardUnchanged {
-		t.Error("an empty body was read as consent to reuse files; absent must mean off")
-	}
-}
-
-// TestBaselineRefreshUpdate_useDefaultClearsTheOverride: the panel must not be
-// a one-way door.
-//
-// The tri-state that lets a saved false beat a daemon flag saying true also
-// means that once ANYTHING is saved, the flag can never be heard again. Without
-// a clear, an operator who passes --baseline-carry-forward-unchanged watches
-// every table get rewritten because of a toggle from months ago, with nothing
-// anywhere naming the reason.
-func TestBaselineRefreshUpdate_useDefaultClearsTheOverride(t *testing.T) {
-	srv, _ := newSupervisorServer(t)
-	srv.baselineRefreshDefaults = BaselineRefreshDefaults{CarryForwardUnchanged: true, Enabled: true}
-
-	rec, body := doServersReq(t, srv, "PUT", "/api/baseline-refresh", `{"carry_forward_unchanged":false}`)
-	if rec.Code != 200 {
-		t.Fatalf("PUT code=%d body=%s", rec.Code, body)
-	}
-	if _, ok := srv.cm.reg.BaselineRefresh(); !ok {
-		t.Fatal("saving false stored no override")
-	}
-
-	rec, body = doServersReq(t, srv, "PUT", "/api/baseline-refresh", `{"use_default":true}`)
-	if rec.Code != 200 {
-		t.Fatalf("clear code=%d body=%s", rec.Code, body)
-	}
-	if _, ok := srv.cm.reg.BaselineRefresh(); ok {
-		t.Fatal("use_default did not clear the override; the daemon flag is still unreachable")
-	}
-	var got baselineRefreshDTO
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatal(err)
-	}
-	if !got.CarryForwardUnchanged || got.Source != "default" {
-		t.Fatalf("after clearing: %+v, want the daemon flag reported as the default again", got)
-	}
-}
-
-// TestBaselineRefreshUpdate_useDefaultWinsOverTheValue: use_default is an
-// instruction, not a value, so a body carrying both must clear rather than save
-// whatever carry_forward_unchanged happened to hold. The console never sends
-// both; the point is that the handler cannot be talked into storing a value it
-// was told to discard.
-func TestBaselineRefreshUpdate_useDefaultWinsOverTheValue(t *testing.T) {
-	srv, _ := newSupervisorServer(t)
-	srv.baselineRefreshDefaults = BaselineRefreshDefaults{CarryForwardUnchanged: false, Enabled: true}
-
-	if rec, body := doServersReq(t, srv, "PUT", "/api/baseline-refresh",
-		`{"carry_forward_unchanged":true,"use_default":true}`); rec.Code != 200 {
-		t.Fatalf("PUT code=%d body=%s", rec.Code, body)
-	}
-	if bc, ok := srv.cm.reg.BaselineRefresh(); ok {
-		t.Fatalf("stored an override %+v when the body asked for the daemon default", bc)
+	if after.Targets == nil || after.SkippedS3Only != 2 {
+		t.Fatalf("third read: %+v (%s), want both counts", after, body)
 	}
 }
 
@@ -241,7 +135,15 @@ func TestBaselineRefreshUpdate_useDefaultWinsOverTheValue(t *testing.T) {
 // be deleted. Built through New() instead, so dropping that line reports the
 // zero value: reuse off, no schedule, on a daemon running with both.
 func TestBaselineRefreshGet_defaultsTravelThroughNew(t *testing.T) {
-	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
+	// The registry carries the block an older console saved, saying the
+	// opposite of the daemon flag below: this build ignores it (#1681), so
+	// what the card reads is the flag. A reader is the only way to see that
+	// the ignoring is real rather than a missing field.
+	path := filepath.Join(t.TempDir(), "console-servers.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nbaseline_refresh:\n  carry_forward_unchanged: false\nservers: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := LoadRegistry(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,12 +163,10 @@ func TestBaselineRefreshGet_defaultsTravelThroughNew(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !got.CarryForwardUnchanged {
-		t.Error("the daemon's reuse flag did not survive New(); the panel would offer to turn on what is already on")
+		t.Error("the daemon's reuse flag did not survive New() (or the old saved block beat it); the card " +
+			"would draw every table being rewritten while the daemon reuses them")
 	}
 	if !got.Enabled {
 		t.Error("the daemon's loop liveness did not survive New(); the panel would call a live setting dormant")
-	}
-	if got.Source != "default" {
-		t.Errorf("Source=%q, want \"default\"", got.Source)
 	}
 }

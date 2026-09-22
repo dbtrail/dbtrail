@@ -732,15 +732,20 @@ func TestUpConsoleConfig_baselineRefreshDefaultsReachTheConsole(t *testing.T) {
 // Both halves are load-bearing and neither was covered. An env var that
 // overrode an explicit --baseline-carry-forward-unchanged=false would change
 // the on-disk shape of an operator's backups against their written instruction,
-// and a value like "yes" silently turning it on is the "unreadable value must
-// never be read as consent" rule this parse exists for.
+// and a value like "yes" deciding anything is the "unreadable value must never
+// be read as an instruction" rule this parse exists for. Since #1681 the
+// default is ON, so a bad value leaves reuse on rather than off.
 func TestResolveUpConsoleEnv_carryForwardPrecedence(t *testing.T) {
 	prev := upBaselineCarryForward
 	t.Cleanup(func() { upBaselineCarryForward = prev })
 
 	newCmd := func() *cobra.Command {
 		cmd := &cobra.Command{Use: "watch"}
-		cmd.Flags().BoolVar(&upBaselineCarryForward, "baseline-carry-forward-unchanged", false, "")
+		// true, like the shipped flag since #1681: with a false fixture the
+		// unreadable-value cases below passed against a default production no
+		// longer has, and an operator who typed a bad value meaning OFF gets
+		// the default, which is now ON.
+		cmd.Flags().BoolVar(&upBaselineCarryForward, "baseline-carry-forward-unchanged", true, "")
 		return cmd
 	}
 
@@ -752,18 +757,21 @@ func TestResolveUpConsoleEnv_carryForwardPrecedence(t *testing.T) {
 	}{
 		{"env on, no flag", "true", "", true},
 		{"env off, no flag", "false", "", false},
-		{"unset, no flag", "", "", false},
-		// Not a true/false value: keeps the default, never read as consent.
-		{"env says yes, no flag", "yes", "", false},
-		{"env says on, no flag", "on", "", false},
-		{"env typo, no flag", "ture", "", false},
+		{"unset, no flag", "", "", true},
+		// Not a true/false value: keeps the default, never read as an
+		// instruction. Since the default is ON, an operator who meant to turn
+		// reuse off and mistyped the value keeps reuse on, and envBoolOr says
+		// so in the log.
+		{"env says yes, no flag", "yes", "", true},
+		{"env says on, no flag", "on", "", true},
+		{"env typo, no flag", "ture", "", true},
 		// An explicit flag is the operator's written instruction; the
 		// environment must not overrule it in either direction.
 		{"env on, flag says false", "true", "false", false},
 		{"env off, flag says true", "false", "true", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			upBaselineCarryForward = false
+			upBaselineCarryForward = true // the shipped default
 			t.Setenv("BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED", tc.env)
 			cmd := newCmd()
 			if tc.flagSet != "" {
@@ -789,13 +797,14 @@ func TestResolveUpConsoleEnv_carryForwardPrecedence(t *testing.T) {
 // and re-declares the flag with a hardcoded false, which is right for testing
 // precedence and blind to the shipped default: it substitutes its fixture for
 // the production declaration rather than reading it. This reads the real one.
-func TestWatchCarryForwardFlagIsOffByDefault(t *testing.T) {
+func TestWatchCarryForwardFlagIsOnByDefault(t *testing.T) {
 	f := watchCmd.Flags().Lookup("baseline-carry-forward-unchanged")
 	if f == nil {
-		t.Fatal("--baseline-carry-forward-unchanged is gone from watch; this guard covers nothing")
+		t.Fatal("--baseline-carry-forward-unchanged is gone from watch; it is the only way to turn reuse off now")
 	}
-	if f.DefValue != "false" {
-		t.Fatalf("default = %q, want \"false\": the daemon would reuse files nobody asked it to", f.DefValue)
+	if f.DefValue != "true" {
+		t.Fatalf("default = %q, want \"true\": since #1681 reusing a table that did not change is always on, "+
+			"and the console no longer offers to turn it on", f.DefValue)
 	}
 }
 

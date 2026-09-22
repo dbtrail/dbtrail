@@ -25,8 +25,9 @@ import (
 // (the flag or environment variable is in force) has to be distinguishable
 // from "saved as empty" (the operator turned it off), or clearing a value in
 // the interface would silently hand the setting back to the flag that set it.
-// Same reasoning as BaselineRefreshConfig's pointer, one level deeper: here
-// each row is saved on its own, so the tri-state has to be per row.
+// Same reasoning the removed baseline-refresh override had for its pointer
+// (#1681), one level deeper: here each row is saved on its own, so the
+// tri-state has to be per row.
 type BackupSettings struct {
 	// BaselineRetain prunes local snapshots older than this once a durable
 	// copy exists elsewhere (--baseline-retain).
@@ -121,8 +122,7 @@ func (r *Registry) BackupSettings() BackupSettings {
 
 // SetBackupSetting saves one key, or clears it when value is nil — clearing is
 // what hands the setting back to the flag or environment variable, and without
-// it the interface would be a one-way door (see SetBaselineRefresh, same
-// reasoning). The in-memory value rolls back if the write fails, so the file
+// it the interface would be a one-way door. The in-memory value rolls back if the write fails, so the file
 // and this process never disagree.
 //
 // The value is stored verbatim, trimmed. Grammar is the caller's to validate:

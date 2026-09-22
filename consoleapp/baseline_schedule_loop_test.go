@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -743,12 +744,43 @@ func TestBackupScheduler_startFullKeepsTheBecause(t *testing.T) {
 	}
 }
 
-// The scheduled rebuild carries the effective reuse setting: the console's
-// saved override over the daemon flag, the same resolution the refresh loop
-// and a restore use. Hardcoding either value compiled and passed.
+// TestStartBackupScheduleLoop_namesReuse (#1681): a daemon that runs backup
+// schedules and no refresh interval never reaches the refresh loop's log line,
+// so this one is the only place that names what it does with a table that did
+// not change. Since reuse is on by default, a daemon that never reused now
+// does, and the log has to say so.
+func TestStartBackupScheduleLoop_namesReuse(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		b, _, _ := newScheduleFixture(t, true)
+		b.carryDefault = want
+		b.sup.tableDeltas = !want // the other half, and never the same value
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		ctx, cancel := context.WithCancel(context.Background())
+		startBackupScheduleLoop(ctx, b)
+		cancel()
+		slog.SetDefault(prev)
+		got := buf.String()
+		if !strings.Contains(got, "reuse_unchanged_path="+strconv.FormatBool(want)) {
+			t.Errorf("the schedule loop did not report reuse_unchanged_path=%v at startup; on this daemon nothing else names it:\n%s", want, got)
+		}
+		// Both keys: with table deltas on, an unchanged table keeps its file
+		// whatever the reuse flag says, so either key alone misleads.
+		if !strings.Contains(got, "table_deltas="+strconv.FormatBool(!want)) {
+			t.Errorf("the schedule loop did not report table_deltas=%v; reuse_unchanged_path alone reads as "+
+				"'every table is rewritten' on a daemon that rewrites nothing:\n%s", !want, got)
+		}
+	}
+}
+
+// The scheduled rebuild carries the reuse setting the daemon was started
+// with, the same resolution the refresh loop and a restore use (#1681 left the
+// flag as the only source). Hardcoding either value compiled and passed, so
+// both directions are driven.
 func TestBackupScheduler_rebuildCarriesTheEffectiveCarryForward(t *testing.T) {
 	for _, want := range []bool{true, false} {
-		t.Run(map[bool]string{true: "override on", false: "override off"}[want], func(t *testing.T) {
+		t.Run(map[bool]string{true: "flag on", false: "flag off"}[want], func(t *testing.T) {
 			var mu sync.Mutex
 			var got []bool
 			holdFold(t, func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
@@ -758,10 +790,7 @@ func TestBackupScheduler_rebuildCarriesTheEffectiveCarryForward(t *testing.T) {
 				return nil, nil, nil
 			})
 			b, reg, _ := newScheduleFixture(t, true)
-			b.carryDefault = !want // the flag says the opposite; the override must win
-			if err := reg.SetBaselineRefresh(&console.BaselineRefreshConfig{CarryForwardUnchanged: want}); err != nil {
-				t.Fatal(err)
-			}
+			b.carryDefault = want
 			e := addScheduled(t, reg, true)
 			fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC))
 			waitTerminal(t, b, e.ID)

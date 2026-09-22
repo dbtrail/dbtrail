@@ -482,8 +482,8 @@ func TestBackupScheduleAPI_permissionTier(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s backup-schedule is unclassified", m)
 		}
-		if got != permForRouteMust(t, "PUT", "/api/baseline-refresh") {
-			t.Fatalf("%s backup-schedule = %v, want the same tier as PUT /api/baseline-refresh", m, got)
+		if got != permForRouteMust(t, "PUT", "/api/servers/abc") {
+			t.Fatalf("%s backup-schedule = %v, want the same tier as PUT /api/servers/{id}", m, got)
 		}
 	}
 }

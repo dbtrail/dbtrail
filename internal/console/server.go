@@ -245,6 +245,12 @@ type BaselineRefreshDefaults struct {
 	// panel's copy has to distinguish "this applies to your restores but
 	// nothing is on a timer" from "this applies to nothing until a restart".
 	Scheduled bool
+	// TableDeltas is the daemon's --baseline-table-deltas (#1638, on by
+	// default). The card needs it to tell the truth with
+	// CarryForwardUnchanged OFF: table deltas publish a table that did not
+	// change by linking its previous file too, so "every table is written
+	// again" is only true when BOTH are off.
+	TableDeltas bool
 }
 
 // Server is a configured, ready-to-run console HTTP server. It holds only
@@ -719,10 +725,11 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/backup-settings", s.handleBackupSettingsGet)
 	api.HandleFunc("PUT /api/backup-settings/servers/{id}", s.handleBackupSettingsServerUpdate)
 	api.HandleFunc("PUT /api/backup-settings/daemon/{key}", s.handleBackupSettingsDaemonUpdate)
-	// Global baseline-refresh policy. Same split as rotation: read the
-	// effective settings, PUT an override the running loop picks up next cycle.
+	// Global baseline-refresh policy, read-only since #1681: reusing an unchanged table's file is always on,
+	// so there is nothing here to write. The GET stays because the Backup
+	// settings card still reports what the daemon does and whether anything
+	// consumes it.
 	api.HandleFunc("GET /api/baseline-refresh", s.handleBaselineRefreshGet)
-	api.HandleFunc("PUT /api/baseline-refresh", s.handleBaselineRefreshUpdate)
 	// Authenticated auth verbs. Registered on the inner mux so a forgotten
 	// root registration breaks login, never security (ServeMux specificity
 	// keeps them under the tokenMiddleware-wrapped /api/ catch-all).

@@ -662,13 +662,20 @@ location at all.
 
 The page shows the three kinds of setting instead of describing them (#1603).
 Two section labels split it: **Change here** and **Set when DBTrail starts**.
+The disk-space card sits under the second one since #1681, beside the other
+values that come from the launch command.
 
-- **Backups & disk space** (change here) — the carry-forward toggle, moved
-  here from the Backups page; it applies live. What it does is drawn: two
-  backups of five tables, the unchanged ones carried across as dashed tiles
-  and the changed ones written again, with one sentence under it. The
-  local-only rule, the S3 skip count and whose choice the value was sit in a
-  compact **More about disk space** block, with links into the docs guide.
+- **Backups & disk space** (read-only since #1681, under **Set when DBTrail
+  starts**) — what DBTrail does with a
+  table that did not change: it keeps that table's previous file instead of
+  writing it again. There is nothing to click; reuse is always on, and only
+  `--baseline-carry-forward-unchanged=false` turns it off. What it does is
+  drawn: two backups of five tables, the unchanged ones carried across as
+  dashed tiles and the changed ones written again, with one sentence under it.
+  (`=false` turns off this path only: with table deltas on, the default, a
+  table that did not change is still published by linking its previous file.)
+  The local-only rule and the S3 skip count sit in a compact **More about disk
+  space** block, with links into the docs guide.
 - **Per server** (change here) — each registry server's Backup dir, Backup
   S3 and archive toggle, editable in place, with which location is in force
   drawn rather than said: the server's own case (own location, daemon
@@ -774,12 +781,18 @@ and lands on Retention.
   the truth). It does not apply when the previous snapshot is read from S3,
   which is what a per-server schedule on an S3-backed server does: linking a
   file needs both ends on a filesystem, so those runs take the ordinary path
-  and the daemon log says so. The setting is
-  **process-global** (`GET`/`PUT /api/baseline-refresh`) even though it sits
-  beside a per-server schedule; the card says so. It is consumed by the daemon-wide refresh interval, by the
-  per-server backup schedules, and by point-in-time restores; the card says
-  which of those are live. Saving here overrides the daemon flag without a
-  restart, and a **Use the default** button then clears the override.
+  and the daemon log says so. It is
+  **process-global** (`GET /api/baseline-refresh`, read-only) even though it
+  sits beside a per-server schedule; the card says so. It is consumed by the
+  daemon-wide refresh interval, by the per-server backup schedules, and by
+  point-in-time restores; the card says which of those are live. **Since
+  #1681 the console does not edit it**: reuse never publishes a table it
+  should not — a destructive DDL or a stale schema snapshot refuses the
+  backup before reuse is reached, a known capture gap makes that table
+  ineligible so it is written the ordinary way, and a failed `_MANIFEST`
+  check fails the run — so it is on for every daemon, and the daemon flag is the only thing that changes it.
+  A `baseline_refresh:` block saved by an older console is ignored, and kept
+  in the registry file untouched.
   See [dump-and-baseline.md](dump-and-baseline.md#refreshing-on-a-schedule).
 - **Staged downloads**: the `.sql` backups built from the Backups page that
   are waiting on the daemon's disk for their download: each build's server,
@@ -1492,6 +1505,7 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `POST /api/servers/{id}/monitor/stop` | Supervisor only: clear intent, drain the stream (final checkpoint), release the advisory lock. |
 | `GET /api/servers/{id}/monitor` | Supervisor only: `{monitor: {state, last_error, since, source_connected, retrying, phase}}` — `stopped\|pending\|running\|stalled\|lost_position\|failed`. `phase` names a long startup step a `pending` stream is inside, currently only `resume_cleanup` (the pre-capture delete of changes a replayed window would save twice); absent when none is running. |
 | `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a change is indexed. A first-backup step follows the capture steps: with its job's state when console backups are enabled and the server has its own baseline location, and as `waiting` with a `detail` and `fix` when backups are turned off for the daemon or the server has no baseline location of its own (#1677). It is left out only for a PostgreSQL server with no slot or publication (the server form refuses to save one), which cannot capture either. `complete` reads only the capture steps, so a backup step that cannot be done never holds the list open. `check_error` means the index database could not be read, and nothing is marked done from it. |
+| `GET /api/baseline-refresh` | What the daemon does with a table that did not change: `{carry_forward_unchanged, enabled, scheduled, targets, skipped_s3_only}`. Read-only since #1681 (the `PUT` and the `source` field are gone): `carry_forward_unchanged` is the daemon's own flag, on unless it was started with `--baseline-carry-forward-unchanged=false`; on the read-only console (`bintrail-console serve`), which has no such flag and takes no backups, it reads false. `enabled` reports whether anything in this daemon consumes it, `scheduled` whether a refresh timer runs, `targets` how many servers the next tick covers (omitted where no loop runs) and `skipped_s3_only` how many it skips for keeping backups only in S3. |
 | `GET /api/rotation` | Effective global rotation policy: `{retain, interval, add_future, source, enabled}` — `source` is `"override"` (console-saved) or `"default"` (daemon `--rotate-*`). |
 | `PUT /api/rotation` | Supervisor only (403 on the standalone console): save a global rotation override `{retain, interval, add_future}` (validated; `off` rejected). Applies live on the next cycle. |
 | `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. With `?location_only=1` it answers only `{configured, source, kind}` (the location the listing reads first: the server's own, else the daemon-wide default, a directory over a bucket) from configuration, without the schedule, the storage or the server's index; same permission as the listing, refused while a data profile is active (a named startup `--profile` even with no rules yet, or the session's, wider than the listing because the export it feeds is not redacted); any value other than `1` is a 400. Connect AI uses it for the Iceberg export command. |

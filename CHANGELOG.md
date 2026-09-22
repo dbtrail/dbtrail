@@ -22,6 +22,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and its + Add server opens the add form directly.
 
 ### Changed
+- **Reusing the file of a table that did not change is always on, and the
+  console no longer asks** (#1681). A backup that finds a table with no
+  changes in its window publishes that table's previous Parquet file instead
+  of writing it again, and it never publishes a table it should not: a
+  destructive DDL or a stale schema snapshot refuses the backup before reuse
+  is reached, a known capture gap makes that table ineligible so it is
+  written the ordinary way, and a failed `_MANIFEST` check fails the run. It was an opt-in for
+  control, not for correctness. What this means for you:
+  - The daemon flag `--baseline-carry-forward-unchanged` (and
+    `BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED`) now defaults to **on**.
+    `=false` turns off this path only: with `--baseline-table-deltas` on (the
+    default since v0.84.0) a table that did not change is still published by
+    linking its previous file, so writing every table again every time needs
+    both turned off.
+  - **If you had turned it off in the web interface, it is on again.** That
+    saved setting is ignored, and left in `console-servers.yaml` untouched.
+    The daemon says so once at startup, naming the file and the flag, so the
+    change does not have to be noticed from the disk figures.
+  - The **Backups & disk space** card on Backup settings has no switch any
+    more: it reports what the daemon does, with the same drawing.
+  - `PUT /api/baseline-refresh` is **gone**. `GET` stays, without its
+    `source` field, since there is one source now.
+  - Two backups that share a reused file share the bytes on disk, so a `du`
+    per snapshot directory double-counts them and a prune reports space it
+    will not reclaim while the newer snapshot points at that file. One `du`
+    over the backup directory reports the truth. Nothing about the rows
+    changes.
 - **The console's DuckDB schema card moved from Backups to Connect AI**
   (#1573), where it now shows with or without the `watch` daemon (before, it
   was on Connect only on `serve`), for a session that may read settings, which

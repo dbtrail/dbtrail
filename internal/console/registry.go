@@ -161,22 +161,35 @@ type RotationConfig struct {
 	AddFuture int    `yaml:"add_future"`
 }
 
-// BaselineRefreshConfig is the console-editable half of the baseline refresh
-// loop's configuration. The interval itself stays a daemon flag: it decides
-// whether the loop runs at all, and starting a loop that was not booted takes a
-// restart. What is here applies to a loop already running, because every cycle
-// re-reads the registry.
-type BaselineRefreshConfig struct {
-	// CarryForwardUnchanged publishes a table with no events in the window by
-	// carrying its previous Parquet file forward instead of rewriting it. Off
-	// by default: the rows are identical either way, but the on-disk
-	// representation is not. Where the filesystem allows it the two snapshots
-	// end up sharing one inode, so a prune reports space it will not reclaim
-	// while the newer snapshot references the file. Separately, and for a
-	// different reason, the carried table stays anchored at its older binlog
-	// coordinate, which is correct rather than a cost: its deltas resume
-	// exactly there.
-	CarryForwardUnchanged bool `yaml:"carry_forward_unchanged"`
+// legacyBaselineRefreshKey is the envelope key an older console wrote for the
+// "reuse unchanged tables" override (#1681 removed it). It is only ever read
+// to warn that it is not read.
+const legacyBaselineRefreshKey = "baseline_refresh"
+
+// legacyReuseTurnedOff reports whether that block explicitly turned reuse off,
+// which is the only case worth a warning: a block saying ON asks for what this
+// build already does, and warning about it would send an operator looking for
+// a change that never happened. The value comes back from the YAML decoder as
+// an untyped map, so both key shapes are handled; anything unreadable is
+// treated as "not off", since a warning nobody can act on is worse than none.
+func legacyReuseTurnedOff(v any) bool {
+	get := func(k string) (any, bool) {
+		switch m := v.(type) {
+		case map[string]any:
+			x, ok := m[k]
+			return x, ok
+		case map[any]any:
+			x, ok := m[k]
+			return x, ok
+		}
+		return nil, false
+	}
+	raw, ok := get("carry_forward_unchanged")
+	if !ok {
+		return false
+	}
+	off, isBool := raw.(bool)
+	return isBool && !off
 }
 
 // registryFile is the versioned on-disk envelope.
@@ -190,17 +203,11 @@ type registryFile struct {
 	// gate, not round-tripping, is the cross-version safety net, since that
 	// older binary has neither this field nor the inline catch-all.
 	Rotation *RotationConfig `yaml:"rotation,omitempty"`
-	// BaselineRefresh is the optional global baseline-refresh override, same
-	// shape and same additive story as Rotation above: absent means the
-	// daemon's own flags are in force, and the Extra catch-all preserves it
-	// across a binary that does not model it.
-	//
-	// A POINTER, and that is what carries the tri-state. The setting inside is
-	// a bool, so "no override" and "an override that says false" would be
-	// indistinguishable in a value type, and the daemon could never tell a
-	// console that had never been touched from one that had explicitly turned
-	// the behaviour off.
-	BaselineRefresh *BaselineRefreshConfig `yaml:"baseline_refresh,omitempty"`
+	// There is no baseline_refresh section here any more (#1681): reusing the
+	// file of a table that did not change is always on, so the console has
+	// nothing to override. A `baseline_refresh:` key written by an older
+	// binary is carried by the Extra catch-all below, ignored, and warned
+	// about once at load (legacyBaselineRefreshKey).
 	// BackupSettings is the optional daemon-wide backup settings section
 	// (#1682): the values the Backup settings page used to show read-only
 	// because they existed only as flags and environment of the process.
@@ -268,6 +275,17 @@ func LoadRegistry(path string) (*Registry, error) {
 	if r.file.Version == 0 {
 		// Unset/zero version: a hand-written file; normalize on the next save.
 		r.file.Version = registryVersion
+	}
+	// An operator who turned reuse off in the old console has that choice in
+	// this file, and this build does not read it (#1681). Say so once, where
+	// the file is read: the daemon otherwise reuses files that operator asked
+	// it not to, the card says reuse is always on, and nothing connects the
+	// two. Same posture as envBoolOr, which warns when it ignores a value.
+	if legacyReuseTurnedOff(r.file.Extra[legacyBaselineRefreshKey]) {
+		slog.Warn("the saved 'reuse unchanged tables' setting turned reuse OFF and is no longer read; reuse of a table that did not change is always on now",
+			"file", path, "key", legacyBaselineRefreshKey,
+			"turn_it_off_with", "the watch daemon's --baseline-carry-forward-unchanged=false (or BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED=false)",
+			"note", "the block is left in the file untouched")
 	}
 	r.syncBucketStores()
 	return r, nil
@@ -550,40 +568,6 @@ func (r *Registry) Rotation() (RotationConfig, bool) {
 		return RotationConfig{}, false
 	}
 	return *r.file.Rotation, true
-}
-
-// BaselineRefresh returns the saved override and whether one exists. Absent
-// means the daemon's own defaults are in force.
-func (r *Registry) BaselineRefresh() (BaselineRefreshConfig, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.file.BaselineRefresh == nil {
-		return BaselineRefreshConfig{}, false
-	}
-	return *r.file.BaselineRefresh, true
-}
-
-// SetBaselineRefresh persists a global baseline-refresh override, rolling back
-// the in-memory value if the write fails so the two never diverge.
-//
-// A nil argument CLEARS the override, which is what returns the daemon's own
-// flag and environment to force. Without it the panel would be a one-way door:
-// the tri-state that lets a saved "off" beat a flag saying "on" also means that
-// once anything is saved, the flag can never be heard again short of editing
-// the file by hand.
-func (r *Registry) SetBaselineRefresh(bc *BaselineRefreshConfig) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.readOnly {
-		return ErrRegistryReadOnly
-	}
-	prev := r.file.BaselineRefresh
-	r.file.BaselineRefresh = bc
-	if err := r.save(); err != nil {
-		r.file.BaselineRefresh = prev // roll back
-		return err
-	}
-	return nil
 }
 
 // SetRotation persists the global rotation policy. Like every registry
