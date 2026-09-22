@@ -2,7 +2,6 @@ package verify
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -227,6 +226,7 @@ func wantSettled(t *testing.T, p BaselinePair, status Status, says ...string) {
 	if p.Settled == nil {
 		t.Fatalf("%s: compared %s -> %s, want settled %s", p.Table, p.PrevSnapshot, p.NewSnapshot, status)
 	}
+	t.Logf("%s: %s: %s", p.Table, p.Settled.Status, p.Settled.Detail)
 	if p.Settled.Status != status || p.Settled.Schema != p.Schema || p.Settled.Table != p.Table {
 		t.Fatalf("%s: settled %+v, want status %s for this table", p.Table, *p.Settled, status)
 	}
@@ -407,38 +407,6 @@ func TestLastRead_postgres(t *testing.T) {
 	}
 }
 
-// 13. The folder of the read the newest copy names cannot be read: the read
-// looks "no longer kept", and the run refuses (#1639) instead of saying so,
-// even though that folder is older than the second newest.
-func TestLastRead_unreadableReadFolderRefuses(t *testing.T) {
-	root := t.TempDir()
-	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
-	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
-	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
-	lrWrite(t, root, lr3, "orders", lrFold(lr3, lr2, lr1, 2, 400))
-	unreadable1639(t, filepath.Join(root, reconstruct.SnapshotDirName(lr1)))
-	if _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
-		t.Fatalf("err = %v, want a refusal: the read this check needs sits in the unreadable folder", err)
-	}
-}
-
-// 13b. An unreadable folder between the older side and the read, with the
-// newest snapshot a fold: the snapshot before the read may be in it, so the
-// pair the listing would make (skipping it) is refused, not compared.
-func TestLastRead_unreadableInsideTheComparedSpanRefuses(t *testing.T) {
-	root := t.TempDir()
-	mid := lr0.Add(12 * time.Hour)
-	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
-	lrWrite(t, root, mid, "orders", lrDump(mid, 150))
-	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
-	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
-	lrWrite(t, root, lr3, "orders", lrFold(lr3, lr2, lr1, 2, 400))
-	unreadable1639(t, filepath.Join(root, reconstruct.SnapshotDirName(mid)))
-	if _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
-		t.Fatalf("err = %v, want a refusal: the snapshot before the read may be in the unreadable folder", err)
-	}
-}
-
 // 14. An unreadable folder older than every snapshot a comparison uses
 // changes nothing.
 func TestLastRead_unreadableOlderThanTheComparedSpan(t *testing.T) {
@@ -494,22 +462,6 @@ func TestLastRead_settledPairIsReturnedAsIs(t *testing.T) {
 	got, err := VerifyBaselinePair(context.Background(), BaselineConfig{}, BaselinePair{Schema: "shop", Table: "orders", Settled: &want})
 	if err != nil || got != want {
 		t.Fatalf("got %+v err=%v, want the settled answer %+v", got, err, want)
-	}
-}
-
-// "No earlier snapshot" is a claim about every older folder: an unreadable one
-// may hold the earlier snapshot, so the run refuses and names it (#1639)
-// instead of sending the operator to take a full backup.
-func TestLastRead_readIsTheOldestReadableRefuses(t *testing.T) {
-	root := t.TempDir()
-	old := time.Date(2026, 8, 1, 3, 0, 0, 0, time.UTC)
-	lrWrite(t, root, old, "orders", lrDump(old, 50))
-	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
-	lrWrite(t, root, lr1, "orders", lrFold(lr1, lr0, lr0, 1, 200))
-	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr0, 2, 300))
-	unreadable1639(t, filepath.Join(root, reconstruct.SnapshotDirName(old)))
-	if _, _, err := FindBaselinePair(context.Background(), root); !errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
-		t.Fatalf("err = %v, want a refusal: the snapshot before the read may be in the unreadable folder", err)
 	}
 }
 
@@ -735,4 +687,180 @@ func TestLastRead_carriedWhereTheReadShouldBeIsAnError(t *testing.T) {
 	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300)) // claims a read at lr1
 	pairs, _ := lrFind(t, root)
 	wantSettled(t, lrOne(t, pairs, "orders"), StatusError, lr1.Format(time.RFC3339), lrPath(root, lr1, "orders"))
+}
+
+// An unreadable folder older than the second newest snapshot (#1639) affects
+// only the tables whose answer it could change, and each of those says so,
+// naming the folder; the other tables are still checked. One table must not
+// refuse the whole run. (At or after the second newest, the run is refused,
+// as before: see unreadable_pair_1639_test.go.)
+
+// The folder of the read the newest copy names cannot be read: that table
+// names it; a table whose pair does not touch it is compared.
+func TestLastRead_unreadableReadFolderIsThatTablesAnswer(t *testing.T) {
+	root := t.TempDir()
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
+	lrWrite(t, root, lr3, "orders", lrFold(lr3, lr2, lr1, 2, 400))
+	lrWrite(t, root, lr2, "users", lrDump(lr2, 300))
+	lrWrite(t, root, lr3, "users", lrDump(lr3, 400))
+	folder := filepath.Join(root, reconstruct.SnapshotDirName(lr1))
+	unreadable1639(t, folder)
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusInconclusive, folder, "could not be read", "last read this table", lr1.Format(time.RFC3339))
+	wantCompared(t, lrOne(t, pairs, "users"), lr2, lr3, 400)
+}
+
+// An unreadable folder between the older side and the read: the snapshot
+// before the read may be in it, so that table names it instead of comparing.
+func TestLastRead_unreadableInsideTheComparedSpanIsThatTablesAnswer(t *testing.T) {
+	root := t.TempDir()
+	mid := lr0.Add(12 * time.Hour)
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, root, mid, "orders", lrDump(mid, 150))
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
+	lrWrite(t, root, lr3, "orders", lrFold(lr3, lr2, lr1, 2, 400))
+	lrWrite(t, root, lr2, "users", lrDump(lr2, 300))
+	lrWrite(t, root, lr3, "users", lrDump(lr3, 400))
+	folder := filepath.Join(root, reconstruct.SnapshotDirName(mid))
+	unreadable1639(t, folder)
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusInconclusive, folder, "could not be read", lr0.Format(time.RFC3339), lr1.Format(time.RFC3339))
+	wantCompared(t, lrOne(t, pairs, "users"), lr2, lr3, 400)
+}
+
+// The case both reviewers of #1787 found: a table added since the last full
+// backup (its only read is the oldest snapshot holding it) and an old folder
+// that cannot be read. That table names the folder, which may hold an earlier
+// snapshot of it; every other table is checked.
+func TestLastRead_readIsTheOldestReadableNamesTheFolder(t *testing.T) {
+	root := t.TempDir()
+	old := time.Date(2026, 8, 1, 3, 0, 0, 0, time.UTC)
+	lrWrite(t, root, old, "orders", lrDump(old, 50))
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	lrWrite(t, root, lr1, "fresh", lrDump(lr1, 200))
+	folder := filepath.Join(root, reconstruct.SnapshotDirName(old))
+	unreadable1639(t, folder)
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "fresh"), StatusInconclusive, folder, "could not be read", "earlier snapshot", lr1.Format(time.RFC3339))
+	wantCompared(t, lrOne(t, pairs, "orders"), lr0, lr1, 200)
+}
+
+// A folder newer than the read (and older than the second newest) cannot hold
+// anything this comparison uses: had it held a newer read of the table, the
+// folds after it would carry that read, not this one. Compared.
+func TestLastRead_unreadableAfterTheReadChangesNothing(t *testing.T) {
+	root := t.TempDir()
+	mid := lr1.Add(12 * time.Hour)
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	lrWrite(t, root, mid, "orders", lrFold(mid, lr1, lr1, 1, 250))
+	lrWrite(t, root, lr2, "orders", lrFold(lr2, mid, lr1, 2, 300))
+	lrWrite(t, root, lr3, "orders", lrFold(lr3, lr2, lr1, 3, 400))
+	unreadable1639(t, filepath.Join(root, reconstruct.SnapshotDirName(mid)))
+	pairs, _ := lrFind(t, root)
+	wantCompared(t, lrOne(t, pairs, "orders"), lr0, lr1, 200)
+}
+
+// A read no longer kept, and unreadable folders of other times, before and
+// after it: the read is not in them (its folder is named by its time), so the
+// answer is unchanged.
+func TestLastRead_readNoLongerKeptIsNotInAnotherFolder(t *testing.T) {
+	root := t.TempDir()
+	before, after := lr0.Add(-24*time.Hour), lr0.Add(12*time.Hour)
+	lrWrite(t, root, before, "orders", lrDump(before, 50))
+	lrWrite(t, root, after, "orders", lrFold(after, lr0, lr0, 1, 150))
+	lrWrite(t, root, lr1, "orders", lrFold(lr1, lr0, lr0, 1, 200))
+	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr0, 2, 300))
+	unreadable1639(t, filepath.Join(root, reconstruct.SnapshotDirName(before)))
+	unreadable1639(t, filepath.Join(root, reconstruct.SnapshotDirName(after)))
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusInconclusive, "no longer kept")
+}
+
+// A table already answered as an error keeps the error, even when an
+// unreadable folder could also affect it: the error is the louder, truer one.
+func TestLastRead_anErrorStaysAnError(t *testing.T) {
+	root := t.TempDir()
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	broken := lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
+	lrWrite(t, root, lr3, "orders", lrFold(lr3, lr2, lr1, 2, 400))
+	if err := os.WriteFile(broken, []byte("not parquet"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mid := lr0.Add(12 * time.Hour) // inside the span the pair would have compared
+	lrWrite(t, root, mid, "orders", lrDump(mid, 150))
+	unreadable1639(t, filepath.Join(root, reconstruct.SnapshotDirName(mid)))
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusError, broken)
+}
+
+// unreadableSchemaFolder makes the folder of one schema inside the snapshot
+// at `at` unreadable, the snapshot itself staying readable.
+func unreadableSchemaFolder(t *testing.T, root string, at time.Time, schema string) string {
+	t.Helper()
+	dir := filepath.Join(root, reconstruct.SnapshotDirName(at), schema)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unreadable1639(t, dir)
+	return dir
+}
+
+// Another schema's folder cannot hold this table, wherever it sits: at the
+// older side's own time, or strictly inside the compared span in a snapshot
+// whose readable part holds other tables, the table is compared.
+func TestLastRead_anotherSchemasFolderChangesNothing(t *testing.T) {
+	mid := lr0.Add(12 * time.Hour)
+	for name, at := range map[string]time.Time{"at the older side's time": lr0, "strictly inside the span": mid} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+			lrWrite(t, root, mid, "users", lrDump(mid, 150)) // holds shop.users, not orders
+			lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+			lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
+			unreadableSchemaFolder(t, root, at, "crm")
+			pairs, _ := lrFind(t, root)
+			wantCompared(t, lrOne(t, pairs, "orders"), lr0, lr1, 200)
+		})
+	}
+}
+
+// This table's own schema folder, unreadable inside the span, may hold the
+// snapshot before the read: settled, naming that folder.
+func TestLastRead_ownSchemasFolderInsideTheSpan(t *testing.T) {
+	root := t.TempDir()
+	mid := lr0.Add(12 * time.Hour)
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, root, mid, "users", lrDump(mid, 150)) // the snapshot stays readable
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	lrWrite(t, root, lr2, "orders", lrFold(lr2, lr1, lr1, 1, 300))
+	lrWrite(t, root, lr2, "users", lrDump(lr2, 300))
+	// users and orders share the schema "shop": make it unreadable at mid.
+	dir := filepath.Join(root, reconstruct.SnapshotDirName(mid), "shop")
+	unreadable1639(t, dir)
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "orders"), StatusInconclusive, dir)
+}
+
+// Several unreadable folders a table's answer rests on: the newest is named,
+// the likeliest to hold what it needs. A table read only once is also told
+// what happens if the folder turns out not to hold it.
+func TestLastRead_namesTheNewestUnreadableFolder(t *testing.T) {
+	root := t.TempDir()
+	older, newer := time.Date(2026, 8, 1, 3, 0, 0, 0, time.UTC), time.Date(2026, 8, 20, 3, 0, 0, 0, time.UTC)
+	lrWrite(t, root, older, "orders", lrDump(older, 40))
+	lrWrite(t, root, newer, "orders", lrDump(newer, 60))
+	lrWrite(t, root, lr0, "orders", lrDump(lr0, 100))
+	lrWrite(t, root, lr1, "orders", lrDump(lr1, 200))
+	lrWrite(t, root, lr1, "fresh", lrDump(lr1, 200))
+	unreadable1639(t, filepath.Join(root, reconstruct.SnapshotDirName(older)))
+	newest := filepath.Join(root, reconstruct.SnapshotDirName(newer))
+	unreadable1639(t, newest)
+	pairs, _ := lrFind(t, root)
+	wantSettled(t, lrOne(t, pairs, "fresh"), StatusInconclusive, newest, "if it holds none, the next full backup makes it checkable")
 }

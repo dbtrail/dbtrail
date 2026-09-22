@@ -95,7 +95,10 @@ not open the change files a refresh keeps beside a table (table deltas), and it
 covers the chain up to the last read, not the refreshes after it. A schedule
 with a full backup every so often (for example every 7 days) gives this check a
 new read to test each time. The JSON report names the read each table was
-compared against (`compared_to`).
+compared against (`compared_to`). That read is the last one the newest baseline
+was built from: normally the last full backup, but not a full backup that a
+later refresh could not build on (one still being written when the refresh
+started, or unreadable at the time).
 
 A table is reported `inconclusive` instead of compared when:
 
@@ -114,10 +117,14 @@ the events may come from the Parquet archives rather than the live index; with
 `--no-archive`, or after rotation dropped them unarchived, the table is
 `inconclusive` with the gap as the reason.
 
-A baseline folder that cannot be read at or after the oldest baseline any table
-is compared with (or older than a read with no earlier baseline, which that
-folder may hold) refuses the whole run and names the folder, whatever
-`--tables` selects: fix its permissions first.
+A baseline folder that cannot be read at or after the second newest baseline
+refuses the whole run and names the folder, whatever `--tables` selects: fix
+its permissions first. An older one affects only the tables whose check it
+could change (it may hold the baseline before a table's last read, that read
+itself, or an earlier baseline of a table read only once): those tables are
+`inconclusive`, naming the folder, and every other table is still checked, so
+the run can exit 0 on the tables that matched. Such an older folder that holds
+only another schema affects no table outside it.
 
 ```sh
 # All tables, baselines on local disk

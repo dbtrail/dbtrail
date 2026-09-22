@@ -43,7 +43,11 @@ var ErrUnreadableSnapshot = errors.New("a backup folder could not be read")
 type UnreadableSnapshot struct {
 	SnapshotTime time.Time
 	Path         string
-	Err          error
+	// Schema is the schema folder that could not be read, empty when the
+	// whole snapshot folder could not be: a table of another schema cannot
+	// be in it.
+	Schema string
+	Err    error
 }
 
 // UnreadableAtOrAfter returns an ErrUnreadableSnapshot error naming the newest
@@ -570,7 +574,7 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 			}
 			if err != nil {
 				slog.Warn("baseline listing: skipping unreadable schema directory", "path", schemaDir, "error", err)
-				skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: schemaDir, Err: err})
+				skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: schemaDir, Schema: dbDir.Name(), Err: err})
 				continue
 			}
 			var tables []BaselineFile
@@ -588,7 +592,7 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 						continue
 					}
 					slog.Warn("baseline listing: skipping unreadable schema directory", "path", schemaDir, "error", err)
-					skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: schemaDir, Err: err})
+					skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: schemaDir, Schema: dbDir.Name(), Err: err})
 					tables = nil
 					break
 				}
@@ -656,6 +660,9 @@ func findBaselineLocal(baselineDir, schema, table string, at time.Time) (string,
 			// both marker stats fail and it reads as a legacy snapshot) may
 			// hold it, so an older pick must say so (#1639).
 			// ENOTDIR is absence too: a file where the schema folder would be.
+			// Recorded as the whole folder (no Schema) even when only the
+			// schema folder failed: this lookup asks about one table, and
+			// nothing here reads the field.
 			if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
 				unreadable = append(unreadable, UnreadableSnapshot{SnapshotTime: t, Path: filepath.Join(baselineDir, entry.Name()), Err: err})
 			}
