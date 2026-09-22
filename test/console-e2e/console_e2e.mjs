@@ -3099,6 +3099,36 @@ try {
     ? ok("verification: a real recover-inputs run completes with structured rows, and its chip says what it proved")
     : bad("verification: a real recover-inputs run completes with structured rows, and its chip says what it proved", JSON.stringify(vfyDone));
 
+  // (d2) a run survives a repaint: start one, leave for Events, come back.
+  // The run's state lives per server, not in the box that was on screen when
+  // it started, so the page that comes back shows the run (still going or
+  // just ended, whichever this machine's timing gives) and never "No run
+  // yet", and when it ends the button ON SCREEN is ready again. Before, the
+  // run kept writing into the box it saved at the start, off screen.
+  await page.evaluate(() => {
+    document.querySelector(".vfy-run").click();
+    navigate("events");
+    navigate("verification");
+  });
+  let vfyBackChip = true;
+  try {
+    await page.waitForFunction(() => !!document.querySelector(".vfy-results .vfy-summary .chip"));
+  } catch (_) { vfyBackChip = false; }
+  await page.waitForFunction(() => {
+    const c = document.querySelector(".vfy-results .vfy-summary .chip");
+    return c && !/RUNNING/.test(c.textContent);
+  }, undefined, { timeout: 60000 }).catch(() => {});
+  const vfyBack = await page.evaluate(() => {
+    const b = document.querySelector(".vfy-run");
+    return { box: ((document.querySelector(".vfy-results") || {}).textContent || "").slice(0, 120),
+      chip: (document.querySelector(".vfy-results .vfy-summary .chip") || {}).textContent || "",
+      btn: b ? { disabled: b.disabled, text: b.textContent } : null };
+  });
+  (vfyBackChip && !/No run yet/.test(vfyBack.box) && vfyBack.chip && !/RUNNING/.test(vfyBack.chip)
+    && vfyBack.btn && !vfyBack.btn.disabled && vfyBack.btn.text === "Run verification")
+    ? ok("verification: a run started, left and come back to still shows on the page, and its end readies the button on screen")
+    : bad("verification: a run started, left and come back to still shows on the page, and its end readies the button on screen", JSON.stringify({ vfyBackChip, ...vfyBack }));
+
   // (e) history (#1417): the finished run is a disclosure row that expands to
   // its per-table detail — data the old renderer dropped on the floor — and
   // LAST CHECK wears the age treatment, not the live one (#1420).

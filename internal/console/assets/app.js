@@ -7469,7 +7469,7 @@ function verifyRegions(servers, opts) {
   };
   modeSel.onchange = updateMode;
   updateMode();
-  btn.onclick = () => createVerify(cur.id, modeSel.value, btn, results);
+  btn.onclick = () => createVerify(cur.id, modeSel.value);
   control.append(el("div", { class: "vfy-actions" }, modeSel, btn));
   control.append(help);
   if (!configured) {
@@ -7481,7 +7481,9 @@ function verifyRegions(servers, opts) {
   const current = el("section", { class: "tcard vfy-region vfy-current" });
   current.append(el("div", { class: "vfy-region-head" },
     el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Current run" }))));
-  renderVerifyResults(results, null, cur.id);
+  vfyView = { id: cur.id, results, btn, updateMode };
+  vfyDraw(vfyView);
+  if (!vfyFollowing.has(cur.id)) vfyProbe(cur.id);
   current.append(results);
   // The per-row nouns are precise AND internal (#1419 §5) — the glossary is
   // the affordance that keeps them from requiring a source dive.
@@ -7514,35 +7516,109 @@ const VFY_MODE_HELP = {
   "recover-inputs": "Reads the index's own record of each change and checks that every row's history holds together from one change to the next. This is the data an undo script is built from. Needs no snapshot and never touches your database.",
 };
 
-// createVerify triggers an in-process verify run on the daemon for the
-// selected server, then polls until it finishes, updating resultsEl live
-// after every poll tick so results appear "as they land" (#677) — the engine
-// itself has no progress callback; the console's own poll loop is the only
+// A verification run's state lives here, per server, and never in the box
+// that was on screen when it started. The page repaints (Back to it, a server
+// switch, and once the backup pages merge, any job that finishes); a run that
+// wrote into the box it saved at the start kept writing off screen while the
+// new box said "No run yet" and offered another run, and the button it
+// re-enabled at the end was the detached one. A run the schedule started
+// (--verify-interval) had no box at all.
+//   vfyLive      the newest status this session read for each server: a run
+//                going, or the one that just ended.
+//   vfyFollowing the servers with a poll loop, so a click and a repaint never
+//                start two (two loops would draw every tick twice and say
+//                the ending twice).
+//   vfyView      the box and button on screen now, and whose they are.
+const vfyLive = new Map();
+const vfyFollowing = new Set();
+let vfyView = null;
+
+// vfyDraw draws a server's state into a view: the box, and the button busy
+// while a run goes or back to what the chosen mode allows.
+function vfyDraw(view, opts) {
+  const st = vfyLive.get(view.id) || null;
+  renderVerifyResults(view.results, st, view.id, opts);
+  if (st && st.state === "running") {
+    view.btn.disabled = true;
+    view.btn.textContent = "Running…";
+  } else {
+    view.btn.textContent = "Run verification";
+    view.updateMode();
+  }
+}
+
+// vfyShow draws a server's state into the view on screen, if that view is
+// the server's and still attached; a run on another server draws nothing.
+function vfyShow(id, opts) {
+  const view = vfyView;
+  if (view && view.id === id && view.results.isConnected) vfyDraw(view, opts);
+}
+
+// vfyProbe asks, once per paint, whether the server has a run going: one the
+// schedule started, or one this tab started before the page repainted. It
+// also settles a run this session last saw running whose loop has stopped
+// (the poll gives up after ~20 minutes). Best effort: a failed read leaves
+// the page as drawn.
+async function vfyProbe(id) {
+  let st;
+  try {
+    st = (await api("/api/servers/" + encodeURIComponent(id) + "/verify")).verify;
+  } catch (err) {
+    if (!(err && (err.status === 403 || err.status === 404))) console.warn("could not read the verification status", err);
+    return;
+  }
+  if (!st) return;
+  const known = vfyLive.get(id);
+  if (st.state !== "running" && !(known && known.state === "running")) return;
+  vfyLive.set(id, st);
+  vfyShow(id);
+  if (st.state === "running") followVerify(id);
+}
+
+// followVerify polls a server's run until it ends and is the one owner of
+// what that run puts on screen: each tick draws into the view on screen at
+// that moment, and the ending (highlight, history, message) happens once.
+async function followVerify(id) {
+  if (vfyFollowing.has(id)) return;
+  vfyFollowing.add(id);
+  let done;
+  try {
+    done = await pollVerify(id, (st) => { vfyLive.set(id, st); vfyShow(id); });
+  } finally {
+    vfyFollowing.delete(id);
+  }
+  // justFinished: the running→done transition gets a one-shot highlight so
+  // completion is perceptible off-chip (#1420); the toast below is the other
+  // half for an operator who looked away.
+  const signal = vfyFinishSignal(done);
+  if (done) vfyLive.set(id, done);
+  vfyShow(id, { justFinished: !!done && signal.flash });
+  // The finished run is now in the persisted history too: refresh the list
+  // on screen, if it is this server's.
+  const histBox = document.querySelector(".vfy-history");
+  if (histBox && vfyView && vfyView.id === id && histBox.isConnected) loadVerifyHistory(id, histBox);
+  (signal.sticky ? toastError : toast)(signal.message);
+}
+
+// createVerify starts an in-process verify run on the daemon for a server and
+// hands it to followVerify, which draws results "as they land" (#677): the
+// engine has no progress callback, so the console's own poll loop is the only
 // source of incremental updates.
-async function createVerify(id, mode, btn, resultsEl) {
-  if (btn) { btn.disabled = true; btn.textContent = "Running…"; }
-  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = "Run verification"; } };
+async function createVerify(id, mode) {
+  const view = vfyView;
+  if (view && view.id === id) { view.btn.disabled = true; view.btn.textContent = "Running…"; }
   let status;
   try {
     status = (await api("/api/servers/" + encodeURIComponent(id) + "/verify", { method: "POST", body: { mode } })).verify;
   } catch (err) {
     toastError("Verify failed: " + ((err && err.message) || err));
-    restore();
+    vfyShow(id);
     return;
   }
-  renderVerifyResults(resultsEl, status, id);
+  vfyLive.set(id, status);
+  vfyShow(id);
   toast("Verification started…");
-  const done = await pollVerify(id, (st) => renderVerifyResults(resultsEl, st, id));
-  restore();
-  // justFinished: the running→done transition gets a one-shot highlight so
-  // completion is perceptible off-chip (#1420); the toast below is the other
-  // half for an operator who looked away.
-  const signal = vfyFinishSignal(done);
-  if (done) renderVerifyResults(resultsEl, done, id, { justFinished: signal.flash });
-  // The finished run is now in the persisted history too — refresh the list.
-  const histBox = document.querySelector(".vfy-history");
-  if (histBox) loadVerifyHistory(id, histBox);
-  (signal.sticky ? toastError : toast)(signal.message);
+  await followVerify(id);
 }
 
 // vfyFinishSignal is how a run's end reaches an operator who looked away, by
