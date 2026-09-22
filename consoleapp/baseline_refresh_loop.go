@@ -1006,11 +1006,19 @@ func foldRunCounts(rec console.BaselineRunRecord, tables, refused int, reuse reu
 
 // measuredEvents is how many row events a fold that started from prev applied,
 // as far as the index marks can tell: the mark read before this fold against
-// the one this daemon read before folding prev. Zero ("not measured") unless
-// the memo is for exactly that snapshot on the same index — after a full
-// backup the memo names an older snapshot, and its delta would count the
-// full backup's window too, inflating the rate the cut-over estimates from —
-// or when the mark went backwards (an index rebuilt).
+// the one read before prev was published. That base is this daemon's memo of
+// its fold of prev when the memo names prev, and then only on the same index
+// and destination. When the memo names another snapshot, or there is none,
+// it is the mark the run history recorded for prev: a full backup's, read
+// before its dump (#1737; without it the update after every full backup went
+// unmeasured, and a rate the model had fitted could never be corrected), or
+// an update's from before a restart. The history does not record which index
+// a mark came from, so that path trusts it the way the window probe's does
+// (measureWindow), except when the memo shows the index was re-pointed since
+// this daemon's last fold. Zero ("not measured") without a base, or when the
+// mark went backwards (an index rebuilt). A full backup's mark over-counts by
+// whatever the capture had not indexed when its dump started; see
+// dumpIndexMark.
 func (s *baselineSupervisor) measuredEvents(req refreshRequest, mark indexMark, known bool, prev time.Time) int64 {
 	if !known || prev.IsZero() {
 		return 0
@@ -1018,12 +1026,26 @@ func (s *baselineSupervisor) measuredEvents(req refreshRequest, mark indexMark, 
 	s.mu.Lock()
 	memo, seen := s.foldedMarks[req.ServerID]
 	s.mu.Unlock()
-	if !seen || memo.indexDSN != req.IndexDSN || memo.destination != refreshDestination(req) ||
-		reconstruct.SnapshotDirName(memo.publishedAt) != reconstruct.SnapshotDirName(prev) ||
-		mark.events < memo.mark.events {
+	var base uint64
+	switch {
+	case seen && reconstruct.SnapshotDirName(memo.publishedAt) == reconstruct.SnapshotDirName(prev):
+		if memo.indexDSN != req.IndexDSN || memo.destination != refreshDestination(req) {
+			return 0
+		}
+		base = memo.mark.events
+	case seen && memo.indexDSN != req.IndexDSN, s.history == nil:
+		return 0
+	default:
+		recorded, ok := s.history.IndexMarkFor(req.ServerID, prev.UTC().Format(time.RFC3339))
+		if !ok {
+			return 0
+		}
+		base = recorded
+	}
+	if mark.events < base {
 		return 0
 	}
-	return int64(mark.events - memo.mark.events)
+	return int64(mark.events - base)
 }
 
 // applyFoldStatus writes a finished fold's outcome onto the status the console

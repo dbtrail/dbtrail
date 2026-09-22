@@ -80,8 +80,14 @@ type BaselineRunRecord struct {
 	// run took, upload included, like the full backup duration it is
 	// compared against (#1721), and IndexMark the high-water mark read
 	// before the fold: the base the NEXT update's Events are counted from,
-	// kept here so the count survives a daemon restart. Zero when not
-	// measured (a full backup, a restore, a fold with no previous mark).
+	// kept here so the count survives a daemon restart. A MySQL full
+	// backup that published a snapshot records IndexMark too, read before
+	// its dump started, so the update that follows it is measured like any
+	// other (#1737); it has no Events or UpdateSeconds. A PostgreSQL one
+	// cannot: its snapshot instant is stamped by the database, so no record
+	// names it, and the update after it goes unmeasured (the one after that
+	// is measured from the daemon's memo). Zero when not measured (a
+	// restore, a fold with no previous mark, an index that did not answer).
 	Events        int64   `json:"events,omitempty"`
 	UpdateSeconds float64 `json:"update_seconds,omitempty"`
 	IndexMark     uint64  `json:"index_mark,omitempty"`
@@ -89,6 +95,17 @@ type BaselineRunRecord struct {
 
 // measuredFoldRuns is how many recent updates the update model fits.
 const measuredFoldRuns = 5
+
+// measuredFoldMinEvents is how many more events than the shortest run at
+// least one run in the sample must have applied for the model to read a
+// per-event cost at all (#1738). Folds apply thousands to tens of
+// thousands of events a second, so a few hundred events more is well under
+// a second of real work, and the seconds that run took beyond the
+// shortest are the fixed cost's own noise: four quiet updates of 100
+// events in 90 s and one of 200 in 140 s read as 2 events a second, and
+// the next 60,000-event burst as eight hours. Per run, not summed over the
+// sample, so the floor does not loosen as the sample fills.
+const measuredFoldMinEvents = 10_000
 
 // UpdateModel fits what an update costs for serverID from its last few
 // measured successful updates: fixed seconds every update pays, taken as
@@ -110,10 +127,18 @@ const measuredFoldRuns = 5
 // the guard does not loosen as the sample fills. And when the marginal
 // rate comes out under a tenth of the shortest run's whole rate (its
 // events over all its seconds, a floor no true per-event rate is below),
-// it is noise in the denominator whatever the spread. Not a whole-run rate
+// it is noise in the denominator whatever the spread. And when no run in
+// the sample applied at least measuredFoldMinEvents more than the shortest
+// (#1738): on a quiet server every relative guard is passed by one update
+// that applied a hundred events more and took a noisy fifty seconds
+// longer, because the server's own scale is that small. Not a whole-run rate
 // in place of the unknown one: on a loaded server that would be near the
 // truth, on a quiet one the fixed cost divided by a handful of events, and
-// the model cannot tell the two apart.
+// the model cannot tell the two apart. Refusing a real rate costs at most
+// one update that runs longer than a full backup would have (with no load
+// on the source), and that update is the wide sample the next fit reads
+// the rate from; believing an artefact costs a full read of production at
+// every burst.
 func (h *BaselineRunHistory) UpdateModel(serverID string) (fixed time.Duration, rate float64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -140,15 +165,21 @@ func (h *BaselineRunHistory) UpdateModel(serverID string) (fixed time.Duration, 
 	if len(sample) < 2 {
 		return fixed, 0
 	}
-	var events int64
+	var events, widest int64
 	var beyond float64
 	for _, r := range sample {
 		if r.UpdateSeconds > minSec && r.Events > minEvents {
 			events += r.Events - minEvents
 			beyond += r.UpdateSeconds - minSec
+			widest = max(widest, r.Events-minEvents)
 		}
 	}
 	if beyond < total/10 || events <= 0 {
+		return fixed, 0
+	}
+	// A slope needs one run far enough from the shortest on the events
+	// axis to be a slope (#1738): see measuredFoldMinEvents.
+	if widest < measuredFoldMinEvents {
 		return fixed, 0
 	}
 	if float64(events) < float64(sampleEvents)/float64(len(sample))/10 {
@@ -197,15 +228,93 @@ func (h *BaselineRunHistory) ProvenUpdate(serverID string, within time.Duration)
 }
 
 // IndexMarkFor is the index high-water mark read before the successful
-// update that published the snapshot named snapshotTime (RFC3339 UTC), and
-// whether one is on record: the base an update from that snapshot counts
-// its events from, after a restart emptied the in-memory memo.
+// update or full backup that published the snapshot named snapshotTime
+// (RFC3339 UTC), and whether one is on record: the base an update from that
+// snapshot counts its events from, when this daemon's in-memory memo does
+// not name it (a restart emptied it, or the snapshot is a full backup's,
+// which folds nothing and leaves no memo, #1737).
+//
+// A full backup's record counts even with an error: it names a snapshot only
+// when one was published, and an error beside that is the upload (or a
+// shutdown during it). The next update reads that local copy
+// (resolveFoldSource prefers it when it is ahead of the bucket), so its
+// mark is the right base. An update's record counts only without an error.
+// No other record counts (a skip names no snapshot at all).
 func (h *BaselineRunHistory) IndexMarkFor(serverID, snapshotTime string) (uint64, bool) {
 	rec := h.FindBySnapshot(serverID, snapshotTime)
-	if rec == nil || rec.Kind != BaselineRunRefresh || rec.Error != "" || rec.IndexMark == 0 {
+	if rec == nil || rec.IndexMark == 0 {
 		return 0, false
 	}
-	return rec.IndexMark, true
+	if rec.Kind == BaselineRunDump || (rec.Kind == BaselineRunRefresh && rec.Error == "") {
+		return rec.IndexMark, true
+	}
+	return 0, false
+}
+
+// UpdateSample is how many measured successful updates the model fits for
+// serverID (at most measuredFoldRuns) and when the newest of them finished;
+// zero time when there is none or its stamp does not parse. What the
+// daemon log says next to a full backup the model chose (#1737), so a rate
+// that stopped being re-measured shows its age there.
+func (h *BaselineRunHistory) UpdateSample(serverID string) (n int, newest time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	recs := h.servers[serverID]
+	for i := len(recs) - 1; i >= 0 && n < measuredFoldRuns; i-- {
+		if !measuredUpdate(recs[i]) {
+			continue
+		}
+		if n == 0 {
+			newest, _ = time.Parse(time.RFC3339, recs[i].FinishedAt)
+		}
+		n++
+	}
+	return n, newest
+}
+
+// MeasuredSinceFull reports whether a measured successful update for
+// serverID was recorded after its newest full backup (one that succeeded or
+// published a snapshot, see below), or there is no full backup on record. False is the model deciding on evidence
+// older than the last full backup, and CutoverToFull then lets the update
+// run (#1737): a full backup chosen on a rate that no update after it has
+// re-measured would choose the next one on the same rate, forever.
+//
+// Record order, not timestamps: an update that ran while a full backup
+// was still uploading (#1725) is recorded before it, and counts as before.
+// That costs one more update after that full backup, never a missed one.
+// A full backup counts when it succeeded or published a snapshot whose
+// upload then failed: either way it read production and the next update
+// folds from what it wrote. One that failed before publishing did not.
+func (h *BaselineRunHistory) MeasuredSinceFull(serverID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	recs := h.servers[serverID]
+	for i := len(recs) - 1; i >= 0; i-- {
+		r := recs[i]
+		if measuredUpdate(r) {
+			return true
+		}
+		if r.Kind == BaselineRunDump && r.SkipReason == "" && (r.Error == "" || r.SnapshotTime != "") {
+			return false
+		}
+	}
+	return true
+}
+
+// FullBackupFinished is when the full backup that published the snapshot
+// named snapshotTime (RFC3339 UTC) finished, zero when no full backup on
+// record published it or its stamp does not parse: what the age rule counts
+// an anchor's age from (BackupWindow.AnchorFullFinished).
+func (h *BaselineRunHistory) FullBackupFinished(serverID, snapshotTime string) time.Time {
+	rec := h.FindBySnapshot(serverID, snapshotTime)
+	if rec == nil || rec.Kind != BaselineRunDump {
+		return time.Time{}
+	}
+	finished, err := time.Parse(time.RFC3339, rec.FinishedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return finished
 }
 
 // LastFullBackup is how long the newest successful full backup for serverID

@@ -356,6 +356,16 @@ type BackupWindow struct {
 	// Anchor is the previous snapshot's instant (the one an update would
 	// start from); zero when unknown.
 	Anchor time.Time
+	// AnchorFullFinished is when the full backup that published Anchor
+	// finished, when one did and this daemon recorded it; zero otherwise. A
+	// full backup's snapshot is named for the instant its dump STARTED, so
+	// its anchor is already as old as the backup took when the next slot
+	// comes, and the age rule counts from here instead (#1737): the time a
+	// full backup took is not time the schedule fell behind. Without this a
+	// full backup longer than the cut-over age was followed by another one
+	// on age at every slot, and the update that would correct the model
+	// never ran.
+	AnchorFullFinished time.Time
 	// Events is how far the index's high-water mark has moved since the
 	// anchor; negative when unknown (no mark on record for THIS anchor, or
 	// the index did not answer). It counts every source writing to that
@@ -367,18 +377,32 @@ type BackupWindow struct {
 	// history: fixed seconds every update pays (starting DuckDB, reading
 	// every table's previous Parquet, fetching it from the bucket) plus one
 	// second per FoldRate events. Zero when unknown, which UpdateModel
-	// decides three ways: fewer than two measured updates, or the runs'
+	// decides five ways: fewer than two measured updates, or the runs'
 	// times beyond the shortest under a tenth of their total (a quiet
 	// server: every update costs the fixed cost), or their events beyond
 	// the shortest under a tenth of a typical run's (a steady load: every
 	// update applies the same), or a marginal rate under a tenth of the
-	// shortest run's whole rate (noise in the denominator, #1736). A rate
-	// read off any of those would be an artefact that cuts over on every
-	// burst, or on every slot. FoldFixed alone still decides one thing
-	// without a rate: an update whose cheapest measured run already took
-	// longer than the last full backup.
+	// shortest run's whole rate (noise in the denominator, #1736), or no
+	// run that applied at least ten thousand events more than the shortest
+	// (a quiet server whose one slightly larger update took a noisy while
+	// longer, #1738). Those cover a flat axis, a noisy denominator and a
+	// small one; they do not cover noise that happens to line up with a
+	// wide spread of events, which only more samples dilute. A rate read
+	// off any of them would be an artefact that cuts over on every burst,
+	// or on every slot. FoldFixed alone still decides one thing without a
+	// rate: an update whose cheapest measured run already took longer than
+	// the last full backup.
 	FoldFixed time.Duration
 	FoldRate  float64
+	// UnmeasuredSinceFull: no measured update was recorded after the newest
+	// full backup, so the model (FoldFixed, FoldRate, Proven) is older than
+	// it, and it may not choose a full backup (#1737); it may still say
+	// "update". Without this, a full backup the model chose was followed by
+	// one unmeasured update, and the slot after that chose a full backup on
+	// the same numbers again: a rate that had gone wrong could never be
+	// corrected. False (the zero value) when a measured update is newer, or
+	// when there is no full backup on record.
+	UnmeasuredSinceFull bool
 	// Proven is the largest number of events one of the newest five
 	// measured updates (the model's own sample) applied in less time than
 	// the last full backup took. An update up to BackupProvenMargin times
@@ -425,9 +449,19 @@ const BackupProvenMargin = 1.5
 // update is cut over when its estimate exceeds the full backup's duration,
 // and NOT cut over otherwise, however old the anchor (the estimate is the
 // better evidence). Only without one of the three does the age rule apply:
-// an anchor older than BackupCutoverAge(interval). The estimate is crude on
+// an anchor older than BackupCutoverAge(interval), counted from when the
+// full backup that published it finished when one did (AnchorFullFinished).
+// The estimate is crude on
 // purpose (events × rate, as the issue asked): it decides between two
 // producers, not a schedule.
+//
+// While no update has been measured since the last full backup
+// (UnmeasuredSinceFull, #1737) the model may still say "update", and that
+// stands; what it may not do is choose a full backup, since the numbers it
+// would choose one on are the ones that chose the last. The age rule still
+// applies. On a server whose updates really do cost more than a full
+// backup that is one update after each full backup, the price of a model
+// that can notice when they stop.
 func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string {
 	if w.Events >= 0 && w.FoldRate > 0 && w.LastFull > 0 {
 		// Compared in float seconds: a Duration conversion of a huge
@@ -445,21 +479,28 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 				"events", w.Events, "estimate", roundSeconds(estSec), "last_full", roundDuration(w.LastFull), "proven_events", w.Proven)
 			return ""
 		}
-		return fmt.Sprintf("%s: %s events since the previous backup would take about %s to apply at the measured rate, and the last full backup took %s",
-			BackupWhyWindowPrefix, formatCount(w.Events), roundSeconds(estSec), roundDuration(w.LastFull))
+		if !w.UnmeasuredSinceFull {
+			return fmt.Sprintf("%s: %s events since the previous backup would take about %s to apply at the measured rate, and the last full backup took %s",
+				BackupWhyWindowPrefix, formatCount(w.Events), roundSeconds(estSec), roundDuration(w.LastFull))
+		}
 	}
 	// No rate, but the fixed cost alone decides (#1736's review): when even
 	// the cheapest measured update took longer than the last full backup,
 	// no estimate is needed, and the age rule below could never say so on
 	// a server whose every update succeeds (each one renews the anchor).
-	if w.Events != 0 && w.FoldRate <= 0 && w.FoldFixed > 0 && w.LastFull > 0 && w.FoldFixed > w.LastFull {
+	// Only ever a full backup, so not on a model older than the last one.
+	if !w.UnmeasuredSinceFull && w.Events != 0 && w.FoldRate <= 0 && w.FoldFixed > 0 && w.LastFull > 0 && w.FoldFixed > w.LastFull {
 		return fmt.Sprintf("%s: the cheapest recent update took %s, longer than the last full backup's %s",
 			BackupWhyWindowPrefix, roundDuration(w.FoldFixed), roundDuration(w.LastFull))
 	}
 	if w.Anchor.IsZero() {
 		return ""
 	}
-	age := now.Sub(w.Anchor)
+	since := w.Anchor
+	if w.AnchorFullFinished.After(since) {
+		since = w.AnchorFullFinished
+	}
+	age := now.Sub(since)
 	if age <= BackupCutoverAge(interval) {
 		return ""
 	}
@@ -472,10 +513,17 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 		missing = append(missing, "no count of the changes since it")
 	}
 	if w.FoldRate <= 0 {
-		missing = append(missing, "no usable update rate (none measured, or the measured updates all cost about the same)")
+		missing = append(missing, "no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from)")
 	}
 	if w.LastFull <= 0 {
 		missing = append(missing, "no full backup on record")
+	}
+	if len(missing) == 0 {
+		// Everything was measured and the estimate called the update
+		// dearer, but on numbers older than the last full backup, which
+		// the rule above does not act on (#1737): the anchor's age decides.
+		return fmt.Sprintf("%s: it is %s old and the cut-over is %s (no update has been measured since the last full backup, so the estimate from before it is not used)",
+			BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)))
 	}
 	return fmt.Sprintf("%s: it is %s old and the cut-over is %s (%s, so the update could not be estimated)",
 		BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)), strings.Join(missing, ", "))

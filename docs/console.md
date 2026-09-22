@@ -578,17 +578,26 @@ panel that answers whether a restore would work, far below the fold.
   rate, and the duration of the last full backup on record) and takes a
   full backup instead when the update is estimated to cost more and no
   recorded update that large was done in less time; when one of the three
-  is unknown (no full backup on record, no rate yet because every recent
-  update cost about the same, an index that did not answer the probe) it
-  cuts over on age alone, once the previous snapshot is older than two
-  hours or six schedule intervals, whichever is longer, and the reason
-  names what was missing. Both say so in the daemon log with the numbers
+  is unknown (no full backup on record, no rate yet because the recent
+  updates differ too little to read a per-event cost from, an index that
+  did not answer the probe) it cuts over on age alone, once the previous
+  snapshot is older than two hours or six schedule intervals, whichever is
+  longer (counted from when the full backup that made it finished, when a
+  full backup did: its own duration is not the schedule falling behind),
+  and the reason names what was missing. After a full backup the
+  model may not choose another one until an update after it has been
+  measured (it may still choose an update): each full backup records the
+  index's high-water mark before it starts, so the update that follows it
+  is measured, and a rate that stopped being true gets corrected instead
+  of choosing a full backup every other slot (#1737). Both say so in the daemon log with the numbers
   and on the page as the run's reason (the page's next-slot method uses the
   same measurement, cached for a minute); neither applies when a full
   backup cannot start (the creation opt-in off), where the update runs
   however long it takes, being the producer that can. Every update's run
-  records `events`, `update_seconds` and `index_mark`, which is what the
-  model and the count after a restart are read from. The reason is persisted with the run,
+  records `events`, `update_seconds` and `index_mark`, and every MySQL
+  full backup that published a snapshot `index_mark` (a PostgreSQL one
+  cannot: its snapshot is stamped by the database), which is what the model
+  and the count after a restart or a full backup are read from. The reason is persisted with the run,
   never recomputed later, so a cleared bucket error cannot show the cheap
   producer for a run that read production in full (#1604); the snapshot
   detail carries the same on `run.why`. The page turns the two permanent

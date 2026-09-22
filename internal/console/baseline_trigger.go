@@ -91,6 +91,10 @@ type BaselineRequest struct {
 	// run (#1604), persisted on the run record so the page can say what was
 	// missing; empty for a manual backup.
 	Why string
+	// IndexDSN is the server's index. The dump reads its high-water mark
+	// before it starts, so the update that follows this full backup is
+	// measured (#1737); empty means no mark is read.
+	IndexDSN string
 }
 
 // BaselineRequestFor builds the in-process job description for a registry
@@ -107,6 +111,7 @@ func BaselineRequestFor(e ServerEntry) BaselineRequest {
 		Flavor:      e.SourceFlavor(),
 		Slot:        e.SourceSlot,
 		Publication: e.SourcePublication,
+		IndexDSN:    e.DSN,
 	}
 }
 

@@ -260,7 +260,11 @@ func (s *baselineSupervisor) run(req console.BaselineRequest) {
 	started := time.Now().UTC()
 	if req.Flavor == console.FlavorPostgres {
 		// The PG producer uploads inside executePG and stamps the snapshot
-		// server-side; it keeps the one-phase shape.
+		// server-side; it keeps the one-phase shape. No index mark either:
+		// with the snapshot's instant out of this process's sight, no
+		// record could name the snapshot the next update folds from, so
+		// that update goes unmeasured and the one after it is measured
+		// from the memo (#1737).
 		stats, uploaded, err := s.executePG(req)
 		s.finishDump(req, started, dumpOutcome{stats: stats}, nil, uploaded, 0, err)
 		return
@@ -269,8 +273,46 @@ func (s *baselineSupervisor) run(req console.BaselineRequest) {
 	if produce == nil {
 		produce = s.execute
 	}
+	// Read BEFORE the dump: its anchor is stamped inside produce, and an
+	// event indexed between a later read and that anchor would be applied
+	// by the next update without being counted, reading the rate too slow,
+	// which is the direction that cuts over to full backups (#1737). Read
+	// earlier, the few events in between are counted and not applied.
+	mark := s.dumpIndexMark(req)
 	out, err := produce(req)
+	out.indexMark = mark
 	s.completeDump(req, started, out, err, &own)
+}
+
+// dumpIndexMark is the index's event high-water mark as a full backup
+// starts, or zero when the request names no index or the index does not
+// answer. Bounded like the window probe (windowProbeTimeout, dial included):
+// it delays a full backup, and an index that has gone silent must cost
+// seconds and a missing measurement, never the backup.
+//
+// It counts what the index holds, not what the dump contains: events the
+// capture had not indexed yet when the dump started are inside the dump
+// and are counted by the next update all the same. Seconds of lag are
+// noise; after a capture stall the first update's count, and so the rate
+// and the size the history proves an update can do, read too high for as
+// long as that update stays in the model's sample. That errs toward
+// updates, which put no load on the source.
+func (s *baselineSupervisor) dumpIndexMark(req console.BaselineRequest) uint64 {
+	if req.IndexDSN == "" {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, windowProbeTimeout)
+	defer cancel()
+	mark, known := readIndexMark(ctx, probeDSN(req.IndexDSN))
+	if !known {
+		// Once per full backup, which is rare enough not to rate-limit.
+		// Without it the only trace is a Debug line worded for a refresh.
+		slog.Info("baseline: could not read the index before the full backup; the update after it will not be measured, "+
+			"so the backup schedule's cost model waits one more update before it can choose a full backup again",
+			"server", req.ServerName, "id", req.ServerID)
+		return 0
+	}
+	return mark.events
 }
 
 // dumpOwn is what a full backup owns once it has published: its status
@@ -334,6 +376,9 @@ type dumpOutcome struct {
 	// staged: snapDir lives under a temp dir removed by cleanup (S3-only).
 	staged  bool
 	cleanup func()
+	// indexMark is the index's event high-water mark read before the dump
+	// started (dumpIndexMark); zero when unknown.
+	indexMark uint64
 }
 
 // completeDump is the second half of a full backup: publish, upload, record.
@@ -548,6 +593,12 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	// success, or a local publish whose upload failed.
 	if !out.at.IsZero() && (err == nil || (out.snapDir != "" && !out.staged)) {
 		rec.SnapshotTime = out.at.UTC().Format(time.RFC3339)
+	}
+	// The base the next update from this snapshot counts its events from
+	// (#1737): whenever a snapshot was published, including one whose
+	// upload failed, since the next update folds from that local copy.
+	if rec.SnapshotTime != "" {
+		rec.IndexMark = out.indexMark
 	}
 	s.recordRun(req.ServerID, req.ServerName, rec, err)
 

@@ -273,9 +273,11 @@ func TestRunRefresh_recordsTheMeasuredRate(t *testing.T) {
 	if len(runs) != 2 || runs[1].Events != 5000 || runs[1].UpdateSeconds <= 0 || runs[1].IndexMark != 6000 {
 		t.Fatalf("second fold = %+v, want 5000 events counted", runs)
 	}
-	// A full backup in between publishes a newer snapshot the memo does not
-	// name: the next fold counts nothing rather than the full backup's
-	// window too.
+	// A snapshot the memo does not name and no run on record published (a
+	// full backup by another process, the CLI): the next fold counts
+	// nothing rather than that snapshot's window too. A full backup THIS
+	// daemon took records its mark and is counted from (#1737,
+	// TestRunRefresh_measuresTheUpdateAfterAFullBackup).
 	full := refreshAt.Add(8 * time.Minute)
 	writeSnapshotFiles(t, filepath.Join(local, reconstruct.SnapshotDirName(full)), baseline.SuccessMarker)
 	mark = indexMark{events: 9000, schemaChanges: 1}
@@ -435,7 +437,7 @@ func TestBackupScheduler_cutsOverOnAgeInTheRealSlot(t *testing.T) {
 	fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC)) // eight days later, on an hourly schedule (cut-over 6 h)
 	st := waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
 	if console.BackupWhyCode(st.LastWhy) != "window_age" ||
-		!strings.Contains(st.LastWhy, "no count of the changes since it, no usable update rate (none measured, or the measured updates all cost about the same), no full backup on record") {
+		!strings.Contains(st.LastWhy, "no count of the changes since it, no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full backup on record") {
 		t.Fatalf("the slot did not cut over on age: %+v", st)
 	}
 	if run, _ := sup.history.LastScheduled(e.ID); run == nil || run.Kind != console.BaselineRunDump || run.WhyCode != "window_age" {

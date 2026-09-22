@@ -81,7 +81,7 @@ func TestCutoverToFull(t *testing.T) {
 		t.Errorf("age reason %q claims something the history has", why)
 	}
 	why = CutoverToFull(BackupWindow{Anchor: old, Events: 100}, 5*time.Minute, now)
-	if !strings.Contains(why, "no usable update rate (none measured, or the measured updates all cost about the same), no full backup on record") || strings.Contains(why, "no count") {
+	if !strings.Contains(why, "no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full backup on record") || strings.Contains(why, "no count") {
 		t.Errorf("age reason %q, want the two missing measurements named", why)
 	}
 	if got := roundSeconds(1e30); got != roundDuration(time.Duration(1<<63-1)) {
@@ -237,7 +237,10 @@ func TestBaselineHistory_updateModel(t *testing.T) {
 	}
 	// The tenth threshold from both sides: five runs whose time beyond the
 	// shortest is under a tenth of the total read as no rate; just over,
-	// a rate.
+	// a rate. The last run applies 20,000 events more than the others, so
+	// the #1738 floor (measuredFoldMinEvents) is not what is read here;
+	// with only 100 more, as this case had before #1738, no time makes a
+	// rate (TestUpdateModel_quietServerOneSlightlyLargerRun).
 	for _, c := range []struct {
 		last float64
 		rate bool
@@ -249,7 +252,7 @@ func TestBaselineHistory_updateModel(t *testing.T) {
 		for range 4 {
 			_ = h2.Append(BaselineRunRecord{ServerID: "s", Kind: BaselineRunRefresh, Events: 100, UpdateSeconds: 90})
 		}
-		_ = h2.Append(BaselineRunRecord{ServerID: "s", Kind: BaselineRunRefresh, Events: 200, UpdateSeconds: c.last})
+		_ = h2.Append(BaselineRunRecord{ServerID: "s", Kind: BaselineRunRefresh, Events: 20_100, UpdateSeconds: c.last})
 		if _, rate := h2.UpdateModel("s"); (rate > 0) != c.rate {
 			t.Fatalf("four runs of 90 s and one of %v s: rate=%v, want a rate: %v", c.last, rate, c.rate)
 		}
