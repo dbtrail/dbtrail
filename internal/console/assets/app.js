@@ -106,7 +106,7 @@ const DOCS_PAGES = {
   verification: "guides/verify",
   storage: "guides/capacity-planning",
   connect: "claude/setup",
-  "backup-settings": "guides/backup-settings",
+  "backup-settings": "settings/backups",
 };
 
 const MON_STATE_TITLES = {
@@ -4553,7 +4553,7 @@ function backupRefreshCard(br) {
   say(br.source === "override"
     ? "You chose this in the web interface. It replaces the setting DBTrail started with."
     : "This is the setting DBTrail started with.");
-  more.append(docsMore("guides/backup-settings", "backups--disk-space", "the disk-space switch"),
+  more.append(docsMore("settings/backups", "backups--disk-space", "the disk-space switch"),
     docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
   card.append(more);
   return card;
@@ -4741,7 +4741,7 @@ function backupDaemonCard(rows) {
   card.append(cnFine("More about changing these",
     el("p", { class: "form-hint", text:
       "These come from the command line or the environment of the DBTrail process. Change the flag or variable shown under the row, then restart DBTrail." }),
-    docsMore("guides/backup-settings", "set-at-startup", "settings that need a restart")));
+    docsMore("settings/backups", "set-at-startup", "settings that need a restart")));
   return card;
 }
 
@@ -4764,7 +4764,7 @@ function backupDaemonEditCard(rows) {
     el("p", { class: "form-hint", text:
       "Saved here, in DBTrail's own settings file, which wins over the command line and the environment. " +
       "Use the startup value to go back to what the process was started with." }),
-    docsMore("guides/backup-settings", "set-at-startup", "settings that need a restart")));
+    docsMore("settings/backups", "set-at-startup", "settings that need a restart")));
   return card;
 }
 
@@ -4957,7 +4957,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   // server's OWN destination only: the daemon default is shared by every
   // server, and a rule on it is not this row's to hand out.
   if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers, daemonS3));
-  more.push(docsMore("guides/backup-settings", "per-server", "backup locations per server"));
+  more.push(docsMore("settings/backups", "per-server", "backup locations per server"));
 
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
