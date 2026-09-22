@@ -2017,6 +2017,37 @@ button { font-family: inherit; }
 }
 .dc-rem > :last-child { margin-bottom: 0; }
 
+/* Tables left out of capture (#1802). Each is a DASHED chip: the dash is the
+   consequence (not captured), the color is whether someone still has to
+   decide: red until then, gray once "Leave it out" records a decision
+   (#1805). The count in the title stays neutral ink. */
+.uncap-card { margin-bottom: 16px; }
+.uncap-card > .warn-item { margin: 12px 14px 14px; }
+.uncap-lead { font-size: 13.5px; color: var(--ink); margin: 0 0 4px; padding: 0 14px; max-width: 78ch; }
+.uncap-list { display: flex; flex-direction: column; gap: 8px; padding: 0 14px 14px; }
+.uncap {
+  border: 1px dashed var(--delete); border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--delete) 4%, transparent);
+  padding: 8px 12px; min-width: 0;
+}
+.uncap.decided { border-color: var(--line); background: transparent; }
+.uncap-line { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.uncap-text { font-size: 13px; color: var(--ink); overflow-wrap: anywhere; min-width: 0; }
+.uncap.needs-decision .uncap-text { color: var(--delete); }
+.uncap.decided .uncap-text { color: var(--ink-3); }
+.uncap-fix { margin-top: 8px; }
+.uncap-fix[hidden] { display: none; }
+.uncap-intro { font-size: 12.5px; line-height: 1.45; color: var(--ink-2); margin: 0 0 6px; max-width: 72ch; }
+.uncap-sql {
+  font-family: var(--f-mono); font-size: 11.5px; line-height: 1.4;
+  background: var(--surface-3); border-radius: 4px; padding: 8px 10px;
+  margin: 0 0 6px; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.uncap-more > summary { cursor: pointer; font-size: 12.5px; color: var(--ink-2); padding: 2px 0; }
+.uncap-more[open] > summary { margin-bottom: 8px; }
+.uncap-more > .uncap + .uncap { margin-top: 8px; }
+.uncap-note { font-size: 12.5px; color: var(--ink-2); margin: 0; padding: 0 14px 14px; max-width: 72ch; }
+
 /* toast — absent from the design system; small, unobtrusive */
 .toast {
   position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);

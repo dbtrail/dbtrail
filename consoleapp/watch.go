@@ -29,6 +29,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/serverid"
+	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/streamdeps"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
@@ -1532,6 +1533,29 @@ func errString(err error) string {
 	return err.Error()
 }
 
+// bootCaptureFilter is the scope THIS daemon's own capture runs with, for the
+// uncaptured-tables report (#1802). It is the only place that scope exists:
+// the schema snapshot records the SCHEMAS capture reads, nothing anywhere
+// records --tables, and a table that filter drops has its events dropped by
+// the parser with no counter, no log line and nothing in capture_skips. A
+// report that counted the snapshot instead would state full coverage over
+// tables nobody is watching.
+//
+// nil when this daemon runs no capture of its own (source-less): it knows
+// nothing then, and the report claims no count rather than guessing. The
+// lists are parsed by the same helper the stream parses them with, so the
+// two cannot disagree about what is watched.
+func bootCaptureFilter() *status.CaptureFilter {
+	if upSourceDSN == "" {
+		return nil
+	}
+	return &status.CaptureFilter{
+		Known:   true,
+		Schemas: cliutil.ParseSchemaList(upSchemas),
+		Tables:  cliutil.ParseSchemaList(upTables),
+	}
+}
+
 func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console.Registry) (console.Config, error) {
 	cfg, err := mysql.ParseDSN(indexDSN)
 	if err != nil {
@@ -1550,6 +1574,8 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console
 		BootDSN: indexDSN,
 		Listen:  opts.Listen,
 		Token:   opts.Token,
+		// What this daemon's own capture watches (#1802).
+		BootCaptureFilter: bootCaptureFilter(),
 
 		BaselineDir:     opts.BaselineDir,
 		BaselineS3:      opts.BaselineS3,

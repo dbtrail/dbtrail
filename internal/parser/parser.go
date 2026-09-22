@@ -909,29 +909,11 @@ func emitUpdates(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// mysqlIdentEqualFold reports whether two column identifiers are equal under
-// MySQL's case-insensitive identifier comparison. strings.EqualFold covers
-// every case MySQL folds except the Turkish dotted/dotless I pair: MySQL's
-// identifier collation treats İ (U+0130) and ı (U+0131) as equal to I/i
-// (verified on 8.4: CREATE TABLE t (i INT, İ INT) fails with a duplicate-
-// column error, and RENAME COLUMN İstanbul TO istanbul succeeds as a
-// case-style rename), while Unicode simple folding maps neither to 'i' — so
-// a plain EqualFold would flag that legal case-style rename as drift (#700).
-// Accents are NOT folded by MySQL identifiers (verified on 8.4: CREATE TABLE
-// t (e INT, é INT) succeeds with two distinct columns), so no wider
-// normalization is needed.
-func mysqlIdentEqualFold(a, b string) bool {
-	if strings.EqualFold(a, b) {
-		return true
-	}
-	dotless := func(r rune) rune {
-		if r == 'İ' || r == 'ı' {
-			return 'i'
-		}
-		return r
-	}
-	return strings.EqualFold(strings.Map(dotless, a), strings.Map(dotless, b))
-}
+// mysqlIdentEqualFold forwards to metadata.IdentEqualFold (kept so this
+// package's #700 drift guard keeps its local name; the canonical doc lives on
+// metadata.IdentEqualFold, which the uncaptured-tables report also uses so
+// one rule decides what MySQL calls the same identifier everywhere).
+func mysqlIdentEqualFold(a, b string) bool { return metadata.IdentEqualFold(a, b) }
 
 // BuildPKValues forwards to event.BuildPKValues (kept for back-compat; the
 // canonical doc lives on event.BuildPKValues).

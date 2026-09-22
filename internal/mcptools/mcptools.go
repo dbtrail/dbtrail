@@ -1160,6 +1160,24 @@ func MakeStatusTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Stat
 		if err != nil {
 			return ErrorResult(err), nil, nil
 		}
+		// The tables capture leaves out (#1802), named with their fixes. The
+		// surface's deny rules (the console's startup profile) withhold a
+		// denied table's name here as they withhold its rows from the query
+		// tool; the report then counts it instead.
+		// An empty filter on purpose, like `bintrail status`: this tool
+		// answers from an index whose capture it does not run, and nothing
+		// records the per-table scope, so no coverage count is claimed.
+		data.TableCapture = status.LoadTableCapture(ctx, t.DB).WithFilter(status.CaptureFilter{})
+		if deny := t.DenyTables; len(deny) > 0 {
+			data.TableVisible = func(schema, table string) bool {
+				for _, dt := range deny {
+					if strings.EqualFold(dt.Schema, schema) && strings.EqualFold(dt.Table, table) {
+						return false
+					}
+				}
+				return true
+			}
+		}
 
 		var buf bytes.Buffer
 		data.Write(&buf)
