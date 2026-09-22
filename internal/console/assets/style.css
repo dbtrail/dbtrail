@@ -3050,10 +3050,10 @@ section.bk-restore { margin-top: 18px; }
 .cf-key .cf-tile.cf-kept { border-width: 1.5px; }
 .cf-key span + .cf-tile { margin-left: 10px; }
 
-/* blCase: which backup location is in force, one row per case. The legend
-   draws all three in --ink-3; the server's own row is highlighted with the
-   Backups page's latest-row idiom (violet tint + line). Marks are glyphs, so
-   the meaning never rides on colour alone. */
+/* blCase: which backup location is in force, one row per server (#1573: the
+   three-row legend is gone). The row is highlighted with the Backups page's
+   latest-row idiom (violet tint + line). Marks are glyphs, so the meaning
+   never rides on colour alone. */
 .bl-case {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px;
   padding: 5px 8px; border-radius: var(--radius-sm); font-size: 12.5px; color: var(--ink-3);

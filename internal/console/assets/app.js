@@ -4875,8 +4875,9 @@ const BACKUP_SOURCE_CASES = {
 };
 
 // blCase renders one case row: the name, then a tick or a cross per lane.
-// Marks are characters, not colour alone. `current` marks the row that is
-// this server's answer; the legend renders all three unmarked.
+// Marks are characters, not colour alone. `current` marks the row as this
+// server's answer, which since #1573 is the only way it is drawn (the
+// three-row legend that rendered all three unmarked is gone).
 function blCase(source, current) {
   const c = BACKUP_SOURCE_CASES[source];
   // A verdict this build does not know draws as unknown, with no lanes: two
@@ -4960,7 +4961,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
     el("span", { text: "Don't automatically include archived data in queries" })));
 
   // Provenance, the row's reason to exist: which location is actually in
-  // force, drawn as the legend row it matches. The daemon default backs the
+  // force, drawn as its own case row. The daemon default backs the
   // READ paths only. Create backup, restores and the schedule read the
   // server's raw entry on purpose (the default is a shared store; folding
   // this server's index onto another server's snapshots would publish a
@@ -7530,8 +7531,10 @@ function verifyRegions(servers, opts) {
   vfyDraw(vfyView);
   vfyProbe(cur.id);
   current.append(results);
-  // The glossary of the per-row nouns (#1419 §5) moved to docs/console.md,
-  // Verification (#1573 redesign); the page's Docs link leads there.
+  // The glossary of the per-row nouns (#1419 §5) moved to this repo's
+  // docs/console.md, Verification (#1573 redesign). The page's Docs link does
+  // NOT reach it: it opens the site's guides/verify page, which lives in
+  // another repo and is given the same four definitions in the docs pass.
 
   // ── Region 3: what ran before ──
   const historyCard = el("section", { class: "tcard vfy-region vfy-histcard" });

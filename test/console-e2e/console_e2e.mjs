@@ -4560,7 +4560,9 @@ try {
       fineOpen: fine.filter((d) => d.open).length,
       refreshCardHere: !!view.querySelector(".bkr-head"),
       cfTiles: view.querySelectorAll(".bkr-head ~ .cf-shape .cf-row").length,
-      legend: Array.from(view.querySelectorAll(".bl-legend .bl-case")).map((c) => c.dataset.source),
+      // Every case row on the page, not only those inside a server box: a
+      // legend re-added anywhere raises this count above one per server.
+      cases: view.querySelectorAll(".bl-case").length,
       current: Array.from(view.querySelectorAll(".bks-server")).map((b) => ({
         name: (b.querySelector(".bks-server-name") || {}).textContent || "",
         cases: Array.from(b.querySelectorAll(".bl-case.is-current")).map((c) => c.dataset.source),
@@ -4598,20 +4600,21 @@ try {
   (bks.refreshCardHere && bks.cfTiles === 2)
     ? ok("backup-settings: the carry-forward card moved here and draws two backups")
     : bad("backup-settings: the carry-forward card moved here and draws two backups", JSON.stringify({ here: bks.refreshCardHere, rows: bks.cfTiles }));
-  // The drawing cannot lie: the legend draws exactly the three verdicts
-  // (the Go side pins that same set to the handler's constants, so a fourth
-  // fails there first), and each seeded server's current case is the source
+  // The drawing cannot lie: one case row per server and no more (#1573 took
+  // the three-row legend away, and counting every .bl-case on the page is
+  // what makes its return fail here), and each server's case is the source
   // the API returned for it, held against the response rather than a list
-  // typed here.
+  // typed here. The Go side pins the case SET to the handler's constants, so
+  // a fourth verdict fails there first.
   const apiSources = (bksAPI.servers || []).map((s) => ({ name: s.name || s.id, source: s.source }));
   // The three-row legend is gone (#1573 redesign); each server still draws
   // its own case, and that case is what the API reports.
   const currentMatches = apiSources.length > 0 && apiSources.length === bks.current.length
     && apiSources.every((s, i) => bks.current[i].name === s.name && bks.current[i].cases.length === 1 && bks.current[i].cases[0] === s.source);
-  (bks.legend.length === 0 && currentMatches)
-    ? ok("backup-settings: each server draws its own location case as the API reports it, with no three-row legend")
-    : bad("backup-settings: each server draws its own location case as the API reports it, with no three-row legend",
-        JSON.stringify({ legend: bks.legend, api: apiSources, current: bks.current }));
+  (bks.cases === apiSources.length && currentMatches)
+    ? ok("backup-settings: each server draws its own location case as the API reports it, and nothing draws the cases twice")
+    : bad("backup-settings: each server draws its own location case as the API reports it, and nothing draws the cases twice",
+        JSON.stringify({ cases: bks.cases, api: apiSources, current: bks.current }));
   // Each compact block links to a page the Docs table carries, the table
   // the daily network check proves the site serves (#1645). Read from the
   // page, not typed here: a folder prefix typed here went stale the day the
@@ -4627,7 +4630,7 @@ try {
   // the kept swatch in the key) and OFF (five written, no kept swatch), a
   // refused daemon value (loud line under the row, outside the compact
   // block, value marked), and the serve-mode page (no sections, no daemon
-  // card, its own sub line). Detached so nothing on the live page changes.
+  // card, no sub line since #1573). Detached so nothing on the live page changes.
   const bksStates = await page.evaluate(() => {
     const shape = (on) => {
       const s = cfShape(on);
