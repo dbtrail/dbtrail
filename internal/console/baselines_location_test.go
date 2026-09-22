@@ -106,6 +106,18 @@ func TestBaselinesAPI_locationOnly(t *testing.T) {
 		}
 	})
 
+	t.Run("a named startup profile with no rules yet is refused too", func(t *testing.T) {
+		// Wider than the listing (sessionRestricted): the command this location
+		// goes into exports every row unredacted, and data_profile, which the
+		// page asks first, is keyed on the same profileActiveFor.
+		srv := newBaselineServer(t, t.TempDir(), true)
+		srv.profileActive = true
+		rec, body := doServersReq(t, srv, "GET", "/api/baselines?location_only=1", "")
+		if rec.Code != 403 {
+			t.Fatalf("code = %d, body = %s; want 403 under serve --profile", rec.Code, body)
+		}
+	})
+
 	t.Run("a session with a data profile is refused, as the listing is", func(t *testing.T) {
 		srv := newBaselineServer(t, t.TempDir(), true)
 		req := httptest.NewRequest("GET", "/api/baselines?location_only=1", nil)
@@ -175,18 +187,11 @@ func TestBaselinesAPI_locationOnlyRegistry(t *testing.T) {
 		t.Errorf("bundles opened: %d; location_only must not open a server's index", len(srv.cm.bundles))
 	}
 
-	// No header: the default server, the one /api/servers reports.
-	rec, body := doServersReq(t, srv, "GET", "/api/baselines?location_only=1", "")
-	if rec.Code != 200 {
-		t.Fatalf("default: code = %d, body = %s", rec.Code, body)
-	}
-	var def baselineLocationResponse
-	if err := json.Unmarshal(body, &def); err != nil {
-		t.Fatal(err)
-	}
-	defEntry, _ := reg.Get(srv.cm.defaultID())
-	if want, _ := baselineSources(srv.cm.withBaselineDefaults(defEntry)); def.Source != want {
-		t.Errorf("default: source %q, want the default server's %q", def.Source, want)
+	// No header, with the daemon's --baseline-dir set: that seeds the
+	// command-line entry, which is then the default, so the answer is the
+	// daemon's own location.
+	if got := headerless(t, srv); got != "/daemon/baselines" {
+		t.Errorf("no header, command-line entry present: source %q, want /daemon/baselines", got)
 	}
 
 	if rec, body := doServersReqHeader(t, srv, "GET", "/api/baselines?location_only=1", "", "no-such-id"); rec.Code != 404 {
@@ -194,9 +199,52 @@ func TestBaselinesAPI_locationOnlyRegistry(t *testing.T) {
 	}
 }
 
+// TestBaselinesAPI_locationOnlyHeaderlessRegistry: with no command-line entry,
+// a request with no server header resolves to the first registry server, and
+// the location is that server's own.
+func TestBaselinesAPI_locationOnlyHeaderlessRegistry(t *testing.T) {
+	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range []ServerEntry{
+		{Name: "first", DSN: "u:p@tcp(127.0.0.1:1)/idx", BaselineDir: "/first/dir"},
+		{Name: "second", DSN: "u:p@tcp(127.0.0.1:1)/idx", BaselineDir: "/second/dir"},
+	} {
+		if _, err := reg.Add(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := reg.Get(srv.cm.defaultID()); !ok {
+		t.Fatalf("defaultID %q is not a registry entry: this test would not test a registry default", srv.cm.defaultID())
+	}
+	if got := headerless(t, srv); got != "/first/dir" {
+		t.Errorf("no header: source %q, want /first/dir, the first registry server's own", got)
+	}
+}
+
+// headerless asks location_only with no server header and returns the source.
+func headerless(t *testing.T, srv *Server) string {
+	t.Helper()
+	rec, body := doServersReq(t, srv, "GET", "/api/baselines?location_only=1", "")
+	if rec.Code != 200 {
+		t.Fatalf("no header: code = %d, body = %s", rec.Code, body)
+	}
+	var got baselineLocationResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	return got.Source
+}
+
 // TestCapabilitiesDataProfile: data_profile tells the page a data profile
-// governs this request, so Connect AI does not ask for the backup location
-// the server would refuse (and audit) on every visit.
+// governs this request (the session's, or a named startup one even with no
+// rules yet), so Connect AI does not ask for the backup location the server
+// would refuse, and audit, on every visit.
 func TestCapabilitiesDataProfile(t *testing.T) {
 	read := func(t *testing.T, srv *Server, tok string) bool {
 		t.Helper()
@@ -221,5 +269,12 @@ func TestCapabilitiesDataProfile(t *testing.T) {
 	}
 	if read(t, profiled, "static-tok") {
 		t.Error("the static token (no profile): data_profile = true, want false")
+	}
+	// A console started under --profile whose profile has no rules yet: no
+	// table is denied and no column redacted (rbacActiveFor is false), and the
+	// profile is still in force.
+	profiled.profileActive = true
+	if !read(t, profiled, "static-tok") {
+		t.Error("a named startup profile with no rules: data_profile = false, want true")
 	}
 }

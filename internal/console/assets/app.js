@@ -8619,8 +8619,17 @@ async function renderConnect() {
   // The server list only picks between /mcp and /mcp/{id-or-name}; a failure
   // (or the registry-only 404 on an empty console) degrades to the bare
   // default-server URL instead of blanking the page.
-  let servers = [];
-  try { servers = (await api("/api/servers")).servers || []; } catch (_) {}
+  // serversFailed covers what that degrade leaves out: the Iceberg command
+  // needs the selected server's index address, and a failure other than a
+  // refusal or the empty console must say why the panel is missing. The
+  // default id is THIS response's, the one a header-less request resolves to
+  // right now, not the one the last loadServers left behind.
+  let servers = [], serversDefault = "", serversFailed = false;
+  try {
+    const r = await api("/api/servers");
+    servers = r.servers || [];
+    serversDefault = r.default_id || "";
+  } catch (err) { serversFailed = err.status !== 403 && err.status !== 404; }
   // Token status (#1052): presence/provenance only, never a value. null on
   // failure — the card degrades to a reload hint instead of blanking the page.
   let tokStatus = null;
@@ -8632,11 +8641,12 @@ async function renderConnect() {
   // Where the selected server's snapshots live, for the Iceberg export
   // command (#1573): location_only is the Backups listing's own resolution,
   // answered without reading the storage or opening the server's index. Not
-  // asked when the session may not read settings or a data profile is active:
-  // the server would refuse it on every visit (and audit a denial under a
-  // profile), and the command hands out unredacted data. A refusal draws no
-  // panel; any other failure says so in one line, so a missing panel never
-  // reads as "this server keeps no backups".
+  // asked when the session may not read settings or a data profile is active
+  // (data_profile, the key the server refuses on): the server would refuse it
+  // on every visit, auditing a denial under a profile, since the command
+  // hands out unredacted data. A refusal draws no panel; any other failure
+  // says so in one line, so a missing panel never reads as "this server keeps
+  // no backups".
   let bLoc = null, bLocFailed = false;
   if ((capsCache.permissions || {})["settings:read"] !== false && !capsCache.data_profile) {
     try { bLoc = await api("/api/baselines?location_only=1"); } catch (err) { bLocFailed = err.status !== 403; }
@@ -8650,7 +8660,11 @@ async function renderConnect() {
     return;
   }
   try {
-    buildConnect(servers, tokStatus, minted, fbStatus, bLoc, bLocFailed);
+    // No note for a console with no server at all: the location 404s there
+    // too, and "this server" would name nothing.
+    const cur = servers.find((s) => s.id === (currentServer || serversDefault));
+    buildConnect(servers, tokStatus, minted, fbStatus,
+      { cur: cur, loc: bLoc, failed: (bLocFailed && !!cur) || serversFailed });
   } catch (err) {
     if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
     const v = VIEW(); clear(v); v.append(pageHead("Connect AI", null)); renderError(v, err);
@@ -8692,7 +8706,7 @@ function copyText(text, what) {
   clip.writeText(text).then(() => toast(what + " copied to clipboard"), () => toastError("Copy failed."));
 }
 
-function buildConnect(servers, tokStatus, minted, fbStatus, bLoc, bLocFailed) {
+function buildConnect(servers, tokStatus, minted, fbStatus, ice) {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "Three steps and Claude can answer questions about your database history. It can only read; it can never change anything.");
@@ -8717,10 +8731,9 @@ function buildConnect(servers, tokStatus, minted, fbStatus, bLoc, bLocFailed) {
   // Last: what the selected server's snapshots can become, for a reader who
   // wants them in front of a reporting engine (#1466). It was the bottom of
   // the Backups page, a third answer to "what do I download" there (#1573).
-  const cur = (servers || []).find((s) => s.id === (currentServer || defaultServerId));
-  const iceberg = icebergExportPanel(cur, bLoc);
+  const iceberg = icebergExportPanel(ice.cur, ice.loc);
   if (iceberg) v.append(iceberg);
-  else if (bLocFailed) {
+  else if (ice.failed) {
     v.append(el("p", { class: "form-hint cn-ice-err", style: "margin-top:18px", text:
       "Could not check where this server's backups are kept, so the Iceberg export command is not shown. Reload the page to try again." }));
   }
@@ -8952,6 +8965,16 @@ async function mintMCPToken(rotate) {
   }
   mcpMintedOnce = (res && res.token) || null;
   try { await gateCapabilities(); } catch (_) {} // 401 already raised the sign-in gate
+  // The reader may have left Connect while the token was being made; painting
+  // it now would cover the page they moved to. The route, not viewGen: a
+  // server switch re-renders Connect in place, and the token is not per
+  // server. Dropped rather than parked for a later visit (the rule
+  // renderConnect keeps), and said, as an interrupted display is.
+  if (routeSegment() !== "connect") {
+    if (mcpMintedOnce) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
+    mcpMintedOnce = null;
+    return;
+  }
   renderConnect();
 }
 
@@ -8965,6 +8988,9 @@ async function revokeMCPToken() {
   }
   toast("Token deleted. AI clients that used it are disconnected");
   try { await gateCapabilities(); } catch (_) {}
+  // Same rule as mintMCPToken: never paint Connect over a page the reader
+  // moved to while the request was out.
+  if (routeSegment() !== "connect") return;
   renderConnect();
 }
 

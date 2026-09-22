@@ -4803,11 +4803,11 @@ try {
     ? ok("connect: the DuckDB schema card is on Backups, not duplicated here")
     : bad("connect: the DuckDB schema card is on Backups, not duplicated here",
         JSON.stringify({ views: cn.duckViewsCap, rendered: cn.duckHere }));
-  // The Iceberg export panel lives here since #1573 (it was on Backups). This
-  // scenario runs on byo-idx, whose own backup folder is the fixture's, so
-  // the command must name THAT folder: the location comes from
-  // /api/baselines?location_only=1, the same resolution the Backups listing
-  // uses, and a panel pointing anywhere else would export the wrong data.
+  // The Iceberg export panel lives here since #1573 (it was on Backups), and
+  // its command names the fixture's backup folder. On this stack byo-idx's own
+  // folder and index are the same as the daemon's, so this cannot tell one
+  // server from another; TestBaselinesAPI_locationOnlyRegistry carries that
+  // guarantee, with a different folder per server.
   const iceDirArg = "--baseline-dir '" + (process.env.E2E_BASELINE_DIR || "") + "'";
   (cn.ice.present && cn.ice.title === "Keep it current with Iceberg"
     && cn.ice.cmd.startsWith("bintrail export iceberg ") && cn.ice.cmd.includes(iceDirArg))

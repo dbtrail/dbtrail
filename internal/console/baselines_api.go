@@ -288,9 +288,15 @@ type baselineLocationResponse struct {
 // S3, paid listings, #1679), and no index connection either. Connect AI asks
 // it on every open to print the Iceberg export command (#1573); resolving
 // through the bundle would open a registry server's index, and a dead one
-// would hold the whole page on the connect timeout. Same permission (the route
-// table matches the path) and the same refusal for a session with a data
-// profile as the listing, in the same order.
+// would hold the whole page on the connect timeout. Same permission as the
+// listing (the route table matches the path), resolved first as the listing is.
+//
+// Refused while a data profile is active, keyed on profileActiveFor (a NAMED
+// startup profile even with no rules yet, or the session's) like the access
+// profiles surface, and wider than the listing's sessionRestricted: the
+// command this location goes into exports every row unredacted. The page asks
+// the same question through the data_profile capability and does not ask, so
+// the refusal and its audit record fire only for a caller that skipped it.
 func (s *Server) handleBaselineLocation(w http.ResponseWriter, r *http.Request) {
 	src, err := s.cm.baselineLocation(r.Header.Get(serverHeader))
 	if err != nil {
@@ -301,10 +307,10 @@ func (s *Server) handleBaselineLocation(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, status, err.Error())
 		return
 	}
-	if sessionRestricted(r) {
+	if s.profileActiveFor(r) {
 		recordProfileGateDeny(r, "baselines")
 		writeJSONError(w, http.StatusForbidden,
-			"backup listings are unavailable while an access-control profile is active: baseline reads aren't redacted")
+			"the backup location is not shown while an access-control profile is active: an export from it is not redacted")
 		return
 	}
 	resp := baselineLocationResponse{}

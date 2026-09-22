@@ -35,10 +35,22 @@ document.getElementById = (id) => (id === "view" ? screen : new FakeEl("div"));
 const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.push(n.textContent); return out; }
   if (n._text) out.push(n._text); for (const c of n.children || []) flat(c, out); return out; };
 const server = { id: "a", name: "a", kind: "registry", host: "db.internal", port: "3307", user: "reader", dbname: "idx", has_password: true };
-let asked = [], loc = null, leaveOnAsk = false;
-ctx.__api = async (path) => {
+let asked = [], loc = null, leaveOnAsk = false, serversAnswer = null, onMint = null;
+const toasts = [];
+ctx.__api = async (path, opts) => {
   asked.push(path);
-  if (path === "/api/servers") return { servers: [server] };
+  if (path === "/api/servers") {
+    if (serversAnswer instanceof Error) throw serversAnswer;
+    return serversAnswer || { servers: [server] };
+  }
+  if (path === "/api/mcp-token" && opts && opts.method === "POST") {
+    if (onMint) onMint();
+    return { token: "minted-plaintext" };
+  }
+  if (path === "/api/mcp-token" && opts && opts.method === "DELETE") {
+    if (onMint) onMint();
+    return {};
+  }
   if (path.startsWith("/api/baselines")) {
     // The reader clicks another page while the location is out.
     if (leaveOnAsk) vm.runInContext("viewGen++", ctx);
@@ -47,9 +59,15 @@ ctx.__api = async (path) => {
   }
   return {};
 };
-vm.runInContext("api = (p) => __api(p); currentServer = 'a';", ctx);
-const run = async (perms, location, caps = {}, leave = false) => {
-  asked = []; loc = location; leaveOnAsk = leave;
+ctx.__toasts = toasts;
+// The token cases stand on /connect, where the page head adds the Docs link,
+// whose icon is an SVG import this fake document cannot do; the link is not
+// what this test is about.
+vm.runInContext("api = (p, o) => __api(p, o); currentServer = 'a'; gateCapabilities = async () => {};" +
+  "toastError = (m) => __toasts.push(m); toast = () => {}; confirm = () => true; icon = () => el('span', {});", ctx);
+const run = async (perms, location, caps = {}, leave = false, servers = null, cur = "a") => {
+  asked = []; loc = location; leaveOnAsk = leave; serversAnswer = servers;
+  vm.runInContext("currentServer = " + JSON.stringify(cur) + "; defaultServerId = 'stale-from-an-old-load';", ctx);
   vm.runInContext("capsCache = " + JSON.stringify(Object.assign({ monitor: true, permissions: perms }, caps)) + "; capsKnown = true;", ctx);
   await vm.runInContext("renderConnect()", ctx);
   const text = flat(screen).join(" ");
@@ -69,6 +87,35 @@ const where = { configured: true, source: "/data/baselines", kind: "dir" };
   out.failed = await run({}, Object.assign(new Error("server error"), { status: 500 }));
   out.network = await run({}, new Error("Failed to fetch"));
   out.left = await run({}, where, {}, true);
+  // The server list fails: the command has no index address, so the panel
+  // cannot be drawn, and that must be said too.
+  out.serversFailed = await run({}, where, {}, false, Object.assign(new Error("boom"), { status: 500 }));
+  // A console with no server: the list 404s, so does the location, and there
+  // is no "this server" for a note to name.
+  out.empty = await run({}, Object.assign(new Error("no servers"), { status: 404 }), {}, false,
+    Object.assign(new Error("no servers"), { status: 404 }), "");
+  // Nothing selected: the default is the one THIS response names, not the
+  // one an older load left in defaultServerId.
+  out.fresh = await run({}, where, {}, false, { servers: [server], default_id: "a" }, "");
+  // A token made while the reader stays on Connect repaints it; one made after
+  // the reader left must not cover the page they moved to.
+  const mint = async (leave, call = "mintMCPToken(false)") => {
+    toasts.length = 0; asked = []; loc = where; serversAnswer = null;
+    vm.runInContext("currentServer = 'a'; location.pathname = '/connect';", ctx);
+    onMint = leave ? () => vm.runInContext("location.pathname = '/events'", ctx) : null;
+    vm.runInContext("clear(VIEW()); VIEW().append(el('p', { text: 'Events page' }))", ctx);
+    await vm.runInContext(call, ctx);
+    // mintMCPToken does not await the repaint it starts; let it finish.
+    await new Promise((r) => setImmediate(r));
+    onMint = null;
+    const text = flat(screen).join(" ");
+    return { steps: text.includes("Three steps"), events: text.includes("Events page"),
+      toast: toasts.join(" | "), parked: vm.runInContext("mcpMintedOnce", ctx) !== null };
+  };
+  out.mintStay = await mint(false);
+  out.mintLeft = await mint(true);
+  out.revokeStay = await mint(false, "revokeMCPToken()");
+  out.revokeLeft = await mint(true, "revokeMCPToken()");
   console.log(JSON.stringify(out));
 })().catch((e) => console.log(JSON.stringify({ err: String((e && e.stack) || e) })));
 `
@@ -85,9 +132,15 @@ const where = { configured: true, source: "/data/baselines", kind: "dir" };
 		Panel, Page, Steps, Note bool
 		Cmd                      string
 	}
+	type minted struct {
+		Steps, Events, Parked bool
+		Toast                 string
+	}
 	var got struct {
 		Err                                                            string
 		Dir, S3, None, Refused, NoPerm, Profile, Failed, Network, Left result
+		ServersFailed, Empty, Fresh                                    result
+		MintStay, MintLeft, RevokeStay, RevokeLeft                     minted
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
@@ -132,6 +185,32 @@ const where = { configured: true, source: "/data/baselines", kind: "dir" };
 	if !asksLocation(got.Left) || got.Left.Steps || got.Left.Panel {
 		t.Errorf("left while the location was out: asked %q, steps drawn %v, panel %v; want nothing painted over the next page",
 			got.Left.Asked, got.Left.Steps, got.Left.Panel)
+	}
+	if got.ServersFailed.Panel || !got.ServersFailed.Note || !got.ServersFailed.Page {
+		t.Errorf("the server list failed: panel %v, note %v, page %v; want the note, since the command lost its index address",
+			got.ServersFailed.Panel, got.ServersFailed.Note, got.ServersFailed.Page)
+	}
+	if got.Empty.Panel || got.Empty.Note || !got.Empty.Page {
+		t.Errorf("a console with no server: panel %v, note %v, page %v; want neither, and the page drawn",
+			got.Empty.Panel, got.Empty.Note, got.Empty.Page)
+	}
+	if !got.Fresh.Panel {
+		t.Errorf("nothing selected, the response names the default: panel %v, asked %q; want the panel for that server, not for the stale defaultServerId",
+			got.Fresh.Panel, got.Fresh.Asked)
+	}
+	if !got.MintStay.Steps || got.MintStay.Toast != "" {
+		t.Errorf("token made, still on Connect: steps %v, toast %q; want Connect repainted with no error", got.MintStay.Steps, got.MintStay.Toast)
+	}
+	if got.MintLeft.Steps || !got.MintLeft.Events || got.MintLeft.Parked || got.MintLeft.Toast == "" {
+		t.Errorf("token made after the reader left: steps %v, events page kept %v, token parked %v, toast %q; want the next page untouched, the token dropped and said",
+			got.MintLeft.Steps, got.MintLeft.Events, got.MintLeft.Parked, got.MintLeft.Toast)
+	}
+	if !got.RevokeStay.Steps {
+		t.Errorf("token deleted, still on Connect: steps %v; want Connect repainted", got.RevokeStay.Steps)
+	}
+	if got.RevokeLeft.Steps || !got.RevokeLeft.Events {
+		t.Errorf("token deleted after the reader left: steps %v, events page kept %v; want the next page untouched",
+			got.RevokeLeft.Steps, got.RevokeLeft.Events)
 	}
 	if !got.Dir.Steps {
 		t.Errorf("the steps text this test uses to see a painted page is gone from Connect; re-anchor the left-page check")

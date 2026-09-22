@@ -55,12 +55,6 @@ type capabilitiesResponse struct {
 	// profile cascade victim synthesis cannot honor redaction, so the endpoint
 	// refuses (see handleRecoverCascade). Process-global, like Monitor.
 	RecoverCascade bool `json:"recover_cascade"`
-	// DataProfile: a data profile governs this request, the console's startup
-	// --profile or this session's (rbacActiveFor). The SPA does not offer
-	// surfaces that hand out unredacted data under one: the Iceberg export
-	// command on Connect AI does not even ask for the backup location (#1573),
-	// which would be refused and audited as a denial on every visit.
-	DataProfile bool `json:"data_profile"`
 	// RecoverCascadeBaseline: cascade recovery's Phase-2 (recover children
 	// untouched within the window) is active for this server. Per-server, and gated
 	// EXACTLY like the handler builds its provider — a baseline source AND a schema
@@ -68,6 +62,13 @@ type capabilitiesResponse struct {
 	// baseline dir set but `bintrail snapshot` never run), where the handler
 	// degrades to Phase-1; advertising true there would over-promise.
 	RecoverCascadeBaseline bool `json:"recover_cascade_baseline"`
+	// DataProfile: a data profile governs this request, keyed on
+	// profileActiveFor: a NAMED startup --profile even with no rules yet, or
+	// this session's. The SPA does not offer surfaces that hand out unredacted
+	// data under one: Connect AI does not ask for the backup location the
+	// Iceberg export command needs (#1573), which the server refuses, and
+	// audits, on the same key.
+	DataProfile bool `json:"data_profile"`
 	// Views: GET /api/views.sql can produce a DuckDB schema for the SELECTED
 	// server's Parquet layout. Per-server and gated exactly as the handler is
 	// (archives enabled, no active data profile, and something to describe), so
@@ -214,7 +215,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		// recover-cascade is the free tier (like recover) and process-global, gated
 		// only by the RBAC profile (which would make synthesis leak redacted data).
 		RecoverCascade: !s.rbacActiveFor(r),
-		DataProfile:    s.rbacActiveFor(r),
+		DataProfile:    s.profileActiveFor(r),
 		Auth:           authCapsInfo{PasswordSet: s.passwordLoginEnabled(), AuthKind: kind},
 		Permissions:    permissionsForPolicy(policyFrom(r.Context())),
 		// The MCP endpoint accepts the static token or the UI-managed one
