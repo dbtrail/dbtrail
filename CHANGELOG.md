@@ -27,13 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes in its window publishes that table's previous Parquet file instead
   of writing it again, and it never publishes a table it should not: a
   destructive DDL or a stale schema snapshot refuses the backup before reuse
-  is reached, and a known capture gap or a failed `_MANIFEST` check
-  disqualifies that table inside the reuse path. It was an opt-in for
+  is reached, a known capture gap makes that table ineligible so it is
+  written the ordinary way, and a failed `_MANIFEST` check fails the run. It was an opt-in for
   control, not for correctness. What this means for you:
   - The daemon flag `--baseline-carry-forward-unchanged` (and
     `BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED`) now defaults to **on**.
     `=false` turns off this path only: with `--baseline-table-deltas` on (the
-    default since v0.79.0) a table that did not change is still published by
+    default since v0.84.0) a table that did not change is still published by
     linking its previous file, so writing every table again every time needs
     both turned off.
   - **If you had turned it off in the web interface, it is on again.** That

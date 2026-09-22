@@ -4298,10 +4298,12 @@ try {
     : bad("layout: a card left alone on the last row spans it", JSON.stringify(bandRow));
 
   // ── Scenario 17g3 — the disk-space card, every state it can be in ──
-  // Calls the REAL backupRefreshCard with each of the 72 DTOs the daemon can
+  // Calls the REAL backupRefreshCard with each of the 144 DTOs the daemon can
   // serve and reads the rendered element. Since #1681 the card has no switch
-  // (reuse is always on, the flag is the only way off), so the "source" axis
-  // and the two buttons are gone with it. A Go guard over the source can only
+  // (reuse is always on), so the "source" axis and the two buttons are gone;
+  // table_deltas took its place as an axis, because what the reader sees
+  // drawn is whether an unchanged table KEEPS its file, and with deltas on it
+  // keeps it whatever the reuse flag says. A Go guard over the source can only
   // see that both `br.enabled` and `br.scheduled` appear somewhere in the
   // function, so inverting either condition survives it while the card tells
   // the operator the opposite of the truth. Rendering is the only view that
@@ -4315,6 +4317,7 @@ try {
   const cardStates = await page.evaluate(() => {
     const rows = [];
     for (const on of [false, true]) {
+      for (const deltas of [false, true]) {
       for (const enabled of [false, true]) {
         for (const scheduled of [false, true]) {
           // The two #1579 dimensions. `targets` is absent off a watch daemon
@@ -4327,8 +4330,13 @@ try {
           // one S3-only server is both the common deployment and the value a
           // later pluralization edit is most likely to special-case.
           for (const skipped of [0, 1, 2]) {
-            const el = backupRefreshCard({ carry_forward_unchanged: on, enabled, scheduled,
+            const el = backupRefreshCard({ carry_forward_unchanged: on, table_deltas: deltas, enabled, scheduled,
               targets, skipped_s3_only: skipped });
+            // What the card must say and draw: the file is kept unless BOTH
+            // are off. Pinned as an equality, not a presence: an inverted
+            // ternary renders a perfectly good sentence about the opposite
+            // daemon, which is the failure this scenario exists for.
+            const kept = on || deltas;
             const t = el.innerText || el.textContent || "";
             // What sits INSIDE the compact block. Detached, innerText is
             // textContent, so `t` alone cannot tell visible from compact;
@@ -4344,11 +4352,19 @@ try {
               hiddenSkip: fine.includes(skipped + " server(s) keep backups only in S3"),
               compactSaving: fine.includes("only when the last backup is read from this machine"),
               // What replaced provenance: the closing sentence names what the
-              // daemon does, and it is compact like the rest of the block.
-              compactRule: fine.includes(on
-                ? "DBTrail always reuses a table that did not change"
-                : "started with reuse turned off"),
-              on, enabled, scheduled, targets, skipped,
+              // daemon does. Read as an EQUALITY over all three arms, so a
+              // card printing two of them fails here.
+              compactRule: [
+                fine.includes("DBTrail always reuses a table that did not change"),
+                fine.includes("but table deltas are on"),
+                fine.includes("both reuse and table deltas turned off"),
+              ].map((x) => (x ? "1" : "0")).join("") === (on ? "100" : deltas ? "010" : "001"),
+              // The visible sentence and the drawing, against the same rule.
+              saysKept: t.includes("Tables with no changes keep their last file"),
+              saysRewrite: t.includes("Every backup writes every table again"),
+              drawsKept: el.querySelectorAll(".cf-shape .cf-tile.cf-kept").length > 0,
+              kept,
+              on, deltas, enabled, scheduled, targets, skipped,
               alarm: t.includes("no server can be refreshed"),
               // The count is read back, not just the sentence: a card that
               // says "server(s)" without the number tells an operator nothing
@@ -4365,9 +4381,11 @@ try {
                 || (/(reus|recorded changes)/i.test(line) && !/\b(never|cannot|no)\b/i.test(line)))(
                 Array.from(el.querySelectorAll("p")).map((p) => p.textContent)
                   .find((x) => x.includes("keep backups only in S3")) || ""),
-              // No state pill and no buttons since #1681: nothing here is a
-              // choice, so a pill would invite a click that has nowhere to go.
+              // No state pill and nothing to operate since #1681: nothing
+              // here is a choice, so a control would invite a click that has
+              // nowhere to go. Every interactive shape, not only buttons.
               pill: !!el.querySelector(".bkr-state"),
+              controls: el.querySelectorAll("button, input, select, textarea, [onclick]").length,
               dormant: t.includes("Nothing uses this yet"),
               middle: t.includes("Nothing refreshes all servers on one timer"),
               saving: t.includes("only when the last backup is read from this machine"),
@@ -4383,12 +4401,16 @@ try {
           }
         }
       }
+      }
     }
     return rows;
   });
   const cardBad = cardStates.filter((r) =>
-    // nothing that reads as a control: no state pill, no buttons
-    r.pill || r.buttons.length > 0
+    // nothing that reads as a control: no state pill, nothing operable
+    r.pill || r.buttons.length > 0 || r.controls > 0
+    // what the card says and draws is what the daemon does with an unchanged
+    // table, in both directions
+    || r.saysKept !== r.kept || r.saysRewrite === r.kept || r.drawsKept !== r.kept
     // the compact block never swallows a fault or the dormancy note, and
     // it does hold the qualifiers that moved there (#1603): a "compact" that
     // hid the alarm would pass every presence check above
@@ -4413,7 +4435,7 @@ try {
     // and it never promises those servers an update from the bucket, which
     // needs the local directory they lack
     || r.skipPromisesReuse);
-  cardStates.length === 72 && cardBad.length === 0
+  cardStates.length === 144 && cardBad.length === 0
     ? ok("backups: the disk-space card reports every state it can be in")
     : bad("backups: the disk-space card reports every state it can be in",
         JSON.stringify({ n: cardStates.length, wrong: cardBad.slice(0, 4) }));

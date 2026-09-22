@@ -166,6 +166,32 @@ type RotationConfig struct {
 // to warn that it is not read.
 const legacyBaselineRefreshKey = "baseline_refresh"
 
+// legacyReuseTurnedOff reports whether that block explicitly turned reuse off,
+// which is the only case worth a warning: a block saying ON asks for what this
+// build already does, and warning about it would send an operator looking for
+// a change that never happened. The value comes back from the YAML decoder as
+// an untyped map, so both key shapes are handled; anything unreadable is
+// treated as "not off", since a warning nobody can act on is worse than none.
+func legacyReuseTurnedOff(v any) bool {
+	get := func(k string) (any, bool) {
+		switch m := v.(type) {
+		case map[string]any:
+			x, ok := m[k]
+			return x, ok
+		case map[any]any:
+			x, ok := m[k]
+			return x, ok
+		}
+		return nil, false
+	}
+	raw, ok := get("carry_forward_unchanged")
+	if !ok {
+		return false
+	}
+	off, isBool := raw.(bool)
+	return isBool && !off
+}
+
 // registryFile is the versioned on-disk envelope.
 type registryFile struct {
 	Version int `yaml:"version"`
@@ -255,10 +281,10 @@ func LoadRegistry(path string) (*Registry, error) {
 	// the file is read: the daemon otherwise reuses files that operator asked
 	// it not to, the card says reuse is always on, and nothing connects the
 	// two. Same posture as envBoolOr, which warns when it ignores a value.
-	if _, ok := r.file.Extra[legacyBaselineRefreshKey]; ok {
-		slog.Warn("the saved 'reuse unchanged tables' setting is no longer read; reuse of a table that did not change is always on now",
+	if legacyReuseTurnedOff(r.file.Extra[legacyBaselineRefreshKey]) {
+		slog.Warn("the saved 'reuse unchanged tables' setting turned reuse OFF and is no longer read; reuse of a table that did not change is always on now",
 			"file", path, "key", legacyBaselineRefreshKey,
-			"turn_it_off_with", "--baseline-carry-forward-unchanged=false (or BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED=false)",
+			"turn_it_off_with", "the watch daemon's --baseline-carry-forward-unchanged=false (or BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED=false)",
 			"note", "the block is left in the file untouched")
 	}
 	r.syncBucketStores()

@@ -788,9 +788,9 @@ and lands on Retention.
   point-in-time restores; the card says which of those are live. **Since
   #1681 the console does not edit it**: reuse never publishes a table it
   should not — a destructive DDL or a stale schema snapshot refuses the
-  backup before reuse is reached, and a known capture gap or a failed
-  `_MANIFEST` check disqualifies that table inside the reuse path — so it is
-  on for every daemon, and the daemon flag is the only thing that changes it.
+  backup before reuse is reached, a known capture gap makes that table
+  ineligible so it is written the ordinary way, and a failed `_MANIFEST`
+  check fails the run — so it is on for every daemon, and the daemon flag is the only thing that changes it.
   A `baseline_refresh:` block saved by an older console is ignored, and kept
   in the registry file untouched.
   See [dump-and-baseline.md](dump-and-baseline.md#refreshing-on-a-schedule).

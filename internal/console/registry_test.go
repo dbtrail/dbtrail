@@ -370,15 +370,21 @@ func TestRegistryOldBaselineRefreshKeySaysItIsIgnored(t *testing.T) {
 		return buf.String()
 	}
 	out := load(t, "version: 1\nbaseline_refresh:\n  carry_forward_unchanged: false\nservers: []\n")
-	for _, want := range []string{"no longer read", "--baseline-carry-forward-unchanged=false", "left in the file untouched"} {
+	for _, want := range []string{"no longer read", "--baseline-carry-forward-unchanged=false", "left in the file untouched", "file="} {
 		if !strings.Contains(out, want) {
 			t.Errorf("loading a registry with the old block did not warn about %q; the operator's saved choice is dropped in silence:\n%s", want, out)
 		}
 	}
-	// And a file without it says nothing: a warning on every start would be
-	// noise nobody can act on.
-	if out := load(t, "version: 1\nservers: []\n"); strings.Contains(out, "no longer read") {
-		t.Errorf("a registry without the old block warned anyway:\n%s", out)
+	// And nothing is said where nothing was discarded: a file without the
+	// block, and a block that asked for what this build already does. A
+	// warning nobody can act on is worse than none.
+	for _, quiet := range []string{
+		"version: 1\nservers: []\n",
+		"version: 1\nbaseline_refresh:\n  carry_forward_unchanged: true\nservers: []\n",
+	} {
+		if out := load(t, quiet); strings.Contains(out, "no longer read") {
+			t.Errorf("warned about a registry that discarded nothing (%q):\n%s", quiet, out)
+		}
 	}
 }
 

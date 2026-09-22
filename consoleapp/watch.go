@@ -225,8 +225,8 @@ func init() {
 		"When a refresh finds a table had no changes, publish its previous Parquet file instead of rewriting "+
 			"it (hard link where possible). On by default since #1681: the rows are identical either way, and "+
 			"reuse never publishes a table it should not — a destructive DDL or a stale schema snapshot refuses "+
-			"the backup before it, and a known capture gap or a failed _MANIFEST check disqualifies the table "+
-			"inside the reuse path. It links two snapshots to one file, so disk-usage and prune figures then "+
+			"the backup before it, a known capture gap makes the table ineligible so it is folded as usual, and a "+
+			"failed _MANIFEST check fails the run. It links two snapshots to one file, so disk-usage and prune figures then "+
 			"count space they will not reclaim while the newer snapshot references it. The web interface no "+
 			"longer asks. --baseline-carry-forward-unchanged=false turns off THIS path; with "+
 			"--baseline-table-deltas on (the default) a table that did not change is still published by linking "+
@@ -1605,6 +1605,10 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console
 			// consumers in runWatch, or the panel drifts from the daemon.
 			Enabled:   upBaselineRefreshEvery != "" || upConsoleBaselineTrigger,
 			Scheduled: upBaselineRefreshEvery != "",
+			// The other half of "what happens to a table that did not
+			// change": with deltas on, its previous file is linked forward
+			// whatever the flag above says.
+			TableDeltas: upBaselineTableDeltas,
 		},
 		AllowSetup: opts.AllowSetup,
 		Version:    appVersion,

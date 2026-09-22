@@ -95,7 +95,11 @@ func TestBackupRefreshCard_neverClaimsLiveWhileDormant(t *testing.T) {
 func TestBackupRefreshCard_hasNothingToClick(t *testing.T) {
 	js := readAsset(t, "app.js")
 	body := jsFunctionBody(t, js, "backupRefreshCard")
-	for _, gone := range []string{"onclick", "stg-cardfoot", "saveBackupRefresh", "bkr-state"} {
+	// Every interactive shape, not only the button the switch used: a
+	// checkbox or a select would ask the same question the console can no
+	// longer answer.
+	for _, gone := range []string{"onclick", "stg-cardfoot", "saveBackupRefresh", "bkr-state",
+		`"checkbox"`, `el("button"`, `el("input"`, `el("select"`} {
 		if strings.Contains(body, gone) {
 			t.Errorf("backupRefreshCard renders %q again; the setting is not editable from the console since #1681", gone)
 		}

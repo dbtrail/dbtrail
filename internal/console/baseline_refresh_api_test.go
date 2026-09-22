@@ -57,6 +57,15 @@ func TestBaselineRefreshUpdate_isGone(t *testing.T) {
 	if rec, _ := doServersReq(t, srv, "GET", "/api/baseline-refresh", ""); rec.Code != 200 {
 		t.Errorf("GET code=%d, want 200", rec.Code)
 	}
+	// The read-only console, which runs no loop and takes no backups: same
+	// answers, and this is the only test that drives the route there.
+	ro := newRegistryServer(t)
+	if rec, body := doServersReq(t, ro, "PUT", "/api/baseline-refresh", `{}`); rec.Code < 400 {
+		t.Errorf("PUT on the read-only console: code=%d body=%s, want a refusal", rec.Code, body)
+	}
+	if rec, _ := doServersReq(t, ro, "GET", "/api/baseline-refresh", ""); rec.Code != 200 {
+		t.Errorf("GET on the read-only console: code=%d, want 200", rec.Code)
+	}
 }
 
 // TestBaselineRefreshGet_targetsAreLiveAndOmittedOffWatch pins the #1579

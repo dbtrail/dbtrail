@@ -753,6 +753,7 @@ func TestStartBackupScheduleLoop_namesReuse(t *testing.T) {
 	for _, want := range []bool{true, false} {
 		b, _, _ := newScheduleFixture(t, true)
 		b.carryDefault = want
+		b.sup.tableDeltas = !want // the other half, and never the same value
 		var buf bytes.Buffer
 		prev := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -760,8 +761,15 @@ func TestStartBackupScheduleLoop_namesReuse(t *testing.T) {
 		startBackupScheduleLoop(ctx, b)
 		cancel()
 		slog.SetDefault(prev)
-		if got := buf.String(); !strings.Contains(got, "reuse_unchanged="+strconv.FormatBool(want)) {
-			t.Errorf("the schedule loop did not report reuse_unchanged=%v at startup; on this daemon nothing else names it:\n%s", want, got)
+		got := buf.String()
+		if !strings.Contains(got, "reuse_unchanged_path="+strconv.FormatBool(want)) {
+			t.Errorf("the schedule loop did not report reuse_unchanged_path=%v at startup; on this daemon nothing else names it:\n%s", want, got)
+		}
+		// Both keys: with table deltas on, an unchanged table keeps its file
+		// whatever the reuse flag says, so either key alone misleads.
+		if !strings.Contains(got, "table_deltas="+strconv.FormatBool(!want)) {
+			t.Errorf("the schedule loop did not report table_deltas=%v; reuse_unchanged_path alone reads as "+
+				"'every table is rewritten' on a daemon that rewrites nothing:\n%s", !want, got)
 		}
 	}
 }

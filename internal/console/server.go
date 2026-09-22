@@ -245,6 +245,12 @@ type BaselineRefreshDefaults struct {
 	// panel's copy has to distinguish "this applies to your restores but
 	// nothing is on a timer" from "this applies to nothing until a restart".
 	Scheduled bool
+	// TableDeltas is the daemon's --baseline-table-deltas (#1638, on by
+	// default). The card needs it to tell the truth with
+	// CarryForwardUnchanged OFF: table deltas publish a table that did not
+	// change by linking its previous file too, so "every table is written
+	// again" is only true when BOTH are off.
+	TableDeltas bool
 }
 
 // Server is a configured, ready-to-run console HTTP server. It holds only

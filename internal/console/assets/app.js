@@ -4520,6 +4520,11 @@ function backupRefreshCard(br) {
   // What the daemon will do. There is no choice to make here any more: this
   // is false only where the operator passed the flag that turns reuse off.
   const on = !!br.carry_forward_unchanged;
+  // …and with table deltas on (the default) a table that did not change is
+  // published by linking its previous file anyway, through the other path.
+  // So what the reader sees drawn is whether the file is KEPT, not which
+  // path keeps it; "every table is written again" is true only with both off.
+  const kept = on || !!br.table_deltas;
   // say() writes into the card until the compact block opens below, then
   // into the block: same sentences, one click further away.
   let into = card;
@@ -4528,13 +4533,10 @@ function backupRefreshCard(br) {
   // on arm promises completeness in the same breath as the saving: "keeps
   // the old file" reads as a partial backup otherwise, and that is the one
   // thing a recovery tool must never let a reader believe.
-  card.append(cfShape(on));
-  say(on
+  card.append(cfShape(kept));
+  say(kept
     ? "Tables with no changes keep their last file. The backup is still complete."
-    // NOT "every table is written again": with table deltas on (the default)
-    // a table that did not change is still published by linking its previous
-    // file, through the other path. This sentence speaks only for this one.
-    : "This DBTrail does not reuse the file of a table with no changes.");
+    : "Every backup writes every table again.");
   // The everything-running silence #1579 names: enabled and scheduled both
   // true reads as the healthy state, while the timer can be running over
   // ZERO refreshable servers (fresh install, or every server S3-only or
@@ -4577,7 +4579,9 @@ function backupRefreshCard(br) {
   say("This covers every server that keeps backups on this machine.");
   say(on
     ? "DBTrail always reuses a table that did not change. Where reuse would be wrong, that table is written again, or the whole backup is refused."
-    : "This DBTrail was started with reuse turned off (--baseline-carry-forward-unchanged=false).");
+    : kept
+      ? "Reuse of unchanged tables was turned off at startup (--baseline-carry-forward-unchanged=false), but table deltas are on, so a table that did not change still keeps its file."
+      : "This DBTrail was started with both reuse and table deltas turned off, so every backup writes every table.");
   more.append(docsMore("settings/backups", "backups--disk-space", "reusing unchanged tables"),
     docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
   card.append(more);

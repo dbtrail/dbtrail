@@ -15,6 +15,11 @@ type baselineRefreshDTO struct {
 	// boot and a saved setting is dormant until a restart when nothing consumes
 	// it.
 	Enabled bool `json:"enabled"`
+	// TableDeltas is the daemon's --baseline-table-deltas (#1638). With
+	// CarryForwardUnchanged false it is what decides whether an unchanged
+	// table is still published by linking its previous file, so the card
+	// cannot describe the off state without it.
+	TableDeltas bool `json:"table_deltas"`
 	// Scheduled reports the narrower fact that a periodic refresh loop is
 	// running. Enabled without Scheduled is the --baseline-trigger daemon: the
 	// setting governs restores today and nothing is on a timer.
@@ -46,6 +51,7 @@ func (s *Server) effectiveBaselineRefresh() baselineRefreshDTO {
 	d := s.baselineRefreshDefaults
 	dto := baselineRefreshDTO{
 		CarryForwardUnchanged: d.CarryForwardUnchanged,
+		TableDeltas:           d.TableDeltas,
 		Enabled:               d.Enabled,
 		Scheduled:             d.Scheduled,
 	}

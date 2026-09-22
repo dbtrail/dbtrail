@@ -147,7 +147,7 @@ type FullTableConfig struct {
 	// filesystem allows one) instead of folding an empty change map over it and
 	// re-emitting the same rows. OutputFormatParquet only.
 	//
-	// OPT-IN, and the zero value is the conservative one. The rows are the same
+	// Opt-in at this layer, and the zero value is the conservative one. The rows are the same
 	// either way; what changes is the representation on disk. See
 	// carryForwardEligible for the trade-offs an operator is agreeing to.
 	CarryForwardUnchanged bool
