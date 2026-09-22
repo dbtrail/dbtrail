@@ -222,9 +222,10 @@ func TestBackupSettingsDrawingCannotLie(t *testing.T) {
 		t.Errorf("BACKUP_SOURCE_CASES draws %v, the API emits %v; the picture of the cases lies", drawn, want)
 	}
 
-	// The wiring: the legend iterates the table (so a new key is drawn), each
-	// server row draws its own verdict as the current case, and the case
-	// carries data-source so the e2e can hold it against the API.
+	// The wiring: each server row draws its own verdict as the current case
+	// (a key this build does not know draws as Unknown), and the case carries
+	// data-source so the e2e can hold it against the API. The three-row legend
+	// that drew every case once is gone (#1573 redesign).
 	shape := functionBody(t, js, "function blCase(")
 	if !strings.Contains(shape, `"data-source": source`) || !strings.Contains(shape, "is-current") {
 		t.Error("blCase no longer stamps data-source / is-current; the e2e cannot compare the drawing to the API")
@@ -232,8 +233,8 @@ func TestBackupSettingsDrawingCannotLie(t *testing.T) {
 	if strings.Contains(shape, "svgEl(") {
 		t.Error("blCase builds through svgEl, which is for static icon constants; draw with el()")
 	}
-	if !strings.Contains(functionBody(t, js, "function backupServersPanel("), "Object.keys(BACKUP_SOURCE_CASES)") {
-		t.Error("the legend does not iterate BACKUP_SOURCE_CASES, so a new case would be pinned by the guard yet never drawn")
+	if strings.Contains(stripJSLineComments(functionBody(t, js, "function backupServersPanel(")), "blCase(") {
+		t.Error("backupServersPanel draws cases of its own again; the three-row legend was removed, each server row draws its own")
 	}
 	if !strings.Contains(functionBody(t, js, "function backupServerRow("), "blCase(src, true)") {
 		t.Error("backupServerRow does not draw the server's own verdict as the current case")

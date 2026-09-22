@@ -2946,7 +2946,8 @@ try {
     return {
       regionCount: regions.length,
       controlTinted: regions[0] ? regions[0].classList.contains("tcard-violet") : false,
-      subDescribesAll: !/prove a snapshot still reconstructs/i.test(document.querySelector(".page-sub").textContent),
+      // No subtitle since the #1573 redesign; the mode help below carries it.
+      subGone: !document.querySelector(".view .page-sub"),
       helpBefore, helpAfter: help ? help.textContent : "",
       // Measured, not scrollWidth: Chrome reports scrollWidth == clientWidth
       // for a <select> at ANY width (the closed control clips its text and
@@ -2971,6 +2972,9 @@ try {
       })(),
     };
   });
+  (vfyStruct.subGone)
+    ? ok("verification: no subtitle; the mode help says what each check does")
+    : bad("verification: no subtitle; the mode help says what each check does", "a .page-sub is back on /verification");
   (vfyStruct.regionCount >= 3 && vfyStruct.controlTinted)
     ? ok("verification: control / current / history are separate surfaces, control wears the structure tint")
     : bad("verification: control / current / history are separate surfaces, control wears the structure tint", JSON.stringify(vfyStruct));
@@ -4534,7 +4538,9 @@ try {
       fineOpen: fine.filter((d) => d.open).length,
       refreshCardHere: !!view.querySelector(".bkr-head"),
       cfTiles: view.querySelectorAll(".bkr-head ~ .cf-shape .cf-row").length,
-      legend: Array.from(view.querySelectorAll(".bl-legend .bl-case")).map((c) => c.dataset.source),
+      // Every case row on the page, not only those inside a server box: a
+      // legend re-added anywhere raises this count above one per server.
+      cases: view.querySelectorAll(".bl-case").length,
       current: Array.from(view.querySelectorAll(".bks-server")).map((b) => ({
         name: (b.querySelector(".bks-server-name") || {}).textContent || "",
         cases: Array.from(b.querySelectorAll(".bl-case.is-current")).map((c) => c.dataset.source),
@@ -4572,19 +4578,21 @@ try {
   (bks.refreshCardHere && bks.cfTiles === 2)
     ? ok("backup-settings: the carry-forward card moved here and draws two backups")
     : bad("backup-settings: the carry-forward card moved here and draws two backups", JSON.stringify({ here: bks.refreshCardHere, rows: bks.cfTiles }));
-  // The drawing cannot lie: the legend draws exactly the three verdicts
-  // (the Go side pins that same set to the handler's constants, so a fourth
-  // fails there first), and each seeded server's current case is the source
+  // The drawing cannot lie: one case row per server and no more (#1573 took
+  // the three-row legend away, and counting every .bl-case on the page is
+  // what makes its return fail here), and each server's case is the source
   // the API returned for it, held against the response rather than a list
-  // typed here.
+  // typed here. The Go side pins the case SET to the handler's constants, so
+  // a fourth verdict fails there first.
   const apiSources = (bksAPI.servers || []).map((s) => ({ name: s.name || s.id, source: s.source }));
-  const legendSet = bks.legend.slice().sort().join(",");
+  // The three-row legend is gone (#1573 redesign); each server still draws
+  // its own case, and that case is what the API reports.
   const currentMatches = apiSources.length > 0 && apiSources.length === bks.current.length
     && apiSources.every((s, i) => bks.current[i].name === s.name && bks.current[i].cases.length === 1 && bks.current[i].cases[0] === s.source);
-  (legendSet === "default,none,server" && currentMatches)
-    ? ok("backup-settings: the location drawing shows the three cases and marks each server's own as the API reports it")
-    : bad("backup-settings: the location drawing shows the three cases and marks each server's own as the API reports it",
-        JSON.stringify({ legend: bks.legend, api: apiSources, current: bks.current }));
+  (bks.cases === apiSources.length && currentMatches)
+    ? ok("backup-settings: each server draws its own location case as the API reports it, and nothing draws the cases twice")
+    : bad("backup-settings: each server draws its own location case as the API reports it, and nothing draws the cases twice",
+        JSON.stringify({ cases: bks.cases, api: apiSources, current: bks.current }));
   // Each compact block links to a page the Docs table carries, the table
   // the daily network check proves the site serves (#1645). Read from the
   // page, not typed here: a folder prefix typed here went stale the day the
@@ -4600,7 +4608,7 @@ try {
   // the kept swatch in the key) and OFF (five written, no kept swatch), a
   // refused daemon value (loud line under the row, outside the compact
   // block, value marked), and the serve-mode page (no sections, no daemon
-  // card, its own sub line). Detached so nothing on the live page changes.
+  // card, no sub line since #1573). Detached so nothing on the live page changes.
   const bksStates = await page.evaluate(() => {
     const shape = (on) => {
       const s = cfShape(on);
@@ -4633,9 +4641,9 @@ try {
   (bksStates.refused.marked && bksStates.refused.loud && bksStates.refused.outside)
     ? ok("backup-settings: a refused daemon value is marked and its reason stays in plain view")
     : bad("backup-settings: a refused daemon value is marked and its reason stays in plain view", JSON.stringify(bksStates.refused));
-  (bksStates.serve.sections === 0 && !bksStates.serve.boot && bksStates.serve.sub === "Where each server keeps its backups." && bksStates.serve.current && bksStates.serve.current.source === "none")
-    ? ok("backup-settings: on serve the page is the per-server half alone, with its own sub line")
-    : bad("backup-settings: on serve the page is the per-server half alone, with its own sub line", JSON.stringify(bksStates.serve));
+  (bksStates.serve.sections === 0 && !bksStates.serve.boot && bksStates.serve.sub === "" && bksStates.serve.current && bksStates.serve.current.source === "none")
+    ? ok("backup-settings: on serve the page is the per-server half alone, with no sub line")
+    : bad("backup-settings: on serve the page is the per-server half alone, with no sub line", JSON.stringify(bksStates.serve));
   // Restored the live page above; re-render it so the next assertion reads
   // the real thing, not the restored HTML with its listeners gone.
   await page.evaluate(() => renderRoute());

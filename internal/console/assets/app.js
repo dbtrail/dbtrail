@@ -4129,9 +4129,9 @@ async function renderBaselines() {
     // button. buildStorage keeps serversErr for the same reason.
     const serversErr = serversRes && serversRes.error;
     const v = VIEW(); clear(v);
-    v.append(backupsHead = pageHead("Backups", el("p", { class: "page-sub" },
-      "Full copies of your tables, taken at a moment in time. Time-travel and full restores are built from them. ",
-      el("b", { text: "Nothing is ever executed" }), " against your source by viewing this page.")));
+    // No subtitle (#1573 redesign): "nothing is executed" is the header's
+    // read-only pill, and what a backup is, the listing below shows.
+    v.append(backupsHead = pageHead("Backups", null));
     if (serversErr) v.append(el("div", { class: "error-box", text: "Could not load servers: " + serversErr }));
     // #1415: a context strip and a full-width list, not two half-width cards
     // sharing only a left edge. The strip carries the facts that are ABOUT the
@@ -4196,11 +4196,9 @@ async function renderVerification() {
     // "Select a server to run verification" while a server IS selected.
     const serversErr = serversRes && serversRes.error;
     const v = VIEW(); clear(v);
-    // The old subtitle described one of the three modes and was wrong about a
-    // second (#1418): "prove a snapshot still reconstructs" — the
-    // recovery-inputs check uses no snapshot at all.
-    v.append(pageHead("Verification", el("p", { class: "page-sub" },
-      "Prove your safety net works before you need it: three checks, from the index's own consistency to a full comparison against your live data.")));
+    // No subtitle (#1573 redesign): the mode picker below says what each of
+    // the three checks proves, needs and costs.
+    v.append(pageHead("Verification", null));
     if (serversErr) v.append(el("div", { class: "error-box", text: "Could not load servers: " + serversErr }));
     // Three regions with visible separation (#1419): what you can run, what is
     // running or just ran, what ran before. One undifferentiated card made
@@ -4676,9 +4674,8 @@ async function renderBackupSettings() {
 
 function buildBackupSettings(settings, refresh) {
   const v = VIEW(); clear(v);
-  v.append(pageHead("Backup settings", el("p", { class: "page-sub", text: capsCache.monitor
-    ? "Where backups go, and what this DBTrail was started with."
-    : "Where each server keeps its backups." })));
+  // No subtitle (#1573 redesign): the section labels below name the halves.
+  v.append(pageHead("Backup settings", null));
   const broken = settings && settings.error;
   if (broken) v.append(el("div", { class: "error-box", text: "Could not load settings: " + settings.error }));
   const sect = (t) => el("div", { class: "bks-sect", text: t });
@@ -4871,8 +4868,9 @@ const BACKUP_SOURCE_CASES = {
 };
 
 // blCase renders one case row: the name, then a tick or a cross per lane.
-// Marks are characters, not colour alone. `current` marks the row that is
-// this server's answer; the legend renders all three unmarked.
+// Marks are characters, not colour alone. `current` marks the row as this
+// server's answer, which since #1573 is the only way it is drawn (the
+// three-row legend that rendered all three unmarked is gone).
 function blCase(source, current) {
   const c = BACKUP_SOURCE_CASES[source];
   // A verdict this build does not know draws as unknown, with no lanes: two
@@ -4893,8 +4891,9 @@ function blCase(source, current) {
 }
 
 // backupServersPanel is the per-server half: the editable backup location and
-// archive toggle, each with the provenance the servers API never showed. The
-// legend draws the three cases once; each server then shows its own.
+// archive toggle, each with the provenance the servers API never showed. Each
+// server shows its own case; the three-row legend that drew all of them once
+// is gone (#1573 redesign).
 function backupServersPanel(settings) {
   const panel = el("section", { class: "ov-panel" });
   panel.append(el("div", { class: "ov-panel-head" },
@@ -4904,9 +4903,6 @@ function backupServersPanel(settings) {
     panel.append(el("p", { class: "form-hint", text: "No servers in the registry yet. Add one on the Servers page." }));
     return panel;
   }
-  const legend = el("div", { class: "bl-legend" });
-  for (const k of Object.keys(BACKUP_SOURCE_CASES)) legend.append(blCase(k, false));
-  panel.append(legend);
   if (settings.registry_read_only) {
     panel.append(el("p", { class: "form-msg err", text:
       "The server registry was written by a newer version and is read-only here; values are shown but cannot be saved." }));
@@ -4958,7 +4954,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
     el("span", { text: "Don't automatically include archived data in queries" })));
 
   // Provenance, the row's reason to exist: which location is actually in
-  // force, drawn as the legend row it matches. The daemon default backs the
+  // force, drawn as its own case row. The daemon default backs the
   // READ paths only. Create backup, restores and the schedule read the
   // server's raw entry on purpose (the default is a shared store; folding
   // this server's index onto another server's snapshots would publish a
@@ -7550,14 +7546,10 @@ function verifyRegions(servers, opts) {
   vfyDraw(vfyView);
   vfyProbe(cur.id);
   current.append(results);
-  // The per-row nouns are precise AND internal (#1419 §5) — the glossary is
-  // the affordance that keeps them from requiring a source dive.
-  current.append(el("details", { class: "form-advanced vfy-glossary" },
-    el("summary", { class: "form-adv-summary", text: "What these words mean" }),
-    el("p", { class: "form-hint", text: "Row history: every recorded change to one row, oldest to newest. The check walks each row's history in order." }),
-    el("p", { class: "form-hint", text: "Before-image: each update or delete stores what the row looked like just before it. The check compares that against what the previous change left. Undo scripts are built from these images." }),
-    el("p", { class: "form-hint", text: "No known earlier state: the check saw a change but held nothing older to compare it against. A longer window may reach the history it needs (CLI: verify --check recover --lookback)." }),
-    el("p", { class: "form-hint", text: "Nothing to check: the table did not change, or only gained new rows. Zero comparisons is the expected result there, not a finding." })));
+  // The glossary of the per-row nouns (#1419 §5) moved to this repo's
+  // docs/console.md, Verification (#1573 redesign). The page's Docs link does
+  // NOT reach it: it opens the site's guides/verify page, which lives in
+  // another repo and is given the same four definitions in the docs pass.
 
   // ── Region 3: what ran before ──
   const historyCard = el("section", { class: "tcard vfy-region vfy-histcard" });

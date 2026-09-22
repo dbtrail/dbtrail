@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the download needs. On Backups, the take-away lane's views button downloads
   `views.sql` itself (the default file, without the change log) and shows the
   command to open it, instead of scrolling to the card.
+- **The Backups, Backup settings and Verification pages lost their subtitles,
+  the three-row legend and the glossary** (#1573). Backups' "nothing is ever
+  executed" is the header's read-only pill; Backup settings still draws each
+  server's own case under its fields; the Verification glossary (row history,
+  before-image, no known earlier state, nothing to check) is now in
+  [the console reference](docs/console.md), which the page does not link to.
 - **The console's Iceberg export panel moved from Backups to Connect AI**
   (#1573). It hands over a command to run elsewhere, which is what Connect AI
   is for, and Backups is being reduced to its snapshots. Connect AI asks only

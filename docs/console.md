@@ -633,6 +633,19 @@ panel that answers whether a restore would work, far below the fold.
 **Protect → Verification** carries the verification runner and the history of
 past runs for the selected server.
 
+The per-table results use a few words of their own:
+
+- **Row history**: every recorded change to one row, oldest to newest. The
+  check walks each row's history in order.
+- **Before-image**: each update or delete stores what the row looked like just
+  before it. The check compares that against what the previous change left.
+  Undo scripts are built from these images.
+- **No known earlier state**: the check saw a change but held nothing older to
+  compare it against. A longer window may reach the history it needs
+  (`bintrail verify --check recover --lookback`).
+- **Nothing to check**: the table did not change, or only gained new rows. Zero
+  comparisons is the expected result there, not a finding.
+
 The Backups summary card that used to point here from Storage is gone (#1543):
 Backups has its own entry in the same sidebar, and the pointer only existed
 because the page it pointed away from was a drawer.
@@ -658,11 +671,11 @@ Two section labels split it: **Change here** and **Set when DBTrail starts**.
   compact **More about disk space** block, with links into the docs guide.
 - **Per server** (change here) — each registry server's Backup dir, Backup
   S3 and archive toggle, editable in place, with which location is in force
-  drawn rather than said: a three-row legend (own location, daemon default,
-  no location) with a tick or a cross per lane, and the server's own case
-  highlighted under its fields. The daemon default backs time-travel,
-  verification and `.sql` exports but backups, restores and the schedule
-  refuse, which is the cross on the middle row. The per-server fields left
+  drawn rather than said: the server's own case (own location, daemon
+  default, or no location) under its fields, with a tick or a cross per lane.
+  The daemon default backs time-travel, verification and `.sql` exports but
+  backups, restores and the schedule refuse, which is the cross on that
+  case. The per-server fields left
   the server edit form for this page (the form still round-trips them, so an
   unrelated edit cannot wipe them). A stored schedule that cannot run as
   things stand shows the refusal above the compact block; the schedule
