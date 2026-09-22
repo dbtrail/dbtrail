@@ -47,6 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newest, so a run can take longer and read more from the Parquet archives.
 
 ### Fixed
+- **A bookmark of an old console address opens the page that replaced it.**
+  `/storage` (now Retention) and `/sql` (now the DuckDB card on Backups, or
+  Connect without the watch daemon) opened from a bookmark, a link or Back
+  showed Overview under the old address; only a click inside the console
+  translated them. The address bar is rewritten, and a query or `#anchor` in
+  the address carries over.
 - **Console texts no longer name command-line flags** (#1783). Adding a server
   from the browser showed doctor text written for the terminal: "Verify
   --source-dsn is reachable" with a fixed "port 3306", "`bintrail init` will
