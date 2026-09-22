@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/status"
+	"github.com/go-sql-driver/mysql"
 )
 
 // #1791: whether the capture has checkpointed everything the source wrote.
@@ -130,6 +133,11 @@ func TestCompareGTIDSets(t *testing.T) {
 			got, detail := compareGTIDSets(c.captured, c.executed)
 			if got != c.want {
 				t.Fatalf("verdict %q (%s), want %q", got, detail, c.want)
+			}
+			// An empty source set would also read as unknown through the
+			// comparison below it; the reason is what pins the check.
+			if c.executed == "" && detail != "the source reported no GTID set" {
+				t.Fatalf("empty source set: detail %q", detail)
 			}
 			if got != console.CaptureCaughtUp && detail == "" {
 				t.Fatal("a verdict other than caught up must say why")
@@ -284,10 +292,11 @@ func TestReportCaptureProbe(t *testing.T) {
 	if out := logs.String(); strings.Count(out, "updating instead of taking a full backup on age") != 1 {
 		t.Fatalf("caught up twice for one anchor: %q, want one Info line", out)
 	}
-	// A failure after caught up is a new condition, said again.
-	b.reportCaptureProbe(e, anchor, failed)
+	// Behind again after caught up is said again, even with the reason it
+	// had before: caught up resolved it.
+	b.reportCaptureProbe(e, anchor, captureProbeResult{verdict: console.CaptureBehind, detail: "the source reports transactions the capture's checkpoint does not include"})
 	if out := logs.String(); strings.Count(out, "level=WARN") != 3 {
-		t.Fatalf("a failure after caught up: %q, want it said again", out)
+		t.Fatalf("behind after caught up: %q, want it said again", out)
 	}
 }
 
@@ -332,5 +341,47 @@ func TestSourceProbeDSN(t *testing.T) {
 	}
 	if got := sourceProbeDSN("not a dsn"); got != "not a dsn" {
 		t.Errorf("an unparsable DSN is handed on as is, got %q", got)
+	}
+}
+
+// The source's executed set as the probe reads it: MySQL puts a newline
+// between UUID blocks, which the single-UUID test server never shows.
+func TestReadExecutedGTIDs(t *testing.T) {
+	q := regexp.QuoteMeta("SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed")
+	cases := []struct {
+		name    string
+		setup   func(sqlmock.Sqlmock)
+		want    string
+		wantErr bool
+	}{
+		{"GTIDs on, several servers", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(q).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("ON", uuidA+":1-10,\n"+uuidB+":1-3"))
+		}, uuidA + ":1-10," + uuidB + ":1-3", false},
+		{"GTIDs off", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(q).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("OFF", uuidA+":1-10"))
+		}, "", false},
+		{"on the way up (ON_PERMISSIVE) is not on", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(q).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("ON_PERMISSIVE", uuidA+":1-10"))
+		}, "", false},
+		{"MariaDB: no such variable", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(q).WillReturnError(&mysql.MySQLError{Number: 1193, Message: "Unknown system variable 'gtid_mode'"})
+		}, "", false},
+		{"a real failure", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(q).WillReturnError(&mysql.MySQLError{Number: 1227, Message: "Access denied"})
+		}, "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db, m, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			c.setup(m)
+			got, err := readExecutedGTIDs(context.Background(), db)
+			if (err != nil) != c.wantErr || got != c.want {
+				t.Fatalf("got %q err=%v, want %q err=%v", got, err, c.want, c.wantErr)
+			}
+		})
 	}
 }
