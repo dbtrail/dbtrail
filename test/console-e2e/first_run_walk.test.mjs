@@ -19,6 +19,7 @@ import path from "node:path";
 import {
   countWords, bannedHits, normalizeChunk, bannedFromChunks,
   deriveRun, compareRatchet, compareTarget, loadBaseline, baselineFrom, layoutColumns, RUNS, NOT_MEASURABLE,
+  parseQuickstartBlock,
 } from "./first_run_scoreboard.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +41,112 @@ describe("countWords", () => {
   test("a token with a letter or digit is one word, whatever else it carries", () => {
     assert.equal(countWords("shop.orders #6"), 2);
     assert.equal(countWords("(optional) 3306 dbtrail@127.0.0.1:23306"), 3);
+  });
+});
+
+// ── the quickstart permissions block ───────────────────────────────────────
+
+describe("parseQuickstartBlock", () => {
+  // The shape docs/quickstart.md publishes: a list item whose ```sql block is
+  // indented, a password left as an unquoted placeholder, and commented lines
+  // that must survive as comments.
+  const page = (blockLines, heading = "## Prerequisites") => [
+    "# Quickstart", "", "## Before you start", "", "  ```sql", "  SELECT 1;", "  ```", "",
+    heading, "", "- create it on the source:", "", "  ```sql",
+    ...blockLines.map((l) => "  " + l), "  ```", "", "  Put a password of your own in quotes.", "",
+  ].join("\n");
+  const REAL = [
+    "CREATE USER 'dbtrail'@'%' IDENTIFIED BY <choose a password>;",
+    "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';",
+    "-- MariaDB and MySQL 5.7 have no BACKUP_ADMIN; run this instead:",
+    "-- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';",
+  ];
+  const throwsWith = (fn, re) => assert.throws(fn, (err) => re.test(err.message), "expected a message matching " + re);
+
+  test("fills the placeholder and leaves every other line exactly as published", () => {
+    const b = parseQuickstartBlock(page(REAL), "Frw-walk-9pw");
+    assert.equal(b.user, "dbtrail");
+    assert.equal(b.password, "Frw-walk-9pw");
+    assert.equal(b.sql, [
+      "CREATE USER 'dbtrail'@'%' IDENTIFIED BY 'Frw-walk-9pw';",
+      "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';",
+      "-- MariaDB and MySQL 5.7 have no BACKUP_ADMIN; run this instead:",
+      "-- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';",
+      "",
+    ].join("\n"));
+    // The commented alternatives stay commented: the walk runs the block, and
+    // uncommenting one would grant a permission the page did not ask for.
+    assert.equal((b.sql.match(/^-- GRANT/gm) || []).length, 1);
+  });
+
+  test("the block under ## Prerequisites is the one read, not an earlier one", () => {
+    const b = parseQuickstartBlock(page(REAL), "Frw-walk-9pw");
+    assert.match(b.sql, /CREATE USER/);
+    assert.doesNotMatch(b.sql, /SELECT 1;/);
+  });
+
+  test("a block with no indent is read the same way", () => {
+    const flat = ["# Quickstart", "", "## Prerequisites", "", "```sql", ...REAL, "```", ""].join("\n");
+    assert.equal(parseQuickstartBlock(flat, "Frw-walk-9pw").sql.split("\n")[0], "CREATE USER 'dbtrail'@'%' IDENTIFIED BY 'Frw-walk-9pw';");
+  });
+
+  // The guard this function exists for. An evaluator pasted a published block
+  // and created a MySQL account whose password was in our documentation.
+  test("a password a reader could paste and run is refused, not measured", () => {
+    const leaked = ["CREATE USER 'dbtrail'@'%' IDENTIFIED BY 'strong-password';", ...REAL.slice(1)];
+    throwsWith(() => parseQuickstartBlock(page(leaked), "Frw-walk-9pw"), /paste and run/);
+  });
+  test("a quoted password inside a comment is refused too", () => {
+    const leaked = [...REAL, "-- On MariaDB: CREATE USER 'dbtrail'@'%' IDENTIFIED BY 'strong-password';"];
+    throwsWith(() => parseQuickstartBlock(page(leaked), "Frw-walk-9pw"), /paste and run/);
+  });
+
+  test("any wording inside the angle brackets is a placeholder", () => {
+    const other = ["CREATE USER 'dbtrail'@'%' IDENTIFIED BY <your own password>;", ...REAL.slice(1)];
+    assert.match(parseQuickstartBlock(page(other), "Frw-walk-9pw").sql, /IDENTIFIED BY 'Frw-walk-9pw';/);
+  });
+  test("every placeholder is filled, not only the first", () => {
+    const two = [...REAL, "-- CREATE USER 'dbtrail'@'localhost' IDENTIFIED BY <choose a password>;"];
+    const sql = parseQuickstartBlock(page(two), "Frw-walk-9pw").sql;
+    assert.equal((sql.match(/IDENTIFIED BY 'Frw-walk-9pw'/g) || []).length, 2);
+    assert.doesNotMatch(sql, /IDENTIFIED BY </);
+  });
+  test("a placeholder that names nothing is refused", () => {
+    const empty = ["CREATE USER 'dbtrail'@'%' IDENTIFIED BY <>;", ...REAL.slice(1)];
+    throwsWith(() => parseQuickstartBlock(page(empty), "Frw-walk-9pw"), /names nothing/);
+    const blank = ["CREATE USER 'dbtrail'@'%' IDENTIFIED BY <   >;", ...REAL.slice(1)];
+    throwsWith(() => parseQuickstartBlock(page(blank), "Frw-walk-9pw"), /names nothing/);
+  });
+
+  test("a dollar sign in the password reaches MySQL unchanged", () => {
+    // A replacement STRING would read $& and $1 as references and rewrite it.
+    assert.match(parseQuickstartBlock(page(REAL), "Frw$&walk$1").sql, /IDENTIFIED BY 'Frw\$&walk\$1';/);
+  });
+  test("a password the walk cannot put in a SQL literal is refused", () => {
+    throwsWith(() => parseQuickstartBlock(page(REAL), "it's"), /quote or a backslash/);
+    throwsWith(() => parseQuickstartBlock(page(REAL), "back\\slash"), /quote or a backslash/);
+    throwsWith(() => parseQuickstartBlock(page(REAL), ""), /must choose a password/);
+  });
+
+  test("a page missing the heading, the block or the statements says which", () => {
+    throwsWith(() => parseQuickstartBlock("# Quickstart\n\nnothing here\n", "Frw-walk-9pw"), /no ## Prerequisites/);
+    throwsWith(() => parseQuickstartBlock("## Prerequisites\n\njust prose\n", "Frw-walk-9pw"), /no ```sql block/);
+    throwsWith(() => parseQuickstartBlock("## Prerequisites\n\n```sql\nCREATE USER 'x'@'%' IDENTIFIED BY <pw>;\n", "Frw-walk-9pw"), /never closed/);
+    throwsWith(() => parseQuickstartBlock("## Prerequisites\n\n```sql\n\n```\n", "Frw-walk-9pw"), /is empty/);
+    throwsWith(() => parseQuickstartBlock(page(["GRANT SELECT ON *.* TO 'dbtrail'@'%';"]), "Frw-walk-9pw"), /no CREATE USER/);
+    throwsWith(() => parseQuickstartBlock(page(["CREATE USER 'dbtrail'@'%';"]), "Frw-walk-9pw"), /no IDENTIFIED BY <placeholder>/);
+    throwsWith(() => parseQuickstartBlock("", "Frw-walk-9pw"), /no ## Prerequisites/);
+  });
+
+  // The page the walk actually reads, so a copy edit that breaks the walk
+  // fails here, in a second, instead of after Docker and a browser in CI.
+  test("the real docs/quickstart.md parses and publishes no runnable password", () => {
+    const md = readFileSync(path.join(HERE, "..", "..", "docs", "quickstart.md"), "utf8");
+    const b = parseQuickstartBlock(md, "Frw-walk-9pw");
+    assert.equal(b.user, "dbtrail");
+    assert.match(b.sql, /^CREATE USER 'dbtrail'@'%' IDENTIFIED BY 'Frw-walk-9pw';$/m);
+    assert.match(b.sql, /GRANT REPLICATION SLAVE/);
+    assert.doesNotMatch(b.published, /IDENTIFIED BY '/i);
   });
 });
 

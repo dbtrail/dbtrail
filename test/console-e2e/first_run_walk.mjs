@@ -33,6 +33,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   deriveRun, compareRatchet, compareTarget, loadBaseline, baselineFrom, renderScoreboard, RUNS,
+  parseQuickstartBlock,
 } from "./first_run_scoreboard.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -105,22 +106,21 @@ function srcSQL(sql) {
     "mysql", "-uroot", "-N", "--protocol=TCP", "-h127.0.0.1"], { input: sql, encoding: "utf8" });
 }
 
+// The password the walk puts where the quickstart says <choose a password>.
+// It meets MySQL's MEDIUM validate_password policy — eight or more, upper,
+// lower, digit, special — so a source with the plugin on measures the page
+// and not a password rule. It carries no quote or backslash, which
+// parseQuickstartBlock refuses, because it is pasted into SQL as a literal.
+const SOURCE_PASSWORD = "Frw-walk-9pw";
+
 // The permissions block, read from the command-line quickstart exactly as it
 // is published there (the web form shows the same statements), so the walk
-// runs what a reader would run.
+// runs what a reader would run. The one edit is the one the page itself asks
+// for: a password of our own in quotes where it says <choose a password>.
+// parseQuickstartBlock refuses a block that publishes a runnable password.
 function quickstartBlock() {
   const md = readFileSync(path.join(REPO_ROOT, "docs", "quickstart.md"), "utf8");
-  const pre = md.indexOf("## Prerequisites");
-  const open = md.indexOf("```sql", pre);
-  const close = md.indexOf("```", open + 6);
-  if (pre < 0 || open < 0 || close < 0) throw new Error("docs/quickstart.md: no ```sql block under ## Prerequisites");
-  const lines = md.slice(open + 6, close).split("\n").filter((l) => l.trim());
-  const indent = Math.min(...lines.map((l) => l.match(/^ */)[0].length));
-  const sql = lines.map((l) => l.slice(indent)).join("\n") + "\n";
-  const pw = (sql.match(/IDENTIFIED BY '([^']*)'/) || [])[1];
-  const user = (sql.match(/CREATE USER '([^']*)'/) || [])[1];
-  if (!pw || !user) throw new Error("docs/quickstart.md: the block has no CREATE USER ... IDENTIFIED BY");
-  return { sql, user, password: pw };
+  return parseQuickstartBlock(md, SOURCE_PASSWORD);
 }
 const blockFor = (b, user) => b.sql.split("'" + b.user + "'@").join("'" + user + "'@");
 

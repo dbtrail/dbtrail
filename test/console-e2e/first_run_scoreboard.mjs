@@ -410,6 +410,62 @@ export function compareTarget(scoreboard, opts = {}) {
   return { failures, passed };
 }
 
+// ── the permissions block published in the quickstart ───────────────────────
+
+// docs/quickstart.md publishes the permissions block with the password left as
+// an unquoted placeholder — <choose a password> — and tells the reader to put
+// a password of their own in quotes where it says that. The walk does exactly
+// that and nothing else: it fills the placeholder and runs every other line
+// exactly as published, so a walk that works is evidence the page works.
+//
+// The guard is the other half, and the reason this is not just a parser. A
+// quoted password anywhere in the block means the page has gone back to
+// publishing an account anyone can paste and run, which is how an evaluator
+// ended up with a MySQL user whose password was 'strong-password'. Commented
+// lines count: a comment is one keystroke away from being run.
+//
+// Pure on purpose: the walk reads the file, this decides. Every rule below is
+// pinned in first_run_walk.test.mjs.
+export function parseQuickstartBlock(md, password) {
+  const text = String(md || "");
+  const pw = String(password ?? "");
+  if (!pw) throw new Error("parseQuickstartBlock: the walk must choose a password for the account it creates");
+  // The password is pasted into SQL as a literal and the walk also rewrites
+  // the account name around it, so a quote or a backslash would change what
+  // runs rather than what it logs in with.
+  if (/['\\]/.test(pw)) throw new Error("parseQuickstartBlock: the walk's password may not contain a quote or a backslash; it goes into SQL as a literal");
+
+  const pre = text.indexOf("## Prerequisites");
+  if (pre < 0) throw new Error("docs/quickstart.md: no ## Prerequisites heading");
+  const open = text.indexOf("```sql", pre);
+  if (open < 0) throw new Error("docs/quickstart.md: no ```sql block under ## Prerequisites");
+  const close = text.indexOf("```", open + 6);
+  if (close < 0) throw new Error("docs/quickstart.md: the ```sql block under ## Prerequisites is never closed");
+
+  const lines = text.slice(open + 6, close).split("\n").filter((l) => l.trim());
+  if (!lines.length) throw new Error("docs/quickstart.md: the ```sql block under ## Prerequisites is empty");
+  // The block sits inside a list item, so every line carries the item's
+  // indent; taking the smallest one back leaves the SQL as it would be typed.
+  const indent = Math.min(...lines.map((l) => l.match(/^ */)[0].length));
+  const published = lines.map((l) => l.slice(indent)).join("\n") + "\n";
+
+  if (/IDENTIFIED\s+BY\s+'/i.test(published)) {
+    throw new Error("docs/quickstart.md publishes a password a reader can paste and run: the block must leave it as an unquoted <placeholder>, commented lines included");
+  }
+
+  const user = (published.match(/CREATE USER '([^']*)'/) || [])[1];
+  if (!user) throw new Error("docs/quickstart.md: the block has no CREATE USER '<name>'");
+
+  const holes = [...published.matchAll(/IDENTIFIED\s+BY\s+<([^>\n]*)>/gi)];
+  if (!holes.length) throw new Error("docs/quickstart.md: the block has no IDENTIFIED BY <placeholder> for the walk to fill in");
+  if (holes.some((h) => !h[1].trim())) throw new Error("docs/quickstart.md: an IDENTIFIED BY <> placeholder names nothing, so the page never tells the reader what to put there");
+
+  // A function replacement, not a string: $& and $1 in a replacement string
+  // would rewrite a password that happens to carry a dollar sign.
+  const sql = published.replace(/IDENTIFIED\s+BY\s+<[^>\n]*>/gi, () => "IDENTIFIED BY '" + pw + "'");
+  return { sql, user, password: pw, published };
+}
+
 export function loadBaseline(file) {
   let text;
   try { text = readFileSync(file, "utf8"); } catch (err) { throw new Error("cannot read the baseline file " + file + ": " + err.message); }
