@@ -55,6 +55,11 @@ func TestCompareCapture(t *testing.T) {
 			if got != c.want {
 				t.Fatalf("verdict %q (%s), want %q", got, detail, c.want)
 			}
+			// The MariaDB set would also fail MySQL parsing and read as
+			// unknown for that reason: the reason is what pins the guard.
+			if c.cp.flavor == "mariadb" && c.cp.mode == "gtid" && detail != "MariaDB GTIDs are not compared yet" {
+				t.Fatalf("MariaDB GTID capture: detail %q, want it named as not compared", detail)
+			}
 			if got != console.CaptureCaughtUp && detail == "" {
 				t.Fatal("a verdict other than caught up must say why, for the reason line")
 			}
