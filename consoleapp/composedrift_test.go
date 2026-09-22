@@ -413,9 +413,9 @@ func TestComposeVersionMatchesTheBinary(t *testing.T) {
 	// added, or the finding degrades to "your file is behind" with nothing
 	// named, which is the diff-two-files problem the version key exists to
 	// remove. Version 1 is the first numbered file and has nothing before it,
-	// so this loop is empty today ON PURPOSE: the failure it prevents can only
-	// exist after a bump, and a bump is exactly when nobody is looking at this
-	// file.
+	// so the loop starts at 2, the first version with an entry (the
+	// host.docker.internal mapping). Every later bump has to add its own, and
+	// a bump is exactly when nobody is looking at this file.
 	for v := 2; v <= bundledComposeVersion; v++ {
 		if _, ok := composeVersionAdded[v]; !ok {
 			t.Errorf("compose version %d has no composeVersionAdded entry, so a stack on %d is told its file is behind and not what that costs",
