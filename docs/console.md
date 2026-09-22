@@ -609,7 +609,8 @@ panel that answers whether a restore would work, far below the fold.
   clears its capture-gap record (the Stop is the acknowledgement of the
   loss), so a gap acknowledged that way before the cut-over no longer
   keeps the full backup, and the rows it lost stay out of the backups
-  until the next full backup reads them. After a full backup the
+  until a full backup reads them: the full-backup timetable, or one taken
+  by hand after acknowledging the loss. After a full backup the
   model may not choose another one until an update after it has been
   measured (it may still choose an update): each full backup records the
   index's high-water mark before it starts, so the update that follows it

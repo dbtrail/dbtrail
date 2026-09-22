@@ -532,15 +532,20 @@ func (h *BaselineRunHistory) LastFullRead(serverID string) *BaselineRunRecord {
 // an update reads only the index, which never received that row, so an
 // update anchor proves nothing about it. The start, not the finish: the
 // dump's consistent read is taken as it starts, and a row dropped while it
-// ran is in neither. A full backup that failed after publishing counts (its
-// snapshot is a read of the source); one that published nothing does not.
+// ran is in neither. Only a full backup that succeeded counts: one that
+// failed after publishing may have reached only one of its destinations
+// (published here, the upload refused), and a fold reading the other one
+// descends from an older full backup, which never read those rows. Both
+// stamps come from this process's clock (the capture's skip ledger and the
+// run record); a ledger written by a capture on another host is only as
+// comparable as the two clocks.
 func (h *BaselineRunHistory) LastSourceRead(serverID string, atOrBefore time.Time) time.Time {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	recs := h.servers[serverID]
 	for i := len(recs) - 1; i >= 0; i-- {
 		r := recs[i]
-		if r.Kind != BaselineRunDump || r.SkipReason != "" || r.SnapshotTime == "" {
+		if r.Kind != BaselineRunDump || r.SkipReason != "" || r.Error != "" || r.SnapshotTime == "" {
 			continue
 		}
 		snap, err := time.Parse(time.RFC3339, r.SnapshotTime)

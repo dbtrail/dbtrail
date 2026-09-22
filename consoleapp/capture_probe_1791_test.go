@@ -318,6 +318,7 @@ func TestCompareCapture(t *testing.T) {
 	cases := []struct {
 		name      string
 		st        *status.StreamStateInfo
+		read      time.Time // the last source read; zero: none on record
 		idx, src  func(sqlmock.Sqlmock)
 		openFails bool
 		verdict   string
@@ -350,6 +351,15 @@ func TestCompareCapture(t *testing.T) {
 		{name: "a position-mode capture: settled from the index, the source never opened",
 			st: func() *status.StreamStateInfo { s := streamStateFor(uuidB + ":1-10"); s.Mode = "position"; return s }(),
 			detail: "the capture runs in binlog-position mode"},
+		// The last source read reaches captureComparable, not the anchor:
+		// rows dropped after the full backup and before an update anchor.
+		{name: "rows dropped after the last source read: refused, the source never opened",
+			st: func() *status.StreamStateInfo {
+				s := streamStateFor(uuidB + ":1-10")
+				s.CaptureSkips = skipLedger(4, anchor.Add(-time.Hour))
+				return s
+			}(), read: anchor.Add(-2 * time.Hour),
+			detail: "the capture dropped events that no full backup has read from the source since"},
 		{name: "the source does not answer", st: streamStateFor(uuidB + ":1-10"), openFails: true,
 			detail: "the source did not answer", wantErr: true, opened: true},
 		{name: "the index's server_uuid read fails", st: streamStateFor(uuidB + ":1-10"),
@@ -381,7 +391,7 @@ func TestCompareCapture(t *testing.T) {
 			}
 			sm.ExpectClose()
 			opened := false
-			r, err := compareCapture(context.Background(), idx, c.st, anchor, time.Time{}, func() (*sql.DB, error) {
+			r, err := compareCapture(context.Background(), idx, c.st, anchor, c.read, func() (*sql.DB, error) {
 				opened = true
 				if c.openFails {
 					return nil, fmt.Errorf("dial tcp 10.0.0.1:3306: connect: connection refused")

@@ -88,10 +88,12 @@ func TestLastSourceRead(t *testing.T) {
 			dump(at(-2*time.Hour), at(-3*time.Hour)),
 			{ServerID: "a", Kind: BaselineRunDump, StartedAt: at(-time.Hour), Error: "mydumper exited 2"},
 		}, anchor.Add(-3 * time.Hour)},
-		{"one that failed after publishing counts: its snapshot read the source", []BaselineRunRecord{
+		// Published here, refused by the bucket: a fold reading the bucket
+		// descends from the older full backup, which never read the rows.
+		{"one that failed after publishing does not count", []BaselineRunRecord{
 			dump(at(-2*time.Hour), at(-3*time.Hour)),
 			{ServerID: "a", Kind: BaselineRunDump, SnapshotTime: at(-time.Hour), StartedAt: at(-80 * time.Minute), Error: "upload failed"},
-		}, anchor.Add(-80 * time.Minute)},
+		}, anchor.Add(-3 * time.Hour)},
 		{"a slot that did not start is not a read", []BaselineRunRecord{
 			dump(at(-2*time.Hour), at(-3*time.Hour)),
 			{ServerID: "a", Kind: BaselineRunDump, SkipReason: "busy", SnapshotTime: at(-time.Hour), StartedAt: at(-time.Hour)},
