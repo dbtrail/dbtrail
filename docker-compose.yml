@@ -231,7 +231,7 @@ services:
     # which then refuses to start the stack), set HOST_GATEWAY in .env to this
     # machine's address. On Linux the database must also listen on more than
     # 127.0.0.1 (bind-address), and its DBTrail user must be allowed from other
-    # hosts ('dbtrail'@'%', as the add-server form creates it).
+    # hosts ('dbtrail'@'%', as in the grant the add-server form shows).
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
     # Building from a source checkout instead? Uncomment here AND on

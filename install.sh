@@ -268,7 +268,9 @@ grep -q '^services:' docker-compose.yml || die \
 
 # ── 3. bring it up ──────────────────────────────────────────────────────
 step "Starting containers (first run pulls images — this can take a minute)"
-$COMPOSE up -d || die "\`$COMPOSE up -d\` failed. Check the output above."
+$COMPOSE up -d || die "\`$COMPOSE up -d\` failed. Check the output above.
+    Says \"invalid IP address in add-host\"? Your engine does not understand
+    host-gateway: put HOST_GATEWAY=<this machine's address> in ${DIR}/.env and re-run."
 
 # ── 4. wait for the console to actually answer ──────────────────────────
 # `up -d` already blocks until the bundled index MySQL is healthy (the bintrail
