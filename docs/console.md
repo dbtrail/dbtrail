@@ -504,20 +504,6 @@ panel that answers whether a restore would work, far below the fold.
   own backup location* when it has none, or both, followed by "(Backup
   settings page)". A server with no location at all shows the setup empty
   state instead.
-- **Keep it current with Iceberg** (#1466) — a display-only panel at the
-  bottom of the page that prints the exact `bintrail export iceberg` command
-  for the selected server, with its index connection and its resolved backup
-  destination filled in, a Copy button, and an hourly cron line. Nothing runs
-  from here: the export writes a new copy of your data and is kept out of the
-  process that captures changes. The password is shown as `***` for you to
-  replace, and the command carries the index host, port, database and user
-  and nothing else about the connection, so an index that needs TLS or a
-  timeout needs those added by hand. The panel also names the compose route
-  (`docker compose --profile iceberg-export run --rm iceberg-export`), which
-  runs against the **bundled stack's own** index and backups: for any other
-  server, point it with `INDEX_DSN` and `BASELINE_DIR` / `BASELINE_S3` in the
-  stack's `.env`, or run the printed command where bintrail is installed. See
-  [Iceberg export](iceberg-export.md) and [docker.md](docker.md).
 - **Scheduled backups** (#1442) — a per-server timetable, set from this page:
   every N minutes, hours or days (at least 5m), lined up on a UTC time of
   day. The operator picks WHEN; HOW each run is made is the daemon's decision
@@ -1434,6 +1420,26 @@ start-to-finish walkthrough (bundle install included), see
 **Connect a SQL client** panel does the same for the embedded time-travel SQL
 port: see [Time-travel over the MySQL protocol](#time-travel-over-the-mysql-protocol-flashback-port).
 
+Last on the page, the **Keep it current with Iceberg** panel (#1466; on
+Connect AI since #1573, it used to sit at the bottom of Backups) prints the
+exact `bintrail export iceberg` command for the selected server, with its
+index connection and its resolved backup destination filled in, a Copy
+button, and an hourly cron line. It shows when the selected server has a
+backup location (its own or the daemon-wide default) and an index reached
+over TCP, and the session can read settings; a session with a data profile
+does not get it. The page learns the location from
+`GET /api/baselines?location_only=1`, which does not read the storage.
+Nothing runs from here: the export writes a new copy of your data and is kept
+out of the process that captures changes. The password is shown as `***` for
+you to replace, and the command carries the index host, port, database and
+user and nothing else about the connection, so an index that needs TLS or a
+timeout needs those added by hand. The panel also names the compose route
+(`docker compose --profile iceberg-export run --rm iceberg-export`), which
+runs against the **bundled stack's own** index and backups: for any other
+server, point it with `INDEX_DSN` and `BASELINE_DIR` / `BASELINE_S3` in the
+stack's `.env`, or run the printed command where bintrail is installed. See
+[Iceberg export](iceberg-export.md) and [docker.md](docker.md).
+
 ## API
 
 All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. `/api/*` (except `healthz`) require
@@ -1470,7 +1476,7 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a change is indexed. A first-backup step follows the capture steps: with its job's state when console backups are enabled and the server has its own baseline location, and as `waiting` with a `detail` and `fix` when backups are turned off for the daemon or the server has no baseline location of its own (#1677). It is left out only for a PostgreSQL server with no slot or publication (the server form refuses to save one), which cannot capture either. `complete` reads only the capture steps, so a backup step that cannot be done never holds the list open. `check_error` means the index database could not be read, and nothing is marked done from it. |
 | `GET /api/rotation` | Effective global rotation policy: `{retain, interval, add_future, source, enabled}` — `source` is `"override"` (console-saved) or `"default"` (daemon `--rotate-*`). |
 | `PUT /api/rotation` | Supervisor only (403 on the standalone console): save a global rotation override `{retain, interval, add_future}` (validated; `off` rejected). Applies live on the next cycle. |
-| `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. |
+| `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. With `?location_only=1` it answers only `{configured, source, kind}` (the location the listing would read, own over daemon-wide, directory over S3) without the schedule or reading the storage; same permission and same refusal for a session with a data profile. Connect AI uses it for the Iceberg export command. |
 | `GET /api/views.sql` | **Not JSON** — a `text/plain` DuckDB schema over the selected server's Parquet (the same output as `bintrail views`), served as a `views.sql` attachment. Nothing is executed here; the file runs in your own DuckDB. `?include_events=1` adds the `events` view over the archived change log, which is left out by default because defining it opens one Parquet footer per archived file (`bintrail views --include-events`). `?include_live=1` adds the leg over the live index (`bintrail views --include-live`), with the index host, port, database and user in the file and never its password; it requires `include_events=1`, since the leg hangs on that view, and 400s without it. 404 when archives are disabled or nothing is archived yet, 403 while an access-control profile is active, 422 when this server cannot carry the live leg (an index reached over a unix socket, or one with no `binlog_events` table), 502 when the index could not be asked, and 400 for an `include_live` or `include_events` value other than `1`/`true`/`0`/`false` (so a request that meant to ask never comes back as an archives-only file). |
 | `GET /api/storage` | Process-global storage context: `{aws: {access_key_env, profile, region_env, shared_config, container_creds, web_identity, web_identity_token_readable, web_identity_role_arn}}` — presence booleans and non-secret names only, never credential values. |
 | `GET /api/flashback` | Process-global: the embedded time-travel SQL port (`watch --flashback-listen`): `{enabled, listen, host, port}`. `enabled: false` alone on the standalone console and on a daemon that did not open the port; `host` is empty on a wildcard bind (the UI then uses the name it was opened with). Never the console token that authenticates the port. Backs the **Connect a SQL client** panel on Settings → Connect AI. |
