@@ -221,11 +221,14 @@ func init() {
 	watchCmd.Flags().StringVar(&upConsoleToken, "console-token", "", "Opt-in static token for API automation (never generated; humans use the password)")
 	watchCmd.Flags().StringVar(&upConsoleBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots; enables the web interface's point-in-time Reconstruct surface")
 	watchCmd.Flags().StringVar(&upConsoleBaselineS3, "baseline-s3", "", "S3 prefix of baseline Parquet snapshots (s3://bucket/prefix/); enables Reconstruct")
-	watchCmd.Flags().BoolVar(&upBaselineCarryForward, "baseline-carry-forward-unchanged", false,
+	watchCmd.Flags().BoolVar(&upBaselineCarryForward, "baseline-carry-forward-unchanged", true,
 		"When a refresh finds a table had no changes, publish its previous Parquet file instead of rewriting "+
-			"it (hard link where possible). Off by default: the rows are identical either way, but it links two "+
-			"snapshots to one file, so disk-usage and prune figures then count space they will not reclaim. "+
-			"Editable from the web interface's settings panel, which overrides this flag.")
+			"it (hard link where possible). On by default since #1681 (--baseline-carry-forward-unchanged=false "+
+			"or BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED=false turns it off): the rows are identical either way, "+
+			"and the checks that would make reuse wrong (destructive DDL, a capture gap, a failed _MANIFEST "+
+			"check) refuse before it. It links two snapshots to one file, so disk-usage and prune figures then "+
+			"count space they will not reclaim while the newer snapshot references it. The web interface no "+
+			"longer asks: this flag is the only way to turn it off.")
 	watchCmd.Flags().BoolVar(&upBaselineTableDeltas, "baseline-table-deltas", true,
 		"On by default (--baseline-table-deltas=false or BINTRAIL_BASELINE_TABLE_DELTAS=false turns it off). A refresh does not rewrite a table that changed: it keeps the previous Parquet file and writes that refresh's changed rows as one numbered "+
 			"pair of small files beside it (<table>.000001.posdel, <table>.000001.upserts, then 000002, ...), linking the earlier pairs forward, and writes the table again in full when the chain's files together pass a quarter of its size or the chain is a "+

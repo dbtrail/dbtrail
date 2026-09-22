@@ -1838,21 +1838,10 @@ func effectiveCarryForward(reg *console.Registry, daemonDefault bool) bool {
 	return on
 }
 
-// carryForwardProvenance resolves the same value and also names WHERE it came
-// from, which is the half that has to be logged.
-//
-// The two sources disagree silently by design: a saved override of false beats
-// a command line saying true, and that is the point of the tri-state. It also
-// means an operator can pass the flag, watch every table get rewritten, and
-// have nothing anywhere tell them a console toggle from months ago is the
-// reason. The provenance string exists so one log line can.
-func carryForwardProvenance(reg *console.Registry, daemonDefault bool) (on bool, source string) {
-	if reg == nil {
-		return daemonDefault, "daemon flag or environment"
-	}
-	if bc, ok := reg.BaselineRefresh(); ok {
-		return bc.CarryForwardUnchanged, "setting saved in the web interface, which overrides the daemon flag"
-	}
+// carryForwardProvenance names where the value came from, for the one log
+// line that reports it. Since #1681 there is only one source: the console's
+// saved override is gone, so the flag (on by default) always decides.
+func carryForwardProvenance(_ *console.Registry, daemonDefault bool) (on bool, source string) {
 	return daemonDefault, "daemon flag or environment"
 }
 

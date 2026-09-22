@@ -743,12 +743,13 @@ func TestBackupScheduler_startFullKeepsTheBecause(t *testing.T) {
 	}
 }
 
-// The scheduled rebuild carries the effective reuse setting: the console's
-// saved override over the daemon flag, the same resolution the refresh loop
-// and a restore use. Hardcoding either value compiled and passed.
+// The scheduled rebuild carries the reuse setting the daemon was started
+// with, the same resolution the refresh loop and a restore use (#1681 left the
+// flag as the only source). Hardcoding either value compiled and passed, so
+// both directions are driven.
 func TestBackupScheduler_rebuildCarriesTheEffectiveCarryForward(t *testing.T) {
 	for _, want := range []bool{true, false} {
-		t.Run(map[bool]string{true: "override on", false: "override off"}[want], func(t *testing.T) {
+		t.Run(map[bool]string{true: "flag on", false: "flag off"}[want], func(t *testing.T) {
 			var mu sync.Mutex
 			var got []bool
 			holdFold(t, func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
@@ -758,10 +759,7 @@ func TestBackupScheduler_rebuildCarriesTheEffectiveCarryForward(t *testing.T) {
 				return nil, nil, nil
 			})
 			b, reg, _ := newScheduleFixture(t, true)
-			b.carryDefault = !want // the flag says the opposite; the override must win
-			if err := reg.SetBaselineRefresh(&console.BaselineRefreshConfig{CarryForwardUnchanged: want}); err != nil {
-				t.Fatal(err)
-			}
+			b.carryDefault = want
 			e := addScheduled(t, reg, true)
 			fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC))
 			waitTerminal(t, b, e.ID)

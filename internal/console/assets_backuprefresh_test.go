@@ -21,8 +21,8 @@ import (
 //
 // The old shape put liveness in a kv row, as "this page (live)", and this
 // guard pinned that ternary. The rewrite deleted the rows, so this guard now
-// covers ONE half of the property: the provenance line answers who chose the
-// value and says nothing about whether it runs.
+// covers ONE half of the property: the card's closing sentence says what the
+// daemon does with unchanged tables and says nothing about whether it runs.
 //
 // It is deliberately NOT the whole property. Everything the card renders
 // before the provenance line is outside the window, so a state pill reading
@@ -40,14 +40,13 @@ func TestBackupRefreshCard_neverClaimsLiveWhileDormant(t *testing.T) {
 	// the prose instead of the code and reports a pass on a deleted gate.
 	body := jsFunctionBody(t, readAsset(t, "app.js"), "backupRefreshCard")
 
-	// The provenance line is the one that used to carry liveness. Anchor on the
-	// say() call rather than on `br.source === "override"` alone, which also
-	// gates the Use-the-default button and would let a liveness word sneak back
-	// into the line this guard is about.
-	const prov = `say(br.source === "override"`
-	i := strings.Index(body, prov)
+	// The closing sentence of the compact block is the one that used to carry
+	// provenance (#1681 removed the override, so it now says what the daemon
+	// was started with). It is the LAST say() over the value, and liveness
+	// must stay out of it.
+	i := strings.LastIndex(body, "say(on")
 	if i < 0 {
-		t.Fatal("backupRefreshCard renders no provenance line; this guard covers nothing")
+		t.Fatal("backupRefreshCard renders no closing sentence over the value; this guard covers nothing")
 	}
 	// End at the statement, not at a raw character budget: 300 chars ran past
 	// the say() call into the primary button's label and cut off mid-string, so
@@ -61,7 +60,7 @@ func TestBackupRefreshCard_neverClaimsLiveWhileDormant(t *testing.T) {
 	}
 	for _, w := range []string{"live", "running", "yet", "now"} {
 		if strings.Contains(strings.ToLower(arm), w) {
-			t.Errorf("the provenance line says %q. Whether the setting is running belongs to the "+
+			t.Errorf("the closing sentence says %q. Whether the setting is running belongs to the "+
 				"br.enabled / br.scheduled line alone; said in both places the card can call a dormant "+
 				"setting live and tell the operator nothing runs, in the same card:\n%s", w, arm)
 		}
@@ -85,51 +84,6 @@ func TestBackupRefreshCard_neverClaimsLiveWhileDormant(t *testing.T) {
 	if !strings.Contains(body, "br.scheduled") {
 		t.Fatal("the card no longer distinguishes 'no schedule' from 'nothing uses this', so a daemon whose " +
 			"restores reuse files today would be told nothing runs yet")
-	}
-}
-
-// TestSaveBackupRefresh_confirmsFromTheResponse: the toast must describe what
-// the daemon reported back, not what was clicked.
-//
-// Two things make the clicked value wrong. "Use the daemon setting" does not
-// know in advance what the daemon flag says, so it has no value to report. And
-// a card rendered before a restart carries a stale schedule, so a confirmation
-// built from it can claim a setting applies now when it does not. Reading the
-// echoed DTO costs nothing and cannot be stale.
-func TestSaveBackupRefresh_confirmsFromTheResponse(t *testing.T) {
-	body := jsFunctionBody(t, readAsset(t, "app.js"), "saveBackupRefresh")
-
-	if !strings.Contains(body, "await api(") {
-		t.Fatal("saveBackupRefresh no longer PUTs; this guard covers nothing")
-	}
-	// The response has to be captured, not discarded.
-	if !strings.Contains(body, "= await api(") {
-		t.Fatal("the PUT response is discarded, so the confirmation cannot describe what the daemon actually stored")
-	}
-	ti := strings.Index(body, "toast(")
-	if ti < 0 {
-		t.Fatal("saveBackupRefresh no longer confirms anything; this guard covers nothing " +
-			"(and slicing on a missing needle would panic the whole package)")
-	}
-	_ = body[ti:] // the needle exists; the checks below read the whole body
-	// Qualified by the RESPONSE variable, not the bare field name. A bare
-	// "carry_forward_unchanged" also matches the request body that was just
-	// sent, which is precisely the stale value this guard exists to reject, and
-	// a mutation swapping now.* for body.* survived until this was tightened.
-	for _, want := range []string{"now.enabled", "now.carry_forward_unchanged"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the confirmation does not read %s from the PUT response", want)
-		}
-	}
-	// Ban the IDENTIFIERS, not the English word: "applies on the next start"
-	// is correct prose and used to fail this.
-	for _, banned := range []string{"next ?", "next)", "body.carry_forward_unchanged", "body.enabled"} {
-		if strings.Contains(body, banned) {
-			t.Errorf("the confirmation reads %q, the value that was SENT, rather than the daemon's answer", banned)
-		}
-	}
-	if !strings.Contains(body, "renderRoute()") {
-		t.Fatal("the card is not re-rendered after saving, so it would keep showing the previous state")
 	}
 }
 
@@ -198,7 +152,7 @@ func TestBackupRefreshWireNamesMatchTheFrontend(t *testing.T) {
 	// Targets non-nil and SkippedS3Only non-zero, or their omitempty hides
 	// the very keys this pin exists for.
 	zero := 0
-	dto, err := json.Marshal(baselineRefreshDTO{CarryForwardUnchanged: true, Source: "override",
+	dto, err := json.Marshal(baselineRefreshDTO{CarryForwardUnchanged: true,
 		Enabled: true, Scheduled: true, Targets: &zero, SkippedS3Only: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +161,9 @@ func TestBackupRefreshWireNamesMatchTheFrontend(t *testing.T) {
 	if err := json.Unmarshal(dto, &d); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"carry_forward_unchanged", "source", "enabled", "scheduled", "targets", "skipped_s3_only"} {
+	// No "source": #1681 left one source (the daemon flag), so the field that
+	// named which of two had won is gone from both sides.
+	for _, key := range []string{"carry_forward_unchanged", "enabled", "scheduled", "targets", "skipped_s3_only"} {
 		if _, ok := d[key]; !ok {
 			t.Errorf("baselineRefreshDTO does not serialise %q (got %s)", key, dto)
 		}

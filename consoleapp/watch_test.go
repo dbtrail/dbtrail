@@ -789,13 +789,14 @@ func TestResolveUpConsoleEnv_carryForwardPrecedence(t *testing.T) {
 // and re-declares the flag with a hardcoded false, which is right for testing
 // precedence and blind to the shipped default: it substitutes its fixture for
 // the production declaration rather than reading it. This reads the real one.
-func TestWatchCarryForwardFlagIsOffByDefault(t *testing.T) {
+func TestWatchCarryForwardFlagIsOnByDefault(t *testing.T) {
 	f := watchCmd.Flags().Lookup("baseline-carry-forward-unchanged")
 	if f == nil {
-		t.Fatal("--baseline-carry-forward-unchanged is gone from watch; this guard covers nothing")
+		t.Fatal("--baseline-carry-forward-unchanged is gone from watch; it is the only way to turn reuse off now")
 	}
-	if f.DefValue != "false" {
-		t.Fatalf("default = %q, want \"false\": the daemon would reuse files nobody asked it to", f.DefValue)
+	if f.DefValue != "true" {
+		t.Fatalf("default = %q, want \"true\": since #1681 reusing a table that did not change is always on, "+
+			"and the console no longer offers to turn it on", f.DefValue)
 	}
 }
 

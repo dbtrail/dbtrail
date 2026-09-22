@@ -4298,8 +4298,10 @@ try {
     : bad("layout: a card left alone on the last row spans it", JSON.stringify(bandRow));
 
   // ── Scenario 17g3 — the disk-space card, every state it can be in ──
-  // Calls the REAL backupRefreshCard with each of the 144 DTOs the daemon can
-  // serve and reads the rendered element. A Go guard over the source can only
+  // Calls the REAL backupRefreshCard with each of the 72 DTOs the daemon can
+  // serve and reads the rendered element. Since #1681 the card has no switch
+  // (reuse is always on, the flag is the only way off), so the "source" axis
+  // and the two buttons are gone with it. A Go guard over the source can only
   // see that both `br.enabled` and `br.scheduled` appear somewhere in the
   // function, so inverting either condition survives it while the card tells
   // the operator the opposite of the truth. Rendering is the only view that
@@ -4315,7 +4317,6 @@ try {
     for (const on of [false, true]) {
       for (const enabled of [false, true]) {
         for (const scheduled of [false, true]) {
-          for (const source of ["default", "override"]) {
           // The two #1579 dimensions. `targets` is absent off a watch daemon
           // (no loop to count) and a real 0 on one whose loop covers nothing;
           // the alarm must separate those, so undefined and 0 are distinct
@@ -4326,7 +4327,7 @@ try {
           // one S3-only server is both the common deployment and the value a
           // later pluralization edit is most likely to special-case.
           for (const skipped of [0, 1, 2]) {
-            const el = backupRefreshCard({ carry_forward_unchanged: on, enabled, scheduled, source,
+            const el = backupRefreshCard({ carry_forward_unchanged: on, enabled, scheduled,
               targets, skipped_s3_only: skipped });
             const t = el.innerText || el.textContent || "";
             // What sits INSIDE the compact block. Detached, innerText is
@@ -4342,8 +4343,12 @@ try {
               // backups only in S3" wording cannot false-positive.
               hiddenSkip: fine.includes(skipped + " server(s) keep backups only in S3"),
               compactSaving: fine.includes("only when the last backup is read from this machine"),
-              compactChose: fine.includes("You chose this in the web interface"),
-              on, enabled, scheduled, source, targets, skipped,
+              // What replaced provenance: the closing sentence names what the
+              // daemon does, and it is compact like the rest of the block.
+              compactRule: fine.includes(on
+                ? "DBTrail always reuses a table that did not change"
+                : "started with reuse turned off"),
+              on, enabled, scheduled, targets, skipped,
               alarm: t.includes("no server can be refreshed"),
               // The count is read back, not just the sentence: a card that
               // says "server(s)" without the number tells an operator nothing
@@ -4360,10 +4365,11 @@ try {
                 || (/(reus|recorded changes)/i.test(line) && !/\b(never|cannot|no)\b/i.test(line)))(
                 Array.from(el.querySelectorAll("p")).map((p) => p.textContent)
                   .find((x) => x.includes("keep backups only in S3")) || ""),
-              pill: (el.querySelector(".bkr-state") || {}).textContent || "",
+              // No state pill and no buttons since #1681: nothing here is a
+              // choice, so a pill would invite a click that has nowhere to go.
+              pill: !!el.querySelector(".bkr-state"),
               dormant: t.includes("Nothing uses this yet"),
               middle: t.includes("Nothing refreshes all servers on one timer"),
-              chose: t.includes("You chose this in the web interface"),
               saving: t.includes("only when the last backup is read from this machine"),
               // A WORD test, not the literal "(live". The old shape put the
               // word in parentheses, so a check for that string passes on a pill
@@ -4375,28 +4381,26 @@ try {
             });
           }
           }
-          }
         }
       }
     }
     return rows;
   });
   const cardBad = cardStates.filter((r) =>
-    // the value is on screen, and it is the value
-    r.pill !== (r.on ? "On" : "Off")
+    // nothing that reads as a control: no state pill, no buttons
+    r.pill || r.buttons.length > 0
     // the compact block never swallows a fault or the dormancy note, and
     // it does hold the qualifiers that moved there (#1603): a "compact" that
     // hid the alarm would pass every presence check above
     || r.hiddenAlarm || r.hiddenDormant || r.hiddenSkip
-    || !r.compactSaving || r.compactChose !== (r.source === "override")
+    || !r.compactSaving || !r.compactRule
     // dormant is said when nothing consumes the setting, and only then
     || r.dormant !== !r.enabled
     // the middle state is the --baseline-trigger daemon: live for restores,
     // nothing on a timer. Collapsing it into either neighbour is the misreport
     // the card exists to avoid.
     || r.middle !== (r.enabled && !r.scheduled)
-    // provenance answers who chose, never whether it runs
-    || r.chose !== (r.source === "override")
+    // the closing sentence says what happens, never whether it runs
     || r.live
     // the saving never appears without the condition it actually has
     || !r.saving
@@ -4408,10 +4412,8 @@ try {
     || r.skipNote !== (r.skipped > 0)
     // and it never promises those servers an update from the bucket, which
     // needs the local directory they lack
-    || r.skipPromisesReuse
-    // the hand-it-back button appears only where there is something to hand back
-    || (r.buttons.length === 2) !== (r.source === "override"));
-  cardStates.length === 144 && cardBad.length === 0
+    || r.skipPromisesReuse);
+  cardStates.length === 72 && cardBad.length === 0
     ? ok("backups: the disk-space card reports every state it can be in")
     : bad("backups: the disk-space card reports every state it can be in",
         JSON.stringify({ n: cardStates.length, wrong: cardBad.slice(0, 4) }));
@@ -4636,8 +4638,8 @@ try {
   const cf = bksStates.on, cfo = bksStates.off;
   (cf.rows.length === 2 && cf.rows.every((r) => r.tiles === 5) && cf.rows[0].kept === 0 && cf.rows[1].kept === 3 && /kept/.test(cf.key) && cf.img
     && cfo.rows.length === 2 && cfo.rows.every((r) => r.tiles === 5) && cfo.rows[1].kept === 0 && !/kept/.test(cfo.key) && cfo.img)
-    ? ok("backup-settings: the switch drawn on keeps three of five and written two; off writes all five")
-    : bad("backup-settings: the switch drawn on keeps three of five and written two; off writes all five", JSON.stringify({ on: cf, off: cfo }));
+    ? ok("backup-settings: reuse drawn on keeps three of five and written two; off writes all five")
+    : bad("backup-settings: reuse drawn on keeps three of five and written two; off writes all five", JSON.stringify({ on: cf, off: cfo }));
   (bksStates.refused.marked && bksStates.refused.loud && bksStates.refused.outside)
     ? ok("backup-settings: a refused daemon value is marked and its reason stays in plain view")
     : bad("backup-settings: a refused daemon value is marked and its reason stays in plain view", JSON.stringify(bksStates.refused));

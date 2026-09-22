@@ -721,8 +721,11 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("PUT /api/backup-settings/daemon/{key}", s.handleBackupSettingsDaemonUpdate)
 	// Global baseline-refresh policy. Same split as rotation: read the
 	// effective settings, PUT an override the running loop picks up next cycle.
+	// Read-only since #1681: reusing an unchanged table's file is always on,
+	// so there is nothing here to write. The GET stays because the Backup
+	// settings card still reports what the daemon does and whether anything
+	// consumes it.
 	api.HandleFunc("GET /api/baseline-refresh", s.handleBaselineRefreshGet)
-	api.HandleFunc("PUT /api/baseline-refresh", s.handleBaselineRefreshUpdate)
 	// Authenticated auth verbs. Registered on the inner mux so a forgotten
 	// root registration breaks login, never security (ServeMux specificity
 	// keeps them under the tokenMiddleware-wrapped /api/ catch-all).

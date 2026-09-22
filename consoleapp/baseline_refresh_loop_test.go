@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -420,41 +421,48 @@ func TestRefreshTick_reportsTheCountersInTheRightOrder(t *testing.T) {
 	}
 }
 
-// effectiveCarryForward is what makes the console panel able to change a
-// RUNNING loop, so its precedence is the contract worth pinning: a saved
-// override wins, absence falls back to the daemon flag, and an override that
-// says false must beat a daemon flag that says true (which is why the registry
-// stores a pointer and not a bare bool).
+// effectiveCarryForward has one source since #1681: the daemon's own flag.
+// The console's saved override is gone, so the contract worth pinning is that
+// a registry cannot change the answer — including a registry file written by
+// an older binary, which still carries the block this build ignores.
 func TestEffectiveCarryForward(t *testing.T) {
-	reg := func(t *testing.T, set *bool) *console.Registry {
+	withOldBlock := func(t *testing.T) *console.Registry {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "servers.yaml")
+		old := "version: 1\nbaseline_refresh:\n  carry_forward_unchanged: false\nservers: []\n"
+		if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r, err := console.LoadRegistry(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	empty := func(t *testing.T) *console.Registry {
 		t.Helper()
 		r, err := console.LoadRegistry(filepath.Join(t.TempDir(), "servers.yaml"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if set != nil {
-			if err := r.SetBaselineRefresh(&console.BaselineRefreshConfig{CarryForwardUnchanged: *set}); err != nil {
-				t.Fatal(err)
-			}
-		}
 		return r
 	}
-	yes, no := true, false
-
 	for _, tc := range []struct {
 		name          string
-		override      *bool
+		reg           func(*testing.T) *console.Registry
 		daemonDefault bool
 		want          bool
 	}{
-		{"no override falls back to the daemon flag (on)", nil, true, true},
-		{"no override falls back to the daemon flag (off)", nil, false, false},
-		{"an override wins when it says on", &yes, false, true},
-		// The case a bare bool in the registry could not express.
-		{"an override that says off beats a daemon flag that says on", &no, true, false},
+		{"the daemon flag decides (on)", empty, true, true},
+		{"the daemon flag decides (off)", empty, false, false},
+		// The case this replaced a tri-state: an operator who had turned it
+		// off in the old console gets reuse back, and the daemon says so in
+		// its log line rather than honouring a setting nothing can edit.
+		{"an old saved override no longer wins", withOldBlock, true, true},
+		{"an old saved override cannot turn it on either", withOldBlock, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := effectiveCarryForward(reg(t, tc.override), tc.daemonDefault); got != tc.want {
+			if got := effectiveCarryForward(tc.reg(t), tc.daemonDefault); got != tc.want {
 				t.Errorf("effectiveCarryForward = %v, want %v", got, tc.want)
 			}
 		})
@@ -464,6 +472,9 @@ func TestEffectiveCarryForward(t *testing.T) {
 	// the operator's own command line is a better answer than a silent no.
 	if !effectiveCarryForward(nil, true) {
 		t.Error("a nil registry discarded the daemon flag")
+	}
+	if effectiveCarryForward(nil, false) {
+		t.Error("a nil registry invented a flag the operator did not pass")
 	}
 }
 
@@ -478,16 +489,11 @@ func TestRefreshTargetsFor_carriesTheEffectiveSettingIntoEveryRequest(t *testing
 	// the zero value, so the field is already right for the wrong reason. The
 	// combination is what catches a daemon whose second and third servers
 	// silently ignore the flag and the console toggle.
-	newReg := func(t *testing.T, override *bool) *console.Registry {
+	newReg := func(t *testing.T) *console.Registry {
 		t.Helper()
 		r, err := console.LoadRegistry(filepath.Join(t.TempDir(), "servers.yaml"))
 		if err != nil {
 			t.Fatal(err)
-		}
-		if override != nil {
-			if err := r.SetBaselineRefresh(&console.BaselineRefreshConfig{CarryForwardUnchanged: *override}); err != nil {
-				t.Fatal(err)
-			}
 		}
 		for _, name := range []string{"prod", "staging"} {
 			if _, err := r.Add(console.ServerEntry{
@@ -498,21 +504,16 @@ func TestRefreshTargetsFor_carriesTheEffectiveSettingIntoEveryRequest(t *testing
 		}
 		return r
 	}
-	yes, no := true, false
-
 	for _, tc := range []struct {
-		name     string
-		override *bool
-		daemon   bool
-		want     bool
+		name   string
+		daemon bool
+		want   bool
 	}{
-		{"daemon flag on, nothing saved", nil, true, true},
-		{"daemon flag off, nothing saved", nil, false, false},
-		{"override on beats a flag saying off", &yes, false, true},
-		{"override off beats a flag saying on", &no, true, false},
+		{"daemon flag on", true, true},
+		{"daemon flag off", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			reqs := refreshTargetsFor(newReg(t, tc.override), "dsn", "/b", tc.daemon)
+			reqs := refreshTargetsFor(newReg(t), "dsn", "/b", tc.daemon)
 			if len(reqs) < 2 {
 				t.Fatalf("got %d targets, need at least 2 or a per-index bug stays invisible", len(reqs))
 			}
@@ -599,48 +600,50 @@ func TestCountReuse(t *testing.T) {
 	}
 }
 
-// TestCarryForwardProvenance: the value AND where it came from. The provenance
-// is the point: a saved override of false beats a command line saying true, and
-// without a name for that an operator watching every table get rewritten has
-// nothing anywhere telling them why.
+// TestCarryForwardProvenance: the value AND where it came from. Since #1681
+// there is one source, so the pin is that nothing on disk can silently become
+// a second one: the answer is the flag, named as the flag, with a registry
+// carrying the old saved block and without any registry at all.
 func TestCarryForwardProvenance(t *testing.T) {
-	cases := []struct {
-		name       string
-		override   *bool
-		daemon     bool
-		wantOn     bool
-		wantSource string
-	}{
-		{"no registry at all falls back to the flag", nil, true, true, "daemon flag or environment"},
-		{"no override, flag off", nil, false, false, "daemon flag or environment"},
-		{"override true over a flag saying false", boolPtr(true), false, true, "setting saved in the web interface, which overrides the daemon flag"},
-		{"override FALSE over a flag saying true", boolPtr(false), true, false, "setting saved in the web interface, which overrides the daemon flag"},
+	oldBlock := func(t *testing.T) *console.Registry {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "servers.yaml")
+		if err := os.WriteFile(path, []byte("version: 1\nbaseline_refresh:\n  carry_forward_unchanged: false\nservers: []\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r, err := console.LoadRegistry(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
 	}
-	for _, tc := range cases {
+	const flagSource = "daemon flag or environment"
+	for _, tc := range []struct {
+		name   string
+		reg    func(*testing.T) *console.Registry
+		daemon bool
+		wantOn bool
+	}{
+		{"no registry at all falls back to the flag", nil, true, true},
+		{"no registry, flag off", nil, false, false},
+		{"an old saved block does not become a second source", oldBlock, true, true},
+		{"an old saved block cannot turn it on either", oldBlock, false, false},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var reg *console.Registry
-			if tc.override != nil {
-				r, err := console.LoadRegistry(filepath.Join(t.TempDir(), "servers.yaml"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := r.SetBaselineRefresh(&console.BaselineRefreshConfig{CarryForwardUnchanged: *tc.override}); err != nil {
-					t.Fatal(err)
-				}
-				reg = r
+			if tc.reg != nil {
+				reg = tc.reg(t)
 			}
 			on, src := carryForwardProvenance(reg, tc.daemon)
 			if on != tc.wantOn {
 				t.Errorf("value = %v, want %v", on, tc.wantOn)
 			}
-			if src != tc.wantSource {
-				t.Errorf("source = %q, want %q", src, tc.wantSource)
+			if src != flagSource {
+				t.Errorf("source = %q, want %q", src, flagSource)
 			}
 		})
 	}
 }
-
-func boolPtr(b bool) *bool { return &b }
 
 // TestEnvBoolOr: the one input an operator can get wrong silently. An
 // unparseable value must keep the fallback, never be read as consent.

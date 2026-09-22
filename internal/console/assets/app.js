@@ -4249,13 +4249,14 @@ function rotationCard(rot) {
 // process-global, the schedule is per server, and a global toggle inside a
 // per-server fold would assert something false.
 //
-// Shape (#1528, then #1603): one state pill on the title, the rule drawn
-// (cfShape) with one sentence under it, the alarms and the dormancy note in
-// plain view, the buttons, and everything else in a compact block after them.
-// Provenance (who chose the value) is last, inside that block: a reader
-// cannot care who chose a setting until he knows what it does. Liveness never
-// rides beside the value: the pill says On/Off, the br.enabled line alone says
-// whether anything uses it, so the two cannot contradict each other.
+// Shape (#1528, then #1603, then #1681): the rule drawn (cfShape) with one
+// sentence under it, the alarms and the dormancy note in plain view, and
+// everything else in a compact block. Since #1681 there is nothing to click:
+// reuse is always on, so the state pill, the two buttons and the provenance
+// line (which of the console and the flag had won) are gone. A daemon
+// started with --baseline-carry-forward-unchanged=false is the one case the
+// drawing must still be able to show, and br.carry_forward_unchanged is read
+// for exactly that.
 //
 // The sentence about where the saving applies is a CORRECTNESS fix, not a
 // hedge. carryForwardEligible refuses any s3:// previous snapshot, because
@@ -4516,11 +4517,9 @@ function backupRefreshCard(br) {
     card.append(el("p", { class: "form-hint", text: "Could not load this setting" + (br && br.error ? ": " + br.error : ".") }));
     return card;
   }
+  // What the daemon will do. There is no choice to make here any more: this
+  // is false only where the operator passed the flag that turns reuse off.
   const on = !!br.carry_forward_unchanged;
-  // The state is the first thing read, because checking it or flipping it is
-  // why the card was opened. It rides the title rather than a row so nothing
-  // sits between the reader and it.
-  head.append(el("span", { class: "tag-pill bkr-state", text: on ? "On" : "Off" }));
   // say() writes into the card until the compact block opens below, then
   // into the block: same sentences, one click further away.
   let into = card;
@@ -4561,25 +4560,6 @@ function backupRefreshCard(br) {
   if (br.skipped_s3_only > 0) {
     say(br.skipped_s3_only + " server(s) keep backups only in S3, so the timer skips them. The only backup they can get is a full one.");
   }
-  const foot = el("div", { class: "stg-cardfoot" },
-    el("button", {
-      class: "btn btn-sm", type: "button",
-      text: on ? "Turn off" : "Turn on",
-      onclick: () => saveBackupRefresh({ carry_forward_unchanged: !on }),
-    }));
-  // Only offered once something is saved here, because that is the only state
-  // it changes. Without it the toggle is a one-way door: the first save wins
-  // over the daemon flag forever, and an operator who set the flag on the
-  // command line has no way to hand the decision back short of editing the
-  // registry file by hand.
-  if (br.source === "override") {
-    foot.append(el("button", {
-      class: "btn btn-sm btn-ghost", type: "button",
-      text: "Use the default",
-      onclick: () => saveBackupRefresh({ use_default: true }),
-    }));
-  }
-  card.append(foot);
   // Everything a reader does not need in order to act is compact, not cut:
   // the local-only rule, the S3 skip count (#1579), what consumes the
   // setting, and whose choice the current value was.
@@ -4591,49 +4571,14 @@ function backupRefreshCard(br) {
   if (br.enabled && !br.scheduled) {
     say("Restores use this, and so do the backup schedules you set. Nothing refreshes all servers on one timer.");
   }
-  say("This one setting covers every server that keeps backups on this machine.");
-  say(br.source === "override"
-    ? "You chose this in the web interface. It replaces the setting DBTrail started with."
-    : "This is the setting DBTrail started with.");
-  more.append(docsMore("settings/backups", "backups--disk-space", "the disk-space switch"),
+  say("This covers every server that keeps backups on this machine.");
+  say(on
+    ? "DBTrail always reuses a table that did not change. Where that would be wrong, the backup is refused instead."
+    : "This DBTrail was started with reuse turned off (--baseline-carry-forward-unchanged=false).");
+  more.append(docsMore("settings/backups", "backups--disk-space", "reusing unchanged tables"),
     docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
   card.append(more);
   return card;
-}
-
-// saveBackupRefresh writes the setting and re-renders, so the card always shows
-// what the daemon will actually do rather than what was clicked.
-//
-// The confirmation is built from the RESPONSE, not from what was clicked or
-// from what the card was holding when it rendered. Those two can disagree with
-// the daemon: "Use the daemon setting" does not know in advance what the flag
-// says, and a card rendered before a restart carries a stale schedule. The PUT
-// already echoes the effective state, so reading it costs nothing.
-async function saveBackupRefresh(body) {
-  let now;
-  try {
-    now = await api("/api/baseline-refresh", { method: "PUT", body });
-  } catch (err) {
-    // NOT "could not save". The handler writes the registry before it writes
-    // the response, so a body that is truncated or a connection dropped after
-    // that point lands here with the change already made. Saying it failed is
-    // the one direction that must not be silent for a setting that governs how
-    // the operator's backups are stored, and returning early left the card
-    // rendering the OLD value on top of the wrong sentence. Re-render so the
-    // card shows whatever the daemon actually holds.
-    toastError("Could not confirm the change: " + ((err && err.message) || err) +
-      ". The card now shows what the daemon holds.");
-    renderRoute();
-    return;
-  }
-  const on = !!(now && now.carry_forward_unchanged);
-  // "will be reused" was an absolute the daemon cannot honour on an S3-backed
-  // server, which is the same over-promise the card carried; the toast states
-  // what changes and lets the card carry the condition.
-  toast((now && now.enabled)
-    ? (on ? "Saved. Unchanged tables can now keep their last file" : "Every table will be written again")
-    : "Saved. Nothing uses it yet, so it starts working the next time DBTrail runs with backups or restores turned on.");
-  renderRoute();
 }
 
 // ── Backup settings (#1582, #1603) ──────────────────────────────────────────

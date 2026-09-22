@@ -145,7 +145,6 @@ var apiRoutePerms = []routePerm{
 	// policy is a settings read, changing what the daemon's loop does is a
 	// control-plane write.
 	{"GET", "/api/baseline-refresh", ext.PermSettingsRead},
-	{"PUT", "/api/baseline-refresh", ext.PermServersWrite},
 	{"GET", "/api/baselines", ext.PermSettingsRead},
 	// The per-server backup schedule (#1442) is a control-plane setting like
 	// the rotation and refresh overrides: what it changes is what the daemon's

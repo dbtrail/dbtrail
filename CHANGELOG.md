@@ -22,6 +22,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and its + Add server opens the add form directly.
 
 ### Changed
+- **Reusing the file of a table that did not change is always on, and the
+  console no longer asks** (#1681). A backup that finds a table with no
+  changes in its window publishes that table's previous Parquet file instead
+  of writing it again; the cases where that would be wrong (a destructive
+  DDL, a capture gap, a failed `_MANIFEST` check) refuse the backup before
+  reuse is reached, so it was an opt-in for control, not for correctness.
+  What this means for you:
+  - The daemon flag `--baseline-carry-forward-unchanged` (and
+    `BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED`) now defaults to **on**, and
+    `=false` is the only way to turn reuse off.
+  - **If you had turned it off in the web interface, it is on again.** That
+    saved setting is ignored, and left in `console-servers.yaml` untouched;
+    pass the flag if you want it off.
+  - The **Backups & disk space** card on Backup settings has no switch any
+    more: it reports what the daemon does, with the same drawing.
+  - `PUT /api/baseline-refresh` is **gone**. `GET` stays, without its
+    `source` field, since there is one source now.
+  - Two backups that share a reused file share the bytes on disk, so a `du`
+    per snapshot directory double-counts them and a prune reports space it
+    will not reclaim while the newer snapshot points at that file. One `du`
+    over the backup directory reports the truth. Nothing about the rows
+    changes.
 - **The console's DuckDB schema card moved from Backups to Connect AI**
   (#1573), where it now shows with or without the `watch` daemon (before, it
   was on Connect only on `serve`), for a session that may read settings, which
