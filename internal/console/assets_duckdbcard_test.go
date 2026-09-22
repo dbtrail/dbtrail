@@ -44,26 +44,33 @@ func TestDuckDBCardOffersOneDecision(t *testing.T) {
 		t.Error("the backup-location box is not gated on the capability, so it is offered for " +
 			"servers with only one location, where it changes nothing")
 	}
-	if !strings.Contains(body, "include_events=1") {
-		t.Error("the card never sends include_events=1, so the change log cannot be asked for at all")
+	// The parameters are built in downloadViewsSQL, the one download path the
+	// card and the Backups take-away lane share (#1573); the card must hand
+	// its two boxes to it.
+	dl := functionBody(t, readAsset(t, "app.js"), "async function downloadViewsSQL(")
+	if !strings.Contains(body, "downloadViewsSQL({ events: events.checked, portable: !!(portable && portable.checked) })") {
+		t.Error("the card does not hand its two boxes to downloadViewsSQL, so ticking them changes nothing")
 	}
-	if !strings.Contains(body, "portable_baseline=1") {
-		t.Error("the card never sends portable_baseline=1, so its box changes nothing")
+	if !strings.Contains(dl, "include_events=1") {
+		t.Error("the download never sends include_events=1, so the change log cannot be asked for at all")
+	}
+	if !strings.Contains(dl, "portable_baseline=1") {
+		t.Error("the download never sends portable_baseline=1, so its box changes nothing")
 	}
 	// Conditional, not always: the change log binds every archived file, so a
 	// download nobody asked for it must not carry it.
-	if !strings.Contains(body, `if (events.checked) q.push("include_events=1")`) {
+	if !strings.Contains(dl, `if (opts.events) q.push("include_events=1")`) {
 		t.Error("the change log is not conditional on the box, so the default download is not the cheap one")
 	}
 	// Its own filename. Saved as views.sql, the second download silently
 	// replaces the first in the reader's downloads folder.
-	if !strings.Contains(body, `"views-portable.sql"`) {
+	if !strings.Contains(dl, `"views-portable.sql"`) {
 		t.Error("both downloads are saved under one filename, so one silently overwrites the other")
 	}
 	// The two retired controls must not come back as silent always-on
 	// parameters, which would be worse than the checkboxes were.
 	for _, gone := range []string{"include_live", "pin_snapshot"} {
-		if strings.Contains(body, gone) {
+		if strings.Contains(body+dl, gone) {
 			t.Errorf("duckdbPanel names %s again; it was removed from this surface, not moved into a default", gone)
 		}
 	}
@@ -156,33 +163,30 @@ func TestDuckDBCardStaysNearlyTextless(t *testing.T) {
 	}
 }
 
-// The card mounts on Backups (#1581): the .tar.gz is the data and views.sql
-// is how you open it, so the two halves of one task share a page — below the
-// list, where it reads as "and this is how you open them". Connect AI keeps
-// it ONLY when the Backups page does not exist: /baselines is
-// capability-gated on monitor, so a serve-only console with views on would
-// otherwise have no UI route to the download at all, the regression #1549
-// fixed when the SQL page took the card down with it.
-func TestDuckDBCardMountsOnBackupsWithConnectFallback(t *testing.T) {
+// TestDuckDBCardMountsOnConnect: the DuckDB schema card lives on Connect AI
+// (#1573), with or without the watch daemon, beside the other ways to take the
+// data somewhere else; Backups no longer mounts it (its take-away lane
+// downloads the default file itself). Between the SQL client panel and the
+// Iceberg export, the order of the page from least to most setup.
+func TestDuckDBCardMountsOnConnect(t *testing.T) {
 	js := readAsset(t, "app.js")
-	backups := stripJSLineComments(functionBody(t, js, "async function renderBaselines("))
-	mount := strings.Index(backups, "if (capsCache.views) v.append(duckdbPanel())")
-	list := strings.Index(backups, "baselinesPanel(")
-	switch {
-	case mount < 0:
-		t.Fatal("renderBaselines does not mount duckdbPanel gated on capsCache.views; the views " +
-			"download has left the page that lists the snapshots its file describes")
-	case list < 0:
-		t.Fatal("renderBaselines no longer mounts baselinesPanel")
-	case mount < list:
-		t.Error("the DuckDB card renders ABOVE the backups list. It is the follow-through for a " +
-			"reader who just took a copy, and belongs under the listing, not at the top of the page")
+	if strings.Contains(stripJSLineComments(functionBody(t, js, "async function renderBaselines(")), "duckdbPanel(") {
+		t.Error("renderBaselines mounts duckdbPanel again; the card moved to Connect AI (#1573), and two " +
+			"copies of one download put two different option sets in front of the reader")
 	}
 	connect := stripJSLineComments(functionBody(t, js, "function buildConnect("))
-	if !strings.Contains(connect, "if (capsCache.views && !capsCache.monitor) v.append(duckdbPanel())") {
-		t.Error("buildConnect no longer keeps the serve-only fallback (views on, monitor off). On a " +
-			"console without /baselines the views capability has no UI route at all — the exact " +
-			"regression #1549 fixed")
+	mount := strings.Index(connect, "if (capsCache.views) v.append(duckdbPanel())")
+	sql := strings.Index(connect, "sqlClientPanel(")
+	ice := strings.Index(connect, "icebergExportPanel(")
+	switch {
+	case mount < 0:
+		t.Fatal("buildConnect does not mount duckdbPanel on capsCache.views alone; with the daemon " +
+			"running (monitor on) the views download would have no page at all")
+	case sql < 0 || ice < 0:
+		t.Fatal("buildConnect no longer mounts the SQL client panel or the Iceberg panel; re-anchor this order check")
+	case !(sql < mount && mount < ice):
+		t.Error("the DuckDB card is out of order on Connect AI: it belongs after the SQL client panel " +
+			"and before the Iceberg export")
 	}
 }
 

@@ -53,12 +53,12 @@ func TestTakeAwayLaneCountIsDerivedNotWritten(t *testing.T) {
 	}
 }
 
-// The views half is a promise this lane does not keep on its own: the file is
-// produced by the card renderBaselines mounts below the list (#1581), gated
-// on capsCache.views. Ungated here, the lane drew a views.sql tile and a
-// button pointing at a card that is not rendered -- exactly the trade
-// views_api.go says this codebase refuses ("a button that only 404s is a
-// lie").
+// The views half is a promise this lane keeps only when the server can make
+// the file: its button downloads it through downloadViewsSQL (#1573; it used
+// to jump to the card), and GET /api/views.sql answers only under
+// capsCache.views. Ungated here, the lane drew a views.sql tile and a button
+// that only fails -- exactly the trade views_api.go says this codebase
+// refuses ("a button that only 404s is a lie").
 func TestDuckLaneGatesTheFileItDoesNotProduce(t *testing.T) {
 	js := readAsset(t, "app.js")
 	lane := stripJSLineComments(functionBody(t, js, "function backupDuckLane("))
@@ -70,10 +70,10 @@ func TestDuckLaneGatesTheFileItDoesNotProduce(t *testing.T) {
 	// not merely later in the file. Comparing byte offsets was the first cut
 	// and it passed a mutation that gated the tile and left the button loose:
 	// the button still came after `const hasViews = ...`.
-	for _, half := range []string{"DUCKDB_VIEWS_FILE, cap:", "scrollIntoView"} {
+	for _, half := range []string{"DUCKDB_VIEWS_FILE, cap:", "downloadViewsSQL("} {
 		if !guardedByHasViews(lane, half) {
 			t.Errorf("%q is not inside an `if (hasViews)` branch. A gated tile beside an ungated "+
-				"button still points the reader at a card that is not on the page", half)
+				"button still offers a file the server will not make", half)
 		}
 	}
 }
@@ -124,11 +124,10 @@ func TestViewsFileIsNamedFromOneConstant(t *testing.T) {
 			"promise a file the schema card no longer produces", decl[1], n)
 	}
 
-	// The card's CLASS has the same two-surface problem in the same file: the
-	// panel wears it, and the take-away lane's jump resolves it — through an
-	// `if (c)` null-guard, so a drift is a dead button with no error and no
-	// toast, not a crash. Same rule, same shape: one declaration, everything
-	// else through the constant.
+	// The card's CLASS: the panel wears it and the browser test resolves it.
+	// The take-away lane's jump that also resolved it is gone (#1573: the lane
+	// downloads the file itself), but the rule stays: one declaration,
+	// everything else through the constant.
 	cardDecl := regexp.MustCompile(`const DUCKDB_CARD_CLASS = "([^"]+)"`).FindStringSubmatch(js)
 	if cardDecl == nil {
 		t.Fatal("DUCKDB_CARD_CLASS is gone: the take-away lane resolves the card by that class, " +
@@ -139,11 +138,9 @@ func TestViewsFileIsNamedFromOneConstant(t *testing.T) {
 			"declaration may spell it out, or the lane's jump can resolve a class the card "+
 			"no longer wears", cardDecl[1], n)
 	}
-	for _, fn := range []string{"function duckdbPanel(", "function backupDuckLane("} {
-		if !strings.Contains(stripJSLineComments(functionBody(t, js, fn)), "DUCKDB_CARD_CLASS") {
-			t.Errorf("%s no longer goes through DUCKDB_CARD_CLASS; the card and the jump "+
-				"that targets it must share one spelling", fn)
-		}
+	if !strings.Contains(stripJSLineComments(functionBody(t, js, "function duckdbPanel(")), "DUCKDB_CARD_CLASS") {
+		t.Error("duckdbPanel no longer goes through DUCKDB_CARD_CLASS; the card and what finds it " +
+			"must share one spelling")
 	}
 }
 

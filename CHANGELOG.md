@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and its + Add server opens the add form directly.
 
 ### Changed
+- **The console's DuckDB schema card moved from Backups to Connect AI**
+  (#1573), where it now shows with or without the `watch` daemon (before, it
+  was on Connect only on `serve`). On Backups, the take-away lane's views
+  button downloads `views.sql` itself (the default file, without the change
+  log) and shows the command to open it, instead of scrolling to the card.
 - **The console's Iceberg export panel moved from Backups to Connect AI**
   (#1573). It hands over a command to run elsewhere, which is what Connect AI
   is for, and Backups is being reduced to its snapshots. Connect AI asks only

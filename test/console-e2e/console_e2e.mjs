@@ -2626,39 +2626,17 @@ try {
     ? ok("take-away: with the capability on, the same builder draws both downloads")
     : bad("take-away: with the capability on, the same builder draws both downloads", JSON.stringify(duckOff.on));
 
-  // The Download-a-DuckDB-schema card itself, which #1581 moved to this page
-  // from Connect AI. These are the drawing and budget checks that ran on the
-  // Connect scenario while the card lived there; the page changed, the
-  // contract did not. Placement is part of the contract: below the list, the
-  // card reads as "and this is how you open them" — above it, it shoves the
-  // listing (the page's answer) below the fold.
-  const dk = await page.evaluate(() => {
-    const c = document.querySelector(".view .cn-dk");
-    if (!c) return { present: false };
-    const kids = Array.from(document.querySelector(".view").children);
-    const list = kids.findIndex((n) => /^Backups\b/.test((n.querySelector(".ov-panel-title") || {}).textContent || ""));
-    return {
-      present: true,
-      // The card's own budget (300): enough for a title, one control and a
-      // button, and not enough to start explaining. It holds on THIS page or
-      // the move quietly re-opened the prose door #1549 closed.
-      chars: c.innerText.length,
-      tiles: c.querySelectorAll(".dk-shape .dk-tile").length,
-      bars: c.querySelectorAll(".dk-shape .dk-bar").length,
-      lit: c.querySelectorAll(".dk-shape .dk-part:not(.dk-off)").length,
-      belowList: list >= 0 && kids.indexOf(c) > list,
-    };
+  // The DuckDB schema card moved to Connect AI (#1573); its drawing, budget
+  // and placement checks moved with it, to scenario 17g. Found by its title,
+  // and anchored on the listing being drawn, so a page that never rendered
+  // cannot pass; the lane above still downloads the file itself.
+  const dkGone = await page.evaluate(() => {
+    const titles = Array.from(document.querySelectorAll(".view .ov-panel-title")).map((t) => t.textContent);
+    return { listed: titles.some((t) => /^Backups\b/.test(t)), card: titles.includes("Download a DuckDB schema") };
   });
-  (dk.present && dk.chars > 0 && dk.chars <= 300)
-    ? ok("backups: the DuckDB schema card renders here under its 300-character budget")
-    : bad("backups: the DuckDB schema card renders here under its 300-character budget", JSON.stringify(dk));
-  (dk.present && dk.tiles > 0 && dk.bars > dk.tiles && dk.lit === 1)
-    ? ok("backups: the DuckDB card draws the shape, with the change log unlit until asked for")
-    : bad("backups: the DuckDB card draws the shape, with the change log unlit until asked for",
-        JSON.stringify({ tiles: dk.tiles, bars: dk.bars, lit: dk.lit }));
-  (dk.present && dk.belowList)
-    ? ok("backups: the DuckDB card sits below the snapshot listing")
-    : bad("backups: the DuckDB card sits below the snapshot listing", JSON.stringify(dk));
+  (dkGone.listed && !dkGone.card)
+    ? ok("backups: the DuckDB schema card is gone from Backups (it lives on Connect AI)")
+    : bad("backups: the DuckDB schema card is gone from Backups (it lives on Connect AI)", JSON.stringify(dkGone));
 
   // Paging, EXECUTED through the real panel. The Go guards test the window
   // function and the clamp in isolation and read the call site as text; their
@@ -4723,6 +4701,8 @@ try {
   // stack it shows 815 chars on its own, against 1046 for the steps, so
   // counting it would put the page past the cap on a panel the cap was
   // never about.
+  // The DuckDB schema card, back here since #1573, is left out the same way:
+  // it carries its own 300-character budget, asserted below.
   // Limit worth naming: run.sh builds without -ldflags, so this only ever
   // photographs the UNVERSIONED bundle arm.
   await page.evaluate(() => navigate("connect"));
@@ -4758,15 +4738,18 @@ try {
     const visible = view.innerText;
     // Both panels below the steps wear .cn-sql; .cn-ice tells the Iceberg
     // one apart, so neither is subtracted twice or mistaken for the other.
+    // The DuckDB card (.cn-dk) is left out too: it has its own budget, below.
     const sqlPanel = view.querySelector(".cn-sql:not(.cn-ice)");
     const icePanel = view.querySelector(".cn-ice");
+    const dkPanel = view.querySelector(".cn-dk");
+    const kids = Array.from(view.children || []);
     const iceCode = icePanel ? icePanel.querySelector("code.cn-url") : null;
     return {
       badges,
       labels,
-      // Minus the two panels' own text (see the budget note above).
+      // Minus the three panels' own text (see the budget note above).
       visibleChars: visible.length - (sqlPanel ? sqlPanel.innerText.length : 0)
-        - (icePanel ? icePanel.innerText.length : 0),
+        - (icePanel ? icePanel.innerText.length : 0) - (dkPanel ? dkPanel.innerText.length : 0),
       ice: {
         present: !!icePanel,
         title: icePanel ? (icePanel.querySelector(".ov-panel-title") || {}).textContent || "" : "",
@@ -4778,12 +4761,20 @@ try {
       // The 404-honesty rule's photographable half: this run is the
       // unversioned arm, where a direct release-asset link can only 404.
       downloadLinks: document.querySelectorAll('.view a[href*="/releases/download/"]').length,
-      // The DuckDB schema card moved to Backups (#1581). On this stack the
-      // monitor capability is on, so the serve-only fallback must NOT render
-      // here — one surface at a time, never a duplicate. views is the anchor
-      // that keeps the negative assertion honest: absent because the gate
-      // withheld it, not because the capability was off all along.
-      duckHere: !!document.querySelector(".view .cn-dk"),
+      // The DuckDB schema card, back on Connect AI with the daemon running
+      // (#1573; it sat on Backups from #1581). Its own budget (300): enough
+      // for a title, one control and a button, and not enough to start
+      // explaining, the prose door #1549 closed. Placement: after the SQL
+      // client panel, before the Iceberg export.
+      dk: dkPanel ? {
+        present: true,
+        chars: dkPanel.innerText.length,
+        tiles: dkPanel.querySelectorAll(".dk-shape .dk-tile").length,
+        bars: dkPanel.querySelectorAll(".dk-shape .dk-bar").length,
+        lit: dkPanel.querySelectorAll(".dk-shape .dk-part:not(.dk-off)").length,
+        afterSql: !!sqlPanel && kids.indexOf(dkPanel) > kids.indexOf(sqlPanel),
+        beforeIce: !icePanel || kids.indexOf(dkPanel) < kids.indexOf(icePanel),
+      } : { present: false },
       duckViewsCap: !!capsCache.views,
     };
   });
@@ -4796,13 +4787,18 @@ try {
   (cn.visibleChars > 0 && cn.visibleChars < 1500 && cn.fine >= 1)
     ? ok("connect: visible text stays under budget with fine print folded")
     : bad("connect: visible text stays under budget with fine print folded", "chars " + cn.visibleChars + " fine " + cn.fine);
-  // The DuckDB schema card lives on Backups since #1581; with monitor on,
-  // the Connect fallback must stay unmounted. Asserted here, photographed on
-  // the Backups scenario (which carries the drawing and budget checks).
-  (cn.duckViewsCap && !cn.duckHere)
-    ? ok("connect: the DuckDB schema card is on Backups, not duplicated here")
-    : bad("connect: the DuckDB schema card is on Backups, not duplicated here",
-        JSON.stringify({ views: cn.duckViewsCap, rendered: cn.duckHere }));
+  // The DuckDB schema card lives here since #1573, with monitor on too (the
+  // views capability is on for this stack, so absence would be a bug).
+  (cn.duckViewsCap && cn.dk.present && cn.dk.chars > 0 && cn.dk.chars <= 300)
+    ? ok("connect: the DuckDB schema card renders here under its 300-character budget")
+    : bad("connect: the DuckDB schema card renders here under its 300-character budget",
+        JSON.stringify({ views: cn.duckViewsCap, dk: cn.dk }));
+  (cn.dk.present && cn.dk.tiles > 0 && cn.dk.bars > cn.dk.tiles && cn.dk.lit === 1)
+    ? ok("connect: the DuckDB card draws the shape, with the change log unlit until asked for")
+    : bad("connect: the DuckDB card draws the shape, with the change log unlit until asked for", JSON.stringify(cn.dk));
+  (cn.dk.present && cn.dk.afterSql && cn.dk.beforeIce)
+    ? ok("connect: the DuckDB card sits after the SQL client panel and before the Iceberg export")
+    : bad("connect: the DuckDB card sits after the SQL client panel and before the Iceberg export", JSON.stringify(cn.dk));
   // The Iceberg export panel lives here since #1573 (it was on Backups), and
   // its command names the fixture's backup folder. On this stack byo-idx's own
   // folder and index are the same as the daemon's, so this cannot tell one
