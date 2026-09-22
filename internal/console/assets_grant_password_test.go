@@ -78,6 +78,11 @@ console.log(JSON.stringify([b.mysql, b.mariadb]));`)
 		t.Fatalf("decode %q: %v", out, err)
 	}
 	for _, b := range blocks {
+		// The placeholder must stay UNQUOTED: uncommenting a line with '' would
+		// create an account with an empty password.
+		if !strings.Contains(b, "IDENTIFIED BY <choose a password>;") {
+			t.Errorf("a block without a password does not hold an unquoted placeholder:\n%s", b)
+		}
 		if !strings.HasPrefix(b, "-- Fill in the source password above.") {
 			t.Errorf("a block without a password does not say why it cannot run:\n%s", b)
 		}
@@ -132,12 +137,41 @@ const l = b.mysql.split("\n"); console.log(JSON.stringify([l[0], l[3]]));`)
 	}
 }
 
-// A blank user field falls back to the account the block has always named,
-// so the block never reads ”@'%' (the anonymous user).
-func TestGrantBlockNeverNamesTheAnonymousUser(t *testing.T) {
-	out := runGrantJS(t, `console.log(grantBlocks("  ", "Ab3-xyzXYZ789_qq").mysql.split("\n")[0]);`)
-	if !strings.HasPrefix(out, "CREATE USER 'dbtrail'@'%'") {
-		t.Errorf("a blank user must fall back to 'dbtrail', got %q", out)
+// A blank user means "keep the stored one" on an edit, so the block cannot
+// name an account: it comments out and says so. The text still falls back to
+// 'dbtrail', never the anonymous user.
+func TestGrantBlockWithoutAUserHasNothingRunnable(t *testing.T) {
+	out := runGrantJS(t, `console.log(JSON.stringify(grantBlocks("  ", "Ab3-xyzXYZ789_qq").mysql));`)
+	var b string
+	if err := json.Unmarshal([]byte(out), &b); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	if !strings.HasPrefix(b, "-- Fill in the source user above.") {
+		t.Errorf("a block without a user does not say why it cannot run:\n%s", b)
+	}
+	for _, l := range strings.Split(b, "\n") {
+		if strings.TrimSpace(l) != "" && !strings.HasPrefix(strings.TrimSpace(l), "--") {
+			t.Errorf("runnable line in a block without a user: %q", l)
+		}
+	}
+	if strings.Contains(b, "CREATE USER ''@") {
+		t.Errorf("the block names the anonymous user:\n%s", b)
+	}
+	if !strings.Contains(b, "CREATE USER 'dbtrail'@'%'") {
+		t.Errorf("the commented text lost the dbtrail fallback:\n%s", b)
+	}
+}
+
+// On an edit the field is blank because the password is stored: the block says
+// that, rather than asking for one that is already there.
+func TestGrantBlockTellsAnEditThatBlankKeepsTheSavedPassword(t *testing.T) {
+	out := runGrantJS(t, `console.log(JSON.stringify(grantBlocks("repl", "", true).mysql.split("\n")[0]));`)
+	var first string
+	if err := json.Unmarshal([]byte(out), &first); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	if !strings.Contains(first, "Leave the password above blank to keep the saved one") {
+		t.Errorf("an edit's empty block does not say blank keeps the saved password: %q", first)
 	}
 }
 
@@ -235,10 +269,18 @@ const save = async (f, started) => {
   out.changeEvent = state(f);
   f.elements.source_password.__selected = false; f.elements.source_password.fire("focus");
   out.focusKeepsTyped = !f.elements.source_password.__selected;
+  f = show({ monitor: true }, null);
+  f.elements.source_user.value = "repl"; f.elements.source_user.fire("input");
+  f.elements.source_password.fire("focus");
+  out.focusSelectsAfterUserTyped = !!f.elements.source_password.__selected;
   f = show({ monitor: true }, { id: "x", name: "x", flavor: "mysql", source_user: "repl", has_source_password: true });
   out.edit = state(f);
   f = show({ monitor: false }, null);
   out.serve = state(f); out.serveBody = body(f);
+  f = show({ monitor: true }, null);
+  f.elements.source_user.value = "repl"; f.elements.source_user.fire("input");
+  f.elements.flavor.value = "postgres"; f.elements.flavor.fire("change");
+  out.postgresAfterTypedUser = { ...state(f), body: body(f) };
   f = show({ monitor: true }, null);
   f.elements.flavor.value = "postgres"; f.elements.flavor.fire("change");
   out.postgres = state(f);
@@ -248,6 +290,13 @@ const save = async (f, started) => {
   out.indexOnlyBody = body(f);
   f.elements.source_user.value = "alice";
   out.typedNoHostBody = body(f);
+  f = show({ monitor: true }, null);
+  f.elements.name.value = "n1";
+  let called = false;
+  ctx.__called = () => { called = true; };
+  vm.runInContext("api = async () => { __called(); return {}; };", ctx);
+  ctx.__f = f; await vm.runInContext("saveServer(__f)", ctx);
+  out.guardNoHostBlockedSave = !called;
   f = show({ monitor: true }, null);
   f.elements.name.value = "n1"; f.elements.source_host.value = "db";
   const sent = f.elements.source_password.value;
@@ -291,9 +340,15 @@ func TestServerFormGrantDefaultsWiring(t *testing.T) {
 	}
 	var out struct {
 		Fresh, TypedUser, ChangeEvent, Edit, Serve, Postgres, BackToMysql st
-		ServeBody, IndexOnlyBody, TypedNoHostBody                         map[string]any
-		ReopenSame, FocusSelects, FocusKeepsTyped, NextServerNewPassword  bool
-		AfterFailedFirstSave, AfterFailedRetry                            saved
+		PostgresAfterTypedUser                                            struct {
+			st
+			Body map[string]any
+		}
+		GuardNoHostBlockedSave                                           bool
+		ServeBody, IndexOnlyBody, TypedNoHostBody                        map[string]any
+		ReopenSame, FocusSelects, FocusKeepsTyped, NextServerNewPassword bool
+		FocusSelectsAfterUserTyped                                       bool
+		AfterFailedFirstSave, AfterFailedRetry                           saved
 	}
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &out); err != nil {
@@ -321,11 +376,16 @@ func TestServerFormGrantDefaultsWiring(t *testing.T) {
 	if !out.ReopenSame {
 		t.Error("reopening the form made a new password; a user created from the first block no longer matches")
 	}
+	// Typing the user name first is the usual order for someone reusing their
+	// own account, and it must not stop the password being selected.
+	if !out.FocusSelectsAfterUserTyped {
+		t.Error("after typing a user, focusing the generated password no longer selects it, so typing appends to it")
+	}
 	if !out.FocusSelects || !out.FocusKeepsTyped {
 		t.Errorf("focus: selects untouched=%v, leaves typed alone=%v", out.FocusSelects, out.FocusKeepsTyped)
 	}
 	// An edit keeps its stored password: nothing generated, nothing runnable.
-	if out.Edit.Pw != "" || out.Edit.Runnable != 0 || !strings.HasPrefix(out.Edit.Block, "-- Fill in the source password above.") {
+	if out.Edit.Pw != "" || out.Edit.Runnable != 0 || !strings.Contains(out.Edit.Block, "Leave the password above blank to keep the saved one") {
 		t.Errorf("an edit generated a password or shows runnable SQL without one: %+v", out.Edit)
 	}
 	// A process that cannot capture: no account filled in, so an index-only
@@ -340,6 +400,18 @@ func TestServerFormGrantDefaultsWiring(t *testing.T) {
 	// and returns when the flavor goes back to MySQL.
 	if out.Postgres.User != "" || out.Postgres.Pw != "" {
 		t.Errorf("switching to PostgreSQL kept the generated account: %+v", out.Postgres)
+	}
+	// The fields change one at a time: a typed user must not keep the
+	// generated MySQL password alive on a PostgreSQL server, where nothing on
+	// screen shows it and no block creates that role.
+	if out.PostgresAfterTypedUser.Pw != "" || out.PostgresAfterTypedUser.Body["source_password"] != nil {
+		t.Errorf("a typed user kept the generated password on PostgreSQL: %+v", out.PostgresAfterTypedUser)
+	}
+	if out.PostgresAfterTypedUser.User != "repl" {
+		t.Errorf("switching flavor dropped a typed user: %+v", out.PostgresAfterTypedUser)
+	}
+	if !out.GuardNoHostBlockedSave {
+		t.Error("a new monitored server with no source host was sent; the server then names the index host or a user the form filled in")
 	}
 	if out.BackToMysql.User != "dbtrail" || len(out.BackToMysql.Pw) < 20 {
 		t.Errorf("switching back to MySQL did not fill the account again: %+v", out.BackToMysql)

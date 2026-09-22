@@ -9783,8 +9783,9 @@ function genSourcePassword() {
 
 // grantBlocks builds the SQL the add-server form shows for MySQL and MariaDB,
 // for the user and password in the form, so what is copied is what is saved.
-// A blank user falls back to 'dbtrail' (never ''@'%', the anonymous user). A
-// blank password gives an unquoted placeholder, a syntax error if run.
+// A blank user falls back to 'dbtrail' in the text (never ''@'%', the
+// anonymous user), and a blank password to a placeholder MySQL refuses. Both
+// cases also comment the whole block out: see the reasons further down.
 //
 // The backup line is here even though the stream does not need it, because
 // omitting it is a DELAYED failure: capture starts clean and only Create
@@ -9795,13 +9796,17 @@ function genSourcePassword() {
 // (internal/mydumperlock/privileges.go): RELOAD, plus BACKUP_ADMIN on MySQL
 // and Percona 8.0 or later. LOCK TABLES is only what lock-all needs, which is
 // the RDS/Aurora path, so it is the commented alternative (#1658).
-function grantBlocks(user, password) {
-  const name = String(user || "").trim() || "dbtrail";
-  const acct = sqlString(name) + "@'%'";
+function grantBlocks(user, password, hasSavedPassword) {
+  const typedUser = String(user || "").trim();
+  const acct = sqlString(typedUser || "dbtrail") + "@'%'";
+  // A placeholder, not '': an empty quoted string is a real password MySQL
+  // accepts, and the block is one uncomment away from creating an account
+  // with it. Unquoted, the line is a syntax error however it is run.
+  const secret = password ? sqlString(password) : "<choose a password>";
   const grantBase =
-    "CREATE USER " + acct + " IDENTIFIED BY " + sqlString(password) + ";\n" +
+    "CREATE USER " + acct + " IDENTIFIED BY " + secret + ";\n" +
     "-- Created it already on an earlier try? Run this instead of CREATE USER:\n" +
-    "-- ALTER USER " + acct + " IDENTIFIED BY " + sqlString(password) + ";\n" +
+    "-- ALTER USER " + acct + " IDENTIFIED BY " + secret + ";\n" +
     "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO " + acct + ";\n";
   // Managed services cannot use the default lock mode (no BACKUP_ADMIN on
   // managed MySQL; RDS MariaDB's RELOAD excludes FLUSH TABLES WITH READ LOCK),
@@ -9822,15 +9827,24 @@ function grantBlocks(user, password) {
     mariadb: grantBase + grantBackups +
       "GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("RDS for MariaDB"),
   };
-  // Two cases where no line may be runnable. No password: on MariaDB, or
-  // MySQL 5.7 without NO_AUTO_CREATE_USER, a pasted block carries on past a
-  // refused CREATE USER and the GRANT lines create the account with NO
-  // password. A backslash: whether it escapes depends on the server's
+  // Three cases where no line may be runnable, because the block would not
+  // create the account the form is about to save.
+  //
+  // No password: on MariaDB, or MySQL 5.7 whose sql_mode lacks
+  // NO_AUTO_CREATE_USER, a pasted block carries on past a refused CREATE USER
+  // and the GRANT lines create the account themselves, with NO password.
+  // No user: the account the block names would not be the one saved, since a
+  // blank field means "keep the stored user" on an edit.
+  // A backslash: whether it escapes depends on the server's
   // NO_BACKSLASH_ESCAPES, so the password MySQL stores could differ from the
   // one the form saves. Every line is commented out, under the reason.
   let why = "";
-  if (!password) why = "-- Fill in the source password above. The SQL to run appears here with it.";
-  else if (/\\/.test(name + password)) why = "-- The user or password has a backslash, which your server's sql_mode may read as an escape. Choose one without it.";
+  if (!typedUser) why = "-- Fill in the source user above. The SQL to run appears here with it.";
+  else if (!password) {
+    why = hasSavedPassword
+      ? "-- Leave the password above blank to keep the saved one. Type a new one and the SQL to set it appears here."
+      : "-- Fill in the source password above. The SQL to run appears here with it.";
+  } else if (/\\/.test(typedUser + password)) why = "-- The user or password has a backslash, which your server's sql_mode may read as an escape. Choose one without it.";
   if (why) {
     for (const k of Object.keys(blocks)) {
       blocks[k] = why + "\n" + blocks[k].split("\n").map((l) => (l.startsWith("--") ? l : "-- " + l)).join("\n");
@@ -9841,7 +9855,7 @@ function grantBlocks(user, password) {
 
 // refreshGrants redraws the grant blocks from the form's user and password.
 function refreshGrants(form) {
-  const b = grantBlocks(form.elements.source_user.value, form.elements.source_password.value);
+  const b = grantBlocks(form.elements.source_user.value, form.elements.source_password.value, !!savedSourcePasswords.get(form));
   $all("pre[data-grant]", form).forEach((p) => { p.textContent = b[p.dataset.grant]; });
 }
 
@@ -9866,12 +9880,25 @@ function grantDefaultsApply(form) {
   return !f.id.value && !!capsCache.monitor && (f.flavor.value === "mysql" || f.flavor.value === "mariadb");
 }
 
-// untouchedGrantDefaults reports whether the source user and password are
-// still exactly what applyGrantDefaults filled in.
-function untouchedGrantDefaults(form) {
+// savedSourcePasswords marks the forms whose entry already has a password
+// stored, where a blank field means "keep it" rather than "none".
+const savedSourcePasswords = new WeakMap();
+
+// The two halves of "nobody has changed this". They are asked SEPARATELY,
+// because the fields are changed separately: someone who types their own user
+// name and then switches to PostgreSQL must still have the generated password
+// taken back, and clicking that field must still select it.
+function untouchedGrantPassword(form) {
   const gen = generatedPasswords.get(form);
-  const f = form.elements;
-  return !!gen && f.source_user.value === "dbtrail" && f.source_password.value === gen;
+  return !!gen && form.elements.source_password.value === gen;
+}
+function untouchedGrantUser(form) {
+  return !!generatedPasswords.get(form) && form.elements.source_user.value === "dbtrail";
+}
+// untouchedGrantDefaults is the pair: an account entirely filled in by this
+// form, which is what a save may leave behind.
+function untouchedGrantDefaults(form) {
+  return untouchedGrantUser(form) && untouchedGrantPassword(form);
 }
 
 // applyGrantDefaults fills in, or takes back, the account the grant block
@@ -9889,12 +9916,23 @@ function applyGrantDefaults(form) {
       f.source_password.value = pendingSourcePassword;
       if (pendingSourcePassword) generatedPasswords.set(form, pendingSourcePassword);
     }
-  } else if (untouchedGrantDefaults(form)) {
-    f.source_user.value = "";
-    f.source_password.value = "";
-    generatedPasswords.delete(form);
+  } else {
+    if (untouchedGrantUser(form)) f.source_user.value = "";
+    if (untouchedGrantPassword(form)) {
+      f.source_password.value = "";
+      generatedPasswords.delete(form);
+    }
   }
   refreshGrants(form);
+}
+
+// missingSourceHost reports a new monitored server whose source host was not
+// filled in. Without this the server answers about the field it does see: the
+// INDEX host, inside a collapsed section, or a source user the form filled in
+// itself. Both name the wrong box.
+function missingSourceHost(form) {
+  const f = form.elements;
+  return grantDefaultsApply(form) && !f.source_host.value.trim() && !f.host.value.trim();
 }
 
 function buildServerForm() {
@@ -10035,7 +10073,7 @@ function showServerForm(prefill) {
   // own account clicks in and types, and the caret lands after the hidden
   // value: select it first, so typing replaces it instead of appending.
   form.elements.source_password.addEventListener("focus", () => {
-    if (untouchedGrantDefaults(form)) form.elements.source_password.select();
+    if (untouchedGrantPassword(form)) form.elements.source_password.select();
   });
 
   // Where the index connection is the whole form (serve-only process: no
@@ -10068,6 +10106,7 @@ function showServerForm(prefill) {
     if (form.elements.no_archive) form.elements.no_archive.checked = !!prefill.no_archive;
     form.elements.password.placeholder = prefill.has_password ? "(unchanged; leave blank to keep)" : "(none)";
     form.elements.source_password.placeholder = prefill.has_source_password ? "(unchanged; leave blank to keep)" : "";
+    if (prefill.has_source_password) savedSourcePasswords.set(form, true);
     form.elements.s3_secret_access_key.placeholder = prefill.has_s3_secret_access_key ? "(unchanged; leave blank to keep)" : "";
   }
   // Flavor init runs for both add and edit; it's immutable after create (the
@@ -10141,6 +10180,7 @@ async function editServer(id) {
 async function saveServer(form) {
   const id = form.elements.id.value;
   refreshGrants(form);
+  if (missingSourceHost(form)) { formMsg("Fill in Source host, the database you want DBTrail to watch.", true); form.elements.source_host.focus(); return; }
   const body = serverFormBody(form);
   let saved;
   try {
@@ -10184,6 +10224,8 @@ async function saveServer(form) {
     const again = document.getElementById("server-form");
     if (again && body.source_password) {
       again.elements.source_password.value = body.source_password;
+      // This form filled it in too, so clicking it selects it like any other.
+      generatedPasswords.set(again, body.source_password);
       refreshGrants(again);
     }
     showStartupOutcome(res);
@@ -10320,6 +10362,7 @@ function testResultClass(res) {
 async function testServerForm(form) {
   const id = form.elements.id.value;
   refreshGrants(form);
+  if (missingSourceHost(form)) { formMsg("Fill in Source host, the database you want DBTrail to watch.", true); form.elements.source_host.focus(); return; }
   const body = serverFormBody(form);
   const btn = form.querySelector("#server-test");
   // Dropped when the form that asked is gone (Cancel, or another server's
