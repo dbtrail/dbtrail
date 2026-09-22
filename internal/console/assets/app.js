@@ -404,6 +404,7 @@ function clearAuthState() {
   lastEvents = [];
   capsCache = {};
   capsKnown = false;
+  routeArrivedFrom = "";
   applyAuthGate();
 }
 
@@ -929,18 +930,18 @@ function routeFromLocation() {
 // Forward) rewrites the bar before painting. Before, only navigate()
 // translated, so a bookmark of /storage or /sql painted Overview under the
 // old address. A Map, so an address like /constructor is not an old page.
-// A target may depend on the session; "" means it cannot tell yet, and the
-// address is left alone rather than rewritten on a guess.
+// A target may depend on the capability check; "" means it has not answered,
+// and the address is left alone rather than rewritten on a guess, which
+// would stay on that history entry after the check recovers.
 const ROUTE_ALIASES = new Map([
   // Time-travel merged into Restore (#1298).
   ["timetravel", () => "recover"],
-  // Storage split into Retention and This daemon (#1543). Retention gates
-  // on the watch daemon itself, so in serve the visit still ends on Overview.
-  ["storage", () => "retention"],
+  // Storage split into Retention and This daemon (#1543). Retention needs
+  // the watch daemon and rewrites the bar to Overview without it, so this is
+  // a capability answer too.
+  ["storage", () => (capsKnown ? "retention" : "")],
   // The SQL page was removed (#1549); its DuckDB schema card lives on
-  // Backups, or on Connect without the watch daemon (#1581). That is a
-  // capability answer, and a guess written into the bar would stay on that
-  // history entry after the capability check recovers.
+  // Backups, or on Connect without the watch daemon (#1581).
   ["sql", () => (capsKnown ? (capsCache.monitor ? "baselines" : "connect") : "")],
 ]);
 
@@ -954,7 +955,7 @@ function aliasTarget(route) {
 // through ("" when it was not). It lives here, never in the address, which a
 // visitor would bookmark again. It survives a repaint of the same visit (a
 // server switch, a save, a gate re-dispatching) and ends at the next
-// navigation: navigate() and onPopState() clear it.
+// navigation (navigate() and onPopState() clear it) and at sign-out.
 let routeArrivedFrom = "";
 
 function navigate(route, params, push = true) {

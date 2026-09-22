@@ -5213,30 +5213,36 @@ try {
   // onto the old path, so the page boots there instead of navigating in. Each
   // lands on the page that replaced it with the bar rewritten and the sidebar
   // lit, and the page remembers which old address brought the visit. Before,
-  // only in-page navigation translated them, so a bookmark of /storage or
-  // /sql painted Overview under the old address.
+  // the translation for /storage and /sql sat where nothing reached it, so a
+  // bookmark of either painted Overview under the old address. /storage/
+  // (trailing slash) also proves the shell boots from a deeper address: its
+  // files were named relative to it, and the page came up blank.
   const tab = await browser.newPage({ viewport: { width: 1300, height: 1000 } });
   tab.on("pageerror", (e) => jsErrors.push("bookmark tab: " + String(e)));
   const bookmarks = [];
-  for (const [from, to] of [["/storage", "/retention"], ["/sql", monitor ? "/baselines" : "/connect"], ["/timetravel", "/recover"]]) {
+  for (const [from, to, came] of [["/storage", "/retention", "storage"], ["/storage/", "/retention", "storage"],
+    ["/sql", "/baselines", "sql"], ["/timetravel", "/recover", "timetravel"], ["/events/", "/events/", ""]]) {
     await tab.goto(`${URL}${from}?token=${encodeURIComponent(TOKEN)}`, { waitUntil: "networkidle" });
     try {
-      await tab.waitForFunction((to) => location.pathname === to
-        && (document.querySelector(".nav-item.active") || { dataset: {} }).dataset.route === to.slice(1), to, { timeout: 10000 });
+      await tab.waitForFunction(([to, lit]) => location.pathname === to
+        && (document.querySelector(".nav-item.active") || { dataset: {} }).dataset.route === lit, [to, to.split("/")[1]]);
     } catch (_) { /* reported below with what the tab did show */ }
-    bookmarks.push(await tab.evaluate(([from, to]) => ({ from, to, path: location.pathname,
-      lit: (document.querySelector(".nav-item.active") || { dataset: {} }).dataset.route || "", came: routeArrivedFrom }), [from, to]));
+    bookmarks.push(await tab.evaluate(([from, to, came]) => ({ from, to, came, path: location.pathname,
+      lit: (document.querySelector(".nav-item.active") || { dataset: {} }).dataset.route || "",
+      gotCame: typeof routeArrivedFrom === "undefined" ? "(no script)" : routeArrivedFrom }), [from, to, came]));
   }
-  bookmarks.every((b) => b.path === b.to && b.lit === b.to.slice(1) && b.came === b.from.slice(1))
-    ? ok("routes: a bookmark of each old address lands on its new page, sidebar lit, origin kept")
-    : bad("routes: a bookmark of each old address lands on its new page, sidebar lit, origin kept", JSON.stringify(bookmarks));
+  bookmarks.every((b) => b.path === b.to && b.lit === b.to.split("/")[1] && b.gotCame === b.came)
+    ? ok("routes: a bookmark of each old or deeper address lands on its page, sidebar lit, origin kept")
+    : bad("routes: a bookmark of each old or deeper address lands on its page, sidebar lit, origin kept", JSON.stringify(bookmarks));
   // Back is a new navigation: stepping back onto the rewritten entry must not
   // still claim the visit came from the old address. This is the half the
   // node tests cannot see, because it depends on the handler the page
   // registers for popstate at boot.
+  await tab.goto(`${URL}/timetravel?token=${encodeURIComponent(TOKEN)}`, { waitUntil: "networkidle" });
+  await tab.waitForFunction(() => location.pathname === "/recover" && routeArrivedFrom === "timetravel").catch(() => {});
   await tab.evaluate(() => history.pushState({}, "", "/events"));
   await tab.evaluate(() => history.back());
-  await tab.waitForFunction(() => location.pathname === "/recover", null, { timeout: 10000 }).catch(() => {});
+  await tab.waitForFunction(() => location.pathname === "/recover").catch(() => {});
   const afterBack = await tab.evaluate(() => ({ path: location.pathname, came: routeArrivedFrom }));
   (afterBack.path === "/recover" && afterBack.came === "")
     ? ok("routes: Back onto a rewritten entry is a fresh visit, not an old address")

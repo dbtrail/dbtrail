@@ -112,9 +112,9 @@ var (
 // TestOldAddressesLandOnTheirPage: an address the console no longer has a page
 // for (a bookmark, a link in an old email or doc, a Back entry) lands on the
 // page that replaced it, with the bar rewritten, and whatever else the address
-// carried (query, anchor) travels along. Before, only clicks and the palette
-// went through the translation; a bookmark of /storage or /sql painted
-// Overview under the old address.
+// carried (query, anchor) travels along. Before, the translation for /storage
+// and /sql sat in navigate(), which nothing called with those names, so a
+// bookmark of either painted Overview under the old address.
 func TestOldAddressesLandOnTheirPage(t *testing.T) {
 	type want struct {
 		url   string
@@ -138,11 +138,14 @@ func TestOldAddressesLandOnTheirPage(t *testing.T) {
 			want{"/baselines", []string{"replace /baselines"}, []string{"renderBaselines"}, "baselines", "sql"}},
 		{"sql, serve", routeScenario{Start: "/sql", Steps: boot, Caps: serveCaps, Known: true},
 			want{"/connect", []string{"replace /connect"}, []string{"renderConnect"}, "connect", "sql"}},
-		// Where /sql goes depends on the capability answer. With no answer
-		// (the check failed), it does not guess: a guess written into the bar
-		// would stick to that history entry after the check recovers.
+		// Where /sql and /storage go depends on the capability answer. With
+		// no answer (the check failed), they do not guess: a guess written
+		// into the bar would stick to that history entry after the check
+		// recovers.
 		{"sql, capabilities unknown", routeScenario{Start: "/sql", Steps: boot, Caps: serveCaps, Known: false},
 			want{"/sql", nil, []string{"renderOverview"}, "", ""}},
+		{"storage, capabilities unknown", routeScenario{Start: "/storage", Steps: boot, Caps: serveCaps, Known: false, Real: []string{"renderRetention"}},
+			want{"/storage", nil, []string{"renderOverview"}, "", ""}},
 		{"timetravel", routeScenario{Start: "/timetravel", Steps: boot, Caps: watchCaps, Known: true},
 			want{"/recover", []string{"replace /recover"}, []string{"renderRecover"}, "recover", "timetravel"}},
 		{"query and anchor travel", routeScenario{Start: "/timetravel?a=1&b=2#here", Steps: boot, Caps: watchCaps, Known: true},
@@ -194,6 +197,10 @@ func TestOldAddressesLandOnTheirPage(t *testing.T) {
 			want{"/events", []string{"replace /retention", "push /events"}, []string{"renderRetention", "renderEvents"}, "retention", ""}},
 		{"arrival ends at Back", routeScenario{Start: "/storage", Steps: []string{"renderRoute()", "__setURL('/events')", "onPopState()"}, Caps: watchCaps, Known: true},
 			want{"/events", []string{"replace /retention"}, []string{"renderRetention", "renderEvents"}, "retention", ""}},
+		// Signing out ends it too: the next sign-in in the same tab, maybe as
+		// someone else, did not arrive from an old address.
+		{"arrival ends at sign-out", routeScenario{Start: "/storage", Steps: []string{"renderRoute()", "clearAuthState()"}, Caps: watchCaps, Known: true},
+			want{"/retention", []string{"replace /retention"}, []string{"renderRetention"}, "retention", ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := runRouteScenarios(t, map[string]routeScenario{"s": tc.sc})["s"]
