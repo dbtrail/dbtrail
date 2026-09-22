@@ -65,8 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its real name by a DROP or RENAME; before, it was recorded as `a` (ALTER,
   CREATE and TRUNCATE still record it that way).
 - **A bookmark of an old console address opens the page that replaced it.**
-  `/storage` (now Retention) and `/sql` (now the DuckDB card on Backups, or
-  Connect without the watch daemon) opened from a bookmark, a link or Back
+  `/storage` (now Retention) and `/sql` (now Backups, where the DuckDB card
+  lives when the server offers views, or Connect without the watch daemon)
+  opened from a bookmark, a link or Back
   showed Overview under the old address: the console knew where they had
   moved, but nothing that opens a page from its address asked. The address
   bar is now rewritten to the new page. Retention needs the watch daemon, so

@@ -137,14 +137,14 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 		rep.Steps = append(rep.Steps, step)
 	}
 	if b := in.Backup; b != nil {
-		step := FirstRunStep{Name: "Take the first backup", State: firstRunWaiting, Fix: "Create one on the Backups page."}
+		step := FirstRunStep{Name: "Take the first backup", State: firstRunWaiting, Fix: "Create one on the " + PageBackups + " page."}
 		switch {
 		case b.Published || b.State == "succeeded":
 			step.State, step.Fix = firstRunDone, ""
 		case b.State == "running":
 			step.State, step.Fix = firstRunRunning, ""
 		case b.State == "failed":
-			step.State, step.Detail, step.Fix = firstRunFailed, b.LastError, "Try again on the Backups page."
+			step.State, step.Detail, step.Fix = firstRunFailed, b.LastError, "Try again on the "+PageBackups+" page."
 		}
 		rep.Steps = append(rep.Steps, step)
 	} else if step, ok := blockedBackupStep(in); ok {
@@ -165,18 +165,18 @@ func blockedBackupStep(in firstRunInput) (FirstRunStep, bool) {
 	switch {
 	case in.BackupOff:
 		step.Detail = "Creating full backups from the console is turned off. Restoring a whole table to a past moment needs a full backup."
-		step.Fix = "On the Backup settings page, under Set when DBTrail starts, the Create-backup button row names the setting to change. Restart DBTrail after changing it. A full backup reads every table this server captures"
+		step.Fix = "On the " + PageBackupSettings + " page, under Set when DBTrail starts, the Create-backup button row names the setting to change. Restart DBTrail after changing it. A full backup reads every table this server captures"
 		if in.Postgres {
 			step.Fix += "."
 		} else {
 			step.Fix += ", and mydumper must be installed where DBTrail runs."
 		}
 		if in.BackupNoLocation {
-			step.Fix += " This server also needs its own backup location, set on the Backup settings page."
+			step.Fix += " This server also needs its own backup location, set on the " + PageBackupSettings + " page."
 		}
 	case in.BackupNoLocation:
 		step.Detail = "This server has no backup location of its own, so no backup can be written for it."
-		step.Fix = "Set a Backup dir or Backup S3 for this server on the Backup settings page, then create one on the Backups page."
+		step.Fix = "Set a Backup dir or Backup S3 for this server on the " + PageBackupSettings + " page, then create one on the " + PageBackups + " page."
 	default:
 		return FirstRunStep{}, false
 	}

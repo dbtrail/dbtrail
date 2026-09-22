@@ -397,7 +397,7 @@ func warnSQLPanelRetired() {
 	// operators to a page without the card.
 	slog.Warn("BINTRAIL_CONSOLE_SQL_PANEL is set but no longer does anything: " +
 		"the SQL page and POST /api/sql were removed. Download a DuckDB schema " +
-		"from the Backups page (named Connect on a read-only `serve`) and query " +
+		"from the " + console.PageBackups + " page (named Connect on a read-only `serve`) and query " +
 		"the same Parquet in your own DuckDB. " +
 		"Remove the variable; a future release stops reading it")
 }
