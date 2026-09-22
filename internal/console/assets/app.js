@@ -406,6 +406,11 @@ function clearAuthState() {
   capsCache = {};
   capsKnown = false;
   routeArrivedFrom = "";
+  vfyEpoch++;
+  vfyLive.clear();
+  vfyFollowing.clear();
+  vfyAnnounce.clear();
+  vfyView = null;
   applyAuthGate();
 }
 
@@ -892,8 +897,10 @@ function pageHead(title, subNode) {
 function viewLoading() {
   const v = VIEW();
   clear(v);
-  v.append(el("div", { class: "view-loading", text: "Loading…" }));
+  const loading = el("div", { class: "view-loading", text: "Loading…" });
+  v.append(loading);
   v.classList.remove("view-enter");
+  return loading;
 }
 function viewEnter() { const v = VIEW(); v.classList.remove("view-enter"); void v.offsetWidth; v.classList.add("view-enter"); }
 
@@ -4097,7 +4104,7 @@ function buildDaemon(serversRes, storage, telemetry) {
 async function renderBaselines() {
   if (!capsCache.monitor) { history.replaceState({}, "", "/overview"); renderRoute(); return; }
   const gen = serverGen, vgen = viewGen;
-  viewLoading();
+  backupsHead = viewLoading();
   // Independent degradation, as on Storage: a panel renders its own failure
   // note rather than one error blanking the page.
   const asErr = (err) => ({ error: (err && err.message) || String(err) });
@@ -4123,7 +4130,7 @@ async function renderBaselines() {
     // button. buildStorage keeps serversErr for the same reason.
     const serversErr = serversRes && serversRes.error;
     const v = VIEW(); clear(v);
-    v.append(pageHead("Backups", el("p", { class: "page-sub" },
+    v.append(backupsHead = pageHead("Backups", el("p", { class: "page-sub" },
       "Full copies of your tables, taken at a moment in time. Time-travel and full restores are built from them. ",
       el("b", { text: "Nothing is ever executed" }), " against your source by viewing this page.")));
     if (serversErr) v.append(el("div", { class: "error-box", text: "Could not load servers: " + serversErr }));
@@ -4180,6 +4187,9 @@ async function renderBaselines() {
     viewEnter();
   } catch (err) {
     const v = VIEW(); clear(v); v.append(pageHead("Backups", null)); renderError(v, err);
+    // renderError clears the view first, heading included: what it leaves is
+    // the page now, and a job that ends must still repaint it.
+    backupsHead = v.lastElementChild;
   }
 }
 
@@ -5943,6 +5953,18 @@ const BACKUPS_PAGE_SIZE = 5;
 // two.
 let backupsPage = { server: null, index: 0 };
 
+// backupsHead is the Backups page's element from its latest paint: the
+// loading notice while it fetches, then its heading. A job that finishes, a
+// schedule saved or a restore started repaints the page only while that
+// element is still on screen. The question is asked of the page, not of the
+// address: ten checks compared the address with "/baselines", which would
+// all answer "no" in silence once the page moves to another address, and a
+// constant holding the new one would answer "yes" for every section of a
+// page that holds several. The loading notice counts, so a job that ends
+// while the page is still fetching repaints it with the newer state.
+let backupsHead = null;
+function backupsOnScreen() { return !!(backupsHead && backupsHead.isConnected); }
+
 function backupsPageIndex(serverId, pages) {
   if (backupsPage.server !== serverId) backupsPage = { server: serverId, index: 0 };
   // Clamped on READ rather than on write: the list shrinks under you when
@@ -6122,13 +6144,13 @@ async function createBaseline(id, btn) {
     return;
   }
   toast("Backup started: copying your data and uploading it…");
-  if (location.pathname === "/baselines") renderBaselines();
+  if (backupsOnScreen()) renderBaselines();
   let done = await pollBaseline(id, false);
   if (done && done.state === "succeeded" && done.uploading) {
     // Published locally; the copy to the destination is still running and
     // no longer holds the schedule (#1725). Say so, and wait for it.
     toast("Backup saved locally: " + (done.tables || 0) + " table(s). Still copying it to the backup destination…");
-    if (location.pathname === "/baselines") renderBaselines();
+    if (backupsOnScreen()) renderBaselines();
     done = await pollBaseline(id, true);
   }
   restore();
@@ -6144,11 +6166,10 @@ async function createBaseline(id, btn) {
   } else {
     toast("The backup is still running. Check back shortly.");
   }
-  // Only /baselines needs the refresh: the button lives in
+  // Only the Backups page needs the refresh: the button lives in
   // baselineContextStrip (#1415 moved it out of baselinesPanel), and both the
-  // strip and the snapshot list render only on this page — a /storage arm
-  // here would be unreachable.
-  if (location.pathname === "/baselines") renderBaselines();
+  // strip and the snapshot list render only on this page.
+  if (backupsOnScreen()) renderBaselines();
 }
 
 // pollBaseline polls the per-server baseline status until it leaves "running"
@@ -6524,7 +6545,7 @@ async function watchBackupRuns(id, vgen, kinds) {
   let refreshBusy = kinds.includes("refresh"); // it WAS running at spawn
   for (let i = 0; i < 900; i++) {
     await sleep(2000);
-    if (wgen !== backupWatchGen || vgen !== viewGen || location.pathname !== "/baselines") return;
+    if (wgen !== backupWatchGen || vgen !== viewGen || !backupsOnScreen()) return;
     let busy = false;
     let pollFailed = false;
     // Only a transport failure or a server fault says "unknown"; a 4xx is a
@@ -6565,13 +6586,13 @@ async function watchBackupRuns(id, vgen, kinds) {
     // would clear the RUNNING region while the fold is still going.
     if (pollFailed && !busy) continue;
     if (!busy) {
-      if (wgen === backupWatchGen && vgen === viewGen && location.pathname === "/baselines") renderBaselines();
+      if (wgen === backupWatchGen && vgen === viewGen && backupsOnScreen()) renderBaselines();
       return;
     }
   }
   // Cap expiry: re-render once so a stale RUNNING region does not outlive
   // the watcher silently.
-  if (wgen === backupWatchGen && vgen === viewGen && location.pathname === "/baselines") renderBaselines();
+  if (wgen === backupWatchGen && vgen === viewGen && backupsOnScreen()) renderBaselines();
 }
 
 // backupFoldError rewrites a fold refusal for this page: the engine's
@@ -6991,7 +7012,7 @@ async function saveBackupSchedule(id, sched, btn, msgEl) {
   const next = saved && saved.schedule;
   toast(next && next.next_method_error ? "Backup schedule saved, but the next run cannot start yet. See the reason on the page."
     : "Backup schedule saved. It runs at the next scheduled time.");
-  if (location.pathname === "/baselines") renderBaselines();
+  if (backupsOnScreen()) renderBaselines();
 }
 
 async function removeBackupSchedule(id, btn, msgEl) {
@@ -7006,7 +7027,7 @@ async function removeBackupSchedule(id, btn, msgEl) {
     return;
   }
   toast("Backup schedule removed.");
-  if (location.pathname === "/baselines") renderBaselines();
+  if (backupsOnScreen()) renderBaselines();
 }
 
 // backupRestoreCard offers the point-in-time restore: pick a past moment, get
@@ -7091,7 +7112,7 @@ async function startBackupRestore(id, at, btn, msgEl) {
   }
   btn.disabled = false;
   toast("Restore started: building a backup as of " + at + " UTC…");
-  if (location.pathname === "/baselines") renderBaselines();
+  if (backupsOnScreen()) renderBaselines();
 }
 
 // ── Take a copy with you ───────────────────────────────────────────────────
@@ -7397,7 +7418,7 @@ async function startSQLExport(id, at, btn, msgEl) {
   }
   btn.disabled = false;
   toast("Build started: a .sql backup as of " + at + " UTC\u2026");
-  if (location.pathname === "/baselines") renderBaselines();
+  if (backupsOnScreen()) renderBaselines();
 }
 
 // downloadSQLExport mirrors downloadBackup: fetch + blob because the API
@@ -7491,12 +7512,13 @@ function verifyRegions(servers, opts) {
   // server with no baseline configured.
   const help = el("p", { class: "form-hint vfy-modehelp" });
   const updateMode = () => {
-    btn.disabled = !configured && modeSel.value !== "recover-inputs";
+    const live = vfyLive.get(cur.id);
+    btn.disabled = (!!live && live.state === "running") || (!configured && modeSel.value !== "recover-inputs");
     help.textContent = VFY_MODE_HELP[modeSel.value] || "";
   };
   modeSel.onchange = updateMode;
   updateMode();
-  btn.onclick = () => createVerify(cur.id, modeSel.value, btn, results);
+  btn.onclick = () => createVerify(cur.id, modeSel.value);
   control.append(el("div", { class: "vfy-actions" }, modeSel, btn));
   control.append(help);
   if (!configured) {
@@ -7508,7 +7530,9 @@ function verifyRegions(servers, opts) {
   const current = el("section", { class: "tcard vfy-region vfy-current" });
   current.append(el("div", { class: "vfy-region-head" },
     el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Current run" }))));
-  renderVerifyResults(results, null, cur.id);
+  vfyView = { id: cur.id, results, btn, updateMode };
+  vfyDraw(vfyView);
+  vfyProbe(cur.id);
   current.append(results);
   // The per-row nouns are precise AND internal (#1419 §5) — the glossary is
   // the affordance that keeps them from requiring a source dive.
@@ -7541,35 +7565,181 @@ const VFY_MODE_HELP = {
   "recover-inputs": "Reads the index's own record of each change and checks that every row's history holds together from one change to the next. This is the data an undo script is built from. Needs no snapshot and never touches your database.",
 };
 
-// createVerify triggers an in-process verify run on the daemon for the
-// selected server, then polls until it finishes, updating resultsEl live
-// after every poll tick so results appear "as they land" (#677) — the engine
-// itself has no progress callback; the console's own poll loop is the only
-// source of incremental updates.
-async function createVerify(id, mode, btn, resultsEl) {
-  if (btn) { btn.disabled = true; btn.textContent = "Running…"; }
-  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = "Run verification"; } };
-  let status;
+// A verification run's state lives here, per server, and never in the box
+// that was on screen when it started. The page repaints (Back to it, a server
+// switch, and once the backup pages merge, any job that finishes); a run that
+// wrote into the box it saved at the start kept writing off screen while the
+// new box said "No run yet" and offered another run, and the button it
+// re-enabled at the end was the detached one. A run the schedule started
+// (--verify-interval) had no box at all.
+//   vfyLive      the newest status this session read for each server: a run
+//                going, or the one that just ended.
+//   vfyFollowing the servers with a poll loop, so a click and a repaint never
+//                start two (two loops would draw every tick twice and say
+//                the ending twice).
+//   vfyView      the box and button on screen now, and whose they are.
+//   vfyAnnounce  the servers whose run this tab started: only those end with
+//                a message, as before; a run the schedule started is shown
+//                on the page but does not pop a message on whatever page
+//                the operator is on.
+// Sign-out clears them (clearAuthState): a status can list tables the next
+// session's profile withholds, and the server refuses that session the read.
+// It also bumps vfyEpoch, and every answer is checked against the epoch its
+// request was sent in: a status that was in flight when one session signed
+// out lands after the clear, and without the check it would write that
+// session's run back for the next one to see. vfyFollowing maps a server to
+// its loop's token, so an old session's loop ending cannot unmark the new
+// session's loop for the same server.
+const vfyLive = new Map();
+const vfyFollowing = new Map();
+const vfyAnnounce = new Set();
+let vfyView = null;
+let vfyEpoch = 0;
+
+// vfyDraw draws a server's state into a view: the box, and the button busy
+// while a run goes or back to what the chosen mode allows.
+function vfyDraw(view, opts) {
+  const st = vfyLive.get(view.id) || null;
+  renderVerifyResults(view.results, st, view.id, opts);
+  if (st && st.state === "running") {
+    view.btn.disabled = true;
+    view.btn.textContent = "Running…";
+  } else {
+    view.btn.textContent = "Run verification";
+    view.updateMode();
+  }
+}
+
+// vfyShow draws a server's state into the view on screen, if that view is
+// the server's and still attached; a run on another server draws nothing.
+function vfyShow(id, opts) {
+  const view = vfyView;
+  if (view && view.id === id && view.results.isConnected) vfyDraw(view, opts);
+}
+
+// vfyProbe asks, once per paint, what the server holds for this server's
+// verification, and decides whether that is newer than what the page shows:
+//   - a run going (one the schedule started, or one this tab started before
+//     the page repainted): show it and follow it; a loop already following
+//     it absorbs the second follow;
+//   - a finished run other than the one shown (a scheduled run, another tab):
+//     show it, so an older green run never sits over a newer mismatch;
+//   - nothing held (the daemon restarted): a run the page last saw going is
+//     over; a run that ended stays;
+//   - a page that has seen nothing keeps "No run yet".
+// An answer that lands after a newer one (a tick of the poll loop, or its
+// end) is dropped: without that, a slow probe could bring RUNNING back over a
+// finished run and start a second loop. A 403 means the server will not show
+// this session the status, so the page drops what it holds too.
+async function vfyProbe(id) {
+  const before = vfyLive.get(id), epoch = vfyEpoch;
+  let st;
   try {
-    status = (await api("/api/servers/" + encodeURIComponent(id) + "/verify", { method: "POST", body: { mode } })).verify;
+    st = (await api("/api/servers/" + encodeURIComponent(id) + "/verify")).verify;
   } catch (err) {
-    toastError("Verify failed: " + ((err && err.message) || err));
-    restore();
+    if (vfyEpoch !== epoch) return;
+    if (err && err.status === 403) {
+      if (vfyLive.get(id) === before && before) { vfyLive.delete(id); vfyShow(id); }
+      return;
+    }
+    // 404: the server is gone. 409: the command-line server, which monitor
+    // verbs do not apply to. Neither is a failure to report.
+    if (!(err && (err.status === 404 || err.status === 409))) console.warn("could not read the verification status", err);
     return;
   }
-  renderVerifyResults(resultsEl, status, id);
-  toast("Verification started…");
-  const done = await pollVerify(id, (st) => renderVerifyResults(resultsEl, st, id));
-  restore();
+  if (vfyEpoch !== epoch || !st || vfyLive.get(id) !== before) return;
+  if (st.state === "running") {
+    vfyLive.set(id, st);
+    vfyShow(id);
+    followVerify(id);
+    return;
+  }
+  if (st.state === "idle") {
+    if (before && before.state === "running") { vfyLive.delete(id); vfyShow(id); }
+    return;
+  }
+  if (!before) return;
+  if (before.state !== "running" && before.since === st.since && before.finished_at === st.finished_at) return;
+  vfyLive.set(id, st);
+  vfyShow(id);
+}
+
+// followVerify polls a server's run until it ends and is the one owner of
+// what that run puts on screen: each tick draws into the view on screen at
+// that moment, and the ending (highlight, history, message) happens once.
+async function followVerify(id) {
+  if (vfyFollowing.has(id)) return;
+  const epoch = vfyEpoch, token = {};
+  const alive = () => vfyEpoch === epoch;
+  vfyFollowing.set(id, token);
+  let done;
+  try {
+    done = await pollVerify(id, (st) => { if (alive()) { vfyLive.set(id, st); vfyShow(id); } }, alive);
+  } finally {
+    if (vfyFollowing.get(id) === token) vfyFollowing.delete(id);
+  }
+  // Signed out meanwhile: this run belongs to the previous session.
+  if (!alive()) return;
+  // The poll gives up after ~20 minutes. While the page shows this server,
+  // follow on, or the box would freeze on RUNNING with the button disabled
+  // after the run ends; off screen, stop, and the next paint's probe picks
+  // the run up again.
+  if (!done && vfyView && vfyView.id === id && vfyView.results.isConnected) {
+    followVerify(id);
+    return;
+  }
   // justFinished: the running→done transition gets a one-shot highlight so
   // completion is perceptible off-chip (#1420); the toast below is the other
   // half for an operator who looked away.
   const signal = vfyFinishSignal(done);
-  if (done) renderVerifyResults(resultsEl, done, id, { justFinished: signal.flash });
-  // The finished run is now in the persisted history too — refresh the list.
+  if (done) vfyLive.set(id, done);
+  vfyShow(id, { justFinished: !!done && signal.flash });
+  // The finished run is now in the persisted history too: refresh the list
+  // on screen, if it is this server's.
   const histBox = document.querySelector(".vfy-history");
-  if (histBox) loadVerifyHistory(id, histBox);
-  (signal.sticky ? toastError : toast)(signal.message);
+  if (histBox && vfyView && vfyView.id === id && histBox.isConnected) loadVerifyHistory(id, histBox);
+  if (vfyAnnounce.delete(id)) (signal.sticky ? toastError : toast)(signal.message);
+}
+
+// createVerify starts an in-process verify run on the daemon for a server and
+// hands it to followVerify, which draws results "as they land" (#677): the
+// engine has no progress callback, so the console's own poll loop is the only
+// source of incremental updates.
+async function createVerify(id, mode) {
+  const view = vfyView, epoch = vfyEpoch;
+  if (view && view.id === id) { view.btn.disabled = true; view.btn.textContent = "Running…"; }
+  let status;
+  try {
+    status = (await api("/api/servers/" + encodeURIComponent(id) + "/verify", { method: "POST", body: { mode } })).verify;
+  } catch (err) {
+    if (vfyEpoch !== epoch) return;
+    // A 409 is a run already going (the schedule started one, or a second
+    // click) OR a server this page cannot run checks on (the command-line
+    // server refuses monitor verbs with its own reason). Ask which before
+    // saying anything.
+    if (err && err.status === 409) {
+      let st = null;
+      try { st = (await api("/api/servers/" + encodeURIComponent(id) + "/verify")).verify; } catch (_) { st = null; }
+      if (vfyEpoch !== epoch) return;
+      if (st && st.state === "running") {
+        toast("A verification is already running on this server. Showing it.");
+        vfyAnnounce.add(id);
+        vfyLive.set(id, st);
+        vfyShow(id);
+        await followVerify(id);
+        return;
+      }
+    }
+    toastError("Verify failed: " + ((err && err.message) || err));
+    vfyShow(id);
+    return;
+  }
+  if (vfyEpoch !== epoch) return;
+  vfyLive.set(id, status);
+  vfyShow(id);
+  toast("Verification started…");
+  vfyAnnounce.add(id);
+  await followVerify(id);
 }
 
 // vfyFinishSignal is how a run's end reaches an operator who looked away, by
@@ -7595,10 +7765,11 @@ function vfyFinishSignal(done) {
 // a ~20-minute cap), invoking onTick after every poll so the caller can
 // re-render mid-run progress. Returns the terminal status, or null if it
 // never settled within the cap. Transient poll errors are ignored and retried.
-async function pollVerify(id, onTick) {
+async function pollVerify(id, onTick, alive) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   for (let i = 0; i < 600; i++) {
     await sleep(2000);
+    if (alive && !alive()) return null;
     let st;
     try {
       st = (await api("/api/servers/" + encodeURIComponent(id) + "/verify")).verify;
