@@ -11,7 +11,7 @@ MCP_LDFLAGS=-ldflags "-X main.mcpVersion=$(VERSION)"
 # bintrail-console and bintrail-pg both reuse BINTRAIL_LDFLAGS: they inject the
 # same main.Version/CommitSHA/BuildDate vars as the core binary.
 
-.PHONY: all build build-mcp build-console build-pg clean test console-e2e lint install build-all tidy deps notices check-notices check-fonts mcpb validate-mcpb
+.PHONY: all build build-mcp build-console build-pg clean test console-e2e console-first-run-walk lint install build-all tidy deps notices check-notices check-fonts mcpb validate-mcpb
 
 all: build build-mcp build-console build-pg
 
@@ -50,6 +50,14 @@ test:
 # uses system Chrome instead of the playwright-managed chromium.
 console-e2e:
 	bash test/console-e2e/run.sh
+
+# The first-run walk (#1800): a person's first hour with DBTrail, measured in
+# a real browser into a scoreboard, compared with test/console-e2e/
+# first_run_baseline.json. Needs Docker (bintrail-test-mysql), Node and
+# mydumper. FIRST_RUN_WALK_MODE=target compares with the issue's targets
+# instead; write-baseline records what it measured.
+console-first-run-walk:
+	bash test/console-e2e/first-run-walk.sh
 
 lint:
 	golangci-lint run ./...
