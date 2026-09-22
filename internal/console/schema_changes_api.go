@@ -42,10 +42,11 @@ import (
 // post-fetch filter over the page could not promise.
 //
 // What the scope does NOT do, and what covers the rest: the WHERE scopes the
-// row's schema_name/table_name, and the index attributes each statement to the
-// FIRST table it names (one row per statement, ddl_query stored verbatim), so
-// `DROP TABLE users, secrets` is one row under users and an ALTER can name a
-// denied table in a REFERENCES clause. That is why, under an active access
+// row's schema_name/table_name, and every row carries its statement verbatim.
+// A DROP or RENAME has a row for each table it names, each scoped by its own
+// rules, but the text of `DROP TABLE users, secrets` on the users row still
+// names secrets, and an ALTER can name a denied table in a REFERENCES clause.
+// That is why, under an active access
 // profile (opts.ProfileActive: a named profile, direct session restrictions,
 // or the startup --profile), the statement text is WITHHELD — the same posture
 // /api/events takes for query_text/query_hash (#699/#838): DDL text can carry
@@ -108,7 +109,8 @@ type schemaChangesResponse struct {
 // Scoping notices, worded for the person reading the list.
 const (
 	schemaChangesScopeWarning = "Your access policy limits which tables you can read, so DDL recorded for other " +
-		"tables is not listed here. Each statement is listed under the first table it names."
+		"tables is not listed here. A DROP or RENAME that names several tables is listed under each of them " +
+		"(one recorded by an older version, under its first table only)."
 	schemaChangesWithheldWarning = "Statement text is withheld while an access profile is active, because DDL text " +
 		"can carry values and name other tables. Time, table, type and binlog position are shown."
 )

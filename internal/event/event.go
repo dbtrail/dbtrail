@@ -113,6 +113,12 @@ type Event struct {
 	SchemaVersion uint32         // actual snapshot_id from schema_snapshots; updated by SwapResolver on DDL
 	DDLQuery      string         // original DDL statement (EventDDL only)
 	DDLType       DDLKind        // ALTER TABLE, CREATE TABLE, CREATE OR REPLACE TABLE, DROP TABLE, RENAME TABLE, TRUNCATE TABLE (EventDDL only)
+	// DDLTables is every table a DROP or RENAME names, in the statement's
+	// order and with repeats (a rename's pairs stay readable): both sides of
+	// every rename pair, since the old name stops holding its rows and the new
+	// one starts holding another table's. The first entry is Schema/Table.
+	// Empty for the other kinds, which name one table (EventDDL only).
+	DDLTables []DDLTable
 	// Relation carries a PostgreSQL relation's shape (EventRelation only); the
 	// consumer persists it as a schema snapshot and stamps subsequent rows'
 	// SchemaVersion. nil for every other event type; never written to binlog_events.
@@ -434,6 +440,11 @@ func SanitizeQueryText(s string) string {
 		cut--
 	}
 	return s[:cut] + QueryTextTruncationMarker
+}
+
+// DDLTable is one table a DDL statement names.
+type DDLTable struct {
+	Schema, Table string
 }
 
 // DDLKind identifies the type of DDL statement detected in a binlog QUERY_EVENT.
