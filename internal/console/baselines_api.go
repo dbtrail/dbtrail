@@ -113,6 +113,22 @@ func (s *Server) selectedServerID(r *http.Request) string {
 // path-derived; only local sources additionally read one Parquet footer per
 // snapshot for its binlog coordinates (best-effort — a missing/corrupt footer
 // just omits them).
+// fillBaselineLocation sets where a server's snapshots live, the one
+// resolution both the listing and its location_only answer use: the bundle's
+// source (the server's own directory, else its own bucket, else the daemon's,
+// directory winning over bucket).
+func fillBaselineLocation(resp *baselinesResponse, b *bundle) {
+	if b.baselineSrc == "" {
+		return
+	}
+	resp.Configured = true
+	resp.Source = b.baselineSrc
+	resp.Kind = "dir"
+	if strings.HasPrefix(b.baselineSrc, "s3://") {
+		resp.Kind = "s3"
+	}
+}
+
 func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	b := s.resolveOr(w, r)
 	if b == nil {
@@ -128,6 +144,16 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := baselinesResponse{Reconstruct: b.baselineConfigured, Snapshots: []baselineSnapshotDTO{}}
+	// location_only answers where this server's snapshots live and stops:
+	// no schedule probe and no listing, both of which reach the storage (on
+	// S3, paid listings, #1679). Connect AI asks it on every open to print the
+	// Iceberg export command. Same permission and same profile refusal as the
+	// listing, since the location sits beside the index address there.
+	if r.URL.Query().Get("location_only") == "1" {
+		fillBaselineLocation(&resp, b)
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
 	if s.baselineRefresh != nil {
 		if st := s.baselineRefresh.RefreshStatus(s.selectedServerID(r)); st.State != "idle" {
 			resp.Refresh = &st
@@ -146,12 +172,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	resp.Configured = true
-	resp.Source = b.baselineSrc
-	resp.Kind = "dir"
-	if strings.HasPrefix(b.baselineSrc, "s3://") {
-		resp.Kind = "s3"
-	}
+	fillBaselineLocation(&resp, b)
 
 	// Every configured location, not just the primary (#1542). A server with a
 	// local directory AND an S3 destination keeps the bucket as the bundle's

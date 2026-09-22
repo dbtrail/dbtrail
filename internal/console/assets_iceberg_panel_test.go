@@ -100,10 +100,14 @@ func TestIcebergExportPanel(t *testing.T) {
 		t.Error("the panel does not offer the compose route for a DBTrail running in Docker")
 	}
 
-	// And it is actually on the page: a panel nothing calls is invisible, and
-	// every check above would still pass.
-	if !strings.Contains(functionBody(t, js, "async function renderBaselines("), "icebergExportPanel(") {
-		t.Error("renderBaselines never calls icebergExportPanel, so the panel never renders")
+	// And it is actually on a page: a panel nothing calls is invisible, and
+	// every check above would still pass. It lives on Connect AI since #1573;
+	// TestIcebergPanelLivesOnConnect drives that page for real.
+	if !strings.Contains(functionBody(t, js, "function buildConnect("), "icebergExportPanel(") {
+		t.Error("buildConnect never calls icebergExportPanel, so the panel never renders")
+	}
+	if strings.Contains(functionBody(t, js, "async function renderBaselines("), "icebergExportPanel(") {
+		t.Error("renderBaselines still mounts the Iceberg panel, which moved to Connect AI (#1573)")
 	}
 }
 

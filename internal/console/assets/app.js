@@ -4180,10 +4180,8 @@ async function renderBaselines() {
     // first visit the list is the page's answer, and this card is the
     // follow-through for a reader who just took a copy.
     if (capsCache.views) v.append(duckdbPanel());
-    // Below the list: what these backups can become, for a reader who has
-    // one and wants it in front of a reporting engine (#1466).
-    const iceberg = icebergExportPanel(cur, baselines);
-    if (iceberg) v.append(iceberg);
+    // The Iceberg export panel (#1466) moved to Connect AI (#1573), where
+    // "take this data somewhere else" lives.
     viewEnter();
   } catch (err) {
     const v = VIEW(); clear(v); v.append(pageHead("Backups", null)); renderError(v, err);
@@ -5819,7 +5817,9 @@ function icebergKeys(cmd) {
 function icebergExportPanel(cur, baselines) {
   const cmd = icebergExportCommand(cur, baselines);
   if (!cmd) return null;
-  const panel = el("section", { class: "ov-panel cn-sql", style: "margin-top:18px" });
+  // cn-sql for the look it shares with the SQL client panel; cn-ice so a
+  // reader can tell the two apart (the Connect text budget leaves both out).
+  const panel = el("section", { class: "ov-panel cn-sql cn-ice", style: "margin-top:18px" });
   panel.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: "Keep it current with Iceberg" })));
   const body = el("div", { class: "cn-sql-body" });
@@ -8628,6 +8628,14 @@ async function renderConnect() {
   // null on failure — the SQL client panel says it could not check.
   let fbStatus = null;
   try { fbStatus = await api("/api/flashback"); } catch (_) {}
+  // Where the selected server's snapshots live, for the Iceberg export
+  // command (#1573). location_only: the same resolution the Backups listing
+  // uses, without walking the storage. Not asked when the session may not
+  // read settings: the server would refuse it, and audit it, on every open.
+  let bLoc = null;
+  if ((capsCache.permissions || {})["settings:read"] !== false) {
+    try { bLoc = await api("/api/baselines?location_only=1"); } catch (_) {}
+  }
   if (gen !== serverGen) {
     // The consumed plaintext cannot be re-shown; say so instead of losing it
     // silently (the user must rotate to get a usable value).
@@ -8635,7 +8643,7 @@ async function renderConnect() {
     return;
   }
   try {
-    buildConnect(servers, tokStatus, minted, fbStatus);
+    buildConnect(servers, tokStatus, minted, fbStatus, bLoc);
   } catch (err) {
     if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
     const v = VIEW(); clear(v); v.append(pageHead("Connect AI", null)); renderError(v, err);
@@ -8677,7 +8685,7 @@ function copyText(text, what) {
   clip.writeText(text).then(() => toast(what + " copied to clipboard"), () => toastError("Copy failed."));
 }
 
-function buildConnect(servers, tokStatus, minted, fbStatus) {
+function buildConnect(servers, tokStatus, minted, fbStatus, bLoc) {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "Three steps and Claude can answer questions about your database history. It can only read; it can never change anything.");
@@ -8699,6 +8707,12 @@ function buildConnect(servers, tokStatus, minted, fbStatus) {
   if (capsCache.views && !capsCache.monitor) v.append(duckdbPanel());
   if (capsCache.mcp) v.append(otherClientsPanel(servers));
   v.append(sqlClientPanel(servers, fbStatus));
+  // Last: what the selected server's snapshots can become, for a reader who
+  // wants them in front of a reporting engine (#1466). It was the bottom of
+  // the Backups page, a third answer to "what do I download" there (#1573).
+  const cur = (servers || []).find((s) => s.id === (currentServer || defaultServerId));
+  const iceberg = icebergExportPanel(cur, bLoc);
+  if (iceberg) v.append(iceberg);
   viewEnter();
 }
 

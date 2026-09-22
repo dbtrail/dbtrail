@@ -4689,6 +4689,15 @@ try {
   (!dupCard)
     ? ok("backups: the carry-forward card is not duplicated on the Backups page")
     : bad("backups: the carry-forward card is not duplicated on the Backups page", "found .bkr-head on /baselines");
+  // The Iceberg export panel moved to Connect AI (#1573). Found by its title,
+  // not by its class: the old page mounted it without .cn-ice, and a class
+  // lookup would pass against it. Scenario 17g shows the same server DOES get
+  // the panel, on Connect, so absence here is the move and not a gate.
+  const iceOnBackups = await page.evaluate(() => Array.from(document.querySelectorAll(".view .ov-panel-title"))
+    .some((t) => t.textContent === "Keep it current with Iceberg"));
+  (!iceOnBackups)
+    ? ok("backups: the Iceberg export panel is gone from Backups (it lives on Connect AI)")
+    : bad("backups: the Iceberg export panel is gone from Backups (it lives on Connect AI)", "found its title on /baselines");
 
   // ── Scenario 17g — Connect AI is three short steps with a drawn dialog ──
   // The audience is Claude users, mostly non-technical. The first rewrite
@@ -4708,7 +4717,12 @@ try {
   // calibrated on the three MCP steps, and the panel's enabled shape alone
   // measures ~330 chars (1316 with it, 985 without), which would leave ~12%
   // headroom and make a legit copy edit on the panel ring a guard about a
-  // different page. The panel has its own assertion further down.
+  // different page. The panel has its own assertion further down. The
+  // Iceberg export panel that moved here from Backups (#1573) is excluded for
+  // the same reason, and carries its own assertion too: measured on this
+  // stack it shows 815 chars on its own, against 1046 for the steps, so
+  // counting it would put the page past the cap on a panel the cap was
+  // never about.
   // Limit worth naming: run.sh builds without -ldflags, so this only ever
   // photographs the UNVERSIONED bundle arm.
   await page.evaluate(() => navigate("connect"));
@@ -4742,12 +4756,22 @@ try {
     const addrCard = document.querySelectorAll(".view .cn-card")[1];
     const view = document.querySelector(".view") || { innerText: "", querySelector: () => null };
     const visible = view.innerText;
-    const sqlPanel = view.querySelector(".cn-sql");
+    // Both panels below the steps wear .cn-sql; .cn-ice tells the Iceberg
+    // one apart, so neither is subtracted twice or mistaken for the other.
+    const sqlPanel = view.querySelector(".cn-sql:not(.cn-ice)");
+    const icePanel = view.querySelector(".cn-ice");
+    const iceCode = icePanel ? icePanel.querySelector("code.cn-url") : null;
     return {
       badges,
       labels,
-      // Minus the SQL client panel's own text (see the budget note above).
-      visibleChars: visible.length - (sqlPanel ? sqlPanel.innerText.length : 0),
+      // Minus the two panels' own text (see the budget note above).
+      visibleChars: visible.length - (sqlPanel ? sqlPanel.innerText.length : 0)
+        - (icePanel ? icePanel.innerText.length : 0),
+      ice: {
+        present: !!icePanel,
+        title: icePanel ? (icePanel.querySelector(".ov-panel-title") || {}).textContent || "" : "",
+        cmd: iceCode ? iceCode.textContent : "",
+      },
       fine: document.querySelectorAll(".view details.cn-fine").length,
       addrCopy: addrCard ? Array.from(addrCard.querySelectorAll("button")).some((b) => b.textContent === "Copy") : false,
       once: /shown only once/.test(visible),
@@ -4779,6 +4803,17 @@ try {
     ? ok("connect: the DuckDB schema card is on Backups, not duplicated here")
     : bad("connect: the DuckDB schema card is on Backups, not duplicated here",
         JSON.stringify({ views: cn.duckViewsCap, rendered: cn.duckHere }));
+  // The Iceberg export panel lives here since #1573 (it was on Backups). This
+  // scenario runs on byo-idx, whose own backup folder is the fixture's, so
+  // the command must name THAT folder: the location comes from
+  // /api/baselines?location_only=1, the same resolution the Backups listing
+  // uses, and a panel pointing anywhere else would export the wrong data.
+  const iceDirArg = "--baseline-dir '" + (process.env.E2E_BASELINE_DIR || "") + "'";
+  (cn.ice.present && cn.ice.title === "Keep it current with Iceberg"
+    && cn.ice.cmd.startsWith("bintrail export iceberg ") && cn.ice.cmd.includes(iceDirArg))
+    ? ok("connect: the Iceberg export panel is here, pointed at this server's backup folder")
+    : bad("connect: the Iceberg export panel is here, pointed at this server's backup folder",
+        JSON.stringify({ ice: cn.ice, want: iceDirArg }));
   // "shown only once" is carried by the fresh state and the managed state
   // (except managed read_only, which drops the Lost-it clause and the phrase
   // with it); this run exercises the fresh one (no scenario mints a token).
@@ -4792,7 +4827,7 @@ try {
   // the three-badge assertion above stays at three.
   const fbPort = process.env.E2E_FLASHBACK_PORT || "13308";
   const sq = await page.evaluate(() => {
-    const p = document.querySelector(".view .cn-sql");
+    const p = document.querySelector(".view .cn-sql:not(.cn-ice)");
     const code = p ? p.querySelector("code.cn-url") : null;
     return { present: !!p, line: code ? code.textContent : "", text: p ? p.innerText : "" };
   });
