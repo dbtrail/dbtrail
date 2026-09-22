@@ -20,11 +20,21 @@ func TestPageNamesAreTheSidebarLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	labelRE := regexp.MustCompile(`<span>([^<]*)</span>\s*$`)
 	for route, name := range map[string]string{"baselines": PageBackups, "backup-settings": PageBackupSettings} {
-		re := regexp.MustCompile(`data-route="` + regexp.QuoteMeta(route) + `"[^>]*>(?s:.*?)<span>([^<]*)</span>\s*</a>`)
-		m := re.FindSubmatch(html)
-		if m == nil {
+		// The label is the last <span> inside that route's own <a>, read from
+		// that anchor only, so a match can never run into the next entry.
+		i := strings.Index(string(html), `data-route="`+route+`"`)
+		if i < 0 {
 			t.Fatalf("no sidebar entry for route %q in index.html", route)
+		}
+		j := strings.Index(string(html[i:]), "</a>")
+		if j < 0 {
+			t.Fatalf("the sidebar entry for route %q never closes", route)
+		}
+		m := labelRE.FindSubmatch(html[i : i+j])
+		if m == nil {
+			t.Fatalf("the sidebar entry for route %q has no plain <span> label before </a>", route)
 		}
 		if got := string(m[1]); got != name {
 			t.Errorf("the sidebar calls route %q %q, and the constant says %q: messages would name a page nobody sees", route, got, name)
@@ -33,13 +43,15 @@ func TestPageNamesAreTheSidebarLabels(t *testing.T) {
 }
 
 // pageNameTypedRE is a page named as typed text in a message: "Backups page",
-// "(Backup settings page)".
+// "(Backup settings page)". A literal that IS a page name ("Backup settings",
+// as in onPage("Backup settings") or "on the " + "Backups" + " page") is
+// refused too, outside pagenames.go.
 var pageNameTypedRE = regexp.MustCompile(`(Backups|Backup settings) page`)
 
 // TestMessagesNameBackupPagesThroughTheConstants: no string in the console's
 // Go code names a backup page as typed text. The pages are about to merge
 // under one name; a message that typed the old name would keep sending people
-// to a page that no longer exists, and backupScheduleRunnable trims its own
+// to a page that no longer exists, and CheckBackupSchedule trims its own
 // page suffix before appending it again, which only works while both sides
 // come from the same constant.
 func TestMessagesNameBackupPagesThroughTheConstants(t *testing.T) {
@@ -49,18 +61,24 @@ func TestMessagesNameBackupPagesThroughTheConstants(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		n := 0
 		for _, f := range matches {
 			if !strings.HasSuffix(f, "_test.go") {
 				files = append(files, f)
+				n++
 			}
 		}
+		// Per folder: a package that moved leaves an empty glob, not an error,
+		// and the other package alone would clear a combined floor.
+		if n < 10 {
+			t.Fatalf("read %d Go files in %s, want that package's: it moved, and this guard no longer covers it", n, dir)
+		}
 	}
-	if len(files) < 20 {
-		t.Fatalf("read %d Go files, want the console and consoleapp packages: the paths broke, not the code", len(files))
-	}
+	names := map[string]bool{PageBackups: true, PageBackupSettings: true}
 	fset := token.NewFileSet()
 	seen := 0
 	for _, f := range files {
+		own := filepath.Base(f) == "pagenames.go" && filepath.Dir(f) == "."
 		node, err := parser.ParseFile(fset, f, nil, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -77,6 +95,8 @@ func TestMessagesNameBackupPagesThroughTheConstants(t *testing.T) {
 			}
 			if m := pageNameTypedRE.FindString(s); m != "" {
 				t.Errorf("%s names %q as typed text: build it from PageBackups / PageBackupSettings (onPage for the suffix)", fset.Position(lit.Pos()), m)
+			} else if names[s] && !own {
+				t.Errorf("%s types the page name %q: use the constant, or a rename misses this spot", fset.Position(lit.Pos()), s)
 			}
 			return true
 		})

@@ -5,7 +5,7 @@ package console
 // backup pages are about to merge under one name, and a name typed in one
 // message and missed in another sends people to a page that is not there.
 // One message also trims its own page suffix off an error before appending
-// it again (backupScheduleRunnable), which only works while both sides spell
+// it again (CheckBackupSchedule), which only works while both sides spell
 // it the same.
 const (
 	PageBackups        = "Backups"
