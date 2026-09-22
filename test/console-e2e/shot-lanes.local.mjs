@@ -1,4 +1,4 @@
-// Renders the Backups page and reads the two download lanes back off the DOM.
+// Renders the Snapshots page and reads the two download lanes back off the DOM.
 // go test never renders the SPA, so "the panel is mounted" and "the panel is
 // VISIBLE with two file tiles on one lane and one on the other" are different
 // claims; the Go guards cover the first, this covers the second.
@@ -36,8 +36,8 @@ const byoId = await page.evaluate(async (baselineDir) => {
 console.log("byo-idx id:", byoId);
 if (byoId) await page.evaluate(async (id) => { await switchServer(id); }, byoId);
 await page.waitForTimeout(600);
-await page.evaluate(() => navigate("baselines"));
-await page.waitForFunction(() => location.pathname === "/baselines", { timeout: 10000 });
+await page.evaluate(() => navigate("snapshots"));
+await page.waitForFunction(() => location.pathname === "/snapshots", { timeout: 10000 });
 await page.waitForTimeout(1200);
 await page.evaluate(() => { if (typeof closeServersModal === "function") closeServersModal(); });
 

@@ -339,7 +339,7 @@ const text = (n) => n ? (n._text || "") + (n.children || []).map(text).join("") 
   const calls = [];
   vm.runInContext("capsCache = { backup_schedule: true };", ctx);
   ctx.__calls = calls;
-  vm.runInContext("api = async (p, o) => { __calls.push({ path: p, opts: o }); return { schedule: {} }; }; toast = () => {}; renderBaselines = () => {};", ctx);
+  vm.runInContext("api = async (p, o) => { __calls.push({ path: p, opts: o }); return { schedule: {} }; }; toast = () => {}; renderSnapshots = () => {};", ctx);
   const cur = { id: "a", name: "a", kind: "registry", baseline_dir: "/x" };
   const card = vm.runInContext("backupScheduleCard", ctx)(cur, { configured: true, snapshots: [], schedule: ` + string(w.Schedule) + ` });
   const input = find(card, (n) => n.tag === "input" && n.attrs && n.attrs["aria-label"] === "Full backup every");

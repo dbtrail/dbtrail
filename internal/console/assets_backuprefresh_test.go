@@ -210,24 +210,26 @@ func TestBackupRefreshWireNamesMatchTheFrontend(t *testing.T) {
 // and dropping the fetch makes it render its error branch forever. A setting
 // an operator cannot reach is the same as a setting that does not exist.
 //
-// The card moved from Storage to Backups (#1543) and from there to the
-// Backup settings page (#1582), which owns settings the way the
-// Backups page owns the work. The guard follows the card rather than the
-// page, and it checks BOTH halves of a move so it cannot be half-done: the
-// new page mounts and feeds it, and the old page no longer does — a control
-// that renders twice saves to one store from two places, and one of them is
+// The card moved from Storage to Backups (#1543), from there to the Backup
+// settings page (#1582), and with that page into the setup half of Snapshots
+// (#1573). The guard follows the card rather than the page, and it checks
+// BOTH halves of a move so it cannot be half-done: the half that owns it
+// mounts it and the page feeds it, and no other half renders it — a control
+// that renders twice reads one value in two places, and one of them is
 // always stale.
 func TestSettingsPageMountsTheRefreshCard(t *testing.T) {
 	js := readAsset(t, "app.js")
-	body := jsFunctionBody(t, js, "renderBackupSettings") + jsFunctionBody(t, js, "buildBackupSettings")
-	if !strings.Contains(body, "backupRefreshCard(") {
-		t.Error("the Backup settings page no longer mounts backupRefreshCard, so the reuse setting has no UI at all")
+	setup := jsFunctionBody(t, js, "snapshotSetupSections")
+	if !strings.Contains(setup, "backupRefreshCard(") {
+		t.Error("the setup half of Snapshots no longer mounts backupRefreshCard, so the reuse setting has no UI at all")
 	}
-	if !strings.Contains(body, `api("/api/baseline-refresh")`) {
-		t.Error("the settings page does not fetch /api/baseline-refresh, so the card can only ever render its error branch")
+	page := jsFunctionBody(t, js, "renderSnapshots")
+	if !strings.Contains(page, `api("/api/baseline-refresh")`) {
+		t.Error("Snapshots does not fetch /api/baseline-refresh, so the card can only ever render its error branch")
 	}
-	if strings.Contains(jsFunctionBody(t, js, "renderBaselines"), "backupRefreshCard(") {
-		t.Error("the Backups page still mounts backupRefreshCard; the card moved to the settings page, one surface at a time")
+	if strings.Contains(page, "backupRefreshCard(") {
+		t.Error("Snapshots mounts backupRefreshCard directly as well as through snapshotSetupSections; " +
+			"the card belongs to the setup half, which is what decides whether it is drawn at all")
 	}
 }
 

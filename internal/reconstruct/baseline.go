@@ -363,7 +363,7 @@ func NewestSnapshot(ctx context.Context, source string) (time.Time, []string, er
 	// On S3, a window of the newest few snapshots, widened while every one
 	// in it is incomplete (#1679): the answer is in the newest complete
 	// one, and reading the whole inventory to find it cost the schedule's
-	// probe as much as the Backups page. Locally the directory read is
+	// probe as much as the Snapshots page. Locally the directory read is
 	// cheap and the unreadable folders it reports are the point (#1639).
 	var files []BaselineFile
 	var unreadable []UnreadableSnapshot

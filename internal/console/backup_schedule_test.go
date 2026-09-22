@@ -447,9 +447,10 @@ func TestBaselineTriggerPrecheck_sharedWithTheSchedule(t *testing.T) {
 		t.Fatal("fixture is runnable; the test needs a refused entry")
 	}
 	got := CheckBackupSchedule(e, BackupSchedule{Every: "1d"}, BackupScheduleGates{LoopRunning: true, FullBackups: true})
-	// The button's hint "(Backup settings page)" moves to the end of the combined
-	// reason and appears once, not once per producer.
-	const hint = " (Backup settings page)"
+	// The button's page hint moves to the end of the combined reason and
+	// appears once, not once per producer. Built from the constant, so a page
+	// rename cannot leave this asserting a page nobody has.
+	hint := onPage(PageSnapshots)
 	reason := RefusalReason(got)
 	if got == nil || !strings.HasPrefix(reason, strings.TrimSuffix(want.Error(), hint)) {
 		t.Fatalf("schedule reason %v does not start with the button's %v", got, want)

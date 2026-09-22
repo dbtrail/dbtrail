@@ -2337,7 +2337,7 @@ try {
   // backups but does not offer the button), the Create backup button must
   // render enabled, and the fixture snapshot (1 table, anchored at
   // binlog.000001:50) must be listed.
-  await page.evaluate(() => navigate("baselines"));
+  await page.evaluate(() => navigate("snapshots"));
   await page.waitForFunction(() => Array.from(document.querySelectorAll(".stg-row")).some((r) => r.textContent.includes("binlog.000001:50")));
   const stg = await page.evaluate(() => {
     // #1415: the Create action moved to the context strip (page level); the
@@ -2417,7 +2417,7 @@ try {
   // sizes, the tar.gz download wire, the restore card's gate + inline refusal,
   // and the in-progress region. All against the REAL fixture snapshot the
   // runner produced with `bintrail baseline`.
-  await page.evaluate(() => navigate("baselines"));
+  await page.evaluate(() => navigate("snapshots"));
   await new Promise((r) => setTimeout(r, 600));
   const bk = await page.evaluate(async () => {
     const out = {};
@@ -2450,9 +2450,9 @@ try {
     if (res.status !== 200) out.dlBody = new TextDecoder().decode(buf).slice(0, 200);
     return out;
   });
-  /^Backups$/.test(bk.title.trim())
-    ? ok("backups: the page is named Backups")
-    : bad("backups: the page is named Backups", bk.title);
+  /^Snapshots$/.test(bk.title.trim())
+    ? ok("snapshots: the page is named Snapshots")
+    : bad("snapshots: the page is named Snapshots", bk.title);
   bk.stripLabels.includes("BACKUPS")
     ? ok("backups: the strip counts BACKUPS, not snapshots")
     : bad("backups: the strip counts BACKUPS, not snapshots", JSON.stringify(bk.stripLabels));
@@ -2635,8 +2635,8 @@ try {
     return { listed: titles.some((t) => /^Backups\b/.test(t)), card: titles.includes("Download a DuckDB schema") };
   });
   (dkGone.listed && !dkGone.card)
-    ? ok("backups: the DuckDB schema card is gone from Backups (it lives on Connect AI)")
-    : bad("backups: the DuckDB schema card is gone from Backups (it lives on Connect AI)", JSON.stringify(dkGone));
+    ? ok("snapshots: the DuckDB schema card is not here (it lives on Connect AI)")
+    : bad("snapshots: the DuckDB schema card is not here (it lives on Connect AI)", JSON.stringify(dkGone));
 
   // Paging, EXECUTED through the real panel. The Go guards test the window
   // function and the clamp in isolation and read the call site as text; their
@@ -2846,7 +2846,7 @@ try {
       gapDl === 409
         ? ok("sqlx: the failed build revoked the previous artifact (download refuses)")
         : bad("sqlx: the failed build revoked the previous artifact (download refuses)", "status " + gapDl);
-      await page.evaluate(() => navigate("baselines"));
+      await page.evaluate(() => navigate("snapshots"));
       await page.waitForFunction(() => {
         const v = document.querySelector(".view");
         if (!v) return false;
@@ -2873,39 +2873,99 @@ try {
     bad("sqlx: gap arm env missing", "E2E_IDX_DB/E2E_MYSQL_CONTAINER not passed by run.sh");
   }
 
-  // Scenario 15d — Protect group (#1384). Baselines and verification moved off
-  // Settings > Storage into their own routes. Two halves must hold TOGETHER,
-  // and only the first is obvious: each route renders its panel, AND Storage
-  // no longer carries it. A move that left a copy behind would sail past a
-  // "does /baselines work" check — which is the shape of the regression 15b
-  // caught when this scenario did not exist.
+  // Scenario 15d — the Protect group. Baselines and verification moved off
+  // Settings > Storage into their own routes (#1384), and those two plus
+  // Backup settings merged into one page, Snapshots (#1573). Two halves must
+  // hold TOGETHER, and only the first is obvious: the page renders all three
+  // jobs, AND nothing else still carries them. A merge that left a copy
+  // behind would sail past a "does /snapshots work" check — which is the
+  // shape of the regression 15b caught when this scenario did not exist.
   //
-  // waitForFunction rather than a sleep: renderBaselines awaits two fetches,
-  // and a fixed delay is the classic way this suite goes intermittently red.
+  // waitForFunction rather than a sleep: renderSnapshots awaits four fetches
+  // and then up to three more, and a fixed delay is the classic way this
+  // suite goes intermittently red.
   const protectNav = await page.evaluate(() => ({
-    baselines: !!document.querySelector('.nav-item[data-route="baselines"]'),
-    verification: !!document.querySelector('.nav-item[data-route="verification"]'),
+    snapshots: !!document.querySelector('.nav-item[data-route="snapshots"]'),
+    gone: ["baselines", "verification", "backup-settings"]
+      .filter((r) => !!document.querySelector('.nav-item[data-route="' + r + '"]')),
   }));
-  (protectNav.baselines && protectNav.verification)
-    ? ok("protect: both nav entries render")
-    : bad("protect: both nav entries render", JSON.stringify(protectNav));
+  (protectNav.snapshots && protectNav.gone.length === 0)
+    ? ok("protect: one nav entry, and the three it replaced are gone")
+    : bad("protect: one nav entry, and the three it replaced are gone", JSON.stringify(protectNav));
 
-  await page.evaluate(() => navigate("baselines"));
-  await page.waitForFunction(() => location.pathname === "/baselines"
-    && Array.from(document.querySelectorAll(".ov-panel-title")).some((h) => /Backups/.test(h.textContent)));
-  ok("protect: /baselines renders the snapshot panel");
+  // One page carries all three jobs (#1573): the list of copies, the checks
+  // and the settings. Waited on together, because a page that paints its
+  // top half and drops the rest is exactly the failure the merge can cause.
+  await page.evaluate(() => navigate("snapshots"));
+  await page.waitForFunction(() => location.pathname === "/snapshots"
+    && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Snapshots/.test(h.textContent))
+    && Array.from(document.querySelectorAll(".ov-panel-title")).some((h) => /Backups/.test(h.textContent))
+    && document.querySelectorAll(".vfy-region").length >= 3
+    && !!document.querySelector(".bks-row"));
+  const snapSections = await page.evaluate(() => Array.from(document.querySelectorAll(".snap-sect")).map((h) => [h.id, h.textContent]));
+  (snapSections.length === 2 && snapSections[0][0] === "checks" && snapSections[1][0] === "setup")
+    ? ok("snapshots: one page with the checks and setup sections, in that order")
+    : bad("snapshots: one page with the checks and setup sections, in that order", JSON.stringify(snapSections));
 
-  await page.evaluate(() => navigate("verification"));
-  await page.waitForFunction(() => location.pathname === "/verification"
-    && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Verification/.test(h.textContent))
-    && document.querySelectorAll(".vfy-region").length >= 3);
-  ok("protect: /verification renders its three regions");
+  // Scenario 15d2 — the three addresses that merged (#1573). A bookmark, a
+  // link in an old email, a Back entry: each lands on the page, at the
+  // section that was its page, with the bar rewritten, and one line says
+  // where what they asked for went. Driven through the real router, not
+  // navigate(): a visitor ARRIVES at the old address, which is the path the
+  // translation used to miss — and, for two of the three on a console
+  // without the daemon, the path that painted Overview instead.
+  const arriveAt = async (old) => {
+    // RETURN the router's promise: renderRoute dispatches an async painter,
+    // and without awaiting it the read below lands on the PREVIOUS paint —
+    // which already shows this page's heading, so a wait on the heading
+    // passes vacuously. That is how this scenario first read zero notes on a
+    // page that draws one.
+    await page.evaluate((o) => { history.pushState({}, "", o); return renderRoute(); }, old);
+    await page.waitForFunction(() => location.pathname === "/snapshots"
+      && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Snapshots/.test(h.textContent)));
+    return page.evaluate(() => ({
+      url: location.pathname + location.hash,
+      note: ((document.querySelector(".snap-moved-text") || {}).textContent || "").trim(),
+      notes: document.querySelectorAll(".snap-moved").length,
+    }));
+  };
+  const movedFrom = {};
+  for (const [old, want, was] of [["/baselines", "/snapshots", "Backups"],
+    ["/verification", "/snapshots#checks", "Verification"],
+    ["/backup-settings", "/snapshots#setup", "Backup settings"]]) {
+    const got = await arriveAt(old);
+    movedFrom[old] = got;
+    (got.url === want && got.notes === 1 && got.note.startsWith(was + " is part of Snapshots now"))
+      ? ok("moved: " + old + " lands on " + want + " and says so once")
+      : bad("moved: " + old + " lands on " + want + " and says so once", JSON.stringify(got));
+  }
+  // Closing the note is per OLD ADDRESS and lasts: the reader who bookmarked
+  // Backup settings is done being told, and the one who bookmarked Backups
+  // has not been told yet.
+  await page.evaluate(() => document.querySelector(".snap-moved-x").click());
+  const closedNow = await page.evaluate(() => document.querySelectorAll(".snap-moved").length);
+  const closedAgain = await arriveAt("/backup-settings");
+  const otherStill = await arriveAt("/baselines");
+  (closedNow === 0 && closedAgain.notes === 0 && otherStill.notes === 1)
+    ? ok("moved: closing one note keeps it closed and leaves the others alone")
+    : bad("moved: closing one note keeps it closed and leaves the others alone",
+      JSON.stringify({ closedNow, closedAgain: closedAgain.notes, otherStill: otherStill.notes }));
+  // And a reader who did NOT come from an old address is told nothing.
+  await page.evaluate(() => navigate("events"));
+  await page.waitForFunction(() => location.pathname === "/events");
+  await page.evaluate(() => navigate("snapshots"));
+  await page.waitForFunction(() => location.pathname === "/snapshots"
+    && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Snapshots/.test(h.textContent)));
+  const noNote = await page.evaluate(() => document.querySelectorAll(".snap-moved").length);
+  (noNote === 0)
+    ? ok("moved: arriving from the sidebar shows no note")
+    : bad("moved: arriving from the sidebar shows no note", "notes=" + noNote);
 
   // Scenario 15w — the page-header Docs link (#1450). One route → slug table
   // in app.js; the Go asset guard pins that table to the site's real pages,
   // and this leg proves the link is actually painted, follows a ROUTE CHANGE
   // (pageHead reads the route per render, not once at boot), and opens in a
-  // new tab without handing the docs site window.opener. Verification is on
+  // new tab without handing the docs site window.opener. Snapshots is on
   // screen right now, so it is the first probe.
   const docsLinkOf = () => page.evaluate(() => {
     const links = Array.from(document.querySelectorAll(".page-head .page-docs"));
@@ -2914,10 +2974,10 @@ try {
       rel: a && a.getAttribute("rel"), text: a && a.textContent.trim() };
   });
   const docsVfy = await docsLinkOf();
-  docsVfy.n === 1 && docsVfy.href === "https://www.dbtrail.com/docs/guides/verify/" && docsVfy.target === "_blank"
+  docsVfy.n === 1 && docsVfy.href === "https://www.dbtrail.com/docs/guides/backup-strategy/" && docsVfy.target === "_blank"
     && /\bnoopener\b/.test(docsVfy.rel || "") && docsVfy.text === "Docs"
-    ? ok("docs link: Verification header links to /docs/guides/verify/ in a new tab")
-    : bad("docs link: Verification header links to /docs/guides/verify/ in a new tab", JSON.stringify(docsVfy));
+    ? ok("docs link: Snapshots header links to /docs/guides/backup-strategy/ in a new tab")
+    : bad("docs link: Snapshots header links to /docs/guides/backup-strategy/ in a new tab", JSON.stringify(docsVfy));
   await page.evaluate(() => navigate("events"));
   await page.waitForFunction(() => location.pathname === "/events"
     && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Events/.test(h.textContent)));
@@ -2925,9 +2985,9 @@ try {
   docsEvents.n === 1 && docsEvents.href === "https://www.dbtrail.com/docs/guides/recovery/"
     ? ok("docs link: follows the route change to Events")
     : bad("docs link: follows the route change to Events", JSON.stringify(docsEvents));
-  // Put the page back: 15v below reads the Verification form as it found it.
-  await page.evaluate(() => navigate("verification"));
-  await page.waitForFunction(() => location.pathname === "/verification"
+  // Put the page back: 15v below reads the verification form as it found it.
+  await page.evaluate(() => navigate("snapshots"));
+  await page.waitForFunction(() => location.pathname === "/snapshots"
     && document.querySelectorAll(".vfy-region").length >= 3);
 
   // Scenario 15v — the verification page rework (#1417/#1418/#1419/#1420),
@@ -2974,7 +3034,7 @@ try {
   });
   (vfyStruct.subGone)
     ? ok("verification: no subtitle; the mode help says what each check does")
-    : bad("verification: no subtitle; the mode help says what each check does", "a .page-sub is back on /verification");
+    : bad("verification: no subtitle; the mode help says what each check does", "a .page-sub is back on /snapshots");
   (vfyStruct.regionCount >= 3 && vfyStruct.controlTinted)
     ? ok("verification: control / current / history are separate surfaces, control wears the structure tint")
     : bad("verification: control / current / history are separate surfaces, control wears the structure tint", JSON.stringify(vfyStruct));
@@ -3098,7 +3158,7 @@ try {
     vfyLive.clear();
     document.querySelector(".vfy-run").click();
     navigate("events");
-    navigate("verification");
+    navigate("snapshots");
   });
   let vfyBackChip = true;
   try {
@@ -4490,7 +4550,7 @@ try {
     ? ok("telemetry: the shown bytes are the daemon's sample_event verbatim")
     : bad("telemetry: the shown bytes are the daemon's sample_event verbatim", JSON.stringify({ shown: telSample.shown, fromApi: telSample.fromApi }));
 
-  // ── Scenario 17i — the Backup settings page (#1582, #1603) ──
+  // ── Scenario 17i — the backup settings, now the setup half of Snapshots (#1582, #1603, #1573) ──
   // The page's job is provenance, and since #1603 it SHOWS the three kinds
   // of setting instead of describing them: the disk-space switch and the
   // per-server rows under "Change here", the daemon's own values under "Set
@@ -4509,6 +4569,9 @@ try {
   // <details> contributes only its summary line. The per-server panel is
   // EXCLUDED from the count because it scales with the registry (this run
   // seeds several servers), which would make the cap measure the fixture.
+  // The per-server panel and the backup schedule card are both subtracted
+  // (see below): one scales with the registry, the other with the schedule's
+  // state, and neither is the settings prose this cap is about.
   // The cap (1300) sits ~45% above the rewritten page (906 measured here,
   // with the harness's daemon flags; the nine rows' labels and flag names
   // are most of it) and ~25% below the pre-#1603 page (1719 measured by the
@@ -4517,11 +4580,11 @@ try {
   // card: measured 906 before it, ~1084 projected after (the four rows cost
   // their provenance sentence instead of their (CLI: ...) suffix), so the cap
   // still has room and did not move.
-  await page.evaluate(() => navigate("backup-settings"));
+  await page.evaluate(() => navigate("snapshots"));
   // Options are the THIRD waitForFunction parameter; an options object in
   // the arg slot is serialized to the predicate and silently discarded
   // (#1589), leaving the 30s default in force. Stated as 30s explicitly.
-  await page.waitForFunction(() => location.pathname === "/backup-settings"
+  await page.waitForFunction(() => location.pathname === "/snapshots"
     && document.querySelectorAll(".bks-row").length >= 5, undefined, { timeout: 30000 });
   const bksAPI = await page.evaluate(() => api("/api/backup-settings"));
   const bks = await page.evaluate(() => {
@@ -4532,12 +4595,27 @@ try {
       value: (r.querySelector(".bks-value") || {}).textContent || "",
     }));
     const boot = view.querySelector(".card.bks-boot");
-    const perServer = view.querySelector(".ov-panel");
+    // The budget below is about the SETTINGS text, and since #1573 they are
+    // the bottom section of a page that also carries the listing and the
+    // checks. Measure from the "Where and how often" heading down, so the
+    // number means what it meant when this was a page of its own.
+    const setupHead = view.querySelector("#setup");
+    const setupNodes = [];
+    for (let n = setupHead && setupHead.nextElementSibling; n; n = n.nextElementSibling) setupNodes.push(n);
+    // Found by what it CONTAINS, not by .ov-panel: the schedule card wears
+    // that class too and comes first in this section, so a class lookup
+    // subtracted the wrong card and let the per-server panel — the part
+    // that scales with the fixture — into the count.
+    const perServer = setupNodes.find((n) => n.querySelector && n.querySelector(".bks-server")) || null;
+    // The timetable card moved into this section with #1573. It is not
+    // settings prose and it scales with the schedule's state, so it is
+    // subtracted as well and the cap keeps measuring what it always did.
+    const schedule = setupNodes.find((n) => (" " + n.className + " ").includes(" bk-schedule ")) || null;
     const fine = Array.from(view.querySelectorAll("details.cn-fine"));
-    const visible = view.innerText;
+    const visible = setupNodes.map((n) => n.innerText).join("\n");
     return {
       head: (view.querySelector(".page-title") || {}).textContent || "",
-      nav: (document.querySelector('.nav-item[data-route="backup-settings"] span:last-child') || {}).textContent || "",
+      nav: (document.querySelector('.nav-item[data-route="snapshots"] span:last-child') || {}).textContent || "",
       docsLink: !!view.querySelector(".page-docs"),
       rows: rows.length,
       // The daemon-wide rows this interface can save (#1682): one input and
@@ -4557,7 +4635,14 @@ try {
       configuredValued: rows.length > 0 && rows[0].value.startsWith("/"),
       notSet: /not set/i.test(visible),
       emDash: /—/.test(visible),
-      visibleChars: visible.length - (perServer ? perServer.innerText.length : 0),
+      visibleChars: visible.length - (perServer ? perServer.innerText.length : 0) - (schedule ? schedule.innerText.length : 0),
+      // A subtraction that silently finds nothing would inflate the count
+      // and ring on a page nobody changed — or, with the cap raised to
+      // match, stop measuring anything.
+      perServerFound: !!perServer,
+      // A heading that disappears would silently empty the measurement
+      // above and pass every budget from then on.
+      setupFound: !!setupHead && setupNodes.length > 0,
       fine: fine.length,
       fineOpen: fine.filter((d) => d.open).length,
       refreshCardHere: !!view.querySelector(".bkr-head"),
@@ -4574,9 +4659,10 @@ try {
   });
   // The measurement itself, so a cap can be re-derived from a run's log.
   console.log("backup-settings: measured " + JSON.stringify({ visibleChars: bks.visibleChars, fine: bks.fine }));
-  (bks.head === "Backup settings" && bks.nav === "Backup settings" && bks.docsLink)
-    ? ok("backup-settings: named Backup settings in the nav and the head, with a Docs link")
-    : bad("backup-settings: named Backup settings in the nav and the head, with a Docs link", JSON.stringify({ head: bks.head, nav: bks.nav, docsLink: bks.docsLink }));
+  (bks.head === "Snapshots" && bks.nav === "Snapshots" && bks.docsLink && bks.setupFound)
+    ? ok("snapshots: named Snapshots in the nav and the head, with a Docs link, and the setup section is there")
+    : bad("snapshots: named Snapshots in the nav and the head, with a Docs link, and the setup section is there",
+        JSON.stringify({ head: bks.head, nav: bks.nav, docsLink: bks.docsLink, setupFound: bks.setupFound }));
   // Five startup rows since #1682 moved the four savable ones into their own
   // card: the two backup locations (#1684 deletes that fallback, so they are
   // deliberately not editable here) plus the three that start or stop a loop
@@ -4595,9 +4681,9 @@ try {
     ? ok("backup-settings: the three kinds are drawn apart: two sections, one card-level restart chip, the daemon card outside the tinted grid")
     : bad("backup-settings: the three kinds are drawn apart: two sections, one card-level restart chip, the daemon card outside the tinted grid",
         JSON.stringify({ cardChips: bks.cardChips, rowChips: bks.rowChips, bootInGrid: bks.bootInGrid, sections: bks.sections }));
-  (bks.visibleChars > 0 && bks.visibleChars < 1300 && bks.fine >= 2 && bks.fineOpen === 0 && !bks.emDash)
-    ? ok("backup-settings: visible text stays under budget with the fine print compact")
-    : bad("backup-settings: visible text stays under budget with the fine print compact",
+  (bks.visibleChars > 0 && bks.visibleChars < 1300 && bks.perServerFound && bks.fine >= 2 && bks.fineOpen === 0 && !bks.emDash)
+    ? ok("snapshots: the setup section's visible text stays under budget with the fine print compact")
+    : bad("snapshots: the setup section's visible text stays under budget with the fine print compact",
         JSON.stringify({ chars: bks.visibleChars, fine: bks.fine, open: bks.fineOpen, emDash: bks.emDash }));
   (bks.refreshCardHere && bks.cfTiles === 2)
     ? ok("backup-settings: the carry-forward card moved here and draws two backups")
@@ -4617,16 +4703,19 @@ try {
     ? ok("backup-settings: each server draws its own location case as the API reports it, and nothing draws the cases twice")
     : bad("backup-settings: each server draws its own location case as the API reports it, and nothing draws the cases twice",
         JSON.stringify({ cases: bks.cases, api: apiSources, current: bks.current }));
-  // Each compact block links to a page the Docs table carries, the table
-  // the daily network check proves the site serves (#1645). Read from the
-  // page, not typed here: a folder prefix typed here went stale the day the
-  // settings page moved out of guides/.
+  // Each compact block links into the docs site, under the console's own
+  // DOCS_BASE and with a real slug. WHICH pages may be linked is pinned on
+  // the Go side, which also fetches every one of them daily (#1645) — a
+  // second copy of that list here went stale the day the settings page moved
+  // out of guides/, and since #1573 the page's own header and its blocks no
+  // longer name the same page at all.
   const [docsBase, docsSlugs] = await page.evaluate(() => [DOCS_BASE, Object.values(DOCS_PAGES)]);
-  const onTablePage = (h) => h.startsWith(docsBase)
-    && docsSlugs.includes(h.slice(docsBase.length).replace(/#.*$/, "").replace(/\/$/, ""));
-  (bks.moreLinks.length >= 3 && bks.moreLinks.every(onTablePage))
-    ? ok("backup-settings: the compact blocks link into pages the Docs table carries")
-    : bad("backup-settings: the compact blocks link into pages the Docs table carries", JSON.stringify({ links: bks.moreLinks, pages: docsSlugs }));
+  const slugOf = (h) => (h.startsWith(docsBase) ? h.slice(docsBase.length).replace(/#.*$/, "").replace(/\/$/, "") : "");
+  const wellFormed = bks.moreLinks.length >= 3 && bks.moreLinks.every((h) => /^[a-z0-9]+(-[a-z0-9]+)*(\/[a-z0-9]+(-[a-z0-9]+)*)*$/.test(slugOf(h)));
+  const anyOnTable = bks.moreLinks.some((h) => docsSlugs.includes(slugOf(h)));
+  (wellFormed && anyOnTable)
+    ? ok("snapshots: the compact blocks link into the docs site, and at least one names a page the header table carries")
+    : bad("snapshots: the compact blocks link into the docs site, and at least one names a page the header table carries", JSON.stringify({ links: bks.moreLinks, pages: docsSlugs }));
   // The states this harness never puts on screen, rendered DETACHED through
   // the real functions (#1603): the switch drawn ON (three kept, two written,
   // the kept swatch in the key) and OFF (five written, no kept swatch), a
@@ -4643,15 +4732,19 @@ try {
     };
     const refused = backupDaemonCard([{ key: "lock_mode", value: "ftwrl", err: "bad mode; MySQL dumps are refused until it is fixed", cli: "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE", needs_restart: true }]);
     const loud = Array.from(refused.querySelectorAll("p.form-msg.err"));
-    const view = document.querySelector(".view");
-    const keep = { monitor: capsCache.monitor, html: view.innerHTML };
+    const keep = { monitor: capsCache.monitor };
     capsCache.monitor = false;
     let serve;
     try {
-      buildBackupSettings({ daemon: [], servers: [{ id: "x", name: "x", source: "none" }], registry_read_only: false }, null);
-      serve = { sections: view.querySelectorAll(".bks-sect").length, boot: !!view.querySelector(".bks-boot"),
-        sub: (view.querySelector(".page-sub") || {}).textContent || "", current: (view.querySelector(".bl-case.is-current") || {}).dataset };
-    } finally { capsCache.monitor = keep.monitor; view.innerHTML = keep.html; }
+      // The setup half returns nodes since #1573 (it is a section of
+      // Snapshots, not a page of its own), so they are collected into a
+      // holder — nothing on the live page is touched at all now.
+      const holder = document.createElement("div");
+      snapshotSetupSections({ daemon: [], servers: [{ id: "x", name: "x", source: "none" }], registry_read_only: false }, null)
+        .forEach((n) => holder.append(n));
+      serve = { sections: holder.querySelectorAll(".bks-sect").length, boot: !!holder.querySelector(".bks-boot"),
+        sub: (holder.querySelector(".page-sub") || {}).textContent || "", current: (holder.querySelector(".bl-case.is-current") || {}).dataset };
+    } finally { capsCache.monitor = keep.monitor; }
     return { on: shape(true), off: shape(false),
       refused: { marked: !!refused.querySelector(".bks-value.bks-refused"), loud: loud.length === 1 && loud[0].textContent.includes("bad mode"),
         outside: loud.length === 1 && !loud[0].closest("details") },
@@ -4666,10 +4759,10 @@ try {
     ? ok("backup-settings: a refused daemon value is marked and its reason stays in plain view")
     : bad("backup-settings: a refused daemon value is marked and its reason stays in plain view", JSON.stringify(bksStates.refused));
   (bksStates.serve.sections === 0 && !bksStates.serve.boot && bksStates.serve.sub === "" && bksStates.serve.current && bksStates.serve.current.source === "none")
-    ? ok("backup-settings: on serve the page is the per-server half alone, with no sub line")
-    : bad("backup-settings: on serve the page is the per-server half alone, with no sub line", JSON.stringify(bksStates.serve));
-  // Restored the live page above; re-render it so the next assertion reads
-  // the real thing, not the restored HTML with its listeners gone.
+    ? ok("snapshots: on serve the setup half is the per-server panel alone, with no section labels")
+    : bad("snapshots: on serve the setup half is the per-server panel alone, with no section labels", JSON.stringify(bksStates.serve));
+  // The block above rendered detached, so the live page is untouched; this
+  // re-render only makes sure the next assertion reads a settled page.
   await page.evaluate(() => renderRoute());
   await page.waitForFunction(() => document.querySelectorAll(".bks-server input[name=baseline_dir]").length >= 1, undefined, { timeout: 30000 });
   // Save wakes up on a change and sleeps again when the field is put back;
@@ -4692,22 +4785,25 @@ try {
   // Settled on the LISTING panel, not a timer: the whole page builds in one
   // pass, so once the panel title is up, a mounted card would be too — a
   // sleep could pass this vacuously against a half-rendered page.
-  await page.evaluate(() => navigate("baselines"));
-  await page.waitForFunction(() => location.pathname === "/baselines"
+  await page.evaluate(() => navigate("snapshots"));
+  await page.waitForFunction(() => location.pathname === "/snapshots"
     && document.querySelector(".view .ov-panel-title"));
-  const dupCard = await page.evaluate(() => !!document.querySelector(".view .bkr-head"));
-  (!dupCard)
-    ? ok("backups: the carry-forward card is not duplicated on the Backups page")
-    : bad("backups: the carry-forward card is not duplicated on the Backups page", "found .bkr-head on /baselines");
+  // The reuse card lives in the setup half and is drawn ONCE: with the three
+  // pages merged (#1573), a card mounted by both halves would read one value
+  // in two places on the same screen.
+  const cardCount = await page.evaluate(() => document.querySelectorAll(".view .bkr-head").length);
+  (cardCount === 1)
+    ? ok("snapshots: the reuse card is drawn exactly once")
+    : bad("snapshots: the reuse card is drawn exactly once", "found " + cardCount + " .bkr-head on /snapshots");
   // The Iceberg export panel moved to Connect AI (#1573). Found by its title,
   // not by its class: the old page mounted it without .cn-ice, and a class
   // lookup would pass against it. Scenario 17g shows the same server DOES get
   // the panel, on Connect, so absence here is the move and not a gate.
-  const iceOnBackups = await page.evaluate(() => Array.from(document.querySelectorAll(".view .ov-panel-title"))
+  const iceOnSnapshots = await page.evaluate(() => Array.from(document.querySelectorAll(".view .ov-panel-title"))
     .some((t) => t.textContent === "Keep it current with Iceberg"));
-  (!iceOnBackups)
-    ? ok("backups: the Iceberg export panel is gone from Backups (it lives on Connect AI)")
-    : bad("backups: the Iceberg export panel is gone from Backups (it lives on Connect AI)", "found its title on /baselines");
+  (!iceOnSnapshots)
+    ? ok("snapshots: the Iceberg export panel is not here (it lives on Connect AI)")
+    : bad("snapshots: the Iceberg export panel is not here (it lives on Connect AI)", "found its title on /snapshots");
 
   // ── Scenario 17g — Connect AI is three short steps with a drawn dialog ──
   // The audience is Claude users, mostly non-technical. The first rewrite

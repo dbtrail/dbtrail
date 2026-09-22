@@ -103,7 +103,7 @@ console.log(JSON.stringify({
 	if r := got.Working.Rows[4]; !strings.Contains(r.Cls, "running") || !strings.Contains(r.Text, "A quiet database is normal") {
 		t.Errorf("capture waiting for its first change is not drawn as running and normal: %+v", r)
 	}
-	if r := got.Working.Rows[5]; !strings.Contains(r.Cls, "waiting") || !strings.Contains(r.Text, "Backups page") {
+	if r := got.Working.Rows[5]; !strings.Contains(r.Cls, "waiting") || !strings.Contains(r.Text, PageSnapshots+" page") {
 		t.Errorf("the backup step does not say where to create one: %+v", r)
 	}
 

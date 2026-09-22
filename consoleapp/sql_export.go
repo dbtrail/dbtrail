@@ -19,7 +19,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
-// Custom .sql backup (the Backups page's "build a backup for a moment"):
+// Custom .sql backup (the Snapshots page's "build a backup for a moment"):
 // fold the newest snapshot at-or-before the chosen instant forward through
 // the index's deltas and write the result as a mydumper-format dump —
 // schema files, INSERT chunks and the coordinates `metadata` file — that
@@ -72,7 +72,7 @@ import (
 // sqlExportTTL is how long a finished build stays downloadable. Long enough
 // to survive a coffee break and a slow browser; short enough that a forgotten
 // build does not park gigabytes on the index host until someone finds it
-// with du. The Backups page tells the operator the deadline.
+// with du. The Snapshots page tells the operator the deadline.
 const sqlExportTTL = 4 * time.Hour
 
 // sqlExportReapEvery is how often the background reaper looks for builds
@@ -535,7 +535,7 @@ func sqlExportExpired(expiresAt string, now time.Time) bool {
 }
 
 // runSQLExportReaper expires builds on a timer until the daemon stops. It
-// exists for the build nobody is watching: the Backups page polls only
+// exists for the build nobody is watching: the Snapshots page polls only
 // while it is open, and a build left behind after the tab closed would
 // otherwise sit on disk until the next visit. Each tick is guarded the way
 // every other goroutine in `watch` is: this process is also the capture

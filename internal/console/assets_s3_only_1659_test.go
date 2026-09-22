@@ -26,8 +26,10 @@ func TestS3OnlyBackupWarning_1659(t *testing.T) {
 	card := functionBody(t, js, "function backupScheduleCard(")
 
 	// Saving repaints the row, which is what takes the warning down once a
-	// Backup dir is saved.
-	if save := strings.Index(row, `toast("Saved for " + (srv.name || srv.id));`); save < 0 || !strings.HasPrefix(strings.TrimSpace(stripLineComments(row[save+len(`toast("Saved for " + (srv.name || srv.id));`):])), "renderRoute();") {
+	// Backup dir is saved. Through the page's own painter since #1573, not
+	// renderRoute: the route path bumps viewGen and kills the job watchers
+	// this page runs.
+	if save := strings.Index(row, `toast("Saved for " + (srv.name || srv.id));`); save < 0 || !strings.HasPrefix(strings.TrimSpace(stripLineComments(row[save+len(`toast("Saved for " + (srv.name || srv.id));`):])), "await renderSnapshots();") {
 		t.Error("a successful save no longer repaints the row, so the S3-only warning would stay up after a Backup dir is saved")
 	}
 	if strings.Contains(jsFunctionSpan(t, js, "backupServerRow"), "As set up, each scheduled run takes a full backup") {

@@ -184,8 +184,8 @@ func TestFirstRunBackupStep(t *testing.T) {
 // TestFirstRunBackupStepSaysWhyItCannotRun is #1677: a first backup the
 // console cannot create is listed with the reason and what to do, in words.
 // The step used to vanish, and a list with no backup step reads as an install
-// that needs none. The daemon setting is named the way the Backup settings
-// page labels it, never as a variable: the step shows no commands.
+// that needs none. The daemon setting is named the way the Snapshots page
+// labels it, never as a variable: the step shows no commands.
 // mydumper is named for MySQL and MariaDB, whose full backup runs it; a
 // PostgreSQL full backup runs inside DBTrail.
 func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
@@ -199,7 +199,7 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 	}{
 		{"off, MySQL, location set", true, false, false,
 			[]string{"turned off", "whole table"},
-			[]string{"Create-backup button", "Set when DBTrail starts", "Backup settings page", "Restart DBTrail", "reads every table this server captures", "mydumper"},
+			[]string{"Create-backup button", "Set when DBTrail starts", PageSnapshots + " page", "Restart DBTrail", "reads every table this server captures", "mydumper"},
 			[]string{"backup location"}},
 		{"off, MySQL, no location: both fixes", true, true, false,
 			[]string{"turned off"},
@@ -211,7 +211,10 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 			[]string{"mydumper", "backup location"}},
 		{"on, no location of its own", false, true, false,
 			[]string{"no backup location of its own"},
-			[]string{"Backup dir or Backup S3", "Backup settings page", "Backups page"},
+			// One page now (#1573), so the fix names it once and then says
+			// where on it — naming a second page would send the reader
+			// looking for one that does not exist.
+			[]string{"Backup dir or Backup S3", PageSnapshots + " page", "Where and how often"},
 			[]string{"Create-backup button", "mydumper", "Restart"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -345,7 +348,7 @@ func TestHandleFirstRun(t *testing.T) {
 	t.Run("a MySQL server with a location gets its backup job's state", func(t *testing.T) {
 		id := add(ServerEntry{Name: "myloc", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineS3: "s3://b/p"})
 		_, body, rep := get(id)
-		if s := rep.Steps[len(rep.Steps)-1]; s.Name != "Take the first backup" || s.Fix != "Create one on the Backups page." {
+		if s := rep.Steps[len(rep.Steps)-1]; s.Name != "Take the first backup" || s.Fix != "Create one on the "+PageSnapshots+" page." {
 			t.Fatalf("backup step = %+v, body = %s", s, body)
 		}
 	})

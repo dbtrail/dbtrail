@@ -80,29 +80,23 @@
             <span>Status</span>
           </a>
         </div>
-        <!-- Protect group (#1384). Baselines and verification used to be two of
-             three panels on Settings > Storage, which was a category error —
-             Create baseline and Run verification are operations that produce
-             and validate recovery artifacts, not settings — and a layout
-             problem: the snapshot list is unbounded, so it pushed verification
-             far below the fold. Same per-item monitor gate as Storage: both
-             read watch-daemon state. The gate is on the GROUP, not per item:
-             every member is monitor-gated, so per-item gating would leave a
-             bare "Protect" heading with nothing under it on a standalone
-             serve — and on every console for the duration of the boot
-             capabilities fetch. (Settings is per-item for the opposite
-             reason: Connect AI is always visible, so its group must survive.)
-             The [data-capability]:not(.cap-on) rule and the $all sweep are
-             both element-agnostic, so this works unchanged. -->
-        <div class="nav-group" data-capability="monitor">
+        <!-- Protect group. ONE entry since #1573: Backups, Verification and
+             Backup settings were three addresses for one job — what copies
+             exist, whether they are restorable, and where and how often they
+             are made — and each one alone read as the whole answer.
+             NOT monitor-gated, unlike the two pages it replaces: Snapshots
+             opens on a standalone serve, where it drops what only the
+             daemon can do (taking a backup, running a check) and keeps what
+             serve can answer — the list of copies, the backup location it
+             also edits, and a saved timetable, shown with the reason
+             nothing here runs it. That is also why the Backup settings
+             entry is gone from the Settings group: it was the
+             serve-reachable half, and it is a section of this page now. -->
+        <div class="nav-group">
           <div class="nav-label">Protect</div>
-          <a class="nav-item" data-route="baselines" href="/baselines" data-capability="monitor">
+          <a class="nav-item" data-route="snapshots" href="/snapshots">
             <span class="ni-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7l9 5 9-5-9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg></span>
-            <span>Backups</span>
-          </a>
-          <a class="nav-item" data-route="verification" href="/verification" data-capability="monitor">
-            <span class="ni-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 4.4 3.2 8.2 8 9 4.8-.8 8-4.6 8-9V6l-8-3z"/><path d="m9 12 2 2 4-4"/></svg></span>
-            <span>Verification</span>
+            <span>Snapshots</span>
           </a>
         </div>
         <!-- Settings group. Storage and Rotation exist only on the watch
@@ -124,16 +118,6 @@
           <a class="nav-item" data-route="access-profiles" href="/access-profiles">
             <span class="ni-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 11h-6"/><path d="M19 8v6"/></svg></span>
             <span>Access profiles</span>
-          </a>
-          <!-- Backup settings (#1582) is NOT monitor-gated, for the same
-               reason Access profiles is not: the per-server backup location
-               is registry state the standalone serve edits too, and the
-               server Edit form no longer carries those fields — this page is
-               their only editor. The daemon-side cards inside it ARE
-               monitor-gated (serve runs no loops). -->
-          <a class="nav-item" data-route="backup-settings" href="/backup-settings">
-            <span class="ni-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><rect x="3" y="17" width="18" height="4" rx="1"/></svg></span>
-            <span>Backup settings</span>
           </a>
           <!-- Storage was a drawer of five unrelated concerns (#1543). Split
                by the question each half answers: what happens to your data

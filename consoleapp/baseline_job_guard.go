@@ -96,14 +96,14 @@ func (s *baselineSupervisor) statusSlotLocked(kind baselineJobKind) map[string]*
 // a false report about durable data. Wedge-safety is untouched by the
 // condition: a terminal state already frees the single-flight.
 //
-// It deliberately does NOT append a run to the history (the Backups page's
+// It deliberately does NOT append a run to the history (the Snapshots page's
 // durations ledger). recordRun runs BEFORE the status write in the dump,
 // refresh and restore jobs, so the guard cannot tell whether the panicking run
 // already has a row, and recording unconditionally would double-count it;
 // beyond that, history.Append is itself inside the guarded region, so
 // re-entering it from here could panic a second time, which the guard could
 // not catch. The consequence to know: a panicked run leaves no row on the
-// Backups page's run list. The server's status card shows failed with the
+// Snapshots page's run list. The server's status card shows failed with the
 // panic value, and the daemon log carries the stack.
 func (s *baselineSupervisor) recoverBaselineJob(kind baselineJobKind, serverID, serverName string) {
 	s.failPanickedJob(kind, serverID, serverName, recover())

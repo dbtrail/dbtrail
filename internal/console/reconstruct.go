@@ -92,7 +92,7 @@ type capabilitiesResponse struct {
 	// the endpoint does the per-server validation (local backup directory).
 	BaselineRestore bool `json:"baseline_restore"`
 	// BackupSchedule: this process runs the per-server backup schedule loop
-	// (#1442), so the Backups page may offer the schedule form. Process-global
+	// (#1442), so the Snapshots page may offer the schedule form. Process-global
 	// like BaselineTrigger; whether a given schedule can run on this daemon is
 	// answered per server by the listing's schedule.runnable.
 	BackupSchedule bool `json:"backup_schedule"`

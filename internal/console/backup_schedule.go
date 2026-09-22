@@ -15,7 +15,7 @@ import (
 )
 
 // Backup schedule (#1442): a per-server timer for unattended backups. Stored
-// on the server's registry entry, edited from the Backups page, and consumed
+// on the server's registry entry, edited from the Snapshots page, and consumed
 // by the watch daemon's schedule loop, which reads the registry every tick so
 // a schedule saved from the page applies without a restart. (The registry is
 // in memory once loaded: a schedule typed into the file by hand is seen after
@@ -40,7 +40,7 @@ import (
 // daemon happened to come back.
 
 // BackupMethod values name the producer a scheduled run used. They are the
-// wire format of a run's method on the Backups page, not an input.
+// wire format of a run's method on the Snapshots page, not an input.
 const (
 	// BackupMethodFull is a full backup from the source database (mydumper,
 	// or pgbaseline for PostgreSQL): the same job the Create backup button
@@ -792,7 +792,7 @@ func CheckBackupSchedule(e ServerEntry, sched BackupSchedule, gates BackupSchedu
 		return nil
 	}
 	if rebuildErr := rebuildPossible(e); rebuildErr != nil {
-		return notRunnable(strings.TrimSuffix(fullErr.Error(), onPage(PageBackupSettings)) + "; " + rebuildErr.Error() + onPage(PageBackupSettings))
+		return notRunnable(strings.TrimSuffix(fullErr.Error(), onPage(PageSnapshots)) + "; " + rebuildErr.Error() + onPage(PageSnapshots))
 	}
 	// Only a rebuild is possible. That is a runnable schedule (it is what
 	// --baseline-refresh-interval does), but only once there is a backup to
@@ -942,7 +942,7 @@ func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupSchedu
 }
 
 // BackupScheduleState is the schedule loop's in-memory view of one server,
-// for the Backups page: the job the schedule last started in this process,
+// for the Snapshots page: the job the schedule last started in this process,
 // as the supervisor's slot reports it. The durable view (runs and skips
 // across restarts) is the baseline run history; this one exists because the
 // history can be unavailable (an unreadable file) or silent (a job that

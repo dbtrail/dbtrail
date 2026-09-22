@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -26,19 +27,24 @@ ctx.history = { pushState: (s, t, u) => { log.push("push " + u); setURL(u); }, r
 let calls = [], nav = [];
 ctx.setActiveNav = (r) => nav.push(r);
 const painters = ["renderOverview", "renderEvents", "renderSchemaChanges", "renderRecover", "renderStatus", "renderRetention",
-  "renderDaemon", "renderBackupSettings", "renderBaselines", "renderVerification", "renderConnect", "renderAccessProfiles"];
+  "renderDaemon", "renderSnapshots", "renderConnect", "renderAccessProfiles"];
 const real = {};
 for (const n of painters) real[n] = ctx[n];
 const run = (sc) => {
   for (const n of painters) ctx[n] = (sc.real || []).includes(n) ? (...a) => { calls.push(n); return real[n](...a); } : () => { calls.push(n); };
   vm.runInContext("capsCache = " + JSON.stringify(sc.caps) + "; capsKnown = " + !!sc.known + ";", ctx);
   vm.runInContext("if (typeof routeArrivedFrom !== 'undefined') routeArrivedFrom = '';", ctx);
+  // Each scenario is a fresh visit: the address the last dispatch painted
+  // must not leak across them, or the second scenario decides whether to arm
+  // the jump by comparing against the first one's address.
+  vm.runInContext("if (typeof lastRouteAddress !== 'undefined') lastRouteAddress = null;", ctx);
   setURL(sc.start);
   log.length = 0; calls = []; nav = [];
   let err = "";
   try { for (const s of sc.steps) vm.runInContext(s, ctx); } catch (e) { err = String(e); }
   return { url: loc.pathname + loc.search + loc.hash, log: [...log], calls, nav, err,
-    from: vm.runInContext("typeof routeArrivedFrom === 'undefined' ? null : routeArrivedFrom", ctx) };
+    from: vm.runInContext("typeof routeArrivedFrom === 'undefined' ? null : routeArrivedFrom", ctx),
+    pending: vm.runInContext("typeof scrollPending === 'undefined' ? null : scrollPending", ctx) };
 };
 const scenarios = JSON.parse(process.argv[3]);
 const out = {};
@@ -63,12 +69,13 @@ type routeScenario struct {
 }
 
 type routeResult struct {
-	URL   string
-	Log   []string
-	Calls []string
-	Nav   []string
-	Err   string
-	From  *string
+	URL     string
+	Log     []string
+	Calls   []string
+	Nav     []string
+	Err     string
+	From    *string
+	Pending *bool
 }
 
 func runRouteScenarios(t *testing.T, scenarios map[string]routeScenario) map[string]routeResult {
@@ -111,7 +118,8 @@ var (
 
 // TestOldAddressesLandOnTheirPage: an address the console no longer has a page
 // for (a bookmark, a link in an old email or doc, a Back entry) lands on the
-// page that replaced it, with the bar rewritten, and whatever else the address
+// page that replaced it — at the section that was its page, where the new
+// page has one — with the bar rewritten, and whatever else the address
 // carried (query, anchor) travels along. Before, the translation for /storage
 // and /sql sat in navigate(), which nothing called with those names, so a
 // bookmark of either painted Overview under the old address.
@@ -171,12 +179,33 @@ func TestOldAddressesLandOnTheirPage(t *testing.T) {
 			want{"/", nil, []string{"renderOverview"}, "overview", ""}},
 		{"events", routeScenario{Start: "/events?q=1", Steps: boot, Caps: watchCaps, Known: true},
 			want{"/events?q=1", nil, []string{"renderEvents"}, "events", ""}},
+		{"snapshots", routeScenario{Start: "/snapshots", Steps: boot, Caps: watchCaps, Known: true},
+			want{"/snapshots", nil, []string{"renderSnapshots"}, "snapshots", ""}},
+		// The three pages that merged into Snapshots (#1573). Each old
+		// address lands on the part of the page that was its page, and the
+		// answer never waits for the capability check: unlike two of the
+		// pages it replaces, Snapshots opens on a standalone serve too.
 		{"baselines", routeScenario{Start: "/baselines", Steps: boot, Caps: watchCaps, Known: true},
-			want{"/baselines", nil, []string{"renderBaselines"}, "baselines", ""}},
-		{"verification", routeScenario{Start: "/verification", Steps: boot, Caps: watchCaps, Known: true},
-			want{"/verification", nil, []string{"renderVerification"}, "verification", ""}},
-		{"backup-settings", routeScenario{Start: "/backup-settings", Steps: boot, Caps: serveCaps, Known: true},
-			want{"/backup-settings", nil, []string{"renderBackupSettings"}, "backup-settings", ""}},
+			want{"/snapshots", []string{"replace /snapshots"}, []string{"renderSnapshots"}, "snapshots", "baselines"}},
+		{"baselines, serve", routeScenario{Start: "/baselines", Steps: boot, Caps: serveCaps, Known: true},
+			want{"/snapshots", []string{"replace /snapshots"}, []string{"renderSnapshots"}, "snapshots", "baselines"}},
+		{"baselines, capabilities unknown", routeScenario{Start: "/baselines", Steps: boot, Caps: serveCaps, Known: false},
+			want{"/snapshots", []string{"replace /snapshots"}, []string{"renderSnapshots"}, "snapshots", "baselines"}},
+		{"verification lands on its section", routeScenario{Start: "/verification", Steps: boot, Caps: watchCaps, Known: true},
+			want{"/snapshots#checks", []string{"replace /snapshots#checks"}, []string{"renderSnapshots"}, "snapshots", "verification"}},
+		{"backup-settings lands on its section", routeScenario{Start: "/backup-settings", Steps: boot, Caps: serveCaps, Known: true},
+			want{"/snapshots#setup", []string{"replace /snapshots#setup"}, []string{"renderSnapshots"}, "snapshots", "backup-settings"}},
+		// An address that already names a part of the old page keeps it: a
+		// link INTO a section must not be overwritten by the section the
+		// whole page became.
+		{"an anchor on the old address survives", routeScenario{Start: "/verification#past", Steps: boot, Caps: watchCaps, Known: true},
+			want{"/snapshots#past", []string{"replace /snapshots#past"}, []string{"renderSnapshots"}, "snapshots", "verification"}},
+		{"query and section travel together", routeScenario{Start: "/backup-settings?a=1", Steps: boot, Caps: watchCaps, Known: true},
+			want{"/snapshots?a=1#setup", []string{"replace /snapshots?a=1#setup"}, []string{"renderSnapshots"}, "snapshots", "backup-settings"}},
+		// A caller naming one of them pushes the new address, section and
+		// all, and records no arrival: nobody followed an old link.
+		{"navigate verification from events", routeScenario{Start: "/events", Steps: []string{"navigate('verification')"}, Caps: watchCaps, Known: true},
+			want{"/snapshots#checks", []string{"push /snapshots#checks"}, []string{"renderSnapshots"}, "snapshots", ""}},
 		// Back and Forward onto an old address.
 		{"back onto storage", routeScenario{Start: "/storage", Steps: []string{"onPopState()"}, Caps: watchCaps, Known: true},
 			want{"/retention", []string{"replace /retention"}, []string{"renderRetention"}, "retention", "storage"}},
@@ -232,7 +261,12 @@ func TestOldAddressesLandOnTheirPage(t *testing.T) {
 
 // TestRouteAliasesLandOnLiveRoutes: every old address names a live route and
 // never another old one, so no chain or loop can form, whatever the
-// capability check answers.
+// capability check answers. A target may name a SECTION of that route
+// ("snapshots#checks"), and that section has to be one the page has a
+// heading for — an anchor no heading answers leaves the reader at the top of
+// a page three times longer than the one they bookmarked. (Whether the
+// heading is DRAWN can still depend on the console; that case is the arrival
+// note's job, and TestSnapshotsOnServeDropsTheDaemonParts pins it.)
 func TestRouteAliasesLandOnLiveRoutes(t *testing.T) {
 	got := runRouteScenarios(t, map[string]routeScenario{})["__targets"]
 	var v struct {
@@ -246,7 +280,17 @@ func TestRouteAliasesLandOnLiveRoutes(t *testing.T) {
 	for _, r := range v.Routes {
 		live[r] = true
 	}
-	seen := 0
+	// The sections the page can draw, by the id snapshotSection() is called
+	// with. Read from app.js rather than listed here: a section that is
+	// renamed or dropped has to take its anchor with it.
+	drawn := map[string]bool{}
+	for _, m := range regexp.MustCompile(`snapshotSection\("[^"]*", "([^"]+)"\)`).FindAllStringSubmatch(readAsset(t, "app.js"), -1) {
+		drawn[m[1]] = true
+	}
+	if len(drawn) < 2 {
+		t.Fatalf("found %d drawn sections, want the ones Snapshots opens; the call shape changed and this guard reads nothing", len(drawn))
+	}
+	seen, anchors := 0, 0
 	for _, pass := range v.Targets {
 		old := map[string]bool{}
 		for _, p := range pass {
@@ -254,12 +298,60 @@ func TestRouteAliasesLandOnLiveRoutes(t *testing.T) {
 		}
 		for _, p := range pass {
 			seen++
-			if !live[p[1]] || old[p[1]] {
+			route, sect, hasSect := strings.Cut(p[1], "#")
+			if !live[route] || old[route] {
 				t.Errorf("old address %q goes to %q, want a live route that is not itself an old address", p[0], p[1])
+			}
+			if hasSect {
+				anchors++
+				if !drawn[sect] {
+					t.Errorf("old address %q lands on section %q of %q, which the page never draws", p[0], sect, route)
+				}
 			}
 		}
 	}
-	if seen < 6 {
-		t.Fatalf("read %d alias targets, want the three old addresses under both capability answers", seen)
+	if seen < 12 {
+		t.Fatalf("read %d alias targets, want the six old addresses under both capability answers", seen)
+	}
+	if anchors < 4 {
+		t.Fatalf("read %d targets naming a section, want the two merged pages under both capability answers", anchors)
+	}
+}
+
+// TestTheJumpToASectionIsArmedOncePerArrival: the address keeps naming a
+// section for the whole visit (#checks / #setup stay in the bar), and the
+// Snapshots page repaints itself through renderRoute on a saved per-server
+// location, a saved schedule and a server switch. If each of those re-armed
+// the jump, pressing Save at the bottom of the page would throw the reader
+// back up to the section heading, every time.
+//
+// Driven through the real renderRoute with the painters swapped out, so what
+// is measured is the arming, not what a fake screen does with it.
+func TestTheJumpToASectionIsArmedOncePerArrival(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sc   routeScenario
+		want bool
+	}{
+		{"arriving at a section arms it", routeScenario{Start: "/verification", Steps: boot, Caps: watchCaps, Known: true}, true},
+		{"a repaint with the same address does not", routeScenario{Start: "/verification",
+			Steps: []string{"renderRoute()", "renderRoute()"}, Caps: watchCaps, Known: true}, false},
+		{"a page with no section never arms it", routeScenario{Start: "/events", Steps: boot, Caps: watchCaps, Known: true}, false},
+		{"navigating away and back arms it again", routeScenario{Start: "/verification",
+			Steps: []string{"renderRoute()", "__setURL('/events')", "renderRoute()", "__setURL('/snapshots#setup')", "renderRoute()"},
+			Caps:  watchCaps, Known: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runRouteScenarios(t, map[string]routeScenario{"s": tc.sc})["s"]
+			if got.Err != "" {
+				t.Fatalf("threw: %s", got.Err)
+			}
+			if got.Pending == nil {
+				t.Fatal("scrollPending is not defined; this guard measures nothing")
+			}
+			if *got.Pending != tc.want {
+				t.Errorf("the jump is armed %v, want %v", *got.Pending, tc.want)
+			}
+		})
 	}
 }

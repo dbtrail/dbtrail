@@ -48,7 +48,7 @@ type backupScheduler struct {
 	sup *baselineSupervisor
 	reg *console.Registry
 	// windows caches each server's last measured window (#1721) for
-	// windowCacheFor, so the Backups page, which asks on every load, does
+	// windowCacheFor, so the Snapshots page, which asks on every load, does
 	// not open the index once per server per load.
 	windows map[string]windowSample
 	// window is the probe both the loop's and the API's gates carry:
@@ -195,7 +195,7 @@ func newBackupScheduleReporter(sup *baselineSupervisor, reg *console.Registry, f
 func (b *backupScheduler) FullBackups() (bool, error) {
 	// The lock mode the next dump would really use (lockModeNow), not the
 	// refusal this process started with: a bad lock mode fixed from the
-	// Backup settings page lets dumps through again at once, and the
+	// Snapshots page lets dumps through again at once, and the
 	// schedule's card, next-run prediction and gates must say so too rather
 	// than wait for a restart.
 	_, err := b.sup.lockModeNow()
@@ -208,7 +208,7 @@ func (b *backupScheduler) WindowProbe() console.BackupWindowProbe {
 }
 
 // windowProbeTimeout bounds the one index read the probe makes: it runs on
-// every schedule decision AND every load of the Backups page, so an index
+// every schedule decision AND every load of the Snapshots page, so an index
 // that does not answer must cost a bounded wait and an "unknown", never a
 // hung page.
 const windowProbeTimeout = 3 * time.Second
@@ -911,7 +911,7 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 // backup it chose (#1737): the rate, the fixed cost, how many updates it was
 // fitted from and how old the newest of them is, so a model that stopped
 // learning is visible in the daemon log and not only in the reason on the
-// Backups page. Read from the history again rather than carried from the
+// Snapshots page. Read from the history again rather than carried from the
 // decision: nothing is recorded between the two, one tick apart at most.
 func (b *backupScheduler) modelLogArgs(serverID string, now time.Time) []any {
 	h := b.sup.history

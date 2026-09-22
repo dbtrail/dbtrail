@@ -62,7 +62,7 @@ ctx.__api = async (path, opts) => {
 vm.runInContext("api = (path, opts) => __api(path, opts);", ctx);
 const paint = async (server) => {
   vm.runInContext("currentServer = " + JSON.stringify(server) + ";", ctx);
-  await vm.runInContext("renderVerification()", ctx);
+  await vm.runInContext("renderSnapshots()", ctx);
   await flush();
 };
 const away = () => { vm.runInContext("clear(VIEW()); VIEW().append(el('div', { text: 'Events' }));", ctx); };

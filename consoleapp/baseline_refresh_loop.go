@@ -174,7 +174,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		// the daemon-wide interval loop this line is the only evidence the loop
 		// is alive at all. Silence it and "this server has nothing to do" and
 		// "the refresh loop died three weeks ago" become the same picture, with
-		// the Backups page showing a successful run from before either.
+		// the Snapshots page showing a successful run from before either.
 		slog.Info("baseline refresh: nothing has been indexed since the last fold; skipping this cycle",
 			"server", req.ServerName, "id", req.ServerID)
 		// LAST, so that releasing the slot is the last thing this cycle does.

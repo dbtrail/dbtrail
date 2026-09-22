@@ -8,16 +8,18 @@ import (
 	"testing"
 )
 
-// The Backup settings page (#1582): wire names, coverage of the
-// daemon rows, the move of the per-server fields out of the server form, and
-// the passthrough that makes the move safe.
+// The backup settings (#1582): wire names, coverage of the daemon rows, the
+// move of the per-server fields out of the server form, and the passthrough
+// that makes the move safe. They were a page of their own until #1573 made
+// them the "Where and how often" half of Snapshots; the guards below follow
+// the half, not the address it used to have.
 
 // TestBackupSettingsWireNamesMatchTheFrontend pins the JSON keys the Go DTOs
 // emit against what the page reads. A renamed tag on either side renders a
 // page of blanks with the whole suite green otherwise.
 func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 	js := readAsset(t, "app.js")
-	page := jsFunctionBody(t, js, "buildBackupSettings") +
+	page := jsFunctionBody(t, js, "snapshotSetupSections") +
 		jsFunctionBody(t, js, "backupDaemonCard") +
 		jsFunctionBody(t, js, "backupDaemonEditCard") +
 		jsFunctionBody(t, js, "backupDaemonEditRow") +
@@ -106,39 +108,55 @@ func TestServerFormCarriesTheBackupFieldsAsPassthrough(t *testing.T) {
 	}
 }
 
-// TestBackupSettingsPageIsWired: route in ROUTES, a renderRoute arm, the
-// monitor gate, and a nav item — the four halves that make a page reachable.
-func TestBackupSettingsPageIsWired(t *testing.T) {
+// TestBackupSettingsSectionIsWired: route in ROUTES, a renderRoute arm, no
+// monitor gate, a nav item, and the anchor the old address lands on — what
+// makes these settings reachable now that they are a section (#1573) rather
+// than a page.
+func TestBackupSettingsSectionIsWired(t *testing.T) {
 	js := readAsset(t, "app.js")
-	if !regexp.MustCompile(`"backup-settings"\]?`).MatchString(js) {
-		t.Fatal("backup-settings is not in ROUTES")
+	if !regexp.MustCompile(`"snapshots"\]?`).MatchString(js) {
+		t.Fatal("snapshots is not in ROUTES")
 	}
-	if !strings.Contains(js, `case "backup-settings": return renderBackupSettings();`) {
-		t.Error("renderRoute has no arm for backup-settings; the URL falls through to Overview")
+	if !strings.Contains(js, `case "snapshots": return renderSnapshots();`) {
+		t.Error("renderRoute has no arm for snapshots; the URL falls through to Overview")
+	}
+	// The old address has to keep landing on this half: a bookmark of the
+	// settings page that arrives at the top of a page three times longer
+	// looks like the settings were removed.
+	if !strings.Contains(js, `["backup-settings", () => "snapshots#setup"]`) {
+		t.Error("/backup-settings no longer lands on the setup section of Snapshots")
+	}
+	if !strings.Contains(js, `snapshotSection("Where and how often", "setup")`) {
+		t.Error("the setup section heading is gone, so the anchor the old address carries answers nothing")
 	}
 	// NOT monitor-gated, deliberately (the Access profiles precedent): the
-	// server Edit form's backup fields became passthroughs, so this page is
-	// the ONLY editor of the registry's backup location — and the registry
-	// is state the standalone serve edits too. Gating the page left serve
-	// with no UI path to a backup location at all. The daemon-side cards
-	// inside the page carry the monitor gate instead.
-	if strings.Contains(js, `route === "backup-settings") && !capsCache.monitor`) ||
-		strings.Contains(js, `"backup-settings" || route`) {
-		t.Error("backup-settings is behind the monitor gate again; on serve the per-server backup " +
+	// server Edit form's backup fields became passthroughs, so this is the
+	// ONLY editor of the registry's backup location — and the registry is
+	// state the standalone serve edits too. Gating the page left serve with
+	// no UI path to a backup location at all. The daemon-side cards inside
+	// carry the monitor gate instead.
+	// Any shape of "this route needs the daemon", not one spelling of it: a
+	// regression written without the closing paren read as fine to a
+	// Contains() check. Behaviour is pinned by the serve rows of
+	// TestOldAddressesLandOnTheirPage; this keeps the gate from creeping back
+	// in on the navigate() side, where those rows do not look.
+	gate := regexp.MustCompile(`route === "snapshots"[^;\n]{0,60}!capsCache\.monitor`)
+	if gate.MatchString(js) {
+		t.Error("snapshots is behind the monitor gate; on serve the per-server backup " +
 			"location would have NO editor anywhere in the UI")
 	}
-	body := jsFunctionBody(t, js, "buildBackupSettings")
+	body := jsFunctionBody(t, js, "snapshotSetupSections")
 	if !strings.Contains(body, "capsCache.monitor") {
-		t.Error("buildBackupSettings no longer gates the daemon-side cards on monitor; on serve the " +
+		t.Error("snapshotSetupSections no longer gates the daemon-side cards on monitor; on serve the " +
 			"daemon card renders empty rows and reads as an unconfigured install")
 	}
 	html := readAsset(t, "index.html")
-	if !strings.Contains(html, `data-route="backup-settings"`) {
-		t.Error("index.html has no nav item for backup-settings")
+	if !strings.Contains(html, `data-route="snapshots"`) {
+		t.Error("index.html has no nav item for snapshots")
 	}
-	navRE := regexp.MustCompile(`(?s)data-route="backup-settings"[^>]*>`)
+	navRE := regexp.MustCompile(`(?s)data-route="snapshots"[^>]*>`)
 	if nav := navRE.FindString(html); strings.Contains(nav, `data-capability="monitor"`) {
-		t.Error("the backup-settings nav item is capability-gated on monitor; serve users could not " +
+		t.Error("the snapshots nav item is capability-gated on monitor; serve users could not " +
 			"reach the only editor of the per-server backup location")
 	}
 }
@@ -331,9 +349,9 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 
 	// The three kinds are told apart by layout: two section labels, and the
 	// daemon card outside the tinted grid.
-	build := functionBody(t, js, "function buildBackupSettings(")
+	build := functionBody(t, js, "function snapshotSetupSections(")
 	if strings.Count(build, `sect("`) != 2 {
-		t.Error("buildBackupSettings does not open exactly two sections; the split between change-here and set-at-startup is not drawn")
+		t.Error("snapshotSetupSections does not open exactly two sections; the split between change-here and set-at-startup is not drawn")
 	}
 	if strings.Contains(build, "cards.append(backupDaemonCard") || !strings.Contains(daemon, `class: "card bks-boot"`) {
 		t.Error("the daemon card is inside the tinted .cards grid again; tinted vs plain is the mark that tells the kinds apart")
@@ -345,7 +363,7 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	// jsFunctionBody fails open, because that helper truncates each line at
 	// its first "//" and a URL literal ("s3://...") hides everything after
 	// it on the line. Comments carrying a dash ring here on purpose.
-	for _, name := range []string{"backupRefreshCard", "backupDaemonCard", "backupServerRow", "buildBackupSettings", "cfShape", "blCase", "s3RetentionBox"} {
+	for _, name := range []string{"backupRefreshCard", "backupDaemonCard", "backupServerRow", "snapshotSetupSections", "cfShape", "blCase", "s3RetentionBox"} {
 		body := jsFunctionSpan(t, js, name)
 		for _, m := range regexp.MustCompile(`"([^"\n]*)"`).FindAllStringSubmatch(body, -1) {
 			if strings.Contains(m[1], "—") {
@@ -355,23 +373,41 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	}
 }
 
-// TestBackupSettingsIsNamedSettings: the page and its nav item say Settings,
-// so the pair with the Backups page reads as work vs configuration. Not the
-// bare word: the item lives inside the sidebar's Settings group already.
-func TestBackupSettingsIsNamedSettings(t *testing.T) {
+// TestSnapshotsIsNamedOnce: one page, one name, in the three places a reader
+// meets it — the heading, the sidebar and the command palette. Three pages
+// merged into it (#1573), so the failure this catches is a half-rename: a
+// sidebar that still says Backups over a page whose heading says Snapshots,
+// or a palette entry for a page that no longer exists.
+func TestSnapshotsIsNamedOnce(t *testing.T) {
 	js := readAsset(t, "app.js")
-	if strings.Count(js, `pageHead("Backup settings"`) != 2 {
-		t.Error("the page head (built and error arms) does not read Backup settings")
+	if strings.Count(js, `pageHead("Snapshots"`) != 2 {
+		t.Error("the page head (built and error arms) does not read Snapshots")
 	}
-	if !strings.Contains(js, `label: "Backup settings", run: () => navigate("backup-settings")`) {
-		t.Error("the command palette entry does not read Backup settings")
+	if !strings.Contains(js, `label: "Snapshots",`) || !strings.Contains(js, `run: () => navigate("snapshots")`) {
+		t.Error("the command palette entry does not read Snapshots")
+	}
+	// Typing what the pages used to be called has to find it: somebody who
+	// has used this console looks for Backups, and an entry they cannot find
+	// reads as a feature that was removed. Read inside the palette's own
+	// function, and paired with the filter that consults the list — a list
+	// nothing reads would pass a search over the whole file.
+	palette := jsFunctionBody(t, js, "cmdkCommands")
+	for _, old := range []string{"backups", "verification", "backup settings"} {
+		if !strings.Contains(palette, `"`+old+`"`) {
+			t.Errorf("the palette does not answer to %q, the name one of the merged pages had", old)
+		}
+	}
+	if !strings.Contains(jsFunctionBody(t, js, "renderCmdk"), "c.alt") {
+		t.Error("the palette filter no longer reads the alternate names, so the old page names find nothing")
 	}
 	html := readAsset(t, "index.html")
-	nav := regexp.MustCompile(`(?s)data-route="backup-settings".*?</a>`).FindString(html)
-	if !strings.Contains(nav, "<span>Backup settings</span>") {
-		t.Error("the nav item does not read Backup settings")
+	nav := regexp.MustCompile(`(?s)data-route="snapshots".*?</a>`).FindString(html)
+	if !strings.Contains(nav, "<span>Snapshots</span>") {
+		t.Error("the nav item does not read Snapshots")
 	}
-	if strings.Contains(js, "Backups & snapshots") || strings.Contains(html, "Backups &amp; snapshots") {
-		t.Error("the old page name survives somewhere; a pointer now names a page that does not exist")
+	for _, gone := range []string{`pageHead("Backups"`, `pageHead("Verification"`, `pageHead("Backup settings"`} {
+		if strings.Contains(js, gone) {
+			t.Errorf("%s is back; the three pages are one page with one heading now", gone)
+		}
 	}
 }

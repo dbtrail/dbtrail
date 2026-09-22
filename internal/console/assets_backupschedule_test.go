@@ -123,11 +123,18 @@ func TestBackupScheduleWireNamesMatchTheFrontend(t *testing.T) {
 }
 
 // The card can be unmounted with the whole suite green; this pins that the
-// Backups page still calls it.
-func TestBackupsPageStillMountsTheScheduleCard(t *testing.T) {
-	body := jsFunctionBody(t, readAsset(t, "app.js"), "renderBaselines")
+// Snapshots page still calls it, and that it sits in the half that answers
+// "where and how often" rather than back up with the list (#1573).
+func TestSnapshotsPageStillMountsTheScheduleCard(t *testing.T) {
+	body := jsFunctionBody(t, readAsset(t, "app.js"), "renderSnapshots")
 	if !strings.Contains(body, "backupScheduleCard(") {
-		t.Error("renderBaselines no longer mounts backupScheduleCard, so the schedule has no UI at all")
+		t.Error("the Snapshots page no longer mounts backupScheduleCard, so the schedule has no UI at all")
+	}
+	setup := strings.Index(body, `snapshotSection("Where and how often"`)
+	card := strings.Index(body, "backupScheduleCard(")
+	if setup < 0 || card < setup {
+		t.Error("the schedule card is mounted above the \"Where and how often\" heading; the timetable is " +
+			"what that half of the page is named after")
 	}
 }
 

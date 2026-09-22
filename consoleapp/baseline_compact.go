@@ -196,7 +196,7 @@ func (s *baselineSupervisor) runCompact(req refreshRequest, due []compactCandida
 
 // recordCompactRun writes the job's run to the history. No trigger: this is
 // the daemon's housekeeping, not the schedule's slot (with the refresh's
-// trigger the Backups page would show it as the last scheduled run, a full
+// trigger the Snapshots page would show it as the last scheduled run, a full
 // backup that produced nothing). A failure that repeats is ONE record whose
 // end moves (console.AppendCompact): the job is retried at every refresh,
 // and at a 5-minute interval a persistent one would otherwise take the

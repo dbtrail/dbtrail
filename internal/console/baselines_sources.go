@@ -14,7 +14,7 @@ import (
 //
 // A local directory answers off the filesystem; an S3 one opens DuckDB, loads
 // httpfs and globs a bucket, and this runs inside `bintrail-console watch`,
-// which is also the capture process. The Backups page polls every ~10s while a
+// which is also the capture process. The Snapshots page polls every ~10s while a
 // run is in flight and the server sets no WriteTimeout, so an endpoint that
 // accepts and never answers would hold a request open indefinitely.
 //
