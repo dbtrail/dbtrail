@@ -482,14 +482,14 @@ See [Query & Recovery](query-and-recovery.md) for the full flag reference and th
 
 You don't want to discover a broken recovery chain *during* an incident. `bintrail
 verify` reconstructs your data from the baseline + indexed binlog and compares
-it with a reference (the next baseline, or the live source) — per table,
-`match` / `mismatch` / `inconclusive`. The next baseline tests against your
-database only when it was read from it, not when a refresh built it from the
-recorded changes: [Verifying a recovery](verify.md#baseline-anchored-default-drift-free).
+it with a read of your database (a baseline taken from a dump, or the live
+source) — per table, `match` / `mismatch` / `inconclusive`:
+[Verifying a recovery](verify.md#baseline-anchored-default-drift-free).
 
 **Run the drift-free check** (no live source, no production impact — safe on a
-schedule). It compares the two most recent baselines, reconstructing the older
-one forward to the newer one's binlog anchor:
+schedule). For each table it takes the last baseline that read it from the
+database and the baseline before that one, reconstructing the older one forward
+to the read's binlog anchor:
 
 ```sh
 bintrail verify --index-dsn "$IDX" --baseline-dir /data/baselines

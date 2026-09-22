@@ -76,8 +76,9 @@ type VerifyController interface {
 type VerifyMode string
 
 const (
-	// VerifyModeBaselineAnchored compares the two most recent baselines,
-	// drift-free — no live source read. The default.
+	// VerifyModeBaselineAnchored compares each table's last read of the
+	// database with the baseline before it, drift-free — no live source read.
+	// The default.
 	VerifyModeBaselineAnchored VerifyMode = "baseline-anchored"
 	// VerifyModeLiveSource reconstructs each table to a consistent snapshot of
 	// the live source and compares. Needs the server's source DSN and reads
@@ -135,6 +136,13 @@ type VerifyTableResult struct {
 	EventsChecked int    `json:"events_checked,omitempty"`
 	ChainsChecked int    `json:"chains_checked,omitempty"`
 	Anchor        string `json:"anchor,omitempty"`
+	// ComparedTo names the read of the database a baseline-anchored table was
+	// fingerprinted against (RFC3339, UTC): the same datum, under the same
+	// name, as the CLI's `verify --format json` compared_to. The newest
+	// snapshot can be days newer than that read, so a "match" without it reads
+	// as "the newest snapshot is verified". Empty where no two fingerprints
+	// were compared.
+	ComparedTo string `json:"compared_to,omitempty"`
 	// Explainable is true only for a baseline-anchored mismatch whose pair is
 	// still cached from the run that produced this result — the precondition
 	// for calling Explain on it.

@@ -89,7 +89,7 @@ func TestVerifyBaselinePair_PositionAnchoredLowerBound_797(t *testing.T) {
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
 
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil {
 		t.Fatalf("FindBaselinePair: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestVerifyBaselinePair_NoPrevAnchor_FallsBackToTimestamp_797(t *testing.T) 
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
 
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil {
 		t.Fatalf("FindBaselinePair: %v", err)
 	}

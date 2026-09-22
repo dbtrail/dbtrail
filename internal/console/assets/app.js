@@ -7493,7 +7493,7 @@ function verifyRegions(servers, opts) {
 // operator browses. Source of truth for the long form is the issue; keep
 // these three claims per entry: proof, prerequisite, cost.
 const VFY_MODE_HELP = {
-  "baseline-anchored": "Takes your two newest snapshots, replays the recorded changes from the older one forward, and compares the result with the newer one. It tests against your database only when the newer snapshot was read from it; a table the newer one stores as changes beside its previous file is reported as not checked. Needs two snapshots. Never touches your database.",
+  "baseline-anchored": "For each table, takes the last snapshot that read it from your database and the snapshot before that one, replays the recorded changes from the older one forward, and compares the result with what your database held at that read. A table whose last read is no longer kept, or has no snapshot before it, is reported as not checked. Never touches your database.",
   "live-source": "Rebuilds each table from a snapshot plus the recorded changes, then compares it row by row against the real table. The strongest content check, and the only one that reads your database: it takes time, adds load, and needs a quiet table, because writes that land during the scan show up as mismatches. Run it outside busy hours.",
   "recover-inputs": "Reads the index's own record of each change and checks that every row's history holds together from one change to the next. This is the data an undo script is built from. Needs no snapshot and never touches your database.",
 };
@@ -7734,6 +7734,20 @@ function vfySortResults(results) {
   }).map((p) => p[0]);
 }
 
+// vfyComparedToLine says which read of the database the compared tables were
+// checked against, as the CLI's text report does: the newest snapshot can be
+// days newer than that read, so a "match" alone reads as "the newest snapshot
+// is verified". "" when no table was compared.
+function vfyComparedToLine(results) {
+  const times = [];
+  (results || []).forEach((r) => {
+    if (r.compared_to && !times.includes(r.compared_to)) times.push(r.compared_to);
+  });
+  if (!times.length) return "";
+  if (times.length === 1) return "Compared against the last read of your database, at " + utcLabel(times[0]) + ".";
+  return "Compared against each table's last read of your database, at " + times.length + " different times. Hover a table to see its read.";
+}
+
 // vfyCountsText: the per-table counters as a compact fixed column (#1419 §2).
 // The wire carries them only for recover-inputs rows (toWireResult copies the
 // walk's counters; the content modes never set them) — review caught the
@@ -7819,6 +7833,8 @@ function renderVerifyResults(container, status, id, opts) {
   if (status.state === "succeeded") {
     container.append(el("p", { class: "form-hint vfy-verdict-sentence", text: vfyVerdictSentence(s) }));
   }
+  const comparedTo = vfyComparedToLine(status.results);
+  if (comparedTo) container.append(el("p", { class: "form-hint vfy-compared-to", text: comparedTo }));
   if (status.note) container.append(el("p", { class: "form-hint", text: status.note }));
   if (status.last_error) container.append(el("p", { class: "form-msg err", text: status.last_error }));
 
@@ -7832,7 +7848,8 @@ function renderVerifyResults(container, status, id, opts) {
     const cls = vfyCardClass(r);
     const row = el("div", { class: "vfy-row " + cls });
     row.append(el("span", { class: "vfy-mark", text: VFY_STATUS_MARK[cls] || "?" }));
-    row.append(el("span", { class: "vfy-tbl", text: r.schema + "." + r.table }));
+    row.append(el("span", { class: "vfy-tbl", text: r.schema + "." + r.table,
+      title: r.compared_to ? "Compared against the read of " + utcLabel(r.compared_to) : null }));
     const verdict = r.status === "inconclusive" && VFY_BENIGN_KINDS[r.inconclusive_kind]
       ? "nothing to check" : r.status;
     row.append(el("span", { class: "vfy-verdict", text: verdict }));

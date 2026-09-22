@@ -23,6 +23,21 @@ import (
 // writeTestBaseline writes a one-table baseline snapshot (Parquet + _SUCCESS
 // marker) under baseDir at snapshot time ts. anchorFile/anchorPos, when set,
 // record the binlog anchor in the Parquet metadata (#633).
+// readFooter is the footer of a snapshot that read the database, as
+// baseline.Run writes it: what `bintrail baseline` produces, and what the
+// default check takes as its reference.
+func readFooter(ts time.Time, createSQL string) map[string]string {
+	at := ts.UTC().Format(time.RFC3339)
+	return map[string]string{
+		baseline.MetaKeyCreateTableSQL:    createSQL,
+		baseline.MetaKeySnapshotTimestamp: at,
+		baseline.MetaKeyMydumperFormat:    "sql",
+		baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
+		baseline.MetaKeyLastDumpAt:        at,
+		baseline.MetaKeyFoldGeneration:    "0",
+	}
+}
+
 func writeTestBaseline(t *testing.T, baseDir string, ts time.Time, dbName, table, createSQL string,
 	cols []baseline.Column, rows [][]string, anchorFile string, anchorPos int64) {
 	t.Helper()
@@ -32,7 +47,7 @@ func writeTestBaseline(t *testing.T, baseDir string, ts time.Time, dbName, table
 	if err := os.MkdirAll(parquetDir, 0o755); err != nil {
 		t.Fatalf("mkdir baseline: %v", err)
 	}
-	md := map[string]string{baseline.MetaKeyCreateTableSQL: createSQL}
+	md := readFooter(ts, createSQL)
 	if anchorFile != "" {
 		md[baseline.MetaKeyBinlogFile] = anchorFile
 		md[baseline.MetaKeyBinlogPos] = strconv.FormatInt(anchorPos, 10)
@@ -71,7 +86,7 @@ func writeTestBaselineWithNulls(t *testing.T, baseDir string, ts time.Time, dbNa
 	if err := os.MkdirAll(parquetDir, 0o755); err != nil {
 		t.Fatalf("mkdir baseline: %v", err)
 	}
-	md := map[string]string{baseline.MetaKeyCreateTableSQL: createSQL}
+	md := readFooter(ts, createSQL)
 	if anchorFile != "" {
 		md[baseline.MetaKeyBinlogFile] = anchorFile
 		md[baseline.MetaKeyBinlogPos] = strconv.FormatInt(anchorPos, 10)
@@ -171,15 +186,12 @@ func TestVerifyBaselinePair_MatchAndMismatch(t *testing.T) {
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
 
-	pairs, unpaired, prevOnly, err := FindBaselinePair(ctx, baseDir)
+	pairs, prevOnly, err := FindBaselinePair(ctx, baseDir)
 	if err != nil {
 		t.Fatalf("FindBaselinePair: %v", err)
 	}
-	if len(pairs) != 1 {
-		t.Fatalf("expected 1 pair (orders), got %d", len(pairs))
-	}
-	if len(unpaired) != 0 {
-		t.Errorf("expected no unpaired tables, got %v", unpaired)
+	if len(pairs) != 1 || pairs[0].Settled != nil {
+		t.Fatalf("expected 1 compared pair (orders), got %+v", pairs)
 	}
 	if len(prevOnly) != 0 {
 		t.Errorf("expected no prev-only tables, got %v", prevOnly)
@@ -286,7 +298,7 @@ func TestExplainBaselinePairMismatch(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -399,7 +411,7 @@ func TestExplainBaselinePairMismatch_CompositePK(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -473,7 +485,7 @@ func TestExplainBaselinePairMismatch_DeferredDrift(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -508,8 +520,9 @@ func TestExplainBaselinePairMismatch_DeferredDrift(t *testing.T) {
 }
 
 // TestFindBaselinePair_UnpairedAndSelection locks two things: a table present
-// only in the new snapshot lands in `unpaired` (not silently dropped), and the
-// pair is built from the two most recent snapshots, ignoring an older third.
+// only in the newest snapshot gets its own answer (not silently dropped), and
+// when the newest snapshot is a read the pair is the two newest, ignoring an
+// older third.
 func TestFindBaselinePair_UnpairedAndSelection(t *testing.T) {
 	baseDir := t.TempDir()
 	now := time.Now().UTC()
@@ -525,19 +538,23 @@ func TestFindBaselinePair_UnpairedAndSelection(t *testing.T) {
 	writeTestBaseline(t, baseDir, newTS, "db", "orders", createSQL, cols, rows, "binlog.000001", 300)
 	writeTestBaseline(t, baseDir, newTS, "db", "fresh", createSQL, cols, rows, "binlog.000001", 300) // new-only
 
-	pairs, unpaired, _, err := FindBaselinePair(context.Background(), baseDir)
+	pairs, _, err := FindBaselinePair(context.Background(), baseDir)
 	if err != nil {
 		t.Fatalf("FindBaselinePair: %v", err)
 	}
-	if len(pairs) != 1 || pairs[0].Table != "orders" {
-		t.Fatalf("expected one pair for orders (newest two snapshots), got %+v", pairs)
+	// Sorted: "fresh" before "orders".
+	if len(pairs) != 2 || pairs[0].Table != "fresh" || pairs[1].Table != "orders" {
+		t.Fatalf("expected an answer for fresh and for orders, got %+v", pairs)
 	}
-	// The pair must use the prev (not the older) snapshot's path.
-	if !pairs[0].PrevSnapshot.Equal(prevTS) {
-		t.Errorf("pair PrevSnapshot = %v, want %v (must ignore the older snapshot)", pairs[0].PrevSnapshot, prevTS)
+	// orders: the newest snapshot read it, so the pair is the newest two, and
+	// it must use the prev (not the older) snapshot's path.
+	if pairs[1].Settled != nil || !pairs[1].PrevSnapshot.Equal(prevTS) {
+		t.Errorf("orders pair = %+v (settled %v), want compared against the snapshot at %v, ignoring the older one", pairs[1], pairs[1].Settled, prevTS)
 	}
-	if len(unpaired) != 1 || unpaired[0].Table != "fresh" {
-		t.Errorf("expected 'fresh' in unpaired (new since prev), got %+v", unpaired)
+	// fresh: new since prev, so its read has no earlier snapshot. Answered
+	// once, inconclusive, never silently dropped.
+	if s := pairs[0].Settled; s == nil || s.Status != StatusInconclusive || !strings.Contains(s.Detail, "no earlier snapshot") {
+		t.Errorf("fresh = %+v, want inconclusive: no earlier snapshot to compare its read with", s)
 	}
 }
 
@@ -578,7 +595,7 @@ func TestFindBaselinePair_PairsSorted(t *testing.T) {
 		"shop.audit", "shop.customers", "shop.orders",
 	}
 	for attempt := range 5 {
-		pairs, _, _, err := FindBaselinePair(context.Background(), baseDir)
+		pairs, _, err := FindBaselinePair(context.Background(), baseDir)
 		if err != nil {
 			t.Fatalf("FindBaselinePair (attempt %d): %v", attempt, err)
 		}
@@ -616,15 +633,12 @@ func TestFindBaselinePair_PrevOnly(t *testing.T) {
 	writeTestBaseline(t, baseDir, prevTS, "db", "customers", createSQL, cols, rows, "binlog.000001", 200)
 	writeTestBaseline(t, baseDir, newTS, "db", "orders", createSQL, cols, rows, "binlog.000001", 300)
 
-	pairs, unpaired, prevOnly, err := FindBaselinePair(context.Background(), baseDir)
+	pairs, prevOnly, err := FindBaselinePair(context.Background(), baseDir)
 	if err != nil {
 		t.Fatalf("FindBaselinePair: %v", err)
 	}
-	if len(pairs) != 1 || pairs[0].Table != "orders" {
-		t.Fatalf("expected one pair for orders, got %+v", pairs)
-	}
-	if len(unpaired) != 0 {
-		t.Errorf("expected no unpaired tables, got %+v", unpaired)
+	if len(pairs) != 1 || pairs[0].Table != "orders" || pairs[0].Settled != nil {
+		t.Fatalf("expected one compared pair for orders, got %+v", pairs)
 	}
 	if len(prevOnly) != 1 || prevOnly[0].Table != "customers" {
 		t.Errorf("expected 'customers' in prevOnly (in prev, absent from newest), got %+v", prevOnly)
@@ -673,7 +687,7 @@ func TestVerifyBaselinePair_UnchangedTable(t *testing.T) {
 		t.Fatalf("NewResolver: %v", err)
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
-	pairs, _, _, err := FindBaselinePair(context.Background(), baseDir)
+	pairs, _, err := FindBaselinePair(context.Background(), baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -684,6 +698,96 @@ func TestVerifyBaselinePair_UnchangedTable(t *testing.T) {
 	if got.Status != StatusMatch {
 		t.Errorf("unchanged table: status = %q (%s); want match", got.Status, got.Detail)
 	}
+}
+
+// TestVerifyBaselinePair_DestructiveDDLInTheWindow: a TRUNCATE between the two
+// compared snapshots writes no row events, so the older one carried forward
+// would keep rows the database no longer had at the read. Inconclusive, naming
+// the statement, never a mismatch that only a full backup clears (the default
+// check pairs every run with the same read until the next one).
+func TestVerifyBaselinePair_DestructiveDDLInTheWindow(t *testing.T) {
+	now := time.Now().UTC()
+	prevTS := now.Truncate(time.Hour).Add(-2 * time.Hour)
+	for _, c := range []struct {
+		name       string
+		detectedAt time.Time
+		refused    bool // inconclusive naming the TRUNCATE, instead of compared
+	}{
+		{"inside the window", prevTS.Add(30 * time.Minute), true},
+		// Whole seconds: the older snapshot's own second may be after its
+		// anchor, where the replay starts, so it counts.
+		{"the older snapshot's second", prevTS, true},
+		// Before the older snapshot: already in it, the comparison runs (and
+		// here finds the two rows the fixture's newer side lacks).
+		{"before the older snapshot", prevTS.Add(-time.Second), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := verifyTruncatedOrders(t, prevTS, c.detectedAt)
+			if c.refused {
+				if got.Status != StatusInconclusive || !strings.Contains(got.Detail, "TRUNCATE") || !got.ComparedTo.IsZero() {
+					t.Fatalf("TRUNCATE at %s: %s (%q) compared_to=%s; want inconclusive naming the TRUNCATE, compared to nothing",
+						c.detectedAt, got.Status, got.Detail, got.ComparedTo)
+				}
+				return
+			}
+			if got.Status != StatusMismatch || strings.Contains(got.Detail, "TRUNCATE") {
+				t.Fatalf("TRUNCATE at %s, before the older snapshot: %s (%q); want the comparison to run", c.detectedAt, got.Status, got.Detail)
+			}
+		})
+	}
+}
+
+// verifyTruncatedOrders verifies a pair whose older snapshot holds two rows
+// and whose newer one holds none, with a TRUNCATE of the table recorded at
+// detectedAt and no row events.
+func verifyTruncatedOrders(t *testing.T, prevTS, detectedAt time.Time) TableResult {
+	t.Helper()
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	for _, c := range []struct {
+		name, key, dt, colType string
+		ord                    int
+	}{
+		{"id", "PRI", "int", "int", 1},
+		{"status", "", "varchar", "varchar(64)", 2},
+	} {
+		testutil.MustExec(t, db, `INSERT INTO schema_snapshots
+			(snapshot_id, snapshot_time, schema_name, table_name, column_name,
+			 ordinal_position, column_key, data_type, column_type, is_nullable, is_generated)
+			VALUES (1, UTC_TIMESTAMP(), ?, 'orders', ?, ?, ?, ?, ?, 'YES', 0)`,
+			dbName, c.name, c.ord, c.key, c.dt, c.colType)
+	}
+	baseDir := t.TempDir()
+	newTS := prevTS.Add(time.Hour)
+	createSQL := "CREATE TABLE `orders` (\n  `id` INT NOT NULL,\n  `status` VARCHAR(64),\n  PRIMARY KEY (`id`)\n);\n"
+	cols := []baseline.Column{
+		{Name: "id", MySQLType: "int", ParquetType: baseline.MysqlToParquetNode("int")},
+		{Name: "status", MySQLType: "varchar", ParquetType: baseline.MysqlToParquetNode("varchar")},
+	}
+	writeTestBaseline(t, baseDir, prevTS, dbName, "orders", createSQL, cols, [][]string{{"1", "a"}, {"2", "b"}}, "binlog.000001", 200)
+	writeTestBaseline(t, baseDir, newTS, dbName, "orders", createSQL, cols, nil, "binlog.000001", 300)
+	testutil.SetupPartitionedTable(t, db, dbName, []time.Time{prevTS.Add(-time.Hour), prevTS, newTS, time.Now().UTC().Truncate(time.Hour)})
+	testutil.MustExec(t, db, `INSERT INTO schema_changes (detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query)
+		VALUES (?, 'binlog.000001', 250, ?, 'orders', 'TRUNCATE TABLE', 'TRUNCATE TABLE orders')`,
+		detectedAt.Format("2006-01-02 15:04:05"), dbName)
+
+	resolver, err := metadata.NewResolver(db, 1)
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
+	pairs, _, err := FindBaselinePair(context.Background(), baseDir)
+	if err != nil || len(pairs) != 1 || pairs[0].Settled != nil {
+		t.Fatalf("FindBaselinePair: %v (pairs=%+v)", err, pairs)
+	}
+	got, err := VerifyBaselinePair(context.Background(), cfg, pairs[0])
+	if err != nil {
+		t.Fatalf("VerifyBaselinePair: %v", err)
+	}
+	return got
 }
 
 // TestVerifyBaselinePair_TextEventDecoded is the #672 regression: a TEXT
@@ -759,7 +863,7 @@ func TestVerifyBaselinePair_TextEventDecoded(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -881,7 +985,7 @@ func TestVerifyBaselinePair_TextOnlyChange_Match(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -981,7 +1085,7 @@ func TestVerifyBaselinePair_JSONValuedTextColumn_KeyOrderIsAMatch(t *testing.T) 
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -1100,7 +1204,7 @@ func TestVerifyBaselinePair_JSONValuedTextColumn_Isolated_Match(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -1183,7 +1287,7 @@ func TestVerifyBaselinePair_DuplicateJSONKey_StaysMismatch(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -1273,7 +1377,7 @@ func TestVerifyBaselinePair_ZeroDateSentinel_IsAMatch(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -1347,7 +1451,7 @@ func TestVerifyBaselinePair_ZeroDateVsRealNull_StaysMismatch(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -1440,7 +1544,7 @@ func TestVerifyBaselinePair_StaleZeroDateVsGenuineNull_AcceptedRisk(t *testing.T
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -1521,7 +1625,7 @@ func TestVerifyBaselinePair_EnumBitCarriedUnchanged_IsAMatch(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}
@@ -1592,7 +1696,7 @@ func TestVerifyBaselinePair_UnmappableEnumOrdinal_Inconclusive(t *testing.T) {
 	}
 	cfg := BaselineConfig{IndexDB: db, Resolver: resolver, IndexDBName: dbName, NoArchive: true}
 	ctx := context.Background()
-	pairs, _, _, err := FindBaselinePair(ctx, baseDir)
+	pairs, _, err := FindBaselinePair(ctx, baseDir)
 	if err != nil || len(pairs) != 1 {
 		t.Fatalf("FindBaselinePair: %v (pairs=%d)", err, len(pairs))
 	}

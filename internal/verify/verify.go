@@ -51,7 +51,11 @@ type TableResult struct {
 	SourceRows        int64
 	ReconstructRows   int64
 	Anchor            string // the point the comparison is anchored to: a GTID set (live-source path) or a binlog coordinate file:pos (baseline-pair path)
-	Detail            string // reason for inconclusive/mismatch, or a note carried on a match (e.g. coverage-unverified)
+	// ComparedTo is the read of the database a baseline-pair comparison was
+	// checked against (the newer side's snapshot time). Zero on every other
+	// path, and on a table that was not compared.
+	ComparedTo time.Time
+	Detail     string // reason for inconclusive/mismatch, or a note carried on a match (e.g. coverage-unverified)
 
 	// Set only by the recover-input check (VerifyRecoverInputs, #1001), which
 	// compares no table content and so leaves the row counts and digests above

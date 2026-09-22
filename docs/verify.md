@@ -2,9 +2,8 @@
 
 `bintrail verify` checks that reconstructing a table — merging a baseline
 snapshot with the indexed binlog deltas on top of it — reproduces the same
-row content as a reference (the next baseline, or the live source) at the
-specific anchor points being compared. The next baseline is an independent
-reference only when it was read from your database: see
+row content as a reference read from your database (a baseline taken from a
+dump, or the live source) at the specific anchor points being compared: see
 [Baseline-anchored](#baseline-anchored-default-drift-free). It answers a narrower
 question than "would my recoveries work": *at these anchor points, for the
 tables and columns compared, does the full-table reconstruction/`_snapshot`
@@ -67,16 +66,18 @@ passing or omitting `--source-dsn` selects **what it is compared against**.
 
 | | Reads | Answers |
 |---|---|---|
-| `--check content` (default), no `--source-dsn` | two baselines + index | does the reconstruction match the next baseline? |
+| `--check content` (default), no `--source-dsn` | two baselines + index | does the reconstruction match the table's last read of the database? |
 | `--check content` + `--source-dsn` | baseline + index + live source | does the reconstruction match the live table? |
 | `--check recover` | index only | are the before/after images `recover` consumes internally consistent? |
 
 ### Baseline-anchored (default, drift-free)
 
-Omit `--source-dsn`. `verify` compares the **two most recent baselines** of each
-table: it reconstructs the older baseline *forward* — applying indexed binlog
-events up to the newer baseline's exact binlog anchor — and fingerprints the
-result against the newer baseline.
+Omit `--source-dsn`. For each table, `verify` takes the **last baseline that
+read it from your database** (a dump: `bintrail baseline`, or a scheduled run
+that took a full backup) and the baseline just before that one. It reconstructs
+the older one *forward*, applying indexed binlog events up to the read's exact
+binlog anchor, and fingerprints the result against what the database held at
+that read.
 
 Both sides are at-rest data (Parquet snapshots), so this mode reads **no live
 source** and has **no production impact**. Run it any time after a baseline — for
@@ -84,16 +85,39 @@ example right after `bintrail baseline`, or on a schedule (cron/CI). Because
 neither side is the live table, it can't be fooled by drift that happened on the
 source after capture.
 
-**It tests against your database only when the newer baseline was read from
-it.** A baseline taken from a dump of the database (`bintrail baseline`, or a
-scheduled run that took a full copy) is an independent reference, and a match
-against it tests the capture-and-reconstruct chain. A baseline that a refresh
-built from the recorded changes never read the database, so comparing with it
-does not test against the database. And when the newer baseline keeps a table's
-previous file and stores its changes beside it (table deltas, the default for a
-local baseline directory since v0.84.0), that table is reported `inconclusive`:
-nothing was checked. A run where no table was proven exits non-zero. To cover
-those tables, run the check right after a baseline read from the database.
+**Why the last read and not the two newest baselines.** A baseline that a
+refresh built from the recorded changes never read the database, so it is not an
+independent reference. The read is. The check replays the recorded changes onto
+the older baseline, from that baseline's own starting point (where its chain
+started, when a refresh kept the table's changes beside its file), up to the read's
+anchor. A match therefore says the capture between the two is complete. It does
+not open the change files a refresh keeps beside a table (table deltas), and it
+covers the chain up to the last read, not the refreshes after it. A schedule
+with a full backup every so often (for example every 7 days) gives this check a
+new read to test each time. The JSON report names the read each table was
+compared against (`compared_to`).
+
+A table is reported `inconclusive` instead of compared when:
+
+- the baseline that last read it is no longer kept;
+- its last read is the oldest baseline that holds it, so there is nothing before
+  it to compare with;
+- when the database was last read for it is not on record (a baseline that a
+  refresh built before DBTrail recorded that);
+- a TRUNCATE, DROP or RENAME of the table ran between the two baselines: it
+  records no row changes to replay, so the older baseline cannot be carried
+  forward to the read. The reason names the statement and when it ran.
+
+The next full backup makes such a table checkable. A run where no table was
+proven exits non-zero. The window between the two baselines can be days old, so
+the events may come from the Parquet archives rather than the live index; with
+`--no-archive`, or after rotation dropped them unarchived, the table is
+`inconclusive` with the gap as the reason.
+
+A baseline folder that cannot be read at or after the oldest baseline any table
+is compared with (or older than a read with no earlier baseline, which that
+folder may hold) refuses the whole run and names the folder, whatever
+`--tables` selects: fix its permissions first.
 
 ```sh
 # All tables, baselines on local disk
