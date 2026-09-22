@@ -11,7 +11,7 @@ import (
 
 // repaintByAddressRE finds a repaint decided by the address: comparing the
 // path, or the route read from it, against a page name.
-var repaintByAddressRE = regexp.MustCompile(`location\.pathname\s*[!=]==|routeFromLocation\(\)\s*[!=]==\s*"(baselines|verification|backup-settings)"`)
+var repaintByAddressRE = regexp.MustCompile(`location\.pathname\s*[!=]==|routeFromLocation\(\)\s*[!=]==\s*"(baselines|verification|backup-settings|snapshots)"`)
 
 // TestRepaintAsksWhetherItsBoxIsOnScreen: a job that finishes, a schedule
 // saved or a restore started repaints the backups page only if that page is
@@ -80,8 +80,8 @@ const on = () => vm.runInContext("backupsOnScreen()", ctx);
   out.painted = on();
   vm.runInContext("clear(VIEW()); VIEW().append(el('div', { text: 'Events' }));", ctx);
   out.away = on();
-  // A paint that fails draws its error under the page heading: still the
-  // Backups page, still on screen.
+  // A paint that fails shows its error in place of the page (renderError
+  // clears the view, heading included): still the Backups page, on screen.
   ctx.baselineContextStrip = () => { throw new Error("boom"); };
   await vm.runInContext("renderBaselines()", ctx);
   out.failed = on() && screen.textContent.includes("boom");

@@ -173,10 +173,15 @@ const out = {};
   ctx.applyAuthGate = () => {}; // the sign-in screen is not this test's subject
   vm.runInContext("clearAuthState()", ctx);
   vm.runInContext("capsCache = { monitor: true, verify_trigger: true, verify: true }; capsKnown = true;", ctx);
-  forbid.a = true;
+  // Read the box before the server answers: a leak that the answer later
+  // erases was on screen all the same.
+  let releaseSignOut;
+  holdNextGet = new Promise((r) => { releaseSignOut = r; });
   away();
   await paint("a");
   out.signOut = { box: box() };
+  releaseSignOut();
+  await flush();
 
   // The same, with the refusal only: what the page held goes too.
   reset();
@@ -230,8 +235,9 @@ const out = {};
   await slow;
   releaseProbe();
   await flush();
+  const afterLate = box(), loopsAfterLate = vm.runInContext("vfyFollowing.size", ctx);
   await drain();
-  out.lateProbe = { box: box(), btn: btn(), toasts: [...toasts] };
+  out.lateProbe = { afterLate, loopsAfterLate, box: box(), btn: btn(), toasts: [...toasts] };
 
   // Changing the mode while a run goes does not offer another run.
   reset();
@@ -336,9 +342,10 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 			Toasts []string
 		}
 		LateProbe struct {
-			Box    string
-			Btn    *button
-			Toasts []string
+			AfterLate, Box string
+			LoopsAfterLate int
+			Btn            *button
+			Toasts         []string
 		}
 		ModeChange struct{ ModeBtn *button }
 		Off        struct{ Gets int }
@@ -447,6 +454,9 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 	}
 
 	lp := got.LateProbe
+	if !strings.Contains(lp.AfterLate, "DONE") || lp.LoopsAfterLate != 0 {
+		t.Errorf("the moment a late probe answer lands: box %q, %d loops; want the finished run kept and no loop started", lp.AfterLate, lp.LoopsAfterLate)
+	}
 	if !strings.Contains(lp.Box, "DONE") || !ready(lp.Btn) || finishToasts(lp.Toasts) != 1 {
 		t.Errorf("a probe answer that lands after the run ended: box %q, button %+v, toasts %q; want the finished run kept, the button ready, one message",
 			lp.Box, lp.Btn, lp.Toasts)

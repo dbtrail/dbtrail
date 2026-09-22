@@ -3105,7 +3105,12 @@ try {
   // just ended, whichever this machine's timing gives) and never "No run
   // yet", and when it ends the button ON SCREEN is ready again. Before, the
   // run kept writing into the box it saved at the start, off screen.
+  // Tied to THIS run: the page forgets leg (d)'s finished run first, so a
+  // chip after the return can only be the new one, and History must gain a
+  // row when it ends.
+  const vfyHistBefore = await page.evaluate(() => document.querySelectorAll(".vfy-histrow").length);
   await page.evaluate(() => {
+    vfyLive.clear();
     document.querySelector(".vfy-run").click();
     navigate("events");
     navigate("verification");
@@ -3124,10 +3129,12 @@ try {
       chip: (document.querySelector(".vfy-results .vfy-summary .chip") || {}).textContent || "",
       btn: b ? { disabled: b.disabled, text: b.textContent } : null };
   });
+  await page.waitForFunction((n) => document.querySelectorAll(".vfy-histrow").length > n, vfyHistBefore).catch(() => {});
+  vfyBack.histRows = await page.evaluate(() => document.querySelectorAll(".vfy-histrow").length);
   (vfyBackChip && !/No run yet/.test(vfyBack.box) && vfyBack.chip && !/RUNNING/.test(vfyBack.chip)
-    && vfyBack.btn && !vfyBack.btn.disabled && vfyBack.btn.text === "Run verification")
+    && vfyBack.btn && !vfyBack.btn.disabled && vfyBack.btn.text === "Run verification" && vfyBack.histRows > vfyHistBefore)
     ? ok("verification: a run started, left and come back to still shows on the page, and its end readies the button on screen")
-    : bad("verification: a run started, left and come back to still shows on the page, and its end readies the button on screen", JSON.stringify({ vfyBackChip, ...vfyBack }));
+    : bad("verification: a run started, left and come back to still shows on the page, and its end readies the button on screen", JSON.stringify({ vfyBackChip, vfyHistBefore, ...vfyBack }));
 
   // (e) history (#1417): the finished run is a disclosure row that expands to
   // its per-table detail — data the old renderer dropped on the floor — and

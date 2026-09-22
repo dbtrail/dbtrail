@@ -52,8 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   screen when it started. After going to another page and back, or switching
   servers and back, the new box said "No run yet" and offered to start
   another run while the first one was still going. The page now keeps each
-  server's run, asks the server whether one is going each time it opens, and
-  shows a run the verification schedule started, which it never did before.
+  server's run and asks the server what it holds each time it opens, so a
+  run the verification schedule started shows while it runs (before, only
+  in History once it had ended), and a newer run replaces an older one in
+  the box. A click while a run is already going shows that run instead of
+  an error.
 - **Console texts no longer name command-line flags** (#1783). Adding a server
   from the browser showed doctor text written for the terminal: "Verify
   --source-dsn is reachable" with a fixed "port 3306", "`bintrail init` will
