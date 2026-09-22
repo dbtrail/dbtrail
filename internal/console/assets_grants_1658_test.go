@@ -15,15 +15,12 @@ import (
 // internal/mydumperlock/privileges.go for RELOAD (or FLUSH_TABLES) and, on
 // MySQL and Percona 8.0 or later, BACKUP_ADMIN; LOCK TABLES alone is refused
 // there, and is only what lock-all needs. The blocks are built by executing
-// the page's own strings, one per flavor.
+// the page's own grantBlocks, one per flavor, for the default account.
 func TestServerFormGrantsMatchTheDefaultLockMode(t *testing.T) {
-	// functionBody, not jsFunctionBody: the latter stops at a "//" comment, and
-	// the grant blocks sit under one.
-	form := functionBody(t, readAsset(t, "app.js"), "function buildServerForm(")
-	start := strings.Index(form, "const grantBase =")
-	end := strings.Index(form, "// PostgreSQL prerequisites")
-	if start < 0 || end < 0 || end < start {
-		t.Fatal("the grant blocks moved; this guard covers nothing")
+	// functionBody, not jsFunctionBody: the latter stops at a "//" comment.
+	js := readAsset(t, "app.js")
+	if !strings.Contains(functionBody(t, js, "function buildServerForm("), "grantBlocks(") {
+		t.Fatal("the add-server form no longer draws its grant blocks from grantBlocks; this guard covers nothing")
 	}
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -32,12 +29,9 @@ func TestServerFormGrantsMatchTheDefaultLockMode(t *testing.T) {
 		}
 		t.Skip("node is not installed")
 	}
-	script := `const blocks = {};
-const el = (tag, o) => ({ text: o.text });
-const tagFlavor = (n, f) => { blocks[f] = n.text; return n; };
-const mon = { append: () => {} };
-` + form[start:end] + `
-console.log(JSON.stringify(blocks));`
+	script := functionBody(t, js, "function sqlString(") + "\n" +
+		functionBody(t, js, "function grantBlocks(") + `
+console.log(JSON.stringify(grantBlocks("dbtrail", "Ab3-xyzXYZ789_qq")));`
 	path := filepath.Join(t.TempDir(), "grants.js")
 	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
 		t.Fatal(err)

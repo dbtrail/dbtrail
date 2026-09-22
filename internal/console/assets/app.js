@@ -9748,6 +9748,85 @@ function applyFlavor(form) {
     n.classList.toggle("flavor-on", n.dataset.flavor.split(" ").includes(f)));
 }
 
+// sqlString quotes a value as a MySQL string literal. Backslashes first: under
+// the default sql_mode a backslash escapes, so 'a\' would swallow its own
+// closing quote.
+function sqlString(s) {
+  return "'" + String(s).replace(/\\/g, "\\\\").replace(/'/g, "''") + "'";
+}
+
+// genSourcePassword makes the password the grant block creates the capture
+// user with. The block is copied and run as written, so a literal password in
+// it becomes a real password anyone can read in this file. It has one of each
+// class validate_password's MEDIUM policy asks for, then 20 more, shuffled,
+// and nothing that needs quoting in SQL or a shell. Without a cryptographic
+// random source it returns "" rather than a guessable password; the block
+// then shows a placeholder MySQL refuses.
+function genSourcePassword() {
+  const c = globalThis.crypto;
+  if (!c || typeof c.getRandomValues !== "function") return "";
+  const lower = "abcdefghijkmnopqrstuvwxyz", upper = "ABCDEFGHJKLMNPQRSTUVWXYZ", digit = "23456789", sym = "-_.";
+  const pick = (set, n) => {
+    const r = new Uint32Array(n);
+    c.getRandomValues(r);
+    return Array.from(r, (x) => set[x % set.length]);
+  };
+  const chars = [...pick(lower, 1), ...pick(upper, 1), ...pick(digit, 1), ...pick(sym, 1), ...pick(lower + upper + digit + sym, 20)];
+  const r = new Uint32Array(chars.length);
+  c.getRandomValues(r);
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = r[i] % (i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join("");
+}
+
+// grantBlocks builds the SQL the add-server form shows for MySQL and MariaDB,
+// for the user and password in the form, so what is copied is what is saved.
+// A blank user falls back to 'dbtrail' (never ''@'%', the anonymous user). A
+// blank password gives an unquoted placeholder, a syntax error if run.
+//
+// The backup line is here even though the stream does not need it, because
+// omitting it is a DELAYED failure: capture starts clean and only Create
+// backup refuses, hours or days later. The form is the last place anyone
+// reads a grant list before pasting it.
+//
+// The backup line is what the DEFAULT lock mode (ftwrl) checks for
+// (internal/mydumperlock/privileges.go): RELOAD, plus BACKUP_ADMIN on MySQL
+// and Percona 8.0 or later. LOCK TABLES is only what lock-all needs, which is
+// the RDS/Aurora path, so it is the commented alternative (#1658).
+function grantBlocks(user, password) {
+  const acct = sqlString(String(user || "").trim() || "dbtrail") + "@'%'";
+  const grantBase =
+    "CREATE USER " + acct + " IDENTIFIED BY " + (password ? sqlString(password) : "<choose a password>") + ";\n" +
+    "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO " + acct + ";\n";
+  // Managed services cannot use the default lock mode (no BACKUP_ADMIN on
+  // managed MySQL; RDS MariaDB's RELOAD excludes FLUSH TABLES WITH READ LOCK),
+  // so they switch to lock-all, which locks tables instead of the instance.
+  const grantLockAll = (who) =>
+    "-- " + who + ": the default lock mode is not available. Run the line below instead of GRANT RELOAD and set the lock mode to lock-all\n" +
+    "-- (BASELINE_LOCK_MODE=lock-all in .env on the compose install, BINTRAIL_CONSOLE_BASELINE_LOCK_MODE otherwise).\n" +
+    "-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO " + acct + ";";
+  // SHOW VIEW is on every backup line: mydumper stops at the first view it
+  // cannot read ("SHOW VIEW command denied"), so a schema holding one view
+  // fails the whole backup on RELOAD alone.
+  const grantBackups = "-- Backups (point-consistent by default). SHOW VIEW lets the backup copy views.\n";
+  return {
+    mysql: grantBase + grantBackups +
+      "-- BACKUP_ADMIN is MySQL/Percona 8.0 or later. On MySQL 5.7 run this instead:\n" +
+      "-- GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" +
+      "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("Managed MySQL (RDS, Aurora, Cloud SQL)"),
+    mariadb: grantBase + grantBackups +
+      "GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("RDS for MariaDB"),
+  };
+}
+
+// refreshGrants redraws the grant blocks from the form's user and password.
+function refreshGrants(form) {
+  const b = grantBlocks(form.elements.source_user.value, form.elements.source_password.value);
+  $all("pre[data-grant]", form).forEach((p) => { p.textContent = b[p.dataset.grant]; });
+}
+
 function buildServerForm() {
   const form = el("form", { class: "filters", id: "server-form", style: "display:block;margin-top:18px" });
   form.append(el("input", { type: "hidden", name: "id" }));
@@ -9760,7 +9839,7 @@ function buildServerForm() {
 
   const mon = el("fieldset", { class: "form-section", "data-capability": "monitor" });
   mon.append(el("legend", { class: "form-legend", text: "Monitor a source database" }));
-  mon.append(el("p", { class: "form-hint", text: "Paste the server you want to watch. DBTrail checks that it is ready, creates an index database for it, and starts capturing changes. Nothing else to fill in beyond a name." }));
+  mon.append(el("p", { class: "form-hint", text: "Name, source host, user and password are required. DBTrail checks that the server is ready, then starts capturing changes." }));
   const monGrid = el("div", { class: "form-grid" });
   // Source family selector — reveals the PostgreSQL-only fields below.
   monGrid.append(el("label", { class: "field" },
@@ -9795,42 +9874,17 @@ function buildServerForm() {
   mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Backups locations set on this server, for uploads and reads alike, not to the daemon's default Backups location. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
-  // SELECT covers the information_schema snapshot of columns/PKs/FKs.
-  //
-  // The backup line is here even though the stream does not need it, because
-  // omitting it is a DELAYED failure: capture starts clean and only Create
-  // backup refuses, hours or days later. The form is the last place anyone
-  // reads a grant list before pasting it.
-  //
-  // The backup line is what the DEFAULT lock mode (ftwrl) checks for
-  // (internal/mydumperlock/privileges.go): RELOAD, plus BACKUP_ADMIN on
-  // MySQL and Percona 8.0 or later. LOCK TABLES is only what lock-all needs,
-  // which is the RDS/Aurora path, so it is the commented alternative (#1658).
+  // SELECT covers the information_schema snapshot of columns/PKs/FKs. The
+  // text comes from grantBlocks and is redrawn from the user and password
+  // fields (showServerForm), so the block creates the user the form saves.
   const grantHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "mysql mariadb");
   grantHint.append("Source user needs ");
   grantHint.append(el("code", { text: "REPLICATION SLAVE, REPLICATION CLIENT, SELECT" }));
   grantHint.append(" to capture, plus the backup line if you want backups. Create one on the source; copy and run:");
   mon.append(grantHint);
-  const grantBase =
-    "CREATE USER 'dbtrail'@'%' IDENTIFIED BY 'strong-password';\n" +
-    "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';\n";
-  // Managed services cannot use the default lock mode (no BACKUP_ADMIN on
-  // managed MySQL; RDS MariaDB's RELOAD excludes FLUSH TABLES WITH READ LOCK),
-  // so they switch to lock-all, which locks tables instead of the instance.
-  const grantLockAll = (who) =>
-    "-- " + who + ": the default lock mode is not available. Run the line below instead of GRANT RELOAD and set the lock mode to lock-all\n" +
-    "-- (BASELINE_LOCK_MODE=lock-all in .env on the compose install, BINTRAIL_CONSOLE_BASELINE_LOCK_MODE otherwise).\n" +
-    "-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';";
-  // SHOW VIEW is on every backup line: mydumper stops at the first view it
-  // cannot read ("SHOW VIEW command denied"), so a schema holding one view
-  // fails the whole backup on RELOAD alone.
-  const grantBackups = "-- Backups (point-consistent by default). SHOW VIEW lets the backup copy views.\n";
-  mon.append(tagFlavor(el("pre", { class: "form-code", text: grantBase + grantBackups +
-    "-- BACKUP_ADMIN is MySQL/Percona 8.0 or later. On MySQL 5.7 run this instead:\n" +
-    "-- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" +
-    "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" + grantLockAll("Managed MySQL (RDS, Aurora, Cloud SQL)") }), "mysql"));
-  mon.append(tagFlavor(el("pre", { class: "form-code", text: grantBase + grantBackups +
-    "GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';\n" + grantLockAll("RDS for MariaDB") }), "mariadb"));
+  const grants = grantBlocks("", "");
+  mon.append(tagFlavor(el("pre", { class: "form-code", "data-grant": "mysql", text: grants.mysql }), "mysql"));
+  mon.append(tagFlavor(el("pre", { class: "form-code", "data-grant": "mariadb", text: grants.mariadb }), "mariadb"));
   // PostgreSQL prerequisites — the console reads them, it never runs CREATE
   // PUBLICATION / ALTER SYSTEM (validate-don't-create; capture is pgoutput-only).
   const pgHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "postgres");
@@ -9936,6 +9990,17 @@ function showServerForm(prefill) {
     form.elements.source_password.placeholder = prefill.has_source_password ? "(unchanged; leave blank to keep)" : "";
     form.elements.s3_secret_access_key.placeholder = prefill.has_s3_secret_access_key ? "(unchanged; leave blank to keep)" : "";
   }
+  // A NEW server gets the account the grant block creates, with a password
+  // made for this form, so running the block and pressing Save line up. An
+  // edit never does: a blank password field there means "keep the stored
+  // one", and a generated value would overwrite it on Save.
+  if (!(prefill && prefill.id)) {
+    if (!form.elements.source_user.value) form.elements.source_user.value = "dbtrail";
+    form.elements.source_password.value = genSourcePassword();
+  }
+  ["source_user", "source_password"].forEach((k) =>
+    form.elements[k].addEventListener("input", () => refreshGrants(form)));
+  refreshGrants(form);
   // Flavor init runs for both add and edit; it's immutable after create (the
   // backend rejects a change on PUT), so disable the selector when editing.
   form.elements.flavor.value = (prefill && prefill.flavor) || "mysql";

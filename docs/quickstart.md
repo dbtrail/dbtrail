@@ -16,7 +16,7 @@ the **command line**. Both need a source MySQL user first.
 - A user on the source for DBTrail to read from — create it on the source:
 
   ```sql
-  CREATE USER 'dbtrail'@'%' IDENTIFIED BY 'strong-password';
+  CREATE USER 'dbtrail'@'%' IDENTIFIED BY <choose a password>;
   GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';
   -- Only if you want baselines (Time-travel / reconstruct): they are
   -- point-consistent by default, and that guarantee needs a lock.
@@ -28,6 +28,11 @@ the **command line**. Both need a source MySQL user first.
   -- default lock mode; run this instead, with BASELINE_LOCK_MODE=lock-all:
   -- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';
   ```
+
+  Put a password of your own in quotes where it says `<choose a password>`.
+  As written, MySQL refuses the line on purpose, so no user is ever created
+  with a password copied from this page. The web interface's + Add server form
+  fills in a generated one for you.
 
   `RELOAD`/`BACKUP_ADMIN` let the baseline dump take a point-in-time snapshot.
   **On managed MySQL (RDS, Aurora, Cloud SQL), `BACKUP_ADMIN` cannot be granted**, so grant `LOCK TABLES, SHOW VIEW` and set `BASELINE_LOCK_MODE=lock-all` — equally point-consistent, and the mode mydumper itself names for RDS. If you would rather grant nothing extra on a self-hosted source, `BASELINE_LOCK_MODE=safe-no-lock` never writes a torn snapshot, but it refuses on a write-active source.
@@ -87,7 +92,7 @@ Prefer the CLI (or scripting and automation)? Install the `bintrail` binary (see
 [Install](install.md)) and set shorthands for your two DSNs:
 
 ```sh
-export SRC="dbtrail:strong-password@tcp(127.0.0.1:3306)/"   # source MySQL
+export SRC="dbtrail:<your password>@tcp(127.0.0.1:3306)/"   # source MySQL
 export IDX="root:secret@tcp(127.0.0.1:3306)/binlog_index"   # the index
 ```
 
