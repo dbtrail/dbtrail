@@ -97,6 +97,8 @@ Key fields:
 | `ddl_query` | The full DDL statement from the binlog |
 | `snapshot_id` | The snapshot taken after this DDL. NULL when none was taken: file mode without `--source-dsn`, a failed auto-snapshot, or `TRUNCATE TABLE` (which changes no table structure, so no snapshot is needed — by design, in every mode) |
 
+A `DROP TABLE` or `RENAME TABLE` that names several tables records one row per table, all with the statement's own position and text: every table a `DROP` names, and both sides of every rename pair (the old name stops holding its rows, the new one starts holding another table's). That is what lets the destructive-DDL checks, which look one table up at a time, see a table that was not named first. `bintrail status` counts statements, not rows.
+
 This table is created by `bintrail init` and must exist in the index database. Older index databases (created before this feature) won't have it — the status command handles this gracefully by treating a missing table as zero schema changes.
 
 ### Querying schema changes from AI (MCP)

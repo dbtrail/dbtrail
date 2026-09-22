@@ -197,7 +197,8 @@ type CoverageInfo struct {
 	LatestEvent   sql.NullTime
 	TotalEvents   int64
 	SchemaChanges int
-	// UncoveredDDLs counts schema_changes rows with snapshot_id IS NULL whose
+	// UncoveredDDLs counts DDL statements (distinct binlog positions: a DROP of
+	// several tables is one row per table) with snapshot_id IS NULL whose
 	// DDL type NEEDS a snapshot — i.e. file-mode indexing without --source-dsn,
 	// or a failed auto-snapshot (any mode). TRUNCATE TABLE rows are excluded:
 	// they record snapshot_id = NULL by design (no structure change, so both
@@ -357,13 +358,15 @@ func LoadCoverage(ctx context.Context, db *sql.DB) (*CoverageInfo, error) {
 		return nil, fmt.Errorf("query binlog_events coverage: %w", err)
 	}
 
-	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_changes`).Scan(&c.SchemaChanges)
+	// Statements, not rows: a DROP or RENAME that names several tables leaves
+	// one row per table, all at the statement's own binlog position.
+	err = db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT binlog_file, binlog_pos) FROM schema_changes`).Scan(&c.SchemaChanges)
 	if err != nil {
 		return nil, fmt.Errorf("query schema_changes count: %w", err)
 	}
 
 	err = db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM schema_changes WHERE `+UncoveredDDLWhere).Scan(&c.UncoveredDDLs)
+		`SELECT COUNT(DISTINCT binlog_file, binlog_pos) FROM schema_changes WHERE `+UncoveredDDLWhere).Scan(&c.UncoveredDDLs)
 	if err != nil {
 		return nil, fmt.Errorf("query uncovered DDLs: %w", err)
 	}

@@ -973,25 +973,70 @@ func ensureColumn(db *sql.DB, table, column, alterSQL string) error {
 	return nil
 }
 
-// InsertSchemaChange records a DDL detection in the schema_changes table.
-// snapshotID may be nil when no auto-snapshot was taken (file mode).
+// schemaChangeChunkRows and schemaChangeChunkBytes bound one INSERT of
+// schema_changes rows: nine placeholders a row, and the statement's text
+// repeated on every row. A variable so a test can force several INSERTs.
+var (
+	schemaChangeChunkRows  = 500
+	schemaChangeChunkBytes = 4 << 20
+)
+
+// InsertSchemaChange records a DDL detection in the schema_changes table: one
+// row per table the statement names (ev.DDLTables, a repeat recorded once;
+// ev.Schema/ev.Table when there is no list), so the destructive-DDL guards,
+// which look one table up at a time, see every one. snapshotID may be nil
+// when no auto-snapshot was taken (file mode).
+//
+// Several rows go in chunks, without a transaction on purpose: each row is a
+// fact of its own ("this table was dropped at this position"), so a failure
+// part way keeps the rows that landed, and a guard protected on some of the
+// tables beats one protected on none. The error says how many landed.
 func InsertSchemaChange(db *sql.DB, ev event.Event, snapshotID *int) error {
 	var snapArg any
 	if snapshotID != nil {
 		snapArg = *snapshotID
 	}
-	// #959: bound the DDL write like the other hot-loop index writes.
-	ctx, cancel := context.WithTimeout(context.Background(), WriteTimeout)
-	defer cancel()
-	_, err := db.ExecContext(ctx, `
-		INSERT INTO schema_changes
+	tables := schemaChangeTables(ev)
+	per := max(1, min(schemaChangeChunkRows, schemaChangeChunkBytes/(len(ev.DDLQuery)+512)))
+	for done := 0; done < len(tables); {
+		chunk := tables[done:min(len(tables), done+per)]
+		q := `INSERT INTO schema_changes
 			(detected_at, binlog_file, binlog_pos, gtid, schema_name, table_name, ddl_type, ddl_query, snapshot_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ev.Timestamp, ev.BinlogFile, ev.EndPos,
-		nullOrString(ev.GTID), ev.Schema, ev.Table, ev.DDLType, ev.DDLQuery, snapArg)
-	return err
+		VALUES ` + strings.TrimSuffix(strings.Repeat("(?, ?, ?, ?, ?, ?, ?, ?, ?), ", len(chunk)), ", ")
+		args := make([]any, 0, 9*len(chunk))
+		for _, n := range chunk {
+			args = append(args, ev.Timestamp, ev.BinlogFile, ev.EndPos,
+				nullOrString(ev.GTID), n.Schema, n.Table, ev.DDLType, ev.DDLQuery, snapArg)
+		}
+		// #959: bound the DDL write like the other hot-loop index writes.
+		ctx, cancel := context.WithTimeout(context.Background(), WriteTimeout)
+		_, err := db.ExecContext(ctx, q, args...)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("record %s at %s:%d: %d of %d tables recorded: %w",
+				ev.DDLType, ev.BinlogFile, ev.EndPos, done, len(tables), err)
+		}
+		done += len(chunk)
+	}
+	return nil
 }
 
+// schemaChangeTables is the tables a DDL event's schema_changes rows name: its
+// list with each repeat once, in order, or its own table when it has none.
+func schemaChangeTables(ev event.Event) []event.DDLTable {
+	if len(ev.DDLTables) == 0 {
+		return []event.DDLTable{{Schema: ev.Schema, Table: ev.Table}}
+	}
+	seen := make(map[event.DDLTable]bool, len(ev.DDLTables))
+	out := make([]event.DDLTable, 0, len(ev.DDLTables))
+	for _, n := range ev.DDLTables {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
+}
 
 // EnsureArchiveStateSchema adds the archive_state columns introduced after the
 // initial schema. Idempotent, like EnsureSchema, which calls it.

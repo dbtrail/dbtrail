@@ -22,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and its + Add server opens the add form directly.
 
 ### Fixed
+- **A DROP or RENAME of several tables records every one of them.** Capture
+  recorded only the first table a statement named, so after `DROP TABLE tmp,
+  orders` or `RENAME TABLE orders_new TO orders`, the checks that refuse a
+  reconstruct across a TRUNCATE, DROP or RENAME never saw `orders`: a
+  reconstruct of it could hand back rows from before the statement, and
+  `bintrail verify` blamed the capture for the difference. Each table a DROP
+  names, and both sides of every rename pair, now gets its own
+  `schema_changes` row, read from the whole statement however long.
+  `bintrail status` counts statements, not rows. A statement recorded before
+  this version keeps its single row.
 - **Console texts no longer name command-line flags** (#1783). Adding a server
   from the browser showed doctor text written for the terminal: "Verify
   --source-dsn is reachable" with a fixed "port 3306", "`bintrail init` will

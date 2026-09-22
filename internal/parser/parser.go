@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-mysql-org/go-mysql/replication"
 
@@ -1042,11 +1043,18 @@ func unquoteDDLName(s string) string {
 // DROP /*!40005 TEMPORARY */ TABLE, which must keep its TEMPORARY. It stops
 // once ddlHeadLimit bytes are built.
 func normalizeDDL(queryStr string) string {
+	return normalizeDDLUpTo(queryStr, ddlHeadLimit)
+}
+
+// normalizeDDLUpTo is normalizeDDL building at most limit bytes. The whole
+// statement is only worth building once it is known to be a DROP or RENAME,
+// whose tail is nothing but the names it acts on.
+func normalizeDDLUpTo(queryStr string, limit int) string {
 	var b strings.Builder
 	pending := false // a space is owed before the next copied byte
 	open := 0        // executable comments whose closing */ is still ahead
 	gap := func() { pending = b.Len() > 0 }
-	for i := 0; i < len(queryStr) && b.Len() < ddlHeadLimit; {
+	for i := 0; i < len(queryStr) && b.Len() < limit; {
 		rest := queryStr[i:]
 		switch c := queryStr[i]; {
 		case isSQLSpace(c):
@@ -1100,7 +1108,7 @@ func normalizeDDL(queryStr string) string {
 			}
 			j = min(j, len(queryStr))
 			// Copied up to the limit only: a quoted DML value can be megabytes.
-			b.WriteString(queryStr[i:min(j, i+ddlHeadLimit-b.Len())])
+			b.WriteString(queryStr[i:min(j, i+limit-b.Len())])
 			i = j
 		default:
 			if pending {
@@ -1290,6 +1298,20 @@ func parseDDL(logger *slog.Logger, filename string, logPos uint32, timestamp tim
 	if schema == "" {
 		schema = defaultSchema
 	}
+	// A DROP or RENAME can name several tables, and each one's rows stop being
+	// what they were: every name gets its schema_changes row, so the
+	// destructive-DDL guards see it. Read from the whole statement, past the
+	// head, and the first name read this way is the event's own, so the two
+	// never disagree.
+	var tables []event.DDLTable
+	if ddlType == DDLDropTable || ddlType == DDLRenameTable {
+		if full := ddlVerbRe.FindStringSubmatch(normalizeDDLUpTo(queryStr, len(queryStr)+1)); full != nil {
+			tables = ddlNameList(full[2], ddlType == DDLRenameTable, defaultSchema)
+		}
+		if len(tables) > 0 {
+			schema, table = tables[0].Schema, tables[0].Table
+		}
+	}
 
 	startPos := uint64(0) // DDL events have no row-level start position
 	endPos := uint64(logPos)
@@ -1300,6 +1322,7 @@ func parseDDL(logger *slog.Logger, filename string, logPos uint32, timestamp tim
 		"ddl_type", ddlType,
 		"schema", schema,
 		"table", table,
+		"tables_named", len(tables),
 		"query", queryStr)
 
 	return Event{
@@ -1313,8 +1336,151 @@ func parseDDL(logger *slog.Logger, filename string, logPos uint32, timestamp tim
 		EventType:     EventDDL,
 		DDLQuery:      queryStr,
 		DDLType:       ddlType,
+		DDLTables:     tables,
 		SchemaVersion: schemaVersion,
 	}, true
+}
+
+// ddlNameList reads the tables a DROP or RENAME names from rest, the
+// normalized statement after its verb: every [schema.]name in order, repeats
+// kept, until something that is not the list (DROP's RESTRICT, CASCADE, WAIT,
+// NOWAIT or ";", or anything unexpected), keeping what it read. A RENAME
+// gives both sides of every "a TO b" pair. An unqualified name takes
+// defaultSchema, as MySQL resolves it.
+func ddlNameList(rest string, rename bool, defaultSchema string) []event.DDLTable {
+	sc := ddlScanner{s: rest}
+	sc.keyword("IF EXISTS")
+	var out []event.DDLTable
+	for {
+		n, ok := sc.qualifiedName(defaultSchema)
+		if !ok {
+			return out
+		}
+		out = append(out, n)
+		if rename {
+			// MariaDB: RENAME TABLE a [WAIT n | NOWAIT] TO b.
+			if sc.keyword("WAIT") {
+				sc.number()
+			} else {
+				sc.keyword("NOWAIT")
+			}
+			if !sc.keyword("TO") {
+				return out
+			}
+			if n, ok = sc.qualifiedName(defaultSchema); !ok {
+				return out
+			}
+			out = append(out, n)
+		}
+		sc.space()
+		if !sc.byte(',') {
+			return out
+		}
+	}
+}
+
+// ddlScanner walks a normalizeDDL result: runs of whitespace are single
+// spaces, comments are gone, quoted names are verbatim.
+type ddlScanner struct {
+	s string
+	i int
+}
+
+func (sc *ddlScanner) space() {
+	for sc.i < len(sc.s) && sc.s[sc.i] == ' ' {
+		sc.i++
+	}
+}
+
+func (sc *ddlScanner) byte(c byte) bool {
+	if sc.i < len(sc.s) && sc.s[sc.i] == c {
+		sc.i++
+		return true
+	}
+	return false
+}
+
+// keyword consumes kw (words separated by single spaces, any case) when it is
+// next and not the start of a longer identifier.
+func (sc *ddlScanner) keyword(kw string) bool {
+	sc.space()
+	end := sc.i + len(kw)
+	if end > len(sc.s) || !strings.EqualFold(sc.s[sc.i:end], kw) {
+		return false
+	}
+	if end < len(sc.s) {
+		if r, _ := utf8.DecodeRuneInString(sc.s[end:]); isDDLNameRune(r) {
+			return false
+		}
+	}
+	sc.i = end
+	return true
+}
+
+func (sc *ddlScanner) number() {
+	sc.space()
+	for sc.i < len(sc.s) && (sc.s[sc.i] >= '0' && sc.s[sc.i] <= '9' || sc.s[sc.i] == '.') {
+		sc.i++
+	}
+}
+
+// qualifiedName reads [schema.]name.
+func (sc *ddlScanner) qualifiedName(defaultSchema string) (event.DDLTable, bool) {
+	first, ok := sc.ident()
+	if !ok {
+		return event.DDLTable{}, false
+	}
+	sc.space()
+	if sc.byte('.') {
+		if table, ok := sc.ident(); ok {
+			return event.DDLTable{Schema: first, Table: table}, true
+		}
+	}
+	return event.DDLTable{Schema: defaultSchema, Table: first}, true
+}
+
+// ident reads one name: backticked or double-quoted (ANSI_QUOTES), where a
+// doubled quote stands for itself, or unquoted.
+func (sc *ddlScanner) ident() (string, bool) {
+	sc.space()
+	if sc.i >= len(sc.s) {
+		return "", false
+	}
+	if q := sc.s[sc.i]; q == '`' || q == '"' {
+		var b strings.Builder
+		for j := sc.i + 1; j < len(sc.s); j++ {
+			if sc.s[j] != q {
+				b.WriteByte(sc.s[j])
+				continue
+			}
+			if j+1 < len(sc.s) && sc.s[j+1] == q {
+				b.WriteByte(q)
+				j++
+				continue
+			}
+			if b.Len() == 0 {
+				return "", false
+			}
+			sc.i = j + 1
+			return b.String(), true
+		}
+		return "", false // no closing quote
+	}
+	start := sc.i
+	for sc.i < len(sc.s) {
+		r, size := utf8.DecodeRuneInString(sc.s[sc.i:])
+		if !isDDLNameRune(r) {
+			break
+		}
+		sc.i += size
+	}
+	return sc.s[start:sc.i], sc.i > start
+}
+
+// isDDLNameRune is a rune an unquoted name may hold: ddlNameRe's class.
+func isDDLNameRune(r rune) bool {
+	return r == '_' || r == '$' || r >= 0x80 ||
+		r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
 }
 
 // SchemaDriftError is the #700 hard error: a TABLE_MAP whose column names
