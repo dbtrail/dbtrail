@@ -7483,7 +7483,7 @@ function verifyRegions(servers, opts) {
     el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Current run" }))));
   vfyView = { id: cur.id, results, btn, updateMode };
   vfyDraw(vfyView);
-  if (!vfyFollowing.has(cur.id)) vfyProbe(cur.id);
+  vfyProbe(cur.id);
   current.append(results);
   // The per-row nouns are precise AND internal (#1419 §5) — the glossary is
   // the affordance that keeps them from requiring a source dive.
@@ -7555,10 +7555,10 @@ function vfyShow(id, opts) {
 }
 
 // vfyProbe asks, once per paint, whether the server has a run going: one the
-// schedule started, or one this tab started before the page repainted. It
-// also settles a run this session last saw running whose loop has stopped
-// (the poll gives up after ~20 minutes). Best effort: a failed read leaves
-// the page as drawn.
+// schedule started, or one this tab started before the page repainted (a
+// loop already following it absorbs the second follow). It also settles a
+// run this session last saw running whose loop has stopped (the poll gives
+// up after ~20 minutes). Best effort: a failed read leaves the page as drawn.
 async function vfyProbe(id) {
   let st;
   try {

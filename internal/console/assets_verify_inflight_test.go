@@ -24,31 +24,44 @@ Object.defineProperty(FakeEl.prototype, "isConnected", { get() { for (let n = th
 document.getElementById = (id) => (id === "view" ? screen : new FakeEl("div"));
 const find = (n, cls) => { if (!n || !n.children) return null; if ((" " + n.className + " ").includes(" " + cls + " ")) return n;
   for (const c of n.children) { const f = find(c, cls); if (f) return f; } return null; };
-ctx.setTimeout = (fn) => setTimeout(fn, 0);
+// A manual clock: the page's timers wait until the test ticks, so a run on
+// one server really is going while the test paints another, and a click
+// really races a repaint.
+let timers = [];
+ctx.setTimeout = (fn) => { timers.push(fn); return timers.length; };
+const flush = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
+const tick = async () => { const due = timers.splice(0); due.forEach((f) => f()); await flush(); };
+const drain = async () => { for (let i = 0; i < 20 && timers.length; i++) await tick(); };
 const toasts = [];
 ctx.toast = (m) => toasts.push(m);
 ctx.toastError = (m) => toasts.push("ERR " + m);
 const queues = {}, gets = {};
-let posts = 0;
+let posts = 0, postGate = null;
 ctx.__api = async (path, opts) => {
   if (path === "/api/servers") return { servers: [{ id: "a", name: "a" }, { id: "b", name: "b" }] };
   if (path.endsWith("/verify/history")) return { history: [] };
   const m = /^\/api\/servers\/([^/]+)\/verify$/.exec(path);
   if (!m) return {};
-  if (opts && opts.method === "POST") { posts++; return { verify: { state: "running", mode: "recover-inputs", results: [] } }; }
+  if (opts && opts.method === "POST") {
+    posts++;
+    if (postGate) await postGate.p;
+    return { verify: { state: "running", mode: "recover-inputs", results: [] } };
+  }
   gets[m[1]] = (gets[m[1]] || 0) + 1;
   const q = queues[m[1]] || [{ state: "idle" }];
   return { verify: q.length > 1 ? q.shift() : q[0] };
 };
 vm.runInContext("api = (path, opts) => __api(path, opts);", ctx);
-const settle = () => new Promise((r) => setTimeout(r, 30));
 const paint = async (server) => {
   vm.runInContext("currentServer = " + JSON.stringify(server) + ";", ctx);
   await vm.runInContext("renderVerification()", ctx);
+  await flush();
 };
 const away = () => { vm.runInContext("clear(VIEW()); VIEW().append(el('div', { text: 'Events' }));", ctx); };
 const box = () => { const r = find(screen, "vfy-results"); return r ? r.textContent : null; };
 const btn = () => { const b = find(screen, "vfy-run"); return b ? { disabled: !!b.disabled, text: b.textContent } : null; };
+const flashed = () => !!find(screen, "vfy-flash");
+const click = () => { find(screen, "vfy-mode").value = "recover-inputs"; return find(screen, "vfy-run").onclick(); };
 const running = (n) => ({ state: "running", mode: "recover-inputs", results: Array.from({ length: n }, (_, i) => ({ schema: "s", table: "t" + i, status: "match" })), summary: { match: n } });
 const finished = { state: "succeeded", verdict: "verified", mode: "recover-inputs", results: [{ schema: "s", table: "t0", status: "match" }], summary: { match: 1 } };
 const reset = (caps) => {
@@ -56,61 +69,77 @@ const reset = (caps) => {
   vm.runInContext("if (typeof vfyLive !== 'undefined') { vfyLive.clear(); vfyFollowing.clear(); vfyView = null; }", ctx);
   for (const k of Object.keys(queues)) delete queues[k];
   for (const k of Object.keys(gets)) delete gets[k];
-  toasts.length = 0; posts = 0;
+  toasts.length = 0; posts = 0; postGate = null; timers = [];
 };
 const out = {};
 (async () => {
   // Start a run, leave, come back while it runs, let it end.
   reset();
-  queues.a = [{ state: "idle" }, running(1), running(2), running(2), finished];
+  queues.a = [{ state: "idle" }, running(1), running(2), finished];
   await paint("a");
   const oldBox = find(screen, "vfy-results");
-  const runBtn = find(screen, "vfy-run");
-  find(screen, "vfy-mode").value = "recover-inputs";
-  const click = runBtn.onclick();
-  await new Promise((r) => setImmediate(r));
+  const clicked = click();
+  await flush();
   const startedBtn = btn();
   away();
   await paint("a");
   const backBox = box(), backBtn = btn();
-  await click;
-  await settle();
-  out.clickThenReturn = { startedBtn, backBox, backBtn, endBox: box(), endBtn: btn(), oldBoxText: oldBox.textContent, toasts: [...toasts], posts };
+  await drain();
+  await clicked;
+  out.clickThenReturn = { startedBtn, backBox, backBtn, endBox: box(), endBtn: btn(), flashed: flashed(), oldBoxText: oldBox.textContent, toasts: [...toasts], posts };
+
+  // The click's start is still on its way when the page repaints and finds
+  // the run going: one loop follows it, not two.
+  reset();
+  queues.a = [{ state: "idle" }, running(1), running(1), running(1), finished];
+  await paint("a");
+  let release;
+  postGate = { p: new Promise((r) => { release = r; }) };
+  const raced = click();
+  await flush();
+  away();
+  await paint("a");
+  release();
+  await flush();
+  await drain();
+  await raced;
+  out.race = { endBox: box(), endBtn: btn(), toasts: [...toasts] };
 
   // A run the schedule started: the page finds it and follows it.
   reset();
   queues.a = [running(1), running(1), finished];
   await paint("a");
   const schedBox = box(), schedBtn = btn();
-  await settle();
-  out.scheduled = { schedBox, schedBtn, endBox: box(), endBtn: btn(), toasts: [...toasts] };
+  await drain();
+  out.scheduled = { schedBox, schedBtn, endBox: box(), endBtn: btn(), flashed: flashed(), toasts: [...toasts] };
 
   // Nothing running: one status request, no loop.
   reset();
   await paint("a");
-  await settle();
+  await drain();
   out.idle = { box: box(), btn: btn(), gets: gets.a || 0, toasts: [...toasts] };
 
-  // A run on a, then the page for b, then back to a.
+  // A run going on a while the page shows b, then back to a.
   reset();
-  queues.a = [running(1), running(1), running(1), running(1), finished];
+  queues.a = [running(1), running(1), running(1), finished];
   queues.b = [{ state: "idle" }];
   await paint("a");
   const aBox = box();
   away();
   await paint("b");
   const bBox = box(), bBtn = btn();
-  await settle();
-  const bLater = box();
+  await tick();
+  const bLater = box(), bLaterBtn = btn();
+  await drain();
+  const bEnd = box();
   away();
   await paint("a");
-  await settle();
-  out.switchServers = { aBox, bBox, bBtn, bLater, aEnd: box(), aBtn: btn(), toasts: [...toasts] };
+  out.switchServers = { aBox, bBox, bBtn, bLater, bLaterBtn, bEnd, aEnd: box(), aBtn: btn(), toasts: [...toasts] };
 
   // The feature off: the page says so and asks nothing.
   reset({ monitor: true, verify_trigger: false });
   await paint("a");
-  await settle();
+  await drain();
   out.off = { gets: gets.a || 0 };
 
   console.log(JSON.stringify(out));
@@ -153,12 +182,19 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 		ClickThenReturn struct {
 			StartedBtn, BackBtn, EndBtn *button
 			BackBox, EndBox, OldBoxText string
+			Flashed                     bool
 			Toasts                      []string
 			Posts                       int
+		}
+		Race struct {
+			EndBox string
+			EndBtn *button
+			Toasts []string
 		}
 		Scheduled struct {
 			SchedBox, EndBox string
 			SchedBtn, EndBtn *button
+			Flashed          bool
 			Toasts           []string
 		}
 		Idle struct {
@@ -168,9 +204,9 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 			Toasts []string
 		}
 		SwitchServers struct {
-			ABox, BBox, BLater, AEnd string
-			BBtn, ABtn               *button
-			Toasts                   []string
+			ABox, BBox, BLater, BEnd, AEnd string
+			BBtn, BLaterBtn, ABtn          *button
+			Toasts                         []string
 		}
 		Off struct{ Gets int }
 	}
@@ -191,6 +227,7 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 	}
 	busy := func(b *button) bool { return b != nil && b.Disabled && b.Text == "Running…" }
 	ready := func(b *button) bool { return b != nil && !b.Disabled && b.Text == "Run verification" }
+	empty := func(s string) bool { return strings.Contains(s, "No run yet") }
 
 	c := got.ClickThenReturn
 	if !busy(c.StartedBtn) {
@@ -199,26 +236,34 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 	if !strings.Contains(c.BackBox, "RUNNING") || !busy(c.BackBtn) {
 		t.Errorf("click, leave, return: box %q, button %+v; want the run in progress and the button busy", c.BackBox, c.BackBtn)
 	}
-	if !strings.Contains(c.EndBox, "DONE") || !ready(c.EndBtn) {
-		t.Errorf("click, leave, return, run ends: box %q, button %+v; want the finished run and the button on screen ready", c.EndBox, c.EndBtn)
+	if !strings.Contains(c.EndBox, "DONE") || !c.Flashed || !ready(c.EndBtn) {
+		t.Errorf("click, leave, return, run ends: box %q, highlighted %v, button %+v; want the finished run highlighted and the button on screen ready",
+			c.EndBox, c.Flashed, c.EndBtn)
 	}
 	if strings.Contains(c.OldBoxText, "DONE") {
 		t.Errorf("the box left behind kept receiving the run: %q", c.OldBoxText)
 	}
 	if n := finishToasts(c.Toasts); n != 1 || c.Posts != 1 {
-		t.Errorf("click then return: %d finish toasts and %d starts, want 1 and 1 (two loops would say it twice): %q", n, c.Posts, c.Toasts)
+		t.Errorf("click then return: %d finish toasts and %d starts, want 1 and 1: %q", n, c.Posts, c.Toasts)
+	}
+
+	r := got.Race
+	if n := finishToasts(r.Toasts); n != 1 || !strings.Contains(r.EndBox, "DONE") || !ready(r.EndBtn) {
+		t.Errorf("a repaint that finds the run while the click's start is on its way: %d finish toasts (want 1; two loops say it twice), box %q, button %+v",
+			n, r.EndBox, r.EndBtn)
 	}
 
 	s := got.Scheduled
 	if !strings.Contains(s.SchedBox, "RUNNING") || !busy(s.SchedBtn) {
 		t.Errorf("a run the schedule started: box %q, button %+v; want it shown in progress and the button busy", s.SchedBox, s.SchedBtn)
 	}
-	if !strings.Contains(s.EndBox, "DONE") || !ready(s.EndBtn) || finishToasts(s.Toasts) != 1 {
-		t.Errorf("the scheduled run ends: box %q, button %+v, toasts %q; want it finished, the button ready, one toast", s.EndBox, s.EndBtn, s.Toasts)
+	if !strings.Contains(s.EndBox, "DONE") || !s.Flashed || !ready(s.EndBtn) || finishToasts(s.Toasts) != 1 {
+		t.Errorf("the scheduled run ends: box %q, highlighted %v, button %+v, toasts %q; want it finished and highlighted, the button ready, one toast",
+			s.EndBox, s.Flashed, s.EndBtn, s.Toasts)
 	}
 
 	i := got.Idle
-	if !strings.Contains(i.Box, "No run yet") || !ready(i.Btn) || i.Gets != 1 || len(i.Toasts) != 0 {
+	if !empty(i.Box) || !ready(i.Btn) || i.Gets != 1 || len(i.Toasts) != 0 {
 		t.Errorf("nothing running: box %q, button %+v, %d status requests, toasts %q; want No run yet, ready, exactly 1, none",
 			i.Box, i.Btn, i.Gets, i.Toasts)
 	}
@@ -227,8 +272,9 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 	if !strings.Contains(w.ABox, "RUNNING") {
 		t.Errorf("server a with a run: box %q, want it in progress", w.ABox)
 	}
-	if !strings.Contains(w.BBox, "No run yet") || !ready(w.BBtn) || strings.Contains(w.BLater, "RUNNING") || strings.Contains(w.BLater, "DONE") {
-		t.Errorf("server b while a runs: box %q then %q, button %+v; want b's own empty box, never a's run, and b's button ready", w.BBox, w.BLater, w.BBtn)
+	if !empty(w.BBox) || !ready(w.BBtn) || !empty(w.BLater) || !ready(w.BLaterBtn) || !empty(w.BEnd) {
+		t.Errorf("server b while a's run goes and ends: box %q, then %q, then %q, button %+v then %+v; want b's own empty box and a ready button throughout",
+			w.BBox, w.BLater, w.BEnd, w.BBtn, w.BLaterBtn)
 	}
 	if !strings.Contains(w.AEnd, "DONE") || !ready(w.ABtn) || finishToasts(w.Toasts) != 1 {
 		t.Errorf("back on a after its run ended: box %q, button %+v, toasts %q; want it finished, ready, one toast", w.AEnd, w.ABtn, w.Toasts)
