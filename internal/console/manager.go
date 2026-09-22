@@ -132,35 +132,14 @@ func newConnManager(reg *Registry, profileActive bool) *connManager {
 // fan-out a tab switch fires (capabilities + schemas + events) opens ONE
 // connection, not four.
 func (cm *connManager) Resolve(ctx context.Context, id string) (*bundle, error) {
-	if id == "" {
-		// The no-header default must match defaultID() exactly — /api/servers
-		// reports that id as default_id and the switcher renders it selected,
-		// so resolving "" anywhere else would render one server while
-		// querying another.
-		if id = cm.defaultID(); id == "" {
-			// Source-less watch, empty registry: the boot entry is hidden
-			// from every listing but still backs header-less requests, so a
-			// fresh install renders (empty) views instead of a 404. The
-			// bundle's db is non-nil by construction: only watch sets
-			// HideBoot, and it connects the boot DB before console.New.
-			cm.mu.Lock()
-			if b := cm.boot; b != nil {
-				cm.mu.Unlock()
-				return b, nil
-			}
-			cm.mu.Unlock()
-			return nil, errNoServers
-		}
+	boot, id, err := cm.target(id)
+	if err != nil {
+		return nil, err
+	}
+	if boot != nil {
+		return boot, nil
 	}
 	cm.mu.Lock()
-	if id == bootServerID {
-		if b := cm.boot; b != nil {
-			cm.mu.Unlock()
-			return b, nil
-		}
-		cm.mu.Unlock()
-		return nil, ErrUnknownServer
-	}
 	if b, ok := cm.bundles[id]; ok {
 		cm.mu.Unlock()
 		return b, nil
@@ -227,6 +206,65 @@ func (cm *connManager) Resolve(ctx context.Context, id string) (*bundle, error) 
 	}
 }
 
+// target resolves a server selection without opening anything: the boot
+// bundle, or the id of a registry entry. Resolve and baselineLocation share it,
+// so the backup location Connect AI prints belongs to the same server every
+// other view resolves.
+func (cm *connManager) target(id string) (*bundle, string, error) {
+	if id == "" {
+		// The no-header default must match defaultID() exactly — /api/servers
+		// reports that id as default_id and the switcher renders it selected,
+		// so resolving "" anywhere else would render one server while
+		// querying another.
+		if id = cm.defaultID(); id == "" {
+			// Source-less watch, empty registry: the boot entry is hidden
+			// from every listing but still backs header-less requests, so a
+			// fresh install renders (empty) views instead of a 404. The
+			// bundle's db is non-nil by construction: only watch sets
+			// HideBoot, and it connects the boot DB before console.New.
+			cm.mu.Lock()
+			b := cm.boot
+			cm.mu.Unlock()
+			if b != nil {
+				return b, "", nil
+			}
+			return nil, "", errNoServers
+		}
+	}
+	if id == bootServerID {
+		cm.mu.Lock()
+		b := cm.boot
+		cm.mu.Unlock()
+		if b != nil {
+			return b, "", nil
+		}
+		return nil, "", ErrUnknownServer
+	}
+	return nil, id, nil
+}
+
+// baselineLocation returns where a server's snapshots live, the source its
+// bundle carries, WITHOUT opening its index connection: for a registry entry
+// the location is configuration (its own, else the daemon's), and Connect AI
+// asks for it on every open, where a dead index would hold the page on the
+// connect timeout. Derived by the same baselineSources over the same
+// withBaselineDefaults the bundle is built from.
+func (cm *connManager) baselineLocation(id string) (string, error) {
+	boot, id, err := cm.target(id)
+	if err != nil {
+		return "", err
+	}
+	if boot != nil {
+		return boot.baselineSrc, nil
+	}
+	entry, ok := cm.reg.Get(id)
+	if !ok {
+		return "", ErrUnknownServer
+	}
+	src, _ := baselineSources(cm.withBaselineDefaults(entry))
+	return src, nil
+}
+
 // buildBundle opens a registry server's connection and derives its per-server
 // state. config.Connect Pings eagerly, so a dead entry fails here — on
 // selection, exactly when the operator switches to it — with a scrubbed error.
@@ -266,6 +304,19 @@ func (cm *connManager) withBaselineDefaults(entry ServerEntry) ServerEntry {
 	return entry
 }
 
+// baselineSources picks an entry's baseline source and its fallback: the
+// directory when set, with the bucket (if any) as the per-table fallback, else
+// the bucket alone.
+func baselineSources(entry ServerEntry) (src, fallback string) {
+	src = entry.BaselineDir
+	if src == "" {
+		src = entry.BaselineS3
+	} else if entry.BaselineS3 != "" {
+		fallback = entry.BaselineS3
+	}
+	return src, fallback
+}
+
 // newBundleDerived computes the pure-config per-server state shared by lazy
 // opens and derived-only rebuilds. The reconstruct gate mirrors what New()
 // enforced process-globally before multi-server:
@@ -277,13 +328,7 @@ func (cm *connManager) withBaselineDefaults(entry ServerEntry) ServerEntry {
 // Conditions 2 and 3 collapse into !noArchive, exactly as in New().
 func newBundleDerived(db *sql.DB, dbName string, entry ServerEntry, profileActive bool) *bundle {
 	noArchive := entry.NoArchive || profileActive
-	src := entry.BaselineDir
-	fallback := ""
-	if src == "" {
-		src = entry.BaselineS3
-	} else if entry.BaselineS3 != "" {
-		fallback = entry.BaselineS3
-	}
+	src, fallback := baselineSources(entry)
 	return &bundle{
 		db:                  db,
 		dbName:              dbName,

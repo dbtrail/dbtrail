@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and its + Add server opens the add form directly.
 
 ### Changed
+- **The console's Iceberg export panel moved from Backups to Connect AI**
+  (#1573). It hands over a command to run elsewhere, which is what Connect AI
+  is for, and Backups is being reduced to its snapshots. Connect AI asks only
+  where the selected server's snapshots are kept
+  (`GET /api/baselines?location_only=1`, same permission as the listing),
+  which reads neither the storage nor the server's index, so the lookup adds
+  no wait of its own for a server whose index is down. It is refused while a
+  data profile is active, a named `--profile` even with no rules yet or the
+  session's, and the page does not ask then (new `data_profile` capability).
+  When the lookup or the server list fails for another reason, one line says
+  so in place of the panel.
+  Because Connect AI also exists without the `watch` daemon, the panel now
+  shows on `bintrail-console serve` too when a backup location is configured.
 - **`bintrail verify` checks each table against its last read of the
   database, not against the newest baseline.** A baseline that a refresh built
   from the recorded changes never read the database, so once a refresh had run

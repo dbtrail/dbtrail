@@ -4180,10 +4180,8 @@ async function renderBaselines() {
     // first visit the list is the page's answer, and this card is the
     // follow-through for a reader who just took a copy.
     if (capsCache.views) v.append(duckdbPanel());
-    // Below the list: what these backups can become, for a reader who has
-    // one and wants it in front of a reporting engine (#1466).
-    const iceberg = icebergExportPanel(cur, baselines);
-    if (iceberg) v.append(iceberg);
+    // The Iceberg export panel (#1466) moved to Connect AI (#1573), where
+    // "take this data somewhere else" lives.
     viewEnter();
   } catch (err) {
     const v = VIEW(); clear(v); v.append(pageHead("Backups", null)); renderError(v, err);
@@ -5645,10 +5643,11 @@ function baselineContextStrip(b, cur) {
 // Apache Iceberg tables. It is shown as a command rather than a button on
 // purpose: it writes a new copy of the data, and it is deliberately kept out
 // of the process that captures changes, so nothing here can start one. The
-// panel is display only and needs no API of its own: everything in the
-// command comes from /api/servers and /api/baselines, which this page already
-// has. The password is elided the same way the SQL-client panel elides the
-// console token.
+// panel is display only: the command is built from /api/servers and from the
+// backup location Connect AI asks for (GET /api/baselines?location_only=1,
+// #1573), which reads neither the storage nor the server's index. The
+// password is elided the same way the SQL-client panel elides the console
+// token.
 
 // icebergExportCommand renders the command for the selected server, or null
 // when this page cannot write a correct one: no server, no backup destination,
@@ -5819,7 +5818,9 @@ function icebergKeys(cmd) {
 function icebergExportPanel(cur, baselines) {
   const cmd = icebergExportCommand(cur, baselines);
   if (!cmd) return null;
-  const panel = el("section", { class: "ov-panel cn-sql", style: "margin-top:18px" });
+  // cn-sql for the look it shares with the SQL client panel; cn-ice so a
+  // reader can tell the two apart (the Connect text budget leaves both out).
+  const panel = el("section", { class: "ov-panel cn-sql cn-ice", style: "margin-top:18px" });
   panel.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: "Keep it current with Iceberg" })));
   const body = el("div", { class: "cn-sql-body" });
@@ -8608,7 +8609,7 @@ function updateSrvNote() {
 let mcpMintedOnce = null;
 
 async function renderConnect() {
-  const gen = serverGen;
+  const gen = serverGen, vgen = viewGen;
   // Consume the one-time plaintext FIRST — before any await or early return —
   // so a server-switch mid-load can never leave it parked in the module
   // global to be re-displayed (stale) on a later visit.
@@ -8618,8 +8619,17 @@ async function renderConnect() {
   // The server list only picks between /mcp and /mcp/{id-or-name}; a failure
   // (or the registry-only 404 on an empty console) degrades to the bare
   // default-server URL instead of blanking the page.
-  let servers = [];
-  try { servers = (await api("/api/servers")).servers || []; } catch (_) {}
+  // serversFailed covers what that degrade leaves out: the Iceberg command
+  // needs the selected server's index address, and a failure other than a
+  // refusal or the empty console must say why the panel is missing. The
+  // default id is THIS response's, the one a header-less request resolves to
+  // right now, not the one the last loadServers left behind.
+  let servers = [], serversDefault = "", serversFailed = false;
+  try {
+    const r = await api("/api/servers");
+    servers = r.servers || [];
+    serversDefault = r.default_id || "";
+  } catch (err) { serversFailed = err.status !== 403 && err.status !== 404; }
   // Token status (#1052): presence/provenance only, never a value. null on
   // failure — the card degrades to a reload hint instead of blanking the page.
   let tokStatus = null;
@@ -8628,14 +8638,33 @@ async function renderConnect() {
   // null on failure — the SQL client panel says it could not check.
   let fbStatus = null;
   try { fbStatus = await api("/api/flashback"); } catch (_) {}
-  if (gen !== serverGen) {
+  // Where the selected server's snapshots live, for the Iceberg export
+  // command (#1573): location_only is the Backups listing's own resolution,
+  // answered without reading the storage or opening the server's index. Not
+  // asked when the session may not read settings or a data profile is active
+  // (data_profile, the key the server refuses on): the server would refuse it
+  // on every visit, auditing a denial under a profile, since the command
+  // hands out unredacted data. A refusal draws no panel; any other failure
+  // says so in one line, so a missing panel never reads as "this server keeps
+  // no backups".
+  let bLoc = null, bLocFailed = false;
+  if ((capsCache.permissions || {})["settings:read"] !== false && !capsCache.data_profile) {
+    try { bLoc = await api("/api/baselines?location_only=1"); } catch (err) { bLocFailed = err.status !== 403; }
+  }
+  // vgen: navigating away while these requests are out must not let this
+  // page paint over the next one.
+  if (gen !== serverGen || vgen !== viewGen) {
     // The consumed plaintext cannot be re-shown; say so instead of losing it
     // silently (the user must rotate to get a usable value).
     if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
     return;
   }
   try {
-    buildConnect(servers, tokStatus, minted, fbStatus);
+    // No note for a console with no server at all: the location 404s there
+    // too, and "this server" would name nothing.
+    const cur = servers.find((s) => s.id === (currentServer || serversDefault));
+    buildConnect(servers, tokStatus, minted, fbStatus,
+      { cur: cur, loc: bLoc, failed: (bLocFailed && !!cur) || serversFailed });
   } catch (err) {
     if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
     const v = VIEW(); clear(v); v.append(pageHead("Connect AI", null)); renderError(v, err);
@@ -8677,7 +8706,7 @@ function copyText(text, what) {
   clip.writeText(text).then(() => toast(what + " copied to clipboard"), () => toastError("Copy failed."));
 }
 
-function buildConnect(servers, tokStatus, minted, fbStatus) {
+function buildConnect(servers, tokStatus, minted, fbStatus, ice) {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "Three steps and Claude can answer questions about your database history. It can only read; it can never change anything.");
@@ -8699,6 +8728,15 @@ function buildConnect(servers, tokStatus, minted, fbStatus) {
   if (capsCache.views && !capsCache.monitor) v.append(duckdbPanel());
   if (capsCache.mcp) v.append(otherClientsPanel(servers));
   v.append(sqlClientPanel(servers, fbStatus));
+  // Last: what the selected server's snapshots can become, for a reader who
+  // wants them in front of a reporting engine (#1466). It was the bottom of
+  // the Backups page, a third answer to "what do I download" there (#1573).
+  const iceberg = icebergExportPanel(ice.cur, ice.loc);
+  if (iceberg) v.append(iceberg);
+  else if (ice.failed) {
+    v.append(el("p", { class: "form-hint cn-ice-err", style: "margin-top:18px", text:
+      "Could not check where this server's backups are kept, so the Iceberg export command is not shown. Reload the page to try again." }));
+  }
   viewEnter();
 }
 
@@ -8927,6 +8965,16 @@ async function mintMCPToken(rotate) {
   }
   mcpMintedOnce = (res && res.token) || null;
   try { await gateCapabilities(); } catch (_) {} // 401 already raised the sign-in gate
+  // The reader may have left Connect while the token was being made; painting
+  // it now would cover the page they moved to. The route, not viewGen: a
+  // server switch re-renders Connect in place, and the token is not per
+  // server. Dropped rather than parked for a later visit (the rule
+  // renderConnect keeps), and said, as an interrupted display is.
+  if (routeSegment() !== "connect") {
+    if (mcpMintedOnce) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
+    mcpMintedOnce = null;
+    return;
+  }
   renderConnect();
 }
 
@@ -8940,6 +8988,9 @@ async function revokeMCPToken() {
   }
   toast("Token deleted. AI clients that used it are disconnected");
   try { await gateCapabilities(); } catch (_) {}
+  // Same rule as mintMCPToken: never paint Connect over a page the reader
+  // moved to while the request was out.
+  if (routeSegment() !== "connect") return;
   renderConnect();
 }
 
