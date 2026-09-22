@@ -80,11 +80,14 @@ type BaselineRunRecord struct {
 	// run took, upload included, like the full backup duration it is
 	// compared against (#1721), and IndexMark the high-water mark read
 	// before the fold: the base the NEXT update's Events are counted from,
-	// kept here so the count survives a daemon restart. A successful full
-	// backup records IndexMark too, read before its dump started, so the
-	// update that follows it is measured like any other (#1737); it has no
-	// Events or UpdateSeconds. Zero when not measured (a restore, a fold
-	// with no previous mark, an index that did not answer).
+	// kept here so the count survives a daemon restart. A MySQL full
+	// backup that published a snapshot records IndexMark too, read before
+	// its dump started, so the update that follows it is measured like any
+	// other (#1737); it has no Events or UpdateSeconds. A PostgreSQL one
+	// cannot: its snapshot instant is stamped by the database, so no record
+	// names it, and the update after it goes unmeasured (the one after that
+	// is measured from the daemon's memo). Zero when not measured (a
+	// restore, a fold with no previous mark, an index that did not answer).
 	Events        int64   `json:"events,omitempty"`
 	UpdateSeconds float64 `json:"update_seconds,omitempty"`
 	IndexMark     uint64  `json:"index_mark,omitempty"`
@@ -230,13 +233,22 @@ func (h *BaselineRunHistory) ProvenUpdate(serverID string, within time.Duration)
 // snapshot counts its events from, when this daemon's in-memory memo does
 // not name it (a restart emptied it, or the snapshot is a full backup's,
 // which folds nothing and leaves no memo, #1737).
+//
+// A full backup's record counts even with an error: it names a snapshot only
+// when one was published, and an error beside that is the upload (or a
+// shutdown during it). The next update reads that local copy
+// (resolveFoldSource prefers it when it is ahead of the bucket), so its
+// mark is the right base. An update's record counts only when clean, as
+// before: a failed update records no mark.
 func (h *BaselineRunHistory) IndexMarkFor(serverID, snapshotTime string) (uint64, bool) {
 	rec := h.FindBySnapshot(serverID, snapshotTime)
-	if rec == nil || (rec.Kind != BaselineRunRefresh && rec.Kind != BaselineRunDump) ||
-		rec.Error != "" || rec.SkipReason != "" || rec.IndexMark == 0 {
+	if rec == nil || rec.IndexMark == 0 {
 		return 0, false
 	}
-	return rec.IndexMark, true
+	if rec.Kind == BaselineRunDump || (rec.Kind == BaselineRunRefresh && rec.Error == "") {
+		return rec.IndexMark, true
+	}
+	return 0, false
 }
 
 // UpdateSample is how many measured successful updates the model fits for
@@ -270,6 +282,9 @@ func (h *BaselineRunHistory) UpdateSample(serverID string) (n int, newest time.T
 // Record order, not timestamps: an update that ran while a full backup
 // was still uploading (#1725) is recorded before it, and counts as before.
 // That costs one more update after that full backup, never a missed one.
+// A full backup counts when it succeeded or published a snapshot whose
+// upload then failed: either way it read production and the next update
+// folds from what it wrote. One that failed before publishing did not.
 func (h *BaselineRunHistory) MeasuredSinceFull(serverID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -279,7 +294,7 @@ func (h *BaselineRunHistory) MeasuredSinceFull(serverID string) bool {
 		if measuredUpdate(r) {
 			return true
 		}
-		if r.Kind == BaselineRunDump && r.Error == "" && r.SkipReason == "" {
+		if r.Kind == BaselineRunDump && r.SkipReason == "" && (r.Error == "" || r.SnapshotTime != "") {
 			return false
 		}
 	}

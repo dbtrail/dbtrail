@@ -230,12 +230,12 @@ type windowSample struct {
 // its own terms, and the rule (console.CutoverToFull) says what it can
 // decide with what it has:
 //
-//   - the events since the anchor need the index mark this daemon read when
-//     it folded THAT snapshot (foldedMarks, in memory, so gone at a restart
-//     and absent after a full backup, which folds nothing) and one read of
-//     the current mark; an anchor with no memo, a memo for another snapshot,
-//     a mark that went backwards (an index rebuilt) or an index that did not
-//     answer all leave it unknown;
+//   - the events since the anchor need a base mark for THAT snapshot and
+//     one read of the current mark: the base is this daemon's memo of its
+//     fold of the snapshot (foldedMarks, in memory), or the mark the run
+//     history recorded for the run that published it (see windowBase); no
+//     base, a mark that went backwards (an index rebuilt) or an index that
+//     did not answer all leave it unknown;
 //   - the update model, what the history proves an update can do, the
 //     last full backup's duration and whether an update was measured
 //     after it come from the run history, and are unknown without one. The
@@ -297,8 +297,11 @@ func probeDSN(dsn string) string {
 }
 
 // windowBase is the index mark an update from anchor counts its events from:
-// the in-memory memo of this daemon's fold that published it, or, after a
-// restart emptied the memo, the mark the run history recorded for it.
+// the in-memory memo of this daemon's fold that published it, or the mark
+// the run history recorded for it (after a restart emptied the memo, or when
+// a full backup published it, #1737). Like measuredEvents, a memo on another
+// index means the server was re-pointed since this daemon's last fold, and
+// no recorded mark can be trusted to come from the current one.
 func (b *backupScheduler) windowBase(e console.ServerEntry, anchor time.Time) (uint64, bool) {
 	if anchor.IsZero() {
 		return 0, false
@@ -306,7 +309,10 @@ func (b *backupScheduler) windowBase(e console.ServerEntry, anchor time.Time) (u
 	b.sup.mu.Lock()
 	memo, seen := b.sup.foldedMarks[e.ID]
 	b.sup.mu.Unlock()
-	if seen && memo.indexDSN == e.DSN && reconstruct.SnapshotDirName(memo.publishedAt) == reconstruct.SnapshotDirName(anchor) {
+	if seen && memo.indexDSN != e.DSN {
+		return 0, false
+	}
+	if seen && reconstruct.SnapshotDirName(memo.publishedAt) == reconstruct.SnapshotDirName(anchor) {
 		return memo.mark.events, true
 	}
 	if b.sup.history != nil {
@@ -804,7 +810,13 @@ func (b *backupScheduler) modelLogArgs(serverID string, now time.Time) []any {
 	}
 	fixed, rate := h.UpdateModel(serverID)
 	n, newest := h.UpdateSample(serverID)
-	args := []any{"fold_rate_events_per_second", math.Round(rate*100) / 100, "fold_fixed", fixed.Round(time.Second), "fold_samples", n}
+	// Unknown, not zero: the fixed-cost verdict chooses a full backup with
+	// no rate at all, and a logged 0 would read as a measured one.
+	var perSecond any = "unknown"
+	if rate > 0 {
+		perSecond = math.Round(rate*100) / 100
+	}
+	args := []any{"fold_rate_events_per_second", perSecond, "fold_fixed", fixed.Round(time.Second), "fold_samples", n}
 	if !newest.IsZero() {
 		args = append(args, "newest_sample_age", now.Sub(newest).Round(time.Second))
 	}

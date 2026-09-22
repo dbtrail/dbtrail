@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,7 +17,8 @@ import (
 // #1737: the daemon's half. A full backup reads the index mark before its
 // dump and records it; the update that folds from that full backup counts
 // its events from it; and the probe tells the rule when no update has been
-// measured since the last full backup, so the model abstains until one is.
+// measured since the last full backup, so the model may not choose a full
+// backup until one is.
 
 func TestDump_recordsTheIndexMarkReadBeforeTheDump(t *testing.T) {
 	at := time.Date(2026, 9, 18, 11, 23, 49, 0, time.UTC)
@@ -53,6 +55,26 @@ func TestDump_recordsTheIndexMarkReadBeforeTheDump(t *testing.T) {
 			t.Fatalf("IndexMarkFor the full backup's snapshot = %d,%v", base, ok)
 		}
 	})
+	t.Run("published locally, upload failed: the mark is recorded, the next update reads that copy", func(t *testing.T) {
+		sup, req, local := setup(t, dsn)
+		req.S3 = "s3://bucket/backups/"
+		ds := stubDumpUpload(t, map[string]bool{}, errors.New("upload: access denied"))
+		close(ds.hold)
+		mark := indexMark{events: 5000}
+		stubIndexMark(t, &mark, true)
+		sup.produce = func(console.BaselineRequest) (dumpOutcome, error) { return dumpOutcomeAt(t, local, at), nil }
+		sup.run(req)
+		runs := sup.history.List("a")
+		if len(runs) != 1 || runs[0].Error == "" || runs[0].SnapshotTime == "" || runs[0].IndexMark != 5000 {
+			t.Fatalf("history = %+v, want the failed upload with its snapshot and mark", runs)
+		}
+		if base, ok := sup.history.IndexMarkFor("a", at.Format(time.RFC3339)); !ok || base != 5000 {
+			t.Fatalf("IndexMarkFor the unuploaded snapshot = %d,%v", base, ok)
+		}
+		if sup.history.MeasuredSinceFull("a") {
+			t.Fatal("a full backup that published a snapshot does not count as one")
+		}
+	})
 	t.Run("a failed full backup records no mark", func(t *testing.T) {
 		sup, req, _ := setup(t, dsn)
 		mark := indexMark{events: 5000}
@@ -82,10 +104,14 @@ func TestDump_recordsTheIndexMarkReadBeforeTheDump(t *testing.T) {
 		sup, req, local := setup(t, dsn)
 		mark := indexMark{events: 5000}
 		stubIndexMark(t, &mark, false)
+		logs := captureSlogFor(t)
 		sup.produce = func(console.BaselineRequest) (dumpOutcome, error) { return dumpOutcomeAt(t, local, at), nil }
 		sup.run(req)
 		if runs := sup.history.List("a"); len(runs) != 1 || runs[0].Error != "" || runs[0].IndexMark != 0 {
 			t.Fatalf("history = %+v, want a successful full backup with no mark", runs)
+		}
+		if !strings.Contains(logs.String(), "could not read the index before the full backup; the update after it will not be measured") {
+			t.Fatalf("the missing measurement was not logged: %q", logs.String())
 		}
 	})
 	t.Run("the read is bounded", func(t *testing.T) {
@@ -151,14 +177,18 @@ func TestRunRefresh_measuresTheUpdateAfterAFullBackup(t *testing.T) {
 		current uint64
 		want    int64
 	}{
+		// The memo's destination ("") is not this request's: the fallback
+		// counts the index, whatever the snapshot was published to.
 		{"memo of an older fold, same index: counted from the full backup's mark", []console.BaselineRunRecord{dumpRec}, olderFold, 12_000, 3000},
 		{"no memo (a restart since): counted from the full backup's mark", []console.BaselineRunRecord{dumpRec}, nil, 12_000, 3000},
 		{"no memo, an update published the snapshot before the restart", []console.BaselineRunRecord{
 			{Kind: console.BaselineRunRefresh, SnapshotTime: fullStamp, IndexMark: 9000, Events: 50, UpdateSeconds: 1}}, nil, 12_000, 3000},
 		{"memo of an older fold on ANOTHER index: the index was re-pointed, not counted",
 			[]console.BaselineRunRecord{dumpRec}, &foldMemo{mark: olderFold.mark, publishedAt: olderFold.publishedAt, indexDSN: "old"}, 12_000, 0},
-		{"the full backup failed: no base", []console.BaselineRunRecord{{Kind: console.BaselineRunDump, SnapshotTime: fullStamp,
-			IndexMark: 9000, Error: "upload: denied"}}, olderFold, 12_000, 0},
+		{"the full backup published locally but its upload failed: counted", []console.BaselineRunRecord{{Kind: console.BaselineRunDump, SnapshotTime: fullStamp,
+			IndexMark: 9000, Error: "upload: denied"}}, olderFold, 12_000, 3000},
+		{"an update published the snapshot and failed its upload: no base", []console.BaselineRunRecord{{Kind: console.BaselineRunRefresh, SnapshotTime: fullStamp,
+			IndexMark: 9000, Error: "upload: denied"}}, nil, 12_000, 0},
 		{"the full backup recorded no mark", []console.BaselineRunRecord{{Kind: console.BaselineRunDump, SnapshotTime: fullStamp}}, olderFold, 12_000, 0},
 		{"a mark for another snapshot only", []console.BaselineRunRecord{{Kind: console.BaselineRunDump,
 			SnapshotTime: full.Add(-time.Hour).Format(time.RFC3339), IndexMark: 9000}}, nil, 12_000, 0},
@@ -210,6 +240,18 @@ func TestMeasureWindow_afterAFullBackup(t *testing.T) {
 	if w := b.measureWindow(context.Background(), e, anchor); w.UnmeasuredSinceFull {
 		t.Fatalf("window after a measured update = %+v, want the model current", w)
 	}
+	// A memo on another index: the server was re-pointed since this
+	// daemon's last fold, so the full backup's recorded mark may be the old
+	// index's, and the count is unknown, as measuredEvents would refuse it.
+	b.sup.mu.Lock()
+	b.sup.foldedMarks["a"] = foldMemo{mark: indexMark{events: 500}, publishedAt: anchor.Add(-time.Hour), indexDSN: "old-idx"}
+	b.sup.mu.Unlock()
+	b.mu.Lock()
+	b.windows = nil
+	b.mu.Unlock()
+	if w := b.measureWindow(context.Background(), e, anchor); w.Events != -1 {
+		t.Fatalf("window with a memo on another index = %+v, want the count unknown", w)
+	}
 }
 
 // The slots themselves: a full backup the measured rule chose is followed by
@@ -234,7 +276,8 @@ func TestBackupScheduler_theUpdateAfterAChosenFullBackupIsMeasured(t *testing.T)
 	stubIndexMark(t, &mark, true)
 	stubCoverage(t, true, true)
 	injectFold(t, 0, nil)
-	dumpAt := time.Now().UTC().Truncate(time.Second)
+	t0 := time.Date(2026, 8, 20, 13, 0, 5, 0, time.UTC)
+	dumpAt := t0.Add(time.Hour) // slot 1's instant, so slot 2's anchor is an hour old, well inside the six-hour cut-over
 	sup.produce = func(console.BaselineRequest) (dumpOutcome, error) {
 		// Long enough that the full backup's duration is a whole second
 		// in its record: LastFullBackup reads zero otherwise, and the model
@@ -243,7 +286,6 @@ func TestBackupScheduler_theUpdateAfterAChosenFullBackupIsMeasured(t *testing.T)
 		return dumpOutcomeAt(t, e.BaselineDir, dumpAt), nil
 	}
 	logs := captureSlogFor(t)
-	t0 := time.Date(2026, 8, 20, 13, 0, 5, 0, time.UTC)
 
 	// Slot 1: the measured rule chooses a full backup, and says on what.
 	fireAt(b, t0)
@@ -274,5 +316,33 @@ func TestBackupScheduler_theUpdateAfterAChosenFullBackupIsMeasured(t *testing.T)
 	}
 	if !sup.history.MeasuredSinceFull(e.ID) {
 		t.Fatal("the model is still older than the full backup after a measured update")
+	}
+	// And the model now fits it: the fake fold is the fastest update on
+	// record, so it is the fixed cost, and the sample has grown to three.
+	// A change that recorded the sample but left it out of the fit would
+	// keep deciding on the minute and the 4,000 events/s that chose slot 1.
+	fixed, _ := sup.history.UpdateModel(e.ID)
+	n, _ := sup.history.UpdateSample(e.ID)
+	if r := runs[len(runs)-1]; n != 3 || fixed != time.Duration(r.UpdateSeconds*float64(time.Second)) {
+		t.Fatalf("model after the measured update: fixed=%s from %d samples, want the new update's %gs from three", fixed, n, r.UpdateSeconds)
+	}
+}
+
+// The log line's rate is "unknown" when the model has none (the fixed-cost
+// verdict chooses a full backup without one), never a measured-looking 0.
+func TestModelLogArgs_unknownRate(t *testing.T) {
+	b, _, sup := newScheduleFixture(t, true)
+	for _, sec := range []float64{360, 370} {
+		if err := sup.history.Append(console.BaselineRunRecord{ServerID: "a", Kind: console.BaselineRunRefresh, Events: 1_000_000, UpdateSeconds: sec,
+			FinishedAt: "2026-09-18T10:00:00Z"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := fmt.Sprint(b.modelLogArgs("a", time.Date(2026, 9, 18, 10, 30, 0, 0, time.UTC)))
+	if want := "[fold_rate_events_per_second unknown fold_fixed 6m0s fold_samples 2 newest_sample_age 30m0s]"; got != want {
+		t.Fatalf("modelLogArgs = %s, want %s", got, want)
+	}
+	if args := (&backupScheduler{sup: &baselineSupervisor{}}).modelLogArgs("a", time.Now()); args != nil {
+		t.Fatalf("no history: %v, want nothing", args)
 	}
 }

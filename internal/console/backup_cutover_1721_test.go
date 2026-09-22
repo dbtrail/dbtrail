@@ -81,7 +81,7 @@ func TestCutoverToFull(t *testing.T) {
 		t.Errorf("age reason %q claims something the history has", why)
 	}
 	why = CutoverToFull(BackupWindow{Anchor: old, Events: 100}, 5*time.Minute, now)
-	if !strings.Contains(why, "no usable update rate (none measured, or the measured updates all cost about the same), no full backup on record") || strings.Contains(why, "no count") {
+	if !strings.Contains(why, "no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full backup on record") || strings.Contains(why, "no count") {
 		t.Errorf("age reason %q, want the two missing measurements named", why)
 	}
 	if got := roundSeconds(1e30); got != roundDuration(time.Duration(1<<63-1)) {

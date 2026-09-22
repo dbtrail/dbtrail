@@ -1016,7 +1016,9 @@ func foldRunCounts(rec console.BaselineRunRecord, tables, refused int, reuse reu
 // a mark came from, so that path trusts it the way the window probe's does
 // (measureWindow), except when the memo shows the index was re-pointed since
 // this daemon's last fold. Zero ("not measured") without a base, or when the
-// mark went backwards (an index rebuilt).
+// mark went backwards (an index rebuilt). A full backup's mark over-counts by
+// whatever the capture had not indexed when its dump started; see
+// dumpIndexMark.
 func (s *baselineSupervisor) measuredEvents(req refreshRequest, mark indexMark, known bool, prev time.Time) int64 {
 	if !known || prev.IsZero() {
 		return 0

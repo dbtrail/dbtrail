@@ -10,13 +10,16 @@ import (
 // measured, so the next slot chose a full backup on the same numbers. The
 // history now answers whether an update was measured since the last full
 // backup, the full backup records the mark the next update counts from,
-// and CutoverToFull lets the model decide only on evidence newer than it.
+// and CutoverToFull lets the model choose a full backup only on evidence
+// newer than it.
 
 func TestBaselineHistory_measuredSinceFull(t *testing.T) {
 	measured := BaselineRunRecord{Kind: BaselineRunRefresh, Events: 1000, UpdateSeconds: 60}
 	full := BaselineRunRecord{Kind: BaselineRunDump, StartedAt: "2026-09-18T05:00:00Z", FinishedAt: "2026-09-18T05:08:00Z"}
 	failedFull := full
 	failedFull.Error = "mydumper: exit 2"
+	unuploadedFull := full // published locally, then the upload failed
+	unuploadedFull.SnapshotTime, unuploadedFull.Error = "2026-09-18T05:00:00Z", "upload: access denied"
 	skippedFull := BaselineRunRecord{Kind: BaselineRunDump, SkipReason: "another backup job was running"}
 	unmeasured := BaselineRunRecord{Kind: BaselineRunRefresh, UpdateSeconds: 60} // the update after a full backup, before #1737
 	failedUpdate := BaselineRunRecord{Kind: BaselineRunRefresh, Events: 1000, UpdateSeconds: 60, Error: "capture gap"}
@@ -34,7 +37,8 @@ func TestBaselineHistory_measuredSinceFull(t *testing.T) {
 		{"only an unmeasured update after it", []BaselineRunRecord{measured, full, unmeasured}, false},
 		{"only a failed update after it", []BaselineRunRecord{measured, full, failedUpdate}, false},
 		{"a restore and a compaction after it are not updates", []BaselineRunRecord{measured, full, restore, compact}, false},
-		{"a failed full backup is not a full backup", []BaselineRunRecord{measured, failedFull}, true},
+		{"a full backup that failed before publishing is not a full backup", []BaselineRunRecord{measured, failedFull}, true},
+		{"one published locally whose upload failed is: the next update folds from it", []BaselineRunRecord{measured, unuploadedFull}, false},
 		{"a skipped full backup is not a full backup", []BaselineRunRecord{measured, skippedFull}, true},
 		{"a failed full backup after a real one does not hide it", []BaselineRunRecord{measured, full, failedFull}, false},
 	}
@@ -73,8 +77,8 @@ func TestBaselineHistory_updateSample(t *testing.T) {
 	}
 }
 
-// A successful full backup's mark is the base the next update counts from;
-// anything that is not a successful update or full backup is not.
+// A full backup's mark is the base the next update counts from whenever it
+// published a snapshot; an update's only when it succeeded; nothing else's.
 func TestBaselineHistory_indexMarkForAFullBackup(t *testing.T) {
 	const snap = "2026-09-18T07:00:00Z"
 	for _, c := range []struct {
@@ -84,7 +88,8 @@ func TestBaselineHistory_indexMarkForAFullBackup(t *testing.T) {
 	}{
 		{"successful full backup", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, IndexMark: 900}, true},
 		{"successful update", BaselineRunRecord{Kind: BaselineRunRefresh, SnapshotTime: snap, IndexMark: 900}, true},
-		{"failed full backup", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, IndexMark: 900, Error: "upload: denied"}, false},
+		{"full backup published locally, upload failed: the next update reads that copy", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, IndexMark: 900, Error: "upload: denied"}, true},
+		{"update whose upload failed", BaselineRunRecord{Kind: BaselineRunRefresh, SnapshotTime: snap, IndexMark: 900, Error: "upload: denied"}, false},
 		{"full backup with no mark (the index did not answer)", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap}, false},
 		{"restore", BaselineRunRecord{Kind: BaselineRunRestore, SnapshotTime: snap, IndexMark: 900}, false},
 		{"compaction", BaselineRunRecord{Kind: BaselineRunCompact, SnapshotTime: snap, IndexMark: 900}, false},
@@ -98,43 +103,53 @@ func TestBaselineHistory_indexMarkForAFullBackup(t *testing.T) {
 	}
 }
 
-// With no update measured since the last full backup, neither the rate nor
-// the fixed cost decides; the age rule still does, and says what is missing.
-func TestCutoverToFull_abstainsUntilAnUpdateIsMeasuredSinceTheFullBackup(t *testing.T) {
+// With no update measured since the last full backup the model may not
+// choose a full backup, but its "update" stands; the age rule still applies,
+// and says what it acted on.
+func TestCutoverToFull_aStaleModelMayUpdateButNotChooseAFullBackup(t *testing.T) {
 	now := time.Date(2026, 9, 18, 10, 30, 0, 0, time.UTC)
 	fresh := now.Add(-5 * time.Minute)
 	old := now.Add(-5*time.Hour - 30*time.Minute)
 	cases := []struct {
-		name string
-		w    BackupWindow
-		want string
+		name        string
+		w           BackupWindow
+		stale, want string // the code with the model older than the last full backup, and with it current
 	}{
-		{"dear by the rate: update", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}, ""},
-		{"fixed cost over the full backup: update", BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, ""},
-		{"fixed cost over it, count unknown: update", BackupWindow{Anchor: fresh, Events: -1, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, ""},
-		{"cheap by the rate, old anchor: full on age", BackupWindow{Anchor: old, Events: 1000, FoldRate: 1000, LastFull: 8 * time.Minute}, "window_age"},
+		{"dear by the rate, fresh anchor", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}, "", "window_measured"},
+		{"fixed cost over the full backup, fresh anchor", BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, "", "window_measured"},
+		{"fixed cost over it, count unknown", BackupWindow{Anchor: fresh, Events: -1, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, "", "window_measured"},
+		// The review's two: a full backup that took longer than the
+		// cut-over age leaves an old anchor behind it, and so does a quiet
+		// server that indexed nothing since. The estimate says update.
+		{"cheap by the rate, old anchor (a full backup longer than the cut-over)", BackupWindow{Anchor: old, Events: 5000, FoldRate: 20_000, LastFull: 5*time.Hour + 20*time.Minute}, "", ""},
+		{"nothing to fold, old anchor (a quiet server)", BackupWindow{Anchor: old, Events: 0, FoldRate: 4000, LastFull: 8 * time.Minute}, "", ""},
+		{"proven cheaper, old anchor", BackupWindow{Anchor: old, Events: 17_000_000, FoldRate: 4000, Proven: 12_000_000, LastFull: 8 * time.Minute}, "", ""},
+		{"dear by the rate, old anchor", BackupWindow{Anchor: old, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}, "window_age", "window_measured"},
+		{"count unknown, old anchor", BackupWindow{Anchor: old, Events: -1, FoldRate: 4000, LastFull: 8 * time.Minute}, "window_age", "window_age"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			w := c.w
-			w.UnmeasuredSinceFull = true
 			if got := BackupWhyCode(CutoverToFull(w, 5*time.Minute, now)); got != c.want {
-				t.Fatalf("got %q, want %q", got, c.want)
+				t.Errorf("model current: got %q, want %q", got, c.want)
+			}
+			w.UnmeasuredSinceFull = true
+			if got := BackupWhyCode(CutoverToFull(w, 5*time.Minute, now)); got != c.stale {
+				t.Errorf("model older than the last full backup: got %q, want %q", got, c.stale)
 			}
 		})
 	}
-	// Controls: the same windows with an update measured since decide as
-	// the model says (the old anchor is cheap by the estimate, so updated).
-	for i, want := range []string{"window_measured", "window_measured", "window_measured", ""} {
-		if got := BackupWhyCode(CutoverToFull(cases[i].w, 5*time.Minute, now)); got != want {
-			t.Errorf("%s, model fresh: got %q, want %q", cases[i].name, got, want)
-		}
-	}
-	// The age reason names the stale model as what is missing, and only
-	// that when everything else is known.
-	w := BackupWindow{Anchor: old, Events: 1000, FoldRate: 1000, LastFull: 8 * time.Minute, UnmeasuredSinceFull: true}
+	// With everything measured, the age reason says the estimate was not
+	// used, never that it could not be made.
+	w := BackupWindow{Anchor: old, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute, UnmeasuredSinceFull: true}
 	why := CutoverToFull(w, 5*time.Minute, now)
-	if !strings.Contains(why, "(no update measured since the last full backup, so the update could not be estimated)") {
-		t.Fatalf("age reason %q does not name the stale model alone", why)
+	if !strings.Contains(why, "(no update has been measured since the last full backup, so the estimate from before it is not used)") ||
+		strings.Contains(why, "could not be estimated") {
+		t.Fatalf("age reason %q, want the stale model named as what was not used", why)
+	}
+	// With a measurement missing, it says that, as before.
+	w.Events = -1
+	if why := CutoverToFull(w, 5*time.Minute, now); !strings.Contains(why, "(no count of the changes since it, so the update could not be estimated)") {
+		t.Fatalf("age reason %q, want the missing count named", why)
 	}
 }
