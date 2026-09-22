@@ -223,6 +223,14 @@ services:
   # daemon formerly known as `bintrail up --console`).
   bintrail:
     image: ghcr.io/dbtrail/bintrail-console:${BINTRAIL_TAG:-latest}
+    # host.docker.internal: a database on this same machine, from inside the
+    # container. Docker Desktop defines the name on its own; Docker Engine on
+    # Linux does not, so the installer's advice to use it failed there. The
+    # host-gateway mapping defines it on both. On Linux the host MySQL must
+    # also listen on more than 127.0.0.1 (bind-address), and its user must be
+    # allowed from the container's network.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Building from a source checkout instead? Uncomment here AND on
     # index-init above (keep the image: lines — `docker compose build` tags
     # the local build with that name, so nothing is pulled):
@@ -474,6 +482,9 @@ services:
   shim:
     profiles: ["flashback"]
     image: ghcr.io/dbtrail/bintrail:${BINTRAIL_TAG:-latest}
+    # Same mapping as the bintrail service: host.docker.internal on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       # Loopback only. The shim binds 0.0.0.0 INSIDE the container so this host
       # mapping can reach it (it logs a non-loopback Warn for that bind, which
@@ -572,6 +583,9 @@ services:
     # Pinned upstream image (the light-locking flags below need mydumper
     # >= 0.18; distro-apt builds are older and would reject them).
     image: mydumper/mydumper:v1.0.3-1
+    # Same mapping as the bintrail service: host.docker.internal on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       BASELINE_SOURCE_DSN: ${BASELINE_SOURCE_DSN:-${SOURCE_DSN:-}}
       # Comma-separated schemas to snapshot (defaults to SCHEMAS; empty = all

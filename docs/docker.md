@@ -180,7 +180,10 @@ Notes:
   MySQL/Percona 8.0+) and `SHOW VIEW`. On managed MySQL (RDS, Aurora,
   Cloud SQL) the default lock mode is not available: grant `LOCK TABLES` and
   `SHOW VIEW` and set `BASELINE_LOCK_MODE=lock-all`. A MySQL on the
-  same machine is reachable from inside Docker as `host.docker.internal`.
+  same machine is reachable from inside Docker as `host.docker.internal`,
+  on Linux too (the compose maps it with `host-gateway`). On Linux that
+  MySQL must listen on more than `127.0.0.1` (`bind-address`) and allow its
+  user from the container's network.
 - The console is published on the **host loopback only** (`127.0.0.1:8090`),
   which is why first-run browser setup is allowed (the compose sets
   `BINTRAIL_CONSOLE_ALLOW_SETUP` because the container itself binds `0.0.0.0`).
