@@ -11,8 +11,10 @@ import (
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
-// The Download a DuckDB schema card is the only caller of GET /api/views.sql,
-// so what it can ask for IS the console's whole surface over that endpoint.
+// The Download a DuckDB schema card is the only caller of GET /api/views.sql
+// that can ask for more than the default file (the Backups lane asks for the
+// default only, #1573), so what it can ask for IS the console's whole surface
+// over that endpoint.
 //
 // It carried three checkboxes and three multi-line caveats until #1549's
 // follow-up. The caveats are what these guards used to pin, one string at a
@@ -175,13 +177,17 @@ func TestDuckDBCardMountsOnConnect(t *testing.T) {
 			"copies of one download put two different option sets in front of the reader")
 	}
 	connect := stripJSLineComments(functionBody(t, js, "function buildConnect("))
-	mount := strings.Index(connect, "if (capsCache.views) v.append(duckdbPanel())")
+	// Gated on views and on settings:read, the permission GET /api/views.sql
+	// checks: on Backups the listing's own permission hid it, and without the
+	// second half a session denied it sees a button that can only be refused.
+	mount := strings.Index(connect, `if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) v.append(duckdbPanel())`)
 	sql := strings.Index(connect, "sqlClientPanel(")
 	ice := strings.Index(connect, "icebergExportPanel(")
 	switch {
 	case mount < 0:
-		t.Fatal("buildConnect does not mount duckdbPanel on capsCache.views alone; with the daemon " +
-			"running (monitor on) the views download would have no page at all")
+		t.Fatal("buildConnect does not mount duckdbPanel on capsCache.views plus settings:read; with " +
+			"the daemon running (monitor on) the views download would have no page at all, or a " +
+			"session denied settings:read would get a button that only 403s")
 	case sql < 0 || ice < 0:
 		t.Fatal("buildConnect no longer mounts the SQL client panel or the Iceberg panel; re-anchor this order check")
 	case !(sql < mount && mount < ice):

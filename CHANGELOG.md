@@ -24,9 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **The console's DuckDB schema card moved from Backups to Connect AI**
   (#1573), where it now shows with or without the `watch` daemon (before, it
-  was on Connect only on `serve`). On Backups, the take-away lane's views
-  button downloads `views.sql` itself (the default file, without the change
-  log) and shows the command to open it, instead of scrolling to the card.
+  was on Connect only on `serve`), for a session that may read settings, which
+  the download needs. On Backups, the take-away lane's views button downloads
+  `views.sql` itself (the default file, without the change log) and shows the
+  command to open it, instead of scrolling to the card.
 - **The console's Iceberg export panel moved from Backups to Connect AI**
   (#1573). It hands over a command to run elsewhere, which is what Connect AI
   is for, and Backups is being reduced to its snapshots. Connect AI asks only
@@ -83,9 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its real name by a DROP or RENAME; before, it was recorded as `a` (ALTER,
   CREATE and TRUNCATE still record it that way).
 - **A bookmark of an old console address opens the page that replaced it.**
-  `/storage` (now Retention) and `/sql` (now Backups, where the DuckDB card
-  lives when the server offers views, or Connect without the watch daemon)
-  opened from a bookmark, a link or Back
+  `/storage` (now Retention) and `/sql` (now Connect AI, where the DuckDB
+  card lives) opened from a bookmark, a link or Back
   showed Overview under the old address: the console knew where they had
   moved, but nothing that opens a page from its address asked. The address
   bar is now rewritten to the new page. Retention needs the watch daemon, so

@@ -290,19 +290,18 @@ func TestStorageSplit_eachHalfHoldsOnlyItsOwnConcern(t *testing.T) {
 	// navigate call) is TestOldAddressesLandOnTheirPage's, which drives the
 	// router instead of looking for the text that once did it.
 	// And the DuckDB schema download has to be mounted SOMEWHERE, not merely
-	// absent from the two halves above. Its home is Backups since #1581; this
-	// only pins that buildConnect still CALLS duckdbPanel at all — the gate on
-	// that call (`views && !monitor`, the serve-only fallback) is pinned
-	// exact-string by TestDuckDBCardMountsOnBackupsWithConnectFallback, not
-	// here. The #1549 lesson behind keeping any Connect mount: /sql gated the
-	// card on a capability and a permission that are not the download's own,
-	// so BINTRAIL_CONSOLE_SQL_PANEL=0 left `views` on with no route to it.
+	// absent from the two halves above. Its home is Connect AI since #1573;
+	// this only pins that buildConnect still CALLS duckdbPanel at all -- the
+	// gate and the order are pinned by TestDuckDBCardMountsOnConnect, not
+	// here. The #1549 lesson: /sql gated the card on a capability and a
+	// permission that are not the download's own, so
+	// BINTRAIL_CONSOLE_SQL_PANEL=0 left `views` on with no route to it.
 	//
 	// Named explicitly rather than searched file-wide, because the failure
 	// this guards is the card existing while nothing calls it.
 	if !strings.Contains(jsFunctionBody(t, js, "buildConnect"), "duckdbPanel(") {
-		t.Error("buildConnect no longer mounts duckdbPanel, so a serve-only console (views on, " +
-			"monitor off — no /baselines page) has no route to the schema download")
+		t.Error("buildConnect no longer mounts duckdbPanel, so the schema download (with its " +
+			"options) has no page at all")
 	}
 	// And it must not go back to the SQL page, which #1549 removed entirely.
 	// Asserted as the page's ABSENCE rather than as "renderSQL does not mount

@@ -34,18 +34,16 @@ const SERVER_KEY = "bintrail_console_server";
 const ONBOARD_KEY = "bintrail_console_onboarded";
 
 // The generated DuckDB views file, named in two places that must not drift:
-// the card that builds it (mounted on Backups by renderBaselines, with
-// buildConnect's serve-only fallback, #1581) and the take-away lane that
-// points a reader down the page to it. Shared rather than guarded -- a
+// the card that builds it (on Connect AI, #1573) and the Backups take-away
+// lane that downloads the default one. Shared rather than guarded -- a
 // constant cannot disagree with itself, and a test comparing two literals
 // only reports the drift after someone ships it.
 const DUCKDB_VIEWS_FILE = "views.sql";
 
-// The card's own class, shared by duckdbPanel (which wears it) and the
-// take-away lane's jump (which resolves it) -- the LOCATION analog of the
-// filename constant above, and for the same reason: two literals drift the
-// first time the card is restyled, and the jump's `if (c)` null-guard would
-// turn that drift into a dead button with no error and no toast. The bare
+// The card's own class, worn by duckdbPanel and resolved by the browser test.
+// The take-away lane's jump that also resolved it is gone (#1573: the lane
+// downloads the file itself), but one declaration still beats two literals
+// that drift the first time the card is restyled. The bare
 // class is a pure JS/e2e query hook; what style.css addresses is the DERIVED
 // `-body` class (the card body's padding), so a rename also walks through
 // there and through the e2e's selectors.
@@ -949,8 +947,9 @@ const ROUTE_ALIASES = new Map([
   // a capability answer too.
   ["storage", () => (capsKnown ? "retention" : "")],
   // The SQL page was removed (#1549); its DuckDB schema card lives on
-  // Backups, or on Connect without the watch daemon (#1581).
-  ["sql", () => (capsKnown ? (capsCache.monitor ? "baselines" : "connect") : "")],
+  // Connect AI (#1573), which every console has, so no capability answer is
+  // needed to know where to send it.
+  ["sql", () => "connect"],
 ]);
 
 // aliasTarget returns the route an old route moved to, or "" for any other.
@@ -5272,10 +5271,10 @@ function duckdbPanel() {
   // tints every child by position, so inside the grid the card took amber and
   // its tint ate the drawing (style.css records --surface-3 at 1.021 against
   // orange-tint, under the 1.02 identity floor, exactly the fill the tiles
-  // and bars are drawn in). On Backups every sibling panel is the same bare
-  // section, so the shape needs no translation. The cn- class prefix is a
-  // birthmark, not a location: style.css styles the derived -body class, and
-  // the bare class is the query hook the lane's jump and the e2e resolve.
+  // and bars are drawn in). Beside the SQL client and Iceberg panels every
+  // sibling is the same bare section, so the shape needs no translation. The
+  // cn- class prefix fits the page again: style.css styles the derived -body
+  // class, and the bare class is the query hook the e2e resolves.
   const card = el("section", { class: "ov-panel " + DUCKDB_CARD_CLASS, style: "margin-top:18px" });
   card.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: "Download a DuckDB schema" })));
@@ -7132,8 +7131,7 @@ async function startBackupRestore(id, at, btn, msgEl) {
 //
 // The two lanes are deliberately NOT symmetrical, and the drawing is what
 // says so before any text does. DuckDB takes two files — the data here, and
-// the views file the card below the list produces (#1581) — so that lane
-// points at both. MySQL takes one file that does not exist until you
+// the views file — so that lane downloads both. MySQL takes one file that does not exist until you
 // pick a moment, so that lane asks for the moment. Dressing them as a
 // matched pair would be a lie about the work each one is.
 function backupTakeAway(cur, b, sqlSt) {
@@ -7151,8 +7149,8 @@ function backupTakeAway(cur, b, sqlSt) {
 }
 
 // backupFilesShape draws the count instead of stating it: on the DuckDB lane
-// two tiles when the card below the list can produce the views file and one
-// when it cannot, one on the MySQL lane. A reader who takes nothing else off
+// two tiles when the server can make the views file and one when it cannot,
+// one on the MySQL lane. A reader who takes nothing else off
 // this panel should still leave knowing that much. Built with el() and CSS
 // like duckdbShape(), never svgEl -- that path is for static icon constants.
 function backupFilesShape(files) {
@@ -7187,13 +7185,12 @@ function backupLane(title, files, tail) {
 // The DuckDB lane. Downloading what is already stored asks for no capability,
 // so the DATA half is gated on there being a backup and nothing else.
 //
-// The VIEWS half is a different promise and needs its own gate. It is not
-// produced by this lane: the button jumps to the card below the list, which
-// renderBaselines mounts under the same capsCache.views, and viewsAvailable()
-// is false whenever the selected server has archived data turned off (a
-// checkbox on this console's own server form), among other reasons. Ungated,
-// this lane drew a views.sql tile and a button pointing at a card that is not
-// rendered -- no error, no toast. views_api.go puts it plainly: "a button
+// The VIEWS half is a different promise and needs its own gate. The button
+// downloads the file (#1573; it used to jump to the card), and the server
+// makes it only under capsCache.views: viewsAvailable() is false whenever the
+// selected server has archived data turned off (a checkbox on this console's
+// own server form), among other reasons. Ungated, this lane drew a views.sql
+// tile and a button that only fails. views_api.go puts it plainly: "a button
 // that only 404s is a lie, and this codebase already refuses that trade for
 // reconstruct and verify." Naming the file from a shared constant pinned its
 // NAME; only this pins its EXISTENCE.
@@ -8739,10 +8736,11 @@ function buildConnect(servers, tokStatus, minted, fbStatus, ice) {
   v.append(sqlClientPanel(servers, fbStatus));
   // The DuckDB schema card, on this page with or without the watch daemon
   // (#1573; it sat on Backups from #1581, and here only on a serve-only
-  // console). GET /api/views.sql needs settings:read, like the Iceberg
-  // location below, and the views capability is already false under a data
-  // profile.
-  if (capsCache.views) v.append(duckdbPanel());
+  // console). GET /api/views.sql needs settings:read, so a session denied it
+  // gets no card whose button could only be refused (on Backups the listing's
+  // own permission hid it). The views capability is already false under a
+  // data profile.
+  if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) v.append(duckdbPanel());
   // Last: what the selected server's snapshots can become, for a reader who
   // wants them in front of a reporting engine (#1466). It was the bottom of
   // the Backups page, a third answer to "what do I download" there (#1573).

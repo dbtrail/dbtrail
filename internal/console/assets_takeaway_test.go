@@ -103,15 +103,15 @@ func guardedByHasViews(body, needle string) bool {
 	return seen
 }
 
-// The views file is named on two surfaces: the card that builds it, and the
-// take-away lane that points a reader down the page to get it. They share a
-// constant so they cannot drift; this pins that neither re-hardcodes it.
+// The views file is named on two surfaces: the card on Connect AI that builds
+// it, and the Backups take-away lane that downloads the default one. They
+// share a constant so they cannot drift; this pins that neither re-hardcodes it.
 func TestViewsFileIsNamedFromOneConstant(t *testing.T) {
 	js := stripJSLineComments(readAsset(t, "app.js"))
 	decl := regexp.MustCompile(`const DUCKDB_VIEWS_FILE = "([^"]+)"`).FindStringSubmatch(js)
 	if decl == nil {
-		t.Fatal("DUCKDB_VIEWS_FILE is gone: the take-away lane names that file when it points at " +
-			"the card, and two literals in two panels drift the moment one is renamed")
+		t.Fatal("DUCKDB_VIEWS_FILE is gone: the take-away lane and the card both name that file, " +
+			"and two literals in two panels drift the moment one is renamed")
 	}
 	// Counted as a bare substring, not as a standalone "views.sql" literal: a
 	// real re-hardcode embeds the name in a longer string (text: "Get
@@ -130,12 +130,12 @@ func TestViewsFileIsNamedFromOneConstant(t *testing.T) {
 	// everything else through the constant.
 	cardDecl := regexp.MustCompile(`const DUCKDB_CARD_CLASS = "([^"]+)"`).FindStringSubmatch(js)
 	if cardDecl == nil {
-		t.Fatal("DUCKDB_CARD_CLASS is gone: the take-away lane resolves the card by that class, " +
+		t.Fatal("DUCKDB_CARD_CLASS is gone: the card wears it and the browser test finds the card by it, " +
 			"and two literals drift the first time the card is restyled")
 	}
 	if n := strings.Count(js, cardDecl[1]); n != 1 {
 		t.Errorf("%q appears %d times outside a comment line; only the DUCKDB_CARD_CLASS "+
-			"declaration may spell it out, or the lane's jump can resolve a class the card "+
+			"declaration may spell it out, or something can look for a class the card "+
 			"no longer wears", cardDecl[1], n)
 	}
 	if !strings.Contains(stripJSLineComments(functionBody(t, js, "function duckdbPanel(")), "DUCKDB_CARD_CLASS") {

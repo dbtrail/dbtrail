@@ -2584,11 +2584,11 @@ try {
   (mysql && mysql.tiles === 1 && mysql.lead.startsWith("One download"))
     ? ok("take-away: the MySQL lane draws one download and says so")
     : bad("take-away: the MySQL lane draws one download and says so", JSON.stringify(mysql));
-  // The views half is a promise this lane does not keep alone: the file comes
-  // from the card below the list (#1581), gated on the same capability.
+  // The views half is offered only when the server can make the file: the
+  // lane downloads it itself (#1573), gated on the views capability.
   (duck && duck.views === lanes.views && duck.tiles === (lanes.views ? 2 : 1))
-    ? ok("take-away: the views file is offered only when the schema card can produce it")
-    : bad("take-away: the views file is offered only when the schema card can produce it", JSON.stringify({ caps: lanes.views, duck: duck }));
+    ? ok("take-away: the views file is offered only when the server can make it")
+    : bad("take-away: the views file is offered only when the server can make it", JSON.stringify({ caps: lanes.views, duck: duck }));
 
   // The GATED arm, fixture-driven through the real builder. The assertions
   // above run on a stack whose views capability is ON, so the one-tile arm --
@@ -5298,7 +5298,7 @@ try {
   tab.on("pageerror", (e) => jsErrors.push("bookmark tab: " + String(e)));
   const bookmarks = [];
   for (const [from, to, came] of [["/storage", "/retention", "storage"], ["/storage/", "/retention", "storage"],
-    ["/sql", "/baselines", "sql"], ["/timetravel", "/recover", "timetravel"], ["/events/", "/events/", ""]]) {
+    ["/sql", "/connect", "sql"], ["/timetravel", "/recover", "timetravel"], ["/events/", "/events/", ""]]) {
     await tab.goto(`${URL}${from}?token=${encodeURIComponent(TOKEN)}`, { waitUntil: "networkidle" });
     try {
       await tab.waitForFunction(([to, lit]) => location.pathname === to
