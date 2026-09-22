@@ -495,9 +495,10 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 	ctx := s.ctx
 	pairs, prevOnly, err := verify.FindBaselinePair(ctx, baselineSrc)
 	if errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
-		// #1639: a folder the walk could not read sits at or after the pair,
-		// so no pair can be trusted. Every table in scope is inconclusive with
-		// the cause, never graded over an older pair.
+		// #1639: a folder the walk could not read sits at or after the second
+		// newest snapshot, so no pair can be trusted (an older one is each
+		// affected table's own answer, from FindBaselinePair). Every table in
+		// scope is inconclusive with the cause, never graded over an older pair.
 		filter, seen := tableFilter(req.Tables)
 		n := 0
 		for _, tm := range resolver.AllTables() {

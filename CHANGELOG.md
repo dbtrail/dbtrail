@@ -42,7 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newest baseline, makes only the tables whose check it could change
   `inconclusive`, naming it (it may hold the baseline before a table's read,
   the read itself, or an earlier baseline of a table read once); the other
-  tables are still checked. The two compared baselines can be days older than the
+  tables are still checked, and the run exits 0 when some of them matched, so
+  such a folder shows in that table's reason, not in the exit code. The two compared baselines can be days older than the
   newest, so a run can take longer and read more from the Parquet archives.
 
 ### Fixed

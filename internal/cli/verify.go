@@ -755,8 +755,10 @@ func comparedToLine(tables []verify.TableReport) string {
 }
 
 // emitUnreadablePairReport is the baseline-pair verdict when a folder the walk
-// could not read sits at or after the pair it would have picked (#1639). No
-// pair can be trusted, so every table in scope is reported inconclusive with
+// could not read sits at or after the second newest snapshot (#1639), which
+// names the tables to answer for. No pair can be trusted (an older unreadable
+// folder is each affected table's own answer instead, from FindBaselinePair),
+// so every table in scope is reported inconclusive with
 // the cause, through the same report and exit decision as any other run: a
 // --format json consumer still gets a document, and an all-inconclusive run
 // still exits non-zero.

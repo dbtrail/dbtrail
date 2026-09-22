@@ -477,11 +477,11 @@ func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair,
 		switch {
 		case snaps[0].SnapshotTime.Equal(tNew):
 			p, rests := pairLastRead(ctx, snaps)
-			if u := rests.unreadableIn(unreadable); u != nil {
+			if u := rests.unreadableIn(unreadable, p.Schema); u != nil {
 				p = BaselinePair{Schema: p.Schema, Table: p.Table, Settled: &TableResult{
 					Schema: p.Schema, Table: p.Table, Status: StatusInconclusive,
 					Detail: fmt.Sprintf("backup folder %s could not be read (%v), and %s may be in it. "+
-						"Fix its permissions to check this table", u.Path, u.Err, rests.holds),
+						"Fix its permissions to check this table%s", u.Path, u.Err, rests.holds, rests.after),
 				}}
 			}
 			pairs = append(pairs, p)
@@ -509,24 +509,31 @@ type restsOn struct {
 	from, until time.Time // folders in [from, until); a zero from is every folder before until
 	at          time.Time // or the folder of exactly this time
 	holds       string    // what such a folder may hold, for the table's answer
+	after       string    // what else may follow once it is readable
 }
 
-// unreadableIn is an unreadable folder inside r, nil when none.
+// unreadableIn is the newest unreadable folder inside r that could hold a
+// table of schema (a whole snapshot folder, or that schema's own folder), nil
+// when none. The newest is the likeliest to hold what the table needs.
 //
 // A folder newer than a table's read is never inside: had it held a newer
 // read of the table, the folds after it would carry that read instead. (A
 // fold that met it unreadable and fell back to an older snapshot would not,
 // but the comparison stays sound, and compared_to names the read it used.)
-func (r restsOn) unreadableIn(unreadable []reconstruct.UnreadableSnapshot) *reconstruct.UnreadableSnapshot {
+func (r restsOn) unreadableIn(unreadable []reconstruct.UnreadableSnapshot, schema string) *reconstruct.UnreadableSnapshot {
+	var newest *reconstruct.UnreadableSnapshot
 	for i := range unreadable {
 		u := &unreadable[i]
-		switch {
-		case !r.at.IsZero() && u.SnapshotTime.Equal(r.at),
-			!r.until.IsZero() && !u.SnapshotTime.Before(r.from) && u.SnapshotTime.Before(r.until):
-			return u
+		if u.Schema != "" && u.Schema != schema {
+			continue
+		}
+		in := !r.at.IsZero() && u.SnapshotTime.Equal(r.at) ||
+			!r.until.IsZero() && !u.SnapshotTime.Before(r.from) && u.SnapshotTime.Before(r.until)
+		if in && (newest == nil || u.SnapshotTime.After(newest.SnapshotTime)) {
+			newest = u
 		}
 	}
-	return nil
+	return newest
 }
 
 // pairLastRead pairs one table, snaps being its snapshots newest first, and
@@ -592,7 +599,8 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile) (p Base
 	if n == len(snaps)-1 {
 		return settle(StatusInconclusive, fmt.Sprintf("the last read of this table from the database (%s) is the oldest snapshot that holds it: "+
 				"there is no earlier snapshot to compare it with", readAt)),
-			restsOn{until: read.SnapshotTime, holds: fmt.Sprintf("an earlier snapshot of this table than its last read (%s)", readAt)}
+			restsOn{until: read.SnapshotTime, holds: fmt.Sprintf("an earlier snapshot of this table than its last read (%s)", readAt),
+				after: "; if it holds none, the next full backup makes it checkable"}
 	}
 	prev := snaps[n+1]
 	prevMeta, err := footer(prev)
