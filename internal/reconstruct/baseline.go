@@ -660,6 +660,9 @@ func findBaselineLocal(baselineDir, schema, table string, at time.Time) (string,
 			// both marker stats fail and it reads as a legacy snapshot) may
 			// hold it, so an older pick must say so (#1639).
 			// ENOTDIR is absence too: a file where the schema folder would be.
+			// Recorded as the whole folder (no Schema) even when only the
+			// schema folder failed: this lookup asks about one table, and
+			// nothing here reads the field.
 			if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
 				unreadable = append(unreadable, UnreadableSnapshot{SnapshotTime: t, Path: filepath.Join(baselineDir, entry.Name()), Err: err})
 			}

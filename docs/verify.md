@@ -96,9 +96,9 @@ covers the chain up to the last read, not the refreshes after it. A schedule
 with a full backup every so often (for example every 7 days) gives this check a
 new read to test each time. The JSON report names the read each table was
 compared against (`compared_to`). That read is the last one the newest baseline
-was built from: the last full backup, unless one was still being written when a
-refresh started, which only a `bintrail baseline` job run apart from the daemon
-can do (the daemon never runs the two at once).
+was built from: normally the last full backup, but not a full backup that a
+later refresh could not build on (one still being written when the refresh
+started, or unreadable at the time).
 
 A table is reported `inconclusive` instead of compared when:
 
@@ -123,8 +123,8 @@ its permissions first. An older one affects only the tables whose check it
 could change (it may hold the baseline before a table's last read, that read
 itself, or an earlier baseline of a table read only once): those tables are
 `inconclusive`, naming the folder, and every other table is still checked, so
-the run can exit 0 on the tables that matched. A folder that holds only another
-schema affects no table outside it.
+the run can exit 0 on the tables that matched. Such an older folder that holds
+only another schema affects no table outside it.
 
 ```sh
 # All tables, baselines on local disk

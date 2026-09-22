@@ -324,10 +324,10 @@ func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metada
 		}
 		for _, tm := range uncovered {
 			detail := "never baselined; unrecoverable via reconstruct (extend the baseline job to cover this table)"
-			if len(unreadableFolders) > 0 {
+			if n, newest := unreadableFor(unreadableFolders, tm.Schema); n > 0 {
 				// #1639: the walk skipped folders it could not read, and the
 				// table may be in one of them.
-				detail = "not in any readable baseline; " + strconv.Itoa(len(unreadableFolders)) + " baseline folder(s) could not be read (first: " + unreadableFolders[0].Path + "), so it may be there"
+				detail = "not in any readable baseline; " + strconv.Itoa(n) + " baseline folder(s) that may hold it could not be read (newest: " + newest.Path + "), so it may be there"
 			}
 			if everBaselined[tm.Schema+"."+tm.Table] {
 				detail = "not covered by the two most recent baselines; reconstruct will fall back to an older snapshot (stale)"
@@ -752,6 +752,23 @@ func comparedToLine(tables []verify.TableReport) string {
 		return "Compared against the last read of the database, at " + times[0] + "."
 	}
 	return fmt.Sprintf("Compared against each table's last read of the database, at %d different times (--format json lists each).", len(times))
+}
+
+// unreadableFor counts the unreadable folders that could hold a table of
+// schema (whole snapshot folders and that schema's own; another schema's
+// folder cannot) and returns the newest of them.
+func unreadableFor(folders []reconstruct.UnreadableSnapshot, schema string) (n int, newest *reconstruct.UnreadableSnapshot) {
+	for i := range folders {
+		u := &folders[i]
+		if u.Schema != "" && u.Schema != schema {
+			continue
+		}
+		n++
+		if newest == nil || u.SnapshotTime.After(newest.SnapshotTime) {
+			newest = u
+		}
+	}
+	return n, newest
 }
 
 // emitUnreadablePairReport is the baseline-pair verdict when a folder the walk

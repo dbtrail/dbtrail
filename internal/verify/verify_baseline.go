@@ -127,8 +127,9 @@ type BaselinePair struct {
 	// pairComparesNothing ignores it for a read).
 	NewReadFromDatabase bool
 	// Settled, when set, is this table's answer, decided while pairing: the
-	// read it needs is not kept, not on record, or has no earlier snapshot,
-	// or a footer the pairing needed would not open. Nothing is compared.
+	// read it needs is not kept, not on record, or has no earlier snapshot, a
+	// footer the pairing needed would not open, or a backup folder the answer
+	// rests on could not be read. Nothing is compared.
 	Settled *TableResult
 }
 
