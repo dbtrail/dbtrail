@@ -404,6 +404,9 @@ function clearAuthState() {
   lastEvents = [];
   capsCache = {};
   capsKnown = false;
+  vfyLive.clear();
+  vfyAnnounce.clear();
+  vfyView = null;
   applyAuthGate();
 }
 
@@ -7464,7 +7467,8 @@ function verifyRegions(servers, opts) {
   // server with no baseline configured.
   const help = el("p", { class: "form-hint vfy-modehelp" });
   const updateMode = () => {
-    btn.disabled = !configured && modeSel.value !== "recover-inputs";
+    const live = vfyLive.get(cur.id);
+    btn.disabled = (!!live && live.state === "running") || (!configured && modeSel.value !== "recover-inputs");
     help.textContent = VFY_MODE_HELP[modeSel.value] || "";
   };
   modeSel.onchange = updateMode;
@@ -7529,8 +7533,15 @@ const VFY_MODE_HELP = {
 //                start two (two loops would draw every tick twice and say
 //                the ending twice).
 //   vfyView      the box and button on screen now, and whose they are.
+//   vfyAnnounce  the servers whose run this tab started: only those end with
+//                a message, as before; a run the schedule started is shown
+//                on the page but does not pop a message on whatever page
+//                the operator is on.
+// Sign-out clears them (clearAuthState): a status can list tables the next
+// session's profile withholds, and the server refuses that session the read.
 const vfyLive = new Map();
 const vfyFollowing = new Set();
+const vfyAnnounce = new Set();
 let vfyView = null;
 
 // vfyDraw draws a server's state into a view: the box, and the button busy
@@ -7554,25 +7565,48 @@ function vfyShow(id, opts) {
   if (view && view.id === id && view.results.isConnected) vfyDraw(view, opts);
 }
 
-// vfyProbe asks, once per paint, whether the server has a run going: one the
-// schedule started, or one this tab started before the page repainted (a
-// loop already following it absorbs the second follow). It also settles a
-// run this session last saw running whose loop has stopped (the poll gives
-// up after ~20 minutes). Best effort: a failed read leaves the page as drawn.
+// vfyProbe asks, once per paint, what the server holds for this server's
+// verification, and decides whether that is newer than what the page shows:
+//   - a run going (one the schedule started, or one this tab started before
+//     the page repainted): show it and follow it; a loop already following
+//     it absorbs the second follow;
+//   - a finished run other than the one shown (a scheduled run, another tab):
+//     show it, so an older green run never sits over a newer mismatch;
+//   - nothing held (the daemon restarted): a run the page last saw going is
+//     over; a run that ended stays;
+//   - a page that has seen nothing keeps "No run yet".
+// An answer that lands after a newer one (a tick of the poll loop, or its
+// end) is dropped: without that, a slow probe could bring RUNNING back over a
+// finished run and start a second loop. A 403 means the server will not show
+// this session the status, so the page drops what it holds too.
 async function vfyProbe(id) {
+  const before = vfyLive.get(id);
   let st;
   try {
     st = (await api("/api/servers/" + encodeURIComponent(id) + "/verify")).verify;
   } catch (err) {
-    if (!(err && (err.status === 403 || err.status === 404))) console.warn("could not read the verification status", err);
+    if (err && err.status === 403) {
+      if (vfyLive.get(id) === before && before) { vfyLive.delete(id); vfyShow(id); }
+      return;
+    }
+    if (!(err && err.status === 404)) console.warn("could not read the verification status", err);
     return;
   }
-  if (!st) return;
-  const known = vfyLive.get(id);
-  if (st.state !== "running" && !(known && known.state === "running")) return;
+  if (!st || vfyLive.get(id) !== before) return;
+  if (st.state === "running") {
+    vfyLive.set(id, st);
+    vfyShow(id);
+    followVerify(id);
+    return;
+  }
+  if (st.state === "idle") {
+    if (before && before.state === "running") { vfyLive.delete(id); vfyShow(id); }
+    return;
+  }
+  if (!before) return;
+  if (before.state !== "running" && before.since === st.since && before.finished_at === st.finished_at) return;
   vfyLive.set(id, st);
   vfyShow(id);
-  if (st.state === "running") followVerify(id);
 }
 
 // followVerify polls a server's run until it ends and is the one owner of
@@ -7587,6 +7621,14 @@ async function followVerify(id) {
   } finally {
     vfyFollowing.delete(id);
   }
+  // The poll gives up after ~20 minutes. While the page shows this server,
+  // follow on, or the box would freeze on RUNNING with the button disabled
+  // after the run ends; off screen, stop, and the next paint's probe picks
+  // the run up again.
+  if (!done && vfyView && vfyView.id === id && vfyView.results.isConnected) {
+    followVerify(id);
+    return;
+  }
   // justFinished: the running→done transition gets a one-shot highlight so
   // completion is perceptible off-chip (#1420); the toast below is the other
   // half for an operator who looked away.
@@ -7597,7 +7639,7 @@ async function followVerify(id) {
   // on screen, if it is this server's.
   const histBox = document.querySelector(".vfy-history");
   if (histBox && vfyView && vfyView.id === id && histBox.isConnected) loadVerifyHistory(id, histBox);
-  (signal.sticky ? toastError : toast)(signal.message);
+  if (vfyAnnounce.delete(id)) (signal.sticky ? toastError : toast)(signal.message);
 }
 
 // createVerify starts an in-process verify run on the daemon for a server and
@@ -7611,6 +7653,15 @@ async function createVerify(id, mode) {
   try {
     status = (await api("/api/servers/" + encodeURIComponent(id) + "/verify", { method: "POST", body: { mode } })).verify;
   } catch (err) {
+    if (err && err.status === 409) {
+      // A run is already going (the schedule started one, or a second click):
+      // show that one and say when it ends.
+      toast("A verification is already running on this server. Showing it.");
+      vfyAnnounce.add(id);
+      vfyShow(id);
+      vfyProbe(id);
+      return;
+    }
     toastError("Verify failed: " + ((err && err.message) || err));
     vfyShow(id);
     return;
@@ -7618,6 +7669,7 @@ async function createVerify(id, mode) {
   vfyLive.set(id, status);
   vfyShow(id);
   toast("Verification started…");
+  vfyAnnounce.add(id);
   await followVerify(id);
 }
 

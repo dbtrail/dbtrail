@@ -10,9 +10,10 @@ import (
 )
 
 // verifyInflightHarnessJS drives the real Verification page over a fake screen
-// that knows what is attached to it, a clock that runs every timer at once,
-// and an api whose verify status answers come from a per-server queue (the
-// last answer repeats). It records every toast and every status request.
+// that knows what is attached to it, a manual clock (the page's timers wait
+// for the test's tick), and an api whose verify status answers come from a
+// per-server queue (the last answer repeats) or a refusal. It records every
+// toast and every status request.
 const verifyInflightHarnessJS = `
 const screen = new FakeEl("main");
 const attach = (parent, x) => { if (x && typeof x === "object") x.__parent = parent; };
@@ -31,12 +32,12 @@ let timers = [];
 ctx.setTimeout = (fn) => { timers.push(fn); return timers.length; };
 const flush = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
 const tick = async () => { const due = timers.splice(0); due.forEach((f) => f()); await flush(); };
-const drain = async () => { for (let i = 0; i < 20 && timers.length; i++) await tick(); };
+const drain = async (n = 20) => { for (let i = 0; i < n && timers.length; i++) await tick(); };
 const toasts = [];
 ctx.toast = (m) => toasts.push(m);
 ctx.toastError = (m) => toasts.push("ERR " + m);
-const queues = {}, gets = {};
-let posts = 0, postGate = null;
+const queues = {}, gets = {}, forbid = {};
+let posts = 0, postGate = null, post409 = false, holdNextGet = null;
 ctx.__api = async (path, opts) => {
   if (path === "/api/servers") return { servers: [{ id: "a", name: "a" }, { id: "b", name: "b" }] };
   if (path.endsWith("/verify/history")) return { history: [] };
@@ -45,11 +46,16 @@ ctx.__api = async (path, opts) => {
   if (opts && opts.method === "POST") {
     posts++;
     if (postGate) await postGate.p;
-    return { verify: { state: "running", mode: "recover-inputs", results: [] } };
+    if (post409) throw Object.assign(new Error("a verify run is already in progress for this server"), { status: 409 });
+    return { verify: { state: "running", since: "2026-09-22 10:00:00", mode: "recover-inputs", results: [] } };
   }
   gets[m[1]] = (gets[m[1]] || 0) + 1;
+  if (forbid[m[1]]) throw Object.assign(new Error("verification isn't available while an access-control profile is active"), { status: 403 });
   const q = queues[m[1]] || [{ state: "idle" }];
-  return { verify: q.length > 1 ? q.shift() : q[0] };
+  const answer = { verify: q.length > 1 ? q.shift() : q[0] };
+  // A held answer is read now and delivered late, after newer ones.
+  if (holdNextGet) { const g = holdNextGet; holdNextGet = null; await g; }
+  return answer;
 };
 vm.runInContext("api = (path, opts) => __api(path, opts);", ctx);
 const paint = async (server) => {
@@ -62,14 +68,18 @@ const box = () => { const r = find(screen, "vfy-results"); return r ? r.textCont
 const btn = () => { const b = find(screen, "vfy-run"); return b ? { disabled: !!b.disabled, text: b.textContent } : null; };
 const flashed = () => !!find(screen, "vfy-flash");
 const click = () => { find(screen, "vfy-mode").value = "recover-inputs"; return find(screen, "vfy-run").onclick(); };
-const running = (n) => ({ state: "running", mode: "recover-inputs", results: Array.from({ length: n }, (_, i) => ({ schema: "s", table: "t" + i, status: "match" })), summary: { match: n } });
-const finished = { state: "succeeded", verdict: "verified", mode: "recover-inputs", results: [{ schema: "s", table: "t0", status: "match" }], summary: { match: 1 } };
+const running = (n) => ({ state: "running", since: "2026-09-22 10:00:00", mode: "recover-inputs", results: Array.from({ length: n }, (_, i) => ({ schema: "s", table: "t" + i, status: "match" })), summary: { match: n } });
+const finished = { state: "succeeded", since: "2026-09-22 10:00:00", finished_at: "2026-09-22 10:01:00", verdict: "verified", mode: "recover-inputs",
+  results: [{ schema: "s", table: "t0", status: "match" }], summary: { match: 1 } };
+const newerMismatch = { state: "succeeded", since: "2026-09-22 11:00:00", finished_at: "2026-09-22 11:02:00", verdict: "mismatch", mode: "recover-inputs",
+  results: [{ schema: "s", table: "hidden_orders", status: "mismatch" }], summary: { mismatch: 1 } };
 const reset = (caps) => {
   vm.runInContext("capsCache = " + JSON.stringify(caps || { monitor: true, verify_trigger: true, verify: true }) + "; capsKnown = true;", ctx);
-  vm.runInContext("if (typeof vfyLive !== 'undefined') { vfyLive.clear(); vfyFollowing.clear(); vfyView = null; }", ctx);
+  vm.runInContext("if (typeof vfyLive !== 'undefined') { vfyLive.clear(); vfyFollowing.clear(); vfyAnnounce.clear(); vfyView = null; }", ctx);
   for (const k of Object.keys(queues)) delete queues[k];
   for (const k of Object.keys(gets)) delete gets[k];
-  toasts.length = 0; posts = 0; postGate = null; timers = [];
+  for (const k of Object.keys(forbid)) delete forbid[k];
+  toasts.length = 0; posts = 0; postGate = null; post409 = false; holdNextGet = null; timers = [];
 };
 const out = {};
 (async () => {
@@ -136,6 +146,107 @@ const out = {};
   await paint("a");
   out.switchServers = { aBox, bBox, bBtn, bLater, bLaterBtn, bEnd, aEnd: box(), aBtn: btn(), toasts: [...toasts] };
 
+  // A run ends green; while the page is away a newer run ends with a
+  // mismatch. Coming back shows the newer one, never the older green.
+  reset();
+  queues.a = [{ state: "idle" }, running(1), finished];
+  await paint("a");
+  const first = click();
+  await flush();
+  await drain();
+  await first;
+  const greenBox = box();
+  away();
+  queues.a = [newerMismatch];
+  await paint("a");
+  out.newerWhileAway = { greenBox, backBox: box(), toasts: [...toasts] };
+
+  // Signing out drops what the previous session read: the next session,
+  // refused the status by its profile, must not be drawn the old run.
+  reset();
+  queues.a = [{ state: "idle" }, running(1), finished];
+  await paint("a");
+  const own = click();
+  await flush();
+  await drain();
+  await own;
+  ctx.applyAuthGate = () => {}; // the sign-in screen is not this test's subject
+  vm.runInContext("clearAuthState()", ctx);
+  vm.runInContext("capsCache = { monitor: true, verify_trigger: true, verify: true }; capsKnown = true;", ctx);
+  forbid.a = true;
+  away();
+  await paint("a");
+  out.signOut = { box: box() };
+
+  // The same, with the refusal only: what the page held goes too.
+  reset();
+  queues.a = [{ state: "idle" }, running(1), finished];
+  await paint("a");
+  const held = click();
+  await flush();
+  await drain();
+  await held;
+  forbid.a = true;
+  away();
+  await paint("a");
+  out.refused = { box: box() };
+
+  // A click while a run is already going (the schedule started it): the
+  // server answers 409; the page shows that run and says when it ends.
+  reset();
+  queues.a = [{ state: "idle" }, running(1), running(1), finished];
+  await paint("a");
+  post409 = true;
+  const second = click();
+  await flush();
+  await second;
+  const runningBox = box(), runningBtn = btn();
+  await drain();
+  out.alreadyRunning = { runningBox, runningBtn, endBox: box(), endBtn: btn(), toasts: [...toasts] };
+
+  // A run longer than the poll's ~20-minute cap, watched on screen: the page
+  // follows on, so the end still lands and the button comes back.
+  reset();
+  queues.a = [{ state: "idle" }, ...Array.from({ length: 640 }, () => running(1)), finished];
+  await paint("a");
+  const long = click();
+  await flush();
+  await drain(700);
+  await long;
+  out.pastTheCap = { endBox: box(), endBtn: btn(), toasts: [...toasts] };
+
+  // A probe whose answer lands after the run ended must not bring RUNNING
+  // back or start a second loop.
+  reset();
+  queues.a = [{ state: "idle" }, running(1), running(1), finished];
+  await paint("a");
+  const slow = click();
+  await flush();
+  let releaseProbe;
+  holdNextGet = new Promise((r) => { releaseProbe = r; });
+  away();
+  await paint("a");
+  await drain();
+  await slow;
+  releaseProbe();
+  await flush();
+  await drain();
+  out.lateProbe = { box: box(), btn: btn(), toasts: [...toasts] };
+
+  // Changing the mode while a run goes does not offer another run.
+  reset();
+  queues.a = [{ state: "idle" }, running(1), running(1), finished];
+  await paint("a");
+  const moded = click();
+  await flush();
+  const sel = find(screen, "vfy-mode");
+  sel.value = "baseline-anchored";
+  sel.onchange();
+  const modeBtn = btn();
+  await drain();
+  await moded;
+  out.modeChange = { modeBtn };
+
   // The feature off: the page says so and asks nothing.
   reset({ monitor: true, verify_trigger: false });
   await paint("a");
@@ -152,7 +263,7 @@ const out = {};
 // finishes), and a run that wrote into the box it saved at the start kept
 // writing off screen while the new box said "No run yet", its button offered
 // another run, and the button re-enabled at the end was the detached one. A
-// run the schedule started never showed at all.
+// run the schedule started showed only in History, once it had ended.
 func TestVerifyRunSurvivesARepaint(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -208,7 +319,29 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 			BBtn, BLaterBtn, ABtn          *button
 			Toasts                         []string
 		}
-		Off struct{ Gets int }
+		NewerWhileAway struct {
+			GreenBox, BackBox string
+			Toasts            []string
+		}
+		SignOut        struct{ Box string }
+		Refused        struct{ Box string }
+		AlreadyRunning struct {
+			RunningBox, EndBox string
+			RunningBtn, EndBtn *button
+			Toasts             []string
+		}
+		PastTheCap struct {
+			EndBox string
+			EndBtn *button
+			Toasts []string
+		}
+		LateProbe struct {
+			Box    string
+			Btn    *button
+			Toasts []string
+		}
+		ModeChange struct{ ModeBtn *button }
+		Off        struct{ Gets int }
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
@@ -253,12 +386,15 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 			n, r.EndBox, r.EndBtn)
 	}
 
+	// A run this tab did not start is shown on the page, and its end pops no
+	// message on whatever page the operator is on (only runs started here
+	// do, as before).
 	s := got.Scheduled
 	if !strings.Contains(s.SchedBox, "RUNNING") || !busy(s.SchedBtn) {
 		t.Errorf("a run the schedule started: box %q, button %+v; want it shown in progress and the button busy", s.SchedBox, s.SchedBtn)
 	}
-	if !strings.Contains(s.EndBox, "DONE") || !s.Flashed || !ready(s.EndBtn) || finishToasts(s.Toasts) != 1 {
-		t.Errorf("the scheduled run ends: box %q, highlighted %v, button %+v, toasts %q; want it finished and highlighted, the button ready, one toast",
+	if !strings.Contains(s.EndBox, "DONE") || !s.Flashed || !ready(s.EndBtn) || len(s.Toasts) != 0 {
+		t.Errorf("the scheduled run ends: box %q, highlighted %v, button %+v, toasts %q; want it finished and highlighted, the button ready, no message",
 			s.EndBox, s.Flashed, s.EndBtn, s.Toasts)
 	}
 
@@ -276,8 +412,48 @@ func TestVerifyRunSurvivesARepaint(t *testing.T) {
 		t.Errorf("server b while a's run goes and ends: box %q, then %q, then %q, button %+v then %+v; want b's own empty box and a ready button throughout",
 			w.BBox, w.BLater, w.BEnd, w.BBtn, w.BLaterBtn)
 	}
-	if !strings.Contains(w.AEnd, "DONE") || !ready(w.ABtn) || finishToasts(w.Toasts) != 1 {
-		t.Errorf("back on a after its run ended: box %q, button %+v, toasts %q; want it finished, ready, one toast", w.AEnd, w.ABtn, w.Toasts)
+	if !strings.Contains(w.AEnd, "DONE") || !ready(w.ABtn) || len(w.Toasts) != 0 {
+		t.Errorf("back on a after its run ended: box %q, button %+v, toasts %q; want it finished, ready, no message (this tab did not start it)", w.AEnd, w.ABtn, w.Toasts)
+	}
+
+	nw := got.NewerWhileAway
+	if !strings.Contains(nw.GreenBox, "DONE") || !strings.Contains(nw.BackBox, "MISMATCH") || strings.Contains(nw.BackBox, "DONE") {
+		t.Errorf("a newer run ended with a mismatch while the page was away: box before %q, after %q; want the older green run replaced by the mismatch",
+			nw.GreenBox, nw.BackBox)
+	}
+
+	if strings.Contains(got.SignOut.Box, "DONE") || strings.Contains(got.SignOut.Box, "match") || !empty(got.SignOut.Box) {
+		t.Errorf("after sign-out, a session the server refuses the status: box %q; want No run yet, never the previous session's run", got.SignOut.Box)
+	}
+	if !empty(got.Refused.Box) {
+		t.Errorf("the server refuses this session the status: box %q; want the held run dropped (No run yet)", got.Refused.Box)
+	}
+
+	ar := got.AlreadyRunning
+	arErr := false
+	for _, m := range ar.Toasts {
+		arErr = arErr || strings.HasPrefix(m, "ERR ")
+	}
+	if !strings.Contains(ar.RunningBox, "RUNNING") || !busy(ar.RunningBtn) || !strings.Contains(ar.EndBox, "DONE") || !ready(ar.EndBtn) ||
+		arErr || finishToasts(ar.Toasts) != 1 {
+		t.Errorf("a click while a run is already going: box %q then %q, button %+v then %+v, toasts %q; "+
+			"want that run shown and followed, no error, one message at its end", ar.RunningBox, ar.EndBox, ar.RunningBtn, ar.EndBtn, ar.Toasts)
+	}
+
+	pc := got.PastTheCap
+	if !strings.Contains(pc.EndBox, "DONE") || !ready(pc.EndBtn) || finishToasts(pc.Toasts) != 1 {
+		t.Errorf("a run past the poll's cap, watched on screen: box %q, button %+v, toasts %q; want it followed to its end, the button ready, one message",
+			pc.EndBox, pc.EndBtn, pc.Toasts)
+	}
+
+	lp := got.LateProbe
+	if !strings.Contains(lp.Box, "DONE") || !ready(lp.Btn) || finishToasts(lp.Toasts) != 1 {
+		t.Errorf("a probe answer that lands after the run ended: box %q, button %+v, toasts %q; want the finished run kept, the button ready, one message",
+			lp.Box, lp.Btn, lp.Toasts)
+	}
+
+	if !busy(got.ModeChange.ModeBtn) {
+		t.Errorf("changing the mode while a run goes: button %+v, want it still busy", got.ModeChange.ModeBtn)
 	}
 
 	if got.Off.Gets != 0 {
