@@ -890,8 +890,10 @@ function pageHead(title, subNode) {
 function viewLoading() {
   const v = VIEW();
   clear(v);
-  v.append(el("div", { class: "view-loading", text: "Loading…" }));
+  const loading = el("div", { class: "view-loading", text: "Loading…" });
+  v.append(loading);
   v.classList.remove("view-enter");
+  return loading;
 }
 function viewEnter() { const v = VIEW(); v.classList.remove("view-enter"); void v.offsetWidth; v.classList.add("view-enter"); }
 
@@ -4054,7 +4056,7 @@ function buildDaemon(serversRes, storage, telemetry) {
 async function renderBaselines() {
   if (!capsCache.monitor) { history.replaceState({}, "", "/overview"); renderRoute(); return; }
   const gen = serverGen, vgen = viewGen;
-  viewLoading();
+  backupsHead = viewLoading();
   // Independent degradation, as on Storage: a panel renders its own failure
   // note rather than one error blanking the page.
   const asErr = (err) => ({ error: (err && err.message) || String(err) });
@@ -4080,7 +4082,7 @@ async function renderBaselines() {
     // button. buildStorage keeps serversErr for the same reason.
     const serversErr = serversRes && serversRes.error;
     const v = VIEW(); clear(v);
-    v.append(pageHead("Backups", el("p", { class: "page-sub" },
+    v.append(backupsHead = pageHead("Backups", el("p", { class: "page-sub" },
       "Full copies of your tables, taken at a moment in time. Time-travel and full restores are built from them. ",
       el("b", { text: "Nothing is ever executed" }), " against your source by viewing this page.")));
     if (serversErr) v.append(el("div", { class: "error-box", text: "Could not load servers: " + serversErr }));
@@ -4137,6 +4139,9 @@ async function renderBaselines() {
     viewEnter();
   } catch (err) {
     const v = VIEW(); clear(v); v.append(pageHead("Backups", null)); renderError(v, err);
+    // renderError clears the view first, heading included: what it leaves is
+    // the page now, and a job that ends must still repaint it.
+    backupsHead = v.lastElementChild;
   }
 }
 
@@ -5900,6 +5905,18 @@ const BACKUPS_PAGE_SIZE = 5;
 // two.
 let backupsPage = { server: null, index: 0 };
 
+// backupsHead is the Backups page's element from its latest paint: the
+// loading notice while it fetches, then its heading. A job that finishes, a
+// schedule saved or a restore started repaints the page only while that
+// element is still on screen. The question is asked of the page, not of the
+// address: ten checks compared the address with "/baselines", which would
+// all answer "no" in silence once the page moves to another address, and a
+// constant holding the new one would answer "yes" for every section of a
+// page that holds several. The loading notice counts, so a job that ends
+// while the page is still fetching repaints it with the newer state.
+let backupsHead = null;
+function backupsOnScreen() { return !!(backupsHead && backupsHead.isConnected); }
+
 function backupsPageIndex(serverId, pages) {
   if (backupsPage.server !== serverId) backupsPage = { server: serverId, index: 0 };
   // Clamped on READ rather than on write: the list shrinks under you when
@@ -6079,13 +6096,13 @@ async function createBaseline(id, btn) {
     return;
   }
   toast("Backup started: copying your data and uploading it…");
-  if (location.pathname === "/baselines") renderBaselines();
+  if (backupsOnScreen()) renderBaselines();
   let done = await pollBaseline(id, false);
   if (done && done.state === "succeeded" && done.uploading) {
     // Published locally; the copy to the destination is still running and
     // no longer holds the schedule (#1725). Say so, and wait for it.
     toast("Backup saved locally: " + (done.tables || 0) + " table(s). Still copying it to the backup destination…");
-    if (location.pathname === "/baselines") renderBaselines();
+    if (backupsOnScreen()) renderBaselines();
     done = await pollBaseline(id, true);
   }
   restore();
@@ -6101,11 +6118,10 @@ async function createBaseline(id, btn) {
   } else {
     toast("The backup is still running. Check back shortly.");
   }
-  // Only /baselines needs the refresh: the button lives in
+  // Only the Backups page needs the refresh: the button lives in
   // baselineContextStrip (#1415 moved it out of baselinesPanel), and both the
-  // strip and the snapshot list render only on this page — a /storage arm
-  // here would be unreachable.
-  if (location.pathname === "/baselines") renderBaselines();
+  // strip and the snapshot list render only on this page.
+  if (backupsOnScreen()) renderBaselines();
 }
 
 // pollBaseline polls the per-server baseline status until it leaves "running"
@@ -6481,7 +6497,7 @@ async function watchBackupRuns(id, vgen, kinds) {
   let refreshBusy = kinds.includes("refresh"); // it WAS running at spawn
   for (let i = 0; i < 900; i++) {
     await sleep(2000);
-    if (wgen !== backupWatchGen || vgen !== viewGen || location.pathname !== "/baselines") return;
+    if (wgen !== backupWatchGen || vgen !== viewGen || !backupsOnScreen()) return;
     let busy = false;
     let pollFailed = false;
     // Only a transport failure or a server fault says "unknown"; a 4xx is a
@@ -6522,13 +6538,13 @@ async function watchBackupRuns(id, vgen, kinds) {
     // would clear the RUNNING region while the fold is still going.
     if (pollFailed && !busy) continue;
     if (!busy) {
-      if (wgen === backupWatchGen && vgen === viewGen && location.pathname === "/baselines") renderBaselines();
+      if (wgen === backupWatchGen && vgen === viewGen && backupsOnScreen()) renderBaselines();
       return;
     }
   }
   // Cap expiry: re-render once so a stale RUNNING region does not outlive
   // the watcher silently.
-  if (wgen === backupWatchGen && vgen === viewGen && location.pathname === "/baselines") renderBaselines();
+  if (wgen === backupWatchGen && vgen === viewGen && backupsOnScreen()) renderBaselines();
 }
 
 // backupFoldError rewrites a fold refusal for this page: the engine's
@@ -6948,7 +6964,7 @@ async function saveBackupSchedule(id, sched, btn, msgEl) {
   const next = saved && saved.schedule;
   toast(next && next.next_method_error ? "Backup schedule saved, but the next run cannot start yet. See the reason on the page."
     : "Backup schedule saved. It runs at the next scheduled time.");
-  if (location.pathname === "/baselines") renderBaselines();
+  if (backupsOnScreen()) renderBaselines();
 }
 
 async function removeBackupSchedule(id, btn, msgEl) {
@@ -6963,7 +6979,7 @@ async function removeBackupSchedule(id, btn, msgEl) {
     return;
   }
   toast("Backup schedule removed.");
-  if (location.pathname === "/baselines") renderBaselines();
+  if (backupsOnScreen()) renderBaselines();
 }
 
 // backupRestoreCard offers the point-in-time restore: pick a past moment, get
@@ -7048,7 +7064,7 @@ async function startBackupRestore(id, at, btn, msgEl) {
   }
   btn.disabled = false;
   toast("Restore started: building a backup as of " + at + " UTC…");
-  if (location.pathname === "/baselines") renderBaselines();
+  if (backupsOnScreen()) renderBaselines();
 }
 
 // ── Take a copy with you ───────────────────────────────────────────────────
@@ -7354,7 +7370,7 @@ async function startSQLExport(id, at, btn, msgEl) {
   }
   btn.disabled = false;
   toast("Build started: a .sql backup as of " + at + " UTC\u2026");
-  if (location.pathname === "/baselines") renderBaselines();
+  if (backupsOnScreen()) renderBaselines();
 }
 
 // downloadSQLExport mirrors downloadBackup: fetch + blob because the API
