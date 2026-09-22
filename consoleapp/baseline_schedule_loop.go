@@ -272,6 +272,9 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 			w.Events = int64(cur.events - base)
 		}
 	}
+	if w.Events == 0 && pastCutover(e, w, time.Now()) {
+		w.Capture, w.CaptureDetail = b.captureVerdict(ctx, e)
+	}
 	b.mu.Lock()
 	if b.windows == nil {
 		b.windows = map[string]windowSample{}
@@ -279,6 +282,40 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 	b.windows[e.ID] = windowSample{anchor: anchor, at: time.Now(), w: w}
 	b.mu.Unlock()
 	return w
+}
+
+// pastCutover reports whether w's anchor is older than e's cut-over age,
+// counted the way console.CutoverToFull counts it: the only case in which
+// the capture verdict can change a decision, and so the only one in which
+// the source is asked. A schedule that does not parse counts as no interval
+// (the two-hour floor), which asks earlier, never later.
+func pastCutover(e console.ServerEntry, w console.BackupWindow, now time.Time) bool {
+	if w.Anchor.IsZero() {
+		return false
+	}
+	var interval time.Duration
+	if e.BackupSchedule != nil {
+		if p, err := e.BackupSchedule.Parse(); err == nil {
+			interval = p.Every
+		}
+	}
+	since := w.Anchor
+	if w.AnchorFullFinished.After(since) {
+		since = w.AnchorFullFinished
+	}
+	return now.Sub(since) > console.BackupCutoverAge(interval)
+}
+
+// captureVerdict asks whether the source wrote anything the capture has not
+// recorded (#1791, probeCapture), for the servers it can be asked about.
+func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEntry) (verdict, detail string) {
+	switch {
+	case e.SourceDSN == "":
+		return "", "this server has no source to ask"
+	case e.IsPostgres():
+		return "", "PostgreSQL sources are not compared yet"
+	}
+	return probeCapture(ctx, e.DSN, e.SourceDSN)
 }
 
 // probeDSN bounds the DIAL of the probe's index connection too: the context

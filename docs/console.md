@@ -584,7 +584,17 @@ panel that answers whether a restore would work, far below the fold.
   snapshot is older than two hours or six schedule intervals, whichever is
   longer (counted from when the full backup that made it finished, when a
   full backup did: its own duration is not the schedule falling behind),
-  and the reason names what was missing. After a full backup the
+  and the reason names what was missing. One exception (#1791): when
+  nothing at all was indexed since the previous snapshot, the daemon asks
+  the source whether it wrote anything the capture has not recorded
+  (the capture's GTID set against `@@GLOBAL.gtid_executed`, or its binlog
+  position against the source's) and updates when it did not, since there
+  is nothing to fold. If the source is ahead, or cannot be asked
+  (PostgreSQL, MariaDB GTIDs, a source that does not answer, an index with
+  no live capture), the full backup is taken, and the reason says which:
+  an index that records nothing while the source keeps writing is a
+  capture that stopped, and a full backup is the one producer that does not
+  depend on it. After a full backup the
   model may not choose another one until an update after it has been
   measured (it may still choose an update): each full backup records the
   index's high-water mark before it starts, so the update that follows it

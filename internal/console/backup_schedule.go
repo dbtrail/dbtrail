@@ -366,6 +366,16 @@ type BackupWindow struct {
 	// on age at every slot, and the update that would correct the model
 	// never ran.
 	AnchorFullFinished time.Time
+	// Capture says whether the source has written anything the capture has
+	// not checkpointed (#1791): CaptureCaughtUp, CaptureBehind, or empty when
+	// not known. The daemon asks only when it matters, nothing indexed since
+	// the anchor (Events == 0) on an anchor past the cut-over age, because
+	// from the index alone "the source wrote nothing" and "the capture
+	// stopped" are the same observation (#1223): the binlog syncer retries
+	// without limit and the checkpoint ticker keeps stamping while it does.
+	// CaptureDetail says why, for the reason line, when not caught up.
+	Capture       string
+	CaptureDetail string
 	// Events is how far the index's high-water mark has moved since the
 	// anchor; negative when unknown (no mark on record for THIS anchor, or
 	// the index did not answer). It counts every source writing to that
@@ -414,6 +424,16 @@ type BackupWindow struct {
 	// there is none on record.
 	LastFull time.Duration
 }
+
+// Capture values (BackupWindow.Capture).
+const (
+	// CaptureCaughtUp: the capture has checkpointed everything the source has
+	// written, so an index that recorded nothing means the source changed
+	// nothing.
+	CaptureCaughtUp = "caught_up"
+	// CaptureBehind: the source has written past the capture's checkpoint.
+	CaptureBehind = "behind"
+)
 
 // BackupWindowProbe measures the window for e whose previous snapshot is
 // anchor. It runs on every decision, page loads included, so it must be
@@ -503,6 +523,27 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 	age := now.Sub(since)
 	if age <= BackupCutoverAge(interval) {
 		return ""
+	}
+	// Nothing indexed since the anchor, and the source confirms it wrote
+	// nothing the capture has not recorded (#1791): there is nothing to fold,
+	// the #1689 gate skips the cycle while the snapshot is covered and
+	// re-anchors it before retention drops its window. A full backup here
+	// would read production to copy what the backup already holds.
+	if w.Events == 0 && w.Capture == CaptureCaughtUp {
+		return ""
+	}
+	if w.Events == 0 {
+		// The rate is beside the point with nothing to fold; what is in
+		// question is whether "nothing" is true. Said as that.
+		what := "and whether the source changed could not be checked"
+		if w.Capture == CaptureBehind {
+			what = "but the source has written past what the capture has recorded, so the capture may have stopped or fallen behind"
+		}
+		if w.CaptureDetail != "" {
+			what += " (" + w.CaptureDetail + ")"
+		}
+		return fmt.Sprintf("%s: it is %s old and the cut-over is %s; nothing new was indexed since it, %s",
+			BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)), what)
 	}
 	// The parenthetical names what is actually missing: the history keeps
 	// the rate, the full backup and (IndexMark) the count's base across
