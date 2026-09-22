@@ -13,7 +13,7 @@ CREATE USER 'dbtrail'@'%' IDENTIFIED BY <choose a password>;
 GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';
 ```
 
-Put a password of your own in quotes where it says `<choose a password>`. As written, MySQL refuses the line on purpose, so no user is created with a password copied from this page.
+Put a password of your own in quotes where it says `<choose a password>`. As written, MySQL refuses the line on purpose, so no user is created with a password copied from this page. On MariaDB or MySQL 5.7, run the `CREATE USER` line on its own first and check it worked: there, a `GRANT` to a user that does not exist can create it with no password.
 
 That is the complete, minimal set. Each privilege maps to exactly one thing DBTrail does:
 

@@ -66,24 +66,65 @@ func TestGrantBlockUsesTheFormsUserAndPassword(t *testing.T) {
 	}
 }
 
-// With no password in the form (editing a saved server, or no random source),
-// the block must not be runnable as-is: a placeholder that MySQL rejects as a
-// syntax error, never a quoted string it would accept.
-func TestGrantBlockWithoutPasswordCannotRunAsIs(t *testing.T) {
-	out := runGrantJS(t, `console.log(grantBlocks("dbtrail", "").mysql.split("\n")[0]);`)
-	if !strings.HasPrefix(out, "CREATE USER 'dbtrail'@'%' IDENTIFIED BY <") {
-		t.Errorf("a block without a password must hold an unquoted placeholder MySQL refuses, got %q", out)
+// With no password in the form (editing a saved server, no random source, a
+// cleared field), no line may be runnable: on MariaDB, or MySQL 5.7 without
+// NO_AUTO_CREATE_USER, a pasted block carries on past a refused CREATE USER
+// and a GRANT creates the account with NO password.
+func TestGrantBlockWithoutPasswordHasNothingRunnable(t *testing.T) {
+	out := runGrantJS(t, `const b = grantBlocks("dbtrail", "");
+console.log(JSON.stringify([b.mysql, b.mariadb]));`)
+	var blocks []string
+	if err := json.Unmarshal([]byte(out), &blocks); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	for _, b := range blocks {
+		if !strings.HasPrefix(b, "-- Fill in the source password above.") {
+			t.Errorf("a block without a password does not say why it cannot run:\n%s", b)
+		}
+		for _, l := range strings.Split(b, "\n") {
+			if strings.TrimSpace(l) != "" && !strings.HasPrefix(strings.TrimSpace(l), "--") {
+				t.Errorf("runnable line in a block without a password: %q", l)
+			}
+		}
+	}
+}
+
+// A backslash means different things under NO_BACKSLASH_ESCAPES, so the
+// password MySQL stores could differ from the one the form saves: nothing
+// runnable, and the reason on top.
+func TestGrantBlockWithABackslashHasNothingRunnable(t *testing.T) {
+	out := runGrantJS(t, `console.log(JSON.stringify(grantBlocks("dbtrail", "pa\\ss").mysql));`)
+	var b string
+	if err := json.Unmarshal([]byte(out), &b); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	if !strings.Contains(strings.SplitN(b, "\n", 2)[0], "backslash") {
+		t.Errorf("a backslash block does not say why it cannot run:\n%s", b)
+	}
+	for _, l := range strings.Split(b, "\n") {
+		if strings.TrimSpace(l) != "" && !strings.HasPrefix(strings.TrimSpace(l), "--") {
+			t.Errorf("runnable line in a block with a backslash: %q", l)
+		}
+	}
+}
+
+// Someone who created the user on an earlier try (then closed the form or
+// reloaded) is told how to set the password this form will save instead.
+func TestGrantBlockOffersAlterUserForARetry(t *testing.T) {
+	out := runGrantJS(t, `console.log(grantBlocks("dbtrail", "Ab3-xyzXYZ789_qq").mysql);`)
+	if !strings.Contains(out, "-- ALTER USER 'dbtrail'@'%' IDENTIFIED BY 'Ab3-xyzXYZ789_qq';") {
+		t.Errorf("no commented ALTER USER with the same password:\n%s", out)
 	}
 }
 
 func TestGrantBlockQuotesUserAndPassword(t *testing.T) {
-	out := runGrantJS(t, `const b = grantBlocks("o'brien", "a'b\\c");
-console.log(JSON.stringify(b.mysql.split("\n").slice(0, 2)));`)
+	out := runGrantJS(t, `const b = grantBlocks("o'brien", "a'b");
+const l = b.mysql.split("\n"); console.log(JSON.stringify([l[0], l[3]]));`)
 	var lines []string
 	if err := json.Unmarshal([]byte(out), &lines); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
-	if lines[0] != `CREATE USER 'o''brien'@'%' IDENTIFIED BY 'a''b\\c';` {
+	if lines[0] != `CREATE USER 'o''brien'@'%' IDENTIFIED BY 'a''b';` {
 		t.Errorf("CREATE USER line not quoted for MySQL: %q", lines[0])
 	}
 	if !strings.Contains(lines[1], `TO 'o''brien'@'%';`) {
@@ -92,7 +133,7 @@ console.log(JSON.stringify(b.mysql.split("\n").slice(0, 2)));`)
 }
 
 // A blank user field falls back to the account the block has always named,
-// so the block never reads ''@'%' (the anonymous user).
+// so the block never reads ”@'%' (the anonymous user).
 func TestGrantBlockNeverNamesTheAnonymousUser(t *testing.T) {
 	out := runGrantJS(t, `console.log(grantBlocks("  ", "Ab3-xyzXYZ789_qq").mysql.split("\n")[0]);`)
 	if !strings.HasPrefix(out, "CREATE USER 'dbtrail'@'%'") {
@@ -141,23 +182,185 @@ console.log(JSON.stringify(genSourcePassword()));`)
 	}
 }
 
-// The wiring: a NEW server gets a generated password and the user the block
-// names; editing a saved one never does (its field stays blank = keep the
-// stored password). Both fields redraw the block when edited.
-func TestServerFormGeneratesOnlyForANewServer(t *testing.T) {
-	show := functionBody(t, readAsset(t, "app.js"), "function showServerForm(")
-	if !strings.Contains(show, "genSourcePassword()") {
-		t.Fatal("showServerForm no longer fills a generated password")
-	}
-	gen := strings.Index(show, "genSourcePassword()")
-	guard := strings.LastIndex(show[:gen], "if (!(prefill && prefill.id))")
-	if guard < 0 {
-		t.Error("the generated password is not guarded to a new server; editing a saved one would overwrite its stored password on Save")
-	}
-	for _, f := range []string{`"source_user"`, `"source_password"`} {
-		if !strings.Contains(show, f) {
-			t.Errorf("showServerForm does not redraw the block when %s changes", f)
+// formHarnessJS extends the render harness so the REAL buildServerForm,
+// showServerForm, serverFormBody and saveServer run: form.elements by name,
+// event listeners that fire, data- attributes in dataset, a selector engine
+// for the handful of selectors the form uses, and a cryptographic random
+// source. It prints what each scenario leaves in the form and its body.
+const formHarnessJS = `
+ctx.crypto = require("crypto").webcrypto;
+const walk = (n, f) => { f(n); for (const c of n.children || []) if (c && c.nodeType === 1) walk(c, f); };
+const matches = (n, sel) => {
+  const m = /^([a-z]*)(?:#([\w-]+))?(?:\.([\w-]+))?(?:\[([\w-]+)(?:=([\w-]+))?\])?$/.exec(sel);
+  if (!m) throw new Error("harness selector not supported: " + sel);
+  const [, tag, id, cls, attr, val] = m;
+  if (tag && n.tag !== tag) return false;
+  if (id && n.attrs.id !== id) return false;
+  if (cls && !(" " + n.className + " ").includes(" " + cls + " ")) return false;
+  if (attr && (n.attrs[attr] === undefined || (val !== undefined && n.attrs[attr] !== val))) return false;
+  return true;
+};
+FakeEl.prototype.querySelectorAll = function (sel) { const out = []; for (const c of this.children) if (c && c.nodeType === 1) walk(c, (n) => { if (matches(n, sel)) out.push(n); }); return out; };
+FakeEl.prototype.querySelector = function (sel) { return this.querySelectorAll(sel)[0] || null; };
+const setAttr = FakeEl.prototype.setAttribute;
+FakeEl.prototype.setAttribute = function (k, v) { setAttr.call(this, k, v); if (k.startsWith("data-")) this.dataset[k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = String(v); };
+FakeEl.prototype.addEventListener = function (type, fn) { (this.__h ||= {})[type] = [...((this.__h || {})[type] || []), fn]; };
+FakeEl.prototype.fire = function (type) { for (const fn of (this.__h && this.__h[type]) || []) fn({ preventDefault() {} }); };
+FakeEl.prototype.focus = function () {};
+Object.defineProperty(FakeEl.prototype, "elements", { get() { const e = {}; walk(this, (n) => { if (n.attrs.name) e[n.attrs.name] = n; }); return e; } });
+const mount = new FakeEl("div"), wrap = new FakeEl("div");
+document.getElementById = (id) => id === "server-form-mount" ? mount : id === "server-add-wrap" ? wrap : id === "server-form" ? (mount.children[0] || null) : null;
+const form = () => mount.children[0];
+const show = (caps, prefill) => { vm.runInContext("capsCache = " + JSON.stringify(caps) + ";", ctx); ctx.__prefill = prefill; vm.runInContext("showServerForm(__prefill)", ctx); return form(); };
+const state = (f) => { const blk = f.querySelector("pre[data-grant=mysql]").textContent; return { user: f.elements.source_user.value, pw: f.elements.source_password.value, block: blk.split("\n")[0], runnable: blk.split("\n").filter((l) => l.trim() && !l.trim().startsWith("--")).length }; };
+const body = (f) => { ctx.__f = f; return vm.runInContext("serverFormBody(__f)", ctx); };
+FakeEl.prototype.select = function () { this.__selected = true; };
+vm.runInContext("refreshServersList = async () => {}; showStartupOutcome = () => {}; toast = () => {}; toastError = () => {}; formMsg = () => {}; openNotice = () => {};", ctx);
+const save = async (f, started) => {
+  ctx.__f = f; ctx.__started = started;
+  vm.runInContext("api = async () => ({ id: 'n1', name: 'n1', flavor: 'mysql', source_host: 'db', source_user: 'dbtrail', has_source: true, has_source_password: true, monitor_state: 'stopped' }); startMonitor = async () => ({ started: __started });", ctx);
+  await vm.runInContext("saveServer(__f)", ctx);
+};
+(async () => {
+  const out = {};
+  let f = show({ monitor: true }, null);
+  out.fresh = state(f);
+  f.elements.source_user.value = "alice"; f.elements.source_user.fire("input");
+  out.typedUser = state(f);
+  f = show({ monitor: true }, null);
+  out.reopenSame = f.elements.source_password.value === out.fresh.pw;
+  f.elements.source_password.fire("focus");
+  out.focusSelects = !!f.elements.source_password.__selected;
+  f.elements.source_password.value = "Zz9-changeOnlyAutofill"; f.elements.source_password.fire("change");
+  out.changeEvent = state(f);
+  f.elements.source_password.__selected = false; f.elements.source_password.fire("focus");
+  out.focusKeepsTyped = !f.elements.source_password.__selected;
+  f = show({ monitor: true }, { id: "x", name: "x", flavor: "mysql", source_user: "repl", has_source_password: true });
+  out.edit = state(f);
+  f = show({ monitor: false }, null);
+  out.serve = state(f); out.serveBody = body(f);
+  f = show({ monitor: true }, null);
+  f.elements.flavor.value = "postgres"; f.elements.flavor.fire("change");
+  out.postgres = state(f);
+  f.elements.flavor.value = "mysql"; f.elements.flavor.fire("change");
+  out.backToMysql = state(f);
+  f = show({ monitor: true }, null);
+  out.indexOnlyBody = body(f);
+  f.elements.source_user.value = "alice";
+  out.typedNoHostBody = body(f);
+  f = show({ monitor: true }, null);
+  f.elements.name.value = "n1"; f.elements.source_host.value = "db";
+  const sent = f.elements.source_password.value;
+  await save(f, false);
+  out.afterFailedFirstSave = { ...state(form()), sameAsSent: form().elements.source_password.value === sent, isEdit: form().elements.id.value === "n1" };
+  await save(form(), false);
+  out.afterFailedRetry = { ...state(form()), sameAsSent: form().elements.source_password.value === sent, isEdit: form().elements.id.value === "n1" };
+  f = show({ monitor: true }, null);
+  out.nextServerNewPassword = f.elements.source_password.value !== sent && f.elements.source_password.value.length >= 20;
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+`
+
+func TestServerFormGrantDefaultsWiring(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv(requireNodeEnv) != "" {
+			t.Fatalf("%s is set and node is not on PATH", requireNodeEnv)
 		}
+		t.Skip("node is not installed")
+	}
+	appJS, err := filepath.Abs("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "form.js")
+	if err := os.WriteFile(path, []byte(renderHarnessJS+formHarnessJS), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := exec.Command(node, path, appJS).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, raw)
+	}
+	type st struct {
+		User, Pw, Block string
+		Runnable        int
+	}
+	type saved struct {
+		st
+		SameAsSent, IsEdit bool
+	}
+	var out struct {
+		Fresh, TypedUser, ChangeEvent, Edit, Serve, Postgres, BackToMysql st
+		ServeBody, IndexOnlyBody, TypedNoHostBody                         map[string]any
+		ReopenSame, FocusSelects, FocusKeepsTyped, NextServerNewPassword  bool
+		AfterFailedFirstSave, AfterFailedRetry                            saved
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	t.Logf("%+v", out)
+
+	// A new MySQL server on a capturing process: the block creates exactly the
+	// account the form will save, and redraws on input and on change.
+	if out.Fresh.User != "dbtrail" || len(out.Fresh.Pw) < 20 {
+		t.Errorf("a new server did not get the dbtrail account with a generated password: %+v", out.Fresh)
+	}
+	if out.Fresh.Block != "CREATE USER 'dbtrail'@'%' IDENTIFIED BY '"+out.Fresh.Pw+"';" {
+		t.Errorf("first draw does not match the fields: %q vs pw %q", out.Fresh.Block, out.Fresh.Pw)
+	}
+	if !strings.HasPrefix(out.TypedUser.Block, "CREATE USER 'alice'@'%'") {
+		t.Errorf("typing a user did not redraw the block: %q", out.TypedUser.Block)
+	}
+	if !strings.Contains(out.ChangeEvent.Block, "'Zz9-changeOnlyAutofill'") {
+		t.Errorf("a change-only fill (some autofill) did not redraw the block: %q", out.ChangeEvent.Block)
+	}
+	// Closing the form and opening it again keeps the password the user may
+	// already have run; focusing the untouched field selects it so typing
+	// replaces it, and a typed value is not selected away.
+	if !out.ReopenSame {
+		t.Error("reopening the form made a new password; a user created from the first block no longer matches")
+	}
+	if !out.FocusSelects || !out.FocusKeepsTyped {
+		t.Errorf("focus: selects untouched=%v, leaves typed alone=%v", out.FocusSelects, out.FocusKeepsTyped)
+	}
+	// An edit keeps its stored password: nothing generated, nothing runnable.
+	if out.Edit.Pw != "" || out.Edit.Runnable != 0 || !strings.HasPrefix(out.Edit.Block, "-- Fill in the source password above.") {
+		t.Errorf("an edit generated a password or shows runnable SQL without one: %+v", out.Edit)
+	}
+	// A process that cannot capture: no account filled in, so an index-only
+	// add is not refused as a source without a host.
+	if out.Serve.User != "" || out.Serve.Pw != "" {
+		t.Errorf("serve mode filled a source account: %+v", out.Serve)
+	}
+	if u, _ := out.ServeBody["source_user"].(string); u != "" || out.ServeBody["source_password"] != nil {
+		t.Errorf("serve mode sends a source account: %v", out.ServeBody)
+	}
+	// PostgreSQL's block creates no role: the untouched account is taken back,
+	// and returns when the flavor goes back to MySQL.
+	if out.Postgres.User != "" || out.Postgres.Pw != "" {
+		t.Errorf("switching to PostgreSQL kept the generated account: %+v", out.Postgres)
+	}
+	if out.BackToMysql.User != "dbtrail" || len(out.BackToMysql.Pw) < 20 {
+		t.Errorf("switching back to MySQL did not fill the account again: %+v", out.BackToMysql)
+	}
+	// No source host: the untouched account stays behind (index-only save),
+	// but a typed user is sent so its "host is required" error still shows.
+	if u, _ := out.IndexOnlyBody["source_user"].(string); u != "" || out.IndexOnlyBody["source_password"] != nil {
+		t.Errorf("an index-only add sends the pre-filled account: %v", out.IndexOnlyBody)
+	}
+	if out.TypedNoHostBody["source_user"] != "alice" {
+		t.Errorf("a typed user was dropped: %v", out.TypedNoHostBody)
+	}
+	// A failed start re-shows the entry as an edit, first save and retry
+	// alike: the block must still create the user with the password saved.
+	for name, a := range map[string]saved{"first save": out.AfterFailedFirstSave, "retry": out.AfterFailedRetry} {
+		if !a.IsEdit || !a.SameAsSent || !strings.Contains(a.Block, "IDENTIFIED BY '"+a.Pw+"';") {
+			t.Errorf("after a failed start (%s) the block lost the saved password: %+v", name, a)
+		}
+	}
+	if !out.NextServerNewPassword {
+		t.Error("the next new server reuses the password of the one just saved")
 	}
 }
 

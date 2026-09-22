@@ -9796,9 +9796,12 @@ function genSourcePassword() {
 // and Percona 8.0 or later. LOCK TABLES is only what lock-all needs, which is
 // the RDS/Aurora path, so it is the commented alternative (#1658).
 function grantBlocks(user, password) {
-  const acct = sqlString(String(user || "").trim() || "dbtrail") + "@'%'";
+  const name = String(user || "").trim() || "dbtrail";
+  const acct = sqlString(name) + "@'%'";
   const grantBase =
-    "CREATE USER " + acct + " IDENTIFIED BY " + (password ? sqlString(password) : "<choose a password>") + ";\n" +
+    "CREATE USER " + acct + " IDENTIFIED BY " + sqlString(password) + ";\n" +
+    "-- Created it already on an earlier try? Run this instead of CREATE USER:\n" +
+    "-- ALTER USER " + acct + " IDENTIFIED BY " + sqlString(password) + ";\n" +
     "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO " + acct + ";\n";
   // Managed services cannot use the default lock mode (no BACKUP_ADMIN on
   // managed MySQL; RDS MariaDB's RELOAD excludes FLUSH TABLES WITH READ LOCK),
@@ -9811,7 +9814,7 @@ function grantBlocks(user, password) {
   // cannot read ("SHOW VIEW command denied"), so a schema holding one view
   // fails the whole backup on RELOAD alone.
   const grantBackups = "-- Backups (point-consistent by default). SHOW VIEW lets the backup copy views.\n";
-  return {
+  const blocks = {
     mysql: grantBase + grantBackups +
       "-- BACKUP_ADMIN is MySQL/Percona 8.0 or later. On MySQL 5.7 run this instead:\n" +
       "-- GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" +
@@ -9819,12 +9822,79 @@ function grantBlocks(user, password) {
     mariadb: grantBase + grantBackups +
       "GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("RDS for MariaDB"),
   };
+  // Two cases where no line may be runnable. No password: on MariaDB, or
+  // MySQL 5.7 without NO_AUTO_CREATE_USER, a pasted block carries on past a
+  // refused CREATE USER and the GRANT lines create the account with NO
+  // password. A backslash: whether it escapes depends on the server's
+  // NO_BACKSLASH_ESCAPES, so the password MySQL stores could differ from the
+  // one the form saves. Every line is commented out, under the reason.
+  let why = "";
+  if (!password) why = "-- Fill in the source password above. The SQL to run appears here with it.";
+  else if (/\\/.test(name + password)) why = "-- The user or password has a backslash, which your server's sql_mode may read as an escape. Choose one without it.";
+  if (why) {
+    for (const k of Object.keys(blocks)) {
+      blocks[k] = why + "\n" + blocks[k].split("\n").map((l) => (l.startsWith("--") ? l : "-- " + l)).join("\n");
+    }
+  }
+  return blocks;
 }
 
 // refreshGrants redraws the grant blocks from the form's user and password.
 function refreshGrants(form) {
   const b = grantBlocks(form.elements.source_user.value, form.elements.source_password.value);
   $all("pre[data-grant]", form).forEach((p) => { p.textContent = b[p.dataset.grant]; });
+}
+
+// generatedPasswords remembers, per form, the password applyGrantDefaults
+// filled in, so a value nobody changed can be told from one somebody typed.
+// Kept here rather than in a data- attribute: it is a secret.
+const generatedPasswords = new WeakMap();
+
+// pendingSourcePassword is the generated password for the next new server,
+// kept for this page until a new server is saved with it. Someone who runs
+// the block, closes the form (Cancel, Escape) and opens it again must find
+// the same password, or the user they created no longer matches. A reload
+// loses it: the block's commented ALTER USER line covers that case.
+let pendingSourcePassword = "";
+
+// grantDefaultsApply reports whether the grant block is one this form can fill
+// in: a new server, on a process that captures, for MySQL or MariaDB. The
+// PostgreSQL block creates no role, an edit keeps its stored password, and a
+// process that cannot capture hides the whole source section.
+function grantDefaultsApply(form) {
+  const f = form.elements;
+  return !f.id.value && !!capsCache.monitor && (f.flavor.value === "mysql" || f.flavor.value === "mariadb");
+}
+
+// untouchedGrantDefaults reports whether the source user and password are
+// still exactly what applyGrantDefaults filled in.
+function untouchedGrantDefaults(form) {
+  const gen = generatedPasswords.get(form);
+  const f = form.elements;
+  return !!gen && f.source_user.value === "dbtrail" && f.source_password.value === gen;
+}
+
+// applyGrantDefaults fills in, or takes back, the account the grant block
+// creates. Where the block applies, a blank user becomes "dbtrail" and a blank
+// password a generated one, so running the block and pressing Save line up.
+// Where it does not, values it filled and nobody changed are cleared again:
+// sent to the server, they would read as a source with no host and the save
+// would be refused, on a form where they may not even be visible.
+function applyGrantDefaults(form) {
+  const f = form.elements;
+  if (grantDefaultsApply(form)) {
+    if (!f.source_user.value) f.source_user.value = "dbtrail";
+    if (!f.source_password.value) {
+      if (!pendingSourcePassword) pendingSourcePassword = genSourcePassword();
+      f.source_password.value = pendingSourcePassword;
+      if (pendingSourcePassword) generatedPasswords.set(form, pendingSourcePassword);
+    }
+  } else if (untouchedGrantDefaults(form)) {
+    f.source_user.value = "";
+    f.source_password.value = "";
+    generatedPasswords.delete(form);
+  }
+  refreshGrants(form);
 }
 
 function buildServerForm() {
@@ -9956,7 +10026,17 @@ function showServerForm(prefill) {
   $("#server-cancel", form).addEventListener("click", hideServerForm);
   $("#server-test", form).addEventListener("click", () => testServerForm(form));
   form.addEventListener("submit", (e) => { e.preventDefault(); saveServer(form); });
-  form.elements.flavor.addEventListener("change", () => applyFlavor(form));
+  form.elements.flavor.addEventListener("change", () => { applyFlavor(form); applyGrantDefaults(form); });
+  // "change" as well as "input": some autofill fills a field and fires only
+  // change, which would leave the block showing another password.
+  ["source_user", "source_password"].forEach((k) => ["input", "change"].forEach((ev) =>
+    form.elements[k].addEventListener(ev, () => refreshGrants(form))));
+  // The generated password sits masked in its field. Someone reusing their
+  // own account clicks in and types, and the caret lands after the hidden
+  // value: select it first, so typing replaces it instead of appending.
+  form.elements.source_password.addEventListener("focus", () => {
+    if (untouchedGrantDefaults(form)) form.elements.source_password.select();
+  });
 
   // Where the index connection is the whole form (serve-only process: no
   // monitor capability), or the entry being edited carries index fields,
@@ -9990,22 +10070,15 @@ function showServerForm(prefill) {
     form.elements.source_password.placeholder = prefill.has_source_password ? "(unchanged; leave blank to keep)" : "";
     form.elements.s3_secret_access_key.placeholder = prefill.has_s3_secret_access_key ? "(unchanged; leave blank to keep)" : "";
   }
-  // A NEW server gets the account the grant block creates, with a password
-  // made for this form, so running the block and pressing Save line up. An
-  // edit never does: a blank password field there means "keep the stored
-  // one", and a generated value would overwrite it on Save.
-  if (!(prefill && prefill.id)) {
-    if (!form.elements.source_user.value) form.elements.source_user.value = "dbtrail";
-    form.elements.source_password.value = genSourcePassword();
-  }
-  ["source_user", "source_password"].forEach((k) =>
-    form.elements[k].addEventListener("input", () => refreshGrants(form)));
-  refreshGrants(form);
   // Flavor init runs for both add and edit; it's immutable after create (the
   // backend rejects a change on PUT), so disable the selector when editing.
   form.elements.flavor.value = (prefill && prefill.flavor) || "mysql";
   if (prefill && prefill.id) form.elements.flavor.disabled = true;
   applyFlavor(form);
+  // After the id and flavor are set: they decide whether the grant block gets
+  // a generated account (a new MySQL/MariaDB server on a capturing process)
+  // or only shows the saved user (an edit: blank still keeps the password).
+  applyGrantDefaults(form);
   form.elements.name.focus();
   return true;
 }
@@ -10046,6 +10119,13 @@ function serverFormBody(form) {
   if (f.password.value !== "") body.password = f.password.value;
   if (f.source_password.value !== "") body.source_password = f.source_password.value;
   if (f.s3_secret_access_key.value !== "") body.s3_secret_access_key = f.s3_secret_access_key.value;
+  // No source host: the account the grant block filled in is not a source the
+  // user asked for, so it stays behind and the entry saves as index-only.
+  // Values somebody typed are sent, so a forgotten host still gets its error.
+  if (!body.source_host && untouchedGrantDefaults(form)) {
+    body.source_user = "";
+    delete body.source_password;
+  }
   return body;
 }
 
@@ -10060,6 +10140,7 @@ async function editServer(id) {
 
 async function saveServer(form) {
   const id = form.elements.id.value;
+  refreshGrants(form);
   const body = serverFormBody(form);
   let saved;
   try {
@@ -10070,6 +10151,9 @@ async function saveServer(form) {
     openNotice({ tone: "err", title: "Could not save", lines: [why], button: "Back to the form" });
     return;
   }
+  // The pending password now belongs to the server just saved; the next new
+  // server gets its own.
+  if (!id && body.source_password && body.source_password === pendingSourcePassword) pendingSourcePassword = "";
 
   // Zero-terminal auto-start: a monitor-capable process with a source DSN starts
   // streaming on save (after preflight). Doctor warnings keep the form open.
@@ -10092,6 +10176,15 @@ async function saveServer(form) {
       else if (res.started) toastError("Monitoring started for " + saved.name + ", with warnings; open Servers and press Start to review them");
       else toastError("Startup checks failed for " + saved.name + "; open Servers and press Start to see what to fix");
       return;
+    }
+    // The re-shown form is an edit of the saved entry, which never carries
+    // the password back, so its grant block would lose the password this
+    // server was just saved with. The most common reason for a failed first
+    // start is that the block has not been run yet: put it back.
+    const again = document.getElementById("server-form");
+    if (again && body.source_password) {
+      again.elements.source_password.value = body.source_password;
+      refreshGrants(again);
     }
     showStartupOutcome(res);
     return;
@@ -10226,6 +10319,7 @@ function testResultClass(res) {
 // state itself, so the click reads as taken before any answer arrives.
 async function testServerForm(form) {
   const id = form.elements.id.value;
+  refreshGrants(form);
   const body = serverFormBody(form);
   const btn = form.querySelector("#server-test");
   // Dropped when the form that asked is gone (Cancel, or another server's

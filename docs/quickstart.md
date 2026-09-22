@@ -33,6 +33,9 @@ the **command line**. Both need a source MySQL user first.
   As written, MySQL refuses the line on purpose, so no user is ever created
   with a password copied from this page. The web interface's + Add server form
   fills in a generated one for you.
+  On MariaDB or MySQL 5.7, run the `CREATE USER` line on its own first and
+  check it worked: there, a `GRANT` to a user that does not exist can create it
+  with no password.
 
   `RELOAD`/`BACKUP_ADMIN` let the baseline dump take a point-in-time snapshot.
   **On managed MySQL (RDS, Aurora, Cloud SQL), `BACKUP_ADMIN` cannot be granted**, so grant `LOCK TABLES, SHOW VIEW` and set `BASELINE_LOCK_MODE=lock-all` — equally point-consistent, and the mode mydumper itself names for RDS. If you would rather grant nothing extra on a self-hosted source, `BASELINE_LOCK_MODE=safe-no-lock` never writes a torn snapshot, but it refuses on a write-active source.
