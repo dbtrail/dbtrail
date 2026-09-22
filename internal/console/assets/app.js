@@ -70,8 +70,8 @@ function badgeClass(t) { return BADGE_CLASS[t] || "b-baseline"; }
 const ROUTES = ["overview", "events", "schema-changes", "timetravel", "recover", "sql", "status", "storage",
   // Storage was a drawer: seven cards from five unrelated concerns (#1543).
   // Split by the question each half answers — what happens to your data over
-  // time, and what this daemon is touching. "storage" stays a KNOWN route so
-  // old bookmarks and Back entries land on Retention instead of Overview.
+  // time, and what this daemon is touching. Old /storage addresses land on
+  // Retention through ROUTE_ALIASES.
   "retention", "daemon", "connect",
   // Access profiles (#1445): author the flags/profiles/rules a data profile
   // enforces. Not monitor-gated: the standalone serve can author too, the
@@ -92,7 +92,8 @@ const ROUTES = ["overview", "events", "schema-changes", "timetravel", "recover",
 // serve those, and it answers HTTP 200 with a small shell for ANY /docs/
 // path, so neither a repo file nor a status code proves a link resolves.
 // assets_docs_links_test.go pins this table exactly and, with
-// BINTRAIL_CHECK_DOCS_LINKS=1, fetches each page and checks its title.
+// BINTRAIL_CHECK_DOCS_LINKS=1 (and a daily workflow), fetches each page and
+// requires its identity tag naming that slug, refusing redirects (#1645).
 // pageHead renders one plain link beside the title. Nothing here fetches:
 // air-gapped consoles are a first-class deployment, and a link is inert
 // offline. A view without a page of its own gets NO link on purpose
@@ -106,7 +107,7 @@ const DOCS_PAGES = {
   verification: "guides/verify",
   storage: "guides/capacity-planning",
   connect: "claude/setup",
-  "backup-settings": "guides/backup-settings",
+  "backup-settings": "settings/backups",
 };
 
 const MON_STATE_TITLES = {
@@ -404,6 +405,7 @@ function clearAuthState() {
   lastEvents = [];
   capsCache = {};
   capsKnown = false;
+  routeArrivedFrom = "";
   applyAuthGate();
 }
 
@@ -911,20 +913,58 @@ function isKnownRoute(route) {
   return route.startsWith("ext-") && extViews.some((v) => "ext-" + v.id === route);
 }
 
+// routeSegment is the first path segment of the address: the route name, as
+// typed or bookmarked ("" for the root).
+function routeSegment() {
+  return location.pathname.replace(/^\//, "").split("/")[0];
+}
+
 function routeFromLocation() {
-  const path = location.pathname.replace(/^\//, "").split("/")[0] || "overview";
+  const path = routeSegment() || "overview";
   return isKnownRoute(path) ? path : "overview";
 }
 
+// A page that moved leaves its old address in bookmarks, emails, docs and
+// Back entries. ROUTE_ALIASES maps each old route to where its page lives
+// now, and both ways in go through it: navigate() (clicks, the palette)
+// translates before pushing, and renderRoute() (a direct load, Back,
+// Forward) rewrites the bar before painting. Before, only navigate()
+// translated, so a bookmark of /storage or /sql painted Overview under the
+// old address. A Map, so an address like /constructor is not an old page.
+// A target may depend on the capability check; "" means it has not answered,
+// and the address is left alone rather than rewritten on a guess, which
+// would stay on that history entry after the check recovers.
+const ROUTE_ALIASES = new Map([
+  // Time-travel merged into Restore (#1298).
+  ["timetravel", () => "recover"],
+  // Storage split into Retention and This daemon (#1543). Retention needs
+  // the watch daemon and rewrites the bar to Overview without it, so this is
+  // a capability answer too.
+  ["storage", () => (capsKnown ? "retention" : "")],
+  // The SQL page was removed (#1549); its DuckDB schema card lives on
+  // Backups, or on Connect without the watch daemon (#1581).
+  ["sql", () => (capsKnown ? (capsCache.monitor ? "baselines" : "connect") : "")],
+]);
+
+// aliasTarget returns the route an old route moved to, or "" for any other.
+function aliasTarget(route) {
+  const to = ROUTE_ALIASES.get(route);
+  return to ? to() : "";
+}
+
+// routeArrivedFrom names the old address the page on screen was reached
+// through ("" when it was not). It lives here, never in the address, which a
+// visitor would bookmark again. It survives a repaint of the same visit (a
+// server switch, a save, a gate re-dispatching) and ends at the next
+// navigation (navigate() and onPopState() clear it) and at sign-out.
+let routeArrivedFrom = "";
+
 function navigate(route, params, push = true) {
+  // An old route from a stale caller goes straight to its new page, so the
+  // entry pushed below already carries the new address. Rewriting with
+  // replaceState here would overwrite the entry you were on instead.
+  route = aliasTarget(route) || route;
   if (!isKnownRoute(route)) route = "overview";
-  // Time-travel merged into Restore (#1298). The route stays known so old
-  // bookmarks and Back entries land somewhere useful instead of on Overview.
-  if (route === "timetravel") route = "recover";
-  // Storage split into Retention and This daemon (#1543). The old route is
-  // rewritten rather than merely aliased, so the address bar stops naming a
-  // page that no longer exists.
-  if (route === "storage") { route = "retention"; history.replaceState({}, "", "/retention"); }
   // Both halves are watch-daemon surfaces (rotation, archiving, staging).
   if ((route === "retention" || route === "daemon") && !capsCache.monitor) route = "overview";
   // Protect shares that gate: both routes read watch-daemon state (the
@@ -935,21 +975,18 @@ function navigate(route, params, push = true) {
   // location is registry state serve edits too, and this page is its only
   // editor since the server form's fields became passthroughs (#1582). The
   // daemon cards inside it are gated instead.
-  // The SQL page was removed (#1549). A stale route string handed to
-  // navigate() lands where the DuckDB schema card actually is (#1581):
-  // Backups when that page exists, Connect on the serve-only fallback — a
-  // fixed /connect target would send a watch reader to a page the card left.
-  // Scope honesty: this covers navigate() callers only. A direct load or
-  // popstate of /sql goes through renderRoute(), whose switch has no "sql"
-  // arm and falls back to Overview with the URL untouched — the same
-  // pre-#1581 shape /storage has. Retargeted here, not extended.
-  if (route === "sql") {
-    route = capsCache.monitor ? "baselines" : "connect";
-    history.replaceState({}, "", "/" + route);
-  }
   const qs = params && Object.keys(params).length
     ? "?" + new URLSearchParams(params).toString() : "";
+  routeArrivedFrom = "";
   if (push) history.pushState({ route }, "", "/" + route + qs);
+  renderRoute();
+}
+
+// onPopState handles Back and Forward: a new navigation, so the previous
+// visit's origin ends here, and renderRoute records a new one if the entry
+// is an old address.
+function onPopState() {
+  routeArrivedFrom = "";
   renderRoute();
 }
 
@@ -964,6 +1001,12 @@ function renderRoute() {
   // new one (nav highlighting one route, content showing another). serverGen
   // only covers server switches; this covers same-server navigation.
   viewGen++;
+  const old = routeSegment();
+  const to = aliasTarget(old);
+  if (to) {
+    routeArrivedFrom = old;
+    history.replaceState({ route: to }, "", "/" + to + location.search + location.hash);
+  }
   const route = routeFromLocation();
   setActiveNav(route);
   cursorIdx = -1;
@@ -4553,7 +4596,7 @@ function backupRefreshCard(br) {
   say(br.source === "override"
     ? "You chose this in the web interface. It replaces the setting DBTrail started with."
     : "This is the setting DBTrail started with.");
-  more.append(docsMore("guides/backup-settings", "backups--disk-space", "the disk-space switch"),
+  more.append(docsMore("settings/backups", "backups--disk-space", "the disk-space switch"),
     docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
   card.append(more);
   return card;
@@ -4741,7 +4784,7 @@ function backupDaemonCard(rows) {
   card.append(cnFine("More about changing these",
     el("p", { class: "form-hint", text:
       "These come from the command line or the environment of the DBTrail process. Change the flag or variable shown under the row, then restart DBTrail." }),
-    docsMore("guides/backup-settings", "set-at-startup", "settings that need a restart")));
+    docsMore("settings/backups", "set-at-startup", "settings that need a restart")));
   return card;
 }
 
@@ -4764,7 +4807,7 @@ function backupDaemonEditCard(rows) {
     el("p", { class: "form-hint", text:
       "Saved here, in DBTrail's own settings file, which wins over the command line and the environment. " +
       "Use the startup value to go back to what the process was started with." }),
-    docsMore("guides/backup-settings", "set-at-startup", "settings that need a restart")));
+    docsMore("settings/backups", "set-at-startup", "settings that need a restart")));
   return card;
 }
 
@@ -4957,7 +5000,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   // server's OWN destination only: the daemon default is shared by every
   // server, and a rule on it is not this row's to hand out.
   if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers, daemonS3));
-  more.push(docsMore("guides/backup-settings", "per-server", "backup locations per server"));
+  more.push(docsMore("settings/backups", "per-server", "backup locations per server"));
 
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
@@ -10340,7 +10383,7 @@ async function init() {
     navigate(a.dataset.route);
   }));
   document.getElementById("nav-rotation").addEventListener("click", showRotationDialog);
-  window.addEventListener("popstate", renderRoute);
+  window.addEventListener("popstate", onPopState);
 
   // Pre-auth gate: with no stored token, first try the HttpOnly session
   // cookie a login in another tab may have left (#1370) — on success the tab

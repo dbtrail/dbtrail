@@ -1,0 +1,35 @@
+# Console Docs links against the live docs site (#1645).
+#
+# The console's page-header Docs links and its compact "more in the docs"
+# links point at www.dbtrail.com/docs, which is authored and deployed apart
+# from this repo. TestDocsLinksResolveOnTheSite fetches every one and
+# requires the page's own identity tag and the linked section ids; it is
+# network-bound, so PR CI skips it. This runs it once a day, so a change on
+# the site (a moved or removed page, a renamed section) fails here within a
+# day instead of waiting for someone to run it by hand. It does not block
+# PRs on an outside site.
+
+name: docs-links
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docs-links:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Docs links resolve on the site
+        env:
+          BINTRAIL_CHECK_DOCS_LINKS: "1"
+        run: go test ./internal/console/ -run 'Docs' -count=1 -v
