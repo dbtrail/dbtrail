@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -1257,11 +1258,13 @@ type RefusedTable struct {
 	Schema, Table string
 	Reason        string
 	PKColumn      string
+	// NotInnoDB and NoPrimaryKey are the two parts of Reason, as flags, so a
+	// reader never has to parse the recorded text to know which applies.
+	NotInnoDB, NoPrimaryKey bool
 }
 
 // RefusedTables is TablesTheSnapshotRefuses with each table described in
-// full, in the order the classifier reports them (tables without a key, then
-// the rest). Same classifier call, same column read: the setup check that
+// full, sorted by schema.table as both of its lists are. Same classifier call, same column read: the setup check that
 // uses it cannot drift from the snapshot it predicts.
 func RefusedTables(sourceDB *sql.DB, schemas []string) ([]RefusedTable, error) {
 	columns, err := fetchColumnRows(sourceDB, schemas)
@@ -1294,15 +1297,23 @@ func RefusedTables(sourceDB *sql.DB, schemas []string) ([]RefusedTable, error) {
 	for _, key := range noPK {
 		needsKey[key] = true
 	}
-	out := make([]RefusedTable, 0, len(reasons))
-	seen := make(map[string]bool, len(reasons))
-	for _, key := range append(append([]string{}, noPK...), nonInnoDB...) {
+	wrongEngine := make(map[string]bool, len(nonInnoDB))
+	for _, key := range nonInnoDB {
+		wrongEngine[key] = true
+	}
+	keys := make([]string, 0, len(reasons))
+	for key := range reasons {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	out := make([]RefusedTable, 0, len(keys))
+	for _, key := range keys {
 		n := byKey[key]
-		if seen[key] || n == nil {
+		if n == nil {
 			continue
 		}
-		seen[key] = true
-		rt := RefusedTable{Schema: n.schema, Table: n.table, Reason: reasons[key]}
+		rt := RefusedTable{Schema: n.schema, Table: n.table, Reason: reasons[key],
+			NotInnoDB: wrongEngine[key], NoPrimaryKey: needsKey[key]}
 		if needsKey[key] {
 			rt.PKColumn = SuggestPKColumn(n.cols)
 		}

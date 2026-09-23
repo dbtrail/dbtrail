@@ -48,7 +48,10 @@ const permForDraftRoutes = ext.PermServersWrite
 // policy-carrying /api request. ORDER MATTERS: matching is first-match-wins, so
 // a route with a literal segment where another has a placeholder must be listed
 // FIRST (e.g. POST /api/servers/test before a hypothetical POST /api/servers/{}).
-// TestRouteTableCompleteness pins that every registered /api route appears here;
+// TestRouteTableClassifiesEveryRegisteredRoute pins that every route in
+// registeredAPIPatterns (authz_test.go, a hand-kept mirror of buildHandler's
+// api.HandleFunc calls — a route missing from the mirror is not checked) is
+// classified here, and TestRouteTableHasNoDeadEntries the reverse;
 // TestRoutePermReachableAndOrdered pins the ordering invariant. The /api/ext/ and
 // /api/ext-settings/ subtrees are NOT here — they are matched by prefix in
 // permForRoute (their depth is unbounded).

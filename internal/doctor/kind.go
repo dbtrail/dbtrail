@@ -40,6 +40,10 @@ const (
 	// KindBinlogSettings: a binary log setting is wrong; Subjects names the
 	// variable.
 	KindBinlogSettings = "binlog_settings"
+	// KindNotInnoDB: tables not on InnoDB, with or without a key; Subjects
+	// names every one as schema.table, and Statements carries the Overview
+	// card's statement for each (engine only, or engine and key).
+	KindNotInnoDB = "not_innodb"
 	// KindNoPrimaryKey: tables with no primary key; Subjects names every one
 	// as schema.table, and Statements carries a statement per table.
 	KindNoPrimaryKey = "no_primary_key"
@@ -50,7 +54,7 @@ const (
 func Kinds() []string {
 	return []string{
 		KindHostUnreachable, KindPortClosed, KindTimeout, KindAccessDenied,
-		KindLoopbackInContainer, KindMissingPrivilege, KindBinlogSettings, KindNoPrimaryKey,
+		KindLoopbackInContainer, KindMissingPrivilege, KindBinlogSettings, KindNoPrimaryKey, KindNotInnoDB,
 	}
 }
 
@@ -251,7 +255,8 @@ func isMySQLGreeting(p []byte) bool {
 	return false
 }
 
-// primaryKeyStatement is the statement that gives a refused table its key.
+// primaryKeyStatement is the statement that makes a refused table capturable
+// (a key, the InnoDB engine, or both, by its reason).
 // It is the Overview card's own FixSQL (#1802), fed the same reason and the
 // same column name the snapshot would record, so the setup check and the card
 // can never hand somebody two different statements for one table. In

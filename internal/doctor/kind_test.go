@@ -482,7 +482,7 @@ func TestKindsAreAClosedSet(t *testing.T) {
 			t.Errorf("kind %q is not a plain lowercase word", k)
 		}
 	}
-	if len(Kinds()) != 8 {
+	if len(Kinds()) != 9 {
 		t.Errorf("Kinds() = %v; a new kind needs a screen to draw it (#1804), add it on purpose", Kinds())
 	}
 }
@@ -538,5 +538,45 @@ func TestCheckPrimaryKeys_aKeyedMyISAMTableIsNotNamed(t *testing.T) {
 	got := checkPrimaryKeys(db, nil, snapshotPending)
 	if got.Status != StatusPass || len(got.Subjects) != 0 || len(got.Statements) != 0 {
 		t.Errorf("a keyed MyISAM table reached the key check: %+v", got)
+	}
+}
+
+// A MyISAM table that HAS a key refuses setup just the same, and it gets the
+// same typed finding the key check gives: a kind, the tables, and for each the
+// statement the Overview card would show — here engine-only, since the key is
+// already there. A table that also lacks a key gets the one statement that
+// fixes both.
+func TestCheckInnoDB_namesEachTableWithTheCardsStatement(t *testing.T) {
+	db, mock, done := pkDB(t)
+	defer done()
+	mock.ExpectQuery("information_schema.COLUMNS").WillReturnRows(colRowsNamed(
+		[4]string{"shop", "keyed", "id", "PRI"},
+		[4]string{"shop", "loose", "v", ""},
+		// On InnoDB and without a key: the key check's, never this one's.
+		[4]string{"shop", "plain", "v", ""},
+	))
+	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(tabRowsEngine(
+		[3]string{"shop", "keyed", "MyISAM"},
+		[3]string{"shop", "loose", "MyISAM"},
+		[3]string{"shop", "plain", "InnoDB"},
+	))
+	got := checkInnoDB(db, nil, snapshotPending)
+	if got.Status != StatusFail || got.Kind != KindNotInnoDB {
+		t.Fatalf("status/kind = %v/%q, want FAIL/%q", got.Status, got.Kind, KindNotInnoDB)
+	}
+	if !slices.Equal(got.Subjects, []string{"shop.keyed", "shop.loose"}) {
+		t.Errorf("subjects = %v", got.Subjects)
+	}
+	want := []string{
+		status.UncapturedTable{Schema: "shop", Table: "keyed", Reason: metadata.ExclusionReasonNotInnoDB}.FixSQL(),
+		status.UncapturedTable{Schema: "shop", Table: "loose",
+			Reason:   metadata.ExclusionReasonNotInnoDB + metadata.ExclusionReasonSeparator + metadata.ExclusionReasonNoPrimaryKey,
+			PKColumn: "id"}.FixSQL(),
+	}
+	if !slices.Equal(got.Statements, want) {
+		t.Errorf("statements =\n%s\nwant\n%s", strings.Join(got.Statements, "\n"), strings.Join(want, "\n"))
+	}
+	if want[0] != "ALTER TABLE `shop`.`keyed` ENGINE=InnoDB;" {
+		t.Fatalf("the fixture no longer exercises the engine-only fix: %s", want[0])
 	}
 }

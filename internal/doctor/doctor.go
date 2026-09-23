@@ -989,7 +989,7 @@ func checkPrimaryKeys(db *sql.DB, schemas []string, snapshot snapshotState) Chec
 	// and its statement fixes both, exactly as the Overview card's does.
 	var tables, statements []string
 	for _, rt := range refused {
-		if rt.PKColumn == "" {
+		if !rt.NoPrimaryKey {
 			continue
 		}
 		tables = append(tables, rt.Schema+"."+rt.Table)
@@ -1091,7 +1091,18 @@ const InnoDBCheckName = "Every table uses InnoDB"
 // pending, since that snapshot refuses whole, a WARN otherwise, and a WARN on
 // its own query error. Same classifier as the snapshot, for the same reason.
 func checkInnoDB(db *sql.DB, schemas []string, snapshot snapshotState) CheckResult {
-	_, tables, err := metadata.TablesTheSnapshotRefuses(db, schemas)
+	refused, err := metadata.RefusedTables(db, schemas)
+	// Every table not on InnoDB, keyed or not, with the Overview card's own
+	// statement for it (#1803): engine only when the key is already there,
+	// engine and key in one statement when it is not.
+	var tables, statements []string
+	for _, rt := range refused {
+		if !rt.NotInnoDB {
+			continue
+		}
+		tables = append(tables, rt.Schema+"."+rt.Table)
+		statements = append(statements, primaryKeyStatement(rt))
+	}
 	switch {
 	case errors.Is(err, metadata.ErrNoColumnsVisible):
 		return CheckResult{Name: InnoDBCheckName, Status: StatusSkip,
@@ -1114,9 +1125,12 @@ func checkInnoDB(db *sql.DB, schemas []string, snapshot snapshotState) CheckResu
 	}
 	status, verdict := firstSnapshotVerdict(snapshot, "they are on InnoDB")
 	return CheckResult{
-		Name:   InnoDBCheckName,
-		Status: status,
-		Detail: detail,
+		Name:       InnoDBCheckName,
+		Status:     status,
+		Detail:     detail,
+		Kind:       KindNotInnoDB,
+		Subjects:   tables,
+		Statements: statements,
 		Remediation: "These tables are NOT captured: bintrail reads row changes from InnoDB tables\n" +
 			"only. Convert each one (it rewrites the table, so pick a quiet moment):\n\n" +
 			"  ALTER TABLE <schema>.<table> ENGINE=InnoDB;\n\n" +
