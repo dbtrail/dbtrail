@@ -92,7 +92,7 @@ var oldVocabulary = regexp.MustCompile(`(?i)\b(backups?|baselines?)\b`)
 // request, not announced.
 const (
 	assetVocabularyPin      = 259 // string literals in assets/app.js (includes the frozen permission name baseline:create, PERM_SNAPSHOT_CREATE)
-	goVocabularyPin         = 226 // string literals in this package's non-test .go files; +2 in #1681 are import paths of internal/baseline, a frozen name
+	goVocabularyPin         = 226 // string literals in this package's non-test .go files; #1681 added frozen names (the "baselines" folder of <state dir>/baselines/<id> and two import paths of internal/baseline) and removed the refresh endpoint's
 	consoleappVocabularyPin = 277 // string literals in consoleapp's non-test .go files
 	vocabularySlack         = 3   // how far under a pin may drift before it must be lowered
 
