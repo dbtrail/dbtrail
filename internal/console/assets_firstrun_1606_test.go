@@ -134,7 +134,7 @@ func TestOverviewPollsFirstRun(t *testing.T) {
 
 // TestWatchFirstRunKeepsTrying: a failure before the list is up tries again
 // instead of hiding it for good, a refusal stops the loop, a list already up
-// says it could not be refreshed, and a complete report renders the page.
+// says it could not be refreshed, and a complete report takes the list away.
 func TestWatchFirstRunKeepsTrying(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -162,7 +162,16 @@ const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.
   if (n._text) out.push(n._text); for (const c of n.children || []) flat(c, out); return out; };
 (async () => {
   const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
-  const timers = [], delays = []; ctx.setTimeout = (fn, ms) => { timers.push(fn); delays.push(ms); return 1; };
+  // The page bounds each request with a deadline of its own (#1801), which
+  // is a timer too. This test is about the POLL cadence, so the deadline is
+  // filtered out by its length, read from the page rather than repeated.
+  // The residue: a poll cadence of exactly OV_REQUEST_MS would be filtered
+  // out with it and stop being counted. Harmless while the backoff caps at
+  // 15s and the settled wait is 2min, neither of which can reach 20s, but a
+  // new cadence between them wants a different discriminator than length.
+  const REQ_MS = vm.runInContext("OV_REQUEST_MS", ctx);
+  const timers = [], delays = [];
+  ctx.setTimeout = (fn, ms) => { if (ms !== REQ_MS) { timers.push(fn); delays.push(ms); } return 1; };
   let queue = [], calls = 0;
   ctx.nextApi = () => { calls++; const s = queue.shift(); return s instanceof Error ? Promise.reject(s) : Promise.resolve(s); };
   ctx.rendered = 0;
@@ -178,7 +187,7 @@ const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.
   timers.shift()(); await flush();
   out.cardAfterRetry = f.firstRunSlot.children.length;
   timers.shift()(); await flush();
-  out.rendered = ctx.rendered; out.timersAfterComplete = timers.length;
+  out.rendered = ctx.rendered; out.timersAfterComplete = timers.length; out.slotAfterComplete = f.firstRunSlot.children.length;
 
   timers.length = 0; queue = [fail(409)];
   f = { firstRunSlot: new FakeEl("div") };
@@ -242,6 +251,7 @@ const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.
 	}
 	var got struct {
 		RetryAfterFirstFailure, CardAfterRetry, Rendered, TimersAfterComplete, TimersAfterRefusal, StillPolling int
+		SlotAfterComplete                                                                                       int
 		RetryAfterCheckError, CardAfterCheckError, CheckErrorRendered, CheckErrorTimers, GoneCalls, GoneTimers  int
 		StaleText, CheckErrorNote                                                                               string
 		Refusals                                                                                                map[string]int
@@ -253,8 +263,11 @@ const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.
 	if got.RetryAfterFirstFailure != 1 || got.CardAfterRetry != 1 {
 		t.Errorf("a failed first request does not try again and draw the list: %+v", got)
 	}
-	if got.Rendered != 1 || got.TimersAfterComplete != 0 {
-		t.Errorf("a complete report does not render the page once and stop: %+v", got)
+	// A complete report takes the list away and stops, without rendering the
+	// page again (#1801): the Overview keeps its own numbers current, and a
+	// repaint would flash every card and reset the reader's place.
+	if got.Rendered != 0 || got.TimersAfterComplete != 0 || got.SlotAfterComplete != 0 {
+		t.Errorf("a complete report does not take the list away and stop without a repaint: %+v", got)
 	}
 	if got.TimersAfterRefusal != 0 {
 		t.Errorf("a 409 keeps polling: %+v", got)

@@ -73,6 +73,9 @@ var apiRoutePerms = []routePerm{
 	{"GET", "/api/uncaptured-tables", ext.PermStatusRead},
 	{"GET", "/api/activity", ext.PermQueryExecute},
 	{"GET", "/api/events", ext.PermQueryExecute},
+	// The events list's change probe (#1801): whoever may read the list may
+	// ask whether it changed, and nobody else.
+	{"GET", "/api/events/head", ext.PermQueryExecute},
 	// DDL history (#1443) is tiered with the events browser: it names tables
 	// and serves the statements that shaped them, and its handler applies
 	// the same deny/allow table scope — a read that needs data-profile rules

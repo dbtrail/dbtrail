@@ -5,16 +5,16 @@
   "viewport": "1280x720",
   "runs": {
     "clean": {
-      "clicks_to_first_snapshot": 15,
+      "clicks_to_first_snapshot": 13,
       "clicks_to_first_snapshot_minimum": 10,
       "fields_typed": 8,
       "forced_choices": 1,
       "trips_out_of_browser": 2,
-      "words_per_step_max": 222,
+      "words_per_step_max": 146,
       "words_per_error_max": 71,
-      "banned_words": 114,
+      "banned_words": 99,
       "yellow_red": 7,
-      "changes_visible_without_reload": 1,
+      "changes_visible_without_reload": 3,
       "changes_visible_within_5s": 0,
       "primary_below_fold_px": 638,
       "final_window_matches_retention": "not measurable",
@@ -28,8 +28,8 @@
       "fields_typed": 5,
       "forced_choices": 0,
       "trips_out_of_browser": 1,
-      "words_per_step_max": 150,
-      "banned_words": 52,
+      "words_per_step_max": 141,
+      "banned_words": 44,
       "yellow_red": 6,
       "primary_below_fold_px": 606
     },
@@ -38,9 +38,9 @@
       "fields_typed": 5,
       "forced_choices": 1,
       "trips_out_of_browser": 2,
-      "words_per_step_max": 150,
+      "words_per_step_max": 141,
       "words_per_error_max": 199,
-      "banned_words": 54,
+      "banned_words": 46,
       "primary_below_fold_px": 671
     },
     "refused-update": {
@@ -59,12 +59,10 @@
           "Save",
           "OK",
           "close the Servers dialog (✕)",
-          "reload the page (to see the later changes) (optional)",
           "Undo (optional)",
-          "Backups (sidebar) (optional)",
-          "Backup settings (sidebar)",
+          "Snapshots (sidebar) (optional)",
           "Save (the snapshot location)",
-          "Backups (sidebar)",
+          "Snapshots (sidebar)",
           "reload the page (after creating the folder)",
           "Create backup"
         ]
@@ -93,7 +91,7 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "snapshot-list-first-look",
+        "worst": "first-snapshot",
         "steps": [
           {
             "step": "sign-in",
@@ -112,92 +110,92 @@
           {
             "step": "connect",
             "kind": "step",
-            "words_above_fold": 126,
-            "words_whole": 488,
+            "words_above_fold": 113,
+            "words_whole": 495,
             "layer": "modal"
           },
           {
             "step": "test-result",
             "kind": "step",
             "words_above_fold": 136,
-            "words_whole": 652,
+            "words_whole": 659,
             "layer": "notice"
           },
           {
             "step": "save-result",
             "kind": "step",
             "words_above_fold": 127,
-            "words_whole": 650,
+            "words_whole": 657,
             "layer": "notice"
           },
           {
             "step": "after-ok",
             "kind": "step",
-            "words_above_fold": 150,
-            "words_whole": 495,
+            "words_above_fold": 134,
+            "words_whole": 502,
             "layer": "modal"
           },
           {
             "step": "first-change-waiting",
             "kind": "step",
-            "words_above_fold": 150,
-            "words_whole": 215,
+            "words_above_fold": 141,
+            "words_whole": 218,
             "layer": "view"
           },
           {
             "step": "changes",
             "kind": "step",
-            "words_above_fold": 123,
-            "words_whole": 126,
+            "words_above_fold": 119,
+            "words_whole": 204,
             "layer": "view"
           },
           {
             "step": "undo",
             "kind": "step",
-            "words_above_fold": 151,
+            "words_above_fold": 49,
             "words_whole": 248,
             "layer": "view"
           },
           {
             "step": "snapshot-list-first-look",
             "kind": "step",
-            "words_above_fold": 222,
-            "words_whole": 239,
+            "words_above_fold": 143,
+            "words_whole": 523,
             "layer": "view"
           },
           {
             "step": "snapshot-location",
             "kind": "step",
-            "words_above_fold": 84,
-            "words_whole": 185,
+            "words_above_fold": 143,
+            "words_whole": 523,
             "layer": "view"
           },
           {
             "step": "snapshot-location-saved",
             "kind": "step",
-            "words_above_fold": 84,
-            "words_whole": 185,
+            "words_above_fold": 70,
+            "words_whole": 354,
             "layer": "view"
           },
           {
             "step": "snapshot-folder-missing",
             "kind": "error",
-            "words_above_fold": 71,
-            "words_whole": 71,
+            "words_above_fold": 70,
+            "words_whole": 354,
             "layer": "view"
           },
           {
             "step": "snapshot-ready",
             "kind": "step",
-            "words_above_fold": 210,
-            "words_whole": 351,
+            "words_above_fold": 126,
+            "words_whole": 474,
             "layer": "view"
           },
           {
             "step": "first-snapshot",
             "kind": "step",
-            "words_above_fold": 161,
-            "words_whole": 487,
+            "words_above_fold": 146,
+            "words_whole": 610,
             "layer": "view"
           }
         ]
@@ -207,16 +205,16 @@
       },
       "banned_words": {
         "per_word": {
-          "backup": 55,
+          "backup": 48,
           "baseline": 9,
-          "daemon": 7,
+          "daemon": 5,
           "em dash": 3,
-          "index": 17,
+          "index": 13,
           "monitor": 4,
           "protect": 2,
-          "source": 14,
+          "source": 13,
           "stream": 1,
-          "watch": 2
+          "watch": 1
         },
         "sentences_in": "the run's first-run-scoreboard.json"
       },
@@ -233,9 +231,9 @@
       },
       "changes_visible_without_reload": {
         "changes": [
-          "INSERT: seen after 20.2 s",
-          "UPDATE: not seen",
-          "DELETE: not seen"
+          "INSERT: seen after 9.4 s",
+          "UPDATE: seen after 9.7 s",
+          "DELETE: seen after 7.6 s"
         ]
       },
       "primary_below_fold_px": {
@@ -292,49 +290,49 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "after-ok",
+        "worst": "overview",
         "steps": [
           {
             "step": "connect",
             "kind": "step",
-            "words_above_fold": 128,
-            "words_whole": 494,
+            "words_above_fold": 115,
+            "words_whole": 516,
             "layer": "modal"
           },
           {
             "step": "save-result",
             "kind": "step",
             "words_above_fold": 127,
-            "words_whole": 663,
+            "words_whole": 685,
             "layer": "notice"
           },
           {
             "step": "after-ok",
             "kind": "step",
-            "words_above_fold": 150,
-            "words_whole": 508,
+            "words_above_fold": 134,
+            "words_whole": 530,
             "layer": "modal"
           },
           {
             "step": "overview",
             "kind": "step",
-            "words_above_fold": 150,
-            "words_whole": 215,
+            "words_above_fold": 141,
+            "words_whole": 218,
             "layer": "view"
           }
         ]
       },
       "banned_words": {
         "per_word": {
-          "backup": 13,
-          "daemon": 5,
+          "backup": 10,
+          "daemon": 4,
           "em dash": 3,
-          "index": 11,
+          "index": 8,
           "monitor": 4,
           "protect": 1,
           "source": 11,
           "stream": 1,
-          "watch": 3
+          "watch": 2
         },
         "sentences_in": "the run's first-run-scoreboard.json"
       },
@@ -390,41 +388,41 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "after-ok",
+        "worst": "overview",
         "steps": [
           {
             "step": "connect",
             "kind": "step",
-            "words_above_fold": 122,
-            "words_whole": 578,
+            "words_above_fold": 109,
+            "words_whole": 590,
             "layer": "modal"
           },
           {
             "step": "save-refused",
             "kind": "error",
             "words_above_fold": 199,
-            "words_whole": 824,
+            "words_whole": 836,
             "layer": "notice"
           },
           {
             "step": "save-result",
             "kind": "step",
             "words_above_fold": 127,
-            "words_whole": 747,
+            "words_whole": 759,
             "layer": "notice"
           },
           {
             "step": "after-ok",
             "kind": "step",
-            "words_above_fold": 150,
-            "words_whole": 592,
+            "words_above_fold": 134,
+            "words_whole": 604,
             "layer": "modal"
           },
           {
             "step": "overview",
             "kind": "step",
-            "words_above_fold": 150,
-            "words_whole": 215,
+            "words_above_fold": 141,
+            "words_whole": 218,
             "layer": "view"
           }
         ]
@@ -434,15 +432,15 @@
       },
       "banned_words": {
         "per_word": {
-          "backup": 13,
-          "daemon": 5,
+          "backup": 10,
+          "daemon": 4,
           "em dash": 3,
-          "index": 12,
+          "index": 9,
           "monitor": 4,
           "protect": 1,
           "source": 11,
           "stream": 2,
-          "watch": 3
+          "watch": 2
         },
         "sentences_in": "the run's first-run-scoreboard.json"
       },

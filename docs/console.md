@@ -88,9 +88,25 @@ top (see [Managing servers](#managing-servers)) and a **⌘K command palette**
 (also reachable from the "Search & commands" button) for jumping between views
 and searching events:
 
-1. **Overview** (landing) — what changed recently and where. While the
-   selected server (on `bintrail-console watch`) has not indexed its first
-   change, a **Getting started** list at the top shows each step from adding
+1. **Overview** (landing) — what changed recently and where. It keeps
+   itself current: every five seconds it asks whether the index gained a
+   change (`GET /api/events/head`, which carries no row data), and re-reads
+   the recent changes and the window counts only when it did. The two
+   expensive reads, the all-time count and the coverage card, are limited to
+   once a minute while changes keep arriving and run every five minutes when
+   none are. Each request carries a deadline of its own, so a locked table or
+   a host that went away ends as a refusal the page reports rather than a
+   page that sits there looking healthy. A hidden tab asks nothing and
+   catches up the moment it is shown again; a refresh that keeps failing says
+   on the page since when it has not updated, one the server refuses says it
+   stopped, and figures whose own read failed say they are the ones from
+   before. Nothing is repainted: the cards fill in place, an unchanged list
+   or activity panel is left alone, the address does not change, and a
+   keyboard focus on an Undo button survives a newer change landing above
+   it.
+
+   While the selected server (on `bintrail-console watch`) has no backup yet,
+   a **Getting started** list at the top shows each step from adding
    it: create the index database, connect to the source, read the table
    structure (not for PostgreSQL, whose stream saves it when changes arrive),
    start capturing changes, capture the first change, and take the first
@@ -100,13 +116,29 @@ and searching events:
    backup location of its own. It is left out only for a PostgreSQL server
    with no replication slot or publication (the server form refuses to save
    one), which cannot capture either, so its capture steps are the ones to fix
-   first. The backup step never holds the list open. Each step is waiting, running, done or failed;
+   first. Each step is waiting, running, done or failed;
    a failure shows the error and what to do, and capture with no change on the
-   source yet is shown as running, not stuck. The list goes away once a change
-   is indexed. Then a **Restore
+   source yet is shown as running, not stuck. The list goes away once a backup
+   exists. What keeps it up is a backup step that FAILED, which is not a done
+   one, so a backup that failed last night on a server backed up last week
+   says so instead of vanishing. A capture step that failed does not: this is
+   a list of setup steps, not a health indicator, and the Overview already
+   says on its own when it has stopped updating, which is where a dead stream
+   belongs. Capture failing before any backup exists still keeps the list, by
+   the same plain rule. A backup counts whoever made it,
+   since the server reads that server's own backup locations, so one taken
+   before a restart or from the command line ends the step; a location that
+   cannot be read is said on the step rather than taken for "no backup". Each
+   server's locations are read at most once a minute for a sequence of asks,
+   because reading an S3 one is a listing over the network. It is a reuse
+   window and not a lock, so two tabs asking at the same instant can both
+   miss it and both read.
+   Then a **Restore
    coverage** card answering "to when can I restore, right now?" — any point
    between the delta-coverage floor and the last *indexed* event (never the
-   wall clock; the capture-lag chip says how close to now that edge is), the
+   wall clock; the **last change** chip says how long ago that edge is, in
+   plain hours and minutes, red while capture is stalled, green while it
+   keeps up and neutral on a server nobody is writing to), the
    continuity verdict, and — with a baseline source configured — the
    full-table restore window plus any table whose newest baseline predates
    coverage. It degrades loudly on `gap_lost`/`unavailable`/`unknown`/an
@@ -1009,11 +1041,11 @@ longer does anything. Remove it.
   before the opt-in was turned off is shown in red and skipped at its slots
   while the updates keep running
   ([#1564](https://github.com/dbtrail/dbtrail/issues/1564)).
-  When it is off, the Overview's Getting started list says so until the
-  server's first change is indexed, and the Snapshots page says so for a server
-  with a source and a location it can list. Both point at the same page, under
-  **Set when DBTrail starts**, where the setting is the Create-backup button
-  row.
+  When it is off, the Overview's Getting started list says so until a backup
+  for that server exists anyway, taken from somewhere this daemon does not
+  run, and the Snapshots page says so for a server with a source and a
+  location it can list. Both point at the same page, under **Set when DBTrail
+  starts**, where the setting is the Create-backup button row.
 - `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — local staging dir for
   S3-destined baselines created by that button (default a temp subdir).
 - `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — `ftwrl` (default),
@@ -1518,6 +1550,7 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `GET /api/activity` | Window aggregate behind the Overview tiles: counts by event type, distinct tables touched, and a per-table breakdown. The window **is the live retention** — derived from the oldest live `binlog_events` partition, so the counts cover exactly what the live index still holds and read the live tier only (no archive scan, and nothing archived can fall inside the window by construction). Returns `{label, since, until, refreshed_at, total, inserts, updates, deletes, other, tables, top_tables, complete, notes}`. The aggregate is a **server-side materialization** refreshed when older than ~30 minutes (a stale copy is served immediately while one recompute runs in the background); `refreshed_at` is when it was computed, and the UI renders it on the tiles ("as of …") so a cached number is never presented as live. `complete: false` means the counts are knowably a floor (an index with a pathological table count trips the grouping cap) and `notes` says so; the UI marks the affected tiles "partial". RBAC deny rules are applied, so a denied table contributes to neither the counts nor `top_tables`, and each deny profile gets its own materialization. |
 | `GET /api/schemas` | Schemas known to the index: those observed in `binlog_events` **plus** those in the latest schema snapshot, so a schema whose partitions have all been rotated out to Parquet/S3 is still listed (the archives still answer `/api/events` and `/api/recover`). `schemas` is that full union; `snapshot_only` (when present) is the subset with no live events observed — the UI labels these "snapshot only" since queries against them may return nothing; `snapshot_unavailable: true` means the snapshot half was skipped because the schema resolver failed to load (check the server log), so archive-only schemas may be missing from the list. The snapshot half is skipped under `--no-archive` or an active `--profile`, where archived data is unreachable anyway. Note this answers *which schemas this index knows of*, not *which have data in a given window* — for that, see `bintrail status`'s continuity verdict. `?schema=<name>` → that schema's tables. |
 | `GET /api/events` | Event browser. Query params: `schema, table, pk, event_type, gtid, since, until, changed_column, order, limit, limit_per_pk` plus the `after`/`before` keyset cursors. `limit_per_pk` keeps only the latest N events per row, requires `pk`, and is **refused alongside a cursor** — it is a whole-result-set cap, so paging would re-anchor it to each page's remainder. `scope=live` serves the **live index only** and answers immediately (the UI's phase 1: rows in `binlog_events` are milliseconds away, an archive scan can take tens of seconds); the response then carries `scope: "live"` and `archives_pending` (never omitted — `false` is a meaningful answer) — `true` means registered archives were **not** read and a follow-up full read is required before the list is complete (the warning says so, loudly); `false` means no follow-up read would add anything: either nothing is registered, or the archives are excluded for this console/session (a session profile always announces itself; a --no-archive console announces only when the window has gaps to point at). Anything else in `scope` is a 400, never a silent full read. |
+| `GET /api/events/head` | `{newest_event_id}`: the highest `event_id` in the live index, `0` when it holds none (#1801). The query carries a five-second deadline, because the console sets no write timeout and a metadata lock or a host that went away would otherwise hold the request open for minutes. The Overview asks for it every five seconds to learn whether anything changed, and re-reads the events list only when the number moved, up or down (a stream reset deletes rows). It is tiered with `GET /api/events` and refuses a session whose data profile does not exist on the server, exactly as the list does. It carries no row data, so it is **not** audited: a list read every five seconds per open tab would have written a `query.run` to the audit trail for every one of them, and the list is still audited each time it is actually read. The number is not narrowed by a data profile — it says the index gained a row, not in which table, which the coverage card's newest-event time already gives every session. |
 | `GET /api/schema-changes` | DDL history from the index's `schema_changes` table. Query params: `schema, table, ddl_type, since, until, limit`. `ddl_type` is one of `CREATE`, `ALTER`, `DROP`, `RENAME`, `TRUNCATE`, matched as a prefix of the stored type (`ALTER` matches `ALTER TABLE`), like the MCP `list_schema_changes` tool. Default limit 100, max 1000; `has_more` says whether the cap cut the list. Ordered by `detected_at, binlog_file, binlog_pos, id`, all descending, so DDLs detected in the same second keep their binlog order. Returns `{changes: [{id, detected_at, schema_name, table_name, ddl_type, statement, binlog_file, binlog_pos}], count, limit, has_more}`. The session's table deny and allow rules scope the rows by table: a `DROP` or `RENAME` that names several tables has a row for each, each scoped by its own rules; the statement is on the first table's row, and the others say which row carries it. One recorded by a version before this behavior has a single row, under its first table. Under an active access profile (a named profile, session restrictions, or the startup `--profile`) `statement` is empty on every row and `statement_withheld: true` says so, with `warnings` naming the scoping and the withholding. `422` when the index has no `schema_changes` table (an index provisioned before DDL tracking; `bintrail init` adds it). |
 | `POST /api/recover` | Undo-SQL generation. JSON body with the same filter fields (requires at least `schema`; an `order` field is accepted but ignored — recover always processes oldest-first). `limit_per_pk` reverses only the latest N events for the matched row and **requires `pk`** — it is the only filter that can separate events sharing a timestamp, since `since`/`until` are second-granular (`/api/events` accepts it too, so Restore's preview can mirror the same window). Returns `{sql, statement_count, row_count, warnings, notes, generated_in_ms}`. `generated_in_ms` is the wall time from request-body decode to the finished script: filter parsing, session-profile resolution, the event fetch including any archive/Parquet leg, cascade victim synthesis when auto-detected, and SQL rendering. It **excludes** selecting and opening the target server's connection, which is a one-off cost of switching servers and can dominate a first request. Always present: `0` means the script was generated in under a millisecond, not that timing is unavailable. When the target is a foreign-key **parent** whose `DELETE` cascaded below the binlog (MySQL/MariaDB index only), cascade victims are **auto-detected** and folded into the same script; the response then also carries `{cascade_detected, victim_count, set_null_count}` (see [Recover and cascade](#cascade-recovery)). Auto-detection needs a single `table` in scope; a schema-wide undo whose window holds a DELETE or UPDATE on a table with cascading children instead gets a `warnings` entry naming those children and saying the script reverses only what was recorded (undo the parent table on its own to have them repaired); a check that fails is reported as such, though an index that never recorded foreign keys answers "no children" (#1616). |
 | `POST /api/recover-cascade` | Cascade-recovery SQL generation (reverse FK `ON DELETE CASCADE` / `SET NULL` side effects). JSON body: `schema, table` (the **parent**), `pk, pks, since, until, lookback, max_depth, allow_incomplete`. Returns `{sql, statement_count, victim_count, set_null_count, complete, incomplete, generated_in_ms}` — text only, never executed. Returns `403` under an active RBAC redaction profile (see [Cascade recovery](#cascade-recovery)). |
@@ -1532,7 +1565,7 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `POST /api/servers/{id}/monitor/start` | Supervisor only (403 on the standalone console): doctor preflight → on green, record intent + provision + stream. Returns `{doctor, started, monitor}`. |
 | `POST /api/servers/{id}/monitor/stop` | Supervisor only: clear intent, drain the stream (final checkpoint), release the advisory lock. |
 | `GET /api/servers/{id}/monitor` | Supervisor only: `{monitor: {state, last_error, since, source_connected, retrying, phase}}` — `stopped\|pending\|running\|stalled\|lost_position\|failed`. `phase` names a long startup step a `pending` stream is inside, currently only `resume_cleanup` (the pre-capture delete of changes a replayed window would save twice); absent when none is running. |
-| `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a change is indexed. A first-backup step follows the capture steps: with its job's state when console backups are enabled and the server has its own baseline location, and as `waiting` with a `detail` and `fix` when backups are turned off for the daemon or the server has no baseline location of its own (#1677). It is left out only for a PostgreSQL server with no slot or publication (the server form refuses to save one), which cannot capture either. `complete` reads only the capture steps, so a backup step that cannot be done never holds the list open. `check_error` means the index database could not be read, and nothing is marked done from it. |
+| `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a backup exists for the server. A first-backup step follows the capture steps: with its job's state when console backups are enabled and the server has its own baseline location, and as `waiting` with a `detail` and `fix` when backups are turned off for the daemon or the server has no baseline location of its own (#1677). It is left out only for a PostgreSQL server with no slot or publication (the server form refuses to save one), which cannot capture either. `complete` is the backup step being done (#1801). A backup ends the list whatever the capture steps are still doing, since seeing the first change is not something anyone can make happen; a backup step that FAILED is not a done one, so it keeps the list up. A capture step that failed deliberately does not, so a finished list never comes back days later: a dead stream is reported by the Overview's own "stopped updating" note, and capture failing before any backup exists keeps the list by the same rule. The server's own backup locations are read for a complete snapshot, at most once a minute per server since an S3 location is a listing over the network, so a backup made before a restart or from the command line ends the step, and one that cannot be read is reported on the step (`detail`) instead of counting as "no backup". The job's own state comes first: a backup that failed or is running outranks an older snapshot. `check_error` means the index database could not be read, and nothing is marked done from it. |
 | `GET /api/baseline-refresh` | What the daemon does with a table that did not change: `{carry_forward_unchanged, enabled, scheduled, targets, skipped_s3_only}`. Read-only since #1681 (the `PUT` and the `source` field are gone): `carry_forward_unchanged` is the daemon's own flag, on unless it was started with `--baseline-carry-forward-unchanged=false`; on the read-only console (`bintrail-console serve`), which has no such flag and takes no backups, it reads false. `enabled` reports whether anything in this daemon consumes it, `scheduled` whether a refresh timer runs, `targets` how many servers the next tick covers (omitted where no loop runs) and `skipped_s3_only` how many it skips for keeping backups only in S3. |
 | `GET /api/rotation` | Effective global rotation policy: `{retain, interval, add_future, source, enabled}` — `source` is `"override"` (console-saved) or `"default"` (daemon `--rotate-*`). |
 | `PUT /api/rotation` | Supervisor only (403 on the standalone console): save a global rotation override `{retain, interval, add_future}` (validated; `off` rejected). Applies live on the next cycle. |
