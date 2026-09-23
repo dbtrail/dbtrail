@@ -3,6 +3,7 @@ package doctor
 import (
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -83,15 +84,33 @@ func (r *recordingListener) receivedAfterClose(t *testing.T) []byte {
 	return r.received
 }
 
+// The property the whole fix rests on is that NOTHING is sent, and it has to
+// hold on every way the probe can end, not only when a greeting arrives: a
+// write on the refusal path would hand the other machine bytes just the same.
 func TestProveLoopback_sendsNoCredentials(t *testing.T) {
-	l := listenSaying(t, mysqlGreeting())
-	got := proveLoopback("dbtrail:S3cret-Pass@tcp(localhost:"+closedPort(t)+")/", KindPortClosed,
-		func(string, string) string { return l.Addr().String() })
-	if got != l.Addr().String() {
-		t.Errorf("a real MySQL greeting was not taken as proof: %q", got)
+	cases := []struct {
+		name   string
+		hello  []byte // nil: the server accepts and says nothing
+		proven bool
+	}{
+		{"a valid greeting", mysqlGreeting(), true},
+		{"a MySQL error packet", packet(0, append([]byte{0xff, 0x6a, 0x04}, "Host is not allowed to connect"...)), true},
+		{"a malformed packet", packet(0, append([]byte{0x09}, "8.4.9"...)), false},
+		{"a length claim over the limit", []byte{0x01, 0x04, 0x00, 0x00}, false},
+		{"a silent server", nil, false},
 	}
-	if b := l.receivedAfterClose(t); len(b) != 0 {
-		t.Errorf("the probe sent %d byte(s) to the other address; it must send nothing: %q", len(b), b)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			l := listenSaying(t, c.hello)
+			got := proveLoopback("dbtrail:S3cret-Pass@tcp(localhost:"+closedPort(t)+")/", KindPortClosed,
+				func(string, string) string { return l.Addr().String() })
+			if (got != "") != c.proven {
+				t.Errorf("proof = %q, want proven=%v", got, c.proven)
+			}
+			if b := l.receivedAfterClose(t); len(b) != 0 {
+				t.Errorf("the probe sent %d byte(s) to the other address; it must send nothing: %q", len(b), b)
+			}
+		})
 	}
 }
 
@@ -144,5 +163,34 @@ func TestGreetingAt_aHugeClaimIsRefusedAtOnce(t *testing.T) {
 	}
 	if d := time.Since(start); d > time.Second {
 		t.Errorf("the probe waited %v on a claim it should have refused on the header", d)
+	}
+}
+
+// What the loopback finding may claim. It KNOWS two things: nothing answered
+// at the typed address, and something that speaks MySQL answered at the other
+// one. It does NOT know that DBTrail runs in a container — on a plain install a
+// DNS search domain can send host.docker.internal to someone else's server —
+// so the advice is conditional, and never tells anyone to use an address it
+// cannot vouch for.
+func TestBuild_loopbackRemediationSaysOnlyWhatIsKnown(t *testing.T) {
+	l := listenSaying(t, mysqlGreeting())
+	closed := closedPort(t)
+	alt := l.Addr().String()
+	got := buildConnect(t, "u:p@tcp(localhost:"+closed+")/?timeout=2s",
+		WithLoopbackRetry(func(string, string) string { return alt }))
+	if got.Kind != KindLoopbackInContainer {
+		t.Fatalf("kind = %q, want %q", got.Kind, KindLoopbackInContainer)
+	}
+	altHost, _, _ := net.SplitHostPort(alt)
+	want := "Nothing answered at localhost:" + closed + ", but a MySQL server answered at " + alt + ".\n\n" +
+		"If DBTrail runs in a container, localhost is the container itself, and that server is your machine. Use this as the host:\n\n" +
+		"  " + altHost + "\n\n" +
+		"If DBTrail does not run in a container, that address belongs to another machine. Check the address of your own database instead."
+	if got.Remediation != want {
+		t.Errorf("remediation =\n%s\n\nwant\n%s", got.Remediation, want)
+	}
+	// Every mention of the container is a condition, never a statement.
+	if all, cond := strings.Count(got.Remediation, "DBTrail runs in a container"), strings.Count(got.Remediation, "If DBTrail runs in a container"); all != cond {
+		t.Error("the remediation states as fact that DBTrail runs in a container")
 	}
 }

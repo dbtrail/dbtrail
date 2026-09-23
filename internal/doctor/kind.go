@@ -190,6 +190,22 @@ func proveLoopback(sourceDSN, kind string, retry func(host, port string) string)
 	return ""
 }
 
+// loopbackRemediation says what the loopback probe KNOWS and no more: nothing
+// answered at the typed address, and something that speaks MySQL answered at
+// alt. Whether DBTrail runs in a container is NOT known — on a plain install a
+// DNS search domain can send host.docker.internal to another machine's MySQL —
+// so the advice to use alt is conditional on it, with the other case said too.
+func loopbackRemediation(sourceDSN, alt string) string {
+	typed := "the address you typed"
+	if cfg, err := mysql.ParseDSN(sourceDSN); err == nil && cfg.Addr != "" {
+		typed = cfg.Addr
+	}
+	return "Nothing answered at " + typed + ", but a MySQL server answered at " + alt + ".\n\n" +
+		"If DBTrail runs in a container, localhost is the container itself, and that server is your machine. Use this as the host:\n\n" +
+		"  " + strings.TrimSuffix(alt, portSuffix(alt)) + "\n\n" +
+		"If DBTrail does not run in a container, that address belongs to another machine. Check the address of your own database instead."
+}
+
 // maxGreetingLen bounds the one packet the probe reads. A real greeting is
 // about 80 bytes; anything claiming more than this is not one, and must not
 // make the probe allocate what a stranger asks for.

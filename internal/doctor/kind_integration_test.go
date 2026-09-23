@@ -46,7 +46,7 @@ func TestIntegrationBuild_loopbackProvenByTheRetry(t *testing.T) {
 		t.Errorf("retry asked about host %q, want the typed one", asked[0])
 	}
 	liveHost, _, _ := strings.Cut(live, ":")
-	if !strings.Contains(got.Remediation, "Use that as the host:\n\n  "+liveHost) {
+	if !strings.Contains(got.Remediation, "Use this as the host:\n\n  "+liveHost) {
 		t.Errorf("remediation does not name the address to use instead:\n%s", got.Remediation)
 	}
 

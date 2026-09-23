@@ -239,10 +239,8 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 		}
 		if alt := proveLoopback(sourceDSN, c.Kind, cfg.loopbackRetry); alt != "" {
 			c.Kind = KindLoopbackInContainer
-			c.Detail += "; a database answered at " + alt + " instead"
-			c.Remediation = "DBTrail runs in a container, where localhost and 127.0.0.1 are the container itself, not your machine.\n\n" +
-				"A database answered at " + alt + ". Use that as the host:\n\n" +
-				"  " + strings.TrimSuffix(alt, portSuffix(alt))
+			c.Detail += "; a MySQL server answered at " + alt + " instead"
+			c.Remediation = loopbackRemediation(sourceDSN, alt)
 		}
 		report.add(c)
 		return report
