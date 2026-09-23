@@ -18,10 +18,19 @@ import (
 // the cry-wolf failure the cascade Result contract forbids. An absent table
 // (legacy index, or no degraded snapshot ever taken) simply means "no
 // exclusions"; readers must tolerate it.
+//
+// The name columns are BINARY (SnapshotExclusionsNameCollation, #1815). On
+// the index database's default collation (utf8mb4_0900_ai_ci on 8.x) two
+// tables whose names differ only in case or accent — `Audit_Log` and
+// `audit_log`, `cafe` and `café`, both ordinary on a case-sensitive source —
+// were one key, and the second exclusion's ERROR 1062 rolled back the WHOLE
+// snapshot transaction: the DDL hook's auto-snapshot failed and capture
+// restarted into the same DDL. The source keeps them apart, and so do
+// schema_snapshots and the capture-skip ledger; this table must too.
 const DDLSnapshotExclusions = `CREATE TABLE IF NOT EXISTS snapshot_exclusions (
     snapshot_id INT UNSIGNED NOT NULL,
-    schema_name VARCHAR(64)  NOT NULL,
-    table_name  VARCHAR(64)  NOT NULL,
+    schema_name VARCHAR(64)  COLLATE utf8mb4_bin NOT NULL,
+    table_name  VARCHAR(64)  COLLATE utf8mb4_bin NOT NULL,
     reason      VARCHAR(64)  NOT NULL,
     pk_column   VARCHAR(64)  DEFAULT NULL COMMENT 'a column name this table does not already use, for the PRIMARY KEY it would take to capture it (#1802); NULL when none was needed or the row predates this column',
     PRIMARY KEY (snapshot_id, schema_name, table_name)
@@ -73,7 +82,88 @@ func ensureSnapshotExclusionsTable(ctx context.Context, db *sql.DB) (hasPKColumn
 		}
 		return true, nil
 	}
+	migrateSnapshotExclusionsNamesBestEffort(ctx, db)
 	return ensureSnapshotExclusionsPKColumn(ctx, db), nil
+}
+
+// SnapshotExclusionsNameCollation is the collation of snapshot_exclusions'
+// schema_name and table_name (#1815): binary, so two names the source keeps
+// apart are two keys here.
+//
+// utf8mb4_bin is PAD SPACE, so it would compare 'x' and 'x ' as equal. That
+// cannot bite: MySQL refuses a schema or table name ending in a space (ERROR
+// 1102/1103, pinned by TestIntegrationServerRefusesTrailingSpaceTableNames_1815).
+// It is chosen over the NO PAD utf8mb4_0900_bin because it exists on every
+// MySQL 8.0 the index supports, not only 8.0.17 and later.
+const SnapshotExclusionsNameCollation = "utf8mb4_bin"
+
+// migrationLockWait bounds how long the writer's collation migration waits
+// for the table's metadata lock. The ALTER rebuilds the table and needs an
+// exclusive lock, which queues behind any open transaction that read the
+// table — and every later reader queues behind the ALTER. The server default
+// wait is a year; on the stream's DDL hook that would be capture hanging.
+const migrationLockWait = 5
+
+// execQuerier is what the migration needs from a connection: *sql.DB and
+// *sql.Conn both satisfy it.
+type execQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// EnsureSnapshotExclusionsNameCollation converts an existing
+// snapshot_exclusions table, created by a build before #1815, to binary name
+// columns. Idempotent: it reads information_schema first and issues no ALTER
+// when both columns already carry SnapshotExclusionsNameCollation. A missing
+// table is not an error (the creator uses the new DDL).
+//
+// The rows already there always survive: the old key was insensitive, so no
+// two rows in it can be equal under a binary one.
+//
+// It runs on its own connection with lock_wait_timeout bounded to
+// migrationLockWait seconds, so a busy table makes it fail instead of stall.
+func EnsureSnapshotExclusionsNameCollation(ctx context.Context, db *sql.DB) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("metadata: snapshot_exclusions collation: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", migrationLockWait)); err != nil {
+		return fmt.Errorf("metadata: snapshot_exclusions collation: bound lock wait: %w", err)
+	}
+	return ensureSnapshotExclusionsNameCollationOn(ctx, conn)
+}
+
+func ensureSnapshotExclusionsNameCollationOn(ctx context.Context, c execQuerier) error {
+	var found, binary int
+	if err := c.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(COLLATION_NAME = ?), 0)
+		FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'snapshot_exclusions'
+		  AND COLUMN_NAME IN ('schema_name', 'table_name')`, SnapshotExclusionsNameCollation,
+	).Scan(&found, &binary); err != nil {
+		return fmt.Errorf("metadata: check snapshot_exclusions name collation: %w", err)
+	}
+	if found == 0 || binary == found {
+		return nil
+	}
+	if _, err := c.ExecContext(ctx, `ALTER TABLE snapshot_exclusions
+		MODIFY COLUMN schema_name VARCHAR(64) COLLATE `+SnapshotExclusionsNameCollation+` NOT NULL,
+		MODIFY COLUMN table_name  VARCHAR(64) COLLATE `+SnapshotExclusionsNameCollation+` NOT NULL`); err != nil {
+		return fmt.Errorf("metadata: convert snapshot_exclusions names to %s: %w", SnapshotExclusionsNameCollation, err)
+	}
+	return nil
+}
+
+// migrateSnapshotExclusionsNamesBestEffort is the writer's self-heal for
+// paths that never run EnsureSchema (`bintrail snapshot`). Best effort and
+// loud: failing the snapshot over it would turn every degraded snapshot into
+// a failure, while leaving it unmigrated only fails the rare snapshot that
+// excludes two case/accent twins — the bug as it was before.
+func migrateSnapshotExclusionsNamesBestEffort(ctx context.Context, db *sql.DB) {
+	if err := EnsureSnapshotExclusionsNameCollation(ctx, db); err != nil {
+		slog.Warn("could not convert snapshot_exclusions names to a binary collation; a snapshot that excludes two tables whose names differ only in case or accent will fail until it is converted (run any capture command once, which retries it)",
+			"error", err)
+	}
 }
 
 // ensureSnapshotExclusionsPKColumn adds pk_column to a snapshot_exclusions
