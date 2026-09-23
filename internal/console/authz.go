@@ -158,11 +158,20 @@ var apiRoutePerms = []routePerm{
 	{"GET", "/api/baseline-refresh", ext.PermSettingsRead},
 	// The snapshot listing is a read ABOUT A SERVER, not console administration:
 	// whoever may create a snapshot has to be able to see the one they created,
-	// and GET /api/servers/{}/baseline — the per-server snapshot read in the
-	// block above — has sat on the read-only floor all along. So this listing
-	// joins it there. The consequence runs both ways and is the point: a role
-	// holding servers:read gains the listing, and a role holding settings:read
-	// ALONE loses it.
+	// and the status of that server's snapshot, restore, .sql and verify jobs
+	// (GET /api/servers/{}/baseline and its siblings in the block above) has
+	// sat on the read-only floor all along. So this listing joins them there.
+	// The consequence runs both ways and is the point: a role holding
+	// servers:read gains the listing, and a role holding settings:read ALONE
+	// loses it.
+	//
+	// What servers:read therefore now reads, stated so nobody finds it by
+	// accident: the resolved snapshot LOCATION of each server (directory path
+	// or s3://bucket/prefix), including the daemon-wide default a server
+	// inherits, which until now only settings:read saw; the storage error
+	// text a listing reports per location; and the schedule's reasons. No
+	// credential is in any of it. The same fact already reached servers:read
+	// for the command-line entry through GET /api/servers.
 	{"GET", "/api/baselines", ext.PermServersRead},
 	// The per-server backup schedule (#1442) is a control-plane setting like
 	// the rotation and refresh overrides: what it changes is what the daemon's
