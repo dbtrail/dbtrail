@@ -1572,12 +1572,11 @@ button { font-family: inherit; }
    (review reproduced it; -3 clears only white and sun). */
 .ov-ev-pk { color: var(--ink-2); }
 .ov-ev-cols { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2); text-align: right; white-space: nowrap; }
-.ov-ev-undo { height: 27px; padding: 0 9px; font-size: 11.5px; opacity: 0; transition: opacity .14s; }
+/* Undo is drawn on every row (#1801). It used to appear only under the
+   mouse (and on keyboard focus, #968), so a first look at the list showed no
+   way to undo anything. */
+.ov-ev-undo { height: 27px; padding: 0 9px; font-size: 11.5px; }
 .ov-ev-undo svg { width: 12px; height: 12px; }
-.ov-ev:hover .ov-ev-undo { opacity: 1; }
-/* Keyboard focus must reveal the hover-only Undo (#968): an invisible
-   focused button is worse than none. */
-.ov-ev-undo:focus-visible { opacity: 1; }
 
 .ov-tables { display: flex; flex-direction: column; }
 .ov-tablerow {
@@ -2177,6 +2176,17 @@ section.bk-restore { margin-top: 18px; }
 .vfy-region { margin-top: 16px; padding: 16px 18px 18px; }
 .vfy-region-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .vfy-region-head .ov-panel-title { margin: 0; }
+/* The mode help is a fold since #1573: open on arrival it was the largest
+   block left on the first screen. Its summary reads as the hint it replaces —
+   no browser triangle, the same caret as the take-away panel. */
+details.vfy-helpfold > summary { cursor: pointer; user-select: none; list-style: none; margin: 8px 2px 0; }
+details.vfy-helpfold > summary::-webkit-details-marker { display: none; }
+details.vfy-helpfold > summary::after {
+  content: "›"; display: inline-block; margin-left: 6px; color: var(--ink-3);
+  transform: rotate(90deg); transition: transform 0.15s ease;
+}
+details.vfy-helpfold[open] > summary::after { transform: rotate(-90deg); }
+details.vfy-helpfold > summary:hover { color: var(--blue); }
 .vfy-modehelp { margin: 8px 2px 0; max-width: 860px; }
 
 /* structured result rows (#1419 §2/§3): mark | table | verdict | counts |
@@ -3033,6 +3043,20 @@ section.bk-restore { margin-top: 18px; }
   margin: 22px 0 10px;
 }
 .page-head + .bks-sect { margin-top: 0; }
+/* The take-away panel is a fold since #1573: its summary has to read as the
+   panel head it replaces, with a caret and no browser triangle. */
+details.bk-take > summary { cursor: pointer; user-select: none; list-style: none; }
+details.bk-take > summary::-webkit-details-marker { display: none; }
+details.bk-take > summary .ov-panel-title::after {
+  content: "›"; display: inline-block; margin-left: 8px; color: var(--ink-3);
+  transform: rotate(90deg); transition: transform 0.15s ease;
+}
+details.bk-take[open] > summary .ov-panel-title::after { transform: rotate(-90deg); }
+details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
+/* A quiet fact about the last .sql build (it expired unread), said on the
+   folded panel's own line so nobody has to open it to learn a copy is gone. */
+.bk-take-sum { flex-wrap: wrap; }
+.bk-take-note { flex-basis: 100%; margin-top: 4px; font-size: 13px; color: var(--ink-2); }
 /* Snapshots section dividers (#1573). The page is three jobs in one — what
    copies exist, whether they are restorable, where and how often they are
    made — so the two lower ones open with a heading that rules across the

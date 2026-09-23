@@ -332,6 +332,27 @@ async function apiText(path) {
   return text;
 }
 
+// OV_REQUEST_MS bounds one request the Overview makes on its own. The console
+// sets no write timeout, on purpose, so nothing else ends a request that
+// neither answers nor fails: an ALTER holding a table's metadata lock (MySQL
+// waits a year by default) or an index host that went away (minutes of TCP
+// retransmission) would leave this page sitting in a turn that never ends,
+// with no next turn armed, no failure counted, and the tab coming back
+// finding it busy. A rejection is something the loop already reports well.
+const OV_REQUEST_MS = 20000;
+
+// apiWithin is api() with a deadline. The abort surfaces as a rejection with
+// a sentence the page can show, rather than the browser's own wording.
+function apiWithin(path, ms) {
+  const ctl = new AbortController();
+  let timedOut = false;
+  const t = setTimeout(() => { timedOut = true; ctl.abort(); }, ms);
+  return api(path, { signal: ctl.signal }).then((d) => { clearTimeout(t); return d; }, (err) => {
+    clearTimeout(t);
+    throw timedOut ? apiError(0, "the server did not answer within " + Math.round(ms / 1000) + "s") : err;
+  });
+}
+
 function apiError(status, message) {
   const err = new Error(message);
   err.status = status;
@@ -1142,6 +1163,22 @@ function tzChip() {
 // one page (#1354).
 function nowClock() { return new Date().toISOString().slice(11, 19) + " UTC"; }
 
+// plainDuration spells a number of seconds the way a person says it: the two
+// largest units, with a zero second unit left out ("45s", "2m 26s", "1h",
+// "1h 14m", "3d 4h"). A bare "4445s" takes arithmetic to read (#1794).
+function plainDuration(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const units = [["d", 86400], ["h", 3600], ["m", 60], ["s", 1]];
+  for (let i = 0; i < units.length - 1; i++) {
+    const [u, n] = units[i];
+    if (s < n) continue;
+    const [u2, n2] = units[i + 1];
+    const small = Math.floor((s % n) / n2);
+    return Math.floor(s / n) + u + (small ? " " + small + u2 : "");
+  }
+  return s + "s";
+}
+
 // ── Overview ─────────────────────────────────────────────────────────────────
 
 // covLast is the payload the visible coverage card was built from, so a FAILED
@@ -1163,7 +1200,7 @@ function covRefresh(stamp) {
   }
   const btn = el("button", {
     class: "cov-refresh-btn", type: "button",
-    title: "Re-read capture lag and continuity",
+    title: "Re-read the restore window and capture state",
     "aria-label": "Refresh restore coverage",
     onclick: (e) => refreshCovCard(e.currentTarget),
   });
@@ -1219,7 +1256,10 @@ function covCard(c, stamp) {
     // Unreachable/broken backend: say nothing about the window — "no events
     // yet" would be a positive factual claim about an index we couldn't read.
   } else if (!c.delta_to) {
-    card.append(el("p", { class: "cov-line warn", text: "No indexed events yet, so there is nothing to restore from." }));
+    // Neutral while capture runs and the server is quiet (#1794): that is how
+    // every new server starts, and the Getting started list beside it says a
+    // quiet database is normal.
+    card.append(el("p", { class: "cov-line" + (c.freshness === "idle" ? "" : " warn"), text: "No indexed events yet, so there is nothing to restore from." }));
   } else if (!c.delta_from) {
     // Unknown floor: don't assert a bounded window whose start we don't know.
     card.append(el("p", { class: "cov-line" },
@@ -1230,20 +1270,25 @@ function covCard(c, stamp) {
       " and ", el("b", { text: c.delta_to, title: utcLocalTitle(c.delta_to) || null }), " is restorable."));
   }
   const chips = el("div", { class: "cov-chips" });
-  // Freshness (#1227) is what makes the lag number readable, so it decides the
-  // lag chip's colour instead of a bare threshold. The same "3600s" means a
-  // DEAD DAEMON under "stalled" and a source nobody wrote to under "idle", and
+  // Freshness (#1227) is what makes the number readable, so it decides the
+  // chip's colour instead of a bare threshold. The same hour means a DEAD
+  // DAEMON under "stalled" and a server nobody wrote to under "idle", and
   // those need opposite responses — the old unconditional amber said neither.
+  // The number is now minus the newest captured change in every state, so the
+  // chip says that, in hours and minutes (#1794): "capture lag 4445s" on a
+  // quiet server read as lag and took arithmetic to read. Idle is neutral:
+  // nobody writing to a server is not a fault.
   const fresh = c.freshness || "unknown";
   if (typeof c.lag_seconds === "number") {
-    const lagTone = fresh === "stalled" ? " bad" : fresh === "current" ? " ok" : " warn";
-    chips.append(el("span", { class: "cov-chip" + lagTone, text: "capture lag " + c.lag_seconds + "s" }));
+    const lagTone = fresh === "stalled" ? " bad" : fresh === "current" ? " ok" : fresh === "idle" ? "" : " warn";
+    chips.append(el("span", { class: "cov-chip" + lagTone, text: "last change " + plainDuration(c.lag_seconds) + " ago" }));
   }
-  // "none" (file-mode: no capture ran) and "unknown"/"unavailable" stay
-  // NEUTRAL/amber — never green, which would paint a non-claim as assurance.
+  // "none" (file-mode: no capture ran) and "idle" stay NEUTRAL, and
+  // "unknown"/"unavailable" amber or red: never green, which would paint a
+  // non-claim as assurance.
   const freshTone = fresh === "stalled" || fresh === "unavailable" ? " bad"
     : fresh === "current" ? " ok"
-    : fresh === "none" ? "" : " warn";
+    : fresh === "none" || fresh === "idle" ? "" : " warn";
   chips.append(el("span", { class: "cov-chip" + freshTone, text: "capture " + fresh }));
   // "none" (file-mode: no capture ran) stays NEUTRAL — green would paint a
   // non-claim as assurance.
@@ -1260,12 +1305,16 @@ function covCard(c, stamp) {
   // error state: the checkpoint ticker runs even with no traffic, so a stale
   // checkpoint is the daemon, never the workload.
   if (fresh === "stalled") {
-    const age = typeof c.checkpoint_age_seconds === "number" ? " for " + Math.round(c.checkpoint_age_seconds / 60) + "m" : "";
+    const age = typeof c.checkpoint_age_seconds === "number" ? " for " + plainDuration(c.checkpoint_age_seconds) : "";
     card.append(el("p", { class: "cov-line bad", text:
       "Capture is STALLED: the daemon has not checkpointed" + age + ". The window's upper edge is frozen: changes since then are NOT recoverable. Check that the stream is running." }));
   } else if (fresh === "idle") {
-    card.append(el("p", { class: "cov-line warn", text:
-      "Capture is checkpointing but has indexed nothing recent. From the index alone a quiet source and a capture falling behind look identical; the daemon's bintrail_stream_index_commit_latency_seconds metric tells them apart." }));
+    // Neutral, and no metric named (#1794): the page gives no way to read
+    // one, and from the index alone a quiet server and a capture that fell
+    // behind look the same, so the line says exactly that much.
+    const quiet = typeof c.lag_seconds === "number" ? "Nothing captured for " + plainDuration(c.lag_seconds) + "." : "Nothing captured yet.";
+    card.append(el("p", { class: "cov-line", text:
+      quiet + " Either nothing changed on this server, or capture fell behind, and this page cannot tell which." }));
   } else if (fresh === "unavailable") {
     card.append(el("p", { class: "cov-line bad", text: "Capture liveness could not be read. Treat the window's upper edge as unverified." }));
   }
@@ -1345,14 +1394,20 @@ function ovStatPending(key, scope) {
 }
 
 // ovFrame builds the whole page skeleton synchronously and returns handles to
-// every slot a fetch will fill. Nothing here waits on the network.
+// every slot a fetch will fill. Nothing here waits on the network. Every fill
+// can run again over the same frame, which is how the page keeps itself
+// current (#1801) without repainting under the reader.
 function ovFrame() {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "What changed recently, and where: your starting point. Each figure below states the window it covers.");
-  v.append(pageHead("Overview", sub));
-
   const f = {};
+  f.head = ovHead = pageHead("Overview", sub);
+  v.append(f.head);
+
+  // Where the page says it stopped keeping itself current.
+  f.liveSlot = el("div");
+  v.append(f.liveSlot);
   f.firstRunSlot = el("div");
   v.append(f.firstRunSlot);
   f.covSlot = el("div");
@@ -1373,6 +1428,10 @@ function ovFrame() {
   stats.append(f.statTotal, f.statDeletes, f.statTables, f.statLatest);
   v.append(stats);
 
+  // Where the tiles say their figures could not be refreshed, above the
+  // notes the aggregate itself carries (which fillOvActivity clears).
+  f.sideSlot = el("div");
+  v.append(f.sideSlot);
   // Whatever the aggregate could not account for lands here, at the point of
   // use — between the tiles and the panels, where the old layout put it.
   f.warnSlot = el("div");
@@ -1395,8 +1454,11 @@ function ovFrame() {
   grid.append(f.recentPanel);
 
   f.tablesPanel = el("section", { class: "ov-panel tcard-sun" });
+  // The "as of" stamp has a slot of its own, so a refill replaces it instead
+  // of adding a second one beside it.
+  f.tablesAsOf = el("span");
   f.tablesHead = el("div", { class: "ov-panel-head" },
-    el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Activity by table" })));
+    el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Activity by table" })), f.tablesAsOf);
   f.tablesPanel.append(f.tablesHead);
   f.tablesBody = el("div", { class: "ov-tables" });
   f.tablesBody.append(ovSkelLines(4), el("div", { class: "skel-note", text: "computing window activity…" }));
@@ -1418,6 +1480,10 @@ function fillOvCoverage(f, coverage) {
   clear(f.covSlot);
   if (!coverage) return;
   covLast = { data: coverage, at: nowClock() };
+  // Also on the frame: covLast is module-wide (the card's own refresh button
+  // reads it), so a refresh that fails must re-render THIS Overview's last
+  // payload, not whichever one filled that global last.
+  f.covLast = covLast;
   f.covSlot.append(covCard(coverage, { at: covLast.at }));
 }
 
@@ -1434,15 +1500,24 @@ function fillOvStatus(f, status) {
 
 // fillOvEvents fills the Recent-changes panel and the most-recent-change tile.
 // A failed fetch renders a red error box in the panel — never a swallowed
-// blank list.
+// blank list. A refill with the same changes leaves the panel alone, and one
+// with a newer change keeps the focus on the Undo it was on (#1801): the list
+// refreshes on its own now, and a keyboard user tabbing to Undo must not be
+// sent back to the top of the page by a change landing above.
 function fillOvEvents(f, eventsData, err) {
-  const events = (eventsData && eventsData.events) || [];
+  const events = ((eventsData && eventsData.events) || []).slice(0, 8);
+  const key = err ? null : events.map((e) => e.anchor).join("\n");
+  if (key !== null && key === f.eventsKey) return;
+  f.eventsKey = key;
   const latest = (events[0] && events[0].event_timestamp) || "—";
   const wide = el("div", { class: "ov-stat" },
     el("div", { class: "ov-stat-v small", text: latest, title: utcLocalTitle(latest) || null }),
     el("div", { class: "ov-stat-k", text: "most recent change" }),
     el("div", { class: "ov-stat-scope", text: "point in time (UTC)" }));
   f.statLatest.replaceWith(f.statLatest = wide);
+  let focused = null;
+  for (const [anchor, btn] of f.undoByAnchor || []) if (btn === document.activeElement) focused = anchor;
+  f.undoByAnchor = new Map();
   clear(f.recentBody);
   if (err) {
     f.recentBody.append(el("div", { class: "error-box", text: "Recent changes unavailable: " + (err.message || err) }));
@@ -1450,9 +1525,14 @@ function fillOvEvents(f, eventsData, err) {
   }
   if (!events.length) {
     f.recentBody.append(el("div", { class: "ev-empty", text: "No changes indexed yet." }));
-  } else {
-    events.slice(0, 8).forEach((e) => f.recentBody.append(ovEventRow(e)));
   }
+  events.forEach((e) => {
+    const row = ovEventRow(e);
+    f.undoByAnchor.set(e.anchor, row.undoButton);
+    f.recentBody.append(row);
+  });
+  const again = focused && f.undoByAnchor.get(focused);
+  if (again) again.focus();
 }
 
 // fillOvActivity fills every window-scoped surface from the /api/activity
@@ -1464,6 +1544,15 @@ function fillOvEvents(f, eventsData, err) {
 // partition; the label travels in the payload so the tile and the measurement
 // can never disagree.
 function fillOvActivity(f, activity) {
+  // Identical bytes leave the panel alone (#1801). The aggregate behind it is
+  // a server-side cache with a 30-minute life, so a busy server sends the
+  // same payload turn after turn; rebuilding it every five seconds would
+  // destroy and recreate the same rows ~720 times an hour. Each row is a
+  // link, so one swapped between a mouse going down and coming up loses the
+  // click, and hovering it would flicker. fillOvEvents does the same.
+  const key = JSON.stringify(activity || null);
+  if (key === f.activityKey) return;
+  f.activityKey = key;
   const deletes = activity ? activity.deletes : null;
   const tableCount = activity ? activity.tables : null;
   const refreshed = (activity && activity.refreshed_at) || "";
@@ -1490,8 +1579,9 @@ function fillOvActivity(f, activity) {
     f.warnSlot.append(el("div", { class: "warn-item" }, icon("warn"), el("span", { text: n })));
   });
 
+  clear(f.tablesAsOf);
   if (refreshed) {
-    f.tablesHead.append(el("span", { class: "cov-asof", text: "as of " + utcLabel(refreshed) }));
+    f.tablesAsOf.append(el("span", { class: "cov-asof", text: "as of " + utcLabel(refreshed) }));
   }
   clear(f.tablesBody);
   const tables = (activity && activity.top_tables || []).map((t) => ({
@@ -1515,26 +1605,30 @@ function fillOvActivity(f, activity) {
 }
 
 function renderOverview() {
-  const gen = serverGen, vgen = viewGen;
+  const gen = serverGen;
   const f = ovFrame();
-  const live = () => gen === serverGen && vgen === viewGen;
-  // Four independent fetches; each fills its card as it lands. No Promise.all:
+  // Asked of the page, not of the address (#1797): this paint's heading is
+  // still on screen, for the same server. A server switch or another page
+  // drops a late payload instead of painting it over the new view, and stops
+  // this paint's loops.
+  const live = () => gen === serverGen && f.head === ovHead && overviewOnScreen();
+  // Independent fetches; each fills its card as it lands. No Promise.all:
   // the slowest aggregate must not hold the frame or its siblings hostage —
   // the #1352 target (p95 < 5 s to a useful first paint) is about the PAINT,
-  // not the backend. Every fill re-checks the generation guards so a server
-  // switch or navigation mid-flight drops the late payload instead of
-  // painting over the new view.
+  // not the backend.
+  let firstRun = null;
   if (serversEmpty && capsCache.monitor) f.firstRunSlot.append(addServerCard());
-  else watchFirstRun(f, live);
+  else firstRun = watchFirstRun(f, live);
 
   api("/api/status").catch(() => null)
     .then((status) => { if (live()) fillOvStatus(f, status); });
   // Only the Recent-changes list needs event ROWS, and it renders 8 of them.
   // The tiles' counts come from /api/activity (#1300), so this page never
-  // pulls row images to derive four integers.
-  api("/api/events?limit=8&order=DESC").then(
-    (d) => { if (live()) fillOvEvents(f, d, null); },
-    (err) => { console.error("events fetch failed", err); if (live()) fillOvEvents(f, null, err); });
+  // pulls row images to derive four integers. The list is read by the loop
+  // that keeps the page current, which asks first for the newest event id:
+  // read in that order, the list holds at least everything that id counts,
+  // and the next change moves the id.
+  watchOverview(f, live, firstRun);
   // A failed fetch must render the same red "unavailable" card the nil-db
   // path gets — a swallowed null would make a broken endpoint
   // indistinguishable from a console without the feature.
@@ -1588,22 +1682,47 @@ function firstRunCard(rep) {
   return card;
 }
 
-// watchFirstRun shows the first-run steps at the top of the Overview while the
-// selected server has not indexed a change, and polls until it has; then the
-// page renders again with its numbers. Only a supervisor console answers the
-// endpoint: a server with no source, the command-line server, a read-only
-// console or a session without the permission answer with an error that
-// stops the loop and draws nothing. Any other failure (a 502, a network blip,
-// an index that could not be read) tries again, so a first request that fails
-// does not hide the list for good. A list already up stays, with a note that
-// it could not be refreshed: right away when the index could not be read,
-// after three failed requests in a row otherwise. The wait between requests
-// goes 3, 6, 12, then 15 seconds, and back to 3 when the list changes.
+// watchFirstRun shows the first-run steps at the top of the Overview until a
+// snapshot exists for the selected server (#1801; the server decides, see
+// firstRunSteps), and polls while it shows. When the list completes it leaves
+// and the page is NOT rendered again: the Overview keeps its own numbers
+// current (watchOverview), and the list used to end at the first change,
+// which is also where the page stopped updating. Only a supervisor console
+// answers the endpoint: a server with no source, the command-line server, a
+// read-only console or a session without the permission answer with an error
+// that stops the loop and draws nothing. Any other failure (a 502, a network
+// blip, an index that could not be read) tries again, so a first request that
+// fails does not hide the list for good. A list already up stays, with a note
+// that it could not be refreshed: right away when the index could not be
+// read, after three failed requests in a row otherwise. The wait between
+// requests goes 3, 6, 12, then 15 seconds, and back to 3 when the list
+// changes. A hidden tab asks nothing.
+//
+// A list nothing on it can change by itself waits two minutes between asks
+// instead of fifteen seconds (firstRunSettled): every capture step done, and
+// the backup step waiting for a backup nobody here is running. Each ask reads
+// that server's backup locations, which for an S3 one is a listing over the
+// network, and a server whose operator never takes a backup would ask for as
+// long as the page is open. Rarely rather than never, because a backup can
+// appear from somewhere this page cannot see (the schedule, the command line,
+// another window), and a list that then kept saying a backup is owed would be
+// exactly the stale claim this change is about. A change landing and the tab
+// coming back still ask at once.
+//
+// Returns { poke }, which asks again now, or null when nothing is watched.
 function watchFirstRun(f, live) {
   const id = currentServer || defaultServerId;
-  if (!capsCache.monitor || !id) return;
+  if (!capsCache.monitor || !id) return null;
   let shown = false, last = "", delay = 3000, failures = 0;
-  const again = () => { setTimeout(tick, delay); delay = Math.min(delay * 2, 15000); };
+  // armed names the one timer that may still run: a poke replaces the wait
+  // instead of starting a second loop beside it. stopped is final (the list
+  // is done, or the server refuses it); settled still answers a poke.
+  let armed = 0, busy = false, stopped = false, settled = false, pokeAfter = false;
+  const arm = (ms) => { const t = ++armed; setTimeout(() => { if (t === armed) tick(); }, ms); };
+  const again = () => {
+    if (pokeAfter) { pokeAfter = false; delay = 3000; arm(0); return; }
+    arm(delay); delay = Math.min(delay * 2, 15000);
+  };
   const stale = (msg) => {
     if (!shown) return;
     const card = f.firstRunSlot.children[0];
@@ -1612,28 +1731,236 @@ function watchFirstRun(f, live) {
       el("span", { text: "Could not refresh this list: " + msg })));
   };
   const tick = () => {
-    if (!live()) return;
-    api("/api/servers/" + encodeURIComponent(id) + "/first-run").then((rep) => {
+    if (stopped || !live()) return;
+    if (document.hidden) { arm(OV_HIDDEN_MS); return; }
+    busy = true;
+    apiWithin("/api/servers/" + encodeURIComponent(id) + "/first-run", OV_REQUEST_MS).then((rep) => {
+      busy = false;
       if (!live()) return;
       if (rep && rep.check_error) { stale(rep.check_error); again(); return; }
       failures = 0;
       const card = firstRunCard(rep);
-      if (!card) { if (shown) renderRoute(); return; }
+      if (!card) { stopped = true; clear(f.firstRunSlot); return; }
       const key = JSON.stringify(rep);
       if (key !== last) delay = 3000;
       last = key;
       clear(f.firstRunSlot);
       f.firstRunSlot.append(card);
       shown = true;
-      again();
+      settled = firstRunSettled(rep);
+      if (settled) arm(OV_SETTLED_MS);
+      else again();
     }, (err) => {
+      busy = false;
       if (!live()) return;
-      if ([401, 403, 404, 409].includes(err && err.status)) return;
+      if ([401, 403, 404, 409].includes(err && err.status)) { stopped = true; return; }
       if (++failures >= 3) stale((err && err.message) || String(err));
       again();
     });
   };
   tick();
+  return {
+    poke(reason) {
+      if (stopped || !live()) return;
+      // A settled list is waiting for a backup, and a change cannot produce
+      // one: on a server being written to steadily, taking every change
+      // would put this endpoint (and its reading of the backup locations)
+      // straight back to one ask per change. The tab coming back is a person
+      // returning, so it asks; arm() replaces the pending wait rather than
+      // adding one, so repeated shows collapse into a single ask.
+      if (settled) { if (reason === "wake") arm(1000); return; }
+      if (busy) { pokeAfter = true; return; }
+      // settled is not cleared here: every answer recomputes it, and a
+      // poke's own answer is the next one.
+      delay = 3000;
+      armed++;
+      tick();
+    },
+  };
+}
+
+// firstRunSettled: nothing on this list can change without something else
+// happening first. Every step but the last is done, and the last one is
+// waiting: a step that is running or failed does change on its own (the first
+// change arrives, a stream reconnects, a backup this console started ends),
+// so those keep the list asking.
+function firstRunSettled(rep) {
+  const steps = (rep && rep.steps) || [];
+  if (!steps.length) return false;
+  return steps.every((s, i) => (i === steps.length - 1 ? s.state === "waiting" : s.state === "done"));
+}
+
+// ── Overview: keeping itself current (#1801) ─────────────────────────────────
+// The Overview used to check for news only while the Getting started list
+// showed. That list ended at the first change, so the first INSERT appeared
+// on its own and the UPDATE and DELETE after it never did until a reload.
+
+// ovHead is the Overview's heading from its latest paint. The page's loops
+// run while it is on screen, asked of the page and not of the address, the
+// same question backupsOnScreen asks (#1797).
+let ovHead = null;
+function overviewOnScreen() { return !!(ovHead && ovHead.isConnected); }
+
+const OV_TICK_MS = 5000;      // how often a visible Overview asks whether anything changed
+const OV_HIDDEN_MS = 30000;   // a hidden tab asks nothing; it checks again this often whether it is shown
+// The two expensive reads (a count over the whole index, and a coverage card
+// that lists every backup location) are rate-limited to OV_SLOW_MS while
+// changes keep arriving, and run on their own only every OV_IDLE_SLOW_MS: on
+// a server nobody is writing to, once a minute is 480 of each overnight per
+// open tab for numbers that did not move. The idle interval matches the five
+// minutes after which capture counts as stalled, so that still surfaces, and
+// the card prints the time it was read.
+const OV_SLOW_MS = 60000;
+const OV_IDLE_SLOW_MS = 300000;
+const OV_RETRY_MAX_MS = 30000;
+// How long a first-run list waiting only for a backup waits between asks.
+const OV_SETTLED_MS = 120000;
+
+// ovLive is the loop of the Overview on screen, so the tab coming back can
+// wake it at once instead of at its next turn.
+let ovLive = null;
+function ovVisibilityChanged() { if (!document.hidden && ovLive) ovLive.wake(); }
+
+// watchOverview keeps a painted Overview current. Every 5 s it asks for the
+// newest event id (GET /api/events/head, no row data), and only when that
+// moved does it read the Recent changes list and the window counts again, so
+// an Overview left open does not re-read, and audit, the same eight rows
+// every five seconds. Coverage and the all-time count are read again when
+// the first change lands on an empty index and otherwise at most once a
+// minute: a profile-restricted session records a refusal on every coverage
+// read, and the coverage card lists every backup location. A hidden tab asks
+// nothing. Three failures in a row say on the page since when it has not
+// updated, and it keeps trying, more slowly; a refusal (403, 404) says it
+// stopped and stops. The first turn runs at once and reads the list after
+// the id, which is how the paint gets its Recent changes.
+function watchOverview(f, live, firstRun) {
+  const me = {};
+  ovLive = me;
+  // head: the newest event id whose list is on screen. drawn: the list was
+  // drawn at least once, from data or with the reason it could not be read.
+  let head = null, drawn = false, armed = 0, busy = false, stopped = false, failures = 0;
+  let delay = OV_TICK_MS, slowAt = Date.now() + OV_SLOW_MS, idleSlowAt = Date.now() + OV_IDLE_SLOW_MS;
+  let okAt = nowClock(), sideOkAt = nowClock();
+  const on = () => !stopped && ovLive === me && live();
+  const arm = (ms) => { const t = ++armed; setTimeout(() => { if (t === armed) tick(); }, ms); };
+  const note = (msg) => {
+    clear(f.liveSlot);
+    if (msg) f.liveSlot.append(el("div", { class: "warn-item ov-live-note" }, icon("warn"), el("span", { text: msg })));
+  };
+  // The tiles and the table activity have reads of their own, and they fail
+  // on their own: the rows can be arriving while the counts are not. Their
+  // last good figures stay on screen, and this says they are from before,
+  // the way the coverage card does. Without it the all-time total sat there
+  // labelled as current for as long as those reads kept failing.
+  const sideNote = (msg) => {
+    clear(f.sideSlot);
+    if (msg) f.sideSlot.append(el("div", { class: "warn-item ov-side-note" }, icon("warn"),
+      el("span", { text: "The counts above could not be refreshed: " + msg + ". They are the ones read at " + sideOkAt + "." })));
+  };
+  const failed = (err) => {
+    const msg = (err && err.message) || String(err);
+    if (err && err.status === 401) { stopped = true; return; } // the sign-in gate is up
+    if (err && (err.status === 403 || err.status === 404)) {
+      stopped = true;
+      note("This page stopped updating: " + msg + ". Reload it to try again.");
+      return;
+    }
+    // Only once something has been drawn: before that the panel carries the
+    // reason itself, and during setup the index does not exist yet, so a
+    // "has not updated since" over a list whose first step reads "Creating
+    // it now" would be two voices for one state.
+    if (++failures >= 3 && drawn) note("This page has not updated since " + okAt + ": " + msg + ". Trying again.");
+    delay = Math.min(delay * 2, OV_RETRY_MAX_MS);
+  };
+  // woke: the tab was just shown again. The Getting started list is asked
+  // again once per turn, after the id, whether the turn was a wake or a
+  // change: asking for both at once sent two identical requests.
+  const pull = async (woke) => {
+    busy = true;
+    // What the Getting started list is asked for at the end of the turn: a
+    // change, or the tab coming back. A list waiting only for a backup takes
+    // the second and not the first (watchFirstRun).
+    let askList = woke ? "wake" : "";
+    try {
+      let next, headErr = null;
+      try { next = (await apiWithin("/api/events/head", OV_REQUEST_MS)).newest_event_id; } catch (err) { headErr = err; }
+      if (!on()) return;
+      if (headErr && drawn) { failed(headErr); return; }
+      const prev = head;
+      // Until the list is drawn it is read whatever the id said, so the
+      // panel shows the rows or why they could not be read, as the paint
+      // always did.
+      if (headErr || next !== head) {
+        let d;
+        try { d = await apiWithin("/api/events?limit=8&order=DESC", OV_REQUEST_MS); } catch (err) {
+          if (!on()) return;
+          console.error("events fetch failed", err);
+          // A later failure keeps the rows on screen and counts as a failed
+          // refresh.
+          if (!drawn) fillOvEvents(f, null, err);
+          failed(headErr || err);
+          return;
+        }
+        if (!on()) return;
+        fillOvEvents(f, d, null);
+        drawn = true;
+        if (headErr) { failed(headErr); return; }
+        head = next;
+      }
+      failures = 0; delay = OV_TICK_MS; okAt = nowClock();
+      note("");
+      // The paint read everything else a moment ago.
+      if (prev === null) return;
+      const changed = next !== prev;
+      const now = Date.now();
+      if (changed) {
+        askList = "change";
+        apiWithin("/api/activity", OV_REQUEST_MS).then((a) => {
+          if (!on()) return;
+          if (a) { fillOvActivity(f, a); sideOkAt = nowClock(); sideNote(""); }
+        }, (err) => { console.error("activity refresh failed", err); if (on()) sideNote((err && err.message) || String(err)); });
+      }
+      // The two expensive reads: on the first change to an index that had
+      // none (the window goes from "nothing to restore" to a real one), and
+      // otherwise rate-limited while changes arrive, on a long interval when
+      // nothing is.
+      if ((changed && !prev) || (changed && now >= slowAt) || now >= idleSlowAt) {
+        slowAt = now + OV_SLOW_MS;
+        idleSlowAt = now + OV_IDLE_SLOW_MS;
+        apiWithin("/api/status", OV_REQUEST_MS).then((st) => {
+          if (!on()) return;
+          if (st) { fillOvStatus(f, st); sideOkAt = nowClock(); sideNote(""); }
+        }, (err) => { console.error("status refresh failed", err); if (on()) sideNote((err && err.message) || String(err)); });
+        apiWithin("/api/coverage", OV_REQUEST_MS).then((c) => { if (on()) fillOvCoverage(f, c); }, (err) => {
+          console.error("coverage refresh failed", err);
+          // The card keeps its numbers and says they are from before, the
+          // way its own refresh button does. From THIS paint's fill, never
+          // the module-wide one, which belongs to whichever Overview filled
+          // it last.
+          if (on() && f.covLast) { clear(f.covSlot); f.covSlot.append(covCard(f.covLast.data, { at: f.covLast.at, error: true })); }
+        });
+      }
+    } finally {
+      busy = false;
+      if (on() && askList && firstRun) firstRun.poke(askList === "wake" ? "wake" : "change");
+      if (on()) arm(document.hidden ? OV_HIDDEN_MS : delay);
+    }
+  };
+  const tick = () => {
+    if (!on()) return;
+    if (document.hidden) { arm(OV_HIDDEN_MS); return; }
+    pull();
+  };
+  me.wake = () => {
+    if (!on()) return;
+    // A turn already on its way ends by arming the next one; only the list,
+    // which a hidden tab left waiting, is asked now.
+    if (busy) { if (firstRun) firstRun.poke("wake"); return; }
+    armed++;
+    pull(true);
+  };
+  pull();
+  return me;
 }
 
 // ── Overview: tables left out of capture (#1802) ─────────────────────────────
@@ -1816,9 +2143,11 @@ function ovEventRow(e) {
   tbl.append(el("span", { class: "ov-ev-pk", text: "#" + e.pk_values }));
   row.append(tbl);
   row.append(el("span", { class: "ov-ev-cols" }, ...colsSummary(e.changed_columns, false)));
-  const undo = el("button", { class: "btn btn-sm ov-ev-undo", type: "button", text: "Undo",
+  const undo = el("button", { class: "btn btn-sm ov-ev-undo", type: "button", text: "Undo", "data-anchor": e.anchor,
     onclick: (ev) => { ev.stopPropagation(); undoEvent(e); } });
   row.append(undo);
+  // fillOvEvents moves the focus back to this button after a refresh.
+  row.undoButton = undo;
   return row;
 }
 
@@ -4417,7 +4746,10 @@ async function renderSnapshots() {
   const [dumpSt, restoreSt, sqlSt] = await Promise.all([
     (capsCache.baseline_trigger && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline").catch(() => null) : null,
     (capsCache.baseline_restore && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline/restore").catch(() => null) : null,
-    (capsCache.sql_export && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/sql-export").catch(() => null) : null,
+    // asErr, not a swallow: the .sql build's outcome appears in exactly one
+    // place on this page, so a failed status read has to reach the panel as
+    // a failure rather than as "no build has ever run here".
+    (capsCache.sql_export && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/sql-export").catch(asErr) : null,
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   try {
@@ -4507,14 +4839,17 @@ async function renderSnapshots() {
     if (drawChecks) {
       if (moved && beside && movedTo === "checks") v.append(moved);
       v.append(snapshotSection("Checks", "checks"));
-      // The verify guide. It lost its only link when the three page headers
-      // became one (#1573) — the header now opens the backup-strategy guide
-      // — and a page nothing links to also stops being fetched by the daily
-      // link check, so the site could move it and nobody would know.
-      v.append(docsMore("guides/verify", "", "what each check proves"));
       // Three regions with visible separation (#1419): what you can run,
       // what is running or just ran, what ran before.
-      part("Checks", () => verifyRegions(servers, { serversErr: serversErr }).forEach((region) => v.append(region)));
+      part("Checks", () => {
+        verifyRegions(servers, { serversErr: serversErr }).forEach((region) => v.append(region));
+        // The verify guide, AFTER the section it describes: it lost its only
+        // link when the three page headers became one (#1573) — the header
+        // now opens the backup-strategy guide — and a page nothing links to
+        // also stops being fetched by the daily link check, so the site
+        // could move it and nobody would know.
+        v.append(docsMore("guides/verify", "", "what each check proves"));
+      });
     }
     // Where and how often — the schedule (#1442) first, because it is what
     // makes the list above keep growing on its own and a failed scheduled
@@ -7351,7 +7686,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   card.append(state);
   const body = el("div", { class: "bk-card-body" });
   body.append(el("p", { class: "form-hint", text:
-    "Pick a past moment. DBTrail rebuilds every table as it was then, from your backups plus the recorded changes, and saves the result as a new backup in the list below. Your database is not touched." }));
+    "Pick a past moment. DBTrail rebuilds every table as it was then and saves the result as a new snapshot below. Your database is not touched." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
@@ -7417,19 +7752,122 @@ async function startBackupRestore(id, at, btn, msgEl) {
 // the views file — so that lane downloads both. MySQL takes one file that does not exist until you
 // pick a moment, so that lane asks for the moment. Dressing them as a
 // matched pair would be a lie about the work each one is.
+// The .sql build states that owe the reader nothing, and so leave the
+// take-away fold closed on arrival. Everything else — including a state this
+// build has never heard of — opens it. See backupTakeAway.
+const SQL_EXPORT_QUIET = new Set(["idle", "downloaded", "expired"]);
+// Every state the daemon documents today (BaselineStatus). Used only to name
+// one it does not, which the lane below has no branch to show.
+const SQL_EXPORT_KNOWN = new Set(["idle", "running", "succeeded", "failed", "downloaded", "expired"]);
+
 function backupTakeAway(cur, b, sqlSt) {
   const duck = backupDuckLane(b);
   const sql = backupSQLLane(cur, b, sqlSt);
   if (!duck && !sql) return null;
-  const panel = el("section", { class: "ov-panel bk-take" });
-  panel.append(el("div", { class: "ov-panel-head" },
-    el("h2", { class: "ov-panel-title", text: "Take a copy with you" })));
+  // FOLDED (#1573). Measured on this page with a real snapshot, these two
+  // lanes explaining file formats were most of the words visible at first
+  // sight (the e2e prints the live count) — the answer to "what do I download", which is not the question
+  // the page is opened with. Folded, the same answer is one click away and
+  // the list of copies starts on the first screen.
+  //
+  // It opens ITSELF whenever the .sql build has anything owed to the reader.
+  // A build nobody is watching must never be hidden behind a fold — that is
+  // the failure this page exists to prevent, one level down. This is the
+  // ONLY place on the page a build's outcome appears, so the rule below is
+  // load-bearing rather than cosmetic.
+  //
+  // Which is why it names the states that keep it CLOSED rather than the
+  // ones that open it (an empty state included: that is unknown too). The documented set is closed today — BaselineStatus
+  // in baseline_trigger.go lists six, and the lane below has a branch for
+  // each — so this guards the day it stops being closed: a state added
+  // server-side before the frontend learns it is far likelier to be a new
+  // way of failing than a new kind of nothing. An allow-list would hide that
+  // one by default. Opening is not enough on its own, though: the lane has
+  // no branch for a state it does not know and draws a plain build form, so
+  // the panel also names the state below. (What such an addition looks
+  // like already exists one endpoint over: `replaced` is a real state on the
+  // Storage page's own DTO, produced in consoleapp/sql_export.go, and it can
+  // NOT reach this code — do not read the guard as being about that value.)
+  // A Set rather than an object literal costs nothing and avoids `state`
+  // values like "constructor" answering truthy through the prototype.
+  //
+  // Beyond the state, two more things open it, and both only when the MySQL
+  // lane is actually drawn: that lane is where a build's outcome and its
+  // staging problem are shown, so without it there is nothing the fold could
+  // be hiding. That gate is not decoration. On the command-line server's
+  // entry the lane is never drawn (builds run on registry servers only), and
+  // its status endpoint answers 409 — counted, that opened the fold on every
+  // visit with a red line about a build that cannot exist there.
+  //
+  //   staging_error is composed independently of state (the daemon folds in
+  //   every orphan it could not delete, and consoleapp/sql_export.go says in
+  //   as many words that clearing one never erases the other). So a build
+  //   that was downloaded — a quiet state — can carry a red line saying the
+  //   daemon cannot clear staged full dumps off its own disk, the disk
+  //   capture shares.
+  //
+  //   An unreadable status is the case we know LEAST about, and hiding it
+  //   would invert the reasoning above.
+  //
+  // "expired" stays quiet, but it is not silent. It means the build is gone
+  // without being downloaded (a downloaded build is "downloaded"), by one of
+  // two routes in consoleapp/sql_export.go: its deadline passed, or its
+  // files were removed from under it (the staging root defaults to the
+  // system temp directory, which some hosts clean). The summary line names
+  // both, so a reader who started one and came back learns it is gone, and
+  // one whose host keeps eating builds is not sent to rebuild into the same
+  // hole, without the panel sitting open on every visit until the next
+  // build.
+  //
+  // What the READER opened stays open across the repaints this page does on
+  // its own (kept outside the node, like the verify help's). A <details>
+  // created with `open` fires one toggle event for that creation, and
+  // recording it latched every automatic open as the reader's choice, so the
+  // panel stayed open for the rest of the tab. That one event is skipped;
+  // every later toggle is recorded. Toggle rather than a click on the
+  // summary, because the browser also opens a fold by itself for
+  // find-in-page and text-fragment links, and a click listener missed those:
+  // the next repaint shut the panel under the reader. A loud state still
+  // re-opens a panel the reader closed, since the one thing this fold may
+  // never do is hide an outcome.
+  const st = sqlSt && sqlSt.sql_export;
+  const stErr = sql && sqlSt && sqlSt.error;
+  const owed = !!(sql && st && (!SQL_EXPORT_QUIET.has(st.state || "") || st.staging_error)) || !!stErr;
+  const panel = el("details", { class: "ov-panel bk-take", open: owed || takeAwayOpen || null });
+  const summary = el("summary", { class: "ov-panel-head bk-take-sum" },
+    el("h2", { class: "ov-panel-title", text: "Take a copy with you" }));
+  if (sql && st && st.state === "expired") {
+    summary.append(el("span", { class: "bk-take-note", text: "The last .sql copy is gone: nobody downloaded it before its deadline, or its files were removed." }));
+  }
+  let creation = !!panel.open;
+  panel.addEventListener("toggle", () => {
+    if (creation) { creation = false; return; }
+    takeAwayOpen = !!panel.open;
+  });
+  panel.append(summary);
+  // Said out loud, and above the lanes it qualifies, rather than rendered as
+  // a build form with nothing in it: every state branch in the lane reads
+  // `st`, so an unreadable status drew the same thing as "no build has ever
+  // run here".
+  if (stErr) {
+    panel.append(el("p", { class: "form-msg err", text:
+      "The state of the .sql build could not be read: " + String(stErr).replace(/[.\s]+$/, "") +
+      ". A build may be running or finished that this page cannot show, so Build is off until it can be read." }));
+  } else if (sql && st && st.state && !SQL_EXPORT_KNOWN.has(st.state)) {
+    panel.append(el("p", { class: "form-msg err", text:
+      "The last .sql build reports a state this console does not recognise: " + st.state + ". Update the console, or check the daemon's log." }));
+  }
   const lanes = el("div", { class: "bk-lanes" });
   if (duck) lanes.append(duck);
   if (sql) lanes.append(sql);
   panel.append(lanes);
   return panel;
 }
+
+// Whether the reader opened the take-away panel themselves. Outside the node
+// for the reason vfyHelpOpen is: the repaints this page does on its own
+// replace the <details> that would have held it. See backupTakeAway.
+let takeAwayOpen = false;
 
 // backupFilesShape draws the count instead of stating it: on the DuckDB lane
 // two tiles when the server can make the views file and one when it cannot,
@@ -7646,6 +8084,11 @@ function backupSQLLane(cur, b, sqlSt) {
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   go.onclick = () => startSQLExport(cur.id, input.value.trim(), go, msg);
+  // With the status unreadable this lane cannot see a finished build, and a
+  // new build REPLACES a finished one: the daemon refuses only while one is
+  // running. One click here would delete a ready copy the reader cannot see.
+  // backupTakeAway says why the button is off.
+  if (sqlSt && sqlSt.error) go.disabled = true;
   body.append(el("div", { class: "bk-restore-row" }, input, go), msg);
   if (b.kind === "dir") {
     const elsewhere = backupElsewhereNote(b, usable, reads);
@@ -7810,16 +8253,27 @@ function verifyRegions(servers, opts) {
   // recover-inputs check reads only the index, so it stays runnable on a
   // server with no baseline configured.
   const help = el("p", { class: "form-hint vfy-modehelp" });
+  // The mode help is a FOLD since #1573. Open on arrival it was the largest
+  // block left on the first screen — an explanation of a check nobody asked
+  // for yet, on the screen whose job is "what copies do I have". Closed it
+  // costs its four-word summary, and it opens BY ITSELF the moment the reader browses the picker, which
+  // is the moment #1418 wrote it for. The text still swaps while closed, so
+  // whoever opens it afterwards reads the mode that is selected now.
+  const helpFold = el("details", { class: "vfy-helpfold", open: vfyHelpOpen || null },
+    el("summary", { class: "form-hint vfy-helpsum", text: "What this check proves" }), help);
+  helpFold.addEventListener("toggle", () => { vfyHelpOpen = !!helpFold.open; });
   const updateMode = () => {
     const live = vfyLive.get(cur.id);
     btn.disabled = (!!live && live.state === "running") || (!configured && modeSel.value !== "recover-inputs");
     help.textContent = VFY_MODE_HELP[modeSel.value] || "";
   };
-  modeSel.onchange = updateMode;
+  // Browsing the picker opens the help; vfyHelpOpen carries that (and a
+  // later close by hand) across the repaints this page does on its own.
+  modeSel.onchange = () => { vfyHelpOpen = true; helpFold.open = true; updateMode(); };
   updateMode();
   btn.onclick = () => createVerify(cur.id, modeSel.value);
   control.append(el("div", { class: "vfy-actions" }, modeSel, btn));
-  control.append(help);
+  control.append(helpFold);
   if (!configured) {
     control.append(el("p", { class: "form-hint", text:
       "No backup set up for this server yet. The two snapshot modes need one (set one under Where and how often, then create at least two snapshots). \"Check recovery inputs\" works without one: it only reads the index." }));
@@ -7890,6 +8344,12 @@ const vfyFollowing = new Map();
 const vfyAnnounce = new Set();
 let vfyView = null;
 let vfyEpoch = 0;
+// Whether the mode help is open, kept out of the box for the same reason the
+// run state is: this page repaints on its own (a job settling, a server
+// switch, a page of the list), and a fold whose state lived in the node it
+// replaces would close under a reader mid-sentence. One flag, not one per
+// server — it is a reading preference, not a fact about a server.
+let vfyHelpOpen = false;
 
 // vfyDraw draws a server's state into a view: the box, and the button busy
 // while a run goes or back to what the chosen mode allows.
@@ -11097,6 +11557,8 @@ async function init() {
   // must not also dismiss an error notice behind it, and only the capture phase
   // still sees that the dialog was open.
   document.addEventListener("keydown", toastEscape, true);
+  // A tab shown again brings the Overview up to date at once (#1801).
+  document.addEventListener("visibilitychange", ovVisibilityChanged);
 
   // Sidebar nav (real hrefs upgraded to in-place swaps). A manual nav starts
   // fresh — clear any carried "Undo" context so the sidebar's Recover link

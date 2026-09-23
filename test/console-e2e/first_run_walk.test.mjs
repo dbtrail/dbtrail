@@ -766,3 +766,51 @@ describe("first-run-walk.sh without Docker", () => {
     assert.match(r.stdout + r.stderr, /SKIPPED/);
   });
 });
+
+// ── the committed baseline agrees with its own evidence ────────────────────
+// The evidence block exists so a reviewer can see WHERE a number came from,
+// and compareRatchet reads it only when it is a string (the not-measurable
+// reason), so a number and the evidence under it can drift apart and every
+// run stays green. That is not theoretical: the first PR to lower a column
+// left `banned_words: 101` over a per-word map still summing to 114, and
+// `changes_visible_without_reload: 3` over a list reading "UPDATE: not seen".
+// An evidence block that contradicts its number is worse than none, because
+// it is read as the proof.
+//
+// The identities below are structural: each one keys off a shape the file
+// actually carries, and is checked wherever that shape appears, in any run
+// and any column. A new run inherits them; a column with no evidence is not
+// invented.
+describe("the committed baseline agrees with its own evidence", () => {
+  const baseline = loadBaseline(path.join(HERE, "first_run_baseline.json"));
+  // Each identity: the evidence field it reads, and the count it must equal.
+  const identities = {
+    // Every banned word counted, per word, has to add up to the total.
+    per_word: (m) => Object.values(m).reduce((a, b) => a + b, 0),
+    // One entry per click walked.
+    clicks: (a) => a.length,
+    // "INSERT: seen after 4.3 s" counts, "UPDATE: not seen" does not.
+    changes: (a) => a.filter((c) => /:\s*seen\b/.test(c)).length,
+  };
+  const found = [];
+  for (const [run, cols] of Object.entries(baseline.evidence || {})) {
+    for (const [col, ev] of Object.entries(cols || {})) {
+      if (!ev || typeof ev !== "object") continue;
+      for (const [field, count] of Object.entries(identities)) {
+        if (!(field in ev)) continue;
+        found.push({ run, col, field, count: count(ev[field]), value: baseline.runs[run] && baseline.runs[run][col] });
+      }
+    }
+  }
+  test("every number with countable evidence is checked", () => {
+    // A guard that found nothing to check would pass for ever in silence.
+    assert.ok(found.length >= 3, "no countable evidence found at all: " + JSON.stringify(found));
+  });
+  for (const f of found) {
+    test(`${f.run}.${f.col}: its ${f.field} evidence counts ${f.value}`, () => {
+      assert.equal(f.count, f.value,
+        `${f.run}.${f.col} is recorded as ${f.value} but its ${f.field} evidence counts ${f.count}; ` +
+        "refresh the evidence from the same run that produced the number, or the evidence is read as a proof of something that did not happen");
+    });
+  }
+});

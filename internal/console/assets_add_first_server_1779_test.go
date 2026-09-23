@@ -35,7 +35,9 @@ const openServersModal = () => calls.push("open");
 const showServerForm = (p) => calls.push("form:" + p);
 const watchFirstRun = () => calls.push("watch");
 const loadOvUncaptured = () => {};
-let serverGen = 0, viewGen = 0, serversEmpty, capsCache;
+const watchOverview = () => calls.push("live");
+const overviewOnScreen = () => true;
+let serverGen = 0, viewGen = 0, serversEmpty, capsCache, ovHead;
 let slot;
 const ovFrame = () => ({ firstRunSlot: slot = { kids: [], append(...k) { this.kids.push(...k); } } });
 const find = (n, id) => n && (n.attrs && n.attrs.id === id ? n : (n.kids || []).map((k) => find(k, id)).find(Boolean));
@@ -46,7 +48,7 @@ for (const empty of [true, false]) for (const monitor of [true, false]) {
   calls.length = 0;
   renderOverview();
   const btn = find({ kids: slot.kids }, "ov-add-server");
-  const r = { card: !!btn, watch: calls.includes("watch") };
+  const r = { card: !!btn, watch: calls.includes("watch"), live: calls.includes("live") };
   if (btn) { calls.length = 0; btn.attrs.onclick(); r.click = calls.slice(); r.label = btn.attrs.text; }
   out[(empty ? "empty" : "listed") + "/" + (monitor ? "monitor" : "readonly")] = r;
 }
@@ -63,6 +65,7 @@ console.log(JSON.stringify(out));
 	var got map[string]struct {
 		Card  bool     `json:"card"`
 		Watch bool     `json:"watch"`
+		Live  bool     `json:"live"`
 		Click []string `json:"click"`
 		Label string   `json:"label"`
 	}
@@ -82,6 +85,13 @@ console.log(JSON.stringify(out));
 	}
 	if first.Watch {
 		t.Error("the Getting started poll also started, for a server that does not exist")
+	}
+	// The page keeps itself current (#1801) in all four: with no server listed
+	// it shows the command-line index, which can gain changes too.
+	for k, r := range got {
+		if !r.Live {
+			t.Errorf("%s: the Overview does not keep itself current", k)
+		}
 	}
 	for _, k := range []string{"empty/readonly", "listed/monitor", "listed/readonly"} {
 		if got[k].Card {

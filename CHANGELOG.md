@@ -57,6 +57,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Backups page" or "the Backup settings page" now name Snapshots, and the one
   that pointed at a DuckDB schema download names Connect AI, where that card
   has lived since the same redesign.
+- **The Snapshots page opens on the copies you have, not on an explanation**
+  (#1573). Merging three pages into one left 189 words on the first screen
+  of `/snapshots` for a server with one snapshot, most of them explaining
+  the two download formats. It is now 112, with a browser test that fails if
+  a change pushes it past 150. Two explanations were folded rather than
+  removed, "Take a copy with you" and "What this check proves", and the
+  restore card's paragraph was shortened. The download panel opens by itself
+  whenever there is something to act on: a `.sql` build running, waiting to
+  be downloaded or failed, a problem clearing its files off the disk, a build
+  status that could not be read, or a state this console does not recognise.
+  A build that expired before anyone downloaded it is said on the panel's
+  own line without opening it. The check help opens the moment you choose a
+  different kind of check. Either panel, once you open it yourself, stays
+  open when the page redraws itself.
 - **Reusing the file of a table that did not change is always on, and the
   console no longer asks** (#1681). A backup that finds a table with no
   changes in its window publishes that table's previous Parquet file instead
@@ -134,6 +148,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newest, so a run can take longer and read more from the Parquet archives.
 
 ### Fixed
+- **The Overview keeps itself up to date after the first change** (#1801).
+  It only re-checked while the Getting started list was showing, and that
+  list ended at the first change: on a walk of a fresh install the first
+  INSERT appeared on its own after 5.3 s and the UPDATE and DELETE after it
+  never appeared at all, until the page was reloaded. The Overview now asks
+  every five seconds whether the index gained a change, through a new
+  `GET /api/events/head` that carries no row data, and re-reads the recent
+  changes, the window counts and (at most once a minute) the coverage card
+  only when it did. A hidden tab asks nothing and catches up when it is shown
+  again. Nothing is repainted: the cards fill in place, the address does not
+  change, and a keyboard focus on an Undo button survives a newer change
+  landing above it, and an unchanged Activity panel is left alone rather than
+  torn down and rebuilt every five seconds. Each request the page makes on
+  its own carries a deadline, so a locked table or an index host that went
+  away ends as a refusal it reports rather than a page frozen mid-refresh
+  with stale rows and no sign of it: a locked `binlog_events` now shows
+  "This page has not updated since 11:53:34 UTC: the index did not answer
+  within 5s; it may be locked by another statement, or its server may be
+  unreachable", where before the request waited on MySQL's `lock_wait_timeout`,
+  which defaults to a year. A refresh that keeps failing says on the
+  page since when it has not updated and keeps trying; one the server refuses
+  says the page stopped updating and stops; and figures whose own read failed
+  stay on screen saying they are the ones from before. The two expensive
+  reads (the all-time count, and the coverage card that lists every backup
+  location) are limited to once a minute while changes arrive and every five
+  minutes when none do, instead of once a minute on an idle page for ever.
+- **Undo is on every row of the Overview, without the mouse** (#1801). It was
+  invisible until the pointer was over its row (and on keyboard focus), so
+  the one action the list offers could not be seen at all.
+- **The Getting started list stays until a backup exists** (#1801). It left
+  at the first captured change and took its "Take the first backup" step with
+  it, after which nothing on the Overview mentioned backups. It now ends when
+  a backup exists for that server, whoever made it: the server reads that
+  server's own backup locations, so one taken before a restart or from the
+  command line counts, a location that cannot be read is said on the step
+  instead of counting as "no backup". A backup step that failed is not a done
+  one, so it keeps the list up: a backup that failed last night on a server
+  backed up last week now says so, where an older backup used to tick the
+  step and take the error away with it. A capture step that failed does not
+  keep it up, so a list somebody has finished with never comes back days
+  later; a stream that dies is reported by the Overview's own note that it
+  stopped updating, and capture failing before any backup exists keeps the
+  list by the same plain rule. A backup running, or one that failed, also outranks an older backup, so
+  the list follows the run it can see. Each server's backup locations are
+  read at most once a minute for a sequence of asks (a reuse window, not a
+  lock: two tabs asking at once can both miss it and both read), and while
+  the list waits on the backup step alone it asks every two minutes rather
+  than every fifteen seconds: for an S3 location a read is a listing over the
+  network. A change landing does not shorten that wait (a change cannot
+  produce a backup), the tab coming back does.
+- **A quiet server no longer reads as capture falling behind** (#1794, the
+  wording half). A source nobody had written to for an hour showed an amber
+  `capture lag 4445s` and a line naming a Prometheus metric the web interface
+  gives no way to read. The chip now says how long ago the last captured
+  change was, in plain hours and minutes ("last change 1h 14m ago"), neutral
+  while capture is idle, green while it keeps up and red while it is stalled;
+  the line reads "Nothing captured for 1h 14m. Either nothing changed on this
+  server, or capture fell behind, and this page cannot tell which." Asking
+  the source which of the two it is stays out of this change.
 - **A DROP or RENAME of several tables records every one of them.** Capture
   recorded only the first table a statement named, so after `DROP TABLE tmp,
   orders` or `RENAME TABLE orders_new TO orders`, the checks that refuse a
