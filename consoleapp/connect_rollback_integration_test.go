@@ -98,7 +98,9 @@ func TestIntegrationConnectCheck_aFailedCheckLeavesNothingBehind(t *testing.T) {
 		t.Fatalf("code=%d body=%v", code, out)
 	}
 	if out["ok"] == true || out["started"] == true {
-		t.Fatalf("a table without a key must refuse the whole server at setup: %v", out)
+		// Errorf, not Fatalf: the assertions below are the promise itself and
+		// must each report even when this one already failed.
+		t.Errorf("a table without a key must refuse the whole server at setup (ok=%v started=%v)", out["ok"], out["started"])
 	}
 	// It refused for the reason the fixture is built around, not for some
 	// unrelated check this test did not mean to exercise.
