@@ -12,8 +12,10 @@ import (
 // TestIcebergPanelLivesOnConnect (#1573): the Iceberg export panel is on
 // Connect AI, built from where the selected server's snapshots live
 // (GET /api/baselines?location_only=1, no walk of the storage). A session that
-// may not read settings, or under a data profile, is not made to ask, since
-// the server would refuse it on every open; no location or a refusal means no
+// may not read the server, or under a data profile, is not made to ask, since
+// the server would refuse it on every open; the gated permission is the one
+// that route takes (servers:read), so a session that HOLDS it is never shown
+// a panel whose location lookup then 403s; no location or a refusal means no
 // panel, but any other failure says so, so a missing panel never reads as "no
 // backups"; the rest of the page renders either way, and a page the reader
 // left while the requests were out is not painted.
@@ -82,7 +84,7 @@ const where = { configured: true, source: "/data/baselines", kind: "dir" };
   out.s3 = await run({}, { configured: true, source: "s3://bkt/base", kind: "s3", snapshots: [] });
   out.none = await run({}, { configured: false, snapshots: [] });
   out.refused = await run({}, Object.assign(new Error("backup listings are unavailable while an access-control profile is active"), { status: 403 }));
-  out.noPerm = await run({ "settings:read": false }, { configured: true, source: "/data/baselines", kind: "dir", snapshots: [] });
+  out.noPerm = await run({ "servers:read": false }, { configured: true, source: "/data/baselines", kind: "dir", snapshots: [] });
   out.profile = await run({}, where, { data_profile: true });
   out.failed = await run({}, Object.assign(new Error("server error"), { status: 500 }));
   out.network = await run({}, new Error("Failed to fetch"));
@@ -170,7 +172,7 @@ const where = { configured: true, source: "/data/baselines", kind: "dir" };
 			t.Errorf("%s: panel %v, note %v, page drawn %v; want no panel, no note, and the rest of Connect drawn", name, r.Panel, r.Note, r.Page)
 		}
 	}
-	for name, r := range map[string]result{"no settings:read": got.NoPerm, "a data profile": got.Profile} {
+	for name, r := range map[string]result{"no servers:read": got.NoPerm, "a data profile": got.Profile} {
 		if asksLocation(r) || r.Panel || r.Note || !r.Page {
 			t.Errorf("%s: asked %q, panel %v, note %v, page %v; want nothing asked, no panel or note, the page drawn",
 				name, r.Asked, r.Panel, r.Note, r.Page)

@@ -380,3 +380,85 @@ func TestFirstRunRouteIsARead(t *testing.T) {
 		t.Fatalf("permForRoute = %q, %v; want %q", p, ok, ext.PermServersRead)
 	}
 }
+
+// snapshotListingRoutes are the two snapshot-listing reads that sit on the
+// read-only floor: listing a server's snapshots is a read about that server,
+// not console administration. The DOWNLOAD is deliberately not among them —
+// see TestSnapshotDownloadStaysOnTheRowDataTier.
+var snapshotListingRoutes = []string{"/api/baselines", "/api/baselines/files"}
+
+// TestSnapshotListingIsAServerRead pins the tier itself: whoever may create a
+// snapshot must be able to see it, so both listings resolve to servers:read.
+// A plain table lookup, so a half-revert of either row fails here first.
+func TestSnapshotListingIsAServerRead(t *testing.T) {
+	for _, path := range snapshotListingRoutes {
+		p, ok := permForRoute("GET", path)
+		if !ok || p != ext.PermServersRead {
+			t.Errorf("permForRoute(GET, %q) = (%q,%v), want (%q,true)", path, p, ok, ext.PermServersRead)
+		}
+	}
+}
+
+// TestSnapshotDownloadStaysOnTheRowDataTier pins the line the listings must not
+// drag with them: the download is a full unredacted copy of every baseline row,
+// so it keeps query:execute. A blanket move of the /api/baselines prefix would
+// turn the read-only floor into a data-exfiltration path, and this is what
+// notices.
+func TestSnapshotDownloadStaysOnTheRowDataTier(t *testing.T) {
+	if p, ok := permForRoute("GET", "/api/baselines/download"); !ok || p != ext.PermQueryExecute {
+		t.Errorf("permForRoute(GET, /api/baselines/download) = (%q,%v), want (%q,true)", p, ok, ext.PermQueryExecute)
+	}
+	// Backup SETTINGS are administration and stay there: the listing moved, the
+	// settings surface it used to share a tier with did not.
+	if p, ok := permForRoute("GET", "/api/backup-settings"); !ok || p != ext.PermSettingsRead {
+		t.Errorf("permForRoute(GET, /api/backup-settings) = (%q,%v), want (%q,true)", p, ok, ext.PermSettingsRead)
+	}
+}
+
+// TestSnapshotListingEnforcedForScopedSessions drives the real middleware, both
+// directions. The move is a SWAP, not a widening: a servers:read session now
+// reaches the listings, and a settings:read-only session — which reached them
+// before — is refused with the missing permission named. Asserting only the
+// first half would let a half-revert (both permissions accepted) pass.
+func TestSnapshotListingEnforcedForScopedSessions(t *testing.T) {
+	srv := &Server{}
+	reached := false
+	h := srv.authzMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	serve := func(pol *ext.AccessPolicy, path string) *httptest.ResponseRecorder {
+		reached = false
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil).WithContext(withPolicy(pol)))
+		return rec
+	}
+
+	viewer := &ext.AccessPolicy{Permissions: []ext.Permission{ext.PermServersRead}}
+	admin := &ext.AccessPolicy{Permissions: []ext.Permission{ext.PermSettingsRead}}
+	for _, path := range snapshotListingRoutes {
+		if rec := serve(viewer, path); !reached || rec.Code != http.StatusNoContent {
+			t.Errorf("servers:read-only GET %s: reached=%v code=%d, want allowed", path, reached, rec.Code)
+		}
+		rec := serve(admin, path)
+		if reached {
+			t.Errorf("settings:read-only session reached the %s handler; the listing is servers:read now", path)
+		}
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("settings:read-only GET %s = %d, want 403", path, rec.Code)
+			continue
+		}
+		if !strings.Contains(rec.Body.String(), string(ext.PermServersRead)) {
+			t.Errorf("403 body %q does not name the missing permission %q", rec.Body.String(), ext.PermServersRead)
+		}
+	}
+
+	// A session holding neither is refused too — the floor is a permission, not
+	// the absence of an administrative one.
+	stranger := &ext.AccessPolicy{Permissions: []ext.Permission{ext.PermStatusRead}}
+	for _, path := range snapshotListingRoutes {
+		if rec := serve(stranger, path); reached || rec.Code != http.StatusForbidden {
+			t.Errorf("status:read-only GET %s: reached=%v code=%d, want 403", path, reached, rec.Code)
+		}
+	}
+}

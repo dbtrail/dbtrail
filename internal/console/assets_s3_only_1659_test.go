@@ -56,7 +56,13 @@ func TestS3OnlyBackupWarning_1659(t *testing.T) {
 		functionBody(t, js, "const BACKUP_WHY_REMEDY = {"),
 		functionBody(t, js, "function backupFoldError("),
 		functionBody(t, js, "function backupWhyLine("),
+		// The remedy is shown only to a session that can act on it (#1573
+		// step 7). A full-access session is the case pinned here: no
+		// permission map, so every permission reads as held.
+		functionBody(t, js, "function sessionMay("),
+		functionBody(t, js, "function sessionMayConfigureServer("),
 	}, "\n") + `
+var capsCache = {};
 const lines = [];
 const el = (tag, o) => ({ class: o.class, text: o.text });
 function nextRun(sch) {

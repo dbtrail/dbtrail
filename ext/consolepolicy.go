@@ -29,16 +29,21 @@ const (
 	// PermBaselineCreate — trigger operator maintenance actions that write no
 	// customer data but change server state (baseline snapshots, verify runs).
 	PermBaselineCreate Permission = "baseline:create"
-	// PermServersRead — read the server registry and per-server status.
+	// PermServersRead — read the server registry and per-server status, which
+	// includes listing the snapshots taken of a server: what copies exist is a
+	// read about that server, not console administration. Listing them is on
+	// this floor; DOWNLOADING one serves unredacted rows and needs
+	// PermQueryExecute instead.
 	PermServersRead Permission = "servers:read"
 	// PermServersWrite — mutate the server registry and control-plane state
 	// (create/update entries, start/stop monitoring, rotation override).
 	PermServersWrite Permission = "servers:write"
 	// PermServersDelete — remove a server registry entry.
 	PermServersDelete Permission = "servers:delete"
-	// PermSettingsRead — reach the settings/administration surfaces (storage and
-	// baseline listings, telemetry opt-out, the managed MCP token) and READ an
-	// installed settings panel's data routes.
+	// PermSettingsRead — reach the settings/administration surfaces (the storage
+	// listing, the backup settings, telemetry opt-out, the managed MCP token) and
+	// READ an installed settings panel's data routes. It does NOT carry the
+	// snapshot listings; those are a read about a server — see PermServersRead.
 	PermSettingsRead Permission = "settings:read"
 	// PermSettingsWrite — MUTATE through a settings surface. Split from
 	// PermSettingsRead because an administration panel (ConsoleSettingsProvider)

@@ -22,6 +22,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and its + Add server opens the add form directly.
 
 ### Changed
+- **Listing a server's snapshots needs `servers:read`, not `settings:read`.**
+  Whoever may create a snapshot has to be able to see the one they created,
+  and asking what copies of a server exist is a read about that server rather
+  than console administration. `GET /api/baselines` and
+  `GET /api/baselines/files` join the read-only floor, where the status of a
+  server's snapshot, restore and check jobs already sat. Operators with
+  per-session roles may need to act: this is a swap, not a widening, so a role
+  holding `settings:read` alone no longer reaches the listing and needs
+  `servers:read` added. Two neighbours deliberately did not move — the
+  snapshot **download** serves unredacted rows and still needs
+  `query:execute`, and `GET /api/backup-settings` is administration and stays
+  `settings:read`. The Iceberg export panel on Connect AI asks the same
+  permission before it looks up where a server's snapshots live, so it is
+  drawn for the sessions that can actually use it rather than offering a
+  button that then refuses. A console whose sessions carry no access policy,
+  which is every session the stock build mints, is unaffected: those sessions
+  already hold every permission.
+
+  What the lowest role can now read, said plainly: where each server keeps
+  its snapshots (the directory or `s3://bucket/prefix`, including a daemon-wide
+  default the server inherits), the storage error a listing reports for a
+  location, and why a schedule cannot run. No credential is in any of it.
+
+  The Snapshots page follows the permissions it is given. What a session may
+  not do is left out rather than offered and refused: Create, Restore, the
+  `.sql` build and "Run a check" need `baseline:create`; the downloads need
+  `query:execute`; editing the schedule or a server's location needs
+  `servers:write`; the settings half needs `settings:read`; the menu entry
+  needs `servers:read`. What a session may read is never left out with its
+  button: a failed scheduled run, how the last `.sql` build or restore ended,
+  and a problem clearing files off the disk are shown to every session that
+  can open the page, including a status that could not be read. The steps
+  that tell the reader to change a server's location or schedule appear only
+  to a session that may save them; the problem they fix is still said to
+  everyone. A session that may read the settings but not write them sees the
+  values saved in this console as they are, locked, instead of an edit box
+  whose Save could only be refused.
 - **Backups, Verification and Backup settings are one page, Snapshots**
   (#1573). They were three addresses for one question — what copies of this
   server exist, would they restore, and where and how often are they made —

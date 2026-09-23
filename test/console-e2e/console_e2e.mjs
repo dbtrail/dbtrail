@@ -2488,6 +2488,316 @@ try {
     ? ok("snapshots: the mode help keeps open or closed across a repaint of the page")
     : bad("snapshots: the mode help keeps open or closed across a repaint of the page", JSON.stringify(foldKeeps));
 
+  // Scenario 15b3 — the page for a session that may only look (#1573 step 7).
+  // The snapshot listing moved from settings:read to servers:read so the
+  // lowest role can see what copies exist, and that made this page theirs:
+  // it must not greet them with a red "Could not load settings" box and five
+  // buttons that can only fail. Driven through the REAL renderSnapshots with
+  // capsCache.permissions swapped per case, the way /api/capabilities sends
+  // them for a scoped session. The full-access case runs FIRST, through the
+  // same probe: it is the control that proves each control is findable, so
+  // "absent" below cannot be a probe that finds nothing.
+  //
+  // Presentation only: each of these routes is still refused by the server
+  // (authz_test.go pins that). This proves the page stops OFFERING them.
+  const permCases = await page.evaluate(async () => {
+    const all = { ...(capsCache.permissions || {}) };
+    const keep = capsCache.permissions;
+    const probe = () => {
+      const v = document.querySelector(".view");
+      const btn = (t) => Array.from(v.querySelectorAll("button")).some((b) => b.textContent === t && !b.hidden);
+      const checks = document.getElementById("checks");
+      const setup = document.getElementById("setup");
+      const serverRows = Array.from(v.querySelectorAll(".bks-server"));
+      const sched = v.querySelector(".bk-schedule");
+      return {
+        rows: v.querySelectorAll(".stg-list .stg-row").length,
+        errorBoxes: v.querySelectorAll(".error-box").length,
+        create: btn("Create backup"),
+        createNote: /CREATE BACKUP/.test((v.querySelector(".ctx-strip") || {}).textContent || ""),
+        restore: !!v.querySelector(".bk-restore:not(.bk-schedule)"),
+        takeAway: !!v.querySelector("details.bk-take"),
+        duckData: btn("Download the data"),
+        views: btn("Download views.sql"),
+        build: btn("Build"),
+        runCheck: !!v.querySelector(".vfy-control"),
+        currentRun: !!v.querySelector(".vfy-current"),
+        history: !!v.querySelector(".vfy-histcard"),
+        checks: !!checks, setup: !!setup,
+        serverRows: serverRows.length,
+        serverSave: serverRows.some((r) => Array.from(r.querySelectorAll("button")).some((b) => b.textContent === "Save")),
+        serverLocked: serverRows.length > 0 && serverRows.every((r) => Array.from(r.querySelectorAll("input")).every((i) => i.disabled)),
+        changeHere: /Change here/.test(v.textContent),
+        startsLabel: /Set when DBTrail starts/.test(v.textContent),
+        currentSettings: /Current settings/.test(v.textContent),
+        schedCard: !!sched,
+        schedSave: !!sched && (btn("Save schedule") || btn("Add schedule")),
+        schedWatchHint: !!sched && /watch daemon's web interface/.test(sched.textContent),
+      };
+    };
+    const run = async (perms) => { capsCache.permissions = perms; await renderSnapshots(); return probe(); };
+    const deny = (...ps) => { const p = { ...all }; for (const k of Object.keys(p)) p[k] = true; for (const x of ps) p[x] = false; return p; };
+    const out = {};
+    try {
+      out.full = await run(Object.keys(all).length ? all : null);
+      out.viewer = await run(Object.fromEntries(Object.keys(all).map((k) => [k, k === "servers:read" || k === "status:read"])));
+      out.noQuery = await run(deny("query:execute"));
+      out.noCreate = await run(deny("baseline:create"));
+      out.noSettingsRead = await run(deny("settings:read"));
+      out.noServersWrite = await run(deny("servers:write"));
+      out.noSettingsWrite = await run(deny("settings:write"));
+      // The menu entry: gatePermissions reads data-perm.
+      capsCache.permissions = deny("servers:read");
+      gatePermissions();
+      out.navHiddenWithoutServersRead = document.querySelector('.nav-item[data-route="snapshots"]').classList.contains("perm-off");
+    } finally {
+      capsCache.permissions = keep;
+      gatePermissions();
+      await renderSnapshots();
+    }
+    out.navShownAgain = !document.querySelector('.nav-item[data-route="snapshots"]').classList.contains("perm-off");
+    out.permKeys = Object.keys(all);
+    return out;
+  });
+  const pc = permCases;
+  // The control: with every permission the probe finds every control.
+  (pc.full.rows > 0 && pc.full.create && pc.full.restore && pc.full.takeAway && pc.full.duckData && pc.full.build
+    && pc.full.runCheck && pc.full.serverSave && pc.full.schedSave && pc.full.startsLabel && !pc.full.currentSettings
+    && pc.full.errorBoxes === 0 && pc.permKeys.includes("servers:read"))
+    ? ok("permissions: with full access every control is drawn (the probe's control case)")
+    : bad("permissions: with full access every control is drawn (the probe's control case)", JSON.stringify(pc.full));
+  // The viewer: the list and the history, nothing that can only fail, no red box.
+  (pc.viewer.rows > 0 && pc.viewer.errorBoxes === 0 && !pc.viewer.create && !pc.viewer.createNote && !pc.viewer.restore
+    && !pc.viewer.takeAway && !pc.viewer.build && !pc.viewer.runCheck && pc.viewer.currentRun && pc.viewer.history
+    && pc.viewer.checks && !pc.viewer.setup && pc.viewer.serverRows === 0 && !pc.viewer.schedSave && !pc.viewer.schedWatchHint)
+    ? ok("permissions: a view-only session sees the copies and the checks' history, with no red box and no button that can only fail")
+    : bad("permissions: a view-only session sees the copies and the checks' history, with no red box and no button that can only fail", JSON.stringify(pc.viewer));
+  // Each permission alone hides exactly its own controls.
+  const each = {
+    "query:execute": !pc.noQuery.duckData && pc.noQuery.build && pc.noQuery.create && pc.noQuery.serverSave,
+    "baseline:create": !pc.noCreate.create && !pc.noCreate.createNote && !pc.noCreate.restore && !pc.noCreate.build
+      && !pc.noCreate.runCheck && pc.noCreate.duckData && pc.noCreate.currentRun && pc.noCreate.serverSave,
+    "settings:read": pc.noSettingsRead.errorBoxes === 0 && pc.noSettingsRead.serverRows === 0 && !pc.noSettingsRead.views
+      && pc.noSettingsRead.duckData && pc.noSettingsRead.create && pc.noSettingsRead.schedSave,
+    "servers:write": !pc.noServersWrite.serverSave && pc.noServersWrite.serverLocked && !pc.noServersWrite.schedSave
+      && !pc.noServersWrite.schedWatchHint && pc.noServersWrite.create && pc.noServersWrite.changeHere === pc.full.changeHere,
+    // Saved values keep their own card, retitled and locked; startup-only
+    // rows stay under their true heading (the locked card is pinned by the
+    // daemon-rows scene below).
+    "settings:write": !pc.noSettingsWrite.changeHere && pc.noSettingsWrite.currentSettings && pc.noSettingsWrite.startsLabel && pc.noSettingsWrite.serverSave
+      && pc.noSettingsWrite.create,
+  };
+  (Object.values(each).every(Boolean))
+    ? ok("permissions: each permission denied alone hides exactly its own controls")
+    : bad("permissions: each permission denied alone hides exactly its own controls",
+      JSON.stringify({ each, noQuery: pc.noQuery, noCreate: pc.noCreate, noSettingsRead: pc.noSettingsRead, noServersWrite: pc.noServersWrite, noSettingsWrite: pc.noSettingsWrite }));
+  // What a session that may only LOOK must still be told. Hiding a control
+  // must never hide the fact next to it: the first cut of this step returned
+  // early from three builders and a view-only reader lost a failed scheduled
+  // run (the card said "Every 1d at 03:00" in grey), a failed .sql build and
+  // a restore that never reached S3. Every route these read is servers:read.
+  // Driven through the REAL builders with failing fixtures, under the
+  // view-only permission map; the full-access runs of the same fixtures are
+  // the control that the text is findable at all.
+  const outcome = await page.evaluate(() => {
+    const keep = capsCache.permissions;
+    const keys = Object.keys(capsCache.permissions || {});
+    const viewer = Object.fromEntries(keys.map((k) => [k, k === "servers:read" || k === "status:read"]));
+    const cur = { id: "srv-fix", kind: "registry", baseline_dir: "/tmp/baselines" };
+    const snaps = [{ time: "2026-06-10 12:00:00", location: "dir", files: [{ name: "x.parquet", bytes: 10 }] }];
+    const b = { configured: true, source: "/tmp/baselines", kind: "dir", snapshots: snaps,
+      schedule: { every: "1d", at: "03:00", runnable: true, next_run: "2026-06-11 03:00:00",
+        last_run: { ok: false, error: "disk full", started_at: "2026-06-10 03:00:00", finished_at: "2026-06-10 03:01:00", method: "refresh" } } };
+    const txt = (n) => n ? n.textContent : "";
+    const hasBtn = (n, t) => !!n && Array.from(n.querySelectorAll("button")).some((x) => x.textContent === t && !x.hidden);
+    const draw = (perms) => {
+      capsCache.permissions = perms;
+      const sched = backupScheduleCard(cur, b);
+      const sqlFailed = backupSQLLane(cur, b, { sql_export: { state: "failed", last_error: "boom" } });
+      const sqlReady = backupSQLLane(cur, b, { sql_export: { state: "succeeded", at: "2026-06-10T12:00:00Z", bytes: 2048, expires_at: "2026-06-10T16:00:00Z" } });
+      const sqlStaging = backupSQLLane(cur, b, { sql_export: { state: "downloaded", at: "2026-06-10T12:00:00Z", staging_error: "could not remove /tmp/x: busy" } });
+      const sqlIdle = backupSQLLane(cur, b, { sql_export: { state: "idle" } });
+      const take = backupTakeAway(cur, b, { sql_export: { state: "failed", last_error: "boom" } });
+      const restoreFailed = backupRestoreCard(cur, b, { restore: { state: "failed", published: true, last_error: "s3 put denied" } });
+      const restoreIdle = backupRestoreCard(cur, b, { restore: { state: "idle" } });
+      // A status that could not be read, and a state this console does not
+      // know, are outcomes too: the take-away panel says so and opens, and
+      // it can only do that while the MySQL lane exists.
+      const takeUnread = backupTakeAway(cur, b, { error: "status endpoint down" });
+      const takeUnknown = backupTakeAway(cur, b, { sql_export: { state: "weird" } });
+      const heading = (n) => { const h = n && n.querySelector("h2, .ov-panel-title"); return h ? h.textContent : ""; };
+      return {
+        unread: /could not be read/.test(txt(takeUnread)),
+        unreadOpen: !!takeUnread && !!takeUnread.open,
+        unknown: /does not recognise: weird/.test(txt(takeUnknown)),
+        unknownOpen: !!takeUnknown && !!takeUnknown.open,
+        laneSub: txt(sqlFailed),
+        restoreHead: heading(restoreFailed),
+        schedFailed: /Last scheduled backup failed/.test(txt(sched)),
+        schedRed: !!sched && !!sched.querySelector(".bk-card-state.alarm"),
+        schedForm: hasBtn(sched, "Save schedule") || hasBtn(sched, "Add schedule"),
+        sqlFailed: /Last build failed/.test(txt(sqlFailed)),
+        sqlBuild: hasBtn(sqlFailed, "Build"),
+        sqlReadyText: txt(sqlReady),
+        sqlReadyDownload: hasBtn(sqlReady, "Download .sql backup (.tar.gz)"),
+        sqlStaging: /Staging problem/.test(txt(sqlStaging)),
+        sqlBuildAgain: /Build again/.test(txt(sqlStaging)),
+        sqlIdle: !!sqlIdle,
+        takeOpen: !!take && !!take.open,
+        restoreFailed: /could not send it to S3/.test(txt(restoreFailed)),
+        restoreButton: hasBtn(restoreFailed, "Restore"),
+        restoreIdle: !!restoreIdle,
+      };
+    };
+    try {
+      return { full: draw(Object.fromEntries(keys.map((k) => [k, true]))), viewer: draw(viewer) };
+    } finally { capsCache.permissions = keep; }
+  });
+  const pFull = outcome.full, pView = outcome.viewer;
+  (pFull.schedFailed && pFull.schedForm && pFull.sqlFailed && pFull.sqlBuild && /Ready/.test(pFull.sqlReadyText) && pFull.sqlReadyDownload
+    && pFull.sqlStaging && pFull.sqlBuildAgain && pFull.restoreFailed && pFull.restoreButton
+    && pFull.unread && pFull.unreadOpen && pFull.unknown && pFull.unknownOpen
+    && /whatever moment you pick/.test(pFull.laneSub) && pFull.restoreHead === "Restore to a moment")
+    ? ok("permissions: with full access the failing fixtures draw their outcome and their controls (control case)")
+    : bad("permissions: with full access the failing fixtures draw their outcome and their controls (control case)", JSON.stringify(pFull));
+  (pView.schedFailed && pView.schedRed && !pView.schedForm
+    && pView.sqlFailed && !pView.sqlBuild && /Built for/.test(pView.sqlReadyText) && !/Ready/.test(pView.sqlReadyText) && !pView.sqlReadyDownload
+    && pView.sqlStaging && !pView.sqlBuildAgain && !pView.sqlIdle && pView.takeOpen
+    && pView.restoreFailed && !pView.restoreButton && !pView.restoreIdle
+    && pView.unread && pView.unreadOpen && pView.unknown && pView.unknownOpen
+    && !/whatever moment you pick/.test(pView.laneSub) && pView.restoreHead === "Last restore")
+    ? ok("permissions: a view-only session is still told a scheduled run, a .sql build or a restore failed, without the controls")
+    : bad("permissions: a view-only session is still told a scheduled run, a .sql build or a restore failed, without the controls", JSON.stringify(pView));
+
+  // Hints that name a fix must name one this reader can make. An operator
+  // may create a snapshot but not see or change settings: the Create note
+  // keeps its reason and drops "(under Where and how often)". A session that
+  // may download but not read settings keeps the DuckDB lane without the
+  // false line about how DBTrail is configured. A session that may read
+  // settings but not write servers is not told to "select this server to
+  // change it". Each is paired with the full-access text as its control.
+  const hints = await page.evaluate(() => {
+    const keep = capsCache.permissions, keepTrig = capsCache.baseline_trigger;
+    const keys = Object.keys(capsCache.permissions || {});
+    const perms = (deny) => Object.fromEntries(keys.map((k) => [k, !deny.includes(k)]));
+    const cur = { id: "srv-fix", kind: "registry", has_source: true };
+    const b = { configured: true, source: "/tmp/baselines", kind: "dir", snapshots: [{ time: "2026-06-10 12:00:00", location: "dir" }] };
+    const srv = { id: "srv-fix", name: "fixture", source: "server", baseline_dir: "/tmp/b" };
+    // S3 only, with no scheduling loop: the row states the problem, and
+    // "Add a Backup dir." is the remedy only a writer gets.
+    const s3only = { id: "srv-s3", name: "s3fix", source: "server", baseline_s3: "s3://b/p" };
+    // No location of its own, reading the daemon default: "save a location
+    // above" is the remedy.
+    const inherits = { id: "srv-inh", name: "inh", source: "default", resolved_dir: "/var/lib/dbtrail/b" };
+    const keepViews = capsCache.views;
+    const probe = () => {
+      capsCache.views = false;
+      const duckNoViews = (backupDuckLane(b) || { textContent: "" }).textContent;
+      capsCache.views = keepViews;
+      return {
+        strip: baselineContextStrip(b, cur).textContent,
+        duck: (backupDuckLane(b) || { textContent: "" }).textContent,
+        duckNoViews,
+        row: backupServerRow(srv, false, [srv], null).textContent,
+        s3: backupServerRow(s3only, false, [s3only], null).textContent,
+        inh: backupServerRow(inherits, false, [inherits], null).textContent,
+      };
+    };
+    try {
+      capsCache.baseline_trigger = true;
+      capsCache.permissions = perms([]);
+      const full = probe();
+      capsCache.permissions = perms(["settings:read", "servers:write"]);
+      const operator = probe();
+      capsCache.permissions = perms(["servers:write"]);
+      const reader = probe();
+      return { full, operator, reader, views: !!capsCache.views };
+    } finally { capsCache.permissions = keep; capsCache.baseline_trigger = keepTrig; capsCache.views = keepViews; }
+  });
+  const H = hints;
+  (/CREATE BACKUP/.test(H.full.strip) && /under Where and how often/.test(H.full.strip)
+    && /CREATE BACKUP/.test(H.operator.strip) && /own backup location/.test(H.operator.strip) && !/Where and how often/.test(H.operator.strip)
+    && (H.views ? !/set not to read archived data/.test(H.operator.duck) : true) && /Download the data/.test(H.operator.duck)
+    && /Select this server at the top/.test(H.full.row) && !/Select this server at the top/.test(H.reader.row) && /No schedule/.test(H.reader.row)
+    && (H.views ? !/set not to read archived data/.test(H.full.duck) : true)
+    && /set not to read archived data/.test(H.operator.duckNoViews)
+    && /With S3 only/.test(H.full.s3) && /Add a Backup dir/.test(H.full.s3)
+    && /With S3 only/.test(H.reader.s3) && !/Add a Backup dir/.test(H.reader.s3)
+    && /save a location above/.test(H.full.inh) && /Time-travel reads/.test(H.reader.inh) && !/save a location above/.test(H.reader.inh))
+    ? ok("permissions: a hint that names a fix is shown only to a session that can make it, and keeps its reason")
+    : bad("permissions: a hint that names a fix is shown only to a session that can make it, and keeps its reason", JSON.stringify(H));
+
+  // A value saved in this console stays in its own card for a session that
+  // may read settings but not write them: locked, no Save, and still
+  // "Saved here", never filed under "Set when DBTrail starts" whose fine
+  // print says to change a flag and restart.
+  const daemonRO = await page.evaluate(() => {
+    const keep = capsCache.permissions, keepMon = capsCache.monitor;
+    const keys = Object.keys(capsCache.permissions || {});
+    const settings = { daemon: [{ key: "baseline_retain", editable: true, source: "saved", value: "9d", startup: "3d", cli: "--baseline-retain" }], servers: [] };
+    const draw = () => {
+      const box = document.createElement("div");
+      for (const n of snapshotSetupSections(settings, {})) if (n) box.append(n);
+      const sects = Array.from(box.querySelectorAll(".bks-sect")).map((n) => n.textContent);
+      const input = box.querySelector("#bks-baseline_retain");
+      return { sects, text: box.textContent, input: !!input, disabled: !!input && input.disabled,
+        save: Array.from(box.querySelectorAll("button")).some((x) => x.textContent === "Save"),
+        revert: Array.from(box.querySelectorAll("button")).some((x) => x.textContent === "Use the startup value") };
+    };
+    try {
+      capsCache.monitor = true;
+      capsCache.permissions = Object.fromEntries(keys.map((k) => [k, true]));
+      const full = draw();
+      capsCache.permissions = Object.fromEntries(keys.map((k) => [k, k !== "settings:write"]));
+      const ro = draw();
+      return { full, ro };
+    } catch (e) { return { err: String(e && e.stack || e) }; }
+    finally { capsCache.permissions = keep; capsCache.monitor = keepMon; }
+  });
+  (daemonRO.full && daemonRO.full.sects.includes("Change here") && daemonRO.full.input && !daemonRO.full.disabled && daemonRO.full.save && daemonRO.full.revert
+    && daemonRO.ro.sects.includes("Current settings") && !daemonRO.ro.sects.includes("Change here")
+    && daemonRO.ro.input && daemonRO.ro.disabled && !daemonRO.ro.save && !daemonRO.ro.revert
+    && /Saved here\. The command line says 3d/.test(daemonRO.ro.text)
+    && /Use the startup value to go back/.test(daemonRO.full.text) && !/Use the startup value/.test(daemonRO.ro.text))
+    ? ok("permissions: a value saved in the console stays in its card, locked, for a session that may only read settings")
+    : bad("permissions: a value saved in the console stays in its card, locked, for a session that may only read settings", JSON.stringify(daemonRO));
+
+  // Arriving at the old settings address with a session that cannot see
+  // settings, on a server with no schedule: no empty heading, and no note
+  // saying the settings are "part of Snapshots now" beside nothing.
+  const oldAddr = await page.evaluate(async () => {
+    const keep = capsCache.permissions;
+    const keys = Object.keys(capsCache.permissions || {});
+    // An earlier scene may have closed this note; reopen it so "absent"
+    // below is about permission, and prove it with the full-access arrival.
+    const reopen = () => { movedClosed.delete("backup-settings"); try { localStorage.removeItem("dbtrail.moved.backup-settings"); } catch (_) {} };
+    const arrive = async () => {
+      history.pushState({}, "", "/backup-settings");
+      await renderRoute();
+      return { setup: !!document.getElementById("setup"), note: /Backup settings is part of Snapshots/.test(document.querySelector(".view").textContent),
+        path: location.pathname };
+    };
+    try {
+      reopen();
+      const full = await arrive();
+      reopen();
+      capsCache.permissions = Object.fromEntries(keys.map((k) => [k, k === "servers:read" || k === "status:read"]));
+      const view = await arrive();
+      return { full, view, path: view.path, setup: view.setup, note: view.note };
+    } finally {
+      capsCache.permissions = keep;
+      history.pushState({}, "", "/snapshots");
+      await renderRoute();
+    }
+  });
+  (oldAddr.full.note && oldAddr.full.setup && oldAddr.path === "/snapshots" && !oldAddr.setup && !oldAddr.note)
+    ? ok("permissions: the old settings address, for a session that cannot see settings, lands with no empty section and no promise")
+    : bad("permissions: the old settings address, for a session that cannot see settings, lands with no empty section and no promise", JSON.stringify(oldAddr));
+
+  (pc.navHiddenWithoutServersRead && pc.navShownAgain)
+    ? ok("permissions: the Snapshots menu entry hides without servers:read, and comes back")
+    : bad("permissions: the Snapshots menu entry hides without servers:read, and comes back", JSON.stringify({ hidden: pc.navHiddenWithoutServersRead, back: pc.navShownAgain }));
+
   // Scenario 15c — the button's other gate arms, fixture-driven through the
   // REAL baselinesPanel (a server with no location at all can't exist live
   // once the daemon sets a default --baseline-dir; the daemon-default-only

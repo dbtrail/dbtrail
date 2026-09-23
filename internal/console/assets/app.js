@@ -4651,8 +4651,10 @@ function closeMoved(from) {
 // daemon it is read-only because a request failed is a false statement about
 // their installation. "" when the section is here.
 //
-// Only the checks can be absent today, so "daemon" names them; a second
-// optional section would need its own reason here.
+// "daemon" names the checks, the only section that can be absent for a
+// reason worth a sentence. The setup section can also be absent, by
+// permission, and renderSnapshots then shows no note at all (setupHidden):
+// hidden by permission says nothing.
 function snapshotsMovedNotice(missing) {
   const from = routeArrivedFrom;
   const was = SNAPSHOT_MOVED.get(from);
@@ -4734,10 +4736,13 @@ async function renderSnapshots() {
     // The bottom half is fetched with the rest, not after the first paint:
     // a page that grows a section under a reader who is already reading it
     // moves what they were looking at.
-    api("/api/backup-settings").catch(asErr),
+    // Only for a session that may read settings: for one that may not, the
+    // answer is a 403 that drew a red "Could not load settings" box on every
+    // visit, about a section this reader was never meant to see.
+    sessionMay("settings:read") ? api("/api/backup-settings").catch(asErr) : Promise.resolve(null),
     // The disk-space card describes the watch daemon's loop; on serve there
     // is no loop, no card, and nothing to fetch.
-    capsCache.monitor ? api("/api/baseline-refresh").catch(asErr) : Promise.resolve(null),
+    capsCache.monitor && sessionMay("settings:read") ? api("/api/baseline-refresh").catch(asErr) : Promise.resolve(null),
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   // Run states for the selected server: only the endpoints this daemon
@@ -4768,8 +4773,18 @@ async function renderSnapshots() {
     // than a second list here, so the note and the address can never
     // disagree about which section they are talking about.
     const drawChecks = !!capsCache.monitor;
+    const cur = servers.find((s) => s.id === (currentServer || defaultServerId));
+    // The setup section is drawn when it has something to hold: the settings
+    // half (settings:read), or the schedule card (which a view-only session
+    // still gets whenever a schedule exists, for its run status). Built HERE
+    // rather than inside its part because the arrival note below has to know
+    // whether the section exists; a throw is kept and re-thrown inside the
+    // part, so it still lands in that part's error box and nowhere else.
+    let scheduleCard = null, scheduleErr = null;
+    try { scheduleCard = backupScheduleCard(cur, baselines); } catch (err) { scheduleErr = err; }
+    const drawSetup = !!settings || !!scheduleCard || !!scheduleErr;
     const movedTo = splitTarget(aliasTarget(routeArrivedFrom) || "")[1].replace("#", "");
-    const sectionDrawn = movedTo === "setup" || (movedTo === "checks" && drawChecks);
+    const sectionDrawn = (movedTo === "setup" && drawSetup) || (movedTo === "checks" && drawChecks);
     // The note goes BESIDE the section that reader asked for — but only while
     // the ADDRESS still points there, because the scroll follows the address:
     // a link into a part of the old page (/verification#past) keeps its own
@@ -4781,12 +4796,16 @@ async function renderSnapshots() {
     // supports at all, in which case saying "read-only" would be a false
     // statement about their installation.
     const missing = movedTo !== "" && !sectionDrawn ? (capsKnown ? "daemon" : "unknown") : "";
-    const moved = snapshotsMovedNotice(missing);
+    // A setup section that is absent here is absent by PERMISSION (with the
+    // capabilities read, settings are fetched whenever the session may read
+    // them, and the section then always has content). Hidden by permission
+    // says nothing, so there is no note promising what moved where.
+    const setupHidden = movedTo === "setup" && !drawSetup && capsKnown;
+    const moved = setupHidden ? null : snapshotsMovedNotice(missing);
     if (moved && !beside) v.append(moved);
     if (!capsKnown) v.append(el("div", { class: "error-box", text:
       "Parts of this page are missing: the capability check failed when this page loaded, so DBTrail does not know what this server supports. Reload the page." }));
     if (serversErr) v.append(el("div", { class: "error-box", text: "Could not load servers: " + serversErr }));
-    const cur = servers.find((s) => s.id === (currentServer || defaultServerId));
     // Three parts, three blast radii — as when they were three pages. A
     // verify record this build cannot read must not take the list of copies
     // down with it, and a settings row must not take both: an operator left
@@ -4855,17 +4874,21 @@ async function renderSnapshots() {
     // makes the list above keep growing on its own and a failed scheduled
     // run has to be visible without opening anything; then every setting
     // that shapes a backup, beside where its value lives.
+    if (drawSetup) {
     if (moved && beside && movedTo === "setup") v.append(moved);
     v.append(snapshotSection("Where and how often", "setup"));
     part("Where and how often", () => {
-      const scheduleCard = backupScheduleCard(cur, baselines);
+      if (scheduleErr) throw scheduleErr;
       if (scheduleCard) v.append(scheduleCard);
-      // Unconditional, because this half always has something to say: at
-      // the very least where this server keeps its copies, or why that
-      // could not be read. The timetable above it is the part that can be
-      // absent.
-      snapshotSetupSections(settings, refresh).forEach((n) => v.append(n));
+      // Whenever the session may read settings, this half always has
+      // something to say: at the very least where this server keeps its
+      // copies, or why that could not be read.
+      // The settings half needs settings:read. Without it nothing was
+      // fetched (see above) and nothing is drawn: hidden by permission says
+      // nothing, unlike a part missing for a reason the reader can fix.
+      if (settings) snapshotSetupSections(settings, refresh).forEach((n) => v.append(n));
     });
+    }
     viewEnter();
     // Last: the sections exist now, so an address that names one can be
     // honored. Before this, there is nothing to scroll to.
@@ -5297,11 +5320,18 @@ function snapshotSetupSections(settings, refresh) {
   // other editable settings; only what still lives in the launch command is
   // under "Set when DBTrail starts". The second card disappears when it is
   // empty (#1682).
+  // A session that may read settings but not write them still sees every
+  // value, in the SAME card and with the same provenance line ("Saved here.
+  // The command line says ..."), only locked and without its buttons. An
+  // earlier cut moved these rows into the startup card, whose title and fine
+  // print say "set at startup, change the flag and restart" -- false for a
+  // value saved in this console.
+  const mayEdit = sessionMay("settings:write");
   const editableRows = daemonRows.filter((row) => row.editable);
   const startupRows = daemonRows.filter((row) => !row.editable);
   if (capsCache.monitor && !broken && editableRows.length) {
-    out.push(sect("Change here"));
-    out.push(el("div", { class: "cards" }, backupDaemonEditCard(editableRows)));
+    out.push(sect(mayEdit ? "Change here" : "Current settings"));
+    out.push(el("div", { class: "cards" }, backupDaemonEditCard(editableRows, !mayEdit)));
   }
   if (!broken) out.push(backupServersPanel(settings));
   if (capsCache.monitor) {
@@ -5403,21 +5433,21 @@ function backupDaemonCard(rows) {
 // are different facts. A row this daemon reads per job says nothing; a row it
 // read once at boot says so beside its input, under its own value, so the
 // operator knows the save landed and the effect has not.
-function backupDaemonEditCard(rows) {
+function backupDaemonEditCard(rows, locked) {
   const card = el("div", { class: "card" });
   card.append(el("div", { class: "card-title" }, el("span", { text: "Backups and checks" })));
   for (const row of rows) {
-    card.append(backupDaemonEditRow(row));
+    card.append(backupDaemonEditRow(row, locked));
   }
   card.append(cnFine("More about these settings",
     el("p", { class: "form-hint", text:
-      "Saved here, in DBTrail's own settings file, which wins over the command line and the environment. " +
-      "Use the startup value to go back to what the process was started with." }),
+      "Saved here, in DBTrail's own settings file, which wins over the command line and the environment." +
+      (locked ? "" : " Use the startup value to go back to what the process was started with.") }),
     docsMore("settings/backups", "set-at-startup", "settings that need a restart")));
   return card;
 }
 
-function backupDaemonEditRow(row) {
+function backupDaemonEditRow(row, locked) {
   const label = BACKUP_DAEMON_ROWS[row.key] || row.key;
   const wrap = el("div", { class: "bks-erow" });
   const head = el("label", { class: "form-label", for: "bks-" + row.key }, label);
@@ -5447,7 +5477,10 @@ function backupDaemonEditRow(row) {
   };
   save.addEventListener("click", () => send({ value: input.value }, save));
   if (revert) revert.addEventListener("click", () => send({ use_startup: true }, revert));
-  wrap.append(el("div", { class: "bks-erow-in" }, input, save, revert));
+  // locked: a session without settings:write sees the value and where it
+  // comes from, and no control that could only be refused.
+  if (locked) input.disabled = true;
+  wrap.append(el("div", { class: "bks-erow-in" }, input, locked ? null : save, locked ? null : revert));
   // Provenance, in one line: what is winning, and what it is winning over.
   wrap.append(el("p", { class: "form-hint", text: row.source === "saved"
     ? "Saved here. The command line says " + (row.startup || "nothing") + "."
@@ -5528,15 +5561,18 @@ function backupServersPanel(settings) {
 // server's Backup dir; without one a scheduled run can only be a full backup,
 // and where this daemon cannot take one either, nothing runs at all. The
 // values are compared as stored, untrimmed, the way the daemon reads them.
-function s3OnlyBackupWarning(srv) {
+function s3OnlyBackupWarning(srv, fix = true) {
   // A saved schedule that cannot run already says why, more precisely.
   if (!srv || srv.baseline_dir || !srv.baseline_s3 || srv.schedule_refusal) return "";
+  // fix: the closing instruction is for a session that can save this row.
+  // The problem itself is said to everyone who can see the row.
+  const then = (t) => fix ? " " + t : "";
   // Where this process runs no scheduled backups, only the setting is known.
-  if (!srv.schedule_loop) return "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Backup dir.";
+  if (!srv.schedule_loop) return "With S3 only, a scheduled backup cannot update from the recorded changes." + then("Add a Backup dir.");
   if (!srv.full_backup_possible) {
-    return "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Backup dir. Add one.";
+    return "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Backup dir." + then("Add one.");
   }
-  return "With S3 only, every scheduled backup reads your whole database. Add a Backup dir so runs update from the recorded changes.";
+  return "With S3 only, every scheduled backup reads your whole database." + then("Add a Backup dir so runs update from the recorded changes.");
 }
 
 function backupServerRow(srv, readOnly, servers, daemonS3) {
@@ -5554,7 +5590,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   // (rebuildPossible): a daemon default folder does not save this server,
   // and a warning that followed the typing would vanish on a save that
   // failed. The page redraws after a successful save.
-  const s3Only = s3OnlyBackupWarning(srv);
+  const s3Only = s3OnlyBackupWarning(srv, sessionMay("servers:write"));
   if (s3Only) box.append(el("p", { class: "form-msg err", text: s3Only }));
   const noArch = el("input", { type: "checkbox", name: "no_archive" });
   noArch.checked = !!srv.no_archive;
@@ -5575,7 +5611,8 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   if (src === "default") {
     const eff = srv.resolved_dir || srv.resolved_s3;
     box.append(el("p", { class: "form-hint" },
-      "Time-travel reads ", el("code", { text: eff }), ". To make backups for this server, save a location above."));
+      "Time-travel reads ", el("code", { text: eff }),
+      sessionMay("servers:write") ? ". To make backups for this server, save a location above." : "."));
   }
   // The refusal beats the prediction: the schedule reads the RAW entry, so
   // clearing the dir on this very page leaves a stored schedule that will
@@ -5593,9 +5630,9 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
       // it lives on is drawn for the SELECTED server, and only where this
       // process runs the schedules. Pointing at "the card above" on a
       // read-only console named something that is not on the screen.
-      (capsCache.backup_schedule
-        ? ". Select this server at the top of the page to change it."
-        : ". Schedules run in the DBTrail daemon; this console cannot change them.")));
+      (!capsCache.backup_schedule
+        ? ". Schedules run in the DBTrail daemon; this console cannot change them."
+        : sessionMay("servers:write") ? ". Select this server at the top of the page to change it." : ".")));
     // Red here as on the schedule card (#1564): a grey summary beside a red
     // card would be the same page disagreeing with itself about one schedule.
     if (srv.schedule_full_refusal && !srv.schedule_refusal) {
@@ -5604,9 +5641,9 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
         (/[.!?]$/.test(why) ? "" : ".") + " The full backups do not run until that changes; the other scheduled runs still do." }));
     }
   } else {
-    more.push(p(capsCache.backup_schedule
-      ? "No scheduled backups. Select this server at the top of the page to set one."
-      : "No scheduled backups. Setting one needs the DBTrail daemon; this console is read-only."));
+    more.push(p(!capsCache.backup_schedule
+      ? "No scheduled backups. Setting one needs the DBTrail daemon; this console is read-only."
+      : sessionMay("servers:write") ? "No scheduled backups. Select this server at the top of the page to set one." : "No schedule."));
   }
   // S3 keeps every uploaded backup forever unless the BUCKET expires it
   // (#1622): say how fast it grows, and hand over the rule to apply. The
@@ -5618,7 +5655,12 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   const save = el("button", { class: "btn btn-sm", type: "button", text: "Save" });
-  if (readOnly) { dir.disabled = s3.disabled = noArch.disabled = true; }
+  // Two different reasons to be read-only. registry_read_only is the
+  // registry file itself (a newer version wrote it), and the Save stays
+  // visible, disabled, beside the reason. A session without servers:write
+  // gets the fields locked and no Save at all: hidden by permission.
+  const mayWrite = sessionMay("servers:write");
+  if (readOnly || !mayWrite) { dir.disabled = s3.disabled = noArch.disabled = true; }
   // Save wakes up when something differs from what was loaded, so a click
   // always means a change; Enter in a field saves too.
   // Trimmed on both sides: the PUT trims, so a stored value with stray
@@ -5655,7 +5697,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   };
   // Save comes after the drawing and any refusal, above the compact block,
   // as on the disk-space card: the block is for reading, not for acting.
-  box.append(el("div", { class: "stg-cardfoot" }, save), msg);
+  if (mayWrite) box.append(el("div", { class: "stg-cardfoot" }, save), msg);
   box.append(cnFine("More about this server", ...more));
   return box;
 }
@@ -6220,7 +6262,10 @@ function baselineContextStrip(b, cur) {
   strip.append(item("TIME-TRAVEL", b.reconstruct ? "enabled" : "off (archives disabled)"));
   // The page's primary action, at page level (not a list-header costume),
   // or, where the action is unavailable, the reason.
-  if (cur && cur.id && cur.kind === "registry" && b.configured) {
+  // Only for a session that may create one: the note below names a
+  // configuration fix, and sending a reader who lacks the permission to fix
+  // a setting they cannot touch is worse than saying nothing.
+  if (cur && cur.id && cur.kind === "registry" && b.configured && sessionMay(PERM_SNAPSHOT_CREATE)) {
     // cur is the RAW registry entry, while b.configured also counts the
     // daemon-wide default, which a backup refuses to write to, as a restore
     // does (the restore card is stricter: it needs a local Backup dir; the
@@ -6242,7 +6287,7 @@ function baselineContextStrip(b, cur) {
       const why = [];
       if (off) why.push("turned off at startup");
       if (!ownLoc) why.push("needs this server's own backup location");
-      strip.append(item("CREATE BACKUP", why.join(", and ") + " (under Where and how often)"));
+      strip.append(item("CREATE BACKUP", why.join(", and ") + (sessionMayConfigureServer() ? " (under Where and how often)" : "")));
     }
   }
   return strip;
@@ -6661,9 +6706,9 @@ function baselinesPanel(b, servers, opts) {
     list.append(el("div", { class: "stg-empty" },
       el("p", { class: "stg-empty-lead", text: "No backups configured." }),
       el("p", { class: "stg-empty-sub", text: "A backup is a full copy of your tables at one point in time. With one, Time-travel can show complete rows, not just the ones that changed lately." }),
-      el("p", { class: "stg-empty-sub", text: "1. Create snapshots:" }),
+      ...(sessionMayConfigureServer() ? [el("p", { class: "stg-empty-sub", text: "1. Create snapshots:" }),
       el("code", { class: "stg-code", text: "docker compose --profile baseline run --rm baseline" }),
-      el("p", { class: "stg-empty-sub", text: "2. " + baselineConfigHint(cur, opts && opts.serversErr) })));
+      el("p", { class: "stg-empty-sub", text: "2. " + baselineConfigHint(cur, opts && opts.serversErr) })] : [])));
   } else if (!(b.snapshots || []).length) {
     // A source that failed reaches HERE too, and "no backups found" would be a
     // flat lie about a bucket nobody could read.
@@ -7018,7 +7063,8 @@ async function loadBackupDetail(at, box) {
     text: "Download (.tar.gz) · " + humanBytes(d.total_bytes || 0) });
   if (d.incomplete) dl.disabled = true;
   dl.onclick = (ev) => { ev.stopPropagation(); downloadBackup(at, dl, d.total_bytes || 0); };
-  facts.append(dl);
+  // The download hands over every row, unredacted: query:execute.
+  if (sessionMay("query:execute")) facts.append(dl);
   box.append(facts);
   if (d.incomplete) box.append(el("p", { class: "form-msg err", text: "This backup is marked incomplete (a failed or unfinished run); it cannot be downloaded or restored from." }));
   const tbl = el("table", { class: "bk-table" });
@@ -7289,8 +7335,18 @@ function backupScheduleCard(cur, b) {
   if (!cur || !cur.id || cur.kind !== "registry") return null;
   if (!b || b.error) return null;
   const sch = b.schedule || null;
+  // Two different reasons this card cannot be edited, handled differently.
+  // The FEATURE being off is the read-only console: the early return below,
+  // with the line that says where to turn it on. The session lacking
+  // servers:write is not a reason to show less: the card still draws every
+  // fact about how the schedule is running — the last failed run, a run that
+  // cannot start, backups that did not reach the destination — exactly as
+  // the editable view does, and only the form is taken out at the end. A
+  // first cut returned early for both, and a view-only reader saw a failed
+  // 03:00 run summarised in the grey of a healthy schedule.
   const canEdit = !!capsCache.backup_schedule;
-  if (!sch && !canEdit) return null;
+  const mayWrite = sessionMay("servers:write");
+  if (!sch && !(canEdit && mayWrite)) return null;
   // A card, not a fold (#1528). Putting backups on a timetable is the thing
   // this page is named after, and it sat behind a line of small caps that had
   // to be clicked. What the summary carried is now the card's state line, so
@@ -7385,7 +7441,7 @@ function backupScheduleCard(cur, b) {
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   save.onclick = () => saveBackupSchedule(cur.id, { every: every.value.trim(), at: at.value.trim(), full_every: fullEvery.value.trim() }, save, msg);
-  const row = el("div", { class: "bk-restore-row" },
+  const row = el("div", { class: "bk-restore-row", "data-sched-edit": "1" },
     el("span", { class: "form-hint", text: "every" }), every,
     el("span", { class: "form-hint", text: "at" }), at,
     el("span", { class: "form-hint", text: "UTC, full backup every" }), fullEvery, save);
@@ -7394,7 +7450,8 @@ function backupScheduleCard(cur, b) {
     remove.onclick = () => removeBackupSchedule(cur.id, remove, msg);
     row.append(remove);
   }
-  body.append(row, el("p", { class: "form-hint", text:
+  msg.setAttribute("data-sched-edit", "1");
+  body.append(row, el("p", { class: "form-hint", "data-sched-edit": "1", text:
     "Every: minutes, hours or days (5m, 6h, 1d), at least 5m. At: the UTC time the timetable lines up on. " +
     "Full backup every (optional, such as 7d): at those times the run reads your whole database instead of updating, " +
     "so the backups do not rest only on the recorded changes. Leave it empty for none." }), msg);
@@ -7402,7 +7459,7 @@ function backupScheduleCard(cur, b) {
   // table, and backups kept only on this machine are never removed on their
   // own (the daemon prunes only what it confirmed durable in S3). Same
   // number the daemon logs at save and at boot.
-  const rate = el("p", { class: "form-hint" });
+  const rate = el("p", { class: "form-hint", "data-sched-edit": "1" });
   const showRate = () => {
     const n = backupsPer30Days(every.value);
     if (!n) { rate.hidden = true; return; }
@@ -7481,7 +7538,7 @@ function backupScheduleCard(cur, b) {
       }
       body.append(el("p", { class: everyRun ? "form-msg err" : "form-hint", text:
         "Next run " + how + (sch.next_method_why ? " (" + sch.next_method_why + ")." : ".") +
-        (everyRun ? " " + BACKUP_WHY_REMEDY[sch.next_method_why_code] : "") }));
+        (everyRun && sessionMayConfigureServer() ? " " + BACKUP_WHY_REMEDY[sch.next_method_why_code] : "") }));
     }
     if (sch.history_unavailable) {
       // Without the run history only what this daemon started since boot is
@@ -7542,7 +7599,7 @@ function backupScheduleCard(cur, b) {
           !(fb && (run.why_code === "fold_refused" || run.why_code === "fold_crashed"))) {
         // In the past tense when the next-run warning carries a remedy: a
         // second remedy for a different setting would read as a contradiction.
-        body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code, !everyRunCode) }));
+        body.append(el("p", { class: "form-hint", text: backupWhyLine(run.why, run.why_code, !everyRunCode && sessionMayConfigureServer()) }));
       }
     }
     if (fb) {
@@ -7611,6 +7668,10 @@ function backupScheduleCard(cur, b) {
     if (alarm) state.classList.add("alarm");
     if (alarmNote) state.textContent += " " + alarmNote;
   }
+  // Without servers:write, the form goes and everything it would have
+  // changed stays: the status lines above were drawn exactly as for an
+  // editor. Hidden by permission, so nothing says the form was here.
+  if (!mayWrite) body.querySelectorAll("[data-sched-edit]").forEach((n) => n.remove());
   card.append(body);
   return card;
 }
@@ -7663,6 +7724,11 @@ function backupRestoreCard(cur, b, restoreSt) {
   // Registry servers only: the CLI (ephemeral) entry is refused by the
   // monitor verbs with a message about monitoring, not restores.
   if (!capsCache.baseline_restore || !cur || !cur.id || cur.kind !== "registry") return null;
+  // Without baseline:create the form goes, the outcome of the last restore
+  // stays: GET .../baseline/restore is servers:read, and "the restore wrote
+  // the copy here but could not send it to S3" is a fact about whether a
+  // copy is safe, not a control. See the end of this function.
+  const mayCreate = sessionMay(PERM_SNAPSHOT_CREATE);
   // The server needs its OWN local backup directory to build INTO: the
   // daemon-wide one is a shared store the endpoint refuses (the fold would mix
   // servers).
@@ -7680,7 +7746,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   if (rst && rst.state === "running") return null; // the run region owns it
   const card = el("section", { class: "ov-panel bk-restore" });
   card.append(el("div", { class: "ov-panel-head" },
-    el("h2", { class: "ov-panel-title", text: "Restore to a moment" })));
+    el("h2", { class: "ov-panel-title", text: mayCreate ? "Restore to a moment" : "Last restore" })));
   const state = el("p", { class: "form-hint bk-card-state" });
   state.hidden = true;
   card.append(state);
@@ -7714,6 +7780,13 @@ function backupRestoreCard(cur, b, restoreSt) {
     state.textContent =
       "Last restore finished" + (rst.at ? ": the backup at " + utcLabel(rst.at) : "") + " is in the list below." +
       (rst.carried ? " " + rst.carried + " table(s) reused an unchanged file" + reusedCopiedNote(rst.carried_copied || 0) + "." : "");
+  }
+  if (!mayCreate) {
+    // Only the outcome line, and no card at all when there is none: an
+    // empty "Restore to a moment" panel offers nothing to a reader who
+    // cannot restore.
+    if (state.hidden) return null;
+    return card;
   }
   card.append(body);
   return card;
@@ -7852,7 +7925,8 @@ function backupTakeAway(cur, b, sqlSt) {
   if (stErr) {
     panel.append(el("p", { class: "form-msg err", text:
       "The state of the .sql build could not be read: " + String(stErr).replace(/[.\s]+$/, "") +
-      ". A build may be running or finished that this page cannot show, so Build is off until it can be read." }));
+      ". A build may be running or finished that this page cannot show" +
+      (sessionMay(PERM_SNAPSHOT_CREATE) ? ", so Build is off until it can be read." : ".") }));
   } else if (sql && st && st.state && !SQL_EXPORT_KNOWN.has(st.state)) {
     panel.append(el("p", { class: "form-msg err", text:
       "The last .sql build reports a state this console does not recognise: " + st.state + ". Update the console, or check the daemon's log." }));
@@ -7917,9 +7991,12 @@ function backupLane(title, files, tail) {
 // NAME; only this pins its EXISTENCE.
 function backupDuckLane(b) {
   if (!b || b.error || !b.configured) return null;
+  // The lane IS a download of row data, which takes query:execute; the
+  // views file beside it is GET /api/views.sql, which takes settings:read.
+  if (!sessionMay("query:execute")) return null;
   const snaps = (b.snapshots || []);
   if (!snaps.length) return null;
-  const hasViews = !!capsCache.views;
+  const hasViews = !!capsCache.views && sessionMay("settings:read");
   const files = [{ name: "Parquet files", cap: "your tables" }];
   if (hasViews) files.push({ name: DUCKDB_VIEWS_FILE, cap: "how to read them" });
   const lane = backupLane("To open in DuckDB", files, hasViews
@@ -7974,7 +8051,10 @@ function backupDuckLane(b) {
   // backup: the same folder still yields the file from the command line. And
   // it is not a convenience -- money columns are stored as text in Parquet,
   // so without it the first SUM a reader writes fails to bind.
-  if (!hasViews) {
+  // Only for the CONFIGURATION reason. When views.sql is held back because
+  // this session may not read settings, saying "DBTrail is set not to read
+  // archived data" is a false statement about the installation.
+  if (!capsCache.views) {
     lane.append(el("p", { class: "form-hint", text:
       "The file that describes these tables is not offered here, because DBTrail is set not to read archived data. " +
       "DuckDB still opens the Parquet files, but decimal columns arrive as text, so totals will not add up until you cast them." }));
@@ -8048,6 +8128,20 @@ function backupElsewhereNote(b, usable, kind) {
 
 function backupSQLLane(cur, b, sqlSt) {
   if (!capsCache.sql_export || !cur || !cur.id || cur.kind !== "registry") return null;
+  // Starting a build takes baseline:create; taking the finished file home is
+  // a download of row data (query:execute). Neither decides whether the lane
+  // exists: GET .../sql-export is servers:read, and how the last build ended
+  // (failed, ready, a staging problem on the disk capture shares) is a fact
+  // for anyone who may look. Without baseline:create the lane is its outcome
+  // alone, and no lane at all when there is none: a status that could not be
+  // read, or a state this console does not know, counts as an outcome (see
+  // the guard at the end). backupTakeAway's own
+  // signals (opening by itself, the unreadable-status line) hang off this
+  // lane being drawn, which is one more reason it must not vanish with its
+  // button.
+  const mayCreate = sessionMay(PERM_SNAPSHOT_CREATE);
+  const mayDownload = sessionMay("query:execute");
+  const again = (t) => mayCreate ? " " + t : "";
   if (!b || b.error || !b.configured) return null;
   // b.kind, NOT cur.baseline_dir. cur is the RAW registry entry; the export
   // resolves through withBaselineDefaults (#1010), so an entry that inherits
@@ -8065,7 +8159,7 @@ function backupSQLLane(cur, b, sqlSt) {
   const st = sqlSt && sqlSt.sql_export;
   const lane = backupLane("To load into MySQL",
     [{ name: ".sql files", cap: "your tables" }],
-    ", built for whatever moment you pick.");
+    mayCreate ? ", built for whatever moment you pick." : ", built for a moment someone picks.");
   const body = el("div", { class: "bk-restore-body" });
   // Running used to return null and take the whole card off the page. In a
   // two-lane panel that leaves a hole where an answer was, so the lane stays
@@ -8075,7 +8169,7 @@ function backupSQLLane(cur, b, sqlSt) {
     lane.append(body);
     return lane;
   }
-  body.append(el("p", { class: "form-hint", text:
+  if (mayCreate) body.append(el("p", { class: "form-hint", text:
     "Plain SQL files in mydumper format, ready for myloader. Loading them back needs nothing from DBTrail, and your database is never touched: DBTrail starts from the backup before that moment and replays the changes it already recorded." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
@@ -8089,14 +8183,22 @@ function backupSQLLane(cur, b, sqlSt) {
   // running. One click here would delete a ready copy the reader cannot see.
   // backupTakeAway says why the button is off.
   if (sqlSt && sqlSt.error) go.disabled = true;
-  body.append(el("div", { class: "bk-restore-row" }, input, go), msg);
-  if (b.kind === "dir") {
-    const elsewhere = backupElsewhereNote(b, usable, reads);
-    if (elsewhere) body.append(elsewhere);
+  if (mayCreate) {
+    body.append(el("div", { class: "bk-restore-row" }, input, go), msg);
+    if (b.kind === "dir") {
+      const elsewhere = backupElsewhereNote(b, usable, reads);
+      if (elsewhere) body.append(elsewhere);
+    }
   }
   if (st && st.state === "failed") {
     body.append(el("p", { class: "form-msg err", text:
       "Last build failed: " + backupFoldError(st.last_error || "unknown error") + " Nothing was built." }));
+  } else if (st && st.state === "succeeded" && !mayDownload && !st.removal_owed) {
+    // A finished build this session cannot take home: say it exists and
+    // when it goes, never "Ready" over a button that is not there.
+    body.append(el("p", { class: "form-hint", text:
+      "Built for " + utcLabel(st.at || "") + (st.bytes ? " (" + humanBytes(st.bytes) + " on this machine)" : "") + "." +
+      (st.expires_at ? " It stays until " + utcLabel(st.expires_at) + ", or until it is downloaded or a new build starts." : "") }));
   } else if (st && st.state === "succeeded") {
     const dl = el("button", { class: "btn", type: "button", text: "Download .sql backup (.tar.gz)" });
     dl.onclick = () => downloadSQLExport(cur.id, dl, st.bytes || 0);
@@ -8117,7 +8219,7 @@ function backupSQLLane(cur, b, sqlSt) {
     // cannot fetch, and the held-download case reaches here with no
     // staging_error to explain it either.
     if (st.removal_owed) {
-      row.append(el("span", { class: "form-hint", text: "This build is being cleaned up and can no longer be downloaded. Build again for a fresh copy." }));
+      row.append(el("span", { class: "form-hint", text: "This build is being cleaned up and can no longer be downloaded." + again("Build again for a fresh copy.") }));
     } else {
       row.append(dl);
     }
@@ -8130,10 +8232,10 @@ function backupSQLLane(cur, b, sqlSt) {
   } else if (st && st.state === "downloaded") {
     body.append(el("p", { class: "form-hint", text:
       "Downloaded" + (st.downloaded_at ? " at " + utcLabel(st.downloaded_at) : "") +
-      ": the backup as of " + utcLabel(st.at || "") + " was handed over and its file was removed from this machine. Build again for another copy." }));
+      ": the backup as of " + utcLabel(st.at || "") + " was handed over and its file was removed from this machine." + again("Build again for another copy.") }));
   } else if (st && st.state === "expired") {
     body.append(el("p", { class: "form-hint", text:
-      "The backup built for " + utcLabel(st.at || "") + " is no longer on this machine: it was not downloaded before its deadline, or its files were removed. Build again for a fresh copy." }));
+      "The backup built for " + utcLabel(st.at || "") + " is no longer on this machine: it was not downloaded before its deadline, or its files were removed." + again("Build again for a fresh copy.") }));
   }
   // The state follows the disk: a removal that failed keeps the build in
   // its previous state and says so here, over a download button that would
@@ -8142,6 +8244,14 @@ function backupSQLLane(cur, b, sqlSt) {
     body.append(el("p", { class: "form-msg err", text:
       "Staging problem: " + st.staging_error + ". The daemon retries every minute; check the staging directory on the machine running it." }));
   }
+  // Without baseline:create and nothing to report, there is no lane. An
+  // unreadable status and a state this console does not know ARE something
+  // to report: backupTakeAway draws those lines, and opens by itself for
+  // them, only when this lane exists. A first version of this guard counted
+  // only the lines drawn here, and a view-only reader whose status read
+  // failed saw a page identical to "no build has ever run".
+  const unknownState = !!(st && st.state && !SQL_EXPORT_KNOWN.has(st.state));
+  if (!mayCreate && !body.childNodes.length && !(sqlSt && sqlSt.error) && !unknownState) return null;
   lane.append(body);
   return lane;
 }
@@ -8276,7 +8386,9 @@ function verifyRegions(servers, opts) {
   control.append(helpFold);
   if (!configured) {
     control.append(el("p", { class: "form-hint", text:
-      "No backup set up for this server yet. The two snapshot modes need one (set one under Where and how often, then create at least two snapshots). \"Check recovery inputs\" works without one: it only reads the index." }));
+      "No backup set up for this server yet. The two snapshot modes need one" +
+      (sessionMayConfigureServer() ? " (set one under Where and how often, then create at least two snapshots)" : "") +
+      ". \"Check recovery inputs\" works without one: it only reads the index." }));
   }
 
   // ── Region 2: what is running or just ran ──
@@ -8301,7 +8413,10 @@ function verifyRegions(servers, opts) {
   historyCard.append(history);
   loadVerifyHistory(cur.id, history);
 
-  return [control, current, historyCard];
+  // Running a check takes baseline:create. Without it the region that
+  // offers one is left out; what is running and what ran before stay, since
+  // reading them takes only servers:read.
+  return sessionMay(PERM_SNAPSHOT_CREATE) ? [control, current, historyCard] : [current, historyCard];
 }
 
 // VFY_MODE_HELP (#1418): what each mode proves, what it needs, what it costs
@@ -8749,7 +8864,7 @@ function renderVerifyResults(container, status, id, opts) {
   const history = (opts && opts.history) || (status && status.trigger !== undefined);
   if (!status || status.state === "idle") {
     if (!history) {
-      container.append(el("div", { class: "ev-empty", text: "No run yet. Results appear here, table by table, once you start one. Past runs sit under History." }));
+      container.append(el("div", { class: "ev-empty", text: "No run yet. Results appear here, table by table, once a check runs. Past runs sit under History." }));
     }
     return;
   }
@@ -9395,14 +9510,20 @@ async function renderConnect() {
   // Where the selected server's snapshots live, for the Iceberg export
   // command (#1573): location_only is the Backups listing's own resolution,
   // answered without reading the storage or opening the server's index. Not
-  // asked when the session may not read settings or a data profile is active
-  // (data_profile, the key the server refuses on): the server would refuse it
-  // on every visit, auditing a denial under a profile, since the command
-  // hands out unredacted data. A refusal draws no panel; any other failure
-  // says so in one line, so a missing panel never reads as "this server keeps
-  // no backups".
+  // asked when the session may not read this server or a data profile is
+  // active (data_profile, the key the server refuses on): the server would
+  // refuse it on every visit, auditing a denial under a profile, since the
+  // command hands out unredacted data. A refusal draws no panel; any other
+  // failure says so in one line, so a missing panel never reads as "this
+  // server keeps no backups".
+  //
+  // The permission is servers:read because that is what the route takes:
+  // listing a server's snapshots is a read about that server, not console
+  // administration. It must track the route — gating on settings:read here
+  // would draw the panel for a settings-only session and then 403 its
+  // location lookup, which is a button that fails rather than one absent.
   let bLoc = null, bLocFailed = false;
-  if ((capsCache.permissions || {})["settings:read"] !== false && !capsCache.data_profile) {
+  if ((capsCache.permissions || {})["servers:read"] !== false && !capsCache.data_profile) {
     try { bLoc = await api("/api/baselines?location_only=1"); } catch (err) { bLocFailed = err.status !== 403; }
   }
   // vgen: navigating away while these requests are out must not let this
@@ -10115,6 +10236,34 @@ function updateSideVersion(known) {
 // permissions map (a degraded {} capabilities response) also leaves everything
 // visible: only an explicit `false` hides. The server's 403 is the real gate;
 // this just spares a scoped user a tab that would only error.
+// sessionMay reports whether this session holds a permission, for the parts
+// of a page that are drawn in code rather than tagged data-perm. Same
+// convention as gatePermissions: only an explicit false hides. A session with
+// no access policy is sent every permission as true, and a capability read
+// that failed is reported by its own line on the page, not by hiding
+// everything (#1573 step 7).
+//
+// Hiding here is presentation only. The server refuses every one of these
+// routes on its own; what this saves is a reader being offered a button that
+// can only fail, or a red box about a section they were never meant to see.
+function sessionMay(p) {
+  return (capsCache.permissions || {})[p] !== false;
+}
+
+// sessionMayConfigureServer: whether this session can reach AND change a
+// server's snapshot location — it has to read the settings half of the page
+// to see the row, and write servers to save it. Every hint that says "set it
+// under Where and how often" is a fix only for such a session; to anyone
+// else it points at a section they cannot see or a Save they do not have.
+function sessionMayConfigureServer() {
+  return sessionMay("settings:read") && sessionMay("servers:write");
+}
+
+// The permission that starts a snapshot, a restore, a .sql build or a
+// check. Its name is frozen (#1573 keeps every permission name), and it is
+// written once so the vocabulary ratchet counts it once.
+const PERM_SNAPSHOT_CREATE = "baseline:create";
+
 function gatePermissions() {
   const perms = capsCache.permissions || {};
   $all("[data-perm]").forEach((node) => node.classList.toggle("perm-off", perms[node.dataset.perm] === false));
