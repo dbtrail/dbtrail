@@ -43,7 +43,7 @@ Before you start:
 
 ## 2. First-Time Setup
 
-The [Quickstart](quickstart.md) gets you running — the web console (`+ Add server`), or `bintrail up` on the command line (preflight + init + snapshot + stream). This guide assumes you're up and focuses on the day-to-day scenarios below.
+The [start page](https://www.dbtrail.com/docs/quickstart/) gets you running from the web interface (`+ Add server`), and the [command-line quickstart](quickstart.md) with `bintrail up` (preflight + init + snapshot + stream). This guide assumes you're up and focuses on the day-to-day scenarios below.
 
 **Tip — skip the repeated flags.** Instead of passing `--index-dsn`/`--source-dsn` on every command, generate a config file once:
 
@@ -364,7 +364,7 @@ bintrail up \
   --index-dsn  "user:pass@tcp(127.0.0.1:3306)/binlog_index"
 ```
 
-`up` runs the preflight, creates the index, snapshots, streams, and rotates hourly — run it under systemd (`Restart=always`). To replay from an earlier point, use `bintrail stream --start-gtid ... --reset`. RDS gotchas (backup-retention enables binlog, stream from the primary, retention cap), the `--ssl-mode` TLS options, and metrics are in [Streaming](streaming.md); the command-by-command walkthrough is [Quickstart Option B](quickstart.md#option-b--command-line).
+`up` runs the preflight, creates the index, snapshots, streams, and rotates hourly. Run it under systemd (`Restart=always`). To replay from an earlier point, use `bintrail stream --start-gtid ... --reset`. RDS gotchas (backup-retention enables binlog, stream from the primary, retention cap), the `--ssl-mode` TLS options, and metrics are in [Streaming](streaming.md); the command-by-command walkthrough is the [command-line quickstart](quickstart.md#capture-changes).
 
 ---
 

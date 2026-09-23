@@ -27,6 +27,10 @@ MPORT="${DBTRAIL_METRICS_PORT:-9090}"
 COMPOSE_URL="https://raw.githubusercontent.com/dbtrail/dbtrail/${REF}/docker-compose.yml"
 HEALTH_URL="http://127.0.0.1:${PORT}/api/healthz"
 CONSOLE_URL="http://127.0.0.1:${PORT}"
+START_PAGE="https://www.dbtrail.com/docs/quickstart/"
+# The promise, word for word the same in this banner, the README and the start
+# page (#1807); test/installer pins it.
+PROMISE="DBTrail keeps every change on your MySQL server, before and after, and writes the SQL that undoes the ones you didn't want."
 
 # ── color capability detection ──────────────────────────────────────────
 # Four tiers so the sunset gradient degrades gracefully: 24-bit truecolor →
@@ -99,7 +103,7 @@ banner() {
   fg 255 210 61 93; printf '●'; crst                          # gold sun node
   printf '   '; sunset_word; printf '\n  '
   fg 255 77 141 35; printf '▌'; crst                          # pink bar
-  printf '   %severy MySQL change — indexed, queryable, reversible%s\n  ' "$DIM" "$RST"
+  printf '   %s%s%s\n  ' "$DIM" "$PROMISE" "$RST"
   fg 255 138 61 33; printf '▌'; crst                          # orange bar
   printf '   %sinstalling the Docker stack → %s%s\n\n' "$DIM" "$DIR" "$RST"
 }
@@ -124,7 +128,7 @@ else
 fi
 
 docker info >/dev/null 2>&1 || die \
-  "The Docker daemon isn't running. Start Docker and re-run this installer."
+  "Docker isn't running. Start Docker and re-run this installer."
 
 # Catch the single most common FRESH-install failure — port already taken — with
 # an actionable message instead of Docker's raw bind error. Best-effort: if we
@@ -168,8 +172,8 @@ rerun_cmd() {
 if [ ! -f "$DIR/docker-compose.yml" ]; then
   if port_in_use "$PORT"; then
     free=$(first_free_port 8091 8099 "$PORT") || free=8091
-    die "Port ${PORT} is already in use on this machine, so the console can't use it.
-    Run the installer with the console on port ${free} instead:
+    die "Port ${PORT} is already in use on this machine, so DBTrail can't use it.
+    Run the installer with DBTrail on port ${free} instead:
         $(rerun_cmd "$free")"
   fi
   # The stack also publishes Prometheus /metrics on 9090, which is also
@@ -178,7 +182,7 @@ if [ ! -f "$DIR/docker-compose.yml" ]; then
   # a port the operator chose explicitly is theirs and is only checked.
   if [ "$MPORT" = "$PORT" ] || port_in_use "$MPORT"; then
     if [ -n "${DBTRAIL_METRICS_PORT:-}" ]; then
-      die "The metrics port ${MPORT} is already in use (or is the console's port).
+      die "The metrics port ${MPORT} is already in use (or is the port DBTrail answers on).
     Pick another one with DBTRAIL_METRICS_PORT, or leave it unset to have one chosen."
     fi
     MPORT=$(first_free_port 9091 9099 "$PORT") || die \
@@ -196,7 +200,7 @@ elif command -v wget >/dev/null 2>&1; then
 else
   die "Need curl or wget to download the compose file."
 fi
-say "${DIM}    docker ✓   ${COMPOSE} ✓   daemon ✓${RST}"
+say "${DIM}    docker ✓   ${COMPOSE} ✓   Docker running ✓${RST}"
 
 # ── 2. download the compose file into a self-contained directory ────────
 step "Setting up the stack in ${B}${DIR}${RST}"
@@ -207,7 +211,7 @@ if [ -f docker-compose.yml ]; then
   warn "docker-compose.yml already exists here, so it was left alone (delete it to re-fetch)."
   warn "An existing file is never upgraded, and volumes and mounts can only come from it. If this is an upgrade, save your edits, delete the file, and re-run: docs/docker.md 'Upgrading the stack'."
   [ "$PORT" != "8090" ] && warn \
-    "DBTRAIL_PORT=${PORT} ignored — reusing the existing docker-compose.yml (edit its ports: line by hand)."
+    "DBTRAIL_PORT=${PORT} ignored: the existing docker-compose.yml is reused (edit its ports: line by hand)."
   [ -n "${DBTRAIL_METRICS_PORT:-}" ] && warn \
     "DBTRAIL_METRICS_PORT=${DBTRAIL_METRICS_PORT} ignored: the existing docker-compose.yml is reused (edit its ports: line by hand)."
 else
@@ -228,7 +232,7 @@ else
     # sed exits 0 even when nothing matched — verify the rewrite actually landed
     # rather than print a false "port set" and bind the wrong port.
     grep -q "127.0.0.1:${PORT}:8090" docker-compose.yml || die \
-      "Couldn't set the console port to ${PORT} — the compose file's published-port
+      "Couldn't set the port to ${PORT}: the compose file's published-port
     line isn't what this installer expected. Edit the 'ports:' line in
     ${DIR}/docker-compose.yml by hand, or report it."
     # A compose file from before #1784 (an older DBTRAIL_REF) has no banner
@@ -236,11 +240,11 @@ else
     # not worth failing the install over.
     if grep -q "BINTRAIL_CONSOLE_URL:" docker-compose.yml; then
       grep -q "BINTRAIL_CONSOLE_URL: http://127.0.0.1:${PORT}/" docker-compose.yml || die \
-        "Couldn't point the console's startup banner at port ${PORT}: the
+        "Couldn't point DBTrail's startup banner at port ${PORT}: the
     BINTRAIL_CONSOLE_URL line in ${DIR}/docker-compose.yml isn't what this
     installer expected. Edit it by hand, or report it."
     fi
-    say "${DIM}    console port set to ${PORT}${RST}"
+    say "${DIM}    DBTrail will answer on port ${PORT}${RST}"
   fi
   # Same rewrite for the metrics mapping, verified the same way.
   if [ "$MPORT" != "9090" ]; then
@@ -267,7 +271,7 @@ grep -q '^services:' docker-compose.yml || die \
     or a network proxy/captive portal returned something else). Delete it and re-run."
 
 # ── 3. bring it up ──────────────────────────────────────────────────────
-step "Starting containers (first run pulls images — this can take a minute)"
+step "Starting containers (the first run downloads images, which can take a minute)"
 $COMPOSE up -d || die "\`$COMPOSE up -d\` failed. Check the output above.
     Says \"invalid IP address in add-host\"? Your engine does not understand
     host-gateway: put HOST_GATEWAY=<this machine's address> in ${DIR}/.env and re-run."
@@ -278,7 +282,7 @@ $COMPOSE up -d || die "\`$COMPOSE up -d\` failed. Check the output above.
 # so by the time it returns the index is up. We still poll the unauthenticated
 # liveness endpoint to wait out the short gap before the console process binds
 # its HTTP listener — so we never print "ready" before the URL actually answers.
-step "Waiting for the console to come up"
+step "Waiting for DBTrail to answer"
 ready=""
 i=0
 while [ "$i" -lt 90 ]; do
@@ -297,35 +301,51 @@ if [ -z "$ready" ]; then
   # `up -d` returns 0 even if a container then crash-loops, so "no answer" can
   # mean still-pulling OR genuinely broken. Point at both ps and logs, and exit
   # non-zero so an automated caller (`install.sh && …`) doesn't read this as success.
-  warn "The console didn't answer at ${CONSOLE_URL} within ~3 minutes."
+  warn "DBTrail didn't answer at ${CONSOLE_URL} within ~3 minutes."
   say  "It may still be pulling images, or a container may have failed. Check both:"
   say  "    ${B}cd ${DIR} && ${COMPOSE} ps${RST}"
   say  "    ${B}cd ${DIR} && ${COMPOSE} logs -f bintrail${RST}"
-  say  "Once the console URL shows there, open ${CONSOLE_URL}"
+  say  "Once DBTrail answers, open ${CONSOLE_URL}"
   exit 1
 fi
 
 # ── 5. next steps — the whole point of this script ──────────────────────
+# The same four steps, in the same words, as the start page (#1807), and only
+# what the merged code does. The sentences a person reads here follow the
+# first run's closed word list (test/installer reads it from the walk's
+# scoreboard); commands may say anything, since they are copied, not read.
 say ""
 fg 14 170 110 32; printf '%s✓ DBTrail is up.%s\n' "$B" "$RST"   # green check
 say ""
+say "Have at hand: the ${B}host and port${RST} of your MySQL server,"
+say "and ${B}a MySQL login that can create users${RST} and grant them privileges."
+say ""
 say "${B}Next steps${RST}"
-say "  ${B}1.${RST} Open the console:    ${B}${CONSOLE_URL}${RST}"
-say "  ${B}2.${RST} Create your console ${B}username + password${RST} (first-run screen)."
-say "  ${B}3.${RST} Click ${B}+ Add server${RST} and paste the MySQL you want to watch —"
-say "     host, user, password. DBTrail runs the preflight, provisions an"
-say "     index for it, and starts streaming. Watch it from a MySQL on this"
-say "     same machine? Use host ${B}host.docker.internal${RST} (on Linux, that"
-say "     MySQL must listen on more than 127.0.0.1)."
+say "  ${B}1. Sign in.${RST} Open ${B}${CONSOLE_URL}${RST} and create a username and password."
+say "  ${B}2. Connect.${RST} Click ${B}+ Add server${RST}, give the server a name, and fill in"
+say "     the host and port of your MySQL server. The form suggests a user and"
+say "     password for DBTrail and shows the SQL that creates that user: run it on"
+say "     your MySQL with that login, then press Save."
+say "     Your MySQL runs on this same machine? Use host ${B}host.docker.internal${RST}"
+say "     (on Linux, that MySQL must listen on more than 127.0.0.1)."
+say "  ${B}3. First change.${RST} Change a row on your MySQL. It shows on the Overview"
+say "     within a minute, with an Undo that writes the SQL to reverse it."
+say "  ${B}4. First snapshot.${RST} With one, DBTrail can rebuild a whole table as it was"
+say "     at a past moment. Today it takes a folder created first and a few steps"
+say "     on the Snapshots page; the start page below walks through them."
 say ""
-say "${DIM}The stack lives in ${DIR}. Useful commands from there:${RST}"
-say "  ${COMPOSE} logs -f bintrail     ${DIM}# follow what it's doing${RST}"
-say "  ${COMPOSE} ps                   ${DIM}# container status${RST}"
-say "  ${COMPOSE} down                 ${DIM}# stop (your data stays in the volumes)${RST}"
-say "  ${COMPOSE} exec -it bintrail bintrail-console user set-password  ${DIM}# reset login${RST}"
+say "Your change history lives on this machine, in this stack's Docker volumes,"
+say "with your login and your saved servers. Back them up. To keep the history on"
+say "a MySQL server of your own instead, set INDEX_DSN in ${DIR}/.env."
 say ""
-say "${DIM}The bundled MySQL 8.4 index is your system of record — back up its"
-say "volumes. Bring your own with INDEX_DSN in a .env. Docs: https://github.com/dbtrail/dbtrail${RST}"
+say "From ${B}${DIR}${RST}:"
+say "  ${COMPOSE} down                 ${DIM}# stop DBTrail; your history stays in the volumes${RST}"
+say "  ${COMPOSE} up -d                ${DIM}# start it again${RST}"
+say "  ${COMPOSE} logs -f bintrail     ${DIM}# see what it is doing${RST}"
+say "  ${COMPOSE} exec -it bintrail bintrail-console user set-password  ${DIM}# reset the login${RST}"
+say "Adding -v to down deletes the volumes, and your history with them."
+say ""
+say "Every step in detail: ${B}${START_PAGE}${RST}"
 
 # ── 6. best-effort: open the browser ────────────────────────────────────
 if [ "${DBTRAIL_NO_OPEN:-}" != "1" ]; then

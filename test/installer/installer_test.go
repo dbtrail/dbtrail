@@ -11,10 +11,15 @@ import (
 // stubs stand in for the tools install.sh calls, so the script runs whole
 // with no Docker and no network. lsof reports a port busy when it is listed
 // in BUSY_PORTS; curl serves the repository's docker-compose.yml; docker
-// records what it was asked to do.
+// records what it was asked to do, and plays a stopped Docker
+// (STUB_DOCKER_DOWN) or a missing Compose (STUB_NO_COMPOSE) when asked.
 var stubs = map[string]string{
 	"docker": `#!/bin/sh
 echo "docker $*" >> "$STUB_LOG"
+case "$1" in
+  info) [ -n "$STUB_DOCKER_DOWN" ] && exit 1 ;;
+  compose) [ "$2" = version ] && [ -n "$STUB_NO_COMPOSE" ] && exit 1 ;;
+esac
 exit 0
 `,
 	"lsof": `#!/bin/sh
