@@ -2757,7 +2757,8 @@ try {
   (daemonRO.full && daemonRO.full.sects.includes("Change here") && daemonRO.full.input && !daemonRO.full.disabled && daemonRO.full.save && daemonRO.full.revert
     && daemonRO.ro.sects.includes("Current settings") && !daemonRO.ro.sects.includes("Change here")
     && daemonRO.ro.input && daemonRO.ro.disabled && !daemonRO.ro.save && !daemonRO.ro.revert
-    && /Saved here\. The command line says 3d/.test(daemonRO.ro.text))
+    && /Saved here\. The command line says 3d/.test(daemonRO.ro.text)
+    && /Use the startup value to go back/.test(daemonRO.full.text) && !/Use the startup value/.test(daemonRO.ro.text))
     ? ok("permissions: a value saved in the console stays in its card, locked, for a session that may only read settings")
     : bad("permissions: a value saved in the console stays in its card, locked, for a session that may only read settings", JSON.stringify(daemonRO));
 

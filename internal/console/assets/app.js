@@ -5441,8 +5441,8 @@ function backupDaemonEditCard(rows, locked) {
   }
   card.append(cnFine("More about these settings",
     el("p", { class: "form-hint", text:
-      "Saved here, in DBTrail's own settings file, which wins over the command line and the environment. " +
-      "Use the startup value to go back to what the process was started with." }),
+      "Saved here, in DBTrail's own settings file, which wins over the command line and the environment." +
+      (locked ? "" : " Use the startup value to go back to what the process was started with.") }),
     docsMore("settings/backups", "set-at-startup", "settings that need a restart")));
   return card;
 }
