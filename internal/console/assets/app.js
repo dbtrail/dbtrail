@@ -1044,7 +1044,7 @@ function navigate(route, params, push = true) {
   // the top (#1681's first-run walk measured it). Only the SAME page: moving
   // between pages keeps today's behavior, which other measurements rely on.
   // An address with a section keeps its own jump (scrollToSection).
-  const samePage = location.pathname === "/" + route;
+  const samePage = routeFromLocation() === route;
   if (push) history.pushState({ route }, "", "/" + route + qs + hash);
   if (push && samePage && !hash) {
     const main = document.querySelector(".main");

@@ -277,7 +277,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 // this keeps the shape from being simplified into a reset on every navigation.
 func TestNavigate_samePageGoesToItsTop(t *testing.T) {
 	body := jsFunctionBody(t, readAsset(t, "app.js"), "navigate")
-	for _, want := range []string{`const samePage = location.pathname === "/" + route;`, `if (push && samePage && !hash) {`, `main.scrollTop = 0;`} {
+	for _, want := range []string{`const samePage = routeFromLocation() === route;`, `if (push && samePage && !hash) {`, `main.scrollTop = 0;`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("navigate lost %q", want)
 		}
