@@ -284,7 +284,9 @@ func pruneFailureReason(res PruneResult, err error) string {
 	if res.ProbeErrors > 0 {
 		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination, so they were kept.", snapshotsWord(res.ProbeErrors)))
 	}
-	return strings.Join(why, " ")
+	// One cause per line, and "\n" only: the page renders them line by line,
+	// and a path or an error can itself contain "; " or ", ".
+	return strings.Join(why, "\n")
 }
 
 // snapshotsWord is "1 snapshot" or "n snapshots".

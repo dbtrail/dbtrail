@@ -837,3 +837,45 @@ func TestPruneFailure_unreadableSnapshotIsRecordedWithItsPath(t *testing.T) {
 		t.Fatalf("readable again, but the failure record stayed: ok=%v err=%v", ok, err)
 	}
 }
+
+// Several causes in one attempt are one per line, joined by "\n" and nothing
+// else: the page renders the reason line by line, and a path or an error can
+// itself contain "; " or ", ". One cause stays one line.
+func TestPruneFailure_severalCausesAreOnePerLine(t *testing.T) {
+	root := t.TempDir()
+	a, b, c := snapName(days(30)), snapName(days(20)), snapName(days(10))
+	for _, s := range []string{a, b, c} {
+		makeSnapshot(t, root, s, true, "shop/orders")
+	}
+	origRead, origRemove := readDir, removeAll
+	t.Cleanup(func() { readDir, removeAll = origRead, origRemove })
+	bad := filepath.Join(root, b)
+	readDir = func(p string) ([]os.DirEntry, error) {
+		if p == bad {
+			return nil, fmt.Errorf("open %s: permission denied; try again", p)
+		}
+		return origRead(p)
+	}
+	removeAll = func(string) error { return os.ErrPermission }
+	keepNewest(t, root, 1) // a is removed from the list, its files stay; b cannot be read
+	f, ok, err := ReadLastPruneFailure(root)
+	if err != nil || !ok {
+		t.Fatalf("no failure recorded: ok=%v err=%v", ok, err)
+	}
+	lines := strings.Split(f.Reason, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("two causes gave %d lines, want 2: %q", len(lines), f.Reason)
+	}
+	if !strings.Contains(lines[0], "could not all be deleted") || !strings.Contains(lines[1], "could not be read") {
+		t.Errorf("lines = %q", lines)
+	}
+
+	// One cause: one line. Deletion works again (the leftover goes), b still
+	// cannot be read.
+	removeAll = origRemove
+	keepNewest(t, root, 1)
+	f, _, _ = ReadLastPruneFailure(root)
+	if strings.Contains(f.Reason, "\n") || !strings.Contains(f.Reason, "could not be read") {
+		t.Errorf("one cause is not one line: %q", f.Reason)
+	}
+}
