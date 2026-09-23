@@ -98,10 +98,16 @@ func (s *Server) startEntry(ctx context.Context, e ServerEntry) error {
 //
 // A failed removal is reported (Kept), never swallowed. A `_ = Delete(...)`
 // here would turn the guarantee this endpoint is FOR into a silent failure.
-func (s *Server) startNewEntry(ctx context.Context, e ServerEntry) startOutcome {
+//
+// created is the snapshot folder this request made for e (#1681), removed with
+// the entry so a failed attempt leaves no empty folder, and a retry no second
+// one. It stays when the entry could not be removed: it is that entry's.
+func (s *Server) startNewEntry(ctx context.Context, e ServerEntry, created string) startOutcome {
 	if err := s.startEntry(ctx, e); err != nil {
 		out := startOutcome{Err: err, Status: s.monitorCtrl.Status(e.ID)}
-		if delErr := s.cm.reg.Delete(e.ID); delErr != nil {
+		// UndoAdd, not Delete: the entry never took a snapshot, so the
+		// folder it pointed at must not be marked held (#1681).
+		if delErr := s.cm.reg.UndoAdd(e.ID); delErr != nil {
 			out.Kept = true
 			slog.Error("connect: capture did not start and the server could not be removed again",
 				"server", e.Name, "id", e.ID, "start_error", err.Error(), "remove_error", delErr.Error())
@@ -109,6 +115,7 @@ func (s *Server) startNewEntry(ctx context.Context, e ServerEntry) startOutcome 
 		}
 		s.cm.evict(e.ID)
 		s.sessionProfiles.invalidate(e.ID)
+		removeCreatedDir(created)
 		// The entry is gone; so must be what Start provisioned for it. A
 		// per-server database left behind here is owned by nothing, and the
 		// next attempt mints a new id, so it would never be reused either.
@@ -180,12 +187,12 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	added, err := s.persistNewEntry(entry, deriveIndex, base)
+	added, created, err := s.persistNewEntry(entry, deriveIndex, base, localCopyOf(req))
 	if err != nil {
-		writeJSONError(w, registryErrStatus(err), err.Error())
+		writeJSONError(w, newEntryErrStatus(err), err.Error())
 		return
 	}
-	res := s.startNewEntry(r.Context(), added)
+	res := s.startNewEntry(r.Context(), added, created)
 	if !res.Started {
 		writeJSON(w, http.StatusOK, connectCheckResponse{
 			Name: added.Name, Doctor: report, Error: res.Err.Error(), Kept: res.Kept,

@@ -2812,7 +2812,6 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 /* The disk-space card's title row. It carried a state pill until #1681 took
    the switch away; the measurements that justified the pill's colour went
    with it. */
-.bkr-head { display: flex; align-items: center; gap: 12px; }
 .cn-num {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 50%; flex: none;
@@ -3098,22 +3097,11 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .bks-docs:hover { color: var(--accent); }
 .bks-server .cn-fine { margin-top: 6px; }
 .bks-server .stg-cardfoot { margin-top: 10px; }
+/* The per-server yes/no (#1681): a plain fieldset, the two answers on one line. */
+.bks-q { border: 0; padding: 0; margin: 0 0 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }
+.bks-q legend { padding: 0; margin-bottom: 6px; width: 100%; }
+.bks-local-words .form-hint, .bks-local-words .form-msg { margin: 4px 0; }
 
-/* cfShape: the disk-space switch drawn. Two rows of five tiles, one backup
-   above the next. A kept tile is dashed in --line on --surface (the same
-   file, carried across); a written tile is solid --accent, the button's own
-   hue, so the control and the drawing say the same thing. With the switch
-   off every tile in the second row is solid accent: written again, all of
-   them. The first row stays neutral because it is the constant. */
-.cf-shape { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 12px; max-width: 320px; }
-.cf-row { display: flex; align-items: center; gap: 4px; }
-.cf-tile { width: 22px; height: 22px; border-radius: 5px; background: var(--ink-4); flex: none; box-sizing: border-box; }
-.cf-tile.cf-kept { background: var(--surface); border: 2px dashed var(--ink-4); }
-.cf-tile.cf-new { background: var(--accent); }
-.cf-key { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink-3); }
-.cf-key .cf-tile { width: 12px; height: 12px; border-radius: 3px; margin-right: 2px; }
-.cf-key .cf-tile.cf-kept { border-width: 1.5px; }
-.cf-key span + .cf-tile { margin-left: 10px; }
 
 /* blCase: which backup location is in force, one row per server (#1573: the
    three-row legend is gone). The row is highlighted with the Backups page's

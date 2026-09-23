@@ -88,6 +88,89 @@ type baselinesResponse struct {
 	// is routine — grading every row red on a healthy retention cadence would
 	// cry wolf, so the per-row verdicts inform and this field decides.
 	Staleness string `json:"staleness,omitempty"`
+	// LocalRetention is the keep-newest count this daemon applies to the
+	// selected server's local folder (#1681). OMITTED, never zero, when
+	// nothing local is ever pruned: no count, an external destination, a
+	// folder another rule owns, or a process that runs no prune loop. The
+	// page reads its presence to say how many copies this machine keeps.
+	LocalRetention *localRetentionDTO `json:"local_retention,omitempty"`
+	// LastPrune is the last prune that removed snapshots from that folder,
+	// read from the record the prune leaves beside them, so it survives a
+	// restart. OMITTED until one has. It is reported whatever wrote it (this
+	// daemon, the CLI, either rule), because the copies are gone either way.
+	LastPrune *lastPruneDTO `json:"last_prune,omitempty"`
+	// LastPruneError is set when that record exists and cannot be read: a
+	// prune happened, and the page must not read its absence as "never".
+	LastPruneError string `json:"last_prune_error,omitempty"`
+	// LastPruneFailure is the most recent prune attempt on that folder that
+	// FAILED: when, and why. OMITTED once an attempt succeeds. Without it a
+	// folder that stops shrinking shows only in the daemon's log while the
+	// retention line says how many snapshots it keeps.
+	LastPruneFailure *pruneFailureDTO `json:"last_prune_failure,omitempty"`
+}
+
+type pruneFailureDTO struct {
+	At     string `json:"at"` // RFC3339, UTC
+	Reason string `json:"reason"`
+}
+
+// localRetentionDTO and lastPruneDTO are the #1681 wire shapes. The Snapshots
+// page pins its sentence against exactly these names.
+type localRetentionDTO struct {
+	KeepNewest int `json:"keep_newest"`
+}
+
+type lastPruneDTO struct {
+	At      string `json:"at"` // RFC3339, UTC
+	Removed int    `json:"removed"`
+}
+
+// localRetentionOf is the selected server's local retention as the prune loop
+// applies it: the same console.LocalKeepTargets rule, over the same entries,
+// with the same folder excluded (the daemon's own --baseline-dir). nil where
+// nothing local is pruned.
+func (s *Server) localRetentionOf(id string) *localRetentionDTO {
+	if !s.localPruneLoop || s.cm.reg == nil {
+		return nil
+	}
+	e, ok := s.cm.reg.Get(id)
+	if !ok || e.BaselineDir == "" {
+		return nil
+	}
+	n := LocalKeepTargets(s.cm.reg.List(), s.cm.defaultBaselineDir)[canonicalDir(e.BaselineDir)]
+	if n <= 0 {
+		return nil
+	}
+	return &localRetentionDTO{KeepNewest: n}
+}
+
+// lastPruneOf reads the two prune records of the bundle's local folder: the
+// last prune that removed snapshots, and the last attempt that failed. An
+// unreadable record does not fail the listing, and is not silent either: it
+// comes back as an error string for last_prune_error, and is logged.
+func lastPruneOf(b *bundle, serverID string) (*lastPruneDTO, *pruneFailureDTO, string) {
+	dir := bundleBaselineDir(b)
+	if dir == "" {
+		return nil, nil, ""
+	}
+	var errs []string
+	var last *lastPruneDTO
+	if rec, ok, err := baseline.ReadLastPrune(dir); err != nil {
+		slog.Warn("console: the record of the last snapshot prune could not be read",
+			"server", serverID, "dir", dir, "error", err)
+		errs = append(errs, "snapshots were removed from this folder, but the record of when could not be read: "+err.Error())
+	} else if ok {
+		last = &lastPruneDTO{At: rec.At.UTC().Format(time.RFC3339), Removed: rec.Removed}
+	}
+	var failed *pruneFailureDTO
+	if rec, ok, err := baseline.ReadLastPruneFailure(dir); err != nil {
+		slog.Warn("console: the record of a failed snapshot prune could not be read",
+			"server", serverID, "dir", dir, "error", err)
+		errs = append(errs, "a prune of this folder failed, and the record of why could not be read: "+err.Error())
+	} else if ok {
+		failed = &pruneFailureDTO{At: rec.At.UTC().Format(time.RFC3339), Reason: rec.Reason}
+	}
+	return last, failed, strings.Join(errs, "; ")
 }
 
 // selectedServerID is the id the request EFFECTIVELY selected: the header
@@ -154,6 +237,8 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		resp.Schedule = s.backupScheduleDTO(sctx, e, s.scheduleClock())
 		cancel()
 	}
+	resp.LocalRetention = s.localRetentionOf(s.selectedServerID(r))
+	resp.LastPrune, resp.LastPruneFailure, resp.LastPruneError = lastPruneOf(b, s.selectedServerID(r))
 	if b.baselineSrc == "" {
 		writeJSON(w, http.StatusOK, resp)
 		return

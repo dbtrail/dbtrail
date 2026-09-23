@@ -137,6 +137,24 @@ type ServerEntry struct {
 	// schedule endpoints; the server edit form carries it over untouched.
 	// On binaries that predate it, it round-trips through Extra.
 	BackupSchedule *BackupSchedule `yaml:"backup_schedule,omitempty"`
+	// LocalKeepNewest is this server's local snapshot retention (#1681):
+	// while it has a local folder (BaselineDir) and no external destination
+	// (BaselineS3), the daemon keeps the newest LocalKeepNewest complete
+	// snapshots there and removes older ones. 0 (every entry saved before
+	// #1681) keeps them all, as before. With a destination set it does
+	// nothing: that mode removes only what the destination confirmed.
+	LocalKeepNewest int `yaml:"local_keep_newest,omitempty"`
+	// LocalKeepHeldDir names a folder that stopped being shared while it
+	// still holds snapshots another server wrote (#1681): the other server
+	// was deleted, answered no, or moved away. A snapshot does not record
+	// which server wrote it, so counting the folder would take the other
+	// server's snapshots for this one's copies; while BaselineDir is this
+	// folder (heldNow) it is never pruned, like a shared folder. A FOLDER,
+	// not a yes/no, so answering no and then yes, or moving away and back,
+	// finds it held again; a new empty folder is not it (the way out the
+	// page names). OWNED BY THE REGISTRY: written by markHeldFolders only,
+	// carried across every update, never taken from a caller.
+	LocalKeepHeldDir string `yaml:"local_keep_held_dir,omitempty"`
 
 	// Extra is the forward-compat catch-all: unknown fields written by a NEWER
 	// bintrail (e.g. the phase-2 control plane's source_dsn / server_id /
@@ -630,6 +648,7 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 		return ServerEntry{}, fmt.Errorf("generate server id: %w", err)
 	}
 	e.ID = id
+	e.LocalKeepHeldDir = "" // registry-owned; a new entry never starts held
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -668,9 +687,39 @@ func (r *Registry) Update(e ServerEntry) error {
 		if e.Extra == nil {
 			e.Extra = old.Extra // preserve forward-compat fields across edits
 		}
+		// Registry-owned (#1681): always the stored value, whatever was sent.
+		e.LocalKeepHeldDir = old.LocalKeepHeldDir
+		// The whole list is copied: marking a folder that stops being shared
+		// changes OTHER entries, and a failed save must undo all of it.
+		prev := slices.Clone(r.file.Servers)
 		r.file.Servers[i] = e
+		markHeldFolders(prev, r.file.Servers)
 		if err := r.save(); err != nil {
-			r.file.Servers[i] = old // roll back
+			r.file.Servers = prev // roll back
+			return err
+		}
+		return nil
+	}
+	return ErrUnknownServer
+}
+
+// UndoAdd removes an entry Add just created, when the rest of the create
+// failed. Unlike Delete it marks no folder held (#1681): the entry never took
+// a snapshot, so the folder it pointed at holds nothing of its.
+func (r *Registry) UndoAdd(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.readOnly {
+		return ErrRegistryReadOnly
+	}
+	for i, old := range r.file.Servers {
+		if old.ID != id {
+			continue
+		}
+		prev := slices.Clone(r.file.Servers)
+		r.file.Servers = append(slices.Clone(r.file.Servers[:i]), r.file.Servers[i+1:]...)
+		if err := r.save(); err != nil {
+			r.file.Servers = prev // roll back
 			return err
 		}
 		return nil
@@ -689,10 +738,13 @@ func (r *Registry) Delete(id string) error {
 		if old.ID != id {
 			continue
 		}
-		r.file.Servers = append(r.file.Servers[:i], r.file.Servers[i+1:]...)
+		// Copied whole before the delete: the append below rewrites the
+		// backing array in place, and markHeldFolders changes other entries.
+		prev := slices.Clone(r.file.Servers)
+		r.file.Servers = append(slices.Clone(r.file.Servers[:i]), r.file.Servers[i+1:]...)
+		markHeldFolders(prev, r.file.Servers)
 		if err := r.save(); err != nil {
-			// Roll back: re-insert at the original position.
-			r.file.Servers = append(r.file.Servers[:i], append([]ServerEntry{old}, r.file.Servers[i:]...)...)
+			r.file.Servers = prev // roll back
 			return err
 		}
 		return nil

@@ -181,6 +181,15 @@ async function navTo(routes, optional, already) {
   throw new Error("no sidebar entry for any of these routes: " + routes.join(", "));
 }
 
+// inViewport is whether a locator is on screen now, inside the window, not
+// only present somewhere on the page.
+async function inViewport(loc) {
+  if (!(await loc.isVisible().catch(() => false))) return false;
+  const box = await loc.boundingBox().catch(() => null);
+  const vp = page.viewportSize();
+  return !!box && !!vp && box.y >= 0 && box.y + box.height <= vp.height;
+}
+
 // settle waits for the page to stop moving: no loading placeholders, no
 // finite animation running, and the same text on two reads in a row.
 async function settle(timeout = 20000) {
@@ -491,7 +500,12 @@ async function runClean(block) {
     (await snapshotLocation().save.isDisabled()), "the saved snapshot location", 30000);
   await measure("snapshot-location-saved", "step");
 
-  await navTo(ROUTES.snapshotList, false, () => takeSnapshotButton().first().isVisible().catch(() => false));
+  // "Already there" means on screen, not merely present: since #1681 a new
+  // server has its folder, so saving the location leaves no error to reload
+  // past and the page stays scrolled down at the setup section, with the
+  // button above the window. A person then goes back to the list, and so
+  // does the walk; a shortcut on "present" measured a button nobody can see.
+  await navTo(ROUTES.snapshotList, false, () => inViewport(takeSnapshotButton().first()));
   const create = takeSnapshotButton().first();
   if (await create.isVisible().catch(() => false)) {
     // The folder the location named did not have to exist for this to work,

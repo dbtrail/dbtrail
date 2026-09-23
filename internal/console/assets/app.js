@@ -1038,7 +1038,18 @@ function navigate(route, params, push = true) {
   const qs = params && Object.keys(params).length
     ? "?" + new URLSearchParams(params).toString() : "";
   routeArrivedFrom = "";
+  // A click on the page you are already on (Snapshots, from its own #setup
+  // section) goes to its top. The page scrolls inside .main, and nothing
+  // reset it, so that click left the reader scrolled down past the button at
+  // the top (#1681's first-run walk measured it). Only the SAME page: moving
+  // between pages keeps today's behavior, which other measurements rely on.
+  // An address with a section keeps its own jump (scrollToSection).
+  const samePage = routeFromLocation() === route;
   if (push) history.pushState({ route }, "", "/" + route + qs + hash);
+  if (push && samePage && !hash) {
+    const main = document.querySelector(".main");
+    if (main) main.scrollTop = 0;
+  }
   renderRoute();
 }
 
@@ -4730,7 +4741,7 @@ async function renderSnapshots() {
   // the DRAWING below, where `part` keeps one throwing section from taking
   // the other two with it.
   const asErr = (err) => ({ error: (err && err.message) || String(err) });
-  const [serversRes, baselines, settings, refresh] = await Promise.all([
+  const [serversRes, baselines, settings] = await Promise.all([
     api("/api/servers").catch(asErr),
     api("/api/baselines").catch(asErr),
     // The bottom half is fetched with the rest, not after the first paint:
@@ -4740,9 +4751,6 @@ async function renderSnapshots() {
     // answer is a 403 that drew a red "Could not load settings" box on every
     // visit, about a section this reader was never meant to see.
     sessionMay("settings:read") ? api("/api/backup-settings").catch(asErr) : Promise.resolve(null),
-    // The disk-space card describes the watch daemon's loop; on serve there
-    // is no loop, no card, and nothing to fetch.
-    capsCache.monitor && sessionMay("settings:read") ? api("/api/baseline-refresh").catch(asErr) : Promise.resolve(null),
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   // Run states for the selected server: only the endpoints this daemon
@@ -4882,11 +4890,11 @@ async function renderSnapshots() {
       if (scheduleCard) v.append(scheduleCard);
       // Whenever the session may read settings, this half always has
       // something to say: at the very least where this server keeps its
-      // copies, or why that could not be read.
-      // The settings half needs settings:read. Without it nothing was
-      // fetched (see above) and nothing is drawn: hidden by permission says
-      // nothing, unlike a part missing for a reason the reader can fix.
-      if (settings) snapshotSetupSections(settings, refresh).forEach((n) => v.append(n));
+      // copies, or why that could not be read. The settings half needs
+      // settings:read. Without it nothing was fetched (see above) and
+      // nothing is drawn: hidden by permission says nothing, unlike a part
+      // missing for a reason the reader can fix.
+      if (settings) snapshotSetupSections(settings).forEach((n) => v.append(n));
     });
     }
     viewEnter();
@@ -4927,92 +4935,6 @@ function rotationCard(rot) {
   card.append(el("div", { class: "stg-cardfoot" },
     el("button", { class: "btn btn-sm", type: "button", text: "Edit rotation…", onclick: showRotationDialog })));
   return card;
-}
-
-// backupRefreshCard exposes ONE storage behaviour: whether a table with no
-// changes keeps its previous file instead of being written again. The refresh
-// schedule itself stays a daemon flag, because starting a loop that was never
-// booted needs a restart.
-//
-// The title used to be "Automatic backup refresh" (#1528), which named neither
-// of those and read as a sibling of Scheduled backups — the card that IS the
-// timetable, which sat beside it on the old Backups page and sits in the same
-// section of Snapshots today (#1573). It stays a GLOBAL card rather than a
-// row inside a server's schedule, for a reason the inventory records:
-// /api/baseline-refresh is process-global, the schedule is per server, and a
-// global toggle inside a per-server fold would assert something false.
-//
-// Shape (#1528, then #1603, then #1681): the rule drawn (cfShape) with one
-// sentence under it, the alarms and the dormancy note in plain view, and
-// everything else in a compact block. Since #1681 there is nothing to click:
-// reuse is always on, so the state pill, the two buttons and the provenance
-// line (which of the console and the flag had won) are gone. A daemon
-// started with --baseline-carry-forward-unchanged=false is the one case the
-// drawing must still be able to show, and br.carry_forward_unchanged is read
-// for exactly that.
-//
-// The sentence about where the saving applies is a CORRECTNESS fix, not a
-// hedge. carryForwardEligible refuses any s3:// previous snapshot, because
-// carrying a file forward means hard-linking it and a link needs both ends on
-// a filesystem. srcPath is baselineFoldSource(req), and only ONE of the three
-// producers ever sets BaselineS3:
-//
-//   consoleapp/baseline_refresh_loop.go  interval loop   BaselineDir only
-//   consoleapp/baseline_schedule_loop.go per-server job  BaselineS3 set; since
-//                                        #1626 resolveFoldSource reads the local
-//                                        directory when it holds the bucket's
-//                                        newest snapshot, the bucket otherwise
-//   consoleapp/baseline_restore.go       restore         BaselineS3 set (#1541);
-//                                        reads the bucket on an S3-backed
-//                                        server, the directory otherwise
-//
-// So the sentence is keyed to servers with NO local directory ("keeps backups
-// only in S3"): on those every producer refuses. A server carrying BOTH a
-// directory and a bucket is deliberately not described: its scheduled backup
-// reuses only on the runs where the directory is current, a restore never
-// does there, and the interval loop always does; one sentence cannot carry
-// that without being false in one direction. The field
-// is "Backup S3" (baseline_s3), NOT "Archive to S3" (archive_s3), which is the
-// binlog archive tier and has nothing to do with this.
-//
-// The saving is never stated unconditionally. carryForward falls back to a
-// COPY when os.Link fails, and fulltable.go marks the table carried either
-// way; carried_copied (#1578) carries the split to this page, and the run
-// notes qualify their "reused" counts with reusedCopiedNote. The guarantee
-// the reader needs, that the backup is still complete, is what stays absolute.
-//
-// No command, flag or path appears in any visible string here. The
-// consequence of a reused file (two backups sharing the same bytes on disk,
-// where the filesystem allows it) is docs material: docs/console.md has it.
-// cfShape draws what the disk-space switch does (#1603): two backups, one
-// above the other, five tables each. With the switch on, a table that did not
-// change keeps the file the last backup wrote (dashed: the same file, carried
-// across) and only the changed ones are written again (solid). With it off,
-// every tile in the second row is written again. Both rows always hold five
-// tiles: completeness is shown, not promised. Built with el(), not svgEl
-// (static constants only, see app.js:26). No transitions, so reduced motion
-// needs nothing here.
-function cfShape(on) {
-  const tile = (cls) => el("span", { class: "cf-tile" + (cls ? " " + cls : ""), "aria-hidden": "true" });
-  const row = (cap, classes) => {
-    const r = el("div", { class: "cf-row" });
-    for (const c of classes) r.append(tile(c));
-    return el("div", { class: "cf-part" }, r, el("div", { class: "dk-cap", text: cap }));
-  };
-  // Three of five carried: enough kept tiles to read as the rule, enough
-  // rewritten ones to read as "still a backup".
-  const next = on ? ["cf-kept", "cf-kept", "cf-new", "cf-kept", "cf-new"] : ["cf-new", "cf-new", "cf-new", "cf-new", "cf-new"];
-  const shape = el("div", { class: "cf-shape", role: "img",
-    "aria-label": on
-      ? "Two backups. In the newer one, tables with no changes keep the file from the last backup and only changed tables are written again. Every table is present."
-      : "Two backups. In the newer one every table is written again, changed or not." },
-    row("last backup", ["", "", "", "", ""]),
-    row("this backup", next));
-  const key = el("div", { class: "cf-key", "aria-hidden": "true" });
-  if (on) key.append(el("span", { class: "cf-tile cf-kept" }), el("span", { text: "kept" }));
-  key.append(el("span", { class: "cf-tile cf-new" }), el("span", { text: "written" }));
-  shape.append(key);
-  return shape;
 }
 
 // docsMore is one plain link into the docs site for a compact block: the
@@ -5201,86 +5123,6 @@ function docsMore(slug, section, label) {
       target: "_blank", rel: "noopener", text: "Read more: " + label }));
 }
 
-function backupRefreshCard(br) {
-  const card = el("div", { class: "card" });
-  const head = el("div", { class: "card-title bkr-head" },
-    el("span", { text: "Backups & disk space" }));
-  card.append(head);
-  if (!br || br.error) {
-    card.append(el("p", { class: "form-hint", text: "Could not load this setting" + (br && br.error ? ": " + br.error : ".") }));
-    return card;
-  }
-  // What the daemon will do. There is no choice to make here any more: this
-  // is false only where the operator passed the flag that turns reuse off.
-  const on = !!br.carry_forward_unchanged;
-  // …and with table deltas on (the default) a table that did not change is
-  // published by linking its previous file anyway, through the other path.
-  // So what the reader sees drawn is whether the file is KEPT, not which
-  // path keeps it; "every table is written again" is true only with both off.
-  const kept = on || !!br.table_deltas;
-  // say() writes into the card until the compact block opens below, then
-  // into the block: same sentences, one click further away.
-  let into = card;
-  const say = (t) => into.append(el("p", { class: "form-hint", text: t }));
-  // The drawing carries the rule (#1603); one sentence rides under it. The
-  // on arm promises completeness in the same breath as the saving: "keeps
-  // the old file" reads as a partial backup otherwise, and that is the one
-  // thing a recovery tool must never let a reader believe.
-  card.append(cfShape(kept));
-  say(kept
-    ? "Tables with no changes keep their last file. The backup is still complete."
-    : "Every backup writes every table again.");
-  // The everything-running silence #1579 names: enabled and scheduled both
-  // true reads as the healthy state, while the timer can be running over
-  // ZERO refreshable servers (fresh install, or every server S3-only or
-  // without a Backup dir). br.targets is computed live by the daemon and
-  // omitted where no loop runs, so the alarm can only fire on a watch
-  // daemon whose loop truly covers nothing. Never compact: it is a fault.
-  if (br.scheduled && br.targets === 0) {
-    card.append(el("p", { class: "form-msg err", text:
-      "The refresh timer is on, but no server can be refreshed. A refresh needs an index connection " +
-      "and a local Backup dir; set one in the servers list below." }));
-  }
-  // A saved switch that nothing uses must say so where it is read, so it
-  // stays outside the compact block. Liveness is decided at boot: with no
-  // consumer there is no restore path either, so waiting changes nothing.
-  if (!br.enabled) {
-    say("Nothing uses this yet. It starts working the next time DBTrail runs with backups or restores turned on.");
-  }
-  // What the skipped servers CANNOT do, not what they will do: an update from
-  // the recorded changes writes Parquet to a local directory, which is the very
-  // field these servers lack, so the bucket is never read back into a cheaper
-  // backup (#1579). Visible, not compact, because on THIS install it is the
-  // exception to the sentence above: a drawing that promises a
-  // saving must carry, in plain view, the servers it cannot save for. The
-  // positive form would be a PREDICTION this card has no gate data for; the
-  // per-server rows make it, after checking the refusal.
-  if (br.skipped_s3_only > 0) {
-    say(br.skipped_s3_only + " server(s) keep backups only in S3, so the timer skips them. The only backup they can get is a full one.");
-  }
-  // Everything a reader does not need in order to act is compact, not cut:
-  // the local-only rule, the S3 skip count (#1579), what consumes the
-  // setting, and what the daemon does with an unchanged table.
-  const more = cnFine("More about disk space");
-  into = more;
-  say("It saves disk only when the last backup is read from this machine. A server that keeps backups only in S3 reuses nothing, so every backup writes every table.");
-  // A daemon started with the backup trigger and no refresh schedule still
-  // applies this to restores, so it is not dormant there.
-  if (br.enabled && !br.scheduled) {
-    say("Restores use this, and so do the backup schedules you set. Nothing refreshes all servers on one timer.");
-  }
-  say("This covers every server that keeps backups on this machine.");
-  say(on
-    ? "DBTrail always reuses a table that did not change. Where reuse would be wrong, that table is written again, or the whole backup is refused."
-    : kept
-      ? "Reuse of unchanged tables was turned off at startup (--baseline-carry-forward-unchanged=false), but table deltas are on, so a table that did not change still keeps its file."
-      : "This DBTrail was started with both reuse and table deltas turned off, so every backup writes every table.");
-  more.append(docsMore("settings/backups", "backups--disk-space", "reusing unchanged tables"),
-    docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
-  card.append(more);
-  return card;
-}
-
 // ── Backup settings (#1582, #1603) ──────────────────────────────────────────
 //
 // The one page that owns backup and snapshot parameters. Its job is
@@ -5289,22 +5131,25 @@ function backupRefreshCard(br) {
 // folder showed an empty field, indistinguishable from a server with no
 // backup location at all.
 //
-// Three kinds of setting live here, and the LAYOUT tells them apart (#1603),
-// not a sentence: the disk-space switch and the per-server rows change on
-// this page and apply at once; the daemon's own values were set when the
-// process started and change on restart. The first two sit under one
-// section label, the third under its own, on a plain card outside the
-// tinted grid with ONE restart chip at card level. Prose a reader does not
-// need in order to act is compact by default (cnFine), never cut, and the
-// two rules that used to be paragraphs are drawn: cfShape for the reuse,
-// blCase for which backup location is in force.
+// Two kinds of setting live here, and the LAYOUT tells them apart (#1603),
+// not a sentence: the per-server rows change on this page and apply at once;
+// the daemon's own values were set when the process started and change on
+// restart, on a plain card outside the tinted grid with ONE restart chip at
+// card level. Prose a reader does not need in order to act is compact by
+// default (cnFine), never cut, and which location is in force is drawn
+// (blCase).
+//
+// The disk-space card is gone (#1681). Once reusing an unchanged table became
+// unconditional its "On" said nothing, and the saving it promised is only
+// true for a server that keeps a copy on this machine, so the saving is now
+// said beside that server's own yes/no, where it is true or not.
 
 // snapshotSetupSections builds the "where and how often" half of Snapshots:
 // every setting that shapes a backup, beside where its value lives. It
 // RETURNS nodes instead of painting the view, because it is a part of a page
 // now and not a page — the caller decides what comes before and after it,
 // and whether the section heading is drawn at all.
-function snapshotSetupSections(settings, refresh) {
+function snapshotSetupSections(settings) {
   const out = [];
   const broken = settings && settings.error;
   if (broken) out.push(el("div", { class: "error-box", text: "Could not load settings: " + settings.error }));
@@ -5334,15 +5179,9 @@ function snapshotSetupSections(settings, refresh) {
     out.push(el("div", { class: "cards" }, backupDaemonEditCard(editableRows, !mayEdit)));
   }
   if (!broken) out.push(backupServersPanel(settings));
-  if (capsCache.monitor) {
+  if (capsCache.monitor && !broken && startupRows.length) {
     out.push(sect("Set when DBTrail starts"));
-    // The disk-space card sits HERE since #1681: with its switch gone it
-    // reports what the daemon was started with, like the rows beside it, and
-    // leaving it under "Change here" would promise a control it no longer
-    // has. It is not one of the startup ROWS (it draws rather than lists), so
-    // it is appended beside that card rather than into it.
-    out.push(el("div", { class: "cards" }, backupRefreshCard(refresh)));
-    if (!broken && startupRows.length) out.push(backupDaemonCard(startupRows));
+    out.push(backupDaemonCard(startupRows));
   }
   return out;
 }
@@ -5551,7 +5390,7 @@ function backupServersPanel(settings) {
   // The daemon default S3 destination, for the retention block: the boot
   // entry backs up there and is not in the list.
   const daemonS3 = ((settings.daemon || []).find((r) => r.key === "baseline_s3") || {}).value || "";
-  for (const srv of servers) panel.append(backupServerRow(srv, settings.registry_read_only, servers, daemonS3));
+  for (const srv of servers) panel.append(backupServerRow(srv, settings.registry_read_only, servers, daemonS3, !!settings.reuse_unchanged));
   return panel;
 }
 
@@ -5575,16 +5414,138 @@ function s3OnlyBackupWarning(srv, fix = true) {
   return "With S3 only, every scheduled backup reads your whole database." + then("Add a Backup dir so runs update from the recorded changes.");
 }
 
-function backupServerRow(srv, readOnly, servers, daemonS3) {
+// localCopyWords is what the per-server yes/no means right now (#1681), from
+// the form's CURRENT values, so the sentence follows the reader's clicks
+// before a save. It returns the lines to show and whether each is a fault.
+//
+//   local  the yes/no as clicked         s3    the S3 field as typed
+//   keep   the count as typed (0 = all)  loop  this process removes snapshots
+//   reuse  unchanged tables keep their last file on this daemon
+//   was    the saved answer, folder and provenance ("default" = this server
+//          reads DBTrail's startup folder), and whether that folder is one
+//          the prune never counts (shared, or DBTrail's own), or held (it
+//          was shared and still holds the other server's snapshots)
+//   reach  how far back the count reaches (localReachWords): the count in
+//          force, the snapshot interval and the age retention, in minutes
+//
+// The "no" sentence is the issue's own words: no is not "no snapshots", it is
+// "only in S3, and every run writes every table". The saving is promised
+// only for a server whose copies are all here: with a bucket as well, a
+// scheduled run reuses only when the folder holds the newest snapshot and a
+// restore never does, which one sentence cannot carry without being false.
+function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
+  const out = [];
+  const say = (text, err) => out.push({ text, err: !!err });
+  if (!local) {
+    if (!s3 && !was.local && was.source === "default") {
+      say("This server has no folder of its own. Time-travel reads DBTrail's startup folder; to take snapshots for it, answer yes or set an S3 destination.");
+      return out;
+    }
+    if (!s3) {
+      say("Set an S3 destination below first. With neither, this server keeps no snapshots at all.", true);
+      return out;
+    }
+    say("Snapshots live only in S3, and every run writes every table.");
+    if (was.local && was.dir) say("The snapshots already in " + was.dir + " stay there. DBTrail stops listing them and never removes them.");
+    return out;
+  }
+  if (s3) {
+    say("A copy stays on this machine, and each snapshot is also sent to S3.");
+    return out;
+  }
+  if (reuse) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
+  if (was.held) {
+    say("Another server's snapshots are still in this folder, so nothing here is removed. To keep only the newest, use a new empty folder.");
+  } else if (was.blocked) {
+    say("This folder is shared with another server or is DBTrail's startup folder, so nothing in it is removed, whatever the count says.");
+  } else if (!keep) {
+    say("Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.");
+  } else if (loop) {
+    // Said even when only the count changed: saving a number over a folder
+    // that already holds snapshots IS the choice to prune them (a new folder
+    // or a moved one is refused instead), so the row says what that means.
+    // The number itself is in the field beside this and, once in force, in
+    // the line above the snapshot list (snapshotRetentionLines); said a third
+    // time here it would only be the same fact again.
+    say("Older ones past that number are removed from this folder at the next hourly cleanup, never a table's only copy.");
+    say(localReachWords(keep, reach || {}));
+  } else {
+    say("Keeps the newest " + keep + " where DBTrail takes the snapshots. This copy of DBTrail removes nothing.");
+  }
+  return out;
+}
+
+// localReachWords is how far back a server can go with the newest `keep`
+// snapshots kept (#1681), from its real schedule:
+//
+//   keep      the count as typed
+//   inForce   the count the prune applies now (keep_in_force, the listing's
+//             local_retention.keep_newest); a different number means the
+//             typed one is not saved or not applied yet, and the line says so
+//   every     how often snapshots are taken on their own, in minutes: the
+//             schedule and the refresh loop together, from the server
+//             (snapshot_every_minutes); 0 = nothing takes them on its own
+//   retain    the age retention in minutes (0 = none)
+//
+// keep x every, but never under the hour the prune always leaves alone, nor
+// under the age retention, which keeps younger snapshots outside the count.
+// "Up to": with one kept, right after a new snapshot the window is shorter.
+// Without a schedule there is no number to give, and the line says what
+// decides it instead.
+function localReachWords(keep, reach) {
+  const soon = reach.inForce === keep ? "" : "Once this number applies, ";
+  const lead = soon ? soon + "you can" : "You can";
+  if (!reach.every) {
+    return lead + " go back as far as " + (keep === 1 ? "the one snapshot kept" : "the oldest of the " + keep + " kept") +
+      ". Nothing here takes snapshots on a timer, so that depends on when they are taken.";
+  }
+  const mins = Math.max(keep * reach.every, 60, reach.retain || 0);
+  return lead + " go back up to about " + reachSpan(mins) + ": restores, .sql exports and full-table time travel start from the oldest snapshot kept.";
+}
+
+// reachSpan says a number of minutes the way a person would: hours below a
+// day, whole days as days, hours again up to two days, days above.
+function reachSpan(mins) {
+  const day = 24 * 60;
+  if (mins < day || (mins % day !== 0 && mins < 2 * day)) {
+    const h = Math.max(1, Math.round(mins / 60));
+    return h + (h === 1 ? " hour" : " hours");
+  }
+  const d = Math.round(mins / day);
+  return d + (d === 1 ? " day" : " days");
+}
+
+function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const box = el("div", { class: "bks-server" });
   box.append(el("h3", { class: "bks-server-name", text: srv.name || srv.id }));
+  // The one question (#1681): does this server keep a copy of its snapshots
+  // on this machine. Yes shows where, and how many are kept when there is no
+  // S3 destination; no hides both and is never SENT unless it was clicked.
+  const q = "bks-local-" + srv.id;
+  const yes = el("input", { type: "radio", name: q, value: "yes" });
+  const no = el("input", { type: "radio", name: q, value: "no" });
+  yes.checked = !!srv.local_copy;
+  no.checked = !srv.local_copy;
+  box.append(el("fieldset", { class: "bks-q" },
+    el("legend", { class: "field-label", text: "Keep a copy of this server's snapshots on this machine?" }),
+    el("label", { class: "check" }, yes, el("span", { text: "Yes" })),
+    el("label", { class: "check" }, no, el("span", { text: "No, only in S3" }))));
   const grid = el("div", { class: "form-grid" });
-  const dir = el("input", { class: "input", name: "baseline_dir", value: srv.baseline_dir || "", placeholder: "(none)" });
+  // The folder a yes uses: this server's own, or the default one named after
+  // its id when it has none yet. Shown, never silently sent: a no omits it.
+  const dirWas = (srv.baseline_dir || srv.default_dir || "").trim();
+  const dir = el("input", { class: "input", name: "baseline_dir", value: dirWas, placeholder: srv.default_dir || "/full/path/to/a/folder" });
   const s3 = el("input", { class: "input", name: "baseline_s3", value: srv.baseline_s3 || "", placeholder: "s3://bucket/prefix/" });
-  grid.append(
-    el("label", { class: "field" }, el("span", { class: "field-label", text: "Backup dir" }), dir),
-    el("label", { class: "field" }, el("span", { class: "field-label", text: "Backup S3" }), s3));
+  const keep = el("input", { class: "input", name: "keep_newest", type: "number", min: "0", step: "1",
+    value: srv.keep_newest ? String(srv.keep_newest) : "", placeholder: "all" });
+  const dirField = el("label", { class: "field" }, el("span", { class: "field-label", text: "Backup dir" }), dir);
+  const keepField = el("label", { class: "field" }, el("span", { class: "field-label", text: "Keep the newest" }), keep);
+  grid.append(dirField,
+    el("label", { class: "field" }, el("span", { class: "field-label", text: "Backup S3" }), s3),
+    keepField);
   box.append(grid);
+  const words = el("div", { class: "bks-local-words" });
+  box.append(words);
   // S3 without a folder (#1659): said in red next to the two fields, schedule
   // or not. From the SAVED values, the ones the schedule reads
   // (rebuildPossible): a daemon default folder does not save this server,
@@ -5650,7 +5611,10 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   // server's OWN destination only: the daemon default is shared by every
   // server, and a rule on it is not this row's to hand out.
   if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers, daemonS3));
-  more.push(docsMore("settings/backups", "per-server", "backup locations per server"));
+  more.push(docsMore("settings/backups", "per-server", "backup locations per server"),
+    // The strategy guide is the page the header table names for Snapshots;
+    // the card that linked it from the setup half is gone (#1681).
+    docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
 
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
@@ -5658,29 +5622,80 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   // Two different reasons to be read-only. registry_read_only is the
   // registry file itself (a newer version wrote it), and the Save stays
   // visible, disabled, beside the reason. A session without servers:write
-  // gets the fields locked and no Save at all: hidden by permission.
+  // (the save goes to PUT /api/backup-settings/servers/{id}) gets the
+  // answers locked and no Save at all: hidden by permission.
   const mayWrite = sessionMay("servers:write");
-  if (readOnly || !mayWrite) { dir.disabled = s3.disabled = noArch.disabled = true; }
+  const locked = !!readOnly || !mayWrite;
+  if (locked) { dir.disabled = s3.disabled = noArch.disabled = yes.disabled = no.disabled = keep.disabled = true; }
   // Save wakes up when something differs from what was loaded, so a click
   // always means a change; Enter in a field saves too.
   // Trimmed on both sides: the PUT trims, so a stored value with stray
   // whitespace is not a change waiting to be saved.
-  const was = { dir: (srv.baseline_dir || "").trim(), s3: (srv.baseline_s3 || "").trim(), noArch: !!srv.no_archive };
-  const dirty = () => dir.value.trim() !== was.dir || s3.value.trim() !== was.s3 || noArch.checked !== was.noArch;
-  const sync = () => { save.disabled = !!readOnly || !dirty(); };
-  for (const input of [dir, s3]) {
+  const was = { local: !!srv.local_copy, dir: dirWas, rawDir: (srv.baseline_dir || "").trim(),
+    s3: (srv.baseline_s3 || "").trim(), keep: srv.keep_newest || 0, noArch: !!srv.no_archive };
+  // The count as typed: "" is 0 (keep them all); anything else must be a
+  // whole number, or it is null and Save refuses it.
+  const keepNow = () => {
+    const t = keep.value.trim();
+    if (t === "") return 0;
+    return /^\d+$/.test(t) ? Number(t) : null;
+  };
+  const dirty = () => yes.checked !== was.local || s3.value.trim() !== was.s3 || noArch.checked !== was.noArch ||
+    (yes.checked && (dir.value.trim() !== was.dir || keepNow() !== was.keep));
+  const paint = () => {
+    const local = yes.checked;
+    const s3v = s3.value.trim();
+    dirField.hidden = !local;
+    keepField.hidden = !local || !!s3v;
+    clear(words);
+    // The reach is said for the count as it applies to the folder as saved:
+    // a typed folder or destination makes it a number that does not apply yet.
+    const asSaved = dir.value.trim() === was.dir && s3v === was.s3;
+    for (const w of localCopyWords(local, s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
+      { local: was.local, dir: was.rawDir, source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held },
+      { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
+        every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0 })) {
+      words.append(el("p", { class: w.err ? "form-msg err" : "form-hint", text: w.text }));
+    }
+  };
+  const sync = () => { paint(); save.disabled = locked || !dirty(); };
+  for (const input of [dir, s3, keep]) {
     input.addEventListener("input", sync);
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !save.disabled) save.click(); });
   }
+  for (const r of [yes, no]) r.addEventListener("change", sync);
   noArch.addEventListener("change", sync);
   sync();
   save.onclick = async () => {
     save.disabled = true;
     msg.hidden = true;
+    // What is sent follows the answer, not the fields on screen: a no sends
+    // local_copy false and never the folder or the count still sitting in
+    // the hidden inputs; a yes always says so, so an emptied folder means
+    // "the default one" and never "no copy anywhere".
+    const body = { baseline_s3: s3.value.trim(), no_archive: noArch.checked };
+    if (yes.checked) {
+      body.local_copy = true;
+      body.baseline_dir = dir.value.trim();
+      // The count only while its field is shown (no S3): hidden, it does
+      // nothing, so it is neither checked nor sent.
+      if (!s3.value.trim()) {
+        const k = keepNow();
+        if (k === null) {
+          msg.textContent = "Keep the newest takes a whole number, or nothing to keep them all.";
+          msg.hidden = false;
+          sync();
+          return;
+        }
+        if (k !== was.keep) body.keep_newest = k;
+      }
+    } else if (was.local) {
+      body.local_copy = false;
+    }
     try {
       await api("/api/backup-settings/servers/" + encodeURIComponent(srv.id), {
         method: "PUT",
-        body: { baseline_dir: dir.value.trim(), baseline_s3: s3.value.trim(), no_archive: noArch.checked },
+        body: body,
       });
     } catch (err) {
       msg.textContent = (err && err.message) || String(err);
@@ -7497,8 +7512,9 @@ function backupScheduleCard(cur, b) {
     "so the backups do not rest only on the recorded changes. Leave it empty for none." }), msg);
   // The rate, before the disk finds out: every run is a full copy of every
   // table, and backups kept only on this machine are never removed on their
-  // own (the daemon prunes only what it confirmed durable in S3). Same
-  // number the daemon logs at save and at boot.
+  // own unless the server keeps a newest-N count (#1681); otherwise the
+  // daemon prunes only what it confirmed durable in S3. Same number the
+  // daemon logs at save and at boot.
   const rate = el("p", { class: "form-hint", "data-sched-edit": "1" });
   const showRate = () => {
     const n = backupsPer30Days(every.value);
@@ -7512,7 +7528,11 @@ function backupScheduleCard(cur, b) {
     const total = f ? n + f - backupsPer30Days(lcmInterval(every.value, fullEvery.value)) : n;
     rate.textContent = "About " + total + " backup" + (total === 1 ? "" : "s") + " every 30 days at this rate, each a full copy of every table." +
       (f ? " About " + f + (f === 1 ? " is a full backup that reads" : " are full backups that read") + " your whole database." : "") +
-      (cur.baseline_s3 ? "" : " Backups kept only on this machine are never removed automatically; make sure the disk has room.");
+      // A count this daemon applies to the folder (#1681) is the one case
+      // where local copies ARE removed. The line above the snapshot list
+      // already says how many (snapshotRetentionLines), so the rate only
+      // drops its "never removed" warning, which would then be false.
+      (b && b.local_retention ? "" : cur.baseline_s3 ? "" : " Backups kept only on this machine are never removed automatically; make sure the disk has room.");
   };
   every.addEventListener("input", showRate);
   fullEvery.addEventListener("input", showRate);
@@ -11010,15 +11030,12 @@ function buildServerForm() {
   idxGrid.append(srvField("Password", "password", { type: "password", autocomplete: "new-password" }));
   idxGrid.append(srvField("Index database", "dbname", { placeholder: "binlog_index" }));
   idx.append(idxGrid);
-  // The backup location and the archive toggle are EDITED on the Backups &
-  // snapshots settings page (#1582); this form carries them as hidden
-  // passthroughs because PUT /api/servers/{id} REPLACES the entry — dropping
-  // the fields from the request would silently wipe a server's backup
-  // configuration on every unrelated edit. The prefill list below fills them
-  // like any other field.
-  idx.append(el("input", { type: "hidden", name: "baseline_dir" }));
-  idx.append(el("input", { type: "hidden", name: "baseline_s3" }));
-  idx.append(el("input", { type: "checkbox", name: "no_archive", hidden: true }));
+  // The snapshot location, the keep count and the archive toggle are edited
+  // on the Snapshots page only (#1582, #1681). This form does not carry them
+  // at all: PUT /api/servers/{id} keeps the stored values when the request
+  // leaves them out. It used to post them back from hidden fields, which put
+  // back an OLD folder whenever the form had been opened before a change on
+  // the Snapshots page.
   adv.append(idx);
   form.append(adv);
 
@@ -11091,10 +11108,9 @@ function showServerForm(prefill, opts) {
 
   if (prefill) {
     form.elements.id.value = prefill.id || "";
-    ["name", "host", "port", "user", "dbname", "baseline_dir", "baseline_s3", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "source_host", "source_port", "source_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
+    ["name", "host", "port", "user", "dbname", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "source_host", "source_port", "source_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
       if (form.elements[k] && prefill[k] != null) form.elements[k].value = prefill[k];
     });
-    if (form.elements.no_archive) form.elements.no_archive.checked = !!prefill.no_archive;
     form.elements.password.placeholder = prefill.has_password ? "(unchanged; leave blank to keep)" : "(none)";
     form.elements.source_password.placeholder = prefill.has_source_password ? "(unchanged; leave blank to keep)" : "";
     if (prefill.has_source_password) savedSourcePasswords.set(form, true);
@@ -11512,8 +11528,6 @@ function serverFormBody(form) {
     name: f.name.value.trim(),
     flavor: f.flavor.value,
     host: f.host.value.trim(), port: f.port.value.trim(), user: f.user.value.trim(), dbname: f.dbname.value.trim(),
-    baseline_dir: f.baseline_dir.value.trim(), baseline_s3: f.baseline_s3.value.trim(),
-    no_archive: !!f.no_archive.checked,
     archive_s3: f.archive_s3.value.trim(),
     s3_endpoint: f.s3_endpoint.value.trim(), s3_path_style: f.s3_path_style.value, s3_region: f.s3_region.value.trim(),
     s3_access_key_id: f.s3_access_key_id.value.trim(),

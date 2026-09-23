@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/cliutil"
 )
 
 // The one settings page that owns backup and snapshot parameters (#1582).
@@ -141,6 +144,51 @@ type backupSettingsServerDTO struct {
 	// for full_backup_possible for a reason no setting on this server fixes,
 	// so the S3-only warning must not say "cannot run on this server" there.
 	ScheduleLoop bool `json:"schedule_loop"`
+	// LocalCopy answers the one per-server question (#1681): does this
+	// server keep a copy of its snapshots on this machine. It is whether the
+	// entry names its OWN folder; the daemon default folder backs reads only
+	// (see backupSourceDefault), so it does not count as this server's copy.
+	LocalCopy bool `json:"local_copy"`
+	// DefaultDir is the folder a "yes" would use when none is typed:
+	// <state dir>/snapshots/<id>. Empty where the registry has no file.
+	DefaultDir string `json:"default_dir,omitempty"`
+	// KeepNewest is the saved local retention (0 = keep every snapshot).
+	// It removes anything only while LocalCopy is on, BaselineS3 is empty
+	// and PruneLoop is true; the page says which of those holds.
+	KeepNewest int `json:"keep_newest"`
+	// PruneLoop is whether this process runs the loop that applies
+	// KeepNewest. A read-only console never removes anything.
+	PruneLoop bool `json:"prune_loop"`
+	// KeepBlocked: this server's folder is shared with another server or is
+	// the daemon's own, so console.LocalKeepTargets never prunes it,
+	// whatever KeepNewest says. The row says that instead of the count.
+	KeepBlocked bool `json:"keep_blocked,omitempty"`
+	// KeepHeld: of those, the folder is blocked because it once was shared
+	// and still holds the other server's snapshots (heldNow). The way
+	// out differs (a new empty folder), so the row says which.
+	KeepHeld bool `json:"keep_held,omitempty"`
+	// KeepInForce is the count the prune loop applies to this folder right
+	// now: localRetentionOf, the SAME call behind GET /api/baselines
+	// local_retention.keep_newest, so the row's "how far back" line and the
+	// listing's retention line can never name two numbers. 0 where nothing
+	// is pruned. KeepNewest is the saved setting; the two differ where the
+	// setting does not apply (blocked, a destination, no loop).
+	KeepInForce int `json:"keep_in_force,omitempty"`
+	// PruneRetainMinutes is the age retention the same loop applies to every
+	// folder (--baseline-retain or its saved value), in minutes: a snapshot
+	// younger than it is kept even outside the newest KeepInForce, so it
+	// stretches how far back this server can go. 0 = none, or unreadable
+	// (the loop then applies none either).
+	PruneRetainMinutes int `json:"prune_retain_minutes,omitempty"`
+	// SnapshotEveryMinutes is how often this server gets a snapshot without
+	// a click (#1681): its schedule (with the full copies off its grid),
+	// where the schedule can run in this process, and the daemon-wide
+	// --baseline-refresh-interval, where that loop covers this server (every
+	// server with a local folder), their rates ADDED since both write into
+	// the folder. 0 = nothing takes snapshots on its own. The row's "how far
+	// back" line multiplies the count by it: the schedule alone would promise
+	// days where an hourly refresh leaves hours.
+	SnapshotEveryMinutes int `json:"snapshot_every_minutes,omitempty"`
 }
 
 // The three provenance verdicts a server's backup location can have. The
@@ -159,6 +207,12 @@ type backupSettingsDTO struct {
 	Daemon           []backupSettingRow        `json:"daemon"`
 	Servers          []backupSettingsServerDTO `json:"servers"`
 	RegistryReadOnly bool                      `json:"registry_read_only"`
+	// ReuseUnchanged is whether a new snapshot reuses the previous file of a
+	// table that did not change (#1681): the daemon's reuse flag, or table
+	// deltas, which link the file forward on their own. What "keep a copy on
+	// this machine" saves depends on it, so the page can only promise the
+	// saving where this is true.
+	ReuseUnchanged bool `json:"reuse_unchanged"`
 }
 
 // lockModeRowErr appends the operational consequence to a lock-mode
@@ -193,7 +247,8 @@ func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request)
 			{Key: "verify_interval", Value: d.VerifyInterval, CLI: "--verify-interval", NeedsRestart: true},
 			s.backupSettingRow(BackupSettingVerifyTables, d.VerifyTables, "--verify-tables"),
 		},
-		Servers: []backupSettingsServerDTO{},
+		Servers:        []backupSettingsServerDTO{},
+		ReuseUnchanged: s.baselineRefreshDefaults.CarryForwardUnchanged || s.baselineRefreshDefaults.TableDeltas,
 	}
 	// The lock-mode rejection rides on whichever row ended up carrying it.
 	for i := range dto.Daemon {
@@ -233,6 +288,17 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	default:
 		dto.Source = backupSourceNone
 	}
+	dto.LocalCopy = e.BaselineDir != ""
+	dto.DefaultDir = s.cm.reg.DefaultBaselineDir(e.ID)
+	dto.KeepNewest = e.LocalKeepNewest
+	dto.PruneLoop = s.localPruneLoop
+	dto.KeepBlocked = LocalKeepBlocked(s.cm.reg.List(), e, s.cm.defaultBaselineDir)
+	dto.KeepHeld = heldNow(e)
+	if r := s.localRetentionOf(e.ID); r != nil {
+		dto.KeepInForce = r.KeepNewest
+		dto.PruneRetainMinutes = s.pruneRetainMinutes()
+		dto.SnapshotEveryMinutes = s.snapshotEveryMinutes(e)
+	}
 	dto.FullBackupPossible = FullBackupPossible(e, s.scheduleGates()) == nil
 	dto.ScheduleLoop = s.backupSchedules != nil
 	if e.BackupSchedule != nil {
@@ -254,6 +320,51 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	return dto
 }
 
+// pruneRetainMinutes is the age retention the prune loop applies, read the way
+// the loop reads it (consoleapp effectiveRetain): the saved value over the
+// startup flag, parsed by the same cliutil.ParseRetain; unreadable = none.
+func (s *Server) pruneRetainMinutes() int {
+	raw := s.backupSettingRow(BackupSettingBaselineRetain, s.backupSettingsDefaults.BaselineRetain, "").Value
+	if raw == "" {
+		return 0
+	}
+	d, err := cliutil.ParseRetain(raw)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return int(d.Minutes())
+}
+
+// snapshotEveryMinutes is SnapshotEveryMinutes for e. The two loops write
+// into the same folder on their own timers and neither skips for the other,
+// so their RATES add: the result is 30 days over the snapshots both take in
+// 30 days, rounded down (a shorter interval can only shorten the reach the
+// page states). The schedule counts its full copies off the regular grid too
+// (BackupsPer30Days). Each loop counts only where it runs for e.
+func (s *Server) snapshotEveryMinutes(e ServerEntry) int {
+	const month = 30 * 24 * time.Hour
+	var per30 int64
+	// The schedule: stored, runnable here (the same IO-free check the row's
+	// refusal uses), and this process runs schedules at all.
+	if sc := e.BackupSchedule; sc != nil && s.backupSchedules != nil && CheckBackupSchedule(e, *sc, s.scheduleGates()) == nil {
+		if p, err := sc.Parse(); err == nil {
+			per30 += p.BackupsPer30Days()
+		}
+	}
+	// The refresh loop: set at startup (it runs whenever the flag is set, or
+	// the daemon refuses to start), and it covers every server with an index
+	// and a local folder (consoleapp baselineRefreshTargets).
+	if raw := s.backupSettingsDefaults.RefreshEvery; raw != "" && e.DSN != "" && e.BaselineDir != "" {
+		if d, err := cliutil.ParseInterval(raw); err == nil && d > 0 {
+			per30 += int64(month / d)
+		}
+	}
+	if per30 <= 0 {
+		return 0
+	}
+	return max(1, int(month.Minutes())/int(per30))
+}
+
 // backupSettingsUpdateRequest is the PUT body. Pointer semantics: an omitted
 // field keeps the stored value. This endpoint patches ONLY the three backup
 // fields — unlike PUT /api/servers/{id}, which replaces the entry and
@@ -263,6 +374,13 @@ type backupSettingsUpdateRequest struct {
 	BaselineDir *string `json:"baseline_dir"`
 	BaselineS3  *string `json:"baseline_s3"`
 	NoArchive   *bool   `json:"no_archive"`
+	// LocalCopy is the yes/no (#1681). false clears the folder, and is
+	// refused where no external destination would be left; true with no
+	// folder given uses the default one. Omitted: the folder field alone
+	// decides, as before.
+	LocalCopy *bool `json:"local_copy"`
+	// KeepNewest sets the local retention; 0 keeps every snapshot.
+	KeepNewest *int `json:"keep_newest"`
 }
 
 // handleBackupSettingsServerUpdate serves PUT /api/backup-settings/servers/{id}.
@@ -283,6 +401,7 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 		writeBodyDecodeError(w, err)
 		return
 	}
+	before := entry
 	if req.BaselineDir != nil {
 		entry.BaselineDir = strings.TrimSpace(*req.BaselineDir)
 	}
@@ -291,6 +410,46 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	}
 	if req.NoArchive != nil {
 		entry.NoArchive = *req.NoArchive
+	}
+	if req.LocalCopy != nil {
+		if !*req.LocalCopy {
+			// The snapshots already in the folder stay where they are; the
+			// page says so, because nothing lists or prunes them after this.
+			entry.BaselineDir = ""
+		} else if entry.BaselineDir == "" {
+			entry.BaselineDir = s.cm.reg.DefaultBaselineDir(entry.ID)
+			if entry.BaselineDir == "" {
+				writeJSONError(w, http.StatusBadRequest, "type the folder this server's snapshots go in")
+				return
+			}
+		}
+	}
+	if entry.BaselineDir == "" && entry.BaselineS3 == "" && req.LocalCopy != nil && !*req.LocalCopy {
+		writeJSONError(w, http.StatusBadRequest, noCopyAnywhereMsg)
+		return
+	}
+	if req.KeepNewest != nil {
+		if err := validLocalKeepNewest(*req.KeepNewest); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		entry.LocalKeepNewest = *req.KeepNewest
+	}
+	// A folder this save changes must be one DBTrail can use (#1681). An
+	// unchanged one is not re-checked, so a toggle elsewhere on the row still
+	// saves while the folder is broken.
+	if entry.BaselineDir != "" && entry.BaselineDir != before.BaselineDir {
+		if err := s.prepareLocalSnapshotDir(entry.BaselineDir); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// A count only removes anything without an S3 destination.
+		if entry.BaselineS3 == "" {
+			if err := adoptsSnapshots(entry.BaselineDir, entry.LocalKeepNewest); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 	}
 	if err := s.cm.reg.Update(entry); err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())

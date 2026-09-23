@@ -44,6 +44,8 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		"srv.resolved_dir", "srv.resolved_s3", "srv.source",
 		"srv.schedule_every", "srv.schedule_at", "srv.schedule_refusal", "srv.schedule_full_every",
 		"srv.schedule_every_minutes", "srv.archive_s3", "srv.full_backup_possible",
+		// How far back the kept count reaches, and a held folder (#1681).
+		"srv.keep_in_force", "srv.snapshot_every_minutes", "srv.prune_retain_minutes", "srv.keep_held",
 	} {
 		if !strings.Contains(page, read) {
 			t.Errorf("the page never reads %q; the server emits it and the page renders a blank instead", read)
@@ -72,39 +74,25 @@ func TestBackupSettingsDaemonRowsAreAllLabeled(t *testing.T) {
 	}
 }
 
-// TestServerFormCarriesTheBackupFieldsAsPassthrough is the wipe hazard the
-// move created (#1582): PUT /api/servers/{id} REPLACES the entry, so a form
-// that stopped sending baseline_dir/baseline_s3/no_archive would silently
-// clear a server's backup configuration on every unrelated edit. The fields
-// left the visible form for the settings page; they must survive in it as
-// hidden passthroughs, prefilled and submitted like before.
-func TestServerFormCarriesTheBackupFieldsAsPassthrough(t *testing.T) {
+// TestServerFormLeavesTheSnapshotFieldsAlone (#1681): the connection form does
+// not carry the snapshot folder, S3 destination or archive toggle at all. It
+// used to post them back from hidden fields so a replacing PUT would not wipe
+// them, which put back an OLD folder whenever the form had been opened before
+// a change on the Snapshots page. The server now keeps what a request leaves
+// out (TestServersUpdate_keepsSnapshotFieldsItWasNotSent).
+func TestServerFormLeavesTheSnapshotFieldsAlone(t *testing.T) {
 	js := readAsset(t, "app.js")
 	form := jsFunctionBody(t, js, "buildServerForm")
 	for _, field := range []string{`name: "baseline_dir"`, `name: "baseline_s3"`, `name: "no_archive"`} {
-		if !strings.Contains(form, field) {
-			t.Errorf("buildServerForm no longer carries %s; a plain edit now WIPES that field on the entry", field)
+		if strings.Contains(form, field) {
+			t.Errorf("buildServerForm carries %s again; a form opened before a Snapshots-page change would post the old value back", field)
 		}
-	}
-	// Hidden, not visible: the settings page is the one editor. A visible
-	// duplicate saves to one store from two places, one of them stale.
-	if strings.Contains(form, `srvField("Backup dir"`) || strings.Contains(form, `srvField("Backup S3"`) {
-		t.Error("the server form still renders visible backup-location fields; they moved to the settings page")
 	}
 	body := jsFunctionBody(t, js, "serverFormBody")
-	for _, read := range []string{"f.baseline_dir.value", "f.baseline_s3.value", "f.no_archive.checked"} {
-		if !strings.Contains(body, read) {
-			t.Errorf("serverFormBody no longer sends %s; the PUT will replace the entry without it", read)
+	for _, key := range []string{"baseline_dir", "baseline_s3", "no_archive"} {
+		if strings.Contains(body, key) {
+			t.Errorf("serverFormBody sends %s again", key)
 		}
-	}
-	// And the prefill still fills the hidden halves, or the passthrough
-	// passes empty strings through — the exact wipe it exists to prevent.
-	show := jsFunctionBody(t, js, "showServerForm")
-	if !strings.Contains(show, `"baseline_dir", "baseline_s3"`) {
-		t.Error("showServerForm's prefill list no longer covers the hidden backup fields")
-	}
-	if !strings.Contains(show, "form.elements.no_archive.checked = !!prefill.no_archive") {
-		t.Error("showServerForm no longer prefills no_archive; the hidden checkbox submits unchecked for every edit")
 	}
 }
 
@@ -294,15 +282,17 @@ func visibleChars(body string) int {
 
 // TestBackupSettingsStaysCompact: the two daemon-side cards carried ~247
 // words of visible copy before the per-server list (#1603). They explain
-// themselves by drawing now; what still needs saying is compact, not cut.
+// themselves by drawing now; what still needs saying is compact, not cut. The
+// disk-space card is gone (#1681); what it said that is still true is one
+// line of the per-server yes/no, localCopyWords, budgeted below.
 func TestBackupSettingsStaysCompact(t *testing.T) {
 	js := readAsset(t, "app.js")
-	refresh := jsFunctionBody(t, js, "backupRefreshCard")
+	words := jsFunctionBody(t, js, "localCopyWords")
 	daemon := jsFunctionBody(t, js, "backupDaemonCard")
 	row := jsFunctionBody(t, js, "backupServerRow")
 
 	// Each surface keeps a compact block: folding is what makes the cut real.
-	for name, body := range map[string]string{"backupRefreshCard": refresh, "backupDaemonCard": daemon, "backupServerRow": row} {
+	for name, body := range map[string]string{"backupDaemonCard": daemon, "backupServerRow": row} {
 		if !strings.Contains(body, `cnFine("More about `) {
 			t.Errorf("%s has no compact block; the prose was cut, not compacted", name)
 		}
@@ -316,8 +306,14 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	// caps sit ~25% and ~40% above the rewrite and well below the old cards,
 	// so a copy edit breathes but one more paragraph rings here before the
 	// e2e sees it.
-	if n := visibleChars(refresh); n > 620 {
-		t.Errorf("backupRefreshCard's visible text is %d characters; the drawing carries the rule, so put the rest behind cnFine", n)
+	// localCopyWords over every arm at once is 1107 characters today (ten
+	// arms: yes, no, no without S3, the startup folder, yes with S3, and the
+	// five count lines, the fifth being the folder another server's
+	// snapshots still hold, #1681); a reader sees at most two of them (the
+	// reach line is localReachWords', counted apart). The cap leaves room for
+	// a copy edit and rings on one more paragraph.
+	if n := visibleChars(words); n > 1200 {
+		t.Errorf("localCopyWords' visible text is %d characters over all its arms; a reader sees two lines of it, keep them short", n)
 	}
 	if n := visibleChars(daemon); n > 150 {
 		t.Errorf("backupDaemonCard's visible text is %d characters beyond its rows; explain in the compact block, not above the rows", n)
@@ -366,7 +362,7 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	// jsFunctionBody fails open, because that helper truncates each line at
 	// its first "//" and a URL literal ("s3://...") hides everything after
 	// it on the line. Comments carrying a dash ring here on purpose.
-	for _, name := range []string{"backupRefreshCard", "backupDaemonCard", "backupServerRow", "snapshotSetupSections", "cfShape", "blCase", "s3RetentionBox"} {
+	for _, name := range []string{"localCopyWords", "backupDaemonCard", "backupServerRow", "snapshotSetupSections", "blCase", "s3RetentionBox"} {
 		body := jsFunctionSpan(t, js, name)
 		for _, m := range regexp.MustCompile(`"([^"\n]*)"`).FindAllStringSubmatch(body, -1) {
 			if strings.Contains(m[1], "—") {

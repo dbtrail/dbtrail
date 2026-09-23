@@ -268,7 +268,6 @@ ctx.__api = async (p) => {
     snapshots: [{ time: "2026-06-10 12:00:00", tables: 3, binlog_file: "binlog.000001", binlog_pos: 50 }] };
   if (p === "/api/backup-settings") return { daemon: [{ key: "baseline_dir", value: "/tmp/b", editable: false }],
     servers: [{ id: "a", name: "a", source: "none" }] };
-  if (p === "/api/baseline-refresh") return { enabled: true, table_deltas: true };
   return {};
 };
 vm.runInContext("api = (p) => __api(p);", ctx);
@@ -354,8 +353,10 @@ const paint = async (caps, from, hash) => {
 	if !hasString(got.Watch.Sections, "checks") || !hasString(got.Watch.Sections, "setup") {
 		t.Errorf("under watch the page is missing a section: %q", got.Watch.Sections)
 	}
-	if !hasString(got.Watch.Asked, "/api/baseline-refresh") {
-		t.Errorf("watch does not fetch /api/baseline-refresh, so the disk-space card can only render its error branch: %q", got.Watch.Asked)
+	// The disk-space card and its endpoint are gone (#1681): neither half
+	// may still ask for it, or every page load logs a 404.
+	if hasString(got.Watch.Asked, "/api/baseline-refresh") {
+		t.Errorf("watch asks for /api/baseline-refresh, which no longer exists: %q", got.Watch.Asked)
 	}
 	// Nobody followed an old address in the two paints above.
 	if got.Serve.Notes != 0 || got.Watch.Notes != 0 {

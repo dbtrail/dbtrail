@@ -407,8 +407,12 @@ func TestIntegrationServerSwitching(t *testing.T) {
 	if caps.Reconstruct {
 		t.Error("boot entry must report reconstruct=false (no baseline)")
 	}
+	// A folder of the test's own: since #1681 a saved folder must exist (this
+	// console only reads, so it creates none), and a fixed /tmp path passed
+	// only on machines where some earlier run had left it behind.
+	baselineDir := t.TempDir()
 	rec, body = doReqOn(t, srv, "", "PUT", "/api/servers/"+created.ID,
-		`{"name":"second","host":"`+created.Host+`","port":"`+created.Port+`","user":"`+created.User+`","dbname":"`+created.DBName+`","baseline_dir":"/tmp/baselines"}`)
+		`{"name":"second","host":"`+created.Host+`","port":"`+created.Port+`","user":"`+created.User+`","dbname":"`+created.DBName+`","baseline_dir":"`+baselineDir+`"}`)
 	if rec.Code != 200 {
 		t.Fatalf("baseline edit: code=%d body=%s", rec.Code, body)
 	}

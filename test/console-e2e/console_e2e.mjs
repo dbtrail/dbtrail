@@ -4905,148 +4905,10 @@ try {
     ? ok("layout: a card left alone on the last row spans it")
     : bad("layout: a card left alone on the last row spans it", JSON.stringify(bandRow));
 
-  // ── Scenario 17g3 — the disk-space card, every state it can be in ──
-  // Calls the REAL backupRefreshCard with each of the 144 DTOs the daemon can
-  // serve and reads the rendered element. Since #1681 the card has no switch
-  // (reuse is always on), so the "source" axis and the two buttons are gone;
-  // table_deltas took its place as an axis, because what the reader sees
-  // drawn is whether an unchanged table KEEPS its file, and with deltas on it
-  // keeps it whatever the reuse flag says. A Go guard over the source can only
-  // see that both `br.enabled` and `br.scheduled` appear somewhere in the
-  // function, so inverting either condition survives it while the card tells
-  // the operator the opposite of the truth. Rendering is the only view that
-  // separates those.
-  //
-  // It also pins the sentence about WHERE the saving applies, which the Go
-  // guard deliberately leaves alone: that one asserts the claim is tied to the
-  // rule in reconstruct, not what the claim says. Keyed to the PRODUCER, since
-  // only the per-server schedule passes BaselineS3 to the fold; the interval
-  // loop and every restore read the local directory and do reuse files.
-  const cardStates = await page.evaluate(() => {
-    const rows = [];
-    for (const on of [false, true]) {
-      for (const deltas of [false, true]) {
-      for (const enabled of [false, true]) {
-        for (const scheduled of [false, true]) {
-          // The two #1579 dimensions. `targets` is absent off a watch daemon
-          // (no loop to count) and a real 0 on one whose loop covers nothing;
-          // the alarm must separate those, so undefined and 0 are distinct
-          // values here, not one falsy case.
-          for (const targets of [undefined, 0, 1]) {
-          // 0, 1 and 2: a predicate that agrees with "> 0" on {0, 2} but hides
-          // the note for a SINGLE skipped server survives a two-value axis, and
-          // one S3-only server is both the common deployment and the value a
-          // later pluralization edit is most likely to special-case.
-          for (const skipped of [0, 1, 2]) {
-            const el = backupRefreshCard({ carry_forward_unchanged: on, table_deltas: deltas, enabled, scheduled,
-              targets, skipped_s3_only: skipped });
-            // What the card must say and draw: the file is kept unless BOTH
-            // are off. Pinned as an equality, not a presence: an inverted
-            // ternary renders a perfectly good sentence about the opposite
-            // daemon, which is the failure this scenario exists for.
-            const kept = on || deltas;
-            const t = el.innerText || el.textContent || "";
-            // What sits INSIDE the compact block. Detached, innerText is
-            // textContent, so `t` alone cannot tell visible from compact;
-            // the floor below needs the split (#1603).
-            const fine = Array.from(el.querySelectorAll("details.cn-fine")).map((d) => d.textContent).join("\n");
-            rows.push({
-              // The floor: what must stay in plain view is not inside the
-              // compact block, and what moved there by design is.
-              hiddenAlarm: fine.includes("no server can be refreshed"),
-              hiddenDormant: fine.includes("Nothing uses this yet"),
-              // The COUNTED sentence, so the compact block's own "keeps
-              // backups only in S3" wording cannot false-positive.
-              hiddenSkip: fine.includes(skipped + " server(s) keep backups only in S3"),
-              compactSaving: fine.includes("only when the last backup is read from this machine"),
-              // What replaced provenance: the closing sentence names what the
-              // daemon does. Read as an EQUALITY over all three arms, so a
-              // card printing two of them fails here.
-              compactRule: [
-                fine.includes("DBTrail always reuses a table that did not change"),
-                fine.includes("but table deltas are on"),
-                fine.includes("both reuse and table deltas turned off"),
-              ].map((x) => (x ? "1" : "0")).join("") === (on ? "100" : deltas ? "010" : "001"),
-              // The visible sentence and the drawing, against the same rule.
-              saysKept: t.includes("Tables with no changes keep their last file"),
-              saysRewrite: t.includes("Every backup writes every table again"),
-              drawsKept: el.querySelectorAll(".cf-shape .cf-tile.cf-kept").length > 0,
-              kept,
-              on, deltas, enabled, scheduled, targets, skipped,
-              alarm: t.includes("no server can be refreshed"),
-              // The count is read back, not just the sentence: a card that
-              // says "server(s)" without the number tells an operator nothing
-              // about how much is uncovered.
-              skipNote: t.includes(skipped + " server(s) keep backups only in S3"),
-              // The skip note may MENTION the cheaper update, but only to DENY
-              // it: these servers cannot get one, because the fold writes its
-              // Parquet to the local directory they do not have. An unnegated
-              // mention is the promise the first version of this note made
-              // ("their scheduled backups read the bucket instead"). Read from
-              // the skip PARAGRAPH, not the card: the saving sentence above
-              // legitimately says "reuses nothing" about the same servers.
-              skipPromisesReuse: ((line) => /read the bucket/i.test(line)
-                || (/(reus|recorded changes)/i.test(line) && !/\b(never|cannot|no)\b/i.test(line)))(
-                Array.from(el.querySelectorAll("p")).map((p) => p.textContent)
-                  .find((x) => x.includes("keep backups only in S3")) || ""),
-              // No state pill and nothing to operate since #1681: nothing
-              // here is a choice, so a control would invite a click that has
-              // nowhere to go. Every interactive shape, not only buttons.
-              pill: !!el.querySelector(".bkr-state"),
-              controls: el.querySelectorAll("button, input, select, textarea, [onclick]").length,
-              dormant: t.includes("Nothing uses this yet"),
-              middle: t.includes("Nothing refreshes all servers on one timer"),
-              saving: t.includes("only when the last backup is read from this machine"),
-              // A WORD test, not the literal "(live". The old shape put the
-              // word in parentheses, so a check for that string passes on a pill
-              // reading "On, running now" beside "Nothing uses this yet", which
-              // is the contradiction this exists to catch. The card says "the
-              // next time dbtrail runs", so \brunning\b does not match it.
-              live: /\b(live|running)\b/i.test(t),
-              buttons: Array.from(el.querySelectorAll("button")).map((b) => b.textContent),
-            });
-          }
-          }
-        }
-      }
-      }
-    }
-    return rows;
-  });
-  const cardBad = cardStates.filter((r) =>
-    // nothing that reads as a control: no state pill, nothing operable
-    r.pill || r.buttons.length > 0 || r.controls > 0
-    // what the card says and draws is what the daemon does with an unchanged
-    // table, in both directions
-    || r.saysKept !== r.kept || r.saysRewrite === r.kept || r.drawsKept !== r.kept
-    // the compact block never swallows a fault or the dormancy note, and
-    // it does hold the qualifiers that moved there (#1603): a "compact" that
-    // hid the alarm would pass every presence check above
-    || r.hiddenAlarm || r.hiddenDormant || r.hiddenSkip
-    || !r.compactSaving || !r.compactRule
-    // dormant is said when nothing consumes the setting, and only then
-    || r.dormant !== !r.enabled
-    // the middle state is the --baseline-trigger daemon: live for restores,
-    // nothing on a timer. Collapsing it into either neighbour is the misreport
-    // the card exists to avoid.
-    || r.middle !== (r.enabled && !r.scheduled)
-    // the closing sentence says what happens, never whether it runs
-    || r.live
-    // the saving never appears without the condition it actually has
-    || !r.saving
-    // #1579: the alarm fires exactly when a timer is on over zero refreshable
-    // servers. An ABSENT count (no loop in this daemon) is not zero, and that
-    // is the whole point of the strict compare in the card.
-    || r.alarm !== (r.scheduled && r.targets === 0)
-    // the skip note appears with its count, and only when servers were skipped
-    || r.skipNote !== (r.skipped > 0)
-    // and it never promises those servers an update from the bucket, which
-    // needs the local directory they lack
-    || r.skipPromisesReuse);
-  cardStates.length === 144 && cardBad.length === 0
-    ? ok("backups: the disk-space card reports every state it can be in")
-    : bad("backups: the disk-space card reports every state it can be in",
-        JSON.stringify({ n: cardStates.length, wrong: cardBad.slice(0, 4) }));
+  // Scenario 17g3 (the disk-space card in every state) is gone with the card
+  // (#1681): reusing an unchanged table is unconditional, and the saving is
+  // said beside each server's yes/no, rendered in every mode by
+  // TestBackupServerRow_localCopyInEveryMode.
 
   // ── Scenario 17h — the telemetry card shows the exact sample event (#1447) ──
   // Still on /daemon. The "Show a sample event" fold must be closed by
@@ -5194,7 +5056,8 @@ try {
       fine: fine.length,
       fineOpen: fine.filter((d) => d.open).length,
       refreshCardHere: !!view.querySelector(".bkr-head"),
-      cfTiles: view.querySelectorAll(".bkr-head ~ .cf-shape .cf-row").length,
+      // #1681: every server box asks the one question, with two answers.
+      questions: Array.from(view.querySelectorAll(".bks-server")).map((b) => b.querySelectorAll(".bks-q input[type=radio]").length),
       // Every case row on the page, not only those inside a server box: a
       // legend re-added anywhere raises this count above one per server.
       cases: view.querySelectorAll(".bl-case").length,
@@ -5233,9 +5096,9 @@ try {
     ? ok("snapshots: the setup section's visible text stays under budget with the fine print compact")
     : bad("snapshots: the setup section's visible text stays under budget with the fine print compact",
         JSON.stringify({ chars: bks.visibleChars, fine: bks.fine, open: bks.fineOpen, emDash: bks.emDash }));
-  (bks.refreshCardHere && bks.cfTiles === 2)
-    ? ok("backup-settings: the carry-forward card moved here and draws two backups")
-    : bad("backup-settings: the carry-forward card moved here and draws two backups", JSON.stringify({ here: bks.refreshCardHere, rows: bks.cfTiles }));
+  (!bks.refreshCardHere && bks.questions.length > 0 && bks.questions.every((n) => n === 2))
+    ? ok("snapshots: the disk-space card is gone and every server asks whether to keep a copy on this machine")
+    : bad("snapshots: the disk-space card is gone and every server asks whether to keep a copy on this machine", JSON.stringify({ card: bks.refreshCardHere, questions: bks.questions }));
   // The drawing cannot lie: one case row per server and no more (#1573 took
   // the three-row legend away, and counting every .bl-case on the page is
   // what makes its return fail here), and each server's case is the source
@@ -5265,19 +5128,10 @@ try {
     ? ok("snapshots: the compact blocks link into the docs site, and at least one names a page the header table carries")
     : bad("snapshots: the compact blocks link into the docs site, and at least one names a page the header table carries", JSON.stringify({ links: bks.moreLinks, pages: docsSlugs }));
   // The states this harness never puts on screen, rendered DETACHED through
-  // the real functions (#1603): the switch drawn ON (three kept, two written,
-  // the kept swatch in the key) and OFF (five written, no kept swatch), a
-  // refused daemon value (loud line under the row, outside the compact
+  // the real functions (#1603): a refused daemon value (loud line under the row, outside the compact
   // block, value marked), and the serve-mode page (no sections, no daemon
   // card, no sub line since #1573). Detached so nothing on the live page changes.
   const bksStates = await page.evaluate(() => {
-    const shape = (on) => {
-      const s = cfShape(on);
-      const rows = Array.from(s.querySelectorAll(".cf-row")).map((r) => ({
-        tiles: r.querySelectorAll(".cf-tile").length, kept: r.querySelectorAll(".cf-tile.cf-kept").length }));
-      return { rows, key: (s.querySelector(".cf-key") || {}).textContent || "",
-        img: s.getAttribute("role") === "img" && (s.getAttribute("aria-label") || "").length > 20 };
-    };
     const refused = backupDaemonCard([{ key: "lock_mode", value: "ftwrl", err: "bad mode; MySQL dumps are refused until it is fixed", cli: "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE", needs_restart: true }]);
     const loud = Array.from(refused.querySelectorAll("p.form-msg.err"));
     const keep = { monitor: capsCache.monitor };
@@ -5288,21 +5142,16 @@ try {
       // Snapshots, not a page of its own), so they are collected into a
       // holder — nothing on the live page is touched at all now.
       const holder = document.createElement("div");
-      snapshotSetupSections({ daemon: [], servers: [{ id: "x", name: "x", source: "none" }], registry_read_only: false }, null)
+      snapshotSetupSections({ daemon: [], servers: [{ id: "x", name: "x", source: "none" }], registry_read_only: false })
         .forEach((n) => holder.append(n));
       serve = { sections: holder.querySelectorAll(".bks-sect").length, boot: !!holder.querySelector(".bks-boot"),
         sub: (holder.querySelector(".page-sub") || {}).textContent || "", current: (holder.querySelector(".bl-case.is-current") || {}).dataset };
     } finally { capsCache.monitor = keep.monitor; }
-    return { on: shape(true), off: shape(false),
+    return {
       refused: { marked: !!refused.querySelector(".bks-value.bks-refused"), loud: loud.length === 1 && loud[0].textContent.includes("bad mode"),
         outside: loud.length === 1 && !loud[0].closest("details") },
       serve };
   });
-  const cf = bksStates.on, cfo = bksStates.off;
-  (cf.rows.length === 2 && cf.rows.every((r) => r.tiles === 5) && cf.rows[0].kept === 0 && cf.rows[1].kept === 3 && /kept/.test(cf.key) && cf.img
-    && cfo.rows.length === 2 && cfo.rows.every((r) => r.tiles === 5) && cfo.rows[1].kept === 0 && !/kept/.test(cfo.key) && cfo.img)
-    ? ok("backup-settings: reuse drawn on keeps three of five and written two; off writes all five")
-    : bad("backup-settings: reuse drawn on keeps three of five and written two; off writes all five", JSON.stringify({ on: cf, off: cfo }));
   (bksStates.refused.marked && bksStates.refused.loud && bksStates.refused.outside)
     ? ok("backup-settings: a refused daemon value is marked and its reason stays in plain view")
     : bad("backup-settings: a refused daemon value is marked and its reason stays in plain view", JSON.stringify(bksStates.refused));
@@ -5317,7 +5166,9 @@ try {
   // a Save that stays asleep is an operator who cannot set a backup location.
   const dirtySave = await page.evaluate(async () => {
     const box = document.querySelector(".bks-server");
-    const input = box.querySelector("input[name=baseline_dir]");
+    // The S3 field, which every answer counts: the folder only counts under
+    // a yes (#1681), and the first server here may well be a no.
+    const input = box.querySelector("input[name=baseline_s3]");
     const save = Array.from(box.querySelectorAll("button")).find((b) => b.textContent === "Save");
     const was = input.value;
     const fire = () => input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -5336,13 +5187,11 @@ try {
   await page.evaluate(() => navigate("snapshots"));
   await page.waitForFunction(() => location.pathname === "/snapshots"
     && document.querySelector(".view .ov-panel-title"));
-  // The reuse card lives in the setup half and is drawn ONCE: with the three
-  // pages merged (#1573), a card mounted by both halves would read one value
-  // in two places on the same screen.
+  // The reuse card is gone (#1681): its saving is said per server now.
   const cardCount = await page.evaluate(() => document.querySelectorAll(".view .bkr-head").length);
-  (cardCount === 1)
-    ? ok("snapshots: the reuse card is drawn exactly once")
-    : bad("snapshots: the reuse card is drawn exactly once", "found " + cardCount + " .bkr-head on /snapshots");
+  (cardCount === 0)
+    ? ok("snapshots: the disk-space card is not drawn")
+    : bad("snapshots: the disk-space card is not drawn", "found " + cardCount + " .bkr-head on /snapshots");
   // The Iceberg export panel moved to Connect AI (#1573). Found by its title,
   // not by its class: the old page mounted it without .cn-ice, and a class
   // lookup would pass against it. Scenario 17g shows the same server DOES get

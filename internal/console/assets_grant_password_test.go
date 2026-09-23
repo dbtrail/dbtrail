@@ -277,6 +277,10 @@ const save = async (f, started) => {
   out.focusSelectsAfterUserTyped = !!f.elements.source_password.__selected;
   f = show({ monitor: true }, { id: "x", name: "x", flavor: "mysql", source_user: "repl", has_source_password: true });
   out.edit = state(f);
+  // #1681: an edit opened on a server with a snapshot folder sends none of
+  // the snapshot fields, so it cannot put back a folder changed meanwhile.
+  f = show({ monitor: true }, { id: "x", name: "x", flavor: "mysql", baseline_dir: "/old/folder", baseline_s3: "s3://old/p/", no_archive: true });
+  out.editBody = body(f);
   f = show({ monitor: false }, null);
   out.serve = state(f); out.serveBody = body(f);
   f = show({ monitor: true }, null);
@@ -347,7 +351,7 @@ func TestServerFormGrantDefaultsWiring(t *testing.T) {
 			Body map[string]any
 		}
 		GuardNoHostBlockedSave                                           bool
-		ServeBody, IndexOnlyBody, TypedNoHostBody                        map[string]any
+		ServeBody, IndexOnlyBody, TypedNoHostBody, EditBody              map[string]any
 		ReopenSame, FocusSelects, FocusKeepsTyped, NextServerNewPassword bool
 		FocusSelectsAfterUserTyped                                       bool
 		AfterFailedFirstSave, AfterFailedRetry                           saved
@@ -389,6 +393,15 @@ func TestServerFormGrantDefaultsWiring(t *testing.T) {
 	// An edit keeps its stored password: nothing generated, nothing runnable.
 	if out.Edit.Pw != "" || out.Edit.Runnable != 0 || !strings.Contains(out.Edit.Block, "Leave the password above blank to keep the saved one") {
 		t.Errorf("an edit generated a password or shows runnable SQL without one: %+v", out.Edit)
+	}
+	// #1681: the real edit form sends no snapshot field at all.
+	if out.EditBody == nil || out.EditBody["name"] != "x" {
+		t.Errorf("test premise: the edit body was not captured: %v", out.EditBody)
+	}
+	for _, k := range []string{"baseline_dir", "baseline_s3", "no_archive"} {
+		if _, ok := out.EditBody[k]; ok {
+			t.Errorf("the edit form sends %s, which puts back a value changed on the Snapshots page meanwhile: %v", k, out.EditBody)
+		}
 	}
 	// A process that cannot capture: no account filled in, so an index-only
 	// add is not refused as a source without a host.

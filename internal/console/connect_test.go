@@ -186,7 +186,7 @@ func TestCheckSaysSoWhenTheRollbackFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv2.cm.reg.readOnly = true
-	res := srv2.startNewEntry(t.Context(), e)
+	res := srv2.startNewEntry(t.Context(), e, "")
 	if res.Started {
 		t.Fatal("the stub start was supposed to fail")
 	}

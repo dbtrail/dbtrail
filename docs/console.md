@@ -721,29 +721,67 @@ location at all.
 
 The page shows the three kinds of setting instead of describing them (#1603).
 Two section labels split it: **Change here** and **Set when DBTrail starts**.
-The disk-space card sits under the second one since #1681, beside the other
-values that come from the launch command.
 
-- **Backups & disk space** (read-only since #1681, under **Set when DBTrail
-  starts**) — what DBTrail does with a
-  table that did not change: it keeps that table's previous file instead of
-  writing it again. There is nothing to click; reuse is always on, and only
-  `--baseline-carry-forward-unchanged=false` turns it off. What it does is
-  drawn: two backups of five tables, the unchanged ones carried across as
-  dashed tiles and the changed ones written again, with one sentence under it.
-  (`=false` turns off this path only: with table deltas on, the default, a
-  table that did not change is still published by linking its previous file.)
-  The local-only rule and the S3 skip count sit in a compact **More about disk
-  space** block, with links into the docs guide.
-- **Per server** (change here) — each registry server's Backup dir, Backup
-  S3 and archive toggle, editable in place, with which location is in force
+- **Keep a copy of this server's snapshots on this machine?** (#1681) — the
+  one per-server question. **Yes** keeps them in a folder on the machine
+  DBTrail runs on. A server added from the console gets one of its own,
+  `<state dir>/snapshots/<server id>` (the state directory is the one holding
+  the server list, `/var/lib/bintrail` in the compose stack), created `0700`
+  and named by the server's id, so renaming the server moves nothing. With no
+  S3 destination, the row also asks how many to keep: a new server keeps the
+  newest 3 and older ones are removed; empty keeps every snapshot. Older
+  snapshots go at the next hourly cleanup, never the only copy of a table.
+  Changing only the count on a server's own folder is the choice to remove
+  the older ones there, so it is not refused. Moving a server that has a
+  count to another folder that already holds snapshots is refused (from
+  this row or the server form), and a server added on a folder that already
+  holds snapshots starts with no count, so it keeps them all.
+  Beside the count the row says how far back that lets you go: the count
+  times how often the server gets a snapshot on its own: its schedule
+  (including full backups that fall between its runs) and the
+  `--baseline-refresh-interval` loop together, since both write into the
+  folder (for example 3 daily snapshots reach back up to about 3 days, but
+  only about 3 hours if an hourly refresh also runs), never less than an
+  hour, because
+  the cleanup leaves snapshots younger than an hour alone, and never less
+  than the `--baseline-retain` age, which keeps younger snapshots past the
+  count. When nothing takes snapshots on a timer it names no number, since
+  the reach then depends on when snapshots are taken. The count it uses is the one the Snapshots
+  listing reports (`local_retention.keep_newest`); a number typed and not
+  yet saved or applied reads "Once this number applies". Past the oldest
+  snapshot kept, a restore, a `.sql` export and full-table time travel have
+  no snapshot to start from, so they cannot reach that far back; the
+  recorded row changes themselves (row history, `recover`) do not depend on
+  snapshots and keep their own retention. A folder that two servers shared
+  is never counted, and neither is one that stopped being shared while it
+  still holds the other server's snapshots (the other server was deleted,
+  answered no, or moved away): a snapshot does not record which server
+  wrote it. That folder keeps everything, also after answering no and then
+  yes on it again, until its server moves to a new empty folder. A server
+  whose creation failed half way leaves no such mark. A table
+  that did not change keeps its last file (a hard link where the filesystem
+  allows it), so a new snapshot only costs the tables that changed. **No, only
+  in S3** means the snapshots live only in the S3 destination, and every run
+  writes every table; it is refused while no S3 destination is set, and the
+  snapshots already in the folder stay there, no longer listed or removed.
+  A folder is checked when it is saved: it must be a full path, a missing one
+  is created, and DBTrail must be able to write into it. That is on the
+  `watch` daemon, which takes the snapshots; the read-only `serve` creates
+  no folder and writes nothing but its server list, so there a folder must
+  already exist and be writable by its user, and a server it adds gets no
+  default folder. Saving needs `servers:write`; a session without it sees
+  the answers and no controls. The server edit form no longer carries these
+  fields, and an edit that leaves them out keeps what is stored. Servers that existed
+  before #1681 are unchanged: none gets a folder or a count it did not have.
+- **Per server** (change here) — each registry server's local-copy answer,
+  Backup dir, Backup S3, keep count and archive toggle, editable in place, with which location is in force
   drawn rather than said: the server's own case (own location, daemon
   default, or no location) under its fields, with a tick or a cross per lane.
   The daemon default backs time-travel, verification and `.sql` exports but
   backups, restores and the schedule refuse, which is the cross on that
   case. The per-server fields left
-  the server edit form for this page (the form still round-trips them, so an
-  unrelated edit cannot wipe them). A stored schedule that cannot run as
+  the server edit form for this page; an edit there that leaves them out
+  keeps what is stored, so it cannot wipe them. A stored schedule that cannot run as
   things stand shows the refusal above the compact block; the schedule
   itself and the full-backup note sit inside it. Save wakes up when a field
   differs from what was loaded.
@@ -809,10 +847,10 @@ Storage, which had become a drawer: seven cards from five unrelated concerns
 
 Two cards left the page entirely. **Backups & disk space** moved to the
 backups page beside **Scheduled backups** (#1543), from there to the
-**Backup settings** page (#1582), and with that page into the "Where and how
-often" section of **Snapshots** (#1573), which keeps the settings beside the
-work they shape — schedules, runs and downloads — and beside the data that
-work reports on.
+**Backup settings** page (#1582), with that page into the "Where and how
+often" section of **Snapshots** (#1573), and was removed in #1681: reusing an
+unchanged table is unconditional, and the saving it described is said beside
+each server's local-copy question, where it is true or not.
 **Download a DuckDB schema** moved to the SQL page, from there to
 **Connect** (#1549) — `GET /api/views.sql` requires `settings:read`, while the
 SQL page is gated on `query:execute` and on the `sql` capability, so the
@@ -827,32 +865,15 @@ and lands on Retention.
 
 - **Table deltas are not on this page.** Table deltas (#1638), which make a refresh keep a changed table's file and write its changes beside it, are on by default (#1729) and turned off with a daemon flag only (`--baseline-table-deltas=false`, or `BINTRAIL_BASELINE_TABLE_DELTAS=false`); there is no card here. It changes the files every refresh publishes; [Dump and baseline](dump-and-baseline.md) describes the layout, who reads it, and what to do with DuckDB views when turning it on or off.
 
-- **Backups & disk space** (#1528/#1543, formerly *File reuse for unchanged
-  tables*, and before that *Automatic backup refresh*; on the **Backups &
-  snapshots** settings page since #1582) — the one behaviour behind
-  `--baseline-carry-forward-unchanged`: whether a table with no changes in the
-  window keeps its previous Parquet file instead of being written again. It has
-  no timetable in it, which the first name promised and which **Scheduled
-  backups** on the Snapshots page actually is. The saving is real and it is
-  not free, which is what the name says: where the filesystem allows a hard
-  link, two backups then share the same bytes on disk, so deleting the older
-  one frees nothing while the newer one still points at it, and a `du` per
-  snapshot directory double-counts it (one `du` over the baseline root reports
-  the truth). It does not apply when the previous snapshot is read from S3,
-  which is what a per-server schedule on an S3-backed server does: linking a
-  file needs both ends on a filesystem, so those runs take the ordinary path
-  and the daemon log says so. It is
-  **process-global** (`GET /api/baseline-refresh`, read-only) even though it
-  sits beside a per-server schedule; the card says so. It is consumed by the
-  daemon-wide refresh interval, by the per-server backup schedules, and by
-  point-in-time restores; the card says which of those are live. **Since
-  #1681 the console does not edit it**: reuse never publishes a table it
-  should not — a destructive DDL or a stale schema snapshot refuses the
-  backup before reuse is reached, a known capture gap makes that table
-  ineligible so it is written the ordinary way, and a failed `_MANIFEST`
-  check fails the run — so it is on for every daemon, and the daemon flag is the only thing that changes it.
-  A `baseline_refresh:` block saved by an older console is ignored, and kept
-  in the registry file untouched.
+- **Reusing an unchanged table** (`--baseline-carry-forward-unchanged`, on
+  by default) has no card since #1681. Where the filesystem allows a hard
+  link, two snapshots then share the same bytes on disk, so deleting the
+  older one frees nothing while the newer one still points at it, and a `du`
+  per snapshot directory double-counts it (one `du` over the root reports the
+  truth). It does not apply when the previous snapshot is read from S3,
+  because linking a file needs both ends on a filesystem. A
+  `baseline_refresh:` block saved by an older console is ignored and kept in
+  the registry file untouched.
   See [dump-and-baseline.md](dump-and-baseline.md#refreshing-on-a-schedule).
 - **Staged downloads**: the `.sql` backups built from the Snapshots page that
   are waiting on the daemon's disk for their download: each build's server,
@@ -1566,10 +1587,9 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `POST /api/servers/{id}/monitor/stop` | Supervisor only: clear intent, drain the stream (final checkpoint), release the advisory lock. |
 | `GET /api/servers/{id}/monitor` | Supervisor only: `{monitor: {state, last_error, since, source_connected, retrying, phase}}` — `stopped\|pending\|running\|stalled\|lost_position\|failed`. `phase` names a long startup step a `pending` stream is inside, currently only `resume_cleanup` (the pre-capture delete of changes a replayed window would save twice); absent when none is running. |
 | `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a backup exists for the server. A first-backup step follows the capture steps: with its job's state when console backups are enabled and the server has its own baseline location, and as `waiting` with a `detail` and `fix` when backups are turned off for the daemon or the server has no baseline location of its own (#1677). It is left out only for a PostgreSQL server with no slot or publication (the server form refuses to save one), which cannot capture either. `complete` is the backup step being done (#1801). A backup ends the list whatever the capture steps are still doing, since seeing the first change is not something anyone can make happen; a backup step that FAILED is not a done one, so it keeps the list up. A capture step that failed deliberately does not, so a finished list never comes back days later: a dead stream is reported by the Overview's own "stopped updating" note, and capture failing before any backup exists keeps the list by the same rule. The server's own backup locations are read for a complete snapshot, at most once a minute per server since an S3 location is a listing over the network, so a backup made before a restart or from the command line ends the step, and one that cannot be read is reported on the step (`detail`) instead of counting as "no backup". The job's own state comes first: a backup that failed or is running outranks an older snapshot. `check_error` means the index database could not be read, and nothing is marked done from it. |
-| `GET /api/baseline-refresh` | What the daemon does with a table that did not change: `{carry_forward_unchanged, enabled, scheduled, targets, skipped_s3_only}`. Read-only since #1681 (the `PUT` and the `source` field are gone): `carry_forward_unchanged` is the daemon's own flag, on unless it was started with `--baseline-carry-forward-unchanged=false`; on the read-only console (`bintrail-console serve`), which has no such flag and takes no backups, it reads false. `enabled` reports whether anything in this daemon consumes it, `scheduled` whether a refresh timer runs, `targets` how many servers the next tick covers (omitted where no loop runs) and `skipped_s3_only` how many it skips for keeping backups only in S3. |
 | `GET /api/rotation` | Effective global rotation policy: `{retain, interval, add_future, source, enabled}` — `source` is `"override"` (console-saved) or `"default"` (daemon `--rotate-*`). |
 | `PUT /api/rotation` | Supervisor only (403 on the standalone console): save a global rotation override `{retain, interval, add_future}` (validated; `off` rejected). Applies live on the next cycle. |
-| `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. With `?location_only=1` it answers only `{configured, source, kind}` (the location the listing reads first: the server's own, else the daemon-wide default, a directory over a bucket) from configuration, without the schedule, the storage or the server's index; same permission as the listing, refused while a data profile is active (a named startup `--profile` even with no rules yet, or the session's, wider than the listing because the export it feeds is not redacted); any value other than `1` is a 400. Connect AI uses it for the Iceberg export command. |
+| `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. With `?location_only=1` it answers only `{configured, source, kind}` (the location the listing reads first: the server's own, else the daemon-wide default, a directory over a bucket) from configuration, without the schedule, the storage or the server's index; same permission as the listing, refused while a data profile is active (a named startup `--profile` even with no rules yet, or the session's, wider than the listing because the export it feeds is not redacted); any value other than `1` is a 400. Connect AI uses it for the Iceberg export command. Since #1681 it also carries, at the top level, `local_retention: {keep_newest}` when this daemon removes snapshots past a count from the selected server's local folder, and `last_prune: {at, removed}` (RFC 3339 UTC) once a prune has removed any, read from the `.last-prune.json` the prune leaves beside the snapshots; `last_prune_failure: {at, reason}` while the most recent prune attempt on that folder failed (`reason` holds one cause per line, separated by `\n` only) (from `.last-prune-failure.json`, removed by the next attempt that succeeds); and `last_prune_error` when either record exists but cannot be read. All are omitted, never null, when there is nothing to say. |
 | `GET /api/views.sql` | **Not JSON** — a `text/plain` DuckDB schema over the selected server's Parquet (the same output as `bintrail views`), served as a `views.sql` attachment. Nothing is executed here; the file runs in your own DuckDB. `?include_events=1` adds the `events` view over the archived change log, which is left out by default because defining it opens one Parquet footer per archived file (`bintrail views --include-events`). `?include_live=1` adds the leg over the live index (`bintrail views --include-live`), with the index host, port, database and user in the file and never its password; it requires `include_events=1`, since the leg hangs on that view, and 400s without it. 404 when archives are disabled or nothing is archived yet, 403 while an access-control profile is active, 422 when this server cannot carry the live leg (an index reached over a unix socket, or one with no `binlog_events` table), 502 when the index could not be asked, and 400 for an `include_live` or `include_events` value other than `1`/`true`/`0`/`false` (so a request that meant to ask never comes back as an archives-only file). |
 | `GET /api/storage` | Process-global storage context: `{aws: {access_key_env, profile, region_env, shared_config, container_creds, web_identity, web_identity_token_readable, web_identity_role_arn}}` — presence booleans and non-secret names only, never credential values. |
 | `GET /api/flashback` | Process-global: the embedded time-travel SQL port (`watch --flashback-listen`): `{enabled, listen, host, port}`. `enabled: false` alone on the standalone console and on a daemon that did not open the port; `host` is empty on a wildcard bind (the UI then uses the name it was opened with). Never the console token that authenticates the port. Backs the **Connect a SQL client** panel on Settings → Connect AI. |

@@ -40,11 +40,10 @@ func TestBaselineRefreshTargets(t *testing.T) {
 			t.Errorf("target %q = %q, want %q", r.ServerID, r.BaselineDir, want[r.ServerID])
 		}
 	}
-	// The skip is REPORTED, not just absent (#1579): the same computation
-	// answers GET /api/baseline-refresh, and "covers every server" was wrong
-	// exactly because this server vanished without a count. The no-baseline
-	// and no-DSN entries are NOT in it: they are unconfigured, not skipped
-	// for a reason the card should name.
+	// The skip is REPORTED, not just absent (#1579): "covers every server"
+	// was wrong exactly because this server vanished without a count, and the
+	// dispatching callers log it. The no-baseline and no-DSN entries are NOT
+	// in it: they are unconfigured, not skipped for a reason to name.
 	if len(skipped) != 1 || skipped[0] != "s3only" {
 		t.Errorf("skippedS3Only = %v, want exactly [s3only]", skipped)
 	}
