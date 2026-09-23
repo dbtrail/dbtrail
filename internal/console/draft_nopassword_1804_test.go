@@ -94,3 +94,21 @@ func TestConnectDraftAnswersWithTheAutomaticName(t *testing.T) {
 		t.Errorf("no host, yet an automatic name: %s", body)
 	}
 }
+
+// The suggested name is the one the check would really give: made unique
+// against the servers already registered, not the bare name from the host.
+func TestConnectDraftAutoNameIsTheNameTheCheckAssigns(t *testing.T) {
+	srv, ctrl := newSupervisorServer(t)
+	if _, err := srv.cm.reg.Add(ServerEntry{Name: "db-3307", DSN: "u:p@tcp(h:3306)/d", SourceDSN: "u:p@tcp(db:3307)/"}); err != nil {
+		t.Fatal(err)
+	}
+	_, body := doServersReq(t, srv, "PUT", "/api/servers/draft", `{"source_host":"db","source_port":"3307","source_user":"u"}`)
+	if !strings.Contains(string(body), `"auto_name":"db-3307-2"`) {
+		t.Errorf("with db-3307 taken, the suggested name should be db-3307-2: %s", body)
+	}
+	ctrl.report = &DoctorReport{Failed: 1, Checks: []DoctorCheck{{Name: "x", Status: "fail"}}}
+	_, cbody := doServersReq(t, srv, "POST", "/api/servers/check", `{"source_host":"db","source_port":"3307","source_user":"u","source_password":"p"}`)
+	if !strings.Contains(string(cbody), `"name":"db-3307-2"`) {
+		t.Errorf("the check names the server differently from the suggestion: %s", cbody)
+	}
+}

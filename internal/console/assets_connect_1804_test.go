@@ -199,12 +199,12 @@ document.getElementById = (id) => id === "server-form-mount" ? mount : id === "s
 ctx.setTimeout = (fn) => { fn(); return 1; };
 const form = () => mount.children[0];
 const calls = [];
-let putGate = null;
+let putGate = null, checkGate = null;
 ctx.__api = async (path, opts) => {
   const method = (opts && opts.method) || "GET";
   calls.push(method + " " + path + (opts && opts.body ? " " + JSON.stringify(opts.body) : ""));
   if (method === "PUT") { if (putGate) await putGate; calls.push("PUT done"); return { found: true, auto_name: (opts.body.source_host || "x") + "-auto" }; }
-  if (path === "/api/servers/check") return ctx.__checkAnswer;
+  if (path === "/api/servers/check") { if (checkGate) await checkGate; return ctx.__checkAnswer; }
   if (method === "GET" && path === "/api/servers/draft") return ctx.__draftAnswer;
   return {};
 };
@@ -256,6 +256,23 @@ const flush = () => new Promise((r) => setImmediate(r));
   f.fire("submit"); await flush(); await flush(); await flush();
   out.startedClosed = !form();
   out.toasts = toasts.slice();
+  // Typing while a check that ends in "started" runs: the edit waits for the
+  // check, and once capture has started it must never be saved. Saved, it
+  // rewrites the draft the server just discarded, the next page load reopens
+  // Connect filled in, and pressing the button adds the same database twice.
+  setCaps({ monitor: true });
+  vm.runInContext("showConnectForm(null)", ctx);
+  f = form();
+  f.elements.source_host.value = "db5"; f.elements.source_password.value = "Pw-5";
+  await flush(); await flush();
+  let openCheck; checkGate = new Promise((r) => { openCheck = r; });
+  ctx.__checkAnswer = { ok: true, started: true, name: "db5", doctor: { checks: [], warnings: 0 } };
+  f.fire("submit"); await flush(); await flush();
+  calls.length = 0;
+  f.elements.source_user.value = "typed-during-check"; f.elements.source_user.fire("input");
+  openCheck(); checkGate = null;
+  for (let i = 0; i < 6; i++) await flush();
+  out.putsAfterStarted = calls.filter((c) => c.startsWith("PUT /api/servers/draft"));
   // A restored draft: no password generated, and the screen asks for it.
   setCaps({ monitor: true });
   vm.runInContext("showConnectForm({ name: '', source_host: 'db', source_port: '3307', source_user: 'alice', auto_name: 'db-3307' })", ctx);
@@ -326,11 +343,11 @@ func TestConnectScreenWiring(t *testing.T) {
 			Pw, User, Name, Placeholder, Focused, Block string
 			PwAgainShown                                bool
 		}
-		DeleteBeforePutDone, CancelOffDuringCheck            bool
-		CancelOrder, ReadOnlyRestoreCalls, QueuedAfterCancel []string
-		RestoredHost                                         *string
-		ServeIsLongForm                                      bool
-		Full                                                 struct {
+		DeleteBeforePutDone, CancelOffDuringCheck                              bool
+		CancelOrder, ReadOnlyRestoreCalls, QueuedAfterCancel, PutsAfterStarted []string
+		RestoredHost                                                           *string
+		ServeIsLongForm                                                        bool
+		Full                                                                   struct {
 			Long, Deleted bool
 			Host, Port    *string
 		}
@@ -400,6 +417,9 @@ func TestConnectScreenWiring(t *testing.T) {
 		t.Errorf("a started check: closed %v, toasts %v", out.StartedClosed, out.Toasts)
 	}
 
+	if len(out.PutsAfterStarted) != 0 {
+		t.Errorf("an edit typed during a check that started capture was saved afterwards, so the finished form comes back on the next load: %v", out.PutsAfterStarted)
+	}
 	r := out.Restored
 	if r.Pw != "" {
 		t.Errorf("a restored form filled in a password (%d chars); the account was created with the old one", len(r.Pw))
