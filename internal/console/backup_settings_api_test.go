@@ -199,9 +199,12 @@ func TestBackupSettings_updatePatchesOnlyTheBackupFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A real folder: since #1681 a folder the save changes is created and
+	// checked, so a made-up absolute path is refused.
+	bl := t.TempDir() + "/bl"
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("PUT", "/api/backup-settings/servers/"+entry.ID,
-		strings.NewReader(`{"baseline_dir":" /data/bl ","no_archive":true}`))
+		strings.NewReader(`{"baseline_dir":" `+bl+` ","no_archive":true}`))
 	req.SetPathValue("id", entry.ID)
 	srv.handleBackupSettingsServerUpdate(rec, req)
 	if rec.Code != 200 {
@@ -211,9 +214,9 @@ func TestBackupSettings_updatePatchesOnlyTheBackupFields(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &dto); err != nil {
 		t.Fatal(err)
 	}
-	if dto.BaselineDir != "/data/bl" || !dto.NoArchive || dto.Source != "server" {
-		t.Errorf("PUT answer: dir=%q no_archive=%v source=%q; want trimmed /data/bl, true, server",
-			dto.BaselineDir, dto.NoArchive, dto.Source)
+	if dto.BaselineDir != bl || !dto.NoArchive || dto.Source != "server" {
+		t.Errorf("PUT answer: dir=%q no_archive=%v source=%q; want trimmed %s, true, server",
+			dto.BaselineDir, dto.NoArchive, dto.Source, bl)
 	}
 
 	after, ok := srv.cm.reg.Get(entry.ID)

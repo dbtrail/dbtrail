@@ -137,6 +137,13 @@ type ServerEntry struct {
 	// schedule endpoints; the server edit form carries it over untouched.
 	// On binaries that predate it, it round-trips through Extra.
 	BackupSchedule *BackupSchedule `yaml:"backup_schedule,omitempty"`
+	// LocalKeepNewest is this server's local snapshot retention (#1681):
+	// while it has a local folder (BaselineDir) and no external destination
+	// (BaselineS3), the daemon keeps the newest LocalKeepNewest complete
+	// snapshots there and removes older ones. 0 (every entry saved before
+	// #1681) keeps them all, as before. With a destination set it does
+	// nothing: that mode removes only what the destination confirmed.
+	LocalKeepNewest int `yaml:"local_keep_newest,omitempty"`
 
 	// Extra is the forward-compat catch-all: unknown fields written by a NEWER
 	// bintrail (e.g. the phase-2 control plane's source_dsn / server_id /

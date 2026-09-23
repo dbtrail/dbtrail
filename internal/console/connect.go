@@ -180,9 +180,9 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	added, err := s.persistNewEntry(entry, deriveIndex, base)
+	added, err := s.persistNewEntry(entry, deriveIndex, base, localCopyOf(req))
 	if err != nil {
-		writeJSONError(w, registryErrStatus(err), err.Error())
+		writeJSONError(w, newEntryErrStatus(err), err.Error())
 		return
 	}
 	res := s.startNewEntry(r.Context(), added)

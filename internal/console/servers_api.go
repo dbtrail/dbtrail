@@ -122,6 +122,12 @@ type serverRequest struct {
 	BaselineS3  string  `json:"baseline_s3"`
 	NoArchive   bool    `json:"no_archive"`
 	ArchiveS3   string  `json:"archive_s3"`
+	// LocalCopy is read on CREATE only (#1681): omitted or true gives the new
+	// server a local snapshot folder, <state dir>/baselines/<id> unless
+	// baseline_dir names another; false keeps its snapshots only at
+	// baseline_s3, which must then be set. An edit changes the local copy
+	// through PUT /api/backup-settings/servers/{id}, never here.
+	LocalCopy *bool `json:"local_copy"`
 	// S3 store (#1575). Always resent by the form, like Schemas: an omitted
 	// field clears it, which is what a form that shows it must do.
 	S3Endpoint  string `json:"s3_endpoint"`
@@ -257,9 +263,9 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	added, err := s.persistNewEntry(entry, deriveIndex,
-		DeriveServerName(req.SourceHost, req.SourcePort, entry.SourceFlavor()))
+		DeriveServerName(req.SourceHost, req.SourcePort, entry.SourceFlavor()), localCopyOf(req))
 	if err != nil {
-		writeJSONError(w, registryErrStatus(err), err.Error())
+		writeJSONError(w, newEntryErrStatus(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.entryDTO(added))
@@ -293,10 +299,22 @@ func (s *Server) buildNewEntry(req serverRequest) (ServerEntry, bool, error) {
 	if err != nil {
 		return ServerEntry{}, false, err
 	}
+	// The local copy (#1681), checked here so the Connect check refuses what
+	// Save would. No IO: the folder itself is prepared in persistNewEntry.
+	localDir := strings.TrimSpace(req.BaselineDir)
+	if req.LocalCopy != nil && !*req.LocalCopy {
+		if localDir != "" {
+			return ServerEntry{}, false, errors.New("a folder was given for a server that keeps no copy on this machine; send one or the other")
+		}
+		if strings.TrimSpace(req.BaselineS3) == "" {
+			return ServerEntry{}, false, errors.New(noCopyAnywhereMsg)
+		}
+	}
 	return ServerEntry{
 		Name:              strings.TrimSpace(req.Name),
 		DSN:               dsn,
-		BaselineDir:       req.BaselineDir,
+		BaselineDir:       localDir,
+		LocalKeepNewest:   DefaultLocalKeepNewest,
 		BaselineS3:        strings.TrimSpace(req.BaselineS3),
 		NoArchive:         req.NoArchive,
 		ArchiveS3:         strings.TrimSpace(req.ArchiveS3),
@@ -314,35 +332,89 @@ func (s *Server) buildNewEntry(req serverRequest) (ServerEntry, bool, error) {
 	}, deriveIndex, nil
 }
 
+// newLocalCopy is what a create asked of its local copy (#1681): want is
+// the answer (omitted counts as yes), asked whether it was given at all.
+type newLocalCopy struct{ want, asked bool }
+
+func localCopyOf(req serverRequest) newLocalCopy {
+	return newLocalCopy{want: req.LocalCopy == nil || *req.LocalCopy, asked: req.LocalCopy != nil}
+}
+
 // persistNewEntry appends the entry and, when its index is derived, fills that
 // in. nameBase is what to call it when nobody typed a name (#1803) — the
 // address of the database it reads; it is resolved under the registry's own
 // lock, so two people adding the first server for one host cannot both derive
 // the same name.
-func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase string) (ServerEntry, error) {
+//
+// It also gives the server its local snapshot folder (#1681): a named one is
+// checked (and created) BEFORE the entry is added, so a refusal leaves
+// nothing behind, and one that cannot be used is an errLocalDirInvalid, a bad
+// request; the default one is named after the id Add mints, so it lands in a
+// follow-up update.
+func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase string, local newLocalCopy) (ServerEntry, error) {
+	entry.LocalKeepNewest = DefaultLocalKeepNewest
+	if entry.BaselineDir != "" {
+		if err := prepareLocalSnapshotDir(entry.BaselineDir); err != nil {
+			return ServerEntry{}, err
+		}
+	}
 	added, err := s.cm.reg.AddAutoNamed(entry, nameBase)
 	if err != nil {
 		return ServerEntry{}, err
 	}
-	if !deriveIndex {
-		return added, nil
-	}
-	// The id is minted by Add, so the derived DSN lands in a follow-up update.
-	// A failure here rolls the entry back rather than leaving a half-configured
-	// server.
-	derived, dErr := s.monitorCtrl.DeriveIndexDSN(added.ID)
-	if dErr == nil {
-		added.DSN = derived
-		dErr = s.cm.reg.Update(added)
-	}
-	if dErr != nil {
-		if delErr := s.cm.reg.Delete(added.ID); delErr != nil {
-			slog.Error("could not remove a half-configured server after its index DSN could not be set",
-				"server", added.Name, "id", added.ID, "error", delErr.Error())
+	if deriveIndex {
+		// The id is minted by Add, so the derived DSN lands in a follow-up
+		// update. A failure here rolls the entry back rather than leaving a
+		// half-configured server.
+		derived, dErr := s.monitorCtrl.DeriveIndexDSN(added.ID)
+		if dErr == nil {
+			added.DSN = derived
+			dErr = s.cm.reg.Update(added)
 		}
-		return ServerEntry{}, fmt.Errorf("could not choose where this server's changes are kept: %w", dErr)
+		if dErr != nil {
+			if delErr := s.cm.reg.Delete(added.ID); delErr != nil {
+				slog.Error("could not remove a half-configured server after its index DSN could not be set",
+					"server", added.Name, "id", added.ID, "error", delErr.Error())
+			}
+			return ServerEntry{}, fmt.Errorf("could not choose where this server's changes are kept: %w", dErr)
+		}
+	}
+	// A daemon started with its own --baseline-dir/--baseline-s3 backs a
+	// server with no location of its own (#1010), and a create that does
+	// not answer the question keeps that: giving the server a folder would
+	// silently switch its reads off the daemon default. #1684 removes that
+	// fallback; until then only an explicit "yes" overrides it.
+	daemonDefault := s.cm.defaultBaselineDir != "" || s.cm.defaultBaselineS3 != ""
+	if local.want && added.BaselineDir == "" && (local.asked || !daemonDefault) {
+		if def := s.cm.reg.DefaultBaselineDir(added.ID); def != "" {
+			if err := prepareLocalSnapshotDir(def); err != nil {
+				// The server is still worth having: it is listed with no
+				// local copy, which is what the page then shows, and the
+				// operator can pick a folder there. Error, because this is
+				// the folder beside the registry DBTrail just wrote.
+				slog.Error("console: new server created without its local snapshot folder", "server", added.Name, "dir", def, "error", err)
+			} else {
+				added.BaselineDir = def
+				if err := s.cm.reg.Update(added); err != nil {
+					if delErr := s.cm.reg.Delete(added.ID); delErr != nil {
+						slog.Error("could not remove a server whose snapshot folder could not be saved",
+							"server", added.Name, "id", added.ID, "error", delErr.Error())
+					}
+					return ServerEntry{}, fmt.Errorf("save the snapshot folder: %w", err)
+				}
+			}
+		}
 	}
 	return added, nil
+}
+
+// newEntryErrStatus is the status of a persistNewEntry refusal: a folder
+// that cannot be used is the request's fault, the rest is the registry's.
+func newEntryErrStatus(err error) int {
+	if errors.Is(err, errLocalDirInvalid) {
+		return http.StatusBadRequest
+	}
+	return registryErrStatus(err)
 }
 
 // handleServersUpdate serves PUT /api/servers/{id}. Password semantics:
@@ -405,6 +477,15 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// A folder this edit changes is checked the way the backup settings
+	// check it (#1681); an unchanged one is left alone, so a server whose
+	// folder broke can still have its connection edited.
+	if req.BaselineDir != old.BaselineDir && req.BaselineDir != "" {
+		if err := prepareLocalSnapshotDir(req.BaselineDir); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	entry := ServerEntry{
 		ID:          id,
 		Name:        strings.TrimSpace(req.Name),
@@ -426,7 +507,10 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		MonitorDesired: old.MonitorDesired,
 		// The schedule has its own endpoints; an edit of the connection must
 		// not silently remove it.
-		BackupSchedule:    old.BackupSchedule,
+		BackupSchedule: old.BackupSchedule,
+		// Local retention (#1681) is set on the backup settings; a plain
+		// edit must not turn it off by omission.
+		LocalKeepNewest:   old.LocalKeepNewest,
 		SourceServerID:    req.SourceServerID,
 		Schemas:           req.Schemas,
 		Flavor:            flavor,

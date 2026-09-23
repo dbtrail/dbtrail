@@ -937,13 +937,18 @@ func TestCapabilityMatrix(t *testing.T) {
 // POST /api/servers path — which has no baseline field — must inherit the
 // process-wide --baseline-dir: its DTO reports reconstruct:true, and the
 // derived bundle (rebuildDerived shares newBundleDerived with the lazy open)
-// turns on both Reconstruct and Verify in /api/capabilities. Without a
-// process baseline dir, both stay off. The DTO's baseline_dir must stay the
-// entry's OWN (empty) value — echoing the default into the edit form would
-// persist it as per-server config on the next save.
+// turns on both Reconstruct and Verify in /api/capabilities. The DTO's
+// baseline_dir must stay the entry's OWN (empty) value — echoing the default
+// into the edit form would persist it as per-server config on the next save.
+//
+// Without a process baseline dir the server gets a folder of its own since
+// #1681 (<state dir>/baselines/<id>), so both capabilities are on and the DTO
+// names that folder; with one, a create that does not ask for a local copy
+// keeps the fallback, unchanged.
 func TestRegistryBaselineFallbackAPI(t *testing.T) {
 	for _, procBaseline := range []bool{true, false} {
-		reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
+		state := t.TempDir()
+		reg, err := LoadRegistry(state + "/console-servers.yaml")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -968,13 +973,16 @@ func TestRegistryBaselineFallbackAPI(t *testing.T) {
 		if err := json.Unmarshal(body, &created); err != nil {
 			t.Fatal(err)
 		}
-		if created.Reconstruct != procBaseline {
-			t.Errorf("procBaseline=%v: created DTO reconstruct=%v, want %v",
-				procBaseline, created.Reconstruct, procBaseline)
+		if !created.Reconstruct {
+			t.Errorf("procBaseline=%v: created DTO reconstruct=false, want true", procBaseline)
 		}
-		if created.BaselineDir != "" || created.BaselineS3 != "" {
-			t.Errorf("procBaseline=%v: DTO must report the entry's OWN baseline (empty), got dir=%q s3=%q",
-				procBaseline, created.BaselineDir, created.BaselineS3)
+		wantOwn := ""
+		if !procBaseline {
+			wantOwn = state + "/baselines/" + created.ID
+		}
+		if created.BaselineDir != wantOwn || created.BaselineS3 != "" {
+			t.Errorf("procBaseline=%v: DTO must report the entry's OWN baseline (%q), got dir=%q s3=%q",
+				procBaseline, wantOwn, created.BaselineDir, created.BaselineS3)
 		}
 
 		// Publish the entry's derived bundle the way the manager does (the
@@ -994,13 +1002,11 @@ func TestRegistryBaselineFallbackAPI(t *testing.T) {
 		if err := json.Unmarshal(body, &caps); err != nil {
 			t.Fatal(err)
 		}
-		if caps.Reconstruct != procBaseline {
-			t.Errorf("procBaseline=%v: capabilities reconstruct=%v, want %v",
-				procBaseline, caps.Reconstruct, procBaseline)
+		if !caps.Reconstruct {
+			t.Errorf("procBaseline=%v: capabilities reconstruct=false, want true", procBaseline)
 		}
-		if caps.Verify != procBaseline {
-			t.Errorf("procBaseline=%v: capabilities verify=%v, want %v",
-				procBaseline, caps.Verify, procBaseline)
+		if !caps.Verify {
+			t.Errorf("procBaseline=%v: capabilities verify=false, want true", procBaseline)
 		}
 		if b := srv.cm.bundles[created.ID]; procBaseline && b.baselineSrc != "/var/bintrail/baselines" {
 			t.Errorf("bundle baselineSrc=%q, want the process --baseline-dir", b.baselineSrc)

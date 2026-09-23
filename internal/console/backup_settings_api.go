@@ -141,6 +141,21 @@ type backupSettingsServerDTO struct {
 	// for full_backup_possible for a reason no setting on this server fixes,
 	// so the S3-only warning must not say "cannot run on this server" there.
 	ScheduleLoop bool `json:"schedule_loop"`
+	// LocalCopy answers the one per-server question (#1681): does this
+	// server keep a copy of its snapshots on this machine. It is whether the
+	// entry names its OWN folder; the daemon default folder backs reads only
+	// (see backupSourceDefault), so it does not count as this server's copy.
+	LocalCopy bool `json:"local_copy"`
+	// DefaultDir is the folder a "yes" would use when none is typed:
+	// <state dir>/baselines/<id>. Empty where the registry has no file.
+	DefaultDir string `json:"default_dir,omitempty"`
+	// KeepNewest is the saved local retention (0 = keep every snapshot).
+	// It removes anything only while LocalCopy is on, BaselineS3 is empty
+	// and PruneLoop is true; the page says which of those holds.
+	KeepNewest int `json:"keep_newest"`
+	// PruneLoop is whether this process runs the loop that applies
+	// KeepNewest. A read-only console never removes anything.
+	PruneLoop bool `json:"prune_loop"`
 }
 
 // The three provenance verdicts a server's backup location can have. The
@@ -159,6 +174,12 @@ type backupSettingsDTO struct {
 	Daemon           []backupSettingRow        `json:"daemon"`
 	Servers          []backupSettingsServerDTO `json:"servers"`
 	RegistryReadOnly bool                      `json:"registry_read_only"`
+	// ReuseUnchanged is whether a new snapshot reuses the previous file of a
+	// table that did not change (#1681): the daemon's reuse flag, or table
+	// deltas, which link the file forward on their own. What "keep a copy on
+	// this machine" saves depends on it, so the page can only promise the
+	// saving where this is true.
+	ReuseUnchanged bool `json:"reuse_unchanged"`
 }
 
 // lockModeRowErr appends the operational consequence to a lock-mode
@@ -193,7 +214,8 @@ func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request)
 			{Key: "verify_interval", Value: d.VerifyInterval, CLI: "--verify-interval", NeedsRestart: true},
 			s.backupSettingRow(BackupSettingVerifyTables, d.VerifyTables, "--verify-tables"),
 		},
-		Servers: []backupSettingsServerDTO{},
+		Servers:        []backupSettingsServerDTO{},
+		ReuseUnchanged: s.baselineRefreshDefaults.CarryForwardUnchanged || s.baselineRefreshDefaults.TableDeltas,
 	}
 	// The lock-mode rejection rides on whichever row ended up carrying it.
 	for i := range dto.Daemon {
@@ -233,6 +255,10 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	default:
 		dto.Source = backupSourceNone
 	}
+	dto.LocalCopy = e.BaselineDir != ""
+	dto.DefaultDir = s.cm.reg.DefaultBaselineDir(e.ID)
+	dto.KeepNewest = e.LocalKeepNewest
+	dto.PruneLoop = s.localPruneLoop
 	dto.FullBackupPossible = FullBackupPossible(e, s.scheduleGates()) == nil
 	dto.ScheduleLoop = s.backupSchedules != nil
 	if e.BackupSchedule != nil {
@@ -263,6 +289,13 @@ type backupSettingsUpdateRequest struct {
 	BaselineDir *string `json:"baseline_dir"`
 	BaselineS3  *string `json:"baseline_s3"`
 	NoArchive   *bool   `json:"no_archive"`
+	// LocalCopy is the yes/no (#1681). false clears the folder, and is
+	// refused where no external destination would be left; true with no
+	// folder given uses the default one. Omitted: the folder field alone
+	// decides, as before.
+	LocalCopy *bool `json:"local_copy"`
+	// KeepNewest sets the local retention; 0 keeps every snapshot.
+	KeepNewest *int `json:"keep_newest"`
 }
 
 // handleBackupSettingsServerUpdate serves PUT /api/backup-settings/servers/{id}.
@@ -283,6 +316,7 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 		writeBodyDecodeError(w, err)
 		return
 	}
+	before := entry
 	if req.BaselineDir != nil {
 		entry.BaselineDir = strings.TrimSpace(*req.BaselineDir)
 	}
@@ -291,6 +325,39 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	}
 	if req.NoArchive != nil {
 		entry.NoArchive = *req.NoArchive
+	}
+	if req.LocalCopy != nil {
+		if !*req.LocalCopy {
+			// The snapshots already in the folder stay where they are; the
+			// page says so, because nothing lists or prunes them after this.
+			entry.BaselineDir = ""
+		} else if entry.BaselineDir == "" {
+			entry.BaselineDir = s.cm.reg.DefaultBaselineDir(entry.ID)
+			if entry.BaselineDir == "" {
+				writeJSONError(w, http.StatusBadRequest, "type the folder this server's snapshots go in")
+				return
+			}
+		}
+	}
+	if entry.BaselineDir == "" && entry.BaselineS3 == "" && req.LocalCopy != nil && !*req.LocalCopy {
+		writeJSONError(w, http.StatusBadRequest, noCopyAnywhereMsg)
+		return
+	}
+	if req.KeepNewest != nil {
+		if err := validLocalKeepNewest(*req.KeepNewest); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		entry.LocalKeepNewest = *req.KeepNewest
+	}
+	// A folder this save changes must be one DBTrail can use (#1681). An
+	// unchanged one is not re-checked, so a toggle elsewhere on the row still
+	// saves while the folder is broken.
+	if entry.BaselineDir != "" && entry.BaselineDir != before.BaselineDir {
+		if err := prepareLocalSnapshotDir(entry.BaselineDir); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	if err := s.cm.reg.Update(entry); err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())

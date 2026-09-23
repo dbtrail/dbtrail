@@ -193,6 +193,11 @@ type Config struct {
 	// which is exactly the fresh-install shape #1579 is about (enabled and
 	// scheduled both true, zero servers refreshable, and the page silent).
 	BaselineRefreshTargets func() (targets, skippedS3Only int)
+	// LocalPruneLoop is set by the watch daemon when it runs the loop that
+	// removes local snapshots past a server's keep-newest count (#1681). The
+	// read-only serve leaves it false: nothing there removes anything, so the
+	// page must not say a retention is in force.
+	LocalPruneLoop bool
 	// BaselineRefreshDefaults carries the daemon's baseline-refresh flag/env
 	// values, the fallback the settings panel reports when no console override
 	// is saved. Same role as RotationDefaults above.
@@ -337,6 +342,8 @@ type Server struct {
 	// baselineRefreshDefaults is the fallback GET /api/baseline-refresh reports
 	// when no console override is saved.
 	baselineRefreshDefaults BaselineRefreshDefaults
+	// localPruneLoop is Config.LocalPruneLoop.
+	localPruneLoop bool
 	// baselineRefreshTargets is Config.BaselineRefreshTargets (nil off watch).
 	baselineRefreshTargets func() (targets, skippedS3Only int)
 	// version is the running build's version string (Config.Version).
@@ -560,6 +567,7 @@ func New(cfg Config) (*Server, error) {
 		backupSettingsDefaults:  cfg.BackupSettingsDefaults,
 		baselineRefreshDefaults: cfg.BaselineRefreshDefaults,
 		baselineRefreshTargets:  cfg.BaselineRefreshTargets,
+		localPruneLoop:          cfg.LocalPruneLoop,
 		version:                 cfg.Version,
 		cm:                      newConnManager(cfg.Registry, profileActive),
 		authPath:                authPath,
