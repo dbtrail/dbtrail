@@ -215,17 +215,9 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	if recPKColumns == "" {
 		return fmt.Errorf("--pk-columns is required")
 	}
-	if recBaselineDir == "" && recBaselineS3 == "" {
-		return fmt.Errorf("one of --baseline-dir or --baseline-s3 is required")
-	}
-	if !recBaselineOnly && recIndexDSN == "" {
-		return fmt.Errorf("--index-dsn is required unless --baseline-only is set")
-	}
-	if recHistory && recBaselineOnly {
-		return fmt.Errorf("--history and --baseline-only are mutually exclusive")
-	}
-
 	// ── Parse --at ─────────────────────────────────────────────────────────────
+	// Before the location check: a missing snapshot location is reported
+	// with the moment it would have to precede (#1807).
 	at := time.Now().UTC()
 	if recAt != "" {
 		parsed, err := cliutil.ParseTime(recAt)
@@ -235,6 +227,15 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		if parsed != nil {
 			at = *parsed
 		}
+	}
+	if recBaselineDir == "" && recBaselineS3 == "" {
+		return noSnapshotLocationError(cmd, recSchema+"."+recTable, at)
+	}
+	if !recBaselineOnly && recIndexDSN == "" {
+		return fmt.Errorf("--index-dsn is required unless --baseline-only is set")
+	}
+	if recHistory && recBaselineOnly {
+		return fmt.Errorf("--history and --baseline-only are mutually exclusive")
 	}
 
 	// ── Build pkFilter from --pk and --pk-columns ──────────────────────────────
@@ -261,6 +262,9 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// The stale-fallback warning (#466) is already logged inside FindBaseline;
 	// the CLI relies on that server-side log.
 	baselinePath, snapshotTime, _, err := reconstruct.FindBaseline(cmd.Context(), baselineSrc, recSchema, recTable, at)
+	if errors.Is(err, reconstruct.ErrNoBaseline) {
+		return noSnapshotBeforeError(cmd, recSchema+"."+recTable, at, baselineSrc, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -703,9 +707,6 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 	if recIndexDSN == "" {
 		return fmt.Errorf("--index-dsn is required in full-table mode")
 	}
-	if recBaselineDir == "" && recBaselineS3 == "" {
-		return fmt.Errorf("one of --baseline-dir or --baseline-s3 is required in full-table mode")
-	}
 
 	// ── Parse --at ─────────────────────────────────────────────────────────
 	at := time.Now().UTC()
@@ -717,6 +718,9 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 		if parsed != nil {
 			at = *parsed
 		}
+	}
+	if recBaselineDir == "" && recBaselineS3 == "" {
+		return noSnapshotLocationError(cmd, recTables, at)
 	}
 
 	// ── Parse --chunk-size ─────────────────────────────────────────────────
@@ -927,4 +931,52 @@ func resolveGapCheck(flavor string, bmeta baseline.DumpMetadata, firstFile strin
 // backstops a baseline whose metadata read failed.
 func pgReconstructBeta(flavor string, baselineLSN uint64) bool {
 	return flavor == "postgres" || baselineLSN != 0
+}
+
+// ── no snapshot (#1807) ──────────────────────────────────────────────────────
+//
+// reconstruct can only start from a snapshot taken at or before the moment
+// asked for; the replay runs forward from there. Both refusals below say so,
+// with the table and the moment filled in, because the one-line versions
+// they replace named only flags, and a person who then took a snapshot now
+// got the same refusal again for any earlier moment. The flags stay named:
+// they are how the location is given, and the CLI keeps calling snapshots
+// baselines (#1793 is the separate question of renaming the flags).
+
+// snapshotCommand is the command that makes a snapshot, named after the
+// binary running: bintrail-pg has its own, and a commercial build carries
+// the core's under its own name.
+func snapshotCommand(cmd *cobra.Command) string {
+	root := "bintrail"
+	if cmd != nil && cmd.HasParent() {
+		root = cmd.Root().Name()
+	}
+	return root + " baseline"
+}
+
+func noSnapshotLocationError(cmd *cobra.Command, tables string, at time.Time) error {
+	return fmt.Errorf("reconstruct needs a snapshot of %s taken at or before %s: it starts from that snapshot "+
+		"and replays the changes recorded after it. No snapshot location was given: set --baseline-dir (a folder) "+
+		"or --baseline-s3 (an s3:// URL) to where `%s` wrote its snapshots",
+		strings.ReplaceAll(tables, ",", ", "), at.UTC().Format(time.RFC3339), snapshotCommand(cmd))
+}
+
+// noSnapshotError keeps the lookup's error reachable (errors.Is on
+// reconstruct.ErrNoBaseline) under a message that says what to do.
+type noSnapshotError struct {
+	msg string
+	err error
+}
+
+func (e *noSnapshotError) Error() string { return e.msg }
+func (e *noSnapshotError) Unwrap() error { return e.err }
+
+func noSnapshotBeforeError(cmd *cobra.Command, table string, at time.Time, location string, err error) error {
+	when := at.UTC().Format(time.RFC3339)
+	return &noSnapshotError{err: err, msg: fmt.Sprintf(
+		"reconstruct needs a snapshot of %s taken at or before %s, and %q has none. It starts from that snapshot "+
+			"and replays the changes recorded after it. A snapshot taken now only answers moments after it: "+
+			"point --baseline-dir or --baseline-s3 at a location holding an older one, or, if the snapshots there "+
+			"are all later, ask for a moment after the oldest (`%s` writes them)",
+		table, when, location, snapshotCommand(cmd))}
 }
