@@ -4746,7 +4746,10 @@ async function renderSnapshots() {
   const [dumpSt, restoreSt, sqlSt] = await Promise.all([
     (capsCache.baseline_trigger && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline").catch(() => null) : null,
     (capsCache.baseline_restore && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline/restore").catch(() => null) : null,
-    (capsCache.sql_export && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/sql-export").catch(() => null) : null,
+    // asErr, not a swallow: the .sql build's outcome appears in exactly one
+    // place on this page, so a failed status read has to reach the panel as
+    // a failure rather than as "no build has ever run here".
+    (capsCache.sql_export && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/sql-export").catch(asErr) : null,
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   try {
@@ -4836,14 +4839,17 @@ async function renderSnapshots() {
     if (drawChecks) {
       if (moved && beside && movedTo === "checks") v.append(moved);
       v.append(snapshotSection("Checks", "checks"));
-      // The verify guide. It lost its only link when the three page headers
-      // became one (#1573) — the header now opens the backup-strategy guide
-      // — and a page nothing links to also stops being fetched by the daily
-      // link check, so the site could move it and nobody would know.
-      v.append(docsMore("guides/verify", "", "what each check proves"));
       // Three regions with visible separation (#1419): what you can run,
       // what is running or just ran, what ran before.
-      part("Checks", () => verifyRegions(servers, { serversErr: serversErr }).forEach((region) => v.append(region)));
+      part("Checks", () => {
+        verifyRegions(servers, { serversErr: serversErr }).forEach((region) => v.append(region));
+        // The verify guide, AFTER the section it describes: it lost its only
+        // link when the three page headers became one (#1573) — the header
+        // now opens the backup-strategy guide — and a page nothing links to
+        // also stops being fetched by the daily link check, so the site
+        // could move it and nobody would know.
+        v.append(docsMore("guides/verify", "", "what each check proves"));
+      });
     }
     // Where and how often — the schedule (#1442) first, because it is what
     // makes the list above keep growing on its own and a failed scheduled
@@ -7680,7 +7686,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   card.append(state);
   const body = el("div", { class: "bk-card-body" });
   body.append(el("p", { class: "form-hint", text:
-    "Pick a past moment. DBTrail rebuilds every table as it was then, from your backups plus the recorded changes, and saves the result as a new backup in the list below. Your database is not touched." }));
+    "Pick a past moment. DBTrail rebuilds every table as it was then and saves the result as a new snapshot below. Your database is not touched." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
@@ -7746,19 +7752,122 @@ async function startBackupRestore(id, at, btn, msgEl) {
 // the views file — so that lane downloads both. MySQL takes one file that does not exist until you
 // pick a moment, so that lane asks for the moment. Dressing them as a
 // matched pair would be a lie about the work each one is.
+// The .sql build states that owe the reader nothing, and so leave the
+// take-away fold closed on arrival. Everything else — including a state this
+// build has never heard of — opens it. See backupTakeAway.
+const SQL_EXPORT_QUIET = new Set(["idle", "downloaded", "expired"]);
+// Every state the daemon documents today (BaselineStatus). Used only to name
+// one it does not, which the lane below has no branch to show.
+const SQL_EXPORT_KNOWN = new Set(["idle", "running", "succeeded", "failed", "downloaded", "expired"]);
+
 function backupTakeAway(cur, b, sqlSt) {
   const duck = backupDuckLane(b);
   const sql = backupSQLLane(cur, b, sqlSt);
   if (!duck && !sql) return null;
-  const panel = el("section", { class: "ov-panel bk-take" });
-  panel.append(el("div", { class: "ov-panel-head" },
-    el("h2", { class: "ov-panel-title", text: "Take a copy with you" })));
+  // FOLDED (#1573). Measured on this page with a real snapshot, these two
+  // lanes explaining file formats were most of the words visible at first
+  // sight (the e2e prints the live count) — the answer to "what do I download", which is not the question
+  // the page is opened with. Folded, the same answer is one click away and
+  // the list of copies starts on the first screen.
+  //
+  // It opens ITSELF whenever the .sql build has anything owed to the reader.
+  // A build nobody is watching must never be hidden behind a fold — that is
+  // the failure this page exists to prevent, one level down. This is the
+  // ONLY place on the page a build's outcome appears, so the rule below is
+  // load-bearing rather than cosmetic.
+  //
+  // Which is why it names the states that keep it CLOSED rather than the
+  // ones that open it (an empty state included: that is unknown too). The documented set is closed today — BaselineStatus
+  // in baseline_trigger.go lists six, and the lane below has a branch for
+  // each — so this guards the day it stops being closed: a state added
+  // server-side before the frontend learns it is far likelier to be a new
+  // way of failing than a new kind of nothing. An allow-list would hide that
+  // one by default. Opening is not enough on its own, though: the lane has
+  // no branch for a state it does not know and draws a plain build form, so
+  // the panel also names the state below. (What such an addition looks
+  // like already exists one endpoint over: `replaced` is a real state on the
+  // Storage page's own DTO, produced in consoleapp/sql_export.go, and it can
+  // NOT reach this code — do not read the guard as being about that value.)
+  // A Set rather than an object literal costs nothing and avoids `state`
+  // values like "constructor" answering truthy through the prototype.
+  //
+  // Beyond the state, two more things open it, and both only when the MySQL
+  // lane is actually drawn: that lane is where a build's outcome and its
+  // staging problem are shown, so without it there is nothing the fold could
+  // be hiding. That gate is not decoration. On the command-line server's
+  // entry the lane is never drawn (builds run on registry servers only), and
+  // its status endpoint answers 409 — counted, that opened the fold on every
+  // visit with a red line about a build that cannot exist there.
+  //
+  //   staging_error is composed independently of state (the daemon folds in
+  //   every orphan it could not delete, and consoleapp/sql_export.go says in
+  //   as many words that clearing one never erases the other). So a build
+  //   that was downloaded — a quiet state — can carry a red line saying the
+  //   daemon cannot clear staged full dumps off its own disk, the disk
+  //   capture shares.
+  //
+  //   An unreadable status is the case we know LEAST about, and hiding it
+  //   would invert the reasoning above.
+  //
+  // "expired" stays quiet, but it is not silent. It means the build is gone
+  // without being downloaded (a downloaded build is "downloaded"), by one of
+  // two routes in consoleapp/sql_export.go: its deadline passed, or its
+  // files were removed from under it (the staging root defaults to the
+  // system temp directory, which some hosts clean). The summary line names
+  // both, so a reader who started one and came back learns it is gone, and
+  // one whose host keeps eating builds is not sent to rebuild into the same
+  // hole, without the panel sitting open on every visit until the next
+  // build.
+  //
+  // What the READER opened stays open across the repaints this page does on
+  // its own (kept outside the node, like the verify help's). A <details>
+  // created with `open` fires one toggle event for that creation, and
+  // recording it latched every automatic open as the reader's choice, so the
+  // panel stayed open for the rest of the tab. That one event is skipped;
+  // every later toggle is recorded. Toggle rather than a click on the
+  // summary, because the browser also opens a fold by itself for
+  // find-in-page and text-fragment links, and a click listener missed those:
+  // the next repaint shut the panel under the reader. A loud state still
+  // re-opens a panel the reader closed, since the one thing this fold may
+  // never do is hide an outcome.
+  const st = sqlSt && sqlSt.sql_export;
+  const stErr = sql && sqlSt && sqlSt.error;
+  const owed = !!(sql && st && (!SQL_EXPORT_QUIET.has(st.state || "") || st.staging_error)) || !!stErr;
+  const panel = el("details", { class: "ov-panel bk-take", open: owed || takeAwayOpen || null });
+  const summary = el("summary", { class: "ov-panel-head bk-take-sum" },
+    el("h2", { class: "ov-panel-title", text: "Take a copy with you" }));
+  if (sql && st && st.state === "expired") {
+    summary.append(el("span", { class: "bk-take-note", text: "The last .sql copy is gone: nobody downloaded it before its deadline, or its files were removed." }));
+  }
+  let creation = !!panel.open;
+  panel.addEventListener("toggle", () => {
+    if (creation) { creation = false; return; }
+    takeAwayOpen = !!panel.open;
+  });
+  panel.append(summary);
+  // Said out loud, and above the lanes it qualifies, rather than rendered as
+  // a build form with nothing in it: every state branch in the lane reads
+  // `st`, so an unreadable status drew the same thing as "no build has ever
+  // run here".
+  if (stErr) {
+    panel.append(el("p", { class: "form-msg err", text:
+      "The state of the .sql build could not be read: " + String(stErr).replace(/[.\s]+$/, "") +
+      ". A build may be running or finished that this page cannot show, so Build is off until it can be read." }));
+  } else if (sql && st && st.state && !SQL_EXPORT_KNOWN.has(st.state)) {
+    panel.append(el("p", { class: "form-msg err", text:
+      "The last .sql build reports a state this console does not recognise: " + st.state + ". Update the console, or check the daemon's log." }));
+  }
   const lanes = el("div", { class: "bk-lanes" });
   if (duck) lanes.append(duck);
   if (sql) lanes.append(sql);
   panel.append(lanes);
   return panel;
 }
+
+// Whether the reader opened the take-away panel themselves. Outside the node
+// for the reason vfyHelpOpen is: the repaints this page does on its own
+// replace the <details> that would have held it. See backupTakeAway.
+let takeAwayOpen = false;
 
 // backupFilesShape draws the count instead of stating it: on the DuckDB lane
 // two tiles when the server can make the views file and one when it cannot,
@@ -7975,6 +8084,11 @@ function backupSQLLane(cur, b, sqlSt) {
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   go.onclick = () => startSQLExport(cur.id, input.value.trim(), go, msg);
+  // With the status unreadable this lane cannot see a finished build, and a
+  // new build REPLACES a finished one: the daemon refuses only while one is
+  // running. One click here would delete a ready copy the reader cannot see.
+  // backupTakeAway says why the button is off.
+  if (sqlSt && sqlSt.error) go.disabled = true;
   body.append(el("div", { class: "bk-restore-row" }, input, go), msg);
   if (b.kind === "dir") {
     const elsewhere = backupElsewhereNote(b, usable, reads);
@@ -8139,16 +8253,27 @@ function verifyRegions(servers, opts) {
   // recover-inputs check reads only the index, so it stays runnable on a
   // server with no baseline configured.
   const help = el("p", { class: "form-hint vfy-modehelp" });
+  // The mode help is a FOLD since #1573. Open on arrival it was the largest
+  // block left on the first screen — an explanation of a check nobody asked
+  // for yet, on the screen whose job is "what copies do I have". Closed it
+  // costs its four-word summary, and it opens BY ITSELF the moment the reader browses the picker, which
+  // is the moment #1418 wrote it for. The text still swaps while closed, so
+  // whoever opens it afterwards reads the mode that is selected now.
+  const helpFold = el("details", { class: "vfy-helpfold", open: vfyHelpOpen || null },
+    el("summary", { class: "form-hint vfy-helpsum", text: "What this check proves" }), help);
+  helpFold.addEventListener("toggle", () => { vfyHelpOpen = !!helpFold.open; });
   const updateMode = () => {
     const live = vfyLive.get(cur.id);
     btn.disabled = (!!live && live.state === "running") || (!configured && modeSel.value !== "recover-inputs");
     help.textContent = VFY_MODE_HELP[modeSel.value] || "";
   };
-  modeSel.onchange = updateMode;
+  // Browsing the picker opens the help; vfyHelpOpen carries that (and a
+  // later close by hand) across the repaints this page does on its own.
+  modeSel.onchange = () => { vfyHelpOpen = true; helpFold.open = true; updateMode(); };
   updateMode();
   btn.onclick = () => createVerify(cur.id, modeSel.value);
   control.append(el("div", { class: "vfy-actions" }, modeSel, btn));
-  control.append(help);
+  control.append(helpFold);
   if (!configured) {
     control.append(el("p", { class: "form-hint", text:
       "No backup set up for this server yet. The two snapshot modes need one (set one under Where and how often, then create at least two snapshots). \"Check recovery inputs\" works without one: it only reads the index." }));
@@ -8219,6 +8344,12 @@ const vfyFollowing = new Map();
 const vfyAnnounce = new Set();
 let vfyView = null;
 let vfyEpoch = 0;
+// Whether the mode help is open, kept out of the box for the same reason the
+// run state is: this page repaints on its own (a job settling, a server
+// switch, a page of the list), and a fold whose state lived in the node it
+// replaces would close under a reader mid-sentence. One flag, not one per
+// server — it is a reading preference, not a fact about a server.
+let vfyHelpOpen = false;
 
 // vfyDraw draws a server's state into a view: the box, and the button busy
 // while a run goes or back to what the chosen mode allows.
