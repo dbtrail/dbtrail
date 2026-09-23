@@ -215,7 +215,7 @@ func TestStartTellsARegistryRefusalFromALaunchFailure(t *testing.T) {
 	if rec.Code != 500 {
 		t.Errorf("a launch failure answered %d (%s), want 500", rec.Code, body)
 	}
-	if !strings.Contains(string(body), "start monitoring") {
+	if !strings.Contains(string(body), "capture did not start") {
 		t.Errorf("the answer does not say the launch is what failed: %s", body)
 	}
 

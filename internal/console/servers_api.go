@@ -340,7 +340,7 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 			slog.Error("could not remove a half-configured server after its index DSN could not be set",
 				"server", added.Name, "id", added.ID, "error", delErr.Error())
 		}
-		return ServerEntry{}, fmt.Errorf("derive index DSN: %w", dErr)
+		return ServerEntry{}, fmt.Errorf("could not choose where this server's changes are kept: %w", dErr)
 	}
 	return added, nil
 }
@@ -502,7 +502,7 @@ type monitorStartResponse struct {
 // readOnlyConsoleRefusal is what every verb that would START something answers
 // on a process that only reads. One constant, reused rather than re-worded, so
 // the same situation is not described two ways.
-const readOnlyConsoleRefusal = "this console is read-only; monitoring is controlled from the `bintrail-console watch` process"
+const readOnlyConsoleRefusal = "this DBTrail only reads and cannot capture; to capture from a database, run it as `bintrail-console watch`"
 
 // requireMonitorEntry centralizes the verb gates: a supervisor must be wired
 // (403 on the standalone read-only console), the entry must exist (404), and

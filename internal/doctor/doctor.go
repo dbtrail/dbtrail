@@ -233,7 +233,7 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 			// Worded for both the terminal and the console (#1783): the
 			// console has no --source-dsn to fix, and the port is whatever
 			// the source uses, not 3306.
-			Remediation: "Check that the source database answers from the machine DBTrail runs on:\n\n" +
+			Remediation: "Check that your MySQL answers from the machine DBTrail runs on:\n\n" +
 				"  mysql -h <host> -P <port> -u <user> -p\n\n" +
 				"On RDS or Aurora, its security group must allow inbound connections from that machine on the database's port.",
 		}

@@ -54,7 +54,7 @@ type connectCheckResponse struct {
 // the registry write that records the intent just before it. The two need
 // different HTTP statuses, and the alternative — telling them apart by the
 // text of the error — is what this wrapper exists to avoid.
-var errStartFailed = errors.New("start monitoring")
+var errStartFailed = errors.New("capture did not start")
 
 // startOutcome is what startNewEntry did. Started is the only success.
 type startOutcome struct {
