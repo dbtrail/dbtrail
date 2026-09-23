@@ -2365,6 +2365,111 @@ try {
     ? ok("baselines: the newest row wears the treatment, carries relative age, and drops the constant column")
     : bad("baselines: the newest row wears the treatment, carries relative age, and drops the constant column", stg.rowText);
 
+  // Scenario 15b2 — the first screen's word budget (#1573): arriving at
+  // /snapshots, with everything folded, the page may show at most 150 words
+  // above the fold. Three pages became one, and the failure mode of that
+  // merge is a wall of text: the reader opens it to answer "what copies do I
+  // have" and meets four explanations first.
+  //
+  // Measured on THIS server, which carries a real snapshot: the rich state is
+  // the expensive one, and a budget proved on an empty page proves nothing.
+  // The two structural gates below are the anti-vacuity guard — without them
+  // a bug that renders half the page would PASS this.
+  //
+  // 1440x900 is the laptop the budget was decided against; the suite's own
+  // 1300x1000 is restored right after. Line breaking differs between the
+  // platform this was measured on and the CI runner's fonts, so the point of
+  // the fold moves by a line or two between them: the budget holds a wide
+  // margin on purpose, and a change that eats it is the change under review,
+  // not the runner.
+  //
+  // innerText, not textContent: it returns only RENDERED text, so a closed
+  // <details> costs its summary and nothing more — which is what makes the
+  // folds on this page real reductions rather than a trick of the counter.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => { history.pushState({}, "", "/snapshots"); return renderRoute(); });
+  await page.waitForFunction(() => location.pathname === "/snapshots"
+    && document.querySelectorAll(".stg-row").length > 0);
+  const budget = await page.evaluate(() => {
+    window.scrollTo(0, 0);
+    const fold = window.innerHeight;
+    const words = (t) => (t || "").trim().split(/\s+/).filter(Boolean).length;
+    const blocks = [];
+    let total = 0;
+    // Per top-level block: count it whole when it ends above the fold,
+    // otherwise descend, so a long section only contributes the part of it
+    // the reader can actually see.
+    const visit = (n) => {
+      for (const c of n.children) {
+        const r = c.getBoundingClientRect();
+        if (r.top >= fold) continue;
+        if (c.children.length === 0 || r.bottom <= fold) total += words(c.innerText);
+        else visit(c);
+      }
+    };
+    const view = document.querySelector(".view");
+    for (const c of view.children) {
+      const r = c.getBoundingClientRect();
+      const before = total;
+      if (r.top < fold) visit({ children: [c] });
+      blocks.push({ cls: c.className, top: Math.round(r.top), words: total - before,
+        text: (c.innerText || "").trim().slice(0, 60).replace(/\s+/g, " ") });
+    }
+    const help = document.querySelector(".vfy-helpfold");
+    return { total, blocks: blocks.filter((b) => b.words > 0),
+      // Structural gates: this is the page, whole, not a half-drawn one.
+      rows: document.querySelectorAll(".stg-row").length,
+      hasChecks: !!document.getElementById("checks"),
+      hasSetup: !!document.getElementById("setup"),
+      // The two folds are closed on arrival, and the mode help still carries
+      // its text while closed (a fold that emptied itself would pass the
+      // budget by losing the words instead of deferring them).
+      takeAwayOpen: (document.querySelector("details.bk-take") || {}).open || false,
+      helpOpen: help ? help.open : null,
+      helpWords: words((document.querySelector(".vfy-modehelp") || {}).textContent) };
+  });
+  await page.setViewportSize({ width: 1300, height: 1000 });
+  // Printed on the way past, pass or fail: a budget that only speaks when it
+  // breaks tells a reviewer nothing about how much room their change ate.
+  console.log(`[budget] snapshots first screen: ${budget.total}/150 words · ` +
+    budget.blocks.map((b) => `${b.words}`).join("+"));
+  (budget.total <= 150 && budget.rows > 0 && budget.hasChecks && budget.hasSetup)
+    ? ok("snapshots: the first screen stays inside its 150-word budget")
+    : bad("snapshots: the first screen stays inside its 150-word budget", JSON.stringify(budget));
+  (budget.helpOpen === false && budget.helpWords > 50 && !budget.takeAwayOpen)
+    ? ok("snapshots: the mode help and the take-away panel arrive folded, with their text intact")
+    : bad("snapshots: the mode help and the take-away panel arrive folded, with their text intact",
+      JSON.stringify({ helpOpen: budget.helpOpen, helpWords: budget.helpWords, takeAwayOpen: budget.takeAwayOpen }));
+  // Browsing the picker opens the help by itself (#1418's reason for it):
+  // folding it must not cost the reader who is choosing a mode.
+  const helpOpens = await page.evaluate(() => {
+    const sel = document.querySelector(".vfy-mode");
+    sel.value = "recover-inputs";
+    sel.dispatchEvent(new Event("change"));
+    const d = document.querySelector(".vfy-helpfold");
+    return { open: d ? d.open : null, text: (document.querySelector(".vfy-modehelp") || {}).textContent || "" };
+  });
+  (helpOpens.open === true && /Needs no snapshot/.test(helpOpens.text))
+    ? ok("snapshots: choosing another check opens its help and swaps the text")
+    : bad("snapshots: choosing another check opens its help and swaps the text", JSON.stringify(helpOpens));
+  // The fold's state outlives a repaint. This page repaints on its own — a
+  // job settling, a server switch, a page of the list — and a <details>
+  // keeps its state in the node, which those repaints replace. Left there,
+  // the help would shut under a reader mid-sentence two seconds after they
+  // opened it, and the close below would be undone just as silently.
+  const foldKeeps = await page.evaluate(async () => {
+    await renderSnapshots();
+    const afterOpen = (document.querySelector(".vfy-helpfold") || {}).open;
+    const d = document.querySelector(".vfy-helpfold");
+    d.open = false;
+    d.dispatchEvent(new Event("toggle"));
+    await renderSnapshots();
+    return { afterOpen, afterClose: (document.querySelector(".vfy-helpfold") || {}).open };
+  });
+  (foldKeeps.afterOpen === true && foldKeeps.afterClose === false)
+    ? ok("snapshots: the mode help keeps open or closed across a repaint of the page")
+    : bad("snapshots: the mode help keeps open or closed across a repaint of the page", JSON.stringify(foldKeeps));
+
   // Scenario 15c — the button's other gate arms, fixture-driven through the
   // REAL baselinesPanel (a server with no location at all can't exist live
   // once the daemon sets a default --baseline-dir; the daemon-default-only
@@ -2737,6 +2842,35 @@ try {
   (!sqlxGateOff.off && sqlxGateOff.on)
     ? ok("sqlx: the capability gates the lane (off absent, on present)")
     : bad("sqlx: the capability gates the lane (off absent, on present)", JSON.stringify(sqlxGateOff));
+
+  // The take-away fold's one duty (#1573): it is closed on arrival to keep
+  // the first screen inside its budget, and it must NEVER be what hides a
+  // build from the person who started it. Driven through the REAL builder,
+  // every state the server can report plus one it cannot — an unknown state
+  // opens the panel, because a state this frontend never learned is far
+  // likelier to be a new failure than a new kind of nothing. `replaced` is
+  // not hypothetical: the server documents it and the frontend has no branch
+  // for it.
+  const takeStates = await page.evaluate(() => {
+    const cur = { id: "srv-fix", kind: "registry" };
+    const b = { configured: true, source: "/tmp/baselines", kind: "dir",
+      snapshots: [{ time: "2026-06-10 12:00:00", files: [{ name: "x.parquet", bytes: 10 }] }] };
+    const openFor = (state) => {
+      const n = backupTakeAway(cur, b, state === null ? null : { sql_export: { state } });
+      return n ? { tag: n.tagName.toLowerCase(), open: !!n.open } : null;
+    };
+    const out = {};
+    for (const s of ["idle", "downloaded", "expired", "running", "succeeded", "failed", "replaced", "some-new-state"]) out[s] = openFor(s);
+    out.noStatus = openFor(null);
+    return out;
+  });
+  const quiet = ["idle", "downloaded", "expired"], loud = ["running", "succeeded", "failed", "replaced", "some-new-state"];
+  (takeStates.idle && takeStates.idle.tag === "details"
+    && quiet.every((s) => takeStates[s] && takeStates[s].open === false)
+    && loud.every((s) => takeStates[s] && takeStates[s].open === true)
+    && takeStates.noStatus && takeStates.noStatus.open === false)
+    ? ok("take-away: the fold arrives closed only while the .sql build owes nothing, and an unknown state opens it")
+    : bad("take-away: the fold arrives closed only while the .sql build owes nothing, and an unknown state opens it", JSON.stringify(takeStates));
 
   // The real build. TT_AT sits after every fixture event; the fold reads the
   // baseline AND the index. Poll the status endpoint, not the DOM — the page

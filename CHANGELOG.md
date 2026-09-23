@@ -40,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Backups page" or "the Backup settings page" now name Snapshots, and the one
   that pointed at a DuckDB schema download names Connect AI, where that card
   has lived since the same redesign.
+- **The Snapshots page opens on the copies you have, not on an explanation**
+  (#1573). Merging three pages into one put four explanations above the list
+  of snapshots: arriving at `/snapshots` on a server with one snapshot meant
+  189 words before reaching anything you could act on. It is now 112, with a
+  browser test that fails if a change pushes it past 150. Nothing was
+  deleted. "Take a copy with you", which explains the two download formats,
+  and "What this check proves", which explains the three kinds of check, are
+  now folds. Both open by themselves the moment they have something to say:
+  the download panel whenever a `.sql` build is running, waiting to be
+  downloaded, failed, or in any state this console does not recognise, and
+  the check help the moment you choose a different kind of check. Whether you
+  opened or closed the help yourself survives the page redrawing itself.
 - **Reusing the file of a table that did not change is always on, and the
   console no longer asks** (#1681). A backup that finds a table with no
   changes in its window publishes that table's previous Parquet file instead

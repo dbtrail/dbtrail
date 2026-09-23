@@ -95,6 +95,18 @@
   // `child` is the node on the path that sits directly inside the <details>,
   // so text written straight into the details (no wrapping element) counts
   // as folded too.
+  //
+  // This is FOLD-AWARE on purpose, and it is one of two rules over the same
+  // vocabulary. The other is TestOldVocabularyOnlyShrinks in
+  // internal/console/assets_vocabulary_test.go, which reads the SOURCE and
+  // is fold-BLIND: a reader who clicks still reads the word, so a sentence
+  // moved behind a fold still counts there. The two answer different
+  // questions — "what does a first run meet without clicking" here, "what
+  // can a reader reach at all" there — so they can move in opposite
+  // directions on one commit, and that is them working, not disagreeing.
+  // The source-level rule is deliberately the broader one; do not narrow it
+  // to match this function, and do not teach this function to see through
+  // folds to match it.
   function inClosedDetails(node) {
     for (let child = node, p = node.parentNode; p; child = p, p = p.parentNode) {
       if (p.tagName === "DETAILS" && !p.open && !(child.nodeType === 1 && child.tagName === "SUMMARY")) return true;

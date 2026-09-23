@@ -4381,14 +4381,17 @@ async function renderSnapshots() {
     if (drawChecks) {
       if (moved && beside && movedTo === "checks") v.append(moved);
       v.append(snapshotSection("Checks", "checks"));
-      // The verify guide. It lost its only link when the three page headers
-      // became one (#1573) — the header now opens the backup-strategy guide
-      // — and a page nothing links to also stops being fetched by the daily
-      // link check, so the site could move it and nobody would know.
-      v.append(docsMore("guides/verify", "", "what each check proves"));
       // Three regions with visible separation (#1419): what you can run,
       // what is running or just ran, what ran before.
-      part("Checks", () => verifyRegions(servers, { serversErr: serversErr }).forEach((region) => v.append(region)));
+      part("Checks", () => {
+        verifyRegions(servers, { serversErr: serversErr }).forEach((region) => v.append(region));
+        // The verify guide, AFTER the section it describes: it lost its only
+        // link when the three page headers became one (#1573) — the header
+        // now opens the backup-strategy guide — and a page nothing links to
+        // also stops being fetched by the daily link check, so the site
+        // could move it and nobody would know.
+        v.append(docsMore("guides/verify", "", "what each check proves"));
+      });
     }
     // Where and how often — the schedule (#1442) first, because it is what
     // makes the list above keep growing on its own and a failed scheduled
@@ -7225,7 +7228,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   card.append(state);
   const body = el("div", { class: "bk-card-body" });
   body.append(el("p", { class: "form-hint", text:
-    "Pick a past moment. DBTrail rebuilds every table as it was then, from your backups plus the recorded changes, and saves the result as a new backup in the list below. Your database is not touched." }));
+    "Pick a past moment. DBTrail rebuilds every table as it was then and saves it as a new snapshot below. Your database is not touched." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
@@ -7291,12 +7294,39 @@ async function startBackupRestore(id, at, btn, msgEl) {
 // the views file — so that lane downloads both. MySQL takes one file that does not exist until you
 // pick a moment, so that lane asks for the moment. Dressing them as a
 // matched pair would be a lie about the work each one is.
+// The .sql build states that owe the reader nothing, and so leave the
+// take-away fold closed on arrival. Everything else — including a state this
+// build has never heard of — opens it. See backupTakeAway.
+const SQL_EXPORT_QUIET = new Set(["idle", "downloaded", "expired"]);
+
 function backupTakeAway(cur, b, sqlSt) {
   const duck = backupDuckLane(b);
   const sql = backupSQLLane(cur, b, sqlSt);
   if (!duck && !sql) return null;
-  const panel = el("section", { class: "ov-panel bk-take" });
-  panel.append(el("div", { class: "ov-panel-head" },
+  // FOLDED (#1573). Measured on this page with a real snapshot: 111 of the
+  // 189 words visible at first sight were these two lanes explaining file
+  // formats — the answer to "what do I download", which is not the question
+  // the page is opened with. Folded, the same answer is one click away and
+  // the list of copies starts on the first screen.
+  //
+  // It opens ITSELF whenever the .sql build has anything owed to the reader.
+  // A build nobody is watching must never be hidden behind a fold — that is
+  // the failure this page exists to prevent, one level down.
+  //
+  // Which is why the rule below names the states that keep it CLOSED rather
+  // than the three that open it. A state this build does not know (the
+  // server already has one the frontend never learned, `replaced`) is far
+  // more likely to be a new way of failing than a new kind of nothing, so
+  // the unknown one opens. An allow-list would have hidden it by default,
+  // and nothing would have said so.
+  //
+  // A Set, not an object: on a plain object `state` values like
+  // "constructor" answer truthy through the prototype and would read as
+  // quiet.
+  const st = sqlSt && sqlSt.sql_export;
+  const live = !!(st && st.state && !SQL_EXPORT_QUIET.has(st.state));
+  const panel = el("details", { class: "ov-panel bk-take", open: live || null });
+  panel.append(el("summary", { class: "ov-panel-head bk-take-sum" },
     el("h2", { class: "ov-panel-title", text: "Take a copy with you" })));
   const lanes = el("div", { class: "bk-lanes" });
   if (duck) lanes.append(duck);
@@ -7684,16 +7714,27 @@ function verifyRegions(servers, opts) {
   // recover-inputs check reads only the index, so it stays runnable on a
   // server with no baseline configured.
   const help = el("p", { class: "form-hint vfy-modehelp" });
+  // The mode help is a FOLD since #1573. Open on arrival it was 79 of the
+  // page's first 154 words — an explanation of a check nobody asked for yet,
+  // on the screen whose job is "what copies do I have". Closed it costs 4,
+  // and it opens BY ITSELF the moment the reader browses the picker, which
+  // is the moment #1418 wrote it for. The text still swaps while closed, so
+  // whoever opens it afterwards reads the mode that is selected now.
+  const helpFold = el("details", { class: "vfy-helpfold", open: vfyHelpOpen || null },
+    el("summary", { class: "form-hint vfy-helpsum", text: "What this check proves" }), help);
+  helpFold.addEventListener("toggle", () => { vfyHelpOpen = !!helpFold.open; });
   const updateMode = () => {
     const live = vfyLive.get(cur.id);
     btn.disabled = (!!live && live.state === "running") || (!configured && modeSel.value !== "recover-inputs");
     help.textContent = VFY_MODE_HELP[modeSel.value] || "";
   };
-  modeSel.onchange = updateMode;
+  // Browsing the picker opens the help; vfyHelpOpen carries that (and a
+  // later close by hand) across the repaints this page does on its own.
+  modeSel.onchange = () => { vfyHelpOpen = true; helpFold.open = true; updateMode(); };
   updateMode();
   btn.onclick = () => createVerify(cur.id, modeSel.value);
   control.append(el("div", { class: "vfy-actions" }, modeSel, btn));
-  control.append(help);
+  control.append(helpFold);
   if (!configured) {
     control.append(el("p", { class: "form-hint", text:
       "No backup set up for this server yet. The two snapshot modes need one (set one under Where and how often, then create at least two snapshots). \"Check recovery inputs\" works without one: it only reads the index." }));
@@ -7764,6 +7805,12 @@ const vfyFollowing = new Map();
 const vfyAnnounce = new Set();
 let vfyView = null;
 let vfyEpoch = 0;
+// Whether the mode help is open, kept out of the box for the same reason the
+// run state is: this page repaints on its own (a job settling, a server
+// switch, a page of the list), and a fold whose state lived in the node it
+// replaces would close under a reader mid-sentence. One flag, not one per
+// server — it is a reading preference, not a fact about a server.
+let vfyHelpOpen = false;
 
 // vfyDraw draws a server's state into a view: the box, and the button busy
 // while a run goes or back to what the chosen mode allows.

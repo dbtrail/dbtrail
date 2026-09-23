@@ -2146,6 +2146,17 @@ section.bk-restore { margin-top: 18px; }
 .vfy-region { margin-top: 16px; padding: 16px 18px 18px; }
 .vfy-region-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .vfy-region-head .ov-panel-title { margin: 0; }
+/* The mode help is a fold since #1573: open on arrival it was half of the
+   first screen's word budget. Its summary reads as the hint it replaces —
+   no browser triangle, the same caret as the take-away panel. */
+details.vfy-helpfold > summary { cursor: pointer; user-select: none; list-style: none; margin: 8px 2px 0; }
+details.vfy-helpfold > summary::-webkit-details-marker { display: none; }
+details.vfy-helpfold > summary::after {
+  content: "›"; display: inline-block; margin-left: 6px; color: var(--ink-3);
+  transform: rotate(90deg); transition: transform 0.15s ease;
+}
+details.vfy-helpfold[open] > summary::after { transform: rotate(-90deg); }
+details.vfy-helpfold > summary:hover { color: var(--blue); }
 .vfy-modehelp { margin: 8px 2px 0; max-width: 860px; }
 
 /* structured result rows (#1419 §2/§3): mark | table | verdict | counts |
@@ -3010,6 +3021,16 @@ section.bk-restore { margin-top: 18px; }
    the anchor an old address lands on; scroll-margin keeps it off the very
    top edge on the arrivals that scroll to the heading itself (the ones that
    carry an arrival note scroll to the note, which sits above it). */
+/* The take-away panel is a fold since #1573: its summary has to read as the
+   panel head it replaces, with a caret and no browser triangle. */
+details.bk-take > summary { cursor: pointer; user-select: none; list-style: none; }
+details.bk-take > summary::-webkit-details-marker { display: none; }
+details.bk-take > summary .ov-panel-title::after {
+  content: "›"; display: inline-block; margin-left: 8px; color: var(--ink-3);
+  transform: rotate(90deg); transition: transform 0.15s ease;
+}
+details.bk-take[open] > summary .ov-panel-title::after { transform: rotate(-90deg); }
+details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .snap-sect {
   font-size: 15px; font-weight: 650; color: var(--ink);
   margin: 34px 0 14px; padding-top: 18px;
