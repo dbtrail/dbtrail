@@ -11377,7 +11377,7 @@ async function checkConnect(form) {
     if (body.source_password === pendingSourcePassword) pendingSourcePassword = "";
     await refreshServersList();
     if (form.isConnected) hideServerForm();
-    if (!doctorWarnings(res.doctor)) { toast("Capture started for " + res.name + ". Changes appear within a minute"); return; }
+    if (!doctorWarnings(res.doctor) && !doctorOptional(res.doctor)) { toast("Capture started for " + res.name + ". Changes appear within a minute"); return; }
     openNotice(connectNotice(res));
     return;
   }
@@ -11397,11 +11397,17 @@ function connectNotice(res) {
   const count = (k, one, many) => k + " " + (k === 1 ? one : many);
   const all = el("details", { class: "notice-all" },
     el("summary", { text: "All " + count(checks.length, "check", "checks") }), doctorCards(checks));
+  const opt = optionalSection(checks);
   if (res.started) {
-    const warns = checks.filter((c) => c.status === "warn");
+    const warns = warningChecks(checks);
+    if (!warns.length) {
+      return { tone: "ok", title: "Capture started", summary: "Capture started",
+        lines: ["Capture started for " + res.name + ". Changes appear within a minute."],
+        content: [opt, all].filter(Boolean), button: "OK" };
+    }
     return { tone: "warn", title: "Capture started", summary: "Capture started, with " + count(warns.length, "warning", "warnings"),
       lines: [warns.length === 1 ? "Check this when you can:" : "Check these when you can:"],
-      content: [connectFindings(warns), all], button: "OK" };
+      content: [connectFindings(warns), opt, all].filter(Boolean), button: "OK" };
   }
   if (res.error) {
     // Every check passed and the start itself failed. Say so, and say whether
@@ -11411,13 +11417,13 @@ function connectNotice(res) {
       lines: ["Every check passed, but capture did not start: " + res.error,
         res.kept ? "DBTrail could not undo everything it set up for this server. Look for it in the server list and remove it there before you try again."
           : "Nothing was saved. Press Check and connect to try again."],
-      content: [all], button: "Back to the form" };
+      content: [opt, all].filter(Boolean), button: "Back to the form" };
   }
   const fails = checks.filter((c) => c.status === "fail");
   const shown = fails.length ? fails : checks;
   return { tone: "err", title: "Capture did not start", summary: "Capture did not start: " + count(fails.length, "thing", "things") + " to fix",
     lines: [(fails.length === 1 ? "Fix this" : "Fix these") + ", then press Check and connect again. Nothing was saved."],
-    content: [connectFindings(shown), all], button: "Back to the form" };
+    content: [connectFindings(shown), opt, all].filter(Boolean), button: "Back to the form" };
 }
 
 // codeOf returns the code blocks of a check's own fix, joined. The fix doctor
@@ -11582,7 +11588,7 @@ async function saveServer(form) {
     formMsg("Running startup checks…", false);
     const res = await startMonitor(saved.id);
     await refreshServersList();
-    if (res && res.started && !doctorWarnings(res.doctor)) { hideServerForm(); toast("Monitoring started. Events will appear within a minute"); return; }
+    if (res && res.started && !doctorWarnings(res.doctor) && !doctorOptional(res.doctor)) { hideServerForm(); toast("Monitoring started. Events will appear within a minute"); return; }
     // The entry now EXISTS: the form is re-shown from the saved entry so that
     // Save is a real retry (a PUT of this id) rather than a second POST of the
     // same name, which the registry refuses as a duplicate. Save stays
@@ -11594,6 +11600,7 @@ async function saveServer(form) {
       // The modal was closed while the checks ran: nothing on screen can
       // carry the outcome, so it goes to a toast that stays until dismissed.
       if (!res || res.requestError) toastError("Could not start capture for " + saved.name + ": " + ((res && res.requestError) || "no answer"));
+      else if (res.started && !doctorWarnings(res.doctor)) toast("Monitoring started for " + saved.name + ". Events will appear within a minute");
       else if (res.started) toastError("Monitoring started for " + saved.name + ", with warnings; open Servers and press Start to review them");
       else toastError("Startup checks failed for " + saved.name + "; open Servers and press Start to see what to fix");
       return;
@@ -11667,21 +11674,29 @@ function startupNotice(res) {
       button: "Back to the form" };
   }
   const checks = (res.doctor && res.doctor.checks) || [];
-  const picked = checks.filter((c) => c.status === (res.started ? "warn" : "fail"));
-  // A start refused with no failing check, or started with no warning card,
-  // is not a shape the server sends; show every check rather than nothing.
+  // Optional improvements are not warnings: they fold under their own
+  // section and never pick the tone or the count.
+  const picked = res.started ? warningChecks(checks) : checks.filter((c) => c.status === "fail");
+  // A start refused with no failing check is not a shape the server sends;
+  // show every check rather than nothing.
   const shown = picked.length ? picked : checks;
   const count = (k, one, many) => k + " " + (k === 1 ? one : many);
   const all = el("details", { class: "notice-all" },
     el("summary", { text: "All " + count(checks.length, "check", "checks") }), doctorCards(checks));
+  const opt = optionalSection(checks);
+  if (res.started && !picked.length) {
+    return { tone: "ok", title: "Capture started", summary: "Capture started",
+      lines: ["Capture started. Changes appear within a minute."],
+      content: [opt, all].filter(Boolean), button: "OK" };
+  }
   if (res.started) {
     return { tone: "warn", title: "Capture started", summary: "Capture started, with " + count(picked.length, "warning", "warnings"),
       lines: [picked.length === 1 ? "Check this when you can:" : "Check these when you can:"],
-      content: [doctorCards(shown), all], button: "OK" };
+      content: [doctorCards(shown), opt, all].filter(Boolean), button: "OK" };
   }
   return { tone: "err", title: "Capture did not start", summary: "Capture did not start: " + count(picked.length, "check", "checks") + " failed",
     lines: [picked.length === 1 ? "Fix this on the database, then press Save again." : "Fix these on the database, then press Save again."],
-    content: [doctorCards(shown), all], button: "Back to the form" };
+    content: [doctorCards(shown), opt, all].filter(Boolean), button: "Back to the form" };
 }
 
 async function deleteServer(s) {
@@ -11765,23 +11780,24 @@ async function testServerForm(form) {
 function unsavedTestNotice(res) {
   const checks = res.doctor.checks || [];
   const fails = checks.filter((c) => c.status === "fail");
-  const warns = checks.filter((c) => c.status === "warn");
+  const warns = warningChecks(checks);
   const count = (k, one, many) => k + " " + (k === 1 ? one : many);
   const all = el("details", { class: "notice-all" },
     el("summary", { text: "All " + count(checks.length, "check", "checks") }), doctorCards(checks));
+  const opt = optionalSection(checks);
   const s3 = s3TestText(res);
   const s3Line = s3 ? [s3] : [];
   if (fails.length) {
     return { tone: "err", lines: [(fails.length === 1 ? "Capture cannot start from this database yet. Fix this first:" : "Capture cannot start from this database yet. Fix these first:")].concat(s3Line),
-      content: [doctorCards(fails), all] };
+      content: [doctorCards(fails), opt, all].filter(Boolean) };
   }
   // A clean database with an S3 store that failed is still a red answer.
   const s3Bad = testResultClass({ ok: true, s3: res.s3 }) === "err";
   if (warns.length) {
     return { tone: s3Bad ? "err" : "warn", lines: ["✓ The database is ready to capture. Check these when you can:"].concat(s3Line),
-      content: [doctorCards(warns), all] };
+      content: [doctorCards(warns), opt, all].filter(Boolean) };
   }
-  return { tone: s3Bad ? "err" : "ok", lines: ["✓ The database is ready to capture."].concat(s3Line), content: [all] };
+  return { tone: s3Bad ? "err" : "ok", lines: ["✓ The database is ready to capture."].concat(s3Line), content: [opt, all].filter(Boolean) };
 }
 
 async function testServerRow(id) {
@@ -11795,6 +11811,42 @@ async function testServerRow(id) {
 }
 
 function doctorWarnings(report) { return !!(report && report.warnings > 0); }
+function doctorOptional(report) { return !!(report && report.optional > 0); }
+
+// warningChecks and optionalChecks split a report's warns. An optional one
+// (doctor marks it) is something capture works fine without, such as the SQL
+// statement behind each change: it never counts as a warning, never colors a
+// notice, and sits folded under "Optional improvements".
+function warningChecks(checks) { return (checks || []).filter((c) => c.status === "warn" && !c.optional); }
+function optionalChecks(checks) { return (checks || []).filter((c) => c.status === "warn" && c.optional); }
+
+// optionalSection is that fold, closed: each item says in one line what it
+// adds, then the statement to copy, exactly as doctor wrote it. Null when
+// there is nothing optional to offer.
+function optionalSection(checks) {
+  const opt = optionalChecks(checks);
+  if (!opt.length) return null;
+  const box = el("div", { class: "doctor-cards" });
+  opt.forEach((c) => {
+    const card = el("div", { class: "doctor-card note optional" });
+    const blocks = remediationBlocks(c.remediation);
+    // A read that failed has no fix to offer: say which one and why.
+    if (!blocks.length) card.append(el("p", { text: c.name + (c.detail ? ": " + c.detail : "") }));
+    const body = el("div", { class: "dc-body" });
+    blocks.forEach((b) => {
+      if (b.kind === "p") body.append(el("p", { text: b.text }));
+      else if (b.kind === "list") body.append(el("ul", {}, ...b.items.map((it) => el("li", { text: it }))));
+      else {
+        body.append(el("pre", { class: "form-code", text: b.text }));
+        body.append(el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(b.text, "Statement") }));
+      }
+    });
+    if (blocks.length) card.append(body);
+    box.append(card);
+  });
+  return el("details", { class: "notice-all notice-optional" },
+    el("summary", { text: "Optional improvements (" + opt.length + ")" }), box);
+}
 
 // remediationBlocks splits a fix doctor wrote into paragraphs, lists and code
 // (#1777). doctor wraps its fixes at about 80 columns for a terminal, and shown
@@ -11852,8 +11904,10 @@ function remediationEl(text) {
 function doctorCards(checks) {
   const box = el("div", { class: "doctor-cards" });
   (checks || []).forEach((chk) => {
-    const status = ["pass", "fail", "warn"].includes(chk.status) ? chk.status : "skip";
-    const mark = { pass: "✓", fail: "✗", warn: "!", skip: "–" }[status];
+    const known = ["pass", "fail", "warn"].includes(chk.status) ? chk.status : "skip";
+    // An optional improvement is not a warning: a quiet note, never amber.
+    const status = known === "warn" && chk.optional ? "note" : known;
+    const mark = { pass: "✓", fail: "✗", warn: "!", skip: "–", note: "○" }[status];
     const card = el("div", { class: "doctor-card " + status });
     card.append(el("span", { class: "dc-mark", text: mark }));
     const bodyEl = el("div", { class: "dc-body" }, el("div", { class: "dc-name", text: chk.name + (chk.detail ? ": " + chk.detail : "") }));

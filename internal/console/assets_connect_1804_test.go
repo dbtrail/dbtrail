@@ -18,6 +18,13 @@ import (
 // Connect screen shows is checked against the same list the walk uses.
 func runNodeConnect(t *testing.T, script string) []byte {
 	t.Helper()
+	return runNodeConnectArgs(t, script)
+}
+
+// runNodeConnectArgs is runNodeConnect with extra arguments after the two
+// paths (argv[4] onward), for a script fed data the test produced.
+func runNodeConnectArgs(t *testing.T, script string, extra ...string) []byte {
+	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		if os.Getenv(requireNodeEnv) != "" {
@@ -37,7 +44,7 @@ func runNodeConnect(t *testing.T, script string) []byte {
 	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := exec.Command(node, path, appJS, board).CombinedOutput()
+	raw, err := exec.Command(node, append([]string{path, appJS, board}, extra...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, raw)
 	}
@@ -209,7 +216,7 @@ ctx.__api = async (path, opts) => {
   return {};
 };
 const notices = [], toasts = [];
-ctx.__notice = (n) => notices.push(n.title);
+ctx.__notice = (n) => notices.push(n.title + " | " + (n.tone || "") + " | " + (n.summary || ""));
 ctx.__toast = (t) => toasts.push(t);
 vm.runInContext("api = (p, o) => __api(p, o); refreshServersList = async () => {}; toast = (t) => __toast(t); toastError = (t) => __toast('ERR ' + t); formMsg = () => {}; openNotice = (n) => __notice(n); openServersModal = () => {};", ctx);
 const setCaps = (caps) => vm.runInContext("capsCache = " + JSON.stringify(caps) + ";", ctx);
@@ -256,6 +263,26 @@ const flush = () => new Promise((r) => setImmediate(r));
   f.fire("submit"); await flush(); await flush(); await flush();
   out.startedClosed = !form();
   out.toasts = toasts.slice();
+  // A start whose only findings are optional improvements opens the notice
+  // that folds them (a toast would hide them), and says nothing of warnings.
+  setCaps({ monitor: true });
+  vm.runInContext("showConnectForm(null)", ctx);
+  f = form();
+  f.elements.source_host.value = "db7"; f.elements.source_password.value = "Pw-7";
+  ctx.__checkAnswer = { ok: true, started: true, name: "db7", doctor: { warnings: 0, optional: 1,
+    checks: [{ name: "Statement capture (query_text)", status: "warn", optional: true, remediation: "Show the SQL statement behind each change. To turn it on:\n\n  SET PERSIST binlog_rows_query_log_events = ON;" }] } };
+  const noticesBefore = notices.length, toastsBefore = toasts.length;
+  f.fire("submit"); for (let i = 0; i < 4; i++) await flush();
+  out.optionalOnly = { notices: notices.slice(noticesBefore), toasts: toasts.slice(toastsBefore) };
+  // One real warning beside the optional one: only the real one is counted.
+  vm.runInContext("showConnectForm(null)", ctx);
+  f = form();
+  f.elements.source_host.value = "db8"; f.elements.source_password.value = "Pw-8";
+  ctx.__checkAnswer = { ok: true, started: true, name: "db8", doctor: { warnings: 1, optional: 1,
+    checks: ctx.__checkAnswer.doctor.checks.concat([{ name: "No FK CASCADE constraints", status: "warn", detail: "x" }]) } };
+  const mixedBefore = notices.length;
+  f.fire("submit"); for (let i = 0; i < 4; i++) await flush();
+  out.mixed = notices.slice(mixedBefore);
   // Typing while a check that ends in "started" runs: the edit waits for the
   // check, and once capture has started it must never be saved. Saved, it
   // rewrites the draft the server just discarded, the next page load reopens
@@ -364,6 +391,8 @@ func TestConnectScreenWiring(t *testing.T) {
 		CheckBody                          map[string]any
 		StartedClosed                      bool
 		Toasts                             []string
+		OptionalOnly                       struct{ Notices, Toasts []string }
+		Mixed                              []string
 		Restored                           struct {
 			Pw, User, Name, Placeholder, Focused, Block string
 			PwAgainShown                                bool
@@ -438,11 +467,18 @@ func TestConnectScreenWiring(t *testing.T) {
 	if out.CheckBody["source_password"] != "Pw-1" || out.CheckBody["name"] != "" || out.CheckBody["source_user"] != "alice" {
 		t.Errorf("check body = %v; want the typed password, the typed (empty) name, the typed user", out.CheckBody)
 	}
-	if len(out.FailNotice) != 1 || out.FailNotice[0] != "Capture did not start" || !out.FormStillThere {
+	if len(out.FailNotice) != 1 || !strings.HasPrefix(out.FailNotice[0], "Capture did not start | err") || !out.FormStillThere {
 		t.Errorf("a failed check: notices %v, form kept %v", out.FailNotice, out.FormStillThere)
 	}
 	if !out.StartedClosed || len(out.Toasts) == 0 || !strings.Contains(out.Toasts[len(out.Toasts)-1], "Capture started for db1") {
 		t.Errorf("a started check: closed %v, toasts %v", out.StartedClosed, out.Toasts)
+	}
+
+	if m := out.Mixed; len(m) != 1 || m[0] != "Capture started | warn | Capture started, with 1 warning" {
+		t.Errorf("one real warning beside an optional item: notices %q; want only the real one counted", m)
+	}
+	if o := out.OptionalOnly; len(o.Notices) != 1 || o.Notices[0] != "Capture started | ok | Capture started" || len(o.Toasts) != 0 {
+		t.Errorf("a start with only optional improvements: notices %v toasts %v; want the Capture started notice that folds them", o.Notices, o.Toasts)
 	}
 
 	if len(out.PutsAfterStarted) != 0 {

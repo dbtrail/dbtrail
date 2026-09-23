@@ -76,7 +76,7 @@ func TestServerFormAnswersInACenteredNotice(t *testing.T) {
 	// Only failures, or only warnings, are on top; every check stays one
 	// click away. A warning is not dressed as a failure.
 	notice := jsFunctionBody(t, js, "startupNotice")
-	if !strings.Contains(notice, `c.status === (res.started ? "warn" : "fail")`) {
+	if !strings.Contains(notice, `res.started ? warningChecks(checks) : checks.filter((c) => c.status === "fail")`) {
 		t.Error("startupNotice no longer puts only the failures (or only the warnings) on top")
 	}
 	if !strings.Contains(notice, `el("summary", { text: "All "`) {

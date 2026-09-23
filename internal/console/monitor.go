@@ -24,6 +24,10 @@ type DoctorCheck struct {
 	Kind       string   `json:"kind,omitempty"`
 	Subjects   []string `json:"subjects,omitempty"`
 	Statements []string `json:"statements,omitempty"`
+	// Optional marks a warn about something capture works fine without
+	// (doctor.CheckResult.Optional). The screens fold it under "Optional
+	// improvements", outside the warning count.
+	Optional bool `json:"optional,omitempty"`
 }
 
 // DoctorReport aggregates the preflight checks for one source.
@@ -33,6 +37,9 @@ type DoctorReport struct {
 	Failed   int           `json:"failed"`
 	Warnings int           `json:"warnings"`
 	Skipped  int           `json:"skipped"`
+	// Optional counts the optional warns, which are NOT in Warnings: a start
+	// with only these is not a start "with warnings".
+	Optional int `json:"optional"`
 }
 
 // MonitorStatus is the supervisor's view of one entry's stream.
