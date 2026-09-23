@@ -303,10 +303,11 @@ func TestCheckSavesTheDraftBeforeItRunsTheChecks(t *testing.T) {
 	if d.SourceHost != "db.example.com" || d.SourcePassword != "Ab3-xyz" {
 		t.Errorf("the draft did not keep what was typed: %+v", d)
 	}
-	// And the name it derived is in the draft too, so the form comes back with
-	// the name the person saw.
-	if d.Name != "db.example.com" {
-		t.Errorf("draft name = %q, want the derived db.example.com", d.Name)
+	// The automatic name is NOT stored: it is not something the person
+	// typed, and restored as typed it would be refused once taken (see
+	// TestCheckRetryFromARestoredDraftIsNotRefusedAsADuplicate).
+	if d.Name != "" {
+		t.Errorf("draft name = %q, want empty: nobody typed one", d.Name)
 	}
 }
 
@@ -451,5 +452,64 @@ func TestCheckSaysSoWhenWhatTheStartProvisionedStays(t *testing.T) {
 	_, body := doServersReq(t, srv, "POST", "/api/servers/check", checkBody)
 	if got := decodeCheck(t, body); !got.Kept {
 		t.Errorf("kept=false although the per-server database could not be removed: %s", body)
+	}
+}
+
+// The reproduction from review (#1803): a server for this address already
+// exists; a second attempt for the same address fails a check; the person
+// fixes the database, reloads, and the restored form is sent again. That
+// retry must start capture under a name of its own — not be refused because
+// the draft stored the automatic name as if it had been TYPED, which is
+// exactly the "that name is already taken" the one-call Check exists to end.
+func TestCheckRetryFromARestoredDraftIsNotRefusedAsADuplicate(t *testing.T) {
+	srv, ctrl := newSupervisorServer(t)
+	if _, body := doServersReq(t, srv, "POST", "/api/servers/check", checkBody); !decodeCheck(t, body).Started {
+		t.Fatalf("setup: the first server did not start: %s", body)
+	}
+	ctrl.report = &DoctorReport{Failed: 1, Checks: []DoctorCheck{{Name: "x", Status: "fail"}}}
+	_, body := doServersReq(t, srv, "POST", "/api/servers/check", checkBody)
+	failed := decodeCheck(t, body)
+	if failed.Name != "db.example.com-2" {
+		t.Errorf("the failed check says the server would be called %q; it would really be db.example.com-2", failed.Name)
+	}
+	d, ok, err := srv.drafts.Load()
+	if err != nil || !ok {
+		t.Fatalf("no draft after the failed check: (%v, %v)", ok, err)
+	}
+	if d.Name != "" {
+		t.Errorf("the draft stores the automatic name %q as if it had been typed", d.Name)
+	}
+
+	// Reload: the restored form sends exactly what the draft holds.
+	restored, err := json.Marshal(map[string]string{
+		"name": d.Name, "flavor": d.Flavor, "source_host": d.SourceHost, "source_port": d.SourcePort,
+		"source_user": d.SourceUser, "source_password": d.SourcePassword, "schemas": d.Schemas,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl.report = nil
+	rec, body := doServersReq(t, srv, "POST", "/api/servers/check", string(restored))
+	if rec.Code != 200 {
+		t.Fatalf("the retry from the restored form was refused: code=%d body=%s", rec.Code, body)
+	}
+	got := decodeCheck(t, body)
+	if !got.Started || got.Name != "db.example.com-2" {
+		t.Errorf("started=%v name=%q, want a started db.example.com-2: %s", got.Started, got.Name, body)
+	}
+}
+
+// A name somebody DID type is theirs: it is kept in the draft as typed and
+// comes back as typed.
+func TestCheckDraftKeepsATypedName(t *testing.T) {
+	srv, ctrl := newSupervisorServer(t)
+	ctrl.report = &DoctorReport{Failed: 1, Checks: []DoctorCheck{{Name: "x", Status: "fail"}}}
+	_, body := doServersReq(t, srv, "POST", "/api/servers/check",
+		`{"name":"orders","source_host":"db.example.com","source_user":"u","source_password":"p"}`)
+	if got := decodeCheck(t, body); got.Name != "orders" {
+		t.Errorf("name = %q, want orders", got.Name)
+	}
+	if d, _, _ := srv.drafts.Load(); d.Name != "orders" {
+		t.Errorf("draft name = %q, want the typed orders", d.Name)
 	}
 }

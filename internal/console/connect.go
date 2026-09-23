@@ -30,9 +30,12 @@ import (
 // screen switches on.
 type connectCheckResponse struct {
 	OK bool `json:"ok"`
-	// Name is what the server is called: what was typed, or what was derived
-	// from the address when nothing was. Present even when nothing was saved,
-	// so the screen can show the name it WOULD get.
+	// Name is what the server is called: what was typed, or, when nothing
+	// was, the automatic name made unique against the registry under its own
+	// lock — the name an add at that moment would really give it, not the bare
+	// address, which another server may already hold. Present even when
+	// nothing was saved, so the screen can show it. Only a typed name is
+	// promised; an automatic one is worked out again on the next check.
 	Name    string         `json:"name,omitempty"`
 	Doctor  *DoctorReport  `json:"doctor,omitempty"`
 	Started bool           `json:"started"`
@@ -141,15 +144,15 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base := DeriveServerName(req.SourceHost, req.SourcePort, entry.SourceFlavor())
-	name := entry.Name
-	if name == "" {
-		name = base
-	}
+	name := s.cm.reg.NameFor(entry.Name, base)
 
 	// The form is saved BEFORE the checks run. They are the slow part — a
 	// round trip per check against a database that may be far away — and a
-	// reload in the middle of them is exactly what the draft is for.
-	s.saveConnectDraft(req, name)
+	// reload in the middle of them is exactly what the draft is for. Only a
+	// TYPED name goes into it: stored, an automatic name would come back as
+	// typed, and a retry would be refused as a duplicate the moment any server
+	// already held it.
+	s.saveConnectDraft(req, entry.Name)
 
 	report, err := s.monitorCtrl.DoctorUnsaved(r.Context(), entry)
 	if err != nil {
@@ -192,9 +195,9 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 // saveConnectDraft stores what the form holds. A failure to write it is logged
 // and nothing more: it would be absurd to refuse to check a database because a
 // convenience file could not be written.
-func (s *Server) saveConnectDraft(req serverRequest, name string) {
+func (s *Server) saveConnectDraft(req serverRequest, typedName string) {
 	d := ConnectDraft{
-		Name:              name,
+		Name:              typedName,
 		Flavor:            strings.TrimSpace(req.Flavor),
 		SourceHost:        strings.TrimSpace(req.SourceHost),
 		SourcePort:        strings.TrimSpace(req.SourcePort),

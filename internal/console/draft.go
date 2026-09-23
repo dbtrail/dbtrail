@@ -26,6 +26,11 @@ import (
 // nothing connects with it, and it is thrown away the moment the server it
 // describes starts capturing, or somebody discards it.
 type ConnectDraft struct {
+	// Name is the name somebody TYPED, empty when they typed none. An
+	// automatic name is never stored here: restored into the form it would be
+	// sent back as typed, and refused as a duplicate as soon as another server
+	// held it. It is worked out again, under the registry's lock, on the next
+	// check.
 	Name              string `yaml:"name,omitempty" json:"name"`
 	Flavor            string `yaml:"flavor,omitempty" json:"flavor"`
 	SourceHost        string `yaml:"source_host,omitempty" json:"source_host"`

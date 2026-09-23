@@ -148,3 +148,16 @@ func (r *Registry) uniqueNameLocked(base string) string {
 		}
 	}
 }
+
+// NameFor is the name an add would give an entry right now: typed when it is
+// not empty, else the automatic name made unique against the registry, worked
+// out under the same lock AddAutoNamed takes. It reserves nothing — another
+// add may take the name first — so it describes, and AddAutoNamed decides.
+func (r *Registry) NameFor(typed, base string) string {
+	if typed != "" || base == "" {
+		return typed
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.uniqueNameLocked(base)
+}
