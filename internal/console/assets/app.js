@@ -5464,7 +5464,10 @@ function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
     // Said even when only the count changed: saving a number over a folder
     // that already holds snapshots IS the choice to prune them (a new folder
     // or a moved one is refused instead), so the row says what that means.
-    say("Keeps the newest " + keep + " here. Older ones in this folder are removed at the next hourly cleanup, never a table's only copy.");
+    // The number itself is in the field beside this and, once in force, in
+    // the line above the snapshot list (snapshotRetentionLines); said a third
+    // time here it would only be the same fact again.
+    say("Older ones past that number are removed from this folder at the next hourly cleanup, never a table's only copy.");
     say(localReachWords(keep, reach || {}));
   } else {
     say("Keeps the newest " + keep + " where DBTrail takes the snapshots. This copy of DBTrail removes nothing.");
@@ -7526,10 +7529,10 @@ function backupScheduleCard(cur, b) {
     rate.textContent = "About " + total + " backup" + (total === 1 ? "" : "s") + " every 30 days at this rate, each a full copy of every table." +
       (f ? " About " + f + (f === 1 ? " is a full backup that reads" : " are full backups that read") + " your whole database." : "") +
       // A count this daemon applies to the folder (#1681) is the one case
-      // where local copies ARE removed; the listing reports it, so the rate
-      // says the same thing the list above it does.
-      (b && b.local_retention ? " This machine keeps the newest " + b.local_retention.keep_newest + " snapshots and removes older ones."
-        : cur.baseline_s3 ? "" : " Backups kept only on this machine are never removed automatically; make sure the disk has room.");
+      // where local copies ARE removed. The line above the snapshot list
+      // already says how many (snapshotRetentionLines), so the rate only
+      // drops its "never removed" warning, which would then be false.
+      (b && b.local_retention ? "" : cur.baseline_s3 ? "" : " Backups kept only on this machine are never removed automatically; make sure the disk has room.");
   };
   every.addEventListener("input", showRate);
   fullEvery.addEventListener("input", showRate);

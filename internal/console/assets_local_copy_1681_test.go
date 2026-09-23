@@ -153,13 +153,13 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if !b(f.Before.DirShown) || !b(f.Before.KeepShown) || !f.Before.SaveDisabled {
 		t.Errorf("fresh server: folder/count not shown or Save awake with nothing changed: %+v", f.Before)
 	}
-	if !strings.Contains(joined(f.Before), "Keeps the newest 3 here. Older ones in this folder are removed at the next hourly cleanup, never a table's only copy.") {
-		t.Errorf("fresh server does not say its count and when older snapshots go: %q", joined(f.Before))
+	if !strings.Contains(joined(f.Before), "Older ones past that number are removed from this folder at the next hourly cleanup, never a table's only copy.") {
+		t.Errorf("fresh server does not say when older snapshots go: %q", joined(f.Before))
 	}
 	// Saving a number over a folder that already holds snapshots is the
 	// choice to prune them (only a new or moved folder is refused), so the
 	// sentence is there for a count that is only typed, too.
-	if !strings.Contains(joined(got["freshKeep5"].After), "Keeps the newest 5 here. Older ones in this folder are removed at the next hourly cleanup") {
+	if !strings.Contains(joined(got["freshKeep5"].After), "Older ones past that number are removed from this folder at the next hourly cleanup") {
 		t.Errorf("a typed count does not say older snapshots go at the next hourly cleanup: %q", joined(got["freshKeep5"].After))
 	}
 	// How far back: the count x the schedule, never under the hour the prune
@@ -259,7 +259,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		t.Errorf("a hidden count blocked the save or was sent: %+v", st.Body)
 	}
 	// A folder the prune never counts says so instead of promising the count.
-	if w := joined(got["blocked"].Before); !strings.Contains(w, "nothing in it is removed, whatever the count says") || strings.Contains(w, "Keeps the newest") {
+	if w := joined(got["blocked"].Before); !strings.Contains(w, "nothing in it is removed, whatever the count says") || strings.Contains(w, "hourly cleanup") {
 		t.Errorf("a blocked folder: %q", w)
 	}
 	// A server read from DBTrail's startup folder is not told it has nothing.
@@ -282,7 +282,9 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 
 	// The schedule card's rate: a count in force is said, and the "never
 	// removed" warning is not, since it would then be false.
-	if w := joined(got["rateKeep"].Before); !strings.Contains(w, "This machine keeps the newest 3 snapshots and removes older ones.") || strings.Contains(w, "never removed automatically") {
+	// The count itself is said once, above the snapshot list; the rate only
+	// loses the warning that would then be false.
+	if w := joined(got["rateKeep"].Before); strings.Contains(w, "never removed automatically") || strings.Contains(w, "keeps the newest") {
 		t.Errorf("rate with a count in force: %q", w)
 	}
 	if w := joined(got["rateAll"].Before); !strings.Contains(w, "never removed automatically") {
