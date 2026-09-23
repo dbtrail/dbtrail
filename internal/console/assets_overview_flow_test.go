@@ -295,12 +295,12 @@ const origPaint = paint;`, 1)
 	if len(f.Cards) != 1 || f.Cards[0].Kind != "capture-failed" || f.Cards[0].Lines[0] != "dial tcp: connection refused" {
 		t.Errorf("failed: cards = %+v", f.Cards)
 	}
-	if !contains(f.Buttons, "Start") || f.CardOnScreen != 1 {
+	if !hasLabel(f.Buttons, "Start") || f.CardOnScreen != 1 {
 		t.Errorf("failed: buttons %v, cards on screen %d", f.Buttons, f.CardOnScreen)
 	}
 
 	sm := get("stalled-monitor")
-	if len(sm.Cards) != 1 || sm.Cards[0].Kind != "capture-stalled" || contains(sm.Buttons, "Start") {
+	if len(sm.Cards) != 1 || sm.Cards[0].Kind != "capture-stalled" || hasLabel(sm.Buttons, "Start") {
 		t.Errorf("stalled-monitor: cards %+v buttons %v (no Start exists for a stall)", sm.Cards, sm.Buttons)
 	}
 	if !strings.Contains(sm.Screen, "SHOW BINARY LOGS") {
@@ -309,7 +309,7 @@ const origPaint = paint;`, 1)
 
 	st := get("stopped")
 	want("stopped", capture, "none", "stopped")
-	if !contains(st.Buttons, "Start") || st.OkClasses != 0 {
+	if !hasLabel(st.Buttons, "Start") || st.OkClasses != 0 {
 		t.Errorf("stopped: buttons %v ok %d", st.Buttons, st.OkClasses)
 	}
 
@@ -405,12 +405,12 @@ const origPaint = paint;`, 1)
 		t.Errorf("unknown: copy arrow tone %q, want none", get("unknown").Pieces[update].Tone)
 	}
 	nc := get("fold-refused-noperm-create")
-	if contains(nc.Buttons, "Read database now") || !contains(nc.Buttons, "Wait for the scheduled read at 15:00") == false && len(nc.Buttons) == 0 {
+	if hasLabel(nc.Buttons, "Read database now") || !hasLabel(nc.Buttons, "Wait for the scheduled read at 15:00") == false && len(nc.Buttons) == 0 {
 		t.Errorf("fold-refused-noperm-create: buttons %v (no Read for a session without baseline:create)", nc.Buttons)
 	}
 }
 
-func contains(xs []string, s string) bool {
+func hasLabel(xs []string, s string) bool {
 	for _, x := range xs {
 		if x == s {
 			return true
