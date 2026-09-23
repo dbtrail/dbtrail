@@ -106,8 +106,8 @@ func TestIcebergExportPanel(t *testing.T) {
 	if !strings.Contains(functionBody(t, js, "function buildConnect("), "icebergExportPanel(") {
 		t.Error("buildConnect never calls icebergExportPanel, so the panel never renders")
 	}
-	if strings.Contains(functionBody(t, js, "async function renderBaselines("), "icebergExportPanel(") {
-		t.Error("renderBaselines still mounts the Iceberg panel, which moved to Connect AI (#1573)")
+	if strings.Contains(functionBody(t, js, "async function renderSnapshots("), "icebergExportPanel(") {
+		t.Error("Snapshots still mounts the Iceberg panel, which moved to Connect AI (#1573)")
 	}
 }
 

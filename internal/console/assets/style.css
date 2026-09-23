@@ -3002,6 +3002,34 @@ section.bk-restore { margin-top: 18px; }
   margin: 22px 0 10px;
 }
 .page-head + .bks-sect { margin-top: 0; }
+/* Snapshots section dividers (#1573). The page is three jobs in one — what
+   copies exist, whether they are restorable, where and how often they are
+   made — so the two lower ones open with a heading that rules across the
+   page. The small uppercase .bks-sect label above marks the halves INSIDE
+   the setup section and would not read as a break between jobs. The id is
+   the anchor an old address lands on; scroll-margin keeps it off the very
+   top edge on the arrivals that scroll to the heading itself (the ones that
+   carry an arrival note scroll to the note, which sits above it). */
+.snap-sect {
+  font-size: 15px; font-weight: 650; color: var(--ink);
+  margin: 34px 0 14px; padding-top: 18px;
+  border-top: 1px solid var(--line);
+  scroll-margin-top: 12px;
+}
+/* The one line a reader who followed an old address reads on arrival. A
+   note, not an error: it reports a rename, and the page under it works. */
+.snap-moved {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 0 14px; padding: 8px 12px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-2); color: var(--ink-2); font-size: 13px;
+}
+.snap-moved-text { flex: 1; }
+.snap-moved-x {
+  border: 0; background: none; cursor: pointer; color: var(--ink-3);
+  font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 6px;
+}
+.snap-moved-x:hover { color: var(--ink); background: var(--surface-3); }
 .bks-boot { margin-bottom: 18px; }
 .bks-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 /* An empty value renders as the word for what applies, in the muted style: a

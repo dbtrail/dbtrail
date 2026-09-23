@@ -34,8 +34,8 @@ const SERVER_KEY = "bintrail_console_server";
 const ONBOARD_KEY = "bintrail_console_onboarded";
 
 // The generated DuckDB views file, named in two places that must not drift:
-// the card that builds it (on Connect AI, #1573) and the Backups take-away
-// lane that downloads the default one. Shared rather than guarded -- a
+// the card that builds it (on Connect AI, #1573) and the take-away lane on
+// Snapshots that downloads the default one. Shared rather than guarded -- a
 // constant cannot disagree with itself, and a test comparing two literals
 // only reports the drift after someone ships it.
 const DUCKDB_VIEWS_FILE = "views.sql";
@@ -75,15 +75,16 @@ const ROUTES = ["overview", "events", "schema-changes", "timetravel", "recover",
   // enforces. Not monitor-gated: the standalone serve can author too, the
   // write goes to the selected server's index, not to daemon state.
   "access-profiles",
-  // Protect (#1384): baselines and verification used to be two of three panels
-  // on Settings > Storage. They are operations that produce and validate
-  // recovery artifacts, not settings, and the snapshot list is unbounded in
-  // practice — it pushed verification, the panel that answers "are my backups
-  // restorable", roughly two screens below the fold.
-  "baselines", "verification",
-  // The Backup settings page (#1582): every parameter that
-  // shapes a backup or a snapshot, with its provenance.
-  "backup-settings"];
+  // Snapshots (#1573). One page for the three that used to answer one
+  // question between them: what copies do I have (/baselines), are they
+  // restorable (/verification), and where and how often are they made
+  // (/backup-settings). Nobody could tell whether their data was safe
+  // without visiting all three, and each one alone read as complete. The
+  // three old addresses are gone from here on purpose: ROUTE_ALIASES sends
+  // each where its page went — two to a section of this one, /baselines to
+  // its top — before anything asks whether it is a route, so they never
+  // render as themselves again.
+  "snapshots"];
 
 // DOCS_PAGES maps a route to its page on www.dbtrail.com/docs (#1450), the
 // separately authored docs site. NOT this repo's docs/*.md: the site does not
@@ -101,11 +102,16 @@ const DOCS_BASE = "https://www.dbtrail.com/docs/";
 const DOCS_PAGES = {
   events: "guides/recovery",
   recover: "guides/recovery",
-  baselines: "guides/backup-strategy",
-  verification: "guides/verify",
+  // The three merged pages had three pages of their own on the site
+  // (guides/backup-strategy, guides/verify, settings/backups). Until the
+  // site carries one page for Snapshots, the header link opens the strategy
+  // guide, which covers the whole job and links to the other two; the
+  // Checks section and the per-server rows link to them directly as well,
+  // which is what keeps the daily check fetching them. That check is also
+  // why this cannot point at a page that is not written yet.
+  snapshots: "guides/backup-strategy",
   storage: "guides/capacity-planning",
   connect: "claude/setup",
-  "backup-settings": "settings/backups",
 };
 
 const MON_STATE_TITLES = {
@@ -950,13 +956,38 @@ const ROUTE_ALIASES = new Map([
   // Connect AI (#1573), which every console has, so no capability answer is
   // needed to know where to send it.
   ["sql", () => "connect"],
+  // The three backup pages merged into Snapshots (#1573). Each lands where
+  // its page went, so a bookmark, a link in an email or a Back entry still
+  // shows what it named. No capability answer is needed: Snapshots opens on
+  // a standalone serve too, where two of these three pages did not exist —
+  // the listing and the backup location are readable there. Whether the
+  // SECTION an address names is drawn is a separate question, and the
+  // arrival note answers it on the page.
+  ["baselines", () => "snapshots"],
+  ["verification", () => "snapshots#checks"],
+  ["backup-settings", () => "snapshots#setup"],
 ]);
 
-// aliasTarget returns the route an old route moved to, or "" for any other.
+// aliasTarget returns where an old route moved to, or "" for any other. A
+// target may name a section of the new page ("snapshots#checks"): three
+// pages merged into one, and each one's readers have to land on their part
+// of it, not at the top of a page three times longer than what they knew.
 function aliasTarget(route) {
   const to = ROUTE_ALIASES.get(route);
   return to ? to() : "";
 }
+
+// splitTarget cuts a target into [route, "#section"], with "" for a target
+// that names no section.
+function splitTarget(target) {
+  const i = target.indexOf("#");
+  return i < 0 ? [target, ""] : [target.slice(0, i), target.slice(i)];
+}
+
+// lastRouteAddress is the address the last dispatch painted, so a repaint
+// that goes through renderRoute with the address unchanged (a save, a server
+// switch) can be told from a real navigation.
+let lastRouteAddress = null;
 
 // routeArrivedFrom names the old address the page on screen was reached
 // through ("" when it was not). It lives here, never in the address, which a
@@ -969,22 +1000,24 @@ function navigate(route, params, push = true) {
   // An old route from a stale caller goes straight to its new page, so the
   // entry pushed below already carries the new address. Rewriting with
   // replaceState here would overwrite the entry you were on instead.
-  route = aliasTarget(route) || route;
+  let hash = "";
+  const target = aliasTarget(route);
+  if (target) [route, hash] = splitTarget(target);
   if (!isKnownRoute(route)) route = "overview";
   // Both halves are watch-daemon surfaces (rotation, archiving, staging).
   if ((route === "retention" || route === "daemon") && !capsCache.monitor) route = "overview";
-  // Protect shares that gate: both routes read watch-daemon state (the
-  // snapshot listing and the verification runner). Same treatment, so a
-  // bookmark to either lands on Overview rather than an empty page.
-  if ((route === "baselines" || route === "verification") && !capsCache.monitor) route = "overview";
-  // backup-settings stays reachable without monitor: the per-server backup
-  // location is registry state serve edits too, and this page is its only
-  // editor since the server form's fields became passthroughs (#1582). The
-  // daemon cards inside it are gated instead.
+  // Snapshots is NOT gated, where two of the three pages it replaces were
+  // (#1573). On a standalone serve it leaves out what only the daemon can
+  // DO — taking a backup, running a check — and keeps what serve can
+  // answer: the list of copies, where this server keeps them, and a
+  // timetable somebody saved, which it shows with the reason nothing here
+  // is running it (that card is deliberately not hidden where it cannot
+  // run: a saved schedule nothing executes is the silent failure it exists
+  // to prevent).
   const qs = params && Object.keys(params).length
     ? "?" + new URLSearchParams(params).toString() : "";
   routeArrivedFrom = "";
-  if (push) history.pushState({ route }, "", "/" + route + qs);
+  if (push) history.pushState({ route }, "", "/" + route + qs + hash);
   renderRoute();
 }
 
@@ -1008,11 +1041,22 @@ function renderRoute() {
   // only covers server switches; this covers same-server navigation.
   viewGen++;
   const old = routeSegment();
-  const to = aliasTarget(old);
-  if (to) {
+  const target = aliasTarget(old);
+  if (target) {
+    const [to, sect] = splitTarget(target);
     routeArrivedFrom = old;
-    history.replaceState({ route: to }, "", "/" + to + location.search + location.hash);
+    // The section that old page became — unless the address already names
+    // one, which a link INTO a part of that page carries and must keep.
+    history.replaceState({ route: to }, "", "/" + to + location.search + (location.hash || sect));
   }
+  // One arrival, one jump. Armed only when the ADDRESS CHANGED: a saved
+  // setting, a saved schedule and a server switch all repaint through here
+  // with the same address, and re-arming there would pull the reader back
+  // to the section heading every time they pressed Save. The painter
+  // clears it, so the repaints a page does on its own never move anyone.
+  const addr = location.pathname + location.hash;
+  scrollPending = !!location.hash && addr !== lastRouteAddress;
+  lastRouteAddress = addr;
   const route = routeFromLocation();
   setActiveNav(route);
   cursorIdx = -1;
@@ -1037,9 +1081,7 @@ function renderRoute() {
     case "status": return renderStatus();
     case "retention": return renderRetention();
     case "daemon": return renderDaemon();
-    case "backup-settings": return renderBackupSettings();
-    case "baselines": return renderBaselines();
-    case "verification": return renderVerification();
+    case "snapshots": return renderSnapshots();
     case "connect": return renderConnect();
     case "access-profiles": return renderAccessProfiles();
     default: return renderOverview();
@@ -4100,16 +4142,147 @@ function buildDaemon(serversRes, storage, telemetry) {
 // capability off must REWRITE the URL before re-rendering, or the address bar
 // keeps pointing at a view the session cannot show.
 
-async function renderBaselines() {
-  if (!capsCache.monitor) { history.replaceState({}, "", "/overview"); renderRoute(); return; }
+// ── Snapshots (#1573) ────────────────────────────────────────────────────
+// One page for what used to be three: the copies this server has, whether
+// they are restorable, and where and how often they are made. Split across
+// three addresses, each one read as the whole answer, so nobody could tell
+// whether their data was safe without visiting all three — and two of them
+// did not exist at all on a standalone serve.
+//
+// The order is the reading order: what do I have, is it good, how is it
+// kept. The two lower parts carry the anchors the old addresses land on
+// (#checks, #setup), so a bookmark still shows what it named.
+
+// SNAPSHOT_MOVED names the page each old address was, for the one line a
+// visitor who followed one of them reads on arrival. A Map, like
+// ROUTE_ALIASES and for the same reason: a plain object answers for the
+// names every object carries ("constructor", "toString"), and a lookup that
+// hits one of those would put a function in the sentence.
+const SNAPSHOT_MOVED = new Map([
+  ["baselines", "Backups"],
+  ["verification", "Verification"],
+  ["backup-settings", "Backup settings"],
+]);
+
+// The notices this visitor closed. They live in the BROWSER and only there:
+// the console keeps nothing per person on the server, and this is a fact
+// about one reader's bookmarks, not about the installation. Every access is
+// wrapped, because reading localStorage THROWS where site data is blocked
+// (a private window, an enterprise policy, a file:// page) — a dismissed
+// notice must never be able to break the page it sits on. The in-memory set
+// is the fallback: the notice then stays closed for this visit.
+const MOVED_KEY = "dbtrail.moved.";
+const movedClosed = new Set();
+function movedIsClosed(from) {
+  if (movedClosed.has(from)) return true;
+  try { return !!window.localStorage.getItem(MOVED_KEY + from); } catch (e) { return false; }
+}
+function closeMoved(from) {
+  movedClosed.add(from);
+  try { window.localStorage.setItem(MOVED_KEY + from, "1"); } catch (e) { /* this visit only */ }
+}
+
+// snapshotsMovedNotice is that one line: the page they asked for, and where
+// it is now. One per OLD ADDRESS, so closing the one for Verification does
+// not hide the one a bookmark of Backup settings would show — they are
+// different readers' habits, and each is told once.
+//
+// `missing` says the part their page became is NOT on this page, and why:
+// "daemon" for a read-only console (the checks run in the watch daemon, so
+// it draws no section for them), "unknown" when the capability check failed
+// and we cannot tell. Telling someone their page is "part of Snapshots now"
+// on a page with no trace of it reads as a feature that was removed, which
+// is worse than the bounce to Overview it replaced — and telling a watch
+// daemon it is read-only because a request failed is a false statement about
+// their installation. "" when the section is here.
+//
+// Only the checks can be absent today, so "daemon" names them; a second
+// optional section would need its own reason here.
+function snapshotsMovedNotice(missing) {
+  const from = routeArrivedFrom;
+  const was = SNAPSHOT_MOVED.get(from);
+  if (!was || movedIsClosed(from)) return null;
+  const why = missing === "daemon" ? " Its section is not on this console: checks run in the DBTrail daemon, and this one is read-only."
+    : missing === "unknown" ? " Its section is missing because the capability check failed when this page loaded; reload to get it back."
+    : "";
+  const box = el("div", { class: "snap-moved" });
+  box.append(el("span", { class: "snap-moved-text", text: was + " is part of Snapshots now." + why }));
+  box.append(el("button", {
+    class: "snap-moved-x", type: "button", title: "Dismiss", "aria-label": "Dismiss",
+    onclick: () => { closeMoved(from); box.remove(); },
+  }, "×"));
+  return box;
+}
+
+// snapshotSection is a heading an address can land on: its id is the anchor
+// ROUTE_ALIASES sends an old page's readers to.
+function snapshotSection(title, id) {
+  return el("h2", { class: "snap-sect", id: id, text: title });
+}
+
+// scrollPending is set by renderRoute when the address it is about to paint
+// names a section, and cleared by the first paint that honors it. It is what
+// keeps the jump to a SINGLE arrival: this page repaints itself on its own —
+// when a job settles, on a saved setting, on a page of the list — and the
+// hash stays in the address bar, so a scroll at the tail of every paint
+// would drag a reader back down to #setup for as long as they stayed.
+let scrollPending = false;
+
+// scrollToSection brings the part of the page the address names into view,
+// once. The browser does this itself only for a hash present when the
+// DOCUMENT loaded; this page paints its sections after two round trips, long
+// after that, so the element the hash names does not exist yet at that
+// moment. A hash naming nothing (a section this console does not have, as on
+// serve) is left alone: the reader stays at the top of the page, where the
+// arrival note tells them why. `top` is passed ONLY when the note was placed
+// beside the section this address names — scrolling the heading to the top
+// edge would put that note just above the viewport, unread. Any other
+// arrival passes nothing, and the heading itself is the target.
+function scrollToSection(top) {
+  if (!scrollPending) return;
+  scrollPending = false;
+  const id = (location.hash || "").slice(1);
+  if (!id) return;
+  const section = document.getElementById(id);
+  if (!section) return;
+  const target = top && top.isConnected ? top : section;
+  if (target.scrollIntoView) target.scrollIntoView();
+}
+
+async function renderSnapshots() {
   const gen = serverGen, vgen = viewGen;
-  backupsHead = viewLoading();
+  // A repaint of the page already on screen, FOR THE SAME SERVER, does not
+  // blank it. Those calls come from a job that finished, a setting that
+  // saved or a page of the list — the reader is mid-page, and "Loading…" in
+  // place of everything would drop them at the top of a page three times
+  // longer than the one it replaced. (The job watcher POLLS every 2s; it
+  // repaints once, when the run settles.) The swap below happens in one
+  // turn, so the page is never empty between the two and the browser keeps
+  // the reader where they were.
+  //
+  // A SERVER SWITCH is not that, and must blank: what is on screen is
+  // another server's list, location and schedule, and its buttons are
+  // closed over that server's id — a click in the gap (three or four
+  // requests, then up to three more, one of them an S3 listing) would start
+  // a backup, a restore or a .sql build on the server the reader just left. Arriving from another page
+  // blanks too: there the view is somebody else's.
+  const paintFor = gen + ":" + (currentServer || defaultServerId || "");
+  if (!backupsOnScreen() || backupsPaintedFor !== paintFor) backupsHead = viewLoading();
   // Independent degradation, as on Storage: a panel renders its own failure
-  // note rather than one error blanking the page.
+  // note rather than one error blanking the page. The same discipline covers
+  // the DRAWING below, where `part` keeps one throwing section from taking
+  // the other two with it.
   const asErr = (err) => ({ error: (err && err.message) || String(err) });
-  const [serversRes, baselines] = await Promise.all([
+  const [serversRes, baselines, settings, refresh] = await Promise.all([
     api("/api/servers").catch(asErr),
     api("/api/baselines").catch(asErr),
+    // The bottom half is fetched with the rest, not after the first paint:
+    // a page that grows a section under a reader who is already reading it
+    // moves what they were looking at.
+    api("/api/backup-settings").catch(asErr),
+    // The disk-space card describes the watch daemon's loop; on serve there
+    // is no loop, no card, and nothing to fetch.
+    capsCache.monitor ? api("/api/baseline-refresh").catch(asErr) : Promise.resolve(null),
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   // Run states for the selected server: only the endpoints this daemon
@@ -4130,83 +4303,118 @@ async function renderBaselines() {
     const serversErr = serversRes && serversRes.error;
     const v = VIEW(); clear(v);
     // No subtitle (#1573 redesign): "nothing is executed" is the header's
-    // read-only pill, and what a backup is, the listing below shows.
-    v.append(backupsHead = pageHead("Backups", null));
+    // read-only pill, and what a snapshot is, the listing below shows.
+    v.append(backupsHead = pageHead("Snapshots", null));
+    backupsPaintedFor = paintFor;
+    // Where this reader's old page went, read from the ALIAS TABLE rather
+    // than a second list here, so the note and the address can never
+    // disagree about which section they are talking about.
+    const drawChecks = !!capsCache.monitor;
+    const movedTo = splitTarget(aliasTarget(routeArrivedFrom) || "")[1].replace("#", "");
+    const sectionDrawn = movedTo === "setup" || (movedTo === "checks" && drawChecks);
+    // The note goes BESIDE the section that reader asked for — but only while
+    // the ADDRESS still points there, because the scroll follows the address:
+    // a link into a part of the old page (/verification#past) keeps its own
+    // anchor, and a note left beside Checks would be somewhere the reader
+    // never looks. Then it leads the page instead.
+    const beside = sectionDrawn && (location.hash || "").slice(1) === movedTo;
+    // What to say when the section that reader's page became is not here:
+    // the daemon runs the checks, unless we could not read what this server
+    // supports at all, in which case saying "read-only" would be a false
+    // statement about their installation.
+    const missing = movedTo !== "" && !sectionDrawn ? (capsKnown ? "daemon" : "unknown") : "";
+    const moved = snapshotsMovedNotice(missing);
+    if (moved && !beside) v.append(moved);
+    if (!capsKnown) v.append(el("div", { class: "error-box", text:
+      "Parts of this page are missing: the capability check failed when this page loaded, so DBTrail does not know what this server supports. Reload the page." }));
     if (serversErr) v.append(el("div", { class: "error-box", text: "Could not load servers: " + serversErr }));
-    // #1415: a context strip and a full-width list, not two half-width cards
-    // sharing only a left edge. The strip carries the facts that are ABOUT the
-    // collection (source, count, freshness, tables-per-snapshot when uniform)
-    // so the rows below can carry only what varies between snapshots.
     const cur = servers.find((s) => s.id === (currentServer || defaultServerId));
-    v.append(baselineContextStrip(baselines, cur));
-    // A visible in-progress region (mirrors the verification page): while a
-    // backup is being created or restored, the page must look like a page
-    // doing work, not a stale list.
-    const running = backupRunsInFlight(dumpSt, restoreSt, baselines, sqlSt);
-    if (running.length) {
-      v.append(backupRunRegion(running));
-      // One watcher at a time: renderBaselines() outside renderRoute does not
-      // bump viewGen, so without its own generation every re-render (its own
-      // settle path included) would stack another 2s poller. The function
-      // owns the counter, so a no-op spawn (no server id) cannot kill a
-      // live watcher.
-      watchBackupRuns(cur && cur.id, vgen, running.map((r) => r.kind));
+    // Three parts, three blast radii — as when they were three pages. A
+    // verify record this build cannot read must not take the list of copies
+    // down with it, and a settings row must not take both: an operator left
+    // with one red box cannot tell whether their backups exist, let alone
+    // which of the three things broke. Inside a part the pieces still share
+    // one, exactly as they did on the page each came from.
+    const part = (name, draw) => {
+      try { draw(); } catch (err) {
+        v.append(el("div", { class: "error-box", text: name + " could not be drawn: " + ((err && err.message) || String(err)) }));
+      }
+    };
+    part("The list of copies", () => {
+      // #1415: a context strip and a full-width list, not two half-width cards
+      // sharing only a left edge. The strip carries the facts that are ABOUT the
+      // collection (source, count, freshness, tables-per-snapshot when uniform)
+      // so the rows below can carry only what varies between snapshots.
+      v.append(baselineContextStrip(baselines, cur));
+      // A visible in-progress region (mirrors the verification page): while a
+      // backup is being created or restored, the page must look like a page
+      // doing work, not a stale list.
+      const running = backupRunsInFlight(dumpSt, restoreSt, baselines, sqlSt);
+      if (running.length) {
+        v.append(backupRunRegion(running));
+        // One watcher at a time: renderSnapshots() outside renderRoute does not
+        // bump viewGen, so without its own generation every re-render (its own
+        // settle path included) would stack another 2s poller. The function
+        // owns the counter, so a no-op spawn (no server id) cannot kill a
+        // live watcher.
+        watchBackupRuns(cur && cur.id, vgen, running.map((r) => r.kind));
+      }
+      // What you can do with a copy, above the list of copies: a reader who
+      // came to put a table back should not scroll past the inventory to find
+      // the control. Below the run region on purpose — a restore already
+      // running reports its progress up there.
+      const restoreCard = backupRestoreCard(cur, baselines, restoreSt);
+      if (restoreCard) v.append(restoreCard);
+      // Still above the list, as on the page this replaces: the two lanes are
+      // the answer to why a reader opened it — what do I download to open
+      // this in DuckDB, what do I download to load it into MySQL — and the
+      // list is how you pick a different copy. The DuckDB schema card and the
+      // Iceberg export panel moved to Connect AI (#1573), where "take this
+      // data somewhere else" lives; this lane downloads views.sql itself.
+      const takeAway = backupTakeAway(cur, baselines, sqlSt);
+      if (takeAway) v.append(takeAway);
+      v.append(baselinesPanel(baselines, servers, { serversErr: serversErr }));
+    });
+    // Checks — the verification page, whole. Its runner is daemon-side, so
+    // on a standalone serve the section is absent rather than present and
+    // unable to answer.
+    if (drawChecks) {
+      if (moved && beside && movedTo === "checks") v.append(moved);
+      v.append(snapshotSection("Checks", "checks"));
+      // The verify guide. It lost its only link when the three page headers
+      // became one (#1573) — the header now opens the backup-strategy guide
+      // — and a page nothing links to also stops being fetched by the daily
+      // link check, so the site could move it and nobody would know.
+      v.append(docsMore("guides/verify", "", "what each check proves"));
+      // Three regions with visible separation (#1419): what you can run,
+      // what is running or just ran, what ran before.
+      part("Checks", () => verifyRegions(servers, { serversErr: serversErr }).forEach((region) => v.append(region)));
     }
-    // Above the list, because it is the answer to why a reader opened this
-    // page: what do I download to open this in DuckDB, what do I download to
-    // load it into MySQL. It sits BELOW the run region on purpose -- the SQL
-    // lane hands a running build off to it with "its progress is above".
-    const takeAway = backupTakeAway(cur, baselines, sqlSt);
-    if (takeAway) v.append(takeAway);
-    // The backup schedule (#1442). It used to sit directly under the context
-    // strip; the two download lanes took that spot, because a reader who came
-    // to fetch a copy should not scroll past scheduling to find one. Still
-    // ABOVE the list, because it answers "will this list keep growing on its
-    // own" and a failed scheduled run has to be visible without opening
-    // anything.
-    const scheduleCard = backupScheduleCard(cur, baselines);
-    if (scheduleCard) v.append(scheduleCard);
-    // The carry-forward card ("Backups & disk space") moved to the Backups &
-    // snapshots settings page (#1582): it is a setting, and this page keeps
-    // the WORK — schedules, runs, downloads — beside the data it reports on.
-    const restoreCard = backupRestoreCard(cur, baselines, restoreSt);
-    if (restoreCard) v.append(restoreCard);
-    v.append(baselinesPanel(baselines, servers, { serversErr: serversErr }));
-    // The DuckDB schema card and the Iceberg export panel moved to Connect
-    // AI (#1573), where "take this data somewhere else" lives. The take-away
-    // lane above still downloads views.sql itself, with the default options.
+    // Where and how often — the schedule (#1442) first, because it is what
+    // makes the list above keep growing on its own and a failed scheduled
+    // run has to be visible without opening anything; then every setting
+    // that shapes a backup, beside where its value lives.
+    if (moved && beside && movedTo === "setup") v.append(moved);
+    v.append(snapshotSection("Where and how often", "setup"));
+    part("Where and how often", () => {
+      const scheduleCard = backupScheduleCard(cur, baselines);
+      if (scheduleCard) v.append(scheduleCard);
+      // Unconditional, because this half always has something to say: at
+      // the very least where this server keeps its copies, or why that
+      // could not be read. The timetable above it is the part that can be
+      // absent.
+      snapshotSetupSections(settings, refresh).forEach((n) => v.append(n));
+    });
     viewEnter();
+    // Last: the sections exist now, so an address that names one can be
+    // honored. Before this, there is nothing to scroll to.
+    scrollToSection(beside ? moved : null);
   } catch (err) {
-    const v = VIEW(); clear(v); v.append(pageHead("Backups", null)); renderError(v, err);
+    const v = VIEW(); clear(v); v.append(pageHead("Snapshots", null)); renderError(v, err);
     // renderError clears the view first, heading included: what it leaves is
     // the page now, and a job that ends must still repaint it.
     backupsHead = v.lastElementChild;
-  }
-}
-
-async function renderVerification() {
-  if (!capsCache.monitor) { history.replaceState({}, "", "/overview"); renderRoute(); return; }
-  const gen = serverGen, vgen = viewGen;
-  viewLoading();
-  const serversRes = await api("/api/servers").catch((err) => ({ error: (err && err.message) || String(err) }));
-  if (gen !== serverGen || vgen !== viewGen) return;
-  try {
-    const servers = (serversRes && serversRes.servers) || [];
-    // Same reason as renderBaselines: swallowed, a transient 500 renders
-    // "Select a server to run verification" while a server IS selected.
-    const serversErr = serversRes && serversRes.error;
-    const v = VIEW(); clear(v);
-    // No subtitle (#1573 redesign): the mode picker below says what each of
-    // the three checks proves, needs and costs.
-    v.append(pageHead("Verification", null));
-    if (serversErr) v.append(el("div", { class: "error-box", text: "Could not load servers: " + serversErr }));
-    // Three regions with visible separation (#1419): what you can run, what is
-    // running or just ran, what ran before. One undifferentiated card made
-    // "No verification run yet" sit directly above five past runs.
-    verifyRegions(servers, { serversErr: serversErr }).forEach((region) => v.append(region));
-    viewEnter();
-  } catch (err) {
-    const v = VIEW(); clear(v); v.append(pageHead("Verification", null)); renderError(v, err);
+    backupsPaintedFor = paintFor;
   }
 }
 
@@ -4243,11 +4451,12 @@ function rotationCard(rot) {
 // booted needs a restart.
 //
 // The title used to be "Automatic backup refresh" (#1528), which named neither
-// of those and read as a sibling of Scheduled backups on the Backups page,
-// which IS the timetable. It stays a GLOBAL card rather than moving beside
-// that schedule for a reason the inventory records: /api/baseline-refresh is
-// process-global, the schedule is per server, and a global toggle inside a
-// per-server fold would assert something false.
+// of those and read as a sibling of Scheduled backups — the card that IS the
+// timetable, which sat beside it on the old Backups page and sits in the same
+// section of Snapshots today (#1573). It stays a GLOBAL card rather than a
+// row inside a server's schedule, for a reason the inventory records:
+// /api/baseline-refresh is process-global, the schedule is per server, and a
+// global toggle inside a per-server fold would assert something false.
 //
 // Shape (#1528, then #1603, then #1681): the rule drawn (cfShape) with one
 // sentence under it, the alarms and the dormancy note in plain view, and
@@ -4419,7 +4628,7 @@ function s3RetentionBox(srv, servers, daemonS3) {
   const minutes = srv.schedule_every_minutes || 0;
   const runs = minutes > 0 && !srv.schedule_refusal ? Math.floor(30 * 1440 / minutes) : 0;
   // Full backups the timetable takes between two runs are backups of their
-  // own (#1564), counted the way the Backups page counts them; one refused
+  // own (#1564), counted the way the Snapshots page counts them; one refused
   // takes none.
   const fulls = runs && srv.schedule_full_every && !srv.schedule_full_refusal ? backupsPer30Days(srv.schedule_full_every) : 0;
   const n = fulls ? runs + fulls - backupsPer30Days(lcmInterval(srv.schedule_every, srv.schedule_full_every)) : runs;
@@ -4606,30 +4815,15 @@ function backupRefreshCard(br) {
 // two rules that used to be paragraphs are drawn: cfShape for the reuse,
 // blCase for which backup location is in force.
 
-async function renderBackupSettings() {
-  const gen = serverGen, vgen = viewGen;
-  viewLoading();
-  const asErr = (err) => ({ error: (err && err.message) || String(err) });
-  // The refresh card describes the watch daemon's loop; on serve there is no
-  // loop, no card, and nothing to fetch.
-  const [settings, refresh] = await Promise.all([
-    api("/api/backup-settings").catch(asErr),
-    capsCache.monitor ? api("/api/baseline-refresh").catch(asErr) : Promise.resolve(null),
-  ]);
-  if (gen !== serverGen || vgen !== viewGen) return;
-  try {
-    buildBackupSettings(settings, refresh);
-  } catch (err) {
-    const v = VIEW(); clear(v); v.append(pageHead("Backup settings", null)); renderError(v, err);
-  }
-}
-
-function buildBackupSettings(settings, refresh) {
-  const v = VIEW(); clear(v);
-  // No subtitle (#1573 redesign): the section labels below name the halves.
-  v.append(pageHead("Backup settings", null));
+// snapshotSetupSections builds the "where and how often" half of Snapshots:
+// every setting that shapes a backup, beside where its value lives. It
+// RETURNS nodes instead of painting the view, because it is a part of a page
+// now and not a page — the caller decides what comes before and after it,
+// and whether the section heading is drawn at all.
+function snapshotSetupSections(settings, refresh) {
+  const out = [];
   const broken = settings && settings.error;
-  if (broken) v.append(el("div", { class: "error-box", text: "Could not load settings: " + settings.error }));
+  if (broken) out.push(el("div", { class: "error-box", text: "Could not load settings: " + settings.error }));
   const sect = (t) => el("div", { class: "bks-sect", text: t });
   // The daemon-side cards are monitor-gated, not the page: serve runs no
   // refresh loop and its daemon rows would render as an unconfigured
@@ -4645,26 +4839,26 @@ function buildBackupSettings(settings, refresh) {
   const editableRows = daemonRows.filter((row) => row.editable);
   const startupRows = daemonRows.filter((row) => !row.editable);
   if (capsCache.monitor && !broken && editableRows.length) {
-    v.append(sect("Change here"));
-    v.append(el("div", { class: "cards" }, backupDaemonEditCard(editableRows)));
+    out.push(sect("Change here"));
+    out.push(el("div", { class: "cards" }, backupDaemonEditCard(editableRows)));
   }
-  if (!broken) v.append(backupServersPanel(settings));
+  if (!broken) out.push(backupServersPanel(settings));
   if (capsCache.monitor) {
-    v.append(sect("Set when DBTrail starts"));
+    out.push(sect("Set when DBTrail starts"));
     // The disk-space card sits HERE since #1681: with its switch gone it
     // reports what the daemon was started with, like the rows beside it, and
     // leaving it under "Change here" would promise a control it no longer
     // has. It is not one of the startup ROWS (it draws rather than lists), so
     // it is appended beside that card rather than into it.
-    v.append(el("div", { class: "cards" }, backupRefreshCard(refresh)));
-    if (!broken && startupRows.length) v.append(backupDaemonCard(startupRows));
+    out.push(el("div", { class: "cards" }, backupRefreshCard(refresh)));
+    if (!broken && startupRows.length) out.push(backupDaemonCard(startupRows));
   }
-  viewEnter();
+  return out;
 }
 
 // What each daemon-wide key means, in words a reader who never saw the flag
 // can act on. The flag itself rides beside the value in the (CLI: ...) form.
-// Vocabulary matches the per-server fields and the Backups page: Backup dir,
+// Vocabulary matches the per-server fields and the list of copies: Backup dir,
 // Backup S3, refresh.
 const BACKUP_DAEMON_ROWS = {
   baseline_dir: "Default Backup dir",
@@ -4782,7 +4976,7 @@ function backupDaemonEditRow(row) {
     try {
       await api("/api/backup-settings/daemon/" + encodeURIComponent(row.key), {
         method: "PUT", body: JSON.stringify(body) });
-      await renderBackupSettings();
+      await renderSnapshots();
     } catch (err) {
       msg.className = "form-msg err";
       msg.textContent = (err && err.message) || String(err);
@@ -4934,16 +5128,24 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   if (srv.schedule_every) {
     more.push(p("Scheduled backups: every " + srv.schedule_every + (srv.schedule_at ? " at " + srv.schedule_at : "") +
       (srv.schedule_full_every ? ", with a full backup every " + srv.schedule_full_every : "") +
-      ". The schedule is managed on the Backups page."));
-    // Red here as on the Backups page (#1564): a grey summary beside a red
-    // card would be two pages disagreeing about the same schedule.
+      // Where the timetable is CHANGED, and only where it can be: the card
+      // it lives on is drawn for the SELECTED server, and only where this
+      // process runs the schedules. Pointing at "the card above" on a
+      // read-only console named something that is not on the screen.
+      (capsCache.backup_schedule
+        ? ". Select this server at the top of the page to change it."
+        : ". Schedules run in the DBTrail daemon; this console cannot change them.")));
+    // Red here as on the schedule card (#1564): a grey summary beside a red
+    // card would be the same page disagreeing with itself about one schedule.
     if (srv.schedule_full_refusal && !srv.schedule_refusal) {
       const why = String(srv.schedule_full_refusal);
       more.push(el("p", { class: "form-msg err", text: why.charAt(0).toUpperCase() + why.slice(1) +
         (/[.!?]$/.test(why) ? "" : ".") + " The full backups do not run until that changes; the other scheduled runs still do." }));
     }
   } else {
-    more.push(p("No scheduled backups. Set one on the Backups page."));
+    more.push(p(capsCache.backup_schedule
+      ? "No scheduled backups. Select this server at the top of the page to set one."
+      : "No scheduled backups. Setting one needs the DBTrail daemon; this console is read-only."));
   }
   // S3 keeps every uploaded backup forever unless the BUCKET expires it
   // (#1622): say how fast it grows, and hand over the rule to apply. The
@@ -4986,7 +5188,9 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
     toast("Saved for " + (srv.name || srv.id));
     // Repaint from the server's answer, not from what was clicked: the
     // provenance row depends on the resolution the daemon just recomputed.
-    renderRoute();
+    // renderSnapshots(), like the daemon-row Save beside it: the route path
+    // bumps viewGen, which kills the job watchers this page is running.
+    await renderSnapshots();
   };
   // Save comes after the drawing and any refusal, above the compact block,
   // as on the disk-space card: the block is for reading, not for acting.
@@ -5057,7 +5261,7 @@ function credentialsCard(storage) {
 }
 
 // stagingCard shows the disk the sql-export staging holds right now (#1448):
-// every .sql backup built from the Backups page waits on the daemon's disk
+// every .sql backup built from the Snapshots page waits on the daemon's disk
 // for its download, and that space used to be invisible until someone ran
 // du. Null when this daemon cannot build .sql backups (no staging exists) or
 // when /api/storage failed (credentialsCard already reports that).
@@ -5069,7 +5273,7 @@ function stagingCard(storage, servers) {
   const builds = stg.builds || [];
   if (!builds.length) {
     card.append(el("p", { class: "stg-hint", text:
-      "Nothing staged. A .sql backup from the Backups page waits here until it is downloaded, or " +
+      "Nothing staged. A .sql backup from the Snapshots page waits here until it is downloaded, or " +
       hours + " hours pass, then it is removed." }));
   } else {
     card.append(el("p", { class: "stg-hint", text:
@@ -5192,7 +5396,7 @@ function duckdbNameList(names) {
 
 // downloadViewsSQL fetches the generated DuckDB schema and saves it, returning
 // the file name and its text. The one download path for the card and the
-// Backups take-away lane, so the name and the parameters cannot drift apart.
+// take-away lane on Snapshots, so the name and the parameters cannot drift apart.
 async function downloadViewsSQL(opts) {
   const q = [];
   if (opts.events) q.push("include_events=1");
@@ -5365,7 +5569,7 @@ function baselineConfigHint(cur, serversErr) {
   if (cur.kind === "ephemeral") {
     return "Restart the daemon with --baseline-dir or --baseline-s3 (compose: BASELINE_DIR in .env).";
   }
-  return "Set Backup dir or S3 on the Backup settings page.";
+  return "Set Backup dir or S3 below, under Where and how often.";
 }
 
 function formatAge(hours) {
@@ -5571,13 +5775,13 @@ function baselineContextStrip(b, cur) {
     } else if (cur.has_source) {
       // Where the button would be, say why it is not (#1677), the same two
       // reasons the Getting started list gives: a missing button reads as a
-      // page with no such action. Points at the Backup settings page, whose
+      // page with no such action. Points at the setup half of this page, whose
       // row carries the variable; this note names none. A server with no
       // source is never backed up from the console, so it gets no note.
       const why = [];
       if (off) why.push("turned off at startup");
       if (!ownLoc) why.push("needs this server's own backup location");
-      strip.append(item("CREATE BACKUP", why.join(", and ") + " (Backup settings page)"));
+      strip.append(item("CREATE BACKUP", why.join(", and ") + " (under Where and how often)"));
     }
   }
   return strip;
@@ -5905,7 +6109,7 @@ const BACKUPS_PAGE_SIZE = 5;
 // two.
 let backupsPage = { server: null, index: 0 };
 
-// backupsHead is the Backups page's element from its latest paint: the
+// backupsHead is the Snapshots page's element from its latest paint: the
 // loading notice while it fetches, then its heading. A job that finishes, a
 // schedule saved or a restore started repaints the page only while that
 // element is still on screen. The question is asked of the page, not of the
@@ -5915,6 +6119,11 @@ let backupsPage = { server: null, index: 0 };
 // page that holds several. The loading notice counts, so a job that ends
 // while the page is still fetching repaints it with the newer state.
 let backupsHead = null;
+// backupsPaintedFor is the server (and server generation) the page on screen
+// was painted for, so a repaint can tell "the same page again" from "another
+// server's page". Only the first tells it to keep what the reader is
+// looking at.
+let backupsPaintedFor = "";
 function backupsOnScreen() { return !!(backupsHead && backupsHead.isConnected); }
 
 function backupsPageIndex(serverId, pages) {
@@ -6066,11 +6275,10 @@ function baselinesPanel(b, servers, opts) {
     });
     const pager = backupsPager(total, page, pages, (target) => {
       backupsPage = { server: currentServer || defaultServerId, index: target };
-      // renderBaselines(), not renderRoute(): the route path bumps viewGen and
-      // runs viewLoading(), which blanks the view and drops the reader at the
-      // top of the page whose bottom they were reading. This is the same
-      // repaint watchBackupRuns uses.
-      renderBaselines();
+      // renderSnapshots(), not renderRoute(): the route path bumps viewGen,
+      // which kills the job watchers this page has running. This is the same
+      // repaint watchBackupRuns uses, and it keeps the reader where they are.
+      renderSnapshots();
     }, !!b.truncated);
     if (pager) list.append(pager);
     // Only when there is no pager to carry it: with one, "of the newest 50"
@@ -6096,13 +6304,13 @@ async function createBaseline(id, btn) {
     return;
   }
   toast("Backup started: copying your data and uploading it…");
-  if (backupsOnScreen()) renderBaselines();
+  if (backupsOnScreen()) renderSnapshots();
   let done = await pollBaseline(id, false);
   if (done && done.state === "succeeded" && done.uploading) {
     // Published locally; the copy to the destination is still running and
     // no longer holds the schedule (#1725). Say so, and wait for it.
     toast("Backup saved locally: " + (done.tables || 0) + " table(s). Still copying it to the backup destination…");
-    if (backupsOnScreen()) renderBaselines();
+    if (backupsOnScreen()) renderSnapshots();
     done = await pollBaseline(id, true);
   }
   restore();
@@ -6112,16 +6320,16 @@ async function createBaseline(id, btn) {
       (done.swept ? ", " + done.swept + " earlier backup(s) sent too" : ""));
   } else if (done && done.uploading) {
     // The poll's cap hit mid-copy: say what is true, not "complete".
-    toast("Backup saved on this machine. The copy to the backup destination is still running; the Backups page shows when it finishes.");
+    toast("Backup saved on this machine. The copy to the backup destination is still running; the Snapshots page shows when it finishes.");
   } else if (done) {
     toastError("Backup failed: " + (done.last_error || "unknown error"));
   } else {
     toast("The backup is still running. Check back shortly.");
   }
-  // Only the Backups page needs the refresh: the button lives in
+  // Only the Snapshots page needs the refresh: the button lives in
   // baselineContextStrip (#1415 moved it out of baselinesPanel), and both the
   // strip and the snapshot list render only on this page.
-  if (backupsOnScreen()) renderBaselines();
+  if (backupsOnScreen()) renderSnapshots();
 }
 
 // pollBaseline polls the per-server baseline status until it leaves "running"
@@ -6166,7 +6374,7 @@ const BACKUP_KIND_LABEL = { dump: "full copy of the source", refresh: "automatic
 // rest carry the run's own reason, which names the error.
 const BACKUP_WHY_REMEDY = {
   no_index: "Set an index connection for this server (Servers) and the next run updates from the recorded changes instead of reading your database in full; without one there are no recorded changes to update from.",
-  no_local_dir: "Set a Backup dir for this server (Backup settings) and the next run updates from the recorded changes instead of reading your database in full.",
+  no_local_dir: "Set a Backup dir for this server (under Where and how often) and the next run updates from the recorded changes instead of reading your database in full.",
   first_backup: "First backup: there was nothing to update from yet. The next run updates from it.",
 };
 // The codes whose cause is a setting, so every run until it changes is a
@@ -6538,13 +6746,13 @@ async function watchBackupRuns(id, vgen, kinds) {
     // would clear the RUNNING region while the fold is still going.
     if (pollFailed && !busy) continue;
     if (!busy) {
-      if (wgen === backupWatchGen && vgen === viewGen && backupsOnScreen()) renderBaselines();
+      if (wgen === backupWatchGen && vgen === viewGen && backupsOnScreen()) renderSnapshots();
       return;
     }
   }
   // Cap expiry: re-render once so a stale RUNNING region does not outlive
   // the watcher silently.
-  if (wgen === backupWatchGen && vgen === viewGen && backupsOnScreen()) renderBaselines();
+  if (wgen === backupWatchGen && vgen === viewGen && backupsOnScreen()) renderSnapshots();
 }
 
 // backupFoldError rewrites a fold refusal for this page: the engine's
@@ -6657,7 +6865,7 @@ function backupScheduleCard(cur, b) {
       // Terminated, the same way the next-run warning below terminates its
       // reason: the daemon's refusals end bare, and since #1528 a note can
       // follow this text on the same line, which ran the two sentences
-      // together ("... turned off (Backup settings page) The last run
+      // together ("... turned off (under Where and how often) The last run
       // failed.").
       const why = plainWords(sch.reason || "unknown reason");
       line += " Cannot run: " + why + (/[.!?]$/.test(why) ? "" : ".");
@@ -6964,7 +7172,7 @@ async function saveBackupSchedule(id, sched, btn, msgEl) {
   const next = saved && saved.schedule;
   toast(next && next.next_method_error ? "Backup schedule saved, but the next run cannot start yet. See the reason on the page."
     : "Backup schedule saved. It runs at the next scheduled time.");
-  if (backupsOnScreen()) renderBaselines();
+  if (backupsOnScreen()) renderSnapshots();
 }
 
 async function removeBackupSchedule(id, btn, msgEl) {
@@ -6979,7 +7187,7 @@ async function removeBackupSchedule(id, btn, msgEl) {
     return;
   }
   toast("Backup schedule removed.");
-  if (backupsOnScreen()) renderBaselines();
+  if (backupsOnScreen()) renderSnapshots();
 }
 
 // backupRestoreCard offers the point-in-time restore: pick a past moment, get
@@ -7064,7 +7272,7 @@ async function startBackupRestore(id, at, btn, msgEl) {
   }
   btn.disabled = false;
   toast("Restore started: building a backup as of " + at + " UTC…");
-  if (backupsOnScreen()) renderBaselines();
+  if (backupsOnScreen()) renderSnapshots();
 }
 
 // ── Take a copy with you ───────────────────────────────────────────────────
@@ -7383,7 +7591,7 @@ async function startSQLExport(id, at, btn, msgEl) {
   }
   btn.disabled = false;
   toast("Build started: a .sql backup as of " + at + " UTC\u2026");
-  if (backupsOnScreen()) renderBaselines();
+  if (backupsOnScreen()) renderSnapshots();
 }
 
 // downloadSQLExport mirrors downloadBackup: fetch + blob because the API
@@ -7488,7 +7696,7 @@ function verifyRegions(servers, opts) {
   control.append(help);
   if (!configured) {
     control.append(el("p", { class: "form-hint", text:
-      "No backup set up for this server yet. The two snapshot modes need one (Backup settings page, then create at least two snapshots). \"Check recovery inputs\" works without one: it only reads the index." }));
+      "No backup set up for this server yet. The two snapshot modes need one (set one under Where and how often, then create at least two snapshots). \"Check recovery inputs\" works without one: it only reads the index." }));
   }
 
   // ── Region 2: what is running or just ran ──
@@ -7528,7 +7736,7 @@ const VFY_MODE_HELP = {
 
 // A verification run's state lives here, per server, and never in the box
 // that was on screen when it started. The page repaints (Back to it, a server
-// switch, and once the backup pages merge, any job that finishes); a run that
+// switch, and since the backup pages merged, any job that finishes); a run that
 // wrote into the box it saved at the start kept writing off screen while the
 // new box said "No run yet" and offered another run, and the button it
 // re-enabled at the end was the detached one. A run the schedule started
@@ -8682,13 +8890,14 @@ function buildConnect(servers, tokStatus, minted, fbStatus, ice) {
   // The DuckDB schema card, on this page with or without the watch daemon
   // (#1573; it sat on Backups from #1581, and here only on a serve-only
   // console). GET /api/views.sql needs settings:read, so a session denied it
-  // gets no card whose button could only be refused (on Backups the listing's
-  // own permission hid it). The views capability is already false under a
+  // gets no card whose button could only be refused (on the old Backups page
+  // the listing's own permission hid it). The views capability is already false under a
   // data profile.
   if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) v.append(duckdbPanel());
   // Last: what the selected server's snapshots can become, for a reader who
   // wants them in front of a reporting engine (#1466). It was the bottom of
-  // the Backups page, a third answer to "what do I download" there (#1573).
+  // the old Backups page, a third answer to "what do I download" there — the
+  // page that has since merged into Snapshots, which never carried it (#1573).
   const iceberg = icebergExportPanel(ice.cur, ice.loc);
   if (iceberg) v.append(iceberg);
   else if (ice.failed) {
@@ -10583,9 +10792,14 @@ function cmdkCommands() {
     { group: "Navigate", label: "Status", run: () => navigate("status") },
   ];
   if (capsCache.reconstruct) cmds.push({ group: "Navigate", label: "Time-travel", run: () => navigate("timetravel") });
-  if (capsCache.monitor) cmds.push({ group: "Navigate", label: "Backups", run: () => navigate("baselines") });
-  if (capsCache.monitor) cmds.push({ group: "Navigate", label: "Verification", run: () => navigate("verification") });
-  cmds.push({ group: "Navigate", label: "Backup settings", run: () => navigate("backup-settings") });
+  // One entry for the three pages that merged into it (#1573), findable by
+  // the names they had: somebody who has used this console types "backup"
+  // or "verif", and an entry they cannot find reads as a feature that was
+  // removed. alt is lowercased and matched like the label, and never shown.
+  // Not gated on
+  // the daemon, because the page opens on a standalone serve too.
+  cmds.push({ group: "Navigate", label: "Snapshots",
+    alt: ["backups", "verification", "backup settings"], run: () => navigate("snapshots") });
   if (capsCache.monitor) cmds.push({ group: "Navigate", label: "Retention", run: () => navigate("retention") });
   if (capsCache.monitor) cmds.push({ group: "Navigate", label: "This daemon", run: () => navigate("daemon") });
   cmds.push({ group: "Navigate", label: "Access profiles", run: () => navigate("access-profiles") });
@@ -10634,7 +10848,8 @@ function renderCmdk(query) {
   if (!list) return;
   const q = (query || "").toLowerCase().trim();
   let cmds = cmdkCommands();
-  if (q) cmds = cmds.filter((c) => c.search || c.label.toLowerCase().includes(q));
+  if (q) cmds = cmds.filter((c) => c.search || c.label.toLowerCase().includes(q)
+    || (c.alt || []).some((a) => a.toLowerCase().includes(q)));
   cmdkItems = cmds; cmdkSel = 0;
   clear(list);
   if (!cmds.length) { list.append(el("div", { class: "cmdk-empty", text: "No commands match." })); return; }

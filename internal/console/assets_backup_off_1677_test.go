@@ -124,7 +124,7 @@ console.log(JSON.stringify({
 
 	const note = "turned off at startup"
 	if !strings.Contains(got.StripOff.Text, "CREATE BACKUP") || !strings.Contains(got.StripOff.Text, note) ||
-		!strings.Contains(got.StripOff.Text, "Backup settings page") || len(got.StripOff.Buttons) != 0 {
+		!strings.Contains(got.StripOff.Text, "under Where and how often") || len(got.StripOff.Buttons) != 0 {
 		t.Errorf("creation off: the strip does not say so where the button would be: %+v", got.StripOff)
 	}
 	if strings.Contains(got.StripOn.Text, note) || len(got.StripOn.Buttons) != 1 || got.StripOn.Buttons[0] != "Create backup" {

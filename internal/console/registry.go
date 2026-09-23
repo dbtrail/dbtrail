@@ -209,7 +209,7 @@ type registryFile struct {
 	// binary is carried by the Extra catch-all below, ignored, and warned
 	// about once at load (legacyBaselineRefreshKey).
 	// BackupSettings is the optional daemon-wide backup settings section
-	// (#1682): the values the Backup settings page used to show read-only
+	// (#1682): the values the console used to show read-only
 	// because they existed only as flags and environment of the process.
 	// Same additive story as the two sections above, and the same reason for
 	// living here rather than in a file of its own — see the BackupSettings

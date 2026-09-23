@@ -22,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and its + Add server opens the add form directly.
 
 ### Changed
+- **Backups, Verification and Backup settings are one page, Snapshots**
+  (#1573). They were three addresses for one question — what copies of this
+  server exist, would they restore, and where and how often are they made —
+  and each page alone read as the whole answer, so nobody could tell whether
+  their data was safe without visiting all three. The sidebar now carries one
+  entry; the page reads top to bottom in that order, with **Checks**
+  (`/snapshots#checks`) and **Where and how often** (`/snapshots#setup`) as
+  sections. The three old addresses still work: each lands on the page, at
+  the section that was its page where this console draws one, with a one-line
+  note saying where what they named went — and, where that section is not
+  here, why. Closing the note is remembered in that browser, per old
+  address. Typing any of the old
+  names in the command palette finds the page. Unlike two of the pages it
+  replaces, Snapshots opens on a standalone `serve` as well, without the parts
+  only the watch daemon can run. Messages that used to send people to "the
+  Backups page" or "the Backup settings page" now name Snapshots, and the one
+  that pointed at a DuckDB schema download names Connect AI, where that card
+  has lived since the same redesign.
 - **Reusing the file of a table that did not change is always on, and the
   console no longer asks** (#1681). A backup that finds a table with no
   changes in its window publishes that table's previous Parquet file instead

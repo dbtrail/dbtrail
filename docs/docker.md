@@ -488,8 +488,8 @@ Each run creates a new snapshot under
 `bintrail-state` volume), with the source's binlog coordinates embedded so
 reconstruct knows where deltas begin. Then point the console at it:
 
-- **Servers added from the UI**: Backup settings (left nav) → the
-  server's row → **Backup dir** = `/var/lib/bintrail/baselines` (a
+- **Servers added from the UI**: Snapshots (left nav) → **Where and how
+  often** → the server's row → **Backup dir** = `/var/lib/bintrail/baselines` (a
   *container* path — the `watch` daemon reads it, not your host). The
   server's Time-travel tab lights up, and its row shows a TT chip under
   Manage servers.
@@ -497,13 +497,13 @@ reconstruct knows where deltas begin. Then point the console at it:
   in `.env` and `docker compose up -d` again.
 
 The console also has an in-process **Create baseline** button (in the sidebar
-under Protect → Baselines, for the selected server) that runs the same
+on the Snapshots page, for the selected server) that runs the same
 dump→convert→upload pipeline without the CLI profile — it's on by default in this compose stack;
 set `BASELINE_TRIGGER=0` in `.env` to disable it. The button still needs a
 source DSN and a baseline dir/S3 configured on the server before it does
 anything.
 
-**Protect → Verification** carries the verification runner (also on by default;
+The **Checks** section of Snapshots carries the verification runner (also on by default;
 `VERIFY_TRIGGER=0` in `.env` to disable) that runs `bintrail verify` in-process
 for the selected server — trigger a run, watch per-table match/mismatch/
 inconclusive results land, and drill into a mismatch — see

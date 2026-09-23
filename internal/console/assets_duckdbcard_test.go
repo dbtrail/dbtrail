@@ -172,8 +172,8 @@ func TestDuckDBCardStaysNearlyTextless(t *testing.T) {
 // Iceberg export, the order of the page from least to most setup.
 func TestDuckDBCardMountsOnConnect(t *testing.T) {
 	js := readAsset(t, "app.js")
-	if strings.Contains(stripJSLineComments(functionBody(t, js, "async function renderBaselines(")), "duckdbPanel(") {
-		t.Error("renderBaselines mounts duckdbPanel again; the card moved to Connect AI (#1573), and two " +
+	if strings.Contains(stripJSLineComments(functionBody(t, js, "async function renderSnapshots(")), "duckdbPanel(") {
+		t.Error("Snapshots mounts duckdbPanel again; the card moved to Connect AI (#1573), and two " +
 			"copies of one download put two different option sets in front of the reader")
 	}
 	connect := stripJSLineComments(functionBody(t, js, "function buildConnect("))

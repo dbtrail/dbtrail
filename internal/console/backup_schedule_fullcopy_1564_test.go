@@ -285,7 +285,10 @@ func TestBackupSettings_summaryCarriesTheFullBackup(t *testing.T) {
 	script := renderHarnessJS + `
 const flat = (n) => !n ? "" : n.nodeType === 3 ? n.textContent : (n._text || "") + (n.children || []).map(flat).join(" ");
 const r = ` + string(raw) + `;
-console.log(JSON.stringify(flat(vm.runInContext("backupServerRow", ctx)(r, false, [r], ""))));
+const row = (caps) => { vm.runInContext("capsCache = " + JSON.stringify(caps) + ";", ctx);
+  return flat(vm.runInContext("backupServerRow", ctx)(r, false, [r], "")); };
+// Both consoles: one that runs the schedules, and one that does not.
+console.log(JSON.stringify([row({}), row({ backup_schedule: true })]));
 `
 	path := filepath.Join(t.TempDir(), "row.js")
 	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
@@ -295,12 +298,31 @@ console.log(JSON.stringify(flat(vm.runInContext("backupServerRow", ctx)(r, false
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, out)
 	}
-	var text string
-	if err := json.Unmarshal(out, &text); err != nil {
+	var both []string
+	if err := json.Unmarshal(out, &both); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
-	if want := "Scheduled backups: every 6h at 03:00, with a full backup every 7d. The schedule is managed on the Backups page."; !strings.Contains(text, want) {
-		t.Fatalf("the settings row does not say the full backup cadence; want %q in %q", want, text)
+	if len(both) != 2 {
+		t.Fatalf("rendered %d rows, want one per console shape", len(both))
+	}
+	readOnly, runsThem := both[0], both[1]
+	for _, text := range both {
+		if want := "Scheduled backups: every 6h at 03:00, with a full backup every 7d."; !strings.Contains(text, want) {
+			t.Fatalf("the settings row does not say the full backup cadence; want %q in %q", want, text)
+		}
+	}
+	// And the sentence after it says where the timetable is CHANGED, which is
+	// not the same place on both consoles (#1573). A console that runs no
+	// schedules draws no card to point at: saying "the card above" there named
+	// something that is not on the screen, and invited an action it refuses.
+	if want := "Schedules run in the DBTrail daemon; this console cannot change them."; !strings.Contains(readOnly, want) {
+		t.Errorf("a console that runs no schedules does not say so; want %q in %q", want, readOnly)
+	}
+	if want := "Select this server at the top of the page to change it."; !strings.Contains(runsThem, want) {
+		t.Errorf("a console that runs the schedules does not say where to change one; want %q in %q", want, runsThem)
+	}
+	if strings.Contains(runsThem, "cannot change them") || strings.Contains(readOnly, "Select this server") {
+		t.Error("the two consoles read the same: the sentence does not follow what this one can do")
 	}
 }
 

@@ -27,14 +27,23 @@ import (
 // title check broke on one. A page the site moves or removes fails that run.
 var expectedDocsPages = map[string]string{
 	"events":       "guides/recovery",
-	"recover":      "guides/recovery",
-	"baselines":    "guides/backup-strategy",
-	"verification": "guides/verify",
-	"storage":      "guides/capacity-planning",
-	"connect":      "claude/setup",
-	// #1603: the settings page had a docs page all along and no link to it.
-	// It moved to settings/backups; the old slug answers only through a 301.
-	"backup-settings": "settings/backups",
+	"recover": "guides/recovery",
+	// One page for the three that merged (#1573). The site still has the
+	// three it documented them with (guides/backup-strategy, guides/verify,
+	// settings/backups); the header link opens the strategy guide, which
+	// covers the whole job, and the other two stay reachable from it and
+	// from the docsMore links below.
+	"snapshots": "guides/backup-strategy",
+	"storage":   "guides/capacity-planning",
+	"connect":   "claude/setup",
+}
+
+// Slugs a compact block links to that no page header names (#1573). Recorded
+// here deliberately, one line each, so the site check below fetches them: a
+// slug typed only in a docsMore call would otherwise be a link nobody checks.
+var expectedDocsMoreSlugs = map[string]string{
+	"settings/backups": "the site documents the backup settings on a page of their own; in the console they are a section of Snapshots",
+	"guides/verify":    "the verify guide was the Verification page's header link; the Checks section links to it now, and this keeps the site check fetching it",
 }
 
 const docsBaseURL = "https://www.dbtrail.com/docs/"
@@ -120,10 +129,13 @@ func TestDocsLinksTableIsExact(t *testing.T) {
 // blocks' own links into the docs site (#1603).
 var docsMoreRE = regexp.MustCompile(`docsMore\("([^"]*)",\s*"([^"]*)"`)
 
-// TestDocsMoreLinksArePagesTheTableCarries: a compact block may only link to
-// a page the header table already names, so the network check below covers
-// it. A slug typed only in a docsMore call would be a link nobody checks.
-func TestDocsMoreLinksArePagesTheTableCarries(t *testing.T) {
+// TestDocsMoreLinksAreCheckedAgainstTheSite: every page a compact block
+// links to is one the network check below fetches — either because a page
+// header names it, or because it is recorded in expectedDocsMoreSlugs. A
+// slug typed only in a docsMore call would be a link nobody checks. Entries
+// recorded there and no longer linked fail too, so the list cannot outlive
+// what it covers.
+func TestDocsMoreLinksAreCheckedAgainstTheSite(t *testing.T) {
 	raw, err := os.ReadFile("assets/app.js")
 	if err != nil {
 		t.Fatal(err)
@@ -137,12 +149,21 @@ func TestDocsMoreLinksArePagesTheTableCarries(t *testing.T) {
 	if len(calls) == 0 {
 		t.Fatal("no docsMore call in app.js; the compact blocks lost their docs links")
 	}
+	used := map[string]bool{}
 	for _, m := range calls {
-		if !known[m[1]] {
-			t.Errorf("docsMore links to %q, which no DOCS_PAGES entry names; add the page to the table so the site check reaches it", m[1])
+		used[m[1]] = true
+		if !known[m[1]] && expectedDocsMoreSlugs[m[1]] == "" {
+			t.Errorf("docsMore links to %q, which no DOCS_PAGES entry names; add the page to the table, "+
+				"or record it in expectedDocsMoreSlugs with the reason, so the site check reaches it", m[1])
 		}
 		if m[2] != "" && !regexp.MustCompile(`^[a-z0-9]+(-+[a-z0-9]+)*$`).MatchString(m[2]) {
 			t.Errorf("docsMore section %q is not a lowercase heading id", m[2])
+		}
+	}
+	for slug := range expectedDocsMoreSlugs {
+		if !used[slug] {
+			t.Errorf("expectedDocsMoreSlugs records %q and no docsMore call links to it; drop the entry, "+
+				"or the list keeps a page alive that the console no longer sends anyone to", slug)
 		}
 	}
 }
@@ -201,8 +222,18 @@ func TestDocsLinksResolveOnTheSite(t *testing.T) {
 			"real page from the shell — this check would pass on a missing page", m[1])
 	}
 
-	checked := map[string]bool{}
+	// The pages the headers name, plus the ones only a compact block links
+	// to: both are links a reader can follow, so both are fetched. Keyed by
+	// where the console links from, which the failure message names.
+	from := map[string]string{}
 	for route, slug := range pages {
+		from["the "+route+" page header"] = slug
+	}
+	for slug := range expectedDocsMoreSlugs {
+		from["a docsMore link on "+slug] = slug
+	}
+	checked := map[string]bool{}
+	for route, slug := range from {
 		url := docsBaseURL + slug + "/"
 		if checked[url] {
 			continue
@@ -213,8 +244,8 @@ func TestDocsLinksResolveOnTheSite(t *testing.T) {
 			got = m[1]
 		}
 		if got != slug {
-			t.Errorf("%s does not serve its own page: identity tag %s, want %q — the console's %s "+
-				"header links to a page the site no longer has", url, got, slug, route)
+			t.Errorf("%s does not serve its own page: identity tag %s, want %q — %s points at a page "+
+				"the site no longer has", url, got, slug, route)
 		}
 	}
 	// The compact blocks' section links (#1603): a heading id the site does

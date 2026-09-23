@@ -17,7 +17,7 @@ import (
 // 1,000 OBJECTS, twice, whatever the caller needed, and again for every
 // caller in the same request. On a prefix of 550 snapshots that was 22
 // requests and 26 seconds from out of region, four times over for the
-// Backups page. Now it is the SDK, two requests: the snapshot directories
+// Snapshots page. Now it is the SDK, two requests: the snapshot directories
 // (a delimiter listing, one request per 1,000 snapshots) and the objects of
 // only the newest ones wanted, from the byte-smallest of their names on (S3
 // lists keys in byte order and the directory names are timestamps, so the

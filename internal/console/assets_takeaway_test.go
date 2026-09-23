@@ -147,7 +147,7 @@ func TestViewsFileIsNamedFromOneConstant(t *testing.T) {
 // A panel nobody mounts answers nothing. This is the wiring half: the guards
 // above prove the lanes are right, not that a reader ever sees them.
 func TestTakeAwayPanelIsMountedAboveTheList(t *testing.T) {
-	body := stripJSLineComments(functionBody(t, readAsset(t, "app.js"), "async function renderBaselines("))
+	body := stripJSLineComments(functionBody(t, readAsset(t, "app.js"), "async function renderSnapshots("))
 	// v.append(takeAway), not backupTakeAway(: dropping only the append leaves
 	// the call sitting there, and a guard that reads the call reports a panel
 	// that no reader can see.
@@ -155,11 +155,11 @@ func TestTakeAwayPanelIsMountedAboveTheList(t *testing.T) {
 	list := strings.Index(body, "baselinesPanel(")
 	switch {
 	case mount < 0:
-		t.Fatal("renderBaselines no longer mounts backupTakeAway: the Parquet download goes back " +
+		t.Fatal("Snapshots no longer mounts backupTakeAway: the Parquet download goes back " +
 			"inside a row expand, and the .sql builder leaves the page entirely — backupTakeAway " +
 			"is its only caller")
 	case list < 0:
-		t.Fatal("renderBaselines no longer mounts baselinesPanel")
+		t.Fatal("Snapshots no longer mounts baselinesPanel")
 	case mount > list:
 		t.Error("the two lanes render BELOW the backups list. They are the answer to why the page " +
 			"was opened; the list is how you pick a different one")

@@ -103,7 +103,7 @@ type backupSettingsServerDTO struct {
 	// neither exists.
 	Source string `json:"source"`
 	// The schedule as CONFIGURED (its own endpoints own editing it; the
-	// Backups page shows the run history and the next-method prediction).
+	// Snapshots page shows the run history and the next-method prediction).
 	// Config only, on purpose: predicting the next run's method probes the
 	// source database, and a settings listing must not dial every server.
 	ScheduleEvery string `json:"schedule_every,omitempty"`
@@ -111,7 +111,7 @@ type backupSettingsServerDTO struct {
 	// ScheduleFullEvery is the schedule's full-backup timetable (#1564), and
 	// ScheduleFullRefusal why its full backups cannot start as things stand
 	// (CheckFullCopy, IO-free like CheckBackupSchedule), so this page does
-	// not show in grey what the Backups page shows in red.
+	// not show in grey what the Snapshots page shows in red.
 	ScheduleFullEvery   string `json:"schedule_full_every,omitempty"`
 	ScheduleFullRefusal string `json:"schedule_full_refusal,omitempty"`
 	// ScheduleRefusal is why the configured schedule cannot run as things
@@ -172,7 +172,7 @@ func lockModeRowErr(err string) string {
 }
 
 // handleBackupSettingsGet serves GET /api/backup-settings: the consolidated
-// read model for the Backup settings page.
+// read model for the Snapshots page.
 func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request) {
 	d := s.backupSettingsDefaults
 	on := func(b bool) *bool { return &b }

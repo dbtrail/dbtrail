@@ -37,7 +37,7 @@ const BaselineRunTriggerScheduled = "scheduled"
 // could not start (another backup job held the server, or the schedule was
 // not runnable). It has no snapshot, so the files listing never joins it;
 // it exists so a schedule that never gets to run stays visible on the
-// Backups page instead of silent.
+// Snapshots page instead of silent.
 type BaselineRunRecord struct {
 	ServerID   string `json:"server_id"`
 	ServerName string `json:"server_name,omitempty"`
@@ -477,7 +477,7 @@ func (h *BaselineRunHistory) FindBySnapshot(serverID, snapshotTime string) *Base
 
 // LastScheduled returns the newest scheduled RUN for serverID and the newest
 // scheduled SKIP, either nil when there is none. Both, because they answer
-// different questions on the Backups page: "when did the schedule last
+// different questions on the Snapshots page: "when did the schedule last
 // produce a backup" and "is it currently unable to". A skip newer than the
 // last run is the case the page has to shout about.
 func (h *BaselineRunHistory) LastScheduled(serverID string) (run, skip *BaselineRunRecord) {

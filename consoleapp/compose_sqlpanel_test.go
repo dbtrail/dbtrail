@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dbtrail/dbtrail/internal/console"
 	"go.yaml.in/yaml/v2"
 )
 
@@ -80,12 +81,12 @@ func TestSQLPanelEnvIsReportedAsRetired(t *testing.T) {
 				t.Fatalf("value %q: warned=%v, want %v (log: %s)", tc.value, got, tc.wantWarn, buf.String())
 			}
 			// The warning has to say what to do instead, or it is only an
-			// obituary. Backups is where the DuckDB schema download lives
-			// (#1581); Connect only serves the read-only console, so an
-			// assertion on "Connect" alone would be satisfied by the
-			// parenthetical while every watch operator is misdirected.
-			if tc.wantWarn && !strings.Contains(buf.String(), "Backups") {
-				t.Errorf("the warning does not point at the Backups page: %s", buf.String())
+			// obituary. Connect AI is where the DuckDB schema card lives
+			// since #1573, on both binaries — it used to be on Backups under
+			// watch, so a warning still naming a backup page would misdirect
+			// every operator it reaches.
+			if tc.wantWarn && !strings.Contains(buf.String(), console.PageConnect) {
+				t.Errorf("the warning does not point at the %s page: %s", console.PageConnect, buf.String())
 			}
 		})
 	}

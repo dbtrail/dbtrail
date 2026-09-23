@@ -24,7 +24,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
-// This file serves the per-snapshot surfaces of the Backups page (#TBD):
+// This file serves the per-snapshot surfaces of the Snapshots page (#TBD):
 //
 //	GET /api/baselines/files    — one snapshot's tables, sizes and write span
 //	GET /api/baselines/download — the whole snapshot as a tar.gz stream

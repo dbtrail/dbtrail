@@ -552,7 +552,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if err := startBaselineRefreshLoop(ctx, registry, baselineSup, upIndexDSN, upConsoleBaselineDir, upBaselineRefreshEvery, upBaselineCarryForward); err != nil {
 		return err
 	}
-	// Per-server backup schedules from the Backups page (#1442). No flag:
+	// Per-server backup schedules from the Snapshots page (#1442). No flag:
 	// the registry decides what runs, the loop only looks at the clock.
 	startBackupScheduleLoop(ctx, backupSched)
 
@@ -780,7 +780,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	if err := startBaselineRefreshLoop(ctx, registry, baselineSup, upIndexDSN, upConsoleBaselineDir, upBaselineRefreshEvery, upBaselineCarryForward); err != nil {
 		return err
 	}
-	// Per-server backup schedules from the Backups page (#1442). No flag:
+	// Per-server backup schedules from the Snapshots page (#1442). No flag:
 	// the registry decides what runs, the loop only looks at the clock.
 	startBackupScheduleLoop(ctx, backupSched)
 
@@ -944,7 +944,7 @@ func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string, reg
 		}
 	}
 	// The download TTL for staged .sql builds (#1448) needs a clock nobody
-	// is polling: the Backups page expires lazily only while it is open.
+	// is polling: the Snapshots page expires lazily only while it is open.
 	go sup.runSQLExportReaper()
 	return sup
 }
@@ -1572,7 +1572,7 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console
 		// told, reported when no console override is saved. Enabled is the
 		// loop's boot-time liveness, so the panel can say a saved setting is
 		// dormant instead of implying it is live.
-		// The Backup settings page's read-only rows (#1582):
+		// The Snapshots page's read-only rows (#1582):
 		// what this daemon was told, verbatim, each under the exact flag or
 		// env name the page shows beside it. Values, not re-derivations — the
 		// page's whole job is saying where the effective value came from.

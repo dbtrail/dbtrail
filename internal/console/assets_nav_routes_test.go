@@ -65,15 +65,23 @@ func TestNavEntriesNameKnownRoutes(t *testing.T) {
 		}
 	}
 
-	// The Protect group specifically: it is the one whose panels were moved out
-	// of another view, so a half-revert (nav removed, routes left, or vice
-	// versa) is plausible.
-	for _, want := range []string{"baselines", "verification"} {
-		if !routes[want] {
-			t.Errorf("route %q is missing from ROUTES", want)
-		}
-		if !strings.Contains(string(html), `data-route="`+want+`"`) {
-			t.Errorf("no nav entry for route %q — the view exists but nothing links to it", want)
+	// Snapshots specifically: three pages merged into it (#1573), so a
+	// half-revert (nav removed, route left, or vice versa) is plausible, and
+	// it is the only way in — the three old entries are gone from the
+	// sidebar, and their addresses only rewrite to this one.
+	if !routes["snapshots"] {
+		t.Error("route \"snapshots\" is missing from ROUTES")
+	}
+	if !strings.Contains(string(html), `data-route="snapshots"`) {
+		t.Error("no nav entry for route \"snapshots\" — the page exists and nothing links to it")
+	}
+	// And the merged-away ones never come back as entries: a sidebar that
+	// lists Backups again would point at an address that rewrites away from
+	// it, lighting a different item than the one that was clicked.
+	for _, gone := range []string{"baselines", "verification", "backup-settings"} {
+		if strings.Contains(string(html), `data-route="`+gone+`"`) {
+			t.Errorf("the sidebar has an entry for %q again; it merged into Snapshots (#1573), and its "+
+				"address rewrites there, so the entry would never be the one lit", gone)
 		}
 	}
 }

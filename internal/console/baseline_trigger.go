@@ -125,7 +125,7 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 		return errors.New("this server has no source configured; set the source connection first")
 	}
 	if !hasOwnBackupLocation(e) {
-		return errors.New("this server has no baseline location set up; set a baseline directory or S3 location first" + onPage(PageBackupSettings))
+		return errors.New("this server has no baseline location set up; set a baseline directory or S3 location first" + onPage(PageSnapshots))
 	}
 	if pgSourceIncomplete(e) {
 		return errors.New("this PostgreSQL server has no replication slot/publication configured; set them first (Edit → Source)")
@@ -136,7 +136,7 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 // hasOwnBackupLocation: the server has a backup location of its own, the one
 // a console-created backup writes to. The daemon-wide default does not count:
 // a backup refuses the shared store. The precheck and the Getting started
-// list's reason call it, and the Backups page strip (baselineContextStrip in
+// list's reason call it, and the Snapshots page strip (baselineContextStrip in
 // app.js) repeats the same raw emptiness test, so change them together. A
 // restore also refuses the shared store but needs a local Backup dir, and
 // does not use this.
@@ -238,7 +238,7 @@ type BaselineStatus struct {
 	At string `json:"at,omitempty"`
 	// ExpiresAt (sql-export builds only, RFC3339 UTC) is when a finished
 	// build is removed from the daemon's disk unless downloaded first; the
-	// Backups page shows it as the download deadline.
+	// Snapshots page shows it as the download deadline.
 	ExpiresAt string `json:"expires_at,omitempty"`
 	// DownloadedAt (sql-export builds only, RFC3339 UTC) stamps the
 	// download that consumed the build.
@@ -354,11 +354,11 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		// belongs to neither.
 		if e.BaselineS3 != "" {
 			writeJSONError(w, http.StatusBadRequest,
-				"this server keeps its backups only in S3; point-in-time restore needs a local backup directory"+onPage(PageBackupSettings))
+				"this server keeps its backups only in S3; point-in-time restore needs a local backup directory"+onPage(PageSnapshots))
 			return
 		}
 		writeJSONError(w, http.StatusBadRequest,
-			"this server has no backup directory of its own; set one first"+onPage(PageBackupSettings))
+			"this server has no backup directory of its own; set one first"+onPage(PageSnapshots))
 		return
 	}
 	var body struct {

@@ -137,14 +137,14 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 		rep.Steps = append(rep.Steps, step)
 	}
 	if b := in.Backup; b != nil {
-		step := FirstRunStep{Name: "Take the first backup", State: firstRunWaiting, Fix: "Create one on the " + PageBackups + " page."}
+		step := FirstRunStep{Name: "Take the first backup", State: firstRunWaiting, Fix: "Create one on the " + PageSnapshots + " page."}
 		switch {
 		case b.Published || b.State == "succeeded":
 			step.State, step.Fix = firstRunDone, ""
 		case b.State == "running":
 			step.State, step.Fix = firstRunRunning, ""
 		case b.State == "failed":
-			step.State, step.Detail, step.Fix = firstRunFailed, b.LastError, "Try again on the "+PageBackups+" page."
+			step.State, step.Detail, step.Fix = firstRunFailed, b.LastError, "Try again on the "+PageSnapshots+" page."
 		}
 		rep.Steps = append(rep.Steps, step)
 	} else if step, ok := blockedBackupStep(in); ok {
@@ -155,7 +155,7 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 
 // blockedBackupStep is the backup step for a server whose first backup the
 // console cannot create, with the reason and what to do (#1677). The daemon
-// setting is named as the Backup settings page labels it, never as a
+// setting is named as the Snapshots page labels it, never as a
 // variable. mydumper is named for every source but PostgreSQL (MySQL and
 // MariaDB): a PostgreSQL full backup runs inside DBTrail. The step can never
 // be done while backups are off, which is why Complete reads only the
@@ -165,18 +165,18 @@ func blockedBackupStep(in firstRunInput) (FirstRunStep, bool) {
 	switch {
 	case in.BackupOff:
 		step.Detail = "Creating full backups from the console is turned off. Restoring a whole table to a past moment needs a full backup."
-		step.Fix = "On the " + PageBackupSettings + " page, under Set when DBTrail starts, the Create-backup button row names the setting to change. Restart DBTrail after changing it. A full backup reads every table this server captures"
+		step.Fix = "On the " + PageSnapshots + " page, under Set when DBTrail starts, the Create-backup button row names the setting to change. Restart DBTrail after changing it. A full backup reads every table this server captures"
 		if in.Postgres {
 			step.Fix += "."
 		} else {
 			step.Fix += ", and mydumper must be installed where DBTrail runs."
 		}
 		if in.BackupNoLocation {
-			step.Fix += " This server also needs its own backup location, set on the " + PageBackupSettings + " page."
+			step.Fix += " This server also needs its own backup location, set on that page under Where and how often."
 		}
 	case in.BackupNoLocation:
 		step.Detail = "This server has no backup location of its own, so no backup can be written for it."
-		step.Fix = "Set a Backup dir or Backup S3 for this server on the " + PageBackupSettings + " page, then create one on the " + PageBackups + " page."
+		step.Fix = "On the " + PageSnapshots + " page, set this server's Backup dir or Backup S3 under Where and how often, then press Create backup."
 	default:
 		return FirstRunStep{}, false
 	}

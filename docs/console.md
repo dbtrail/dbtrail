@@ -196,7 +196,9 @@ and searching events:
    its own, reports the retention as "not known here" instead of grading an
    index another process rotates as unbounded. See
    [capacity planning](capacity.md#monitoring).
-7. **Protect** (under `watch` only) — **Backups** (the selected server's
+7. **Protect** — **Snapshots**, one page for the copies, the checks and the
+   settings (#1573; on a standalone `serve` the parts only the watch daemon
+   can run are left out). Its top half is the selected server's
    snapshot listing; each row expands to its tables, sizes and how long the
    backup took; for a backup in a local directory, how each table was made
    (read from the database, built from the recorded changes, or reused
@@ -217,11 +219,13 @@ and searching events:
    downloaded as one `.tar.gz` — load it with `myloader`, nothing from
    bintrail needed on the restore side; the build is a full plaintext copy
    of every row, staged on the daemon's disk under the system temp
-   directory unless `BINTRAIL_CONSOLE_BASELINE_STAGING` says otherwise) and
-   **Verification** (run
-   `bintrail verify` and read past runs). These produce and validate the
+   directory unless `BINTRAIL_CONSOLE_BASELINE_STAGING` says otherwise). Its
+   **Checks** section (`watch` only) runs
+   `bintrail verify` and shows past runs, and **Where and how often** holds
+   every setting that shapes a backup. The first two produce and validate the
    artifacts a restore depends on, so they are operations rather than
-   settings; they lived on the old Storage page until they outgrew it.
+   settings; they lived on the old Storage page until they outgrew it, then
+   on two pages of their own until #1573 put the whole job on one.
    A staged `.sql` build does not stay on disk: it is removed as soon as a
    download completes, 4 hours after the build finished if nobody
    downloaded it (the Ready line shows the deadline and the size), when a
@@ -233,10 +237,11 @@ and searching events:
    downloadable; its status names the previous build's directory until that
    removal succeeds. The This daemon page shows what is staged while it
    exists, previous builds that could not be removed included.
-8. **Settings** — **Backup settings** (every parameter that shapes a
+8. **Settings** — the backup settings live in the **Snapshots** page's
+   "Where and how often" section (every parameter that shapes a
    backup or a snapshot, with its provenance — see
-   [The Backup settings page](#the-backup-settings-page);
-   on `serve` only the editable per-server half renders, since this page is
+   [Where and how often](#where-and-how-often-snapshotssetup);
+   on `serve` only the editable per-server half renders, since it is
    the one editor of a server's backup location), and under `watch` only:
    **Retention** (rotation policy and
    per-source S3 archiving), **This daemon** (AWS credential signals, staged
@@ -245,7 +250,7 @@ and searching events:
    and **Rotation** (opens the rotation dialog).
 
 Every view whose subject has a page on www.dbtrail.com/docs (Events, Restore,
-Backups, Verification, Storage, Connect AI) shows a small **Docs** link beside
+Snapshots, Storage, Connect AI) shows a small **Docs** link beside
 its title. It opens that page in a new tab and is a plain link: the console
 makes no request for it, so it costs nothing on an air-gapped host. Views with
 no page of their own show no link.
@@ -480,15 +485,36 @@ editing flags or restarting:
 - The standalone `bintrail-console serve` hides the panel and refuses the write
   (HTTP 403) — only the daemon running the loop consumes the policy.
 
-### The Protect pages
+### The Snapshots page
 
-Under `watch` the sidebar carries a **Protect** group with two pages. They were
-part of the old Storage page until they outgrew it: both are operations that
-produce and validate the artifacts a restore depends on, rather than settings,
-and the snapshot listing is unbounded in practice — it pushed verification, the
-panel that answers whether a restore would work, far below the fold.
+The sidebar carries a **Protect** group with one page, **Snapshots**, which
+answers the whole question in one place (#1573): what copies of this server
+exist, whether they would restore, and where and how often they are made.
+Those were three pages — Backups, Verification and Backup settings — and each
+one alone read as the complete answer, so nobody could tell whether their data
+was safe without visiting all three.
 
-**Protect → Baselines**
+The page is read top to bottom in that order, and the two lower parts are
+sections with addresses of their own:
+
+| Part | Anchor | What it answers |
+|---|---|---|
+| (top) | `/snapshots` | what copies exist, and what you can do with one |
+| **Checks** | `/snapshots#checks` | whether a copy would restore |
+| **Where and how often** | `/snapshots#setup` | where copies are kept, and the timetable |
+
+The three old addresses (`/baselines`, `/verification`, `/backup-settings`)
+still work: each rewrites to its part of this page, and a one-line note says
+where the page they asked for went. Closing that note is remembered in that
+browser, per old address.
+
+**Snapshots opens on a standalone `serve` too**, where two of the three pages
+it replaces did not exist. It leaves out what only the watch daemon can do —
+taking a backup, running a check — and keeps what `serve` can answer: the
+listing, the backup location (which it also edits), and a timetable somebody
+saved, shown with the reason nothing here is running it.
+
+**What copies exist**
 
 - A read-only listing of the **selected server's** baseline source
   (`baseline_dir` / `baseline_s3`): each snapshot's timestamp, age, table
@@ -630,8 +656,8 @@ panel that answers whether a restore would work, far below the fold.
   opt-in on its own: it does not require, and does not enable, the **Create
   baseline** button.
 
-**Protect → Verification** carries the verification runner and the history of
-past runs for the selected server.
+**Checks** (`/snapshots#checks`, under `watch` only) carries the verification
+runner and the history of past runs for the selected server.
 
 The per-table results use a few words of their own:
 
@@ -647,12 +673,13 @@ The per-table results use a few words of their own:
   comparisons is the expected result there, not a finding.
 
 The Backups summary card that used to point here from Storage is gone (#1543):
-Backups has its own entry in the same sidebar, and the pointer only existed
-because the page it pointed away from was a drawer.
+this is a part of the page in the same sidebar entry, and the pointer only
+existed because the page it pointed away from was a drawer.
 
-### The Backup settings page
+### Where and how often (`/snapshots#setup`)
 
-One page owns every parameter that shapes a backup or a snapshot (#1582),
+This part of the page owns every parameter that shapes a backup or a snapshot
+(#1582; a page of its own until #1573),
 because no two of them were configured the same way: some are daemon flags,
 some are environment variables, some live per server in the registry, and the
 precedence between them — per server, then daemon flag, then nothing — was
@@ -749,10 +776,11 @@ Storage, which had become a drawer: seven cards from five unrelated concerns
 - **Staged downloads**, and **Usage telemetry**, both described below.
 
 Two cards left the page entirely. **Backups & disk space** moved to the
-Backups page beside **Scheduled backups** (#1543), and from there to the
-**Backup settings** page (#1582), which owns settings the way
-the Backups page owns the work — schedules, runs and downloads stay beside
-the data they report on.
+backups page beside **Scheduled backups** (#1543), from there to the
+**Backup settings** page (#1582), and with that page into the "Where and how
+often" section of **Snapshots** (#1573), which keeps the settings beside the
+work they shape — schedules, runs and downloads — and beside the data that
+work reports on.
 **Download a DuckDB schema** moved to the SQL page, from there to
 **Connect** (#1549) — `GET /api/views.sql` requires `settings:read`, while the
 SQL page is gated on `query:execute` and on the `sql` capability, so the
@@ -773,7 +801,7 @@ and lands on Retention.
   `--baseline-carry-forward-unchanged`: whether a table with no changes in the
   window keeps its previous Parquet file instead of being written again. It has
   no timetable in it, which the first name promised and which **Scheduled
-  backups** on the Backups page actually is. The saving is real and it is
+  backups** on the Snapshots page actually is. The saving is real and it is
   not free, which is what the name says: where the filesystem allows a hard
   link, two backups then share the same bytes on disk, so deleting the older
   one frees nothing while the newer one still points at it, and a `du` per
@@ -794,7 +822,7 @@ and lands on Retention.
   A `baseline_refresh:` block saved by an older console is ignored, and kept
   in the registry file untouched.
   See [dump-and-baseline.md](dump-and-baseline.md#refreshing-on-a-schedule).
-- **Staged downloads**: the `.sql` backups built from the Backups page that
+- **Staged downloads**: the `.sql` backups built from the Snapshots page that
   are waiting on the daemon's disk for their download: each build's server,
   size and download deadline, the total, and where they live. A build is
   removed once downloaded or 4 hours after it finished, so this card is
@@ -967,7 +995,7 @@ longer does anything. Remove it.
   the upload come from the ambient chain (`AWS_*` / `~/.aws` / role).
 - `BINTRAIL_CONSOLE_BASELINE_TRIGGER` (`watch` only) — `1`/`true` enables the
   **Create backup** button (runs `mydumper` → convert → upload in-process;
-  see [Protect → Baselines](#the-protect-pages)). Off by default for a bare
+  see [The Snapshots page](#the-snapshots-page)). Off by default for a bare
   `watch` invocation; the bundled compose stack sets this on by default (see
   [docker.md](docker.md) — `BASELINE_TRIGGER=0` in `.env` opts out there).
   The bare default stays off on purpose (#1677): the `bintrail-console`
@@ -982,10 +1010,10 @@ longer does anything. Remove it.
   while the updates keep running
   ([#1564](https://github.com/dbtrail/dbtrail/issues/1564)).
   When it is off, the Overview's Getting started list says so until the
-  server's first change is indexed, and the Backups page says so for a server
-  with a source and a location it can list. Both point at the Backup settings
-  page, where the setting is the Create-backup button row under Set when
-  DBTrail starts.
+  server's first change is indexed, and the Snapshots page says so for a server
+  with a source and a location it can list. Both point at the same page, under
+  **Set when DBTrail starts**, where the setting is the Create-backup button
+  row.
 - `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — local staging dir for
   S3-destined baselines created by that button (default a temp subdir).
 - `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — `ftwrl` (default),
@@ -1010,7 +1038,7 @@ longer does anything. Remove it.
   [Running verification from the console](#running-verification-from-the-console)).
 - `BINTRAIL_CONSOLE_VERIFY_TABLES` (`watch` only) — same as `--verify-tables`.
 - `BINTRAIL_CONSOLE_VERIFY_TRIGGER` (`watch` only) — `1`/`true` enables the
-  **Protect → Verification** page (runs `bintrail verify` in-process;
+  **Checks** section of Snapshots (runs `bintrail verify` in-process;
   see [Running verification from the console](#running-verification-from-the-console)).
   Off by default for a bare `watch` invocation; the bundled compose stack sets
   this on by default (see [docker.md](docker.md) — `VERIFY_TRIGGER=0` in
