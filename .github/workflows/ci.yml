@@ -70,12 +70,22 @@ jobs:
   # own tests run in `unit`, the 8.4 `integration` cell and the console jobs.
   # On a PR, `data` decides whether the MariaDB and PostgreSQL source jobs
   # run and whether the MySQL 8.0 cell runs alongside 8.4.
+  #
+  # `dbgo` is `go` minus the console's browser-driven tests
+  # (internal/console/assets_*_test.go: node over app.js, no database). It
+  # decides whether the 8.4 cell runs at all: a PR that only touches the
+  # console's assets and their tests used to pay the 15-minute MySQL leg
+  # for nothing. What that leg also did for such a PR, compiling the
+  # package under -tags integration, the unit job now does on its own
+  # (`go vet -tags integration ./...`), so a test helper that redeclares
+  # one from an integration test file still fails the PR (#1843).
   changes:
     runs-on: ubuntu-22.04
     permissions:
       pull-requests: read
     outputs:
       go: ${{ steps.filter.outputs.go }}
+      dbgo: ${{ steps.filter.outputs.dbgo }}
       console: ${{ steps.filter.outputs.console }}
       data: ${{ steps.filter.outputs.data }}
     steps:
@@ -86,8 +96,9 @@ jobs:
         if: github.event_name == 'pull_request'
         with:
           # A file counts for a filter when it matches at least one pattern
-          # and none of that filter's `!` patterns. Only `data` has any, so
-          # `go` and `console` behave exactly as with the default.
+          # and none of that filter's `!` patterns. Only `data` and `dbgo`
+          # have any, so `go` and `console` behave exactly as with the
+          # default.
           predicate-quantifier: some-with-excludes
           filters: |
             go:
@@ -102,6 +113,14 @@ jobs:
               # reshapes it breaks the walk, so it has to be able to run.
               - 'docs/quickstart.md'
               - '.github/workflows/ci.yml'
+            dbgo:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - 'migrations/**'
+              - '.github/workflows/ci.yml'
+              - '!internal/console/assets_*_test.go'
             console:
               - 'internal/console/**'
               - 'cmd/bintrail-console/**'
@@ -136,6 +155,14 @@ jobs:
 
       - name: go vet
         run: go vet ./...
+
+      # The integration test files compile only under their tag, and the
+      # MySQL cell no longer runs for a console-tests-only PR (`dbgo`), so
+      # this is where a helper redeclared between a unit test and an
+      # integration test file is caught (#1843). No database is needed to
+      # compile them.
+      - name: go vet (integration tag)
+        run: go vet -tags integration ./...
 
       # Staleness guard for THIRD-PARTY-NOTICES (license compliance, #428).
       # Keys off `go list -m all` (the module graph), NOT a go-licenses regen:
@@ -214,10 +241,11 @@ jobs:
       # DuckDB's iceberg extension; require it so the read-back never skips.
       BINTRAIL_REQUIRE_DUCKDB_ICEBERG: "1"
       # Whether this cell executes its steps (see the note on the `changes`
-      # job). Everything on push/nightly/dispatch. On a PR that touches Go,
-      # 8.4 always runs; 8.0 joins only when the PR touches the data path,
-      # and otherwise reports as a success with nothing executed.
-      RUN: ${{ github.event_name != 'pull_request' || (needs.changes.outputs.go == 'true' && (matrix.mysql == '8.4' || needs.changes.outputs.data == 'true')) }}
+      # job). Everything on push/nightly/dispatch. On a PR that touches Go
+      # outside the console's browser-driven tests (`dbgo`), 8.4 always
+      # runs; 8.0 joins only when the PR touches the data path, and
+      # otherwise reports as a success with nothing executed.
+      RUN: ${{ github.event_name != 'pull_request' || (needs.changes.outputs.dbgo == 'true' && (matrix.mysql == '8.4' || needs.changes.outputs.data == 'true')) }}
 
     steps:
       # Step-level (not job-level) `if:` — see the note on the `changes` job.
