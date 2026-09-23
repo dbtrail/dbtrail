@@ -117,6 +117,10 @@ func TestSnapshotEveryMinutes_isTheShorterLoopThatRuns(t *testing.T) {
 	fiveMin := add("fivemin", &BackupSchedule{Every: "5m"}, src)
 	refused := add("refused", &BackupSchedule{Every: "soon"}, src) // unreadable: the schedule cannot run
 	bare := add("bare", nil, "")
+	// Full copies off the regular grid add runs of their own: every 10h with
+	// a full copy every 1d is 72 + 30 - 6 (they meet every 5 days) = 96 runs
+	// in 30 days, one every 450 minutes, not every 600.
+	withFull := add("withfull", &BackupSchedule{Every: "10h", FullEvery: "1d"}, src)
 
 	for _, tc := range []struct {
 		name     string
@@ -125,12 +129,14 @@ func TestSnapshotEveryMinutes_isTheShorterLoopThatRuns(t *testing.T) {
 		readOnly bool
 		want     map[string]int
 	}{
-		{"schedules only", "", true, false, map[string]int{daily: 1440, fiveMin: 5, refused: 0, bare: 0}},
-		{"hourly refresh too", "1h", true, false, map[string]int{daily: 60, fiveMin: 5, refused: 60, bare: 60}},
-		{"no schedule loop", "", false, false, map[string]int{daily: 0, fiveMin: 0, refused: 0, bare: 0}},
+		{"schedules only", "", true, false, map[string]int{daily: 1440, fiveMin: 5, refused: 0, bare: 0, withFull: 450}},
+		// Both loops write into the same folder on their own timers, so their
+		// rates add: daily + hourly is 25 a day, one every 57 minutes.
+		{"hourly refresh too", "1h", true, false, map[string]int{daily: 57, fiveMin: 4, refused: 60, bare: 60, withFull: 52}},
+		{"no schedule loop", "", false, false, map[string]int{daily: 0, fiveMin: 0, refused: 0, bare: 0, withFull: 0}},
 		// A loop that parses the schedule but cannot run it here (no
 		// monitor = a read-only console) takes no snapshots either.
-		{"schedules refused here", "", true, true, map[string]int{daily: 0, fiveMin: 0, refused: 0, bare: 0}},
+		{"schedules refused here", "", true, true, map[string]int{daily: 0, fiveMin: 0, refused: 0, bare: 0, withFull: 0}},
 	} {
 		cfg := Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, LocalPruneLoop: true,
 			BackupSettingsDefaults: BackupSettingsDefaults{RefreshEvery: tc.refresh}}

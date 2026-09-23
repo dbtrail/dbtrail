@@ -737,10 +737,12 @@ Two section labels split it: **Change here** and **Set when DBTrail starts**.
   this row or the server form), and a server added on a folder that already
   holds snapshots starts with no count, so it keeps them all.
   Beside the count the row says how far back that lets you go: the count
-  times how often the server gets a snapshot on its own, which is the
-  shorter of its schedule and the `--baseline-refresh-interval` loop (for
-  example 3 daily snapshots reach back up to about 3 days, but only about 3
-  hours if an hourly refresh also runs), never less than an hour, because
+  times how often the server gets a snapshot on its own: its schedule
+  (including full backups that fall between its runs) and the
+  `--baseline-refresh-interval` loop together, since both write into the
+  folder (for example 3 daily snapshots reach back up to about 3 days, but
+  only about 3 hours if an hourly refresh also runs), never less than an
+  hour, because
   the cleanup leaves snapshots younger than an hour alone, and never less
   than the `--baseline-retain` age, which keeps younger snapshots past the
   count. When nothing takes snapshots on a timer it names no number, since
@@ -754,8 +756,9 @@ Two section labels split it: **Change here** and **Set when DBTrail starts**.
   is never counted, and neither is one that stopped being shared while it
   still holds the other server's snapshots (the other server was deleted,
   answered no, or moved away): a snapshot does not record which server
-  wrote it. That folder keeps everything until its server moves to a new
-  empty folder. A table
+  wrote it. That folder keeps everything, also after answering no and then
+  yes on it again, until its server moves to a new empty folder. A server
+  whose creation failed half way leaves no such mark. A table
   that did not change keeps its last file (a hard link where the filesystem
   allows it), so a new snapshot only costs the tables that changed. **No, only
   in S3** means the snapshots live only in the S3 destination, and every run

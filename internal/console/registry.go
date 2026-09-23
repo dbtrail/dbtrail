@@ -144,15 +144,17 @@ type ServerEntry struct {
 	// #1681) keeps them all, as before. With a destination set it does
 	// nothing: that mode removes only what the destination confirmed.
 	LocalKeepNewest int `yaml:"local_keep_newest,omitempty"`
-	// LocalKeepHeld marks a folder that stopped being shared while it still
-	// holds snapshots another server wrote (#1681): the other server was
-	// deleted, answered no, or moved away. A snapshot does not record which
-	// server wrote it, so counting the folder would take the other server's
-	// snapshots for this one's copies; it is never pruned, like a shared
-	// folder. OWNED BY THE REGISTRY: set by markHeldFolders, carried while
-	// the entry keeps its folder, cleared when it moves to another one (the
-	// way out the page names), and never taken from a caller.
-	LocalKeepHeld bool `yaml:"local_keep_held,omitempty"`
+	// LocalKeepHeldDir names a folder that stopped being shared while it
+	// still holds snapshots another server wrote (#1681): the other server
+	// was deleted, answered no, or moved away. A snapshot does not record
+	// which server wrote it, so counting the folder would take the other
+	// server's snapshots for this one's copies; while BaselineDir is this
+	// folder (heldNow) it is never pruned, like a shared folder. A FOLDER,
+	// not a yes/no, so answering no and then yes, or moving away and back,
+	// finds it held again; a new empty folder is not it (the way out the
+	// page names). OWNED BY THE REGISTRY: written by markHeldFolders only,
+	// carried across every update, never taken from a caller.
+	LocalKeepHeldDir string `yaml:"local_keep_held_dir,omitempty"`
 
 	// Extra is the forward-compat catch-all: unknown fields written by a NEWER
 	// bintrail (e.g. the phase-2 control plane's source_dsn / server_id /
@@ -646,7 +648,7 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 		return ServerEntry{}, fmt.Errorf("generate server id: %w", err)
 	}
 	e.ID = id
-	e.LocalKeepHeld = false // registry-owned; a new entry never starts held
+	e.LocalKeepHeldDir = "" // registry-owned; a new entry never starts held
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -685,13 +687,37 @@ func (r *Registry) Update(e ServerEntry) error {
 		if e.Extra == nil {
 			e.Extra = old.Extra // preserve forward-compat fields across edits
 		}
-		// Registry-owned (#1681): kept while the folder is, cleared by a move.
-		e.LocalKeepHeld = old.LocalKeepHeld && canonicalDir(e.BaselineDir) == canonicalDir(old.BaselineDir) && e.BaselineDir != ""
+		// Registry-owned (#1681): always the stored value, whatever was sent.
+		e.LocalKeepHeldDir = old.LocalKeepHeldDir
 		// The whole list is copied: marking a folder that stops being shared
 		// changes OTHER entries, and a failed save must undo all of it.
 		prev := slices.Clone(r.file.Servers)
 		r.file.Servers[i] = e
 		markHeldFolders(prev, r.file.Servers)
+		if err := r.save(); err != nil {
+			r.file.Servers = prev // roll back
+			return err
+		}
+		return nil
+	}
+	return ErrUnknownServer
+}
+
+// UndoAdd removes an entry Add just created, when the rest of the create
+// failed. Unlike Delete it marks no folder held (#1681): the entry never took
+// a snapshot, so the folder it pointed at holds nothing of its.
+func (r *Registry) UndoAdd(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.readOnly {
+		return ErrRegistryReadOnly
+	}
+	for i, old := range r.file.Servers {
+		if old.ID != id {
+			continue
+		}
+		prev := slices.Clone(r.file.Servers)
+		r.file.Servers = append(slices.Clone(r.file.Servers[:i]), r.file.Servers[i+1:]...)
 		if err := r.save(); err != nil {
 			r.file.Servers = prev // roll back
 			return err

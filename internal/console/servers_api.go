@@ -380,7 +380,7 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 			dErr = s.cm.reg.Update(added)
 		}
 		if dErr != nil {
-			if delErr := s.cm.reg.Delete(added.ID); delErr != nil {
+			if delErr := s.cm.reg.UndoAdd(added.ID); delErr != nil {
 				slog.Error("could not remove a half-configured server after its index DSN could not be set",
 					"server", added.Name, "id", added.ID, "error", delErr.Error())
 			}
@@ -407,7 +407,7 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 			} else {
 				added.BaselineDir = def
 				if err := s.cm.reg.Update(added); err != nil {
-					if delErr := s.cm.reg.Delete(added.ID); delErr != nil {
+					if delErr := s.cm.reg.UndoAdd(added.ID); delErr != nil {
 						slog.Error("could not remove a server whose snapshot folder could not be saved",
 							"server", added.Name, "id", added.ID, "error", delErr.Error())
 					}

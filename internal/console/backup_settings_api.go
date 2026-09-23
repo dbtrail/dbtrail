@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 )
@@ -163,7 +164,7 @@ type backupSettingsServerDTO struct {
 	// whatever KeepNewest says. The row says that instead of the count.
 	KeepBlocked bool `json:"keep_blocked,omitempty"`
 	// KeepHeld: of those, the folder is blocked because it once was shared
-	// and still holds the other server's snapshots (LocalKeepHeld). The way
+	// and still holds the other server's snapshots (heldNow). The way
 	// out differs (a new empty folder), so the row says which.
 	KeepHeld bool `json:"keep_held,omitempty"`
 	// KeepInForce is the count the prune loop applies to this folder right
@@ -180,12 +181,13 @@ type backupSettingsServerDTO struct {
 	// (the loop then applies none either).
 	PruneRetainMinutes int `json:"prune_retain_minutes,omitempty"`
 	// SnapshotEveryMinutes is how often this server gets a snapshot without
-	// a click (#1681): the shorter of its schedule, where the schedule can
-	// run in this process, and the daemon-wide --baseline-refresh-interval,
-	// where that loop covers this server (it refreshes every server with a
-	// local folder). 0 = nothing takes snapshots on its own. The row's "how
-	// far back" line multiplies the count by it: the schedule alone would
-	// promise days where an hourly refresh leaves hours.
+	// a click (#1681): its schedule (with the full copies off its grid),
+	// where the schedule can run in this process, and the daemon-wide
+	// --baseline-refresh-interval, where that loop covers this server (every
+	// server with a local folder), their rates ADDED since both write into
+	// the folder. 0 = nothing takes snapshots on its own. The row's "how far
+	// back" line multiplies the count by it: the schedule alone would promise
+	// days where an hourly refresh leaves hours.
 	SnapshotEveryMinutes int `json:"snapshot_every_minutes,omitempty"`
 }
 
@@ -291,7 +293,7 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	dto.KeepNewest = e.LocalKeepNewest
 	dto.PruneLoop = s.localPruneLoop
 	dto.KeepBlocked = LocalKeepBlocked(s.cm.reg.List(), e, s.cm.defaultBaselineDir)
-	dto.KeepHeld = e.LocalKeepHeld
+	dto.KeepHeld = heldNow(e)
 	if r := s.localRetentionOf(e.ID); r != nil {
 		dto.KeepInForce = r.KeepNewest
 		dto.PruneRetainMinutes = s.pruneRetainMinutes()
@@ -333,20 +335,20 @@ func (s *Server) pruneRetainMinutes() int {
 	return int(d.Minutes())
 }
 
-// snapshotEveryMinutes is SnapshotEveryMinutes for e: the shorter of the two
-// loops that take snapshots on their own, each only where it runs for e.
+// snapshotEveryMinutes is SnapshotEveryMinutes for e. The two loops write
+// into the same folder on their own timers and neither skips for the other,
+// so their RATES add: the result is 30 days over the snapshots both take in
+// 30 days, rounded down (a shorter interval can only shorten the reach the
+// page states). The schedule counts its full copies off the regular grid too
+// (BackupsPer30Days). Each loop counts only where it runs for e.
 func (s *Server) snapshotEveryMinutes(e ServerEntry) int {
-	every := 0
-	shorter := func(m int) {
-		if m > 0 && (every == 0 || m < every) {
-			every = m
-		}
-	}
+	const month = 30 * 24 * time.Hour
+	var per30 int64
 	// The schedule: stored, runnable here (the same IO-free check the row's
 	// refusal uses), and this process runs schedules at all.
 	if sc := e.BackupSchedule; sc != nil && s.backupSchedules != nil && CheckBackupSchedule(e, *sc, s.scheduleGates()) == nil {
 		if p, err := sc.Parse(); err == nil {
-			shorter(int(p.Every.Minutes()))
+			per30 += p.BackupsPer30Days()
 		}
 	}
 	// The refresh loop: set at startup (it runs whenever the flag is set, or
@@ -354,10 +356,13 @@ func (s *Server) snapshotEveryMinutes(e ServerEntry) int {
 	// and a local folder (consoleapp baselineRefreshTargets).
 	if raw := s.backupSettingsDefaults.RefreshEvery; raw != "" && e.DSN != "" && e.BaselineDir != "" {
 		if d, err := cliutil.ParseInterval(raw); err == nil && d > 0 {
-			shorter(max(1, int(d.Minutes())))
+			per30 += int64(month / d)
 		}
 	}
-	return every
+	if per30 <= 0 {
+		return 0
+	}
+	return max(1, int(month.Minutes())/int(per30))
 }
 
 // backupSettingsUpdateRequest is the PUT body. Pointer semantics: an omitted

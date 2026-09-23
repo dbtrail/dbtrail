@@ -5480,7 +5480,7 @@ function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
 //             local_retention.keep_newest); a different number means the
 //             typed one is not saved or not applied yet, and the line says so
 //   every     how often snapshots are taken on their own, in minutes: the
-//             shorter of the schedule and the refresh loop, from the server
+//             schedule and the refresh loop together, from the server
 //             (snapshot_every_minutes); 0 = nothing takes them on its own
 //   retain    the age retention in minutes (0 = none)
 //

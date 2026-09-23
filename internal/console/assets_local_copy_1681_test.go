@@ -83,8 +83,8 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   // How far back the count reaches, from the real schedule fields the
   // settings API sends (#1681), with the count in force as the listing has it.
   const inForce = Object.assign({}, fresh, { keep_in_force: 3 });
-  // snapshot_every_minutes is the server's answer (the shorter of the
-  // schedule and the refresh loop, where each runs); the page never works
+  // snapshot_every_minutes is the server's answer (the schedule and the
+  // refresh loop together, where each runs); the page never works
   // it out from the schedule fields, which reachScheduleOnly proves.
   await step("reach5m", Object.assign({}, inForce, { snapshot_every_minutes: 5 }), null);
   await step("reachHourly", Object.assign({}, inForce, { snapshot_every_minutes: 60 }), null);

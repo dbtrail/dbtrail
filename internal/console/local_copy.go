@@ -175,7 +175,7 @@ func validLocalKeepNewest(n int) error {
 // newer copy of a table would count as the newest copy of the other's.
 // Folders are compared after resolving symlinks, so a second spelling of the
 // same folder is still the same folder. A folder that USED to be shared and
-// still holds the other server's snapshots (LocalKeepHeld) is never pruned
+// still holds the other server's snapshots (heldNow) is never pruned
 // either: the reason above outlives the sharing.
 func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int {
 	users := map[string]int{}
@@ -192,7 +192,7 @@ func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int 
 	}
 	out := map[string]int{}
 	for _, e := range entries {
-		if e.BaselineDir == "" || e.BaselineS3 != "" || e.LocalKeepNewest <= 0 || e.LocalKeepHeld {
+		if e.BaselineDir == "" || e.BaselineS3 != "" || e.LocalKeepNewest <= 0 || heldNow(e) {
 			continue
 		}
 		dir := canonicalDir(e.BaselineDir)
@@ -212,7 +212,7 @@ func LocalKeepBlocked(entries []ServerEntry, e ServerEntry, excluded ...string) 
 	if e.BaselineDir == "" {
 		return false
 	}
-	if e.LocalKeepHeld {
+	if heldNow(e) {
 		return true
 	}
 	dir := canonicalDir(e.BaselineDir)
@@ -254,9 +254,15 @@ func markHeldFolders(before, after []ServerEntry) {
 		}
 		d := canonicalDir(after[i].BaselineDir)
 		if was[d] > 1 && now[d] == 1 {
-			after[i].LocalKeepHeld = true
+			after[i].LocalKeepHeldDir = after[i].BaselineDir
 		}
 	}
+}
+
+// heldNow reports whether e's current folder is the one the registry marked
+// held (LocalKeepHeldDir).
+func heldNow(e ServerEntry) bool {
+	return e.BaselineDir != "" && e.LocalKeepHeldDir != "" && canonicalDir(e.BaselineDir) == canonicalDir(e.LocalKeepHeldDir)
 }
 
 // canonicalDir is the folder a path names, symlinks resolved; a path that

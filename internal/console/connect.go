@@ -101,7 +101,9 @@ func (s *Server) startEntry(ctx context.Context, e ServerEntry) error {
 func (s *Server) startNewEntry(ctx context.Context, e ServerEntry) startOutcome {
 	if err := s.startEntry(ctx, e); err != nil {
 		out := startOutcome{Err: err, Status: s.monitorCtrl.Status(e.ID)}
-		if delErr := s.cm.reg.Delete(e.ID); delErr != nil {
+		// UndoAdd, not Delete: the entry never took a snapshot, so the
+		// folder it pointed at must not be marked held (#1681).
+		if delErr := s.cm.reg.UndoAdd(e.ID); delErr != nil {
 			out.Kept = true
 			slog.Error("connect: capture did not start and the server could not be removed again",
 				"server", e.Name, "id", e.ID, "start_error", err.Error(), "remove_error", delErr.Error())

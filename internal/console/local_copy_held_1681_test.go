@@ -109,7 +109,7 @@ func TestLocalKeepHeld_theOwnerMovingAwayLeavesTheOtherUnpruned(t *testing.T) {
 	if n := LocalKeepTargets(srv.cm.reg.List())[canonicalDir(other)]; n != 2 {
 		t.Errorf("b's new folder is pruned to %d, want 2", n)
 	}
-	if e, _ := srv.cm.reg.Get(b); e.LocalKeepHeld {
+	if e, _ := srv.cm.reg.Get(b); heldNow(e) {
 		t.Error("moving to a new folder did not clear the hold")
 	}
 }
@@ -123,22 +123,66 @@ func TestLocalKeepHeld_callersCannotClearOrSetIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	e, _ := srv.cm.reg.Get(a)
-	if !e.LocalKeepHeld {
+	if !heldNow(e) {
 		t.Fatal("test premise: a is not held")
 	}
-	e.LocalKeepHeld = false
+	e.LocalKeepHeldDir = ""
 	e.LocalKeepNewest = 5
 	if err := srv.cm.reg.Update(e); err != nil {
 		t.Fatal(err)
 	}
-	if e2, _ := srv.cm.reg.Get(a); !e2.LocalKeepHeld {
+	if e2, _ := srv.cm.reg.Get(a); !heldNow(e2) {
 		t.Error("an edit that kept the folder cleared the hold")
 	}
-	added, err := srv.cm.reg.Add(ServerEntry{Name: "n", DSN: "u:p@tcp(h:3306)/n", LocalKeepHeld: true})
+	added, err := srv.cm.reg.Add(ServerEntry{Name: "n", DSN: "u:p@tcp(h:3306)/n", LocalKeepHeldDir: "/somewhere"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added.LocalKeepHeld {
+	if added.LocalKeepHeldDir != "" {
 		t.Error("a new entry started held")
 	}
+}
+
+// Undoing a create that failed half way is not a folder "stopping being
+// shared": the new server never wrote a snapshot, so it must not hold the
+// folder of the server it pointed at.
+func TestLocalKeepHeld_undoingAFailedCreateHoldsNothing(t *testing.T) {
+	srv, _ := newLocalCopyServer(t)
+	a, err := srv.cm.reg.Add(ServerEntry{Name: "a", DSN: "u:p@tcp(h:3306)/a", BaselineDir: t.TempDir(), LocalKeepNewest: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := srv.cm.reg.Add(ServerEntry{Name: "b", DSN: "u:p@tcp(h:3306)/b", BaselineDir: a.BaselineDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.cm.reg.UndoAdd(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := srv.cm.reg.Get(a.ID); heldNow(e) {
+		t.Fatal("undoing a failed create held the other server's folder")
+	}
+	if _, ok := srv.cm.reg.Get(b.ID); ok {
+		t.Fatal("the undone entry is still listed")
+	}
+}
+
+// Answering no and then yes on the same folder, or moving away and back,
+// does not forget the hold: the other server's snapshots are still there.
+func TestLocalKeepHeld_noThenYesOnTheSameFolderStaysHeld(t *testing.T) {
+	srv, _ := newLocalCopyServer(t)
+	a, b, dir := sharedPair(t, srv)
+	if err := srv.cm.reg.Delete(b); err != nil {
+		t.Fatal(err)
+	}
+	if rec := putBackupSettings(t, srv, a, `{"local_copy":false,"baseline_s3":"s3://bucket/a/"}`); rec.Code != http.StatusOK {
+		t.Fatalf("a answers no: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := putBackupSettings(t, srv, a, `{"local_copy":true,"baseline_dir":"`+dir+`","baseline_s3":"","keep_newest":0}`); rec.Code != http.StatusOK {
+		t.Fatalf("a answers yes again: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := putBackupSettings(t, srv, a, `{"keep_newest":2}`); rec.Code != http.StatusOK {
+		t.Fatalf("a sets a count: %d %s", rec.Code, rec.Body.String())
+	}
+	wantHeld(t, srv, a, dir)
 }
