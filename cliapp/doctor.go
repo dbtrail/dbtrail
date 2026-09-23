@@ -33,7 +33,9 @@ Run this before 'bintrail up', 'bintrail stream', 'bintrail index', or
 missing GRANTs, missing log_bin) before they cost you a debugging cycle.
 
 Exit code is 0 only when every required check passes. Warnings do not affect
-the exit code so 'doctor' is safe to run in CI as a smoke test.
+the exit code so 'doctor' is safe to run in CI as a smoke test. Optional
+improvements (marked "~ ... [optional]", "optional": true in JSON, still
+status "warn") are counted apart from warnings and never affect it either.
 
 Examples:
 

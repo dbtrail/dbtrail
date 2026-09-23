@@ -19,6 +19,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/serverid"
+	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // CheckStatus is the outcome of a single preflight check. Constrained to the
@@ -47,6 +48,13 @@ type CheckResult struct {
 	Kind       string   `json:"kind,omitempty"`
 	Subjects   []string `json:"subjects,omitempty"`
 	Statements []string `json:"statements,omitempty"`
+	// Optional marks a WARN about something capture works fine without (the
+	// SQL statement behind each change, noticing a column rename). The status
+	// stays "warn" so scripts that read it keep working, but the report
+	// counts it under Optional instead of Warnings, and screens fold it under
+	// "Optional improvements". It never hides a FAIL: add counts a failure as
+	// a failure whatever this says.
+	Optional bool `json:"optional,omitempty"`
 }
 
 type Report struct {
@@ -55,6 +63,10 @@ type Report struct {
 	Failed   int           `json:"failed"`
 	Warnings int           `json:"warnings"`
 	Skipped  int           `json:"skipped"`
+	// Optional counts the optional improvements: WARNs marked Optional, which
+	// are not in Warnings. Passed+Failed+Warnings+Skipped+Optional is the
+	// number of checks with a known status.
+	Optional int `json:"optional"`
 
 	// ReadyFooter / FixFooter customize the trailing one-line guidance in the TEXT
 	// output (the all-passed line and the has-failures line respectively). They are
@@ -470,7 +482,7 @@ func checkBinlogRetention(ctx context.Context, db *sql.DB) CheckResult {
 			Detail: "could not read mysql.rds_configuration ('binlog retention hours'): " + probeErr.Error() +
 				" — if this is RDS/Aurora, the engine variable below can overstate the real retention",
 			Remediation: "On RDS/Aurora, grant the check user read access so bintrail can verify the managed retention:\n\n" +
-				"  GRANT SELECT ON mysql.rds_configuration TO '<user>'@'%';",
+				"  GRANT SELECT ON mysql.rds_configuration TO " + currentAccount(ctx, db) + ";",
 		}
 	} else if isRDS {
 		return rdsBinlogRetentionVerdict("Binlog retention >= 2 days", raw)
@@ -538,6 +550,42 @@ func checkBinlogRetention(ctx context.Context, db *sql.DB) CheckResult {
 		Status: StatusPass,
 		Detail: fmt.Sprintf("%dh", seconds/3600),
 	}
+}
+
+// placeholderAccount is what a GRANT names when the real account is unknown.
+const placeholderAccount = "'<user>'@'%'"
+
+// currentAccount is the account this connection authenticated as, from
+// CURRENT_USER() on the same pool, ready to paste into a GRANT. It falls back
+// to placeholderAccount when the query fails or grantAccount cannot name the
+// answer safely: a fix with a placeholder is still a fix, a wrong account is
+// not.
+func currentAccount(ctx context.Context, db *sql.DB) string {
+	var cu string
+	if err := db.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&cu); err != nil {
+		slog.Debug("doctor: CURRENT_USER() failed; the GRANT keeps a placeholder", "error", err)
+		return placeholderAccount
+	}
+	if a := grantAccount(cu); a != "" {
+		return a
+	}
+	return placeholderAccount
+}
+
+// grantAccount turns CURRENT_USER()'s user@host into `user`@`host`. The split
+// is at the LAST @: a host never holds one, a user name may. Each part is
+// quoted with status.QuoteIdentifier, the quoting doctor already uses for the
+// table statements (backquotes, a backquote inside doubled); MySQL accepts
+// backquoted account parts, and unlike single quotes their escaping does not
+// depend on NO_BACKSLASH_ESCAPES. "" when there is nothing safe to name: no
+// @, an empty user (the anonymous account) or host, or a line break, which
+// would split the statement across the fix's code block.
+func grantAccount(currentUser string) string {
+	i := strings.LastIndexByte(currentUser, '@')
+	if i <= 0 || i == len(currentUser)-1 || strings.ContainsAny(currentUser, "\r\n") {
+		return ""
+	}
+	return status.QuoteIdentifier(currentUser[:i]) + "@" + status.QuoteIdentifier(currentUser[i+1:])
 }
 
 // rdsBinlogRetentionHours reads the RDS/Aurora-managed binlog retention from
@@ -695,7 +743,7 @@ func checkSyncBinlog(ctx context.Context, db *sql.DB) CheckResult {
 // statement alongside each row event (#699): MySQL's
 // binlog_rows_query_log_events or MariaDB's binlog_annotate_row_events. The
 // capture is OPTIONAL — it feeds the query_text/query_hash forensics columns —
-// so this check never FAILs: ON → PASS, OFF → WARN with an enable suggestion
+// so this check never FAILs: ON → PASS, OFF → WARN marked Optional with an enable suggestion
 // (validate, never set), variable absent on both probes → SKIP. Both probes use
 // SELECT @@var, which errors (MySQL 1193) rather than returning rows for a
 // variable the flavor doesn't have — the checkBinlogRetention fallback pattern.
@@ -717,19 +765,23 @@ func checkStatementCapture(ctx context.Context, db *sql.DB) CheckResult {
 			return CheckResult{Name: name, Status: StatusPass, Detail: "binlog_rows_query_log_events=ON"}
 		}
 		return CheckResult{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "binlog_rows_query_log_events=OFF — events index without the originating SQL statement (query_text stays NULL)",
-			Remediation: "Optional: log the original statement with each row event, so each change can show the SQL that made it (dynamic, no restart; costs binlog bytes per statement):\n\n" +
+			Name:     name,
+			Status:   StatusWarn,
+			Optional: true,
+			Detail:   "binlog_rows_query_log_events=OFF",
+			// Not retroactive (#1437): the last sentence is what stops a
+			// search by statement over a window that can never match.
+			Remediation: "Show the SQL statement behind each change. To turn it on:\n\n" +
 				"  SET PERSIST binlog_rows_query_log_events = ON;\n\n" +
-				"Not retroactive: only events written AFTER the change carry the statement, so a search by statement finds nothing before it.",
+				statementCaptureNotRetroactive,
 		}
 	}
 	if !isUnknownVar(err) {
 		return CheckResult{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "could not read binlog_rows_query_log_events: " + err.Error(),
+			Name:     name,
+			Status:   StatusWarn,
+			Optional: true,
+			Detail:   "could not read binlog_rows_query_log_events: " + err.Error(),
 		}
 	}
 
@@ -746,20 +798,23 @@ func checkStatementCapture(ctx context.Context, db *sql.DB) CheckResult {
 			}
 		}
 		return CheckResult{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "binlog_annotate_row_events=OFF — events index without the originating SQL statement (query_text stays NULL)",
-			Remediation: "Optional: log the original statement with each row event, so each change can show the SQL that made it (capture also needs the source type set to MariaDB: `--source-flavor mariadb` on the command line):\n\n" +
+			Name:     name,
+			Status:   StatusWarn,
+			Optional: true,
+			Detail:   "binlog_annotate_row_events=OFF",
+			Remediation: "Show the SQL statement behind each change. To turn it on:\n\n" +
 				"  SET GLOBAL binlog_annotate_row_events = ON;\n\n" +
-				"Persist it in my.cnf ([mysqld] binlog_annotate_row_events=ON) to survive restarts. " +
-				"Not retroactive: only events written AFTER the change carry the statement.",
+				"To keep it after a restart, add binlog_annotate_row_events=ON under [mysqld] in my.cnf. " +
+				"The server type must be MariaDB (--source-flavor mariadb on the command line). " +
+				statementCaptureNotRetroactive,
 		}
 	}
 	if !isUnknownVar(err) {
 		return CheckResult{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "could not read binlog_annotate_row_events: " + err.Error(),
+			Name:     name,
+			Status:   StatusWarn,
+			Optional: true,
+			Detail:   "could not read binlog_annotate_row_events: " + err.Error(),
 		}
 	}
 
@@ -777,7 +832,7 @@ func checkStatementCapture(ctx context.Context, db *sql.DB) CheckResult {
 // same-column-count drift (a rename, or a DROP+ADD in one ALTER) that the
 // count guard cannot see and that would otherwise index values under the
 // wrong column names. The setting is OPTIONAL, so this check never FAILs:
-// FULL → PASS, MINIMAL → WARN with an enable suggestion (validate, never
+// FULL → PASS, MINIMAL → WARN marked Optional with an enable suggestion (validate, never
 // set), variable absent → SKIP.
 func checkRowMetadata(ctx context.Context, db *sql.DB) CheckResult {
 	const name = "Schema-drift detection (binlog_row_metadata)"
@@ -797,25 +852,31 @@ func checkRowMetadata(ctx context.Context, db *sql.DB) CheckResult {
 			}
 		}
 		return CheckResult{
-			Name:   name,
-			Status: StatusWarn,
-			Detail: "could not read binlog_row_metadata: " + err.Error(),
+			Name:     name,
+			Status:   StatusWarn,
+			Optional: true,
+			Detail:   "could not read binlog_row_metadata: " + err.Error(),
 		}
 	}
 	if strings.EqualFold(val, "FULL") {
 		return CheckResult{Name: name, Status: StatusPass, Detail: "binlog_row_metadata=FULL"}
 	}
 	return CheckResult{
-		Name:   name,
-		Status: StatusWarn,
-		Detail: "binlog_row_metadata=" + val + " — a stale schema snapshot cannot be detected at capture time (a same-column-count change like a rename would index values under the wrong column names)",
-		Remediation: "Optional: embed column names in row-event metadata so bintrail can verify the snapshot against every event (dynamic, no restart; adds a handful of bytes per column to each TABLE_MAP event):\n\n" +
-			"  -- MySQL 8.0+:\n" +
+		Name:     name,
+		Status:   StatusWarn,
+		Optional: true,
+		Detail:   "binlog_row_metadata=" + val,
+		Remediation: "Notice if someone renames a column. To turn it on:\n\n" +
 			"  SET PERSIST binlog_row_metadata = 'FULL';\n\n" +
-			"  -- MariaDB 10.5+ (no SET PERSIST; persist it in my.cnf under [mysqld]):\n" +
+			"On MariaDB 10.5+, which has no SET PERSIST, run this and add it under [mysqld] in my.cnf:\n\n" +
 			"  SET GLOBAL binlog_row_metadata = 'FULL';",
 	}
 }
+
+// statementCaptureNotRetroactive closes both statement-capture fixes: turning
+// it on does not reach back, so a search by statement over earlier changes
+// finds nothing (#1437).
+const statementCaptureNotRetroactive = "Only changes made after this carry it."
 
 func checkReplicationGrants(ctx context.Context, db *sql.DB) CheckResult {
 	rows, err := db.QueryContext(ctx, "SHOW GRANTS")
@@ -1457,7 +1518,11 @@ func (r *Report) add(c CheckResult) {
 	case StatusFail:
 		r.Failed++
 	case StatusWarn:
-		r.Warnings++
+		if c.Optional {
+			r.Optional++
+		} else {
+			r.Warnings++
+		}
 	case StatusSkip:
 		r.Skipped++
 	default:
@@ -1490,10 +1555,14 @@ func (r *Report) Write(w io.Writer, format string) error {
 		default:
 			mark = "?"
 		}
+		name := c.Name
+		if c.Status == StatusWarn && c.Optional {
+			mark, name = "~", name+" [optional]"
+		}
 		if c.Detail != "" {
-			fmt.Fprintf(w, "%s %s (%s)\n", mark, c.Name, c.Detail)
+			fmt.Fprintf(w, "%s %s (%s)\n", mark, name, c.Detail)
 		} else {
-			fmt.Fprintf(w, "%s %s\n", mark, c.Name)
+			fmt.Fprintf(w, "%s %s\n", mark, name)
 		}
 		if c.Remediation != "" {
 			for _, line := range strings.Split(c.Remediation, "\n") {
@@ -1502,8 +1571,14 @@ func (r *Report) Write(w io.Writer, format string) error {
 		}
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "Passed: %d  Failed: %d  Warnings: %d  Skipped: %d\n",
+	// The optional count is appended only when there is one, so a report
+	// without optional items prints the summary line it always printed.
+	summary := fmt.Sprintf("Passed: %d  Failed: %d  Warnings: %d  Skipped: %d",
 		r.Passed, r.Failed, r.Warnings, r.Skipped)
+	if r.Optional > 0 {
+		summary += fmt.Sprintf("  Optional: %d", r.Optional)
+	}
+	fmt.Fprintln(w, summary)
 	ready := r.ReadyFooter
 	if ready == "" {
 		ready = "Ready to stream. Run `bintrail up --source-dsn ... --index-dsn ...` to start."
@@ -1521,7 +1596,8 @@ func (r *Report) Write(w io.Writer, format string) error {
 }
 
 // Err returns a non-nil error when any required check failed, so the CLI exits
-// non-zero for CI/scripting use cases. Warnings do not cause failure.
+// non-zero for CI/scripting use cases. Warnings and optional improvements do
+// not cause failure.
 func (r *Report) Err() error {
 	return r.ErrExcluding()
 }

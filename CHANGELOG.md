@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and its + Add server opens the add form directly.
 
 ### Changed
+- **Optional improvements are no longer warnings.** On a stock MySQL, Connect
+  said "Capture started, with 2 warnings" over two settings capture works fine
+  without: logging the SQL statement behind each change, and noticing a column
+  rename. `doctor` now marks those two findings optional: the status stays
+  `warn` for scripts, JSON adds `"optional": true` on the check and an
+  `optional` count on the report, and they are counted apart from `warnings`
+  (text output marks them `~ ... [optional]`; exit codes never change). The
+  console folds them under a closed "Optional improvements" section and a start
+  with only these reads "Capture started". Each says in one plain line what it
+  adds, then the statement to copy.
+- **The RDS binlog retention fix names your account.** The GRANT for reading
+  `mysql.rds_configuration` used a `'<user>'@'%'` placeholder; it now names the
+  account the check connected as, from `CURRENT_USER()`, quoted with
+  backquotes. The placeholder stays only when that query fails.
 - **Listing a server's snapshots needs `servers:read`, not `settings:read`.**
   Whoever may create a snapshot has to be able to see the one they created,
   and asking what copies of a server exist is a read about that server rather

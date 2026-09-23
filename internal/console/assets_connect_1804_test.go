@@ -18,6 +18,13 @@ import (
 // Connect screen shows is checked against the same list the walk uses.
 func runNodeConnect(t *testing.T, script string) []byte {
 	t.Helper()
+	return runNodeConnectArgs(t, script)
+}
+
+// runNodeConnectArgs is runNodeConnect with extra arguments after the two
+// paths (argv[4] onward), for a script fed data the test produced.
+func runNodeConnectArgs(t *testing.T, script string, extra ...string) []byte {
+	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		if os.Getenv(requireNodeEnv) != "" {
@@ -37,7 +44,7 @@ func runNodeConnect(t *testing.T, script string) []byte {
 	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := exec.Command(node, path, appJS, board).CombinedOutput()
+	raw, err := exec.Command(node, append([]string{path, appJS, board}, extra...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, raw)
 	}
@@ -256,6 +263,17 @@ const flush = () => new Promise((r) => setImmediate(r));
   f.fire("submit"); await flush(); await flush(); await flush();
   out.startedClosed = !form();
   out.toasts = toasts.slice();
+  // A start whose only findings are optional improvements opens the notice
+  // that folds them (a toast would hide them), and says nothing of warnings.
+  setCaps({ monitor: true });
+  vm.runInContext("showConnectForm(null)", ctx);
+  f = form();
+  f.elements.source_host.value = "db7"; f.elements.source_password.value = "Pw-7";
+  ctx.__checkAnswer = { ok: true, started: true, name: "db7", doctor: { warnings: 0, optional: 1,
+    checks: [{ name: "Statement capture (query_text)", status: "warn", optional: true, remediation: "Show the SQL statement behind each change. To turn it on:\n\n  SET PERSIST binlog_rows_query_log_events = ON;" }] } };
+  const noticesBefore = notices.length, toastsBefore = toasts.length;
+  f.fire("submit"); for (let i = 0; i < 4; i++) await flush();
+  out.optionalOnly = { notices: notices.slice(noticesBefore), toasts: toasts.slice(toastsBefore) };
   // Typing while a check that ends in "started" runs: the edit waits for the
   // check, and once capture has started it must never be saved. Saved, it
   // rewrites the draft the server just discarded, the next page load reopens
@@ -364,6 +382,7 @@ func TestConnectScreenWiring(t *testing.T) {
 		CheckBody                          map[string]any
 		StartedClosed                      bool
 		Toasts                             []string
+		OptionalOnly                       struct{ Notices, Toasts []string }
 		Restored                           struct {
 			Pw, User, Name, Placeholder, Focused, Block string
 			PwAgainShown                                bool
@@ -443,6 +462,10 @@ func TestConnectScreenWiring(t *testing.T) {
 	}
 	if !out.StartedClosed || len(out.Toasts) == 0 || !strings.Contains(out.Toasts[len(out.Toasts)-1], "Capture started for db1") {
 		t.Errorf("a started check: closed %v, toasts %v", out.StartedClosed, out.Toasts)
+	}
+
+	if o := out.OptionalOnly; len(o.Notices) != 1 || o.Notices[0] != "Capture started" || len(o.Toasts) != 0 {
+		t.Errorf("a start with only optional improvements: notices %v toasts %v; want the Capture started notice that folds them", o.Notices, o.Toasts)
 	}
 
 	if len(out.PutsAfterStarted) != 0 {

@@ -337,6 +337,7 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 		Failed:   r.Failed,
 		Warnings: r.Warnings,
 		Skipped:  r.Skipped,
+		Optional: r.Optional,
 		Checks:   make([]console.DoctorCheck, len(r.Checks)),
 	}
 	for i, c := range r.Checks {
@@ -348,6 +349,7 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 			Kind:        c.Kind,
 			Subjects:    c.Subjects,
 			Statements:  c.Statements,
+			Optional:    c.Optional,
 		}
 		// Per-check trace so `--log-level debug` shows the full preflight from
 		// the host, not just the pass/fail tally returned to the browser.
