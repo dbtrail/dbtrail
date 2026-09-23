@@ -3,10 +3,10 @@ package baseline
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,11 +40,18 @@ var readDir = os.ReadDir
 
 // PruneOptions configures a local baseline-snapshot prune (#616).
 //
-// Pruning is a deliberate no-op (logged loudly) unless S3URL is set: a local
-// snapshot with no durable S3 counterpart is the ONLY copy, and the prune never
-// deletes the only copy. This mirrors rotation's archive invariant exactly —
-// `PruneLocalAfterUpload && ArchiveS3 != ""` (internal/rotation/rotation.go) — a
-// local-only baseline IS the durable copy and is never reclaimed.
+// Two modes, chosen by whether the snapshots have an external destination:
+//
+//   - S3URL set: a snapshot is reclaimed only once its copy is confirmed at
+//     the destination and it is older than Retain. This mirrors rotation's
+//     archive invariant exactly — `PruneLocalAfterUpload && ArchiveS3 != ""`
+//     (internal/rotation/rotation.go). KeepNewest is ignored.
+//   - S3URL empty, KeepNewest > 0 (#1681): the local snapshots ARE the only
+//     copies, so the invariant is "never leave fewer than KeepNewest": the
+//     newest KeepNewest complete snapshots are always kept and older ones are
+//     reclaimed. Retain is optional here and, when set, only keeps more.
+//
+// S3URL empty and KeepNewest zero is a deliberate no-op, logged loudly.
 type PruneOptions struct {
 	// LocalDir is the baseline output root pruned, laid out as
 	// <LocalDir>/<timestamp>/<schema>/<table>.parquet. Required.
@@ -55,8 +62,17 @@ type PruneOptions struct {
 	// S3Region is the optional AWS region for the durability probe; empty lets
 	// the SDK resolve it from the ambient chain (AWS_REGION / ~/.aws / IAM role).
 	S3Region string
-	// Retain prunes COMPLETE snapshots older than this. Required (> 0).
+	// Retain prunes COMPLETE snapshots older than this. Required (> 0) when
+	// S3URL is set; optional with KeepNewest, where a snapshot younger than
+	// Retain is kept even outside the newest KeepNewest.
 	Retain time.Duration
+	// KeepNewest is the local-only retention (#1681): with no S3URL, keep the
+	// newest KeepNewest complete snapshots and reclaim the rest. Only
+	// snapshots that are complete, readable, hold at least one table and are
+	// dated at or before Now take one of the N places; everything else is
+	// kept by its own rule and never displaces a real copy. 0 = no local-only
+	// pruning (the pre-#1681 behavior).
+	KeepNewest int
 	// Now is an injectable clock for tests; the zero value means time.Now().UTC().
 	Now time.Time
 	// DryRun logs what would be pruned without deleting anything. NOTE: the zero
@@ -68,15 +84,27 @@ type PruneOptions struct {
 //
 // The Kept* counters are FIRST-MATCH reason codes, not independent set
 // memberships: a snapshot that is both a keeper and recent counts once, as
-// KeptKeeper (the order is incomplete > unreadable > keeper > recent
+// KeptKeeper (the order is incomplete > unreadable > keeper > newest > recent
 // > not-durable). Together with len(Pruned) they partition the enumerated
 // snapshot set — every snapshot lands in exactly one bucket.
 type PruneResult struct {
 	// Pruned holds the snapshot directory names actually removed (or, under
-	// DryRun, that would be removed).
+	// DryRun, that would be removed). A snapshot counts as removed once it has
+	// been renamed aside, because from that instant no listing shows it, even
+	// if deleting the renamed tree then fails and is retried next cycle.
 	Pruned []string
-	// ReclaimedBytes is the on-disk size of the pruned snapshots.
+	// ReclaimedBytes is the disk the removals freed: files with no other link.
+	// A carried-forward file is a hard link shared with a newer snapshot, and
+	// deleting one of its names frees nothing, so it is not counted. Under
+	// DryRun the count is a lower bound (a file shared only among snapshots
+	// that would all be removed is not counted).
 	ReclaimedBytes int64
+	// KeptNewest counts snapshots retained because they are among the newest
+	// KeepNewest (local-only mode) and not already kept as a keeper.
+	KeptNewest int
+	// Busy reports that another prune held this directory's lock, so this one
+	// did nothing. Not an error: the other prune is doing the same job.
+	Busy bool
 	// KeptKeeper counts snapshots retained because they are the newest snapshot
 	// containing some table — reconstruct.FindBaseline's per-table target.
 	KeptKeeper int
@@ -135,16 +163,28 @@ func PruneLocal(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 	if opts.LocalDir == "" {
 		return PruneResult{}, fmt.Errorf("baseline prune: LocalDir is required")
 	}
-	if opts.Retain <= 0 {
-		return PruneResult{}, fmt.Errorf("baseline prune: Retain must be positive")
+	if opts.KeepNewest < 0 {
+		return PruneResult{}, fmt.Errorf("baseline prune: KeepNewest must not be negative")
 	}
 	if opts.S3URL == "" {
-		// No durable destination → every local snapshot is the only copy. Refuse,
-		// loudly, so a retention setting on a local-only deployment is not a
-		// silent no-op that looks like a bug when the disk keeps filling.
-		slog.Warn("baseline prune: no S3 destination configured; refusing to prune local snapshots (they are the only copy). Upload baselines to S3 to enable retention.",
+		if opts.KeepNewest > 0 {
+			if opts.Retain < 0 {
+				return PruneResult{}, fmt.Errorf("baseline prune: Retain must not be negative")
+			}
+			// Local-only retention (#1681): no durability probe, the floor is
+			// the newest KeepNewest instead.
+			return pruneWithProbe(ctx, opts, nil)
+		}
+		// No durable destination and no count to keep → every local snapshot
+		// is the only copy. Refuse, loudly, so a retention setting on a
+		// local-only deployment is not a silent no-op that looks like a bug
+		// when the disk keeps filling.
+		slog.Warn("baseline prune: no S3 destination configured and no number of local snapshots to keep; refusing to prune local snapshots (they are the only copy).",
 			"dir", opts.LocalDir)
 		return PruneResult{}, nil
+	}
+	if opts.Retain <= 0 {
+		return PruneResult{}, fmt.Errorf("baseline prune: Retain must be positive")
 	}
 
 	bucket, prefix, err := storage.ParseS3URL(opts.S3URL)
@@ -171,12 +211,42 @@ func PruneLocal(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 }
 
 // pruneWithProbe is PruneLocal's IO body with the durability check injected, so
-// the keeper/marker/age invariants are testable without S3.
+// the keeper/marker/age invariants are testable without S3. With no S3URL it
+// is the local-only keep-newest mode (#1681): there is nothing to confirm
+// durable, probe is unused, and the newest opts.KeepNewest snapshots take the
+// probe's place as the floor. The mode is decided by S3URL, never by the
+// probe, so a destination always means "delete only what it confirmed".
 func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) (PruneResult, error) {
 	now := opts.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	localOnly := opts.S3URL == ""
+	if localOnly && opts.KeepNewest <= 0 {
+		// Defensive: no destination and no floor would reclaim every
+		// non-keeper. PruneLocal never builds this; refuse rather than trust it.
+		return PruneResult{}, fmt.Errorf("baseline prune: local-only pruning needs KeepNewest > 0")
+	}
+	if !localOnly && probe == nil {
+		return PruneResult{}, fmt.Errorf("baseline prune: a destination needs a durability probe")
+	}
+
+	// One prune per directory at a time (#1681): the CLI's `baseline prune`
+	// and the daemon's loop can meet on one root, and each decides from its
+	// own listing. A missing directory has nothing to prune and nothing to
+	// lock.
+	if _, err := os.Stat(opts.LocalDir); os.IsNotExist(err) {
+		return PruneResult{}, nil
+	}
+	unlock, busy, err := lockPrune(opts.LocalDir)
+	if err != nil {
+		return PruneResult{}, fmt.Errorf("baseline prune: %w", err)
+	}
+	if busy {
+		slog.Info("baseline prune: another prune is running on this directory; skipping this cycle", "dir", opts.LocalDir)
+		return PruneResult{Busy: true}, nil
+	}
+	defer unlock()
 
 	// Sweep any ".<ts>.pruning" leftovers from a previous crashed cycle first —
 	// they are already invisible to discovery, but they still occupy disk.
@@ -188,6 +258,12 @@ func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) 
 	}
 	keepers := computeKeepers(snaps, now)
 	keepPointerTarget(opts.LocalDir, keepers)
+
+	if localOnly {
+		newest := computeNewestN(snaps, opts.KeepNewest, now)
+		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, baselinePruneMinAge, now)
+		return removePlanned(opts, now, pruneNames, res, "no external destination; keeping the newest "+fmt.Sprint(opts.KeepNewest)), nil
+	}
 
 	// Confirm durability only for snapshots that could actually be pruned —
 	// complete, readable, not a keeper, and already past the retention/min-age
@@ -223,26 +299,96 @@ func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) 
 			"unconfirmed", probeErrors)
 	}
 
+	return removePlanned(opts, now, pruneNames, res, "durable copy in S3"), nil
+}
+
+// removePlanned deletes the planned snapshots, tallies what left the listing,
+// and records the prune beside the snapshots when anything did (#1681). why is
+// the reason each removal is logged under.
+func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res PruneResult, why string) PruneResult {
 	for _, name := range pruneNames {
-		size := dirSize(filepath.Join(opts.LocalDir, name))
+		size := reclaimableSize(filepath.Join(opts.LocalDir, name))
 		if opts.DryRun {
 			slog.Info("baseline prune (dry-run): would remove redundant local snapshot",
-				"snapshot", name, "bytes", size)
+				"snapshot", name, "bytes", size, "reason", why)
 			res.Pruned = append(res.Pruned, name)
 			res.ReclaimedBytes += size
 			continue
 		}
-		if err := removeSnapshot(opts.LocalDir, name); err != nil {
+		staged, err := removeSnapshot(opts.LocalDir, name)
+		if !staged {
 			slog.Warn("baseline prune: could not remove snapshot; it will be retried next cycle",
 				"snapshot", name, "error", err)
 			continue
 		}
-		slog.Info("baseline prune: removed redundant local snapshot (durable copy in S3)",
-			"snapshot", name, "bytes", size)
+		// Renamed aside = gone from every listing, so it counts as removed
+		// even when the delete below it failed: leaving it out would make a
+		// copy vanish from the page with a count that does not include it.
 		res.Pruned = append(res.Pruned, name)
+		if err != nil {
+			slog.Warn("baseline prune: snapshot removed from the listing, but its files could not all be deleted yet; the disk is reclaimed next cycle",
+				"snapshot", name, "error", err)
+			continue
+		}
+		slog.Info("baseline prune: removed redundant local snapshot",
+			"snapshot", name, "bytes", size, "reason", why)
 		res.ReclaimedBytes += size
 	}
-	return res, nil
+	if !opts.DryRun && len(res.Pruned) > 0 {
+		if err := writeLastPrune(opts.LocalDir, LastPrune{At: now, Removed: len(res.Pruned)}); err != nil {
+			// The prune happened; only the record of it failed. Loud, because
+			// that record is what tells the operator why copies are gone.
+			slog.Error("baseline prune: snapshots were removed but the record of it could not be written; the page will not say why they are gone",
+				"dir", opts.LocalDir, "removed", len(res.Pruned), "error", err)
+		}
+	}
+	return res
+}
+
+// planPruneKeepNewest is the local-only decision (#1681): planPrune's order
+// with the newest-N floor in place of the durability check. No IO.
+func planPruneKeepNewest(snaps []localSnapshot, keepers, newest map[string]bool, retain, minAge time.Duration, now time.Time) ([]string, PruneResult) {
+	var prune []string
+	var res PruneResult
+	for _, s := range snaps {
+		switch {
+		case !s.complete:
+			res.KeptIncomplete++
+		case s.unreadable:
+			res.KeptUnreadable++
+		case keepers[s.name]:
+			res.KeptKeeper++
+		case newest[s.name]:
+			// One of the newest N: the only copies there are, never fewer.
+			res.KeptNewest++
+		case now.Sub(s.ts) < minAge || (retain > 0 && now.Sub(s.ts) < retain):
+			res.KeptRecent++
+		default:
+			prune = append(prune, s.name)
+		}
+	}
+	return prune, res
+}
+
+// computeNewestN returns the newest n snapshots that count as copies: complete,
+// readable, holding at least one table, and dated at or before now. The rest
+// are kept (or not) by their own rules; none of them may take a place from a
+// real copy, or "the newest n" would silently mean fewer.
+func computeNewestN(snaps []localSnapshot, n int, now time.Time) map[string]bool {
+	var eligible []localSnapshot
+	for _, s := range snaps {
+		// An unreadable snapshot has no tables listed (listSnapshotTables
+		// returns none when it fails), so the table test excludes it too.
+		if s.complete && len(s.tables) > 0 && !s.ts.After(now) {
+			eligible = append(eligible, s)
+		}
+	}
+	sort.Slice(eligible, func(i, j int) bool { return eligible[i].ts.After(eligible[j].ts) })
+	out := make(map[string]bool, n)
+	for i := 0; i < len(eligible) && i < n; i++ {
+		out[eligible[i].name] = true
+	}
+	return out
 }
 
 // planPrune is the pure prune decision: given the enumerated snapshots, the
@@ -414,21 +560,32 @@ func keepPointerTarget(dir string, keepers map[string]bool) {
 	}
 }
 
+// renameAside and removeAll are os.Rename and os.RemoveAll, indirected only so
+// a test can fail either half of removeSnapshot deterministically (a chmod
+// cannot, under a root-running CI).
+var (
+	renameAside = os.Rename
+	removeAll   = os.RemoveAll
+)
+
 // removeSnapshot deletes a snapshot directory atomically-then-lazily: it renames
 // <dir>/<name> to <dir>/.<name>.pruning (an atomic same-filesystem rename that
 // instantly hides the tree from discovery), then RemoveAll's the staged path. If
 // the rename succeeds but RemoveAll partially fails, the leftover ".pruning" dir
 // is harmless (invisible to readers) and swept next cycle.
-func removeSnapshot(dir, name string) error {
+//
+// staged reports whether the rename happened, which is what decides whether
+// the snapshot left the listing; err may still be set when it did.
+func removeSnapshot(dir, name string) (staged bool, err error) {
 	src := filepath.Join(dir, name)
-	staged := filepath.Join(dir, "."+name+pruningSuffix)
-	if err := os.Rename(src, staged); err != nil {
-		return fmt.Errorf("stage snapshot %q for removal: %w", name, err)
+	stagedPath := filepath.Join(dir, "."+name+pruningSuffix)
+	if err := renameAside(src, stagedPath); err != nil {
+		return false, fmt.Errorf("stage snapshot %q for removal: %w", name, err)
 	}
-	if err := os.RemoveAll(staged); err != nil {
-		return fmt.Errorf("remove staged snapshot %q: %w", staged, err)
+	if err := removeAll(stagedPath); err != nil {
+		return true, fmt.Errorf("remove staged snapshot %q: %w", stagedPath, err)
 	}
-	return nil
+	return true, nil
 }
 
 // sweepPruningLeftovers removes ".<ts>.pruning" staging directories left by a
@@ -445,25 +602,9 @@ func sweepPruningLeftovers(dir string) {
 		n := e.Name()
 		if strings.HasPrefix(n, ".") && strings.HasSuffix(n, pruningSuffix) {
 			p := filepath.Join(dir, n)
-			if err := os.RemoveAll(p); err != nil {
+			if err := removeAll(p); err != nil {
 				slog.Warn("baseline prune: could not sweep leftover staging dir", "path", p, "error", err)
 			}
 		}
 	}
-}
-
-// dirSize sums the sizes of all regular files under dir (best-effort, for the
-// reclaimed-bytes report).
-func dirSize(dir string) int64 {
-	var total int64
-	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		if info, ierr := d.Info(); ierr == nil {
-			total += info.Size()
-		}
-		return nil
-	})
-	return total
 }
