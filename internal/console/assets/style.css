@@ -1506,6 +1506,79 @@ button { font-family: inherit; }
    page, so the scope has to travel with the number. */
 .ov-stat-scope { font-size: 11px; color: var(--ink-4); margin-top: 3px; letter-spacing: 0.02em; }
 
+/* ---- the copy flow (Overview first screen) ----
+   Your MySQL -> binlog -> DBTrail -> every N -> Your bucket -> SQL -> reader,
+   as boxes and arrows in one grid. State lives on the piece that changed;
+   downstream of a break everything is .off (grey, "as of"), never red. The
+   tones reuse the three semantic colours (--insert / --orange-2 / --delete)
+   and nothing else. Under 880 px the grid stacks and the arrows turn. */
+.flow { margin: 4px 0 24px; }
+.flow-grid {
+  display: grid; grid-template-columns: 1.15fr 1fr 1.15fr 1.25fr 1.15fr 0.8fr 1.15fr;
+  gap: 0 6px; align-items: stretch;
+}
+.flow-box {
+  --flow-c: var(--ink-4);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: 14px 16px; box-shadow: var(--panel-shadow); min-width: 0;
+}
+[data-dir="paper"] .flow-box { background: transparent; }
+.flow-box.ok   { --flow-c: var(--insert); }
+.flow-box.warn { --flow-c: var(--orange-2); border-color: var(--ochre); background: var(--ochre-bg); }
+.flow-box.bad  { --flow-c: var(--delete);   border-color: var(--delete);  background: var(--delete-bg); }
+.flow-box.off, .flow-arrow.off { opacity: 0.62; }
+.flow-box-head { display: flex; align-items: center; gap: 8px; font-family: var(--title-font); font-weight: 600; font-size: 15px; color: var(--ink); }
+.flow-state { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2); margin-top: 8px; display: flex; align-items: center; gap: 6px; }
+.flow-box.bad .flow-state, .flow-arrow.bad .flow-state { color: var(--delete); }
+.flow-box.warn .flow-state, .flow-arrow.warn .flow-state { color: var(--orange-2); }
+.flow-sub { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3); margin-top: 4px; overflow-wrap: anywhere; }
+.flow-arrow {
+  --flow-c: var(--ink-4);
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+  padding: 6px 4px 0; min-width: 0; text-align: center;
+}
+.flow-arrow.ok   { --flow-c: var(--insert); }
+.flow-arrow.warn { --flow-c: var(--orange-2); }
+.flow-arrow.bad  { --flow-c: var(--delete); }
+.flow-label { font-family: var(--f-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
+.flow-line { position: relative; width: 100%; height: 12px; margin: 6px 0 8px; }
+.flow-line::before { content: ""; position: absolute; left: 0; right: 10px; top: 5px; height: 2px; background: var(--flow-c); border-radius: 1px; }
+.flow-line::after { content: ""; position: absolute; right: 0; top: 0; border: 6px solid transparent; border-left: 10px solid var(--flow-c); border-right: 0; }
+.flow-val { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.flow-big { font-family: var(--f-display); font-size: 22px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; color: var(--ink); }
+.flow-arrow.bad .flow-big { color: var(--delete); }
+.flow-arrow .flow-state { margin-top: 2px; justify-content: center; }
+.flow-link { font-family: var(--f-mono); font-size: 12.5px; color: var(--accent); text-decoration: none; border-bottom: 1px solid currentColor; }
+.flow-link:hover { color: var(--ink); }
+.health-dot.none { background: var(--ink-4); }
+.health-dot.warn { background: var(--orange-2); }
+.health-dot.bad  { background: var(--delete); }
+.health-dot.off  { background: var(--ink-4); }
+/* the red sibling of .warn-box: a stopped capture or a refused update, with
+   the decision under it. The console had no red box before the flow. */
+.bad-box {
+  font-family: var(--f-mono); font-size: 12.5px; color: var(--delete);
+  background: var(--delete-bg); border: 1px solid var(--delete);
+  border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
+  white-space: pre-wrap;
+}
+.bad-box .warn-line { margin-top: 8px; }
+.bad-box .warn-actions { margin-top: 10px; }
+.flow-card { margin-top: 12px; }
+.flow-card .warn-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.flow-cost { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3); margin-top: 8px; }
+.flow-recipe { margin-top: 8px; }
+.flow-recipe summary { cursor: pointer; }
+.flow-recipe ul { margin: 6px 0 0; padding-left: 18px; }
+.flow-recipe li { margin: 3px 0; color: var(--ink-2); }
+@media (max-width: 880px) {
+  .flow-grid { grid-template-columns: 1fr; gap: 4px 0; }
+  .flow-arrow { padding: 4px 0; }
+  .flow-line { width: 12px; height: 26px; margin: 2px 0; }
+  .flow-line::before { left: 5px; right: auto; top: 0; bottom: 10px; width: 2px; height: auto; }
+  .flow-line::after { left: 0; right: auto; top: auto; bottom: 0; border: 6px solid transparent; border-top: 10px solid var(--flow-c); border-bottom: 0; }
+}
+
 /* Overview loading skeletons (#1352): each card paints its frame immediately
    and shimmers until its own fetch lands, so a slow aggregate reads as work in
    progress instead of a hang. */
