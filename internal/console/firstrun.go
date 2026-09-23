@@ -176,7 +176,7 @@ func blockedBackupStep(in firstRunInput) (FirstRunStep, bool) {
 		}
 	case in.BackupNoLocation:
 		step.Detail = "This server has no backup location of its own, so no backup can be written for it."
-		step.Fix = "Set a Backup dir or Backup S3 for this server on the " + PageSnapshots + " page, under Where and how often, then take the backup with the Create backup button at the top of that page."
+		step.Fix = "On the " + PageSnapshots + " page, set this server's Backup dir or Backup S3 under Where and how often, then press Create backup."
 	default:
 		return FirstRunStep{}, false
 	}
