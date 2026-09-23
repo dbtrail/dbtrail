@@ -317,7 +317,10 @@ type Server struct {
 	// verify runs (see Config.VerifyCtrl).
 	verifyCtrl VerifyController
 	// verifyHistory: the persisted run history, set with verifyCtrl (#1191).
-	verifyHistory   *VerifyHistory
+	verifyHistory *VerifyHistory
+	// drafts holds the one half-filled Connect form (#1803), beside the
+	// server registry. Always non-nil; it is in-memory when the registry is.
+	drafts          *DraftStore
 	baselineRestore BaselineRestorer
 	// backupSchedules: non-nil only on a watch daemon with a baseline
 	// supervisor (see Config.BackupSchedules).
@@ -571,6 +574,12 @@ func New(cfg Config) (*Server, error) {
 		archiveFetcher:          parquetquery.Fetch,
 		capacityProbe:           doctor.ProbeCapacity,
 	}
+	// The saved Connect form lives beside the registry, so it is named from
+	// the registry the server actually USES — s.cm.reg, which newConnManager
+	// has already replaced with an in-memory one when Config.Registry was nil.
+	// Naming it from cfg.Registry instead dereferenced that nil (and did, on
+	// every caller that passes no registry).
+	s.drafts = NewDraftStore(DefaultConnectDraftPath(s.cm.reg.Path()))
 	s.managedTok.initFromDisk(mcpTokenPath, mcpTokFile)
 	s.cm.hideBoot = cfg.HideBoot
 	s.bootCaptureFilter = cfg.BootCaptureFilter
@@ -711,6 +720,12 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/servers", s.handleServersList)
 	api.HandleFunc("POST /api/servers", s.handleServersCreate)
 	api.HandleFunc("POST /api/servers/test", s.handleServersTest)
+	// Connect (#1803): one call that checks the database and starts capturing,
+	// and the half-filled form kept while somebody goes to run the SQL on it.
+	api.HandleFunc("POST /api/servers/check", s.handleServersCheck)
+	api.HandleFunc("GET /api/servers/draft", s.handleConnectDraftGet)
+	api.HandleFunc("PUT /api/servers/draft", s.handleConnectDraftPut)
+	api.HandleFunc("DELETE /api/servers/draft", s.handleConnectDraftDelete)
 	api.HandleFunc("GET /api/servers/{id}", s.handleServersGet)
 	api.HandleFunc("PUT /api/servers/{id}", s.handleServersUpdate)
 	api.HandleFunc("DELETE /api/servers/{id}", s.handleServersDelete)

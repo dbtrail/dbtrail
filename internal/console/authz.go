@@ -36,12 +36,20 @@ type routePerm struct {
 	perm    ext.Permission
 }
 
+// permForDraftRoutes is the tier of the Connect step: the call that checks a
+// database and starts capturing from it, and the saved form it keeps. Both
+// create servers or hold the credentials for one, so both sit with
+// servers:write. Named once because the two must never drift apart: a saved
+// form readable a tier below the server it becomes would hand a read-only
+// session a password.
+const permForDraftRoutes = ext.PermServersWrite
+
 // apiRoutePerms is the authoritative route→permission table, consulted on every
 // policy-carrying /api request. ORDER MATTERS: matching is first-match-wins, so
 // a route with a literal segment where another has a placeholder must be listed
 // FIRST (e.g. POST /api/servers/test before a hypothetical POST /api/servers/{}).
 // TestRouteTableCompleteness pins that every registered /api route appears here;
-// TestRoutePermFirstMatchWins pins the ordering invariant. The /api/ext/ and
+// TestRoutePermReachableAndOrdered pins the ordering invariant. The /api/ext/ and
 // /api/ext-settings/ subtrees are NOT here — they are matched by prefix in
 // permForRoute (their depth is unbounded).
 //
@@ -113,6 +121,15 @@ var apiRoutePerms = []routePerm{
 	// write-free test probe are reads; create/update/delete/monitor are writes.
 	// Literal-segment routes precede the {} ones at the same depth.
 	{"POST", "/api/servers/test", ext.PermServersRead},
+	// Connect (#1803). These three literal-segment routes MUST stay above the
+	// "/api/servers/{}" rows below: matching is first-match-wins at equal
+	// depth, and a placeholder listed first would classify them as reads. The
+	// saved form carries the password the SQL block creates the account with,
+	// so reading it is a write-tier action, not a listing.
+	{"POST", "/api/servers/check", permForDraftRoutes},
+	{"GET", "/api/servers/draft", permForDraftRoutes},
+	{"PUT", "/api/servers/draft", permForDraftRoutes},
+	{"DELETE", "/api/servers/draft", permForDraftRoutes},
 	{"GET", "/api/servers/{}/monitor", ext.PermServersRead},
 	{"GET", "/api/servers/{}/first-run", ext.PermServersRead},
 	{"POST", "/api/servers/{}/monitor/start", ext.PermServersWrite},

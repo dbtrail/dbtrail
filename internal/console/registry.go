@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -731,35 +730,29 @@ func (r *Registry) save() error {
 	if err != nil {
 		return fmt.Errorf("marshal server registry: %w", err)
 	}
-	dir := filepath.Dir(r.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create registry directory %s: %w", dir, err)
-	}
-	tmp, err := os.CreateTemp(dir, ".console-servers-*.yaml")
-	if err != nil {
-		return fmt.Errorf("create temp registry file: %w", err)
-	}
-	defer os.Remove(tmp.Name()) // no-op after a successful rename
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp registry file: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write server registry: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("sync server registry: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp registry file: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), r.path); err != nil {
-		return fmt.Errorf("replace server registry %s: %w", r.path, err)
+	// The write itself is writeFilePrivateAtomic (draft.go): temp file in the
+	// same directory → chmod 0600 → fsync → rename, in a 0700 directory. It was
+	// written here first and moved out when the Connect draft needed exactly
+	// the same discipline for exactly the same reason — both files hold
+	// passwords — so there is one implementation of it, not two that drift.
+	if err := writeFilePrivateAtomic(r.path, data); err != nil {
+		return fmt.Errorf("save server registry: %w", err)
 	}
 	r.syncBucketStores()
 	return nil
+}
+
+// Path returns the registry file's path, or "" for an in-memory registry.
+// Console state files that belong beside it are named from this.
+//
+// Nil-safe: Config.Registry is optional, so a nil *Registry is a real shape in
+// this package, and "no registry" and "an in-memory registry" mean the same
+// thing to every caller of this — nothing on disk to sit beside.
+func (r *Registry) Path() string {
+	if r == nil {
+		return ""
+	}
+	return r.path
 }
 
 // genServerID returns a random 8-byte hex id (16 chars) — stable across
