@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // This file is the server side of the Connect step (#1803): one call that
@@ -59,6 +60,11 @@ type connectCheckResponse struct {
 // text of the error — is what this wrapper exists to avoid.
 var errStartFailed = errors.New("capture did not start")
 
+// rollbackTimeout bounds taking back what a failed start provisioned. It is
+// its own budget, detached from the request (see startNewEntry): generous for
+// one DROP DATABASE, finite so a stuck index server cannot hold it forever.
+const rollbackTimeout = 30 * time.Second
+
 // startOutcome is what startNewEntry did. Started is the only success.
 type startOutcome struct {
 	Started bool
@@ -107,7 +113,14 @@ func (s *Server) startNewEntry(ctx context.Context, e ServerEntry) startOutcome 
 		// per-server database left behind here is owned by nothing, and the
 		// next attempt mints a new id, so it would never be reused either.
 		if d, ok := s.monitorCtrl.(NewEntryDiscarder); ok {
-			if dErr := d.DiscardNew(ctx, e); dErr != nil {
+			// On a context of its own: a reload or a closed tab cancels the
+			// request, which is also what made the start fail after it had
+			// created the database. Run on that same context, the drop failed
+			// too, and the database outlived a server that had left the list.
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+			dErr := d.DiscardNew(rctx, e)
+			cancel()
+			if dErr != nil {
 				out.Kept = true
 				slog.Error("connect: capture did not start and what it provisioned could not be removed",
 					"server", e.Name, "id", e.ID, "error", dErr.Error())

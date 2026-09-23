@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -396,10 +397,15 @@ type discardingCtrl struct {
 	*stubMonitorCtrl
 	discarded  []string
 	discardErr error
+	// What the context handed to DiscardNew looked like when it arrived.
+	discardCtxErr      error
+	discardHadDeadline bool
 }
 
-func (c *discardingCtrl) DiscardNew(_ context.Context, e ServerEntry) error {
+func (c *discardingCtrl) DiscardNew(ctx context.Context, e ServerEntry) error {
 	c.discarded = append(c.discarded, e.ID)
+	c.discardCtxErr = ctx.Err()
+	_, c.discardHadDeadline = ctx.Deadline()
 	return c.discardErr
 }
 
@@ -511,5 +517,32 @@ func TestCheckDraftKeepsATypedName(t *testing.T) {
 	}
 	if d, _, _ := srv.drafts.Load(); d.Name != "orders" {
 		t.Errorf("draft name = %q, want the typed orders", d.Name)
+	}
+}
+
+// A reload or a closed tab cancels the request — and a reload in the middle
+// of Connect is the case the draft exists for. Measured for real, a start
+// cancelled that way fails AFTER it created the per-server database; if the
+// rollback then runs on the same cancelled context it cannot drop it, and the
+// database stays behind a server that has left the list. The rollback runs on
+// a context the request cannot cancel, bounded on its own.
+func TestCheckRollbackOutlivesACancelledRequest(t *testing.T) {
+	srv, ctrl := newDiscardingServer(t)
+	ctrl.startErr = errors.New("failed to create rotation_policy: context canceled")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest("POST", "http://127.0.0.1:8090/api/servers/check", strings.NewReader(checkBody)).WithContext(ctx)
+	req.Host = "127.0.0.1:8090"
+	req.Header.Set("Authorization", "Bearer t")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if len(ctrl.discarded) != 1 {
+		t.Fatalf("DiscardNew was called %d times, want 1 (code=%d body=%s)", len(ctrl.discarded), rec.Code, rec.Body)
+	}
+	if ctrl.discardCtxErr != nil {
+		t.Errorf("the rollback ran on the request's cancelled context (%v), so it could not drop anything", ctrl.discardCtxErr)
+	}
+	if !ctrl.discardHadDeadline {
+		t.Error("the rollback's context has no deadline of its own; a stuck index server would hold it forever")
 	}
 }
