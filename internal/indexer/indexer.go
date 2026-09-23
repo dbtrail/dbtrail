@@ -856,6 +856,14 @@ func EnsureSchema(db *sql.DB) error {
 			return fmt.Errorf("failed to create snapshot_exclusions: %w", err)
 		}
 	}
+	// #1815: a table an older build created keys names case- and
+	// accent-insensitively, so two excluded twins (`Audit_Log`/`audit_log`)
+	// failed the whole snapshot with ERROR 1062. Idempotent, and it never
+	// loses a row: making the key stricter cannot merge two of them. Best
+	// effort, unlike its siblings: the read plane runs this with SELECT-only
+	// DSNs and never writes the table, and the snapshot writer retries it
+	// before every degraded snapshot anyway.
+	metadata.MigrateSnapshotExclusionsNamesBestEffort(context.Background(), db)
 
 	// rotation_policy (#1709) shipped in CreateIndexTables only, so an index
 	// an older build created never grew it and a fresh one did: the same
