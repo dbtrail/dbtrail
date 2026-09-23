@@ -22,6 +22,7 @@ const model = (inp) => vm.runInContext("ovFlowModel", ctx)(inp);
 const paint = (inp, pctx) => vm.runInContext("flowSection", ctx)(model(inp), pctx || { serverId: "a", registry: true, monitorCap: true });
 vm.runInContext("capsCache = { monitor: true, permissions: {} };", ctx);
 const cases = JSON.parse(process.argv[3]);
+document.importNode = (n) => n;
 const out = {};
 for (const [name, c] of Object.entries(cases)) {
   const inp = Object.assign({ monitorCap: true, may: () => true }, c.input);
@@ -82,7 +83,7 @@ func TestOverviewFlowModel(t *testing.T) {
 		// C2 + U2 + B2 + T2: the healthy path.
 		"healthy": {"input": c{
 			"coverage":   c{"freshness": "current", "continuity": "ok", "lag_seconds": 12, "delta_to": "2026-09-23 14:58:52"},
-			"baselines":  c{"configured": true, "snapshots": []any{snap}, "schedule": sched},
+			"baselines":  c{"configured": true, "snapshots": []any{snap}, "schedule": sched, "local_retention": c{"keep_newest": 3}},
 			"server":     registry,
 			"schema":     c{"state": "succeeded", "finished_at": "2026-09-23T14:31:00Z"},
 			"uncaptured": c{"tables_captured": 47}}},
@@ -246,8 +247,13 @@ const origPaint = paint;`, 1)
 	if b := get("no-schedule").Pieces[bucket].Line; b != "2 tables" {
 		t.Errorf("no-schedule: bucket line %q", b)
 	}
-	if h.Pieces[bucket].Sub != "disk + S3" {
+	// The bucket box carries the one retention figure the API has per server
+	// (what this machine keeps); without it the sub is the storage kinds alone.
+	if h.Pieces[bucket].Sub != "disk + S3 · keeps 3 copies" {
 		t.Errorf("healthy: bucket sub = %q", h.Pieces[bucket].Sub)
+	}
+	if b := get("stalled-index").Pieces[bucket]; b.Tone != "off" || b.Sub != "" {
+		t.Errorf("stalled-index: bucket downstream of a break = %+v", b)
 	}
 	if h.Pieces[reader].Line != "DuckDB here" || h.Pieces[reader].Sub != "your tools" || h.Pieces[sqlArrow].Line != "Query the copy" {
 		t.Errorf("healthy: reader/sql = %+v %+v", h.Pieces[reader], h.Pieces[sqlArrow])

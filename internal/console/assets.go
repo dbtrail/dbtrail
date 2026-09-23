@@ -17,7 +17,7 @@ import (
 // served files are embedded; VENDOR.md stays as source-tree documentation
 // and is not exposed.
 //
-//go:embed assets/index.html assets/app.js assets/style.css assets/logo.png assets/favicon.png assets/fonts
+//go:embed assets/index.html assets/app.js assets/style.css assets/logo.png assets/favicon.png assets/mysql-logo.png assets/dbtrail-lockup-white.png assets/fonts
 var assetsFS embed.FS
 
 func init() {

@@ -1470,7 +1470,7 @@ button { font-family: inherit; }
    review caught that "tcard tcard-violet" — the natural reading — rendered
    white.) */
 .tag-pill {
-  display: inline-block; font-family: var(--f-mono); font-size: 10.5px;
+  display: inline-block; font-family: var(--f-ui); font-size: 11px;
   font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
   padding: 4px 11px; border-radius: 999px;
   background: var(--surface-3); color: var(--ink-2);
@@ -1497,7 +1497,7 @@ button { font-family: inherit; }
 }
 [data-dir="paper"] .ov-stat { background: transparent; border-color: var(--line); }
 .ov-stat-v { font-family: var(--f-display); font-size: 32px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; color: var(--ink); }
-.ov-stat-v.small { font-family: var(--f-mono); font-size: 19px; font-weight: 500; }
+.ov-stat-v.small { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 19px; font-weight: 500; }
 .ov-stat-v.danger { color: var(--delete); }
 .ov-stat-day { color: var(--ink-4); font-size: 13px; }
 .ov-stat-k { font-size: 12px; color: var(--ink-3); margin-top: 8px; letter-spacing: 0.01em; }
@@ -1508,47 +1508,64 @@ button { font-family: inherit; }
 
 /* ---- the copy flow (Overview first screen) ----
    Your MySQL -> binlog -> DBTrail -> every N -> Your bucket -> SQL -> reader,
-   as boxes and arrows in one grid. State lives on the piece that changed;
-   downstream of a break everything is .off (grey, "as of"), never red. The
-   tones reuse the three semantic colours (--insert / --orange-2 / --delete)
-   and nothing else. Under 880 px the grid stacks and the arrows turn. */
+   as boxes and arrows in one grid, in the palette and type of the talk's
+   own drawing of the same path: violet-edged source, pink DBTrail, mint
+   bucket, sun reader, pink arrows, UI type for every line and mono only
+   for the small arrow labels. State lives on the piece that changed;
+   downstream of a break everything is .off (grey, "as of"), never red.
+   Under 880 px the grid stacks and the arrows turn. */
 .flow { margin: 4px 0 24px; }
 .flow-grid {
   display: grid; grid-template-columns: 1.15fr 1fr 1.15fr 1.25fr 1.15fr 0.8fr 1.15fr;
   gap: 0 6px; align-items: stretch;
 }
 .flow-box {
-  --flow-c: var(--ink-4);
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
-  padding: 14px 16px; box-shadow: var(--panel-shadow); min-width: 0;
+  --flow-c: var(--ink-4); --flow-ink: var(--ink); --flow-sub: var(--ink-3);
+  background: #fff; border: 0; border-radius: 22px;
+  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
+  padding: 22px 16px 20px; min-width: 0; color: var(--flow-ink);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
 }
-[data-dir="paper"] .flow-box { background: transparent; }
+.flow-box:nth-child(3) { background: linear-gradient(160deg, #FF5A97, #E8397C); --flow-ink: #fff; --flow-sub: rgba(255,255,255,0.86); box-shadow: 0 10px 28px rgba(232,57,124,0.28); }
+.flow-box:nth-child(5) { background: #E8F8F0; }
+.flow-box:nth-child(7) { background: #FFF6DC; }
 .flow-box.ok   { --flow-c: var(--insert); }
-.flow-box.warn { --flow-c: var(--orange-2); border-color: var(--ochre); background: var(--ochre-bg); }
-.flow-box.bad  { --flow-c: var(--delete);   border-color: var(--delete);  background: var(--delete-bg); }
-.flow-box.off, .flow-arrow.off { opacity: 0.62; }
-.flow-box-head { display: flex; align-items: center; gap: 8px; font-family: var(--title-font); font-weight: 600; font-size: 15px; color: var(--ink); }
-.flow-state { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2); margin-top: 8px; display: flex; align-items: center; gap: 6px; }
+.flow-box.warn { --flow-c: var(--orange-2); background: #FFF1E2; --flow-ink: var(--ink); --flow-sub: var(--ink-3); }
+.flow-box.bad  { --flow-c: var(--delete);   background: var(--delete-bg); --flow-ink: var(--ink); --flow-sub: var(--ink-3); }
+.flow-box.off, .flow-arrow.off { opacity: 0.55; filter: grayscale(1); }
+.flow-ico { width: 30px; height: 30px; flex: none; display: inline-flex; color: var(--flow-ink); margin-bottom: 10px; }
+.flow-ico svg { width: 30px; height: 30px; }
+.flow-ico-mysql { width: 46px; height: 30px; object-fit: contain; }
+.flow-lockup { height: 30px; width: auto; display: block; margin-bottom: 10px; }
+.flow-box:nth-child(5) .flow-ico { color: #0E8A5E; }
+.flow-box:nth-child(7) .flow-ico { color: #EB6834; }
+.flow-box-head { display: flex; flex-direction: column; align-items: center; font-family: var(--f-display); font-weight: 700; font-size: 16.5px; letter-spacing: -0.01em; line-height: 1.2; color: var(--flow-ink); }
+.flow-box-head b, .flow-box-head .flow-lockup-wrap { display: inline-flex; align-items: center; gap: 7px; }
+.flow-state { font-family: var(--f-ui); font-size: 14px; color: var(--flow-ink); margin-top: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; }
 .flow-box.bad .flow-state, .flow-arrow.bad .flow-state { color: var(--delete); }
 .flow-box.warn .flow-state, .flow-arrow.warn .flow-state { color: var(--orange-2); }
-.flow-sub { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3); margin-top: 4px; overflow-wrap: anywhere; }
+.flow-sub { font-family: var(--f-ui); font-size: 13px; color: var(--flow-sub); margin-top: 4px; overflow-wrap: anywhere; }
 .flow-arrow {
-  --flow-c: var(--ink-4);
-  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
-  padding: 6px 4px 0; min-width: 0; text-align: center;
+  --flow-c: #FF4D8D;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 0 4px; min-width: 0; text-align: center;
 }
 .flow-arrow.ok   { --flow-c: var(--insert); }
 .flow-arrow.warn { --flow-c: var(--orange-2); }
 .flow-arrow.bad  { --flow-c: var(--delete); }
-.flow-label { font-family: var(--f-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
+.flow-label { font-family: var(--f-ui); font-size: 12.5px; font-weight: 600; color: #D9367A; }
+.flow-arrow.ok .flow-label { color: var(--insert); }
+.flow-arrow.warn .flow-label { color: var(--orange-2); }
+.flow-arrow.bad .flow-label { color: var(--delete); }
 .flow-line { position: relative; width: 100%; height: 12px; margin: 6px 0 8px; }
-.flow-line::before { content: ""; position: absolute; left: 0; right: 10px; top: 5px; height: 2px; background: var(--flow-c); border-radius: 1px; }
-.flow-line::after { content: ""; position: absolute; right: 0; top: 0; border: 6px solid transparent; border-left: 10px solid var(--flow-c); border-right: 0; }
+.flow-line::before { content: ""; position: absolute; left: 0; right: 10px; top: 4.5px; height: 2.5px; background: var(--flow-c); border-radius: 2px; }
+.flow-line::after { content: ""; position: absolute; right: 0; top: -1px; border: 7px solid transparent; border-left: 11px solid var(--flow-c); border-right: 0; }
 .flow-val { display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.flow-big { font-family: var(--f-display); font-size: 22px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; color: var(--ink); }
+.flow-big { font-family: var(--f-display); font-size: 24px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; color: var(--ink); }
 .flow-arrow.bad .flow-big { color: var(--delete); }
-.flow-arrow .flow-state { margin-top: 2px; justify-content: center; }
-.flow-link { font-family: var(--f-mono); font-size: 12.5px; color: var(--accent); text-decoration: none; border-bottom: 1px solid currentColor; }
+.flow-arrow .flow-state { margin-top: 2px; justify-content: center; color: var(--ink-2); }
+.flow-arrow .flow-sub { color: var(--ink-3); }
+.flow-link { font-family: var(--f-ui); font-size: 14px; font-weight: 600; color: #D9367A; text-decoration: none; border-bottom: 2px solid currentColor; }
 .flow-link:hover { color: var(--ink); }
 .health-dot.none { background: var(--ink-4); }
 .health-dot.warn { background: var(--orange-2); }
@@ -1557,16 +1574,21 @@ button { font-family: inherit; }
 /* the red sibling of .warn-box: a stopped capture or a refused update, with
    the decision under it. The console had no red box before the flow. */
 .bad-box {
-  font-family: var(--f-mono); font-size: 12.5px; color: var(--delete);
+  font-family: var(--f-ui); font-size: 13.5px; color: var(--delete);
   background: var(--delete-bg); border: 1px solid var(--delete);
   border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
   white-space: pre-wrap;
 }
 .bad-box .warn-line { margin-top: 8px; }
 .bad-box .warn-actions { margin-top: 10px; }
-.flow-card { margin-top: 12px; }
+.flow-card { margin-top: 12px; font-family: var(--f-ui); font-size: 14px; }
+.fr-go { font-weight: 600; color: #D9367A; text-decoration: none; border-bottom: 1px solid currentColor; white-space: nowrap; }
+.fr-go:hover { color: var(--ink); }
+.ov-fold { margin-top: 20px; }
+.ov-fold > summary { cursor: pointer; font-family: var(--f-ui); font-size: 13.5px; color: var(--ink-3); padding: 6px 0; }
+.ov-fold[open] > summary { margin-bottom: 10px; }
 .flow-card .warn-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.flow-cost { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3); margin-top: 8px; }
+.flow-cost { font-family: var(--f-ui); font-size: 12.5px; color: var(--ink-3); margin-top: 8px; }
 .flow-recipe { margin-top: 8px; }
 .flow-recipe summary { cursor: pointer; }
 .flow-recipe ul { margin: 6px 0 0; padding-left: 18px; }
@@ -1638,13 +1660,13 @@ button { font-family: inherit; }
 }
 .ov-ev:first-child { border-top: none; }
 .ov-ev:hover { background: var(--surface-2); }
-.ov-ev-time { font-family: var(--f-mono); font-size: 12px; color: var(--ink-2); }
-.ov-ev-tbl { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-ev-time { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--ink-2); }
+.ov-ev-tbl { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* --ink-2, not -3: this text sits on the violet tint, where --ink-3
    measures 4.20:1 — below the 4.5 floor the ink ramp is verified against
    (review reproduced it; -3 clears only white and sun). */
 .ov-ev-pk { color: var(--ink-2); }
-.ov-ev-cols { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2); text-align: right; white-space: nowrap; }
+.ov-ev-cols { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--ink-2); text-align: right; white-space: nowrap; }
 /* Undo is drawn on every row (#1801). It used to appear only under the
    mouse (and on keyboard focus, #968), so a first look at the list showed no
    way to undo anything. */
@@ -1659,14 +1681,14 @@ button { font-family: inherit; }
 }
 .ov-tablerow:first-child { border-top: none; }
 .ov-tablerow:hover { background: var(--surface-2); }
-.ov-tname { font-family: var(--f-mono); font-size: 13px; color: var(--ink); }
+.ov-tname { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 13px; color: var(--ink); }
 .ov-bar { display: flex; height: 7px; border-radius: 4px; overflow: hidden; background: var(--surface-3); gap: 1.5px; }
 .ov-seg { display: block; }
 .ov-seg.i { background: var(--insert); }
 .ov-seg.u { background: var(--update); }
 .ov-seg.d { background: var(--delete); }
 .ov-pills { display: none; }
-.ov-total { font-family: var(--f-mono); font-size: 13px; font-weight: 600; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+.ov-total { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
 .ov-coverage {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 13px 14px 8px; margin-top: 4px; border-top: 1px solid var(--line-soft);
@@ -1932,7 +1954,7 @@ button { font-family: inherit; }
 /* affirmative counterpart to .error-box — the green "no data lost" continuity
    confirmation, mapped onto the positive (insert) green of the palette. */
 .ok-box {
-  font-family: var(--f-mono); font-size: 12.5px; color: var(--insert);
+  font-family: var(--f-ui); font-size: 13.5px; color: var(--insert);
   background: var(--insert-bg); border: 1px solid var(--insert);
   border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
   white-space: pre-wrap;
@@ -1940,7 +1962,7 @@ button { font-family: inherit; }
 /* capture-health degraded surface (#1034) — sustained in-stream skips: orange,
    sitting between the green all-clear and the red permanent-loss record. */
 .warn-box {
-  font-family: var(--f-mono); font-size: 12.5px; color: var(--orange-2);
+  font-family: var(--f-ui); font-size: 13.5px; color: var(--orange-2);
   background: var(--orange-bg); border: 1px solid var(--ochre);
   border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
   white-space: pre-wrap;
@@ -1953,7 +1975,7 @@ button { font-family: inherit; }
    who has read the alarm and said so should not keep being alarmed by it, and
    deleting the box instead would trade an annoyance for lost evidence. */
 .muted-box {
-  font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2);
+  font-family: var(--f-ui); font-size: 13.5px; color: var(--ink-2);
   background: var(--surface-3); border: 1px solid var(--line);
   border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
   white-space: pre-wrap;
@@ -2054,13 +2076,22 @@ button { font-family: inherit; }
    quieter than pass, never amber. */
 .doctor-card.note { border-color: var(--line); }
 .doctor-card.note .dc-mark { color: var(--ink-4); }
-.dc-mark { font-family: var(--f-mono); font-weight: 700; line-height: 1.4; flex: none; }
+.dc-mark { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-weight: 700; line-height: 1.4; flex: none; }
 .doctor-card.pass .dc-mark { color: var(--insert); }
 .doctor-card.fail .dc-mark { color: var(--delete); }
 .doctor-card.warn .dc-mark { color: var(--orange-2); }
 .dc-body { flex: 1; min-width: 0; }
 /* First-run steps (#1606): waiting is a muted ring, never the failure red. */
-.fr-card { margin-bottom: 16px; }
+.fr-card {
+  margin-bottom: 20px; background: #fff; border: 0; border-radius: 22px;
+  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
+  padding: 22px 24px 20px;
+}
+.fr-card .dc-name { font-family: var(--f-display); font-weight: 700; font-size: 16.5px; letter-spacing: -0.01em; color: var(--ink); }
+.fr-card .fr-step.waiting .dc-name { color: var(--ink); }
+.fr-card .fr-fix { font-family: var(--f-ui); font-size: 14px; color: var(--ink-2); margin-top: 4px; }
+.fr-card .fr-step .dc-mark { width: 18px; text-align: center; }
+.fr-card .fr-fold { margin-left: 28px; }
 .add-first-lead { font-size: 13.5px; color: var(--ink-2); margin: 0 0 12px; max-width: 62ch; }
 .fr-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .fr-step { display: flex; gap: 10px; align-items: flex-start; }
@@ -2494,7 +2525,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .cov-line.bad { color: var(--delete); font-weight: 600; }
 .cov-line.warn { color: var(--ink-2); }
 .cov-refresh { display: flex; align-items: center; gap: 8px; }
-.cov-asof { font-family: var(--f-mono); font-size: 11px; color: var(--ink-4); }
+.cov-asof { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--ink-4); }
 .cov-asof.bad { color: var(--delete); }
 
 /* Section-level timezone declaration (#1354): a small "UTC" chip on the head
@@ -2538,7 +2569,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
   .cov-refresh-btn.spin { opacity: .55; }
 }
 .cov-chips { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-.cov-chip { font-family: var(--f-mono); font-size: 12px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink-2); }
+.cov-chip { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 12px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink-2); }
 .cov-chip.ok { color: var(--insert); border-color: var(--insert); }
 .cov-chip.warn { color: var(--update); border-color: var(--update); }
 .cov-chip.bad { color: var(--delete); border-color: var(--delete); font-weight: 600; }
@@ -3196,3 +3227,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .bl-case.is-current { background: var(--violet-tint); border-color: var(--violet-line); color: var(--ink-2); }
 .bl-case.is-current .bl-name { color: var(--ink); }
 .bl-case.is-current .bl-lane.no { color: var(--ink-2); }
+.fr-card:not(.fr-open) .fr-step:not(.fr-cur) { display: none; }
+.fr-fold { margin-top: 10px; background: none; border: 0; padding: 0; cursor: pointer; font-family: var(--f-ui); font-size: 13px; color: var(--ink-3); }
+.fr-fold::before { content: "\25B8 "; }
+.fr-card.fr-open .fr-fold::before { content: "\25BE "; }

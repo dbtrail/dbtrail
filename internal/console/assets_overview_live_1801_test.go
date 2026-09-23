@@ -761,7 +761,7 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
 	if w.Rendered != 0 {
 		t.Errorf("the page was repainted %d time(s) during the walk; a change must fill it in place", w.Rendered)
 	}
-	if !strings.Contains(w.Card, "Take the first backup") || !strings.Contains(w.CardAfterChanges, "Take the first backup") {
+	if !strings.Contains(w.Card, "Take the first full DB snapshot") || !strings.Contains(w.CardAfterChanges, "Take the first full DB snapshot") {
 		t.Errorf("the Getting started list left before a snapshot existed: before %q, after the changes %q", w.Card, w.CardAfterChanges)
 	}
 	if w.EventsReads != 4 {
@@ -774,7 +774,7 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
 	if w.RowsBeforeList != 4 {
 		t.Errorf("the change did not show before the list asked again: %d rows", w.RowsBeforeList)
 	}
-	if !strings.Contains(w.CardWithChange, "…Take the first backup") {
+	if !strings.Contains(w.CardWithChange, "…Take the first full DB snapshot") {
 		t.Errorf("the settled list never asked again on its own wait: %q", w.CardWithChange)
 	}
 	for i, n := range w.AsOfStamps {

@@ -87,3 +87,16 @@ f.save("<downloaded-static>.with-license.woff2")
 If any other third-party asset is ever added, list it here with its name,
 version, license, and source URL, confirm its license permits redistribution,
 and extend the notices header + guard scripts above to cover it.
+
+## MySQL logo (`mysql-logo.png`)
+
+The Overview's flow draws the source box with the MySQL logo, downloaded
+from `https://www.mysql.com/common/logos/logo-mysql-170x115.png` (176x119
+PNG, 3.8 KB) and embedded so the console still makes zero external requests.
+MySQL is a trademark of Oracle Corporation; the logo identifies the database
+the console reads from and implies no endorsement.
+
+## DBTrail lockup (`dbtrail-lockup-white.png`)
+
+The brand lockup in white (494x188 PNG, 17 KB), from the project's own
+logo set, drawn in the Overview's DBTrail box.

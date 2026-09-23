@@ -97,8 +97,30 @@ console.log(JSON.stringify({
 		}
 	}
 
+	// One step is open on the card: the failed one when there is one, the
+	// running one otherwise (the rest fold behind "All N steps").
+	current := func(rows []struct{ Cls, Text string }) (int, int) {
+		n, at := 0, -1
+		for i, r := range rows {
+			if strings.Contains(r.Cls, "fr-cur") {
+				n++
+				at = i
+			}
+		}
+		return n, at
+	}
+	if n, at := current(got.Failed.Rows); n != 1 || at != 1 {
+		t.Errorf("failed: %d current step(s) at %d, want exactly the failed step (1): %+v", n, at, got.Failed.Rows)
+	}
+	if !strings.Contains(got.Failed.Text, "All 5 steps · 1 done") {
+		t.Errorf("failed: the fold does not count the steps: %q", got.Failed.Text)
+	}
+
 	if n := len(got.Working.Rows); n != 6 {
 		t.Fatalf("working: %d step rows, want 6 with the backup: %+v", n, got.Working.Rows)
+	}
+	if n, at := current(got.Working.Rows); n != 1 || at != 4 {
+		t.Errorf("working: %d current step(s) at %d, want exactly the running step (4): %+v", n, at, got.Working.Rows)
 	}
 	if r := got.Working.Rows[4]; !strings.Contains(r.Cls, "running") || !strings.Contains(r.Text, "A quiet database is normal") {
 		t.Errorf("capture waiting for its first change is not drawn as running and normal: %+v", r)
