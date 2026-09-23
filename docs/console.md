@@ -729,7 +729,29 @@ Two section labels split it: **Change here** and **Set when DBTrail starts**.
   the server list, `/var/lib/bintrail` in the compose stack), created `0700`
   and named by the server's id, so renaming the server moves nothing. With no
   S3 destination, the row also asks how many to keep: a new server keeps the
-  newest 3 and older ones are removed; empty keeps every snapshot. A table
+  newest 3 and older ones are removed; empty keeps every snapshot. Older
+  snapshots go at the next hourly cleanup, never the only copy of a table.
+  Saving a count for a folder that already holds snapshots is the choice to
+  remove the older ones there: only a NEW folder, or a move to another
+  folder, that already holds snapshots is refused while a count is set.
+  Beside the count the row says how far back that lets you go: the count
+  times the server's snapshot schedule (for example 3 daily snapshots reach
+  back up to about 3 days), never less than an hour, because the cleanup
+  leaves snapshots younger than an hour alone, and never less than the
+  `--baseline-retain` age, which keeps younger snapshots past the count.
+  With no schedule running it names no number, since the reach then depends
+  on when snapshots are taken. The count it uses is the one the Snapshots
+  listing reports (`local_retention.keep_newest`); a number typed and not
+  yet saved or applied reads "Once this number applies". Past the oldest
+  snapshot kept, a restore, a `.sql` export and full-table time travel have
+  no snapshot to start from, so they cannot reach that far back; the
+  recorded row changes themselves (row history, `recover`) do not depend on
+  snapshots and keep their own retention. A folder that two servers shared
+  is never counted, and neither is one that stopped being shared while it
+  still holds the other server's snapshots (the other server was deleted,
+  answered no, or moved away): a snapshot does not record which server
+  wrote it. That folder keeps everything until its server moves to a new
+  empty folder. A table
   that did not change keeps its last file (a hard link where the filesystem
   allows it), so a new snapshot only costs the tables that changed. **No, only
   in S3** means the snapshots live only in the S3 destination, and every run

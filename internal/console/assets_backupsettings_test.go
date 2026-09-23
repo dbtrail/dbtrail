@@ -304,11 +304,13 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	// caps sit ~25% and ~40% above the rewrite and well below the old cards,
 	// so a copy edit breathes but one more paragraph rings here before the
 	// e2e sees it.
-	// localCopyWords over every arm at once is 940 characters today (nine
+	// localCopyWords over every arm at once is 1107 characters today (ten
 	// arms: yes, no, no without S3, the startup folder, yes with S3, and the
-	// four count lines); a reader sees at most two of them. The cap leaves
-	// room for a copy edit and rings on one more paragraph.
-	if n := visibleChars(words); n > 1100 {
+	// five count lines, the fifth being the folder another server's
+	// snapshots still hold, #1681); a reader sees at most two of them (the
+	// reach line is localReachWords', counted apart). The cap leaves room for
+	// a copy edit and rings on one more paragraph.
+	if n := visibleChars(words); n > 1200 {
 		t.Errorf("localCopyWords' visible text is %d characters over all its arms; a reader sees two lines of it, keep them short", n)
 	}
 	if n := visibleChars(daemon); n > 150 {

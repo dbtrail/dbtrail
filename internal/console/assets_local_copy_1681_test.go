@@ -79,6 +79,19 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   await step("oldLocal", { baseline_dir: "/srv/snaps", local_copy: true, source: "server" }, null);
   await step("s3TypedAfterBadCount", fresh, (r) => { type(r, "keep_newest", "x"); type(r, "baseline_s3", "s3://b/p/"); });
   await step("blocked", Object.assign({}, fresh, { keep_blocked: true }), null);
+  await step("held", Object.assign({}, fresh, { keep_blocked: true, keep_held: true }), null);
+  // How far back the count reaches, from the real schedule fields the
+  // settings API sends (#1681), with the count in force as the listing has it.
+  const inForce = Object.assign({}, fresh, { keep_in_force: 3 });
+  await step("reach5m", Object.assign({}, inForce, { schedule_every: "5m", schedule_every_minutes: 5 }), null);
+  await step("reachHourly", Object.assign({}, inForce, { schedule_every: "1h", schedule_every_minutes: 60 }), null);
+  await step("reachDaily", Object.assign({}, inForce, { schedule_every: "1d", schedule_every_minutes: 1440 }), null);
+  await step("reachDailyTyped1", Object.assign({}, inForce, { schedule_every: "1d", schedule_every_minutes: 1440 }), (r) => type(r, "keep_newest", "1"));
+  await step("reachNone", inForce, null);
+  await step("reachNoneOne", Object.assign({}, inForce, { keep_newest: 1, keep_in_force: 1 }), null);
+  await step("reachRetain", Object.assign({}, inForce, { schedule_every: "5m", schedule_every_minutes: 5, prune_retain_minutes: 7 * 1440 }), null);
+  await step("reachRefused", Object.assign({}, inForce, { schedule_every: "1h", schedule_every_minutes: 60, schedule_refusal: "no folder" }), null);
+  await step("reachNotApplied", Object.assign({}, fresh, { schedule_every: "1h", schedule_every_minutes: 60 }), null);
   await step("daemonDefault", { source: "default" }, null);
   await step("oldLocalBothYes", { baseline_dir: "/srv/snaps", baseline_s3: "s3://b/p/", local_copy: true, source: "server" }, null);
   // The schedule card's rate sentence follows the listing's local_retention.
@@ -137,8 +150,43 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if !b(f.Before.DirShown) || !b(f.Before.KeepShown) || !f.Before.SaveDisabled {
 		t.Errorf("fresh server: folder/count not shown or Save awake with nothing changed: %+v", f.Before)
 	}
-	if !strings.Contains(joined(f.Before), "Keeps the newest 3 here and removes older ones") {
-		t.Errorf("fresh server does not say its count: %q", joined(f.Before))
+	if !strings.Contains(joined(f.Before), "Keeps the newest 3 here. Older ones in this folder are removed at the next hourly cleanup, never a table's only copy.") {
+		t.Errorf("fresh server does not say its count and when older snapshots go: %q", joined(f.Before))
+	}
+	// Saving a number over a folder that already holds snapshots is the
+	// choice to prune them (only a new or moved folder is refused), so the
+	// sentence is there for a count that is only typed, too.
+	if !strings.Contains(joined(got["freshKeep5"].After), "Keeps the newest 5 here. Older ones in this folder are removed at the next hourly cleanup") {
+		t.Errorf("a typed count does not say older snapshots go at the next hourly cleanup: %q", joined(got["freshKeep5"].After))
+	}
+	// How far back: the count x the schedule, never under the hour the prune
+	// leaves alone nor under the age retention; "once" while the number is
+	// not the one in force; no number without a schedule that runs.
+	for name, want := range map[string]string{
+		"reach5m":          "You can go back up to about 1 hour: restores, .sql exports and full-table time travel start from the oldest snapshot kept.",
+		"reachHourly":      "You can go back up to about 3 hours:",
+		"reachDaily":       "You can go back up to about 3 days:",
+		"reachDailyTyped1": "Once this number applies, you can go back up to about 1 day:",
+		"reachNone":        "You can go back as far as the oldest of the 3 kept. With no schedule running, that depends on when snapshots are taken.",
+		"reachNoneOne":     "You can go back as far as the one snapshot kept.",
+		"reachRetain":      "You can go back up to about 7 days:",
+		"reachRefused":     "You can go back as far as the oldest of the 3 kept. With no schedule running",
+		"reachNotApplied":  "Once this number applies, you can go back up to about 3 hours:",
+	} {
+		r := got[name]
+		w := joined(r.Before)
+		if name == "reachDailyTyped1" {
+			w = joined(r.After)
+		}
+		if !strings.Contains(w, want) {
+			t.Errorf("%s: %q does not say %q", name, w, want)
+		}
+	}
+	if w := joined(got["freshKeepAll"].After); strings.Contains(w, "go back") {
+		t.Errorf("keeping everything gives a reach: %q", w)
+	}
+	if w := joined(got["held"].Before); !strings.Contains(w, "Another server's snapshots are still in this folder, so nothing here is removed. To keep only the newest, use a new empty folder.") || strings.Contains(w, "go back") {
+		t.Errorf("a held folder: %q", w)
 	}
 	if !strings.Contains(joined(f.Before), "only costs the tables that changed") {
 		t.Errorf("fresh server does not say what the local copy saves: %q", joined(f.Before))

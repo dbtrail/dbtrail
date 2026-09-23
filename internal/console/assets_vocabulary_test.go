@@ -91,8 +91,8 @@ var oldVocabulary = regexp.MustCompile(`(?i)\b(backups?|baselines?)\b`)
 // test's log, and CI does not run with -v — so the gap is visible locally on
 // request, not announced.
 const (
-	assetVocabularyPin      = 259 // string literals in assets/app.js (includes the frozen permission name baseline:create, PERM_SNAPSHOT_CREATE)
-	goVocabularyPin         = 226 // string literals in this package's non-test .go files; #1681 added frozen names (the "baselines" folder of <state dir>/baselines/<id> and two import paths of internal/baseline) and removed the refresh endpoint's
+	assetVocabularyPin      = 260 // string literals in assets/app.js (includes the frozen permission name baseline:create, PERM_SNAPSHOT_CREATE, and the frozen docs slug "guides/backup-strategy" each server block links since #1681 removed the card that carried it)
+	goVocabularyPin         = 225 // string literals in this package's non-test .go files; #1681's frozen names (two import paths of internal/baseline) balance the refresh endpoint's it removed
 	consoleappVocabularyPin = 277 // string literals in consoleapp's non-test .go files
 	vocabularySlack         = 3   // how far under a pin may drift before it must be lowered
 

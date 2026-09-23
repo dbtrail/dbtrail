@@ -5423,14 +5423,17 @@ function s3OnlyBackupWarning(srv, fix = true) {
 //   reuse  unchanged tables keep their last file on this daemon
 //   was    the saved answer, folder and provenance ("default" = this server
 //          reads DBTrail's startup folder), and whether that folder is one
-//          the prune never counts (shared, or DBTrail's own)
+//          the prune never counts (shared, or DBTrail's own), or held (it
+//          was shared and still holds the other server's snapshots)
+//   reach  how far back the count reaches (localReachWords): the count in
+//          force, the snapshot interval and the age retention, in minutes
 //
 // The "no" sentence is the issue's own words: no is not "no snapshots", it is
 // "only in S3, and every run writes every table". The saving is promised
 // only for a server whose copies are all here: with a bucket as well, a
 // scheduled run reuses only when the folder holds the newest snapshot and a
 // restore never does, which one sentence cannot carry without being false.
-function localCopyWords(local, s3, keep, loop, reuse, was) {
+function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
   const out = [];
   const say = (text, err) => out.push({ text, err: !!err });
   if (!local) {
@@ -5451,16 +5454,60 @@ function localCopyWords(local, s3, keep, loop, reuse, was) {
     return out;
   }
   if (reuse) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
-  if (was.blocked) {
+  if (was.held) {
+    say("Another server's snapshots are still in this folder, so nothing here is removed. To keep only the newest, use a new empty folder.");
+  } else if (was.blocked) {
     say("This folder is shared with another server or is DBTrail's startup folder, so nothing in it is removed, whatever the count says.");
   } else if (!keep) {
     say("Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.");
   } else if (loop) {
-    say("Keeps the newest " + keep + " here and removes older ones, never the only copy of a table.");
+    // Said even when only the count changed: saving a number over a folder
+    // that already holds snapshots IS the choice to prune them (a new folder
+    // or a moved one is refused instead), so the row says what that means.
+    say("Keeps the newest " + keep + " here. Older ones in this folder are removed at the next hourly cleanup, never a table's only copy.");
+    say(localReachWords(keep, reach || {}));
   } else {
     say("Keeps the newest " + keep + " where DBTrail takes the snapshots. This copy of DBTrail removes nothing.");
   }
   return out;
+}
+
+// localReachWords is how far back a server can go with the newest `keep`
+// snapshots kept (#1681), from its real schedule:
+//
+//   keep      the count as typed
+//   inForce   the count the prune applies now (keep_in_force, the listing's
+//             local_retention.keep_newest); a different number means the
+//             typed one is not saved or not applied yet, and the line says so
+//   every     the schedule's interval in minutes (0 = no schedule that runs)
+//   retain    the age retention in minutes (0 = none)
+//
+// keep x every, but never under the hour the prune always leaves alone, nor
+// under the age retention, which keeps younger snapshots outside the count.
+// "Up to": with one kept, right after a new snapshot the window is shorter.
+// Without a schedule there is no number to give, and the line says what
+// decides it instead.
+function localReachWords(keep, reach) {
+  const soon = reach.inForce === keep ? "" : "Once this number applies, ";
+  const lead = soon ? soon + "you can" : "You can";
+  if (!reach.every) {
+    return lead + " go back as far as " + (keep === 1 ? "the one snapshot kept" : "the oldest of the " + keep + " kept") +
+      ". With no schedule running, that depends on when snapshots are taken.";
+  }
+  const mins = Math.max(keep * reach.every, 60, reach.retain || 0);
+  return lead + " go back up to about " + reachSpan(mins) + ": restores, .sql exports and full-table time travel start from the oldest snapshot kept.";
+}
+
+// reachSpan says a number of minutes the way a person would: hours below a
+// day, whole days as days, hours again up to two days, days above.
+function reachSpan(mins) {
+  const day = 24 * 60;
+  if (mins < day || (mins % day !== 0 && mins < 2 * day)) {
+    const h = Math.max(1, Math.round(mins / 60));
+    return h + (h === 1 ? " hour" : " hours");
+  }
+  const d = Math.round(mins / day);
+  return d + (d === 1 ? " day" : " days");
 }
 
 function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
@@ -5559,7 +5606,10 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // server's OWN destination only: the daemon default is shared by every
   // server, and a rule on it is not this row's to hand out.
   if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers, daemonS3));
-  more.push(docsMore("settings/backups", "per-server", "backup locations per server"));
+  more.push(docsMore("settings/backups", "per-server", "backup locations per server"),
+    // The strategy guide is the page the header table names for Snapshots;
+    // the card that linked it from the setup half is gone (#1681).
+    docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
 
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
@@ -5593,8 +5643,13 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     dirField.hidden = !local;
     keepField.hidden = !local || !!s3v;
     clear(words);
+    // The reach is said for the count as it applies to the folder as saved:
+    // a typed folder or destination makes it a number that does not apply yet.
+    const asSaved = dir.value.trim() === was.dir && s3v === was.s3;
     for (const w of localCopyWords(local, s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
-      { local: was.local, dir: was.rawDir, source: srv.source, blocked: !!srv.keep_blocked })) {
+      { local: was.local, dir: was.rawDir, source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held },
+      { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
+        every: srv.schedule_refusal ? 0 : (srv.schedule_every_minutes || 0), retain: srv.prune_retain_minutes || 0 })) {
       words.append(el("p", { class: w.err ? "form-msg err" : "form-hint", text: w.text }));
     }
   };
