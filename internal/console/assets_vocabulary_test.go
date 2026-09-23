@@ -45,12 +45,28 @@ import (
 // Do not narrow this one to match that one.
 var oldVocabulary = regexp.MustCompile(`(?i)\b(backups?|baselines?)\b`)
 
+// SCOPE, and the one way this can be satisfied without doing the work:
+// filepath.Glob("*.go") reads THIS package only. Text that MOVES OUT of
+// internal/console — into consoleapp/ or ext/ during the rename — leaves the
+// count and so reads as progress. Relocation is not renaming; if a step
+// moves copy out, check it there by hand.
+//
 // The pins. Both were measured on the commit that introduced this test, and
 // were cross-checked against an independent tokenizer that agreed on both
-// numbers. They may only go DOWN: the rename is the work that lowers them.
+// numbers.
+//
+// The rule is NOT "must equal". Over the pin fails: that is the regression
+// this exists to catch. Under it is allowed, up to vocabularySlack, and only
+// a bigger drop asks for the pin to be lowered. The slack is there because
+// several branches edit this package at once: two branches each removing one
+// occurrence and each pinning one lower both merge, the count lands two
+// under, and a must-equal rule would turn main red for a change no single
+// pull request made. A rename step moves these by hundreds, which is well
+// past the slack, so the pin still gets lowered exactly when it should be.
 const (
 	assetVocabularyPin = 282 // string literals in assets/app.js
 	goVocabularyPin    = 225 // string literals in this package's non-test .go files
+	vocabularySlack    = 20  // how far under a pin may drift before it must be lowered
 )
 
 func TestOldVocabularyOnlyShrinks(t *testing.T) {
@@ -73,10 +89,12 @@ func TestOldVocabularyOnlyShrinks(t *testing.T) {
 				"If the new text is unavoidable — a frozen route, flag, environment variable or file "+
 				"name — raise %s in this commit and say why in the message.",
 				c.what, c.got, c.pin, c.how)
-		case c.got < c.pin:
-			t.Errorf("%s: %d occurrences of the old vocabulary, down from %d. Lower %s to %d in this "+
-				"commit, so the next change cannot spend the ground you just gained.",
-				c.what, c.got, c.pin, c.how, c.got)
+		case c.got < c.pin-vocabularySlack:
+			t.Errorf("%s: %d occurrences of the old vocabulary, %d under the pin of %d. Lower %s to "+
+				"%d in this commit, so the next change cannot spend the ground already gained.\n"+
+				"If you removed none of these words yourself, concurrent merges did: lowering the pin "+
+				"is still the right answer.",
+				c.what, c.got, c.pin-c.got, c.pin, c.how, c.got)
 		}
 	}
 }
