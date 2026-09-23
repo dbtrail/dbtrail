@@ -67,20 +67,21 @@ func DeriveServerName(host, port, flavor string) string {
 	isV6 := ip != nil && ip.To4() == nil
 
 	label := sanitizeNameLabel(host)
-	switch {
-	case isV6 && label == "":
-		label = "ipv6"
-	case isV6:
-		label = "ipv6-" + label
-	case label == "":
-		label = derivedNameFallback
+	if isV6 {
+		// The trim is for "::", which sanitizes to nothing: the name is then
+		// "ipv6", not "ipv6-".
+		label = strings.Trim("ipv6-"+label, "-")
 	}
 	// sanitizeNameLabel leaves only ASCII, so cutting by byte cannot split a
-	// character. The second trim is for the cut itself: it can land right
-	// after a dot or a dash.
+	// character. The trim is for the cut itself: it can land right after a dot
+	// or a dash.
 	if len(label) > serverNameMaxLen {
 		label = strings.Trim(label[:serverNameMaxLen], "-.")
 	}
+	// ONE fallback, after every step that can empty the label — a host with no
+	// character a name carries, and a cut that lands on a run of separators.
+	// It was written twice before, and a mutation showed the first copy could
+	// be deleted with every test still green: the second was doing both jobs.
 	if label == "" {
 		label = derivedNameFallback
 	}

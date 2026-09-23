@@ -30,6 +30,7 @@ func TestDeriveServerName(t *testing.T) {
 		{"a bare v6 address", "2001:db8::1", "", FlavorMySQL, "ipv6-2001-db8-1"},
 		{"a v6 address with a port", "[::1]:3307", "", FlavorMySQL, "ipv6-1-3307"},
 		{"a v6 address with the usual port", "[::1]:3306", "", FlavorMySQL, "ipv6-1"},
+		{"a v6 address with no digits left after folding", "::", "", FlavorMySQL, "ipv6"},
 		{"PostgreSQL leaves out its own usual port", "pg.example.com", "5432", FlavorPostgres, "pg.example.com"},
 		{"PostgreSQL keeps an unusual port", "pg.example.com", "5433", FlavorPostgres, "pg.example.com-5433"},
 		{"MySQL's usual port is unusual for PostgreSQL", "pg.example.com", "3306", FlavorPostgres, "pg.example.com-3306"},
