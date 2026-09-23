@@ -1227,6 +1227,90 @@ func TablesTheSnapshotRefuses(sourceDB *sql.DB, schemas []string) (noPK, nonInno
 	return noPK, nonInnoDB, nil
 }
 
+// refusalReasons is the reason the snapshot records for each refused table,
+// keyed "schema.table": one entry per table, the two reasons joined for a
+// table that is both not on InnoDB and without a key. The snapshot and
+// RefusedTables both use it, so the setup check and the Overview card read
+// the same reason for the same table and build the same fix from it.
+func refusalReasons(nonInnoDB, noPK []string) map[string]string {
+	reasonByKey := make(map[string]string, len(nonInnoDB)+len(noPK))
+	for _, key := range nonInnoDB {
+		reasonByKey[key] = ExclusionReasonNotInnoDB
+	}
+	for _, key := range noPK {
+		if r, ok := reasonByKey[key]; ok {
+			reasonByKey[key] = r + ExclusionReasonSeparator + ExclusionReasonNoPrimaryKey
+		} else {
+			reasonByKey[key] = ExclusionReasonNoPrimaryKey
+		}
+	}
+	return reasonByKey
+}
+
+// RefusedTable is one table the snapshot refuses, described the way the
+// snapshot would record it if it excluded the table: schema and table as
+// separate names (a name may itself contain a dot, so "schema.table" cannot
+// be split back apart), the recorded reason, and — for a table that needs a
+// key — the free column name SuggestPKColumn picks from the table's OWN
+// columns, the same name the Overview card's fix uses (#1802).
+type RefusedTable struct {
+	Schema, Table string
+	Reason        string
+	PKColumn      string
+}
+
+// RefusedTables is TablesTheSnapshotRefuses with each table described in
+// full, in the order the classifier reports them (tables without a key, then
+// the rest). Same classifier call, same column read: the setup check that
+// uses it cannot drift from the snapshot it predicts.
+func RefusedTables(sourceDB *sql.DB, schemas []string) ([]RefusedTable, error) {
+	columns, err := fetchColumnRows(sourceDB, schemas)
+	if err != nil {
+		return nil, err
+	}
+	if len(columns) == 0 {
+		return nil, ErrNoColumnsVisible
+	}
+	nonInnoDB, noPK, _, err := invalidTables(sourceDB, schemas, columns)
+	if err != nil {
+		return nil, err
+	}
+	type named struct {
+		schema, table string
+		cols          []string
+	}
+	byKey := make(map[string]*named)
+	for _, c := range columns {
+		key := c.schemaName + "." + c.tableName
+		n := byKey[key]
+		if n == nil {
+			n = &named{schema: c.schemaName, table: c.tableName}
+			byKey[key] = n
+		}
+		n.cols = append(n.cols, c.columnName)
+	}
+	reasons := refusalReasons(nonInnoDB, noPK)
+	needsKey := make(map[string]bool, len(noPK))
+	for _, key := range noPK {
+		needsKey[key] = true
+	}
+	out := make([]RefusedTable, 0, len(reasons))
+	seen := make(map[string]bool, len(reasons))
+	for _, key := range append(append([]string{}, noPK...), nonInnoDB...) {
+		n := byKey[key]
+		if seen[key] || n == nil {
+			continue
+		}
+		seen[key] = true
+		rt := RefusedTable{Schema: n.schema, Table: n.table, Reason: reasons[key]}
+		if needsKey[key] {
+			rt.PKColumn = SuggestPKColumn(n.cols)
+		}
+		out = append(out, rt)
+	}
+	return out, nil
+}
+
 // ErrNoColumnsVisible marks a source whose information_schema.COLUMNS answered
 // with nothing for the requested scope: an empty schema, a misspelled name, or
 // an account that cannot see it. Every one of those means the question was not
@@ -1365,17 +1449,7 @@ func takeSnapshot(sourceDB, indexDB *sql.DB, schemas []string, excludeInvalid bo
 		// Degraded mode (#1051): drop the offending tables from the snapshot
 		// instead of failing it. A table can be both non-InnoDB and PK-less —
 		// one exclusion entry, combined reason.
-		reasonByKey := make(map[string]string, len(nonInnoDB)+len(noPK))
-		for _, key := range nonInnoDB {
-			reasonByKey[key] = ExclusionReasonNotInnoDB
-		}
-		for _, key := range noPK {
-			if r, ok := reasonByKey[key]; ok {
-				reasonByKey[key] = r + ExclusionReasonSeparator + ExclusionReasonNoPrimaryKey
-			} else {
-				reasonByKey[key] = ExclusionReasonNoPrimaryKey
-			}
-		}
+		reasonByKey := refusalReasons(nonInnoDB, noPK)
 		// The excluded tables' COLUMN NAMES, gathered while they go past:
 		// this is the only moment anything sees them. They are not written to
 		// the snapshot, so no later reader of the index can tell which names

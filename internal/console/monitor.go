@@ -107,3 +107,13 @@ type MonitorController interface {
 	// Status reports the entry's current monitor state.
 	Status(entryID string) MonitorStatus
 }
+
+// NewEntryDiscarder is implemented by a supervisor that can take back what a
+// failed first Start provisioned for an entry created in the same request:
+// its job slot and the per-server index database Start may already have
+// created. Optional, and checked with a type assertion, so MonitorController
+// does not grow a method every implementation must carry; only the Connect
+// check's rollback calls it (#1803).
+type NewEntryDiscarder interface {
+	DiscardNew(ctx context.Context, e ServerEntry) error
+}

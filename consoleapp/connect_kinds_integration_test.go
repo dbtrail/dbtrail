@@ -54,7 +54,7 @@ func TestIntegrationDoctorUnsaved_namesTablesWithoutAKey(t *testing.T) {
 	if want := []string{name + ".loose"}; !slices.Equal(c.Subjects, want) {
 		t.Errorf("subjects = %v, want %v", c.Subjects, want)
 	}
-	if want := []string{"ALTER TABLE `" + name + "`.`loose` ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;"}; !slices.Equal(c.Statements, want) {
+	if want := []string{"ALTER TABLE `" + name + "`.`loose` ADD COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;"}; !slices.Equal(c.Statements, want) {
 		t.Errorf("statements = %v, want %v", c.Statements, want)
 	}
 }

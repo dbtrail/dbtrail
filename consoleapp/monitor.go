@@ -578,6 +578,68 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 	return nil
 }
 
+// The Connect rollback finds DiscardNew by type assertion, so a renamed or
+// re-signed method would be skipped in silence and leave databases behind.
+// This line makes that a compile error instead.
+var _ console.NewEntryDiscarder = (*monitorSupervisor)(nil)
+
+// DiscardNew implements console.NewEntryDiscarder (#1803): it
+// takes back what a FAILED Start provisioned for a server that the Connect
+// check created a moment earlier in the same request — the job slot Start
+// reserved, and the per-server index database it may already have created
+// (every step of Start after EnsureDatabase can still fail). Without it the
+// check's rollback removed the registry entry and left `bintrail_idx_<id>`
+// behind on the index server, owned by nothing.
+//
+// Deliberately narrow, because it DROPs a database:
+//   - only the database this supervisor DERIVES for the id, and only when the
+//     entry's DSN is exactly that derived DSN — a server that brings its own
+//     index is never touched;
+//   - never while the job is running or starting: a stream that holds the
+//     database is not a failed first start.
+//
+// The id is minted by the request that calls this, so the derived database
+// cannot have held anything before that request.
+func (m *monitorSupervisor) DiscardNew(ctx context.Context, e console.ServerEntry) error {
+	m.mu.Lock()
+	if j, ok := m.jobs[e.ID]; ok {
+		switch j.storedState() {
+		case "running", "pending":
+			m.mu.Unlock()
+			return fmt.Errorf("server %s is %s; not discarding it", e.ID, j.storedState())
+		}
+		j.cancel()
+		delete(m.jobs, e.ID)
+	}
+	m.mu.Unlock()
+
+	derived, err := m.DeriveIndexDSN(e.ID)
+	if err != nil {
+		return err
+	}
+	if e.DSN != derived {
+		return nil // an index the server brought itself: never ours to drop
+	}
+	cfg, err := mysql.ParseDSN(derived)
+	if err != nil {
+		return fmt.Errorf("daemon index DSN: %s", config.ScrubDSNError(err, derived))
+	}
+	name := cfg.DBName
+	if !dbNameRE.MatchString(name) {
+		return fmt.Errorf("index database name %q is not one this supervisor provisions", name)
+	}
+	cfg.DBName = ""
+	db, err := config.Connect(cfg.FormatDSN())
+	if err != nil {
+		return fmt.Errorf("connect to drop %s: %s", name, config.ScrubDSNError(err, derived))
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, "DROP DATABASE IF EXISTS `"+name+"`"); err != nil {
+		return fmt.Errorf("drop %s: %s", name, config.ScrubDSNError(err, derived))
+	}
+	return nil
+}
+
 // deriveSourceIdentity resolves the stream's server_id. MySQL/MariaDB derive it
 // from the source DSN (serverid.DeriveServerID parses a MySQL DSN and fails on a
 // postgres:// connstring). PostgreSQL identity is the replication slot, so

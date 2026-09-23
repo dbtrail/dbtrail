@@ -16,6 +16,8 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // The kinds are what a screen switches on (#1803), so every one of them is
@@ -250,22 +252,101 @@ func TestCheckPrimaryKeys_namesEveryTableAndItsStatement(t *testing.T) {
 		t.Fatalf("statements = %d, want one per table (%d)", len(got.Statements), len(want))
 	}
 	for _, s := range got.Statements {
-		if !strings.HasPrefix(s, "ALTER TABLE `shop`.`") || !strings.HasSuffix(s, "` ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;") {
+		if !strings.HasPrefix(s, "ALTER TABLE `shop`.`") || !strings.HasSuffix(s, "` ADD COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;") {
 			t.Errorf("statement not in the expected shape: %s", s)
 		}
 	}
-	if !slices.Contains(got.Statements, "ALTER TABLE `shop`.`we``ird` ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;") {
+	if !slices.Contains(got.Statements, "ALTER TABLE `shop`.`we``ird` ADD COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;") {
 		t.Errorf("the backtick in we`ird was not doubled: %v", got.Statements)
 	}
 }
 
-// "a.b.c" could be schema a, table b.c or schema a.b, table c: a statement
-// that guesses runs against the wrong table. It is named, with no statement.
-func TestPrimaryKeyStatements_ambiguousNameGetsNone(t *testing.T) {
-	got := primaryKeyStatements([]string{"a.b.c", "shop.orders", "nodot", ".x", "x."})
-	want := []string{"ALTER TABLE `shop`.`orders` ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;"}
-	if !slices.Equal(got, want) {
-		t.Errorf("primaryKeyStatements = %v, want %v", got, want)
+// colRowsNamed is colRows with the column NAME chosen, for the cases where
+// the name a new key may take depends on the columns already there.
+func colRowsNamed(rows ...[4]string) *sqlmock.Rows {
+	r := sqlmock.NewRows([]string{
+		"TABLE_SCHEMA", "TABLE_NAME", "COLUMN_NAME", "ORDINAL_POSITION", "COLUMN_KEY",
+		"DATA_TYPE", "COLUMN_TYPE", "IS_NULLABLE", "COLUMN_DEFAULT", "GENERATION_EXPRESSION", "CHARACTER_SET_NAME",
+	})
+	for _, c := range rows {
+		r.AddRow(c[0], c[1], c[2], 1, c[3], "int", "int", "NO", nil, nil, nil)
+	}
+	return r
+}
+
+// The commonest key-less table already has a plain `id` column. A statement
+// that adds `id` again dies with ERROR 1060, which is worse than no statement
+// (#1802). The name comes from metadata.SuggestPKColumn over the table's own
+// columns, folded the way MySQL folds them, so `ID` counts as taken too.
+func TestCheckPrimaryKeys_neverAddsAColumnTheTableHas(t *testing.T) {
+	db, mock, done := pkDB(t)
+	defer done()
+	mock.ExpectQuery("information_schema.COLUMNS").WillReturnRows(colRowsNamed(
+		[4]string{"shop", "carts", "ID", ""},
+		[4]string{"shop", "carts", "total", ""},
+		[4]string{"shop", "notes", "body", ""},
+	))
+	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(tabRows(
+		[3]string{"shop", "carts", "BASE TABLE"},
+		[3]string{"shop", "notes", "BASE TABLE"},
+	))
+	got := checkPrimaryKeys(db, nil, snapshotPending)
+	want := []string{
+		"ALTER TABLE `shop`.`carts` ADD COLUMN `dbtrail_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;",
+		"ALTER TABLE `shop`.`notes` ADD COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;",
+	}
+	if !slices.Equal(got.Statements, want) {
+		t.Errorf("statements =\n%s\nwant\n%s", strings.Join(got.Statements, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// The setup check and the Overview card must hand somebody the SAME statement
+// for the same table. Built from the same reason, they are: a table that is
+// both on the wrong engine and without a key gets the one statement that
+// fixes both, not an ALTER that adds a key to a MyISAM table and leaves it
+// uncaptured.
+func TestCheckPrimaryKeys_statementIsTheOverviewCardsOwn(t *testing.T) {
+	db, mock, done := pkDB(t)
+	defer done()
+	mock.ExpectQuery("information_schema.COLUMNS").WillReturnRows(colRowsNamed(
+		[4]string{"shop", "legacy", "v", ""},
+	))
+	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(tabRowsEngine(
+		[3]string{"shop", "legacy", "MyISAM"},
+	))
+	got := checkPrimaryKeys(db, nil, snapshotPending)
+	card := status.UncapturedTable{
+		Schema: "shop", Table: "legacy",
+		Reason:   metadata.ExclusionReasonNotInnoDB + metadata.ExclusionReasonSeparator + metadata.ExclusionReasonNoPrimaryKey,
+		PKColumn: "id",
+	}.FixSQL()
+	if len(got.Statements) != 1 || got.Statements[0] != card {
+		t.Errorf("statements = %v, want the card's own %q", got.Statements, card)
+	}
+	if !strings.Contains(card, "ENGINE=InnoDB") {
+		t.Fatalf("the fixture no longer exercises the combined fix: %s", card)
+	}
+}
+
+// A table whose name contains a dot is named in full and still gets its
+// statement: schema and table travel as two names, never as one string split
+// back apart at a guessed dot.
+func TestCheckPrimaryKeys_aDotInATableName(t *testing.T) {
+	db, mock, done := pkDB(t)
+	defer done()
+	mock.ExpectQuery("information_schema.COLUMNS").WillReturnRows(colRowsNamed(
+		[4]string{"a", "b.c", "v", ""},
+	))
+	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(tabRows(
+		[3]string{"a", "b.c", "BASE TABLE"},
+	))
+	got := checkPrimaryKeys(db, nil, snapshotPending)
+	if !slices.Equal(got.Subjects, []string{"a.b.c"}) {
+		t.Errorf("subjects = %v", got.Subjects)
+	}
+	want := "ALTER TABLE `a`.`b.c` ADD COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;"
+	if !slices.Equal(got.Statements, []string{want}) {
+		t.Errorf("statements = %v, want [%s]", got.Statements, want)
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // A check's Kind names WHAT went wrong in a fixed word a screen can switch on
@@ -178,29 +180,16 @@ func proveLoopback(sourceDSN, kind string, retry func(host, port string) string)
 	return ""
 }
 
-// primaryKeyStatements builds one statement per table that adds a surrogate
-// key, the same one the check's remediation shows. names are schema.table as
-// the snapshot's classifier reports them. A name with more than one dot is
-// ambiguous (schema a.b, table c, or schema a, table b.c) and gets no
-// statement, since a guess would alter the wrong table; it is still named in
-// Subjects.
-func primaryKeyStatements(names []string) []string {
-	var out []string
-	for _, n := range names {
-		schema, table, ok := strings.Cut(n, ".")
-		if !ok || schema == "" || table == "" || strings.Contains(table, ".") {
-			continue
-		}
-		out = append(out, "ALTER TABLE "+quoteIdent(schema)+"."+quoteIdent(table)+
-			" ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;")
-	}
-	return out
-}
-
-// quoteIdent quotes a MySQL identifier: backticks, with a backtick inside
-// doubled.
-func quoteIdent(s string) string {
-	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+// primaryKeyStatement is the statement that gives a refused table its key.
+// It is the Overview card's own FixSQL (#1802), fed the same reason and the
+// same column name the snapshot would record, so the setup check and the card
+// can never hand somebody two different statements for one table. In
+// particular it never guesses `id`: a key-less table very often already HAS a
+// plain `id` column, and a statement that dies with ERROR 1060 is worse than
+// none. The column name is metadata.SuggestPKColumn's, over the table's own
+// columns.
+func primaryKeyStatement(rt metadata.RefusedTable) string {
+	return status.UncapturedTable{Schema: rt.Schema, Table: rt.Table, Reason: rt.Reason, PKColumn: rt.PKColumn}.FixSQL()
 }
 
 // portSuffix returns ":port" of a host:port address, or "" when it has none.

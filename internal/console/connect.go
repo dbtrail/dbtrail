@@ -42,8 +42,9 @@ type connectCheckResponse struct {
 	// launch itself failed. Empty when the checks are the reason (they are in
 	// Doctor) and on success.
 	Error string `json:"error,omitempty"`
-	// Kept reports the one case where something WAS left behind: the launch
-	// failed and removing the entry failed too. It is reported rather than
+	// Kept reports that something WAS left behind: the launch failed and
+	// removing the entry, or the database its start had already created,
+	// failed too. It is reported rather than
 	// swallowed, because "nothing happened" over a saved stopped server is the
 	// exact lie this endpoint exists to stop telling.
 	Kept bool `json:"kept,omitempty"`
@@ -99,6 +100,17 @@ func (s *Server) startNewEntry(ctx context.Context, e ServerEntry) startOutcome 
 		}
 		s.cm.evict(e.ID)
 		s.sessionProfiles.invalidate(e.ID)
+		// The entry is gone; so must be what Start provisioned for it. A
+		// per-server database left behind here is owned by nothing, and the
+		// next attempt mints a new id, so it would never be reused either.
+		if d, ok := s.monitorCtrl.(NewEntryDiscarder); ok {
+			if dErr := d.DiscardNew(ctx, e); dErr != nil {
+				out.Kept = true
+				slog.Error("connect: capture did not start and what it provisioned could not be removed",
+					"server", e.Name, "id", e.ID, "error", dErr.Error())
+				return out
+			}
+		}
 		slog.Warn("connect: capture did not start; the server was removed again",
 			"server", e.Name, "id", e.ID, "error", err.Error())
 		return out

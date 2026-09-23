@@ -1,6 +1,7 @@
 package console
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -385,5 +386,70 @@ func TestCheckRouteIsWriteTier(t *testing.T) {
 	// declared with — see TestDraftRoutesAreWriteTier.
 	if perm != ext.PermServersWrite {
 		t.Errorf("POST /api/servers/check requires %q, want %q", perm, ext.PermServersWrite)
+	}
+}
+
+// discardingCtrl is the stub supervisor with the optional discarder: it
+// records what the rollback asked it to take back.
+type discardingCtrl struct {
+	*stubMonitorCtrl
+	discarded  []string
+	discardErr error
+}
+
+func (c *discardingCtrl) DiscardNew(_ context.Context, e ServerEntry) error {
+	c.discarded = append(c.discarded, e.ID)
+	return c.discardErr
+}
+
+func newDiscardingServer(t *testing.T) (*Server, *discardingCtrl) {
+	t.Helper()
+	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl := &discardingCtrl{stubMonitorCtrl: &stubMonitorCtrl{}}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, MonitorCtrl: ctrl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv, ctrl
+}
+
+// A start can fail AFTER it created the per-server database. The rollback
+// removes the entry, so it must also hand back what the start provisioned —
+// and only then, never on a start that worked.
+func TestCheckRollbackTakesBackWhatTheStartProvisioned(t *testing.T) {
+	srv, ctrl := newDiscardingServer(t)
+	ctrl.startErr = errors.New("advisory lock is held")
+	_, body := doServersReq(t, srv, "POST", "/api/servers/check", checkBody)
+	got := decodeCheck(t, body)
+	if got.Started || got.Kept {
+		t.Fatalf("started=%v kept=%v, want both false: %s", got.Started, got.Kept, body)
+	}
+	if len(ctrl.discarded) != 1 {
+		t.Fatalf("DiscardNew was called %d times after a failed start, want 1", len(ctrl.discarded))
+	}
+
+	ctrl.startErr = nil
+	ctrl.discarded = nil
+	_, body = doServersReq(t, srv, "POST", "/api/servers/check", checkBody)
+	if got := decodeCheck(t, body); !got.Started {
+		t.Fatalf("the start did not go through: %s", body)
+	}
+	if len(ctrl.discarded) != 0 {
+		t.Errorf("DiscardNew was called on a start that worked")
+	}
+}
+
+// If what the start provisioned cannot be taken back, something WAS left
+// behind, and the answer says so.
+func TestCheckSaysSoWhenWhatTheStartProvisionedStays(t *testing.T) {
+	srv, ctrl := newDiscardingServer(t)
+	ctrl.startErr = errors.New("no")
+	ctrl.discardErr = errors.New("drop refused")
+	_, body := doServersReq(t, srv, "POST", "/api/servers/check", checkBody)
+	if got := decodeCheck(t, body); !got.Kept {
+		t.Errorf("kept=false although the per-server database could not be removed: %s", body)
 	}
 }

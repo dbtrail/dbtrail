@@ -983,7 +983,18 @@ const PrimaryKeyCheckName = "Every table has a PRIMARY KEY"
 // information_schema error must not stop capture on a healthy source, the trade
 // checkIndexCapacity already refused to make.
 func checkPrimaryKeys(db *sql.DB, schemas []string, snapshot snapshotState) CheckResult {
-	tables, err := metadata.TablesWithoutPrimaryKey(db, schemas)
+	refused, err := metadata.RefusedTables(db, schemas)
+	// Only the tables that need a KEY are this check's; one that is merely on
+	// the wrong engine is checkInnoDB's. A table that is both is named here,
+	// and its statement fixes both, exactly as the Overview card's does.
+	var tables, statements []string
+	for _, rt := range refused {
+		if rt.PKColumn == "" {
+			continue
+		}
+		tables = append(tables, rt.Schema+"."+rt.Table)
+		statements = append(statements, primaryKeyStatement(rt))
+	}
 	switch {
 	case errors.Is(err, metadata.ErrNoColumnsVisible):
 		// Not a pass. Schema visibility has its own check and has already
@@ -1028,7 +1039,7 @@ func checkPrimaryKeys(db *sql.DB, schemas []string, snapshot snapshotState) Chec
 		Detail:     detail,
 		Kind:       KindNoPrimaryKey,
 		Subjects:   tables,
-		Statements: primaryKeyStatements(tables),
+		Statements: statements,
 		// States what HAPPENS, not what degrades. An earlier draft of this said
 		// the tables were captured but could not be addressed by row, which is
 		// wrong in the reassuring direction: the operator reads it as degraded
