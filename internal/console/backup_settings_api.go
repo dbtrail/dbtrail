@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/dbtrail/dbtrail/internal/cliutil"
 )
 
 // The one settings page that owns backup and snapshot parameters (#1582).
@@ -160,6 +162,23 @@ type backupSettingsServerDTO struct {
 	// the daemon's own, so console.LocalKeepTargets never prunes it,
 	// whatever KeepNewest says. The row says that instead of the count.
 	KeepBlocked bool `json:"keep_blocked,omitempty"`
+	// KeepHeld: of those, the folder is blocked because it once was shared
+	// and still holds the other server's snapshots (LocalKeepHeld). The way
+	// out differs (a new empty folder), so the row says which.
+	KeepHeld bool `json:"keep_held,omitempty"`
+	// KeepInForce is the count the prune loop applies to this folder right
+	// now: localRetentionOf, the SAME call behind GET /api/baselines
+	// local_retention.keep_newest, so the row's "how far back" line and the
+	// listing's retention line can never name two numbers. 0 where nothing
+	// is pruned. KeepNewest is the saved setting; the two differ where the
+	// setting does not apply (blocked, a destination, no loop).
+	KeepInForce int `json:"keep_in_force,omitempty"`
+	// PruneRetainMinutes is the age retention the same loop applies to every
+	// folder (--baseline-retain or its saved value), in minutes: a snapshot
+	// younger than it is kept even outside the newest KeepInForce, so it
+	// stretches how far back this server can go. 0 = none, or unreadable
+	// (the loop then applies none either).
+	PruneRetainMinutes int `json:"prune_retain_minutes,omitempty"`
 }
 
 // The three provenance verdicts a server's backup location can have. The
@@ -264,6 +283,11 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	dto.KeepNewest = e.LocalKeepNewest
 	dto.PruneLoop = s.localPruneLoop
 	dto.KeepBlocked = LocalKeepBlocked(s.cm.reg.List(), e, s.cm.defaultBaselineDir)
+	dto.KeepHeld = e.LocalKeepHeld
+	if r := s.localRetentionOf(e.ID); r != nil {
+		dto.KeepInForce = r.KeepNewest
+		dto.PruneRetainMinutes = s.pruneRetainMinutes()
+	}
 	dto.FullBackupPossible = FullBackupPossible(e, s.scheduleGates()) == nil
 	dto.ScheduleLoop = s.backupSchedules != nil
 	if e.BackupSchedule != nil {
@@ -283,6 +307,21 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 		}
 	}
 	return dto
+}
+
+// pruneRetainMinutes is the age retention the prune loop applies, read the way
+// the loop reads it (consoleapp effectiveRetain): the saved value over the
+// startup flag, parsed by the same cliutil.ParseRetain; unreadable = none.
+func (s *Server) pruneRetainMinutes() int {
+	raw := s.backupSettingRow(BackupSettingBaselineRetain, s.backupSettingsDefaults.BaselineRetain, "").Value
+	if raw == "" {
+		return 0
+	}
+	d, err := cliutil.ParseRetain(raw)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return int(d.Minutes())
 }
 
 // backupSettingsUpdateRequest is the PUT body. Pointer semantics: an omitted

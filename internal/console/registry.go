@@ -144,6 +144,15 @@ type ServerEntry struct {
 	// #1681) keeps them all, as before. With a destination set it does
 	// nothing: that mode removes only what the destination confirmed.
 	LocalKeepNewest int `yaml:"local_keep_newest,omitempty"`
+	// LocalKeepHeld marks a folder that stopped being shared while it still
+	// holds snapshots another server wrote (#1681): the other server was
+	// deleted, answered no, or moved away. A snapshot does not record which
+	// server wrote it, so counting the folder would take the other server's
+	// snapshots for this one's copies; it is never pruned, like a shared
+	// folder. OWNED BY THE REGISTRY: set by markHeldFolders, carried while
+	// the entry keeps its folder, cleared when it moves to another one (the
+	// way out the page names), and never taken from a caller.
+	LocalKeepHeld bool `yaml:"local_keep_held,omitempty"`
 
 	// Extra is the forward-compat catch-all: unknown fields written by a NEWER
 	// bintrail (e.g. the phase-2 control plane's source_dsn / server_id /
@@ -637,6 +646,7 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 		return ServerEntry{}, fmt.Errorf("generate server id: %w", err)
 	}
 	e.ID = id
+	e.LocalKeepHeld = false // registry-owned; a new entry never starts held
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -675,9 +685,15 @@ func (r *Registry) Update(e ServerEntry) error {
 		if e.Extra == nil {
 			e.Extra = old.Extra // preserve forward-compat fields across edits
 		}
+		// Registry-owned (#1681): kept while the folder is, cleared by a move.
+		e.LocalKeepHeld = old.LocalKeepHeld && canonicalDir(e.BaselineDir) == canonicalDir(old.BaselineDir) && e.BaselineDir != ""
+		// The whole list is copied: marking a folder that stops being shared
+		// changes OTHER entries, and a failed save must undo all of it.
+		prev := slices.Clone(r.file.Servers)
 		r.file.Servers[i] = e
+		markHeldFolders(prev, r.file.Servers)
 		if err := r.save(); err != nil {
-			r.file.Servers[i] = old // roll back
+			r.file.Servers = prev // roll back
 			return err
 		}
 		return nil
@@ -696,10 +712,13 @@ func (r *Registry) Delete(id string) error {
 		if old.ID != id {
 			continue
 		}
-		r.file.Servers = append(r.file.Servers[:i], r.file.Servers[i+1:]...)
+		// Copied whole before the delete: the append below rewrites the
+		// backing array in place, and markHeldFolders changes other entries.
+		prev := slices.Clone(r.file.Servers)
+		r.file.Servers = append(slices.Clone(r.file.Servers[:i]), r.file.Servers[i+1:]...)
+		markHeldFolders(prev, r.file.Servers)
 		if err := r.save(); err != nil {
-			// Roll back: re-insert at the original position.
-			r.file.Servers = append(r.file.Servers[:i], append([]ServerEntry{old}, r.file.Servers[i:]...)...)
+			r.file.Servers = prev // roll back
 			return err
 		}
 		return nil

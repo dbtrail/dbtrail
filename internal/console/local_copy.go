@@ -174,7 +174,9 @@ func validLocalKeepNewest(n int) error {
 // pruned: a snapshot does not record which server wrote it, so one server's
 // newer copy of a table would count as the newest copy of the other's.
 // Folders are compared after resolving symlinks, so a second spelling of the
-// same folder is still the same folder.
+// same folder is still the same folder. A folder that USED to be shared and
+// still holds the other server's snapshots (LocalKeepHeld) is never pruned
+// either: the reason above outlives the sharing.
 func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int {
 	users := map[string]int{}
 	for _, e := range entries {
@@ -190,7 +192,7 @@ func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int 
 	}
 	out := map[string]int{}
 	for _, e := range entries {
-		if e.BaselineDir == "" || e.BaselineS3 != "" || e.LocalKeepNewest <= 0 {
+		if e.BaselineDir == "" || e.BaselineS3 != "" || e.LocalKeepNewest <= 0 || e.LocalKeepHeld {
 			continue
 		}
 		dir := canonicalDir(e.BaselineDir)
@@ -203,11 +205,15 @@ func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int 
 }
 
 // LocalKeepBlocked reports whether e's folder is one LocalKeepTargets refuses
-// to prune whatever e's count says: shared with another server, or the
-// daemon's own folder. The settings row says so instead of promising a count.
+// to prune whatever e's count says: shared with another server, once shared
+// and still holding its snapshots, or the daemon's own folder. The settings
+// row says so instead of promising a count.
 func LocalKeepBlocked(entries []ServerEntry, e ServerEntry, excluded ...string) bool {
 	if e.BaselineDir == "" {
 		return false
+	}
+	if e.LocalKeepHeld {
+		return true
 	}
 	dir := canonicalDir(e.BaselineDir)
 	for _, d := range excluded {
@@ -222,6 +228,35 @@ func LocalKeepBlocked(entries []ServerEntry, e ServerEntry, excluded ...string) 
 		}
 	}
 	return n > 1
+}
+
+// markHeldFolders marks, in after, every entry left ALONE in a folder that
+// before had more than one server (#1681): the others' snapshots are still in
+// it, and a snapshot does not say which server wrote it. The registry calls it
+// on every update and delete, the only two ways a folder stops being shared
+// (a delete, an answer of no, or a move elsewhere). Marking is the safe
+// direction: a held folder keeps every snapshot until its server moves to a
+// new folder. Callers hold the registry lock.
+func markHeldFolders(before, after []ServerEntry) {
+	count := func(list []ServerEntry) map[string]int {
+		n := map[string]int{}
+		for _, e := range list {
+			if e.BaselineDir != "" {
+				n[canonicalDir(e.BaselineDir)]++
+			}
+		}
+		return n
+	}
+	was, now := count(before), count(after)
+	for i := range after {
+		if after[i].BaselineDir == "" {
+			continue
+		}
+		d := canonicalDir(after[i].BaselineDir)
+		if was[d] > 1 && now[d] == 1 {
+			after[i].LocalKeepHeld = true
+		}
+	}
 }
 
 // canonicalDir is the folder a path names, symlinks resolved; a path that

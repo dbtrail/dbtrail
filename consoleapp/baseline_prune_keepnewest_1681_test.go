@@ -219,3 +219,34 @@ func TestUpConsoleConfig_localPruneLoopFollowsTheLoopGate(t *testing.T) {
 		t.Error("no registry and no retention: no loop, the console must not claim one")
 	}
 }
+
+// A folder that stopped being shared while it still holds the other server's
+// snapshots is not a prune target: the daemon's sweep never counts them as
+// the remaining server's copies. Through the real registry, so the flag the
+// sweep reads is the one a delete sets.
+func TestLocalKeepPruneTargets_aFolderThatWasSharedStaysUncounted(t *testing.T) {
+	state := t.TempDir()
+	reg, err := console.LoadRegistry(filepath.Join(state, "console-servers.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(state, "shared")
+	if _, err := reg.Add(console.ServerEntry{Name: "a", DSN: "u:p@tcp(h:3306)/a", BaselineDir: shared, LocalKeepNewest: 1}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := reg.Add(console.ServerEntry{Name: "b", DSN: "u:p@tcp(h:3306)/b", BaselineDir: shared})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := makeLocalSnapshots(t, shared, 3)
+	if err := reg.Delete(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := localKeepPruneTargets(reg.List(), ""); len(got) != 0 {
+		t.Fatalf("targets = %+v, want none: the folder still holds b's snapshots", got)
+	}
+	baselinePruneSweep(context.Background(), reg, "", "", "", baseline.PruneLocal)
+	if got := snapshotsIn(t, shared); len(got) != len(names) {
+		t.Fatalf("the sweep removed snapshots from a folder that held another server's: %v", got)
+	}
+}
