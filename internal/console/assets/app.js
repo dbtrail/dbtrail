@@ -1411,7 +1411,7 @@ function ovStatPending(key, scope) {
 function ovFrame() {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
-    "What changed recently, and where: your starting point. Each figure below states the window it covers.");
+    "The path from your database to its Parquet copy, with what each step is doing right now. Where it breaks, the fix is on it.");
   const f = {};
   f.head = ovHead = pageHead("Overview", sub);
   v.append(f.head);
@@ -1421,6 +1421,13 @@ function ovFrame() {
   v.append(f.liveSlot);
   f.firstRunSlot = el("div");
   v.append(f.firstRunSlot);
+  // The path from the source to the copy (the page's first answer): filled
+  // by fillOvFlow once the four reads behind it land, and again on the slow
+  // refresh cycle. Not painted on a console that lists no server yet: the
+  // add-server card above is that page's whole first screen.
+  f.flowSlot = el("div");
+  f.flowSlot.append(el("section", { class: "flow flow-pending" }, ovSkelLines(2), el("div", { class: "skel-note", text: "reading the path from your database to its copy…" })));
+  v.append(f.flowSlot);
   f.covSlot = el("div");
   f.covSlot.append(ovPendingCard("Restore coverage", "computing restore coverage…", "cov-card"));
   v.append(f.covSlot);
@@ -1615,6 +1622,372 @@ function fillOvActivity(f, activity) {
     el("span", { text: activity ? " · " + winScope : "" }));
 }
 
+
+// ── The copy flow ────────────────────────────────────────────────────────────
+//
+// The Overview's first screen is the path itself: your MySQL, the binlog it
+// ships, DBTrail, the timetable that writes the Parquet copy, the bucket the
+// copy lives in, and whatever reads it. Every arrow and box carries its live
+// state, so the three questions an operator brings (is the binlog being
+// read, do the table definitions still hold, how far behind is what I query)
+// are read off the drawing instead of off three sentences.
+//
+// One rule keeps it honest: the state goes ON THE ARROW THAT BROKE, and every
+// piece downstream of it goes grey with "as of HH:MM", never red. What is
+// downstream is still valid, only old — and a green "5 min ago" on the copy
+// arrow while capture is stopped would be a false green, because the update
+// folded a frozen index.
+//
+// ovFlowModel is pure: raw payloads in, the seven pieces and the decision
+// cards out. It never fetches and never touches the DOM, so every state has
+// a fixture test in assets_overview_flow_test.go. Tones: ok (green), warn
+// (amber), bad (red), off (grey: downstream of a break), none (neutral: not
+// known, and NOT an alarm). Nothing here is ever ok without the payload that
+// earns it.
+
+// flowHHMM: "HH:MM" of a wire stamp (RFC3339 or "YYYY-MM-DD HH:MM:SS"), for
+// the labels that are read at a glance; the full stamp goes in the tooltip.
+function flowHHMM(stamp) {
+  const m = /^\d{4}-\d{2}-\d{2}[ T](\d{2}:\d{2})/.exec(String(stamp || ""));
+  return m ? m[1] : "";
+}
+
+// flowEveryMinutes parses a schedule's "every" ("5m", "6h", "1d") into
+// minutes, or 0 when it cannot: 0 never colours the copy arrow.
+function flowEveryMinutes(every) {
+  const m = /^(\d+)\s*([mhd])$/.exec(String(every || "").trim());
+  if (!m) return 0;
+  const n = Number(m[1]);
+  return m[2] === "m" ? n : m[2] === "h" ? n * 60 : n * 1440;
+}
+
+// flowEveryLabel says the interval the way a person does: "every 5 min",
+// "every 6 h", "every 24 h" (a day is said in hours: "every 1 d" reads as a
+// typo).
+function flowEveryLabel(every) {
+  const min = flowEveryMinutes(every);
+  if (!min) return "";
+  if (min % 60) return "every " + min + " min";
+  return "every " + (min / 60) + " h";
+}
+
+function ovFlowModel(inp) {
+  const cov = inp.coverage || {};
+  const bl = inp.baselines || {};
+  const srv = inp.server || null;
+  // The server list could not be read: the supervisor's word is unknown, so
+  // the capture arrow cannot be green off the index's verdict alone — the
+  // index can still say "current" for a stream that crashed seconds ago.
+  const serverUnknown = !!inp.serverUnknown;
+  const mon = inp.monitor || {};
+  const schema = inp.schema || {};
+  const unc = inp.uncaptured || {};
+  const may = inp.may || (() => true);
+  const monitorCap = !!inp.monitorCap;
+  const registry = !!(srv && srv.kind === "registry" && srv.has_source);
+  const sid = srv ? srv.id : "";
+  const piece = (title, tone, line, sub, extra) => Object.assign({ title, tone, line: line || "", sub: sub || "" }, extra || {});
+  const cards = [];
+
+  // Capture: the supervisor's word first (it knows a crashed stream before
+  // the index shows it), then the index's own freshness verdict.
+  const lastIndexed = flowHHMM(cov.delta_to);
+  let capture, cut = null;
+  const mstate = registry ? (srv.monitor_state || "") : "";
+  if (serverUnknown || cov.continuity === "unavailable") {
+    capture = piece("binlog", "warn", "state could not be read", serverUnknown ? "the server list did not answer" : "");
+  } else if (mstate === "failed") {
+    capture = piece("binlog", "bad", "stopped", mon.since ? "since " + flowHHMM(mon.since) : "");
+    cut = { at: lastIndexed, piece: "capture" };
+    cards.push({ kind: "capture-failed", key: sid + "|failed|" + (mon.since || "") + "|" + (mon.last_error || ""), tone: "bad",
+      title: "Capture stopped" + (lastIndexed ? " " + lastIndexed : ""),
+      lines: [mon.last_error || "The daemon reported no error text."],
+      actions: [{ label: "Start", primary: true, run: "start" }, { label: "Details", run: "status" }] });
+  } else if (mstate === "stalled" || mstate === "lost_position") {
+    capture = piece("binlog", "bad", mstate === "stalled" ? "stalled" : "position lost", lastIndexed ? "last change " + lastIndexed : "");
+    cut = { at: lastIndexed, piece: "capture" };
+    cards.push({ kind: "capture-stalled", key: sid + "|" + mstate + "|" + lastIndexed, tone: "bad",
+      title: mstate === "stalled" ? "Capture is not making progress" : "Capture lost its position in the binlog",
+      lines: [mstate === "stalled"
+        ? "The stream is alive but nothing new has reached the index" + (lastIndexed ? " since " + lastIndexed : "") + ". It restarts on its own; there is no button for this."
+        : "Events between the saved position and the oldest binlog still on the source are gone for good. Read the database again to make the copy whole."],
+      recipe: ["Is the daemon process alive, and is its clock right?",
+        "The last 100 lines of the daemon log: a stuck batch names itself there.",
+        "SHOW BINARY LOGS on the source: if the file the saved position points at is gone, capture ends in a permanent gap.",
+        "Free disk and write errors on the index database."],
+      actions: [{ label: "Details", run: "status" }] });
+  } else if (mstate === "stopped") {
+    capture = piece("binlog", "none", "stopped", "not capturing");
+    cut = { at: lastIndexed, piece: "capture" };
+    cards.push({ kind: "capture-stopped", key: sid + "|stopped|" + (mon.since || lastIndexed), tone: "none", title: "Capture is stopped for this server",
+      lines: ["Nothing new reaches the copy until it starts again."],
+      actions: [{ label: "Start", primary: true, run: "start" }] });
+  } else if (mstate === "pending") {
+    capture = piece("binlog", "warn", "starting", srv.monitor_phase || "");
+  } else {
+    const fresh = cov.freshness || "";
+    const cont = cov.continuity || "";
+    if (cont === "gap_lost") {
+      capture = piece("binlog", "bad", "changes lost for good", lastIndexed ? "last change " + lastIndexed : "");
+      cut = { at: lastIndexed, piece: "capture" };
+    } else if (fresh === "current") {
+      capture = piece("binlog", "ok", typeof cov.lag_seconds === "number" ? plainDuration(cov.lag_seconds) + " behind" : "reading", "");
+    } else if (fresh === "idle") {
+      // Green, and "connected": the daemon is alive and checkpointing; what
+      // it cannot tell apart is a quiet server from capture fallen far
+      // behind, so the word is never "up to date".
+      capture = piece("binlog", "ok", "connected", lastIndexed ? "nothing new since " + lastIndexed : "nothing new yet");
+    } else if (fresh === "stalled") {
+      capture = piece("binlog", "bad", "stopped" + (lastIndexed ? " " + lastIndexed : ""),
+        typeof cov.checkpoint_age_seconds === "number" ? "position saved " + plainDuration(cov.checkpoint_age_seconds) + " ago" : "");
+      cut = { at: lastIndexed, piece: "capture" };
+    } else if (fresh === "unknown" || fresh === "unavailable") {
+      capture = piece("binlog", "warn", "state could not be read", "");
+    } else if (fresh === "none") {
+      capture = piece("binlog", "none", "not capturing from here", "");
+    } else {
+      capture = piece("binlog", "none", "no data yet", "");
+    }
+  }
+
+  // The source box: a quiet server says so on the box, not on the arrow.
+  const source = piece("Your MySQL", "none", srv && srv.source_host ? srv.source_host : "", "nothing installed");
+  if (!cut && capture.tone === "ok" && capture.line === "connected") source.line = "quiet";
+
+  // Table definitions (the DBTrail box): what the schema snapshot last did,
+  // the count of captured tables, and a schema change that stopped the copy.
+  const tablesWord = (n) => n + (n === 1 ? " table" : " tables");
+  const captured = typeof unc.tables_captured === "number" ? tablesWord(unc.tables_captured) : "";
+  const sch = bl.schedule || null;
+  const run = sch && sch.last_run;
+  const fb = sch && sch.last_fallback;
+  const foldCode = run && run.why_code;
+  const foldRefused = !!(fb && run && (foldCode === "fold_refused" || foldCode === "fold_crashed"));
+  const refreshFailed = !!(!sch && bl.refresh && bl.refresh.state === "failed");
+  const showReason = may("query:execute");
+  let engine;
+  if (schema.unavailable && schema.status && schema.status !== 403) {
+    engine = piece("DBTrail", "warn", captured, "definitions could not be read");
+  } else if (schema.unavailable) {
+    engine = piece("DBTrail", "none", captured, monitorCap ? "definitions: not checked from here" : "run the daemon with watch to check definitions");
+  } else if (schema.state === "failed") {
+    engine = piece("DBTrail", "bad", "definitions could not be refreshed", showReason ? (schema.last_error || "") : "", { schemaRetry: true });
+  } else if (schema.state === "running") {
+    engine = piece("DBTrail", "warn", "refreshing table definitions", schema.since ? "since " + flowHHMM(schema.since) : "");
+  } else if (schema.state === "succeeded") {
+    engine = piece("DBTrail", "ok", captured || "definitions read", schema.finished_at ? "definitions read " + flowHHMM(schema.finished_at) : "");
+  } else {
+    engine = piece("DBTrail", "none", captured, "");
+  }
+  if (foldRefused && run.ok === true) {
+    // The schedule already answered the change with a full read: say so,
+    // no decision to make.
+    engine = piece("DBTrail", "warn", "a schema change", "copy read in full" + (run.finished_at ? " " + flowHHMM(run.finished_at) : ""));
+  }
+
+  // The copy arrow: how the copy moves, and how old the newest one is. The
+  // number is the copy's AGE, never "behind the source": the copy stands on
+  // the index as it was when the update started, and the index was itself
+  // behind by then, so a single "behind" figure would understate. "behind"
+  // is said once on this page, on the binlog arrow.
+  const blUnknown = !!bl.unavailable;
+  const snap = (bl.snapshots || [])[0] || null;
+  const snapAt = snap ? flowHHMM(snap.time) : "";
+  const everyMin = sch ? flowEveryMinutes(sch.every) : 0;
+  const everyLabel = sch ? flowEveryLabel(sch.every) : (bl.refresh ? "on the daemon's timetable" : "no schedule set");
+  const nextAt = sch && sch.runnable && sch.next_run ? flowHHMM(sch.next_run) : "";
+  const ageMin = snap && typeof snap.age_hours === "number" ? snap.age_hours * 60 : -1;
+  let update = piece(everyLabel || "no schedule set", "none", "", "");
+  if (snap) {
+    update.big = ageMin >= 0 ? plainDuration(ageMin * 60) + " ago" : "";
+    update.sub = (snapAt ? "copy from " + snapAt : "") + (nextAt ? (snapAt ? " · " : "") + "next " + nextAt : "");
+    update.stamp = snap.time;
+    if (everyMin && ageMin >= 0) {
+      const ratio = ageMin / everyMin;
+      update.tone = ratio < 2 ? "ok" : ratio <= 3 ? "warn" : "bad";
+    }
+  } else {
+    update.line = blUnknown ? "could not be read" : "no copy yet";
+    if (blUnknown) { update.tone = "warn"; update.title = "copy"; }
+  }
+  // An unknown capture state cannot vouch for the copy: keep the age, drop
+  // the colour, so a fresh snapshot never reads green while nobody knows
+  // whether capture is stopped.
+  if (capture.tone === "warn" && capture.line === "state could not be read") update.tone = "none";
+  if (sch && sch.runnable === false && sch.reason) {
+    update.tone = "warn";
+    update.line = "schedule cannot run";
+    update.sub = showReason ? sch.reason : "";
+  }
+  const blocked = (foldRefused && run.ok !== true) || refreshFailed;
+  if (blocked && !cut) {
+    const stamp = foldRefused ? (run.finished_at || run.started_at || "") : (bl.refresh.finished_at || "");
+    const at = flowHHMM(stamp);
+    update.tone = "bad";
+    update.big = "";
+    update.line = "update stopped" + (at ? " " + at : "");
+    update.sub = snapAt ? "copy from " + snapAt : "";
+    cut = { at: snapAt, piece: "update" };
+    const why = foldRefused ? run.why : bl.refresh.last_error;
+    const said = showReason && why ? (foldRefused ? backupWhyLine(why, foldCode, false) : backupFoldError(why)) : "";
+    cards.push({ kind: "update-blocked", key: sid + "|blocked|" + stamp, tone: "bad",
+      title: "A schema change stopped the update from changes",
+      lines: [said || "A table changed shape. The copy cannot be updated from the recorded changes until that table is read again from the database."],
+      cost: "Reading the database takes longer than an update and adds load on your server. The lock mode is set when the daemon starts.",
+      actions: [
+        nextAt ? { label: "Wait for the scheduled read at " + nextAt, primary: true, run: "dismiss" } : { label: "Wait", primary: true, run: "dismiss" },
+        { label: "Read database now", run: "read", confirm: "Read every table from the source now?\n\nThis reads your whole database, with the lock mode set when the daemon starts, and publishes a new copy when it finishes." },
+      ] });
+  }
+
+  // The bucket, and the reader.
+  let bucket;
+  if (blUnknown) bucket = piece("Your bucket", "warn", "could not be read", "");
+  else if (bl.configured === false) bucket = piece("Your bucket", "none", "no copy location set", "");
+  else if (snap) {
+    const kinds = (snap.kinds || []).map((k) => (k === "dir" ? "disk" : k === "s3" ? "S3" : k));
+    bucket = piece("Your bucket", "none", tablesWord((snap.tables || []).length), kinds.join(" + "));
+  } else bucket = piece("Your bucket", "none", bl.snapshots ? "no copy yet" : "", "");
+  const sql = piece("SQL", "none", "Query the copy", "", { link: "connect" });
+  const reader = piece("Any reader", "none", "DuckDB here", "your tools");
+
+  // Downstream of a break: grey, "as of" the same stamp on every piece.
+  if (cut) {
+    // No stamp (nothing was ever indexed): "not updating" says the same
+    // without implying a change that never happened.
+    const asOf = cut.at ? "as of " + cut.at : "not updating";
+    const dim = (p) => { p.tone = "off"; p.big = ""; p.line = asOf; p.sub = ""; p.schemaRetry = false; };
+    if (cut.piece === "capture") { dim(engine); dim(update); }
+    dim(bucket);
+  }
+  return { pieces: [source, capture, engine, update, bucket, sql, reader], cards, cut };
+}
+
+// ovFlowDismissed remembers the decision cards an operator closed, by server,
+// kind and the stamp that raised them: the same alarm does not come back on
+// the next refresh, a NEW one (another stamp) does.
+const ovFlowDismissed = new Set();
+// ovFlowSeq: the newest loadOvFlow issued. An older read landing after a
+// newer one painted must not repaint the slot with what it found first.
+let ovFlowSeq = 0;
+
+// flowSection paints one model. Boxes and arrows are plain HTML in a grid
+// (style.css .flow): the decision card under a broken arrow carries buttons
+// and wrapping text, which an SVG cannot hold, and under 880 px the grid
+// stacks. Colour and label change by class and text; nothing is drawn.
+function flowSection(model, ctx) {
+  const sec = el("section", { class: "flow" + (model.cut ? " flow-cut" : ""), "aria-label": "The path from your database to its copy" });
+  const grid = el("div", { class: "flow-grid" });
+  const isArrow = (i) => i % 2 === 1;
+  model.pieces.forEach((p, i) => {
+    const node = el("div", { class: (isArrow(i) ? "flow-arrow" : "flow-box") + " " + (p.tone || "none") });
+    if (isArrow(i)) {
+      node.append(el("span", { class: "flow-label", text: p.title }));
+      node.append(el("span", { class: "flow-line", "aria-hidden": "true" }));
+      const val = el("div", { class: "flow-val" });
+      if (p.big) val.append(el("div", { class: "flow-big", text: p.big, title: p.stamp ? utcLocalTitle(p.stamp) || null : null }));
+      if (p.link) {
+        val.append(el("a", { class: "flow-link", href: "/" + p.link, text: p.line + " ›",
+          onclick: (e) => { e.preventDefault(); navigate(p.link); } }));
+      } else if (p.line) val.append(el("div", { class: "flow-state" }, el("span", { class: "health-dot " + (p.tone || "none") }), " " + p.line));
+      if (p.sub) val.append(el("div", { class: "flow-sub", text: p.sub }));
+      node.append(val);
+    } else {
+      const head = el("div", { class: "flow-box-head" });
+      if (p.tone !== "none") head.append(el("span", { class: "health-dot " + p.tone }));
+      head.append(el("b", { text: p.title }));
+      node.append(head);
+      if (p.line) node.append(el("div", { class: "flow-state", text: p.line }));
+      if (p.sub) node.append(el("div", { class: "flow-sub", text: p.sub }));
+      if (p.schemaRetry) { const b = schemaSnapshotButton(); if (b) node.append(b); }
+    }
+    grid.append(node);
+  });
+  sec.append(grid);
+  // One decision at a time: the card of the piece that broke first.
+  const card = model.cards.find((c) => !ovFlowDismissed.has(c.key));
+  if (card) sec.append(flowCard(card, ctx, () => { ovFlowDismissed.add(card.key); sec.replaceWith(flowSection(model, ctx)); }));
+  return sec;
+}
+
+// flowCard is one decision: what happened, what it costs, and buttons with a
+// verb each. The expensive option is never the primary button; every button
+// closes the card.
+function flowCard(card, ctx, close) {
+  const box = el("div", { class: "flow-card " + (card.tone === "bad" ? "bad-box" : card.tone === "warn" ? "warn-box" : "muted-box"), role: "region", "aria-label": card.title });
+  box.append(el("b", { text: card.title }));
+  (card.lines || []).forEach((l) => box.append(el("div", { class: "warn-line", text: l })));
+  if (card.recipe) {
+    const d = el("details", { class: "flow-recipe" });
+    d.append(el("summary", { text: "See what to check" }));
+    const ul = el("ul");
+    card.recipe.forEach((r) => ul.append(el("li", { text: r })));
+    d.append(ul);
+    box.append(d);
+  }
+  const acts = el("div", { class: "warn-actions" });
+  (card.actions || []).forEach((a) => {
+    if (a.run === "start" && !(ctx.registry && ctx.monitorCap)) return;
+    if (a.run === "read" && !(ctx.registry && ctx.monitorCap && sessionMay(PERM_SNAPSHOT_CREATE))) return;
+    const b = el("button", { class: "btn btn-sm" + (a.primary ? " btn-primary" : " btn-ghost"), type: "button", text: a.label });
+    b.onclick = () => {
+      // A guarded action needs a real yes; where confirm is missing the
+      // expensive read does not run on a missing answer.
+      if (a.confirm && !(typeof window.confirm === "function" && window.confirm(a.confirm))) return;
+      if (a.run === "status") { navigate("status"); return; }
+      if (a.run === "start") { startMonitorRow(ctx.serverId); close(); return; }
+      if (a.run === "read") {
+        // The card stays until the next repaint says what the read did:
+        // closing it here would hide the decision when the POST fails
+        // (createBaseline only toasts). The button says it was pressed.
+        b.disabled = true; b.textContent = "Reading…";
+        createBaseline(ctx.serverId);
+        return;
+      }
+      close();
+    };
+    acts.append(b);
+  });
+  if (acts.children.length) box.append(acts);
+  if (card.cost) box.append(el("div", { class: "flow-cost", text: card.cost }));
+  return box;
+}
+
+// loadOvFlow gathers the reads the flow needs and paints it. The coverage
+// payload comes from the caller (the page already reads it; a second read per
+// cycle would double the count the live test pins). The three others are
+// best-effort: a 403 on the schema snapshot (a serve without the daemon) or a
+// missing monitor status paints "not known", never a colour.
+function loadOvFlow(f, live, coverage) {
+  if (serversEmpty) { clear(f.flowSlot); return Promise.resolve(); }
+  const seq = ++ovFlowSeq;
+  const id = currentServer || defaultServerId;
+  const read = (path) => apiWithin(path, OV_REQUEST_MS);
+  // A read that fails is said as a failure by the model, never as a fact
+  // ("no copy yet") and never as a colour: the marker carries the status so
+  // a 403 (serve, or a session without the permission) can read "not from
+  // here" while a 500 or a timeout reads "could not be read".
+  const servers = read("/api/servers").then((d) => ({ srv: ((d && d.servers) || []).find((s) => s.id === id) || null }), (err) => ({ srv: null, unknown: true, err }));
+  const baselines = read("/api/baselines").then((d) => d || {}, () => ({ unavailable: true }));
+  const uncaptured = read("/api/uncaptured-tables").then((d) => d || {}, () => ({}));
+  return servers.then(({ srv, unknown, err }) => {
+    if (unknown) console.error("flow: server list unavailable", err);
+    const registry = !!(srv && srv.kind === "registry" && srv.has_source);
+    const wantMonitor = registry && /^(failed|stalled|lost_position|stopped)$/.test(srv.monitor_state || "");
+    const monitor = wantMonitor ? read("/api/servers/" + encodeURIComponent(id) + "/monitor").then((d) => (d && d.monitor) || {}, () => ({})) : Promise.resolve({});
+    const schema = registry && capsCache.monitor
+      ? read("/api/servers/" + encodeURIComponent(id) + "/schema-snapshot").then((d) => (d && d.schema_snapshot) || { unavailable: true, status: 0 }, (e) => ({ unavailable: true, status: (e && e.status) || 0 }))
+      : Promise.resolve({ unavailable: true, status: 403 });
+    return Promise.all([baselines, uncaptured, monitor, schema]).then(([bl, unc, mon, sch]) => {
+      if (!live() || seq !== ovFlowSeq) return;
+      const model = ovFlowModel({ coverage, baselines: bl, server: srv, serverUnknown: !!unknown, monitor: mon, schema: sch, uncaptured: unc,
+        monitorCap: !!capsCache.monitor, may: sessionMay });
+      clear(f.flowSlot);
+      f.flowSlot.append(flowSection(model, { serverId: id, registry, monitorCap: !!capsCache.monitor }));
+    });
+  });
+}
+
 function renderOverview() {
   const gen = serverGen;
   const f = ovFrame();
@@ -1644,7 +2017,7 @@ function renderOverview() {
   // path gets — a swallowed null would make a broken endpoint
   // indistinguishable from a console without the feature.
   api("/api/coverage").catch((err) => { console.error("coverage fetch failed", err); return { continuity: "unavailable" }; })
-    .then((coverage) => { if (live()) fillOvCoverage(f, coverage); });
+    .then((coverage) => { if (!live()) return; fillOvCoverage(f, coverage); loadOvFlow(f, live, coverage).catch((err) => console.error("flow paint failed", err)); });
   loadOvUncaptured(f, live);
   // null on failure, never {} — the fill renders "—" for a missing aggregate.
   // A zero-filled fallback would print "0 deletes", an assurance nobody
@@ -1942,7 +2315,7 @@ function watchOverview(f, live, firstRun) {
           if (!on()) return;
           if (st) { fillOvStatus(f, st); sideOkAt = nowClock(); sideNote(""); }
         }, (err) => { console.error("status refresh failed", err); if (on()) sideNote((err && err.message) || String(err)); });
-        apiWithin("/api/coverage", OV_REQUEST_MS).then((c) => { if (on()) fillOvCoverage(f, c); }, (err) => {
+        apiWithin("/api/coverage", OV_REQUEST_MS).then((c) => { if (!on()) return; fillOvCoverage(f, c); loadOvFlow(f, on, c).catch((err) => console.error("flow refresh failed", err)); }, (err) => {
           console.error("coverage refresh failed", err);
           // The card keeps its numbers and says they are from before, the
           // way its own refresh button does. From THIS paint's fill, never
