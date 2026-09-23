@@ -593,6 +593,30 @@ func (r *Registry) SetRotation(rc RotationConfig) error {
 func (r *Registry) Add(e ServerEntry) (ServerEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.addLocked(e)
+}
+
+// AddAutoNamed is Add for an entry nobody named: when e.Name is empty and base
+// is not, the name is derived from base under the SAME lock the append takes,
+// so two operators adding the first server for one host cannot both derive the
+// same name and have one of them refused as a duplicate.
+//
+// A name the caller DID supply is used verbatim, duplicate refusal included —
+// deriving is what happens when nobody chose, never a silent rename of what
+// somebody did choose. e.Name is compared to "" rather than trimmed, because
+// that is exactly the emptiness rule checkName applies one line later; the
+// handlers trim before they get here.
+func (r *Registry) AddAutoNamed(e ServerEntry, base string) (ServerEntry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e.Name == "" && base != "" {
+		e.Name = r.uniqueNameLocked(base)
+	}
+	return r.addLocked(e)
+}
+
+// addLocked is Add's body. Callers hold r.mu.
+func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 	if r.readOnly {
 		return ServerEntry{}, ErrRegistryReadOnly
 	}

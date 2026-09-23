@@ -39,6 +39,14 @@ type CheckResult struct {
 	// populated for StatusFail/StatusWarn.
 	Detail      string `json:"detail,omitempty"`
 	Remediation string `json:"remediation,omitempty"`
+	// Kind names the finding in a fixed word (kind.go), for a screen to
+	// switch on; empty when it is none of them. Subjects are the things it
+	// is about (the privileges missing, the tables without a key, the
+	// setting that is wrong), and Statements, for tables without a key, one
+	// statement per table. All three are empty on a pass.
+	Kind       string   `json:"kind,omitempty"`
+	Subjects   []string `json:"subjects,omitempty"`
+	Statements []string `json:"statements,omitempty"`
 }
 
 type Report struct {
@@ -129,9 +137,10 @@ func connectWithoutDB(dsn string) (*sql.DB, error) {
 type BuildOption func(*buildConfig)
 
 type buildConfig struct {
-	retainNote string
-	snapshot   snapshotState
-	sourceOnly bool
+	retainNote    string
+	snapshot      snapshotState
+	sourceOnly    bool
+	loopbackRetry func(host, port string) string
 }
 
 // WithRetainNote names WHERE the retention window came from, for the capacity
@@ -216,17 +225,26 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	// ── Source MySQL checks ──────────────────────────────────────────────────
 	sourceDB, err := config.Connect(sourceDSN)
 	if err != nil {
-		report.add(CheckResult{
+		c := CheckResult{
 			Name:   SourceConnectionCheckName,
 			Status: StatusFail,
 			Detail: err.Error(),
+			Kind:   ClassifyConnectError(err),
 			// Worded for both the terminal and the console (#1783): the
 			// console has no --source-dsn to fix, and the port is whatever
 			// the source uses, not 3306.
 			Remediation: "Check that the source database answers from the machine DBTrail runs on:\n\n" +
 				"  mysql -h <host> -P <port> -u <user> -p\n\n" +
 				"On RDS or Aurora, its security group must allow inbound connections from that machine on the database's port.",
-		})
+		}
+		if alt := proveLoopback(sourceDSN, c.Kind, cfg.loopbackRetry); alt != "" {
+			c.Kind = KindLoopbackInContainer
+			c.Detail += "; a database answered at " + alt + " instead"
+			c.Remediation = "DBTrail runs in a container, where localhost and 127.0.0.1 are the container itself, not your machine.\n\n" +
+				"A database answered at " + alt + ". Use that as the host:\n\n" +
+				"  " + strings.TrimSuffix(alt, portSuffix(alt))
+		}
+		report.add(c)
 		return report
 	}
 	defer sourceDB.Close()
@@ -321,9 +339,11 @@ func checkLogBin(ctx context.Context, db *sql.DB) CheckResult {
 	}
 	if val != "1" && !strings.EqualFold(val, "ON") {
 		return CheckResult{
-			Name:   "log_bin enabled",
-			Status: StatusFail,
-			Detail: fmt.Sprintf("log_bin=%q (binary logging is OFF)", val),
+			Name:     "log_bin enabled",
+			Status:   StatusFail,
+			Detail:   fmt.Sprintf("log_bin=%q (binary logging is OFF)", val),
+			Kind:     KindBinlogSettings,
+			Subjects: []string{"log_bin"},
 			Remediation: "Binary logging is disabled. Set in my.cnf and restart MySQL:\n\n" +
 				"  [mysqld]\n" +
 				"  log_bin = mysql-bin\n" +
@@ -337,10 +357,17 @@ func checkLogBin(ctx context.Context, db *sql.DB) CheckResult {
 func checkBinlogFormat(ctx context.Context, db *sql.DB) CheckResult {
 	err := metadata.ValidateBinlogFormatContext(ctx, db)
 	if err != nil {
+		var kind string
+		var subjects []string
+		if fe := (*metadata.BinlogFormatError)(nil); errors.As(err, &fe) {
+			kind, subjects = KindBinlogSettings, []string{"binlog_format"}
+		}
 		return CheckResult{
-			Name:   "binlog_format=ROW",
-			Status: StatusFail,
-			Detail: err.Error(),
+			Name:     "binlog_format=ROW",
+			Status:   StatusFail,
+			Detail:   err.Error(),
+			Kind:     kind,
+			Subjects: subjects,
 			Remediation: "Set on the source MySQL (MySQL 8.0+ — survives restart without editing my.cnf):\n\n" +
 				"  SET PERSIST binlog_format = 'ROW';\n\n" +
 				"On MySQL 5.7 use SET GLOBAL and also add to my.cnf:\n\n" +
@@ -354,10 +381,17 @@ func checkBinlogFormat(ctx context.Context, db *sql.DB) CheckResult {
 func checkBinlogRowImage(ctx context.Context, db *sql.DB) CheckResult {
 	err := metadata.ValidateBinlogRowImageContext(ctx, db)
 	if err != nil {
+		var kind string
+		var subjects []string
+		if ie := (*metadata.RowImageError)(nil); errors.As(err, &ie) {
+			kind, subjects = KindBinlogSettings, []string{"binlog_row_image"}
+		}
 		return CheckResult{
-			Name:   "binlog_row_image=FULL",
-			Status: StatusFail,
-			Detail: err.Error(),
+			Name:     "binlog_row_image=FULL",
+			Status:   StatusFail,
+			Detail:   err.Error(),
+			Kind:     kind,
+			Subjects: subjects,
 			Remediation: "Set on the source MySQL (MySQL 8.0+ — survives restart):\n\n" +
 				"  SET PERSIST binlog_row_image = 'FULL';\n\n" +
 				"On MySQL 5.7 use SET GLOBAL and also add to my.cnf:\n\n" +
@@ -837,9 +871,11 @@ func checkReplicationGrants(ctx context.Context, db *sql.DB) CheckResult {
 	}
 
 	return CheckResult{
-		Name:   ReplicationGrantsCheckName,
-		Status: StatusFail,
-		Detail: "missing: " + strings.Join(missing, ", "),
+		Name:     ReplicationGrantsCheckName,
+		Status:   StatusFail,
+		Detail:   "missing: " + strings.Join(missing, ", "),
+		Kind:     KindMissingPrivilege,
+		Subjects: missing,
 		Remediation: fmt.Sprintf("Run on the source MySQL as a privileged user (e.g. root):\n\n"+
 			"  GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO %s;\n"+
 			"  FLUSH PRIVILEGES;\n\n"+
@@ -987,9 +1023,12 @@ func checkPrimaryKeys(db *sql.DB, schemas []string, snapshot snapshotState) Chec
 	}
 	status, verdict := firstSnapshotVerdict(snapshot, "they do")
 	return CheckResult{
-		Name:   PrimaryKeyCheckName,
-		Status: status,
-		Detail: detail,
+		Name:       PrimaryKeyCheckName,
+		Status:     status,
+		Detail:     detail,
+		Kind:       KindNoPrimaryKey,
+		Subjects:   tables,
+		Statements: primaryKeyStatements(tables),
 		// States what HAPPENS, not what degrades. An earlier draft of this said
 		// the tables were captured but could not be addressed by row, which is
 		// wrong in the reassuring direction: the operator reads it as degraded

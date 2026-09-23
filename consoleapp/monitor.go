@@ -61,6 +61,10 @@ type monitorSupervisor struct {
 	// pgStreamFn runs one supervised PostgreSQL stream; pgstreamrun.One in
 	// production, a seam for tests. Selected when the entry's flavor is postgres.
 	pgStreamFn func(ctx context.Context, cfg pgstreamrun.Config) error
+	// loopbackRetry is where the doctor retries a failed connection to
+	// localhost or 127.0.0.1, to prove the container case (#1803):
+	// doctor.DockerHostRetry in production, a seam for tests.
+	loopbackRetry func(host, port string) string
 
 	mu   sync.Mutex
 	jobs map[string]*monitorJob
@@ -260,13 +264,14 @@ func (j *monitorJob) snapshot() console.MonitorStatus {
 // Doctor's replica/duplicate detection is skipped then.
 func newMonitorSupervisor(baseCtx context.Context, bootIndexDSN string, reg *console.Registry, retain time.Duration) *monitorSupervisor {
 	return &monitorSupervisor{
-		baseCtx:      baseCtx,
-		bootIndexDSN: bootIndexDSN,
-		registry:     reg,
-		rotateRetain: retain,
-		streamFn:     streamrun.One,
-		pgStreamFn:   pgstreamrun.One,
-		jobs:         map[string]*monitorJob{},
+		baseCtx:       baseCtx,
+		bootIndexDSN:  bootIndexDSN,
+		registry:      reg,
+		rotateRetain:  retain,
+		streamFn:      streamrun.One,
+		pgStreamFn:    pgstreamrun.One,
+		loopbackRetry: doctor.DockerHostRetry,
+		jobs:          map[string]*monitorJob{},
 	}
 }
 
@@ -324,6 +329,7 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 			Schemas:     e.Schemas,
 		})
 	default:
+		opts = append(opts, doctor.WithLoopbackRetry(m.loopbackRetry))
 		r = doctor.Build(ctx, e.SourceDSN, e.DSN, e.Schemas, m.rotateRetain, opts...)
 	}
 	out := &console.DoctorReport{
@@ -339,6 +345,9 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 			Status:      string(c.Status),
 			Detail:      config.ScrubDSNText(c.Detail, e.SourceDSN, e.DSN),
 			Remediation: c.Remediation,
+			Kind:        c.Kind,
+			Subjects:    c.Subjects,
+			Statements:  c.Statements,
 		}
 		// Per-check trace so `--log-level debug` shows the full preflight from
 		// the host, not just the pass/fail tally returned to the browser.

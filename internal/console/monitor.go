@@ -17,6 +17,13 @@ type DoctorCheck struct {
 	Status      string `json:"status"`
 	Detail      string `json:"detail,omitempty"`
 	Remediation string `json:"remediation,omitempty"`
+	// Kind, Subjects and Statements are the doctor's typed finding (#1803):
+	// a fixed word a screen switches on, the things it names (privileges,
+	// tables, a setting), and for tables without a key one statement each.
+	// See internal/doctor/kind.go for the set. Empty on a pass.
+	Kind       string   `json:"kind,omitempty"`
+	Subjects   []string `json:"subjects,omitempty"`
+	Statements []string `json:"statements,omitempty"`
 }
 
 // DoctorReport aggregates the preflight checks for one source.
