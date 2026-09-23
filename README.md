@@ -2,7 +2,7 @@
 
 <img src="docs/img/dbtrail _ header.png" alt="DBTrail: the open-source time-travel flashback for MySQL. Every change leaves a trail. Follow it back." width="100%">
 
-**See every row change in MySQL and PostgreSQL, and undo the ones you didn't want. No restore, no locks, no schema changes.**
+**DBTrail keeps every change on your MySQL server, before and after, and writes the SQL that undoes the ones you didn't want.**
 
 [![Release](https://img.shields.io/github/v/release/dbtrail/dbtrail)](https://github.com/dbtrail/dbtrail/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -59,11 +59,16 @@ See [the demo image](docs/demo.md).
 curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | sh
 ```
 
-This downloads the Compose stack, brings it up, waits for the console, and prints
-what to do next. Then:
+This downloads the Docker Compose stack, starts it, waits until DBTrail answers,
+and prints the next steps. They are the same four steps as the
+[start page](https://www.dbtrail.com/docs/quickstart/):
 
-1. Open **http://127.0.0.1:8090** and create a username and password on first run. That is your login from now on.
-2. Click **+ Add server**, pick the **source type** (MySQL, MariaDB, or PostgreSQL), and paste the host, user, and password of the database you want to watch. DBTrail runs preflight checks, provisions an index, and starts streaming within the minute.
+1. **Sign in.** Open **http://127.0.0.1:8090** and create a username and password.
+2. **Connect.** Click **+ Add server**, give the server a name, and fill in the host and port of your MySQL server. The form suggests a user and password for DBTrail and shows the SQL that creates that user; run it on your MySQL with a login that can create users and grant them privileges, then press **Save**.
+3. **First change.** Change a row on your MySQL. It shows on the Overview within a minute, with an **Undo** that writes the SQL to reverse it.
+4. **First snapshot.** With one, DBTrail can rebuild a whole table as it was at a past moment. Today it takes a folder created first, then on the **Snapshots** page: type it in **Backup dir**, **Save**, and press **Create backup**. The start page has the command that creates the folder.
+
+Prefer the command line? See the [command-line quickstart](docs/quickstart.md).
 
 ### PostgreSQL & MariaDB (alpha) sources
 
@@ -81,7 +86,7 @@ and Cloud SQL: **[PostgreSQL source](docs/postgres.md)** ·
 | Start here | Reference | Operations |
 |---|---|---|
 | [Install](docs/install.md) | [Query & Recovery](docs/query-and-recovery.md) | [Deployment](docs/deployment.md) · [Capacity](docs/capacity.md) |
-| [Quickstart](docs/quickstart.md) | [Web console](docs/console.md) | [Rotation & Status](docs/rotation-and-status.md) |
+| [Start page](https://www.dbtrail.com/docs/quickstart/) · [Command-line quickstart](docs/quickstart.md) | [Web console](docs/console.md) | [Rotation & Status](docs/rotation-and-status.md) |
 | [DBA guide](docs/guide.md) | [Time-Travel SQL](docs/time-travel-sql.md) · [Verify recoveries](docs/verify.md) | [Docker](docs/docker.md) |
 | [30-second demo](docs/demo.md) | [Streaming](docs/streaming.md) · [Indexing](docs/indexing.md) | [Upload to S3](docs/upload.md) · [S3 IAM policy](docs/s3-iam-policy.md) · [Upgrading](docs/upgrade.md) |
 | | [MariaDB source (alpha)](docs/mariadb.md) · [PostgreSQL source](docs/postgres.md) | [Server identity](docs/server-identity.md) |
