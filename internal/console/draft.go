@@ -17,14 +17,15 @@ import (
 //
 // It exists because of one real interruption: the form shows a block of SQL to
 // run on the database, and running it means leaving this page. Coming back to
-// an empty form means typing it all again — and, worse, generating a DIFFERENT
-// password from the one the block just created the account with.
+// an empty form means typing it all again.
 //
-// It is kept HERE, beside the server registry, and never in the browser: it
-// holds a password, and this is where the product already keeps those, in a
-// file only its owner can read. A draft is not a server: nothing lists it,
-// nothing connects with it, and it is thrown away the moment the server it
-// describes starts capturing, or somebody discards it.
+// It never holds the database password (#1804). This is ONE form, shared by
+// every session allowed to add servers (a session limited by a data profile
+// included), so a stored password could be read by somebody it was never typed
+// for. The screen keeps the password in the page only and asks for it again
+// after a reload. A draft is not a server: nothing lists it, nothing connects
+// with it, and it is thrown away the moment the server it describes starts
+// capturing, or somebody discards it.
 type ConnectDraft struct {
 	// Name is the name somebody TYPED, empty when they typed none. An
 	// automatic name is never stored here: restored into the form it would be
@@ -36,7 +37,6 @@ type ConnectDraft struct {
 	SourceHost        string `yaml:"source_host,omitempty" json:"source_host"`
 	SourcePort        string `yaml:"source_port,omitempty" json:"source_port"`
 	SourceUser        string `yaml:"source_user,omitempty" json:"source_user"`
-	SourcePassword    string `yaml:"source_password,omitempty" json:"source_password"`
 	Schemas           string `yaml:"schemas,omitempty" json:"schemas"`
 	SourceDatabase    string `yaml:"source_database,omitempty" json:"source_database"`
 	SourceSlot        string `yaml:"source_slot,omitempty" json:"source_slot"`
@@ -46,11 +46,10 @@ type ConnectDraft struct {
 	SavedAt string `yaml:"saved_at,omitempty" json:"saved_at"`
 }
 
-// DraftStore holds the one Connect draft. One, not a set: Connect is a step
-// somebody is inside, and a keyed set would need the browser to hold the key,
-// which is exactly what "never in the browser" rules out. Two people
-// connecting two databases at the same moment therefore share it, the same way
-// they share the registry they are both writing to.
+// DraftStore holds the one Connect draft. One, not a set: two people
+// connecting two databases at the same moment share it, the same way they
+// share the registry they are both writing to. Sharing it is why it holds no
+// password (see ConnectDraft).
 type DraftStore struct {
 	path string // "" = in-memory only (an in-memory registry, and unit tests)
 	mu   sync.Mutex
@@ -63,7 +62,7 @@ func NewDraftStore(path string) *DraftStore { return &DraftStore{path: path} }
 // DefaultConnectDraftPath names the draft file as a sibling of the server
 // registry, like the verify and backup run histories. An empty registry path
 // (an in-memory registry) has no directory to be a sibling of, and must not
-// spill a password into the working directory: it stays in memory.
+// spill a half-filled form into the working directory: it stays in memory.
 func DefaultConnectDraftPath(serversPath string) string {
 	if serversPath == "" {
 		return ""
@@ -106,8 +105,8 @@ func (d *DraftStore) Load() (ConnectDraft, bool, error) {
 }
 
 // Save replaces the draft. The write is atomic and the file is 0600 inside a
-// 0700 directory, the same discipline as the server registry: it holds a
-// password.
+// 0700 directory, the same discipline as the server registry: it names a
+// database, its user and the addresses around it.
 func (d *DraftStore) Save(c ConnectDraft) error {
 	c.SavedAt = time.Now().UTC().Format(time.RFC3339)
 	d.mu.Lock()

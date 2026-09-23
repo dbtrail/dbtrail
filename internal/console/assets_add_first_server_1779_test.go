@@ -37,6 +37,7 @@ const watchFirstRun = () => calls.push("watch");
 const loadOvUncaptured = () => {};
 const watchOverview = () => calls.push("live");
 const overviewOnScreen = () => true;
+const sessionMay = () => true;
 let serverGen = 0, viewGen = 0, serversEmpty, capsCache, ovHead;
 let slot;
 const ovFrame = () => ({ firstRunSlot: slot = { kids: [], append(...k) { this.kids.push(...k); } } });

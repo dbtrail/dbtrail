@@ -5,15 +5,15 @@
   "viewport": "1280x720",
   "runs": {
     "clean": {
-      "clicks_to_first_snapshot": 13,
+      "clicks_to_first_snapshot": 11,
       "clicks_to_first_snapshot_minimum": 10,
       "fields_typed": 8,
       "forced_choices": 1,
       "trips_out_of_browser": 2,
       "words_per_step_max": 146,
       "words_per_error_max": 71,
-      "banned_words": 99,
-      "yellow_red": 7,
+      "banned_words": 77,
+      "yellow_red": 4,
       "changes_visible_without_reload": 3,
       "changes_visible_within_5s": 0,
       "primary_below_fold_px": 638,
@@ -21,7 +21,7 @@
       "copied_differs_from_shown": 1
     },
     "reload-mid-connect": {
-      "connect_fields_kept_after_reload": 0
+      "connect_fields_kept_after_reload": 3
     },
     "second-server": {
       "clicks_to_capture": 6,
@@ -29,18 +29,18 @@
       "forced_choices": 0,
       "trips_out_of_browser": 1,
       "words_per_step_max": 141,
-      "banned_words": 44,
+      "banned_words": 26,
       "yellow_red": 6,
       "primary_below_fold_px": 606
     },
     "no-primary-key": {
       "clicks_to_capture": 8,
       "fields_typed": 5,
-      "forced_choices": 1,
+      "forced_choices": 0,
       "trips_out_of_browser": 2,
       "words_per_step_max": 141,
       "words_per_error_max": 199,
-      "banned_words": 46,
+      "banned_words": 26,
       "primary_below_fold_px": 671
     },
     "refused-update": {
@@ -54,9 +54,7 @@
         "clicks": [
           "Create & sign in",
           "+ Add server",
-          "Test connection (optional)",
-          "Back to the form (optional)",
-          "Save",
+          "Check and connect",
           "OK",
           "close the Servers dialog (✕)",
           "Undo (optional)",
@@ -205,14 +203,14 @@
       },
       "banned_words": {
         "per_word": {
-          "backup": 48,
+          "backup": 40,
           "baseline": 9,
-          "daemon": 5,
+          "daemon": 2,
           "em dash": 3,
-          "index": 13,
-          "monitor": 4,
+          "index": 12,
+          "monitor": 3,
           "protect": 2,
-          "source": 13,
+          "source": 4,
           "stream": 1,
           "watch": 1
         },
@@ -220,9 +218,6 @@
       },
       "yellow_red": {
         "elements": [
-          "test-result: .notice.warn \"Test connection ✓ The database is ready to capture. Check these when you can:...\"",
-          "test-result: .doctor-card.warn \"! Statement capture (query_text): binlog_rows_query_log_events=OFF — events i...\"",
-          "test-result: .doctor-card.warn \"! Schema-drift detection (binlog_row_metadata): binlog_row_metadata=MINIMAL —...\"",
           "save-result: .notice.warn \"Capture started Check these when you can: ! Statement capture (query_text): b...\"",
           "save-result: .doctor-card.warn \"! Statement capture (query_text): binlog_rows_query_log_events=OFF — events i...\"",
           "save-result: .doctor-card.warn \"! Schema-drift detection (binlog_row_metadata): binlog_row_metadata=MINIMAL —...\"",
@@ -258,7 +253,7 @@
     },
     "reload-mid-connect": {
       "connect_fields_kept_after_reload": {
-        "detail": "every typed field was lost"
+        "detail": "kept: host, port, user"
       }
     },
     "second-server": {
@@ -324,13 +319,13 @@
       },
       "banned_words": {
         "per_word": {
-          "backup": 10,
-          "daemon": 4,
+          "backup": 6,
+          "daemon": 1,
           "em dash": 3,
-          "index": 8,
-          "monitor": 4,
+          "index": 7,
+          "monitor": 3,
           "protect": 1,
-          "source": 11,
+          "source": 2,
           "stream": 1,
           "watch": 2
         },
@@ -377,9 +372,7 @@
         ]
       },
       "forced_choices": {
-        "choices": [
-          "which of 2 ALTER TABLE forms to run"
-        ]
+        "choices": []
       },
       "trips_out_of_browser": {
         "trips": [
@@ -432,14 +425,14 @@
       },
       "banned_words": {
         "per_word": {
-          "backup": 10,
-          "daemon": 4,
+          "backup": 6,
+          "daemon": 1,
           "em dash": 3,
-          "index": 9,
-          "monitor": 4,
+          "index": 7,
+          "monitor": 3,
           "protect": 1,
-          "source": 11,
-          "stream": 2,
+          "source": 2,
+          "stream": 1,
           "watch": 2
         },
         "sentences_in": "the run's first-run-scoreboard.json"

@@ -38,10 +38,10 @@ type routePerm struct {
 
 // permForDraftRoutes is the tier of the Connect step: the call that checks a
 // database and starts capturing from it, and the saved form it keeps. Both
-// create servers or hold the credentials for one, so both sit with
-// servers:write. Named once because the two must never drift apart: a saved
-// form readable a tier below the server it becomes would hand a read-only
-// session a password.
+// sit with servers:write, the tier that creates the server. Named once because
+// the two must never drift apart: the saved form (host, port, user, never the
+// password since #1804) is part of creating a server, and a read-only session
+// has no use for it.
 const permForDraftRoutes = ext.PermServersWrite
 
 // apiRoutePerms is the authoritative route→permission table, consulted on every
@@ -127,8 +127,8 @@ var apiRoutePerms = []routePerm{
 	// Connect (#1803). These three literal-segment routes MUST stay above the
 	// "/api/servers/{}" rows below: matching is first-match-wins at equal
 	// depth, and a placeholder listed first would classify them as reads. The
-	// saved form carries the password the SQL block creates the account with,
-	// so reading it is a write-tier action, not a listing.
+	// saved form is part of adding a server (it never holds the password,
+	// #1804), so reading it is a write-tier action, not a listing.
 	{"POST", "/api/servers/check", permForDraftRoutes},
 	{"GET", "/api/servers/draft", permForDraftRoutes},
 	{"PUT", "/api/servers/draft", permForDraftRoutes},

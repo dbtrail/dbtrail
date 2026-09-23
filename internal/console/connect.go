@@ -205,7 +205,8 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// saveConnectDraft stores what the form holds. A failure to write it is logged
+// saveConnectDraft stores what the form holds, except the password, which a
+// draft never keeps (#1804, see ConnectDraft). A failure to write it is logged
 // and nothing more: it would be absurd to refuse to check a database because a
 // convenience file could not be written.
 func (s *Server) saveConnectDraft(req serverRequest, typedName string) {
@@ -220,9 +221,6 @@ func (s *Server) saveConnectDraft(req serverRequest, typedName string) {
 		SourceSlot:        strings.TrimSpace(req.SourceSlot),
 		SourcePublication: strings.TrimSpace(req.SourcePublication),
 	}
-	if req.SourcePassword != nil {
-		d.SourcePassword = *req.SourcePassword
-	}
 	if err := s.drafts.Save(d); err != nil {
 		slog.Warn("connect: the form could not be saved, so a reload will lose it", "error", err.Error())
 	}
@@ -230,22 +228,34 @@ func (s *Server) saveConnectDraft(req serverRequest, typedName string) {
 
 // ─── the saved form ──────────────────────────────────────────────────────────
 
-// draftResponse is GET /api/servers/draft. Found tells "nothing saved" from
-// "saved, and every field happens to be blank" — a screen must not restore the
-// second over what somebody is typing.
+// draftResponse is GET and PUT /api/servers/draft. Found tells "nothing
+// saved" from "saved, and every field happens to be blank": a screen must not
+// restore the second over what somebody is typing.
+//
+// AutoName is the name the server would get if it were added now with no name
+// typed: DeriveServerName made unique against the registry, as the check does.
+// It is worked out on every answer and never stored, so the screen can show it
+// as the name field's placeholder without it ever coming back as typed.
 type draftResponse struct {
-	Found bool          `json:"found"`
-	Draft *ConnectDraft `json:"draft,omitempty"`
+	Found    bool          `json:"found"`
+	Draft    *ConnectDraft `json:"draft,omitempty"`
+	AutoName string        `json:"auto_name,omitempty"`
+}
+
+// draftAnswer builds the answer for a saved draft.
+func (s *Server) draftAnswer(d ConnectDraft) draftResponse {
+	out := draftResponse{Found: true, Draft: &d}
+	if strings.TrimSpace(d.Name) == "" {
+		out.AutoName = s.cm.reg.NameFor("", DeriveServerName(d.SourceHost, d.SourcePort, d.Flavor))
+	}
+	return out
 }
 
 // handleConnectDraftGet serves GET /api/servers/draft.
 //
-// It returns the password, unlike every other read in this package, and that
-// is the point rather than an oversight: the form shows a block of SQL that
-// creates an account WITH that password, and a person who ran it and came back
-// to a different one would have made an account nothing uses. The route is
-// classified with creating a server (servers:write), not with reading one, so
-// a read-only session cannot reach it.
+// The route is still classified with creating a server (servers:write), not
+// with reading one: the draft names a database and a user somebody is about to
+// connect, which a session that may only list servers has no use for.
 func (s *Server) handleConnectDraftGet(w http.ResponseWriter, r *http.Request) {
 	d, ok, err := s.drafts.Load()
 	if err != nil {
@@ -256,10 +266,12 @@ func (s *Server) handleConnectDraftGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, draftResponse{})
 		return
 	}
-	writeJSON(w, http.StatusOK, draftResponse{Found: true, Draft: &d})
+	writeJSON(w, http.StatusOK, s.draftAnswer(d))
 }
 
 // handleConnectDraftPut serves PUT /api/servers/draft: replace the saved form.
+// A source_password in the body is dropped by the decoder: ConnectDraft has no
+// field for it.
 func (s *Server) handleConnectDraftPut(w http.ResponseWriter, r *http.Request) {
 	var d ConnectDraft
 	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
@@ -270,7 +282,7 @@ func (s *Server) handleConnectDraftPut(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, draftResponse{Found: true, Draft: &d})
+	writeJSON(w, http.StatusOK, s.draftAnswer(d))
 }
 
 // handleConnectDraftDelete serves DELETE /api/servers/draft: throw it away.

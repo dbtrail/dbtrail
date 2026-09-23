@@ -365,7 +365,7 @@ async function fillServer(step, name, user, password) {
   await type(f.locator("input[name=source_password]"), password, "password", step);
 }
 async function saveServer() {
-  await click(page.locator("#server-form-mount button[type=submit]"), "Save");
+  await click(page.locator("#server-form-mount button[type=submit]"), "Check and connect");
   // Save runs the startup checks and starts capture; a person waits for the
   // answer. A clean start with no warning closes the form with a toast and
   // opens no notice.
@@ -415,16 +415,12 @@ async function runClean(block) {
   await click(add, "+ Add server");
   await page.locator("#server-form").waitFor({ timeout: 10000 });
   const save = page.locator("#server-form-mount button[type=submit]");
-  await measure("connect", "step", { locator: save, label: "Save" });
+  await measure("connect", "step", { locator: save, label: "Check and connect" });
   await copyChecks("connect");
   await fillServer("connect", "shop-db", block.user, block.password);
 
-  // The form offers Test connection next to Save; the inventory pressed it,
-  // as a careful person does. Not needed for the snapshot, so optional.
-  await click(page.locator("#server-test"), "Test connection", true);
-  await waitFor(noticeOpen, "the Test connection notice", 60000);
-  await measure("test-result", "step", { locator: page.locator("#notice-close"), label: await page.locator("#notice-close").textContent() });
-  await click(page.locator("#notice-close"), "Back to the form", true);
+  // Connect has one button (#1804): it checks and starts in the same press,
+  // so there is no separate Test connection to take.
 
   const title = await saveServer();
   if (/did not|could not/i.test(title)) throw new Error("capture did not start on a clean MySQL: notice \"" + title + "\"");
@@ -625,7 +621,7 @@ async function addAnotherServer(runName, name, user, block, onRefused) {
   await click(page.locator("#manage-servers"), "Manage servers");
   await click(page.locator("#server-add"), "+ Add server");
   await page.locator("#server-form").waitFor({ timeout: 10000 });
-  await measure("connect", "step", { locator: page.locator("#server-form-mount button[type=submit]"), label: "Save" });
+  await measure("connect", "step", { locator: page.locator("#server-form-mount button[type=submit]"), label: "Check and connect" });
   await fillServer("connect", name, user, block.password);
   let title = await saveServer();
   if (/did not/i.test(title)) {
