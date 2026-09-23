@@ -6202,7 +6202,9 @@ function baselineRefreshNote(rf) {
     default:
       return el("p", { class: "form-hint", text: "Automatic refresh is enabled; it has not run yet." });
   }
-  return el("p", { class: "form-hint", text: text });
+  // A failed refresh is a failure: red, like every other failed run on this
+  // page. It used to share the grey of a successful one.
+  return el("p", { class: rf.state === "failed" ? "form-msg err" : "form-hint", text: text });
 }
 
 // snapshotTablesUniform: the per-snapshot table count, when EVERY snapshot
@@ -6675,6 +6677,41 @@ function backupsPager(total, page, pages, onGo, truncated) {
     btn("Older", page + 1, page >= pages - 1));
 }
 
+// snapshotRetentionLines says what this machine does with older copies
+// (#1681): how many it keeps, the last time it removed some, and in red when
+// that record cannot be read or the last attempt failed. Every field is
+// OMITTED by the server when it does not apply, so an absent field draws
+// nothing, never "0" or "never". A cleanup that removed nothing is not
+// recorded and not said. A failure's reason carries one cause per line
+// (path and error each), so each line is drawn on its own; a path or an
+// error text can contain "; ", which is why the split is on newlines only.
+function snapshotRetentionLines(b) {
+  const out = [];
+  const keep = b.local_retention && b.local_retention.keep_newest;
+  const facts = [];
+  if (keep > 0) {
+    facts.push(keep === 1 ? "Keeps only the newest snapshot on this machine." : "Keeps the newest " + keep + " snapshots on this machine.");
+  }
+  const lp = b.last_prune;
+  if (lp && lp.removed > 0 && lp.at) {
+    facts.push("Removed " + lp.removed + " older " + (lp.removed === 1 ? "copy" : "copies") + " on " + utcLabel(lp.at) + ".");
+  }
+  if (facts.length) out.push(el("p", { class: "form-hint bk-retention", text: facts.join(" ") }));
+  if (b.last_prune_error) {
+    out.push(el("p", { class: "form-msg err bk-retention-err", text:
+      "The record of older copies removed here could not be read: " + firstLine(b.last_prune_error) }));
+  }
+  const fail = b.last_prune_failure;
+  if (fail) {
+    const causes = String(fail.reason || "").split("\n").map((c) => c.trim()).filter(Boolean);
+    const box = el("div", { class: "form-msg err bk-retention-err" },
+      el("div", { text: "Removing older copies failed" + (fail.at ? " on " + utcLabel(fail.at) : "") + (causes.length ? ":" : ", with no reason recorded.") }));
+    causes.forEach((c) => box.append(el("div", { class: "bk-retention-cause", text: c })));
+    out.push(box);
+  }
+  return out;
+}
+
 function baselinesPanel(b, servers, opts) {
   // Full-width (#1415): this list is the page. The Create-baseline action
   // moved to the context strip — at page level it is a page action; inside
@@ -6699,6 +6736,7 @@ function baselinesPanel(b, servers, opts) {
   // the mydumper dump are independently opt-in, so a refresh-only daemon reports
   // here with baseline_trigger false, and a capability gate would render nothing.
   if (b && !b.error && b.refresh) panel.append(baselineRefreshNote(b.refresh));
+  if (b && !b.error) snapshotRetentionLines(b).forEach((line) => panel.append(line));
   const list = el("div", { class: "stg-list" });
   if (!b || b.error) {
     list.append(el("div", { class: "ev-empty", text: "Could not list backups: " + ((b && b.error) || "unavailable") }));
@@ -6726,7 +6764,9 @@ function baselinesPanel(b, servers, opts) {
     if (incomplete) list.append(incomplete);
     if (b.staleness && b.staleness !== "ok") {
       list.append(el("div", { class: "vfy-summary" },
-        el("span", { class: "chip chip-mon", text: b.staleness === "broken"
+        // broken is the worst state on this page (a full-table restore will
+        // not work), so it is red; aging and unknown stay the warning colour.
+        el("span", { class: b.staleness === "broken" ? "chip chip-fail" : "chip chip-mon", text: b.staleness === "broken"
           ? "⚠ BACKUP STALE: full-table restore broken; take a fresh backup"
           : "BACKUP " + b.staleness.toUpperCase() })));
     }

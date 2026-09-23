@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The Snapshots page says what this machine does with older copies**
+  (#1681). Above the list: how many snapshots the local folder keeps and the
+  last time older ones were removed, and in red when the last removal failed
+  (one line per cause) or its record cannot be read. Each line appears only
+  when the server reports that field.
 - **`BINTRAIL_CONSOLE_URL` names the address people open the console at**
   (#1784). Inside the container the console listens on 8090 while the host may
   publish another port, so the startup banner in `docker compose logs` sent
@@ -168,6 +173,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newest, so a run can take longer and read more from the Parquet archives.
 
 ### Fixed
+- **Two failures on the Snapshots page were drawn in calm colours**: a
+  failed automatic refresh shared the grey of a successful one, and "full-table
+  restore broken", the worst state the list can report, was yellow. Both are
+  red now.
 - **The Overview keeps itself up to date after the first change** (#1801).
   It only re-checked while the Getting started list was showing, and that
   list ended at the first change: on a walk of a fresh install the first
