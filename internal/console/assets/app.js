@@ -1,3 +1,4 @@
+// CI probe: throwaway, never merged.
 // dbtrail console — vanilla-JS SPA over the read-only JSON API.
 //
 // No frameworks, no bundler, no third-party code (see assets/VENDOR.md). The
