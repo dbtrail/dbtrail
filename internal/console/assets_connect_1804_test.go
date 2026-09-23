@@ -316,6 +316,31 @@ const flush = () => new Promise((r) => setImmediate(r));
   out.full = { long: !!form() && form().attrs["data-connect"] === undefined && !!form().elements.host,
     host: form() ? form().elements.source_host.value : null, port: form() ? form().elements.source_port.value : null,
     deleted: calls.some((c) => c.startsWith("DELETE /api/servers/draft")) };
+  // A reload right after typing: the saves still on their way are cut off,
+  // so the fields are stashed as the page goes away and win on restore. The
+  // password is never stashed, and a finished form is not stashed at all.
+  const store = new Map();
+  ctx.sessionStorage = { getItem: (k) => store.has(k) ? store.get(k) : null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
+  mount.replaceChildren();
+  setCaps({ monitor: true });
+  vm.runInContext("showConnectForm(null)", ctx);
+  f = form();
+  f.elements.source_host.value = "late-host"; f.elements.source_port.value = "3399"; f.elements.source_user.value = "late_user";
+  f.elements.source_password.value = "Pw-never-stashed";
+  vm.runInContext("stashConnectDraft()", ctx);
+  out.stash = [...store.values()].join("");
+  mount.replaceChildren();
+  calls.length = 0;
+  ctx.__draftAnswer = { found: true, draft: { source_host: "late-host" }, auto_name: "late-host" };
+  await vm.runInContext("restoreConnectDraft()", ctx);
+  for (let i = 0; i < 4; i++) await flush();
+  f = form();
+  out.stashRestored = f ? { host: f.elements.source_host.value, port: f.elements.source_port.value, user: f.elements.source_user.value, pw: f.elements.source_password.value } : null;
+  out.stashResynced = calls.some((c) => c.startsWith("PUT /api/servers/draft") && c.includes("late_user"));
+  out.stashConsumed = store.size === 0;
+  f.dataset.done = "1";
+  vm.runInContext("stashConnectDraft()", ctx);
+  out.doneNotStashed = store.size === 0;
   // A console that only reads an index keeps the long form for an add.
   mount.replaceChildren();
   f = show({ monitor: false });
@@ -347,6 +372,9 @@ func TestConnectScreenWiring(t *testing.T) {
 		CancelOrder, ReadOnlyRestoreCalls, QueuedAfterCancel, PutsAfterStarted []string
 		RestoredHost                                                           *string
 		ServeIsLongForm                                                        bool
+		Stash                                                                  string
+		StashRestored                                                          *struct{ Host, Port, User, Pw string }
+		StashResynced, StashConsumed, DoneNotStashed                           bool
 		Full                                                                   struct {
 			Long, Deleted bool
 			Host, Port    *string
@@ -450,6 +478,15 @@ func TestConnectScreenWiring(t *testing.T) {
 	}
 	if !out.Full.Long || !out.Full.Deleted || out.Full.Host == nil || *out.Full.Host != "db9" || *out.Full.Port != "3310" {
 		t.Errorf("the link to the long form: %+v (want the long form, the typed host and port carried, the draft deleted)", out.Full)
+	}
+	if strings.Contains(out.Stash, "Pw-never-stashed") || !strings.Contains(out.Stash, "late_user") {
+		t.Errorf("the pagehide stash: %s (want the fields, never the password)", out.Stash)
+	}
+	if r := out.StashRestored; r == nil || r.Host != "late-host" || r.Port != "3399" || r.User != "late_user" || r.Pw != "" {
+		t.Errorf("a reload that cut off the save lost fields: %+v", out.StashRestored)
+	}
+	if !out.StashResynced || !out.StashConsumed || !out.DoneNotStashed {
+		t.Errorf("stash: resynced to the server %v, consumed %v, a finished form not stashed %v", out.StashResynced, out.StashConsumed, out.DoneNotStashed)
 	}
 	if !out.ServeIsLongForm {
 		t.Error("a console that only reads an index lost the long add form")

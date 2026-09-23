@@ -11241,11 +11241,45 @@ async function restoreConnectDraft() {
   let res;
   try { res = await api("/api/servers/draft"); }
   catch (err) { toastError("Could not read the saved Connect form: " + ((err && err.message) || err)); return; }
-  const d = res && res.found && res.draft;
-  if (!d || !(d.source_host || d.source_port || d.source_user || d.name)) return;
+  // What this tab typed last, stashed as the page went away, wins field by
+  // field over the server's copy: a reload right after typing can cut off the
+  // save that was still on its way (see stashConnectDraft).
+  const local = readConnectStash();
+  const d = Object.assign({}, res && res.found ? res.draft : {}, local || {});
+  if (!(d.source_host || d.source_port || d.source_user || d.name)) return;
   if (document.getElementById("server-form")) return; // somebody already opened a form
   if (!document.getElementById("server-form-mount")) openServersModal();
-  showConnectForm(Object.assign({ auto_name: res.auto_name }, d));
+  showConnectForm(Object.assign({ auto_name: res && res.auto_name }, d));
+  // Bring the server's copy up to what is now on screen.
+  const form = document.getElementById("server-form");
+  if (local && form) saveConnectDraftSoon(form);
+}
+
+// The last-moment copy of the Connect form, for this tab only. The server's
+// draft is saved as the person types, but a reload cancels a save still on its
+// way, and the queued one behind it is never sent: the walk measured one field
+// of three kept that way. On pagehide the fields are written here, which is
+// synchronous and survives the reload. Never the password.
+const CONNECT_STASH_KEY = "dbtrail.connectDraft";
+
+function stashConnectDraft() {
+  const form = document.getElementById("server-form");
+  if (!form || !form.dataset.connect || form.dataset.done) return;
+  const b = connectBody(form, false);
+  try { sessionStorage.setItem(CONNECT_STASH_KEY, JSON.stringify({ name: b.name, source_host: b.source_host, source_port: b.source_port, source_user: b.source_user })); }
+  catch (_) { /* storage off: the server's copy is all there is */ }
+}
+
+function readConnectStash() {
+  try {
+    const raw = sessionStorage.getItem(CONNECT_STASH_KEY);
+    sessionStorage.removeItem(CONNECT_STASH_KEY);
+    const v = raw ? JSON.parse(raw) : null;
+    if (!v || typeof v !== "object") return null;
+    const out = {};
+    for (const k of ["name", "source_host", "source_port", "source_user"]) if (typeof v[k] === "string" && v[k]) out[k] = v[k];
+    return Object.keys(out).length ? out : null;
+  } catch (_) { return null; }
 }
 
 async function checkConnect(form) {
@@ -12053,6 +12087,8 @@ async function init() {
   document.addEventListener("keydown", toastEscape, true);
   // A tab shown again brings the Overview up to date at once (#1801).
   document.addEventListener("visibilitychange", ovVisibilityChanged);
+  // A half-filled Connect form is stashed as the page goes away (#1804).
+  window.addEventListener("pagehide", stashConnectDraft);
 
   // Sidebar nav (real hrefs upgraded to in-place swaps). A manual nav starts
   // fresh — clear any carried "Undo" context so the sidebar's Recover link
