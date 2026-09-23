@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/dbtrail/dbtrail/ext"
 )
 
 // POST /api/servers/check is the one call behind the Connect step: it runs the
@@ -194,6 +196,45 @@ func TestCheckSaysSoWhenTheRollbackFails(t *testing.T) {
 	}
 }
 
+// Two very different things can go wrong between "the checks passed" and
+// "capture is running", and they answer differently: the registry refusing the
+// write that records the intent, and the stream refusing to launch. They are
+// told apart by a wrapped sentinel rather than by reading the error's text,
+// which is what makes the second case safe: a launch failure whose message
+// happens to contain a word the registry mapping looks for ("required") must
+// still be reported as a failure of this server, not as a bad request.
+func TestStartTellsARegistryRefusalFromALaunchFailure(t *testing.T) {
+	srv, ctrl := newSupervisorServer(t)
+	e, err := srv.cm.reg.Add(ServerEntry{Name: "x", DSN: "u:p@tcp(h:3306)/d", SourceDSN: "u:p@tcp(db:3306)/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl.startErr = errors.New("a replication user is required on the database")
+	rec, body := doServersReq(t, srv, "POST", "/api/servers/"+e.ID+"/monitor/start", "{}")
+	if rec.Code != 500 {
+		t.Errorf("a launch failure answered %d (%s), want 500", rec.Code, body)
+	}
+	if !strings.Contains(string(body), "start monitoring") {
+		t.Errorf("the answer does not say the launch is what failed: %s", body)
+	}
+
+	// The other side: the registry refusing to record the intent is its own
+	// refusal and keeps the registry's status.
+	srv2, ctrl2 := newSupervisorServer(t)
+	e2, err := srv2.cm.reg.Add(ServerEntry{Name: "y", DSN: "u:p@tcp(h:3306)/d", SourceDSN: "u:p@tcp(db:3306)/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv2.cm.reg.readOnly = true
+	rec, body = doServersReq(t, srv2, "POST", "/api/servers/"+e2.ID+"/monitor/start", "{}")
+	if rec.Code != 409 {
+		t.Errorf("a refused registry write answered %d (%s), want 409", rec.Code, body)
+	}
+	if len(ctrl2.started) != 0 {
+		t.Error("the stream was launched although the intent was never recorded")
+	}
+}
+
 func TestCheckRefusesOnAConsoleThatCannotCapture(t *testing.T) {
 	srv := newRegistryServer(t) // no MonitorCtrl
 	if rec, body := doServersReq(t, srv, "POST", "/api/servers/check", checkBody); rec.Code != 403 {
@@ -211,6 +252,28 @@ func TestCheckRefusesAnEmptySource(t *testing.T) {
 		if srv.cm.reg.Len() != 0 {
 			t.Fatalf("%s created a server", body)
 		}
+	}
+}
+
+// A body that describes a complete INDEX and no database to read is the one
+// shape that builds a valid entry with nothing to check. It must come back as
+// a request to fill in the address — not as the startup checks failing to run,
+// which is what asking the supervisor about a sourceless entry produces.
+func TestCheckRefusesAnIndexWithNothingToRead(t *testing.T) {
+	srv, ctrl := newSupervisorServer(t)
+	rec, body := doServersReq(t, srv, "POST", "/api/servers/check",
+		`{"name":"idx","host":"h","port":"3306","user":"u","password":"p","dbname":"binlog_index"}`)
+	if rec.Code != 400 {
+		t.Fatalf("code=%d body=%s, want 400", rec.Code, body)
+	}
+	if !strings.Contains(string(body), "address") {
+		t.Errorf("the refusal does not name the field to fill in: %s", body)
+	}
+	if len(ctrl.unsaved) != 0 {
+		t.Errorf("the checks were asked to run against an entry with nothing to read")
+	}
+	if srv.cm.reg.Len() != 0 {
+		t.Errorf("it created a server")
 	}
 }
 
@@ -318,7 +381,9 @@ func TestCheckRouteIsWriteTier(t *testing.T) {
 	if !ok {
 		t.Fatal("POST /api/servers/check is not classified")
 	}
-	if perm != permForDraftRoutes {
-		t.Errorf("POST /api/servers/check requires %q, want %q", perm, permForDraftRoutes)
+	// Against the permission itself, never against the constant the route is
+	// declared with — see TestDraftRoutesAreWriteTier.
+	if perm != ext.PermServersWrite {
+		t.Errorf("POST /api/servers/check requires %q, want %q", perm, ext.PermServersWrite)
 	}
 }

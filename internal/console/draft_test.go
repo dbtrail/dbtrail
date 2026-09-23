@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dbtrail/dbtrail/ext"
 )
 
 // The Connect draft is the half-filled form somebody leaves behind when they
@@ -208,10 +210,16 @@ func TestRegistryPathIsNilSafe(t *testing.T) {
 
 func TestDraftEndpointRoundTrip(t *testing.T) {
 	srv, _ := newSupervisorServer(t)
-	if rec, body := doServersReq(t, srv, "GET", "/api/servers/draft", ""); rec.Code != 200 || !strings.Contains(string(body), `"found":false`) {
+	rec, body := doServersReq(t, srv, "GET", "/api/servers/draft", "")
+	if rec.Code != 200 || !strings.Contains(string(body), `"found":false`) {
 		t.Fatalf("GET with nothing saved: code=%d body=%s", rec.Code, body)
 	}
-	rec, body := doServersReq(t, srv, "PUT", "/api/servers/draft",
+	// And no draft object at all beside it: a screen handed an object of
+	// blanks could restore it over what somebody is typing.
+	if strings.Contains(string(body), `"draft"`) {
+		t.Errorf("nothing is saved, yet the answer carries a draft: %s", body)
+	}
+	rec, body = doServersReq(t, srv, "PUT", "/api/servers/draft",
 		`{"name":"prod","flavor":"mysql","source_host":"db.example.com","source_port":"3307","source_user":"dbtrail","source_password":"Ab3-xyz","schemas":"shop"}`)
 	if rec.Code != 200 {
 		t.Fatalf("PUT: code=%d body=%s", rec.Code, body)
@@ -228,7 +236,7 @@ func TestDraftEndpointRoundTrip(t *testing.T) {
 	if rec, body := doServersReq(t, srv, "DELETE", "/api/servers/draft", ""); rec.Code != 204 {
 		t.Fatalf("DELETE: code=%d body=%s", rec.Code, body)
 	}
-	if _, body := doServersReq(t, srv, "GET", "/api/servers/draft", ""); !strings.Contains(string(body), `"found":false`) {
+	if _, body := doServersReq(t, srv, "GET", "/api/servers/draft", ""); !strings.Contains(string(body), `"found":false`) || strings.Contains(string(body), `"draft"`) {
 		t.Errorf("the draft survived DELETE: %s", body)
 	}
 }
@@ -265,9 +273,15 @@ func TestDraftRoutesAreWriteTier(t *testing.T) {
 			t.Errorf("%s %s is not classified", m.method, m.path)
 			continue
 		}
-		if perm != permForDraftRoutes {
+		// Compared against the permission itself, not against the constant
+		// the routes are declared with: that would assert the constant equals
+		// itself and stay green if the whole tier were lowered to a read.
+		if perm != ext.PermServersWrite {
 			t.Errorf("%s %s requires %q, want %q — a read-tier session must not read a saved password",
-				m.method, m.path, perm, permForDraftRoutes)
+				m.method, m.path, perm, ext.PermServersWrite)
+		}
+		if perm == ext.PermServersRead {
+			t.Errorf("%s %s is readable by a session that may only list servers", m.method, m.path)
 		}
 	}
 }
