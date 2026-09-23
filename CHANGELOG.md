@@ -41,17 +41,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that pointed at a DuckDB schema download names Connect AI, where that card
   has lived since the same redesign.
 - **The Snapshots page opens on the copies you have, not on an explanation**
-  (#1573). Merging three pages into one put four explanations above the list
-  of snapshots: arriving at `/snapshots` on a server with one snapshot meant
-  189 words before reaching anything you could act on. It is now 112, with a
-  browser test that fails if a change pushes it past 150. Nothing was
-  deleted. "Take a copy with you", which explains the two download formats,
-  and "What this check proves", which explains the three kinds of check, are
-  now folds. Both open by themselves the moment they have something to say:
-  the download panel whenever a `.sql` build is running, waiting to be
-  downloaded, failed, or in any state this console does not recognise, and
-  the check help the moment you choose a different kind of check. Whether you
-  opened or closed the help yourself survives the page redrawing itself.
+  (#1573). Merging three pages into one left 189 words on the first screen
+  of `/snapshots` for a server with one snapshot, most of them explaining
+  the two download formats. It is now 112, with a browser test that fails if
+  a change pushes it past 150. Two explanations were folded rather than
+  removed, "Take a copy with you" and "What this check proves", and the
+  restore card's paragraph was shortened. The download panel opens by itself
+  whenever there is something to act on: a `.sql` build running, waiting to
+  be downloaded or failed, a problem clearing its files off the disk, a build
+  status that could not be read, or a state this console does not recognise.
+  A build that expired before anyone downloaded it is said on the panel's
+  own line without opening it. The check help opens the moment you choose a
+  different kind of check. Either panel, once you open it yourself, stays
+  open when the page redraws itself.
 - **Reusing the file of a table that did not change is always on, and the
   console no longer asks** (#1681). A backup that finds a table with no
   changes in its window publishes that table's previous Parquet file instead

@@ -2177,8 +2177,8 @@ section.bk-restore { margin-top: 18px; }
 .vfy-region { margin-top: 16px; padding: 16px 18px 18px; }
 .vfy-region-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .vfy-region-head .ov-panel-title { margin: 0; }
-/* The mode help is a fold since #1573: open on arrival it was half of the
-   first screen's word budget. Its summary reads as the hint it replaces —
+/* The mode help is a fold since #1573: open on arrival it was the largest
+   block left on the first screen. Its summary reads as the hint it replaces —
    no browser triangle, the same caret as the take-away panel. */
 details.vfy-helpfold > summary { cursor: pointer; user-select: none; list-style: none; margin: 8px 2px 0; }
 details.vfy-helpfold > summary::-webkit-details-marker { display: none; }
@@ -3062,6 +3062,9 @@ details.bk-take > summary .ov-panel-title::after {
 }
 details.bk-take[open] > summary .ov-panel-title::after { transform: rotate(-90deg); }
 details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
+/* A quiet fact about the last .sql build (it expired unread), said on the
+   folded panel's own line so nobody has to open it to learn a copy is gone. */
+.bk-take-note { display: block; margin-top: 4px; font-size: 13px; color: var(--ink-2); }
 .snap-sect {
   font-size: 15px; font-weight: 650; color: var(--ink);
   margin: 34px 0 14px; padding-top: 18px;

@@ -7357,7 +7357,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   card.append(state);
   const body = el("div", { class: "bk-card-body" });
   body.append(el("p", { class: "form-hint", text:
-    "Pick a past moment. DBTrail rebuilds every table as it was then and saves it as a new snapshot below. Your database is not touched." }));
+    "Pick a past moment. DBTrail rebuilds every table as it was then and saves the result as a new snapshot below. Your database is not touched." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
@@ -7432,9 +7432,9 @@ function backupTakeAway(cur, b, sqlSt) {
   const duck = backupDuckLane(b);
   const sql = backupSQLLane(cur, b, sqlSt);
   if (!duck && !sql) return null;
-  // FOLDED (#1573). Measured on this page with a real snapshot: 111 of the
-  // 189 words visible at first sight were these two lanes explaining file
-  // formats — the answer to "what do I download", which is not the question
+  // FOLDED (#1573). Measured on this page with a real snapshot, these two
+  // lanes explaining file formats were most of the words visible at first
+  // sight (the e2e prints the live count) — the answer to "what do I download", which is not the question
   // the page is opened with. Folded, the same answer is one click away and
   // the list of copies starts on the first screen.
   //
@@ -7457,44 +7457,64 @@ function backupTakeAway(cur, b, sqlSt) {
   // A Set rather than an object literal costs nothing and avoids `state`
   // values like "constructor" answering truthy through the prototype.
   //
-  // THREE things beside the state also open it, each because a closed fold
-  // would be the only thing standing between an operator and a real problem:
+  // Beyond the state, two more things open it, and both only when the MySQL
+  // lane is actually drawn: that lane is where a build's outcome and its
+  // staging problem are shown, so without it there is nothing the fold could
+  // be hiding. That gate is not decoration. On the command-line server's
+  // entry the lane is never drawn (builds run on registry servers only), and
+  // its status endpoint answers 409 — counted, that opened the fold on every
+  // visit with a red line about a build that cannot exist there.
   //
   //   staging_error is composed independently of state (the daemon folds in
-  //   every orphan it could not delete, and sql_export.go says in as many
-  //   words that clearing one never erases the other). So a build that was
-  //   downloaded — a quiet state — can carry a red line saying the daemon
-  //   cannot clear staged full dumps off its own disk, the disk capture
-  //   shares.
+  //   every orphan it could not delete, and consoleapp/sql_export.go says in
+  //   as many words that clearing one never erases the other). So a build
+  //   that was downloaded — a quiet state — can carry a red line saying the
+  //   daemon cannot clear staged full dumps off its own disk, the disk
+  //   capture shares.
   //
   //   An unreadable status is the case we know LEAST about, and hiding it
-  //   would invert the reasoning above. The fetch failing used to be
-  //   swallowed into "no status"; it is now reported in the lane.
+  //   would invert the reasoning above.
   //
-  //   The reader's own choice, kept outside the node like the verify help's,
-  //   because this page repaints itself and a <details> keeps open/closed in
-  //   the node those repaints replace. The asymmetry is deliberate: a loud
-  //   state re-opens the panel even if the reader closed it, since the one
-  //   thing this fold may never do is hide an outcome; their OPEN, though,
-  //   survives every repaint.
+  // "expired" stays quiet, but it is not silent: it means the build finished
+  // and nobody downloaded it before its deadline (a downloaded build is
+  // "downloaded", not "expired"). The summary line says so, so a reader who
+  // started one, went elsewhere and came back learns it is gone without
+  // opening anything, and without the panel sitting open on every visit
+  // until the next build.
+  //
+  // What the READER opened stays open across the repaints this page does on
+  // its own (kept outside the node, like the verify help's). It is recorded
+  // from a click on the summary, never from the toggle event: a <details>
+  // created with `open` fires toggle too, so a toggle listener recorded
+  // every automatic open as the reader's choice and the panel stayed open
+  // for the rest of the tab. A loud state still re-opens a panel the reader
+  // closed, since the one thing this fold may never do is hide an outcome.
   const st = sqlSt && sqlSt.sql_export;
-  const stErr = sqlSt && sqlSt.error;
-  const live = !!(st && ((st.state && !SQL_EXPORT_QUIET.has(st.state)) || st.staging_error)) || !!stErr;
-  const panel = el("details", { class: "ov-panel bk-take", open: live || takeAwayOpen || null });
-  panel.addEventListener("toggle", () => { takeAwayOpen = !!panel.open; });
-  panel.append(el("summary", { class: "ov-panel-head bk-take-sum" },
-    el("h2", { class: "ov-panel-title", text: "Take a copy with you" })));
+  const stErr = sql && sqlSt && sqlSt.error;
+  const owed = !!(sql && st && ((st.state && !SQL_EXPORT_QUIET.has(st.state)) || st.staging_error)) || !!stErr;
+  const panel = el("details", { class: "ov-panel bk-take", open: owed || takeAwayOpen || null });
+  const summary = el("summary", { class: "ov-panel-head bk-take-sum" },
+    el("h2", { class: "ov-panel-title", text: "Take a copy with you" }));
+  if (sql && st && st.state === "expired") {
+    summary.append(el("span", { class: "bk-take-note", text: "The last .sql copy expired before anyone downloaded it." }));
+  }
+  // Click fires before the browser flips `open`, so the reader's new choice
+  // is the opposite of what it reads now. Keyboard activation of a summary
+  // dispatches click too.
+  summary.addEventListener("click", () => { takeAwayOpen = !panel.open; });
+  panel.append(summary);
+  // Said out loud, and above the lanes it qualifies, rather than rendered as
+  // a build form with nothing in it: every state branch in the lane reads
+  // `st`, so an unreadable status drew the same thing as "no build has ever
+  // run here".
+  if (stErr) {
+    panel.append(el("p", { class: "form-msg err", text:
+      "The state of the .sql build could not be read: " + stErr + ". What the MySQL lane below says about a build may be out of date." }));
+  }
   const lanes = el("div", { class: "bk-lanes" });
   if (duck) lanes.append(duck);
   if (sql) lanes.append(sql);
   panel.append(lanes);
-  // Said out loud rather than rendered as a build form with nothing in it:
-  // every state branch in the lane reads `st`, so an unreadable status drew
-  // the same thing as "no build has ever run here".
-  if (stErr) {
-    panel.append(el("p", { class: "form-msg err", text:
-      "The state of the .sql build could not be read: " + stErr + ". Anything below about a build is out of date." }));
-  }
   return panel;
 }
 
@@ -7882,10 +7902,10 @@ function verifyRegions(servers, opts) {
   // recover-inputs check reads only the index, so it stays runnable on a
   // server with no baseline configured.
   const help = el("p", { class: "form-hint vfy-modehelp" });
-  // The mode help is a FOLD since #1573. Open on arrival it was 79 of the
-  // page's first 154 words — an explanation of a check nobody asked for yet,
-  // on the screen whose job is "what copies do I have". Closed it costs 4,
-  // and it opens BY ITSELF the moment the reader browses the picker, which
+  // The mode help is a FOLD since #1573. Open on arrival it was the largest
+  // block left on the first screen — an explanation of a check nobody asked
+  // for yet, on the screen whose job is "what copies do I have". Closed it
+  // costs its four-word summary, and it opens BY ITSELF the moment the reader browses the picker, which
   // is the moment #1418 wrote it for. The text still swaps while closed, so
   // whoever opens it afterwards reads the mode that is selected now.
   const helpFold = el("details", { class: "vfy-helpfold", open: vfyHelpOpen || null },

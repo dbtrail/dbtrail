@@ -1,6 +1,7 @@
 package console
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -80,13 +81,18 @@ var oldVocabulary = regexp.MustCompile(`(?i)\b(backups?|baselines?)\b`)
 // several branches edit this package at once: two branches each removing one
 // occurrence and each pinning one lower both merge, the count lands two
 // under, and a must-equal rule would turn main red for a change no single
-// pull request made. A rename step moves these by hundreds, which is well
-// past the slack, so the pin still gets lowered exactly when it should be.
+// pull request made.
+//
+// The slack is also exactly how much this guard can be beaten by: a drop
+// that stays inside it never forces the pin down, so that many occurrences
+// can come back later with the test still green. That is why it is three —
+// enough for merges that land together, too small to hide a rename step —
+// and why every run under a pin says so in the test log.
 const (
 	assetVocabularyPin      = 282 // string literals in assets/app.js
 	goVocabularyPin         = 225 // string literals in this package's non-test .go files
 	consoleappVocabularyPin = 277 // string literals in consoleapp's non-test .go files
-	vocabularySlack         = 20  // how far under a pin may drift before it must be lowered
+	vocabularySlack         = 3   // how far under a pin may drift before it must be lowered
 
 	// Regular expressions in app.js that carry a quote character. Pinned
 	// because a change here means one of two things, and both matter: a new
@@ -130,6 +136,9 @@ func TestOldVocabularyOnlyShrinks(t *testing.T) {
 				"If you removed none of these words yourself, concurrent merges did: lowering the pin "+
 				"is still the right answer.",
 				c.what, c.got, c.pin-c.got, c.pin, c.how, c.got)
+		case c.got < c.pin:
+			t.Logf("%s: %d occurrences, %d under the pin of %d: room a later change could fill back "+
+				"up without failing this test. Lower %s to %d.", c.what, c.got, c.pin-c.got, c.pin, c.how, c.got)
 		}
 	}
 }
@@ -195,7 +204,7 @@ func countInGoStrings(t *testing.T, dir string) int {
 // whose last character is the "n" of return, and reading that as division
 // swallows the quote inside the character class and swaps code for text from
 // there on. So the previous WORD is tracked, not only the previous byte.
-func countInJSStrings(t *testing.T, src string) (int, []string) {
+func countInJSStrings(t scanT, src string) (int, []string) {
 	t.Helper()
 	n, i := 0, 0
 	var quoteRegexes []string
@@ -244,6 +253,13 @@ func countInJSStrings(t *testing.T, src string) (int, []string) {
 			}
 			prev = src[j-1]
 			i = j
+		case (c == '+' || c == '-') && i+1 < len(src) && src[i+1] == c:
+			// ++ and -- end an expression (i++ / 2 divides), but a lone + or -
+			// is an operator after which a regex may start. Read as two
+			// operators, `i++ / 2 + " backup " + b / 3` became one long regex
+			// and the word inside it went uncounted without a sound.
+			prev, prevWord = ')', ""
+			i += 2
 		default:
 			if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
 				prev, prevWord = c, ""
@@ -252,6 +268,14 @@ func countInJSStrings(t *testing.T, src string) (int, []string) {
 		}
 	}
 	return n, quoteRegexes
+}
+
+// scanT is the slice of *testing.T the JS scanner uses, so the scanner's own
+// test can check that a bad input fails loudly instead of miscounting.
+type scanT interface {
+	Helper()
+	Fatal(args ...any)
+	Fatalf(format string, args ...any)
 }
 
 func isWordByte(c byte) bool {
@@ -282,7 +306,7 @@ func regexCanStart(prev byte, prevWord string) bool {
 // swallows whatever strings lie between the two slashes, or silently counts
 // a regex's own backticked words as prose. Counting them and pinning the
 // count is what makes either event loud.
-func skipRegex(t *testing.T, src string, i int) (int, bool) {
+func skipRegex(t scanT, src string, i int) (int, bool) {
 	t.Helper()
 	start := i
 	quoted := false
@@ -298,7 +322,9 @@ func skipRegex(t *testing.T, src string, i int) (int, bool) {
 			class = false
 		case '/':
 			if !class {
-				return i + 1, quoted
+				end := i + 1
+				checkAfterRegex(t, src, end, start)
+				return end, quoted
 			}
 		case '\n':
 			t.Fatalf("app.js: newline inside what was read as a regular expression at offset %d — "+
@@ -312,26 +338,159 @@ func skipRegex(t *testing.T, src string, i int) (int, bool) {
 	return i, quoted
 }
 
-// scanString returns the contents of the string literal starting at i, and
-// the index just past its closing quote. Escapes are stepped over rather
-// than decoded: no escape sequence in this file spells a letter, so the word
-// boundaries are the same either way.
-func scanString(t *testing.T, src string, i int) (string, int) {
+// checkAfterRegex is the backstop for every regex/division misreading the
+// rules above do not foresee. A real regex literal is followed by its flags
+// and then by something that can follow an expression; a division misread
+// as a regex ends wherever the next slash happened to be, usually in the
+// middle of an expression. Failing there turns a silent miscount into a
+// loud one.
+func checkAfterRegex(t scanT, src string, i, start int) {
+	t.Helper()
+	for i < len(src) && strings.IndexByte("dgimsuyv", src[i]) >= 0 {
+		i++
+	}
+	for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
+		i++
+	}
+	if i >= len(src) || strings.IndexByte(".),;]}?:|&=!\n\r", src[i]) >= 0 {
+		return
+	}
+	t.Fatalf("app.js: what was read as a regular expression at offset %d is followed by %q, which "+
+		"cannot follow one — a division was probably read as a regex, and the scan swallowed "+
+		"everything between two slashes. Teach countInJSStrings the case.", start, src[i])
+}
+
+// scanString returns the contents of the string literal starting at i, with
+// every escape sequence replaced by a space, and the index just past its
+// closing quote.
+//
+// Decoded to a SPACE rather than kept: a kept escape puts its letter against
+// the next word — "\nBackups" reads as "nBackups", \b finds no boundary
+// there, and the occurrence goes uncounted. A space always makes the
+// boundary, which errs toward counting. \uXXXX, \u{...} and \xHH are
+// consumed whole, since their hex digits are word characters too.
+//
+// Inside a template literal, a backtick within ${...} opens a NESTED
+// template, and this scanner would take it for the outer one closing and
+// read code as text from there on. It fails instead. The code inside ${...}
+// is counted as if it were text, which can only make the count go up.
+func scanString(t scanT, src string, i int) (string, int) {
 	t.Helper()
 	quote := src[i]
 	start := i + 1
+	var b strings.Builder
+	depth := 0 // brace depth inside ${...}, template literals only
 	for j := start; j < len(src); j++ {
-		switch src[j] {
-		case '\\':
+		c := src[j]
+		switch {
+		case c == '\\':
+			j += escapeLen(src, j) - 1
+			b.WriteByte(' ')
+			continue
+		case quote == '`' && depth > 0 && c == '`':
+			t.Fatalf("app.js: a template literal nested inside ${...} at offset %d — this scanner "+
+				"cannot follow it; teach scanString nesting before writing one", j)
+		case quote == '`' && c == '$' && j+1 < len(src) && src[j+1] == '{':
+			depth++
+			b.WriteString("${")
 			j++
-		case quote:
-			return src[start:j], j + 1
-		case '\n':
-			if quote != '`' {
-				t.Fatalf("app.js: newline inside a %c-quoted string at offset %d", quote, start)
-			}
+			continue
+		case depth > 0 && c == '{':
+			depth++
+		case depth > 0 && c == '}':
+			depth--
+		case depth == 0 && c == quote:
+			return b.String(), j + 1
+		case c == '\n' && quote != '`':
+			t.Fatalf("app.js: newline inside a %c-quoted string at offset %d", quote, start)
 		}
+		b.WriteByte(c)
 	}
 	t.Fatalf("app.js: unterminated %c-quoted string at offset %d", quote, start)
 	return "", len(src)
+}
+
+// escapeLen is the length of the escape sequence starting at the backslash
+// at i.
+func escapeLen(src string, i int) int {
+	if i+1 >= len(src) {
+		return 1
+	}
+	switch src[i+1] {
+	case 'x':
+		return 4
+	case 'u':
+		if i+2 < len(src) && src[i+2] == '{' {
+			if end := strings.IndexByte(src[i:], '}'); end > 0 {
+				return end + 1
+			}
+		}
+		return 6
+	}
+	return 2
+}
+
+// The inputs that broke earlier versions of this scanner, each turning a
+// word into an uncounted one without a sound. None occurs in app.js today;
+// the point is that none can arrive silently. Each must either count the
+// word or fail loudly — never neither.
+func TestVocabularyScannerDoesNotGoQuiet(t *testing.T) {
+	for _, c := range []struct {
+		name, src string
+		want      int // -1: must fail loudly
+	}{
+		{"an escape against the word", `a = "First line.\nBackups are kept.";`, 1},
+		{"a tab escape against the word", `a = "x\tbaseline";`, 1},
+		{"a unicode escape against the word", `a = "\u2014backup";`, 1},
+		{"a braced unicode escape", `a = "\u{2014}backup";`, 1},
+		{"a keyword-named property before a division", `a = o.delete / 2 + " backup " + b / 3;`, 1},
+		{"another one", `a = o.in / 2 + " backup " + b / 3;`, 1},
+		{"a postfix increment before a division", `a = i++ / 2 + " backup " + b / 3;`, 1},
+		{"a postfix decrement before a division", `a = i-- / 2 + " backup " + b / 3;`, 1},
+		{"a keyword that really opens a regex", `function f(s) { return /[",]/.test(s) ? " backup " : ""; }`, 1},
+		{"a regex after a closing paren, misread", `if (x) /"/.test(y); a = " backup ";`, -1},
+		{"a template nested in ${}", "a = `x ${ok ? `backup` : \"\"} y`;", -1},
+		{"a plain template", "a = `one backup, ${n} baselines`;", 2},
+		// No rule above covers a division after a closing brace; only the
+		// check on what follows a regex catches it.
+		{"a division no rule foresees", `a = {} / 2 + " backup " + c / d * 3;`, -1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ft := &fatalRecorder{}
+			got := -1
+			func() {
+				defer func() {
+					if r := recover(); r != nil && r != errScanFatal {
+						panic(r)
+					}
+				}()
+				got, _ = countInJSStrings(ft, c.src)
+			}()
+			switch {
+			case c.want == -1 && !ft.failed:
+				t.Errorf("counted %d and said nothing; this input must fail loudly", got)
+			case c.want >= 0 && ft.failed:
+				t.Errorf("failed (%s); want a count of %d", ft.msg, c.want)
+			case c.want >= 0 && got != c.want:
+				t.Errorf("counted %d, want %d: a word went uncounted without a sound", got, c.want)
+			}
+		})
+	}
+}
+
+var errScanFatal = &struct{ string }{"scanner fatal"}
+
+type fatalRecorder struct {
+	failed bool
+	msg    string
+}
+
+func (f *fatalRecorder) Helper() {}
+func (f *fatalRecorder) Fatal(args ...any) {
+	f.failed, f.msg = true, fmt.Sprint(args...)
+	panic(errScanFatal)
+}
+func (f *fatalRecorder) Fatalf(format string, args ...any) {
+	f.failed, f.msg = true, fmt.Sprintf(format, args...)
+	panic(errScanFatal)
 }

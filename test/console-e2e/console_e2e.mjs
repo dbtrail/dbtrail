@@ -2373,8 +2373,8 @@ try {
   //
   // Measured on THIS server, which carries a real snapshot: the rich state is
   // the expensive one, and a budget proved on an empty page proves nothing.
-  // The two structural gates below are the anti-vacuity guard — without them
-  // a bug that renders half the page would PASS this.
+  // The structural gates below are the anti-vacuity guard — without them a
+  // bug that renders half the page would PASS this.
   //
   // 1440x900 is the laptop the budget was decided against; the suite's own
   // 1300x1000 is restored right after. Line breaking differs between the
@@ -2389,7 +2389,7 @@ try {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.evaluate(() => { history.pushState({}, "", "/snapshots"); return renderRoute(); });
   await page.waitForFunction(() => location.pathname === "/snapshots"
-    && document.querySelectorAll(".stg-row").length > 0);
+    && document.querySelectorAll(".view .stg-list .stg-row").length > 0);
   const budget = await page.evaluate(() => {
     window.scrollTo(0, 0);
     const fold = window.innerHeight;
@@ -2416,11 +2416,25 @@ try {
         text: (c.innerText || "").trim().slice(0, 60).replace(/\s+/g, " ") });
     }
     const help = document.querySelector(".vfy-helpfold");
+    // Structural gates: this is the page, whole, not a half-drawn one. Each
+    // part must have drawn its CONTENT, not just its heading: #checks and
+    // #setup are headings appended outside part(), so a part that throws
+    // still leaves them there and draws one short error box instead, and a
+    // shorter page is exactly what this budget rewards. Hence no error box
+    // anywhere, and a content marker AFTER each heading. The list's rows are
+    // looked up in the list that sits before #checks, because Storage and
+    // the verify history use the same row class.
+    const checks = document.getElementById("checks");
+    const setup = document.getElementById("setup");
+    const after = (head, sel) => !!head && Array.from(document.querySelectorAll(".view " + sel))
+      .some((n) => head.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const list = Array.from(document.querySelectorAll(".view .stg-list"))
+      .find((l) => checks && (l.compareDocumentPosition(checks) & Node.DOCUMENT_POSITION_FOLLOWING));
     return { total, blocks: blocks.filter((b) => b.words > 0),
-      // Structural gates: this is the page, whole, not a half-drawn one.
-      rows: document.querySelectorAll(".stg-row").length,
-      hasChecks: !!document.getElementById("checks"),
-      hasSetup: !!document.getElementById("setup"),
+      rows: list ? list.querySelectorAll(".stg-row").length : 0,
+      hasChecks: after(checks, ".vfy-control"),
+      hasSetup: after(setup, ".cards, .tcard, .ov-panel"),
+      errorBoxes: document.querySelectorAll(".view .error-box").length,
       // The two folds are closed on arrival, and the mode help still carries
       // its text while closed (a fold that emptied itself would pass the
       // budget by losing the words instead of deferring them).
@@ -2433,7 +2447,7 @@ try {
   // breaks tells a reviewer nothing about how much room their change ate.
   console.log(`[budget] snapshots first screen: ${budget.total}/150 words · ` +
     budget.blocks.map((b) => `${b.words}`).join("+"));
-  (budget.total <= 150 && budget.rows > 0 && budget.hasChecks && budget.hasSetup)
+  (budget.total <= 150 && budget.rows > 0 && budget.hasChecks && budget.hasSetup && budget.errorBoxes === 0)
     ? ok("snapshots: the first screen stays inside its 150-word budget")
     : bad("snapshots: the first screen stays inside its 150-word budget", JSON.stringify(budget));
   (budget.helpOpen === false && budget.helpWords > 50 && !budget.takeAwayOpen)
@@ -2455,8 +2469,8 @@ try {
   // The fold's state outlives a repaint. This page repaints on its own — a
   // job settling, a server switch, a page of the list — and a <details>
   // keeps its state in the node, which those repaints replace. Left there,
-  // the help would shut under a reader mid-sentence two seconds after they
-  // opened it, and the close below would be undone just as silently.
+  // the help would shut under a reader mid-sentence the next time a job
+  // finished, and the close below would be undone just as silently.
   const foldKeeps = await page.evaluate(async () => {
     await renderSnapshots();
     const afterOpen = (document.querySelector(".vfy-helpfold") || {}).open;
@@ -2845,32 +2859,76 @@ try {
 
   // The take-away fold's one duty (#1573): it is closed on arrival to keep
   // the first screen inside its budget, and it must NEVER be what hides a
-  // build from the person who started it. Driven through the REAL builder,
-  // every state the server can report plus one it cannot — an unknown state
-  // opens the panel, because a state this frontend never learned is far
-  // likelier to be a new failure than a new kind of nothing. `replaced` is
-  // not hypothetical: the server documents it and the frontend has no branch
-  // for it.
-  const takeStates = await page.evaluate(() => {
+  // build's outcome. Driven through the REAL builder: every state the server
+  // documents today (BaselineStatus: idle, running, succeeded, failed,
+  // downloaded, expired) plus one it does not send — an unknown state opens
+  // the panel, because a state added server-side before this page learns it
+  // is far likelier to be a new failure than a new kind of nothing.
+  //
+  // Then what opens it beside the state, and the two places it must NOT:
+  //   - a staging error on a quiet (downloaded) build: the red line saying
+  //     the daemon cannot clear full dumps off its disk lives in the panel;
+  //   - a status that could not be read: said above the lanes;
+  //   - the command-line server's entry, whose status endpoint answers 409
+  //     and which never draws the MySQL lane: no red line, no auto-open;
+  //   - "expired": closed, but said on the summary line.
+  // And the reader's choice: an automatic open must not be recorded as one
+  // (a <details> created open fires `toggle`, which is how the first cut of
+  // this latched open for the rest of the tab), while a click on the
+  // summary is.
+  const takeStates = await page.evaluate(async () => {
     const cur = { id: "srv-fix", kind: "registry" };
+    const cli = { id: "default", kind: "ephemeral" };
     const b = { configured: true, source: "/tmp/baselines", kind: "dir",
       snapshots: [{ time: "2026-06-10 12:00:00", files: [{ name: "x.parquet", bytes: 10 }] }] };
-    const openFor = (state) => {
-      const n = backupTakeAway(cur, b, state === null ? null : { sql_export: { state } });
-      return n ? { tag: n.tagName.toLowerCase(), open: !!n.open } : null;
-    };
+    const keep = takeAwayOpen;
+    takeAwayOpen = false;
+    const shape = (n) => n ? {
+      tag: n.tagName.toLowerCase(), open: !!n.open,
+      err: !!n.querySelector(".form-msg.err"),
+      errBeforeLanes: !!n.querySelector(".form-msg.err + .bk-lanes"),
+      note: (n.querySelector(".bk-take-note") || {}).textContent || "",
+    } : null;
+    const openFor = (sqlSt, who) => shape(backupTakeAway(who || cur, b, sqlSt));
     const out = {};
-    for (const s of ["idle", "downloaded", "expired", "running", "succeeded", "failed", "replaced", "some-new-state"]) out[s] = openFor(s);
+    for (const s of ["idle", "downloaded", "expired", "running", "succeeded", "failed", "some-new-state"]) {
+      out[s] = openFor({ sql_export: { state: s } });
+    }
     out.noStatus = openFor(null);
+    out.stagingOnQuiet = openFor({ sql_export: { state: "downloaded", staging_error: "could not remove /tmp/x: busy" } });
+    out.unreadable = openFor({ error: "503 Service Unavailable" });
+    out.cliUnreadable = openFor({ error: "409 the command-line server is already streamed by this process" }, cli);
+    // Let the queued toggle events of every panel built open above land.
+    await new Promise((r) => setTimeout(r, 50));
+    out.latchedByAutoOpen = takeAwayOpen;
+    // A reader's click on a closed panel's summary is the choice.
+    const quiet = backupTakeAway(cur, b, { sql_export: { state: "idle" } });
+    quiet.querySelector("summary").click();
+    out.recordedClick = takeAwayOpen;
+    out.keptOnRebuild = shape(backupTakeAway(cur, b, { sql_export: { state: "idle" } })).open;
+    takeAwayOpen = keep;
     return out;
   });
-  const quiet = ["idle", "downloaded", "expired"], loud = ["running", "succeeded", "failed", "replaced", "some-new-state"];
+  const quiet = ["idle", "downloaded", "expired"], loud = ["running", "succeeded", "failed", "some-new-state"];
   (takeStates.idle && takeStates.idle.tag === "details"
     && quiet.every((s) => takeStates[s] && takeStates[s].open === false)
     && loud.every((s) => takeStates[s] && takeStates[s].open === true)
     && takeStates.noStatus && takeStates.noStatus.open === false)
     ? ok("take-away: the fold arrives closed only while the .sql build owes nothing, and an unknown state opens it")
     : bad("take-away: the fold arrives closed only while the .sql build owes nothing, and an unknown state opens it", JSON.stringify(takeStates));
+  (takeStates.stagingOnQuiet && takeStates.stagingOnQuiet.open === true
+    && takeStates.unreadable && takeStates.unreadable.open === true && takeStates.unreadable.errBeforeLanes
+    && takeStates.cliUnreadable && takeStates.cliUnreadable.open === false && !takeStates.cliUnreadable.err)
+    ? ok("take-away: a staging problem or an unreadable status opens it, and never on a server that cannot build")
+    : bad("take-away: a staging problem or an unreadable status opens it, and never on a server that cannot build",
+      JSON.stringify({ stagingOnQuiet: takeStates.stagingOnQuiet, unreadable: takeStates.unreadable, cliUnreadable: takeStates.cliUnreadable }));
+  (/expired before anyone downloaded it/.test(takeStates.expired && takeStates.expired.note) && !takeStates.idle.note)
+    ? ok("take-away: an expired copy is said on the folded panel's own line")
+    : bad("take-away: an expired copy is said on the folded panel's own line", JSON.stringify({ expired: takeStates.expired, idle: takeStates.idle }));
+  (takeStates.latchedByAutoOpen === false && takeStates.recordedClick === true && takeStates.keptOnRebuild === true)
+    ? ok("take-away: only the reader's click is remembered across a rebuild, never an automatic open")
+    : bad("take-away: only the reader's click is remembered across a rebuild, never an automatic open",
+      JSON.stringify({ latchedByAutoOpen: takeStates.latchedByAutoOpen, recordedClick: takeStates.recordedClick, keptOnRebuild: takeStates.keptOnRebuild }));
 
   // The real build. TT_AT sits after every fixture event; the fold reads the
   // baseline AND the index. Poll the status endpoint, not the DOM — the page
