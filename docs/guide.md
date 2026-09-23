@@ -364,7 +364,7 @@ bintrail up \
   --index-dsn  "user:pass@tcp(127.0.0.1:3306)/binlog_index"
 ```
 
-`up` runs the preflight, creates the index, snapshots, streams, and rotates hourly — run it under systemd (`Restart=always`). To replay from an earlier point, use `bintrail stream --start-gtid ... --reset`. RDS gotchas (backup-retention enables binlog, stream from the primary, retention cap), the `--ssl-mode` TLS options, and metrics are in [Streaming](streaming.md); the command-by-command walkthrough is the [command-line quickstart](quickstart.md#capture-changes).
+`up` runs the preflight, creates the index, snapshots, streams, and rotates hourly. Run it under systemd (`Restart=always`). To replay from an earlier point, use `bintrail stream --start-gtid ... --reset`. RDS gotchas (backup-retention enables binlog, stream from the primary, retention cap), the `--ssl-mode` TLS options, and metrics are in [Streaming](streaming.md); the command-by-command walkthrough is the [command-line quickstart](quickstart.md#capture-changes).
 
 ---
 

@@ -128,7 +128,7 @@ else
 fi
 
 docker info >/dev/null 2>&1 || die \
-  "The Docker daemon isn't running. Start Docker and re-run this installer."
+  "Docker isn't running. Start Docker and re-run this installer."
 
 # Catch the single most common FRESH-install failure — port already taken — with
 # an actionable message instead of Docker's raw bind error. Best-effort: if we
@@ -322,10 +322,10 @@ say "and ${B}a MySQL login that can create users${RST} and grant them privileges
 say ""
 say "${B}Next steps${RST}"
 say "  ${B}1. Sign in.${RST} Open ${B}${CONSOLE_URL}${RST} and create a username and password."
-say "  ${B}2. Connect.${RST} Click ${B}+ Add server${RST} and fill in the host and port of your MySQL"
-say "     server. The form suggests a user and password for DBTrail and shows the"
-say "     SQL that creates that user: run it on your MySQL with that login, then"
-say "     press Save."
+say "  ${B}2. Connect.${RST} Click ${B}+ Add server${RST}, give the server a name, and fill in"
+say "     the host and port of your MySQL server. The form suggests a user and"
+say "     password for DBTrail and shows the SQL that creates that user: run it on"
+say "     your MySQL with that login, then press Save."
 say "     Your MySQL runs on this same machine? Use host ${B}host.docker.internal${RST}"
 say "     (on Linux, that MySQL must listen on more than 127.0.0.1)."
 say "  ${B}3. First change.${RST} Change a row on your MySQL. It shows on the Overview"

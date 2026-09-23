@@ -189,6 +189,40 @@ func TestInstaller_aCleanRunSpeaksTheWordList(t *testing.T) {
 	}
 }
 
+// The installer's refusals and warnings are read too, by the person whose
+// install just stopped. Every one the stand-ins can reach is checked: a taken
+// port, a taken chosen metrics port, Docker stopped, Compose missing, and a
+// re-run over an existing stack. Not reached: Docker not installed (the
+// stand-in cannot be absent) and DBTrail never answering (a three-minute
+// wait).
+func TestInstaller_refusalsAndWarningsSpeakTheWordList(t *testing.T) {
+	existing := t.TempDir()
+	if err := os.WriteFile(filepath.Join(existing, "docker-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"console port taken", []string{"BUSY_PORTS=8090 8091"}, "already in use"},
+		{"chosen metrics port taken", []string{"BUSY_PORTS=9095", "DBTRAIL_METRICS_PORT=9095"}, "already in use"},
+		{"Docker stopped", []string{"STUB_DOCKER_DOWN=1"}, "Docker isn't running"},
+		{"Compose missing", []string{"STUB_NO_COMPOSE=1"}, "Docker Compose is not available"},
+		{"re-run over an existing stack", []string{"DBTRAIL_DIR=" + existing, "DBTRAIL_PORT=8095", "DBTRAIL_METRICS_PORT=9095"}, "ignored"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := install(t, tc.env...)
+			if !strings.Contains(r.out, tc.want) {
+				t.Fatalf("the run did not reach the path it tests (no %q):\n%s", tc.want, r.out)
+			}
+			for _, h := range sentenceHits(t, r.out, r.dir, existing) {
+				t.Errorf("banned in a sentence the installer prints: %s", h)
+			}
+		})
+	}
+}
+
 func cleanRunSpeaksTheWordList(t *testing.T, env ...string) {
 	r := install(t, env...)
 	if r.failed || !strings.Contains(r.out, "DBTrail is up.") {
@@ -200,11 +234,20 @@ func cleanRunSpeaksTheWordList(t *testing.T, env ...string) {
 	for _, h := range sentenceHits(t, r.out, r.dir) {
 		t.Errorf("banned in a sentence the installer prints: %s", h)
 	}
+	for _, e := range env {
+		if port, ok := strings.CutPrefix(e, "DBTRAIL_PORT="); ok {
+			if !strings.Contains(r.out, "DBTrail will answer on port "+port) {
+				t.Errorf("a chosen port is not said:\n%s", r.out)
+			}
+		}
+	}
 	for _, want := range []string{
 		promise,
 		startPage,
 		"your MySQL",
 		"host and port",
+		// The add-server form refuses a blank Name, and it has no default.
+		"give the server a name",
 		"a MySQL login that can create users",
 		"Docker volumes",
 		"docker compose down",

@@ -229,7 +229,7 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if recBaselineDir == "" && recBaselineS3 == "" {
-		return noSnapshotLocationError(cmd, recSchema+"."+recTable, at)
+		return noSnapshotLocationError(cmd, recSchema+"."+recTable, at, recBaselineOnly)
 	}
 	if !recBaselineOnly && recIndexDSN == "" {
 		return fmt.Errorf("--index-dsn is required unless --baseline-only is set")
@@ -263,7 +263,7 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// the CLI relies on that server-side log.
 	baselinePath, snapshotTime, _, err := reconstruct.FindBaseline(cmd.Context(), baselineSrc, recSchema, recTable, at)
 	if errors.Is(err, reconstruct.ErrNoBaseline) {
-		return noSnapshotBeforeError(cmd, recSchema+"."+recTable, at, baselineSrc, err)
+		return noSnapshotBeforeError(cmd.Context(), cmd, recSchema, recTable, at, baselineSrc, recBaselineOnly, err)
 	}
 	if err != nil {
 		return err
@@ -720,7 +720,7 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 		}
 	}
 	if recBaselineDir == "" && recBaselineS3 == "" {
-		return noSnapshotLocationError(cmd, recTables, at)
+		return noSnapshotLocationError(cmd, recTables, at, false)
 	}
 
 	// ── Parse --chunk-size ─────────────────────────────────────────────────
@@ -936,16 +936,17 @@ func pgReconstructBeta(flavor string, baselineLSN uint64) bool {
 // ── no snapshot (#1807) ──────────────────────────────────────────────────────
 //
 // reconstruct can only start from a snapshot taken at or before the moment
-// asked for; the replay runs forward from there. Both refusals below say so,
+// asked for; the replay runs forward from there. The refusals below say so,
 // with the table and the moment filled in, because the one-line versions
 // they replace named only flags, and a person who then took a snapshot now
 // got the same refusal again for any earlier moment. The flags stay named:
 // they are how the location is given, and the CLI keeps calling snapshots
 // baselines (#1793 is the separate question of renaming the flags).
 
-// snapshotCommand is the command that makes a snapshot, named after the
-// binary running: bintrail-pg has its own, and a commercial build carries
-// the core's under its own name.
+// snapshotCommand is the command that writes snapshots, named after the root
+// command: bintrail-pg has its own baseline command. The core's root is
+// always "bintrail", so a build that embeds it under another binary name
+// still prints "bintrail baseline".
 func snapshotCommand(cmd *cobra.Command) string {
 	root := "bintrail"
 	if cmd != nil && cmd.HasParent() {
@@ -954,11 +955,22 @@ func snapshotCommand(cmd *cobra.Command) string {
 	return root + " baseline"
 }
 
-func noSnapshotLocationError(cmd *cobra.Command, tables string, at time.Time) error {
-	return fmt.Errorf("reconstruct needs a snapshot of %s taken at or before %s: it starts from that snapshot "+
-		"and replays the changes recorded after it. No snapshot location was given: set --baseline-dir (a folder) "+
+// needsSnapshot is the opening every no-snapshot refusal shares: which
+// snapshot, and what the mode does with it. --baseline-only does not replay.
+func needsSnapshot(tables string, at time.Time, baselineOnly bool) string {
+	what := "reconstruct needs a snapshot of %s taken at or before %s: " +
+		"it starts from that snapshot and replays the changes recorded after it."
+	if baselineOnly {
+		what = "reconstruct --baseline-only needs a snapshot of %s taken at or before %s: " +
+			"it reads the row as that snapshot holds it."
+	}
+	return fmt.Sprintf(what, strings.ReplaceAll(tables, ",", ", "), at.UTC().Format(time.RFC3339))
+}
+
+func noSnapshotLocationError(cmd *cobra.Command, tables string, at time.Time, baselineOnly bool) error {
+	return fmt.Errorf("%s No snapshot location was given: set --baseline-dir (a folder) "+
 		"or --baseline-s3 (an s3:// URL) to where `%s` wrote its snapshots",
-		strings.ReplaceAll(tables, ",", ", "), at.UTC().Format(time.RFC3339), snapshotCommand(cmd))
+		needsSnapshot(tables, at, baselineOnly), snapshotCommand(cmd))
 }
 
 // noSnapshotError keeps the lookup's error reachable (errors.Is on
@@ -971,13 +983,61 @@ type noSnapshotError struct {
 func (e *noSnapshotError) Error() string { return e.msg }
 func (e *noSnapshotError) Unwrap() error { return e.err }
 
-func noSnapshotBeforeError(cmd *cobra.Command, table string, at time.Time, location string, err error) error {
+// listSnapshots lists a snapshot location; a variable so a test can make the
+// listing fail.
+var listSnapshots = reconstruct.ListBaselines
+
+// noSnapshotBeforeError is the refusal when the location holds no snapshot
+// of the table from at or before the moment. The lookup cannot say why, so
+// the location is listed, on this failure path only, to tell the three cases
+// apart: every snapshot of the table is later (the moment is too early), no
+// snapshot includes the table, or the location holds none at all. When the
+// listing fails, or shows a snapshot the lookup did not accept, the message
+// claims no case.
+func noSnapshotBeforeError(ctx context.Context, cmd *cobra.Command, schema, table string, at time.Time,
+	location string, baselineOnly bool, err error) error {
+	name := schema + "." + table
 	when := at.UTC().Format(time.RFC3339)
-	return &noSnapshotError{err: err, msg: fmt.Sprintf(
-		"reconstruct needs a snapshot of %s taken at or before %s, and %q has none. It starts from that snapshot "+
-			"and replays the changes recorded after it. A snapshot taken now only answers moments after it: "+
-			"point --baseline-dir or --baseline-s3 at a location holding an older snapshot that includes this table "+
-			"(`%s` writes them). If the snapshots there are later than %s, a later moment works; if none of them "+
-			"includes the table, no moment does until one that includes it is taken",
-		table, when, location, snapshotCommand(cmd), when)}
+	take := snapshotCommand(cmd)
+	var why string
+	files, listErr := listSnapshots(ctx, location)
+	snapshots := map[time.Time]bool{}
+	var earliest time.Time
+	ofTable, beforeAt := 0, false
+	for _, f := range files {
+		snapshots[f.SnapshotTime] = true
+		if f.Schema != schema || f.Table != table {
+			continue
+		}
+		ofTable++
+		if !f.SnapshotTime.After(at) {
+			beforeAt = true
+		}
+		if earliest.IsZero() || f.SnapshotTime.Before(earliest) {
+			earliest = f.SnapshotTime
+		}
+	}
+	switch {
+	case listErr != nil || beforeAt:
+		why = fmt.Sprintf("No snapshot of %s from at or before %s was found in %q. "+
+			"A snapshot only answers moments at or after it was taken (`%s` writes them)",
+			name, when, location, take)
+	case ofTable > 0:
+		first := earliest.UTC().Format(time.RFC3339)
+		why = fmt.Sprintf("The snapshots of %s in %q are all from after %s; the earliest is %s. "+
+			"A snapshot only answers moments at or after it was taken, so ask for a moment at or after %s, "+
+			"or point --baseline-dir or --baseline-s3 at a location holding an older one",
+			name, location, when, first, first)
+	case len(snapshots) > 0:
+		held := "holds 1 snapshot, and it does not include"
+		if len(snapshots) > 1 {
+			held = fmt.Sprintf("holds %d snapshots, and none of them includes", len(snapshots))
+		}
+		why = fmt.Sprintf("%q %s %s. Take one that includes it (`%s` writes them); "+
+			"it answers moments from then on, not earlier ones", location, held, name, take)
+	default:
+		why = fmt.Sprintf("%q holds no snapshots. Take one (`%s` writes them); "+
+			"it answers moments from then on, not earlier ones", location, take)
+	}
+	return &noSnapshotError{err: err, msg: needsSnapshot(name, at, baselineOnly) + " " + why}
 }
