@@ -2581,7 +2581,10 @@ try {
       && pc.noSettingsRead.duckData && pc.noSettingsRead.create && pc.noSettingsRead.schedSave,
     "servers:write": !pc.noServersWrite.serverSave && pc.noServersWrite.serverLocked && !pc.noServersWrite.schedSave
       && !pc.noServersWrite.schedWatchHint && pc.noServersWrite.create && pc.noServersWrite.changeHere === pc.full.changeHere,
-    "settings:write": !pc.noSettingsWrite.changeHere && pc.noSettingsWrite.currentSettings && !pc.noSettingsWrite.startsLabel && pc.noSettingsWrite.serverSave
+    // Saved values keep their own card, retitled and locked; startup-only
+    // rows stay under their true heading (the locked card is pinned by the
+    // daemon-rows scene below).
+    "settings:write": !pc.noSettingsWrite.changeHere && pc.noSettingsWrite.currentSettings && pc.noSettingsWrite.startsLabel && pc.noSettingsWrite.serverSave
       && pc.noSettingsWrite.create,
   };
   (Object.values(each).every(Boolean))
@@ -2617,7 +2620,19 @@ try {
       const take = backupTakeAway(cur, b, { sql_export: { state: "failed", last_error: "boom" } });
       const restoreFailed = backupRestoreCard(cur, b, { restore: { state: "failed", published: true, last_error: "s3 put denied" } });
       const restoreIdle = backupRestoreCard(cur, b, { restore: { state: "idle" } });
+      // A status that could not be read, and a state this console does not
+      // know, are outcomes too: the take-away panel says so and opens, and
+      // it can only do that while the MySQL lane exists.
+      const takeUnread = backupTakeAway(cur, b, { error: "status endpoint down" });
+      const takeUnknown = backupTakeAway(cur, b, { sql_export: { state: "weird" } });
+      const heading = (n) => { const h = n && n.querySelector("h2, .ov-panel-title"); return h ? h.textContent : ""; };
       return {
+        unread: /could not be read/.test(txt(takeUnread)),
+        unreadOpen: !!takeUnread && !!takeUnread.open,
+        unknown: /does not recognise: weird/.test(txt(takeUnknown)),
+        unknownOpen: !!takeUnknown && !!takeUnknown.open,
+        laneSub: txt(sqlFailed),
+        restoreHead: heading(restoreFailed),
         schedFailed: /Last scheduled backup failed/.test(txt(sched)),
         schedRed: !!sched && !!sched.querySelector(".bk-card-state.alarm"),
         schedForm: hasBtn(sched, "Save schedule") || hasBtn(sched, "Add schedule"),
@@ -2640,13 +2655,17 @@ try {
   });
   const pFull = outcome.full, pView = outcome.viewer;
   (pFull.schedFailed && pFull.schedForm && pFull.sqlFailed && pFull.sqlBuild && /Ready/.test(pFull.sqlReadyText) && pFull.sqlReadyDownload
-    && pFull.sqlStaging && pFull.restoreFailed && pFull.restoreButton)
+    && pFull.sqlStaging && pFull.sqlBuildAgain && pFull.restoreFailed && pFull.restoreButton
+    && pFull.unread && pFull.unreadOpen && pFull.unknown && pFull.unknownOpen
+    && /whatever moment you pick/.test(pFull.laneSub) && pFull.restoreHead === "Restore to a moment")
     ? ok("permissions: with full access the failing fixtures draw their outcome and their controls (control case)")
     : bad("permissions: with full access the failing fixtures draw their outcome and their controls (control case)", JSON.stringify(pFull));
   (pView.schedFailed && pView.schedRed && !pView.schedForm
     && pView.sqlFailed && !pView.sqlBuild && /Built for/.test(pView.sqlReadyText) && !/Ready/.test(pView.sqlReadyText) && !pView.sqlReadyDownload
     && pView.sqlStaging && !pView.sqlBuildAgain && !pView.sqlIdle && pView.takeOpen
-    && pView.restoreFailed && !pView.restoreButton && !pView.restoreIdle)
+    && pView.restoreFailed && !pView.restoreButton && !pView.restoreIdle
+    && pView.unread && pView.unreadOpen && pView.unknown && pView.unknownOpen
+    && !/whatever moment you pick/.test(pView.laneSub) && pView.restoreHead === "Last restore")
     ? ok("permissions: a view-only session is still told a scheduled run, a .sql build or a restore failed, without the controls")
     : bad("permissions: a view-only session is still told a scheduled run, a .sql build or a restore failed, without the controls", JSON.stringify(pView));
 
@@ -2663,12 +2682,27 @@ try {
     const perms = (deny) => Object.fromEntries(keys.map((k) => [k, !deny.includes(k)]));
     const cur = { id: "srv-fix", kind: "registry", has_source: true };
     const b = { configured: true, source: "/tmp/baselines", kind: "dir", snapshots: [{ time: "2026-06-10 12:00:00", location: "dir" }] };
-    const srv = { id: "srv-fix", name: "fixture", source: "registry", baseline_dir: "/tmp/b" };
-    const probe = () => ({
-      strip: baselineContextStrip(b, cur).textContent,
-      duck: (backupDuckLane(b) || { textContent: "" }).textContent,
-      row: backupServerRow(srv, false, [srv], null).textContent,
-    });
+    const srv = { id: "srv-fix", name: "fixture", source: "server", baseline_dir: "/tmp/b" };
+    // S3 only, with no scheduling loop: the row states the problem, and
+    // "Add a Backup dir." is the remedy only a writer gets.
+    const s3only = { id: "srv-s3", name: "s3fix", source: "server", baseline_s3: "s3://b/p" };
+    // No location of its own, reading the daemon default: "save a location
+    // above" is the remedy.
+    const inherits = { id: "srv-inh", name: "inh", source: "default", resolved_dir: "/var/lib/dbtrail/b" };
+    const keepViews = capsCache.views;
+    const probe = () => {
+      capsCache.views = false;
+      const duckNoViews = (backupDuckLane(b) || { textContent: "" }).textContent;
+      capsCache.views = keepViews;
+      return {
+        strip: baselineContextStrip(b, cur).textContent,
+        duck: (backupDuckLane(b) || { textContent: "" }).textContent,
+        duckNoViews,
+        row: backupServerRow(srv, false, [srv], null).textContent,
+        s3: backupServerRow(s3only, false, [s3only], null).textContent,
+        inh: backupServerRow(inherits, false, [inherits], null).textContent,
+      };
+    };
     try {
       capsCache.baseline_trigger = true;
       capsCache.permissions = perms([]);
@@ -2678,16 +2712,54 @@ try {
       capsCache.permissions = perms(["servers:write"]);
       const reader = probe();
       return { full, operator, reader, views: !!capsCache.views };
-    } finally { capsCache.permissions = keep; capsCache.baseline_trigger = keepTrig; }
+    } finally { capsCache.permissions = keep; capsCache.baseline_trigger = keepTrig; capsCache.views = keepViews; }
   });
   const H = hints;
   (/CREATE BACKUP/.test(H.full.strip) && /under Where and how often/.test(H.full.strip)
     && /CREATE BACKUP/.test(H.operator.strip) && /own backup location/.test(H.operator.strip) && !/Where and how often/.test(H.operator.strip)
     && (H.views ? !/set not to read archived data/.test(H.operator.duck) : true) && /Download the data/.test(H.operator.duck)
     && /Select this server at the top/.test(H.full.row) && !/Select this server at the top/.test(H.reader.row) && /No schedule/.test(H.reader.row)
-    && (H.views ? !/set not to read archived data/.test(H.full.duck) : true))
+    && (H.views ? !/set not to read archived data/.test(H.full.duck) : true)
+    && /set not to read archived data/.test(H.operator.duckNoViews)
+    && /With S3 only/.test(H.full.s3) && /Add a Backup dir/.test(H.full.s3)
+    && /With S3 only/.test(H.reader.s3) && !/Add a Backup dir/.test(H.reader.s3)
+    && /save a location above/.test(H.full.inh) && /Time-travel reads/.test(H.reader.inh) && !/save a location above/.test(H.reader.inh))
     ? ok("permissions: a hint that names a fix is shown only to a session that can make it, and keeps its reason")
     : bad("permissions: a hint that names a fix is shown only to a session that can make it, and keeps its reason", JSON.stringify(H));
+
+  // A value saved in this console stays in its own card for a session that
+  // may read settings but not write them: locked, no Save, and still
+  // "Saved here", never filed under "Set when DBTrail starts" whose fine
+  // print says to change a flag and restart.
+  const daemonRO = await page.evaluate(() => {
+    const keep = capsCache.permissions, keepMon = capsCache.monitor;
+    const keys = Object.keys(capsCache.permissions || {});
+    const settings = { daemon: [{ key: "baseline_retain", editable: true, source: "saved", value: "9d", startup: "3d", cli: "--baseline-retain" }], servers: [] };
+    const draw = () => {
+      const box = document.createElement("div");
+      for (const n of snapshotSetupSections(settings, {})) if (n) box.append(n);
+      const sects = Array.from(box.querySelectorAll(".bks-sect")).map((n) => n.textContent);
+      const input = box.querySelector("#bks-baseline_retain");
+      return { sects, text: box.textContent, input: !!input, disabled: !!input && input.disabled,
+        save: Array.from(box.querySelectorAll("button")).some((x) => x.textContent === "Save"),
+        revert: Array.from(box.querySelectorAll("button")).some((x) => x.textContent === "Use the startup value") };
+    };
+    try {
+      capsCache.monitor = true;
+      capsCache.permissions = Object.fromEntries(keys.map((k) => [k, true]));
+      const full = draw();
+      capsCache.permissions = Object.fromEntries(keys.map((k) => [k, k !== "settings:write"]));
+      const ro = draw();
+      return { full, ro };
+    } catch (e) { return { err: String(e && e.stack || e) }; }
+    finally { capsCache.permissions = keep; capsCache.monitor = keepMon; }
+  });
+  (daemonRO.full && daemonRO.full.sects.includes("Change here") && daemonRO.full.input && !daemonRO.full.disabled && daemonRO.full.save && daemonRO.full.revert
+    && daemonRO.ro.sects.includes("Current settings") && !daemonRO.ro.sects.includes("Change here")
+    && daemonRO.ro.input && daemonRO.ro.disabled && !daemonRO.ro.save && !daemonRO.ro.revert
+    && /Saved here\. The command line says 3d/.test(daemonRO.ro.text))
+    ? ok("permissions: a value saved in the console stays in its card, locked, for a session that may only read settings")
+    : bad("permissions: a value saved in the console stays in its card, locked, for a session that may only read settings", JSON.stringify(daemonRO));
 
   // Arriving at the old settings address with a session that cannot see
   // settings, on a server with no schedule: no empty heading, and no note

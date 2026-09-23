@@ -53,8 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needs `servers:read`. What a session may read is never left out with its
   button: a failed scheduled run, how the last `.sql` build or restore ended,
   and a problem clearing files off the disk are shown to every session that
-  can open the page, and hints that name a setting to change appear only to a
-  session that can change it.
+  can open the page, including a status that could not be read. The steps
+  that tell the reader to change a server's location or schedule appear only
+  to a session that may save them; the problem they fix is still said to
+  everyone. A session that may read the settings but not write them sees the
+  values saved in this console as they are, locked, instead of an edit box
+  whose Save could only be refused.
 - **Backups, Verification and Backup settings are one page, Snapshots**
   (#1573). They were three addresses for one question — what copies of this
   server exist, would they restore, and where and how often are they made —

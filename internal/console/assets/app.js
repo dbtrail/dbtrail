@@ -4651,8 +4651,10 @@ function closeMoved(from) {
 // daemon it is read-only because a request failed is a false statement about
 // their installation. "" when the section is here.
 //
-// Only the checks can be absent today, so "daemon" names them; a second
-// optional section would need its own reason here.
+// "daemon" names the checks, the only section that can be absent for a
+// reason worth a sentence. The setup section can also be absent, by
+// permission, and renderSnapshots then shows no note at all (setupHidden):
+// hidden by permission says nothing.
 function snapshotsMovedNotice(missing) {
   const from = routeArrivedFrom;
   const was = SNAPSHOT_MOVED.get(from);
@@ -5319,18 +5321,21 @@ function snapshotSetupSections(settings, refresh) {
   // under "Set when DBTrail starts". The second card disappears when it is
   // empty (#1682).
   // A session that may read settings but not write them still sees every
-  // value: the editable rows join the read-only card instead of vanishing,
-  // under a label that does not promise "here" or "when DBTrail starts".
+  // value, in the SAME card and with the same provenance line ("Saved here.
+  // The command line says ..."), only locked and without its buttons. An
+  // earlier cut moved these rows into the startup card, whose title and fine
+  // print say "set at startup, change the flag and restart" -- false for a
+  // value saved in this console.
   const mayEdit = sessionMay("settings:write");
-  const editableRows = mayEdit ? daemonRows.filter((row) => row.editable) : [];
-  const startupRows = mayEdit ? daemonRows.filter((row) => !row.editable) : daemonRows;
+  const editableRows = daemonRows.filter((row) => row.editable);
+  const startupRows = daemonRows.filter((row) => !row.editable);
   if (capsCache.monitor && !broken && editableRows.length) {
-    out.push(sect("Change here"));
-    out.push(el("div", { class: "cards" }, backupDaemonEditCard(editableRows)));
+    out.push(sect(mayEdit ? "Change here" : "Current settings"));
+    out.push(el("div", { class: "cards" }, backupDaemonEditCard(editableRows, !mayEdit)));
   }
   if (!broken) out.push(backupServersPanel(settings));
   if (capsCache.monitor) {
-    out.push(sect(mayEdit ? "Set when DBTrail starts" : "Current settings"));
+    out.push(sect("Set when DBTrail starts"));
     // The disk-space card sits HERE since #1681: with its switch gone it
     // reports what the daemon was started with, like the rows beside it, and
     // leaving it under "Change here" would promise a control it no longer
@@ -5428,11 +5433,11 @@ function backupDaemonCard(rows) {
 // are different facts. A row this daemon reads per job says nothing; a row it
 // read once at boot says so beside its input, under its own value, so the
 // operator knows the save landed and the effect has not.
-function backupDaemonEditCard(rows) {
+function backupDaemonEditCard(rows, locked) {
   const card = el("div", { class: "card" });
   card.append(el("div", { class: "card-title" }, el("span", { text: "Backups and checks" })));
   for (const row of rows) {
-    card.append(backupDaemonEditRow(row));
+    card.append(backupDaemonEditRow(row, locked));
   }
   card.append(cnFine("More about these settings",
     el("p", { class: "form-hint", text:
@@ -5442,7 +5447,7 @@ function backupDaemonEditCard(rows) {
   return card;
 }
 
-function backupDaemonEditRow(row) {
+function backupDaemonEditRow(row, locked) {
   const label = BACKUP_DAEMON_ROWS[row.key] || row.key;
   const wrap = el("div", { class: "bks-erow" });
   const head = el("label", { class: "form-label", for: "bks-" + row.key }, label);
@@ -5472,7 +5477,10 @@ function backupDaemonEditRow(row) {
   };
   save.addEventListener("click", () => send({ value: input.value }, save));
   if (revert) revert.addEventListener("click", () => send({ use_startup: true }, revert));
-  wrap.append(el("div", { class: "bks-erow-in" }, input, save, revert));
+  // locked: a session without settings:write sees the value and where it
+  // comes from, and no control that could only be refused.
+  if (locked) input.disabled = true;
+  wrap.append(el("div", { class: "bks-erow-in" }, input, locked ? null : save, locked ? null : revert));
   // Provenance, in one line: what is winning, and what it is winning over.
   wrap.append(el("p", { class: "form-hint", text: row.source === "saved"
     ? "Saved here. The command line says " + (row.startup || "nothing") + "."
@@ -5553,15 +5561,18 @@ function backupServersPanel(settings) {
 // server's Backup dir; without one a scheduled run can only be a full backup,
 // and where this daemon cannot take one either, nothing runs at all. The
 // values are compared as stored, untrimmed, the way the daemon reads them.
-function s3OnlyBackupWarning(srv) {
+function s3OnlyBackupWarning(srv, fix = true) {
   // A saved schedule that cannot run already says why, more precisely.
   if (!srv || srv.baseline_dir || !srv.baseline_s3 || srv.schedule_refusal) return "";
+  // fix: the closing instruction is for a session that can save this row.
+  // The problem itself is said to everyone who can see the row.
+  const then = (t) => fix ? " " + t : "";
   // Where this process runs no scheduled backups, only the setting is known.
-  if (!srv.schedule_loop) return "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Backup dir.";
+  if (!srv.schedule_loop) return "With S3 only, a scheduled backup cannot update from the recorded changes." + then("Add a Backup dir.");
   if (!srv.full_backup_possible) {
-    return "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Backup dir. Add one.";
+    return "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Backup dir." + then("Add one.");
   }
-  return "With S3 only, every scheduled backup reads your whole database. Add a Backup dir so runs update from the recorded changes.";
+  return "With S3 only, every scheduled backup reads your whole database." + then("Add a Backup dir so runs update from the recorded changes.");
 }
 
 function backupServerRow(srv, readOnly, servers, daemonS3) {
@@ -5579,7 +5590,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   // (rebuildPossible): a daemon default folder does not save this server,
   // and a warning that followed the typing would vanish on a save that
   // failed. The page redraws after a successful save.
-  const s3Only = s3OnlyBackupWarning(srv);
+  const s3Only = s3OnlyBackupWarning(srv, sessionMay("servers:write"));
   if (s3Only) box.append(el("p", { class: "form-msg err", text: s3Only }));
   const noArch = el("input", { type: "checkbox", name: "no_archive" });
   noArch.checked = !!srv.no_archive;
@@ -5600,7 +5611,8 @@ function backupServerRow(srv, readOnly, servers, daemonS3) {
   if (src === "default") {
     const eff = srv.resolved_dir || srv.resolved_s3;
     box.append(el("p", { class: "form-hint" },
-      "Time-travel reads ", el("code", { text: eff }), ". To make backups for this server, save a location above."));
+      "Time-travel reads ", el("code", { text: eff }),
+      sessionMay("servers:write") ? ". To make backups for this server, save a location above." : "."));
   }
   // The refusal beats the prediction: the schedule reads the RAW entry, so
   // clearing the dir on this very page leaves a stored schedule that will
@@ -7734,7 +7746,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   if (rst && rst.state === "running") return null; // the run region owns it
   const card = el("section", { class: "ov-panel bk-restore" });
   card.append(el("div", { class: "ov-panel-head" },
-    el("h2", { class: "ov-panel-title", text: "Restore to a moment" })));
+    el("h2", { class: "ov-panel-title", text: mayCreate ? "Restore to a moment" : "Last restore" })));
   const state = el("p", { class: "form-hint bk-card-state" });
   state.hidden = true;
   card.append(state);
@@ -8121,7 +8133,9 @@ function backupSQLLane(cur, b, sqlSt) {
   // exists: GET .../sql-export is servers:read, and how the last build ended
   // (failed, ready, a staging problem on the disk capture shares) is a fact
   // for anyone who may look. Without baseline:create the lane is its outcome
-  // alone, and no lane at all when there is none. backupTakeAway's own
+  // alone, and no lane at all when there is none: a status that could not be
+  // read, or a state this console does not know, counts as an outcome (see
+  // the guard at the end). backupTakeAway's own
   // signals (opening by itself, the unreadable-status line) hang off this
   // lane being drawn, which is one more reason it must not vanish with its
   // button.
@@ -8145,7 +8159,7 @@ function backupSQLLane(cur, b, sqlSt) {
   const st = sqlSt && sqlSt.sql_export;
   const lane = backupLane("To load into MySQL",
     [{ name: ".sql files", cap: "your tables" }],
-    ", built for whatever moment you pick.");
+    mayCreate ? ", built for whatever moment you pick." : ", built for a moment someone picks.");
   const body = el("div", { class: "bk-restore-body" });
   // Running used to return null and take the whole card off the page. In a
   // two-lane panel that leaves a hole where an answer was, so the lane stays
@@ -8230,9 +8244,14 @@ function backupSQLLane(cur, b, sqlSt) {
     body.append(el("p", { class: "form-msg err", text:
       "Staging problem: " + st.staging_error + ". The daemon retries every minute; check the staging directory on the machine running it." }));
   }
-  // Without baseline:create and nothing to report (no build yet, or one
-  // that ended in a state with no line above), there is no lane.
-  if (!mayCreate && !body.childNodes.length) return null;
+  // Without baseline:create and nothing to report, there is no lane. An
+  // unreadable status and a state this console does not know ARE something
+  // to report: backupTakeAway draws those lines, and opens by itself for
+  // them, only when this lane exists. A first version of this guard counted
+  // only the lines drawn here, and a view-only reader whose status read
+  // failed saw a page identical to "no build has ever run".
+  const unknownState = !!(st && st.state && !SQL_EXPORT_KNOWN.has(st.state));
+  if (!mayCreate && !body.childNodes.length && !(sqlSt && sqlSt.error) && !unknownState) return null;
   lane.append(body);
   return lane;
 }
