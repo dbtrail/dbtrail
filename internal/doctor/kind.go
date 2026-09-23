@@ -1,10 +1,8 @@
 package doctor
 
 import (
-	"context"
 	"errors"
 	"net"
-	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -81,9 +79,12 @@ func ClassifyConnectError(err error) string {
 		return KindPortClosed
 	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
 		return KindHostUnreachable
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
-		return KindTimeout
 	}
+	// One test covers every timeout: context.DeadlineExceeded,
+	// os.ErrDeadlineExceeded (a dial or read deadline) and any dialer's own
+	// error all implement net.Error with Timeout() true. A separate check for
+	// the two sentinels was written here too; a mutation deleting it kept
+	// every test green, because this line already answered for both.
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
 		return KindTimeout

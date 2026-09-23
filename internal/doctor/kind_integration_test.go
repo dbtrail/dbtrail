@@ -56,3 +56,25 @@ func TestIntegrationBuild_loopbackProvenByTheRetry(t *testing.T) {
 		t.Errorf("kind = %q when the retry answered access denied, want %q", got.Kind, KindLoopbackInContainer)
 	}
 }
+
+// A loopback address that ANSWERED — here with access denied — reached a
+// database: the address was right, the credentials were not. Retrying it
+// somewhere else would send the typed password to a host nobody typed, and
+// could relabel a password problem as a container problem.
+func TestIntegrationBuild_noRetryWhenTheLoopbackAddressAnswered(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	live := liveAddr(t)
+	host, port, _ := strings.Cut(live, ":")
+	if !isLoopbackHost(host) {
+		t.Skipf("the test MySQL is at %s, not a loopback address; this case needs one", live)
+	}
+	calls := 0
+	retry := func(string, string) string { calls++; return live }
+	got := buildConnect(t, "root:definitely-not-the-password@tcp("+host+":"+port+")/?timeout=3s", WithLoopbackRetry(retry))
+	if got.Kind != KindAccessDenied {
+		t.Errorf("kind = %q, want %q", got.Kind, KindAccessDenied)
+	}
+	if calls != 0 {
+		t.Errorf("an answered loopback address was retried elsewhere %d time(s)", calls)
+	}
+}

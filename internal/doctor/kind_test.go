@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
@@ -118,6 +119,9 @@ func TestClassifyConnectError_wrappedShapes(t *testing.T) {
 		{"dns timeout", wrap(&net.DNSError{Err: "i/o timeout", Name: "db", IsTimeout: true}), KindHostUnreachable},
 		{"context deadline", wrap(context.DeadlineExceeded), KindTimeout},
 		{"os deadline", wrap(&net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}), KindTimeout},
+		// A dialer that reports its timeout only through net.Error (a proxy
+		// or TLS dialer), wrapping neither deadline sentinel.
+		{"net.Error timeout", wrap(&net.OpError{Op: "dial", Err: onlyTimeout{}}), KindTimeout},
 		{"access denied", wrap(&mysql.MySQLError{Number: 1045, Message: "Access denied"}), KindAccessDenied},
 		{"auth plugin refused", wrap(&mysql.MySQLError{Number: 1698, Message: "Access denied"}), KindAccessDenied},
 		// Unknown database is not a connection problem this list names.
@@ -480,5 +484,42 @@ func TestKindsAreAClosedSet(t *testing.T) {
 	}
 	if len(Kinds()) != 8 {
 		t.Errorf("Kinds() = %v; a new kind needs a screen to draw it (#1804), add it on purpose", Kinds())
+	}
+}
+
+// onlyTimeout is a net.Error whose ONLY sign of a timeout is Timeout().
+type onlyTimeout struct{}
+
+func (onlyTimeout) Error() string   { return "handshake did not finish" }
+func (onlyTimeout) Timeout() bool   { return true }
+func (onlyTimeout) Temporary() bool { return false }
+
+// The retry runs after a failure the person is already waiting on, so it is
+// bounded however the typed address was configured: a retry address that
+// accepts the connection and then never speaks must not hold the check for
+// the driver's default budget.
+func TestProveLoopback_retryIsBounded(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close() // accept, then say nothing
+		}
+	}()
+	start := time.Now()
+	got := proveLoopback("u:p@tcp(localhost:"+closedPort(t)+")/?timeout=30s", KindPortClosed,
+		func(string, string) string { return l.Addr().String() })
+	if got != "" {
+		t.Errorf("a silent address was taken as proof: %q", got)
+	}
+	if d := time.Since(start); d > loopbackRetryTimeout+2*time.Second {
+		t.Errorf("the retry took %v, want it bounded near %v", d, loopbackRetryTimeout)
 	}
 }
