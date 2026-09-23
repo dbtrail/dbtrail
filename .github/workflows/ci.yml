@@ -4,6 +4,22 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly full run: every job and every matrix cell, whatever a PR's paths
+  # let it skip. A failure emails the repo owner (GitHub's default for
+  # scheduled workflows). workflow_dispatch is the same full run on demand.
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+# A new push to a PR cancels that PR's run still in flight: only the newest
+# commit's result can merge. Non-PR runs (push to main, nightly, manual) get a
+# group of their own via run_id, so nothing ever cancels or queues them. A
+# `github.ref` fallback would NOT be enough: with cancel-in-progress false,
+# GitHub still drops a PENDING run when a newer one joins the same group, so
+# two quick merges to main would silently lose the middle run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Default for every job: read-only. The `changes` job overrides with the
 # pull-requests read it needs for dorny/paths-filter.
@@ -21,20 +37,39 @@ jobs:
   # reports those contexts, leaving a PR stuck on "Expected — waiting for
   # status to be reported" forever.
   #
-  # Non-matrix jobs (unit, integration-mariadb-source, console-e2e) use a
+  # Non-matrix jobs (unit, console-e2e, console-first-run-walk) use a
   # JOB-level `if:` — its context name has no suffix, so a skipped job still
   # reports under the exact name branch protection expects, which GitHub
   # treats as satisfying the required check.
   #
-  # Matrix jobs (integration, integration-postgres-source) do NOT: a job-level
-  # `if:` is evaluated BEFORE matrix expansion, so a false condition means the
-  # matrix never expands and the specifically-suffixed required contexts
+  # Matrix jobs (integration, integration-mariadb-source,
+  # integration-postgres-source, integration-postgres-extensions) do NOT: a
+  # job-level `if:` is evaluated BEFORE matrix expansion, so a false condition
+  # means the matrix never expands and the specifically-suffixed required contexts
   # (`integration (8.0)`, `integration-postgres-source (14)`, etc.) never get
   # created at all — verified live via a throwaway PR, whose mergeStateStatus
   # stayed BLOCKED with those 6 contexts permanently missing even though every
-  # other job showed "skipped". Those two jobs instead push the same `if:`
+  # other job showed "skipped". Those jobs instead push the same `if:`
   # down to every step, so the matrix still expands into the correctly-named
-  # contexts and each just completes instantly with nothing executed.
+  # contexts and each just completes instantly with nothing executed. Each of
+  # those jobs computes its condition ONCE into a job-level `env.RUN` and every
+  # step reads that, so a step that forgets the condition cannot slip in.
+  #
+  # Every gate below reads `github.event_name != 'pull_request'` first: that is
+  # "push to main, nightly schedule or manual dispatch", the runs that execute
+  # EVERYTHING. The filter itself runs only on pull_request (a schedule or
+  # dispatch has no base to diff against), so its outputs are empty on the
+  # other events and nothing may read them without the event check in front.
+  #
+  # `data` is the DATA PATH: capture and parsing (MySQL, MariaDB, Postgres),
+  # indexing, query, recovery, reconstruct, archives, baselines, DuckDB, the
+  # CLI, config and the module files. It is written as "every Go file EXCEPT
+  # the ones that cannot reach a database source" so that a NEW package counts
+  # as data path until someone decides otherwise. The exclusions are the web
+  # console, the MCP server and its tools, telemetry and notifications, whose
+  # own tests run in `unit`, the 8.4 `integration` cell and the console jobs.
+  # On a PR, `data` decides whether the MariaDB and PostgreSQL source jobs
+  # run and whether the MySQL 8.0 cell runs alongside 8.4.
   changes:
     runs-on: ubuntu-22.04
     permissions:
@@ -42,11 +77,18 @@ jobs:
     outputs:
       go: ${{ steps.filter.outputs.go }}
       console: ${{ steps.filter.outputs.console }}
+      data: ${{ steps.filter.outputs.data }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
+        if: github.event_name == 'pull_request'
         with:
+          # A file counts for a filter when it matches at least one pattern
+          # and none of that filter's `!` patterns. Only `data` has any, so
+          # `go` and `console` behave exactly as with the default.
+          predicate-quantifier: some-with-excludes
           filters: |
             go:
               - '**/*.go'
@@ -64,10 +106,25 @@ jobs:
               - 'internal/console/**'
               - 'cmd/bintrail-console/**'
               - 'consoleapp/**'
+            data:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'migrations/**'
+              - '.github/workflows/ci.yml'
+              - '!internal/console/**'
+              - '!consoleapp/**'
+              - '!cmd/bintrail-console/**'
+              - '!cmd/bintrail-mcp/**'
+              - '!internal/mcptools/**'
+              - '!ext/mcpext/**'
+              - '!internal/telemetry/**'
+              - '!internal/notify/**'
+              - '!test/console-e2e/**'
 
   unit:
     needs: changes
-    if: github.event_name == 'push' || needs.changes.outputs.go == 'true' || needs.changes.outputs.console == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.go == 'true' || needs.changes.outputs.console == 'true'
     runs-on: ubuntu-22.04
 
     steps:
@@ -156,6 +213,11 @@ jobs:
       # The Iceberg export's integration leg reads its tables back with
       # DuckDB's iceberg extension; require it so the read-back never skips.
       BINTRAIL_REQUIRE_DUCKDB_ICEBERG: "1"
+      # Whether this cell executes its steps (see the note on the `changes`
+      # job). Everything on push/nightly/dispatch. On a PR that touches Go,
+      # 8.4 always runs; 8.0 joins only when the PR touches the data path,
+      # and otherwise reports as a success with nothing executed.
+      RUN: ${{ github.event_name != 'pull_request' || (needs.changes.outputs.go == 'true' && (matrix.mysql == '8.4' || needs.changes.outputs.data == 'true')) }}
 
     steps:
       # Step-level (not job-level) `if:` — see the note on the `changes` job.
@@ -166,10 +228,10 @@ jobs:
       # Step-level `if:` lets the matrix still expand into both contexts;
       # each just completes instantly with every step skipped.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         with:
           go-version-file: go.mod
 
@@ -181,7 +243,7 @@ jobs:
       # command-line args). This mirrors the local setup in CONTRIBUTING.md so
       # CI and developer machines run against an identical container.
       - name: Start MySQL (bintrail-test-mysql, ${{ matrix.mysql }})
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         run: |
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
@@ -248,7 +310,7 @@ jobs:
       # Docker Hub stopped serving minio/minio in September 2026 (pull access
       # denied, repository does not exist), which turned every push red.
       - name: Start MinIO (bintrail-test-minio)
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         run: |
           docker run -d --name bintrail-test-minio \
             -e MINIO_ROOT_USER=bintrail \
@@ -262,7 +324,7 @@ jobs:
           curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null || { docker logs bintrail-test-minio; exit 1; }
 
       - name: Integration tests (-tags=integration)
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         env:
           BINTRAIL_TEST_MINIO_ENDPOINT: http://127.0.0.1:9000
           BINTRAIL_TEST_MINIO_ACCESS_KEY: bintrail
@@ -289,7 +351,6 @@ jobs:
     # tests (-run); the MySQL-only MariaDB tests (sqlmock/index-side) also run in
     # the matrix job, where the live-replication test skips for lack of a source.
     needs: changes
-    if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
     runs-on: ubuntu-22.04
 
     # Spans the supported MariaDB range (#622): 10.6 LTS (declared minimum)
@@ -311,15 +372,22 @@ jobs:
       # regression would pass as green-via-skip. The 8.0/8.4 matrix leaves this
       # unset, so the same tests skip politely there.
       BINTRAIL_REQUIRE_MARIADB: "1"
+      # Data-path PRs only (plus push/nightly/dispatch). Step-level, not
+      # job-level: this job has a matrix, and its three cells are required
+      # checks — see the note on the `changes` job.
+      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.RUN == 'true'
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: env.RUN == 'true'
         with:
           go-version-file: go.mod
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
+        if: env.RUN == 'true'
         run: |
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
@@ -345,6 +413,7 @@ jobs:
           exit 1
 
       - name: Start MariaDB source (bintrail-test-mariadb, ${{ matrix.mariadb }})
+        if: env.RUN == 'true'
         run: |
           docker run -d --name bintrail-test-mariadb \
             -e MARIADB_ROOT_PASSWORD=testroot \
@@ -374,6 +443,7 @@ jobs:
       # so the shared binlog window stays single-writer (same rationale as the
       # MySQL integration job).
       - name: MariaDB-source integration tests
+        if: env.RUN == 'true'
         run: go test -tags=integration -race -p 1 -count=1 -run 'MariaDB|Mariadb|mariadb|Flavor|FourColumns' ./...
 
   integration-postgres-source:
@@ -407,20 +477,23 @@ jobs:
       # (not silently skip) if the DSN is missing — guards against green-via-skip.
       # The 8.0/8.4 matrix and console-e2e leave it unset, so PG tests skip there.
       BINTRAIL_REQUIRE_POSTGRES: "1"
+      # Data-path PRs only (plus push/nightly/dispatch); step-level because
+      # of the matrix — see the note on the `changes` job.
+      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
 
     steps:
       # Step-level (not job-level) `if:` — see the note on the `integration`
       # job above; this job's matrix has the same requirement.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         with:
           go-version-file: go.mod
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         run: |
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
@@ -446,7 +519,7 @@ jobs:
           exit 1
 
       - name: Start PostgreSQL source (bintrail-test-postgres, ${{ matrix.postgres }})
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         run: |
           docker run -d --name bintrail-test-postgres \
             -e POSTGRES_PASSWORD=testpg \
@@ -480,7 +553,7 @@ jobs:
       # asserting the headline end-to-end test genuinely ran — not merely that
       # `go test` exited 0. pipefail keeps the go-test exit code through the tee.
       - name: PostgreSQL-source integration tests
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         run: |
           set -o pipefail
           go test -tags=integration -race -p 1 -count=1 -v \
@@ -521,19 +594,22 @@ jobs:
       BINTRAIL_TEST_PG_DSN: "postgres://postgres:testpg@127.0.0.1:15432/pgtest?sslmode=disable"
       BINTRAIL_REQUIRE_POSTGRES: "1"
       BINTRAIL_REQUIRE_PGEXT: ${{ matrix.ext }}
+      # Data-path PRs only (plus push/nightly/dispatch); step-level because
+      # of the matrix — see the note on the `changes` job.
+      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
     steps:
       # Step-level (not job-level) `if:` — see the note on the `integration`
       # job above; this job's matrix has the same requirement.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         with:
           go-version-file: go.mod
 
       - name: Start MySQL index (bintrail-test-mysql, 8.4)
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         run: |
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
@@ -559,7 +635,7 @@ jobs:
           exit 1
 
       - name: Start PostgreSQL source (bintrail-test-postgres, ${{ matrix.image }})
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         run: |
           docker run -d --name bintrail-test-postgres \
             -e POSTGRES_PASSWORD=testpg \
@@ -581,7 +657,7 @@ jobs:
           exit 1
 
       - name: Extension-type round-trip test (${{ matrix.ext }})
-        if: github.event_name == 'push' || needs.changes.outputs.go == 'true'
+        if: env.RUN == 'true'
         run: |
           set -o pipefail
           go test -tags=integration -race -p 1 -count=1 -v \
@@ -596,7 +672,7 @@ jobs:
     # a broken server selection) are invisible to the Go suite. Each scenario
     # pins a bug that shipped in 0.13.3.
     needs: changes
-    if: github.event_name == 'push' || needs.changes.outputs.go == 'true' || needs.changes.outputs.console == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.go == 'true' || needs.changes.outputs.console == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -671,7 +747,7 @@ jobs:
     # FIRST_RUN_WALK_MODE=target compares with the targets instead; that is red
     # on main today, on purpose.
     needs: changes
-    if: github.event_name == 'push' || needs.changes.outputs.go == 'true' || needs.changes.outputs.console == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.go == 'true' || needs.changes.outputs.console == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
