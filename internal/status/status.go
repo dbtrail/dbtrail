@@ -120,6 +120,10 @@ type StreamStateInfo struct {
 	// the column, or one nobody has acknowledged. See acknowledge.go for why an
 	// acknowledgement records a COUNT rather than a fact.
 	CaptureSkipsAck sql.NullString
+	// scopedSkips is the capture-skip ledger already filtered to what the
+	// reader may see (#1452), set only on a COPY made for one rendering — see
+	// withScopedSkips. Never loaded from the database, never serialized.
+	scopedSkips map[string]CaptureSkipStat
 	// SchemaSnapshotAt is when the newest schema snapshot in this index was
 	// taken — the layout capture decodes against today. It is the anchor that
 	// makes a monotonic skip tally answerable (#1312): a skip older than this
@@ -180,6 +184,13 @@ const CaptureSkipReasonUnreadablePreviousLedger = "unreadable_previous_ledger"
 // entirely, never render OK. An empty map with ok=true is the affirmative
 // "evaluated, nothing skipped".
 func (s *StreamStateInfo) ParseCaptureSkips() (skips map[string]CaptureSkipStat, ok bool) {
+	// A rendering that already scoped the ledger to its reader hands it back
+	// here (withScopedSkips) rather than re-serializing it: TablesWithheld is
+	// json:"-" on purpose, so a round trip through the persisted shape would
+	// lose the very count that keeps the prose honest.
+	if s.scopedSkips != nil {
+		return s.scopedSkips, true
+	}
 	if !s.CaptureSkips.Valid || strings.TrimSpace(s.CaptureSkips.String) == "" {
 		return nil, false
 	}
@@ -693,10 +704,21 @@ type StatusData struct {
 	// dropped from `skipped[*].tables` and from the explanation prose, and
 	// counted in `tables_withheld` instead, so the counts stay whole while a
 	// reader with restricted data access learns no name it may not read
-	// elsewhere. Nil renders the ledger verbatim. Only the web console sets
-	// it — a session is the thing that has a scope; `bintrail status` has
-	// none, and its text report never consults this field.
+	// elsewhere. Nil renders the ledger verbatim. Set by the web console (a
+	// session is the thing that has a scope) and by the MCP status tool from
+	// its surface's deny rules; `bintrail status` has none. The text report
+	// consults it only for the TableCapture section: its capture-health lines
+	// still print the ledger's names unscoped.
 	TableVisible func(schema, table string) bool `json:"-"`
+	// TableCapture is which tables the current schema snapshot captures and
+	// which it left out (#1802), or nil when the caller did not load it —
+	// CollectStatus does not, because the index-metrics scraper calls it on a
+	// timer and has no use for a per-table list. `bintrail status` and the MCP
+	// status tool load it with LoadTableCapture; the console serves it from
+	// its own endpoint. Both renderings withhold the names TableVisible
+	// refuses, the text report included: this section is the one place the
+	// text report consults TableVisible.
+	TableCapture *TableCapture `json:"-"`
 }
 
 // BaselineInfo holds metadata about a discovered baseline Parquet file.
@@ -805,9 +827,28 @@ func LoadIndexSizeBytes(ctx context.Context, db *sql.DB, dbName string) (int64, 
 	return b.Int64, nil
 }
 
+// withScopedSkips returns the stream state this rendering should use: with a
+// visibility predicate, a COPY whose capture-skip ledger is already scoped,
+// so the capture-health prose cannot name a table the same output withholds
+// from the uncaptured list beside it (#1802 round 4). Without one, the
+// original — `bintrail status` has no scope and renders the ledger verbatim.
+func withScopedSkips(stream *StreamStateInfo, visible func(schema, table string) bool) *StreamStateInfo {
+	if stream == nil || visible == nil {
+		return stream
+	}
+	skips, ok := stream.ParseCaptureSkips()
+	if !ok {
+		return stream
+	}
+	scoped := *stream
+	scoped.scopedSkips = ScopeCaptureSkips(skips, visible)
+	return &scoped
+}
+
 // Write writes the status data as a human-readable report to w.
 func (d *StatusData) Write(w io.Writer) {
-	WriteStatus(w, d.Files, d.Parts, d.Archives, d.Coverage, d.Servers, d.Stream, d.Retention)
+	WriteStatus(w, d.Files, d.Parts, d.Archives, d.Coverage, d.Servers, withScopedSkips(d.Stream, d.TableVisible), d.Retention)
+	writeTableCapture(w, d.TableCapture, d.TableVisible)
 	if d.Stream == nil && d.StreamErr != nil {
 		writeStreamUnavailable(w, d.StreamErr)
 	}
@@ -876,7 +917,12 @@ func writeCoverageUnavailable(w io.Writer, err error) {
 
 // WriteJSON writes the status data as JSON to w.
 func (d *StatusData) WriteJSON(w io.Writer) error {
-	return writeStatusJSONFull(w, d.Files, d.Parts, d.Archives, d.Coverage, d.Servers, d.Stream, d.Baselines, d.BaselinesUnavailable, d.StreamErr, d.ArchivesErr, d.CoverageErr, d.TableVisible, d.Retention)
+	var tables *TableCaptureView
+	if d.TableCapture != nil {
+		v := d.TableCapture.View(d.TableVisible)
+		tables = &v
+	}
+	return writeStatusJSONFull(w, d.Files, d.Parts, d.Archives, d.Coverage, d.Servers, d.Stream, d.Baselines, d.BaselinesUnavailable, d.StreamErr, d.ArchivesErr, d.CoverageErr, tables, d.TableVisible, d.Retention)
 }
 
 // WriteStatus writes a multi-section status report (Servers, Stream, Indexed Files, Partitions, Archives, Coverage, Summary) to w.
@@ -1307,12 +1353,12 @@ func Truncate(s string, n int) string {
 
 // WriteStatusJSON writes the status data as a JSON object to w.
 func WriteStatusJSON(w io.Writer, files []IndexStateRow, parts []PartitionStat, archives *ArchiveStats, coverage *CoverageInfo, servers []ServerInfo, stream *StreamStateInfo) error {
-	return writeStatusJSONFull(w, files, parts, archives, coverage, servers, stream, nil, false, nil, nil, nil, nil)
+	return writeStatusJSONFull(w, files, parts, archives, coverage, servers, stream, nil, false, nil, nil, nil, nil, nil)
 }
 
 // tableVisible scopes the capture-health table names (#1452); nil renders the
 // ledger verbatim. See StatusData.TableVisible.
-func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionStat, archives *ArchiveStats, coverage *CoverageInfo, servers []ServerInfo, stream *StreamStateInfo, baselines []BaselineInfo, baselinesUnavailable bool, streamErr, archivesErr, coverageErr error, tableVisible func(schema, table string) bool, retentions ...*RetentionInfo) error {
+func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionStat, archives *ArchiveStats, coverage *CoverageInfo, servers []ServerInfo, stream *StreamStateInfo, baselines []BaselineInfo, baselinesUnavailable bool, streamErr, archivesErr, coverageErr error, tables *TableCaptureView, tableVisible func(schema, table string) bool, retentions ...*RetentionInfo) error {
 	var retention *RetentionInfo
 	if len(retentions) > 0 {
 		retention = retentions[0]
@@ -1536,6 +1582,10 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 		// nobody sets one, with basis recorded|legacy|unreadable (#1709).
 		// Absent when it could not be read.
 		Retention *RetentionInfo `json:"retention,omitempty"`
+		// TableCapture: which tables the current schema snapshot captures and
+		// leaves out (#1802), already scoped to the reader. Absent when the
+		// caller did not load it.
+		TableCapture *TableCaptureView `json:"table_capture,omitempty"`
 	}
 
 	jf := make([]jsonFile, len(files))
@@ -1588,7 +1638,7 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 		js = append(js, srv)
 	}
 
-	out := jsonSummary{Servers: js, Files: jf, Parts: jp, Total: total, Retention: retention}
+	out := jsonSummary{Servers: js, Files: jf, Parts: jp, Total: total, Retention: retention, TableCapture: tables}
 	if stream != nil {
 		jstr := &jsonStream{
 			Mode:           stream.Mode,

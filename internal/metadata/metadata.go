@@ -1367,15 +1367,26 @@ func takeSnapshot(sourceDB, indexDB *sql.DB, schemas []string, excludeInvalid bo
 		// one exclusion entry, combined reason.
 		reasonByKey := make(map[string]string, len(nonInnoDB)+len(noPK))
 		for _, key := range nonInnoDB {
-			reasonByKey[key] = "not InnoDB"
+			reasonByKey[key] = ExclusionReasonNotInnoDB
 		}
 		for _, key := range noPK {
 			if r, ok := reasonByKey[key]; ok {
-				reasonByKey[key] = r + "; no primary key"
+				reasonByKey[key] = r + ExclusionReasonSeparator + ExclusionReasonNoPrimaryKey
 			} else {
-				reasonByKey[key] = "no primary key"
+				reasonByKey[key] = ExclusionReasonNoPrimaryKey
 			}
 		}
+		// The excluded tables' COLUMN NAMES, gathered while they go past:
+		// this is the only moment anything sees them. They are not written to
+		// the snapshot, so no later reader of the index can tell which names
+		// a new primary-key column may take (#1802). Collected by index into
+		// `exclusions` because the filter below writes into `columns`' own
+		// backing array, so nothing may hold a columnRow past the loop.
+		noPKKeys := make(map[string]bool, len(noPK))
+		for _, key := range noPK {
+			noPKKeys[key] = true
+		}
+		columnsByKey := make(map[string][]string, len(reasonByKey))
 		kept := columns[:0]
 		seenExcluded := make(map[string]bool, len(reasonByKey))
 		for _, c := range columns {
@@ -1388,11 +1399,21 @@ func takeSnapshot(sourceDB, indexDB *sql.DB, schemas []string, excludeInvalid bo
 						schema: c.schemaName, table: c.tableName, reason: reason,
 					})
 				}
+				if noPKKeys[key] {
+					columnsByKey[key] = append(columnsByKey[key], c.columnName)
+				}
 				continue
 			}
 			kept = append(kept, c)
 		}
 		columns = kept
+		for i, e := range exclusions {
+			if key := e.schema + "." + e.table; noPKKeys[key] {
+				// Only a table that needs a KEY needs a column name; one that
+				// merely sits on the wrong engine keeps the key it has.
+				exclusions[i].pkColumn = SuggestPKColumn(columnsByKey[key])
+			}
+		}
 		if len(columns) == 0 {
 			// Nothing capturable remains — an empty snapshot would silently
 			// blind the resolver to every table, so this stays a hard error.
@@ -1436,9 +1457,11 @@ func takeSnapshot(sourceDB, indexDB *sql.DB, schemas []string, excludeInvalid bo
 	}
 	// DDL is an implicit commit in MySQL, so the lazy table creation must
 	// happen BEFORE the write transaction opens.
+	exclusionsHavePKColumn := false
 	if len(exclusions) > 0 {
-		if err := ensureSnapshotExclusionsTable(context.Background(), indexDB); err != nil {
-			return SnapshotStats{}, err
+		var exErr error
+		if exclusionsHavePKColumn, exErr = ensureSnapshotExclusionsTable(context.Background(), indexDB); exErr != nil {
+			return SnapshotStats{}, exErr
 		}
 	}
 
@@ -1568,10 +1591,24 @@ func takeSnapshot(sourceDB, indexDB *sql.DB, schemas []string, excludeInvalid bo
 	// Same transaction as the snapshot rows: a snapshot that excluded tables
 	// must never commit without the record the cascade loaders flag from.
 	for _, e := range exclusions {
-		if _, err = tx.Exec(
-			"INSERT INTO snapshot_exclusions (snapshot_id, schema_name, table_name, reason) VALUES (?, ?, ?, ?)",
-			nextID, e.schema, e.table, e.reason,
-		); err != nil {
+		// pk_column is left out on an index whose table predates it and could
+		// not be migrated (#1802): the exclusion itself must still land, since
+		// it is what every consumer reads to tell a permanent skip from a
+		// stale snapshot.
+		if exclusionsHavePKColumn {
+			var pkColumn any
+			if e.pkColumn != "" {
+				pkColumn = e.pkColumn
+			}
+			_, err = tx.Exec(
+				"INSERT INTO snapshot_exclusions (snapshot_id, schema_name, table_name, reason, pk_column) VALUES (?, ?, ?, ?, ?)",
+				nextID, e.schema, e.table, e.reason, pkColumn)
+		} else {
+			_, err = tx.Exec(
+				"INSERT INTO snapshot_exclusions (snapshot_id, schema_name, table_name, reason) VALUES (?, ?, ?, ?)",
+				nextID, e.schema, e.table, e.reason)
+		}
+		if err != nil {
 			return SnapshotStats{}, fmt.Errorf("failed to insert snapshot exclusion: %w", err)
 		}
 	}

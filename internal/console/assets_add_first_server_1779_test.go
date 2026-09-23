@@ -34,6 +34,7 @@ const api = () => never;
 const openServersModal = () => calls.push("open");
 const showServerForm = (p) => calls.push("form:" + p);
 const watchFirstRun = () => calls.push("watch");
+const loadOvUncaptured = () => {};
 let serverGen = 0, viewGen = 0, serversEmpty, capsCache;
 let slot;
 const ovFrame = () => ({ firstRunSlot: slot = { kids: [], append(...k) { this.kids.push(...k); } } });
