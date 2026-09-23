@@ -3,6 +3,7 @@ package metadata
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -25,8 +26,9 @@ import (
 // `audit_log`, `cafe` and `café`, both ordinary on a case-sensitive source —
 // were one key, and the second exclusion's ERROR 1062 rolled back the WHOLE
 // snapshot transaction: the DDL hook's auto-snapshot failed and capture
-// restarted into the same DDL. The source keeps them apart, and so do
-// schema_snapshots and the capture-skip ledger; this table must too.
+// restarted into the same DDL. The source keeps them apart, and so does the
+// capture-skip ledger; schema_snapshots stores both only because it has no
+// unique key on names. This table must keep them apart too.
 const DDLSnapshotExclusions = `CREATE TABLE IF NOT EXISTS snapshot_exclusions (
     snapshot_id INT UNSIGNED NOT NULL,
     schema_name VARCHAR(64)  COLLATE utf8mb4_bin NOT NULL,
@@ -82,7 +84,7 @@ func ensureSnapshotExclusionsTable(ctx context.Context, db *sql.DB) (hasPKColumn
 		}
 		return true, nil
 	}
-	migrateSnapshotExclusionsNamesBestEffort(ctx, db)
+	MigrateSnapshotExclusionsNamesBestEffort(ctx, db)
 	return ensureSnapshotExclusionsPKColumn(ctx, db), nil
 }
 
@@ -120,31 +122,54 @@ type execQuerier interface {
 // The rows already there always survive: the old key was insensitive, so no
 // two rows in it can be equal under a binary one.
 //
-// It runs on its own connection with lock_wait_timeout bounded to
-// migrationLockWait seconds, so a busy table makes it fail instead of stall.
+// The check runs on the pool. Only when an ALTER is due does it take a
+// dedicated connection, bound lock_wait_timeout to migrationLockWait seconds
+// there, and then DISCARD that connection instead of returning it: the
+// session setting would otherwise ride back into the pool and make some
+// later, unrelated statement (rotation DDL, the snapshot transaction, a batch
+// INSERT) give up on a lock after a few seconds.
 func EnsureSnapshotExclusionsNameCollation(ctx context.Context, db *sql.DB) error {
+	due, err := snapshotExclusionsNamesNeedMigration(ctx, db)
+	if err != nil || !due {
+		return err
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("metadata: snapshot_exclusions collation: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		// A Raw callback that returns ErrBadConn makes database/sql close the
+		// connection rather than pool it. Close afterwards is then a no-op.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		_ = conn.Close()
+	}()
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", migrationLockWait)); err != nil {
 		return fmt.Errorf("metadata: snapshot_exclusions collation: bound lock wait: %w", err)
 	}
 	return ensureSnapshotExclusionsNameCollationOn(ctx, conn)
 }
 
-func ensureSnapshotExclusionsNameCollationOn(ctx context.Context, c execQuerier) error {
+// snapshotExclusionsNamesNeedMigration reports whether snapshot_exclusions
+// exists with at least one name column not yet binary. A NULL collation
+// counts as not binary, which errs toward converting.
+func snapshotExclusionsNamesNeedMigration(ctx context.Context, q execQuerier) (bool, error) {
 	var found, binary int
-	if err := c.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(COLLATION_NAME = ?), 0)
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(COLLATION_NAME = ?), 0)
 		FROM information_schema.COLUMNS
 		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'snapshot_exclusions'
 		  AND COLUMN_NAME IN ('schema_name', 'table_name')`, SnapshotExclusionsNameCollation,
 	).Scan(&found, &binary); err != nil {
-		return fmt.Errorf("metadata: check snapshot_exclusions name collation: %w", err)
+		return false, fmt.Errorf("metadata: check snapshot_exclusions name collation: %w", err)
 	}
-	if found == 0 || binary == found {
-		return nil
+	return found > 0 && binary != found, nil
+}
+
+// ensureSnapshotExclusionsNameCollationOn re-checks and ALTERs on the given
+// connection; the caller owns its session settings.
+func ensureSnapshotExclusionsNameCollationOn(ctx context.Context, c execQuerier) error {
+	due, err := snapshotExclusionsNamesNeedMigration(ctx, c)
+	if err != nil || !due {
+		return err
 	}
 	if _, err := c.ExecContext(ctx, `ALTER TABLE snapshot_exclusions
 		MODIFY COLUMN schema_name VARCHAR(64) COLLATE `+SnapshotExclusionsNameCollation+` NOT NULL,
@@ -154,14 +179,21 @@ func ensureSnapshotExclusionsNameCollationOn(ctx context.Context, c execQuerier)
 	return nil
 }
 
-// migrateSnapshotExclusionsNamesBestEffort is the writer's self-heal for
-// paths that never run EnsureSchema (`bintrail snapshot`). Best effort and
-// loud: failing the snapshot over it would turn every degraded snapshot into
-// a failure, while leaving it unmigrated only fails the rare snapshot that
-// excludes two case/accent twins — the bug as it was before.
-func migrateSnapshotExclusionsNamesBestEffort(ctx context.Context, db *sql.DB) {
+// MigrateSnapshotExclusionsNamesBestEffort runs the conversion and logs a
+// warning instead of failing. Both callers want that:
+//   - the snapshot writer, for paths that never run EnsureSchema (`bintrail
+//     snapshot`): failing the snapshot over it would fail every degraded
+//     snapshot, while leaving it unconverted only fails the rare one that
+//     excludes two case/accent twins, the bug as it was before;
+//   - EnsureSchema, which the READ plane also runs with SELECT-only DSNs
+//     that cannot ALTER, and which must not refuse a read over a table the
+//     read plane never writes, nor refuse to start over a transient lock.
+//
+// The writer retries it before every degraded snapshot, so a missed run heals
+// on the next one.
+func MigrateSnapshotExclusionsNamesBestEffort(ctx context.Context, db *sql.DB) {
 	if err := EnsureSnapshotExclusionsNameCollation(ctx, db); err != nil {
-		slog.Warn("could not convert snapshot_exclusions names to a binary collation; a snapshot that excludes two tables whose names differ only in case or accent will fail until it is converted (run any capture command once, which retries it)",
+		slog.Warn("could not convert snapshot_exclusions names to a binary collation; a snapshot that excludes two tables whose names differ only in case or accent will fail until it is converted (the next degraded snapshot retries it)",
 			"error", err)
 	}
 }

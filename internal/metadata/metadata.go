@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-sql-driver/mysql"
 	"golang.org/x/text/encoding/charmap"
 )
 
@@ -1694,6 +1695,10 @@ func takeSnapshot(sourceDB, indexDB *sql.DB, schemas []string, excludeInvalid bo
 				nextID, e.schema, e.table, e.reason)
 		}
 		if err != nil {
+			var me *mysql.MySQLError
+			if errors.As(err, &me) && me.Number == 1062 {
+				return SnapshotStats{}, fmt.Errorf("failed to insert snapshot exclusion %s.%s: snapshot_exclusions still compares names without case or accents and could not be converted (#1815; see the earlier warning): %w", e.schema, e.table, err)
+			}
 			return SnapshotStats{}, fmt.Errorf("failed to insert snapshot exclusion: %w", err)
 		}
 	}

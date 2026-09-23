@@ -7,7 +7,9 @@ import (
 	"database/sql"
 	"errors"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -242,5 +244,76 @@ func TestIntegrationServerRefusesTrailingSpaceTableNames_1815(t *testing.T) {
 	_, err = sourceDB.Exec("CREATE DATABASE `trailing_db `")
 	if !errors.As(err, &me) || me.Number != 1102 {
 		t.Fatalf("CREATE DATABASE with a trailing space = %v, want ERROR 1102", err)
+	}
+}
+
+// The migration bounds its lock wait on the session it ALTERs from. That
+// setting must never go back into the pool: a later rotation DDL, snapshot
+// transaction or batch INSERT drawing that connection would give up after a
+// few seconds instead of waiting, failing with a 1205 nobody could trace
+// here. One connection in the pool makes the test get the same one back.
+func TestIntegrationExclusionsMigrationLeavesThePoolUntouched_1815(t *testing.T) {
+	indexDB, _ := testutil.CreateTestDB(t)
+	indexDB.SetMaxOpenConns(1)
+	indexDB.SetMaxIdleConns(1)
+	ctx := context.Background()
+	testutil.MustExec(t, indexDB, legacyDDLSnapshotExclusions)
+
+	check := func(when string) {
+		t.Helper()
+		var same bool
+		if err := indexDB.QueryRowContext(ctx,
+			"SELECT @@SESSION.lock_wait_timeout = @@GLOBAL.lock_wait_timeout").Scan(&same); err != nil {
+			t.Fatal(err)
+		}
+		if !same {
+			t.Fatalf("%s: a pooled connection kept the migration's lock_wait_timeout", when)
+		}
+	}
+	if err := EnsureSnapshotExclusionsNameCollation(ctx, indexDB); err != nil {
+		t.Fatalf("migration: %v", err)
+	}
+	assertNameColumnsAreBinary(t, indexDB)
+	check("after the ALTER")
+	if err := EnsureSnapshotExclusionsNameCollation(ctx, indexDB); err != nil {
+		t.Fatalf("no-op migration: %v", err)
+	}
+	check("after the no-op run")
+}
+
+// When the conversion cannot run (here: another session holds the table), the
+// writer waits only the bounded lock wait, carries on, and a snapshot that
+// then hits the old collision says why instead of a bare 1062.
+func TestIntegrationExclusionsBlockedMigrationIsBoundedAndNamed_1815(t *testing.T) {
+	sourceDB, sourceName := testutil.CreateTestDB(t)
+	indexDB, _ := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
+	testutil.MustExec(t, indexDB, legacyDDLSnapshotExclusions)
+	createCollidingExcludedTables(t, sourceDB)
+	ctx := context.Background()
+
+	holder, err := indexDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if _, err := holder.ExecContext(ctx, "START TRANSACTION"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.ExecContext(ctx, "SELECT COUNT(*) FROM snapshot_exclusions"); err != nil {
+		t.Fatal(err)
+	}
+	defer holder.ExecContext(ctx, "ROLLBACK") //nolint:errcheck
+
+	start := time.Now()
+	_, err = TakeSnapshotExcludingInvalid(sourceDB, indexDB, []string{sourceName})
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Fatalf("snapshot took %v; the migration's lock wait is not bounded", elapsed)
+	}
+	if err == nil {
+		t.Fatal("with the table unconverted, the twins must still collide (this test's premise)")
+	}
+	if !strings.Contains(err.Error(), "#1815") || !strings.Contains(err.Error(), "could not be converted") {
+		t.Fatalf("the collision must name its cause, got: %v", err)
 	}
 }
