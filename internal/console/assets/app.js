@@ -1358,6 +1358,12 @@ function ovFrame() {
   f.covSlot = el("div");
   f.covSlot.append(ovPendingCard("Restore coverage", "computing restore coverage…", "cov-card"));
   v.append(f.covSlot);
+  // Tables capture leaves out (#1802): right under the restore window, which
+  // they qualify, and outside the first-run steps, which go away while the
+  // table must stay named.
+  f.uncapSlot = el("div");
+  f.uncapSlot.append(ovPendingCard("Table coverage", "checking which tables are captured…", "uncap-card"));
+  v.append(f.uncapSlot);
 
   const stats = el("div", { class: "ov-stats" });
   f.statTotal = ovStatPending("changes indexed", "all time · estimate");
@@ -1534,6 +1540,7 @@ function renderOverview() {
   // indistinguishable from a console without the feature.
   api("/api/coverage").catch((err) => { console.error("coverage fetch failed", err); return { continuity: "unavailable" }; })
     .then((coverage) => { if (live()) fillOvCoverage(f, coverage); });
+  loadOvUncaptured(f, live);
   // null on failure, never {} — the fill renders "—" for a missing aggregate.
   // A zero-filled fallback would print "0 deletes", an assurance nobody
   // measured. No period parameter: the server derives the window from the
@@ -1629,6 +1636,124 @@ function watchFirstRun(f, live) {
   tick();
 }
 
+// ── Overview: tables left out of capture (#1802) ─────────────────────────────
+// A schema read after capture started leaves out a table it cannot key (no
+// primary key, not InnoDB), and before #1802 only the capture log said so. The
+// server builds every sentence and statement (status.TableCapture.View), so
+// this block only draws them: the page, `bintrail status` and the MCP status
+// tool cannot word the same table two ways.
+
+// Rows shown before the rest fold away: enough to read, never a wall.
+const UNCAP_SHOWN = 3;
+
+// loadOvUncaptured fetches the list and draws it. A request that FAILS says so
+// on screen, in the same words a read that failed inside the endpoint gets:
+// drawing nothing would rebuild, one layer up, the silence this whole section
+// exists to end, and the page around it would look healthy while nobody knows
+// which tables are captured. Same rule as the coverage card above.
+function loadOvUncaptured(f, live) {
+  api("/api/uncaptured-tables").then(
+    (v) => { if (live()) fillOvUncaptured(f, v); },
+    (err) => {
+      console.error("uncaptured tables fetch failed", err);
+      if (live()) fillOvUncaptured(f, { state: "unavailable", error: (err && err.message) || String(err), uncaptured: [] });
+    });
+}
+
+function fillOvUncaptured(f, v) {
+  clear(f.uncapSlot);
+  const card = uncapturedCard(v);
+  if (card) f.uncapSlot.append(card);
+}
+
+// uncapturedCard draws the count and one row per table left out, or null when
+// there is nothing to say (no schema read yet, a PostgreSQL server, a state
+// this page does not know). It never draws "every table is captured" from
+// something it could not read: "not checked" and "unavailable" say so.
+function uncapturedCard(v) {
+  if (!v) return null;
+  const card = el("section", { class: "ov-panel uncap-card" });
+  const head = (extra) => card.append(el("div", { class: "ov-panel-head" },
+    el("h2", { class: "ov-panel-title", text: "Table coverage" }), extra || null));
+  if (v.state === "unavailable") {
+    card.append(el("div", { class: "warn-item" }, icon("warn"),
+      el("span", { text: "Could not check which tables are captured: " + (v.error || "unknown error") })));
+    return card;
+  }
+  if (v.state !== "checked" && v.state !== "not_checked") return null;
+  head();
+  // The count, or why there is none. Never both, and never a count nobody
+  // could verify: with the capture scope unknown the note takes its place.
+  if (v.headline || v.coverage_note) {
+    card.append(el("p", { class: "uncap-lead", text: v.headline || v.coverage_note }));
+  }
+  // The line that answers "and nothing else?" — the same one the terminal
+  // prints, from the same field, so the two cannot answer differently.
+  if (v.all_captured_note) card.append(el("p", { class: "uncap-note", text: v.all_captured_note }));
+  if (v.state === "not_checked") {
+    // NOT "an older version": a current build that has not migrated this
+    // server's data leaves the same shape, and the console never migrates a
+    // server it did not start from the command line.
+    card.append(el("p", { class: "uncap-note",
+      text: "Whether any table is left out is not known: this server has not recorded it. The first schema read that leaves one out records it, and this card names it from then on." }));
+    return card;
+  }
+  const rows = (v.uncaptured || []).map(uncapturedRow);
+  // The lines that say the list is INCOMPLETE never go inside the fold: they
+  // are the reason to open it, and with more than a few tables they were the
+  // ones being hidden.
+  const notices = [];
+  if (v.omitted_summary) notices.push(el("div", { class: "uncap needs-decision" }, el("span", { class: "uncap-text", text: v.omitted_summary })));
+  if (v.withheld_summary) notices.push(el("div", { class: "uncap needs-decision" }, el("span", { class: "uncap-text", text: v.withheld_summary })));
+  if (!rows.length && !notices.length) return card;
+  const list = el("div", { class: "uncap-list" });
+  list.append(...rows.slice(0, UNCAP_SHOWN));
+  if (rows.length > UNCAP_SHOWN) {
+    const more = el("details", { class: "uncap-more" },
+      el("summary", { text: "Show " + (rows.length - UNCAP_SHOWN) + " more" }));
+    more.append(...rows.slice(UNCAP_SHOWN));
+    list.append(more);
+  }
+  list.append(...notices);
+  card.append(list);
+  return card;
+}
+
+// uncapturedRow draws one table as a dashed chip: the dash says it is not
+// captured, the color whether someone still has to decide (red) or already
+// did (gray, once "Leave it out" records a decision, #1805). The fix starts
+// folded; Copy copies exactly the statement on screen.
+function uncapturedRow(t) {
+  const tone = t.decision ? "decided" : "needs-decision";
+  const row = el("div", { class: "uncap " + tone });
+  const line = el("div", { class: "uncap-line" }, el("span", { class: "uncap-text", text: t.summary }));
+  row.append(line);
+  if (!t.fix_sql) {
+    // No statement to hand over (a table whose columns nothing recorded, so
+    // a guessed column name could collide). The words still carry what
+    // happens to the data and the step that produces a statement.
+    if (t.fix_intro) row.append(el("p", { class: "uncap-intro", text: t.fix_intro }));
+    return row;
+  }
+  const fix = el("div", { class: "uncap-fix" },
+    el("p", { class: "uncap-intro", text: t.fix_intro || "" }),
+    el("pre", { class: "uncap-sql", text: t.fix_sql }),
+    el("button", { class: "btn btn-sm", type: "button", text: "Copy",
+      onclick: (e) => { e.stopPropagation(); copyText(t.fix_sql, "SQL"); } }));
+  fix.hidden = true;
+  const toggle = el("button", { class: "btn btn-sm btn-ghost uncap-toggle", type: "button", text: "Show fix",
+    "aria-expanded": "false",
+    onclick: (e) => {
+      e.stopPropagation();
+      fix.hidden = !fix.hidden;
+      toggle.textContent = fix.hidden ? "Show fix" : "Hide fix";
+      toggle.setAttribute("aria-expanded", fix.hidden ? "false" : "true");
+    } });
+  line.append(toggle);
+  row.append(fix);
+  return row;
+}
+
 // buildOverview renders the dashboard from already-fetched payloads — the
 // composition seam the e2e fixture drives directly, sharing every fill with
 // the progressive path above. status and activity may each be null (their
@@ -1637,12 +1762,13 @@ function watchFirstRun(f, live) {
 // into incident channels without the page around them (#1300): "N deletes"
 // beside "N changes indexed" invites reading the first as a share of the
 // second, and before this they were different denominators.
-function buildOverview(status, eventsData, coverage, activity) {
+function buildOverview(status, eventsData, coverage, activity, uncaptured) {
   const f = ovFrame();
   fillOvStatus(f, status);
   fillOvEvents(f, eventsData, null);
   fillOvCoverage(f, coverage);
   fillOvActivity(f, activity);
+  fillOvUncaptured(f, uncaptured || null);
 }
 
 // ovStat renders one tile. scope is REQUIRED for any tile carrying a number:

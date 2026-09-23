@@ -143,6 +143,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Which tables the current schema snapshot captures and which it left out
+	// (#1802). Loaded here rather than in CollectStatus, which the index-metrics
+	// scraper also runs on a timer. The report prints it in both formats.
+	// An empty filter on purpose: this command reads an index it did not
+	// start, and nothing records the per-table scope capture may run with, so
+	// it names what was left out and claims no coverage count (#1802).
+	data.TableCapture = status.LoadTableCapture(cmd.Context(), db).WithFilter(status.CaptureFilter{})
 	// An index with nothing in it is the shape an operator reaches by running
 	// the CLI with the daemon's own env file (#1731): the events are in the
 	// per-source database the control plane provisioned, not in the one the

@@ -25,6 +25,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // Config configures a console Server. The caller (cmd/bintrail/console.go) is
@@ -50,6 +51,15 @@ type Config struct {
 	// look pre-populated. Header-less requests still resolve to the boot
 	// bundle underneath, so the views render before the first server exists.
 	HideBoot bool
+	// BootCaptureFilter is the scope THIS process's boot capture runs with:
+	// `bintrail-console watch --schemas/--tables`. It is the only place that
+	// scope exists — the schema snapshot records the schemas, nothing records
+	// the per-table filter, and the parser drops a filtered-out table's events
+	// with no counter and no log line. Without it the uncaptured-tables report
+	// would count the snapshot and state full coverage over tables nobody is
+	// watching (#1802). nil means this process does not run the boot capture,
+	// and the report then claims no count at all.
+	BootCaptureFilter *status.CaptureFilter
 	// Registry is the named-server store (a local YAML file — the only thing
 	// the console ever writes). nil means an empty in-memory registry.
 	Registry *Registry
@@ -291,6 +301,9 @@ type Server struct {
 	// monitorCtrl: non-nil only when this process is a control-plane
 	// supervisor (see Config.MonitorCtrl).
 	monitorCtrl MonitorController
+	// bootCaptureFilter: the scope this process's boot capture runs with,
+	// nil when it runs none (see Config.BootCaptureFilter).
+	bootCaptureFilter *status.CaptureFilter
 	// baselineCtrl: non-nil only when the watch daemon opted into in-process
 	// baseline creation (see Config.BaselineCtrl).
 	baselineCtrl BaselineController
@@ -544,6 +557,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	s.managedTok.initFromDisk(mcpTokenPath, mcpTokFile)
 	s.cm.hideBoot = cfg.HideBoot
+	s.bootCaptureFilter = cfg.BootCaptureFilter
 	// Registry entries with no baseline of their own (every UI/API-added
 	// server — the add form has no baseline field) fall back to the process
 	// flags, so a daemon started with --baseline-dir/--baseline-s3 enables
@@ -629,6 +643,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/status", s.handleStatus)
 	api.HandleFunc("GET /api/capacity", s.handleCapacity)
 	api.HandleFunc("GET /api/coverage", s.handleCoverage)
+	api.HandleFunc("GET /api/uncaptured-tables", s.handleUncapturedTables)
 	api.HandleFunc("GET /api/activity", s.handleActivity)
 	api.HandleFunc("GET /api/schemas", s.handleSchemas)
 	api.HandleFunc("GET /api/events", s.handleEvents)

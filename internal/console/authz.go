@@ -66,6 +66,11 @@ var apiRoutePerms = []routePerm{
 	{"GET", "/api/status", ext.PermStatusRead},
 	{"GET", "/api/coverage", ext.PermStatusRead},
 	{"GET", "/api/capacity", ext.PermStatusRead},
+	// The tables capture leaves out (#1802) are capture health, the floor a
+	// read-only session exists for, like the capture-health names on
+	// /api/status: the handler withholds each name the session's data scope
+	// refuses and keeps the counts, the same rule under the same tier.
+	{"GET", "/api/uncaptured-tables", ext.PermStatusRead},
 	{"GET", "/api/activity", ext.PermQueryExecute},
 	{"GET", "/api/events", ext.PermQueryExecute},
 	// DDL history (#1443) is tiered with the events browser: it names tables
