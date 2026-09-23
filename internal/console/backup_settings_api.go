@@ -179,6 +179,14 @@ type backupSettingsServerDTO struct {
 	// stretches how far back this server can go. 0 = none, or unreadable
 	// (the loop then applies none either).
 	PruneRetainMinutes int `json:"prune_retain_minutes,omitempty"`
+	// SnapshotEveryMinutes is how often this server gets a snapshot without
+	// a click (#1681): the shorter of its schedule, where the schedule can
+	// run in this process, and the daemon-wide --baseline-refresh-interval,
+	// where that loop covers this server (it refreshes every server with a
+	// local folder). 0 = nothing takes snapshots on its own. The row's "how
+	// far back" line multiplies the count by it: the schedule alone would
+	// promise days where an hourly refresh leaves hours.
+	SnapshotEveryMinutes int `json:"snapshot_every_minutes,omitempty"`
 }
 
 // The three provenance verdicts a server's backup location can have. The
@@ -287,6 +295,7 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	if r := s.localRetentionOf(e.ID); r != nil {
 		dto.KeepInForce = r.KeepNewest
 		dto.PruneRetainMinutes = s.pruneRetainMinutes()
+		dto.SnapshotEveryMinutes = s.snapshotEveryMinutes(e)
 	}
 	dto.FullBackupPossible = FullBackupPossible(e, s.scheduleGates()) == nil
 	dto.ScheduleLoop = s.backupSchedules != nil
@@ -322,6 +331,33 @@ func (s *Server) pruneRetainMinutes() int {
 		return 0
 	}
 	return int(d.Minutes())
+}
+
+// snapshotEveryMinutes is SnapshotEveryMinutes for e: the shorter of the two
+// loops that take snapshots on their own, each only where it runs for e.
+func (s *Server) snapshotEveryMinutes(e ServerEntry) int {
+	every := 0
+	shorter := func(m int) {
+		if m > 0 && (every == 0 || m < every) {
+			every = m
+		}
+	}
+	// The schedule: stored, runnable here (the same IO-free check the row's
+	// refusal uses), and this process runs schedules at all.
+	if sc := e.BackupSchedule; sc != nil && s.backupSchedules != nil && CheckBackupSchedule(e, *sc, s.scheduleGates()) == nil {
+		if p, err := sc.Parse(); err == nil {
+			shorter(int(p.Every.Minutes()))
+		}
+	}
+	// The refresh loop: set at startup (it runs whenever the flag is set, or
+	// the daemon refuses to start), and it covers every server with an index
+	// and a local folder (consoleapp baselineRefreshTargets).
+	if raw := s.backupSettingsDefaults.RefreshEvery; raw != "" && e.DSN != "" && e.BaselineDir != "" {
+		if d, err := cliutil.ParseInterval(raw); err == nil && d > 0 {
+			shorter(max(1, int(d.Minutes())))
+		}
+	}
+	return every
 }
 
 // backupSettingsUpdateRequest is the PUT body. Pointer semantics: an omitted

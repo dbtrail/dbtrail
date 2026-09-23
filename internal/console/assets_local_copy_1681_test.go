@@ -83,15 +83,18 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   // How far back the count reaches, from the real schedule fields the
   // settings API sends (#1681), with the count in force as the listing has it.
   const inForce = Object.assign({}, fresh, { keep_in_force: 3 });
-  await step("reach5m", Object.assign({}, inForce, { schedule_every: "5m", schedule_every_minutes: 5 }), null);
-  await step("reachHourly", Object.assign({}, inForce, { schedule_every: "1h", schedule_every_minutes: 60 }), null);
-  await step("reachDaily", Object.assign({}, inForce, { schedule_every: "1d", schedule_every_minutes: 1440 }), null);
-  await step("reachDailyTyped1", Object.assign({}, inForce, { schedule_every: "1d", schedule_every_minutes: 1440 }), (r) => type(r, "keep_newest", "1"));
+  // snapshot_every_minutes is the server's answer (the shorter of the
+  // schedule and the refresh loop, where each runs); the page never works
+  // it out from the schedule fields, which reachScheduleOnly proves.
+  await step("reach5m", Object.assign({}, inForce, { snapshot_every_minutes: 5 }), null);
+  await step("reachHourly", Object.assign({}, inForce, { snapshot_every_minutes: 60 }), null);
+  await step("reachDaily", Object.assign({}, inForce, { schedule_every: "1d", snapshot_every_minutes: 1440 }), null);
+  await step("reachDailyTyped1", Object.assign({}, inForce, { snapshot_every_minutes: 1440 }), (r) => type(r, "keep_newest", "1"));
   await step("reachNone", inForce, null);
   await step("reachNoneOne", Object.assign({}, inForce, { keep_newest: 1, keep_in_force: 1 }), null);
-  await step("reachRetain", Object.assign({}, inForce, { schedule_every: "5m", schedule_every_minutes: 5, prune_retain_minutes: 7 * 1440 }), null);
-  await step("reachRefused", Object.assign({}, inForce, { schedule_every: "1h", schedule_every_minutes: 60, schedule_refusal: "no folder" }), null);
-  await step("reachNotApplied", Object.assign({}, fresh, { schedule_every: "1h", schedule_every_minutes: 60 }), null);
+  await step("reachRetain", Object.assign({}, inForce, { snapshot_every_minutes: 5, prune_retain_minutes: 7 * 1440 }), null);
+  await step("reachScheduleOnly", Object.assign({}, inForce, { schedule_every: "1h", schedule_every_minutes: 60 }), null);
+  await step("reachNotApplied", Object.assign({}, fresh, { snapshot_every_minutes: 60 }), null);
   await step("daemonDefault", { source: "default" }, null);
   await step("oldLocalBothYes", { baseline_dir: "/srv/snaps", baseline_s3: "s3://b/p/", local_copy: true, source: "server" }, null);
   // The schedule card's rate sentence follows the listing's local_retention.
@@ -163,15 +166,15 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	// leaves alone nor under the age retention; "once" while the number is
 	// not the one in force; no number without a schedule that runs.
 	for name, want := range map[string]string{
-		"reach5m":          "You can go back up to about 1 hour: restores, .sql exports and full-table time travel start from the oldest snapshot kept.",
-		"reachHourly":      "You can go back up to about 3 hours:",
-		"reachDaily":       "You can go back up to about 3 days:",
-		"reachDailyTyped1": "Once this number applies, you can go back up to about 1 day:",
-		"reachNone":        "You can go back as far as the oldest of the 3 kept. With no schedule running, that depends on when snapshots are taken.",
-		"reachNoneOne":     "You can go back as far as the one snapshot kept.",
-		"reachRetain":      "You can go back up to about 7 days:",
-		"reachRefused":     "You can go back as far as the oldest of the 3 kept. With no schedule running",
-		"reachNotApplied":  "Once this number applies, you can go back up to about 3 hours:",
+		"reach5m":           "You can go back up to about 1 hour: restores, .sql exports and full-table time travel start from the oldest snapshot kept.",
+		"reachHourly":       "You can go back up to about 3 hours:",
+		"reachDaily":        "You can go back up to about 3 days:",
+		"reachDailyTyped1":  "Once this number applies, you can go back up to about 1 day:",
+		"reachNone":         "You can go back as far as the oldest of the 3 kept. Nothing here takes snapshots on a timer, so that depends on when they are taken.",
+		"reachNoneOne":      "You can go back as far as the one snapshot kept.",
+		"reachRetain":       "You can go back up to about 7 days:",
+		"reachScheduleOnly": "You can go back as far as the oldest of the 3 kept.",
+		"reachNotApplied":   "Once this number applies, you can go back up to about 3 hours:",
 	} {
 		r := got[name]
 		w := joined(r.Before)

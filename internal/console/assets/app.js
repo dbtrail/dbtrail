@@ -5479,7 +5479,9 @@ function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
 //   inForce   the count the prune applies now (keep_in_force, the listing's
 //             local_retention.keep_newest); a different number means the
 //             typed one is not saved or not applied yet, and the line says so
-//   every     the schedule's interval in minutes (0 = no schedule that runs)
+//   every     how often snapshots are taken on their own, in minutes: the
+//             shorter of the schedule and the refresh loop, from the server
+//             (snapshot_every_minutes); 0 = nothing takes them on its own
 //   retain    the age retention in minutes (0 = none)
 //
 // keep x every, but never under the hour the prune always leaves alone, nor
@@ -5492,7 +5494,7 @@ function localReachWords(keep, reach) {
   const lead = soon ? soon + "you can" : "You can";
   if (!reach.every) {
     return lead + " go back as far as " + (keep === 1 ? "the one snapshot kept" : "the oldest of the " + keep + " kept") +
-      ". With no schedule running, that depends on when snapshots are taken.";
+      ". Nothing here takes snapshots on a timer, so that depends on when they are taken.";
   }
   const mins = Math.max(keep * reach.every, 60, reach.retain || 0);
   return lead + " go back up to about " + reachSpan(mins) + ": restores, .sql exports and full-table time travel start from the oldest snapshot kept.";
@@ -5649,7 +5651,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     for (const w of localCopyWords(local, s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
       { local: was.local, dir: was.rawDir, source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
-        every: srv.schedule_refusal ? 0 : (srv.schedule_every_minutes || 0), retain: srv.prune_retain_minutes || 0 })) {
+        every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0 })) {
       words.append(el("p", { class: w.err ? "form-msg err" : "form-hint", text: w.text }));
     }
   };

@@ -44,6 +44,8 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		"srv.resolved_dir", "srv.resolved_s3", "srv.source",
 		"srv.schedule_every", "srv.schedule_at", "srv.schedule_refusal", "srv.schedule_full_every",
 		"srv.schedule_every_minutes", "srv.archive_s3", "srv.full_backup_possible",
+		// How far back the kept count reaches, and a held folder (#1681).
+		"srv.keep_in_force", "srv.snapshot_every_minutes", "srv.prune_retain_minutes", "srv.keep_held",
 	} {
 		if !strings.Contains(page, read) {
 			t.Errorf("the page never reads %q; the server emits it and the page renders a blank instead", read)
