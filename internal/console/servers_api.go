@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -263,7 +264,7 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	added, err := s.persistNewEntry(entry, deriveIndex,
+	added, _, err := s.persistNewEntry(entry, deriveIndex,
 		DeriveServerName(req.SourceHost, req.SourcePort, entry.SourceFlavor()), localCopyOf(req))
 	if err != nil {
 		writeJSONError(w, newEntryErrStatus(err), err.Error())
@@ -352,12 +353,27 @@ func localCopyOf(req serverRequest) newLocalCopy {
 // nothing behind, and one that cannot be used is an errLocalDirInvalid, a bad
 // request; the default one is named after the id Add mints, so it lands in a
 // follow-up update.
-func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase string, local newLocalCopy) (ServerEntry, error) {
+//
+// created is the folder THIS request made (named or default), "" when it made
+// none: a caller that rolls the entry back afterwards removes it with
+// removeCreatedDir. Every failure inside removes it here, so a refused create
+// leaves no empty folder behind, and a retry does not add another.
+func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase string, local newLocalCopy) (added ServerEntry, created string, err error) {
+	defer func() {
+		if err != nil {
+			removeCreatedDir(created)
+			created = ""
+		}
+	}()
 	entry.LocalKeepNewest = DefaultLocalKeepNewest
 	if entry.BaselineDir != "" {
+		fresh := !dirExists(entry.BaselineDir)
 		// On serve this only checks: it creates no folder (mayCreateFolders).
 		if err := s.prepareLocalSnapshotDir(entry.BaselineDir); err != nil {
-			return ServerEntry{}, err
+			return ServerEntry{}, "", err
+		}
+		if fresh && s.mayCreateFolders {
+			created = entry.BaselineDir
 		}
 		// A named folder that already holds snapshots keeps all of them: the
 		// new server's default count would otherwise remove them on the
@@ -366,9 +382,9 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 			entry.LocalKeepNewest = 0
 		}
 	}
-	added, err := s.cm.reg.AddAutoNamed(entry, nameBase)
+	added, err = s.cm.reg.AddAutoNamed(entry, nameBase)
 	if err != nil {
-		return ServerEntry{}, err
+		return ServerEntry{}, created, err
 	}
 	if deriveIndex {
 		// The id is minted by Add, so the derived DSN lands in a follow-up
@@ -384,7 +400,7 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 				slog.Error("could not remove a half-configured server after its index DSN could not be set",
 					"server", added.Name, "id", added.ID, "error", delErr.Error())
 			}
-			return ServerEntry{}, fmt.Errorf("could not choose where this server's changes are kept: %w", dErr)
+			return ServerEntry{}, created, fmt.Errorf("could not choose where this server's changes are kept: %w", dErr)
 		}
 	}
 	// A daemon started with its own --baseline-dir/--baseline-s3 backs a
@@ -398,6 +414,7 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 	// given one.
 	if s.mayCreateFolders && local.want && added.BaselineDir == "" && (local.asked || !daemonDefault) {
 		if def := s.cm.reg.DefaultBaselineDir(added.ID); def != "" {
+			fresh := !dirExists(def)
 			if err := prepareLocalSnapshotDir(def); err != nil {
 				// The server is still worth having: it is listed with no
 				// local copy, which is what the page then shows, and the
@@ -405,18 +422,43 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 				// the folder beside the registry DBTrail just wrote.
 				slog.Error("console: new server created without its local snapshot folder", "server", added.Name, "dir", def, "error", err)
 			} else {
+				if fresh {
+					created = def
+				}
 				added.BaselineDir = def
 				if err := s.cm.reg.Update(added); err != nil {
 					if delErr := s.cm.reg.UndoAdd(added.ID); delErr != nil {
 						slog.Error("could not remove a server whose snapshot folder could not be saved",
 							"server", added.Name, "id", added.ID, "error", delErr.Error())
 					}
-					return ServerEntry{}, fmt.Errorf("save the snapshot folder: %w", err)
+					return ServerEntry{}, created, fmt.Errorf("save the snapshot folder: %w", err)
 				}
 			}
 		}
 	}
-	return added, nil
+	return added, created, nil
+}
+
+// dirExists reports whether path names something already there. Anything but
+// a clear "does not exist" counts as existing: removeCreatedDir must never
+// take a folder this request did not make.
+func dirExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
+}
+
+// removeCreatedDir removes a folder this request created, when the server it
+// was made for is rolled back. os.Remove, never RemoveAll: it only succeeds on
+// an EMPTY folder, so it can never take a snapshot with it. A failure is
+// logged and nothing more; the entry's rollback is what matters.
+func removeCreatedDir(dir string) {
+	if dir == "" {
+		return
+	}
+	if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+		slog.Warn("console: a snapshot folder made for a server that was rolled back could not be removed",
+			"dir", dir, "error", err)
+	}
 }
 
 // newEntryErrStatus is the status of a persistNewEntry refusal: a folder
