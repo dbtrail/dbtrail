@@ -111,6 +111,20 @@ type PruneResult struct {
 	Unremoved int
 	// firstRemoveErr is the first of those errors, for the failure record.
 	firstRemoveErr string
+	// Undeleted counts snapshots that left the listing (renamed aside, so in
+	// Pruned) whose files could not all be deleted: the disk they hold is
+	// not back yet. A failure, recorded with the first error.
+	Undeleted      int
+	firstDeleteErr string
+	// SweepFailures counts leftovers of earlier removals (".<ts>.pruning")
+	// that still could not be deleted this cycle. Without it the cycle after
+	// a failed delete plans nothing, counts as a success, and clears the
+	// record while the disk stays full.
+	SweepFailures int
+	firstSweepErr string
+	// firstUnreadable is the path and error of the first snapshot counted in
+	// KeptUnreadable, for the failure record.
+	firstUnreadable string
 	// KeptKeeper counts snapshots retained because they are the newest snapshot
 	// containing some table — reconstruct.FindBaseline's per-table target.
 	KeptKeeper int
@@ -248,15 +262,46 @@ func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) 
 // CHECKED are a failure, because retention stalls while the page would say
 // it runs.
 func pruneFailureReason(res PruneResult, err error) string {
-	switch {
-	case err != nil:
+	if err != nil {
 		return err.Error()
-	case res.Unremoved > 0:
-		return fmt.Sprintf("%d snapshots could not be removed: %s", res.Unremoved, res.firstRemoveErr)
-	case res.ProbeErrors > 0:
-		return fmt.Sprintf("%d snapshots could not be checked at the S3 destination, so they were kept", res.ProbeErrors)
 	}
-	return ""
+	var why []string
+	if res.Unremoved > 0 {
+		why = append(why, fmt.Sprintf("%s could not be removed: %s.", snapshotsWord(res.Unremoved), res.firstRemoveErr))
+	}
+	if res.Undeleted > 0 {
+		why = append(why, fmt.Sprintf("%s left the list, but their files could not all be deleted, so the disk space is not free yet: %s. DBTrail tries again at the next cleanup; check that it may delete files in that folder.",
+			snapshotsWord(res.Undeleted), res.firstDeleteErr))
+	}
+	if res.SweepFailures > 0 {
+		why = append(why, fmt.Sprintf("Files of %s removed earlier could not be deleted: %s. Check that DBTrail may delete files in that folder.",
+			snapshotsWord(res.SweepFailures), res.firstSweepErr))
+	}
+	if res.KeptUnreadable > 0 {
+		why = append(why, fmt.Sprintf("%s could not be read, so they are kept and never removed: %s. Check that DBTrail may read that folder.",
+			snapshotsWord(res.KeptUnreadable), res.firstUnreadable))
+	}
+	if res.ProbeErrors > 0 {
+		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination, so they were kept.", snapshotsWord(res.ProbeErrors)))
+	}
+	return strings.Join(why, " ")
+}
+
+// snapshotsWord is "1 snapshot" or "n snapshots".
+func snapshotsWord(n int) string {
+	if n == 1 {
+		return "1 snapshot"
+	}
+	return fmt.Sprintf("%d snapshots", n)
+}
+
+// pathErr names the path an error is about, once: an os error already
+// carries it, an injected one may not.
+func pathErr(path string, err error) string {
+	if strings.Contains(err.Error(), path) {
+		return err.Error()
+	}
+	return path + ": " + err.Error()
 }
 
 // pruneAttempt is PruneLocal's IO body with the durability check injected, so
@@ -280,9 +325,9 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 		return PruneResult{}, fmt.Errorf("baseline prune: a destination needs a durability probe")
 	}
 
-	// One prune per directory at a time (#1681): the CLI's `baseline prune`
-	// and the daemon's loop can meet on one root, and each decides from its
-	// own listing. A missing directory has nothing to prune and nothing to
+	// One prune per directory at a time (#1681): `bintrail baseline
+	// --baseline-retain`, which prunes after its upload, and the daemon's loop
+	// can meet on one root, and each decides from its own listing. A missing directory has nothing to prune and nothing to
 	// lock.
 	if _, err := os.Stat(opts.LocalDir); os.IsNotExist(err) {
 		return PruneResult{}, nil
@@ -299,11 +344,23 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 
 	// Sweep any ".<ts>.pruning" leftovers from a previous crashed cycle first —
 	// they are already invisible to discovery, but they still occupy disk.
-	sweepPruningLeftovers(opts.LocalDir)
+	sweepFailures, firstSweepErr := sweepPruningLeftovers(opts.LocalDir)
 
 	snaps, err := enumerateLocalSnapshots(opts.LocalDir)
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("baseline prune: %w", err)
+	}
+	// Carried on the result whatever the plan says: a leftover that cannot be
+	// deleted is a failure even in a cycle that has nothing new to remove.
+	withSweep := func(res PruneResult) PruneResult {
+		res.SweepFailures, res.firstSweepErr = sweepFailures, firstSweepErr
+		for _, s := range snaps {
+			if s.unreadable {
+				res.firstUnreadable = s.readErr
+				break
+			}
+		}
+		return res
 	}
 	keepers := computeKeepers(snaps, now)
 	keepPointerTarget(opts.LocalDir, keepers)
@@ -311,7 +368,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	if localOnly {
 		newest := computeNewestN(snaps, opts.KeepNewest, now)
 		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, baselinePruneMinAge, now)
-		return removePlanned(opts, now, pruneNames, res, "no external destination; keeping the newest "+fmt.Sprint(opts.KeepNewest)), nil
+		return withSweep(removePlanned(opts, now, pruneNames, res, "no external destination; keeping the newest "+fmt.Sprint(opts.KeepNewest))), nil
 	}
 
 	// Confirm durability only for snapshots that could actually be pruned —
@@ -348,7 +405,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			"unconfirmed", probeErrors)
 	}
 
-	return removePlanned(opts, now, pruneNames, res, "durable copy in S3"), nil
+	return withSweep(removePlanned(opts, now, pruneNames, res, "durable copy in S3")), nil
 }
 
 // removePlanned deletes the planned snapshots, tallies what left the listing,
@@ -379,8 +436,14 @@ func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res Pr
 		// copy vanish from the page with a count that does not include it.
 		res.Pruned = append(res.Pruned, name)
 		if err != nil {
+			// Still a failure: the disk it holds is not back, and the record
+			// says so until a cycle deletes the leftover (the sweep).
 			slog.Warn("baseline prune: snapshot removed from the listing, but its files could not all be deleted yet; the disk is reclaimed next cycle",
 				"snapshot", name, "error", err)
+			res.Undeleted++
+			if res.firstDeleteErr == "" {
+				res.firstDeleteErr = err.Error()
+			}
 			continue
 		}
 		slog.Info("baseline prune: removed redundant local snapshot",
@@ -501,6 +564,9 @@ type localSnapshot struct {
 	complete   bool
 	tables     []string
 	unreadable bool
+	// readErr is why an unreadable snapshot could not be listed: the path
+	// and the error, for the failure record.
+	readErr string
 }
 
 // enumerateLocalSnapshots lists the snapshot directories under dir. Entries whose
@@ -527,9 +593,10 @@ func enumerateLocalSnapshots(dir string) ([]localSnapshot, error) {
 		snapDir := filepath.Join(dir, e.Name())
 		s := localSnapshot{name: e.Name(), ts: ts, complete: SnapshotComplete(snapDir)}
 		if s.complete {
-			tables, ok := listSnapshotTables(snapDir)
+			tables, readErr := listSnapshotTables(snapDir)
 			s.tables = tables
-			s.unreadable = !ok
+			s.unreadable = readErr != ""
+			s.readErr = readErr
 		}
 		out = append(out, s)
 	}
@@ -550,13 +617,14 @@ func enumerateLocalSnapshots(dir string) ([]localSnapshot, error) {
 // such a snapshot as "contains no tables" would drop it from every table's keeper
 // set and make it prunable: a delete of data reconstruct can still read. So on
 // any enumeration failure we return ok=false, and the caller force-keeps the
-// snapshot rather than risk deleting a usable baseline.
-func listSnapshotTables(snapDir string) (tables []string, ok bool) {
+// snapshot rather than risk deleting a usable baseline. readErr is "" when the
+// listing worked, else the path and error, for the failure record.
+func listSnapshotTables(snapDir string) (tables []string, readErr string) {
 	dbDirs, err := readDir(snapDir)
 	if err != nil {
 		slog.Warn("baseline prune: unreadable snapshot directory; keeping it (cannot prove it is redundant)",
 			"path", snapDir, "error", err)
-		return nil, false
+		return nil, pathErr(snapDir, err)
 	}
 	for _, dbDir := range dbDirs {
 		if !dbDir.IsDir() {
@@ -567,7 +635,7 @@ func listSnapshotTables(snapDir string) (tables []string, ok bool) {
 		if err != nil {
 			slog.Warn("baseline prune: unreadable schema directory; keeping the snapshot",
 				"path", schemaDir, "error", err)
-			return nil, false // a table here could be this snapshot's unique copy
+			return nil, pathErr(schemaDir, err) // a table here could be this snapshot's unique copy
 		}
 		for _, f := range files {
 			if f.IsDir() || !strings.HasSuffix(f.Name(), ".parquet") {
@@ -576,7 +644,7 @@ func listSnapshotTables(snapDir string) (tables []string, ok bool) {
 			tables = append(tables, dbDir.Name()+"/"+strings.TrimSuffix(f.Name(), ".parquet"))
 		}
 	}
-	return tables, true
+	return tables, ""
 }
 
 // computeKeepers returns the set of snapshot directory names that must never be
@@ -658,11 +726,13 @@ func removeSnapshot(dir, name string) (staged bool, err error) {
 }
 
 // sweepPruningLeftovers removes ".<ts>.pruning" staging directories left by a
-// crashed prune. Best-effort; failures are logged, not fatal.
-func sweepPruningLeftovers(dir string) {
+// crashed prune or a delete that failed. Failures are logged and returned
+// (how many, and the first error): not fatal to the prune, but a failure of
+// it, because the disk those leftovers hold is not back.
+func sweepPruningLeftovers(dir string) (failures int, firstErr string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
+		return 0, "" // the enumeration right after reports this
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -673,7 +743,12 @@ func sweepPruningLeftovers(dir string) {
 			p := filepath.Join(dir, n)
 			if err := removeAll(p); err != nil {
 				slog.Warn("baseline prune: could not sweep leftover staging dir", "path", p, "error", err)
+				failures++
+				if firstErr == "" {
+					firstErr = pathErr(p, err)
+				}
 			}
 		}
 	}
+	return failures, firstErr
 }

@@ -15,8 +15,8 @@ import (
 // a copy vanishing from the list with no sentence saying why is the silent
 // failure retention must not introduce. It lives in the snapshot root rather
 // than in the console's registry because the fact is about this directory's
-// contents, it has to survive a restart, and the CLI's `baseline prune`
-// removes copies too. Dot-prefixed, a regular file, and not a timestamp, so
+// contents, it has to survive a restart, and `bintrail baseline
+// --baseline-retain` removes copies there too (after its upload). Dot-prefixed, a regular file, and not a timestamp, so
 // discovery skips it; the upload names it explicitly (isPruneArtifact).
 const LastPruneFile = ".last-prune.json"
 

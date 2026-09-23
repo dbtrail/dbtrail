@@ -751,8 +751,8 @@ Two section labels split it: **Change here** and **Set when DBTrail starts**.
   The daemon default backs time-travel, verification and `.sql` exports but
   backups, restores and the schedule refuse, which is the cross on that
   case. The per-server fields left
-  the server edit form for this page (the form still round-trips them, so an
-  unrelated edit cannot wipe them). A stored schedule that cannot run as
+  the server edit form for this page; an edit there that leaves them out
+  keeps what is stored, so it cannot wipe them. A stored schedule that cannot run as
   things stand shows the refusal above the compact block; the schedule
   itself and the full-backup note sit inside it. Save wakes up when a field
   differs from what was loaded.

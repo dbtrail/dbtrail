@@ -751,3 +751,89 @@ func TestPruneFailure_busyIsNotAFailure(t *testing.T) {
 		t.Fatal("stepping aside for another prune was recorded as a failure")
 	}
 }
+
+// A snapshot renamed aside whose files then could not be deleted left the
+// list, so it counts as removed, AND the attempt is a failure: the disk it
+// was supposed to free is still used. The record must survive the next cycle
+// while the leftover still cannot be deleted (the sweep fails too), and only
+// a cycle that actually deletes it clears the record.
+func TestPruneFailure_deleteAfterRenameIsRecordedUntilTheFilesAreGone(t *testing.T) {
+	root := t.TempDir()
+	a, b := snapName(days(20)), snapName(days(10))
+	makeSnapshot(t, root, a, true, "shop/orders")
+	makeSnapshot(t, root, b, true, "shop/orders")
+	orig := removeAll
+	t.Cleanup(func() { removeAll = orig })
+	removeAll = func(string) error { return os.ErrPermission }
+
+	res := keepNewest(t, root, 1)
+	if !slices.Equal(res.Pruned, []string{a}) {
+		t.Fatalf("pruned %v, want [%s]", res.Pruned, a)
+	}
+	f, ok, err := ReadLastPruneFailure(root)
+	if err != nil || !ok {
+		t.Fatalf("cycle 1: a delete that failed after the rename is not recorded: ok=%v err=%v", ok, err)
+	}
+	for _, want := range []string{"1 snapshot", "could not all be deleted", "permission denied", root} {
+		if !strings.Contains(f.Reason, want) {
+			t.Errorf("cycle 1 reason %q does not say %q", f.Reason, want)
+		}
+	}
+
+	// Cycle 2: nothing new to remove, the leftover still cannot be deleted.
+	keepNewest(t, root, 1)
+	f, ok, err = ReadLastPruneFailure(root)
+	if err != nil || !ok {
+		t.Fatalf("cycle 2: the leftover still fills the disk and the failure record was cleared: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(f.Reason, "could not be deleted") || !strings.Contains(f.Reason, "permission denied") {
+		t.Errorf("cycle 2 reason %q does not say the leftover files could not be deleted", f.Reason)
+	}
+
+	// Cycle 3: deletion works, the leftover goes, and so does the record.
+	removeAll = orig
+	keepNewest(t, root, 1)
+	if _, ok, err := ReadLastPruneFailure(root); ok || err != nil {
+		t.Fatalf("cycle 3: the files are gone but the failure record stayed: ok=%v err=%v", ok, err)
+	}
+}
+
+// A snapshot whose directory cannot be listed is kept (never removed), and the
+// attempt says so with the path, so an operator can fix the permission instead
+// of reading only a retention line.
+func TestPruneFailure_unreadableSnapshotIsRecordedWithItsPath(t *testing.T) {
+	root := t.TempDir()
+	a, b, c := snapName(days(30)), snapName(days(20)), snapName(days(10))
+	for _, s := range []string{a, b, c} {
+		makeSnapshot(t, root, s, true, "shop/orders")
+	}
+	orig := readDir
+	t.Cleanup(func() { readDir = orig })
+	bad := filepath.Join(root, b)
+	readDir = func(p string) ([]os.DirEntry, error) {
+		if p == bad {
+			return nil, os.ErrPermission
+		}
+		return orig(p)
+	}
+	res := keepNewest(t, root, 1)
+	if res.KeptUnreadable != 1 {
+		t.Fatalf("KeptUnreadable = %d, want 1", res.KeptUnreadable)
+	}
+	wantOnDisk(t, root, b, c)
+	f, ok, err := ReadLastPruneFailure(root)
+	if err != nil || !ok {
+		t.Fatalf("an unreadable snapshot is not recorded: ok=%v err=%v", ok, err)
+	}
+	for _, want := range []string{"1 snapshot", "could not be read", bad, "permission denied"} {
+		if !strings.Contains(f.Reason, want) {
+			t.Errorf("reason %q does not say %q", f.Reason, want)
+		}
+	}
+	// Readable again: the next attempt clears it.
+	readDir = orig
+	keepNewest(t, root, 1)
+	if _, ok, err := ReadLastPruneFailure(root); ok || err != nil {
+		t.Fatalf("readable again, but the failure record stayed: ok=%v err=%v", ok, err)
+	}
+}
