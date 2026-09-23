@@ -5410,7 +5410,9 @@ function s3OnlyBackupWarning(srv, fix = true) {
 //   local  the yes/no as clicked         s3    the S3 field as typed
 //   keep   the count as typed (0 = all)  loop  this process removes snapshots
 //   reuse  unchanged tables keep their last file on this daemon
-//   was    the saved answer and folder, for "what happens to the old ones"
+//   was    the saved answer, folder and provenance ("default" = this server
+//          reads DBTrail's startup folder), and whether that folder is one
+//          the prune never counts (shared, or DBTrail's own)
 //
 // The "no" sentence is the issue's own words: no is not "no snapshots", it is
 // "only in S3, and every run writes every table". The saving is promised
@@ -5421,6 +5423,10 @@ function localCopyWords(local, s3, keep, loop, reuse, was) {
   const out = [];
   const say = (text, err) => out.push({ text, err: !!err });
   if (!local) {
+    if (!s3 && !was.local && was.source === "default") {
+      say("This server has no folder of its own. Time-travel reads DBTrail's startup folder; to take snapshots for it, answer yes or set an S3 destination.");
+      return out;
+    }
     if (!s3) {
       say("Set an S3 destination below first. With neither, this server keeps no snapshots at all.", true);
       return out;
@@ -5434,7 +5440,9 @@ function localCopyWords(local, s3, keep, loop, reuse, was) {
     return out;
   }
   if (reuse) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
-  if (!keep) {
+  if (was.blocked) {
+    say("This folder is shared with another server or is DBTrail's startup folder, so nothing in it is removed, whatever the count says.");
+  } else if (!keep) {
     say("Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.");
   } else if (loop) {
     say("Keeps the newest " + keep + " here and removes older ones, never the only copy of a table.");
@@ -5573,7 +5581,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     keepField.hidden = !local || !!s3v;
     clear(words);
     for (const w of localCopyWords(local, s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
-      { local: was.local, dir: was.rawDir })) {
+      { local: was.local, dir: was.rawDir, source: srv.source, blocked: !!srv.keep_blocked })) {
       words.append(el("p", { class: w.err ? "form-msg err" : "form-hint", text: w.text }));
     }
   };
@@ -5594,16 +5602,20 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // "the default one" and never "no copy anywhere".
     const body = { baseline_s3: s3.value.trim(), no_archive: noArch.checked };
     if (yes.checked) {
-      const k = keepNow();
-      if (k === null) {
-        msg.textContent = "Keep the newest takes a whole number, or nothing to keep them all.";
-        msg.hidden = false;
-        sync();
-        return;
-      }
       body.local_copy = true;
       body.baseline_dir = dir.value.trim();
-      if (k !== was.keep) body.keep_newest = k;
+      // The count only while its field is shown (no S3): hidden, it does
+      // nothing, so it is neither checked nor sent.
+      if (!s3.value.trim()) {
+        const k = keepNow();
+        if (k === null) {
+          msg.textContent = "Keep the newest takes a whole number, or nothing to keep them all.";
+          msg.hidden = false;
+          sync();
+          return;
+        }
+        if (k !== was.keep) body.keep_newest = k;
+      }
     } else if (was.local) {
       body.local_copy = false;
     }

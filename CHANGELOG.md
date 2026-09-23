@@ -74,10 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every run writes every table; it is refused while no S3 destination is set.
   - **Local retention without S3.** A folder with no S3 destination is pruned
     to its server's count on every `watch` prune cycle, whether or not
-    `--baseline-retain` is set: the newest N complete snapshots always stay,
-    and so do the newest snapshot of every table, `_INCOMPLETE` snapshots,
-    the `current` pointer's target and anything younger than an hour. Before,
+    `--baseline-retain` is set: for every table the newest N complete
+    snapshots holding it always stay, and so do `_INCOMPLETE` snapshots, the
+    `current` pointer's target and anything younger than an hour. Before,
     such a folder was never pruned. A count of 0, or none, keeps everything.
+    A folder two servers share, or the daemon's own `--baseline-dir`, is
+    never pruned to a count, and a folder that already holds snapshots is
+    never put under one without the operator emptying the count first.
   - **Existing servers are not changed.** A server saved before this release
     gets no folder and no count; it keeps every local snapshot, as before.
     Answering yes on it uses the default folder and still keeps everything

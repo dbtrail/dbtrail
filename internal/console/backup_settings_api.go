@@ -156,6 +156,10 @@ type backupSettingsServerDTO struct {
 	// PruneLoop is whether this process runs the loop that applies
 	// KeepNewest. A read-only console never removes anything.
 	PruneLoop bool `json:"prune_loop"`
+	// KeepBlocked: this server's folder is shared with another server or is
+	// the daemon's own, so console.LocalKeepTargets never prunes it,
+	// whatever KeepNewest says. The row says that instead of the count.
+	KeepBlocked bool `json:"keep_blocked,omitempty"`
 }
 
 // The three provenance verdicts a server's backup location can have. The
@@ -259,6 +263,7 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	dto.DefaultDir = s.cm.reg.DefaultBaselineDir(e.ID)
 	dto.KeepNewest = e.LocalKeepNewest
 	dto.PruneLoop = s.localPruneLoop
+	dto.KeepBlocked = LocalKeepBlocked(s.cm.reg.List(), e, s.cm.defaultBaselineDir)
 	dto.FullBackupPossible = FullBackupPossible(e, s.scheduleGates()) == nil
 	dto.ScheduleLoop = s.backupSchedules != nil
 	if e.BackupSchedule != nil {
@@ -357,6 +362,13 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 		if err := prepareLocalSnapshotDir(entry.BaselineDir); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		// A count only removes anything without an S3 destination.
+		if entry.BaselineS3 == "" {
+			if err := adoptsSnapshots(entry.BaselineDir, entry.LocalKeepNewest); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 	}
 	if err := s.cm.reg.Update(entry); err != nil {

@@ -204,3 +204,28 @@ func TestBaselinesRetention_destinationMeansNoCountAnnounced(t *testing.T) {
 		t.Errorf("the daemon's own folder announced %+v", *got)
 	}
 }
+
+// An unreadable record is reported as such, never as "never pruned".
+func TestBaselinesRetention_unreadableRecordIsReported(t *testing.T) {
+	state := t.TempDir()
+	path := filepath.Join(state, "console-servers.yaml")
+	dir := filepath.Join(state, "d")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, baseline.LastPruneFile), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, _ := LoadRegistry(path)
+	e, err := reg.Add(ServerEntry{Name: "s", DSN: "u:p@tcp(h:3306)/a", BaselineDir: dir, LocalKeepNewest: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, body := retentionFields(t, retentionServer(t, path, true), e.ID)
+	if _, ok := raw["last_prune"]; ok {
+		t.Errorf("an unreadable record produced a last_prune: %s", body)
+	}
+	if _, ok := raw["last_prune_error"]; !ok {
+		t.Errorf("an unreadable record is not reported: %s", body)
+	}
+}

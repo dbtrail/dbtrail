@@ -413,3 +413,67 @@ func TestLocalCopy_daemonDefaultKeepsTheFallbackUnlessAsked(t *testing.T) {
 		t.Errorf("explicit yes got %q", e.BaselineDir)
 	}
 }
+
+// makeSnapshotDir puts one complete-looking snapshot folder in dir.
+func makeSnapshotDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "2026-01-01T00-00-00Z", "shop"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A folder that already holds snapshots is never silently put under a count:
+// a new server pointed at it keeps everything, and a save that would move a
+// counting server onto it is refused with the number it would remove.
+func TestLocalCopy_aFolderWithSnapshotsIsNotAdoptedByACount(t *testing.T) {
+	srv, state := newLocalCopyServer(t)
+	full := filepath.Join(state, "full")
+	makeSnapshotDir(t, full)
+
+	rec, dto := createServer(t, srv, newServerBody+`,"baseline_dir":"`+full+`"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	if e, _ := srv.cm.reg.Get(dto.ID); e.LocalKeepNewest != 0 {
+		t.Errorf("a new server over existing snapshots got a count of %d", e.LocalKeepNewest)
+	}
+
+	_, counted := createServer(t, srv, `{"name":"c","host":"h","port":"3306","user":"u","password":"p","dbname":"i2"}`)
+	rec = putBackupSettings(t, srv, counted.ID, `{"baseline_dir":"`+full+`"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "already holds 1 snapshot,") {
+		t.Fatalf("moving a counting server onto snapshots: %d %s", rec.Code, rec.Body.String())
+	}
+	// With the count emptied in the same save, it is allowed.
+	if rec := putBackupSettings(t, srv, counted.ID, `{"baseline_dir":"`+full+`","keep_newest":0}`); rec.Code != http.StatusOK {
+		t.Fatalf("with keep 0: %d %s", rec.Code, rec.Body.String())
+	}
+	// And a plain connection edit that moves the folder is held to the same rule.
+	_, other := createServer(t, srv, `{"name":"o","host":"h","port":"3306","user":"u","password":"p","dbname":"i3"}`)
+	req := httptest.NewRequest("PUT", "/api/servers/"+other.ID, strings.NewReader(
+		`{"name":"o","host":"h","port":"3306","user":"u","dbname":"i3","baseline_dir":"`+full+`"}`))
+	req.SetPathValue("id", other.ID)
+	rec = httptest.NewRecorder()
+	srv.handleServersUpdate(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("connection edit onto snapshots: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The settings row learns that a shared folder is never pruned, so it can say
+// so instead of promising the count.
+func TestLocalCopy_sharedFolderIsReportedBlocked(t *testing.T) {
+	srv, state := newLocalCopyServer(t)
+	shared := filepath.Join(state, "shared")
+	a, _ := srv.cm.reg.Add(ServerEntry{Name: "a", DSN: "u:p@tcp(h:3306)/a", BaselineDir: shared, LocalKeepNewest: 3})
+	b, _ := srv.cm.reg.Add(ServerEntry{Name: "b", DSN: "u:p@tcp(h:3306)/b", BaselineDir: shared, LocalKeepNewest: 3})
+	own, _ := srv.cm.reg.Add(ServerEntry{Name: "own", DSN: "u:p@tcp(h:3306)/c", BaselineDir: filepath.Join(state, "own"), LocalKeepNewest: 3})
+	for _, row := range backupSettingsGet(t, srv).Servers {
+		want := row.ID == a.ID || row.ID == b.ID
+		if row.ID == own.ID {
+			want = false
+		}
+		if row.KeepBlocked != want {
+			t.Errorf("%s: keep_blocked = %v, want %v", row.Name, row.KeepBlocked, want)
+		}
+	}
+}

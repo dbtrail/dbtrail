@@ -134,36 +134,49 @@ func TestBaselinePruneSweep_switchingTheDestinationSwitchesTheRule(t *testing.T)
 	}
 }
 
-// A folder that another server sends to a destination, or the daemon's own
-// --baseline-dir, is never pruned to a count: some of its snapshots are not
-// this server's to count.
-func TestLocalKeepPruneTargets_sharedFoldersAreLeftToTheirOtherRule(t *testing.T) {
+// A folder two servers share, or the daemon's own --baseline-dir (also under
+// another spelling, through a symlink), is never pruned to a count: a
+// snapshot does not say which server wrote it, so one server's newer copy of
+// a table would count as the other's newest.
+func TestLocalKeepPruneTargets_sharedFoldersAreNeverCounted(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "global")
+	if err := os.MkdirAll(global, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(global, alias); err != nil {
+		t.Fatal(err)
+	}
 	entries := []console.ServerEntry{
 		{Name: "a", BaselineDir: "/shared-with-s3", LocalKeepNewest: 2},
 		{Name: "b", BaselineDir: "/shared-with-s3", BaselineS3: "s3://b/p/"},
-		{Name: "c", BaselineDir: "/global", LocalKeepNewest: 2},
-		// The larger count first, so "last one wins" cannot pass for "max".
+		{Name: "c", BaselineDir: alias, LocalKeepNewest: 2},
 		{Name: "e", BaselineDir: "/two/", LocalKeepNewest: 5},
 		{Name: "d", BaselineDir: "/two", LocalKeepNewest: 2},
 		{Name: "f", BaselineDir: "/with-a-keeper", LocalKeepNewest: 2},
 		{Name: "g", BaselineDir: "/with-a-keeper"},
 		{Name: "h", BaselineDir: "/solo", LocalKeepNewest: 3},
+		{Name: "i", BaselineDir: "/counted-with-s3", BaselineS3: "s3://b/q/", LocalKeepNewest: 3},
+		{Name: "j", BaselineDir: "/zero", LocalKeepNewest: 0},
 	}
 	got := map[string]int{}
-	for _, tgt := range localKeepPruneTargets(entries, "/global") {
+	for _, tgt := range localKeepPruneTargets(entries, global) {
 		if tgt.s3 != "" {
 			t.Errorf("a local-only target carries a destination: %+v", tgt)
 		}
 		got[tgt.dir] = tgt.keepNewest
 	}
-	want := map[string]int{"/two": 5, "/solo": 3}
-	if len(got) != len(want) {
-		t.Fatalf("targets = %v, want %v", got, want)
+	if len(got) != 1 || got["/solo"] != 3 {
+		t.Fatalf("targets = %v, want only /solo keeping 3", got)
 	}
-	for d, n := range want {
-		if got[d] != n {
-			t.Errorf("%s keeps %d, want %d", d, got[d], n)
+	for _, e := range entries[:7] {
+		if !console.LocalKeepBlocked(entries, e, global) {
+			t.Errorf("%s: its folder is shared or the daemon's, but it is not reported blocked", e.Name)
 		}
+	}
+	if console.LocalKeepBlocked(entries, entries[7], global) {
+		t.Error("a folder of its own is reported blocked")
 	}
 }
 

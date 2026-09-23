@@ -628,3 +628,48 @@ func TestKeepNewest_serverDirectoryInsideASharedRootIsInvisible(t *testing.T) {
 		}
 	}
 }
+
+// Partial snapshots (a run over some tables) must not use up the places of
+// the tables they leave out: N is counted per table, so an older full
+// snapshot survives while any of its tables has fewer than N newer copies.
+func TestKeepNewest_partialSnapshotsDoNotCrowdOutOtherTables(t *testing.T) {
+	root := t.TempDir()
+	full1, full2 := snapName(days(50)), snapName(days(40))
+	p1, p2, p3 := snapName(days(30)), snapName(days(20)), snapName(days(10))
+	makeSnapshot(t, root, full1, true, "shop/orders", "shop/users")
+	makeSnapshot(t, root, full2, true, "shop/orders", "shop/users")
+	for _, p := range []string{p1, p2, p3} {
+		makeSnapshot(t, root, p, true, "shop/orders")
+	}
+	res := keepNewest(t, root, 2)
+	// users has copies only in full1 and full2: both stay. orders' newest two
+	// are p2 and p3, so p1 goes.
+	if !slices.Equal(res.Pruned, []string{p1}) {
+		t.Fatalf("pruned %v, want [%s]", res.Pruned, p1)
+	}
+	wantOnDisk(t, root, full1, full2, p2, p3)
+}
+
+// A prune whose record cannot be written removes the previous record: left in
+// place it would show an older date and count as the latest prune.
+func TestLastPrune_aFailedWriteDoesNotLeaveAStaleRecord(t *testing.T) {
+	root := t.TempDir()
+	for i := 4; i >= 1; i-- {
+		makeSnapshot(t, root, snapName(days(10*i)), true, "shop/orders")
+	}
+	keepNewest(t, root, 3) // removes one, records it
+	if _, ok, _ := ReadLastPrune(root); !ok {
+		t.Fatal("test premise: no first record")
+	}
+	makeSnapshot(t, root, snapName(days(5)), true, "shop/orders")
+	orig := writeRecord
+	t.Cleanup(func() { writeRecord = orig })
+	writeRecord = func(string, LastPrune) error { return os.ErrPermission }
+	res := keepNewest(t, root, 1)
+	if len(res.Pruned) == 0 {
+		t.Fatal("test premise: the second prune removed nothing")
+	}
+	if _, ok, err := ReadLastPrune(root); ok || err != nil {
+		t.Fatalf("a stale record survived a failed write: ok=%v err=%v", ok, err)
+	}
+}

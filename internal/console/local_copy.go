@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
 )
 
 // Every server keeps a local copy of its snapshots by default (#1681), in a
@@ -89,6 +91,29 @@ func prepareLocalSnapshotDir(dir string) error {
 // external destination: that is not "snapshots elsewhere", it is none at all.
 const noCopyAnywhereMsg = "this server would keep its snapshots nowhere: keep a copy on this machine, or set an S3 destination first"
 
+// adoptsSnapshots refuses to point a server that removes old snapshots at a
+// folder that already holds some (#1681): the next prune would remove every
+// one past the count, and nobody chose that for those copies. A folder that
+// cannot be listed is refused the same way, since whether it holds any is
+// unknown. keep <= 0 (keep everything) never refuses.
+func adoptsSnapshots(dir string, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+	n, err := baseline.CountLocalSnapshots(dir)
+	if err != nil {
+		return fmt.Errorf("%w: DBTrail could not list the folder %s to check for snapshots already in it: %v", errLocalDirInvalid, dir, err)
+	}
+	if n > 0 {
+		what := fmt.Sprintf("%d snapshots", n)
+		if n == 1 {
+			what = "1 snapshot"
+		}
+		return fmt.Errorf("%w: the folder %s already holds %s, and with Keep the newest at %d all but the newest %d would be removed. Empty Keep the newest to keep them all, or choose another folder", errLocalDirInvalid, dir, what, keep, keep)
+	}
+	return nil
+}
+
 // validLocalKeepNewest refuses a count the prune could not honor.
 func validLocalKeepNewest(n int) error {
 	if n < 0 || n > maxLocalKeepNewest {
@@ -98,48 +123,73 @@ func validLocalKeepNewest(n int) error {
 }
 
 // LocalKeepTargets is the ONE rule for which local folders the daemon prunes
-// down to a keep-newest count (#1681), shared by the prune loop and by the
-// Snapshots listing that reports the policy, so the page cannot announce a
-// retention the loop does not apply, or miss one it does.
+// down to a keep-newest count (#1681), shared by the prune loop, the snapshot
+// listing that reports the policy and the settings row that describes it, so
+// none of them can announce a retention the loop does not apply, or miss one
+// it does.
 //
-// A folder qualifies when a server keeps its snapshots there (BaselineDir),
-// has no external destination (BaselineS3 empty) and a count (LocalKeepNewest
-// > 0). A folder that ANY server also sends to an external destination, or
-// that is one of excluded (the daemon's own --baseline-dir), is left out:
-// there, some of the snapshots are another owner's, pruned by the other rule
-// or not at all. Servers sharing a qualifying folder get the largest count,
-// because the larger count keeps more.
+// A folder qualifies when exactly ONE server keeps its snapshots there
+// (BaselineDir), that server has no external destination (BaselineS3 empty)
+// and a count (LocalKeepNewest > 0), and the folder is not one of excluded
+// (the daemon's own --baseline-dir). A folder two servers share is never
+// pruned: a snapshot does not record which server wrote it, so one server's
+// newer copy of a table would count as the newest copy of the other's.
+// Folders are compared after resolving symlinks, so a second spelling of the
+// same folder is still the same folder.
 func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int {
-	claimed := map[string]bool{}
-	for _, d := range excluded {
-		if d != "" {
-			claimed[filepath.Clean(d)] = true
+	users := map[string]int{}
+	for _, e := range entries {
+		if e.BaselineDir != "" {
+			users[canonicalDir(e.BaselineDir)]++
 		}
 	}
-	for _, e := range entries {
-		if e.BaselineDir != "" && e.BaselineS3 != "" {
-			claimed[filepath.Clean(e.BaselineDir)] = true
+	blocked := map[string]bool{}
+	for _, d := range excluded {
+		if d != "" {
+			blocked[canonicalDir(d)] = true
 		}
 	}
 	out := map[string]int{}
 	for _, e := range entries {
-		// A count of 0 lands as 0 and is removed with the keep-everything
-		// folders below.
-		if e.BaselineDir == "" || e.BaselineS3 != "" {
+		if e.BaselineDir == "" || e.BaselineS3 != "" || e.LocalKeepNewest <= 0 {
 			continue
 		}
-		dir := filepath.Clean(e.BaselineDir)
-		if claimed[dir] {
+		dir := canonicalDir(e.BaselineDir)
+		if users[dir] > 1 || blocked[dir] {
 			continue
 		}
-		out[dir] = max(out[dir], e.LocalKeepNewest)
-	}
-	// A folder shared with a server that keeps everything (count 0) keeps
-	// everything: that server never agreed to have its copies removed.
-	for _, e := range entries {
-		if e.BaselineDir != "" && e.BaselineS3 == "" && e.LocalKeepNewest <= 0 {
-			delete(out, filepath.Clean(e.BaselineDir))
-		}
+		out[dir] = e.LocalKeepNewest
 	}
 	return out
+}
+
+// LocalKeepBlocked reports whether e's folder is one LocalKeepTargets refuses
+// to prune whatever e's count says: shared with another server, or the
+// daemon's own folder. The settings row says so instead of promising a count.
+func LocalKeepBlocked(entries []ServerEntry, e ServerEntry, excluded ...string) bool {
+	if e.BaselineDir == "" {
+		return false
+	}
+	dir := canonicalDir(e.BaselineDir)
+	for _, d := range excluded {
+		if d != "" && canonicalDir(d) == dir {
+			return true
+		}
+	}
+	n := 0
+	for _, o := range entries {
+		if o.BaselineDir != "" && canonicalDir(o.BaselineDir) == dir {
+			n++
+		}
+	}
+	return n > 1
+}
+
+// canonicalDir is the folder a path names, symlinks resolved; a path that
+// cannot be resolved (not created yet) is compared as cleaned text.
+func canonicalDir(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return filepath.Clean(p)
 }

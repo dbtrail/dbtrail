@@ -49,7 +49,7 @@ const out = {};
 async function step(name, o, act, reuse) {
   calls.length = 0;
   const r = row(o, reuse === undefined ? true : reuse);
-  const before = { words: visible(r), dirShown: shown(r, "baseline_dir"), keepShown: shown(r, "keep_newest"), dir: byName(r, "baseline_dir").value, saveDisabled: saveBtn(r).disabled };
+  const before = { words: visible(r), reds: reds(r), dirShown: shown(r, "baseline_dir"), keepShown: shown(r, "keep_newest"), dir: byName(r, "baseline_dir").value, saveDisabled: saveBtn(r).disabled };
   if (act) act(r);
   const s = saveBtn(r);
   const after = { words: visible(r), reds: reds(r), dirShown: shown(r, "baseline_dir"), keepShown: shown(r, "keep_newest"), saveDisabled: s.disabled };
@@ -77,6 +77,9 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   await step("bareArchiveToggle", {}, (r) => { const c = find(r, (n) => n.tag === "input" && n.attrs.name === "no_archive"); c.checked = true; fire(c, "change"); });
   // An existing local-only server that keeps everything.
   await step("oldLocal", { baseline_dir: "/srv/snaps", local_copy: true, source: "server" }, null);
+  await step("s3TypedAfterBadCount", fresh, (r) => { type(r, "keep_newest", "x"); type(r, "baseline_s3", "s3://b/p/"); });
+  await step("blocked", Object.assign({}, fresh, { keep_blocked: true }), null);
+  await step("daemonDefault", { source: "default" }, null);
   await step("oldLocalBothYes", { baseline_dir: "/srv/snaps", baseline_s3: "s3://b/p/", local_copy: true, source: "server" }, null);
   // The schedule card's rate sentence follows the listing's local_retention.
   vm.runInContext("capsCache.backup_schedule = true;", ctx);
@@ -189,6 +192,20 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if b(sy.After.KeepShown) || !strings.Contains(joined(sy.After), "each snapshot is also sent to S3") {
 		t.Errorf("yes with S3: the count is shown or the S3 copy is not said: %+v", sy.After)
 	}
+	// A count typed and then hidden by an S3 destination is neither checked
+	// nor sent: hidden, it does nothing.
+	if st := got["s3TypedAfterBadCount"]; st.Body == nil || st.Body["keep_newest"] != nil {
+		t.Errorf("a hidden count blocked the save or was sent: %+v", st.Body)
+	}
+	// A folder the prune never counts says so instead of promising the count.
+	if w := joined(got["blocked"].Before); !strings.Contains(w, "nothing in it is removed, whatever the count says") || strings.Contains(w, "Keeps the newest") {
+		t.Errorf("a blocked folder: %q", w)
+	}
+	// A server read from DBTrail's startup folder is not told it has nothing.
+	if d := got["daemonDefault"]; len(d.Before.Reds) != 0 || !strings.Contains(joined(d.Before), "Time-travel reads DBTrail's startup folder") {
+		t.Errorf("a server on the startup folder: %+v", d.Before)
+	}
+
 	// A server with nothing: an unrelated toggle does not send a no (which
 	// the server would refuse for want of S3).
 	if _, ok := got["bareArchiveToggle"].Body["local_copy"]; ok {

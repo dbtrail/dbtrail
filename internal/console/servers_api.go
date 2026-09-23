@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
@@ -357,6 +358,12 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 		if err := prepareLocalSnapshotDir(entry.BaselineDir); err != nil {
 			return ServerEntry{}, err
 		}
+		// A named folder that already holds snapshots keeps all of them: the
+		// new server's default count would otherwise remove them on the
+		// next prune, and nobody chose that for copies already there.
+		if n, err := baseline.CountLocalSnapshots(entry.BaselineDir); err != nil || n > 0 {
+			entry.LocalKeepNewest = 0
+		}
 	}
 	added, err := s.cm.reg.AddAutoNamed(entry, nameBase)
 	if err != nil {
@@ -484,6 +491,12 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		if err := prepareLocalSnapshotDir(req.BaselineDir); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		if strings.TrimSpace(req.BaselineS3) == "" {
+			if err := adoptsSnapshots(req.BaselineDir, old.LocalKeepNewest); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 	}
 	entry := ServerEntry{

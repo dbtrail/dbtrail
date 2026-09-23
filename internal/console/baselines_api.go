@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -100,6 +99,9 @@ type baselinesResponse struct {
 	// restart. OMITTED until one has. It is reported whatever wrote it (this
 	// daemon, the CLI, either rule), because the copies are gone either way.
 	LastPrune *lastPruneDTO `json:"last_prune,omitempty"`
+	// LastPruneError is set when that record exists and cannot be read: a
+	// prune happened, and the page must not read its absence as "never".
+	LastPruneError string `json:"last_prune_error,omitempty"`
 }
 
 // localRetentionDTO and lastPruneDTO are the #1681 wire shapes. The Snapshots
@@ -125,7 +127,7 @@ func (s *Server) localRetentionOf(id string) *localRetentionDTO {
 	if !ok || e.BaselineDir == "" {
 		return nil
 	}
-	n := LocalKeepTargets(s.cm.reg.List(), s.cm.defaultBaselineDir)[filepath.Clean(e.BaselineDir)]
+	n := LocalKeepTargets(s.cm.reg.List(), s.cm.defaultBaselineDir)[canonicalDir(e.BaselineDir)]
 	if n <= 0 {
 		return nil
 	}
@@ -133,24 +135,23 @@ func (s *Server) localRetentionOf(id string) *localRetentionDTO {
 }
 
 // lastPruneOf reads the prune record of the bundle's local folder. An
-// unreadable record is logged and left out: the listing must not fail over
-// it, but it is the only thing that says why copies are gone, so it is never
-// silent.
-func lastPruneOf(b *bundle, serverID string) *lastPruneDTO {
+// unreadable record does not fail the listing, and is not silent either: it
+// comes back as an error string for last_prune_error, and is logged.
+func lastPruneOf(b *bundle, serverID string) (*lastPruneDTO, string) {
 	dir := bundleBaselineDir(b)
 	if dir == "" {
-		return nil
+		return nil, ""
 	}
 	rec, ok, err := baseline.ReadLastPrune(dir)
 	if err != nil {
-		slog.Warn("console: the record of the last snapshot prune could not be read; the page will not say why copies are gone",
+		slog.Warn("console: the record of the last snapshot prune could not be read",
 			"server", serverID, "dir", dir, "error", err)
-		return nil
+		return nil, "snapshots were removed from this folder, but the record of when could not be read: " + err.Error()
 	}
 	if !ok {
-		return nil
+		return nil, ""
 	}
-	return &lastPruneDTO{At: rec.At.UTC().Format(time.RFC3339), Removed: rec.Removed}
+	return &lastPruneDTO{At: rec.At.UTC().Format(time.RFC3339), Removed: rec.Removed}, ""
 }
 
 // selectedServerID is the id the request EFFECTIVELY selected: the header
@@ -218,7 +219,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}
 	resp.LocalRetention = s.localRetentionOf(s.selectedServerID(r))
-	resp.LastPrune = lastPruneOf(b, s.selectedServerID(r))
+	resp.LastPrune, resp.LastPruneError = lastPruneOf(b, s.selectedServerID(r))
 	if b.baselineSrc == "" {
 		writeJSON(w, http.StatusOK, resp)
 		return

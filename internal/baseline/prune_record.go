@@ -47,6 +47,13 @@ func ReadLastPrune(dir string) (rec LastPrune, ok bool, err error) {
 	return rec, true, nil
 }
 
+// writeRecord and removeRecord are indirected only so a test can fail the
+// write and see the stale record go.
+var (
+	writeRecord  = writeLastPrune
+	removeRecord = os.Remove
+)
+
 // writeLastPrune replaces dir's record atomically (temp file, fsync, rename),
 // 0600 like the rest of the state DBTrail writes.
 func writeLastPrune(dir string, rec LastPrune) error {
@@ -89,4 +96,12 @@ func isPruneArtifact(root, path string) bool {
 	name := filepath.Base(path)
 	return name == LastPruneFile || name == pruneLockName ||
 		(len(name) > len(LastPruneFile+".tmp-") && name[:len(LastPruneFile+".tmp-")] == LastPruneFile+".tmp-")
+}
+
+// CountLocalSnapshots counts the snapshot folders directly under dir,
+// complete or not (#1681). A missing dir holds none. The console uses it to
+// refuse turning on a keep-newest count over snapshots nobody chose to prune.
+func CountLocalSnapshots(dir string) (int, error) {
+	snaps, err := enumerateLocalSnapshots(dir)
+	return len(snaps), err
 }

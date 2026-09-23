@@ -738,10 +738,8 @@ Two section labels split it: **Change here** and **Set when DBTrail starts**.
   A folder is checked when it is saved: it must be a full path, a missing one
   is created, and DBTrail must be able to write into it. Servers that existed
   before #1681 are unchanged: none gets a folder or a count it did not have.
-  The local-only rule and the S3 skip count sit in a compact **More about disk
-  space** block, with links into the docs guide.
-- **Per server** (change here) — each registry server's Backup dir, Backup
-  S3 and archive toggle, editable in place, with which location is in force
+- **Per server** (change here) — each registry server's local-copy answer,
+  Backup dir, Backup S3, keep count and archive toggle, editable in place, with which location is in force
   drawn rather than said: the server's own case (own location, daemon
   default, or no location) under its fields, with a tick or a cross per lane.
   The daemon default backs time-travel, verification and `.sql` exports but

@@ -66,10 +66,10 @@ type PruneOptions struct {
 	// S3URL is set; optional with KeepNewest, where a snapshot younger than
 	// Retain is kept even outside the newest KeepNewest.
 	Retain time.Duration
-	// KeepNewest is the local-only retention (#1681): with no S3URL, keep the
-	// newest KeepNewest complete snapshots and reclaim the rest. Only
-	// snapshots that are complete, readable, hold at least one table and are
-	// dated at or before Now take one of the N places; everything else is
+	// KeepNewest is the local-only retention (#1681): with no S3URL, keep,
+	// for every table, the newest KeepNewest complete snapshots holding it,
+	// and reclaim snapshots outside all of those. Only complete, readable
+	// snapshots dated at or before Now count as copies; everything else is
 	// kept by its own rule and never displaces a real copy. 0 = no local-only
 	// pruning (the pre-#1681 behavior).
 	KeepNewest int
@@ -335,11 +335,17 @@ func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res Pr
 		res.ReclaimedBytes += size
 	}
 	if !opts.DryRun && len(res.Pruned) > 0 {
-		if err := writeLastPrune(opts.LocalDir, LastPrune{At: now, Removed: len(res.Pruned)}); err != nil {
+		if err := writeRecord(opts.LocalDir, LastPrune{At: now, Removed: len(res.Pruned)}); err != nil {
 			// The prune happened; only the record of it failed. Loud, because
-			// that record is what tells the operator why copies are gone.
+			// that record is what tells the operator why copies are gone. The
+			// PREVIOUS record is removed too: left in place it would show an
+			// older date and count as the latest, which is worse than none.
 			slog.Error("baseline prune: snapshots were removed but the record of it could not be written; the page will not say why they are gone",
 				"dir", opts.LocalDir, "removed", len(res.Pruned), "error", err)
+			if rerr := removeRecord(filepath.Join(opts.LocalDir, LastPruneFile)); rerr != nil && !os.IsNotExist(rerr) {
+				slog.Error("baseline prune: the previous prune record could not be removed either; the page may show an older prune as the latest",
+					"dir", opts.LocalDir, "error", rerr)
+			}
 		}
 	}
 	return res
@@ -370,23 +376,33 @@ func planPruneKeepNewest(snaps []localSnapshot, keepers, newest map[string]bool,
 	return prune, res
 }
 
-// computeNewestN returns the newest n snapshots that count as copies: complete,
-// readable, holding at least one table, and dated at or before now. The rest
-// are kept (or not) by their own rules; none of them may take a place from a
-// real copy, or "the newest n" would silently mean fewer.
+// computeNewestN returns, for EVERY table, the newest n snapshots holding it
+// that count as copies: complete, readable (an unreadable one lists no
+// tables) and dated at or before now. The union is kept. Counting per table
+// rather than per snapshot is what stops runs over a few tables from using up
+// the places of the tables they leave out: three runs over one table would
+// otherwise push out an older full snapshot and leave every other table with
+// a single copy. For snapshots that all hold every table the two are the
+// same thing, the newest n. Snapshots that are not copies are kept (or not)
+// by their own rules and never take a place.
 func computeNewestN(snaps []localSnapshot, n int, now time.Time) map[string]bool {
-	var eligible []localSnapshot
+	byTable := map[string][]localSnapshot{}
 	for _, s := range snaps {
-		// An unreadable snapshot has no tables listed (listSnapshotTables
-		// returns none when it fails), so the table test excludes it too.
-		if s.complete && len(s.tables) > 0 && !s.ts.After(now) {
-			eligible = append(eligible, s)
+		// Only complete, readable snapshots list tables (enumerate leaves
+		// s.tables empty otherwise), so they are the only ones counted here.
+		if s.ts.After(now) {
+			continue
+		}
+		for _, tbl := range s.tables {
+			byTable[tbl] = append(byTable[tbl], s)
 		}
 	}
-	sort.Slice(eligible, func(i, j int) bool { return eligible[i].ts.After(eligible[j].ts) })
-	out := make(map[string]bool, n)
-	for i := 0; i < len(eligible) && i < n; i++ {
-		out[eligible[i].name] = true
+	out := map[string]bool{}
+	for _, list := range byTable {
+		sort.Slice(list, func(i, j int) bool { return list[i].ts.After(list[j].ts) })
+		for i := 0; i < len(list) && i < n; i++ {
+			out[list[i].name] = true
+		}
 	}
 	return out
 }

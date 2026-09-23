@@ -9,8 +9,6 @@ import (
 	"testing"
 )
 
-
-
 // TestBaselineRefreshNote_partitionsTheTables: reused and refreshed must ADD UP
 // to the run's table count, never overlap.
 //
@@ -152,7 +150,6 @@ func TestStorageSplit_eachHalfHoldsOnlyItsOwnConcern(t *testing.T) {
 	}
 }
 
-
 // TestReusedCopiedNote_saysWhatACopyCost pins the only user-visible half of
 // #1578: every layer under the render (carryForward's bool, the fold wiring,
 // countReuse, applyFoldStatus, the wire names) is guarded, but the string the
@@ -174,7 +171,6 @@ func TestReusedCopiedNote_saysWhatACopyCost(t *testing.T) {
 		}
 	}
 }
-
 
 // TestBackupScheduleCard_introIsNotAnEssay (#1528): the card's opening
 // paragraph explained the producer choice in general terms directly above the
