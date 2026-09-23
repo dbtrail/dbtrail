@@ -85,9 +85,11 @@ var oldVocabulary = regexp.MustCompile(`(?i)\b(backups?|baselines?)\b`)
 //
 // The slack is also exactly how much this guard can be beaten by: a drop
 // that stays inside it never forces the pin down, so that many occurrences
-// can come back later with the test still green. That is why it is three —
-// enough for merges that land together, too small to hide a rename step —
-// and why every run under a pin says so in the test log.
+// can come back later with the test still green. That is why it is three:
+// enough for merges that land together, too small to hide a rename step. A
+// run under a pin also logs the gap, but only `go test -v` prints a passing
+// test's log, and CI does not run with -v — so the gap is visible locally on
+// request, not announced.
 const (
 	assetVocabularyPin      = 282 // string literals in assets/app.js
 	goVocabularyPin         = 225 // string literals in this package's non-test .go files
@@ -338,12 +340,21 @@ func skipRegex(t scanT, src string, i int) (int, bool) {
 	return i, quoted
 }
 
-// checkAfterRegex is the backstop for every regex/division misreading the
-// rules above do not foresee. A real regex literal is followed by its flags
-// and then by something that can follow an expression; a division misread
-// as a regex ends wherever the next slash happened to be, usually in the
-// middle of an expression. Failing there turns a silent miscount into a
-// loud one.
+// checkAfterRegex is the backstop for a DIVISION misread as a regex, in
+// the cases the rules above do not foresee. A real regex literal is followed
+// by its flags and then by something that can follow an expression; a
+// division misread as a regex ends wherever the next slash happened to be,
+// usually in the middle of an expression. Failing there turns a silent
+// miscount into a loud one. The set it accepts is what this file writes
+// after a regex, not everything JavaScript allows, so a new shape can fail
+// here while being valid: extend the set when that happens.
+//
+// It cannot see the OPPOSITE mistake, a real regex read as a division
+// (after a closing paren: `if (x) /re/`). That regex is then scanned as
+// code, and a quote inside it opens a string that is not there. With an odd
+// number of such quotes the scan fails loudly at the end of a line or the
+// file; with an even number it can miscount silently. app.js has no regex
+// after a closing paren today.
 func checkAfterRegex(t scanT, src string, i, start int) {
 	t.Helper()
 	for i < len(src) && strings.IndexByte("dgimsuyv", src[i]) >= 0 {
@@ -352,28 +363,35 @@ func checkAfterRegex(t scanT, src string, i, start int) {
 	for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
 		i++
 	}
-	if i >= len(src) || strings.IndexByte(".),;]}?:|&=!\n\r", src[i]) >= 0 {
+	if i >= len(src) || strings.IndexByte(".),;]}?:|&=!+\n\r", src[i]) >= 0 {
+		return
+	}
+	// A comment after a regex: `re = /x/g // why`.
+	if src[i] == '/' && i+1 < len(src) && (src[i+1] == '/' || src[i+1] == '*') {
 		return
 	}
 	t.Fatalf("app.js: what was read as a regular expression at offset %d is followed by %q, which "+
-		"cannot follow one — a division was probably read as a regex, and the scan swallowed "+
-		"everything between two slashes. Teach countInJSStrings the case.", start, src[i])
+		"this scanner does not expect after one. Either a division was read as a regex (and the "+
+		"scan swallowed everything between two slashes), or a valid new shape needs adding to "+
+		"checkAfterRegex's set.", start, src[i])
 }
 
 // scanString returns the contents of the string literal starting at i, with
-// every escape sequence replaced by a space, and the index just past its
-// closing quote.
+// its escape sequences decoded, and the index just past its closing quote.
 //
-// Decoded to a SPACE rather than kept: a kept escape puts its letter against
-// the next word — "\nBackups" reads as "nBackups", \b finds no boundary
-// there, and the occurrence goes uncounted. A space always makes the
-// boundary, which errs toward counting. \uXXXX, \u{...} and \xHH are
-// consumed whole, since their hex digits are word characters too.
+// Decoded, not kept: a kept escape puts its letter against the next word —
+// "\nBackups" reads as "nBackups", \b finds no boundary there, and the
+// occurrence goes uncounted. \n \r \t \b \f \v become a space (what they
+// are, for word boundaries), \xHH \uXXXX \u{...} become their character
+// ("\x62ackup" is "backup"), and any other escaped character stands for
+// itself.
 //
-// Inside a template literal, a backtick within ${...} opens a NESTED
-// template, and this scanner would take it for the outer one closing and
-// read code as text from there on. It fails instead. The code inside ${...}
-// is counted as if it were text, which can only make the count go up.
+// Inside a template literal, ${...} holds code. Its braces are counted to
+// find where it ends, and strings inside it are stepped over whole, so a
+// "}" in one does not end the placeholder early. A backtick inside ${...}
+// opens a NESTED template, which this scanner would take for the outer one
+// closing: it fails instead. The code inside ${...} is counted as if it were
+// text, which errs toward counting.
 func scanString(t scanT, src string, i int) (string, int) {
 	t.Helper()
 	quote := src[i]
@@ -384,12 +402,18 @@ func scanString(t scanT, src string, i int) (string, int) {
 		c := src[j]
 		switch {
 		case c == '\\':
-			j += escapeLen(src, j) - 1
-			b.WriteByte(' ')
+			dec, n := decodeEscape(src, j)
+			b.WriteString(dec)
+			j += n - 1
 			continue
-		case quote == '`' && depth > 0 && c == '`':
+		case depth > 0 && c == '`':
 			t.Fatalf("app.js: a template literal nested inside ${...} at offset %d — this scanner "+
 				"cannot follow it; teach scanString nesting before writing one", j)
+		case depth > 0 && (c == '"' || c == '\''):
+			lit, end := scanString(t, src, j)
+			b.WriteString(lit)
+			j = end - 1
+			continue
 		case quote == '`' && c == '$' && j+1 < len(src) && src[j+1] == '{':
 			depth++
 			b.WriteString("${")
@@ -410,24 +434,42 @@ func scanString(t scanT, src string, i int) (string, int) {
 	return "", len(src)
 }
 
-// escapeLen is the length of the escape sequence starting at the backslash
-// at i.
-func escapeLen(src string, i int) int {
+// decodeEscape decodes the escape sequence at the backslash at i, returning
+// what it stands for and how many bytes it spans. Malformed input (only
+// possible in JavaScript that would not parse) stands for itself.
+func decodeEscape(src string, i int) (string, int) {
 	if i+1 >= len(src) {
-		return 1
+		return "\\", 1
 	}
-	switch src[i+1] {
+	hex := func(from, to int) (string, int, bool) {
+		if to > len(src) {
+			return "", 0, false
+		}
+		v, err := strconv.ParseUint(src[from:to], 16, 32)
+		if err != nil {
+			return "", 0, false
+		}
+		return string(rune(v)), to - i, true
+	}
+	switch c := src[i+1]; c {
+	case 'n', 'r', 't', 'b', 'f', 'v':
+		return " ", 2
 	case 'x':
-		return 4
+		if r, n, ok := hex(i+2, i+4); ok {
+			return r, n
+		}
 	case 'u':
 		if i+2 < len(src) && src[i+2] == '{' {
-			if end := strings.IndexByte(src[i:], '}'); end > 0 {
-				return end + 1
+			if end := strings.IndexByte(src[i+3:], '}'); end >= 0 && end <= 6 {
+				if r, n, ok := hex(i+3, i+3+end); ok {
+					return r, n + 1
+				}
 			}
+		} else if r, n, ok := hex(i+2, i+6); ok {
+			return r, n
 		}
-		return 6
 	}
-	return 2
+	return string(src[i+1]), 2
 }
 
 // The inputs that broke earlier versions of this scanner, each turning a
@@ -437,23 +479,32 @@ func escapeLen(src string, i int) int {
 func TestVocabularyScannerDoesNotGoQuiet(t *testing.T) {
 	for _, c := range []struct {
 		name, src string
-		want      int // -1: must fail loudly
+		want      int    // -1: must fail loudly
+		why       string // for -1: what the failure must say, so a case cannot pass by failing for another reason
 	}{
-		{"an escape against the word", `a = "First line.\nBackups are kept.";`, 1},
-		{"a tab escape against the word", `a = "x\tbaseline";`, 1},
-		{"a unicode escape against the word", `a = "\u2014backup";`, 1},
-		{"a braced unicode escape", `a = "\u{2014}backup";`, 1},
-		{"a keyword-named property before a division", `a = o.delete / 2 + " backup " + b / 3;`, 1},
-		{"another one", `a = o.in / 2 + " backup " + b / 3;`, 1},
-		{"a postfix increment before a division", `a = i++ / 2 + " backup " + b / 3;`, 1},
-		{"a postfix decrement before a division", `a = i-- / 2 + " backup " + b / 3;`, 1},
-		{"a keyword that really opens a regex", `function f(s) { return /[",]/.test(s) ? " backup " : ""; }`, 1},
-		{"a regex after a closing paren, misread", `if (x) /"/.test(y); a = " backup ";`, -1},
-		{"a template nested in ${}", "a = `x ${ok ? `backup` : \"\"} y`;", -1},
-		{"a plain template", "a = `one backup, ${n} baselines`;", 2},
+		{"an escape against the word", `a = "First line.\nBackups are kept.";`, 1, ""},
+		{"a tab escape against the word", `a = "x\tbaseline";`, 1, ""},
+		{"a unicode escape against the word", `a = "\u2014backup";`, 1, ""},
+		{"a unicode escape that spells the letter", `a = "\u0062ackup";`, 1, ""},
+		{"a braced one", `a = "\u{62}ackup";`, 1, ""},
+		{"a hex escape that spells the letter", `a = "\x62ackup";`, 1, ""},
+		{"a keyword-named property before a division", `a = o.delete / 2 + " backup " + b / 3;`, 1, ""},
+		{"another one", `a = o.in / 2 + " backup " + b / 3;`, 1, ""},
+		{"a postfix increment before a division", `a = i++ / 2 + " backup " + b / 3;`, 1, ""},
+		{"a postfix decrement before a division", `a = i-- / 2 + " backup " + b / 3;`, 1, ""},
+		{"a keyword that really opens a regex", `function f(s) { return /[",]/.test(s) ? " backup " : ""; }`, 1, ""},
+		// A real regex read as a division: loud only because its quote count
+		// is odd (see checkAfterRegex for the even case it cannot see).
+		{"a regex after a closing paren, odd quotes", `if (x) /"/.test(y); a = " backup ";`, -1, "unterminated"},
+		{"a template nested in ${}", "a = `x ${ok ? `backup` : \"\"} y`;", -1, "nested inside"},
+		{"a plain template", "a = `one backup, ${n} baselines`;", 2, ""},
+		{"a closing brace in a string inside ${}", "a = `a ${ f(\"}\") } backup`;", 1, ""},
+		{"then a nested template after it", "a = `a ${ \"}\" + `backup` } b`;", -1, "nested inside"},
+		{"a regex followed by +", `a = /x/ + " backup ";`, 1, ""},
+		{"a regex followed by a comment", "a = /x/g // why\nb = \" backup \";", 1, ""},
 		// No rule above covers a division after a closing brace; only the
 		// check on what follows a regex catches it.
-		{"a division no rule foresees", `a = {} / 2 + " backup " + c / d * 3;`, -1},
+		{"a division no rule foresees", `a = {} / 2 + " backup " + c / d * 3;`, -1, "does not expect after one"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ft := &fatalRecorder{}
@@ -469,6 +520,8 @@ func TestVocabularyScannerDoesNotGoQuiet(t *testing.T) {
 			switch {
 			case c.want == -1 && !ft.failed:
 				t.Errorf("counted %d and said nothing; this input must fail loudly", got)
+			case c.want == -1 && !strings.Contains(ft.msg, c.why):
+				t.Errorf("failed, but for another reason: %q (want it to say %q)", ft.msg, c.why)
 			case c.want >= 0 && ft.failed:
 				t.Errorf("failed (%s); want a count of %d", ft.msg, c.want)
 			case c.want >= 0 && got != c.want:

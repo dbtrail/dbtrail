@@ -3044,14 +3044,6 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
   margin: 22px 0 10px;
 }
 .page-head + .bks-sect { margin-top: 0; }
-/* Snapshots section dividers (#1573). The page is three jobs in one — what
-   copies exist, whether they are restorable, where and how often they are
-   made — so the two lower ones open with a heading that rules across the
-   page. The small uppercase .bks-sect label above marks the halves INSIDE
-   the setup section and would not read as a break between jobs. The id is
-   the anchor an old address lands on; scroll-margin keeps it off the very
-   top edge on the arrivals that scroll to the heading itself (the ones that
-   carry an arrival note scroll to the note, which sits above it). */
 /* The take-away panel is a fold since #1573: its summary has to read as the
    panel head it replaces, with a caret and no browser triangle. */
 details.bk-take > summary { cursor: pointer; user-select: none; list-style: none; }
@@ -3064,7 +3056,16 @@ details.bk-take[open] > summary .ov-panel-title::after { transform: rotate(-90de
 details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 /* A quiet fact about the last .sql build (it expired unread), said on the
    folded panel's own line so nobody has to open it to learn a copy is gone. */
-.bk-take-note { display: block; margin-top: 4px; font-size: 13px; color: var(--ink-2); }
+.bk-take-sum { flex-wrap: wrap; }
+.bk-take-note { flex-basis: 100%; margin-top: 4px; font-size: 13px; color: var(--ink-2); }
+/* Snapshots section dividers (#1573). The page is three jobs in one — what
+   copies exist, whether they are restorable, where and how often they are
+   made — so the two lower ones open with a heading that rules across the
+   page. The small uppercase .bks-sect label above marks the halves INSIDE
+   the setup section and would not read as a break between jobs. The id is
+   the anchor an old address lands on; scroll-margin keeps it off the very
+   top edge on the arrivals that scroll to the heading itself (the ones that
+   carry an arrival note scroll to the note, which sits above it). */
 .snap-sect {
   font-size: 15px; font-weight: 650; color: var(--ink);
   margin: 34px 0 14px; padding-top: 18px;

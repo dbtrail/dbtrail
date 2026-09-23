@@ -7427,6 +7427,9 @@ async function startBackupRestore(id, at, btn, msgEl) {
 // take-away fold closed on arrival. Everything else — including a state this
 // build has never heard of — opens it. See backupTakeAway.
 const SQL_EXPORT_QUIET = new Set(["idle", "downloaded", "expired"]);
+// Every state the daemon documents today (BaselineStatus). Used only to name
+// one it does not, which the lane below has no branch to show.
+const SQL_EXPORT_KNOWN = new Set(["idle", "running", "succeeded", "failed", "downloaded", "expired"]);
 
 function backupTakeAway(cur, b, sqlSt) {
   const duck = backupDuckLane(b);
@@ -7445,12 +7448,14 @@ function backupTakeAway(cur, b, sqlSt) {
   // load-bearing rather than cosmetic.
   //
   // Which is why it names the states that keep it CLOSED rather than the
-  // ones that open it. The documented set is closed today — BaselineStatus
+  // ones that open it (an empty state included: that is unknown too). The documented set is closed today — BaselineStatus
   // in baseline_trigger.go lists six, and the lane below has a branch for
   // each — so this guards the day it stops being closed: a state added
   // server-side before the frontend learns it is far likelier to be a new
   // way of failing than a new kind of nothing. An allow-list would hide that
-  // one by default and nothing would say so. (What such an addition looks
+  // one by default. Opening is not enough on its own, though: the lane has
+  // no branch for a state it does not know and draws a plain build form, so
+  // the panel also names the state below. (What such an addition looks
   // like already exists one endpoint over: `replaced` is a real state on the
   // Storage page's own DTO, produced in consoleapp/sql_export.go, and it can
   // NOT reach this code — do not read the guard as being about that value.)
@@ -7475,33 +7480,41 @@ function backupTakeAway(cur, b, sqlSt) {
   //   An unreadable status is the case we know LEAST about, and hiding it
   //   would invert the reasoning above.
   //
-  // "expired" stays quiet, but it is not silent: it means the build finished
-  // and nobody downloaded it before its deadline (a downloaded build is
-  // "downloaded", not "expired"). The summary line says so, so a reader who
-  // started one, went elsewhere and came back learns it is gone without
-  // opening anything, and without the panel sitting open on every visit
-  // until the next build.
+  // "expired" stays quiet, but it is not silent. It means the build is gone
+  // without being downloaded (a downloaded build is "downloaded"), by one of
+  // two routes in consoleapp/sql_export.go: its deadline passed, or its
+  // files were removed from under it (the staging root defaults to the
+  // system temp directory, which some hosts clean). The summary line names
+  // both, so a reader who started one and came back learns it is gone, and
+  // one whose host keeps eating builds is not sent to rebuild into the same
+  // hole, without the panel sitting open on every visit until the next
+  // build.
   //
   // What the READER opened stays open across the repaints this page does on
-  // its own (kept outside the node, like the verify help's). It is recorded
-  // from a click on the summary, never from the toggle event: a <details>
-  // created with `open` fires toggle too, so a toggle listener recorded
-  // every automatic open as the reader's choice and the panel stayed open
-  // for the rest of the tab. A loud state still re-opens a panel the reader
-  // closed, since the one thing this fold may never do is hide an outcome.
+  // its own (kept outside the node, like the verify help's). A <details>
+  // created with `open` fires one toggle event for that creation, and
+  // recording it latched every automatic open as the reader's choice, so the
+  // panel stayed open for the rest of the tab. That one event is skipped;
+  // every later toggle is recorded. Toggle rather than a click on the
+  // summary, because the browser also opens a fold by itself for
+  // find-in-page and text-fragment links, and a click listener missed those:
+  // the next repaint shut the panel under the reader. A loud state still
+  // re-opens a panel the reader closed, since the one thing this fold may
+  // never do is hide an outcome.
   const st = sqlSt && sqlSt.sql_export;
   const stErr = sql && sqlSt && sqlSt.error;
-  const owed = !!(sql && st && ((st.state && !SQL_EXPORT_QUIET.has(st.state)) || st.staging_error)) || !!stErr;
+  const owed = !!(sql && st && (!SQL_EXPORT_QUIET.has(st.state || "") || st.staging_error)) || !!stErr;
   const panel = el("details", { class: "ov-panel bk-take", open: owed || takeAwayOpen || null });
   const summary = el("summary", { class: "ov-panel-head bk-take-sum" },
     el("h2", { class: "ov-panel-title", text: "Take a copy with you" }));
   if (sql && st && st.state === "expired") {
-    summary.append(el("span", { class: "bk-take-note", text: "The last .sql copy expired before anyone downloaded it." }));
+    summary.append(el("span", { class: "bk-take-note", text: "The last .sql copy is gone: nobody downloaded it before its deadline, or its files were removed." }));
   }
-  // Click fires before the browser flips `open`, so the reader's new choice
-  // is the opposite of what it reads now. Keyboard activation of a summary
-  // dispatches click too.
-  summary.addEventListener("click", () => { takeAwayOpen = !panel.open; });
+  let creation = !!panel.open;
+  panel.addEventListener("toggle", () => {
+    if (creation) { creation = false; return; }
+    takeAwayOpen = !!panel.open;
+  });
   panel.append(summary);
   // Said out loud, and above the lanes it qualifies, rather than rendered as
   // a build form with nothing in it: every state branch in the lane reads
@@ -7509,7 +7522,11 @@ function backupTakeAway(cur, b, sqlSt) {
   // run here".
   if (stErr) {
     panel.append(el("p", { class: "form-msg err", text:
-      "The state of the .sql build could not be read: " + stErr + ". What the MySQL lane below says about a build may be out of date." }));
+      "The state of the .sql build could not be read: " + String(stErr).replace(/[.\s]+$/, "") +
+      ". A build may be running or finished that this page cannot show, so Build is off until it can be read." }));
+  } else if (sql && st && st.state && !SQL_EXPORT_KNOWN.has(st.state)) {
+    panel.append(el("p", { class: "form-msg err", text:
+      "The last .sql build reports a state this console does not recognise: " + st.state + ". Update the console, or check the daemon's log." }));
   }
   const lanes = el("div", { class: "bk-lanes" });
   if (duck) lanes.append(duck);
@@ -7738,6 +7755,11 @@ function backupSQLLane(cur, b, sqlSt) {
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   go.onclick = () => startSQLExport(cur.id, input.value.trim(), go, msg);
+  // With the status unreadable this lane cannot see a finished build, and a
+  // new build REPLACES a finished one: the daemon refuses only while one is
+  // running. One click here would delete a ready copy the reader cannot see.
+  // backupTakeAway says why the button is off.
+  if (sqlSt && sqlSt.error) go.disabled = true;
   body.append(el("div", { class: "bk-restore-row" }, input, go), msg);
   if (b.kind === "dir") {
     const elsewhere = backupElsewhereNote(b, usable, reads);

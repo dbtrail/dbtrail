@@ -2871,11 +2871,17 @@ try {
   //   - a status that could not be read: said above the lanes;
   //   - the command-line server's entry, whose status endpoint answers 409
   //     and which never draws the MySQL lane: no red line, no auto-open;
-  //   - "expired": closed, but said on the summary line.
+  //   - "expired": closed, but said on the summary line, naming both ways a
+  //     build gets there (deadline, or files removed);
+  //   - a state this console does not know: opened AND named, since the
+  //     lane has no branch for it and would draw a plain build form.
+  // An unreadable status also switches Build off: the lane cannot see a
+  // finished build then, and a new build replaces a finished one.
   // And the reader's choice: an automatic open must not be recorded as one
   // (a <details> created open fires `toggle`, which is how the first cut of
-  // this latched open for the rest of the tab), while a click on the
-  // summary is.
+  // this latched open for the rest of the tab), while an open the reader
+  // makes is — including one the browser makes for them, as find-in-page
+  // does, with no click at all.
   const takeStates = await page.evaluate(async () => {
     const cur = { id: "srv-fix", kind: "registry" };
     const cli = { id: "default", kind: "ephemeral" };
@@ -2883,6 +2889,7 @@ try {
       snapshots: [{ time: "2026-06-10 12:00:00", files: [{ name: "x.parquet", bytes: 10 }] }] };
     const keep = takeAwayOpen;
     takeAwayOpen = false;
+    try {
     // Found by its sentence, not its class: the DuckDB lane keeps an empty
     // .form-msg.err of its own for download failures, so a class lookup
     // reads that slot as the status line.
@@ -2893,6 +2900,12 @@ try {
       err: !!statusLine(n),
       errBeforeLanes: !!statusLine(n) && statusLine(n).nextElementSibling === n.querySelector(".bk-lanes"),
       note: (n.querySelector(".bk-take-note") || {}).textContent || "",
+      unknownLine: /does not recognise: some-new-state/.test(n.textContent),
+      buildOff: (() => {
+        const lane = Array.from(n.querySelectorAll(".bk-lane")).find((l) => /To load into MySQL/.test(l.textContent));
+        const b = lane && Array.from(lane.querySelectorAll("button")).find((x) => x.textContent === "Build");
+        return b ? b.disabled : null;
+      })(),
     } : null;
     const openFor = (sqlSt, who) => shape(backupTakeAway(who || cur, b, sqlSt));
     const out = {};
@@ -2908,11 +2921,23 @@ try {
     out.latchedByAutoOpen = takeAwayOpen;
     // A reader's click on a closed panel's summary is the choice.
     const quiet = backupTakeAway(cur, b, { sql_export: { state: "idle" } });
+    document.body.append(quiet);
     quiet.querySelector("summary").click();
+    await new Promise((r) => setTimeout(r, 50));
     out.recordedClick = takeAwayOpen;
     out.keptOnRebuild = shape(backupTakeAway(cur, b, { sql_export: { state: "idle" } })).open;
-    takeAwayOpen = keep;
+    quiet.remove();
+    // So is an open the browser makes for the reader with no click
+    // (find-in-page, a text-fragment link): same event, no summary click.
+    takeAwayOpen = false;
+    const found = backupTakeAway(cur, b, { sql_export: { state: "idle" } });
+    document.body.append(found);
+    found.open = true;
+    await new Promise((r) => setTimeout(r, 50));
+    out.recordedFind = takeAwayOpen;
+    found.remove();
     return out;
+    } finally { takeAwayOpen = keep; }
   });
   const quiet = ["idle", "downloaded", "expired"], loud = ["running", "succeeded", "failed", "some-new-state"];
   (takeStates.idle && takeStates.idle.tag === "details"
@@ -2923,17 +2948,22 @@ try {
     : bad("take-away: the fold arrives closed only while the .sql build owes nothing, and an unknown state opens it", JSON.stringify(takeStates));
   (takeStates.stagingOnQuiet && takeStates.stagingOnQuiet.open === true
     && takeStates.unreadable && takeStates.unreadable.open === true && takeStates.unreadable.errBeforeLanes
+    && takeStates.unreadable.buildOff === true && takeStates.idle.buildOff === false
     && takeStates.cliUnreadable && takeStates.cliUnreadable.open === false && !takeStates.cliUnreadable.err)
     ? ok("take-away: a staging problem or an unreadable status opens it, and never on a server that cannot build")
     : bad("take-away: a staging problem or an unreadable status opens it, and never on a server that cannot build",
       JSON.stringify({ stagingOnQuiet: takeStates.stagingOnQuiet, unreadable: takeStates.unreadable, cliUnreadable: takeStates.cliUnreadable }));
-  (/expired before anyone downloaded it/.test(takeStates.expired && takeStates.expired.note) && !takeStates.idle.note)
-    ? ok("take-away: an expired copy is said on the folded panel's own line")
-    : bad("take-away: an expired copy is said on the folded panel's own line", JSON.stringify({ expired: takeStates.expired, idle: takeStates.idle }));
-  (takeStates.latchedByAutoOpen === false && takeStates.recordedClick === true && takeStates.keptOnRebuild === true)
-    ? ok("take-away: only the reader's click is remembered across a rebuild, never an automatic open")
-    : bad("take-away: only the reader's click is remembered across a rebuild, never an automatic open",
-      JSON.stringify({ latchedByAutoOpen: takeStates.latchedByAutoOpen, recordedClick: takeStates.recordedClick, keptOnRebuild: takeStates.keptOnRebuild }));
+  (/deadline, or its files were removed/.test(takeStates.expired && takeStates.expired.note) && !takeStates.idle.note
+    && takeStates["some-new-state"].unknownLine && !takeStates.failed.unknownLine)
+    ? ok("take-away: an expired copy is said on the folded panel's own line, and an unknown state is named")
+    : bad("take-away: an expired copy is said on the folded panel's own line, and an unknown state is named",
+      JSON.stringify({ expired: takeStates.expired, idle: takeStates.idle, unknown: takeStates["some-new-state"] }));
+  (takeStates.latchedByAutoOpen === false && takeStates.recordedClick === true && takeStates.keptOnRebuild === true
+    && takeStates.recordedFind === true)
+    ? ok("take-away: the reader's open is remembered across a rebuild (click or find-in-page), never an automatic one")
+    : bad("take-away: the reader's open is remembered across a rebuild (click or find-in-page), never an automatic one",
+      JSON.stringify({ latchedByAutoOpen: takeStates.latchedByAutoOpen, recordedClick: takeStates.recordedClick,
+        keptOnRebuild: takeStates.keptOnRebuild, recordedFind: takeStates.recordedFind }));
 
   // The real build. TT_AT sits after every fixture event; the fold reads the
   // baseline AND the index. Poll the status endpoint, not the DOM — the page
