@@ -251,37 +251,49 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		writeBodyDecodeError(w, err)
 		return
 	}
-	flavor, err := NormalizeFlavor(req.Flavor)
+	entry, deriveIndex, err := s.buildNewEntry(req)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	added, err := s.persistNewEntry(entry, deriveIndex,
+		DeriveServerName(req.SourceHost, req.SourcePort, entry.SourceFlavor()))
+	if err != nil {
+		writeJSONError(w, registryErrStatus(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.entryDTO(added))
+}
+
+// buildNewEntry turns a create request into the entry it describes, and
+// reports whether its index DSN is still to be derived. Create and the Connect
+// check both go through it, so Check cannot pass a shape Save would refuse —
+// the same rule testUnsavedSource follows for the probe. Every error it
+// returns is a bad request.
+func (s *Server) buildNewEntry(req serverRequest) (ServerEntry, bool, error) {
+	flavor, err := NormalizeFlavor(req.Flavor)
+	if err != nil {
+		return ServerEntry{}, false, err
 	}
 	sourceDSN, err := buildSourceDSN(req, "", flavor)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
+		return ServerEntry{}, false, err
 	}
 	if err := validatePGSourceMonitorConfig(flavor, sourceDSN, req.SourceSlot, req.SourcePublication); err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
+		return ServerEntry{}, false, err
 	}
-
 	deriveIndex := indexIsDerived(req) && sourceDSN != "" && s.monitorCtrl != nil
 	var dsn string
 	if !deriveIndex {
-		dsn, err = buildDSN(req, "")
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
+		if dsn, err = buildDSN(req, ""); err != nil {
+			return ServerEntry{}, false, err
 		}
 	}
-
 	s3KeyID, s3Secret, err := resolveS3Keys(req, "", "")
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
+		return ServerEntry{}, false, err
 	}
-	entry := ServerEntry{
+	return ServerEntry{
 		Name:              strings.TrimSpace(req.Name),
 		DSN:               dsn,
 		BaselineDir:       req.BaselineDir,
@@ -299,28 +311,38 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		Flavor:            flavor,
 		SourceSlot:        strings.TrimSpace(req.SourceSlot),
 		SourcePublication: strings.TrimSpace(req.SourcePublication),
-	}
-	added, err := s.cm.reg.Add(entry)
+	}, deriveIndex, nil
+}
+
+// persistNewEntry appends the entry and, when its index is derived, fills that
+// in. nameBase is what to call it when nobody typed a name (#1803) — the
+// address of the database it reads; it is resolved under the registry's own
+// lock, so two people adding the first server for one host cannot both derive
+// the same name.
+func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase string) (ServerEntry, error) {
+	added, err := s.cm.reg.AddAutoNamed(entry, nameBase)
 	if err != nil {
-		writeJSONError(w, registryErrStatus(err), err.Error())
-		return
+		return ServerEntry{}, err
 	}
-	if deriveIndex {
-		// The id is minted by Add, so the derived DSN lands in a follow-up
-		// update. A failure here rolls the entry back rather than leaving a
-		// half-configured server.
-		derived, dErr := s.monitorCtrl.DeriveIndexDSN(added.ID)
-		if dErr == nil {
-			added.DSN = derived
-			dErr = s.cm.reg.Update(added)
-		}
-		if dErr != nil {
-			_ = s.cm.reg.Delete(added.ID)
-			writeJSONError(w, http.StatusInternalServerError, "derive index DSN: "+dErr.Error())
-			return
-		}
+	if !deriveIndex {
+		return added, nil
 	}
-	writeJSON(w, http.StatusCreated, s.entryDTO(added))
+	// The id is minted by Add, so the derived DSN lands in a follow-up update.
+	// A failure here rolls the entry back rather than leaving a half-configured
+	// server.
+	derived, dErr := s.monitorCtrl.DeriveIndexDSN(added.ID)
+	if dErr == nil {
+		added.DSN = derived
+		dErr = s.cm.reg.Update(added)
+	}
+	if dErr != nil {
+		if delErr := s.cm.reg.Delete(added.ID); delErr != nil {
+			slog.Error("could not remove a half-configured server after its index DSN could not be set",
+				"server", added.Name, "id", added.ID, "error", delErr.Error())
+		}
+		return ServerEntry{}, fmt.Errorf("could not choose where this server's changes are kept: %w", dErr)
+	}
+	return added, nil
 }
 
 // handleServersUpdate serves PUT /api/servers/{id}. Password semantics:
@@ -477,13 +499,17 @@ type monitorStartResponse struct {
 	Monitor MonitorStatus `json:"monitor"`
 }
 
+// readOnlyConsoleRefusal is what every verb that would START something answers
+// on a process that only reads. One constant, reused rather than re-worded, so
+// the same situation is not described two ways.
+const readOnlyConsoleRefusal = "this DBTrail only reads and cannot capture; to capture from a database, run it as `bintrail-console watch`"
+
 // requireMonitorEntry centralizes the verb gates: a supervisor must be wired
 // (403 on the standalone read-only console), the entry must exist (404), and
 // — for start — must have a source configured (400, checked by the caller).
 func (s *Server) requireMonitorEntry(w http.ResponseWriter, id string) (ServerEntry, bool) {
 	if s.monitorCtrl == nil {
-		writeJSONError(w, http.StatusForbidden,
-			"this console is read-only; monitoring is controlled from the `bintrail-console watch` process")
+		writeJSONError(w, http.StatusForbidden, readOnlyConsoleRefusal)
 		return ServerEntry{}, false
 	}
 	if id == bootServerID {
@@ -540,16 +566,18 @@ func (s *Server) handleMonitorStart(w http.ResponseWriter, r *http.Request) {
 
 	// Doctor green → record intent first (the supervisor reconciles desired
 	// state at boot, so a crash right after this line still resumes), then
-	// launch.
+	// launch. Both halves live in startEntry (connect.go), which the Connect
+	// check shares, so the order cannot drift between the two callers. This
+	// one does NOT roll the entry back on failure: the entry already existed
+	// before the request, so removing it would delete somebody's server.
 	slog.Info("monitor: preflight passed, starting stream", "server", e.Name, "id", e.ID)
-	e.MonitorDesired = true
-	if err := s.cm.reg.Update(e); err != nil {
+	if err := s.startEntry(r.Context(), e); err != nil {
+		if errors.Is(err, errStartFailed) {
+			slog.Error("monitor: start failed after green preflight", "server", e.Name, "id", e.ID, "error", err.Error())
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeJSONError(w, registryErrStatus(err), err.Error())
-		return
-	}
-	if err := s.monitorCtrl.Start(r.Context(), e); err != nil {
-		slog.Error("monitor: start failed after green preflight", "server", e.Name, "id", e.ID, "error", err.Error())
-		writeJSONError(w, http.StatusInternalServerError, "start monitoring: "+err.Error())
 		return
 	}
 	slog.Info("monitor: stream started", "server", e.Name, "id", e.ID)

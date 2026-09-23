@@ -61,6 +61,10 @@ type monitorSupervisor struct {
 	// pgStreamFn runs one supervised PostgreSQL stream; pgstreamrun.One in
 	// production, a seam for tests. Selected when the entry's flavor is postgres.
 	pgStreamFn func(ctx context.Context, cfg pgstreamrun.Config) error
+	// loopbackRetry is where the doctor retries a failed connection to
+	// localhost or 127.0.0.1, to prove the container case (#1803):
+	// doctor.DockerHostRetry in production, a seam for tests.
+	loopbackRetry func(host, port string) string
 
 	mu   sync.Mutex
 	jobs map[string]*monitorJob
@@ -260,13 +264,14 @@ func (j *monitorJob) snapshot() console.MonitorStatus {
 // Doctor's replica/duplicate detection is skipped then.
 func newMonitorSupervisor(baseCtx context.Context, bootIndexDSN string, reg *console.Registry, retain time.Duration) *monitorSupervisor {
 	return &monitorSupervisor{
-		baseCtx:      baseCtx,
-		bootIndexDSN: bootIndexDSN,
-		registry:     reg,
-		rotateRetain: retain,
-		streamFn:     streamrun.One,
-		pgStreamFn:   pgstreamrun.One,
-		jobs:         map[string]*monitorJob{},
+		baseCtx:       baseCtx,
+		bootIndexDSN:  bootIndexDSN,
+		registry:      reg,
+		rotateRetain:  retain,
+		streamFn:      streamrun.One,
+		pgStreamFn:    pgstreamrun.One,
+		loopbackRetry: doctor.DockerHostRetry,
+		jobs:          map[string]*monitorJob{},
 	}
 }
 
@@ -324,6 +329,7 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 			Schemas:     e.Schemas,
 		})
 	default:
+		opts = append(opts, doctor.WithLoopbackRetry(m.loopbackRetry))
 		r = doctor.Build(ctx, e.SourceDSN, e.DSN, e.Schemas, m.rotateRetain, opts...)
 	}
 	out := &console.DoctorReport{
@@ -339,6 +345,9 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 			Status:      string(c.Status),
 			Detail:      config.ScrubDSNText(c.Detail, e.SourceDSN, e.DSN),
 			Remediation: c.Remediation,
+			Kind:        c.Kind,
+			Subjects:    c.Subjects,
+			Statements:  c.Statements,
 		}
 		// Per-check trace so `--log-level debug` shows the full preflight from
 		// the host, not just the pass/fail tally returned to the browser.
@@ -566,6 +575,68 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 
 	m.wg.Add(1)
 	go m.run(jobCtx, job, e, flavor, runOnce)
+	return nil
+}
+
+// The Connect rollback finds DiscardNew by type assertion, so a renamed or
+// re-signed method would be skipped in silence and leave databases behind.
+// This line makes that a compile error instead.
+var _ console.NewEntryDiscarder = (*monitorSupervisor)(nil)
+
+// DiscardNew implements console.NewEntryDiscarder (#1803): it
+// takes back what a FAILED Start provisioned for a server that the Connect
+// check created a moment earlier in the same request — the job slot Start
+// reserved, and the per-server index database it may already have created
+// (every step of Start after EnsureDatabase can still fail). Without it the
+// check's rollback removed the registry entry and left `bintrail_idx_<id>`
+// behind on the index server, owned by nothing.
+//
+// Deliberately narrow, because it DROPs a database:
+//   - only the database this supervisor DERIVES for the id, and only when the
+//     entry's DSN is exactly that derived DSN — a server that brings its own
+//     index is never touched;
+//   - never while the job is running or starting: a stream that holds the
+//     database is not a failed first start.
+//
+// The id is minted by the request that calls this, so the derived database
+// cannot have held anything before that request.
+func (m *monitorSupervisor) DiscardNew(ctx context.Context, e console.ServerEntry) error {
+	m.mu.Lock()
+	if j, ok := m.jobs[e.ID]; ok {
+		switch j.storedState() {
+		case "running", "pending":
+			m.mu.Unlock()
+			return fmt.Errorf("server %s is %s; not discarding it", e.ID, j.storedState())
+		}
+		j.cancel()
+		delete(m.jobs, e.ID)
+	}
+	m.mu.Unlock()
+
+	derived, err := m.DeriveIndexDSN(e.ID)
+	if err != nil {
+		return err
+	}
+	if e.DSN != derived {
+		return nil // an index the server brought itself: never ours to drop
+	}
+	cfg, err := mysql.ParseDSN(derived)
+	if err != nil {
+		return fmt.Errorf("daemon index DSN: %s", config.ScrubDSNError(err, derived))
+	}
+	name := cfg.DBName
+	if !dbNameRE.MatchString(name) {
+		return fmt.Errorf("index database name %q is not one this supervisor provisions", name)
+	}
+	cfg.DBName = ""
+	db, err := config.Connect(cfg.FormatDSN())
+	if err != nil {
+		return fmt.Errorf("connect to drop %s: %s", name, config.ScrubDSNError(err, derived))
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, "DROP DATABASE IF EXISTS `"+name+"`"); err != nil {
+		return fmt.Errorf("drop %s: %s", name, config.ScrubDSNError(err, derived))
+	}
 	return nil
 }
 
