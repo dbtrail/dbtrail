@@ -6,10 +6,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/config"
@@ -51,7 +54,7 @@ func perServerDatabases(t *testing.T) []string {
 
 const rollbackListen = "127.0.0.1:18093"
 
-func connectConsole(t *testing.T, sup *monitorSupervisor) (*console.Server, *console.Registry) {
+func connectConsole(t *testing.T, sup console.MonitorController) (*console.Server, *console.Registry) {
 	t.Helper()
 	reg, err := console.LoadRegistry(filepath.Join(t.TempDir(), "console-servers.yaml"))
 	if err != nil {
@@ -80,20 +83,9 @@ func TestIntegrationConnectCheck_aFailedCheckLeavesNothingBehind(t *testing.T) {
 	db, name := testutil.CreateTestDB(t)
 	testutil.MustExec(t, db, "CREATE TABLE loose (v INT)")
 
-	sup := newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, 0)
+	sup := &recordingSupervisor{monitorSupervisor: newMonitorSupervisor(context.Background(), testutil.IntegrationDSN(name), nil, 0)}
 	srv, reg := connectConsole(t, sup)
-	before := perServerDatabases(t)
-
-	cfg, err := mysql.ParseDSN(testutil.BaseDSN() + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	host, port, _ := strings.Cut(cfg.Addr, ":")
-	body, _ := json.Marshal(map[string]string{
-		"source_host": host, "source_port": port,
-		"source_user": cfg.User, "source_password": cfg.Passwd, "schemas": name,
-	})
-	code, out := postCheck(t, srv, string(body))
+	code, out := postCheck(t, srv, sourceBody(t, name))
 	if code != 200 {
 		t.Fatalf("code=%d body=%v", code, out)
 	}
@@ -119,8 +111,16 @@ func TestIntegrationConnectCheck_aFailedCheckLeavesNothingBehind(t *testing.T) {
 	if n := reg.Len(); n != 0 {
 		t.Errorf("the failed check left %d server(s) in the list", n)
 	}
-	if after := perServerDatabases(t); !slices.Equal(after, before) {
-		t.Errorf("the failed check created a per-server database: before %v, after %v", before, after)
+	// Only the ids THIS test's supervisor handed out are looked at: other
+	// packages create bintrail_idx_ databases concurrently, so comparing the
+	// whole list before and after was flaky. A refused check must not reach
+	// the point of choosing a database at all.
+	for _, id := range sup.recorded() {
+		t.Errorf("the failed check chose a per-server database for id %s", id)
+		if databaseExists(t, "bintrail_idx_"+id) {
+			t.Errorf("the failed check created bintrail_idx_%s", id)
+			dropIfExists(t, "bintrail_idx_"+id)
+		}
 	}
 	if len(sup.jobs) != 0 {
 		t.Errorf("the failed check left %d job slot(s) in the supervisor", len(sup.jobs))
@@ -221,4 +221,168 @@ func dropIfExists(t *testing.T, name string) {
 	}
 	defer db.Close()
 	_, _ = db.Exec("DROP DATABASE IF EXISTS `" + name + "`")
+}
+
+// recordingSupervisor is the real supervisor, noting every id it derives a
+// database for, so a test can look at exactly the databases IT caused.
+type recordingSupervisor struct {
+	*monitorSupervisor
+	mu  sync.Mutex
+	ids []string
+}
+
+func (r *recordingSupervisor) DeriveIndexDSN(id string) (string, error) {
+	r.mu.Lock()
+	r.ids = append(r.ids, id)
+	r.mu.Unlock()
+	return r.monitorSupervisor.DeriveIndexDSN(id)
+}
+
+func (r *recordingSupervisor) recorded() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.ids...)
+}
+
+var hexID = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
+func databaseExists(t *testing.T, name string) bool {
+	t.Helper()
+	db, err := config.Connect(testutil.BaseDSN() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?", name).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n > 0
+}
+
+// sourceBody is a Connect form for the test MySQL, scoped to schema.
+func sourceBody(t *testing.T, schema string) string {
+	t.Helper()
+	cfg, err := mysql.ParseDSN(testutil.BaseDSN() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, _ := strings.Cut(cfg.Addr, ":")
+	b, _ := json.Marshal(map[string]string{
+		"source_host": host, "source_port": port,
+		"source_user": cfg.User, "source_password": cfg.Passwd, "schemas": schema,
+	})
+	return string(b)
+}
+
+// limitedIndexUser creates a MySQL account for the INDEX side that can create
+// a database and its tables but cannot write a row, so a real start fails
+// right AFTER it has created the per-server database: at the first INSERT.
+// withDrop decides whether the rollback may drop that database again. The
+// account is created and removed by exact name.
+func limitedIndexUser(t *testing.T, name string, withDrop bool) string {
+	t.Helper()
+	root, err := config.Connect(testutil.BaseDSN() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	privs := "CREATE, SELECT"
+	if withDrop {
+		privs = "CREATE, DROP, SELECT"
+	}
+	for _, q := range []string{
+		"DROP USER IF EXISTS '" + name + "'@'%'",
+		"CREATE USER '" + name + "'@'%' IDENTIFIED BY 'Ct1803-limited'",
+		"GRANT " + privs + " ON *.* TO '" + name + "'@'%'",
+	} {
+		if _, err := root.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	t.Cleanup(func() {
+		if db, err := config.Connect(testutil.BaseDSN() + "/"); err == nil {
+			_, _ = db.Exec("DROP USER IF EXISTS '" + name + "'@'%'")
+			db.Close()
+		}
+	})
+	cfg, err := mysql.ParseDSN(testutil.BaseDSN() + "/ct1803_boot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.User, cfg.Passwd = name, "Ct1803-limited"
+	return cfg.FormatDSN()
+}
+
+// The whole rollback, end to end, through the real /api/servers/check: every
+// check passes, the real start creates the per-server database and then dies
+// at its first INSERT. Nothing may remain — no server, no job slot, and the
+// database dropped again — and the answer must not claim anything was kept.
+func TestIntegrationConnectCheck_aStartThatFailsAfterCreatingItsDatabaseLeavesNothing(t *testing.T) {
+	db, schema := testutil.CreateTestDB(t)
+	testutil.MustExec(t, db, "CREATE TABLE keyed (id INT PRIMARY KEY)")
+	sup := &recordingSupervisor{monitorSupervisor: newMonitorSupervisor(context.Background(),
+		limitedIndexUser(t, "ct1803_noinsert", true), nil, 0)}
+	srv, reg := connectConsole(t, sup)
+
+	code, out := postCheck(t, srv, sourceBody(t, schema))
+	if code != 200 {
+		t.Fatalf("code=%d body=%v", code, out)
+	}
+	if out["started"] == true {
+		t.Fatalf("the start succeeded with an index account that cannot INSERT: %v", out)
+	}
+	if doc, _ := out["doctor"].(map[string]any); doc["failed"] != float64(0) {
+		t.Fatalf("a check failed, so this never reached the start it is about: %v", doc)
+	}
+	ids := sup.recorded()
+	if len(ids) != 1 || !hexID.MatchString(ids[0]) {
+		t.Fatalf("derived ids = %v, want exactly one fresh id", ids)
+	}
+	if !strings.Contains(fmt.Sprint(out["error"]), "INSERT") && !strings.Contains(fmt.Sprint(out["error"]), "denied") {
+		t.Errorf("the start did not fail where this test means it to (at the first INSERT): %v", out["error"])
+	}
+	if reg.Len() != 0 {
+		t.Errorf("the failed start left %d server(s) in the list", reg.Len())
+	}
+	if len(sup.jobs) != 0 {
+		t.Errorf("the failed start left %d job slot(s)", len(sup.jobs))
+	}
+	if databaseExists(t, "bintrail_idx_"+ids[0]) {
+		t.Errorf("bintrail_idx_%s outlived the rollback", ids[0])
+		dropIfExists(t, "bintrail_idx_"+ids[0])
+	}
+	if out["kept"] == true {
+		t.Errorf("kept=true although everything was taken back: %v", out)
+	}
+}
+
+// The same, with an account that cannot drop the database either: something
+// IS left behind, and the answer has to say so.
+func TestIntegrationConnectCheck_aDatabaseThatCannotBeDroppedIsReportedKept(t *testing.T) {
+	db, schema := testutil.CreateTestDB(t)
+	testutil.MustExec(t, db, "CREATE TABLE keyed (id INT PRIMARY KEY)")
+	sup := &recordingSupervisor{monitorSupervisor: newMonitorSupervisor(context.Background(),
+		limitedIndexUser(t, "ct1803_nodrop", false), nil, 0)}
+	srv, reg := connectConsole(t, sup)
+
+	_, out := postCheck(t, srv, sourceBody(t, schema))
+	ids := sup.recorded()
+	for _, id := range ids {
+		if hexID.MatchString(id) {
+			t.Cleanup(func() { dropIfExists(t, "bintrail_idx_"+id) })
+		}
+	}
+	if out["started"] == true {
+		t.Fatalf("the start succeeded with an index account that cannot INSERT: %v", out)
+	}
+	if len(ids) != 1 || !databaseExists(t, "bintrail_idx_"+ids[0]) {
+		t.Fatalf("the fixture did not leave the database it is about (ids %v)", ids)
+	}
+	if out["kept"] != true {
+		t.Errorf("the per-server database is still there and the answer does not say so: %v", out)
+	}
+	if reg.Len() != 0 {
+		t.Errorf("%d server(s) left in the list", reg.Len())
+	}
 }
