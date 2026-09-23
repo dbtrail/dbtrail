@@ -1633,6 +1633,9 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console
 		// The loop that applies each server's keep-newest count (#1681):
 		// the listing reports a retention only where this is true.
 		LocalPruneLoop: pruneLoopRuns(reg),
+		// watch takes the snapshots, so it creates their folders (#1681);
+		// the read-only serve does not set this and only checks them.
+		MayCreateFolders: true,
 		BaselineRefreshDefaults: console.BaselineRefreshDefaults{
 			CarryForwardUnchanged: upBaselineCarryForward,
 			// Enabled is the OR because the restore consumes this setting too

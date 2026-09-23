@@ -102,6 +102,16 @@ type baselinesResponse struct {
 	// LastPruneError is set when that record exists and cannot be read: a
 	// prune happened, and the page must not read its absence as "never".
 	LastPruneError string `json:"last_prune_error,omitempty"`
+	// LastPruneFailure is the most recent prune attempt on that folder that
+	// FAILED: when, and why. OMITTED once an attempt succeeds. Without it a
+	// folder that stops shrinking shows only in the daemon's log while the
+	// retention line says how many snapshots it keeps.
+	LastPruneFailure *pruneFailureDTO `json:"last_prune_failure,omitempty"`
+}
+
+type pruneFailureDTO struct {
+	At     string `json:"at"` // RFC3339, UTC
+	Reason string `json:"reason"`
 }
 
 // localRetentionDTO and lastPruneDTO are the #1681 wire shapes. The Snapshots
@@ -134,24 +144,33 @@ func (s *Server) localRetentionOf(id string) *localRetentionDTO {
 	return &localRetentionDTO{KeepNewest: n}
 }
 
-// lastPruneOf reads the prune record of the bundle's local folder. An
+// lastPruneOf reads the two prune records of the bundle's local folder: the
+// last prune that removed snapshots, and the last attempt that failed. An
 // unreadable record does not fail the listing, and is not silent either: it
 // comes back as an error string for last_prune_error, and is logged.
-func lastPruneOf(b *bundle, serverID string) (*lastPruneDTO, string) {
+func lastPruneOf(b *bundle, serverID string) (*lastPruneDTO, *pruneFailureDTO, string) {
 	dir := bundleBaselineDir(b)
 	if dir == "" {
-		return nil, ""
+		return nil, nil, ""
 	}
-	rec, ok, err := baseline.ReadLastPrune(dir)
-	if err != nil {
+	var errs []string
+	var last *lastPruneDTO
+	if rec, ok, err := baseline.ReadLastPrune(dir); err != nil {
 		slog.Warn("console: the record of the last snapshot prune could not be read",
 			"server", serverID, "dir", dir, "error", err)
-		return nil, "snapshots were removed from this folder, but the record of when could not be read: " + err.Error()
+		errs = append(errs, "snapshots were removed from this folder, but the record of when could not be read: "+err.Error())
+	} else if ok {
+		last = &lastPruneDTO{At: rec.At.UTC().Format(time.RFC3339), Removed: rec.Removed}
 	}
-	if !ok {
-		return nil, ""
+	var failed *pruneFailureDTO
+	if rec, ok, err := baseline.ReadLastPruneFailure(dir); err != nil {
+		slog.Warn("console: the record of a failed snapshot prune could not be read",
+			"server", serverID, "dir", dir, "error", err)
+		errs = append(errs, "a prune of this folder failed, and the record of why could not be read: "+err.Error())
+	} else if ok {
+		failed = &pruneFailureDTO{At: rec.At.UTC().Format(time.RFC3339), Reason: rec.Reason}
 	}
-	return &lastPruneDTO{At: rec.At.UTC().Format(time.RFC3339), Removed: rec.Removed}, ""
+	return last, failed, strings.Join(errs, "; ")
 }
 
 // selectedServerID is the id the request EFFECTIVELY selected: the header
@@ -219,7 +238,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}
 	resp.LocalRetention = s.localRetentionOf(s.selectedServerID(r))
-	resp.LastPrune, resp.LastPruneError = lastPruneOf(b, s.selectedServerID(r))
+	resp.LastPrune, resp.LastPruneFailure, resp.LastPruneError = lastPruneOf(b, s.selectedServerID(r))
 	if b.baselineSrc == "" {
 		writeJSON(w, http.StatusOK, resp)
 		return

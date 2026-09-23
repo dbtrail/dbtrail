@@ -942,7 +942,7 @@ func TestCapabilityMatrix(t *testing.T) {
 // into the edit form would persist it as per-server config on the next save.
 //
 // Without a process baseline dir the server gets a folder of its own since
-// #1681 (<state dir>/baselines/<id>), so both capabilities are on and the DTO
+// #1681 (<state dir>/snapshots/<id>), so both capabilities are on and the DTO
 // names that folder; with one, a create that does not ask for a local copy
 // keeps the fallback, unchanged.
 func TestRegistryBaselineFallbackAPI(t *testing.T) {
@@ -955,6 +955,7 @@ func TestRegistryBaselineFallbackAPI(t *testing.T) {
 		cfg := Config{
 			Listen: "127.0.0.1:8090", Token: "t", Registry: reg,
 			MonitorCtrl: &stubMonitorCtrl{}, VerifyCtrl: &stubVerifyCtrl{},
+			MayCreateFolders: true,
 		}
 		if procBaseline {
 			cfg.BaselineDir = "/var/bintrail/baselines"
@@ -978,7 +979,7 @@ func TestRegistryBaselineFallbackAPI(t *testing.T) {
 		}
 		wantOwn := ""
 		if !procBaseline {
-			wantOwn = state + "/baselines/" + created.ID
+			wantOwn = state + "/snapshots/" + created.ID
 		}
 		if created.BaselineDir != wantOwn || created.BaselineS3 != "" {
 			t.Errorf("procBaseline=%v: DTO must report the entry's OWN baseline (%q), got dir=%q s3=%q",

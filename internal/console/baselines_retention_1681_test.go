@@ -68,7 +68,7 @@ func writeSnapshot(t *testing.T, dir string, ts time.Time) {
 func TestBaselinesRetention_shape(t *testing.T) {
 	state := t.TempDir()
 	path := filepath.Join(state, "console-servers.yaml")
-	dir := filepath.Join(state, "baselines", "srv")
+	dir := filepath.Join(state, "snapshots", "srv")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -227,5 +227,75 @@ func TestBaselinesRetention_unreadableRecordIsReported(t *testing.T) {
 	}
 	if _, ok := raw["last_prune_error"]; !ok {
 		t.Errorf("an unreadable record is not reported: %s", body)
+	}
+}
+
+// A prune that happened on a server with no count in force (the S3 rule, the
+// CLI, or a count removed since): last_prune alone, which the page renders
+// without a retention clause.
+func TestBaselinesRetention_pruneWithoutAPolicy(t *testing.T) {
+	state := t.TempDir()
+	path := filepath.Join(state, "console-servers.yaml")
+	dir := filepath.Join(state, "d")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	writeSnapshot(t, dir, now.Add(-96*time.Hour))
+	writeSnapshot(t, dir, now.Add(-48*time.Hour))
+	if _, err := baseline.PruneLocal(context.Background(), baseline.PruneOptions{LocalDir: dir, KeepNewest: 1}); err != nil {
+		t.Fatal(err)
+	}
+	reg, _ := LoadRegistry(path)
+	e, err := reg.Add(ServerEntry{Name: "s", DSN: "u:p@tcp(h:3306)/a", BaselineDir: dir}) // no count
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, body := retentionFields(t, retentionServer(t, path, true), e.ID)
+	if _, ok := raw["local_retention"]; ok {
+		t.Errorf("no count, but local_retention: %s", body)
+	}
+	if _, ok := raw["last_prune"]; !ok {
+		t.Errorf("a prune without a policy is not reported: %s", body)
+	}
+	for _, k := range []string{"last_prune_failure", "last_prune_error"} {
+		if _, ok := raw[k]; ok {
+			t.Errorf("%s present on a clean prune: %s", k, body)
+		}
+	}
+}
+
+// A failed attempt is reported beside the retention with its time and reason,
+// and disappears once an attempt succeeds.
+func TestBaselinesRetention_failedAttemptIsReportedUntilOneSucceeds(t *testing.T) {
+	state := t.TempDir()
+	path := filepath.Join(state, "console-servers.yaml")
+	dir := filepath.Join(state, "d")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	failure := `{"at":"2026-09-23T03:10:00Z","reason":"2 snapshots could not be removed: permission denied"}`
+	if err := os.WriteFile(filepath.Join(dir, baseline.LastPruneFailureFile), []byte(failure), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, _ := LoadRegistry(path)
+	e, err := reg.Add(ServerEntry{Name: "s", DSN: "u:p@tcp(h:3306)/a", BaselineDir: dir, LocalKeepNewest: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, body := retentionFields(t, retentionServer(t, path, true), e.ID)
+	if got := string(raw["last_prune_failure"]); got != failure {
+		t.Errorf("last_prune_failure = %s, want %s; body %s", got, failure, body)
+	}
+	if _, ok := raw["local_retention"]; !ok {
+		t.Errorf("the retention is not shown beside the failure: %s", body)
+	}
+	// A clean attempt clears it.
+	if _, err := baseline.PruneLocal(context.Background(), baseline.PruneOptions{LocalDir: dir, KeepNewest: 2}); err != nil {
+		t.Fatal(err)
+	}
+	raw, body = retentionFields(t, retentionServer(t, path, true), e.ID)
+	if _, ok := raw["last_prune_failure"]; ok {
+		t.Errorf("a successful attempt left the failure: %s", body)
 	}
 }

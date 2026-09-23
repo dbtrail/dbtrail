@@ -105,6 +105,12 @@ type PruneResult struct {
 	// Busy reports that another prune held this directory's lock, so this one
 	// did nothing. Not an error: the other prune is doing the same job.
 	Busy bool
+	// Unremoved counts snapshots the prune planned to remove and could not
+	// move aside; they are still listed, and the attempt is recorded as a
+	// failure (LastPruneFailureFile).
+	Unremoved int
+	// firstRemoveErr is the first of those errors, for the failure record.
+	firstRemoveErr string
 	// KeptKeeper counts snapshots retained because they are the newest snapshot
 	// containing some table — reconstruct.FindBaseline's per-table target.
 	KeptKeeper int
@@ -210,13 +216,56 @@ func PruneLocal(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 	return pruneWithProbe(ctx, opts, probe)
 }
 
-// pruneWithProbe is PruneLocal's IO body with the durability check injected, so
+// pruneWithProbe runs one prune attempt and records its outcome beside the
+// snapshots (#1681): a failed attempt writes .last-prune-failure.json (when,
+// and why), a successful one removes it. A dry run and a prune that stepped
+// aside for another touch neither. Recording is best-effort and logged: the
+// attempt's own result is returned unchanged.
+func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) (PruneResult, error) {
+	res, err := pruneAttempt(ctx, opts, probe)
+	if opts.DryRun || res.Busy {
+		return res, err
+	}
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if reason := pruneFailureReason(res, err); reason != "" {
+		if werr := writeFailureRecord(opts.LocalDir, PruneFailure{At: now, Reason: reason}); werr != nil {
+			slog.Error("baseline prune: the attempt failed and the record of the failure could not be written either; the page will not say it",
+				"dir", opts.LocalDir, "reason", reason, "error", werr)
+		}
+	} else if rerr := removeRecord(filepath.Join(opts.LocalDir, LastPruneFailureFile)); rerr != nil && !os.IsNotExist(rerr) {
+		slog.Error("baseline prune: the attempt succeeded but the record of an earlier failure could not be removed; the page will go on showing it",
+			"dir", opts.LocalDir, "error", rerr)
+	}
+	return res, err
+}
+
+// pruneFailureReason is why an attempt counts as failed, in words the page
+// can show, or "" when it did everything it planned. Snapshots kept for lack
+// of a confirmed S3 copy are policy, not failure; snapshots that could not be
+// CHECKED are a failure, because retention stalls while the page would say
+// it runs.
+func pruneFailureReason(res PruneResult, err error) string {
+	switch {
+	case err != nil:
+		return err.Error()
+	case res.Unremoved > 0:
+		return fmt.Sprintf("%d snapshots could not be removed: %s", res.Unremoved, res.firstRemoveErr)
+	case res.ProbeErrors > 0:
+		return fmt.Sprintf("%d snapshots could not be checked at the S3 destination, so they were kept", res.ProbeErrors)
+	}
+	return ""
+}
+
+// pruneAttempt is PruneLocal's IO body with the durability check injected, so
 // the keeper/marker/age invariants are testable without S3. With no S3URL it
 // is the local-only keep-newest mode (#1681): there is nothing to confirm
 // durable, probe is unused, and the newest opts.KeepNewest snapshots take the
 // probe's place as the floor. The mode is decided by S3URL, never by the
 // probe, so a destination always means "delete only what it confirmed".
-func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) (PruneResult, error) {
+func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (PruneResult, error) {
 	now := opts.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -319,6 +368,10 @@ func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res Pr
 		if !staged {
 			slog.Warn("baseline prune: could not remove snapshot; it will be retried next cycle",
 				"snapshot", name, "error", err)
+			res.Unremoved++
+			if res.firstRemoveErr == "" {
+				res.firstRemoveErr = err.Error()
+			}
 			continue
 		}
 		// Renamed aside = gone from every listing, so it counts as removed

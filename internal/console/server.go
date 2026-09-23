@@ -184,6 +184,12 @@ type Config struct {
 	// hides the panel).
 	RotationDefaults RotationDefaults
 
+	// MayCreateFolders is set by the watch daemon (#1681): saving a server's
+	// snapshot folder may create it and write a check file into it, and a new
+	// server gets a default folder. The read-only serve leaves it false and
+	// only checks that a folder exists and is writable: it writes nothing on
+	// the filesystem but its registry.
+	MayCreateFolders bool
 	// LocalPruneLoop is set by the watch daemon when it runs the loop that
 	// removes local snapshots past a server's keep-newest count (#1681). The
 	// read-only serve leaves it false: nothing there removes anything, so the
@@ -336,6 +342,8 @@ type Server struct {
 	baselineRefreshDefaults BaselineRefreshDefaults
 	// localPruneLoop is Config.LocalPruneLoop.
 	localPruneLoop bool
+	// mayCreateFolders is Config.MayCreateFolders.
+	mayCreateFolders bool
 	// version is the running build's version string (Config.Version).
 	version string
 	// archiveFetcher reads one archive source for the browsing endpoints —
@@ -557,6 +565,7 @@ func New(cfg Config) (*Server, error) {
 		backupSettingsDefaults:  cfg.BackupSettingsDefaults,
 		baselineRefreshDefaults: cfg.BaselineRefreshDefaults,
 		localPruneLoop:          cfg.LocalPruneLoop,
+		mayCreateFolders:        cfg.MayCreateFolders,
 		version:                 cfg.Version,
 		cm:                      newConnManager(cfg.Registry, profileActive),
 		authPath:                authPath,

@@ -11,7 +11,7 @@ import (
 )
 
 // #1681: every NEW server keeps a local copy of its snapshots by default, in
-// <state dir>/baselines/<id>; the per-server question is one yes/no; a folder
+// <state dir>/snapshots/<id>; the per-server question is one yes/no; a folder
 // that cannot be used is refused at save instead of shown with a tick.
 
 // newLocalCopyServer is a Server over a registry FILE (the default folder
@@ -24,7 +24,7 @@ func newLocalCopyServer(t *testing.T) (*Server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, LocalPruneLoop: true})
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, LocalPruneLoop: true, MayCreateFolders: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestLocalCopy_newServerGetsItsOwnFolderByID(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
-	want := filepath.Join(state, "baselines", dto.ID)
+	want := filepath.Join(state, "snapshots", dto.ID)
 	e, _ := srv.cm.reg.Get(dto.ID)
 	if e.BaselineDir != want {
 		t.Fatalf("folder = %q, want %q", e.BaselineDir, want)
@@ -182,7 +182,7 @@ func TestLocalCopy_existingServersAreUnchanged(t *testing.T) {
 			}
 		}
 	}
-	if _, err := os.Stat(filepath.Join(state, "baselines")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(state, "snapshots")); !os.IsNotExist(err) {
 		t.Errorf("reading the settings created a snapshot folder: %v", err)
 	}
 	after, _ := os.ReadFile(path)
@@ -275,7 +275,7 @@ func TestLocalCopy_answeringYesUsesTheDefaultFolder(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("yes: %d %s", rec.Code, rec.Body.String())
 	}
-	want := filepath.Join(state, "baselines", e.ID)
+	want := filepath.Join(state, "snapshots", e.ID)
 	after, _ := srv.cm.reg.Get(e.ID)
 	if after.BaselineDir != want {
 		t.Fatalf("folder = %q, want %q", after.BaselineDir, want)
@@ -397,7 +397,7 @@ func TestLocalCopy_daemonDefaultKeepsTheFallbackUnlessAsked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineDir: "/var/bintrail/baselines"})
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineDir: "/var/bintrail/baselines", MayCreateFolders: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +409,7 @@ func TestLocalCopy_daemonDefaultKeepsTheFallbackUnlessAsked(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
-	if e, _ := reg.Get(asked.ID); e.BaselineDir != filepath.Join(state, "baselines", asked.ID) {
+	if e, _ := reg.Get(asked.ID); e.BaselineDir != filepath.Join(state, "snapshots", asked.ID) {
 		t.Errorf("explicit yes got %q", e.BaselineDir)
 	}
 }
@@ -475,5 +475,102 @@ func TestLocalCopy_sharedFolderIsReportedBlocked(t *testing.T) {
 		if row.KeepBlocked != want {
 			t.Errorf("%s: keep_blocked = %v, want %v", row.Name, row.KeepBlocked, want)
 		}
+	}
+}
+
+// The read-only serve writes nothing on the filesystem but its registry: it
+// creates no folder, not even the default one, and writes no check file. It
+// still refuses a folder that is missing, a file, or not writable.
+func TestLocalCopy_serveNeverCreatesFolders(t *testing.T) {
+	clearStores(t)
+	state := t.TempDir()
+	reg, err := LoadRegistry(filepath.Join(state, "console-servers.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg}) // serve: MayCreateFolders false
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, dto := createServer(t, srv, newServerBody+`}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	if e, _ := reg.Get(dto.ID); e.BaselineDir != "" {
+		t.Errorf("serve gave a new server the folder %q", e.BaselineDir)
+	}
+	missing := filepath.Join(state, "missing")
+	if rec := putBackupSettings(t, srv, dto.ID, `{"baseline_dir":"`+missing+`"}`); rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), "does not create folders") {
+		t.Errorf("serve and a missing folder: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := putBackupSettings(t, srv, dto.ID, `{"local_copy":true}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("serve and yes to a default folder that does not exist: %d %s", rec.Code, rec.Body.String())
+	}
+	entries, _ := os.ReadDir(state)
+	for _, e := range entries {
+		if e.IsDir() {
+			t.Errorf("serve created %s", e.Name())
+		}
+	}
+	// An existing, writable folder is accepted, and nothing is written into it.
+	exists := filepath.Join(state, "exists")
+	if err := os.Mkdir(exists, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if rec := putBackupSettings(t, srv, dto.ID, `{"baseline_dir":"`+exists+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("serve and an existing folder: %d %s", rec.Code, rec.Body.String())
+	}
+	if inside, _ := os.ReadDir(exists); len(inside) != 0 {
+		t.Errorf("serve wrote into the folder: %v", inside)
+	}
+	if os.Geteuid() != 0 {
+		ro := filepath.Join(state, "ro")
+		if err := os.Mkdir(ro, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(ro, 0o700) })
+		if rec := putBackupSettings(t, srv, dto.ID, `{"baseline_dir":"`+ro+`"}`); rec.Code != http.StatusBadRequest {
+			t.Errorf("serve and a read-only folder: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// The watch daemon tells the console it may create folders.
+func TestLocalCopy_onlyWatchMayCreateFolders(t *testing.T) {
+	if (Config{}).MayCreateFolders {
+		t.Fatal("the zero Config (serve) may create folders")
+	}
+}
+
+// A connection edit that leaves the snapshot fields out keeps what is stored:
+// the folder changed on the Snapshots page after the form was opened stays.
+// Sending a field still changes it (an API client may).
+func TestServersUpdate_keepsSnapshotFieldsItWasNotSent(t *testing.T) {
+	srv, state := newLocalCopyServer(t)
+	e, err := srv.cm.reg.Add(ServerEntry{Name: "s", DSN: "u:p@tcp(h:3306)/idx", BaselineDir: filepath.Join(state, "new"), BaselineS3: "s3://b/p/", NoArchive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(body string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("PUT", "/api/servers/"+e.ID, strings.NewReader(body))
+		req.SetPathValue("id", e.ID)
+		srv.handleServersUpdate(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("edit: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	send(`{"name":"renamed","host":"h","port":"3306","user":"u","dbname":"idx"}`)
+	got, _ := srv.cm.reg.Get(e.ID)
+	if got.BaselineDir != e.BaselineDir || got.BaselineS3 != e.BaselineS3 || !got.NoArchive || got.Name != "renamed" {
+		t.Fatalf("an edit that did not send them changed the snapshot fields: %+v", got)
+	}
+	other := filepath.Join(state, "other")
+	send(`{"name":"renamed","host":"h","port":"3306","user":"u","dbname":"idx","baseline_dir":"` + other + `","baseline_s3":"","no_archive":false}`)
+	got, _ = srv.cm.reg.Get(e.ID)
+	if got.BaselineDir != other || got.BaselineS3 != "" || got.NoArchive {
+		t.Fatalf("sent fields were not applied: %+v", got)
 	}
 }

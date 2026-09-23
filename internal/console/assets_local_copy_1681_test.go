@@ -43,7 +43,7 @@ const saveBtn = (root) => find(root, (n) => n.tag === "button" && n.textContent 
 const visible = (root) => { const out = []; const go = (n, hid) => { if (!n) return; if (n.nodeType === 3) return; const h = hid || n.hidden; if (!h && n.tag === "p" && n._text) out.push(n._text); for (const c of n.children) go(c, h); }; go(root, false); return out; };
 const reds = (root) => { const out = []; walk(root, (n) => { if (!n.hidden && n.tag === "p" && /\berr\b/.test(n.className) && n._text) out.push(n._text); }); return out; };
 const shown = (root, name) => { let ok = null; const go = (n, hid) => { if (!n || n.nodeType !== 1) return; const h = hid || n.hidden; if (n.tag === "input" && n.attrs.name === name) ok = !h; for (const c of n.children) go(c, h); }; go(root, false); return ok; };
-const base = { id: "s1", name: "prod", baseline_dir: "", baseline_s3: "", default_dir: "/state/baselines/s1", keep_newest: 0, local_copy: false, prune_loop: true, source: "none" };
+const base = { id: "s1", name: "prod", baseline_dir: "", baseline_s3: "", default_dir: "/state/snapshots/s1", keep_newest: 0, local_copy: false, prune_loop: true, source: "none" };
 const row = (o, reuse) => ctx.backupServerRow(Object.assign({}, base, o), false, [], "", reuse);
 const out = {};
 async function step(name, o, act, reuse) {
@@ -60,7 +60,7 @@ const pick = (r, v) => { const y = byName(r, "bks-local-s1", "yes"), n = byName(
 const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "input"); };
 (async () => {
   // A new server: its own folder, a count, no S3.
-  const fresh = { baseline_dir: "/state/baselines/s1", local_copy: true, keep_newest: 3, source: "server" };
+  const fresh = { baseline_dir: "/state/snapshots/s1", local_copy: true, keep_newest: 3, source: "server" };
   await step("freshAsIs", fresh, null);
   await step("freshKeep5", fresh, (r) => type(r, "keep_newest", "5"));
   await step("freshKeepAll", fresh, (r) => type(r, "keep_newest", ""));
@@ -88,6 +88,13 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   const sch = { every: "1d", at: "03:00", runnable: true };
   out.rateKeep = { before: { words: [text(ctx.backupScheduleCard(cur, { schedule: sch, local_retention: { keep_newest: 3 } }))] } };
   out.rateAll = { before: { words: [text(ctx.backupScheduleCard(cur, { schedule: sch }))] } };
+  // A session without servers:write sees the answers but no control.
+  vm.runInContext("capsCache.permissions = { \"servers:write\": false };", ctx);
+  const lockedRow = row({ baseline_dir: "/state/snapshots/s1", local_copy: true, keep_newest: 3, source: "server" }, true);
+  const ctl = ["baseline_dir", "baseline_s3", "keep_newest", "no_archive"].map((n) => byName(lockedRow, n)).concat([byName(lockedRow, "bks-local-s1", "yes"), byName(lockedRow, "bks-local-s1", "no")]);
+  pick(lockedRow, "no");
+  out.locked = { before: { words: [] }, disabled: ctl.every((c) => c && c.disabled === true), saveDisabled: saveBtn(lockedRow) === null };
+  vm.runInContext("capsCache.permissions = {};", ctx);
   console.log(JSON.stringify(out));
 })().catch((e) => { console.log(JSON.stringify({ err: String(e && e.stack || e) })); });
 `
@@ -111,6 +118,9 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		Before view           `json:"before"`
 		After  view           `json:"after"`
 		Body   map[string]any `json:"body"`
+		// locked only
+		Disabled     bool `json:"disabled"`
+		SaveDisabled bool `json:"saveDisabled"`
 	}
 	var got map[string]res
 	if err := json.Unmarshal(raw, &got); err != nil {
@@ -166,7 +176,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if !strings.Contains(joined(ns.After), "Snapshots live only in S3, and every run writes every table.") {
 		t.Errorf("no does not say it in those words: %q", joined(ns.After))
 	}
-	if !strings.Contains(joined(ns.After), "The snapshots already in /state/baselines/s1 stay there") {
+	if !strings.Contains(joined(ns.After), "The snapshots already in /state/snapshots/s1 stay there") {
 		t.Errorf("no does not say what happens to the snapshots already here: %q", joined(ns.After))
 	}
 	if ns.Body["local_copy"] != false || ns.Body["baseline_s3"] != "s3://b/p/" {
@@ -183,7 +193,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		t.Errorf("an S3-only server does not read as no: %+v", so.Before)
 	}
 	sy := got["s3onlyYes"]
-	if sy.Body["local_copy"] != true || sy.Body["baseline_dir"] != "/state/baselines/s1" {
+	if sy.Body["local_copy"] != true || sy.Body["baseline_dir"] != "/state/snapshots/s1" {
 		t.Errorf("yes on an S3-only server sent %+v, want the default folder", sy.Body)
 	}
 	if _, ok := sy.Body["keep_newest"]; ok {
@@ -226,6 +236,12 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	}
 	if w := joined(got["rateAll"].Before); !strings.Contains(w, "never removed automatically") {
 		t.Errorf("rate without a count lost its disk warning: %q", w)
+	}
+
+	// A session without servers:write: every control disabled, and no Save
+	// at all (hidden by permission, as on the rest of the page).
+	if l := got["locked"]; !l.Disabled || !l.SaveDisabled {
+		t.Errorf("a session without servers:write can edit the row: %+v", l)
 	}
 
 	// Every sentence this row can say, against the first-run walk's closed

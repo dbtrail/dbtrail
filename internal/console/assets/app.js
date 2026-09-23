@@ -5556,9 +5556,11 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // Two different reasons to be read-only. registry_read_only is the
   // registry file itself (a newer version wrote it), and the Save stays
   // visible, disabled, beside the reason. A session without servers:write
-  // gets the fields locked and no Save at all: hidden by permission.
+  // (the save goes to PUT /api/backup-settings/servers/{id}) gets the
+  // answers locked and no Save at all: hidden by permission.
   const mayWrite = sessionMay("servers:write");
-  if (readOnly || !mayWrite) { dir.disabled = s3.disabled = noArch.disabled = yes.disabled = no.disabled = keep.disabled = true; }
+  const locked = !!readOnly || !mayWrite;
+  if (locked) { dir.disabled = s3.disabled = noArch.disabled = yes.disabled = no.disabled = keep.disabled = true; }
   // Save wakes up when something differs from what was loaded, so a click
   // always means a change; Enter in a field saves too.
   // Trimmed on both sides: the PUT trims, so a stored value with stray
@@ -5585,7 +5587,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
       words.append(el("p", { class: w.err ? "form-msg err" : "form-hint", text: w.text }));
     }
   };
-  const sync = () => { paint(); save.disabled = !!readOnly || !dirty(); };
+  const sync = () => { paint(); save.disabled = locked || !dirty(); };
   for (const input of [dir, s3, keep]) {
     input.addEventListener("input", sync);
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !save.disabled) save.click(); });
@@ -10957,15 +10959,12 @@ function buildServerForm() {
   idxGrid.append(srvField("Password", "password", { type: "password", autocomplete: "new-password" }));
   idxGrid.append(srvField("Index database", "dbname", { placeholder: "binlog_index" }));
   idx.append(idxGrid);
-  // The backup location and the archive toggle are EDITED on the Backups &
-  // snapshots settings page (#1582); this form carries them as hidden
-  // passthroughs because PUT /api/servers/{id} REPLACES the entry — dropping
-  // the fields from the request would silently wipe a server's backup
-  // configuration on every unrelated edit. The prefill list below fills them
-  // like any other field.
-  idx.append(el("input", { type: "hidden", name: "baseline_dir" }));
-  idx.append(el("input", { type: "hidden", name: "baseline_s3" }));
-  idx.append(el("input", { type: "checkbox", name: "no_archive", hidden: true }));
+  // The snapshot location, the keep count and the archive toggle are edited
+  // on the Snapshots page only (#1582, #1681). This form does not carry them
+  // at all: PUT /api/servers/{id} keeps the stored values when the request
+  // leaves them out. It used to post them back from hidden fields, which put
+  // back an OLD folder whenever the form had been opened before a change on
+  // the Snapshots page.
   adv.append(idx);
   form.append(adv);
 
@@ -11038,10 +11037,9 @@ function showServerForm(prefill, opts) {
 
   if (prefill) {
     form.elements.id.value = prefill.id || "";
-    ["name", "host", "port", "user", "dbname", "baseline_dir", "baseline_s3", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "source_host", "source_port", "source_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
+    ["name", "host", "port", "user", "dbname", "archive_s3", "s3_endpoint", "s3_path_style", "s3_region", "s3_access_key_id", "source_host", "source_port", "source_user", "schemas", "source_database", "source_slot", "source_publication"].forEach((k) => {
       if (form.elements[k] && prefill[k] != null) form.elements[k].value = prefill[k];
     });
-    if (form.elements.no_archive) form.elements.no_archive.checked = !!prefill.no_archive;
     form.elements.password.placeholder = prefill.has_password ? "(unchanged; leave blank to keep)" : "(none)";
     form.elements.source_password.placeholder = prefill.has_source_password ? "(unchanged; leave blank to keep)" : "";
     if (prefill.has_source_password) savedSourcePasswords.set(form, true);
@@ -11459,8 +11457,6 @@ function serverFormBody(form) {
     name: f.name.value.trim(),
     flavor: f.flavor.value,
     host: f.host.value.trim(), port: f.port.value.trim(), user: f.user.value.trim(), dbname: f.dbname.value.trim(),
-    baseline_dir: f.baseline_dir.value.trim(), baseline_s3: f.baseline_s3.value.trim(),
-    no_archive: !!f.no_archive.checked,
     archive_s3: f.archive_s3.value.trim(),
     s3_endpoint: f.s3_endpoint.value.trim(), s3_path_style: f.s3_path_style.value, s3_region: f.s3_region.value.trim(),
     s3_access_key_id: f.s3_access_key_id.value.trim(),

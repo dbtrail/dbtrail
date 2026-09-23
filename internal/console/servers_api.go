@@ -124,7 +124,7 @@ type serverRequest struct {
 	NoArchive   bool    `json:"no_archive"`
 	ArchiveS3   string  `json:"archive_s3"`
 	// LocalCopy is read on CREATE only (#1681): omitted or true gives the new
-	// server a local snapshot folder, <state dir>/baselines/<id> unless
+	// server a local snapshot folder, <state dir>/snapshots/<id> unless
 	// baseline_dir names another; false keeps its snapshots only at
 	// baseline_s3, which must then be set. An edit changes the local copy
 	// through PUT /api/backup-settings/servers/{id}, never here.
@@ -355,7 +355,8 @@ func localCopyOf(req serverRequest) newLocalCopy {
 func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase string, local newLocalCopy) (ServerEntry, error) {
 	entry.LocalKeepNewest = DefaultLocalKeepNewest
 	if entry.BaselineDir != "" {
-		if err := prepareLocalSnapshotDir(entry.BaselineDir); err != nil {
+		// On serve this only checks: it creates no folder (mayCreateFolders).
+		if err := s.prepareLocalSnapshotDir(entry.BaselineDir); err != nil {
 			return ServerEntry{}, err
 		}
 		// A named folder that already holds snapshots keeps all of them: the
@@ -392,7 +393,10 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 	// silently switch its reads off the daemon default. #1684 removes that
 	// fallback; until then only an explicit "yes" overrides it.
 	daemonDefault := s.cm.defaultBaselineDir != "" || s.cm.defaultBaselineS3 != ""
-	if local.want && added.BaselineDir == "" && (local.asked || !daemonDefault) {
+	// Only where DBTrail takes the snapshots: the read-only serve creates no
+	// folders, so a server it adds gets none and answers no until it is
+	// given one.
+	if s.mayCreateFolders && local.want && added.BaselineDir == "" && (local.asked || !daemonDefault) {
 		if def := s.cm.reg.DefaultBaselineDir(added.ID); def != "" {
 			if err := prepareLocalSnapshotDir(def); err != nil {
 				// The server is still worth having: it is listed with no
@@ -439,10 +443,29 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, ErrUnknownServer.Error())
 		return
 	}
-	var req serverRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeBodyDecodeError(w, err)
 		return
+	}
+	var req serverRequest
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&req); err != nil {
+		writeBodyDecodeError(w, err)
+		return
+	}
+	// The snapshot fields are edited on the Snapshots page (#1681): a
+	// request that leaves them out keeps what is stored, so a connection
+	// form opened before a folder change cannot put the old folder back.
+	var sent map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &sent)
+	if _, ok := sent["baseline_dir"]; !ok {
+		req.BaselineDir = old.BaselineDir
+	}
+	if _, ok := sent["baseline_s3"]; !ok {
+		req.BaselineS3 = old.BaselineS3
+	}
+	if _, ok := sent["no_archive"]; !ok {
+		req.NoArchive = old.NoArchive
 	}
 	dsn, err := buildDSN(req, old.DSN)
 	if err != nil {
@@ -488,7 +511,7 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 	// check it (#1681); an unchanged one is left alone, so a server whose
 	// folder broke can still have its connection edited.
 	if req.BaselineDir != old.BaselineDir && req.BaselineDir != "" {
-		if err := prepareLocalSnapshotDir(req.BaselineDir); err != nil {
+		if err := s.prepareLocalSnapshotDir(req.BaselineDir); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}

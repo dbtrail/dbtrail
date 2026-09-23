@@ -147,7 +147,7 @@ type backupSettingsServerDTO struct {
 	// (see backupSourceDefault), so it does not count as this server's copy.
 	LocalCopy bool `json:"local_copy"`
 	// DefaultDir is the folder a "yes" would use when none is typed:
-	// <state dir>/baselines/<id>. Empty where the registry has no file.
+	// <state dir>/snapshots/<id>. Empty where the registry has no file.
 	DefaultDir string `json:"default_dir,omitempty"`
 	// KeepNewest is the saved local retention (0 = keep every snapshot).
 	// It removes anything only while LocalCopy is on, BaselineS3 is empty
@@ -359,7 +359,7 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	// unchanged one is not re-checked, so a toggle elsewhere on the row still
 	// saves while the folder is broken.
 	if entry.BaselineDir != "" && entry.BaselineDir != before.BaselineDir {
-		if err := prepareLocalSnapshotDir(entry.BaselineDir); err != nil {
+		if err := s.prepareLocalSnapshotDir(entry.BaselineDir); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}

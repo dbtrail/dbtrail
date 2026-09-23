@@ -72,39 +72,25 @@ func TestBackupSettingsDaemonRowsAreAllLabeled(t *testing.T) {
 	}
 }
 
-// TestServerFormCarriesTheBackupFieldsAsPassthrough is the wipe hazard the
-// move created (#1582): PUT /api/servers/{id} REPLACES the entry, so a form
-// that stopped sending baseline_dir/baseline_s3/no_archive would silently
-// clear a server's backup configuration on every unrelated edit. The fields
-// left the visible form for the settings page; they must survive in it as
-// hidden passthroughs, prefilled and submitted like before.
-func TestServerFormCarriesTheBackupFieldsAsPassthrough(t *testing.T) {
+// TestServerFormLeavesTheSnapshotFieldsAlone (#1681): the connection form does
+// not carry the snapshot folder, S3 destination or archive toggle at all. It
+// used to post them back from hidden fields so a replacing PUT would not wipe
+// them, which put back an OLD folder whenever the form had been opened before
+// a change on the Snapshots page. The server now keeps what a request leaves
+// out (TestServersUpdate_keepsSnapshotFieldsItWasNotSent).
+func TestServerFormLeavesTheSnapshotFieldsAlone(t *testing.T) {
 	js := readAsset(t, "app.js")
 	form := jsFunctionBody(t, js, "buildServerForm")
 	for _, field := range []string{`name: "baseline_dir"`, `name: "baseline_s3"`, `name: "no_archive"`} {
-		if !strings.Contains(form, field) {
-			t.Errorf("buildServerForm no longer carries %s; a plain edit now WIPES that field on the entry", field)
+		if strings.Contains(form, field) {
+			t.Errorf("buildServerForm carries %s again; a form opened before a Snapshots-page change would post the old value back", field)
 		}
-	}
-	// Hidden, not visible: the settings page is the one editor. A visible
-	// duplicate saves to one store from two places, one of them stale.
-	if strings.Contains(form, `srvField("Backup dir"`) || strings.Contains(form, `srvField("Backup S3"`) {
-		t.Error("the server form still renders visible backup-location fields; they moved to the settings page")
 	}
 	body := jsFunctionBody(t, js, "serverFormBody")
-	for _, read := range []string{"f.baseline_dir.value", "f.baseline_s3.value", "f.no_archive.checked"} {
-		if !strings.Contains(body, read) {
-			t.Errorf("serverFormBody no longer sends %s; the PUT will replace the entry without it", read)
+	for _, key := range []string{"baseline_dir", "baseline_s3", "no_archive"} {
+		if strings.Contains(body, key) {
+			t.Errorf("serverFormBody sends %s again", key)
 		}
-	}
-	// And the prefill still fills the hidden halves, or the passthrough
-	// passes empty strings through — the exact wipe it exists to prevent.
-	show := jsFunctionBody(t, js, "showServerForm")
-	if !strings.Contains(show, `"baseline_dir", "baseline_s3"`) {
-		t.Error("showServerForm's prefill list no longer covers the hidden backup fields")
-	}
-	if !strings.Contains(show, "form.elements.no_archive.checked = !!prefill.no_archive") {
-		t.Error("showServerForm no longer prefills no_archive; the hidden checkbox submits unchecked for every edit")
 	}
 }
 

@@ -208,6 +208,9 @@ func TestUpConsoleConfig_localPruneLoopFollowsTheLoopGate(t *testing.T) {
 	if !cfg.LocalPruneLoop {
 		t.Error("a registry and no retention: the loop runs, the console must be told")
 	}
+	if !cfg.MayCreateFolders {
+		t.Error("watch takes the snapshots, so it must be allowed to create their folders")
+	}
 	cfg, err = upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", opts, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -21,6 +21,7 @@ func newBackupSettingsServer(t *testing.T, defaults BackupSettingsDefaults, base
 		Listen: "127.0.0.1:8090", Token: "t", Registry: reg,
 		BaselineDir: baselineDir, BaselineS3: baselineS3,
 		BackupSettingsDefaults: defaults,
+		MayCreateFolders:       true, // the watch daemon's settings page
 	})
 	if err != nil {
 		t.Fatal(err)

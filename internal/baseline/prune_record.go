@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -47,12 +48,50 @@ func ReadLastPrune(dir string) (rec LastPrune, ok bool, err error) {
 	return rec, true, nil
 }
 
-// writeRecord and removeRecord are indirected only so a test can fail the
-// write and see the stale record go.
+// writeRecord, writeFailureRecord and removeRecord are indirected only so a
+// test can fail the write and see the stale record go.
 var (
-	writeRecord  = writeLastPrune
-	removeRecord = os.Remove
+	writeRecord        = writeLastPrune
+	writeFailureRecord = writePruneFailure
+	removeRecord       = os.Remove
 )
+
+// LastPruneFailureFile records, beside the snapshots, the last prune attempt
+// that FAILED (#1681): when, and why. A successful attempt removes it. Without
+// it a folder that stops shrinking is visible only in the daemon's log, while
+// the page goes on saying how many snapshots it keeps.
+const LastPruneFailureFile = ".last-prune-failure.json"
+
+// PruneFailure is that record.
+type PruneFailure struct {
+	At     time.Time `json:"at"`
+	Reason string    `json:"reason"`
+}
+
+// ReadLastPruneFailure reads dir's failure record; ok is false when the last
+// attempt did not fail. An unreadable record is an error, never "no failure".
+func ReadLastPruneFailure(dir string) (rec PruneFailure, ok bool, err error) {
+	b, err := os.ReadFile(filepath.Join(dir, LastPruneFailureFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return PruneFailure{}, false, nil
+	}
+	if err != nil {
+		return PruneFailure{}, false, fmt.Errorf("read the prune failure record: %w", err)
+	}
+	if err := json.Unmarshal(b, &rec); err != nil || rec.At.IsZero() || rec.Reason == "" {
+		return PruneFailure{}, false, fmt.Errorf("the prune failure record %s cannot be read", filepath.Join(dir, LastPruneFailureFile))
+	}
+	return rec, true, nil
+}
+
+func writePruneFailure(dir string, rec PruneFailure) error {
+	rec.At = rec.At.UTC()
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic0600(dir, LastPruneFailureFile, b)
+}
 
 // writeLastPrune replaces dir's record atomically (temp file, fsync, rename),
 // 0600 like the rest of the state DBTrail writes.
@@ -62,7 +101,11 @@ func writeLastPrune(dir string, rec LastPrune) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, LastPruneFile+".tmp-*")
+	return writeFileAtomic0600(dir, LastPruneFile, b)
+}
+
+func writeFileAtomic0600(dir, name string, b []byte) error {
+	tmp, err := os.CreateTemp(dir, name+".tmp-*")
 	if err != nil {
 		return err
 	}
@@ -83,7 +126,7 @@ func writeLastPrune(dir string, rec LastPrune) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, filepath.Join(dir, LastPruneFile))
+	return os.Rename(tmpName, filepath.Join(dir, name))
 }
 
 // isPruneArtifact reports whether path is the prune's own bookkeeping directly
@@ -94,8 +137,12 @@ func isPruneArtifact(root, path string) bool {
 		return false
 	}
 	name := filepath.Base(path)
-	return name == LastPruneFile || name == pruneLockName ||
-		(len(name) > len(LastPruneFile+".tmp-") && name[:len(LastPruneFile+".tmp-")] == LastPruneFile+".tmp-")
+	for _, rec := range []string{LastPruneFile, LastPruneFailureFile} {
+		if name == rec || strings.HasPrefix(name, rec+".tmp-") {
+			return true
+		}
+	}
+	return name == pruneLockName
 }
 
 // CountLocalSnapshots counts the snapshot folders directly under dir,

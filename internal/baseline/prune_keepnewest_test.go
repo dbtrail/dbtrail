@@ -673,3 +673,81 @@ func TestLastPrune_aFailedWriteDoesNotLeaveAStaleRecord(t *testing.T) {
 		t.Fatalf("a stale record survived a failed write: ok=%v err=%v", ok, err)
 	}
 }
+
+// ─── the failed-attempt record ───────────────────────────────────────────────
+
+// A prune that could not remove what it planned records when and why, beside
+// the snapshots, so a folder that stops shrinking is not visible only in the
+// log. The next attempt that succeeds clears it.
+func TestPruneFailure_recordedAndClearedBySuccess(t *testing.T) {
+	root := t.TempDir()
+	for i := 4; i >= 1; i-- {
+		makeSnapshot(t, root, snapName(days(10*i)), true, "shop/orders")
+	}
+	orig := renameAside
+	t.Cleanup(func() { renameAside = orig })
+	renameAside = func(string, string) error { return os.ErrPermission }
+	keepNewest(t, root, 1)
+	f, ok, err := ReadLastPruneFailure(root)
+	if err != nil || !ok {
+		t.Fatalf("no failure recorded: ok=%v err=%v", ok, err)
+	}
+	if !f.At.Equal(kn) || !strings.Contains(f.Reason, "3 snapshots could not be removed") {
+		t.Errorf("failure = %+v", f)
+	}
+	info, err := os.Stat(filepath.Join(root, LastPruneFailureFile))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("failure record mode: %v %v", info, err)
+	}
+	// A dry run neither records nor clears.
+	renameAside = orig
+	if _, err := PruneLocal(context.Background(), PruneOptions{LocalDir: root, KeepNewest: 1, Now: kn, DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := ReadLastPruneFailure(root); !ok {
+		t.Fatal("a dry run cleared the failure")
+	}
+	keepNewest(t, root, 1)
+	if _, ok, err := ReadLastPruneFailure(root); ok || err != nil {
+		t.Fatalf("a successful prune left the failure: ok=%v err=%v", ok, err)
+	}
+	// And the record is never uploaded or taken for a snapshot.
+	if !isPruneArtifact(root, filepath.Join(root, LastPruneFailureFile)) {
+		t.Error("the failure record is not excluded from the upload")
+	}
+}
+
+// A prune that fails outright (the folder cannot be listed) is recorded too.
+func TestPruneFailure_anErrorIsRecorded(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lists through permissions")
+	}
+	root := t.TempDir()
+	makeSnapshot(t, root, snapName(days(10)), true, "shop/orders")
+	if err := os.Chmod(root, 0o300); err != nil { // writable, not listable
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+	if _, err := PruneLocal(context.Background(), PruneOptions{LocalDir: root, KeepNewest: 1, Now: kn}); err == nil {
+		t.Fatal("test premise: the prune did not fail")
+	}
+	_ = os.Chmod(root, 0o700)
+	if f, ok, err := ReadLastPruneFailure(root); err != nil || !ok || f.Reason == "" {
+		t.Fatalf("an outright failure is not recorded: %+v ok=%v err=%v", f, ok, err)
+	}
+}
+
+// Another prune holding the lock is not a failure: nothing is recorded.
+func TestPruneFailure_busyIsNotAFailure(t *testing.T) {
+	root := t.TempDir()
+	makeSnapshot(t, root, snapName(days(10)), true, "shop/orders")
+	unlock, _, err := lockPrune(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	keepNewest(t, root, 1)
+	if _, ok, _ := ReadLastPruneFailure(root); ok {
+		t.Fatal("stepping aside for another prune was recorded as a failure")
+	}
+}

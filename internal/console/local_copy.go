@@ -33,11 +33,16 @@ const DefaultLocalKeepNewest = 3
 const maxLocalKeepNewest = 1000
 
 // localSnapshotsDirName is the folder under the state directory that holds
-// one folder per server, named by the server's id.
-const localSnapshotsDirName = "baselines"
+// one folder per server, named by the server's id. NOT "baselines": the
+// compose stack documents <state dir>/baselines as the daemon's own startup
+// folder (BASELINE_DIR), and a server folder nested inside it was walked into
+// by that folder's S3 upload, which published the server's files under the
+// startup prefix and then refused the whole upload at the server's `current`
+// link. Pinned by TestDefaultFolder_isNeverInsideTheStartupFolder.
+const localSnapshotsDirName = "snapshots"
 
 // DefaultBaselineDir is where server id keeps its local snapshots unless the
-// operator names another folder: <state dir>/baselines/<id>, where the state
+// operator names another folder: <state dir>/snapshots/<id>, where the state
 // directory is the one holding this registry file. Keyed by the id (random
 // hex, stable, path-safe), never by the display name, which is editable free
 // text: renaming a server must not orphan its snapshots. "" for an in-memory
@@ -63,6 +68,40 @@ var errLocalDirInvalid = errors.New("invalid snapshot folder")
 // A missing folder is created (0700, like the registry's own directory, since
 // snapshots hold the rows of the operator's tables); an existing one must be a
 // folder DBTrail can write into, proven by writing into it.
+//
+// Only the watch daemon creates and writes (s.mayCreateFolders). The
+// read-only serve writes nothing on the filesystem but its registry, so there
+// it only CHECKS: the folder must exist, be a folder, and be writable by this
+// user, and a missing one is refused with where to create it.
+func (s *Server) prepareLocalSnapshotDir(dir string) error {
+	if !s.mayCreateFolders {
+		return checkLocalSnapshotDir(dir)
+	}
+	return prepareLocalSnapshotDir(dir)
+}
+
+// checkLocalSnapshotDir is the read-only half: no folder is created and
+// nothing is written.
+func checkLocalSnapshotDir(dir string) error {
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("%w: the folder must be a full path starting with /, because a relative one would depend on where DBTrail was started (got %q)", errLocalDirInvalid, dir)
+	}
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("%w: the folder %s does not exist, and this DBTrail only reads, so it does not create folders. Create it, or save this where DBTrail takes the snapshots", errLocalDirInvalid, dir)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: DBTrail could not open the folder %s: %v", errLocalDirInvalid, dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: %s is a file, not a folder", errLocalDirInvalid, dir)
+	}
+	if err := dirWritable(dir); err != nil {
+		return fmt.Errorf("%w: DBTrail cannot write into the folder %s: %v", errLocalDirInvalid, dir, err)
+	}
+	return nil
+}
+
 func prepareLocalSnapshotDir(dir string) error {
 	if !filepath.IsAbs(dir) {
 		return fmt.Errorf("%w: the folder must be a full path starting with /, because a relative one would depend on where DBTrail was started (got %q)", errLocalDirInvalid, dir)

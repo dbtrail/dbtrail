@@ -66,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose Save could only be refused.
 - **Every new server keeps a copy of its snapshots on this machine, and keeps
   the newest 3** (#1681). A server added from the console gets a folder of its
-  own, `<state dir>/baselines/<server id>` (`/var/lib/bintrail/baselines/...`
+  own, `<state dir>/snapshots/<server id>` (`/var/lib/bintrail/snapshots/...`
   in the compose stack), created `0700` and named by the server's id so a
   rename orphans nothing. The per-server settings under **Where and how
   often** ask one question instead: keep a copy of this server's snapshots on
@@ -90,7 +90,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The Snapshots listing (`GET /api/baselines`) reports `local_retention`
     and, once a prune removed anything, `last_prune` (when and how many), read
     from `.last-prune.json` beside the snapshots, so it survives a restart and
-    covers `bintrail baseline --baseline-retain` too. Two prunes of one folder
+    covers `bintrail baseline --baseline-retain` too. A prune attempt that
+    fails (a folder that cannot be listed, a snapshot that cannot be moved
+    aside, copies that could not be checked in S3) is recorded beside the
+    snapshots as well and reported as `last_prune_failure` until an attempt
+    succeeds, so a folder that stops shrinking is not visible only in the
+    log. Two prunes of one folder
     never overlap; a snapshot moved aside counts as removed even when deleting
     its files fails and is retried; reclaimed bytes no longer count a reused
     file a newer snapshot still links.
@@ -98,7 +103,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#1681). Saving a server's folder now creates a missing one, and refuses a
   relative path, a file, or a folder DBTrail cannot write into, saying which.
   Before, the save succeeded and the Snapshots page then showed a raw "no
-  such file or directory" with nothing to click.
+  such file or directory" with nothing to click. The read-only `serve`
+  creates nothing: there a folder must already exist and be writable.
+- **The server edit form no longer carries the snapshot folder, S3
+  destination or archive toggle** (#1681), and `PUT /api/servers/{id}`
+  keeps what a request leaves out. A form opened before a change on the
+  Snapshots page used to post the old folder back.
 - **The Backups & disk space card is gone** (#1681), and with it
   `GET /api/baseline-refresh`. With reuse unconditional its "On" said
   nothing; the saving it described is now said beside each server's
