@@ -5,14 +5,14 @@
   "viewport": "1280x720",
   "runs": {
     "clean": {
-      "clicks_to_first_snapshot": 11,
-      "clicks_to_first_snapshot_minimum": 10,
+      "clicks_to_first_snapshot": 10,
+      "clicks_to_first_snapshot_minimum": 8,
       "fields_typed": 8,
-      "forced_choices": 1,
-      "trips_out_of_browser": 2,
+      "forced_choices": 0,
+      "trips_out_of_browser": 1,
       "words_per_step_max": 146,
       "words_per_error_max": 71,
-      "banned_words": 77,
+      "banned_words": 59,
       "yellow_red": 4,
       "changes_visible_without_reload": 3,
       "changes_visible_within_5s": 0,
@@ -28,8 +28,8 @@
       "fields_typed": 5,
       "forced_choices": 0,
       "trips_out_of_browser": 1,
-      "words_per_step_max": 141,
-      "banned_words": 26,
+      "words_per_step_max": 127,
+      "banned_words": 21,
       "yellow_red": 6,
       "primary_below_fold_px": 606
     },
@@ -38,9 +38,9 @@
       "fields_typed": 5,
       "forced_choices": 0,
       "trips_out_of_browser": 2,
-      "words_per_step_max": 141,
+      "words_per_step_max": 127,
       "words_per_error_max": 199,
-      "banned_words": 26,
+      "banned_words": 21,
       "primary_below_fold_px": 671
     },
     "refused-update": {
@@ -61,7 +61,6 @@
           "Snapshots (sidebar) (optional)",
           "Save (the snapshot location)",
           "Snapshots (sidebar)",
-          "reload the page (after creating the folder)",
           "Create backup"
         ]
       },
@@ -78,14 +77,11 @@
         ]
       },
       "forced_choices": {
-        "choices": [
-          "a folder or a bucket for the snapshots: two empty places and no default"
-        ]
+        "choices": []
       },
       "trips_out_of_browser": {
         "trips": [
-          "create the capture user: run the permissions block on MySQL",
-          "create the snapshot folder (mkdir)"
+          "create the capture user: run the permissions block on MySQL"
         ]
       },
       "words_per_step_max": {
@@ -203,8 +199,8 @@
       },
       "banned_words": {
         "per_word": {
-          "backup": 40,
-          "baseline": 9,
+          "backup": 26,
+          "baseline": 5,
           "daemon": 2,
           "em dash": 3,
           "index": 12,
@@ -285,41 +281,41 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "overview",
+        "worst": "save-result",
         "steps": [
           {
             "step": "connect",
             "kind": "step",
-            "words_above_fold": 115,
-            "words_whole": 516,
+            "words_above_fold": 84,
+            "words_whole": 366,
             "layer": "modal"
           },
           {
             "step": "save-result",
             "kind": "step",
             "words_above_fold": 127,
-            "words_whole": 685,
+            "words_whole": 373,
             "layer": "notice"
           },
           {
             "step": "after-ok",
             "kind": "step",
-            "words_above_fold": 134,
-            "words_whole": 530,
+            "words_above_fold": 64,
+            "words_whole": 218,
             "layer": "modal"
           },
           {
             "step": "overview",
             "kind": "step",
-            "words_above_fold": 141,
-            "words_whole": 218,
+            "words_above_fold": 116,
+            "words_whole": 186,
             "layer": "view"
           }
         ]
       },
       "banned_words": {
         "per_word": {
-          "backup": 6,
+          "backup": 1,
           "daemon": 1,
           "em dash": 3,
           "index": 7,
@@ -381,41 +377,41 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "overview",
+        "worst": "save-result",
         "steps": [
           {
             "step": "connect",
             "kind": "step",
-            "words_above_fold": 109,
-            "words_whole": 590,
+            "words_above_fold": 93,
+            "words_whole": 409,
             "layer": "modal"
           },
           {
             "step": "save-refused",
             "kind": "error",
-            "words_above_fold": 199,
-            "words_whole": 836,
+            "words_above_fold": 43,
+            "words_whole": 475,
             "layer": "notice"
           },
           {
             "step": "save-result",
             "kind": "step",
             "words_above_fold": 127,
-            "words_whole": 759,
+            "words_whole": 416,
             "layer": "notice"
           },
           {
             "step": "after-ok",
             "kind": "step",
-            "words_above_fold": 134,
-            "words_whole": 604,
+            "words_above_fold": 73,
+            "words_whole": 261,
             "layer": "modal"
           },
           {
             "step": "overview",
             "kind": "step",
-            "words_above_fold": 141,
-            "words_whole": 218,
+            "words_above_fold": 116,
+            "words_whole": 186,
             "layer": "view"
           }
         ]
@@ -425,7 +421,7 @@
       },
       "banned_words": {
         "per_word": {
-          "backup": 6,
+          "backup": 1,
           "daemon": 1,
           "em dash": 3,
           "index": 7,
