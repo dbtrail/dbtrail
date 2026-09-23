@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.87.0] - 2026-09-23
+
 ### Added
 - **The Snapshots page says what this machine does with older copies**
   (#1681). Above the list: how many snapshots the local folder keeps and the
