@@ -180,13 +180,17 @@ func TestRegistryFilePerms(t *testing.T) {
 	if perm := di.Mode().Perm(); perm != 0o700 {
 		t.Errorf("registry dir perms = %o, want 700", perm)
 	}
-	// Atomic write leaves no temp files behind.
+	// Atomic write leaves no temp files behind. The prefix is the file's own
+	// name with a leading dot and NO trailing dash: the shared writer names its
+	// temp file after the whole base name, so a dash here stopped matching
+	// ".console-servers.yaml-123" and the guard would have seen every leftover
+	// as no leftover at all.
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".console-servers-") {
+		if strings.HasPrefix(e.Name(), "."+filepath.Base(path)) {
 			t.Errorf("leftover temp file: %s", e.Name())
 		}
 	}
