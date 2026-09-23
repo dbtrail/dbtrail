@@ -523,3 +523,20 @@ func TestProveLoopback_retryIsBounded(t *testing.T) {
 		t.Errorf("the retry took %v, want it bounded near %v", d, loopbackRetryTimeout)
 	}
 }
+
+// A table on the wrong engine that HAS a key is checkInnoDB's finding, not
+// this one's: naming it here would tell somebody to add a key it already has.
+func TestCheckPrimaryKeys_aKeyedMyISAMTableIsNotNamed(t *testing.T) {
+	db, mock, done := pkDB(t)
+	defer done()
+	mock.ExpectQuery("information_schema.COLUMNS").WillReturnRows(colRowsNamed(
+		[4]string{"shop", "legacy", "id", "PRI"},
+	))
+	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(tabRowsEngine(
+		[3]string{"shop", "legacy", "MyISAM"},
+	))
+	got := checkPrimaryKeys(db, nil, snapshotPending)
+	if got.Status != StatusPass || len(got.Subjects) != 0 || len(got.Statements) != 0 {
+		t.Errorf("a keyed MyISAM table reached the key check: %+v", got)
+	}
+}
