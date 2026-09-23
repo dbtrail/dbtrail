@@ -301,7 +301,7 @@ func TestCheckSavesTheDraftBeforeItRunsTheChecks(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("no draft after a failed check: (%v, %v)", ok, err)
 	}
-	if d.SourceHost != "db.example.com" || d.SourcePassword != "Ab3-xyz" {
+	if d.SourceHost != "db.example.com" || d.SourceUser != "dbtrail" {
 		t.Errorf("the draft did not keep what was typed: %+v", d)
 	}
 	// The automatic name is NOT stored: it is not something the person
@@ -486,10 +486,11 @@ func TestCheckRetryFromARestoredDraftIsNotRefusedAsADuplicate(t *testing.T) {
 		t.Errorf("the draft stores the automatic name %q as if it had been typed", d.Name)
 	}
 
-	// Reload: the restored form sends exactly what the draft holds.
+	// Reload: the restored form sends what the draft holds, plus the
+	// password the person types again (a draft never keeps it, #1804).
 	restored, err := json.Marshal(map[string]string{
 		"name": d.Name, "flavor": d.Flavor, "source_host": d.SourceHost, "source_port": d.SourcePort,
-		"source_user": d.SourceUser, "source_password": d.SourcePassword, "schemas": d.Schemas,
+		"source_user": d.SourceUser, "source_password": "p", "schemas": d.Schemas,
 	})
 	if err != nil {
 		t.Fatal(err)

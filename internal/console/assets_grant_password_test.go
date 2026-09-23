@@ -216,7 +216,9 @@ console.log(JSON.stringify(genSourcePassword()));`)
 	}
 }
 
-// formHarnessJS extends the render harness so the REAL buildServerForm,
+// formHarnessJS extends the render harness so the REAL buildServerForm (the
+// long form, which a new server reaches through the Connect screen's link since
+// #1804, so every add here asks for it by that door),
 // showServerForm, serverFormBody and saveServer run: form.elements by name,
 // event listeners that fire, data- attributes in dataset, a selector engine
 // for the handful of selectors the form uses, and a cryptographic random
@@ -245,7 +247,7 @@ Object.defineProperty(FakeEl.prototype, "elements", { get() { const e = {}; walk
 const mount = new FakeEl("div"), wrap = new FakeEl("div");
 document.getElementById = (id) => id === "server-form-mount" ? mount : id === "server-add-wrap" ? wrap : id === "server-form" ? (mount.children[0] || null) : null;
 const form = () => mount.children[0];
-const show = (caps, prefill) => { vm.runInContext("capsCache = " + JSON.stringify(caps) + ";", ctx); ctx.__prefill = prefill; vm.runInContext("showServerForm(__prefill)", ctx); return form(); };
+const show = (caps, prefill) => { vm.runInContext("capsCache = " + JSON.stringify(caps) + ";", ctx); ctx.__prefill = prefill; vm.runInContext("showServerForm(__prefill, { full: true })", ctx); return form(); };
 const state = (f) => { const blk = f.querySelector("pre[data-grant=mysql]").textContent; return { user: f.elements.source_user.value, pw: f.elements.source_password.value, block: blk.split("\n")[0], runnable: blk.split("\n").filter((l) => l.trim() && !l.trim().startsWith("--")).length }; };
 const body = (f) => { ctx.__f = f; return vm.runInContext("serverFormBody(__f)", ctx); };
 FakeEl.prototype.select = function () { this.__selected = true; };

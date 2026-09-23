@@ -408,31 +408,38 @@ try {
     after.focus === "server-test" ? ok("notice: focus returns to the Test button") : bad("notice: focus returns to the Test button", JSON.stringify(after));
   }
 
-  // #1767: Test on a NEW server runs the source half of the startup checks
-  // Save runs, on the source as typed, instead of answering "nothing to
-  // test". A wrong password against the suite's own MySQL is deterministic:
-  // the source connection check fails, and the notice says capture cannot
-  // start, naming the check.
+  // #1804: a NEW server opens the Connect screen, whose one button checks the
+  // database and starts capture only when nothing failed. A wrong password
+  // against the suite's own MySQL is deterministic: the check refuses, and
+  // the notice says so in plain words (access_denied), not as a check name.
+  // Cancel then throws the saved form away, so no later page load reopens it.
   await page.click("#server-cancel");
   await page.click("#server-add");
-  await page.waitForSelector('#server-form-mount input[name="source_host"]', { timeout: 5000 });
+  await page.waitForSelector('#server-form[data-connect] input[name="source_host"]', { timeout: 5000 });
   await page.fill('#server-form-mount input[name="name"]', "e2e-draft");
   await page.fill('#server-form-mount input[name="source_host"]', "127.0.0.1");
   await page.fill('#server-form-mount input[name="source_port"]', "13306");
   await page.fill('#server-form-mount input[name="source_user"]', "root");
   await page.fill('#server-form-mount input[name="source_password"]', "definitely-not-the-password");
-  await page.click("#server-test");
+  await page.click("#server-form-mount button[type=submit]");
   let draft = "";
-  for (let i = 0; i < 60 && !/Capture cannot start|ready to capture|nothing to test/.test(draft); i++) {
+  for (let i = 0; i < 60 && !/Capture did not start|Capture started/.test(draft); i++) {
     await page.waitForTimeout(250);
     draft = await page.evaluate(() => (document.querySelector("#notice-mount .notice") || {}).textContent || "");
   }
-  /Capture cannot start/.test(draft) && /Source MySQL connection/.test(draft) && !/nothing to test/.test(draft)
-    ? ok("form: Test on a new server runs the source checks")
-    : bad("form: Test on a new server runs the source checks", JSON.stringify(draft.slice(0, 300)));
+  /Capture did not start/.test(draft) && /MySQL refused the user or the password/.test(draft)
+    ? ok("connect: a wrong password is refused in plain words")
+    : bad("connect: a wrong password is refused in plain words", JSON.stringify(draft.slice(0, 300)));
   await page.keyboard.press("Escape");
   await page.waitForTimeout(200);
   await page.click("#server-cancel");
+  let saved = null;
+  for (let i = 0; i < 20; i++) {
+    await page.waitForTimeout(150);
+    saved = await page.evaluate(async () => (await api("/api/servers/draft")).found);
+    if (saved === false) break;
+  }
+  saved === false ? ok("connect: Cancel throws the saved form away") : bad("connect: Cancel throws the saved form away", String(saved));
 
   // Scenario 4 — the REAL missing-index path (not a fabricated string): query
   // a data endpoint against the default (unprovisioned wp) server, take the

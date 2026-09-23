@@ -20,7 +20,7 @@ func TestDraftStoreRoundTripsEveryField(t *testing.T) {
 	want := ConnectDraft{
 		Name: "prod", Flavor: FlavorPostgres,
 		SourceHost: "db.example.com", SourcePort: "5433", SourceUser: "dbtrail",
-		SourcePassword: "Ab3-xyz", Schemas: "shop,billing",
+		Schemas:        "shop,billing",
 		SourceDatabase: "appdb", SourceSlot: "slot", SourcePublication: "pub",
 	}
 	if err := d.Save(want); err != nil {
@@ -36,29 +36,28 @@ func TestDraftStoreRoundTripsEveryField(t *testing.T) {
 	}
 }
 
-// Reading it back is the whole point: the person left the page with the SQL
-// block on screen, and the block has to come back with the SAME password or
-// the account they already created no longer matches the form.
+// Reading it back is the whole point: the person left the page to run the SQL
+// block, and what they typed has to be there when they come back.
 func TestDraftStoreSurvivesANewProcess(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "console-connect-draft.yaml")
-	if err := NewDraftStore(path).Save(ConnectDraft{SourceHost: "db", SourcePassword: "Ab3-xyz"}); err != nil {
+	if err := NewDraftStore(path).Save(ConnectDraft{SourceHost: "db", SourceUser: "dbtrail"}); err != nil {
 		t.Fatal(err)
 	}
 	got, ok, err := NewDraftStore(path).Load()
 	if err != nil || !ok {
 		t.Fatalf("a second store did not find the draft: (%v, %v)", ok, err)
 	}
-	if got.SourcePassword != "Ab3-xyz" {
-		t.Errorf("password came back as %q", got.SourcePassword)
+	if got.SourceHost != "db" || got.SourceUser != "dbtrail" {
+		t.Errorf("draft came back as %+v", got)
 	}
 }
 
-// It holds a password, so it is written like the registry: only its owner may
-// read it.
+// It names a database and its user, so it is written like the registry: only
+// its owner may read it.
 func TestDraftStoreFileIsPrivate(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	path := filepath.Join(dir, "console-connect-draft.yaml")
-	if err := NewDraftStore(path).Save(ConnectDraft{SourceHost: "db", SourcePassword: "s3cret"}); err != nil {
+	if err := NewDraftStore(path).Save(ConnectDraft{SourceHost: "db", SourceUser: "u"}); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(path)
@@ -228,7 +227,7 @@ func TestDraftEndpointRoundTrip(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("GET: code=%d body=%s", rec.Code, body)
 	}
-	for _, want := range []string{`"found":true`, `"source_host":"db.example.com"`, `"source_password":"Ab3-xyz"`, `"source_port":"3307"`} {
+	for _, want := range []string{`"found":true`, `"source_host":"db.example.com"`, `"source_port":"3307"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("GET body missing %s: %s", want, body)
 		}
@@ -260,8 +259,8 @@ func TestDraftIsNeverListedAsAServer(t *testing.T) {
 	}
 }
 
-// The draft holds a password, so reading it is not a read-tier action: it is
-// classified with creating a server, not with listing one.
+// Reading the draft is not a read-tier action: it is classified with creating
+// a server, not with listing one.
 func TestDraftRoutesAreWriteTier(t *testing.T) {
 	for _, m := range []struct{ method, path string }{
 		{"GET", "/api/servers/draft"},
@@ -277,7 +276,7 @@ func TestDraftRoutesAreWriteTier(t *testing.T) {
 		// the routes are declared with: that would assert the constant equals
 		// itself and stay green if the whole tier were lowered to a read.
 		if perm != ext.PermServersWrite {
-			t.Errorf("%s %s requires %q, want %q — a read-tier session must not read a saved password",
+			t.Errorf("%s %s requires %q, want %q ; a read-tier session must not read a half-filled Connect form",
 				m.method, m.path, perm, ext.PermServersWrite)
 		}
 		if perm == ext.PermServersRead {
