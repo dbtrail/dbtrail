@@ -268,3 +268,21 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		t.Errorf("only %d of the row's own sentences were checked for banned words; the filter lost them", checked)
 	}
 }
+
+// TestNavigate_samePageGoesToItsTop pins the scroll reset the first-run walk
+// needed once saving a snapshot folder stopped forcing a reload (#1681): a
+// click on the page you are on goes to its top, and ONLY that case, because
+// moving between pages keeps its behavior. The walk's clean run is the
+// behavioral check (primary_below_fold_px measurable again on snapshot-ready);
+// this keeps the shape from being simplified into a reset on every navigation.
+func TestNavigate_samePageGoesToItsTop(t *testing.T) {
+	body := jsFunctionBody(t, readAsset(t, "app.js"), "navigate")
+	for _, want := range []string{`const samePage = location.pathname === "/" + route;`, `if (push && samePage && !hash) {`, `main.scrollTop = 0;`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("navigate lost %q", want)
+		}
+	}
+	if strings.Index(body, "const samePage") > strings.Index(body, "history.pushState") {
+		t.Error("samePage is read after pushState, when the address is already the new one: every navigation would count as the same page")
+	}
+}

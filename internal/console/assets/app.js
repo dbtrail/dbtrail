@@ -1038,7 +1038,18 @@ function navigate(route, params, push = true) {
   const qs = params && Object.keys(params).length
     ? "?" + new URLSearchParams(params).toString() : "";
   routeArrivedFrom = "";
+  // A click on the page you are already on (Snapshots, from its own #setup
+  // section) goes to its top. The page scrolls inside .main, and nothing
+  // reset it, so that click left the reader scrolled down past the button at
+  // the top (#1681's first-run walk measured it). Only the SAME page: moving
+  // between pages keeps today's behavior, which other measurements rely on.
+  // An address with a section keeps its own jump (scrollToSection).
+  const samePage = location.pathname === "/" + route;
   if (push) history.pushState({ route }, "", "/" + route + qs + hash);
+  if (push && samePage && !hash) {
+    const main = document.querySelector(".main");
+    if (main) main.scrollTop = 0;
+  }
   renderRoute();
 }
 
