@@ -179,7 +179,18 @@ func TestWordList_sentenceHitsSeesWhatItShould(t *testing.T) {
 // from the list, and the end text says what to have at hand, where the
 // history lives, how to stop, and where the start page is.
 func TestInstaller_aCleanRunSpeaksTheWordList(t *testing.T) {
-	r := install(t)
+	// The default run, and the successful runs that print extra lines: a
+	// port chosen by hand (the start page shows how) and a metrics port
+	// moved because 9090 was taken.
+	for _, env := range [][]string{nil, {"DBTRAIL_PORT=8091"}, {"BUSY_PORTS=9090"}} {
+		t.Run(strings.Join(append([]string{"default"}, env...), " "), func(t *testing.T) {
+			cleanRunSpeaksTheWordList(t, env...)
+		})
+	}
+}
+
+func cleanRunSpeaksTheWordList(t *testing.T, env ...string) {
+	r := install(t, env...)
 	if r.failed || !strings.Contains(r.out, "DBTrail is up.") {
 		t.Fatalf("the clean install did not finish:\n%s", r.out)
 	}

@@ -976,7 +976,8 @@ func noSnapshotBeforeError(cmd *cobra.Command, table string, at time.Time, locat
 	return &noSnapshotError{err: err, msg: fmt.Sprintf(
 		"reconstruct needs a snapshot of %s taken at or before %s, and %q has none. It starts from that snapshot "+
 			"and replays the changes recorded after it. A snapshot taken now only answers moments after it: "+
-			"point --baseline-dir or --baseline-s3 at a location holding an older one, or, if the snapshots there "+
-			"are all later, ask for a moment after the oldest (`%s` writes them)",
-		table, when, location, snapshotCommand(cmd))}
+			"point --baseline-dir or --baseline-s3 at a location holding an older snapshot that includes this table "+
+			"(`%s` writes them). If the snapshots there are later than %s, a later moment works; if none of them "+
+			"includes the table, no moment does until one that includes it is taken",
+		table, when, location, snapshotCommand(cmd), when)}
 }

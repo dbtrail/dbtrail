@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -126,13 +128,31 @@ func TestReconstruct1807_noSnapshotBeforeTheMoment(t *testing.T) {
 				if !errors.Is(err, reconstruct.ErrNoBaseline) {
 					t.Errorf("the refusal no longer unwraps to ErrNoBaseline: %v", err)
 				}
-				for _, want := range []string{dir, "A snapshot taken now only answers moments after it"} {
+				for _, want := range []string{dir, "A snapshot taken now only answers moments after it", "that includes this table"} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("the message does not say %q:\n%s", want, err)
 					}
 				}
 			})
 		}
+	}
+}
+
+// The control for the fixture above: the same later snapshot IS found for a
+// moment after it, so "only a later snapshot" cannot pass for the reason the
+// empty folder does.
+func TestReconstruct1807_theLaterSnapshotIsFoundAfterIt(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "2026-09-02T00-00-00Z", "mydb")
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p, "orders.parquet"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	if _, _, _, err := reconstruct.FindBaseline(context.Background(), dir, "mydb", "orders", after); err != nil {
+		t.Fatalf("the fixture's snapshot is not found even after it, so the case above proves nothing: %v", err)
 	}
 }
 

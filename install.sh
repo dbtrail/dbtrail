@@ -172,8 +172,8 @@ rerun_cmd() {
 if [ ! -f "$DIR/docker-compose.yml" ]; then
   if port_in_use "$PORT"; then
     free=$(first_free_port 8091 8099 "$PORT") || free=8091
-    die "Port ${PORT} is already in use on this machine, so the console can't use it.
-    Run the installer with the console on port ${free} instead:
+    die "Port ${PORT} is already in use on this machine, so DBTrail can't use it.
+    Run the installer with DBTrail on port ${free} instead:
         $(rerun_cmd "$free")"
   fi
   # The stack also publishes Prometheus /metrics on 9090, which is also
@@ -182,7 +182,7 @@ if [ ! -f "$DIR/docker-compose.yml" ]; then
   # a port the operator chose explicitly is theirs and is only checked.
   if [ "$MPORT" = "$PORT" ] || port_in_use "$MPORT"; then
     if [ -n "${DBTRAIL_METRICS_PORT:-}" ]; then
-      die "The metrics port ${MPORT} is already in use (or is the console's port).
+      die "The metrics port ${MPORT} is already in use (or is the port DBTrail answers on).
     Pick another one with DBTRAIL_METRICS_PORT, or leave it unset to have one chosen."
     fi
     MPORT=$(first_free_port 9091 9099 "$PORT") || die \
@@ -211,7 +211,7 @@ if [ -f docker-compose.yml ]; then
   warn "docker-compose.yml already exists here, so it was left alone (delete it to re-fetch)."
   warn "An existing file is never upgraded, and volumes and mounts can only come from it. If this is an upgrade, save your edits, delete the file, and re-run: docs/docker.md 'Upgrading the stack'."
   [ "$PORT" != "8090" ] && warn \
-    "DBTRAIL_PORT=${PORT} ignored — reusing the existing docker-compose.yml (edit its ports: line by hand)."
+    "DBTRAIL_PORT=${PORT} ignored: the existing docker-compose.yml is reused (edit its ports: line by hand)."
   [ -n "${DBTRAIL_METRICS_PORT:-}" ] && warn \
     "DBTRAIL_METRICS_PORT=${DBTRAIL_METRICS_PORT} ignored: the existing docker-compose.yml is reused (edit its ports: line by hand)."
 else
@@ -232,7 +232,7 @@ else
     # sed exits 0 even when nothing matched — verify the rewrite actually landed
     # rather than print a false "port set" and bind the wrong port.
     grep -q "127.0.0.1:${PORT}:8090" docker-compose.yml || die \
-      "Couldn't set the console port to ${PORT} — the compose file's published-port
+      "Couldn't set the port to ${PORT}: the compose file's published-port
     line isn't what this installer expected. Edit the 'ports:' line in
     ${DIR}/docker-compose.yml by hand, or report it."
     # A compose file from before #1784 (an older DBTRAIL_REF) has no banner
@@ -240,11 +240,11 @@ else
     # not worth failing the install over.
     if grep -q "BINTRAIL_CONSOLE_URL:" docker-compose.yml; then
       grep -q "BINTRAIL_CONSOLE_URL: http://127.0.0.1:${PORT}/" docker-compose.yml || die \
-        "Couldn't point the console's startup banner at port ${PORT}: the
+        "Couldn't point DBTrail's startup banner at port ${PORT}: the
     BINTRAIL_CONSOLE_URL line in ${DIR}/docker-compose.yml isn't what this
     installer expected. Edit it by hand, or report it."
     fi
-    say "${DIM}    console port set to ${PORT}${RST}"
+    say "${DIM}    DBTrail will answer on port ${PORT}${RST}"
   fi
   # Same rewrite for the metrics mapping, verified the same way.
   if [ "$MPORT" != "9090" ]; then
@@ -317,20 +317,22 @@ fi
 say ""
 fg 14 170 110 32; printf '%s✓ DBTrail is up.%s\n' "$B" "$RST"   # green check
 say ""
-say "Have at hand: the ${B}host and port${RST} of your MySQL server, and ${B}a MySQL login that can create users${RST}."
+say "Have at hand: the ${B}host and port${RST} of your MySQL server,"
+say "and ${B}a MySQL login that can create users${RST} and grant them privileges."
 say ""
 say "${B}Next steps${RST}"
 say "  ${B}1. Sign in.${RST} Open ${B}${CONSOLE_URL}${RST} and create a username and password."
 say "  ${B}2. Connect.${RST} Click ${B}+ Add server${RST} and fill in the host and port of your MySQL"
 say "     server. The form suggests a user and password for DBTrail and shows the"
-say "     SQL that creates that user: run it on your MySQL with the login that can"
-say "     create users, then press Save."
+say "     SQL that creates that user: run it on your MySQL with that login, then"
+say "     press Save."
 say "     Your MySQL runs on this same machine? Use host ${B}host.docker.internal${RST}"
 say "     (on Linux, that MySQL must listen on more than 127.0.0.1)."
 say "  ${B}3. First change.${RST} Change a row on your MySQL. It shows on the Overview"
 say "     within a minute, with an Undo that writes the SQL to reverse it."
-say "  ${B}4. First snapshot.${RST} Take one on the Snapshots page. With it, DBTrail can"
-say "     rebuild a whole table as it was at a past moment."
+say "  ${B}4. First snapshot.${RST} With one, DBTrail can rebuild a whole table as it was"
+say "     at a past moment. Today it takes a folder created first and a few steps"
+say "     on the Snapshots page; the start page below walks through them."
 say ""
 say "Your change history lives on this machine, in this stack's Docker volumes,"
 say "with your login and your saved servers. Back them up. To keep the history on"

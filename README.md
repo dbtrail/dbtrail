@@ -64,9 +64,9 @@ and prints the next steps. They are the same four steps as the
 [start page](https://www.dbtrail.com/docs/quickstart/):
 
 1. **Sign in.** Open **http://127.0.0.1:8090** and create a username and password.
-2. **Connect.** Click **+ Add server** and fill in the host and port of your MySQL server. The form suggests a user and password for DBTrail and shows the SQL that creates that user; run it on your MySQL, then press **Save**.
+2. **Connect.** Click **+ Add server** and fill in the host and port of your MySQL server. The form suggests a user and password for DBTrail and shows the SQL that creates that user; run it on your MySQL with a login that can create users and grant them privileges, then press **Save**.
 3. **First change.** Change a row on your MySQL. It shows on the Overview within a minute, with an **Undo** that writes the SQL to reverse it.
-4. **First snapshot.** Take one on the **Snapshots** page, so DBTrail can rebuild a whole table as it was at a past moment.
+4. **First snapshot.** With one, DBTrail can rebuild a whole table as it was at a past moment. Today it takes a folder created first, then on the **Snapshots** page: type it in **Backup dir**, **Save**, and press **Create backup**. The start page has the command that creates the folder.
 
 Prefer the command line? See the [command-line quickstart](docs/quickstart.md).
 

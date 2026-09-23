@@ -53,7 +53,7 @@ token is their credential.
 > AI page as environment-owned.
 
 
-> **No console yet?** The [quickstart](quickstart.md) gets a full stack up in a
+> **No console yet?** The [start page](https://www.dbtrail.com/docs/quickstart/) gets a full stack up in a
 > few minutes. Come back to this page after.
 
 ---
