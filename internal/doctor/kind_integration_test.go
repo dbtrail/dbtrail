@@ -50,7 +50,8 @@ func TestIntegrationBuild_loopbackProvenByTheRetry(t *testing.T) {
 		t.Errorf("remediation does not name the address to use instead:\n%s", got.Remediation)
 	}
 
-	// A wrong password at the retry address still proves a database is there.
+	// The typed password is wrong, and it does not matter: nothing is sent to
+	// the retry address, and the server's greeting there is the proof.
 	got = buildConnect(t, "root:wrong@tcp(127.0.0.1:"+closedPort(t)+")/?timeout=2s", WithLoopbackRetry(retry))
 	if got.Kind != KindLoopbackInContainer {
 		t.Errorf("kind = %q when the retry answered access denied, want %q", got.Kind, KindLoopbackInContainer)

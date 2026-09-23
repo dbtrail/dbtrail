@@ -1,7 +1,9 @@
 package doctor
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"syscall"
@@ -9,7 +11,6 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
-	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
@@ -129,23 +130,35 @@ func DockerHostRetry(_ string, port string) string {
 	return net.JoinHostPort("host.docker.internal", port)
 }
 
-// WithLoopbackRetry lets a failed connection to a loopback address be retried
-// once at retry(host, port), with the same user and password. Only the web
-// interface passes it: it runs where a container is likely, and the command
-// line reaches the host it was given and nothing else. The retry proves the
-// container case, so no container detection is needed.
+// WithLoopbackRetry lets a failed connection to a loopback address be followed
+// by one look at retry(host, port): a connect that reads the server's greeting
+// and sends nothing — never the user, never the password (see proveLoopback).
+// Only the web interface passes it: it runs where a container is likely, and
+// the command line contacts the host it was given and nothing else. A greeting
+// there proves the container case, so no container detection is needed.
 func WithLoopbackRetry(retry func(host, port string) string) BuildOption {
 	return func(c *buildConfig) { c.loopbackRetry = retry }
 }
 
-// loopbackRetryTimeout bounds the retry. It runs only after a failure, so it
-// adds to a wait the person is already in.
+// loopbackRetryTimeout bounds the probe, name lookup included. It runs only
+// after a failure, so it adds to a wait the person is already in.
 const loopbackRetryTimeout = 3 * time.Second
 
-// proveLoopback retries a failed loopback connection at the retry address and
-// reports the address when a database answered there, with or without letting
-// the user in. "" when the host is not loopback, the kind does not qualify, or
-// nothing answered.
+// proveLoopback looks for a database at the retry address after a loopback
+// address failed, and reports that address when one is there. "" when the
+// host is not loopback, the kind does not qualify, or nothing that speaks
+// MySQL answered.
+//
+// It sends NOTHING: no user, no password, not a single byte (#1803). The
+// retry address is a name nobody typed. Docker Desktop and our compose file
+// map it to the machine itself, but on a plain install nothing does, and a
+// resolver that answers for it anyway (a search domain is enough) points it
+// at some other machine. A login there would hand that machine the password;
+// with caching_sha2 over plain TCP the driver even fetches the server's key
+// and encrypts the password TO it. And the login proves nothing the greeting
+// does not: a MySQL server speaks first, before any credentials, so reading
+// its greeting is the whole proof. The finding then SUGGESTS the address; the
+// person decides whether to use it.
 func proveLoopback(sourceDSN, kind string, retry func(host, port string) string) string {
 	if retry == nil || !loopbackRetryAfter(kind) {
 		return ""
@@ -165,20 +178,77 @@ func proveLoopback(sourceDSN, kind string, retry func(host, port string) string)
 	if alt == "" {
 		return ""
 	}
-	cfg.Addr = alt
-	if cfg.Timeout == 0 || cfg.Timeout > loopbackRetryTimeout {
-		cfg.Timeout = loopbackRetryTimeout
-	}
-	db, err := config.Connect(cfg.FormatDSN())
-	if err == nil {
-		db.Close()
-		return alt
-	}
-	var me *mysql.MySQLError
-	if errors.As(err, &me) {
+	ctx, cancel := context.WithTimeout(context.Background(), loopbackRetryTimeout)
+	defer cancel()
+	if greetingAt(ctx, alt) {
 		return alt
 	}
 	return ""
+}
+
+// maxGreetingLen bounds the one packet the probe reads. A real greeting is
+// about 80 bytes; anything claiming more than this is not one, and must not
+// make the probe allocate what a stranger asks for.
+const maxGreetingLen = 1024
+
+// greetingAt connects to addr, reads the first packet the server sends, and
+// reports whether it is a MySQL or MariaDB greeting. It writes nothing and
+// closes. ctx bounds the name lookup, the connect and the read.
+func greetingAt(ctx context.Context, addr string) bool {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetReadDeadline(dl)
+	}
+	hdr := make([]byte, 4)
+	if _, err := io.ReadFull(conn, hdr); err != nil {
+		return false
+	}
+	n := int(hdr[0]) | int(hdr[1])<<8 | int(hdr[2])<<16
+	if hdr[3] != 0 || n < 1 || n > maxGreetingLen {
+		return false
+	}
+	payload := make([]byte, n)
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		return false
+	}
+	return isMySQLGreeting(payload)
+}
+
+// isMySQLGreeting recognises the first packet a MySQL or MariaDB server
+// sends. Two shapes count:
+//   - a handshake, protocol 10: a printable version string ended by a zero
+//     byte, then at least the connection id, the first part of the salt and
+//     its filler (13 bytes);
+//   - an error packet (0xff and a two-byte error code), which is how a
+//     server refuses a client's HOST before any login ("Host ... is not
+//     allowed to connect", 1130). It is still a MySQL server answering.
+func isMySQLGreeting(p []byte) bool {
+	switch p[0] {
+	case 0x0a:
+		end := -1
+		for i := 1; i < len(p); i++ {
+			if p[i] == 0 {
+				end = i
+				break
+			}
+			if p[i] < 0x20 || p[i] > 0x7e {
+				return false
+			}
+		}
+		return end > 1 && len(p)-end-1 >= 13
+	case 0xff:
+		if len(p) < 3 {
+			return false
+		}
+		code := int(p[1]) | int(p[2])<<8
+		return code >= 1000 && code < 6000
+	}
+	return false
 }
 
 // primaryKeyStatement is the statement that gives a refused table its key.
