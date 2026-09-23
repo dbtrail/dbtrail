@@ -96,3 +96,50 @@ func validLocalKeepNewest(n int) error {
 	}
 	return nil
 }
+
+// LocalKeepTargets is the ONE rule for which local folders the daemon prunes
+// down to a keep-newest count (#1681), shared by the prune loop and by the
+// Snapshots listing that reports the policy, so the page cannot announce a
+// retention the loop does not apply, or miss one it does.
+//
+// A folder qualifies when a server keeps its snapshots there (BaselineDir),
+// has no external destination (BaselineS3 empty) and a count (LocalKeepNewest
+// > 0). A folder that ANY server also sends to an external destination, or
+// that is one of excluded (the daemon's own --baseline-dir), is left out:
+// there, some of the snapshots are another owner's, pruned by the other rule
+// or not at all. Servers sharing a qualifying folder get the largest count,
+// because the larger count keeps more.
+func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int {
+	claimed := map[string]bool{}
+	for _, d := range excluded {
+		if d != "" {
+			claimed[filepath.Clean(d)] = true
+		}
+	}
+	for _, e := range entries {
+		if e.BaselineDir != "" && e.BaselineS3 != "" {
+			claimed[filepath.Clean(e.BaselineDir)] = true
+		}
+	}
+	out := map[string]int{}
+	for _, e := range entries {
+		// A count of 0 lands as 0 and is removed with the keep-everything
+		// folders below.
+		if e.BaselineDir == "" || e.BaselineS3 != "" {
+			continue
+		}
+		dir := filepath.Clean(e.BaselineDir)
+		if claimed[dir] {
+			continue
+		}
+		out[dir] = max(out[dir], e.LocalKeepNewest)
+	}
+	// A folder shared with a server that keeps everything (count 0) keeps
+	// everything: that server never agreed to have its copies removed.
+	for _, e := range entries {
+		if e.BaselineDir != "" && e.BaselineS3 == "" && e.LocalKeepNewest <= 0 {
+			delete(out, filepath.Clean(e.BaselineDir))
+		}
+	}
+	return out
+}

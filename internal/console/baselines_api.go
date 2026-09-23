@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -88,6 +89,68 @@ type baselinesResponse struct {
 	// is routine — grading every row red on a healthy retention cadence would
 	// cry wolf, so the per-row verdicts inform and this field decides.
 	Staleness string `json:"staleness,omitempty"`
+	// LocalRetention is the keep-newest count this daemon applies to the
+	// selected server's local folder (#1681). OMITTED, never zero, when
+	// nothing local is ever pruned: no count, an external destination, a
+	// folder another rule owns, or a process that runs no prune loop. The
+	// page reads its presence to say how many copies this machine keeps.
+	LocalRetention *localRetentionDTO `json:"local_retention,omitempty"`
+	// LastPrune is the last prune that removed snapshots from that folder,
+	// read from the record the prune leaves beside them, so it survives a
+	// restart. OMITTED until one has. It is reported whatever wrote it (this
+	// daemon, the CLI, either rule), because the copies are gone either way.
+	LastPrune *lastPruneDTO `json:"last_prune,omitempty"`
+}
+
+// localRetentionDTO and lastPruneDTO are the #1681 wire shapes. The Snapshots
+// page pins its sentence against exactly these names.
+type localRetentionDTO struct {
+	KeepNewest int `json:"keep_newest"`
+}
+
+type lastPruneDTO struct {
+	At      string `json:"at"` // RFC3339, UTC
+	Removed int    `json:"removed"`
+}
+
+// localRetentionOf is the selected server's local retention as the prune loop
+// applies it: the same console.LocalKeepTargets rule, over the same entries,
+// with the same folder excluded (the daemon's own --baseline-dir). nil where
+// nothing local is pruned.
+func (s *Server) localRetentionOf(id string) *localRetentionDTO {
+	if !s.localPruneLoop || s.cm.reg == nil {
+		return nil
+	}
+	e, ok := s.cm.reg.Get(id)
+	if !ok || e.BaselineDir == "" {
+		return nil
+	}
+	n := LocalKeepTargets(s.cm.reg.List(), s.cm.defaultBaselineDir)[filepath.Clean(e.BaselineDir)]
+	if n <= 0 {
+		return nil
+	}
+	return &localRetentionDTO{KeepNewest: n}
+}
+
+// lastPruneOf reads the prune record of the bundle's local folder. An
+// unreadable record is logged and left out: the listing must not fail over
+// it, but it is the only thing that says why copies are gone, so it is never
+// silent.
+func lastPruneOf(b *bundle, serverID string) *lastPruneDTO {
+	dir := bundleBaselineDir(b)
+	if dir == "" {
+		return nil
+	}
+	rec, ok, err := baseline.ReadLastPrune(dir)
+	if err != nil {
+		slog.Warn("console: the record of the last snapshot prune could not be read; the page will not say why copies are gone",
+			"server", serverID, "dir", dir, "error", err)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	return &lastPruneDTO{At: rec.At.UTC().Format(time.RFC3339), Removed: rec.Removed}
 }
 
 // selectedServerID is the id the request EFFECTIVELY selected: the header
@@ -154,6 +217,8 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 		resp.Schedule = s.backupScheduleDTO(sctx, e, s.scheduleClock())
 		cancel()
 	}
+	resp.LocalRetention = s.localRetentionOf(s.selectedServerID(r))
+	resp.LastPrune = lastPruneOf(b, s.selectedServerID(r))
 	if b.baselineSrc == "" {
 		writeJSON(w, http.StatusOK, resp)
 		return

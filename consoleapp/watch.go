@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1336,6 +1337,10 @@ func recordVerifySkip(history *console.VerifyHistory, e console.ServerEntry, rea
 type baselinePruneTarget struct {
 	dir string
 	s3  string
+	// keepNewest > 0 marks a local-only target (#1681): no destination, so
+	// the prune keeps the newest keepNewest snapshots instead of confirming
+	// copies. s3 is empty on such a target.
+	keepNewest int
 }
 
 // baselinePruneTargets collects every baseline directory the daemon should prune,
@@ -1372,6 +1377,23 @@ func baselinePruneTargets(entries []console.ServerEntry, globalDir, globalS3 str
 	return targets
 }
 
+// localKeepPruneTargets are the local-only targets (#1681): every folder
+// console.LocalKeepTargets names, with the daemon's own --baseline-dir
+// excluded (its snapshots follow the global rule). Sorted for a stable order.
+func localKeepPruneTargets(entries []console.ServerEntry, globalDir string) []baselinePruneTarget {
+	keep := console.LocalKeepTargets(entries, globalDir)
+	dirs := make([]string, 0, len(keep))
+	for d := range keep {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+	out := make([]baselinePruneTarget, 0, len(dirs))
+	for _, d := range dirs {
+		out = append(out, baselinePruneTarget{dir: d, keepNewest: keep[d]})
+	}
+	return out
+}
+
 // runBaselinePruneCycle prunes each target via pruneFn, one (dir + S3) pair at a
 // time. A failure on one target is logged and the rest still run — one bad dir
 // must not strand the others. pruneFn is injected (baseline.PruneLocal in
@@ -1379,9 +1401,10 @@ func baselinePruneTargets(entries []console.ServerEntry, globalDir, globalS3 str
 func runBaselinePruneCycle(ctx context.Context, targets []baselinePruneTarget, retain time.Duration, pruneFn func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error)) {
 	for _, t := range targets {
 		res, err := pruneFn(ctx, baseline.PruneOptions{
-			LocalDir: t.dir,
-			S3URL:    t.s3,
-			Retain:   retain,
+			LocalDir:   t.dir,
+			S3URL:      t.s3,
+			Retain:     retain,
+			KeepNewest: t.keepNewest,
 		})
 		if err != nil {
 			slog.Warn("baseline prune cycle failed", "dir", t.dir, "error", err)
@@ -1430,18 +1453,21 @@ func startBaselinePruneLoop(ctx context.Context, reg *console.Registry, globalDi
 			return fmt.Errorf("--baseline-retain: %w", err)
 		}
 	}
-	// The BOOT gate stays a gate: with nothing configured and nothing saved,
-	// no goroutine is started, and a retention saved later is dormant until a
-	// restart — which is exactly what the page reports, because
-	// backupSettingsLive only names this key when this loop is running. A
-	// saved value that this build cannot read has already warned inside
-	// effectiveRetain; it leaves the loop off rather than failing the daemon,
-	// because a file edited by hand must never stop capture.
+	// The BOOT gate: with a registry the loop always runs (#1681), because
+	// a server's keep-newest count is saved per server and can appear at any
+	// time; without one it runs only for a configured age retention. What it
+	// removes is decided per cycle: nothing, where no server has a count and
+	// no retention is set. pruneLoopStarts is the same expression, so the
+	// page's "restart to change" and the listing's retention line follow
+	// what actually runs. A saved value this build cannot read has already
+	// warned inside effectiveRetain; it leaves the age rule off rather than
+	// failing the daemon, because a file edited by hand must never stop
+	// capture.
 	bootRetain, _ := effectiveRetain(reg, retainRaw)
-	if bootRetain <= 0 {
-		return nil // retention not configured — leave baselines untouched
+	if !pruneLoopStarts(reg, bootRetain) {
+		return nil // no registry and no retention — leave baselines untouched
 	}
-	if globalDir != "" && globalS3 == "" {
+	if bootRetain > 0 && globalDir != "" && globalS3 == "" {
 		// The operator pointed retention at a local dir with no durable S3 source;
 		// warn once so the global dir not being reclaimed isn't a silent surprise.
 		// Per-server registry targets (added at runtime) may still have both.
@@ -1622,6 +1648,9 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console
 				upConsoleBaselineTrigger || upBaselineRefreshEvery != "",
 			),
 		},
+		// The loop that applies each server's keep-newest count (#1681):
+		// the listing reports a retention only where this is true.
+		LocalPruneLoop: pruneLoopRuns(reg),
 		BaselineRefreshDefaults: console.BaselineRefreshDefaults{
 			CarryForwardUnchanged: upBaselineCarryForward,
 			// Enabled is the OR because the restore consumes this setting too
@@ -1769,8 +1798,14 @@ func resolveBintrailID(indexDSN string) (string, error) {
 // the goroutine exists — a loop that never started cannot pick anything up,
 // and saying otherwise would be the one lie this page cannot afford.
 func pruneLoopRuns(reg *console.Registry) bool {
-	d, on := effectiveRetain(reg, upConsoleBaselineRetain)
-	return on && d > 0
+	d, _ := effectiveRetain(reg, upConsoleBaselineRetain)
+	return pruneLoopStarts(reg, d)
+}
+
+// pruneLoopStarts is startBaselinePruneLoop's gate: a registry (servers carry
+// their own keep-newest counts, #1681) or an age retention.
+func pruneLoopStarts(reg *console.Registry, retain time.Duration) bool {
+	return reg != nil || retain > 0
 }
 
 func verifyLoopRuns() bool {
@@ -1803,20 +1838,27 @@ func baselinePruneSweep(ctx context.Context, reg *console.Registry, globalDir, g
 	// rather than treating a zero duration as "unset".
 	retain, on := effectiveRetain(reg, retainRaw)
 	if !on {
-		return
+		retain = 0
 	}
 	var entries []console.ServerEntry
 	if reg != nil {
 		entries = reg.List()
 	}
-	// A per-server local baseline dir with no S3 prefix is the only copy —
-	// skipped, but warn (matching the global/CLI signal) so its unbounded
-	// growth isn't silent.
-	for _, e := range entries {
-		if e.BaselineDir != "" && e.BaselineS3 == "" {
-			slog.Warn("baseline-retain: server has a local baseline dir but no S3 prefix; its baselines are the only copy and will not be pruned",
-				"server", e.Name, "dir", e.BaselineDir)
+	var targets []baselinePruneTarget
+	if retain > 0 {
+		// A per-server local baseline dir with no S3 prefix and no count is
+		// the only copy — skipped, but warn (matching the global/CLI signal)
+		// so its unbounded growth isn't silent.
+		for _, e := range entries {
+			if e.BaselineDir != "" && e.BaselineS3 == "" && e.LocalKeepNewest <= 0 {
+				slog.Warn("baseline-retain: server has a local baseline dir, no S3 prefix and no number of snapshots to keep; its baselines are the only copy and will not be pruned",
+					"server", e.Name, "dir", e.BaselineDir)
+			}
 		}
+		targets = baselinePruneTargets(entries, globalDir, globalS3)
 	}
-	runBaselinePruneCycle(ctx, baselinePruneTargets(entries, globalDir, globalS3), retain, pruneFn)
+	// Local-only folders prune to their count whether or not an age
+	// retention is set (#1681); a set one still protects younger snapshots.
+	targets = append(targets, localKeepPruneTargets(entries, globalDir)...)
+	runBaselinePruneCycle(ctx, targets, retain, pruneFn)
 }
