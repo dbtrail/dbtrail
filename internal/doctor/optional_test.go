@@ -111,7 +111,7 @@ func optionalHeadline(rem string) string {
 
 // The two optional findings speak plain English: one short line, then the
 // statement, with no jargon and no em dash, and every outcome of these two
-// checks that is a WARN is marked optional.
+// checks that offers a fix is marked optional.
 func TestOptionalCheckTexts(t *testing.T) {
 	type tc struct {
 		name     string
@@ -189,13 +189,13 @@ func TestOptionalCheckTexts(t *testing.T) {
 		})
 	}
 
-	// A failed read of an optional setting is still optional: it can never
-	// be the reason a start reads "with warnings".
+	// A failed read is NOT optional: "could not tell" is a plain warning,
+	// never folded away under "Optional improvements".
 	for _, run := range []func(*testing.T) CheckResult{
 		mysqlVar("SELECT @@binlog_rows_query_log_events", "v", errResp("driver: bad connection")),
 		mysqlVar("SELECT @@binlog_row_metadata", "v", errResp("driver: bad connection")),
 	} {
-		if got := run(t); got.Status != StatusWarn || !got.Optional {
+		if got := run(t); got.Status != StatusWarn || got.Optional {
 			t.Errorf("read failure: status %q optional %v (%s)", got.Status, got.Optional, got.Detail)
 		}
 	}

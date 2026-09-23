@@ -778,10 +778,10 @@ func checkStatementCapture(ctx context.Context, db *sql.DB) CheckResult {
 	}
 	if !isUnknownVar(err) {
 		return CheckResult{
-			Name:     name,
-			Status:   StatusWarn,
-			Optional: true,
-			Detail:   "could not read binlog_rows_query_log_events: " + err.Error(),
+			Name:   name,
+			Status: StatusWarn,
+			// Not optional: "could not tell" is not an improvement to offer.
+			Detail: "could not read binlog_rows_query_log_events: " + err.Error(),
 		}
 	}
 
@@ -811,10 +811,10 @@ func checkStatementCapture(ctx context.Context, db *sql.DB) CheckResult {
 	}
 	if !isUnknownVar(err) {
 		return CheckResult{
-			Name:     name,
-			Status:   StatusWarn,
-			Optional: true,
-			Detail:   "could not read binlog_annotate_row_events: " + err.Error(),
+			Name:   name,
+			Status: StatusWarn,
+			// Not optional: "could not tell" is not an improvement to offer.
+			Detail: "could not read binlog_annotate_row_events: " + err.Error(),
 		}
 	}
 
@@ -852,10 +852,10 @@ func checkRowMetadata(ctx context.Context, db *sql.DB) CheckResult {
 			}
 		}
 		return CheckResult{
-			Name:     name,
-			Status:   StatusWarn,
-			Optional: true,
-			Detail:   "could not read binlog_row_metadata: " + err.Error(),
+			Name:   name,
+			Status: StatusWarn,
+			// Not optional: "could not tell" is not an improvement to offer.
+			Detail: "could not read binlog_row_metadata: " + err.Error(),
 		}
 	}
 	if strings.EqualFold(val, "FULL") {
