@@ -2883,10 +2883,15 @@ try {
       snapshots: [{ time: "2026-06-10 12:00:00", files: [{ name: "x.parquet", bytes: 10 }] }] };
     const keep = takeAwayOpen;
     takeAwayOpen = false;
+    // Found by its sentence, not its class: the DuckDB lane keeps an empty
+    // .form-msg.err of its own for download failures, so a class lookup
+    // reads that slot as the status line.
+    const statusLine = (n) => Array.from(n.querySelectorAll(".form-msg.err"))
+      .find((p) => /state of the \.sql build could not be read/.test(p.textContent));
     const shape = (n) => n ? {
       tag: n.tagName.toLowerCase(), open: !!n.open,
-      err: !!n.querySelector(".form-msg.err"),
-      errBeforeLanes: !!n.querySelector(".form-msg.err + .bk-lanes"),
+      err: !!statusLine(n),
+      errBeforeLanes: !!statusLine(n) && statusLine(n).nextElementSibling === n.querySelector(".bk-lanes"),
       note: (n.querySelector(".bk-take-note") || {}).textContent || "",
     } : null;
     const openFor = (sqlSt, who) => shape(backupTakeAway(who || cur, b, sqlSt));
