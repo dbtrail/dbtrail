@@ -2650,6 +2650,45 @@ try {
     ? ok("permissions: a view-only session is still told a scheduled run, a .sql build or a restore failed, without the controls")
     : bad("permissions: a view-only session is still told a scheduled run, a .sql build or a restore failed, without the controls", JSON.stringify(pView));
 
+  // Hints that name a fix must name one this reader can make. An operator
+  // may create a snapshot but not see or change settings: the Create note
+  // keeps its reason and drops "(under Where and how often)". A session that
+  // may download but not read settings keeps the DuckDB lane without the
+  // false line about how DBTrail is configured. A session that may read
+  // settings but not write servers is not told to "select this server to
+  // change it". Each is paired with the full-access text as its control.
+  const hints = await page.evaluate(() => {
+    const keep = capsCache.permissions, keepTrig = capsCache.baseline_trigger;
+    const keys = Object.keys(capsCache.permissions || {});
+    const perms = (deny) => Object.fromEntries(keys.map((k) => [k, !deny.includes(k)]));
+    const cur = { id: "srv-fix", kind: "registry", has_source: true };
+    const b = { configured: true, source: "/tmp/baselines", kind: "dir", snapshots: [{ time: "2026-06-10 12:00:00", location: "dir" }] };
+    const srv = { id: "srv-fix", name: "fixture", source: "registry", baseline_dir: "/tmp/b" };
+    const probe = () => ({
+      strip: baselineContextStrip(b, cur).textContent,
+      duck: (backupDuckLane(b) || { textContent: "" }).textContent,
+      row: backupServerRow(srv, false, [srv], null).textContent,
+    });
+    try {
+      capsCache.baseline_trigger = true;
+      capsCache.permissions = perms([]);
+      const full = probe();
+      capsCache.permissions = perms(["settings:read", "servers:write"]);
+      const operator = probe();
+      capsCache.permissions = perms(["servers:write"]);
+      const reader = probe();
+      return { full, operator, reader, views: !!capsCache.views };
+    } finally { capsCache.permissions = keep; capsCache.baseline_trigger = keepTrig; }
+  });
+  const H = hints;
+  (/CREATE BACKUP/.test(H.full.strip) && /under Where and how often/.test(H.full.strip)
+    && /CREATE BACKUP/.test(H.operator.strip) && /own backup location/.test(H.operator.strip) && !/Where and how often/.test(H.operator.strip)
+    && (H.views ? !/set not to read archived data/.test(H.operator.duck) : true) && /Download the data/.test(H.operator.duck)
+    && /Select this server at the top/.test(H.full.row) && !/Select this server at the top/.test(H.reader.row) && /No schedule/.test(H.reader.row)
+    && (H.views ? !/set not to read archived data/.test(H.full.duck) : true))
+    ? ok("permissions: a hint that names a fix is shown only to a session that can make it, and keeps its reason")
+    : bad("permissions: a hint that names a fix is shown only to a session that can make it, and keeps its reason", JSON.stringify(H));
+
   // Arriving at the old settings address with a session that cannot see
   // settings, on a server with no schedule: no empty heading, and no note
   // saying the settings are "part of Snapshots now" beside nothing.
