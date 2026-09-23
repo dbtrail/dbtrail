@@ -153,7 +153,7 @@ func firstRunSteps(in firstRunInput) FirstRunReport {
 				// Still capturing, but events were skipped for good: say which.
 				step.State, step.Detail = firstRunRunning, in.Monitor.LastError
 			default:
-				step.Fix = "Press Start on this server in Servers."
+				step.Fix = "Go to Servers and click the Start button."
 			}
 		}
 		rep.Steps = append(rep.Steps, step)
@@ -222,7 +222,7 @@ func backupStep(in firstRunInput) (FirstRunStep, bool) {
 
 // backupStepName is the last step's name, in one place: firstRunBackupIsNext
 // finds the step by it.
-const backupStepName = "Take the first backup"
+const backupStepName = "Take the first full DB snapshot"
 
 // withCheckError adds why the backup locations could not be read to a step's
 // detail. The step stays up and says so: an unreadable location is not a

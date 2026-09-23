@@ -302,7 +302,7 @@ func TestFirstRunStaysUntilASnapshotExists(t *testing.T) {
 			if c.detail != "" && !strings.Contains(last.Detail, c.detail) {
 				t.Errorf("backup step detail = %q, want it to carry %q", last.Detail, c.detail)
 			}
-			if last.Name == "Take the first backup" && last.State == firstRunDone && (last.Detail != "" || last.Fix != "") {
+			if last.Name == "Take the first full DB snapshot" && last.State == firstRunDone && (last.Detail != "" || last.Fix != "") {
 				t.Errorf("a done backup step still carries a reason or a fix: %+v", last)
 			}
 		})
@@ -362,7 +362,7 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 			}
 			got := firstRunSteps(in)
 			s := got.Steps[len(got.Steps)-1]
-			if s.Name != "Take the first backup" || s.State != firstRunWaiting {
+			if s.Name != "Take the first full DB snapshot" || s.State != firstRunWaiting {
 				t.Fatalf("last step = %+v", s)
 			}
 			for _, w := range c.detailHas {
@@ -481,7 +481,7 @@ func TestHandleFirstRun(t *testing.T) {
 		if code != 200 || len(rep.Steps) != 6 || !strings.Contains(names(rep), "Read the table structure") {
 			t.Fatalf("code = %d, steps = %s, body = %s", code, names(rep), body)
 		}
-		if s := rep.Steps[5]; s.Name != "Take the first backup" || s.State != firstRunWaiting || !strings.Contains(s.Detail, "no backup location of its own") {
+		if s := rep.Steps[5]; s.Name != "Take the first full DB snapshot" || s.State != firstRunWaiting || !strings.Contains(s.Detail, "no backup location of its own") {
 			t.Fatalf("backup step = %+v", s)
 		}
 		if !strings.Contains(body, `"name":"Create the index database"`) || !strings.Contains(body, `"state":"waiting"`) {
@@ -491,7 +491,7 @@ func TestHandleFirstRun(t *testing.T) {
 	t.Run("a MySQL server with a location gets its backup job's state", func(t *testing.T) {
 		id := add(ServerEntry{Name: "myloc", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineS3: "s3://b/p"})
 		_, body, rep := get(id)
-		if s := rep.Steps[len(rep.Steps)-1]; s.Name != "Take the first backup" || s.Fix != "Create one on the "+PageSnapshots+" page." {
+		if s := rep.Steps[len(rep.Steps)-1]; s.Name != "Take the first full DB snapshot" || s.Fix != "Create one on the "+PageSnapshots+" page." {
 			t.Fatalf("backup step = %+v, body = %s", s, body)
 		}
 	})
@@ -510,7 +510,7 @@ func TestHandleFirstRun(t *testing.T) {
 		id := add(ServerEntry{Name: "pg", Flavor: FlavorPostgres, SourceDSN: "postgres://u:pw@127.0.0.1:2/db",
 			SourceSlot: "s", SourcePublication: "p", BaselineDir: t.TempDir()})
 		code, body, rep := get(id)
-		if code != 200 || strings.Contains(names(rep), "Read the table structure") || !strings.Contains(names(rep), "Take the first backup") {
+		if code != 200 || strings.Contains(names(rep), "Read the table structure") || !strings.Contains(names(rep), "Take the first full DB snapshot") {
 			t.Fatalf("code = %d, steps = %s, body = %s", code, names(rep), body)
 		}
 	})
@@ -828,7 +828,7 @@ func TestHandleFirstRunWithBackupsOff(t *testing.T) {
 				t.Fatalf("code = %d, body = %s", rec.Code, body)
 			}
 			s := rep.Steps[len(rep.Steps)-1]
-			if s.Name != "Take the first backup" || s.State != firstRunWaiting || !strings.Contains(s.Detail, "turned off") {
+			if s.Name != "Take the first full DB snapshot" || s.State != firstRunWaiting || !strings.Contains(s.Detail, "turned off") {
 				t.Fatalf("backup step = %+v", s)
 			}
 			if got := strings.Contains(s.Fix, "backup location"); got != c.wantLocText {

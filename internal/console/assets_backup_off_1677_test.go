@@ -100,7 +100,7 @@ console.log(JSON.stringify({
 	t.Logf("strip off, shared location: %s", got.StripOffShared.Text)
 
 	for name, r := range map[string]*row{"off": got.Off, "off+no loc": got.OffNoLoc, "off, PG": got.OffPG, "no loc": got.NoLoc} {
-		if r == nil || !strings.Contains(r.Text, "Take the first backup") || !strings.Contains(r.Cls, "waiting") {
+		if r == nil || !strings.Contains(r.Text, "Take the first full DB snapshot") || !strings.Contains(r.Cls, "waiting") {
 			t.Fatalf("%s: last row is not a waiting backup step: %+v", name, r)
 		}
 		for _, bad := range []string{"—", "BINTRAIL_", "--", " here", "this page"} {

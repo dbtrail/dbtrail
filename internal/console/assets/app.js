@@ -146,6 +146,11 @@ const ICONS = {
   ext: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>`,
   external: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"></path><path d="M20 4l-9 9"></path><path d="M19 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4"></path></svg>`,
   refresh: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>`,
+  // The flow's boxes (Overview): a bucket and a duck drawn here for the
+  // reader; the MySQL box shows the vendor's logo (assets/mysql-logo.png,
+  // see VENDOR.md) and the DBTrail box the brand lockup in white.
+  duck: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M14.2 3.2c2.3 0 4.1 1.8 4.1 4.1 0 .9-.3 1.7-.8 2.4l3.2-.4c.7-.1 1 .8.5 1.2l-2.1 1.5c.4.9.6 1.9.6 2.9 0 3.6-3.2 6.4-7.4 6.4H8.6C5.4 21.3 3 19 3 16.2c0-2.6 2.1-4.7 4.8-4.9h2.3V7.3c0-2.3 1.8-4.1 4.1-4.1zm.6 3.1c-.5 0-.9.4-.9.9s.4.9.9.9.9-.4.9-.9-.4-.9-.9-.9z"/></svg>`,
+  bucket: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="8.5" ry="2.8"/><path d="M3.5 5.5l2 13.2c.2 1.3 3.1 2.3 6.5 2.3s6.3-1 6.5-2.3l2-13.2"/></svg>`,
 };
 
 // ── module state ─────────────────────────────────────────────────────────────
@@ -1410,10 +1415,8 @@ function ovStatPending(key, scope) {
 // current (#1801) without repainting under the reader.
 function ovFrame() {
   const v = VIEW(); clear(v);
-  const sub = el("p", { class: "page-sub" },
-    "The path from your database to its Parquet copy, with what each step is doing right now. Where it breaks, the fix is on it.");
   const f = {};
-  f.head = ovHead = pageHead("Overview", sub);
+  f.head = ovHead = pageHead("Overview", null);
   v.append(f.head);
 
   // Where the page says it stopped keeping itself current.
@@ -1428,15 +1431,16 @@ function ovFrame() {
   f.flowSlot = el("div");
   f.flowSlot.append(el("section", { class: "flow flow-pending" }, ovSkelLines(2), el("div", { class: "skel-note", text: "reading the path from your database to its copy…" })));
   v.append(f.flowSlot);
+  // The restore window, the table-coverage check and the four tiles are
+  // the page's recovery-era half. They keep their slots and fills (the
+  // live-refresh loop and every fill are untouched), but hang under one
+  // closed fold at the foot of the page: the flow above answers the
+  // questions a replica's operator brings, and these answer "can I undo",
+  // which is the History pages' question.
   f.covSlot = el("div");
   f.covSlot.append(ovPendingCard("Restore coverage", "computing restore coverage…", "cov-card"));
-  v.append(f.covSlot);
-  // Tables capture leaves out (#1802): right under the restore window, which
-  // they qualify, and outside the first-run steps, which go away while the
-  // table must stay named.
   f.uncapSlot = el("div");
   f.uncapSlot.append(ovPendingCard("Table coverage", "checking which tables are captured…", "uncap-card"));
-  v.append(f.uncapSlot);
 
   const stats = el("div", { class: "ov-stats" });
   f.statTotal = ovStatPending("changes indexed", "all time · estimate");
@@ -1444,16 +1448,13 @@ function ovFrame() {
   f.statTables = ovStatPending("tables touched", "");
   f.statLatest = ovStatPending("most recent change", "point in time (UTC)");
   stats.append(f.statTotal, f.statDeletes, f.statTables, f.statLatest);
-  v.append(stats);
 
   // Where the tiles say their figures could not be refreshed, above the
   // notes the aggregate itself carries (which fillOvActivity clears).
   f.sideSlot = el("div");
-  v.append(f.sideSlot);
   // Whatever the aggregate could not account for lands here, at the point of
   // use — between the tiles and the panels, where the old layout put it.
   f.warnSlot = el("div");
-  v.append(f.warnSlot);
 
   const grid = el("div", { class: "ov-grid" });
 
@@ -1486,6 +1487,11 @@ function ovFrame() {
   grid.append(f.tablesPanel);
 
   v.append(grid);
+
+  const fold = el("details", { class: "ov-fold" });
+  fold.append(el("summary", { text: "Restore window and figures" }));
+  fold.append(f.covSlot, f.uncapSlot, stats, f.sideSlot, f.warnSlot);
+  v.append(fold);
   viewEnter();
   return f;
 }
@@ -1751,7 +1757,7 @@ function ovFlowModel(inp) {
   }
 
   // The source box: a quiet server says so on the box, not on the arrow.
-  const source = piece("Your MySQL", "none", srv && srv.source_host ? srv.source_host : "", "nothing installed");
+  const source = piece("Your MySQL", "none", srv && srv.source_host ? srv.source_host : "", "");
   if (!cut && capture.tone === "ok" && capture.line === "connected") source.line = "quiet";
 
   // Table definitions (the DBTrail box): what the schema snapshot last did,
@@ -1846,7 +1852,11 @@ function ovFlowModel(inp) {
   else if (bl.configured === false) bucket = piece("Your bucket", "none", "no copy location set", "");
   else if (snap) {
     const kinds = (snap.kinds || []).map((k) => (k === "dir" ? "disk" : k === "s3" ? "S3" : k));
-    bucket = piece("Your bucket", "none", tablesWord((snap.tables || []).length), kinds.join(" + "));
+    // What this machine keeps is the one retention figure the API carries
+    // per server (local_retention, #1681); the S3 rule lives on the bucket.
+    const keep = bl.local_retention && bl.local_retention.keep_newest;
+    const keeps = keep > 0 ? "keeps " + keep + (keep === 1 ? " copy" : " copies") : "";
+    bucket = piece("Your bucket", "none", tablesWord((snap.tables || []).length), [kinds.join(" + "), keeps].filter(Boolean).join(" · "));
   } else bucket = piece("Your bucket", "none", bl.snapshots ? "no copy yet" : "", "");
   const sql = piece("SQL", "none", "Query the copy", "", { link: "connect" });
   const reader = piece("Any reader", "none", "DuckDB here", "your tools");
@@ -1882,7 +1892,7 @@ function flowSection(model, ctx) {
   model.pieces.forEach((p, i) => {
     const node = el("div", { class: (isArrow(i) ? "flow-arrow" : "flow-box") + " " + (p.tone || "none") });
     if (isArrow(i)) {
-      node.append(el("span", { class: "flow-label", text: p.title }));
+      node.append(el("span", { class: "flow-label", text: String(p.title || "").toLowerCase() }));
       node.append(el("span", { class: "flow-line", "aria-hidden": "true" }));
       const val = el("div", { class: "flow-val" });
       if (p.big) val.append(el("div", { class: "flow-big", text: p.big, title: p.stamp ? utcLocalTitle(p.stamp) || null : null }));
@@ -1894,8 +1904,21 @@ function flowSection(model, ctx) {
       node.append(val);
     } else {
       const head = el("div", { class: "flow-box-head" });
-      if (p.tone !== "none") head.append(el("span", { class: "health-dot " + p.tone }));
-      head.append(el("b", { text: p.title }));
+      const marks = { 0: "mysql", 2: "logo", 4: "bucket", 6: "duck" };
+      // The DBTrail box carries the white lockup in place of its title; the
+      // source box the MySQL logo beside it.
+      const dot = p.tone !== "none" ? el("span", { class: "health-dot " + p.tone }) : null;
+      if (marks[i] === "logo") {
+        const wrap = el("span", { class: "flow-lockup-wrap" }, el("img", { class: "flow-lockup", src: "/dbtrail-lockup-white.png", alt: p.title, width: "79", height: "30" }));
+        if (dot) wrap.append(dot);
+        head.append(wrap);
+      } else {
+        if (marks[i] === "mysql") head.append(el("img", { class: "flow-ico flow-ico-mysql", src: "/mysql-logo.png", alt: "MySQL", width: "46", height: "30" }));
+        else if (marks[i]) head.append(icon(marks[i], "flow-ico"));
+        const title = el("b", { text: p.title });
+        if (dot) title.append(dot);
+        head.append(title);
+      }
       node.append(head);
       if (p.line) node.append(el("div", { class: "flow-state", text: p.line }));
       if (p.sub) node.append(el("div", { class: "flow-sub", text: p.sub }));
@@ -2054,15 +2077,42 @@ function firstRunCard(rep) {
   const card = el("section", { class: "ov-panel fr-card" });
   card.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Getting started" }))));
+  // One step is shown open: the one that needs the operator (failed or
+  // running, else the first not done). The others stay on the page, folded,
+  // so the card asks for one thing at a time instead of a list of six.
+  const stateOf = (s) => (marks[s.state] ? s.state : "waiting");
+  let cur = rep.steps.findIndex((s) => stateOf(s) === "failed");
+  if (cur < 0) cur = rep.steps.findIndex((s) => stateOf(s) === "running");
+  if (cur < 0) cur = rep.steps.findIndex((s) => stateOf(s) !== "done");
   const list = el("ol", { class: "fr-steps" });
-  rep.steps.forEach((s) => {
-    const state = marks[s.state] ? s.state : "waiting";
+  rep.steps.forEach((s, i) => {
+    const state = stateOf(s);
     const body = el("div", { class: "dc-body" }, el("div", { class: "dc-name", text: s.name }));
     if (s.detail) body.append(el("div", { class: "fr-detail", text: s.detail }));
-    if (s.fix) body.append(el("div", { class: "fr-fix", text: s.fix }));
-    list.append(el("li", { class: "fr-step " + state }, el("span", { class: "dc-mark", text: marks[state], "aria-label": state }), body));
+    if (s.fix) {
+      // A fix that names a page carries the way there: "press Start in
+      // Servers" opens the Servers dialog, "on the Snapshots page" goes to
+      // that page. The sentence itself is the server's and stays as sent.
+      const fix = el("div", { class: "fr-fix", text: s.fix });
+      if (/\bServers\b/.test(s.fix)) {
+        fix.append(" ", el("a", { class: "fr-go", href: "#servers", text: "Open Servers ›",
+          onclick: (e) => { e.preventDefault(); openServersModal(); } }));
+      } else if (/^On the Snapshots page/.test(s.fix)) {
+        fix.append(" ", el("a", { class: "fr-go", href: "/snapshots", text: "Open Snapshots ›",
+          onclick: (e) => { e.preventDefault(); navigate("snapshots"); } }));
+      }
+      body.append(fix);
+    }
+    list.append(el("li", { class: "fr-step " + state + (i === cur ? " fr-cur" : "") }, el("span", { class: "dc-mark", text: marks[state], "aria-label": state }), body));
   });
   card.append(list);
+  if (rep.steps.length > 1) {
+    const done = rep.steps.filter((s) => stateOf(s) === "done").length;
+    const toggle = el("button", { class: "fr-fold", type: "button", "aria-expanded": "false",
+      text: "All " + rep.steps.length + " steps · " + done + " done" });
+    toggle.onclick = () => { const open = card.classList.toggle("fr-open"); toggle.setAttribute("aria-expanded", open ? "true" : "false"); };
+    card.append(toggle);
+  }
   return card;
 }
 
