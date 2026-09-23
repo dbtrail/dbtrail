@@ -8935,14 +8935,20 @@ async function renderConnect() {
   // Where the selected server's snapshots live, for the Iceberg export
   // command (#1573): location_only is the Backups listing's own resolution,
   // answered without reading the storage or opening the server's index. Not
-  // asked when the session may not read settings or a data profile is active
-  // (data_profile, the key the server refuses on): the server would refuse it
-  // on every visit, auditing a denial under a profile, since the command
-  // hands out unredacted data. A refusal draws no panel; any other failure
-  // says so in one line, so a missing panel never reads as "this server keeps
-  // no backups".
+  // asked when the session may not read this server or a data profile is
+  // active (data_profile, the key the server refuses on): the server would
+  // refuse it on every visit, auditing a denial under a profile, since the
+  // command hands out unredacted data. A refusal draws no panel; any other
+  // failure says so in one line, so a missing panel never reads as "this
+  // server keeps no backups".
+  //
+  // The permission is servers:read because that is what the route takes:
+  // listing a server's snapshots is a read about that server, not console
+  // administration. It must track the route — gating on settings:read here
+  // would draw the panel for a settings-only session and then 403 its
+  // location lookup, which is a button that fails rather than one absent.
   let bLoc = null, bLocFailed = false;
-  if ((capsCache.permissions || {})["settings:read"] !== false && !capsCache.data_profile) {
+  if ((capsCache.permissions || {})["servers:read"] !== false && !capsCache.data_profile) {
     try { bLoc = await api("/api/baselines?location_only=1"); } catch (err) { bLocFailed = err.status !== 403; }
   }
   // vgen: navigating away while these requests are out must not let this

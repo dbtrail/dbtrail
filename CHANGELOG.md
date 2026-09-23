@@ -33,9 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `servers:read` added. Two neighbours deliberately did not move — the
   snapshot **download** serves unredacted rows and still needs
   `query:execute`, and `GET /api/backup-settings` is administration and stays
-  `settings:read`. A console whose sessions carry no access policy, which is
-  every session the stock build mints, is unaffected: those sessions already
-  hold every permission.
+  `settings:read`. The Iceberg export panel on Connect AI asks the same
+  permission before it looks up where a server's snapshots live, so it is
+  drawn for the sessions that can actually use it rather than offering a
+  button that then refuses. A console whose sessions carry no access policy,
+  which is every session the stock build mints, is unaffected: those sessions
+  already hold every permission.
 - **Backups, Verification and Backup settings are one page, Snapshots**
   (#1573). They were three addresses for one question — what copies of this
   server exist, would they restore, and where and how often are they made —
