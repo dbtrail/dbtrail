@@ -2569,7 +2569,7 @@ try {
   // The viewer: the list and the history, nothing that can only fail, no red box.
   (pc.viewer.rows > 0 && pc.viewer.errorBoxes === 0 && !pc.viewer.create && !pc.viewer.createNote && !pc.viewer.restore
     && !pc.viewer.takeAway && !pc.viewer.build && !pc.viewer.runCheck && pc.viewer.currentRun && pc.viewer.history
-    && pc.viewer.checks && pc.viewer.setup && pc.viewer.serverRows === 0 && !pc.viewer.schedSave && !pc.viewer.schedWatchHint)
+    && pc.viewer.checks && !pc.viewer.setup && pc.viewer.serverRows === 0 && !pc.viewer.schedSave && !pc.viewer.schedWatchHint)
     ? ok("permissions: a view-only session sees the copies and the checks' history, with no red box and no button that can only fail")
     : bad("permissions: a view-only session sees the copies and the checks' history, with no red box and no button that can only fail", JSON.stringify(pc.viewer));
   // Each permission alone hides exactly its own controls.
@@ -2588,6 +2588,100 @@ try {
     ? ok("permissions: each permission denied alone hides exactly its own controls")
     : bad("permissions: each permission denied alone hides exactly its own controls",
       JSON.stringify({ each, noQuery: pc.noQuery, noCreate: pc.noCreate, noSettingsRead: pc.noSettingsRead, noServersWrite: pc.noServersWrite, noSettingsWrite: pc.noSettingsWrite }));
+  // What a session that may only LOOK must still be told. Hiding a control
+  // must never hide the fact next to it: the first cut of this step returned
+  // early from three builders and a view-only reader lost a failed scheduled
+  // run (the card said "Every 1d at 03:00" in grey), a failed .sql build and
+  // a restore that never reached S3. Every route these read is servers:read.
+  // Driven through the REAL builders with failing fixtures, under the
+  // view-only permission map; the full-access runs of the same fixtures are
+  // the control that the text is findable at all.
+  const outcome = await page.evaluate(() => {
+    const keep = capsCache.permissions;
+    const keys = Object.keys(capsCache.permissions || {});
+    const viewer = Object.fromEntries(keys.map((k) => [k, k === "servers:read" || k === "status:read"]));
+    const cur = { id: "srv-fix", kind: "registry", baseline_dir: "/tmp/baselines" };
+    const snaps = [{ time: "2026-06-10 12:00:00", location: "dir", files: [{ name: "x.parquet", bytes: 10 }] }];
+    const b = { configured: true, source: "/tmp/baselines", kind: "dir", snapshots: snaps,
+      schedule: { every: "1d", at: "03:00", runnable: true, next_run: "2026-06-11 03:00:00",
+        last_run: { ok: false, error: "disk full", started_at: "2026-06-10 03:00:00", finished_at: "2026-06-10 03:01:00", method: "refresh" } } };
+    const txt = (n) => n ? n.textContent : "";
+    const hasBtn = (n, t) => !!n && Array.from(n.querySelectorAll("button")).some((x) => x.textContent === t && !x.hidden);
+    const draw = (perms) => {
+      capsCache.permissions = perms;
+      const sched = backupScheduleCard(cur, b);
+      const sqlFailed = backupSQLLane(cur, b, { sql_export: { state: "failed", last_error: "boom" } });
+      const sqlReady = backupSQLLane(cur, b, { sql_export: { state: "succeeded", at: "2026-06-10T12:00:00Z", bytes: 2048, expires_at: "2026-06-10T16:00:00Z" } });
+      const sqlStaging = backupSQLLane(cur, b, { sql_export: { state: "downloaded", at: "2026-06-10T12:00:00Z", staging_error: "could not remove /tmp/x: busy" } });
+      const sqlIdle = backupSQLLane(cur, b, { sql_export: { state: "idle" } });
+      const take = backupTakeAway(cur, b, { sql_export: { state: "failed", last_error: "boom" } });
+      const restoreFailed = backupRestoreCard(cur, b, { restore: { state: "failed", published: true, last_error: "s3 put denied" } });
+      const restoreIdle = backupRestoreCard(cur, b, { restore: { state: "idle" } });
+      return {
+        schedFailed: /Last scheduled backup failed/.test(txt(sched)),
+        schedRed: !!sched && !!sched.querySelector(".bk-card-state.alarm"),
+        schedForm: hasBtn(sched, "Save schedule") || hasBtn(sched, "Add schedule"),
+        sqlFailed: /Last build failed/.test(txt(sqlFailed)),
+        sqlBuild: hasBtn(sqlFailed, "Build"),
+        sqlReadyText: txt(sqlReady),
+        sqlReadyDownload: hasBtn(sqlReady, "Download .sql backup (.tar.gz)"),
+        sqlStaging: /Staging problem/.test(txt(sqlStaging)),
+        sqlBuildAgain: /Build again/.test(txt(sqlStaging)),
+        sqlIdle: !!sqlIdle,
+        takeOpen: !!take && !!take.open,
+        restoreFailed: /could not send it to S3/.test(txt(restoreFailed)),
+        restoreButton: hasBtn(restoreFailed, "Restore"),
+        restoreIdle: !!restoreIdle,
+      };
+    };
+    try {
+      return { full: draw(Object.fromEntries(keys.map((k) => [k, true]))), viewer: draw(viewer) };
+    } finally { capsCache.permissions = keep; }
+  });
+  const pFull = outcome.full, pView = outcome.viewer;
+  (pFull.schedFailed && pFull.schedForm && pFull.sqlFailed && pFull.sqlBuild && /Ready/.test(pFull.sqlReadyText) && pFull.sqlReadyDownload
+    && pFull.sqlStaging && pFull.restoreFailed && pFull.restoreButton)
+    ? ok("permissions: with full access the failing fixtures draw their outcome and their controls (control case)")
+    : bad("permissions: with full access the failing fixtures draw their outcome and their controls (control case)", JSON.stringify(pFull));
+  (pView.schedFailed && pView.schedRed && !pView.schedForm
+    && pView.sqlFailed && !pView.sqlBuild && /Built for/.test(pView.sqlReadyText) && !/Ready/.test(pView.sqlReadyText) && !pView.sqlReadyDownload
+    && pView.sqlStaging && !pView.sqlBuildAgain && !pView.sqlIdle && pView.takeOpen
+    && pView.restoreFailed && !pView.restoreButton && !pView.restoreIdle)
+    ? ok("permissions: a view-only session is still told a scheduled run, a .sql build or a restore failed, without the controls")
+    : bad("permissions: a view-only session is still told a scheduled run, a .sql build or a restore failed, without the controls", JSON.stringify(pView));
+
+  // Arriving at the old settings address with a session that cannot see
+  // settings, on a server with no schedule: no empty heading, and no note
+  // saying the settings are "part of Snapshots now" beside nothing.
+  const oldAddr = await page.evaluate(async () => {
+    const keep = capsCache.permissions;
+    const keys = Object.keys(capsCache.permissions || {});
+    // An earlier scene may have closed this note; reopen it so "absent"
+    // below is about permission, and prove it with the full-access arrival.
+    const reopen = () => { movedClosed.delete("backup-settings"); try { localStorage.removeItem("dbtrail.moved.backup-settings"); } catch (_) {} };
+    const arrive = async () => {
+      history.pushState({}, "", "/backup-settings");
+      await renderRoute();
+      return { setup: !!document.getElementById("setup"), note: /Backup settings is part of Snapshots/.test(document.querySelector(".view").textContent),
+        path: location.pathname };
+    };
+    try {
+      reopen();
+      const full = await arrive();
+      reopen();
+      capsCache.permissions = Object.fromEntries(keys.map((k) => [k, k === "servers:read" || k === "status:read"]));
+      const view = await arrive();
+      return { full, view, path: view.path, setup: view.setup, note: view.note };
+    } finally {
+      capsCache.permissions = keep;
+      history.pushState({}, "", "/snapshots");
+      await renderRoute();
+    }
+  });
+  (oldAddr.full.note && oldAddr.full.setup && oldAddr.path === "/snapshots" && !oldAddr.setup && !oldAddr.note)
+    ? ok("permissions: the old settings address, for a session that cannot see settings, lands with no empty section and no promise")
+    : bad("permissions: the old settings address, for a session that cannot see settings, lands with no empty section and no promise", JSON.stringify(oldAddr));
+
   (pc.navHiddenWithoutServersRead && pc.navShownAgain)
     ? ok("permissions: the Snapshots menu entry hides without servers:read, and comes back")
     : bad("permissions: the Snapshots menu entry hides without servers:read, and comes back", JSON.stringify({ hidden: pc.navHiddenWithoutServersRead, back: pc.navShownAgain }));

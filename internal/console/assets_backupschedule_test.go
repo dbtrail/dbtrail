@@ -108,7 +108,10 @@ func TestBackupScheduleWireNamesMatchTheFrontend(t *testing.T) {
 	if !strings.Contains(body, "capsCache.backup_schedule") {
 		t.Error("the form is not gated on the backup_schedule capability, so the read-only console would offer a form that 403s")
 	}
-	if !strings.Contains(body, "if (!sch && !canEdit) return null") || strings.Contains(body, "if (!capsCache.backup_schedule ||") {
+	// With a saved schedule the card is drawn whatever the capability and the
+	// session's servers:write (#1573 step 7): only the no-schedule case, where
+	// nothing could be shown but a form, returns null.
+	if !strings.Contains(body, "if (!sch && !(canEdit && mayWrite)) return null") || strings.Contains(body, "if (!capsCache.backup_schedule ||") {
 		t.Error("the whole card is gated on the capability, so a saved schedule on a daemon that cannot run it is hidden instead of reported")
 	}
 	caps, _ := json.Marshal(capabilitiesResponse{BackupSchedule: true})
@@ -130,8 +133,11 @@ func TestSnapshotsPageStillMountsTheScheduleCard(t *testing.T) {
 	if !strings.Contains(body, "backupScheduleCard(") {
 		t.Error("the Snapshots page no longer mounts backupScheduleCard, so the schedule has no UI at all")
 	}
+	// Where it is APPENDED, not where it is built: since #1573 step 7 the
+	// card is built before the heading, because whether that section exists
+	// at all depends on it, and is placed inside the section's part.
 	setup := strings.Index(body, `snapshotSection("Where and how often"`)
-	card := strings.Index(body, "backupScheduleCard(")
+	card := strings.Index(body, "v.append(scheduleCard)")
 	if setup < 0 || card < setup {
 		t.Error("the schedule card is mounted above the \"Where and how often\" heading; the timetable is " +
 			"what that half of the page is named after")
