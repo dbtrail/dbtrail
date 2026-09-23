@@ -91,7 +91,7 @@ var oldVocabulary = regexp.MustCompile(`(?i)\b(backups?|baselines?)\b`)
 // test's log, and CI does not run with -v — so the gap is visible locally on
 // request, not announced.
 const (
-	assetVocabularyPin      = 282 // string literals in assets/app.js
+	assetVocabularyPin      = 283 // string literals in assets/app.js (+1: the frozen permission name baseline:create, PERM_SNAPSHOT_CREATE)
 	goVocabularyPin         = 225 // string literals in this package's non-test .go files
 	consoleappVocabularyPin = 277 // string literals in consoleapp's non-test .go files
 	vocabularySlack         = 3   // how far under a pin may drift before it must be lowered

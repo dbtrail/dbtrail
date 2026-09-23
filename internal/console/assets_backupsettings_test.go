@@ -350,7 +350,10 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	// The three kinds are told apart by layout: two section labels, and the
 	// daemon card outside the tinted grid.
 	build := functionBody(t, js, "function snapshotSetupSections(")
-	if strings.Count(build, `sect("`) != 2 {
+	// Counted as CALLS, not as quoted labels: the second label depends on
+	// whether the session may change settings (#1573 step 7), so it is one
+	// call with two possible words, still one section.
+	if strings.Count(build, `out.push(sect(`) != 2 {
 		t.Error("snapshotSetupSections does not open exactly two sections; the split between change-here and set-at-startup is not drawn")
 	}
 	if strings.Contains(build, "cards.append(backupDaemonCard") || !strings.Contains(daemon, `class: "card bks-boot"`) {

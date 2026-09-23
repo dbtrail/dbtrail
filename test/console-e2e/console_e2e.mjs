@@ -2488,6 +2488,110 @@ try {
     ? ok("snapshots: the mode help keeps open or closed across a repaint of the page")
     : bad("snapshots: the mode help keeps open or closed across a repaint of the page", JSON.stringify(foldKeeps));
 
+  // Scenario 15b3 — the page for a session that may only look (#1573 step 7).
+  // The snapshot listing moved from settings:read to servers:read so the
+  // lowest role can see what copies exist, and that made this page theirs:
+  // it must not greet them with a red "Could not load settings" box and five
+  // buttons that can only fail. Driven through the REAL renderSnapshots with
+  // capsCache.permissions swapped per case, the way /api/capabilities sends
+  // them for a scoped session. The full-access case runs FIRST, through the
+  // same probe: it is the control that proves each control is findable, so
+  // "absent" below cannot be a probe that finds nothing.
+  //
+  // Presentation only: each of these routes is still refused by the server
+  // (authz_test.go pins that). This proves the page stops OFFERING them.
+  const permCases = await page.evaluate(async () => {
+    const all = { ...(capsCache.permissions || {}) };
+    const keep = capsCache.permissions;
+    const probe = () => {
+      const v = document.querySelector(".view");
+      const btn = (t) => Array.from(v.querySelectorAll("button")).some((b) => b.textContent === t && !b.hidden);
+      const checks = document.getElementById("checks");
+      const setup = document.getElementById("setup");
+      const serverRows = Array.from(v.querySelectorAll(".bks-server"));
+      const sched = v.querySelector(".bk-schedule");
+      return {
+        rows: v.querySelectorAll(".stg-list .stg-row").length,
+        errorBoxes: v.querySelectorAll(".error-box").length,
+        create: btn("Create backup"),
+        createNote: /CREATE BACKUP/.test((v.querySelector(".ctx-strip") || {}).textContent || ""),
+        restore: !!v.querySelector(".bk-restore:not(.bk-schedule)"),
+        takeAway: !!v.querySelector("details.bk-take"),
+        duckData: btn("Download the data"),
+        views: btn("Download views.sql"),
+        build: btn("Build"),
+        runCheck: !!v.querySelector(".vfy-control"),
+        currentRun: !!v.querySelector(".vfy-current"),
+        history: !!v.querySelector(".vfy-histcard"),
+        checks: !!checks, setup: !!setup,
+        serverRows: serverRows.length,
+        serverSave: serverRows.some((r) => Array.from(r.querySelectorAll("button")).some((b) => b.textContent === "Save")),
+        serverLocked: serverRows.length > 0 && serverRows.every((r) => Array.from(r.querySelectorAll("input")).every((i) => i.disabled)),
+        changeHere: /Change here/.test(v.textContent),
+        startsLabel: /Set when DBTrail starts/.test(v.textContent),
+        currentSettings: /Current settings/.test(v.textContent),
+        schedCard: !!sched,
+        schedSave: !!sched && (btn("Save schedule") || btn("Add schedule")),
+        schedWatchHint: !!sched && /watch daemon's web interface/.test(sched.textContent),
+      };
+    };
+    const run = async (perms) => { capsCache.permissions = perms; await renderSnapshots(); return probe(); };
+    const deny = (...ps) => { const p = { ...all }; for (const k of Object.keys(p)) p[k] = true; for (const x of ps) p[x] = false; return p; };
+    const out = {};
+    try {
+      out.full = await run(Object.keys(all).length ? all : null);
+      out.viewer = await run(Object.fromEntries(Object.keys(all).map((k) => [k, k === "servers:read" || k === "status:read"])));
+      out.noQuery = await run(deny("query:execute"));
+      out.noCreate = await run(deny("baseline:create"));
+      out.noSettingsRead = await run(deny("settings:read"));
+      out.noServersWrite = await run(deny("servers:write"));
+      out.noSettingsWrite = await run(deny("settings:write"));
+      // The menu entry: gatePermissions reads data-perm.
+      capsCache.permissions = deny("servers:read");
+      gatePermissions();
+      out.navHiddenWithoutServersRead = document.querySelector('.nav-item[data-route="snapshots"]').classList.contains("perm-off");
+    } finally {
+      capsCache.permissions = keep;
+      gatePermissions();
+      await renderSnapshots();
+    }
+    out.navShownAgain = !document.querySelector('.nav-item[data-route="snapshots"]').classList.contains("perm-off");
+    out.permKeys = Object.keys(all);
+    return out;
+  });
+  const pc = permCases;
+  // The control: with every permission the probe finds every control.
+  (pc.full.rows > 0 && pc.full.create && pc.full.restore && pc.full.takeAway && pc.full.duckData && pc.full.build
+    && pc.full.runCheck && pc.full.serverSave && pc.full.schedSave && pc.full.startsLabel && !pc.full.currentSettings
+    && pc.full.errorBoxes === 0 && pc.permKeys.includes("servers:read"))
+    ? ok("permissions: with full access every control is drawn (the probe's control case)")
+    : bad("permissions: with full access every control is drawn (the probe's control case)", JSON.stringify(pc.full));
+  // The viewer: the list and the history, nothing that can only fail, no red box.
+  (pc.viewer.rows > 0 && pc.viewer.errorBoxes === 0 && !pc.viewer.create && !pc.viewer.createNote && !pc.viewer.restore
+    && !pc.viewer.takeAway && !pc.viewer.build && !pc.viewer.runCheck && pc.viewer.currentRun && pc.viewer.history
+    && pc.viewer.checks && pc.viewer.setup && pc.viewer.serverRows === 0 && !pc.viewer.schedSave && !pc.viewer.schedWatchHint)
+    ? ok("permissions: a view-only session sees the copies and the checks' history, with no red box and no button that can only fail")
+    : bad("permissions: a view-only session sees the copies and the checks' history, with no red box and no button that can only fail", JSON.stringify(pc.viewer));
+  // Each permission alone hides exactly its own controls.
+  const each = {
+    "query:execute": !pc.noQuery.duckData && pc.noQuery.build && pc.noQuery.create && pc.noQuery.serverSave,
+    "baseline:create": !pc.noCreate.create && !pc.noCreate.createNote && !pc.noCreate.restore && !pc.noCreate.build
+      && !pc.noCreate.runCheck && pc.noCreate.duckData && pc.noCreate.currentRun && pc.noCreate.serverSave,
+    "settings:read": pc.noSettingsRead.errorBoxes === 0 && pc.noSettingsRead.serverRows === 0 && !pc.noSettingsRead.views
+      && pc.noSettingsRead.duckData && pc.noSettingsRead.create && pc.noSettingsRead.schedSave,
+    "servers:write": !pc.noServersWrite.serverSave && pc.noServersWrite.serverLocked && !pc.noServersWrite.schedSave
+      && !pc.noServersWrite.schedWatchHint && pc.noServersWrite.create && pc.noServersWrite.changeHere === pc.full.changeHere,
+    "settings:write": !pc.noSettingsWrite.changeHere && pc.noSettingsWrite.currentSettings && !pc.noSettingsWrite.startsLabel && pc.noSettingsWrite.serverSave
+      && pc.noSettingsWrite.create,
+  };
+  (Object.values(each).every(Boolean))
+    ? ok("permissions: each permission denied alone hides exactly its own controls")
+    : bad("permissions: each permission denied alone hides exactly its own controls",
+      JSON.stringify({ each, noQuery: pc.noQuery, noCreate: pc.noCreate, noSettingsRead: pc.noSettingsRead, noServersWrite: pc.noServersWrite, noSettingsWrite: pc.noSettingsWrite }));
+  (pc.navHiddenWithoutServersRead && pc.navShownAgain)
+    ? ok("permissions: the Snapshots menu entry hides without servers:read, and comes back")
+    : bad("permissions: the Snapshots menu entry hides without servers:read, and comes back", JSON.stringify({ hidden: pc.navHiddenWithoutServersRead, back: pc.navShownAgain }));
+
   // Scenario 15c — the button's other gate arms, fixture-driven through the
   // REAL baselinesPanel (a server with no location at all can't exist live
   // once the daemon sets a default --baseline-dir; the daemon-default-only
