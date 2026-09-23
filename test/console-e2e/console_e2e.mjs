@@ -264,27 +264,31 @@ try {
   });
   const chipFor = (r, prefix) => r.chips.find((c) => c.text.startsWith(prefix)) || { text: "", cls: "" };
 
-  // stalled: the lag chip must go RED, not amber — the window's upper edge is
-  // frozen and changes since are not recoverable.
-  chipFor(cov.stalled, "capture lag").cls.includes("bad")
-    ? ok("coverage: a stalled stream paints the lag chip as an error")
-    : bad("coverage: a stalled stream paints the lag chip as an error", `cls=${chipFor(cov.stalled, "capture lag").cls}`);
+  // stalled: the time-since-last-change chip must go RED, not amber — the
+  // window's upper edge is frozen and changes since are not recoverable. The
+  // chip says "last change 1h ago" in every state since #1794: the number is
+  // the time since the newest captured change, which "capture lag" misnamed.
+  chipFor(cov.stalled, "last change").cls.includes("bad")
+    ? ok("coverage: a stalled stream paints the last-change chip as an error")
+    : bad("coverage: a stalled stream paints the last-change chip as an error", `cls=${chipFor(cov.stalled, "last change").cls}`);
   cov.stalled.lines.some((l) => l.cls.includes("bad") && /STALLED/.test(l.text))
     ? ok("coverage: stalled renders an explicit error line")
     : bad("coverage: stalled renders an explicit error line", JSON.stringify(cov.stalled.lines));
 
-  // idle: the SAME 3600s lag must NOT read as an error, and the card must say
-  // it cannot tell a quiet source from a lagging one.
-  chipFor(cov.idle, "capture lag").cls.includes("bad")
-    ? bad("coverage: an idle stream is not an error state", "the lag chip is red — idle is not a fault")
-    : ok("coverage: an idle stream is not an error state");
-  cov.idle.lines.some((l) => /identical/.test(l.text))
-    ? ok("coverage: idle admits it cannot tell quiet from lagging")
-    : bad("coverage: idle admits it cannot tell quiet from lagging", JSON.stringify(cov.idle.lines));
+  // idle: the SAME hour must read neutral (#1794): a quiet server is not a
+  // warning, let alone an error. The chip is found by its words first, so a
+  // renamed chip fails here instead of passing for want of a chip.
+  const idleChip = chipFor(cov.idle, "last change");
+  idleChip.text === "last change 1h ago" && !/\b(bad|warn|ok)\b/.test(idleChip.cls)
+    ? ok("coverage: an idle stream reads as time since the last change, in a neutral colour")
+    : bad("coverage: an idle stream reads as time since the last change, in a neutral colour", JSON.stringify(idleChip));
+  cov.idle.lines.some((l) => /cannot tell which/.test(l.text)) && !cov.idle.lines.some((l) => /bintrail_|metric/.test(l.text))
+    ? ok("coverage: idle admits it cannot tell quiet from lagging, without naming a metric")
+    : bad("coverage: idle admits it cannot tell quiet from lagging, without naming a metric", JSON.stringify(cov.idle.lines));
 
-  chipFor(cov.current, "capture lag").cls.includes("ok")
-    ? ok("coverage: a current stream paints the lag chip green")
-    : bad("coverage: a current stream paints the lag chip green", `cls=${chipFor(cov.current, "capture lag").cls}`);
+  chipFor(cov.current, "last change").cls.includes("ok")
+    ? ok("coverage: a current stream paints the last-change chip green")
+    : bad("coverage: a current stream paints the last-change chip green", `cls=${chipFor(cov.current, "last change").cls}`);
 
   // "none" is a NON-CLAIM (a file-mode index ran no capture). Green there would
   // paint the absence of a claim as assurance — the same rule continuity follows.

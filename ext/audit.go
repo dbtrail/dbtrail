@@ -58,7 +58,13 @@ import (
 //   - metadata-only reads that return no row images: the shim's
 //     SHOW TABLES FROM <virtual schema>, and the console's
 //     status/schemas/capabilities/storage endpoints, plus the baselines
-//     LISTING and per-snapshot files endpoints (names, sizes, timestamps).
+//     LISTING and per-snapshot files endpoints (names, sizes, timestamps),
+//     and the events browser's change probe (GET /api/events/head), which
+//     answers with the newest event id and nothing else. The Overview asks
+//     it every few seconds to decide whether to READ the events list, and
+//     that read is audited as query.run every time it happens; auditing the
+//     probe as well would file one entry per five seconds per open tab for
+//     reading nothing.
 //     The backup tar download is NOT in this list: it hands over every
 //     baseline row and is audited as console/baseline.download.
 //   - `verify` without --explain — including `--check recover`, which

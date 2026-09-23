@@ -344,6 +344,22 @@ type Server struct {
 	// "scope=live read the archives anyway" is invisible at the SQL layer
 	// and only a counting stub here can observe it (#1414).
 	archiveFetcher query.ArchiveFetcher
+	// snapshotLister answers whether one backup location holds a complete
+	// snapshot, for the Getting started list (#1801) — hasCompleteSnapshot
+	// when nil, injectable so a test never reaches a real bucket.
+	snapshotLister func(ctx context.Context, source string) (bool, error)
+	// snapshotChecks memoizes that answer for snapshotCheckTTL, keyed by
+	// server id so it holds one entry per server however often its backup
+	// locations are edited: the Getting started list is polled every few
+	// seconds while it shows, and an S3 location costs a listing over the
+	// network each time. Same shape as bucketRegions above, including that a
+	// deleted server's entry is NOT evicted: the map is bounded by the ids
+	// this process has ever served, an entry is a handful of bytes, and a
+	// sweep would buy nothing a restart does not. snapshotNow is the cache's
+	// clock (nil: time.Now).
+	snapshotMu     sync.Mutex
+	snapshotChecks map[string]snapshotCheck
+	snapshotNow    func() time.Time
 	// capacityProbe reads the index disk-capacity inputs for GET
 	// /api/capacity — doctor.ProbeCapacity in production, injectable so a
 	// test can drive the real verdict over a fixture (#1444). nil falls back
@@ -647,6 +663,10 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/activity", s.handleActivity)
 	api.HandleFunc("GET /api/schemas", s.handleSchemas)
 	api.HandleFunc("GET /api/events", s.handleEvents)
+	// Whether the index gained a row since the Overview last asked (#1801):
+	// no row data, so the page can ask every few seconds without re-reading
+	// (and auditing) the events list each time.
+	api.HandleFunc("GET /api/events/head", s.handleEventsHead)
 	// DDL history (#1443): the schema_changes table of the selected server,
 	// read-only, same caps and scope rules as the events browser.
 	api.HandleFunc("GET /api/schema-changes", s.handleSchemaChanges)
