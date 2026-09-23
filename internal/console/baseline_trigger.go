@@ -434,7 +434,7 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		// is a shared store, for the reason BaselineDir above is not defaulted.
 		BaselineS3:            e.BaselineS3,
 		At:                    at,
-		CarryForwardUnchanged: s.effectiveBaselineRefresh().CarryForwardUnchanged,
+		CarryForwardUnchanged: s.baselineRefreshDefaults.CarryForwardUnchanged,
 	}
 	if err := s.baselineRestore.TriggerRestore(req); err != nil {
 		if errors.Is(err, ErrBaselineRunning) {

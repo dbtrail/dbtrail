@@ -294,15 +294,17 @@ func visibleChars(body string) int {
 
 // TestBackupSettingsStaysCompact: the two daemon-side cards carried ~247
 // words of visible copy before the per-server list (#1603). They explain
-// themselves by drawing now; what still needs saying is compact, not cut.
+// themselves by drawing now; what still needs saying is compact, not cut. The
+// disk-space card is gone (#1681); what it said that is still true is one
+// line of the per-server yes/no, localCopyWords, budgeted below.
 func TestBackupSettingsStaysCompact(t *testing.T) {
 	js := readAsset(t, "app.js")
-	refresh := jsFunctionBody(t, js, "backupRefreshCard")
+	words := jsFunctionBody(t, js, "localCopyWords")
 	daemon := jsFunctionBody(t, js, "backupDaemonCard")
 	row := jsFunctionBody(t, js, "backupServerRow")
 
 	// Each surface keeps a compact block: folding is what makes the cut real.
-	for name, body := range map[string]string{"backupRefreshCard": refresh, "backupDaemonCard": daemon, "backupServerRow": row} {
+	for name, body := range map[string]string{"backupDaemonCard": daemon, "backupServerRow": row} {
 		if !strings.Contains(body, `cnFine("More about `) {
 			t.Errorf("%s has no compact block; the prose was cut, not compacted", name)
 		}
@@ -316,8 +318,11 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	// caps sit ~25% and ~40% above the rewrite and well below the old cards,
 	// so a copy edit breathes but one more paragraph rings here before the
 	// e2e sees it.
-	if n := visibleChars(refresh); n > 620 {
-		t.Errorf("backupRefreshCard's visible text is %d characters; the drawing carries the rule, so put the rest behind cnFine", n)
+	// localCopyWords over every arm at once is 669 characters today; a reader
+	// sees at most two of its lines. The cap leaves room for a copy edit and
+	// rings on one more paragraph.
+	if n := visibleChars(words); n > 820 {
+		t.Errorf("localCopyWords' visible text is %d characters over all its arms; a reader sees two lines of it, keep them short", n)
 	}
 	if n := visibleChars(daemon); n > 150 {
 		t.Errorf("backupDaemonCard's visible text is %d characters beyond its rows; explain in the compact block, not above the rows", n)
@@ -366,7 +371,7 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	// jsFunctionBody fails open, because that helper truncates each line at
 	// its first "//" and a URL literal ("s3://...") hides everything after
 	// it on the line. Comments carrying a dash ring here on purpose.
-	for _, name := range []string{"backupRefreshCard", "backupDaemonCard", "backupServerRow", "snapshotSetupSections", "cfShape", "blCase", "s3RetentionBox"} {
+	for _, name := range []string{"localCopyWords", "backupDaemonCard", "backupServerRow", "snapshotSetupSections", "blCase", "s3RetentionBox"} {
 		body := jsFunctionSpan(t, js, name)
 		for _, m := range regexp.MustCompile(`"([^"\n]*)"`).FindAllStringSubmatch(body, -1) {
 			if strings.Contains(m[1], "—") {

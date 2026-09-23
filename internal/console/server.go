@@ -184,15 +184,6 @@ type Config struct {
 	// hides the panel).
 	RotationDefaults RotationDefaults
 
-	// BaselineRefreshTargets reports, LIVE, how many servers the next refresh
-	// tick will cover and how many were skipped for keeping their baselines
-	// only in S3. Wired by the watch daemon only when the refresh loop is
-	// scheduled; nil everywhere else, and the DTO then omits the counts. Live
-	// rather than a boot snapshot because the loop recomputes its target set
-	// every tick — a snapshot would go stale the moment a server is added,
-	// which is exactly the fresh-install shape #1579 is about (enabled and
-	// scheduled both true, zero servers refreshable, and the page silent).
-	BaselineRefreshTargets func() (targets, skippedS3Only int)
 	// LocalPruneLoop is set by the watch daemon when it runs the loop that
 	// removes local snapshots past a server's keep-newest count (#1681). The
 	// read-only serve leaves it false: nothing there removes anything, so the
@@ -339,13 +330,12 @@ type Server struct {
 	// /api/rotation reports when no console override is saved.
 	rotationDefaults       RotationDefaults
 	backupSettingsDefaults BackupSettingsDefaults
-	// baselineRefreshDefaults is the fallback GET /api/baseline-refresh reports
-	// when no console override is saved.
+	// baselineRefreshDefaults is what the daemon was started with for
+	// reusing unchanged tables; the backup settings report it as
+	// reuse_unchanged (#1681) and a triggered snapshot passes it on.
 	baselineRefreshDefaults BaselineRefreshDefaults
 	// localPruneLoop is Config.LocalPruneLoop.
 	localPruneLoop bool
-	// baselineRefreshTargets is Config.BaselineRefreshTargets (nil off watch).
-	baselineRefreshTargets func() (targets, skippedS3Only int)
 	// version is the running build's version string (Config.Version).
 	version string
 	// archiveFetcher reads one archive source for the browsing endpoints —
@@ -566,7 +556,6 @@ func New(cfg Config) (*Server, error) {
 		rotationDefaults:        cfg.RotationDefaults,
 		backupSettingsDefaults:  cfg.BackupSettingsDefaults,
 		baselineRefreshDefaults: cfg.BaselineRefreshDefaults,
-		baselineRefreshTargets:  cfg.BaselineRefreshTargets,
 		localPruneLoop:          cfg.LocalPruneLoop,
 		version:                 cfg.Version,
 		cm:                      newConnManager(cfg.Registry, profileActive),
@@ -783,11 +772,6 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/backup-settings", s.handleBackupSettingsGet)
 	api.HandleFunc("PUT /api/backup-settings/servers/{id}", s.handleBackupSettingsServerUpdate)
 	api.HandleFunc("PUT /api/backup-settings/daemon/{key}", s.handleBackupSettingsDaemonUpdate)
-	// Global baseline-refresh policy, read-only since #1681: reusing an unchanged table's file is always on,
-	// so there is nothing here to write. The GET stays because the Backup
-	// settings card still reports what the daemon does and whether anything
-	// consumes it.
-	api.HandleFunc("GET /api/baseline-refresh", s.handleBaselineRefreshGet)
 	// Authenticated auth verbs. Registered on the inner mux so a forgotten
 	// root registration breaks login, never security (ServeMux specificity
 	// keeps them under the tokenMiddleware-wrapped /api/ catch-all).

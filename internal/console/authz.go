@@ -172,10 +172,6 @@ var apiRoutePerms = []routePerm{
 	// The daemon-wide rows are process settings, not one server's connection,
 	// so they sit behind settings:write rather than servers:write.
 	{"PUT", "/api/backup-settings/daemon/{}", ext.PermSettingsWrite},
-	// Baseline refresh: reading what the daemon does with an unchanged table
-	// is a settings read. There is no write since #1681 — the setting is the
-	// daemon's own flag, and the console does not edit it.
-	{"GET", "/api/baseline-refresh", ext.PermSettingsRead},
 	// The snapshot listing is a read ABOUT A SERVER, not console administration:
 	// whoever may create a snapshot has to be able to see the one they created,
 	// and the status of that server's snapshot, restore, .sql and verify jobs

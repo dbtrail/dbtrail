@@ -9,105 +9,7 @@ import (
 	"testing"
 )
 
-// TestBackupRefreshCard_neverClaimsLiveWhileDormant pins the one thing this
-// card must not do: state two opposite things about the running system.
-//
-// The card says "Nothing uses this yet" whenever br.enabled is false. If the
-// provenance line ALSO claims the setting is live purely because an override
-// exists, the same card simultaneously tells the operator the setting is
-// running and that nothing runs. That is not a wording preference: the setting
-// changes the on-disk representation of their backups, and the panel is where
-// consent for that is taken.
-//
-// The old shape put liveness in a kv row, as "this page (live)", and this
-// guard pinned that ternary. The rewrite deleted the rows, so this guard now
-// covers ONE half of the property: the card's closing sentence says what the
-// daemon does with unchanged tables and says nothing about whether it runs.
-//
-// It is deliberately NOT the whole property. Everything the card renders
-// before the provenance line is outside the window, so a state pill reading
-// "On, live and running now" passes here. The whole-card version is the e2e
-// scenario "backups: the disk-space card reports every state it can be in",
-// which renders the real function across all 16 DTOs and matches a liveness
-// WORD against the rendered text. The difference matters: the check below is
-// the literal "(live", which the old kv row used, and a pill reading "On,
-// running now" carries no parentheses and passes it. This guard is the cheap
-// unit-level half; do not delete the e2e believing this one covers it.
-func TestBackupRefreshCard_neverClaimsLiveWhileDormant(t *testing.T) {
-	// jsFunctionBody, not functionBody: it strips comment lines before walking.
-	// These guards search for the rendered LABELS, and this function documents
-	// its own gate in a comment that quotes them, so an unstripped body matches
-	// the prose instead of the code and reports a pass on a deleted gate.
-	body := jsFunctionBody(t, readAsset(t, "app.js"), "backupRefreshCard")
 
-	// The closing sentence of the compact block is the one that used to carry
-	// provenance (#1681 removed the override, so it now says what the daemon
-	// was started with). It is the LAST say() over the value, and liveness
-	// must stay out of it.
-	i := strings.LastIndex(body, "say(on")
-	if i < 0 {
-		t.Fatal("backupRefreshCard renders no closing sentence over the value; this guard covers nothing")
-	}
-	// End at the statement, not at a raw character budget: 300 chars ran past
-	// the say() call into the primary button's label and cut off mid-string, so
-	// a future button reading "Live now" would fail a guard whose message
-	// blames the provenance line. ("now" is a bare substring, so "know" trips
-	// it too.)
-	rest := body[i:]
-	arm := rest
-	if e := strings.Index(rest, ");"); e >= 0 {
-		arm = rest[:e]
-	}
-	for _, w := range []string{"live", "running", "yet", "now"} {
-		if strings.Contains(strings.ToLower(arm), w) {
-			t.Errorf("the closing sentence says %q. Whether the setting is running belongs to the "+
-				"br.enabled / br.scheduled line alone; said in both places the card can call a dormant "+
-				"setting live and tell the operator nothing runs, in the same card:\n%s", w, arm)
-		}
-	}
-	// The old mechanism, pinned so it cannot come back through a row. Over the
-	// SPAN, not the body: jsFunctionBody truncates each line at its first "//",
-	// so a must-not-contain over it fails OPEN. A string carrying a URL removes
-	// everything after the scheme's slashes from the body this guard would see
-	// while the browser still renders it, which is how `say("… (live)")` passed
-	// this check when it was written against the body.
-	if strings.Contains(jsFunctionSpan(t, readAsset(t, "app.js"), "backupRefreshCard"), "(live") {
-		t.Error("a `(live` label is back. Liveness in a label next to the value reintroduces the " +
-			"contradiction this guard exists for; keep it in the sentence that owns it")
-	}
-	if !strings.Contains(body, "!br.enabled") {
-		t.Fatal("the dormancy note is gone; a setting nothing consumes would look active")
-	}
-	// Three states, and the middle one is the whole point: --baseline-trigger
-	// with no schedule runs no loop but DOES apply this to restores. Collapsing
-	// it back into the dormant branch is the misreport this guard exists for.
-	if !strings.Contains(body, "br.scheduled") {
-		t.Fatal("the card no longer distinguishes 'no schedule' from 'nothing uses this', so a daemon whose " +
-			"restores reuse files today would be told nothing runs yet")
-	}
-}
-
-// TestBackupRefreshCard_hasNothingToClick (#1681): the card reports what the
-// daemon does with a table that did not change; the switch, its two buttons
-// and the save they called are gone. A control here would ask a question the
-// console can no longer answer, and the e2e's state matrix is the other half
-// of this (it renders the real card and counts buttons).
-func TestBackupRefreshCard_hasNothingToClick(t *testing.T) {
-	js := readAsset(t, "app.js")
-	body := jsFunctionBody(t, js, "backupRefreshCard")
-	// Every interactive shape, not only the button the switch used: a
-	// checkbox or a select would ask the same question the console can no
-	// longer answer.
-	for _, gone := range []string{"onclick", "stg-cardfoot", "saveBackupRefresh", "bkr-state",
-		`"checkbox"`, `el("button"`, `el("input"`, `el("select"`} {
-		if strings.Contains(body, gone) {
-			t.Errorf("backupRefreshCard renders %q again; the setting is not editable from the console since #1681", gone)
-		}
-	}
-	if strings.Contains(js, "function saveBackupRefresh(") {
-		t.Error("saveBackupRefresh is back; there is no endpoint for it to call")
-	}
-}
 
 // TestBaselineRefreshNote_partitionsTheTables: reused and refreshed must ADD UP
 // to the run's table count, never overlap.
@@ -170,66 +72,23 @@ func TestBackupRefreshWireNamesMatchTheFrontend(t *testing.T) {
 			t.Errorf("app.js does not read %s, so the reused count never reaches the page", ref)
 		}
 	}
-
-	// Targets non-nil and SkippedS3Only non-zero, or their omitempty hides
-	// the very keys this pin exists for.
-	zero := 0
-	dto, err := json.Marshal(baselineRefreshDTO{CarryForwardUnchanged: true,
-		Enabled: true, Scheduled: true, Targets: &zero, SkippedS3Only: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var d map[string]any
-	if err := json.Unmarshal(dto, &d); err != nil {
-		t.Fatal(err)
-	}
-	// No "source": #1681 left one source (the daemon flag), so the field that
-	// named which of two had won is gone from both sides.
-	for _, key := range []string{"carry_forward_unchanged", "enabled", "scheduled", "targets", "skipped_s3_only"} {
-		if _, ok := d[key]; !ok {
-			t.Errorf("baselineRefreshDTO does not serialise %q (got %s)", key, dto)
-		}
-		if !strings.Contains(js, "br."+key) && !strings.Contains(js, key) {
-			t.Errorf("app.js never reads %q from the refresh DTO", key)
-		}
-	}
-	// The zero-targets alarm keys on the exact shape #1579 names: scheduled
-	// AND a REAL zero. `br.targets === 0` (strict) so an omitted field
-	// (serve, no loop) can never fire it.
-	if !strings.Contains(js, "br.targets === 0") {
-		t.Error("the zero-targets alarm is gone or no longer strict; a running timer over zero " +
-			"refreshable servers would fall back to silence (#1579)")
-	}
 }
 
-// TestSettingsPageMountsTheRefreshCard: the card can be unmounted, or its
-// fetch removed, with the whole suite green.
-//
-// The two guards above check what the card renders once it is called. Neither
-// notices if nothing calls it: dropping the append makes the setting vanish,
-// and dropping the fetch makes it render its error branch forever. A setting
-// an operator cannot reach is the same as a setting that does not exist.
-//
-// The card moved from Storage to Backups (#1543), from there to the Backup
-// settings page (#1582), and with that page into the setup half of Snapshots
-// (#1573). The guard follows the card rather than the page, and it checks
-// BOTH halves of a move so it cannot be half-done: the half that owns it
-// mounts it and the page feeds it, and no other half renders it — a control
-// that renders twice reads one value in two places, and one of them is
-// always stale.
-func TestSettingsPageMountsTheRefreshCard(t *testing.T) {
+// TestSnapshotsSetup_theDiskSpaceCardIsGone (#1681): with reuse unconditional
+// the card's "On" said nothing, and its saving is only true for a server with
+// a local copy, so the saving moved beside each server's yes/no. The card, its
+// fetch and its endpoint go together: a fetch left behind would 404 on every
+// page load, and a card left behind would read an endpoint that is gone.
+func TestSnapshotsSetup_theDiskSpaceCardIsGone(t *testing.T) {
 	js := readAsset(t, "app.js")
-	setup := jsFunctionBody(t, js, "snapshotSetupSections")
-	if !strings.Contains(setup, "backupRefreshCard(") {
-		t.Error("the setup half of Snapshots no longer mounts backupRefreshCard, so the reuse setting has no UI at all")
+	if strings.Contains(js, "function backupRefreshCard(") || strings.Contains(js, "backupRefreshCard(") {
+		t.Error("backupRefreshCard is back; the saving is said per server now (localCopyWords)")
 	}
-	page := jsFunctionBody(t, js, "renderSnapshots")
-	if !strings.Contains(page, `api("/api/baseline-refresh")`) {
-		t.Error("Snapshots does not fetch /api/baseline-refresh, so the card can only ever render its error branch")
+	if strings.Contains(js, "/api/baseline-refresh") {
+		t.Error("app.js still asks for /api/baseline-refresh, which no longer exists")
 	}
-	if strings.Contains(page, "backupRefreshCard(") {
-		t.Error("Snapshots mounts backupRefreshCard directly as well as through snapshotSetupSections; " +
-			"the card belongs to the setup half, which is what decides whether it is drawn at all")
+	if !strings.Contains(jsFunctionBody(t, js, "backupServersPanel"), "settings.reuse_unchanged") {
+		t.Error("the per-server rows are not told whether unchanged tables keep their file, so the yes can only guess the saving")
 	}
 }
 
@@ -293,54 +152,6 @@ func TestStorageSplit_eachHalfHoldsOnlyItsOwnConcern(t *testing.T) {
 	}
 }
 
-// TestBackupRefreshCard_titleSaysWhatItDoes (#1528). This card controls one
-// thing: whether an unchanged table reuses its previous file instead of being
-// written again. It is a storage behaviour with no timetable in it, and it
-// used to be titled "Automatic backup refresh" one route away from "Scheduled
-// backups", which IS the timetable. Two names both promising "backups,
-// automatically", for two unrelated settings.
-//
-// The third assertion is what makes this a guard rather than a spelling check:
-// it fails if the collision is "fixed" by renaming the schedule instead.
-func TestBackupRefreshCard_titleSaysWhatItDoes(t *testing.T) {
-	js := readAsset(t, "app.js")
-	body := jsFunctionBody(t, js, "backupRefreshCard")
-
-	// Tolerates both shapes: the title as a `text:` on the card-title div, and
-	// the title as a nested span once the div grew a second class to carry the
-	// state pill beside it.
-	m := regexp.MustCompile(`card-title[^"]*"[\s\S]{0,80}?text: "([^"]*)"`).FindStringSubmatch(body)
-	if m == nil {
-		t.Fatal("backupRefreshCard renders no card title; this guard covers nothing")
-	}
-	title := m[1]
-	for _, banned := range []string{"Automatic", "automatic", "Schedul", "schedul", "Refresh", "refresh"} {
-		if strings.Contains(title, banned) {
-			t.Errorf("the card title %q contains %q: this setting has no timetable in it, and the word "+
-				"puts it back beside Scheduled backups, which is the timetable", title, banned)
-		}
-	}
-	// It sits on the Backups page beside the schedule (#1543), so the title
-	// says which of the two it is and what it costs or saves. Disk is the
-	// whole trade: reusing a file means two snapshots share one, so a prune
-	// reports space it will not reclaim while the newer one references it.
-	low := strings.ToLower(title)
-	if !strings.HasPrefix(low, "backups") {
-		t.Errorf("the card title %q does not start with Backups, so on the Backups page it does not say "+
-			"which control it is", title)
-	}
-	if !strings.Contains(low, "disk") {
-		t.Errorf("the card title %q does not name what the control trades (disk space)", title)
-	}
-	// The timetable's own name, read from the card that carries it. It was a
-	// <summary> line ("Scheduled backups: none") until #1528 turned the fold
-	// into a card with a heading; scoping the check to the function is what
-	// keeps it from passing on the same words somewhere else in the file.
-	if !strings.Contains(jsFunctionBody(t, js, "backupScheduleCard"), `text: "Scheduled backups"`) {
-		t.Fatal("the schedule card is no longer titled Scheduled backups; the collision was resolved from " +
-			"the wrong side, and this guard would have passed on a renamed timetable")
-	}
-}
 
 // TestReusedCopiedNote_saysWhatACopyCost pins the only user-visible half of
 // #1578: every layer under the render (carryForward's bool, the fold wiring,
@@ -364,25 +175,6 @@ func TestReusedCopiedNote_saysWhatACopyCost(t *testing.T) {
 	}
 }
 
-// TestBackupRefreshCard_prose (#1528): a line of help under a control is fine,
-// a paragraph means the control explains itself instead of being clear. The
-// on-state used to carry the shared-bytes consequence of a hard link in the
-// card; that is a thing a reader wants while reading docs, not while flipping
-// the switch, so it lives in docs/console.md now.
-func TestBackupRefreshCard_prose(t *testing.T) {
-	body := jsFunctionBody(t, readAsset(t, "app.js"), "backupRefreshCard")
-	if strings.Contains(body, "share the same bytes on disk") {
-		t.Error("the hard-link consequence is back in the card; it belongs in docs/console.md")
-	}
-	if strings.Contains(body, "—") {
-		t.Error("backupRefreshCard copy contains an em dash")
-	}
-	// docsNoWrap: the first version of this read the file raw and went red
-	// because the sentence wrapped between two lines.
-	if !strings.Contains(docsNoWrap(t), "share the same bytes on disk") {
-		t.Error("docs/console.md does not carry the shared-bytes consequence, so removing it from the card lost it")
-	}
-}
 
 // TestBackupScheduleCard_introIsNotAnEssay (#1528): the card's opening
 // paragraph explained the producer choice in general terms directly above the
@@ -779,68 +571,28 @@ func TestDuckDBCard_titleDoesNotPromiseAQuery(t *testing.T) {
 	}
 }
 
-// TestBackupRefreshCard_saysReuseCannotHappenOnS3 ties the card's one factual
-// claim about where the saving applies to the code that makes it true.
-//
-// carryForwardEligible refuses any s3:// previous snapshot, because carrying a
-// file forward means hard-linking it and a link needs both ends on a
-// filesystem. Before this sentence existed the card promised the saving
-// unconditionally, so on every S3-backed server it advertised a disk saving
-// that CANNOT happen: the refresh loop already logs "not applicable" on each
-// published run, and the console was the surface contradicting it.
-//
-// The guard is two-sided on purpose. It fails if the card drops the sentence,
-// and it fails if the exclusion is LIFTED in reconstruct while the card still
-// carries it, because a card that understates what a setting does sends an
-// operator looking for a saving they already have.
-//
-// What it does NOT cover, so nobody reads more into it than it does:
-//
-//   - the WORDING. This side only asserts that some visible string names both
-//     S3 and the machine-local condition, so it passes on a sentence that says
-//     the OPPOSITE about them. The e2e renders the real function across every
-//     state and asserts the sentences; that is where the claim is pinned.
-//   - the exclusion being defeated at the CALLER rather than in the rule, for
-//     instance baselineFoldSource returning the local directory. Nothing here
-//     sees that. internal/reconstruct's own TestCarryForwardEligible covers
-//     the rule itself.
-func TestBackupRefreshCard_saysReuseCannotHappenOnS3(t *testing.T) {
-	body := jsFunctionBody(t, readAsset(t, "app.js"), "backupRefreshCard")
-
-	// Assert the CLAIM, not its spelling: any sentence naming S3 in the same
-	// visible string as the machine-local condition satisfies this.
-	var said string
-	for _, s := range visibleStrings(body) {
-		if strings.Contains(s, "S3") && strings.Contains(strings.ToLower(s), "this machine") {
-			said = s
-			break
-		}
+// TestLocalCopyWords_saysEveryTableIsWrittenWithoutALocalCopy ties the "no"
+// sentence (#1681) to the rule that makes it true. Choosing "only in S3" is
+// choosing a full write of every table on every run, because carrying a file
+// forward is a hard link and carryForwardEligible refuses an s3:// previous
+// snapshot. If that exclusion is ever lifted, the sentence understates what
+// a server without a local copy gets, and this fails in the same change.
+func TestLocalCopyWords_saysEveryTableIsWrittenWithoutALocalCopy(t *testing.T) {
+	body := jsFunctionBody(t, readAsset(t, "app.js"), "localCopyWords")
+	if !strings.Contains(body, `"Snapshots live only in S3, and every run writes every table."`) {
+		t.Error("the no answer no longer says, in those words, that snapshots live only in S3 and every run writes every table")
 	}
-	if said == "" {
-		t.Error("no visible string on the card says the saving applies only to backups kept on this " +
-			"machine and not to ones in S3. Without it the card promises a disk saving that an " +
-			"S3-backed server can never get, which is what it did before this sentence existed")
-	}
-
-	// The other side: the rule the sentence describes.
 	src, err := os.ReadFile(filepath.Join("..", "reconstruct", "carryforward.go"))
 	if err != nil {
 		t.Fatalf("read carryforward.go: %v", err)
 	}
-	// Comments stripped first. Reading the raw file let a comment SAYING the
-	// rule was removed ("it used to read !strings.HasPrefix(srcPath, ...) right
-	// here") satisfy the check that the rule is still there, which is the exact
-	// inversion this side of the guard exists to catch.
-	// Anchored BEFORE the literal's own slashes: "s3://" contains a "//", so
-	// the comment strip truncates the real line of code at exactly this point.
-	// That is what makes the anchor work on both sides. A comment quoting the
-	// rule starts with "//" and is removed whole, so it cannot supply it, while
-	// the code line always survives up to here.
+	// Anchored before the literal's own slashes, as the card's guard was:
+	// "s3://" contains "//", so the comment strip truncates the real line of
+	// code exactly there, and a comment quoting the rule cannot supply it.
 	const rule = `!strings.HasPrefix(srcPath, "s3:`
 	if !strings.Contains(stripGoLineComments(string(src)), rule) {
 		t.Errorf("carryForwardEligible no longer excludes an s3:// previous snapshot (%s is gone), so the "+
-			"card's sentence %q now understates what the setting does. Update the card in the same "+
-			"change that lifts the exclusion", rule, said)
+			"no answer's sentence now understates what a server without a local copy gets", rule)
 	}
 }
 

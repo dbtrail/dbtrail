@@ -498,13 +498,6 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	}
 	if upBaselineRefreshEvery != "" {
 		cfg.BaselineRefresh = baselineSup
-		// Live target count for GET /api/baseline-refresh (#1579): the loop
-		// recomputes its set per tick, so the page must too, or a fresh
-		// install reports everything-running over zero refreshable servers.
-		cfg.BaselineRefreshTargets = func() (int, int) {
-			reqs, skipped := baselineRefreshTargets(registryEntries(registry), upIndexDSN, upConsoleBaselineDir)
-			return len(reqs), len(skipped)
-		}
 	}
 	wireBaselineExtras(&cfg, baselineSup, serversPath)
 	// The per-server backup schedule (#1442) needs only the supervisor: the
@@ -727,13 +720,6 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	}
 	if upBaselineRefreshEvery != "" {
 		cfg.BaselineRefresh = baselineSup
-		// Live target count for GET /api/baseline-refresh (#1579): the loop
-		// recomputes its set per tick, so the page must too, or a fresh
-		// install reports everything-running over zero refreshable servers.
-		cfg.BaselineRefreshTargets = func() (int, int) {
-			reqs, skipped := baselineRefreshTargets(registryEntries(registry), upIndexDSN, upConsoleBaselineDir)
-			return len(reqs), len(skipped)
-		}
 	}
 	wireBaselineExtras(&cfg, baselineSup, serversPath)
 	// The per-server backup schedule (#1442) needs only the supervisor: the
@@ -1620,10 +1606,6 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console
 			AddFuture: upRotateAddFuture,
 			Enabled:   upRotationCfg.Enabled,
 		},
-		// Same role for the baseline-refresh panel: what the daemon itself was
-		// told, reported when no console override is saved. Enabled is the
-		// loop's boot-time liveness, so the panel can say a saved setting is
-		// dormant instead of implying it is live.
 		// The Snapshots page's read-only rows (#1582):
 		// what this daemon was told, verbatim, each under the exact flag or
 		// env name the page shows beside it. Values, not re-derivations — the

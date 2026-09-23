@@ -1939,9 +1939,10 @@ func registryEntries(reg *console.Registry) []console.ServerEntry {
 // names of servers skipped for having only an S3 destination.
 //
 // PURE on purpose (#1579): it used to slog.Warn the S3-only skip itself, and
-// the same computation now also answers GET /api/baseline-refresh live, where
-// a warning per page load would be log spam. The callers that dispatch work
-// log the skip via logSkippedRefreshTargets, preserving the old visibility.
+// the same computation also answered a page's live target count (removed with
+// the disk-space card in #1681), where a warning per page load would have been
+// log spam. The callers that dispatch work log the skip via
+// logSkippedRefreshTargets, preserving the old visibility.
 func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBaselineDir string) ([]refreshRequest, []string) {
 	var out []refreshRequest
 	var skippedS3Only []string
