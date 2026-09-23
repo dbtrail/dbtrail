@@ -96,17 +96,23 @@
   // so text written straight into the details (no wrapping element) counts
   // as folded too.
   //
-  // This is FOLD-AWARE on purpose, and it is one of two rules over the same
-  // vocabulary. The other is TestOldVocabularyOnlyShrinks in
-  // internal/console/assets_vocabulary_test.go, which reads the SOURCE and
-  // is fold-BLIND: a reader who clicks still reads the word, so a sentence
-  // moved behind a fold still counts there. The two answer different
-  // questions — "what does a first run meet without clicking" here, "what
-  // can a reader reach at all" there — so they can move in opposite
-  // directions on one commit, and that is them working, not disagreeing.
-  // The source-level rule is deliberately the broader one; do not narrow it
-  // to match this function, and do not teach this function to see through
-  // folds to match it.
+  // This is FOLD-AWARE on purpose, and it has a counterpart that is not:
+  // TestOldVocabularyOnlyShrinks in
+  // internal/console/assets_vocabulary_test.go reads the SOURCE, so a
+  // sentence moved behind a fold still counts there — a reader who clicks
+  // still reads the word. They answer different questions ("what does a
+  // first run meet without clicking" here, "what can a reader reach at all"
+  // there) and can move in opposite directions on one commit, which is them
+  // working rather than disagreeing. Do not teach this function to see
+  // through folds to match it, and do not narrow it to match this.
+  //
+  // They are NOT the same rule over the same words, and reading them that
+  // way is how a fold gets mistaken for a rename. The banned list behind
+  // `chunks` is twelve words plus the em dash (first_run_scoreboard.mjs);
+  // the source-level rule covers two of them, backup and baseline, and
+  // nothing about the em dash. So folding text lowers `banned_words` with
+  // nothing removed from the product, and for the other ten words no guard
+  // notices either way.
   function inClosedDetails(node) {
     for (let child = node, p = node.parentNode; p; child = p, p = p.parentNode) {
       if (p.tagName === "DETAILS" && !p.open && !(child.nodeType === 1 && child.tagName === "SUMMARY")) return true;

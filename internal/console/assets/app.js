@@ -4417,7 +4417,10 @@ async function renderSnapshots() {
   const [dumpSt, restoreSt, sqlSt] = await Promise.all([
     (capsCache.baseline_trigger && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline").catch(() => null) : null,
     (capsCache.baseline_restore && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/baseline/restore").catch(() => null) : null,
-    (capsCache.sql_export && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/sql-export").catch(() => null) : null,
+    // asErr, not a swallow: the .sql build's outcome appears in exactly one
+    // place on this page, so a failed status read has to reach the panel as
+    // a failure rather than as "no build has ever run here".
+    (capsCache.sql_export && selId) ? api("/api/servers/" + encodeURIComponent(selId) + "/sql-export").catch(asErr) : null,
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   try {
@@ -7437,29 +7440,68 @@ function backupTakeAway(cur, b, sqlSt) {
   //
   // It opens ITSELF whenever the .sql build has anything owed to the reader.
   // A build nobody is watching must never be hidden behind a fold — that is
-  // the failure this page exists to prevent, one level down.
+  // the failure this page exists to prevent, one level down. This is the
+  // ONLY place on the page a build's outcome appears, so the rule below is
+  // load-bearing rather than cosmetic.
   //
-  // Which is why the rule below names the states that keep it CLOSED rather
-  // than the three that open it. A state this build does not know (the
-  // server already has one the frontend never learned, `replaced`) is far
-  // more likely to be a new way of failing than a new kind of nothing, so
-  // the unknown one opens. An allow-list would have hidden it by default,
-  // and nothing would have said so.
+  // Which is why it names the states that keep it CLOSED rather than the
+  // ones that open it. The documented set is closed today — BaselineStatus
+  // in baseline_trigger.go lists six, and the lane below has a branch for
+  // each — so this guards the day it stops being closed: a state added
+  // server-side before the frontend learns it is far likelier to be a new
+  // way of failing than a new kind of nothing. An allow-list would hide that
+  // one by default and nothing would say so. (What such an addition looks
+  // like already exists one endpoint over: `replaced` is a real state on the
+  // Storage page's own DTO, produced in consoleapp/sql_export.go, and it can
+  // NOT reach this code — do not read the guard as being about that value.)
+  // A Set rather than an object literal costs nothing and avoids `state`
+  // values like "constructor" answering truthy through the prototype.
   //
-  // A Set, not an object: on a plain object `state` values like
-  // "constructor" answer truthy through the prototype and would read as
-  // quiet.
+  // THREE things beside the state also open it, each because a closed fold
+  // would be the only thing standing between an operator and a real problem:
+  //
+  //   staging_error is composed independently of state (the daemon folds in
+  //   every orphan it could not delete, and sql_export.go says in as many
+  //   words that clearing one never erases the other). So a build that was
+  //   downloaded — a quiet state — can carry a red line saying the daemon
+  //   cannot clear staged full dumps off its own disk, the disk capture
+  //   shares.
+  //
+  //   An unreadable status is the case we know LEAST about, and hiding it
+  //   would invert the reasoning above. The fetch failing used to be
+  //   swallowed into "no status"; it is now reported in the lane.
+  //
+  //   The reader's own choice, kept outside the node like the verify help's,
+  //   because this page repaints itself and a <details> keeps open/closed in
+  //   the node those repaints replace. The asymmetry is deliberate: a loud
+  //   state re-opens the panel even if the reader closed it, since the one
+  //   thing this fold may never do is hide an outcome; their OPEN, though,
+  //   survives every repaint.
   const st = sqlSt && sqlSt.sql_export;
-  const live = !!(st && st.state && !SQL_EXPORT_QUIET.has(st.state));
-  const panel = el("details", { class: "ov-panel bk-take", open: live || null });
+  const stErr = sqlSt && sqlSt.error;
+  const live = !!(st && ((st.state && !SQL_EXPORT_QUIET.has(st.state)) || st.staging_error)) || !!stErr;
+  const panel = el("details", { class: "ov-panel bk-take", open: live || takeAwayOpen || null });
+  panel.addEventListener("toggle", () => { takeAwayOpen = !!panel.open; });
   panel.append(el("summary", { class: "ov-panel-head bk-take-sum" },
     el("h2", { class: "ov-panel-title", text: "Take a copy with you" })));
   const lanes = el("div", { class: "bk-lanes" });
   if (duck) lanes.append(duck);
   if (sql) lanes.append(sql);
   panel.append(lanes);
+  // Said out loud rather than rendered as a build form with nothing in it:
+  // every state branch in the lane reads `st`, so an unreadable status drew
+  // the same thing as "no build has ever run here".
+  if (stErr) {
+    panel.append(el("p", { class: "form-msg err", text:
+      "The state of the .sql build could not be read: " + stErr + ". Anything below about a build is out of date." }));
+  }
   return panel;
 }
+
+// Whether the reader opened the take-away panel themselves. Outside the node
+// for the reason vfyHelpOpen is: the repaints this page does on its own
+// replace the <details> that would have held it. See backupTakeAway.
+let takeAwayOpen = false;
 
 // backupFilesShape draws the count instead of stating it: on the DuckDB lane
 // two tiles when the server can make the views file and one when it cannot,

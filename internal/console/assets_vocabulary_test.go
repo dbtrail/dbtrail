@@ -17,10 +17,15 @@ import (
 // keeps a new sentence from arriving in the old words in the meantime.
 //
 // WHAT IS COUNTED: every occurrence of those four words inside a STRING
-// LITERAL of app.js and of the non-test Go files of this package. Nothing
-// else — an identifier like backupScheduleCard has no word boundary after
-// "backup" and never matches, and comments are not counted because they are
-// not text this program can emit.
+// LITERAL — every one, including import paths and struct tags, which are
+// plainly not text this program can emit. An identifier like
+// backupScheduleCard never matches, because \b finds no boundary after
+// "backup" there (and `_` is a word character, so baseline_dir does not
+// match either). Comments are out for a mechanical reason rather than a
+// principled one: go/parser is called without ParseComments, and the JS
+// scanner steps over them. Do not restate that as a rule about what reaches
+// a screen — the import paths would contradict it, and a rule nobody can
+// apply consistently is how a guard starts getting argued with.
 //
 // WHY FROZEN NAMES ARE COUNTED TOO. Route paths, CLI flags, environment
 // variables, JSON fields, CSS classes, the S3 rule name — the redesign
@@ -42,18 +47,32 @@ import (
 // (test/console-e2e/first_run_measure.js, inClosedDetails) is deliberately
 // the opposite: it answers what a first run meets WITHOUT clicking. The two
 // can move in opposite directions on one commit, and that is them working.
-// Do not narrow this one to match that one.
+// Do not narrow this one to match that one. They are not the same rule over
+// the same words either: the walk bans twelve words plus the em dash, this
+// one covers two of them.
+//
+// WHAT IT CANNOT CATCH, so nobody reads a green run as more than it is:
+// it counts occurrences, not sentences. Remove one "backup" from an old
+// literal, add a new sentence carrying one somewhere else, and the count is
+// unchanged. The rename is what fixes that; this only keeps the total from
+// climbing while the rename is in progress.
 var oldVocabulary = regexp.MustCompile(`(?i)\b(backups?|baselines?)\b`)
 
-// SCOPE, and the one way this can be satisfied without doing the work:
-// filepath.Glob("*.go") reads THIS package only. Text that MOVES OUT of
-// internal/console — into consoleapp/ or ext/ during the rename — leaves the
-// count and so reads as progress. Relocation is not renaming; if a step
-// moves copy out, check it there by hand.
+// SCOPE. Two directories are read: this package, and consoleapp, whose
+// strings reach the same screens — the daemon composes a build's staging
+// error there and app.js renders it verbatim, so prose left unguarded in
+// consoleapp is prose on the console. Neither glob recurses.
 //
-// The pins. Both were measured on the commit that introduced this test, and
-// were cross-checked against an independent tokenizer that agreed on both
-// numbers.
+// What is still outside: ext, assets/index.html (its occurrences today are
+// all inside HTML comments) and style.css. Text that MOVES to one of those
+// during the rename leaves the count and so reads as progress. Relocation
+// is not renaming; if a step moves copy out, check it there by hand.
+//
+// The pins were each measured three ways and agreed exactly: this scanner,
+// a separate tokenizer written without sight of it, and a byte-for-byte
+// comparison of this scanner's string ranges against acorn's over the real
+// app.js (282 = 282, no desync anywhere in the file). Repeat it that way if
+// a number ever looks wrong.
 //
 // The rule is NOT "must equal". Over the pin fails: that is the regression
 // this exists to catch. Under it is allowed, up to vocabularySlack, and only
@@ -64,14 +83,29 @@ var oldVocabulary = regexp.MustCompile(`(?i)\b(backups?|baselines?)\b`)
 // pull request made. A rename step moves these by hundreds, which is well
 // past the slack, so the pin still gets lowered exactly when it should be.
 const (
-	assetVocabularyPin = 282 // string literals in assets/app.js
-	goVocabularyPin    = 225 // string literals in this package's non-test .go files
-	vocabularySlack    = 20  // how far under a pin may drift before it must be lowered
+	assetVocabularyPin      = 282 // string literals in assets/app.js
+	goVocabularyPin         = 225 // string literals in this package's non-test .go files
+	consoleappVocabularyPin = 277 // string literals in consoleapp's non-test .go files
+	vocabularySlack         = 20  // how far under a pin may drift before it must be lowered
+
+	// Regular expressions in app.js that carry a quote character. Pinned
+	// because a change here means one of two things, and both matter: a new
+	// regex legitimately carries a quote (raise it), or a division was
+	// misread as a regex, in which case the scan has swallowed whatever lay
+	// between the two slashes and the counts above cannot be trusted. Left
+	// unpinned, that second case is silent — and silence is worse now that
+	// the counts tolerate drifting under their pins.
+	quoteCarryingRegexes = 9
 )
 
 func TestOldVocabularyOnlyShrinks(t *testing.T) {
-	assets := countInJSStrings(t, readAsset(t, "app.js"))
-	gone := countInGoStrings(t)
+	assets, quoted := countInJSStrings(t, readAsset(t, "app.js"))
+	if len(quoted) != quoteCarryingRegexes {
+		t.Errorf("app.js: %d regular expressions carry a quote character, pinned at %d. Either a new "+
+			"one does (raise quoteCarryingRegexes), or a division was read as a regular expression — "+
+			"in which case the scan ran past it and every count below is wrong. What was read as one:\n\t%s",
+			len(quoted), quoteCarryingRegexes, strings.Join(quoted, "\n\t"))
+	}
 	for _, c := range []struct {
 		what string
 		got  int
@@ -79,7 +113,8 @@ func TestOldVocabularyOnlyShrinks(t *testing.T) {
 		how  string
 	}{
 		{"assets/app.js", assets, assetVocabularyPin, "assetVocabularyPin"},
-		{"the package's Go files", gone, goVocabularyPin, "goVocabularyPin"},
+		{"internal/console's Go files", countInGoStrings(t, "."), goVocabularyPin, "goVocabularyPin"},
+		{"consoleapp's Go files", countInGoStrings(t, "../../consoleapp"), consoleappVocabularyPin, "consoleappVocabularyPin"},
 	} {
 		switch {
 		case c.got > c.pin:
@@ -100,13 +135,18 @@ func TestOldVocabularyOnlyShrinks(t *testing.T) {
 }
 
 // countInGoStrings counts the vocabulary in the string literals of every
-// non-test .go file of this package. go/parser does the work, so what counts
+// non-test .go file directly in dir. go/parser does the work, so what counts
 // as a string is the language's answer, not a guess.
-func countInGoStrings(t *testing.T) int {
+func countInGoStrings(t *testing.T, dir string) int {
 	t.Helper()
-	names, err := filepath.Glob("*.go")
+	names, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
 		t.Fatalf("glob: %v", err)
+	}
+	// A directory that answers nothing is a moved or renamed package, not a
+	// clean one: it would read as the count dropping to zero.
+	if len(names) == 0 {
+		t.Fatalf("no .go files under %s — did the package move? This guard counts its text.", dir)
 	}
 	fset := token.NewFileSet()
 	n := 0
@@ -155,9 +195,10 @@ func countInGoStrings(t *testing.T) int {
 // whose last character is the "n" of return, and reading that as division
 // swallows the quote inside the character class and swaps code for text from
 // there on. So the previous WORD is tracked, not only the previous byte.
-func countInJSStrings(t *testing.T, src string) int {
+func countInJSStrings(t *testing.T, src string) (int, []string) {
 	t.Helper()
 	n, i := 0, 0
+	var quoteRegexes []string
 	prev := byte(0) // last significant character, for the regex/division call
 	prevWord := ""  // and the identifier it belonged to, when it was one
 	for i < len(src) {
@@ -174,7 +215,13 @@ func countInJSStrings(t *testing.T, src string) int {
 			}
 			i += 2 + end + 2
 		case c == '/' && regexCanStart(prev, prevWord):
-			i = skipRegex(t, src, i)
+			from := i
+			var quoted bool
+			i, quoted = skipRegex(t, src, i)
+			if quoted {
+				quoteRegexes = append(quoteRegexes, src[from:i])
+			}
+			prev, prevWord = '/', ""
 		case c == '"' || c == '\'' || c == '`':
 			var lit string
 			lit, i = scanString(t, src, i)
@@ -185,7 +232,17 @@ func countInJSStrings(t *testing.T, src string) int {
 			for j < len(src) && isWordByte(src[j]) {
 				j++
 			}
-			prev, prevWord = src[j-1], src[i:j]
+			// A keyword only reads as a keyword when nothing dotted into it.
+			// app.js has `t.delete`, `s.delete`, `vfyLive.delete` and more,
+			// and `s.delete / s.total` is one edit away: read as a regex, the
+			// scan runs to the NEXT slash and swallows whatever text is
+			// between them.
+			if prev == '.' {
+				prevWord = ""
+			} else {
+				prevWord = src[i:j]
+			}
+			prev = src[j-1]
 			i = j
 		default:
 			if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
@@ -194,7 +251,7 @@ func countInJSStrings(t *testing.T, src string) int {
 			i++
 		}
 	}
-	return n
+	return n, quoteRegexes
 }
 
 func isWordByte(c byte) bool {
@@ -218,8 +275,17 @@ func regexCanStart(prev byte, prevWord string) bool {
 	return prevWord != "" && regexKeywords[prevWord]
 }
 
-func skipRegex(t *testing.T, src string, i int) int {
+// skipRegex steps over a regular-expression literal and reports whether it
+// carried a quote character. That second answer is the scanner's own desync
+// alarm: a real regex here may carry one (/Unknown database '([^']+)'/
+// does), but so does a DIVISION misread as a regex — and that one silently
+// swallows whatever strings lie between the two slashes, or silently counts
+// a regex's own backticked words as prose. Counting them and pinning the
+// count is what makes either event loud.
+func skipRegex(t *testing.T, src string, i int) (int, bool) {
 	t.Helper()
+	start := i
+	quoted := false
 	i++ // the opening '/'
 	class := false
 	for i < len(src) {
@@ -232,15 +298,18 @@ func skipRegex(t *testing.T, src string, i int) int {
 			class = false
 		case '/':
 			if !class {
-				return i + 1
+				return i + 1, quoted
 			}
 		case '\n':
-			t.Fatal("app.js: newline inside what was read as a regular expression")
+			t.Fatalf("app.js: newline inside what was read as a regular expression at offset %d — "+
+				"a '/' was misread as opening one, and the scan ran past the end of its line", start)
+		case '"', '\'', '`':
+			quoted = true
 		}
 		i++
 	}
-	t.Fatal("app.js: unterminated regular expression")
-	return i
+	t.Fatalf("app.js: unterminated regular expression at offset %d", start)
+	return i, quoted
 }
 
 // scanString returns the contents of the string literal starting at i, and
