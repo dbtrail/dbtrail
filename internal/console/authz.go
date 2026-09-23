@@ -133,9 +133,12 @@ var apiRoutePerms = []routePerm{
 	{"GET", "/api/servers", ext.PermServersRead},
 	{"POST", "/api/servers", ext.PermServersWrite},
 
-	// Settings / administration. rotation PUT is a control-plane config write;
-	// the storage/baseline listings, telemetry opt-out, and managed MCP token are
-	// the settings surface.
+	// Settings / administration, plus the Snapshots page's own routes — grouped
+	// by subject rather than by tier, so the schedule write and the listing its
+	// state rides on stay next to each other. Ordering is free inside this
+	// block: no pattern here shadows another. rotation PUT is a control-plane
+	// config write; the storage listing, telemetry opt-out, and managed MCP
+	// token are the settings surface.
 	{"GET", "/api/rotation", ext.PermSettingsRead},
 	{"PUT", "/api/rotation", ext.PermServersWrite},
 	// The Snapshots page (#1582): the GET is the same
@@ -150,7 +153,14 @@ var apiRoutePerms = []routePerm{
 	// is a settings read. There is no write since #1681 — the setting is the
 	// daemon's own flag, and the console does not edit it.
 	{"GET", "/api/baseline-refresh", ext.PermSettingsRead},
-	{"GET", "/api/baselines", ext.PermSettingsRead},
+	// The snapshot listing is a read ABOUT A SERVER, not console administration:
+	// whoever may create a snapshot has to be able to see the one they created,
+	// and GET /api/servers/{}/baseline — the per-server snapshot read in the
+	// block above — has sat on the read-only floor all along. So this listing
+	// joins it there. The consequence runs both ways and is the point: a role
+	// holding servers:read gains the listing, and a role holding settings:read
+	// ALONE loses it.
+	{"GET", "/api/baselines", ext.PermServersRead},
 	// The per-server backup schedule (#1442) is a control-plane setting like
 	// the rotation and refresh overrides: what it changes is what the daemon's
 	// loop does, so writing it is servers:write, not baseline:create. Its
@@ -158,11 +168,11 @@ var apiRoutePerms = []routePerm{
 	{"PUT", "/api/servers/{}/backup-schedule", ext.PermServersWrite},
 	{"DELETE", "/api/servers/{}/backup-schedule", ext.PermServersWrite},
 	// The per-snapshot files listing is metadata (names, sizes, timestamps),
-	// same tier as the listing above. The DOWNLOAD is not: it is a full
-	// unredacted copy of every baseline row, so it takes the row-data
-	// permission — tiering it with the settings surface would make
-	// settings:read a data-exfiltration path.
-	{"GET", "/api/baselines/files", ext.PermSettingsRead},
+	// same tier as the listing above and moved with it. The DOWNLOAD is not: it
+	// is a full unredacted copy of every baseline row, so it takes the row-data
+	// permission — tiering it with the two listings it sits between would make
+	// the read-only floor a data-exfiltration path.
+	{"GET", "/api/baselines/files", ext.PermServersRead},
 	{"GET", "/api/baselines/download", ext.PermQueryExecute},
 	{"GET", "/api/storage", ext.PermSettingsRead},
 	// Data-profile NAMES on the selected server — access-control vocabulary

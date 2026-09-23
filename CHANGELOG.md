@@ -22,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and its + Add server opens the add form directly.
 
 ### Changed
+- **Listing a server's snapshots needs `servers:read`, not `settings:read`.**
+  Whoever may create a snapshot has to be able to see the one they created,
+  and asking what copies of a server exist is a read about that server rather
+  than console administration. `GET /api/baselines` and
+  `GET /api/baselines/files` join the read-only floor, where the per-server
+  snapshot read (`GET /api/servers/{id}/baseline`) already sat. Operators with
+  per-session roles may need to act: this is a swap, not a widening, so a role
+  holding `settings:read` alone no longer reaches the listing and needs
+  `servers:read` added. Two neighbours deliberately did not move — the
+  snapshot **download** serves unredacted rows and still needs
+  `query:execute`, and `GET /api/backup-settings` is administration and stays
+  `settings:read`. A console whose sessions carry no access policy, which is
+  every session the stock build mints, is unaffected: those sessions already
+  hold every permission.
 - **Backups, Verification and Backup settings are one page, Snapshots**
   (#1573). They were three addresses for one question — what copies of this
   server exist, would they restore, and where and how often are they made —
