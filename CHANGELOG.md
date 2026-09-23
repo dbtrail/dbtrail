@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.88.0] - 2026-09-23
+
+### Added
+- **The Overview opens on the path from your database to its copy** (#1842,
+  #1845). Your MySQL → binlog → DBTrail → every N min → Your bucket → SQL →
+  Any reader, drawn as boxes and arrows with the live state on each piece:
+  capture lag and freshness on the binlog arrow, the table definitions on the
+  DBTrail box, the copy's age and next run on the update arrow, where the copy
+  lives and how many copies this machine keeps on the bucket box. The piece
+  that broke carries the state; everything after it turns grey "as of HH:MM",
+  never red. Nothing is green without the reading that earns it. Under a broken
+  piece, one decision: a schema change that refused the update offers "Wait
+  for the scheduled read" or "Read database now" (behind a confirm); a capture
+  the daemon reports failed or stopped offers Start.
+- **The Getting started card asks for one thing at a time** (#1845). The step
+  that needs you shows open; the rest fold behind "All N steps · M done". A
+  step that names a page carries the link to it (Open Servers ›, Open
+  Snapshots ›). The last step is now "Take the first full DB snapshot".
+
+### Changed
+- **The Overview takes the look of the product deck** (#1845). Borderless
+  boxes, the MySQL logo and the DBTrail lockup on their boxes, the UI typeface
+  everywhere (no terminal font on the page), and the recovery-era tiles
+  (restore window, table coverage, figures) folded under "Restore window and
+  figures" below the flow. The page subtitle is gone.
+- **CI**: a pull request that only touches the console's own tests skips the
+  MySQL 8.4 integration cell, and the unit job vets the integration tag so a
+  helper redeclared under it fails before the merge (#1843, #1844).
+
 ## [0.87.0] - 2026-09-23
 
 ### Added
