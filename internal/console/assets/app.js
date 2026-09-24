@@ -6389,6 +6389,30 @@ function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
   return out;
 }
 
+// keepShapeDraw draws what "keep the newest N" means: N tiles, the newest
+// lit at the right, two faded tiles past the count on the left (the ones
+// the cleanup removes), and under them how far back the oldest kept
+// reaches: a span when the copy is on a schedule, "the oldest kept"
+// when it is not. A count of 0 keeps them all: one open row, no faded
+// tiles. Built with el() and CSS like duckdbShape, never svgEl.
+function keepShapeDraw(box, keep, everyMin, retainMin) {
+  const row = el("div", { class: "ks-row" });
+  const all = keep === 0;
+  if (!all) {
+    row.append(el("span", { class: "ks-tile ks-gone" }), el("span", { class: "ks-tile ks-gone" }));
+    row.append(el("span", { class: "ks-cut" }));
+  }
+  const shown = all ? 5 : Math.min(keep, 6);
+  const extra = all ? 0 : keep - shown;
+  if (extra > 0) row.append(el("span", { class: "ks-more", text: "+" + extra }));
+  for (let i = 0; i < shown; i++) row.append(el("span", { class: "ks-tile" + (i === shown - 1 ? " ks-newest" : "") + (all && i === 0 ? " ks-open" : "") }));
+  box.append(row);
+  const mins = keep && everyMin ? Math.max(keep * everyMin, 60, retainMin || 0) : 0;
+  box.append(el("div", { class: "ks-axis" },
+    el("span", { class: "ks-left", text: all ? "every snapshot, kept" : (mins ? "about " + reachSpan(mins) + " ago" : "the oldest kept") }),
+    el("span", { class: "ks-right", text: "now" })));
+}
+
 // localReachWords is how far back a server can go with the newest `keep`
 // snapshots kept (#1681), from its real schedule:
 //
@@ -6470,6 +6494,10 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const keepField = el("div", { class: "stg-card keep-card" },
     el("div", { class: "stg-card-t" }, icon("layers", "stg-ico stg-ico-mint"), el("span", { class: "field-label", text: "Keep by count" })),
     el("div", { class: "keep-step" }, el("span", { class: "keep-lead", text: "the newest" }), minus, keep, plus, unit));
+  // The drawing: the copies kept, newest at the right, the ones past the
+  // count fading out on the left, and how far back the oldest reaches.
+  const shape = el("div", { class: "keep-shape" });
+  keepField.append(shape);
   const words = el("div", { class: "bks-local-words" });
   keepField.append(words);
   const wordsMore = el("div", { class: "bks-local-words" });
@@ -6614,8 +6642,11 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     const infos = said.filter((w) => !w.err);
     said.forEach((w) => {
       const keepHere = w.err || w === infos[infos.length - 1];
-      (keepHere ? words : wordsMore).append(el("p", { class: w.err ? "form-msg err" : "form-hint", text: w.text }));
+      (keepHere ? words : wordsMore).append(el("p", { class: w.err ? "form-msg err" : (keepHere ? "form-hint keep-reach" : "form-hint"), text: w.text }));
     });
+    clear(shape);
+    shape.hidden = keep.hidden;
+    if (!shape.hidden) keepShapeDraw(shape, keepNow() || 0, srv.snapshot_every_minutes || 0, srv.prune_retain_minutes || 0);
   };
   const sync = () => { paint(); save.disabled = locked || !dirty(); };
   for (const input of [dir, s3, keep]) {
