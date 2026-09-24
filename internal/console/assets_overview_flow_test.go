@@ -38,6 +38,7 @@ for (const [name, c] of Object.entries(cases)) {
     okClasses: find(sec, "ok").length,
     buttons: find(sec, "btn").map(text),
     fixLinks: find(sec, "flow-fix").map(text),
+    cta: m.cta || "", actions: find(sec, "flow-actions").map(text), ctaButtons: find(sec, "flow-cta").map(text),
     cardOnScreen: find(sec, "flow-card").length,
   };
 }
@@ -61,6 +62,9 @@ type flowOut struct {
 	OkClasses    int
 	Buttons      []string
 	FixLinks     []string
+	CTA          string   `json:"cta"`
+	Actions      []string `json:"actions"`
+	CTAButtons   []string `json:"ctaButtons"`
 	CardOnScreen int
 }
 
@@ -174,7 +178,7 @@ func TestOverviewFlowModel(t *testing.T) {
 		"boot-index-serve":   {"input": c{"coverage": c{"freshness": "none"}, "baselines": c{}, "server": c{"id": "default", "kind": "cli"}, "schema": c{"unavailable": true}, "uncaptured": c{}, "monitorCap": false}, "pctx": c{"serverId": "default", "registry": false, "monitorCap": false}},
 		"no-source-readonly": {"deny": []string{"servers:write", "settings:write"}, "input": c{"coverage": c{"freshness": "none"}, "baselines": c{}, "server": c{"id": "a", "kind": "registry", "has_source": false}, "schema": c{"unavailable": true, "status": 403}, "uncaptured": c{}}},
 		// K4: no buttons for a session that may not read the database, or on a serve.
-		"fold-refused-noperm-create": {"deny": []string{"baseline:create"}, "input": c{
+		"fold-refused-noperm-create": {"deny": []string{"baseline:create", "settings:read"}, "input": c{
 			"coverage": c{"freshness": "current", "delta_to": "2026-09-23 14:58:52"},
 			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": c{"every": "5m", "runnable": true,
 				"last_fallback": c{"at": "2026-09-23T14:35:00Z", "reason": "x"},
@@ -259,7 +263,7 @@ const origPaint = paint;`, 1)
 	}
 	// The bucket box carries the one retention figure the API has per server
 	// (what this machine keeps); without it the sub is the storage kinds alone.
-	if h.Pieces[bucket].Sub != "disk + S3 · keeps 3 copies" {
+	if h.Pieces[bucket].Sub != "disk + S3 · keeps 3 snapshots" {
 		t.Errorf("healthy: bucket sub = %q", h.Pieces[bucket].Sub)
 	}
 	if b := get("stalled-index").Pieces[bucket]; b.Tone != "off" || b.Sub != "" {
@@ -423,6 +427,28 @@ const origPaint = paint;`, 1)
 	nc := get("fold-refused-noperm-create")
 	if hasLabel(nc.Buttons, "Read database now") || !hasLabel(nc.Buttons, "Wait for the scheduled read at 15:00") == false && len(nc.Buttons) == 0 {
 		t.Errorf("fold-refused-noperm-create: buttons %v (no Read for a session without baseline:create)", nc.Buttons)
+	}
+	// #1860: the action row under the drawing. One filled button where a copy
+	// exists to query; a link to set the copy up where none does; nothing to
+	// query where the listing failed; and with a decision card showing, the
+	// button steps down to a link so the card's is the one filled button.
+	if h.CTA != "button" || !reflect.DeepEqual(h.CTAButtons, []string{"Query the copy"}) || len(h.Actions) != 1 || !strings.Contains(h.Actions[0], "Download views.sql (DuckDB views)") || !strings.Contains(h.Actions[0], "Connect AI") {
+		t.Errorf("healthy: cta=%q buttons=%v actions=%v", h.CTA, h.CTAButtons, h.Actions)
+	}
+	if nl := get("no-location"); nl.CTA != "setup" || len(nl.CTAButtons) != 0 || !strings.Contains(nl.Actions[0], "Set up the copy ›") {
+		t.Errorf("no-location: cta=%q buttons=%v actions=%v", nl.CTA, nl.CTAButtons, nl.Actions)
+	}
+	if ns := get("no-schedule"); ns.CTA != "button" {
+		t.Errorf("no-schedule (a copy exists): cta=%q, want button", ns.CTA)
+	}
+	if bd := get("baselines-down"); bd.CTA != "none" || len(bd.CTAButtons) != 0 || strings.Contains(bd.Actions[0], "Query the copy") {
+		t.Errorf("baselines-down: cta=%q buttons=%v actions=%v, want no offer to query what could not be read", bd.CTA, bd.CTAButtons, bd.Actions)
+	}
+	if fl := get("failed"); len(fl.CTAButtons) != 0 || !strings.Contains(fl.Actions[0], "Query the copy ›") || fl.CardOnScreen != 1 {
+		t.Errorf("failed (card showing): the button must step down to a link: buttons=%v actions=%v card=%d", fl.CTAButtons, fl.Actions, fl.CardOnScreen)
+	}
+	if nv := get("fold-refused-noperm-create"); strings.Contains(nv.Actions[0], "views.sql") {
+		t.Errorf("a session without settings:read is offered views.sql: %v", nv.Actions)
 	}
 	// #1853: the fix is named where there is one, and only there.
 	nosrc := get("no-source")
