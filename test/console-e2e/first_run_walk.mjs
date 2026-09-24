@@ -475,6 +475,9 @@ async function runClean(block) {
   }
   await measure("changes", "step");
 
+  // Recent changes folds under the drawing (#1860): a person opens it to
+  // reach a row. One click, recorded as such.
+  await click(page.locator(".ov-fold-recent > summary"), "Recent changes", false);
   // Undo on the DELETE. The button only appears under the mouse.
   const delRow = recentRow("3", "DELETE").first();
   await delRow.hover();

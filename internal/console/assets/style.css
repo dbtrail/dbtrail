@@ -1511,7 +1511,7 @@ button { font-family: inherit; }
    for the small arrow labels. State lives on the piece that changed;
    downstream of a break everything is .off (grey, "as of"), never red.
    Under 880 px the grid stacks and the arrows turn. */
-.flow { margin: 4px 0 24px; }
+.flow { margin: 4px 0 32px; }
 .flow-grid {
   display: grid; grid-template-columns: 1.15fr 1fr 1.15fr 1.25fr 1.15fr 0.8fr 1.15fr;
   gap: 0 6px; align-items: stretch;
@@ -1520,7 +1520,7 @@ button { font-family: inherit; }
   --flow-c: var(--ink-4); --flow-ink: var(--ink); --flow-sub: var(--ink-3);
   background: #fff; border: 0; border-radius: 22px;
   box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
-  padding: 22px 16px 20px; min-width: 0; color: var(--flow-ink);
+  padding: 28px 18px 26px; min-width: 0; min-height: 170px; color: var(--flow-ink);
   display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
 }
 .flow-box:nth-child(3) { background: linear-gradient(160deg, #FF5A97, #E8397C); --flow-ink: #fff; --flow-sub: rgba(255,255,255,0.86); box-shadow: 0 10px 28px rgba(232,57,124,0.28); }
@@ -1530,13 +1530,13 @@ button { font-family: inherit; }
 .flow-box.warn { --flow-c: var(--orange-2); background: #FFF1E2; --flow-ink: var(--ink); --flow-sub: var(--ink-3); }
 .flow-box.bad  { --flow-c: var(--delete);   background: var(--delete-bg); --flow-ink: var(--ink); --flow-sub: var(--ink-3); }
 .flow-box.off, .flow-arrow.off { opacity: 0.55; filter: grayscale(1); }
-.flow-ico { width: 30px; height: 30px; flex: none; display: inline-flex; color: var(--flow-ink); margin-bottom: 10px; }
-.flow-ico svg { width: 30px; height: 30px; }
-.flow-ico-mysql { width: 46px; height: 30px; object-fit: contain; }
-.flow-lockup { height: 30px; width: auto; display: block; margin-bottom: 10px; }
+.flow-ico { width: 36px; height: 36px; flex: none; display: inline-flex; color: var(--flow-ink); margin-bottom: 10px; }
+.flow-ico svg { width: 36px; height: 36px; }
+.flow-ico-mysql { width: 55px; height: 36px; object-fit: contain; }
+.flow-lockup { height: 36px; width: auto; display: block; margin-bottom: 10px; }
 .flow-box:nth-child(5) .flow-ico { color: #0E8A5E; }
 .flow-box:nth-child(7) .flow-ico { color: #EB6834; }
-.flow-box-head { display: flex; flex-direction: column; align-items: center; font-family: var(--f-display); font-weight: 700; font-size: 16.5px; letter-spacing: -0.01em; line-height: 1.2; color: var(--flow-ink); }
+.flow-box-head { display: flex; flex-direction: column; align-items: center; font-family: var(--f-display); font-weight: 700; font-size: 18px; letter-spacing: -0.01em; line-height: 1.2; color: var(--flow-ink); }
 .flow-box-head b, .flow-box-head .flow-lockup-wrap { display: inline-flex; align-items: center; gap: 7px; }
 .flow-state { font-family: var(--f-ui); font-size: 14px; color: var(--flow-ink); margin-top: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; }
 .flow-box.bad .flow-state, .flow-arrow.bad .flow-state { color: var(--delete); }
@@ -1558,12 +1558,18 @@ button { font-family: inherit; }
 .flow-line::before { content: ""; position: absolute; left: 0; right: 10px; top: 4.5px; height: 2.5px; background: var(--flow-c); border-radius: 2px; }
 .flow-line::after { content: ""; position: absolute; right: 0; top: -1px; border: 7px solid transparent; border-left: 11px solid var(--flow-c); border-right: 0; }
 .flow-val { display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.flow-big { font-family: var(--f-display); font-size: 24px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; color: var(--ink); }
+/* The copy's age is the one large number of the page (#1860); the capture's
+   "behind" stays a state line, so two clocks never compete. */
+.flow-big { font-family: var(--f-display); font-size: 34px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; color: var(--ink); }
 .flow-arrow.bad .flow-big { color: var(--delete); }
 .flow-arrow .flow-state { margin-top: 2px; justify-content: center; color: var(--ink-2); }
 .flow-arrow .flow-sub { color: var(--ink-3); }
 .flow-link { font-family: var(--f-ui); font-size: 14px; font-weight: 600; color: #D9367A; text-decoration: none; border-bottom: 2px solid currentColor; }
 .flow-link:hover { color: var(--ink); }
+/* The action row under the drawing (#1860): one filled button, then links. */
+.flow-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px 22px; margin-top: 22px; }
+.flow-actions .flow-cta { padding: 10px 22px; font-size: 15px; }
+.flow-card + .flow-actions { margin-top: 16px; }
 .health-dot.none { background: var(--ink-4); }
 .health-dot.warn { background: var(--orange-2); }
 .health-dot.bad  { background: var(--delete); }
@@ -1584,6 +1590,11 @@ button { font-family: inherit; }
 .ov-fold { margin-top: 20px; }
 .ov-fold > summary { cursor: pointer; font-family: var(--f-ui); font-size: 13.5px; color: var(--ink-3); padding: 6px 0; }
 .ov-fold[open] > summary { margin-bottom: 10px; }
+/* The two panels' folds (#1860): one readable line each, the count in ink. */
+.ov-fold-panel { margin-top: 8px; }
+.ov-fold-panel > summary { font-size: 14.5px; color: var(--ink-2); padding: 8px 0; }
+.ov-fold-panel > summary::marker { color: var(--ink-3); }
+.ov-fold-panel[open] > summary { color: var(--ink); }
 .flow-card .warn-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .flow-cost { font-family: var(--f-ui); font-size: 12.5px; color: var(--ink-3); margin-top: 8px; }
 .flow-recipe { margin-top: 8px; }
@@ -1592,6 +1603,9 @@ button { font-family: inherit; }
 .flow-recipe li { margin: 3px 0; color: var(--ink-2); }
 @media (max-width: 880px) {
   .flow-grid { grid-template-columns: 1fr; gap: 4px 0; }
+  .flow-box { padding: 14px 14px 12px; min-height: 96px; }
+  .flow-big { font-size: 26px; }
+  .flow-actions .flow-cta { width: 100%; }
   .flow-arrow { padding: 4px 0; }
   .flow-line { width: 12px; height: 26px; margin: 2px 0; }
   .flow-line::before { left: 5px; right: auto; top: 0; bottom: 10px; width: 2px; height: auto; }

@@ -1423,11 +1423,15 @@ function ovFrame() {
   // use — between the tiles and the panels, where the old layout put it.
   f.warnSlot = el("div");
 
-  const grid = el("div", { class: "ov-grid" });
-
   // The two panels carry the home's tint layer (#1421): violet and sun, the
   // structure tints. The pill is the eyebrow — the title stays an h2 for the
   // document outline; the pill is presentation, not the heading.
+  //
+  // Both hang under a closed fold of one line each (#1860): the drawing
+  // above is the page's answer, and two tinted panels with an Undo per row
+  // under it read as an undo list with a diagram on top. The fold's line
+  // carries the count, so what is inside is never in doubt; Undo stays
+  // where it was, one click down (D6). Fold state lives on the node.
   f.recentPanel = el("section", { class: "ov-panel tcard-violet" });
   f.recentPanel.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Recent changes" })),
@@ -1437,7 +1441,10 @@ function ovFrame() {
   f.recentBody = el("div", { class: "ov-evlist" });
   f.recentBody.append(ovSkelLines(4), el("div", { class: "skel-note", text: "loading recent changes…" }));
   f.recentPanel.append(f.recentBody);
-  grid.append(f.recentPanel);
+  f.recentFold = el("details", { class: "ov-fold ov-fold-panel ov-fold-recent" });
+  f.recentSummary = el("summary", { text: "Recent changes" });
+  f.recentFold.append(f.recentSummary, f.recentPanel);
+  v.append(f.recentFold);
 
   f.tablesPanel = el("section", { class: "ov-panel tcard-sun" });
   // The "as of" stamp has a slot of its own, so a refill replaces it instead
@@ -1451,9 +1458,10 @@ function ovFrame() {
   f.tablesPanel.append(f.tablesBody);
   f.tablesFoot = el("div", { class: "ov-coverage" });
   f.tablesPanel.append(f.tablesFoot);
-  grid.append(f.tablesPanel);
-
-  v.append(grid);
+  f.tablesFold = el("details", { class: "ov-fold ov-fold-panel ov-fold-tables" });
+  f.tablesSummary = el("summary", { text: "Activity by table" });
+  f.tablesFold.append(f.tablesSummary, f.tablesPanel);
+  v.append(f.tablesFold);
 
   const fold = el("details", { class: "ov-fold" });
   fold.append(el("summary", { text: "Restore window and figures" }));
@@ -1524,6 +1532,16 @@ function fillOvEvents(f, eventsData, err) {
   });
   const again = focused && f.undoByAnchor.get(focused);
   if (again) again.focus();
+  // The fold's one line: what is inside, and what it is for. "8 newest" is
+  // what the list holds (the response has no total); "every version kept"
+  // is the other half of what the copy is.
+  if (f.recentSummary) f.recentSummary.textContent = ovFoldLine("Recent changes", err ? "" : events.length + " newest", "every version kept, undo a row");
+}
+
+// ovFoldLine joins a fold's title with its count and its purpose: the parts
+// that are known, separated by a middle dot.
+function ovFoldLine(title, count, purpose) {
+  return [title, count, purpose].filter(Boolean).join(" · ");
 }
 
 // fillOvActivity fills every window-scoped surface from the /api/activity
@@ -1574,6 +1592,7 @@ function fillOvActivity(f, activity) {
   if (refreshed) {
     f.tablesAsOf.append(el("span", { class: "cov-asof", text: "as of " + utcLabel(refreshed) }));
   }
+  if (f.tablesSummary) f.tablesSummary.textContent = ovFoldLine("Activity by table", tableCount === null ? "" : tableCount + (tableCount === 1 ? " table" : " tables"), "");
   clear(f.tablesBody);
   const tables = (activity && activity.top_tables || []).map((t) => ({
     key: t.schema + "." + t.table, insert: t.insert, update: t.update, delete: t.delete, total: t.total,
@@ -1844,10 +1863,19 @@ function ovFlowModel(inp) {
     // What this machine keeps is the one retention figure the API carries
     // per server (local_retention, #1681); the S3 rule lives on the bucket.
     const keep = bl.local_retention && bl.local_retention.keep_newest;
-    const keeps = keep > 0 ? "keeps " + keep + (keep === 1 ? " copy" : " copies") : "";
+    // "snapshot" is one version of the copy (D10); "copies" read as several
+    // copies of the database.
+    const keeps = keep > 0 ? "keeps " + keep + (keep === 1 ? " snapshot" : " snapshots") : "";
     bucket = piece("Your bucket", "none", tablesWord((snap.tables || []).length), [kinds.join(" + "), keeps].filter(Boolean).join(" · "));
   } else bucket = piece("Your bucket", "none", bl.snapshots ? "no copy yet" : "", "");
   const sql = piece("SQL", "none", "Query the copy", "", { link: "connect" });
+  // The action row under the drawing (#1860): ONE filled button, "Query the
+  // copy", where a copy exists to query; a link to set the copy up where
+  // none does yet; nothing where the listing could not be read (a button
+  // over an unknown would promise what the page cannot see). The row's
+  // links follow the session: views.sql needs settings:read.
+  const cta = blUnknown ? "none" : (bl.configured === false || !snap) ? "setup" : "button";
+  const viewsSQL = may("settings:read");
   const reader = piece("Any reader", "none", "DuckDB here", "your tools");
 
   // Downstream of a break: grey, "as of" the same stamp on every piece.
@@ -1859,7 +1887,7 @@ function ovFlowModel(inp) {
     if (cut.piece === "capture") { dim(engine); dim(update); }
     dim(bucket);
   }
-  return { pieces: [source, capture, engine, update, bucket, sql, reader], cards, cut };
+  return { pieces: [source, capture, engine, update, bucket, sql, reader], cards, cut, cta, viewsSQL };
 }
 
 // ovFlowDismissed remembers the decision cards an operator closed, by server,
@@ -1881,7 +1909,7 @@ function flowSection(model, ctx) {
   model.pieces.forEach((p, i) => {
     const node = el("div", { class: (isArrow(i) ? "flow-arrow" : "flow-box") + " " + (p.tone || "none") });
     if (isArrow(i)) {
-      node.append(el("span", { class: "flow-label", text: String(p.title || "").toLowerCase() }));
+      node.append(el("span", { class: "flow-label", text: String(p.title || "") }));
       node.append(el("span", { class: "flow-line", "aria-hidden": "true" }));
       const val = el("div", { class: "flow-val" });
       if (p.big) val.append(el("div", { class: "flow-big", text: p.big, title: p.stamp ? utcLocalTitle(p.stamp) || null : null }));
@@ -1923,7 +1951,30 @@ function flowSection(model, ctx) {
   // One decision at a time: the card of the piece that broke first.
   const card = model.cards.find((c) => !ovFlowDismissed.has(c.key));
   if (card) sec.append(flowCard(card, ctx, () => { ovFlowDismissed.add(card.key); sec.replaceWith(flowSection(model, ctx)); }));
+  sec.append(flowActions(model, !!card));
   return sec;
+}
+
+// flowActions is the row under the drawing (#1860): the one filled button of
+// the first screen, "Query the copy", then the links. With a decision card
+// showing, the button steps down to a link: the card's own button is the
+// one filled button then, and two would be two protagonists. A page with no
+// copy yet offers to set it up instead; a page whose listing failed offers
+// nothing it cannot vouch for.
+function flowActions(model, demoted) {
+  const row = el("div", { class: "flow-actions" });
+  const link = (text, go) => el("a", { class: "flow-link", href: "#", text, onclick: (e) => { e.preventDefault(); go(); } });
+  const cta = model.cta || "none";
+  if (cta === "button") {
+    row.append(demoted
+      ? link("Query the copy ›", () => navigate("connect"))
+      : el("button", { class: "btn btn-primary flow-cta", type: "button", text: "Query the copy", onclick: () => navigate("connect") }));
+  } else if (cta === "setup") {
+    row.append(link("Set up the copy ›", () => navigate("snapshots#setup")));
+  }
+  if (model.viewsSQL) row.append(link("Download " + DUCKDB_VIEWS_FILE + " (DuckDB views)", () => downloadViewsSQL({})));
+  row.append(link("Connect AI", () => navigate("connect")));
+  return row;
 }
 
 // runFlowAction is the fix an arrow link or a card button names (#1853):
