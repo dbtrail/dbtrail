@@ -454,7 +454,7 @@ try {
     const v = document.getElementById("view") || document.querySelector(".view") || document.body;
     renderError(v, new Error(errMsg));
     const empty = document.querySelector(".empty");
-    return { errMsg, empty: empty ? empty.textContent : null };
+    return { errMsg, empty: empty ? empty.textContent : null, tip: empty ? ((empty.querySelector("h3") || {}).title || "") : "" };
   });
   if (!es.errMsg) {
     bad("error: real 1049 reaches the frontend", "/api/status did not error for the unprovisioned default server");
@@ -468,7 +468,7 @@ try {
     // One sentence on screen (where to go, what to press); the source-vs-index
     // fact and the database's name ride as the heading's tooltip.
     /Go to Servers and press the Start button/.test(t) ? ok("error: 1049 empty state says where to go and what to press") : bad("error: 1049 empty state says where to go and what to press", t);
-    const tip = (document.querySelector(".empty h3") || {}).title || "";
+    const tip = es.tip || "";
     (/never lives on the source/.test(tip) && /bintrail_idx_/.test(tip)) ? ok("error: 1049 empty state keeps the source-vs-index fact and the db name as the tooltip") : bad("error: 1049 empty state keeps the source-vs-index fact and the db name as the tooltip", tip);
   }
 
