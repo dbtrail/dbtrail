@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.90.0] - 2026-09-24
+
+### Changed
+- **The Snapshots page shows the copy instead of describing it** (#1859,
+  #1865, #1866, #1868, #1870). One line under the title says what a
+  snapshot is. A hero draws the newest copy's age, big, with a dot the
+  schedule colours (pink whatever the age when capture is stopped, when the
+  last run failed or when a saved schedule cannot run; never green when the
+  capture's state could not be read), tiles for where the newest copy lives
+  (on disk, in S3), seven days of ticks, one per snapshot, and the last
+  check's verdict, which uses the same words as the Checks card (a tick only
+  for a run that proved the copy matches). Download and Read database now
+  sit at the right of a tab bar with three tabs, **Versions**, **Checks**
+  and **Settings**; the old addresses `/snapshots#checks` and
+  `/snapshots#setup` open their tab. A server with nothing to list yet opens
+  on Settings and moves to Versions once its first snapshot exists.
+- **Versions**: the two downloads (Parquet for DuckDB, `.sql` for MySQL)
+  are offer cards, open on arrival. With a "keep by count" in force, every
+  local copy past the count is faded with "goes at the next cleanup".
+- **Checks**: the last verdict as an icon and a headline ("The copy
+  matches", "2 tables differ", "Nothing proven", "Never checked") above the
+  mode picker and the one button; past checks beside it, a mark per row.
+- **Settings**: the interval as a row of pills with the one in force lit;
+  "Delete by age" beside it, with an example value (`7d`, `36h`); per
+  server, "Keep by count" as a stepper around the number with a drawing of
+  what stays and what goes, and "Where it lives" as two tiles the folder and
+  the bucket are typed into. The block draws the **selected server only**
+  (the others are picked at the top of the page). The location verdict is a
+  sentence with the action ("No place of its own yet … Type one above and
+  Save."); the reach reads "You can restore back to about 1 hour ago: the
+  oldest of the 3 kept is that old". The word "daemon" left the page and the
+  schedule refusals ("DBTrail service").
+- **A server whose index database is not created yet** (MySQL 1049) reads
+  "not indexing yet" in grey with one sentence, "Go to Servers and press the
+  Start button.", on the hero and in the list; the database's name and that
+  it is created on the index server, never on the source, ride as a
+  tooltip. Any other failure stays a failure.
+- **The word is snapshot, and the cards lose their borders** (#1852):
+  backup(s) → snapshot(s), "full backup" → "full read", "Create backup" →
+  "Read database now", ".sql backup" → ".sql export" across the console's
+  prose (routes, keys, flags and file names untouched); panels and cards
+  take the borderless look the Overview has.
+- **Overview: the drawing leads** (#1861, #1862, #1854, #1855). Bigger
+  boxes and icons, the copy's age as the one large number; one action row
+  under the drawing (Query the copy, Download views.sql, Connect AI); one
+  activity line over the window the index actually holds ("Since 23:00
+  yesterday · 1,240 changes in 5 tables ›"), the two panels folded under it
+  and remembered per browser; a narrow layout. The capture and schedule
+  arrows name their fix where there is one (Add the source ›, Add a server
+  ›, Set a schedule ›), and `navigate` keeps a `#section` on a direct
+  target, so "Set a schedule" lands on Snapshots' settings.
+- **Overview: the coverage card is metadata-only** (#1851). It keeps the
+  restorable window, lag, continuity and freshness, all from the index, and
+  no longer reads any backup location; the full-table half and its listing
+  are gone.
+- **Servers: Test names what it probed** (#1857, #1858): "✓ index ok · 6 ms
+  · MySQL 8.4.9", and a row with no source database says so beside the
+  answer; the answer takes a line of its own under the row.
+- **Sidebar** (#1864): Overview, Snapshots and Status on top with no
+  heading; Investigate and Resolve unchanged; Settings in four runs, with
+  the entry that was Connect AI named **MCP Server** (same page).
+- **The This daemon settings page is gone** (#1869): AWS credentials now
+  sit under a server's S3 location field (shown once one is typed), staged
+  `.sql` downloads under the `.sql` lane on Snapshots, and usage telemetry
+  on Status. `/daemon` lands on Status.
+
 ## [0.89.0] - 2026-09-24
 
 ### Changed
