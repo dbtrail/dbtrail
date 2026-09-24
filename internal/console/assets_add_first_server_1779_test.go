@@ -35,6 +35,9 @@ const openServersModal = () => calls.push("open");
 const showServerForm = (p) => calls.push("form:" + p);
 const watchFirstRun = () => calls.push("watch");
 const loadOvUncaptured = () => {};
+// The flow's loader is called at render since #1847 (its reads start beside
+// the coverage read, no longer after its answer); this harness paints no flow.
+const loadOvFlow = () => Promise.resolve();
 const watchOverview = () => calls.push("live");
 const overviewOnScreen = () => true;
 const sessionMay = () => true;
