@@ -5138,14 +5138,15 @@ try {
   // the API returned for it, held against the response rather than a list
   // typed here. The Go side pins the case SET to the handler's constants, so
   // a fourth verdict fails there first.
-  const apiSources = (bksAPI.servers || []).map((s) => ({ name: s.name || s.id, source: s.source }));
-  // The three-row legend is gone (#1573 redesign); each server still draws
-  // its own case, and that case is what the API reports.
-  const currentMatches = apiSources.length > 0 && apiSources.length === bks.current.length
-    && apiSources.every((s, i) => bks.current[i].name === s.name && bks.current[i].cases.length === 1 && bks.current[i].cases[0] === s.source);
-  (bks.cases === apiSources.length && currentMatches)
-    ? ok("backup-settings: each server draws its own location case as the API reports it, and nothing draws the cases twice")
-    : bad("backup-settings: each server draws its own location case as the API reports it, and nothing draws the cases twice",
+  // Only the SELECTED server's row is drawn (round 3): its case is what the
+  // API reports for that server, and nothing else on the page draws a case.
+  const selectedId = await page.evaluate(() => currentServer || defaultServerId);
+  const apiSources = (bksAPI.servers || []).filter((s) => s.id === selectedId).map((s) => ({ name: s.name || s.id, source: s.source }));
+  const currentMatches = apiSources.length === 1 && bks.current.length === 1
+    && bks.current[0].name === apiSources[0].name && bks.current[0].cases.length === 1 && bks.current[0].cases[0] === apiSources[0].source;
+  (bks.cases === 1 && currentMatches)
+    ? ok("backup-settings: the selected server draws its own location case as the API reports it, and nothing draws the cases twice")
+    : bad("backup-settings: the selected server draws its own location case as the API reports it, and nothing draws the cases twice",
         JSON.stringify({ cases: bks.cases, api: apiSources, current: bks.current }));
   // Each compact block links into the docs site, under the console's own
   // DOCS_BASE and with a real slug. WHICH pages may be linked is pinned on
@@ -5172,9 +5173,15 @@ try {
       // The setup half returns nodes since #1573 (it is a section of
       // Snapshots, not a page of its own), so they are collected into a
       // holder — nothing on the live page is touched at all now.
+      // The block draws the SELECTED server only (round 3), so the fixture
+      // server has to be the selected one for its case to render.
       const holder = document.createElement("div");
-      snapshotSetupSections({ daemon: [], servers: [{ id: "x", name: "x", source: "none" }], registry_read_only: false })
-        .forEach((n) => holder.append(n));
+      const keepSel = currentServer;
+      currentServer = "x";
+      try {
+        snapshotSetupSections({ daemon: [], servers: [{ id: "x", name: "x", source: "none" }], registry_read_only: false })
+          .forEach((n) => holder.append(n));
+      } finally { currentServer = keepSel; }
       serve = { sections: holder.querySelectorAll(".bks-sect").length, boot: !!holder.querySelector(".bks-boot"),
         sub: (holder.querySelector(".page-sub") || {}).textContent || "", current: (holder.querySelector(".bl-case.is-current") || {}).dataset };
     } finally { capsCache.monitor = keep.monitor; }
