@@ -9,25 +9,55 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // fakeS3Snapshots is an s3SnapshotLister over a set of keys, answering the
 // two calls the way S3 does (directories from the keys' first segment, in
-// byte order; objects from a start-after key on, in byte order) and
-// recording what was asked, so a test can pin the REQUESTS as well as the
-// answer.
+// byte order; objects under a prefix from a start-after key on, in byte
+// order) and recording what was asked, so a test can pin the REQUESTS as
+// well as the answer. The listing reads directories concurrently, so the
+// fake locks.
 type fakeS3Snapshots struct {
-	keys        []string
-	dirCalls    int
-	startAfters []string
-	err         error // fails ListDirs
-	infoErr     error // fails ListInfoFrom
+	mu       sync.Mutex
+	keys     []string
+	dirCalls int
+	prefixes []string // every ListInfoFrom prefix asked, in call order
+	err      error    // fails ListDirs
+	infoErr  error    // fails ListInfoFrom
+	// failPrefix fails ListInfoFrom for that one prefix only.
+	failPrefix string
+	// emptyOnce answers that one prefix with no keys the first time it is
+	// asked: a transient empty answer.
+	emptyOnce string
+	// sloppy answers ListInfoFrom with every key, ignoring the prefix: what a
+	// store that misread the request would do, which the listing must not
+	// mistake for the directory's own contents.
+	sloppy bool
+	// dirsGate, when set, holds every ListDirs answer until it is closed: a
+	// directory listing that hangs.
+	dirsGate chan struct{}
+	// failAfterOthers makes the failPrefix read wait until that many other
+	// reads were served before it fails, so the round's siblings finish
+	// first.
+	failAfterOthers int
+	served          int
+	othersDone      chan struct{}
 }
 
 func (f *fakeS3Snapshots) ListDirs(context.Context, string) ([]string, error) {
+	f.mu.Lock()
+	gate := f.dirsGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.dirCalls++
 	if f.err != nil {
 		return nil, f.err
@@ -43,18 +73,68 @@ func (f *fakeS3Snapshots) ListDirs(context.Context, string) ([]string, error) {
 	return out, nil
 }
 
-func (f *fakeS3Snapshots) ListInfoFrom(_ context.Context, _ string, startAfter string) ([]storage.ObjectInfo, error) {
-	f.startAfters = append(f.startAfters, startAfter)
+func (f *fakeS3Snapshots) ListInfoFrom(_ context.Context, prefix, startAfter string) ([]storage.ObjectInfo, error) {
+	f.mu.Lock()
+	f.prefixes = append(f.prefixes, prefix)
 	if f.infoErr != nil {
+		f.mu.Unlock()
 		return nil, f.infoErr
 	}
+	if f.failPrefix != "" && prefix == f.failPrefix {
+		wait := f.othersDone
+		f.mu.Unlock()
+		if wait != nil {
+			<-wait
+		}
+		return nil, errors.New("SlowDown on " + prefix)
+	}
 	var out []storage.ObjectInfo
+	if f.emptyOnce != "" && prefix == f.emptyOnce {
+		f.emptyOnce = ""
+		f.mu.Unlock()
+		return nil, nil
+	}
 	for _, k := range slices.Sorted(slices.Values(f.keys)) {
-		if k > startAfter {
+		if k > startAfter && (f.sloppy || strings.HasPrefix(k, prefix)) {
 			out = append(out, storage.ObjectInfo{Key: k})
 		}
 	}
+	f.served++
+	if f.othersDone != nil && f.served == f.failAfterOthers {
+		close(f.othersDone)
+	}
+	f.mu.Unlock()
 	return out, nil
+}
+
+// asked returns the prefixes ListInfoFrom was asked, sorted: the directory
+// reads of one round go out concurrently, so their order is not a fact.
+func (f *fakeS3Snapshots) asked() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Sorted(slices.Values(f.prefixes))
+}
+
+// dirsRead returns the prefixes asked and forgets them, so the next call
+// pins the NEXT round's requests alone.
+func (f *fakeS3Snapshots) dirsRead() []string {
+	out := f.asked()
+	f.mu.Lock()
+	f.prefixes = nil
+	f.mu.Unlock()
+	return out
+}
+
+func (f *fakeS3Snapshots) add(keys ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keys = append(f.keys, keys...)
+}
+
+func (f *fakeS3Snapshots) remove(dir string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keys = slices.DeleteFunc(f.keys, func(k string) bool { return strings.HasPrefix(k, dir+"/") })
 }
 
 // snapshotKeys writes a snapshot's keys: its tables, its markers, and the
@@ -70,16 +150,29 @@ func snapshotKeys(dir string, tables []string, markers ...string) []string {
 	return keys
 }
 
+// stubS3Snapshots installs the fake as every s3:// source and starts from
+// an empty inventory cache, so one test's warm cache is never another's.
 func stubS3Snapshots(t *testing.T, f *fakeS3Snapshots) {
 	t.Helper()
+	resetS3Inventories()
 	prev := newS3SnapshotLister
-	t.Cleanup(func() { newS3SnapshotLister = prev })
+	t.Cleanup(func() { newS3SnapshotLister = prev; resetS3Inventories() })
 	newS3SnapshotLister = func(context.Context, string) (s3SnapshotLister, error) { return f, nil }
+}
+
+// prefixesOf is the ListInfoFrom prefixes that reading these directories
+// costs, sorted like fakeS3Snapshots.asked.
+func prefixesOf(dirs ...string) []string {
+	var out []string
+	for _, d := range dirs {
+		out = append(out, d+"/")
+	}
+	return slices.Sorted(slices.Values(out))
 }
 
 func dirAt(i int) string { return fmt.Sprintf("2026-09-18T%02d-00-00Z", i) }
 
-func TestListBaselinesS3_readsTheLayoutOffTwoRequests(t *testing.T) {
+func TestListBaselinesS3_readsEachDirectoryOnce(t *testing.T) {
 	var keys []string
 	keys = append(keys, snapshotKeys(dirAt(1), []string{"shop/orders", "shop/items"}, "_SUCCESS")...)
 	keys = append(keys, snapshotKeys(dirAt(2), []string{"shop/orders"}, "_INCOMPLETE")...)             // partial: out
@@ -105,10 +198,31 @@ func TestListBaselinesS3_readsTheLayoutOffTwoRequests(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("files =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	// Two requests: the directories, then the objects from the
-	// byte-smallest wanted name on (every snapshot wanted, so the oldest).
-	if f.dirCalls != 1 || !reflect.DeepEqual(f.startAfters, []string{dirAt(1)}) {
-		t.Fatalf("dirCalls=%d startAfters=%v", f.dirCalls, f.startAfters)
+	// One directory listing, then one read per SNAPSHOT directory; the keys
+	// that are not snapshot directories (current/, .compact/) cost nothing.
+	if f.dirCalls != 1 || !reflect.DeepEqual(f.dirsRead(), prefixesOf(dirAt(1), dirAt(2), dirAt(3), dirAt(4))) {
+		t.Fatalf("dirCalls=%d prefixes=%v", f.dirCalls, f.asked())
+	}
+	// Again, inside the TTL: no directory listing and no directory read for
+	// the three complete snapshots. The partial one (dirAt(2)) is read again:
+	// it may be an upload in progress, and it joins the cache only once its
+	// _SUCCESS lands.
+	again, err := ListBaselines(context.Background(), "s3://b/base")
+	if err != nil || len(again) != len(files) {
+		t.Fatalf("second read: %d files err=%v", len(again), err)
+	}
+	if f.dirCalls != 1 || !reflect.DeepEqual(f.dirsRead(), prefixesOf(dirAt(2))) {
+		t.Fatalf("warm: dirCalls=%d prefixes=%v, want the incomplete directory alone", f.dirCalls, f.asked())
+	}
+	f.add(dirAt(2) + "/_SUCCESS")
+	if files, err := ListBaselines(context.Background(), "s3://b/base"); err != nil || len(files) != 5 {
+		t.Fatalf("after _SUCCESS: %d files err=%v, want dirAt(2) in", len(files), err)
+	}
+	if !reflect.DeepEqual(f.dirsRead(), prefixesOf(dirAt(2))) {
+		t.Fatalf("prefixes=%v, want dirAt(2) read once more", f.asked())
+	}
+	if _, err := ListBaselines(context.Background(), "s3://b/base"); err != nil || len(f.dirsRead()) != 0 {
+		t.Fatalf("now complete, dirAt(2) must be cached: err=%v prefixes=%v", err, f.asked())
 	}
 }
 
@@ -123,22 +237,25 @@ func TestListBaselinesS3_newestWindow(t *testing.T) {
 	if err != nil || skipped != 0 || !more || len(files) != 2 || files[0].SnapshotTime.Hour() != 6 || files[1].SnapshotTime.Hour() != 5 {
 		t.Fatalf("files=%+v skipped=%d more=%v err=%v, want the two newest and more", files, skipped, more, err)
 	}
-	// The object listing started at the oldest WANTED directory, so the
-	// four older snapshots' objects were never fetched.
-	if !reflect.DeepEqual(f.startAfters, []string{dirAt(5)}) {
-		t.Fatalf("startAfters = %v, want from %s on", f.startAfters, dirAt(5))
+	// Only the two WANTED directories were read.
+	if !reflect.DeepEqual(f.dirsRead(), prefixesOf(dirAt(6), dirAt(5))) {
+		t.Fatalf("prefixes = %v, want the two newest", f.asked())
 	}
+	// A wider window reads the directories it adds, and nothing twice.
 	if _, _, more, _ = ListBaselinesNewestReport(context.Background(), "s3://b/base", 6); more {
 		t.Fatal("a window as wide as the inventory reported more")
 	}
-	if all, _, more, _ := ListBaselinesNewestReport(context.Background(), "s3://b/base", 0); more || len(all) != 6 {
-		t.Fatalf("0 = all: len=%d more=%v", len(all), more)
+	if !reflect.DeepEqual(f.dirsRead(), prefixesOf(dirAt(1), dirAt(2), dirAt(3), dirAt(4))) {
+		t.Fatalf("prefixes = %v, want the four older ones only", f.asked())
+	}
+	if all, _, more, _ := ListBaselinesNewestReport(context.Background(), "s3://b/base", 0); more || len(all) != 6 || len(f.dirsRead()) != 0 {
+		t.Fatalf("0 = all: len=%d more=%v prefixes=%v (want none: everything is cached)", len(all), more, f.asked())
 	}
 	// An empty prefix: one request, nothing, no error.
 	f2 := &fakeS3Snapshots{}
 	stubS3Snapshots(t, f2)
-	if files, _, more, err := ListBaselinesNewestReport(context.Background(), "s3://b/empty", 3); err != nil || len(files) != 0 || more || len(f2.startAfters) != 0 {
-		t.Fatalf("empty: files=%v more=%v err=%v startAfters=%v", files, more, err, f2.startAfters)
+	if files, _, more, err := ListBaselinesNewestReport(context.Background(), "s3://b/empty", 3); err != nil || len(files) != 0 || more || len(f2.asked()) != 0 {
+		t.Fatalf("empty: files=%v more=%v err=%v prefixes=%v", files, more, err, f2.asked())
 	}
 	// A listing error is the caller's error, never a shorter answer: from
 	// either listing.
@@ -162,8 +279,13 @@ func TestListBaselinesS3_newestWindow(t *testing.T) {
 	if files, _, more, err := ListBaselinesNewestReport(context.Background(), "s3://b/base", 2); err != nil || len(files) != 1 || files[0].SnapshotTime.Hour() != 0 || more {
 		t.Fatalf("stale window: files=%+v more=%v err=%v, want the one complete snapshot found by widening", files, more, err)
 	}
-	if !reflect.DeepEqual(f4.startAfters, []string{dirAt(8), dirAt(2), dirAt(0)}) {
-		t.Fatalf("startAfters = %v, want 2, 8 then all", f4.startAfters)
+	// 2, then 8, then all: every directory read once on the way.
+	var all []string
+	for i := 0; i <= 9; i++ {
+		all = append(all, dirAt(i))
+	}
+	if got := f4.dirsRead(); !reflect.DeepEqual(got, prefixesOf(all...)) || f4.dirCalls != 1 {
+		t.Fatalf("prefixes = %v dirCalls=%d, want each directory once over one directory listing", got, f4.dirCalls)
 	}
 }
 
@@ -182,16 +304,21 @@ func TestNewestSnapshot_widensPastIncompleteSnapshots(t *testing.T) {
 	if err != nil || at.Hour() != 0 || !reflect.DeepEqual(tables, []string{"shop.items", "shop.orders"}) {
 		t.Fatalf("at=%s tables=%v err=%v", at, tables, err)
 	}
-	// 8, then 32 (which covers all 21): two object listings, the second
-	// from the oldest directory.
-	if !reflect.DeepEqual(f.startAfters, []string{dirAt(13), dirAt(0)}) || f.dirCalls != 1 {
-		t.Fatalf("startAfters = %v dirCalls = %d, want the probe then the widened window over one directory listing", f.startAfters, f.dirCalls)
+	// 8, then 32 (which covers all 21): every directory read once, over one
+	// directory listing.
+	var all []string
+	for i := 0; i <= 20; i++ {
+		all = append(all, dirAt(i))
 	}
-	// The common case is one request pair.
+	if got := f.dirsRead(); !reflect.DeepEqual(got, prefixesOf(all...)) || f.dirCalls != 1 {
+		t.Fatalf("prefixes = %v dirCalls = %d, want each directory once", got, f.dirCalls)
+	}
+	// The common case is one request pair: the directories, then the
+	// newest one.
 	f2 := &fakeS3Snapshots{keys: snapshotKeys(dirAt(0), []string{"shop/orders", "shop/items"}, "_SUCCESS")}
 	stubS3Snapshots(t, f2)
-	if _, _, err := NewestSnapshot(context.Background(), "s3://b/base"); err != nil || len(f2.startAfters) != 1 {
-		t.Fatalf("err=%v startAfters=%v", err, f2.startAfters)
+	if _, _, err := NewestSnapshot(context.Background(), "s3://b/base"); err != nil || !reflect.DeepEqual(f2.asked(), prefixesOf(dirAt(0))) {
+		t.Fatalf("err=%v prefixes=%v", err, f2.asked())
 	}
 	// Nothing complete anywhere: no snapshot, no error, and the widening
 	// stopped once the window covered everything.
@@ -201,8 +328,8 @@ func TestNewestSnapshot_widensPastIncompleteSnapshots(t *testing.T) {
 	}
 	f3 := &fakeS3Snapshots{keys: incompleteOnly}
 	stubS3Snapshots(t, f3)
-	if at, tables, err := NewestSnapshot(context.Background(), "s3://b/base"); err != nil || !at.IsZero() || tables != nil || len(f3.startAfters) != 2 {
-		t.Fatalf("at=%s tables=%v err=%v startAfters=%v", at, tables, err, f3.startAfters)
+	if at, tables, err := NewestSnapshot(context.Background(), "s3://b/base"); err != nil || !at.IsZero() || tables != nil || len(f3.asked()) != 20 {
+		t.Fatalf("at=%s tables=%v err=%v prefixes=%v", at, tables, err, f3.asked())
 	}
 }
 
@@ -229,11 +356,11 @@ func TestListBaselinesNewestReport_local(t *testing.T) {
 	}
 }
 
-// The object listing starts at the byte-smallest wanted NAME, not the
-// time-oldest: a hand-copied directory whose name carries a fraction parses
-// newer than a plain one it sorts before, and starting after the plain one
-// would skip its keys with no error.
-func TestListBaselinesS3_startsAtTheByteSmallestWantedName(t *testing.T) {
+// A directory is read by its OWN prefix, so a hand-copied directory whose
+// name carries a fraction (which parses newer than a plain name it sorts
+// before) is read like any other; the #1679 start-after trap is gone with
+// the range listing.
+func TestListBaselinesS3_readsAFractionalNameByItsOwnPrefix(t *testing.T) {
 	older, plain, fraction := "2026-09-17T00-00-00Z", "2026-09-18T00-00-00Z", "2026-09-18T00-00-00.5Z"
 	if fraction >= plain {
 		t.Fatal("fixture: the fractional name must sort before the plain one")
@@ -251,7 +378,267 @@ func TestListBaselinesS3_startsAtTheByteSmallestWantedName(t *testing.T) {
 	if files[0].Path != "s3://b/base/"+fraction+"/shop/orders.parquet" || files[1].Path != "s3://b/base/"+plain+"/shop/orders.parquet" {
 		t.Fatalf("files = %+v, want the fractional (newer) then the plain", files)
 	}
-	if !reflect.DeepEqual(f.startAfters, []string{fraction}) {
-		t.Fatalf("startAfters = %v, want the byte-smallest wanted name", f.startAfters)
+	if !reflect.DeepEqual(f.asked(), prefixesOf(plain, fraction)) {
+		t.Fatalf("prefixes = %v, want the two wanted directories by name", f.asked())
+	}
+}
+
+// The directory listing is reused inside s3DirsTTL and made again past it;
+// a directory gone from the fresh listing is evicted, so a snapshot removed
+// by the bucket's lifecycle rule is never answered from the cache.
+func TestListBaselinesS3_directoryListingTTLAndEviction(t *testing.T) {
+	f := &fakeS3Snapshots{}
+	f.add(snapshotKeys(dirAt(1), []string{"shop/orders"}, "_SUCCESS")...)
+	f.add(snapshotKeys(dirAt(2), []string{"shop/orders"}, "_SUCCESS")...)
+	stubS3Snapshots(t, f)
+	now := time.Date(2026, 9, 24, 3, 0, 0, 0, time.UTC)
+	prev := s3Clock
+	t.Cleanup(func() { s3Clock = prev })
+	s3Clock = func() time.Time { return now }
+
+	if files, err := ListBaselines(context.Background(), "s3://b/base"); err != nil || len(files) != 2 || f.dirCalls != 1 {
+		t.Fatalf("cold: files=%d err=%v dirCalls=%d", len(files), err, f.dirCalls)
+	}
+	// A snapshot removed and one added, inside the TTL: the listing does
+	// not see either yet (no request), and answers the cached inventory.
+	f.remove(dirAt(1))
+	f.add(snapshotKeys(dirAt(3), []string{"shop/orders"}, "_SUCCESS")...)
+	now = now.Add(s3DirsTTL - time.Second)
+	f.dirsRead()
+	if files, err := ListBaselines(context.Background(), "s3://b/base"); err != nil || len(files) != 2 || files[0].SnapshotTime.Hour() != 2 || f.dirCalls != 1 || len(f.asked()) != 0 {
+		t.Fatalf("inside TTL: files=%+v err=%v dirCalls=%d prefixes=%v", files, err, f.dirCalls, f.asked())
+	}
+	// Past it: listed again, the new directory read, the removed one gone
+	// from the answer AND from the cache.
+	now = now.Add(2 * time.Second)
+	files, err := ListBaselines(context.Background(), "s3://b/base")
+	if err != nil || len(files) != 2 || files[0].SnapshotTime.Hour() != 3 || files[1].SnapshotTime.Hour() != 2 || f.dirCalls != 2 {
+		t.Fatalf("past TTL: files=%+v err=%v dirCalls=%d", files, err, f.dirCalls)
+	}
+	if !reflect.DeepEqual(f.dirsRead(), prefixesOf(dirAt(3))) {
+		t.Fatalf("prefixes=%v, want the new directory alone", f.asked())
+	}
+	inv := s3InventoryFor("s3://b/base")
+	inv.mu.Lock()
+	_, evicted := inv.contents[dirAt(1)]
+	inv.mu.Unlock()
+	if evicted {
+		t.Fatal("the removed directory is still cached")
+	}
+}
+
+// InvalidateS3Inventory makes the next read list the directories again
+// inside the TTL, keeping what was read: the daemon calls it after an
+// upload so the snapshot it just wrote is seen at once.
+func TestInvalidateS3Inventory(t *testing.T) {
+	f := &fakeS3Snapshots{}
+	f.add(snapshotKeys(dirAt(1), []string{"shop/orders"}, "_SUCCESS")...)
+	stubS3Snapshots(t, f)
+	if _, err := ListBaselines(context.Background(), "s3://b/base"); err != nil || f.dirCalls != 1 {
+		t.Fatalf("cold: err=%v dirCalls=%d", err, f.dirCalls)
+	}
+	f.add(snapshotKeys(dirAt(2), []string{"shop/orders"}, "_SUCCESS")...)
+	f.dirsRead()
+	// The daemon names the snapshot's OWN directory when it uploads; that
+	// invalidates the source holding it.
+	InvalidateS3Inventory("s3://b/base/" + dirAt(2) + "/")
+	files, err := ListBaselines(context.Background(), "s3://b/base")
+	if err != nil || len(files) != 2 || f.dirCalls != 2 {
+		t.Fatalf("after invalidate: files=%d err=%v dirCalls=%d", len(files), err, f.dirCalls)
+	}
+	if got := f.dirsRead(); !reflect.DeepEqual(got, prefixesOf(dirAt(2))) {
+		t.Fatalf("prefixes=%v, want the new directory alone (the old one is kept)", got)
+	}
+	// Naming a directory already read drops THAT directory's contents (the
+	// daemon wrote into it: the sweep completes a remote copy that had no
+	// _SUCCESS) and no other's.
+	InvalidateS3Inventory("s3://b/base/" + dirAt(1))
+	if _, err := ListBaselines(context.Background(), "s3://b/base"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.dirsRead(); !reflect.DeepEqual(got, prefixesOf(dirAt(1))) {
+		t.Fatalf("prefixes=%v, want the named directory read again and the other kept", got)
+	}
+	// The source itself, in either spelling, invalidates too.
+	f.add(snapshotKeys(dirAt(3), []string{"shop/orders"}, "_SUCCESS")...)
+	InvalidateS3Inventory("s3://b/base/")
+	if files, err := ListBaselines(context.Background(), "s3://b/base"); err != nil || len(files) != 3 || f.dirCalls != 4 {
+		t.Fatalf("source spelling: files=%d err=%v dirCalls=%d", len(files), err, f.dirCalls)
+	}
+	// A sibling prefix is not this source: no listing, and no inventory
+	// created for it.
+	InvalidateS3Inventory("s3://b/baseline-other/" + dirAt(4))
+	InvalidateS3Inventory("/var/lib/backups")
+	if _, err := ListBaselines(context.Background(), "s3://b/base"); err != nil || f.dirCalls != 4 {
+		t.Fatalf("sibling: dirCalls=%d, want no re-listing", f.dirCalls)
+	}
+	s3InventoriesMu.Lock()
+	n := len(s3Inventories)
+	s3InventoriesMu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d inventories, want the one source only", n)
+	}
+}
+
+// A round in which one directory read fails is the caller's error, and the
+// complete directories that round DID read are kept: a retry reads only
+// what it has to.
+func TestListBaselinesS3_failedRoundKeepsWhatItRead(t *testing.T) {
+	// The failing read waits until the two good ones were served, so the
+	// round has read them by the time it fails.
+	f := &fakeS3Snapshots{failPrefix: dirAt(2) + "/", failAfterOthers: 2, othersDone: make(chan struct{})}
+	for i := 1; i <= 3; i++ {
+		f.add(snapshotKeys(dirAt(i), []string{"shop/orders"}, "_SUCCESS")...)
+	}
+	stubS3Snapshots(t, f)
+	if _, err := ListBaselines(context.Background(), "s3://b/base"); err == nil || !strings.Contains(err.Error(), "SlowDown") {
+		t.Fatalf("err = %v, want the failed read's error", err)
+	}
+	f.mu.Lock()
+	f.failPrefix = ""
+	f.mu.Unlock()
+	f.dirsRead()
+	files, err := ListBaselines(context.Background(), "s3://b/base")
+	if err != nil || len(files) != 3 {
+		t.Fatalf("retry: files=%d err=%v", len(files), err)
+	}
+	if got := f.dirsRead(); !reflect.DeepEqual(got, prefixesOf(dirAt(2))) {
+		t.Fatalf("retry prefixes=%v, want the failed directory alone: the two the failed round read are kept", got)
+	}
+	if _, err := ListBaselines(context.Background(), "s3://b/base"); err != nil || len(f.asked()) != 0 {
+		t.Fatalf("warm after retry: err=%v prefixes=%v, want nothing read", err, f.asked())
+	}
+}
+
+// A store that answered a directory read with keys outside that directory
+// must not have them counted as the directory's tables at the directory's
+// instant.
+func TestListBaselinesS3_ignoresKeysOutsideTheDirectoryRead(t *testing.T) {
+	f := &fakeS3Snapshots{sloppy: true}
+	f.add(snapshotKeys(dirAt(1), []string{"shop/orders"}, "_SUCCESS")...)
+	f.add(snapshotKeys(dirAt(2), []string{"shop/items"}, "_SUCCESS")...)
+	stubS3Snapshots(t, f)
+	files, err := ListBaselines(context.Background(), "s3://b/base")
+	if err != nil || len(files) != 2 {
+		t.Fatalf("files=%+v err=%v", files, err)
+	}
+	for _, x := range files {
+		if !strings.HasPrefix(x.Path, "s3://b/base/"+x.SnapshotTime.Format("2006-01-02T15-04-05Z")+"/") {
+			t.Fatalf("file %+v attributed to the wrong snapshot", x)
+		}
+	}
+}
+
+// Concurrent readers of one source share the inventory without racing;
+// run under -race this is the guard, and the answers must agree.
+func TestListBaselinesS3_concurrentReaders(t *testing.T) {
+	f := &fakeS3Snapshots{}
+	for i := 0; i < 20; i++ {
+		f.add(snapshotKeys(dirAt(i), []string{"shop/orders", "shop/items"}, "_SUCCESS")...)
+	}
+	stubS3Snapshots(t, f)
+	var wg sync.WaitGroup
+	got := make([]int, 8)
+	for i := range got {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			files, err := ListBaselines(context.Background(), "s3://b/base")
+			if err != nil {
+				t.Error(err)
+			}
+			got[i] = len(files)
+		}()
+	}
+	wg.Wait()
+	for _, n := range got {
+		if n != 40 {
+			t.Fatalf("a reader got %d files, want 40", n)
+		}
+	}
+}
+
+// No lock is held across a request: while one source's directory listing
+// hangs, invalidating that source returns at once (it used to wait on the
+// inventory's lock, holding the map's lock every other source opens
+// through), and another source is read.
+func TestListBaselinesS3_aHungListingHoldsUpItsCallerOnly(t *testing.T) {
+	hung := &fakeS3Snapshots{dirsGate: make(chan struct{})}
+	hung.add(snapshotKeys(dirAt(1), []string{"shop/orders"}, "_SUCCESS")...)
+	other := &fakeS3Snapshots{}
+	other.add(snapshotKeys(dirAt(1), []string{"shop/items"}, "_SUCCESS")...)
+	resetS3Inventories()
+	prev := newS3SnapshotLister
+	t.Cleanup(func() { newS3SnapshotLister = prev; resetS3Inventories() })
+	newS3SnapshotLister = func(_ context.Context, url string) (s3SnapshotLister, error) {
+		if url == "s3://b/hung" {
+			return hung, nil
+		}
+		return other, nil
+	}
+	done := make(chan error, 1)
+	go func() { _, err := ListBaselines(context.Background(), "s3://b/hung"); done <- err }()
+	// The hung listing is in flight (it took the fake's gate).
+	deadline := time.After(5 * time.Second)
+	for {
+		hung.mu.Lock()
+		waiting := len(hung.prefixes) == 0 && hung.dirCalls == 0
+		hung.mu.Unlock()
+		if waiting {
+			select {
+			case <-deadline:
+				t.Fatal("the hung listing never started")
+			case <-time.After(time.Millisecond):
+			}
+		}
+		break
+	}
+	returned := make(chan struct{})
+	go func() {
+		InvalidateS3Inventory("s3://b/hung/" + dirAt(1))
+		if _, err := ListBaselines(context.Background(), "s3://b/other"); err != nil {
+			t.Error(err)
+		}
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("invalidating the hung source, or reading another, waited behind the hung request")
+	}
+	close(hung.dirsGate)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// The listing that was in flight when the invalidation landed was
+	// stored but not dated: the next read lists again.
+	hung.dirsRead()
+	if _, err := ListBaselines(context.Background(), "s3://b/hung"); err != nil || hung.dirCalls != 2 {
+		t.Fatalf("after an invalidation during the listing: err=%v dirCalls=%d, want a second listing", err, hung.dirCalls)
+	}
+	if _, err := ListBaselines(context.Background(), "s3://b/hung"); err != nil || hung.dirCalls != 2 {
+		t.Fatalf("dated now: dirCalls=%d, want no third listing", hung.dirCalls)
+	}
+}
+
+// A directory the listing showed but whose read came back with no objects
+// (a transient empty answer) is not kept as "no tables": it is read again
+// next time, and its snapshot is back.
+func TestListBaselinesS3_anEmptyReadIsNotKept(t *testing.T) {
+	f := &fakeS3Snapshots{emptyOnce: dirAt(2) + "/"}
+	f.add(snapshotKeys(dirAt(1), []string{"shop/orders"}, "_SUCCESS")...)
+	f.add(snapshotKeys(dirAt(2), []string{"shop/orders"}, "_SUCCESS")...)
+	stubS3Snapshots(t, f)
+	files, err := ListBaselines(context.Background(), "s3://b/base")
+	if err != nil || len(files) != 1 {
+		t.Fatalf("first read: files=%d err=%v, want the one directory that answered", len(files), err)
+	}
+	f.dirsRead()
+	files, err = ListBaselines(context.Background(), "s3://b/base")
+	if err != nil || len(files) != 2 {
+		t.Fatalf("second read: files=%d err=%v, want the snapshot back", len(files), err)
+	}
+	if got := f.dirsRead(); !reflect.DeepEqual(got, prefixesOf(dirAt(2))) {
+		t.Fatalf("prefixes=%v, want the directory that answered empty read again, alone", got)
 	}
 }

@@ -1981,9 +1981,17 @@ function flowCard(card, ctx, close) {
 // cycle would double the count the live test pins). The three others are
 // best-effort: a 403 on the schema snapshot (a serve without the daemon) or a
 // missing monitor status paints "not known", never a colour.
-function loadOvFlow(f, live, coverage) {
+// coverageP is the /api/coverage read IN FLIGHT, not its answer: the flow's
+// own reads (servers, the snapshot list, the tables left out) go out at
+// once, beside it, and the paint waits for all of them together. Chained
+// after the coverage answer, the snapshot list started only when coverage
+// landed, and the head of the page took the two latencies in a row (#1847).
+// A coverageP that resolves null (the refresh loop's failed read) paints
+// nothing, the way that loop never called this on a failure, and it must
+// not cancel a paint in flight either: the sequence that drops a late
+// paint is taken once coverage has answered, not when the reads go out.
+function loadOvFlow(f, live, coverageP) {
   if (serversEmpty) { clear(f.flowSlot); return Promise.resolve(); }
-  const seq = ++ovFlowSeq;
   const id = currentServer || defaultServerId;
   const read = (path) => apiWithin(path, OV_REQUEST_MS);
   // A read that fails is said as a failure by the model, never as a fact
@@ -1993,7 +2001,9 @@ function loadOvFlow(f, live, coverage) {
   const servers = read("/api/servers").then((d) => ({ srv: ((d && d.servers) || []).find((s) => s.id === id) || null }), (err) => ({ srv: null, unknown: true, err }));
   const baselines = read("/api/baselines").then((d) => d || {}, () => ({ unavailable: true }));
   const uncaptured = read("/api/uncaptured-tables").then((d) => d || {}, () => ({}));
-  return servers.then(({ srv, unknown, err }) => {
+  return Promise.all([coverageP, servers]).then(([coverage, { srv, unknown, err }]) => {
+    if (coverage === null) return;
+    const seq = ++ovFlowSeq;
     if (unknown) console.error("flow: server list unavailable", err);
     const registry = !!(srv && srv.kind === "registry" && srv.has_source);
     const wantMonitor = registry && /^(failed|stalled|lost_position|stopped)$/.test(srv.monitor_state || "");
@@ -2039,8 +2049,9 @@ function renderOverview() {
   // A failed fetch must render the same red "unavailable" card the nil-db
   // path gets — a swallowed null would make a broken endpoint
   // indistinguishable from a console without the feature.
-  api("/api/coverage").catch((err) => { console.error("coverage fetch failed", err); return { continuity: "unavailable" }; })
-    .then((coverage) => { if (!live()) return; fillOvCoverage(f, coverage); loadOvFlow(f, live, coverage).catch((err) => console.error("flow paint failed", err)); });
+  const coverageP = api("/api/coverage").catch((err) => { console.error("coverage fetch failed", err); return { continuity: "unavailable" }; });
+  coverageP.then((coverage) => { if (live()) fillOvCoverage(f, coverage); });
+  loadOvFlow(f, live, coverageP).catch((err) => console.error("flow paint failed", err));
   loadOvUncaptured(f, live);
   // null on failure, never {} — the fill renders "—" for a missing aggregate.
   // A zero-filled fallback would print "0 deletes", an assurance nobody
@@ -2365,7 +2376,8 @@ function watchOverview(f, live, firstRun) {
           if (!on()) return;
           if (st) { fillOvStatus(f, st); sideOkAt = nowClock(); sideNote(""); }
         }, (err) => { console.error("status refresh failed", err); if (on()) sideNote((err && err.message) || String(err)); });
-        apiWithin("/api/coverage", OV_REQUEST_MS).then((c) => { if (!on()) return; fillOvCoverage(f, c); loadOvFlow(f, on, c).catch((err) => console.error("flow refresh failed", err)); }, (err) => {
+        const coverageP = apiWithin("/api/coverage", OV_REQUEST_MS);
+        coverageP.then((c) => { if (on()) fillOvCoverage(f, c); }, (err) => {
           console.error("coverage refresh failed", err);
           // The card keeps its numbers and says they are from before, the
           // way its own refresh button does. From THIS paint's fill, never
@@ -2373,6 +2385,9 @@ function watchOverview(f, live, firstRun) {
           // it last.
           if (on() && f.covLast) { clear(f.covSlot); f.covSlot.append(covCard(f.covLast.data, { at: f.covLast.at, error: true })); }
         });
+        // The flow's reads go out beside the coverage read; a failed one
+        // leaves the flow as it was (null paints nothing).
+        loadOvFlow(f, on, coverageP.then((c) => c, () => null)).catch((err) => console.error("flow refresh failed", err));
       }
     } finally {
       busy = false;
