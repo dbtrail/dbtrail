@@ -1535,7 +1535,8 @@ function fillOvEvents(f, eventsData, err) {
   // The fold's one line: what is inside, and what it is for. "8 newest" is
   // what the list holds (the response has no total); "every version kept"
   // is the other half of what the copy is.
-  if (f.recentSummary) f.recentSummary.textContent = ovFoldLine("Recent changes", err ? "" : events.length + " newest", "every version kept, undo a row");
+  // A zero is said in words, never as "0 newest".
+  if (f.recentSummary) f.recentSummary.textContent = ovFoldLine("Recent changes", err ? "" : events.length ? events.length + " newest" : "no changes yet", "every version kept, undo a row");
 }
 
 // ovFoldLine joins a fold's title with its count and its purpose: the parts
@@ -1592,7 +1593,7 @@ function fillOvActivity(f, activity) {
   if (refreshed) {
     f.tablesAsOf.append(el("span", { class: "cov-asof", text: "as of " + utcLabel(refreshed) }));
   }
-  if (f.tablesSummary) f.tablesSummary.textContent = ovFoldLine("Activity by table", tableCount === null ? "" : tableCount + (tableCount === 1 ? " table" : " tables"), "");
+  if (f.tablesSummary) f.tablesSummary.textContent = ovFoldLine("Activity by table", tableCount === null ? "" : tableCount === 0 ? "no changes in this window" : tableCount + (tableCount === 1 ? " table" : " tables"), "");
   clear(f.tablesBody);
   const tables = (activity && activity.top_tables || []).map((t) => ({
     key: t.schema + "." + t.table, insert: t.insert, update: t.update, delete: t.delete, total: t.total,
