@@ -915,14 +915,16 @@ try {
       capBtn.foundRegistryServer ? "no button in the banner" : "no registry server in the fixture — the check tested nothing");
   !capBtn.onBoot ? ok("capture health: no Refresh button for the command-line entry") : bad("capture health: no Refresh button for the command-line entry", "offered an action the endpoint refuses");
 
-  // Scenario 9 — Storage page AWS-credentials card (#681). credentialsCard is
-  // pure (like pgHealthCard/continuityBox): it must lead with a plain-language
-  // summary of which credential source is active, never leave the raw signals
-  // as the only content, and each of the mutually-favored signals (static
-  // env keys > IAM role > shared config > none) must produce distinct copy —
-  // an IAM-role or shared-config setup must never read as "no credentials".
+  // Scenario 9 — the AWS-credentials signals (#681), the note under the S3
+  // field of a server's snapshot setup since #1867 (it was the Storage
+  // page's card, then This daemon's). s3SigningNote is pure (like
+  // pgHealthCard/continuityBox): it must lead with a plain-language summary
+  // of which credential source is active, never leave the raw signals as the
+  // only content, and each of the mutually-favored signals (static env keys
+  // > IAM role > shared config > none) must produce distinct copy: an
+  // IAM-role or shared-config setup must never read as "no credentials".
   const cred = await page.evaluate(() => {
-    const mk = (aws) => credentialsCard({ aws });
+    const mk = (aws) => { const s3 = document.createElement("input"); s3.value = "s3://bucket/prefix/"; return s3SigningNote(s3, { id: "e2e" }, { aws }, []); };
     const none = mk({ access_key_env: false, profile: "", region_env: "", shared_config: false, container_creds: false, web_identity: false });
     const keys = mk({ access_key_env: true, profile: "", region_env: "", shared_config: false, container_creds: false, web_identity: false });
     const ecs = mk({ access_key_env: false, profile: "", region_env: "", shared_config: false, container_creds: true, web_identity: false });
