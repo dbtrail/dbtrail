@@ -1398,6 +1398,11 @@ function ovFrame() {
   f.flowSlot = el("div");
   f.flowSlot.append(el("section", { class: "flow flow-pending" }, ovSkelLines(2), el("div", { class: "skel-note", text: "reading the path from your database to its copy…" })));
   v.append(f.flowSlot);
+  // One grey line under the drawing (#1860): does the copy carry life? Two
+  // numbers over the index's own window, filled by fillOvActivity; the
+  // per-table figures live in the fold below.
+  f.actLine = el("div", { class: "ov-actline" });
+  v.append(f.actLine);
   // The restore window, the table-coverage check and the four tiles are
   // the page's recovery-era half. They keep their slots and fills (the
   // live-refresh loop and every fill are untouched), but hang under one
@@ -1444,6 +1449,7 @@ function ovFrame() {
   f.recentFold = el("details", { class: "ov-fold ov-fold-panel ov-fold-recent" });
   f.recentSummary = el("summary", { text: "Recent changes" });
   f.recentFold.append(f.recentSummary, f.recentPanel);
+  ovFoldRemember(f.recentFold, "recent");
   v.append(f.recentFold);
 
   f.tablesPanel = el("section", { class: "ov-panel tcard-sun" });
@@ -1461,6 +1467,7 @@ function ovFrame() {
   f.tablesFold = el("details", { class: "ov-fold ov-fold-panel ov-fold-tables" });
   f.tablesSummary = el("summary", { text: "Activity by table" });
   f.tablesFold.append(f.tablesSummary, f.tablesPanel);
+  ovFoldRemember(f.tablesFold, "tables");
   v.append(f.tablesFold);
 
   const fold = el("details", { class: "ov-fold ov-fold-figures" });
@@ -1523,7 +1530,7 @@ function fillOvEvents(f, eventsData, err) {
     return;
   }
   if (!events.length) {
-    f.recentBody.append(el("div", { class: "ev-empty", text: "No changes indexed yet." }));
+    f.recentBody.append(el("div", { class: "ev-empty", text: "No changes yet." }));
   }
   events.forEach((e) => {
     const row = ovEventRow(e);
@@ -1543,6 +1550,62 @@ function fillOvEvents(f, eventsData, err) {
 // that are known, separated by a middle dot.
 function ovFoldLine(title, count, purpose) {
   return [title, count, purpose].filter(Boolean).join(" · ");
+}
+
+// ovFoldRemember keeps a fold the way this browser left it (#1860): closed
+// the first time, then as it was. A per-browser convenience, so browser
+// storage; it may be absent or refused (a private window), and the fold
+// then simply starts closed.
+const OV_FOLD_KEY = "dbtrail.overview.fold.";
+function ovFoldRemember(details, name) {
+  try { if (localStorage.getItem(OV_FOLD_KEY + name) === "open") details.open = true; } catch (e) { /* no storage: starts closed */ }
+  details.addEventListener("toggle", () => {
+    try { localStorage.setItem(OV_FOLD_KEY + name, details.open ? "open" : "closed"); } catch (e) { /* not remembered */ }
+  });
+}
+
+// ovSinceLabel says where a window starts, at a glance: the time alone when
+// it opened today, "yesterday" when it opened the day before, the date
+// otherwise. Both stamps are the index's own, in UTC.
+function ovSinceLabel(since, until) {
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(String(since || ""));
+  if (!m) return "";
+  const day = (stamp) => String(stamp || "").slice(0, 10);
+  const untilDay = day(until);
+  if (m[1] === untilDay) return "Since " + m[2];
+  const prev = new Date(Date.parse(untilDay + "T00:00:00Z") - 86400000);
+  if (untilDay && m[1] === prev.toISOString().slice(0, 10)) return "Since " + m[2] + " yesterday";
+  return "Since " + m[1] + " " + m[2];
+}
+
+// ovActivityLine is the one grey line's text: two numbers over the index's
+// window, or the zero said in words with the hour it holds since.
+function ovActivityLine(activity) {
+  if (!activity) return "";
+  const since = ovSinceLabel(activity.since, activity.until);
+  const total = Number(activity.total) || 0;
+  const tables = Number(activity.tables) || 0;
+  if (total === 0) return "No changes" + (since ? " " + since.charAt(0).toLowerCase() + since.slice(1) : "");
+  return (since ? since + " · " : "") + total.toLocaleString("en-US") + (total === 1 ? " change" : " changes") + " in " + tables + (tables === 1 ? " table" : " tables");
+}
+
+// ovAgeText is the copy's age from its own stamp, so the large number keeps
+// moving between two reads of the listing (a still number reads as a frozen
+// page). The stamp is the index's, in UTC, with or without a zone suffix.
+function ovAgeText(stamp, nowMs) {
+  const t = Date.parse(String(stamp || "").replace(" ", "T").replace(/Z?$/, "Z"));
+  if (!isFinite(t)) return "";
+  return plainDuration((nowMs - t) / 1000) + " ago";
+}
+
+// ovTickAges re-reads every large age on the drawing off its stamp.
+function ovTickAges(root) {
+  if (!root || typeof root.querySelectorAll !== "function") return;
+  const now = Date.now();
+  for (const n of root.querySelectorAll(".flow-big[data-stamp]")) {
+    const text = ovAgeText(n.getAttribute("data-stamp"), now);
+    if (text && n.textContent !== text) n.textContent = text;
+  }
 }
 
 // fillOvActivity fills every window-scoped surface from the /api/activity
@@ -1594,6 +1657,11 @@ function fillOvActivity(f, activity) {
     f.tablesAsOf.append(el("span", { class: "cov-asof", text: "as of " + utcLabel(refreshed) }));
   }
   if (f.tablesSummary) f.tablesSummary.textContent = ovFoldLine("Activity by table", tableCount === null ? "" : tableCount === 0 ? "no changes in this window" : tableCount + (tableCount === 1 ? " table" : " tables"), "");
+  if (f.actLine) {
+    clear(f.actLine);
+    const line = ovActivityLine(activity);
+    if (line) f.actLine.append(el("a", { class: "ov-actline-link", href: "/events", text: line + " ›", onclick: (e) => { e.preventDefault(); navigate("events"); } }));
+  }
   clear(f.tablesBody);
   const tables = (activity && activity.top_tables || []).map((t) => ({
     key: t.schema + "." + t.table, insert: t.insert, update: t.update, delete: t.delete, total: t.total,
@@ -1768,7 +1836,10 @@ function ovFlowModel(inp) {
   // Table definitions (the DBTrail box): what the schema snapshot last did,
   // the count of captured tables, and a schema change that stopped the copy.
   const tablesWord = (n) => n + (n === 1 ? " table" : " tables");
-  const captured = typeof unc.tables_captured === "number" ? tablesWord(unc.tables_captured) : "";
+  // Before the definitions were read once, "0 tables" is not a count, it is
+  // a wait: said in words (#1860). A finished read that found none says 0.
+  const captured = typeof unc.tables_captured === "number"
+    ? (unc.tables_captured === 0 && schema.state !== "succeeded" ? "first read pending" : tablesWord(unc.tables_captured)) : "";
   const sch = bl.schedule || null;
   const run = sch && sch.last_run;
   const fb = sch && sch.last_fallback;
@@ -1913,7 +1984,7 @@ function flowSection(model, ctx) {
       node.append(el("span", { class: "flow-label", text: String(p.title || "") }));
       node.append(el("span", { class: "flow-line", "aria-hidden": "true" }));
       const val = el("div", { class: "flow-val" });
-      if (p.big) val.append(el("div", { class: "flow-big", text: p.big, title: p.stamp ? utcLocalTitle(p.stamp) || null : null }));
+      if (p.big) val.append(el("div", { class: "flow-big", text: p.big, title: p.stamp ? utcLocalTitle(p.stamp) || null : null, "data-stamp": p.stamp || null }));
       if (p.link) {
         val.append(el("a", { class: "flow-link", href: "/" + p.link, text: p.line + " ›",
           onclick: (e) => { e.preventDefault(); navigate(p.link); } }));
@@ -2455,6 +2526,7 @@ function watchOverview(f, live, firstRun) {
   const tick = () => {
     if (!on()) return;
     if (document.hidden) { arm(OV_HIDDEN_MS); return; }
+    ovTickAges(f.flowSlot);
     pull();
   };
   me.wake = () => {
