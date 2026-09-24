@@ -110,8 +110,8 @@ console.log(JSON.stringify(out));
 		contains []string
 		absent   []string
 	}{
-		"noStore":        {"ok", []string{"✓ ok · 5 ms · MySQL 8.0.36"}, []string{"S3"}},
-		"s3ok":           {"ok", []string{"✓ ok · 5 ms", "✓ S3 arch · 12 ms", "✓ S3 bk · 3 ms"}, nil},
+		"noStore":        {"ok", []string{"✓ index ok · 5 ms · MySQL 8.0.36"}, []string{"S3"}},
+		"s3ok":           {"ok", []string{"✓ index ok · 5 ms", "✓ S3 arch · 12 ms", "✓ S3 bk · 3 ms"}, nil},
 		"s3fail":         {"err", []string{"✓ S3 arch · 12 ms", "✗ S3 bk: Forbidden"}, nil},
 		"needsSecret":    {"pending", []string{"○ S3 arch: type the S3 secret key to test these keys"}, []string{"✗"}},
 		"noLocation":     {"err", []string{"✗ S3 store: no Archive to S3"}, nil},

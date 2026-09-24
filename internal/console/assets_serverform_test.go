@@ -215,9 +215,20 @@ func TestServerThatWillNotStreamIsMarked(t *testing.T) {
 	if chip < 0 {
 		t.Fatal("serverRow carries no mark for a source-less entry")
 	}
+	// The gate is one named condition (noSource), shared since #1856 with the
+	// Test result's note on the status slot, so the mark and the note cannot
+	// disagree about which rows have no source.
 	chipLine := row[strings.LastIndex(row[:chip], "\n")+1 : chip]
+	if !strings.Contains(chipLine, "if (noSource)") {
+		t.Errorf("the NO SOURCE mark is not gated on noSource: %q", chipLine)
+	}
+	gate := strings.Index(row, "const noSource = ")
+	if gate < 0 {
+		t.Fatal("serverRow no longer names the no-source condition")
+	}
+	gateLine := row[gate : strings.Index(row[gate:], "\n")+gate]
 	for _, operand := range []string{`s.kind !== "ephemeral"`, "capsKnown", "capsCache.monitor", "!s.has_source"} {
-		if !strings.Contains(chipLine, operand) {
+		if !strings.Contains(gateLine, operand) {
 			t.Errorf("the NO SOURCE mark is not gated on %s: it would show where its remedy is impossible or false", operand)
 		}
 	}
