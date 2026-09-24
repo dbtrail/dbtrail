@@ -1336,6 +1336,20 @@ func (s *baselineSupervisor) foldSnapshot(req refreshRequest, at time.Time, tabl
 // still folding is a data race on this variable.
 var foldTables = reconstruct.ReconstructTablesDetailed
 
+// uploadAndInvalidate is baseline.Upload followed by dropping the cached
+// directory listing of the source the snapshot went to (#1847): the console
+// reads the bucket through reconstruct's inventory, which otherwise learns
+// of a new directory within its TTL, and the snapshot this daemon just
+// wrote must be on the Snapshots page, in the coverage card and under the
+// scheduler's next fold at once. Invalidated on failure too: a partial
+// upload left a directory with its _INCOMPLETE marker, and the listing
+// should see that as well.
+func uploadAndInvalidate(ctx context.Context, outputDir, s3URL, region string, retry bool) (int, error) {
+	n, err := baseline.Upload(ctx, outputDir, s3URL, region, retry)
+	reconstruct.InvalidateS3Inventory(s3URL)
+	return n, err
+}
+
 // newestSnapshotTables and uploadSnapshot are indirected for the same reason
 // foldTables is, and carry the same rule about when a test may restore them:
 // since #1539 both address the server's S3 destination on an S3-backed server,
@@ -1343,7 +1357,7 @@ var foldTables = reconstruct.ReconstructTablesDetailed
 // offline-safe.
 var (
 	newestSnapshotTables = reconstruct.NewestSnapshot
-	uploadSnapshot       = baseline.Upload
+	uploadSnapshot       = uploadAndInvalidate
 	// listBaselines feeds resolveFoldSource; it addresses the bucket on an
 	// S3-backed server, same rule as the two above.
 	listBaselines = reconstruct.ListBaselines
