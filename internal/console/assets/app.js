@@ -1715,6 +1715,24 @@ function ovFlowModel(inp) {
       capture = piece("binlog", "warn", "state could not be read", "");
     } else if (fresh === "none") {
       capture = piece("binlog", "none", "not capturing from here", "");
+      // Three causes wear this label, and two have a fix from this page
+      // (#1853): a server with no source database, and the daemon's own
+      // index entry, which is not a server. A read-only console (no
+      // daemon) is the third, and the DBTrail box already says what to
+      // run. The arrow keeps naming the state; the link names the fix.
+      if (srv && monitorCap && srv.kind === "registry" && !srv.has_source) {
+        if (may("servers:write")) capture.action = { label: "Add the source", run: "add-source" };
+        cards.push({ kind: "capture-no-source", key: sid + "|no-source", tone: "none",
+          title: "This server has no database to capture from",
+          lines: ["Add its connection and DBTrail starts reading its changes."],
+          actions: [{ label: "Add the source", primary: true, run: "add-source" }] });
+      } else if (srv && monitorCap && srv.kind !== "registry") {
+        if (may("servers:write")) capture.action = { label: "Add a server", run: "add-server" };
+        cards.push({ kind: "capture-boot-index", key: sid + "|boot-index", tone: "none",
+          title: "This is the daemon's own index, not a monitored server",
+          lines: ["Add the database you want to protect."],
+          actions: [{ label: "Add a server", primary: true, run: "add-server" }] });
+      }
     } else {
       capture = piece("binlog", "none", "no data yet", "");
     }
@@ -1768,6 +1786,10 @@ function ovFlowModel(inp) {
   const nextAt = sch && sch.runnable && sch.next_run ? flowHHMM(sch.next_run) : "";
   const ageMin = snap && typeof snap.age_hours === "number" ? snap.age_hours * 60 : -1;
   let update = piece(everyLabel || "no schedule set", "none", "", "");
+  // No schedule and nothing else moving the copy: the fix is one page away
+  // (#1853). Only for a server the schedule can be set on, where this
+  // console can run one, and for a session that may set it.
+  if (srv && !sch && !bl.refresh && !blUnknown && monitorCap && may("settings:write")) update.action = { label: "Set a schedule", run: "schedule" };
   if (snap) {
     update.big = ageMin >= 0 ? plainDuration(ageMin * 60) + " ago" : "";
     update.sub = (snapAt ? "copy from " + snapAt : "") + (nextAt ? (snapAt ? " · " : "") + "next " + nextAt : "");
@@ -1865,6 +1887,10 @@ function flowSection(model, ctx) {
           onclick: (e) => { e.preventDefault(); navigate(p.link); } }));
       } else if (p.line) val.append(el("div", { class: "flow-state" }, el("span", { class: "health-dot " + (p.tone || "none") }), " " + p.line));
       if (p.sub) val.append(el("div", { class: "flow-sub", text: p.sub }));
+      if (p.action) {
+        val.append(el("a", { class: "flow-link flow-fix", href: "#", text: p.action.label + " ›",
+          onclick: (e) => { e.preventDefault(); runFlowAction(p.action.run, ctx); } }));
+      }
       node.append(val);
     } else {
       const head = el("div", { class: "flow-box-head" });
@@ -1897,6 +1923,16 @@ function flowSection(model, ctx) {
   return sec;
 }
 
+// runFlowAction is the fix an arrow link or a card button names (#1853):
+// the server form for the selected server (its source is missing), the add
+// form (the selected entry is the daemon's own index), or the Snapshots
+// setup (no schedule). One place, so the link and the button cannot drift.
+function runFlowAction(run, ctx) {
+  if (run === "add-source") { openServersModal(); editServer(ctx.serverId); return; }
+  if (run === "add-server") { openServersModal(); showServerForm(null); return; }
+  if (run === "schedule") { navigate("snapshots#setup"); return; }
+}
+
 // flowCard is one decision: what happened, what it costs, and buttons with a
 // verb each. The expensive option is never the primary button; every button
 // closes the card.
@@ -1916,6 +1952,7 @@ function flowCard(card, ctx, close) {
   (card.actions || []).forEach((a) => {
     if (a.run === "start" && !(ctx.registry && ctx.monitorCap)) return;
     if (a.run === "read" && !(ctx.registry && ctx.monitorCap && sessionMay(PERM_SNAPSHOT_CREATE))) return;
+    if ((a.run === "add-source" || a.run === "add-server") && !(ctx.monitorCap && sessionMay("servers:write"))) return;
     const b = el("button", { class: "btn btn-sm" + (a.primary ? " btn-primary" : " btn-ghost"), type: "button", text: a.label });
     b.onclick = () => {
       // A guarded action needs a real yes; where confirm is missing the
@@ -1923,6 +1960,7 @@ function flowCard(card, ctx, close) {
       if (a.confirm && !(typeof window.confirm === "function" && window.confirm(a.confirm))) return;
       if (a.run === "status") { navigate("status"); return; }
       if (a.run === "start") { startMonitorRow(ctx.serverId); close(); return; }
+      if (a.run === "add-source" || a.run === "add-server") { runFlowAction(a.run, ctx); close(); return; }
       if (a.run === "read") {
         // The card stays until the next repaint says what the read did:
         // closing it here would hide the decision when the POST fails
