@@ -5173,9 +5173,15 @@ try {
       // The setup half returns nodes since #1573 (it is a section of
       // Snapshots, not a page of its own), so they are collected into a
       // holder — nothing on the live page is touched at all now.
+      // The block draws the SELECTED server only (round 3), so the fixture
+      // server has to be the selected one for its case to render.
       const holder = document.createElement("div");
-      snapshotSetupSections({ daemon: [], servers: [{ id: "x", name: "x", source: "none" }], registry_read_only: false })
-        .forEach((n) => holder.append(n));
+      const keepSel = currentServer;
+      currentServer = "x";
+      try {
+        snapshotSetupSections({ daemon: [], servers: [{ id: "x", name: "x", source: "none" }], registry_read_only: false })
+          .forEach((n) => holder.append(n));
+      } finally { currentServer = keepSel; }
       serve = { sections: holder.querySelectorAll(".bks-sect").length, boot: !!holder.querySelector(".bks-boot"),
         sub: (holder.querySelector(".page-sub") || {}).textContent || "", current: (holder.querySelector(".bl-case.is-current") || {}).dataset };
     } finally { capsCache.monitor = keep.monitor; }
