@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -30,12 +31,13 @@ for (const [name, c] of Object.entries(cases)) {
   const m = model(inp);
   const sec = paint(inp, c.pctx);
   out[name] = {
-    pieces: m.pieces.map((p) => ({ title: p.title, tone: p.tone, line: p.line, sub: p.sub, big: p.big || "" })),
+    pieces: m.pieces.map((p) => ({ title: p.title, tone: p.tone, line: p.line, sub: p.sub, big: p.big || "", action: p.action ? p.action.label : "" })),
     cards: m.cards.map((k) => ({ kind: k.kind, title: k.title, lines: k.lines, actions: k.actions.map((a) => a.label) })),
     cut: m.cut ? m.cut.piece + "@" + m.cut.at : "",
     screen: text(sec),
     okClasses: find(sec, "ok").length,
     buttons: find(sec, "btn").map(text),
+    fixLinks: find(sec, "flow-fix").map(text),
     cardOnScreen: find(sec, "flow-card").length,
   };
 }
@@ -43,7 +45,7 @@ process.stdout.write(JSON.stringify(out));
 `
 
 type flowPiece struct {
-	Title, Tone, Line, Sub, Big string
+	Title, Tone, Line, Sub, Big, Action string
 }
 type flowCardOut struct {
 	Kind    string
@@ -58,6 +60,7 @@ type flowOut struct {
 	Screen       string
 	OkClasses    int
 	Buttons      []string
+	FixLinks     []string
 	CardOnScreen int
 }
 
@@ -103,7 +106,7 @@ func TestOverviewFlowModel(t *testing.T) {
 			"schema":    c{"state": "idle"}, "uncaptured": c{"tables_captured": 47}}},
 		// C9: stalled by the supervisor: recipe, no Start.
 		"stalled-monitor": {"input": c{
-			"coverage": c{"freshness": "current", "continuity": "ok", "delta_to": "2026-09-23 14:02:10"},
+			"coverage":  c{"freshness": "current", "continuity": "ok", "delta_to": "2026-09-23 14:02:10"},
 			"baselines": c{}, "server": c{"id": "a", "kind": "registry", "has_source": true, "monitor_state": "stalled"},
 			"schema": c{"state": "idle"}, "uncaptured": c{}}},
 		// C10: stopped on purpose: neutral, with Start.
@@ -115,21 +118,21 @@ func TestOverviewFlowModel(t *testing.T) {
 		"unknown": {"input": c{"coverage": c{"freshness": "unknown"}, "baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched}, "server": nil, "schema": c{"unavailable": true}, "uncaptured": c{}}},
 		// U8: a schema change refused the update and the fallback has not succeeded: the decision card.
 		"fold-refused": {"input": c{
-			"coverage":  c{"freshness": "current", "continuity": "ok", "lag_seconds": 5, "delta_to": "2026-09-23 14:58:52"},
+			"coverage": c{"freshness": "current", "continuity": "ok", "lag_seconds": 5, "delta_to": "2026-09-23 14:58:52"},
 			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": c{"every": "5m", "runnable": true, "next_run": "2026-09-23T15:00:00Z",
 				"last_fallback": c{"at": "2026-09-23T14:35:00Z", "reason": "x"},
 				"last_run":      c{"method": "dump", "why": "fold refused: (table shop.orders: column note added)", "why_code": "fold_refused", "ok": false, "started_at": "2026-09-23T14:35:00Z", "error": "boom"}}},
 			"server": registry, "schema": c{"state": "idle"}, "uncaptured": c{"tables_captured": 47}}},
 		// U9: without query:execute the reason text stays off the page.
 		"fold-refused-noperm": {"deny": []string{"query:execute"}, "input": c{
-			"coverage":  c{"freshness": "current", "continuity": "ok", "delta_to": "2026-09-23 14:58:52"},
+			"coverage": c{"freshness": "current", "continuity": "ok", "delta_to": "2026-09-23 14:58:52"},
 			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": c{"every": "5m", "runnable": true,
 				"last_fallback": c{"at": "2026-09-23T14:35:00Z", "reason": "x"},
 				"last_run":      c{"method": "dump", "why": "fold refused: (table shop.orders: column note added)", "why_code": "fold_refused", "ok": false, "started_at": "2026-09-23T14:35:00Z"}}},
 			"server": registry, "schema": c{"state": "idle"}, "uncaptured": c{}}},
 		// T7: the fallback full read already succeeded: amber note, no card.
 		"fold-refused-recovered": {"input": c{
-			"coverage":  c{"freshness": "current", "continuity": "ok", "delta_to": "2026-09-23 14:58:52"},
+			"coverage": c{"freshness": "current", "continuity": "ok", "delta_to": "2026-09-23 14:58:52"},
 			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": c{"every": "5m", "runnable": true,
 				"last_fallback": c{"at": "2026-09-23T14:35:00Z", "reason": "x"},
 				"last_run":      c{"method": "dump", "why": "fold refused: (x)", "why_code": "fold_refused", "ok": true, "finished_at": "2026-09-23T14:41:00Z"}}},
@@ -163,9 +166,16 @@ func TestOverviewFlowModel(t *testing.T) {
 		// A 500 on the schema snapshot is a failure; a 403 is "not from here".
 		"schema-500": {"input": c{"coverage": c{}, "baselines": c{}, "server": registry, "schema": c{"unavailable": true, "status": 500}, "uncaptured": c{}}},
 		"schema-403": {"input": c{"coverage": c{}, "baselines": c{}, "server": registry, "schema": c{"unavailable": true, "status": 403}, "uncaptured": c{}}},
+		// #1853: the two "not capturing from here" causes with a fix from here, and
+		// the one without; and "no schedule set" naming its fix.
+		"no-source":          {"input": c{"coverage": c{"freshness": "none"}, "baselines": c{}, "server": c{"id": "a", "kind": "registry", "has_source": false}, "schema": c{"unavailable": true, "status": 403}, "uncaptured": c{}}},
+		"boot-index":         {"input": c{"coverage": c{"freshness": "none"}, "baselines": c{}, "server": c{"id": "default", "kind": "cli"}, "schema": c{"unavailable": true, "status": 403}, "uncaptured": c{}}},
+		"no-source-serve":    {"input": c{"coverage": c{"freshness": "none"}, "baselines": c{}, "server": c{"id": "a", "kind": "registry", "has_source": false}, "schema": c{"unavailable": true}, "uncaptured": c{}, "monitorCap": false}, "pctx": c{"serverId": "a", "registry": false, "monitorCap": false}},
+		"boot-index-serve":   {"input": c{"coverage": c{"freshness": "none"}, "baselines": c{}, "server": c{"id": "default", "kind": "cli"}, "schema": c{"unavailable": true}, "uncaptured": c{}, "monitorCap": false}, "pctx": c{"serverId": "default", "registry": false, "monitorCap": false}},
+		"no-source-readonly": {"deny": []string{"servers:write", "settings:write"}, "input": c{"coverage": c{"freshness": "none"}, "baselines": c{}, "server": c{"id": "a", "kind": "registry", "has_source": false}, "schema": c{"unavailable": true, "status": 403}, "uncaptured": c{}}},
 		// K4: no buttons for a session that may not read the database, or on a serve.
 		"fold-refused-noperm-create": {"deny": []string{"baseline:create"}, "input": c{
-			"coverage":  c{"freshness": "current", "delta_to": "2026-09-23 14:58:52"},
+			"coverage": c{"freshness": "current", "delta_to": "2026-09-23 14:58:52"},
 			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": c{"every": "5m", "runnable": true,
 				"last_fallback": c{"at": "2026-09-23T14:35:00Z", "reason": "x"},
 				"last_run":      c{"why": "fold refused: (x)", "why_code": "fold_refused", "ok": false, "started_at": "2026-09-23T14:35:00Z"}}},
@@ -414,6 +424,38 @@ const origPaint = paint;`, 1)
 	if hasLabel(nc.Buttons, "Read database now") || !hasLabel(nc.Buttons, "Wait for the scheduled read at 15:00") == false && len(nc.Buttons) == 0 {
 		t.Errorf("fold-refused-noperm-create: buttons %v (no Read for a session without baseline:create)", nc.Buttons)
 	}
+	// #1853: the fix is named where there is one, and only there.
+	nosrc := get("no-source")
+	if nosrc.Pieces[capture].Line != "not capturing from here" || nosrc.Pieces[capture].Action != "Add the source" {
+		t.Errorf("no-source: capture = %+v, want the state and the 'Add the source' link", nosrc.Pieces[capture])
+	}
+	if len(nosrc.Cards) != 1 || nosrc.Cards[0].Kind != "capture-no-source" || !reflect.DeepEqual(nosrc.Buttons, []string{"Add the source"}) || !reflect.DeepEqual(nosrc.FixLinks, []string{"Add the source ›", "Set a schedule ›"}) {
+		t.Errorf("no-source: cards=%+v buttons=%v links=%v", nosrc.Cards, nosrc.Buttons, nosrc.FixLinks)
+	}
+	if nosrc.Pieces[update].Title != "no schedule set" || nosrc.Pieces[update].Action != "Set a schedule" {
+		t.Errorf("no-source: update = %+v, want 'no schedule set' with the 'Set a schedule' link", nosrc.Pieces[update])
+	}
+	boot := get("boot-index")
+	if boot.Pieces[capture].Action != "Add a server" || len(boot.Cards) != 1 || boot.Cards[0].Kind != "capture-boot-index" || !reflect.DeepEqual(boot.Buttons, []string{"Add a server"}) {
+		t.Errorf("boot-index: capture=%+v cards=%+v buttons=%v", boot.Pieces[capture], boot.Cards, boot.Buttons)
+	}
+	serve := get("no-source-serve")
+	if serve.Pieces[capture].Action != "" || len(serve.Cards) != 0 || len(serve.FixLinks) != 0 || serve.Pieces[update].Action != "" {
+		t.Errorf("no-source-serve: a read-only console names no fix: capture=%+v cards=%d links=%v update=%+v", serve.Pieces[capture], len(serve.Cards), serve.FixLinks, serve.Pieces[update])
+	}
+	if bs := get("boot-index-serve"); bs.Pieces[capture].Action != "" || len(bs.Cards) != 0 || len(bs.FixLinks) != 0 {
+		t.Errorf("boot-index-serve: a read-only console names no fix: capture=%+v cards=%d links=%v", bs.Pieces[capture], len(bs.Cards), bs.FixLinks)
+	}
+	ronly := get("no-source-readonly")
+	if ronly.Pieces[capture].Action != "" || ronly.Pieces[update].Action != "" || len(ronly.FixLinks) != 0 || len(ronly.Buttons) != 0 || len(ronly.Cards) != 1 {
+		t.Errorf("no-source-readonly: a session without the permission gets the card's words and no link or button: capture=%+v update=%+v links=%v buttons=%v cards=%d", ronly.Pieces[capture], ronly.Pieces[update], ronly.FixLinks, ronly.Buttons, len(ronly.Cards))
+	}
+	// The healthy strip and the no-schedule case on a server list that did not
+	// answer name no fix: nothing to add, and no server to add it to.
+	if h.Pieces[capture].Action != "" || h.Pieces[update].Action != "" || get("empty").Pieces[update].Action != "" {
+		t.Errorf("healthy/empty: unexpected fix link: %+v %+v %+v", h.Pieces[capture], h.Pieces[update], get("empty").Pieces[update])
+	}
+
 }
 
 func hasLabel(xs []string, s string) bool {
@@ -423,4 +465,5 @@ func hasLabel(xs []string, s string) bool {
 		}
 	}
 	return false
+
 }
