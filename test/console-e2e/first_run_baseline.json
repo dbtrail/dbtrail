@@ -1,24 +1,24 @@
 {
   "schema": 1,
-  "measured_at_commit": "0c9dd00d",
+  "measured_at_commit": "6ce95500",
   "platform": "darwin/153.0.8010.12",
   "viewport": "1280x720",
   "runs": {
     "clean": {
-      "clicks_to_first_snapshot": 10,
-      "clicks_to_first_snapshot_minimum": 8,
-      "fields_typed": 8,
+      "clicks_to_first_snapshot": 11,
+      "clicks_to_first_snapshot_minimum": 9,
+      "fields_typed": 7,
       "forced_choices": 0,
       "trips_out_of_browser": 1,
-      "words_per_step_max": 146,
-      "words_per_error_max": 71,
-      "banned_words": 59,
-      "yellow_red": 4,
+      "words_per_step_max": 151,
+      "words_per_error_max": "not measurable",
+      "banned_words": 18,
+      "yellow_red": 1,
       "changes_visible_without_reload": 3,
       "changes_visible_within_5s": 0,
-      "primary_below_fold_px": 638,
+      "primary_below_fold_px": 771,
       "final_window_matches_retention": "not measurable",
-      "copied_differs_from_shown": 1
+      "copied_differs_from_shown": 0
     },
     "reload-mid-connect": {
       "connect_fields_kept_after_reload": 3
@@ -28,20 +28,20 @@
       "fields_typed": 5,
       "forced_choices": 0,
       "trips_out_of_browser": 1,
-      "words_per_step_max": 127,
-      "banned_words": 21,
-      "yellow_red": 6,
-      "primary_below_fold_px": 606
+      "words_per_step_max": 92,
+      "banned_words": 10,
+      "yellow_red": 3,
+      "primary_below_fold_px": 258
     },
     "no-primary-key": {
       "clicks_to_capture": 8,
       "fields_typed": 5,
       "forced_choices": 0,
       "trips_out_of_browser": 2,
-      "words_per_step_max": 127,
-      "words_per_error_max": 199,
-      "banned_words": 21,
-      "primary_below_fold_px": 671
+      "words_per_step_max": 93,
+      "words_per_error_max": 46,
+      "banned_words": 10,
+      "primary_below_fold_px": 356
     },
     "refused-update": {
       "renewal_sentence_with_gate_open": "not measurable",
@@ -57,11 +57,12 @@
           "Check and connect",
           "OK",
           "close the Servers dialog (✕)",
+          "Recent changes",
           "Undo (optional)",
           "Snapshots (sidebar) (optional)",
           "Save (the snapshot location)",
           "Snapshots (sidebar)",
-          "Create backup"
+          "Read database now"
         ]
       },
       "fields_typed": {
@@ -71,7 +72,6 @@
           "connect: name",
           "connect: host",
           "connect: port",
-          "connect: user",
           "connect: password",
           "snapshot-location: snapshot folder"
         ]
@@ -85,7 +85,7 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "first-snapshot",
+        "worst": "undo",
         "steps": [
           {
             "step": "sign-in",
@@ -97,116 +97,99 @@
           {
             "step": "after-sign-in",
             "kind": "step",
-            "words_above_fold": 112,
-            "words_whole": 135,
+            "words_above_fold": 27,
+            "words_whole": 50,
             "layer": "view"
           },
           {
             "step": "connect",
             "kind": "step",
-            "words_above_fold": 113,
-            "words_whole": 495,
+            "words_above_fold": 82,
+            "words_whole": 260,
             "layer": "modal"
-          },
-          {
-            "step": "test-result",
-            "kind": "step",
-            "words_above_fold": 136,
-            "words_whole": 659,
-            "layer": "notice"
           },
           {
             "step": "save-result",
             "kind": "step",
-            "words_above_fold": 127,
-            "words_whole": 657,
+            "words_above_fold": 18,
+            "words_whole": 123,
             "layer": "notice"
           },
           {
             "step": "after-ok",
             "kind": "step",
-            "words_above_fold": 134,
-            "words_whole": 502,
+            "words_above_fold": 55,
+            "words_whole": 105,
             "layer": "modal"
           },
           {
             "step": "first-change-waiting",
             "kind": "step",
-            "words_above_fold": 141,
-            "words_whole": 218,
+            "words_above_fold": 92,
+            "words_whole": 92,
             "layer": "view"
           },
           {
             "step": "changes",
             "kind": "step",
-            "words_above_fold": 119,
-            "words_whole": 204,
+            "words_above_fold": 81,
+            "words_whole": 81,
             "layer": "view"
           },
           {
             "step": "undo",
             "kind": "step",
-            "words_above_fold": 49,
+            "words_above_fold": 151,
             "words_whole": 248,
             "layer": "view"
           },
           {
             "step": "snapshot-list-first-look",
             "kind": "step",
-            "words_above_fold": 143,
-            "words_whole": 523,
+            "words_above_fold": 72,
+            "words_whole": 203,
             "layer": "view"
           },
           {
             "step": "snapshot-location",
             "kind": "step",
-            "words_above_fold": 143,
-            "words_whole": 523,
+            "words_above_fold": 72,
+            "words_whole": 203,
             "layer": "view"
           },
           {
             "step": "snapshot-location-saved",
             "kind": "step",
-            "words_above_fold": 70,
-            "words_whole": 354,
-            "layer": "view"
-          },
-          {
-            "step": "snapshot-folder-missing",
-            "kind": "error",
-            "words_above_fold": 70,
-            "words_whole": 354,
+            "words_above_fold": 112,
+            "words_whole": 203,
             "layer": "view"
           },
           {
             "step": "snapshot-ready",
             "kind": "step",
-            "words_above_fold": 126,
-            "words_whole": 474,
+            "words_above_fold": 60,
+            "words_whole": 203,
             "layer": "view"
           },
           {
             "step": "first-snapshot",
             "kind": "step",
-            "words_above_fold": 146,
-            "words_whole": 610,
+            "words_above_fold": 61,
+            "words_whole": 192,
             "layer": "view"
           }
         ]
       },
-      "words_per_error_max": {
-        "worst": "snapshot-folder-missing"
-      },
+      "words_per_error_max": "no error screen in this run: the snapshot could be taken without creating the folder first",
       "banned_words": {
         "per_word": {
-          "backup": 26,
-          "baseline": 5,
-          "daemon": 2,
-          "em dash": 3,
-          "index": 12,
+          "baseline": 2,
+          "daemon": 1,
+          "em dash": 1,
+          "index": 4,
           "monitor": 3,
           "protect": 2,
-          "source": 4,
+          "source": 3,
           "stream": 1,
           "watch": 1
         },
@@ -214,35 +197,32 @@
       },
       "yellow_red": {
         "elements": [
-          "save-result: .notice.warn \"Capture started Check these when you can: ! Statement capture (query_text): b...\"",
-          "save-result: .doctor-card.warn \"! Statement capture (query_text): binlog_rows_query_log_events=OFF — events i...\"",
-          "save-result: .doctor-card.warn \"! Schema-drift detection (binlog_row_metadata): binlog_row_metadata=MINIMAL —...\"",
           "after-ok: .chip-mon \"PENDING\""
         ]
       },
       "changes_visible_without_reload": {
         "changes": [
-          "INSERT: seen after 9.4 s",
-          "UPDATE: seen after 9.7 s",
-          "DELETE: seen after 7.6 s"
+          "INSERT: seen after 9.2 s",
+          "UPDATE: seen after 9.9 s",
+          "DELETE: seen after 7.9 s"
         ]
       },
       "primary_below_fold_px": {
-        "worst": "connect",
+        "worst": "snapshot-location",
         "steps": [
           "sign-in: 0 px (Create & sign in)",
           "after-sign-in: 0 px (+ Add server)",
-          "connect: 638 px (Save)",
-          "test-result: 0 px (Back to the form)",
+          "connect: 302 px (Check and connect)",
           "save-result: 0 px (OK)",
-          "snapshot-location: 565 px (Save (the snapshot location))",
-          "snapshot-ready: 0 px (Create backup)"
+          "snapshot-location: 771 px (Save (the snapshot location))",
+          "snapshot-ready: 0 px (Read database now)"
         ]
       },
       "final_window_matches_retention": "the final screen states no retention (no \"Changes are kept N days\" sentence)",
       "copied_differs_from_shown": {
         "blocks": [
-          "connect: permissions block: the block sets the password 'strong-password', the Password field holds nothing",
+          "connect: permissions block: matches",
+          "connect: Copy button: matches",
           "undo: Copy button: matches"
         ]
       }
@@ -257,7 +237,7 @@
         "clicks": [
           "Manage servers",
           "+ Add server",
-          "Save",
+          "Check and connect",
           "OK",
           "close the Servers dialog (✕)",
           "choose shop-db-2 in the server selector"
@@ -281,47 +261,45 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "save-result",
+        "worst": "overview",
         "steps": [
           {
             "step": "connect",
             "kind": "step",
             "words_above_fold": 84,
-            "words_whole": 366,
+            "words_whole": 278,
             "layer": "modal"
           },
           {
             "step": "save-result",
             "kind": "step",
-            "words_above_fold": 127,
-            "words_whole": 373,
+            "words_above_fold": 18,
+            "words_whole": 148,
             "layer": "notice"
           },
           {
             "step": "after-ok",
             "kind": "step",
             "words_above_fold": 64,
-            "words_whole": 218,
+            "words_whole": 130,
             "layer": "modal"
           },
           {
             "step": "overview",
             "kind": "step",
-            "words_above_fold": 116,
-            "words_whole": 186,
+            "words_above_fold": 92,
+            "words_whole": 92,
             "layer": "view"
           }
         ]
       },
       "banned_words": {
         "per_word": {
-          "backup": 1,
           "daemon": 1,
-          "em dash": 3,
-          "index": 7,
+          "index": 1,
           "monitor": 3,
           "protect": 1,
-          "source": 2,
+          "source": 1,
           "stream": 1,
           "watch": 2
         },
@@ -330,9 +308,6 @@
       "yellow_red": {
         "elements": [
           "connect: .chip-mon \"RUNNING\"",
-          "save-result: .notice.warn \"Capture started Check these when you can: ! Statement capture (query_text): b...\"",
-          "save-result: .doctor-card.warn \"! Statement capture (query_text): binlog_rows_query_log_events=OFF — events i...\"",
-          "save-result: .doctor-card.warn \"! Schema-drift detection (binlog_row_metadata): binlog_row_metadata=MINIMAL —...\"",
           "after-ok: .chip-mon \"RUNNING\"",
           "after-ok: .chip-mon \"PENDING\""
         ]
@@ -340,7 +315,7 @@
       "primary_below_fold_px": {
         "worst": "connect",
         "steps": [
-          "connect: 606 px (Save)",
+          "connect: 258 px (Check and connect)",
           "save-result: 0 px (OK)"
         ]
       }
@@ -350,9 +325,9 @@
         "clicks": [
           "Manage servers",
           "+ Add server",
-          "Save",
+          "Check and connect",
           "Back to the form",
-          "Save",
+          "Check and connect",
           "OK",
           "close the Servers dialog (✕)",
           "choose shop-audit in the server selector"
@@ -377,41 +352,41 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "save-result",
+        "worst": "connect",
         "steps": [
           {
             "step": "connect",
             "kind": "step",
             "words_above_fold": 93,
-            "words_whole": 409,
+            "words_whole": 313,
             "layer": "modal"
           },
           {
             "step": "save-refused",
             "kind": "error",
-            "words_above_fold": 43,
-            "words_whole": 475,
+            "words_above_fold": 46,
+            "words_whole": 382,
             "layer": "notice"
           },
           {
             "step": "save-result",
             "kind": "step",
-            "words_above_fold": 127,
-            "words_whole": 416,
+            "words_above_fold": 18,
+            "words_whole": 183,
             "layer": "notice"
           },
           {
             "step": "after-ok",
             "kind": "step",
             "words_above_fold": 73,
-            "words_whole": 261,
+            "words_whole": 165,
             "layer": "modal"
           },
           {
             "step": "overview",
             "kind": "step",
-            "words_above_fold": 116,
-            "words_whole": 186,
+            "words_above_fold": 92,
+            "words_whole": 92,
             "layer": "view"
           }
         ]
@@ -421,13 +396,11 @@
       },
       "banned_words": {
         "per_word": {
-          "backup": 1,
           "daemon": 1,
-          "em dash": 3,
-          "index": 7,
+          "index": 1,
           "monitor": 3,
           "protect": 1,
-          "source": 2,
+          "source": 1,
           "stream": 1,
           "watch": 2
         },
@@ -436,7 +409,7 @@
       "primary_below_fold_px": {
         "worst": "connect",
         "steps": [
-          "connect: 671 px (Save)",
+          "connect: 356 px (Check and connect)",
           "save-refused: 0 px (Back to the form)",
           "save-result: 0 px (OK)"
         ]

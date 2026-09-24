@@ -3835,10 +3835,12 @@ try {
   //  2. Re-declaring the `transition` SHORTHAND on `.nav-item .ni-icon` reset
   //     transition-property to `transform` alone, so the icon colour snapped.
   await page.evaluate(() => navigate("overview"));
-  // The tiles live under the closed "Restore window and figures" fold since
-  // the flow took the top of the page; hover needs them visible.
-  await page.waitForSelector(".ov-fold", { timeout: 10000 });
-  await page.evaluate(() => { document.querySelector(".ov-fold").open = true; });
+  // The tiles live under the closed "Restore window and figures" fold
+  // since the flow took the top of the page; hover needs them visible. That
+  // fold is no longer the first one (Recent changes folds above it, #1860),
+  // so it is named by its own class.
+  await page.waitForSelector(".ov-fold-figures", { timeout: 10000 });
+  await page.evaluate(() => { document.querySelector(".ov-fold-figures").open = true; });
   await page.waitForSelector(".ov-stat", { timeout: 10000 });
   // Let the entrance finish first: a RUNNING animation outranks the author rule
   // too, so hovering early measures the animation rather than the bug.

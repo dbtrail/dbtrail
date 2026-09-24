@@ -1463,7 +1463,7 @@ function ovFrame() {
   f.tablesFold.append(f.tablesSummary, f.tablesPanel);
   v.append(f.tablesFold);
 
-  const fold = el("details", { class: "ov-fold" });
+  const fold = el("details", { class: "ov-fold ov-fold-figures" });
   fold.append(el("summary", { text: "Restore window and figures" }));
   fold.append(f.covSlot, f.uncapSlot, stats, f.sideSlot, f.warnSlot);
   v.append(fold);
