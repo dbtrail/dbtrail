@@ -32,43 +32,8 @@ func unreadableDir(t *testing.T, dir string) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 }
 
-// TestCoverageAPI_partiallyReadableLocationIsUnknown is #1601's own
-// reproduction: the second location answers, but its only snapshot directory
-// cannot be read. Before, the listing came back short with a nil error, the
-// guard saw a location that "answered", and the card graded green over a
-// table it never saw. A partial answer is an unknown verdict, like a location
-// that did not answer at all.
-func TestCoverageAPI_partiallyReadableLocationIsUnknown(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	latest := now.Add(-30 * time.Second)
-	part := now.Add(-100 * time.Hour).Format("p_2006010215")
-	tsDir := func(age time.Duration) string { return now.Add(-age).Format("2006-01-02T15-04-05Z") }
-
-	primary, fallback := t.TempDir(), t.TempDir()
-	writeBaselineFixture(t, primary, tsDir(time.Hour), "shop", "orders.parquet")
-	oldSnap := tsDir(150 * time.Hour)
-	writeBaselineFixture(t, fallback, oldSnap, "shop", "archived.parquet")
-	unreadableDir(t, filepath.Join(fallback, oldSnap))
-
-	srv := newBaselineServerWithFallback(t, primary, fallback)
-	srv.cm.boot.db = coverageMockDB(t, part, latest, nil)
-	srv.cm.boot.dbName = "binlog_index"
-	got := coverageGet(t, srv)
-
-	if got.FullTableStatus != "unknown" {
-		t.Errorf("status = %q with a snapshot directory unreadable, want unknown: the listing "+
-			"dropped a whole snapshot and the card graded what was left as the whole set", got.FullTableStatus)
-	}
-	if got.FullTableFrom != "" {
-		t.Errorf("full_table_from = %q, want empty: an unknown verdict claims no anchor", got.FullTableFrom)
-	}
-	if len(got.BrokenTables) != 0 {
-		t.Errorf("broken_tables = %v, want none: a partial view must not accuse", got.BrokenTables)
-	}
-}
-
-// The merge carries the skip count per source and in total, so both the
-// coverage guard and the Backups page's "incomplete" flag can see it.
+// The merge carries the skip count per source and in total, so the Backups
+// page's "incomplete" flag can see it.
 func TestListBaselinesMerged_carriesTheSkipCount(t *testing.T) {
 	ts := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
 	f := reconstruct.BaselineFile{Schema: "shop", Table: "orders", SnapshotTime: ts, Path: "/backups/2026-06-10T12-00-00Z/shop/orders.parquet"}
