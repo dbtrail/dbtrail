@@ -93,8 +93,7 @@ func TestBackupsPanelRendersEveryLocation(t *testing.T) {
 // its endpoint REFUSES the shared daemon store, because that fold would mix
 // servers. Same field, opposite meanings. Where it READS is the other half
 // (#1541): this server's S3 backups when it has them, else that directory,
-// which is the scheduled update's rule and what the coverage card reports as
-// restore_reads, so the card narrows on cur.baseline_s3.
+// which is the scheduled update's rule, so the card narrows on cur.baseline_s3.
 func TestBackupJobCardsOfferOnlyWhatTheirJobCanRead(t *testing.T) {
 	raw, err := os.ReadFile("assets/app.js")
 	if err != nil {
