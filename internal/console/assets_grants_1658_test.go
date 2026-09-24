@@ -49,7 +49,7 @@ console.log(JSON.stringify(grantBlocks("dbtrail", "Ab3-xyzXYZ789_qq")));`
 			t.Errorf("%s: the capture grant is gone", flavor)
 		}
 		if !activeLine(b, "GRANT RELOAD") {
-			t.Errorf("%s: RELOAD is not an active grant, so the default backup mode is refused on a source set up as written", flavor)
+			t.Errorf("%s: RELOAD is not an active grant, so the default snapshot mode is refused on a source set up as written", flavor)
 		}
 		if activeLine(b, "GRANT LOCK TABLES") {
 			t.Errorf("%s: LOCK TABLES is an active line; the default mode does not accept it in place of RELOAD", flavor)
@@ -67,7 +67,7 @@ console.log(JSON.stringify(grantBlocks("dbtrail", "Ab3-xyzXYZ789_qq")));`
 			if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(l), "--")), "GRANT RELOAD") ||
 				strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(l), "--")), "GRANT LOCK TABLES") {
 				if !strings.Contains(l, "SHOW VIEW") {
-					t.Errorf("%s: backup grant without SHOW VIEW, so a schema with a view fails the backup: %q", flavor, l)
+					t.Errorf("%s: snapshot grant without SHOW VIEW, so a schema with a view fails the snapshot: %q", flavor, l)
 				}
 			}
 		}

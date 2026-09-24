@@ -34,7 +34,7 @@ func TestBackupsPageDoesNotFoldItsOwnSubject(t *testing.T) {
 	for _, fn := range []string{"backupScheduleCard", "backupRestoreCard"} {
 		span := jsFunctionSpan(t, js, fn)
 		if strings.Contains(span, `el("details"`) || strings.Contains(span, `el("summary"`) {
-			t.Errorf("%s builds a fold again; the Backups page's own subject is a card (#1528)", fn)
+			t.Errorf("%s builds a fold again; the Snapshots page's own subject is a card (#1528)", fn)
 		}
 		if !strings.Contains(span, `el("section", { class: "ov-panel`) {
 			t.Errorf("%s no longer builds a panel section, so it does not look like the cards around it", fn)
@@ -104,7 +104,7 @@ func TestBackupScheduleAlarmReachesTheStateLine(t *testing.T) {
 		// alarm were raised only there this would render grey.
 		name:      "not runnable, read-only daemon",
 		caps:      "{ backup_schedule: false }",
-		schedule:  map[string]any{"every": "1d", "at": "03:00", "runnable": false, "reason": "backup features are off on this daemon"},
+		schedule:  map[string]any{"every": "1d", "at": "03:00", "runnable": false, "reason": "snapshot features are off on this daemon"},
 		wantAlarm: true,
 		wantWords: "Cannot run:",
 	}, {
@@ -120,7 +120,7 @@ func TestBackupScheduleAlarmReachesTheStateLine(t *testing.T) {
 		name: "a slot was skipped",
 		caps: "{ backup_schedule: true }",
 		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
-			"last_skipped": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "no previous backup"}},
+			"last_skipped": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "no previous snapshot"}},
 		wantAlarm: true,
 		wantWords: "A scheduled run did not start.",
 	}, {
@@ -130,14 +130,14 @@ func TestBackupScheduleAlarmReachesTheStateLine(t *testing.T) {
 		// fallback and said a full backup had run instead, while the body
 		// said that same backup failed and nothing was written. A false
 		// all-clear, on the backups page.
-		name: "a fallback whose full backup then failed",
+		name: "a fallback whose full read then failed",
 		caps: "{ backup_schedule: true }",
 		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
 			"last_fallback": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "schema changed since the baseline"},
 			"last_run":      map[string]any{"method": "dump", "ok": false, "finished_at": "2026-09-19T03:02:00Z", "error": "mydumper: connection refused"}},
 		wantAlarm: true,
 		wantWords: "The last run failed.",
-		rejectWords: "full backup ran instead",
+		rejectWords: "full read ran instead",
 	}, {
 		// The mirror, and the reason the guard is a recency rule and not a
 		// suppression: with the fallback the newest fact it must still reach
@@ -149,44 +149,44 @@ func TestBackupScheduleAlarmReachesTheStateLine(t *testing.T) {
 			"last_run":      map[string]any{"method": "refresh", "ok": true, "finished_at": "2026-09-18T03:01:00Z", "tables": 4},
 			"last_fallback": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "the recorded changes do not reach that far back"}},
 		wantAlarm: true,
-		wantWords: "An update was refused, so a full backup ran instead.",
+		wantWords: "An update was refused, so a full read ran instead.",
 	}, {
 		// The tie, which is not a corner case: baseline_schedule_loop.go
 		// formats ONE stamp and gives it to both the fallback record and the
 		// run it starts, so a full backup that fails inside its starting
 		// second collides exactly. Two minutes apart (the row above) never
 		// exercises it.
-		name: "a fallback and its failed backup in the same second",
+		name: "a fallback and its failed snapshot in the same second",
 		caps: "{ backup_schedule: true }",
 		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
 			"last_fallback": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "schema changed since the baseline"},
 			"last_run":      map[string]any{"method": "dump", "ok": false, "started_at": "2026-09-19T03:00:00Z", "finished_at": "2026-09-19T03:00:00Z", "error": "mydumper: connection refused"}},
 		wantAlarm:   true,
 		wantWords:   "The last run failed.",
-		rejectWords: "full backup ran instead",
+		rejectWords: "full read ran instead",
 	}, {
 		// Same tie reached the other way: no finished_at, so the run is dated
 		// by started_at, which IS the fallback's stamp.
-		name: "a fallback and its failed backup, dated by started_at",
+		name: "a fallback and its failed snapshot, dated by started_at",
 		caps: "{ backup_schedule: true }",
 		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
 			"last_fallback": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "schema changed since the baseline"},
 			"last_run":      map[string]any{"method": "dump", "ok": false, "started_at": "2026-09-19T03:00:00Z", "error": "mydumper: connection refused"}},
 		wantAlarm:   true,
 		wantWords:   "The last run failed.",
-		rejectWords: "full backup ran instead",
+		rejectWords: "full read ran instead",
 	}, {
 		// The upload-failure variant of the same tie: "ran instead" would
 		// read as done and shipped, while the backup never left the machine.
-		name: "a fallback whose backup could not be sent, same second",
+		name: "a fallback whose snapshot could not be sent, same second",
 		caps: "{ backup_schedule: true }",
 		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
 			"last_fallback": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "schema changed since the baseline"},
 			"last_run": map[string]any{"method": "dump", "ok": false, "started_at": "2026-09-19T03:00:00Z", "finished_at": "2026-09-19T03:00:00Z",
 				"snapshot_time": "2026-09-19 03:00:00", "error": "s3: access denied"}},
 		wantAlarm:   true,
-		wantWords:   "The last run could not send its backup.",
-		rejectWords: "full backup ran instead",
+		wantWords:   "The last run could not send its snapshot.",
+		rejectWords: "full read ran instead",
 	}, {
 		// The three forward-looking and knowledge-gap notes, which arrived
 		// with no test of their own: each is a new user-visible string, and
@@ -194,7 +194,7 @@ func TestBackupScheduleAlarmReachesTheStateLine(t *testing.T) {
 		name: "the next run cannot start",
 		caps: "{ backup_schedule: true }",
 		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": true, "next_run": "2026-09-20T03:00:00Z",
-			"next_method_error": "the previous backup could not be read"},
+			"next_method_error": "the previous snapshot could not be read"},
 		wantAlarm: true,
 		wantWords: "The next run cannot start.",
 	}, {
@@ -216,10 +216,10 @@ func TestBackupScheduleAlarmReachesTheStateLine(t *testing.T) {
 		// so the note used to run straight on from the reason.
 		name: "a refusal and a note on the same line",
 		caps: "{ backup_schedule: true }",
-		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": false, "reason": "creating backups from the web interface is turned off on this daemon (Backup settings page)",
-			"last_skipped": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "no previous backup"}},
+		schedule: map[string]any{"every": "1d", "at": "03:00", "runnable": false, "reason": "creating snapshots from the web interface is turned off on this daemon (Snapshot settings page)",
+			"last_skipped": map[string]any{"at": "2026-09-19T03:00:00Z", "reason": "no previous snapshot"}},
 		wantAlarm: true,
-		wantWords: "(Backup settings page). A scheduled run did not start.",
+		wantWords: "(Snapshot settings page). A scheduled run did not start.",
 	}}
 
 	for _, tc := range cases {

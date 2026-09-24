@@ -78,7 +78,7 @@ const cases = {
   notApplied: { ...db, s3: [{ bucket: "arch", ok: true, not_applied: true, latency_ms: 7 }] },
   notAppliedFail: { ...db, s3: [{ bucket: "arch", ok: false, error: "Forbidden", not_applied: true, latency_ms: 7 }] },
   secretAndFail: { ...db, s3: [{ bucket: "arch", ok: false, needs_secret: true, latency_ms: 0 }, { bucket: "bk", ok: false, error: "NoSuchBucket", latency_ms: 3 }] },
-  noLocation: { ...db, s3: [{ bucket: "", ok: false, error: "no Archive to S3 or Backups S3 location to test the store with", latency_ms: 0 }] },
+  noLocation: { ...db, s3: [{ bucket: "", ok: false, error: "no Archive to S3 or Snapshots S3 location to test the store with", latency_ms: 0 }] },
   dbDown: { ok: false, error: "dial tcp: refused", latency_ms: 1, s3: [{ bucket: "arch", ok: true, latency_ms: 2 }] },
   pending: { ok: false, provision_pending: true, error: "index database \"x\" not provisioned yet", latency_ms: 1, s3: [{ bucket: "arch", ok: true, latency_ms: 2 }] },
   pendingS3fail: { ok: false, provision_pending: true, latency_ms: 1, s3: [{ bucket: "arch", ok: false, error: "NoSuchBucket", latency_ms: 2 }] },

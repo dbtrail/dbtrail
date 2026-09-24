@@ -405,7 +405,7 @@ func assertLaterRunUntouched(t *testing.T, sup *baselineSupervisor) {
 	busy := sup.busyLocked("a")
 	sup.mu.Unlock()
 	if st := sup.Status("a"); !busy || st.State != "running" || st.Since != "later" {
-		t.Fatalf("the later backup's entry was overwritten: busy=%v status=%+v", busy, st)
+		t.Fatalf("the later snapshot's entry was overwritten: busy=%v status=%+v", busy, st)
 	}
 }
 
@@ -467,7 +467,7 @@ func TestDump_panicDuringTheUploadFailsThisRunOnly(t *testing.T) {
 		if st.State != "failed" || !strings.Contains(st.LastError, "during the sweep of older snapshots") {
 			t.Fatalf("status = %+v, want failed with the sweep named", st)
 		}
-		if out := logs.String(); !strings.Contains(out, "had already reached the destination") || strings.Contains(out, "the next full backup sends it") {
+		if out := logs.String(); !strings.Contains(out, "had already reached the destination") || strings.Contains(out, "the next full read sends it") {
 			t.Fatalf("log = %q, want the destination's copy acknowledged", out)
 		}
 		assertNothingInFlight(t, sup)

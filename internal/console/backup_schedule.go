@@ -30,7 +30,7 @@ import (
 // directory for the fold to write into, whether the recorded history has a
 // gap or a schema change in the window. The first cut put that choice in a dropdown; the
 // product owner's verdict was that it asked the user to understand the fold
-// to do something they think of as "backups every night".
+// to do something they think of as "snapshots every night".
 //
 // The grid is FIXED, not relative to the last run: slots sit at
 // epoch + At + k*Every for every integer k. "every 1d at 03:00" is 03:00 UTC
@@ -186,10 +186,10 @@ func (b BackupSchedule) Parse() (ParsedBackupSchedule, error) {
 	var full time.Duration
 	if raw := strings.TrimSpace(b.FullEvery); raw != "" {
 		if full, err = cliutil.ParseInterval(raw); err != nil {
-			return p, fmt.Errorf("full backup every: %w", err)
+			return p, fmt.Errorf("full read every: %w", err)
 		}
 		if full < every {
-			return p, fmt.Errorf("full backup every: %s is more often than the schedule runs (every %s); set it to %s or more, or set every to %s",
+			return p, fmt.Errorf("full read every: %s is more often than the schedule runs (every %s); set it to %s or more, or set every to %s",
 				raw, strings.TrimSpace(b.Every), strings.TrimSpace(b.Every), raw)
 		}
 	}
@@ -319,9 +319,9 @@ func RefusalReason(err error) string {
 // The refusal texts the checker and the schedule endpoints share, so a saved
 // schedule is reported with the same words a write is refused with.
 const (
-	scheduleRefusalReadOnly = "scheduled backups run in the watch daemon (CLI: bintrail-console watch); this DBTrail is read-only"
-	scheduleRefusalNoLoop   = "backup features are turned off on this daemon: BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1 and no refresh interval is set (CLI: --baseline-refresh-interval), so nothing can run a schedule"
-	scheduleRefusalNoDumps  = "creating backups from the web interface is turned off on this daemon (BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1)"
+	scheduleRefusalReadOnly = "scheduled snapshots run in the watch daemon (CLI: bintrail-console watch); this DBTrail is read-only"
+	scheduleRefusalNoLoop   = "snapshot features are turned off on this daemon: BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1 and no refresh interval is set (CLI: --baseline-refresh-interval), so nothing can run a schedule"
+	scheduleRefusalNoDumps  = "creating snapshots from the web interface is turned off on this daemon (BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1)"
 )
 
 // BackupScheduleGates is what the daemon can do, as the schedule checker
@@ -495,12 +495,12 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 			// Evidence over the model, said so: the two disagree by a
 			// lot here, and which one to believe is what an operator
 			// reading the log would want to know.
-			slog.Info("backup schedule: updating although the estimate exceeds the last full backup; an update of about this size was done cheaper",
+			slog.Info("snapshot schedule: updating although the estimate exceeds the last full read; an update of about this size was done cheaper",
 				"events", w.Events, "estimate", roundSeconds(estSec), "last_full", roundDuration(w.LastFull), "proven_events", w.Proven)
 			return ""
 		}
 		if !w.UnmeasuredSinceFull {
-			return fmt.Sprintf("%s: %s events since the previous backup would take about %s to apply at the measured rate, and the last full backup took %s",
+			return fmt.Sprintf("%s: %s events since the previous snapshot would take about %s to apply at the measured rate, and the last full read took %s",
 				BackupWhyWindowPrefix, formatCount(w.Events), roundSeconds(estSec), roundDuration(w.LastFull))
 		}
 	}
@@ -510,7 +510,7 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 	// a server whose every update succeeds (each one renews the anchor).
 	// Only ever a full backup, so not on a model older than the last one.
 	if !w.UnmeasuredSinceFull && w.Events != 0 && w.FoldRate <= 0 && w.FoldFixed > 0 && w.LastFull > 0 && w.FoldFixed > w.LastFull {
-		return fmt.Sprintf("%s: the cheapest recent update took %s, longer than the last full backup's %s",
+		return fmt.Sprintf("%s: the cheapest recent update took %s, longer than the last full read's %s",
 			BackupWhyWindowPrefix, roundDuration(w.FoldFixed), roundDuration(w.LastFull))
 	}
 	if w.Anchor.IsZero() {
@@ -558,13 +558,13 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 		missing = append(missing, "no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from)")
 	}
 	if w.LastFull <= 0 {
-		missing = append(missing, "no full backup on record")
+		missing = append(missing, "no full read on record")
 	}
 	if len(missing) == 0 {
 		// Everything was measured and the estimate called the update
 		// dearer, but on numbers older than the last full backup, which
 		// the rule above does not act on (#1737): the anchor's age decides.
-		return fmt.Sprintf("%s: it is %s old and the cut-over is %s (no update has been measured since the last full backup, so the estimate from before it is not used)",
+		return fmt.Sprintf("%s: it is %s old and the cut-over is %s (no update has been measured since the last full read, so the estimate from before it is not used)",
 			BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)))
 	}
 	return fmt.Sprintf("%s: it is %s old and the cut-over is %s (%s, so the update could not be estimated)",
@@ -635,7 +635,7 @@ func FullBackupPossible(e ServerEntry, gates BackupScheduleGates) error {
 // The two diverge exactly when backups go to S3 (#1539): the previous snapshot
 // lives in the bucket, so a fold that read the local directory would find an
 // empty one on a server whose backups have only ever been uploaded, and report
-// "no previous backup to update" while the bucket holds dozens. FindBaseline
+// "no previous snapshot to update" while the bucket holds dozens. FindBaseline
 // and ListBaselines both dispatch on the s3:// prefix, so the remote source
 // needs no separate code path here.
 //
@@ -683,11 +683,11 @@ func rebuildPossible(e ServerEntry) error {
 // the page turns them into the setting to change.
 const (
 	BackupWhyNoIndex     = "this server has no index connection to read the recorded changes from"
-	BackupWhyNoLocalDir  = "an update from the recorded changes needs a local backup directory"
-	BackupWhyFirstBackup = "no previous backup to update"
+	BackupWhyNoLocalDir  = "an update from the recorded changes needs a local snapshot directory"
+	BackupWhyFirstBackup = "no previous snapshot to update"
 	// BackupWhyUnreadablePrefix starts the reason for a full backup taken
 	// because the previous one could not be read (the rest names the error).
-	BackupWhyUnreadablePrefix = "the previous backup could not be read"
+	BackupWhyUnreadablePrefix = "the previous snapshot could not be read"
 	// BackupWhyFoldRefusedPrefix / BackupWhyFoldCrashedPrefix start the reason
 	// for a full backup that stands in for an update the fold refused or that
 	// crashed (the rest names the refusal or the panic).
@@ -697,12 +697,12 @@ const (
 	// a full backup chosen over an update the daemon measured (#1721): the
 	// update was estimated dearer than a full backup, or its anchor is past
 	// the cut-over age with nothing measured. The rest carries the numbers.
-	BackupWhyWindowPrefix      = "an update from the recorded changes would take longer than a full backup"
-	BackupWhyStaleAnchorPrefix = "the previous backup is too old to update from"
+	BackupWhyWindowPrefix      = "an update from the recorded changes would take longer than a full read"
+	BackupWhyStaleAnchorPrefix = "the previous snapshot is too old to update from"
 	// BackupWhyFullCopyPrefix starts the reason for a full backup the
 	// schedule's own full-copy timetable asked for (#1564); the rest names
 	// the cadence. Not a fault, and the page does not treat it as one.
-	BackupWhyFullCopyPrefix = "the schedule takes a full backup"
+	BackupWhyFullCopyPrefix = "the schedule takes a full read"
 )
 
 // BackupWhyCodeFullCopy is BackupWhyCode's code for FullCopyWhy.
@@ -719,7 +719,7 @@ func FullCopyWhy(sched BackupSchedule) string {
 // the schedule's other skips: a skipped run is made up by the next run an
 // hour later, a skipped weekly full backup by nothing for a week, so its line
 // stays until a full backup starts again rather than until the next run ends.
-const BackupSkipFullCopyPrefix = "the full backup the schedule asks for did not start"
+const BackupSkipFullCopyPrefix = "the full read the schedule asks for did not start"
 
 // IsFullCopySkip reports whether a recorded skip reason is one of the
 // full-backup timetable's (BackupSkipFullCopyPrefix).
@@ -818,7 +818,7 @@ func CheckFullCopy(e ServerEntry, sched BackupSchedule, gates BackupScheduleGate
 		return nil
 	}
 	if err := FullBackupPossible(e, gates); err != nil {
-		return notRunnable("the full backup every " + strings.TrimSpace(sched.FullEvery) + " reads your database, and " + err.Error())
+		return notRunnable("the full read every " + strings.TrimSpace(sched.FullEvery) + " reads your database, and " + err.Error())
 	}
 	return nil
 }
@@ -837,7 +837,7 @@ var newestSnapshot = reconstruct.NewestSnapshot
 //     directory) gets a FULL backup, with that refusal as the why;
 //   - a server with no previous backup gets a FULL backup: there is nothing
 //     to update. A directory that does not exist yet is that case; one that
-//     cannot be READ is its own error, never "no backup yet". The previous
+//     cannot be READ is its own error, never "no snapshot yet". The previous
 //     backup is looked for where the fold would READ it (BaselineFoldSource),
 //     which is the bucket on an S3-backed server;
 //   - a server whose update the daemon measured as dearer than a full
@@ -889,7 +889,7 @@ func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupSchedu
 		listErr, tables = nil, nil
 	}
 	if listErr != nil {
-		// Never "no backup yet" — that reason would be false, and it would
+		// Never "no snapshot yet" — that reason would be false, and it would
 		// quietly turn a no-load update into a nightly full read of production
 		// with the page naming a cause that did not happen.
 		//
@@ -908,17 +908,17 @@ func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupSchedu
 		// the way out, reporting something else.
 		if errors.Is(listErr, reconstruct.ErrUnreadableSnapshot) {
 			// The location read; one folder inside it did not (#1639).
-			return BackupMethodFull, "", fmt.Errorf("the newest backup under %s could not be checked: %w", source, listErr)
+			return BackupMethodFull, "", fmt.Errorf("the newest snapshot under %s could not be checked: %w", source, listErr)
 		}
 		if fullErr != nil || !strings.HasPrefix(source, "s3://") {
-			return BackupMethodFull, "", fmt.Errorf("the backup location %s could not be read: %w", source, listErr)
+			return BackupMethodFull, "", fmt.Errorf("the snapshot location %s could not be read: %w", source, listErr)
 		}
-		return BackupMethodFull, BackupWhyUnreadablePrefix + " from the backup destination (" +
-			listErr.Error() + "), so a full backup is taken instead", nil
+		return BackupMethodFull, BackupWhyUnreadablePrefix + " from the snapshot destination (" +
+			listErr.Error() + "), so a full read is taken instead", nil
 	}
 	if len(tables) == 0 {
 		if fullErr != nil {
-			return BackupMethodFull, "", fmt.Errorf("no previous backup to update under %s, and a full backup cannot start: %w", source, fullErr)
+			return BackupMethodFull, "", fmt.Errorf("no previous snapshot to update under %s, and a full read cannot start: %w", source, fullErr)
 		}
 		return BackupMethodFull, BackupWhyFirstBackup, nil
 	}
@@ -930,7 +930,7 @@ func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupSchedu
 			// (which would cut a daily schedule over after two hours).
 			p, err := e.BackupSchedule.Parse()
 			if err != nil {
-				return BackupMethodFull, "", fmt.Errorf("the backup schedule could not be read: %w", err)
+				return BackupMethodFull, "", fmt.Errorf("the snapshot schedule could not be read: %w", err)
 			}
 			interval = p.Every
 		}

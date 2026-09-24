@@ -27,8 +27,8 @@ func TestBackupSchedule_ParseFullCopy(t *testing.T) {
 		// Equal is every run a full copy: allowed, it is what the operator asked.
 		{"as often as the schedule", BackupSchedule{Every: "6h", FullEvery: "6h"}, 6 * time.Hour, ""},
 		{"more often than the schedule", BackupSchedule{Every: "6h", FullEvery: "1h"}, 0, "more often than the schedule runs"},
-		{"no unit", BackupSchedule{Every: "6h", FullEvery: "7"}, 0, "full backup every:"},
-		{"not an interval", BackupSchedule{Every: "6h", FullEvery: "weekly"}, 0, "full backup every:"},
+		{"no unit", BackupSchedule{Every: "6h", FullEvery: "7"}, 0, "full read every:"},
+		{"not an interval", BackupSchedule{Every: "6h", FullEvery: "weekly"}, 0, "full read every:"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -102,7 +102,7 @@ func TestParsedBackupSchedule_fullCopySlots(t *testing.T) {
 
 func TestFullCopyWhy_hasItsOwnCode(t *testing.T) {
 	why := FullCopyWhy(BackupSchedule{Every: "6h", FullEvery: " 7d "})
-	if why != "the schedule takes a full backup every 7d" {
+	if why != "the schedule takes a full read every 7d" {
 		t.Fatalf("why = %q", why)
 	}
 	if code := BackupWhyCode(why); code != "full_copy" {
@@ -119,12 +119,12 @@ func TestCheckFullCopy(t *testing.T) {
 		t.Fatalf("a schedule without a full copy was refused: %v", err)
 	}
 	if err := CheckFullCopy(e, weekly, on); err != nil {
-		t.Fatalf("full backups on: %v", err)
+		t.Fatalf("full reads on: %v", err)
 	}
 	err := CheckFullCopy(e, weekly, off)
-	if err == nil || !strings.Contains(RefusalReason(err), "the full backup every 7d reads your database, and") ||
+	if err == nil || !strings.Contains(RefusalReason(err), "the full read every 7d reads your database, and") ||
 		!strings.Contains(RefusalReason(err), "BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1") {
-		t.Fatalf("full backups off: %v", err)
+		t.Fatalf("full reads off: %v", err)
 	}
 	// The base schedule itself is fine there (an update can run): the two
 	// verdicts are separate on purpose.
@@ -186,7 +186,7 @@ func TestBackupScheduleAPI_fullCopy(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("PUT code=%d body=%s", rec.Code, body)
 	}
-	if got = scheduleOf(t, body); got.NextMethod != BackupMethodFull || got.NextMethodWhy != "the schedule takes a full backup every 1d" ||
+	if got = scheduleOf(t, body); got.NextMethod != BackupMethodFull || got.NextMethodWhy != "the schedule takes a full read every 1d" ||
 		got.NextRun != got.NextFullRun {
 		t.Fatalf("every run a full copy: %+v", got)
 	}
@@ -216,7 +216,7 @@ func TestBackupScheduleAPI_fullCopy(t *testing.T) {
 	rep.full = false
 	observed := len(rep.observed)
 	rec, body = doServersReq(t, srv, "PUT", path, `{"every":"6h","at":"03:00","full_every":"7d"}`)
-	if rec.Code != 400 || !strings.Contains(string(body), "the full backup every 7d reads your database") ||
+	if rec.Code != 400 || !strings.Contains(string(body), "the full read every 7d reads your database") ||
 		!strings.Contains(string(body), "BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1") {
 		t.Fatalf("refusal: code=%d body=%s", rec.Code, body)
 	}
@@ -240,7 +240,7 @@ func TestBackupScheduleAPI_fullCopy(t *testing.T) {
 	rep.full = false
 	_, body = doServersReqHeader(t, srv, "GET", "/api/baselines", "", id)
 	got = scheduleOf(t, body)
-	if !got.Runnable || !strings.Contains(got.FullReason, "the full backup every 1d reads your database") {
+	if !got.Runnable || !strings.Contains(got.FullReason, "the full read every 1d reads your database") {
 		t.Fatalf("listing = %+v, want runnable with the full copy's refusal", got)
 	}
 	if got.NextMethod != BackupMethodRefresh {
@@ -307,8 +307,8 @@ console.log(JSON.stringify([row({}), row({ backup_schedule: true })]));
 	}
 	readOnly, runsThem := both[0], both[1]
 	for _, text := range both {
-		if want := "Scheduled backups: every 6h at 03:00, with a full backup every 7d."; !strings.Contains(text, want) {
-			t.Fatalf("the settings row does not say the full backup cadence; want %q in %q", want, text)
+		if want := "Scheduled snapshots: every 6h at 03:00, with a full read every 7d."; !strings.Contains(text, want) {
+			t.Fatalf("the settings row does not say the full read cadence; want %q in %q", want, text)
 		}
 	}
 	// And the sentence after it says where the timetable is CHANGED, which is
@@ -343,7 +343,7 @@ func TestBackupsPer30Days_countsFullBackupsBetweenRuns(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got := p.BackupsPer30Days(); got != c.want {
-			t.Errorf("every %s, full %s: %d backups per 30 days, want %d", c.every, c.full, got, c.want)
+			t.Errorf("every %s, full %s: %d snapshots per 30 days, want %d", c.every, c.full, got, c.want)
 		}
 	}
 }
@@ -356,7 +356,7 @@ func TestBaselineRunHistory_capKeepsTheFullBackupEvidence(t *testing.T) {
 	sched := func(r BaselineRunRecord) BaselineRunRecord { r.Trigger = BaselineRunTriggerScheduled; return r }
 	recs = append(recs,
 		sched(BaselineRunRecord{Kind: BaselineRunDump, StartedAt: "2026-08-01T00:00:00Z", WhyCode: BackupWhyCodeFullCopy}),
-		sched(BaselineRunRecord{Kind: BaselineRunDump, SkipReason: FullCopySkipReason("another backup job was running"), FinishedAt: "2026-08-08T00:00:05Z"}))
+		sched(BaselineRunRecord{Kind: BaselineRunDump, SkipReason: FullCopySkipReason("another snapshot job was running"), FinishedAt: "2026-08-08T00:00:05Z"}))
 	for i := 0; i < 2*BaselineRunHistoryCap; i++ {
 		recs = capRecords(append(recs, sched(BaselineRunRecord{Kind: BaselineRunRefresh, StartedAt: "2026-08-09T00:00:00Z"})))
 	}
@@ -390,7 +390,7 @@ func TestBackupScheduleAPI_fullBackupMissAndEdits(t *testing.T) {
 		return r
 	}
 	if _, err := h.AppendSkip(sched(BaselineRunRecord{Kind: BaselineRunDump,
-		SkipReason: FullCopySkipReason("another backup job was running for this server at the scheduled time"),
+		SkipReason: FullCopySkipReason("another snapshot job was running for this server at the scheduled time"),
 		StartedAt:  "2026-09-10T00:00:05Z", FinishedAt: "2026-09-10T00:00:05Z"})); err != nil {
 		t.Fatal(err)
 	}
@@ -400,19 +400,19 @@ func TestBackupScheduleAPI_fullBackupMissAndEdits(t *testing.T) {
 	_, body := doServersReqHeader(t, srv, "GET", "/api/baselines", "", id)
 	got := scheduleOf(t, body)
 	if got.LastFullMissed == nil || got.LastFullMissed.At != "2026-09-10T00:00:05Z" ||
-		got.LastFullMissed.Reason != "another backup job was running for this server at the scheduled time" {
+		got.LastFullMissed.Reason != "another snapshot job was running for this server at the scheduled time" {
 		t.Fatalf("last_full_missed = %+v, want the collision with the prefix taken off", got.LastFullMissed)
 	}
 	if got.LastSkipped != nil {
-		t.Fatalf("the full backup's miss is also on the ordinary skip line: %+v", got.LastSkipped)
+		t.Fatalf("the full read's miss is also on the ordinary skip line: %+v", got.LastSkipped)
 	}
 	if err := h.Append(sched(BaselineRunRecord{Kind: BaselineRunDump, StartedAt: "2026-09-11T00:00:07Z", FinishedAt: "2026-09-11T00:09:00Z",
-		Why: "the schedule takes a full backup every 1d", WhyCode: BackupWhyCodeFullCopy})); err != nil {
+		Why: "the schedule takes a full read every 1d", WhyCode: BackupWhyCodeFullCopy})); err != nil {
 		t.Fatal(err)
 	}
 	_, body = doServersReqHeader(t, srv, "GET", "/api/baselines", "", id)
 	if got = scheduleOf(t, body); got.LastFullMissed != nil {
-		t.Fatalf("a full backup of the timetable started after the miss and the miss is still shown: %+v", got.LastFullMissed)
+		t.Fatalf("a full read of the timetable started after the miss and the miss is still shown: %+v", got.LastFullMissed)
 	}
 
 	// Full backups turned off after the save: the rest of the schedule can
@@ -420,13 +420,13 @@ func TestBackupScheduleAPI_fullBackupMissAndEdits(t *testing.T) {
 	rep.full = false
 	rec, body := doServersReq(t, srv, "PUT", path, `{"every":"1h","at":"00:30","full_every":"1d"}`)
 	if rec.Code != 200 {
-		t.Fatalf("editing the time with the full backup unchanged: code=%d body=%s", rec.Code, body)
+		t.Fatalf("editing the time with the full read unchanged: code=%d body=%s", rec.Code, body)
 	}
 	if got = scheduleOf(t, body); got.At != "00:30" || !strings.Contains(got.FullReason, "reads your database") {
-		t.Fatalf("after the edit: %+v, want the new time and the full backup still shown as refused", got)
+		t.Fatalf("after the edit: %+v, want the new time and the full read still shown as refused", got)
 	}
 	if rec, body = doServersReq(t, srv, "PUT", path, `{"every":"1h","at":"00:30","full_every":"7d"}`); rec.Code != 400 {
-		t.Fatalf("changing a refused full backup: code=%d body=%s, want 400", rec.Code, body)
+		t.Fatalf("changing a refused full read: code=%d body=%s, want 400", rec.Code, body)
 	}
 }
 
@@ -446,8 +446,8 @@ func TestBackupSettings_fullBackupRefusalReachesTheRow(t *testing.T) {
 			row = s
 		}
 		seen = seen || s.ID == e.ID
-		if s.ID == e.ID && (s.ScheduleRefusal != "" || !strings.Contains(s.ScheduleFullRefusal, "the full backup every 7d reads your database")) {
-			t.Fatalf("row = refusal %q, full refusal %q; want the schedule runnable and its full backups refused", s.ScheduleRefusal, s.ScheduleFullRefusal)
+		if s.ID == e.ID && (s.ScheduleRefusal != "" || !strings.Contains(s.ScheduleFullRefusal, "the full read every 7d reads your database")) {
+			t.Fatalf("row = refusal %q, full refusal %q; want the schedule runnable and its full reads refused", s.ScheduleRefusal, s.ScheduleFullRefusal)
 		}
 	}
 	if !seen {
@@ -485,14 +485,14 @@ console.log(JSON.stringify(red(vm.runInContext("backupServerRow", ctx)(r, false,
 	if err := json.Unmarshal(out, &lines); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
-	want := "The full backup every 7d reads your database, and creating backups from the web interface is turned off on this daemon " +
-		"(BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1). The full backups do not run until that changes; the other scheduled runs still do."
+	want := "The full read every 7d reads your database, and creating snapshots from the web interface is turned off on this daemon " +
+		"(BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1). The full reads do not run until that changes; the other scheduled runs still do."
 	found := false
 	for _, l := range lines {
 		found = found || l == want
 	}
 	if !found {
-		t.Fatalf("the settings row does not show the refused full backup in red; red lines %q", lines)
+		t.Fatalf("the settings row does not show the refused full read in red; red lines %q", lines)
 	}
 }
 
@@ -565,7 +565,7 @@ func TestBackupScheduleAPI_reAddedFullCopyReportsNothingStale(t *testing.T) {
 			}
 			backdateFullSince(t, srv, id, "2026-09-01T00:00:00Z")
 			if _, err := srv.baselineHistory.AppendSkip(BaselineRunRecord{ServerID: id, Trigger: BaselineRunTriggerScheduled, Kind: BaselineRunDump,
-				SkipReason: FullCopySkipReason("another backup job was running for this server at the scheduled time"),
+				SkipReason: FullCopySkipReason("another snapshot job was running for this server at the scheduled time"),
 				StartedAt:  "2026-09-10T00:00:05Z", FinishedAt: "2026-09-10T00:00:05Z"}); err != nil {
 				t.Fatal(err)
 			}
@@ -624,19 +624,19 @@ func TestBackupScheduleAPI_failedFullCopyStaysUntilAFullReadSucceeds(t *testing.
 		return scheduleOf(t, body).LastFullMissed
 	}
 	add(BaselineRunRecord{Kind: BaselineRunDump, StartedAt: "2026-09-10T00:00:05Z", FinishedAt: "2026-09-10T00:04:00Z",
-		Why: "the schedule takes a full backup every 1d", WhyCode: BackupWhyCodeFullCopy, Error: "mydumper: exit status 2"})
+		Why: "the schedule takes a full read every 1d", WhyCode: BackupWhyCodeFullCopy, Error: "mydumper: exit status 2"})
 	// While it is the last run, the last run's own line says it, once.
 	_, body := doServersReqHeader(t, srv, "GET", "/api/baselines", "", id)
 	if got := scheduleOf(t, body); got.LastFullMissed != nil || got.LastRun == nil || got.LastRun.OK {
-		t.Fatalf("a failed full backup that is the last run: last_run %+v, last_full_missed %+v; want it said once, by the last run", got.LastRun, got.LastFullMissed)
+		t.Fatalf("a failed full read that is the last run: last_run %+v, last_full_missed %+v; want it said once, by the last run", got.LastRun, got.LastFullMissed)
 	}
 	add(BaselineRunRecord{Kind: BaselineRunRefresh, StartedAt: "2026-09-10T01:00:05Z", FinishedAt: "2026-09-10T01:03:00Z"})
 	if m := missed(); m == nil || !m.Failed || m.At != "2026-09-10T00:00:05Z" || m.Reason != "mydumper: exit status 2" {
-		t.Fatalf("an ordinary update pushed the failed full backup off: %+v, want it on its own line with its error", m)
+		t.Fatalf("an ordinary update pushed the failed full read off: %+v, want it on its own line with its error", m)
 	}
 	add(BaselineRunRecord{Kind: BaselineRunDump, Trigger: "manual", StartedAt: "2026-09-10T08:00:00Z", FinishedAt: "2026-09-10T08:20:00Z"})
 	if m := missed(); m != nil {
-		t.Fatalf("a manual full backup that succeeded afterwards left the line: %+v", m)
+		t.Fatalf("a manual full read that succeeded afterwards left the line: %+v", m)
 	}
 }
 
@@ -652,7 +652,7 @@ func TestBackupScheduleAPI_theCollidingFullBackupAnswersTheMiss(t *testing.T) {
 	backdateFullSince(t, srv, id, "2026-09-01T00:00:00Z")
 	h := srv.baselineHistory
 	if _, err := h.AppendSkip(BaselineRunRecord{ServerID: id, Trigger: BaselineRunTriggerScheduled, Kind: BaselineRunDump,
-		SkipReason: FullCopySkipReason("another backup job was running for this server at the scheduled time"),
+		SkipReason: FullCopySkipReason("another snapshot job was running for this server at the scheduled time"),
 		StartedAt:  "2026-09-10T00:00:05Z", FinishedAt: "2026-09-10T00:00:05Z"}); err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +662,7 @@ func TestBackupScheduleAPI_theCollidingFullBackupAnswersTheMiss(t *testing.T) {
 	}
 	_, body := doServersReqHeader(t, srv, "GET", "/api/baselines", "", id)
 	if m := scheduleOf(t, body).LastFullMissed; m != nil {
-		t.Fatalf("the full backup that held the slot and succeeded left the miss: %+v", m)
+		t.Fatalf("the full read that held the slot and succeeded left the miss: %+v", m)
 	}
 }
 
@@ -671,7 +671,7 @@ func TestBackupScheduleAPI_theCollidingFullBackupAnswersTheMiss(t *testing.T) {
 // ends); one that failed is on the line before any record exists; and with
 // no history at all, the loop's own miss is shown.
 func TestBackupScheduleAPI_fullMissFromTheLoopsMemory(t *testing.T) {
-	why := "the schedule takes a full backup every 1d"
+	why := "the schedule takes a full read every 1d"
 	setup := func(t *testing.T) (*Server, *stubScheduleReporter, string) {
 		t.Helper()
 		rep := &stubScheduleReporter{full: true, state: map[string]BackupScheduleState{}}
@@ -696,7 +696,7 @@ func TestBackupScheduleAPI_fullMissFromTheLoopsMemory(t *testing.T) {
 		rep.state[id] = BackupScheduleState{LastStartedAt: "2026-09-11T00:00:05Z", LastMethod: BackupMethodFull, LastWhy: why,
 			Last: &BaselineStatus{State: "running"}, Running: true}
 		if m := missed(t, srv, id); m != nil {
-			t.Fatalf("a full backup of the timetable is running and the older miss is still shown: %+v", m)
+			t.Fatalf("a full read of the timetable is running and the older miss is still shown: %+v", m)
 		}
 	})
 	t.Run("succeeded, no record yet", func(t *testing.T) {
@@ -708,15 +708,15 @@ func TestBackupScheduleAPI_fullMissFromTheLoopsMemory(t *testing.T) {
 		rep.state[id] = BackupScheduleState{LastStartedAt: "2026-09-11T00:00:05Z", LastMethod: BackupMethodFull,
 			Last: &BaselineStatus{State: "succeeded", FinishedAt: "2026-09-11T00:20:00Z"}}
 		if m := missed(t, srv, id); m != nil {
-			t.Fatalf("a full backup the loop saw succeed left the older miss: %+v", m)
+			t.Fatalf("a full read the loop saw succeed left the older miss: %+v", m)
 		}
 	})
 	t.Run("no history", func(t *testing.T) {
 		srv, rep, id := setup(t)
 		srv.baselineHistory = nil
 		rep.state[id] = BackupScheduleState{LastFullMissedAt: "2026-09-12T00:00:05Z",
-			LastFullMissedReason: FullCopySkipReason("another backup job was running for this server at the scheduled time")}
-		if m := missed(t, srv, id); m == nil || m.Reason != "another backup job was running for this server at the scheduled time" {
+			LastFullMissedReason: FullCopySkipReason("another snapshot job was running for this server at the scheduled time")}
+		if m := missed(t, srv, id); m == nil || m.Reason != "another snapshot job was running for this server at the scheduled time" {
 			t.Fatalf("with no history the loop's miss = %+v", m)
 		}
 	})
@@ -737,7 +737,7 @@ func TestBackupScheduleAPI_owedFullCopyIsTheNextRun(t *testing.T) {
 	rep.state[id] = BackupScheduleState{FullOwed: true}
 	got := srv.backupScheduleDTO(context.Background(), e, now)
 	if got.NextRun != "2026-09-21T11:00:00Z" || got.NextFullRun != got.NextRun || got.NextMethod != BackupMethodFull || got.NextMethodWhyCode != "full_copy" || !got.FullOwed {
-		t.Fatalf("owed: %+v, want the next run to be the full backup", got)
+		t.Fatalf("owed: %+v, want the next run to be the full read", got)
 	}
 	rep.full = false
 	if got := srv.backupScheduleDTO(context.Background(), e, now); got.NextMethod == BackupMethodFull || got.NextFullRun == got.NextRun || got.FullOwed {
@@ -760,14 +760,14 @@ func TestBackupScheduleDTO_fullCopyBeforeTheNextRun(t *testing.T) {
 	now := time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC)
 	for i := 0; !p.NextFullRun(now).Before(p.NextRun(now)); i++ {
 		if i > 200 {
-			t.Fatal("fixture: no instant where the full backup comes first")
+			t.Fatal("fixture: no instant where the full read comes first")
 		}
 		now = now.Add(time.Hour)
 	}
 	got := srv.backupScheduleDTO(context.Background(), e, now)
 	want := p.NextFullRun(now).Format(time.RFC3339)
 	if got.NextRun != want || got.NextFullRun != want || got.NextMethod != BackupMethodFull || got.NextMethodWhyCode != "full_copy" {
-		t.Fatalf("at %s: %+v, want the full backup at %s as the next run", now, got, want)
+		t.Fatalf("at %s: %+v, want the full read at %s as the next run", now, got, want)
 	}
 }
 
@@ -789,6 +789,6 @@ func TestBaselineRunHistory_capKeepsTheLastFullRead(t *testing.T) {
 		}
 	}
 	if r := h.LastFullRead("a"); r == nil || r.StartedAt != "2026-09-01T00:00:00Z" {
-		t.Fatalf("LastFullRead after the cap = %+v, want the manual full backup", r)
+		t.Fatalf("LastFullRead after the cap = %+v, want the manual full read", r)
 	}
 }

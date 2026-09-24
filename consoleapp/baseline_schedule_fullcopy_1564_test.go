@@ -52,7 +52,7 @@ func TestBackupScheduler_fullCopyTakesACoincidingSlot(t *testing.T) {
 	}
 	run, _ := sup.history.LastScheduled(e.ID)
 	if run == nil || run.Kind != console.BaselineRunDump || run.WhyCode != "full_copy" {
-		t.Fatalf("history = %+v, want the full backup with why code full_copy", run)
+		t.Fatalf("history = %+v, want the full read with why code full_copy", run)
 	}
 	// The next hour is an ordinary run again: the rule picks the update.
 	b.tick(context.Background(), time.Date(2026, 8, 28, 1, 0, 5, 0, time.UTC))
@@ -103,21 +103,21 @@ func TestBackupScheduler_refusedFullCopyIsASkipAndTheUpdateRuns(t *testing.T) {
 	// On the full backup's own line, not the ordinary skip line: that one
 	// stops showing when the next run ends, and this one must not.
 	if st.LastFullMissedAt != now.Format(time.RFC3339) || !console.IsFullCopySkip(st.LastFullMissedReason) ||
-		!strings.Contains(st.LastFullMissedReason, "the full backup every 1d reads your database") ||
+		!strings.Contains(st.LastFullMissedReason, "the full read every 1d reads your database") ||
 		!strings.Contains(st.LastFullMissedReason, "BINTRAIL_CONSOLE_BASELINE_TRIGGER") {
-		t.Fatalf("full backup miss = %q at %q, want the refusal at the slot", st.LastFullMissedReason, st.LastFullMissedAt)
+		t.Fatalf("full read miss = %q at %q, want the refusal at the slot", st.LastFullMissedReason, st.LastFullMissedAt)
 	}
 	if st.LastSkippedAt != "" {
-		t.Fatalf("the full backup's refusal was also filed as an ordinary skip: %q", st.LastSkipReason)
+		t.Fatalf("the full read's refusal was also filed as an ordinary skip: %q", st.LastSkipReason)
 	}
-	if _, skip := sup.history.LastFullCopy(e.ID); skip == nil || !strings.Contains(skip.SkipReason, "full backup every") {
+	if _, skip := sup.history.LastFullCopy(e.ID); skip == nil || !strings.Contains(skip.SkipReason, "full read every") {
 		t.Fatalf("the refusal is not in the history: %+v", skip)
 	}
 	if _, skip := sup.history.LastScheduled(e.ID); skip != nil {
-		t.Fatalf("the full backup's refusal is on the ordinary skip line of the history: %+v", skip)
+		t.Fatalf("the full read's refusal is on the ordinary skip line of the history: %+v", skip)
 	}
 	if ds := sup.Status(e.ID); ds.State != "idle" {
-		t.Fatalf("a full backup started with full backups off: %+v", ds)
+		t.Fatalf("a full read started with full reads off: %+v", ds)
 	}
 }
 
@@ -140,7 +140,7 @@ func TestBackupScheduler_addingAFullCopyNeverFiresOnTheSpot(t *testing.T) {
 		t.Fatalf("the next run = %+v, want an update", st)
 	}
 	if ds := sup.Status(e.ID); ds.State != "idle" {
-		t.Fatalf("a full backup started at a run that is not the full copy's: %+v", ds)
+		t.Fatalf("a full read started at a run that is not the full copy's: %+v", ds)
 	}
 }
 
@@ -208,8 +208,8 @@ func TestBackupScheduler_fullCopyCollisionIsAFullCopyMiss(t *testing.T) {
 	b.tick(context.Background(), now)
 	st := b.ScheduleState(e.ID)
 	if st.LastFullMissedAt != now.Format(time.RFC3339) || !console.IsFullCopySkip(st.LastFullMissedReason) ||
-		!strings.Contains(st.LastFullMissedReason, "another backup job was running") {
-		t.Fatalf("collision = %q at %q, want a full backup miss naming the job", st.LastFullMissedReason, st.LastFullMissedAt)
+		!strings.Contains(st.LastFullMissedReason, "another snapshot job was running") {
+		t.Fatalf("collision = %q at %q, want a full read miss naming the job", st.LastFullMissedReason, st.LastFullMissedAt)
 	}
 	if rs := sup.RefreshStatus(e.ID); rs.State != "idle" {
 		t.Fatalf("an update started beside the collision: %+v", rs)
@@ -219,7 +219,7 @@ func TestBackupScheduler_fullCopyCollisionIsAFullCopyMiss(t *testing.T) {
 	b.tick(context.Background(), time.Date(2026, 8, 29, 0, 0, 5, 0, time.UTC))
 	st = waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
 	if st.LastFullMissedAt != "" {
-		t.Fatalf("a full backup of the timetable started and the miss is still on record: %+v", st)
+		t.Fatalf("a full read of the timetable started and the miss is still on record: %+v", st)
 	}
 }
 
@@ -233,7 +233,7 @@ func TestBackupScheduler_onlyFullBackupsEndTheFallbackAlarm(t *testing.T) {
 	b.started[e.ID] = scheduledStart{method: console.BackupMethodFull, at: "2026-08-29T00:00:00Z", since: "2026-08-29T00:00:00Z", fullCopy: true, noUpdates: true}
 	sup.jobs[e.ID] = &console.BaselineStatus{State: "succeeded", Since: "2026-08-29T00:00:00Z"}
 	if st := b.ScheduleState(e.ID); st.LastFallbackAt != "" {
-		t.Fatalf("a schedule of full backups only kept the alarm about updates it no longer makes: %+v", st)
+		t.Fatalf("a schedule of full reads only kept the alarm about updates it no longer makes: %+v", st)
 	}
 	// And the flag is set from the schedule itself.
 	noFold(t)
@@ -263,7 +263,7 @@ func TestBackupScheduler_busyFullCopyIsTakenByTheNextRun(t *testing.T) {
 	b.tick(context.Background(), slot.Add(-30*time.Minute))
 	b.tick(context.Background(), slot.Add(5*time.Second))
 	st := b.ScheduleState(e.ID)
-	if !st.FullOwed || !strings.Contains(st.LastFullMissedReason, "another backup job was running") {
+	if !st.FullOwed || !strings.Contains(st.LastFullMissedReason, "another snapshot job was running") {
 		t.Fatalf("a busy full-backup slot = %+v, want it owed and the collision recorded", st)
 	}
 	// The recorded reason states the collision and nothing more: the debt is
@@ -276,10 +276,10 @@ func TestBackupScheduler_busyFullCopyIsTakenByTheNextRun(t *testing.T) {
 	b.tick(context.Background(), slot.Add(time.Hour+5*time.Second))
 	st = waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
 	if !strings.HasPrefix(st.LastWhy, console.BackupWhyFullCopyPrefix) || st.FullOwed || st.LastFullMissedAt != "" {
-		t.Fatalf("the next run = %+v, want the owed full backup, the debt paid and the miss over", st)
+		t.Fatalf("the next run = %+v, want the owed full read, the debt paid and the miss over", st)
 	}
 	if rs := sup.RefreshStatus(e.ID); rs.State != "idle" {
-		t.Fatalf("an update also started on the run that took the owed full backup: %+v", rs)
+		t.Fatalf("an update also started on the run that took the owed full read: %+v", rs)
 	}
 	// Paid: the run after that is an ordinary one.
 	b.tick(context.Background(), slot.Add(2*time.Hour+5*time.Second))
@@ -312,10 +312,10 @@ func TestBackupScheduler_fullCopyDebtIsDropped(t *testing.T) {
 		b.tick(context.Background(), next)
 		st := waitTerminalMethod(t, b, e.ID, console.BackupMethodRefresh)
 		if st.FullOwed || !strings.Contains(st.LastFullMissedReason, "reads your database") {
-			t.Fatalf("after a refusal = %+v, want the debt dropped and the refusal on the full backup's line", st)
+			t.Fatalf("after a refusal = %+v, want the debt dropped and the refusal on the full read's line", st)
 		}
 		if ds := sup.Status(e.ID); ds.State != "idle" {
-			t.Fatalf("a full backup started with full backups off: %+v", ds)
+			t.Fatalf("a full read started with full reads off: %+v", ds)
 		}
 	})
 	t.Run("a save", func(t *testing.T) {
@@ -368,10 +368,10 @@ func TestBackupScheduler_panicWhileFiringAFullCopyIsItsMiss(t *testing.T) {
 	b.fireGuarded(broken, p, time.Date(2026, 8, 28, 0, 0, 5, 0, time.UTC), false, true)
 	st := b.ScheduleState(e.ID)
 	if !console.IsFullCopySkip(st.LastFullMissedReason) || !strings.Contains(st.LastFullMissedReason, "internal error: ") {
-		t.Fatalf("a panic while firing the full backup = %+v, want it on the full backup's line", st)
+		t.Fatalf("a panic while firing the full read = %+v, want it on the full read's line", st)
 	}
 	if st.LastSkippedAt != "" {
-		t.Fatalf("the full backup's panic was also filed as an ordinary skip: %q", st.LastSkipReason)
+		t.Fatalf("the full read's panic was also filed as an ordinary skip: %q", st.LastSkipReason)
 	}
 }
 
@@ -386,7 +386,7 @@ func TestBackupScheduler_bootSeedsTheFullCopyTimetable(t *testing.T) {
 		b.observeAll(time.Date(2026, 8, 27, 23, 59, 30, 0, time.UTC))
 		b.tick(context.Background(), time.Date(2026, 8, 28, 0, 0, 20, 0, time.UTC))
 		if st := waitTerminalMethod(t, b, e.ID, console.BackupMethodFull); !strings.HasPrefix(st.LastWhy, console.BackupWhyFullCopyPrefix) {
-			t.Fatalf("the slot after boot = %+v, want the full backup", st)
+			t.Fatalf("the slot after boot = %+v, want the full read", st)
 		}
 	})
 	t.Run("a slot before boot does not", func(t *testing.T) {
@@ -484,6 +484,6 @@ func TestBackupScheduler_displacedFullCopyIsItsMiss(t *testing.T) {
 	b.watchScheduled(e, stamp, console.BackupMethodFull)
 	st := b.ScheduleState(e.ID)
 	if !console.IsFullCopySkip(st.LastFullMissedReason) || strings.Contains(st.LastFullMissedReason, "stand in for it") {
-		t.Fatalf("a displaced full backup = %q, want the timetable's miss in its own words", st.LastFullMissedReason)
+		t.Fatalf("a displaced full read = %q, want the timetable's miss in its own words", st.LastFullMissedReason)
 	}
 }

@@ -151,7 +151,7 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 					// question for THIS purpose (#1601): the snapshot it could
 					// not read may be the newer one. A newer snapshot it DID
 					// read is still reported below, as the more useful fact.
-					slog.Warn("console: could not check the other backup location in full for a newer snapshot; the generated file says the check did not answer",
+					slog.Warn("console: could not check the other snapshot location in full for a newer snapshot; the generated file says the check did not answer",
 						"source", other, "error", oerr, "unreadable_directories", oskipped)
 					// Carried into the file, not swallowed: a header that says
 					// nothing reads as "the other location holds nothing
@@ -346,7 +346,7 @@ func (s *Server) handleViewsSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	portableBaseline, err := parseStrictInclude("portable_baseline",
-		"read the state views from this server's S3 backup prefix", r.URL.Query().Get("portable_baseline"))
+		"read the state views from this server's S3 snapshot prefix", r.URL.Query().Get("portable_baseline"))
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -357,8 +357,8 @@ func (s *Server) handleViewsSQL(w http.ResponseWriter, r *http.Request) {
 	// avoid, delivered as a successful download.
 	if portableBaseline && b.baselineFallbackSrc == "" {
 		writeJSONError(w, http.StatusUnprocessableEntity,
-			"this server has no S3 backup prefix to read from: portable_baseline needs a server "+
-				"configured with BOTH a local backup directory and an S3 one, so there are two "+
+			"this server has no S3 snapshot prefix to read from: portable_baseline needs a server "+
+				"configured with BOTH a local snapshot directory and an S3 one, so there are two "+
 				"locations to choose between")
 		return
 	}
@@ -424,7 +424,7 @@ func (s *Server) handleViewsSQL(w http.ResponseWriter, r *http.Request) {
 	if !in.RendersAnyView() {
 		writeJSONError(w, http.StatusNotFound,
 			"this would define no view at all: no baseline snapshot was found to build "+
-				"state views from, and the change log is not included. Take a backup, or "+
+				"state views from, and the change log is not included. Take a snapshot, or "+
 				"tick \"Include the change log\" to get a view over the archived changes")
 		return
 	}

@@ -74,7 +74,7 @@ const run = async (perms, location, caps = {}, leave = false, servers = null, cu
   await vm.runInContext("renderConnect()", ctx);
   const text = flat(screen).join(" ");
   return { asked: [...asked], panel: text.includes("Keep it current with Iceberg"), page: text.includes("Connect AI"),
-    steps: text.includes("Three steps"), note: text.includes("Could not check where this server's backups are kept"),
+    steps: text.includes("Three steps"), note: text.includes("Could not check where this server's snapshots are kept"),
     cmd: (text.match(/bintrail export iceberg .*?--warehouse/) || [""])[0] };
 };
 const where = { configured: true, source: "/data/baselines", kind: "dir" };
@@ -83,7 +83,7 @@ const where = { configured: true, source: "/data/baselines", kind: "dir" };
   out.dir = await run({}, { configured: true, source: "/data/baselines", kind: "dir", snapshots: [] });
   out.s3 = await run({}, { configured: true, source: "s3://bkt/base", kind: "s3", snapshots: [] });
   out.none = await run({}, { configured: false, snapshots: [] });
-  out.refused = await run({}, Object.assign(new Error("backup listings are unavailable while an access-control profile is active"), { status: 403 }));
+  out.refused = await run({}, Object.assign(new Error("snapshot listings are unavailable while an access-control profile is active"), { status: 403 }));
   out.noPerm = await run({ "servers:read": false }, { configured: true, source: "/data/baselines", kind: "dir", snapshots: [] });
   out.profile = await run({}, where, { data_profile: true });
   out.failed = await run({}, Object.assign(new Error("server error"), { status: 500 }));

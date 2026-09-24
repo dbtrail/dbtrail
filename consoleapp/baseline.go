@@ -307,8 +307,8 @@ func (s *baselineSupervisor) dumpIndexMark(req console.BaselineRequest) uint64 {
 	if !known {
 		// Once per full backup, which is rare enough not to rate-limit.
 		// Without it the only trace is a Debug line worded for a refresh.
-		slog.Info("baseline: could not read the index before the full backup; the update after it will not be measured, "+
-			"so the backup schedule's cost model waits one more update before it can choose a full backup again",
+		slog.Info("baseline: could not read the index before the full read; the update after it will not be measured, "+
+			"so the snapshot schedule's cost model waits one more update before it can choose a full read again",
 			"server", req.ServerName, "id", req.ServerID)
 		return 0
 	}
@@ -345,9 +345,9 @@ func (s *baselineSupervisor) recoverDumpJob(req console.BaselineRequest, own *du
 	if r == nil {
 		return
 	}
-	phase, what := "the upload", "the local snapshot is complete and the next full backup sends it"
+	phase, what := "the upload", "the local snapshot is complete and the next full read sends it"
 	if own.uploaded {
-		phase, what = "the sweep of older snapshots", "this run's own snapshot had already reached the destination; the next full backup sweeps again"
+		phase, what = "the sweep of older snapshots", "this run's own snapshot had already reached the destination; the next full read sweeps again"
 	}
 	slog.Error(string(baselineJobDump)+": "+phase+" hit an internal error and stopped after the snapshot was published. Capture and the web interface keep "+
 		"running; "+what+". Please report this with the stack recorded here.",
@@ -439,7 +439,7 @@ func (s *baselineSupervisor) publishDump(req console.BaselineRequest, out dumpOu
 	st.Tables = out.stats.TablesProcessed
 	st.Rows = out.stats.RowsWritten
 	st.FinishedAt = nowStamp()
-	slog.Info("baseline: snapshot published locally; uploading it to the backup destination in the background",
+	slog.Info("baseline: snapshot published locally; uploading it to the snapshot destination in the background",
 		"server", req.ServerName, "id", req.ServerID, "snapshot", out.snapDir, "destination", req.S3)
 	return st
 }
@@ -468,7 +468,7 @@ func (s *baselineSupervisor) uploadDump(req console.BaselineRequest, out dumpOut
 			// operator to a directory that no longer exists.
 			return 0, fmt.Errorf("upload: %w", err)
 		}
-		return 0, fmt.Errorf("upload: the snapshot was written to %s but could not be uploaded to %s; the next full backup sends it: %w",
+		return 0, fmt.Errorf("upload: the snapshot was written to %s but could not be uploaded to %s; the next full read sends it: %w",
 			out.snapDir, dest, err)
 	}
 	return uploaded, nil
@@ -519,7 +519,7 @@ func (s *baselineSupervisor) isUploading(serverID, name string) bool {
 func (s *baselineSupervisor) sweepUnuploaded(req console.BaselineRequest, root, own string) int {
 	files, err := listBaselines(s.ctx, req.LocalDir)
 	if err != nil {
-		slog.Warn("baseline: could not list the local backups to sweep unuploaded snapshots", "server", req.ServerName, "error", err)
+		slog.Warn("baseline: could not list the local snapshots to sweep unuploaded snapshots", "server", req.ServerName, "error", err)
 		return 0
 	}
 	seen := map[string]bool{own: true}
@@ -528,7 +528,7 @@ func (s *baselineSupervisor) sweepUnuploaded(req console.BaselineRequest, root, 
 		if s.ctx.Err() != nil {
 			// Shutdown: what is left is the next full backup's, and one line
 			// says so instead of one warning per snapshot.
-			slog.Info("baseline: sweep of unuploaded snapshots interrupted by shutdown; the next full backup continues it", "server", req.ServerName)
+			slog.Info("baseline: sweep of unuploaded snapshots interrupted by shutdown; the next full read continues it", "server", req.ServerName)
 			return swept
 		}
 		name := reconstruct.SnapshotDirName(f.SnapshotTime)
@@ -560,7 +560,7 @@ func (s *baselineSupervisor) sweepUnuploaded(req console.BaselineRequest, root, 
 		}
 		n, err := s.uploadMarked(req.ServerID, name, filepath.Join(req.LocalDir, name), dest, true)
 		if err != nil {
-			slog.Warn("baseline: a local snapshot the destination lacks could not be sent; the next full backup tries again",
+			slog.Warn("baseline: a local snapshot the destination lacks could not be sent; the next full read tries again",
 				"server", req.ServerName, "snapshot", name, "error", err)
 			continue
 		}
@@ -606,7 +606,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	defer s.mu.Unlock()
 	st := s.dumpStatusLocked(req.ServerID)
 	if own != nil && st != own {
-		slog.Info("baseline: a later full backup took over this server's status while the upload ran; this run's outcome is recorded in the history only",
+		slog.Info("baseline: a later full read took over this server's status while the upload ran; this run's outcome is recorded in the history only",
 			"server", req.ServerName, "id", req.ServerID, "snapshot", out.snapDir)
 		st = own
 	}
@@ -619,11 +619,11 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 			if errors.Is(err, context.Canceled) {
 				// A routine restart, not a lost backup: the local snapshot is
 				// complete and the next full backup sends it.
-				slog.Warn("baseline: the upload was interrupted by daemon shutdown; the local snapshot is complete and the next full backup sends it",
+				slog.Warn("baseline: the upload was interrupted by daemon shutdown; the local snapshot is complete and the next full read sends it",
 					"server", req.ServerName, "id", req.ServerID, "snapshot", out.snapDir)
 				return
 			}
-			slog.Error("baseline: the snapshot was written but not sent to the backup destination",
+			slog.Error("baseline: the snapshot was written but not sent to the snapshot destination",
 				"server", req.ServerName, "id", req.ServerID, "snapshot", out.snapDir, "error", err)
 			return
 		}
@@ -697,7 +697,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		if errors.Is(err, baseline.ErrDumpNotAnchored) {
 			return dumpOutcome{}, fmt.Errorf("dump: %w", err)
 		}
-		return dumpOutcome{}, fmt.Errorf("dump: cannot read mydumper's metadata, so the backup cannot be anchored to a binlog position: %w", err)
+		return dumpOutcome{}, fmt.Errorf("dump: cannot read mydumper's metadata, so the snapshot cannot be anchored to a binlog position: %w", err)
 	}
 
 	out := dumpOutcome{at: dumpStartedAt, cleanup: func() {}}
@@ -847,7 +847,7 @@ func planMydumper(lockMode baseline.LockMode) (mydumperPlan, error) {
 	path, err := exec.LookPath("mydumper")
 	if err != nil {
 		return mydumperPlan{}, fmt.Errorf("mydumper is not installed where DBTrail can run it (%v). "+
-			"Full backups of MySQL and MariaDB servers run the mydumper on the PATH of the DBTrail process; "+
+			"Full reads of MySQL and MariaDB servers run the mydumper on the PATH of the DBTrail process; "+
 			"install mydumper %s or newer, which supports every lock mode",
 			err, mydumperlock.LockModeFloor)
 	}
@@ -857,7 +857,7 @@ func planMydumper(lockMode baseline.LockMode) (mydumperPlan, error) {
 	case errors.Is(verErr, mydumperlock.ErrNotRunnable):
 		// #1699: a binary that does not run is not an "unknown version", and
 		// routing it there would make the first error a privilege refusal.
-		return mydumperPlan{}, fmt.Errorf("%w. Full backups run that same binary, so fix or replace it with mydumper %s or newer",
+		return mydumperPlan{}, fmt.Errorf("%w. Full reads run that same binary, so fix or replace it with mydumper %s or newer",
 			verErr, mydumperlock.LockModeFloor)
 	case verErr != nil:
 		if !ftwrl {
@@ -880,7 +880,7 @@ func planMydumper(lockMode baseline.LockMode) (mydumperPlan, error) {
 			"and --trx-tables and takes that build's own FTWRL", v, mydumperlock.LockModeFloor)
 		if v.Less(mydumperlock.PositionFloor) {
 			fallback += fmt.Sprintf("; against MySQL 8.4 and newer a build older than %s cannot record the binlog position, "+
-				"so backups of those sources are refused before they start", mydumperlock.PositionFloor)
+				"so snapshots of those sources are refused before they start", mydumperlock.PositionFloor)
 		}
 		// The #800 privilege check is skipped only for a build that takes no
 		// backup lock (measured: the packaged 0.10 does not; 0.16.3 and 1.0.3
@@ -904,9 +904,9 @@ func mydumperBootWarning(lockMode baseline.LockMode) string {
 	plan, err := planMydumper(lockMode)
 	switch {
 	case err != nil:
-		return "full backups of MySQL and MariaDB servers will fail until this is fixed: " + err.Error()
+		return "full reads of MySQL and MariaDB servers will fail until this is fixed: " + err.Error()
 	case plan.fallback != "":
-		return "full backups of MySQL and MariaDB servers will run, but " + plan.fallback
+		return "full reads of MySQL and MariaDB servers will run, but " + plan.fallback
 	default:
 		return ""
 	}
@@ -946,12 +946,12 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 			// The dump still runs and its own metadata is checked afterwards,
 			// but that check comes AFTER a full dump: say why the cheap
 			// refusal could not be made instead of dropping it in silence.
-			slog.Warn("console backup: could not read the source server's version, so an old mydumper cannot be refused before it dumps",
+			slog.Warn("console snapshot: could not read the source server's version, so an old mydumper cannot be refused before it dumps",
 				"mydumper", plan.version.String(), "error", verr)
 		}
 		if verr == nil && !plan.version.RecordsPositionOn(sv) {
 			return fmt.Errorf("mydumper %s cannot record the binlog position on MySQL %s: builds older than %s read it "+
-				"with SHOW MASTER STATUS, which MySQL 8.4 removed, so the backup would be refused after a full dump and "+
+				"with SHOW MASTER STATUS, which MySQL 8.4 removed, so the snapshot would be refused after a full dump and "+
 				"the dump was not started. Install mydumper %s or newer",
 				plan.version, sv, mydumperlock.PositionFloor, mydumperlock.LockModeFloor)
 		}
@@ -1024,7 +1024,7 @@ const systemSchemaExcludeRegex = `^(?!(mysql|sys|performance_schema|information_
 //     --trx-tables=0"), which the console propagates as the run's error. The
 //     same flag under NO_LOCK only warns and proceeds — verified empirically
 //     on the identical MyISAM table (#800). The refusal is gated to an actual
-//     "consistent backup attempt" in mydumper's own wording, which NO_LOCK is
+//     "consistent snapshot attempt" in mydumper's own wording, which NO_LOCK is
 //     explicitly not making. So this is NOT a reason to move an RDS source off
 //     LOCK_ALL: switching modes among the consistent ones cannot avoid it.
 //   - FTWRL needs RELOAD/FLUSH_TABLES on every flavor, plus BACKUP_ADMIN on

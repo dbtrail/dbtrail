@@ -342,13 +342,13 @@ const paint = async (caps, from, hash) => {
 		t.Errorf("serve asks the watch daemon's own endpoint: %q", got.Serve.Asked)
 	}
 	if !strings.Contains(got.Serve.Text, "Snapshots") || !hasString(got.Serve.Titles, "Per server") {
-		t.Errorf("serve does not render the page and the backup location: titles %q", got.Serve.Titles)
+		t.Errorf("serve does not render the page and the snapshot location: titles %q", got.Serve.Titles)
 	}
 	if hasString(got.Serve.Sections, "checks") {
 		t.Errorf("serve draws the checks section, whose runner only the watch daemon has: %q", got.Serve.Sections)
 	}
 	if !hasString(got.Serve.Sections, "setup") {
-		t.Errorf("serve drops the setup section, which is the only editor of a server's backup location: %q", got.Serve.Sections)
+		t.Errorf("serve drops the setup section, which is the only editor of a server's snapshot location: %q", got.Serve.Sections)
 	}
 	if !hasString(got.Watch.Sections, "checks") || !hasString(got.Watch.Sections, "setup") {
 		t.Errorf("under watch the page is missing a section: %q", got.Watch.Sections)

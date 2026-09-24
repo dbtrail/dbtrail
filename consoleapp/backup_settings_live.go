@@ -47,7 +47,7 @@ func effectiveLockMode(reg *console.Registry, bootMode baseline.LockMode, bootEr
 	}
 	mode, err := baseline.ParseLockMode(raw)
 	if err != nil {
-		slog.Warn("backup settings: ignoring an unreadable saved lock mode; using the value this process started with",
+		slog.Warn("snapshot settings: ignoring an unreadable saved lock mode; using the value this process started with",
 			"saved", raw, "error", err)
 		return bootMode, bootErr
 	}
@@ -76,7 +76,7 @@ func effectiveRetain(reg *console.Registry, boot string) (time.Duration, bool) {
 	}
 	d, err := cliutil.ParseRetain(raw)
 	if err != nil {
-		slog.Warn("backup settings: ignoring an unreadable saved retention; keeping every local backup",
+		slog.Warn("snapshot settings: ignoring an unreadable saved retention; keeping every local snapshot",
 			"saved", raw, "error", err)
 		return 0, false
 	}

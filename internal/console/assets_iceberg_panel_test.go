@@ -47,7 +47,7 @@ func TestIcebergExportPanel(t *testing.T) {
 		t.Error("the command does not carry both destination forms")
 	}
 	if !strings.Contains(cmd, `baselines.kind === "s3"`) {
-		t.Error("the destination flag is not chosen from the resolved backup kind")
+		t.Error("the destination flag is not chosen from the resolved snapshot kind")
 	}
 
 	// Why it is a command and not a button, in the panel itself.
@@ -238,7 +238,7 @@ console.log(JSON.stringify(cases.map((c) => (
 			absent:   []string{"--baseline-dir"},
 		},
 		{
-			// The Docker route exports the STACK's index and backups. For a
+			// The Docker route exports the STACK's index and snapshots. For a
 			// registry server that is a different dataset, exported
 			// successfully and with nothing to see, which is why the note is
 			// in the visible body rather than the collapsed block.
@@ -592,8 +592,8 @@ func TestIcebergFlowStatesWhatTheExportActuallyProduces(t *testing.T) {
 	flow := functionBody(t, js, "function icebergFlow(")
 	runs := functionBody(t, js, "function icebergRuns(")
 
-	if !strings.Contains(flow, "newest backup") || !strings.Contains(runs, "newest backup") {
-		t.Error("the panel no longer says WHICH backup the first run loads; a reader looking at " +
+	if !strings.Contains(flow, "newest snapshot") || !strings.Contains(runs, "newest snapshot") {
+		t.Error("the panel no longer says WHICH snapshot the first run loads; a reader looking at " +
 			"a list of them on this very page cannot work that out from \"the whole snapshot\"")
 	}
 	if !strings.Contains(flow, "nowhere else") {

@@ -24,13 +24,13 @@ func TestCutoverToFull(t *testing.T) {
 		want     string // "" = update; otherwise the code of the reason
 	}{
 		{"nothing known: update", BackupWindow{Events: -1}, 5 * time.Minute, ""},
-		{"measured cheaper than a full backup: update", BackupWindow{Anchor: fresh, Events: 100_000, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
-		{"measured dearer than a full backup: full", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_measured"},
-		{"the fixed cost alone exceeds the full backup: full", BackupWindow{Anchor: fresh, Events: 1, FoldFixed: 9 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_measured"},
+		{"measured cheaper than a full read: update", BackupWindow{Anchor: fresh, Events: 100_000, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
+		{"measured dearer than a full read: full", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_measured"},
+		{"the fixed cost alone exceeds the full read: full", BackupWindow{Anchor: fresh, Events: 1, FoldFixed: 9 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_measured"},
 		// Evidence beats the model: an update this size was done cheaper.
 		{"dearer by the model but proven cheaper: update", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 4000, Proven: 20_000_000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
 		// A tiny rate and a long stop: the estimate overflows a Duration,
-		// and must not wrap into "cheaper than a full backup".
+		// and must not wrap into "cheaper than a full read".
 		{"estimate past what a Duration holds: full", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 0.0000001, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_measured"},
 		// A quiet server has a fixed cost and no rate: the age rule, and a
 		// fresh anchor after a burst is an update.
@@ -38,12 +38,12 @@ func TestCutoverToFull(t *testing.T) {
 		// The estimate is the better evidence: an old anchor with a cheap
 		// update is updated, and a fresh one with a dear update is not.
 		{"old anchor but measured cheaper: update", BackupWindow{Anchor: old, Events: 1000, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
-		{"estimate exactly the full backup: update", BackupWindow{Anchor: fresh, Events: 480_000, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
+		{"estimate exactly the full read: update", BackupWindow{Anchor: fresh, Events: 480_000, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
 		{"nothing to fold: update", BackupWindow{Anchor: old, Events: 0, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
 		// Without one of the three the age rule decides.
 		{"events unknown, old anchor: full on age", BackupWindow{Anchor: old, Events: -1, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_age"},
 		{"no rate, old anchor: full on age", BackupWindow{Anchor: old, Events: 100, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_age"},
-		{"no full backup on record, old anchor: full on age", BackupWindow{Anchor: old, Events: 100, FoldRate: 1000}, 5 * time.Minute, "window_age"},
+		{"no full read on record, old anchor: full on age", BackupWindow{Anchor: old, Events: 100, FoldRate: 1000}, 5 * time.Minute, "window_age"},
 		{"events unknown, fresh anchor: update", BackupWindow{Anchor: fresh, Events: -1}, 5 * time.Minute, ""},
 		{"anchor exactly at the cut-over age: update", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge), Events: -1}, 5 * time.Minute, ""},
 		{"anchor a second past it: full on age", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge - time.Second), Events: -1}, 5 * time.Minute, "window_age"},
@@ -77,11 +77,11 @@ func TestCutoverToFull(t *testing.T) {
 			t.Errorf("age reason %q lacks %q", why, want)
 		}
 	}
-	if strings.Contains(why, "no usable update rate") || strings.Contains(why, "no full backup") {
+	if strings.Contains(why, "no usable update rate") || strings.Contains(why, "no full read") {
 		t.Errorf("age reason %q claims something the history has", why)
 	}
 	why = CutoverToFull(BackupWindow{Anchor: old, Events: 100}, 5*time.Minute, now)
-	if !strings.Contains(why, "no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full backup on record") || strings.Contains(why, "no count") {
+	if !strings.Contains(why, "no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full read on record") || strings.Contains(why, "no count") {
 		t.Errorf("age reason %q, want the two missing measurements named", why)
 	}
 	if got := roundSeconds(1e30); got != roundDuration(time.Duration(1<<63-1)) {
@@ -281,7 +281,7 @@ func TestChooseBackupMethod_cutsOverOnTheMeasuredWindow(t *testing.T) {
 	}
 	method, why, err := ChooseBackupMethod(context.Background(), e, BackupScheduleGates{LoopRunning: true, FullBackups: true, Window: dear})
 	if err != nil || method != BackupMethodFull || BackupWhyCode(why) != "window_measured" {
-		t.Fatalf("method=%q why=%q err=%v, want a full backup on the measured window", method, why, err)
+		t.Fatalf("method=%q why=%q err=%v, want a full read on the measured window", method, why, err)
 	}
 	if want := time.Date(2026, 8, 27, 3, 0, 0, 0, time.UTC); !asked.Equal(want) {
 		t.Fatalf("the probe was asked with anchor %s, want the newest snapshot's instant %s", asked, want)
@@ -289,7 +289,7 @@ func TestChooseBackupMethod_cutsOverOnTheMeasuredWindow(t *testing.T) {
 	// Full backups off: the update is the producer that can, so it runs.
 	method, why, err = ChooseBackupMethod(context.Background(), e, BackupScheduleGates{LoopRunning: true, Window: dear})
 	if err != nil || method != BackupMethodRefresh {
-		t.Fatalf("with full backups off: method=%q why=%q err=%v, want the update", method, why, err)
+		t.Fatalf("with full reads off: method=%q why=%q err=%v, want the update", method, why, err)
 	}
 	// No probe (a process that measures nothing): the update, as before.
 	method, _, err = ChooseBackupMethod(context.Background(), e, BackupScheduleGates{LoopRunning: true, FullBackups: true})

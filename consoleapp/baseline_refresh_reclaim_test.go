@@ -226,7 +226,7 @@ func TestKeepPartialSnapshotBecause(t *testing.T) {
 		// snapshot is finished AND marked, so the heuristic below it ("may be
 		// complete", "failed to be marked") would be false twice over on the
 		// one shape where the local copy is all the operator has left.
-		{"folded and marked, only the upload failed", 0, "", true, true, "only sending it to the backup destination failed"},
+		{"folded and marked, only the upload failed", 0, "", true, true, "only sending it to the snapshot destination failed"},
 		// Ownership still wins: a directory that was not this run's stays
 		// reported as not ours, whatever markers it carries.
 		{"not ours, and marked complete", 0, "the directory already held files", true, true, "the directory already held files"},

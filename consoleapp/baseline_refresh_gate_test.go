@@ -86,11 +86,11 @@ func TestRefreshCanSkip(t *testing.T) {
 				"newest snapshot is unknown here"},
 		{name: "something was indexed", seed: true, now: indexMark{101, 7}, covered: true, known: true,
 			why: "there is something to apply"},
-		{name: "nothing indexed and the backup is still covered", seed: true, now: folded,
+		{name: "nothing indexed and the snapshot is still covered", seed: true, now: folded,
 			covered: true, known: true, wantSkip: true,
 			wantsCoverageRead: true,
 			why:               "this is the cycle the whole feature exists for"},
-		{name: "nothing indexed but the backup is aging out", seed: true, now: folded,
+		{name: "nothing indexed but the snapshot is aging out", seed: true, now: folded,
 			covered: false, known: true,
 			wantsCoverageRead: true,
 			why: "not republishing freezes the lower bound of the next fold's window, and the " +
@@ -380,7 +380,7 @@ func TestRunRefresh_anUnknownMarkAlwaysFolds(t *testing.T) {
 	run()
 	if got := folds.Load(); got != 2 {
 		t.Errorf("folded %d time(s), want 2: the gate skipped on a mark it could not read, "+
-			"which stops the backup silently", got)
+			"which stops the snapshot silently", got)
 	}
 }
 
@@ -440,7 +440,7 @@ func TestTriggerRefresh_aSkippedCycleLeavesTheServerFree(t *testing.T) {
 	// that is taking too long rather than one that already returned.
 	if _, err := sup.TriggerRefresh(req, time.Minute); err != nil {
 		t.Fatalf("a third TriggerRefresh was refused with %v: the skipped cycle never released "+
-			"the single-flight, so this server's backup, restore and SQL export are wedged too "+
+			"the single-flight, so this server's snapshot, restore and SQL export are wedged too "+
 			"until the daemon restarts", err)
 	}
 	waitForTerminalState(t, func() console.BaselineStatus { return sup.RefreshStatus("s") })
@@ -634,7 +634,7 @@ func TestRunRefresh_foldsToReanchorAnAgingBackup(t *testing.T) {
 	run(refreshAt)                    // the first cycle folds and publishes, nothing remembered yet
 	run(refreshAt.Add(1 * time.Hour)) // quiet and still covered: skipped
 	if got := folds.Load(); got != 1 {
-		t.Fatalf("folded %d time(s), want 1 while the backup is still covered", got)
+		t.Fatalf("folded %d time(s), want 1 while the snapshot is still covered", got)
 	}
 
 	// Time passes on a server nobody is writing to. Nothing has been indexed —
@@ -684,13 +684,13 @@ func TestSnapshotCoveredBy(t *testing.T) {
 			"0.8 of the span, which on the default 30-day retention is the real bound on how " +
 				"long a quiet server goes without re-anchoring: 24 days, not one cycle"},
 		{"published before the floor", floor30d, now.AddDate(0, 0, -31), false,
-			"broken: the hours between the backup and the floor are gone"},
+			"broken: the hours between the snapshot and the floor are gone"},
 		{"no partitions to grade against", time.Time{}, now.Add(-time.Hour), false,
 			"a zero floor grades unknown, and unknown is not permission to skip"},
 		{"nothing was ever published", floor30d, time.Time{}, false,
 			"a memo with no published instant cannot vouch for anything"},
 		{"a young install, folded an hour ago", now.AddDate(0, 0, -2), now.Add(-time.Hour), true,
-			"the span is the install's age, so the aging band is narrow — but the backup is an " +
+			"the span is the install's age, so the aging band is narrow — but the snapshot is an " +
 				"hour old inside a two-day window, so the gate still engages. The bootstrap " +
 				"artifact staleness.go warns about does not make this feature inert"},
 		{"a long-lived install whose archives would have vouched for it", floor30d,
@@ -728,13 +728,13 @@ func TestRefreshCanSkip_aMemoDoesNotCrossDestinations(t *testing.T) {
 	toBucket.BaselineS3 = "s3://acme-backups/shop"
 	if sup.refreshCanSkip(context.Background(), toBucket, mark, refreshAt) {
 		t.Error("skipped a cycle that uploads on the strength of a fold that only wrote local " +
-			"disk: the bucket never receives a copy, and the schedule reports the backup as " +
+			"disk: the bucket never receives a copy, and the schedule reports the snapshot as " +
 			"up to date")
 	}
 	moved := local
 	moved.BaselineDir = "/mnt/new-backups"
 	if sup.refreshCanSkip(context.Background(), moved, mark, refreshAt) {
-		t.Error("skipped after the backup directory was re-pointed: nothing is ever written to " +
+		t.Error("skipped after the snapshot directory was re-pointed: nothing is ever written to " +
 			"the new location")
 	}
 }
@@ -866,7 +866,7 @@ func TestSnapshotCoveredIn_readsOnlyTheLivePartitions(t *testing.T) {
 
 	covered, known := snapshotCoveredIn(context.Background(), db, "idx", now.Add(-time.Hour), now)
 	if !known || !covered {
-		t.Errorf("covered=%v known=%v, want true/true: the backup is an hour old inside a "+
+		t.Errorf("covered=%v known=%v, want true/true: the snapshot is an hour old inside a "+
 			"30-day window", covered, known)
 	}
 	if err := mock.ExpectationsWereMet(); err == nil {

@@ -45,7 +45,7 @@ func (s *baselineSupervisor) statusSlotLocked(kind baselineJobKind) map[string]*
 		return s.compacts
 	default:
 		slog.Error("baseline supervisor: job kind has no status slot, so its failure cannot be recorded "+
-			"and this server's backup jobs will stay blocked until the daemon restarts. This is a bug: "+
+			"and this server's snapshot jobs will stay blocked until the daemon restarts. This is a bug: "+
 			"add the kind to statusSlotLocked.", "kind", string(kind))
 		return nil
 	}

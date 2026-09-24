@@ -509,7 +509,7 @@ func (h *BaselineRunHistory) LastScheduled(serverID string) (run, skip *Baseline
 // LastFullRead returns the newest full backup of the server that succeeded,
 // whatever started it (the full-backup timetable, the automatic choice, the
 // fallback for a failed update, a click), or nil. It is what ends the page's
-// "the full backup did not run" line (#1564): what the timetable asks for is
+// "the full read did not run" line (#1564): what the timetable asks for is
 // a real read of the database, and any successful one after the miss is one.
 func (h *BaselineRunHistory) LastFullRead(serverID string) *BaselineRunRecord {
 	h.mu.Lock()

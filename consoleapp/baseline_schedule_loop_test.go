@@ -303,8 +303,8 @@ func TestBackupScheduler_choosesTheProducerAndStampsTheTrigger(t *testing.T) {
 		wantMethod string
 		wantKind   string
 	}{
-		{"previous backup on disk: rebuild", true, console.BackupMethodRefresh, console.BaselineRunRefresh},
-		{"no backup yet: full backup", false, console.BackupMethodFull, console.BaselineRunDump},
+		{"previous snapshot on disk: rebuild", true, console.BackupMethodRefresh, console.BaselineRunRefresh},
+		{"no snapshot yet: full read", false, console.BackupMethodFull, console.BaselineRunDump},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			holdFold(t, func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
@@ -347,7 +347,7 @@ func TestBackupScheduler_choosesTheProducerAndStampsTheTrigger(t *testing.T) {
 				t.Fatalf("records = %v, want kinds %v", kinds, want)
 			}
 			if st.LastMethod != console.BackupMethodFull || (tc.withBackup && st.LastFallbackAt == "") {
-				t.Fatalf("slot state = %+v, want the full backup on record%s", st, map[bool]string{true: " as a fallback", false: ""}[tc.withBackup])
+				t.Fatalf("slot state = %+v, want the full read on record%s", st, map[bool]string{true: " as a fallback", false: ""}[tc.withBackup])
 			}
 		})
 	}
@@ -372,16 +372,16 @@ func TestBackupScheduler_refusedRebuildFallsBackToAFullBackup(t *testing.T) {
 		t.Fatalf("the fallback was not recorded: %+v", st)
 	}
 	if sup.Status(e.ID).State != "failed" {
-		t.Fatalf("the full backup did not run after the refusal: %+v", sup.Status(e.ID))
+		t.Fatalf("the full read did not run after the refusal: %+v", sup.Status(e.ID))
 	}
 	if run, _ := sup.history.LastScheduled(e.ID); run == nil || run.Kind != console.BaselineRunDump {
-		t.Fatalf("the newest scheduled record is not the fallback's full backup: %+v", run)
+		t.Fatalf("the newest scheduled record is not the fallback's full read: %+v", run)
 	}
 	// The fallback line is an alarm about the rebuild path, so it outlives
 	// the full backup it caused, and ends when a later scheduled rebuild
 	// goes through. Not at restart, not never.
 	if st := b.ScheduleState(e.ID); st.LastFallbackAt == "" {
-		t.Fatal("the fallback was forgotten as soon as its full backup finished")
+		t.Fatal("the fallback was forgotten as soon as its full read finished")
 	}
 	holdFold(t, func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
 		return nil, nil, nil
@@ -411,7 +411,7 @@ func TestBackupScheduler_refusedRebuildFallsBackToAFullBackup(t *testing.T) {
 	}
 	st2 := b2.ScheduleState(e2.ID)
 	if !strings.Contains(st2.LastSkipReason, "capture gap") || !strings.Contains(st2.LastSkipReason, "not set to 1") {
-		t.Fatalf("skip reason = %q, want the refusal and why a full backup cannot start", st2.LastSkipReason)
+		t.Fatalf("skip reason = %q, want the refusal and why a full read cannot start", st2.LastSkipReason)
 	}
 	// The reason is about THIS server: it has no S3 destination and the
 	// message must not invent one (the first cut routed the decision through
@@ -420,7 +420,7 @@ func TestBackupScheduler_refusedRebuildFallsBackToAFullBackup(t *testing.T) {
 		t.Fatalf("skip reason names S3 on a server that has none: %q", st2.LastSkipReason)
 	}
 	if sup2.Status(e2.ID).State != "idle" {
-		t.Fatal("a full backup was started without the opt-in")
+		t.Fatal("a full read was started without the opt-in")
 	}
 }
 
@@ -455,7 +455,7 @@ func TestBackupScheduler_noFallbackDuringShutdown(t *testing.T) {
 	close(release)
 	waitTerminal(t, b, e.ID)
 	if st := sup.Status(e.ID); st.State != "idle" {
-		t.Fatalf("a full backup was started during shutdown: %+v", st)
+		t.Fatalf("a full read was started during shutdown: %+v", st)
 	}
 	if st := b.ScheduleState(e.ID); st.LastFallbackAt != "" {
 		t.Fatalf("a shutdown-caused failure was recorded as a fallback: %+v", st)
@@ -477,7 +477,7 @@ func TestBackupScheduler_successfulRebuildDoesNotFallBack(t *testing.T) {
 		t.Fatalf("rebuild = %+v, want succeeded", st.Last)
 	}
 	if st := sup.Status(e.ID); st.State != "idle" {
-		t.Fatalf("a full backup was started after a successful rebuild: %+v", st)
+		t.Fatalf("a full read was started after a successful rebuild: %+v", st)
 	}
 	if st := b.ScheduleState(e.ID); st.LastFallbackAt != "" || st.LastSkippedAt != "" {
 		t.Fatalf("a successful rebuild left a fallback or skip behind: %+v", st)
@@ -514,7 +514,7 @@ func TestBackupScheduler_fallbackAlarmSurvivesItsOwnFullBackup(t *testing.T) {
 	b.started[e.ID] = scheduledStart{method: console.BackupMethodFull, at: "2026-08-28T09:00:07Z", since: "2026-08-28T09:00:07Z", fallback: true}
 	sup.jobs[e.ID] = &console.BaselineStatus{State: "succeeded", Since: "2026-08-28T09:00:07Z"}
 	if st := b.ScheduleState(e.ID); st.LastFallbackAt == "" || st.Last == nil || st.Last.State != "succeeded" {
-		t.Fatalf("the fallback's own full backup ended the alarm: %+v", st)
+		t.Fatalf("the fallback's own full read ended the alarm: %+v", st)
 	}
 	// A full backup the RULE picked at a later slot (the server now goes to
 	// S3, say) does end it: the alarm would otherwise be immortal on a
@@ -522,7 +522,7 @@ func TestBackupScheduler_fallbackAlarmSurvivesItsOwnFullBackup(t *testing.T) {
 	b.started[e.ID] = scheduledStart{method: console.BackupMethodFull, at: "2026-08-28T10:00:00Z", since: "2026-08-28T10:00:00Z"}
 	sup.jobs[e.ID] = &console.BaselineStatus{State: "succeeded", Since: "2026-08-28T10:00:00Z"}
 	if st := b.ScheduleState(e.ID); st.LastFallbackAt != "" {
-		t.Fatalf("a later successful full backup picked by the rule did not end the alarm: %+v", st)
+		t.Fatalf("a later successful full read picked by the rule did not end the alarm: %+v", st)
 	}
 	// And so does a successful scheduled update.
 	b.fallback[e.ID] = scheduledFallback{at: "2026-08-28T11:00:07Z", reason: "capture gap"}
@@ -560,9 +560,9 @@ func TestBackupScheduler_fallbackCollisionIsASkipNotAFallback(t *testing.T) {
 	}
 	st := b.ScheduleState(e.ID)
 	if st.LastFallbackAt != "" {
-		t.Fatalf("a fallback was recorded although no full backup started: %+v", st)
+		t.Fatalf("a fallback was recorded although no full read started: %+v", st)
 	}
-	if !strings.Contains(st.LastSkipReason, "was refused (capture gap") || !strings.Contains(st.LastSkipReason, "another backup job was running for this server when the full backup was tried") {
+	if !strings.Contains(st.LastSkipReason, "was refused (capture gap") || !strings.Contains(st.LastSkipReason, "another snapshot job was running for this server when the full read was tried") {
 		t.Fatalf("skip reason = %q, want both the failed update and the collision", st.LastSkipReason)
 	}
 	sup.mu.Lock()
@@ -593,7 +593,7 @@ func TestBackupScheduler_changedScheduleGetsNoFallback(t *testing.T) {
 	close(release)
 	waitTerminal(t, b, e.ID)
 	if st := sup.Status(e.ID); st.State != "idle" {
-		t.Fatalf("a full backup was started for a schedule that was changed meanwhile: %+v", st)
+		t.Fatalf("a full read was started for a schedule that was changed meanwhile: %+v", st)
 	}
 	if st := b.ScheduleState(e.ID); st.LastFallbackAt != "" || st.LastSkippedAt != "" {
 		t.Fatalf("something was recorded for the changed schedule: %+v", st)
@@ -700,7 +700,7 @@ func TestBackupScheduler_slotTheftIsASkip(t *testing.T) {
 		t.Fatal("the slot-theft skip did not reach the history")
 	}
 	if sup.Status(e.ID).State != "idle" {
-		t.Fatal("a full backup was started for a job whose end nobody saw")
+		t.Fatal("a full read was started for a job whose end nobody saw")
 	}
 }
 
@@ -835,7 +835,7 @@ func TestBackupScheduler_panickedJobStaysVisible(t *testing.T) {
 	// re-read: waitTerminal returns the snapshot from BEFORE the watcher's
 	// last poll, and the skip is written by that poll.
 	if st = b.ScheduleState(e.ID); !strings.Contains(st.LastSkipReason, "hit an internal error") || !strings.Contains(st.LastSkipReason, "not set to 1") {
-		t.Fatalf("skip reason = %q, want the crash named and why no full backup ran", st.LastSkipReason)
+		t.Fatalf("skip reason = %q, want the crash named and why no full read ran", st.LastSkipReason)
 	}
 	// A later manual rebuild overwrites the slot. The schedule's outcome
 	// must not vanish with it.
@@ -896,7 +896,7 @@ func TestBackupScheduler_skipsWithTheReasonWhenNothingCanRun(t *testing.T) {
 		s3   bool
 		want string
 	}{
-		{"no backup yet, opt-in off", false, nil, false, "not set to 1"},
+		{"no snapshot yet, opt-in off", false, nil, false, "not set to 1"},
 		{"S3 destination, lock mode misconfigured", true, errors.New("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: unknown mode \"lock-sometimes\""), true, "lock-sometimes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1063,7 +1063,7 @@ func TestBackupScheduler_runningAfterARealFire(t *testing.T) {
 		t.Fatal("the scheduled dump never reached the privilege check")
 	}
 	if st := b.ScheduleState(e.ID); !st.Running || st.Last == nil || st.LastMethod != console.BackupMethodFull {
-		t.Fatalf("in flight: ScheduleState = %+v, want a running full backup attributed", st)
+		t.Fatalf("in flight: ScheduleState = %+v, want a running full read attributed", st)
 	}
 	releaseOnce.Do(func() { close(release) })
 	st := waitTerminal(t, b, e.ID)
@@ -1231,7 +1231,7 @@ func TestBackupScheduler_aRefusedFoldStillFallsBack(t *testing.T) {
 // the fold source in internal/console, and the fold reads it from the request
 // the schedule builds here. Deleting `BaselineS3: e.BaselineS3` in startRebuild
 // passed the entire suite, and the result is not a small regression: the
-// decision still says "update, the previous backup is in the bucket" while the
+// decision still says "update, the previous snapshot is in the bucket" while the
 // fold looks in the empty local directory, refuses, and the watcher answers
 // that with a full lock-and-read of production. Every slot, silently.
 func TestStartRebuild_carriesTheDestinationIntoTheFold(t *testing.T) {

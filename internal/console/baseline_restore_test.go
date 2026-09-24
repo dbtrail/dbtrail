@@ -306,7 +306,7 @@ func TestBaselineRestore_carriesTheServersS3Destination(t *testing.T) {
 		name string
 		s3   string
 	}{
-		{"backups go to S3: the request carries the bucket", "s3://bucket/backups/"},
+		{"snapshots go to S3: the request carries the bucket", "s3://bucket/backups/"},
 		{"local only: the request carries no bucket", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -223,7 +223,7 @@ func TestBaselinesAPI_failsOnlyWhenNoLocationAnswers(t *testing.T) {
 //
 // Before the merge this could not be asked: a snapshot held only in the second
 // location had no row, so nothing linked to it. Now it has one, and opening the
-// primary alone answers "no backup found" for a row the same page just said is
+// primary alone answers "no snapshot found" for a row the same page just said is
 // there — and the Download button, which the frontend builds inside the success
 // path, never appears for exactly the snapshots this feature exists to reveal.
 func TestBaselineFilesAPI_reachesASnapshotOnlyInTheFallback(t *testing.T) {

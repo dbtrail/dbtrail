@@ -28,7 +28,7 @@ func TestS3RetentionBlockKeepsThePromises(t *testing.T) {
 		"if the schedule stops it keeps expiring until none is left",
 		"and to no archived changes configured on this page",
 		"sit at the bucket root",
-		"the newest complete backup expires before the next one exists",
+		"the newest complete snapshot expires before the next one exists",
 	} {
 		if !strings.Contains(box, want) {
 			t.Errorf("s3RetentionBox lost the sentence %q", want)
@@ -153,7 +153,7 @@ console.log(JSON.stringify(out));
 		t.Errorf("conflicts = %+v: want B's archives refused, B (by its resolved default), D and the daemon default named, C (sibling prefix) untouched", got.Conflicts)
 	}
 	if strings.Join(got.OwnArchive, ",") != "this server" {
-		t.Errorf("own archives under the backup prefix = %v, want [this server]", got.OwnArchive)
+		t.Errorf("own archives under the snapshot prefix = %v, want [this server]", got.OwnArchive)
 	}
 	if want := []bool{false, false, true, false, true, false, false}; !equalBools(got.Short, want) {
 		t.Errorf("retentionTooShort = %v, want %v (equal is refused; an unknown interval never warns)", got.Short, want)

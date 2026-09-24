@@ -1112,7 +1112,7 @@ func probeS3Store(ctx context.Context, e ServerEntry, typed bool, hold func(buck
 	}
 	buckets := e.s3Buckets()
 	if len(buckets) == 0 {
-		return []s3ProbeResult{{Error: "no Archive to S3 or Backups S3 location to test the S3 store with"}}
+		return []s3ProbeResult{{Error: "no Archive to S3 or Snapshots S3 location to test the S3 store with"}}
 	}
 	out := make([]s3ProbeResult, 0, len(buckets))
 	for _, b := range buckets {

@@ -50,7 +50,7 @@ func TestCoverageAPI_gradesEveryBackupLocation(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("broken_tables = %v, want shop.archived named. Its only anchor lives in the "+
-			"second backup location, so reading one location drops the table from the verdict "+
+			"second snapshot location, so reading one location drops the table from the verdict "+
 			"entirely: not covered, not broken, just absent from a panel that claims to say "+
 			"what is restorable", got.BrokenTables)
 	}
@@ -89,7 +89,7 @@ func TestCoverageAPI_partialListingIsUnknownNotAShorterWindow(t *testing.T) {
 	// The delta half is computed from the index, not from the backup
 	// locations, so it stays a real answer.
 	if got.DeltaFrom == "" {
-		t.Error("the live floor is independent of the backup listing and must still be reported")
+		t.Error("the live floor is independent of the snapshot listing and must still be reported")
 	}
 }
 
@@ -98,7 +98,7 @@ func TestCoverageAPI_partialListingIsUnknownNotAShorterWindow(t *testing.T) {
 // directory on a server with no S3 destination of its own. A table whose only
 // usable anchor is in a daemon-wide bucket must therefore NOT advance
 // full_table_from -- the card would print a start the button then refuses
-// with "no backup exists at or before <t>" -- and must NOT join
+// with "no snapshot exists at or before <t>" -- and must NOT join
 // broken_tables, which drives an alarm a backup that exists off site does
 // not deserve.
 //
@@ -140,8 +140,8 @@ func TestGradeFullTable_dirRestore_anS3OnlyAnchorDoesNotWidenTheRestoreWindow(t 
 		t.Errorf("from = %s, want %s: the window is the latest LOCAL earliest-usable anchor", got.from, localOrders)
 	}
 	if len(got.broken) != 0 {
-		t.Errorf("broken = %v, want none: shop.carts has a current backup, it is just off site. "+
-			"broken_tables drives an alarm and says 'take a fresh backup', which is wrong advice here", got.broken)
+		t.Errorf("broken = %v, want none: shop.carts has a current snapshot, it is just off site. "+
+			"broken_tables drives an alarm and says 'take a fresh snapshot', which is wrong advice here", got.broken)
 	}
 	if !slices.Equal(got.unreachable, []string{"shop.audit", "shop.carts"}) {
 		t.Errorf("unreachable = %v, want [shop.audit shop.carts] in that order: silence here is the "+
@@ -207,7 +207,7 @@ func TestGradeFullTable_s3Restore_aLocalOnlySnapshotIsUnreachableNotBroken(t *te
 		t.Errorf("unreachable = %v, want [shop.carts]: its only copy is where an S3 restore does not look", got.unreachable)
 	}
 	if len(got.broken) != 0 {
-		t.Errorf("broken = %v, want none: the backup exists and Time-travel reads it", got.broken)
+		t.Errorf("broken = %v, want none: the snapshot exists and Time-travel reads it", got.broken)
 	}
 	if !got.from.Equal(now.Add(-2 * time.Hour)) {
 		t.Errorf("from = %s, want the bucket's own anchor, not the local-only one", got.from)
@@ -267,7 +267,7 @@ func TestListBaselinesMerged_marksEveryFileTheBucketListed(t *testing.T) {
 // the fallback never fires and time travel resolves the stale copy. No console
 // surface reaches the fresh S3 sibling.
 //
-// Calling this unreachable would trade the red "take a fresh backup" this card
+// Calling this unreachable would trade the red "take a fresh snapshot" this card
 // gave before #1571 for a warning that PROMISES a working time travel -- the
 // operator would read the promise and not take the backup.
 func TestGradeFullTable_aStaleLocalCopyShadowsTheOffsiteOneAndStaysBroken(t *testing.T) {
@@ -293,7 +293,7 @@ func TestGradeFullTable_aStaleLocalCopyShadowsTheOffsiteOneAndStaysBroken(t *tes
 	}
 
 	// The same shape on an S3-backed server is RESTORABLE: Restore folds the
-	// fresh copy from the bucket, so "take a fresh backup" would be wrong
+	// fresh copy from the bucket, so "take a fresh snapshot" would be wrong
 	// advice about a restore that works. (Time-travel still prefers the
 	// stale local copy; that divergence is the fold's, documented on
 	// BaselineFoldSource, not this card's to hide a working restore behind.)
@@ -452,15 +452,15 @@ func TestCoverageAPI_aDirBackedServerDoesNotAskForALocalFolder(t *testing.T) {
 	got := coverageGet(t, srv)
 
 	if got.RestoreNeedsLocal {
-		t.Error("restore_needs_local is true on a server whose backups go to a local directory. " +
-			"The card would tell the operator their backups are S3-only and drop the unreachable list")
+		t.Error("restore_needs_local is true on a server whose snapshots go to a local directory. " +
+			"The card would tell the operator their snapshots are S3-only and drop the unreachable list")
 	}
 	if got.RestoreReads != "inherited" {
 		t.Errorf("restore_reads = %q, want inherited: the boot server names no location of its own, so "+
 			"the card graded the daemon-wide directory, and Restore is refused for it (#1602)", got.RestoreReads)
 	}
 	if got.FullTableFrom == "" {
-		t.Error("a dir-backed server with a healthy backup must still report its restore window")
+		t.Error("a dir-backed server with a healthy snapshot must still report its restore window")
 	}
 }
 
@@ -542,7 +542,7 @@ func TestCoverageAPI_anEntryInheritingTheDaemonDirKeepsItsWindow(t *testing.T) {
 	}
 	if got.RestoreReads != "inherited" || got.FullTableFrom == "" {
 		t.Errorf("restore_reads = %q full_table_from = %q, want inherited and a window: the inherited "+
-			"directory holds a healthy backup, so reading nothing would erase it from the card, and "+
+			"directory holds a healthy snapshot, so reading nothing would erase it from the card, and "+
 			"calling it dir would claim a Restore button the server does not get (#1602)", got.RestoreReads, got.FullTableFrom)
 	}
 }
@@ -551,7 +551,7 @@ func TestCoverageAPI_anEntryInheritingTheDaemonDirKeepsItsWindow(t *testing.T) {
 // (uploaded, then pruned locally) while a fresh copy sits on this host alone
 // (a restore whose upload failed, or the daemon-wide refresh). Restore reads
 // the bucket, anchors on the stale copy and refuses the whole run, so this is
-// broken — "take a fresh backup" is the remedy, and a full backup sends the
+// broken — "take a fresh snapshot" is the remedy, and a full backup sends the
 // directory up. Calling it unreachable would say "backed up only on this
 // host", which is false: an older copy IS in S3, and it is the one the
 // button would use.

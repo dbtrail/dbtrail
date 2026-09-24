@@ -154,7 +154,7 @@ func TestBackupScheduleCard_copy(t *testing.T) {
 	if !strings.Contains(body, "Cannot run: ") {
 		t.Error("the state line does not say when the schedule cannot run")
 	}
-	if strings.Contains(body, "rebuild from change history") || strings.Contains(body, "Full backup (reads") {
+	if strings.Contains(body, "rebuild from change history") || strings.Contains(body, "Full read (reads") {
 		t.Error("the card still names the two producers as options; the operator picks when, the daemon picks how")
 	}
 }

@@ -93,11 +93,11 @@ func TestCaptureComparable(t *testing.T) {
 			s.CaptureSkips = skipLedger(12, anchor.Add(-time.Hour))
 			return s
 		}, false, time.Time{}, false},
-		{"rows dropped exactly as the last full backup started", func(s *status.StreamStateInfo) *status.StreamStateInfo {
+		{"rows dropped exactly as the last full read started", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.CaptureSkips = skipLedger(12, fullRead)
 			return s
 		}, false, time.Time{}, false},
-		{"rows dropped before the last full backup started: it read them", func(s *status.StreamStateInfo) *status.StreamStateInfo {
+		{"rows dropped before the last full read started: it read them", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.CaptureSkips = skipLedger(12, fullRead.Add(-time.Minute))
 			return s
 		}, true, time.Time{}, false},
@@ -105,11 +105,11 @@ func TestCaptureComparable(t *testing.T) {
 			s.CaptureSkips = skipLedger(12, anchor.Add(-10*time.Minute))
 			return s
 		}, true, anchor.Add(-5 * time.Minute), false},
-		{"rows dropped, and no full backup on record", func(s *status.StreamStateInfo) *status.StreamStateInfo {
+		{"rows dropped, and no full read on record", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.CaptureSkips = skipLedger(12, anchor.Add(-72*time.Hour))
 			return s
 		}, false, time.Time{}, true},
-		{"no full backup on record and nothing dropped", func(s *status.StreamStateInfo) *status.StreamStateInfo { return s }, true, time.Time{}, true},
+		{"no full read on record and nothing dropped", func(s *status.StreamStateInfo) *status.StreamStateInfo { return s }, true, time.Time{}, true},
 		{"a reason with a zero count is not a skip", func(s *status.StreamStateInfo) *status.StreamStateInfo {
 			s.CaptureSkips = skipLedger(0, anchor.Add(time.Hour))
 			return s
@@ -359,7 +359,7 @@ func TestCompareCapture(t *testing.T) {
 				s.CaptureSkips = skipLedger(4, anchor.Add(-time.Hour))
 				return s
 			}(), read: anchor.Add(-2 * time.Hour),
-			detail: "the capture dropped events that no full backup has read from the source since"},
+			detail: "the capture dropped events that no full read has read from the source since"},
 		{name: "the source does not answer", st: streamStateFor(uuidB + ":1-10"), openFails: true,
 			detail: "the source did not answer", wantErr: true, opened: true},
 		{name: "the index's server_uuid read fails", st: streamStateFor(uuidB + ":1-10"),
@@ -466,7 +466,7 @@ func TestReportCaptureProbe(t *testing.T) {
 	}
 	b.reportCaptureProbe(e, anchor, captureProbeResult{verdict: console.CaptureCaughtUp})
 	b.reportCaptureProbe(e, anchor, captureProbeResult{verdict: console.CaptureCaughtUp})
-	if out := logs.String(); strings.Count(out, "updating instead of taking a full backup on age") != 1 {
+	if out := logs.String(); strings.Count(out, "updating instead of taking a full read on age") != 1 {
 		t.Fatalf("caught up twice for one anchor: %q, want one Info line", out)
 	}
 	// Behind again after caught up is said again, even with the reason it

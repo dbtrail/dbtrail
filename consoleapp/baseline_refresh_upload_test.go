@@ -221,7 +221,7 @@ func TestRunRefresh_failedUploadFailsTheRunAndKeepsTheSnapshot(t *testing.T) {
 	// read of production, so the link from THIS failure to that flag is pinned
 	// here: the watcher's own test stages the status directly.
 	if st.State != "failed" {
-		t.Fatalf("state = %q, want the run reported failed: the backup did not reach the destination", st.State)
+		t.Fatalf("state = %q, want the run reported failed: the snapshot did not reach the destination", st.State)
 	}
 	if !st.Published {
 		t.Fatalf("status = %+v, want Published: the fold finished and marked the snapshot", st)
@@ -235,7 +235,7 @@ func TestRunRefresh_failedUploadFailsTheRunAndKeepsTheSnapshot(t *testing.T) {
 	if !strings.Contains(out, "AccessDenied") {
 		t.Fatalf("the failed upload was not reported: %s", out)
 	}
-	if !strings.Contains(out, "only sending it to the backup destination failed") {
+	if !strings.Contains(out, "only sending it to the snapshot destination failed") {
 		t.Fatalf("the report does not say the fold itself worked: %s", out)
 	}
 	snap := filepath.Join(local, reconstruct.SnapshotDirName(refreshAt))

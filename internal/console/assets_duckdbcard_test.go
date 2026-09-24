@@ -37,7 +37,7 @@ func TestDuckDBCardOffersOneDecision(t *testing.T) {
 	boxes := strings.Count(body, `type: "checkbox"`)
 	if boxes != 2 {
 		t.Errorf("duckdbPanel renders %d checkboxes, want exactly 2 (the change log, and the "+
-			"backup location when the server has two); pin-snapshot and include-live are CLI "+
+			"snapshot location when the server has two); pin-snapshot and include-live are CLI "+
 			"flags and route parameters, not first-visit decisions", boxes)
 	}
 	// The point of the pair above: unconditional, it is a control that changes

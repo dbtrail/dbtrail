@@ -117,7 +117,7 @@ func TestNewestBackupRowChildrenAreAllListed(t *testing.T) {
 		}
 	}
 	if start < 0 || end <= start {
-		t.Fatal("could not find the backups row builder in app.js; if it moved, re-point this test " +
+		t.Fatal("could not find the snapshots row builder in app.js; if it moved, re-point this test " +
 			"rather than deleting it")
 	}
 	known := map[string]bool{}
@@ -158,7 +158,7 @@ func TestNewestBackupRowChildrenAreAllListed(t *testing.T) {
 			if skip[c] || known[c] {
 				continue
 			}
-			t.Errorf("the newest backup row renders .%s, which no contrast check covers. Add it to "+
+			t.Errorf("the newest snapshot row renders .%s, which no contrast check covers. Add it to "+
 				"latestRowChildren so its colour is measured against the tint.", c)
 		}
 	}
@@ -226,12 +226,12 @@ func TestNewestBackupRowPillMatchesTheOtherVioletPill(t *testing.T) {
 	css := string(readStyleCSS(t))
 	want := ruleBody(css, ".tcard-violet .tag-pill")
 	if want == "" {
-		t.Fatal("no .tcard-violet .tag-pill rule: this test compares the newest backup row's pill " +
+		t.Fatal("no .tcard-violet .tag-pill rule: this test compares the newest snapshot row's pill " +
 			"against it, so if that rule moved, re-point this rather than deleting it")
 	}
 	got := ruleBody(css, ".stg-row-latest .tag-pill")
 	if got == "" {
-		t.Fatal("the newest backup row's pill no longer overrides its ground. It sits on the same " +
+		t.Fatal("the newest snapshot row's pill no longer overrides its ground. It sits on the same " +
 			"--violet-tint as the .tcard-violet pill and must look the same there")
 	}
 	if norm(got) != norm(want) {

@@ -228,7 +228,7 @@ func TestReportRefreshDuration_saysWhatEachReadingSupports(t *testing.T) {
 			refreshRun{interval: 5 * time.Minute, took: 579 * time.Second, window: 485 * time.Second},
 			refreshPace{window: 420 * time.Second, took: 485 * time.Second, fold: 485 * time.Second})
 		for _, want := range []string{"level=WARN", "second published run in a row", "further behind than the one before it did",
-			"A longer interval does not change that", "full backup", "took=9m39s", "window=8m5s",
+			"A longer interval does not change that", "full read", "took=9m39s", "window=8m5s",
 			"previous_window=7m0s", "previous_took=8m5s", "server=srv",
 			// The reading is over the WHOLE run, upload included, so the
 			// remedy may not point at the fold alone: an S3 destination that
@@ -710,7 +710,7 @@ func TestRunRefresh_theSampleIsKeptOnPublishAndDroppedOnRefusal(t *testing.T) {
 	// exactly zero, so it would show up here as a few hundred nanoseconds of
 	// upload this server cannot perform.
 	if out := buf.String(); strings.Contains(out, "upload_took=") {
-		t.Errorf("a server whose backups stay on disk reported an upload duration: %q", out)
+		t.Errorf("a server whose snapshots stay on disk reported an upload duration: %q", out)
 	}
 
 	kept, ok := sup.refreshPaces["s"]

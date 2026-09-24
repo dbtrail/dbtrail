@@ -74,13 +74,13 @@ func TestLastSourceRead(t *testing.T) {
 		want time.Time
 	}{
 		{"nothing on record", nil, time.Time{}},
-		{"the newest full backup at or before the anchor: its start", []BaselineRunRecord{
+		{"the newest full read at or before the anchor: its start", []BaselineRunRecord{
 			dump(at(-5*time.Hour), at(-6*time.Hour)),
 			dump(at(-2*time.Hour), at(-3*time.Hour)),
 			{ServerID: "a", Kind: BaselineRunRefresh, SnapshotTime: at(0), StartedAt: at(-time.Minute)},
 		}, anchor.Add(-3 * time.Hour)},
-		{"the anchor itself a full backup", []BaselineRunRecord{dump(at(0), at(-20*time.Minute))}, anchor.Add(-20 * time.Minute)},
-		{"a full backup newer than the anchor is not its chain", []BaselineRunRecord{
+		{"the anchor itself a full read", []BaselineRunRecord{dump(at(0), at(-20*time.Minute))}, anchor.Add(-20 * time.Minute)},
+		{"a full read newer than the anchor is not its chain", []BaselineRunRecord{
 			dump(at(-2*time.Hour), at(-3*time.Hour)),
 			dump(at(time.Hour), at(30*time.Minute)),
 		}, anchor.Add(-3 * time.Hour)},
@@ -98,7 +98,7 @@ func TestLastSourceRead(t *testing.T) {
 			dump(at(-2*time.Hour), at(-3*time.Hour)),
 			{ServerID: "a", Kind: BaselineRunDump, SkipReason: "busy", SnapshotTime: at(-time.Hour), StartedAt: at(-time.Hour)},
 		}, anchor.Add(-3 * time.Hour)},
-		{"another server's full backup", []BaselineRunRecord{{ServerID: "b", Kind: BaselineRunDump, SnapshotTime: at(-time.Hour), StartedAt: at(-2 * time.Hour)}}, time.Time{}},
+		{"another server's full read", []BaselineRunRecord{{ServerID: "b", Kind: BaselineRunDump, SnapshotTime: at(-time.Hour), StartedAt: at(-2 * time.Hour)}}, time.Time{}},
 		{"the newest one's start does not parse: never, not an older one", []BaselineRunRecord{
 			dump(at(-2*time.Hour), at(-3*time.Hour)),
 			dump(at(-time.Hour), "yesterday"),

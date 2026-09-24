@@ -146,7 +146,7 @@ func TestIntegrationFirstRunReadsTheBackupLocation(t *testing.T) {
 	}
 	last := rep.Steps[len(rep.Steps)-1]
 	if !rep.Complete || last.State != firstRunDone {
-		t.Fatalf("complete = %v, backup step = %+v; the backup in %s was not found", rep.Complete, last, backups)
+		t.Fatalf("complete = %v, snapshot step = %+v; the snapshot in %s was not found", rep.Complete, last, backups)
 	}
 
 	// And with the folder empty, the same server keeps the list up: the read

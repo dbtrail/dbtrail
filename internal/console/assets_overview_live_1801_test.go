@@ -793,10 +793,10 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
 	// Five quiet minutes: at most three asks (one every two minutes), where
 	// the 15 s cap would give twenty.
 	if st.SettledAsks == 0 || st.SettledAsks > 3 {
-		t.Errorf("a list waiting only for a backup asked %d time(s) over five quiet minutes; want it still asking, but rarely (each ask reads the server's backup locations)", st.SettledAsks)
+		t.Errorf("a list waiting only for a snapshot asked %d time(s) over five quiet minutes; want it still asking, but rarely (each ask reads the server's snapshot locations)", st.SettledAsks)
 	}
 	if st.AfterChange != 0 {
-		t.Errorf("a change made the settled list ask %d time(s); a change cannot produce a backup, and a busy server would ask on every one", st.AfterChange)
+		t.Errorf("a change made the settled list ask %d time(s); a change cannot produce a snapshot, and a busy server would ask on every one", st.AfterChange)
 	}
 	// Bounded, not one per show: the fake clock resolves each pending turn at
 	// a different instant, so two of them can each arm a wait where a browser
@@ -806,13 +806,13 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
 		t.Errorf("five shows in a row asked %d time(s), want 1 or 2: %v", st.AfterWake, st.WakeTrace)
 	}
 	if st.WhileRunning < 2 {
-		t.Errorf("a backup this console is running was followed with %d ask(s); want it followed to the end", st.WhileRunning)
+		t.Errorf("a snapshot this console is running was followed with %d ask(s); want it followed to the end", st.WhileRunning)
 	}
 	if st.CardAtEnd != "" {
-		t.Errorf("the list stayed after the backup finished: %q", st.CardAtEnd)
+		t.Errorf("the list stayed after the snapshot finished: %q", st.CardAtEnd)
 	}
 	if got.OutsideBackup.Card != "" {
-		t.Errorf("a backup taken outside this page left the list saying one is owed: %q (%d asks)", got.OutsideBackup.Card, got.OutsideBackup.Asks)
+		t.Errorf("a snapshot taken outside this page left the list saying one is owed: %q (%d asks)", got.OutsideBackup.Card, got.OutsideBackup.Asks)
 	}
 	h2 := got.Hang
 	if !strings.Contains(h2.Note, "has not updated since") {
@@ -840,8 +840,8 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
 	}
 
 	if got.BusySettled.Asks > 5 {
-		t.Errorf("a busy server asked the first-run endpoint %d times over five minutes while only a backup was left; "+
-			"each ask reads the server's backup locations", got.BusySettled.Asks)
+		t.Errorf("a busy server asked the first-run endpoint %d times over five minutes while only a snapshot was left; "+
+			"each ask reads the server's snapshot locations", got.BusySettled.Asks)
 	}
 	if got.IdleSlow.Status > 6 || got.IdleSlow.Cov > 6 {
 		t.Errorf("half an hour idle ran %d full index counts and %d coverage reads; want a handful", got.IdleSlow.Status, got.IdleSlow.Cov)
@@ -899,7 +899,7 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
 	// change would have sat there unshown until a reload.
 	s := got.SnapshotNoChange
 	if s.Card != "" || s.Rows != 0 {
-		t.Errorf("a server with a backup and no change: list %q, rows %d; want the list finished by the backup and nothing to show yet", s.Card, s.Rows)
+		t.Errorf("a server with a snapshot and no change: list %q, rows %d; want the list finished by the snapshot and nothing to show yet", s.Card, s.Rows)
 	}
 	if len(s.After) != 1 || s.CardAfter != "" {
 		t.Errorf("after the first change: rows %q, list %q; want the change shown with no list to carry it", s.After, s.CardAfter)

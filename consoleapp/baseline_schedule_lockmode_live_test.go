@@ -9,7 +9,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 )
 
-// The schedule's answer to "can a full backup start here?" follows the lock
+// The schedule's answer to "can a full read start here?" follows the lock
 // mode the next dump would really use. It used to return the refusal this
 // process started with, so after an operator fixed a bad lock mode from the
 // Backup settings page, dumps went through again while the schedule card,

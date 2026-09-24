@@ -130,7 +130,7 @@ func (s *baselineSupervisor) executeRestore(req console.BaselineRestoreRequest) 
 		return 0, 0, reuseTally{}, fmt.Errorf("list the snapshot to restore from: %w", err)
 	}
 	if len(tableList) == 0 {
-		return 0, 0, reuseTally{}, fmt.Errorf("no backup exists at or before %s; a restore folds an existing backup forward, so pick a moment after your oldest backup", req.At.UTC().Format("2006-01-02 15:04:05"))
+		return 0, 0, reuseTally{}, fmt.Errorf("no snapshot exists at or before %s; a restore folds an existing snapshot forward, so pick a moment after your oldest snapshot", req.At.UTC().Format("2006-01-02 15:04:05"))
 	}
 	if reconstruct.SnapshotDirName(anchor) == reconstruct.SnapshotDirName(req.At) {
 		// Compared by the DIRECTORY NAME, which is what collides, not by the
@@ -144,7 +144,7 @@ func (s *baselineSupervisor) executeRestore(req console.BaselineRestoreRequest) 
 		// place, writing the _INCOMPLETE marker into a complete remote backup
 		// first, so a failure midway leaves the bucket copy hidden from every
 		// listing and nothing saying so.
-		return 0, 0, reuseTally{}, fmt.Errorf("a backup already exists at exactly %s in %s; pick another second, or use that backup", req.At.UTC().Format("2006-01-02 15:04:05"), source)
+		return 0, 0, reuseTally{}, fmt.Errorf("a snapshot already exists at exactly %s in %s; pick another second, or use that snapshot", req.At.UTC().Format("2006-01-02 15:04:05"), source)
 	}
 	return s.foldSnapshot(fold, req.At.UTC(), tableList)
 }

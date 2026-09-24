@@ -15,7 +15,7 @@ import (
 // errFoldDiskFull marks a table refused before writing because the disk could
 // not hold it (#1614). applyFoldStatus turns it into DiskRefused, which keeps
 // the schedule from answering it with a full backup into the same disk.
-var errFoldDiskFull = errors.New("not enough free disk space for this backup")
+var errFoldDiskFull = errors.New("not enough free disk space for this snapshot")
 
 // foldDiskMargin is the room kept free on top of each file's size. It covers
 // what the size cannot see on a host that also captures: DuckDB spill, the
@@ -45,7 +45,7 @@ func newDiskSpaceCheck() func(dir string, need int64) error {
 		free, total, err := diskSpaceFn(dir)
 		if err != nil || total == 0 {
 			once.Do(func() {
-				slog.Warn("backup disk check skipped: free space on the backup directory cannot be measured",
+				slog.Warn("snapshot disk check skipped: free space on the snapshot directory cannot be measured",
 					"dir", dir, "error", err)
 			})
 			return nil

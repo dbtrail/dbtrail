@@ -219,7 +219,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	if sessionRestricted(r) {
 		recordProfileGateDeny(r, "baselines")
 		writeJSONError(w, http.StatusForbidden,
-			"backup listings are unavailable while an access-control profile is active: baseline reads aren't redacted")
+			"snapshot listings are unavailable while an access-control profile is active: baseline reads aren't redacted")
 		return
 	}
 	resp := baselinesResponse{Reconstruct: b.baselineConfigured, Snapshots: []baselineSnapshotDTO{}}
@@ -395,7 +395,7 @@ func (s *Server) handleBaselineLocation(w http.ResponseWriter, r *http.Request) 
 	if s.profileActiveFor(r) {
 		recordProfileGateDeny(r, "baselines")
 		writeJSONError(w, http.StatusForbidden,
-			"the backup location is not shown while an access-control profile is active: an export from it is not redacted")
+			"the snapshot location is not shown while an access-control profile is active: an export from it is not redacted")
 		return
 	}
 	resp := baselineLocationResponse{}

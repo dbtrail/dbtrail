@@ -123,8 +123,8 @@ func TestSQLExport_gates(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec, body := doServersReq(t, srv, "POST", "/api/servers/"+bare.ID+"/sql-export", `{"at":"2026-06-10 12:00:00"}`)
-	if rec.Code != 400 || !strings.Contains(string(body), "backup location") {
-		t.Fatalf("no baseline source: code=%d body=%s, want 400 naming the missing backup location", rec.Code, body)
+	if rec.Code != 400 || !strings.Contains(string(body), "snapshot location") {
+		t.Fatalf("no baseline source: code=%d body=%s, want 400 naming the missing snapshot location", rec.Code, body)
 	}
 
 	id := addRestoreEntry(t, srv, "/var/lib/dbtrail/baselines")

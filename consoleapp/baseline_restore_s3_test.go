@@ -120,7 +120,7 @@ func TestRunRestore_S3BackedServerFoldsFromTheBucketAndUploads(t *testing.T) {
 		t.Fatalf("status = %+v, want a published success", st)
 	}
 	if len(*listed) != 1 || (*listed)[0] != "s3://bucket/backups/" {
-		t.Fatalf("looked for the backup to fold from in %v, want the bucket once", *listed)
+		t.Fatalf("looked for the snapshot to fold from in %v, want the bucket once", *listed)
 	}
 	// Read from the bucket, write to the local directory: the two halves of
 	// the fold config that the stub above is the only thing to observe.

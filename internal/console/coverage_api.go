@@ -92,7 +92,7 @@ type coverageResponse struct {
 	// backup that exists is not broken. Its own bucket rather than silence,
 	// too — the listing behind this verdict reads every location (#1571), so
 	// folding these into full_table_from would promise a restore the button
-	// then refuses with "no backup exists at or before".
+	// then refuses with "no snapshot exists at or before".
 	UnreachableTables []string `json:"unreachable_tables,omitempty"`
 	// RestoreNeedsLocal marks a server whose backups go ONLY to S3: the Restore
 	// button needs a local backup directory to fold INTO and refuses outright
@@ -284,7 +284,7 @@ func gradeFullTable(files []reconstruct.BaselineFile, reach restoreReach, floor 
 			// rescue the button (see tableAnchors), so this is broken on the
 			// newest SOURCE anchor — under "dir" exactly the verdict this card
 			// gave before it read both locations. Calling it unreachable
-			// would trade a red "take a fresh backup" for a warning that says
+			// would trade a red "take a fresh snapshot" for a warning that says
 			// the backup merely lives elsewhere.
 			if floor.Grade(a.newestSource, now) == status.BaselineBroken {
 				v.broken = append(v.broken, k)
@@ -435,7 +435,7 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 		// in the directory that would not open, so the readable subset is not
 		// gradable either. reconstruct reports the skips for that reason.
 		if merged.Listed < len(merged.Sources) || merged.Listed == 0 || merged.Skipped > 0 {
-			slog.Warn("console: coverage card could not list every backup location in full; the verdict is unknown rather than graded against a partial view",
+			slog.Warn("console: coverage card could not list every snapshot location in full; the verdict is unknown rather than graded against a partial view",
 				"server", serverID(r), "listed", merged.Listed, "configured", len(merged.Sources), "unreadable_directories", merged.Skipped)
 			resp.FullTableStatus = "unknown"
 			break
@@ -449,7 +449,7 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 			// The card tells the operator to check the daemon log, and this is
 			// the only producer of "unknown" that was not writing one: the
 			// listing failure and the missing floor both log already.
-			slog.Warn("console: coverage could not grade every table; their newest backup sits below a floor whose archives cannot be attributed to one source",
+			slog.Warn("console: coverage could not grade every table; their newest snapshot sits below a floor whose archives cannot be attributed to one source",
 				"server", serverID(r), "tables", v.unevaluable)
 			break
 		}

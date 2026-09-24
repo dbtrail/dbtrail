@@ -129,7 +129,7 @@ func TestBackupSettingsSectionIsWired(t *testing.T) {
 	// in on the navigate() side, where those rows do not look.
 	gate := regexp.MustCompile(`route === "snapshots"[^;\n]{0,60}!capsCache\.monitor`)
 	if gate.MatchString(js) {
-		t.Error("snapshots is behind the monitor gate; on serve the per-server backup " +
+		t.Error("snapshots is behind the monitor gate; on serve the per-server snapshot " +
 			"location would have NO editor anywhere in the UI")
 	}
 	body := jsFunctionBody(t, js, "snapshotSetupSections")
@@ -144,7 +144,7 @@ func TestBackupSettingsSectionIsWired(t *testing.T) {
 	navRE := regexp.MustCompile(`(?s)data-route="snapshots"[^>]*>`)
 	if nav := navRE.FindString(html); strings.Contains(nav, `data-capability="monitor"`) {
 		t.Error("the snapshots nav item is capability-gated on monitor; serve users could not " +
-			"reach the only editor of the per-server backup location")
+			"reach the only editor of the per-server snapshot location")
 	}
 }
 
@@ -354,7 +354,7 @@ func TestSnapshotsIsNamedOnce(t *testing.T) {
 	// function, and paired with the filter that consults the list — a list
 	// nothing reads would pass a search over the whole file.
 	palette := jsFunctionBody(t, js, "cmdkCommands")
-	for _, old := range []string{"backups", "verification", "backup settings"} {
+	for _, old := range []string{"backups", "verification", "snapshot settings"} {
 		if !strings.Contains(palette, `"`+old+`"`) {
 			t.Errorf("the palette does not answer to %q, the name one of the merged pages had", old)
 		}
@@ -367,7 +367,7 @@ func TestSnapshotsIsNamedOnce(t *testing.T) {
 	if !strings.Contains(nav, "<span>Snapshots</span>") {
 		t.Error("the nav item does not read Snapshots")
 	}
-	for _, gone := range []string{`pageHead("Backups"`, `pageHead("Verification"`, `pageHead("Backup settings"`} {
+	for _, gone := range []string{`pageHead("Backups"`, `pageHead("Verification"`, `pageHead("Snapshot settings"`} {
 		if strings.Contains(js, gone) {
 			t.Errorf("%s is back; the three pages are one page with one heading now", gone)
 		}

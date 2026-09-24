@@ -227,7 +227,7 @@ func init() {
 		"When a refresh finds a table had no changes, publish its previous Parquet file instead of rewriting "+
 			"it (hard link where possible). On by default since #1681: the rows are identical either way, and "+
 			"reuse never publishes a table it should not — a destructive DDL or a stale schema snapshot refuses "+
-			"the backup before it, a known capture gap makes the table ineligible so it is folded as usual, and a "+
+			"the snapshot before it, a known capture gap makes the table ineligible so it is folded as usual, and a "+
 			"failed _MANIFEST check fails the run. It links two snapshots to one file, so disk-usage and prune figures then "+
 			"count space they will not reclaim while the newer snapshot references it. The web interface no "+
 			"longer asks. --baseline-carry-forward-unchanged=false turns off THIS path; with "+
@@ -1408,12 +1408,12 @@ func runBaselinePruneCycle(ctx context.Context, targets []baselinePruneTarget, r
 		// while the page suppresses its disk warning for any server that HAS a
 		// destination.
 		if res.KeptNotDurable > 0 {
-			slog.Warn("baseline prune: snapshots are old enough to reclaim but have no confirmed copy at the backup "+
+			slog.Warn("baseline prune: snapshots are old enough to reclaim but have no confirmed copy at the snapshot "+
 				"destination, so they stay on this disk. Send them, or remove them by hand.",
 				"dir", t.dir, "kept", res.KeptNotDurable, "destination", t.s3)
 		}
 		if res.ProbeErrors > 0 {
-			slog.Warn("baseline prune: could not check whether some snapshots are at the backup destination, so they "+
+			slog.Warn("baseline prune: could not check whether some snapshots are at the snapshot destination, so they "+
 				"were kept", "dir", t.dir, "unchecked", res.ProbeErrors)
 		}
 	}

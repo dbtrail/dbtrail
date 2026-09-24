@@ -377,7 +377,7 @@ func bucketStoresOf(entries []ServerEntry, process map[string]string) (map[strin
 		}
 		buckets := e.s3Buckets()
 		if !st.IsZero() && len(buckets) == 0 {
-			slog.Warn("server registry: this server has S3 store settings but no Archive to S3 or Backups S3 location of its own; the store routes nothing",
+			slog.Warn("server registry: this server has S3 store settings but no Archive to S3 or Snapshots S3 location of its own; the store routes nothing",
 				"server", e.Name)
 		}
 		for _, b := range buckets {
@@ -414,7 +414,7 @@ func (r *Registry) syncBucketStores() {
 		if label, ok := r.processBuckets[c.Bucket]; ok && label == c.ServerA {
 			// Not a disagreement two servers can resolve: a store on this
 			// bucket is refused outright (checkBucketStore).
-			slog.Warn("server registry: a server's S3 store names the daemon's --baseline-s3 bucket, which servers with no Backups location of their own read with the process-wide endpoint; the store is not applied to that bucket. Give the server another bucket, or set BINTRAIL_S3_ENDPOINT for the whole process",
+			slog.Warn("server registry: a server's S3 store names the daemon's --baseline-s3 bucket, which servers with no Snapshots location of their own read with the process-wide endpoint; the store is not applied to that bucket. Give the server another bucket, or set BINTRAIL_S3_ENDPOINT for the whole process",
 				"bucket", c.Bucket, "server", c.ServerB)
 			continue
 		}
@@ -485,7 +485,7 @@ func (r *Registry) checkBucketStore(e *ServerEntry, selfID string) error {
 	e.S3Region = st.Region
 	e.S3AccessKeyID, e.S3SecretAccessKey = st.AccessKeyID, st.SecretKey
 	if !st.IsZero() {
-		for _, loc := range []struct{ field, value string }{{"Archive to S3", e.ArchiveS3}, {"Backups S3", e.BaselineS3}} {
+		for _, loc := range []struct{ field, value string }{{"Archive to S3", e.ArchiveS3}, {"Snapshots S3", e.BaselineS3}} {
 			if loc.value == "" {
 				continue
 			}
@@ -494,12 +494,12 @@ func (r *Registry) checkBucketStore(e *ServerEntry, selfID string) error {
 			}
 		}
 		if len(e.s3Buckets()) == 0 {
-			return fmt.Errorf("%w: an S3 store applies to this server's own buckets; set its Archive to S3 or Backups S3 location, or clear the S3 store fields", storage.ErrBucketStoreConfig)
+			return fmt.Errorf("%w: an S3 store applies to this server's own buckets; set its Archive to S3 or Snapshots S3 location, or clear the S3 store fields", storage.ErrBucketStoreConfig)
 		}
 	}
 	for _, b := range e.s3Buckets() {
 		if label, ok := r.processBuckets[b]; ok && !st.IsZero() {
-			return fmt.Errorf("%w: bucket %q is %s, which servers with no Backups S3 location of their own read from AWS or the process-wide endpoint; a per-server store would take them all over, so use another bucket, or set BINTRAIL_S3_ENDPOINT for the whole process",
+			return fmt.Errorf("%w: bucket %q is %s, which servers with no Snapshots S3 location of their own read from AWS or the process-wide endpoint; a per-server store would take them all over, so use another bucket, or set BINTRAIL_S3_ENDPOINT for the whole process",
 				ErrS3StoreConflict, b, label)
 		}
 		for _, other := range r.file.Servers {

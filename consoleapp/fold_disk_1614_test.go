@@ -132,7 +132,7 @@ func TestFoldConfigs_carryTheDiskCheck(t *testing.T) {
 	stubDisk(t, 1, nil)
 	refresh := refreshFoldConfig(refreshRequest{IndexDSN: "dsn", BaselineDir: "/b"}, time.Now(), []string{"shop.orders"})
 	export := sqlExportFoldConfig(console.SQLExportRequest{IndexDSN: "dsn", BaselineSrc: "/b"}, "/out", []string{"shop.orders"})
-	for name, cfg := range map[string]reconstruct.FullTableConfig{"refresh and restore": refresh, ".sql backup": export} {
+	for name, cfg := range map[string]reconstruct.FullTableConfig{"refresh and restore": refresh, ".sql export": export} {
 		if cfg.SpaceCheck == nil {
 			t.Errorf("%s: no disk check", name)
 			continue
@@ -212,10 +212,10 @@ func TestBackupScheduler_diskRefusedUpdateDoesNotFallBack(t *testing.T) {
 				t.Fatalf("the update was not refused for disk space: %+v", st.Last)
 			}
 			if now := b.ScheduleState(e.ID); now.LastFallbackAt != "" || now.LastMethod != console.BackupMethodRefresh {
-				t.Fatalf("a full backup stood in for a disk refusal: %+v", now)
+				t.Fatalf("a full read stood in for a disk refusal: %+v", now)
 			}
 			if got := sup.Status(e.ID).State; got != "idle" {
-				t.Fatalf("a full backup was started after a disk refusal: state %q", got)
+				t.Fatalf("a full read was started after a disk refusal: state %q", got)
 			}
 		})
 	}
@@ -236,7 +236,7 @@ func TestSQLExport_checksDiskPerFile(t *testing.T) {
 	stubDisk(t, 1, nil)
 	_, _, _, _ = sup.executeSQLExport(console.SQLExportRequest{ServerID: "srv", BaselineSrc: root, At: time.Now().UTC()}, dir)
 	if space == nil {
-		t.Fatal("the .sql backup's fold has no per-file disk check")
+		t.Fatal("the .sql export's fold has no per-file disk check")
 	}
 	if err := space(dir, 256<<20); !errors.Is(err, errFoldDiskFull) || !strings.Contains(err.Error(), "256.0 MiB") {
 		t.Fatalf("a file that does not fit: err = %v", err)
