@@ -489,7 +489,7 @@ Each run creates a new snapshot under
 reconstruct knows where deltas begin. Then point the console at it:
 
 - **Servers added from the UI**: Snapshots (left nav) → **Where and how
-  often** → the server's row → **Backup dir** = `/var/lib/bintrail/baselines` (a
+  often** → the server's row → **Local folder** = `/var/lib/bintrail/baselines` (a
   *container* path — the `watch` daemon reads it, not your host). The
   server's Time-travel tab lights up, and its row shows a TT chip under
   Manage servers.

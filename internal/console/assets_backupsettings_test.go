@@ -20,7 +20,6 @@ import (
 func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 	js := readAsset(t, "app.js")
 	page := jsFunctionBody(t, js, "snapshotSetupSections") +
-		jsFunctionBody(t, js, "backupDaemonCard") +
 		jsFunctionBody(t, js, "backupDaemonEditCard") +
 		jsFunctionBody(t, js, "backupDaemonEditRow") +
 		jsFunctionBody(t, js, "backupServersPanel") +
@@ -34,7 +33,7 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 	// is the actual dereference of the wire field.
 	for _, read := range []string{
 		"settings.daemon", "settings.servers", "settings.registry_read_only",
-		"row.key", "row.value", "row.on", "row.cli", "row.needs_restart", "row.err",
+		"row.key", "row.value", "row.cli", "row.needs_restart", "row.err",
 		// The editable daemon rows (#1682). row.editable decides which card a
 		// row lands in, row.source which sentence it gets, row.startup what
 		// "use the startup value" would restore — a blank there would offer
@@ -280,50 +279,28 @@ func visibleChars(body string) int {
 	return total
 }
 
-// TestBackupSettingsStaysCompact: the two daemon-side cards carried ~247
-// words of visible copy before the per-server list (#1603). They explain
-// themselves by drawing now; what still needs saying is compact, not cut. The
-// disk-space card is gone (#1681); what it said that is still true is one
-// line of the per-server yes/no, localCopyWords, budgeted below.
+// TestBackupSettingsStaysCompact: the per-server row carried ~247 words of
+// visible copy before #1603. It explains itself by drawing now; what still
+// needs saying is compact, not cut. The daemon's startup card left the page
+// with the Snapshots cut (D13: the interval, a manual read and retention are
+// the settings the page offers; the rest lives in the launch command).
 func TestBackupSettingsStaysCompact(t *testing.T) {
 	js := readAsset(t, "app.js")
 	words := jsFunctionBody(t, js, "localCopyWords")
-	daemon := jsFunctionBody(t, js, "backupDaemonCard")
 	row := jsFunctionBody(t, js, "backupServerRow")
 
-	// Each surface keeps a compact block: folding is what makes the cut real.
-	for name, body := range map[string]string{"backupDaemonCard": daemon, "backupServerRow": row} {
-		if !strings.Contains(body, `cnFine("More about `) {
-			t.Errorf("%s has no compact block; the prose was cut, not compacted", name)
-		}
+	// The row keeps a compact block: folding is what makes the cut real.
+	if !strings.Contains(row, `cnFine("More about `) {
+		t.Error("backupServerRow has no compact block; the prose was cut, not compacted")
 	}
-	// The budget covers every arm of every conditional at once (the source
-	// cannot tell which render), so it sits above any one rendered state. By
-	// this exact count on both trees: the pre-#1603 refresh card 1236 and the
-	// rewrite 497 (the drawing's one sentence, the alarm, the dormancy note
-	// and the S3 skip note, all deliberately visible); the daemon card 222
-	// (its hint paragraph) and 106 (title, chip, the refused-value line). The
-	// caps sit ~25% and ~40% above the rewrite and well below the old cards,
-	// so a copy edit breathes but one more paragraph rings here before the
-	// e2e sees it.
 	// localCopyWords over every arm at once is 1107 characters today (ten
-	// arms: yes, no, no without S3, the startup folder, yes with S3, and the
-	// five count lines, the fifth being the folder another server's
-	// snapshots still hold, #1681); a reader sees at most two of them (the
-	// reach line is localReachWords', counted apart). The cap leaves room for
-	// a copy edit and rings on one more paragraph.
+	// arms); a reader sees at most two of them (the reach line is
+	// localReachWords', counted apart). The cap leaves room for a copy edit
+	// and rings on one more paragraph.
 	if n := visibleChars(words); n > 1200 {
 		t.Errorf("localCopyWords' visible text is %d characters over all its arms; a reader sees two lines of it, keep them short", n)
 	}
-	if n := visibleChars(daemon); n > 150 {
-		t.Errorf("backupDaemonCard's visible text is %d characters beyond its rows; explain in the compact block, not above the rows", n)
-	}
 
-	// Empty means what applies, never a fault. One word per key, because one
-	// word for all nine would lie (an empty Backup dir is no shared location).
-	if strings.Contains(daemon, `"not set"`) {
-		t.Error(`backupDaemonCard renders "not set" again; on a healthy install that reads as nine faults`)
-	}
 	empty := jsObjectKeys(t, js, "BACKUP_DAEMON_EMPTY")
 	labels := jsObjectKeys(t, js, "BACKUP_DAEMON_ROWS")
 	slices.Sort(empty)
@@ -332,28 +309,14 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 		t.Errorf("BACKUP_DAEMON_EMPTY keys %v differ from BACKUP_DAEMON_ROWS keys %v; an empty row would fall back to a word chosen for another key", empty, labels)
 	}
 
-	// One restart chip on the card, honest only while every row needs one.
-	if !strings.Contains(daemon, `rows.every((r) => r.needs_restart)`) {
-		t.Error("backupDaemonCard no longer derives the card-level chip from every row's needs_restart; the chip could claim more than the rows do")
-	}
-	if strings.Count(daemon, `class: "tag-pill bks-restart"`) != 2 {
-		t.Error("backupDaemonCard should render the restart chip in exactly two places: once at card level, once per row as the fallback")
-	}
-	if !strings.Contains(daemon, "if (!allRestart && row.needs_restart)") {
-		t.Error("the per-row chip is not the fallback for the card chip; the page would show both at once")
-	}
-
-	// The three kinds are told apart by layout: two section labels, and the
-	// daemon card outside the tinted grid.
+	// One section label (the editable daemon row), and only the retention
+	// row of the daemon settings reaches the page.
 	build := functionBody(t, js, "function snapshotSetupSections(")
-	// Counted as CALLS, not as quoted labels: the second label depends on
-	// whether the session may change settings (#1573 step 7), so it is one
-	// call with two possible words, still one section.
-	if strings.Count(build, `out.push(sect(`) != 2 {
-		t.Error("snapshotSetupSections does not open exactly two sections; the split between change-here and set-at-startup is not drawn")
+	if strings.Count(build, `out.push(sect(`) != 1 {
+		t.Error("snapshotSetupSections does not open exactly one section")
 	}
-	if strings.Contains(build, "cards.append(backupDaemonCard") || !strings.Contains(daemon, `class: "card bks-boot"`) {
-		t.Error("the daemon card is inside the tinted .cards grid again; tinted vs plain is the mark that tells the kinds apart")
+	if strings.Contains(build, "backupDaemonCard(") || !strings.Contains(build, "SNAPSHOT_SETTING_KEYS.has(row.key)") {
+		t.Error("the daemon rows are not filtered to the settings the page offers (D13)")
 	}
 
 	// No em dash in any double-quoted literal these surfaces hold: text:
@@ -362,7 +325,7 @@ func TestBackupSettingsStaysCompact(t *testing.T) {
 	// jsFunctionBody fails open, because that helper truncates each line at
 	// its first "//" and a URL literal ("s3://...") hides everything after
 	// it on the line. Comments carrying a dash ring here on purpose.
-	for _, name := range []string{"localCopyWords", "backupDaemonCard", "backupServerRow", "snapshotSetupSections", "blCase", "s3RetentionBox"} {
+	for _, name := range []string{"localCopyWords", "backupServerRow", "snapshotSetupSections", "blCase", "s3RetentionBox"} {
 		body := jsFunctionSpan(t, js, name)
 		for _, m := range regexp.MustCompile(`"([^"\n]*)"`).FindAllStringSubmatch(body, -1) {
 			if strings.Contains(m[1], "—") {

@@ -81,7 +81,7 @@ func TestBackupScheduleWireNamesMatchTheFrontend(t *testing.T) {
 	// Reasons assembled by the daemon never appear in this file, so the em
 	// dash guard below cannot see one riding in on a fold error; they go
 	// through plainWords.
-	for _, want := range []string{`backupFoldError(skip.reason)`, `plainWords(sch.next_method_error)`, `plainWords(sch.reason`, `skip.at >= `, `backupsPer30Days(every.value)`, `never removed automatically`, `body.append(rate)`} {
+	for _, want := range []string{`backupFoldError(skip.reason)`, `plainWords(sch.next_method_error)`, `plainWords(sch.reason`, `skip.at >= `} {
 		if !strings.Contains(body, want) {
 			t.Errorf("backupScheduleCard lost %q", want)
 		}
@@ -91,7 +91,7 @@ func TestBackupScheduleWireNamesMatchTheFrontend(t *testing.T) {
 	}
 	// The method is not an input any more: the form sends only when, and the
 	// card never offers a producer to pick.
-	if strings.Contains(body, "method: how.value") || strings.Contains(body, `el("select"`) {
+	if strings.Contains(body, "method: how.value") || strings.Contains(body, `"aria-label": "Method"`) {
 		t.Error("the card still offers the producer as a choice; the daemon decides per run (ChooseBackupMethod)")
 	}
 	// The body the form sends is what the handler decodes. Scoped to the

@@ -1356,7 +1356,7 @@ function covCard(c, stamp) {
       card.append(el("p", { class: "cov-line bad", text: "Not fully restorable (newest backup predates coverage): " + c.broken_tables.join(", ") + ". Take a fresh backup." }));
     }
     if (c.restore_needs_local) {
-      card.append(el("p", { class: "cov-line warn", text: "Backups for this server go to S3 only, so \"Restore to a moment\" has no local folder to build into. Time-travel still reads them. Set this server's backup dir to restore here." }));
+      card.append(el("p", { class: "cov-line warn", text: "Backups for this server go to S3 only, so \"Restore to a moment\" has no local folder to build into. Time-travel still reads them. Set this server's Local folder to restore here." }));
     }
     if (c.unreachable_tables && c.unreachable_tables.length) {
       // Warn, not bad: the backup exists and Time-travel reads it (local
@@ -1367,7 +1367,7 @@ function covCard(c, stamp) {
       const names = c.unreachable_tables.join(", ");
       card.append(el("p", { class: "cov-line warn", text: c.restore_reads === "s3"
         ? "Backed up only on this host, not in S3, so \"Restore to a moment\" (which folds from this server's S3 backups) cannot use them: " + names + ". Time-travel still reads them. Take a full backup to send them to S3."
-        : "Backed up only in S3, so \"Restore to a moment\" (which folds from this server's backup dir) cannot use them: " + names + ". Time-travel still reads them. Set this server's S3 location, or take a local backup, to restore them here." }));
+        : "Backed up only in S3, so \"Restore to a moment\" (which folds from this server's Local folder) cannot use them: " + names + ". Time-travel still reads them. Set this server's S3 location, or take a local backup, to restore them here." }));
     }
   }
   return card;
@@ -5462,8 +5462,7 @@ function s3RetentionBox(srv, servers, daemonS3) {
   const fulls = runs && srv.schedule_full_every && !srv.schedule_full_refusal ? backupsPer30Days(srv.schedule_full_every) : 0;
   const n = fulls ? runs + fulls - backupsPer30Days(lcmInterval(srv.schedule_every, srv.schedule_full_every)) : runs;
   wrap.append(el("p", { class: "form-hint", text:
-    (n ? "About " + n + " backup" + (n === 1 ? "" : "s") + " every 30 days reach S3 at this rate, each a full copy of every table, and DBTrail never removes one: the bucket grows by that much until a rule in the bucket expires old backups."
-       : "Every backup sent to S3 is a full copy of every table, and DBTrail never removes one: each stays in the bucket until a rule in the bucket expires old backups.") }));
+    "Every backup sent to S3 is a full copy of every table, and DBTrail never removes one: each stays in the bucket until a rule in the bucket expires old backups." }));
   if (!s) {
     wrap.append(el("p", { class: "form-msg err", text:
       "This is not an s3://bucket/prefix destination, so no backup can be uploaded to it and no bucket rule applies." }));
@@ -5595,27 +5594,25 @@ function snapshotSetupSections(settings) {
   // print say "set at startup, change the flag and restart" -- false for a
   // value saved in this console.
   const mayEdit = sessionMay("settings:write");
-  const editableRows = daemonRows.filter((row) => row.editable);
-  const startupRows = daemonRows.filter((row) => !row.editable);
+  // Of the daemon rows only retention is one of the three settings the page
+  // offers (D13); the rest live in the launch command and its docs.
+  const editableRows = daemonRows.filter((row) => row.editable && SNAPSHOT_SETTING_KEYS.has(row.key));
   if (capsCache.monitor && !broken && editableRows.length) {
     out.push(sect(mayEdit ? "Change here" : "Current settings"));
     out.push(el("div", { class: "cards" }, backupDaemonEditCard(editableRows, !mayEdit)));
   }
   if (!broken) out.push(backupServersPanel(settings));
-  if (capsCache.monitor && !broken && startupRows.length) {
-    out.push(sect("Set when DBTrail starts"));
-    out.push(backupDaemonCard(startupRows));
-  }
   return out;
 }
 
 // What each daemon-wide key means, in words a reader who never saw the flag
 // can act on. The flag itself rides beside the value in the (CLI: ...) form.
-// Vocabulary matches the per-server fields and the list of copies: Backup dir,
-// Backup S3, refresh.
+// Vocabulary matches the per-server fields and the list of copies: Local
+// folder, S3 location, refresh.
+const SNAPSHOT_SETTING_KEYS = new Set(["baseline_retain"]);
 const BACKUP_DAEMON_ROWS = {
-  baseline_dir: "Default Backup dir",
-  baseline_s3: "Default Backup S3",
+  baseline_dir: "Default local folder",
+  baseline_s3: "Default S3 location",
   baseline_retain: "Delete local snapshots older than",
   refresh_every: "Refresh backups every",
   lock_mode: "Lock while dumping",
@@ -5645,47 +5642,6 @@ const BACKUP_DAEMON_EMPTY = {
   verify_tables: "all tables",
 };
 
-// backupDaemonCard renders the values this process was started with, on a
-// plain card outside the tinted grid: tinted is "change here", plain is
-// "set at startup". One restart chip for the card, not one per row (#1603):
-// nine identical chips read as nine warnings to say one thing. The card chip
-// is only honest while EVERY row needs a restart, so a live-appliable row
-// joining the wire shape drops it and the rows say it for themselves again.
-function backupDaemonCard(rows) {
-  const card = el("div", { class: "card bks-boot" });
-  const head = el("div", { class: "card-title bks-head" }, el("span", { text: "Set at startup" }));
-  const allRestart = rows.length > 0 && rows.every((r) => r.needs_restart);
-  if (allRestart) head.append(el("span", { class: "tag-pill bks-restart", text: "Restart to change" }));
-  card.append(head);
-  for (const row of rows) {
-    const label = BACKUP_DAEMON_ROWS[row.key] || row.key;
-    let value = row.value;
-    if (row.on != null) value = row.on ? "On" : "Off";
-    const empty = !value;
-    if (empty) value = BACKUP_DAEMON_EMPTY[row.key] || "none";
-    const r = el("div", { class: "bks-row" },
-      el("span", { class: "bks-label", text: label }),
-      el("span", { class: "bks-value" + (empty ? " bks-default" : "") + (row.err ? " bks-refused" : ""), text: value }));
-    if (!allRestart && row.needs_restart) r.append(el("span", { class: "tag-pill bks-restart", text: "restart to change" }));
-    r.append(el("span", { class: "bks-cli", text: "(CLI: " + row.cli + ")" }));
-    card.append(r);
-    // A rejected value outranks the fallback the row shows: rendering only
-    // the default on the one row whose real state is "your value was
-    // refused" is the opposite of provenance. Loud, under its row, never
-    // compact. The consequence rides in the server's err string, so this
-    // stays honest for any row that gains one.
-    if (row.err) {
-      card.append(el("p", { class: "form-msg err", text:
-        "The value you set was refused and is not in force: " + row.err }));
-    }
-  }
-  card.append(cnFine("More about changing these",
-    el("p", { class: "form-hint", text:
-      "These come from the command line or the environment of the DBTrail process. Change the flag or variable shown under the row, then restart DBTrail." }),
-    docsMore("settings/backups", "set-at-startup", "settings that need a restart")));
-  return card;
-}
-
 // backupDaemonEditCard renders the daemon-wide rows this interface can save
 // (#1682). One row, one input, one Save — and, when a value is saved, the way
 // back to what the process was started with, because a setting that can only
@@ -5697,7 +5653,7 @@ function backupDaemonCard(rows) {
 // operator knows the save landed and the effect has not.
 function backupDaemonEditCard(rows, locked) {
   const card = el("div", { class: "card" });
-  card.append(el("div", { class: "card-title" }, el("span", { text: "Backups and checks" })));
+  card.append(el("div", { class: "card-title" }, el("span", { text: "Retention" })));
   for (const row of rows) {
     card.append(backupDaemonEditRow(row, locked));
   }
@@ -5830,11 +5786,11 @@ function s3OnlyBackupWarning(srv, fix = true) {
   // The problem itself is said to everyone who can see the row.
   const then = (t) => fix ? " " + t : "";
   // Where this process runs no scheduled backups, only the setting is known.
-  if (!srv.schedule_loop) return "With S3 only, a scheduled backup cannot update from the recorded changes." + then("Add a Backup dir.");
+  if (!srv.schedule_loop) return "With S3 only, a scheduled backup cannot update from the recorded changes." + then("Add a Local folder.");
   if (!srv.full_backup_possible) {
-    return "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Backup dir." + then("Add one.");
+    return "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Local folder." + then("Add one.");
   }
-  return "With S3 only, every scheduled backup reads your whole database." + then("Add a Backup dir so runs update from the recorded changes.");
+  return "With S3 only, every scheduled backup reads your whole database." + then("Add a Local folder so runs update from the recorded changes.");
 }
 
 // localCopyWords is what the per-server yes/no means right now (#1681), from
@@ -5947,9 +5903,12 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const q = "bks-local-" + srv.id;
   const yes = el("input", { type: "radio", name: q, value: "yes" });
   const no = el("input", { type: "radio", name: q, value: "no" });
-  yes.checked = !!srv.local_copy;
-  no.checked = !srv.local_copy;
-  box.append(el("fieldset", { class: "bks-q" },
+  // The local copy is always yes (D13): the question left the page, and a
+  // save from here always says so. The two inputs stay as the form's state,
+  // in the row but hidden.
+  yes.checked = true;
+  no.checked = false;
+  box.append(el("fieldset", { class: "bks-q", hidden: true },
     el("legend", { class: "field-label", text: "Keep a copy of this server's snapshots on this machine?" }),
     el("label", { class: "check" }, yes, el("span", { text: "Yes" })),
     el("label", { class: "check" }, no, el("span", { text: "No, only in S3" }))));
@@ -5961,10 +5920,10 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const s3 = el("input", { class: "input", name: "baseline_s3", value: srv.baseline_s3 || "", placeholder: "s3://bucket/prefix/" });
   const keep = el("input", { class: "input", name: "keep_newest", type: "number", min: "0", step: "1",
     value: srv.keep_newest ? String(srv.keep_newest) : "", placeholder: "all" });
-  const dirField = el("label", { class: "field" }, el("span", { class: "field-label", text: "Backup dir" }), dir);
+  const dirField = el("label", { class: "field" }, el("span", { class: "field-label", text: "Local folder" }), dir);
   const keepField = el("label", { class: "field" }, el("span", { class: "field-label", text: "Keep the newest" }), keep);
   grid.append(dirField,
-    el("label", { class: "field" }, el("span", { class: "field-label", text: "Backup S3" }), s3),
+    el("label", { class: "field" }, el("span", { class: "field-label", text: "S3 location" }), s3),
     keepField);
   box.append(grid);
   const words = el("div", { class: "bks-local-words" });
@@ -5976,10 +5935,10 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // failed. The page redraws after a successful save.
   const s3Only = s3OnlyBackupWarning(srv, sessionMay("servers:write"));
   if (s3Only) box.append(el("p", { class: "form-msg err", text: s3Only }));
+  // The archive toggle is not one of the three settings (D13): it keeps its
+  // saved value and stays off the page (CLI: --no-archive).
   const noArch = el("input", { type: "checkbox", name: "no_archive" });
   noArch.checked = !!srv.no_archive;
-  box.append(el("label", { class: "check" }, noArch,
-    el("span", { text: "Don't automatically include archived data in queries" })));
 
   // Provenance, the row's reason to exist: which location is actually in
   // force, drawn as its own case row. The daemon default backs the
@@ -6054,7 +6013,10 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // always means a change; Enter in a field saves too.
   // Trimmed on both sides: the PUT trims, so a stored value with stray
   // whitespace is not a change waiting to be saved.
-  const was = { local: !!srv.local_copy, dir: dirWas, rawDir: (srv.baseline_dir || "").trim(),
+  // local: true, whatever was stored: the answer is always yes now, so a
+  // server saved as S3-only does not wake Save on its own; its next save from
+  // here turns the local copy on along with whatever changed.
+  const was = { local: true, dir: dirWas, rawDir: (srv.baseline_dir || "").trim(),
     s3: (srv.baseline_s3 || "").trim(), keep: srv.keep_newest || 0, noArch: !!srv.no_archive };
   // The count as typed: "" is 0 (keep them all); anything else must be a
   // whole number, or it is null and Save refuses it.
@@ -6510,7 +6472,7 @@ function baselineConfigHint(cur, serversErr) {
   if (cur.kind === "ephemeral") {
     return "Restart the daemon with --baseline-dir or --baseline-s3 (compose: BASELINE_DIR in .env).";
   }
-  return "Set Backup dir or S3 below, under Where and how often.";
+  return "Set a Local folder or an S3 location below, under Where and how often.";
 }
 
 function formatAge(hours) {
@@ -7225,11 +7187,13 @@ function baselinesPanel(b, servers, opts) {
       const idx = pageWindow.start + i;
       const row = el("div", { class: "stg-row" + (idx === 0 ? " stg-row-latest" : "") });
       if (idx === 0) row.append(el("span", { class: "tag-pill", text: "Newest" }));
-      row.append(tsSpan("stg-name mono", sn.time));
+      const when = tsSpan("stg-name mono", sn.time);
+      // The binlog coordinates are for whoever debugs a copy, not for the
+      // list: they ride as the tooltip of the time.
+      if (sn.binlog_file) when.title = "binlog " + sn.binlog_file + ":" + sn.binlog_pos;
+      row.append(when);
       row.append(el("span", { class: "stg-rel", text: formatAge(sn.age_hours) + " ago" }));
-      row.append(el("span", { class: "stg-dest", text:
-        (uniformTables === null ? (sn.tables || []).length + " table(s)" + (sn.binlog_file ? " · " : "") : "") +
-        (sn.binlog_file ? sn.binlog_file + ":" + sn.binlog_pos : "") }));
+      if (uniformTables === null) row.append(el("span", { class: "stg-dest", text: (sn.tables || []).length + " table(s)" }));
       if (idx === 0 && sn.staleness && sn.staleness !== "ok") {
         row.append(el("span", { class: "chip chip-mon", text:
           sn.staleness === "broken" ? "⚠ STALE: restore broken" : sn.staleness.toUpperCase() }));
@@ -7358,7 +7322,7 @@ const BACKUP_KIND_LABEL = { dump: "full copy of the source", refresh: "automatic
 // rest carry the run's own reason, which names the error.
 const BACKUP_WHY_REMEDY = {
   no_index: "Set an index connection for this server (Servers) and the next run updates from the recorded changes instead of reading your database in full; without one there are no recorded changes to update from.",
-  no_local_dir: "Set a Backup dir for this server (under Where and how often) and the next run updates from the recorded changes instead of reading your database in full.",
+  no_local_dir: "Set a Local folder for this server (under Where and how often) and the next run updates from the recorded changes instead of reading your database in full.",
   first_backup: "First backup: there was nothing to update from yet. The next run updates from it.",
 };
 // The codes whose cause is a setting, so every run until it changes is a
@@ -7749,6 +7713,19 @@ async function watchBackupRuns(id, vgen, kinds) {
 // backupsPer30Days mirrors ParsedBackupSchedule.BackupsPer30Days for the
 // grammar the form accepts (a whole number of m, h or d); 0 when it cannot
 // be read, and the server's refusal then says why.
+// SCHEDULE_CHOICES is the list the Update-the-copy form offers (D13): five
+// minutes is the floor the daemon accepts. scheduleChoice maps a saved
+// interval to the list's spelling of it (15m and 15min are one choice).
+const SCHEDULE_CHOICES = [["5m", "5 min"], ["15m", "15 min"], ["30m", "30 min"], ["1h", "1 h"], ["6h", "6 h"], ["1d", "24 h"]];
+function scheduleChoice(every) {
+  const m = /^(\d+)\s*(m|min|h|d)$/.exec(String(every || "").trim());
+  if (!m) return String(every || "");
+  const n = Number(m[1]), u = m[2] === "min" ? "m" : m[2];
+  if (u === "h" && n === 24) return "1d";
+  if (u === "m" && n === 60) return "1h";
+  return n + u;
+}
+
 function backupsPer30Days(every) {
   const minutes = intervalMinutes(every);
   return minutes > 0 ? Math.floor(30 * 1440 / minutes) : 0;
@@ -7832,7 +7809,7 @@ function backupScheduleCard(cur, b) {
   // passing, and the form behind it no longer costs a click to find.
   const card = el("section", { class: "ov-panel bk-restore bk-schedule" });
   card.append(el("div", { class: "ov-panel-head" },
-    el("h2", { class: "ov-panel-title", text: "Scheduled backups" })));
+    el("h2", { class: "ov-panel-title", text: "Update the copy" })));
   const state = el("p", { class: "form-hint bk-card-state" });
   card.append(state);
   const body = el("div", { class: "bk-card-body" });
@@ -7873,20 +7850,6 @@ function backupScheduleCard(cur, b) {
     if (fullWarn) state.classList.add("alarm");
   }
 
-  // Two lines, not a lecture (#1528). The general explanation of the producer
-  // choice sat directly above the line that names it for the NEXT run, so the
-  // rule itself is docs/console.md's job now.
-  //
-  // The COST clause stays here, though, and the first cut took it away with
-  // the rest: with no schedule saved every per-run line is inside `if (sch)`
-  // and renders nothing, leaving the rate line ("each a full copy of every
-  // table", true of the output) as the only description of a run. An operator
-  // filling in an empty form would read that as a full read of the database
-  // every time.
-  body.append(el("p", { class: "form-hint", text:
-    "Takes a backup on a fixed timetable while the daemon runs. A run updates from the recorded changes, without reading your database, only when the server has an index connection, a Backup dir and a previous backup. " +
-    "A time missed while it was stopped is not made up." }));
-
   if (!canEdit) {
     // The read-only console, or a daemon with every backup feature off:
     // nothing here can change the schedule, and the state line already says
@@ -7903,64 +7866,34 @@ function backupScheduleCard(cur, b) {
     return card;
   }
 
-  // The form. Prefilled from the saved schedule, else a sane daily default.
-  const every = el("input", { class: "in", type: "text", spellcheck: "false", placeholder: "1d", "aria-label": "Every" });
-  every.value = sch ? sch.every : "1d";
-  every.style.maxWidth = "90px";
+  // The form (D13): one list of intervals, five minutes to a day. The UTC
+  // hour a daily run lines up on shows only for the daily choice; the full
+  // read timetable (#1564) is kept as saved, never edited here.
+  const every = el("select", { class: "select", "aria-label": "Update the copy every" });
+  for (const [v, t] of SCHEDULE_CHOICES) every.append(el("option", { value: v, text: t }));
+  const saved = sch ? scheduleChoice(sch.every) : "1d";
+  if (!SCHEDULE_CHOICES.some(([v]) => v === saved)) every.append(el("option", { value: saved, text: sch.every }));
+  every.value = saved;
   const at = el("input", { class: "in", type: "text", spellcheck: "false", placeholder: "03:00", "aria-label": "At (UTC)" });
   at.value = sch ? sch.at : "03:00";
   at.style.maxWidth = "90px";
-  // Optional (#1564): empty is no full backup of its own, the daemon then
-  // takes one only when an update cannot serve.
-  const fullEvery = el("input", { class: "in", type: "text", spellcheck: "false", placeholder: "none", "aria-label": "Full backup every" });
-  fullEvery.value = sch && sch.full_every ? sch.full_every : "";
-  fullEvery.style.maxWidth = "90px";
-  const save = el("button", { class: "btn", type: "button", text: sch ? "Save schedule" : "Add schedule" });
+  const atWrap = el("span", { class: "bk-sched-at" }, el("span", { class: "form-hint", text: "at" }), at, el("span", { class: "form-hint", text: "UTC" }));
+  const syncAt = () => { atWrap.hidden = every.value !== "1d"; };
+  every.addEventListener("change", syncAt);
+  syncAt();
+  const save = el("button", { class: "btn", type: "button", text: sch ? "Save" : "Turn on" });
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
-  save.onclick = () => saveBackupSchedule(cur.id, { every: every.value.trim(), at: at.value.trim(), full_every: fullEvery.value.trim() }, save, msg);
+  save.onclick = () => saveBackupSchedule(cur.id, { every: every.value, at: at.value.trim(), full_every: sch && sch.full_every ? sch.full_every : "" }, save, msg);
   const row = el("div", { class: "bk-restore-row", "data-sched-edit": "1" },
-    el("span", { class: "form-hint", text: "every" }), every,
-    el("span", { class: "form-hint", text: "at" }), at,
-    el("span", { class: "form-hint", text: "UTC, full backup every" }), fullEvery, save);
+    el("span", { class: "form-hint", text: "every" }), every, atWrap, save);
   if (sch) {
-    const remove = el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Remove schedule" });
+    const remove = el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Turn off" });
     remove.onclick = () => removeBackupSchedule(cur.id, remove, msg);
     row.append(remove);
   }
   msg.setAttribute("data-sched-edit", "1");
-  body.append(row, el("p", { class: "form-hint", "data-sched-edit": "1", text:
-    "Every: minutes, hours or days (5m, 6h, 1d), at least 5m. At: the UTC time the timetable lines up on. " +
-    "Full backup every (optional, such as 7d): at those times the run reads your whole database instead of updating, " +
-    "so the backups do not rest only on the recorded changes. Leave it empty for none." }), msg);
-  // The rate, before the disk finds out: every run is a full copy of every
-  // table, and backups kept only on this machine are never removed on their
-  // own unless the server keeps a newest-N count (#1681); otherwise the
-  // daemon prunes only what it confirmed durable in S3. Same number the
-  // daemon logs at save and at boot.
-  const rate = el("p", { class: "form-hint", "data-sched-edit": "1" });
-  const showRate = () => {
-    const n = backupsPer30Days(every.value);
-    if (!n) { rate.hidden = true; return; }
-    rate.hidden = false;
-    // The full backups the schedule asks for (#1564), said with the rate
-    // because each is a read of the whole database. Those that do not land
-    // on a run are runs of their own and add to the total (the two
-    // timetables meet every lcm of the two intervals).
-    const f = backupsPer30Days(fullEvery.value);
-    const total = f ? n + f - backupsPer30Days(lcmInterval(every.value, fullEvery.value)) : n;
-    rate.textContent = "About " + total + " backup" + (total === 1 ? "" : "s") + " every 30 days at this rate, each a full copy of every table." +
-      (f ? " About " + f + (f === 1 ? " is a full backup that reads" : " are full backups that read") + " your whole database." : "") +
-      // A count this daemon applies to the folder (#1681) is the one case
-      // where local copies ARE removed. The line above the snapshot list
-      // already says how many (snapshotRetentionLines), so the rate only
-      // drops its "never removed" warning, which would then be false.
-      (b && b.local_retention ? "" : cur.baseline_s3 ? "" : " Backups kept only on this machine are never removed automatically; make sure the disk has room.");
-  };
-  every.addEventListener("input", showRate);
-  fullEvery.addEventListener("input", showRate);
-  showRate();
-  body.append(rate);
+  body.append(row, msg);
 
   // What the schedule will do next, and what it last did. The skip is
   // shown when it is the newest fact: a slot that could not start after

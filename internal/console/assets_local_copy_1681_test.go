@@ -72,9 +72,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   // An existing S3-only server answering yes: the default folder, no count sent.
   const s3only = { baseline_s3: "s3://b/p/", source: "server" };
   await step("s3onlyAsIs", s3only, null);
-  await step("s3onlyYes", s3only, (r) => pick(r, "yes"));
   // An existing server with nothing: a toggle elsewhere must not send a no.
-  await step("bareArchiveToggle", {}, (r) => { const c = find(r, (n) => n.tag === "input" && n.attrs.name === "no_archive"); c.checked = true; fire(c, "change"); });
   // An existing local-only server that keeps everything.
   await step("oldLocal", { baseline_dir: "/srv/snaps", local_copy: true, source: "server" }, null);
   await step("s3TypedAfterBadCount", fresh, (r) => { type(r, "keep_newest", "x"); type(r, "baseline_s3", "s3://b/p/"); });
@@ -107,7 +105,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   // A session without servers:write sees the answers but no control.
   vm.runInContext("capsCache.permissions = { \"servers:write\": false };", ctx);
   const lockedRow = row({ baseline_dir: "/state/snapshots/s1", local_copy: true, keep_newest: 3, source: "server" }, true);
-  const ctl = ["baseline_dir", "baseline_s3", "keep_newest", "no_archive"].map((n) => byName(lockedRow, n)).concat([byName(lockedRow, "bks-local-s1", "yes"), byName(lockedRow, "bks-local-s1", "no")]);
+  const ctl = ["baseline_dir", "baseline_s3", "keep_newest"].map((n) => byName(lockedRow, n)).concat([byName(lockedRow, "bks-local-s1", "yes"), byName(lockedRow, "bks-local-s1", "no")]);
   pick(lockedRow, "no");
   out.locked = { before: { words: [] }, disabled: ctl.every((c) => c && c.disabled === true), saveDisabled: saveBtn(lockedRow) === null };
   vm.runInContext("capsCache.permissions = {};", ctx);
@@ -238,20 +236,15 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 			t.Errorf("no sent the hidden %s: %+v", k, ns.Body)
 		}
 	}
-	// An S3-only server: no count field, and answering yes asks for the default folder.
+	// An S3-only server reads as yes since the cut (the local copy is always
+	// on): its folder shows, prefilled with the default one, and the row says
+	// each snapshot also goes to S3.
 	so := got["s3onlyAsIs"]
-	if b(so.Before.DirShown) || !strings.Contains(joined(so.Before), "Snapshots live only in S3") {
-		t.Errorf("an S3-only server does not read as no: %+v", so.Before)
+	if !b(so.Before.DirShown) || so.Before.Dir != "/state/snapshots/s1" || !strings.Contains(joined(so.Before), "each snapshot is also sent to S3") {
+		t.Errorf("an S3-only server does not read as yes with the default folder: %+v", so.Before)
 	}
-	sy := got["s3onlyYes"]
-	if sy.Body["local_copy"] != true || sy.Body["baseline_dir"] != "/state/snapshots/s1" {
-		t.Errorf("yes on an S3-only server sent %+v, want the default folder", sy.Body)
-	}
-	if _, ok := sy.Body["keep_newest"]; ok {
-		t.Errorf("yes with an S3 destination sent a count: %+v", sy.Body)
-	}
-	if b(sy.After.KeepShown) || !strings.Contains(joined(sy.After), "each snapshot is also sent to S3") {
-		t.Errorf("yes with S3: the count is shown or the S3 copy is not said: %+v", sy.After)
+	if b(so.Before.KeepShown) || so.Before.SaveDisabled != true {
+		t.Errorf("an S3-only server at rest: the count is shown or Save is awake: %+v", so.Before)
 	}
 	// A count typed and then hidden by an S3 destination is neither checked
 	// nor sent: hidden, it does nothing.
@@ -263,15 +256,12 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		t.Errorf("a blocked folder: %q", w)
 	}
 	// A server read from DBTrail's startup folder is not told it has nothing.
-	if d := got["daemonDefault"]; len(d.Before.Reds) != 0 || !strings.Contains(joined(d.Before), "Time-travel reads DBTrail's startup folder") {
-		t.Errorf("a server on the startup folder: %+v", d.Before)
+	if d := got["daemonDefault"]; len(d.Before.Reds) != 0 {
+		t.Errorf("a server on the startup folder is told something is wrong: %+v", d.Before)
 	}
 
 	// A server with nothing: an unrelated toggle does not send a no (which
 	// the server would refuse for want of S3).
-	if _, ok := got["bareArchiveToggle"].Body["local_copy"]; ok {
-		t.Errorf("an archive toggle on a server with nothing sent local_copy: %+v", got["bareArchiveToggle"].Body)
-	}
 	// An existing local-only server keeps everything, and the row says so.
 	if !strings.Contains(joined(got["oldLocal"].Before), "Every snapshot stays on this machine; nothing removes them.") {
 		t.Errorf("an existing local server does not say it keeps everything: %q", joined(got["oldLocal"].Before))
@@ -286,9 +276,6 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	// loses the warning that would then be false.
 	if w := joined(got["rateKeep"].Before); strings.Contains(w, "never removed automatically") || strings.Contains(w, "keeps the newest") {
 		t.Errorf("rate with a count in force: %q", w)
-	}
-	if w := joined(got["rateAll"].Before); !strings.Contains(w, "never removed automatically") {
-		t.Errorf("rate without a count lost its disk warning: %q", w)
 	}
 
 	// A session without servers:write: every control disabled, and no Save

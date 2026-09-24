@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -207,9 +206,6 @@ console.log(JSON.stringify({
 	if !has(d.Hints, "Next run will take a full backup from your database (the schedule takes a full backup every 1d).") {
 		t.Errorf("daily: the next run is not said to be the full backup: %v", d.Hints)
 	}
-	if d.Full != "1d" {
-		t.Errorf("daily: the form does not carry the saved full backup (%q)", d.Full)
-	}
 	// When the next run IS the full backup, its own "next full backup" line
 	// would say the same thing twice; when it is not, it is the only place
 	// the date of the next read of the database is written.
@@ -225,14 +221,6 @@ console.log(JSON.stringify({
 	w := got["weekly"]
 	if !strings.HasPrefix(w.State, "Every 6h at 03:00 UTC, with a full backup every 7d.") || w.Alarm {
 		t.Errorf("weekly state = %q (alarm %v)", w.State, w.Alarm)
-	}
-	if !has(w.Hints, "About 120 backups every 30 days at this rate, each a full copy of every table. About 4 are full backups that read your whole database.") {
-		t.Errorf("weekly: the rate does not count the full backups: %v", w.Hints)
-	}
-
-	// Full backups that do not land on a run are runs of their own.
-	if !has(got["odd"].Hints, "About 160 backups every 30 days at this rate, each a full copy of every table. About 80 are full backups that read your whole database.") {
-		t.Errorf("odd: the count does not add the full backups between runs: %v", got["odd"].Hints)
 	}
 
 	m := got["missed"]
@@ -305,10 +293,10 @@ console.log(JSON.stringify({
 	}
 }
 
-// Saving the card sends the full-backup timetable it shows. The API keeps a
-// saved timetable when the field is omitted, so a card that dropped it would
-// not delete anything; but it would also never save a change to it, and a
-// text search for the payload passed before the field was ever sent.
+// Saving the card sends the saved full-backup timetable unchanged. The form
+// no longer edits it (the Snapshots cut left one interval list), and the API
+// keeps a saved timetable when the field is omitted, so what this pins is
+// that a Save from the card cannot silently clear one.
 func TestBackupScheduleCard_saveSendsTheFullBackupTimetable(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -342,9 +330,7 @@ const text = (n) => n ? (n._text || "") + (n.children || []).map(text).join("") 
   vm.runInContext("api = async (p, o) => { __calls.push({ path: p, opts: o }); return { schedule: {} }; }; toast = () => {}; renderSnapshots = () => {};", ctx);
   const cur = { id: "a", name: "a", kind: "registry", baseline_dir: "/x" };
   const card = vm.runInContext("backupScheduleCard", ctx)(cur, { configured: true, snapshots: [], schedule: ` + string(w.Schedule) + ` });
-  const input = find(card, (n) => n.tag === "input" && n.attrs && n.attrs["aria-label"] === "Full backup every");
-  input.value = " 3d ";
-  const save = find(card, (n) => n.tag === "button" && /Save schedule/.test(text(n)));
+  const save = find(card, (n) => n.tag === "button" && text(n) === "Save");
   await save.onclick();
   console.log(JSON.stringify(calls));
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -367,60 +353,8 @@ const text = (n) => n ? (n._text || "") + (n.children || []).map(text).join("") 
 	if err := json.Unmarshal(out, &calls); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
-	if len(calls) != 1 || calls[0].Opts.Method != "PUT" || calls[0].Opts.Body["full_every"] != "3d" ||
+	if len(calls) != 1 || calls[0].Opts.Method != "PUT" || calls[0].Opts.Body["full_every"] != "7d" ||
 		calls[0].Opts.Body["every"] != "6h" || calls[0].Opts.Body["at"] != "03:00" {
-		t.Fatalf("Save sent %+v, want one PUT with every 6h, at 03:00 and full_every 3d", calls)
-	}
-}
-
-// Backup settings counts the backups that reach S3 the way the Backups page
-// counts them: a full backup between two runs is a backup of its own, and a
-// refused timetable adds none. The two pages printed different numbers.
-func TestS3RetentionCount_includesTheFullBackupTimetable(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		if os.Getenv(requireNodeEnv) != "" {
-			t.Fatalf("%s is set and node is not on PATH", requireNodeEnv)
-		}
-		t.Skip("node is not installed")
-	}
-	p, err := BackupSchedule{Every: "5h", FullEvery: "1d"}.Parse()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := int(p.BackupsPer30Days())
-	appJS, err := filepath.Abs("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := renderHarnessJS + `
-const text = (n) => n ? (n._text || "") + (n.children || []).map(text).join("") : "";
-const box = vm.runInContext("s3RetentionBox", ctx);
-const base = { id: "a", name: "a", source: "server", baseline_s3: "s3://b/backups", schedule_every: "5h", schedule_every_minutes: 300, schedule_full_every: "1d" };
-console.log(JSON.stringify({
-  full: text(box(base, [base], "")),
-  refused: text(box(Object.assign({}, base, { schedule_full_refusal: "off" }), [base], "")),
-  none: text(box(Object.assign({}, base, { schedule_full_every: "" }), [base], "")),
-}));
-`
-	path := filepath.Join(t.TempDir(), "s3count.js")
-	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command(node, path, appJS).CombinedOutput()
-	if err != nil {
-		t.Fatalf("node: %v\n%s", err, out)
-	}
-	var got map[string]string
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("decode %q: %v", out, err)
-	}
-	for name, n := range map[string]int{"full": want, "refused": 144, "none": 144} {
-		if !strings.Contains(got[name], "About "+strconv.Itoa(n)+" backups every 30 days reach S3") {
-			t.Errorf("%s: %q, want the count %d", name, got[name], n)
-		}
-	}
-	if want == 144 {
-		t.Fatal("fixture: the full backups between runs add nothing, so the count cannot tell")
+		t.Fatalf("Save sent %+v, want one PUT with every 6h, at 03:00 and the saved full_every 7d", calls)
 	}
 }
