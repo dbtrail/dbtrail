@@ -3566,9 +3566,11 @@ try {
     sel.dispatchEvent(new Event("change"));
     return {
       regionCount: regions.length,
-      controlTinted: regions[0] ? regions[0].classList.contains("tcard-violet") : false,
-      // No subtitle since the #1573 redesign; the mode help below carries it.
-      subGone: !document.querySelector(".view .page-sub"),
+      // Round 3: the control card leads with the verdict of the last check.
+      controlTinted: regions[0] ? !!regions[0].querySelector(".vfy-state") : false,
+      // One line under the title since round 3, and only that one: what a
+      // snapshot is. The mode help below carries what each check does.
+      subGone: (document.querySelector(".view .page-sub") || {}).textContent === "A snapshot is a copy of every table at one moment in time.",
       helpBefore, helpAfter: help ? help.textContent : "",
       // Measured, not scrollWidth: Chrome reports scrollWidth == clientWidth
       // for a <select> at ANY width (the closed control clips its text and
@@ -3594,11 +3596,11 @@ try {
     };
   });
   (vfyStruct.subGone)
-    ? ok("verification: no subtitle; the mode help says what each check does")
-    : bad("verification: no subtitle; the mode help says what each check does", "a .page-sub is back on /snapshots");
+    ? ok("verification: the page's one line says what a snapshot is; the mode help says what each check does")
+    : bad("verification: the page's one line says what a snapshot is; the mode help says what each check does", "the .page-sub on /snapshots is not the one sentence");
   (vfyStruct.regionCount >= 3 && vfyStruct.controlTinted)
-    ? ok("verification: control / current / history are separate surfaces, control wears the structure tint")
-    : bad("verification: control / current / history are separate surfaces, control wears the structure tint", JSON.stringify(vfyStruct));
+    ? ok("verification: control / current / history are separate surfaces, control leads with the verdict")
+    : bad("verification: control / current / history are separate surfaces, control leads with the verdict", JSON.stringify(vfyStruct));
   (vfyStruct.helpBefore && vfyStruct.helpAfter && vfyStruct.helpBefore !== vfyStruct.helpAfter
     && /never touches your database/.test(vfyStruct.helpAfter))
     ? ok("verification: the mode help swaps with the select and states proof, prerequisite, cost")

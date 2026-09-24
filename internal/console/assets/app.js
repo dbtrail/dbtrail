@@ -150,6 +150,10 @@ const ICONS = {
   // reader; the MySQL box shows the vendor's logo (assets/mysql-logo.png,
   // see VENDOR.md) and the DBTrail box the brand lockup in white.
   duck: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M14.2 3.2c2.3 0 4.1 1.8 4.1 4.1 0 .9-.3 1.7-.8 2.4l3.2-.4c.7-.1 1 .8.5 1.2l-2.1 1.5c.4.9.6 1.9.6 2.9 0 3.6-3.2 6.4-7.4 6.4H8.6C5.4 21.3 3 19 3 16.2c0-2.6 2.1-4.7 4.8-4.9h2.3V7.3c0-2.3 1.8-4.1 4.1-4.1zm.6 3.1c-.5 0-.9.4-.9.9s.4.9.9.9.9-.4.9-.9-.4-.9-.9-.9z"/></svg>`,
+  layers: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/></svg>`,
+  pin: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.2-6-10a6 6 0 0 1 12 0c0 4.8-6 10-6 10z"/><circle cx="12" cy="11" r="2.2"/></svg>`,
+  clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>`,
+  shield: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>`,
   folder: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`,
   check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.6 2.6L16.5 9"/></svg>`,
   cross: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></svg>`,
@@ -5585,7 +5589,14 @@ async function renderSnapshots() {
       // Three regions with visible separation (#1419): what you can run,
       // what is running or just ran, what ran before.
       part("Checks", () => {
-        verifyRegions(servers, { serversErr: serversErr }).forEach((region) => panel.append(region));
+        // Two columns (round 3): what you can run and what is running on
+        // the left, what ran before on the right, so the verdict and the
+        // list of past runs are read together.
+        const regions = verifyRegions(servers, { serversErr: serversErr });
+        const isHist = (r) => (" " + r.className + " ").includes(" vfy-histcard ");
+        const left = el("div", { class: "snap-checks-l" }), right = el("div", { class: "snap-checks-r" });
+        regions.forEach((r) => (isHist(r) ? right : left).append(r));
+        panel.append(el("div", { class: "snap-checks" }, left, right.children.length ? right : null));
         // The verify guide, AFTER the section it describes: it lost its only
         // link when the three page headers became one (#1573) — the header
         // now opens the backup-strategy guide — and a page nothing links to
@@ -5952,8 +5963,8 @@ const BACKUP_DAEMON_EMPTY = {
 // read once at boot says so beside its input, under its own value, so the
 // operator knows the save landed and the effect has not.
 function backupDaemonEditCard(rows, locked) {
-  const card = el("div", { class: "card" });
-  card.append(el("div", { class: "card-title" }, el("span", { text: "Retention" })));
+  const card = el("div", { class: "card stg-card" });
+  card.append(el("div", { class: "card-title stg-card-t" }, icon("clock", "stg-ico stg-ico-sun"), el("span", { text: "Retention" })));
   for (const row of rows) {
     card.append(backupDaemonEditRow(row, locked));
   }
@@ -6212,22 +6223,40 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     el("legend", { class: "field-label", text: "Keep a copy of this server's snapshots on this machine?" }),
     el("label", { class: "check" }, yes, el("span", { text: "Yes" })),
     el("label", { class: "check" }, no, el("span", { text: "No, only in S3" }))));
-  const grid = el("div", { class: "form-grid" });
+  // Two cards (round 3): the count to keep, as a stepper around the number,
+  // and the two places the copy lives, as tiles the folder and the bucket
+  // are typed into. The inputs keep their names: the save reads them, the
+  // browser tests find them by name.
+  const grid = el("div", { class: "stg-two" });
   // The folder a yes uses: this server's own, or the default one named after
   // its id when it has none yet. Shown, never silently sent: a no omits it.
   const dirWas = (srv.baseline_dir || srv.default_dir || "").trim();
-  const dir = el("input", { class: "input", name: "baseline_dir", value: dirWas, placeholder: srv.default_dir || "/full/path/to/a/folder" });
-  const s3 = el("input", { class: "input", name: "baseline_s3", value: srv.baseline_s3 || "", placeholder: "s3://bucket/prefix/" });
-  const keep = el("input", { class: "input", name: "keep_newest", type: "number", min: "0", step: "1",
-    value: srv.keep_newest ? String(srv.keep_newest) : "", placeholder: "all" });
-  const dirField = el("label", { class: "field" }, el("span", { class: "field-label", text: "Local folder" }), dir);
-  const keepField = el("label", { class: "field" }, el("span", { class: "field-label", text: "Keep the newest" }), keep);
-  grid.append(dirField,
-    el("label", { class: "field" }, el("span", { class: "field-label", text: "S3 location" }), s3),
-    keepField);
-  box.append(grid);
+  const dir = el("input", { class: "input where-in", name: "baseline_dir", value: dirWas, placeholder: srv.default_dir || "/full/path/to/a/folder" });
+  const s3 = el("input", { class: "input where-in", name: "baseline_s3", value: srv.baseline_s3 || "", placeholder: "s3://bucket/prefix/" });
+  const keep = el("input", { class: "input keep-n", name: "keep_newest", type: "number", min: "0", step: "1",
+    value: srv.keep_newest ? String(srv.keep_newest) : "", placeholder: "all", "aria-label": "Keep the newest" });
+  const step = (d) => {
+    const n = /^\d+$/.test(keep.value.trim()) ? Number(keep.value.trim()) : 0;
+    keep.value = Math.max(0, n + d) ? String(Math.max(0, n + d)) : "";
+    keep.dispatchEvent(new Event("input"));
+  };
+  const minus = el("button", { class: "keep-btn", type: "button", "aria-label": "Keep one fewer", text: "\u2212", onclick: () => step(-1) });
+  const plus = el("button", { class: "keep-btn", type: "button", "aria-label": "Keep one more", text: "+", onclick: () => step(1) });
+  const unit = el("span", { class: "keep-unit", text: "snapshots" });
+  const keepField = el("div", { class: "stg-card keep-card" },
+    el("div", { class: "stg-card-t" }, icon("layers", "stg-ico stg-ico-mint"), el("span", { class: "field-label", text: "Keep the newest" })),
+    el("div", { class: "keep-step" }, minus, keep, plus, unit));
   const words = el("div", { class: "bks-local-words" });
-  box.append(words);
+  keepField.append(words);
+  const tile = (ico, label, input) => el("label", { class: "where-tile" }, icon(ico, "where-ico"),
+    el("span", { class: "where-body" }, el("span", { class: "field-label", text: label }), input));
+  const dirField = tile("folder", "Local folder", dir);
+  const s3Field = tile("bucket", "S3 location", s3);
+  const whereCard = el("div", { class: "stg-card where-card" },
+    el("div", { class: "stg-card-t" }, icon("pin", "stg-ico stg-ico-orange"), el("span", { class: "field-label", text: "Where it lives" })),
+    dirField, s3Field);
+  grid.append(keepField, whereCard);
+  box.append(grid);
   // S3 without a folder (#1659): said in red next to the two fields, schedule
   // or not. From the SAVED values, the ones the schedule reads
   // (rebuildPossible): a daemon default folder does not save this server,
@@ -6250,10 +6279,10 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // covered when the write paths would refuse. The cross on that row is the
   // whole page in one glyph; the line under it says what to do.
   const src = srv.source;
-  box.append(blCase(src, true));
+  whereCard.append(blCase(src, true));
   if (src === "default") {
     const eff = srv.resolved_dir || srv.resolved_s3;
-    box.append(el("p", { class: "form-hint" },
+    whereCard.append(el("p", { class: "form-hint" },
       "Time-travel reads ", el("code", { text: eff }),
       sessionMay("servers:write") ? ". To make snapshots for this server, save a location above." : "."));
   }
@@ -6300,7 +6329,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
 
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
-  const save = el("button", { class: "btn btn-sm", type: "button", text: "Save" });
+  const save = el("button", { class: "btn btn-primary", type: "button", text: "Save" });
   // Two different reasons to be read-only. registry_read_only is the
   // registry file itself (a newer version wrote it), and the Save stays
   // visible, disabled, beside the reason. A session without servers:write
@@ -6331,7 +6360,15 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     const local = yes.checked;
     const s3v = s3.value.trim();
     dirField.hidden = !local;
-    keepField.hidden = !local || !!s3v;
+    // A tile lights when the place is this server's OWN: a folder typed here
+    // (the daemon's default, shown as the placeholder value, is not), or a
+    // bucket. The verdict row under them says the same in words.
+    const ownDir = dir.value.trim() !== "" && (was.rawDir !== "" || dir.value.trim() !== (srv.default_dir || "").trim());
+    dirField.classList.toggle("on", local && ownDir);
+    s3Field.classList.toggle("on", !!s3v);
+    // With S3 the count does nothing (S3 keeps everything), so the stepper
+    // goes and the words say what happens instead.
+    minus.hidden = plus.hidden = keep.hidden = unit.hidden = !local || !!s3v;
     clear(words);
     // The reach is said for the count as it applies to the folder as saved:
     // a typed folder or destination makes it a number that does not apply yet.
@@ -7994,6 +8031,33 @@ function backupFoldError(msg) {
   return out;
 }
 
+// choicePills draws a closed set of choices as pills, one lit, and behaves
+// like the select it replaces: `value` reads and sets the lit one, a click
+// lights it and calls onChange. Pills say the whole question at once; a
+// dropdown says one answer and hides the rest.
+function choicePills(choices, value, label, onChange) {
+  const group = el("div", { class: "sch-pills", role: "radiogroup", "aria-label": label });
+  const pills = [];
+  let current = value;
+  const paint = () => {
+    for (const p of pills) {
+      const on = p.dataset.value === current;
+      p.classList.toggle("is-on", on);
+      p.setAttribute("aria-checked", on ? "true" : "false");
+    }
+  };
+  for (const [v, t] of choices) {
+    const pill = el("button", { class: "sch-pill", type: "button", role: "radio", "aria-checked": "false", text: t });
+    pill.dataset.value = v;
+    pill.onclick = () => { current = v; paint(); if (onChange) onChange(); };
+    pills.push(pill);
+    group.append(pill);
+  }
+  Object.defineProperty(group, "value", { get: () => current, set: (v) => { current = v; paint(); } });
+  paint();
+  return group;
+}
+
 // backupScheduleCard (#1442): the per-server backup timer. The state line
 // under the heading carries the schedule and the next run, so the state
 // reads without going into the body; the body is the form plus what the
@@ -8033,9 +8097,9 @@ function backupScheduleCard(cur, b) {
   // to be clicked. What the summary carried is now the card's state line, so
   // the fact that used to be readable in passing is still readable in
   // passing, and the form behind it no longer costs a click to find.
-  const card = el("section", { class: "ov-panel bk-restore bk-schedule" });
+  const card = el("section", { class: "ov-panel bk-restore bk-schedule stg-card" });
   card.append(el("div", { class: "ov-panel-head" },
-    el("h2", { class: "ov-panel-title", text: "Update the copy" })));
+    el("h2", { class: "ov-panel-title stg-card-t" }, icon("refresh", "stg-ico stg-ico-pink"), "Update the copy")));
   const state = el("p", { class: "form-hint bk-card-state" });
   card.append(state);
   const body = el("div", { class: "bk-card-body" });
@@ -8054,7 +8118,7 @@ function backupScheduleCard(cur, b) {
       " The full reads do not run until that changes; the other scheduled runs still do." });
   }
   if (!sch) {
-    state.textContent = "None yet.";
+    state.textContent = "Not on a schedule. Pick how often the copy updates.";
   } else {
     let line = "Every " + sch.every + " at " + sch.at + " UTC" +
       (sch.full_every ? ", with a full read every " + sch.full_every : "") + ".";
@@ -8095,31 +8159,33 @@ function backupScheduleCard(cur, b) {
   // The form (D13): one list of intervals, five minutes to a day. The UTC
   // hour a daily run lines up on shows only for the daily choice; the full
   // read timetable (#1564) is kept as saved, never edited here.
-  const every = el("select", { class: "select", "aria-label": "Update the copy every" });
-  for (const [v, t] of SCHEDULE_CHOICES) every.append(el("option", { value: v, text: t }));
+  // The choice is a row of pills, one lit: a reader sees the interval in
+  // force and the alternatives at once, where a closed dropdown showed one
+  // value and hid the question. A saved interval outside the list gets its
+  // own pill, so the form never shows a choice the schedule does not have.
   const saved = sch ? scheduleChoice(sch.every) : "1d";
-  if (!SCHEDULE_CHOICES.some(([v]) => v === saved)) every.append(el("option", { value: saved, text: sch.every }));
-  every.value = saved;
+  const choices = SCHEDULE_CHOICES.slice();
+  if (!choices.some(([v]) => v === saved)) choices.push([saved, sch.every]);
   const at = el("input", { class: "in", type: "text", spellcheck: "false", placeholder: "03:00", "aria-label": "At (UTC)" });
   at.value = sch ? sch.at : "03:00";
   at.style.maxWidth = "90px";
   const atWrap = el("span", { class: "bk-sched-at" }, el("span", { class: "form-hint", text: "at" }), at, el("span", { class: "form-hint", text: "UTC" }));
   const syncAt = () => { atWrap.hidden = every.value !== "1d"; };
-  every.addEventListener("change", syncAt);
+  const every = choicePills(choices, saved, "Update the copy every", syncAt);
   syncAt();
-  const save = el("button", { class: "btn", type: "button", text: sch ? "Save" : "Turn on" });
+  const save = el("button", { class: "btn btn-primary", type: "button", text: sch ? "Save" : "Turn on" });
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   save.onclick = () => saveBackupSchedule(cur.id, { every: every.value, at: at.value.trim(), full_every: sch && sch.full_every ? sch.full_every : "" }, save, msg);
-  const row = el("div", { class: "bk-restore-row", "data-sched-edit": "1" },
-    el("span", { class: "form-hint", text: "every" }), every, atWrap, save);
+  const row = el("div", { class: "bk-restore-row", "data-sched-edit": "1" }, atWrap, save);
   if (sch) {
     const remove = el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Turn off" });
     remove.onclick = () => removeBackupSchedule(cur.id, remove, msg);
     row.append(remove);
   }
+  every.setAttribute("data-sched-edit", "1");
   msg.setAttribute("data-sched-edit", "1");
-  body.append(row, msg);
+  body.append(every, row, msg);
 
   // What the schedule will do next, and what it last did. The skip is
   // shown when it is the newest fact: a slot that could not start after
@@ -8614,11 +8680,11 @@ function backupFilesShape(files) {
 // tile is a whole folder arriving as one .tar.gz. Counting files would be
 // wrong by hundreds.
 const LANE_COUNT_WORD = ["No", "One", "Two", "Three"];
-function backupLane(title, files, tail) {
+function backupLane(title, files, tail, ico) {
   const n = files.length;
   const word = (LANE_COUNT_WORD[n] || String(n)) + " download" + (n === 1 ? "" : "s");
   return el("div", { class: "bk-lane" },
-    el("h3", { class: "bk-lane-t", text: title }),
+    el("div", { class: "bk-lane-head" }, ico ? icon(ico, "bk-lane-ico") : null, el("h3", { class: "bk-lane-t", text: title })),
     backupFilesShape(files),
     el("p", { class: "bk-lane-lead", text: word + tail }));
 }
@@ -8647,10 +8713,10 @@ function backupDuckLane(b) {
   if (hasViews) files.push({ name: DUCKDB_VIEWS_FILE, cap: "how to read them" });
   const lane = backupLane("To open in DuckDB", files, hasViews
     ? ". The data, and the file that tells DuckDB how to read it."
-    : ". The data, on its own.");
+    : ". The data, on its own.", "duck");
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
-  const dl = el("button", { class: "btn", type: "button", text: "Download the data" });
+  const dl = el("button", { class: "btn btn-primary", type: "button", text: "Download the data" });
   dl.onclick = async () => {
     const err = await downloadNewestBackup(snaps[0].time, dl);
     // The lane may have been repainted while the request was in flight, which
@@ -8805,7 +8871,7 @@ function backupSQLLane(cur, b, sqlSt) {
   const st = sqlSt && sqlSt.sql_export;
   const lane = backupLane("To load into MySQL",
     [{ name: ".sql files", cap: "your tables" }],
-    mayCreate ? ", built for whatever moment you pick." : ", built for a moment someone picks.");
+    mayCreate ? ", built for whatever moment you pick." : ", built for a moment someone picks.", "file");
   const body = el("div", { class: "bk-restore-body" });
   // Running used to return null and take the whole card off the page. In a
   // two-lane panel that leaves a hole where an answer was, so the lane stays
@@ -8816,11 +8882,11 @@ function backupSQLLane(cur, b, sqlSt) {
     return lane;
   }
   if (mayCreate) body.append(el("p", { class: "form-hint", text:
-    "Plain SQL files in mydumper format, ready for myloader. Loading them back needs nothing from DBTrail, and your database is never touched: DBTrail starts from the snapshot before that moment and replays the changes it already recorded." }));
+    "Plain SQL files in mydumper format, ready for myloader. Built from the snapshot before that moment plus the recorded changes; your database is never touched." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
-  const go = el("button", { class: "btn", type: "button", text: "Build" });
+  const go = el("button", { class: "btn btn-primary", type: "button", text: "Build" });
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   go.onclick = () => startSQLExport(cur.id, input.value.trim(), go, msg);
@@ -8992,9 +9058,19 @@ function verifyRegions(servers, opts) {
   }
 
   // ── Region 1: what you can run ──
-  const control = el("section", { class: "tcard tcard-violet vfy-region vfy-control" });
+  const control = el("section", { class: "tcard vfy-region vfy-control" });
+  // The verdict first (round 3): what the last check found, as an icon and
+  // a headline, filled in from the history read below. Then the question,
+  // "which check", and the one button. A reader who takes nothing else
+  // from this card leaves knowing whether the copy matched.
+  const verdict = el("div", { class: "vfy-state none" },
+    el("span", { class: "vfy-state-ico" }, icon("check", "vfy-vico")),
+    el("div", { class: "vfy-state-w" },
+      el("div", { class: "vfy-state-t", text: "Checking…" }),
+      el("div", { class: "vfy-state-s", text: "" })));
+  control.append(verdict);
   control.append(el("div", { class: "vfy-region-head" },
-    el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Run a check" }))));
+    el("h2", { class: "ov-panel-title", text: "Run a check" })));
   const modeSel = el("select", { class: "select vfy-mode" },
     el("option", { value: "baseline-anchored", text: "Compare two saved snapshots" }));
   if (capsCache.verify_live_source) {
@@ -9003,7 +9079,7 @@ function verifyRegions(servers, opts) {
   modeSel.append(el("option", { value: "recover-inputs", text: "Check recovery inputs (no snapshot needed)" }));
 
   const results = el("div", { class: "vfy-results" });
-  const btn = el("button", { class: "btn vfy-run", type: "button", text: "Run verification" });
+  const btn = el("button", { class: "btn btn-primary vfy-run", type: "button", text: "Run verification" });
   const configured = !!capsCache.verify;
   // The snapshot-comparison modes need a baseline location; the
   // recover-inputs check reads only the index, so it stays runnable on a
@@ -9040,7 +9116,7 @@ function verifyRegions(servers, opts) {
   // ── Region 2: what is running or just ran ──
   const current = el("section", { class: "tcard vfy-region vfy-current" });
   current.append(el("div", { class: "vfy-region-head" },
-    el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Current run" }))));
+    el("h2", { class: "ov-panel-title", text: "Current run" })));
   vfyView = { id: cur.id, results, btn, updateMode };
   vfyDraw(vfyView);
   vfyProbe(cur.id);
@@ -9053,11 +9129,11 @@ function verifyRegions(servers, opts) {
   // ── Region 3: what ran before ──
   const historyCard = el("section", { class: "tcard vfy-region vfy-histcard" });
   historyCard.append(el("div", { class: "vfy-region-head" },
-    el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "History" })),
+    el("h2", { class: "ov-panel-title", text: "Past checks" }),
     tzChip()));
   const history = el("div", { class: "vfy-history" });
   historyCard.append(history);
-  loadVerifyHistory(cur.id, history, opts && opts.lastLine);
+  loadVerifyHistory(cur.id, history, opts && opts.lastLine, verdict);
 
   // Running a check takes baseline:create. Without it the region that
   // offers one is left out; what is running and what ran before stay, since
@@ -9384,21 +9460,27 @@ const VFY_MODE_LABEL = { "baseline-anchored": "compared two saved snapshots", "l
 // --verify-interval loop writes the same store. On a fetch error (including
 // the 403 feature-off case) the box keeps whatever it already shows; the
 // trigger UI above explains how to enable verification.
-async function loadVerifyHistory(id, box, lastLine) {
+async function loadVerifyHistory(id, box, lastLine, verdictTile) {
+  // The verdict tile on the control card: the one on screen when none is
+  // handed in (a run that just ended refreshes the history from followVerify).
+  const tile = verdictTile || document.querySelector(".vfy-control .vfy-state");
   let recs;
   try {
     recs = (await api("/api/servers/" + encodeURIComponent(id) + "/verify/history")).history || [];
   } catch (err) {
     if (lastLine) lastLine.textContent = "past runs could not be read";
+    vfyVerdictFill(tile, null, "unreadable");
     return;
   }
   clear(box);
   if (!recs.length) {
     box.append(el("div", { class: "ev-empty", text: "No past runs yet." }));
     if (lastLine) lastLine.textContent = "no check yet";
+    vfyVerdictFill(tile, null, "none");
     return;
   }
   const latest = recs.find((r) => r.state === "succeeded" || r.state === "failed");
+  vfyVerdictFill(tile, latest || null, "none");
   // The fold line above the section (D9): when, and what it found.
   if (lastLine) lastLine.textContent = latest && latest.finished_at ? "last check " + utcLabel(latest.finished_at) + " · " + vfyHeadline(latest) : "no finished check yet";
   if (latest && latest.finished_at) {
@@ -9426,7 +9508,13 @@ async function loadVerifyHistory(id, box, lastLine) {
     // the history is short and comparing runs side by side is the point.
     const detailID = "vfy-hist-" + i;
     const row = el("button", { class: "stg-row vfy-histrow", type: "button", "aria-expanded": "false", "aria-controls": detailID });
+    // A mark before the date says the outcome without reading the counts:
+    // a tick, a cross, or a dash for a run that proved nothing or was
+    // skipped.
+    const mark = r.state === "failed" || r.verdict === "mismatch" || r.verdict === "error" ? "bad"
+      : r.state === "succeeded" && r.verdict === "verified" ? "ok" : "none";
     row.append(
+      el("span", { class: "vfy-mark " + mark, text: mark === "ok" ? "\u2713" : mark === "bad" ? "\u2715" : "\u2013" }),
       icon("caret", "ev-caret"),
       el("span", { class: "stg-name mono", text: when }),
       el("span", { text: (VFY_MODE_LABEL[r.mode] || r.mode || "") + (r.trigger === "scheduled" ? " (scheduled)" : "") }),
@@ -9449,6 +9537,45 @@ async function loadVerifyHistory(id, box, lastLine) {
     };
     box.append(row, detail);
   });
+}
+
+// vfyVerdictFill paints the control card's verdict from the newest finished
+// run: the mark, a headline in words, and when. It never claims more than
+// the run proved (a run whose tables all came back not checked is "Nothing
+// proven", never a tick), and before the first run it says so.
+function vfyVerdictFill(tile, latest, whyNone) {
+  if (!tile) return;
+  const t = tile.querySelector(".vfy-state-t"), sub = tile.querySelector(".vfy-state-s"), ico = tile.querySelector(".vfy-state-ico");
+  if (!t || !sub || !ico) return;
+  const set = (state, title, line, mark) => {
+    tile.className = "vfy-state " + state;
+    t.textContent = title;
+    sub.textContent = line;
+    clear(ico);
+    ico.append(icon(mark, "vfy-vico"));
+  };
+  if (!latest || !latest.finished_at) {
+    set("none", whyNone === "unreadable" ? "Past checks could not be read" : "Never checked", "Run one below.", "check");
+    return;
+  }
+  const s = latest.summary || {};
+  const when = "checked " + agoText((Date.now() - Date.parse(latest.finished_at)) / 1000);
+  if (latest.state === "failed") { set("bad", "The check failed", (latest.last_error || "unknown error") + " · " + when, "cross"); return; }
+  switch (latest.verdict) {
+    case "verified":
+      set("ok", "The copy matches", (s.match || 0) + " of " + ((s.match || 0) + (s.inconclusive || 0) + (s.error || 0)) + " tables · " + when, "check");
+      return;
+    case "mismatch":
+      set("bad", (s.mismatch || 0) + (s.mismatch === 1 ? " table differs" : " tables differ"), (s.match || 0) + " match · " + when, "cross");
+      return;
+    case "error":
+      set("bad", "Errors on " + (s.error || 0) + (s.error === 1 ? " table" : " tables"), (s.match || 0) + " match · " + when, "cross");
+      return;
+    case "no_predecessor":
+      set("none", "Nothing to compare yet", "Only one snapshot so far · " + when, "check");
+      return;
+  }
+  set("warn", "Nothing proven", vfyHeadline(latest) + " · " + when, "check");
 }
 
 // vfySortResults: worst verdict first (#1419 §3) — a mismatch must not sit
@@ -9514,7 +9641,7 @@ function renderVerifyResults(container, status, id, opts) {
   const history = (opts && opts.history) || (status && status.trigger !== undefined);
   if (!status || status.state === "idle") {
     if (!history) {
-      container.append(el("div", { class: "ev-empty", text: "No run yet. Results appear here, table by table, once a check runs. Past runs sit under History." }));
+      container.append(el("div", { class: "ev-empty", text: "No run yet. Results land here, table by table." }));
     }
     return;
   }
