@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.89.0] - 2026-09-24
+
+### Changed
+- **The Snapshots page offers three settings and nothing else** (#1846,
+  #1849): how often the copy is updated, a manual read of the database
+  (Create backup) and retention. The schedule card ("Update the copy") is a
+  list of six intervals, 5 minutes to 24 hours, with the UTC hour only for
+  the daily choice; the full-read timetable is no longer edited on the page
+  (a Save keeps the saved value) and the "About N backups every 30 days"
+  line is gone, here and on the S3 rule box. The per-server row no longer
+  asks whether to keep a local copy (the answer is yes); its fields read
+  **Local folder** and **S3 location**, and the archive toggle keeps its
+  saved value off the page. Of the daemon settings only retention is drawn;
+  the "Set at startup" card (lock mode, `.sql` build folder, verify table
+  filter, default locations) is gone, its values documented with the flags.
+  The copies list shows the binlog coordinates as the tooltip of the time.
+- **Checks is a closed fold** (#1849) whose line says when the last check
+  ran and what it found ("no check yet" before the first). It opens on its
+  own while a run is live for the server, and stays open across the page's
+  own repaints once opened.
+- **Restore to a moment moved to the Restore page** (#1849), under the
+  row-level form, with a link to follow the run on Snapshots, where the
+  in-flight region and the result stay.
+- **The S3 baseline inventory is cached per source** (#1847). On a server
+  whose backups go to S3, the coverage read walked every object of the
+  baseline prefix (one request per 1,000 objects, sequentially): on a prefix
+  of 1,021 snapshots that was ~578 requests, past the 15 s budget, and a
+  restore coverage of `unknown`. The directory listing is now reused for
+  10 s and refreshed sooner when the daemon writes a snapshot; a completed
+  snapshot directory is read once (by its own prefix, 32 in flight when
+  cold) and kept while listed. Every S3 reader goes through it: coverage,
+  the Snapshots page, the scheduler's newest-snapshot probe and views. The
+  Overview flow asks for its own reads beside the coverage read instead of
+  after it. Measured out of region: the Snapshots page window 9.1 s → 4.1 s
+  cold and under 1 ms warm; the whole inventory from `unknown` to 41 s cold
+  and 2.3 s warm.
+
 ## [0.88.0] - 2026-09-23
 
 ### Added
