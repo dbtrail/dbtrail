@@ -10,7 +10,7 @@ import (
 
 // The sidebar's order is a decision (#1863): the three pages an operator opens
 // every day sit at the top with no heading, Investigate and Resolve keep
-// theirs, and Settings runs MCP Server, the daemon's three, then Access
+// theirs, and Settings runs MCP Server, Rotation, Retention, then Access
 // profiles, after which a commercial build's panels are inserted. A guard
 // over index.html, because an entry that drifts back into a group of its own
 // looks fine in every unit test and wrong on the only screen that matters.
@@ -39,16 +39,14 @@ func TestSidebarOrder1863(t *testing.T) {
 		"Overview", "Snapshots", "Status",
 		"## Investigate", "Events", "Schema changes",
 		"## Resolve", "Restore",
-		"## Settings", "MCP Server", "Rotation", "Retention", "This daemon", "Access profiles",
+		"## Settings", "MCP Server", "Rotation", "Retention", "Access profiles",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("sidebar reads\n  %q\nwant\n  %q", got, want)
 	}
 	// The gates travel with the entries they gate.
-	for _, route := range []string{"retention", "daemon"} {
-		if !regexp.MustCompile(`data-route="` + route + `"[^>]*data-capability="monitor"`).MatchString(nav) {
-			t.Errorf("the %s entry lost its monitor gate", route)
-		}
+	if !regexp.MustCompile(`data-route="retention"[^>]*data-capability="monitor"`).MatchString(nav) {
+		t.Error("the retention entry lost its monitor gate")
 	}
 	if !regexp.MustCompile(`id="nav-rotation"[^>]*data-capability="monitor"`).MatchString(nav) {
 		t.Error("the Rotation entry lost its monitor gate")

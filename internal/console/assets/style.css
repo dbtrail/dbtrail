@@ -3428,3 +3428,10 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 /* The row's own name repeats the panel title now that only the selected
    server is drawn: kept for the tests and screen readers, not painted. */
 .bks-server-name { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; }
+
+/* #1867: the two notes that took over from the This daemon page. The S3
+   signing note sits under the "Where it lives" card and hides with an empty
+   S3 field; the staged-builds note closes the .sql lane. */
+.s3-signing { margin-top: 10px; }
+.s3-signing[hidden] { display: none; }
+.stg-staged { margin-top: 12px; padding-top: 10px; border-top: 1px solid oklch(0.9 0.02 300 / 0.6); }

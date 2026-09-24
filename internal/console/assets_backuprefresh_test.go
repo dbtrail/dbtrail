@@ -98,6 +98,9 @@ func TestStorageSplit_eachHalfHoldsOnlyItsOwnConcern(t *testing.T) {
 	if strings.Contains(js, "function buildStorage(") {
 		t.Fatal("buildStorage is back; Storage was split into Retention and This daemon (#1543)")
 	}
+	if strings.Contains(js, "function buildDaemon(") || strings.Contains(js, "function credentialsCard(") || strings.Contains(js, "function stagingCard(") {
+		t.Fatal("the This daemon page is back; it was dissolved into Status and Snapshots (#1867)")
+	}
 	for _, tc := range []struct {
 		fn    string
 		want  []string
@@ -105,11 +108,12 @@ func TestStorageSplit_eachHalfHoldsOnlyItsOwnConcern(t *testing.T) {
 	}{
 		// What happens to your data over time. Nothing about this process.
 		{"buildRetention", []string{"rotationCard(", "archivingPanel("},
-			[]string{"credentialsCard(", "stagingCard(", "telemetryCard(", "backupRefreshCard(", "duckdbPanel("}},
-		// What this process is reaching, holding and sending. Nothing about
-		// the data lifecycle.
-		{"buildDaemon", []string{"credentialsCard(", "stagingCard(", "telemetryCard("},
-			[]string{"rotationCard(", "archivingPanel(", "backupRefreshCard(", "duckdbPanel("}},
+			[]string{"s3SigningNote(", "stagedDownloadsNote(", "telemetryCard(", "backupRefreshCard(", "duckdbPanel("}},
+		// The other half, This daemon, was dissolved (#1867): each of its
+		// cards is mounted where its question is asked, and nowhere else.
+		{"renderStatus", []string{"telemetryCard("}, []string{"rotationCard(", "archivingPanel(", "s3SigningNote(", "stagedDownloadsNote("}},
+		{"backupSQLLane", []string{"stagedDownloadsNote("}, []string{"telemetryCard(", "s3SigningNote("}},
+		{"backupServerRow", []string{"s3SigningNote("}, []string{"telemetryCard(", "stagedDownloadsNote("}},
 	} {
 		body := jsFunctionBody(t, js, tc.fn)
 		for _, w := range tc.want {
@@ -368,7 +372,10 @@ func jsArmSummary(t *testing.T, body, anchor string) string {
 // Each assertion is scoped to the STRING that arm assigns. See jsArmSummary
 // for why neither a byte window nor the whole line is narrow enough.
 func TestCredentialsCard_armsReportWhatWasProbed(t *testing.T) {
-	body := jsFunctionBody(t, readAsset(t, "app.js"), "credentialsCard")
+	// The sentence lives in awsSigningSummary since #1867 (the card became the
+	// note under the S3 field); the Raw signals rows in awsSignalsFold.
+	body := jsFunctionBody(t, readAsset(t, "app.js"), "awsSigningSummary")
+	rows := jsFunctionBody(t, readAsset(t, "app.js"), "awsSignalsFold")
 
 	shared := jsArmSummary(t, body, "else if (aws.shared_config")
 	if strings.Contains(shared, "Using credentials from") {
@@ -405,11 +412,11 @@ func TestCredentialsCard_armsReportWhatWasProbed(t *testing.T) {
 	// access keys PLURAL are "set", two lines below a sentence that says the
 	// secret key was not checked, reproduces inside one card the contradiction
 	// the shared-config arm was rewritten to remove.
-	if strings.Contains(body, `"access keys (env)"`) {
+	if strings.Contains(rows, `"access keys (env)"`) {
 		t.Error(`the Raw signals row is still labelled "access keys (env)" but only AWS_ACCESS_KEY_ID is ` +
 			`probed, so it contradicts the summary two lines above it`)
 	}
-	if !strings.Contains(body, `"access key ID (env)"`) {
+	if !strings.Contains(rows, `"access key ID (env)"`) {
 		t.Error(`the Raw signals row does not name the one variable that was read (AWS_ACCESS_KEY_ID)`)
 	}
 
@@ -467,10 +474,10 @@ func TestCredentialsCard_armsReportWhatWasProbed(t *testing.T) {
 	// closes those; what it closes is the phrase itself coming back verbatim.
 	// "Using an IAM role" joined the retired list with #1534: both role arms
 	// now report what was probed instead of asserting use.
-	span := jsFunctionSpan(t, readAsset(t, "app.js"), "credentialsCard")
+	span := jsFunctionSpan(t, readAsset(t, "app.js"), "awsSigningSummary")
 	for _, retired := range []string{"Using credentials from", "Using access keys", "Using an IAM role"} {
 		if strings.Contains(span, retired) {
-			t.Errorf("credentialsCard says %q somewhere in its body. That claim was retired in #1528: the "+
+			t.Errorf("awsSigningSummary says %q somewhere in its body. That claim was retired in #1528: the "+
 				"daemon probes presence, never use, and this is the card an operator opens precisely "+
 				"because S3 is not working", retired)
 		}
@@ -489,13 +496,13 @@ func TestCredentialsCard_armsReportWhatWasProbed(t *testing.T) {
 // the body view cannot see a comment at all.
 func TestCredentialsCard_commentDoesNotOverclaim(t *testing.T) {
 	js := readAsset(t, "app.js")
-	start := strings.Index(js, "function credentialsCard(")
+	start := strings.Index(js, "function awsSigningSummary(")
 	if start < 0 {
-		t.Fatal("credentialsCard is gone; this guard covers nothing")
+		t.Fatal("awsSigningSummary is gone; this guard covers nothing")
 	}
-	end := strings.Index(js[start:], "function stagingCard(")
+	end := strings.Index(js[start:], "function awsSignalsFold(")
 	if end < 0 {
-		t.Fatal("cannot bound credentialsCard's source region")
+		t.Fatal("cannot bound awsSigningSummary's source region")
 	}
 	region := js[start : start+end]
 
@@ -518,9 +525,10 @@ func TestCredentialsCard_commentDoesNotOverclaim(t *testing.T) {
 // words and no em dashes. kvRow's own empty fallback is a shared helper, but
 // these two call sites pass the character in themselves.
 func TestCredentialsCard_noEmDashPlaceholders(t *testing.T) {
-	body := jsFunctionBody(t, readAsset(t, "app.js"), "credentialsCard")
-	if strings.Contains(body, "—") {
-		t.Error("credentialsCard passes an em dash as a placeholder; say \"not set\", like the row above it")
+	for _, fn := range []string{"awsSigningSummary", "awsSignalsFold", "s3SigningNote", "stagedDownloadsNote"} {
+		if strings.Contains(jsFunctionBody(t, readAsset(t, "app.js"), fn), "—") {
+			t.Errorf("%s passes an em dash as a placeholder; say \"not set\", like the row above it", fn)
+		}
 	}
 }
 

@@ -918,14 +918,16 @@ try {
       capBtn.foundRegistryServer ? "no button in the banner" : "no registry server in the fixture — the check tested nothing");
   !capBtn.onBoot ? ok("capture health: no Refresh button for the command-line entry") : bad("capture health: no Refresh button for the command-line entry", "offered an action the endpoint refuses");
 
-  // Scenario 9 — Storage page AWS-credentials card (#681). credentialsCard is
-  // pure (like pgHealthCard/continuityBox): it must lead with a plain-language
-  // summary of which credential source is active, never leave the raw signals
-  // as the only content, and each of the mutually-favored signals (static
-  // env keys > IAM role > shared config > none) must produce distinct copy —
-  // an IAM-role or shared-config setup must never read as "no credentials".
+  // Scenario 9 — the AWS-credentials signals (#681), the note under the S3
+  // field of a server's snapshot setup since #1867 (it was the Storage
+  // page's card, then This daemon's). s3SigningNote is pure (like
+  // pgHealthCard/continuityBox): it must lead with a plain-language summary
+  // of which credential source is active, never leave the raw signals as the
+  // only content, and each of the mutually-favored signals (static env keys
+  // > IAM role > shared config > none) must produce distinct copy: an
+  // IAM-role or shared-config setup must never read as "no credentials".
   const cred = await page.evaluate(() => {
-    const mk = (aws) => credentialsCard({ aws });
+    const mk = (aws) => { const s3 = document.createElement("input"); s3.value = "s3://bucket/prefix/"; return s3SigningNote(s3, { id: "e2e" }, { aws }, []); };
     const none = mk({ access_key_env: false, profile: "", region_env: "", shared_config: false, container_creds: false, web_identity: false });
     const keys = mk({ access_key_env: true, profile: "", region_env: "", shared_config: false, container_creds: false, web_identity: false });
     const ecs = mk({ access_key_env: false, profile: "", region_env: "", shared_config: false, container_creds: true, web_identity: false });
@@ -3822,22 +3824,22 @@ try {
     ? ok("protect: the old /storage link lands on Retention, without the moved panels")
     : bad("protect: the old /storage link lands on Retention, without the moved panels", JSON.stringify(storageTitles));
 
-  // The split itself: each half holds only its own concern, photographed
-  // rather than grepped. Retention must NOT carry the daemon's cards.
+  // The split itself: Retention holds only the data lifecycle, photographed
+  // rather than grepped. The other half, This daemon, was dissolved (#1867):
+  // its telemetry card is on Status, and the old /daemon address lands there.
   const halves = await page.evaluate(async () => {
     const titles = () => Array.from(document.querySelectorAll(".card-title")).map((h) => h.textContent);
     const retention = titles();
     navigate("daemon");
     await new Promise((r) => setTimeout(r, 1200));
-    return { retention: retention, daemon: titles(), path: location.pathname };
+    return { retention: retention, status: titles(), path: location.pathname };
   });
-  (halves.path === "/daemon"
+  (halves.path === "/status"
     && !halves.retention.some((t) => /AWS credentials|Usage telemetry|File reuse/.test(t))
-    && halves.daemon.some((t) => /AWS credentials/.test(t))
-    && halves.daemon.some((t) => /Usage telemetry/.test(t))
-    && !halves.daemon.some((t) => /Rotation/.test(t)))
-    ? ok("storage split: Retention holds the data lifecycle, This daemon holds the process")
-    : bad("storage split: Retention holds the data lifecycle, This daemon holds the process", JSON.stringify(halves));
+    && halves.status.some((t) => /Usage telemetry/.test(t))
+    && !halves.status.some((t) => /Rotation|AWS credentials/.test(t)))
+    ? ok("storage split: Retention holds the data lifecycle; /daemon lands on Status, which holds telemetry")
+    : bad("storage split: Retention holds the data lifecycle; /daemon lands on Status, which holds telemetry", JSON.stringify(halves));
 
   // Scenario 15e — motion that cannot be seen from Go (#1385).
   //
@@ -4852,10 +4854,10 @@ try {
   // The card tint rotation, on the page from the user's own screenshot. Two
   // distinct tinted grounds prove rotation; "not white" alone would pass a
   // single flat tint.
-  // On This daemon, which is the half that still carries two or more
-  // unconditional cards after the split (#1543); Retention has one.
-  await page.evaluate(() => navigate("daemon"));
-  await page.waitForFunction(() => location.pathname === "/daemon" && document.querySelectorAll(".cards .card").length >= 2);
+  // On Status, which always carries two or more cards (This daemon, the
+  // page this used to photograph, was dissolved in #1867).
+  await page.evaluate(() => navigate("status"));
+  await page.waitForFunction(() => location.pathname === "/status" && document.querySelectorAll(".cards .card").length >= 2);
   const tints = await page.evaluate(() => {
     const cards = Array.from(document.querySelectorAll(".cards .card")).slice(0, 2);
     return cards.map((c) => getComputedStyle(c).backgroundColor);
@@ -4875,10 +4877,10 @@ try {
   // The property is the one a reader sees: the cards on the first row, plus
   // the gaps between them, add up to the grid they sit in.
   //
-  // Retention runs FIRST and daemon LAST, because Scenario 17h below picks up
-  // "still on /daemon".
+  // Retention is the one route the split left under-filled since This
+  // daemon went (#1867).
   const rowFill = [];
-  for (const route of ["retention", "daemon"]) {
+  for (const route of ["retention"]) {
     await page.evaluate((r) => navigate(r), route);
     await page.waitForFunction(() => document.querySelectorAll(".cards .card").length >= 1);
     rowFill.push(await page.evaluate((r) => {
@@ -4896,8 +4898,8 @@ try {
   // whole empty track (361px on a 1084px grid), not a rounding remainder.
   // Scoped to what auto-fit actually promises. It collapses a track only when
   // the track is empty across the whole grid, so a page with MORE cards than
-  // tracks still ends on a ragged last row exactly as before. These two routes
-  // are the ones the #1543 split left under-filled, at one card and two.
+  // tracks still ends on a ragged last row exactly as before. Retention is
+  // the route the #1543 split left under-filled, at one card.
   rowFill.every((r) => r.cards >= 1 && r.left <= 2)
     ? ok("layout: a page with fewer cards than tracks still fills its row")
     : bad("layout: a page with fewer cards than tracks still fills its row", JSON.stringify(rowFill));
@@ -4926,12 +4928,12 @@ try {
     return { cards: boxes.length, rows: tops.length, onLast: last.length, left: Math.round(gw - used) };
   });
   await page.setViewportSize({ width: 1300, height: 1000 });
-  // Back to /daemon, and WAIT for it: Scenario 17h below picks up "still on
-  // /daemon" and looks for a card by title there. Leaving the page on /connect
-  // failed it with {"found":false}, which reads as a telemetry bug and is not
-  // one.
-  await page.evaluate(() => navigate("daemon"));
-  await page.waitForFunction(() => location.pathname === "/daemon"
+  // On to /status, and WAIT for it: Scenario 17h below picks up "still on
+  // /status" and looks for the telemetry card by title there. Leaving the
+  // page on /connect failed it with {"found":false}, which reads as a
+  // telemetry bug and is not one.
+  await page.evaluate(() => navigate("status"));
+  await page.waitForFunction(() => location.pathname === "/status"
     && document.querySelectorAll(".cards .card").length >= 2);
   // rows > 1 asserts the band is actually the wrapped case, so a future width
   // change that stops wrapping here cannot pass this vacuously.
@@ -4945,7 +4947,7 @@ try {
   // TestBackupServerRow_localCopyInEveryMode.
 
   // ── Scenario 17h — the telemetry card shows the exact sample event (#1447) ──
-  // Still on /daemon. The "Show a sample event" fold must be closed by
+  // Still on /status, where the card lives since #1867. The "Show a sample event" fold must be closed by
   // default, open on click, and carry the daemon's `sample_event` string
   // VERBATIM in a read-only <pre>: the daemon renders it through the same
   // function `bintrail telemetry show` prints through, and a JSON.stringify

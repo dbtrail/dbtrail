@@ -155,6 +155,12 @@ func TestOldAddressesLandOnTheirPage(t *testing.T) {
 		// would stick to that history entry after the check recovers.
 		{"storage, capabilities unknown", routeScenario{Start: "/storage", Steps: boot, Caps: serveCaps, Known: false, Real: []string{"renderRetention"}},
 			want{"/storage", nil, []string{"renderOverview"}, "", ""}},
+		// /daemon goes to Status (#1867), which every console has: the page it
+		// named was dissolved and its telemetry card lives there now.
+		{"daemon, watch", routeScenario{Start: "/daemon", Steps: boot, Caps: watchCaps, Known: true},
+			want{"/status", []string{"replace /status"}, []string{"renderStatus"}, "status", "daemon"}},
+		{"daemon, serve", routeScenario{Start: "/daemon", Steps: boot, Caps: serveCaps, Known: true},
+			want{"/status", []string{"replace /status"}, []string{"renderStatus"}, "status", "daemon"}},
 		{"timetravel", routeScenario{Start: "/timetravel", Steps: boot, Caps: watchCaps, Known: true},
 			want{"/recover", []string{"replace /recover"}, []string{"renderRecover"}, "recover", "timetravel"}},
 		{"query and anchor travel", routeScenario{Start: "/timetravel?a=1&b=2#here", Steps: boot, Caps: watchCaps, Known: true},
