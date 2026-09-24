@@ -8208,7 +8208,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   card.append(state);
   const body = el("div", { class: "bk-card-body" });
   body.append(el("p", { class: "form-hint", text:
-    "Pick a past moment. DBTrail rebuilds every table as it was then and saves the result as a new snapshot below. Your database is not touched." }));
+    "Pick a past moment. DBTrail rebuilds every table as it was then and saves the result as a new snapshot on the Snapshots page. Your database is not touched." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
