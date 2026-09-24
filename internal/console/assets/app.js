@@ -2052,7 +2052,7 @@ function flowActions(model, demoted) {
     row.append(link("Set up the copy ›", () => navigate("snapshots#setup")));
   }
   if (model.viewsSQL) row.append(link("Download " + DUCKDB_VIEWS_FILE + " (DuckDB views)", () => downloadViewsSQL({})));
-  row.append(link("Connect AI", () => navigate("connect")));
+  row.append(link("MCP Server", () => navigate("connect")));
   return row;
 }
 
@@ -10642,7 +10642,7 @@ function buildConnect(servers, tokStatus, minted, fbStatus, ice) {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "Three steps and Claude can answer questions about your database history. It can only read; it can never change anything.");
-  v.append(pageHead("Connect AI", sub));
+  v.append(pageHead("MCP Server", sub));
 
   const cards = el("div", { class: "cards" });
   cards.append(mcpTokenCard(tokStatus, minted));
@@ -11365,18 +11365,21 @@ function syncExtNav() {
 // async view here.
 // syncExtSettingsNav rebuilds the extension settings-panel nav items inside the
 // existing Settings group (not a group of their own: a panel administers the
-// console, so it belongs where Connect AI and Storage already are). Idempotent —
-// the previously injected items are removed first, so a capabilities refresh
+// console, so it belongs where MCP Server and Retention already are). They go
+// right after Access profiles, in registration order (#1863): the panels a
+// commercial build registers are mostly about who may see what, so they sit
+// with the built-in entry that answers the same question, and a build that
+// wants one entry last (a license card) registers it last. Idempotent — the
+// previously injected items are removed first, so a capabilities refresh
 // after a server switch or a re-login never accumulates duplicates.
 function syncExtSettingsNav() {
   $all("[data-extset-nav]").forEach((n) => n.remove());
   if (!extSettings.length) return;
-  const anchor = $('.nav-item[data-route="connect"]');
-  const group = anchor ? anchor.closest(".nav-group") : null;
-  if (!group) return;
+  let after = $('.nav-item[data-route="access-profiles"]');
+  if (!after) return;
   for (const p of extSettings) {
     const route = "extset-" + p.id;
-    group.append(el("a", {
+    const item = el("a", {
       class: "nav-item",
       "data-extset-nav": "1",
       "data-route": route,
@@ -11389,7 +11392,9 @@ function syncExtSettingsNav() {
       "data-perm": "settings:read",
       href: "/" + route,
       onclick: (e) => { e.preventDefault(); pendingRecover = null; navigate(route); },
-    }, icon("ext", "ni-icon"), el("span", { text: p.label })));
+    }, icon("ext", "ni-icon"), el("span", { text: p.label }));
+    after.after(item);
+    after = item;
   }
 }
 
@@ -13014,26 +13019,26 @@ async function stopMonitorRow(id) {
 let cmdkSel = 0, cmdkItems = [];
 
 function cmdkCommands() {
+  // Same order as the sidebar (#1863). Snapshots is one entry for the three
+  // pages that merged into it (#1573), findable by the names they had:
+  // somebody who has used this console types "backup" or "verif", and an
+  // entry they cannot find reads as a feature that was removed. alt is
+  // lowercased and matched like the label, and never shown. Not gated on the
+  // daemon, because the page opens on a standalone serve too.
   const cmds = [
     { group: "Navigate", label: "Overview", run: () => navigate("overview") },
+    { group: "Navigate", label: "Snapshots",
+      alt: ["backups", "verification", "snapshot settings"], run: () => navigate("snapshots") },
+    { group: "Navigate", label: "Status", run: () => navigate("status") },
     { group: "Navigate", label: "Events", run: () => navigate("events") },
     { group: "Navigate", label: "Schema changes", run: () => navigate("schema-changes") },
     { group: "Navigate", label: "Recover", run: () => navigate("recover") },
-    { group: "Navigate", label: "Status", run: () => navigate("status") },
   ];
   if (capsCache.reconstruct) cmds.push({ group: "Navigate", label: "Time-travel", run: () => navigate("timetravel") });
-  // One entry for the three pages that merged into it (#1573), findable by
-  // the names they had: somebody who has used this console types "backup"
-  // or "verif", and an entry they cannot find reads as a feature that was
-  // removed. alt is lowercased and matched like the label, and never shown.
-  // Not gated on
-  // the daemon, because the page opens on a standalone serve too.
-  cmds.push({ group: "Navigate", label: "Snapshots",
-    alt: ["backups", "verification", "snapshot settings"], run: () => navigate("snapshots") });
+  cmds.push({ group: "Navigate", label: "MCP Server", run: () => navigate("connect") });
   if (capsCache.monitor) cmds.push({ group: "Navigate", label: "Retention", run: () => navigate("retention") });
   if (capsCache.monitor) cmds.push({ group: "Navigate", label: "This daemon", run: () => navigate("daemon") });
   cmds.push({ group: "Navigate", label: "Access profiles", run: () => navigate("access-profiles") });
-  cmds.push({ group: "Navigate", label: "Connect AI", run: () => navigate("connect") });
   cmds.push({ group: "Actions", label: "Manage servers", run: () => { closeCmdk(); openServersModal(); } });
   if (capsCache.monitor) cmds.push({ group: "Actions", label: "Configure rotation…", run: () => { closeCmdk(); showRotationDialog(); } });
   if (capsCache.auth) {

@@ -525,7 +525,7 @@ readable by any DuckDB, Spark, Trino or Athena with no DBTrail involved.
 **Files, queried by name.** `bintrail views` writes a DuckDB schema over them:
 one `state_<schema>_<table>` view per table in the newest baseline, plus — with
 `--include-events` — an `events` view across every archive (the console's
-**Connect AI → Download a DuckDB schema** card downloads the same file). The change log
+**MCP Server → Download a DuckDB schema** card downloads the same file). The change log
 is opt-in because defining that view opens one Parquet footer per archived file
 before it returns a row, a cost that grows with the archive.
 

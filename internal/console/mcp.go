@@ -146,7 +146,7 @@ func (s *Server) mcpHandler() http.Handler {
 			// MCP clients have no credential that could authenticate them —
 			// refuse with the remediation, never serve open.
 			writeJSONError(w, http.StatusForbidden,
-				"the MCP endpoint requires a console token: generate one in Settings → Connect AI, "+
+				"the MCP endpoint requires a console token: generate one in Settings → MCP Server, "+
 					"or start with --token / BINTRAIL_CONSOLE_TOKEN "+
 					"(password login is a browser credential and cannot authenticate MCP clients)")
 			return
