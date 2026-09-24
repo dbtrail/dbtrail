@@ -3425,3 +3425,6 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .bl-case.bl-no { background: #FFE9F5; color: #B02762; }
 .bl-case .bl-name { min-width: 0; font-weight: 700; color: inherit; white-space: nowrap; }
 .bl-case .bl-say { color: inherit; }
+/* The row's own name repeats the panel title now that only the selected
+   server is drawn: kept for the tests and screen readers, not painted. */
+.bks-server-name { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; }
