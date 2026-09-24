@@ -58,52 +58,21 @@ func coverageGet(t *testing.T, srv *Server) coverageResponse {
 }
 
 // TestCoverageAPI pins the live-RPO statement (#1194): the delta window from
-// the strict floor, the full-table window from each table's EARLIEST usable
-// anchor reduced by max across tables (#1294),
-// broken tables named, and the degraded states each keeping their identity.
+// the strict floor, and the degraded states each keeping their identity. The
+// card is metadata-only since #1850: a configured backup location, readable
+// or not, changes nothing in the answer, and the answer carries none of the
+// full-table fields it used to.
 func TestCoverageAPI(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	latest := now.Add(-30 * time.Second)
 	part := now.Add(-100 * time.Hour).Format("p_2006010215")
 	tsDir := func(age time.Duration) string { return now.Add(-age).Format("2006-01-02T15-04-05Z") }
-	anchorNew := now.Add(-time.Hour)
-	anchorOld := now.Add(-10 * time.Hour)
 
 	dir := t.TempDir()
-	// orders: usable newest anchor (-1h, plus a superseded -200h). users:
-	// usable at -10h. legacy: newest -150h predates the floor → broken.
 	writeBaselineFixture(t, dir, tsDir(time.Hour), "shop", "orders.parquet")
-	writeBaselineFixture(t, dir, tsDir(200*time.Hour), "shop", "orders.parquet")
-	writeBaselineFixture(t, dir, tsDir(10*time.Hour), "shop", "users.parquet")
 	writeBaselineFixture(t, dir, tsDir(150*time.Hour), "shop", "legacy.parquet")
 
-	// #1219: the archives reach back 300h but belong to two sources, so the
-	// floor collapses to the live partitions (-100h) and the -150h `legacy`
-	// anchor becomes UNATTRIBUTABLE. Grading it against the bare floor hour
-	// would name a table whose archives are intact in broken_tables — the
-	// false alarm the narrowed floor exists to avoid — and letting it define
-	// the window would assert restorability it cannot prove. Neither: the
-	// full-table half reports "unknown" and claims no anchor.
-	t.Run("unattributable floor: no broken claim and no window claim", func(t *testing.T) {
-		srv := newBaselineServer(t, dir, true)
-		srv.cm.boot.db = coverageMockDBArchives(t, part, latest, nil,
-			now.Add(-300*time.Hour).Format("p_2006010215"),
-			now.Add(-101*time.Hour).Format("p_2006010215"), 2)
-		srv.cm.boot.dbName = "binlog_index"
-		got := coverageGet(t, srv)
-		if len(got.BrokenTables) != 0 {
-			t.Fatalf("unattributable anchors must not be named broken: %+v", got.BrokenTables)
-		}
-		if got.FullTableStatus != "unknown" || got.FullTableFrom != "" {
-			t.Fatalf("want unknown with no window, got status=%q from=%q", got.FullTableStatus, got.FullTableFrom)
-		}
-		// The delta half still states the window every source provably has.
-		if got.DeltaFrom == "" {
-			t.Fatal("the live floor is still a real window and must be reported")
-		}
-	})
-
-	t.Run("window, latest usable anchor, broken named", func(t *testing.T) {
+	t.Run("window from the strict floor, file-mode index", func(t *testing.T) {
 		srv := newBaselineServer(t, dir, true)
 		srv.cm.boot.db = coverageMockDB(t, part, latest, nil)
 		srv.cm.boot.dbName = "binlog_index"
@@ -124,39 +93,28 @@ func TestCoverageAPI(t *testing.T) {
 		if got.CheckpointAgeSeconds != nil {
 			t.Fatalf("checkpoint_age_seconds = %v, want omitted with no checkpoint", *got.CheckpointAgeSeconds)
 		}
-		if got.FullTableStatus != "ok" {
-			t.Fatalf("full_table_status = %q", got.FullTableStatus)
-		}
-		// Max ACROSS tables: users' -10h anchor must not widen the
-		// all-tables claim past orders, whose only usable anchor is -1h (its
-		// -200h one is below the floor). Within a table the earliest usable
-		// anchor wins, which #1294 covers separately.
-		if got.FullTableFrom != anchorNew.Format(consoleTSFormat) {
-			t.Fatalf("full_table_from = %q, want %q (not %q)", got.FullTableFrom,
-				anchorNew.Format(consoleTSFormat), anchorOld.Format(consoleTSFormat))
-		}
-		if len(got.BrokenTables) != 1 || got.BrokenTables[0] != "shop.legacy" {
-			t.Fatalf("broken_tables = %v", got.BrokenTables)
-		}
 	})
 
-	t.Run("all tables broken: no window claim, all named", func(t *testing.T) {
-		dir2 := t.TempDir()
-		writeBaselineFixture(t, dir2, tsDir(150*time.Hour), "shop", "legacy.parquet")
-		writeBaselineFixture(t, dir2, tsDir(200*time.Hour), "shop", "carts.parquet")
-		srv := newBaselineServer(t, dir2, true)
+	t.Run("no full-table fields, with a backup location configured", func(t *testing.T) {
+		srv := newBaselineServer(t, dir, true)
 		srv.cm.boot.db = coverageMockDB(t, part, latest, nil)
 		srv.cm.boot.dbName = "binlog_index"
-		got := coverageGet(t, srv)
-		if got.FullTableStatus != "ok" || got.FullTableFrom != "" {
-			t.Fatalf("all-broken must claim NO window: %+v", got)
+		rec, body := doServersReq(t, srv, "GET", "/api/coverage", "")
+		if rec.Code != 200 {
+			t.Fatalf("code = %d, body = %s", rec.Code, body)
 		}
-		if len(got.BrokenTables) != 2 || got.BrokenTables[0] != "shop.carts" || got.BrokenTables[1] != "shop.legacy" {
-			t.Fatalf("broken_tables = %v", got.BrokenTables)
+		var raw map[string]any
+		if err := json.Unmarshal(body, &raw); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []string{"full_table_status", "full_table_from", "broken_tables", "unreachable_tables", "unevaluable_tables", "restore_reads", "restore_needs_local", "baseline_configured"} {
+			if _, ok := raw[k]; ok {
+				t.Errorf("%s is in the answer; the card is metadata-only since #1850", k)
+			}
 		}
 	})
 
-	t.Run("unknown floor suppresses the full-table half as unknown", func(t *testing.T) {
+	t.Run("unknown floor keeps the edge", func(t *testing.T) {
 		srv := newBaselineServer(t, dir, true)
 		srv.cm.boot.db = coverageMockDB(t, part, latest, &mysql.MySQLError{Number: 1045, Message: "access denied"})
 		srv.cm.boot.dbName = "binlog_index"
@@ -164,97 +122,23 @@ func TestCoverageAPI(t *testing.T) {
 		if got.DeltaFrom != "" || got.DeltaTo == "" {
 			t.Fatalf("floor must be unknown, edge present: %+v", got)
 		}
-		if got.FullTableStatus != "unknown" || got.FullTableFrom != "" || len(got.BrokenTables) != 0 {
-			t.Fatalf("unknown floor must be 'unknown', never a silently-empty ok: %+v", got)
-		}
 	})
 
-	t.Run("listing failure is unknown, not silently-empty", func(t *testing.T) {
+	t.Run("a backup location that cannot be listed changes nothing", func(t *testing.T) {
 		srv := newBaselineServer(t, dir+"/does-not-exist", true)
 		srv.cm.boot.db = coverageMockDB(t, part, latest, nil)
 		srv.cm.boot.dbName = "binlog_index"
 		got := coverageGet(t, srv)
-		if got.DeltaTo == "" {
-			t.Fatalf("delta half must survive a listing failure: %+v", got)
-		}
-		if got.FullTableStatus != "unknown" || got.FullTableFrom != "" || len(got.BrokenTables) != 0 {
-			t.Fatalf("a failed listing must not render as 'nothing broken': %+v", got)
+		if got.DeltaFrom == "" || got.DeltaTo != latest.Format(consoleTSFormat) {
+			t.Fatalf("delta window = [%q, %q]: the card reads no backup location", got.DeltaFrom, got.DeltaTo)
 		}
 	})
 
 	t.Run("nil db degrades to unavailable with no window", func(t *testing.T) {
 		srv := newBaselineServer(t, dir, true)
 		got := coverageGet(t, srv)
-		if got.Continuity != "unavailable" || got.DeltaTo != "" || got.FullTableFrom != "" || got.FullTableStatus != "" {
+		if got.Continuity != "unavailable" || got.DeltaTo != "" || got.Freshness != "unavailable" {
 			t.Fatalf("nil db must degrade to unavailable with no window: %+v", got)
 		}
 	})
-}
-
-// A table can have SEVERAL baselines inside coverage, and reconstruct serves an
-// instant from the newest one AT OR BEFORE it — so the table is restorable from
-// its EARLIEST usable anchor, not its newest. Reducing to the newest understated
-// the window by however long ago the last baseline ran, and got worse with good
-// hygiene: every new snapshot pushed the reported floor forward (#1294).
-//
-// The pre-existing fixture could not catch this — its one multi-anchor table has
-// a single USABLE anchor, so both rules agree there.
-func TestCoverageFullTableWindowUsesEarliestUsableAnchor(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	latest := now.Add(-30 * time.Second)
-	part := now.Add(-100 * time.Hour).Format("p_2006010215") // floor: -100h
-	tsDir := func(age time.Duration) string { return now.Add(-age).Format("2006-01-02T15-04-05Z") }
-
-	dir := t.TempDir()
-	// orders: THREE anchors, two of them usable (-1h, -50h) and one below the
-	// floor (-200h). users: one usable anchor at -10h.
-	writeBaselineFixture(t, dir, tsDir(time.Hour), "shop", "orders.parquet")
-	writeBaselineFixture(t, dir, tsDir(50*time.Hour), "shop", "orders.parquet")
-	writeBaselineFixture(t, dir, tsDir(200*time.Hour), "shop", "orders.parquet")
-	writeBaselineFixture(t, dir, tsDir(10*time.Hour), "shop", "users.parquet")
-
-	srv := newBaselineServer(t, dir, true)
-	srv.cm.boot.db = coverageMockDB(t, part, latest, nil)
-	srv.cm.boot.dbName = "binlog_index"
-	got := coverageGet(t, srv)
-
-	if got.FullTableStatus != "ok" {
-		t.Fatalf("full_table_status = %q, want ok", got.FullTableStatus)
-	}
-	if len(got.BrokenTables) != 0 {
-		t.Fatalf("broken_tables = %v; every table here has a usable baseline", got.BrokenTables)
-	}
-	// orders starts at -50h (its earliest usable anchor, NOT its newest -1h
-	// one); users starts at -10h. "every table" therefore holds from -10h.
-	want := now.Add(-10 * time.Hour).Format(consoleTSFormat)
-	if got.FullTableFrom != want {
-		t.Errorf("full_table_from = %q, want %q\n"+
-			"reducing to the NEWEST anchor per table would give %q — a window %v narrower than the truth",
-			got.FullTableFrom, want, now.Add(-time.Hour).Format(consoleTSFormat), 9*time.Hour)
-	}
-}
-
-// A baseline BELOW the floor must not widen the window even though older
-// anchors now participate: its deltas are gone, so it restores nothing.
-func TestCoverageFullTableWindowIgnoresBelowFloorAnchors(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	latest := now.Add(-30 * time.Second)
-	part := now.Add(-100 * time.Hour).Format("p_2006010215")
-	tsDir := func(age time.Duration) string { return now.Add(-age).Format("2006-01-02T15-04-05Z") }
-
-	dir := t.TempDir()
-	writeBaselineFixture(t, dir, tsDir(5*time.Hour), "shop", "orders.parquet")
-	writeBaselineFixture(t, dir, tsDir(300*time.Hour), "shop", "orders.parquet") // below the floor
-
-	srv := newBaselineServer(t, dir, true)
-	srv.cm.boot.db = coverageMockDB(t, part, latest, nil)
-	srv.cm.boot.dbName = "binlog_index"
-	got := coverageGet(t, srv)
-
-	if want := now.Add(-5 * time.Hour).Format(consoleTSFormat); got.FullTableFrom != want {
-		t.Errorf("full_table_from = %q, want %q — the -300h anchor is below the floor and restores nothing", got.FullTableFrom, want)
-	}
-	if len(got.BrokenTables) != 0 {
-		t.Errorf("broken_tables = %v; the table has a usable newer baseline, so it is not broken", got.BrokenTables)
-	}
 }

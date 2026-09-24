@@ -1334,42 +1334,6 @@ function covCard(c, stamp) {
   } else if (fresh === "unavailable") {
     card.append(el("p", { class: "cov-line bad", text: "Capture liveness could not be read. Treat the window's upper edge as unverified." }));
   }
-  if (c.baseline_configured) {
-    if (c.full_table_status === "unknown") {
-      // An error must never render like "nothing broken" — the broken-table
-      // warning would silently vanish behind a failed listing.
-      card.append(el("p", { class: "cov-line warn", text: "Full-table coverage could not be checked. See the daemon log." }));
-      if (c.unevaluable_tables && c.unevaluable_tables.length) {
-        // Naming them is the point. The usual cause is an index whose archives
-        // cannot be attributed to one source, where a backup below the live
-        // floor may still be covered: too uncertain to call broken, too
-        // specific to leave as "could not be checked".
-        card.append(el("p", { class: "cov-line warn", text: "Their newest backup is older than the window this index can prove, and the archives cannot be tied to one source: " + c.unevaluable_tables.join(", ") + ". Take a fresh backup to settle it." }));
-      }
-    }
-    if (c.full_table_from) {
-      card.append(el("p", { class: "cov-line" },
-        "Full-table restore for tables with a backup: any point from ",
-        el("b", { text: c.full_table_from, title: utcLocalTitle(c.full_table_from) || null }), " onwards."));
-    }
-    if (c.broken_tables && c.broken_tables.length) {
-      card.append(el("p", { class: "cov-line bad", text: "Not fully restorable (newest backup predates coverage): " + c.broken_tables.join(", ") + ". Take a fresh backup." }));
-    }
-    if (c.restore_needs_local) {
-      card.append(el("p", { class: "cov-line warn", text: "Backups for this server go to S3 only, so \"Restore to a moment\" has no local folder to build into. Time-travel still reads them. Set this server's Local folder to restore here." }));
-    }
-    if (c.unreachable_tables && c.unreachable_tables.length) {
-      // Warn, not bad: the backup exists and Time-travel reads it (local
-      // first, bucket on a miss). What cannot use it is Restore, which folds
-      // from ONE location: this server's S3 backups when it has them, else
-      // its backup dir (restore_reads says which). The two cases are mirror
-      // images, so the advice has to be too.
-      const names = c.unreachable_tables.join(", ");
-      card.append(el("p", { class: "cov-line warn", text: c.restore_reads === "s3"
-        ? "Backed up only on this host, not in S3, so \"Restore to a moment\" (which folds from this server's S3 backups) cannot use them: " + names + ". Time-travel still reads them. Take a full backup to send them to S3."
-        : "Backed up only in S3, so \"Restore to a moment\" (which folds from this server's Local folder) cannot use them: " + names + ". Time-travel still reads them. Set this server's S3 location, or take a local backup, to restore them here." }));
-    }
-  }
   return card;
 }
 

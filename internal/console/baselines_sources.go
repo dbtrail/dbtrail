@@ -82,14 +82,9 @@ type mergedBaselines struct {
 	// Skipped counts the snapshot or schema directories an answering location
 	// could not read (#1601). A location that answered with skips is a
 	// PARTIAL answer: it can be missing whole snapshots, so the verdicts
-	// built on Files (coverage, "latest") must treat it like a location that
+	// built on Files ("latest") must treat it like a location that
 	// did not answer, not like one that held nothing.
 	Skipped int
-	// InS3 marks every file an s3 location listed, whichever path Files kept
-	// for it. The coverage card needs it: Restore folds from the bucket on an
-	// S3-backed server, and a file present in both locations keeps its LOCAL
-	// path below, so the path alone cannot say whether the bucket has it.
-	InS3 map[baselineFileKey]bool
 }
 
 // listBaselinesMerged lists every configured location and returns their union.
@@ -115,7 +110,7 @@ type mergedBaselines struct {
 type baselineLister func(ctx context.Context, source string) (files []reconstruct.BaselineFile, skipped int, err error)
 
 func listBaselinesMerged(ctx context.Context, sources []string, list baselineLister) mergedBaselines {
-	out := mergedBaselines{Kinds: map[int64][]string{}, InS3: map[baselineFileKey]bool{}}
+	out := mergedBaselines{Kinds: map[int64][]string{}}
 	seen := map[baselineFileKey]int{}
 	kindSeen := map[int64]map[string]bool{}
 
@@ -160,9 +155,6 @@ func listBaselinesMerged(ctx context.Context, sources []string, list baselineLis
 			kindSeen[ts][kind] = true
 
 			k := keyOf(f)
-			if kind == "s3" {
-				out.InS3[k] = true
-			}
 			if idx, dup := seen[k]; dup {
 				// Keep the LOCAL path when the same file exists in both. The
 				// footer read downstream opens Path directly, and doing that
