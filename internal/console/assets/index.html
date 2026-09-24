@@ -86,10 +86,11 @@
           </a>
         </div>
         <!-- Settings group, in four runs: how tools connect (MCP Server),
-             what happens to the data over time (Rotation, Retention, This
-             daemon: all three exist only on the watch daemon and are gated
-             per item, so the always-available MCP Server entry keeps the
-             group visible on the standalone serve too, #1041), who may see
+             what happens to the data over time (Rotation and Retention:
+             both exist only on the watch daemon and are gated per item, so
+             the always-available MCP Server entry keeps the group visible on
+             the standalone serve too, #1041; This daemon was dissolved into
+             Status and Snapshots, #1867), who may see
              what (Access profiles, then the extension panels a commercial
              build registers, which syncExtSettingsNav inserts right after
              it in registration order), and whatever the build registers
@@ -113,10 +114,6 @@
           <a class="nav-item" data-route="retention" href="/retention" data-capability="monitor">
             <span class="ni-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg></span>
             <span>Retention</span>
-          </a>
-          <a class="nav-item" data-route="daemon" href="/daemon" data-capability="monitor">
-            <span class="ni-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="6" rx="2"/><path d="M6 7.5h.01M6 17h.01"/></svg></span>
-            <span>This daemon</span>
           </a>
           <a class="nav-item" data-route="access-profiles" href="/access-profiles">
             <span class="ni-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 11h-6"/><path d="M19 8v6"/></svg></span>

@@ -67,10 +67,10 @@ function badgeClass(t) { return BADGE_CLASS[t] || "b-baseline"; }
 
 const ROUTES = ["overview", "events", "schema-changes", "timetravel", "recover", "sql", "status", "storage",
   // Storage was a drawer: seven cards from five unrelated concerns (#1543).
-  // Split by the question each half answers — what happens to your data over
-  // time, and what this daemon is touching. Old /storage addresses land on
-  // Retention through ROUTE_ALIASES.
-  "retention", "daemon", "connect",
+  // What happens to your data over time. Old /storage addresses land on
+  // Retention through ROUTE_ALIASES; its other half, This daemon, was
+  // dissolved in #1867 and /daemon lands on Status.
+  "retention", "connect",
   // Access profiles (#1445): author the flags/profiles/rules a data profile
   // enforces. Not monitor-gated: the standalone serve can author too, the
   // write goes to the selected server's index, not to daemon state.
@@ -985,6 +985,10 @@ const ROUTE_ALIASES = new Map([
   // the watch daemon and rewrites the bar to Overview without it, so this is
   // a capability answer too.
   ["storage", () => (capsKnown ? "retention" : "")],
+  // This daemon was dissolved (#1867): its telemetry card is on Status, its
+  // credential signals and staged downloads on Snapshots. A bookmark lands
+  // on Status, which every console has, so no capability answer is needed.
+  ["daemon", () => "status"],
   // The SQL page was removed (#1549); its DuckDB schema card lives on
   // Connect AI (#1573), which every console has, so no capability answer is
   // needed to know where to send it.
@@ -1041,7 +1045,7 @@ function navigate(route, params, push = true) {
   [route, hash] = splitTarget(aliasTarget(route) || route);
   if (!isKnownRoute(route)) [route, hash] = ["overview", ""];
   // Both halves are watch-daemon surfaces (rotation, archiving, staging).
-  if ((route === "retention" || route === "daemon") && !capsCache.monitor) route = "overview";
+  if (route === "retention" && !capsCache.monitor) route = "overview";
   // Snapshots is NOT gated, where two of the three pages it replaces were
   // (#1573). On a standalone serve it leaves out what only the daemon can
   // DO — taking a backup, running a check — and keeps what serve can
@@ -1127,7 +1131,6 @@ function renderRoute() {
     case "recover": return renderRecover(params);
     case "status": return renderStatus();
     case "retention": return renderRetention();
-    case "daemon": return renderDaemon();
     case "snapshots": return renderSnapshots();
     case "connect": return renderConnect();
     case "access-profiles": return renderAccessProfiles();
@@ -4530,12 +4533,18 @@ function renderTimeline(container, data, onDone) {
 async function renderStatus() {
   const gen = serverGen, vgen = viewGen;
   viewLoading();
-  let data, capacity;
+  let data, capacity, telemetry;
   // The index-disk read degrades independently (as the Storage panels do): a
   // failed /api/capacity renders its own note inside the card, never blanking
-  // the health page it sits on.
+  // the health page it sits on. Telemetry (#1867, from the dissolved This
+  // daemon page) the same way, and not asked at all for a session that may
+  // not read settings: a 403 would be a red card about a setting this reader
+  // was never meant to see.
   const asErr = (err) => ({ error: (err && err.message) || String(err) });
-  try { [data, capacity] = await Promise.all([api("/api/status"), api("/api/capacity").catch(asErr)]); }
+  try {
+    [data, capacity, telemetry] = await Promise.all([api("/api/status"), api("/api/capacity").catch(asErr),
+      sessionMay("settings:read") ? api("/api/telemetry").catch(asErr) : Promise.resolve(null)]);
+  }
   catch (err) { if (gen !== serverGen || vgen !== viewGen) return; const v = VIEW(); clear(v); v.append(pageHead("Status", null)); renderError(v, err); return; }
   if (gen !== serverGen || vgen !== viewGen) return;
   updateSideMeta(data);
@@ -4583,6 +4592,9 @@ async function renderStatus() {
     ["size", arch.total_size_human],
   ]));
   cards.append(capacityCard(capacity));
+  // Usage telemetry (#1867): what this process sends is a fact about the
+  // process, like everything else on this page. Last, after the data.
+  if (telemetry) cards.append(telemetryCard(telemetry));
   // Replication-health panel (#599): the streaming daemon polls the PostgreSQL source
   // (slot wal_status/lag + REPLICA IDENTITY coverage) and persists a snapshot to the
   // index; this renders it. Gated on source==postgresql AND a snapshot existing.
@@ -5169,44 +5181,6 @@ function buildRetention(serversRes, rotation) {
   viewEnter();
 }
 
-async function renderDaemon() {
-  if (!capsCache.monitor) { history.replaceState({}, "", "/overview"); renderRoute(); return; }
-  const gen = serverGen, vgen = viewGen;
-  viewLoading();
-  const asErr = (err) => ({ error: (err && err.message) || String(err) });
-  const [serversRes, storage, telemetry] = await Promise.all([
-    api("/api/servers").catch(asErr),
-    api("/api/storage").catch(asErr),
-    api("/api/telemetry").catch(asErr),
-  ]);
-  if (gen !== serverGen || vgen !== viewGen) return;
-  try {
-    buildDaemon(serversRes, storage, telemetry);
-  } catch (err) {
-    const v = VIEW(); clear(v); v.append(pageHead("This daemon", null)); renderError(v, err);
-  }
-}
-
-// This daemon answers the other question the old Storage page mixed in: what
-// is THIS process reaching, holding and sending. All three are properties of
-// the machine, not of your data, which is why they read as noise beside a
-// retention policy and as a coherent page here (#1543).
-function buildDaemon(serversRes, storage, telemetry) {
-  const servers = (serversRes && serversRes.servers) || [];
-  const v = VIEW(); clear(v);
-  v.append(pageHead("This daemon", el("p", { class: "page-sub" },
-    "What this daemon can reach, what it is holding on disk, and what it sends. ",
-    el("b", { text: "No credentials are stored here." }))));
-
-  const cards = el("div", { class: "cards" });
-  cards.append(credentialsCard(storage));
-  const staging = stagingCard(storage, servers);
-  if (staging) cards.append(staging);
-  cards.append(telemetryCard(telemetry));
-  v.append(cards);
-  viewEnter();
-}
-
 // ── Protect: baselines and verification (#1384) ──
 //
 // Both gate on capsCache.monitor and both use the replaceState + re-dispatch
@@ -5638,7 +5612,7 @@ async function renderSnapshots() {
   // the DRAWING below, where `part` keeps one throwing section from taking
   // the other two with it.
   const asErr = (err) => ({ error: (err && err.message) || String(err) });
-  const [serversRes, baselines, coverage, settings] = await Promise.all([
+  const [serversRes, baselines, coverage, settings, storage] = await Promise.all([
     api("/api/servers").catch(asErr),
     api("/api/baselines").catch(asErr),
     // The hero colours the copy's age by the capture's state (a young copy
@@ -5652,8 +5626,15 @@ async function renderSnapshots() {
     // answer is a 403 that drew a red "Could not load settings" box on every
     // visit, about a section this reader was never meant to see.
     sessionMay("settings:read") ? api("/api/backup-settings").catch(asErr) : Promise.resolve(null),
+    // What signs S3 requests on this machine and what .sql builds wait on
+    // its disk (#1867, from the dissolved This daemon page): read beside
+    // the settings, under the same permission, and drawn where each is
+    // asked about (the S3 field, the .sql lane).
+    sessionMay("settings:read") ? api("/api/storage").catch(asErr) : Promise.resolve(null),
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
+  snapStorage = storage;
+  snapRegistry = (serversRes && serversRes.servers) || [];
   // Run states for the selected server: only the endpoints this daemon
   // actually serves (each 403s when its feature is off).
   const selId = currentServer || defaultServerId;
@@ -6527,6 +6508,11 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     dirField, s3Field);
   grid.append(keepField, whereCard);
   box.append(grid);
+  // What signs S3 requests, under the field the bucket is typed into (#1867):
+  // shown only while an S3 location is in play, so a folder-only server
+  // never reads about AWS.
+  const signing = s3SigningNote(s3, srv, snapStorage, snapRegistry);
+  if (signing) box.append(signing);
   // S3 without a folder (#1659): said in red next to the two fields, schedule
   // or not. From the SAVED values, the ones the schedule reads
   // (rebuildPossible): a daemon default folder does not save this server,
@@ -6722,19 +6708,15 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   return box;
 }
 
-function credentialsCard(storage) {
-  const card = el("div", { class: "card" }, el("div", { class: "card-title", text: "AWS credentials" }));
-  const aws = storage && storage.aws;
-  if (!aws) {
-    card.append(el("p", { class: "form-hint", text: "Could not read the daemon's credential signals" + (storage && storage.error ? ": " + storage.error : ".") }));
-    return card;
-  }
+// awsSigningSummary is the one sentence about what signs this machine's S3
+// requests, from the credential signals GET /api/storage reports.
+// Presence, not use: each arm reports the signal it saw and nothing about
+// whether that signal is what the AWS chain resolves to.
+function awsSigningSummary(aws) {
   let summary = "No credentials set directly; DBTrail relies on your AWS environment (for example, an EC2 instance role) to provide them automatically.";
-  // Presence, not use: this arm reports the signal it saw and nothing about
-  // whether that signal is what the AWS chain resolves to. AccessKeyEnv is
-  // AWS_ACCESS_KEY_ID ALONE (storage_api.go), so an ID exported without its
-  // secret used to render "Using access keys" while the SDK's env provider
-  // yields nothing and the chain walks on past it.
+  // AccessKeyEnv is AWS_ACCESS_KEY_ID ALONE (storage_api.go), so an ID
+  // exported without its secret used to render "Using access keys" while the
+  // SDK's env provider yields nothing and the chain walks on past it.
   if (aws.access_key_env) summary = "Found an access key ID set in an environment variable. Its secret key is not checked here, so this may not be what signs the requests.";
   // The ECS arm stays env-var presence: probing the endpoint is a network
   // call and a separate decision (#1534), so the copy claims exactly what
@@ -6742,34 +6724,33 @@ function credentialsCard(storage) {
   else if (aws.container_creds) summary = "Found the ECS task-role endpoint in the environment. Whether the endpoint answers is not checked here, so this may not be what signs the requests.";
   // The web-identity arm is PROBED since #1534: the provider needs the token
   // file readable AND AWS_ROLE_ARN, and asserting a role from the variable
-  // alone rendered "Using an IAM role" over a stale or unmounted token — on
+  // alone rendered "Using an IAM role" over a stale or unmounted token, on
   // the page an operator opens precisely because S3 is not working. The two
   // broken shapes speak first, because they are the ones with a fix to name.
   else if (aws.web_identity) {
     if (!aws.web_identity_token_readable) {
-      summary = "An EKS service-account role is configured, but its token file cannot be read (missing, not a file, or not readable by the daemon), so it cannot sign anything.";
+      summary = "An EKS service-account role is configured, but its token file cannot be read (missing, not a file, or not readable by DBTrail), so it cannot sign anything.";
     } else if (!aws.web_identity_role_arn) {
       summary = "An EKS service-account token is readable, but AWS_ROLE_ARN is not set. The provider needs both, so this cannot sign requests.";
     } else {
       summary = "Found an EKS service-account role: the token file is readable and a role is named. Whether AWS accepts it is not checked here.";
     }
   }
-  // TWO independent probes select this arm, and the sentence has to name both.
-  // hasSharedAWSConfig() stats a file; aws.profile is AWS_PROFILE in the
-  // environment. Naming only the file contradicted the card's own
-  // "~/.aws config: absent" row two lines below whenever AWS_PROFILE was
-  // exported into a container with no ~/.aws mounted, which is precisely when
-  // somebody opens this page to ask whether S3 works. And since the arm sits
-  // below the env-key, ECS and IRSA ones, an EC2 box with an instance role and
-  // a region-only ~/.aws/config (what `aws configure set region` writes) lands
-  // here with no credentials in either place.
+  // TWO independent probes select this arm, and the sentence has to name
+  // both: hasSharedAWSConfig() stats a file; aws.profile is AWS_PROFILE in
+  // the environment. An EC2 box with an instance role and a region-only
+  // ~/.aws/config (what `aws configure set region` writes) lands here with
+  // no credentials in either place.
   else if (aws.shared_config || aws.profile) summary = "Found an AWS profile name or a shared ~/.aws config file, which may hold credentials or only a region. An IAM role on this machine can still be what signs the requests.";
-  card.append(el("p", { class: "stg-hint", text: summary }));
+  return summary;
+}
+
+// awsSignalsFold lists the raw signals behind the sentence. Each row names
+// the ONE variable that was read: "access keys (env): set" under a sentence
+// saying the secret key was not checked was a self-contradiction.
+function awsSignalsFold(aws) {
   const adv = el("details", { class: "form-advanced" },
     el("summary", { class: "form-adv-summary", text: "Raw signals" }));
-  // The row names the ONE variable that was read. "access keys (env): set",
-  // two lines under a summary saying the secret key was not checked, was the
-  // same self-contradiction the shared-config arm was rewritten to remove.
   kvRow(adv, "access key ID (env)", aws.access_key_env ? "set" : "not set");
   kvRow(adv, "profile (env)", aws.profile || "not set");
   kvRow(adv, "region (env)", aws.region_env || "not set");
@@ -6779,43 +6760,75 @@ function credentialsCard(storage) {
     kvRow(adv, "EKS IRSA token", aws.web_identity_token_readable ? "readable" : "unreadable");
     kvRow(adv, "role ARN (env)", aws.web_identity_role_arn ? "set" : "not set");
   }
-  card.append(adv);
-  return card;
+  return adv;
 }
 
-// stagingCard shows the disk the sql-export staging holds right now (#1448):
-// every .sql backup built from the Snapshots page waits on the daemon's disk
-// for its download, and that space used to be invisible until someone ran
-// du. Null when this daemon cannot build .sql backups (no staging exists) or
-// when /api/storage failed (credentialsCard already reports that).
-function stagingCard(storage, servers) {
+// s3SigningNote answers "why does nothing reach my bucket?" where the bucket
+// is typed (#1867; the card was on the This daemon page). Hidden while the
+// S3 field is empty and shown as soon as one is typed, so a folder-only
+// server never reads about AWS. A server with its own access key (Manage
+// servers) signs with it, and the machine's signals do not apply to it.
+// null when the storage signals were not read (a session that may not read
+// settings), never a note about a missing note.
+function s3SigningNote(s3Input, srv, storage, registry) {
+  if (!storage) return null;
+  const note = el("div", { class: "s3-signing" });
+  const sync = () => { note.hidden = !(s3Input.value || "").trim(); };
+  s3Input.addEventListener("input", sync);
+  sync();
+  const entry = (registry || []).find((r) => r.id === srv.id);
+  if (entry && entry.s3_access_key_id) {
+    note.append(el("p", { class: "form-hint", text: "S3 requests for this server are signed with its own access key, set in Manage servers." }));
+    return note;
+  }
+  const aws = storage.aws;
+  if (!aws) {
+    note.append(el("p", { class: "form-hint", text: "Could not read what signs S3 requests on this machine" + (storage.error ? ": " + storage.error : ".") }));
+    return note;
+  }
+  note.append(el("p", { class: "form-hint" }, el("b", { text: "S3 requests from this machine: " }), el("span", { text: awsSigningSummary(aws) })));
+  note.append(awsSignalsFold(aws));
+  return note;
+}
+
+// stagedDownloadsNote says what .sql builds wait on this machine's disk
+// (#1448; on the This daemon page until #1867): every .sql export built from
+// this page waits there for its download, and that space used to be
+// invisible until someone ran du. Under the lane that starts the builds, so
+// the disk a build takes is read where the build is asked for. null when
+// this process cannot build .sql exports (no staging exists) or the storage
+// signals were not read.
+function stagedDownloadsNote(storage, cur, servers) {
   const stg = storage && storage.staging;
   if (!stg) return null;
-  const card = el("div", { class: "card" }, el("div", { class: "card-title", text: "Staged downloads" }));
   const hours = Math.round(stg.ttl_hours || 0);
   const builds = stg.builds || [];
+  const box = el("div", { class: "stg-staged" });
   if (!builds.length) {
-    card.append(el("p", { class: "stg-hint", text:
-      "Nothing staged. A .sql export from the Snapshots page waits here until it is downloaded, or " +
-      hours + " hours pass, then it is removed." }));
-  } else {
-    card.append(el("p", { class: "stg-hint", text:
-      humanBytes(stg.bytes || 0) + " on this machine in " + builds.length + (builds.length === 1 ? " build" : " builds") +
-      (builds.some((b) => !b.bytes_known) ? " (not counting builds whose size could not be measured)" : "") +
-      ". Each is removed once downloaded, or " + hours + " hours after it finished." }));
-    for (const b of builds) {
-      const name = b.server_name || ((servers || []).find((s) => s.id === b.server_id) || {}).name || b.server_id;
-      let what;
-      if (b.staging_error) what = "could not be removed or read: " + b.staging_error;
-      else if (b.state === "running") what = "building" + (b.at ? " as of " + utcLabel(b.at) : "");
-      else if (b.state === "failed") what = "failed build, being removed";
-      else what = "ready" + (b.at ? " as of " + utcLabel(b.at) : "") + (b.expires_at ? ", removed at " + utcLabel(b.expires_at) + " if not downloaded" : "");
-      const size = b.bytes_known ? humanBytes(b.bytes || 0) : "size unknown";
-      kvRow(card, name, size + ", " + what);
-    }
+    box.append(el("p", { class: "form-hint", text:
+      "Nothing is staged on this machine. A build waits on its disk until it is downloaded, or " + hours + " hours pass, then it is removed." }));
+    return box;
   }
-  kvRow(card, "location", stg.dir || "");
-  return card;
+  const others = builds.filter((b) => b.server_id !== cur.id).length;
+  box.append(el("p", { class: "form-hint", text:
+    humanBytes(stg.bytes || 0) + " staged on this machine in " + builds.length + (builds.length === 1 ? " build" : " builds") +
+    (others ? " (" + others + " for " + (others === 1 ? "another server" : "other servers") + ")" : "") +
+    (builds.some((b) => !b.bytes_known) ? ", not counting builds whose size could not be measured" : "") +
+    ". Each is removed once downloaded, or " + hours + " hours after it finished." }));
+  const d = el("details", { class: "form-advanced" },
+    el("summary", { class: "form-adv-summary", text: "Staged builds" }));
+  for (const b of builds) {
+    const name = b.server_name || ((servers || []).find((x) => x.id === b.server_id) || {}).name || b.server_id;
+    let what;
+    if (b.staging_error) what = "could not be removed or read: " + b.staging_error;
+    else if (b.state === "running") what = "building" + (b.at ? " as of " + utcLabel(b.at) : "");
+    else if (b.state === "failed") what = "failed build, being removed";
+    else what = "ready" + (b.at ? " as of " + utcLabel(b.at) : "") + (b.expires_at ? ", removed at " + utcLabel(b.expires_at) + " if not downloaded" : "");
+    kvRow(d, name, (b.bytes_known ? humanBytes(b.bytes || 0) : "size unknown") + ", " + what);
+  }
+  kvRow(d, "location", stg.dir || "");
+  box.append(d);
+  return box;
 }
 
 // telemetryCard shows the machine-wide usage-telemetry state and an opt-out
@@ -7076,8 +7089,8 @@ async function setTelemetry(enabled) {
     toastError("Could not change telemetry: " + ((e && e.message) || e));
     return;
   }
-  toast(enabled ? "Telemetry turned on." : "Telemetry turned off. This daemon stops sending now.");
-  renderDaemon();
+  toast(enabled ? "Telemetry turned on." : "Telemetry turned off. Sending stops now.");
+  renderStatus();
 }
 
 // baselineConfigHint: the boot (cli) entry is not editable from the UI — its
@@ -7578,6 +7591,13 @@ let backupsHead = null;
 // server's page". Only the first tells it to keep what the reader is
 // looking at.
 let backupsPaintedFor = "";
+// The machine's storage signals (GET /api/storage) and the registry entries
+// read by the last Snapshots paint, for the two notes drawn deep inside the
+// page (#1867): what signs S3 requests, under the S3 field, and what .sql
+// builds wait on disk, under the .sql lane. null when the session may not
+// read settings, and then neither note is drawn.
+let snapStorage = null;
+let snapRegistry = [];
 function backupsOnScreen() { return !!(backupsHead && backupsHead.isConnected); }
 
 function backupsPageIndex(serverId, pages) {
@@ -9272,6 +9292,8 @@ function backupSQLLane(cur, b, sqlSt) {
   // failed saw a page identical to "no build has ever run".
   const unknownState = !!(st && st.state && !SQL_EXPORT_KNOWN.has(st.state));
   if (!mayCreate && !body.childNodes.length && !(sqlSt && sqlSt.error) && !unknownState) return null;
+  const staged = stagedDownloadsNote(snapStorage, cur, snapRegistry);
+  if (staged) body.append(staged);
   lane.append(body);
   return lane;
 }
@@ -13070,7 +13092,6 @@ function cmdkCommands() {
   if (capsCache.reconstruct) cmds.push({ group: "Navigate", label: "Time-travel", run: () => navigate("timetravel") });
   cmds.push({ group: "Navigate", label: "MCP Server", run: () => navigate("connect") });
   if (capsCache.monitor) cmds.push({ group: "Navigate", label: "Retention", run: () => navigate("retention") });
-  if (capsCache.monitor) cmds.push({ group: "Navigate", label: "This daemon", run: () => navigate("daemon") });
   cmds.push({ group: "Navigate", label: "Access profiles", run: () => navigate("access-profiles") });
   cmds.push({ group: "Actions", label: "Manage servers", run: () => { closeCmdk(); openServersModal(); } });
   if (capsCache.monitor) cmds.push({ group: "Actions", label: "Configure rotation…", run: () => { closeCmdk(); showRotationDialog(); } });

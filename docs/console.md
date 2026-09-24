@@ -267,8 +267,9 @@ and searching events:
    why, and the daemon retries every minute. If a new build starts and the
    previous one cannot be removed, the new build still runs and stays
    downloadable; its status names the previous build's directory until that
-   removal succeeds. The This daemon page shows what is staged while it
-   exists, previous builds that could not be removed included.
+   removal succeeds. The .sql lane on Snapshots shows what is staged on
+   the machine while it exists, previous builds that could not be removed
+   included (#1867; it was on the This daemon page).
 8. **Settings** — the backup settings live in the **Snapshots** page's
    "Where and how often" section (every parameter that shapes a
    backup or a snapshot, with its provenance — see
@@ -276,10 +277,13 @@ and searching events:
    on `serve` only the editable per-server half renders, since it is
    the one editor of a server's backup location), and under `watch` only:
    **Retention** (rotation policy and
-   per-source S3 archiving), **This daemon** (AWS credential signals, staged
-   downloads and a usage-telemetry opt-out — see
-   [The Retention and This daemon pages](#the-retention-and-this-daemon-pages))
-   and **Rotation** (opens the rotation dialog).
+   per-source S3 archiving — see
+   [The Retention page](#the-retention-page))
+   and **Rotation** (opens the rotation dialog). The **This daemon** page
+   was dissolved in #1867: its usage-telemetry card is on **Status**, its
+   AWS credential signals sit under the S3 field of a server's snapshot
+   setup, and its staged .sql downloads under the .sql lane on Snapshots;
+   `/daemon` still works and lands on Status.
 
 Every view whose subject has a page on www.dbtrail.com/docs (Events, Restore,
 Snapshots, Storage, MCP Server) shows a small **Docs** link beside
@@ -828,11 +832,13 @@ The per-server half is the whole page on the standalone `serve` console: the
 daemon cards describe loops only `watch` runs, but the backup location is
 registry state, and this page is its only editor.
 
-### The Retention and This daemon pages
+### The Retention page
 
-Under `watch` the sidebar grows two settings pages. They were one page,
+Under `watch` the sidebar grows a Retention page. It was half of one page,
 Storage, which had become a drawer: seven cards from five unrelated concerns
-(#1543). They are split by the question each answers.
+(#1543), split by the question each answers into Retention and This daemon.
+This daemon was then dissolved (#1867): each of its three cards went where
+its question is asked, and the section after this one says where.
 
 **Retention** — what happens to your data as it ages:
 
@@ -842,12 +848,19 @@ Storage, which had become a drawer: seven cards from five unrelated concerns
   `Archive to S3` destination (or `drop-only` when none), with a shortcut into
   that server's edit form. The boot (cli) index always rotates drop-only.
 
-**This daemon** — what this process can reach, is holding, and sends:
+**Where the This daemon cards went (#1867):**
 
-- **AWS credentials** — which credential signals this process sees. Presence
-  and the non-secret profile and region names only; no value is ever shown or
-  stored.
-- **Staged downloads**, and **Usage telemetry**, both described below.
+- **AWS credentials** — which credential signals this process sees, as one
+  sentence plus a "Raw signals" fold under the **S3 location** field of a
+  server's snapshot setup, shown while an S3 location is typed or saved.
+  Presence and the non-secret profile and region names only; no value is
+  ever shown or stored. A server with its own access key (Manage servers)
+  reads that it signs with its own key instead.
+- **Staged downloads** — under the .sql lane on Snapshots: what is staged on
+  the machine, how many builds are for other servers, and a "Staged builds"
+  fold with each build's size, state and deadline.
+- **Usage telemetry** — the last card on **Status**, for a session that may
+  read settings; described below.
 
 Two cards left the page entirely. **Backups & disk space** moved to the
 backups page beside **Scheduled backups** (#1543), from there to the
