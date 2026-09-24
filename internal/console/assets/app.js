@@ -5173,6 +5173,10 @@ function snapshotSection(title, id) {
 // /snapshots#setup, the two old pages' addresses, and #versions/#settings,
 // the tabs' own, open their tab.
 let snapTab = "versions";
+// snapTabAuto: the tab on screen was picked by the page (nothing to list
+// yet, so Settings), not by the reader or the address. A repaint may then
+// move on: once the first snapshot exists the list is what to show.
+let snapTabAuto = false;
 const SNAP_TAB_IDS = { versions: "versions", checks: "checks", setup: "settings", settings: "settings" };
 function snapTabFromHash() {
   return SNAP_TAB_IDS[(location.hash || "").slice(1)] || "";
@@ -5225,6 +5229,7 @@ function snapshotTabs(has) {
       buttons[k].classList.toggle("is-on", k === id);
     }
     snapTab = id;
+    if (!quiet) snapTabAuto = false;
     if (!quiet && typeof history !== "undefined" && history.replaceState) {
       history.replaceState(history.state, "", location.pathname + location.search + "#" + id);
       // The router arms its one arrival scroll when the address CHANGED
@@ -5708,7 +5713,15 @@ async function renderSnapshots() {
     // The tab the address names (the old pages' addresses, #checks and
     // #setup, open theirs), else the one the reader last opened. Quiet: the
     // address is the reader's, and a repaint must not rewrite it.
-    tabs.select(snapTabFromHash() || (keepTab ? snapTab : "versions"), true);
+    // A copy with nothing in it yet (no place set, or no snapshot taken)
+    // has nothing to list: the page opens on Settings, where the place and
+    // the schedule are set, unless the address or the reader says otherwise.
+    const nothingYet = baselines && !baselines.error && (!baselines.configured || !(baselines.snapshots || []).length);
+    const first = nothingYet && drawSetup ? "settings" : "versions";
+    const byReader = keepTab && !snapTabAuto;
+    const fromHash = snapTabFromHash();
+    tabs.select(fromHash || (byReader ? snapTab : first), true);
+    snapTabAuto = !fromHash && !byReader;
     viewEnter();
     // Last: the sections exist now, so an address that names one can be
     // honored. Before this, there is nothing to scroll to.
@@ -6116,15 +6129,16 @@ function backupDaemonEditRow(row, locked) {
 // it draws as one tick and one cross.
 const BACKUP_SOURCE_CASES = {
   server: { name: "Own location", reads: true, writes: true, say: "Snapshots, restores and time travel all work here." },
-  default: { name: "Shared folder", reads: true, writes: false, say: "Time travel works. Snapshots and restores need a folder or bucket of this server's own." },
-  none: { name: "No location", reads: false, writes: false, say: "Nothing works until this server has a folder or bucket." },
+  default: { name: "No place of its own yet", reads: true, writes: false, say: "Time travel works from DBTrail's shared folder. Read database now and restores will refuse until this server has a folder or bucket of its own." },
+  none: { name: "No location", reads: false, writes: false, say: "Nothing works until this server has a folder or bucket of its own." },
 };
 
 // blCase renders one case row: the name, then a tick or a cross per lane.
 // Marks are characters, not colour alone. `current` marks the row as this
 // server's answer, which since #1573 is the only way it is drawn (the
 // three-row legend that rendered all three unmarked is gone).
-function blCase(source, current) {
+// fix: the closing instruction, only for a session that can act on it.
+function blCase(source, current, fix) {
   const c = BACKUP_SOURCE_CASES[source];
   // A verdict this build does not know draws as unknown, with no lanes: two
   // crosses would read as "no location", which is a claim, not an unknown.
@@ -6140,7 +6154,7 @@ function blCase(source, current) {
     "aria-current": current ? "true" : null },
     el("span", { class: "bl-mark", text: c.writes ? "✓" : c.reads ? "!" : "✗" }),
     el("span", { class: "bl-name", text: c.name }),
-    el("span", { class: "bl-say", text: c.say }));
+    el("span", { class: "bl-say", text: c.say + (fix && !c.writes ? " " + fix : "") }));
 }
 
 // backupServersPanel is the per-server half: the editable backup location and
@@ -6266,14 +6280,14 @@ function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
 // Without a schedule there is no number to give, and the line says what
 // decides it instead.
 function localReachWords(keep, reach) {
-  const soon = reach.inForce === keep ? "" : "Once this number applies, ";
-  const lead = soon ? soon + "you can" : "You can";
+  // "After you save" while the typed number is not the one in force yet.
+  const lead = reach.inForce === keep ? "You can" : "After you save, you can";
   if (!reach.every) {
-    return lead + " go back as far as " + (keep === 1 ? "the one snapshot kept" : "the oldest of the " + keep + " kept") +
-      ". Nothing here takes snapshots on a timer, so that depends on when they are taken.";
+    return lead + " restore back to " + (keep === 1 ? "the one snapshot kept" : "the oldest of the " + keep + " kept") +
+      ". Put the copy on a schedule (Update the copy, above) and this becomes a number of hours.";
   }
   const mins = Math.max(keep * reach.every, 60, reach.retain || 0);
-  return lead + " go back up to about " + reachSpan(mins) + ": restores, .sql exports and full-table time travel start from the oldest snapshot kept.";
+  return lead + " restore back to about " + reachSpan(mins) + " ago: the oldest of the " + keep + " kept is that old.";
 }
 
 // reachSpan says a number of minutes the way a person would: hours below a
@@ -6332,6 +6346,8 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const words = el("div", { class: "bks-local-words" });
   keepField.append(words);
   const wordsMore = el("div", { class: "bks-local-words" });
+  // What goes under "More about this server", in the order it is pushed.
+  const more = [wordsMore];
   const tile = (ico, label, input) => el("label", { class: "where-tile" }, icon(ico, "where-ico"),
     el("span", { class: "where-body" }, el("span", { class: "field-label", text: label }), input));
   const dirField = tile("folder", "Local folder", dir);
@@ -6363,10 +6379,12 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // covered when the write paths would refuse. The cross on that row is the
   // whole page in one glyph; the line under it says what to do.
   const src = srv.source;
-  whereCard.append(blCase(src, true));
+  whereCard.append(blCase(src, true, sessionMay("servers:write") ? "Type one above and Save." : ""));
   if (src === "default") {
+    // Which shared place, under "More about this server": the case row
+    // above already says what to do.
     const eff = srv.resolved_dir || srv.resolved_s3;
-    whereCard.append(el("p", { class: "form-hint" },
+    more.push(el("p", { class: "form-hint" },
       "Time-travel reads ", el("code", { text: eff }),
       sessionMay("servers:write") ? ". To make snapshots for this server, save a location above." : "."));
   }
@@ -6377,7 +6395,6 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     box.append(el("p", { class: "form-msg err", text:
       "The schedule cannot run as things stand: " + srv.schedule_refusal }));
   }
-  const more = [wordsMore];
   const p = (t) => el("p", { class: "form-hint", text: t });
   if (srv.schedule_every) {
     more.push(p("Scheduled snapshots: every " + srv.schedule_every + (srv.schedule_at ? " at " + srv.schedule_at : "") +

@@ -3308,7 +3308,9 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .stg-ico { display: inline-flex; width: 24px; height: 24px; flex: none; }
 .stg-ico svg { width: 100%; height: 100%; }
 .stg-ico-pink { color: #D9367A; } .stg-ico-mint { color: #0E8A5E; } .stg-ico-orange { color: #EB6834; } .stg-ico-sun { color: #B8860B; }
-.stg-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.stg-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch; }
+.stg-two > .stg-card, .stg-two > .card { display: flex; flex-direction: column; }
+.stg-two > .card.stg-card .cn-fine { margin-top: auto; }
 @media (max-width: 900px) { .stg-two { grid-template-columns: 1fr; } }
 /* the schedule card is an .ov-panel: its head and body carry gutters that
    the card look does not need */

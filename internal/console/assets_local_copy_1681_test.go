@@ -164,15 +164,15 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	// leaves alone nor under the age retention; "once" while the number is
 	// not the one in force; no number without a schedule that runs.
 	for name, want := range map[string]string{
-		"reach5m":           "You can go back up to about 1 hour: restores, .sql exports and full-table time travel start from the oldest snapshot kept.",
-		"reachHourly":       "You can go back up to about 3 hours:",
-		"reachDaily":        "You can go back up to about 3 days:",
-		"reachDailyTyped1":  "Once this number applies, you can go back up to about 1 day:",
-		"reachNone":         "You can go back as far as the oldest of the 3 kept. Nothing here takes snapshots on a timer, so that depends on when they are taken.",
-		"reachNoneOne":      "You can go back as far as the one snapshot kept.",
-		"reachRetain":       "You can go back up to about 7 days:",
-		"reachScheduleOnly": "You can go back as far as the oldest of the 3 kept.",
-		"reachNotApplied":   "Once this number applies, you can go back up to about 3 hours:",
+		"reach5m":           "You can restore back to about 1 hour ago: the oldest of the 3 kept is that old.",
+		"reachHourly":       "You can restore back to about 3 hours ago",
+		"reachDaily":        "You can restore back to about 3 days ago",
+		"reachDailyTyped1":  "After you save, you can restore back to about 1 day ago",
+		"reachNone":         "You can restore back to the oldest of the 3 kept. Put the copy on a schedule (Update the copy, above) and this becomes a number of hours.",
+		"reachNoneOne":      "You can restore back to the one snapshot kept.",
+		"reachRetain":       "You can restore back to about 7 days ago",
+		"reachScheduleOnly": "You can restore back to the oldest of the 3 kept.",
+		"reachNotApplied":   "After you save, you can restore back to about 3 hours ago",
 	} {
 		r := got[name]
 		w := joined(r.Before)
@@ -183,10 +183,10 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 			t.Errorf("%s: %q does not say %q", name, w, want)
 		}
 	}
-	if w := joined(got["freshKeepAll"].After); strings.Contains(w, "go back") {
+	if w := joined(got["freshKeepAll"].After); strings.Contains(w, "restore back") {
 		t.Errorf("keeping everything gives a reach: %q", w)
 	}
-	if w := joined(got["held"].Before); !strings.Contains(w, "Another server's snapshots are still in this folder, so nothing here is removed. To keep only the newest, use a new empty folder.") || strings.Contains(w, "go back") {
+	if w := joined(got["held"].Before); !strings.Contains(w, "Another server's snapshots are still in this folder, so nothing here is removed. To keep only the newest, use a new empty folder.") || strings.Contains(w, "restore back") {
 		t.Errorf("a held folder: %q", w)
 	}
 	if !strings.Contains(joined(f.Before), "only costs the tables that changed") {
