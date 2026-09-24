@@ -315,7 +315,7 @@ console.log(JSON.stringify([row({}), row({ backup_schedule: true })]));
 	// not the same place on both consoles (#1573). A console that runs no
 	// schedules draws no card to point at: saying "the card above" there named
 	// something that is not on the screen, and invited an action it refuses.
-	if want := "Schedules run in the DBTrail daemon; this console cannot change them."; !strings.Contains(readOnly, want) {
+	if want := "Schedules run in the DBTrail service; this console cannot change them."; !strings.Contains(readOnly, want) {
 		t.Errorf("a console that runs no schedules does not say so; want %q in %q", want, readOnly)
 	}
 	if want := "Select this server at the top of the page to change it."; !strings.Contains(runsThem, want) {
@@ -485,7 +485,7 @@ console.log(JSON.stringify(red(vm.runInContext("backupServerRow", ctx)(r, false,
 	if err := json.Unmarshal(out, &lines); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
-	want := "The full read every 7d reads your database, and creating snapshots from the web interface is turned off on this daemon " +
+	want := "The full read every 7d reads your database, and creating snapshots from the web interface is turned off here " +
 		"(BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1). The full reads do not run until that changes; the other scheduled runs still do."
 	found := false
 	for _, l := range lines {

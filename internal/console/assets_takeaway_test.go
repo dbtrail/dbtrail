@@ -154,6 +154,11 @@ func TestTakeAwayPanelIsMountedAboveTheList(t *testing.T) {
 	// tab, above the list.
 	mount := strings.Index(body, "tabs.panels.versions.append(takeAway)")
 	list := strings.Index(body, "baselinesPanel(")
+	// The panel the lanes go into must itself reach the page, or the mount
+	// above is into a node nobody sees.
+	if !strings.Contains(body, "v.append(tabs.panels.versions)") {
+		t.Error("the Versions panel is never appended to the view")
+	}
 	switch {
 	case mount < 0:
 		t.Fatal("Snapshots no longer mounts backupTakeAway: the Parquet download goes back " +

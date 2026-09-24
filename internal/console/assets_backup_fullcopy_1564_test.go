@@ -270,7 +270,7 @@ console.log(JSON.stringify({
 			t.Errorf("refused: the card promises the next full read while saying none will run: %q", line)
 		}
 	}
-	wantRed := "The full read every 7d reads your database, and creating snapshots from the web interface is turned off on this daemon " +
+	wantRed := "The full read every 7d reads your database, and creating snapshots from the web interface is turned off here " +
 		"(BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1). The full reads do not run until that changes; the other scheduled runs still do."
 	if !has(r.Red, wantRed) {
 		t.Errorf("refused: red lines %v, want %q", r.Red, wantRed)

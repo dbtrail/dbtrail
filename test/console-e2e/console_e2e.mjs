@@ -2468,9 +2468,11 @@ try {
   (budget.total <= 150 && budget.rows > 0 && budget.hasChecks && budget.hasSetup && budget.errorBoxes === 0)
     ? ok("snapshots: the first screen stays inside its 150-word budget")
     : bad("snapshots: the first screen stays inside its 150-word budget", JSON.stringify(budget));
-  (budget.helpOpen === false && budget.helpWords > 50 && !budget.takeAwayOpen)
-    ? ok("snapshots: the mode help and the take-away panel arrive folded, with their text intact")
-    : bad("snapshots: the mode help and the take-away panel arrive folded, with their text intact",
+  // The take-away panel arrives OPEN since round 3 (the downloads are the
+  // offer of the Versions tab); the mode help stays folded.
+  (budget.helpOpen === false && budget.helpWords > 50 && budget.takeAwayOpen)
+    ? ok("snapshots: the mode help arrives folded with its text intact, the take-away panel open")
+    : bad("snapshots: the mode help arrives folded with its text intact, the take-away panel open",
       JSON.stringify({ helpOpen: budget.helpOpen, helpWords: budget.helpWords, takeAwayOpen: budget.takeAwayOpen }));
   // Browsing the picker opens the help by itself (#1418's reason for it):
   // folding it must not cost the reader who is choosing a mode.
@@ -3559,6 +3561,12 @@ try {
   //
   // (a) structure + mode help (#1418/#1419): three separated regions; the
   // help swaps with the select and describes the selected mode.
+  // The verdict tile must have moved past its loading word: a tile that
+  // never fills would otherwise pass the structure check below.
+  await page.waitForFunction(() => {
+    const t = document.querySelector(".snap-checks .vfy-state-t");
+    return !!t && t.textContent !== "Checking…";
+  });
   const vfyStruct = await page.evaluate(() => {
     const regions = document.querySelectorAll(".vfy-region");
     const sel = document.querySelector(".vfy-mode");
@@ -3569,7 +3577,7 @@ try {
     return {
       regionCount: regions.length,
       // Round 3: the control card leads with the verdict of the last check.
-      controlTinted: regions[0] ? !!regions[0].querySelector(".vfy-state") : false,
+      controlTinted: regions[0] ? (regions[0].querySelector(".vfy-state-t") || {}).textContent === "Never checked" : false,
       // One line under the title since round 3, and only that one: what a
       // snapshot is. The mode help below carries what each check does.
       subGone: (document.querySelector(".view .page-sub") || {}).textContent === "A snapshot is a copy of every table at one moment in time.",

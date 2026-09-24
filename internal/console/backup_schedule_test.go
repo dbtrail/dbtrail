@@ -201,7 +201,7 @@ func TestCheckBackupSchedule(t *testing.T) {
 		wantErr string // "" = runnable
 	}{
 		{"everything on", ready, live, ""},
-		{"read-only console", ready, BackupScheduleGates{ReadOnlyConsole: true}, "watch daemon"},
+		{"read-only console", ready, BackupScheduleGates{ReadOnlyConsole: true}, "DBTrail service"},
 		{"watch without any baseline feature", ready, BackupScheduleGates{}, "BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1 and no refresh interval is set (CLI: --baseline-refresh-interval)"},
 		{"creation off but a rebuild is possible", ready, BackupScheduleGates{LoopRunning: true}, ""},
 		{"creation off and no local dir", ServerEntry{DSN: "idx", SourceDSN: "src", BaselineS3: "s3://b/"}, BackupScheduleGates{LoopRunning: true}, "BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1); an update from the recorded changes needs a local snapshot directory"},

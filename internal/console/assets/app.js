@@ -5183,18 +5183,37 @@ function snapTabFromHash() {
 // panel, marks its tab and writes the address (a hash, which the router
 // keeps); with `quiet` it leaves the address alone.
 function snapshotTabs(has) {
-  const bar = el("div", { class: "snap-tabs", role: "tablist" });
-  const panels = {}, buttons = {};
+  const bar = el("div", { class: "snap-tabs" });
+  const list = el("div", { class: "snap-tablist", role: "tablist", "aria-label": "Snapshots" });
+  bar.append(list);
+  const panels = {}, buttons = {}, order = [];
   const names = [["versions", "Versions"], ["checks", "Checks"], ["settings", "Settings"]];
   for (const [id, label] of names) {
     if (id !== "versions" && !has[id]) continue;
-    panels[id] = el("div", { class: "snap-panel", id: "snap-" + id, role: "tabpanel" });
+    panels[id] = el("div", { class: "snap-panel", id: "snap-" + id, role: "tabpanel", "aria-labelledby": "snap-tab-" + id });
     panels[id].hidden = true;
-    const btn = el("button", { class: "snap-tab", type: "button", role: "tab", "aria-selected": "false", "data-tab": id, text: label });
+    const btn = el("button", { class: "snap-tab", type: "button", role: "tab", id: "snap-tab-" + id, "aria-controls": "snap-" + id,
+      "aria-selected": "false", tabindex: "-1", "data-tab": id, text: label });
     btn.onclick = () => select(id);
     buttons[id] = btn;
-    bar.append(btn);
+    order.push(id);
+    list.append(btn);
   }
+  // Arrow keys move between tabs, as the tabs pattern says; one tab stop
+  // for the whole list.
+  list.addEventListener("keydown", (e) => {
+    const i = order.indexOf(snapTab);
+    if (i < 0) return;
+    let to = -1;
+    if (e.key === "ArrowRight") to = (i + 1) % order.length;
+    else if (e.key === "ArrowLeft") to = (i - 1 + order.length) % order.length;
+    else if (e.key === "Home") to = 0;
+    else if (e.key === "End") to = order.length - 1;
+    if (to < 0) return;
+    e.preventDefault();
+    select(order[to]);
+    buttons[order[to]].focus();
+  });
   const actions = el("div", { class: "snap-tab-actions" });
   bar.append(actions);
   function select(id, quiet) {
@@ -5202,41 +5221,69 @@ function snapshotTabs(has) {
     for (const k of Object.keys(panels)) {
       panels[k].hidden = k !== id;
       buttons[k].setAttribute("aria-selected", k === id ? "true" : "false");
+      buttons[k].setAttribute("tabindex", k === id ? "0" : "-1");
       buttons[k].classList.toggle("is-on", k === id);
     }
     snapTab = id;
     if (!quiet && typeof history !== "undefined" && history.replaceState) {
       history.replaceState(history.state, "", location.pathname + location.search + "#" + id);
+      // The router arms its one arrival scroll when the address CHANGED
+      // since it last painted; a tab click is not an arrival.
+      lastRouteAddress = location.pathname + location.hash;
     }
   }
   return { bar: bar, panels: panels, actions: actions, select: select };
 }
 
-// snapshotHeroTone grades the newest copy's age against the schedule: mint
-// inside one and a half intervals, sun up to three, pink past that — and
-// pink whatever the age when the last run failed or the capture is stopped
-// (a copy that updates from a frozen index is young and stale at once).
-// No schedule: no colour, the sub-line says so.
-function snapshotHeroTone(b, cov) {
+// snapshotHeroTone grades the copy, worst fact first, and says which page
+// fixes it (link: "overview" for capture, "settings" for the schedule, ""
+// when nothing here can):
+//   the supervisor's word (a stopped or crashed stream is known before the
+//   index shows it), then the index's (stalled, position lost); a capture
+//   state that could not be read is never mint; a failed run, manual or
+//   scheduled; a saved schedule the daemon cannot run, or whose next slot
+//   will not start, or that skipped its last one; then the age against the
+//   interval: mint inside one and a half intervals, sun up to three, pink
+//   past that. No schedule, or no age: no colour.
+function snapshotHeroTone(b, cov, cur) {
   const snap = b && b.snapshots && b.snapshots[0];
-  if (!snap) return { tone: "none", why: "" };
+  if (!snap) return { tone: "none", why: "", link: "" };
   const sch = b.schedule;
+  const mstate = (cur && cur.kind === "registry" && cur.monitor_state) || "";
+  if (/^(failed|stalled|lost_position|stopped)$/.test(mstate)) {
+    return { tone: "bad", why: "Capture is " + (mstate === "lost_position" ? "lost" : mstate === "stalled" ? "stalled" : "stopped") + ", so nothing new reaches the copy.", link: "overview" };
+  }
+  if (!cov || cov.continuity === "unavailable" || cov.freshness === "unavailable" || cov.freshness === "unknown") {
+    return { tone: "warn", why: "Capture state could not be read.", link: "overview" };
+  }
+  if (cov.freshness === "stalled" || cov.continuity === "gap_lost") {
+    return { tone: "bad", why: "Capture is " + (cov.continuity === "gap_lost" ? "lost" : "stalled") + ", so nothing new reaches the copy.", link: "overview" };
+  }
   const lastRun = sch && sch.last_run;
-  if (cov && (cov.freshness === "stalled" || cov.continuity === "gap_lost")) {
-    return { tone: "bad", why: "Capture is stopped, so nothing new reaches the copy." };
-  }
   if (lastRun && lastRun.ok === false) {
-    return { tone: "bad", why: "The last update failed" + (lastRun.error ? ": " + plainWords(lastRun.error) : ".") };
+    return { tone: "bad", why: "The last update failed" + (lastRun.error ? ": " + plainWords(lastRun.error) : "."), link: "settings" };
   }
-  if (!sch && b.refresh && b.refresh.state === "failed") {
-    return { tone: "bad", why: "The last update failed" + (b.refresh.last_error ? ": " + plainWords(b.refresh.last_error) : ".") };
+  if (b.refresh && b.refresh.state === "failed") {
+    return { tone: "bad", why: "The last update failed" + (b.refresh.last_error ? ": " + plainWords(b.refresh.last_error) : "."), link: "settings" };
   }
-  const every = sch && sch.runnable ? flowEveryMinutes(sch.every) : 0;
-  if (!every) return { tone: "none", why: "" };
-  const age = (snap.age_hours || 0) * 60;
-  if (age <= every * 1.5) return { tone: "ok", why: "" };
-  if (age <= every * 3) return { tone: "warn", why: "Later than its schedule." };
-  return { tone: "bad", why: "Much later than its schedule." };
+  if (sch && !sch.runnable) {
+    const why = plainWords(sch.reason || "unknown reason");
+    return { tone: "bad", why: "The schedule cannot run: " + why + (/[.!?]$/.test(why) ? "" : "."), link: "settings" };
+  }
+  if (sch && sch.next_method_error) {
+    return { tone: "bad", why: "The next run cannot start: " + plainWords(sch.next_method_error), link: "settings" };
+  }
+  const skip = sch && sch.last_skipped;
+  if (skip && (!lastRun || (skip.at || "") >= (lastRun.finished_at || ""))) {
+    return { tone: "bad", why: "A scheduled run did not start: " + plainWords(skip.reason || "unknown reason"), link: "settings" };
+  }
+  const every = sch ? flowEveryMinutes(sch.every) : 0;
+  if (!every) return { tone: "none", why: "", link: "" };
+  if (typeof snap.age_hours !== "number" || isNaN(snap.age_hours)) return { tone: "none", why: "", link: "" };
+  const age = snap.age_hours * 60;
+  if (age <= every * 1.5) return { tone: "ok", why: "", link: "" };
+  if (age <= every * 3) return { tone: "warn", why: "Later than its schedule.", link: "settings" };
+  return { tone: "bad", why: "Much later than its schedule.", link: "settings" };
 }
 
 // snapshotHero draws the copy: age, where it lives, seven days of rhythm,
@@ -5253,6 +5300,11 @@ function snapshotHero(b, cov, cur, acts) {
   const settingsLink = () => acts && acts.settings
     ? el("a", { href: "#settings", class: "hero-link", text: "Settings ›", onclick: (e) => { e.preventDefault(); acts.settings(); } })
     : null;
+  // Where the fix is: the schedule lives on this page's Settings tab, the
+  // capture on Overview; a state that could not be read has no fix here.
+  const fixLink = (link) => link === "settings" ? settingsLink()
+    : link === "overview" ? el("a", { href: "/overview", class: "hero-link", text: "Overview ›", onclick: (e) => { e.preventDefault(); navigate("overview"); } })
+    : null;
   if (!b || b.error) {
     hero.append(el("div", { class: "hero-card hero-age bad" }, el("div", { class: "hero-k", text: "Snapshots" }),
       el("div", { class: "hero-big", text: "could not load" }), el("div", { class: "hero-sub", text: (b && b.error) || "unavailable" })));
@@ -5268,7 +5320,7 @@ function snapshotHero(b, cov, cur, acts) {
   }
   const snaps = b.snapshots || [];
   const snap = snaps[0] || null;
-  const grade = snapshotHeroTone(b, cov);
+  const grade = snapshotHeroTone(b, cov, cur);
   const sch = b.schedule;
 
   // Updated: the age, big, with the dot; the sub-line says the rhythm, or
@@ -5281,7 +5333,8 @@ function snapshotHero(b, cov, cur, acts) {
   const link = settingsLink();
   if (grade.why) {
     sub.append(grade.why + " ");
-    if (link) sub.append(link);
+    const fix = fixLink(grade.link);
+    if (fix) sub.append(fix);
   } else if (sch && sch.runnable && flowEveryLabel(sch.every)) {
     sub.append(flowEveryLabel(sch.every) + (sch.next_run ? " · next " + flowHHMM(sch.next_run) + " UTC" : ""));
   } else {
@@ -5295,7 +5348,9 @@ function snapshotHero(b, cov, cur, acts) {
   // dim when the place is set but the newest copy is not there yet, and
   // "No S3" / "No local copy" when no such place is set.
   const srcs = b.sources && b.sources.length ? b.sources : (b.kind ? [{ kind: b.kind, source: b.source }] : []);
-  const kinds = snap && snap.kinds ? snap.kinds : srcs.map((x) => x.kind);
+  // "on" means the newest copy IS there. No copy, or a listing that does
+  // not say where the newest one is: the place is set but not lit.
+  const kinds = (snap && snap.kinds) || [];
   const tile = (kind, label, off, ico) => {
     const src = srcs.find((x) => x.kind === kind);
     const state = !src ? "off" : kinds.includes(kind) ? "on" : "dim";
@@ -5331,7 +5386,9 @@ function snapshotHero(b, cov, cur, acts) {
 
   // The last check: filled in when its read answers; absent where no daemon
   // can run one.
-  if (capsCache.monitor && cur && cur.id) {
+  // Only where a check can run: on a daemon with checks off the history
+  // read answers 403, which is not a failure to report.
+  if (capsCache.verify_trigger && cur && cur.id) {
     const check = el("div", { class: "hero-card hero-check none" }, icon("check", "hero-ico"), el("span", { class: "hero-tile-t", text: "Checking…" }));
     hero.append(check);
     loadSnapshotVerdict(cur.id, check);
@@ -5365,29 +5422,31 @@ function snapshotHero(b, cov, cur, acts) {
   return hero;
 }
 
-// loadSnapshotVerdict fills the hero's check tile from the verify history:
-// the newest finished run's verdict and age, "Never checked" before the
-// first, and that the history could not be read when it could not.
+// loadSnapshotVerdict fills the hero's check tile from the verify history
+// on first paint; loadVerifyHistory refills it when a run ends, so the hero
+// and the Checks card never disagree about the same record.
 async function loadSnapshotVerdict(id, tile) {
-  const say = (state, text, ico) => {
-    tile.className = "hero-card hero-check " + state;
-    clear(tile);
-    tile.append(icon(ico, "hero-ico"), el("span", { class: "hero-tile-t", text: text }));
-  };
   let recs;
   try {
     recs = (await api("/api/servers/" + encodeURIComponent(id) + "/verify/history")).history || [];
   } catch (err) {
-    say("none", "Checks could not be read", "cross");
+    snapshotCheckTileFill(tile, null, "unreadable");
     return;
   }
   if (!tile.isConnected) return;
-  const latest = recs.find((r) => r.state === "succeeded" || r.state === "failed");
-  if (!latest || !latest.finished_at) { say("none", "Never checked", "check"); return; }
-  const sec = (Date.now() - Date.parse(latest.finished_at)) / 1000;
-  const sum = latest.summary || {};
-  const bad = latest.state === "failed" || (sum.mismatch || 0) > 0 || (sum.error || 0) > 0;
-  say(bad ? "bad" : "ok", (bad ? "Check failed " : "Verified ") + agoText(sec), bad ? "cross" : "check");
+  snapshotCheckTileFill(tile, recs.find((r) => r.state === "succeeded" || r.state === "failed") || null, "none");
+}
+
+// snapshotCheckTileFill paints the hero's check tile with the same words the
+// Checks card uses (vfyVerdictWords): a tick only for a run that proved the
+// copy matches, never for one that compared nothing.
+function snapshotCheckTileFill(tile, latest, whyNone) {
+  if (!tile) return;
+  const w = vfyVerdictWords(latest, whyNone);
+  tile.className = "hero-card hero-check " + w.state;
+  clear(tile);
+  tile.append(icon(w.mark, "hero-ico"), el("span", { class: "hero-tile-t", text: w.title }));
+  if (w.when) tile.append(el("span", { class: "hero-tile-s", text: w.when }));
 }
 
 // scrollPending is set by renderRoute when the address it is about to paint
@@ -5616,16 +5675,35 @@ async function renderSnapshots() {
       panel.append(snapshotSection("Where and how often", "setup"));
       part("Where and how often", () => {
         if (scheduleErr) throw scheduleErr;
-        if (scheduleCard) panel.append(scheduleCard);
         // Whenever the session may read settings, this half always has
         // something to say: at the very least where this server keeps its
         // copies, or why that could not be read. The settings half needs
         // settings:read. Without it nothing was fetched (see above) and
         // nothing is drawn: hidden by permission says nothing, unlike a part
         // missing for a reason the reader can fix.
-        if (settings) snapshotSetupSections(settings).forEach((n) => panel.append(n));
+        const nodes = settings ? snapshotSetupSections(settings) : [];
+        // The two cards about time, the schedule and the age retention,
+        // share one row: the section label stays above it.
+        const isCards = (n) => (" " + n.className + " ").includes(" cards ");
+        const ci = nodes.findIndex(isCards);
+        if (ci >= 0) {
+          const row = el("div", { class: "stg-two stg-top" });
+          if (scheduleCard) row.append(scheduleCard);
+          nodes[ci].children.length && row.append(...Array.from(nodes[ci].children));
+          nodes[ci] = row;
+        } else if (scheduleCard) {
+          nodes.unshift(scheduleCard);
+        }
+        nodes.forEach((n) => panel.append(n));
       });
       v.append(panel);
+    }
+    // The schedule card's alarms live on a tab that is closed by default:
+    // the tab says so with a dot, and the hero says the fact itself
+    // (snapshotHeroTone reads the same schedule).
+    if (scheduleCard && scheduleCard.querySelector && scheduleCard.querySelector(".bk-card-state.alarm") && tabs.panels.settings) {
+      const t = tabs.bar.querySelector('.snap-tab[data-tab="settings"]');
+      if (t) { t.classList.add("has-alarm"); t.setAttribute("title", "The schedule needs attention"); }
     }
     // The tab the address names (the old pages' addresses, #checks and
     // #setup, open theirs), else the one the reader last opened. Quiet: the
@@ -5964,7 +6042,7 @@ const BACKUP_DAEMON_EMPTY = {
 // operator knows the save landed and the effect has not.
 function backupDaemonEditCard(rows, locked) {
   const card = el("div", { class: "card stg-card" });
-  card.append(el("div", { class: "card-title stg-card-t" }, icon("clock", "stg-ico stg-ico-sun"), el("span", { text: "Retention" })));
+  card.append(el("div", { class: "card-title stg-card-t" }, icon("clock", "stg-ico stg-ico-sun"), el("span", { text: "Delete by age" })));
   for (const row of rows) {
     card.append(backupDaemonEditRow(row, locked));
   }
@@ -5982,8 +6060,10 @@ function backupDaemonEditRow(row, locked) {
   const head = el("label", { class: "form-label", for: "bks-" + row.key }, label);
   if (row.needs_restart) head.append(el("span", { class: "tag-pill bks-restart", text: "restart to apply" }));
   wrap.append(head);
+  // The age retention shows an example instead of "off": a reader has to
+  // know the grammar (days or hours) to type one.
   const input = el("input", { class: "input", id: "bks-" + row.key, type: "text",
-    value: row.value || "", placeholder: BACKUP_DAEMON_EMPTY[row.key] || "" });
+    value: row.value || "", placeholder: row.key === "baseline_retain" ? "e.g. 7d" : (BACKUP_DAEMON_EMPTY[row.key] || "") });
   const msg = el("p", { class: "form-msg" });
   const save = el("button", { class: "btn btn-sm", type: "button", text: "Save" });
   const revert = row.source === "saved"
@@ -6010,6 +6090,9 @@ function backupDaemonEditRow(row, locked) {
   // comes from, and no control that could only be refused.
   if (locked) input.disabled = true;
   wrap.append(el("div", { class: "bks-erow-in" }, input, locked ? null : save, locked ? null : revert));
+  if (row.key === "baseline_retain") {
+    wrap.append(el("p", { class: "form-hint", text: "Days or hours: 7d, 36h. Empty keeps them all. Applies to every server's local folder." }));
+  }
   // Provenance, in one line: what is winning, and what it is winning over.
   wrap.append(el("p", { class: "form-hint", text: row.source === "saved"
     ? "Saved here. The command line says " + (row.startup || "nothing") + "."
@@ -6032,9 +6115,9 @@ function backupDaemonEditRow(row, locked) {
 // .sql exports) while the writes refuse (backups, restores, the schedule), so
 // it draws as one tick and one cross.
 const BACKUP_SOURCE_CASES = {
-  server: { name: "Own location", reads: true, writes: true },
-  default: { name: "Daemon default", reads: true, writes: false },
-  none: { name: "No location", reads: false, writes: false },
+  server: { name: "Own location", reads: true, writes: true, say: "Snapshots, restores and time travel all work here." },
+  default: { name: "Shared folder", reads: true, writes: false, say: "Time travel works. Snapshots and restores need a folder or bucket of this server's own." },
+  none: { name: "No location", reads: false, writes: false, say: "Nothing works until this server has a folder or bucket." },
 };
 
 // blCase renders one case row: the name, then a tick or a cross per lane.
@@ -6051,13 +6134,13 @@ function blCase(source, current) {
       el("span", { class: "bl-name", text: "Unknown" }),
       el("span", { class: "bl-lane", text: "DBTrail cannot read this server's snapshot state; update it" }));
   }
-  const lane = (label, ok) => el("span", { class: "bl-lane " + (ok ? "on" : "no") },
-    el("span", { class: "bl-mark", text: ok ? "✓" : "✗" }), label);
-  return el("div", { class: "bl-case" + (current ? " is-current" : ""), "data-source": source,
+  // One sentence, not two lanes of ticks: what works from here and what
+  // does not, in words. The mark says which case this is at a glance.
+  return el("div", { class: "bl-case bl-" + (c.writes ? "ok" : c.reads ? "part" : "no") + (current ? " is-current" : ""), "data-source": source,
     "aria-current": current ? "true" : null },
+    el("span", { class: "bl-mark", text: c.writes ? "✓" : c.reads ? "!" : "✗" }),
     el("span", { class: "bl-name", text: c.name }),
-    lane("time-travel", c.reads),
-    lane("snapshots and restores", c.writes));
+    el("span", { class: "bl-say", text: c.say }));
 }
 
 // backupServersPanel is the per-server half: the editable backup location and
@@ -6244,10 +6327,11 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const plus = el("button", { class: "keep-btn", type: "button", "aria-label": "Keep one more", text: "+", onclick: () => step(1) });
   const unit = el("span", { class: "keep-unit", text: "snapshots" });
   const keepField = el("div", { class: "stg-card keep-card" },
-    el("div", { class: "stg-card-t" }, icon("layers", "stg-ico stg-ico-mint"), el("span", { class: "field-label", text: "Keep the newest" })),
-    el("div", { class: "keep-step" }, minus, keep, plus, unit));
+    el("div", { class: "stg-card-t" }, icon("layers", "stg-ico stg-ico-mint"), el("span", { class: "field-label", text: "Keep by count" })),
+    el("div", { class: "keep-step" }, el("span", { class: "keep-lead", text: "the newest" }), minus, keep, plus, unit));
   const words = el("div", { class: "bks-local-words" });
   keepField.append(words);
+  const wordsMore = el("div", { class: "bks-local-words" });
   const tile = (ico, label, input) => el("label", { class: "where-tile" }, icon(ico, "where-ico"),
     el("span", { class: "where-body" }, el("span", { class: "field-label", text: label }), input));
   const dirField = tile("folder", "Local folder", dir);
@@ -6293,7 +6377,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     box.append(el("p", { class: "form-msg err", text:
       "The schedule cannot run as things stand: " + srv.schedule_refusal }));
   }
-  const more = [];
+  const more = [wordsMore];
   const p = (t) => el("p", { class: "form-hint", text: t });
   if (srv.schedule_every) {
     more.push(p("Scheduled snapshots: every " + srv.schedule_every + (srv.schedule_at ? " at " + srv.schedule_at : "") +
@@ -6303,7 +6387,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
       // process runs the schedules. Pointing at "the card above" on a
       // read-only console named something that is not on the screen.
       (!capsCache.backup_schedule
-        ? ". Schedules run in the DBTrail daemon; this console cannot change them."
+        ? ". Schedules run in the DBTrail service; this console cannot change them."
         : sessionMay("servers:write") ? ". Select this server at the top of the page to change it." : ".")));
     // Red here as on the schedule card (#1564): a grey summary beside a red
     // card would be the same page disagreeing with itself about one schedule.
@@ -6314,7 +6398,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     }
   } else {
     more.push(p(!capsCache.backup_schedule
-      ? "No scheduled snapshots. Setting one needs the DBTrail daemon; this console is read-only."
+      ? "No scheduled snapshots. Setting one needs the DBTrail service; this console is read-only."
       : sessionMay("servers:write") ? "No scheduled snapshots. Select this server at the top of the page to set one." : "No schedule."));
   }
   // S3 keeps every uploaded backup forever unless the BUCKET expires it
@@ -6337,7 +6421,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // answers locked and no Save at all: hidden by permission.
   const mayWrite = sessionMay("servers:write");
   const locked = !!readOnly || !mayWrite;
-  if (locked) { dir.disabled = s3.disabled = noArch.disabled = yes.disabled = no.disabled = keep.disabled = true; }
+  if (locked) { dir.disabled = s3.disabled = noArch.disabled = yes.disabled = no.disabled = keep.disabled = minus.disabled = plus.disabled = true; }
   // Save wakes up when something differs from what was loaded, so a click
   // always means a change; Enter in a field saves too.
   // Trimmed on both sides: the PUT trims, so a stored value with stray
@@ -6373,12 +6457,21 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // The reach is said for the count as it applies to the folder as saved:
     // a typed folder or destination makes it a number that does not apply yet.
     const asSaved = dir.value.trim() === was.dir && s3v === was.s3;
-    for (const w of localCopyWords(local, s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
+    // The reuse note stays off this card (the refresh line on Versions
+    // says it): this card is about the count and only the count.
+    clear(wordsMore);
+    // The card keeps the refusals and the one line that answers "how far
+    // back can I go"; the rest of what the count means waits under "More
+    // about this server", so the card is read at a glance.
+    const said = localCopyWords(local, s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
       { local: was.local, dir: was.rawDir, source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
-        every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0 })) {
-      words.append(el("p", { class: w.err ? "form-msg err" : "form-hint", text: w.text }));
-    }
+        every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0 });
+    const infos = said.filter((w) => !w.err);
+    said.forEach((w) => {
+      const keepHere = w.err || w === infos[infos.length - 1];
+      (keepHere ? words : wordsMore).append(el("p", { class: w.err ? "form-msg err" : "form-hint", text: w.text }));
+    });
   };
   const sync = () => { paint(); save.disabled = locked || !dirty(); };
   for (const input of [dir, s3, keep]) {
@@ -8044,15 +8137,26 @@ function choicePills(choices, value, label, onChange) {
       const on = p.dataset.value === current;
       p.classList.toggle("is-on", on);
       p.setAttribute("aria-checked", on ? "true" : "false");
+      p.setAttribute("tabindex", on ? "0" : "-1");
     }
   };
   for (const [v, t] of choices) {
-    const pill = el("button", { class: "sch-pill", type: "button", role: "radio", "aria-checked": "false", text: t });
+    const pill = el("button", { class: "sch-pill", type: "button", role: "radio", "aria-checked": "false", tabindex: "-1", text: t });
     pill.dataset.value = v;
     pill.onclick = () => { current = v; paint(); if (onChange) onChange(); };
     pills.push(pill);
     group.append(pill);
   }
+  group.addEventListener("keydown", (e) => {
+    const i = pills.findIndex((p) => p.dataset.value === current);
+    let to = -1;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") to = (i + 1) % pills.length;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") to = (i - 1 + pills.length) % pills.length;
+    if (to < 0) return;
+    e.preventDefault();
+    pills[to].onclick();
+    pills[to].focus();
+  });
   Object.defineProperty(group, "value", { get: () => current, set: (v) => { current = v; paint(); } });
   paint();
   return group;
@@ -8151,7 +8255,7 @@ function backupScheduleCard(cur, b) {
       body.append(fullWarn);
     }
     body.append(el("p", { class: "form-hint", text:
-      "This schedule can be changed from the watch daemon's web interface (CLI: bintrail-console watch) once its snapshot features are on." }));
+      "This schedule can be changed from the DBTrail service's web interface (CLI: bintrail-console watch) once its snapshot features are on." }));
     card.append(body);
     return card;
   }
@@ -8254,7 +8358,7 @@ function backupScheduleCard(cur, b) {
       alarm = true;
       alarmNote = "The run history could not be opened.";
       body.append(el("p", { class: "form-msg err", text:
-        "The snapshot run history could not be opened, so runs from before this daemon started are not shown. Check the daemon log." }));
+        "The snapshot run history could not be opened, so runs from before DBTrail started are not shown. Check its log." }));
     }
     // The full backup the schedule asks for (#1564): its refusal, or when
     // the next one is due if that is not the next run already said above.
@@ -8649,11 +8753,7 @@ function backupTakeAway(cur, b, sqlSt) {
 // Whether the reader opened the take-away panel themselves. Outside the node
 // for the reason vfyHelpOpen is: the repaints this page does on its own
 // replace the <details> that would have held it. See backupTakeAway.
-let takeAwayOpen = false;
-// checksOpen remembers the Checks fold across the page's own repaints (a job
-// that settles repaints the page; the fold must not snap shut under a reader
-// who opened it). A live run opens it on its own.
-let checksOpen = false;
+let takeAwayOpen = true;
 
 // backupFilesShape draws the count instead of stating it: on the DuckDB lane
 // two tiles when the server can make the views file and one when it cannot,
@@ -8756,8 +8856,8 @@ function backupDuckLane(b) {
   // b.incomplete means at least one configured location would not answer, so
   // the list is a SUBSET and "the newest" is only the newest of what was read.
   lane.append(el("p", { class: "form-hint", text:
-    (b.incomplete ? "This takes the newest snapshot that could be read, from " : "This takes the newest snapshot, from ") +
-    utcLabel(snaps[0].time) + ". Any other one in the list downloads the same way." }));
+    (b.incomplete ? "The newest snapshot that could be read, from " : "The newest snapshot, from ") +
+    utcLabel(snaps[0].time) + ". Any other one downloads from its row below." }));
   // Say WHY the second file is missing, and do not dress it as a property of
   // the data. It is withheld by this console's own setting, not by the
   // backup: the same folder still yields the file from the command line. And
@@ -8882,7 +8982,7 @@ function backupSQLLane(cur, b, sqlSt) {
     return lane;
   }
   if (mayCreate) body.append(el("p", { class: "form-hint", text:
-    "Plain SQL files in mydumper format, ready for myloader. Built from the snapshot before that moment plus the recorded changes; your database is never touched." }));
+    "Plain SQL in mydumper format. Your database is never touched." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
@@ -9068,7 +9168,11 @@ function verifyRegions(servers, opts) {
     el("div", { class: "vfy-state-w" },
       el("div", { class: "vfy-state-t", text: "Checking…" }),
       el("div", { class: "vfy-state-s", text: "" })));
-  control.append(verdict);
+  // A session that may run a check reads the verdict above the control; a
+  // view-only session gets no control card, so the verdict leads the
+  // current-run card instead (see the return at the end).
+  const mayRun = sessionMay(PERM_SNAPSHOT_CREATE);
+  if (mayRun) control.append(verdict);
   control.append(el("div", { class: "vfy-region-head" },
     el("h2", { class: "ov-panel-title", text: "Run a check" })));
   const modeSel = el("select", { class: "select vfy-mode" },
@@ -9115,6 +9219,7 @@ function verifyRegions(servers, opts) {
 
   // ── Region 2: what is running or just ran ──
   const current = el("section", { class: "tcard vfy-region vfy-current" });
+  if (!mayRun) current.append(verdict);
   current.append(el("div", { class: "vfy-region-head" },
     el("h2", { class: "ov-panel-title", text: "Current run" })));
   vfyView = { id: cur.id, results, btn, updateMode };
@@ -9133,12 +9238,12 @@ function verifyRegions(servers, opts) {
     tzChip()));
   const history = el("div", { class: "vfy-history" });
   historyCard.append(history);
-  loadVerifyHistory(cur.id, history, opts && opts.lastLine, verdict);
+  loadVerifyHistory(cur.id, history, verdict);
 
   // Running a check takes baseline:create. Without it the region that
   // offers one is left out; what is running and what ran before stay, since
   // reading them takes only servers:read.
-  return sessionMay(PERM_SNAPSHOT_CREATE) ? [control, current, historyCard] : [current, historyCard];
+  return mayRun ? [control, current, historyCard] : [current, historyCard];
 }
 
 // VFY_MODE_HELP (#1418): what each mode proves, what it needs, what it costs
@@ -9460,29 +9565,30 @@ const VFY_MODE_LABEL = { "baseline-anchored": "compared two saved snapshots", "l
 // --verify-interval loop writes the same store. On a fetch error (including
 // the 403 feature-off case) the box keeps whatever it already shows; the
 // trigger UI above explains how to enable verification.
-async function loadVerifyHistory(id, box, lastLine, verdictTile) {
-  // The verdict tile on the control card: the one on screen when none is
-  // handed in (a run that just ended refreshes the history from followVerify).
-  const tile = verdictTile || document.querySelector(".vfy-control .vfy-state");
+async function loadVerifyHistory(id, box, verdictTile) {
+  // The two tiles that say the verdict: the Checks card's (handed in on
+  // paint, else the one on screen: a run that just ended refreshes the
+  // history from followVerify) and the hero's, so they never disagree.
+  const tile = verdictTile || document.querySelector(".snap-checks .vfy-state");
+  const heroTile = document.querySelector(".snap-hero .hero-check");
   let recs;
   try {
     recs = (await api("/api/servers/" + encodeURIComponent(id) + "/verify/history")).history || [];
   } catch (err) {
-    if (lastLine) lastLine.textContent = "past runs could not be read";
     vfyVerdictFill(tile, null, "unreadable");
+    snapshotCheckTileFill(heroTile, null, "unreadable");
     return;
   }
   clear(box);
   if (!recs.length) {
     box.append(el("div", { class: "ev-empty", text: "No past runs yet." }));
-    if (lastLine) lastLine.textContent = "no check yet";
     vfyVerdictFill(tile, null, "none");
+    snapshotCheckTileFill(heroTile, null, "none");
     return;
   }
   const latest = recs.find((r) => r.state === "succeeded" || r.state === "failed");
   vfyVerdictFill(tile, latest || null, "none");
-  // The fold line above the section (D9): when, and what it found.
-  if (lastLine) lastLine.textContent = latest && latest.finished_at ? "last check " + utcLabel(latest.finished_at) + " · " + vfyHeadline(latest) : "no finished check yet";
+  snapshotCheckTileFill(heroTile, latest || null, "none");
   if (latest && latest.finished_at) {
     const sec = (Date.now() - Date.parse(latest.finished_at)) / 1000;
     // chip-age, NOT chip-mon and NOT the live treatment: this is a staleness
@@ -9514,7 +9620,7 @@ async function loadVerifyHistory(id, box, lastLine, verdictTile) {
     const mark = r.state === "failed" || r.verdict === "mismatch" || r.verdict === "error" ? "bad"
       : r.state === "succeeded" && r.verdict === "verified" ? "ok" : "none";
     row.append(
-      el("span", { class: "vfy-mark " + mark, text: mark === "ok" ? "\u2713" : mark === "bad" ? "\u2715" : "\u2013" }),
+      el("span", { class: "vfy-hmark " + mark, text: mark === "ok" ? "\u2713" : mark === "bad" ? "\u2715" : "\u2013" }),
       icon("caret", "ev-caret"),
       el("span", { class: "stg-name mono", text: when }),
       el("span", { text: (VFY_MODE_LABEL[r.mode] || r.mode || "") + (r.trigger === "scheduled" ? " (scheduled)" : "") }),
@@ -9539,43 +9645,42 @@ async function loadVerifyHistory(id, box, lastLine, verdictTile) {
   });
 }
 
-// vfyVerdictFill paints the control card's verdict from the newest finished
-// run: the mark, a headline in words, and when. It never claims more than
-// the run proved (a run whose tables all came back not checked is "Nothing
-// proven", never a tick), and before the first run it says so.
+// vfyVerdictWords is what one finished run means, for the two tiles that
+// show it (the Checks card and the hero): a state, a headline, the counts
+// and when, and the mark. Never more than was proven: a run whose tables
+// all came back not checked is "Nothing proven", never a tick.
+function vfyVerdictWords(latest, whyNone) {
+  if (!latest || !latest.finished_at) {
+    return { state: "none", title: whyNone === "unreadable" ? "Past checks could not be read" : "Never checked", line: whyNone === "unreadable" ? "" : "Run one below.", when: "", mark: "check" };
+  }
+  const s = latest.summary || {};
+  const when = agoText((Date.now() - Date.parse(latest.finished_at)) / 1000);
+  const n = (x) => x || 0;
+  if (latest.state === "failed") return { state: "bad", title: "The check failed", line: latest.last_error || "unknown error", when: when, mark: "cross" };
+  switch (latest.verdict) {
+    case "verified":
+      return { state: "ok", title: "The copy matches", line: n(s.match) + " of " + (n(s.match) + n(s.inconclusive) + n(s.error)) + " tables", when: when, mark: "check" };
+    case "mismatch":
+      return { state: "bad", title: n(s.mismatch) + (s.mismatch === 1 ? " table differs" : " tables differ"), line: n(s.match) + " match", when: when, mark: "cross" };
+    case "error":
+      return { state: "bad", title: "Errors on " + n(s.error) + (s.error === 1 ? " table" : " tables"), line: n(s.match) + " match", when: when, mark: "cross" };
+    case "no_predecessor":
+      return { state: "none", title: "Nothing to compare yet", line: "Only one snapshot so far", when: when, mark: "check" };
+  }
+  return { state: "warn", title: "Nothing proven", line: vfyHeadline(latest), when: when, mark: "check" };
+}
+
+// vfyVerdictFill paints the Checks card's verdict tile from vfyVerdictWords.
 function vfyVerdictFill(tile, latest, whyNone) {
   if (!tile) return;
   const t = tile.querySelector(".vfy-state-t"), sub = tile.querySelector(".vfy-state-s"), ico = tile.querySelector(".vfy-state-ico");
   if (!t || !sub || !ico) return;
-  const set = (state, title, line, mark) => {
-    tile.className = "vfy-state " + state;
-    t.textContent = title;
-    sub.textContent = line;
-    clear(ico);
-    ico.append(icon(mark, "vfy-vico"));
-  };
-  if (!latest || !latest.finished_at) {
-    set("none", whyNone === "unreadable" ? "Past checks could not be read" : "Never checked", "Run one below.", "check");
-    return;
-  }
-  const s = latest.summary || {};
-  const when = "checked " + agoText((Date.now() - Date.parse(latest.finished_at)) / 1000);
-  if (latest.state === "failed") { set("bad", "The check failed", (latest.last_error || "unknown error") + " · " + when, "cross"); return; }
-  switch (latest.verdict) {
-    case "verified":
-      set("ok", "The copy matches", (s.match || 0) + " of " + ((s.match || 0) + (s.inconclusive || 0) + (s.error || 0)) + " tables · " + when, "check");
-      return;
-    case "mismatch":
-      set("bad", (s.mismatch || 0) + (s.mismatch === 1 ? " table differs" : " tables differ"), (s.match || 0) + " match · " + when, "cross");
-      return;
-    case "error":
-      set("bad", "Errors on " + (s.error || 0) + (s.error === 1 ? " table" : " tables"), (s.match || 0) + " match · " + when, "cross");
-      return;
-    case "no_predecessor":
-      set("none", "Nothing to compare yet", "Only one snapshot so far · " + when, "check");
-      return;
-  }
-  set("warn", "Nothing proven", vfyHeadline(latest) + " · " + when, "check");
+  const w = vfyVerdictWords(latest, whyNone);
+  tile.className = "vfy-state " + w.state;
+  t.textContent = w.title;
+  sub.textContent = w.line + (w.when ? (w.line ? " · " : "") + "checked " + w.when : "");
+  clear(ico);
+  ico.append(icon(w.mark, "vfy-vico"));
 }
 
 // vfySortResults: worst verdict first (#1419 §3) — a mismatch must not sit

@@ -39,7 +39,9 @@ const sched = (every, extra) => Object.assign({ every: every, runnable: true, ne
 const b = (ageH, schedule, extra) => Object.assign({ configured: true, source: "/tmp/b", kind: "dir", snapshots: [snap(ageH)], schedule: schedule }, extra || {});
 const cur = { id: "s1", name: "prod", kind: "registry", has_source: true, baseline_dir: "/tmp/b" };
 vm.runInContext("capsCache = { monitor: false, baseline_trigger: true };", ctx);
-const draw = (bb, cov, acts) => { const h = hero(bb, cov, cur, acts || {}); return { text: flat(h).join(" "), cls: h.children.map((c) => c.className) }; };
+const words = vm.runInContext("vfyVerdictWords", ctx);
+const draw = (bb, cov, acts, who) => { const h = hero(bb, cov, who || cur, acts || {}); return { text: flat(h).join(" "), cls: h.children.map((c) => c.className), tiles: h.children[1] ? h.children[1].children.map((c) => c.className) : [] }; };
+const rec = (verdict, sum, state) => ({ state: state || "succeeded", verdict: verdict, finished_at: "2026-06-10T12:00:00Z", summary: sum || {} });
 console.log(JSON.stringify({
   fresh: tone(b(0.1, sched("5m")), { freshness: "current" }),
   late: tone(b(0.2, sched("5m")), { freshness: "current" }),
@@ -52,10 +54,25 @@ console.log(JSON.stringify({
   noSchedule: tone(b(30, null), { freshness: "current" }),
   scheduleOff: tone(b(30, sched("5m", { runnable: false })), { freshness: "current" }),
   noCoverage: tone(b(0.1, sched("5m")), null),
+  covUnknown: tone(b(0.1, sched("5m")), { freshness: "unknown" }),
+  supervisorStopped: tone(b(0.1, sched("5m")), { freshness: "current" }, { kind: "registry", monitor_state: "stopped" }),
+  nextSkips: tone(b(0.1, sched("5m", { next_method_error: "no folder" })), { freshness: "current" }),
+  skipped: tone(b(0.1, sched("5m", { last_skipped: { at: "2026-06-10T12:00:00Z", reason: "capture gap" } })), { freshness: "current" }),
+  refreshWithSchedule: tone(b(0.1, sched("5m"), { refresh: { state: "failed", last_error: "boom" } }), { freshness: "current" }),
+  noAge: tone({ configured: true, snapshots: [{ time: "2026-06-10 12:00:00", kinds: ["dir"] }], schedule: sched("5m") }, { freshness: "current" }),
   empty: tone({ configured: true, snapshots: [] }, { freshness: "current" }),
+  drawnScheduleOff: draw(b(30, sched("5m", { runnable: false, reason: "snapshot creation is off" })), { freshness: "current" }, { settings: () => {} }),
+  drawnEmpty: draw({ configured: true, source: "/tmp/b", kind: "dir", sources: [{ kind: "dir", source: "/tmp/b" }], snapshots: [] }, { freshness: "current" }),
+  drawnNoKinds: draw({ configured: true, source: "/tmp/b", kind: "dir", sources: [{ kind: "dir", source: "/tmp/b" }, { kind: "s3", source: "s3://b/p" }], snapshots: [{ time: "2026-06-10 12:00:00", age_hours: 0.1 }] }, { freshness: "current" }),
+  wordsVerified: words(rec("verified", { match: 3 })),
+  wordsUnproven: words(rec("unproven", { match: 0, inconclusive: 3 })),
+  wordsNoPred: words(rec("no_predecessor", {})),
+  wordsMismatch: words(rec("mismatch", { match: 2, mismatch: 1 })),
+  wordsFailed: words(rec("", {}, "failed")),
+  wordsNone: words(null, "none"),
   drawnFresh: draw(b(0.1, sched("5m")), { freshness: "current" }),
   drawnStopped: draw(b(0.1, sched("5m")), { freshness: "stalled" }, { settings: () => {} }),
-  drawnNoSchedule: draw(b(30, null), null, { settings: () => {} }),
+  drawnNoSchedule: draw(b(30, null), { freshness: "current" }, { settings: () => {} }),
   drawnUnset: draw({ configured: false }, null, { settings: () => {} }),
   drawnS3: draw(b(0.1, sched("5m"), { sources: [{ kind: "dir", source: "/tmp/b" }, { kind: "s3", source: "s3://b/p" }], snapshots: [{ time: "2026-06-10 12:00:00", age_hours: 0.1, kinds: ["s3"] }] }), { freshness: "current" }),
 }));
@@ -70,13 +87,19 @@ console.log(JSON.stringify({
 	}
 	type grade struct{ Tone, Why string }
 	type drawn struct {
-		Text string
-		Cls  []string
+		Text  string
+		Cls   []string
+		Tiles []string
 	}
+	type verdictWords struct{ State, Title, Line, When, Mark string }
 	var got struct {
-		Fresh, Late, VeryLate, Hourly, Stopped, Gap, FailedRun, FailedRefresh grade
-		NoSchedule, ScheduleOff, NoCoverage, Empty                             grade
-		DrawnFresh, DrawnStopped, DrawnNoSchedule, DrawnUnset, DrawnS3         drawn
+		Fresh, Late, VeryLate, Hourly, Stopped, Gap, FailedRun, FailedRefresh    grade
+		NoSchedule, ScheduleOff, NoCoverage, CovUnknown, SupervisorStopped, Empty grade
+		NextSkips, Skipped, RefreshWithSchedule, NoAge                            grade
+		DrawnFresh, DrawnStopped, DrawnNoSchedule, DrawnUnset, DrawnS3            drawn
+		DrawnScheduleOff, DrawnEmpty, DrawnNoKinds                                drawn
+		WordsVerified, WordsUnproven, WordsNoPred, WordsMismatch, WordsFailed     verdictWords
+		WordsNone                                                                 verdictWords
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
@@ -90,13 +113,24 @@ console.log(JSON.stringify({
 		"late (12 min at every 5)":        {got.Late, "warn", "Later"},
 		"very late (2 h at every 5)":      {got.VeryLate, "bad", "Much later"},
 		"hourly, 72 min":                  {got.Hourly, "ok", ""},
-		"capture stalled, young copy":     {got.Stopped, "bad", "Capture is stopped"},
-		"capture lost position":           {got.Gap, "bad", "Capture is stopped"},
+		"capture stalled, young copy":     {got.Stopped, "bad", "Capture is stalled"},
+		"capture lost position":           {got.Gap, "bad", "Capture is lost"},
 		"last scheduled run failed":       {got.FailedRun, "bad", "capture gap"},
 		"refresh loop failed, no schedule": {got.FailedRefresh, "bad", "boom"},
 		"no schedule":                     {got.NoSchedule, "none", ""},
-		"schedule turned off":             {got.ScheduleOff, "none", ""},
-		"coverage unreadable":             {got.NoCoverage, "ok", ""},
+		// A saved schedule the daemon cannot run is the silent failure the
+		// schedule DTO exists to surface: never "no schedule" in grey.
+		"schedule cannot run":              {got.ScheduleOff, "bad", "cannot run"},
+		"next slot will not start":         {got.NextSkips, "bad", "next run cannot start"},
+		"last slot skipped":                {got.Skipped, "bad", "did not start"},
+		"manual read failed, schedule on":  {got.RefreshWithSchedule, "bad", "boom"},
+		// Unknown capture is never mint: a young copy of a stopped capture
+		// is the case the colour exists for, and unread is not "fine".
+		"coverage unreadable":             {got.NoCoverage, "warn", "could not be read"},
+		"coverage unknown":                {got.CovUnknown, "warn", "could not be read"},
+		// The supervisor knows a stopped stream before the index does.
+		"supervisor says stopped":         {got.SupervisorStopped, "bad", "Capture is stopped"},
+		"no age on the wire":              {got.NoAge, "none", ""},
 		"no snapshot":                     {got.Empty, "none", ""},
 	} {
 		if c.got.Tone != c.tone || !strings.Contains(c.got.Why, c.why) || (c.why == "" && c.got.Why != "") {
@@ -110,9 +144,46 @@ console.log(JSON.stringify({
 		!strings.Contains(got.DrawnFresh.Text, "1 in all") || !hasString(got.DrawnFresh.Cls, "hero-card hero-age ok") {
 		t.Errorf("fresh hero: %q %q", got.DrawnFresh.Text, got.DrawnFresh.Cls)
 	}
-	if !strings.Contains(got.DrawnStopped.Text, "Capture is stopped") || !strings.Contains(got.DrawnStopped.Text, "Settings ›") ||
-		!hasString(got.DrawnStopped.Cls, "hero-card hero-age bad") {
+	// A stopped capture is fixed on Overview, not under this page's
+	// Settings: the link goes where the fix is.
+	if !strings.Contains(got.DrawnStopped.Text, "Capture is stalled") || !strings.Contains(got.DrawnStopped.Text, "Overview ›") ||
+		strings.Contains(got.DrawnStopped.Text, "Settings ›") || !hasString(got.DrawnStopped.Cls, "hero-card hero-age bad") {
 		t.Errorf("stopped hero: %q %q", got.DrawnStopped.Text, got.DrawnStopped.Cls)
+	}
+	if !strings.Contains(got.DrawnScheduleOff.Text, "The schedule cannot run: snapshot creation is off") || !strings.Contains(got.DrawnScheduleOff.Text, "Settings ›") ||
+		strings.Contains(got.DrawnScheduleOff.Text, "Not on a schedule") {
+		t.Errorf("a stuck schedule must be named, never \"not on a schedule\": %q", got.DrawnScheduleOff.Text)
+	}
+	// No copy yet: the places are set but not lit ("on" means the newest
+	// copy is there). A listing that does not say where the newest one is:
+	// the same.
+	for name, d := range map[string]drawn{"no snapshot": got.DrawnEmpty, "no kinds on the wire": got.DrawnNoKinds} {
+		for _, c := range d.Tiles {
+			if strings.Contains(c, " on") {
+				t.Errorf("%s: a tile is lit: %q", name, d.Tiles)
+			}
+		}
+		if len(d.Tiles) != 2 {
+			t.Errorf("%s: want two tiles, got %q", name, d.Tiles)
+		}
+	}
+	// The verdict words, shared by the hero tile and the Checks card: a
+	// tick only for "verified"; a run that compared nothing is never green.
+	for name, c := range map[string]struct {
+		got   verdictWords
+		state string
+		title string
+	}{
+		"verified":       {got.WordsVerified, "ok", "The copy matches"},
+		"unproven":       {got.WordsUnproven, "warn", "Nothing proven"},
+		"no predecessor": {got.WordsNoPred, "none", "Nothing to compare yet"},
+		"mismatch":       {got.WordsMismatch, "bad", "1 table differs"},
+		"failed":         {got.WordsFailed, "bad", "The check failed"},
+		"never":          {got.WordsNone, "none", "Never checked"},
+	} {
+		if c.got.State != c.state || c.got.Title != c.title || (c.state == "ok") != (c.got.Mark == "check" && c.got.State == "ok") {
+			t.Errorf("%s: %+v, want state %q title %q", name, c.got, c.state, c.title)
+		}
 	}
 	if !strings.Contains(got.DrawnNoSchedule.Text, "Not on a schedule") || !strings.Contains(got.DrawnNoSchedule.Text, "Settings ›") {
 		t.Errorf("no-schedule hero does not say so and point at Settings: %q", got.DrawnNoSchedule.Text)
@@ -152,14 +223,15 @@ const hashes = {};
 for (const h of ["", "#checks", "#setup", "#settings", "#versions", "#past"]) { ctx.location.hash = h; hashes[h] = fromHash(); }
 out.hashes = hashes;
 const all = tabs({ checks: true, settings: true });
-out.offered = all.bar.children.filter((c) => c.tag === "button").map((c) => c._text);
+const tabsOf = (t) => t.bar.children[0].children.filter((c) => c.tag === "button");
+out.offered = tabsOf(all).map((c) => c._text);
 all.select("checks");
-out.afterClick = { shown: Object.keys(all.panels).filter((k) => !all.panels[k].hidden), on: all.bar.children.filter((c) => c.attrs && c.attrs["aria-selected"] === "true").map((c) => c._text), written: written.slice() };
+out.afterClick = { shown: Object.keys(all.panels).filter((k) => !all.panels[k].hidden), on: tabsOf(all).filter((c) => c.attrs && c.attrs["aria-selected"] === "true").map((c) => c._text), written: written.slice() };
 written = [];
 all.select("settings", true);
 out.quiet = { shown: Object.keys(all.panels).filter((k) => !all.panels[k].hidden), written: written.slice() };
 const serve = tabs({ checks: false, settings: true });
-out.serveOffered = serve.bar.children.filter((c) => c.tag === "button").map((c) => c._text);
+out.serveOffered = tabsOf(serve).map((c) => c._text);
 serve.select("checks");
 out.serveFallback = Object.keys(serve.panels).filter((k) => !serve.panels[k].hidden);
 console.log(JSON.stringify(out));

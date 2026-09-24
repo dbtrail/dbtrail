@@ -319,9 +319,9 @@ func RefusalReason(err error) string {
 // The refusal texts the checker and the schedule endpoints share, so a saved
 // schedule is reported with the same words a write is refused with.
 const (
-	scheduleRefusalReadOnly = "scheduled snapshots run in the watch daemon (CLI: bintrail-console watch); this DBTrail is read-only"
-	scheduleRefusalNoLoop   = "snapshot features are turned off on this daemon: BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1 and no refresh interval is set (CLI: --baseline-refresh-interval), so nothing can run a schedule"
-	scheduleRefusalNoDumps  = "creating snapshots from the web interface is turned off on this daemon (BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1)"
+	scheduleRefusalReadOnly = "scheduled snapshots run in the DBTrail service (CLI: bintrail-console watch); this DBTrail is read-only"
+	scheduleRefusalNoLoop   = "snapshot features are turned off here: BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1 and no refresh interval is set (CLI: --baseline-refresh-interval), so nothing can run a schedule"
+	scheduleRefusalNoDumps  = "creating snapshots from the web interface is turned off here (BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1)"
 )
 
 // BackupScheduleGates is what the daemon can do, as the schedule checker

@@ -3061,11 +3061,11 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
    1024px window stack two lanes that 1fr 1fr kept side by side. 300 holds
    the pair down to about 970px, and the 860px rule below still covers the
    narrow band. */
-.bk-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; padding: 14px; }
+.bk-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; padding: 4px 14px 14px; }
 @media (max-width: 860px) { .bk-lanes { grid-template-columns: 1fr; } }
 .bk-lane {
-  background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--radius-sm); padding: 18px;
+  background: var(--surface-3); border: 0;
+  border-radius: 18px; padding: 20px;
   display: flex; flex-direction: column; gap: 10px;
 }
 .bk-lane-t {
@@ -3122,9 +3122,9 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .bks-value.muted { color: var(--ink-3); font-weight: 400; }
 .bks-restart { font-size: 10px; white-space: nowrap; }
 .bks-cli { grid-column: 1; font-size: 11px; color: var(--ink-3); font-family: var(--f-mono); }
-.bks-server { padding: 14px 0; border-bottom: 1px dotted var(--line); }
+.bks-server { padding: 18px 0; border-bottom: 1px dotted var(--line); }
 .bks-server:last-child { border-bottom: none; padding-bottom: 4px; }
-.bks-server-name { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+.bks-server-name { margin: 0 0 12px; font-family: var(--f-display); font-size: 16px; font-weight: 700; }
 
 /* Backup settings (#1603): three kinds of setting, told apart by layout.
    A section label opens each group; the disk-space card keeps the tinted
@@ -3189,7 +3189,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .bks-docs { color: var(--ink-2); text-decoration: underline; text-underline-offset: 2px; }
 .bks-docs:hover { color: var(--accent); }
 .bks-server .cn-fine { margin-top: 6px; }
-.bks-server .stg-cardfoot { margin-top: 10px; }
+.bks-server .stg-cardfoot { margin-top: 12px; display: flex; justify-content: flex-end; }
 /* The per-server yes/no (#1681): a plain fieldset, the two answers on one line. */
 .bks-q { border: 0; padding: 0; margin: 0 0 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }
 .bks-q legend { padding: 0; margin-bottom: 6px; width: 100%; }
@@ -3220,11 +3220,6 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .fr-fold { margin-top: 10px; background: none; border: 0; padding: 0; cursor: pointer; font-family: var(--f-ui); font-size: 13px; color: var(--ink-3); }
 .fr-fold::before { content: "\25B8 "; }
 .fr-card.fr-open .fr-fold::before { content: "\25BE "; }
-.snap-fold { margin: 4px 0 8px; }
-.snap-fold > summary { cursor: pointer; padding: 8px 0; font-family: var(--f-ui); font-size: 14px; color: var(--ink-2); display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
-.snap-fold > summary .snap-fold-title { font-weight: 600; color: var(--ink); }
-.snap-fold > summary .snap-fold-last { color: var(--ink-3); font-size: 13px; }
-.snap-fold[open] > summary { margin-bottom: 10px; }
 .rc-restore-slot { margin-top: 20px; }
 .rc-restore-note a { color: #D9367A; font-weight: 600; text-decoration: none; border-bottom: 1px solid currentColor; }
 /* the Snapshots page's one daemon row: a plain white card, the tints stay
@@ -3272,6 +3267,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .hero-ico { display: inline-flex; width: 32px; height: 32px; }
 .hero-ico svg { width: 100%; height: 100%; }
 .hero-tile-t { font-family: var(--f-ui); font-size: 13px; font-weight: 600; }
+.hero-tile-s { font-family: var(--f-ui); font-size: 11px; color: inherit; opacity: .8; }
 .hero-days { gap: 10px; }
 .hero-strip { position: relative; height: 34px; border-bottom: 2px solid var(--line); }
 .hero-tick { position: absolute; bottom: 0; width: 3px; height: 16px; border-radius: 2px; background: var(--ink-4); transform: translateX(-50%); }
@@ -3287,6 +3283,8 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 }
 
 .snap-tabs { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--line); margin: 6px 0 18px; }
+.snap-tablist { display: flex; align-items: center; gap: 6px; }
+.snap-tab.has-alarm::after { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #E8397C; margin-left: 7px; vertical-align: middle; }
 .snap-tab-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; padding-bottom: 8px; }
 .snap-tab {
   font-family: var(--f-ui); font-size: 15px; font-weight: 500; color: var(--ink-2);
@@ -3328,7 +3326,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .keep-step .keep-n { font-family: var(--f-display); font-size: 40px; font-weight: 800; letter-spacing: -0.02em; width: 110px; text-align: center; border: 0; background: transparent; color: var(--ink); padding: 0; height: auto; -moz-appearance: textfield; }
 .keep-step .keep-n::-webkit-outer-spin-button, .keep-step .keep-n::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .keep-step .keep-n::placeholder { color: var(--ink-3); font-size: 28px; font-weight: 700; }
-.keep-unit { font-family: var(--f-ui); font-size: 14px; color: var(--ink-2); }
+.keep-unit, .keep-lead { font-family: var(--f-ui); font-size: 14px; color: var(--ink-2); }
 .where-tile { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 16px; background: var(--surface-3); margin: 0 0 10px; }
 .where-tile.on { background: #DDF7EC; color: #0E8A5E; }
 .where-ico { display: inline-flex; width: 26px; height: 26px; flex: none; color: currentColor; }
@@ -3337,10 +3335,8 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .where-body .field-label { font-size: 12px; color: inherit; }
 .where-tile .where-in { background: transparent; border: 0; padding: 0; height: auto; font-family: var(--f-mono); font-size: 12.5px; color: var(--ink); width: 100%; }
 .where-tile .where-in:focus { outline: none; box-shadow: none; }
+.where-tile:focus-within { box-shadow: 0 0 0 2px var(--brand-warm-a); }
 .where-card .bl-case { margin-top: 4px; }
-.bks-server { padding: 18px 0; border-bottom: 1px dotted var(--line); }
-.bks-server-name { margin: 0 0 12px; font-family: var(--f-display); font-size: 16px; font-weight: 700; }
-.bks-server .stg-cardfoot { margin-top: 12px; display: flex; justify-content: flex-end; }
 
 .snap-checks { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
 @media (max-width: 960px) { .snap-checks { grid-template-columns: 1fr; } }
@@ -3362,13 +3358,22 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .vfy-state-t { font-family: var(--f-display); font-size: 22px; font-weight: 800; letter-spacing: -0.01em; color: var(--ink); line-height: 1.1; }
 .vfy-state.bad .vfy-state-t { color: #D9367A; }
 .vfy-state-s { font-family: var(--f-ui); font-size: 13px; color: var(--ink-2); margin-top: 3px; }
-.vfy-mark { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex: none; }
-.vfy-mark.ok { background: #DDF7EC; color: #0E8A5E; }
-.vfy-mark.bad { background: #FFE9F5; color: #D9367A; }
-.vfy-mark.none { background: var(--surface-3); color: var(--ink-3); }
+.vfy-hmark { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex: none; }
+.vfy-hmark.ok { background: #DDF7EC; color: #0E8A5E; }
+.vfy-hmark.bad { background: #FFE9F5; color: #D9367A; }
+.vfy-hmark.none { background: var(--surface-3); color: var(--ink-3); }
 
-.bk-lanes { padding: 4px 14px 14px; }
-.bk-lane { background: var(--surface-3); border: 0; border-radius: 18px; padding: 20px; }
 .bk-lane-head { display: flex; align-items: center; gap: 10px; }
 .bk-lane-ico { display: inline-flex; width: 26px; height: 26px; color: #D9367A; flex: none; }
-.bk-lane-ico svg { width: 100%; height: 100%; }
+/* !important: the file icon constant carries an inline 16px size */
+.bk-lane-ico svg { width: 100% !important; height: 100% !important; }
+
+.stg-top { margin-bottom: 4px; }
+.stg-top .card.stg-card { background: #fff; }
+.stg-top .card.stg-card::after { display: none; }
+.bl-case { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 12px; font-size: 13px; }
+.bl-case.bl-ok { background: #DDF7EC; color: #0E8A5E; }
+.bl-case.bl-part { background: #FFF6DC; color: #7A5F00; }
+.bl-case.bl-no { background: #FFE9F5; color: #B02762; }
+.bl-case .bl-name { min-width: 0; font-weight: 700; color: inherit; white-space: nowrap; }
+.bl-case .bl-say { color: inherit; }
