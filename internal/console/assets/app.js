@@ -11129,7 +11129,8 @@ function serverRow(s) {
   if (s.flavor && s.flavor !== "mysql") item.append(el("span", { class: "chip", text: s.flavor === "postgres" ? "PG" : s.flavor.toUpperCase(), title: "Source type: " + s.flavor }));
   // A registry entry with no source connection under a capturing console
   // never streams; the mark says so where the Start button would be (#1607).
-  if (s.kind !== "ephemeral" && capsKnown && capsCache.monitor && !s.has_source) item.append(el("span", { class: "chip chip-nosrc", text: "NO SOURCE", title: "No source connection: nothing is captured from this server. Edit it and add one." }));
+  const noSource = s.kind !== "ephemeral" && capsKnown && capsCache.monitor && !s.has_source;
+  if (noSource) item.append(el("span", { class: "chip chip-nosrc", text: "NO SOURCE", title: "No source connection: nothing is captured from this server. Edit it and add one." }));
 
   let desc;
   if (s.has_source && s.source_host) desc = "watching " + s.source_user + "@" + s.source_host + ":" + (s.source_port || (s.flavor === "postgres" ? "5432" : "3306")) + (s.source_database ? "/" + s.source_database : "") + (s.schemas ? " [" + s.schemas + "]" : "");
@@ -11138,7 +11139,9 @@ function serverRow(s) {
   item.append(el("span", { class: "srv-desc conn", text: desc }));
 
   const note = noCaptureNotes[s.id] && noCaptureReason(s);
-  item.append(el("span", { class: "srv-status" + (note ? " pending" : ""), id: "srv-status-" + s.id, text: note ? "○ " + note : "" }));
+  // data-nosrc: the Test result on this row says the same thing beside its
+  // "index ok", so the two facts read as two connections (#1856).
+  item.append(el("span", { class: "srv-status" + (note ? " pending" : ""), id: "srv-status-" + s.id, text: note ? "○ " + note : "", "data-nosrc": noSource ? "1" : null }));
 
   const acts = el("span", { class: "acts row-acts" });
   const monitorable = capsCache.monitor && s.has_source && s.kind !== "ephemeral";
@@ -12156,7 +12159,10 @@ function testResultText(res) {
   // it as a neutral hint, not a red failure.
   if (res.provision_pending) return withS3("○ " + (res.error || "index not created yet; click Start"));
   if (!res.ok) return withS3("✗ " + (res.error || "unreachable"));
-  let s = "✓ ok · " + res.latency_ms + " ms";
+  // Named: the connection tested is the INDEX (where captured changes are
+  // stored), the one the row prints. Beside a NO SOURCE mark, a bare "ok"
+  // read as a contradiction (#1856); the source is not probed here.
+  let s = "✓ index ok · " + res.latency_ms + " ms";
   if (res.server_version) s += " · MySQL " + res.server_version;
   // has_index/schema_current are tri-state: absent = the metadata lookup itself
   // failed (unknown) — never render that as the confident negative.
@@ -12230,7 +12236,8 @@ async function testServerRow(id) {
   try {
     const res = await api("/api/servers/" + encodeURIComponent(id) + "/test", { method: "POST", body: {} });
     const note = noCaptureNotes[id]; // the row rebuild re-derives it; here it only needs to survive the test result
-    if (slot) { slot.className = "srv-status " + testResultClass(res); slot.textContent = testResultText(res) + (note ? " · ○ " + note : ""); }
+    const noSource = slot && slot.getAttribute("data-nosrc") === "1";
+    if (slot) { slot.className = "srv-status " + testResultClass(res); slot.textContent = testResultText(res) + (note ? " · ○ " + note : "") + (noSource ? " · ○ no source database set, nothing to capture" : ""); }
   } catch (err) { if (slot) { slot.className = "srv-status err"; slot.textContent = "✗ " + ((err && err.message) || err); } }
 }
 
