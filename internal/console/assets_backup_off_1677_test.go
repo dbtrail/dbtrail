@@ -43,9 +43,9 @@ const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.
 const last = (n) => { const rows = []; const walk = (x) => { if (!x) return; if ((x.className || "").includes("fr-step ")) { rows.push(x); return; } (x.children || []).forEach(walk); }; walk(n);
   const r = rows[rows.length - 1]; return r ? { cls: r.className, text: flat(r).join(" ") } : null; };
 const card = vm.runInContext("firstRunCard", ctx);
-const strip = vm.runInContext("baselineContextStrip", ctx);
+const strip = vm.runInContext("snapshotHero", ctx);
 const buttons = (n, out = []) => { if (!n) return out; if (n.tag === "button") out.push(n._text); (n.children || []).forEach((c) => buttons(c, out)); return out; };
-const drawStrip = (caps, b, cur) => { vm.runInContext("capsCache = " + JSON.stringify(caps) + ";", ctx); const s = strip(b, cur); return { text: flat(s).join(" "), buttons: buttons(s) }; };
+const drawStrip = (caps, b, cur) => { vm.runInContext("capsCache = " + JSON.stringify(caps) + ";", ctx); const s = strip(b, null, cur, { settings: () => {} }); return { text: flat(s).join(" "), buttons: buttons(s) }; };
 const reg = { id: "s1", name: "prod", kind: "registry", has_source: true, baseline_dir: "/var/lib/bintrail/baselines" };
 const shared = { id: "s2", name: "shared", kind: "registry", has_source: true };
 const nosrc = { id: "s3", name: "byo", kind: "registry", baseline_dir: "/var/lib/bintrail/baselines" };
@@ -123,16 +123,16 @@ console.log(JSON.stringify({
 	}
 
 	const note = "turned off at startup"
-	if !strings.Contains(got.StripOff.Text, "READ DATABASE") || !strings.Contains(got.StripOff.Text, note) ||
-		!strings.Contains(got.StripOff.Text, "under Where and how often") || len(got.StripOff.Buttons) != 0 {
-		t.Errorf("creation off: the strip does not say so where the button would be: %+v", got.StripOff)
+	if !strings.Contains(got.StripOff.Text, "Read database now:") || !strings.Contains(got.StripOff.Text, note) ||
+		!strings.Contains(got.StripOff.Text, "under Settings") || len(got.StripOff.Buttons) != 0 {
+		t.Errorf("creation off: the hero does not say so where the button would be: %+v", got.StripOff)
 	}
 	if strings.Contains(got.StripOn.Text, note) || len(got.StripOn.Buttons) != 1 || got.StripOn.Buttons[0] != "Read database now" {
 		t.Errorf("creation on: want the button and no note: %+v", got.StripOn)
 	}
-	// Each strip must have drawn something, or the absence below proves nothing.
-	if !strings.Contains(got.StripOffBoot.Text, "SOURCE") || !strings.Contains(got.StripOffUnconfigured.Text, "not configured") {
-		t.Fatalf("a strip was not drawn: boot %q, unconfigured %q", got.StripOffBoot.Text, got.StripOffUnconfigured.Text)
+	// Each hero must have drawn something, or the absence below proves nothing.
+	if !strings.Contains(got.StripOffBoot.Text, "Updated") || !strings.Contains(got.StripOffUnconfigured.Text, "not set up") {
+		t.Fatalf("a hero was not drawn: boot %q, unconfigured %q", got.StripOffBoot.Text, got.StripOffUnconfigured.Text)
 	}
 	if strings.Contains(got.StripOffBoot.Text, note) || strings.Contains(got.StripOffUnconfigured.Text, note) {
 		t.Errorf("the note shows where the button is missing for another reason: boot %q, unconfigured %q",
@@ -152,7 +152,7 @@ console.log(JSON.stringify({
 	}
 	// No source: nothing a backup could read, so no note either way. The
 	// button stays where it was (the page's live test pins it).
-	if !strings.Contains(got.StripOffNoSource.Text, "SOURCE") || strings.Contains(got.StripOffNoSource.Text, "READ DATABASE") {
+	if !strings.Contains(got.StripOffNoSource.Text, "Updated") || strings.Contains(got.StripOffNoSource.Text, "Read database now") {
 		t.Errorf("a server with no source gets a note: %q", got.StripOffNoSource.Text)
 	}
 	// A bucket is a location of the server's own, like a directory: the

@@ -2352,10 +2352,10 @@ try {
   // The coordinates ride as the tooltip of the row's time since the Snapshots cut.
   await page.waitForFunction(() => Array.from(document.querySelectorAll(".stg-row")).some((r) => ((r.querySelector(".stg-name") || {}).title || "").includes("binlog.000001:50")));
   const stg = await page.evaluate(() => {
-    // #1415: the Create action moved to the context strip (page level); the
-    // uniform table count moved there too, so the row carries only what
+    // Round 3: the Create action is a hero button (page level); the hero
+    // draws the copy's age and where it lives, so the row carries only what
     // varies (the binlog anchor) plus the newest treatment.
-    const strip = document.querySelector(".ctx-strip");
+    const strip = document.querySelector(".snap-hero");
     const btn = strip ? Array.from(strip.querySelectorAll("button")).find((b) => b.textContent === "Read database now") : null;
     const row = Array.from(document.querySelectorAll(".stg-row")).find((r) => ((r.querySelector(".stg-name") || {}).title || "").includes("binlog.000001:50"));
     return { capOn: !!capsCache.baseline_trigger, stripPresent: !!strip,
@@ -2363,16 +2363,17 @@ try {
       btnPresent: !!btn, btnEnabled: btn ? !btn.disabled : false,
       rowText: row ? row.textContent : "",
       rowIsLatest: row ? row.classList.contains("stg-row-latest") : false,
-      sourceOneLine: strip && strip.querySelector(".ctx-source") ?
-        getComputedStyle(strip.querySelector(".ctx-source")).whiteSpace === "nowrap" : false };
+      heroAge: ((strip && strip.querySelector(".hero-big")) || {}).textContent || "",
+      heroDisk: !!(strip && strip.querySelector(".hero-tile.on")),
+      heroTicks: strip ? strip.querySelectorAll(".hero-tick").length : 0 };
   });
   stg.capOn ? ok("baselines: baseline_trigger capability reaches the frontend") : bad("baselines: baseline_trigger capability reaches the frontend", "capsCache.baseline_trigger falsy");
-  (stg.stripPresent && stg.btnPresent && stg.btnEnabled) ? ok("baselines: Create baseline is a page action on the context strip, enabled when both gates pass") : bad("baselines: Create baseline is a page action on the context strip, enabled when both gates pass", `strip=${stg.stripPresent} present=${stg.btnPresent} enabled=${stg.btnEnabled}`);
-  // The facts moved, they did not vanish: table count and source live on the
-  // strip; the row keeps the anchor and gains the newest treatment.
-  (/1 per snapshot/.test(stg.stripText) && stg.sourceOneLine)
-    ? ok("baselines: the uniform table count and the one-line source render on the strip")
-    : bad("baselines: the uniform table count and the one-line source render on the strip", stg.stripText);
+  (stg.stripPresent && stg.btnPresent && stg.btnEnabled) ? ok("baselines: Read database now is a hero action, enabled when both gates pass") : bad("baselines: Read database now is a hero action, enabled when both gates pass", `hero=${stg.stripPresent} present=${stg.btnPresent} enabled=${stg.btnEnabled}`);
+  // The hero SHOWS the copy: its age as a number, the lit tile for the place
+  // it lives (the fixture is on disk), and one tick per snapshot this week.
+  (/ago$/.test(stg.heroAge) && stg.heroDisk && stg.heroTicks >= 1 && /On disk/.test(stg.stripText))
+    ? ok("baselines: the hero shows the copy's age, where it lives and its ticks")
+    : bad("baselines: the hero shows the copy's age, where it lives and its ticks", JSON.stringify({ age: stg.heroAge, disk: stg.heroDisk, ticks: stg.heroTicks, text: stg.stripText }));
   (stg.rowIsLatest && /ago/.test(stg.rowText) && !/table\(s\)/.test(stg.rowText))
     ? ok("baselines: the newest row wears the treatment, carries relative age, and drops the constant column")
     : bad("baselines: the newest row wears the treatment, carries relative age, and drops the constant column", stg.rowText);
@@ -2411,10 +2412,13 @@ try {
     // Per top-level block: count it whole when it ends above the fold,
     // otherwise descend, so a long section only contributes the part of it
     // the reader can actually see.
+    // A hidden tab panel is not on screen: innerText of an unrendered node
+    // falls back to its whole text, which would count what the reader
+    // cannot see.
     const visit = (n) => {
       for (const c of n.children) {
         const r = c.getBoundingClientRect();
-        if (r.top >= fold) continue;
+        if (c.hidden || (r.width === 0 && r.height === 0) || r.top >= fold) continue;
         if (c.children.length === 0 || r.bottom <= fold) total += words(c.innerText);
         else visit(c);
       }
@@ -2423,7 +2427,7 @@ try {
     for (const c of view.children) {
       const r = c.getBoundingClientRect();
       const before = total;
-      if (r.top < fold) visit({ children: [c] });
+      if (!c.hidden && r.top < fold) visit({ children: [c] });
       blocks.push({ cls: c.className, top: Math.round(r.top), words: total - before,
         text: (c.innerText || "").trim().slice(0, 60).replace(/\s+/g, " ") });
     }
@@ -2522,7 +2526,7 @@ try {
         rows: v.querySelectorAll(".stg-list .stg-row").length,
         errorBoxes: v.querySelectorAll(".error-box").length,
         create: btn("Read database now"),
-        createNote: /READ DATABASE/.test((v.querySelector(".ctx-strip") || {}).textContent || ""),
+        createNote: /Read database now:/.test((v.querySelector(".snap-hero") || {}).textContent || ""),
         restore: !!v.querySelector(".bk-restore:not(.bk-schedule)"),
         takeAway: !!v.querySelector("details.bk-take"),
         duckData: btn("Download the data"),
@@ -2679,7 +2683,7 @@ try {
 
   // Hints that name a fix must name one this reader can make. An operator
   // may create a snapshot but not see or change settings: the Create note
-  // keeps its reason and drops "(under Where and how often)". A session that
+  // keeps its reason and drops "(under Settings)". A session that
   // may download but not read settings keeps the DuckDB lane without the
   // false line about how DBTrail is configured. A session that may read
   // settings but not write servers is not told to "select this server to
@@ -2703,7 +2707,7 @@ try {
       const duckNoViews = (backupDuckLane(b) || { textContent: "" }).textContent;
       capsCache.views = keepViews;
       return {
-        strip: baselineContextStrip(b, cur).textContent,
+        strip: snapshotHero(b, null, cur, { settings: () => {} }).textContent,
         duck: (backupDuckLane(b) || { textContent: "" }).textContent,
         duckNoViews,
         row: backupServerRow(srv, false, [srv], null).textContent,
@@ -2723,8 +2727,8 @@ try {
     } finally { capsCache.permissions = keep; capsCache.baseline_trigger = keepTrig; capsCache.views = keepViews; }
   });
   const H = hints;
-  (/READ DATABASE/.test(H.full.strip) && /under Where and how often/.test(H.full.strip)
-    && /READ DATABASE/.test(H.operator.strip) && /own snapshot location/.test(H.operator.strip) && !/Where and how often/.test(H.operator.strip)
+  (/Read database now:/.test(H.full.strip) && /under Settings/.test(H.full.strip)
+    && /Read database now:/.test(H.operator.strip) && /own snapshot location/.test(H.operator.strip) && !/under Settings/.test(H.operator.strip)
     && (H.views ? !/set not to read archived data/.test(H.operator.duck) : true) && /Download the data/.test(H.operator.duck)
     && /Select this server at the top/.test(H.full.row) && !/Select this server at the top/.test(H.reader.row) && /No schedule/.test(H.reader.row)
     && (H.views ? !/set not to read archived data/.test(H.full.duck) : true)
@@ -2814,27 +2818,27 @@ try {
   // button even with a destination, and the strip says why (#1677).
   const gates = await page.evaluate(() => {
     // A source and a location of its own (#1677): the source is what makes
-    // the strip draw its READ DATABASE note, and the own location keeps the
+    // the hero draw its "Read database now:" note, and the own location keeps the
     // capability-off check honest, since without one the button is withheld
     // for the location and that check would pass even with creation on.
     const servers = [{ id: "srv-fix", name: "fixture", kind: "registry", has_source: true, baseline_dir: "/tmp/baselines" }];
     const cur = servers[0];
     const keepCur = currentServer;
     currentServer = "srv-fix";
-    // The button lives on the STRIP since #1415 — drive both builders so the
-    // gate holds where the button actually is AND the panel keeps its empty
-    // states.
+    // The button lives on the HERO since round 3 — drive both builders so
+    // the gate holds where the button actually is AND the panel keeps its
+    // empty states.
     const cfgOff = baselinesPanel({ configured: false }, servers);
-    const cfgOffStrip = baselineContextStrip({ configured: false }, cur);
+    const cfgOffStrip = snapshotHero({ configured: false }, null, cur, {});
     const keepCap = capsCache.baseline_trigger;
     capsCache.baseline_trigger = false;
     const capOff = baselinesPanel({ configured: true, source: "/tmp/baselines", snapshots: [] }, servers);
-    const capOffStrip = baselineContextStrip({ configured: true, source: "/tmp/baselines", snapshots: [] }, cur);
+    const capOffStrip = snapshotHero({ configured: true, source: "/tmp/baselines", snapshots: [] }, null, cur, {});
     capsCache.baseline_trigger = keepCap;
     currentServer = keepCur;
     const hasBtn = (n) => Array.from(n.querySelectorAll("button")).some((b) => b.textContent === "Read database now");
-    // #1677: where the button would be, the strip says creation is off.
-    const offNote = (n) => /READ DATABASE/.test(n.textContent) && /turned off at startup/.test(n.textContent);
+    // #1677: where the button would be, the hero says creation is off.
+    const offNote = (n) => /Read database now:/.test(n.textContent) && /turned off at startup/.test(n.textContent);
     return {
       cfgOffBtn: hasBtn(cfgOff) || hasBtn(cfgOffStrip),
       cfgOffEmpty: /No snapshots configured/.test(cfgOff.textContent),
@@ -2850,9 +2854,9 @@ try {
   (!gates.capOffBtn && gates.capOffEmpty)
     ? ok("baselines: baseline_trigger off → no button even with a destination")
     : bad("baselines: baseline_trigger off → no button even with a destination", JSON.stringify(gates));
-  (gates.capOffNote && !gates.cfgOffNote && !/READ DATABASE/.test(stg.stripText))
-    ? ok("baselines: baseline_trigger off → the strip says creation is off where the button would be, and only then")
-    : bad("baselines: baseline_trigger off → the strip says creation is off where the button would be, and only then", JSON.stringify({ gates, live: stg.stripText }));
+  (gates.capOffNote && !gates.cfgOffNote && !/Read database now:/.test(stg.stripText))
+    ? ok("baselines: baseline_trigger off → the hero says creation is off where the button would be, and only then")
+    : bad("baselines: baseline_trigger off → the hero says creation is off where the button would be, and only then", JSON.stringify({ gates, live: stg.stripText }));
 
   // Scenario 15e — the Snapshots feature set: rename, per-row detail with real
   // sizes, the tar.gz download wire, the restore card's gate + inline refusal,
@@ -3543,9 +3547,9 @@ try {
   await page.evaluate(() => navigate("snapshots"));
   await page.waitForFunction(() => location.pathname === "/snapshots"
     && document.querySelectorAll(".vfy-region").length >= 3);
-  // Checks is a closed fold since the Snapshots cut (D9); the measurements
-  // below need it open.
-  await page.evaluate(() => { const d = document.querySelector(".snap-fold"); if (d) d.open = true; });
+  // Checks is a tab since round 3; the measurements below need it on screen.
+  await page.evaluate(() => document.querySelector('.snap-tab[data-tab="checks"]').click());
+  await page.waitForFunction(() => !document.getElementById("snap-checks").hidden);
 
   // Scenario 15v — the verification page rework (#1417/#1418/#1419/#1420),
   // driven END TO END against the real daemon: a real recover-inputs run over
@@ -5009,6 +5013,10 @@ try {
   // (#1589), leaving the 30s default in force. Stated as 30s explicitly.
   await page.waitForFunction(() => location.pathname === "/snapshots"
     && document.querySelectorAll(".bks-erow").length >= 1, undefined, { timeout: 30000 });
+  // The settings are a tab since round 3: the words are measured as the
+  // reader sees them.
+  await page.evaluate(() => document.querySelector('.snap-tab[data-tab="settings"]').click());
+  await page.waitForFunction(() => !document.getElementById("snap-settings").hidden);
   const bksAPI = await page.evaluate(() => api("/api/backup-settings"));
   const bks = await page.evaluate(() => {
     const view = document.querySelector(".view");

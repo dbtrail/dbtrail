@@ -150,6 +150,9 @@ const ICONS = {
   // reader; the MySQL box shows the vendor's logo (assets/mysql-logo.png,
   // see VENDOR.md) and the DBTrail box the brand lockup in white.
   duck: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M14.2 3.2c2.3 0 4.1 1.8 4.1 4.1 0 .9-.3 1.7-.8 2.4l3.2-.4c.7-.1 1 .8.5 1.2l-2.1 1.5c.4.9.6 1.9.6 2.9 0 3.6-3.2 6.4-7.4 6.4H8.6C5.4 21.3 3 19 3 16.2c0-2.6 2.1-4.7 4.8-4.9h2.3V7.3c0-2.3 1.8-4.1 4.1-4.1zm.6 3.1c-.5 0-.9.4-.9.9s.4.9.9.9.9-.4.9-.9-.4-.9-.9-.9z"/></svg>`,
+  folder: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`,
+  check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.6 2.6L16.5 9"/></svg>`,
+  cross: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></svg>`,
   bucket: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="8.5" ry="2.8"/><path d="M3.5 5.5l2 13.2c.2 1.3 3.1 2.3 6.5 2.3s6.3-1 6.5-2.3l2-13.2"/></svg>`,
 };
 
@@ -5160,6 +5163,229 @@ function snapshotSection(title, id) {
   return el("h2", { class: "snap-sect", id: id, text: title });
 }
 
+// snapTab is the tab the reader last opened, kept across the page's own
+// repaints (a job that settles repaints the page); an arrival from another
+// page opens Versions. The address wins over both: /snapshots#checks and
+// /snapshots#setup, the two old pages' addresses, and #versions/#settings,
+// the tabs' own, open their tab.
+let snapTab = "versions";
+const SNAP_TAB_IDS = { versions: "versions", checks: "checks", setup: "settings", settings: "settings" };
+function snapTabFromHash() {
+  return SNAP_TAB_IDS[(location.hash || "").slice(1)] || "";
+}
+
+// snapshotTabs builds the bar and the panels (Versions, Checks, Settings).
+// A panel the caller does not have is not offered. select() shows one
+// panel, marks its tab and writes the address (a hash, which the router
+// keeps); with `quiet` it leaves the address alone.
+function snapshotTabs(has) {
+  const bar = el("div", { class: "snap-tabs", role: "tablist" });
+  const panels = {}, buttons = {};
+  const names = [["versions", "Versions"], ["checks", "Checks"], ["settings", "Settings"]];
+  for (const [id, label] of names) {
+    if (id !== "versions" && !has[id]) continue;
+    panels[id] = el("div", { class: "snap-panel", id: "snap-" + id, role: "tabpanel" });
+    panels[id].hidden = true;
+    const btn = el("button", { class: "snap-tab", type: "button", role: "tab", "aria-selected": "false", "data-tab": id, text: label });
+    btn.onclick = () => select(id);
+    buttons[id] = btn;
+    bar.append(btn);
+  }
+  const actions = el("div", { class: "snap-tab-actions" });
+  bar.append(actions);
+  function select(id, quiet) {
+    if (!panels[id]) id = "versions";
+    for (const k of Object.keys(panels)) {
+      panels[k].hidden = k !== id;
+      buttons[k].setAttribute("aria-selected", k === id ? "true" : "false");
+      buttons[k].classList.toggle("is-on", k === id);
+    }
+    snapTab = id;
+    if (!quiet && typeof history !== "undefined" && history.replaceState) {
+      history.replaceState(history.state, "", location.pathname + location.search + "#" + id);
+    }
+  }
+  return { bar: bar, panels: panels, actions: actions, select: select };
+}
+
+// snapshotHeroTone grades the newest copy's age against the schedule: mint
+// inside one and a half intervals, sun up to three, pink past that — and
+// pink whatever the age when the last run failed or the capture is stopped
+// (a copy that updates from a frozen index is young and stale at once).
+// No schedule: no colour, the sub-line says so.
+function snapshotHeroTone(b, cov) {
+  const snap = b && b.snapshots && b.snapshots[0];
+  if (!snap) return { tone: "none", why: "" };
+  const sch = b.schedule;
+  const lastRun = sch && sch.last_run;
+  if (cov && (cov.freshness === "stalled" || cov.continuity === "gap_lost")) {
+    return { tone: "bad", why: "Capture is stopped, so nothing new reaches the copy." };
+  }
+  if (lastRun && lastRun.ok === false) {
+    return { tone: "bad", why: "The last update failed" + (lastRun.error ? ": " + plainWords(lastRun.error) : ".") };
+  }
+  if (!sch && b.refresh && b.refresh.state === "failed") {
+    return { tone: "bad", why: "The last update failed" + (b.refresh.last_error ? ": " + plainWords(b.refresh.last_error) : ".") };
+  }
+  const every = sch && sch.runnable ? flowEveryMinutes(sch.every) : 0;
+  if (!every) return { tone: "none", why: "" };
+  const age = (snap.age_hours || 0) * 60;
+  if (age <= every * 1.5) return { tone: "ok", why: "" };
+  if (age <= every * 3) return { tone: "warn", why: "Later than its schedule." };
+  return { tone: "bad", why: "Much later than its schedule." };
+}
+
+// snapshotHero draws the copy: age, where it lives, seven days of rhythm,
+// the last check, and the two actions. Everything it shows comes from the
+// listing and the coverage read already on the page; the check verdict is
+// filled in by loadSnapshotVerdict once its own read answers.
+// acts.download / acts.settings: what the Download button and the
+// "Settings ›" links do (null = not offered). acts.mount: where the buttons
+// go (the tab bar's right end, so they stay one click away on every tab);
+// without it they sit in the hero. The reason a button is missing stays in
+// the hero either way.
+function snapshotHero(b, cov, cur, acts) {
+  const hero = el("section", { class: "snap-hero", "aria-label": "The copy" });
+  const settingsLink = () => acts && acts.settings
+    ? el("a", { href: "#settings", class: "hero-link", text: "Settings ›", onclick: (e) => { e.preventDefault(); acts.settings(); } })
+    : null;
+  if (!b || b.error) {
+    hero.append(el("div", { class: "hero-card hero-age bad" }, el("div", { class: "hero-k", text: "Snapshots" }),
+      el("div", { class: "hero-big", text: "could not load" }), el("div", { class: "hero-sub", text: (b && b.error) || "unavailable" })));
+    return hero;
+  }
+  if (!b.configured) {
+    const sub = el("div", { class: "hero-sub" }, "Set where the copy lives");
+    const link = settingsLink();
+    if (link) sub.append(" under ", link); else sub.append(".");
+    hero.append(el("div", { class: "hero-card hero-age none" }, el("div", { class: "hero-k", text: "Snapshots" }),
+      el("div", { class: "hero-big", text: "not set up" }), sub));
+    return hero;
+  }
+  const snaps = b.snapshots || [];
+  const snap = snaps[0] || null;
+  const grade = snapshotHeroTone(b, cov);
+  const sch = b.schedule;
+
+  // Updated: the age, big, with the dot; the sub-line says the rhythm, or
+  // what is wrong.
+  const age = el("div", { class: "hero-card hero-age " + grade.tone });
+  age.append(el("div", { class: "hero-k", text: "Updated" }));
+  age.append(el("div", { class: "hero-big-row" }, el("span", { class: "hero-dot " + grade.tone }),
+    el("span", { class: "hero-big", text: snap ? formatAge(snap.age_hours) + " ago" : "never", title: snap ? utcLocalTitle(snap.time) || null : null })));
+  const sub = el("div", { class: "hero-sub" });
+  const link = settingsLink();
+  if (grade.why) {
+    sub.append(grade.why + " ");
+    if (link) sub.append(link);
+  } else if (sch && sch.runnable && flowEveryLabel(sch.every)) {
+    sub.append(flowEveryLabel(sch.every) + (sch.next_run ? " · next " + flowHHMM(sch.next_run) + " UTC" : ""));
+  } else {
+    sub.append("Not on a schedule. ");
+    if (link) sub.append(link);
+  }
+  age.append(sub);
+  hero.append(age);
+
+  // Where it lives: a tile per place. Lit when the newest copy is there,
+  // dim when the place is set but the newest copy is not there yet, and
+  // "No S3" / "No local copy" when no such place is set.
+  const srcs = b.sources && b.sources.length ? b.sources : (b.kind ? [{ kind: b.kind, source: b.source }] : []);
+  const kinds = snap && snap.kinds ? snap.kinds : srcs.map((x) => x.kind);
+  const tile = (kind, label, off, ico) => {
+    const src = srcs.find((x) => x.kind === kind);
+    const state = !src ? "off" : kinds.includes(kind) ? "on" : "dim";
+    return el("div", { class: "hero-card hero-tile " + state, title: src ? src.source : null },
+      icon(ico, "hero-ico"), el("span", { class: "hero-tile-t", text: src ? label : off }));
+  };
+  hero.append(el("div", { class: "hero-where" },
+    tile("dir", "On disk", "No local copy", "folder"),
+    tile("s3", "In S3", "No S3", "bucket")));
+
+  // Seven days of rhythm: one tick per snapshot, the newest pink, a gap
+  // visible without reading. The listing is capped, so a long history says
+  // "50+" and the strip still ends today.
+  const days = el("div", { class: "hero-card hero-days" });
+  days.append(el("div", { class: "hero-k", text: "Last 7 days" }));
+  const strip = el("div", { class: "hero-strip" });
+  const now = Date.now(), span = 7 * 86400000;
+  let shown = 0;
+  snaps.forEach((sn, i) => {
+    const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/.exec(String(sn.time || ""));
+    const t = m ? Date.parse(m[1] + "T" + m[2] + "Z") : NaN;
+    if (isNaN(t) || now - t > span || t > now) return;
+    shown++;
+    const left = ((t - (now - span)) / span) * 100;
+    strip.append(el("span", { class: "hero-tick" + (i === 0 ? " newest" : ""), style: "left:" + left.toFixed(2) + "%", title: utcLocalTitle(sn.time) || null }));
+  });
+  days.append(strip);
+  const foot = el("div", { class: "hero-days-foot" });
+  foot.append(el("span", { text: shown ? shown + (b.truncated && shown === snaps.length ? "+" : "") + " this week" : "none this week" }));
+  foot.append(el("span", { text: snaps.length ? snaps.length + (b.truncated ? "+" : "") + " in all" : "" }));
+  days.append(foot);
+  hero.append(days);
+
+  // The last check: filled in when its read answers; absent where no daemon
+  // can run one.
+  if (capsCache.monitor && cur && cur.id) {
+    const check = el("div", { class: "hero-card hero-check none" }, icon("check", "hero-ico"), el("span", { class: "hero-tile-t", text: "Checking…" }));
+    hero.append(check);
+    loadSnapshotVerdict(cur.id, check);
+  }
+
+  // The actions: Download opens the take-away lane; Read database now keeps
+  // the gating the context strip had (#1677), and says why when it cannot
+  // run. Only for a session that may create one: the note names a
+  // configuration fix, and sending a reader who lacks the permission to fix
+  // a setting they cannot touch is worse than saying nothing.
+  const actions = (acts && acts.mount) || el("div", { class: "hero-actions" });
+  if (acts && acts.download) actions.append(el("button", { class: "btn btn-primary", type: "button", text: "Download", onclick: acts.download }));
+  if (cur && cur.id && cur.kind === "registry" && sessionMay(PERM_SNAPSHOT_CREATE)) {
+    // cur is the RAW registry entry, while b.configured also counts the
+    // daemon-wide default, which a backup refuses to write to. The precheck
+    // reads the raw fields (hasOwnBackupLocation), so this does too.
+    const ownLoc = !!(cur.baseline_dir || cur.baseline_s3);
+    const off = !capsCache.baseline_trigger;
+    if (!off && ownLoc) {
+      const btn = el("button", { class: "btn", type: "button", text: "Read database now" });
+      btn.onclick = () => createBaseline(cur.id, btn);
+      actions.append(btn);
+    } else if (cur.has_source) {
+      const why = [];
+      if (off) why.push("turned off at startup");
+      if (!ownLoc) why.push("needs this server's own snapshot location");
+      hero.append(el("div", { class: "hero-note", text: "Read database now: " + why.join(", and ") + (sessionMayConfigureServer() && acts && acts.settings ? " (under Settings)" : "") }));
+    }
+  }
+  if (actions.children.length && !(acts && acts.mount)) hero.append(actions);
+  return hero;
+}
+
+// loadSnapshotVerdict fills the hero's check tile from the verify history:
+// the newest finished run's verdict and age, "Never checked" before the
+// first, and that the history could not be read when it could not.
+async function loadSnapshotVerdict(id, tile) {
+  const say = (state, text, ico) => {
+    tile.className = "hero-card hero-check " + state;
+    clear(tile);
+    tile.append(icon(ico, "hero-ico"), el("span", { class: "hero-tile-t", text: text }));
+  };
+  let recs;
+  try {
+    recs = (await api("/api/servers/" + encodeURIComponent(id) + "/verify/history")).history || [];
+  } catch (err) {
+    say("none", "Checks could not be read", "cross");
+    return;
+  }
+  if (!tile.isConnected) return;
+  const latest = recs.find((r) => r.state === "succeeded" || r.state === "failed");
+  if (!latest || !latest.finished_at) { say("none", "Never checked", "check"); return; }
+  const sec = (Date.now() - Date.parse(latest.finished_at)) / 1000;
+  const sum = latest.summary || {};
+  const bad = latest.state === "failed" || (sum.mismatch || 0) > 0 || (sum.error || 0) > 0;
+  say(bad ? "bad" : "ok", (bad ? "Check failed " : "Verified ") + agoText(sec), bad ? "cross" : "check");
+}
+
 // scrollPending is set by renderRoute when the address it is about to paint
 // names a section, and cleared by the first paint that honors it. It is what
 // keeps the jump to a SINGLE arrival: this page repaints itself on its own —
@@ -5207,15 +5433,23 @@ async function renderSnapshots() {
   // a backup, a restore or a .sql build on the server the reader just left. Arriving from another page
   // blanks too: there the view is somebody else's.
   const paintFor = gen + ":" + (currentServer || defaultServerId || "");
-  if (!backupsOnScreen() || backupsPaintedFor !== paintFor) backupsHead = viewLoading();
+  // A repaint of the page already on screen (a job settled, a permission
+  // probe) keeps the tab the reader opened; an arrival opens Versions unless
+  // the address names a tab.
+  const keepTab = backupsOnScreen() && backupsPaintedFor === paintFor;
+  if (!keepTab) backupsHead = viewLoading();
   // Independent degradation, as on Storage: a panel renders its own failure
   // note rather than one error blanking the page. The same discipline covers
   // the DRAWING below, where `part` keeps one throwing section from taking
   // the other two with it.
   const asErr = (err) => ({ error: (err && err.message) || String(err) });
-  const [serversRes, baselines, settings] = await Promise.all([
+  const [serversRes, baselines, coverage, settings] = await Promise.all([
     api("/api/servers").catch(asErr),
     api("/api/baselines").catch(asErr),
+    // The hero colours the copy's age by the capture's state (a young copy
+    // of a stopped capture is pink, not mint); a failed read paints nothing
+    // about capture rather than a false green.
+    api("/api/coverage").catch(() => null),
     // The bottom half is fetched with the rest, not after the first paint:
     // a page that grows a section under a reader who is already reading it
     // moves what they were looking at.
@@ -5245,9 +5479,9 @@ async function renderSnapshots() {
     // button. buildStorage keeps serversErr for the same reason.
     const serversErr = serversRes && serversRes.error;
     const v = VIEW(); clear(v);
-    // No subtitle (#1573 redesign): "nothing is executed" is the header's
-    // read-only pill, and what a snapshot is, the listing below shows.
-    v.append(backupsHead = pageHead("Snapshots", null));
+    // One line under the title says what the page is about (round 3): the
+    // word is new to most readers, and the hero below SHOWS the rest.
+    v.append(backupsHead = pageHead("Snapshots", el("p", { class: "page-sub", text: "A snapshot is a copy of every table at one moment in time." })));
     backupsPaintedFor = paintFor;
     // Where this reader's old page went, read from the ALIAS TABLE rather
     // than a second list here, so the note and the address can never
@@ -5297,15 +5531,28 @@ async function renderSnapshots() {
         v.append(el("div", { class: "error-box", text: name + " could not be drawn: " + ((err && err.message) || String(err)) }));
       }
     };
-    part("The list of copies", () => {
-      // #1415: a context strip and a full-width list, not two half-width cards
-      // sharing only a left edge. The strip carries the facts that are ABOUT the
-      // collection (source, count, freshness, tables-per-snapshot when uniform)
-      // so the rows below can carry only what varies between snapshots.
-      v.append(baselineContextStrip(baselines, cur));
+    // The hero (round 3): where the copy lives, how fresh it is, its rhythm
+    // over seven days and the last check, drawn, with the two actions.
+    // Below it the three tabs (Versions, Checks, Settings); a tab this
+    // daemon or session cannot serve is not offered.
+    const takeAway = backupTakeAway(cur, baselines, sqlSt);
+    const tabs = snapshotTabs({ checks: drawChecks, settings: drawSetup });
+    part("The copy", () => {
+      v.append(snapshotHero(baselines, coverage, cur, {
+        // Download: one button for the newest copy (D1). It opens the
+        // take-away lane on Versions, where the two downloads live.
+        download: takeAway ? () => {
+          tabs.select("versions");
+          takeAway.open = true; takeAwayOpen = true;
+          if (takeAway.scrollIntoView) takeAway.scrollIntoView({ block: "start" });
+        } : null,
+        settings: drawSetup ? () => tabs.select("settings") : null,
+        mount: tabs.actions,
+      }));
       // A visible in-progress region (mirrors the verification page): while a
       // backup is being created or restored, the page must look like a page
-      // doing work, not a stale list.
+      // doing work, not a stale list. Above the tabs: a run shows whichever
+      // tab is open.
       const running = backupRunsInFlight(dumpSt, restoreSt, baselines, sqlSt);
       if (running.length) {
         v.append(backupRunRegion(running));
@@ -5316,67 +5563,63 @@ async function renderSnapshots() {
         // live watcher.
         watchBackupRuns(cur && cur.id, vgen, running.map((r) => r.kind));
       }
-      // What you can do with a copy, above the list of copies: a reader who
-      // came to put a table back should not scroll past the inventory to find
-      // the control. Below the run region on purpose — a restore already
-      // running reports its progress up there.
-      // Still above the list, as on the page this replaces: the two lanes are
-      // the answer to why a reader opened it — what do I download to open
-      // this in DuckDB, what do I download to load it into MySQL — and the
-      // list is how you pick a different copy. The DuckDB schema card and the
-      // Iceberg export panel moved to Connect AI (#1573), where "take this
-      // data somewhere else" lives; this lane downloads views.sql itself.
-      const takeAway = backupTakeAway(cur, baselines, sqlSt);
-      if (takeAway) v.append(takeAway);
-      v.append(baselinesPanel(baselines, servers, { serversErr: serversErr }));
     });
+    v.append(tabs.bar);
+    // Versions: what you can do with a copy, above the list of copies — the
+    // two lanes are the answer to why a reader opened it (what do I download
+    // to open this in DuckDB, what do I download to load it into MySQL), and
+    // the list is how you pick a different copy.
+    part("The list of copies", () => {
+      if (takeAway) tabs.panels.versions.append(takeAway);
+      tabs.panels.versions.append(baselinesPanel(baselines, servers, { serversErr: serversErr }));
+    });
+    v.append(tabs.panels.versions);
     // Checks — the verification page, whole. Its runner is daemon-side, so
-    // on a standalone serve the section is absent rather than present and
-    // unable to answer.
+    // on a standalone serve the tab is absent rather than present and
+    // unable to answer. The section heading keeps its id: /snapshots#checks
+    // is the old page's address, and the moved note lands beside it.
     if (drawChecks) {
-      if (moved && beside && movedTo === "checks") v.append(moved);
-      v.append(snapshotSection("Checks", "checks"));
+      const panel = tabs.panels.checks;
+      if (moved && beside && movedTo === "checks") panel.append(moved);
+      panel.append(snapshotSection("Checks", "checks"));
       // Three regions with visible separation (#1419): what you can run,
       // what is running or just ran, what ran before.
       part("Checks", () => {
-        // Folded (D9): the fold line carries the last check's date and
-        // verdict, so a reader sees the state without opening it. Open while
-        // a run is live on this server, or once the reader opened it.
-        const live = cur && cur.id ? vfyLive.get(cur.id) : null;
-        const fold = el("details", { class: "snap-fold", open: checksOpen || (live && live.state === "running") || null });
-        const last = el("span", { class: "snap-fold-last", text: "" });
-        fold.append(el("summary", { class: "snap-fold-sum" },
-          el("span", { class: "snap-fold-title", text: "Run a check, the current run and past runs" }), last));
-        fold.addEventListener("toggle", () => { checksOpen = !!fold.open; });
-        verifyRegions(servers, { serversErr: serversErr, lastLine: last }).forEach((region) => fold.append(region));
+        verifyRegions(servers, { serversErr: serversErr }).forEach((region) => panel.append(region));
         // The verify guide, AFTER the section it describes: it lost its only
         // link when the three page headers became one (#1573) — the header
         // now opens the backup-strategy guide — and a page nothing links to
         // also stops being fetched by the daily link check, so the site
         // could move it and nobody would know.
-        fold.append(docsMore("guides/verify", "", "what each check proves"));
-        v.append(fold);
+        panel.append(docsMore("guides/verify", "", "what each check proves"));
       });
+      v.append(panel);
     }
-    // Where and how often — the schedule (#1442) first, because it is what
-    // makes the list above keep growing on its own and a failed scheduled
-    // run has to be visible without opening anything; then every setting
-    // that shapes a backup, beside where its value lives.
+    // Settings — the schedule (#1442) first, because it is what makes the
+    // list keep growing on its own and a failed scheduled run has to be
+    // visible without opening anything; then every setting that shapes a
+    // backup, beside where its value lives.
     if (drawSetup) {
-    if (moved && beside && movedTo === "setup") v.append(moved);
-    v.append(snapshotSection("Where and how often", "setup"));
-    part("Where and how often", () => {
-      if (scheduleErr) throw scheduleErr;
-      if (scheduleCard) v.append(scheduleCard);
-      // Whenever the session may read settings, this half always has
-      // something to say: at the very least where this server keeps its
-      // copies, or why that could not be read. The settings half needs
-      // settings:read. Without it nothing was fetched (see above) and
-      // nothing is drawn: hidden by permission says nothing, unlike a part
-      // missing for a reason the reader can fix.
-      if (settings) snapshotSetupSections(settings).forEach((n) => v.append(n));
-    });
+      const panel = tabs.panels.settings;
+      if (moved && beside && movedTo === "setup") panel.append(moved);
+      panel.append(snapshotSection("Where and how often", "setup"));
+      part("Where and how often", () => {
+        if (scheduleErr) throw scheduleErr;
+        if (scheduleCard) panel.append(scheduleCard);
+        // Whenever the session may read settings, this half always has
+        // something to say: at the very least where this server keeps its
+        // copies, or why that could not be read. The settings half needs
+        // settings:read. Without it nothing was fetched (see above) and
+        // nothing is drawn: hidden by permission says nothing, unlike a part
+        // missing for a reason the reader can fix.
+        if (settings) snapshotSetupSections(settings).forEach((n) => panel.append(n));
+      });
+      v.append(panel);
     }
+    // The tab the address names (the old pages' addresses, #checks and
+    // #setup, open theirs), else the one the reader last opened. Quiet: the
+    // address is the reader's, and a repaint must not rewrite it.
+    tabs.select(snapTabFromHash() || (keepTab ? snapTab : "versions"), true);
     viewEnter();
     // Last: the sections exist now, so an address that names one can be
     // honored. Before this, there is nothing to scroll to.
@@ -6678,80 +6921,6 @@ function snapshotTablesUniform(snaps, truncated) {
   return snaps.every((sn) => (sn.tables || []).length === n) ? n : null;
 }
 
-// baselineContextStrip (#1415): one horizontal band of facts about where the
-// snapshots come from and how fresh they are — a context strip, not a card —
-// plus the page's one primary action. Replaces the half-width summary card
-// whose eyebrow duplicated the H1 and whose 405px forced the source path to
-// wrap mid-word.
-function baselineContextStrip(b, cur) {
-  const strip = el("section", { class: "tcard ctx-strip" });
-  const item = (label, val, cls) => el("div", { class: "ctx-item" + (cls ? " " + cls : "") },
-    el("span", { class: "ctx-label", text: label }),
-    typeof val === "string" ? el("span", { class: "ctx-value", text: val }) : val);
-  if (!b || b.error) {
-    strip.append(item("SNAPSHOTS", "could not load: " + ((b && b.error) || "unavailable")));
-    return strip;
-  }
-  if (!b.configured) {
-    strip.append(item("SOURCE", "not configured"));
-    strip.append(item("TIME-TRAVEL", "off"));
-    return strip;
-  }
-  const snaps = b.snapshots || [];
-  // The source path is code, and it gets the width to render as one line —
-  // the dark code-ink treatment the recipe reserves for SQL/DSNs/paths.
-  // With two locations the strip names them BOTH. Printing only the primary
-  // is what made an S3-backed server look empty: the path on screen was the
-  // local directory, and the bucket holding the snapshots was never mentioned.
-  const srcs = b.sources || [];
-  if (srcs.length > 1) {
-    strip.append(item("SOURCES", el("div", { class: "ctx-srcs" },
-      ...srcs.map((s) => el("code", { class: "code-ink ctx-source", text: s.source }))), "ctx-grow"));
-  } else {
-    strip.append(item("SOURCE", el("code", { class: "code-ink ctx-source", text: b.source }), "ctx-grow"));
-  }
-  strip.append(item("SNAPSHOTS", String(snaps.length) + (b.truncated ? "+" : "")));
-  if (snaps.length) {
-    // One fact, one place: absolute and relative side by side, instead of the
-    // same freshness spelled two ways 300px apart.
-    strip.append(item("LATEST", snaps[0].time + " UTC · " + formatAge(snaps[0].age_hours) + " ago"));
-  }
-  const uniform = snapshotTablesUniform(snaps, b.truncated);
-  if (uniform !== null) strip.append(item("TABLES", uniform + " per snapshot"));
-  strip.append(item("TIME-TRAVEL", b.reconstruct ? "enabled" : "off (archives disabled)"));
-  // The page's primary action, at page level (not a list-header costume),
-  // or, where the action is unavailable, the reason.
-  // Only for a session that may create one: the note below names a
-  // configuration fix, and sending a reader who lacks the permission to fix
-  // a setting they cannot touch is worse than saying nothing.
-  if (cur && cur.id && cur.kind === "registry" && b.configured && sessionMay(PERM_SNAPSHOT_CREATE)) {
-    // cur is the RAW registry entry, while b.configured also counts the
-    // daemon-wide default, which a backup refuses to write to, as a restore
-    // does (the restore card is stricter: it needs a local Backup dir; the
-    // button takes either location). The precheck reads the raw fields
-    // (hasOwnBackupLocation), so this does too: a button on a server with no
-    // location of its own is refused on click.
-    const ownLoc = !!(cur.baseline_dir || cur.baseline_s3);
-    const off = !capsCache.baseline_trigger;
-    if (!off && ownLoc) {
-      const btn = el("button", { class: "btn ctx-action", type: "button", text: "Read database now" });
-      btn.onclick = () => createBaseline(cur.id, btn);
-      strip.append(btn);
-    } else if (cur.has_source) {
-      // Where the button would be, say why it is not (#1677), the same two
-      // reasons the Getting started list gives: a missing button reads as a
-      // page with no such action. Points at the setup half of this page, whose
-      // row carries the variable; this note names none. A server with no
-      // source is never backed up from the console, so it gets no note.
-      const why = [];
-      if (off) why.push("turned off at startup");
-      if (!ownLoc) why.push("needs this server's own snapshot location");
-      strip.append(item("READ DATABASE", why.join(", and ") + (sessionMayConfigureServer() ? " (under Where and how often)" : "")));
-    }
-  }
-  return strip;
-}
-
 // opts.serversErr: when /api/servers failed, `servers` is empty for the WRONG
 // reason. Without it this panel derives affirmative claims from a failure —
 // the empty state advises adding a server that exists, and the `owner`
@@ -7332,7 +7501,7 @@ async function createBaseline(id, btn) {
     toast("The snapshot is still running. Check back shortly.");
   }
   // Only the Snapshots page needs the refresh: the button lives in
-  // baselineContextStrip (#1415 moved it out of baselinesPanel), and both the
+  // the hero (#1415 moved it out of baselinesPanel; round 3 made it the hero), and both the
   // strip and the snapshot list render only on this page.
   if (backupsOnScreen()) renderSnapshots();
 }

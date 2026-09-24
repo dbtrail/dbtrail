@@ -52,9 +52,9 @@ func TestBackupsPanelRendersEveryLocation(t *testing.T) {
 			"only one of the places that came back empty")
 	}
 
-	strip := functionBody(t, js, "function baselineContextStrip(")
-	if !strings.Contains(strip, "b.sources") {
-		t.Error("the context strip prints only the primary source; on a server with a local " +
+	hero := functionBody(t, js, "function snapshotHero(")
+	if !strings.Contains(hero, "b.sources") {
+		t.Error("the hero reads only the primary source; on a server with a local " +
 			"directory and a bucket, the bucket holding the snapshots is never named")
 	}
 

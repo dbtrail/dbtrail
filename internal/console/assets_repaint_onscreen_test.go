@@ -107,7 +107,7 @@ const on = () => vm.runInContext("backupsOnScreen()", ctx);
   out.away = on();
   // A paint that fails shows its error in place of the page (renderError
   // clears the view, heading included): still the Backups page, on screen.
-  ctx.baselineContextStrip = () => { throw new Error("boom"); };
+  ctx.snapshotHero = () => { throw new Error("boom"); };
   await vm.runInContext("renderSnapshots()", ctx);
   out.failed = on() && screen.textContent.includes("boom");
   console.log(JSON.stringify(out));

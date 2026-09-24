@@ -275,9 +275,13 @@ const noteText = () => (walk(screen, (n) => hasClass(n, "snap-moved-text")).map(
 // Whether the arrival note sits immediately before the section the reader
 // asked for: scrolling that section to the top edge would otherwise leave
 // the note just above the viewport, unread.
+// The heading sits inside its tab's panel since round 3, so the check is
+// against its siblings there, not the page's top level.
 const noteBefore = (id) => {
-  const kids = screen.children;
-  const i = kids.findIndex((n) => n && n.attrs && n.attrs.id === id);
+  const h = walk(screen, (n) => n.attrs && n.attrs.id === id)[0];
+  if (!h || !h.__parent) return false;
+  const kids = h.__parent.children;
+  const i = kids.indexOf(h);
   return i > 0 && hasClass(kids[i - 1], "snap-moved");
 };
 // hash is what renderRoute leaves in the address before it dispatches: the
@@ -442,7 +446,7 @@ ctx.__api = async (p) => {
 };
 vm.runInContext("api = (p) => __api(p); capsCache = { monitor: true, verify_trigger: true }; capsKnown = true; currentServer = 'a'; defaultServerId = 'a';", ctx);
 const paint = async () => { await vm.runInContext("renderSnapshots()", ctx); return { titles: titles(), text: screen.textContent }; };
-const real = { verifyRegions: ctx.verifyRegions, setup: ctx.snapshotSetupSections, strip: ctx.baselineContextStrip };
+const real = { verifyRegions: ctx.verifyRegions, setup: ctx.snapshotSetupSections, hero: ctx.snapshotHero };
 (async () => {
   const out = {};
   out.whole = await paint();
@@ -452,9 +456,9 @@ const real = { verifyRegions: ctx.verifyRegions, setup: ctx.snapshotSetupSection
   ctx.snapshotSetupSections = () => { throw new Error("bad settings row"); };
   out.setupBroken = await paint();
   ctx.snapshotSetupSections = real.setup;
-  ctx.baselineContextStrip = () => { throw new Error("bad strip"); };
+  ctx.snapshotHero = () => { throw new Error("bad hero"); };
   out.listBroken = await paint();
-  ctx.baselineContextStrip = real.strip;
+  ctx.snapshotHero = real.hero;
   console.log(JSON.stringify(out));
 })().catch((e) => console.log(JSON.stringify({ err: String((e && e.stack) || e) })));
 `
@@ -493,7 +497,7 @@ const real = { verifyRegions: ctx.verifyRegions, setup: ctx.snapshotSetupSection
 		// failure that quietly swallowed a neighbour still rings.
 		{"a verify record it cannot read", got.ChecksBroken, "Checks could not be drawn", []string{"Take a copy with you", "Per server"}},
 		{"a settings row that throws", got.SetupBroken, "Where and how often could not be drawn", []string{"Take a copy with you", "Run a check"}},
-		{"the context strip throwing", got.ListBroken, "The list of copies could not be drawn", []string{"Run a check", "Per server"}},
+		{"the hero throwing", got.ListBroken, "The copy could not be drawn", []string{"Take a copy with you", "Run a check", "Per server"}},
 	} {
 		if !strings.Contains(c.got.Text, c.says) {
 			t.Errorf("with %s the page does not say which part broke (looking for %q): %q", c.name, c.says, c.got.Text)
