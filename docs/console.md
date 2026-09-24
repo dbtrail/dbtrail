@@ -562,9 +562,9 @@ saved, shown with the reason nothing here is running it.
   own backup location* when it has none, or both, followed by "(Backup
   settings page)". A server with no location at all shows the setup empty
   state instead.
-- **Scheduled backups** (#1442) — a per-server timetable, set from this page:
-  every N minutes, hours or days (at least 5m), lined up on a UTC time of
-  day. The operator picks WHEN; HOW each run is made is the daemon's decision
+- **Update the copy** (#1442) — a per-server timetable, set from this page:
+  one of six intervals, 5 minutes to 24 hours (the daily one lined up on a
+  UTC hour). The operator picks WHEN; HOW each run is made is the daemon's decision
   per slot (`console.ChooseBackupMethod`), and the page says which one comes
   next and why: a server with no local backup directory gets a **full backup**
   (the Create backup job, reads the source, needs
@@ -716,15 +716,20 @@ because no two of them were configured the same way: some are daemon flags,
 some are environment variables, some live per server in the registry, and the
 precedence between them — per server, then daemon flag, then nothing — was
 real and invisible. A server backed by the daemon's `--baseline-dir` showed
-an empty Backup dir field, indistinguishable from a server with no backup
+an empty Local folder field, indistinguishable from a server with no backup
 location at all.
 
-The page shows the three kinds of setting instead of describing them (#1603).
-Two section labels split it: **Change here** and **Set when DBTrail starts**.
+The page offers three settings and nothing else: how often the copy is
+updated, a manual read of the database (Create backup) and retention, under
+one label, **Change here**: the daemon's retention row and the per-server
+rows. What is set in the launch command (the lock mode, the `.sql` build
+folder, the verify table filter, the default locations) is documented under
+[settings that need a restart](https://www.dbtrail.com/docs/settings/backups#set-at-startup) and no
+longer drawn on the page.
 
-- **Keep a copy of this server's snapshots on this machine?** (#1681) — the
-  one per-server question. **Yes** keeps them in a folder on the machine
-  DBTrail runs on. A server added from the console gets one of its own,
+- **Local folder** (#1681) — every server keeps a copy of its snapshots in a
+  folder on the machine DBTrail runs on; the yes/no question left the page
+  and the answer is yes. A server added from the console gets one of its own,
   `<state dir>/snapshots/<server id>` (the state directory is the one holding
   the server list, `/var/lib/bintrail` in the compose stack), created `0700`
   and named by the server's id, so renaming the server moves nothing. With no
@@ -760,10 +765,9 @@ Two section labels split it: **Change here** and **Set when DBTrail starts**.
   yes on it again, until its server moves to a new empty folder. A server
   whose creation failed half way leaves no such mark. A table
   that did not change keeps its last file (a hard link where the filesystem
-  allows it), so a new snapshot only costs the tables that changed. **No, only
-  in S3** means the snapshots live only in the S3 destination, and every run
-  writes every table; it is refused while no S3 destination is set, and the
-  snapshots already in the folder stay there, no longer listed or removed.
+  allows it), so a new snapshot only costs the tables that changed. A server
+  saved as S3-only before the page stopped asking keeps working that way
+  until its next save from this page, which turns the local copy on.
   A folder is checked when it is saved: it must be a full path, a missing one
   is created, and DBTrail must be able to write into it. That is on the
   `watch` daemon, which takes the snapshots; the read-only `serve` creates
@@ -774,7 +778,7 @@ Two section labels split it: **Change here** and **Set when DBTrail starts**.
   fields, and an edit that leaves them out keeps what is stored. Servers that existed
   before #1681 are unchanged: none gets a folder or a count it did not have.
 - **Per server** (change here) — each registry server's local-copy answer,
-  Backup dir, Backup S3, keep count and archive toggle, editable in place, with which location is in force
+  Local folder, S3 location and keep count, editable in place, with which location is in force
   drawn rather than said: the server's own case (own location, daemon
   default, or no location) under its fields, with a tick or a cross per lane.
   The daemon default backs time-travel, verification and `.sql` exports but
@@ -1056,8 +1060,9 @@ longer does anything. Remove it.
   fail on first use, and a full backup reads every table in scope on the
   source, which is load an operator should choose. Turning it on also lets the
   backup schedule take a full backup on its own when an update cannot serve
-  the server (no previous backup, no local Backup dir) or fails (a capture
-  gap, a schema change), and it is what the schedule's **full backup every**
+  the server (no previous backup, no Local folder) or fails (a capture
+  gap, a schema change), and it is what a schedule's full-backup timetable
+  (`full_every`, set through the schedule API; the page no longer edits it)
   needs: without it, saving one is refused with the reason, and one saved
   before the opt-in was turned off is shown in red and skipped at its slots
   while the updates keep running

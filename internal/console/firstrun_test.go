@@ -351,7 +351,7 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 			// One page now (#1573), so the fix names it once and then says
 			// where on it — naming a second page would send the reader
 			// looking for one that does not exist.
-			[]string{"Backup dir or Backup S3", PageSnapshots + " page", "Where and how often"},
+			[]string{"Local folder or S3 location", PageSnapshots + " page", "Where and how often"},
 			[]string{"Create-backup button", "mydumper", "Restart"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

@@ -217,26 +217,9 @@ func docsNoWrap(t *testing.T) string {
 // asserted: the reuse cut is pinned on the docs side too, and an unpinned half
 // is what lets a later edit delete the explanation from both places.
 func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
-	body := jsFunctionBody(t, readAsset(t, "app.js"), "backupScheduleCard")
-
-	const clause = "A run updates from the recorded changes, without reading your database, only when the server has an index connection, a Backup dir and a previous backup."
-	i := strings.Index(body, clause)
-	if i < 0 {
-		t.Fatalf("the intro does not say a run is usually built from the recorded changes, so an empty "+
-			"form describes every run as a full copy read from the database:\n%s", body)
-	}
-	// Unconditional: above the canEdit branch, and therefore above every
-	// `if (sch)` line, so it renders on a page with no schedule saved.
-	gate := strings.Index(body, "if (!canEdit)")
-	if gate < 0 {
-		t.Fatal("the canEdit branch is gone; this guard can no longer tell an unconditional line from a gated one")
-	}
-	if i > gate {
-		t.Error("the clause is below the canEdit branch, so the state it exists for (no schedule yet) does not show it")
-	}
-	if !strings.Contains(body[i:min(len(body), i+220)], "your database") {
-		t.Error("the clause does not say what is spared, which is the whole point of stating it")
-	}
+	// The card no longer describes a run at all (the interval list is the
+	// whole form since the Snapshots cut), so the producer rule lives in the
+	// docs alone, and that half is what this test still pins.
 	// The full rule (which producer runs when, and why) is docs work, and it
 	// has to actually be there.
 	docs := docsNoWrap(t)

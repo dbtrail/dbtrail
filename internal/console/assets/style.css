@@ -3188,7 +3188,6 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
   font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 6px;
 }
 .snap-moved-x:hover { color: var(--ink); background: var(--surface-3); }
-.bks-boot { margin-bottom: 18px; }
 .bks-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 /* An empty value renders as the word for what applies, in the muted style: a
    value, not a gap. A refused value shows the fallback the daemon fell to,

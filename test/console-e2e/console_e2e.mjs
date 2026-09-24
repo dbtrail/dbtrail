@@ -2349,14 +2349,15 @@ try {
   // render enabled, and the fixture snapshot (1 table, anchored at
   // binlog.000001:50) must be listed.
   await page.evaluate(() => navigate("snapshots"));
-  await page.waitForFunction(() => Array.from(document.querySelectorAll(".stg-row")).some((r) => r.textContent.includes("binlog.000001:50")));
+  // The coordinates ride as the tooltip of the row's time since the Snapshots cut.
+  await page.waitForFunction(() => Array.from(document.querySelectorAll(".stg-row")).some((r) => ((r.querySelector(".stg-name") || {}).title || "").includes("binlog.000001:50")));
   const stg = await page.evaluate(() => {
     // #1415: the Create action moved to the context strip (page level); the
     // uniform table count moved there too, so the row carries only what
     // varies (the binlog anchor) plus the newest treatment.
     const strip = document.querySelector(".ctx-strip");
     const btn = strip ? Array.from(strip.querySelectorAll("button")).find((b) => b.textContent === "Create backup") : null;
-    const row = Array.from(document.querySelectorAll(".stg-row")).find((r) => r.textContent.includes("binlog.000001:50"));
+    const row = Array.from(document.querySelectorAll(".stg-row")).find((r) => ((r.querySelector(".stg-name") || {}).title || "").includes("binlog.000001:50"));
     return { capOn: !!capsCache.baseline_trigger, stripPresent: !!strip,
       stripText: strip ? strip.textContent : "",
       btnPresent: !!btn, btnEnabled: btn ? !btn.disabled : false,
@@ -2538,7 +2539,7 @@ try {
         startsLabel: /Set when DBTrail starts/.test(v.textContent),
         currentSettings: /Current settings/.test(v.textContent),
         schedCard: !!sched,
-        schedSave: !!sched && (btn("Save schedule") || btn("Add schedule")),
+        schedSave: !!sched && Array.from(sched.querySelectorAll("button")).some((b) => (b.textContent === "Save" || b.textContent === "Turn on") && !b.hidden),
         schedWatchHint: !!sched && /watch daemon's web interface/.test(sched.textContent),
       };
     };
@@ -2569,7 +2570,7 @@ try {
   const pc = permCases;
   // The control: with every permission the probe finds every control.
   (pc.full.rows > 0 && pc.full.create && pc.full.restore && pc.full.takeAway && pc.full.duckData && pc.full.build
-    && pc.full.runCheck && pc.full.serverSave && pc.full.schedSave && pc.full.startsLabel && !pc.full.currentSettings
+    && pc.full.runCheck && pc.full.serverSave && pc.full.schedSave && !pc.full.startsLabel && !pc.full.currentSettings
     && pc.full.errorBoxes === 0 && pc.permKeys.includes("servers:read"))
     ? ok("permissions: with full access every control is drawn (the probe's control case)")
     : bad("permissions: with full access every control is drawn (the probe's control case)", JSON.stringify(pc.full));
@@ -2591,7 +2592,7 @@ try {
     // Saved values keep their own card, retitled and locked; startup-only
     // rows stay under their true heading (the locked card is pinned by the
     // daemon-rows scene below).
-    "settings:write": !pc.noSettingsWrite.changeHere && pc.noSettingsWrite.currentSettings && pc.noSettingsWrite.startsLabel && pc.noSettingsWrite.serverSave
+    "settings:write": !pc.noSettingsWrite.changeHere && pc.noSettingsWrite.currentSettings && !pc.noSettingsWrite.startsLabel && pc.noSettingsWrite.serverSave
       && pc.noSettingsWrite.create,
   };
   (Object.values(each).every(Boolean))
@@ -2642,7 +2643,7 @@ try {
         restoreHead: heading(restoreFailed),
         schedFailed: /Last scheduled backup failed/.test(txt(sched)),
         schedRed: !!sched && !!sched.querySelector(".bk-card-state.alarm"),
-        schedForm: hasBtn(sched, "Save schedule") || hasBtn(sched, "Add schedule"),
+        schedForm: hasBtn(sched, "Save") || hasBtn(sched, "Turn on"),
         sqlFailed: /Last build failed/.test(txt(sqlFailed)),
         sqlBuild: hasBtn(sqlFailed, "Build"),
         sqlReadyText: txt(sqlReady),
@@ -2691,7 +2692,7 @@ try {
     const b = { configured: true, source: "/tmp/baselines", kind: "dir", snapshots: [{ time: "2026-06-10 12:00:00", location: "dir" }] };
     const srv = { id: "srv-fix", name: "fixture", source: "server", baseline_dir: "/tmp/b" };
     // S3 only, with no scheduling loop: the row states the problem, and
-    // "Add a Backup dir." is the remedy only a writer gets.
+    // "Add a Local folder." is the remedy only a writer gets.
     const s3only = { id: "srv-s3", name: "s3fix", source: "server", baseline_s3: "s3://b/p" };
     // No location of its own, reading the daemon default: "save a location
     // above" is the remedy.
@@ -2728,8 +2729,8 @@ try {
     && /Select this server at the top/.test(H.full.row) && !/Select this server at the top/.test(H.reader.row) && /No schedule/.test(H.reader.row)
     && (H.views ? !/set not to read archived data/.test(H.full.duck) : true)
     && /set not to read archived data/.test(H.operator.duckNoViews)
-    && /With S3 only/.test(H.full.s3) && /Add a Backup dir/.test(H.full.s3)
-    && /With S3 only/.test(H.reader.s3) && !/Add a Backup dir/.test(H.reader.s3)
+    && /With S3 only/.test(H.full.s3) && /Add a Local folder/.test(H.full.s3)
+    && /With S3 only/.test(H.reader.s3) && !/Add a Local folder/.test(H.reader.s3)
     && /save a location above/.test(H.full.inh) && /Time-travel reads/.test(H.reader.inh) && !/save a location above/.test(H.reader.inh))
     ? ok("permissions: a hint that names a fix is shown only to a session that can make it, and keeps its reason")
     : bad("permissions: a hint that names a fix is shown only to a session that can make it, and keeps its reason", JSON.stringify(H));
@@ -3449,7 +3450,7 @@ try {
     && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Snapshots/.test(h.textContent))
     && Array.from(document.querySelectorAll(".ov-panel-title")).some((h) => /Backups/.test(h.textContent))
     && document.querySelectorAll(".vfy-region").length >= 3
-    && !!document.querySelector(".bks-row"));
+    && !!document.querySelector(".bks-erow"));
   const snapSections = await page.evaluate(() => Array.from(document.querySelectorAll(".snap-sect")).map((h) => [h.id, h.textContent]));
   (snapSections.length === 2 && snapSections[0][0] === "checks" && snapSections[1][0] === "setup")
     ? ok("snapshots: one page with the checks and setup sections, in that order")
@@ -4999,7 +5000,7 @@ try {
   // the arg slot is serialized to the predicate and silently discarded
   // (#1589), leaving the 30s default in force. Stated as 30s explicitly.
   await page.waitForFunction(() => location.pathname === "/snapshots"
-    && document.querySelectorAll(".bks-row").length >= 5, undefined, { timeout: 30000 });
+    && document.querySelectorAll(".bks-erow").length >= 1, undefined, { timeout: 30000 });
   const bksAPI = await page.evaluate(() => api("/api/backup-settings"));
   const bks = await page.evaluate(() => {
     const view = document.querySelector(".view");
@@ -5078,31 +5079,29 @@ try {
     ? ok("snapshots: named Snapshots in the nav and the head, with a Docs link, and the setup section is there")
     : bad("snapshots: named Snapshots in the nav and the head, with a Docs link, and the setup section is there",
         JSON.stringify({ head: bks.head, nav: bks.nav, docsLink: bks.docsLink, setupFound: bks.setupFound }));
-  // Five startup rows since #1682 moved the four savable ones into their own
-  // card: the two backup locations (#1684 deletes that fallback, so they are
-  // deliberately not editable here) plus the three that start or stop a loop
-  // at boot.
-  (bks.rows === 5 && bks.allNamed && bks.configuredValued && !bks.notSet)
-    ? ok("backup-settings: five startup rows, each named, the configured one valued, none reading not set")
-    : bad("backup-settings: five startup rows, each named, the configured one valued, none reading not set", JSON.stringify(bks));
+  // The startup rows left the page with the Snapshots cut (D13): what is set
+  // in the launch command is documented, not drawn here.
+  (bks.rows === 0 && !bks.notSet)
+    ? ok("backup-settings: no startup rows on the page, nothing reading not set")
+    : bad("backup-settings: no startup rows on the page, nothing reading not set", JSON.stringify({ rows: bks.rows, notSet: bks.notSet }));
   // The half the page gained: four rows an operator can change without
   // stopping capture, each with the sentence naming where its value comes
   // from. A row with an input and no provenance is the failure this catches —
   // an editor that does not say what it is overriding.
-  (bks.editRows.length === 4 && bks.editRows.every((r) => r.input && r.save && r.why.length > 0))
-    ? ok("backup-settings: four savable daemon rows, each with an input, a Save and its provenance")
-    : bad("backup-settings: four savable daemon rows, each with an input, a Save and its provenance", JSON.stringify(bks.editRows));
-  (bks.cardChips === 1 && bks.rowChips === 0 && !bks.bootInGrid && bks.sections.length === 2)
-    ? ok("backup-settings: the three kinds are drawn apart: two sections, one card-level restart chip, the daemon card outside the tinted grid")
-    : bad("backup-settings: the three kinds are drawn apart: two sections, one card-level restart chip, the daemon card outside the tinted grid",
+  (bks.editRows.length === 1 && bks.editRows.every((r) => r.input && r.save && r.why.length > 0))
+    ? ok("backup-settings: one savable daemon row (retention), with an input, a Save and its provenance")
+    : bad("backup-settings: one savable daemon row (retention), with an input, a Save and its provenance", JSON.stringify(bks.editRows));
+  (bks.cardChips === -1 && bks.rowChips === 0 && !bks.bootInGrid && bks.sections.length === 1)
+    ? ok("backup-settings: one section, no startup card and no restart chip on the page")
+    : bad("backup-settings: one section, no startup card and no restart chip on the page",
         JSON.stringify({ cardChips: bks.cardChips, rowChips: bks.rowChips, bootInGrid: bks.bootInGrid, sections: bks.sections }));
   (bks.visibleChars > 0 && bks.visibleChars < 1300 && bks.perServerFound && bks.fine >= 2 && bks.fineOpen === 0 && !bks.emDash)
     ? ok("snapshots: the setup section's visible text stays under budget with the fine print compact")
     : bad("snapshots: the setup section's visible text stays under budget with the fine print compact",
         JSON.stringify({ chars: bks.visibleChars, fine: bks.fine, open: bks.fineOpen, emDash: bks.emDash }));
   (!bks.refreshCardHere && bks.questions.length > 0 && bks.questions.every((n) => n === 2))
-    ? ok("snapshots: the disk-space card is gone and every server asks whether to keep a copy on this machine")
-    : bad("snapshots: the disk-space card is gone and every server asks whether to keep a copy on this machine", JSON.stringify({ card: bks.refreshCardHere, questions: bks.questions }));
+    ? ok("snapshots: the disk-space card is gone and every server keeps its local-copy answer (hidden: always yes since the cut)")
+    : bad("snapshots: the disk-space card is gone and every server keeps its local-copy answer (hidden: always yes since the cut)", JSON.stringify({ card: bks.refreshCardHere, questions: bks.questions }));
   // The drawing cannot lie: one case row per server and no more (#1573 took
   // the three-row legend away, and counting every .bl-case on the page is
   // what makes its return fail here), and each server's case is the source
@@ -5136,8 +5135,6 @@ try {
   // block, value marked), and the serve-mode page (no sections, no daemon
   // card, no sub line since #1573). Detached so nothing on the live page changes.
   const bksStates = await page.evaluate(() => {
-    const refused = backupDaemonCard([{ key: "lock_mode", value: "ftwrl", err: "bad mode; MySQL dumps are refused until it is fixed", cli: "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE", needs_restart: true }]);
-    const loud = Array.from(refused.querySelectorAll("p.form-msg.err"));
     const keep = { monitor: capsCache.monitor };
     capsCache.monitor = false;
     let serve;
@@ -5151,14 +5148,8 @@ try {
       serve = { sections: holder.querySelectorAll(".bks-sect").length, boot: !!holder.querySelector(".bks-boot"),
         sub: (holder.querySelector(".page-sub") || {}).textContent || "", current: (holder.querySelector(".bl-case.is-current") || {}).dataset };
     } finally { capsCache.monitor = keep.monitor; }
-    return {
-      refused: { marked: !!refused.querySelector(".bks-value.bks-refused"), loud: loud.length === 1 && loud[0].textContent.includes("bad mode"),
-        outside: loud.length === 1 && !loud[0].closest("details") },
-      serve };
+    return { serve };
   });
-  (bksStates.refused.marked && bksStates.refused.loud && bksStates.refused.outside)
-    ? ok("backup-settings: a refused daemon value is marked and its reason stays in plain view")
-    : bad("backup-settings: a refused daemon value is marked and its reason stays in plain view", JSON.stringify(bksStates.refused));
   (bksStates.serve.sections === 0 && !bksStates.serve.boot && bksStates.serve.sub === "" && bksStates.serve.current && bksStates.serve.current.source === "none")
     ? ok("snapshots: on serve the setup half is the per-server panel alone, with no section labels")
     : bad("snapshots: on serve the setup half is the per-server panel alone, with no section labels", JSON.stringify(bksStates.serve));

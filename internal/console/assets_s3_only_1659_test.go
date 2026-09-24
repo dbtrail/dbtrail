@@ -127,7 +127,7 @@ console.log(JSON.stringify(out));
 	for i, w := range got.Warn {
 		t.Logf("warning %d: %q", i, w)
 	}
-	const fullRead = "With S3 only, every scheduled backup reads your whole database. Add a Backup dir so runs update from the recorded changes."
+	const fullRead = "With S3 only, every scheduled backup reads your whole database. Add a Local folder so runs update from the recorded changes."
 	if got.Warn[0] != fullRead {
 		t.Errorf("S3 without a folder is not warned with the agreed sentence: %q", got.Warn[0])
 	}
@@ -138,7 +138,7 @@ console.log(JSON.stringify(out));
 	}
 	// Where no full backup is possible either, nothing runs: saying every run
 	// reads the database would be false.
-	if w := got.Warn[4]; w != "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Backup dir. Add one." {
+	if w := got.Warn[4]; w != "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Local folder. Add one." {
 		t.Errorf("S3 without a folder on a daemon that cannot take a full backup: %q", w)
 	}
 	wantAlarm := []bool{true, false, false, true, false, false}
@@ -162,7 +162,7 @@ console.log(JSON.stringify(out));
 			t.Errorf("em dash in %q", w)
 		}
 	}
-	if got.Lines[0].Class != "form-msg err" || !strings.Contains(got.Lines[0].Text, "Set a Backup dir for this server") {
+	if got.Lines[0].Class != "form-msg err" || !strings.Contains(got.Lines[0].Text, "Set a Local folder for this server") {
 		t.Errorf("no Backup dir: not a red line naming the setting: %+v", got.Lines[0])
 	}
 	if got.Lines[1].Class != "form-hint" || got.Lines[2].Class != "form-hint" || got.Lines[4].Class != "form-hint" || got.Lines[5].Class != "form-hint" {
@@ -172,7 +172,7 @@ console.log(JSON.stringify(out));
 		t.Errorf("no index connection: not a red line naming the setting: %+v", got.Lines[3])
 	}
 	// Where this process runs no scheduled backups, only the setting is known.
-	if got.Warn[6] != "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Backup dir." {
+	if got.Warn[6] != "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Local folder." {
 		t.Errorf("no schedule loop: %q", got.Warn[6])
 	}
 	// The last run's full-backup reason: skipped when the next-run warning
@@ -181,7 +181,7 @@ console.log(JSON.stringify(out));
 	if len(got.LastRun) != 3 || len(got.LastRun[0]) != 1 || len(got.LastRun[1]) != 2 || len(got.LastRun[2]) != 2 {
 		t.Fatalf("last-run lines = %q", got.LastRun)
 	}
-	if strings.Contains(got.LastRun[1][1], "Set a Backup dir") || !strings.Contains(got.LastRun[2][1], "Set a Backup dir") {
+	if strings.Contains(got.LastRun[1][1], "Set a Local folder") || !strings.Contains(got.LastRun[2][1], "Set a Local folder") {
 		t.Errorf("last-run reason tense: next-run warning elsewhere %q, no warning %q", got.LastRun[1][1], got.LastRun[2][1])
 	}
 }
@@ -319,7 +319,7 @@ console.log(JSON.stringify(out));
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
 	}
-	const fullRead = "With S3 only, every scheduled backup reads your whole database. Add a Backup dir so runs update from the recorded changes."
+	const fullRead = "With S3 only, every scheduled backup reads your whole database. Add a Local folder so runs update from the recorded changes."
 	has := func(lines []string, want string) bool {
 		for _, l := range lines {
 			if l == want {
@@ -334,7 +334,7 @@ console.log(JSON.stringify(out));
 	if has(got["refused"], fullRead) || len(got["refused"]) != 1 || !strings.Contains(got["refused"][0], "creating backups from the console is turned off") {
 		t.Errorf("a refused schedule shows the S3-only line next to its own reason: %q", got["refused"])
 	}
-	if !has(got["noLoop"], "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Backup dir.") {
+	if !has(got["noLoop"], "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Local folder.") {
 		t.Errorf("no schedule loop: %q", got["noLoop"])
 	}
 	if len(got["withDir"]) != 0 {
