@@ -1344,11 +1344,21 @@ var foldTables = reconstruct.ReconstructTablesDetailed
 // scheduler's next fold at once. Invalidated on failure too: a partial
 // upload left a directory with its _INCOMPLETE marker, and the listing
 // should see that as well.
+// Every upload the console makes goes through uploadSnapshot (the MySQL
+// dump, the PostgreSQL dump, the sweep of unuploaded snapshots and the
+// refresh loop), so this is the one place the invalidation lives.
 func uploadAndInvalidate(ctx context.Context, outputDir, s3URL, region string, retry bool) (int, error) {
-	n, err := baseline.Upload(ctx, outputDir, s3URL, region, retry)
-	reconstruct.InvalidateS3Inventory(s3URL)
+	n, err := baselineUpload(ctx, outputDir, s3URL, region, retry)
+	invalidateS3Inventory(s3URL)
 	return n, err
 }
+
+// baselineUpload and invalidateS3Inventory are the two halves of
+// uploadAndInvalidate, indirected so a test can drive it without a bucket.
+var (
+	baselineUpload        = baseline.Upload
+	invalidateS3Inventory = reconstruct.InvalidateS3Inventory
+)
 
 // newestSnapshotTables and uploadSnapshot are indirected for the same reason
 // foldTables is, and carry the same rule about when a test may restore them:

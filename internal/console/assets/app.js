@@ -1987,10 +1987,11 @@ function flowCard(card, ctx, close) {
 // after the coverage answer, the snapshot list started only when coverage
 // landed, and the head of the page took the two latencies in a row (#1847).
 // A coverageP that resolves null (the refresh loop's failed read) paints
-// nothing, the way that loop never called this on a failure.
+// nothing, the way that loop never called this on a failure, and it must
+// not cancel a paint in flight either: the sequence that drops a late
+// paint is taken once coverage has answered, not when the reads go out.
 function loadOvFlow(f, live, coverageP) {
   if (serversEmpty) { clear(f.flowSlot); return Promise.resolve(); }
-  const seq = ++ovFlowSeq;
   const id = currentServer || defaultServerId;
   const read = (path) => apiWithin(path, OV_REQUEST_MS);
   // A read that fails is said as a failure by the model, never as a fact
@@ -2002,6 +2003,7 @@ function loadOvFlow(f, live, coverageP) {
   const uncaptured = read("/api/uncaptured-tables").then((d) => d || {}, () => ({}));
   return Promise.all([coverageP, servers]).then(([coverage, { srv, unknown, err }]) => {
     if (coverage === null) return;
+    const seq = ++ovFlowSeq;
     if (unknown) console.error("flow: server list unavailable", err);
     const registry = !!(srv && srv.kind === "registry" && srv.has_source);
     const wantMonitor = registry && /^(failed|stalled|lost_position|stopped)$/.test(srv.monitor_state || "");

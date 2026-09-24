@@ -39,13 +39,21 @@ const settle = () => new Promise((r) => setImmediate(r));
   await loadOvFlow({ flowSlot: slot2 }, () => true, Promise.resolve(null));
   await settle();
   out.nullKept = slot2.children.length === 1 && slot2.children[0] === keep;
+  // 2b. A null call while another paint is in flight: that paint lands.
+  const slot4 = new FakeEl("div");
+  let answer; const pending = new Promise((r) => { answer = r; });
+  const inFlight = loadOvFlow({ flowSlot: slot4 }, () => true, pending);
+  await loadOvFlow({ flowSlot: new FakeEl("div") }, () => true, Promise.resolve(null));
+  answer({ freshness: "current", continuity: "ok", delta_to: "2026-09-23 14:58:52" });
+  await inFlight; await settle();
+  out.paintedDespiteNullSibling = slot4.children.length;
   // 3. Coverage answered: painted.
   const slot3 = new FakeEl("div");
   await loadOvFlow({ flowSlot: slot3 }, () => true, Promise.resolve({ freshness: "current", continuity: "ok", delta_to: "2026-09-23 14:58:52" }));
   await settle();
   out.paintedWhenAnswered = slot3.children.length;
   out.screen = slot3.textContent;
-  process.stdout.write(JSON.stringify(out));
+  process.stdout.write("\n@@RESULT@@" + JSON.stringify(out));
 })().catch((e) => { console.error(e); process.exit(1); });
 `
 
@@ -73,10 +81,15 @@ func TestOverviewFlowReadsBesideCoverage(t *testing.T) {
 		AskedWhilePending   []string `json:"askedWhilePending"`
 		PaintedWhilePending int      `json:"paintedWhilePending"`
 		NullKept            bool     `json:"nullKept"`
+		PaintedDespiteNull  int      `json:"paintedDespiteNullSibling"`
 		PaintedWhenAnswered int      `json:"paintedWhenAnswered"`
 		Screen              string   `json:"screen"`
 	}
-	if err := json.Unmarshal(raw[strings.LastIndex(string(raw), "{"):], &out); err != nil {
+	_, result, found := strings.Cut(string(raw), "@@RESULT@@")
+	if !found {
+		t.Fatalf("no result in node output:\n%s", raw)
+	}
+	if err := json.Unmarshal([]byte(result), &out); err != nil {
 		t.Fatalf("parse %q: %v", raw, err)
 	}
 	for _, want := range []string{"/api/servers", "/api/baselines", "/api/uncaptured-tables"} {
@@ -95,6 +108,9 @@ func TestOverviewFlowReadsBesideCoverage(t *testing.T) {
 	}
 	if !out.NullKept {
 		t.Error("a null coverage (the refresh loop's failed read) repainted the flow")
+	}
+	if out.PaintedDespiteNull == 0 {
+		t.Error("a null coverage cancelled the paint that was in flight beside it")
 	}
 	if out.PaintedWhenAnswered == 0 || !strings.Contains(out.Screen, "Your bucket") {
 		t.Errorf("an answered coverage did not paint the flow: nodes=%d screen=%q", out.PaintedWhenAnswered, out.Screen)

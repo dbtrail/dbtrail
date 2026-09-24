@@ -31,9 +31,11 @@ import (
 //   - the directory listing is refreshed at most every s3DirsTTL, and
 //     sooner when InvalidateS3Inventory says the tree changed (the daemon
 //     calls it after an upload);
-//   - the contents of a directory are read ONCE, one request per
-//     directory (its own prefix), concurrently for the directories not
-//     yet read, and kept for as long as the directory is listed. A
+//   - the contents of a directory are read ONCE, one listing of its own
+//     prefix (a request per 1,000 objects in it: with the incremental
+//     layout a directory carries its delta chunks and can pass that),
+//     concurrently for the directories not yet read, and kept for as long
+//     as the directory is listed. A
 //     directory is immutable once complete: baseline.Upload writes
 //     _INCOMPLETE first, the files, and _SUCCESS last, so a directory with
 //     _SUCCESS never changes, and one with NO marker predates the markers
@@ -43,10 +45,14 @@ import (
 //     time, and joins the cache when its _SUCCESS lands.
 //
 // A warm read is therefore the directory listing (or nothing, inside the
-// TTL) plus one request per directory that appeared since. A cold read is
-// one request per directory wanted, in parallel, never a walk over every
+// TTL) plus one listing per directory that appeared since. A cold read is
+// one listing per directory wanted, in parallel, never a walk over every
 // object of the prefix. A listing error still fails the call, never a
-// shorter answer, and nothing from a failed round is kept.
+// shorter answer; the complete directories a failed round did read are
+// kept, so a cold read cut by the caller's deadline has less to do next
+// time. No lock is held across a request to S3: a read that hangs holds
+// up its own caller, not the other readers of the source, and not the
+// other sources.
 
 // s3SnapshotLister is the two calls the listing makes; *storage.S3Backend
 // is one, a test's fake is the other.
@@ -89,6 +95,10 @@ type s3Inventory struct {
 	dirs     []s3SnapshotDir // newest first
 	dirsAt   time.Time       // zero: never listed, or invalidated
 	contents map[string]s3DirContents
+	// gen counts invalidations. A directory listing that started before
+	// one is stored (it is the freshest there is) but not dated: the tree
+	// changed under it, so the next read lists again.
+	gen uint64
 }
 
 // s3DirContents is what one complete directory holds: its table files, in
@@ -123,22 +133,45 @@ func s3InventoryFor(prefix string) *s3Inventory {
 // lists the directories again instead of waiting out s3DirsTTL: the
 // Snapshots page and the coverage card must show the snapshot just written
 // on their next read, and the scheduler's next fold must anchor on it. The
-// contents already read are kept; a snapshot directory does not change
-// once it is complete. A URL that is not s3:// has no inventory here and
-// is ignored, and one no inventory covers creates none.
+// contents already read are kept, except the directory the URL itself
+// names, which the caller just wrote into. A URL that is not s3:// has no
+// inventory here and is ignored, and one no inventory covers creates none.
 func InvalidateS3Inventory(s3URL string) {
 	if !strings.HasPrefix(s3URL, "s3://") {
 		return
 	}
 	target := strings.TrimSuffix(s3URL, "/")
+	// The matches are gathered under the map's lock and marked after it is
+	// released: the map's lock is on every open's path, for every source,
+	// and must never wait behind one inventory's lock.
+	type match struct {
+		inv *s3Inventory
+		dir string // the snapshot directory the URL names under the source, if any
+	}
+	var stale []match
 	s3InventoriesMu.Lock()
-	defer s3InventoriesMu.Unlock()
 	for prefix, inv := range s3Inventories {
-		if target == prefix || strings.HasPrefix(target, prefix+"/") {
-			inv.mu.Lock()
-			inv.dirsAt = time.Time{}
-			inv.mu.Unlock()
+		switch {
+		case target == prefix:
+			stale = append(stale, match{inv, ""})
+		case strings.HasPrefix(target, prefix+"/"):
+			dir, _, _ := strings.Cut(strings.TrimPrefix(target, prefix+"/"), "/")
+			stale = append(stale, match{inv, dir})
 		}
+	}
+	s3InventoriesMu.Unlock()
+	for _, m := range stale {
+		m.inv.mu.Lock()
+		m.inv.dirsAt = time.Time{}
+		m.inv.gen++
+		// The daemon wrote INTO that directory: the sweep of unuploaded
+		// snapshots completes a remote copy that lacks its _SUCCESS, which
+		// a pre-marker directory (cached as complete) may be. Its contents
+		// are read again; every other directory's are kept.
+		if m.dir != "" {
+			delete(m.inv.contents, m.dir)
+		}
+		m.inv.mu.Unlock()
 	}
 }
 
@@ -152,7 +185,7 @@ func resetS3Inventories() {
 
 // s3SnapshotIndex is one opened source with its snapshot directories read:
 // the directory listing is made once per call at most (and not at all
-// inside s3DirsTTL), and every window read off it costs one request per
+// inside s3DirsTTL), and every window read off it costs one listing per
 // directory not read before.
 type s3SnapshotIndex struct {
 	prefix string
@@ -191,12 +224,22 @@ func openS3SnapshotIndex(ctx context.Context, s3URL string) (*s3SnapshotIndex, e
 // invalidated. A fresh listing evicts the contents of directories that are
 // no longer there (pruned, or removed by a lifecycle rule), so the cache
 // never answers for a snapshot that is gone.
+//
+// The request goes out with the lock released (a hung request must hold
+// up its caller only); two callers that find the listing stale at once
+// both list, which costs one more listing and nothing else. An
+// invalidation that lands while the request is in flight wins: the
+// listing is stored, since it is the freshest there is, but left undated,
+// so the next read lists again.
 func (inv *s3Inventory) directories(ctx context.Context, lister s3SnapshotLister) ([]s3SnapshotDir, error) {
 	inv.mu.Lock()
-	defer inv.mu.Unlock()
 	if !inv.dirsAt.IsZero() && s3Clock().Sub(inv.dirsAt) < s3DirsTTL {
-		return inv.dirs, nil
+		dirs := inv.dirs
+		inv.mu.Unlock()
+		return dirs, nil
 	}
+	gen := inv.gen
+	inv.mu.Unlock()
 	names, err := lister.ListDirs(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("list S3 baseline snapshots: %w", err)
@@ -210,12 +253,17 @@ func (inv *s3Inventory) directories(ctx context.Context, lister s3SnapshotLister
 		}
 	}
 	slices.SortFunc(dirs, func(a, b s3SnapshotDir) int { return b.at.Compare(a.at) })
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
 	for name := range inv.contents {
 		if !listed[name] {
 			delete(inv.contents, name)
 		}
 	}
-	inv.dirs, inv.dirsAt = dirs, s3Clock()
+	inv.dirs, inv.dirsAt = dirs, time.Time{}
+	if inv.gen == gen {
+		inv.dirsAt = s3Clock()
+	}
 	return dirs, nil
 }
 
@@ -232,7 +280,7 @@ func (x *s3SnapshotIndex) files(ctx context.Context, newest int) (files []Baseli
 	if len(dirs) == 0 {
 		return nil, more, nil
 	}
-	// The directories not read before, read now, one request each, in
+	// The directories not read before, read now, one listing each, in
 	// parallel. Whatever a round reads of a COMPLETE directory is kept even
 	// when a sibling's read fails: the contents are immutable, so a retry
 	// only has less to do.
@@ -332,6 +380,14 @@ func (x *s3SnapshotIndex) readDir(ctx context.Context, d s3SnapshotDir) (c s3Dir
 		}
 	}
 	if incomplete && !success {
+		return s3DirContents{}, false, nil
+	}
+	// The directory listing showed this directory holds objects (S3 emits a
+	// common prefix for real keys only), so a read that returns NONE is a
+	// contradiction: a transient empty answer from a proxy or a compatible
+	// store, or the directory deleted since. Not kept; before the cache
+	// every call re-read it, and the next read still must.
+	if len(infos) == 0 {
 		return s3DirContents{}, false, nil
 	}
 	return c, true, nil

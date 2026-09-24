@@ -758,7 +758,7 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (baseline.St
 
 	var uploaded int
 	if req.S3 != "" {
-		uploaded, err = baseline.Upload(s.ctx, outputDir, req.S3, "", false)
+		uploaded, err = uploadSnapshot(s.ctx, outputDir, req.S3, "", false)
 		if err != nil {
 			return baseline.Stats{}, 0, fmt.Errorf("upload: %w", err)
 		}
