@@ -137,7 +137,7 @@ func TestSnapshotsPageStillMountsTheScheduleCard(t *testing.T) {
 	// card is built before the heading, because whether that section exists
 	// at all depends on it, and is placed inside the section's part.
 	setup := strings.Index(body, `snapshotSection("Where and how often"`)
-	card := strings.Index(body, "v.append(scheduleCard)")
+	card := strings.Index(body, "row.append(scheduleCard)")
 	if setup < 0 || card < setup {
 		t.Error("the schedule card is mounted above the \"Where and how often\" heading; the timetable is " +
 			"what that half of the page is named after")

@@ -2387,14 +2387,6 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .vfy-histrow.open .ev-caret { transform: rotate(90deg); }
 .vfy-histdetail { padding: 4px 10px 10px 30px; border-top: 1px dashed var(--line-soft); }
 
-/* baselines context strip (#1415) */
-.ctx-strip { display: flex; align-items: center; gap: 26px; flex-wrap: wrap; margin-top: 4px; margin-bottom: 18px; padding: 20px 24px; }
-.ctx-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.ctx-grow { flex: 1 1 320px; }
-.ctx-label { font-family: var(--f-ui); font-size: 12px; font-weight: 500; color: var(--ink-3); }
-.ctx-value { font-family: var(--f-display); font-size: 17px; font-weight: 700; letter-spacing: -0.01em; color: var(--ink); }
-.ctx-source { display: block; font-size: 12px; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ctx-action { align-self: center; margin-left: auto; }
 /* the newest snapshot is what a restore actually uses — it gets the
    treatment; relative age rides beside the absolute time */
 .stg-row-latest { background: var(--violet-tint); border-radius: var(--radius-sm); }
@@ -3099,11 +3091,11 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
    1024px window stack two lanes that 1fr 1fr kept side by side. 300 holds
    the pair down to about 970px, and the 860px rule below still covers the
    narrow band. */
-.bk-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; padding: 14px; }
+.bk-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; padding: 4px 14px 14px; }
 @media (max-width: 860px) { .bk-lanes { grid-template-columns: 1fr; } }
 .bk-lane {
-  background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--radius-sm); padding: 18px;
+  background: var(--surface-3); border: 0;
+  border-radius: 18px; padding: 20px;
   display: flex; flex-direction: column; gap: 10px;
 }
 .bk-lane-t {
@@ -3160,9 +3152,9 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .bks-value.muted { color: var(--ink-3); font-weight: 400; }
 .bks-restart { font-size: 10px; white-space: nowrap; }
 .bks-cli { grid-column: 1; font-size: 11px; color: var(--ink-3); font-family: var(--f-mono); }
-.bks-server { padding: 14px 0; border-bottom: 1px dotted var(--line); }
+.bks-server { padding: 18px 0; border-bottom: 1px dotted var(--line); }
 .bks-server:last-child { border-bottom: none; padding-bottom: 4px; }
-.bks-server-name { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+.bks-server-name { margin: 0 0 12px; font-family: var(--f-display); font-size: 16px; font-weight: 700; }
 
 /* Backup settings (#1603): three kinds of setting, told apart by layout.
    A section label opens each group; the disk-space card keeps the tinted
@@ -3227,7 +3219,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .bks-docs { color: var(--ink-2); text-decoration: underline; text-underline-offset: 2px; }
 .bks-docs:hover { color: var(--accent); }
 .bks-server .cn-fine { margin-top: 6px; }
-.bks-server .stg-cardfoot { margin-top: 10px; }
+.bks-server .stg-cardfoot { margin-top: 12px; display: flex; justify-content: flex-end; }
 /* The per-server yes/no (#1681): a plain fieldset, the two answers on one line. */
 .bks-q { border: 0; padding: 0; margin: 0 0 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }
 .bks-q legend { padding: 0; margin-bottom: 6px; width: 100%; }
@@ -3258,14 +3250,162 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .fr-fold { margin-top: 10px; background: none; border: 0; padding: 0; cursor: pointer; font-family: var(--f-ui); font-size: 13px; color: var(--ink-3); }
 .fr-fold::before { content: "\25B8 "; }
 .fr-card.fr-open .fr-fold::before { content: "\25BE "; }
-.snap-fold { margin: 4px 0 8px; }
-.snap-fold > summary { cursor: pointer; padding: 8px 0; font-family: var(--f-ui); font-size: 14px; color: var(--ink-2); display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
-.snap-fold > summary .snap-fold-title { font-weight: 600; color: var(--ink); }
-.snap-fold > summary .snap-fold-last { color: var(--ink-3); font-size: 13px; }
-.snap-fold[open] > summary { margin-bottom: 10px; }
 .rc-restore-slot { margin-top: 20px; }
 .rc-restore-note a { color: #D9367A; font-weight: 600; text-decoration: none; border-bottom: 1px solid currentColor; }
 /* the Snapshots page's one daemon row: a plain white card, the tints stay
    for the configuration pages */
 .cards.cards-plain .card { background: #fff; }
 .cards.cards-plain .card .card-title { color: var(--ink); }
+
+/* ── Snapshots: the hero and the tabs (round 3) ─────────────────────────────
+   The hero SHOWS the copy: its age (big, with a dot the schedule colours),
+   where it lives (a tile per place), seven days of rhythm (one tick per
+   snapshot) and the last check. Everything else is under three tabs. */
+.snap-hero {
+  display: grid; grid-template-columns: 4fr 3fr 3fr 2fr; gap: 16px;
+  align-items: stretch; margin: 6px 0 18px;
+}
+.snap-hero .hero-actions, .snap-hero .hero-note { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
+.hero-card {
+  background: #fff; border: 0; border-radius: 22px; padding: 22px 24px;
+  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
+  display: flex; flex-direction: column; justify-content: center; gap: 6px; min-width: 0;
+}
+.hero-k { font-family: var(--f-ui); font-size: 12px; font-weight: 500; color: var(--ink-3); }
+.hero-big-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.hero-big { font-family: var(--f-display); font-size: 36px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.05; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hero-age.ok .hero-big { color: #0E8A5E; }
+.hero-age.warn .hero-big { color: #B8860B; }
+.hero-age.bad .hero-big { color: #E8397C; }
+.hero-age.bad { box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(232,57,124,0.18); }
+.hero-dot { width: 14px; height: 14px; border-radius: 50%; flex: none; background: var(--ink-4); box-shadow: 0 0 0 5px var(--surface-3); }
+.hero-dot.ok { background: #0E8A5E; box-shadow: 0 0 0 5px #DDF7EC; }
+.hero-dot.warn { background: #EB6834; box-shadow: 0 0 0 5px #FFF6DC; }
+.hero-dot.bad { background: #E8397C; box-shadow: 0 0 0 5px #FFE9F5; }
+@media (prefers-reduced-motion: no-preference) {
+  .hero-dot.bad { animation: hero-pulse 1.6s ease-in-out infinite; }
+  @keyframes hero-pulse { 0%, 100% { box-shadow: 0 0 0 5px #FFE9F5; } 50% { box-shadow: 0 0 0 9px #FFE9F5; } }
+}
+.hero-sub { font-family: var(--f-ui); font-size: 13px; color: var(--ink-2); }
+.hero-sub .hero-link { font-weight: 600; text-decoration: none; }
+.hero-where { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.hero-tile { align-items: center; text-align: center; gap: 8px; padding: 18px 12px; }
+.hero-tile.on { background: #DDF7EC; color: #0E8A5E; box-shadow: none; }
+.hero-tile.dim { background: #F1ECF5; color: var(--ink-3); box-shadow: none; }
+.hero-tile.off { background: #F1ECF5; color: #A899B8; box-shadow: none; }
+.hero-tile.off .hero-ico svg { stroke-dasharray: 3 3; }
+.hero-ico { display: inline-flex; width: 32px; height: 32px; }
+.hero-ico svg { width: 100%; height: 100%; }
+.hero-tile-t { font-family: var(--f-ui); font-size: 13px; font-weight: 600; }
+.hero-tile-s { font-family: var(--f-ui); font-size: 11px; color: inherit; opacity: .8; }
+.hero-days { gap: 10px; }
+.hero-strip { position: relative; height: 34px; border-bottom: 2px solid var(--line); }
+.hero-tick { position: absolute; bottom: 0; width: 3px; height: 16px; border-radius: 2px; background: var(--ink-4); transform: translateX(-50%); }
+.hero-tick.newest { background: #E8397C; height: 22px; }
+.hero-days-foot { display: flex; justify-content: space-between; font-family: var(--f-ui); font-size: 11px; color: var(--ink-3); }
+.hero-check { align-items: center; text-align: center; gap: 8px; padding: 18px 12px; box-shadow: none; }
+.hero-check.ok { background: #DDF7EC; color: #0E8A5E; }
+.hero-check.bad { background: #FFE9F5; color: #D9367A; }
+.hero-check.none { background: #F1ECF5; color: var(--ink-3); }
+.hero-note { font-family: var(--f-ui); font-size: 13px; color: var(--ink-3); }
+@media (max-width: 960px) {
+  .snap-hero { grid-template-columns: 1fr 1fr; }
+}
+
+.snap-tabs { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--line); margin: 6px 0 18px; }
+.snap-tablist { display: flex; align-items: center; gap: 6px; }
+.snap-tab.has-alarm::after { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #E8397C; margin-left: 7px; vertical-align: middle; }
+.snap-tab-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; padding-bottom: 8px; }
+.snap-tab {
+  font-family: var(--f-ui); font-size: 15px; font-weight: 500; color: var(--ink-2);
+  padding: 12px 18px; margin-bottom: -1px; background: none; border: 0;
+  border-bottom: 3px solid transparent; cursor: pointer;
+}
+.snap-tab:hover { color: var(--ink); }
+.snap-tab.is-on { color: var(--ink); font-weight: 700; border-bottom-color: var(--brand-warm-a); }
+.snap-panel[hidden] { display: none; }
+.snap-panel .snap-sect:first-child, .snap-panel .snap-moved + .snap-sect { margin-top: 4px; padding-top: 0; border-top: 0; }
+/* The section heading under a tab repeats the tab's label, so it is kept
+   for what it IS (the anchor of an old address, the landmark a screen
+   reader lands on, the point the arrival scroll targets) and not drawn. */
+.snap-panel > .snap-sect { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; }
+
+/* ── Snapshots tabs (round 3): offers are buttons, questions are controls
+   that show the value in force. ── */
+.stg-card { background: #fff; border: 0; border-radius: 22px; box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07); padding: 20px 22px; }
+.stg-card-t { display: flex; align-items: center; gap: 10px; font-family: var(--f-display); font-size: 18px; font-weight: 700; letter-spacing: -0.01em; color: var(--ink); margin: 0 0 14px; }
+.stg-card-t .field-label { font-family: var(--f-display); font-size: 18px; font-weight: 700; color: var(--ink); }
+.stg-ico { display: inline-flex; width: 24px; height: 24px; flex: none; }
+.stg-ico svg { width: 100%; height: 100%; }
+.stg-ico-pink { color: #D9367A; } .stg-ico-mint { color: #0E8A5E; } .stg-ico-orange { color: #EB6834; } .stg-ico-sun { color: #B8860B; }
+.stg-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch; }
+.stg-two > .stg-card, .stg-two > .card { display: flex; flex-direction: column; }
+.stg-two > .card.stg-card .cn-fine { margin-top: auto; }
+@media (max-width: 900px) { .stg-two { grid-template-columns: 1fr; } }
+/* the schedule card is an .ov-panel: its head and body carry gutters that
+   the card look does not need */
+.bk-schedule.stg-card .ov-panel-head { padding: 0; margin-bottom: 4px; }
+.bk-schedule.stg-card .bk-card-state { padding: 0; margin: 0 0 12px; font-size: 13.5px; }
+.bk-schedule.stg-card .bk-card-body { padding: 0; }
+.sch-pills { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin: 2px 0 12px; }
+@media (max-width: 700px) { .sch-pills { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.sch-pill { font-family: var(--f-ui); font-size: 14px; font-weight: 600; padding: 11px 0; border-radius: 14px; border: 1.5px solid var(--line); background: #fff; color: var(--ink); cursor: pointer; }
+.sch-pill:hover { border-color: var(--ink-4); }
+.sch-pill.is-on { background: var(--brand-warm-a); border-color: var(--brand-warm-a); color: #fff; font-weight: 700; }
+.keep-step { display: flex; align-items: center; gap: 12px; margin: 4px 0 10px; }
+.keep-btn { width: 42px; height: 42px; border-radius: 50%; border: 1.5px solid var(--line); background: #fff; font-size: 20px; color: var(--ink); cursor: pointer; flex: none; }
+.keep-btn:hover { border-color: var(--ink-4); }
+.keep-step .keep-n { font-family: var(--f-display); font-size: 40px; font-weight: 800; letter-spacing: -0.02em; width: 110px; text-align: center; border: 0; background: transparent; color: var(--ink); padding: 0; height: auto; -moz-appearance: textfield; }
+.keep-step .keep-n::-webkit-outer-spin-button, .keep-step .keep-n::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.keep-step .keep-n::placeholder { color: var(--ink-3); font-size: 28px; font-weight: 700; }
+.keep-unit, .keep-lead { font-family: var(--f-ui); font-size: 14px; color: var(--ink-2); }
+.where-tile { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 16px; background: var(--surface-3); margin: 0 0 10px; }
+.where-tile.on { background: #DDF7EC; color: #0E8A5E; }
+.where-ico { display: inline-flex; width: 26px; height: 26px; flex: none; color: currentColor; }
+.where-ico svg { width: 100%; height: 100%; }
+.where-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.where-body .field-label { font-size: 12px; color: inherit; }
+.where-tile .where-in { background: transparent; border: 0; padding: 0; height: auto; font-family: var(--f-mono); font-size: 12.5px; color: var(--ink); width: 100%; }
+.where-tile .where-in:focus { outline: none; box-shadow: none; }
+.where-tile:focus-within { box-shadow: 0 0 0 2px var(--brand-warm-a); }
+.where-card .bl-case { margin-top: 4px; }
+
+.snap-checks { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 960px) { .snap-checks { grid-template-columns: 1fr; } }
+.snap-checks .vfy-region { margin-top: 0; }
+.snap-checks-l, .snap-checks-r { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.snap-checks .tcard { background: #fff; border: 0; border-radius: 22px; box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07); padding: 22px 24px; }
+.snap-checks .vfy-region-head .ov-panel-title { font-size: 12px; font-family: var(--f-ui); font-weight: 500; color: var(--ink-3); }
+.snap-checks .vfy-control .vfy-region-head { margin-top: 18px; }
+.snap-checks .vfy-actions { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.snap-checks .vfy-mode { min-width: 0; width: 100%; }
+.snap-checks .vfy-run { align-self: flex-start; }
+.vfy-state { display: flex; align-items: center; gap: 14px; }
+.vfy-state-ico { width: 56px; height: 56px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; flex: none; background: var(--surface-3); color: var(--ink-3); }
+.vfy-state.ok .vfy-state-ico { background: #DDF7EC; color: #0E8A5E; }
+.vfy-state.bad .vfy-state-ico { background: #FFE9F5; color: #D9367A; }
+.vfy-state.warn .vfy-state-ico { background: #FFF6DC; color: #B8860B; }
+.vfy-vico { display: inline-flex; width: 30px; height: 30px; }
+.vfy-vico svg { width: 100%; height: 100%; }
+.vfy-state-t { font-family: var(--f-display); font-size: 22px; font-weight: 800; letter-spacing: -0.01em; color: var(--ink); line-height: 1.1; }
+.vfy-state.bad .vfy-state-t { color: #D9367A; }
+.vfy-state-s { font-family: var(--f-ui); font-size: 13px; color: var(--ink-2); margin-top: 3px; }
+.vfy-hmark { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex: none; }
+.vfy-hmark.ok { background: #DDF7EC; color: #0E8A5E; }
+.vfy-hmark.bad { background: #FFE9F5; color: #D9367A; }
+.vfy-hmark.none { background: var(--surface-3); color: var(--ink-3); }
+
+.bk-lane-head { display: flex; align-items: center; gap: 10px; }
+.bk-lane-ico { display: inline-flex; width: 26px; height: 26px; color: #D9367A; flex: none; }
+/* !important: the file icon constant carries an inline 16px size */
+.bk-lane-ico svg { width: 100% !important; height: 100% !important; }
+
+.stg-top { margin-bottom: 4px; }
+.stg-top .card.stg-card { background: #fff; }
+.stg-top .card.stg-card::after { display: none; }
+.bl-case { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 12px; font-size: 13px; }
+.bl-case.bl-ok { background: #DDF7EC; color: #0E8A5E; }
+.bl-case.bl-part { background: #FFF6DC; color: #7A5F00; }
+.bl-case.bl-no { background: #FFE9F5; color: #B02762; }
+.bl-case .bl-name { min-width: 0; font-weight: 700; color: inherit; white-space: nowrap; }
+.bl-case .bl-say { color: inherit; }

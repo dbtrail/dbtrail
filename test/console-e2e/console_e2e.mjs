@@ -2352,27 +2352,30 @@ try {
   // The coordinates ride as the tooltip of the row's time since the Snapshots cut.
   await page.waitForFunction(() => Array.from(document.querySelectorAll(".stg-row")).some((r) => ((r.querySelector(".stg-name") || {}).title || "").includes("binlog.000001:50")));
   const stg = await page.evaluate(() => {
-    // #1415: the Create action moved to the context strip (page level); the
-    // uniform table count moved there too, so the row carries only what
+    // Round 3: the Create action is a hero button (page level); the hero
+    // draws the copy's age and where it lives, so the row carries only what
     // varies (the binlog anchor) plus the newest treatment.
-    const strip = document.querySelector(".ctx-strip");
-    const btn = strip ? Array.from(strip.querySelectorAll("button")).find((b) => b.textContent === "Read database now") : null;
+    const strip = document.querySelector(".snap-hero");
+    // The two buttons sit at the tab bar's right end, one click away on
+    // every tab; the reason a button is missing stays in the hero.
+    const btn = Array.from(document.querySelectorAll(".snap-tab-actions button")).find((b) => b.textContent === "Read database now") || null;
     const row = Array.from(document.querySelectorAll(".stg-row")).find((r) => ((r.querySelector(".stg-name") || {}).title || "").includes("binlog.000001:50"));
     return { capOn: !!capsCache.baseline_trigger, stripPresent: !!strip,
       stripText: strip ? strip.textContent : "",
       btnPresent: !!btn, btnEnabled: btn ? !btn.disabled : false,
       rowText: row ? row.textContent : "",
       rowIsLatest: row ? row.classList.contains("stg-row-latest") : false,
-      sourceOneLine: strip && strip.querySelector(".ctx-source") ?
-        getComputedStyle(strip.querySelector(".ctx-source")).whiteSpace === "nowrap" : false };
+      heroAge: ((strip && strip.querySelector(".hero-big")) || {}).textContent || "",
+      heroDisk: !!(strip && strip.querySelector(".hero-tile.on")),
+      heroTicks: strip ? strip.querySelectorAll(".hero-tick").length : 0 };
   });
   stg.capOn ? ok("baselines: baseline_trigger capability reaches the frontend") : bad("baselines: baseline_trigger capability reaches the frontend", "capsCache.baseline_trigger falsy");
-  (stg.stripPresent && stg.btnPresent && stg.btnEnabled) ? ok("baselines: Create baseline is a page action on the context strip, enabled when both gates pass") : bad("baselines: Create baseline is a page action on the context strip, enabled when both gates pass", `strip=${stg.stripPresent} present=${stg.btnPresent} enabled=${stg.btnEnabled}`);
-  // The facts moved, they did not vanish: table count and source live on the
-  // strip; the row keeps the anchor and gains the newest treatment.
-  (/1 per snapshot/.test(stg.stripText) && stg.sourceOneLine)
-    ? ok("baselines: the uniform table count and the one-line source render on the strip")
-    : bad("baselines: the uniform table count and the one-line source render on the strip", stg.stripText);
+  (stg.stripPresent && stg.btnPresent && stg.btnEnabled) ? ok("baselines: Read database now is a hero action, enabled when both gates pass") : bad("baselines: Read database now is a hero action, enabled when both gates pass", `hero=${stg.stripPresent} present=${stg.btnPresent} enabled=${stg.btnEnabled}`);
+  // The hero SHOWS the copy: its age as a number, the lit tile for the place
+  // it lives (the fixture is on disk), and one tick per snapshot this week.
+  (/ago$/.test(stg.heroAge) && stg.heroDisk && stg.heroTicks >= 1 && /On disk/.test(stg.stripText))
+    ? ok("baselines: the hero shows the copy's age, where it lives and its ticks")
+    : bad("baselines: the hero shows the copy's age, where it lives and its ticks", JSON.stringify({ age: stg.heroAge, disk: stg.heroDisk, ticks: stg.heroTicks, text: stg.stripText }));
   (stg.rowIsLatest && /ago/.test(stg.rowText) && !/table\(s\)/.test(stg.rowText))
     ? ok("baselines: the newest row wears the treatment, carries relative age, and drops the constant column")
     : bad("baselines: the newest row wears the treatment, carries relative age, and drops the constant column", stg.rowText);
@@ -2411,10 +2414,13 @@ try {
     // Per top-level block: count it whole when it ends above the fold,
     // otherwise descend, so a long section only contributes the part of it
     // the reader can actually see.
+    // A hidden tab panel is not on screen: innerText of an unrendered node
+    // falls back to its whole text, which would count what the reader
+    // cannot see.
     const visit = (n) => {
       for (const c of n.children) {
         const r = c.getBoundingClientRect();
-        if (r.top >= fold) continue;
+        if (c.hidden || (r.width === 0 && r.height === 0) || r.top >= fold) continue;
         if (c.children.length === 0 || r.bottom <= fold) total += words(c.innerText);
         else visit(c);
       }
@@ -2423,7 +2429,7 @@ try {
     for (const c of view.children) {
       const r = c.getBoundingClientRect();
       const before = total;
-      if (r.top < fold) visit({ children: [c] });
+      if (!c.hidden && r.top < fold) visit({ children: [c] });
       blocks.push({ cls: c.className, top: Math.round(r.top), words: total - before,
         text: (c.innerText || "").trim().slice(0, 60).replace(/\s+/g, " ") });
     }
@@ -2462,9 +2468,11 @@ try {
   (budget.total <= 150 && budget.rows > 0 && budget.hasChecks && budget.hasSetup && budget.errorBoxes === 0)
     ? ok("snapshots: the first screen stays inside its 150-word budget")
     : bad("snapshots: the first screen stays inside its 150-word budget", JSON.stringify(budget));
-  (budget.helpOpen === false && budget.helpWords > 50 && !budget.takeAwayOpen)
-    ? ok("snapshots: the mode help and the take-away panel arrive folded, with their text intact")
-    : bad("snapshots: the mode help and the take-away panel arrive folded, with their text intact",
+  // The take-away panel arrives OPEN since round 3 (the downloads are the
+  // offer of the Versions tab); the mode help stays folded.
+  (budget.helpOpen === false && budget.helpWords > 50 && budget.takeAwayOpen)
+    ? ok("snapshots: the mode help arrives folded with its text intact, the take-away panel open")
+    : bad("snapshots: the mode help arrives folded with its text intact, the take-away panel open",
       JSON.stringify({ helpOpen: budget.helpOpen, helpWords: budget.helpWords, takeAwayOpen: budget.takeAwayOpen }));
   // Browsing the picker opens the help by itself (#1418's reason for it):
   // folding it must not cost the reader who is choosing a mode.
@@ -2522,7 +2530,7 @@ try {
         rows: v.querySelectorAll(".stg-list .stg-row").length,
         errorBoxes: v.querySelectorAll(".error-box").length,
         create: btn("Read database now"),
-        createNote: /READ DATABASE/.test((v.querySelector(".ctx-strip") || {}).textContent || ""),
+        createNote: /Read database now:/.test((v.querySelector(".snap-hero") || {}).textContent || ""),
         restore: !!v.querySelector(".bk-restore:not(.bk-schedule)"),
         takeAway: !!v.querySelector("details.bk-take"),
         duckData: btn("Download the data"),
@@ -2679,7 +2687,7 @@ try {
 
   // Hints that name a fix must name one this reader can make. An operator
   // may create a snapshot but not see or change settings: the Create note
-  // keeps its reason and drops "(under Where and how often)". A session that
+  // keeps its reason and drops "(under Settings)". A session that
   // may download but not read settings keeps the DuckDB lane without the
   // false line about how DBTrail is configured. A session that may read
   // settings but not write servers is not told to "select this server to
@@ -2703,7 +2711,7 @@ try {
       const duckNoViews = (backupDuckLane(b) || { textContent: "" }).textContent;
       capsCache.views = keepViews;
       return {
-        strip: baselineContextStrip(b, cur).textContent,
+        strip: snapshotHero(b, null, cur, { settings: () => {} }).textContent,
         duck: (backupDuckLane(b) || { textContent: "" }).textContent,
         duckNoViews,
         row: backupServerRow(srv, false, [srv], null).textContent,
@@ -2723,8 +2731,8 @@ try {
     } finally { capsCache.permissions = keep; capsCache.baseline_trigger = keepTrig; capsCache.views = keepViews; }
   });
   const H = hints;
-  (/READ DATABASE/.test(H.full.strip) && /under Where and how often/.test(H.full.strip)
-    && /READ DATABASE/.test(H.operator.strip) && /own snapshot location/.test(H.operator.strip) && !/Where and how often/.test(H.operator.strip)
+  (/Read database now:/.test(H.full.strip) && /under Settings/.test(H.full.strip)
+    && /Read database now:/.test(H.operator.strip) && /own snapshot location/.test(H.operator.strip) && !/under Settings/.test(H.operator.strip)
     && (H.views ? !/set not to read archived data/.test(H.operator.duck) : true) && /Download the data/.test(H.operator.duck)
     && /Select this server at the top/.test(H.full.row) && !/Select this server at the top/.test(H.reader.row) && /No schedule/.test(H.reader.row)
     && (H.views ? !/set not to read archived data/.test(H.full.duck) : true)
@@ -2814,27 +2822,27 @@ try {
   // button even with a destination, and the strip says why (#1677).
   const gates = await page.evaluate(() => {
     // A source and a location of its own (#1677): the source is what makes
-    // the strip draw its READ DATABASE note, and the own location keeps the
+    // the hero draw its "Read database now:" note, and the own location keeps the
     // capability-off check honest, since without one the button is withheld
     // for the location and that check would pass even with creation on.
     const servers = [{ id: "srv-fix", name: "fixture", kind: "registry", has_source: true, baseline_dir: "/tmp/baselines" }];
     const cur = servers[0];
     const keepCur = currentServer;
     currentServer = "srv-fix";
-    // The button lives on the STRIP since #1415 — drive both builders so the
-    // gate holds where the button actually is AND the panel keeps its empty
-    // states.
+    // The button lives on the HERO since round 3 — drive both builders so
+    // the gate holds where the button actually is AND the panel keeps its
+    // empty states.
     const cfgOff = baselinesPanel({ configured: false }, servers);
-    const cfgOffStrip = baselineContextStrip({ configured: false }, cur);
+    const cfgOffStrip = snapshotHero({ configured: false }, null, cur, {});
     const keepCap = capsCache.baseline_trigger;
     capsCache.baseline_trigger = false;
     const capOff = baselinesPanel({ configured: true, source: "/tmp/baselines", snapshots: [] }, servers);
-    const capOffStrip = baselineContextStrip({ configured: true, source: "/tmp/baselines", snapshots: [] }, cur);
+    const capOffStrip = snapshotHero({ configured: true, source: "/tmp/baselines", snapshots: [] }, null, cur, {});
     capsCache.baseline_trigger = keepCap;
     currentServer = keepCur;
     const hasBtn = (n) => Array.from(n.querySelectorAll("button")).some((b) => b.textContent === "Read database now");
-    // #1677: where the button would be, the strip says creation is off.
-    const offNote = (n) => /READ DATABASE/.test(n.textContent) && /turned off at startup/.test(n.textContent);
+    // #1677: where the button would be, the hero says creation is off.
+    const offNote = (n) => /Read database now:/.test(n.textContent) && /turned off at startup/.test(n.textContent);
     return {
       cfgOffBtn: hasBtn(cfgOff) || hasBtn(cfgOffStrip),
       cfgOffEmpty: /No snapshots configured/.test(cfgOff.textContent),
@@ -2850,9 +2858,9 @@ try {
   (!gates.capOffBtn && gates.capOffEmpty)
     ? ok("baselines: baseline_trigger off → no button even with a destination")
     : bad("baselines: baseline_trigger off → no button even with a destination", JSON.stringify(gates));
-  (gates.capOffNote && !gates.cfgOffNote && !/READ DATABASE/.test(stg.stripText))
-    ? ok("baselines: baseline_trigger off → the strip says creation is off where the button would be, and only then")
-    : bad("baselines: baseline_trigger off → the strip says creation is off where the button would be, and only then", JSON.stringify({ gates, live: stg.stripText }));
+  (gates.capOffNote && !gates.cfgOffNote && !/Read database now:/.test(stg.stripText))
+    ? ok("baselines: baseline_trigger off → the hero says creation is off where the button would be, and only then")
+    : bad("baselines: baseline_trigger off → the hero says creation is off where the button would be, and only then", JSON.stringify({ gates, live: stg.stripText }));
 
   // Scenario 15e — the Snapshots feature set: rename, per-row detail with real
   // sizes, the tar.gz download wire, the restore card's gate + inline refusal,
@@ -2864,7 +2872,7 @@ try {
     const out = {};
     const v = document.querySelector(".view");
     out.title = (v.querySelector("h1") || {}).textContent || "";
-    out.stripLabels = Array.from(v.querySelectorAll(".ctx-label")).map((n) => n.textContent);
+    out.stripLabels = Array.from(v.querySelectorAll(".snap-hero .hero-k")).map((n) => n.textContent);
     // Expand the newest row: the detail must load the REAL files endpoint.
     const row = v.querySelector(".stg-row.bk-expandable");
     out.expandable = !!row;
@@ -2894,9 +2902,9 @@ try {
   /^Snapshots$/.test(bk.title.trim())
     ? ok("snapshots: the page is named Snapshots")
     : bad("snapshots: the page is named Snapshots", bk.title);
-  bk.stripLabels.includes("SNAPSHOTS")
-    ? ok("snapshots: the strip counts SNAPSHOTS, not snapshots")
-    : bad("snapshots: the strip counts SNAPSHOTS, not snapshots", JSON.stringify(bk.stripLabels));
+  bk.stripLabels.includes("Last 7 days")
+    ? ok("snapshots: the hero counts the week's snapshots")
+    : bad("snapshots: the hero counts the week's snapshots", JSON.stringify(bk.stripLabels));
   (bk.expandable && bk.detailTables >= 1 && /B/.test(bk.detailText) && bk.detailHasDownload)
     ? ok("snapshots: a row expands into real tables, sizes and a download action")
     : bad("snapshots: a row expands into real tables, sizes and a download action", JSON.stringify({ e: bk.expandable, t: bk.detailTables, d: bk.detailHasDownload, txt: (bk.detailText || "").slice(0, 120) }));
@@ -3543,9 +3551,9 @@ try {
   await page.evaluate(() => navigate("snapshots"));
   await page.waitForFunction(() => location.pathname === "/snapshots"
     && document.querySelectorAll(".vfy-region").length >= 3);
-  // Checks is a closed fold since the Snapshots cut (D9); the measurements
-  // below need it open.
-  await page.evaluate(() => { const d = document.querySelector(".snap-fold"); if (d) d.open = true; });
+  // Checks is a tab since round 3; the measurements below need it on screen.
+  await page.evaluate(() => document.querySelector('.snap-tab[data-tab="checks"]').click());
+  await page.waitForFunction(() => !document.getElementById("snap-checks").hidden);
 
   // Scenario 15v — the verification page rework (#1417/#1418/#1419/#1420),
   // driven END TO END against the real daemon: a real recover-inputs run over
@@ -3553,6 +3561,12 @@ try {
   //
   // (a) structure + mode help (#1418/#1419): three separated regions; the
   // help swaps with the select and describes the selected mode.
+  // The verdict tile must have moved past its loading word: a tile that
+  // never fills would otherwise pass the structure check below.
+  await page.waitForFunction(() => {
+    const t = document.querySelector(".snap-checks .vfy-state-t");
+    return !!t && t.textContent !== "Checking…";
+  });
   const vfyStruct = await page.evaluate(() => {
     const regions = document.querySelectorAll(".vfy-region");
     const sel = document.querySelector(".vfy-mode");
@@ -3562,9 +3576,11 @@ try {
     sel.dispatchEvent(new Event("change"));
     return {
       regionCount: regions.length,
-      controlTinted: regions[0] ? regions[0].classList.contains("tcard-violet") : false,
-      // No subtitle since the #1573 redesign; the mode help below carries it.
-      subGone: !document.querySelector(".view .page-sub"),
+      // Round 3: the control card leads with the verdict of the last check.
+      controlTinted: regions[0] ? (regions[0].querySelector(".vfy-state-t") || {}).textContent === "Never checked" : false,
+      // One line under the title since round 3, and only that one: what a
+      // snapshot is. The mode help below carries what each check does.
+      subGone: (document.querySelector(".view .page-sub") || {}).textContent === "A snapshot is a copy of every table at one moment in time.",
       helpBefore, helpAfter: help ? help.textContent : "",
       // Measured, not scrollWidth: Chrome reports scrollWidth == clientWidth
       // for a <select> at ANY width (the closed control clips its text and
@@ -3590,11 +3606,11 @@ try {
     };
   });
   (vfyStruct.subGone)
-    ? ok("verification: no subtitle; the mode help says what each check does")
-    : bad("verification: no subtitle; the mode help says what each check does", "a .page-sub is back on /snapshots");
+    ? ok("verification: the page's one line says what a snapshot is; the mode help says what each check does")
+    : bad("verification: the page's one line says what a snapshot is; the mode help says what each check does", "the .page-sub on /snapshots is not the one sentence");
   (vfyStruct.regionCount >= 3 && vfyStruct.controlTinted)
-    ? ok("verification: control / current / history are separate surfaces, control wears the structure tint")
-    : bad("verification: control / current / history are separate surfaces, control wears the structure tint", JSON.stringify(vfyStruct));
+    ? ok("verification: control / current / history are separate surfaces, control leads with the verdict")
+    : bad("verification: control / current / history are separate surfaces, control leads with the verdict", JSON.stringify(vfyStruct));
   (vfyStruct.helpBefore && vfyStruct.helpAfter && vfyStruct.helpBefore !== vfyStruct.helpAfter
     && /never touches your database/.test(vfyStruct.helpAfter))
     ? ok("verification: the mode help swaps with the select and states proof, prerequisite, cost")
@@ -5011,6 +5027,10 @@ try {
   // (#1589), leaving the 30s default in force. Stated as 30s explicitly.
   await page.waitForFunction(() => location.pathname === "/snapshots"
     && document.querySelectorAll(".bks-erow").length >= 1, undefined, { timeout: 30000 });
+  // The settings are a tab since round 3: the words are measured as the
+  // reader sees them.
+  await page.evaluate(() => document.querySelector('.snap-tab[data-tab="settings"]').click());
+  await page.waitForFunction(() => !document.getElementById("snap-settings").hidden);
   const bksAPI = await page.evaluate(() => api("/api/backup-settings"));
   const bks = await page.evaluate(() => {
     const view = document.querySelector(".view");

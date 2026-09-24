@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "measured_at_commit": "6ce95500",
+  "measured_at_commit": "a3ddbf0d",
   "platform": "darwin/153.0.8010.12",
   "viewport": "1280x720",
   "runs": {
@@ -12,11 +12,11 @@
       "trips_out_of_browser": 1,
       "words_per_step_max": 151,
       "words_per_error_max": "not measurable",
-      "banned_words": 18,
+      "banned_words": 15,
       "yellow_red": 1,
       "changes_visible_without_reload": 3,
       "changes_visible_within_5s": 0,
-      "primary_below_fold_px": 771,
+      "primary_below_fold_px": 444,
       "final_window_matches_retention": "not measurable",
       "copied_differs_from_shown": 0
     },
@@ -146,36 +146,36 @@
           {
             "step": "snapshot-list-first-look",
             "kind": "step",
-            "words_above_fold": 72,
-            "words_whole": 203,
+            "words_above_fold": 113,
+            "words_whole": 169,
             "layer": "view"
           },
           {
             "step": "snapshot-location",
             "kind": "step",
-            "words_above_fold": 72,
-            "words_whole": 203,
+            "words_above_fold": 113,
+            "words_whole": 169,
             "layer": "view"
           },
           {
             "step": "snapshot-location-saved",
             "kind": "step",
-            "words_above_fold": 112,
-            "words_whole": 203,
+            "words_above_fold": 72,
+            "words_whole": 169,
             "layer": "view"
           },
           {
             "step": "snapshot-ready",
             "kind": "step",
-            "words_above_fold": 60,
-            "words_whole": 203,
+            "words_above_fold": 109,
+            "words_whole": 169,
             "layer": "view"
           },
           {
             "step": "first-snapshot",
             "kind": "step",
-            "words_above_fold": 61,
-            "words_whole": 192,
+            "words_above_fold": 134,
+            "words_whole": 169,
             "layer": "view"
           }
         ]
@@ -183,13 +183,13 @@
       "words_per_error_max": "no error screen in this run: the snapshot could be taken without creating the folder first",
       "banned_words": {
         "per_word": {
-          "baseline": 2,
+          "baseline": 1,
           "daemon": 1,
           "em dash": 1,
           "index": 4,
           "monitor": 3,
           "protect": 2,
-          "source": 3,
+          "source": 1,
           "stream": 1,
           "watch": 1
         },
@@ -202,9 +202,9 @@
       },
       "changes_visible_without_reload": {
         "changes": [
-          "INSERT: seen after 9.2 s",
-          "UPDATE: seen after 9.9 s",
-          "DELETE: seen after 7.9 s"
+          "INSERT: seen after 9.3 s",
+          "UPDATE: seen after 9.7 s",
+          "DELETE: seen after 7.6 s"
         ]
       },
       "primary_below_fold_px": {
@@ -214,7 +214,7 @@
           "after-sign-in: 0 px (+ Add server)",
           "connect: 302 px (Check and connect)",
           "save-result: 0 px (OK)",
-          "snapshot-location: 771 px (Save (the snapshot location))",
+          "snapshot-location: 444 px (Save (the snapshot location))",
           "snapshot-ready: 0 px (Read database now)"
         ]
       },

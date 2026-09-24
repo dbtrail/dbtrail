@@ -21,7 +21,7 @@ class FakeEl {
   set innerHTML(v) { this._text = String(v); }
 }
 const permissive = () => new Proxy(function () {}, { get: (t, p) => p === Symbol.toPrimitive ? () => "" : (p === "then" ? undefined : permissive()), apply: () => permissive(), construct: () => permissive() });
-const document = { createElement: (t) => new FakeEl(t), createTextNode: (s) => ({ nodeType: 3, textContent: String(s) }), addEventListener() {}, querySelector: () => null, querySelectorAll: () => [], body: new FakeEl("body"), documentElement: new FakeEl("html"), getElementById: () => new FakeEl("div"), readyState: "loading", createElementNS: (n, t) => new FakeEl(t) };
+const document = { createElement: (t) => new FakeEl(t), createTextNode: (s) => ({ nodeType: 3, textContent: String(s) }), addEventListener() {}, querySelector: () => null, querySelectorAll: () => [], body: new FakeEl("body"), documentElement: new FakeEl("html"), getElementById: () => new FakeEl("div"), importNode: (n) => n, readyState: "loading", createElementNS: (n, t) => new FakeEl(t) };
 const ctx = { document, console, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, URLSearchParams, URL, Intl, Date, Math, JSON, Set, Map, RegExp, Promise, AbortController, Event, EventTarget,
   location: { pathname: "/settings", search: "", hash: "", origin: "http://x" }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, sessionStorage: { getItem: () => null, setItem() {} },
   navigator: permissive(), history: permissive(), fetch: () => new Promise(() => {}), matchMedia: () => ({ matches: false, addEventListener() {} }), DOMParser: function () { this.parseFromString = () => ({ documentElement: new FakeEl("svg") }); },

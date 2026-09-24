@@ -236,7 +236,7 @@ func TestBackupScheduleAPI_needsTheLoop(t *testing.T) {
 	ro := newRegistryServer(t) // serve
 	e, _ := ro.cm.reg.Add(ServerEntry{Name: "wp", DSN: "idx:pw@tcp(127.0.0.1:3306)/idx"})
 	rec, body = doServersReq(t, ro, "PUT", "/api/servers/"+e.ID+"/backup-schedule", `{"every":"1d"}`)
-	if rec.Code != 403 || !strings.Contains(string(body), "watch daemon") {
+	if rec.Code != 403 || !strings.Contains(string(body), "DBTrail service") {
 		t.Fatalf("read-only console: code=%d body=%s", rec.Code, body)
 	}
 

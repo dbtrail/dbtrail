@@ -241,7 +241,7 @@ func TestBackupSettingsDrawingCannotLie(t *testing.T) {
 	if strings.Contains(stripJSLineComments(functionBody(t, js, "function backupServersPanel(")), "blCase(") {
 		t.Error("backupServersPanel draws cases of its own again; the three-row legend was removed, each server row draws its own")
 	}
-	if !strings.Contains(functionBody(t, js, "function backupServerRow("), "blCase(src, true)") {
+	if !strings.Contains(functionBody(t, js, "function backupServerRow("), "blCase(src, true, ") {
 		t.Error("backupServerRow does not draw the server's own verdict as the current case")
 	}
 }
