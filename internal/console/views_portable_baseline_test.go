@@ -54,7 +54,7 @@ func TestViewsPortableBaseline_readsTheOtherLocation(t *testing.T) {
 	// location would pass for a build that read it in EVERY file, which breaks
 	// the reader on the host instead of the one off it.
 	if !strings.Contains(string(local), "state_shop_orders") {
-		t.Error("the default download does not read the backup directory on this host")
+		t.Error("the default download does not read the snapshot directory on this host")
 	}
 	if strings.Contains(string(local), "state_shop_invoices") {
 		t.Error("the default download reads the uploaded copy, which needs credentials " +
@@ -64,7 +64,7 @@ func TestViewsPortableBaseline_readsTheOtherLocation(t *testing.T) {
 		t.Error("portable_baseline=1 did not move the state views to the uploaded copy")
 	}
 	if strings.Contains(string(portable), "state_shop_orders") {
-		t.Error("the portable download still reads the backup directory on this host, " +
+		t.Error("the portable download still reads the snapshot directory on this host, " +
 			"which is not on the machine it was downloaded to")
 	}
 	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, `filename="views-portable.sql"`) {
@@ -89,7 +89,7 @@ func TestViewsPortableBaseline_refusedWithoutASecondLocation(t *testing.T) {
 	if rec.Code != 422 {
 		t.Fatalf("code = %d, want 422; body = %s", rec.Code, body)
 	}
-	if !strings.Contains(string(body), "no S3 backup prefix") {
+	if !strings.Contains(string(body), "no S3 snapshot prefix") {
 		t.Errorf("the refusal does not say what is missing: %s", body)
 	}
 }

@@ -22,7 +22,7 @@ import (
 // a chain grows by one pair per refresh; every reader opens every pair, and
 // every upload sends every pair again. This job merges the chain's first
 // pairs into ONE range pair (reconstruct.CompactTableDeltaMinor, DuckDB
-// only) and stages it under "<backup dir>/.compact/"; the NEXT refresh links
+// only) and stages it under "<snapshot dir>/.compact/"; the NEXT refresh links
 // the range forward in place of the pairs it merged. The base file is never
 // touched here: folding the chain INTO the table (the major compaction) is
 // the refresh's rewrite path still, and its own job is the second half of
@@ -70,7 +70,7 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 	}
 	at, _, err := reconstruct.NewestSnapshot(s.ctx, req.BaselineDir)
 	if err != nil {
-		slog.Warn("baseline compact: could not read the backup directory, so no chain is merged", "server", req.ServerName, "dir", req.BaselineDir, "error", err)
+		slog.Warn("baseline compact: could not read the snapshot directory, so no chain is merged", "server", req.ServerName, "dir", req.BaselineDir, "error", err)
 		return
 	}
 	if at.IsZero() {

@@ -287,11 +287,11 @@ func TestMydumperBootWarning(t *testing.T) {
 
 	fakeConsoleMydumper(t, printsVersion(versionDistro))
 	fail := mydumperBootWarning(baseline.LockModeLockAll)
-	if !strings.HasPrefix(fail, "full backups of MySQL and MariaDB servers will fail") || !strings.Contains(fail, "0.10.0") {
+	if !strings.HasPrefix(fail, "full reads of MySQL and MariaDB servers will fail") || !strings.Contains(fail, "0.10.0") {
 		t.Errorf("0.10 + lock-all: %q", fail)
 	}
 	run := mydumperBootWarning(baseline.LockModeFTWRL)
-	if !strings.HasPrefix(run, "full backups of MySQL and MariaDB servers will run, but") || !strings.Contains(run, "0.10.0") {
+	if !strings.HasPrefix(run, "full reads of MySQL and MariaDB servers will run, but") || !strings.Contains(run, "0.10.0") {
 		t.Errorf("0.10 + ftwrl: %q", run)
 	}
 	for _, msg := range []string{fail, run} {
@@ -327,7 +327,7 @@ func TestBaselineWiringWarnsAboutAnUnusableMydumperAtBoot(t *testing.T) {
 		newBaselineSupervisorFromConfig(ctx, t.TempDir(), nil)
 		cancel()
 		upConsoleBaselineLockModeErr = nil
-		if strings.Contains(buf.String(), "full backups of MySQL and MariaDB servers") {
+		if strings.Contains(buf.String(), "full reads of MySQL and MariaDB servers") {
 			t.Errorf("a mydumper boot line was printed over an invalid lock-mode setting:\n%s", buf.String())
 		}
 	})
@@ -338,7 +338,7 @@ func TestBaselineWiringWarnsAboutAnUnusableMydumperAtBoot(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		newBaselineSupervisorFromConfig(ctx, t.TempDir(), nil)
 		cancel() // stops the reaper goroutine the constructor starts
-		warned := strings.Contains(buf.String(), "full backups of MySQL and MariaDB servers will fail") &&
+		warned := strings.Contains(buf.String(), "full reads of MySQL and MariaDB servers will fail") &&
 			strings.Contains(buf.String(), "0.10.0")
 		if warned != trigger {
 			t.Errorf("trigger=%v: boot warning present = %v, want %v; log:\n%s", trigger, warned, trigger, buf.String())
@@ -374,7 +374,7 @@ func TestExecuteRefusesADumpWithNoBinlogPosition(t *testing.T) {
 	}
 	entries, _ := os.ReadDir(local)
 	if len(entries) != 0 {
-		t.Errorf("an unanchored dump was converted anyway: %d entries in the backup directory", len(entries))
+		t.Errorf("an unanchored dump was converted anyway: %d entries in the snapshot directory", len(entries))
 	}
 }
 

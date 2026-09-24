@@ -19,7 +19,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
-// Custom .sql backup (the Snapshots page's "build a backup for a moment"):
+// Custom .sql backup (the Snapshots page's "build a snapshot for a moment"):
 // fold the newest snapshot at-or-before the chosen instant forward through
 // the index's deltas and write the result as a mydumper-format dump —
 // schema files, INSERT chunks and the coordinates `metadata` file — that
@@ -862,10 +862,10 @@ func (s *baselineSupervisor) finishSQLExport(req console.SQLExportRequest, dir s
 func (s *baselineSupervisor) executeSQLExport(req console.SQLExportRequest, dir string) (tables int, rows, bytes int64, err error) {
 	tableList, err := reconstruct.SnapshotTablesAt(s.ctx, req.BaselineSrc, req.At)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("list the backup to build from: %w", err)
+		return 0, 0, 0, fmt.Errorf("list the snapshot to build from: %w", err)
 	}
 	if len(tableList) == 0 {
-		return 0, 0, 0, fmt.Errorf("no backup exists at or before %s; the build folds an existing backup forward, so pick a moment after your oldest backup", req.At.UTC().Format("2006-01-02 15:04:05"))
+		return 0, 0, 0, fmt.Errorf("no snapshot exists at or before %s; the build folds an existing snapshot forward, so pick a moment after your oldest snapshot", req.At.UTC().Format("2006-01-02 15:04:05"))
 	}
 	// Tear down previous builds as this one starts; the new build writes only
 	// into its own directory, so an in-flight download of an OLD build either
@@ -956,7 +956,7 @@ func sqlExportRunError(reports []*reconstruct.TableReport, runErr error) error {
 	for _, rep := range reports {
 		if rep.BinlogOnly {
 			runErr = errors.Join(runErr, fmt.Errorf(
-				"table %s.%s lost its backup mid-build and was rebuilt from recorded changes only; that dump would silently miss every row those changes never touched", rep.Schema, rep.Table))
+				"table %s.%s lost its snapshot mid-build and was rebuilt from recorded changes only; that dump would silently miss every row those changes never touched", rep.Schema, rep.Table))
 		}
 	}
 	return runErr

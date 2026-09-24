@@ -133,7 +133,7 @@ func listBaselinesMerged(ctx context.Context, sources []string, list baselineLis
 			// coverage endpoint already warns on the identical failure from the
 			// identical call, and this handler already warns about the far
 			// smaller failure of one unreadable Parquet footer.
-			slog.Warn("console: a backup location could not be listed; the listing beside it is incomplete",
+			slog.Warn("console: a snapshot location could not be listed; the listing beside it is incomplete",
 				"source", src, "kind", kind, "error", err)
 			continue
 		}
@@ -142,7 +142,7 @@ func listBaselinesMerged(ctx context.Context, sources []string, list baselineLis
 		report.Count = len(files)
 		report.Skipped = skipped
 		if skipped > 0 {
-			slog.Warn("console: a backup location could only be listed in part; whole snapshots may be missing from the listing beside it",
+			slog.Warn("console: a snapshot location could only be listed in part; whole snapshots may be missing from the listing beside it",
 				"source", src, "kind", kind, "unreadable_directories", skipped)
 		}
 		out.Sources = append(out.Sources, report)

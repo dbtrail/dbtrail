@@ -60,7 +60,7 @@ func TestBackupScheduler_recordsWhyTheFallbackWasFull(t *testing.T) {
 // The two reasons that stay true until a setting changes (#1604's headline
 // cases) reach the record from the scheduler: decided BEFORE any probe of
 // the destination, so an S3-only server records the missing setting, not
-// "first backup" or an unreadable bucket.
+// "first snapshot" or an unreadable bucket.
 func TestBackupScheduler_recordsThePermanentReasons(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -68,7 +68,7 @@ func TestBackupScheduler_recordsThePermanentReasons(t *testing.T) {
 		why   string
 		code  string
 	}{
-		{"no local backup directory", func(e *console.ServerEntry) { e.BaselineDir, e.BaselineS3 = "", "s3://bucket/prefix" }, console.BackupWhyNoLocalDir, "no_local_dir"},
+		{"no local snapshot directory", func(e *console.ServerEntry) { e.BaselineDir, e.BaselineS3 = "", "s3://bucket/prefix" }, console.BackupWhyNoLocalDir, "no_local_dir"},
 		{"no index connection", func(e *console.ServerEntry) { e.DSN = "" }, console.BackupWhyNoIndex, "no_index"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

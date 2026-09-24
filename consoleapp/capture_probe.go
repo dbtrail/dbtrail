@@ -61,7 +61,7 @@ func captureComparable(st *status.StreamStateInfo, anchor, sourceRead time.Time)
 	case !st.GapColumnsPresent:
 		return false, "the index predates the capture's loss record"
 	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(anchor):
-		return false, "the capture lost events to a binlog gap after the previous backup"
+		return false, "the capture lost events to a binlog gap after the previous snapshot"
 	}
 	skips, readable := st.ParseCaptureSkips()
 	if !readable {
@@ -69,7 +69,7 @@ func captureComparable(st *status.StreamStateInfo, anchor, sourceRead time.Time)
 	}
 	for _, sk := range skips {
 		if sk.Count > 0 && (sourceRead.IsZero() || sk.LastAt.IsZero() || !sk.LastAt.Before(sourceRead)) {
-			return false, "the capture dropped events that no full backup has read from the source since"
+			return false, "the capture dropped events that no full read has read from the source since"
 		}
 	}
 	if st.Mode != "gtid" {

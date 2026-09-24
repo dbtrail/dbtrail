@@ -41,7 +41,7 @@ func TestBackupsPanelRendersEveryLocation(t *testing.T) {
 	}
 	if !strings.Contains(populatedBranch, "backupIncompleteNotice(b)") {
 		t.Error("the empty-list branch does not render the incomplete notice; a failed location " +
-			"that leaves the list EMPTY renders as a flat \"no backups found\"")
+			"that leaves the list EMPTY renders as a flat \"no snapshots found\"")
 	}
 	if !strings.Contains(strings.TrimPrefix(populatedHalf, populatedBranch), "backupIncompleteNotice(b)") {
 		t.Error("the populated branch does not render the incomplete notice; a shorter list " +
@@ -107,7 +107,7 @@ func TestBackupJobCardsOfferOnlyWhatTheirJobCanRead(t *testing.T) {
 	exportCard := stripJSLineComments(functionBody(t, js, "function backupSQLLane("))
 	if strings.Contains(exportCard, "cur.baseline_dir") {
 		t.Error("the .sql lane gates on cur.baseline_dir, which is the RAW registry entry. " +
-			"A server inheriting the daemon-wide backup location has none, so the lane either " +
+			"A server inheriting the daemon-wide snapshot location has none, so the lane either " +
 			"vanishes or defaults to a snapshot the build cannot read")
 	}
 	if !strings.Contains(exportCard, `const reads = b.kind === "dir" ? "dir" : "s3";`) || !strings.Contains(exportCard, `backupSnapshotsFor(b, reads)`) {
@@ -122,7 +122,7 @@ func TestBackupJobCardsOfferOnlyWhatTheirJobCanRead(t *testing.T) {
 	}
 	if !strings.Contains(restoreCard, `const reads = cur.baseline_s3 ? "s3" : "dir";`) || !strings.Contains(restoreCard, `backupSnapshotsFor(b, reads)`) {
 		t.Error("the restore card does not narrow to the snapshots its fold can read: this server's " +
-			"S3 backups when it has them, else its directory (#1541)")
+			"S3 snapshots when it has them, else its directory (#1541)")
 	}
 
 	for _, fn := range []string{"function backupSQLLane(", "function backupRestoreCard("} {

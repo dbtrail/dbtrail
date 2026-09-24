@@ -1007,11 +1007,11 @@ button { font-family: inherit; }
   .cards > .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
 .card {
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius);
+  background: #fff;
+  border: 0;
+  border-radius: 22px;
   padding: 22px 22px 8px;
-  box-shadow: var(--panel-shadow);
+  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
   position: relative; overflow: hidden;
 }
 [data-dir="paper"] .card { background: transparent; border-color: var(--line); padding-left: 0; padding-right: 22px; }
@@ -1020,9 +1020,9 @@ button { font-family: inherit; }
   background: linear-gradient(var(--accent-a), var(--accent-b));
 }
 .card-title {
-  font-family: var(--f-mono); font-size: 11px; font-weight: 600;
-  letter-spacing: 0.08em; text-transform: uppercase;
-  color: var(--accent); margin-bottom: 16px;
+  font-family: var(--f-display); font-size: 16px; font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink); margin-bottom: 14px;
 }
 .kv {
   display: flex; align-items: baseline; justify-content: space-between;
@@ -1307,11 +1307,7 @@ button { font-family: inherit; }
   border-radius: var(--radius); user-select: all;
 }
 .form-advanced { margin-top: 18px; }
-.form-adv-summary {
-  cursor: pointer; user-select: none;
-  font-family: var(--f-mono); font-size: 11px; font-weight: 600;
-  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2);
-}
+.form-adv-summary { cursor: pointer; font-family: var(--f-ui); font-size: 13px; font-weight: 500; color: var(--ink-3); list-style: none; }
 .form-adv-summary:hover, .form-advanced[open] > .form-adv-summary { color: var(--blue); }
 .form-adv-summary[hidden] { display: none; }
 .form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
@@ -1461,8 +1457,9 @@ button { font-family: inherit; }
    page.
    ============================================================ */
 .tcard {
-  border-radius: var(--radius-lg); border: 1px solid var(--line);
-  background: var(--surface); padding: 20px 22px; min-width: 0;
+  border-radius: 22px; border: 0;
+  background: #fff; padding: 20px 22px; min-width: 0;
+  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
 }
 /* tint modifiers live further down, AFTER the .ov-panel ground rules —
    one vocabulary, always hyphenated: class="tcard tcard-violet". (An
@@ -1623,8 +1620,9 @@ button { font-family: inherit; }
 
 .ov-grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 18px; align-items: start; }
 .ov-panel {
-  background: var(--panel-bg); border: 1px solid var(--panel-border);
-  border-radius: var(--radius-lg); padding: 10px 10px 12px; box-shadow: var(--panel-shadow);
+  background: #fff; border: 0;
+  border-radius: 22px; padding: 14px 14px 16px;
+  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
 }
 /* the tint modifiers (#1421) — one OPT-IN vocabulary: the hyphenated class
    IS the modifier, valid on .tcard and .ov-panel alike ("tcard tcard-violet",
@@ -2230,7 +2228,7 @@ section.bk-restore { margin-top: 18px; }
 .bk-restore-row .in { max-width: 260px; }
 
 .stg-name { font-weight: 600; color: var(--ink); white-space: nowrap; }
-.stg-name.mono { font-family: var(--f-mono); font-weight: 500; font-size: 12.5px; }
+.stg-name.mono { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13.5px; }
 .stg-dest {
   color: var(--ink-2); flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -2360,17 +2358,17 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .vfy-histdetail { padding: 4px 10px 10px 30px; border-top: 1px dashed var(--line-soft); }
 
 /* baselines context strip (#1415) */
-.ctx-strip { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; margin-top: 4px; margin-bottom: 16px; padding: 14px 18px; }
+.ctx-strip { display: flex; align-items: center; gap: 26px; flex-wrap: wrap; margin-top: 4px; margin-bottom: 18px; padding: 20px 24px; }
 .ctx-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .ctx-grow { flex: 1 1 320px; }
-.ctx-label { font-family: var(--f-mono); font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em; color: var(--ink-4); text-transform: uppercase; }
-.ctx-value { font-size: 13px; color: var(--ink); }
+.ctx-label { font-family: var(--f-ui); font-size: 12px; font-weight: 500; color: var(--ink-3); }
+.ctx-value { font-family: var(--f-display); font-size: 17px; font-weight: 700; letter-spacing: -0.01em; color: var(--ink); }
 .ctx-source { display: block; font-size: 12px; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ctx-action { align-self: center; margin-left: auto; }
 /* the newest snapshot is what a restore actually uses — it gets the
    treatment; relative age rides beside the absolute time */
 .stg-row-latest { background: var(--violet-tint); border-radius: var(--radius-sm); }
-.stg-rel { font-family: var(--f-mono); font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.stg-rel { font-family: var(--f-ui); font-size: 12.5px; color: var(--ink-3); white-space: nowrap; }
 /* The newest row is the one tint on this page, so everything it carries has
    to survive the ground it sits on. Measured with the converter in
    assets_tint_contrast_test.go; the rules below are guarded by
@@ -2882,10 +2880,10 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .cards .card::after {
   content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
 }
-.cards .card:nth-child(4n+1) { background: var(--pink-tint);   border-color: color-mix(in srgb, var(--pink-deep) 22%, transparent); }
-.cards .card:nth-child(4n+2) { background: var(--sun-tint);    border-color: color-mix(in srgb, var(--sun-deep) 26%, transparent); }
-.cards .card:nth-child(4n+3) { background: var(--violet-tint); border-color: color-mix(in srgb, var(--violet-deep) 22%, transparent); }
-.cards .card:nth-child(4n+0) { background: var(--orange-tint); border-color: color-mix(in srgb, var(--orange-deep) 22%, transparent); }
+.cards .card:nth-child(4n+1) { background: var(--pink-tint); }
+.cards .card:nth-child(4n+2) { background: var(--sun-tint); }
+.cards .card:nth-child(4n+3) { background: var(--violet-tint); }
+.cards .card:nth-child(4n+0) { background: var(--orange-tint); }
 .cards .card:nth-child(4n+1) .card-title { color: var(--pink-deep); }
 .cards .card:nth-child(4n+2) .card-title { color: var(--sun-deep); }
 .cards .card:nth-child(4n+3) .card-title { color: var(--violet-deep); }
@@ -3123,7 +3121,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .bks-erow { padding: 12px 0; border-bottom: 1px dotted var(--line); }
 .bks-erow:last-child { border-bottom: none; }
 .bks-erow-in { display: flex; gap: 8px; align-items: center; margin: 4px 0 6px; flex-wrap: wrap; }
-.bks-erow-in .input { flex: 1 1 220px; min-width: 0; }
+.bks-erow-in .input { flex: 0 1 200px; min-width: 0; }
 .bks-label { font-size: 13px; color: var(--ink-2); }
 .bks-value {
   font-family: var(--f-mono); font-size: 13px; color: var(--ink);
@@ -3141,8 +3139,8 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
    grid ("change here"), and the daemon card sits outside it, plain, with
    one restart chip at card level ("set at startup"). */
 .bks-sect {
-  font-family: var(--f-mono); font-size: 11px; font-weight: 600;
-  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3);
+  font-family: var(--f-ui); font-size: 13px; font-weight: 500;
+  color: var(--ink-3);
   margin: 22px 0 10px;
 }
 .page-head + .bks-sect { margin-top: 0; }
@@ -3237,3 +3235,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .snap-fold[open] > summary { margin-bottom: 10px; }
 .rc-restore-slot { margin-top: 20px; }
 .rc-restore-note a { color: #D9367A; font-weight: 600; text-decoration: none; border-bottom: 1px solid currentColor; }
+/* the Snapshots page's one daemon row: a plain white card, the tints stay
+   for the configuration pages */
+.cards.cards-plain .card { background: #fff; }
+.cards.cards-plain .card .card-title { color: var(--ink); }

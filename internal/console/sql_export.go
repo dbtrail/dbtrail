@@ -93,7 +93,7 @@ type SQLExportRequest struct {
 func (s *Server) handleSQLExportTrigger(w http.ResponseWriter, r *http.Request) {
 	if s.sqlExport == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"custom .sql backups from the console are not enabled; they need the watch daemon with baseline creation or refresh turned on")
+			"custom .sql exports from the console are not enabled; they need the watch daemon with baseline creation or refresh turned on")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))
@@ -107,7 +107,7 @@ func (s *Server) handleSQLExportTrigger(w http.ResponseWriter, r *http.Request) 
 	if sessionRestricted(r) {
 		recordProfileGateDeny(r, "sql-export-trigger")
 		writeJSONError(w, http.StatusForbidden,
-			"custom .sql backups are unavailable while an access-control profile is active: baseline reads aren't redacted")
+			"custom .sql exports are unavailable while an access-control profile is active: baseline reads aren't redacted")
 		return
 	}
 	// An entry with no baseline of its own inherits the process-wide
@@ -124,7 +124,7 @@ func (s *Server) handleSQLExportTrigger(w http.ResponseWriter, r *http.Request) 
 	}
 	if src == "" {
 		writeJSONError(w, http.StatusBadRequest,
-			"this server has no backup location set up; set a backup directory or S3 location first"+onPage(PageSnapshots))
+			"this server has no snapshot location set up; set a snapshot directory or S3 location first"+onPage(PageSnapshots))
 		return
 	}
 	var body struct {
@@ -161,7 +161,7 @@ func (s *Server) handleSQLExportTrigger(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleSQLExportStatus(w http.ResponseWriter, r *http.Request) {
 	if s.sqlExport == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"custom .sql backups from the console are not enabled; they need the watch daemon with baseline creation or refresh turned on")
+			"custom .sql exports from the console are not enabled; they need the watch daemon with baseline creation or refresh turned on")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))
@@ -179,7 +179,7 @@ func (s *Server) handleSQLExportStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request) {
 	if s.sqlExport == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"custom .sql backups from the console are not enabled; they need the watch daemon with baseline creation or refresh turned on")
+			"custom .sql exports from the console are not enabled; they need the watch daemon with baseline creation or refresh turned on")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))
@@ -191,13 +191,13 @@ func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request)
 	if sessionRestricted(r) {
 		recordProfileGateDeny(r, "sql-export-download")
 		writeJSONError(w, http.StatusForbidden,
-			"backups are unavailable while an access-control profile is active: baseline reads aren't redacted")
+			"snapshots are unavailable while an access-control profile is active: baseline reads aren't redacted")
 		return
 	}
 	dir, st, ready := s.sqlExport.SQLExportDir(e.ID)
 	if !ready {
 		writeJSONError(w, http.StatusConflict,
-			"no finished .sql backup to download; build one first (it may still be running, the last build may have failed, it may already have been downloaded or passed its download deadline, or its files were removed from the staging directory; building again fixes all of these)")
+			"no finished .sql export to download; build one first (it may still be running, the last build may have failed, it may already have been downloaded or passed its download deadline, or its files were removed from the staging directory; building again fixes all of these)")
 		return
 	}
 	// The hold keeps the TTL and the reaper off this build for as long as
@@ -206,7 +206,7 @@ func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request)
 	release, held := s.sqlExport.SQLExportHold(e.ID, dir)
 	if !held {
 		writeJSONError(w, http.StatusConflict,
-			"no finished .sql backup to download; build one first (it may still be running, the last build may have failed, it may already have been downloaded or passed its download deadline, or its files were removed from the staging directory; building again fixes all of these)")
+			"no finished .sql export to download; build one first (it may still be running, the last build may have failed, it may already have been downloaded or passed its download deadline, or its files were removed from the staging directory; building again fixes all of these)")
 		return
 	}
 	defer release()
@@ -216,7 +216,7 @@ func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "read the built backup: "+err.Error())
+		writeJSONError(w, http.StatusInternalServerError, "read the built snapshot: "+err.Error())
 		return
 	}
 	var names []string
@@ -227,7 +227,7 @@ func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request)
 		// archive missing whatever it holds.
 		if ent.IsDir() {
 			writeJSONError(w, http.StatusInternalServerError,
-				"the built backup holds an unexpected subdirectory ("+name+"); build it again")
+				"the built snapshot holds an unexpected subdirectory ("+name+"); build it again")
 			return
 		}
 		// The completeness markers describe the BUILD; the dump myloader
@@ -239,7 +239,7 @@ func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request)
 	}
 	sort.Strings(names)
 	if len(names) == 0 {
-		writeJSONError(w, http.StatusConflict, "the built backup is empty; build it again")
+		writeJSONError(w, http.StatusConflict, "the built snapshot is empty; build it again")
 		return
 	}
 
@@ -263,7 +263,7 @@ func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request)
 	}()
 	abort := func(msg string, err error) {
 		if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
-			slog.Info("sql backup download canceled by the client", "server", e.ID, "bytes", sent)
+			slog.Info("sql snapshot download canceled by the client", "server", e.ID, "bytes", sent)
 		} else {
 			slog.Warn(msg, "server", e.ID, "error", err)
 		}
@@ -277,32 +277,32 @@ func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request)
 		full := filepath.Join(dir, name)
 		info, err := os.Stat(full)
 		if err != nil {
-			abort("sql backup download aborted: file unreadable", err)
+			abort("sql snapshot download aborted: file unreadable", err)
 		}
 		hdr := &tar.Header{Name: prefix + name, Mode: 0o644, Size: info.Size(), ModTime: info.ModTime()}
 		if err := tw.WriteHeader(hdr); err != nil {
-			abort("sql backup download aborted: tar header write failed", err)
+			abort("sql snapshot download aborted: tar header write failed", err)
 		}
 		f, err := os.Open(full)
 		if err != nil {
-			abort("sql backup download aborted: file unreadable", err)
+			abort("sql snapshot download aborted: file unreadable", err)
 		}
 		n, err := io.Copy(tw, f)
 		f.Close()
 		sent += n
 		if err != nil {
-			abort("sql backup download aborted mid-file", err)
+			abort("sql snapshot download aborted mid-file", err)
 		}
 		if n != info.Size() {
-			abort("sql backup download aborted: file changed mid-stream", errors.New("short read"))
+			abort("sql snapshot download aborted: file changed mid-stream", errors.New("short read"))
 		}
 		sentFiles++
 	}
 	if err := tw.Close(); err != nil {
-		abort("sql backup download: tar finalize failed", err)
+		abort("sql snapshot download: tar finalize failed", err)
 	}
 	if err := gz.Close(); err != nil {
-		abort("sql backup download: gzip finalize failed", err)
+		abort("sql snapshot download: gzip finalize failed", err)
 	}
 	// net/http buffers the tail of the body; a connection that broke during
 	// the last chunk surfaces only when that buffer is flushed. Flush before
@@ -315,20 +315,20 @@ func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request)
 	// that went away. The deadline still bounds the build either way.
 	if err := http.NewResponseController(w).Flush(); err != nil {
 		if errors.Is(err, http.ErrNotSupported) {
-			slog.Error("sql backup download: the response writer cannot flush, so the delivery cannot be confirmed and the staged build is kept; every ResponseWriter wrapper on this route must implement Flush or Unwrap",
+			slog.Error("sql snapshot download: the response writer cannot flush, so the delivery cannot be confirmed and the staged build is kept; every ResponseWriter wrapper on this route must implement Flush or Unwrap",
 				"server", e.ID, "writer", fmt.Sprintf("%T", w))
 		}
-		abort("sql backup download aborted: the connection dropped before the last bytes were sent", err)
+		abort("sql snapshot download aborted: the connection dropped before the last bytes were sent", err)
 	}
 	if err := r.Context().Err(); err != nil {
-		abort("sql backup download aborted: the connection dropped before the last bytes were sent", err)
+		abort("sql snapshot download aborted: the connection dropped before the last bytes were sent", err)
 	}
 	// A rebuild's teardown racing this stream can hand the ReadDir above a
 	// subset whose every surviving file then streams cleanly — the one shape
 	// the per-file guards cannot see. If the wipe happened, the _SUCCESS
 	// marker is gone with it: re-check before declaring the archive whole.
 	if _, err := os.Stat(filepath.Join(dir, baseline.SuccessMarker)); err != nil {
-		abort("sql backup download aborted: the build was replaced or expired mid-stream", err)
+		abort("sql snapshot download aborted: the build was replaced or expired mid-stream", err)
 	}
 	completed = true
 	// The archive is whole and written to the socket: the staged copy has

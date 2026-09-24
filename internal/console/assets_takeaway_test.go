@@ -120,7 +120,7 @@ func TestViewsFileIsNamedFromOneConstant(t *testing.T) {
 	body := strings.ReplaceAll(js, "/api/"+decl[1], "")
 	if n := strings.Count(body, decl[1]); n != 1 {
 		t.Errorf("%q appears %d times outside a comment line; only its own declaration may spell "+
-			"it out. Everywhere else it must come from DUCKDB_VIEWS_FILE, or the Backups lane can "+
+			"it out. Everywhere else it must come from DUCKDB_VIEWS_FILE, or the Snapshots lane can "+
 			"promise a file the schema card no longer produces", decl[1], n)
 	}
 
@@ -161,7 +161,7 @@ func TestTakeAwayPanelIsMountedAboveTheList(t *testing.T) {
 	case list < 0:
 		t.Fatal("Snapshots no longer mounts baselinesPanel")
 	case mount > list:
-		t.Error("the two lanes render BELOW the backups list. They are the answer to why the page " +
+		t.Error("the two lanes render BELOW the snapshots list. They are the answer to why the page " +
 			"was opened; the list is how you pick a different one")
 	}
 }

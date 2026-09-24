@@ -20,10 +20,10 @@ func TestBackupWhyCode(t *testing.T) {
 		{BackupWhyNoIndex, "no_index"},
 		{BackupWhyNoLocalDir, "no_local_dir"},
 		{BackupWhyFirstBackup, "first_backup"},
-		{BackupWhyUnreadablePrefix + " from the backup destination (boom), so a full backup is taken instead", "previous_unreadable"},
+		{BackupWhyUnreadablePrefix + " from the snapshot destination (boom), so a full read is taken instead", "previous_unreadable"},
 		{BackupWhyFoldRefusedPrefix + " (capture gap)", "fold_refused"},
 		{BackupWhyFoldCrashedPrefix + " (internal error: nil map)", "fold_crashed"},
-		{BackupWhyWindowPrefix + ": 17,000,000 events since the previous backup would take about 1h 10m to apply at the measured rate, and the last full backup took 8m", "window_measured"},
+		{BackupWhyWindowPrefix + ": 17,000,000 events since the previous snapshot would take about 1h 10m to apply at the measured rate, and the last full read took 8m", "window_measured"},
 		{BackupWhyStaleAnchorPrefix + ": it is 5h 30m old and the cut-over is 2h (no count of the changes since it, so the update could not be estimated)", "window_age"},
 		{"no load on your database", ""},
 		{"some wording a newer daemon wrote", ""},
@@ -195,12 +195,12 @@ const gap = "` + BackupWhyFoldRefusedPrefix + ` (shop.orders: reconstruct: captu
 const out = {
   remedy: backupWhyLine("` + BackupWhyNoLocalDir + `", "no_local_dir", true),
   fact: backupWhyLine("` + BackupWhyNoLocalDir + `", "no_local_dir", false),
-  unreadable: backupWhyLine("` + BackupWhyUnreadablePrefix + ` from the backup destination (boom), so a full backup is taken instead", "previous_unreadable", true),
+  unreadable: backupWhyLine("` + BackupWhyUnreadablePrefix + ` from the snapshot destination (boom), so a full read is taken instead", "previous_unreadable", true),
   gap: backupWhyLine(gap, "fold_refused", true),
   crash: backupWhyLine("` + BackupWhyFoldCrashedPrefix + ` (internal error: nil map)", "fold_crashed", false),
   unknown: backupWhyLine("something a newer daemon wrote", "", true),
   empty: backupWhyLine("", "no_index", true),
-  window: backupWhyLine("` + BackupWhyWindowPrefix + `: 17,000,000 events since the previous backup would take about 1h 10m to apply at the measured rate, and the last full backup took 8m", "window_measured", true),
+  window: backupWhyLine("` + BackupWhyWindowPrefix + `: 17,000,000 events since the previous snapshot would take about 1h 10m to apply at the measured rate, and the last full read took 8m", "window_measured", true),
   age: backupWhyLine("` + BackupWhyStaleAnchorPrefix + `: it is 5h 30m old and the cut-over is 2h (no count of the changes since it, so the update could not be estimated)", "window_age", false),
 };
 console.log(JSON.stringify(out));
@@ -220,26 +220,26 @@ console.log(JSON.stringify(out));
 	if !strings.Contains(got.Remedy, "the next run updates") || strings.Contains(got.Fact, "next run") || !strings.Contains(got.Fact, "did not have at the time") {
 		t.Errorf("remedy/fact split: remedy=%q fact=%q", got.Remedy, got.Fact)
 	}
-	if got.Unreadable != "The previous backup could not be read from the backup destination (boom), so a full backup is taken instead." {
+	if got.Unreadable != "The previous snapshot could not be read from the snapshot destination (boom), so a full read is taken instead." {
 		t.Errorf("unreadable = %q", got.Unreadable)
 	}
-	if !strings.HasPrefix(got.Gap, "The update from the recorded changes was refused, so a full backup was taken instead. Reason: shop.orders") ||
+	if !strings.HasPrefix(got.Gap, "The update from the recorded changes was refused, so a full read was taken instead. Reason: shop.orders") ||
 		strings.Contains(got.Gap, "--allow-gaps") || strings.Contains(got.Gap, "pick a later moment") || !strings.Contains(got.Gap, "shop.items") {
 		t.Errorf("multi-table refusal = %q", got.Gap)
 	}
-	if got.Crash != "The update from the recorded changes hit an internal error, so a full backup was taken instead. Error: nil map." {
+	if got.Crash != "The update from the recorded changes hit an internal error, so a full read was taken instead. Error: nil map." {
 		t.Errorf("crash = %q", got.Crash)
 	}
-	if got.Unknown != "Full backup because something a newer daemon wrote." || got.Empty != "" {
+	if got.Unknown != "Full read because something a newer daemon wrote." || got.Empty != "" {
 		t.Errorf("unknown=%q empty=%q", got.Unknown, got.Empty)
 	}
 	// The #1721 reasons carry the daemon's numbers and are said as recorded,
 	// on the card and in the detail alike.
-	if !strings.HasPrefix(got.Window, "Full backup instead of an update: an update from the recorded changes would take longer") ||
+	if !strings.HasPrefix(got.Window, "Full read instead of an update: an update from the recorded changes would take longer") ||
 		!strings.Contains(got.Window, "17,000,000 events") || !strings.HasSuffix(got.Window, "took 8m.") {
 		t.Errorf("window = %q", got.Window)
 	}
-	if !strings.HasPrefix(got.Age, "Full backup instead of an update: the previous backup is too old") || !strings.HasSuffix(got.Age, "estimated).") {
+	if !strings.HasPrefix(got.Age, "Full read instead of an update: the previous snapshot is too old") || !strings.HasSuffix(got.Age, "estimated).") {
 		t.Errorf("age = %q", got.Age)
 	}
 	for k, v := range map[string]string{"remedy": got.Remedy, "fact": got.Fact, "unreadable": got.Unreadable, "gap": got.Gap, "crash": got.Crash, "unknown": got.Unknown, "window": got.Window, "age": got.Age} {

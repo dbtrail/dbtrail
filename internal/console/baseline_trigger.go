@@ -181,7 +181,7 @@ type BaselineRestoreRequest struct {
 	// behaves like the scheduled update on the same server (#1541). Before it
 	// was carried, the restore listed the local directory alone, which on an
 	// S3-backed server holds only what this daemon folded since it started,
-	// and refused with "no backup exists" while the bucket held dozens.
+	// and refused with "no snapshot exists" while the bucket held dozens.
 	BaselineS3 string
 	At         time.Time
 	// CarryForwardUnchanged is the effective setting the console resolved for
@@ -205,7 +205,7 @@ type BaselineStatus struct {
 	// diverge on one failure — the fold finished and marked the snapshot and
 	// only the upload to the backup destination failed (#1539) — and that is
 	// exactly the case where asking "did it fail?" gives the wrong answer to
-	// "is a backup still owed?".
+	// "is a snapshot still owed?".
 	Published bool `json:"published,omitempty"`
 	// Uploading: the snapshot is published locally and its copy to the backup
 	// destination is still in flight (#1725). The server's job slot is
@@ -354,11 +354,11 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		// belongs to neither.
 		if e.BaselineS3 != "" {
 			writeJSONError(w, http.StatusBadRequest,
-				"this server keeps its backups only in S3; point-in-time restore needs a local backup directory"+onPage(PageSnapshots))
+				"this server keeps its snapshots only in S3; point-in-time restore needs a local snapshot directory"+onPage(PageSnapshots))
 			return
 		}
 		writeJSONError(w, http.StatusBadRequest,
-			"this server has no backup directory of its own; set one first"+onPage(PageSnapshots))
+			"this server has no snapshot directory of its own; set one first"+onPage(PageSnapshots))
 		return
 	}
 	var body struct {
@@ -383,19 +383,19 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		// Refuse only a COMPLETE snapshot: an _INCOMPLETE leftover from a
 		// failed fold is the retry-the-same-instant case the engine supports
 		// on purpose (reconstruct's leftover rule), and the listing hides it,
-		// so "use that backup" would name something the operator cannot see.
+		// so "use that snapshot" would name something the operator cannot see.
 		if baseline.SnapshotComplete(snapDir) {
 			// The fold WRITES here whatever it reads from, so this is a
-			// collision either way; "use that backup" is only advice when the
+			// collision either way; "use that snapshot" is only advice when the
 			// restore would read it, which on an S3-backed server it does not
 			// (a local-only snapshot is the leftover of a failed upload).
 			if e.BaselineS3 != "" {
 				writeJSONError(w, http.StatusConflict,
-					"a backup already exists on this host at exactly "+at.Format(consoleTSFormat)+"; pick another second")
+					"a snapshot already exists on this host at exactly "+at.Format(consoleTSFormat)+"; pick another second")
 				return
 			}
 			writeJSONError(w, http.StatusConflict,
-				"a backup already exists at exactly "+at.Format(consoleTSFormat)+"; pick another second, or use that backup")
+				"a snapshot already exists at exactly "+at.Format(consoleTSFormat)+"; pick another second, or use that snapshot")
 			return
 		}
 		// The engine's retry rule tolerates ONLY the marker: a failed fold
@@ -406,7 +406,7 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		// check exists to avoid.
 		ents, rerr := os.ReadDir(snapDir)
 		if rerr != nil {
-			writeJSONError(w, http.StatusBadGateway, "cannot read the backup directory: "+rerr.Error())
+			writeJSONError(w, http.StatusBadGateway, "cannot read the snapshot directory: "+rerr.Error())
 			return
 		}
 		for _, ent := range ents {
@@ -414,14 +414,14 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			writeJSONError(w, http.StatusConflict,
-				"a failed backup at exactly "+at.Format(consoleTSFormat)+" left files behind; delete that backup folder and retry, or pick another second")
+				"a failed snapshot at exactly "+at.Format(consoleTSFormat)+" left files behind; delete that snapshot folder and retry, or pick another second")
 			return
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		// A backup directory that cannot even be stat'ed predicts the fold
 		// will fail; refuse now with the real reason instead of a 202 whose
 		// failure the operator must poll for.
-		writeJSONError(w, http.StatusBadGateway, "cannot read the backup directory: "+err.Error())
+		writeJSONError(w, http.StatusBadGateway, "cannot read the snapshot directory: "+err.Error())
 		return
 	}
 	req := BaselineRestoreRequest{

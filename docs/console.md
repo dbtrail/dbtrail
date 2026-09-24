@@ -244,7 +244,7 @@ and searching events:
    archive includes a `views.sql` with relative paths, so unpacking it and
    running `duckdb -init views.sql` from inside the folder opens every table
    ([#1583](https://github.com/dbtrail/dbtrail/issues/1583)); plus
-   **Create backup** and — for a server with its own local backup directory —
+   **Read database now** and — for a server with its own local backup directory —
    **Restore to a moment**, which folds a chosen past instant into a NEW
    discoverable snapshot in the same store, and **Build a .sql backup for
    any moment**, which folds a chosen instant into a mydumper-format dump
@@ -395,7 +395,7 @@ immediately; warnings (e.g. short binlog retention) show but don't block.
 The **source user** you paste into the form needs `REPLICATION SLAVE,
 REPLICATION CLIENT, SELECT` on the source MySQL — the form spells out the
 exact `CREATE USER` / `GRANT` to copy. DBTrail never writes to the source, and
-capture never locks it. The **Create backup** button needs more,
+capture never locks it. The **Read database now** button needs more,
 `RELOAD` plus `BACKUP_ADMIN` on MySQL/Percona 8.0+ and `SHOW VIEW` for views,
 because a baseline is point-consistent by default. Without the lock privileges
 capture keeps running and only the baseline is refused, naming the exact
@@ -552,7 +552,7 @@ saved, shown with the reason nothing here is running it.
   (`baseline_dir` / `baseline_s3`): each snapshot's timestamp, age, table
   count, and (local sources) the binlog coordinates its deltas start from. The
   empty states explain how to produce a first baseline (`bintrail dump` →
-  `bintrail baseline`). When the **Create backup** button is enabled it sits
+  `bintrail baseline`). When the **Read database now** button is enabled it sits
   on the page's top strip, for a server with a backup location of its own (the
   daemon-wide default lists backups, but a backup refuses to write to it).
   When the page lists backups for a server with a source (from its own
@@ -567,7 +567,7 @@ saved, shown with the reason nothing here is running it.
   UTC hour). The operator picks WHEN; HOW each run is made is the daemon's decision
   per slot (`console.ChooseBackupMethod`), and the page says which one comes
   next and why: a server with no local backup directory gets a **full backup**
-  (the Create backup job, reads the source, needs
+  (the Read-database-now job, reads the source, needs
   `BINTRAIL_CONSOLE_BASELINE_TRIGGER=1`), and so does one with no previous
   backup yet; otherwise the newest backup is **updated from the recorded
   changes** (the baseline-refresh fold: reads nothing from the source, needs
@@ -720,7 +720,7 @@ an empty Local folder field, indistinguishable from a server with no backup
 location at all.
 
 The page offers three settings and nothing else: how often the copy is
-updated, a manual read of the database (Create backup) and retention, under
+updated, a manual read of the database (Read database now) and retention, under
 one label, **Change here**: the daemon's retention row and the per-server
 rows. What is set in the launch command (the lock mode, the `.sql` build
 folder, the verify table filter, the default locations) is documented under
@@ -790,7 +790,7 @@ longer drawn on the page.
   itself and the full-backup note sit inside it. Save wakes up when a field
   differs from what was loaded.
   A server with its own S3 destination also gets the growth line and the
-  rule (#1622), schedule or not, since the Create backup button, a restore
+  rule (#1622), schedule or not, since the Read database now button, a restore
   and the daemon-wide refresh upload too: about how many full backups
   reach the bucket every 30 days at the schedule's rate (or that every one
   stays, without a schedule), and that DBTrail never removes one. Under
@@ -1051,7 +1051,7 @@ longer does anything. Remove it.
   Archive-to-S3 feature, same as `--archive-staging-dir`. AWS credentials for
   the upload come from the ambient chain (`AWS_*` / `~/.aws` / role).
 - `BINTRAIL_CONSOLE_BASELINE_TRIGGER` (`watch` only) — `1`/`true` enables the
-  **Create backup** button (runs `mydumper` → convert → upload in-process;
+  **Read database now** button (runs `mydumper` → convert → upload in-process;
   see [The Snapshots page](#the-snapshots-page)). Off by default for a bare
   `watch` invocation; the bundled compose stack sets this on by default (see
   [docker.md](docker.md) — `BASELINE_TRIGGER=0` in `.env` opts out there).

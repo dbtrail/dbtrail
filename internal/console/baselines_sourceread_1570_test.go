@@ -234,10 +234,10 @@ func TestBaselineFilesAPI_sourceReadOfAFullBackup(t *testing.T) {
 	}
 	got := srGet(t, root, t0)
 	if got.SourceReadAt != "2026-06-01 03:00:00" || got.SourceReadAgeSeconds != 0 || got.SourceReadMissing != 0 {
-		t.Fatalf("full backup: read %q, age %v, missing %d", got.SourceReadAt, got.SourceReadAgeSeconds, got.SourceReadMissing)
+		t.Fatalf("full read: read %q, age %v, missing %d", got.SourceReadAt, got.SourceReadAgeSeconds, got.SourceReadMissing)
 	}
 	if got.MaxFoldsSinceRead == nil || *got.MaxFoldsSinceRead != 0 {
-		t.Fatalf("full backup: max folds %v, want 0 (sent, not omitted)", got.MaxFoldsSinceRead)
+		t.Fatalf("full read: max folds %v, want 0 (sent, not omitted)", got.MaxFoldsSinceRead)
 	}
 }
 
@@ -341,29 +341,29 @@ vm.runInContext("loadBackupDetail", ctx)("2026-06-01T15:00:00Z", box).then(() =>
 		t.Logf("cell %-7s %q  (title: %s)", name, got.Cells[name].Text, got.Cells[name].Title)
 	}
 
-	if want := "Last real read of your database: 2026-06-01 03:00:00 UTC, 12h before this backup. " +
+	if want := "Last real read of your database: 2026-06-01 03:00:00 UTC, 12h before this snapshot. " +
 		"Updated from the recorded changes up to twice since. 2 tables do not record when."; got.ChainLine != want {
 		t.Errorf("chain line:\n got %q\nwant %q", got.ChainLine, want)
 	}
 	if got.FullLine != "Read from your database when it was taken." {
-		t.Errorf("full backup line = %q", got.FullLine)
+		t.Errorf("full read line = %q", got.FullLine)
 	}
 	if got.S3Line != "" {
 		t.Errorf("nothing looked up (an S3 source) drew %q; it must draw nothing", got.S3Line)
 	}
-	if got.QuietLine != "Last real read of your database: 2026-06-01 03:00:00 UTC, 6h before this backup." {
-		t.Errorf("quiet line = %q; a backup that carried a six-hour-old full backup forward must not read as taken from the database", got.QuietLine)
+	if got.QuietLine != "Last real read of your database: 2026-06-01 03:00:00 UTC, 6h before this snapshot." {
+		t.Errorf("quiet line = %q; a snapshot that carried a six-hour-old full read forward must not read as taken from the database", got.QuietLine)
 	}
 	if got.Days != "3 days" {
 		t.Errorf("fmtAge(3 days) = %q", got.Days)
 	}
-	if !strings.Contains(got.Detail, "Last real read of your database: 2026-06-01 03:00:00 UTC, 12h before this backup.") {
-		t.Errorf("the backup detail does not draw the line: %q", got.Detail)
+	if !strings.Contains(got.Detail, "Last real read of your database: 2026-06-01 03:00:00 UTC, 12h before this snapshot.") {
+		t.Errorf("the snapshot detail does not draw the line: %q", got.Detail)
 	}
-	if got.UndatedLine != "When your database was last read for this backup is not recorded." {
+	if got.UndatedLine != "When your database was last read for this snapshot is not recorded." {
 		t.Errorf("undated line = %q", got.UndatedLine)
 	}
-	if want := "Last real read of your database: 2026-06-01 03:00:00 UTC, 24h before this backup. " +
+	if want := "Last real read of your database: 2026-06-01 03:00:00 UTC, 24h before this snapshot. " +
 		"How many updates were built since is not recorded for 1 table."; got.UncountedLine != want {
 		t.Errorf("uncounted line:\n got %q\nwant %q", got.UncountedLine, want)
 	}
@@ -380,7 +380,7 @@ vm.runInContext("loadBackupDetail", ctx)("2026-06-01T15:00:00Z", box).then(() =>
 			t.Errorf("cell %s = %q, want %q", name, got.Cells[name].Text, want)
 		}
 	}
-	if !strings.Contains(got.Cells["quiet"].Title, "Reused from the backup of 2026-06-01 09:00:00 UTC.") {
+	if !strings.Contains(got.Cells["quiet"].Title, "Reused from the snapshot of 2026-06-01 09:00:00 UTC.") {
 		t.Errorf("the reused table's tooltip does not say whose file (and date) it is: %q", got.Cells["quiet"].Title)
 	}
 	if !strings.Contains(got.Cells["orders"].Title, "updated twice from the recorded changes since") {
@@ -390,8 +390,8 @@ vm.runInContext("loadBackupDetail", ctx)("2026-06-01T15:00:00Z", box).then(() =>
 	if strings.Contains(got.Cells["orders"].Title, "Built") {
 		t.Errorf("orders tooltip names its chain start twice: %q", got.Cells["orders"].Title)
 	}
-	if !strings.Contains(got.Cells["old"].Title, "Built from the backup of 2026-06-01 09:00:00 UTC plus the changes recorded since.") {
-		t.Errorf("the updated table's tooltip does not name the backup its file came from: %q", got.Cells["old"].Title)
+	if !strings.Contains(got.Cells["old"].Title, "Built from the snapshot of 2026-06-01 09:00:00 UTC plus the changes recorded since.") {
+		t.Errorf("the updated table's tooltip does not name the snapshot its file came from: %q", got.Cells["old"].Title)
 	}
 	for name, c := range got.Cells {
 		for _, bad := range []string{"— ", "fold", "carried", "undefined", "null", "NaN"} {

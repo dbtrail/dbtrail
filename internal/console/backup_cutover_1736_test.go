@@ -251,11 +251,11 @@ func TestCutoverToFull_fixedCostAboveTheFullBackupWithoutARate(t *testing.T) {
 		w    BackupWindow
 		want string
 	}{
-		{"six-minute updates, two-minute full backups: full", BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, "window_measured"},
+		{"six-minute updates, two-minute full reads: full", BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, "window_measured"},
 		{"count unknown, same costs: full", BackupWindow{Anchor: fresh, Events: -1, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, "window_measured"},
 		{"nothing to fold: update", BackupWindow{Anchor: fresh, Events: 0, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, ""},
-		{"fixed cost under the full backup, fresh anchor: update", BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: 6 * time.Minute, LastFull: 8 * time.Minute}, ""},
-		{"no full backup on record, fresh anchor: update", BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: 6 * time.Minute}, ""},
+		{"fixed cost under the full read, fresh anchor: update", BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: 6 * time.Minute, LastFull: 8 * time.Minute}, ""},
+		{"no full read on record, fresh anchor: update", BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: 6 * time.Minute}, ""},
 		{"with a rate the estimate decides, not this", BackupWindow{Anchor: fresh, Events: 1, FoldFixed: 6 * time.Minute, FoldRate: 1000, LastFull: 2 * time.Minute}, "window_measured"},
 	}
 	for _, c := range cases {
@@ -280,6 +280,6 @@ func TestCutoverToFull_fixedCostAboveTheFullBackupWithoutARate(t *testing.T) {
 	}
 	w := BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: fixed, FoldRate: rate, LastFull: 2 * time.Minute}
 	if why := CutoverToFull(w, 5*time.Minute, now); BackupWhyCode(why) != "window_measured" || !strings.Contains(why, "cheapest recent update took 6m") {
-		t.Fatalf("six-minute updates against a two-minute full backup were not cut over: %q", why)
+		t.Fatalf("six-minute updates against a two-minute full read were not cut over: %q", why)
 	}
 }

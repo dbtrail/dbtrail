@@ -900,7 +900,7 @@ func TestRefreshFoldConfig_readsTheBucketAndWritesTheLocalDirectory(t *testing.T
 	}{
 		{"no destination: both are the local directory",
 			refreshRequest{IndexDSN: "dsn", BaselineDir: "/b"}, "/b"},
-		{"backups go to S3: read the bucket, write the local directory",
+		{"snapshots go to S3: read the bucket, write the local directory",
 			refreshRequest{IndexDSN: "dsn", BaselineDir: "/b", BaselineS3: "s3://bucket/backups/"}, "s3://bucket/backups/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

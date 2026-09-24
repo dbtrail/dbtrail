@@ -357,7 +357,7 @@ func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.
 	if r.verdict == console.CaptureCaughtUp {
 		b.sup.gateEdge.Resolve(loud)
 		if b.sup.gateEdge.Fire(quiet, anchor.UTC().Format(time.RFC3339)) {
-			slog.Info("backup schedule: nothing was indexed since the previous backup and the source confirms it wrote nothing the capture has not recorded; updating instead of taking a full backup on age",
+			slog.Info("snapshot schedule: nothing was indexed since the previous snapshot and the source confirms it wrote nothing the capture has not recorded; updating instead of taking a full read on age",
 				"server", e.Name, "id", e.ID, "previous_backup", anchor.UTC().Format(time.RFC3339))
 		}
 		return
@@ -370,7 +370,7 @@ func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.
 	if r.cause != "" {
 		args = append(args, "error", r.cause)
 	}
-	msg := "backup schedule: nothing was indexed since the previous backup, but the source could not confirm it wrote nothing; the full backup on age stays in place"
+	msg := "snapshot schedule: nothing was indexed since the previous snapshot, but the source could not confirm it wrote nothing; the full read on age stays in place"
 	if r.cause != "" || r.verdict == console.CaptureBehind {
 		slog.Warn(msg, args...)
 		return
@@ -432,8 +432,8 @@ func (b *backupScheduler) reportWindowBlind(e console.ServerEntry, answered bool
 		return
 	}
 	if b.sup.gateEdge.Fire(key, "") {
-		slog.Warn("backup schedule: the index did not answer the update-size probe in time; until it does, the choice between "+
-			"an update and a full backup falls back to the age of the previous backup alone",
+		slog.Warn("snapshot schedule: the index did not answer the update-size probe in time; until it does, the choice between "+
+			"an update and a full read falls back to the age of the previous snapshot alone",
 			"server", e.Name, "id", e.ID, "timeout", windowProbeTimeout)
 	}
 }
@@ -507,7 +507,7 @@ func (b *backupScheduler) noteFullMissedWhileDown(e console.ServerEntry, p conso
 	if (run != nil && run.StartedAt >= stamp) || (skip != nil && skip.FinishedAt >= stamp) {
 		return
 	}
-	b.skip(e, slot, console.FullCopySkipReason("DBTrail was not running at the scheduled time, or stopped before the full backup finished"))
+	b.skip(e, slot, console.FullCopySkipReason("DBTrail was not running at the scheduled time, or stopped before the full read finished"))
 }
 
 // warnBackupScheduleRate is the schedule's version of the refresh loop's
@@ -517,7 +517,7 @@ func (b *backupScheduler) noteFullMissedWhileDown(e console.ServerEntry, p conso
 // at save, with the 30-day count, so the operator reads the rate before
 // the disk does.
 func warnBackupScheduleRate(e console.ServerEntry, p console.ParsedBackupSchedule) {
-	slog.Warn("backup schedule: every run publishes a full-table snapshot",
+	slog.Warn("snapshot schedule: every run publishes a full-table snapshot",
 		"server", e.Name, "every", p.Every, "backups_per_30d", p.BackupsPer30Days(),
 		"local_only", e.BaselineS3 == "", "dir", e.BaselineDir,
 		"full_every", p.FullEvery, "full_copies_per_30d", p.FullCopiesPer30Days())
@@ -612,7 +612,7 @@ func startBackupScheduleLoop(ctx context.Context, sched *backupScheduler) {
 	// default) an unchanged table keeps its file whatever the reuse flag
 	// says, so a bare reuse_unchanged=false would read as "every table is
 	// rewritten" on a daemon that rewrites nothing.
-	slog.Info("backup schedule loop enabled", "tick", backupScheduleTick, "full_backups", sched.fullBackups,
+	slog.Info("snapshot schedule loop enabled", "tick", backupScheduleTick, "full_backups", sched.fullBackups,
 		"reuse_unchanged_path", sched.carryDefault, "table_deltas", sched.sup.tableDeltas)
 	go func() {
 		t := time.NewTicker(backupScheduleTick)
@@ -633,7 +633,7 @@ func startBackupScheduleLoop(ctx context.Context, sched *backupScheduler) {
 func (b *backupScheduler) tick(ctx context.Context, now time.Time) {
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("backup schedule tick panicked; schedules continue next tick", "panic", r, "stack", string(debug.Stack()))
+			slog.Error("snapshot schedule tick panicked; schedules continue next tick", "panic", r, "stack", string(debug.Stack()))
 		}
 	}()
 	if ctx.Err() != nil {
@@ -657,7 +657,7 @@ func (b *backupScheduler) tick(ctx context.Context, now time.Time) {
 			b.warned[e.ID] = true
 			b.mu.Unlock()
 			if first {
-				slog.Warn("backup schedule: this server's schedule cannot be read and will not run until it is fixed",
+				slog.Warn("snapshot schedule: this server's schedule cannot be read and will not run until it is fixed",
 					"server", e.Name, "error", err)
 			}
 			continue
@@ -772,7 +772,7 @@ func (b *backupScheduler) fireGuarded(e console.ServerEntry, p console.ParsedBac
 	firingFull := false
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("backup schedule: firing a slot panicked", "server", e.Name, "panic", r, "stack", string(debug.Stack()))
+			slog.Error("snapshot schedule: firing a slot panicked", "server", e.Name, "panic", r, "stack", string(debug.Stack()))
 			reason := fmt.Sprintf("internal error: %v", r)
 			if firingFull {
 				reason = console.FullCopySkipReason(reason)
@@ -833,7 +833,7 @@ func (b *backupScheduler) fireFullCopy(e console.ServerEntry, p console.ParsedBa
 		return false
 	}
 	why := console.FullCopyWhy(*e.BackupSchedule)
-	slog.Info("backup schedule: taking the full backup the schedule asks for", "server", e.Name, "id", e.ID, "reason", why)
+	slog.Info("snapshot schedule: taking the full read the schedule asks for", "server", e.Name, "id", e.ID, "reason", why)
 	stamp := now.Format(time.RFC3339)
 	if b.startFullCopy(e, stamp, now, why, p.FullEvery == p.Every) {
 		b.watch(e, stamp, console.BackupMethodFull)
@@ -874,7 +874,7 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 	degraded := ""
 	if method == console.BackupMethodFull && strings.HasPrefix(why, console.BackupWhyUnreadablePrefix) {
 		degraded = why
-		slog.Warn("backup schedule: taking a full backup because the previous one could not be read",
+		slog.Warn("snapshot schedule: taking a full read because the previous one could not be read",
 			"server", e.Name, "id", e.ID, "reason", why)
 	}
 	// The #1721 cut-over is the plan working as designed, not a degradation,
@@ -886,7 +886,7 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 		if code == "window_measured" {
 			args = append(args, b.modelLogArgs(e.ID, now)...)
 		}
-		slog.Info("backup schedule: taking a full backup instead of an update from the recorded changes; the update would cost more, or its starting point is too old to fold cheaply", args...)
+		slog.Info("snapshot schedule: taking a full read instead of an update from the recorded changes; the update would cost more, or its starting point is too old to fold cheaply", args...)
 	}
 	stamp := now.Format(time.RFC3339)
 	if method == console.BackupMethodRefresh {
@@ -894,7 +894,7 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 		case err == nil:
 			b.watch(e, stamp, method)
 		case errors.Is(err, console.ErrBaselineRunning):
-			b.skip(e, now, "another backup job was running for this server at the scheduled time")
+			b.skip(e, now, "another snapshot job was running for this server at the scheduled time")
 		default:
 			// TriggerRefresh has no other error today; defensive, so a
 			// future one is a recorded skip rather than a silent miss.
@@ -1008,7 +1008,7 @@ func (b *backupScheduler) startFullBackup(e console.ServerEntry, stamp string, n
 	req.Why = why
 	prefix, when := "", "at the scheduled time"
 	if because != "" {
-		prefix, when = because+"; ", "when the full backup was tried"
+		prefix, when = because+"; ", "when the full read was tried"
 	}
 	switch err := b.sup.Trigger(req); {
 	case err == nil:
@@ -1029,10 +1029,10 @@ func (b *backupScheduler) startFullBackup(e console.ServerEntry, stamp string, n
 			// the full backup is said by the page while the debt is live
 			// (FullOwed): the debt is in memory, and a restart or a save
 			// drops it, which a promise written into the history would outlive.
-			b.skip(e, now, skipText(prefix+"another backup job was running for this server "+when))
+			b.skip(e, now, skipText(prefix+"another snapshot job was running for this server "+when))
 			return false
 		}
-		b.skip(e, now, skipText(prefix+"another backup job was running for this server "+when))
+		b.skip(e, now, skipText(prefix+"another snapshot job was running for this server "+when))
 	default:
 		b.skip(e, now, skipText(prefix+err.Error()))
 	}
@@ -1057,7 +1057,7 @@ func (b *backupScheduler) recordStart(e console.ServerEntry, st scheduledStart) 
 		delete(b.fullOwed, e.ID)
 	}
 	b.mu.Unlock()
-	slog.Info("backup schedule: started", "server", e.Name, "method", st.method, "every", e.BackupSchedule.Every, "full_copy", st.fullCopy)
+	slog.Info("snapshot schedule: started", "server", e.Name, "method", st.method, "every", e.BackupSchedule.Every, "full_copy", st.fullCopy)
 }
 
 // fallbackPoll is how often watchScheduled looks at its job. A var so tests
@@ -1083,7 +1083,7 @@ var fallbackPoll = time.Second
 func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method string) {
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("backup schedule: watching a scheduled job panicked", "server", e.Name, "panic", r, "stack", string(debug.Stack()))
+			slog.Error("snapshot schedule: watching a scheduled job panicked", "server", e.Name, "panic", r, "stack", string(debug.Stack()))
 		}
 	}()
 	t := time.NewTicker(fallbackPoll)
@@ -1100,7 +1100,7 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 		}
 		st := b.ScheduleState(e.ID)
 		if st.LastStartedAt != stamp {
-			slog.Info("backup schedule: stopped watching a scheduled job; the schedule was removed or a newer slot started",
+			slog.Info("snapshot schedule: stopped watching a scheduled job; the schedule was removed or a newer slot started",
 				"server", e.Name, "method", method, "started", stamp)
 			return
 		}
@@ -1120,7 +1120,7 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 			// otherwise explain a dump with "nothing had been indexed". Not
 			// reachable today; it costs nothing to make it structural.
 			if method == console.BackupMethodRefresh && b.sup.refreshSkippedAsUnchanged(e.ID, since) {
-				b.skip(e, time.Now().UTC(), "nothing had been indexed since the last backup, so this "+
+				b.skip(e, time.Now().UTC(), "nothing had been indexed since the last snapshot, so this "+
 					"slot had nothing to add to it")
 				return
 			}
@@ -1128,12 +1128,12 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 			fullCopy := b.started[e.ID].fullCopy
 			b.mu.Unlock()
 			if fullCopy {
-				b.skip(e, time.Now().UTC(), console.FullCopySkipReason("another backup job took the server before the full backup was "+
+				b.skip(e, time.Now().UTC(), console.FullCopySkipReason("another snapshot job took the server before the full read was "+
 					"seen finishing; its result is in the run history unless it crashed"))
 				return
 			}
-			b.skip(e, time.Now().UTC(), "another backup job took the server before the scheduled "+jobNoun(method)+
-				" was seen finishing, so no full backup could stand in for it; its result is in the run history unless it crashed")
+			b.skip(e, time.Now().UTC(), "another snapshot job took the server before the scheduled "+jobNoun(method)+
+				" was seen finishing, so no full read could stand in for it; its result is in the run history unless it crashed")
 			return
 		}
 		if st.Running {
@@ -1163,7 +1163,7 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 func (b *backupScheduler) fallBack(e console.ServerEntry, reason string) {
 	cur, ok := b.reg.Get(e.ID)
 	if !ok || cur.BackupSchedule == nil || cur.BackupSchedule.Identity() != e.BackupSchedule.Identity() {
-		slog.Warn("backup schedule: the update from the recorded changes failed, but the schedule was removed or changed meanwhile; no full backup taken",
+		slog.Warn("snapshot schedule: the update from the recorded changes failed, but the schedule was removed or changed meanwhile; no full read taken",
 			"server", e.Name, "reason", reason)
 		return
 	}
@@ -1175,10 +1175,10 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, reason string) {
 	because := failed + " (" + reason + ")"
 	now := time.Now().UTC()
 	if err := console.FullBackupPossible(e, b.gates()); err != nil {
-		b.skip(e, now, because+" and a full backup cannot start here: "+err.Error())
+		b.skip(e, now, because+" and a full read cannot start here: "+err.Error())
 		return
 	}
-	slog.Warn("backup schedule: "+failed+", trying a full backup instead", "server", e.Name, "reason", reason)
+	slog.Warn("snapshot schedule: "+failed+", trying a full read instead", "server", e.Name, "reason", reason)
 	// Last look before the trigger: Forget landing between the registry
 	// read above and here drops the observation, and a full read of
 	// production for a schedule that was just removed is the thing this
@@ -1187,7 +1187,7 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, reason string) {
 	_, observed := b.seen[e.ID]
 	b.mu.Unlock()
 	if !observed {
-		slog.Warn("backup schedule: the update failed, but the schedule was removed meanwhile; no full backup taken", "server", e.Name)
+		slog.Warn("snapshot schedule: the update failed, but the schedule was removed meanwhile; no full read taken", "server", e.Name)
 		return
 	}
 	stamp := now.Format(time.RFC3339)
@@ -1223,7 +1223,7 @@ func (b *backupScheduler) Forget(serverID string) {
 // copy the page reads when the history is unavailable.
 func (b *backupScheduler) noteSkip(e console.ServerEntry, now time.Time, reason string) string {
 	stamp := now.Format(time.RFC3339)
-	slog.Warn("backup schedule: scheduled backup did not start", "server", e.Name, "reason", reason)
+	slog.Warn("snapshot schedule: scheduled snapshot did not start", "server", e.Name, "reason", reason)
 	b.mu.Lock()
 	if console.IsFullCopySkip(reason) {
 		b.fullMissed[e.ID] = scheduledSkip{at: stamp, reason: reason}
@@ -1239,7 +1239,7 @@ func jobNoun(method string) string {
 	if method == console.BackupMethodRefresh {
 		return "update from the recorded changes"
 	}
-	return "full backup"
+	return "full read"
 }
 
 // skip records a slot that did not start: in memory (the page's view when
@@ -1259,6 +1259,6 @@ func (b *backupScheduler) skip(e console.ServerEntry, now time.Time, reason stri
 		StartedAt: stamp, FinishedAt: stamp,
 	})
 	if err != nil {
-		slog.Warn("backup schedule: could not record the skip in the history", "server", e.Name, "error", err)
+		slog.Warn("snapshot schedule: could not record the skip in the history", "server", e.Name, "error", err)
 	}
 }

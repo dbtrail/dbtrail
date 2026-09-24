@@ -57,7 +57,7 @@ func TestBackupFoldError_schemaRefusalNamesNoCommand(t *testing.T) {
 	}
 	const want = "reconstruct shop.orders: shop.orders changed shape since its baseline was taken " +
 		"(added since: none; gone since: gone; type changed since: none). " +
-		"Updating it from the recorded changes needs a backup taken after that change."
+		"Updating it from the recorded changes needs a snapshot taken after that change."
 	if got != want {
 		t.Errorf("rendered refusal:\n got %s\nwant %s", got, want)
 	}

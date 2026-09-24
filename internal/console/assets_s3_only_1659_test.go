@@ -30,9 +30,9 @@ func TestS3OnlyBackupWarning_1659(t *testing.T) {
 	// renderRoute: the route path bumps viewGen and kills the job watchers
 	// this page runs.
 	if save := strings.Index(row, `toast("Saved for " + (srv.name || srv.id));`); save < 0 || !strings.HasPrefix(strings.TrimSpace(stripLineComments(row[save+len(`toast("Saved for " + (srv.name || srv.id));`):])), "await renderSnapshots();") {
-		t.Error("a successful save no longer repaints the row, so the S3-only warning would stay up after a Backup dir is saved")
+		t.Error("a successful save no longer repaints the row, so the S3-only warning would stay up after a Snapshot dir is saved")
 	}
-	if strings.Contains(jsFunctionSpan(t, js, "backupServerRow"), "As set up, each scheduled run takes a full backup") {
+	if strings.Contains(jsFunctionSpan(t, js, "backupServerRow"), "As set up, each scheduled run takes a full read") {
 		t.Error("the old schedule-gated grey hint is still rendered next to the new red line")
 	}
 	// The last-run remedy is not repeated in grey under the red next-run one.
@@ -88,21 +88,21 @@ const out = {
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", full_backup_possible: false })),
     s3OnlyBackupWarning(null),
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_loop: false, full_backup_possible: false })),
-    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_refusal: "creating backups from the console is turned off" })),
+    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_refusal: "creating snapshots from the console is turned off" })),
   ],
   alarms: [
-    nextRun({ runnable: true, next_method: "full", next_method_why: "an update from the recorded changes needs a local backup directory", next_method_why_code: "no_local_dir" }),
-    nextRun({ runnable: true, next_method: "full", next_method_why: "no previous backup to update", next_method_why_code: "first_backup" }),
+    nextRun({ runnable: true, next_method: "full", next_method_why: "an update from the recorded changes needs a local snapshot directory", next_method_why_code: "no_local_dir" }),
+    nextRun({ runnable: true, next_method: "full", next_method_why: "no previous snapshot to update", next_method_why_code: "first_backup" }),
     nextRun({ runnable: true, next_method: "refresh", next_method_why: "no load on your database" }),
     nextRun({ runnable: true, next_method: "full", next_method_why: "this server has no index connection to read the recorded changes from", next_method_why_code: "no_index" }),
     nextRun({ runnable: true, next_method: "refresh", next_method_why: "x", next_method_why_code: "no_local_dir" }),
-    nextRun({ runnable: true, next_method: "full", next_method_why: "the previous backup could not be read", next_method_why_code: "previous_unreadable" }),
+    nextRun({ runnable: true, next_method: "full", next_method_why: "the previous snapshot could not be read", next_method_why_code: "previous_unreadable" }),
   ],
   lines,
   lastRun: [
-    lastRun({ last_run: { ok: true, method: "full", why: "an update needs a local backup directory", why_code: "no_local_dir" } }, "no_local_dir"),
-    lastRun({ last_run: { ok: true, method: "full", why: "an update needs a local backup directory", why_code: "no_local_dir" } }, "no_index"),
-    lastRun({ last_run: { ok: true, method: "full", why: "an update needs a local backup directory", why_code: "no_local_dir" } }, ""),
+    lastRun({ last_run: { ok: true, method: "full", why: "an update needs a local snapshot directory", why_code: "no_local_dir" } }, "no_local_dir"),
+    lastRun({ last_run: { ok: true, method: "full", why: "an update needs a local snapshot directory", why_code: "no_local_dir" } }, "no_index"),
+    lastRun({ last_run: { ok: true, method: "full", why: "an update needs a local snapshot directory", why_code: "no_local_dir" } }, ""),
   ],
 };
 console.log(JSON.stringify(out));
@@ -127,7 +127,7 @@ console.log(JSON.stringify(out));
 	for i, w := range got.Warn {
 		t.Logf("warning %d: %q", i, w)
 	}
-	const fullRead = "With S3 only, every scheduled backup reads your whole database. Add a Local folder so runs update from the recorded changes."
+	const fullRead = "With S3 only, every scheduled snapshot reads your whole database. Add a Local folder so runs update from the recorded changes."
 	if got.Warn[0] != fullRead {
 		t.Errorf("S3 without a folder is not warned with the agreed sentence: %q", got.Warn[0])
 	}
@@ -138,8 +138,8 @@ console.log(JSON.stringify(out));
 	}
 	// Where no full backup is possible either, nothing runs: saying every run
 	// reads the database would be false.
-	if w := got.Warn[4]; w != "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Local folder. Add one." {
-		t.Errorf("S3 without a folder on a daemon that cannot take a full backup: %q", w)
+	if w := got.Warn[4]; w != "With S3 only, scheduled snapshots cannot run on this server: a full read is not available here, and updating from the recorded changes needs a Local folder. Add one." {
+		t.Errorf("S3 without a folder on a daemon that cannot take a full read: %q", w)
 	}
 	wantAlarm := []bool{true, false, false, true, false, false}
 	wantCode := []string{"no_local_dir", "", "", "no_index", "", ""}
@@ -163,16 +163,16 @@ console.log(JSON.stringify(out));
 		}
 	}
 	if got.Lines[0].Class != "form-msg err" || !strings.Contains(got.Lines[0].Text, "Set a Local folder for this server") {
-		t.Errorf("no Backup dir: not a red line naming the setting: %+v", got.Lines[0])
+		t.Errorf("no Snapshot dir: not a red line naming the setting: %+v", got.Lines[0])
 	}
 	if got.Lines[1].Class != "form-hint" || got.Lines[2].Class != "form-hint" || got.Lines[4].Class != "form-hint" || got.Lines[5].Class != "form-hint" {
-		t.Errorf("a first backup or an update is not a hint: %+v", got.Lines)
+		t.Errorf("a first snapshot or an update is not a hint: %+v", got.Lines)
 	}
 	if got.Lines[3].Class != "form-msg err" || !strings.Contains(got.Lines[3].Text, "Set an index connection") {
 		t.Errorf("no index connection: not a red line naming the setting: %+v", got.Lines[3])
 	}
 	// Where this process runs no scheduled backups, only the setting is known.
-	if got.Warn[6] != "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Local folder." {
+	if got.Warn[6] != "With S3 only, a scheduled snapshot cannot update from the recorded changes. Add a Local folder." {
 		t.Errorf("no schedule loop: %q", got.Warn[6])
 	}
 	// The last run's full-backup reason: skipped when the next-run warning
@@ -222,7 +222,7 @@ func nextRunBranch(t *testing.T, card string) string {
 }
 
 // TestBackupSettings_fullBackupPossibleReachesTheWire (#1659): the S3-only
-// warning says "every scheduled backup reads your whole database" only where a
+// warning says "every scheduled snapshot reads your whole database" only where a
 // full backup can actually start; elsewhere nothing runs, and the page needs
 // the daemon's answer to say which. Driven through the real handler, with the
 // schedule loop both present and absent.
@@ -232,12 +232,12 @@ func TestBackupSettings_fullBackupPossibleReachesTheWire(t *testing.T) {
 		rep  *stubScheduleReporter
 		want bool
 	}{
-		{"full backups enabled", &stubScheduleReporter{full: true}, true},
-		{"full backups off on this daemon", &stubScheduleReporter{full: false}, false},
+		{"full reads enabled", &stubScheduleReporter{full: true}, true},
+		{"full reads off on this daemon", &stubScheduleReporter{full: false}, false},
 		{"no schedule loop (read-only console)", nil, false},
 		// Per-server: the daemon may take full backups, this server cannot.
 		{"no source connection on this server", &stubScheduleReporter{full: true}, false},
-		{"full backups refused on this daemon", &stubScheduleReporter{full: true, refusal: errors.New("lock mode refused")}, false},
+		{"full reads refused on this daemon", &stubScheduleReporter{full: true, refusal: errors.New("lock mode refused")}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := newScheduleServer(t, tc.rep)
@@ -299,7 +299,7 @@ const base = { id: "a", name: "a", kind: "registry", baseline_dir: "", baseline_
 const rows = {
   noSchedule: base,
   withSchedule: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440 }),
-  refused: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440, schedule_refusal: "creating backups from the console is turned off" }),
+  refused: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440, schedule_refusal: "creating snapshots from the console is turned off" }),
   noLoop: Object.assign({}, base, { schedule_loop: false, full_backup_possible: false }),
   withDir: Object.assign({}, base, { baseline_dir: "/var/lib/bintrail/baselines/a" }),
 };
@@ -319,7 +319,7 @@ console.log(JSON.stringify(out));
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
 	}
-	const fullRead = "With S3 only, every scheduled backup reads your whole database. Add a Local folder so runs update from the recorded changes."
+	const fullRead = "With S3 only, every scheduled snapshot reads your whole database. Add a Local folder so runs update from the recorded changes."
 	has := func(lines []string, want string) bool {
 		for _, l := range lines {
 			if l == want {
@@ -331,13 +331,13 @@ console.log(JSON.stringify(out));
 	if !has(got["noSchedule"], fullRead) || !has(got["withSchedule"], fullRead) {
 		t.Errorf("the S3-only warning is not rendered in red with and without a schedule: %q", got)
 	}
-	if has(got["refused"], fullRead) || len(got["refused"]) != 1 || !strings.Contains(got["refused"][0], "creating backups from the console is turned off") {
+	if has(got["refused"], fullRead) || len(got["refused"]) != 1 || !strings.Contains(got["refused"][0], "creating snapshots from the console is turned off") {
 		t.Errorf("a refused schedule shows the S3-only line next to its own reason: %q", got["refused"])
 	}
-	if !has(got["noLoop"], "With S3 only, a scheduled backup cannot update from the recorded changes. Add a Local folder.") {
+	if !has(got["noLoop"], "With S3 only, a scheduled snapshot cannot update from the recorded changes. Add a Local folder.") {
 		t.Errorf("no schedule loop: %q", got["noLoop"])
 	}
 	if len(got["withDir"]) != 0 {
-		t.Errorf("a server with a Backup dir is warned: %q", got["withDir"])
+		t.Errorf("a server with a Snapshot dir is warned: %q", got["withDir"])
 	}
 }

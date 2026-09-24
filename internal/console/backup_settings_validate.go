@@ -28,7 +28,7 @@ func ValidateBackupSetting(key, value string) error {
 	switch key {
 	case BackupSettingBaselineRetain:
 		if _, err := cliutil.ParseRetain(value); err != nil {
-			return fmt.Errorf("keep local backups for: %w", err)
+			return fmt.Errorf("keep local snapshots for: %w", err)
 		}
 	case BackupSettingLockMode:
 		if _, err := baseline.ParseLockMode(value); err != nil {

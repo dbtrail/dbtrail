@@ -104,8 +104,8 @@ func TestBackupScheduleAPI_saveListRemove(t *testing.T) {
 		t.Fatalf("next_run %q is not on the 03:00 grid", got.NextRun)
 	}
 	// No backup on disk yet: the next run is a full backup, and it says why.
-	if got.NextMethod != BackupMethodFull || !strings.Contains(got.NextMethodWhy, "no previous backup") || got.NextMethodError != "" {
-		t.Fatalf("next_method = %q (%q / %q), want a full backup because there is nothing to rebuild from", got.NextMethod, got.NextMethodWhy, got.NextMethodError)
+	if got.NextMethod != BackupMethodFull || !strings.Contains(got.NextMethodWhy, "no previous snapshot") || got.NextMethodError != "" {
+		t.Fatalf("next_method = %q (%q / %q), want a full read because there is nothing to rebuild from", got.NextMethod, got.NextMethodWhy, got.NextMethodError)
 	}
 	// The loop is told at save time, with the normalized schedule, so the
 	// next_run this response promises is the slot that fires.
@@ -201,13 +201,13 @@ func TestBackupScheduleAPI_refusals(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("with a local dir and creation off: code=%d body=%s, want runnable (rebuild)", rec.Code, body)
 	}
-	if got := scheduleOf(t, body); got == nil || !got.Runnable || got.NextMethodError == "" || !strings.Contains(got.NextMethodError, "no previous backup") || got.NextMethodWhy != "" {
-		t.Fatalf("rebuild-only server with no backup yet = %+v, want next_method_error set and no why", got)
+	if got := scheduleOf(t, body); got == nil || !got.Runnable || got.NextMethodError == "" || !strings.Contains(got.NextMethodError, "no previous snapshot") || got.NextMethodWhy != "" {
+		t.Fatalf("rebuild-only server with no snapshot yet = %+v, want next_method_error set and no why", got)
 	}
 	fakeSnapshot(t, e.BaselineDir)
 	_, body = doServersReqHeader(t, srv, "GET", "/api/baselines", "", id)
 	if got := scheduleOf(t, body); got == nil || got.NextMethodError != "" || got.NextMethod != BackupMethodRefresh {
-		t.Fatalf("with a backup on disk = %+v, want a rebuild next and no error", got)
+		t.Fatalf("with a snapshot on disk = %+v, want a rebuild next and no error", got)
 	}
 	if rec, body := doServersReq(t, srv, "PUT", "/api/servers/default/backup-schedule", `{"every":"1d"}`); rec.Code != 409 {
 		t.Fatalf("boot entry: code=%d body=%s, want 409", rec.Code, body)
@@ -570,8 +570,8 @@ func TestBackupScheduleAPI_nextMethodWhyCodeReachesTheWire(t *testing.T) {
 		s3only bool
 		want   string
 	}{
-		{"no backup yet", false, "first_backup"},
-		{"S3 without a Backup dir", true, "no_local_dir"},
+		{"no snapshot yet", false, "first_backup"},
+		{"S3 without a Snapshot dir", true, "no_local_dir"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, id := newScheduleServer(t, &stubScheduleReporter{full: true})
@@ -584,7 +584,7 @@ func TestBackupScheduleAPI_nextMethodWhyCodeReachesTheWire(t *testing.T) {
 			}
 			got := scheduleOf(t, body)
 			if got == nil || got.NextMethod != BackupMethodFull || got.NextMethodWhyCode != tc.want {
-				t.Fatalf("schedule = %+v, want a full backup with why code %q", got, tc.want)
+				t.Fatalf("schedule = %+v, want a full read with why code %q", got, tc.want)
 			}
 		})
 	}

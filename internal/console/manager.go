@@ -362,7 +362,7 @@ func (b *bundle) findBaseline(ctx context.Context, schema, table string, at time
 			// Kept to the log: the local answer (or its refusal) still stands
 			// and says why, but a destination that cannot be read is a second
 			// problem nobody would otherwise see.
-			slog.Warn("backup lookup: the backup destination could not be read either",
+			slog.Warn("snapshot lookup: the snapshot destination could not be read either",
 				"table", schema+"."+table, "destination", b.baselineFallbackSrc, "err", ferr)
 		}
 		// Which copy is NEWER is a question about snapshot directories. The
@@ -383,7 +383,7 @@ func (b *bundle) findBaseline(ctx context.Context, schema, table string, at time
 		if err != nil {
 			cause = err.Error()
 		}
-		why := "read from the backup destination because a local backup folder could not be read, so a newer backup may exist there: " + cause
+		why := "read from the snapshot destination because a local snapshot folder could not be read, so a newer snapshot may exist there: " + cause
 		if fstale.Stale() {
 			// The destination's own answer is stale too: keep both, or the
 			// operator sees a stale warning without the reason it came from

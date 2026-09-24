@@ -52,7 +52,7 @@ func TestIntegrationProbeCapture(t *testing.T) {
 		VALUES (1, 'gtid', 'binlog.000001', 4, ?, 'mysql', UTC_TIMESTAMP(), 1, ?)`,
 		"3e11fa47-71ca-11e1-9e33-c80aa9429562:1-10",
 		`{"column_count_mismatch":{"count":3,"last_at":"`+anchor.Add(-time.Hour).UTC().Format(time.RFC3339)+`"}}`)
-	if r := probe(); r.verdict != "" || r.detail != "the capture dropped events that no full backup has read from the source since" {
+	if r := probe(); r.verdict != "" || r.detail != "the capture dropped events that no full read has read from the source since" {
 		t.Fatalf("rows dropped before an update anchor: %+v", r)
 	}
 	// A GTID capture whose index is on the source server.
@@ -68,7 +68,7 @@ func TestIntegrationProbeCapture(t *testing.T) {
 		want string
 	}{
 		{anchor.Add(-time.Hour), "the index lives on the source server"},
-		{anchor.Add(time.Hour), "the capture lost events to a binlog gap after the previous backup"},
+		{anchor.Add(time.Hour), "the capture lost events to a binlog gap after the previous snapshot"},
 	} {
 		testutil.MustExec(t, db, "UPDATE stream_state SET gap_lost_at = ?, gap_lost_detail = 'purged' WHERE id = 1", c.lost.UTC())
 		if r := probe(); r.verdict != "" || !strings.HasPrefix(r.detail, c.want) {

@@ -341,7 +341,7 @@ runs.unknown = Object.assign({}, runs.clean, { verdict: "someday" });
 // newest snapshots (a snapshot built from the recorded changes is not a read).
 func TestVerificationModes_doNotOverpromise(t *testing.T) {
 	js := readAsset(t, "app.js")
-	for _, bad := range []string{"Compare two saved snapshots (recommended)", "Strong evidence your backup chain is sound", "Takes your two newest snapshots"} {
+	for _, bad := range []string{"Compare two saved snapshots (recommended)", "Strong evidence your snapshot chain is sound", "Takes your two newest snapshots"} {
 		if strings.Contains(js, bad) {
 			t.Errorf("the verification page still says %q", bad)
 		}

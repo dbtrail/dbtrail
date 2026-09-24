@@ -60,7 +60,7 @@ func TestBackupsListPagesAndSaysItOpens(t *testing.T) {
 	// handlers close over).
 	if !regexp.MustCompile(`\.start \+ i\b`).MatchString(panel) {
 		t.Error("the row index is not offset by the page; the first row of page two would be " +
-			"labelled Newest and given the treatment reserved for the backup restores use")
+			"labelled Newest and given the treatment reserved for the snapshot restores use")
 	}
 	if !strings.Contains(panel, `class: "bk-chev"`) {
 		t.Error("rows carry no chevron. The per-row Download lives inside the fold a click opens, " +

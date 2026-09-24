@@ -300,12 +300,12 @@ func TestBackupSettings_keepsS3Keys(t *testing.T) {
 	req.SetPathValue("id", a.ID)
 	srv.handleBackupSettingsServerUpdate(rec, req)
 	if rec.Code != 200 {
-		t.Fatalf("backup settings save: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("snapshot settings save: %d %s", rec.Code, rec.Body.String())
 	}
 	if e, _ := srv.cm.reg.Get(a.ID); e.S3AccessKeyID != keyID || e.S3SecretAccessKey != keySecret {
 		t.Error("a backup-settings save wiped the S3 keys")
 	}
-	assertNoSecret(t, "backup settings", rec.Body.Bytes())
+	assertNoSecret(t, "snapshot settings", rec.Body.Bytes())
 }
 
 // probeFake is an S3-compatible store that records each request's

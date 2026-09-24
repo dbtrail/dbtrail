@@ -232,7 +232,7 @@ func withCheckError(detail, checkErr string) string {
 	if checkErr == "" {
 		return detail
 	}
-	note := "Could not check for an existing backup: " + checkErr
+	note := "Could not check for an existing snapshot: " + checkErr
 	if detail == "" {
 		return note
 	}
@@ -250,19 +250,19 @@ func blockedBackupStep(in firstRunInput) (FirstRunStep, bool) {
 	step := FirstRunStep{Name: backupStepName, State: firstRunWaiting}
 	switch {
 	case in.BackupOff:
-		step.Detail = "Creating full backups from the console is turned off. Restoring a whole table to a past moment needs a full backup."
-		step.Fix = "On the " + PageSnapshots + " page, under Set when DBTrail starts, the Create-backup button row names the setting to change. Restart DBTrail after changing it. A full backup reads every table this server captures"
+		step.Detail = "Creating full reads from the console is turned off. Restoring a whole table to a past moment needs a full read."
+		step.Fix = "On the " + PageSnapshots + " page, under Set when DBTrail starts, the Create-backup button row names the setting to change. Restart DBTrail after changing it. A full read reads every table this server captures"
 		if in.Postgres {
 			step.Fix += "."
 		} else {
 			step.Fix += ", and mydumper must be installed where DBTrail runs."
 		}
 		if in.BackupNoLocation {
-			step.Fix += " This server also needs its own backup location, set on that page under Where and how often."
+			step.Fix += " This server also needs its own snapshot location, set on that page under Where and how often."
 		}
 	case in.BackupNoLocation:
-		step.Detail = "This server has no backup location of its own, so no backup can be written for it."
-		step.Fix = "On the " + PageSnapshots + " page, set this server's Local folder or S3 location under Where and how often, then press Create backup."
+		step.Detail = "This server has no snapshot location of its own, so no snapshot can be written for it."
+		step.Fix = "On the " + PageSnapshots + " page, set this server's Local folder or S3 location under Where and how often, then press Read database now."
 	default:
 		return FirstRunStep{}, false
 	}

@@ -101,7 +101,7 @@ console.log(JSON.stringify({
 
 	for name, r := range map[string]*row{"off": got.Off, "off+no loc": got.OffNoLoc, "off, PG": got.OffPG, "no loc": got.NoLoc} {
 		if r == nil || !strings.Contains(r.Text, "Take the first full DB snapshot") || !strings.Contains(r.Cls, "waiting") {
-			t.Fatalf("%s: last row is not a waiting backup step: %+v", name, r)
+			t.Fatalf("%s: last row is not a waiting snapshot step: %+v", name, r)
 		}
 		for _, bad := range []string{"—", "BINTRAIL_", "--", " here", "this page"} {
 			if strings.Contains(r.Text, bad) {
@@ -109,25 +109,25 @@ console.log(JSON.stringify({
 			}
 		}
 	}
-	if !strings.Contains(got.Off.Text, "turned off") || !strings.Contains(got.Off.Text, "mydumper") || strings.Contains(got.Off.Text, "backup location") {
+	if !strings.Contains(got.Off.Text, "turned off") || !strings.Contains(got.Off.Text, "mydumper") || strings.Contains(got.Off.Text, "snapshot location") {
 		t.Errorf("off: %s", got.Off.Text)
 	}
-	if !strings.Contains(got.OffNoLoc.Text, "its own backup location") {
+	if !strings.Contains(got.OffNoLoc.Text, "its own snapshot location") {
 		t.Errorf("off with no location does not name the location: %s", got.OffNoLoc.Text)
 	}
 	if strings.Contains(got.OffPG.Text, "mydumper") {
-		t.Errorf("a PostgreSQL full backup does not run mydumper: %s", got.OffPG.Text)
+		t.Errorf("a PostgreSQL full read does not run mydumper: %s", got.OffPG.Text)
 	}
-	if !strings.Contains(got.NoLoc.Text, "no backup location of its own") || strings.Contains(got.NoLoc.Text, "turned off") {
+	if !strings.Contains(got.NoLoc.Text, "no snapshot location of its own") || strings.Contains(got.NoLoc.Text, "turned off") {
 		t.Errorf("no location: %s", got.NoLoc.Text)
 	}
 
 	const note = "turned off at startup"
-	if !strings.Contains(got.StripOff.Text, "CREATE BACKUP") || !strings.Contains(got.StripOff.Text, note) ||
+	if !strings.Contains(got.StripOff.Text, "READ DATABASE") || !strings.Contains(got.StripOff.Text, note) ||
 		!strings.Contains(got.StripOff.Text, "under Where and how often") || len(got.StripOff.Buttons) != 0 {
 		t.Errorf("creation off: the strip does not say so where the button would be: %+v", got.StripOff)
 	}
-	if strings.Contains(got.StripOn.Text, note) || len(got.StripOn.Buttons) != 1 || got.StripOn.Buttons[0] != "Create backup" {
+	if strings.Contains(got.StripOn.Text, note) || len(got.StripOn.Buttons) != 1 || got.StripOn.Buttons[0] != "Read database now" {
 		t.Errorf("creation on: want the button and no note: %+v", got.StripOn)
 	}
 	// Each strip must have drawn something, or the absence below proves nothing.
@@ -138,7 +138,7 @@ console.log(JSON.stringify({
 		t.Errorf("the note shows where the button is missing for another reason: boot %q, unconfigured %q",
 			got.StripOffBoot.Text, got.StripOffUnconfigured.Text)
 	}
-	const loc = "needs this server's own backup location"
+	const loc = "needs this server's own snapshot location"
 	if strings.Contains(got.StripOff.Text, loc) {
 		t.Errorf("a server with its own location is told it needs one: %s", got.StripOff.Text)
 	}
@@ -152,7 +152,7 @@ console.log(JSON.stringify({
 	}
 	// No source: nothing a backup could read, so no note either way. The
 	// button stays where it was (the page's live test pins it).
-	if !strings.Contains(got.StripOffNoSource.Text, "SOURCE") || strings.Contains(got.StripOffNoSource.Text, "CREATE BACKUP") {
+	if !strings.Contains(got.StripOffNoSource.Text, "SOURCE") || strings.Contains(got.StripOffNoSource.Text, "READ DATABASE") {
 		t.Errorf("a server with no source gets a note: %q", got.StripOffNoSource.Text)
 	}
 	// A bucket is a location of the server's own, like a directory: the

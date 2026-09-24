@@ -59,7 +59,7 @@ const (
 // ErrUnknownBackupSetting rejects a key this build does not model. Refusing is
 // deliberate: silently accepting a key would store a value nothing reads, and
 // the interface would show a setting in force that governs nothing.
-var ErrUnknownBackupSetting = errors.New("unknown backup setting")
+var ErrUnknownBackupSetting = errors.New("unknown snapshot setting")
 
 // backupSettingFields maps each key to its field inside the struct. One table,
 // so a key added to the constants above and forgotten here fails a test rather

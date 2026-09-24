@@ -42,7 +42,7 @@ var expectedDocsPages = map[string]string{
 // here deliberately, one line each, so the site check below fetches them: a
 // slug typed only in a docsMore call would otherwise be a link nobody checks.
 var expectedDocsMoreSlugs = map[string]string{
-	"settings/backups": "the site documents the backup settings on a page of their own; in the console they are a section of Snapshots",
+	"settings/backups": "the site documents the snapshot settings on a page of their own; in the console they are a section of Snapshots",
 	"guides/verify":    "the verify guide was the Verification page's header link; the Checks section links to it now, and this keeps the site check fetching it",
 }
 

@@ -78,7 +78,7 @@ func TestBackupScheduleCard_fullBackupTimetable(t *testing.T) {
 		return r
 	}
 	if _, err := srv.baselineHistory.AppendSkip(sched(BaselineRunRecord{Kind: BaselineRunDump,
-		SkipReason: FullCopySkipReason("another backup job was running for this server at the scheduled time"),
+		SkipReason: FullCopySkipReason("another snapshot job was running for this server at the scheduled time"),
 		StartedAt:  "2026-09-17T03:00:05Z", FinishedAt: "2026-09-17T03:00:05Z"})); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestBackupScheduleCard_fullBackupTimetable(t *testing.T) {
 	// A full backup of the timetable that started and failed, after the
 	// miss: the line says it failed, with its error.
 	if err := srv.baselineHistory.Append(sched(BaselineRunRecord{Kind: BaselineRunDump, StartedAt: "2026-09-18T03:00:05Z", FinishedAt: "2026-09-18T03:04:00Z",
-		Why: "the schedule takes a full backup every 7d", WhyCode: BackupWhyCodeFullCopy, Error: "mydumper: exit status 2"})); err != nil {
+		Why: "the schedule takes a full read every 7d", WhyCode: BackupWhyCodeFullCopy, Error: "mydumper: exit status 2"})); err != nil {
 		t.Fatal(err)
 	}
 	// While it is the last run, the last run's line says it; once an
@@ -105,7 +105,7 @@ func TestBackupScheduleCard_fullBackupTimetable(t *testing.T) {
 	// The daemon was stopped at a slot: the reason starts with the product's
 	// name, which the sentence must not lowercase ("dBTrail").
 	if _, err := srv.baselineHistory.AppendSkip(sched(BaselineRunRecord{Kind: BaselineRunDump,
-		SkipReason: FullCopySkipReason("DBTrail was not running at the scheduled time, or stopped before the full backup finished"),
+		SkipReason: FullCopySkipReason("DBTrail was not running at the scheduled time, or stopped before the full read finished"),
 		StartedAt:  "2026-09-18T09:30:00Z", FinishedAt: "2026-09-18T09:30:00Z"})); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestBackupScheduleCard_fullBackupTimetable(t *testing.T) {
 		t.Fatal(err)
 	}
 	withRun["last_run"] = map[string]any{"method": "backup", "ok": true, "finished_at": "2026-09-17T03:20:00Z", "tables": 3,
-		"why": "the schedule takes a full backup every 7d", "why_code": BackupWhyCode("the schedule takes a full backup every 7d")}
+		"why": "the schedule takes a full read every 7d", "why_code": BackupWhyCode("the schedule takes a full read every 7d")}
 	lastRun, err := json.Marshal(withRun)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ const draw = (caps, sched) => {
   return { state: st.textContent, alarm: String(st.className).includes("alarm"),
     red: byClass(card, "form-msg err").map((n) => flat(n).join("")).filter((s) => s),
     hints: byClass(card, "form-hint").map((n) => flat(n).join("")),
-    full: (inputs(card).find((i) => i.attrs["aria-label"] === "Full backup every") || {}).value };
+    full: (inputs(card).find((i) => i.attrs["aria-label"] === "Full read every") || {}).value };
 };
 console.log(JSON.stringify({
   daily: draw("{ backup_schedule: true }", ` + string(daily) + `),
@@ -200,46 +200,46 @@ console.log(JSON.stringify({
 	}
 
 	d := got["daily"]
-	if !strings.HasPrefix(d.State, "Every 1d at 03:00 UTC, with a full backup every 1d.") || d.Alarm {
+	if !strings.HasPrefix(d.State, "Every 1d at 03:00 UTC, with a full read every 1d.") || d.Alarm {
 		t.Errorf("daily state = %q (alarm %v)", d.State, d.Alarm)
 	}
-	if !has(d.Hints, "Next run will take a full backup from your database (the schedule takes a full backup every 1d).") {
-		t.Errorf("daily: the next run is not said to be the full backup: %v", d.Hints)
+	if !has(d.Hints, "Next run will take a full read from your database (the schedule takes a full read every 1d).") {
+		t.Errorf("daily: the next run is not said to be the full read: %v", d.Hints)
 	}
-	// When the next run IS the full backup, its own "next full backup" line
+	// When the next run IS the full backup, its own "next full read" line
 	// would say the same thing twice; when it is not, it is the only place
 	// the date of the next read of the database is written.
-	if has(d.Hints, "Next full backup the schedule asks for") {
-		t.Errorf("daily: the next full backup is announced twice: %v", d.Hints)
+	if has(d.Hints, "Next full read the schedule asks for") {
+		t.Errorf("daily: the next full read is announced twice: %v", d.Hints)
 	}
 	for _, name := range []string{"weekly", "odd"} {
-		if !has(got[name].Hints, "Next full backup the schedule asks for: ") {
-			t.Errorf("%s: the date of the next full backup is not written: %v", name, got[name].Hints)
+		if !has(got[name].Hints, "Next full read the schedule asks for: ") {
+			t.Errorf("%s: the date of the next full read is not written: %v", name, got[name].Hints)
 		}
 	}
 
 	w := got["weekly"]
-	if !strings.HasPrefix(w.State, "Every 6h at 03:00 UTC, with a full backup every 7d.") || w.Alarm {
+	if !strings.HasPrefix(w.State, "Every 6h at 03:00 UTC, with a full read every 7d.") || w.Alarm {
 		t.Errorf("weekly state = %q (alarm %v)", w.State, w.Alarm)
 	}
 
 	m := got["missed"]
-	if !m.Alarm || !strings.HasSuffix(m.State, " The last full backup did not run.") {
+	if !m.Alarm || !strings.HasSuffix(m.State, " The last full read did not run.") {
 		t.Errorf("missed state = %q (alarm %v), want red with the note", m.State, m.Alarm)
 	}
-	if !has(m.Red, "The full backup due at 2026-09-17 03:00:05 UTC did not run: another backup job was running for this server at the scheduled time. The next one is due at ") {
+	if !has(m.Red, "The full read due at 2026-09-17 03:00:05 UTC did not run: another snapshot job was running for this server at the scheduled time. The next one is due at ") {
 		t.Errorf("missed: red lines %v", m.Red)
 	}
 	f := got["failed"]
-	if !f.Alarm || !strings.HasSuffix(f.State, " The last full backup failed.") ||
-		!has(f.Red, "The full backup that started at 2026-09-18 03:00:05 UTC failed: mydumper: exit status 2. The next one is due at ") {
+	if !f.Alarm || !strings.HasSuffix(f.State, " The last full read failed.") ||
+		!has(f.Red, "The full read that started at 2026-09-18 03:00:05 UTC failed: mydumper: exit status 2. The next one is due at ") {
 		t.Errorf("failed: state %q (alarm %v), red %v", f.State, f.Alarm, f.Red)
 	}
 	if !has(got["down"].Red, "did not run: DBTrail was not running at the scheduled time") {
 		t.Errorf("down: the product's name was lowercased or the line is missing: %v", got["down"].Red)
 	}
 	if !has(got["owed"].Red, ". The next scheduled run takes it, at ") || has(got["owed"].Red, "The next one is due at") {
-		t.Errorf("owed: the card does not say the next run takes the full backup: %v", got["owed"].Red)
+		t.Errorf("owed: the card does not say the next run takes the full read: %v", got["owed"].Red)
 	}
 	if has(got["down"].Red, "takes it") {
 		t.Errorf("down: the card promises a debt the loop does not hold: %v", got["down"].Red)
@@ -249,42 +249,42 @@ console.log(JSON.stringify({
 			strings.Count(strings.Join(fl.Red, "\n"), "mydumper: exit status 2"), fl.Red)
 	}
 
-	if rc := got["refusedClean"]; !rc.Alarm || !strings.HasSuffix(rc.State, " The full backup cannot run.") || strings.Count(rc.State, "cannot run") != 1 {
+	if rc := got["refusedClean"]; !rc.Alarm || !strings.HasSuffix(rc.State, " The full read cannot run.") || strings.Count(rc.State, "cannot run") != 1 {
 		t.Errorf("refused, nothing missed: state = %q (alarm %v), want red ending with the refusal's note once", rc.State, rc.Alarm)
 	}
 	r := got["refused"]
 	// One note on the line however many facts, and a past alarm outranks a
 	// forward-looking one (the card's existing rule): this server also has
 	// the missed full backup above. Both facts are in the body.
-	notes := strings.Count(r.State, "The full backup cannot run.") + strings.Count(r.State, "The last full backup did not run.")
-	if !r.Alarm || notes != 1 || !strings.HasSuffix(r.State, " The last full backup did not run.") {
-		t.Errorf("refused state = %q (alarm %v), want red with exactly one note, the missed full backup's", r.State, r.Alarm)
+	notes := strings.Count(r.State, "The full read cannot run.") + strings.Count(r.State, "The last full read did not run.")
+	if !r.Alarm || notes != 1 || !strings.HasSuffix(r.State, " The last full read did not run.") {
+		t.Errorf("refused state = %q (alarm %v), want red with exactly one note, the missed full read's", r.State, r.Alarm)
 	}
-	if !has(r.Red, "The full backup due at 2026-09-17 03:00:05 UTC did not run") {
-		t.Errorf("refused: the missed full backup is not in the body: %v", r.Red)
+	if !has(r.Red, "The full read due at 2026-09-17 03:00:05 UTC did not run") {
+		t.Errorf("refused: the missed full read is not in the body: %v", r.Red)
 	}
 	// A refused timetable says none will run; the miss beside it must not
 	// then promise the next one.
 	for _, line := range r.Red {
 		if strings.Contains(line, "The next one is due at") {
-			t.Errorf("refused: the card promises the next full backup while saying none will run: %q", line)
+			t.Errorf("refused: the card promises the next full read while saying none will run: %q", line)
 		}
 	}
-	wantRed := "The full backup every 7d reads your database, and creating backups from the web interface is turned off on this daemon " +
-		"(BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1). The full backups do not run until that changes; the other scheduled runs still do."
+	wantRed := "The full read every 7d reads your database, and creating snapshots from the web interface is turned off on this daemon " +
+		"(BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1). The full reads do not run until that changes; the other scheduled runs still do."
 	if !has(r.Red, wantRed) {
 		t.Errorf("refused: red lines %v, want %q", r.Red, wantRed)
 	}
 	if ro := got["refusedReadOnly"]; !ro.Alarm || !has(ro.Red, wantRed) {
-		t.Errorf("read-only view of a refused full backup: state %q, red %v", ro.State, ro.Red)
+		t.Errorf("read-only view of a refused full read: state %q, red %v", ro.State, ro.Red)
 	}
 
-	if !has(got["lastRun"].Hints, "The schedule takes a full backup every 7d.") {
+	if !has(got["lastRun"].Hints, "The schedule takes a full read every 7d.") {
 		t.Errorf("the last run's reason is not said as the schedule's own: %v", got["lastRun"].Hints)
 	}
 	for name, dr := range got {
 		for _, s := range append(append([]string{dr.State}, dr.Red...), dr.Hints...) {
-			for _, bad := range []string{"—", "undefined", "null", "NaN", "Full backup because the schedule"} {
+			for _, bad := range []string{"—", "undefined", "null", "NaN", "Full read because the schedule"} {
 				if strings.Contains(s, bad) {
 					t.Errorf("%s draws %q: %q", name, bad, s)
 				}

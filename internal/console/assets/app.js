@@ -1311,7 +1311,7 @@ function covCard(c, stamp) {
   chips.append(el("span", { class: "cov-chip" + (bad ? " bad" : warn ? " warn" : cont === "ok" ? " ok" : ""), text: "continuity " + cont }));
   card.append(chips);
   if (cont === "gap_lost") {
-    card.append(el("p", { class: "cov-line bad", text: "Events were lost for good: the window has a hole, and points past it need a fresh backup." }));
+    card.append(el("p", { class: "cov-line bad", text: "Events were lost for good: the window has a hole, and points past it need a fresh snapshot." }));
   } else if (cont === "unavailable") {
     card.append(el("p", { class: "cov-line bad", text: "Continuity could not be read. Treat the window as unverified." }));
   } else if (warn) {
@@ -3998,7 +3998,7 @@ function stateSection(form) {
 
   if (!capsCache.reconstruct) {
     wrap.append(el("p", { class: "state-note", text:
-      "Configure a backup for this server to see a row's earlier state here. Undo SQL below works without one; it reverses recorded changes, so it cannot show a row nothing has touched." }));
+      "Configure a snapshot for this server to see a row's earlier state here. Undo SQL below works without one; it reverses recorded changes, so it cannot show a row nothing has touched." }));
     return wrap;
   }
 
@@ -4284,7 +4284,7 @@ async function runReconstruct(form, history) {
 function reconstructMeta(data, label) {
   return el("div", { class: "meta-line" },
     el("b", { text: data.schema + "." + data.table + " pk=" + data.pk }),
-    " · " + label + " · backup " + data.baseline_time + " · " + data.event_count + " event(s)",
+    " · " + label + " · snapshot " + data.baseline_time + " · " + data.event_count + " event(s)",
     tzChip());
 }
 
@@ -4682,8 +4682,8 @@ function continuityBox(stream, pg) {
     const lost = el("div", { class: "error-box" });
     lost.append(el("b", { text: "⚠ Events permanently lost" }));
     lost.append(el("div", { text: stream.gap_lost.detail ||
-      (pg ? "The replication slot PostgreSQL was using got invalidated. To keep capturing changes, create a new backup and start over."
-          : "A gap in the binlog can't be filled; some history is permanently missing. To keep capturing changes, create a new backup and start over.") }));
+      (pg ? "The replication slot PostgreSQL was using got invalidated. To keep capturing changes, create a new snapshot and start over."
+          : "A gap in the binlog can't be filled; some history is permanently missing. To keep capturing changes, create a new snapshot and start over.") }));
     lost.append(el("div", { text: "Detected: " + utcLabel(stream.gap_lost.at) }));
     return lost;
   }
@@ -5519,33 +5519,33 @@ function s3RetentionBox(srv, servers, daemonS3) {
   const fulls = runs && srv.schedule_full_every && !srv.schedule_full_refusal ? backupsPer30Days(srv.schedule_full_every) : 0;
   const n = fulls ? runs + fulls - backupsPer30Days(lcmInterval(srv.schedule_every, srv.schedule_full_every)) : runs;
   wrap.append(el("p", { class: "form-hint", text:
-    "Every backup sent to S3 is a full copy of every table, and DBTrail never removes one: each stays in the bucket until a rule in the bucket expires old backups." }));
+    "Every snapshot sent to S3 is a full copy of every table, and DBTrail never removes one: each stays in the bucket until a rule in the bucket expires old snapshots." }));
   if (!s) {
     wrap.append(el("p", { class: "form-msg err", text:
-      "This is not an s3://bucket/prefix destination, so no backup can be uploaded to it and no bucket rule applies." }));
+      "This is not an s3://bucket/prefix destination, so no snapshot can be uploaded to it and no bucket rule applies." }));
     return wrap;
   }
   const details = el("details", { class: "form-advanced s3-retention-rule" });
-  details.append(el("summary", { class: "form-adv-summary", text: "Bucket rule to expire old backups" }));
+  details.append(el("summary", { class: "form-adv-summary", text: "Bucket rule to expire old snapshots" }));
   const body = el("div");
   const refuse = (text) => { body.append(el("p", { class: "form-msg err", text })); details.append(body); wrap.append(details); return wrap; };
   if (!s.prefix) {
     // The one shape refused outright: see lifecycleRuleFor.
-    return refuse("These backups sit at the bucket root, which archived changes may share. A rule there would expire everything in the bucket. Put the backups under a prefix (for example s3://" + s.bucket + "/backups) before applying an expiry rule.");
+    return refuse("These snapshots sit at the bucket root, which archived changes may share. A rule there would expire everything in the bucket. Put the snapshots under a prefix (for example s3://" + s.bucket + "/backups) before applying an expiry rule.");
   }
   // The archived changes are the evidence recovery is built from and are
   // never expired by dbtrail. A rule on a prefix that covers them (the
   // same prefix, or the archives nested under it), any server's, would.
   const conflicts = s3RetentionConflicts(srv, servers, daemonS3);
   if (conflicts.archives.length) {
-    return refuse("The archived changes of " + conflicts.archives.join(", ") + " sit under the same prefix as these backups. A rule on " + s.prefix + "/ would expire the archived changes too. Move the backups or the archives to their own prefix first.");
+    return refuse("The archived changes of " + conflicts.archives.join(", ") + " sit under the same prefix as these snapshots. A rule on " + s.prefix + "/ would expire the archived changes too. Move the snapshots or the archives to their own prefix first.");
   }
   // Other backups nested under this prefix would expire under THIS
   // server's retention. Said, not refused: the operator may want that.
   const nested = conflicts.backups;
   const days = el("input", { class: "input", type: "number", min: "1", step: "1", value: "30" });
   const row = el("label", { class: "field field--sm" });
-  row.append(el("span", { class: "field-label", text: "Keep backups for (days)" }), days);
+  row.append(el("span", { class: "field-label", text: "Keep snapshots for (days)" }), days);
   const warn = el("p", { class: "form-msg err" });
   const rule = el("pre", { class: "stg-code" });
   const cmd = el("pre", { class: "stg-code" });
@@ -5566,9 +5566,9 @@ function s3RetentionBox(srv, servers, daemonS3) {
       const least = Math.floor(minutes / 1440) + 1;
       rule.textContent = ""; cmd.textContent = "";
       warn.hidden = false;
-      warn.textContent = "With backups every " + srv.schedule_every + (srv.schedule_refusal ? " (the schedule is stored; it cannot run right now)" : "") +
+      warn.textContent = "With snapshots every " + srv.schedule_every + (srv.schedule_refusal ? " (the schedule is stored; it cannot run right now)" : "") +
         " and this rule at " + d + " day" + (d === 1 ? "" : "s") +
-        ", the newest complete backup expires before the next one exists: there would be moments with no backup in S3 at all. Use at least " + least + " days.";
+        ", the newest complete snapshot expires before the next one exists: there would be moments with no snapshot in S3 at all. Use at least " + least + " days.";
       return;
     }
     warn.hidden = true;
@@ -5581,13 +5581,13 @@ function s3RetentionBox(srv, servers, daemonS3) {
   body.append(row, warn);
   if (nested.length) {
     body.append(el("p", { class: "form-msg err", text:
-      "The backups of " + nested.join(", ") + " sit under this prefix too and would expire under this rule." }));
+      "The snapshots of " + nested.join(", ") + " sit under this prefix too and would expire under this rule." }));
   }
   body.append(
     el("p", { class: "form-hint", text: "Save the rule as dbtrail-backups-rule.json. The first command shows the rules the bucket already has; merge this one into them, since the second command replaces every rule on the bucket, such as one that aborts unfinished uploads, or the one-year rule that bintrail init --s3-bucket sets when it creates a bucket." }),
     rule, cmd,
     el("p", { class: "form-hint", text:
-      "The rule applies to " + s.prefix + "/ only, and to no archived changes configured on this page. It expires by age alone: it cannot spare the only complete copy, nor a backup a restore is reading, and if the schedule stops it keeps expiring until none is left." }),
+      "The rule applies to " + s.prefix + "/ only, and to no archived changes configured on this page. It expires by age alone: it cannot spare the only complete copy, nor a snapshot a restore is reading, and if the schedule stops it keeps expiring until none is left." }),
     el("p", { class: "form-hint", text:
       "On a bucket with versioning the rule also expires old versions after the same number of days; under an Object Lock retention nothing can be expired before that retention ends." }),
     el("p", { class: "form-hint", text: "DBTrail never deletes from S3 and never changes a bucket's rules; this one is yours to apply." }));
@@ -5656,7 +5656,7 @@ function snapshotSetupSections(settings) {
   const editableRows = daemonRows.filter((row) => row.editable && SNAPSHOT_SETTING_KEYS.has(row.key));
   if (capsCache.monitor && !broken && editableRows.length) {
     out.push(sect(mayEdit ? "Change here" : "Current settings"));
-    out.push(el("div", { class: "cards" }, backupDaemonEditCard(editableRows, !mayEdit)));
+    out.push(el("div", { class: "cards cards-plain" }, backupDaemonEditCard(editableRows, !mayEdit)));
   }
   if (!broken) out.push(backupServersPanel(settings));
   return out;
@@ -5671,7 +5671,7 @@ const BACKUP_DAEMON_ROWS = {
   baseline_dir: "Default local folder",
   baseline_s3: "Default S3 location",
   baseline_retain: "Delete local snapshots older than",
-  refresh_every: "Refresh backups every",
+  refresh_every: "Refresh snapshots every",
   lock_mode: "Lock while dumping",
   trigger: "Create-backup button",
   staging_dir: ".sql build folder",
@@ -5795,7 +5795,7 @@ function blCase(source, current) {
     return el("div", { class: "bl-case bl-unknown" + (current ? " is-current" : ""), "data-source": source || "",
       "aria-current": current ? "true" : null },
       el("span", { class: "bl-name", text: "Unknown" }),
-      el("span", { class: "bl-lane", text: "DBTrail cannot read this server's backup state; update it" }));
+      el("span", { class: "bl-lane", text: "DBTrail cannot read this server's snapshot state; update it" }));
   }
   const lane = (label, ok) => el("span", { class: "bl-lane " + (ok ? "on" : "no") },
     el("span", { class: "bl-mark", text: ok ? "✓" : "✗" }), label);
@@ -5803,7 +5803,7 @@ function blCase(source, current) {
     "aria-current": current ? "true" : null },
     el("span", { class: "bl-name", text: c.name }),
     lane("time-travel", c.reads),
-    lane("backups and restores", c.writes));
+    lane("snapshots and restores", c.writes));
 }
 
 // backupServersPanel is the per-server half: the editable backup location and
@@ -5843,11 +5843,11 @@ function s3OnlyBackupWarning(srv, fix = true) {
   // The problem itself is said to everyone who can see the row.
   const then = (t) => fix ? " " + t : "";
   // Where this process runs no scheduled backups, only the setting is known.
-  if (!srv.schedule_loop) return "With S3 only, a scheduled backup cannot update from the recorded changes." + then("Add a Local folder.");
+  if (!srv.schedule_loop) return "With S3 only, a scheduled snapshot cannot update from the recorded changes." + then("Add a Local folder.");
   if (!srv.full_backup_possible) {
-    return "With S3 only, scheduled backups cannot run on this server: a full backup is not available here, and updating from the recorded changes needs a Local folder." + then("Add one.");
+    return "With S3 only, scheduled snapshots cannot run on this server: a full read is not available here, and updating from the recorded changes needs a Local folder." + then("Add one.");
   }
-  return "With S3 only, every scheduled backup reads your whole database." + then("Add a Local folder so runs update from the recorded changes.");
+  return "With S3 only, every scheduled snapshot reads your whole database." + then("Add a Local folder so runs update from the recorded changes.");
 }
 
 // localCopyWords is what the per-server yes/no means right now (#1681), from
@@ -6012,7 +6012,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     const eff = srv.resolved_dir || srv.resolved_s3;
     box.append(el("p", { class: "form-hint" },
       "Time-travel reads ", el("code", { text: eff }),
-      sessionMay("servers:write") ? ". To make backups for this server, save a location above." : "."));
+      sessionMay("servers:write") ? ". To make snapshots for this server, save a location above." : "."));
   }
   // The refusal beats the prediction: the schedule reads the RAW entry, so
   // clearing the dir on this very page leaves a stored schedule that will
@@ -6024,8 +6024,8 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const more = [];
   const p = (t) => el("p", { class: "form-hint", text: t });
   if (srv.schedule_every) {
-    more.push(p("Scheduled backups: every " + srv.schedule_every + (srv.schedule_at ? " at " + srv.schedule_at : "") +
-      (srv.schedule_full_every ? ", with a full backup every " + srv.schedule_full_every : "") +
+    more.push(p("Scheduled snapshots: every " + srv.schedule_every + (srv.schedule_at ? " at " + srv.schedule_at : "") +
+      (srv.schedule_full_every ? ", with a full read every " + srv.schedule_full_every : "") +
       // Where the timetable is CHANGED, and only where it can be: the card
       // it lives on is drawn for the SELECTED server, and only where this
       // process runs the schedules. Pointing at "the card above" on a
@@ -6038,19 +6038,19 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     if (srv.schedule_full_refusal && !srv.schedule_refusal) {
       const why = String(srv.schedule_full_refusal);
       more.push(el("p", { class: "form-msg err", text: why.charAt(0).toUpperCase() + why.slice(1) +
-        (/[.!?]$/.test(why) ? "" : ".") + " The full backups do not run until that changes; the other scheduled runs still do." }));
+        (/[.!?]$/.test(why) ? "" : ".") + " The full reads do not run until that changes; the other scheduled runs still do." }));
     }
   } else {
     more.push(p(!capsCache.backup_schedule
-      ? "No scheduled backups. Setting one needs the DBTrail daemon; this console is read-only."
-      : sessionMay("servers:write") ? "No scheduled backups. Select this server at the top of the page to set one." : "No schedule."));
+      ? "No scheduled snapshots. Setting one needs the DBTrail daemon; this console is read-only."
+      : sessionMay("servers:write") ? "No scheduled snapshots. Select this server at the top of the page to set one." : "No schedule."));
   }
   // S3 keeps every uploaded backup forever unless the BUCKET expires it
   // (#1622): say how fast it grows, and hand over the rule to apply. The
   // server's OWN destination only: the daemon default is shared by every
   // server, and a rule on it is not this row's to hand out.
   if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers, daemonS3));
-  more.push(docsMore("settings/backups", "per-server", "backup locations per server"),
+  more.push(docsMore("settings/backups", "per-server", "snapshot locations per server"),
     // The strategy guide is the page the header table names for Snapshots;
     // the card that linked it from the setup half is gone (#1681).
     docsMore("guides/backup-strategy", "", "how DBTrail backs up your database"));
@@ -6233,7 +6233,7 @@ function stagingCard(storage, servers) {
   const builds = stg.builds || [];
   if (!builds.length) {
     card.append(el("p", { class: "stg-hint", text:
-      "Nothing staged. A .sql backup from the Snapshots page waits here until it is downloaded, or " +
+      "Nothing staged. A .sql export from the Snapshots page waits here until it is downloaded, or " +
       hours + " hours pass, then it is removed." }));
   } else {
     card.append(el("p", { class: "stg-hint", text:
@@ -6425,7 +6425,7 @@ function duckdbPanel() {
     el("p", { class: "form-hint", text:
       "Runs in your own DuckDB. Nothing runs here, and no credentials are in the file." }),
     el("p", { class: "form-hint", text:
-      "The views follow your newest backup where the backup folder supports it. (CLI: bintrail views)" })));
+      "The views follow your newest snapshot where the snapshot folder supports it. (CLI: bintrail views)" })));
 
   const btn = el("button", { class: "btn btn-sm", type: "button", text: "Download " + DUCKDB_VIEWS_FILE });
   btn.onclick = async () => {
@@ -6586,9 +6586,9 @@ function reusedCopiedNote(copied) {
 // The subject is "update", not "automatic refresh": a scheduled update writes
 // the same status slot.
 function budgetRefusedTail() {
-  return " Nothing was overwritten. Until a newer full backup exists, every update from the recorded changes" +
-    " starts from the same backup and is refused again" +
-    (capsCache.baseline_trigger ? "." : "; creating backups from the web interface is turned off here.");
+  return " Nothing was overwritten. Until a newer full read exists, every update from the recorded changes" +
+    " starts from the same snapshot and is refused again" +
+    (capsCache.baseline_trigger ? "." : "; creating snapshots from the web interface is turned off here.");
 }
 
 // scheduleSkipTail: a skipped slot retries at the next one, which falls back
@@ -6596,8 +6596,8 @@ function budgetRefusedTail() {
 // budget refusal whose full backup cannot start here: its reason already says
 // why, so the tail does not repeat it.
 function scheduleSkipTail(reason) {
-  return touchedRowBudgetText(reason) && /a full backup cannot start here/.test(reason || "")
-    ? " Until a newer full backup exists, every scheduled update is refused the same way."
+  return touchedRowBudgetText(reason) && /a full (backup|read) cannot start here/.test(reason || "")
+    ? " Until a newer full read exists, every scheduled update is refused the same way."
     : " It will try again at the next scheduled time.";
 }
 
@@ -6612,7 +6612,7 @@ function touchedRowBudgetText(s) {
 // needs a closer moment, which is this card's own input.
 function restoreRefusedLine(rst) {
   return "Last restore published nothing: " + backupFoldError(rst.last_error || "unknown error") +
-    (rst.too_many_changes ? " Nothing was overwritten. Pick a moment closer to an existing backup." : " Nothing was overwritten.");
+    (rst.too_many_changes ? " Nothing was overwritten. Pick a moment closer to an existing snapshot." : " Nothing was overwritten.");
 }
 
 // baselineRefreshNote renders the last automatic refresh for the selected
@@ -6646,9 +6646,9 @@ function baselineRefreshNote(rf) {
       // run folds a NEW snapshot rather than re-sending this one.
       text = rf.published
         ? "Automatic refresh" + (when ? " at " + when : "") +
-          " wrote the backup on this machine but could not send it to the backup destination" +
+          " wrote the snapshot on this machine but could not send it to the snapshot destination" +
           (rf.last_error ? ": " + backupFoldError(rf.last_error) : ".") +
-          " The backup is on disk and can be restored from. The next run folds a new one."
+          " The snapshot is on disk and can be restored from. The next run folds a new one."
         : "Automatic refresh published nothing" + (when ? " at " + when : "") +
           (rf.refused ? "; " + rf.refused + " table(s) refused" : "") +
           (rf.last_error ? ": " + backupFoldError(rf.last_error) : "") +
@@ -6689,7 +6689,7 @@ function baselineContextStrip(b, cur) {
     el("span", { class: "ctx-label", text: label }),
     typeof val === "string" ? el("span", { class: "ctx-value", text: val }) : val);
   if (!b || b.error) {
-    strip.append(item("BACKUPS", "could not load: " + ((b && b.error) || "unavailable")));
+    strip.append(item("SNAPSHOTS", "could not load: " + ((b && b.error) || "unavailable")));
     return strip;
   }
   if (!b.configured) {
@@ -6710,14 +6710,14 @@ function baselineContextStrip(b, cur) {
   } else {
     strip.append(item("SOURCE", el("code", { class: "code-ink ctx-source", text: b.source }), "ctx-grow"));
   }
-  strip.append(item("BACKUPS", String(snaps.length) + (b.truncated ? "+" : "")));
+  strip.append(item("SNAPSHOTS", String(snaps.length) + (b.truncated ? "+" : "")));
   if (snaps.length) {
     // One fact, one place: absolute and relative side by side, instead of the
     // same freshness spelled two ways 300px apart.
     strip.append(item("LATEST", snaps[0].time + " UTC · " + formatAge(snaps[0].age_hours) + " ago"));
   }
   const uniform = snapshotTablesUniform(snaps, b.truncated);
-  if (uniform !== null) strip.append(item("TABLES", uniform + " per backup"));
+  if (uniform !== null) strip.append(item("TABLES", uniform + " per snapshot"));
   strip.append(item("TIME-TRAVEL", b.reconstruct ? "enabled" : "off (archives disabled)"));
   // The page's primary action, at page level (not a list-header costume),
   // or, where the action is unavailable, the reason.
@@ -6734,7 +6734,7 @@ function baselineContextStrip(b, cur) {
     const ownLoc = !!(cur.baseline_dir || cur.baseline_s3);
     const off = !capsCache.baseline_trigger;
     if (!off && ownLoc) {
-      const btn = el("button", { class: "btn ctx-action", type: "button", text: "Create backup" });
+      const btn = el("button", { class: "btn ctx-action", type: "button", text: "Read database now" });
       btn.onclick = () => createBaseline(cur.id, btn);
       strip.append(btn);
     } else if (cur.has_source) {
@@ -6745,8 +6745,8 @@ function baselineContextStrip(b, cur) {
       // source is never backed up from the console, so it gets no note.
       const why = [];
       if (off) why.push("turned off at startup");
-      if (!ownLoc) why.push("needs this server's own backup location");
-      strip.append(item("CREATE BACKUP", why.join(", and ") + (sessionMayConfigureServer() ? " (under Where and how often)" : "")));
+      if (!ownLoc) why.push("needs this server's own snapshot location");
+      strip.append(item("READ DATABASE", why.join(", and ") + (sessionMayConfigureServer() ? " (under Where and how often)" : "")));
     }
   }
   return strip;
@@ -6821,7 +6821,7 @@ function icebergExportCommand(cur, baselines) {
 // stack IS the bundled index; every other entry comes from the registry.
 function icebergComposeNote(cur) {
   const bundled = cur && cur.kind === "ephemeral";
-  return "The Docker route below runs against this stack's own index and backups" +
+  return "The Docker route below runs against this stack's own index and snapshots" +
     (bundled ? ". " : ", not the server picked here. ") +
     "To point it " + (bundled ? "somewhere else" : "at this server") +
     ", set INDEX_DSN and BASELINE_DIR or BASELINE_S3 in the stack's .env file.";
@@ -6875,11 +6875,11 @@ function icebergFlow() {
     el("div", { class: "ice-eng-l", text: "through a catalog" }),
     chips(ICEBERG_ENGINES_CATALOG));
   return el("div", { class: "ice-flow" },
-    // "newest backup", not "the whole snapshot": the old paragraph said WHICH
+    // "newest snapshot", not "the whole snapshot": the old paragraph said WHICH
     // backup the first run consumes, and a reader looking at a list of them on
     // this very page cannot work that out from "snapshot". One word for one
     // object, too — the fold below and the rest of this page say "backup".
-    stage("This server's history", "the newest backup, plus every change since"),
+    stage("This server's history", "the newest snapshot, plus every change since"),
     arrow(),
     // The egress answer, kept in the open. It was a sentence under the command
     // ("Nothing is sent anywhere: the tables are written where you point it")
@@ -6911,7 +6911,7 @@ function icebergRuns() {
       el("span", { class: "ice-run-n", text: note })),
   ];
   return el("div", { class: "ice-runs" },
-    ...row("First run", "ice-bar-full", "loads the newest backup"),
+    ...row("First run", "ice-bar-full", "loads the newest snapshot"),
     ...row("Every run after", "ice-bar-delta", "adds only what changed"));
 }
 
@@ -6979,12 +6979,12 @@ function icebergExportPanel(cur, baselines) {
     el("code", { class: "stg-code cn-snippet", text:
       "docker compose --profile iceberg-export run --rm iceberg-export" }),
     el("p", { class: "form-hint", text:
-      "Run it where bintrail is installed and can reach this index and these backups. Run it again whenever " +
+      "Run it where bintrail is installed and can reach this index and these snapshots. Run it again whenever " +
       "you want the tables brought forward; it picks up where it left off, and a run that dies partway leaves " +
       "the last good copy in place." }),
     el("p", { class: "form-hint", text:
       "Hourly from cron. The Docker line keeps the index password out of your crontab, since the container " +
-      "reads it from the stack; use it when the stack holds the index and backups you want exported, per the " +
+      "reads it from the stack; use it when the stack holds the index and snapshots you want exported, per the " +
       "note above." }),
     el("code", { class: "stg-code cn-snippet", text:
       "17 * * * * cd /path/to/stack && docker compose --profile iceberg-export run --rm iceberg-export" }),
@@ -6993,7 +6993,7 @@ function icebergExportPanel(cur, baselines) {
       "out of the crontab line: put it in a file only you can read and have the job read it from there." }),
     el("p", { class: "form-hint", text:
       "Each table is written to <warehouse>/<schema>/<table>/. The export refuses to advance a table whose " +
-      "columns changed, or whose history has a gap, and says which; to load one again from a fresh backup, " +
+      "columns changed, or whose history has a gap, and says which; to load one again from a fresh snapshot, " +
       "remove its folder." })));
   return panel;
 }
@@ -7050,7 +7050,7 @@ function backupIncompleteNotice(b) {
   // could not be read" over such a listing and named nothing.
   const bad = ((b.sources) || []).filter((s) => s.error || s.skipped > 0);
   const box = el("div", { class: "error-box" },
-    el("div", { text: "Some backups are not listed: " + bad.length +
+    el("div", { text: "Some snapshots are not listed: " + bad.length +
       " of " + ((b.sources) || []).length + " locations could not be read in full." }));
   bad.forEach((s) => box.append(el("div", { class: "bk-src" },
     el("span", { class: "bk-src-k", text: backupKindWord(s.kind) }),
@@ -7180,7 +7180,7 @@ function baselinesPanel(b, servers, opts) {
     owner = "daemon (--baseline-dir / --baseline-s3)";
   }
   const head = el("div", { class: "ov-panel-head" },
-    el("h2", { class: "ov-panel-title", text: "Backups" + (owner ? " · " + owner : "") }),
+    el("h2", { class: "ov-panel-title", text: "Snapshots" + (owner ? " · " + owner : "") }),
     tzChip());
   panel.append(head);
   // The daemon's periodic refresh (#1171). Shown next to the list because the
@@ -7196,23 +7196,23 @@ function baselinesPanel(b, servers, opts) {
   if (b && !b.error) snapshotRetentionLines(b).forEach((line) => panel.append(line));
   const list = el("div", { class: "stg-list" });
   if (!b || b.error) {
-    list.append(el("div", { class: "ev-empty", text: "Could not list backups: " + ((b && b.error) || "unavailable") }));
+    list.append(el("div", { class: "ev-empty", text: "Could not list snapshots: " + ((b && b.error) || "unavailable") }));
   } else if (!b.configured) {
     list.append(el("div", { class: "stg-empty" },
-      el("p", { class: "stg-empty-lead", text: "No backups configured." }),
-      el("p", { class: "stg-empty-sub", text: "A backup is a full copy of your tables at one point in time. With one, Time-travel can show complete rows, not just the ones that changed lately." }),
+      el("p", { class: "stg-empty-lead", text: "No snapshots configured." }),
+      el("p", { class: "stg-empty-sub", text: "A snapshot is a full copy of your tables at one point in time. With one, Time-travel can show complete rows, not just the ones that changed lately." }),
       ...(sessionMayConfigureServer() ? [el("p", { class: "stg-empty-sub", text: "1. Create snapshots:" }),
       el("code", { class: "stg-code", text: "docker compose --profile baseline run --rm baseline" }),
       el("p", { class: "stg-empty-sub", text: "2. " + baselineConfigHint(cur, opts && opts.serversErr) })] : [])));
   } else if (!(b.snapshots || []).length) {
-    // A source that failed reaches HERE too, and "no backups found" would be a
+    // A source that failed reaches HERE too, and "no snapshots found" would be a
     // flat lie about a bucket nobody could read.
     const emptyWarn = backupIncompleteNotice(b);
     if (emptyWarn) list.append(emptyWarn);
     list.append(el("div", { class: "stg-empty" },
-      el("p", { class: "stg-empty-lead", text: "Source configured, no backups found." }),
+      el("p", { class: "stg-empty-lead", text: "Source configured, no snapshots found." }),
       backupSourceList(b),
-      el("p", { class: "stg-empty-sub", text: "Run bintrail dump and bintrail baseline to create your first backup. The path must point at the folder that contains the backups, not a specific file (<timestamp>/<schema>/<table>.parquet)." })));
+      el("p", { class: "stg-empty-sub", text: "Run bintrail dump and bintrail baseline to create your first snapshot. The path must point at the folder that contains the snapshots, not a specific file (<timestamp>/<schema>/<table>.parquet)." })));
   } else {
     // Panel headline: the newest-per-table rollup. Older snapshots being past
     // coverage is routine (superseded) — only the headline and the newest
@@ -7224,8 +7224,8 @@ function baselinesPanel(b, servers, opts) {
         // broken is the worst state on this page (a full-table restore will
         // not work), so it is red; aging and unknown stay the warning colour.
         el("span", { class: b.staleness === "broken" ? "chip chip-fail" : "chip chip-mon", text: b.staleness === "broken"
-          ? "⚠ BACKUP STALE: full-table restore broken; take a fresh backup"
-          : "BACKUP " + b.staleness.toUpperCase() })));
+          ? "⚠ SNAPSHOT STALE: full-table restore broken; take a fresh snapshot"
+          : "SNAPSHOT " + b.staleness.toUpperCase() })));
     }
     // Row hierarchy (#1415): the newest snapshot is what Time-travel and a
     // restore actually use — it gets the treatment; the rest are history and
@@ -7289,7 +7289,7 @@ function baselinesPanel(b, servers, opts) {
     // Only when there is no pager to carry it: with one, "of the newest 50"
     // already says it, and this line sitting under page 1 read as "backups 6
     // and up are not shown" when they are on page 2.
-    if (b.truncated && !pager) list.append(el("div", { class: "ev-empty", text: "…older backups not shown." }));
+    if (b.truncated && !pager) list.append(el("div", { class: "ev-empty", text: "…older snapshots not shown." }));
   }
   panel.append(list);
   return panel;
@@ -7300,36 +7300,36 @@ function baselinesPanel(b, servers, opts) {
 // Storage view so the new snapshot appears. The button is disabled while in flight.
 async function createBaseline(id, btn) {
   if (btn) { btn.disabled = true; btn.textContent = "Creating…"; }
-  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = "Create backup"; } };
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = "Read database now"; } };
   try {
     await api("/api/servers/" + encodeURIComponent(id) + "/baseline", { method: "POST", body: {} });
   } catch (err) {
-    toastError("Backup failed: " + ((err && err.message) || err));
+    toastError("Snapshot failed: " + ((err && err.message) || err));
     restore();
     return;
   }
-  toast("Backup started: copying your data and uploading it…");
+  toast("Snapshot started: copying your data and uploading it…");
   if (backupsOnScreen()) renderSnapshots();
   let done = await pollBaseline(id, false);
   if (done && done.state === "succeeded" && done.uploading) {
     // Published locally; the copy to the destination is still running and
     // no longer holds the schedule (#1725). Say so, and wait for it.
-    toast("Backup saved locally: " + (done.tables || 0) + " table(s). Still copying it to the backup destination…");
+    toast("Snapshot saved locally: " + (done.tables || 0) + " table(s). Still copying it to the snapshot destination…");
     if (backupsOnScreen()) renderSnapshots();
     done = await pollBaseline(id, true);
   }
   restore();
   if (done && done.state === "succeeded" && !done.uploading) {
-    toast("Backup complete: " + (done.tables || 0) + " table(s)" +
+    toast("Snapshot complete: " + (done.tables || 0) + " table(s)" +
       (done.uploaded ? ", " + done.uploaded + " file(s) uploaded" : "") +
-      (done.swept ? ", " + done.swept + " earlier backup(s) sent too" : ""));
+      (done.swept ? ", " + done.swept + " earlier snapshot(s) sent too" : ""));
   } else if (done && done.uploading) {
     // The poll's cap hit mid-copy: say what is true, not "complete".
-    toast("Backup saved on this machine. The copy to the backup destination is still running; the Snapshots page shows when it finishes.");
+    toast("Snapshot saved on this machine. The copy to the snapshot destination is still running; the Snapshots page shows when it finishes.");
   } else if (done) {
-    toastError("Backup failed: " + (done.last_error || "unknown error"));
+    toastError("Snapshot failed: " + (done.last_error || "unknown error"));
   } else {
-    toast("The backup is still running. Check back shortly.");
+    toast("The snapshot is still running. Check back shortly.");
   }
   // Only the Snapshots page needs the refresh: the button lives in
   // baselineContextStrip (#1415 moved it out of baselinesPanel), and both the
@@ -7380,7 +7380,7 @@ const BACKUP_KIND_LABEL = { dump: "full copy of the source", refresh: "automatic
 const BACKUP_WHY_REMEDY = {
   no_index: "Set an index connection for this server (Servers) and the next run updates from the recorded changes instead of reading your database in full; without one there are no recorded changes to update from.",
   no_local_dir: "Set a Local folder for this server (under Where and how often) and the next run updates from the recorded changes instead of reading your database in full.",
-  first_backup: "First backup: there was nothing to update from yet. The next run updates from it.",
+  first_backup: "First snapshot: there was nothing to update from yet. The next run updates from it.",
 };
 // The codes whose cause is a setting, so every run until it changes is a
 // full read of the database (#1659). first_backup is not one: the next run
@@ -7390,9 +7390,9 @@ const BACKUP_WHY_EVERY_RUN = new Set(["no_index", "no_local_dir"]);
 // that may be months old: "the next run updates" is false there (it ran
 // long ago) and "this server has no index connection" may no longer hold.
 const BACKUP_WHY_FACT = {
-  no_index: "Full backup: this server had no index connection at the time, so there were no recorded changes to update from.",
-  no_local_dir: "Full backup: an update from the recorded changes needed a local backup directory, which this server did not have at the time.",
-  first_backup: "Full backup: the first one, with nothing to update from yet.",
+  no_index: "Full read: this server had no index connection at the time, so there were no recorded changes to update from.",
+  no_local_dir: "Full read: an update from the recorded changes needed a local snapshot directory, which this server did not have at the time.",
+  first_backup: "Full read: the first one, with nothing to update from yet.",
 };
 // remedy: true on the schedule card (this IS the last run, and the setting
 // to change is the point); false on a snapshot's detail (the fact only).
@@ -7413,9 +7413,9 @@ function backupWhyLine(why, code, remedy) {
   const said = (t) => backupFoldError(t).replace(/; pick a later moment\.?(?=\n|$)/g, ".");
   let out;
   if (code === "fold_refused" && inner) {
-    out = "The update from the recorded changes was refused, so a full backup was taken instead. Reason: " + said(inner[1]);
+    out = "The update from the recorded changes was refused, so a full read was taken instead. Reason: " + said(inner[1]);
   } else if (code === "fold_crashed" && inner) {
-    out = "The update from the recorded changes hit an internal error, so a full backup was taken instead. Error: " + said(inner[1].replace(/^internal error:?\s*/, ""));
+    out = "The update from the recorded changes hit an internal error, so a full read was taken instead. Error: " + said(inner[1].replace(/^internal error:?\s*/, ""));
   } else if (code === "previous_unreadable" || code === "full_copy") {
     // A full backup the schedule's own timetable asked for (#1564) is its
     // own reason, not a fault: "Full backup because the schedule takes a
@@ -7424,9 +7424,9 @@ function backupWhyLine(why, code, remedy) {
   } else if (code === "window_measured" || code === "window_age") {
     // The daemon's own numbers (#1721): events, the estimate, the last full
     // backup's duration or the anchor's age. Said as recorded.
-    out = "Full backup instead of an update: " + why;
+    out = "Full read instead of an update: " + why;
   } else {
-    out = "Full backup because " + why;
+    out = "Full read because " + why;
   }
   if (!/[.!?]$/.test(out.trim())) out = out.trim() + ".";
   return out;
@@ -7451,7 +7451,7 @@ const MADE_BY = {
   // the record, by a newer version writing a value this build does not know,
   // and by a footer field that would not parse. Picking one of them for the
   // tooltip would be the reader told something nobody checked.
-  unknown: ["not recorded", "This backup does not say how it was made."],
+  unknown: ["not recorded", "This snapshot does not say how it was made."],
 };
 
 function madeByCell(t) {
@@ -7469,9 +7469,9 @@ function madeByCell(t) {
   // sentence names the file plus the changes since, which is exact either
   // way; when that backup IS the last read, the next sentence already says so.
   let title = entry[1];
-  if (t.produced_by === "carried_forward" && t.from) title += " Reused from the backup of " + utcLabel(t.from) + ".";
+  if (t.produced_by === "carried_forward" && t.from) title += " Reused from the snapshot of " + utcLabel(t.from) + ".";
   if (t.produced_by === "fold" && t.from && t.from !== t.source_read_at) {
-    title += " Built from the backup of " + utcLabel(t.from) + " plus the changes recorded since.";
+    title += " Built from the snapshot of " + utcLabel(t.from) + " plus the changes recorded since.";
   }
   if (t.produced_by !== "dump" && t.source_read_at) {
     title += " Last real read of the database: " + utcLabel(t.source_read_at) +
@@ -7521,13 +7521,13 @@ function sourceReadLine(d) {
   const tail = (missing ? " " + missing + (missing === 1 ? " table does" : " tables do") + " not record when." : "") +
     (uncounted ? " How many updates were built since is not recorded for " + uncounted + (uncounted === 1 ? " table." : " tables.") : "");
   if (!d.source_read_at) {
-    return missing ? "When your database was last read for this backup is not recorded." : "";
+    return missing ? "When your database was last read for this snapshot is not recorded." : "";
   }
   const age = d.source_read_age_seconds || 0;
   const folds = d.max_folds_since_read;
   if (age < 1 && folds === 0) return "Read from your database when it was taken." + tail;
   return "Last real read of your database: " + utcLabel(d.source_read_at) +
-    (age >= 1 ? ", " + fmtAge(age) + " before this backup" : "") +
+    (age >= 1 ? ", " + fmtAge(age) + " before this snapshot" : "") +
     (folds > 0 ? ". Updated from the recorded changes " + (folds > 1 ? "up to " : "") + timesText(folds) + " since" : "") +
     "." + tail;
 }
@@ -7538,7 +7538,7 @@ async function loadBackupDetail(at, box) {
   try {
     d = await api("/api/baselines/files?at=" + encodeURIComponent(at));
   } catch (err) {
-    box.textContent = "Could not load the backup detail: " + ((err && err.message) || err);
+    box.textContent = "Could not load the snapshot detail: " + ((err && err.message) || err);
     delete box.dataset.loaded; // a transient failure must not pin the row
     return;
   }
@@ -7565,7 +7565,7 @@ async function loadBackupDetail(at, box) {
   // The download hands over every row, unredacted: query:execute.
   if (sessionMay("query:execute")) facts.append(dl);
   box.append(facts);
-  if (d.incomplete) box.append(el("p", { class: "form-msg err", text: "This backup is marked incomplete (a failed or unfinished run); it cannot be downloaded or restored from." }));
+  if (d.incomplete) box.append(el("p", { class: "form-msg err", text: "This snapshot is marked incomplete (a failed or unfinished run); it cannot be downloaded or restored from." }));
   const tbl = el("table", { class: "bk-table" });
   // The "Made by" column is only rendered when a row actually carries a verdict
   // (#1545). An S3 source does not look it up, and a header over a column of
@@ -7601,11 +7601,11 @@ async function downloadBackup(at, btn, totalBytes) {
   // click starting a second full archive, both held whole in browser memory.
   // The flag outlives the node the click came from.
   if (backupDownloadBusy) {
-    toastError("A backup is already downloading. Wait for that one to finish before starting another.");
+    toastError("A snapshot is already downloading. Wait for that one to finish before starting another.");
     return;
   }
   if (totalBytes > 1 << 30 &&
-      !window.confirm("This backup weighs " + humanBytes(totalBytes) +
+      !window.confirm("This snapshot weighs " + humanBytes(totalBytes) +
         ". The browser holds all of it in memory before saving. Download anyway?")) {
     return;
   }
@@ -7655,21 +7655,21 @@ function backupRunsInFlight(dumpSt, restoreSt, b, sqlSt) {
   const running = [];
   const dump = dumpSt && dumpSt.baseline;
   if (dump && dump.state === "running") {
-    running.push({ kind: "dump", text: "Creating a backup: copying your data" + (dump.since ? ", since " + utcLabel(dump.since) : "") + "…" });
+    running.push({ kind: "dump", text: "Creating a snapshot: copying your data" + (dump.since ? ", since " + utcLabel(dump.since) : "") + "…" });
   } else if (dump && dump.state === "succeeded" && dump.uploading) {
     // Published on this machine; the copy to the backup destination is still
     // running and no longer holds the schedule (#1725): a refresh may start
-    // meanwhile, so this line must not read as "the backup is still running".
-    running.push({ kind: "dump", text: "Backup saved on this machine" + (dump.tables ? ": " + dump.tables + " table(s)" : "") +
-      ". Still copying it to the backup destination…" });
+    // meanwhile, so this line must not read as "the snapshot is still running".
+    running.push({ kind: "dump", text: "Snapshot saved on this machine" + (dump.tables ? ": " + dump.tables + " table(s)" : "") +
+      ". Still copying it to the snapshot destination…" });
   }
   const rst = restoreSt && restoreSt.restore;
   if (rst && rst.state === "running") {
-    running.push({ kind: "restore", text: "Restoring to " + (rst.at ? utcLabel(rst.at) : "the chosen moment") + ": building a new backup…" });
+    running.push({ kind: "restore", text: "Restoring to " + (rst.at ? utcLabel(rst.at) : "the chosen moment") + ": building a new snapshot…" });
   }
   const sq = sqlSt && sqlSt.sql_export;
   if (sq && sq.state === "running") {
-    running.push({ kind: "sql-export", text: "Building a .sql backup" + (sq.at ? " for " + utcLabel(sq.at) : "") + "\u2026" });
+    running.push({ kind: "sql-export", text: "Building a .sql export" + (sq.at ? " for " + utcLabel(sq.at) : "") + "\u2026" });
   }
   const rf = b && !b.error && b.refresh;
   if (rf && rf.state === "running") {
@@ -7816,10 +7816,10 @@ function plainWords(msg) {
 function backupFoldError(msg) {
   let out = String(msg)
     .replace(/;?[ \t]*pass --allow-gaps to proceed[^.;\n]*/g,
-      ". The recorded history has a permanent gap in that window, so the backup would be incomplete; pick a later moment")
+      ". The recorded history has a permanent gap in that window, so the snapshot would be incomplete; pick a later moment")
     .replace(/,?[ \t]*or target a different instant with --at/g, ", or pick another second")
     .replace(/ \u2014 a snapshot emitted from it would carry the OLD CREATE TABLE forward and project every row onto the old columns and types, so every reconstruct anchored on it would be wrong\. Take a real snapshot instead: `bintrail dump` \+ `bintrail baseline`\. \(If the schema snapshot is what is stale, run `bintrail snapshot` first and retry\.\): schema changed since the baseline/g,
-      ". Updating it from the recorded changes needs a backup taken after that change")
+      ". Updating it from the recorded changes needs a snapshot taken after that change")
     .replace(/\u2014/g, "-");
   if (!/[.!?]$/.test(out.trim())) out = out.trim() + ".";
   return out;
@@ -7882,13 +7882,13 @@ function backupScheduleCard(cur, b) {
     const why = plainWords(sch.full_reason);
     fullWarn = el("p", { class: "form-msg err", text:
       why.charAt(0).toUpperCase() + why.slice(1) + (/[.!?]$/.test(why) ? "" : ".") +
-      " The full backups do not run until that changes; the other scheduled runs still do." });
+      " The full reads do not run until that changes; the other scheduled runs still do." });
   }
   if (!sch) {
     state.textContent = "None yet.";
   } else {
     let line = "Every " + sch.every + " at " + sch.at + " UTC" +
-      (sch.full_every ? ", with a full backup every " + sch.full_every : "") + ".";
+      (sch.full_every ? ", with a full read every " + sch.full_every : "") + ".";
     if (sch.runnable && sch.next_run) line += " Next: " + utcLabel(sch.next_run) + ".";
     if (!sch.runnable) {
       // Terminated, the same way the next-run warning below terminates its
@@ -7914,11 +7914,11 @@ function backupScheduleCard(cur, b) {
     // No run history renders here, so the refusal's note goes on the state
     // line directly (the editable view ranks it with the other alarms).
     if (fullWarn) {
-      state.textContent += " The full backup cannot run.";
+      state.textContent += " The full read cannot run.";
       body.append(fullWarn);
     }
     body.append(el("p", { class: "form-hint", text:
-      "This schedule can be changed from the watch daemon's web interface (CLI: bintrail-console watch) once its backup features are on." }));
+      "This schedule can be changed from the watch daemon's web interface (CLI: bintrail-console watch) once its snapshot features are on." }));
     card.append(body);
     return card;
   }
@@ -7999,7 +7999,7 @@ function backupScheduleCard(cur, b) {
       body.append(el("p", { class: "form-msg err", text:
         "The next run cannot start: " + plainWords(sch.next_method_error) + (/[.!?]$/.test(sch.next_method_error) ? "" : ".") }));
     } else if (sch.runnable && sch.next_method) {
-      const how = sch.next_method === "refresh" ? "will update the latest backup from the recorded changes" : "will take a full backup from your database";
+      const how = sch.next_method === "refresh" ? "will update the latest snapshot from the recorded changes" : "will take a full read from your database";
       // A setting that makes EVERY run a full read (no Backup dir, no index
       // connection) is a warning, not the grey of a healthy prediction
       // (#1659); a first backup or a one-off unreadable bucket stays a hint.
@@ -8019,7 +8019,7 @@ function backupScheduleCard(cur, b) {
       alarm = true;
       alarmNote = "The run history could not be opened.";
       body.append(el("p", { class: "form-msg err", text:
-        "The backup run history could not be opened, so runs from before this daemon started are not shown. Check the daemon log." }));
+        "The snapshot run history could not be opened, so runs from before this daemon started are not shown. Check the daemon log." }));
     }
     // The full backup the schedule asks for (#1564): its refusal, or when
     // the next one is due if that is not the next run already said above.
@@ -8028,37 +8028,37 @@ function backupScheduleCard(cur, b) {
     // alarm replaces it.
     if (fullWarn) {
       alarm = true;
-      if (!alarmNote) alarmNote = "The full backup cannot run.";
+      if (!alarmNote) alarmNote = "The full read cannot run.";
       body.append(fullWarn);
     } else if (sch.runnable && sch.next_full_run && sch.next_full_run !== sch.next_run) {
-      body.append(el("p", { class: "form-hint", text: "Next full backup the schedule asks for: " + utcLabel(sch.next_full_run) + "." }));
+      body.append(el("p", { class: "form-hint", text: "Next full read the schedule asks for: " + utcLabel(sch.next_full_run) + "." }));
     }
     if (sch.running) {
-      body.append(el("p", { class: "form-hint", text: "A scheduled backup is running now." }));
+      body.append(el("p", { class: "form-hint", text: "A scheduled snapshot is running now." }));
     }
     const run = sch.last_run, skip = sch.last_skipped, fb = sch.last_fallback;
     if (run) {
       const when = utcLabel(run.finished_at || run.started_at || "");
-      const what = run.method === "refresh" ? "update from the recorded changes" : "full backup";
+      const what = run.method === "refresh" ? "update from the recorded changes" : "full read";
       if (run.ok) {
         const reused = run.carried || 0;
         body.append(el("p", { class: "form-hint", text:
-          "Last scheduled backup finished " + when + " (" + what + "): " + (run.tables || 0) + " table(s)" +
+          "Last scheduled snapshot finished " + when + " (" + what + "): " + (run.tables || 0) + " table(s)" +
           (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(run.carried_copied || 0) : "") +
           (run.uploaded ? ", " + run.uploaded + " file(s) uploaded" : "") + "." }));
       } else {
         alarm = true;
         noteAt(run.finished_at || run.started_at || "",
-          run.snapshot_time ? "The last run could not send its backup." : "The last run failed.");
+          run.snapshot_time ? "The last run could not send its snapshot." : "The last run failed.");
         // A failed run that still names a snapshot is the one shape where the
         // backup exists: the fold finished and only the upload failed. Telling
         // that operator nothing was written would send them looking for a
         // backup they already have.
         body.append(el("p", { class: "form-msg err", text: run.snapshot_time
-          ? "Last scheduled backup " + when + " (" + what + ") wrote the backup on this machine but could not " +
-            "send it to the backup destination: " + backupFoldError(run.error || "unknown error") +
-            " The backup is on disk and can be restored from. The next scheduled run folds a new one."
-          : "Last scheduled backup failed " + when + " (" + what + "): " + backupFoldError(run.error || "unknown error") +
+          ? "Last scheduled snapshot " + when + " (" + what + ") wrote the snapshot on this machine but could not " +
+            "send it to the snapshot destination: " + backupFoldError(run.error || "unknown error") +
+            " The snapshot is on disk and can be restored from. The next scheduled run folds a new one."
+          : "Last scheduled snapshot failed " + when + " (" + what + "): " + backupFoldError(run.error || "unknown error") +
             " Nothing was overwritten; the next scheduled run tries again." }));
       }
       // The reason a full backup was taken, as recorded when it ran, and
@@ -8079,18 +8079,18 @@ function backupScheduleCard(cur, b) {
       // Always shown while the daemon remembers it, in red: an update that
       // is refused at every slot means the no-load half of this feature is
       // dead and production is being read in full instead, and a green
-      // "last backup finished" line would hide exactly that. A crash is
+      // "last snapshot finished" line would hide exactly that. A crash is
       // named as one, not as a refusal. The daemon records a fallback only
       // once the full backup actually started, so "started" is a fact.
       alarm = true;
       // startsRun: this stamp is when the full backup STARTED, so it must
       // never outrank that backup's own outcome recorded in the same second.
-      noteAt(fb.at, "An update was refused, so a full backup ran instead.", true);
+      noteAt(fb.at, "An update was refused, so a full read ran instead.", true);
       const crashed = /^internal error/.test(fb.reason || "");
       const why = backupFoldError(crashed ? fb.reason.replace(/^internal error:?\s*/, "") : fb.reason);
       body.append(el("p", { class: "form-msg err", text:
         "At " + utcLabel(fb.at) + " the update from the recorded changes " + (crashed ? "hit an internal error" : "was refused") +
-        " (" + why + ") so a full backup was started instead. If this repeats, the recorded changes cannot be used for this server; check the reason." }));
+        " (" + why + ") so a full read was started instead. If this repeats, the recorded changes cannot be used for this server; check the reason." }));
     }
     // A full backup of the schedule's own timetable that did not start, or
     // started and failed (#1564): red until a full backup succeeds, not
@@ -8102,7 +8102,7 @@ function backupScheduleCard(cur, b) {
     const fm = sch.last_full_missed;
     if (fm) {
       alarm = true;
-      noteAt(fm.at, fm.failed ? "The last full backup failed." : "The last full backup did not run.");
+      noteAt(fm.at, fm.failed ? "The last full read failed." : "The last full read did not run.");
       const cause = backupFoldError(fm.reason || "unknown reason");
       const next = !(sch.runnable && !sch.full_reason && sch.next_full_run) ? ""
         : sch.full_owed ? " The next scheduled run takes it, at " + utcLabel(sch.next_full_run) + "."
@@ -8111,7 +8111,7 @@ function backupScheduleCard(cur, b) {
       // or an acronym ("DBTrail was not running..." must not read "dBTrail").
       const lead = /^[A-Z][a-z]/.test(cause) ? cause.charAt(0).toLowerCase() + cause.slice(1) : cause;
       body.append(el("p", { class: "form-msg err", text:
-        (fm.failed ? "The full backup that started at " + utcLabel(fm.at) + " failed: " : "The full backup due at " + utcLabel(fm.at) + " did not run: ") +
+        (fm.failed ? "The full read that started at " + utcLabel(fm.at) + " failed: " : "The full read due at " + utcLabel(fm.at) + " did not run: ") +
         lead + next }));
     }
     // >= not >: the stamps are whole seconds, and a skip recorded in the
@@ -8165,8 +8165,8 @@ async function saveBackupSchedule(id, sched, btn, msgEl) {
   // The response already knows whether the next slot can start; a toast
   // promising a run above a red line saying it cannot would be a lie.
   const next = saved && saved.schedule;
-  toast(next && next.next_method_error ? "Backup schedule saved, but the next run cannot start yet. See the reason on the page."
-    : "Backup schedule saved. It runs at the next scheduled time.");
+  toast(next && next.next_method_error ? "Snapshot schedule saved, but the next run cannot start yet. See the reason on the page."
+    : "Snapshot schedule saved. It runs at the next scheduled time.");
   if (backupsOnScreen()) renderSnapshots();
 }
 
@@ -8181,7 +8181,7 @@ async function removeBackupSchedule(id, btn, msgEl) {
     btn.disabled = false;
     return;
   }
-  toast("Backup schedule removed.");
+  toast("Snapshot schedule removed.");
   if (backupsOnScreen()) renderSnapshots();
 }
 
@@ -8243,7 +8243,7 @@ function backupRestoreCard(cur, b, restoreSt) {
     state.hidden = false;
     state.classList.add("alarm");
     state.textContent = rst.published
-      ? "Last restore wrote the backup on this machine but could not send it to S3: " + backupFoldError(rst.last_error || "unknown error") + " The backup is in the list below. A full backup sends it along with the rest."
+      ? "Last restore wrote the snapshot on this machine but could not send it to S3: " + backupFoldError(rst.last_error || "unknown error") + " The snapshot is in the list below. A full read sends it along with the rest."
       : restoreRefusedLine(rst);
   } else if (rst && rst.state === "succeeded") {
     // The reused count belongs here for the same reason it belongs on the
@@ -8251,7 +8251,7 @@ function backupRestoreCard(cur, b, restoreSt) {
     // number nothing on this page confirms the setting did anything.
     state.hidden = false;
     state.textContent =
-      "Last restore finished" + (rst.at ? ": the backup at " + utcLabel(rst.at) : "") + " is in the list below." +
+      "Last restore finished" + (rst.at ? ": the snapshot at " + utcLabel(rst.at) : "") + " is in the list below." +
       (rst.carried ? " " + rst.carried + " table(s) reused an unchanged file" + reusedCopiedNote(rst.carried_copied || 0) + "." : "");
   }
   if (!mayCreate) {
@@ -8278,7 +8278,7 @@ async function startBackupRestore(id, at, btn, msgEl) {
     return;
   }
   btn.disabled = false;
-  toast("Restore started: building a backup as of " + at + " UTC…");
+  toast("Restore started: building a snapshot as of " + at + " UTC…");
   if (backupsOnScreen()) renderSnapshots();
 }
 
@@ -8521,7 +8521,7 @@ function backupDuckLane(b) {
   // b.incomplete means at least one configured location would not answer, so
   // the list is a SUBSET and "the newest" is only the newest of what was read.
   lane.append(el("p", { class: "form-hint", text:
-    (b.incomplete ? "This takes the newest backup that could be read, from " : "This takes the newest backup, from ") +
+    (b.incomplete ? "This takes the newest snapshot that could be read, from " : "This takes the newest snapshot, from ") +
     utcLabel(snaps[0].time) + ". Any other one in the list downloads the same way." }));
   // Say WHY the second file is missing, and do not dress it as a property of
   // the data. It is withheld by this console's own setting, not by the
@@ -8554,12 +8554,12 @@ async function downloadNewestBackup(at, btn) {
   } catch (err) {
     btn.disabled = false;
     btn.textContent = label;
-    return "Could not read that backup: " + ((err && err.message) || err);
+    return "Could not read that snapshot: " + ((err && err.message) || err);
   }
   btn.disabled = false;
   btn.textContent = label;
   if (d.incomplete) {
-    return "The newest backup is marked incomplete, so it cannot be downloaded. Open another one in the list below.";
+    return "The newest snapshot is marked incomplete, so it cannot be downloaded. Open another one in the list below.";
   }
   downloadBackup(at, btn, d.total_bytes || 0);
   return "";
@@ -8599,8 +8599,8 @@ function backupElsewhereNote(b, usable, kind) {
   const n = all - usable.length;
   const one = n === 1;
   return el("p", { class: "form-hint", text: kind === "s3"
-    ? n + " backup" + (one ? " is" : "s are") + " kept only on this host, not in S3. This builds from this server's S3 backups, so it cannot start from " + (one ? "that one" : "those") + "."
-    : n + " backup" + (one ? " is" : "s are") + " kept only in S3. This builds from the local folder, so it cannot start from " + (one ? "that one" : "those") + "." });
+    ? n + " snapshot" + (one ? " is" : "s are") + " kept only on this host, not in S3. This builds from this server's S3 snapshots, so it cannot start from " + (one ? "that one" : "those") + "."
+    : n + " snapshot" + (one ? " is" : "s are") + " kept only in S3. This builds from the local folder, so it cannot start from " + (one ? "that one" : "those") + "." });
 }
 
 function backupSQLLane(cur, b, sqlSt) {
@@ -8647,7 +8647,7 @@ function backupSQLLane(cur, b, sqlSt) {
     return lane;
   }
   if (mayCreate) body.append(el("p", { class: "form-hint", text:
-    "Plain SQL files in mydumper format, ready for myloader. Loading them back needs nothing from DBTrail, and your database is never touched: DBTrail starts from the backup before that moment and replays the changes it already recorded." }));
+    "Plain SQL files in mydumper format, ready for myloader. Loading them back needs nothing from DBTrail, and your database is never touched: DBTrail starts from the snapshot before that moment and replays the changes it already recorded." }));
   const input = el("input", { class: "in", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
@@ -8677,7 +8677,7 @@ function backupSQLLane(cur, b, sqlSt) {
       "Built for " + utcLabel(st.at || "") + (st.bytes ? " (" + humanBytes(st.bytes) + " on this machine)" : "") + "." +
       (st.expires_at ? " It stays until " + utcLabel(st.expires_at) + ", or until it is downloaded or a new build starts." : "") }));
   } else if (st && st.state === "succeeded") {
-    const dl = el("button", { class: "btn", type: "button", text: "Download .sql backup (.tar.gz)" });
+    const dl = el("button", { class: "btn", type: "button", text: "Download .sql export (.tar.gz)" });
     dl.onclick = () => downloadSQLExport(cur.id, dl, st.bytes || 0);
     // The lead has to agree with whether the button is there. Adding the
     // explanation below was not enough: this line still opened with "Ready"
@@ -8709,10 +8709,10 @@ function backupSQLLane(cur, b, sqlSt) {
   } else if (st && st.state === "downloaded") {
     body.append(el("p", { class: "form-hint", text:
       "Downloaded" + (st.downloaded_at ? " at " + utcLabel(st.downloaded_at) : "") +
-      ": the backup as of " + utcLabel(st.at || "") + " was handed over and its file was removed from this machine." + again("Build again for another copy.") }));
+      ": the snapshot as of " + utcLabel(st.at || "") + " was handed over and its file was removed from this machine." + again("Build again for another copy.") }));
   } else if (st && st.state === "expired") {
     body.append(el("p", { class: "form-hint", text:
-      "The backup built for " + utcLabel(st.at || "") + " is no longer on this machine: it was not downloaded before its deadline, or its files were removed." + again("Build again for a fresh copy.") }));
+      "The snapshot built for " + utcLabel(st.at || "") + " is no longer on this machine: it was not downloaded before its deadline, or its files were removed." + again("Build again for a fresh copy.") }));
   }
   // The state follows the disk: a removal that failed keeps the build in
   // its previous state and says so here, over a download button that would
@@ -8746,7 +8746,7 @@ async function startSQLExport(id, at, btn, msgEl) {
     return;
   }
   btn.disabled = false;
-  toast("Build started: a .sql backup as of " + at + " UTC\u2026");
+  toast("Build started: a .sql export as of " + at + " UTC\u2026");
   if (backupsOnScreen()) renderSnapshots();
 }
 
@@ -8755,7 +8755,7 @@ async function startSQLExport(id, at, btn, msgEl) {
 // status carries the finished build's byte count).
 async function downloadSQLExport(id, btn, totalBytes) {
   if (totalBytes > 1 << 30 &&
-      !window.confirm("This backup weighs " + humanBytes(totalBytes) +
+      !window.confirm("This snapshot weighs " + humanBytes(totalBytes) +
         ". The browser holds all of it in memory before saving. Download anyway?")) {
     return;
   }
@@ -8786,7 +8786,7 @@ async function downloadSQLExport(id, btn, totalBytes) {
   } catch (err) {
     toastError("Download failed: " + ((err && err.message) || err));
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "Download .sql backup (.tar.gz)"; }
+    if (btn) { btn.disabled = false; btn.textContent = "Download .sql export (.tar.gz)"; }
   }
 }
 
@@ -8863,7 +8863,7 @@ function verifyRegions(servers, opts) {
   control.append(helpFold);
   if (!configured) {
     control.append(el("p", { class: "form-hint", text:
-      "No backup set up for this server yet. The two snapshot modes need one" +
+      "No snapshot set up for this server yet. The two snapshot modes need one" +
       (sessionMayConfigureServer() ? " (set one under Where and how often, then create at least two snapshots)" : "") +
       ". \"Check recovery inputs\" works without one: it only reads the index." }));
   }
@@ -9522,7 +9522,7 @@ async function openVerifyExplain(id, schema, table, btn) {
     (ex.total === 1 ? "1 row differs" : ex.total + " rows differ") +
     "; checked against binlog position " + ex.anchor + "." }));
   head.append(el("p", { class: "modal-desc", text:
-    "Recovered = what replaying the change log on top of the older snapshot produced. Backup (real) = the actual values from the newer, trusted snapshot." }));
+    "Recovered = what replaying the change log on top of the older snapshot produced. Snapshot (real) = the actual values from the newer, trusted snapshot." }));
   head.append(el("button", { class: "modal-x", type: "button", text: "✕", onclick: closeVerifyExplain }));
   modal.append(head);
 
@@ -9617,8 +9617,8 @@ const VFY_KIND_LABEL = {
 };
 const VFY_KIND_CLASS = { changed: "warn", missing: "fail", extra: "fail" };
 const VFY_KIND_NOTE = {
-  missing: "This row exists in the real backup, but replaying the change log never reproduced it.",
-  extra: "Replaying the change log produced this row, but it isn't in the real backup.",
+  missing: "This row exists in the real snapshot, but replaying the change log never reproduced it.",
+  extra: "Replaying the change log produced this row, but it isn't in the real snapshot.",
 };
 
 // verifyDiffCard renders one RowDiff, reusing the doctor-preflight card
@@ -9642,7 +9642,7 @@ function verifyDiffCard(d) {
 function verifyDiffCellsTable(cells) {
   const table = el("table", { class: "vfy-diff-table" });
   table.append(el("thead", {}, el("tr", {},
-    el("th", { text: "Column" }), el("th", { text: "Recovered" }), el("th", { text: "Backup (real)" }))));
+    el("th", { text: "Column" }), el("th", { text: "Recovered" }), el("th", { text: "Snapshot (real)" }))));
   const tbody = el("tbody");
   cells.forEach((c) => tbody.append(el("tr", {},
     el("td", { text: c.column }),
@@ -10090,7 +10090,7 @@ function buildConnect(servers, tokStatus, minted, fbStatus, ice) {
   if (iceberg) v.append(iceberg);
   else if (ice.failed) {
     v.append(el("p", { class: "form-hint cn-ice-err", style: "margin-top:18px", text:
-      "Could not check where this server's backups are kept, so the Iceberg export command is not shown. Reload the page to try again." }));
+      "Could not check where this server's snapshots are kept, so the Iceberg export command is not shown. Reload the page to try again." }));
   }
   viewEnter();
 }
@@ -10641,7 +10641,7 @@ function sqlClientPanel(servers, fb) {
   body.append(cnFine("What to run, and other machines",
     el("p", { class: "form-hint" }, "Ask for a table as it was: ",
       el("code", { text: "SELECT * FROM _flashback.orders AS OF '10 minutes ago' WHERE id = 1;" }),
-      " Use _snapshot for the whole table (needs a backup) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again."),
+      " Use _snapshot for the whole table (needs a snapshot) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again."),
     el("p", { class: "form-hint", text: fb.host
       ? "The port answers on that address only. Run mysql where it can reach it (on the daemon's machine when it is 127.0.0.1), or open a tunnel to it."
       : "The port answers on every network address of the daemon's machine; the command uses the name this page was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use the daemon machine's own name or address instead." })));
@@ -11121,7 +11121,7 @@ function serverRow(s) {
     serverLabel(s));
   item.append(nm);
   if (s.kind === "ephemeral") item.append(el("span", { class: "chip chip-cli", text: "CLI", title: "Set from the command line with --index-dsn" }));
-  if (s.reconstruct) item.append(el("span", { class: "chip chip-tt", text: "TT", title: "Backup configured: Time-travel available" }));
+  if (s.reconstruct) item.append(el("span", { class: "chip chip-tt", text: "TT", title: "Snapshot configured: Time-travel available" }));
   if (s.monitor_state) item.append(monitorChip(s));
   if (s.flavor && s.flavor !== "mysql") item.append(el("span", { class: "chip", text: s.flavor === "postgres" ? "PG" : s.flavor.toUpperCase(), title: "Source type: " + s.flavor }));
   // A registry entry with no source connection under a capturing console
@@ -11245,7 +11245,7 @@ function grantBlocks(user, password, hasSavedPassword) {
   // SHOW VIEW is on every backup line: mydumper stops at the first view it
   // cannot read ("SHOW VIEW command denied"), so a schema holding one view
   // fails the whole backup on RELOAD alone.
-  const grantBackups = "-- Backups (point-consistent by default). SHOW VIEW lets the backup copy views.\n";
+  const grantBackups = "-- Snapshots (point-consistent by default). SHOW VIEW lets the snapshot copy views.\n";
   const blocks = {
     mysql: grantBase + grantBackups +
       "-- BACKUP_ADMIN is MySQL/Percona 8.0 or later. On MySQL 5.7 run this instead:\n" +
@@ -11406,7 +11406,7 @@ function buildServerForm() {
   monGrid.append(srvField("S3 access key", "s3_access_key_id", { placeholder: "(optional) blank uses the daemon's own credentials", autocomplete: "off" }));
   monGrid.append(srvField("S3 secret key", "s3_secret_access_key", { type: "password", autocomplete: "new-password" }));
   mon.append(monGrid);
-  mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Backups locations set on this server, for uploads and reads alike, not to the daemon's default Backups location. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
+  mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Snapshots locations set on this server, for uploads and reads alike, not to the daemon's default Snapshots location. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
   // SELECT covers the information_schema snapshot of columns/PKs/FKs. The
@@ -11415,7 +11415,7 @@ function buildServerForm() {
   const grantHint = tagFlavor(el("p", { class: "form-hint", style: "margin-top:10px" }), "mysql mariadb");
   grantHint.append("Source user needs ");
   grantHint.append(el("code", { text: "REPLICATION SLAVE, REPLICATION CLIENT, SELECT" }));
-  grantHint.append(" to capture, plus the backup line if you want backups. Create one on the source; copy and run:");
+  grantHint.append(" to capture, plus the snapshot line if you want snapshots. Create one on the source; copy and run:");
   mon.append(grantHint);
   const grants = grantBlocks("", "");
   mon.append(tagFlavor(el("pre", { class: "form-code", "data-grant": "mysql", text: grants.mysql }), "mysql"));
@@ -12446,7 +12446,7 @@ function cmdkCommands() {
   // Not gated on
   // the daemon, because the page opens on a standalone serve too.
   cmds.push({ group: "Navigate", label: "Snapshots",
-    alt: ["backups", "verification", "backup settings"], run: () => navigate("snapshots") });
+    alt: ["backups", "verification", "snapshot settings"], run: () => navigate("snapshots") });
   if (capsCache.monitor) cmds.push({ group: "Navigate", label: "Retention", run: () => navigate("retention") });
   if (capsCache.monitor) cmds.push({ group: "Navigate", label: "This daemon", run: () => navigate("daemon") });
   cmds.push({ group: "Navigate", label: "Access profiles", run: () => navigate("access-profiles") });

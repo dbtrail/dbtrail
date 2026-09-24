@@ -117,7 +117,7 @@ console.log(JSON.stringify({
 	}
 
 	if n := len(got.Working.Rows); n != 6 {
-		t.Fatalf("working: %d step rows, want 6 with the backup: %+v", n, got.Working.Rows)
+		t.Fatalf("working: %d step rows, want 6 with the snapshot: %+v", n, got.Working.Rows)
 	}
 	if n, at := current(got.Working.Rows); n != 1 || at != 4 {
 		t.Errorf("working: %d current step(s) at %d, want exactly the running step (4): %+v", n, at, got.Working.Rows)
@@ -126,7 +126,7 @@ console.log(JSON.stringify({
 		t.Errorf("capture waiting for its first change is not drawn as running and normal: %+v", r)
 	}
 	if r := got.Working.Rows[5]; !strings.Contains(r.Cls, "waiting") || !strings.Contains(r.Text, PageSnapshots+" page") {
-		t.Errorf("the backup step does not say where to create one: %+v", r)
+		t.Errorf("the snapshot step does not say where to create one: %+v", r)
 	}
 
 	// No em dash in any literal the card holds.

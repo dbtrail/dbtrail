@@ -148,7 +148,7 @@ func (s *Server) scheduleGates() BackupScheduleGates {
 // last started (survives an unavailable history and a job that panicked,
 // which writes no record; the loop watches every job it starts, so that
 // copy exists whether or not a page load caught the job in time). Neither
-// alone meets "a failed scheduled backup must be visible".
+// alone meets "a failed scheduled snapshot must be visible".
 // scheduleClock is now, as the backup-schedule handlers read it (scheduleNow).
 func (s *Server) scheduleClock() time.Time {
 	if s.scheduleNow != nil {
@@ -457,7 +457,7 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 	// page shows the same number): every run is a full-table snapshot, and
 	// local-only backups are never removed automatically.
 	if p, err := sched.Parse(); err == nil {
-		slog.Warn("backup schedule saved: every run publishes a full-table snapshot",
+		slog.Warn("snapshot schedule saved: every run publishes a full-table snapshot",
 			"server", e.Name, "every", p.Every, "backups_per_30d", p.BackupsPer30Days(), "local_only", e.BaselineS3 == "",
 			"full_every", p.FullEvery, "full_copies_per_30d", p.FullCopiesPer30Days())
 	}

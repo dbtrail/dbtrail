@@ -185,7 +185,7 @@ func TestBackupScheduleCard_introIsNotAnEssay(t *testing.T) {
 		t.Error("the card explains the producer choice in general above the line that names it for the next run")
 	}
 	// The specific half must survive the cut.
-	if !strings.Contains(body, "will update the latest backup from the recorded changes") {
+	if !strings.Contains(body, "will update the latest snapshot from the recorded changes") {
 		t.Fatal("the per-run producer line is gone, so nothing says how the next run will be made")
 	}
 }
@@ -227,7 +227,7 @@ func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
 		"otherwise the newest backup is **updated from the recorded changes**",
 		// The condition that actually decides the producer since #1539. It
 		// used to be the S3 destination, which is why this guard asked for
-		// "only a full backup uploads" — a sentence the docs must NOT carry
+		// "only a full read uploads" — a sentence the docs must NOT carry
 		// any more, because an operator who reads it configures a nightly
 		// full read of production to get an off-box copy.
 		"a server with no local backup directory gets a **full backup**",
@@ -256,10 +256,10 @@ func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
 		}
 		flat := strings.Join(strings.Fields(string(body)), " ")
 		for _, banned := range []string{
-			"only a full backup uploads",
-			"only a full backup can upload",
-			"backups that go to S3 are always full backups",
-			"backups that go to S3 are full backups",
+			"only a full read uploads",
+			"only a full read can upload",
+			"snapshots that go to S3 are always full reads",
+			"snapshots that go to S3 are full reads",
 		} {
 			if strings.Contains(flat, banned) {
 				t.Errorf("docs/%s still says %q, which #1539 made false: the scheduled update reads the "+

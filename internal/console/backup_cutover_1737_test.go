@@ -20,7 +20,7 @@ func TestBaselineHistory_measuredSinceFull(t *testing.T) {
 	failedFull.Error = "mydumper: exit 2"
 	unuploadedFull := full // published locally, then the upload failed
 	unuploadedFull.SnapshotTime, unuploadedFull.Error = "2026-09-18T05:00:00Z", "upload: access denied"
-	skippedFull := BaselineRunRecord{Kind: BaselineRunDump, SkipReason: "another backup job was running"}
+	skippedFull := BaselineRunRecord{Kind: BaselineRunDump, SkipReason: "another snapshot job was running"}
 	unmeasured := BaselineRunRecord{Kind: BaselineRunRefresh, UpdateSeconds: 60} // the update after a full backup, before #1737
 	failedUpdate := BaselineRunRecord{Kind: BaselineRunRefresh, Events: 1000, UpdateSeconds: 60, Error: "capture gap"}
 	restore := BaselineRunRecord{Kind: BaselineRunRestore, Events: 1000, UpdateSeconds: 60}
@@ -31,16 +31,16 @@ func TestBaselineHistory_measuredSinceFull(t *testing.T) {
 		want bool
 	}{
 		{"empty history: nothing to be older than", nil, true},
-		{"updates only, no full backup", []BaselineRunRecord{measured, measured}, true},
-		{"a full backup is the newest record", []BaselineRunRecord{measured, full}, false},
-		{"a measured update after the full backup", []BaselineRunRecord{measured, full, measured}, true},
+		{"updates only, no full read", []BaselineRunRecord{measured, measured}, true},
+		{"a full read is the newest record", []BaselineRunRecord{measured, full}, false},
+		{"a measured update after the full read", []BaselineRunRecord{measured, full, measured}, true},
 		{"only an unmeasured update after it", []BaselineRunRecord{measured, full, unmeasured}, false},
 		{"only a failed update after it", []BaselineRunRecord{measured, full, failedUpdate}, false},
 		{"a restore and a compaction after it are not updates", []BaselineRunRecord{measured, full, restore, compact}, false},
-		{"a full backup that failed before publishing is not a full backup", []BaselineRunRecord{measured, failedFull}, true},
+		{"a full read that failed before publishing is not a full read", []BaselineRunRecord{measured, failedFull}, true},
 		{"one published locally whose upload failed is: the next update folds from it", []BaselineRunRecord{measured, unuploadedFull}, false},
-		{"a skipped full backup is not a full backup", []BaselineRunRecord{measured, skippedFull}, true},
-		{"a failed full backup after a real one does not hide it", []BaselineRunRecord{measured, full, failedFull}, false},
+		{"a skipped full read is not a full read", []BaselineRunRecord{measured, skippedFull}, true},
+		{"a failed full read after a real one does not hide it", []BaselineRunRecord{measured, full, failedFull}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -50,7 +50,7 @@ func TestBaselineHistory_measuredSinceFull(t *testing.T) {
 		})
 	}
 	if !historyWith(t, []BaselineRunRecord{measured, full}).MeasuredSinceFull("another server") {
-		t.Fatal("another server's full backup made this one's model stale")
+		t.Fatal("another server's full read made this one's model stale")
 	}
 }
 
@@ -86,11 +86,11 @@ func TestBaselineHistory_indexMarkForAFullBackup(t *testing.T) {
 		rec  BaselineRunRecord
 		ok   bool
 	}{
-		{"successful full backup", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, IndexMark: 900}, true},
+		{"successful full read", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, IndexMark: 900}, true},
 		{"successful update", BaselineRunRecord{Kind: BaselineRunRefresh, SnapshotTime: snap, IndexMark: 900}, true},
-		{"full backup published locally, upload failed: the next update reads that copy", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, IndexMark: 900, Error: "upload: denied"}, true},
+		{"full read published locally, upload failed: the next update reads that copy", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, IndexMark: 900, Error: "upload: denied"}, true},
 		{"update whose upload failed", BaselineRunRecord{Kind: BaselineRunRefresh, SnapshotTime: snap, IndexMark: 900, Error: "upload: denied"}, false},
-		{"full backup with no mark (the index did not answer)", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap}, false},
+		{"full read with no mark (the index did not answer)", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap}, false},
 		{"restore", BaselineRunRecord{Kind: BaselineRunRestore, SnapshotTime: snap, IndexMark: 900}, false},
 		{"compaction", BaselineRunRecord{Kind: BaselineRunCompact, SnapshotTime: snap, IndexMark: 900}, false},
 	} {
@@ -116,12 +116,12 @@ func TestCutoverToFull_aStaleModelMayUpdateButNotChooseAFullBackup(t *testing.T)
 		stale, want string // the code with the model older than the last full backup, and with it current
 	}{
 		{"dear by the rate, fresh anchor", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}, "", "window_measured"},
-		{"fixed cost over the full backup, fresh anchor", BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, "", "window_measured"},
+		{"fixed cost over the full read, fresh anchor", BackupWindow{Anchor: fresh, Events: 1_000_000, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, "", "window_measured"},
 		{"fixed cost over it, count unknown", BackupWindow{Anchor: fresh, Events: -1, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute}, "", "window_measured"},
 		// The review's two: a full backup that took longer than the
 		// cut-over age leaves an old anchor behind it, and so does a quiet
 		// server that indexed nothing since. The estimate says update.
-		{"cheap by the rate, old anchor (a full backup longer than the cut-over)", BackupWindow{Anchor: old, Events: 5000, FoldRate: 20_000, LastFull: 5*time.Hour + 20*time.Minute}, "", ""},
+		{"cheap by the rate, old anchor (a full read longer than the cut-over)", BackupWindow{Anchor: old, Events: 5000, FoldRate: 20_000, LastFull: 5*time.Hour + 20*time.Minute}, "", ""},
 		{"nothing to fold, old anchor (a quiet server)", BackupWindow{Anchor: old, Events: 0, FoldRate: 4000, LastFull: 8 * time.Minute}, "", ""},
 		{"proven cheaper, old anchor", BackupWindow{Anchor: old, Events: 17_000_000, FoldRate: 4000, Proven: 12_000_000, LastFull: 8 * time.Minute}, "", ""},
 		{"dear by the rate, old anchor", BackupWindow{Anchor: old, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}, "window_age", "window_measured"},
@@ -135,7 +135,7 @@ func TestCutoverToFull_aStaleModelMayUpdateButNotChooseAFullBackup(t *testing.T)
 			}
 			w.UnmeasuredSinceFull = true
 			if got := BackupWhyCode(CutoverToFull(w, 5*time.Minute, now)); got != c.stale {
-				t.Errorf("model older than the last full backup: got %q, want %q", got, c.stale)
+				t.Errorf("model older than the last full read: got %q, want %q", got, c.stale)
 			}
 		})
 	}
@@ -143,7 +143,7 @@ func TestCutoverToFull_aStaleModelMayUpdateButNotChooseAFullBackup(t *testing.T)
 	// used, never that it could not be made.
 	w := BackupWindow{Anchor: old, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute, UnmeasuredSinceFull: true}
 	why := CutoverToFull(w, 5*time.Minute, now)
-	if !strings.Contains(why, "(no update has been measured since the last full backup, so the estimate from before it is not used)") ||
+	if !strings.Contains(why, "(no update has been measured since the last full read, so the estimate from before it is not used)") ||
 		strings.Contains(why, "could not be estimated") {
 		t.Fatalf("age reason %q, want the stale model named as what was not used", why)
 	}
@@ -195,7 +195,7 @@ func TestCutoverToFull_ageCountsFromTheFullBackupsFinish(t *testing.T) {
 	w := dear(stopped)
 	w.AnchorFullFinished = stopped.Add(took)
 	if why := CutoverToFull(w, 5*time.Minute, now); !strings.Contains(why, "it is 3h old and the cut-over is 2h") {
-		t.Fatalf("age reason %q, want the age since the full backup finished", why)
+		t.Fatalf("age reason %q, want the age since the full read finished", why)
 	}
 }
 
@@ -207,9 +207,9 @@ func TestBaselineHistory_fullBackupFinished(t *testing.T) {
 		rec  BaselineRunRecord
 		want time.Time
 	}{
-		{"full backup", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, FinishedAt: "2026-09-18T09:30:00Z"}, want},
-		{"full backup published locally, upload failed", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, FinishedAt: "2026-09-18T09:30:00Z", Error: "upload: denied"}, want},
-		{"an update's snapshot is not a full backup's", BaselineRunRecord{Kind: BaselineRunRefresh, SnapshotTime: snap, FinishedAt: "2026-09-18T09:30:00Z"}, time.Time{}},
+		{"full read", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, FinishedAt: "2026-09-18T09:30:00Z"}, want},
+		{"full read published locally, upload failed", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, FinishedAt: "2026-09-18T09:30:00Z", Error: "upload: denied"}, want},
+		{"an update's snapshot is not a full read's", BaselineRunRecord{Kind: BaselineRunRefresh, SnapshotTime: snap, FinishedAt: "2026-09-18T09:30:00Z"}, time.Time{}},
 		{"unparsable stamp", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: snap, FinishedAt: "later"}, time.Time{}},
 		{"another snapshot", BaselineRunRecord{Kind: BaselineRunDump, SnapshotTime: "2026-09-18T06:00:00Z", FinishedAt: "2026-09-18T09:30:00Z"}, time.Time{}},
 	} {

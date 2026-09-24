@@ -1650,7 +1650,7 @@ try {
   (tt1.cells.status === "shipped" && tt1.cells.email === "a@example.com")
     ? ok("restore: reconstructed row folds the event over the baseline")
     : bad("restore: reconstructed row folds the event over the baseline", JSON.stringify(tt1.cells));
-  /backup /.test(tt1.meta) ? ok("restore: meta line names the backup anchor") : bad("restore: meta line names the backup anchor", tt1.meta);
+  /snapshot /.test(tt1.meta) ? ok("restore: meta line names the snapshot anchor") : bad("restore: meta line names the snapshot anchor", tt1.meta);
 
   // pk=4: exists ONLY in the baseline (no events) — a binlog-only reconstruct
   // cannot resolve it, so this pins the baseline half of baseline+deltas.
@@ -2343,9 +2343,9 @@ try {
 
   // Scenario 15b — Baselines page live (#686, moved off Storage by #1384):
   // with the daemon opted in (BINTRAIL_CONSOLE_BASELINE_TRIGGER=1) and this
-  // server carrying a backup location of its own (byo-idx is created with
+  // server carrying a snapshot location of its own (byo-idx is created with
   // baseline_dir; since #1677 the daemon-level --baseline-dir alone lists
-  // backups but does not offer the button), the Create backup button must
+  // snapshots but does not offer the button), the Read database now button must
   // render enabled, and the fixture snapshot (1 table, anchored at
   // binlog.000001:50) must be listed.
   await page.evaluate(() => navigate("snapshots"));
@@ -2356,7 +2356,7 @@ try {
     // uniform table count moved there too, so the row carries only what
     // varies (the binlog anchor) plus the newest treatment.
     const strip = document.querySelector(".ctx-strip");
-    const btn = strip ? Array.from(strip.querySelectorAll("button")).find((b) => b.textContent === "Create backup") : null;
+    const btn = strip ? Array.from(strip.querySelectorAll("button")).find((b) => b.textContent === "Read database now") : null;
     const row = Array.from(document.querySelectorAll(".stg-row")).find((r) => ((r.querySelector(".stg-name") || {}).title || "").includes("binlog.000001:50"));
     return { capOn: !!capsCache.baseline_trigger, stripPresent: !!strip,
       stripText: strip ? strip.textContent : "",
@@ -2370,7 +2370,7 @@ try {
   (stg.stripPresent && stg.btnPresent && stg.btnEnabled) ? ok("baselines: Create baseline is a page action on the context strip, enabled when both gates pass") : bad("baselines: Create baseline is a page action on the context strip, enabled when both gates pass", `strip=${stg.stripPresent} present=${stg.btnPresent} enabled=${stg.btnEnabled}`);
   // The facts moved, they did not vanish: table count and source live on the
   // strip; the row keeps the anchor and gains the newest treatment.
-  (/1 per backup/.test(stg.stripText) && stg.sourceOneLine)
+  (/1 per snapshot/.test(stg.stripText) && stg.sourceOneLine)
     ? ok("baselines: the uniform table count and the one-line source render on the strip")
     : bad("baselines: the uniform table count and the one-line source render on the strip", stg.stripText);
   (stg.rowIsLatest && /ago/.test(stg.rowText) && !/table\(s\)/.test(stg.rowText))
@@ -2521,8 +2521,8 @@ try {
       return {
         rows: v.querySelectorAll(".stg-list .stg-row").length,
         errorBoxes: v.querySelectorAll(".error-box").length,
-        create: btn("Create backup"),
-        createNote: /CREATE BACKUP/.test((v.querySelector(".ctx-strip") || {}).textContent || ""),
+        create: btn("Read database now"),
+        createNote: /READ DATABASE/.test((v.querySelector(".ctx-strip") || {}).textContent || ""),
         restore: !!v.querySelector(".bk-restore:not(.bk-schedule)"),
         takeAway: !!v.querySelector("details.bk-take"),
         duckData: btn("Download the data"),
@@ -2641,13 +2641,13 @@ try {
         unknownOpen: !!takeUnknown && !!takeUnknown.open,
         laneSub: txt(sqlFailed),
         restoreHead: heading(restoreFailed),
-        schedFailed: /Last scheduled backup failed/.test(txt(sched)),
+        schedFailed: /Last scheduled snapshot failed/.test(txt(sched)),
         schedRed: !!sched && !!sched.querySelector(".bk-card-state.alarm"),
         schedForm: hasBtn(sched, "Save") || hasBtn(sched, "Turn on"),
         sqlFailed: /Last build failed/.test(txt(sqlFailed)),
         sqlBuild: hasBtn(sqlFailed, "Build"),
         sqlReadyText: txt(sqlReady),
-        sqlReadyDownload: hasBtn(sqlReady, "Download .sql backup (.tar.gz)"),
+        sqlReadyDownload: hasBtn(sqlReady, "Download .sql export (.tar.gz)"),
         sqlStaging: /Staging problem/.test(txt(sqlStaging)),
         sqlBuildAgain: /Build again/.test(txt(sqlStaging)),
         sqlIdle: !!sqlIdle,
@@ -2723,8 +2723,8 @@ try {
     } finally { capsCache.permissions = keep; capsCache.baseline_trigger = keepTrig; capsCache.views = keepViews; }
   });
   const H = hints;
-  (/CREATE BACKUP/.test(H.full.strip) && /under Where and how often/.test(H.full.strip)
-    && /CREATE BACKUP/.test(H.operator.strip) && /own backup location/.test(H.operator.strip) && !/Where and how often/.test(H.operator.strip)
+  (/READ DATABASE/.test(H.full.strip) && /under Where and how often/.test(H.full.strip)
+    && /READ DATABASE/.test(H.operator.strip) && /own snapshot location/.test(H.operator.strip) && !/Where and how often/.test(H.operator.strip)
     && (H.views ? !/set not to read archived data/.test(H.operator.duck) : true) && /Download the data/.test(H.operator.duck)
     && /Select this server at the top/.test(H.full.row) && !/Select this server at the top/.test(H.reader.row) && /No schedule/.test(H.reader.row)
     && (H.views ? !/set not to read archived data/.test(H.full.duck) : true)
@@ -2814,7 +2814,7 @@ try {
   // button even with a destination, and the strip says why (#1677).
   const gates = await page.evaluate(() => {
     // A source and a location of its own (#1677): the source is what makes
-    // the strip draw its CREATE BACKUP note, and the own location keeps the
+    // the strip draw its READ DATABASE note, and the own location keeps the
     // capability-off check honest, since without one the button is withheld
     // for the location and that check would pass even with creation on.
     const servers = [{ id: "srv-fix", name: "fixture", kind: "registry", has_source: true, baseline_dir: "/tmp/baselines" }];
@@ -2832,15 +2832,15 @@ try {
     const capOffStrip = baselineContextStrip({ configured: true, source: "/tmp/baselines", snapshots: [] }, cur);
     capsCache.baseline_trigger = keepCap;
     currentServer = keepCur;
-    const hasBtn = (n) => Array.from(n.querySelectorAll("button")).some((b) => b.textContent === "Create backup");
+    const hasBtn = (n) => Array.from(n.querySelectorAll("button")).some((b) => b.textContent === "Read database now");
     // #1677: where the button would be, the strip says creation is off.
-    const offNote = (n) => /CREATE BACKUP/.test(n.textContent) && /turned off at startup/.test(n.textContent);
+    const offNote = (n) => /READ DATABASE/.test(n.textContent) && /turned off at startup/.test(n.textContent);
     return {
       cfgOffBtn: hasBtn(cfgOff) || hasBtn(cfgOffStrip),
-      cfgOffEmpty: /No backups configured/.test(cfgOff.textContent),
+      cfgOffEmpty: /No snapshots configured/.test(cfgOff.textContent),
       cfgOffNote: offNote(cfgOffStrip),
       capOffBtn: hasBtn(capOff) || hasBtn(capOffStrip),
-      capOffEmpty: /no backups found/.test(capOff.textContent),
+      capOffEmpty: /no snapshots found/.test(capOff.textContent),
       capOffNote: offNote(capOffStrip),
     };
   });
@@ -2850,11 +2850,11 @@ try {
   (!gates.capOffBtn && gates.capOffEmpty)
     ? ok("baselines: baseline_trigger off → no button even with a destination")
     : bad("baselines: baseline_trigger off → no button even with a destination", JSON.stringify(gates));
-  (gates.capOffNote && !gates.cfgOffNote && !/CREATE BACKUP/.test(stg.stripText))
+  (gates.capOffNote && !gates.cfgOffNote && !/READ DATABASE/.test(stg.stripText))
     ? ok("baselines: baseline_trigger off → the strip says creation is off where the button would be, and only then")
     : bad("baselines: baseline_trigger off → the strip says creation is off where the button would be, and only then", JSON.stringify({ gates, live: stg.stripText }));
 
-  // Scenario 15e — the Backups feature set: rename, per-row detail with real
+  // Scenario 15e — the Snapshots feature set: rename, per-row detail with real
   // sizes, the tar.gz download wire, the restore card's gate + inline refusal,
   // and the in-progress region. All against the REAL fixture snapshot the
   // runner produced with `bintrail baseline`.
@@ -2894,15 +2894,15 @@ try {
   /^Snapshots$/.test(bk.title.trim())
     ? ok("snapshots: the page is named Snapshots")
     : bad("snapshots: the page is named Snapshots", bk.title);
-  bk.stripLabels.includes("BACKUPS")
-    ? ok("backups: the strip counts BACKUPS, not snapshots")
-    : bad("backups: the strip counts BACKUPS, not snapshots", JSON.stringify(bk.stripLabels));
+  bk.stripLabels.includes("SNAPSHOTS")
+    ? ok("snapshots: the strip counts SNAPSHOTS, not snapshots")
+    : bad("snapshots: the strip counts SNAPSHOTS, not snapshots", JSON.stringify(bk.stripLabels));
   (bk.expandable && bk.detailTables >= 1 && /B/.test(bk.detailText) && bk.detailHasDownload)
-    ? ok("backups: a row expands into real tables, sizes and a download action")
-    : bad("backups: a row expands into real tables, sizes and a download action", JSON.stringify({ e: bk.expandable, t: bk.detailTables, d: bk.detailHasDownload, txt: (bk.detailText || "").slice(0, 120) }));
+    ? ok("snapshots: a row expands into real tables, sizes and a download action")
+    : bad("snapshots: a row expands into real tables, sizes and a download action", JSON.stringify({ e: bk.expandable, t: bk.detailTables, d: bk.detailHasDownload, txt: (bk.detailText || "").slice(0, 120) }));
   (bk.dlStatus === 200 && bk.dlMagic && /dbtrail-backup-.*\.tar\.gz/.test(bk.dlDisposition) && bk.dlBytes > 100 && !bk.dlBody)
-    ? ok("backups: the download endpoint streams a gzip archive with an attachment name")
-    : bad("backups: the download endpoint streams a gzip archive with an attachment name", JSON.stringify({ s: bk.dlStatus, m: bk.dlMagic, cd: bk.dlDisposition, n: bk.dlBytes }));
+    ? ok("snapshots: the download endpoint streams a gzip archive with an attachment name")
+    : bad("snapshots: the download endpoint streams a gzip archive with an attachment name", JSON.stringify({ s: bk.dlStatus, m: bk.dlMagic, cd: bk.dlDisposition, n: bk.dlBytes }));
 
   // 15e-2: the restore card. Gated on the capability the daemon advertises;
   // a bad instant is refused INLINE (the server's 400 lands next to the
@@ -2933,11 +2933,11 @@ try {
     return out;
   });
   (bkRestore.cap && bkRestore.card && bkRestore.prefilled)
-    ? ok("backups: the restore card renders under its capability, prefilled with the newest backup time")
-    : bad("backups: the restore card renders under its capability, prefilled with the newest backup time", JSON.stringify(bkRestore));
+    ? ok("snapshots: the restore card renders under its capability, prefilled with the newest snapshot time")
+    : bad("snapshots: the restore card renders under its capability, prefilled with the newest snapshot time", JSON.stringify(bkRestore));
   (bkRestore.inlineErr && /UTC time/.test(bkRestore.inlineErr))
-    ? ok("backups: a bad restore instant is refused inline with the server's words")
-    : bad("backups: a bad restore instant is refused inline with the server's words", JSON.stringify(bkRestore.inlineErr));
+    ? ok("snapshots: a bad restore instant is refused inline with the server's words")
+    : bad("snapshots: a bad restore instant is refused inline with the server's words", JSON.stringify(bkRestore.inlineErr));
   await page.evaluate(() => navigate("snapshots"));
   await page.waitForFunction(() => location.pathname === "/snapshots" && document.querySelectorAll(".stg-row").length > 0, undefined, { timeout: 15000 });
 
@@ -2957,11 +2957,11 @@ try {
       text: region.textContent,
     };
   });
-  (bkRun.count === 3 && bkRun.live === 3 && bkRun.progress && /Creating a backup/.test(bkRun.text) && /Restoring to/.test(bkRun.text))
-    ? ok("backups: every running kind renders a live chip, words, and the motion strip")
-    : bad("backups: every running kind renders a live chip, words, and the motion strip", JSON.stringify(bkRun));
+  (bkRun.count === 3 && bkRun.live === 3 && bkRun.progress && /Creating a snapshot/.test(bkRun.text) && /Restoring to/.test(bkRun.text))
+    ? ok("snapshots: every running kind renders a live chip, words, and the motion strip")
+    : bad("snapshots: every running kind renders a live chip, words, and the motion strip", JSON.stringify(bkRun));
 
-  // 15e-3b (#1725): a full backup that is published on this machine while
+  // 15e-3b (#1725): a full read that is published on this machine while
   // its copy to the destination still runs is in flight too, in different
   // words: it must not read as "still creating" (a refresh may start now)
   // nor vanish from the region as if it were done.
@@ -2970,9 +2970,9 @@ try {
     const settled = backupRunsInFlight({ baseline: { state: "succeeded", tables: 4 } }, null, null, null);
     return { count: runs.length, kind: runs[0] && runs[0].kind, text: runs[0] && runs[0].text, settled: settled.length };
   });
-  (bkUp.count === 1 && bkUp.kind === "dump" && /saved on this machine: 4 table/.test(bkUp.text) && /copying it to the backup destination/.test(bkUp.text) && !/Creating a backup/.test(bkUp.text) && bkUp.settled === 0)
-    ? ok("backups: a published backup still uploading is in flight in its own words, and settles once uploaded")
-    : bad("backups: a published backup still uploading is in flight in its own words, and settles once uploaded", JSON.stringify(bkUp));
+  (bkUp.count === 1 && bkUp.kind === "dump" && /saved on this machine: 4 table/.test(bkUp.text) && /copying it to the snapshot destination/.test(bkUp.text) && !/Creating a snapshot/.test(bkUp.text) && bkUp.settled === 0)
+    ? ok("snapshots: a published snapshot still uploading is in flight in its own words, and settles once uploaded")
+    : bad("snapshots: a published snapshot still uploading is in flight in its own words, and settles once uploaded", JSON.stringify(bkUp));
 
   // 15e-4: fold refusals are rewritten for this page. The engine's errors are
   // per-table and newline-joined; the rewrite must strip every CLI remedy
@@ -2989,11 +2989,11 @@ try {
     };
   });
   (bkErr.noFlags && bkErr.bothTables && bkErr.terminated)
-    ? ok("backups: fold refusals lose their CLI flags without losing table identities")
-    : bad("backups: fold refusals lose their CLI flags without losing table identities", JSON.stringify(bkErr));
+    ? ok("snapshots: fold refusals lose their CLI flags without losing table identities")
+    : bad("snapshots: fold refusals lose their CLI flags without losing table identities", JSON.stringify(bkErr));
 
-  // Scenario 15f — the made-to-measure .sql backup: pick an instant, the
-  // daemon folds the nearest earlier backup forward through the index and
+  // Scenario 15f — the made-to-measure .sql export: pick an instant, the
+  // daemon folds the nearest earlier snapshot forward through the index and
   // hands out a mydumper-format dump. Driven END TO END against the fixture:
   // baseline rows 1,2,4 + INSERT id 3 + UPDATE id 1 (-> shipped) + DELETE
   // id 2, built at TT_AT (after all three), so the dump must carry the folded
@@ -3078,7 +3078,7 @@ try {
   // cannot pass; the lane above still downloads the file itself.
   const dkGone = await page.evaluate(() => {
     const titles = Array.from(document.querySelectorAll(".view .ov-panel-title")).map((t) => t.textContent);
-    return { listed: titles.some((t) => /^Backups\b/.test(t)), card: titles.includes("Download a DuckDB schema") };
+    return { listed: titles.some((t) => /^Snapshots\b/.test(t)), card: titles.includes("Download a DuckDB schema") };
   });
   (dkGone.listed && !dkGone.card)
     ? ok("snapshots: the DuckDB schema card is not here (it lives on Connect AI)")
@@ -3107,25 +3107,25 @@ try {
     return { p0: p0, p1: p1 };
   });
   (paged.p0.rows.length === 5 && paged.p1.rows.length === 3)
-    ? ok("backups paging: five rows a page, and the last page holds the remainder")
-    : bad("backups paging: five rows a page, and the last page holds the remainder",
+    ? ok("snapshots paging: five rows a page, and the last page holds the remainder")
+    : bad("snapshots paging: five rows a page, and the last page holds the remainder",
         JSON.stringify({ p0: paged.p0.rows.length, p1: paged.p1.rows.length }));
   // The composition is what a literal page argument breaks: the window has to
   // MOVE. Page two showing page one's rows is the shape that passed every
   // source assertion and both isolated node tests.
   (paged.p1.rows[0] && paged.p1.rows[0] !== paged.p0.rows[0])
-    ? ok("backups paging: page two continues the list instead of restarting it")
-    : bad("backups paging: page two continues the list instead of restarting it",
+    ? ok("snapshots paging: page two continues the list instead of restarting it")
+    : bad("snapshots paging: page two continues the list instead of restarting it",
         JSON.stringify({ p0first: paged.p0.rows[0], p1first: paged.p1.rows[0] }));
-  // The treatment marks the backup a restore reads, so it belongs to the
+  // The treatment marks the snapshot a restore reads, so it belongs to the
   // whole list, not to a page.
   (paged.p0.latest === 1 && paged.p1.latest === 0)
-    ? ok("backups paging: only the real newest backup wears the treatment")
-    : bad("backups paging: only the real newest backup wears the treatment",
+    ? ok("snapshots paging: only the real newest snapshot wears the treatment")
+    : bad("snapshots paging: only the real newest snapshot wears the treatment",
         JSON.stringify({ p0: paged.p0.latest, p1: paged.p1.latest }));
   (/^1.5 of 8$/.test(paged.p0.pager) && /^6.8 of 8$/.test(paged.p1.pager))
-    ? ok("backups paging: the pager says which rows are on screen")
-    : bad("backups paging: the pager says which rows are on screen",
+    ? ok("snapshots paging: the pager says which rows are on screen")
+    : bad("snapshots paging: the pager says which rows are on screen",
         JSON.stringify({ p0: paged.p0.pager, p1: paged.p1.pager }));
   const sqlxGate = await page.evaluate(async () => {
     const out = { cap: !!capsCache.sql_export };
@@ -3157,8 +3157,8 @@ try {
     return out;
   });
   (sqlxGate.cap && sqlxGate.card && sqlxGate.prefilled)
-    ? ok("sqlx: the build card renders under its capability, prefilled with the newest backup time")
-    : bad("sqlx: the build card renders under its capability, prefilled with the newest backup time", JSON.stringify(sqlxGate));
+    ? ok("sqlx: the build card renders under its capability, prefilled with the newest snapshot time")
+    : bad("sqlx: the build card renders under its capability, prefilled with the newest snapshot time", JSON.stringify(sqlxGate));
   (sqlxGate.preStatus === 409 && /build one first/.test(sqlxGate.preBody))
     ? ok("sqlx: downloading before any build refuses with words")
     : bad("sqlx: downloading before any build refuses with words", JSON.stringify({ s: sqlxGate.preStatus, b: sqlxGate.preBody }));
@@ -3324,7 +3324,7 @@ try {
     const card = Array.from(v.querySelectorAll(".bk-lane")).find((c) =>
       /To load into MySQL/.test((c.querySelector(".bk-lane-t") || {}).textContent || ""));
     return !!card && /Ready: every table as of/.test(card.textContent) &&
-      Array.from(card.querySelectorAll("button")).some((b) => /Download \.sql backup/.test(b.textContent));
+      Array.from(card.querySelectorAll("button")).some((b) => /Download \.sql export/.test(b.textContent));
   });
   ok("sqlx: after the run settles the card offers the finished build for download");
 
@@ -3429,7 +3429,7 @@ try {
 
   // Scenario 15d — the Protect group. Baselines and verification moved off
   // Settings > Storage into their own routes (#1384), and those two plus
-  // Backup settings merged into one page, Snapshots (#1573). Two halves must
+  // Snapshot settings merged into one page, Snapshots (#1573). Two halves must
   // hold TOGETHER, and only the first is obvious: the page renders all three
   // jobs, AND nothing else still carries them. A merge that left a copy
   // behind would sail past a "does /snapshots work" check — which is the
@@ -3453,7 +3453,7 @@ try {
   await page.evaluate(() => navigate("snapshots"));
   await page.waitForFunction(() => location.pathname === "/snapshots"
     && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Snapshots/.test(h.textContent))
-    && Array.from(document.querySelectorAll(".ov-panel-title")).some((h) => /Backups/.test(h.textContent))
+    && Array.from(document.querySelectorAll(".ov-panel-title")).some((h) => /Snapshots/.test(h.textContent))
     && document.querySelectorAll(".vfy-region").length >= 3
     && !!document.querySelector(".bks-erow"));
   const snapSections = await page.evaluate(() => Array.from(document.querySelectorAll(".snap-sect")).map((h) => [h.id, h.textContent]));
@@ -3494,7 +3494,7 @@ try {
       : bad("moved: " + old + " lands on " + want + " and says so once", JSON.stringify(got));
   }
   // Closing the note is per OLD ADDRESS and lasts: the reader who bookmarked
-  // Backup settings is done being told, and the one who bookmarked Backups
+  // Snapshot settings is done being told, and the one who bookmarked Snapshots
   // has not been told yet.
   await page.evaluate(() => document.querySelector(".snap-moved-x").click());
   const closedNow = await page.evaluate(() => document.querySelectorAll(".snap-moved").length);
@@ -4845,7 +4845,7 @@ try {
 
   // ── Scenario 17g2 — a .cards row leaves no empty track ──
   // The grid was repeat(3, 1fr), which is right only for the pages that carry
-  // three cards. After the #1543 split Retention and Backups carry one and
+  // three cards. After the #1543 split Retention and Snapshots carry one and
   // This daemon two, so a third of the row was card and the rest was nothing.
   //
   // Measured on the RENDERED boxes, not on the rule: a stylesheet that reads
@@ -4973,14 +4973,14 @@ try {
     ? ok("telemetry: the shown bytes are the daemon's sample_event verbatim")
     : bad("telemetry: the shown bytes are the daemon's sample_event verbatim", JSON.stringify({ shown: telSample.shown, fromApi: telSample.fromApi }));
 
-  // ── Scenario 17i — the backup settings, now the setup half of Snapshots (#1582, #1603, #1573) ──
+  // ── Scenario 17i — the snapshot settings, now the setup half of Snapshots (#1582, #1603, #1573) ──
   // The page's job is provenance, and since #1603 it SHOWS the three kinds
   // of setting instead of describing them: the disk-space switch and the
   // per-server rows under "Change here", the daemon's own values under "Set
   // when dbtrail starts" on a plain card with ONE restart chip, and two
   // drawings where paragraphs used to be. Driven LIVE against the watch
   // daemon. Guards, in the order the issue ranked them:
-  //   1. the name: nav item and page head both read Backup settings;
+  //   1. the name: nav item and page head both read Snapshot settings;
   //   2. the kinds: two section labels, one card-level chip and zero per-row
   //      chips, no "not set" anywhere (an empty value renders as the word
   //      for what applies);
@@ -4992,7 +4992,7 @@ try {
   // <details> contributes only its summary line. The per-server panel is
   // EXCLUDED from the count because it scales with the registry (this run
   // seeds several servers), which would make the cap measure the fixture.
-  // The per-server panel and the backup schedule card are both subtracted
+  // The per-server panel and the snapshot schedule card are both subtracted
   // (see below): one scales with the registry, the other with the schedule's
   // state, and neither is the settings prose this cap is about.
   // The cap (1300) sits ~45% above the rewritten page (906 measured here,
@@ -5166,7 +5166,7 @@ try {
   await page.evaluate(() => renderRoute());
   await page.waitForFunction(() => document.querySelectorAll(".bks-server input[name=baseline_dir]").length >= 1, undefined, { timeout: 30000 });
   // Save wakes up on a change and sleeps again when the field is put back;
-  // a Save that stays asleep is an operator who cannot set a backup location.
+  // a Save that stays asleep is an operator who cannot set a snapshot location.
   const dirtySave = await page.evaluate(async () => {
     const box = document.querySelector(".bks-server");
     // The S3 field, which every answer counts: the folder only counts under
@@ -5224,7 +5224,7 @@ try {
   // measures ~330 chars (1316 with it, 985 without), which would leave ~12%
   // headroom and make a legit copy edit on the panel ring a guard about a
   // different page. The panel has its own assertion further down. The
-  // Iceberg export panel that moved here from Backups (#1573) is excluded for
+  // Iceberg export panel that moved here from Snapshots (#1573) is excluded for
   // the same reason, and carries its own assertion too: measured on this
   // stack it shows 815 chars on its own, against 1046 for the steps, so
   // counting it would put the page past the cap on a panel the cap was
@@ -5290,7 +5290,7 @@ try {
       // unversioned arm, where a direct release-asset link can only 404.
       downloadLinks: document.querySelectorAll('.view a[href*="/releases/download/"]').length,
       // The DuckDB schema card, back on Connect AI with the daemon running
-      // (#1573; it sat on Backups from #1581). Its own budget (300): enough
+      // (#1573; it sat on Snapshots from #1581). Its own budget (300): enough
       // for a title, one control and a button, and not enough to start
       // explaining, the prose door #1549 closed. Placement: after the SQL
       // client panel, before the Iceberg export.
@@ -5327,16 +5327,16 @@ try {
   (cn.dk.present && cn.dk.afterSql && cn.dk.beforeIce)
     ? ok("connect: the DuckDB card sits after the SQL client panel and before the Iceberg export")
     : bad("connect: the DuckDB card sits after the SQL client panel and before the Iceberg export", JSON.stringify(cn.dk));
-  // The Iceberg export panel lives here since #1573 (it was on Backups), and
-  // its command names the fixture's backup folder. On this stack byo-idx's own
+  // The Iceberg export panel lives here since #1573 (it was on Snapshots), and
+  // its command names the fixture's snapshot folder. On this stack byo-idx's own
   // folder and index are the same as the daemon's, so this cannot tell one
   // server from another; TestBaselinesAPI_locationOnlyRegistry carries that
   // guarantee, with a different folder per server.
   const iceDirArg = "--baseline-dir '" + (process.env.E2E_BASELINE_DIR || "") + "'";
   (cn.ice.present && cn.ice.title === "Keep it current with Iceberg"
     && cn.ice.cmd.startsWith("bintrail export iceberg ") && cn.ice.cmd.includes(iceDirArg))
-    ? ok("connect: the Iceberg export panel is here, pointed at this server's backup folder")
-    : bad("connect: the Iceberg export panel is here, pointed at this server's backup folder",
+    ? ok("connect: the Iceberg export panel is here, pointed at this server's snapshot folder")
+    : bad("connect: the Iceberg export panel is here, pointed at this server's snapshot folder",
         JSON.stringify({ ice: cn.ice, want: iceDirArg }));
   // "shown only once" is carried by the fresh state and the managed state
   // (except managed read_only, which drops the Lost-it clause and the phrase

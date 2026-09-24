@@ -55,7 +55,7 @@ func TestMeasureWindow(t *testing.T) {
 			t.Fatal("the index was read with nothing to count from")
 		}
 	})
-	t.Run("memo for another snapshot (a full backup since): unknown", func(t *testing.T) {
+	t.Run("memo for another snapshot (a full read since): unknown", func(t *testing.T) {
 		b := newSched(t)
 		mark := indexMark{events: 18_000}
 		stubIndexMark(t, &mark, true)
@@ -89,7 +89,7 @@ func TestMeasureWindow(t *testing.T) {
 			t.Fatalf("window = %+v, want events unknown", w)
 		}
 	})
-	t.Run("model, proven size and last full backup come from the history", func(t *testing.T) {
+	t.Run("model, proven size and last full read come from the history", func(t *testing.T) {
 		b, _, sup := newScheduleFixture(t, true)
 		for _, rec := range []console.BaselineRunRecord{
 			{ServerID: "a", Kind: console.BaselineRunDump, StartedAt: "2026-09-18T05:00:00Z", FinishedAt: "2026-09-18T05:07:41Z"},
@@ -285,7 +285,7 @@ func TestRunRefresh_recordsTheMeasuredRate(t *testing.T) {
 	sup.runRefresh(req, refreshAt.Add(10*time.Minute), time.Minute)
 	runs = sup.history.List("s")
 	if len(runs) != 3 || runs[2].Events != 0 {
-		t.Fatalf("fold after a full backup = %+v, want no events counted", runs)
+		t.Fatalf("fold after a full read = %+v, want no events counted", runs)
 	}
 	// After a restart the count for the newest refresh snapshot comes from
 	// its record, not the (gone) memo.
@@ -363,9 +363,9 @@ func TestBackupScheduler_cutsOverToAFullBackupOnTheMeasuredWindow(t *testing.T) 
 		t.Fatalf("the slot did not cut over on the measured window: %+v", st)
 	}
 	if run, _ := sup.history.LastScheduled(e.ID); run == nil || run.Kind != console.BaselineRunDump || run.WhyCode != "window_measured" {
-		t.Fatalf("the full backup's record does not carry the reason: %+v", run)
+		t.Fatalf("the full read's record does not carry the reason: %+v", run)
 	}
-	if !strings.Contains(logs.String(), "taking a full backup instead of an update") {
+	if !strings.Contains(logs.String(), "taking a full read instead of an update") {
 		t.Fatalf("the decision was not logged: %q", logs.String())
 	}
 	// The same server with a window the model estimates well under the full
@@ -437,13 +437,13 @@ func TestBackupScheduler_cutsOverOnAgeInTheRealSlot(t *testing.T) {
 	fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC)) // eight days later, on an hourly schedule (cut-over 6 h)
 	st := waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
 	if console.BackupWhyCode(st.LastWhy) != "window_age" ||
-		!strings.Contains(st.LastWhy, "no count of the changes since it, no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full backup on record") {
+		!strings.Contains(st.LastWhy, "no count of the changes since it, no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full read on record") {
 		t.Fatalf("the slot did not cut over on age: %+v", st)
 	}
 	if run, _ := sup.history.LastScheduled(e.ID); run == nil || run.Kind != console.BaselineRunDump || run.WhyCode != "window_age" {
-		t.Fatalf("the full backup's record does not carry the reason: %+v", run)
+		t.Fatalf("the full read's record does not carry the reason: %+v", run)
 	}
-	if !strings.Contains(logs.String(), "taking a full backup instead of an update") {
+	if !strings.Contains(logs.String(), "taking a full read instead of an update") {
 		t.Fatalf("the decision was not logged: %q", logs.String())
 	}
 }

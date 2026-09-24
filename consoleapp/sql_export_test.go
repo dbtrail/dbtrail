@@ -133,7 +133,7 @@ func TestSQLExportRun_failure(t *testing.T) {
 	sup.runSQLExport(req, dir)
 
 	st := sup.SQLExportStatus("srv1")
-	if st.State != "failed" || !strings.Contains(st.LastError, "no backup exists at or before") {
+	if st.State != "failed" || !strings.Contains(st.LastError, "no snapshot exists at or before") {
 		t.Fatalf("status = %+v, want failed with the no-backup message", st)
 	}
 	if st.At != "2026-06-10T11:00:00Z" {
@@ -341,6 +341,6 @@ func TestSQLExportFoldConfig_sharesTheDaemonBounds(t *testing.T) {
 	// The engine's fail-closed contract for an artifact the operator will load.
 	if cfg.AllowGaps {
 		t.Error("AllowGaps = true: a dump built over a known capture gap would " +
-			"silently miss rows and still look like a complete backup")
+			"silently miss rows and still look like a complete snapshot")
 	}
 }

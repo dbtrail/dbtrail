@@ -267,11 +267,11 @@ func (s *Server) resolveSnapshotRequest(w http.ResponseWriter, r *http.Request, 
 	if sessionRestricted(r) {
 		recordProfileGateDeny(r, gate)
 		writeJSONError(w, http.StatusForbidden,
-			"backups are unavailable while an access-control profile is active: baseline reads aren't redacted")
+			"snapshots are unavailable while an access-control profile is active: baseline reads aren't redacted")
 		return nil, "", nil
 	}
 	if b.baselineSrc == "" {
-		writeJSONError(w, http.StatusNotFound, "no backup location is configured for this server")
+		writeJSONError(w, http.StatusNotFound, "no snapshot location is configured for this server")
 		return nil, "", nil
 	}
 	ts, ok := parseSnapshotAt(r.URL.Query().Get("at"))
@@ -285,7 +285,7 @@ func (s *Server) resolveSnapshotRequest(w http.ResponseWriter, r *http.Request, 
 	// (#1542). Before the listing merged them this could only ever be asked
 	// about a snapshot the primary held, because no other row existed. Now that
 	// an S3-only snapshot has a row, opening the primary alone would answer
-	// "no backup found" for a row the same page just said is there — and the
+	// "no snapshot found" for a row the same page just said is there — and the
 	// download button, which is built inside the success path, would never
 	// appear for exactly the snapshots #1542 exists to reveal.
 	//
@@ -305,7 +305,7 @@ func (s *Server) resolveSnapshotRequest(w http.ResponseWriter, r *http.Request, 
 		if err != nil {
 			cancel()
 			if firstErr == nil {
-				firstErr = fmt.Errorf("open backup storage: %w", err)
+				firstErr = fmt.Errorf("open snapshot storage: %w", err)
 			}
 			continue
 		}
@@ -318,14 +318,14 @@ func (s *Server) resolveSnapshotRequest(w http.ResponseWriter, r *http.Request, 
 		// else IS reported, but only after every location has been tried, so an
 		// unreachable bucket cannot hide a snapshot sitting on local disk.
 		if !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
-			firstErr = fmt.Errorf("list backup files: %w", err)
+			firstErr = fmt.Errorf("list snapshot files: %w", err)
 		}
 	}
 	if firstErr != nil {
 		writeJSONError(w, http.StatusBadGateway, firstErr.Error())
 		return nil, "", nil
 	}
-	writeJSONError(w, http.StatusNotFound, "no backup found at "+ts.Format(consoleTSFormat))
+	writeJSONError(w, http.StatusNotFound, "no snapshot found at "+ts.Format(consoleTSFormat))
 	return nil, "", nil
 }
 
@@ -507,7 +507,7 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 	}
 	if snapshotIncomplete(files) {
 		writeJSONError(w, http.StatusConflict,
-			"this backup is marked incomplete (a failed or unfinished run); refusing to download it")
+			"this snapshot is marked incomplete (a failed or unfinished run); refusing to download it")
 		return
 	}
 	// Rendered BEFORE the first byte: the footer reads behind the decimal
@@ -555,7 +555,7 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 		// logging it as a storage fault would send an operator chasing S3
 		// errors that were browser cancels.
 		if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
-			slog.Info("backup download canceled by the client", "snapshot", dirName, "file", file, "bytes", sent)
+			slog.Info("snapshot download canceled by the client", "snapshot", dirName, "file", file, "bytes", sent)
 		} else {
 			slog.Warn(msg, "snapshot", dirName, "file", file, "error", err)
 		}
@@ -578,11 +578,11 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 		}
 		hdr := &tar.Header{Name: f.RelPath, Mode: 0o644, Size: f.Size, ModTime: f.ModTime}
 		if err := tw.WriteHeader(hdr); err != nil {
-			abort("backup download aborted: tar header write failed", f.RelPath, err)
+			abort("snapshot download aborted: tar header write failed", f.RelPath, err)
 		}
 		rc, err := ss.open(r.Context(), f.RelPath)
 		if err != nil {
-			abort("backup download aborted: file unreadable mid-stream", f.RelPath, err)
+			abort("snapshot download aborted: file unreadable mid-stream", f.RelPath, err)
 		}
 		n, err := io.Copy(tw, rc)
 		rc.Close()
@@ -591,13 +591,13 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 			sentFiles++
 		}
 		if err != nil {
-			abort("backup download aborted mid-file", f.RelPath, err)
+			abort("snapshot download aborted mid-file", f.RelPath, err)
 		}
 		if n != f.Size {
 			// A file that shrank between the listing and the copy: without
 			// this check the mismatch only surfaces on the NEXT header write,
 			// blaming the wrong file.
-			abort("backup download aborted: file shorter than listed", f.RelPath,
+			abort("snapshot download aborted: file shorter than listed", f.RelPath,
 				fmt.Errorf("read %d bytes, listing said %d", n, f.Size))
 		}
 	}
@@ -607,20 +607,20 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 			Size: int64(len(viewsSQL)), ModTime: time.Now().UTC(),
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
-			abort("backup download aborted: tar header write failed", hdr.Name, err)
+			abort("snapshot download aborted: tar header write failed", hdr.Name, err)
 		}
 		n, err := io.Copy(tw, strings.NewReader(viewsSQL))
 		sent += n
 		if err != nil {
-			abort("backup download aborted mid-file", hdr.Name, err)
+			abort("snapshot download aborted mid-file", hdr.Name, err)
 		}
 		sentFiles++
 	}
 	if err := tw.Close(); err != nil {
-		abort("backup download: tar finalize failed", "", err)
+		abort("snapshot download: tar finalize failed", "", err)
 	}
 	if err := gz.Close(); err != nil {
-		abort("backup download: gzip finalize failed", "", err)
+		abort("snapshot download: gzip finalize failed", "", err)
 	}
 	completed = true
 }
@@ -675,14 +675,14 @@ type tableDescription struct {
 func describeTable(path, dir string, names []string, snapshotAt time.Time) tableDescription {
 	md, err := baseline.ReadParquetMetadata(path)
 	if err != nil {
-		slog.Warn("console: could not read a backup table's footer for provenance",
+		slog.Warn("console: could not read a snapshot table's footer for provenance",
 			"path", path, "error", err)
 		// NOT ProducedByUnknown: see above. An empty verdict renders as a dash.
 		return tableDescription{}
 	}
 	chain, err := baseline.TableDeltaChainIn(dir, names, strings.TrimSuffix(filepath.Base(path), ".parquet"))
 	if err != nil {
-		slog.Warn("console: a backup table's delta files do not form a chain, so how it was made is not shown",
+		slog.Warn("console: a snapshot table's delta files do not form a chain, so how it was made is not shown",
 			"path", path, "error", err)
 		return tableDescription{}
 	}
@@ -690,7 +690,7 @@ func describeTable(path, dir string, names []string, snapshotAt time.Time) table
 	if chain != nil {
 		lm, err := baseline.ReadParquetMetadata(chain.LastFileUpserts())
 		if err != nil {
-			slog.Warn("console: could not read the newest delta of a backup table for provenance",
+			slog.Warn("console: could not read the newest delta of a snapshot table for provenance",
 				"path", chain.LastFileUpserts(), "error", err)
 			return tableDescription{}
 		}
@@ -701,7 +701,7 @@ func describeTable(path, dir string, names []string, snapshotAt time.Time) table
 			// table from its file alone would call it reused unchanged, the
 			// very answer this function exists to stop giving: no verdict.
 			// When the rows were last read is still the file's to say.
-			slog.Warn("console: the newest delta of a backup table records no writer instant, so how the table was made is not shown",
+			slog.Warn("console: the newest delta of a snapshot table records no writer instant, so how the table was made is not shown",
 				"path", chain.LastFileUpserts())
 			return tableDescription{read: baseline.ChainSourceRead(md, last)}
 		}

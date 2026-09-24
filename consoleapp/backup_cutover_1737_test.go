@@ -30,7 +30,7 @@ func TestDump_recordsTheIndexMarkReadBeforeTheDump(t *testing.T) {
 		return sup, console.BaselineRequest{ServerID: "a", ServerName: "a", LocalDir: local, IndexDSN: dsn}, local
 	}
 	const dsn = "u:p@tcp(10.0.0.1:3306)/idx"
-	t.Run("read before the dump, recorded on the full backup", func(t *testing.T) {
+	t.Run("read before the dump, recorded on the full read", func(t *testing.T) {
 		sup, req, local := setup(t, dsn)
 		mark := indexMark{events: 5000}
 		p := stubIndexMark(t, &mark, true)
@@ -49,10 +49,10 @@ func TestDump_recordsTheIndexMarkReadBeforeTheDump(t *testing.T) {
 		}
 		runs := sup.history.List("a")
 		if len(runs) != 1 || runs[0].Kind != console.BaselineRunDump || runs[0].IndexMark != 5000 || runs[0].SnapshotTime != at.Format(time.RFC3339) {
-			t.Fatalf("history = %+v, want the full backup with the mark read before it (5000)", runs)
+			t.Fatalf("history = %+v, want the full read with the mark read before it (5000)", runs)
 		}
 		if base, ok := sup.history.IndexMarkFor("a", at.Format(time.RFC3339)); !ok || base != 5000 {
-			t.Fatalf("IndexMarkFor the full backup's snapshot = %d,%v", base, ok)
+			t.Fatalf("IndexMarkFor the full read's snapshot = %d,%v", base, ok)
 		}
 	})
 	t.Run("published locally, upload failed: the mark is recorded, the next update reads that copy", func(t *testing.T) {
@@ -72,10 +72,10 @@ func TestDump_recordsTheIndexMarkReadBeforeTheDump(t *testing.T) {
 			t.Fatalf("IndexMarkFor the unuploaded snapshot = %d,%v", base, ok)
 		}
 		if sup.history.MeasuredSinceFull("a") {
-			t.Fatal("a full backup that published a snapshot does not count as one")
+			t.Fatal("a full read that published a snapshot does not count as one")
 		}
 	})
-	t.Run("a failed full backup records no mark", func(t *testing.T) {
+	t.Run("a failed full read records no mark", func(t *testing.T) {
 		sup, req, _ := setup(t, dsn)
 		mark := indexMark{events: 5000}
 		stubIndexMark(t, &mark, true)
@@ -97,10 +97,10 @@ func TestDump_recordsTheIndexMarkReadBeforeTheDump(t *testing.T) {
 			t.Fatalf("the index was read with no DSN: %v", p.marks())
 		}
 		if runs := sup.history.List("a"); len(runs) != 1 || runs[0].Error != "" || runs[0].IndexMark != 0 {
-			t.Fatalf("history = %+v, want a successful full backup with no mark", runs)
+			t.Fatalf("history = %+v, want a successful full read with no mark", runs)
 		}
 	})
-	t.Run("the index does not answer: the full backup runs, unmeasured", func(t *testing.T) {
+	t.Run("the index does not answer: the full read runs, unmeasured", func(t *testing.T) {
 		sup, req, local := setup(t, dsn)
 		mark := indexMark{events: 5000}
 		stubIndexMark(t, &mark, false)
@@ -108,9 +108,9 @@ func TestDump_recordsTheIndexMarkReadBeforeTheDump(t *testing.T) {
 		sup.produce = func(console.BaselineRequest) (dumpOutcome, error) { return dumpOutcomeAt(t, local, at), nil }
 		sup.run(req)
 		if runs := sup.history.List("a"); len(runs) != 1 || runs[0].Error != "" || runs[0].IndexMark != 0 {
-			t.Fatalf("history = %+v, want a successful full backup with no mark", runs)
+			t.Fatalf("history = %+v, want a successful full read with no mark", runs)
 		}
-		if !strings.Contains(logs.String(), "could not read the index before the full backup; the update after it will not be measured") {
+		if !strings.Contains(logs.String(), "could not read the index before the full read; the update after it will not be measured") {
 			t.Fatalf("the missing measurement was not logged: %q", logs.String())
 		}
 	})
@@ -179,20 +179,20 @@ func TestRunRefresh_measuresTheUpdateAfterAFullBackup(t *testing.T) {
 	}{
 		// The memo's destination ("") is not this request's: the fallback
 		// counts the index, whatever the snapshot was published to.
-		{"memo of an older fold, same index: counted from the full backup's mark", []console.BaselineRunRecord{dumpRec}, olderFold, 12_000, 3000},
-		{"no memo (a restart since): counted from the full backup's mark", []console.BaselineRunRecord{dumpRec}, nil, 12_000, 3000},
+		{"memo of an older fold, same index: counted from the full read's mark", []console.BaselineRunRecord{dumpRec}, olderFold, 12_000, 3000},
+		{"no memo (a restart since): counted from the full read's mark", []console.BaselineRunRecord{dumpRec}, nil, 12_000, 3000},
 		{"no memo, an update published the snapshot before the restart", []console.BaselineRunRecord{
 			{Kind: console.BaselineRunRefresh, SnapshotTime: fullStamp, IndexMark: 9000, Events: 50, UpdateSeconds: 1}}, nil, 12_000, 3000},
 		{"memo of an older fold on ANOTHER index: the index was re-pointed, not counted",
 			[]console.BaselineRunRecord{dumpRec}, &foldMemo{mark: olderFold.mark, publishedAt: olderFold.publishedAt, indexDSN: "old"}, 12_000, 0},
-		{"the full backup published locally but its upload failed: counted", []console.BaselineRunRecord{{Kind: console.BaselineRunDump, SnapshotTime: fullStamp,
+		{"the full read published locally but its upload failed: counted", []console.BaselineRunRecord{{Kind: console.BaselineRunDump, SnapshotTime: fullStamp,
 			IndexMark: 9000, Error: "upload: denied"}}, olderFold, 12_000, 3000},
 		{"an update published the snapshot and failed its upload: no base", []console.BaselineRunRecord{{Kind: console.BaselineRunRefresh, SnapshotTime: fullStamp,
 			IndexMark: 9000, Error: "upload: denied"}}, nil, 12_000, 0},
-		{"the full backup recorded no mark", []console.BaselineRunRecord{{Kind: console.BaselineRunDump, SnapshotTime: fullStamp}}, olderFold, 12_000, 0},
+		{"the full read recorded no mark", []console.BaselineRunRecord{{Kind: console.BaselineRunDump, SnapshotTime: fullStamp}}, olderFold, 12_000, 0},
 		{"a mark for another snapshot only", []console.BaselineRunRecord{{Kind: console.BaselineRunDump,
 			SnapshotTime: full.Add(-time.Hour).Format(time.RFC3339), IndexMark: 9000}}, nil, 12_000, 0},
-		{"the mark went backwards since the full backup (an index rebuilt)", []console.BaselineRunRecord{dumpRec}, olderFold, 8000, 0},
+		{"the mark went backwards since the full read (an index rebuilt)", []console.BaselineRunRecord{dumpRec}, olderFold, 8000, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -225,12 +225,12 @@ func TestMeasureWindow_afterAFullBackup(t *testing.T) {
 	w := b.measureWindow(context.Background(), e, anchor)
 	if w.Events != 17_000_000 || !w.UnmeasuredSinceFull || w.FoldRate != 4000 || w.LastFull != 8*time.Minute ||
 		!w.AnchorFullFinished.Equal(time.Date(2026, 9, 18, 5, 0, 0, 0, time.UTC)) {
-		t.Fatalf("window after a full backup = %+v, want 17,000,000 events, the model marked older than the full backup, the backup's finish", w)
+		t.Fatalf("window after a full read = %+v, want 17,000,000 events, the model marked older than the full read, the snapshot's finish", w)
 	}
 	// The rate alone would cut this over (about 71 minutes against 8); the
 	// rule abstains and the update runs.
 	if why := console.CutoverToFull(w, time.Hour, anchor.Add(5*time.Minute)); why != "" {
-		t.Fatalf("the slot after a full backup cut over on a model older than it: %q", why)
+		t.Fatalf("the slot after a full read cut over on a model older than it: %q", why)
 	}
 	if err := sup.history.Append(console.BaselineRunRecord{ServerID: "a", Kind: console.BaselineRunRefresh, Events: 50_000, UpdateSeconds: 70}); err != nil {
 		t.Fatal(err)
@@ -292,15 +292,15 @@ func TestBackupScheduler_theUpdateAfterAChosenFullBackupIsMeasured(t *testing.T)
 	fireAt(b, t0)
 	st := waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
 	if console.BackupWhyCode(st.LastWhy) != "window_measured" || st.Last.State != "succeeded" {
-		t.Fatalf("slot 1 = %+v, want a successful full backup on the measured window", st)
+		t.Fatalf("slot 1 = %+v, want a successful full read on the measured window", st)
 	}
 	for _, want := range []string{"fold_rate_events_per_second=4000", "fold_fixed=1m0s", "fold_samples=2", "newest_sample_age=1h30m5s"} {
 		if !strings.Contains(logs.String(), want) {
-			t.Fatalf("the full backup's log line lacks %q: %q", want, logs.String())
+			t.Fatalf("the full read's log line lacks %q: %q", want, logs.String())
 		}
 	}
 	if base, ok := sup.history.IndexMarkFor(e.ID, dumpAt.Format(time.RFC3339)); !ok || base != 17_001_000 {
-		t.Fatalf("the full backup recorded mark %d,%v, want the one read before it", base, ok)
+		t.Fatalf("the full read recorded mark %d,%v, want the one read before it", base, ok)
 	}
 
 	// Slot 2: 100,000 events since the full backup. The rate would call
@@ -313,10 +313,10 @@ func TestBackupScheduler_theUpdateAfterAChosenFullBackupIsMeasured(t *testing.T)
 	}
 	runs := sup.history.List(e.ID)
 	if r := runs[len(runs)-1]; r.Kind != console.BaselineRunRefresh || r.Events != 100_000 || r.UpdateSeconds <= 0 {
-		t.Fatalf("the update after the full backup = %+v, want 100,000 events measured", r)
+		t.Fatalf("the update after the full read = %+v, want 100,000 events measured", r)
 	}
 	if !sup.history.MeasuredSinceFull(e.ID) {
-		t.Fatal("the model is still older than the full backup after a measured update")
+		t.Fatal("the model is still older than the full read after a measured update")
 	}
 	// And the model now fits it: the fake fold is the fastest update on
 	// record, so it is the fixed cost, and the sample has grown to three.

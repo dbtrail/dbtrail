@@ -58,9 +58,9 @@ const out = {
   matchTwo: touchedRowBudgetText(two),
   matchGap: touchedRowBudgetText(gap.last_error),
   scheduled: budgetRefusedTail(),
-  skipBlocked: scheduleSkipTail("the update from the recorded changes was refused (" + two + ") and a full backup cannot start here: creating backups from the web interface is turned off"),
-  skipBusy: scheduleSkipTail("the update from the recorded changes was refused (" + two + "); another backup job was running for this server when the full backup was tried"),
-  skipGap: scheduleSkipTail("the update from the recorded changes was refused (shop.a: capture gap) and a full backup cannot start here: off"),
+  skipBlocked: scheduleSkipTail("the update from the recorded changes was refused (" + two + ") and a full read cannot start here: creating snapshots from the web interface is turned off"),
+  skipBusy: scheduleSkipTail("the update from the recorded changes was refused (" + two + "); another snapshot job was running for this server when the full read was tried"),
+  skipGap: scheduleSkipTail("the update from the recorded changes was refused (shop.a: capture gap) and a full read cannot start here: off"),
 };
 capsCache = {};
 out.refreshNoTrigger = baselineRefreshNote(budget).text;
@@ -85,20 +85,20 @@ console.log(JSON.stringify(out));
 	t.Logf("refresh: %s", got.Refresh)
 	t.Logf("single-table error: %s", one)
 
-	if got.SkipBlocked != " Until a newer full backup exists, every scheduled update is refused the same way." ||
+	if got.SkipBlocked != " Until a newer full read exists, every scheduled update is refused the same way." ||
 		got.SkipBusy != " It will try again at the next scheduled time." || got.SkipGap != " It will try again at the next scheduled time." {
 		t.Errorf("skip tails: blocked %q, busy %q, gap %q", got.SkipBlocked, got.SkipBusy, got.SkipGap)
 	}
-	if !strings.HasSuffix(got.Refresh, "every update from the recorded changes starts from the same backup and is refused again.") {
+	if !strings.HasSuffix(got.Refresh, "every update from the recorded changes starts from the same snapshot and is refused again.") {
 		t.Errorf("refresh budget refusal: %q", got.Refresh)
 	}
-	if !strings.HasSuffix(got.RefreshNoTrigger, "is refused again; creating backups from the web interface is turned off here.") {
+	if !strings.HasSuffix(got.RefreshNoTrigger, "is refused again; creating snapshots from the web interface is turned off here.") {
 		t.Errorf("refresh budget refusal without the create button: %q", got.RefreshNoTrigger)
 	}
 	if !strings.HasSuffix(got.RefreshGap, "Nothing was overwritten; the next run retries.") {
 		t.Errorf("other refresh refusal changed wording: %q", got.RefreshGap)
 	}
-	if !strings.HasSuffix(got.Restore, "Pick a moment closer to an existing backup.") {
+	if !strings.HasSuffix(got.Restore, "Pick a moment closer to an existing snapshot.") {
 		t.Errorf("restore budget refusal: %q", got.Restore)
 	}
 	if !strings.HasSuffix(got.RestoreGap, "published nothing: shop.a: capture gap. Nothing was overwritten.") {
@@ -137,7 +137,7 @@ func TestBudgetRefusalCardsRendered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocked, _ := json.Marshal("the update from the recorded changes was refused (" + refusal + ") and a full backup cannot start here: creating backups from the web interface is turned off")
+	blocked, _ := json.Marshal("the update from the recorded changes was refused (" + refusal + ") and a full read cannot start here: creating snapshots from the web interface is turned off")
 	errText, _ := json.Marshal(refusal)
 	script := renderHarnessJS + `
 vm.runInContext("capsCache = { backup_schedule: true, baseline_restore: true, baseline_trigger: false };", ctx);
@@ -176,9 +176,9 @@ console.log(JSON.stringify({
 		t.Errorf("failed-run line: %q", got.Schedule)
 	}
 	if !has(got.Schedule, "every scheduled update is refused the same way.") || has(got.Schedule, "It will try again at the next scheduled time.") {
-		t.Errorf("skip line after a budget refusal with no full backup possible: %q", got.Schedule)
+		t.Errorf("skip line after a budget refusal with no full read possible: %q", got.Schedule)
 	}
-	if !has(got.Restore, "Pick a moment closer to an existing backup.") {
+	if !has(got.Restore, "Pick a moment closer to an existing snapshot.") {
 		t.Errorf("restore line: %q", got.Restore)
 	}
 }

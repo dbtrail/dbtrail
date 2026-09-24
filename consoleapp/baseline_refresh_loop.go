@@ -227,7 +227,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// Publishing is not finished until the snapshot is where this server's
 	// backups live. A fold that wrote a perfect local snapshot for a server
 	// whose destination is S3 has produced a copy on one box, which is not
-	// what "the backups go to S3" promises: it is outside retention (a prune
+	// what "the snapshots go to S3" promises: it is outside retention (a prune
 	// confirms the S3 copy), outside anything reading the bucket, and gone
 	// with the host. Reporting that as published would be reporting a backup
 	// the destination does not have.
@@ -358,7 +358,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// it). Reuse is on and the card says unchanged tables keep their file, so
 	// a count that CANNOT be nonzero here has to say so.
 	if req.CarryForwardUnchanged && strings.HasPrefix(baselineFoldSource(req), "s3://") {
-		pub = append(pub, "reuse_unchanged", "not applicable: the previous backup is read from S3, and reusing a file means linking it on disk")
+		pub = append(pub, "reuse_unchanged", "not applicable: the previous snapshot is read from S3, and reusing a file means linking it on disk")
 	}
 	slog.Info("baseline refresh: published", pub...)
 	// ONE value for both, deliberately. Built twice, the sample this run leaves
@@ -459,7 +459,7 @@ func resolveFoldSource(ctx context.Context, req refreshRequest) string {
 	// be a newer one, and the fold would refuse over the local directory.
 	// The bucket has no such folder, so it stays the source.
 	if unreadable, err := listLocalUnreadable(ctx, req.BaselineDir); err != nil || reconstruct.UnreadableAtOrAfter(unreadable, localAt, time.Time{}) != nil {
-		slog.Debug("baseline refresh: a local backup folder could not be read, reading the bucket",
+		slog.Debug("baseline refresh: a local snapshot folder could not be read, reading the bucket",
 			"server", req.ServerName, "dir", req.BaselineDir)
 		return standing
 	}
@@ -526,7 +526,7 @@ func newestSnapshotOf(files []reconstruct.BaselineFile) (time.Time, map[string]s
 //
 // A sentinel, not a message match: the verdict must not depend on wording that
 // an edit to a string can change.
-var errSnapshotNotUploaded = errors.New("the snapshot was not sent to the backup destination")
+var errSnapshotNotUploaded = errors.New("the snapshot was not sent to the snapshot destination")
 
 // refreshCanSkip reports whether this cycle can be skipped in its entirety
 // (#1689). Both questions have to answer yes:
@@ -578,7 +578,7 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 		// OK, which includes a backup already PAST the floor and one that could
 		// not be graded at all.
 		if s.gateEdge.Fire("reanchor:"+req.ServerID, prev.publishedAt.UTC().Format(time.RFC3339)) {
-			slog.Info("baseline refresh: nothing has been indexed, but the last backup is no longer "+
+			slog.Info("baseline refresh: nothing has been indexed, but the last snapshot is no longer "+
 				"safely inside the window the index still covers; folding to re-anchor it",
 				"server", req.ServerName, "id", req.ServerID,
 				"last_backup", prev.publishedAt.UTC().Format(time.RFC3339))
@@ -710,7 +710,7 @@ func (s *baselineSupervisor) refreshSkippedAsUnchanged(serverID, since string) b
 
 // foldPublished reports whether a finished fold left a complete snapshot in the
 // server's local directory, which is true both when the run fully succeeded and
-// when only the upload failed. Callers that ask "is a backup owed?" must use
+// when only the upload failed. Callers that ask "is a snapshot owed?" must use
 // this rather than err == nil.
 func foldPublished(err error) bool {
 	return err == nil || errors.Is(err, errSnapshotNotUploaded)
@@ -735,7 +735,7 @@ func uploadRefreshedSnapshot(ctx context.Context, req refreshRequest, at time.Ti
 		// complete, and an operator reading this needs to know the run's work
 		// still exists rather than that a backup was lost.
 		return 0, fmt.Errorf("%w: it was written to %s but could not be uploaded to %s. The next update folds a NEW "+
-			"snapshot rather than re-sending this one; the next full backup sends every local snapshot the destination "+
+			"snapshot rather than re-sending this one; the next full read sends every local snapshot the destination "+
 			"lacks, so it sweeps this one up: %w",
 			errSnapshotNotUploaded, refreshSnapshotDir(req, at), dest, err)
 	}
@@ -797,7 +797,7 @@ func reportRefusedRefresh(req refreshRequest, at time.Time, refused int, unclaim
 		// "published nothing" over a finished snapshot sends them looking for
 		// a fold problem that did not happen, and the remedy (the credentials
 		// or the bucket policy) is not where that message points.
-		slog.Warn("baseline refresh: the snapshot was written but not sent to the backup destination", args...)
+		slog.Warn("baseline refresh: the snapshot was written but not sent to the snapshot destination", args...)
 		return
 	}
 	slog.Warn("baseline refresh: published nothing", args...)
@@ -954,7 +954,7 @@ func keepPartialSnapshotBecause(refused int, unclaimed string, holdsData, publis
 		// finished, marked snapshot as one that "may be complete" and "failed
 		// to be marked" — both halves false, on the one shape where the local
 		// copy is the operator's whole remaining result.
-		return "the fold finished and marked the snapshot; only sending it to the backup destination failed"
+		return "the fold finished and marked the snapshot; only sending it to the snapshot destination failed"
 	}
 	if refused == 0 && holdsData {
 		return "the fold reported no table failure, so what is on disk may be a complete snapshot that only " +
@@ -1199,8 +1199,8 @@ const (
 	// operator to lower a flag their binary does not have is worse than saying
 	// nothing, so this names what they CAN actually reach.
 	daemonFoldRemediation = "shorten the window this fold covers: for the scheduled refresh, " +
-		"lower --baseline-refresh-interval so each fold starts from a fresher backup; " +
-		"for a restore or a SQL export, pick a moment closer to an existing backup"
+		"lower --baseline-refresh-interval so each fold starts from a fresher snapshot; " +
+		"for a restore or a SQL export, pick a moment closer to an existing snapshot"
 )
 
 // refreshFoldConfig is the configuration one refresh cycle folds with.
@@ -1723,13 +1723,13 @@ func reportRefreshDuration(server string, run refreshRun, prev refreshPace) {
 		slog.Warn("baseline refresh: this server's refresh took longer than the configured interval, and it is "+
 			"the second published run in a row to outlast the window of changes it folded. This one folded a "+
 			"larger window than the run before it and took longer doing it, so the run is growing faster than "+
-			"the window is, and this refresh left the backup further behind than the one before it did. A "+
+			"the window is, and this refresh left the snapshot further behind than the one before it did. A "+
 			"longer interval does not change "+
 			"that: the next refresh cannot start until this one ends, and it inherits everything that arrived "+
-			"while it ran. Taking a full backup does change it, because a full backup reads the source instead "+
-			"of folding, and the refreshes after it start from the moment that backup BEGAN, which means the "+
-			"first of them still folds the time the backup itself took; the backup schedule does this on its "+
-			"own once an update is measured to cost more than a full backup, or when its starting point is "+
+			"while it ran. Taking a full read does change it, because a full read reads the source instead "+
+			"of folding, and the refreshes after it start from the moment that snapshot BEGAN, which means the "+
+			"first of them still folds the time the snapshot itself took; the snapshot schedule does this on its "+
+			"own once an update is measured to cost more than a full read, or when its starting point is "+
 			"past the cut-over age with nothing measured. Otherwise reduce what a run costs, "+
 			"and start where growth_mostly_in on this line points: this reading is over the whole run, so a "+
 			"destination that slowed down reaches it exactly as a fold that did, and fold_grew_by against "+
