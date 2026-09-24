@@ -316,7 +316,7 @@ console.log(JSON.stringify({ missing: { text: flat(missing).join(" "), cls: miss
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
 	}
-	if !strings.Contains(got.Missing.Text, "not indexing yet") || !strings.Contains(got.Missing.Text, "Go to Servers and press Start") ||
+	if !strings.Contains(got.Missing.Text, "not indexing yet") || !strings.Contains(got.Missing.Text, "Go to Servers and press the Start button") ||
 		!strings.Contains(got.Missing.Text, "Servers ›") || strings.Contains(got.Missing.Text, "1049") || got.Missing.Cls != "hero-card hero-age none" {
 		t.Errorf("missing index: %q %q", got.Missing.Text, got.Missing.Cls)
 	}

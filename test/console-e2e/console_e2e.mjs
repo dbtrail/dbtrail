@@ -465,8 +465,11 @@ try {
     const t = es.empty || "";
     !es.empty ? bad("error: 1049 renders friendly empty state", "no .empty element produced") : ok("error: 1049 renders friendly empty state");
     /indexing yet/.test(t) ? ok("error: 1049 empty state has friendly title") : bad("error: 1049 empty state has friendly title", t);
-    /never lives on the source/.test(t) ? ok("error: 1049 empty state clarifies source-vs-index") : bad("error: 1049 empty state clarifies source-vs-index", t);
-    /bintrail_idx_/.test(t) ? ok("error: 1049 empty state names the index db") : bad("error: 1049 empty state names the index db", t);
+    // One sentence on screen (where to go, what to press); the source-vs-index
+    // fact and the database's name ride as the heading's tooltip.
+    /Go to Servers and press the Start button/.test(t) ? ok("error: 1049 empty state says where to go and what to press") : bad("error: 1049 empty state says where to go and what to press", t);
+    const tip = (document.querySelector(".empty h3") || {}).title || "";
+    (/never lives on the source/.test(tip) && /bintrail_idx_/.test(tip)) ? ok("error: 1049 empty state keeps the source-vs-index fact and the db name as the tooltip") : bad("error: 1049 empty state keeps the source-vs-index fact and the db name as the tooltip", tip);
   }
 
   // Scenario 5 — a pure BYO-index entry (no source) must auto-EXPAND the

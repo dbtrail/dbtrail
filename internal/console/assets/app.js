@@ -872,8 +872,8 @@ function renderError(container, err) {
   const m = indexMissingFrom(msg);
   if (m) {
     const box = el("div", { class: "empty" });
-    box.append(el("h3", { text: "This server isn't indexing yet" }));
-    box.append(el("p", { text: indexMissingWords(m) }));
+    box.append(el("h3", { text: "This server isn't indexing yet", title: indexMissingDetail(m) }));
+    box.append(el("p", { text: indexMissingWords() }));
     box.append(el("button", { class: "btn btn-sm", type: "button", text: "Servers",
       onclick: () => openServersModal() }));
     container.append(box);
@@ -890,12 +890,15 @@ function indexMissingFrom(msg) {
   const m = String(msg || "").match(/Unknown database '([^']+)'/);
   return m ? m[1] : "";
 }
-// The two facts a reader goes looking for: the database's name, and that it
-// lives on the INDEX server (people look for it on the source, where it
-// never is). Then the one action.
-function indexMissingWords(name) {
-  return "Its index database \"" + name + "\" is created on the index server when capture starts; it never lives on the source MySQL. " +
-    "Go to Servers and press Start on this server; snapshots, checks and time travel come after that.";
+// One sentence, the action: where to go and what to press. The technical
+// fact (the database's name, and that it is created on the index server
+// when capture starts, never on the source) rides as the tooltip for
+// whoever wants it (indexMissingDetail).
+function indexMissingWords() {
+  return "Go to Servers and press the Start button.";
+}
+function indexMissingDetail(name) {
+  return "Its index database \"" + name + "\" is created on the index server when capture starts; it never lives on the source MySQL.";
 }
 
 function renderWarnings(node, warnings) {
@@ -5455,8 +5458,8 @@ function snapshotHero(b, cov, cur, acts) {
     // Not a fault: the server was added and capture has not started. Say
     // what to do and where, in the grey of "nothing yet", never in pink.
     hero.append(el("div", { class: "hero-card hero-age none" }, el("div", { class: "hero-k", text: "Snapshots" }),
-      el("div", { class: "hero-big", text: "not indexing yet" }),
-      el("div", { class: "hero-sub" }, indexMissingWords(missingDB) + " ",
+      el("div", { class: "hero-big", text: "not indexing yet", title: indexMissingDetail(missingDB) }),
+      el("div", { class: "hero-sub" }, indexMissingWords() + " ",
         el("a", { href: "#servers", class: "hero-link", text: "Servers ›", onclick: (e) => { e.preventDefault(); openServersModal(); } }))));
     return hero;
   }
