@@ -2569,7 +2569,7 @@ try {
   });
   const pc = permCases;
   // The control: with every permission the probe finds every control.
-  (pc.full.rows > 0 && pc.full.create && pc.full.restore && pc.full.takeAway && pc.full.duckData && pc.full.build
+  (pc.full.rows > 0 && pc.full.create && !pc.full.restore && pc.full.takeAway && pc.full.duckData && pc.full.build
     && pc.full.runCheck && pc.full.serverSave && pc.full.schedSave && !pc.full.startsLabel && !pc.full.currentSettings
     && pc.full.errorBoxes === 0 && pc.permKeys.includes("servers:read"))
     ? ok("permissions: with full access every control is drawn (the probe's control case)")
@@ -2583,7 +2583,7 @@ try {
   // Each permission alone hides exactly its own controls.
   const each = {
     "query:execute": !pc.noQuery.duckData && pc.noQuery.build && pc.noQuery.create && pc.noQuery.serverSave,
-    "baseline:create": !pc.noCreate.create && !pc.noCreate.createNote && !pc.noCreate.restore && !pc.noCreate.build
+    "baseline:create": !pc.noCreate.create && !pc.noCreate.createNote && !pc.noCreate.build
       && !pc.noCreate.runCheck && pc.noCreate.duckData && pc.noCreate.currentRun && pc.noCreate.serverSave,
     "settings:read": pc.noSettingsRead.errorBoxes === 0 && pc.noSettingsRead.serverRows === 0 && !pc.noSettingsRead.views
       && pc.noSettingsRead.duckData && pc.noSettingsRead.create && pc.noSettingsRead.schedSave,
@@ -2907,6 +2907,9 @@ try {
   // 15e-2: the restore card. Gated on the capability the daemon advertises;
   // a bad instant is refused INLINE (the server's 400 lands next to the
   // input, not in a toast that outlives nothing).
+  // The card lives on the Restore page since the Snapshots cut (D9).
+  await page.evaluate(() => navigate("recover"));
+  await page.waitForFunction(() => location.pathname === "/recover" && !!document.querySelector(".rc-restore-slot .bk-restore"), undefined, { timeout: 15000 });
   const bkRestore = await page.evaluate(async () => {
     const out = { cap: !!capsCache.baseline_restore };
     const v = document.querySelector(".view");
@@ -2935,6 +2938,8 @@ try {
   (bkRestore.inlineErr && /UTC time/.test(bkRestore.inlineErr))
     ? ok("backups: a bad restore instant is refused inline with the server's words")
     : bad("backups: a bad restore instant is refused inline with the server's words", JSON.stringify(bkRestore.inlineErr));
+  await page.evaluate(() => navigate("snapshots"));
+  await page.waitForFunction(() => location.pathname === "/snapshots" && document.querySelectorAll(".stg-row").length > 0, undefined, { timeout: 15000 });
 
   // 15e-3: the in-progress region, driven through the real builders (a live
   // run cannot be photographed deterministically; same pattern as the
@@ -3538,6 +3543,9 @@ try {
   await page.evaluate(() => navigate("snapshots"));
   await page.waitForFunction(() => location.pathname === "/snapshots"
     && document.querySelectorAll(".vfy-region").length >= 3);
+  // Checks is a closed fold since the Snapshots cut (D9); the measurements
+  // below need it open.
+  await page.evaluate(() => { const d = document.querySelector(".snap-fold"); if (d) d.open = true; });
 
   // Scenario 15v — the verification page rework (#1417/#1418/#1419/#1420),
   // driven END TO END against the real daemon: a real recover-inputs run over

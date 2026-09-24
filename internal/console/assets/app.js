@@ -3497,7 +3497,39 @@ function renderRecover(params) {
       generateUndo(form);
     });
   }
+  // Restore to a moment (D9): rebuilding every table as it was is a
+  // restore, so its card lives here, under the row-level one, and its run
+  // reports on Snapshots where the copies are.
+  const slot = el("div", { class: "rc-restore-slot" });
+  v.append(slot);
+  loadRestoreToMoment(slot);
   viewEnter();
+}
+
+// loadRestoreToMoment fills the Restore page's slot with the restore card
+// once the three reads it needs are in (the server row, the copies, the last
+// restore's state); nothing while the daemon has no restore feature or the
+// selected server is not a registry one. A generation guard drops a late
+// answer after the reader moved on.
+async function loadRestoreToMoment(slot) {
+  if (!capsCache.baseline_restore) return;
+  const id = currentServer || defaultServerId;
+  if (!id) return;
+  const gen = serverGen, vgen = viewGen;
+  const [srvRes, b, rst] = await Promise.all([
+    api("/api/servers").catch(() => null),
+    api("/api/baselines").catch(() => null),
+    api("/api/servers/" + encodeURIComponent(id) + "/baseline/restore").catch(() => null),
+  ]);
+  if (gen !== serverGen || vgen !== viewGen) return;
+  const cur = srvRes && Array.isArray(srvRes.servers) ? srvRes.servers.find((s) => s.id === id) : null;
+  const running = !!(rst && rst.restore && rst.restore.state === "running");
+  const card = running ? null : backupRestoreCard(cur, b, rst);
+  if (!card && !running) return;
+  const note = el("p", { class: "form-hint rc-restore-note" },
+    running ? "A restore is running for this server. " : "The run and its result show on ",
+    el("a", { href: "/snapshots", text: running ? "Follow it on Snapshots ›" : "Snapshots ›", onclick: (e) => { e.preventDefault(); navigate("snapshots"); } }));
+  if (card) { card.append(note); slot.append(card); } else slot.append(el("section", { class: "ov-panel bk-restore" }, note));
 }
 
 // setSelectWhenReady fills a schema select once its options have loaded, then
@@ -5271,8 +5303,6 @@ async function renderSnapshots() {
       // came to put a table back should not scroll past the inventory to find
       // the control. Below the run region on purpose — a restore already
       // running reports its progress up there.
-      const restoreCard = backupRestoreCard(cur, baselines, restoreSt);
-      if (restoreCard) v.append(restoreCard);
       // Still above the list, as on the page this replaces: the two lanes are
       // the answer to why a reader opened it — what do I download to open
       // this in DuckDB, what do I download to load it into MySQL — and the
@@ -5292,13 +5322,23 @@ async function renderSnapshots() {
       // Three regions with visible separation (#1419): what you can run,
       // what is running or just ran, what ran before.
       part("Checks", () => {
-        verifyRegions(servers, { serversErr: serversErr }).forEach((region) => v.append(region));
+        // Folded (D9): the fold line carries the last check's date and
+        // verdict, so a reader sees the state without opening it. Open while
+        // a run is live on this server, or once the reader opened it.
+        const live = cur && cur.id ? vfyLive.get(cur.id) : null;
+        const fold = el("details", { class: "snap-fold", open: checksOpen || (live && live.state === "running") || null });
+        const last = el("span", { class: "snap-fold-last", text: "" });
+        fold.append(el("summary", { class: "snap-fold-sum" },
+          el("span", { class: "snap-fold-title", text: "Run a check, the current run and past runs" }), last));
+        fold.addEventListener("toggle", () => { checksOpen = !!fold.open; });
+        verifyRegions(servers, { serversErr: serversErr, lastLine: last }).forEach((region) => fold.append(region));
         // The verify guide, AFTER the section it describes: it lost its only
         // link when the three page headers became one (#1573) — the header
         // now opens the backup-strategy guide — and a page nothing links to
         // also stops being fetched by the daily link check, so the site
         // could move it and nobody would know.
-        v.append(docsMore("guides/verify", "", "what each check proves"));
+        fold.append(docsMore("guides/verify", "", "what each check proves"));
+        v.append(fold);
       });
     }
     // Where and how often — the schedule (#1442) first, because it is what
@@ -8358,6 +8398,10 @@ function backupTakeAway(cur, b, sqlSt) {
 // for the reason vfyHelpOpen is: the repaints this page does on its own
 // replace the <details> that would have held it. See backupTakeAway.
 let takeAwayOpen = false;
+// checksOpen remembers the Checks fold across the page's own repaints (a job
+// that settles repaints the page; the fold must not snap shut under a reader
+// who opened it). A live run opens it on its own.
+let checksOpen = false;
 
 // backupFilesShape draws the count instead of stating it: on the DuckDB lane
 // two tiles when the server can make the views file and one when it cannot,
@@ -8827,7 +8871,7 @@ function verifyRegions(servers, opts) {
     tzChip()));
   const history = el("div", { class: "vfy-history" });
   historyCard.append(history);
-  loadVerifyHistory(cur.id, history);
+  loadVerifyHistory(cur.id, history, opts && opts.lastLine);
 
   // Running a check takes baseline:create. Without it the region that
   // offers one is left out; what is running and what ran before stay, since
@@ -9154,19 +9198,23 @@ const VFY_MODE_LABEL = { "baseline-anchored": "compared two saved snapshots", "l
 // --verify-interval loop writes the same store. On a fetch error (including
 // the 403 feature-off case) the box keeps whatever it already shows; the
 // trigger UI above explains how to enable verification.
-async function loadVerifyHistory(id, box) {
+async function loadVerifyHistory(id, box, lastLine) {
   let recs;
   try {
     recs = (await api("/api/servers/" + encodeURIComponent(id) + "/verify/history")).history || [];
   } catch (err) {
+    if (lastLine) lastLine.textContent = "past runs could not be read";
     return;
   }
   clear(box);
   if (!recs.length) {
     box.append(el("div", { class: "ev-empty", text: "No past runs yet." }));
+    if (lastLine) lastLine.textContent = "no check yet";
     return;
   }
   const latest = recs.find((r) => r.state === "succeeded" || r.state === "failed");
+  // The fold line above the section (D9): when, and what it found.
+  if (lastLine) lastLine.textContent = latest && latest.finished_at ? "last check " + utcLabel(latest.finished_at) + " · " + vfyHeadline(latest) : "no finished check yet";
   if (latest && latest.finished_at) {
     const sec = (Date.now() - Date.parse(latest.finished_at)) / 1000;
     // chip-age, NOT chip-mon and NOT the live treatment: this is a staleness
