@@ -170,6 +170,10 @@ func TestOverviewFlowModel(t *testing.T) {
 		// A 500 on the schema snapshot is a failure; a 403 is "not from here".
 		"schema-500": {"input": c{"coverage": c{}, "baselines": c{}, "server": registry, "schema": c{"unavailable": true, "status": 500}, "uncaptured": c{}}},
 		"schema-403": {"input": c{"coverage": c{}, "baselines": c{}, "server": registry, "schema": c{"unavailable": true, "status": 403}, "uncaptured": c{}}},
+		// #1860: before the definitions were read once, the DBTrail box says so
+		// in words; a finished read that found no tables says 0.
+		"first-read": {"input": c{"coverage": c{"freshness": "idle"}, "baselines": c{}, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{"tables_captured": 0}}},
+		"read-empty": {"input": c{"coverage": c{"freshness": "idle"}, "baselines": c{}, "server": registry, "schema": c{"state": "succeeded", "finished_at": "2026-09-23T14:31:00Z"}, "uncaptured": c{"tables_captured": 0}}},
 		// #1853: the two "not capturing from here" causes with a fix from here, and
 		// the one without; and "no schedule set" naming its fix.
 		"no-source":          {"input": c{"coverage": c{"freshness": "none"}, "baselines": c{}, "server": c{"id": "a", "kind": "registry", "has_source": false}, "schema": c{"unavailable": true, "status": 403}, "uncaptured": c{}}},
@@ -449,6 +453,12 @@ const origPaint = paint;`, 1)
 	}
 	if nv := get("fold-refused-noperm-create"); strings.Contains(nv.Actions[0], "views.sql") {
 		t.Errorf("a session without settings:read is offered views.sql: %v", nv.Actions)
+	}
+	if fr := get("first-read"); fr.Pieces[engine].Line != "first read pending" {
+		t.Errorf("first-read: engine line = %q, want the wait in words, never a 0 count", fr.Pieces[engine].Line)
+	}
+	if re := get("read-empty"); re.Pieces[engine].Line != "0 tables" {
+		t.Errorf("read-empty: engine line = %q, want the count a finished read produced", re.Pieces[engine].Line)
 	}
 	// #1853: the fix is named where there is one, and only there.
 	nosrc := get("no-source")

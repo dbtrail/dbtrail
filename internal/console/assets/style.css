@@ -1570,6 +1570,10 @@ button { font-family: inherit; }
 .flow-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px 22px; margin-top: 22px; }
 .flow-actions .flow-cta { padding: 10px 22px; font-size: 15px; }
 .flow-card + .flow-actions { margin-top: 16px; }
+/* The one grey line under the action row (#1860). */
+.ov-actline { text-align: center; font-family: var(--f-ui); font-size: 13.5px; color: var(--ink-3); margin: -8px 0 6px; min-height: 1em; }
+.ov-actline-link { color: inherit; text-decoration: none; border-bottom: 1px solid var(--line); }
+.ov-actline-link:hover { color: var(--ink); }
 .health-dot.none { background: var(--ink-4); }
 .health-dot.warn { background: var(--orange-2); }
 .health-dot.bad  { background: var(--delete); }
@@ -1606,6 +1610,12 @@ button { font-family: inherit; }
   .flow-box { padding: 14px 14px 12px; min-height: 96px; }
   .flow-big { font-size: 26px; }
   .flow-actions .flow-cta { width: 100%; }
+  .flow-actions { gap: 10px 16px; }
+  .flow-box-head { font-size: 16px; }
+  .flow-ico { width: 30px; height: 30px; margin-bottom: 6px; }
+  .flow-ico svg { width: 30px; height: 30px; }
+  .flow-lockup { height: 30px; margin-bottom: 6px; }
+  .flow-line { height: 40px; }
   .flow-arrow { padding: 4px 0; }
   .flow-line { width: 12px; height: 26px; margin: 2px 0; }
   .flow-line::before { left: 5px; right: auto; top: 0; bottom: 10px; width: 2px; height: auto; }
