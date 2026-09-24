@@ -3230,3 +3230,10 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .fr-fold { margin-top: 10px; background: none; border: 0; padding: 0; cursor: pointer; font-family: var(--f-ui); font-size: 13px; color: var(--ink-3); }
 .fr-fold::before { content: "\25B8 "; }
 .fr-card.fr-open .fr-fold::before { content: "\25BE "; }
+.snap-fold { margin: 4px 0 8px; }
+.snap-fold > summary { cursor: pointer; padding: 8px 0; font-family: var(--f-ui); font-size: 14px; color: var(--ink-2); display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.snap-fold > summary .snap-fold-title { font-weight: 600; color: var(--ink); }
+.snap-fold > summary .snap-fold-last { color: var(--ink-3); font-size: 13px; }
+.snap-fold[open] > summary { margin-bottom: 10px; }
+.rc-restore-slot { margin-top: 20px; }
+.rc-restore-note a { color: #D9367A; font-weight: 600; text-decoration: none; border-bottom: 1px solid currentColor; }
