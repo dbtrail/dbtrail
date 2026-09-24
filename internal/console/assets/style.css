@@ -3359,6 +3359,17 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .keep-step .keep-n::-webkit-outer-spin-button, .keep-step .keep-n::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .keep-step .keep-n::placeholder { color: var(--ink-3); font-size: 28px; font-weight: 700; }
 .keep-unit, .keep-lead { font-family: var(--f-ui); font-size: 14px; color: var(--ink-2); }
+.keep-card .keep-reach { font-size: 15px; line-height: 1.5; color: var(--ink); margin: 14px 0 0; }
+.keep-shape { margin: 8px 0 4px; }
+.ks-row { display: flex; align-items: flex-end; gap: 6px; height: 44px; }
+.ks-tile { width: 28px; height: 36px; border-radius: 6px; background: #DDF7EC; border: 1.5px solid #0E8A5E; flex: none; }
+.ks-tile.ks-newest { background: #FF4D8D; border-color: #E8397C; height: 44px; }
+.ks-tile.ks-open { border-left-style: dashed; }
+.ks-tile.ks-gone { background: transparent; border: 1.5px dashed var(--ink-4); opacity: .5; height: 30px; }
+.ks-cut { width: 2px; height: 44px; background: var(--ink-4); border-radius: 1px; margin: 0 4px; flex: none; }
+.ks-more { font-family: var(--f-ui); font-size: 12px; font-weight: 600; color: var(--ink-3); align-self: center; }
+.ks-axis { display: flex; justify-content: space-between; margin-top: 6px; padding-top: 6px; border-top: 2px solid var(--line); font-family: var(--f-ui); font-size: 12px; color: var(--ink-3); }
+.ks-right { color: #E8397C; font-weight: 600; }
 .where-tile { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 16px; background: var(--surface-3); margin: 0 0 10px; }
 .where-tile.on { background: #DDF7EC; color: #0E8A5E; }
 .where-ico { display: inline-flex; width: 26px; height: 26px; flex: none; color: currentColor; }
