@@ -2044,7 +2044,13 @@ button { font-family: inherit; }
 }
 .health-dot.ok { background: var(--insert); }
 .srv-desc { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3); }
-.srv-status { font-family: var(--f-mono); font-size: 11px; }
+/* The Test answer gets a line of its own under the row (#1856): squeezed
+   between the connection string and the buttons it broke into a column of
+   one word per line. Hidden while empty, so an untested row keeps its
+   height. */
+.srv-item { flex-wrap: wrap; }
+.srv-status { font-family: var(--f-mono); font-size: 11px; flex-basis: 100%; order: 10; padding-left: 20px; }
+.srv-status:empty { display: none; }
 .srv-status.ok { color: var(--insert); }
 .srv-status.err { color: var(--delete); }
 .srv-status.pending { color: var(--ink-2); }
