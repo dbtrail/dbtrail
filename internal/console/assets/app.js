@@ -6796,19 +6796,17 @@ function s3SigningNote(s3Input, srv, storage, registry) {
 // this page waits there for its download, and that space used to be
 // invisible until someone ran du. Under the lane that starts the builds, so
 // the disk a build takes is read where the build is asked for. null when
-// this process cannot build .sql exports (no staging exists) or the storage
-// signals were not read.
+// this process cannot build .sql exports (no staging exists), when the
+// storage signals were not read, and when nothing is staged: the lane's own
+// lines already say a build is removed once downloaded, and the Snapshots
+// first screen has a word budget this sentence would spend on nothing.
 function stagedDownloadsNote(storage, cur, servers) {
   const stg = storage && storage.staging;
   if (!stg) return null;
   const hours = Math.round(stg.ttl_hours || 0);
   const builds = stg.builds || [];
+  if (!builds.length) return null;
   const box = el("div", { class: "stg-staged" });
-  if (!builds.length) {
-    box.append(el("p", { class: "form-hint", text:
-      "Nothing is staged on this machine. A build waits on its disk until it is downloaded, or " + hours + " hours pass, then it is removed." }));
-    return box;
-  }
   const others = builds.filter((b) => b.server_id !== cur.id).length;
   box.append(el("p", { class: "form-hint", text:
     humanBytes(stg.bytes || 0) + " staged on this machine in " + builds.length + (builds.length === 1 ? " build" : " builds") +

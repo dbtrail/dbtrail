@@ -70,7 +70,7 @@ out.ownText = texts(note("s3://b/", { id: "s1" }, { aws }, [{ id: "s1", s3_acces
 out.noSignals = note("s3://b/", { id: "s1" }, null, []);
 out.unreadable = texts(note("s3://b/", { id: "s1" }, { error: "503" }, [])).join(" ");
 // The staged note: nothing, one build of this server and one of another.
-out.stagedNone = fn("stagedDownloadsNote")({ staging: { ttl_hours: 4, builds: [] } }, { id: "s1" }, []) ? texts(fn("stagedDownloadsNote")({ staging: { ttl_hours: 4, builds: [] } }, { id: "s1" }, [])).join(" ") : null;
+out.stagedNone = fn("stagedDownloadsNote")({ staging: { ttl_hours: 4, builds: [] } }, { id: "s1" }, []);
 out.stagedTwo = texts(fn("stagedDownloadsNote")({ staging: { ttl_hours: 4, bytes: 3 * 1024 * 1024, dir: "/var/stg", builds: [
   { server_id: "s1", state: "succeeded", bytes: 2 * 1024 * 1024, bytes_known: true, at: "2026-09-24T10:00:00Z" },
   { server_id: "s2", server_name: "other", state: "running", bytes: 1024 * 1024, bytes_known: true },
@@ -113,7 +113,7 @@ func TestThisDaemonDissolved1867(t *testing.T) {
 		EmptyHidden, TypedShown                                            bool
 		MachineText, OwnText, Unreadable                                   string
 		NoSignals                                                          *json.RawMessage
-		StagedNone                                                         *string
+		StagedNone                                                         *json.RawMessage
 		StagedTwo                                                          string
 		StagedAbsent, StagedNoStorage                                      *json.RawMessage
 	}
@@ -154,8 +154,8 @@ func TestThisDaemonDissolved1867(t *testing.T) {
 	if !strings.Contains(out.Unreadable, "Could not read what signs S3 requests on this machine: 503") {
 		t.Errorf("unreadable signals = %q", out.Unreadable)
 	}
-	if out.StagedNone == nil || !strings.Contains(*out.StagedNone, "Nothing is staged on this machine") || !strings.Contains(*out.StagedNone, "4 hours") {
-		t.Errorf("staged none = %v", out.StagedNone)
+	if out.StagedNone != nil && string(*out.StagedNone) != "null" {
+		t.Errorf("nothing staged must draw nothing (the first screen's word budget), got %s", *out.StagedNone)
 	}
 	for _, want := range []string{"3.0 MB staged on this machine in 2 builds (1 for another server)", "Staged builds", "other", "building", "/var/stg"} {
 		if !strings.Contains(out.StagedTwo, want) {
