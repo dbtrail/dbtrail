@@ -2356,7 +2356,9 @@ try {
     // draws the copy's age and where it lives, so the row carries only what
     // varies (the binlog anchor) plus the newest treatment.
     const strip = document.querySelector(".snap-hero");
-    const btn = strip ? Array.from(strip.querySelectorAll("button")).find((b) => b.textContent === "Read database now") : null;
+    // The two buttons sit at the tab bar's right end, one click away on
+    // every tab; the reason a button is missing stays in the hero.
+    const btn = Array.from(document.querySelectorAll(".snap-tab-actions button")).find((b) => b.textContent === "Read database now") || null;
     const row = Array.from(document.querySelectorAll(".stg-row")).find((r) => ((r.querySelector(".stg-name") || {}).title || "").includes("binlog.000001:50"));
     return { capOn: !!capsCache.baseline_trigger, stripPresent: !!strip,
       stripText: strip ? strip.textContent : "",
@@ -2868,7 +2870,7 @@ try {
     const out = {};
     const v = document.querySelector(".view");
     out.title = (v.querySelector("h1") || {}).textContent || "";
-    out.stripLabels = Array.from(v.querySelectorAll(".ctx-label")).map((n) => n.textContent);
+    out.stripLabels = Array.from(v.querySelectorAll(".snap-hero .hero-k")).map((n) => n.textContent);
     // Expand the newest row: the detail must load the REAL files endpoint.
     const row = v.querySelector(".stg-row.bk-expandable");
     out.expandable = !!row;
@@ -2898,9 +2900,9 @@ try {
   /^Snapshots$/.test(bk.title.trim())
     ? ok("snapshots: the page is named Snapshots")
     : bad("snapshots: the page is named Snapshots", bk.title);
-  bk.stripLabels.includes("SNAPSHOTS")
-    ? ok("snapshots: the strip counts SNAPSHOTS, not snapshots")
-    : bad("snapshots: the strip counts SNAPSHOTS, not snapshots", JSON.stringify(bk.stripLabels));
+  bk.stripLabels.includes("Last 7 days")
+    ? ok("snapshots: the hero counts the week's snapshots")
+    : bad("snapshots: the hero counts the week's snapshots", JSON.stringify(bk.stripLabels));
   (bk.expandable && bk.detailTables >= 1 && /B/.test(bk.detailText) && bk.detailHasDownload)
     ? ok("snapshots: a row expands into real tables, sizes and a download action")
     : bad("snapshots: a row expands into real tables, sizes and a download action", JSON.stringify({ e: bk.expandable, t: bk.detailTables, d: bk.detailHasDownload, txt: (bk.detailText || "").slice(0, 120) }));
