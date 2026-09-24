@@ -103,7 +103,7 @@ func LoadMCPTokenFile(path string) (*MCPTokenFile, error) {
 		return &f, nil
 	}
 	if _, err := f.digest(); err != nil {
-		return nil, fmt.Errorf("%w: %s has a malformed token_sha256; delete it or generate a new token from Settings → Connect AI", errMCPTokenFileMalformed, path)
+		return nil, fmt.Errorf("%w: %s has a malformed token_sha256; delete it or generate a new token from Settings → MCP Server", errMCPTokenFileMalformed, path)
 	}
 	return &f, nil
 }

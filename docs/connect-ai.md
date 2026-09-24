@@ -25,7 +25,7 @@ server, exactly like the console's Time-travel tab; without one the tool says so
 
 ## Step 1 — you need the console with a token
 
-> The numbers here match the numbered cards on the console's **Connect AI**
+> The numbers here match the numbered cards on the console's **MCP Server**
 > page (1 Create a token, 2 Copy the address, 3 Add it to Claude), so you can
 > follow either surface.
 
@@ -34,7 +34,7 @@ The AI connects to your **web console**, which serves an MCP endpoint at
 the Docker stack), you're nearly done — the AI client just needs an **access
 token**, and you mint one without leaving the browser:
 
-Open **Settings → Connect AI** in the sidebar. If no token is configured yet,
+Open **Settings → MCP Server** in the sidebar. If no token is configured yet,
 the **Create a token** card has a **Generate token** button — click it, copy the
 value it shows (it appears exactly once and is never stored), and you're done.
 No flags, no environment variables, no restart. The same card replaces the
@@ -60,7 +60,7 @@ token is their credential.
 
 ## Step 2 — copy your MCP URL
 
-Open the console in your browser → **Settings → Connect AI**. Copy the URL it
+Open the console in your browser → **Settings → MCP Server**. Copy the URL it
 shows, e.g.:
 
 ```
@@ -78,7 +78,7 @@ Two things worth knowing (the page handles both for you):
 
 ## Step 3 — install the bundle in Claude Desktop
 
-1. Grab the `.mcpb` file from the **Connect AI** page's download button (or the
+1. Grab the `.mcpb` file from the **MCP Server** page's download button (or the
    [releases page](https://github.com/dbtrail/dbtrail/releases)) — pick the one
    matching the machine where Claude Desktop runs.
 2. **Double-click it.** Claude Desktop opens an install dialog.
@@ -121,7 +121,7 @@ Connectors → add custom connector. No bundle, no local install. (Not public?
 Keep using Desktop + the bundle — it works over private networks.)
 
 **Any other MCP client** (Claude Code, Cursor, …). Anything that launches stdio
-MCP servers can use the bridge; the Connect AI page has a copy-paste snippet:
+MCP servers can use the bridge; the MCP Server page has a copy-paste snippet:
 
 ```json
 {
@@ -144,7 +144,7 @@ directly with a DSN — see [mcp-server.md](mcp-server.md).
 | Symptom | Likely cause, in order of likelihood |
 |---|---|
 | **401 unauthorized** | Wrong token; or the token was wiped by a container recreation, which happens when the managed-token file is not on a mounted volume (`--mcp-token-file` / `BINTRAIL_CONSOLE_MCP_TOKEN_FILE`; the shipped compose sets it, see [Docker](docker.md)); or you're not talking to the console you think you are, such as a port-forward pointing at a stale process or another console on the same port. Check with `curl -H "Authorization: Bearer $TOKEN" http://host:8090/api/capabilities`: it should return JSON with `"mcp": true`. |
-| **403 "no token configured"** | No token exists yet. Open **Settings → Connect AI** and click **Generate token** (step 1) — no restart needed. (Or set `--token` / `BINTRAIL_CONSOLE_TOKEN` and restart.) |
+| **403 "no token configured"** | No token exists yet. Open **Settings → MCP Server** and click **Generate token** (step 1) — no restart needed. (Or set `--token` / `BINTRAIL_CONSOLE_TOKEN` and restart.) |
 | **Connection refused / timeout** | The URL isn't reachable from the AI client's machine. `curl http://host:8090/api/healthz` from that machine; if you tunnel, remember tunnels can idle out — re-establish and retry. |
 | **Bundle download 404s** | That release predates the bundles. Take the latest release, or build with `make mcpb`. |
 | **Tools don't appear in Claude Desktop** | Check Desktop's MCP logs (Settings → Extensions): the bridge exits with a one-line reason — bad URL and rejected token are spelled out, it never hangs silently. |

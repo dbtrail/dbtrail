@@ -436,7 +436,7 @@ const origPaint = paint;`, 1)
 	// exists to query; a link to set the copy up where none does; nothing to
 	// query where the listing failed; and with a decision card showing, the
 	// button steps down to a link so the card's is the one filled button.
-	if h.CTA != "button" || !reflect.DeepEqual(h.CTAButtons, []string{"Query the copy"}) || len(h.Actions) != 1 || !strings.Contains(h.Actions[0], "Download views.sql (DuckDB views)") || !strings.Contains(h.Actions[0], "Connect AI") {
+	if h.CTA != "button" || !reflect.DeepEqual(h.CTAButtons, []string{"Query the copy"}) || len(h.Actions) != 1 || !strings.Contains(h.Actions[0], "Download views.sql (DuckDB views)") || !strings.Contains(h.Actions[0], "MCP Server") {
 		t.Errorf("healthy: cta=%q buttons=%v actions=%v", h.CTA, h.CTAButtons, h.Actions)
 	}
 	if nl := get("no-location"); nl.CTA != "setup" || len(nl.CTAButtons) != 0 || !strings.Contains(nl.Actions[0], "Set up the copy ›") {

@@ -80,7 +80,7 @@ console's password store — so set `--console-token` / `BINTRAIL_CONSOLE_TOKEN`
 `watch` refuses to open the port otherwise. The default `127.0.0.1` bind keeps
 it host-local; do not expose it to untrusted networks.
 
-The console shows all of this on **Settings → Connect AI**, in the **Connect a
+The console shows all of this on **Settings → MCP Server**, in the **Connect a
 SQL client** panel: whether the port is on, its address, the user and password
 rules, and a ready-to-copy `mysql` line for the server picked in the sidebar
 (the token itself is never displayed). When the port is off, the panel names

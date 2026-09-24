@@ -282,7 +282,7 @@ and searching events:
    and **Rotation** (opens the rotation dialog).
 
 Every view whose subject has a page on www.dbtrail.com/docs (Events, Restore,
-Snapshots, Storage, Connect AI) shows a small **Docs** link beside
+Snapshots, Storage, MCP Server) shows a small **Docs** link beside
 its title. It opens that page in a new tab and is a plain link: the console
 makes no request for it, so it costs nothing on an air-gapped host. Views with
 no page of their own show no link.
@@ -860,7 +860,7 @@ each server's local-copy question, where it is true or not.
 SQL page is gated on `query:execute` and on the `sql` capability, so the
 download was unreachable for a role the endpoint would have authorized, and
 gone entirely on a daemon started with `BINTRAIL_CONSOLE_SQL_PANEL=0` — then
-to **Backups** (#1581), below the snapshot listing, and back to **Connect AI**
+to **Backups** (#1581), below the snapshot listing, and back to **MCP Server**
 (#1573), with or without the daemon, beside the other ways to take the data
 somewhere else. The Backups take-away lane keeps a **Download views.sql**
 button that saves the default file (no change log) and shows the command to
@@ -887,7 +887,7 @@ and lands on Retention.
   could not be removed stays listed with the reason (a previous build a
   newer one could not clear included) and is retried every minute. Shown
   only on a daemon that can build `.sql` backups.
-- **Download a DuckDB schema** (#1528, formerly *Query in DuckDB*; on Connect AI since #1573, after the SQL client panel) — a one-click download of `views.sql`: a ready-made
+- **Download a DuckDB schema** (#1528, formerly *Query in DuckDB*; on MCP Server since #1573, after the SQL client panel) — a one-click download of `views.sql`: a ready-made
   DuckDB schema over the selected server's own Parquet — one
   `state_<schema>_<table>` view per table in the newest baseline snapshot, plus
   an `events` view across every archive source registered in `archive_state`
@@ -1017,7 +1017,7 @@ way to learn the derived `state_*` names — built the whole catalog and hit tha
 budget, and the page's own example named `events`.
 
 Query the same Parquet in your own DuckDB instead. **Download a DuckDB schema**
-on the **Connect AI** page writes a `views.sql` over the same files, with no row
+on the **MCP Server** page writes a `views.sql` over the same files, with no row
 cap, no time limit and nothing running in the daemon. See
 [Query in DuckDB](https://www.dbtrail.com/docs/guides/query-in-duckdb/).
 
@@ -1473,7 +1473,7 @@ Rules that differ from the standalone `bintrail-mcp` server:
 - **A token is required.** Password login is a browser credential and cannot
   authenticate a headless MCP client, so `/mcp` needs either the static
   `--token` / `BINTRAIL_CONSOLE_TOKEN` **or a managed MCP token generated
-  from Settings → Connect AI** (#1052) — one click from an authenticated
+  from Settings → MCP Server** (#1052) — one click from an authenticated
   browser session, no flags, no restart. The managed token is persisted as a
   SHA-256 hash only (`~/.config/bintrail/console-mcp-token.yaml`, or the
   path given to `--mcp-token-file` / `BINTRAIL_CONSOLE_MCP_TOKEN_FILE`; `0600`,
@@ -1520,7 +1520,7 @@ Rules that differ from the standalone `bintrail-mcp` server:
 The host-header allowlist (`--allowed-hosts`) covers `/mcp` like every other
 route.
 
-The UI's **Settings → Connect AI** page assembles all of this for you: the
+The UI's **Settings → MCP Server** page assembles all of this for you: the
 ready-to-copy `/mcp` URL for the selected server (the per-server form when
 more than one server is registered), the `.mcpb` bundle download for the
 running version, and the raw-config fallback above. Its **Access token** card
@@ -1535,7 +1535,7 @@ Parquet can be described (the `views` capability), with or without the
 daemon (#1573).
 
 Last on the page, the **Keep it current with Iceberg** panel (#1466; on
-Connect AI since #1573, it used to sit at the bottom of Backups) prints the
+MCP Server since #1573, it used to sit at the bottom of Backups) prints the
 exact `bintrail export iceberg` command for the selected server, with its
 index connection and its resolved backup destination filled in, a Copy
 button, and an hourly cron line. It shows when the selected server has a
@@ -1594,10 +1594,10 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a backup exists for the server. A first-backup step follows the capture steps: with its job's state when console backups are enabled and the server has its own baseline location, and as `waiting` with a `detail` and `fix` when backups are turned off for the daemon or the server has no baseline location of its own (#1677). It is left out only for a PostgreSQL server with no slot or publication (the server form refuses to save one), which cannot capture either. `complete` is the backup step being done (#1801). A backup ends the list whatever the capture steps are still doing, since seeing the first change is not something anyone can make happen; a backup step that FAILED is not a done one, so it keeps the list up. A capture step that failed deliberately does not, so a finished list never comes back days later: a dead stream is reported by the Overview's own "stopped updating" note, and capture failing before any backup exists keeps the list by the same rule. The server's own backup locations are read for a complete snapshot, at most once a minute per server since an S3 location is a listing over the network, so a backup made before a restart or from the command line ends the step, and one that cannot be read is reported on the step (`detail`) instead of counting as "no backup". The job's own state comes first: a backup that failed or is running outranks an older snapshot. `check_error` means the index database could not be read, and nothing is marked done from it. |
 | `GET /api/rotation` | Effective global rotation policy: `{retain, interval, add_future, source, enabled}` — `source` is `"override"` (console-saved) or `"default"` (daemon `--rotate-*`). |
 | `PUT /api/rotation` | Supervisor only (403 on the standalone console): save a global rotation override `{retain, interval, add_future}` (validated; `off` rejected). Applies live on the next cycle. |
-| `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. With `?location_only=1` it answers only `{configured, source, kind}` (the location the listing reads first: the server's own, else the daemon-wide default, a directory over a bucket) from configuration, without the schedule, the storage or the server's index; same permission as the listing, refused while a data profile is active (a named startup `--profile` even with no rules yet, or the session's, wider than the listing because the export it feeds is not redacted); any value other than `1` is a 400. Connect AI uses it for the Iceberg export command. Since #1681 it also carries, at the top level, `local_retention: {keep_newest}` when this daemon removes snapshots past a count from the selected server's local folder, and `last_prune: {at, removed}` (RFC 3339 UTC) once a prune has removed any, read from the `.last-prune.json` the prune leaves beside the snapshots; `last_prune_failure: {at, reason}` while the most recent prune attempt on that folder failed (`reason` holds one cause per line, separated by `\n` only) (from `.last-prune-failure.json`, removed by the next attempt that succeeds); and `last_prune_error` when either record exists but cannot be read. All are omitted, never null, when there is nothing to say. |
+| `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. With `?location_only=1` it answers only `{configured, source, kind}` (the location the listing reads first: the server's own, else the daemon-wide default, a directory over a bucket) from configuration, without the schedule, the storage or the server's index; same permission as the listing, refused while a data profile is active (a named startup `--profile` even with no rules yet, or the session's, wider than the listing because the export it feeds is not redacted); any value other than `1` is a 400. MCP Server uses it for the Iceberg export command. Since #1681 it also carries, at the top level, `local_retention: {keep_newest}` when this daemon removes snapshots past a count from the selected server's local folder, and `last_prune: {at, removed}` (RFC 3339 UTC) once a prune has removed any, read from the `.last-prune.json` the prune leaves beside the snapshots; `last_prune_failure: {at, reason}` while the most recent prune attempt on that folder failed (`reason` holds one cause per line, separated by `\n` only) (from `.last-prune-failure.json`, removed by the next attempt that succeeds); and `last_prune_error` when either record exists but cannot be read. All are omitted, never null, when there is nothing to say. |
 | `GET /api/views.sql` | **Not JSON** — a `text/plain` DuckDB schema over the selected server's Parquet (the same output as `bintrail views`), served as a `views.sql` attachment. Nothing is executed here; the file runs in your own DuckDB. `?include_events=1` adds the `events` view over the archived change log, which is left out by default because defining it opens one Parquet footer per archived file (`bintrail views --include-events`). `?include_live=1` adds the leg over the live index (`bintrail views --include-live`), with the index host, port, database and user in the file and never its password; it requires `include_events=1`, since the leg hangs on that view, and 400s without it. 404 when archives are disabled or nothing is archived yet, 403 while an access-control profile is active, 422 when this server cannot carry the live leg (an index reached over a unix socket, or one with no `binlog_events` table), 502 when the index could not be asked, and 400 for an `include_live` or `include_events` value other than `1`/`true`/`0`/`false` (so a request that meant to ask never comes back as an archives-only file). |
 | `GET /api/storage` | Process-global storage context: `{aws: {access_key_env, profile, region_env, shared_config, container_creds, web_identity, web_identity_token_readable, web_identity_role_arn}}` — presence booleans and non-secret names only, never credential values. |
-| `GET /api/flashback` | Process-global: the embedded time-travel SQL port (`watch --flashback-listen`): `{enabled, listen, host, port}`. `enabled: false` alone on the standalone console and on a daemon that did not open the port; `host` is empty on a wildcard bind (the UI then uses the name it was opened with). Never the console token that authenticates the port. Backs the **Connect a SQL client** panel on Settings → Connect AI. |
+| `GET /api/flashback` | Process-global: the embedded time-travel SQL port (`watch --flashback-listen`): `{enabled, listen, host, port}`. `enabled: false` alone on the standalone console and on a daemon that did not open the port; `host` is empty on a wildcard bind (the UI then uses the name it was opened with). Never the console token that authenticates the port. Backs the **Connect a SQL client** panel on Settings → MCP Server. |
 | `GET /api/profiles` | RBAC data-profile **names** defined on the selected server's index: `{"profiles": ["..."]}`, sorted; empty on a legacy index without the table. Vocabulary for administration panels (e.g. a settings-surface profile picker) — never the rules or flagged tables/columns behind a name. |
 | `GET /api/access-profiles` | The selected server's access-profile configuration in one document: `{flags: [{schema, table, column, flag, created_at}], profiles: [{name, description, created_at}], rules: [{profile, flag, permission, created_at}]}` (`column` empty = a table-level flag). `settings:read`. `403` while an access-control profile is active (a startup `--profile`, even one with no rules yet, or the session's own data profile: the flagged tables and columns are what that profile withholds). `422` on an index without the RBAC tables. |
 | `POST /api/access-profiles/flags`, `.../flags/remove` | Add / remove a flag: `{flag, schema, table, column}` (`column` optional). `settings:write`; `403` while an access-control profile is active, as for the GET. Names are trimmed. Answers with the full document. `400` with the CLI's own message on missing fields or a value past its column width, `404` when the flag to remove is not there, `409` when the flag exists under a spelling that differs only by case or accents (the stored row is named). When the write landed but the readback failed, a `500` whose message begins `The change was saved but the page could not be re-read:`. |
@@ -1714,7 +1714,7 @@ and baseline, so one port covers them all. A token is required (`--console-token
 password store. Full setup, routing, and the `_snapshot` baseline-parity edge:
 [docs/time-travel-sql.md → the embedded port](time-travel-sql.md#the-embedded-port-multi-source).
 
-The console shows the port on **Settings → Connect AI**, in the **Connect a
+The console shows the port on **Settings → MCP Server**, in the **Connect a
 SQL client** panel (#1446): when `watch` opened it, the listen address, the
 user rule (the server picked in the sidebar: its registry name or id, `default`
 for the command-line entry), the password rule (the console token, never

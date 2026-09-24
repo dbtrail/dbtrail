@@ -72,7 +72,7 @@ func init() {
 	serveCmd.Flags().StringVar(&conBaselineS3, "baseline-s3", "", "S3 prefix of baseline Parquet snapshots (s3://bucket/prefix/); enables Reconstruct")
 	serveCmd.Flags().StringVar(&conServersFile, "servers-file", "", "Path to the server registry YAML managed by the web interface (default ~/.config/bintrail/console-servers.yaml)")
 	serveCmd.Flags().StringVar(&conAuthFile, "auth-file", "", "Path to the web interface auth file enabling password login (default ~/.config/bintrail/console-auth.yaml; created with `bintrail-console user set-password`)")
-	serveCmd.Flags().StringVar(&conMCPTokenFile, "mcp-token-file", "", "Path to the managed MCP token file written by Settings → Connect AI (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the daemon runs in a container.")
+	serveCmd.Flags().StringVar(&conMCPTokenFile, "mcp-token-file", "", "Path to the managed MCP token file written by Settings → MCP Server (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the daemon runs in a container.")
 	serveCmd.Flags().StringVar(&conTLSCert, "tls-cert", "", "TLS certificate file (PEM); serve the web interface over HTTPS (requires --tls-key)")
 	serveCmd.Flags().StringVar(&conTLSKey, "tls-key", "", "TLS private key file (PEM; requires --tls-cert)")
 	serveCmd.Flags().BoolVar(&conAllowSetup, "allow-setup", false, "Allow browser first-run password setup on a non-loopback bind (assert the bind is access-controlled, e.g. published only on the host loopback)")
@@ -392,7 +392,7 @@ func warnSQLPanelRetired() {
 		return
 	}
 	// One page for both binaries since the card moved (#1573): it is on
-	// Connect AI under `watch` and under a read-only `serve` alike, so this
+	// MCP Server under `watch` and under a read-only `serve` alike, so this
 	// no longer has to name a page that only half the operators have.
 	slog.Warn("BINTRAIL_CONSOLE_SQL_PANEL is set but no longer does anything: " +
 		"the SQL page and POST /api/sql were removed. Download a DuckDB schema " +

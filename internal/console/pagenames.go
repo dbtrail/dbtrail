@@ -15,7 +15,7 @@ const (
 	PageSnapshots = "Snapshots"
 	// PageConnect is where a reader downloads a DuckDB schema or exports
 	// to Iceberg, on every console (#1573).
-	PageConnect = "Connect AI"
+	PageConnect = "MCP Server"
 )
 
 // onPage is the suffix an error carries to say where it is fixed, as in

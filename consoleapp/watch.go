@@ -242,7 +242,7 @@ func init() {
 	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, "baseline-retain", "", "Periodically prune local --baseline-dir snapshots older than this (Nd/Nh) once a durable copy exists in --baseline-s3 (never deletes the only copy or the newest snapshot per table)")
 	watchCmd.Flags().StringVar(&upConsoleServersFile, "console-servers-file", "", "Path to the server registry YAML managed by the web interface (default ~/.config/bintrail/console-servers.yaml)")
 	watchCmd.Flags().StringVar(&upConsoleAuthFile, "console-auth-file", "", "Path to the web interface auth file enabling password login (default ~/.config/bintrail/console-auth.yaml; created with `bintrail-console user set-password`)")
-	watchCmd.Flags().StringVar(&upConsoleMCPTokenFile, "console-mcp-token-file", "", "Path to the managed MCP token file written by Settings → Connect AI (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the daemon runs in a container.")
+	watchCmd.Flags().StringVar(&upConsoleMCPTokenFile, "console-mcp-token-file", "", "Path to the managed MCP token file written by Settings → MCP Server (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the daemon runs in a container.")
 	watchCmd.Flags().StringVar(&upConsoleTLSCert, "console-tls-cert", "", "TLS certificate file (PEM); serve the web interface over HTTPS (requires --console-tls-key)")
 	watchCmd.Flags().StringVar(&upConsoleTLSKey, "console-tls-key", "", "TLS private key file (PEM; requires --console-tls-cert)")
 	watchCmd.Flags().StringSliceVar(&upConsoleAllowedHost, "console-allowed-hosts", nil, "Extra hostnames allowed in the Host header (for a TLS-terminating reverse proxy); IP literals and localhost are always allowed")

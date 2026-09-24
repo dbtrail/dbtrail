@@ -128,7 +128,7 @@ func bridgeHint(err error) string {
 		return "the address answered a web page, not the MCP endpoint. Check --connect: it should end in /mcp or /mcp/<server> (a trailing slash on an older build, or the web interface's root URL, lands on the web page)."
 	}
 	if strings.Contains(msg, authRejectedMarker) {
-		return "the web interface did not accept the credential. Paste only the token value, with nothing before or after it; on a daemon started with a fixed token, that fixed value is the one to use; and every managed token minted on the Connect AI page replaces the previous one, so only the newest works. If the web interface has no token configured at all, create one on its Connect AI page first."
+		return "the web interface did not accept the credential. Paste only the token value, with nothing before or after it; on a daemon started with a fixed token, that fixed value is the one to use; and every managed token minted on the MCP Server page replaces the previous one, so only the newest works. If the web interface has no token configured at all, create one on its MCP Server page first."
 	}
 	return ""
 }

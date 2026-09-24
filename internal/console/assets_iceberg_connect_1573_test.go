@@ -10,7 +10,7 @@ import (
 )
 
 // TestIcebergPanelLivesOnConnect (#1573): the Iceberg export panel is on
-// Connect AI, built from where the selected server's snapshots live
+// MCP Server, built from where the selected server's snapshots live
 // (GET /api/baselines?location_only=1, no walk of the storage). A session that
 // may not read the server, or under a data profile, is not made to ask, since
 // the server would refuse it on every open; the gated permission is the one
@@ -73,7 +73,7 @@ const run = async (perms, location, caps = {}, leave = false, servers = null, cu
   vm.runInContext("capsCache = " + JSON.stringify(Object.assign({ monitor: true, permissions: perms }, caps)) + "; capsKnown = true;", ctx);
   await vm.runInContext("renderConnect()", ctx);
   const text = flat(screen).join(" ");
-  return { asked: [...asked], panel: text.includes("Keep it current with Iceberg"), page: text.includes("Connect AI"),
+  return { asked: [...asked], panel: text.includes("Keep it current with Iceberg"), page: text.includes("MCP Server"),
     steps: text.includes("Three steps"), note: text.includes("Could not check where this server's snapshots are kept"),
     cmd: (text.match(/bintrail export iceberg .*?--warehouse/) || [""])[0] };
 };

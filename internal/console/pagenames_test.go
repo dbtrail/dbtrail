@@ -48,7 +48,7 @@ func TestPageNamesAreTheSidebarLabels(t *testing.T) {
 // that no longer exists. A literal that IS a page name ("Snapshots", as in
 // onPage("Snapshots") or "on the " + "Snapshots" + " page") is refused too,
 // outside pagenames.go.
-var pageNameTypedRE = regexp.MustCompile(`(Backups|Backup settings|Verification|Snapshots|Connect AI) page`)
+var pageNameTypedRE = regexp.MustCompile(`(Backups|Backup settings|Verification|Snapshots|MCP Server) page`)
 
 // TestMessagesNameBackupPagesThroughTheConstants: no string in the console's
 // Go code names one of these pages as typed text. Three of them merged into

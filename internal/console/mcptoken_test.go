@@ -221,7 +221,7 @@ func TestManagedToken_APILifecycle(t *testing.T) {
 
 // TestManagedToken_CapabilitiesManagedOnly pins the zero-config headline:
 // with NO static token, capabilities.mcp flips false→true when a managed
-// token is generated (a regression to static-only would hide the Connect AI
+// token is generated (a regression to static-only would hide the MCP Server
 // ready state for exactly the users the feature exists for).
 func TestManagedToken_CapabilitiesManagedOnly(t *testing.T) {
 	s := newManagedServer(t, "")
@@ -338,8 +338,8 @@ func TestManagedToken_MCPWithoutStaticToken(t *testing.T) {
 
 	// No credential configured at all: the gate refuses and names the UI path.
 	rec := doMCP(t, s, "/mcp", "anything")
-	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "Connect AI") {
-		t.Fatalf("token-less /mcp = %d %s, want 403 naming Settings → Connect AI", rec.Code, rec.Body.String())
+	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "MCP Server") {
+		t.Fatalf("token-less /mcp = %d %s, want 403 naming Settings → MCP Server", rec.Code, rec.Body.String())
 	}
 
 	token, f, err := GenerateMCPToken(s.mcpTokenPath, nil)

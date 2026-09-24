@@ -206,7 +206,7 @@ Notes:
   copy-pasteable remediation in the logs and the container retries.
 - Saved console connections (the Servers menu) persist in the
   `bintrail-state` volume.
-- The managed MCP token (**Settings → Connect AI**) lives at
+- The managed MCP token (**Settings → MCP Server**) lives at
   `/var/lib/bintrail/console-mcp-token.yaml` in the same volume, so an AI
   client you connected keeps working across restarts. An older copy of this
   compose file kept it inside the container, where recreating the container
@@ -254,7 +254,7 @@ What a stale compose file costs:
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
 | the `iceberg-export` profile and its volume | there is no one-shot Iceberg export to run | `docker compose --profile iceberg-export run ...` says the service does not exist |
 | the `host.docker.internal` mapping (`extra_hosts`) | on Linux, a database on this same machine cannot be reached by that name | Adding the server fails with `lookup host.docker.internal: no such host` |
-| `BINTRAIL_CONSOLE_SQL_PANEL` (the current file does not set it) | nothing: the SQL page was removed in 0.75.0 | Remove the variable. It is read for one release and warns; download a DuckDB schema from **Connect AI** and query the same Parquet yourself |
+| `BINTRAIL_CONSOLE_SQL_PANEL` (the current file does not set it) | nothing: the SQL page was removed in 0.75.0 | Remove the variable. It is read for one release and warns; download a DuckDB schema from **MCP Server** and query the same Parquet yourself |
 
 Two things make this easier to catch:
 
@@ -511,7 +511,7 @@ inconclusive results land, and drill into a mismatch — see
 
 **SQL over your Parquet** is not answered by the daemon. The console's SQL page
 was removed in 0.75.0 (see [The SQL panel
-(removed)](console.md#the-sql-panel-removed)). Open **Connect AI**, click
+(removed)](console.md#the-sql-panel-removed)). Open **MCP Server**, click
 **Download views.sql** on the **Download a DuckDB schema** card, and run the
 file in your own DuckDB: no row cap, no time
 limit, and nothing executing inside the process that captures.

@@ -159,7 +159,7 @@ type Config struct {
 	// configured; a corrupt one fails New loudly.
 	AuthPath string
 	// MCPTokenPath locates the managed MCP token file (SHA-256 only, written
-	// by the Settings → Connect AI generate flow — #1052). Empty means
+	// by the Settings → MCP Server generate flow — #1052). Empty means
 	// DefaultMCPTokenPath(). A missing file means no managed token; a corrupt
 	// one is logged loudly and disables the managed token until regenerated —
 	// unlike AuthPath, it deliberately never fails New (the daemon may be the
@@ -455,7 +455,7 @@ func New(cfg Config) (*Server, error) {
 	// Missing file = the normal not-configured state; an unreadable file is
 	// logged loudly but never blocks startup — this daemon may be the stream
 	// supervisor, and capture must not die over a UI-convenience credential
-	// (regenerating from Settings → Connect AI overwrites the bad file). It
+	// (regenerating from Settings → MCP Server overwrites the bad file). It
 	// deliberately plays no part in the bind/setup policy below and is NOT
 	// accepted by tokenMiddleware: its advertised scope is the read-only MCP
 	// tools, so it must not unlock the browser API (registry CRUD, monitor
@@ -466,7 +466,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	mcpTokFile, err := LoadMCPTokenFile(mcpTokenPath)
 	if err != nil {
-		slog.Error("console: MCP token file unreadable; managed MCP token disabled until regenerated from Settings → Connect AI", "path", mcpTokenPath, "error", err)
+		slog.Error("console: MCP token file unreadable; managed MCP token disabled until regenerated from Settings → MCP Server", "path", mcpTokenPath, "error", err)
 		mcpTokFile = nil
 	}
 
