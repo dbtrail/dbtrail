@@ -276,3 +276,51 @@ console.log(JSON.stringify(out));
 		t.Errorf("serve: offered %q, selecting a missing tab shows %q", got.ServeOffered, got.ServeFallback)
 	}
 }
+
+// A server whose index database is not created yet (MySQL 1049) is the
+// state every new server starts in: the hero says what to set up and where,
+// in grey, never the driver's sentence in pink.
+func TestSnapshotHeroSaysWhereToStartWhenTheIndexIsMissing(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv(requireNodeEnv) != "" {
+			t.Fatalf("%s is set and node is not on PATH", requireNodeEnv)
+		}
+		t.Skip("node is not installed")
+	}
+	appJS, err := filepath.Abs("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := renderHarnessJS + `
+const hero = vm.runInContext("snapshotHero", ctx);
+const flat = (n, out = []) => { if (!n) return out; if (typeof n === "string") { out.push(n); return out; }
+  if (n.nodeType === 3) { out.push(n.textContent); return out; }
+  if (n._text) out.push(n._text); for (const c of n.children || []) flat(c, out); return out; };
+const cur = { id: "s1", name: "wp", kind: "registry", has_source: true };
+vm.runInContext("capsCache = { monitor: true, baseline_trigger: true };", ctx);
+const missing = hero({ error: "server \"wp\": failed to ping MySQL: Error 1049 (42000): Unknown database 'bintrail_idx_5122'" }, null, cur, {});
+const other = hero({ error: "server \"wp\": failed to ping MySQL: dial tcp: connection refused" }, null, cur, {});
+console.log(JSON.stringify({ missing: { text: flat(missing).join(" "), cls: missing.children[0].className },
+  other: { text: flat(other).join(" "), cls: other.children[0].className } }));
+`
+	path := filepath.Join(t.TempDir(), "idx.js")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := exec.Command(node, path, appJS).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, raw)
+	}
+	var got struct{ Missing, Other struct{ Text, Cls string } }
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if !strings.Contains(got.Missing.Text, "not indexing yet") || !strings.Contains(got.Missing.Text, "Go to Servers and press Start") ||
+		!strings.Contains(got.Missing.Text, "Servers ›") || strings.Contains(got.Missing.Text, "1049") || got.Missing.Cls != "hero-card hero-age none" {
+		t.Errorf("missing index: %q %q", got.Missing.Text, got.Missing.Cls)
+	}
+	if !strings.Contains(got.Other.Text, "could not load") || !strings.Contains(got.Other.Text, "connection refused") || got.Other.Cls != "hero-card hero-age bad" {
+		t.Errorf("another failure must stay a failure: %q %q", got.Other.Text, got.Other.Cls)
+	}
+}
