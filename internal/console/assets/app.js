@@ -869,20 +869,33 @@ function renderError(container, err) {
   // index DB lives on the INDEX server and is created when monitoring starts;
   // it is NEVER expected on the source. Render an actionable empty state, not
   // a raw red error wall.
-  const m = msg.match(/Unknown database '([^']+)'/);
+  const m = indexMissingFrom(msg);
   if (m) {
     const box = el("div", { class: "empty" });
     box.append(el("h3", { text: "This server isn't indexing yet" }));
-    box.append(el("p", { text:
-      "Its index database \"" + m[1] + "\" doesn't exist on the index server yet. " +
-      "It's created automatically when monitoring starts for this source; it never lives on the source MySQL itself. " +
-      "Start monitoring from Manage servers, or switch to a server that's already indexing." }));
-    box.append(el("button", { class: "btn btn-sm", type: "button", text: "Manage servers",
+    box.append(el("p", { text: indexMissingWords(m) }));
+    box.append(el("button", { class: "btn btn-sm", type: "button", text: "Servers",
       onclick: () => openServersModal() }));
     container.append(box);
     return;
   }
   container.append(el("div", { class: "error-box", text: msg }));
+}
+
+// indexMissingFrom is the one reading of MySQL 1049 on a server's index: the
+// database DBTrail creates when capture starts is not there yet. Returns
+// its name, or "" for any other error. The pages that show it say what to
+// set up and where (INDEX_MISSING_WORDS) instead of the driver's sentence.
+function indexMissingFrom(msg) {
+  const m = String(msg || "").match(/Unknown database '([^']+)'/);
+  return m ? m[1] : "";
+}
+// The two facts a reader goes looking for: the database's name, and that it
+// lives on the INDEX server (people look for it on the source, where it
+// never is). Then the one action.
+function indexMissingWords(name) {
+  return "Its index database \"" + name + "\" is created on the index server when capture starts; it never lives on the source MySQL. " +
+    "Go to Servers and press Start on this server; snapshots, checks and time travel come after that.";
 }
 
 function renderWarnings(node, warnings) {
@@ -5437,6 +5450,16 @@ function snapshotHero(b, cov, cur, acts) {
   const fixLink = (link) => link === "settings" ? settingsLink()
     : link === "overview" ? el("a", { href: "/overview", class: "hero-link", text: "Overview ›", onclick: (e) => { e.preventDefault(); navigate("overview"); } })
     : null;
+  const missingDB = b && b.error ? indexMissingFrom(b.error) : "";
+  if (missingDB) {
+    // Not a fault: the server was added and capture has not started. Say
+    // what to do and where, in the grey of "nothing yet", never in pink.
+    hero.append(el("div", { class: "hero-card hero-age none" }, el("div", { class: "hero-k", text: "Snapshots" }),
+      el("div", { class: "hero-big", text: "not indexing yet" }),
+      el("div", { class: "hero-sub" }, indexMissingWords(missingDB) + " ",
+        el("a", { href: "#servers", class: "hero-link", text: "Servers ›", onclick: (e) => { e.preventDefault(); openServersModal(); } }))));
+    return hero;
+  }
   if (!b || b.error) {
     hero.append(el("div", { class: "hero-card hero-age bad" }, el("div", { class: "hero-k", text: "Snapshots" }),
       el("div", { class: "hero-big", text: "could not load" }), el("div", { class: "hero-sub", text: (b && b.error) || "unavailable" })));
@@ -7685,7 +7708,10 @@ function baselinesPanel(b, servers, opts) {
   if (b && !b.error) snapshotRetentionLines(b).forEach((line) => panel.append(line));
   const list = el("div", { class: "stg-list" });
   if (!b || b.error) {
-    list.append(el("div", { class: "ev-empty", text: "Could not list snapshots: " + ((b && b.error) || "unavailable") }));
+    // A missing index database is the pre-capture state, and renderError
+    // draws it as what to do and where; any other failure stays a failure.
+    if (b && b.error && indexMissingFrom(b.error)) renderError(list, b.error);
+    else list.append(el("div", { class: "ev-empty", text: "Could not list snapshots: " + ((b && b.error) || "unavailable") }));
   } else if (!b.configured) {
     list.append(el("div", { class: "stg-empty" },
       el("p", { class: "stg-empty-lead", text: "No snapshots configured." }),
