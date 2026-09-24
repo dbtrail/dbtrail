@@ -35,6 +35,8 @@ var latestRowChildren = []string{
 	"stg-dest", // tables / binlog coordinates
 	"chip-mon", // staleness, newest row only
 	"bk-where", // from backupWhereChip()
+	"stg-going",     // a copy past the count in force (never on the newest row, listed so the guard sees it)
+	"stg-row-going", // the row modifier for the same case
 	"bk-chev",  // the expand affordance
 }
 

@@ -6288,13 +6288,24 @@ function blCase(source, current, fix) {
 // archive toggle, each with the provenance the servers API never showed. Each
 // server shows its own case; the three-row legend that drew all of them once
 // is gone (#1573 redesign).
+// One server: the one chosen at the top of the page, so the count and the
+// places on this card are about the same server as the list on Versions.
+// Every server's row used to stack here, and "keep 3" under one name beside
+// a list of eight under another was read as one page contradicting itself.
 function backupServersPanel(settings) {
   const panel = el("section", { class: "ov-panel" });
-  panel.append(el("div", { class: "ov-panel-head" },
-    el("h2", { class: "ov-panel-title", text: "Per server" })));
   const servers = settings.servers || [];
+  const selId = currentServer || defaultServerId;
+  const own = servers.find((x) => x.id === selId);
+  panel.append(el("div", { class: "ov-panel-head" },
+    el("h2", { class: "ov-panel-title", text: "This server" + (own ? " · " + (own.name || own.id) : "") })));
   if (!servers.length) {
     panel.append(el("p", { class: "form-hint", text: "No servers in the registry yet. Add one on the Servers page." }));
+    return panel;
+  }
+  if (!own) {
+    panel.append(el("p", { class: "form-hint", text:
+      "The command-line server keeps its snapshots where DBTrail was started. Pick a server at the top of the page to set where its own copies live." }));
     return panel;
   }
   if (settings.registry_read_only) {
@@ -6304,7 +6315,11 @@ function backupServersPanel(settings) {
   // The daemon default S3 destination, for the retention block: the boot
   // entry backs up there and is not in the list.
   const daemonS3 = ((settings.daemon || []).find((r) => r.key === "baseline_s3") || {}).value || "";
-  for (const srv of servers) panel.append(backupServerRow(srv, settings.registry_read_only, servers, daemonS3, !!settings.reuse_unchanged));
+  panel.append(backupServerRow(own, settings.registry_read_only, servers, daemonS3, !!settings.reuse_unchanged));
+  if (servers.length > 1) {
+    panel.append(el("p", { class: "form-hint bks-others", text:
+      (servers.length - 1) + " other " + (servers.length === 2 ? "server keeps" : "servers keep") + " settings of their own: pick one at the top of the page to see them." }));
+  }
   return panel;
 }
 
@@ -7708,6 +7723,20 @@ function baselinesPanel(b, servers, opts) {
     // appears per-row only when it VARIES — a value identical in every row
     // is a fact about the collection and lives in the context strip.
     const uniformTables = snapshotTablesUniform(b.snapshots, b.truncated);
+    // The count in force (Settings, "Keep by count"): every local copy past
+    // it goes at the next hourly cleanup, and the row says so instead of
+    // sitting in the list as if it were staying. Copies only in S3 are not
+    // touched by the cleanup, so they are not marked.
+    const keepInForce = (b.local_retention && b.local_retention.keep_newest) || 0;
+    let localSeen = 0;
+    const goingIdx = new Set();
+    if (keepInForce > 0) {
+      b.snapshots.forEach((sn, i) => {
+        if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
+        localSeen++;
+        if (localSeen > keepInForce) goingIdx.add(i);
+      });
+    }
     const total = b.snapshots.length;
     const pages = Math.max(1, Math.ceil(total / BACKUPS_PAGE_SIZE));
     const page = backupsPageIndex(currentServer || defaultServerId, pages);
@@ -7724,6 +7753,10 @@ function baselinesPanel(b, servers, opts) {
       if (sn.binlog_file) when.title = "binlog " + sn.binlog_file + ":" + sn.binlog_pos;
       row.append(when);
       row.append(el("span", { class: "stg-rel", text: formatAge(sn.age_hours) + " ago" }));
+      if (goingIdx.has(idx)) {
+        row.classList.add("stg-row-going");
+        row.append(el("span", { class: "tag-pill stg-going", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, never a table's only copy." }));
+      }
       if (uniformTables === null) row.append(el("span", { class: "stg-dest", text: (sn.tables || []).length + " table(s)" }));
       if (idx === 0 && sn.staleness && sn.staleness !== "ok") {
         row.append(el("span", { class: "chip chip-mon", text:

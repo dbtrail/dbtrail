@@ -345,7 +345,7 @@ const paint = async (caps, from, hash) => {
 	if hasString(got.Serve.Asked, "/api/baseline-refresh") {
 		t.Errorf("serve asks the watch daemon's own endpoint: %q", got.Serve.Asked)
 	}
-	if !strings.Contains(got.Serve.Text, "Snapshots") || !hasString(got.Serve.Titles, "Per server") {
+	if !strings.Contains(got.Serve.Text, "Snapshots") || !hasString(got.Serve.Titles, "This server · a") {
 		t.Errorf("serve does not render the page and the snapshot location: titles %q", got.Serve.Titles)
 	}
 	if hasString(got.Serve.Sections, "checks") {
@@ -484,7 +484,7 @@ const real = { verifyRegions: ctx.verifyRegions, setup: ctx.snapshotSetupSection
 	if got.Err != "" {
 		t.Fatalf("threw: %s", got.Err)
 	}
-	if !hasString(got.Whole.Titles, "Per server") || !strings.Contains(got.Whole.Text, "Snapshots") {
+	if !hasString(got.Whole.Titles, "This server · a") || !strings.Contains(got.Whole.Text, "Snapshots") {
 		t.Fatalf("the page does not render whole, so the broken cases below prove nothing: %q", got.Whole.Titles)
 	}
 	for _, c := range []struct {
@@ -495,9 +495,9 @@ const real = { verifyRegions: ctx.verifyRegions, setup: ctx.snapshotSetupSection
 	}{
 		// Each case keeps a panel from EACH of the other two parts, so a
 		// failure that quietly swallowed a neighbour still rings.
-		{"a verify record it cannot read", got.ChecksBroken, "Checks could not be drawn", []string{"Take a copy with you", "Per server"}},
+		{"a verify record it cannot read", got.ChecksBroken, "Checks could not be drawn", []string{"Take a copy with you", "This server · a"}},
 		{"a settings row that throws", got.SetupBroken, "Where and how often could not be drawn", []string{"Take a copy with you", "Run a check"}},
-		{"the hero throwing", got.ListBroken, "The copy could not be drawn", []string{"Take a copy with you", "Run a check", "Per server"}},
+		{"the hero throwing", got.ListBroken, "The copy could not be drawn", []string{"Take a copy with you", "Run a check", "This server · a"}},
 	} {
 		if !strings.Contains(c.got.Text, c.says) {
 			t.Errorf("with %s the page does not say which part broke (looking for %q): %q", c.name, c.says, c.got.Text)

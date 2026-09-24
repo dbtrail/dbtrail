@@ -2390,6 +2390,11 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 /* the newest snapshot is what a restore actually uses — it gets the
    treatment; relative age rides beside the absolute time */
 .stg-row-latest { background: var(--violet-tint); border-radius: var(--radius-sm); }
+/* A copy past the count in force: still here, going at the next cleanup. */
+.stg-row-going .stg-name, .stg-row-going .stg-rel { color: var(--ink-3); font-weight: 500; }
+.stg-going { color: var(--ink-2); background: var(--surface-3); font-family: var(--f-ui); text-transform: none; letter-spacing: 0; font-size: 11.5px; }
+.stg-row-latest .stg-going { background: var(--surface); color: var(--ink-2); }
+.bks-others { margin: 10px 14px 6px; }
 .stg-rel { font-family: var(--f-ui); font-size: 12.5px; color: var(--ink-3); white-space: nowrap; }
 /* The newest row is the one tint on this page, so everything it carries has
    to survive the ground it sits on. Measured with the converter in
