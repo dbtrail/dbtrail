@@ -1026,10 +1026,13 @@ function navigate(route, params, push = true) {
   // An old route from a stale caller goes straight to its new page, so the
   // entry pushed below already carries the new address. Rewriting with
   // replaceState here would overwrite the entry you were on instead.
+  // A target may name a section ("snapshots#setup") whether it is an old
+  // alias or the page's own address: the section is cut off before the
+  // route is checked, or a direct target with a section would read as an
+  // unknown route and land on the Overview (#1853's "Set a schedule" did).
   let hash = "";
-  const target = aliasTarget(route);
-  if (target) [route, hash] = splitTarget(target);
-  if (!isKnownRoute(route)) route = "overview";
+  [route, hash] = splitTarget(aliasTarget(route) || route);
+  if (!isKnownRoute(route)) [route, hash] = ["overview", ""];
   // Both halves are watch-daemon surfaces (rotation, archiving, staging).
   if ((route === "retention" || route === "daemon") && !capsCache.monitor) route = "overview";
   // Snapshots is NOT gated, where two of the three pages it replaces were
