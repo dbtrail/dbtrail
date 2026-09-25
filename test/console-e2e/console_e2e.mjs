@@ -5114,6 +5114,89 @@ try {
     ? ok("snapshots: named Snapshots in the nav and the head, with a Docs link, and the setup section is there")
     : bad("snapshots: named Snapshots in the nav and the head, with a Docs link, and the setup section is there",
         JSON.stringify({ head: bks.head, nav: bks.nav, docsLink: bks.docsLink, setupFound: bks.setupFound }));
+  // Saving a daemon-wide value goes through the REAL Save button and the
+  // REAL endpoint: the row's handler once stringified the body and api()
+  // stringified it again, so the server got a JSON string and answered
+  // "cannot unmarshal string into Go value". A stub of fetch would have
+  // passed either way; only the server's own decode tells the two apart.
+  // The value is put back with "Use the startup value" so the fixture's
+  // registry leaves this scene as it entered it.
+  const bksSave = await page.evaluate(async () => {
+    const row = Array.from(document.querySelectorAll(".bks-erow")).find((r) => r.querySelector("#bks-baseline_retain"));
+    if (!row) return { err: "no baseline_retain row" };
+    const input = row.querySelector("#bks-baseline_retain");
+    const before = input.value;
+    input.value = "36h";
+    row.querySelector("button.btn:not(.btn-ghost)").click();
+    const saved = await new Promise((resolve) => {
+      const t0 = Date.now();
+      const tick = async () => {
+        const r = (await api("/api/backup-settings")).daemon.find((d) => d.key === "baseline_retain");
+        if (r && r.source === "saved" && r.value === "36h") return resolve(r);
+        if (Date.now() - t0 > 10000) return resolve(r || null);
+        setTimeout(tick, 200);
+      };
+      tick();
+    });
+    const errText = (document.querySelector(".bks-erow .form-msg.err") || {}).textContent || "";
+    // Put it back through the same wire (use_startup), then confirm. The
+    // revert button exists only on a row drawn from a SAVED value, and the
+    // save re-renders the page after the server answers, so wait for it.
+    const findRevert = () => {
+      const row2 = Array.from(document.querySelectorAll(".bks-erow")).find((r) => r.querySelector("#bks-baseline_retain"));
+      return row2 && Array.from(row2.querySelectorAll("button")).find((b) => b.textContent === "Use the startup value");
+    };
+    const revert = await new Promise((resolve) => {
+      const t0 = Date.now();
+      const tick = () => {
+        const b = findRevert();
+        if (b || Date.now() - t0 > 10000) return resolve(b || null);
+        setTimeout(tick, 200);
+      };
+      tick();
+    });
+    if (revert) revert.click();
+    const restored = await new Promise((resolve) => {
+      const t0 = Date.now();
+      const tick = async () => {
+        const r = (await api("/api/backup-settings")).daemon.find((d) => d.key === "baseline_retain");
+        if (r && r.source !== "saved") return resolve(r);
+        if (Date.now() - t0 > 10000) return resolve(r || null);
+        setTimeout(tick, 200);
+      };
+      tick();
+    });
+    return { before, saved, errText, revertFound: !!revert, restored };
+  });
+  (bksSave.saved && bksSave.saved.source === "saved" && bksSave.saved.value === "36h" && !bksSave.errText
+    && bksSave.revertFound && bksSave.restored && bksSave.restored.source !== "saved")
+    ? ok("backup-settings: Save sends the value as a JSON object, the server stores it, and Use the startup value puts it back")
+    : bad("backup-settings: Save sends the value as a JSON object, the server stores it, and Use the startup value puts it back", JSON.stringify(bksSave));
+
+  // The telemetry switch shares the wire shape. Its endpoint writes the
+  // machine's consent file, so this one is checked at the request instead:
+  // what setTelemetry hands fetch must parse as an OBJECT with `enabled`,
+  // never as a string.
+  const telBody = await page.evaluate(async () => {
+    const realFetch = window.fetch;
+    let body = null;
+    // The POST only: a successful switch re-renders Status, whose GET of
+    // the same path would otherwise overwrite the captured body with nothing.
+    window.fetch = (path, opts) => {
+      if (typeof path === "string" && path === "/api/telemetry" && opts && opts.method === "POST") {
+        body = opts.body;
+        return Promise.resolve(new Response(JSON.stringify({ enabled: true }), { status: 200, headers: { "Content-Type": "application/json" } }));
+      }
+      return realFetch(path, opts);
+    };
+    try { await setTelemetry(true); } finally { window.fetch = realFetch; }
+    let parsed = null;
+    try { parsed = JSON.parse(body); } catch (_) { /* reported below */ }
+    return { body, isObject: !!parsed && typeof parsed === "object", enabled: parsed && parsed.enabled };
+  });
+  (telBody.isObject && telBody.enabled === true)
+    ? ok("telemetry: the switch sends {enabled} as a JSON object, not a JSON string")
+    : bad("telemetry: the switch sends {enabled} as a JSON object, not a JSON string", JSON.stringify(telBody));
   // The startup rows left the page with the Snapshots cut (D13): what is set
   // in the launch command is documented, not drawn here.
   (bks.rows === 0 && !bks.notSet)

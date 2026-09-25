@@ -6221,8 +6221,10 @@ function backupDaemonEditRow(row, locked) {
     if (revert) revert.disabled = true;
     save.disabled = true;
     try {
+      // api() serializes the body itself; stringifying here too sent the
+      // server a JSON string, which it refused as "cannot unmarshal string".
       await api("/api/backup-settings/daemon/" + encodeURIComponent(row.key), {
-        method: "PUT", body: JSON.stringify(body) });
+        method: "PUT", body });
       await renderSnapshots();
     } catch (err) {
       msg.className = "form-msg err";
@@ -7108,7 +7110,7 @@ function telemetrySampleSection(t) {
 
 async function setTelemetry(enabled) {
   try {
-    await api("/api/telemetry", { method: "POST", body: JSON.stringify({ enabled: enabled }) });
+    await api("/api/telemetry", { method: "POST", body: { enabled: enabled } });
   } catch (e) {
     toastError("Could not change telemetry: " + ((e && e.message) || e));
     return;
