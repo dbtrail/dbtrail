@@ -10,27 +10,44 @@ import (
 // and saves a server whose dialog was closed while the checks ran, each with
 // an answer the start endpoint sends. It reads back what reached the person:
 // the short message that fades, the one that stays, or the notice with its
-// folds. The form is a stand-in (it needs a real page); whether one can be
-// shown is the difference between the server list and the Overview.
+// folds, the line that names the server, and where the focus lands when the
+// notice is closed. The notice is drawn and closed by the real openNotice and
+// closeNotice over stand-in elements. The form is a stand-in too (it needs a
+// real page); whether one can be shown is the difference between the server
+// list and the Overview.
 const startOptionalJS = `
 FakeEl.prototype.addEventListener = function (type, fn) { (this.__h ||= {})[type] = fn; };
 const walk = (n, f) => { f(n); for (const c of n.children || []) if (c && c.nodeType === 1) walk(c, f); };
 const run = (s) => vm.runInContext(s, ctx);
+FakeEl.prototype.focus = function () { focused.push(this.__mark || this.attrs.id || this.tag); };
+Object.defineProperty(FakeEl.prototype, "firstChild", { get() { return this.children[0] || null; } });
+Object.defineProperty(FakeEl.prototype, "innerHTML", { set(v) { htmlSets.push(String(v)); this._text = String(v); } });
+const focused = [], htmlSets = [], made = [];
+const mark = (m) => { const n = new FakeEl("button"); n.__mark = m; n.isConnected = true; return n; };
+const mount = new FakeEl("div"), select = mark("server-select"), rowButton = mark("row-button");
+const rowSlot = new FakeEl("span");
+rowSlot.parentNode = { querySelector: (q) => q === ".row-acts button" ? rowButton : null };
+const realCreate = document.createElement;
+document.createElement = (t) => { made.push(String(t).toLowerCase()); return realCreate(t); };
 const seen = { toasts: [], errors: [], notices: [], asked: [] };
-Object.assign(ctx, { __seen: seen, __answer: null, __form: true });
+Object.assign(ctx, { __seen: seen, __answer: null, __form: true, __name: "shop-db", __row: false });
+document.getElementById = (id) => id === "notice-mount" ? mount : id === "server-select" ? select
+  : id === "srv-status-s1" ? (ctx.__row ? rowSlot : null) : new FakeEl("div");
+document.querySelector = () => null;
 run("toast = (m) => { __seen.toasts.push(String(m)); };");
 run("toastError = (m) => { __seen.errors.push(String(m)); };");
-run("openNotice = (o) => { __seen.notices.push(o); };");
+run("const drawNotice = openNotice; openNotice = (o) => { __seen.notices.push(o); drawNotice(o); };");
 run("refreshServersList = async () => {};");
 run("showServerForm = () => __form;");
 run("hideServerForm = () => {};");
 run("refreshGrants = () => {};");
 run("missingSourceHost = () => false;");
-run("serverFormBody = () => ({ name: 'shop-db' });");
+run("serverFormBody = () => ({ name: __name });");
 run("noCaptureReason = () => null;");
 run("api = async (path, opts) => { __seen.asked.push(((opts && opts.method) || 'GET') + ' ' + path);" +
   " if (/monitor\\/start$/.test(path)) { if (__answer.throws) throw new Error(__answer.throws); return __answer.body; }" +
-  " return { id: 's1', name: 'shop-db', has_source: true, monitor_state: 'stopped' }; };");
+  " if (path === '/api/servers') return { default_id: 's1', servers: [{ id: 's1', name: __name, kind: 'registry' }, { id: 's2', name: 'other', kind: 'registry' }] };" +
+  " return { id: 's1', name: __name, has_source: true, monitor_state: 'stopped' }; };");
 const read = (o) => {
   const folds = [];
   for (const c of [].concat(o.content || [])) {
@@ -46,25 +63,47 @@ const read = (o) => {
   }
   return { tone: o.tone || "", title: o.title || "", lines: o.lines || [], button: o.button || "", folds };
 };
+const press = async (c, where, name) => {
+  seen.toasts = []; seen.errors = []; seen.notices = []; seen.asked = [];
+  focused.length = 0; htmlSets.length = 0; made.length = 0;
+  mount.replaceChildren();
+  run("noticeInerted = []; noticeReturnFocus = null;");
+  ctx.__answer = c;
+  ctx.__name = name;
+  // The Overview has no server dialog to show a form in, and neither has
+  // a save whose dialog was closed while the checks ran. Only the server
+  // list has a row for the server.
+  ctx.__form = where === "row";
+  ctx.__row = where === "row";
+  run("capsCache = { monitor: true };");
+  let threw = "";
+  try {
+    // The names are learned the way the page learns them: from the list.
+    await run("loadServers")();
+    seen.asked = [];
+    if (where === "save") await run("saveServer")({ elements: { id: { value: "s1" } } });
+    else await run("startMonitorRow")("s1");
+  } catch (e) { threw = String(e && e.stack || e); }
+  // What was drawn, read off the mount, then closed the way a person does.
+  const drawn = [];
+  walk(mount, (x) => { if (x.className === "notice-line") drawn.push(x._text); });
+  const tags = made.slice(), html = htmlSets.slice();
+  focused.length = 0;
+  if (mount.firstChild) run("closeNotice")();
+  return { toasts: seen.toasts, errors: seen.errors, notices: seen.notices.map(read), threw, drawn,
+    focusAfterClose: focused.slice(), tags, html,
+    loadedForm: seen.asked.includes("GET /api/servers/s1") };
+};
 (async () => {
   const cases = JSON.parse(process.argv[4]);
-  const out = {};
+  const names = JSON.parse(process.argv[5]);
+  const out = { outcomes: {}, named: {} };
   for (const c of cases) {
-    for (const where of ["row", "overview", "save"]) {
-      seen.toasts = []; seen.errors = []; seen.notices = []; seen.asked = [];
-      ctx.__answer = c;
-      // The Overview has no server dialog to show a form in, and neither has
-      // a save whose dialog was closed while the checks ran.
-      ctx.__form = where === "row";
-      run("capsCache = { monitor: true };");
-      let threw = "";
-      try {
-        if (where === "save") await run("saveServer")({ elements: { id: { value: "s1" } } });
-        else await run("startMonitorRow")("s1");
-      } catch (e) { threw = String(e && e.stack || e); }
-      out[c.name + "/" + where] = { toasts: seen.toasts, errors: seen.errors, notices: seen.notices.map(read), threw,
-        loadedForm: seen.asked.includes("GET /api/servers/s1") };
-    }
+    for (const where of ["row", "overview", "save"]) out.outcomes[c.name + "/" + where] = await press(c, where, "shop-db");
+  }
+  const optional = cases.find((c) => c.name === "optional");
+  for (const k of Object.keys(names)) {
+    for (const where of ["row", "overview", "save"]) out.named[k + "/" + where] = await press(optional, where, names[k]);
   }
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
@@ -92,16 +131,24 @@ type startOptionalSeen struct {
 			}
 		}
 	}
-	Threw      string
-	LoadedForm bool
+	Threw           string
+	LoadedForm      bool
+	Drawn           []string
+	FocusAfterClose []string
+	Tags, HTML      []string
 }
 
 // TestStartShowsOptionalImprovements (#1841): a start that has only optional
 // improvements to offer opens the same notice Save opens, with the closed
 // "Optional improvements" fold and each statement to copy, from the server
 // list, from the Overview and from a save whose dialog was closed. A short
-// message that fades carried none of that. Every other outcome stays as it
-// was: a clean start is the short message, a failed one is never replaced.
+// message that fades carried none of that. The notice opens alone, with no
+// edit form under it, names the server, and closing it lands on something
+// still on the page. Every other outcome stays as it was: a clean start is
+// the short message, a failed one is never replaced.
+//
+// The counts of warnings and optional items in the answers copy doctor's
+// rule; they do not call it.
 func TestStartShowsOptionalImprovements(t *testing.T) {
 	pass := DoctorCheck{Name: "Source binlog format", Status: "pass", Detail: "binlog_format=ROW"}
 	skip := DoctorCheck{Name: "Replication slot", Status: "skip", Detail: "slot does not exist yet"}
@@ -168,10 +215,22 @@ func TestStartShowsOptionalImprovements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := runNodeConnectArgs(t, renderHarnessJS+startOptionalJS, string(in))
-	var got map[string]startOptionalSeen
-	if err := json.Unmarshal(raw, &got); err != nil {
+	long := strings.Repeat("a-very-long-server-name-", 20)
+	names := map[string]string{"plain": "shop-db", "empty": "", "blank": "   ", "markup": "<b>x</b>", "ampersand": "a&b <img src=x onerror=1>", "long": long}
+	namesIn, err := json.Marshal(names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := runNodeConnectArgs(t, renderHarnessJS+startOptionalJS, string(in), string(namesIn))
+	var all struct {
+		Outcomes, Named map[string]startOptionalSeen
+	}
+	if err := json.Unmarshal(raw, &all); err != nil {
 		t.Fatalf("decode %s: %v", raw, err)
+	}
+	got := all.Outcomes
+	if len(all.Named) != len(names)*3 {
+		t.Fatalf("%d named outcomes for %d names in three places", len(all.Named), len(names))
 	}
 	if len(got) != len(cases)*3 {
 		t.Fatalf("%d outcomes for %d cases in three places", len(got), len(cases))
@@ -247,6 +306,48 @@ func TestStartShowsOptionalImprovements(t *testing.T) {
 			t.Errorf("optional/%s: no Optional improvements fold in %+v", p, n.Folds)
 		}
 	}
+	// Alone: no edit form is loaded under it, in any of the three places,
+	// and closing it lands on the row's own button in the server list and on
+	// the server selector where there is no row.
+	for _, p := range places {
+		g := got["optional/"+p]
+		if p != "save" && g.LoadedForm {
+			t.Errorf("optional/%s: the edit form was loaded under the notice of a start that worked", p)
+		}
+		want := map[string]string{"row": "row-button", "overview": "server-select", "save": "server-select"}[p]
+		if len(g.FocusAfterClose) != 1 || g.FocusAfterClose[0] != want {
+			t.Errorf("optional/%s: closing the notice put the focus on %q, want %q", p, g.FocusAfterClose, want)
+		}
+		if len(g.Drawn) != 1 || g.Drawn[0] != "Capture started for shop-db. Changes appear within a minute." {
+			t.Errorf("optional/%s: the notice reads %q", p, g.Drawn)
+		}
+	}
+	// The name is the operator's text: said as typed, never read as markup,
+	// and left out when there is none.
+	for k, name := range names {
+		want := "Capture started for " + strings.TrimSpace(name) + ". Changes appear within a minute."
+		if strings.TrimSpace(name) == "" {
+			want = "Capture started. Changes appear within a minute."
+		}
+		for _, p := range places {
+			g := all.Named[k+"/"+p]
+			t.Logf("%-20s %.90q", k+"/"+p, g.Drawn)
+			if g.Threw != "" || len(g.Notices) != 1 || len(g.Drawn) != 1 || g.Drawn[0] != want {
+				t.Errorf("%s/%s: threw %q, %d notice(s), reads %.120q; want %.120q", k, p, g.Threw, len(g.Notices), g.Drawn, want)
+			}
+			for _, h := range g.HTML {
+				if strings.TrimSpace(name) != "" && strings.Contains(h, strings.TrimSpace(name)) {
+					t.Errorf("%s/%s: the name was written as markup: %.80q", k, p, h)
+				}
+			}
+			for _, tag := range g.Tags {
+				if tag == "b" || tag == "img" {
+					t.Errorf("%s/%s: the name made a <%s> element", k, p, tag)
+				}
+			}
+		}
+	}
+
 	// An optional item with no statement still opens the notice and says
 	// which one it is.
 	for _, p := range places {
@@ -274,6 +375,9 @@ func TestStartShowsOptionalImprovements(t *testing.T) {
 		}
 		if !g.LoadedForm {
 			t.Errorf("%s/row: the notice did not open over the server's form", c)
+		}
+		if strings.Contains(strings.Join(g.Drawn, " "), "shop-db") {
+			t.Errorf("%s/row: %q names the server over a form that already does", c, g.Drawn)
 		}
 		// With no form to show, a start with warnings keeps its message.
 		g = only(c+"/overview", 1, 0, 0)
