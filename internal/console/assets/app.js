@@ -11566,10 +11566,14 @@ function serverLabel(s) {
   return s.name;
 }
 
+// serverNames: id to name, as last listed, for a message that has only the id.
+let serverNames = new Map();
+
 async function loadServers() {
   const data = await api("/api/servers");
   defaultServerId = data.default_id || "";
   const servers = data.servers || [];
+  serverNames = new Map(servers.map((s) => [s.id, s.name]));
   // Reconcile a stale selection (server deleted elsewhere).
   if (currentServer && !servers.some((s) => s.id === currentServer)) setCurrentServer("");
   serversEmpty = !servers.length;
@@ -12693,7 +12697,7 @@ async function saveServer(form) {
       // The modal was closed while the checks ran: nothing on screen can
       // carry the outcome, so it goes to a toast that stays until dismissed.
       if (!res || res.requestError) toastError("Could not start capture for " + saved.name + ": " + ((res && res.requestError) || "no answer"));
-      else if (res.started && !doctorWarnings(res.doctor)) toast("Monitoring started for " + saved.name + ". Events will appear within a minute");
+      else if (res.started && !doctorWarnings(res.doctor)) openStartedNotice(res, saved.id, saved.name);
       else if (res.started) toastError("Monitoring started for " + saved.name + ", with warnings; open Servers and press Start to review them");
       else toastError("Startup checks failed for " + saved.name + "; open Servers and press Start to see what to fix");
       return;
@@ -12758,7 +12762,7 @@ function showStartupOutcome(res) {
 // are on top: every check, green ones included, sits one click away under
 // "All N checks", since 14 green cards around one red one is how the red one
 // got missed. Built fresh on every call, so Show reopens it whole.
-function startupNotice(res) {
+function startupNotice(res, name) {
   if (!res || res.requestError) {
     // The server may well have answered, with an error (the checks could not
     // run, or the start failed after they passed): say what it said.
@@ -12778,8 +12782,10 @@ function startupNotice(res) {
     el("summary", { text: "All " + count(checks.length, "check", "checks") }), doctorCards(checks));
   const opt = optionalSection(checks);
   if (res.started && !picked.length) {
+    // Where no form names the server, the notice does.
+    const who = String(name || "").trim();
     return { tone: "ok", title: "Capture started", summary: "Capture started",
-      lines: ["Capture started. Changes appear within a minute."],
+      lines: ["Capture started" + (who ? " for " + who : "") + ". Changes appear within a minute."],
       content: [opt, all].filter(Boolean), button: "OK" };
   }
   if (res.started) {
@@ -13030,13 +13036,27 @@ async function startMonitorRow(id) {
   const res = await startMonitor(id);
   await refreshServersList();
   if (!res || res.requestError) { toastError("Could not start: " + ((res && res.requestError) || "no answer")); return; }
-  if (res.started && !doctorWarnings(res.doctor)) { toast("Monitoring started"); return; }
+  if (res.started && !doctorWarnings(res.doctor) && !doctorOptional(res.doctor)) { toast("Monitoring started"); return; }
+  // Started, with only optional improvements to offer: the notice alone. A
+  // form under it would leave the operator inside the edit form of a server
+  // that captures, with the focus on Save.
+  if (res.started && !doctorWarnings(res.doctor)) { openStartedNotice(res, id, serverNames.get(id)); return; }
   // The same notice Save opens, over this server's form: Save there is the
   // retry, since it starts a server that is not capturing yet.
   const opened = await editServer(id);
   if (opened) showStartupOutcome(res);
   else if (res.started) { toast("Monitoring started, with warnings"); }
   else { toastError("Startup checks failed"); }
+}
+
+// openStartedNotice opens the notice of a start that worked where no form is
+// under it: it names the server, and closing it lands on something still on
+// the page (the button that asked is gone once its row or card is redrawn).
+function openStartedNotice(res, id, name) {
+  const slot = document.getElementById("srv-status-" + id);
+  const row = slot && slot.parentNode;
+  const back = (row && row.querySelector(".row-acts button")) || document.getElementById("server-select");
+  openNotice(Object.assign(startupNotice(res, name), { returnFocus: back }));
 }
 
 // ── notice: an action's outcome, centered above the dialog that asked ──────
