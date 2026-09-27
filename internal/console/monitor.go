@@ -76,12 +76,27 @@ type MonitorStatus struct {
 	Retrying bool `json:"retrying,omitempty"`
 	// Phase names a long startup step the stream is inside right now, so
 	// "pending" can say WHICH part of starting up it is stuck on (#1690).
-	// Currently only "resume_cleanup": the pre-capture delete of events a
-	// replayed window would re-index, minutes of work on a large index.
+	// "resume_cleanup": the pre-capture delete of events a replayed window
+	// would re-index, minutes of work on a large index.
+	// "resume_cleanup_waiting": that delete has not started, because one from
+	// an earlier run is still executing on the index server (#1708).
 	// Empty whenever no such step is running — including between retries and
 	// for a stream that never reached one.
 	Phase string `json:"phase,omitempty"`
+	// PhaseDetail qualifies Phase in a few words, for display only. For
+	// "resume_cleanup_waiting" (#1708) it names the earlier cleanup being
+	// waited on: "connection 812, running for 14m0s". Empty with Phase.
+	PhaseDetail string `json:"phase_detail,omitempty"`
+	// ErrorCode names the cause of a "failed" state for the causes a screen
+	// acts on (MonitorErr*). Empty for every other failure, which LastError
+	// describes. A screen decides on this and never on LastError's text.
+	ErrorCode string `json:"error_code,omitempty"`
 }
+
+// MonitorErrEarlierCleanup is the ErrorCode of a start that waited its whole
+// ceiling for a cleanup an earlier run left executing on the index server
+// (#1708).
+const MonitorErrEarlierCleanup = "earlier_cleanup_running"
 
 // MonitorController is the control-plane supervisor as the console sees it.
 // All methods must be safe for concurrent use. Errors returned to handlers

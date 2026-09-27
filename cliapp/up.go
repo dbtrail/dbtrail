@@ -13,6 +13,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/serverid"
+	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
 
 var upCmd = &cobra.Command{
@@ -72,6 +73,7 @@ func init() {
 	upCmd.Flags().StringVar(&upTables, "tables", "", "Comma-separated tables to index (default: all)")
 	upCmd.Flags().IntVar(&upBatchSize, "batch-size", 1000, indexer.BatchSizeHelp())
 	upCmd.Flags().DurationVar(&indexer.WriteTimeout, "write-timeout", indexer.DefaultWriteTimeout, "Deadline for each index write (batch INSERT, checkpoint, digest lookup). A mid-statement network stall surfaces as an error within this window instead of freezing the daemon on kernel TCP retransmission (~13-16 min). Raise for very large batches over a slow link")
+	upCmd.Flags().DurationVar(&streamrun.ResumeCleanupWait, "cleanup-wait-timeout", streamrun.DefaultResumeCleanupWait, "How long a start waits for a resume cleanup that a previous run left executing on the index, before it fails and names it. A second cleanup sent while the first still runs only fails on its locks. 0 starts the cleanup without looking")
 	upCmd.Flags().IntVar(&upCheckpoint, "checkpoint", 10, "Checkpoint interval in seconds")
 	upCmd.Flags().StringVar(&upMetricsAddr, "metrics-addr", "", "Address to expose Prometheus metrics (e.g. :9090); empty = disabled")
 	upCmd.Flags().IntVar(&upPartitions, "partitions", 48, "Hourly partitions to create on first init")
