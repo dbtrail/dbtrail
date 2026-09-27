@@ -740,9 +740,20 @@ move to `FROM` this image once its first tag is published.
 
 To change it, edit `build/Dockerfile.console-base` and bump the tag in
 `build/console-base.tag` in the same change. A published tag is never
-overwritten, so a change without a new tag is never published, and the pull
-request check fails to say so. Run the test locally with
-`build/smoke-console-base.sh` (it needs only Docker).
+overwritten. Every published image carries the SHA-256 of its Dockerfile as the
+label `com.dbtrail.console-base.recipe-sha256`, and the workflow compares it
+with the file in the tree: a changed Dockerfile behind a tag that is already
+published fails the run, on the pull request and on main. Run the test locally
+with `build/smoke-console-base.sh` (it needs only Docker).
+
+The image is signed by its own workflow, so the identity to verify is narrower
+than for the release images:
+
+```bash
+cosign verify ghcr.io/dbtrail/bintrail-console-base:<tag> \
+  --certificate-identity "https://github.com/dbtrail/dbtrail/.github/workflows/console-base-image.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+```
 
 ### Why not Alpine?
 

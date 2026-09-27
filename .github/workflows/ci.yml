@@ -112,6 +112,9 @@ jobs:
               # quickstart, read out of that file: a docs-only edit that
               # reshapes it breaks the walk, so it has to be able to run.
               - 'docs/quickstart.md'
+              # A unit test reads the image recipes (#1876): a change to one
+              # has to be able to run it.
+              - '**/Dockerfile*'
               - '.github/workflows/ci.yml'
             dbgo:
               - '**/*.go'
