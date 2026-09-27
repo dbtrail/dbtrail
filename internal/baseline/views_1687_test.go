@@ -257,6 +257,17 @@ func TestDiscoverDump_NamesAndSiblings_1687(t *testing.T) {
 			wantViews:  []string{"d.v"},
 		},
 		{
+			// A text value that spans lines. The statement is the INSERT
+			// above it, so the scan stops there.
+			name: "a row whose text has a line that starts with create view",
+			files: map[string]string{
+				"d.x-schema.sql":             realTableSchema,
+				"d.x-schema-view-schema.sql": realTableSchema,
+				"d.x-schema-view.sql":        "INSERT INTO `t` (`id`,`note`) VALUES(1,\"run this:\nCREATE ALGORITHM=UNDEFINED VIEW `v` AS select 1\")\n;\n",
+			},
+			wantTables: []string{"d.x", "d.x-schema-view"},
+		},
+		{
 			name: "create table in the view file is not a view",
 			files: map[string]string{
 				"d.x-schema.sql":      realTableSchema,
@@ -465,6 +476,19 @@ func TestRun_TablesFilterAndViews_1687(t *testing.T) {
 		for _, filter := range [][]string{{"shop.big_orders"}, {"shop.orders", "SHOP.Big_Orders"}} {
 			_, err := Run(context.Background(), Config{InputDir: fixtureViews, OutputDir: t.TempDir(), Timestamp: at, Tables: filter})
 			if err == nil || !strings.Contains(err.Error(), "--tables names 1 view (shop.big_orders)") {
+				t.Errorf("filter %q: err = %v, want the refusal that names the view", filter, err)
+			}
+		}
+	})
+	t.Run("a view is matched whatever the case of either name", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "Shop.BigOrders-schema.sql", realPlaceholder)
+		writeFile(t, dir, "Shop.BigOrders-schema-view.sql", realViewFile)
+		writeFile(t, dir, "Shop.t-schema.sql", realTableSchema)
+		writeFile(t, dir, "Shop.t.00000.sql", realData)
+		for _, filter := range []string{"shop.bigorders", "SHOP.BIGORDERS", "Shop.BigOrders"} {
+			_, err := Run(context.Background(), Config{InputDir: dir, OutputDir: t.TempDir(), Timestamp: at, Tables: []string{"shop.t", filter}})
+			if err == nil || !strings.Contains(err.Error(), "--tables names 1 view (Shop.BigOrders)") {
 				t.Errorf("filter %q: err = %v, want the refusal that names the view", filter, err)
 			}
 		}
