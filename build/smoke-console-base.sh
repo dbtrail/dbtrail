@@ -43,14 +43,22 @@ NET="$RUN_ID-net"
 SOURCE_NAME=""
 BUILT_IMAGE=""
 # Best effort by design: cleanup runs on every exit, including the ones where
-# the container or the network was never created.
+# the container or the network was never created. No line here may stop the
+# ones after it: under `set -e` a failed `docker network rm` would otherwise
+# skip the image removal and replace the exit code.
 cleanup() {
-  [ -n "$SOURCE_NAME" ] && docker rm -f "$SOURCE_NAME" >/dev/null 2>&1
-  docker network rm "$NET" >/dev/null 2>&1
-  [ -n "$BUILT_IMAGE" ] && docker rmi "$BUILT_IMAGE" >/dev/null 2>&1
+  if [ -n "$SOURCE_NAME" ]; then docker rm -f "$SOURCE_NAME" >/dev/null 2>&1 || true; fi
+  docker network rm "$NET" >/dev/null 2>&1 || true
+  if [ -n "$BUILT_IMAGE" ]; then docker rmi "$BUILT_IMAGE" >/dev/null 2>&1 || true; fi
   return 0
 }
-trap cleanup EXIT
+# The exit code the script was leaving with is the one it leaves with.
+on_exit() {
+  local rc=$?
+  cleanup
+  exit "$rc"
+}
+trap on_exit EXIT
 # Ctrl-C and a plain kill must clean up too. bash runs the EXIT trap on the
 # way out of these, after the docker command in progress returns.
 trap 'exit 130' INT

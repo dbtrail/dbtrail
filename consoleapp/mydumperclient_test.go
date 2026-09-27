@@ -36,10 +36,24 @@ const mydumperClientLibrary = "libmariadb3"
 // A download or an install of a mydumper .deb, in any spelling of the version.
 var reMydumperDeb = regexp.MustCompile(`mydumper[_-][^\s"']*\.deb`)
 
-// recipeInstructions returns a Dockerfile's instructions the way Docker reads
+// recipeInstructions returns the instructions of a Dockerfile's LAST stage, the
+// one that becomes the image: everything after the last FROM. A package
+// installed in an earlier stage (a builder) is not in the image.
+func recipeInstructions(text string) []string {
+	all := allInstructions(text)
+	last := -1
+	for i, instruction := range all {
+		if fields := strings.Fields(instruction); len(fields) > 0 && strings.EqualFold(fields[0], "FROM") {
+			last = i
+		}
+	}
+	return all[last+1:]
+}
+
+// allInstructions returns a Dockerfile's instructions the way Docker reads
 // them: comment lines dropped first (also inside a continued RUN), then lines
 // ending in a backslash joined with the next one.
-func recipeInstructions(text string) []string {
+func allInstructions(text string) []string {
 	var kept []string
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "#") {
@@ -124,6 +138,10 @@ func TestMydumperClientLibraryRule(t *testing.T) {
 		{"library only in an echo", strings.Replace(good, " libmariadb3 &&", " && echo apt-get install libmariadb3 &&", 1), true, false},
 		{"library removed, not installed", strings.Replace(good, " libmariadb3 &&", " && apt-get remove -y libmariadb3 &&", 1), true, false},
 		{"library in a second apt-get install", strings.Replace(good, " libmariadb3 &&", " && apt-get install -y libmariadb3 &&", 1), true, true},
+		{"library only in the builder stage", "FROM golang:1.25 AS builder\nRUN apt-get update && apt-get install -y libmariadb3\n" + strings.Replace(good, " libmariadb3", "", 1), true, false},
+		{"mydumper only in the builder stage", good + "FROM debian:bookworm-slim\nRUN apt-get update && apt-get install -y zstd\n", false, false},
+		{"both in the last of two stages", "FROM golang:1.25 AS builder\nRUN go build ./...\n" + good, true, true},
+		{"lowercase from", "from golang:1.25 as builder\nRUN apt-get install -y libmariadb3\nfrom debian:bookworm-slim\n" + strings.TrimPrefix(strings.Replace(good, " libmariadb3", "", 1), "FROM debian:bookworm-slim\n"), true, false},
 		{"windows line endings", strings.ReplaceAll(good, "\n", "\r\n"), true, true},
 		{"no mydumper at all", "FROM debian:bookworm-slim\nRUN apt-get update && apt-get install -y zstd\n", false, false},
 		{"mydumper named in a comment only", "FROM debian:bookworm-slim\n# wget mydumper_1.0.3-1.bookworm_amd64.deb\nRUN apt-get install -y zstd\n", false, false},
