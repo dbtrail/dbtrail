@@ -285,6 +285,7 @@ bintrail baseline \
 | `--upload-region` | *(from AWS env)* | AWS region for `--upload` |
 | `--baseline-retain` | *(disabled)* | Prune local snapshots older than this (`Nd`/`Nh`) once a durable S3 copy exists (requires `--upload`) |
 | `--retry` | `false` | Skip tables whose Parquet file already exists and S3 objects already uploaded |
+| `--bintrail-id` | *(unsigned)* | Server identity UUID to sign the snapshot with (env `BINTRAIL_ID`); see [One writer per location](#one-writer-per-location) |
 | `--format` | `text` | Output format: `text` or `json` |
 
 ### Output structure
@@ -312,6 +313,22 @@ The console's own **Create baseline** trigger runs mydumper and the Parquet conv
 Override the resolved timestamp with `--timestamp` if needed.
 
 Each snapshot also records its **binlog anchor** (the file/position/GTID where the deltas on top of it begin) and, per table, a **content digest + row count** in the Parquet metadata (used by [`bintrail verify`](verify.md)). Baseline-anchored consumers (full-table and single-row `reconstruct`, the shim's `_snapshot`, `verify`, and cascade recovery's baseline fallback) fetch deltas using this recorded binlog **position** as the window's exact lower bound, not the snapshot's wall-clock timestamp: a row-event's timestamp reflects when its statement executed, not when its transaction committed, so a transaction that executed just before the snapshot instant but committed (and so was logged) just after it would otherwise be silently missed by a timestamp-only lower bound. Snapshots taken before this position was recorded (or that never recorded one) fall back to the timestamp alone. A `_SUCCESS` marker is written when the conversion completes; a partially-converted snapshot carries an `_INCOMPLETE` marker instead and is excluded from discovery (see [Pruning old local snapshots](#pruning-old-local-snapshots---baseline-retain)). Since [#1583](https://github.com/dbtrail/dbtrail/issues/1583) a completing snapshot is also published with its own `views.sql` next to `_SUCCESS` — the same DuckDB schema `bintrail views` writes, pinned to the snapshot's own paths (respelled as `s3://` URLs when the snapshot is uploaded), so the file that says how to open the data can never disagree with the data it sits beside. The console's `.tar.gz` download carries a relative copy instead, which works from inside the unpacked folder wherever it lands.
+
+### One writer per location
+
+**One DBTrail installation writes into one snapshot folder or S3 prefix.** Give each installation its own.
+
+Archives are kept apart by a `bintrail_id=<uuid>/` folder per server. Snapshots have no such folder: each one is a folder named after its time, directly under the location. When two installations write into the same location their snapshots interleave, and whatever takes the newest one gets one installation's tables this time and the other's the next. If both have a schema and a table of the same name (production and staging of one application, two replicas), a read returns rows from the wrong database, with no error.
+
+Nothing refuses this today. It is reported instead:
+
+- Each snapshot is signed by its writer: an empty file named `_WRITER.<bintrail_id>` next to `_SUCCESS`. The console, `baseline refresh` and `reconstruct --output-format parquet` sign with the `bintrail_id` recorded in the index they work from. `bintrail baseline` and `bintrail-pg baseline` have no index, so they sign with `--bintrail-id` and leave the snapshot unsigned without it. A snapshot built on top of an older one is signed by the installation that builds it.
+- When a listing finds snapshots signed by more than one writer in a location, it logs a warning that names them, and the console shows it on the Snapshots page, in the server's settings, naming the other writer.
+- Snapshots written before signatures existed are unsigned. An unsigned snapshot names no writer and never raises the warning, so a location with older snapshots and one signing installation reports nothing.
+
+The warning stays while the location still holds the other writer's snapshots. An index that was created again gets a new `bintrail_id`, so its new snapshots are signed differently from the ones it wrote before: point it at a new folder.
+
+A later release will refuse to write into a location that holds another writer's snapshots.
 
 ### At-rest integrity (the `_MANIFEST` sidecar)
 

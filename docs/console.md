@@ -723,6 +723,12 @@ real and invisible. A server backed by the daemon's `--baseline-dir` showed
 an empty Local folder field, indistinguishable from a server with no backup
 location at all.
 
+One DBTrail installation writes into one folder or S3 prefix. When the
+selected server's location holds snapshots signed by another installation,
+its settings say so in red and name the other writer by its `bintrail_id`;
+nothing is refused. See
+[One writer per location](dump-and-baseline.md#one-writer-per-location).
+
 The page offers three settings and nothing else: how often the copy is
 updated, a manual read of the database (Read database now) and retention, under
 one label, **Change here**: the daemon's retention row and the per-server
