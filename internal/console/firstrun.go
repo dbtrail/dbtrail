@@ -251,7 +251,7 @@ func blockedBackupStep(in firstRunInput) (FirstRunStep, bool) {
 	switch {
 	case in.BackupOff:
 		step.Detail = "Creating full reads from the console is turned off. Restoring a whole table to a past moment needs a full read."
-		step.Fix = "On the " + PageSnapshots + " page, under Set when DBTrail starts, the Create-backup button row names the setting to change. Restart DBTrail after changing it. A full read reads every table this server captures"
+		step.Fix = "On the " + PageSnapshots + " page, under Set when DBTrail starts, the Read database now button row names the setting to change. Restart DBTrail after changing it. A full read reads every table this server captures"
 		if in.Postgres {
 			step.Fix += "."
 		} else {

@@ -336,15 +336,15 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 	}{
 		{"off, MySQL, location set", true, false, false,
 			[]string{"turned off", "whole table"},
-			[]string{"Create-backup button", "Set when DBTrail starts", PageSnapshots + " page", "Restart DBTrail", "reads every table this server captures", "mydumper"},
+			[]string{"Read database now button", "Set when DBTrail starts", PageSnapshots + " page", "Restart DBTrail", "reads every table this server captures", "mydumper"},
 			[]string{"snapshot location"}},
 		{"off, MySQL, no location: both fixes", true, true, false,
 			[]string{"turned off"},
-			[]string{"Create-backup button", "mydumper", "its own snapshot location"},
+			[]string{"Read database now button", "mydumper", "its own snapshot location"},
 			nil},
 		{"off, PostgreSQL: no mydumper", true, false, true,
 			[]string{"turned off"},
-			[]string{"Create-backup button", "reads every table"},
+			[]string{"Read database now button", "reads every table"},
 			[]string{"mydumper", "snapshot location"}},
 		{"on, no location of its own", false, true, false,
 			[]string{"no snapshot location of its own"},
@@ -352,7 +352,7 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 			// where on it — naming a second page would send the reader
 			// looking for one that does not exist.
 			[]string{"Local folder or S3 location", PageSnapshots + " page", "Where and how often"},
-			[]string{"Create-backup button", "mydumper", "Restart"}},
+			[]string{"Read database now button", "mydumper", "Restart"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			in := base

@@ -866,7 +866,8 @@ func checkRowMetadata(ctx context.Context, db *sql.DB) CheckResult {
 		Status:   StatusWarn,
 		Optional: true,
 		Detail:   "binlog_row_metadata=" + val,
-		Remediation: "Notice if someone renames a column. To turn it on:\n\n" +
+		Remediation: "Notice if someone renames a column. A missed rename can store changes under the\n" +
+			"wrong column name, with no error. To turn it on:\n\n" +
 			"  SET PERSIST binlog_row_metadata = 'FULL';\n\n" +
 			"On MariaDB 10.5+, which has no SET PERSIST, run this and add it under [mysqld] in my.cnf:\n\n" +
 			"  SET GLOBAL binlog_row_metadata = 'FULL';",

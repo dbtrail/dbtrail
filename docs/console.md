@@ -725,7 +725,7 @@ location at all.
 
 The page offers three settings and nothing else: how often the copy is
 updated, a manual read of the database (Read database now) and retention, under
-one label, **Change here**: the daemon's retention row and the per-server
+one label, **Change in the web interface**: the daemon's retention row and the per-server
 rows. What is set in the launch command (the lock mode, the `.sql` build
 folder, the verify table filter, the default locations) is documented under
 [settings that need a restart](https://www.dbtrail.com/docs/settings/backups#set-at-startup) and no
@@ -1084,7 +1084,7 @@ longer does anything. Remove it.
   for that server exists anyway, taken from somewhere this daemon does not
   run, and the Snapshots page says so for a server with a source and a
   location it can list. Both point at the same page, under **Set when DBTrail
-  starts**, where the setting is the Create-backup button row.
+  starts**, where the setting is the Read database now button row.
 - `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — local staging dir for
   S3-destined baselines created by that button (default a temp subdir).
 - `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — `ftwrl` (default),

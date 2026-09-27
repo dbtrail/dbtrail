@@ -155,8 +155,8 @@ func TestOptionalImprovementsRenderFromRealDoctor(t *testing.T) {
 			t.Errorf("%s: fold %q open=%v; want a closed \"Optional improvements (2)\"", label, f.Summary, f.Open)
 		}
 		want := map[string]string{
-			"Show the SQL statement behind each change. To turn it on:": "SET PERSIST binlog_rows_query_log_events = ON;",
-			"Notice if someone renames a column. To turn it on:":        "SET PERSIST binlog_row_metadata = 'FULL';",
+			"Show the SQL statement behind each change. To turn it on:":                                                                        "SET PERSIST binlog_rows_query_log_events = ON;",
+			"Notice if someone renames a column. A missed rename can store changes under the wrong column name, with no error. To turn it on:": "SET PERSIST binlog_row_metadata = 'FULL';",
 		}
 		for i := range f.Cards {
 			c := &f.Cards[i]

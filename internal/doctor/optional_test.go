@@ -152,10 +152,10 @@ func TestOptionalCheckTexts(t *testing.T) {
 			"Show the SQL statement behind each change. To turn it on:",
 			"  SET GLOBAL binlog_annotate_row_events = ON;", "Only changes made after this carry it."},
 		{"row metadata MINIMAL", mysqlVar("SELECT @@binlog_row_metadata", "v", row("MINIMAL")),
-			"Notice if someone renames a column. To turn it on:",
+			"Notice if someone renames a column. A missed rename can store changes under the\nwrong column name, with no error. To turn it on:",
 			"  SET PERSIST binlog_row_metadata = 'FULL';", "  SET GLOBAL binlog_row_metadata = 'FULL';"},
 		{"row metadata MariaDB NO_LOG", mysqlVar("SELECT @@binlog_row_metadata", "v", row("NO_LOG")),
-			"Notice if someone renames a column. To turn it on:",
+			"Notice if someone renames a column. A missed rename can store changes under the\nwrong column name, with no error. To turn it on:",
 			"  SET PERSIST binlog_row_metadata = 'FULL';", "MariaDB"},
 	}
 	for _, c := range cases {
