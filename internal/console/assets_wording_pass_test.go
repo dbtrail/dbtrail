@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// wordingPassJS draws the screens whose sentences still said "console" or
-// "here" (#1683), and the SQL client panel (#1685), and reads back what a
-// person sees. Text inside <code> is left out of the prose: a flag such as
-// --console-token keeps its spelling.
+// wordingPassJS draws eight functions and reads back their paragraphs,
+// their section titles, the row with the command to copy and, for the
+// first-run card, its links. Text inside <code> is left out of the prose: a
+// flag such as --console-token keeps its spelling.
 const wordingPassJS = `
 const prose = (n) => !n ? "" : n.nodeType === 3 ? n.textContent : n.tag === "code" ? "" : (n._text || "") + (n.children || []).map(prose).join(" ");
 const whole = (n) => !n ? "" : n.nodeType === 3 ? n.textContent : (n._text || "") + (n.children || []).map(whole).join(" ");
@@ -22,6 +22,7 @@ const rows = (n, out = []) => {
   else (n.children || []).forEach((c) => rows(c, out));
   return out;
 };
+const walk = (n, f) => { if (!n || n.nodeType === 3) return; f(n); (n.children || []).forEach((c) => walk(c, f)); };
 const run = (s) => vm.runInContext(s, ctx);
 (async () => {
   const { bannedHits } = await import(process.argv[3]);
@@ -38,8 +39,15 @@ const run = (s) => vm.runInContext(s, ctx);
   run("capsCache = {};");
   out.sql.serve = rows(panel(servers, fb.off));
 
+  const setup = (perms) => { run("capsCache = " + JSON.stringify({ monitor: true, permissions: perms }) + ";");
+    const kids = run("snapshotSetupSections")({ daemon: [setting], servers: [] });
+    const titles = [];
+    kids.forEach((k) => walk(k, (x) => { if (x.className === "bks-sect") titles.push(x._text); }));
+    return { lines: rows({ tag: "x", children: kids }), titles, first: kids.length ? kids[0].className : "" }; };
+  out.setup = setup(null);
+  out.setupLocked = setup({ "settings:write": false });
+  out.sections = out.setup.lines;
   run("capsCache = { monitor: true, permissions: null };");
-  out.sections = rows({ tag: "x", children: run("snapshotSetupSections")({ daemon: [setting], servers: [] }) });
   out.locked = rows(run("backupDaemonEditCard")([Object.assign({}, setting, { startup: "" })], true));
 
   run("capsCache = {};");
@@ -57,20 +65,35 @@ const run = (s) => vm.runInContext(s, ctx);
   const take = run("backupTakeAway")(cur, b, { sql_export: { state: "some-new-state" } });
   out.unknownState = rows(take).filter((l) => /does not recognise/.test(l));
 
-  const seen = [].concat(...Object.values(out.sql), out.sections, out.locked, out.noSchedule, out.schedule, [out.moved], out.unknownState);
+  out.firstRun = JSON.parse(process.argv[6]).map((rep) => {
+    const card = run("firstRunCard")(rep);
+    const fixes = [], details = [], links = [];
+    walk(card, (x) => { if (x.className === "fr-fix") fixes.push(tidy(x._text));
+      if (x.className === "fr-detail") details.push(tidy(x._text));
+      if (x.tag === "a") links.push({ text: x._text, href: x.attrs.href || x.href || "" }); });
+    return { fixes, details, links };
+  });
+  const seen = [].concat(...out.firstRun.map((f) => f.fixes.concat(f.details)), ...Object.values(out.sql), out.sections, out.locked, out.noSchedule, out.schedule, [out.moved], out.unknownState);
   for (const l of seen) for (const h of bannedHits(l)) if (h.word === "console") out.banned.push(l);
   out.here = seen.filter((l) => /^(Change|Saved) here\b/.test(l));
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
 `
 
-// TestWordingPassSaysWebInterface: the sentences drawn for a person say "web
-// interface" or "DBTrail", never "console", and the settings card says where
-// a value was saved instead of "here" (#1683). The SQL client panel says that
-// its password is not one server's (#1685), under the command, and only when
-// the port is on. The port's state comes from flashbackStatus and the setting
-// from the wire type, so the shapes are the ones the API sends.
-func TestWordingPassSaysWebInterface(t *testing.T) {
+// TestWordingPassTheseSentences pins the sentences one wording pass changed
+// (#1683, #1685), as drawn: the arrival note, the two schedule lines of a
+// server row, the unknown .sql build state, the saved-setting card, the SQL
+// client panel and the first-run step for full reads that are turned off. The
+// port's state comes from flashbackStatus, the setting from the wire type and
+// the steps from firstRunSteps, so the shapes are the ones the API sends.
+//
+// It is a test of THESE sentences and nothing wider. It does not sweep the
+// web interface for the word "console": it draws eight functions and reads
+// paragraphs, section titles, the command row and the first-run card. A
+// button, a summary, a heading, a list item or an error box is not read, no
+// other function is drawn, and no text written in Go is looked at beyond the
+// first-run step. A new sentence that says "console" anywhere else passes.
+func TestWordingPassTheseSentences(t *testing.T) {
 	status := map[string]flashbackStatusDTO{
 		"named":    (&Server{flashbackListen: "127.0.0.1:3308"}).flashbackStatus(),
 		"wildcard": (&Server{flashbackListen: ":3308"}).flashbackStatus(),
@@ -90,18 +113,39 @@ func TestWordingPassSaysWebInterface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := runNodeConnectArgs(t, renderHarnessJS+wordingPassJS, string(fb), string(setting))
+	yes := true
+	running := firstRunInput{Monitor: MonitorStatus{State: "running", SourceConnected: true}, IndexExists: &yes, SnapshotTaken: true, StreamStarted: true}
+	var reports []FirstRunReport
+	for _, c := range []struct{ noLoc, pg bool }{{false, false}, {true, false}, {false, true}} {
+		in := running
+		in.BackupOff, in.BackupNoLocation, in.Postgres = true, c.noLoc, c.pg
+		in.SnapshotTaken = !c.pg
+		reports = append(reports, firstRunSteps(in))
+	}
+	steps, err := json.Marshal(reports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := runNodeConnectArgs(t, renderHarnessJS+wordingPassJS, string(fb), string(setting), string(steps))
 	var got struct {
 		SQL                                    map[string][]string
 		Sections, Locked, NoSchedule, Schedule []string
 		Moved                                  string
 		UnknownState, Banned, Here             []string
+		Setup, SetupLocked                     struct {
+			Lines, Titles []string
+			First         string
+		}
+		FirstRun []struct {
+			Fixes, Details []string
+			Links          []struct{ Text, Href string }
+		}
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %s: %v", raw, err)
 	}
 
-	const notice = "This password works for every server in the sidebar, not only this one."
+	const notice = "This password works for every server in the sidebar."
 	index := func(lines []string, want string) int {
 		at := -1
 		for i, l := range lines {
@@ -148,7 +192,44 @@ func TestWordingPassSaysWebInterface(t *testing.T) {
 			t.Errorf("%s: want the line %q in:\n  %s", what, want, strings.Join(lines, "\n  "))
 		}
 	}
-	has("settings heading", got.Sections, "Change in the web interface")
+	// One kind of setting is drawn, so it has no title to tell it from
+	// another; the card opens the section. A session that cannot save them
+	// is told so.
+	if len(got.Setup.Titles) != 0 || got.Setup.First != "cards cards-plain" {
+		t.Errorf("settings a session can save: titles %q, first node %q; want no title and the card first", got.Setup.Titles, got.Setup.First)
+	}
+	if len(got.SetupLocked.Titles) != 1 || got.SetupLocked.Titles[0] != "Current settings" {
+		t.Errorf("settings a session cannot save: titles %q, want Current settings", got.SetupLocked.Titles)
+	}
+	// With no server yet there is no "this one" to tell apart.
+	for k, lines := range got.SQL {
+		for _, l := range lines {
+			if strings.Contains(l, "this one") {
+				t.Errorf("%s: %q names a server that may not exist", k, l)
+			}
+		}
+	}
+
+	// Full reads turned off: the step says where that is changed, and the
+	// way there is the docs section, since no page draws the setting.
+	const fixHead = "Creating full reads is turned on where DBTrail is started, not in the web interface. " +
+		"The docs name the setting under Set at startup. Restart DBTrail after changing it. A full read reads every table this server captures"
+	wantFix := []string{
+		fixHead + ", and mydumper must be installed where DBTrail runs.",
+		fixHead + ", and mydumper must be installed where DBTrail runs. This server also needs its own snapshot location, set on the Snapshots page under Where and how often.",
+		fixHead + ".",
+	}
+	if len(got.FirstRun) != len(wantFix) {
+		t.Fatalf("%d first-run cards drawn, want %d", len(got.FirstRun), len(wantFix))
+	}
+	for i, f := range got.FirstRun {
+		t.Logf("first run %d: %q %q %+v", i, f.Details, f.Fixes, f.Links)
+		has("first-run fix", f.Fixes, wantFix[i])
+		has("first-run detail", f.Details, "Creating full reads from the web interface is turned off. Restoring a whole table to a past moment needs a full read.")
+		if len(f.Links) != 1 || f.Links[0].Text != "Read the docs ›" || f.Links[0].Href != "https://www.dbtrail.com/docs/settings/backups/#set-at-startup" {
+			t.Errorf("first run %d: links %+v, want one to the docs section", i, f.Links)
+		}
+	}
 	has("where a value was saved", got.Sections, "Saved in the web interface. The command line says 3d.")
 	has("settings fine print", got.Sections, "Saved in DBTrail's own settings file, which wins over the command line and the environment. "+
 		"Use the startup value to go back to what the process was started with.")
