@@ -2,9 +2,12 @@ package console
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -152,4 +155,144 @@ func TestBaselinesAPI_sharedWith(t *testing.T) {
 			t.Fatalf("shared_with = %+v, snapshots = %d; want none and 3", got.SharedWith, len(got.Snapshots))
 		}
 	})
+}
+
+// The sentence the settings row says, rendered by the REAL row in node from
+// what the REAL endpoint answered over real folders.
+func TestBackupServerRow_saysTheLocationIsShared(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv(requireNodeEnv) != "" {
+			t.Fatalf("%s is set and node is not on PATH", requireNodeEnv)
+		}
+		t.Skip("node is not installed")
+	}
+	const own = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	const other = "bbbbbbbb-0000-0000-0000-000000000002"
+	const third = "cccccccc-0000-0000-0000-000000000003"
+	answer := func(t *testing.T, ownID string, markers ...[]string) (string, json.RawMessage) {
+		dir := t.TempDir()
+		for i, ms := range markers {
+			ts := fmt.Sprintf("2026-06-%02dT00-00-00Z", i+1)
+			writeBaselineFixture(t, dir, ts, "shop", "orders.parquet")
+			for _, m := range ms {
+				writeBaselineFixture(t, dir, ts, m)
+			}
+		}
+		srv := newBaselineServer(t, dir, true)
+		if ownID != "" {
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { db.Close() })
+			mock.ExpectQuery("FROM stream_state").WillReturnRows(sqlmock.NewRows([]string{"bintrail_id"}).AddRow(ownID))
+			srv.cm.boot.db = db
+		}
+		rec, body := doServersReq(t, srv, "GET", "/api/baselines", "")
+		if rec.Code != 200 {
+			t.Fatalf("code = %d, body = %s", rec.Code, body)
+		}
+		return dir, body
+	}
+	signed := func(id string) []string { return []string{"_SUCCESS", "_WRITER." + id} }
+	type scene struct {
+		Dir      string          `json:"dir"`
+		Listing  json.RawMessage `json:"listing"`
+		TypedDir string          `json:"typed_dir,omitempty"`
+		S3       string          `json:"s3,omitempty"`
+	}
+	scenes := map[string]scene{}
+	add := func(name, ownID string, mod func(*scene), markers ...[]string) {
+		dir, body := answer(t, ownID, markers...)
+		sc := scene{Dir: dir, Listing: body}
+		if mod != nil {
+			mod(&sc)
+		}
+		scenes[name] = sc
+	}
+	add("oneWriter", own, nil, signed(own), signed(own))
+	add("unsignedAndOne", own, nil, nil, []string{"_SUCCESS"}, signed(own))
+	add("onlyUnsigned", own, nil, nil, []string{"_SUCCESS"})
+	add("twoKnown", own, nil, signed(own), signed(other))
+	add("threeKnown", own, nil, signed(own), signed(other), signed(third))
+	add("twoUnknown", "", nil, signed(own), signed(other))
+	add("twoWithS3", own, func(s *scene) { s.S3 = "s3://b/p/" }, signed(own), signed(other))
+	add("twoTypedElsewhere", own, func(s *scene) { s.TypedDir = "/srv/a-new-folder" }, signed(own), signed(other))
+	in, err := json.Marshal(scenes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appJS, err := filepath.Abs("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := renderHarnessJS + `
+FakeEl.prototype.addEventListener = function (t, f) { (this._l = this._l || {})[t] = ((this._l || {})[t] || []).concat(f); };
+const fire = (n, t) => { for (const f of ((n._l || {})[t] || [])) f({ key: "" }); };
+vm.runInContext("capsCache.monitor = true;", ctx);
+const walk = (n, f) => { if (!n || n.nodeType !== 1) return; f(n); for (const c of n.children) walk(c, f); };
+const find = (root, pred) => { let hit = null; walk(root, (n) => { if (!hit && pred(n)) hit = n; }); return hit; };
+const reds = (root) => { const out = []; const go = (n, hid) => { if (!n || n.nodeType !== 1) return; const h = hid || n.hidden; if (!h && n.tag === "p" && /\berr\b/.test(n.className) && n._text) out.push(n._text); for (const c of n.children) go(c, h); }; go(root, false); return out; };
+const scenes = ` + string(in) + `;
+const out = {};
+for (const [name, sc] of Object.entries(scenes)) {
+  // What the page loader does with the listing it read.
+  ctx.__listing = sc.listing;
+  vm.runInContext("snapSharedWith = (__listing && __listing.shared_with) || [];", ctx);
+  const srv = { id: "s1", name: "prod", baseline_dir: sc.dir, baseline_s3: sc.s3 || "", default_dir: "/state/snapshots/s1",
+    keep_newest: 0, local_copy: true, prune_loop: true, source: "server" };
+  const r = ctx.backupServerRow(srv, false, [], "", true);
+  if (sc.typed_dir) { const i = find(r, (n) => n.tag === "input" && n.attrs.name === "baseline_dir"); i.value = sc.typed_dir; fire(i, "input"); }
+  out[name] = reds(r);
+}
+console.log(JSON.stringify(out));
+`
+	path := filepath.Join(t.TempDir(), "row.js")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := exec.Command(node, path, appJS).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, raw)
+	}
+	var got map[string][]string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("node said: %s", raw)
+	}
+	if len(got) != len(scenes) {
+		t.Fatalf("node rendered %d scenes of %d: %s", len(got), len(scenes), raw)
+	}
+	tail := func(dir string) string {
+		return " Their snapshots mix in " + dir + ", and a read can return the other one's data. Give each its own folder or S3 prefix."
+	}
+	want := map[string][]string{
+		"oneWriter":         nil,
+		"unsignedAndOne":    nil,
+		"onlyUnsigned":      nil,
+		"twoKnown":          {"Another DBTrail writes its snapshots here too: " + other + "." + tail(scenes["twoKnown"].Dir)},
+		"threeKnown":        {"Other copies of DBTrail write their snapshots here too: " + other + ", " + third + "." + tail(scenes["threeKnown"].Dir)},
+		"twoUnknown":        {"More than one DBTrail writes its snapshots here: " + own + ", " + other + "." + tail(scenes["twoUnknown"].Dir)},
+		"twoWithS3":         {"Another DBTrail writes its snapshots here too: " + other + "." + tail(scenes["twoWithS3"].Dir)},
+		"twoTypedElsewhere": nil,
+	}
+	banned := regexp.MustCompile(`(?i)\b(backups?|baselines?|index(es)?|sources?|consoles?|daemons?)\b|—`)
+	for name, w := range want {
+		if !reflect.DeepEqual(got[name], w) && !(len(got[name]) == 0 && len(w) == 0) {
+			t.Errorf("%s: the row says in red\n\t%q\nwant\n\t%q", name, got[name], w)
+		}
+		for _, line := range got[name] {
+			t.Logf("%s: %s", name, line)
+			if m := banned.FindString(strings.ReplaceAll(line, scenes[name].Dir, "")); m != "" {
+				t.Errorf("%s: %q uses %q", name, line, m)
+			}
+			// Known writer: the row names the OTHER one, never this server.
+			if strings.HasPrefix(line, "Another") || strings.HasPrefix(line, "Other") {
+				if strings.Contains(line, own) || !strings.Contains(line, other) {
+					t.Errorf("%s: %q does not name the other writer and only it", name, line)
+				}
+			}
+		}
+	}
 }

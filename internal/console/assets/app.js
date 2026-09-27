@@ -5660,6 +5660,7 @@ async function renderSnapshots() {
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
   snapStorage = storage;
+  snapSharedWith = (baselines && baselines.shared_with) || [];
   snapRegistry = (serversRes && serversRes.servers) || [];
   // Run states for the selected server: only the endpoints this daemon
   // actually serves (each 403s when its feature is off).
@@ -6374,6 +6375,9 @@ function s3OnlyBackupWarning(srv, fix = true) {
 function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
   const out = [];
   const say = (text, err) => out.push({ text, err: !!err });
+  // First, and whatever the answers below are: it is about the place as
+  // saved, local or S3, and it is the one line here that is about data.
+  for (const w of was.shared || []) say(sharedLocationWords(w), true);
   if (!local) {
     if (!s3 && !was.local && was.source === "default") {
       say("This server has no folder of its own. Time-travel reads DBTrail's startup folder; to take snapshots for it, answer yes or set an S3 destination.");
@@ -6411,6 +6415,18 @@ function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
     say("Keeps the newest " + keep + " where DBTrail takes the snapshots. This copy of DBTrail removes nothing.");
   }
   return out;
+}
+
+// sharedLocationWords says that a place holds snapshots of more than one
+// installation (#1762), from one entry of GET /api/baselines shared_with:
+// who the other one is, by the id it signs with, and what to do. Nothing is
+// refused, so it says what can go wrong rather than what was stopped.
+function sharedLocationWords(w) {
+  const ids = (w.others || []).join(", ");
+  const who = w.own
+    ? (w.others.length === 1 ? "Another DBTrail writes its snapshots here too: " : "Other copies of DBTrail write their snapshots here too: ") + ids + "."
+    : "More than one DBTrail writes its snapshots here: " + ids + ".";
+  return who + " Their snapshots mix in " + w.source + ", and a read can return the other one's data. Give each its own folder or S3 prefix.";
 }
 
 // keepShapeDraw draws what "keep the newest N" means: N tiles, the newest
@@ -6665,7 +6681,8 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // back can I go"; the rest of what the count means waits under "More
     // about this server", so the card is read at a glance.
     const said = localCopyWords(local, s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
-      { local: was.local, dir: was.rawDir, source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held },
+      { local: was.local, dir: was.rawDir, source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held,
+        shared: asSaved ? snapSharedWith : [] },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
         every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0 });
     const infos = said.filter((w) => !w.err);
@@ -7623,6 +7640,10 @@ let backupsPaintedFor = "";
 // builds wait on disk, under the .sql lane. null when the session may not
 // read settings, and then neither note is drawn.
 let snapStorage = null;
+// The places of the selected server that hold snapshots of more than one
+// installation (#1762), from the listing the page just read; the server's
+// settings row says it.
+let snapSharedWith = [];
 let snapRegistry = [];
 function backupsOnScreen() { return !!(backupsHead && backupsHead.isConnected); }
 
