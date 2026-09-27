@@ -44,6 +44,7 @@ var (
 	bslRetry          bool
 	bslEncrypt        bool
 	bslEncryptKey     string
+	bslBintrailID     string
 )
 
 func init() {
@@ -53,13 +54,14 @@ func init() {
 	baselineCmd.Flags().StringVar(&bslTables, "tables", "", "Comma-separated db.table filter (e.g. mydb.orders,mydb.items; default: all)")
 	baselineCmd.Flags().StringVar(&bslCompression, "compression", "zstd", "Parquet compression codec: zstd, snappy, gzip, none")
 	baselineCmd.Flags().IntVar(&bslRowGroupSize, "row-group-size", 500_000, "Rows per Parquet row group")
-	baselineCmd.Flags().StringVar(&bslUpload, "upload", "", "S3 destination URL to upload Parquet files after generation (e.g. s3://my-bucket/baselines/)")
+	baselineCmd.Flags().StringVar(&bslUpload, "upload", "", "S3 destination URL to upload Parquet files after generation (e.g. s3://my-bucket/baselines/). One writer per prefix")
 	baselineCmd.Flags().StringVar(&bslUploadRegion, "upload-region", "", "AWS region for --upload (default: from AWS_REGION env var or ~/.aws/config)")
 	baselineCmd.Flags().StringVar(&bslBaselineRetain, "baseline-retain", "", "Prune local snapshots older than this (Nd/Nh) once a durable S3 copy exists (requires --upload; never deletes the only copy or the newest snapshot per table)")
 	baselineCmd.Flags().StringVar(&bslFormat, "format", "text", "Output format: text or json")
 	baselineCmd.Flags().BoolVar(&bslRetry, "retry", false, "Skip tables whose output Parquet file already exists and S3 objects that were already uploaded")
 	baselineCmd.Flags().BoolVar(&bslEncrypt, "encrypt", false, "Decrypt encrypted dump files before processing, verifying each file's .enc.hmac integrity sidecar first (requires openssl on $PATH)")
 	baselineCmd.Flags().StringVar(&bslEncryptKey, "encrypt-key", "", "Path to encryption key file (default: ~/.config/bintrail/dump.key)")
+	baselineCmd.Flags().StringVar(&bslBintrailID, "bintrail-id", "", "Server identity UUID to sign the snapshot with. One writer per --output folder or --upload prefix: two installations writing into one location mix their snapshots. Without it the snapshot is unsigned")
 	_ = baselineCmd.MarkFlagRequired("input")
 	_ = baselineCmd.MarkFlagRequired("output")
 	bindCommandEnv(baselineCmd)
@@ -112,6 +114,7 @@ func runBaseline(cmd *cobra.Command, args []string) error {
 		Compression:  bslCompression,
 		RowGroupSize: bslRowGroupSize,
 		Retry:        bslRetry,
+		WriterID:     bslBintrailID,
 	}
 
 	stats, err := baseline.Run(cmd.Context(), cfg)

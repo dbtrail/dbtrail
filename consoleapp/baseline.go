@@ -23,6 +23,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/notify"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
@@ -717,6 +718,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		Compression: "zstd",
 		Timestamp:   dumpStartedAt,
 		TableDeltas: s.tableDeltas,
+		WriterID:    snapshotWriterID(req),
 	})
 	if err != nil {
 		out.cleanup()
@@ -725,6 +727,36 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	out.stats = stats
 	out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(dumpStartedAt))
 	return out, nil
+}
+
+// snapshotWriterID is the identity a full snapshot of req's server is signed
+// with (#1762): the bintrail_id its index records, the same one the scheduled
+// updates of that server sign with, since they read it from the same index.
+// Empty when the index names none yet, or cannot be read: the snapshot is
+// then published unsigned, never refused.
+func snapshotWriterID(req console.BaselineRequest) string {
+	if req.IndexDSN == "" {
+		return ""
+	}
+	id, err := snapshotWriterIDFunc(req.IndexDSN)
+	if err != nil {
+		slog.Warn("could not read the server's bintrail_id, so this snapshot is published unsigned and takes no part in noticing two writers on one snapshot location",
+			"server", req.ServerID, "error", err)
+		return ""
+	}
+	return id
+}
+
+// snapshotWriterIDFunc reads the identity from an index; a test replaces it.
+var snapshotWriterIDFunc = func(indexDSN string) (string, error) {
+	db, err := config.Connect(indexDSN)
+	if err != nil {
+		return "", fmt.Errorf("connect: %w", err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return serverid.SnapshotWriterID(ctx, db)
 }
 
 // executePG produces a PostgreSQL baseline in-process via internal/pgbaseline —
@@ -751,6 +783,7 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (baseline.St
 	if err != nil {
 		return baseline.Stats{}, 0, err
 	}
+	cfg.WriterID = snapshotWriterID(req)
 	pgStats, err := pgbaseline.Run(s.ctx, cfg)
 	if err != nil {
 		return baseline.Stats{}, 0, fmt.Errorf("pg baseline: %w", err)
