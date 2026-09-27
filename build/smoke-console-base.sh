@@ -49,6 +49,10 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
+# Ctrl-C and a plain kill must clean up too. bash runs the EXIT trap on the
+# way out of these, after the docker command in progress returns.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # A plain string, not an array: bash 3.2 (the macOS default) treats an empty
 # array as unset under `set -u`.
@@ -154,8 +158,8 @@ SQL
       rc=$?
       echo "rc=$rc"
       grep -E "CRITICAL|ERROR" /tmp/mydumper.log | head -5
+      # For the log only. The rows below are what is checked.
       echo "files=$(ls /tmp/dump 2>/dev/null | wc -l | tr -d " ")"
-      echo "rows=$(cat /tmp/dump/shop.items.*.sql 2>/dev/null | grep -cE "^\(|,\(|VALUES ?\(" )"
       for v in one two three; do
         grep -q "\"$v\"" /tmp/dump/shop.items.*.sql 2>/dev/null && echo "has=$v"
       done
