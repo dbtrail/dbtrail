@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -455,5 +456,32 @@ func TestOneRejectsANegativeCleanupWait(t *testing.T) {
 	err := One(context.Background(), Config{Format: "text", GapTimeout: 30})
 	if err == nil || !strings.Contains(err.Error(), "--cleanup-wait-timeout") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// TestOneLooksBeforeEveryCleanup guards the wiring in One, which no unit test
+// can run (it needs a live source and index). It reads the source: every
+// place that starts the resume cleanup must have the look right before it.
+// The real-server test covers what the look does; this covers that it is
+// called at all.
+func TestOneLooksBeforeEveryCleanup(t *testing.T) {
+	raw, err := os.ReadFile("streamrun.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(raw), "\n")
+	starts := 0
+	for i, l := range lines {
+		if !strings.Contains(l, "done := beginResumeCleanup(") {
+			continue
+		}
+		starts++
+		if i < 3 || !strings.Contains(lines[i-3], "awaitEarlierCleanup(ctx, indexDB, cfg.Hooks); stopped || err != nil {") ||
+			strings.TrimSpace(lines[i-2]) != "return err" || strings.TrimSpace(lines[i-1]) != "}" {
+			t.Errorf("streamrun.go:%d starts the resume cleanup without looking for an earlier one first", i+1)
+		}
+	}
+	if starts != 2 {
+		t.Errorf("found %d places that start the resume cleanup, want 2 (position and GTID); a new one needs the look too", starts)
 	}
 }
