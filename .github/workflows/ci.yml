@@ -334,9 +334,10 @@ jobs:
       # An S3-compatible store for the #1453/#1454 leg: the SDK half uploads
       # through BINTRAIL_S3_ENDPOINT and the DuckDB half reads the object back
       # through the session's endpoint settings. Throwaway root credentials;
-      # the container is gone with the runner. Pulled from quay.io and pinned:
-      # Docker Hub stopped serving minio/minio in September 2026 (pull access
-      # denied, repository does not exist), which turned every push red.
+      # the container is gone with the runner. MinIO withdrew its own
+      # images twice in September 2026 (Docker Hub, then quay.io: "unauthorized"
+      # on every tag), and each time every push turned red. This is a community
+      # build of the same server, pinned by tag AND digest so it cannot move.
       - name: Start MinIO (bintrail-test-minio)
         if: env.RUN == 'true'
         run: |
@@ -344,7 +345,7 @@ jobs:
             -e MINIO_ROOT_USER=bintrail \
             -e MINIO_ROOT_PASSWORD=bintrail-it-secret \
             -p 9000:9000 \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+            ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9 server /data
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null && break
             sleep 1
