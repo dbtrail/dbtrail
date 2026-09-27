@@ -39,9 +39,14 @@ ARG TARGETARCH
 # mydumper is 0.10, too old for the CONSISTENT lock-free --trx-tables snapshot a
 # least-privilege replication user (no RELOAD/FLUSH_TABLES) needs (verified against
 # a real Percona 8.0 source). Idle bytes when the trigger is not enabled.
+#
+# libmariadb3 (#1876): the arm64 mydumper package is linked against MariaDB
+# Connector/C, which loads caching_sha2_password from a plugin directory that
+# only this package ships. Without it mydumper cannot log in on arm64 as a user
+# created with the MySQL 8.0+ default.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        ca-certificates wget libatomic1 libglib2.0-0 libpcre2-8-0 zstd && \
+        ca-certificates wget libatomic1 libglib2.0-0 libpcre2-8-0 zstd libmariadb3 && \
     wget -q "https://github.com/mydumper/mydumper/releases/download/v1.0.3-1/mydumper_1.0.3-1.bookworm_${TARGETARCH}.deb" -O /tmp/mydumper.deb && \
     dpkg -i /tmp/mydumper.deb && \
     rm -f /tmp/mydumper.deb && \

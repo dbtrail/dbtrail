@@ -725,6 +725,25 @@ volume is chowned to it), `/var/lib/bintrail` pre-created for the server
 registry. Build it from source with
 `docker build -f build/Dockerfile.bintrail-console -t bintrail-console .`
 
+### The console base image
+
+`ghcr.io/dbtrail/bintrail-console-base` holds everything the console image
+needs besides the binary: Debian, the pinned mydumper with the client library
+it needs to log in, the `bintrail` user (uid 999) and its directories. You do
+not run it yourself. It exists so that mydumper is installed in one place and
+tested there: before a tag is published, `build/smoke-console-base.sh` runs the
+image's mydumper against MySQL 8.0 and 8.4 on both architectures, as a user
+created with the server's default login plugin.
+
+The console image recipes still install the same packages themselves. They
+move to `FROM` this image once its first tag is published.
+
+To change it, edit `build/Dockerfile.console-base` and bump the tag in
+`build/console-base.tag` in the same change. A published tag is never
+overwritten, so a change without a new tag is never published, and the pull
+request check fails to say so. Run the test locally with
+`build/smoke-console-base.sh` (it needs only Docker).
+
 ### Why not Alpine?
 
 DBTrail depends on DuckDB (`duckdb-go`) for querying Parquet archives. DuckDB's Go bindings include pre-compiled C libraries linked against glibc. Alpine uses musl libc, which is binary-incompatible and would cause runtime failures.

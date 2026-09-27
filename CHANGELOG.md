@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Snapshots from the console image failed on arm64 for a user created with
+  the MySQL 8 default** (#1876). The arm64 mydumper package is linked against
+  MariaDB Connector/C, which loads `caching_sha2_password` from a plugin
+  directory the image did not have, so the dump stopped at login with
+  `Plugin caching_sha2_password could not be loaded`. The console images now
+  install `libmariadb3`, which ships that directory. amd64 was not affected.
+
+### Added
+- **A base image for the console, tested before it is published.**
+  `ghcr.io/dbtrail/bintrail-console-base` holds Debian, the pinned mydumper
+  (checksum verified per architecture) and the `bintrail` user. Its workflow
+  runs the image's mydumper against MySQL 8.0 and 8.4 on amd64 and arm64
+  before the tag exists. The console image recipes move onto it in a later
+  change.
+
 ## [0.90.0] - 2026-09-24
 
 ### Changed

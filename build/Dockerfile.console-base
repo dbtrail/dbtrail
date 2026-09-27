@@ -1,0 +1,70 @@
+# Base image for every console image: the operating system, mydumper, and the
+# unprivileged user. Published as ghcr.io/dbtrail/bintrail-console-base by
+# .github/workflows/console-base-image.yml, tagged with the contents of
+# build/console-base.tag.
+#
+# Why this is its own image. The block below used to be copied into each
+# console image recipe, and nothing built or ran any of them before a release.
+# #1876 lived in that gap: a fix had to land in every copy, and no test would
+# have noticed one left behind. Here it is installed once and
+# build/smoke-console-base.sh runs it on both architectures, against real
+# servers, before the tag exists.
+#
+# Changing this file means a new tag: bump build/console-base.tag in the same
+# change. A published tag is never overwritten.
+FROM debian:bookworm-slim
+ARG TARGETARCH
+
+# mydumper powers the OPT-IN in-process baseline trigger (#613): with
+# BINTRAIL_CONSOLE_BASELINE_TRIGGER=1 the watch daemon runs mydumper here as a
+# LOCAL subprocess (no docker socket), then converts+uploads in-process. We pin
+# the SAME version the compose baseline-dump pipeline uses so console-created
+# baselines are identical to CLI/compose ones. bookworm's apt mydumper is 0.10,
+# too old for the CONSISTENT lock-free --trx-tables snapshot a least-privilege
+# replication user (no RELOAD/FLUSH_TABLES) needs (verified against a real
+# Percona 8.0 source). Idle bytes when the trigger is not enabled.
+ARG MYDUMPER_VERSION=1.0.3-1
+# One checksum per architecture, because they are two different builds of the
+# same version: amd64 is linked against the MySQL client library, arm64 against
+# MariaDB Connector/C (#1876). From the release's own asset digests.
+ARG MYDUMPER_SHA256_AMD64=9120840af0fe40172fb10ea5edbed4a303f54194049c880744f92eb55a877c6c
+ARG MYDUMPER_SHA256_ARM64=c0839b1cfbc543c0851e82978abba57dcd2c2ce83aa2dc6a792b2fd0f13e3532
+
+# libmariadb3: MariaDB Connector/C loads caching_sha2_password (what MySQL 8.0+
+# gives a user by default) from a shared object in its plugin directory, and the
+# mydumper package neither ships that directory nor depends on the package that
+# does. Without it the arm64 build cannot log in to a stock MySQL 8 user (#1876).
+# Installed on both architectures so the two images differ only in the binary.
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+        amd64) mydumper_sha256="${MYDUMPER_SHA256_AMD64}" ;; \
+        arm64) mydumper_sha256="${MYDUMPER_SHA256_ARM64}" ;; \
+        *) echo "no mydumper checksum for architecture '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates wget libatomic1 libglib2.0-0 libpcre2-8-0 zstd libmariadb3; \
+    wget -q "https://github.com/mydumper/mydumper/releases/download/v${MYDUMPER_VERSION}/mydumper_${MYDUMPER_VERSION}.bookworm_${TARGETARCH}.deb" -O /tmp/mydumper.deb; \
+    echo "${mydumper_sha256}  /tmp/mydumper.deb" | sha256sum -c -; \
+    dpkg -i /tmp/mydumper.deb; \
+    rm -f /tmp/mydumper.deb; \
+    rm -rf /var/lib/apt/lists/*; \
+    # Pin uid 999: the bundled compose chowns the index password secret to
+    # uid 999 (mode 0600) for this process to read, see docker-compose.yml.
+    useradd --system --no-create-home --uid 999 bintrail; \
+    # Writable state dir (console server registry, etc.). Pre-created and
+    # chowned in the image so a named volume mounted here inherits the
+    # ownership: the container runs as the non-root bintrail user.
+    mkdir -p /var/lib/bintrail; chown bintrail /var/lib/bintrail; \
+    # Home dir for the bintrail user. DuckDB extracts/caches its httpfs and aws
+    # extensions under $HOME/.duckdb for S3 baseline/archive reads; without an
+    # existing home the INSTALL fails with "Can't find the home directory at
+    # '/home/bintrail'". (The duckdbutil loader also pins a fallback dir, so
+    # this is belt-and-suspenders for the bundled image.)
+    mkdir -p /home/bintrail; chown bintrail /home/bintrail
+
+LABEL org.opencontainers.image.source="https://github.com/dbtrail/dbtrail" \
+      org.opencontainers.image.description="Base image for the bintrail console: Debian, mydumper, the bintrail user" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+USER bintrail
