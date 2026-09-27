@@ -1,6 +1,7 @@
 package baseline
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -168,4 +169,92 @@ func TestWriteWriterMarker(t *testing.T) {
 func TestSignSnapshotNeverFails(t *testing.T) {
 	SignSnapshot(filepath.Join(t.TempDir(), "gone"), "abc")
 	SignSnapshot(t.TempDir(), "a/b")
+}
+
+// runSigned converts a one-table dump with cfg's writer and returns the
+// snapshot directory it published.
+func runSigned(t *testing.T, writer string, deltas bool) string {
+	t.Helper()
+	inputDir, outputDir := t.TempDir(), t.TempDir()
+	for name, body := range map[string]string{
+		"metadata":               sampleMetadata,
+		"shop.orders-schema.sql": sampleSchema,
+		"shop.orders.00000.sql":  "INSERT INTO `orders` VALUES(1,10,'9.99','n','2025-01-01 00:00:00','2025-01-15');\n",
+	} {
+		if err := os.WriteFile(filepath.Join(inputDir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Run(context.Background(), Config{InputDir: inputDir, OutputDir: outputDir, Compression: "none",
+		RowGroupSize: 100, WriterID: writer, TableDeltas: deltas}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var snap string
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			snap = filepath.Join(outputDir, e.Name())
+		}
+	}
+	if snap == "" {
+		t.Fatal("no snapshot directory was published")
+	}
+	if _, err := os.Stat(filepath.Join(snap, SuccessMarker)); err != nil {
+		t.Fatalf("the snapshot is not complete: %v", err)
+	}
+	return snap
+}
+
+// The conversion from a dump signs what it publishes, with table deltas
+// written beside the tables or not.
+func TestRun_signsTheSnapshot(t *testing.T) {
+	const id = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	for _, deltas := range []bool{false, true} {
+		snap := runSigned(t, strings.ToUpper(id), deltas)
+		w, bad, err := ReadSnapshotWriters(snap)
+		if err != nil || !slices.Equal(w, []string{id}) || len(bad) != 0 {
+			t.Fatalf("deltas=%v: the snapshot is signed by %q (unreadable %q, err %v), want %s", deltas, w, bad, err, id)
+		}
+	}
+}
+
+// Without an identity the snapshot is published as before, unsigned.
+func TestRun_withoutAWriterPublishesUnsigned(t *testing.T) {
+	snap := runSigned(t, "", false)
+	w, bad, err := ReadSnapshotWriters(snap)
+	if err != nil || len(w) != 0 || len(bad) != 0 {
+		t.Fatalf("writers %q, unreadable %q, err %v", w, bad, err)
+	}
+}
+
+// An identity that cannot sign does not cost the snapshot.
+func TestRun_aBadWriterStillPublishes(t *testing.T) {
+	snap := runSigned(t, "not/an id", false)
+	if w, _, _ := ReadSnapshotWriters(snap); len(w) != 0 {
+		t.Fatalf("signed by %q", w)
+	}
+}
+
+// The signature reaches S3 with the snapshot, before the marker that makes
+// the snapshot readable there.
+func TestUpload_carriesTheSignature(t *testing.T) {
+	snap := runSigned(t, "abc-1", false)
+	var calls []string
+	ops := s3UploadOps{
+		putEmpty:     func(_ context.Context, k string) error { calls = append(calls, "put "+k); return nil },
+		uploadFile:   func(_ context.Context, _, k string) error { calls = append(calls, "upload "+k); return nil },
+		objectExists: func(_ context.Context, _ string) (bool, error) { return false, nil },
+		deleteObject: func(_ context.Context, k string) error { calls = append(calls, "delete "+k); return nil },
+	}
+	if _, err := uploadWithOps(context.Background(), filepath.Dir(snap), "p", false, ops); err != nil {
+		t.Fatal(err)
+	}
+	sig := slices.Index(calls, "upload p/"+filepath.Base(snap)+"/_WRITER.abc-1")
+	done := slices.Index(calls, "upload p/"+filepath.Base(snap)+"/"+SuccessMarker)
+	if sig < 0 || done < 0 || sig > done {
+		t.Fatalf("signature at %d, %s at %d, in:\n%s", sig, SuccessMarker, done, strings.Join(calls, "\n"))
+	}
 }

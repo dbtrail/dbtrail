@@ -112,6 +112,7 @@ func TestPGBaseline_Integration(t *testing.T) {
 		OutputDir:   outDir,
 		Compression: "zstd",
 		Parallelism: 2, // exercise the exported-snapshot worker path
+		WriterID:    "3E11FA47-71CA-11E1-9E33-C80AA9429562",
 	})
 	if err != nil {
 		t.Fatalf("pgbaseline.Run: %v", err)
@@ -145,6 +146,11 @@ func TestPGBaseline_Integration(t *testing.T) {
 	}
 	if !baseline.SnapshotComplete(snapDir) {
 		t.Error("SnapshotComplete = false, want true")
+	}
+	// Signed by its writer (#1762), in the form signatures are compared in.
+	if w, bad, err := baseline.ReadSnapshotWriters(snapDir); err != nil || len(bad) != 0 ||
+		len(w) != 1 || w[0] != "3e11fa47-71ca-11e1-9e33-c80aa9429562" {
+		t.Errorf("snapshot writers = %q (unreadable %q, err %v), want the configured one", w, bad, err)
 	}
 	if _, ok, err := baselineintegrity.LoadManifest(snapDir); err != nil || !ok {
 		t.Errorf("LoadManifest: ok=%v err=%v, want a valid manifest", ok, err)
