@@ -313,6 +313,24 @@ Override the resolved timestamp with `--timestamp` if needed.
 
 Each snapshot also records its **binlog anchor** (the file/position/GTID where the deltas on top of it begin) and, per table, a **content digest + row count** in the Parquet metadata (used by [`bintrail verify`](verify.md)). Baseline-anchored consumers (full-table and single-row `reconstruct`, the shim's `_snapshot`, `verify`, and cascade recovery's baseline fallback) fetch deltas using this recorded binlog **position** as the window's exact lower bound, not the snapshot's wall-clock timestamp: a row-event's timestamp reflects when its statement executed, not when its transaction committed, so a transaction that executed just before the snapshot instant but committed (and so was logged) just after it would otherwise be silently missed by a timestamp-only lower bound. Snapshots taken before this position was recorded (or that never recorded one) fall back to the timestamp alone. A `_SUCCESS` marker is written when the conversion completes; a partially-converted snapshot carries an `_INCOMPLETE` marker instead and is excluded from discovery (see [Pruning old local snapshots](#pruning-old-local-snapshots---baseline-retain)). Since [#1583](https://github.com/dbtrail/dbtrail/issues/1583) a completing snapshot is also published with its own `views.sql` next to `_SUCCESS` — the same DuckDB schema `bintrail views` writes, pinned to the snapshot's own paths (respelled as `s3://` URLs when the snapshot is uploaded), so the file that says how to open the data can never disagree with the data it sits beside. The console's `.tar.gz` download carries a relative copy instead, which works from inside the unpacked folder wherever it lands.
 
+### Views are skipped
+
+A view holds no rows of its own, so it is not copied. The snapshot holds the tables only, and the run says what it left out:
+
+```
+Baseline complete.
+  tables    : 2
+  views     : 1 skipped (shop.big_orders)
+  rows      : 6
+  files     : 2
+```
+
+The log names every skipped view, and `--format json` lists them under `views_skipped`. A source with no views prints no `views` line. The dump user still needs `SHOW VIEW`: without it mydumper stops at the first view.
+
+mydumper writes two files for a view, `<db>.<view>-schema.sql` (a placeholder table) and `<db>.<view>-schema-view.sql` (the view). `bintrail baseline` takes an object for a view only when the second file holds a `CREATE VIEW` and the object has no data file. An object with rows is always converted. If that file is empty or cannot be read, the run stops and names it.
+
+Naming a view in `--tables` is refused. A dump that holds views and no table is refused too, because there is nothing to copy.
+
 ### At-rest integrity (the `_MANIFEST` sidecar)
 
 Alongside each snapshot, `bintrail baseline` writes a `_MANIFEST` sidecar holding a **CRC-32C** over every Parquet file's bytes. Every local read path that consumes a baseline — full-table and single-row `reconstruct`, cascade recovery, the time-travel shim's `_snapshot`, and `query --include-snapshot` — **re-validates the CRC on every read** and **fails loud** on a mismatch (bit-rot, a truncated/partial write), rather than silently reconstructing from corrupt data. Snapshots created before this feature (no `_MANIFEST`) are read without validation, so it degrades gracefully. S3 reads validate too ([#698](https://github.com/dbtrail/dbtrail/issues/698)): before an S3 baseline is read, the original object is streamed once through CRC-32C via the AWS SDK (default credential chain) and compared against the snapshot's `_MANIFEST`, failing loud on a mismatch exactly like the local paths — at the cost of one extra full read of each object, memoized per process. When the validating client itself cannot reach the manifest or the object (for example a region or IAM mismatch with the credentials DuckDB's reader uses), the read proceeds with a logged warning instead of blocking recovery: only a completed hash that disagrees with the manifest is treated as corruption.

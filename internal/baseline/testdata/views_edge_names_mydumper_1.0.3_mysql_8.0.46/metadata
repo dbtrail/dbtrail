@@ -1,0 +1,87 @@
+# Started dump at: 2026-09-27 22:24:04
+[config]
+quote-character = BACKTICK
+
+[myloader_session_variables]
+SQL_MODE='NO_AUTO_VALUE_ON_ZERO,ONLY_FULL_GROUP_BY,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' /*!40101
+
+[source]
+# Channel_Name = '' # It can be use to setup replication FOR CHANNEL
+# SOURCE_LOG_FILE = "binlog.000002"
+# SOURCE_LOG_POS = 7470
+
+[`edge`.`mydumper_0`]
+real_table_name=Mixed.Case
+rows = 1
+schema_checksum = acf496de
+indexes_checksum = 1f09d0e1
+
+[`edge`.`mydumper_1`]
+real_table_name=Totals.By-schema
+rows = 0
+is_view = 1
+schema_checksum = a4bcf570
+
+[`edge`.`empty_real`]
+real_table_name=empty_real
+rows = 0
+schema_checksum = acf496de
+indexes_checksum = 1f09d0e1
+
+[`edge`.`items-schema-view`]
+real_table_name=items-schema-view
+rows = 1
+schema_checksum = acf496de
+indexes_checksum = 1f09d0e1
+
+[`edge`.`items`]
+real_table_name=items
+rows = 1
+schema_checksum = acf496de
+indexes_checksum = 1f09d0e1
+
+[`edge`.`log-schema`]
+real_table_name=log-schema
+rows = 1
+schema_checksum = acf496de
+indexes_checksum = 1f09d0e1
+
+[`edge`.`mem_real`]
+real_table_name=mem_real
+rows = 0
+schema_checksum = acf496de
+indexes_checksum = 1f09d0e1
+
+[`edge`.`orders-view`]
+real_table_name=orders-view
+rows = 2
+schema_checksum = acf496de
+indexes_checksum = 1f09d0e1
+
+[`edge`.`sale`]
+real_table_name=sale
+rows = 0
+is_view = 1
+schema_checksum = a4bcf570
+
+[`edge`.`sales_recent`]
+real_table_name=sales_recent
+rows = 0
+is_view = 1
+schema_checksum = a4bcf570
+
+[`edge`.`sales`]
+real_table_name=sales
+rows = 1
+schema_checksum = acf496de
+indexes_checksum = 1f09d0e1
+
+[`onlyviews`.`v1`]
+real_table_name=v1
+rows = 0
+is_view = 1
+schema_checksum = aa5b9dc0
+[config]
+max-statement-size = 312
+num-sequences = 0
+# Finished dump at: 2026-09-27 22:24:10

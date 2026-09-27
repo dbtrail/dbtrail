@@ -1,0 +1,36 @@
+# Started dump at: 2026-09-27 22:23:21
+[config]
+quote-character = BACKTICK
+
+[myloader_session_variables]
+SQL_MODE='NO_AUTO_VALUE_ON_ZERO,ONLY_FULL_GROUP_BY,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' /*!40101
+
+[source]
+# Channel_Name = '' # It can be use to setup replication FOR CHANNEL
+# SOURCE_LOG_FILE = "binlog.000002"
+# SOURCE_LOG_POS = 7470
+
+[`shop`.`big_orders`]
+real_table_name=big_orders
+rows = 0
+is_view = 1
+schema_checksum = ee666d26
+
+[`shop`.`customers`]
+real_table_name=customers
+rows = 3
+schema_checksum = 30248ab
+indexes_checksum = 1f09d0e1
+
+[`shop`.`orders`]
+real_table_name=orders
+rows = 3
+schema_checksum = a0c7caf2
+indexes_checksum = 1f09d0e1
+
+[`shop`]
+schema_checksum = 95DC8DDE
+[config]
+max-statement-size = 358
+num-sequences = 0
+# Finished dump at: 2026-09-27 22:23:21

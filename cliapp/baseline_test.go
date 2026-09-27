@@ -378,3 +378,25 @@ func writeMinimalDump(t *testing.T, dir string) {
 		}
 	}
 }
+
+func TestViewsSkippedLine(t *testing.T) {
+	many := []string{"a.v1", "a.v2", "a.v3", "a.v4", "a.v5", "a.v6", "a.v7"}
+	tests := []struct {
+		name  string
+		views []string
+		want  string
+	}{
+		{"none", nil, ""},
+		{"empty", []string{}, ""},
+		{"one", []string{"shop.big_orders"}, "1 skipped (shop.big_orders)"},
+		{"as many as are shown", many[:5], "5 skipped (a.v1, a.v2, a.v3, a.v4, a.v5)"},
+		{"more than are shown", many, "7 skipped (a.v1, a.v2, a.v3, a.v4, a.v5 and 2 more)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := viewsSkippedLine(tt.views); got != tt.want {
+				t.Errorf("viewsSkippedLine = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

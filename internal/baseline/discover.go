@@ -2,10 +2,13 @@ package baseline
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -19,20 +22,63 @@ type TableFiles struct {
 	Format     string   // "sql" or "tab"
 }
 
+// SkippedView is a view found in the dump. A view holds no rows of its own, so
+// there is nothing to convert: it is left out of the baseline and reported.
+type SkippedView struct {
+	Database string
+	Name     string
+	// File is what identified it: mydumper's <db>.<view>-schema-view.sql, or
+	// the <db>.<view>-schema.sql of a layout that writes CREATE VIEW there.
+	File string
+}
+
+// viewSchemaSuffix ends the file mydumper writes the real CREATE VIEW into.
+// The view's <db>.<view>-schema.sql beside it is a placeholder CREATE TABLE
+// (ENGINE=MEMORY, every column int) that myloader creates first so that views
+// depending on each other can be loaded in any order.
+const viewSchemaSuffix = "-schema-view.sql"
+
 // DiscoverTables scans the mydumper output directory and groups files by table.
 // It returns one TableFiles entry per table that has a schema file. Tables with
 // no data files (empty at dump time) are included with an empty DataFiles slice
-// so that downstream consumers can produce 0-row baselines. Views are skipped.
+// so that downstream consumers can produce 0-row baselines. Views are skipped;
+// DiscoverDump also says which ones.
 func DiscoverTables(inputDir string) ([]TableFiles, error) {
+	tables, _, err := DiscoverDump(inputDir)
+	return tables, err
+}
+
+// DiscoverDump is DiscoverTables plus the views it left out, sorted by
+// database and name.
+//
+// A view is recognized by its <db>.<view>-schema-view.sql file (#1687), and
+// only when all of this holds:
+//
+//   - the file's first CREATE statement is a CREATE VIEW. The name alone is
+//     not enough: mydumper 0.10 writes the rows of a table called
+//     `x-schema-view` to a file with that exact name.
+//   - no data file exists for the object. A view has none, so an object with
+//     rows is converted whatever else sits beside it.
+//
+// Anything else stays a table. Skipping a real table loses it without a word,
+// while converting a view fails the run where someone can see it, so every
+// doubt resolves to "table". The one case with no safe answer, a
+// -schema-view.sql that is empty or cannot be read, is an error that names
+// the file.
+func DiscoverDump(inputDir string) ([]TableFiles, []SkippedView, error) {
 	entries, err := os.ReadDir(inputDir)
 	if err != nil {
-		return nil, fmt.Errorf("read input directory: %w", err)
+		return nil, nil, fmt.Errorf("read input directory: %w", err)
 	}
 
 	type tableKey struct{ db, table string }
 	schemas := make(map[tableKey]string) // key → schema file path
 	data := make(map[tableKey][]string)  // key → data file paths
 	formats := make(map[tableKey]string) // key → "sql" or "tab"
+	// View files by the object they would describe. The same path is also
+	// filed under data below (as the mydumper 0.10 data file of a table named
+	// `<view>-schema-view`); its content picks one of the two after the scan.
+	viewFiles := make(map[tableKey]string)
 
 	for _, e := range entries {
 		if e.IsDir() {
@@ -48,7 +94,7 @@ func DiscoverTables(inputDir string) ([]TableFiles, error) {
 		// dump then surfaces as an unhelpful "no tables found". Fail loud with
 		// actionable guidance instead.
 		if isCompressedDump(name) {
-			return nil, fmt.Errorf("compressed mydumper dump detected (%s): compressed dumps are not supported — "+
+			return nil, nil, fmt.Errorf("compressed mydumper dump detected (%s): compressed dumps are not supported — "+
 				"re-run mydumper without --compress, or decompress the dump first (e.g. gunzip *.gz / unzstd *.zst)", name)
 		}
 
@@ -62,6 +108,13 @@ func DiscoverTables(inputDir string) ([]TableFiles, error) {
 			k := tableKey{db, table}
 			schemas[k] = path
 			continue
+		}
+
+		if strings.HasSuffix(name, viewSchemaSuffix) {
+			if db, view, ok := splitDBTable(strings.TrimSuffix(name, viewSchemaSuffix)); ok {
+				viewFiles[tableKey{db, view}] = path
+			}
+			// No continue: see viewFiles.
 		}
 
 		// Data file: <db>.<table>.<chunk>.sql, <db>.<table>.<chunk>.dat,
@@ -108,12 +161,40 @@ func DiscoverTables(inputDir string) ([]TableFiles, error) {
 		}
 	}
 
+	var views []SkippedView
+	for k, viewPath := range viewFiles {
+		holdsView, err := holdsCreateView(viewPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("cannot tell whether %s.%s is a view: %w", k.db, k.table, err)
+		}
+		if !holdsView {
+			continue // table data under a name that looks like a view file
+		}
+		// It is a view definition, so it is not rows of `<view>-schema-view`.
+		asData := tableKey{k.db, k.table + strings.TrimSuffix(viewSchemaSuffix, ".sql")}
+		if rest := slices.DeleteFunc(data[asData], func(p string) bool { return p == viewPath }); len(rest) > 0 {
+			data[asData] = rest
+		} else {
+			delete(data, asData)
+			delete(formats, asData)
+		}
+		if len(data[k]) > 0 {
+			slog.Warn("the dump holds a view definition and rows under the same name; converting the rows as a table",
+				"db", k.db, "table", k.table, "view_file", viewPath, "data_files", len(data[k]))
+			continue
+		}
+		views = append(views, SkippedView{Database: k.db, Name: k.table, File: viewPath})
+		delete(schemas, k) // the placeholder, when the dump has one
+	}
+
 	var result []TableFiles
 	for k, schemaPath := range schemas {
 		files, ok := data[k]
 		if !ok {
 			if isView(schemaPath) {
-				continue // genuine view — no data to convert
+				// genuine view — no data to convert
+				views = append(views, SkippedView{Database: k.db, Name: k.table, File: schemaPath})
+				continue
 			}
 			// Empty table: schema exists but mydumper produced no data file
 			// because the table had zero rows at dump time. Emit a 0-row
@@ -141,7 +222,70 @@ func DiscoverTables(inputDir string) ([]TableFiles, error) {
 		}
 		return result[i].Table < result[j].Table
 	})
-	return result, nil
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].Database != views[j].Database {
+			return views[i].Database < views[j].Database
+		}
+		return views[i].Name < views[j].Name
+	})
+	return result, views, nil
+}
+
+// holdsCreateView reports whether the first CREATE statement of a
+// <db>.<view>-schema-view.sql candidate is a CREATE VIEW. A file that reaches
+// an INSERT or a CREATE TABLE first is table data or a table definition, and
+// the answer is false. An empty or unreadable file is an error: its name says
+// view, nothing in it confirms that, and guessing either way is wrong.
+//
+// Only the start of each line is looked at. A data file's INSERT line can be
+// megabytes long, far past what a bufio.Scanner accepts.
+func holdsCreateView(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	r := bufio.NewReaderSize(f, 64<<10)
+	sawContent := false
+	for {
+		head, more, err := r.ReadLine()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return false, fmt.Errorf("read %s: %w", path, err)
+		}
+		// Copied before reading on: head points into the reader's buffer.
+		line := strings.ToUpper(strings.TrimSpace(string(head)))
+		for more { // drop the rest of a line longer than the buffer
+			if _, more, err = r.ReadLine(); err != nil {
+				return false, fmt.Errorf("read %s: %w", path, err)
+			}
+		}
+		if line == "" {
+			continue
+		}
+		sawContent = true
+		fields := strings.Fields(line)
+		// A statement inside a version comment: /*!50001 CREATE ... VIEW ... */
+		if strings.HasPrefix(fields[0], "/*!") && len(fields) > 1 {
+			fields = fields[1:]
+		}
+		switch fields[0] {
+		case "INSERT", "REPLACE", "LOAD":
+			return false, nil
+		case "CREATE":
+			// "CREATE [OR REPLACE] [ALGORITHM=...] [DEFINER=...]
+			// [SQL SECURITY ...] VIEW `name`": VIEW is a word of its own
+			// before the name. CREATE TABLE `my view` has TABLE there.
+			return len(fields) > 1 && fields[1] != "TABLE" && strings.Contains(line, " VIEW "), nil
+		}
+	}
+	if !sawContent {
+		return false, fmt.Errorf("%s is empty", path)
+	}
+	return false, nil
 }
 
 // splitDBTable splits a "<db>.<table>" string. Returns false if it doesn't

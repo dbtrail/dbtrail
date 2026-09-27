@@ -55,6 +55,9 @@ type BaselineRunRecord struct {
 	StartedAt    string `json:"started_at"`
 	FinishedAt   string `json:"finished_at"`
 	Tables       int    `json:"tables,omitempty"`
+	// ViewsSkipped: see BaselineStatus.ViewsSkipped. Zero also for every run
+	// recorded before the count existed, so zero is never shown as a count.
+	ViewsSkipped int `json:"views_skipped,omitempty"`
 	// Carried counts tables published by reusing the previous snapshot's file
 	// (refresh and restore). Persisted rather than left to the live status,
 	// which the next run overwrites: whether a run cost a full rewrite is
