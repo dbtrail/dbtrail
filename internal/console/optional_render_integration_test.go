@@ -156,7 +156,7 @@ func TestOptionalImprovementsRenderFromRealDoctor(t *testing.T) {
 		}
 		want := map[string]string{
 			"Show the SQL statement behind each change. To turn it on:":                                                                        "SET PERSIST binlog_rows_query_log_events = ON;",
-			"Notice if someone renames a column. A missed rename can store changes under the wrong column name, with no error. To turn it on:": "SET PERSIST binlog_row_metadata = 'FULL';",
+			"Notice if someone renames a column. Without it, the column can keep its old name in saved changes, with no error. To turn it on:": "SET PERSIST binlog_row_metadata = 'FULL';",
 		}
 		for i := range f.Cards {
 			c := &f.Cards[i]

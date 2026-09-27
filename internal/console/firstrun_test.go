@@ -336,23 +336,23 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 	}{
 		{"off, MySQL, location set", true, false, false,
 			[]string{"turned off", "whole table"},
-			[]string{"Read database now button", "Set when DBTrail starts", PageSnapshots + " page", "Restart DBTrail", "reads every table this server captures", "mydumper"},
-			[]string{"snapshot location"}},
+			[]string{"turned on where DBTrail is started", "under Set at startup", "Restart DBTrail", "reads every table this server captures", "mydumper"},
+			[]string{"snapshot location", "Set when DBTrail starts", "button row", PageSnapshots + " page"}},
 		{"off, MySQL, no location: both fixes", true, true, false,
 			[]string{"turned off"},
-			[]string{"Read database now button", "mydumper", "its own snapshot location"},
-			nil},
+			[]string{"under Set at startup", "mydumper", "its own snapshot location", "on the " + PageSnapshots + " page under Where and how often"},
+			[]string{"Set when DBTrail starts", "button row", "that page"}},
 		{"off, PostgreSQL: no mydumper", true, false, true,
 			[]string{"turned off"},
-			[]string{"Read database now button", "reads every table"},
-			[]string{"mydumper", "snapshot location"}},
+			[]string{"under Set at startup", "reads every table"},
+			[]string{"mydumper", "snapshot location", "Set when DBTrail starts", "button row"}},
 		{"on, no location of its own", false, true, false,
 			[]string{"no snapshot location of its own"},
 			// One page now (#1573), so the fix names it once and then says
 			// where on it — naming a second page would send the reader
 			// looking for one that does not exist.
 			[]string{"Local folder or S3 location", PageSnapshots + " page", "Where and how often"},
-			[]string{"Read database now button", "mydumper", "Restart"}},
+			[]string{"Set at startup", "mydumper", "Restart"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			in := base
@@ -381,7 +381,7 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 				}
 			}
 			for _, text := range []string{s.Detail, s.Fix} {
-				for _, bad := range []string{"—", "BINTRAIL_", "--", "=1", " here", "this page", "  ", ".."} {
+				for _, bad := range []string{"—", "BINTRAIL_", "--", "=1", " here", "this page", "  ", "..", "console"} {
 					if strings.Contains(text, bad) {
 						t.Errorf("%q holds %q", text, bad)
 					}

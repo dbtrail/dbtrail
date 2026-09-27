@@ -2265,6 +2265,9 @@ function firstRunCard(rep) {
       } else if (/^On the Snapshots page/.test(s.fix)) {
         fix.append(" ", el("a", { class: "fr-go", href: "/snapshots", text: "Open Snapshots ›",
           onclick: (e) => { e.preventDefault(); navigate("snapshots"); } }));
+      } else if (/\bunder Set at startup\b/.test(s.fix)) {
+        fix.append(" ", el("a", { class: "fr-go", href: DOCS_BASE + "settings/backups/#set-at-startup",
+          target: "_blank", rel: "noopener", text: "Read the docs ›" }));
       }
       body.append(fix);
     }
@@ -6134,7 +6137,7 @@ function snapshotSetupSections(settings) {
   // offers (D13); the rest live in the launch command and its docs.
   const editableRows = daemonRows.filter((row) => row.editable && SNAPSHOT_SETTING_KEYS.has(row.key));
   if (capsCache.monitor && !broken && editableRows.length) {
-    out.push(sect(mayEdit ? "Change in the web interface" : "Current settings"));
+    if (!mayEdit) out.push(sect("Current settings"));
     out.push(el("div", { class: "cards cards-plain" }, backupDaemonEditCard(editableRows, !mayEdit)));
   }
   if (!broken) out.push(backupServersPanel(settings));
@@ -11298,7 +11301,7 @@ function sqlClientPanel(servers, fb) {
       el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") })));
     body.append(el("p", { class: "cn-sql-row", text: "Paste the token at the password prompt." }));
   }
-  body.append(el("p", { class: "cn-sql-row", text: "This password works for every server in the sidebar, not only this one." }));
+  body.append(el("p", { class: "cn-sql-row", text: "This password works for every server in the sidebar." }));
   body.append(cnFine("What to run, and other machines",
     el("p", { class: "form-hint" }, "Ask for a table as it was: ",
       el("code", { text: "SELECT * FROM _flashback.orders AS OF '10 minutes ago' WHERE id = 1;" }),
