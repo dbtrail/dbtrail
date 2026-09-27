@@ -26,6 +26,8 @@ PLATFORM="${PLATFORM:-}"
 # into a test of the plugin that always worked.
 SOURCES="${SOURCES:-mysql:8.0 mysql:8.4}"
 WANT_PLUGIN="caching_sha2_password"
+# Memory given to each source server. One runs at a time.
+SOURCE_MEMORY="${SOURCE_MEMORY:-768m}"
 DOCKERFILE="build/Dockerfile.console-base"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -112,7 +114,7 @@ for src in $SOURCES; do
   SOURCE_NAME="$RUN_ID-$(printf '%s' "$src" | tr -c 'a-zA-Z0-9' '-')"
   name="$SOURCE_NAME"
   echo "== source $src"
-  docker run -d --name "$name" --network "$NET" -e MYSQL_ROOT_PASSWORD=smokeroot "$src" >/dev/null
+  docker run -d --name "$name" --network "$NET" --memory "$SOURCE_MEMORY" -e MYSQL_ROOT_PASSWORD=smokeroot "$src" >/dev/null
 
   # Three answers in a row: the entrypoint restarts mysqld once during init, so
   # a single success can be the temporary server.
