@@ -12689,7 +12689,7 @@ async function saveServer(form) {
       // The modal was closed while the checks ran: nothing on screen can
       // carry the outcome, so it goes to a toast that stays until dismissed.
       if (!res || res.requestError) toastError("Could not start capture for " + saved.name + ": " + ((res && res.requestError) || "no answer"));
-      else if (res.started && !doctorWarnings(res.doctor)) toast("Monitoring started for " + saved.name + ". Events will appear within a minute");
+      else if (res.started && !doctorWarnings(res.doctor)) openNotice(startupNotice(res));
       else if (res.started) toastError("Monitoring started for " + saved.name + ", with warnings; open Servers and press Start to review them");
       else toastError("Startup checks failed for " + saved.name + "; open Servers and press Start to see what to fix");
       return;
@@ -13026,11 +13026,14 @@ async function startMonitorRow(id) {
   const res = await startMonitor(id);
   await refreshServersList();
   if (!res || res.requestError) { toastError("Could not start: " + ((res && res.requestError) || "no answer")); return; }
-  if (res.started && !doctorWarnings(res.doctor)) { toast("Monitoring started"); return; }
+  if (res.started && !doctorWarnings(res.doctor) && !doctorOptional(res.doctor)) { toast("Monitoring started"); return; }
   // The same notice Save opens, over this server's form: Save there is the
   // retry, since it starts a server that is not capturing yet.
   const opened = await editServer(id);
   if (opened) showStartupOutcome(res);
+  // No form to show it over (the Overview): optional improvements and their
+  // statements still open, since a message that fades cannot carry them.
+  else if (res.started && !doctorWarnings(res.doctor)) openNotice(startupNotice(res));
   else if (res.started) { toast("Monitoring started, with warnings"); }
   else { toastError("Startup checks failed"); }
 }
