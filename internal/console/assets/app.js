@@ -5992,6 +5992,85 @@ function lifecycleRuleFor(url, days) {
   }] }, null, 2);
 }
 
+// s3ExpiryWords turns the server's read of the bucket's rules (#1680) into
+// the sentence under the retention block, and whether it is a warning. Three
+// states, and the third is its own: a bucket that could not be read is never
+// written as "No rule" (a missing permission would raise an alarm on a
+// bucket that is fine), and neither is an answer this page does not know.
+// The covering test ran in the server (its twin of s3PrefixCovers, pinned
+// against this file's by a test); the too-short test is retentionTooShort.
+function s3ExpiryWords(v, srv, per30) {
+  const days = (n) => n + " day" + (n === 1 ? "" : "s");
+  const named = (id) => (id ? " (" + id + ")" : "");
+  const state = v && typeof v === "object" ? v.state : "";
+  if (state === "not_applicable") return { text: "", warn: false };
+  if (state === "unreadable") {
+    const unknown = ", so it is not known whether old snapshots expire";
+    if (v.reason === "unsupported") return { text: "This S3 store does not answer when asked for its rules" + unknown + ".", warn: false };
+    if (v.reason === "denied") {
+      return { text: "Could not read this bucket's rules" + unknown + ". The likely reason is a missing permission: s3:GetBucketLifecycleConfiguration.", warn: false };
+    }
+    const why = String(v.error || "").replace(/[.\s]+$/, "");
+    return { text: "Could not read this bucket's rules" + unknown + (why ? ": " + why : "") +
+      ". If access was refused, the missing permission is s3:GetBucketLifecycleConfiguration.", warn: false };
+  }
+  if (state === "none") {
+    const c = v.conditional || 0;
+    return { warn: true, text: "No rule in the bucket expires these snapshots. " +
+      (per30 > 0 ? "About " + per30 + (per30 === 1 ? " arrives" : " arrive") + " every 30 days and none leaves" : "Each one stays") +
+      ": the bucket grows without limit." +
+      (c ? " " + c + (c === 1 ? " rule on this prefix applies" : " rules on this prefix apply") +
+        " only to objects with a tag or a size limit, and " + (c === 1 ? "is" : "are") + " not counted." : "") };
+  }
+  if (state !== "in_force" || !(v.days > 0 || v.expires_on)) {
+    return { text: "Could not tell whether old snapshots expire.", warn: false };
+  }
+  const minutes = (srv && srv.schedule_every_minutes) || 0;
+  let text = "", warn = false;
+  if (v.days > 0) {
+    text = "A rule " + (v.whole_bucket ? "on the whole bucket" : "in the bucket") + named(v.rule_id) +
+      " expires these snapshots after " + days(v.days) + ".";
+    if (retentionTooShort(minutes, v.days)) {
+      warn = true;
+      text += " That is too short for snapshots every " + srv.schedule_every +
+        ": the newest one expires before the next exists, so there are moments with no snapshot in S3 at all. The rule needs at least " +
+        days(Math.floor(minutes / 1440) + 1) + ".";
+    }
+  }
+  if (v.expires_on) {
+    const who = (text ? " Another rule" : "A rule in the bucket") + named(v.date_rule_id);
+    if (v.date_passed) {
+      warn = true;
+      text += who + " has been expiring every snapshot here since " + v.expires_on +
+        ", whatever its age: a snapshot is removed soon after it arrives.";
+    } else {
+      text += who + " expires every snapshot here on " + v.expires_on + ", whatever its age.";
+    }
+  }
+  return { text, warn };
+}
+
+// S3_EXPIRY_MS bounds the page's wait for that read. The server gives the
+// bucket 5 s, so this only ends a request the server itself never answers.
+const S3_EXPIRY_MS = 8000;
+
+// s3ExpiryLine is the line itself: drawn at once with its waiting words and
+// filled when the answer arrives, so the row never waits on a bucket. A
+// request that fails says so; it is not an answer about the rules.
+function s3ExpiryLine(srv, per30) {
+  const line = el("p", { class: "form-hint s3-expiry", text: "Checking whether the bucket expires old snapshots." });
+  const show = (w) => {
+    line.hidden = !w.text;
+    line.className = (w.warn ? "form-msg err" : "form-hint") + " s3-expiry";
+    line.textContent = w.text;
+  };
+  apiWithin("/api/backup-settings/servers/" + encodeURIComponent(srv.id) + "/expiry", S3_EXPIRY_MS).then(
+    (v) => show(s3ExpiryWords(v, srv, per30)),
+    (err) => show({ warn: false, text: "Could not ask whether the bucket expires old snapshots: " +
+      String((err && err.message) || "no answer").replace(/[.\s]+$/, "") + "." }));
+  return line;
+}
+
 // s3RetentionBox is the settings-row block for a server with its OWN S3
 // destination (the raw entry, not the daemon default every server shares):
 // the growth line when a schedule can run, then the rule behind a fold.
@@ -6019,6 +6098,10 @@ function s3RetentionBox(srv, servers, daemonS3) {
       "This is not an s3://bucket/prefix destination, so no snapshot can be uploaded to it and no bucket rule applies." }));
     return wrap;
   }
+  // Whether the bucket already expires them (#1680), read after the row is
+  // drawn. Before the refusals below: a whole-bucket rule covers a
+  // destination this page hands no rule out for.
+  wrap.append(s3ExpiryLine(srv, n));
   const details = el("details", { class: "form-advanced s3-retention-rule" });
   details.append(el("summary", { class: "form-adv-summary", text: "Bucket rule to expire old snapshots" }));
   const body = el("div");
