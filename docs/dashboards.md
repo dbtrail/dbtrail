@@ -20,12 +20,15 @@ DuckDB reads the Parquet files directly. What connects the two is the **views
 file**, a short SQL file that turns each snapshot file into a table with a
 plain name (`state_<schema>_<table>`).
 
-Three things have to be true, and each step below takes care of one:
+You run the views file once, into a small DuckDB database file, and point the
+tool at that file. Three things have to be true, and the steps below take care
+of them:
 
-1. The tool can read the snapshot folder, **at the same path** the views file
+1. The views file is one that **follows** the newest snapshot.
+2. The tool can read the snapshot folder, **at the same path** the views file
    names.
-2. DuckDB runs the views file every time the tool opens a connection.
-3. The views file is one that **follows** the newest snapshot.
+3. The database file is built with the same DuckDB version the tool's driver
+   uses.
 
 ## Before you start
 
@@ -57,21 +60,32 @@ The views file names absolute paths. Open it and look at one
 `read_parquet('...')` line: that path is where the tool has to find the
 files.
 
-## 2. Let the tool see the files
+## 2. Build the database file
 
-Mount the snapshot directory into the tool's container, **read-only, at the
-same path** it has in DBTrail's container. With the standard
-`docker-compose.yml`, the daemon keeps its state in the `bintrail-state`
-volume, mounted at `/var/lib/bintrail`, so mount that volume at the same
-place:
+Run the views file into a DuckDB database file, somewhere the snapshot paths
+resolve. With the standard `docker-compose.yml`, the daemon keeps its state in
+the `bintrail-state` volume, mounted at `/var/lib/bintrail`, so run DuckDB's
+own image with that volume at the same place. From the folder holding
+`views.sql`:
 
-```yaml
-    volumes:
-      - bintrail-state:/var/lib/bintrail:ro
+```sh
+docker run --rm \
+  -v <folder>_bintrail-state:/var/lib/bintrail:ro \
+  -v "$PWD:/work" -w /work \
+  duckdb/duckdb:1.5.5 /duckdb lake.duckdb -c ".read views.sql"
 ```
 
-Read-only is enough: DuckDB only reads the files. The snapshot files are
-written readable by every user, so the tool's own user can read them.
+Docker Compose puts the project name, usually the name of the folder holding
+the compose file, in front of the volume's name. Run `docker volume ls` to see
+yours.
+
+The result, `lake.duckdb`, holds only the view definitions, not data: a few
+hundred kilobytes. If a table the file names is no longer in the newest
+snapshot, this step stops and names it; get a new views file.
+
+**Match the DuckDB version to the driver's.** The driver's version starts with
+it: driver `1.5.5.0` is DuckDB `1.5.5`. An older DuckDB cannot open a file
+written by a newer one.
 
 ## 3. Run Metabase with a DuckDB driver that loads
 
@@ -80,27 +94,26 @@ Alpine Linux, and the DuckDB library needs the GNU C library; connecting fails
 with `Error loading shared library libstdc++.so.6`. Installing packages does
 not fix it.
 
-The driver's authors publish a Dockerfile on a Debian-based image instead. Use
-it:
+The driver's authors publish a Dockerfile on a Debian-based image instead.
+Build it with the driver version that matches step 2:
 
 ```sh
-curl -LO https://raw.githubusercontent.com/motherduckdb/metabase_duckdb_driver/main/Dockerfile
-docker build -t metabase-duckdb .
+curl -LO https://raw.githubusercontent.com/motherduckdb/metabase_duckdb_driver/1.5.5.0/Dockerfile
+docker build -t metabase-duckdb --build-arg METABASE_DUCKDB_DRIVER_VERSION=1.5.5.0 .
 ```
 
-Then run it with the volume from step 2:
+Then run it with two read-only mounts: the snapshot volume **at the same path**
+it has in DBTrail's container, and the folder holding `lake.duckdb`:
 
 ```sh
 docker run -d --name metabase -p 3000:3000 \
-  -v bintrail-state:/var/lib/bintrail:ro \
+  -v <folder>_bintrail-state:/var/lib/bintrail:ro \
+  -v "$PWD:/bi:ro" \
   metabase-duckdb
 ```
 
-Docker Compose puts the project name, usually the name of the folder holding
-the compose file, in front of the volume's name (`<folder>_bintrail-state`).
-Run `docker volume ls` to see yours. Or add Metabase as a service in a
-`docker-compose.override.yml` next to DBTrail's compose file, where the short
-name `bintrail-state` works.
+Read-only is enough for both: DuckDB only reads them. The snapshot files are
+written readable by every user, so Metabase's own user can read them.
 
 ## 4. Add the database
 
@@ -109,17 +122,18 @@ In Metabase, **Admin settings > Databases > Add a database**, and pick
 
 | Field | Value |
 |---|---|
-| Database file | `:memory:` |
-| Init SQL | the whole content of the views file |
+| Database file | `/bi/lake.duckdb` |
+| Establish a read-only connection | on |
 
 Save. Metabase lists one table per source table, named
 `state_<schema>_<table>`, and both typed SQL and the visual query builder work
 on them.
 
-Why `:memory:` and Init SQL rather than a DuckDB database file: the views are
-only definitions, and the driver runs Init SQL on each new connection, so every
-connection gets them. Nothing is written to disk, no file has to be writable,
-and no DuckDB version has to match the driver's.
+Why not `:memory:` with the views file pasted into **Init SQL**, which skips
+step 2: the driver runs Init SQL before every query, not once per connection.
+With 100 tables that added about 1.5 seconds to each query, against 27
+milliseconds with the database file. And when one table leaves the snapshot,
+every query fails instead of only that table's.
 
 ## What stays current, and what does not
 
@@ -130,24 +144,26 @@ and no DuckDB version has to match the driver's.
 - **The list of tables does not.** Which views exist, and how each `DECIMAL`
   column is read, come from the snapshot the file was generated against. After
   a table is added or dropped, or a column changes type, get the views file
-  again and paste it into Init SQL.
+  again and build `lake.duckdb` again (step 2). Until then, a dropped table's
+  chart fails and the others keep answering.
 - **A few tables warn.** If the views file has a comment above a view saying it
-  "reads the table file alone", that table's view stops with an error at the
-  first refresh that writes changes beside its file. The comment says why
-  (DBTrail could not read the table's schema, or another table's name starts
-  with this one's name and a dot). Get the views file again when that happens.
+  "reads the table file alone", that table's view stops with an error if a
+  refresh writes changes beside its file. The comment says why (DBTrail could
+  not read the table's schema, or another table's name starts with this one's
+  name and a dot). Get the views file again when that happens.
 
 ## Snapshots only in S3
 
 The views file for an S3-only server has no `current` pointer to read through.
-Instead, it looks up the newest completed snapshot when it is run, and it
-creates a session-only credential lookup rather than holding keys. In
-Metabase, Init SQL runs that lookup again for each query, which also re-reads
-each table's layout from S3. With many tables that is slow, and the tool's
-container also needs AWS credentials in its environment.
+Instead, it looks up the newest completed snapshot in a session variable when
+it is run, and it reads S3 through a credential lookup that lasts one session.
+Neither is kept in a database file, so each connection would have to run those
+statements again, through **Init SQL**, which the driver runs before every
+query. The tool's container would also need AWS credentials. This page does not
+cover that route.
 
-The simpler route is to give the server a local backup directory as well (on
-the Snapshots page), and follow the steps above.
+Give the server a local backup directory as well (on the Snapshots page), and
+follow the steps above.
 
 Do not point the tool at a copy made with `aws s3 sync`. A synced folder has no
 `current` pointer, and the sync can copy a snapshot's completion marker before
