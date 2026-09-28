@@ -2277,6 +2277,9 @@ function firstRunCard(rep) {
       } else if (/^On the Snapshots page/.test(s.fix)) {
         fix.append(" ", el("a", { class: "fr-go", href: "/snapshots", text: "Open Snapshots ›",
           onclick: (e) => { e.preventDefault(); navigate("snapshots"); } }));
+      } else if (/\bunder Set at startup\b/.test(s.fix)) {
+        fix.append(" ", el("a", { class: "fr-go", href: DOCS_BASE + "settings/backups/#set-at-startup",
+          target: "_blank", rel: "noopener", text: "Read the docs ›" }));
       }
       body.append(fix);
     }
@@ -5278,7 +5281,7 @@ function snapshotsMovedNotice(missing) {
   const from = routeArrivedFrom;
   const was = SNAPSHOT_MOVED.get(from);
   if (!was || movedIsClosed(from)) return null;
-  const why = missing === "daemon" ? " Its section is not on this console: checks run in the DBTrail daemon, and this one is read-only."
+  const why = missing === "daemon" ? " Its section is not in this web interface: checks run in the DBTrail daemon, and this one is read-only."
     : missing === "unknown" ? " Its section is missing because the capability check failed when this page loaded; reload to get it back."
     : "";
   const box = el("div", { class: "snap-moved" });
@@ -6146,7 +6149,7 @@ function snapshotSetupSections(settings) {
   // offers (D13); the rest live in the launch command and its docs.
   const editableRows = daemonRows.filter((row) => row.editable && SNAPSHOT_SETTING_KEYS.has(row.key));
   if (capsCache.monitor && !broken && editableRows.length) {
-    out.push(sect(mayEdit ? "Change here" : "Current settings"));
+    if (!mayEdit) out.push(sect("Current settings"));
     out.push(el("div", { class: "cards cards-plain" }, backupDaemonEditCard(editableRows, !mayEdit)));
   }
   if (!broken) out.push(backupServersPanel(settings));
@@ -6164,7 +6167,7 @@ const BACKUP_DAEMON_ROWS = {
   baseline_retain: "Delete local snapshots older than",
   refresh_every: "Refresh snapshots every",
   lock_mode: "Lock while dumping",
-  trigger: "Create-backup button",
+  trigger: "Read database now button",
   staging_dir: ".sql build folder",
   verify_interval: "Verify every",
   verify_tables: "Verify only these tables",
@@ -6207,7 +6210,7 @@ function backupDaemonEditCard(rows, locked) {
   }
   card.append(cnFine("More about these settings",
     el("p", { class: "form-hint", text:
-      "Saved here, in DBTrail's own settings file, which wins over the command line and the environment." +
+      "Saved in DBTrail's own settings file, which wins over the command line and the environment." +
       (locked ? "" : " Use the startup value to go back to what the process was started with.") }),
     docsMore("settings/backups", "set-at-startup", "settings that need a restart")));
   return card;
@@ -6256,7 +6259,7 @@ function backupDaemonEditRow(row, locked) {
   }
   // Provenance, in one line: what is winning, and what it is winning over.
   wrap.append(el("p", { class: "form-hint", text: row.source === "saved"
-    ? "Saved here. The command line says " + (row.startup || "nothing") + "."
+    ? "Saved in the web interface. The command line says " + (row.startup || "nothing") + "."
     : "From the command line or the environment (" + row.cli + ")." }));
   if (row.err) {
     wrap.append(el("p", { class: "form-msg err", text:
@@ -6600,7 +6603,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
       // process runs the schedules. Pointing at "the card above" on a
       // read-only console named something that is not on the screen.
       (!capsCache.backup_schedule
-        ? ". Schedules run in the DBTrail service; this console cannot change them."
+        ? ". Schedules run in the DBTrail service; this web interface cannot change them."
         : sessionMay("servers:write") ? ". Select this server at the top of the page to change it." : ".")));
     // Red here as on the schedule card (#1564): a grey summary beside a red
     // card would be the same page disagreeing with itself about one schedule.
@@ -6611,7 +6614,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     }
   } else {
     more.push(p(!capsCache.backup_schedule
-      ? "No scheduled snapshots. Setting one needs the DBTrail service; this console is read-only."
+      ? "No scheduled snapshots. Setting one needs the DBTrail service; this web interface is read-only."
       : sessionMay("servers:write") ? "No scheduled snapshots. Select this server at the top of the page to set one." : "No schedule."));
   }
   // S3 keeps every uploaded backup forever unless the BUCKET expires it
@@ -9010,7 +9013,7 @@ function backupTakeAway(cur, b, sqlSt) {
       (sessionMay(PERM_SNAPSHOT_CREATE) ? ", so Build is off until it can be read." : ".") }));
   } else if (sql && st && st.state && !SQL_EXPORT_KNOWN.has(st.state)) {
     panel.append(el("p", { class: "form-msg err", text:
-      "The last .sql build reports a state this console does not recognise: " + st.state + ". Update the console, or check the daemon's log." }));
+      "The last .sql build reports a state this web interface does not recognise: " + st.state + ". Update DBTrail, or check the daemon's log." }));
   }
   const lanes = el("div", { class: "bk-lanes" });
   if (duck) lanes.append(duck);
@@ -11310,6 +11313,7 @@ function sqlClientPanel(servers, fb) {
       el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") })));
     body.append(el("p", { class: "cn-sql-row", text: "Paste the token at the password prompt." }));
   }
+  body.append(el("p", { class: "cn-sql-row", text: "This password works for every server in the sidebar." }));
   body.append(cnFine("What to run, and other machines",
     el("p", { class: "form-hint" }, "Ask for a table as it was: ",
       el("code", { text: "SELECT * FROM _flashback.orders AS OF '10 minutes ago' WHERE id = 1;" }),

@@ -204,7 +204,7 @@ console.log(JSON.stringify(out));
 		t.Errorf("the jump aimed at %q, want the arrival note beside the section: the heading at the top edge "+
 			"leaves the note just above the viewport, unread", got.JumpWithNote)
 	}
-	if got.MissingSection == nil || !strings.Contains(*got.MissingSection, "not on this console") {
+	if got.MissingSection == nil || !strings.Contains(*got.MissingSection, "not in this web interface") {
 		t.Errorf("a reader whose section this console does not draw reads %q; it must say so, or the page "+
 			"claims to hold something with no trace of it", deref(got.MissingSection))
 	}
@@ -378,16 +378,16 @@ const paint = async (caps, from, hash) => {
 	// section must be told that, or the page claims to hold something it
 	// shows no trace of — worse than the bounce to Overview it replaced.
 	if !strings.Contains(got.ServeArrival.Note, "Verification is part of Snapshots now") ||
-		!strings.Contains(got.ServeArrival.Note, "not on this console") {
+		!strings.Contains(got.ServeArrival.Note, "not in this web interface") {
 		t.Errorf("arriving from /verification on serve reads %q; it must name the page AND say its section is not here", got.ServeArrival.Note)
 	}
 	// On a watch daemon the same arrival lands beside the section, and says
 	// nothing about it missing.
-	if !got.WatchArrival.NoteBeforeChecks || strings.Contains(got.WatchArrival.Note, "not on this console") {
+	if !got.WatchArrival.NoteBeforeChecks || strings.Contains(got.WatchArrival.Note, "not in this web interface") {
 		t.Errorf("arriving from /verification on watch: note beside the Checks heading %v, text %q",
 			got.WatchArrival.NoteBeforeChecks, got.WatchArrival.Note)
 	}
-	if !got.SetupArrival.NoteBeforeSetup || strings.Contains(got.SetupArrival.Note, "not on this console") {
+	if !got.SetupArrival.NoteBeforeSetup || strings.Contains(got.SetupArrival.Note, "not in this web interface") {
 		t.Errorf("arriving from /backup-settings: note beside the setup heading %v, text %q",
 			got.SetupArrival.NoteBeforeSetup, got.SetupArrival.Note)
 	}

@@ -724,9 +724,8 @@ an empty Local folder field, indistinguishable from a server with no backup
 location at all.
 
 The page offers three settings and nothing else: how often the copy is
-updated, a manual read of the database (Read database now) and retention, under
-one label, **Change here**: the daemon's retention row and the per-server
-rows. What is set in the launch command (the lock mode, the `.sql` build
+updated, a manual read of the database (Read database now) and retention: the
+daemon's retention row and the per-server rows. What is set in the launch command (the lock mode, the `.sql` build
 folder, the verify table filter, the default locations) is documented under
 [settings that need a restart](https://www.dbtrail.com/docs/settings/backups#set-at-startup) and no
 longer drawn on the page.
@@ -1083,8 +1082,9 @@ longer does anything. Remove it.
   When it is off, the Overview's Getting started list says so until a backup
   for that server exists anyway, taken from somewhere this daemon does not
   run, and the Snapshots page says so for a server with a source and a
-  location it can list. Both point at the same page, under **Set when DBTrail
-  starts**, where the setting is the Create-backup button row.
+  location it can list. It is turned on where the daemon is started, with this
+  variable, and not in the web interface; see
+  [settings that need a restart](https://www.dbtrail.com/docs/settings/backups#set-at-startup).
 - `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — local staging dir for
   S3-destined baselines created by that button (default a temp subdir).
 - `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — `ftwrl` (default),

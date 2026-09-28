@@ -241,8 +241,8 @@ func withCheckError(detail, checkErr string) string {
 
 // blockedBackupStep is the backup step for a server whose first backup the
 // console cannot create, with the reason and what to do (#1677). The daemon
-// setting is named as the Snapshots page labels it, never as a
-// variable. mydumper is named for every source but PostgreSQL (MySQL and
+// setting is said in words and by where the docs list it, never as a
+// variable: the Snapshots page no longer draws a row for it. mydumper is named for every source but PostgreSQL (MySQL and
 // MariaDB): a PostgreSQL full backup runs inside DBTrail. The step can never
 // be done from here while backups are off; it is done when a snapshot exists
 // anyway (backupStep), and until then the list stays up with it (#1801).
@@ -250,15 +250,15 @@ func blockedBackupStep(in firstRunInput) (FirstRunStep, bool) {
 	step := FirstRunStep{Name: backupStepName, State: firstRunWaiting}
 	switch {
 	case in.BackupOff:
-		step.Detail = "Creating full reads from the console is turned off. Restoring a whole table to a past moment needs a full read."
-		step.Fix = "On the " + PageSnapshots + " page, under Set when DBTrail starts, the Create-backup button row names the setting to change. Restart DBTrail after changing it. A full read reads every table this server captures"
+		step.Detail = "Creating full reads from the web interface is turned off. Restoring a whole table to a past moment needs a full read."
+		step.Fix = "Creating full reads is turned on where DBTrail is started, not in the web interface. The docs name the setting under Set at startup. Restart DBTrail after changing it. A full read reads every table this server captures"
 		if in.Postgres {
 			step.Fix += "."
 		} else {
 			step.Fix += ", and mydumper must be installed where DBTrail runs."
 		}
 		if in.BackupNoLocation {
-			step.Fix += " This server also needs its own snapshot location, set on that page under Where and how often."
+			step.Fix += " This server also needs its own snapshot location, set on the " + PageSnapshots + " page under Where and how often."
 		}
 	case in.BackupNoLocation:
 		step.Detail = "This server has no snapshot location of its own, so no snapshot can be written for it."

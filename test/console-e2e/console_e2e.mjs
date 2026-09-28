@@ -2548,7 +2548,7 @@ try {
         serverRows: serverRows.length,
         serverSave: serverRows.some((r) => Array.from(r.querySelectorAll("button")).some((b) => b.textContent === "Save")),
         serverLocked: serverRows.length > 0 && serverRows.every((r) => Array.from(r.querySelectorAll("input")).every((i) => i.disabled)),
-        changeHere: /Change here/.test(v.textContent),
+        changeHere: /Change here|Change in the web interface/.test(v.textContent),
         startsLabel: /Set when DBTrail starts/.test(v.textContent),
         currentSettings: /Current settings/.test(v.textContent),
         schedCard: !!sched,
@@ -2775,10 +2775,10 @@ try {
     } catch (e) { return { err: String(e && e.stack || e) }; }
     finally { capsCache.permissions = keep; capsCache.monitor = keepMon; }
   });
-  (daemonRO.full && daemonRO.full.sects.includes("Change here") && daemonRO.full.input && !daemonRO.full.disabled && daemonRO.full.save && daemonRO.full.revert
-    && daemonRO.ro.sects.includes("Current settings") && !daemonRO.ro.sects.includes("Change here")
+  (daemonRO.full && daemonRO.full.sects.length === 0 && daemonRO.full.input && !daemonRO.full.disabled && daemonRO.full.save && daemonRO.full.revert
+    && daemonRO.ro.sects.length === 1 && daemonRO.ro.sects[0] === "Current settings"
     && daemonRO.ro.input && daemonRO.ro.disabled && !daemonRO.ro.save && !daemonRO.ro.revert
-    && /Saved here\. The command line says 3d/.test(daemonRO.ro.text)
+    && /Saved in the web interface\. The command line says 3d/.test(daemonRO.ro.text)
     && /Use the startup value to go back/.test(daemonRO.full.text) && !/Use the startup value/.test(daemonRO.ro.text))
     ? ok("permissions: a value saved in the console stays in its card, locked, for a session that may only read settings")
     : bad("permissions: a value saved in the console stays in its card, locked, for a session that may only read settings", JSON.stringify(daemonRO));
@@ -5209,9 +5209,11 @@ try {
   (bks.editRows.length === 1 && bks.editRows.every((r) => r.input && r.save && r.why.length > 0))
     ? ok("backup-settings: one savable daemon row (retention), with an input, a Save and its provenance")
     : bad("backup-settings: one savable daemon row (retention), with an input, a Save and its provenance", JSON.stringify(bks.editRows));
-  (bks.cardChips === -1 && bks.rowChips === 0 && !bks.bootInGrid && bks.sections.length === 1)
-    ? ok("backup-settings: one section, no startup card and no restart chip on the page")
-    : bad("backup-settings: one section, no startup card and no restart chip on the page",
+  // One kind of setting is drawn, so nothing titles it: a title existed only
+  // to tell it from the startup rows, which left the page.
+  (bks.cardChips === -1 && bks.rowChips === 0 && !bks.bootInGrid && bks.sections.length === 0)
+    ? ok("backup-settings: no section title, no startup card and no restart chip on the page")
+    : bad("backup-settings: no section title, no startup card and no restart chip on the page",
         JSON.stringify({ cardChips: bks.cardChips, rowChips: bks.rowChips, bootInGrid: bks.bootInGrid, sections: bks.sections }));
   (bks.visibleChars > 0 && bks.visibleChars < 1300 && bks.perServerFound && bks.fine >= 2 && bks.fineOpen === 0 && !bks.emDash)
     ? ok("snapshots: the setup section's visible text stays under budget with the fine print compact")
