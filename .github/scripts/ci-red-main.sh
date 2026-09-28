@@ -64,16 +64,21 @@ finish() { # finish <action> <reason>
 }
 
 # api <what it is doing> <gh api arguments...>
-# Prints the answer. Fails on a gh error and on an answer that is not a JSON
-# object or list: nothing at all, or a proxy error page with exit code 0.
+# Prints the answer. Fails on a gh error, on an empty answer and on an answer
+# that is not a JSON object or list (a proxy error page arrives with exit
+# code 0). The empty case has a check of its own: jq 1.6, the one on the
+# ubuntu-22.04 runner, exits 0 for `jq -e` over no input, and jq 1.7 does not.
 api() {
   local what="$1" out
   shift
   if ! out="$(gh api "$@")"; then
     die "$what: the GitHub API call failed"
   fi
+  if [ -z "$out" ]; then
+    die "$what: the GitHub API answered with nothing"
+  fi
   if ! printf '%s' "$out" | jq -e 'type == "object" or type == "array"' >/dev/null 2>&1; then
-    die "$what: the GitHub API answer is empty or not JSON"
+    die "$what: the GitHub API answer is not JSON"
   fi
   printf '%s' "$out"
 }
