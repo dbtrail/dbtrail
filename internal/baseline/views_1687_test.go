@@ -503,3 +503,73 @@ func TestRun_TablesFilterAndViews_1687(t *testing.T) {
 		}
 	})
 }
+
+// A real table that is empty, beside a view file left behind by an earlier
+// dump of the same directory. Its schema file is not mydumper's placeholder,
+// so it is a table.
+func TestDiscoverDump_EmptyRealTableBesideAViewFile_1687(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "d.t-schema.sql", realTableSchema)
+	writeFile(t, dir, "d.t-schema-view.sql", realViewFile)
+	tables, views, err := DiscoverDump(dir)
+	if err != nil {
+		t.Fatalf("DiscoverDump: %v", err)
+	}
+	wantNames(t, "tables", tableNames(tables), []string{"d.t"})
+	wantNames(t, "views", viewNames(views), nil)
+}
+
+func TestIsViewPlaceholder_1687(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"real placeholder", read(filepath.Join(fixtureViews, "shop.big_orders-schema.sql")), true},
+		{"real placeholder of a renamed view", read(filepath.Join(fixtureViewsEdge, "edge.mydumper_1-schema.sql")), true},
+		{"real empty MEMORY table", read(filepath.Join(fixtureViewsEdge, "edge.mem_real-schema.sql")), false},
+		{"real empty InnoDB table", read(filepath.Join(fixtureViewsEdge, "edge.empty_real-schema.sql")), false},
+		{"real table", read(filepath.Join(fixtureViews, "shop.orders-schema.sql")), false},
+		{"if not exists, indented columns", "CREATE TABLE IF NOT EXISTS `t`(\n  `id` int\n) ENGINE=MEMORY;\n", false},
+		{"if not exists, a key line", "CREATE TABLE IF NOT EXISTS `t`(\n`id` int,\nPRIMARY KEY (`id`)\n) ENGINE=MEMORY;\n", false},
+		{"columns at column 0, no if not exists", "CREATE TABLE `t`(\n`id` int\n) ENGINE=MEMORY;\n", false},
+		{"no columns", "CREATE TABLE IF NOT EXISTS `t`(\n) ENGINE=MEMORY;\n", false},
+		{"never closed", "CREATE TABLE IF NOT EXISTS `t`(\n`id` int\n", false},
+		{"no create", "/*!40101 SET NAMES utf8mb4*/;\n", false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "s.sql", tt.content)
+			if got := isViewPlaceholder(filepath.Join(dir, "s.sql")); got != tt.want {
+				t.Errorf("isViewPlaceholder = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	if isViewPlaceholder(filepath.Join(t.TempDir(), "missing.sql")) {
+		t.Error("a file that cannot be read was taken for a placeholder")
+	}
+}
+
+// A last line that fills the buffer exactly and has no line break ends the
+// file. It is not a read error.
+func TestDiscoverDump_LongLastLineWithoutBreak_1687(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "d.x-schema-view-schema.sql", realTableSchema)
+	writeFile(t, dir, "d.x-schema-view.sql", "-- "+strings.Repeat("a", 64<<10-3))
+	tables, views, err := DiscoverDump(dir)
+	if err != nil {
+		t.Fatalf("DiscoverDump: %v", err)
+	}
+	wantNames(t, "tables", tableNames(tables), []string{"d.x-schema-view"})
+	wantNames(t, "views", viewNames(views), nil)
+}

@@ -59,6 +59,9 @@ func DiscoverTables(inputDir string) ([]TableFiles, error) {
 //     `x-schema-view` to a file with that exact name.
 //   - no data file exists for the object. A view has none, so an object with
 //     rows is converted whatever else sits beside it.
+//   - its <db>.<view>-schema.sql, when there is one, is mydumper's
+//     placeholder (isViewPlaceholder). A real table that is empty has no data
+//     file either, and a view file can outlive the dump that wrote it.
 //
 // Anything else stays a table. Skipping a real table loses it without a word,
 // while converting a view fails the run where someone can see it, so every
@@ -183,6 +186,11 @@ func DiscoverDump(inputDir string) ([]TableFiles, []SkippedView, error) {
 				"db", k.db, "table", k.table, "view_file", viewPath, "data_files", len(data[k]))
 			continue
 		}
+		if schemaPath, ok := schemas[k]; ok && !isViewPlaceholder(schemaPath) {
+			slog.Warn("the dump holds a view definition beside a table definition of the same name; converting the table",
+				"db", k.db, "table", k.table, "view_file", viewPath, "schema_file", schemaPath)
+			continue
+		}
 		views = append(views, SkippedView{Database: k.db, Name: k.table, File: viewPath})
 		delete(schemas, k) // the placeholder, when the dump has one
 	}
@@ -259,7 +267,11 @@ func holdsCreateView(path string) (bool, error) {
 		// Copied before reading on: head points into the reader's buffer.
 		line := strings.ToUpper(strings.TrimSpace(string(head)))
 		for more { // drop the rest of a line longer than the buffer
-			if _, more, err = r.ReadLine(); err != nil {
+			_, more, err = r.ReadLine()
+			if errors.Is(err, io.EOF) {
+				break // the line filled the buffer and ended the file
+			}
+			if err != nil {
 				return false, fmt.Errorf("read %s: %w", path, err)
 			}
 		}
@@ -286,6 +298,50 @@ func holdsCreateView(path string) (bool, error) {
 		return false, fmt.Errorf("%s is empty", path)
 	}
 	return false, nil
+}
+
+// isViewPlaceholder reports whether a <db>.<name>-schema.sql is the table
+// mydumper writes in place of a view, and not the definition of a real table.
+//
+// The two differ in how they are produced. A real table's file is the
+// server's SHOW CREATE TABLE output: "CREATE TABLE `t` (", every line of the
+// body indented. The placeholder is written by mydumper itself:
+// "CREATE TABLE IF NOT EXISTS `v`(", then one column per line starting at
+// column 0 and nothing else. The engine does not tell them apart, since an
+// empty MEMORY table is a real table.
+//
+// All of it has to match. Anything else, a file that cannot be read included,
+// is answered "not a placeholder", which keeps the object a table.
+func isViewPlaceholder(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	inBody, columns := false, 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !inBody {
+			if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "CREATE") {
+				continue
+			}
+			if !strings.HasPrefix(strings.ToUpper(line), "CREATE TABLE IF NOT EXISTS ") {
+				return false
+			}
+			inBody = true
+			continue
+		}
+		if strings.HasPrefix(line, ")") {
+			return columns > 0
+		}
+		if !strings.HasPrefix(line, "`") {
+			return false // indented, or a key or constraint: a real table
+		}
+		columns++
+	}
+	return false
 }
 
 // splitDBTable splits a "<db>.<table>" string. Returns false if it doesn't
