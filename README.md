@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/img/dbtrail _ header.png" alt="DBTrail: the open-source time-travel flashback for MySQL. Every change leaves a trail. Follow it back." width="100%">
+<img src="docs/img/dbtrailheader.png" alt="DBTrail: the open-source time-travel flashback for MySQL. Every change leaves a trail. Follow it back." width="100%">
 
 **DBTrail keeps every change on your MySQL server, before and after, and writes the SQL that undoes the ones you didn't want.**
 
