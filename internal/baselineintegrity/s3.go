@@ -273,6 +273,11 @@ func loadManifestS3(ctx context.Context, bucket, snapKey string) (*Manifest, boo
 	return &parsed, true, nil
 }
 
+// S3ObjectAbsent is s3ObjectAbsent for a caller that reads another sidecar of
+// a snapshot through OpenS3Object and has to tell "not there" from "could
+// not be read".
+func S3ObjectAbsent(err error) bool { return s3ObjectAbsent(err) }
+
 // s3ObjectAbsent reports whether err means the object does not exist, across
 // the shapes real backends produce: the modeled SDK types, a bare S3 error
 // code, and the plain HTTP 404 some S3-compatible backends (Ceph, Wasabi)

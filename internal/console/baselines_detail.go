@@ -98,6 +98,9 @@ type baselineFilesResponse struct {
 	// elsewhere (CLI, another daemon) have no record; the write span above is
 	// their approximation.
 	Run *baselineRunDTO `json:"run,omitempty"`
+	// ViewsSkipped is the views this snapshot left out (#1879), with their
+	// names. Absent when nothing is recorded, which is never "no views".
+	ViewsSkipped *viewsSkippedDTO `json:"views_skipped,omitempty"`
 }
 
 type baselineRunDTO struct {
@@ -336,7 +339,7 @@ func (s *Server) resolveSnapshotRequest(w http.ResponseWriter, r *http.Request, 
 // Deliberately NOT audited: like the listing, this is metadata (names, sizes,
 // timestamps) — no row data leaves the store. The download below is audited.
 func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
-	src, _, files := s.resolveSnapshotRequest(w, r, "baseline-files")
+	src, dirName, files := s.resolveSnapshotRequest(w, r, "baseline-files")
 	if files == nil {
 		return
 	}
@@ -415,6 +418,14 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 			}
 			resp.Run = run
 		}
+	}
+	// The snapshot's own record first; this daemon's count of the run for a
+	// snapshot that has none.
+	vctx, vcancel := context.WithTimeout(r.Context(), baselineListTimeout)
+	resp.ViewsSkipped = snapshotViewsSkipped(vctx, src, dirName, files)
+	vcancel()
+	if resp.ViewsSkipped == nil {
+		resp.ViewsSkipped = s.viewsSkippedFromRun(s.selectedServerID(r), ts)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -85,3 +85,51 @@ func TestReconstructParquet_signsWithTheWriterOfThisRun(t *testing.T) {
 		})
 	}
 }
+
+// A snapshot built from recorded changes reads no dump. It carries the
+// record of skipped views of the snapshot it was built from, marked as
+// carried, with the time of the full read (#1879).
+func TestReconstructParquet_carriesTheSkippedViews(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	ctx := context.Background()
+	db, dbName := testutil.CreateTestDB(t)
+	if err := indexer.CreateIndexTables(ctx, db, 48, false, nil); err != nil {
+		t.Fatalf("CreateIndexTables: %v", err)
+	}
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	const schema = "shop"
+	base := time.Now().UTC().Truncate(time.Hour)
+	seedOrdersSnapshot(t, db, schema, base)
+	root := t.TempDir()
+	seedSourceBaseline(t, root, base, schema)
+	older := filepath.Join(root, base.Format("2006-01-02T15-04-05Z"))
+	if err := baseline.WriteViewsSkipped(older, baseline.NewViewsSkipped([]string{"shop.big_orders"}, base)); err != nil {
+		t.Fatal(err)
+	}
+	at := base.Add(30 * time.Minute)
+	if _, err := reconstruct.ReconstructTables(ctx, reconstruct.FullTableConfig{
+		IndexDSN:              testutil.BaseDSN() + "/" + dbName,
+		BaselineSrc:           root,
+		Tables:                []string{schema + ".orders"},
+		At:                    at,
+		OutputDir:             root,
+		OutputFormat:          reconstruct.OutputFormatParquet,
+		CarryForwardUnchanged: true,
+	}); err != nil {
+		t.Fatalf("ReconstructTables: %v", err)
+	}
+	newer := filepath.Join(root, reconstruct.SnapshotDirName(at))
+	rec, ok, err := baseline.ReadViewsSkipped(newer)
+	if err != nil || !ok {
+		t.Fatalf("the new snapshot has no record: ok %v err %v", ok, err)
+	}
+	if !rec.Carried || rec.Count != 1 || !slices.Equal(rec.Views, []string{"shop.big_orders"}) ||
+		rec.ReadAt != base.Format(time.RFC3339) {
+		t.Fatalf("record = %+v, want 1 view carried from the full read of %s", rec, base.Format(time.RFC3339))
+	}
+	if !baseline.SnapshotComplete(newer) {
+		t.Fatal("the new snapshot is not complete")
+	}
+}

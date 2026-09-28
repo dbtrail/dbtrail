@@ -61,6 +61,15 @@ type baselineSnapshotDTO struct {
 	// exactly what it claims and no more — a snapshot listing both was seen in
 	// both places, not necessarily with every table in each.
 	Kinds []string `json:"kinds,omitempty"`
+	// ViewsSkipped counts the views the source held and this snapshot left
+	// out (#1879), omitted when nothing is recorded: a snapshot from before
+	// the record, or a source with no views. Never zero on the wire.
+	// ViewsCarried says the snapshot did not read the source itself, and
+	// ViewsReadAt when the source was read in full and the views counted.
+	// The names are in the snapshot's detail. See views_skipped.go.
+	ViewsSkipped int    `json:"views_skipped,omitempty"`
+	ViewsCarried bool   `json:"views_carried,omitempty"`
+	ViewsReadAt  string `json:"views_read_at,omitempty"`
 }
 
 type baselinesResponse struct {
@@ -335,6 +344,9 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	rows := gradeSnapshotRows(files, bounds, floor, now)
 	var cur *baselineSnapshotDTO
 	var curTime time.Time
+	// curViews: the record of skipped views was looked for in this
+	// snapshot's local directory (#1879).
+	curViews := false
 	for _, f := range files {
 		if cur == nil || !f.SnapshotTime.Equal(curTime) {
 			if len(resp.Snapshots) >= baselinesMaxSnapshots {
@@ -369,10 +381,21 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 					slog.Warn("console: baseline Parquet metadata unreadable", "path", f.Path, "error", err)
 				}
 			}
+			// What this daemon recorded for the run, until the snapshot's
+			// own record is read below.
+			dto.rowViewsSkipped(s.viewsSkippedFromRun(serverID, f.SnapshotTime))
 			resp.Snapshots = append(resp.Snapshots, dto)
 			cur = &resp.Snapshots[len(resp.Snapshots)-1]
+			curViews = false
 		}
 		cur.Tables = append(cur.Tables, f.Schema+"."+f.Table)
+		// The snapshot's own record, from its local directory: one small
+		// file per snapshot. A snapshot found only in S3 is not read here
+		// (one request per row); its detail reads it.
+		if !curViews && baselineKindOf(f.Path) == "dir" {
+			curViews = true
+			cur.rowViewsSkipped(readLocalViewsSkipped(localSnapshotDirOf(f.Path)))
+		}
 	}
 	// Headline over the files of the snapshots the page reads (the cap plus
 	// one, #1679), delegated to the status package's newest-per-table

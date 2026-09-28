@@ -334,6 +334,10 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		}
 	}
 	SignSnapshot(snapDir, cfg.WriterID)
+	// The views this read left out (#1879), kept with the snapshot. Written
+	// for a run with none too: that removes the record an earlier attempt at
+	// this directory may have left.
+	RecordViewsSkipped(snapDir, NewViewsSkipped(stats.ViewsSkipped, ts))
 	if err := baselineintegrity.WriteManifest(snapDir); err != nil {
 		return stats, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err)
 	}
