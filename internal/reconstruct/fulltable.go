@@ -1274,7 +1274,11 @@ func ReconstructTable(
 	// TRUNCATE/DROP emit no row events (#764): without this check the merge
 	// below would replay the baseline straight through and silently
 	// resurrect rows the DDL actually deleted.
-	if err := CheckDestructiveDDL(ctx, db, schema, table, snapshotTime, cfg.At); err != nil {
+	// By position as well as by time (#1912): the anchor is the BASE's, the
+	// start of everything this run replays whether or not it resumes from a
+	// delta, and the cut is the run's (nil outside Parquet mode).
+	if err := CheckDestructiveDDL(ctx, db, schema, table,
+		DDLWindow{Since: snapshotTime, Until: cfg.At, Anchor: AnchorOf(bmeta), Cut: cfg.cut}); err != nil {
 		return nil, err
 	}
 
@@ -2513,9 +2517,15 @@ func reconstructBinlogOnly(
 	// one second earlier because both clocks are whole seconds and a statement
 	// in the same second may follow that change: refusing there is the
 	// recoverable mistake, a resurrected row is not.
+	//
+	// By time alone, with no anchor (#1912 places a statement by position
+	// against a snapshot's anchor). There is no snapshot here that a statement
+	// could have been indexed after: the window is whatever the index holds
+	// now, read by this same run, and its changes are fetched by time.
 	if fold.First != nil {
-		since := fold.First.EventTimestamp.Add(-time.Second)
-		ddlType, detectedAt, found, err := findDestructiveDDL(ctx, db, schema, table, since, cfg.At)
+		w := DDLWindow{Since: fold.First.EventTimestamp.Add(-time.Second), Until: cfg.At}
+		d, how, err := findDestructiveDDL(ctx, db, schema, table, w)
+		ddlType, detectedAt, found := d.Type, d.DetectedAt, how != ddlOutside
 		switch {
 		case errors.Is(err, errSchemaChangesMissing):
 			// An index too old to record DDL. The baseline paths treat this

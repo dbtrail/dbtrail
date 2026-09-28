@@ -4,11 +4,14 @@ package reconstruct_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
@@ -123,5 +126,170 @@ func TestReconstructParquet_aTruncateIndexedLateIsStillReported(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not say %q: %v", want, err)
 		}
+	}
+}
+
+// lateDDLIndex is a fresh index with the orders table described, and a
+// snapshot of it under root taken at base and anchored at binlog.000003:500.
+func lateDDLIndex(t *testing.T) (db *sql.DB, dsn, root string, base time.Time) {
+	t.Helper()
+	db, dbName := testutil.CreateTestDB(t)
+	if err := indexer.CreateIndexTables(context.Background(), db, 48, false, nil); err != nil {
+		t.Fatalf("CreateIndexTables: %v", err)
+	}
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	base = time.Now().UTC().Truncate(time.Hour)
+	seedOrdersSnapshot(t, db, "shop", base)
+
+	root = t.TempDir()
+	snapDir := filepath.Join(root, reconstruct.SnapshotDirName(base))
+	cols, err := baseline.ParseSchemaText(ordersCreateSQL)
+	if err != nil {
+		t.Fatalf("ParseSchemaText: %v", err)
+	}
+	w, err := baseline.NewWriter(filepath.Join(snapDir, "shop", "orders.parquet"), cols, baseline.WriterConfig{
+		Compression:  "none",
+		RowGroupSize: 100,
+		Metadata: map[string]string{
+			baseline.MetaKeyCreateTableSQL: ordersCreateSQL,
+			baseline.MetaKeyBinlogFile:     "binlog.000003",
+			baseline.MetaKeyBinlogPos:      "500",
+			"bintrail.snapshot_timestamp":  base.Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseline.NewWriter: %v", err)
+	}
+	for _, r := range [][]string{{"1", "new"}, {"2", "paid"}, {"3", "shipped"}} {
+		if err := w.WriteRow(r, []bool{false, false}); err != nil {
+			t.Fatalf("WriteRow: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := baseline.WriteSuccessMarker(snapDir); err != nil {
+		t.Fatalf("WriteSuccessMarker: %v", err)
+	}
+	return db, testutil.BaseDSN() + "/" + dbName, root, base
+}
+
+func recordTruncate(t *testing.T, db *sql.DB, file string, endPos uint64, ranAt time.Time) {
+	t.Helper()
+	if err := indexer.InsertSchemaChange(db, event.Event{
+		BinlogFile: file,
+		EndPos:     endPos,
+		Timestamp:  ranAt,
+		Schema:     "shop",
+		Table:      "orders",
+		EventType:  event.EventDDL,
+		DDLType:    event.DDLTruncateTable,
+		DDLQuery:   "TRUNCATE TABLE orders",
+	}, nil); err != nil {
+		t.Fatalf("InsertSchemaChange: %v", err)
+	}
+}
+
+func rowChange(t *testing.T, db *sql.DB, file string, start, end uint64, at time.Time, pk, after string) {
+	t.Helper()
+	testutil.InsertEvent(t, db, file, start, end, at.Format("2006-01-02 15:04:05"), nil,
+		"shop", "orders", 2, pk, nil, nil, []byte(after))
+}
+
+func foldOrders(dsn, root, out, format string, at time.Time) error {
+	_, err := reconstruct.ReconstructTables(context.Background(), reconstruct.FullTableConfig{
+		IndexDSN:     dsn,
+		BaselineSrc:  root,
+		Tables:       []string{"shop.orders"},
+		At:           at,
+		OutputDir:    out,
+		OutputFormat: format,
+	})
+	return err
+}
+
+// Indexed after TWO refreshes published (the source went quiet, capture was
+// behind): the third one reports it.
+func TestReconstructParquet_aTruncateIndexedAfterTwoRefreshes(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dsn, root, base := lateDDLIndex(t)
+
+	rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	for _, at := range []time.Duration{30 * time.Second, 40 * time.Second} {
+		if err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(at)); err != nil {
+			t.Fatalf("the refresh at +%s: %v", at, err)
+		}
+	}
+	recordTruncate(t, db, "binlog.000003", 800, base.Add(20*time.Second))
+
+	err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(60*time.Second))
+	if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
+		t.Fatalf("the third refresh = %v, want ErrDestructiveDDL: the TRUNCATE ran before both published "+
+			"snapshots' times and is in neither", err)
+	}
+}
+
+// A TRUNCATE from before the snapshot, by time and by position, refuses no
+// refresh: not the first after it, not the next.
+func TestReconstructParquet_aTruncateBeforeTheSnapshotRefusesNothing(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dsn, root, base := lateDDLIndex(t)
+
+	recordTruncate(t, db, "binlog.000002", 900, base.Add(-10*time.Minute))
+	// Same file as the anchor, ending exactly on it, in the snapshot's second.
+	recordTruncate(t, db, "binlog.000003", 500, base)
+	rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	if err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(30*time.Second)); err != nil {
+		t.Fatalf("the first refresh refused on a TRUNCATE the snapshot already holds: %v", err)
+	}
+	rowChange(t, db, "binlog.000003", 700, 800, base.Add(40*time.Second), "2", `{"id":2,"status":"B"}`)
+	if err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(60*time.Second)); err != nil {
+		t.Fatalf("the second refresh refused on a TRUNCATE the snapshot already holds: %v", err)
+	}
+	out, _, _, err := reconstruct.FindBaseline(context.Background(), root, "shop", "orders", base.Add(61*time.Second))
+	if err != nil {
+		t.Fatalf("FindBaseline: %v", err)
+	}
+	if got, want := readOrders(t, out), []string{"1=A", "2=B", "3=shipped"}; !equalStrings(got, want) {
+		t.Fatalf("snapshot = %v, want %v", got, want)
+	}
+}
+
+// The statement and the snapshot in the same second: the position decides.
+func TestReconstructParquet_aTruncateInTheSnapshotsSecond(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dsn, root, base := lateDDLIndex(t)
+
+	rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	recordTruncate(t, db, "binlog.000003", 560, base)
+	err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(30*time.Second))
+	if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
+		t.Fatalf("err = %v, want ErrDestructiveDDL: the TRUNCATE ran in the snapshot's second, after its position", err)
+	}
+}
+
+// A restore to a moment, as a SQL dump: no cut, the same check.
+func TestReconstructDump_aTruncateIndexedLateRefusesARestore(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dsn, root, base := lateDDLIndex(t)
+
+	rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	// Ran 5 seconds before the snapshot's time, recorded after its position.
+	recordTruncate(t, db, "binlog.000003", 560, base.Add(-5*time.Second))
+
+	err := foldOrders(dsn, root, t.TempDir(), reconstruct.OutputFormatMydumper, base.Add(30*time.Second))
+	if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
+		t.Fatalf("err = %v, want ErrDestructiveDDL", err)
+	}
+
+	// A statement that ran after the target stays outside: restoring to
+	// before a TRUNCATE is what a restore is for.
+	db2, dsn2, root2, base2 := lateDDLIndex(t)
+	rowChange(t, db2, "binlog.000003", 600, 700, base2.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	recordTruncate(t, db2, "binlog.000003", 800, base2.Add(40*time.Second))
+	if err := foldOrders(dsn2, root2, t.TempDir(), reconstruct.OutputFormatMydumper, base2.Add(30*time.Second)); err != nil {
+		t.Fatalf("a restore to before the TRUNCATE refused: %v", err)
 	}
 }

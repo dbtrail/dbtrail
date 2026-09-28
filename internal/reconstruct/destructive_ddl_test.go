@@ -11,6 +11,9 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
+// ddlCols is what loadDestructiveDDLs selects.
+var ddlCols = []string{"ddl_type", "detected_at", "binlog_file", "binlog_pos", "after_since", "at_or_before_until"}
+
 // TestCheckDestructiveDDL_truncateInWindowRefuses is the regression for #764:
 // a TRUNCATE between the baseline snapshot and --at emits no row events, so
 // without this check a reconstruct/_snapshot merge would silently resurrect
@@ -26,19 +29,19 @@ func TestCheckDestructiveDDL_truncateInWindowRefuses(t *testing.T) {
 	until := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
 	detectedAt := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
 
-	mock.ExpectQuery("SELECT ddl_type, detected_at FROM schema_changes").
-		WithArgs("mydb", "orders", since, until).
-		WillReturnRows(sqlmock.NewRows([]string{"ddl_type", "detected_at"}).
-			AddRow("TRUNCATE TABLE", detectedAt))
+	mock.ExpectQuery("SELECT ddl_type, detected_at, binlog_file, binlog_pos").
+		WithArgs(since, until, "mydb", "orders").
+		WillReturnRows(sqlmock.NewRows(ddlCols).
+			AddRow("TRUNCATE TABLE", detectedAt, "binlog.000001", 400, true, true))
 
-	err = CheckDestructiveDDL(context.Background(), db, "mydb", "orders", since, until)
+	err = CheckDestructiveDDL(context.Background(), db, "mydb", "orders", DDLWindow{Since: since, Until: until})
 	if err == nil {
 		t.Fatal("expected a refusal error for TRUNCATE TABLE in the window, got nil")
 	}
 	if !errors.Is(err, ErrDestructiveDDL) {
 		t.Errorf("error should wrap ErrDestructiveDDL, got: %v", err)
 	}
-	for _, want := range []string{"TRUNCATE TABLE", "mydb.orders", "2026-01-02T12:00:00Z"} {
+	for _, want := range []string{"TRUNCATE TABLE", "mydb.orders", "2026-01-02T12:00:00Z", "binlog.000001:400", "Take a new snapshot"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error message %q should contain %q", err.Error(), want)
 		}
@@ -63,12 +66,12 @@ func TestCheckDestructiveDDL_dropAndRenameAlsoRefuse(t *testing.T) {
 			until := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
 			detectedAt := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 
-			mock.ExpectQuery("SELECT ddl_type, detected_at FROM schema_changes").
-				WithArgs("mydb", "orders", since, until).
-				WillReturnRows(sqlmock.NewRows([]string{"ddl_type", "detected_at"}).
-					AddRow(ddlType, detectedAt))
+			mock.ExpectQuery("SELECT ddl_type, detected_at, binlog_file, binlog_pos").
+				WithArgs(since, until, "mydb", "orders").
+				WillReturnRows(sqlmock.NewRows(ddlCols).
+					AddRow(ddlType, detectedAt, "binlog.000001", 400, true, true))
 
-			err = CheckDestructiveDDL(context.Background(), db, "mydb", "orders", since, until)
+			err = CheckDestructiveDDL(context.Background(), db, "mydb", "orders", DDLWindow{Since: since, Until: until})
 			if err == nil {
 				t.Fatalf("expected a refusal error for %s in the window, got nil", ddlType)
 			}
@@ -91,11 +94,11 @@ func TestCheckDestructiveDDL_noneInWindowPasses(t *testing.T) {
 	since := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
 
-	mock.ExpectQuery("SELECT ddl_type, detected_at FROM schema_changes").
-		WithArgs("mydb", "orders", since, until).
-		WillReturnRows(sqlmock.NewRows([]string{"ddl_type", "detected_at"}))
+	mock.ExpectQuery("SELECT ddl_type, detected_at, binlog_file, binlog_pos").
+		WithArgs(since, until, "mydb", "orders").
+		WillReturnRows(sqlmock.NewRows(ddlCols))
 
-	if err := CheckDestructiveDDL(context.Background(), db, "mydb", "orders", since, until); err != nil {
+	if err := CheckDestructiveDDL(context.Background(), db, "mydb", "orders", DDLWindow{Since: since, Until: until}); err != nil {
 		t.Errorf("expected nil error when no destructive DDL is in the window, got: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -116,11 +119,11 @@ func TestCheckDestructiveDDL_missingTableIsNotFatal(t *testing.T) {
 	since := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
 
-	mock.ExpectQuery("SELECT ddl_type, detected_at FROM schema_changes").
-		WithArgs("mydb", "orders", since, until).
+	mock.ExpectQuery("SELECT ddl_type, detected_at, binlog_file, binlog_pos").
+		WithArgs(since, until, "mydb", "orders").
 		WillReturnError(&mysqldriver.MySQLError{Number: 1146, Message: "Table 'bintrail_index.schema_changes' doesn't exist"})
 
-	if err := CheckDestructiveDDL(context.Background(), db, "mydb", "orders", since, until); err != nil {
+	if err := CheckDestructiveDDL(context.Background(), db, "mydb", "orders", DDLWindow{Since: since, Until: until}); err != nil {
 		t.Errorf("expected nil error for a missing schema_changes table, got: %v", err)
 	}
 }
@@ -139,11 +142,11 @@ func TestCheckDestructiveDDL_brokenTablespaceIsNotAMissingTable(t *testing.T) {
 
 	since := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
-	mock.ExpectQuery("SELECT ddl_type, detected_at FROM schema_changes").
-		WithArgs("mydb", "orders", since, until).
+	mock.ExpectQuery("SELECT ddl_type, detected_at, binlog_file, binlog_pos").
+		WithArgs(since, until, "mydb", "orders").
 		WillReturnError(&mysqldriver.MySQLError{Number: 1932, Message: "Table 'bintrail_index.schema_changes' doesn't exist in engine"})
 
-	err = CheckDestructiveDDL(context.Background(), db, "mydb", "orders", since, until)
+	err = CheckDestructiveDDL(context.Background(), db, "mydb", "orders", DDLWindow{Since: since, Until: until})
 	if err == nil {
 		t.Fatal("a missing tablespace was answered as \"nothing to check\"")
 	}

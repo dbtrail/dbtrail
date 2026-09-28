@@ -374,7 +374,8 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// would silently resolve a truncated-away row as if it still existed at
 	// --at (#764; same guard as the full-table path and the shim's
 	// _snapshot).
-	if err := reconstruct.CheckDestructiveDDL(cmd.Context(), db, recSchema, recTable, snapshotTime, at); err != nil {
+	if err := reconstruct.CheckDestructiveDDL(cmd.Context(), db, recSchema, recTable,
+		reconstruct.DDLWindow{Since: snapshotTime, Until: at, Anchor: reconstruct.AnchorOf(bmeta)}); err != nil {
 		return err
 	}
 

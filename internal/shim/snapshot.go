@@ -248,7 +248,11 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// Refuse if a TRUNCATE/DROP/RENAME hit this table in the window: it emits
 	// no row events, so the merge below would replay the baseline straight
 	// through and silently resurrect rows the DDL actually deleted (#764).
-	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table, snapshotTime, q.AsOf); err != nil {
+	// The baseline's position is read here, ahead of the fetch that also
+	// takes it: the check places a statement indexed late by it (#1912).
+	sincePos := snapshotSincePos(ctx, baselinePath, h.logger, q.Schema, q.Table)
+	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table,
+		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos}); err != nil {
 		return nil, err
 	}
 
@@ -264,7 +268,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 			Schema:     q.Schema,
 			Table:      q.Table,
 			Since:      &snapshotTime,
-			SincePos:   snapshotSincePos(ctx, baselinePath, h.logger, q.Schema, q.Table),
+			SincePos:   sincePos,
 			Until:      &q.AsOf,
 			LimitPerPK: 1,
 		},
