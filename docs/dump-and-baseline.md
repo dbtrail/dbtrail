@@ -323,7 +323,7 @@ Archives are kept apart by a `bintrail_id=<uuid>/` folder per server. Snapshots 
 Nothing refuses this today. It is reported instead:
 
 - Each snapshot is signed by its writer: an empty file named `_WRITER.<bintrail_id>` next to `_SUCCESS`. The console, `baseline refresh` and `reconstruct --output-format parquet` sign with the `bintrail_id` recorded in the index they work from. `bintrail baseline` and `bintrail-pg baseline` have no index, so they sign with `--bintrail-id` and leave the snapshot unsigned without it. A snapshot built on top of an older one is signed by the installation that builds it.
-- When a listing finds snapshots signed by more than one writer in a location, it logs a warning that names them, and the console shows it on the Snapshots page, in the server's settings, naming the other writer.
+- When a listing finds snapshots signed by more than one writer in a location, it logs a warning that names them, and the web interface shows it on the Snapshots page, in the server's settings, naming the other writer.
 - Snapshots written before signatures existed are unsigned. An unsigned snapshot names no writer and never raises the warning, so a location with older snapshots and one signing installation reports nothing.
 
 The warning stays while the location still holds the other writer's snapshots. An index that was created again gets a new `bintrail_id`, so its new snapshots are signed differently from the ones it wrote before: point it at a new folder.
