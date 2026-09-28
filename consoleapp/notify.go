@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -264,6 +266,12 @@ type stalenessWatcher struct {
 	// reconstruct.ReadBounds. With nil, a file with a chain beside it is
 	// not graded at all: its snapshot time is not where a reader starts.
 	readBounds func(ctx context.Context, files []reconstruct.BaselineFile) []status.ReadBound
+	// readTimeout bounds one server's chain reads; zero is
+	// stalenessReadTimeout.
+	readTimeout time.Duration
+	// standing is, per edge, the tables the alert in force names. Only
+	// runCycle touches it, and cycles do not overlap.
+	standing map[string][]string
 }
 
 // newStalenessWatcher is the watcher the daemon runs, with its real readers.
@@ -402,14 +410,7 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 		for _, i := range reconstruct.NewestPerTable(files) {
 			newest = append(newest, files[i])
 		}
-		bounds := make([]status.ReadBound, len(newest))
-		if w.readBounds != nil {
-			bounds = w.readBounds(ctx, newest)
-		} else {
-			for i, f := range newest {
-				bounds[i].Unread = f.HasDelta()
-			}
-		}
+		bounds := w.boundsWithin(ctx, t, newest)
 		// ALL broken tables, sorted — the edge detail must be a stable
 		// identity, and a map-iteration-ordered single pick would flip
 		// between cycles and re-fire through the repeat window.
@@ -448,9 +449,16 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 			}
 			// What could not be graded for one table is no evidence about
 			// another (#1707): a chain is unread per table, so a table that
-			// IS past coverage still alerts. Only the resolve is withheld.
+			// IS past coverage still alerts. Only the resolve is withheld,
+			// and the list of the alert in force does not get shorter: a
+			// table leaves it when a cycle that graded every table found it
+			// inside coverage, never because it could not be read. A table
+			// going back and forth between past coverage and unread would
+			// otherwise change the list, and so page, on every cycle, and
+			// the shorter list would read as that table repaired.
+			brokenTables = mergeSorted(brokenTables, w.standing[edgeID])
 			if len(brokenTables) > 0 {
-				sort.Strings(brokenTables)
+				w.keepStanding(edgeID, brokenTables)
 				w.n.BaselineStale(t.name, edgeID, true,
 					strings.Join(brokenTables, ", "), floor.Hour.UTC().Format(time.RFC3339))
 			}
@@ -458,9 +466,81 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 		}
 		w.unknownEdge.Resolve("staleness-attribution:" + edgeID)
 		sort.Strings(brokenTables)
+		w.keepStanding(edgeID, brokenTables)
 		w.n.BaselineStale(t.name, edgeID, len(brokenTables) > 0,
 			strings.Join(brokenTables, ", "), floor.Hour.UTC().Format(time.RFC3339))
 	}
+}
+
+// stalenessReadTimeout bounds the chain reads of ONE server. Servers are
+// checked one after another, so a read that never returns (a store that
+// accepts the request and does not answer) would otherwise leave every
+// server after it unchecked, with nothing logged.
+const stalenessReadTimeout = 2 * time.Minute
+
+// boundsWithin is readBounds under the deadline of one server. What has not
+// answered by then leaves every table that has a chain unread, which grades
+// unknown; a table with none needs no read and is graded as before.
+//
+// The read runs in a goroutine of its own so that the cycle moves on even
+// when the read ignores its context. That goroutine stays behind until the
+// read returns, one per server per cycle at the worst.
+func (w *stalenessWatcher) boundsWithin(ctx context.Context, t stalenessTarget, newest []reconstruct.BaselineFile) []status.ReadBound {
+	unread := make([]status.ReadBound, len(newest))
+	for i, f := range newest {
+		unread[i].Unread = f.HasDelta()
+	}
+	if w.readBounds == nil {
+		return unread
+	}
+	timeout := w.readTimeout
+	if timeout <= 0 {
+		timeout = stalenessReadTimeout
+	}
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	answer := make(chan []status.ReadBound, 1) // buffered: a late answer has nobody waiting
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("reading where the table deltas of a server start hit an internal error; its tables with deltas grade unknown this cycle",
+					"server", t.name, "panic", r, "stack", string(debug.Stack()))
+				answer <- nil
+			}
+		}()
+		answer <- w.readBounds(rctx, newest)
+	}()
+	select {
+	case got := <-answer:
+		if len(got) != len(newest) {
+			return unread
+		}
+		return got
+	case <-rctx.Done():
+		slog.Warn("reading where the table deltas of a server start did not finish in time; its tables with deltas grade unknown this cycle",
+			"server", t.name, "source", t.source, "timeout", timeout.String())
+		return unread
+	}
+}
+
+// keepStanding records the tables the alert in force names; none forgets
+// the edge.
+func (w *stalenessWatcher) keepStanding(edgeID string, tables []string) {
+	if len(tables) == 0 {
+		delete(w.standing, edgeID)
+		return
+	}
+	if w.standing == nil {
+		w.standing = map[string][]string{}
+	}
+	w.standing[edgeID] = slices.Clone(tables)
+}
+
+// mergeSorted is the union of two lists of names, sorted.
+func mergeSorted(a, b []string) []string {
+	out := slices.Concat(a, b)
+	sort.Strings(out)
+	return slices.Compact(out)
 }
 
 func oldestDeltaByDSN(ctx context.Context, dsn string) (status.DeltaFloor, error) {

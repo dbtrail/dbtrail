@@ -238,3 +238,102 @@ func TestStalenessWatcher_unreadChainDoesNotMuteABrokenTable(t *testing.T) {
 		t.Fatalf("every table graded and none broken must resolve: %+v", f.events)
 	}
 }
+
+// TestStalenessWatcher_aFlickeringTableDoesNotReAlert: orders is past
+// coverage and stays there; audit goes back and forth between past coverage
+// and unread. Unread is not repaired, so the alert in force keeps naming
+// audit and nothing is sent again. A list that dropped audit would page once
+// per cycle and read as "audit was fixed".
+func TestStalenessWatcher_aFlickeringTableDoesNotReAlert(t *testing.T) {
+	now := time.Now().UTC()
+	oldest := now.Add(-20 * time.Hour)
+	n, f := testNotifier()
+	c := newChainWatcher(t, n)
+	c.floor = status.DeltaFloor{Hour: oldest}
+	snap := now.Add(-time.Hour)
+	c.files = []reconstruct.BaselineFile{
+		{Schema: "shop", Table: "orders", SnapshotTime: snap, DeltaUpserts: "orders.upserts.parquet"},
+		{Schema: "shop", Table: "audit", SnapshotTime: snap, DeltaUpserts: "audit.upserts.parquet"},
+	}
+	past := status.ReadBound{ChainStart: oldest.Add(-2 * time.Hour)}
+	c.bounds["shop.orders"] = past
+	for cycle := range 4 {
+		c.bounds["shop.audit"] = past
+		if cycle%2 == 1 {
+			c.bounds["shop.audit"] = status.ReadBound{Unread: true}
+		}
+		c.w.runCycle(context.Background())
+	}
+	if len(f.events) != 1 || f.events[0].Details["tables"] != "shop.audit, shop.orders" {
+		t.Fatalf("four cycles with one table flickering must alert once, naming both: %+v", f.events)
+	}
+
+	// audit is read and is inside coverage: it leaves the list, said once.
+	c.bounds["shop.audit"] = status.ReadBound{ChainStart: snap.Add(-time.Hour)}
+	c.w.runCycle(context.Background())
+	c.w.runCycle(context.Background())
+	if len(f.events) != 2 || f.events[1].Resolved || f.events[1].Details["tables"] != "shop.orders" {
+		t.Fatalf("a table checked and inside coverage leaves the list: %+v", f.events)
+	}
+
+	// An unread table that was never in the alert does not join it.
+	c.bounds["shop.audit"] = status.ReadBound{Unread: true}
+	c.w.runCycle(context.Background())
+	if len(f.events) != 2 {
+		t.Fatalf("an unread table the alert never named must not be added: %+v", f.events)
+	}
+}
+
+// TestStalenessWatcher_aReadThatNeverReturnsDoesNotStopTheRest: servers are
+// checked one after another, so a chain read that hangs on the first would
+// leave every server after it unchecked, for good. Each server's reads have
+// a deadline; past it the tables with a chain are unread.
+func TestStalenessWatcher_aReadThatNeverReturnsDoesNotStopTheRest(t *testing.T) {
+	reg := testRegistryWithEntries(t,
+		console.ServerEntry{Name: "a", DSN: "d1", BaselineDir: "/a"},
+		console.ServerEntry{Name: "b", DSN: "d2", BaselineDir: "/b"},
+	)
+	now := time.Now().UTC()
+	oldest := now.Add(-20 * time.Hour)
+	snap := now.Add(-time.Hour)
+	n, f := testNotifier()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	w := &stalenessWatcher{
+		n: n, registry: reg, unknownEdge: notify.NewEdge(0), readTimeout: 50 * time.Millisecond,
+		listBaselines: func(_ context.Context, source string) ([]reconstruct.BaselineFile, int, error) {
+			return []reconstruct.BaselineFile{
+				{Schema: "shop", Table: "orders", SnapshotTime: snap, DeltaUpserts: "orders.upserts.parquet", Path: source + "/orders.parquet"},
+				{Schema: "shop", Table: "plain", SnapshotTime: oldest.Add(-time.Hour), Path: source + "/plain.parquet"},
+			}, 0, nil
+		},
+		oldestDelta: func(context.Context, string) (status.DeltaFloor, error) { return status.DeltaFloor{Hour: oldest}, nil },
+		readBounds: func(_ context.Context, files []reconstruct.BaselineFile) []status.ReadBound {
+			if files[0].Path[:2] == "/a" {
+				<-release // a store that accepted the request and never answers
+			}
+			out := make([]status.ReadBound, len(files))
+			out[0].ChainStart = oldest.Add(-2 * time.Hour)
+			return out
+		},
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); w.runCycle(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the cycle never finished: one server's read holds every server")
+	}
+	got := map[string]string{}
+	for _, e := range f.events {
+		got[e.Server] = e.Details["tables"]
+	}
+	// a: orders has a chain nobody could read, plain has none and is past
+	// coverage. b: both are past coverage.
+	if len(f.events) != 2 || got["a"] != "shop.plain" || got["b"] != "shop.orders, shop.plain" {
+		t.Fatalf("events %+v", f.events)
+	}
+	if !w.unknownEdge.Active("staleness-attribution:d1\x1f/a") || w.unknownEdge.Active("staleness-attribution:d2\x1f/b") {
+		t.Fatal("only the server whose read ran out of time is cannot-evaluate")
+	}
+}
