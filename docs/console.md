@@ -823,7 +823,7 @@ longer drawn on the page.
   ends. DBTrail itself never deletes from S3 and never sets a bucket rule;
   the rule is the operator's to apply.
   Above the rule, one line says whether the bucket already expires these
-  snapshots (#1680). The console reads the bucket's rules after the row is
+  snapshots (#1680). The web interface reads the bucket's rules after the row is
   drawn and answers with one of three states. A rule covers this prefix: the
   line names it and the age it expires at, and turns red when that age is no
   longer than the schedule interval. No rule covers it: the line is red and
