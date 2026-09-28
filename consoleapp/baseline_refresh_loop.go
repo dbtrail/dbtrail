@@ -73,13 +73,16 @@ type refreshRequest struct {
 // gate skips RESTORES the slot, so by the time a caller looked the stamp could
 // already be the previous job's — and which one it saw would depend on how
 // long the gate's index read took. The empty string comes back with an error.
+//
+// It does NOT choose the instant the cycle folds to. That is taken inside the
+// cycle, after the gate has read the index marks (#1705); see anchorRefresh.
+// The claim therefore carries no At until the cycle has one.
 func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Duration) (string, error) {
 	s.mu.Lock()
 	if s.busyLocked(req.ServerID) {
 		s.mu.Unlock()
 		return "", console.ErrBaselineRunning
 	}
-	at := time.Now().UTC()
 	since := nowStamp()
 	// Saved before it is overwritten, so a cycle the #1689 gate skips can put
 	// it back exactly. It can never itself be "running": busyLocked above just
@@ -88,13 +91,13 @@ func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Du
 	s.refreshPrior[req.ServerID] = s.refreshes[req.ServerID]
 	// A new cycle, so any earlier gate skip stops speaking for this server.
 	delete(s.refreshGateSkips, req.ServerID)
-	s.refreshes[req.ServerID] = &console.BaselineStatus{State: "running", Since: since,
-		At: at.Format(time.RFC3339)}
+	s.refreshes[req.ServerID] = &console.BaselineStatus{State: "running", Since: since}
 	s.mu.Unlock()
 
 	slog.Info("baseline refresh: starting", "server", req.ServerName, "id", req.ServerID)
 	go func() {
-		s.runRefresh(req, at, interval)
+		// The zero instant: the cycle stamps its own, after the mark read.
+		s.runRefresh(req, time.Time{}, interval)
 		// After the refresh has released its slot: a chain that grew long
 		// is merged by the compaction job, which claims the slot for itself
 		// (#1723). Never inside the refresh's own time.
@@ -104,13 +107,20 @@ func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Du
 }
 
 // RefreshStatus reports the last periodic refresh for a server.
+//
+// CheckedAt is laid over the copy handed out and never written on the slot
+// (#1705): a cycle the gate skips puts the slot back exactly as it found it,
+// and the last run it names did not happen any later because the loop looked
+// again.
 func (s *baselineSupervisor) RefreshStatus(serverID string) console.BaselineStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if st, ok := s.refreshes[serverID]; ok {
-		return *st
+	st := console.BaselineStatus{State: "idle"}
+	if cur, ok := s.refreshes[serverID]; ok {
+		st = *cur
 	}
-	return console.BaselineStatus{State: "idle"}
+	st.CheckedAt = s.refreshChecked[serverID]
+	return st
 }
 
 // busyLocked reports whether any of the four baseline job kinds (dump,
@@ -135,6 +145,13 @@ func (s *baselineSupervisor) busyLocked(serverID string) bool {
 	return false
 }
 
+// runRefresh is one refresh cycle: the gate, and the fold when the gate does
+// not skip it.
+//
+// at is the instant the cycle folds to, and the daemon passes the ZERO instant,
+// which means "take it after the index marks are read". A caller that passes a
+// real instant gets that one; only tests do, to fix the snapshot directory's
+// name. Either way the cycle has no instant until anchorRefresh runs.
 func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interval time.Duration) {
 	// The cycle's own recover in runBaselineRefreshCycle cannot reach here: it
 	// sits on the near side of the `go` in TriggerRefresh, so it guards the
@@ -187,6 +204,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		s.releaseRefreshSlot(req.ServerID)
 		return
 	}
+	// BELOW the mark read, and the order is the point (#1705). See
+	// anchorRefresh.
+	at = s.anchorRefresh(req.ServerID, at)
 
 	// Read and REMOVED in one step, before anything below can fail. Every exit
 	// that FOLDED and published nothing has to leave no sample behind, and the
@@ -304,26 +324,17 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// This cycle is writing its own terminal status, so the one it displaced is
 	// of no further use. Dropped under the same lock that stored it.
 	delete(s.refreshPrior, req.ServerID)
+	s.refreshChecked[req.ServerID] = nowStamp()
 	if err == nil && known {
 		// Memoized under the same lock that publishes the status, and only on
 		// the branch where the fold succeeded. The mark stored is the one read
 		// BEFORE the fold: an event indexed WHILE it ran was not folded, and
 		// storing the later value would skip it forever.
 		//
-		// That invariant holds for the fold's DURATION and NOT for the sliver
-		// before it. `at` is stamped in TriggerRefresh and is the fold's cut;
-		// the mark is read further down, after the staging sweep and two
-		// queries. Anything indexed in between is above the cut, so it was not
-		// folded, and it IS in the mark — the gate will count it as done. On a
-		// server where nothing else is ever indexed that defers the next
-		// cycle's work until the coverage question opens the gate, which at the
-		// default retention is up to 24 days. Nothing is lost: the deltas stay
-		// in the index and the next fold's window still starts at the previous
-		// snapshot's instant, so they are folded whenever a cycle does run.
-		// What is deferred is the WARNING a TRUNCATE in that sliver would have
-		// produced, since it writes a schema_changes row and no row event.
-		// Fixing it means anchoring the cut after the mark read instead of
-		// before; that is a wider change than this one and is filed separately.
+		// The other end is closed by where `at` is taken: after this mark was
+		// read, so what the mark counts was indexed before the instant the
+		// fold targets (#1705, anchorRefresh).
+		//
 		// at, not time.Now(): it is the instant that NAMES the published
 		// snapshot directory, and the directory instant is the one the next
 		// fold's window starts from.
@@ -370,6 +381,51 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	}
 	reportRefreshDuration(req.ServerName, finished, prevPace)
 	s.refreshPaces[req.ServerID] = refreshSample(finished)
+}
+
+// anchorRefresh fixes the instant this cycle folds to, and writes it on the
+// cycle's claim. The instant names the snapshot directory, bounds the fold's
+// window, and is what the memo dates the published snapshot by.
+//
+// It runs AFTER the gate has read the index marks, and that order is the whole
+// reason it exists (#1705). The marks are what a clean fold remembers as done,
+// so everything they count has to be inside the window that fold looked at.
+// Taken before the read, the instant left a sliver: a statement indexed after
+// the instant and before the read was past the window and inside the mark, so
+// the gate counted it as folded. Row events were never lost to that, because
+// the next fold's window starts at this snapshot's instant. What waited was
+// the refusal a TRUNCATE raises, which is the only notice of one (it writes a
+// schema_changes row and no row event), and on a server where nothing else is
+// indexed it waited until the coverage question opened the gate.
+//
+// Taken after the read, the error points the safe way: something indexed
+// between the read and the fold is folded and not remembered, which costs one
+// more fold that applies nothing.
+//
+// What this does NOT change is which events a fold takes. That is decided by
+// position inside the fold (reconstruct.ResolveSnapshotCut), from whatever
+// instant it is handed, and this hands it one that is a few milliseconds later
+// than before: the same as the cycle having been triggered that much later.
+//
+// What it cannot close: the order is between two readings of THIS host's
+// clock, and a statement carries the SOURCE's. A source whose clock runs ahead
+// of this host can still stamp a statement past the instant. That case is
+// bounded the way the sliver was, by the next fold, and is not made worse.
+//
+// fixed is the instant a caller chose; the zero instant means now.
+func (s *baselineSupervisor) anchorRefresh(serverID string, fixed time.Time) time.Time {
+	at := fixed
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// On the claim, because the status names the snapshot by this instant and
+	// the backup schedule reads that name off it once the run has published.
+	if st := s.refreshes[serverID]; st != nil {
+		st.At = at.Format(time.RFC3339)
+	}
+	return at
 }
 
 // takeRefreshPace hands this run the previous published run's sample and takes
@@ -641,6 +697,13 @@ func (s *baselineSupervisor) reportGateBlind(question string, known bool, req re
 		s.gateEdge.Resolve(key)
 		return
 	}
+	if s.ctx.Err() != nil {
+		// The daemon is stopping, and that is why the read failed (#1705).
+		// Nothing is wrong with the index, so there is nothing to tell the
+		// operator to fix. The condition is neither raised nor resolved: a
+		// blindness that was standing before the shutdown is still standing.
+		return
+	}
 	if s.gateEdge.Fire(key, "") {
 		slog.Warn("baseline refresh: "+why, "server", req.ServerName, "id", req.ServerID,
 			"question", question)
@@ -650,8 +713,30 @@ func (s *baselineSupervisor) reportGateBlind(question string, known bool, req re
 // refreshDestination names where a cycle would put what it publishes: the local
 // directory and the bucket together. It is the memo's identity alongside the
 // index, because a fold that reached one destination says nothing about another.
+//
+// Two spellings of one place are one destination (#1705): a trailing slash
+// added in the settings panel moved nothing, and comparing the raw text cost a
+// fold that applied nothing. Each half is normalised by the rule the cycle
+// itself WRITES by, and by nothing wider, because the dangerous direction is
+// calling two places one: the gate would then skip the cycle whose job was to
+// put a copy in the second. The directory goes through filepath.Join
+// (refreshSnapshotDir), which cleans it. The bucket has ONE trailing slash
+// trimmed before the snapshot name is appended (uploadRefreshedSnapshot), so
+// two trailing slashes are a different key and stay a different destination.
+// An empty directory stays empty: cleaned, it would read as the working
+// directory.
 func refreshDestination(req refreshRequest) string {
-	return req.BaselineDir + "\x00" + req.BaselineS3
+	dir := req.BaselineDir
+	if dir != "" {
+		dir = filepath.Clean(dir)
+	}
+	bucket := strings.TrimSuffix(req.BaselineS3, "/")
+	if bucket == "" {
+		// A bucket that is nothing but a slash is not "no bucket": the cycle
+		// would still try to upload. Left as written, so it compares different.
+		bucket = req.BaselineS3
+	}
+	return dir + "\x00" + bucket
 }
 
 // releaseRefreshSlot puts a server's refresh status back the way TriggerRefresh
@@ -687,6 +772,9 @@ func (s *baselineSupervisor) releaseRefreshSlot(serverID string) {
 	if claim := s.refreshes[serverID]; claim != nil {
 		s.refreshGateSkips[serverID] = claim.Since
 	}
+	// The one thing a skipped cycle leaves on the wire: that the loop looked.
+	// It is not an outcome, and the status below is still put back untouched.
+	s.refreshChecked[serverID] = nowStamp()
 	if prior := s.refreshPrior[serverID]; prior != nil {
 		s.refreshes[serverID] = prior
 	} else {

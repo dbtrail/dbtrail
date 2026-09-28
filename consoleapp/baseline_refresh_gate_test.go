@@ -430,6 +430,9 @@ func TestTriggerRefresh_aSkippedCycleLeavesTheServerFree(t *testing.T) {
 		t.Fatalf("folded %d time(s), want still 1", folds.Load())
 	}
 	// DeepEqual: the status carries the refused tables, a slice (#1653).
+	// CheckedAt is set apart first: it is the one field that describes the loop
+	// and not the run, and it is pinned on its own (#1705).
+	skipped.CheckedAt, published.CheckedAt = "", ""
 	if !reflect.DeepEqual(skipped, published) {
 		t.Errorf("the skipped cycle changed the reported status:\n got %+v\nwant %+v\n"+
 			"a cycle that did not run has nothing to report, and any new value here is a "+
