@@ -177,6 +177,14 @@ type FullTableConfig struct {
 	// to adopt (#1723): "<CompactDir>/<schema>/<table>/<chain start>/", one
 	// complete range pair plus a _SUCCESS marker. Empty: nothing is adopted.
 	CompactDir string
+	// ChainStartFloor ends a chain of deltas that started at or before it
+	// (#1904): the table is written in full again, and a new chain starts at
+	// At. A reader of a table with a chain fetches events from the chain's
+	// start, and a refresh that only adds a pair leaves that start where it
+	// was, so on a quiet server nothing else moves it before the index drops
+	// the events it needs. The daemon's refresh sets it from how far back the
+	// index still keeps events; the zero value ends nothing on this ground.
+	ChainStartFloor time.Time
 
 	// WarnEventThreshold logs a loud warning when a table's fetched event count
 	// exceeds it. The event window itself is PAGED since #1097, so the resident

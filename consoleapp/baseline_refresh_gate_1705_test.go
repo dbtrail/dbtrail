@@ -29,7 +29,7 @@ import (
 func seedQuietServer(sup *baselineSupervisor, req refreshRequest, mark indexMark) {
 	sup.mu.Lock()
 	defer sup.mu.Unlock()
-	sup.foldedMarks[req.ServerID] = foldMemo{mark: mark, publishedAt: refreshAt,
+	sup.foldedMarks[req.ServerID] = foldMemo{mark: mark, publishedAt: refreshAt, readsFrom: refreshAt, readsFromKnown: true,
 		destination: refreshDestination(req), indexDSN: req.IndexDSN}
 }
 
@@ -238,7 +238,7 @@ func TestRefreshCanSkip_aHungCoverageReadBlocksNoOtherJob(t *testing.T) {
 	var once, freed sync.Once
 	prevCov := snapshotStillCovered
 	t.Cleanup(func() { snapshotStillCovered = prevCov })
-	snapshotStillCovered = func(context.Context, string, time.Time, time.Time) (bool, bool) {
+	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, bool) {
 		once.Do(func() { close(reading) })
 		<-release
 		return true, true
@@ -253,7 +253,7 @@ func TestRefreshCanSkip_aHungCoverageReadBlocksNoOtherJob(t *testing.T) {
 	gateDone := make(chan struct{})
 	go func() {
 		defer close(gateDone)
-		sup.refreshCanSkip(context.Background(), quiet, mark, refreshAt)
+		sup.refreshCanSkip(context.Background(), quiet, mark, refreshAt, 0)
 	}()
 	// Registered after the goroutine, so it runs first at cleanup: every exit
 	// from this test lets the read return and waits for the gate to leave,
@@ -413,7 +413,7 @@ func TestRefreshCanSkip_saysWhenItCannotReadCoverage(t *testing.T) {
 	sup.reportGateBlind("mark", false, req, "cannot tell whether anything has been indexed")
 
 	for range 3 {
-		if sup.refreshCanSkip(context.Background(), req, mark, refreshAt) {
+		if sup.refreshCanSkip(context.Background(), req, mark, refreshAt, 0) {
 			t.Fatal("skipped on a coverage read that did not answer")
 		}
 	}

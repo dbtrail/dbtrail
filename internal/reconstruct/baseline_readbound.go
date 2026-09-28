@@ -2,6 +2,7 @@ package reconstruct
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"path/filepath"
@@ -191,4 +192,49 @@ func NewestPerTable(files []BaselineFile) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// SnapshotReadsFrom returns the earliest instant a reader of any table of the
+// LOCAL snapshot at `at` under root fetches events from (#1904): the start of
+// the oldest chain of deltas in it, or the snapshot's own time when no table
+// has a chain. It is the instant the snapshot stays restorable only while the
+// index still holds, which the refresh loop's gate has to watch rather than
+// the snapshot's directory time.
+//
+// It errors whenever that instant is not known: no table file listed at that
+// snapshot, or a chain whose start could not be read. Never a guess, since
+// the caller acts on a later answer as "still covered".
+func SnapshotReadsFrom(ctx context.Context, root string, at time.Time) (time.Time, error) {
+	files, unreadable, err := ListBaselinesUnreadable(ctx, root)
+	if err != nil {
+		return time.Time{}, err
+	}
+	// By the folder's NAME: at may carry sub-second digits the name drops.
+	name := SnapshotDirName(at)
+	for _, u := range unreadable {
+		// A folder of this snapshot the listing skipped hides its tables,
+		// and their chains may be the oldest.
+		if SnapshotDirName(u.SnapshotTime) == name {
+			return time.Time{}, fmt.Errorf("part of the snapshot %s could not be listed (%s): %w", name, u.Path, u.Err)
+		}
+	}
+	var mine []BaselineFile
+	for _, f := range files {
+		if SnapshotDirName(f.SnapshotTime) == name {
+			mine = append(mine, f)
+		}
+	}
+	if len(mine) == 0 {
+		return time.Time{}, fmt.Errorf("no table file of the snapshot %s is listed under %s", name, root)
+	}
+	var oldest time.Time
+	for i, b := range ReadBounds(ctx, mine) {
+		if b.Unread {
+			return time.Time{}, fmt.Errorf("where the chain of deltas beside %s starts could not be read", mine[i].Path)
+		}
+		if from := b.From(mine[i].SnapshotTime); oldest.IsZero() || from.Before(oldest) {
+			oldest = from
+		}
+	}
+	return oldest, nil
 }

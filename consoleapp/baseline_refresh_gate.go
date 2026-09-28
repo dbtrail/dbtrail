@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
 
@@ -89,6 +91,100 @@ type foldMemo struct {
 	// would read as "nothing has been indexed" about an index this daemon has
 	// never folded from. Compared, never logged.
 	indexDSN string
+	// readsFrom is the earliest instant a reader of the published snapshot
+	// fetches events from (#1904): the start of its oldest chain of deltas, or
+	// publishedAt when no table has one. That is the instant the index has to
+	// keep for the snapshot to stay restorable, and it can be up to a day
+	// before publishedAt. readsFromKnown is false when it could not be read;
+	// the gate then folds.
+	readsFrom      time.Time
+	readsFromKnown bool
+}
+
+// coverageRule is what, besides the live partitions, decides how long a
+// snapshot may go without being replaced (#1904): the retention the operator
+// has configured (zero: rotation off or unreadable) and the time between two
+// refresh cycles.
+type coverageRule struct {
+	retain   time.Duration
+	interval time.Duration
+}
+
+// reanchorBy is THE line, for the gate and for the fold alike (#1904): a
+// snapshot whose readers start at or before it is no longer safely covered,
+// and a chain of table deltas whose start is at or before it is ended (the
+// table is written in full, reconstruct.FullTableConfig.ChainStartFloor). ok
+// is false when there is no floor to draw it from.
+//
+// One function on purpose. The gate opens when a start reaches the line, and
+// the fold it releases is what has to move that start; if the two drew their
+// lines apart, a gate that opened would release a fold that appended a pair,
+// kept the start, and opened the gate again on every cycle, repairing nothing.
+//
+// Three bounds, and the line is the latest of them:
+//
+//   - the product's aging band over the LIVE floor, exactly the verdict
+//     status.BaselineStalenessFor gives (see snapshotStillCovered for why the
+//     live floor and not the archive-extended one);
+//   - the same band over the retention the operator CONFIGURED. The observed
+//     floor is an observation of that policy and the policy can change under
+//     it in a step: the rotation panel saves a new retain and the next
+//     rotation drops every newly expired partition in one statement, 30 days
+//     to 7 skipping the aging verdict entirely. Asked against the policy, a
+//     cycle between the save and the drop already sees the new line;
+//   - one hour plus one interval above the floor. The floor moves in whole
+//     hours, since partitions are hourly, and nothing looks again for an
+//     interval, so a start closer than that can be past the floor at the next
+//     cycle. On a long retention the band is wider and this never binds. It
+//     assumes the next cycle does come one interval later: a cycle skipped
+//     because another job holds the server, or a daemon that is down, stretches
+//     the gap past what the margin covers.
+//
+// A busy table does not rewrite on every cycle: a rewrite starts a new chain
+// at the run, and the next cycle only ends it again when the retention is
+// shorter than two intervals plus an hour, where no chain could live anyway.
+// The same holds, for the same arithmetic, while the index itself is younger
+// than an hour plus an interval: every refresh of that first stretch writes its
+// tables in full.
+func (r coverageRule) reanchorBy(liveFloor, now time.Time) (time.Time, bool) {
+	if liveFloor.IsZero() {
+		return time.Time{}, false
+	}
+	// status.BaselineStalenessFor: aging once now-start >= 0.8 of now-floor,
+	// broken before the floor, and never aging over a floor not behind now.
+	// Rounded up so a start exactly on the band's edge falls on the line.
+	line := liveFloor.Add(-time.Nanosecond)
+	if span := now.Sub(liveFloor); span > 0 {
+		line = now.Add(-time.Duration(math.Ceil(status.BaselineAgingFraction * float64(span))))
+	}
+	floor := liveFloor
+	if r.retain > 0 {
+		if p := now.Add(-time.Duration(float64(r.retain) * status.BaselineAgingFraction)); p.After(line) {
+			line = p
+		}
+		if p := now.Add(-r.retain); p.After(floor) {
+			floor = p
+		}
+	}
+	if m := floor.Add(time.Hour + r.interval); m.After(line) {
+		line = m
+	}
+	return line, true
+}
+
+// readLiveFloor reads the oldest hour the index's live partitions still hold,
+// and whether it could; a package variable so the refresh cycle's use of it can
+// be driven without an index.
+var readLiveFloor = readLiveFloorFromDB
+
+func readLiveFloorFromDB(ctx context.Context, dsn string) (time.Time, bool) {
+	db, err := config.Connect(dsn)
+	if err != nil {
+		slog.Debug("baseline refresh: could not open the index to read how far back it keeps events", "error", err)
+		return time.Time{}, false
+	}
+	defer db.Close()
+	return liveFloorIn(ctx, db, indexDBName(dsn))
 }
 
 // snapshotStillCovered reports whether a published snapshot is still inside the
@@ -140,30 +236,51 @@ type foldMemo struct {
 // one republish every 0.8 of retention. That is the cost the archives were
 // letting it skip, and it was not safe to skip.
 //
+// The same floor draws the line a refresh with table deltas ends a chain on
+// (#1904), so an archiving server with a retention under about 30 hours also
+// writes a table in full once per 0.8 of retention, a little before the day
+// cap would. Same cost, same reason.
+//
 // The threshold itself is still the product's own (status.BaselineStalenessFor,
 // baselineAgingFraction): anything it would already describe as aging or worse
-// counts as not covered.
+// counts as not covered, and coverageRule.reanchorBy adds the configured
+// retention and a cycle's margin to it.
+//
+// What is graded is readsFrom, where a reader of the snapshot starts its event
+// fetch (#1904): with table deltas, the start of its oldest chain, up to a day
+// before the directory's instant. Grading the directory said covered for hours
+// in which a restore refused.
 var snapshotStillCovered = snapshotStillCoveredInDB
 
-func snapshotStillCoveredInDB(ctx context.Context, dsn string, publishedAt, now time.Time) (covered, known bool) {
+func snapshotStillCoveredInDB(ctx context.Context, dsn string, readsFrom, now time.Time, rule coverageRule) (covered, known bool) {
 	db, err := config.Connect(dsn)
 	if err != nil {
 		slog.Debug("baseline refresh: could not open the index to check how far it still reaches", "error", err)
 		return false, false
 	}
 	defer db.Close()
-	return snapshotCoveredIn(ctx, db, indexDBName(dsn), publishedAt, now)
+	return snapshotCoveredIn(ctx, db, indexDBName(dsn), readsFrom, now, rule)
 }
 
 // snapshotCoveredIn is the half that runs the query, split from the connect so
 // it can be tested. It reads the LIVE partitions and nothing else — a test can
 // hold it to that, which is the point: reaching for the archive-extended floor
 // here is the mistake this split exists to make visible.
-func snapshotCoveredIn(ctx context.Context, db *sql.DB, dbName string, publishedAt, now time.Time) (covered, known bool) {
+func snapshotCoveredIn(ctx context.Context, db *sql.DB, dbName string, readsFrom, now time.Time, rule coverageRule) (covered, known bool) {
+	floor, known := liveFloorIn(ctx, db, dbName)
+	if !known {
+		return false, false
+	}
+	return snapshotCoveredBy(floor, readsFrom, now, rule), true
+}
+
+// liveFloorIn is the oldest hour the live partitions hold, and whether there is
+// one: the floor both the gate and the fold's chain line are drawn from.
+func liveFloorIn(ctx context.Context, db *sql.DB, dbName string) (time.Time, bool) {
 	parts, err := status.LoadPartitionStats(ctx, db, dbName)
 	if err != nil {
 		slog.Debug("baseline refresh: could not read how far the index still reaches", "error", err)
-		return false, false
+		return time.Time{}, false
 	}
 	floor := status.OldestLivePartitionHour(parts)
 	if floor.IsZero() {
@@ -174,23 +291,25 @@ func snapshotCoveredIn(ctx context.Context, db *sql.DB, dbName string, published
 		// one reaches reportGateBlind and says so out loud. Grading it would be
 		// the last silent way for the gate to be permanently inert.
 		slog.Debug("baseline refresh: the index has no partition to measure coverage from")
-		return false, false
+		return time.Time{}, false
 	}
-	return snapshotCoveredBy(floor, publishedAt, now), true
+	return floor, true
 }
 
 // snapshotCoveredBy is the verdict itself, split from the read so the threshold
 // is pinned by a test rather than by a stub standing in for one.
 //
 // A zero floor — an index with no parsable partitions — grades unknown, and so
-// does a memo with no published instant; both are meant to fold.
+// does a memo with no instant; both are meant to fold.
 //
 // Exactly OK, not merely "not broken". Broken means the snapshot is ALREADY
 // outside the window, which is too late — the fold that would re-anchor it is
 // the fold that refuses. Aging is the last verdict from which republishing still
-// works, so it is the one that has to open the gate.
-func snapshotCoveredBy(liveFloor, publishedAt, now time.Time) bool {
-	return status.BaselineStalenessFor(publishedAt, liveFloor, now) == status.BaselineOK
+// works, so it is the one that has to open the gate. The line is reanchorBy's,
+// the same one the fold ends chains on.
+func snapshotCoveredBy(liveFloor, readsFrom, now time.Time, rule coverageRule) bool {
+	line, ok := rule.reanchorBy(liveFloor, now)
+	return ok && readsFrom.After(line)
 }
 
 // readIndexMark is a package variable for the reason foldTables and
@@ -280,3 +399,9 @@ func readMaxID(ctx context.Context, db *sql.DB, q string) (uint64, bool) {
 func (m indexMark) unchangedSince(prev indexMark) bool {
 	return m.events == prev.events && m.schemaChanges == prev.schemaChanges
 }
+
+// snapshotReadsFrom is reconstruct.SnapshotReadsFrom behind a seam: the
+// refresh cycle reads it once per clean fold with table deltas on, off the
+// snapshot it just published (foldMemo.readsFrom), and a unit test has no
+// published chain to read.
+var snapshotReadsFrom = reconstruct.SnapshotReadsFrom
