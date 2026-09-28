@@ -1948,11 +1948,12 @@ function ovFlowModel(inp) {
     }
   }
 
-  // The source box: a quiet server says so on the box, not on the arrow,
-  // and only when the source was asked and capture holds all it wrote
-  // (#1794). When it could not be asked the box says no word.
+  // The source box says "up to date", like the card, only when the source
+  // was asked and capture holds all it wrote (#1794). Not "quiet": equal
+  // sets prove capture read all it can, not that nothing was written to
+  // what it does not read. When it could not be asked the box says no word.
   const source = piece("Your MySQL", "none", srv && srv.source_host ? srv.source_host : "", "");
-  if (!cut && capture.tone === "ok" && capture.line === "connected" && covCaptureState(cov) === "up_to_date") source.line = "quiet";
+  if (!cut && capture.tone === "ok" && capture.line === "connected" && covCaptureState(cov) === "up_to_date") source.line = "up to date";
 
   // Table definitions (the DBTrail box): what the schema snapshot last did,
   // the count of captured tables, and a schema change that stopped the copy.

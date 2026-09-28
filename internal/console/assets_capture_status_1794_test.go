@@ -13,8 +13,9 @@ import (
 // a server nobody wrote to: the coverage card that it could not tell a quiet
 // server from capture falling behind, and the flow drawing, beside it,
 // "quiet". Both now read ONE answer (GET /api/capture-status) and say:
+// (the box says "up to date" since the owner's decision of 2026-09-28)
 //
-//   - up to date, and "quiet" on the drawing, only when the source was asked
+//   - up to date, on the card and on the drawing, only when the source was asked
 //     and said so;
 //   - behind, in amber, only when the source was asked and said so;
 //   - what the card said before, and no word on the drawing, for everything
@@ -205,7 +206,7 @@ type captureFlow struct {
 	SourceBoxCls, ArrowCls string
 }
 
-func TestFlowDrawingSaysQuietOnlyWhenTheSourceSaidSo(t *testing.T) {
+func TestFlowDrawingSaysUpToDateOnlyWhenTheSourceSaidSo(t *testing.T) {
 	var got struct {
 		NoAnswer, UpToDate, Behind captureFlow
 		Unknown                    []captureFlow
@@ -236,17 +237,24 @@ console.log(JSON.stringify({
 }));
 `, &got)
 
-	quiet := func(f captureFlow) bool { return strings.Contains(strings.ToLower(f.Screen), "quiet") }
+	// The word on the box, anywhere on the drawing. "quiet" is never said:
+	// it claimed more than the source was asked.
+	quiet := func(f captureFlow) bool { return strings.Contains(strings.ToLower(f.Screen), "up to date") }
+	for _, f := range []captureFlow{got.NoAnswer, got.UpToDate, got.Behind, got.Current, got.Stalled, got.Stopped} {
+		if strings.Contains(strings.ToLower(f.Screen), "quiet") {
+			t.Errorf("the drawing says quiet: %q", f.Screen)
+		}
+	}
 
-	// Asked, and up to date: the drawing may say quiet.
-	if u := got.UpToDate; u.SourceLine != "quiet" || u.ArrowTone != "ok" || u.ArrowLine != "connected" || u.ArrowSub != "nothing new since 14:58" || u.Cut != "" {
+	// Asked, and up to date: the box says so, like the card.
+	if u := got.UpToDate; u.SourceLine != "up to date" || u.ArrowTone != "ok" || u.ArrowLine != "connected" || u.ArrowSub != "nothing new since 14:58" || u.Cut != "" {
 		t.Errorf("up to date: %+v", u)
 	}
 	if !quiet(got.UpToDate) {
 		t.Errorf("up to date: the word is not on screen: %q", got.UpToDate.Screen)
 	}
 
-	// Asked, and behind: amber on the arrow, no quiet, nothing cut.
+	// Asked, and behind: amber on the arrow, no word on the box, nothing cut.
 	if b := got.Behind; b.SourceLine != "db1" || b.ArrowTone != "warn" || b.ArrowLine != "behind" || b.ArrowSub != "last change 14:58" || b.Cut != "" {
 		t.Errorf("behind: %+v", b)
 	}
@@ -254,7 +262,7 @@ console.log(JSON.stringify({
 		t.Errorf("behind: the arrow is drawn %q", got.Behind.ArrowCls)
 	}
 	if quiet(got.Behind) {
-		t.Errorf("behind: the drawing says quiet: %q", got.Behind.Screen)
+		t.Errorf("behind: the drawing says up to date: %q", got.Behind.Screen)
 	}
 
 	// Could not ask: connected, as before, and NO word on the database box,
@@ -441,7 +449,7 @@ const see = (card) => ({ card: card.textContent, flow: flowSlot.textContent, ask
   release(); await settle();
   out.fill.after = see(f.covSlot);
 
-  // The card's refresh button, over a drawing that said quiet.
+  // The card's refresh button, over a drawing that said up to date.
   asked = 0;
   paintFlow({ ...idle(), capture: { server_id: "a", state: "up_to_date" } });
   const card = new FakeEl("section"); card.className = "cov-card"; card.isConnected = true;
@@ -464,7 +472,7 @@ const see = (card) => ({ card: card.textContent, flow: flowSlot.textContent, ask
 })();
 `, &got)
 
-	quiet := func(s string) bool { return strings.Contains(s, "quiet") }
+	quiet := func(s string) bool { return strings.Contains(s, "up to date") }
 	for name, s := range map[string]struct{ Before, After step }{"fill": got.Fill, "refresh": got.Refresh} {
 		// Before the source answers: drawn, with the sentence it had, and
 		// no word on the box, whatever the drawing said a moment ago.
@@ -475,7 +483,7 @@ const see = (card) => ({ card: card.textContent, flow: flowSlot.textContent, ask
 			t.Errorf("%s: asked %d time(s) once the card was drawn, want 1", name, s.Before.Asked)
 		}
 		if name == "refresh" && quiet(s.Before.Flow) {
-			t.Errorf("%s, before the answer: the card says it cannot tell and the drawing says quiet: %q", name, s.Before.Flow)
+			t.Errorf("%s, before the answer: the card says it cannot tell and the drawing says up to date: %q", name, s.Before.Flow)
 		}
 		// After: both say it.
 		if !strings.Contains(s.After.Card, "Up to date. No captured changes since 11:30:27 (1h 14m ago).") || strings.Contains(s.After.Card, "cannot tell which") {
@@ -524,10 +532,10 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   console.log(JSON.stringify({ before, after: f.flowSlot.textContent, asked: asked.filter((p) => p === "/api/capture-status") }));
 })();
 `, &got)
-	if strings.Contains(got.Before, "quiet") || !strings.Contains(got.Before, "connected") {
+	if strings.Contains(got.Before, "up to date") || !strings.Contains(got.Before, "connected") {
 		t.Errorf("before the answer the drawing says: %q", got.Before)
 	}
-	if !strings.Contains(got.After, "quiet") {
+	if !strings.Contains(got.After, "up to date") {
 		t.Errorf("after the answer the drawing was not painted again: %q", got.After)
 	}
 	if len(got.Asked) != 1 {

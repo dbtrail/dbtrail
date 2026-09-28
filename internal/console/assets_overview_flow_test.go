@@ -290,8 +290,8 @@ const origPaint = paint;`, 1)
 	i := get("idle")
 	want("idle", capture, "ok", "connected")
 	// The source was not asked here, so the database box says no word
-	// (#1794): "quiet" is said only on the source's own answer, which
-	// TestFlowDrawingSaysQuietOnlyWhenTheSourceSaidSo covers.
+	// (#1794): "up to date" is said only on the source's own answer, which
+	// TestFlowDrawingSaysUpToDateOnlyWhenTheSourceSaidSo covers.
 	if i.Pieces[capture].Sub != "nothing new since 14:58" || i.Pieces[source].Line != "" {
 		t.Errorf("idle: capture sub %q source line %q", i.Pieces[capture].Sub, i.Pieces[source].Line)
 	}
