@@ -105,9 +105,9 @@ func TestFollowingView_guardStaysWhereTheChainBodyIsNotSafe_1733(t *testing.T) {
 		withPrefix string // a sibling table's name, or none
 		why        string // what the file says above the view
 	}{
-		{"schema not read", false, "", "because its schema could not be read"},
-		{"sibling named orders.old", true, "orders.old", "a name that starts with orders."},
-		{"sibling named ORDERS.000000, other case", true, "ORDERS.000000", "a name that starts with orders."},
+		{"schema not read", false, "", "because its schema could not be read. If a refresh"},
+		{"sibling named orders.old", true, "orders.old", `a name that starts with "orders.". If a refresh`},
+		{"sibling named ORDERS.000000, other case", true, "ORDERS.000000", `a name that starts with "orders.". If a refresh`},
 	} {
 		for _, mode := range followModes1733 {
 			t.Run(tc.name+"/"+mode.name, func(t *testing.T) {
