@@ -1,4 +1,4 @@
-package parser
+package ddltext
 
 import (
 	"slices"
@@ -126,11 +126,11 @@ func TestAddedColumns_notReadable(t *testing.T) {
 // TestAddedColumns_longStatement: a statement is read whole, past the head
 // parseDDL looks at.
 func TestAddedColumns_longStatement(t *testing.T) {
-	q := "ALTER TABLE t ADD COLUMN c INT COMMENT '" + strings.Repeat("x", 4*ddlHeadLimit) + "', DROP COLUMN d"
+	q := "ALTER TABLE t ADD COLUMN c INT COMMENT '" + strings.Repeat("x", 4*HeadLimit) + "', DROP COLUMN d"
 	if _, cols, ok := AddedColumns(q, "shop"); ok {
 		t.Fatalf("a DROP past the head was not seen: read as adding %q", cols)
 	}
-	q = "ALTER TABLE t ADD COLUMN c INT COMMENT '" + strings.Repeat("x", 4*ddlHeadLimit) + "', ADD COLUMN d INT"
+	q = "ALTER TABLE t ADD COLUMN c INT COMMENT '" + strings.Repeat("x", 4*HeadLimit) + "', ADD COLUMN d INT"
 	if _, cols, ok := AddedColumns(q, "shop"); !ok || !slices.Equal(cols, []string{"c", "d"}) {
 		t.Fatalf("columns = %q, ok = %v", cols, ok)
 	}

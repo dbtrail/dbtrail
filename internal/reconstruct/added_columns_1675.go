@@ -11,8 +11,9 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/ddltext"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
-	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/query"
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
@@ -130,13 +131,13 @@ func placeAddedColumns(added []string, inBaseline map[string]bool, ddls []record
 			return fmt.Sprintf("the %s recorded at %s is not after the target by both its time and its binlog position (the cut is %s:%d)",
 				d.Type, d.at(), cut.File, cut.Pos)
 		}
-		if d.Type != string(parser.DDLAlterTable) {
+		if d.Type != string(event.DDLAlterTable) {
 			return fmt.Sprintf("a %s is recorded after the target, at %s", d.Type, d.at())
 		}
 		if len(d.Query) >= maybeCutDDLBytes {
 			return fmt.Sprintf("the text of the ALTER TABLE recorded at %s may be cut short", d.at())
 		}
-		tbl, cols, ok := parser.AddedColumns(d.Query, d.Schema)
+		tbl, cols, ok := ddltext.AddedColumns(d.Query, d.Schema)
 		if !ok {
 			return fmt.Sprintf("the ALTER TABLE recorded at %s cannot be read as only adding columns", d.at())
 		}

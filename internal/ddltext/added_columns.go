@@ -1,4 +1,4 @@
-package parser
+package ddltext
 
 import (
 	"strings"
@@ -17,8 +17,8 @@ var addTargetsNotColumns = map[string]bool{
 }
 
 // AddedColumns reads an ALTER TABLE that does nothing but add columns, and
-// returns the table it names (an unqualified name takes defaultSchema, as in
-// parseDDL) and the columns it adds, spelled as written.
+// returns the table it names (an unqualified name takes defaultSchema, as the
+// capture parser does) and the columns it adds, spelled as written.
 //
 // ok is false for everything else, and for anything that is not read with
 // certainty to its last byte. The caller uses the answer as proof that a
@@ -39,8 +39,8 @@ var addTargetsNotColumns = map[string]bool{
 //   - a line comment (# or --), a block comment left open, or bytes that are
 //     not UTF-8: each is how a text cut short can look complete.
 //
-// It reads the statement through normalizeDDLUpTo and ddlScanner, the same
-// reading parseDDL gives the verb and the table.
+// It reads the statement through NormalizeUpTo and Scanner, the same
+// reading the capture parser gives the verb and the table.
 func AddedColumns(queryStr, defaultSchema string) (tbl event.DDLTable, cols []string, ok bool) {
 	none := event.DDLTable{}
 	if strings.Contains(queryStr, "/*!") || strings.Contains(queryStr, "/*M!") ||
@@ -55,39 +55,39 @@ func AddedColumns(queryStr, defaultSchema string) (tbl event.DDLTable, cols []st
 		!blockCommentsClosed(queryStr) {
 		return none, nil, false
 	}
-	m := ddlVerbRe.FindStringSubmatch(normalizeDDLUpTo(queryStr, len(queryStr)+1))
+	m := VerbRe.FindStringSubmatch(NormalizeUpTo(queryStr, len(queryStr)+1))
 	if m == nil || !strings.HasPrefix(strings.ToUpper(m[1]), "ALTER") {
 		return none, nil, false
 	}
-	sc := ddlScanner{s: m[2]}
-	tbl, ok = sc.qualifiedName(defaultSchema)
+	sc := Scanner{S: m[2]}
+	tbl, ok = sc.QualifiedName(defaultSchema)
 	if !ok {
 		return none, nil, false
 	}
-	clauses, ok := splitDDLClauses(sc.s[sc.i:])
+	clauses, ok := splitDDLClauses(sc.S[sc.I:])
 	if !ok {
 		return none, nil, false
 	}
 	seen := map[string]bool{}
 	for _, clause := range clauses {
-		c := ddlScanner{s: clause}
-		if c.keyword("ALGORITHM") || c.keyword("LOCK") {
-			if !ddlOptionValue(c.s[c.i:]) {
+		c := Scanner{S: clause}
+		if c.Keyword("ALGORITHM") || c.Keyword("LOCK") {
+			if !ddlOptionValue(c.S[c.I:]) {
 				return none, nil, false
 			}
 			continue
 		}
-		if !c.keyword("ADD") {
+		if !c.Keyword("ADD") {
 			return none, nil, false
 		}
-		c.keyword("COLUMN")
-		c.space()
-		quoted := c.i < len(c.s) && (c.s[c.i] == '`' || c.s[c.i] == '"')
-		name, ok := c.ident()
+		c.Keyword("COLUMN")
+		c.Space()
+		quoted := c.I < len(c.S) && (c.S[c.I] == '`' || c.S[c.I] == '"')
+		name, ok := c.Ident()
 		if !ok || !quoted && addTargetsNotColumns[strings.ToUpper(name)] {
 			return none, nil, false
 		}
-		if !addedColumnDefinition(c.s[c.i:]) {
+		if !addedColumnDefinition(c.S[c.I:]) {
 			return none, nil, false
 		}
 		// MySQL compares column names without case.
@@ -223,9 +223,9 @@ func addedColumnDefinition(s string) bool {
 				return false
 			}
 			i = end + 1
-		case isDDLNameRune(rune(c)):
+		case IsNameRune(rune(c)):
 			j := i
-			for j < len(s) && isDDLNameRune(rune(s[j])) {
+			for j < len(s) && IsNameRune(rune(s[j])) {
 				j++
 			}
 			if w := strings.ToUpper(s[i:j]); w == "PRIMARY" || w == "KEY" {
