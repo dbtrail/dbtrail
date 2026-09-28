@@ -8,21 +8,26 @@ import (
 
 func TestOf(t *testing.T) {
 	cases := []struct {
-		name                  string
-		match, mismatch, errs int
-		want                  string
+		name                           string
+		match, mismatch, errs, differs int
+		want                           string
 	}{
-		{"nothing tallied", 0, 0, 0, Unproven},
-		{"one proven", 1, 0, 0, Verified},
-		{"some proven, the rest inconclusive", 3, 0, 0, Verified},
-		{"a divergence", 3, 1, 0, Mismatch},
-		{"an error, nothing proven", 0, 0, 1, Error},
-		{"a divergence outranks an error", 0, 1, 1, Mismatch},
-		{"an error outranks proof", 5, 0, 1, Error},
+		{"nothing tallied", 0, 0, 0, 0, Unproven},
+		{"one proven", 1, 0, 0, 0, Verified},
+		{"some proven, the rest inconclusive", 3, 0, 0, 0, Verified},
+		{"a divergence", 3, 1, 0, 0, Mismatch},
+		{"an error, nothing proven", 0, 0, 1, 0, Error},
+		{"a divergence outranks an error", 0, 1, 1, 0, Mismatch},
+		{"an error outranks proof", 5, 0, 1, 0, Error},
+		// #1380: a difference over a snapshot read with no locks.
+		{"a difference over a torn snapshot beside proof", 9, 0, 0, 1, Differs},
+		{"only differences over a torn snapshot", 0, 0, 0, 2, Differs},
+		{"a mismatch outranks it", 3, 1, 0, 1, Mismatch},
+		{"an error outranks it", 3, 0, 1, 1, Error},
 	}
 	for _, c := range cases {
-		if got := Of(c.match, c.mismatch, c.errs); got != c.want {
-			t.Errorf("%s: Of(%d, %d, %d) = %q, want %q", c.name, c.match, c.mismatch, c.errs, got, c.want)
+		if got := Of(c.match, c.mismatch, c.errs, c.differs); got != c.want {
+			t.Errorf("%s: Of(%d, %d, %d, %d) = %q, want %q", c.name, c.match, c.mismatch, c.errs, c.differs, got, c.want)
 		}
 	}
 }

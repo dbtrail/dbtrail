@@ -249,6 +249,7 @@ func TestFooterReaders_agreeOnEveryKey(t *testing.T) {
 		"MetaKeyDeltaSeqLo":        "1",
 		"MetaKeyLastDumpAt":        "2026-06-01T03:00:00Z",
 		"MetaKeyFoldGeneration":    "4",
+		"MetaKeyLockMode":          "no-lock",
 	}
 	keys := footerKeyConstants(t)
 	if len(keys) < len(values) {

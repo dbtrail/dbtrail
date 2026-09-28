@@ -822,9 +822,10 @@ func toWireResult(res verify.TableResult, explainable bool) console.VerifyTableR
 		InconclusiveKind: res.InconclusiveKind,
 		SourceRows:       res.SourceRows, ReconstructRows: res.ReconstructRows,
 		EventsChecked: res.EventsChecked, ChainsChecked: res.ChainsChecked,
-		Anchor:      res.Anchor,
-		ComparedTo:  comparedTo,
-		Explainable: explainable,
+		Anchor:       res.Anchor,
+		ComparedTo:   comparedTo,
+		SnapshotLock: res.SnapshotLock,
+		Explainable:  explainable,
 	}
 }
 

@@ -304,6 +304,13 @@ func snapshotFileMetadata(in mergeInput) map[string]string {
 	if line := captureGapLines(in); line != "" {
 		md[baseline.MetaKeyCaptureGap] = line
 	}
+	// #1380: a fold reads no source, so how these rows were locked is what
+	// the file it folded from says, word for word. No record stays no record:
+	// the rows this fold did not touch are the ones a torn read left as they
+	// were, so folding cannot make a snapshot consistent.
+	if stamp := in.SourceBaseline.Metadata.LockMode; stamp != "" {
+		md[baseline.MetaKeyLockMode] = stamp
+	}
 	in.FoldedFrom.Next().Stamp(md)
 	if in.LastEventID > 0 {
 		md[baseline.MetaKeyLastEventID] = strconv.FormatUint(in.LastEventID, 10)

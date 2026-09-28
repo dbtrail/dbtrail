@@ -477,6 +477,12 @@ func runDump(cmd *cobra.Command, args []string) error {
 			"output_dir", dmpOutputDir, "error", err)
 	}
 
+	// How the read was locked, for the snapshot made from this dump (#1380).
+	// Recorded only when the mode was sent to mydumper: a build that did not
+	// take --sync-thread-lock-mode chose its own mode, and what it chose is
+	// not on record.
+	baseline.RecordDumpLockMode(dmpOutputDir, lockMode, supportsLockMode)
+
 	// CBC gives no authentication (#960): authenticate every encrypted file
 	// with an HMAC-SHA256 sidecar so `bintrail baseline --encrypt` can refuse
 	// a tampered/bit-rotted .enc instead of decrypting it into garbled SQL.

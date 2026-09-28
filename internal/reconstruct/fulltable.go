@@ -1260,6 +1260,14 @@ func ReconstructTable(
 				"its missing events are missing here too",
 				"schema", schema, "table", table, "baseline", baselinePath, "capture_gap", bmeta.CaptureGap)
 		}
+		// Same for a read taken with no locks (#1380). Only the known case:
+		// a snapshot with no record is every snapshot written before the
+		// record existed, and a line per table per run for those says nothing.
+		if baseline.ReadConsistencyOf(bmeta) == baseline.ReadTorn {
+			slog.Warn("the snapshot this is built on was taken with no locks, so its rows may not agree with each other; "+
+				"what is built from it inherits that",
+				"schema", schema, "table", table, "baseline", baselinePath, "lock_mode", bmeta.LockMode)
+		}
 	}
 
 	// ── 3b. Refuse if a TRUNCATE/DROP/RENAME hit this table in the window ──

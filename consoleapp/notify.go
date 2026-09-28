@@ -105,7 +105,11 @@ func (n *watchNotifier) VerifyFinished(rec console.VerifyRunRecord) {
 	// all-inconclusive as a failure, so it fires here too — but never as the
 	// "clean" that would auto-close a real mismatch alert.
 	allInconclusive := s.Total > 0 && s.Inconclusive == s.Total
-	problem := rec.State == "failed" || s.Mismatch > 0 || s.Error > 0 || allInconclusive
+	// A table that differs from a snapshot read with no locks (#1380) is a
+	// problem of warning grade: the run is not clean, closes no open alert,
+	// and says so, even when every other table matched.
+	differs := s.InconclusiveDiffers > 0
+	problem := rec.State == "failed" || s.Mismatch > 0 || s.Error > 0 || allInconclusive || differs
 	clean := rec.State == "succeeded" && !problem && s.Match > 0
 	sev := notify.SeverityWarning
 	if s.Mismatch > 0 {
@@ -132,14 +136,18 @@ func (n *watchNotifier) VerifyFinished(rec console.VerifyRunRecord) {
 	switch {
 	case rec.State == "failed":
 		summary = "verification run failed: " + rec.LastError
-	case allInconclusive:
+	case allInconclusive && !differs:
 		summary = fmt.Sprintf("verification could not verify any table: all %d inconclusive", s.Total)
+	case differs && s.Mismatch == 0 && s.Error == 0:
+		summary = fmt.Sprintf("verification found %d table(s) that differ from a snapshot read with no locks (%d match); the difference may come from that read, and a full snapshot taken with locks tells",
+			s.InconclusiveDiffers, s.Match)
 	}
 	n.send.Notify(notify.Event{
 		Event: notify.EventVerifyProblem, Severity: sev, Server: rec.ServerName, Summary: summary,
 		Details: map[string]string{
 			"mode": string(rec.Mode), "trigger": rec.Trigger, "state": rec.State,
 			"mismatch": strconv.Itoa(s.Mismatch), "error": strconv.Itoa(s.Error), "match": strconv.Itoa(s.Match),
+			"differs": strconv.Itoa(s.InconclusiveDiffers),
 		},
 	})
 }

@@ -357,6 +357,7 @@ func statusBaselines(baselines []baseline.BaselineInfo) []status.BaselineInfo {
 			Bound:        status.ReadBound{ChainStart: b.ChainStart, Unread: b.ChainStartErr != nil},
 			Path:         b.Path,
 			Size:         size,
+			Lock:         b.Lock.String(),
 		})
 	}
 	return out

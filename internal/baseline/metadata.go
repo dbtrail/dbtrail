@@ -165,6 +165,11 @@ type DumpMetadata struct {
 	// --allow-gaps, or inherited that state from the snapshot it was derived
 	// from. Empty is the normal case; see MetaKeyCaptureGap.
 	CaptureGap string
+	// LockMode is MetaKeyLockMode (#1380): the lock mode of the read of the
+	// source these rows descend from, as written. Empty when nothing is on
+	// record, which is UNKNOWN and never "consistent". Read it through
+	// ReadConsistencyOf, the one place that rule lives.
+	LockMode string
 }
 
 // StartedAtMarkerFile is a bintrail-authored sidecar written into the mydumper
@@ -240,6 +245,7 @@ func ParseMetadata(inputDir string) (DumpMetadata, error) {
 	if haveMarker {
 		m.StartedAt = markerStartedAt
 	}
+	m.LockMode = readLockModeMarker(inputDir)
 
 	// Where a line sits matters (#1744). The legacy format (0.10 to 0.13) puts
 	// this server's position under "SHOW MASTER STATUS:" and, on a replica, the
@@ -457,6 +463,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	if v, ok := pf.Lookup(MetaKeyCaptureGap); ok {
 		m.CaptureGap = v
 	}
+	if v, ok := pf.Lookup(MetaKeyLockMode); ok {
+		m.LockMode = v
+	}
 	readProvenance(path, &m, func(k string) (string, bool) { return pf.Lookup(k) })
 	if v, ok := pf.Lookup(MetaKeyDeltaChainStart); ok {
 		m.DeltaChainStart = parseFooterTime(path, MetaKeyDeltaChainStart, v)
@@ -594,6 +603,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.RenderGUCs = val
 	case MetaKeyCaptureGap:
 		m.CaptureGap = val
+	case MetaKeyLockMode:
+		m.LockMode = val
 	case MetaKeySnapshotProducer:
 		m.Producer = val
 	case MetaKeyDerivedFromPath:

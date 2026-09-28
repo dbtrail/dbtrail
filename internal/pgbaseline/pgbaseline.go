@@ -406,18 +406,9 @@ func openWorkerConn(ctx context.Context, dsn, snapshotID string) (*pgx.Conn, err
 	return c, nil
 }
 
-// processTable COPYs one table into its Parquet file. Returns rows written.
-//
-// There is deliberately NO local skip-if-exists here (review medium): every
-// run gets a fresh now()-named snapshot directory, so a prior run's file can
-// never legitimately be at this path — and blindly trusting any size>0 file
-// would CRC-certify a stale or partial Parquet (possibly carrying another
-// anchor's MetaKeyLSN) into a _SUCCESS baseline. The CLI's --retry applies
-// only to baseline.Upload's S3 object skip, which keys on real object state.
-func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, tsDir, tsStr string, deltaStartLSN uint64, compression string, rowGroupSize int, logger *slog.Logger) (int64, error) {
-	outPath := filepath.Join(outputDir, tsDir, t.Schema, t.Table+".parquet")
-
-	md := map[string]string{
+// tableFooter is the footer of one table of a PostgreSQL snapshot.
+func tableFooter(t tableInfo, tsStr string, deltaStartLSN uint64) map[string]string {
+	return map[string]string{
 		baseline.MetaKeySnapshotTimestamp: tsStr,
 		"bintrail.source_database":        t.Schema,
 		"bintrail.source_table":           t.Table,
@@ -429,6 +420,9 @@ func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, t
 		// #1570: the read of the source every descendant inherits.
 		baseline.MetaKeyLastDumpAt:     tsStr,
 		baseline.MetaKeyFoldGeneration: "0",
+		// #1380: one REPEATABLE READ snapshot for every table, so the read
+		// is of one instant by construction.
+		baseline.MetaKeyLockMode: baseline.LockStampPGRepeatableRead,
 		// The LSN delta-replay floor (#593 slice A, corrected by #771): deltas
 		// for this table replay from AT OR AFTER this point — the slot's own
 		// confirmed_flush_lsn/restart_lsn (pgcapture.SlotFloorLSN), NOT the
@@ -447,6 +441,20 @@ func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, t
 		// not join post-pin deltas (warn + re-baseline guidance).
 		baseline.MetaKeyRenderGUCs: pgcapture.RenderGUCsStamp(),
 	}
+}
+
+// processTable COPYs one table into its Parquet file. Returns rows written.
+//
+// There is deliberately NO local skip-if-exists here (review medium): every
+// run gets a fresh now()-named snapshot directory, so a prior run's file can
+// never legitimately be at this path, and blindly trusting any size>0 file
+// would CRC-certify a stale or partial Parquet (possibly carrying another
+// anchor's MetaKeyLSN) into a _SUCCESS baseline. The CLI's --retry applies
+// only to baseline.Upload's S3 object skip, which keys on real object state.
+func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, tsDir, tsStr string, deltaStartLSN uint64, compression string, rowGroupSize int, logger *slog.Logger) (int64, error) {
+	outPath := filepath.Join(outputDir, tsDir, t.Schema, t.Table+".parquet")
+
+	md := tableFooter(t, tsStr, deltaStartLSN)
 
 	cols := make([]baseline.Column, len(t.Columns))
 	for i, name := range t.Columns {

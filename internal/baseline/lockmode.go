@@ -124,12 +124,8 @@ func (m LockMode) MydumperValue() string {
 // a torn snapshot, so anything it does write is consistent. Only NO_LOCK can
 // hand back skew without saying so.
 //
-// NOTE: nothing durable records which mode produced a snapshot yet, so a
-// no-lock baseline is indistinguishable from a consistent one downstream —
-// unlike a capture gap, which stamps bintrail.capture_gap into the footer and
-// is inherited by every descendant. Closing that is the remaining half of
-// #1377; until then this predicate serves callers deciding what to WARN
-// about, not readers of an existing snapshot.
+// The mode is recorded in the snapshot (MetaKeyLockMode, #1380) and read
+// back through ReadConsistencyOf, which calls this.
 func (m LockMode) PointConsistent() bool { return m != LockModeNoLock }
 
 // NeedsElevatedPrivileges reports whether the mode issues statements a

@@ -566,6 +566,18 @@ saved, shown with the reason nothing here is running it.
   own backup location* when it has none, or both, followed by "(Backup
   settings page)". A server with no location at all shows the setup empty
   state instead.
+- **How a snapshot was locked** (#1380): a row carries a mark when the
+  snapshot was read with no locks (**no locks**: its rows were copied at
+  different moments and may not agree with each other) or does not say how it
+  was locked (**locks not recorded**, which is every snapshot taken before
+  this was recorded). A snapshot read with locks carries no mark. The answer
+  is the worst of the snapshot's tables, and a snapshot updated from the
+  recorded changes inherits it. Opening the row says how many tables are
+  behind it and marks each one. A snapshot kept only in S3 shows **locks not
+  checked**: the list does not read its files there. `GET /api/baselines`
+  carries it as `lock` on each snapshot (`consistent`, `unknown`, `torn`, or
+  absent when not checked), and `GET /api/baselines/files` as `lock`,
+  `lock_torn` and `lock_unknown`, plus `lock` on each table.
 - **Update the copy** (#1442) — a per-server timetable, set from this page:
   one of six intervals, 5 minutes to 24 hours (the daily one lined up on a
   UTC hour). The operator picks WHEN; HOW each run is made is the daemon's decision

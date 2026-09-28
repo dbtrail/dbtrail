@@ -77,6 +77,7 @@ func TestConstantsMatchTheCore(t *testing.T) {
 		{"VerifyVerdictMismatch", VerifyVerdictMismatch, "mismatch"},
 		{"VerifyVerdictError", VerifyVerdictError, "error"},
 		{"VerifyVerdictUnproven", VerifyVerdictUnproven, "unproven"},
+		{"VerifyVerdictDiffers", VerifyVerdictDiffers, "differs"},
 		{"VerifyVerdictNoPredecessor", VerifyVerdictNoPredecessor, "no_predecessor"},
 		{"VerifyModeBaselineAnchored", string(VerifyModeBaselineAnchored), string(console.VerifyModeBaselineAnchored)},
 		{"VerifyModeLiveSource", string(VerifyModeLiveSource), string(console.VerifyModeLiveSource)},

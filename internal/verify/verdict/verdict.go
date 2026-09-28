@@ -17,6 +17,11 @@ const (
 	Mismatch = "mismatch"
 	// Error: no mismatch, but at least one table hit a hard error.
 	Error = "error"
+	// Differs: no mismatch and no error, but at least one table differs from
+	// a snapshot that was read with no locks. The difference is real; what
+	// is in doubt is its cause (the read, or the recorded changes). The run
+	// fails and is never called verified, however many tables matched.
+	Differs = "differs"
 	// Unproven: tables were reported but none could be proven (every one
 	// inconclusive, or none at all). An all-inconclusive run must never read
 	// as "recovery verified".
@@ -29,15 +34,19 @@ const (
 // Of is the run verdict for the counts of one run, in the precedence the exit
 // code uses: a divergence outranks an error, and a run with neither that
 // proved no table is unproven, whatever inconclusive tables it holds.
-// Inconclusive tables do not appear here: they neither prove nor disprove, so
-// a run with some matches and some inconclusive tables is Verified, and the
-// counts say how much of it was.
-func Of(match, mismatch, errs int) string {
+// Inconclusive tables do not appear here, with one exception: they neither
+// prove nor disprove, so a run with some matches and some inconclusive tables
+// is Verified, and the counts say how much of it was. The exception is
+// differs, the inconclusive tables where a difference WAS found (over a
+// snapshot read with no locks): one of them is enough for Differs.
+func Of(match, mismatch, errs, differs int) string {
 	switch {
 	case mismatch > 0:
 		return Mismatch
 	case errs > 0:
 		return Error
+	case differs > 0:
+		return Differs
 	case match == 0:
 		return Unproven
 	}
