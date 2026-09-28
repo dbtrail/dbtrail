@@ -103,6 +103,8 @@ that reads S3.
 
 **The web interface does not run the file.** Your DuckDB runs it, in your
 process, on your machine: a laptop, a notebook, the box your BI tool runs on.
+To put a reporting tool such as Metabase in front of the copy, see
+[Dashboards](dashboards.md).
 
 ### The change history, too
 
