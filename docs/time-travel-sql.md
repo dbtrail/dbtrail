@@ -80,6 +80,13 @@ web interface's password store, so set `--console-token` / `BINTRAIL_CONSOLE_TOK
 `watch` refuses to open the port otherwise. The default `127.0.0.1` bind keeps
 it host-local; do not expose it to untrusted networks.
 
+**The port does not filter by schema.** Anyone with the access token can read
+the full history of every schema on every monitored server through it. There is
+no `allowed_schemas` here. When you need per-schema filtering, run the standalone
+`bintrail shim` (or `bintrail-pg flashback`) instead, with one tenant per
+application and an `allowed_schemas` list on each (see
+[Isolating tenants with `allowed_schemas`](#isolating-tenants-with-allowed_schemas)).
+
 The web interface shows all of this on **Settings → MCP Server**, in the **Connect a
 SQL client** panel: whether the port is on, its address, the user and password
 rules, and a ready-to-copy `mysql` line for the server picked in the sidebar

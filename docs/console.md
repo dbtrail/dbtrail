@@ -1767,7 +1767,10 @@ with the access token. It replaces running a separate `bintrail shim` per
 per-source index: the daemon already resolves each server's `bintrail_idx_<id>`
 and baseline, so one port covers them all. A token is required (`--console-token`
 / `BINTRAIL_CONSOLE_TOKEN`) because MySQL-protocol auth cannot use the web interface's
-password store. Full setup, routing, and the `_snapshot` baseline-parity edge:
+password store. The port does not filter by schema: anyone with the token can
+read the full history of every schema on every monitored server. For per-schema
+filtering, use the standalone `bintrail shim` (or `bintrail-pg flashback`) with
+`allowed_schemas` on each tenant. Full setup, routing, and the `_snapshot` baseline-parity edge:
 [docs/time-travel-sql.md → the embedded port](time-travel-sql.md#the-embedded-port-multi-source).
 
 The web interface shows the port on **Settings → MCP Server**, in the **Connect a
