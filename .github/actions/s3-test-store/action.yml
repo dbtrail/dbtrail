@@ -1,0 +1,37 @@
+name: S3-compatible test store
+description: >
+  Starts the MinIO server the S3-compatible integration tests use. Never
+  fails: when the store cannot start, `ready` is false, `endpoint` is empty,
+  and the other integration tests still run. Pair it with
+  ./.github/actions/s3-test-store-check, which turns the job red in that case.
+  ci.yml and release.yaml both use this action, so the image is named once.
+  See README.md in this directory for the image, its mirror and its licence.
+
+inputs:
+  image:
+    description: Image reference, pinned by digest.
+    # The one line to change when the image moves. Keep the digest equal to
+    # the one in .github/workflows/mirror-ci-images.yml
+    # (scripts/check-s3-store-lockstep.sh fails CI otherwise).
+    default: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+  wait-seconds:
+    description: Seconds allowed for the health check once the container runs.
+    default: "60"
+
+outputs:
+  ready:
+    description: '"true" when the store answered its health check, else "false".'
+    value: ${{ steps.start.outputs.ready }}
+  endpoint:
+    description: The store URL when ready, else empty.
+    value: ${{ steps.start.outputs.endpoint }}
+
+runs:
+  using: composite
+  steps:
+    - id: start
+      shell: bash
+      env:
+        S3_STORE_IMAGE: ${{ inputs.image }}
+        S3_STORE_WAIT: ${{ inputs.wait-seconds }}
+      run: bash "${{ github.action_path }}/start.sh"

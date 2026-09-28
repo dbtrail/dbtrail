@@ -41,6 +41,11 @@ jobs:
   # `integration-postgres-source` jobs for the full story). If ci.yml's
   # integration jobs change (readiness probes, env guards, tripwire test
   # names, matrix versions), port the change here too.
+  #
+  # The S3-compatible test store is the exception to the copy: both files
+  # start and check it through the shared actions in .github/actions/, and
+  # scripts/check-s3-store-lockstep.sh (the `workflow-lockstep` job in
+  # ci.yml) fails CI when either file stops using them (#1884).
   integration-mysql:
     runs-on: ubuntu-22.04
     # These test jobs only need read access to the tagged ref.
@@ -101,11 +106,24 @@ jobs:
           docker logs bintrail-test-mysql >&2 || true
           exit 1
 
-      # -p 1 serializes package execution — see ci.yml's `integration` job for
+      # Same S3-compatible store as ci.yml, from the same shared action
+      # (#1884). It never fails the step: when the store cannot start, the S3
+      # tests skip, the rest still run, and the "S3-compatible leg" step
+      # below turns this job red, which blocks the release.
+      - name: Start S3-compatible test store (bintrail-test-minio)
+        id: s3store
+        uses: ./.github/actions/s3-test-store
+
+      # -p 1 serializes package execution. See ci.yml's `integration` job for
       # the full rationale (shared single binlog, exact-count assertions).
       # False-green tripwire mirrors ci.yml: assert the flagship end-to-end
       # and caching_sha2 auth-seam tests genuinely ran (#949).
       - name: Integration tests (-tags=integration)
+        id: tests
+        env:
+          BINTRAIL_TEST_MINIO_ENDPOINT: ${{ steps.s3store.outputs.endpoint }}
+          BINTRAIL_TEST_MINIO_ACCESS_KEY: bintrail
+          BINTRAIL_TEST_MINIO_SECRET_KEY: bintrail-it-secret
         run: |
           set -o pipefail
           go test -tags=integration -race -p 1 -count=1 -v ./... 2>&1 | tee /tmp/mysql-it.out
@@ -113,6 +131,14 @@ jobs:
             || { echo "FATAL: MySQL end-to-end integration test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestCachingSha2ColdAuthSeam' /tmp/mysql-it.out \
             || { echo "FATAL: caching_sha2 cold-auth seam test did not run — false-green tripwire" >&2; exit 1; }
+
+      # Same S3 tripwire as ci.yml, from the same shared action.
+      - name: S3-compatible leg
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        uses: ./.github/actions/s3-test-store-check
+        with:
+          ready: ${{ steps.s3store.outputs.ready }}
+          test-log: /tmp/mysql-it.out
 
   integration-mariadb-source:
     # Mirrors ci.yml's `integration-mariadb-source` job. See that job's

@@ -1,0 +1,115 @@
+# Copies the S3-compatible test store image (MinIO) into this project's own
+# registry namespace, byte for byte, so CI and the release workflow do not
+# depend on somebody else keeping it online (#1884). Its upstream images were
+# withdrawn twice in September 2026 and each time every integration run
+# stopped.
+#
+# Manual only. Nothing here runs on a push or a pull request. How to refresh
+# the mirror, and the licence of what is mirrored: .github/actions/s3-test-store/README.md
+#
+#   gh workflow run mirror-ci-images.yml -R dbtrail/dbtrail --ref main
+#
+# What a green run guarantees:
+#
+# 1. ghcr.io/dbtrail/ci-minio:$TAG points at exactly $DIGEST, the same
+#    manifest list as upstream (crane copies bytes, so the digest does not
+#    change), with linux/amd64 and linux/arm64 in it.
+# 2. An existing tag is never moved: when the target tag already points at a
+#    different digest, the run fails and copies nothing.
+# 3. Anybody can pull it without logging in, so pull requests from forks can
+#    too. A new package on ghcr.io starts private; when the anonymous check
+#    fails, the run says so, and the fix is a one-time switch to public in the
+#    package settings. Then run this workflow again.
+#
+# TAG and DIGEST must match the image default in
+# .github/actions/s3-test-store/action.yml. scripts/check-s3-store-lockstep.sh
+# fails CI when they do not.
+name: mirror-ci-images
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: mirror-ci-images
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  minio:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io/dbtrail/ci-minio
+    env:
+      SOURCE: ghcr.io/coollabsio/minio
+      TARGET: ghcr.io/dbtrail/ci-minio
+      TAG: RELEASE.2025-10-15T17-29-55Z
+      DIGEST: sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+      CRANE_VERSION: v0.22.1
+    steps:
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.25"
+          cache: false
+
+      - name: Install crane
+        run: |
+          go install "github.com/google/go-containerregistry/cmd/crane@${CRANE_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Copy the pinned image, unless it is already there
+        run: |
+          set -euo pipefail
+          if existing="$(crane digest "${TARGET}:${TAG}" 2>/dev/null)"; then
+            if [ "$existing" != "$DIGEST" ]; then
+              echo "::error::${TARGET}:${TAG} already points at ${existing}, not ${DIGEST}. Refusing to move a published tag."
+              exit 1
+            fi
+            echo "${TARGET}:${TAG} is already ${DIGEST}; nothing to copy."
+          else
+            # --no-clobber: if the lookup above failed for any reason other
+            # than a missing tag, crane still refuses to move an existing one.
+            crane copy --no-clobber "${SOURCE}@${DIGEST}" "${TARGET}:${TAG}"
+          fi
+
+      - name: Verify digest and platforms
+        run: |
+          set -euo pipefail
+          got="$(crane digest "${TARGET}:${TAG}")"
+          if [ "$got" != "$DIGEST" ]; then
+            echo "::error::${TARGET}:${TAG} is ${got}, want ${DIGEST}"
+            exit 1
+          fi
+          platforms="$(crane manifest "${TARGET}@${DIGEST}" \
+            | jq -r '.manifests[]? | select(.platform.os != "unknown") | "\(.platform.os)/\(.platform.architecture)"' \
+            | sort -u)"
+          echo "Platforms in ${TARGET}@${DIGEST}:"
+          echo "$platforms"
+          for want in linux/amd64 linux/arm64; do
+            if ! grep -qx "$want" <<<"$platforms"; then
+              echo "::error::${TARGET}@${DIGEST} has no ${want} image"
+              exit 1
+            fi
+          done
+
+      - name: Verify anybody can pull it
+        run: |
+          set -euo pipefail
+          repo="${TARGET#ghcr.io/}"
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:${repo}:pull" | jq -r '.token // empty' || true)"
+          code="$(curl -s -o /dev/null -w '%{http_code}' -I \
+            -H "Authorization: Bearer ${token}" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            "https://ghcr.io/v2/${repo}/manifests/${DIGEST}")"
+          if [ "$code" != 200 ]; then
+            echo "::error::An anonymous pull of ${TARGET}@${DIGEST} answered HTTP ${code}. The package is probably private: set its visibility to Public in the organization's package settings (ci-minio), link it to this repository, and run this workflow again."
+            exit 1
+          fi
+          echo "Anonymous pull works: ${TARGET}:${TAG}@${DIGEST}"
