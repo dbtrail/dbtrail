@@ -165,8 +165,14 @@ func TestTriggerRefresh_theStatusNamesTheSnapshotItPublished(t *testing.T) {
 		t.Errorf("status names the snapshot at %q and the fold targeted %q: the schedule would "+
 			"report a snapshot that is not the one on disk", st.At, want)
 	}
-	if want := refreshSnapshotDir(req, to); dir != want {
-		t.Errorf("the fold wrote %q and the cycle reclaims and uploads %q", dir, want)
+	// From the status back to the disk, which is the direction a reader goes:
+	// the instant the status names has to be the directory the fold wrote.
+	named, err := time.Parse(time.RFC3339, st.At)
+	if err != nil {
+		t.Fatalf("status at = %q: %v", st.At, err)
+	}
+	if want := refreshSnapshotDir(req, named); dir != want {
+		t.Errorf("the fold wrote %q and the status names %q", dir, want)
 	}
 	sup.mu.Lock()
 	memo := sup.foldedMarks["s"]
@@ -519,6 +525,7 @@ func TestRefreshDestination(t *testing.T) {
 		{name: "another prefix", s3A: "s3://acme/shop", s3B: "s3://acme/shop2"},
 		{name: "bucket case", s3A: "s3://acme/shop", s3B: "s3://acme/Shop"},
 		{name: "two trailing slashes on the bucket", s3A: "s3://acme/shop", s3B: "s3://acme/shop//"},
+		{name: "a bucket that is only a slash against no bucket", dirA: "/var/backups", dirB: "/var/backups", s3B: "/"},
 		{name: "the same text as a directory and as a bucket", dirA: "backups", s3B: "backups"},
 		{name: "text moved across the two", dirA: "a", s3A: "b", dirB: "ab", s3B: ""},
 	}
@@ -652,5 +659,37 @@ func TestBaselineStatus_checkedAtOnTheWire(t *testing.T) {
 	}
 	if strings.Contains(string(out), "checked_at") {
 		t.Errorf("wire = %s: a dump, a restore and an export have no loop to report on", out)
+	}
+}
+
+// A cycle that stops on an internal error ended too. It leaves by the panic
+// guard and not by the cycle's own last lines, so the guard has to say the loop
+// looked: a loop that crashes every cycle must not read as one that stopped.
+func TestRefreshStatus_aCycleThatPanickedSaysTheLoopLooked(t *testing.T) {
+	captureLog(t, slog.LevelError)
+	mark := indexMark{events: 100, schemaChanges: 7}
+	stubIndexMark(t, &mark, true)
+	stubBucketListing(t)
+	stubCoverage(t, true, true)
+	prevFold := foldTables
+	t.Cleanup(func() { foldTables = prevFold })
+	foldTables = func(context.Context, reconstruct.FullTableConfig) (
+		[]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		panic("staged")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sup := newBaselineSupervisor(ctx, t.TempDir(), baseline.DefaultLockMode)
+	req := refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "d", BaselineDir: stageBaselineRoot(t)}
+	if _, err := sup.TriggerRefresh(req, time.Minute); err != nil {
+		t.Fatalf("TriggerRefresh: %v", err)
+	}
+	st := waitForTerminalState(t, func() console.BaselineStatus { return sup.RefreshStatus("s") })
+	if st.State != "failed" {
+		t.Fatalf("the cycle ended %q, want failed: the fold panicked", st.State)
+	}
+	if st.CheckedAt == "" || st.CheckedAt != st.FinishedAt {
+		t.Errorf("checked_at = %q and finished_at = %q, want the same instant", st.CheckedAt, st.FinishedAt)
 	}
 }

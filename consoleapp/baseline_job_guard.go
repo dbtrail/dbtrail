@@ -137,6 +137,11 @@ func (s *baselineSupervisor) failPanickedJob(kind baselineJobKind, serverID, ser
 	st.State = "failed"
 	st.LastError = fmt.Sprintf("internal error: %v", r)
 	st.FinishedAt = nowStamp()
+	if kind == baselineJobRefresh {
+		// The cycle ended, and this is the one exit that does not pass through
+		// runRefresh's own stamp (#1705).
+		s.refreshChecked[serverID] = st.FinishedAt
+	}
 	// Nothing was published, so report nothing: a partial count reads as
 	// progress to the status API ({state:"failed", rows:12000} looks
 	// half-done). Same reasoning the sql export's ordinary failure path

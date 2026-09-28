@@ -730,7 +730,13 @@ func refreshDestination(req refreshRequest) string {
 	if dir != "" {
 		dir = filepath.Clean(dir)
 	}
-	return dir + "\x00" + strings.TrimSuffix(req.BaselineS3, "/")
+	bucket := strings.TrimSuffix(req.BaselineS3, "/")
+	if bucket == "" {
+		// A bucket that is nothing but a slash is not "no bucket": the cycle
+		// would still try to upload. Left as written, so it compares different.
+		bucket = req.BaselineS3
+	}
+	return dir + "\x00" + bucket
 }
 
 // releaseRefreshSlot puts a server's refresh status back the way TriggerRefresh
