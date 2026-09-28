@@ -344,6 +344,10 @@ Baseline complete.
 
 The log names every skipped view, and `--format json` lists them under `views_skipped`. A source with no views prints no `views` line. The dump user still needs `SHOW VIEW`: without it mydumper stops at the first view.
 
+The snapshot keeps the list too, in a file named `_VIEWS_SKIPPED` next to `_SUCCESS`: the count, the names (up to 1000) and the time the source was read. The Snapshots page of the web interface shows the count on the snapshot's row ("2 tables, 1 view skipped") and the names when the row is opened. A source with no views writes no file, and a snapshot written before this file existed has none, so neither says anything about views.
+
+A snapshot updated from the recorded changes reads no dump. It carries the list of the snapshot it was built from and says so: the page dates it ("as of the full read of ..."). That list is what the source held at that read. A view created since is not in it, and a view dropped since still is, until the next full read.
+
 mydumper writes two files for a view, `<db>.<view>-schema.sql` (a placeholder table) and `<db>.<view>-schema-view.sql` (the view). `bintrail baseline` takes an object for a view only when the second file holds a `CREATE VIEW`, the object has no data file, and the first file is the placeholder mydumper writes. An object with rows is always converted, and so is a real table that is empty. If that file is empty or cannot be read, the run stops and names it.
 
 Naming a view in `--tables` is refused. A dump that holds views and no table is refused too, because there is nothing to copy.
