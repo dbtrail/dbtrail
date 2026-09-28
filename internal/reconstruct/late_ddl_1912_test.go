@@ -37,6 +37,10 @@ func TestDDLWindow_place(t *testing.T) {
 		{"indexed late, inside the cut", "binlog.000010", 100, false, true, anchor, cut, ddlByPosition},
 		{"indexed late, a run with no cut", "binlog.000010", 100, false, true, anchor, nil, ddlByPosition},
 		{"indexed late, same file as the snapshot", "binlog.000009", 501, false, true, anchor, cut, ddlByPosition},
+		// Positions compare as numbers, not as text: 1200 is after 500, and
+		// 90 is before it.
+		{"indexed late, a position with more digits", "binlog.000009", 1200, false, true, anchor, cut, ddlByPosition},
+		{"before the snapshot, a position with fewer digits", "binlog.000009", 90, false, true, anchor, cut, ddlOutside},
 		// The last statement on a quiet source: no row change follows it, so
 		// the cut never moves past it. Its time still says it ran before the
 		// target.

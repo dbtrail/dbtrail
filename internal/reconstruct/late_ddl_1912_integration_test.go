@@ -293,3 +293,19 @@ func TestReconstructDump_aTruncateIndexedLateRefusesARestore(t *testing.T) {
 		t.Fatalf("a restore to before the TRUNCATE refused: %v", err)
 	}
 }
+
+// A TRUNCATE stamped past the refresh's time (the source's clock is ahead)
+// that sits before row changes the refresh folds: inside by position, and
+// reported by this refresh, not by the next one over a snapshot that already
+// published without it.
+func TestReconstructParquet_aTruncateStampedPastTheTargetInsideTheCut(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dsn, root, base := lateDDLIndex(t)
+
+	recordTruncate(t, db, "binlog.000003", 560, base.Add(45*time.Second))
+	rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(30*time.Second))
+	if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
+		t.Fatalf("err = %v, want ErrDestructiveDDL", err)
+	}
+}
