@@ -31,6 +31,9 @@ const (
 	VerdictMismatch = verdict.Mismatch
 	// VerdictError: no mismatch, but at least one table hit a hard error.
 	VerdictError = verdict.Error
+	// VerdictDiffers: a table differs from a snapshot read with no locks
+	// (#1380). Fails the run, whatever else matched.
+	VerdictDiffers = verdict.Differs
 	// VerdictUnproven: tables were reported but none could be proven (all
 	// inconclusive). Fails the run — an all-inconclusive run must never read as
 	// "recovery verified".
@@ -145,8 +148,13 @@ type Summary struct {
 	// difference is the slice that deserves attention. A subdivision, not a
 	// fifth bucket: Total still sums the four statuses.
 	InconclusiveNothingToCheck int `json:"inconclusive_nothing_to_check"`
-	Error                      int `json:"error"`
-	Total                      int `json:"total"`
+	// InconclusiveDiffers is the other slice of Inconclusive that is named:
+	// tables where a difference WAS found, over a snapshot read with no
+	// locks (kind torn-snapshot, #1380). Always <= Inconclusive. One of them
+	// fails the run: see verdict.Differs.
+	InconclusiveDiffers int `json:"inconclusive_differs"`
+	Error               int `json:"error"`
+	Total               int `json:"total"`
 }
 
 // Count files one table's status under its summary bucket and bumps Total.
@@ -164,6 +172,9 @@ func (s *Summary) CountWithKind(status Status, kind string) {
 	normalized, _ := NormalizeStatus(status, "")
 	if normalized == StatusInconclusive && InconclusiveKindBenign(kind) {
 		s.InconclusiveNothingToCheck++
+	}
+	if normalized == StatusInconclusive && kind == InconclusiveTornSnapshot {
+		s.InconclusiveDiffers++
 	}
 	switch normalized {
 	case StatusMatch:
@@ -291,7 +302,7 @@ func NormalizeStatus(s Status, detail string) (Status, string) {
 // verdictOf collapses the counts into the run verdict, in the same precedence
 // the exit code uses (verdict.Of, shared with the web interface).
 func verdictOf(s Summary) string {
-	return verdict.Of(s.Match, s.Mismatch, s.Error)
+	return verdict.Of(s.Match, s.Mismatch, s.Error, s.InconclusiveDiffers)
 }
 
 // ExitError returns the non-nil error that makes the run exit non-zero, or nil
@@ -305,6 +316,11 @@ func (r *Report) ExitError() error {
 		return fmt.Errorf("%d table(s) diverged from the source", r.Summary.Mismatch)
 	case VerdictError:
 		return fmt.Errorf("%d table(s) could not be verified due to errors", r.Summary.Error)
+	case VerdictDiffers:
+		// A difference was found and only its cause is in doubt (#1380): the
+		// run fails even when every other table matched.
+		return fmt.Errorf("%d table(s) differ from a snapshot that was read with no locks; the difference may come from that read or from the recorded changes, and a full snapshot taken with locks tells which",
+			r.Summary.InconclusiveDiffers)
 	case VerdictUnproven:
 		// The exit stays non-zero even when every inconclusive is benign: the
 		// operator asked this run to prove recover inputs and it proved none,

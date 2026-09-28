@@ -37,15 +37,14 @@ import (
 //
 // # Why this cannot become a run that never fails
 //
-// The exit code is not decided here. Report.ExitError keeps its rule: a run
-// where no table was proven fails, so a source whose snapshots are all torn
-// exits non-zero with every table inconclusive. A known torn snapshot softens
-// only its own tables, and those count as inconclusive that need attention
-// (InconclusiveTornSnapshot), never as "nothing to check".
-//
-// What it does cost, and it is the cost every inconclusive already has: a
-// table softened this way does not fail a run in which another table was
-// proven. The kind is there so a gate that wants to fail on it can.
+// The exit code is not decided here, it is Report.ExitError's. A table
+// softened this way is inconclusive with its own kind
+// (InconclusiveTornSnapshot), counted apart (Summary.InconclusiveDiffers),
+// and ONE of them fails the run with the verdict "differs", however many
+// other tables matched: a difference was found, and only its cause is in
+// doubt. The run is never called verified, closes no open alert, and has a
+// series of its own in the metrics. Every other inconclusive behaves as it
+// did, and a table that MATCHES over a torn snapshot is a match.
 type lockSide struct {
 	// what names the snapshot in a sentence: "the snapshot of <time>".
 	what string
@@ -93,37 +92,35 @@ func withSnapshotLock(st Status, detail string, sides ...lockSide) lockVerdict {
 	switch {
 	case len(torn) > 0:
 		return lockVerdict{status: StatusInconclusive, kind: InconclusiveTornSnapshot, lock: worst,
-			detail: detail + ". " + capitalize(joinAnd(torn)) + " " + wasWere(torn) +
-				" taken with no locks, so its rows were copied at different moments and the difference may come from that. " +
-				"Take a full snapshot with locks to check this table"}
+			detail: detail + ". " + tornSentence(torn)}
 	case len(unrecorded) > 0:
-		return lockVerdict{status: StatusMismatch, lock: worst,
-			detail: detail + ". " + capitalize(joinAnd(unrecorded)) + " " + doesDo(unrecorded) +
-				" not record how it was locked, so it may have been taken with no locks. " +
-				"A full snapshot taken with this version records it"}
+		return lockVerdict{status: StatusMismatch, lock: worst, detail: detail + ". " + unrecordedSentence(unrecorded)}
 	}
 	return lockVerdict{status: st, detail: detail, lock: worst}
 }
 
+// tornSentence says which snapshots were read with no locks: one, or two.
+func tornSentence(what []string) string {
+	if len(what) == 1 {
+		return capitalize(what[0]) + " was taken with no locks, so its rows were copied at different moments and the difference may come from that. " +
+			"Take a full snapshot with locks to check this table"
+	}
+	return capitalize(joinAnd(what)) + " were taken with no locks, so their rows were copied at different moments and the difference may come from that. " +
+		"Take a full snapshot with locks to check this table"
+}
+
+// unrecordedSentence says which snapshots have no record of their locks.
+func unrecordedSentence(what []string) string {
+	if len(what) == 1 {
+		return capitalize(what[0]) + " does not record how it was locked, so it may have been taken with no locks. " +
+			"A full snapshot taken with this version records it"
+	}
+	return "Neither " + strings.Join(what, " nor ") + " records how it was locked, so they may have been taken with no locks. " +
+		"A full snapshot taken with this version records it"
+}
+
 func joinAnd(s []string) string {
-	if len(s) == 2 {
-		return s[0] + " and " + s[1]
-	}
-	return strings.Join(s, ", ")
-}
-
-func wasWere(s []string) string {
-	if len(s) > 1 {
-		return "were each"
-	}
-	return "was"
-}
-
-func doesDo(s []string) string {
-	if len(s) > 1 {
-		return "each do"
-	}
-	return "does"
+	return strings.Join(s, " and ")
 }
 
 func capitalize(s string) string {

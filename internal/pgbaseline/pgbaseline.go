@@ -447,7 +447,7 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN uint64) map[string]str
 //
 // There is deliberately NO local skip-if-exists here (review medium): every
 // run gets a fresh now()-named snapshot directory, so a prior run's file can
-// never legitimately be at this path — and blindly trusting any size>0 file
+// never legitimately be at this path, and blindly trusting any size>0 file
 // would CRC-certify a stale or partial Parquet (possibly carrying another
 // anchor's MetaKeyLSN) into a _SUCCESS baseline. The CLI's --retry applies
 // only to baseline.Upload's S3 object skip, which keys on real object state.

@@ -1194,6 +1194,7 @@ func setVerifyGauges(rec console.VerifyRunRecord, server string) {
 	}
 	s := rec.Summary
 	observe.SetVerifyOutcome(server, finished, s.Match, s.Mismatch, s.Inconclusive, s.Error)
+	observe.SetVerifyDiffers(server, s.InconclusiveDiffers)
 }
 
 // seedVerifyGauges republishes each registry server's newest publishable run
