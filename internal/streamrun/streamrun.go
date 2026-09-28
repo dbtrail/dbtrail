@@ -1876,6 +1876,11 @@ type Hooks struct {
 	// a failed step never leaves a phase stuck. Only steps that can outlast
 	// an operator's patience get one; the fast ones stay silent.
 	OnPhase func(phase string)
+	// OnPhaseDetail qualifies the phase OnPhase last named, in a few words for
+	// an operator ("connection 812, running for 14m0s"). It fires right after
+	// OnPhase, again whenever the detail changes, and with "" when the phase
+	// ends. It is text to show, never to decide on.
+	OnPhaseDetail func(detail string)
 }
 
 // PhaseResumeCleanup is the OnPhase value for the resume-time dedup: the
@@ -1978,6 +1983,10 @@ func One(ctx context.Context, cfg Config) error {
 	// failure instead of bounding a genuine stall (#959).
 	if indexer.WriteTimeout <= 0 {
 		return fmt.Errorf("invalid --write-timeout %s: must be a positive duration", indexer.WriteTimeout)
+	}
+	// Zero is a setting (no look, see ResumeCleanupWait); negative is a typo.
+	if ResumeCleanupWait < 0 {
+		return fmt.Errorf("invalid --cleanup-wait-timeout %s: must be zero or a positive duration", ResumeCleanupWait)
 	}
 	// Fail fast on an unwired dependency (named field) before opening any
 	// connection, rather than nil-panicking on first use further down.
@@ -2376,7 +2385,15 @@ func One(ctx context.Context, cfg Config) error {
 	// --start-file/--start-gtid mode switch is a deliberate one-off operator
 	// action, not the crash-replay case this fix targets, and the saved
 	// binlog coordinates don't correspond to the newly chosen start point.
+	//
+	// Both branches look first for a cleanup an earlier run left executing on
+	// the index server, and wait for it (#1708). The look is ahead of
+	// beginResumeCleanup on purpose: while it waits, no cleanup of this run has
+	// started, and the phase says so.
 	if saved != nil && saved.mode == mode && mode == "position" {
+		if stopped, err := awaitEarlierCleanup(ctx, indexDB, cfg.Hooks); stopped || err != nil {
+			return err
+		}
 		done := beginResumeCleanup(cfg.Hooks, mode, "replay start", startFile, uint64(startPos))
 		n, err := deleteEventsSinceCheckpoint(indexDB, startFile, uint64(startPos), saved.dedupFloorID)
 		done(n, err)
@@ -2390,6 +2407,9 @@ func One(ctx context.Context, cfg Config) error {
 				"accepted trade-off (deleting on the pre-advance coordinates would destroy " +
 				"already-captured rows below the purge floor); see docs/streaming.md")
 		} else {
+			if stopped, err := awaitEarlierCleanup(ctx, indexDB, cfg.Hooks); stopped || err != nil {
+				return err
+			}
 			done := beginResumeCleanup(cfg.Hooks, mode, "saved checkpoint", saved.binlogFile, saved.binlogPos)
 			n, err := deleteEventsSinceCheckpointGTID(indexDB, saved.binlogFile, saved.binlogPos, accGTID, cfg.Flavor, saved.dedupFloorID)
 			done(n, err)

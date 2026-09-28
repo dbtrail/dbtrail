@@ -44,6 +44,24 @@ rebuild a row or a table as it was.
   check it worked: there, a `GRANT` to a user that does not exist can create it
   with no password.
 
+  If a snapshot fails with `Plugin caching_sha2_password could not be loaded`:
+  this happens with the console Docker image on arm64 hosts (Apple Silicon,
+  AWS Graviton), in every version up to and including 0.90.0. Upgrade to a
+  version after 0.90.0. Until you can, add the missing library to the image
+  with a Dockerfile of your own and run that image instead:
+
+  ```dockerfile
+  FROM ghcr.io/dbtrail/bintrail-console:0.90.0
+  USER root
+  RUN apt-get update && apt-get install -y --no-install-recommends libmariadb3
+  USER bintrail
+  ```
+
+  The second option, for MySQL 8.0 and 8.4 sources, is to create the user with
+  `IDENTIFIED WITH mysql_native_password BY <choose a password>`. MySQL 8.4
+  ships that plugin turned off (start the server with
+  `mysql_native_password=ON`).
+
   `RELOAD`/`BACKUP_ADMIN` let the baseline dump take a point-in-time snapshot.
   **On managed MySQL (RDS, Aurora, Cloud SQL), `BACKUP_ADMIN` cannot be granted**, so grant `LOCK TABLES, SHOW VIEW` and set `BASELINE_LOCK_MODE=lock-all`: equally point-consistent, and the mode mydumper itself names for RDS. If you would rather grant nothing extra on a self-hosted source, `BASELINE_LOCK_MODE=safe-no-lock` never writes a torn snapshot, but it refuses on a write-active source.
   `REPLICATION SLAVE`/`REPLICATION CLIENT` drive the binlog stream; `SELECT` lets

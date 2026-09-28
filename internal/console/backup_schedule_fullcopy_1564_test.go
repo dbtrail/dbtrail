@@ -315,7 +315,7 @@ console.log(JSON.stringify([row({}), row({ backup_schedule: true })]));
 	// not the same place on both consoles (#1573). A console that runs no
 	// schedules draws no card to point at: saying "the card above" there named
 	// something that is not on the screen, and invited an action it refuses.
-	if want := "Schedules run in the DBTrail service; this console cannot change them."; !strings.Contains(readOnly, want) {
+	if want := "Schedules run in the DBTrail service; this web interface cannot change them."; !strings.Contains(readOnly, want) {
 		t.Errorf("a console that runs no schedules does not say so; want %q in %q", want, readOnly)
 	}
 	if want := "Select this server at the top of the page to change it."; !strings.Contains(runsThem, want) {

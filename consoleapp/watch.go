@@ -209,6 +209,7 @@ func init() {
 	watchCmd.Flags().StringVar(&upTables, "tables", "", "Comma-separated tables to index (default: all)")
 	watchCmd.Flags().IntVar(&upBatchSize, "batch-size", 1000, indexer.BatchSizeHelp())
 	watchCmd.Flags().DurationVar(&indexer.WriteTimeout, "write-timeout", indexer.DefaultWriteTimeout, "Deadline for each index write (batch INSERT, checkpoint, digest lookup). A mid-statement network stall surfaces as an error within this window instead of freezing the daemon on kernel TCP retransmission (~13-16 min). Raise for very large batches over a slow link")
+	watchCmd.Flags().DurationVar(&streamrun.ResumeCleanupWait, "cleanup-wait-timeout", streamrun.DefaultResumeCleanupWait, "How long a start waits for a resume cleanup that a previous run left executing on the index, before it fails and names it. A second cleanup sent while the first still runs only fails on its locks. 0 starts the cleanup without looking")
 	watchCmd.Flags().IntVar(&upCheckpoint, "checkpoint", 10, "Checkpoint interval in seconds")
 	watchCmd.Flags().StringVar(&upSSLMode, "ssl-mode", "preferred", "TLS mode for the source AND index connections: disabled, preferred, required, verify-ca, verify-identity")
 	watchCmd.Flags().StringVar(&upSSLCA, "ssl-ca", "", "Path to CA certificate file for source TLS verification (omit to use system CAs)")

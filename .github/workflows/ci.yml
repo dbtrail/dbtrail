@@ -5,8 +5,15 @@ on:
     branches: [main]
   pull_request:
   # Nightly full run: every job and every matrix cell, whatever a PR's paths
-  # let it skip. A failure emails the repo owner (GitHub's default for
-  # scheduled workflows). workflow_dispatch is the same full run on demand.
+  # let it skip. workflow_dispatch is the same full run on demand.
+  #
+  # Who hears about a failure: ci-alert.yml watches every run of this
+  # workflow on main, push and nightly, and keeps one issue labelled
+  # `ci-red-main` open while main is red (#1882). GitHub's own email is not
+  # the alert. For a scheduled run it goes to one person only, whoever last
+  # edited the cron line below, and only if that account has notifications
+  # for Actions turned on. Eleven runs in a row failed that way in September
+  # 2026 and three days went by.
   schedule:
     - cron: '17 6 * * *'
   workflow_dispatch:
@@ -112,6 +119,9 @@ jobs:
               # quickstart, read out of that file: a docs-only edit that
               # reshapes it breaks the walk, so it has to be able to run.
               - 'docs/quickstart.md'
+              # A unit test reads the image recipes (#1876): a change to one
+              # has to be able to run it.
+              - '**/Dockerfile*'
               - '.github/workflows/ci.yml'
             dbgo:
               - '**/*.go'

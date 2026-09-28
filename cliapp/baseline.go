@@ -124,6 +124,7 @@ func runBaseline(cmd *cobra.Command, args []string) error {
 
 	slog.Info("baseline complete",
 		"tables", stats.TablesProcessed,
+		"views_skipped", len(stats.ViewsSkipped),
 		"rows_written", stats.RowsWritten,
 		"files_written", stats.FilesWritten)
 
@@ -168,15 +169,17 @@ func runBaseline(cmd *cobra.Command, args []string) error {
 
 	if bslFormat == "json" {
 		result := struct {
-			Tables       int    `json:"tables"`
-			RowsWritten  int64  `json:"rows_written"`
-			FilesWritten int    `json:"files_written"`
-			Uploaded     int    `json:"uploaded,omitempty"`
-			UploadDest   string `json:"upload_destination,omitempty"`
-			Pruned       int    `json:"pruned_snapshots,omitempty"`
-			Reclaimed    int64  `json:"reclaimed_bytes,omitempty"`
+			Tables       int      `json:"tables"`
+			ViewsSkipped []string `json:"views_skipped,omitempty"`
+			RowsWritten  int64    `json:"rows_written"`
+			FilesWritten int      `json:"files_written"`
+			Uploaded     int      `json:"uploaded,omitempty"`
+			UploadDest   string   `json:"upload_destination,omitempty"`
+			Pruned       int      `json:"pruned_snapshots,omitempty"`
+			Reclaimed    int64    `json:"reclaimed_bytes,omitempty"`
 		}{
 			Tables:       stats.TablesProcessed,
+			ViewsSkipped: stats.ViewsSkipped,
 			RowsWritten:  stats.RowsWritten,
 			FilesWritten: stats.FilesWritten,
 			Pruned:       prunedSnapshots,
@@ -191,9 +194,32 @@ func runBaseline(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Baseline complete.\n")
 	fmt.Printf("  tables    : %d\n", stats.TablesProcessed)
+	if line := viewsSkippedLine(stats.ViewsSkipped); line != "" {
+		fmt.Printf("  views     : %s\n", line)
+	}
 	fmt.Printf("  rows      : %d\n", stats.RowsWritten)
 	fmt.Printf("  files     : %d\n", stats.FilesWritten)
 	return nil
+}
+
+// viewsSkippedShown is how many view names the summary line spells out. The
+// log names every one.
+const viewsSkippedShown = 5
+
+// viewsSkippedLine renders the views a run left out, for the summary:
+// "1 skipped (shop.big_orders)". Empty when there were none, so a source with
+// no views reads as it always did.
+func viewsSkippedLine(views []string) string {
+	if len(views) == 0 {
+		return ""
+	}
+	shown := views
+	more := ""
+	if len(views) > viewsSkippedShown {
+		shown = views[:viewsSkippedShown]
+		more = fmt.Sprintf(" and %d more", len(views)-viewsSkippedShown)
+	}
+	return fmt.Sprintf("%d skipped (%s%s)", len(views), strings.Join(shown, ", "), more)
 }
 
 // resolveBaselineRetain decides what --baseline-retain should do given --upload.

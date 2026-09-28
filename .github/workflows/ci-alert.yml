@@ -1,0 +1,109 @@
+name: CI alert
+
+# Says so in the repository when main turns red (#1882): one issue labelled
+# `ci-red-main`, opened on the first failed CI run on main, commented on
+# every failed run after that, closed by the first green one.
+#
+# Why a workflow of its own and not a last job inside ci.yml:
+#
+#   - It reads the result GitHub gave the whole run. A last job would read
+#     `needs.*.result`, and a job added to ci.yml later and left out of that
+#     list would fail without anyone being told.
+#   - ci.yml also runs on pull requests. The write permission on issues
+#     stays out of it altogether.
+#   - It can be tried by hand against an old run (see workflow_dispatch
+#     below) without a 20 minute CI run and without breaking main.
+#
+# workflow_run runs the code of the DEFAULT branch with a token that can
+# write, whatever the observed run was. So this workflow never checks out or
+# executes anything from the observed run. It passes the run id, a number,
+# to a script from the default branch, and the script reads the rest from
+# the API.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+  # Self-test. Replays any finished CI run of main against a SEPARATE label,
+  # `ci-red-main-selftest`, so it can never open, comment on or close the
+  # real alert issue. A failed run id opens the test issue, a second failed
+  # run id comments on it, a green run id closes it.
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Id of a finished CI run on main to replay (the number in its URL)"
+        required: true
+        type: string
+
+  # The script's own tests, on the pull requests that touch it.
+  pull_request:
+    paths:
+      - '.github/scripts/ci-red-main*'
+      - '.github/workflows/ci-alert.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  alert:
+    # `branches: [main]` above matches the branch NAME of the observed run,
+    # and a pull request from a fork can come from a branch called main. The
+    # event check is what keeps pull requests out. The script checks both
+    # again from the API.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       (github.event.workflow_run.event == 'push' ||
+        github.event.workflow_run.event == 'schedule'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout of the script
+      actions: read # the observed run, its jobs, the runs around it
+      issues: write # the alert issue and its label
+    # One at a time, so two runs that finish together do not both find "no
+    # issue open" and open two. Nothing is cancelled. GitHub keeps one
+    # waiting run per group and drops an older waiting one. The script
+    # compares the observed run with the runs around it, so a newer push or
+    # nightly run that takes the place of a dropped one reaches the right
+    # state. What can be lost is a failure dropped in favour of a cancelled
+    # run, three runs finishing within seconds. The next failed run, the
+    # nightly at the latest, raises it.
+    concurrency:
+      group: ci-alert-${{ github.event_name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      # A failure here is the alert NOT being delivered. It turns this run
+      # red and says so in the log.
+      - name: Open, comment on or close the alert issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.workflow_run.id }}
+          LABEL: ${{ github.event_name == 'workflow_dispatch' && 'ci-red-main-selftest' || 'ci-red-main' }}
+          TITLE_PREFIX: ${{ github.event_name == 'workflow_dispatch' && '[alert self-test] ' || '' }}
+          SKIP_SUPERSEDED_CHECK: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+        run: bash .github/scripts/ci-red-main.sh
+
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        run: shellcheck .github/scripts/ci-red-main.sh .github/scripts/ci-red-main_test.sh
+
+      # A fake gh on PATH: no token and no network call.
+      - name: Tests
+        run: bash .github/scripts/ci-red-main_test.sh
