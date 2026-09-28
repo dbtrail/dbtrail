@@ -74,6 +74,10 @@ type LifecycleRule struct {
 	Days int
 	// Date is a fixed expiry date; zero when the rule has none.
 	Date time.Time
+	// NoncurrentDays is the age OLD VERSIONS expire at; 0 when the rule
+	// leaves them. On a bucket that keeps versions, Days alone only writes
+	// a delete marker and every byte stays.
+	NoncurrentDays int
 }
 
 // SnapshotExpiry is the verdict, and the body of the console's answer.
@@ -90,6 +94,10 @@ type SnapshotExpiry struct {
 	// WholeBucket: that rule's scope is the whole bucket, so it expires
 	// everything else in it at the same age.
 	WholeBucket bool `json:"whole_bucket,omitempty"`
+	// OldVersionsStay: that rule expires current objects only. Whether the
+	// bucket keeps versions is not read (it is another permission), so this
+	// is said as a condition, never as a finding.
+	OldVersionsStay bool `json:"old_versions_stay,omitempty"`
 	// ExpiresOn is the earliest fixed date (YYYY-MM-DD, UTC) a covering rule
 	// expires on, and DatePassed whether that day has come. Such a rule has
 	// no age: from that date on it expires every object in its scope.
@@ -189,6 +197,7 @@ func SnapshotExpiryVerdict(snapshotS3 string, rules []LifecycleRule, now time.Ti
 		v.State = ExpiryInForce
 		if r.Days > 0 && (v.Days == 0 || r.Days < v.Days) {
 			v.Days, v.RuleID, v.WholeBucket = r.Days, r.ID, r.Prefix == ""
+			v.OldVersionsStay = r.NoncurrentDays <= 0
 		}
 		if !r.Date.IsZero() && (earliest.IsZero() || r.Date.Before(earliest)) {
 			earliest = r.Date
@@ -217,6 +226,9 @@ func lifecycleRulesFromSDK(in []types.LifecycleRule) []LifecycleRule {
 				lr.Prefix = aws.ToString(a.Prefix)
 				lr.Conditional = lr.Conditional || len(a.Tags) > 0 || a.ObjectSizeGreaterThan != nil || a.ObjectSizeLessThan != nil
 			}
+		}
+		if n := r.NoncurrentVersionExpiration; n != nil {
+			lr.NoncurrentDays = int(aws.ToInt32(n.NoncurrentDays))
 		}
 		if e := r.Expiration; e != nil {
 			lr.Days = int(aws.ToInt32(e.Days))
@@ -356,6 +368,9 @@ func snapshotExpiryCheck(v SnapshotExpiry, every time.Duration) CheckResult {
 		if v.WholeBucket {
 			s += " (the rule is on the whole bucket, so everything else in it expires at that age too)"
 		}
+		if v.OldVersionsStay {
+			s += " (current objects only: if the bucket keeps versions, the old ones stay and the bucket still grows)"
+		}
 		parts = append(parts, s)
 		if minutes := int(every / time.Minute); RetentionTooShort(minutes, v.Days) {
 			status = StatusWarn
@@ -374,6 +389,15 @@ func snapshotExpiryCheck(v SnapshotExpiry, every time.Duration) CheckResult {
 			}
 		} else {
 			parts = append(parts, fmt.Sprintf("%s expires every snapshot %s on %s, whatever its age", ruleName(v.DateRuleID), where, v.ExpiresOn))
+		}
+	}
+	if len(parts) == 0 {
+		// An answer that names no age and no date claims nothing.
+		return CheckResult{
+			Name:        SnapshotExpiryCheckName,
+			Status:      StatusSkip,
+			Detail:      fmt.Sprintf("could not tell whether old snapshots in bucket %q expire: the answer names no age and no date", v.Bucket),
+			Remediation: readFix,
 		}
 	}
 	return CheckResult{Name: SnapshotExpiryCheckName, Status: status, Detail: strings.Join(parts, "; "), Remediation: fix}

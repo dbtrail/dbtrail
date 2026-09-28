@@ -147,6 +147,7 @@ const cases = {
   dateAhead: [{ state: "in_force", bucket: "b", prefix: "backups", expires_on: "2027-01-01", date_rule_id: "dated" }, daily, 30],
   datePassed: [{ state: "in_force", bucket: "b", prefix: "backups", expires_on: "2026-01-01", date_rule_id: "dated", date_passed: true }, daily, 30],
   ageAndDate: [{ state: "in_force", bucket: "b", prefix: "backups", days: 30, rule_id: "r", expires_on: "2027-01-01" }, daily, 30],
+  oldVersions: [{ state: "in_force", bucket: "b", prefix: "backups", days: 30, rule_id: "r", old_versions_stay: true }, daily, 30],
   none: [{ state: "none", bucket: "b", prefix: "backups" }, daily, 30],
   noneOne: [{ state: "none", bucket: "b", prefix: "backups" }, daily, 1],
   noneNoSchedule: [{ state: "none", bucket: "b", prefix: "backups" }, none, 0],
@@ -185,7 +186,7 @@ console.log(JSON.stringify(out, null, 1));
 		has  []string
 		not  []string
 	}{
-		{"generated", false, []string{"A rule in the bucket (dbtrail-backups-expire-30d) expires these snapshots after 30 days."}, []string{noRule, unknown, gap, limitless}},
+		{"generated", false, []string{"A rule in the bucket (dbtrail-backups-expire-30d) expires these snapshots after 30 days."}, []string{noRule, unknown, gap, limitless, "keeps versions"}},
 		{"oneDay", false, []string{"after 1 day."}, []string{"1 days", gap}},
 		{"wholeBucket", false, []string{"A rule on the whole bucket (bintrail-1yr-expiry) expires these snapshots after 365 days"}, []string{noRule, unknown, limitless}},
 		{"noID", false, []string{"A rule in the bucket expires these snapshots after 14 days."}, []string{"()", "undefined"}},
@@ -196,6 +197,7 @@ console.log(JSON.stringify(out, null, 1));
 		{"dateAhead", false, []string{"A rule in the bucket (dated) expires every snapshot here on 2027-01-01, whatever its age."}, []string{noRule, "after", "undefined"}},
 		{"datePassed", true, []string{"has been expiring every snapshot here since 2026-01-01", "removed soon after it arrives"}, []string{noRule}},
 		{"ageAndDate", false, []string{"after 30 days.", "Another rule expires every snapshot here on 2027-01-01"}, []string{"()", "undefined"}},
+		{"oldVersions", false, []string{"after 30 days.", "If the bucket keeps versions, the old ones stay: this rule does not expire them."}, []string{noRule}},
 		{"none", true, []string{noRule, "About 30 arrive every 30 days and none leaves", limitless}, []string{unknown, perm}},
 		{"noneOne", true, []string{noRule, "About 1 arrives every 30 days"}, []string{"1 arrive every"}},
 		{"noneNoSchedule", true, []string{noRule, "Each one stays", limitless}, []string{"About", "every 30 days"}},
@@ -272,6 +274,8 @@ const srv = { id: "a b/c", schedule_every_minutes: 1440, schedule_every: "1d" };
   await run("forbidden", () => Promise.reject(new Error("forbidden")));
   await run("empty", () => Promise.resolve(null));
   await run("na", () => Promise.resolve({ state: "not_applicable" }));
+  // An answer the sentence cannot be built from: reading .state throws.
+  await run("throws", () => Promise.resolve(new Proxy({}, { get(_, k) { if (k === "state") throw new Error("bad answer"); return undefined; } })));
   out.asked = asked;
   console.log(JSON.stringify(out));
 })();
@@ -287,7 +291,7 @@ const srv = { id: "a b/c", schedule_every_minutes: 1440, schedule_every: "1d" };
 		t.Fatalf("decode %q: %v", out, err)
 	}
 	r := got.lineResults
-	for name, l := range map[string]lineResult{"ruled": r.Ruled, "bare": r.Bare, "denied": r.Denied, "failed": r.Failed, "forbidden": r.Forbidden, "empty": r.Empty, "na": r.Na} {
+	for name, l := range map[string]lineResult{"ruled": r.Ruled, "bare": r.Bare, "denied": r.Denied, "failed": r.Failed, "forbidden": r.Forbidden, "empty": r.Empty, "na": r.Na, "throws": r.Throws} {
 		if !strings.Contains(l.First.Text, "Checking whether the bucket expires old snapshots") || l.First.Cls != "form-hint s3-expiry" {
 			t.Errorf("%s: the line starts as %+v, want the waiting words in grey", name, l.First)
 		}
@@ -301,7 +305,7 @@ const srv = { id: "a b/c", schedule_every_minutes: 1440, schedule_every: "1d" };
 	if !strings.Contains(r.Bare.Text, "No rule in the bucket") || r.Bare.Cls != "form-msg err s3-expiry" {
 		t.Errorf("bare: %+v, want the no-rule sentence in red", r.Bare)
 	}
-	for name, l := range map[string]lineResult{"denied": r.Denied, "failed": r.Failed, "forbidden": r.Forbidden, "empty": r.Empty} {
+	for name, l := range map[string]lineResult{"denied": r.Denied, "failed": r.Failed, "forbidden": r.Forbidden, "empty": r.Empty, "throws": r.Throws} {
 		if strings.Contains(l.Text, "No rule") || strings.Contains(l.Text, "without limit") || l.Cls != "form-hint s3-expiry" || l.Hidden || l.Text == "" {
 			t.Errorf("%s: %+v, want a grey sentence that claims nothing about the rules", name, l)
 		}
@@ -312,8 +316,8 @@ const srv = { id: "a b/c", schedule_every_minutes: 1440, schedule_every: "1d" };
 	if !r.Na.Hidden {
 		t.Errorf("na: the line is shown for a server with no bucket of its own: %+v", r.Na)
 	}
-	if len(got.Asked) != 7 {
-		t.Fatalf("asked %d times, want 7", len(got.Asked))
+	if len(got.Asked) != 8 {
+		t.Fatalf("asked %d times, want 8", len(got.Asked))
 	}
 	for _, a := range got.Asked {
 		if a[0] != "/api/servers/a%20b%2Fc/snapshot-expiry" {
@@ -336,7 +340,7 @@ type lineResult struct {
 }
 
 type lineResults struct {
-	Ruled, Bare, Denied, Failed, Forbidden, Empty, Na lineResult
+	Ruled, Bare, Denied, Failed, Forbidden, Empty, Na, Throws lineResult
 }
 
 // TestS3ExpiryLineIsMounted: the line sits in the retention block, after the

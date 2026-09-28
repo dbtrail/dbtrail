@@ -214,6 +214,37 @@ func TestSnapshotExpiryVerdict(t *testing.T) {
 			wantState: ExpiryNone,
 		},
 		{
+			name: "a rule that leaves old versions in place says so", url: "s3://b/backups",
+			rules:     []LifecycleRule{rule("current-only", "backups/", 30)},
+			wantState: ExpiryInForce, wantDays: 30, wantID: "current-only",
+			check: func(t *testing.T, v SnapshotExpiry) {
+				if !v.OldVersionsStay {
+					t.Error("a rule with no expiry for old versions was not marked")
+				}
+			},
+		},
+		{
+			name: "the generated rule expires old versions too", url: "s3://b/backups",
+			rules:     []LifecycleRule{{ID: "gen", Enabled: true, Prefix: "backups/", Days: 30, NoncurrentDays: 30}},
+			wantState: ExpiryInForce, wantDays: 30, wantID: "gen",
+			check: func(t *testing.T, v SnapshotExpiry) {
+				if v.OldVersionsStay {
+					t.Error("a rule that expires old versions was marked as leaving them")
+				}
+			},
+		},
+		{
+			name: "the mark follows the rule that wins, not another one", url: "s3://b/backups",
+			rules: []LifecycleRule{{ID: "long", Enabled: true, Prefix: "", Days: 365, NoncurrentDays: 365},
+				rule("short", "backups/", 7)},
+			wantState: ExpiryInForce, wantDays: 7, wantID: "short",
+			check: func(t *testing.T, v SnapshotExpiry) {
+				if !v.OldVersionsStay {
+					t.Error("the winning rule leaves old versions and the verdict does not say so")
+				}
+			},
+		},
+		{
 			name: "a rule with no ID still counts", url: "s3://b/backups",
 			rules:     []LifecycleRule{rule("", "backups/", 14)},
 			wantState: ExpiryInForce, wantDays: 14, wantID: "",
@@ -343,6 +374,9 @@ func TestLifecycleRulesFromSDK(t *testing.T) {
 		{ID: aws.String("and-size"), Status: types.ExpirationStatusEnabled,
 			Filter: &types.LifecycleRuleFilter{And: &types.LifecycleRuleAndOperator{Prefix: aws.String("backups/"),
 				ObjectSizeLessThan: aws.Int64(100)}}, Expiration: &types.LifecycleExpiration{Days: aws.Int32(20)}},
+		{ID: aws.String("generated"), Status: types.ExpirationStatusEnabled,
+			Filter: &types.LifecycleRuleFilter{Prefix: aws.String("backups/")}, Expiration: &types.LifecycleExpiration{Days: aws.Int32(30)},
+			NoncurrentVersionExpiration: &types.NoncurrentVersionExpiration{NoncurrentDays: aws.Int32(30)}},
 		{ID: aws.String("noncurrent-only"), Status: types.ExpirationStatusEnabled,
 			Filter:                      &types.LifecycleRuleFilter{Prefix: aws.String("")},
 			NoncurrentVersionExpiration: &types.NoncurrentVersionExpiration{NoncurrentDays: aws.Int32(3)}},
@@ -372,7 +406,8 @@ func TestLifecycleRulesFromSDK(t *testing.T) {
 		{ID: "and-prefix-only", Enabled: true, Prefix: "backups/", Days: 20},
 		{ID: "and-tags", Enabled: true, Prefix: "backups/", Days: 20, Conditional: true},
 		{ID: "and-size", Enabled: true, Prefix: "backups/", Days: 20, Conditional: true},
-		{ID: "noncurrent-only", Enabled: true},
+		{ID: "generated", Enabled: true, Prefix: "backups/", Days: 30, NoncurrentDays: 30},
+		{ID: "noncurrent-only", Enabled: true, NoncurrentDays: 3},
 		{ID: "abort-only", Enabled: true},
 		{ID: "transition-only", Enabled: true},
 		{ID: "delete-marker-only", Enabled: true},
@@ -484,6 +519,16 @@ func TestSnapshotExpiryCheck(t *testing.T) {
 			name:       "a good age rule beside a passed date still warns",
 			v:          SnapshotExpiry{State: ExpiryInForce, Bucket: "b", Prefix: "backups", Days: 30, RuleID: "r", ExpiresOn: "2026-01-01", DateRuleID: "dated", DatePassed: true},
 			wantStatus: StatusWarn, wantDetail: []string{"after 30 days", "since 2026-01-01"},
+		},
+		{
+			name:       "a rule that leaves old versions passes and says what it leaves",
+			v:          SnapshotExpiry{State: ExpiryInForce, Bucket: "b", Prefix: "backups", Days: 30, RuleID: "r", OldVersionsStay: true},
+			wantStatus: StatusPass, wantDetail: []string{"after 30 days", "if the bucket keeps versions, the old ones stay"},
+		},
+		{
+			name:       "in force with no age and no date is SKIP, never a green line with no words",
+			v:          SnapshotExpiry{State: ExpiryInForce, Bucket: "b", Prefix: "backups"},
+			wantStatus: StatusSkip, wantDetail: []string{"could not tell"},
 		},
 		{
 			name:       "a state this build does not know is SKIP, never a claim",

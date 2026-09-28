@@ -6030,6 +6030,7 @@ function s3ExpiryWords(v, srv, per30) {
   if (v.days > 0) {
     text = "A rule " + (v.whole_bucket ? "on the whole bucket" : "in the bucket") + named(v.rule_id) +
       " expires these snapshots after " + days(v.days) + ".";
+    if (v.old_versions_stay) text += " If the bucket keeps versions, the old ones stay: this rule does not expire them.";
     if (retentionTooShort(minutes, v.days)) {
       warn = true;
       text += " That is too short for snapshots every " + srv.schedule_every +
@@ -6064,8 +6065,10 @@ function s3ExpiryLine(srv, per30) {
     line.className = (w.warn ? "form-msg err" : "form-hint") + " s3-expiry";
     line.textContent = w.text;
   };
+  // then().catch(), not then(a, b): an answer the sentence cannot be built
+  // from must end as "could not" too, not leave the waiting words up.
   apiWithin("/api/servers/" + encodeURIComponent(srv.id) + "/snapshot-expiry", S3_EXPIRY_MS).then(
-    (v) => show(s3ExpiryWords(v, srv, per30)),
+    (v) => show(s3ExpiryWords(v, srv, per30))).catch(
     (err) => show({ warn: false, text: "Could not ask whether the bucket expires old snapshots: " +
       String((err && err.message) || "no answer").replace(/[.\s]+$/, "") + "." }));
   return line;
