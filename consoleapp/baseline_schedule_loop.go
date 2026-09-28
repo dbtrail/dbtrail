@@ -953,7 +953,7 @@ func (b *backupScheduler) watch(e console.ServerEntry, stamp, method string) {
 // gates is what the checker needs to know about this daemon.
 func (b *backupScheduler) gates() console.BackupScheduleGates {
 	enabled, refusal := b.FullBackups()
-	g := console.BackupScheduleGates{LoopRunning: true, FullBackups: enabled, Window: b.window}
+	g := console.BackupScheduleGates{LoopRunning: true, FullBackups: enabled, Window: b.window, WriteRefusal: b.reg.WriteRefusal}
 	if refusal != nil {
 		g.FullBackupsErr = refusal.Error()
 	}

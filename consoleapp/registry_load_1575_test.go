@@ -22,13 +22,13 @@ func TestLoadConsoleRegistry_registersTheDaemonBaselineBucket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := loadConsoleRegistry(path, "", ""); err != nil {
+	if _, err := loadConsoleRegistry(path, "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := storage.BucketStoreFor("daemon"); !ok {
 		t.Fatal("with no --baseline-s3 the saved store must route its bucket")
 	}
-	if _, err := loadConsoleRegistry(path, "", "s3://daemon/baselines/"); err != nil {
+	if _, err := loadConsoleRegistry(path, "", "", "s3://daemon/baselines/"); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := storage.BucketStoreFor("daemon"); ok {
@@ -47,7 +47,7 @@ func TestLoadConsoleRegistry_migratesTheStartupLocationFirst(t *testing.T) {
 	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	reg, err := loadConsoleRegistry(path, "/daemon/baselines", "s3://daemon/baselines/")
+	reg, err := loadConsoleRegistry(path, "", "/daemon/baselines", "s3://daemon/baselines/")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -263,6 +263,9 @@ type Registry struct {
 	// migration is what MigrateProcessBaselineLocation did at this start.
 	// Guarded by mu.
 	migration LocationMigration
+	// cliWriter is the command-line server's location when this process
+	// writes snapshots for it (SetCommandLineWriter). Guarded by mu.
+	cliWriter CommandLineWriter
 }
 
 // DefaultRegistryPath returns ~/.config/bintrail/console-servers.yaml, with

@@ -30,7 +30,7 @@ func TestBaselineRefreshTargets(t *testing.T) {
 		{ID: "d", Name: "viewonly", BaselineDir: "/b/d"},
 	}
 
-	got, skipped := baselineRefreshTargets(entries, "boot-dsn", "/b/boot")
+	got, skipped, _ := baselineRefreshTargets(entries, "boot-dsn", "/b/boot")
 	want := map[string]string{"default": "/b/boot", "a": "/b/a"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d target(s) %+v, want %d", len(got), got, len(want))
@@ -53,10 +53,10 @@ func TestBaselineRefreshTargets(t *testing.T) {
 // the daemon has both halves — a --baseline-dir with no --index-dsn (or the
 // reverse) has nothing to fold.
 func TestBaselineRefreshTargets_bootNeedsBoth(t *testing.T) {
-	if got, _ := baselineRefreshTargets(nil, "", "/b/boot"); len(got) != 0 {
+	if got, _, _ := baselineRefreshTargets(nil, "", "/b/boot"); len(got) != 0 {
 		t.Errorf("targets without an index DSN = %+v, want none", got)
 	}
-	if got, _ := baselineRefreshTargets(nil, "boot-dsn", ""); len(got) != 0 {
+	if got, _, _ := baselineRefreshTargets(nil, "boot-dsn", ""); len(got) != 0 {
 		t.Errorf("targets without a baseline dir = %+v, want none", got)
 	}
 }

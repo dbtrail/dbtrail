@@ -92,6 +92,14 @@ func (r *Registry) MigrateProcessBaselineLocation(dir, s3 string) LocationMigrat
 		}
 		r.file.Servers[i].BaselineDir = dir
 		r.file.Servers[i].BaselineS3 = s3
+		if dir != "" {
+			// A count saved for a server with no folder (new servers got 3)
+			// would, on this folder, prune snapshots the command-line server
+			// wrote the moment DBTrail runs without --baseline-dir (which
+			// is what stops the folder being excluded from pruning). The
+			// folder holds snapshots that are not this server's: keep them all.
+			r.file.Servers[i].LocalKeepNewest = 0
+		}
 		rec.Servers = append(rec.Servers, e.ID)
 		rep.Migrated = append(rep.Migrated, e.Name)
 		if dirProblem != "" {

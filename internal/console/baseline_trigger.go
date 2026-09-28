@@ -309,6 +309,12 @@ func (s *Server) handleBaselineTrigger(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// A location another server writes too is refused (#1684): the snapshot
+	// would land beside theirs with nothing saying whose it is.
+	if err := s.cm.reg.WriteRefusal(e); err != nil {
+		writeJSONError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	if err := s.baselineCtrl.Trigger(BaselineRequestFor(e)); err != nil {
 		if errors.Is(err, ErrBaselineRunning) {
@@ -376,6 +382,12 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONError(w, http.StatusBadRequest,
 			"this server has no snapshot directory of its own; set one first"+onPage(PageSnapshots))
+		return
+	}
+	// The fold writes into this folder and reads the newest snapshot there,
+	// which in a shared folder may be another server's (#1684).
+	if err := s.cm.reg.WriteRefusal(e); err != nil {
+		writeJSONError(w, http.StatusConflict, err.Error())
 		return
 	}
 	var body struct {
