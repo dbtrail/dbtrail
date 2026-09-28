@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
+
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 )
 
 // The table lookup on an s3:// source (#1740) moved off three DuckDB globs
@@ -25,9 +28,9 @@ import (
 //   - the listing lookup (findBaselineS3), run over the same keys in the fake
 //     store.
 //
-// A scenario the glob lookup answers differently says so in globDiffers, with
-// what it answers instead; one it cannot run on a local folder says why in
-// globSkip.
+// A scenario the glob lookup answers differently says what it answers and
+// why (globNotFound, globHTTPFails, globWhy); one it cannot run on a local
+// folder says why in globSkip.
 
 const findRoot = "s3://b/base"
 
@@ -59,9 +62,11 @@ type findScenario struct {
 	wantNewest string // the newer snapshot that lacks the table; empty: not stale
 	why        string
 
-	globSkip    func() string // non-empty: the glob lookup is not run
-	globDiffers string        // the snapshot directory the glob lookup answers instead ("" = no baseline)
-	globWhy     string
+	// Where the glob lookup answers something else, and why (globWhy).
+	globSkip      func() string // non-empty: not run on a local folder
+	globNotFound  bool          // it answers "no baseline"
+	globHTTPFails string        // over HTTP it fails, with an error holding this
+	globWhy       string
 }
 
 // findAnswer is one lookup's result with the source's own spelling taken out,
@@ -388,7 +393,9 @@ func findScenarios() []findScenario {
 			keys:   cat(snapshotKeys(findDay(1), []string{"shop/or?ers"}, "_SUCCESS"), snapshotKeys(findDay(2), []string{"shop/orders"}, "_SUCCESS")),
 			schema: "shop", table: "or?ers", at: atLate,
 			wantDir: findDay(1), wantNewest: findDay(2),
-			why: "the name is a name, not a pattern: orders in snapshot 2 is another table",
+			why:           "the name is a name, not a pattern: orders in snapshot 2 is another table",
+			globHTTPFails: "Invalid query parameters found",
+			globWhy:       "on a local folder the glob finds it. On S3 it never could: httpfs reads what follows the ? as the URL's parameters and refuses the glob, so the lookup of such a table failed",
 		},
 		{
 			name:   "a star in the name",
@@ -402,8 +409,9 @@ func findScenarios() []findScenario {
 			keys:   cat(snapshotKeys(findDay(1), []string{"shop/a[b]"}, "_SUCCESS"), snapshotKeys(findDay(2), []string{"shop/ab"}, "_SUCCESS")),
 			schema: "shop", table: "a[b]", at: atLate,
 			wantDir: findDay(1), wantNewest: findDay(2),
-			why:     "the table a[b] is in snapshot 1",
-			globWhy: "the glob reads [b] as a character class, lists ab.parquet, and drops it as another table: it never found a table with brackets in its name. The listing compares names, so it does",
+			why:          "the table a[b] is in snapshot 1",
+			globNotFound: true,
+			globWhy:      "the glob reads [b] as a character class, lists ab.parquet, and drops it as another table: it never found a table with brackets in its name. The listing compares names, so it does",
 		},
 		{
 			name:   "a quote in the name",
@@ -506,6 +514,39 @@ func TestFindBaselineS3_sameAnswerAsTheGlobs(t *testing.T) {
 				}
 			})
 
+			// The same two lookups over HTTP, against a store that lists the
+			// way S3 does: the real client under the listing, DuckDB's httpfs
+			// under the globs. This is where a name's case and S3's own
+			// reading of a glob are in play.
+			t.Run("listing over http", func(t *testing.T) {
+				newHTTPS3(t, "base/", sc.keys)
+				path, snap, stale, err := findBaselineS3(context.Background(), findRoot+sc.slash, sc.schema, sc.table, at)
+				if got := answerOf(findRoot, path, snap, stale, err); got != want {
+					t.Fatalf("%s\n got %s\nwant %s", sc.why, got, want)
+				}
+			})
+
+			t.Run("globs over http", func(t *testing.T) {
+				if !httpfsLoads(t) {
+					t.Skip("httpfs does not load here")
+				}
+				wantGlob := want
+				if sc.globNotFound {
+					wantGlob = wantAnswer(t, sc, "", "")
+				}
+				newHTTPS3(t, "base/", sc.keys)
+				path, snap, stale, err := findBaselineS3Globs(context.Background(), findRoot+sc.slash, sc.schema, sc.table, at)
+				if sc.globHTTPFails != "" {
+					if err == nil || errors.Is(err, ErrNoBaseline) || !strings.Contains(err.Error(), sc.globHTTPFails) {
+						t.Fatalf("%s\n got %q, %v", sc.globWhy, path, err)
+					}
+					return
+				}
+				if got := answerOf(findRoot, path, snap, stale, err); got != wantGlob {
+					t.Fatalf("%s\n got %s\nwant %s", sc.why+" "+sc.globWhy, got, wantGlob)
+				}
+			})
+
 			t.Run("globs", func(t *testing.T) {
 				if sc.globSkip != nil {
 					if why := sc.globSkip(); why != "" {
@@ -513,8 +554,8 @@ func TestFindBaselineS3_sameAnswerAsTheGlobs(t *testing.T) {
 					}
 				}
 				wantGlob := want
-				if sc.globWhy != "" {
-					wantGlob = wantAnswer(t, sc, sc.globDiffers, "")
+				if sc.globNotFound {
+					wantGlob = wantAnswer(t, sc, "", "")
 				}
 				root := writeFindKeys(t, sc.keys)
 				path, snap, stale, err := findBaselineGlob(context.Background(), db, root+sc.slash, sc.schema, sc.table, at)
@@ -525,3 +566,23 @@ func TestFindBaselineS3_sameAnswerAsTheGlobs(t *testing.T) {
 		})
 	}
 }
+
+// httpfsLoads says whether DuckDB can load its httpfs extension on this
+// machine: it is installed from the network the first time.
+func httpfsLoads(t *testing.T) bool {
+	t.Helper()
+	httpfsOnce.Do(func() {
+		db, err := sql.Open("duckdb", "")
+		if err != nil {
+			return
+		}
+		defer db.Close()
+		httpfsOK = duckdbutil.LoadHTTPFS(context.Background(), db) == nil
+	})
+	return httpfsOK
+}
+
+var (
+	httpfsOnce sync.Once
+	httpfsOK   bool
+)
