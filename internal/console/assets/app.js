@@ -3824,7 +3824,7 @@ async function loadRestoreToMoment(slot) {
   if (card && card.dataset.why) {
     // Switched off: the run note would point at a run that cannot happen.
     // Where the fix is on Snapshots, the note is the way there.
-    if (card.dataset.why === "no-folder" || card.dataset.why === "no-snapshot") {
+    if (card.dataset.why === "no-folder" || card.dataset.why === "no-snapshot" || card.dataset.why === "shared") {
       card.append(el("p", { class: "form-hint rc-restore-note" },
         el("a", { href: "/snapshots", text: "Snapshots ›", onclick: (e) => { e.preventDefault(); navigate("snapshots"); } })));
     }
@@ -5674,7 +5674,11 @@ function snapshotHero(b, cov, cur, acts) {
     // reads the raw fields (hasOwnBackupLocation), so this does too.
     const ownLoc = !!(cur.baseline_dir || cur.baseline_s3);
     const off = !capsCache.baseline_trigger;
-    if (!off && ownLoc) {
+    if (!off && ownLoc && cur.write_refusal) {
+      // The location is shared (#1684): the dump would be refused, so the
+      // refusal is shown instead of a button that answers 409.
+      hero.append(el("div", { class: "hero-note", text: "Read database now: " + cur.write_refusal }));
+    } else if (!off && ownLoc) {
       const btn = el("button", { class: "btn", type: "button", text: "Read database now" });
       btn.onclick = () => createBaseline(cur.id, btn);
       actions.append(btn);
@@ -9251,6 +9255,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   // The server needs its OWN local backup directory to build INTO: a
   // restore saves a new snapshot there.
   if (!cur.baseline_dir) return off("no-folder", "A restore saves its result in this server's own snapshot folder, and it has none. Set one on Snapshots.");
+  if (cur.write_refusal) return off("shared", cur.write_refusal);
   if (!b || b.error) return off("list-error", "The snapshot list could not be read" + (b && b.error ? ": " + b.error : "."));
   if (!b.configured) return off("no-folder", "A restore saves its result in this server's own snapshot folder, and it has none. Set one on Snapshots.");
   // Where the restore READS is the other half (#1541): this server's S3

@@ -92,6 +92,11 @@ type serverDTO struct {
 	// Reconstruct is the per-server Time-travel capability, derived from pure
 	// config (no connection is opened to compute it).
 	Reconstruct bool `json:"reconstruct"`
+	// WriteRefusal is why no snapshot may be written for this server: its
+	// location is one another server writes too (#1684). The page shows it
+	// instead of offering Read database now and the restore, which would
+	// answer 409. Empty when it may write.
+	WriteRefusal string `json:"write_refusal,omitempty"`
 	Editable    bool `json:"editable"`
 	Deletable   bool `json:"deletable"`
 	// Connected reports whether a live connection is currently cached.
@@ -1479,6 +1484,7 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		S3AccessKeyID:        e.S3AccessKeyID,
 		HasS3SecretAccessKey: e.S3SecretAccessKey != "",
 		Reconstruct:          s.cm.capability(e),
+		WriteRefusal:         refusalText(s.cm.reg.WriteRefusal(e)),
 		Editable:             !s.cm.reg.ReadOnly(),
 		Deletable:            !s.cm.reg.ReadOnly(),
 		Connected:            s.cm.cached(e.ID),

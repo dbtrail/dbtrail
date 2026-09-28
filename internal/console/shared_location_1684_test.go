@@ -1,8 +1,10 @@
 package console
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -214,5 +216,116 @@ servers:
 	r3.MigrateProcessBaselineLocation("", "s3://startup/b/")
 	if e := mustGet(t, r3, "aaaaaaaaaaaaaaa2"); e.LocalKeepNewest != 3 || e.BaselineDir != "" {
 		t.Errorf("s3-only default: dir=%q keep=%d", e.BaselineDir, e.LocalKeepNewest)
+	}
+}
+
+// The page must not offer a write every server answer refuses: the servers
+// API carries the refusal, and the real hero and restore card, rendered in
+// node from that API answer, show it instead of the button and the form.
+func TestSharedLocation_pageShowsTheRefusal(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv(requireNodeEnv) != "" {
+			t.Fatalf("%s is set and node is not on PATH", requireNodeEnv)
+		}
+		t.Skip("node is not installed")
+	}
+	appJS, err := filepath.Abs("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearStores(t)
+	shared := t.TempDir()
+	path := writeRegistryFile(t, "version: 1\nservers:\n"+
+		"  - id: aaaaaaaaaaaaaaa1\n    name: a\n    index_dsn: u:p@tcp(127.0.0.1:1)/a\n    source_dsn: s:p@tcp(127.0.0.1:1)/\n"+
+		"  - id: aaaaaaaaaaaaaaa2\n    name: b\n    index_dsn: u:p@tcp(127.0.0.1:1)/b\n    source_dsn: s:p@tcp(127.0.0.1:1)/\n"+
+		"  - id: aaaaaaaaaaaaaaa3\n    name: c\n    index_dsn: u:p@tcp(127.0.0.1:1)/c\n    source_dsn: s:p@tcp(127.0.0.1:1)/\n    baseline_dir: "+t.TempDir()+"\n")
+	reg := loadReg(t, path)
+	reg.MigrateProcessBaselineLocation(shared, "")
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, MonitorCtrl: &stubMonitorCtrl{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, body := doServersReq(t, srv, "GET", "/api/servers", "")
+	if rec.Code != 200 {
+		t.Fatalf("GET /api/servers: %d %s", rec.Code, body)
+	}
+	script := renderHarnessJS + `
+vm.runInContext("capsCache = { baseline_restore: true, baseline_trigger: true };", ctx);
+const list = ` + string(body) + `.servers;
+const b = { configured: true, source: "/x", kind: "dir", snapshots: [{ time: "2026-06-10 12:00:00", kinds: ["dir"] }] };
+const out = {};
+for (const cur of list) {
+  const hero = vm.runInContext("snapshotHero", ctx)(b, null, cur, null);
+  const all = []; const walk = (x) => { if (!x || !x.children) return; all.push(x); x.children.forEach(walk); }; walk(hero);
+  const card = vm.runInContext("backupRestoreCard", ctx)(cur, b, null);
+  out[cur.name] = { refusal: cur.write_refusal || "", hero: hero.textContent,
+    button: all.some((x) => x.tag === "button" && x.textContent === "Read database now"),
+    card: card ? (card.dataset.why || "live") : "none" };
+}
+console.log(JSON.stringify(out));
+`
+	jsPath := filepath.Join(t.TempDir(), "hero.js")
+	if err := os.WriteFile(jsPath, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := exec.Command(node, jsPath, appJS).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, raw)
+	}
+	var got map[string]struct {
+		Refusal, Hero, Card string
+		Button              bool
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	for _, name := range []string{"a", "b"} {
+		g := got[name]
+		if !strings.Contains(g.Refusal, "own folder or prefix") || g.Button || g.Card != "shared" ||
+			!strings.Contains(g.Hero, "Read database now: "+g.Refusal) {
+			t.Errorf("%s on the shared folder: %+v", name, g)
+		}
+	}
+	if c := got["c"]; c.Refusal != "" || !c.Button || c.Card != "live" {
+		t.Errorf("c, alone in its folder: %+v", c)
+	}
+}
+
+// The first-run list does not offer a snapshot step that every write would
+// refuse: a server on a shared location lists no backup step, one alone in
+// its folder does.
+func TestSharedLocation_firstRunOffersNoRefusedStep(t *testing.T) {
+	clearStores(t)
+	shared := t.TempDir()
+	path := writeRegistryFile(t, "version: 1\nservers:\n"+
+		"  - id: aaaaaaaaaaaaaaa1\n    name: a\n    index_dsn: u:p@tcp(127.0.0.1:1)/a\n    source_dsn: s:p@tcp(127.0.0.1:1)/\n"+
+		"  - id: aaaaaaaaaaaaaaa2\n    name: b\n    index_dsn: u:p@tcp(127.0.0.1:1)/b\n    source_dsn: s:p@tcp(127.0.0.1:1)/\n")
+	reg := loadReg(t, path)
+	reg.MigrateProcessBaselineLocation(shared, "")
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, MonitorCtrl: &stubMonitorCtrl{},
+		BaselineCtrl: &stubBaselineCtrl{status: BaselineStatus{State: "idle"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := func() *BaselineStatus {
+		e, _ := reg.Get("aaaaaaaaaaaaaaa1")
+		var in firstRunInput
+		srv.firstRunBackup(e, &in)
+		if in.BackupOff || in.BackupNoLocation {
+			t.Fatalf("input = %+v", in)
+		}
+		return in.Backup
+	}
+	if b := backup(); b != nil {
+		t.Errorf("shared: a backup step is offered (%+v)", b)
+	}
+	e, _ := reg.Get("aaaaaaaaaaaaaaa2")
+	e.BaselineDir = t.TempDir()
+	if err := reg.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	if backup() == nil {
+		t.Error("alone in its folder: no backup step")
 	}
 }

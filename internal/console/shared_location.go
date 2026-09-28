@@ -84,6 +84,14 @@ func s3Overlap(a, b string) bool {
 	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
+// refusalText is err's message, "" for nil.
+func refusalText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 // SetCommandLineWriter records the command-line server's location for a
 // process that writes snapshots for it, so WriteRefusal can count it.
 // Called once where the registry is loaded.

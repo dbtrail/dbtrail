@@ -161,6 +161,6 @@ func logLocationMigration(path, dir, s3, dirProblem string, rep LocationMigratio
 	}
 	// The startup location is also the command-line server's, so even one
 	// migrated server shares it, and now takes snapshots and restores there.
-	slog.Warn("snapshot locations: these servers now share the startup snapshot location with the command-line server and with each other, and their snapshots can mix there; give each its own folder or S3 prefix"+onPage(PageSnapshots),
+	slog.Warn("snapshot locations: these servers now read from the startup snapshot location; where it is shared (with each other, or with the command-line server when DBTrail refreshes it) every snapshot write for them is refused until each has its own folder or S3 prefix"+onPage(PageSnapshots),
 		"servers", rep.Migrated)
 }

@@ -11,10 +11,14 @@ import "github.com/dbtrail/dbtrail/internal/console"
 // entries' own locations, so both must already be final. console.New
 // registers the bucket again, harmlessly; the migration runs once.
 //
-// indexDSN is the command-line server's index: with one, that server writes
-// snapshots into the startup location, and a registry server naming the
-// same location is refused every write (#1684, Registry.WriteRefusal).
-func loadConsoleRegistry(path, indexDSN, baselineDir, baselineS3 string) (*console.Registry, error) {
+// cliRefreshes: this process refreshes the command-line server's snapshots
+// (a command-line index and --baseline-refresh-interval, the one way it
+// writes them; baselineRefreshTargets makes it a target on the same terms).
+// Then that server is a writer of the startup folder, and a registry server
+// naming the same folder is refused every write (#1684,
+// Registry.WriteRefusal). The refresh writes the folder only, so the startup
+// S3 location is not counted, exactly as the refresh loop counts it.
+func loadConsoleRegistry(path string, cliRefreshes bool, baselineDir, baselineS3 string) (*console.Registry, error) {
 	reg, err := console.LoadRegistry(path)
 	if err != nil {
 		return nil, err
@@ -22,8 +26,8 @@ func loadConsoleRegistry(path, indexDSN, baselineDir, baselineS3 string) (*conso
 	if baselineS3 != "" {
 		reg.SetProcessS3Location(console.DaemonBaselineS3Label, baselineS3)
 	}
-	if indexDSN != "" {
-		reg.SetCommandLineWriter(baselineDir, baselineS3)
+	if cliRefreshes {
+		reg.SetCommandLineWriter(baselineDir, "")
 	}
 	reg.MigrateProcessBaselineLocation(baselineDir, baselineS3)
 	return reg, nil

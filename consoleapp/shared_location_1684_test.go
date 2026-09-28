@@ -94,19 +94,19 @@ func TestTriggerCompact_refusesASharedLocation(t *testing.T) {
 }
 
 // loadConsoleRegistry counts the command-line server as a writer of the
-// startup location only when there is a command-line index to write for.
+// startup folder only when this process refreshes it.
 func TestLoadConsoleRegistry_countsTheCommandLineWriter(t *testing.T) {
 	dir := t.TempDir()
 	body := "version: 1\nservers:\n  - id: aaaaaaaaaaaaaaaa\n    name: A\n    index_dsn: u:p@tcp(h:3306)/a\n"
 	for _, tc := range []struct {
-		indexDSN string
-		refused  bool
-	}{{"", false}, {"u:p@tcp(h:3306)/boot", true}} {
+		cliRefreshes bool
+		refused      bool
+	}{{false, false}, {true, true}} {
 		path := filepath.Join(t.TempDir(), "servers.yaml")
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		reg, err := loadConsoleRegistry(path, tc.indexDSN, dir, "")
+		reg, err := loadConsoleRegistry(path, tc.cliRefreshes, dir, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +115,7 @@ func TestLoadConsoleRegistry_countsTheCommandLineWriter(t *testing.T) {
 			t.Fatalf("not migrated: %+v", e)
 		}
 		if err := reg.WriteRefusal(e); (err != nil) != tc.refused {
-			t.Errorf("index %q: refusal = %v, want refused=%v", tc.indexDSN, err, tc.refused)
+			t.Errorf("command-line refresh %v: refusal = %v, want refused=%v", tc.cliRefreshes, err, tc.refused)
 		}
 	}
 }
