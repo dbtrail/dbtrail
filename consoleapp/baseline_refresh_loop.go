@@ -15,7 +15,6 @@ import (
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
-	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // refreshRequest is one server's periodic baseline refresh.
@@ -56,6 +55,10 @@ type refreshRequest struct {
 	// local copy IS the bucket's newest snapshot is only true at the moment
 	// it was checked.
 	FoldSource string
+	// ChainStartFloor is reconstruct.FullTableConfig.ChainStartFloor for this
+	// cycle (#1904), stamped by runRefresh when table deltas are on. Zero for
+	// a restore, which writes no chain.
+	ChainStartFloor time.Time
 }
 
 // TriggerRefresh starts a periodic baseline refresh for a server, sharing the
@@ -181,7 +184,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	s.reportGateBlind("mark", known, req,
 		"cannot tell whether anything has been indexed, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
-	if known && s.refreshCanSkip(s.ctx, req, mark, time.Now().UTC()) {
+	if known && s.refreshCanSkip(s.ctx, req, mark, time.Now().UTC(), interval) {
 		// FIRST, before the log line and before anything can return early
 		// around it: until this runs, this server's dump, restore and SQL
 		// export are all refused as well.
@@ -207,6 +210,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// BELOW the mark read, and the order is the point (#1705). See
 	// anchorRefresh.
 	at = s.anchorRefresh(req.ServerID, at)
+	if s.tableDeltas {
+		req.ChainStartFloor = s.chainStartFloor(req, at, interval)
+	}
 
 	// Read and REMOVED in one step, before anything below can fail. Every exit
 	// that FOLDED and published nothing has to leave no sample behind, and the
@@ -306,6 +312,13 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		}
 	}
 	s.recordRun(req.ServerID, req.ServerName, foldRunCounts(rec, tables, refused, reuse), err)
+	// Where the readers of what this cycle published start (#1904), for the
+	// gate to grade next. Outside s.mu: it reads the snapshot's files.
+	var readsFrom time.Time
+	var readsFromKnown bool
+	if err == nil && known {
+		readsFrom, readsFromKnown = s.publishedReadsFrom(req, at)
+	}
 	if err != nil {
 		// Reported and reclaimed OUTSIDE s.mu. Deleting a directory is
 		// filesystem work of unbounded duration, and s.mu is the lock every
@@ -339,7 +352,8 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		// snapshot directory, and the directory instant is the one the next
 		// fold's window starts from.
 		s.foldedMarks[req.ServerID] = foldMemo{mark: mark, publishedAt: at,
-			destination: refreshDestination(req), indexDSN: req.IndexDSN}
+			destination: refreshDestination(req), indexDSN: req.IndexDSN,
+			readsFrom: readsFrom, readsFromKnown: readsFromKnown}
 	}
 	applyFoldStatus(st, tables, refused, reuse, err)
 	if err != nil {
@@ -381,6 +395,57 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	}
 	reportRefreshDuration(req.ServerName, finished, prevPace)
 	s.refreshPaces[req.ServerID] = refreshSample(finished)
+}
+
+// chainStartFloor is the line this cycle's fold ends chains of table deltas
+// on (#1904, reconstruct.FullTableConfig.ChainStartFloor): coverageRule's, drawn
+// at the instant the fold targets, so the fold ends every chain whose start the
+// gate would no longer call covered.
+//
+// Zero when the index's floor cannot be read, and said so once a day. Ending
+// chains on a guess would rewrite every table of every cycle; not ending them
+// early leaves the day cap, which is today's behaviour, and the gate, blind on
+// the same read, folds every cycle and says so too.
+func (s *baselineSupervisor) chainStartFloor(req refreshRequest, at time.Time, interval time.Duration) time.Time {
+	floor, known := readLiveFloor(s.ctx, req.IndexDSN)
+	line, ok := coverageRule{retain: s.retainPolicy(), interval: interval}.reanchorBy(floor, at)
+	known = known && ok
+	s.reportGateBlind("chain-floor", known, req,
+		"cannot tell how far back the index keeps events, so this cycle ends no chain of table deltas "+
+			"early: a table is written in full only when its chain is a day old, and a restore of a quiet "+
+			"table can come to need events the index has already dropped")
+	if !known {
+		return time.Time{}
+	}
+	return line
+}
+
+// publishedReadsFrom is where the readers of the snapshot this cycle just
+// published start their event fetch (#1904), and whether that is known.
+//
+// With table deltas off no chain can be in it (the fold writes none and
+// carries none), so its readers start at its own instant and nothing is read.
+// With them on, the snapshot's files are read, once, since a published
+// snapshot never changes. A failed read is known=false and the gate folds,
+// rather than vouching for the directory's instant, which is exactly the
+// instant #1904 is about.
+func (s *baselineSupervisor) publishedReadsFrom(req refreshRequest, at time.Time) (time.Time, bool) {
+	if !s.tableDeltas {
+		return at, true
+	}
+	from, err := snapshotReadsFrom(s.ctx, req.BaselineDir, at)
+	known := err == nil
+	why := ""
+	if err != nil {
+		why = "cannot tell where the readers of the snapshot just published start (" + err.Error() +
+			"), so the next cycle folds instead of skipping; this repeats until a snapshot whose table " +
+			"deltas can all be read is published"
+	}
+	s.reportGateBlind("reads-from", known, req, why)
+	if !known {
+		return time.Time{}, false
+	}
+	return from, true
 }
 
 // anchorRefresh fixes the instant this cycle folds to, and writes it on the
@@ -602,7 +667,7 @@ var errSnapshotNotUploaded = errors.New("the snapshot was not sent to the snapsh
 // the next cycle that answers no to either question behaves exactly as it did
 // before this gate existed. It does say so: at Info below, and as the backup
 // schedule's own skip reason.
-func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequest, mark indexMark, now time.Time) bool {
+func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequest, mark indexMark, now time.Time, interval time.Duration) bool {
 	s.mu.Lock()
 	prev, seen := s.foldedMarks[req.ServerID]
 	s.mu.Unlock() // released BEFORE the index read below: s.mu is the lock every baseline job takes to start.
@@ -610,11 +675,21 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 		!mark.unchangedSince(prev.mark) {
 		return false
 	}
+	// #1904: graded where the snapshot's readers start, which with table
+	// deltas is the start of its oldest chain. When that could not be read
+	// after the fold, the snapshot cannot be vouched for, and the cycle folds;
+	// the fold that published it already said why (reportGateBlind
+	// "reads-from").
+	if !prev.readsFromKnown {
+		return false
+	}
 	// Two bounds, answering the same question from opposite ends: the observed
-	// one asks what the index still HOLDS, the policy one what the operator has
-	// told it to hold. A skip needs both.
-	covered, known := snapshotStillCovered(ctx, req.IndexDSN, prev.publishedAt, now)
-	covered = covered && s.withinRetentionPolicy(prev.publishedAt, now)
+	// one asks what the index still HOLDS, the policy one (the rule's retain)
+	// what the operator has told it to hold. A skip needs both. The rule is
+	// the one the fold ends chains with, so the fold this releases moves the
+	// instant graded here.
+	covered, known := snapshotStillCovered(ctx, req.IndexDSN, prev.readsFrom, now,
+		coverageRule{retain: s.retainPolicy(), interval: interval})
 	s.reportGateBlind("coverage", known, req,
 		"cannot tell how far the index still reaches, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
@@ -633,11 +708,12 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 		// Deliberately not "aging out": this fires on every verdict that is not
 		// OK, which includes a backup already PAST the floor and one that could
 		// not be graded at all.
-		if s.gateEdge.Fire("reanchor:"+req.ServerID, prev.publishedAt.UTC().Format(time.RFC3339)) {
+		if s.gateEdge.Fire("reanchor:"+req.ServerID, prev.readsFrom.UTC().Format(time.RFC3339)) {
 			slog.Info("baseline refresh: nothing has been indexed, but the last snapshot is no longer "+
 				"safely inside the window the index still covers; folding to re-anchor it",
 				"server", req.ServerName, "id", req.ServerID,
-				"last_backup", prev.publishedAt.UTC().Format(time.RFC3339))
+				"last_backup", prev.publishedAt.UTC().Format(time.RFC3339),
+				"reads_from", prev.readsFrom.UTC().Format(time.RFC3339))
 		}
 		return false
 	}
@@ -645,38 +721,15 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 	return true
 }
 
-// withinRetentionPolicy bounds the skip against the retention the operator has
-// CONFIGURED, not only against the partitions that happen to exist right now.
-//
-// The observed floor is an observation of a policy, and the policy can change
-// under it in a step. The console's rotation panel writes a new retain, the
-// setting is read fresh on the next rotation tick, and rotation drops every
-// newly-expired partition in ONE statement. Going from 30 days to 7 — the most
-// ordinary reason anyone touches that setting — drops 23 days of partitions at
-// once, so a snapshot that graded ok on one cycle grades broken on the next,
-// never passing through the aging verdict the keepalive waits for. Same failure
-// as grading against the archive-extended floor, through a setting on the same
-// page as the ones that comment rules out.
-//
-// Asked against the POLICY because the policy acts BEFORE the drop. A refresh
-// cycle between the save and the next rotation tick already sees the new retain,
-// re-anchors, and is comfortably inside the window by the time the partitions
-// go. Detecting the step afterwards is too late by construction: the cycle that
-// notices is the cycle whose fold refuses.
-//
-// The same 0.8 band, so the two bounds cannot disagree about where aging starts.
-// A retain of zero means rotation is off or unreadable — nothing is being
-// dropped on a clock, so the policy has nothing to say and the observed floor is
-// the whole answer.
-func (s *baselineSupervisor) withinRetentionPolicy(publishedAt, now time.Time) bool {
+// retainPolicy is the retention the operator has CONFIGURED, or zero when
+// rotation is off or the setting cannot be read: nothing is then dropped on a
+// clock, and the observed floor is the whole answer. Why the policy is asked
+// at all, beside the partitions that exist: coverageRule.reanchorBy.
+func (s *baselineSupervisor) retainPolicy() time.Duration {
 	if s.retainInForce == nil {
-		return true
+		return 0
 	}
-	retain := s.retainInForce()
-	if retain <= 0 {
-		return true
-	}
-	return now.Sub(publishedAt) < time.Duration(float64(retain)*status.BaselineAgingFraction)
+	return max(s.retainInForce(), 0)
 }
 
 // reportGateBlind says, at most once a day per server, that the gate cannot
@@ -1319,6 +1372,7 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		OutputFormat:          reconstruct.OutputFormatParquet,
 		CarryForwardUnchanged: req.CarryForwardUnchanged,
 		TableDeltas:           req.TableDeltas,
+		ChainStartFloor:       req.ChainStartFloor,
 		CompactDir:            compactDirFor(req.BaselineDir),
 		Parallelism:           daemonFoldParallelism,
 		WarnEventThreshold:    daemonFoldWarnEventThreshold,

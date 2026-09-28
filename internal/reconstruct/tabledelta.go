@@ -44,7 +44,8 @@ import (
 //
 // # When the table is rewritten anyway
 //
-// tableDeltaCompactReason: the chain is a day old; every pair together has
+// tableDeltaCompactReason: the chain is a day old, or it started too close to
+// the oldest events the index keeps (FullTableConfig.ChainStartFloor); every pair together has
 // passed tableDeltaMaxFraction of the base (and tableDeltaMinCompactBytes, so
 // small tables are left alone); the window's changes spilled to disk; the run
 // crossed a known capture gap; the previous snapshot is on S3; the table has
@@ -253,7 +254,13 @@ func readDeltaChainStart(ctx context.Context, basePath string) (time.Time, error
 // tableDeltaCompactReason says why a run must rewrite the base instead of
 // extending (or starting) a chain. Empty means a pair can be written. reserved
 // is the name of a table column a delta reserves, or "" (reservedDeltaColumn).
-func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, spilled bool, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string) string {
+//
+// chainFloor is FullTableConfig.ChainStartFloor, and newStart is the start a
+// chain begun by this run would declare (newChainStart). A table with no chain
+// yet is checked on newStart: a chain begun over an old base starts at that
+// base's time, not at this run, and would otherwise carry an already too old
+// start forward for a whole cycle.
+func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, spilled bool, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time) string {
 	switch {
 	case strings.HasPrefix(basePath, "s3://"):
 		return "the previous snapshot is read from S3"
@@ -273,6 +280,10 @@ func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, 
 		return "the window's changes did not fit in memory"
 	}
 	if prev == nil {
+		if !chainFloor.IsZero() && !newStart.IsZero() && !newStart.After(chainFloor) {
+			return fmt.Sprintf("a new chain would start at %s, too close to the oldest events the index keeps (chains that start at or before %s are ended)",
+				newStart.UTC().Format(time.RFC3339), chainFloor.UTC().Format(time.RFC3339))
+		}
 		return ""
 	}
 	if prev.Legacy {
@@ -283,6 +294,13 @@ func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, 
 	}
 	if age := at.Sub(prev.Meta.DeltaChainStart); age > tableDeltaMaxAge {
 		return fmt.Sprintf("the chain is %s old", age.Round(time.Minute))
+	}
+	if !chainFloor.IsZero() && !prev.Meta.DeltaChainStart.After(chainFloor) {
+		// #1904: a reader fetches from the chain's start, and adding a pair
+		// does not move it. Past this line the index is about to drop the
+		// events at that start, and a quiet table would ride the chain there.
+		return fmt.Sprintf("the chain started at %s, too close to the oldest events the index keeps (chains that start at or before %s are ended)",
+			prev.Meta.DeltaChainStart.UTC().Format(time.RFC3339), chainFloor.UTC().Format(time.RFC3339))
 	}
 	if prev.PairSize >= tableDeltaMinCompactBytes && float64(prev.PairSize) > tableDeltaMaxFraction*float64(baseSize) {
 		return fmt.Sprintf("the changes beside the table (%d bytes) passed %d%% of the table (%d bytes)",
@@ -843,6 +861,20 @@ func foldedFromChain(p tableDeltaPublish) baseline.SourceRead {
 	return baseline.ChainSourceRead(p.baseMeta, &last)
 }
 
+// newChainStart is the start a chain begun by this run over p's base declares
+// when no chain is extended: FindBaseline's time for the base.
+func newChainStart(p tableDeltaPublish) time.Time {
+	start := p.chainStart
+	if !p.baseMeta.SnapshotTimestamp.IsZero() && p.baseMeta.SnapshotTimestamp.Before(start) {
+		// Same rule as fetchFloor, on the side that STAMPS: a chain that
+		// starts over a base whose own stamp is earlier than FindBaseline's
+		// time (a table file replaced by hand under a set-aside chain) must
+		// declare a start no later than the events it holds.
+		start = p.baseMeta.SnapshotTimestamp
+	}
+	return start
+}
+
 // publishWithTableDelta publishes one table of a run with deltas on: as its
 // previous file plus the chain plus one new pair, or rewritten when
 // tableDeltaCompactReason says so. Either way the table leaves with a chain
@@ -886,7 +918,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	if cols, err := baseline.ParseSchemaText(in.CreateTableSQL); err == nil {
 		reserved = reservedDeltaColumn(cols)
 	}
-	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.fold.Spill != nil, p.capGap, p.cfg.At, hasAnchor, reserved); reason != "" {
+	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.fold.Spill != nil, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p)); reason != "" {
 		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
 	}
 
@@ -931,14 +963,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		return fmt.Errorf("carry the backup file of %s.%s forward: %w", p.schema, p.table, err)
 	}
 	published = append(published, newBase)
-	chainStart, seq, spaceHint := p.chainStart, 0, int64(0)
-	if p.prev == nil && !p.baseMeta.SnapshotTimestamp.IsZero() && p.baseMeta.SnapshotTimestamp.Before(chainStart) {
-		// Same rule as fetchFloor, on the side that STAMPS: a chain that
-		// starts over a base whose own stamp is earlier than FindBaseline's
-		// time (a table file replaced by hand under a set-aside chain) must
-		// declare a start no later than the events it holds.
-		chainStart = p.baseMeta.SnapshotTimestamp
-	}
+	chainStart, seq, spaceHint := newChainStart(p), 0, int64(0)
 	copied := 0
 	adopted := ""
 	var files []baseline.TableDeltaFile

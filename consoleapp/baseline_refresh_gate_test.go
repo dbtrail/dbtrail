@@ -55,9 +55,9 @@ func stubCoverage(t *testing.T, covered, known bool) *gateProbe {
 	p := &gateProbe{}
 	prev := snapshotStillCovered
 	t.Cleanup(func() { snapshotStillCovered = prev })
-	snapshotStillCovered = func(_ context.Context, dsn string, publishedAt, now time.Time) (bool, bool) {
+	snapshotStillCovered = func(_ context.Context, dsn string, publishedAt, now time.Time, rule coverageRule) (bool, bool) {
 		p.mu.Lock()
-		p.coverages = append(p.coverages, coverageCall{dsn: dsn, publishedAt: publishedAt, now: now})
+		p.coverages = append(p.coverages, coverageCall{dsn: dsn, publishedAt: publishedAt, now: now, rule: rule})
 		p.mu.Unlock()
 		return covered, known
 	}
@@ -114,10 +114,10 @@ func TestRefreshCanSkip(t *testing.T) {
 			sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 			req := refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "d"}
 			if c.seed {
-				sup.foldedMarks["s"] = foldMemo{mark: folded, publishedAt: refreshAt,
+				sup.foldedMarks["s"] = foldMemo{mark: folded, publishedAt: refreshAt, readsFrom: refreshAt, readsFromKnown: true,
 					destination: refreshDestination(req), indexDSN: "d"}
 			}
-			if got := sup.refreshCanSkip(context.Background(), req, c.now, refreshAt); got != c.wantSkip {
+			if got := sup.refreshCanSkip(context.Background(), req, c.now, refreshAt, 0); got != c.wantSkip {
 				t.Errorf("refreshCanSkip = %v, want %v — %s", got, c.wantSkip, c.why)
 			}
 			// The cheap questions come first, and this is the only way to say
@@ -153,9 +153,13 @@ type gateProbe struct {
 }
 
 type coverageCall struct {
-	dsn         string
+	dsn string
+	// publishedAt is the instant graded: since #1904, where the snapshot's
+	// readers start (foldMemo.readsFrom), which is its published instant
+	// only when no table has a chain of deltas.
 	publishedAt time.Time
 	now         time.Time
+	rule        coverageRule
 }
 
 func (p *gateProbe) marks() []string {
@@ -619,7 +623,7 @@ func TestRunRefresh_foldsToReanchorAnAgingBackup(t *testing.T) {
 	covered := true
 	prevCov := snapshotStillCovered
 	t.Cleanup(func() { snapshotStillCovered = prevCov })
-	snapshotStillCovered = func(context.Context, string, time.Time, time.Time) (bool, bool) {
+	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, bool) {
 		return covered, true
 	}
 
@@ -707,7 +711,7 @@ func TestSnapshotCoveredBy(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := snapshotCoveredBy(c.liveFloor, c.publishedAt, now); got != c.want {
+			if got := snapshotCoveredBy(c.liveFloor, c.publishedAt, now, coverageRule{}); got != c.want {
 				t.Errorf("snapshotCoveredBy = %v, want %v — %s", got, c.want, c.why)
 			}
 		})
@@ -723,22 +727,22 @@ func TestRefreshCanSkip_aMemoDoesNotCrossDestinations(t *testing.T) {
 	mark := indexMark{events: 100, schemaChanges: 7}
 	local := refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "d", BaselineDir: "/var/backups"}
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
-	sup.foldedMarks["s"] = foldMemo{mark: mark, publishedAt: refreshAt,
+	sup.foldedMarks["s"] = foldMemo{mark: mark, publishedAt: refreshAt, readsFrom: refreshAt, readsFromKnown: true,
 		destination: refreshDestination(local), indexDSN: "d"}
 
-	if !sup.refreshCanSkip(context.Background(), local, mark, refreshAt) {
+	if !sup.refreshCanSkip(context.Background(), local, mark, refreshAt, 0) {
 		t.Fatal("the same destination and the same marks must still skip")
 	}
 	toBucket := local
 	toBucket.BaselineS3 = "s3://acme-backups/shop"
-	if sup.refreshCanSkip(context.Background(), toBucket, mark, refreshAt) {
+	if sup.refreshCanSkip(context.Background(), toBucket, mark, refreshAt, 0) {
 		t.Error("skipped a cycle that uploads on the strength of a fold that only wrote local " +
 			"disk: the bucket never receives a copy, and the schedule reports the snapshot as " +
 			"up to date")
 	}
 	moved := local
 	moved.BaselineDir = "/mnt/new-backups"
-	if sup.refreshCanSkip(context.Background(), moved, mark, refreshAt) {
+	if sup.refreshCanSkip(context.Background(), moved, mark, refreshAt, 0) {
 		t.Error("skipped after the snapshot directory was re-pointed: nothing is ever written to " +
 			"the new location")
 	}
@@ -753,14 +757,14 @@ func TestRefreshCanSkip_aMemoDoesNotCrossIndexes(t *testing.T) {
 	mark := indexMark{events: 100, schemaChanges: 7}
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 	same := refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "first"}
-	sup.foldedMarks["s"] = foldMemo{mark: mark, publishedAt: refreshAt,
+	sup.foldedMarks["s"] = foldMemo{mark: mark, publishedAt: refreshAt, readsFrom: refreshAt, readsFromKnown: true,
 		destination: refreshDestination(same), indexDSN: "first"}
 
-	if !sup.refreshCanSkip(context.Background(), same, mark, refreshAt) {
+	if !sup.refreshCanSkip(context.Background(), same, mark, refreshAt, 0) {
 		t.Fatal("the same index and the same marks must still skip")
 	}
 	moved := refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "second"}
-	if sup.refreshCanSkip(context.Background(), moved, mark, refreshAt) {
+	if sup.refreshCanSkip(context.Background(), moved, mark, refreshAt, 0) {
 		t.Error("skipped on a memo read from a different index: the matching marks say nothing " +
 			"about what this index holds")
 	}
@@ -869,7 +873,7 @@ func TestSnapshotCoveredIn_readsOnlyTheLivePartitions(t *testing.T) {
 
 	mock.ExpectQuery(".*").WillReturnError(errors.New("a second query was issued"))
 
-	covered, known := snapshotCoveredIn(context.Background(), db, "idx", now.Add(-time.Hour), now)
+	covered, known := snapshotCoveredIn(context.Background(), db, "idx", now.Add(-time.Hour), now, coverageRule{})
 	if !known || !covered {
 		t.Errorf("covered=%v known=%v, want true/true: the snapshot is an hour old inside a "+
 			"30-day window", covered, known)
@@ -889,7 +893,7 @@ func TestSnapshotCoveredIn_anUnreadablePartitionListFolds(t *testing.T) {
 	defer db.Close()
 	mock.ExpectQuery("information_schema.PARTITIONS").WillReturnError(errors.New("gone away"))
 	if covered, known := snapshotCoveredIn(context.Background(), db, "idx",
-		time.Now().Add(-time.Hour), time.Now()); known || covered {
+		time.Now().Add(-time.Hour), time.Now(), coverageRule{}); known || covered {
 		t.Errorf("covered=%v known=%v, want false/false", covered, known)
 	}
 }

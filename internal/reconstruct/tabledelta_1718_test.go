@@ -315,7 +315,7 @@ func TestTableDeltaCompactReason_1718(t *testing.T) {
 			"/b/t.parquet", false, nil, "sequence", false, ""},
 	}
 	for _, c := range cases {
-		got := tableDeltaCompactReason(c.prev, c.base, 1000, c.spilled, c.gap, at, !c.noAnchor, c.reserved)
+		got := tableDeltaCompactReason(c.prev, c.base, 1000, c.spilled, c.gap, at, !c.noAnchor, c.reserved, time.Time{}, time.Time{})
 		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
 			t.Errorf("%s: reason = %q, want it to contain %q", c.name, got, c.want)
 		}
