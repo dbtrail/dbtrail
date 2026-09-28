@@ -578,7 +578,7 @@ saved, shown with the reason `serve` is not running it.
   carries it as `lock` on each snapshot (`consistent`, `unknown`, `torn`, or
   absent when not checked), and `GET /api/baselines/files` as `lock`,
   `lock_torn` and `lock_unknown`, plus `lock` on each table.
-- **Update the copy** (#1442) — a per-server timetable, set from the Snapshots page:
+- **Update the copy** (#1442): a per-server timetable, set from the Snapshots page:
   one of six intervals, 5 minutes to 24 hours (the daily one lined up on a
   UTC hour). The operator picks WHEN; HOW each run is made is the daemon's decision
   per slot (`console.ChooseBackupMethod`), and the page says which one comes
@@ -798,7 +798,7 @@ longer drawn on the page.
   the answers and no controls. The server edit form no longer carries these
   fields, and an edit that leaves them out keeps what is stored. Servers that existed
   before #1681 are unchanged: none gets a folder or a count it did not have.
-- **Per server** (changed on the Snapshots page) — each registry server's local-copy answer,
+- **Per server** (changed on the Snapshots page): each registry server's local-copy answer,
   Local folder, S3 location and keep count, editable in place, with which location is in force
   drawn rather than said: the server's own case (own location, daemon
   default, or no location) under its fields, with a tick or a cross per lane.
