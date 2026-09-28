@@ -8,9 +8,9 @@ tool that runs DuckDB inside its own process.
 When you are done, the tool shows your tables, and a change made on the source
 reaches its charts at the next scheduled snapshot, with nothing to rebuild.
 
-**Needs a DBTrail release newer than v0.90.0.** Before that, a views file
-stopped answering at the first refresh that changed a table, and had to be
-generated again.
+**Needs DBTrail v0.91.0 or later.** Before that, a views file stopped
+answering at the first refresh that changed a table, and had to be generated
+again.
 
 ## How it works
 
