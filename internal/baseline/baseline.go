@@ -96,6 +96,17 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			attrs...)
 	}
 
+	switch ReadConsistencyOfStamp(meta.LockMode) {
+	case ReadTorn:
+		slog.Warn("this dump was taken with no locks, so its rows may not agree with each other; "+
+			"the snapshot records it, and every snapshot updated from it inherits the record",
+			"input_dir", cfg.InputDir, "lock_mode", meta.LockMode)
+	case ReadUnknown:
+		slog.Info("this dump does not record how it was locked (it was not made by bintrail dump, or mydumper chose its own mode), "+
+			"so the snapshot will not say either",
+			"input_dir", cfg.InputDir)
+	}
+
 	// Discover tables.
 	tables, views, err := DiscoverDump(cfg.InputDir)
 	if err != nil {
@@ -266,6 +277,11 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			}
 			if meta.GTIDSet != "" {
 				md[MetaKeyGTIDSet] = meta.GTIDSet
+			}
+			// #1380: how the read was locked, when the dump says. A dump
+			// with no record leaves the key out, which reads as unknown.
+			if meta.LockMode != "" {
+				md[MetaKeyLockMode] = meta.LockMode
 			}
 			// Embed the raw mydumper <db>.<table>-schema.sql bytes so that
 			// full-table reconstruct (#187) can emit a faithful schema file

@@ -429,6 +429,9 @@ func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, t
 		// #1570: the read of the source every descendant inherits.
 		baseline.MetaKeyLastDumpAt:     tsStr,
 		baseline.MetaKeyFoldGeneration: "0",
+		// #1380: one REPEATABLE READ snapshot for every table, so the read
+		// is of one instant by construction.
+		baseline.MetaKeyLockMode: baseline.LockStampPGRepeatableRead,
 		// The LSN delta-replay floor (#593 slice A, corrected by #771): deltas
 		// for this table replay from AT OR AFTER this point — the slot's own
 		// confirmed_flush_lsn/restart_lsn (pgcapture.SlotFloorLSN), NOT the
