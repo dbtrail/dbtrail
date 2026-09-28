@@ -185,15 +185,32 @@ func TestFold_beforeAnAddedColumn(t *testing.T) {
 			events: []addedColumnEvent{{at: 40 * time.Minute, start: 300, end: 400}}}.run(t)
 		refuses(t, failures, err, "no ALTER TABLE recorded after the target adds d")
 	})
-	t.Run("the target is after the DDL", func(t *testing.T) {
+	// With the DDL's own snapshot taken at or before the target, that
+	// snapshot is the one in effect at the target and it has the column: the
+	// first reason found, and the plainest one.
+	t.Run("the target is after the DDL and its snapshot", func(t *testing.T) {
 		failures, err := addedColumnFold{target: 2 * time.Minute, snapshotAt: 60 * time.Second,
 			ddl:    &addedColumnDDL{at: 60 * time.Second, pos: 500, table: "t", query: addD},
 			events: []addedColumnEvent{between, after}}.run(t)
-		refuses(t, failures, err, "is not after the target by both its time and its binlog position")
+		refuses(t, failures, err, "the schema snapshot in effect at the target already has d")
 	})
-	t.Run("g: the target is in the DDL's second", func(t *testing.T) {
+	t.Run("g: the target is in the second of the DDL and its snapshot", func(t *testing.T) {
 		failures, err := addedColumnFold{target: 60 * time.Second, snapshotAt: 60 * time.Second,
 			ddl:    &addedColumnDDL{at: 60 * time.Second, pos: 500, table: "t", query: addD},
+			events: []addedColumnEvent{between, after}}.run(t)
+		refuses(t, failures, err, "the schema snapshot in effect at the target already has d")
+	})
+	// With no snapshot until later, the recorded statement is what refuses,
+	// by the index server's own comparison of detected_at with the target.
+	t.Run("the target is after the DDL, which left no snapshot", func(t *testing.T) {
+		failures, err := addedColumnFold{target: 2 * time.Minute, snapshotAt: time.Hour,
+			ddl:    &addedColumnDDL{at: 60 * time.Second, pos: 500, table: "t", query: addD, noSnapshot: true},
+			events: []addedColumnEvent{between, after}}.run(t)
+		refuses(t, failures, err, "is not after the target by both its time and its binlog position")
+	})
+	t.Run("g: the target is in the second of the DDL, which left no snapshot", func(t *testing.T) {
+		failures, err := addedColumnFold{target: 60 * time.Second, snapshotAt: time.Hour,
+			ddl:    &addedColumnDDL{at: 60 * time.Second, pos: 500, table: "t", query: addD, noSnapshot: true},
 			events: []addedColumnEvent{between, after}}.run(t)
 		refuses(t, failures, err, "is not after the target by both its time and its binlog position")
 	})
