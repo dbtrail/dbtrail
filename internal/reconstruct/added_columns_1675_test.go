@@ -227,9 +227,16 @@ func TestPlaceAddedColumns_cutAndAnchor(t *testing.T) {
 	if why := placeAddedColumns([]string{"c"}, inBaseline1675, nil, "shop", "t", anchor1675, nil); !strings.Contains(why, "no event to place the target") {
 		t.Errorf("no cut, nothing recorded: why = %q", why)
 	}
-	old := with(ddlBefore("DROP TABLE t"), func(d *recordedDDL) { d.Type, d.Pos = "DROP TABLE", 900000 })
-	if why := placeAddedColumns([]string{"c"}, inBaseline1675, []recordedDDL{old, add}, "shop", "t", nil, cut1675); why != "" {
-		t.Errorf("a baseline with no anchor: %s", why)
+	// A backup that recorded no binlog position: a DDL stamped before it may
+	// have been written after it, and nothing says which.
+	for name, ddls := range map[string][]recordedDDL{
+		"a DROP COLUMN stamped before the backup": {ddlBefore("ALTER TABLE t DROP COLUMN c"), add},
+		"only the ADD":     {add},
+		"nothing recorded": nil,
+	} {
+		if why := placeAddedColumns([]string{"c"}, inBaseline1675, ddls, "shop", "t", nil, cut1675); !strings.Contains(why, "the backup recorded no binlog position") {
+			t.Errorf("a backup with no anchor, %s: why = %q", name, why)
+		}
 	}
 	// The #840 rollover: binlog.1000000 comes after binlog.999999.
 	cut := &query.BinlogPos{File: "binlog.999999", Pos: 5000}
@@ -274,7 +281,10 @@ func mockDDLs(t *testing.T, ddls ...recordedDDL) (sqlmock.Sqlmock, *sql.DB) {
 	for _, d := range ddls {
 		rows.AddRow(toDriverValues(ddlRow(d))...)
 	}
-	mock.ExpectQuery("FROM schema_changes").WithArgs(asOf1675, target1675, "shop", "t").WillReturnRows(rows)
+	// The names are compared without case in the statement itself, whatever
+	// the index's collation: a row too many can only refuse.
+	mock.ExpectQuery(`FROM schema_changes\s+WHERE \(LOWER\(schema_name\) = LOWER\(\?\) OR schema_name = ''\) AND LOWER\(table_name\) = LOWER\(\?\)\s+ORDER BY id`).
+		WithArgs(asOf1675, target1675, "shop", "t").WillReturnRows(rows)
 	return mock, db
 }
 
@@ -537,12 +547,18 @@ func TestFoldNamesAtTarget_anchor(t *testing.T) {
 	if names, why := foldNamesAtTarget(context.Background(), db, foldCfg1675(), bmeta1675(), tm, asOf1675, "shop", "t"); why == "" || names != tm {
 		t.Fatalf("a DDL past the baseline's anchor was taken for one before the baseline")
 	}
-	// A baseline that recorded no position decides by time alone.
-	_, db = mockDDLs(t, pastAnchor, ddlAfter("ALTER TABLE t ADD COLUMN c INT"))
-	bmeta := bmeta1675()
-	bmeta.BinlogFile, bmeta.BinlogPos = "", 0
-	if _, why := foldNamesAtTarget(context.Background(), db, foldCfg1675(), bmeta, tm, asOf1675, "shop", "t"); why != "" {
-		t.Fatalf("a baseline with no anchor: %s", why)
+	// A baseline that recorded no position refuses, whichever half is missing.
+	for _, tc := range []struct {
+		file string
+		pos  int64
+	}{{"", 0}, {"binlog.000001", 0}, {"", 500}} {
+		_, db = mockDDLs(t, ddlAfter("ALTER TABLE t ADD COLUMN c INT"))
+		bmeta := bmeta1675()
+		bmeta.BinlogFile, bmeta.BinlogPos = tc.file, tc.pos
+		names, why := foldNamesAtTarget(context.Background(), db, foldCfg1675(), bmeta, tm, asOf1675, "shop", "t")
+		if names != tm || !strings.Contains(why, "the backup recorded no binlog position") {
+			t.Fatalf("a baseline anchored at %q:%d: why = %q", tc.file, tc.pos, why)
+		}
 	}
 }
 

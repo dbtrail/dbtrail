@@ -20,8 +20,9 @@ var addTargetsNotColumns = map[string]bool{
 // returns the table it names (an unqualified name takes defaultSchema, as the
 // capture parser does) and the columns it adds, spelled as written.
 //
-// ok is false for everything else, and for anything that is not read with
-// certainty to its last byte. The caller uses the answer as proof that a
+// ok is false for everything else, and for anything it cannot account for:
+// every byte outside a string or a parenthesised group must be part of a form
+// it knows. What is inside a string or a group is skipped, not read. The caller uses the answer as proof that a
 // column did not exist before the statement (#1675), so a statement read in
 // part is worse than one not read: "adds c" must be the whole of what it did.
 // Not read, on purpose:
@@ -30,7 +31,10 @@ var addTargetsNotColumns = map[string]bool{
 //     and LOCK, which change no definition;
 //   - ADD COLUMN IF NOT EXISTS (MariaDB), which succeeds when the column
 //     already exists, and the parenthesised list form;
-//   - a definition with PRIMARY or KEY, which changes the table's key;
+//   - a definition with PRIMARY or KEY, which changes the table's key, or
+//     with any word a column's definition is not made of (see
+//     addedColumnDefinition): another clause written with no comma before it,
+//     a PARTITION BY, an AFTER with no name, which only a text cut short has;
 //   - an executable comment: whether the server ran its body depends on the
 //     server's version, which the text does not say;
 //   - a backslash: whether it escapes a quote depends on the session's
@@ -205,36 +209,150 @@ func ddlOptionValue(s string) bool {
 	return true
 }
 
+// columnTypeWords are the words a column's type can start with, MySQL 8.4 and
+// MariaDB 11.4.
+var columnTypeWords = wordSet(`TINYINT SMALLINT MEDIUMINT INT INTEGER BIGINT INT1 INT2 INT3 INT4 INT8 MIDDLEINT
+	DECIMAL DEC NUMERIC FIXED FLOAT FLOAT4 FLOAT8 DOUBLE REAL BIT BOOL BOOLEAN SERIAL
+	DATE TIME DATETIME TIMESTAMP YEAR
+	CHAR CHARACTER VARCHAR NCHAR NVARCHAR NATIONAL BINARY VARBINARY LONG
+	TINYBLOB BLOB MEDIUMBLOB LONGBLOB TINYTEXT TEXT MEDIUMTEXT LONGTEXT ENUM SET JSON
+	GEOMETRY POINT LINESTRING POLYGON MULTIPOINT MULTILINESTRING MULTIPOLYGON GEOMETRYCOLLECTION GEOMCOLLECTION
+	UUID INET4 INET6 VECTOR`)
+
+// columnDefinitionWords are the words that can follow the type inside one
+// column's definition. It is a list of what is allowed, not of what is not:
+// the words that open another ALTER TABLE clause (DROP, RENAME, CHANGE,
+// MODIFY, ALTER, ADD, CONVERT, ORDER, DISCARD, IMPORT, FORCE, PARTITION,
+// REMOVE, a table option...) are not in it, and neither is a word a later
+// server version adds. PRIMARY and KEY are left out on purpose: they change
+// the table's key. WITH and WITHOUT (MariaDB system versioning) too.
+var columnDefinitionWords = wordSet(`PRECISION VARYING UNSIGNED SIGNED ZEROFILL CHARACTER SET CHARSET COLLATE ASCII UNICODE BYTE
+	NOT NULL DEFAULT VISIBLE INVISIBLE AUTO_INCREMENT UNIQUE COMMENT COLUMN_FORMAT FIXED DYNAMIC
+	STORAGE DISK MEMORY ENGINE_ATTRIBUTE SECONDARY_ENGINE_ATTRIBUTE COMPRESSED
+	GENERATED ALWAYS AS VIRTUAL STORED PERSISTENT SRID
+	REFERENCES MATCH FULL PARTIAL SIMPLE ON DELETE UPDATE RESTRICT CASCADE NO ACTION
+	CHECK ENFORCED FIRST AFTER
+	CURRENT_TIMESTAMP NOW LOCALTIME LOCALTIMESTAMP CURRENT_DATE CURRENT_TIME TRUE FALSE`)
+
+func wordSet(words string) map[string]bool {
+	out := map[string]bool{}
+	for _, w := range strings.Fields(words) {
+		out[w] = true
+	}
+	return out
+}
+
 // addedColumnDefinition reports whether s, what follows the column's name, is
-// a definition that starts with a type and makes the column no part of a key.
+// one column's definition and nothing else: a type, then only words a
+// definition is made of (columnDefinitionWords), numbers, strings and
+// parenthesised groups, whose contents are not read. A name is taken only
+// where the grammar asks for one: after AFTER, COLLATE, CHARSET, CHARACTER SET
+// and REFERENCES. FIRST, and AFTER with its name, end the definition.
 func addedColumnDefinition(s string) bool {
 	if !strings.HasPrefix(s, " ") {
 		return false
 	}
 	s = strings.TrimSpace(s)
-	if s == "" || (s[0] < 'a' || s[0] > 'z') && (s[0] < 'A' || s[0] > 'Z') {
-		return false
-	}
+	var (
+		prev     string // the last word, upper case
+		words    int
+		wantName bool // the next token is a name the grammar asks for
+		last     bool // that name ends the definition
+		done     bool
+	)
 	for i := 0; i < len(s); {
-		switch c := s[i]; {
-		case c == '\'' || c == '"' || c == '`':
+		c := s[i]
+		if c == ' ' {
+			i++
+			continue
+		}
+		if done {
+			return false
+		}
+		switch {
+		case c == '`' || c == '\'' || c == '"':
 			end := closingQuote(s, i)
-			if end < 0 {
+			if end < 0 || end == i+1 {
 				return false
 			}
 			i = end + 1
+			switch {
+			case wantName && c != '\'':
+				wantName, done = false, last
+			case wantName || c == '`' || words == 0:
+				return false
+			}
+			prev = ""
+		case c == '(':
+			end := closingParen(s, i)
+			if end < 0 || wantName || words == 0 {
+				return false
+			}
+			i = end + 1
+			prev = ""
+		case c >= '0' && c <= '9' || (c == '-' || c == '+' || c == '.') && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9':
+			if wantName || words == 0 {
+				return false
+			}
+			i++
+			for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '.') {
+				i++
+			}
+			if i < len(s) && s[i] != ' ' {
+				return false
+			}
+			prev = ""
 		case IsNameRune(rune(c)):
 			j := i
 			for j < len(s) && IsNameRune(rune(s[j])) {
 				j++
 			}
-			if w := strings.ToUpper(s[i:j]); w == "PRIMARY" || w == "KEY" {
+			w := strings.ToUpper(s[i:j])
+			i = j
+			if wantName {
+				wantName, done = false, last
+				prev = ""
+				continue
+			}
+			if words == 0 && !columnTypeWords[w] || words > 0 && !columnTypeWords[w] && !columnDefinitionWords[w] {
 				return false
 			}
-			i = j
+			words++
+			switch {
+			case w == "FIRST":
+				done = true
+			case w == "AFTER":
+				wantName, last = true, true
+			case w == "COLLATE" || w == "CHARSET" || w == "REFERENCES" || w == "SET" && prev == "CHARACTER":
+				wantName = true
+			}
+			prev = w
 		default:
-			i++
+			return false
 		}
 	}
-	return true
+	return words > 0 && !wantName
+}
+
+// closingParen returns the index of the parenthesis that closes the one at
+// s[i], skipping quoted text, or -1.
+func closingParen(s string, i int) int {
+	depth := 0
+	for j := i; j < len(s); j++ {
+		switch s[j] {
+		case '\'', '"', '`':
+			end := closingQuote(s, j)
+			if end < 0 {
+				return -1
+			}
+			j = end
+		case '(':
+			depth++
+		case ')':
+			if depth--; depth == 0 {
+				return j
+			}
+		}
+	}
+	return -1
 }

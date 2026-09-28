@@ -73,15 +73,22 @@ func (d recordedDDL) at() string {
 	return fmt.Sprintf("%s (%s:%d)", d.DetectedAt.UTC().Format(time.RFC3339), d.File, d.Pos)
 }
 
-// loadRecordedDDLs reads every DDL recorded for the table. The name match is
-// the index's collation, which ignores case, and rows indexed before #1435
-// carry an empty schema: both are loaded so placeAddedColumns can refuse on
-// them, never so they can count as this table's.
+// loadRecordedDDLs reads every DDL recorded for the table, and for any name
+// that differs from it only by case: schema_changes takes the collation of
+// the index's database, which may or may not tell case apart, so the
+// statement lowers both sides itself. Rows indexed before #1435 carry an
+// empty schema and are loaded too. Both are loaded so placeAddedColumns can
+// refuse on them, never so they can count as this table's: a row too many can
+// only refuse.
+//
+// LOWER() on the columns keeps idx_schema_table from being used, so this reads
+// the whole table. It has one row per table per DDL statement, and the read
+// runs once per table of a fold and only when that table has added columns.
 func loadRecordedDDLs(ctx context.Context, db *sql.DB, schema, table string, asOf, target time.Time) ([]recordedDDL, error) {
 	rows, err := db.QueryContext(ctx, `SELECT detected_at, binlog_file, binlog_pos, schema_name, table_name,
 			ddl_type, ddl_query, detected_at < ?, detected_at > ?
 		FROM schema_changes
-		WHERE (schema_name = ? OR schema_name = '') AND table_name = ?
+		WHERE (LOWER(schema_name) = LOWER(?) OR schema_name = '') AND LOWER(table_name) = LOWER(?)
 		ORDER BY id`, asOf, target, schema, table)
 	if err != nil {
 		var me *mysqldriver.MySQLError
@@ -108,18 +115,24 @@ func loadRecordedDDLs(ctx context.Context, db *sql.DB, schema, table string, asO
 // the baseline's columns (lower case): a statement after the target that adds
 // one of them proves a drop nobody recorded.
 //
-// anchor is the baseline's own binlog coordinate, nil when it recorded none;
+// anchor is the baseline's own binlog coordinate, nil when it recorded none,
+// which refuses;
 // cut is the run's positional cut, the same coordinate that bounds the fold.
 func placeAddedColumns(added []string, inBaseline map[string]bool, ddls []recordedDDL, schema, table string, anchor, cut *query.BinlogPos) string {
 	if cut == nil {
 		return "the index holds no event to place the target by binlog position"
+	}
+	// detected_at is when the statement started. One stamped before the
+	// backup may have been written after it, and only a position says.
+	if anchor == nil {
+		return "the backup recorded no binlog position, so a DDL recorded around it cannot be placed before or after it"
 	}
 	placed := map[string]bool{}
 	for _, d := range ddls {
 		pos := query.BinlogPos{File: d.File, Pos: d.Pos}
 		hasPos := d.File != "" && d.Pos > 0
 		// Before the baseline: its effect is in the baseline's CREATE TABLE.
-		if d.BeforeAsOf && (anchor == nil || hasPos && pos.AtOrBefore(*anchor)) {
+		if d.BeforeAsOf && hasPos && pos.AtOrBefore(*anchor) {
 			continue
 		}
 		if d.Schema != schema || d.Table != table {
