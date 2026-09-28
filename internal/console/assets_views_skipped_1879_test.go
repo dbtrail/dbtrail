@@ -47,7 +47,7 @@ function backupWhyLine() { return ""; }
 function downloadBackup() {}
 `}
 	for _, decl := range []string{"function el(", "function utcLabel(", "function fmtSeconds(", "function timesText(", "function fmtAge(",
-		"const MADE_BY", "function madeByCell(", "function sourceReadLine(", "const SNAPSHOT_LOCK", "function snapshotLockKey(", "function snapshotLockPill(",
+		"const MADE_BY", "function madeByCell(", "function sourceReadLine(", "function snapshotLockKey(", "function snapshotLockPill(",
 		"function snapshotLockLine(", "function tableLockMark(", "function viewsSkippedCount(", "function viewsSkippedAsOf(",
 		"function snapshotViewsText(", "function viewsSkippedWords(", "function viewsSkippedBlock(", "async function loadBackupDetail("} {
 		parts = append(parts, functionBody(t, js, decl))
