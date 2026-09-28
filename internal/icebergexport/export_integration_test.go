@@ -377,3 +377,41 @@ func dumpRows(t *testing.T, db *sql.DB, q string) string {
 	}
 	return b.String()
 }
+
+// A TRUNCATE that ran before the first load's instant and was indexed after
+// it (capture was behind, #1912). Its time is before the cursor's, so only
+// its binlog position places it after the load.
+func TestIntegrationExport_aTruncateIndexedLateRefuses(t *testing.T) {
+	f := seedFixture(t)
+	f.seedFirstWindow(t)
+	warehouse := t.TempDir()
+	if o := runOne(t, f.config(warehouse, f.base.Add(20*time.Minute))); o.Verdict != VerdictLoaded {
+		t.Fatalf("run 1 = %s (%s)", o.Verdict, o.Detail)
+	}
+	// The first window ends at binlog.000001:400, where the cursor now is.
+	testutil.MustExec(t, f.db, `INSERT INTO schema_changes (detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query)
+		VALUES (?, 'binlog.000001', 450, ?, 'orders', 'TRUNCATE TABLE', 'TRUNCATE TABLE orders')`,
+		f.base.Add(15*time.Minute).Format("2006-01-02 15:04:05"), f.schema)
+	o := runOne(t, f.config(warehouse, f.base.Add(40*time.Minute)))
+	if o.Verdict != VerdictRefusedDDL || !strings.Contains(o.Detail, "TRUNCATE") {
+		t.Fatalf("verdict = %s (%s), want refused-ddl naming the TRUNCATE", o.Verdict, o.Detail)
+	}
+}
+
+// A TRUNCATE the first load already holds, by time and by position, refuses
+// no later run.
+func TestIntegrationExport_aTruncateBeforeTheCursorRefusesNothing(t *testing.T) {
+	f := seedFixture(t)
+	f.seedFirstWindow(t)
+	testutil.MustExec(t, f.db, `INSERT INTO schema_changes (detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query)
+		VALUES (?, 'binlog.000001', 90, ?, 'orders', 'TRUNCATE TABLE', 'TRUNCATE TABLE orders')`,
+		f.base.Add(-time.Minute).Format("2006-01-02 15:04:05"), f.schema)
+	warehouse := t.TempDir()
+	if o := runOne(t, f.config(warehouse, f.base.Add(20*time.Minute))); o.Verdict != VerdictLoaded {
+		t.Fatalf("run 1 = %s (%s)", o.Verdict, o.Detail)
+	}
+	f.seedSecondWindow(t)
+	if o := runOne(t, f.config(warehouse, f.base.Add(40*time.Minute))); o.Verdict == VerdictRefusedDDL {
+		t.Fatalf("run 2 refused on a TRUNCATE from before the load: %s", o.Detail)
+	}
+}

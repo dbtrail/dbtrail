@@ -142,6 +142,10 @@ type FullTableConfig struct {
 	// anchored at (nil when the index holds no events); see ResolveSnapshotCut.
 	snapshotDir string
 	cut         *query.BinlogPos
+	// ddlMark is the run's DDL mark, encoded (ddl_mark.go): the newest
+	// schema_changes row, read before the cut and so before any table's
+	// check. "" when the index was not written by a stream or holds no row.
+	ddlMark string
 	// schemaAt is the schema snapshot in effect at At, and schemaAtTime when it
 	// was taken (#1651): the column-type check compares against it, not the
 	// latest snapshot, and only for a baseline older than it. nil when the
@@ -749,6 +753,9 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// the snapshot at a coordinate later than the events it actually folded, and
 	// the next refresh would skip everything in between.
 	if parquetMode {
+		// The DDL mark first: every table's check below reads schema_changes
+		// after it, so every row up to it is one those checks placed.
+		cfg.ddlMark = readRunDDLMark(ctx, db)
 		cut, cutErr := ResolveSnapshotCut(ctx, db, cfg.At)
 		if cutErr != nil {
 			return nil, cutErr
@@ -1274,9 +1281,16 @@ func ReconstructTable(
 	// TRUNCATE/DROP emit no row events (#764): without this check the merge
 	// below would replay the baseline straight through and silently
 	// resurrect rows the DDL actually deleted.
-	if err := CheckDestructiveDDL(ctx, db, schema, table, snapshotTime, cfg.At); err != nil {
+	// By position as well as by time (#1912): the anchor is the BASE's, the
+	// start of everything this run replays whether or not it resumes from a
+	// delta, and the cut is the run's (nil outside Parquet mode).
+	// The mark comes from the same footer as the anchor it qualifies.
+	ddlWin := DDLWindow{Since: snapshotTime, Until: cfg.At, Anchor: AnchorOf(bmeta), Cut: cfg.cut, Mark: ParseDDLMark(bmeta.DDLMark)}
+	if err := CheckDestructiveDDL(ctx, db, schema, table, ddlWin); err != nil {
 		return nil, err
 	}
+	afterDestructiveDDLCheck()
+	stampMark := markToStamp(cfg.ddlMark, ddlWin)
 
 	// ── 3c. Refuse/warn on a stamped capture gap inside the window (#765) ──
 	// stream_state.gap_lost_at records an irreparable capture gap (source
@@ -1437,6 +1451,7 @@ func ReconstructTable(
 			basePath: baselinePath, chainStart: snapshotTime, baseMeta: bmeta, anchorMeta: anchorMeta,
 			prev: prevDelta, fold: fold, capGap: capGap, pkCols: pkCols,
 			currentGenerated: generatedByName(tm.Columns), streamCaptured: captured,
+			ddlMark: stampMark,
 		}, rep)
 		if err != nil {
 			return nil, err
@@ -1509,6 +1524,7 @@ func ReconstructTable(
 		in.SnapshotDir = cfg.snapshotDir
 		in.SnapshotAt = cfg.At
 		in.Cut = cfg.cut
+		in.DDLMark = stampMark
 		in.CaptureGap = capGap
 		in.SourceBaseline = baselineMeta{
 			Path:     baselinePath,
@@ -1697,6 +1713,8 @@ type mergeInput struct {
 	// LastEventID is stamped as baseline.MetaKeyLastEventID on every file
 	// this merge writes (#1720); 0 leaves the key out.
 	LastEventID uint64
+	// DDLMark is stamped as baseline.MetaKeyDDLMark (#1912); "" leaves it out.
+	DDLMark string
 	// ImageColumns/SawImage come from foldResult and carry the #843 signal the
 	// trimmed Changes map can no longer provide (see droppedBaselineColumns).
 	ImageColumns map[string]struct{}
@@ -2513,9 +2531,15 @@ func reconstructBinlogOnly(
 	// one second earlier because both clocks are whole seconds and a statement
 	// in the same second may follow that change: refusing there is the
 	// recoverable mistake, a resurrected row is not.
+	//
+	// By time alone, with no anchor (#1912 places a statement by position
+	// against a snapshot's anchor). There is no snapshot here that a statement
+	// could have been indexed after: the window is whatever the index holds
+	// now, read by this same run, and its changes are fetched by time.
 	if fold.First != nil {
-		since := fold.First.EventTimestamp.Add(-time.Second)
-		ddlType, detectedAt, found, err := findDestructiveDDL(ctx, db, schema, table, since, cfg.At)
+		w := DDLWindow{Since: fold.First.EventTimestamp.Add(-time.Second), Until: cfg.At}
+		f, err := findDestructiveDDL(ctx, db, schema, table, w)
+		ddlType, detectedAt, found := f.first.Type, f.first.DetectedAt, f.how != ddlOutside
 		switch {
 		case errors.Is(err, errSchemaChangesMissing):
 			// An index too old to record DDL. The baseline paths treat this

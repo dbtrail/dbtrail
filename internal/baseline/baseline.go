@@ -38,6 +38,11 @@ type Config struct {
 	// source's bintrail_id. Empty leaves it unsigned, which readers treat as
 	// naming no writer. See writersig.go.
 	WriterID string
+	// DDLMark is stamped as MetaKeyDDLMark on every file (#1912): the newest
+	// schema_changes row in the index before the dump started. Only a caller
+	// that read it before starting the dump, from the index of the source it
+	// dumped, may set it. Empty leaves the key out.
+	DDLMark string
 }
 
 // Stats describes the outcome of a baseline run.
@@ -289,6 +294,9 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			// with no record leaves the key out, which reads as unknown.
 			if meta.LockMode != "" {
 				md[MetaKeyLockMode] = meta.LockMode
+			}
+			if cfg.DDLMark != "" {
+				md[MetaKeyDDLMark] = cfg.DDLMark
 			}
 			// Embed the raw mydumper <db>.<table>-schema.sql bytes so that
 			// full-table reconstruct (#187) can emit a faithful schema file

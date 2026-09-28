@@ -236,6 +236,7 @@ func TestFooterReaders_agreeOnEveryKey(t *testing.T) {
 		"MetaKeyRenderGUCs":        RenderGUCsPinned,
 		"MetaKeyCaptureGap":        "2026-06-10T03:00:00Z: a gap",
 		"MetaKeyLastEventID":       "4500",
+		"MetaKeyDDLMark":           `{"id":7,"binlog_file":"binlog.000003","binlog_pos":500,"detected_at":"2026-06-01T00:00:00Z","ddl_type":"TRUNCATE TABLE"}`,
 		"MetaKeySnapshotProducer":  ProducerReconstruct,
 		"MetaKeyDerivedFrom":       "2026-06-03T03:00:00Z",
 		"MetaKeyDerivedFromPath":   "/b/2026-06-03T03-00-00Z/shop/t.parquet",

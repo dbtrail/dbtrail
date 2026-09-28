@@ -22,6 +22,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
 	"github.com/dbtrail/dbtrail/internal/notify"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/storage"
@@ -706,11 +707,15 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	// otherwise be misread as UTC verbatim, skewing the replay window by the
 	// host's UTC offset (#768).
 	dumpStartedAt := time.Now().UTC()
+	// The DDL mark (#1912) BEFORE mydumper starts: a TRUNCATE already in the
+	// index ran on the source before this dump began, so the dump holds its
+	// effect, and no update from this snapshot has to place it by position.
+	ddlMark := dumpDDLMarkFunc(req)
 	// Resolved HERE, not at boot: a lock mode saved from the interface governs
 	// the very next dump. Trigger already refused an unreadable one, so the
 	// error is spent — taking the mode alone keeps this call site to one line.
 	lockMode, _ := s.lockModeNow()
-	if err := runMydumper(s.ctx, req.SourceDSN, req.Schemas, dumpDir, lockMode); err != nil {
+	if err := runMydumperFunc(s.ctx, req.SourceDSN, req.Schemas, dumpDir, lockMode); err != nil {
 		return dumpOutcome{}, fmt.Errorf("dump: %w", err)
 	}
 	// A dump that cannot be anchored is refused here, never published (#1688).
@@ -738,7 +743,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		out.cleanup = func() { os.RemoveAll(outputDir) }
 	}
 
-	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt))
+	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt, ddlMark))
 	if err != nil {
 		out.cleanup()
 		return dumpOutcome{}, fmt.Errorf("convert: %w", err)
@@ -751,7 +756,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 // dumpBaselineConfig is how a dump of req's server is converted: split out
 // so what the conversion is told, the writer it signs with among it, is
 // checked without running mydumper.
-func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dumpDir, outputDir string, at time.Time) baseline.Config {
+func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dumpDir, outputDir string, at time.Time, ddlMark string) baseline.Config {
 	return baseline.Config{
 		InputDir:    dumpDir,
 		OutputDir:   outputDir,
@@ -759,6 +764,7 @@ func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dum
 		Timestamp:   at,
 		TableDeltas: s.tableDeltas,
 		WriterID:    snapshotWriterID(req),
+		DDLMark:     ddlMark,
 	}
 }
 
@@ -790,6 +796,41 @@ var snapshotWriterIDFunc = func(indexDSN string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return serverid.SnapshotWriterID(ctx, db)
+}
+
+// dumpDDLMarkFunc reads the DDL mark a dump of req's server carries: the
+// newest schema_changes row of its index, and only when a stream writes that
+// index (the dump and the capture then read the same source). "" when there is
+// no index, no stream, no row, or the read fails: the snapshot is published
+// without one, and updates from it place statements by position as before.
+// A variable so a test answers it without an index.
+var dumpDDLMarkFunc = func(req console.BaselineRequest) string {
+	if req.IndexDSN == "" {
+		return ""
+	}
+	db, err := config.Connect(req.IndexDSN)
+	if err != nil {
+		slog.Warn("could not reach the index for the snapshot's DDL mark; the snapshot is published without one",
+			"server", req.ServerID, "error", err)
+		return ""
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	captured, err := query.StreamCaptured(ctx, db)
+	if err != nil || !captured {
+		return ""
+	}
+	m, err := reconstruct.ReadDDLMark(ctx, db)
+	if err != nil {
+		slog.Warn("could not read the index for the snapshot's DDL mark; the snapshot is published without one",
+			"server", req.ServerID, "error", err)
+		return ""
+	}
+	if m == nil {
+		return ""
+	}
+	return m.Encode()
 }
 
 // executePG produces a PostgreSQL baseline in-process via internal/pgbaseline —
@@ -985,6 +1026,9 @@ func mydumperBootWarning(lockMode baseline.LockMode) string {
 // baseline-dump pipeline also uses; on a native install it is whatever the host
 // has, which is why planMydumper reads its version first (#1688). lockMode
 // selects the sync mode when the build accepts it; see buildConsoleMydumperArgs.
+// runMydumperFunc runs mydumper; a test replaces it.
+var runMydumperFunc = runMydumper
+
 func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDir string, lockMode baseline.LockMode) error {
 	host, port, user, password, err := config.ParseSourceDSN(sourceDSN)
 	if err != nil {

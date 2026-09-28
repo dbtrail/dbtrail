@@ -279,7 +279,8 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// detection then reports "unavailable", the pre-#916 S3 behavior).
 	var bmeta baseline.DumpMetadata
 	if bm, metaErr := baseline.ReadParquetMetadataAny(cmd.Context(), baselinePath); metaErr != nil {
-		slog.Warn("could not read baseline metadata", "error", metaErr)
+		slog.Warn("could not read baseline metadata; a TRUNCATE, DROP or RENAME is looked for by time alone, so one indexed late is not seen",
+			"error", metaErr)
 	} else {
 		bmeta = bm
 		if bmeta.BinlogFile != "" {
@@ -374,7 +375,9 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// would silently resolve a truncated-away row as if it still existed at
 	// --at (#764; same guard as the full-table path and the shim's
 	// _snapshot).
-	if err := reconstruct.CheckDestructiveDDL(cmd.Context(), db, recSchema, recTable, snapshotTime, at); err != nil {
+	if err := reconstruct.CheckDestructiveDDL(cmd.Context(), db, recSchema, recTable,
+		reconstruct.DDLWindow{Since: snapshotTime, Until: at, Anchor: reconstruct.AnchorOf(bmeta),
+			Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}); err != nil {
 		return err
 	}
 

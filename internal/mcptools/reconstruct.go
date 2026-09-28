@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
@@ -315,7 +316,17 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		//      happened (#764).
 		//    - stream_state.gap_lost_at records events lost at the SOURCE, which
 		//      no archive can refill (#765) — unlike a coverage gap.
-		if err := reconstruct.CheckDestructiveDDL(ctx, t.DB, args.Schema, args.Table, snapshotTime, atTime); err != nil {
+		//      The check places a statement by the baseline's binlog position
+		//      as well as by time (#1912), so the footer is read for it. A
+		//      footer that cannot be read refuses: without the position, a
+		//      statement indexed late would pass as outside the window.
+		bmeta, err := baseline.ReadParquetMetadataAny(ctx, path)
+		if err != nil {
+			return ErrorResult(fmt.Errorf("read baseline metadata: %w", err)), nil, nil
+		}
+		if err := reconstruct.CheckDestructiveDDL(ctx, t.DB, args.Schema, args.Table,
+			reconstruct.DDLWindow{Since: snapshotTime, Until: atTime, Anchor: reconstruct.AnchorOf(bmeta),
+				Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}); err != nil {
 			return ErrorResult(err), nil, nil
 		}
 		//      CaptureGapStatus rather than CheckCaptureGap: the shared helper

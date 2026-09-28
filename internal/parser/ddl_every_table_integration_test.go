@@ -90,7 +90,7 @@ func TestParseFile_everyTableADropOrRenameNames(t *testing.T) {
 		t.Fatalf("names read from the binlog: drop %q, rename %q; want both tables of the DROP and both sides of the RENAME", drop, rename)
 	}
 	for _, tbl := range []string{"ddl_gone", "ddl_orders"} {
-		err := reconstruct.CheckDestructiveDDL(context.Background(), indexDB, sourceName, tbl, before, after)
+		err := reconstruct.CheckDestructiveDDL(context.Background(), indexDB, sourceName, tbl, reconstruct.DDLWindow{Since: before, Until: after})
 		if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
 			t.Errorf("%s: CheckDestructiveDDL = %v, want a refusal: a statement dropped or renamed it without naming it first", tbl, err)
 		}

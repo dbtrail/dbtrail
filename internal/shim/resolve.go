@@ -264,7 +264,11 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	// Refuse if a TRUNCATE/DROP/RENAME hit this table in the window: same blind
 	// spot as the full-table path — no row events to invalidate the baseline
 	// image, so the row would silently resolve as if it still existed (#764).
-	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table, snapshotTime, q.AsOf); err != nil {
+	// The baseline's position is read here, ahead of the fetch that also
+	// takes it: the check places a statement indexed late by it (#1912).
+	sincePos, ddlMark := snapshotAnchor(ctx, baselinePath, h.logger, q.Schema, q.Table)
+	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table,
+		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
 		return nil, err
 	}
 
@@ -283,7 +287,7 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 		Schema:   q.Schema,
 		Table:    q.Table,
 		Since:    &snapshotTime,
-		SincePos: snapshotSincePos(ctx, baselinePath, h.logger, q.Schema, q.Table),
+		SincePos: sincePos,
 		Until:    &q.AsOf,
 	}
 	// Delta fetch matches binlog_events.pk_values (BuildPKValues-encoded), so
