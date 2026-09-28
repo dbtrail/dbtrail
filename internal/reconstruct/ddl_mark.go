@@ -112,6 +112,10 @@ func markStillNamesItsRow(ctx context.Context, db *sql.DB, m *DDLMark) (bool, er
 		cur.DetectedAt.UTC().Equal(m.DetectedAt.UTC()), nil
 }
 
+// afterDestructiveDDLCheck runs right after a table's check; a test indexes a
+// statement there, one the check did not see.
+var afterDestructiveDDLCheck = func() {}
+
 // readRunDDLMark is a fold's mark, encoded: read only on an index a stream
 // wrote, where ascending id is the order rows were indexed. A read that fails
 // leaves the snapshot without one, which only places more rows later.

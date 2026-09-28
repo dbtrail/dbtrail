@@ -140,6 +140,14 @@ func lateDDLIndex(t *testing.T) (db *sql.DB, dsn, root string, base time.Time) {
 // an empty file records none, as older snapshots did.
 func lateDDLIndexAt(t *testing.T, file, pos string) (db *sql.DB, dsn, root string, base time.Time) {
 	t.Helper()
+	return lateDDLIndexWith(t, file, pos, nil)
+}
+
+// lateDDLIndexWith is lateDDLIndexAt with the snapshot written at the end,
+// after seed has run against the index and returned extra footer keys: what a
+// dump taken after seed's rows were indexed carries.
+func lateDDLIndexWith(t *testing.T, file, pos string, seed func(db *sql.DB, base time.Time) map[string]string) (db *sql.DB, dsn, root string, base time.Time) {
+	t.Helper()
 	db, dbName := testutil.CreateTestDB(t)
 	if err := indexer.CreateIndexTables(context.Background(), db, 48, false, nil); err != nil {
 		t.Fatalf("CreateIndexTables: %v", err)
@@ -162,6 +170,11 @@ func lateDDLIndexAt(t *testing.T, file, pos string) (db *sql.DB, dsn, root strin
 	}
 	if file != "" {
 		meta[baseline.MetaKeyBinlogFile], meta[baseline.MetaKeyBinlogPos] = file, pos
+	}
+	if seed != nil {
+		for k, v := range seed(db, base) {
+			meta[k] = v
+		}
 	}
 	w, err := baseline.NewWriter(filepath.Join(snapDir, "shop", "orders.parquet"), cols, baseline.WriterConfig{
 		Compression:  "none",
@@ -356,5 +369,177 @@ func TestReconstructParquet_aTruncateFromAnotherBinlogSequenceRefusesNothing(t *
 	}
 	if err := foldOrders(dsn, root, t.TempDir(), reconstruct.OutputFormatMydumper, base.Add(70*time.Second)); err != nil {
 		t.Fatalf("a restore: %v", err)
+	}
+}
+
+// streamWritten records a stream_state row: the index is one a stream wrote,
+// the only kind a fold stamps a DDL mark on.
+func streamWritten(t *testing.T, db *sql.DB) {
+	t.Helper()
+	testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, last_checkpoint, server_id)
+		VALUES (1, 'position', 'binlog.000003', 4, UTC_TIMESTAMP(), 1)`)
+}
+
+// The source's binlog files started over under the same name (a failover to
+// a server whose files are also binlog.N, a RESET MASTER). A TRUNCATE from the
+// old numbering, binlog.000412, was indexed long ago. The daemon's full backup
+// of the new source is anchored at binlog.000003:500 and carries the DDL mark
+// it read before the dump started: the refresh from it publishes, and so does
+// the one after it. Without the mark, every refresh refused for good.
+func TestReconstructParquet_aNumberingThatStartedOverRefusesNothingWithAMark(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	old := func(db *sql.DB, base time.Time) {
+		recordTruncate(t, db, "binlog.000412", 900, base.Add(-48*time.Hour))
+	}
+
+	// Without a mark: the refusal this exists for.
+	db0, dsn0, root0, base0 := lateDDLIndexWith(t, "binlog.000003", "500", func(db *sql.DB, base time.Time) map[string]string {
+		streamWritten(t, db)
+		old(db, base)
+		return nil
+	})
+	rowChange(t, db0, "binlog.000003", 600, 700, base0.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	err := foldOrders(dsn0, root0, root0, reconstruct.OutputFormatParquet, base0.Add(30*time.Second))
+	if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
+		t.Fatalf("without a mark: err = %v, want the refusal", err)
+	}
+	if !strings.Contains(err.Error(), "DELETE FROM schema_changes WHERE id IN (1);") {
+		t.Errorf("the refusal does not name the row to remove: %v", err)
+	}
+
+	// With the mark the daemon's backup reads before mydumper starts.
+	db, dsn, root, base := lateDDLIndexWith(t, "binlog.000003", "500", func(db *sql.DB, base time.Time) map[string]string {
+		streamWritten(t, db)
+		old(db, base)
+		m, err := reconstruct.ReadDDLMark(context.Background(), db)
+		if err != nil || m == nil {
+			t.Fatalf("ReadDDLMark = %v, %v", m, err)
+		}
+		return map[string]string{baseline.MetaKeyDDLMark: m.Encode()}
+	})
+	rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	if err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(30*time.Second)); err != nil {
+		t.Fatalf("the first refresh refused on a statement from the old numbering: %v", err)
+	}
+	mid, _, _, err := reconstruct.FindBaseline(context.Background(), root, "shop", "orders", base.Add(31*time.Second))
+	if err != nil {
+		t.Fatalf("FindBaseline: %v", err)
+	}
+	meta, err := baseline.ReadParquetMetadata(mid)
+	if err != nil {
+		t.Fatalf("ReadParquetMetadata: %v", err)
+	}
+	if m := reconstruct.ParseDDLMark(meta.DDLMark); m == nil || m.ID != 1 {
+		t.Fatalf("the published snapshot's mark = %q, want row 1", meta.DDLMark)
+	}
+	rowChange(t, db, "binlog.000003", 700, 800, base.Add(40*time.Second), "2", `{"id":2,"status":"B"}`)
+	if err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(60*time.Second)); err != nil {
+		t.Fatalf("the second refresh refused on a statement from the old numbering: %v", err)
+	}
+
+	// A TRUNCATE indexed late in the new numbering still refuses.
+	recordTruncate(t, db, "binlog.000003", 850, base.Add(50*time.Second))
+	rowChange(t, db, "binlog.000003", 900, 1000, base.Add(70*time.Second), "3", `{"id":3,"status":"C"}`)
+	err = foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(80*time.Second))
+	if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
+		t.Fatalf("a TRUNCATE indexed after the mark: err = %v, want the refusal", err)
+	}
+	if !strings.Contains(err.Error(), "binlog.000003:850") {
+		t.Errorf("refused on the wrong statement: %v", err)
+	}
+}
+
+// schema_changes handed its ids out again (restore-index, the table created
+// again): the snapshot's mark names a row that now holds another statement,
+// and is not used. The old TRUNCATE, now under a low id, refuses.
+func TestReconstructParquet_aMarkFromBeforeTheIdsStartedOverIsNotUsed(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dsn, root, base := lateDDLIndexWith(t, "binlog.000003", "500", func(db *sql.DB, base time.Time) map[string]string {
+		streamWritten(t, db)
+		recordTruncate(t, db, "binlog.000001", 100, base.Add(-72*time.Hour))
+		m, err := reconstruct.ReadDDLMark(context.Background(), db)
+		if err != nil || m == nil {
+			t.Fatalf("ReadDDLMark = %v, %v", m, err)
+		}
+		return map[string]string{baseline.MetaKeyDDLMark: m.Encode()}
+	})
+	// The ids start over: row 1 now holds a statement indexed after the
+	// snapshot, one this snapshot's check never saw.
+	testutil.MustExec(t, db, "TRUNCATE TABLE schema_changes")
+	recordTruncate(t, db, "binlog.000003", 560, base.Add(-5*time.Second))
+	rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(30*time.Second))
+	if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
+		t.Fatalf("err = %v, want the refusal: the mark names row 1, which is now another statement", err)
+	}
+}
+
+// A fold stamps the newest schema_changes row as its mark, and only on an
+// index a stream wrote: elsewhere ids need not follow the order rows arrived.
+func TestReconstructParquet_aFoldStampsItsMarkOnAStreamIndexOnly(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	for _, stream := range []bool{true, false} {
+		db, dsn, root, base := lateDDLIndexWith(t, "binlog.000003", "500", func(db *sql.DB, base time.Time) map[string]string {
+			if stream {
+				streamWritten(t, db)
+			}
+			return nil
+		})
+		recordTruncate(t, db, "binlog.000002", 10, base.Add(-time.Hour))
+		rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+		if err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(30*time.Second)); err != nil {
+			t.Fatalf("stream=%v: the refresh: %v", stream, err)
+		}
+		out, _, _, err := reconstruct.FindBaseline(context.Background(), root, "shop", "orders", base.Add(31*time.Second))
+		if err != nil {
+			t.Fatalf("FindBaseline: %v", err)
+		}
+		meta, err := baseline.ReadParquetMetadata(out)
+		if err != nil {
+			t.Fatalf("ReadParquetMetadata: %v", err)
+		}
+		m := reconstruct.ParseDDLMark(meta.DDLMark)
+		switch {
+		case stream && (m == nil || m.ID != 1 || m.File != "binlog.000002"):
+			t.Errorf("stream-written index: mark = %q, want row 1", meta.DDLMark)
+		case !stream && m != nil:
+			t.Errorf("index no stream wrote: mark = %q, want none", meta.DDLMark)
+		}
+	}
+}
+
+// A statement indexed after a table's check ran (capture caught up while the
+// run was folding) was not seen by that check, so it must be above the mark
+// the run stamps: the next refresh places it by position and refuses. The
+// mark is read before the checks for exactly this.
+func TestReconstructParquet_aStatementIndexedAfterTheCheckIsAboveTheMark(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dsn, root, base := lateDDLIndexWith(t, "binlog.000003", "500", func(db *sql.DB, base time.Time) map[string]string {
+		streamWritten(t, db)
+		return nil
+	})
+	// Row 1: older than the snapshot by time and by position.
+	recordTruncate(t, db, "binlog.000002", 10, base.Add(-time.Hour))
+	rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	rowChange(t, db, "binlog.000003", 800, 900, base.Add(40*time.Second), "2", `{"id":2,"status":"B"}`)
+	once := false
+	restore := reconstruct.AfterDestructiveDDLCheckForTest(func() {
+		if !once {
+			once = true
+			// Row 2. Ran before the snapshot's time, recorded after the
+			// cut. (One recorded before the cut cannot arrive this late:
+			// capture writes a DDL's row before any later row change, and
+			// the cut is read from those.)
+			recordTruncate(t, db, "binlog.000003", 950, base.Add(-5*time.Second))
+		}
+	})
+	defer restore()
+	if err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(30*time.Second)); err != nil {
+		t.Fatalf("the first refresh: %v", err)
+	}
+	restore()
+	err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(60*time.Second))
+	if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
+		t.Fatalf("err = %v, want the refusal: the TRUNCATE was indexed after the first refresh's check", err)
 	}
 }

@@ -72,3 +72,11 @@ func CountManifestReuseForTest(into *baselineintegrity.ManifestStats) (restore f
 	}
 	return func() { manifestWriter = prev }
 }
+
+// AfterDestructiveDDLCheckForTest runs fn right after each table's
+// destructive-DDL check (#1912).
+func AfterDestructiveDDLCheckForTest(fn func()) (restore func()) {
+	prev := afterDestructiveDDLCheck
+	afterDestructiveDDLCheck = fn
+	return func() { afterDestructiveDDLCheck = prev }
+}

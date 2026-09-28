@@ -1289,6 +1289,7 @@ func ReconstructTable(
 	if err := CheckDestructiveDDL(ctx, db, schema, table, ddlWin); err != nil {
 		return nil, err
 	}
+	afterDestructiveDDLCheck()
 	stampMark := markToStamp(cfg.ddlMark, ddlWin)
 
 	// ── 3c. Refuse/warn on a stamped capture gap inside the window (#765) ──
