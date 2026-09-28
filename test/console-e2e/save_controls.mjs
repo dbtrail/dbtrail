@@ -428,6 +428,16 @@ export async function runSaveScenes(ctx) {
   const SRV_NAME = "e2e save target";
   const SRV_EDITED = "e2e save edited";
 
+  // The Snapshots settings live behind a tab since round 3: open it (on a
+  // redraw it may have closed again) before touching a field there.
+  const openSnapSettings = async (p) => {
+    await p.waitForSelector('.snap-tab[data-tab="settings"]', { timeout: 15000 });
+    await p.evaluate(() => {
+      const t = document.querySelector('.snap-tab[data-tab="settings"]');
+      if (t.getAttribute("aria-selected") !== "true") t.click();
+    });
+  };
+
   page.on("dialog", acceptDialog);
   try {
     // ── the add and edit server form ─────────────────────────────────────
@@ -547,6 +557,7 @@ export async function runSaveScenes(ctx) {
       let own = st.body && (st.body.servers || []).find((s) => s.id === srvId);
       const startDir = own ? own.baseline_dir : undefined;
       await page.evaluate(() => navigate("snapshots"));
+      await openSnapSettings(page);
       await page.waitForSelector('.bks-server input[name="baseline_dir"]', { timeout: 15000 });
       // A relative folder is refused by the server, in its words.
       await page.fill('.bks-server input[name="baseline_dir"]', "relative/snaps");
@@ -577,6 +588,7 @@ export async function runSaveScenes(ctx) {
       const tab = await freshTab(srvId);
       try {
         await tab.evaluate(() => navigate("snapshots"));
+        await openSnapSettings(tab);
         await tab.waitForSelector('.bks-server input[name="baseline_dir"]', { timeout: 15000 });
         const shown = await tab.evaluate(() => document.querySelector('.bks-server input[name="baseline_dir"]').value);
         check("location", "a fresh tab shows the saved folder", shown === want, JSON.stringify(shown));
@@ -587,6 +599,7 @@ export async function runSaveScenes(ctx) {
     await scene("schedule", async () => {
       if (!srvId) throw new Error("no server from the server-form scene");
       await page.evaluate(async (id) => { await switchServer(id); navigate("snapshots"); }, srvId);
+      await openSnapSettings(page);
       await page.waitForSelector(".bk-schedule .bk-restore-row .btn-primary", { timeout: 15000 });
       // A time of day the server cannot read: refused in its words, nothing
       // stored.
@@ -616,12 +629,14 @@ export async function runSaveScenes(ctx) {
       const tab = await freshTab(srvId);
       try {
         await tab.evaluate(() => navigate("snapshots"));
+        await openSnapSettings(tab);
         await tab.waitForSelector(".bk-schedule .bk-card-state", { timeout: 15000 });
         const line = await until(() => tab.evaluate(() => (document.querySelector(".bk-schedule .bk-card-state") || {}).textContent || ""));
         check("schedule", "a fresh tab states the saved schedule", line.includes("at " + at), JSON.stringify(line));
       } finally { await tab.close(); }
 
       await page.evaluate(() => navigate("snapshots"));
+      await openSnapSettings(page);
       await page.waitForSelector(".bk-schedule .bk-restore-row .btn-ghost", { timeout: 15000 });
       await page.click(".bk-schedule .bk-restore-row .btn-ghost");
       const off = await until(async () => {
