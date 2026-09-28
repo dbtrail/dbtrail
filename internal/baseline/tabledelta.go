@@ -894,9 +894,7 @@ func writeEmptyTableDelta(base string) error {
 		return err
 	}
 	// Warn, not Info: the table leaves without a chain, so the next refresh
-	// rewrites it (no anchor to resume from, or a reserved column), and a
-	// following view generated against this snapshot refuses once that
-	// rewrite's chain appears beside the table.
+	// rewrites it (no anchor to resume from, or a reserved column) in full.
 	if m.BinlogFile == "" || m.BinlogPos <= 0 || m.SnapshotTimestamp.IsZero() || m.CreateTableSQL == "" {
 		slog.Warn("no empty table delta written: the backup file's footer cannot anchor one; the next refresh rewrites this table", "path", base)
 		return nil

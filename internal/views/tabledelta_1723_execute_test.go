@@ -118,10 +118,11 @@ func TestStateView_pinnedNamesTheChainFiles(t *testing.T) {
 	}
 }
 
-// TestStateView_guardSeesARangePairAlone: the following views' guard (#1638)
-// also refuses once a chain made of one RANGE pair appears beside the
-// table, a shape the chain listing accepts.
-func TestStateView_guardSeesARangePairAlone(t *testing.T) {
+// TestStateView_followsARangePairAlone: a following view generated while the
+// table had no chain also reads a chain made of one RANGE pair once it appears
+// beside the table, a shape the chain listing accepts (#1733; it used to
+// refuse, #1638).
+func TestStateView_followsARangePairAlone(t *testing.T) {
 	const stamp = "2026-04-30T03-00-00Z"
 	for _, mode := range followModes[1:] {
 		t.Run(mode.name, func(t *testing.T) {
@@ -152,9 +153,8 @@ func TestStateView_guardSeesARangePairAlone(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := db.QueryRow(`SELECT count(*) FROM state_shop_orders`).Scan(&n)
-			if err == nil || !strings.Contains(err.Error(), "shop.orders now has a table delta") {
-				t.Fatalf("after a range pair alone appeared: n=%d err=%v, want the guard's refusal", n, err)
+			if err := db.QueryRow(`SELECT count(*) FROM state_shop_orders`).Scan(&n); err != nil || n != 2 {
+				t.Fatalf("after a range pair alone appeared: n=%d err=%v, want 2 (the chain's dead row gone)", n, err)
 			}
 		})
 	}

@@ -73,10 +73,14 @@ func TestRunViews_stateViewsFollowTheCurrentPointer(t *testing.T) {
 	}
 
 	sql := runViewsOverBaselines(t, root, false)
-	got := statePath(t, sql)
+	// A following view reads the table's file and, through globs beside it,
+	// any chain of deltas (#1733), so the file is not the first read_parquet.
 	want := filepath.Join(root, baseline.CurrentLinkName, "shop", "orders.parquet")
-	if got != want {
-		t.Fatalf("state view reads %q, want it through the pointer (%q)", got, want)
+	if !strings.Contains(sql, "read_parquet('"+want+"'") {
+		t.Fatalf("the state view does not read the table through the pointer (%q):\n%s", want, sql)
+	}
+	if strings.Contains(sql, filepath.Join(root, newer)) {
+		t.Fatalf("the state view names the snapshot directory instead of the pointer:\n%s", sql)
 	}
 	if !strings.Contains(sql, "views follow the `"+baseline.CurrentLinkName+"` pointer") {
 		t.Fatal("the file does not say it follows the pointer")

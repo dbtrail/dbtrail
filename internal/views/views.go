@@ -1926,23 +1926,21 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 			writeNewestStateBody(b, in, t)
 			continue
 		}
-		if t.Delta {
+		// A view that FOLLOWS reads the table through its chain whether or not
+		// one exists today: it outlives the snapshot it was generated against,
+		// and the next refresh of a changed table writes a chain beside it
+		// (#1733). A pinned one reads the same files forever, so a table with
+		// no chain is its file alone.
+		if t.Delta || in.Follow.follows() {
 			fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Path, sqlString, in.Follow == FollowNone))
 			continue
 		}
-		// Only a view that FOLLOWS can meet a snapshot it was not generated
-		// against; a pinned one reads the same files forever.
-		guard := ""
-		if in.Follow.follows() {
-			plain, rng := deltaAppearedPatterns(t.Path)
-			guard = "\n  " + deltaAppearedGuard(sqlString(plain), sqlString(rng), t)
-		}
 		if replace := decimalReplaceClause(t); replace != "" {
 			fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
-			fmt.Fprintf(b, "  FROM read_parquet(%s)%s;\n", sqlString(t.Path), guard)
+			fmt.Fprintf(b, "  FROM read_parquet(%s);\n", sqlString(t.Path))
 			continue
 		}
-		fmt.Fprintf(b, "  SELECT * FROM read_parquet(%s)%s;\n", sqlString(t.Path), guard)
+		fmt.Fprintf(b, "  SELECT * FROM read_parquet(%s);\n", sqlString(t.Path))
 	}
 	b.WriteString("\n")
 	return len(wanted) > 0
@@ -2225,27 +2223,15 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 		return fmt.Sprintf("CASE WHEN getvariable('%s') IS NULL\n    THEN error(%s)\n    ELSE getvariable('%s') || %s END",
 			newest, sqlString(newestVarUnsetMsg), newest, sqlString(rel))
 	}
-	if t.Delta {
-		fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path, false))
-		return
-	}
-	// The guard's pattern is built beside the variable, not through path():
-	// an unset variable is already reported by the read itself.
-	plain, rng := deltaAppearedPatterns(t.Rel)
-	guard := "\n  " + deltaAppearedGuard(fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(plain)),
-		fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(rng)), t)
-	read := "read_parquet(" + path(t.Rel) + ")" + guard
-	if replace := decimalReplaceClause(t); replace != "" {
-		fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
-		fmt.Fprintf(b, "  FROM %s;\n", read)
-		return
-	}
-	fmt.Fprintf(b, "  SELECT * FROM %s;\n", read)
+	// Through the chain even when the table has none today: the next refresh
+	// of a changed table writes one beside it (#1733).
+	fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path, false))
 }
 
-// deltaStateBody is the state view's body for a table with a delta: the
-// chain's state (baseline.TableDeltaStateSQL over the chain's files) or, for
-// a snapshot written by v0.83.0, the one pair's state. p is the table file's
+// deltaStateBody is the state view's body for a table with a delta, and for
+// every table of a following view: the chain's state
+// (baseline.TableDeltaStateSQL over the chain's files) or, for a snapshot
+// written by v0.83.0, the one pair's state. p is the table file's
 // path or Rel, and expr turns such a string into the SQL expression the
 // producer's following mode wants (a literal, or the variable-prefixed CASE).
 // pinned says the view reads these files forever: then the chain is named
@@ -2278,49 +2264,6 @@ func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned 
 	// instead of failing on a glob that matches nothing.
 	posdel, upserts := baseline.TableDeltaFollowGlobs(p)
 	return baseline.TableDeltaFollowStateSQL(expr(p), expr(posdel), expr(upserts), p, decimalReplaceClause(t))
-}
-
-// deltaAppearedPatterns are the two globs deltaAppearedGuard counts: the
-// plain upserts files of the table's chain (#1718) and the range ones a
-// compaction writes (#1723). Each always holds a wildcard (the digit
-// classes), which the guard needs over S3, and each matches its shape
-// exactly, so a neighbouring table's pairs never trip this table's guard.
-// Two exact shapes rather than the wider TableDeltaGlobs: today every
-// chain the daemon writes keeps a plain pair (the job merges all but the
-// last), but nothing outside consoleapp enforces that, and the listing
-// accepts a chain of one range alone, so the guard looks for both.
-func deltaAppearedPatterns(p string) (plain, rng string) {
-	digits := strings.Repeat("[0-9]", baseline.TableDeltaSeqWidth)
-	stem := globLiteral(strings.TrimSuffix(p, ".parquet")) + "."
-	return stem + digits + baseline.TableDeltaUpsertsSuffix, stem + digits + "-" + digits + baseline.TableDeltaUpsertsSuffix
-}
-
-// deltaAppearedGuard is the WHERE clause a FOLLOWING state view over a table
-// with NO delta carries (#1638). plain and rng are SQL expressions for the
-// two globs of deltaAppearedPatterns, matching the table's .upserts files
-// and nothing else.
-//
-// A view's shape is fixed when it is generated, and a following view outlives
-// the snapshot it was generated against. If table deltas are turned on later,
-// the table's file stops being rewritten: it becomes the table as it was when
-// its chain of deltas started, and a view reading it alone would show that as
-// the newest state, with no error, for up to a day. So the view looks for the
-// delta on every read and refuses once one is there. The other direction needs
-// no guard: a view generated WITH the delta reads the table's file with
-// whatever chain is beside it, none included (#1918,
-// baseline.TableDeltaFollowGlobs), so it stays right once deltas are off.
-//
-// Three things verified against DuckDB 1.5.5 rather than assumed. The guard
-// survives in a persisted view and fires per query. error() behind a CASE whose
-// condition is a subquery is not folded at bind time, so a healthy view binds.
-// And the pattern must hold a wildcard (the digit classes): a glob over an exact s3:// key
-// lists nothing and reports the key as found. On a 40M-row file the guard adds
-// nothing measurable to a full-table sum.
-func deltaAppearedGuard(plain, rng string, t BaselineTable) string {
-	msg := fmt.Sprintf("bintrail views: %s.%s now has a table delta beside its file, and this view reads the file alone, "+
-		"so it would show the table as it was when it was last written in full. Generate the views again", t.Schema, t.Table)
-	return fmt.Sprintf("WHERE CASE WHEN (SELECT count(*) FROM glob(%s)) + (SELECT count(*) FROM glob(%s)) > 0 THEN error(%s) ELSE true END",
-		plain, rng, sqlString(msg))
 }
 
 // stateViewName builds the view identifier for a table and guarantees it is
