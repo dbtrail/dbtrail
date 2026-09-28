@@ -990,6 +990,12 @@ type BackupScheduleState struct {
 	// process only.
 	LastFallbackAt     string
 	LastFallbackReason string
+	// What the failed update reported, kept with the fallback because the
+	// status slot it was read from belongs to the next run (#1653).
+	LastFallbackTables         int
+	LastFallbackRefused        int
+	LastFallbackRefusedTables  []RefusedTable
+	LastFallbackRefusedOmitted int
 }
 
 // BackupScheduleReporter is the schedule loop as the console sees it. nil when

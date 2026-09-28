@@ -1188,6 +1188,7 @@ func (s *baselineSupervisor) recordRun(serverID, serverName string, rec console.
 	if runErr != nil {
 		rec.Error = runErr.Error()
 	}
+	rec.RefusedTables, rec.RefusedTablesOmitted = refusedTablesIn(runErr)
 	if err := s.history.Append(rec); err != nil {
 		slog.Warn("baseline history: could not record run (durations for this snapshot will fall back to file timestamps)",
 			"server", serverName, "kind", rec.Kind, "error", err)

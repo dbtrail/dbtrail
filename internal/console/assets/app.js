@@ -7335,6 +7335,79 @@ function restoreRefusedLine(rst) {
     (rst.too_many_changes ? " Nothing was overwritten. Pick a moment closer to an existing snapshot." : " Nothing was overwritten.");
 }
 
+// REFUSED_TABLE_WORDS: what each verdict of a refused table is called here,
+// and what fixes it. The verdicts are the ones `bintrail baseline refresh`
+// prints. One this page does not know is shown as it was written.
+const REFUSED_TABLE_WORDS = {
+  "refused-ddl": ["schema changed", "Needs a new read of this table."],
+  "refused-gap": ["changes missing", "Needs a full snapshot."],
+  "refused": ["refused", ""],
+};
+
+// refusedTableRows (#1653): the tables that stopped an update, as words. run
+// is a refresh status, a schedule's last run or its last fallback; tail says
+// what happened next. Publishing is all or nothing, so each table here
+// stopped the copy of every table, and the first line says so. null when the
+// run carries no list: a run recorded before the list existed has only its
+// count, and the caller keeps saying that count.
+function refusedTableRows(run, tail) {
+  const list = run && Array.isArray(run.refused_tables) ? run.refused_tables : [];
+  if (!list.length || run.ok === true || run.state === "succeeded" || run.state === "running") return null;
+  const clip = (v, n) => {
+    const s = String(v == null ? "" : v).replace(/\s+/g, " ").trim();
+    // By character, not by code unit: a cut must not split one in two.
+    const chars = Array.from(s);
+    return chars.length > n ? chars.slice(0, n - 3).join("") + "..." : s;
+  };
+  // The engine writes what happened, then a remedy in command line words.
+  // The row has its own fix, so the reason stops where that remedy starts.
+  const fact = (s) => s.split(/\s\u2014\s|;\s*pass --/)[0].replace(/^(full-table )?reconstruct:\s*/, "");
+  const left = Math.max(0, Math.floor(Number(run.refused_tables_omitted)) || 0);
+  const n = Math.max(list.length + left, Math.floor(Number(run.refused)) || 0);
+  const all = Math.floor(Number(run.tables)) || 0;
+  const rows = list.map((row) => {
+    const t = row && typeof row === "object" ? row : {};
+    const verdict = clip(t.verdict, 40);
+    const words = Object.prototype.hasOwnProperty.call(REFUSED_TABLE_WORDS, verdict) ? REFUSED_TABLE_WORDS[verdict] : null;
+    const reason = clip(t.reason, 400);
+    return {
+      name: clip(t.name, 130) || "(no name)",
+      what: words ? words[0] : (verdict || "refused"),
+      fix: words ? words[1] : "",
+      // A row with no fix of its own keeps the whole reason: the engine's
+      // remedy is then the only one on the page.
+      reason: !reason ? "" : words && words[1] ? clip(backupFoldError(fact(reason)), 200) : clip(backupFoldError(reason), 300),
+    };
+  });
+  return {
+    head: (n === all ? (n === 1 ? "The only table" : "All " + n + " tables")
+      : (n === 1 ? "1 table" : n + " tables")) +
+      " stopped the update" + (all > n ? " of all " + all : "") + ". " + (tail || "Nothing was published."),
+    rows: rows,
+    more: n > rows.length ? (n - rows.length) + " more not listed." : "",
+  };
+}
+
+// refusedTablesBlock draws refusedTableRows: one row per table, its name,
+// what happened and the fix, the reason under it. Every value is set as
+// text, never parsed as markup: names and reasons come from a server.
+function refusedTablesBlock(run, tail) {
+  const d = refusedTableRows(run, tail);
+  if (!d) return null;
+  const list = el("ul", { class: "refused-list" });
+  for (const r of d.rows) {
+    list.append(el("li", null,
+      el("code", { text: r.name }),
+      el("span", { class: "refused-what", text: r.what }),
+      r.fix ? el("span", { class: "refused-fix", text: r.fix }) : null,
+      r.reason ? el("span", { class: "refused-why", text: r.reason }) : null));
+  }
+  return el("div", { class: "refused-tables" },
+    el("p", { class: "form-msg err", text: d.head }),
+    list,
+    d.more ? el("p", { class: "form-hint", text: d.more }) : null);
+}
+
 // baselineRefreshNote renders the last automatic refresh for the selected
 // server.
 function baselineRefreshNote(rf) {
@@ -7370,8 +7443,11 @@ function baselineRefreshNote(rf) {
           (rf.last_error ? ": " + backupFoldError(rf.last_error) : ".") +
           " The snapshot is on disk and can be restored from. The next run folds a new one."
         : "Automatic refresh published nothing" + (when ? " at " + when : "") +
-          (rf.refused ? "; " + rf.refused + " table(s) refused" : "") +
-          (rf.last_error ? ": " + backupFoldError(rf.last_error) : "") +
+          // With the list, the rows drawn under this line say which tables
+          // and why (refusedTablesBlock). Without it, the count as before.
+          (Array.isArray(rf.refused_tables) && rf.refused_tables.length ? "."
+            : (rf.refused ? "; " + rf.refused + " table(s) refused" : "") +
+              (rf.last_error ? ": " + backupFoldError(rf.last_error) : "")) +
           (rf.too_many_changes
             ? budgetRefusedTail()
             : " Nothing was overwritten; the next run retries.");
@@ -7849,7 +7925,7 @@ function baselinesPanel(b, servers, opts) {
   // Gated on the PAYLOAD, never on capsCache.baseline_trigger: the refresh and
   // the mydumper dump are independently opt-in, so a refresh-only daemon reports
   // here with baseline_trigger false, and a capability gate would render nothing.
-  if (b && !b.error && b.refresh) panel.append(baselineRefreshNote(b.refresh));
+  if (b && !b.error && b.refresh) panel.append(baselineRefreshNote(b.refresh), refusedTablesBlock(b.refresh) || "");
   if (b && !b.error) snapshotRetentionLines(b).forEach((line) => panel.append(line));
   const list = el("div", { class: "stg-list" });
   if (!b || b.error) {
@@ -8776,8 +8852,11 @@ function backupScheduleCard(cur, b) {
           ? "Last scheduled snapshot " + when + " (" + what + ") wrote the snapshot on this machine but could not " +
             "send it to the snapshot destination: " + backupFoldError(run.error || "unknown error") +
             " The snapshot is on disk and can be restored from. The next scheduled run folds a new one."
-          : "Last scheduled snapshot failed " + when + " (" + what + "): " + backupFoldError(run.error || "unknown error") +
+          : "Last scheduled snapshot failed " + when + " (" + what + ")" +
+            (refusedTableRows(run) ? "." : ": " + backupFoldError(run.error || "unknown error")) +
             " Nothing was overwritten; the next scheduled run tries again." }));
+        const stopped = refusedTablesBlock(run);
+        if (stopped) body.append(stopped);
       }
       // The reason a full backup was taken, as recorded when it ran, and
       // the setting that turns the next one into an update (#1604). After
@@ -8808,7 +8887,10 @@ function backupScheduleCard(cur, b) {
       const why = backupFoldError(crashed ? fb.reason.replace(/^internal error:?\s*/, "") : fb.reason);
       body.append(el("p", { class: "form-msg err", text:
         "At " + utcLabel(fb.at) + " the update from the recorded changes " + (crashed ? "hit an internal error" : "was refused") +
-        " (" + why + ") so a full read was started instead. If this repeats, the recorded changes cannot be used for this server; check the reason." }));
+        (refusedTableRows(fb) ? "," : " (" + why + ")") +
+        " so a full read was started instead. If this repeats, the recorded changes cannot be used for this server; check the reason." }));
+      const stopped = refusedTablesBlock(fb, "A full read was started instead.");
+      if (stopped) body.append(stopped);
     }
     // A full backup of the schedule's own timetable that did not start, or
     // started and failed (#1564): red until a full backup succeeds, not

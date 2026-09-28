@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -428,7 +429,8 @@ func TestTriggerRefresh_aSkippedCycleLeavesTheServerFree(t *testing.T) {
 	if folds.Load() != 1 {
 		t.Fatalf("folded %d time(s), want still 1", folds.Load())
 	}
-	if skipped != published {
+	// DeepEqual: the status carries the refused tables, a slice (#1653).
+	if !reflect.DeepEqual(skipped, published) {
 		t.Errorf("the skipped cycle changed the reported status:\n got %+v\nwant %+v\n"+
 			"a cycle that did not run has nothing to report, and any new value here is a "+
 			"third kind of outcome for every surface that reads it", skipped, published)

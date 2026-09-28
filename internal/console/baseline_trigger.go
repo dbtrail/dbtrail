@@ -262,6 +262,13 @@ type BaselineStatus struct {
 	// a correct fail-closed verdict — so it reports succeeded=false with this
 	// count rather than an opaque error.
 	Refused int `json:"refused,omitempty"`
+	// RefusedTables names the tables behind Refused, each with its verdict and
+	// reason (#1653), up to RefusedTablesCap; RefusedTablesOmitted counts the
+	// ones past the cap. Both are empty on a run whose failure was not a
+	// table's (no snapshot to start from, an index that did not answer), and
+	// for a session with a data profile. Refused stays the count either way.
+	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
+	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
 	// TooManyChanges: the run refused for too many changed rows
 	// (reconstruct.ErrTouchedRowBudget, #1107): one of a table's on-disk groups
 	// of changes passed the per-table limit, or a table with no backup passed
@@ -448,7 +455,7 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"restore": s.baselineRestore.RestoreStatus(e.ID)})
+	writeJSON(w, http.StatusAccepted, map[string]any{"restore": withholdRefusedTables(r, s.baselineRestore.RestoreStatus(e.ID))})
 }
 
 // handleBaselineRestoreStatus reports the latest restore job state for the
@@ -463,5 +470,5 @@ func (s *Server) handleBaselineRestoreStatus(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"restore": s.baselineRestore.RestoreStatus(e.ID)})
+	writeJSON(w, http.StatusOK, map[string]any{"restore": withholdRefusedTables(r, s.baselineRestore.RestoreStatus(e.ID))})
 }

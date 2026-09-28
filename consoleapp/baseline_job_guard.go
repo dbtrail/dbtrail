@@ -143,5 +143,6 @@ func (s *baselineSupervisor) failPanickedJob(kind baselineJobKind, serverID, ser
 	// spells out. Since and At are kept — they identify the run.
 	st.Tables, st.Refused, st.Carried, st.CarriedCopied, st.Uploaded, st.Swept = 0, 0, 0, 0, 0, 0
 	st.Rows, st.Bytes = 0, 0
+	st.RefusedTables, st.RefusedTablesOmitted = nil, 0
 	st.Uploading = false
 }

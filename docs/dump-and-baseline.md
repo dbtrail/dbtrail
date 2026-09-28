@@ -458,6 +458,8 @@ Why this matters beyond convenience: reconstructing from a **fresh** snapshot re
 | `refused-ddl` | The table's columns, their declared types, or whether they allow NULL changed since the baseline, or a `TRUNCATE`/`DROP`/`RENAME` (or MariaDB's `CREATE OR REPLACE TABLE`) landed in the window | `bintrail dump` + `bintrail baseline` (in the web interface, a full backup). No flag helps |
 | `refused` | Anything else (no baseline for the table, no primary key, a PK-changing `UPDATE` in the window) | Named in the message |
 
+**In the web interface.** The Snapshots page shows the same verdicts, one row per refused table: its name, what happened, the fix and the reason. The first line says how many tables stopped the update and that nothing was published, because one refused table stops the copy of every table. A run keeps up to 20 refused tables by name and counts the rest. A run recorded before this list existed shows its count only. A session with a data profile sees the count and no names.
+
 A table with no baseline is refused rather than degraded to the binlog-only fallback: a snapshot folded from deltas alone would silently omit every row the window never touched.
 
 ### Refreshing on a schedule

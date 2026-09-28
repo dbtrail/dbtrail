@@ -1061,6 +1061,9 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 	st.FinishedAt = nowStamp()
 	st.Tables = tables
 	st.Refused = refused
+	// Set on BOTH branches, like the flags below: the slot is reused, and a
+	// list left from the run before would name tables this run never refused.
+	st.RefusedTables, st.RefusedTablesOmitted = refusedTablesIn(err)
 	st.Carried = reuse.reused
 	st.CarriedCopied = reuse.copied
 	// Set on BOTH branches, never left from a previous run: this is what the
@@ -1314,7 +1317,11 @@ func countReuse(reports []*reconstruct.TableReport) (tally reuseTally) {
 // with a capture gap, or on the S3 path is folded anyway.
 func (s *baselineSupervisor) foldSnapshot(req refreshRequest, at time.Time, tableList []string) (tables, refused int, reuse reuseTally, err error) {
 	reports, failures, runErr := foldTables(s.ctx, refreshFoldConfig(req, at, tableList))
-	return foldOutcome(tableList, reports, failures, runErr)
+	tables, refused, reuse, err = foldOutcome(tableList, reports, failures, runErr)
+	// Which tables refused, and why, from the rule the command line prints
+	// (#1653). Attached to the error, which is what reaches the status and
+	// the run history.
+	return tables, refused, reuse, withRefusedTables(err, reconstruct.RefreshOutcomes(tableList, reports, failures), req.IndexDSN)
 }
 
 // foldTables is reconstruct.ReconstructTablesDetailed behind a seam, shared by
