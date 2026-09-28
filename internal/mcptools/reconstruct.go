@@ -209,13 +209,12 @@ func buildPKFilter(cols []string, pk string) (map[string]string, error) {
 // row's full state as of a point in time, or its history, folded from a
 // baseline Parquet snapshot plus the indexed deltas after it.
 //
-// It is strictly read-only and deliberately STRICTER than the console's
-// /api/reconstruct endpoint: it additionally runs
-// reconstruct.CheckDestructiveDDL (#764) and reconstruct.CaptureGapStatus
-// (#765). Those guards exist on the `bintrail reconstruct` CLI path and catch
-// two ways a fold can be silently wrong that the coverage-gap check cannot
-// see. An agent cannot eyeball a suspicious result the way a human reading CLI
-// output can, so the tool takes the strictest available posture.
+// It is strictly read-only and runs reconstruct.CheckDestructiveDDL (#764) and
+// reconstruct.CaptureGapStatus (#765), as the `bintrail reconstruct` CLI and
+// the console's /api/reconstruct do (#1916). Those guards catch two ways a
+// fold can be silently wrong that the coverage-gap check cannot see. An agent
+// cannot eyeball a suspicious result the way a human reading CLI output can,
+// so the tool takes the strictest available posture.
 func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest, ReconstructArgs) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, args ReconstructArgs) (*mcp.CallToolResult, any, error) {
 		if res := rejectSurfaceParams(cfg, args.IndexDSN, ""); res != nil {

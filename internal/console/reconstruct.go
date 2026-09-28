@@ -405,17 +405,21 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "find baseline: "+err.Error())
 		return
 	}
-	// Read the baseline's Parquet metadata for the rendering-GUC stamp check
-	// (#921). Best-effort: on a read failure bmeta stays zero (LSN 0) and the
-	// warning is simply not raised — the fold below never needs this metadata
-	// (deltas anchor on snapshotTime).
-	bmeta, bmetaErr := baseline.ReadParquetMetadataAny(ctx, path)
-	if bmetaErr != nil {
-		// Warn, not Debug: a PG baseline whose metadata cannot be read loses
-		// the render-GUCs mismatch warning silently otherwise (parity with the
-		// shim's failure log level).
-		slog.Warn("reconstruct: could not read baseline metadata for the render-GUCs check",
-			"path", path, "error", bmetaErr)
+	// Read the baseline's Parquet metadata: the destructive-DDL check below
+	// places a statement by the snapshot's binlog position and DDL mark as
+	// well as by time (#1912), and the rendering-GUC stamp check (#921) reads
+	// it too. A footer that cannot be read refuses, as the MCP tool does:
+	// without the position, a TRUNCATE indexed late would pass as outside the
+	// window, and the row shown would be wrong rather than incomplete. The
+	// shim falls back to time alone only because a MySQL client has no
+	// channel to be warned on; this response does, but a warning would still
+	// hand out a row the check could not vouch for.
+	bmeta, err := baseline.ReadParquetMetadataAny(ctx, path)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError,
+			"could not read the snapshot file's footer, which records where in the binlog the snapshot was taken. "+
+				"Without it a TRUNCATE or DROP recorded late cannot be ruled out, so the row is not shown: "+err.Error())
+		return
 	}
 	// PK column metadata from the snapshot in effect when the baseline was
 	// taken (#1159), enabling the fixed BINARY(n) pad-and-retry inside
@@ -428,6 +432,44 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	baselineRow, err := reconstruct.ReadBaselineRow(ctx, path, pkFilter, pkMetas)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "read baseline: "+err.Error())
+		return
+	}
+
+	// Refuse on the two ways a fold can be silently wrong that the
+	// coverage-gap check below cannot see (#1916), with the same calls and the
+	// same anchor as the CLI and the MCP tool. Both run before the fetch, so a
+	// refusal names its own cause instead of a coverage gap in the same window.
+	//   - A TRUNCATE/DROP/RENAME in the window emits no row events, so the
+	//     fold would show the rows it removed as present (#764). No override:
+	//     allow_gaps does not cover it here, as --allow-gaps does not on the
+	//     CLI and allow_gaps does not on MCP. The result would be wrong, not
+	//     incomplete, and the way out is a newer snapshot. The message names
+	//     the statement's type, table, time and position, never its text, so
+	//     nothing a data profile hides can reach it (profiled sessions are
+	//     refused above in any case).
+	if err := reconstruct.CheckDestructiveDDL(ctx, b.db, schema, table,
+		reconstruct.DDLWindow{Since: snapshotTime, Until: atTime, Anchor: reconstruct.AnchorOf(bmeta),
+			Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}); err != nil {
+		if errors.Is(err, reconstruct.ErrDestructiveDDL) {
+			writeJSONError(w, http.StatusUnprocessableEntity, "time-travel stopped: "+err.Error())
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	//   - stream_state.gap_lost_at records events lost at the SOURCE, which no
+	//     archive can refill (#765). allow_gaps overrides it, as it does on the
+	//     CLI and MCP, and the finding then travels as a capture_gap warning:
+	//     an override never silences it. CaptureGapStatus rather than
+	//     CheckCaptureGap, whose override only logs and whose refusal names a
+	//     command-line flag.
+	captureGap, err := reconstruct.CaptureGapStatus(ctx, b.db, snapshotTime, atTime)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if captureGap != nil && !allowGaps {
+		writeJSONError(w, http.StatusUnprocessableEntity, captureGapRefusal(captureGap))
 		return
 	}
 
@@ -524,7 +566,8 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 		// coverage-gap warnings: the server already logs these; this puts
 		// them in front of the operator.
 		Warnings: appendDivergenceWarning(
-			appendRenderGUCsWarning(appendStaleWarning(coverageWarnings(plan, skippedSources, allowGaps), stale), bmeta),
+			appendRenderGUCsWarning(appendStaleWarning(
+				appendCaptureGapWarning(coverageWarnings(plan, skippedSources, allowGaps), captureGap), stale), bmeta),
 			diverged),
 		Notes: archiveElisionNotes(archivesElided, reconstructArchiveElisionNote()),
 	}
@@ -649,6 +692,48 @@ func appendRenderGUCsWarning(warnings []string, bmeta baseline.DumpMetadata) []s
 	return append(warnings, fmt.Sprintf(
 		"render_gucs_mismatch: this baseline's rendering-GUC stamp (%q) does not match the current pin; it predates GUC pinning or was produced under a different pin; its GUC-sensitive text (timestamps, floats, bytea, intervals) may not match newer deltas; re-run `bintrail-pg baseline` to refresh it",
 		bmeta.RenderGUCs))
+}
+
+// captureGapReason says what stream_state reports about lost events for one
+// Time-travel window (#765), in this screen's words: the shared
+// CaptureGap.Reason() is worded for the command line. Times are UTC, in the
+// format the rest of the response uses.
+func captureGapReason(g *reconstruct.CaptureGap) string {
+	since, until := g.Since.UTC().Format(consoleTSFormat), g.Until.UTC().Format(consoleTSFormat)
+	if g.Unevaluable {
+		return fmt.Sprintf("this index is too old to record whether capture lost events, so a loss between the snapshot (%s UTC) "+
+			"and %s UTC cannot be ruled out. Any capture or indexing command updates the index so it can tell", since, until)
+	}
+	detail := g.Detail
+	if detail == "" {
+		detail = "no detail recorded"
+	}
+	return fmt.Sprintf("capture permanently lost events at %s UTC (%s), between the snapshot (%s UTC) and %s UTC. "+
+		"No archive can bring them back", g.At.UTC().Format(consoleTSFormat), detail, since, until)
+}
+
+// captureGapRefusal is the 422 for a capture gap the operator did not
+// override. It names the screen's own checkbox, never a command-line flag.
+func captureGapRefusal(g *reconstruct.CaptureGap) string {
+	todo := "Pick a time before the loss, or check"
+	if g.Unevaluable {
+		todo = "Check" // there is no known loss to pick a time before
+	}
+	return "time-travel stopped: " + captureGapReason(g) + ". The row shown could be missing changes. " +
+		todo + " \"Continue even if some history is missing\" to see it with a warning"
+}
+
+// appendCaptureGapWarning puts an overridden capture gap first in the
+// warnings, as the MCP tool does: an answer given over lost events must say
+// so in the response, not only in the server log the operator never sees.
+// A no-op for a nil finding, so callers can wire it unconditionally.
+func appendCaptureGapWarning(warnings []string, g *reconstruct.CaptureGap) []string {
+	if g == nil {
+		return warnings
+	}
+	return append([]string{"capture_gap: " + captureGapReason(g) +
+		". Shown anyway because \"Continue even if some history is missing\" is checked; the row may be missing changes"},
+		warnings...)
 }
 
 // isTrue reports whether a query-param flag is set to a truthy value.
