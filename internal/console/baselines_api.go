@@ -88,6 +88,10 @@ type baselinesResponse struct {
 	// is routine — grading every row red on a healthy retention cadence would
 	// cry wolf, so the per-row verdicts inform and this field decides.
 	Staleness string `json:"staleness,omitempty"`
+	// SharedWith lists the locations above that hold snapshots signed by
+	// more than one writer (#1762), omitted when none does. Read off the
+	// listing this response just made, so it costs no read of its own.
+	SharedWith []snapshotWritersDTO `json:"shared_with,omitempty"`
 	// LocalRetention is the keep-newest count this daemon applies to the
 	// selected server's local folder (#1681). OMITTED, never zero, when
 	// nothing local is ever pruned: no count, an external destination, a
@@ -282,6 +286,17 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	// that dropped an unreadable snapshot reads exactly like a complete one
 	// otherwise (#1601).
 	resp.Incomplete = merged.Listed < len(merged.Sources) || merged.Skipped > 0
+	// Only the locations that answered: a failed listing saw nothing, and
+	// what an earlier one saw is not this response's to repeat.
+	var listed []string
+	for _, src := range merged.Sources {
+		if src.Error == "" {
+			listed = append(listed, src.Source)
+		}
+	}
+	resp.SharedWith = sharedSnapshotLocations(listed, snapshotWritersSeen, func() string {
+		return ownWriterID(r.Context(), b.db, s.selectedServerID(r))
+	})
 	files := merged.Files
 
 	now := time.Now().UTC()

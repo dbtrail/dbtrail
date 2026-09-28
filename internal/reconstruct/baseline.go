@@ -539,6 +539,10 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 	}
 	var out []BaselineFile
 	var skipped []UnreadableSnapshot
+	// Who signed the snapshots of this folder (#1762), read off the names
+	// the walk below lists anyway. See snapshot_writers.go.
+	writers := writerSet{}
+	defer func() { recordLocalWriters(baselineDir, writers.sorted()) }()
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -552,6 +556,13 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 		// advertise an incomplete snapshot as the latest baseline.
 		if !baseline.SnapshotComplete(snapDir) {
 			slog.Warn("baseline listing: skipping incomplete snapshot", "path", snapDir)
+			// Not listed, and still evidence of who writes here. A local
+			// snapshot is signed as it completes, so this read finds a
+			// signature only on one that was completed and flagged again.
+			if w, bad, err := baseline.ReadSnapshotWriters(snapDir); err == nil {
+				writers.add(w)
+				warnUnreadableSignatures(snapDir, bad)
+			}
 			continue
 		}
 		dbDirs, err := os.ReadDir(snapDir)
@@ -563,6 +574,15 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 			skipped = append(skipped, UnreadableSnapshot{SnapshotTime: ts, Path: snapDir, Err: err})
 			continue
 		}
+		var plain []string
+		for _, e := range dbDirs {
+			if !e.IsDir() {
+				plain = append(plain, e.Name())
+			}
+		}
+		signed, bad := baseline.WritersFromNames(plain)
+		writers.add(signed)
+		warnUnreadableSignatures(snapDir, bad)
 		for _, dbDir := range dbDirs {
 			if !dbDir.IsDir() {
 				continue

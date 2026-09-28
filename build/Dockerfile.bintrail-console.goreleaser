@@ -5,42 +5,15 @@
 # cross-compiled. The build context root contains `bintrail-console` for the
 # target arch — GoReleaser stages it there before invoking `docker build`.
 #
-# Runtime base matches Dockerfile.bintrail-console (debian:bookworm-slim):
-# glibc for DuckDB's static libs and a shell for debugging. One binary per
+# Runtime base matches Dockerfile.bintrail-console (the console base image,
+# Debian bookworm): glibc for DuckDB's static libs and a shell for debugging. One binary per
 # image (PMM-style) — the core CLI ships as ghcr.io/dbtrail/bintrail.
-FROM debian:bookworm-slim
-ARG TARGETARCH
-
-# mydumper powers the OPT-IN in-process baseline trigger (#613): with
-# BINTRAIL_CONSOLE_BASELINE_TRIGGER=1 the watch daemon runs mydumper here as a
-# LOCAL subprocess (no docker socket), then converts+uploads in-process. We pin
-# the SAME version the compose baseline-dump pipeline uses (mydumper v1.0.3-1) so
-# console-created baselines are identical to CLI/compose ones — bookworm's apt
-# mydumper is 0.10, too old for the CONSISTENT lock-free --trx-tables snapshot a
-# least-privilege replication user (no RELOAD/FLUSH_TABLES) needs (verified against
-# a real Percona 8.0 source). Idle bytes when the trigger is not enabled.
-#
-# libmariadb3 (#1876): the arm64 mydumper package is linked against MariaDB
-# Connector/C, which loads caching_sha2_password from a plugin directory that
-# only this package ships. Without it mydumper cannot log in on arm64 as a user
-# created with the MySQL 8.0+ default.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        ca-certificates wget libatomic1 libglib2.0-0 libpcre2-8-0 zstd libmariadb3 && \
-    wget -q "https://github.com/mydumper/mydumper/releases/download/v1.0.3-1/mydumper_1.0.3-1.bookworm_${TARGETARCH}.deb" -O /tmp/mydumper.deb && \
-    dpkg -i /tmp/mydumper.deb && \
-    rm -f /tmp/mydumper.deb && \
-    rm -rf /var/lib/apt/lists/* && \
-    # Pin uid 999: the bundled compose chowns the index password secret to
-    # uid 999 (mode 0600) for this process to read — see docker-compose.yml.
-    useradd --system --no-create-home --uid 999 bintrail && \
-    # Writable state dir (console server registry, etc.) — a named volume
-    # mounted here inherits the ownership; the container runs as uid 999.
-    mkdir -p /var/lib/bintrail && chown bintrail /var/lib/bintrail && \
-    # Home dir for the bintrail user: DuckDB caches its httpfs/aws extensions
-    # under $HOME/.duckdb for S3 reads and fails INSTALL without one. (The
-    # duckdbutil loader pins a fallback if $HOME is missing — belt-and-suspenders.)
-    mkdir -p /home/bintrail && chown bintrail /home/bintrail
+# The base image holds Debian, the pinned mydumper with the client library it
+# needs, the bintrail user (uid 999) and its directories. It is built and tested
+# from build/Dockerfile.console-base, and the tag here is the one in
+# build/console-base.tag (a test keeps the two equal). It already runs as the
+# bintrail user.
+FROM ghcr.io/dbtrail/bintrail-console-base:bookworm-mydumper1.0.3-1-r1
 
 COPY bintrail-console /usr/local/bin/bintrail-console
 

@@ -34,6 +34,10 @@ type Config struct {
 	// so a full backup taken by a daemon running with table deltas has the
 	// layout of the refreshes around it. See WriteEmptyTableDeltas.
 	TableDeltas bool
+	// WriterID is the identity this snapshot is signed with (#1762): the
+	// source's bintrail_id. Empty leaves it unsigned, which readers treat as
+	// naming no writer. See writersig.go.
+	WriterID string
 }
 
 // Stats describes the outcome of a baseline run.
@@ -329,6 +333,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			return stats, err
 		}
 	}
+	SignSnapshot(snapDir, cfg.WriterID)
 	if err := baselineintegrity.WriteManifest(snapDir); err != nil {
 		return stats, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err)
 	}

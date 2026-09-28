@@ -23,6 +23,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/notify"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
@@ -715,13 +716,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		out.cleanup = func() { os.RemoveAll(outputDir) }
 	}
 
-	stats, err := baseline.Run(s.ctx, baseline.Config{
-		InputDir:    dumpDir,
-		OutputDir:   outputDir,
-		Compression: "zstd",
-		Timestamp:   dumpStartedAt,
-		TableDeltas: s.tableDeltas,
-	})
+	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt))
 	if err != nil {
 		out.cleanup()
 		return dumpOutcome{}, fmt.Errorf("convert: %w", err)
@@ -729,6 +724,50 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	out.stats = stats
 	out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(dumpStartedAt))
 	return out, nil
+}
+
+// dumpBaselineConfig is how a dump of req's server is converted: split out
+// so what the conversion is told, the writer it signs with among it, is
+// checked without running mydumper.
+func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dumpDir, outputDir string, at time.Time) baseline.Config {
+	return baseline.Config{
+		InputDir:    dumpDir,
+		OutputDir:   outputDir,
+		Compression: "zstd",
+		Timestamp:   at,
+		TableDeltas: s.tableDeltas,
+		WriterID:    snapshotWriterID(req),
+	}
+}
+
+// snapshotWriterID is the identity a full snapshot of req's server is signed
+// with (#1762): the bintrail_id its index records, the same one the scheduled
+// updates of that server sign with, since they read it from the same index.
+// Empty when the index names none yet, or cannot be read: the snapshot is
+// then published unsigned, never refused.
+func snapshotWriterID(req console.BaselineRequest) string {
+	if req.IndexDSN == "" {
+		return ""
+	}
+	id, err := snapshotWriterIDFunc(req.IndexDSN)
+	if err != nil {
+		slog.Warn("could not read the server's bintrail_id, so this snapshot is published unsigned and takes no part in noticing two writers on one snapshot location",
+			"server", req.ServerID, "error", err)
+		return ""
+	}
+	return id
+}
+
+// snapshotWriterIDFunc reads the identity from an index; a test replaces it.
+var snapshotWriterIDFunc = func(indexDSN string) (string, error) {
+	db, err := config.Connect(indexDSN)
+	if err != nil {
+		return "", fmt.Errorf("connect: %w", err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return serverid.SnapshotWriterID(ctx, db)
 }
 
 // executePG produces a PostgreSQL baseline in-process via internal/pgbaseline —
@@ -778,8 +817,9 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (baseline.St
 // cmd/bintrail-pg's pgBaselineConfigFromFlags. The replication DSN is derived
 // from the stored query DSN (console.PGReplDSN — the one home for that
 // derivation), needed so pgbaseline can CREATE the slot when a user baselines
-// BEFORE the first monitor start; harmless if the slot already exists. Pure —
-// unit-testable without a live PG. The registry carries only a schema filter.
+// BEFORE the first monitor start; harmless if the slot already exists.
+// Unit-testable without a live PG: the one thing it reads is the writer the
+// snapshot is signed with, from the server's index, behind a seam. The registry carries only a schema filter.
 func pgBaselineConfig(req console.BaselineRequest, outputDir string) (pgbaseline.Config, error) {
 	replDSN, err := console.PGReplDSN(req.SourceDSN)
 	if err != nil {
@@ -793,6 +833,7 @@ func pgBaselineConfig(req console.BaselineRequest, outputDir string) (pgbaseline
 		Filters:     cliutil.BuildIndexFilters(strings.Join(req.Schemas, ","), ""),
 		OutputDir:   outputDir,
 		Compression: "zstd",
+		WriterID:    snapshotWriterID(req),
 	}, nil
 }
 

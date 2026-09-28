@@ -33,6 +33,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/recovery"
+	"github.com/dbtrail/dbtrail/internal/serverid"
 )
 
 // FullTableConfig drives ReconstructTables — the full-table merge-on-read
@@ -122,6 +123,14 @@ type FullTableConfig struct {
 	// the files land in directly. See emitParquetSnapshot for the layout and the
 	// anchoring contract.
 	OutputFormat string
+
+	// WriterID is the identity a Parquet snapshot is signed with (#1762).
+	// Empty means "ask the index": the run reads the source's bintrail_id
+	// from the index it folds (serverid.SnapshotWriterID), which is the
+	// writer of THIS snapshot whoever wrote the one it builds on.
+	// OutputFormatParquet only; a mydumper dump is not a snapshot in a
+	// baselines root and is never signed.
+	WriterID string
 
 	// snapshotDir and cut are per-run state ReconstructTables resolves once and
 	// hands to each ReconstructTable goroutine. Unexported because they are
@@ -689,6 +698,18 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 		return nil, indexer.WrapSchemaMigrationErr(err)
 	}
 
+	// Who signs the snapshot (#1762). Read before the fold so a run that
+	// cannot learn it says so up front; the run goes on and publishes
+	// unsigned, because a signature is never a condition for a snapshot.
+	if parquetMode && strings.TrimSpace(cfg.WriterID) == "" {
+		id, err := serverid.SnapshotWriterID(ctx, db)
+		if err != nil {
+			slog.Warn("could not read this index's bintrail_id, so the snapshot is published unsigned and takes no part in noticing two writers on one snapshot location",
+				"error", err)
+		}
+		cfg.WriterID = id
+	}
+
 	// Derive DBName for the query planner.
 	var dbName string
 	if dsnCfg, perr := mysqldriver.ParseDSN(cfg.IndexDSN); perr == nil {
@@ -858,6 +879,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// the run is otherwise clean; a failed run stays _INCOMPLETE and needs no
 	// manifest.
 	if parquetMode && ctx.Err() == nil && len(errs) == 0 {
+		baseline.SignSnapshot(cfg.snapshotDir, cfg.WriterID)
 		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err))

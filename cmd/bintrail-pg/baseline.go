@@ -56,6 +56,7 @@ var (
 	pgbRetry        bool
 	pgbUpload       string
 	pgbUploadRegion string
+	pgbBintrailID   string
 )
 
 func init() {
@@ -72,6 +73,7 @@ func init() {
 	pgBaselineCmd.Flags().BoolVar(&pgbRetry, "retry", false, "With --upload: skip S3 objects that were already uploaded (local Parquet generation always runs fresh — every run is a new timestamped snapshot)")
 	pgBaselineCmd.Flags().StringVar(&pgbUpload, "upload", "", "S3 destination URL to upload Parquet files after generation (e.g. s3://my-bucket/baselines/)")
 	pgBaselineCmd.Flags().StringVar(&pgbUploadRegion, "upload-region", "", "AWS region for --upload (default: from AWS_REGION env var or ~/.aws/config)")
+	pgBaselineCmd.Flags().StringVar(&pgbBintrailID, "bintrail-id", "", "Server identity UUID to sign the snapshot with. One writer per --output folder or --upload prefix: two installations writing into one location mix their snapshots. Without it the snapshot is unsigned")
 	_ = pgBaselineCmd.MarkFlagRequired("output")
 	// query-dsn/slot/publication are required but validated in RunE, not via
 	// MarkFlagRequired: their BINTRAIL_PG_* env fallback (applied below, after
@@ -115,6 +117,7 @@ func pgBaselineConfigFromFlags() (pgbaseline.Config, error) {
 		Compression:  pgbCompression,
 		RowGroupSize: pgbRowGroupSize,
 		Parallelism:  pgbParallelism,
+		WriterID:     pgbBintrailID,
 	}, nil
 }
 
