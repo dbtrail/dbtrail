@@ -32,15 +32,15 @@ of them:
 
 ## Before you start
 
-- The server's snapshots must be kept in a **local directory**. On the
-  **Snapshots** page, under **Where and how often**, give the server a local
-  backup directory. A folder there carries a `current` pointer that every
+- The server's snapshots must be kept in a **Local folder**. On the
+  **Snapshots** page, under **Where and how often**, give the server a
+  **Local folder**. A folder there carries a `current` pointer that every
   scheduled snapshot moves forward, and that pointer is what lets the views
   follow. A server whose snapshots go only to S3 has no such pointer; see
   [Snapshots only in S3](#snapshots-only-in-s3) below.
 - A snapshot schedule, set on the same page. The interval is how fresh the
   charts can be.
-- The steps below assume that local directory is inside `/var/lib/bintrail`,
+- The steps below assume that folder is inside `/var/lib/bintrail`,
   the daemon's state volume in the standard `docker-compose.yml`. If it is
   somewhere else, mount that folder instead, at its own path.
 
@@ -165,7 +165,7 @@ statements again, through **Init SQL**, which the driver runs before every
 query. The tool's container would also need AWS credentials. This page does not
 cover that route.
 
-Give the server a local backup directory as well (on the Snapshots page), and
+Give the server a **Local folder** as well (on the Snapshots page), and
 follow the steps above.
 
 Do not point the tool at a copy made with `aws s3 sync`. A synced folder has no
