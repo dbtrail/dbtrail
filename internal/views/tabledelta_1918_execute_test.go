@@ -325,10 +325,14 @@ func TestFollowingDeltaView_everyShapeARefreshLeaves_1918(t *testing.T) {
 	}
 }
 
-// TestFollowingPlainView_noChainEver_1918: a table that never has a chain
-// keeps the plain body, and follows snapshots with the exact rows. (That it
-// refuses once a chain does appear is TestFollowingStateView_refusesOnceADeltaAppears.)
-func TestFollowingPlainView_noChainEver_1918(t *testing.T) {
+// TestFollowingView_noChainAtGeneration_1733: a following view generated while its
+// table had no chain reads the table through the chain anyway, because the
+// next refresh of a changed table writes one beside it and the view outlives
+// the snapshot it was generated against. Before #1733 such a view refused
+// every query from that refresh on, until someone generated the views again.
+// It follows every shape a later snapshot can leave: no chain, a chain, and
+// no chain again after a full rewrite.
+func TestFollowingView_noChainAtGeneration_1733(t *testing.T) {
 	for _, mode := range []struct {
 		name   string
 		follow FollowMode
@@ -341,16 +345,19 @@ func TestFollowingPlainView_noChainEver_1918(t *testing.T) {
 			if tbl.Delta {
 				t.Fatal("a table with no chain was marked")
 			}
-			if strings.Contains(sqlText, "file_row_number") {
-				t.Fatalf("a table with no chain got the chain body:\n%s", sqlText)
-			}
 			if got, _, err := f.stateOf(db, view); err != nil || !reflect.DeepEqual(got, f.want(row1918{1, "a"}, row1918{2, "b"})) {
-				t.Fatalf("first snapshot: %v err=%v", got, err)
+				t.Fatalf("first snapshot, no chain: %v err=%v", got, err)
 			}
-			f.publish("2026-04-30T02-00-00Z", row1918{3, "c"})
+			b := f.publish("2026-04-30T02-00-00Z", row1918{1, "a"}, row1918{2, "b"}, row1918{3, "c"})
+			f.pair(b, 0, []int64{0}, []row1918{{1, "changed"}, {4, "new"}})
 			f.moveTo(db, mode.follow, sqlText, "2026-04-30T02-00-00Z")
-			if got, _, err := f.stateOf(db, view); err != nil || !reflect.DeepEqual(got, f.want(row1918{3, "c"})) {
-				t.Fatalf("second snapshot: %v err=%v", got, err)
+			if got, _, err := f.stateOf(db, view); err != nil || !reflect.DeepEqual(got, f.want(row1918{1, "changed"}, row1918{2, "b"}, row1918{3, "c"}, row1918{4, "new"})) {
+				t.Fatalf("a chain appeared: %v err=%v", got, err)
+			}
+			f.publish("2026-04-30T03-00-00Z", row1918{5, "e"})
+			f.moveTo(db, mode.follow, sqlText, "2026-04-30T03-00-00Z")
+			if got, _, err := f.stateOf(db, view); err != nil || !reflect.DeepEqual(got, f.want(row1918{5, "e"})) {
+				t.Fatalf("rewritten with no chain: %v err=%v", got, err)
 			}
 		})
 	}

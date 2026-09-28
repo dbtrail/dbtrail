@@ -18,16 +18,30 @@ import (
 // DECIMAL(39,2) is refused with "Width must be between 1 and 38".
 const MaxDuckDBDecimalPrecision = 38
 
-// DecimalColumnsFor reports the decimal and numeric columns of each baseline
-// Parquet file, read from the CREATE TABLE the writer embedded in the file's
-// footer. The result is keyed by the path as it was passed in.
+// TableFooter is what the state views need from one baseline file's embedded
+// CREATE TABLE.
+type TableFooter struct {
+	// Decimals are the table's decimal and numeric columns.
+	Decimals []DecimalColumn
+	// DeltaReserved says the table has a column under a name a table delta
+	// reserves (TableDeltaReservedColumns). Such a table is never published
+	// with a delta, and the chain-aware state SQL does not even bind over it:
+	// DuckDB refuses the filename and file_row_number options on a file that
+	// already has a column of that name.
+	DeltaReserved bool
+}
+
+// TableFootersFor reports, for each baseline Parquet file, the decimal and
+// numeric columns and whether a table delta reserves one of its column names,
+// read from the CREATE TABLE the writer embedded in the file's footer. The
+// result is keyed by the path as it was passed in.
 //
 // PRESENCE in the map means the file's schema was read, and is deliberately
 // distinct from the value being empty. A table with no decimal column maps to
-// an empty slice; a file whose footer carries no CREATE TABLE at all (a
-// baseline written before that key existed) is ABSENT. Collapsing the two would
-// let a caller report "this table has no decimal columns" about a table it
-// never managed to look at.
+// an empty Decimals slice; a file whose footer carries no CREATE TABLE at all
+// (a baseline written before that key existed) is ABSENT. Collapsing the two
+// would let a caller report "this table has no decimal columns" about a table
+// it never managed to look at.
 //
 // One DuckDB session reads every footer in a single parquet_kv_metadata() call,
 // falling back to one call per file if that batch fails (see below). Neither
@@ -42,7 +56,7 @@ const MaxDuckDBDecimalPrecision = 38
 // rather than swallowed so the caller can say so in its own voice. Note that a
 // per-FILE failure is not one of those errors: it leaves that path absent and
 // is logged here, because the readable files' answers are still worth having.
-func DecimalColumnsFor(ctx context.Context, paths []string) (map[string][]DecimalColumn, error) {
+func TableFootersFor(ctx context.Context, paths []string) (map[string]TableFooter, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
@@ -81,7 +95,7 @@ func DecimalColumnsFor(ctx context.Context, paths []string) (map[string][]Decima
 	}
 	defer rows.Close()
 
-	out := make(map[string][]DecimalColumn)
+	out := make(map[string]TableFooter)
 	collectDecimalRows(rows, out)
 	return out, nil
 }
@@ -103,8 +117,8 @@ func decimalFooterQuery(paths []string) string {
 // snapshot with several unreadable footers should not turn into an error that
 // costs the readable tables their casts, which is the exact failure this
 // fallback exists to undo.
-func decimalColumnsPerFile(ctx context.Context, db *sql.DB, paths []string, batchErr error) map[string][]DecimalColumn {
-	out := make(map[string][]DecimalColumn)
+func decimalColumnsPerFile(ctx context.Context, db *sql.DB, paths []string, batchErr error) map[string]TableFooter {
+	out := make(map[string]TableFooter)
 	var failed []string
 	for _, p := range paths {
 		rows, err := db.QueryContext(ctx, decimalFooterQuery([]string{p}))
@@ -133,7 +147,7 @@ func decimalColumnsPerFile(ctx context.Context, db *sql.DB, paths []string, batc
 // collectDecimalRows folds one footer query's rows into the result map. Shared
 // by the batched read and the per-file fallback so the two cannot disagree
 // about what an entry means.
-func collectDecimalRows(rows *sql.Rows, out map[string][]DecimalColumn) {
+func collectDecimalRows(rows *sql.Rows, out map[string]TableFooter) {
 	for rows.Next() {
 		var file string
 		// parquet_kv_metadata types both key and value as BLOB.
@@ -164,7 +178,7 @@ func collectDecimalRows(rows *sql.Rows, out map[string][]DecimalColumn) {
 			// columns" rather than a nil that reads like an absent key.
 			decs = []DecimalColumn{}
 		}
-		out[file] = decs
+		out[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols)}
 	}
 	if err := rows.Err(); err != nil {
 		// Warn: an iteration that dies partway leaves every file after the
@@ -218,4 +232,18 @@ func fileListLiteral(paths []string) string {
 
 func sqlQuoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// hasDeltaReservedColumn reports whether any column is named like one a table
+// delta reserves, by the same case-insensitive rule TableDeltaColumns refuses
+// such a table with.
+func hasDeltaReservedColumn(cols []Column) bool {
+	for _, c := range cols {
+		for _, reserved := range TableDeltaReservedColumns {
+			if strings.EqualFold(c.Name, reserved) {
+				return true
+			}
+		}
+	}
+	return false
 }

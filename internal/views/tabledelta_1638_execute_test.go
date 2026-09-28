@@ -279,12 +279,14 @@ func TestMarkTableDeltas_refusesHalfAPair(t *testing.T) {
 	}
 }
 
-// TestFollowingStateView_refusesOnceADeltaAppears: a following view generated
-// while the table had no delta must not keep answering from the table's file
-// once a refresh starts writing a chain beside it. It reads fine before, and
-// names the table and the remedy after. A pinned view carries no guard: the
-// files it names never change.
-func TestFollowingStateView_refusesOnceADeltaAppears(t *testing.T) {
+// TestFollowingStateView_readsADeltaThatAppearsLater: a following view
+// generated while the table had no delta must not keep answering from the
+// table's file once a refresh starts writing a chain beside it, because the
+// file alone is then the table as it was when the chain started. It used to
+// refuse with "Generate the views again" (#1638); since #1733 it reads the
+// chain, so a dashboard built on it keeps answering. A pinned view reads the
+// file alone: the files it names never change.
+func TestFollowingStateView_readsADeltaThatAppearsLater(t *testing.T) {
 	const stamp = "2026-04-30T03-00-00Z"
 	for _, mode := range []struct {
 		name   string
@@ -304,32 +306,41 @@ func TestFollowingStateView_refusesOnceADeltaAppears(t *testing.T) {
 				GeneratedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC), Version: "test",
 				BaselineSource: root, BaselineSnapshot: time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC),
 				Follow:    mode.follow,
-				Baselines: []BaselineTable{{Schema: "shop", Table: "orders", Path: path, Rel: "shop/orders.parquet"}},
+				Baselines: []BaselineTable{{Schema: "shop", Table: "orders", Path: path, Rel: "shop/orders.parquet", SchemaKnown: true}},
 			})
 			db := execViews(t, sqlText)
 			var n int
 			if err := db.QueryRow(`SELECT count(*) FROM state_shop_orders`).Scan(&n); err != nil || n != 3 {
 				t.Fatalf("before any delta: n=%d err=%v", n, err)
 			}
-			// A sibling table's chain must not trip this one's guard.
-			writeDeltaPairAt(t, filepath.Join(root, stamp, "shop", "orders_archive.parquet"), 0, nil, nil)
-			if err := db.QueryRow(`SELECT count(*) FROM state_shop_orders`).Scan(&n); err != nil || n != 3 {
-				t.Fatalf("a delta beside ANOTHER table tripped the guard: n=%d err=%v", n, err)
+			state := func() string {
+				t.Helper()
+				var got string
+				if err := db.QueryRow(`SELECT string_agg(CAST(id AS VARCHAR) || '=' || status, ',' ORDER BY id) FROM state_shop_orders`).Scan(&got); err != nil {
+					t.Fatal(err)
+				}
+				return got
 			}
-			writeDeltaPair(t, base, 0, []int64{0}, nil)
-			err := db.QueryRow(`SELECT count(*) FROM state_shop_orders`).Scan(&n)
-			if err == nil || !strings.Contains(err.Error(), "shop.orders now has a table delta") || !strings.Contains(err.Error(), "Generate the views again") {
-				t.Fatalf("after the delta appeared: n=%d err=%v, want a refusal naming the table and the remedy", n, err)
+			before := state()
+			// A sibling table whose name starts with this one's: its chain must
+			// not reach this view.
+			writeDeltaPairAt(t, filepath.Join(root, stamp, "shop", "orders_archive.parquet"), 0, []int64{0}, [][3]string{{"7", "x", baseline.TableDeltaOpUpsert}})
+			if got := state(); got != before {
+				t.Fatalf("a delta beside ANOTHER table changed this view: %s, want %s", got, before)
+			}
+			writeDeltaPair(t, base, 0, []int64{0}, [][3]string{{"9", "z", baseline.TableDeltaOpUpsert}})
+			if got := state(); got != "2=b,3=c,9=z" {
+				t.Fatalf("after the delta appeared: %s, want the chain applied (2=b,3=c,9=z)", got)
 			}
 		})
 	}
-	// Pinned: no guard in the text at all.
+	// Pinned: the file alone, no chain read at all.
 	root := t.TempDir()
 	base := writeSnapshot(t, root, stamp, true, "a")
 	pinned := Generate(Input{GeneratedAt: time.Now(), Version: "test", BaselineSource: root,
 		Baselines: []BaselineTable{{Schema: "shop", Table: "orders", Path: base, Rel: "shop/orders.parquet"}}})
-	if strings.Contains(pinned, "now has a table delta") {
-		t.Fatal("a pinned view carries the guard; its files never change")
+	if strings.Contains(pinned, "file_row_number") {
+		t.Fatalf("a pinned view with no chain reads through one; its files never change:\n%s", pinned)
 	}
 }
 

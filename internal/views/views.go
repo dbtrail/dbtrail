@@ -96,6 +96,9 @@ type BaselineTable struct {
 	// without the reader having to discover the storage choice through a
 	// failed sum().
 	Decimals []DecimalColumn
+	// DeltaReserved says the table has a column under a name a table delta
+	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
+	DeltaReserved bool
 	// SchemaKnown records whether the table's embedded CREATE TABLE was read at
 	// all. It separates "this table has no decimal columns" from "we could not
 	// find out", which are the same empty Decimals slice and very different
@@ -1921,12 +1924,15 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		for _, line := range decimalComments(t) {
 			fmt.Fprintf(b, "-- %s: %s\n", name, line)
 		}
+		if line := fileAloneComment(in, t); line != "" {
+			fmt.Fprintf(b, "-- %s: %s\n", name, line)
+		}
 		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.viewRef(name))
 		if in.Follow == FollowNewest {
 			writeNewestStateBody(b, in, t)
 			continue
 		}
-		if t.Delta {
+		if t.Delta || (in.Follow.follows() && chainReady(in, t)) {
 			fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Path, sqlString, in.Follow == FollowNone))
 			continue
 		}
@@ -2225,7 +2231,7 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 		return fmt.Sprintf("CASE WHEN getvariable('%s') IS NULL\n    THEN error(%s)\n    ELSE getvariable('%s') || %s END",
 			newest, sqlString(newestVarUnsetMsg), newest, sqlString(rel))
 	}
-	if t.Delta {
+	if t.Delta || chainReady(in, t) {
 		fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path, false))
 		return
 	}
@@ -2243,9 +2249,60 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 	fmt.Fprintf(b, "  SELECT * FROM %s;\n", read)
 }
 
-// deltaStateBody is the state view's body for a table with a delta: the
-// chain's state (baseline.TableDeltaStateSQL over the chain's files) or, for
-// a snapshot written by v0.83.0, the one pair's state. p is the table file's
+// fileAloneComment says, above a following view that reads its table's file
+// alone, why it does and what will stop it, so the refusal it raises later is
+// not the first the reader hears of it. A table with a reserved column is not
+// named: it never gets a chain, so its view never refuses.
+func fileAloneComment(in Input, t BaselineTable) string {
+	if !in.Follow.follows() || t.Delta || t.DeltaReserved || chainReady(in, t) {
+		return ""
+	}
+	why := "its schema could not be read"
+	if t.SchemaKnown {
+		why = "another table in its schema has a name that starts with \"" + commentSafe(t.Table) + ".\""
+	}
+	return "reads the table file alone because " + why + ". If a refresh writes changes beside the file, " +
+		"this view stops with an error until the views are generated again"
+}
+
+// chainReady says whether a FOLLOWING state view of a table with no chain
+// today may read the table through the chain-aware body anyway (#1733). The
+// next refresh of a changed table writes a chain beside it, and a view
+// reading the file alone would then have to refuse (deltaAppearedGuard), so
+// a views file, or a DuckDB database built from one that a BI tool opens,
+// would stop answering minutes after it was made.
+//
+// Three cases keep the file-alone body and its guard, because the chain-aware
+// one is not safe there and the guard never answers wrong:
+//
+//   - The table's schema was not read. Nothing below can be checked.
+//   - The table has a column a table delta reserves. It never gets a chain,
+//     and the chain-aware SQL does not bind over it at all.
+//   - Another table in the same schema is named "<table>.<anything>". Only a
+//     name whose next six characters fit TableDeltaFollowGlobs' classes
+//     (six digits, or "parque...") can match the chain globs, where
+//     union_by_name would merge its columns into this view's shape. Every
+//     such sibling is excluded on purpose: the rule is one prefix test
+//     rather than a copy of the glob, and the cost is a guard on a table
+//     that did not need one. A table created with such a name after the file
+//     was generated is the residual TableDeltaFollowGlobs names.
+func chainReady(in Input, t BaselineTable) bool {
+	if !t.SchemaKnown || t.DeltaReserved {
+		return false
+	}
+	prefix := strings.ToLower(t.Table) + "."
+	for _, o := range in.Baselines {
+		if strings.EqualFold(o.Schema, t.Schema) && strings.HasPrefix(strings.ToLower(o.Table), prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// deltaStateBody is the state view's body for a table with a delta, and for
+// a following view's table that chainReady clears: the chain's state
+// (baseline.TableDeltaStateSQL over the chain's files) or, for a snapshot
+// written by v0.83.0, the one pair's state. p is the table file's
 // path or Rel, and expr turns such a string into the SQL expression the
 // producer's following mode wants (a literal, or the variable-prefixed CASE).
 // pinned says the view reads these files forever: then the chain is named
@@ -2296,17 +2353,19 @@ func deltaAppearedPatterns(p string) (plain, rng string) {
 }
 
 // deltaAppearedGuard is the WHERE clause a FOLLOWING state view over a table
-// with NO delta carries (#1638). plain and rng are SQL expressions for the
+// with NO delta carries when chainReady refuses it the chain-aware body
+// (#1638, #1733): every other following view reads the chain, whether or not
+// one exists yet, and needs no guard. plain and rng are SQL expressions for the
 // two globs of deltaAppearedPatterns, matching the table's .upserts files
 // and nothing else.
 //
 // A view's shape is fixed when it is generated, and a following view outlives
-// the snapshot it was generated against. If table deltas are turned on later,
+// the snapshot it was generated against. Once a chain appears,
 // the table's file stops being rewritten: it becomes the table as it was when
 // its chain of deltas started, and a view reading it alone would show that as
 // the newest state, with no error, for up to a day. So the view looks for the
-// delta on every read and refuses once one is there. The other direction needs
-// no guard: a view generated WITH the delta reads the table's file with
+// delta on every read and refuses once one is there. A view with the
+// chain-aware body needs no guard in either direction: it reads the table's file with
 // whatever chain is beside it, none included (#1918,
 // baseline.TableDeltaFollowGlobs), so it stays right once deltas are off.
 //

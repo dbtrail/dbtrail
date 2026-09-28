@@ -2,6 +2,7 @@ package baseline
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -81,11 +82,11 @@ func TestParseSchema_decimalPrecisionScale(t *testing.T) {
 	}
 }
 
-// TestDecimalColumnsFor_readsTheEmbeddedSchema drives the real writer and the
+// TestTableFootersFor_readsTheEmbeddedSchema drives the real writer and the
 // real footer read: the precision has to survive being written into the Parquet
 // key-value metadata and read back out of it, which is the round trip
 // `bintrail views` depends on.
-func TestDecimalColumnsFor_readsTheEmbeddedSchema(t *testing.T) {
+func TestTableFootersFor_readsTheEmbeddedSchema(t *testing.T) {
 	dir := t.TempDir()
 	createSQL := "CREATE TABLE `orders` (\n" +
 		"  `id` int NOT NULL,\n" +
@@ -105,11 +106,11 @@ func TestDecimalColumnsFor_readsTheEmbeddedSchema(t *testing.T) {
 	noSchema := filepath.Join(dir, "legacy.parquet")
 	writeFixtureTableNoSchemaMeta(t, noSchema, plainSQL, [][]string{{"1", "hi"}})
 
-	got, err := DecimalColumnsFor(context.Background(), []string{withDecimals, noDecimals, noSchema})
+	got, err := TableFootersFor(context.Background(), []string{withDecimals, noDecimals, noSchema})
 	if err != nil {
-		t.Fatalf("DecimalColumnsFor: %v", err)
+		t.Fatalf("TableFootersFor: %v", err)
 	}
-	decs := got[withDecimals]
+	decs := got[withDecimals].Decimals
 	if len(decs) != 1 {
 		t.Fatalf("got %d decimal columns for %s, want 1 (%v)", len(decs), withDecimals, got)
 	}
@@ -118,7 +119,8 @@ func TestDecimalColumnsFor_readsTheEmbeddedSchema(t *testing.T) {
 	}
 
 	// Schema read, nothing to cast: PRESENT and empty.
-	plain, ok := got[noDecimals]
+	plainFooter, ok := got[noDecimals]
+	plain := plainFooter.Decimals
 	if !ok {
 		t.Errorf("a table whose schema WAS read must be present even with no decimal columns; "+
 			"absence is how the caller reports that it could not look: %v", got)
@@ -182,7 +184,7 @@ func writeFixtureTable(t *testing.T, path, createSQL string, rows [][]string) {
 	}
 }
 
-// TestDecimalColumnsFor_corruptSiblingKeepsOthersCast pins the blast radius of
+// TestTableFootersFor_corruptSiblingKeepsOthersCast pins the blast radius of
 // one unreadable file.
 //
 // DuckDB resolves a parquet_kv_metadata() file list up front, so a single
@@ -190,7 +192,7 @@ func writeFixtureTable(t *testing.T, path, createSQL string, rows [][]string) {
 // would mean one bad file in a snapshot costs EVERY table in it its casts,
 // which turns a local fault into a layout-wide one for no reason: the other
 // files' footers are perfectly readable.
-func TestDecimalColumnsFor_corruptSiblingKeepsOthersCast(t *testing.T) {
+func TestTableFootersFor_corruptSiblingKeepsOthersCast(t *testing.T) {
 	dir := t.TempDir()
 	createSQL := "CREATE TABLE `orders` (\n" +
 		"  `id` int NOT NULL,\n" +
@@ -205,11 +207,11 @@ func TestDecimalColumnsFor_corruptSiblingKeepsOthersCast(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := DecimalColumnsFor(context.Background(), []string{good, corrupt})
+	got, err := TableFootersFor(context.Background(), []string{good, corrupt})
 	if err != nil {
 		t.Fatalf("one unreadable file must not fail the whole read: %v", err)
 	}
-	if len(got[good]) != 1 || got[good][0].Name != "total" {
+	if len(got[good].Decimals) != 1 || got[good].Decimals[0].Name != "total" {
 		t.Errorf("the readable file lost its casts to a corrupt sibling: got %v", got)
 	}
 	// The corrupt one is absent, which is how the caller reports "could not look".
@@ -260,5 +262,34 @@ func TestDecimalPrecisionScale_refusesMalformedArgs(t *testing.T) {
 					tc.createSQL, c.DecimalPrecision, c.DecimalScale, refused, tc.wantRefused)
 			}
 		})
+	}
+}
+
+// TestTableFootersFor_marksDeltaReservedColumns: a table with a column a table delta
+// reserves is marked, by the same case-insensitive rule the writer refuses
+// its delta with, so the state views keep reading it without the chain-aware
+// SQL that does not bind over such a table (#1733). Every reserved name is
+// covered, and an ordinary table is not marked.
+func TestTableFootersFor_marksDeltaReservedColumns(t *testing.T) {
+	dir := t.TempDir()
+	var paths []string
+	for i, name := range append(append([]string{}, TableDeltaReservedColumns...), "FileName") {
+		p := filepath.Join(dir, fmt.Sprintf("t%d.parquet", i))
+		writeFixtureTable(t, p, "CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `"+name+"` varchar(8) DEFAULT NULL\n);\n", [][]string{{"1", "x"}})
+		paths = append(paths, p)
+	}
+	ordinary := filepath.Join(dir, "ordinary.parquet")
+	writeFixtureTable(t, ordinary, "CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `file_name` varchar(8) DEFAULT NULL\n);\n", [][]string{{"1", "x"}})
+	got, err := TableFootersFor(context.Background(), append(paths, ordinary))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		if f, ok := got[p]; !ok || !f.DeltaReserved {
+			t.Errorf("%s: footer %+v (present=%v), want DeltaReserved", p, f, ok)
+		}
+	}
+	if f, ok := got[ordinary]; !ok || f.DeltaReserved {
+		t.Errorf("an ordinary table was marked: %+v (present=%v)", f, ok)
 	}
 }

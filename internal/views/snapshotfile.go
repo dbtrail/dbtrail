@@ -162,11 +162,11 @@ func GenerateSnapshotViews(ctx context.Context, snapshotDir, root string) (strin
 	// the path as passed, and the local files are the ones actually here.
 	// Best-effort for the same reason the CLI's resolver is: types make the
 	// file better, they are not what it is for.
-	if decimals, err := baseline.DecimalColumnsFor(ctx, in.BaselinePaths()); err != nil {
+	if decimals, err := baseline.TableFootersFor(ctx, in.BaselinePaths()); err != nil {
 		slog.Warn("snapshot views: could not read column types from the Parquet footers; "+
 			"the state views will not cast decimal columns", "dir", snapshotDir, "error", err)
 	} else {
-		in.ApplyDecimals(decimals)
+		in.ApplyFooters(decimals)
 	}
 	in.RespellBaselines(root)
 	return Generate(in), true, nil

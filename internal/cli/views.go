@@ -454,13 +454,13 @@ func resolveBaselineViews(ctx context.Context, in *views.Input) error {
 // and says so in the file, rather than failing a command whose whole job is to
 // describe what exists.
 func resolveBaselineDecimals(ctx context.Context, in *views.Input) {
-	decimals, err := baseline.DecimalColumnsFor(ctx, in.BaselinePaths())
+	decimals, err := baseline.TableFootersFor(ctx, in.BaselinePaths())
 	if err != nil {
 		slog.Warn("views: could not read baseline column types from the Parquet footers; "+
 			"the state views will not cast decimal columns", "error", err)
 		return
 	}
-	in.ApplyDecimals(decimals)
+	in.ApplyFooters(decimals)
 }
 
 // writeViewsOutput sends the generated SQL to --output, or to stdout for "-".
