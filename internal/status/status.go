@@ -1904,13 +1904,18 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 	if OverallBaselineStaleness(baselines) == BaselineUnknown {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "=== ⚠ BASELINE STALENESS NOT EVALUABLE ===")
-		fmt.Fprintln(w, "The delta-coverage floor could not be established for at least one table:")
-		fmt.Fprintln(w, "an index serving more than one source cannot attribute archived coverage to")
-		fmt.Fprintln(w, "the source that owns a baseline, and an unreadable index yields the same.")
-		if unread := unreadChainTables(baselines); len(unread) > 0 {
-			fmt.Fprintln(w, "Deltas beside the snapshot could not be read (READS_FROM unreadable) for:")
+		unread, floorUnknown := unknownNewestTables(baselines)
+		if len(unread) > 0 {
+			// #1707: its own cause, with its own fix. The floor is fine here.
+			fmt.Fprintln(w, "The deltas beside the newest snapshot could not be read for:")
 			fmt.Fprintln(w, "  "+strings.Join(unread, ", "))
-			fmt.Fprintln(w, "A full backup of those tables replaces them.")
+			fmt.Fprintln(w, "Where a restore of those tables starts is not known. A full backup of")
+			fmt.Fprintln(w, "them replaces the damaged files.")
+		}
+		if floorUnknown {
+			fmt.Fprintln(w, "The delta-coverage floor could not be established for at least one table:")
+			fmt.Fprintln(w, "an index serving more than one source cannot attribute archived coverage to")
+			fmt.Fprintln(w, "the source that owns a baseline, and an unreadable index yields the same.")
 		}
 		fmt.Fprintln(w, "A broken restore window would NOT be detected here — see")
 		fmt.Fprintln(w, "docs/rotation-and-status.md (Baseline staleness).")
@@ -1924,10 +1929,11 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 	}
 }
 
-// unreadChainTables names, sorted, the tables whose NEWEST snapshot has a
-// chain of deltas whose start could not be read and grades unknown for it:
-// the rows the not-evaluable banner is about when the floor itself is fine.
-func unreadChainTables(baselines []BaselineInfo) []string {
+// unknownNewestTables splits the tables whose NEWEST snapshot grades unknown
+// by cause: unread names, sorted, those with a chain of deltas whose start
+// could not be read (#1707); floorUnknown says at least one is unknown for
+// any other reason, which is the floor.
+func unknownNewestTables(baselines []BaselineInfo) (unread []string, floorUnknown bool) {
 	newest := make(map[string]BaselineInfo, len(baselines))
 	for _, b := range baselines {
 		k := b.Database + "." + b.Table
@@ -1935,14 +1941,17 @@ func unreadChainTables(baselines []BaselineInfo) []string {
 			newest[k] = b
 		}
 	}
-	var out []string
 	for k, b := range newest {
-		if b.Bound.Unread && b.Staleness == BaselineUnknown {
-			out = append(out, k)
+		switch {
+		case b.Staleness != BaselineUnknown:
+		case b.Bound.Unread:
+			unread = append(unread, k)
+		default:
+			floorUnknown = true
 		}
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(unread)
+	return unread, floorUnknown
 }
 
 // RetentionInfo is the built-in rotation window one index runs on while its
