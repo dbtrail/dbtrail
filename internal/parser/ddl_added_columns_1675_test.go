@@ -58,6 +58,8 @@ func TestAddedColumns_notReadable(t *testing.T) {
 		{"not DDL", "INSERT INTO t VALUES (1)"},
 		{"create", "CREATE TABLE t (id INT)"},
 		{"create like", "CREATE TABLE t LIKE u"},
+		{"ADD clauses under a verb that is not ALTER", "CREATE TABLE t ADD COLUMN c INT"},
+		{"ADD clauses under DROP", "DROP TABLE t ADD COLUMN c INT"},
 		{"rename table", "RENAME TABLE u TO t"},
 		{"drop table", "DROP TABLE t"},
 		{"truncate", "TRUNCATE TABLE t"},

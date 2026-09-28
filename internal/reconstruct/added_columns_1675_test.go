@@ -213,6 +213,10 @@ func TestPlaceAddedColumns_cutAndAnchor(t *testing.T) {
 	if why := placeAddedColumns([]string{"c"}, []recordedDDL{add}, "shop", "t", anchor1675, nil); !strings.Contains(why, "no event to place the target") {
 		t.Errorf("no cut: why = %q", why)
 	}
+	// Asked with nothing recorded too, so the answer is about the cut.
+	if why := placeAddedColumns([]string{"c"}, nil, "shop", "t", anchor1675, nil); !strings.Contains(why, "no event to place the target") {
+		t.Errorf("no cut, nothing recorded: why = %q", why)
+	}
 	old := with(ddlBefore("DROP TABLE t"), func(d *recordedDDL) { d.Type, d.Pos = "DROP TABLE", 900000 })
 	if why := placeAddedColumns([]string{"c"}, []recordedDDL{old, add}, "shop", "t", nil, cut1675); why != "" {
 		t.Errorf("a baseline with no anchor: %s", why)

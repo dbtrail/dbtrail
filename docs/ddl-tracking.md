@@ -71,6 +71,29 @@ Decoding old rows (ENUM and SET labels, BLOB values, the width of a `BINARY` key
 
 ---
 
+## Restoring to Before a Column Was Added
+
+Column names are compared with the newest schema snapshot, because it is the only record of a DDL that left nothing else behind (file mode without a source, a snapshot that failed, a statement that was not recognized). So a column added after the moment being restored would refuse the restore.
+
+Such a column is left out of the comparison when the index proves it did not exist yet. All of this must hold, for every added column:
+
+| What | Why |
+|---|---|
+| A recorded `ALTER TABLE` on this schema and table, spelled the same, adds the column | The statement ran, so the column did not exist right before it |
+| That statement is later than the moment by its time, and after the restore's binlog cut by its position | The restore keeps row changes by both |
+| Every DDL recorded for the table after the moment only adds columns | A `DROP`, `CHANGE`, `RENAME` or a statement that cannot be read could have removed the column in between |
+| No DDL is recorded for the table between the backup and the moment | The table's shape moved before the moment |
+| The snapshot in effect at the moment does not have the column | It existed already |
+
+Anything else refuses as before, and the refusal says which of these is missing. A statement is not read when it has an executable comment (`/*! ... */`), a backslash, `IF NOT EXISTS`, the `ADD COLUMN (a, b)` list form, a column defined as part of a key, or a text as long as `ddl_query` holds.
+
+Two cases still refuse or stay unseen:
+
+- **No row change was captured between the moment and the `ALTER TABLE`.** The restore's cut is the first captured change after the moment, which is then past the statement, so the restore refuses.
+- **Two DDLs with no record that cancel out.** A column added before the moment and dropped after it, neither recorded, then added again by a recorded statement, is not seen. The name comparison has never seen an unrecorded add and drop.
+
+---
+
 ## The schema_changes Table
 
 ```sql
