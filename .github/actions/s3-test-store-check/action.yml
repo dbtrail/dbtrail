@@ -1,0 +1,22 @@
+name: S3-compatible leg check
+description: >
+  Fails the job unless the S3-compatible test store started AND
+  TestS3Compat_MinIO passed. Runs after the integration tests, which keep
+  going when the store is down; this is where that becomes a red result.
+
+inputs:
+  ready:
+    description: The `ready` output of ./.github/actions/s3-test-store.
+    required: true
+  test-log:
+    description: Path to the `go test -v` output of the integration tests.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        S3_STORE_READY: ${{ inputs.ready }}
+        S3_TEST_LOG: ${{ inputs.test-log }}
+      run: bash "${{ github.action_path }}/check.sh"
