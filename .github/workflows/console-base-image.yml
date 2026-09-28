@@ -1,0 +1,566 @@
+# Builds, tests and publishes the console base image
+# (build/Dockerfile.console-base): Debian, mydumper and the bintrail user.
+#
+# The tag is the content of build/console-base.tag. It is not a release
+# version: the base changes far less often than the console does.
+#
+# What this workflow guarantees:
+#
+# 1. A published tag is never overwritten.
+#
+# 2. A changed recipe cannot sit behind an old tag with a green run. Every
+#    published image carries the SHA-256 of build/Dockerfile.console-base as a
+#    label. When the tag in the file is already published, `plan` reads that
+#    label from the registry and compares it with the file in this tree. A
+#    different hash fails the run, on a pull request and on main. A label that
+#    cannot be read fails the run too. The fix is always the same: bump
+#    build/console-base.tag.
+#
+# 3. A tag that exists is signed and has both architectures. When the tag is
+#    already published, `verify-published` runs `cosign verify` on it and
+#    fails if that does not pass.
+#
+# 4. The tag is the last thing written. `merge` puts the image under a staging
+#    tag, checks both architectures and the recipe label on it, signs its
+#    digest, verifies the signature, and only then points the real tag at that
+#    same digest. A failure in any of those steps leaves no real tag behind.
+#    What can stay behind is the staging tag (staging-<tag>-<run>-<attempt>),
+#    which nothing reads. The one step that can fail after the real tag
+#    exists is the last comparison of digests; guarantee 3 turns the next run
+#    red in that case.
+#
+# Pull requests build and test both architectures and push nothing.
+#
+# Publish gate, same shape as demo-image.yml: each architecture is built on
+# its native runner and pushed by digest, the `smoke` job runs
+# build/smoke-console-base.sh against that digest on the same kind of runner,
+# and only then `merge` runs.
+#
+# NOTE: like ghcr.io/dbtrail/bintrail, the bintrail-console-base package is
+# created PRIVATE on first push and needs a one-time manual flip to public
+# before an anonymous `docker pull` works (see docs/docker.md).
+name: console-base-image
+
+on:
+  pull_request:
+    paths:
+      - build/Dockerfile.console-base
+      - build/console-base.tag
+      - build/console-base-registry.sh
+      - build/console-base-registry-test.sh
+      - build/smoke-console-base.sh
+      - .github/workflows/console-base-image.yml
+  push:
+    branches: [main]
+    paths:
+      - build/Dockerfile.console-base
+      - build/console-base.tag
+      - build/console-base-registry.sh
+      - build/console-base-registry-test.sh
+      - build/smoke-console-base.sh
+      - .github/workflows/console-base-image.yml
+  workflow_dispatch:
+
+# One publishing run at a time, and never cancelled halfway: two runs that
+# both saw the tag as absent must not both publish it. Pull request runs only
+# build and test, so a newer push to the same pull request replaces the older
+# run.
+concurrency:
+  group: console-base-image-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Default for every job: read-only. packages:write lives on the two jobs that
+# push to ghcr.io; id-token:write only on `merge`, which cosign-signs.
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/dbtrail/bintrail-console-base
+  RECIPE_LABEL: com.dbtrail.console-base.recipe-sha256
+  # Who signs: this workflow, run on main. `merge` signs with it and both
+  # `merge` and `verify-published` verify against it.
+  SIGNER_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/console-base-image.yml@refs/heads/main
+  SIGNER_ISSUER: https://token.actions.githubusercontent.com
+
+jobs:
+  # Reads the tag and the recipe hash, asks the registry, and decides what
+  # this run does.
+  plan:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read # ask ghcr.io about the tag
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      recipe: ${{ steps.recipe.outputs.recipe }}
+      publish: ${{ steps.decide.outputs.publish }}
+      published: ${{ steps.decide.outputs.published }}
+    env:
+      # A pull request from a fork gets a token that may not see the package.
+      FROM_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Two commits: on a pull request the checkout is the merge commit,
+          # and its first parent is the base branch.
+          fetch-depth: 2
+
+      # The decisions below rest on this script. Its tests need no network.
+      - name: Test the registry script
+        run: build/console-base-registry-test.sh
+
+      - id: tag
+        name: Read the tag
+        run: |
+          set -euo pipefail
+          [ -f build/console-base.tag ] || { echo "::error::build/console-base.tag is missing"; exit 1; }
+          lines="$(grep -c '' build/console-base.tag)"
+          [ "$lines" -eq 1 ] || { echo "::error::build/console-base.tag must hold exactly one line, it holds $lines"; exit 1; }
+          TAG="$(cat build/console-base.tag)"
+          [[ "$TAG" =~ ^[a-z0-9][a-z0-9._-]{0,100}$ ]] || { echo "::error::build/console-base.tag holds '$TAG', which is not a valid image tag"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag: $TAG"
+
+      - id: recipe
+        name: Hash the recipe
+        run: |
+          set -euo pipefail
+          RECIPE="$(build/console-base-registry.sh recipe-hash)"
+          [[ "$RECIPE" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::unexpected recipe hash '$RECIPE'"; exit 1; }
+          echo "recipe=$RECIPE" >> "$GITHUB_OUTPUT"
+          echo "recipe: $RECIPE"
+
+      # Cheap and early, with the clearest message. It is not the guarantee:
+      # it cannot see a second pull request that took the same tag, or a tag
+      # moved back to a published value. The comparison against the registry
+      # in "Decide" is the guarantee.
+      - name: A changed Dockerfile needs a new tag
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          # The merge commit has two parents. Anything else means the diff
+          # below would compare the wrong trees.
+          parents="$(git rev-list --parents -n 1 HEAD | wc -w)"
+          [ "$parents" -eq 3 ] || { echo "::error::expected a merge commit with two parents, HEAD has $((parents - 1))"; exit 1; }
+          changed="$(git diff --name-only HEAD^1 HEAD)"
+          echo "changed files:"
+          echo "$changed"
+          if grep -qxF 'build/Dockerfile.console-base' <<< "$changed" \
+            && ! grep -qxF 'build/console-base.tag' <<< "$changed"; then
+            echo "::error::build/Dockerfile.console-base changed and build/console-base.tag did not. Bump the tag in build/console-base.tag: a published tag is never overwritten, so this change would never be published."
+            exit 1
+          fi
+
+      # Decides nothing and never fails. It puts in the log what ghcr.io says
+      # to this workflow's own token, which no one can find out from outside
+      # a run. The case that matters is the first one: a package that does
+      # not exist yet.
+      - name: Log what the registry answers
+        if: env.FROM_FORK != 'true'
+        continue-on-error: true
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: build/console-base-registry.sh raw "$IMAGE" "$TAG"
+
+      - id: decide
+        name: Decide
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          RECIPE: ${{ steps.recipe.outputs.recipe }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$FROM_FORK" = "true" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Pull request from a fork: both architectures are built and tested. The registry is not asked, the run on main is."
+            exit 0
+          fi
+
+          state="$(build/console-base-registry.sh state "$IMAGE" "$TAG")"
+          case "$state" in
+            absent)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              if [ "$GITHUB_EVENT_NAME" != "pull_request" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+                echo "publish=true" >> "$GITHUB_OUTPUT"
+                echo "::notice::${IMAGE}:${TAG} is not published yet. This run publishes it if both architectures pass."
+              else
+                echo "publish=false" >> "$GITHUB_OUTPUT"
+                echo "::notice::${IMAGE}:${TAG} is not published yet. This run builds and tests both architectures and pushes nothing; the run on main publishes."
+              fi
+              ;;
+            exists)
+              rc=0
+              verdict="$(build/console-base-registry.sh check-published "$IMAGE" "$TAG" "$RECIPE")" || rc=$?
+              if [ "$rc" -eq 0 ] && [ "$verdict" = "same" ]; then
+                echo "publish=false" >> "$GITHUB_OUTPUT"
+                echo "published=true" >> "$GITHUB_OUTPUT"
+                echo "::notice::${IMAGE}:${TAG} is already published from this same recipe. This run builds and tests, and checks the published tag's signature."
+              elif [ "$rc" -eq 3 ]; then
+                if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+                  echo "::error::${IMAGE}:${TAG} is already published from a different build/Dockerfile.console-base. Bump build/console-base.tag in this pull request."
+                else
+                  echo "::error::${IMAGE}:${TAG} is already published from a different build/Dockerfile.console-base, so the recipe in this tree is NOT published. Bump build/console-base.tag."
+                fi
+                exit 1
+              else
+                echo "::error::${IMAGE}:${TAG} exists and its recipe label could not be read (exit ${rc}, answer '${verdict}'). Not reading it is not the same as a match."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::unexpected tag state '$state'"
+              exit 1
+              ;;
+          esac
+
+  # The tag is already published from this recipe. It must also be signed by
+  # this workflow. `plan` already checked it has both architectures.
+  verify-published:
+    needs: plan
+    if: needs.plan.outputs.published == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read # read the tag and its signature from ghcr.io
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: The published tag must be signed by this workflow
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DIGEST="$(build/console-base-registry.sh digest "$IMAGE" "$TAG")"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::unexpected digest '$DIGEST'"; exit 1; }
+          if ! cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity "$SIGNER_IDENTITY" \
+            --certificate-oidc-issuer "$SIGNER_ISSUER" > /dev/null; then
+            echo "::error::${IMAGE}:${TAG} (${DIGEST}) is published without a signature from ${SIGNER_IDENTITY}. The tag is never overwritten: bump build/console-base.tag to publish a signed one."
+            exit 1
+          fi
+          echo "${IMAGE}:${TAG} (${DIGEST}) is signed by ${SIGNER_IDENTITY}"
+
+  # The path that pushes nothing: pull requests, runs off main, and runs whose
+  # tag is already published. Builds on the native runner, loads the image
+  # into the local docker and tests it there.
+  test:
+    needs: plan
+    if: needs.plan.outputs.publish == 'false'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-22.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: build
+          file: build/Dockerfile.console-base
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: bintrail-console-base:ci
+          # A loaded image is a single manifest; attestations would make it
+          # an index, which the local docker store cannot load.
+          provenance: false
+          sbom: false
+
+      - name: Test the image
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: IMAGE=bintrail-console-base:ci build/smoke-console-base.sh
+
+  # Build each arch on its OWN native runner and push a tagless image BY
+  # DIGEST; the `merge` job stitches the digests into one multi-arch manifest
+  # list. (Docker's documented multi-runner pattern.)
+  build:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # push per-arch images by digest to ghcr.io
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with the `smoke` job's matrix: only the platforms
+        # listed THERE get tested. `merge` refuses anything but exactly these
+        # two, so an arch added here alone fails the run instead of shipping
+        # untested.
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-22.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Prepare platform slug
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: build
+          file: build/Dockerfile.console-base
+          platforms: ${{ matrix.platform }}
+          # The recipe hash goes in as a label at build time. It is not
+          # written in the Dockerfile, so storing it does not change it.
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            ${{ env.RECIPE_LABEL }}=${{ needs.plan.outputs.recipe }}
+          # Push by digest only (no tag here); the merge job applies the tag.
+          # SBOM + provenance attestations make each per-arch push a small
+          # OCI index: the arch image plus attestation manifests (platform
+          # "unknown/unknown"). `docker run` resolves the native-arch image
+          # from that index, so the smoke job tests the exact pushed bytes.
+          # mode=min keeps build args and env out of the provenance statement.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=min
+          sbom: true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Guard against an empty/malformed build output silently producing
+          # a bad artifact filename that would poison the merge.
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "unexpected build digest: '$DIGEST'"; exit 1; }
+          mkdir -p "${{ runner.temp }}/digests"
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Test each arch's pushed digest on its NATIVE runner before anything is
+  # tagged or signed. Same script the pull request runs, so there is one copy
+  # of the checks.
+  smoke:
+    runs-on: ${{ matrix.runner }}
+    needs: build
+    # The script bounds its own waits, but the ghcr pull and the docker runs
+    # do not. Without this a hung pull holds the publish for the 6h default.
+    timeout-minutes: 20
+    permissions:
+      contents: read # checkout: the smoke script and the Dockerfile it reads the pin from
+      packages: read # pull the per-arch image by digest from ghcr.io
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with the `build` job's matrix.
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-22.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Prepare platform slug
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # This leg's digest travels as the artifact's FILENAME (see the build
+      # job's "Export digest"). download-artifact fails loudly if the named
+      # artifact is missing.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test the pushed digest
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          # failglob: an empty digests dir aborts here (same guard as the
+          # merge job) instead of testing a bogus ref.
+          shopt -s failglob
+          files=("${{ runner.temp }}/digests"/*)
+          [[ ${#files[@]} -eq 1 ]] || { echo "expected exactly one digest file, got ${#files[@]}: ${files[*]}"; exit 1; }
+          DIGEST="sha256:$(basename "${files[0]}")"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "unexpected digest: '$DIGEST'"; exit 1; }
+          # The EXACT bytes the build leg pushed: `docker run` pulls the
+          # digest ref on its own.
+          IMAGE="${IMAGE}@${DIGEST}" build/smoke-console-base.sh
+
+  # Order matters here, see guarantee 4 in the header: everything that can
+  # fail runs before the real tag is written.
+  merge:
+    runs-on: ubuntu-22.04
+    # smoke: nothing is tagged or signed unless both arches passed the test.
+    needs: [plan, build, smoke]
+    timeout-minutes: 15
+    permissions:
+      contents: read # checkout: build/console-base-registry.sh
+      packages: write # push the merged manifest list to ghcr.io
+      id-token: write # cosign keyless signing via GitHub OIDC
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      RECIPE: ${{ needs.plan.outputs.recipe }}
+      STAGING_TAG: staging-${{ needs.plan.outputs.tag }}-${{ github.run_id }}-${{ github.run_attempt }}
+      REGISTRY_USER: ${{ github.actor }}
+      REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: The tag must still be absent
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^[a-z0-9][a-z0-9._-]{0,100}$ ]] || { echo "::error::unexpected tag '$TAG'"; exit 1; }
+          [[ "$STAGING_TAG" =~ ^[a-z0-9][a-z0-9._-]{0,100}$ ]] || { echo "::error::unexpected staging tag '$STAGING_TAG'"; exit 1; }
+          [[ "$RECIPE" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::unexpected recipe hash '$RECIPE'"; exit 1; }
+          state="$(build/console-base-registry.sh state "$IMAGE" "$TAG")"
+          [ "$state" = "absent" ] || { echo "::error::${IMAGE}:${TAG} is '$state' now. A published tag is never overwritten."; exit 1; }
+
+      - name: Exactly two digests, one per architecture
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          # failglob: an empty digests dir aborts here.
+          shopt -s failglob
+          files=(*)
+          [[ ${#files[@]} -eq 2 ]] || { echo "::error::expected exactly 2 digests, got ${#files[@]}: ${files[*]}"; exit 1; }
+          seen=""
+          for f in "${files[@]}"; do
+            [[ "$f" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::unexpected digest file '$f'"; exit 1; }
+            # Each push is a small index: one real platform plus attestation
+            # entries that report unknown/unknown.
+            platforms="$(docker buildx imagetools inspect "${IMAGE}@sha256:${f}" \
+              --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')"
+            real=""
+            for p in $platforms; do
+              [ "$p" = "unknown/unknown" ] || real="${real}${p} "
+            done
+            real="${real% }"
+            echo "sha256:${f}: ${real:-none}"
+            case "$real" in
+              linux/amd64|linux/arm64) ;;
+              *) echo "::error::sha256:${f} holds '${real}', expected exactly one of linux/amd64, linux/arm64"; exit 1 ;;
+            esac
+            case " $seen " in *" $real "*) echo "::error::two digests for ${real}"; exit 1 ;; esac
+            seen="${seen}${real} "
+          done
+
+      - name: Put the image under a staging tag
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          shopt -s failglob
+          # Intentional word-splitting: expand to multiple image@digest args
+          # (Docker's documented merge idiom).
+          # shellcheck disable=SC2046
+          docker buildx imagetools create -t "${IMAGE}:${STAGING_TAG}" \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - id: staged
+        name: Check the staged image
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE}:${STAGING_TAG}"
+          # Both architectures, exactly one image each, and the recipe label
+          # on both equal to the recipe of this tree.
+          verdict="$(build/console-base-registry.sh check-published "$IMAGE" "$STAGING_TAG" "$RECIPE")"
+          [ "$verdict" = "same" ] || { echo "::error::unexpected answer '$verdict' for the staged image"; exit 1; }
+          DIGEST="$(build/console-base-registry.sh digest "$IMAGE" "$STAGING_TAG")"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::unexpected index digest '$DIGEST'"; exit 1; }
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "staged: ${IMAGE}@${DIGEST}"
+
+      # cosign signs a digest. It does not need the real tag to exist.
+      - name: Sign the digest and verify the signature
+        env:
+          DIGEST: ${{ steps.staged.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          # Same check `verify-published` runs later against the real tag. If
+          # the identity is wrong, this is where it shows, before the tag.
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity "$SIGNER_IDENTITY" \
+            --certificate-oidc-issuer "$SIGNER_ISSUER" > /dev/null
+
+      - name: Point the tag at the signed digest
+        env:
+          DIGEST: ${{ steps.staged.outputs.digest }}
+        run: |
+          set -euo pipefail
+          state="$(build/console-base-registry.sh state "$IMAGE" "$TAG")"
+          [ "$state" = "absent" ] || { echo "::error::${IMAGE}:${TAG} is '$state' now. A published tag is never overwritten."; exit 1; }
+          docker buildx imagetools create -t "${IMAGE}:${TAG}" "${IMAGE}@${DIGEST}"
+          # The signature is on the digest. The tag must point at that digest
+          # and at nothing else.
+          GOT="$(build/console-base-registry.sh digest "$IMAGE" "$TAG")"
+          [ "$GOT" = "$DIGEST" ] || { echo "::error::${IMAGE}:${TAG} points at ${GOT}, the signed digest is ${DIGEST}. The tag exists and is not the signed image: bump build/console-base.tag and publish again."; exit 1; }
+          echo "::notice::published ${IMAGE}:${TAG} at ${DIGEST}, signed"

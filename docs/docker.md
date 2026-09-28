@@ -725,6 +725,38 @@ volume is chowned to it), `/var/lib/bintrail` pre-created for the server
 registry. Build it from source with
 `docker build -f build/Dockerfile.bintrail-console -t bintrail-console .`
 
+### The console base image
+
+`ghcr.io/dbtrail/bintrail-console-base` holds everything the console image
+needs besides the binary: Debian, the pinned mydumper with the client library
+it needs to log in, the `bintrail` user (uid 999) and its directories. You do
+not run it yourself. It exists so that mydumper is installed in one place and
+tested there: before a tag is published, `build/smoke-console-base.sh` runs the
+image's mydumper against MySQL 8.0 and 8.4 on both architectures, as a user
+created with the server's default login plugin.
+
+The console image recipes still install the same packages themselves. They
+move to `FROM` this image once its first tag is published. The first tag is
+published when the change that adds the image is merged. The package is created
+private on that first push and needs a one-time manual change to public.
+
+To change it, edit `build/Dockerfile.console-base` and bump the tag in
+`build/console-base.tag` in the same change. A published tag is never
+overwritten. Every published image carries the SHA-256 of its Dockerfile as the
+label `com.dbtrail.console-base.recipe-sha256`, and the workflow compares it
+with the file in the tree: a changed Dockerfile behind a tag that is already
+published fails the run, on the pull request and on main. Run the test locally
+with `build/smoke-console-base.sh` (it needs only Docker).
+
+The image is signed by its own workflow, so the identity to verify is narrower
+than for the release images:
+
+```bash
+cosign verify ghcr.io/dbtrail/bintrail-console-base:<tag> \
+  --certificate-identity "https://github.com/dbtrail/dbtrail/.github/workflows/console-base-image.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+```
+
 ### Why not Alpine?
 
 DBTrail depends on DuckDB (`duckdb-go`) for querying Parquet archives. DuckDB's Go bindings include pre-compiled C libraries linked against glibc. Alpine uses musl libc, which is binary-incompatible and would cause runtime failures.
