@@ -2,6 +2,7 @@ package parser
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 )
@@ -34,7 +35,9 @@ var addTargetsNotColumns = map[string]bool{
 //     server's version, which the text does not say;
 //   - a backslash: whether it escapes a quote depends on the session's
 //     sql_mode (NO_BACKSLASH_ESCAPES), which the text does not say;
-//   - the truncation marker, an open quote or parenthesis, a second statement.
+//   - the truncation marker, an open quote or parenthesis, a second statement;
+//   - a line comment (# or --), a block comment left open, or bytes that are
+//     not UTF-8: each is how a text cut short can look complete.
 //
 // It reads the statement through normalizeDDLUpTo and ddlScanner, the same
 // reading parseDDL gives the verb and the table.
@@ -43,6 +46,13 @@ func AddedColumns(queryStr, defaultSchema string) (tbl event.DDLTable, cols []st
 	if strings.Contains(queryStr, "/*!") || strings.Contains(queryStr, "/*M!") ||
 		strings.ContainsRune(queryStr, '\\') ||
 		strings.Contains(queryStr, strings.TrimSpace(event.QueryTextTruncationMarker)) {
+		return none, nil, false
+	}
+	// A text stored cut short can end inside a comment, and what the comment
+	// hides may be the clause that matters: the index server, outside strict
+	// mode, cuts a value at the first byte that is not valid UTF-8.
+	if !utf8.ValidString(queryStr) || strings.Contains(queryStr, "#") || strings.Contains(queryStr, "--") ||
+		!blockCommentsClosed(queryStr) {
 		return none, nil, false
 	}
 	m := ddlVerbRe.FindStringSubmatch(normalizeDDLUpTo(queryStr, len(queryStr)+1))
@@ -92,6 +102,26 @@ func AddedColumns(queryStr, defaultSchema string) (tbl event.DDLTable, cols []st
 		return none, nil, false
 	}
 	return tbl, cols, true
+}
+
+// blockCommentsClosed reports whether every /* in s is closed by a */ after
+// it, and no */ comes with nothing open. It does not look at quotes: a
+// comment mark inside a string can only make a statement unreadable.
+func blockCommentsClosed(s string) bool {
+	for {
+		open, shut := strings.Index(s, "/*"), strings.Index(s, "*/")
+		switch {
+		case open < 0 && shut < 0:
+			return true
+		case open < 0 || shut >= 0 && shut < open:
+			return false
+		}
+		end := strings.Index(s[open+2:], "*/")
+		if end < 0 {
+			return false
+		}
+		s = s[open+2+end+2:]
+	}
 }
 
 // splitDDLClauses cuts what follows the table name at the commas that are

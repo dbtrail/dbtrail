@@ -123,6 +123,10 @@ func TestPlaceAddedColumns(t *testing.T) {
 			[]recordedDDL{with(ddlAfter("ALTER TABLE t ADD COLUMN c INT"), func(d *recordedDDL) { d.Type = "TRUNCATE TABLE" })},
 			"a TRUNCATE TABLE is recorded after the target"},
 
+		{"e: a statement after the target adds a column the baseline has", []string{"c"},
+			[]recordedDDL{ddlAfter("ALTER TABLE t ADD COLUMN c INT, ADD COLUMN B INT")},
+			"B is in the baseline and is added again after the target"},
+
 		// (f)
 		{"f: the row names the table in another case", []string{"c"},
 			[]recordedDDL{with(ddlAfter("ALTER TABLE T ADD COLUMN c INT"), func(d *recordedDDL) { d.Table = "T" })},
@@ -164,6 +168,12 @@ func TestPlaceAddedColumns(t *testing.T) {
 		{"h: a text as long as the column holds", []string{"c"},
 			[]recordedDDL{ddlAfter("ALTER TABLE t ADD COLUMN c INT COMMENT '" + strings.Repeat("x", maxRecordedDDLBytes-41) + "'")},
 			"may be cut short"},
+		// A cut lands on a character boundary, up to three bytes short.
+		{"h: a text three bytes short of what the column holds", []string{"c"},
+			[]recordedDDL{ddlAfter("ALTER TABLE t ADD COLUMN c INT COMMENT '" + strings.Repeat("x", maxRecordedDDLBytes-44) + "'")},
+			"may be cut short"},
+		{"h: a text four bytes short of what the column holds", []string{"c"},
+			[]recordedDDL{ddlAfter("ALTER TABLE t ADD COLUMN c INT COMMENT '" + strings.Repeat("x", maxRecordedDDLBytes-45) + "'")}, ""},
 		{"h: no binlog file", []string{"c"},
 			[]recordedDDL{with(ddlAfter("ALTER TABLE t ADD COLUMN c INT"), func(d *recordedDDL) { d.File = "" })},
 			"is not after the target by both its time and its binlog position"},
@@ -193,7 +203,7 @@ func TestPlaceAddedColumns(t *testing.T) {
 			if len(tc.ddls) > 0 && strings.Contains(tc.name, "as long as the column holds") && len(tc.ddls[0].Query) != maxRecordedDDLBytes {
 				t.Fatalf("the fixture is %d bytes, want %d", len(tc.ddls[0].Query), maxRecordedDDLBytes)
 			}
-			why := placeAddedColumns(tc.added, tc.ddls, "shop", "t", anchor1675, cut1675)
+			why := placeAddedColumns(tc.added, inBaseline1675, tc.ddls, "shop", "t", anchor1675, cut1675)
 			switch {
 			case tc.wantWhy == "" && why != "":
 				t.Fatalf("not placed: %s", why)
@@ -210,24 +220,26 @@ func TestPlaceAddedColumns(t *testing.T) {
 // baseline's side of the window is decided by time alone.
 func TestPlaceAddedColumns_cutAndAnchor(t *testing.T) {
 	add := ddlAfter("ALTER TABLE t ADD COLUMN c INT")
-	if why := placeAddedColumns([]string{"c"}, []recordedDDL{add}, "shop", "t", anchor1675, nil); !strings.Contains(why, "no event to place the target") {
+	if why := placeAddedColumns([]string{"c"}, inBaseline1675, []recordedDDL{add}, "shop", "t", anchor1675, nil); !strings.Contains(why, "no event to place the target") {
 		t.Errorf("no cut: why = %q", why)
 	}
 	// Asked with nothing recorded too, so the answer is about the cut.
-	if why := placeAddedColumns([]string{"c"}, nil, "shop", "t", anchor1675, nil); !strings.Contains(why, "no event to place the target") {
+	if why := placeAddedColumns([]string{"c"}, inBaseline1675, nil, "shop", "t", anchor1675, nil); !strings.Contains(why, "no event to place the target") {
 		t.Errorf("no cut, nothing recorded: why = %q", why)
 	}
 	old := with(ddlBefore("DROP TABLE t"), func(d *recordedDDL) { d.Type, d.Pos = "DROP TABLE", 900000 })
-	if why := placeAddedColumns([]string{"c"}, []recordedDDL{old, add}, "shop", "t", nil, cut1675); why != "" {
+	if why := placeAddedColumns([]string{"c"}, inBaseline1675, []recordedDDL{old, add}, "shop", "t", nil, cut1675); why != "" {
 		t.Errorf("a baseline with no anchor: %s", why)
 	}
 	// The #840 rollover: binlog.1000000 comes after binlog.999999.
 	cut := &query.BinlogPos{File: "binlog.999999", Pos: 5000}
 	rolled := with(add, func(d *recordedDDL) { d.File, d.Pos = "binlog.1000000", 4 })
-	if why := placeAddedColumns([]string{"c"}, []recordedDDL{rolled}, "shop", "t", anchor1675, cut); why != "" {
+	if why := placeAddedColumns([]string{"c"}, inBaseline1675, []recordedDDL{rolled}, "shop", "t", anchor1675, cut); why != "" {
 		t.Errorf("after a file number rollover: %s", why)
 	}
 }
+
+var inBaseline1675 = map[string]bool{"id": true, "b": true}
 
 const createSQL1675 = "CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `b` int DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
 
@@ -274,8 +286,10 @@ func toDriverValues(in []any) []driver.Value {
 	return out
 }
 
+// The snapshot in effect at the target has the baseline's columns.
 func foldCfg1675() FullTableConfig {
-	return FullTableConfig{At: target1675, cut: cut1675}
+	return FullTableConfig{At: target1675, cut: cut1675,
+		schemaAt: metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{"shop.t": tm1675()})}
 }
 
 func bmeta1675() baseline.DumpMetadata {
@@ -399,6 +413,28 @@ func TestFoldNamesAtTarget_refuses(t *testing.T) {
 			wantWhy: "the schema snapshot in effect at the target already has C",
 		},
 		{
+			// The history could not be read, or no snapshot is that old:
+			// the run cannot tell which, and nothing says the column was absent.
+			name: "there is no snapshot in effect at the target", tm: tm1675(c),
+			cfg: func(cfg *FullTableConfig) { cfg.schemaAt = nil },
+			db: func(t *testing.T) *sql.DB {
+				_, db := mockDDLs(t, ddlAfter("ALTER TABLE t ADD COLUMN c INT"))
+				return db
+			},
+			wantWhy: "no schema snapshot from at or before the target",
+		},
+		{
+			name: "the snapshot in effect at the target does not describe the table", tm: tm1675(c),
+			cfg: func(cfg *FullTableConfig) {
+				cfg.schemaAt = metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{"shop.u": tm1675()})
+			},
+			db: func(t *testing.T) *sql.DB {
+				_, db := mockDDLs(t, ddlAfter("ALTER TABLE t ADD COLUMN c INT"))
+				return db
+			},
+			wantWhy: "the schema snapshot in effect at the target does not describe the table",
+		},
+		{
 			name: "the added column is in the primary key",
 			tm:   tm1675(metadata.ColumnMeta{Name: "c", DataType: "int", ColumnType: "int", IsPK: true}),
 			db: func(t *testing.T) *sql.DB {
@@ -513,7 +549,7 @@ func TestFoldNamesAtTarget_anchor(t *testing.T) {
 // TestExplainUnplacedColumns_text is the whole refusal as an operator reads it.
 func TestExplainUnplacedColumns_text(t *testing.T) {
 	tm := tm1675(metadata.ColumnMeta{Name: "extra", DataType: "int", ColumnType: "int"})
-	why := placeAddedColumns([]string{"extra"}, []recordedDDL{ddlInWindow("ALTER TABLE t ADD COLUMN extra INT")}, "shop", "t", anchor1675, cut1675)
+	why := placeAddedColumns([]string{"extra"}, inBaseline1675, []recordedDDL{ddlInWindow("ALTER TABLE t ADD COLUMN extra INT")}, "shop", "t", anchor1675, cut1675)
 	err := explainUnplacedColumns(checkBaselineSchemaCurrent(createSQL1675, tm, nil, "shop", "t"), why)
 	want := "shop.t changed shape since its baseline was taken (added since: extra; gone since: none; type changed since: none) — " +
 		"a snapshot emitted from it would carry the OLD CREATE TABLE forward and project every row onto the old columns and types, " +

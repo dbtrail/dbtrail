@@ -83,9 +83,10 @@ Such a column is left out of the comparison when the index proves it did not exi
 | That statement is later than the moment by its time, and after the restore's binlog cut by its position | The restore keeps row changes by both |
 | Every DDL recorded for the table after the moment only adds columns | A `DROP`, `CHANGE`, `RENAME` or a statement that cannot be read could have removed the column in between |
 | No DDL is recorded for the table between the backup and the moment | The table's shape moved before the moment |
-| The snapshot in effect at the moment does not have the column | It existed already |
+| A schema snapshot from at or before the moment describes the table and does not have the column | It existed already, or nothing says it did not |
+| No statement after the moment adds a column the backup already has | That column was dropped by a statement with no record |
 
-Anything else refuses as before, and the refusal says which of these is missing. A statement is not read when it has an executable comment (`/*! ... */`), a backslash, `IF NOT EXISTS`, the `ADD COLUMN (a, b)` list form, a column defined as part of a key, or a text as long as `ddl_query` holds.
+Anything else refuses as before, and the refusal says which of these is missing. A statement is not read when it has an executable comment (`/*! ... */`), a line comment (`#` or `--`), a block comment left open, a backslash, bytes that are not UTF-8, `IF NOT EXISTS`, the `ADD COLUMN (a, b)` list form, a column defined as part of a key, or a text as long as `ddl_query` holds.
 
 Two cases still refuse or stay unseen:
 

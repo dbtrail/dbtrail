@@ -41,12 +41,16 @@ import (
 // again by a recorded statement. The comparison with the latest snapshot has
 // always been blind to an unrecorded add and drop; the snapshot in effect at
 // the target is compared too (atTarget), which catches it when one was taken
-// in between.
+// in between, and a restore with no such snapshot refuses.
 
 // maxRecordedDDLBytes is what schema_changes.ddl_query (TEXT) holds. An ALTER
 // TABLE's text is stored whole, and a server outside strict mode cuts a longer
 // one without a word, so a text this long may be missing its tail.
 const maxRecordedDDLBytes = 65535
+
+// The cut lands on a character boundary, so a cut text can be up to three
+// bytes shorter than the column holds.
+const maybeCutDDLBytes = maxRecordedDDLBytes - 3
 
 // recordedDDL is one schema_changes row, with its place in time decided by
 // the index server: the same comparison, on the same values, as every other
@@ -99,11 +103,13 @@ func loadRecordedDDLs(ctx context.Context, db *sql.DB, schema, table string, asO
 }
 
 // placeAddedColumns reports why the columns in added (lower case) cannot all
-// be placed after the target, or "" when every one of them can.
+// be placed after the target, or "" when every one of them can. inBaseline is
+// the baseline's columns (lower case): a statement after the target that adds
+// one of them proves a drop nobody recorded.
 //
 // anchor is the baseline's own binlog coordinate, nil when it recorded none;
 // cut is the run's positional cut, the same coordinate that bounds the fold.
-func placeAddedColumns(added []string, ddls []recordedDDL, schema, table string, anchor, cut *query.BinlogPos) string {
+func placeAddedColumns(added []string, inBaseline map[string]bool, ddls []recordedDDL, schema, table string, anchor, cut *query.BinlogPos) string {
 	if cut == nil {
 		return "the index holds no event to place the target by binlog position"
 	}
@@ -127,7 +133,7 @@ func placeAddedColumns(added []string, ddls []recordedDDL, schema, table string,
 		if d.Type != string(parser.DDLAlterTable) {
 			return fmt.Sprintf("a %s is recorded after the target, at %s", d.Type, d.at())
 		}
-		if len(d.Query) >= maxRecordedDDLBytes {
+		if len(d.Query) >= maybeCutDDLBytes {
 			return fmt.Sprintf("the text of the ALTER TABLE recorded at %s may be cut short", d.at())
 		}
 		tbl, cols, ok := parser.AddedColumns(d.Query, d.Schema)
@@ -139,6 +145,9 @@ func placeAddedColumns(added []string, ddls []recordedDDL, schema, table string,
 		}
 		for _, c := range cols {
 			key := strings.ToLower(c)
+			if inBaseline[key] {
+				return fmt.Sprintf("%s is in the baseline and is added again after the target, so it was dropped in between by a statement that is not recorded", c)
+			}
 			if placed[key] {
 				return fmt.Sprintf("%s is added more than once after the target, so it was dropped in between by a statement that is not recorded", c)
 			}
@@ -164,11 +173,12 @@ func placeAddedColumns(added []string, ddls []recordedDDL, schema, table string,
 // why in the second value, when there are added columns and not every one of
 // them is proven; "" when there is nothing to explain.
 //
-// atTarget is the table in the schema snapshot in effect at the target, nil
-// when there is none. It can only refuse: a column it already has existed at
-// or before the target, whatever the recorded statements say.
+// atTarget is the table in the schema snapshot in effect at the target. It
+// can only refuse: a column it already has existed at or before the target,
+// whatever the recorded statements say. nil refuses with atTargetMissing: the
+// caller could not read one, and an unreadable history looks the same as none.
 func namesAtTarget(ctx context.Context, db *sql.DB, createSQL string, tm, atTarget *metadata.TableMeta,
-	schema, table string, asOf, target time.Time, anchor, cut *query.BinlogPos) (*metadata.TableMeta, string) {
+	schema, table string, asOf, target time.Time, anchor, cut *query.BinlogPos, atTargetMissing string) (*metadata.TableMeta, string) {
 	if tm == nil || strings.TrimSpace(createSQL) == "" {
 		return tm, ""
 	}
@@ -214,11 +224,12 @@ func namesAtTarget(ctx context.Context, db *sql.DB, createSQL string, tm, atTarg
 			return tm, name + " is part of the primary key now"
 		}
 	}
-	if atTarget != nil {
-		for _, c := range atTarget.Columns {
-			if isAdded[strings.ToLower(c.Name)] {
-				return tm, "the schema snapshot in effect at the target already has " + c.Name
-			}
+	if atTarget == nil {
+		return tm, atTargetMissing
+	}
+	for _, c := range atTarget.Columns {
+		if isAdded[strings.ToLower(c.Name)] {
+			return tm, "the schema snapshot in effect at the target already has " + c.Name
 		}
 	}
 	ddls, err := loadRecordedDDLs(ctx, db, schema, table, asOf, target)
@@ -228,7 +239,7 @@ func namesAtTarget(ctx context.Context, db *sql.DB, createSQL string, tm, atTarg
 	case err != nil:
 		return tm, "the recorded DDL statements could not be read: " + err.Error()
 	}
-	if why := placeAddedColumns(added, ddls, schema, table, anchor, cut); why != "" {
+	if why := placeAddedColumns(added, inBaseline, ddls, schema, table, anchor, cut); why != "" {
 		return tm, why
 	}
 	trimmed := *tm
@@ -251,16 +262,19 @@ func namesAtTarget(ctx context.Context, db *sql.DB, createSQL string, tm, atTarg
 func foldNamesAtTarget(ctx context.Context, db *sql.DB, cfg FullTableConfig, bmeta baseline.DumpMetadata,
 	tm *metadata.TableMeta, asOf time.Time, schema, table string) (*metadata.TableMeta, string) {
 	var atTarget *metadata.TableMeta
+	missing := "there is no schema snapshot from at or before the target to check the column against, or the snapshot history could not be read"
 	if cfg.schemaAt != nil {
-		if t, err := cfg.schemaAt.Resolve(schema, table); err == nil {
-			atTarget = t
+		t, err := cfg.schemaAt.Resolve(schema, table)
+		if err != nil {
+			missing = "the schema snapshot in effect at the target does not describe the table"
 		}
+		atTarget = t
 	}
 	var anchor *query.BinlogPos
 	if bmeta.BinlogFile != "" && bmeta.BinlogPos > 0 {
 		anchor = &query.BinlogPos{File: bmeta.BinlogFile, Pos: uint64(bmeta.BinlogPos)}
 	}
-	return namesAtTarget(ctx, db, bmeta.CreateTableSQL, tm, atTarget, schema, table, asOf, cfg.At, anchor, cfg.cut)
+	return namesAtTarget(ctx, db, bmeta.CreateTableSQL, tm, atTarget, schema, table, asOf, cfg.At, anchor, cfg.cut, missing)
 }
 
 // explainUnplacedColumns adds to a schema refusal why its added columns could
