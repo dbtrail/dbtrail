@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -237,7 +238,7 @@ func TestBaselinesAPI_readsAFooterOnlyForTheRowsItGrades(t *testing.T) {
 	want = append(want, reconstruct.SnapshotDirName(now.Add(-3*time.Hour))+"/gone")
 	sort.Strings(asked)
 	sort.Strings(want)
-	if len(asked) != tables+1 || !equalStrings(asked, want) {
+	if len(asked) != tables+1 || !slices.Equal(asked, want) {
 		t.Fatalf("footers read for %d files, want %d (the newest snapshot's tables and each table's newest):\n got %v\nwant %v",
 			len(asked), tables+1, asked, want)
 	}
@@ -272,18 +273,6 @@ func TestBaselinesAPI_readsAFooterOnlyForTheRowsItGrades(t *testing.T) {
 	if got.Staleness != "aging" {
 		t.Errorf("headline = %q, want aging (plain's newest snapshot)", got.Staleness)
 	}
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // A footer read that runs out of time must not leave the page at "ok".

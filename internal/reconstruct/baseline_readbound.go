@@ -83,7 +83,7 @@ func (f BaselineFile) deltaUpsertsPath() string {
 func (f BaselineFile) HasDelta() bool { return f.DeltaUpserts != "" || f.DeltaErr != nil }
 
 // readBoundConcurrency bounds the footer reads in flight for one call. Over
-// S3 each is a request (and a DuckDB session), and the console calls this
+// S3 each is a request (and a DuckDB session), and the web interface calls this
 // while rendering a page.
 const readBoundConcurrency = 8
 
