@@ -21,6 +21,7 @@ import (
 var registeredAPIPatterns = []struct{ method, pattern string }{
 	{"GET", "/api/status"},
 	{"GET", "/api/coverage"},
+	{"GET", "/api/capture-status"},
 	{"GET", "/api/uncaptured-tables"},
 	{"GET", "/api/capacity"},
 	{"GET", "/api/activity"},

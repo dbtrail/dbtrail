@@ -76,6 +76,7 @@ var apiRoutePerms = []routePerm{
 	// it also reads /api/events.
 	{"GET", "/api/status", ext.PermStatusRead},
 	{"GET", "/api/coverage", ext.PermStatusRead},
+	{"GET", "/api/capture-status", ext.PermStatusRead},
 	{"GET", "/api/capacity", ext.PermStatusRead},
 	// The tables capture leaves out (#1802) are capture health, the floor a
 	// read-only session exists for, like the capture-health names on

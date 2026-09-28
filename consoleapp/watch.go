@@ -1596,6 +1596,10 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console
 		Token:   opts.Token,
 		// What this daemon's own capture watches (#1802).
 		BootCaptureFilter: bootCaptureFilter(),
+		// The Overview asks the source whether capture is caught up (#1794).
+		// Here because both watch entry points reach this function; the
+		// read-only serve does not, and answers unknown.
+		CaptureStatus: newCaptureStatusReporter(upSourceDSN),
 
 		BaselineDir:     opts.BaselineDir,
 		BaselineS3:      opts.BaselineS3,

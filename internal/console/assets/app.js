@@ -1284,7 +1284,62 @@ async function refreshCovCard(btn) {
     return;
   }
   covLast = { data: next, at: nowClock() };
-  card.replaceWith(covCard(next, { at: covLast.at }));
+  const stamp = { at: covLast.at };
+  let shown = covCard(next, stamp);
+  card.replaceWith(shown);
+  // The drawing reads the same coverage as the card, now and when the
+  // source answers (#1794).
+  ovFlowRepaint(next);
+  ovCaptureAsk(next, () => {
+    ovFlowRepaint(next);
+    if (!covLast || covLast.data !== next || !shown.isConnected) return;
+    const again = covCard(next, stamp);
+    shown.replaceWith(again);
+    shown = again;
+  });
+}
+
+// covCaptureState reads what the source answered about an idle capture
+// (#1794): "up_to_date", "behind", or "" for everything else. The card and
+// the flow drawing both read it here, so they cannot say two things. Only
+// the two exact words count: no answer, a failed read, a capture that cannot
+// be compared and a state this page does not know are all "".
+function covCaptureState(c) {
+  if (!c || c.freshness !== "idle" || !c.capture) return "";
+  const s = c.capture.state;
+  return s === "up_to_date" || s === "behind" ? s : "";
+}
+
+// OV_CAPTURE_MS bounds the ask below. The daemon bounds its read of the
+// source at three seconds.
+const OV_CAPTURE_MS = 10000;
+
+// ovCaptureAsk asks the daemon whether capture is caught up, for one
+// coverage read c, and calls draw when an answer for it arrives. Asked after
+// the card is drawn, never before: the page does not wait on the source.
+// Only while capture is idle, and only where the daemon is connected to
+// sources. One request per coverage read however many ask, and one more
+// when the daemon says when. An answer about another server is dropped.
+function ovCaptureAsk(c, draw) {
+  if (!c || c.freshness !== "idle" || !capsCache.monitor) return;
+  if (c.captureDraws) {
+    c.captureDraws.push(draw);
+    if (c.capture) draw();
+    return;
+  }
+  c.captureDraws = [draw];
+  const gen = serverGen, id = currentServer || defaultServerId;
+  const ask = (again) => {
+    if (gen !== serverGen) return;
+    apiWithin("/api/capture-status", OV_CAPTURE_MS).then((a) => {
+      if (gen !== serverGen || !a || a.server_id !== id) return;
+      c.capture = a;
+      c.captureDraws.forEach((d) => d());
+      const wait = Number(a.retry_in_seconds);
+      if (again && a.state === "unknown" && wait > 0) setTimeout(() => ask(false), wait * 1000);
+    }, (err) => console.error("capture status unavailable", err));
+  };
+  ask(true);
 }
 
 // covCard renders the live RPO statement (#1194). The window's upper edge is
@@ -1337,7 +1392,11 @@ function covCard(c, stamp) {
   const freshTone = fresh === "stalled" || fresh === "unavailable" ? " bad"
     : fresh === "current" ? " ok"
     : fresh === "none" || fresh === "idle" ? "" : " warn";
-  chips.append(el("span", { class: "cov-chip" + freshTone, text: "capture " + fresh }));
+  // The source was asked and is ahead (#1794): amber, and said on the chip.
+  const asked = covCaptureState(c);
+  chips.append(asked === "behind"
+    ? el("span", { class: "cov-chip warn", text: "capture behind" })
+    : el("span", { class: "cov-chip" + freshTone, text: "capture " + fresh }));
   // "none" (file-mode: no capture ran) stays NEUTRAL — green would paint a
   // non-claim as assurance.
   chips.append(el("span", { class: "cov-chip" + (bad ? " bad" : warn ? " warn" : cont === "ok" ? " ok" : ""), text: "continuity " + cont }));
@@ -1356,6 +1415,18 @@ function covCard(c, stamp) {
     const age = typeof c.checkpoint_age_seconds === "number" ? " for " + plainDuration(c.checkpoint_age_seconds) : "";
     card.append(el("p", { class: "cov-line bad", text:
       "Capture is STALLED: the daemon has not checkpointed" + age + ". The window's upper edge is frozen: changes since then are NOT recoverable. Check that the stream is running." }));
+  } else if (asked === "up_to_date") {
+    // Said only when the source was asked and holds nothing capture has not
+    // recorded. "captured" because the source may have written to schemas
+    // or tables capture does not read. The time is the newest captured change, in UTC like the
+    // rest of the card; past a day it carries its date.
+    const since = String(c.delta_to || "");
+    const at = c.lag_seconds >= 86400 ? since : since.slice(11, 19);
+    card.append(typeof c.lag_seconds === "number" && at
+      ? el("p", { class: "cov-line" }, "Up to date. No captured changes since ", el("b", { text: at, title: utcLocalTitle(since) || null }), " (" + plainDuration(c.lag_seconds) + " ago).")
+      : el("p", { class: "cov-line", text: "Up to date. No captured changes yet." }));
+  } else if (asked === "behind") {
+    card.append(el("p", { class: "cov-line warn", text: "Behind: the source has changes capture has not read yet." }));
   } else if (fresh === "idle") {
     // Neutral, and no metric named (#1794): the page gives no way to read
     // one, and from the index alone a quiet server and a capture that fell
@@ -1519,7 +1590,14 @@ function fillOvCoverage(f, coverage) {
   // reads it), so a refresh that fails must re-render THIS Overview's last
   // payload, not whichever one filled that global last.
   f.covLast = covLast;
-  f.covSlot.append(covCard(coverage, { at: covLast.at }));
+  const stamp = { at: covLast.at };
+  f.covSlot.append(covCard(coverage, stamp));
+  // Asked once the card is on screen (#1794). The answer redraws the card
+  // this fill drew, if it is still the one shown, and the drawing.
+  ovCaptureAsk(coverage, () => {
+    ovFlowRepaint(coverage);
+    if (f.covLast && f.covLast.data === coverage) { clear(f.covSlot); f.covSlot.append(covCard(coverage, stamp)); }
+  });
 }
 
 // fillOvStatus fills the all-time tile. "changes indexed" is
@@ -1836,6 +1914,9 @@ function ovFlowModel(inp) {
       // it cannot tell apart is a quiet server from capture fallen far
       // behind, so the word is never "up to date".
       capture = piece("binlog", "ok", "connected", lastIndexed ? "nothing new since " + lastIndexed : "nothing new yet");
+      // Unless the source was asked (#1794): behind is amber, and nothing
+      // is cut, since capture is running.
+      if (covCaptureState(cov) === "behind") capture = piece("binlog", "warn", "behind", lastIndexed ? "last change " + lastIndexed : "");
     } else if (fresh === "stalled") {
       capture = piece("binlog", "bad", "stopped" + (lastIndexed ? " " + lastIndexed : ""),
         typeof cov.checkpoint_age_seconds === "number" ? "position saved " + plainDuration(cov.checkpoint_age_seconds) + " ago" : "");
@@ -1867,9 +1948,12 @@ function ovFlowModel(inp) {
     }
   }
 
-  // The source box: a quiet server says so on the box, not on the arrow.
+  // The source box says "up to date", like the card, only when the source
+  // was asked and capture holds all it wrote (#1794). Not "quiet": equal
+  // sets prove capture read all it can, not that nothing was written to
+  // what it does not read. When it could not be asked the box says no word.
   const source = piece("Your MySQL", "none", srv && srv.source_host ? srv.source_host : "", "");
-  if (!cut && capture.tone === "ok" && capture.line === "connected") source.line = "quiet";
+  if (!cut && capture.tone === "ok" && capture.line === "connected" && covCaptureState(cov) === "up_to_date") source.line = "up to date";
 
   // Table definitions (the DBTrail box): what the schema snapshot last did,
   // the count of captured tables, and a schema change that stopped the copy.
@@ -2179,12 +2263,31 @@ function loadOvFlow(f, live, coverageP) {
       : Promise.resolve({ unavailable: true, status: 403 });
     return Promise.all([baselines, uncaptured, monitor, schema]).then(([bl, unc, mon, sch]) => {
       if (!live() || seq !== ovFlowSeq) return;
-      const model = ovFlowModel({ coverage, baselines: bl, server: srv, serverUnknown: !!unknown, monitor: mon, schema: sch, uncaptured: unc,
-        monitorCap: !!capsCache.monitor, may: sessionMay });
+      const inp = { coverage, baselines: bl, server: srv, serverUnknown: !!unknown, monitor: mon, schema: sch, uncaptured: unc,
+        monitorCap: !!capsCache.monitor, may: sessionMay };
+      const pctx = { serverId: id, registry, monitorCap: !!capsCache.monitor };
+      ovFlowLast = { inp, pctx, slot: f.flowSlot, gen: serverGen };
       clear(f.flowSlot);
-      f.flowSlot.append(flowSection(model, { serverId: id, registry, monitorCap: !!capsCache.monitor }));
+      f.flowSlot.append(flowSection(ovFlowModel(inp), pctx));
     });
   });
+}
+
+// ovFlowLast is what the drawing on screen was painted from, so that a
+// coverage read that changes after the paint (the card's own refresh, the
+// source's answer about capture, #1794) repaints it without reading
+// anything again.
+let ovFlowLast = null;
+
+// ovFlowRepaint paints the drawing again with `coverage` in place of the
+// one it was painted from. Nothing to do when no drawing is on screen, or
+// the one on screen is another server's.
+function ovFlowRepaint(coverage) {
+  const last = ovFlowLast;
+  if (!last || !coverage || last.gen !== serverGen || !last.slot.isConnected) return;
+  last.inp = Object.assign({}, last.inp, { coverage });
+  clear(last.slot);
+  last.slot.append(flowSection(ovFlowModel(last.inp), last.pctx));
 }
 
 function renderOverview() {

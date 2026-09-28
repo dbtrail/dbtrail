@@ -118,6 +118,11 @@ type Config struct {
 	// elsewhere, where the schedule endpoints refuse with 403 and the listing
 	// reports a saved schedule as not runnable.
 	BackupSchedules BackupScheduleReporter
+	// CaptureStatus asks a server's source whether capture has read
+	// everything it wrote (#1794). Wired in ONLY by `bintrail-console watch`,
+	// the process that is connected to the sources; nil elsewhere, where
+	// GET /api/capture-status answers unknown.
+	CaptureStatus CaptureStatusReporter
 	// SQLExport builds custom .sql backups (fold at a chosen instant,
 	// download as a mydumper-format dump). Wired with BaselineRestore.
 	SQLExport SQLExporter
@@ -330,6 +335,8 @@ type Server struct {
 	// backupSchedules: non-nil only on a watch daemon with a baseline
 	// supervisor (see Config.BackupSchedules).
 	backupSchedules BackupScheduleReporter
+	// captureStatus is Config.CaptureStatus (#1794); nil = never asked.
+	captureStatus   CaptureStatusReporter
 	sqlExport       SQLExporter
 	baselineHistory *BaselineRunHistory
 	// telemetry: non-nil only when a long-running console wired its live
@@ -561,6 +568,7 @@ func New(cfg Config) (*Server, error) {
 		verifyHistory:           cfg.VerifyHistory,
 		baselineRestore:         cfg.BaselineRestore,
 		backupSchedules:         cfg.BackupSchedules,
+		captureStatus:           cfg.CaptureStatus,
 		sqlExport:               cfg.SQLExport,
 		baselineHistory:         cfg.BaselineHistory,
 		telemetry:               cfg.Telemetry,
@@ -677,6 +685,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/status", s.handleStatus)
 	api.HandleFunc("GET /api/capacity", s.handleCapacity)
 	api.HandleFunc("GET /api/coverage", s.handleCoverage)
+	api.HandleFunc("GET /api/capture-status", s.handleCaptureStatus)
 	api.HandleFunc("GET /api/uncaptured-tables", s.handleUncapturedTables)
 	api.HandleFunc("GET /api/activity", s.handleActivity)
 	api.HandleFunc("GET /api/schemas", s.handleSchemas)

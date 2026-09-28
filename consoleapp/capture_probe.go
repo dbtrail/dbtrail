@@ -72,6 +72,18 @@ func captureComparable(st *status.StreamStateInfo, anchor, sourceRead time.Time)
 			return false, "the capture dropped events that no full read has read from the source since"
 		}
 	}
+	return checkpointComparable(st)
+}
+
+// checkpointComparable is the part of captureComparable that is about the
+// checkpoint itself and not about what a snapshot needs: a capture on
+// record, in GTID mode, with a GTID set saved. The capture status read
+// (#1794) refuses on these and on nothing else: a loss or a dropped row is
+// said by the page's own continuity and capture health lines.
+func checkpointComparable(st *status.StreamStateInfo) (ok bool, detail string) {
+	if st == nil {
+		return false, "the index has no live capture on record"
+	}
 	if st.Mode != "gtid" {
 		return false, "the capture runs in binlog-position mode, which is not compared"
 	}
@@ -119,6 +131,15 @@ func compareGTIDSets(captured, executed string) (verdict, detail string) {
 // only (scrubbed of both DSNs).
 type captureProbeResult struct {
 	verdict, detail, cause string
+	// For the capture status read (#1794): the two sets that were compared,
+	// and when the capture last saved its position. Empty when the source
+	// was not read.
+	captured, executed string
+	checkpoint         time.Time
+	// purged is the source's @@GLOBAL.gtid_purged, read with executed:
+	// transactions it counts as executed that no binlog carries, so capture
+	// can never read them (#1794).
+	purged string
 }
 
 // probeCapture is a package variable for the reason readIndexMark is: it
@@ -195,6 +216,25 @@ func compareCapture(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo
 	if ok, detail := captureComparable(st, anchor, sourceRead); !ok {
 		return captureProbeResult{detail: detail}, nil
 	}
+	return compareWithSource(ctx, idx, st, openSource, readExecutedOnly)
+}
+
+// sourceGTIDReader reads the source's executed GTID set, and, where the
+// caller uses it, its purged set.
+type sourceGTIDReader func(ctx context.Context, db *sql.DB) (executed, purged string, err error)
+
+// readExecutedOnly is the snapshot schedule's reader: it reads no purged
+// set, since there "behind" keeps the full backup, the safe direction.
+func readExecutedOnly(ctx context.Context, db *sql.DB) (string, string, error) {
+	executed, err := readExecutedGTIDs(ctx, db)
+	return executed, "", err
+}
+
+// compareWithSource is the half of compareCapture that reaches the source,
+// for a stream_state that was already found comparable: the same-server
+// check, the source's GTID sets (read), and the verdict on the two sets.
+// The capture status read (#1794) shares it.
+func compareWithSource(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo, openSource func() (*sql.DB, error), read sourceGTIDReader) (captureProbeResult, error) {
 	src, err := openSource()
 	if err != nil {
 		return captureProbeResult{detail: "the source did not answer"}, err
@@ -211,12 +251,13 @@ func compareCapture(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo
 	if same {
 		return captureProbeResult{detail: "the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture"}, nil
 	}
-	executed, err := readExecutedGTIDs(ctx, src)
+	executed, purged, err := read(ctx, src)
 	if err != nil {
 		return captureProbeResult{detail: "the source did not report its GTID set"}, err
 	}
 	verdict, detail := compareGTIDSets(st.GTIDSet.String, executed)
-	return captureProbeResult{verdict: verdict, detail: detail}, nil
+	return captureProbeResult{verdict: verdict, detail: detail,
+		captured: strings.Join(strings.Fields(st.GTIDSet.String), ""), executed: executed, purged: purged, checkpoint: st.LastCheckpoint}, nil
 }
 
 // readExecutedGTIDs is the source's @@GLOBAL.gtid_executed with its
@@ -239,6 +280,26 @@ func readExecutedGTIDs(ctx context.Context, db *sql.DB) (string, error) {
 		return "", nil
 	}
 	return strings.Join(strings.Fields(executed), ""), nil
+}
+
+// readExecutedAndPurgedGTIDs is readExecutedGTIDs plus @@GLOBAL.gtid_purged,
+// in the same statement so both sets are of one instant. Both come back
+// empty when GTIDs are not fully on or the server has none (MariaDB, 1193).
+// Only the capture status read (#1794) uses it.
+func readExecutedAndPurgedGTIDs(ctx context.Context, db *sql.DB) (executed, purged string, err error) {
+	var gtidMode string
+	err = db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed, @@GLOBAL.gtid_purged").Scan(&gtidMode, &executed, &purged)
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 { // ER_UNKNOWN_SYSTEM_VARIABLE
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if !strings.EqualFold(gtidMode, "ON") {
+		return "", "", nil
+	}
+	return strings.Join(strings.Fields(executed), ""), strings.Join(strings.Fields(purged), ""), nil
 }
 
 // sameServer reports whether a and b are the same MySQL server, by
