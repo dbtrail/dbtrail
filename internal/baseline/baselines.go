@@ -28,6 +28,10 @@ type BaselineInfo struct {
 	// then unknown, which is not the same as the snapshot's own time (#1707).
 	ChainStart    time.Time
 	ChainStartErr error
+	// Lock is how the database was locked when the file's rows were read
+	// (#1380), from its footer. ReadUnknown when the footer has no record or
+	// could not be read.
+	Lock ReadConsistency
 }
 
 // DiscoverBaselines walks a baseline directory and returns metadata for each
@@ -137,6 +141,7 @@ func DiscoverBaselinesReport(dir string) ([]BaselineInfo, []time.Time, error) {
 					info.BinlogPos = meta.BinlogPos
 					info.GTIDSet = meta.GTIDSet
 					info.LSN = meta.LSN
+					info.Lock = ReadConsistencyOf(meta)
 				} else {
 					slog.Warn("could not read Parquet metadata for baseline", "path", filePath, "error", err)
 				}

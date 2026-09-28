@@ -56,6 +56,12 @@ type baselineTableSizeDTO struct {
 	// ProducedBy, when nothing was looked up.
 	SourceReadAt   string `json:"source_read_at,omitempty"`
 	FoldsSinceRead *int   `json:"folds_since_read,omitempty"`
+	// Lock is how the database was locked when these rows were read (#1380):
+	// consistent | unknown | torn. Inherited through every update, and for a
+	// reused table read off the reused file. "unknown" is a file with no
+	// record. Absent, like ProducedBy, when nothing was looked up or the
+	// footer could not be read.
+	Lock string `json:"lock,omitempty"`
 }
 
 type baselineFilesResponse struct {
@@ -89,6 +95,14 @@ type baselineFilesResponse struct {
 	// since their read. MaxFoldsSinceRead is absent whenever it is not zero:
 	// a maximum that leaves tables out is not the most.
 	SourceReadUncounted int `json:"source_read_uncounted,omitempty"`
+	// Lock is the snapshot's word on how the database was locked when its
+	// rows were read (#1380), the worst of its tables: consistent | unknown |
+	// torn. LockTorn and LockUnknown count the tables behind the two that are
+	// not consistent; a footer that could not be read counts as unknown. All
+	// absent when no table was looked up (an S3 source).
+	Lock        string `json:"lock,omitempty"`
+	LockTorn    int    `json:"lock_torn,omitempty"`
+	LockUnknown int    `json:"lock_unknown,omitempty"`
 	// Incomplete marks a snapshot carrying an _INCOMPLETE marker without a
 	// _SUCCESS one (a failed or unfinished run). The listing excludes such
 	// snapshots, but the detail stays honest if one is addressed directly.
@@ -356,6 +370,7 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 	// from its file alone.
 	deltaNames := tableDeltaNames(files)
 	reads := snapshotSourceReads{}
+	locks := snapshotLocks{}
 	for _, f := range files {
 		resp.TotalBytes += f.Size
 		resp.Files++
@@ -386,6 +401,10 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 			// Every table looked at counts, the unreadable ones too: the
 			// snapshot's line must not speak for a table it could not date.
 			reads.add(d.read)
+			locks.add(d.lock, d.lockRead)
+			if d.lockRead {
+				row.Lock = d.lock.String()
+			}
 			if d.read.Known() {
 				row.SourceReadAt = d.read.At.UTC().Format(consoleTSFormat)
 				if d.read.Folds >= 0 {
@@ -397,6 +416,7 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 		resp.Tables = append(resp.Tables, row)
 	}
 	reads.fill(&resp, ts)
+	resp.Lock, resp.LockTorn, resp.LockUnknown = locks.verdict(), locks.torn, locks.unknown
 	sort.Slice(resp.Tables, func(i, j int) bool {
 		if resp.Tables[i].Schema != resp.Tables[j].Schema {
 			return resp.Tables[i].Schema < resp.Tables[j].Schema
@@ -662,6 +682,12 @@ func tableDeltaNames(files []baselineSnapshotFile) map[string][]string {
 type tableDescription struct {
 	producedBy, from string
 	read             baseline.SourceRead
+	// lock is how the database was locked when the table's rows were read
+	// (#1380), from the table file's own footer: the file under a chain of
+	// table deltas is the one the rows not changed since still come from.
+	// lockRead is false when that footer could not be read.
+	lock     baseline.ReadConsistency
+	lockRead bool
 }
 
 // describeTable reads one table's footers and derives how its rows reached
@@ -691,11 +717,12 @@ func describeTable(path, dir string, names []string, snapshotAt time.Time) table
 		// NOT ProducedByUnknown: see above. An empty verdict renders as a dash.
 		return tableDescription{}
 	}
+	lock := baseline.ReadConsistencyOf(md)
 	chain, err := baseline.TableDeltaChainIn(dir, names, strings.TrimSuffix(filepath.Base(path), ".parquet"))
 	if err != nil {
 		slog.Warn("console: a snapshot table's delta files do not form a chain, so how it was made is not shown",
 			"path", path, "error", err)
-		return tableDescription{}
+		return tableDescription{lock: lock, lockRead: true}
 	}
 	describing, last := md, (*baseline.DumpMetadata)(nil)
 	if chain != nil {
@@ -703,7 +730,7 @@ func describeTable(path, dir string, names []string, snapshotAt time.Time) table
 		if err != nil {
 			slog.Warn("console: could not read the newest delta of a snapshot table for provenance",
 				"path", chain.LastFileUpserts(), "error", err)
-			return tableDescription{}
+			return tableDescription{lock: lock, lockRead: true}
 		}
 		last = &lm
 		if lm.SnapshotTimestamp.IsZero() {
@@ -714,14 +741,14 @@ func describeTable(path, dir string, names []string, snapshotAt time.Time) table
 			// When the rows were last read is still the file's to say.
 			slog.Warn("console: the newest delta of a snapshot table records no writer instant, so how the table was made is not shown",
 				"path", chain.LastFileUpserts())
-			return tableDescription{read: baseline.ChainSourceRead(md, last)}
+			return tableDescription{read: baseline.ChainSourceRead(md, last), lock: lock, lockRead: true}
 		}
 		if lm.SnapshotTimestamp.After(md.SnapshotTimestamp) {
 			describing = lm
 		}
 	}
 	p := baseline.ProvenanceOf(snapshotAt, describing)
-	d := tableDescription{producedBy: p.ProducedBy, read: baseline.ChainSourceRead(md, last)}
+	d := tableDescription{producedBy: p.ProducedBy, read: baseline.ChainSourceRead(md, last), lock: lock, lockRead: true}
 	if !p.From.IsZero() {
 		d.from = p.From.UTC().Format(consoleTSFormat)
 	}

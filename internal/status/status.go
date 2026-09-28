@@ -742,6 +742,11 @@ type BaselineInfo struct {
 	// operator can see per-table baseline size — the signal that tells whether
 	// a single-table baseline has grown into the large regime.
 	Size int64
+	// Lock is how the database was locked when this table's rows were read
+	// (#1380): consistent | unknown | torn, from the file's footer. "unknown"
+	// is a file with no record, or one whose footer could not be read. Empty
+	// when the caller did not look, which the report prints as "-".
+	Lock string
 }
 
 // CollectStatus loads all status data from the index database.
@@ -1543,6 +1548,10 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 		// and its start could not be read.
 		ReadsFrom        string `json:"reads_from,omitempty"`
 		ReadsFromUnknown bool   `json:"reads_from_unknown,omitempty"`
+		// SnapshotLock is how the database was locked when the table's rows
+		// were read (#1380): consistent | unknown | torn. "unknown" is a
+		// snapshot with no record; it is never reported as consistent.
+		SnapshotLock string `json:"snapshot_lock,omitempty"`
 	}
 	// jsonStreamError is emitted (under a distinct key, never a fake `stream` object —
 	// jsonStream's non-omitempty events_indexed:0/mode:"" would read as a real empty
@@ -1815,6 +1824,9 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 			jb.GTIDSet = &b.GTIDSet
 		}
 		jb.Staleness = string(b.Staleness)
+		if b.Lock != "" {
+			jb.SnapshotLock = jsonLock(b.Lock)
+		}
 		jb.ReadsFromUnknown = b.Bound.Unread
 		if from := b.Bound.From(b.SnapshotTime); !b.Bound.Unread && !from.Equal(b.SnapshotTime) {
 			jb.ReadsFrom = from.UTC().Format(TSFmt)
@@ -1832,6 +1844,79 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 }
 
 // writeBaselines writes the baselines section to a text status report.
+// Snapshot lock words (#1380), as baseline.ReadConsistency spells them. This
+// package does not import internal/baseline, so the three are repeated here
+// and pinned against it by a test in internal/cli.
+const (
+	LockConsistent = "consistent"
+	LockUnknown    = "unknown"
+	LockTorn       = "torn"
+)
+
+// jsonLock is a lock word on the wire: one of the three, and unknown for
+// anything else.
+func jsonLock(lock string) string {
+	switch lock {
+	case LockConsistent, LockTorn:
+		return lock
+	}
+	return LockUnknown
+}
+
+// lockColumn is one row's LOCKS cell. Anything that is not one of the three
+// words prints as unknown, never as consistent; an entry nobody looked at
+// prints "-".
+func lockColumn(lock string) string {
+	switch lock {
+	case "":
+		return "-"
+	case LockConsistent:
+		return LockConsistent
+	case LockTorn:
+		return "⚠ no locks"
+	}
+	return LockUnknown
+}
+
+// writeBaselineLocks says, under the table, how many tables have a NEWEST
+// snapshot that was read with no locks, and how many have one that does not
+// say. The newest is the one a restore starts from. Nothing is printed when
+// every newest snapshot is consistent or nobody looked.
+func writeBaselineLocks(w io.Writer, baselines []BaselineInfo, newestOf map[string]time.Time) {
+	var torn, unknown int
+	for _, b := range baselines {
+		if b.Lock == "" || !newestOf[b.Database+"."+b.Table].Equal(b.SnapshotTime) {
+			continue
+		}
+		switch b.Lock {
+		case LockConsistent:
+		case LockTorn:
+			torn++
+		default:
+			unknown++
+		}
+	}
+	if torn == 0 && unknown == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	if torn > 0 {
+		fmt.Fprintf(w, "⚠ NO LOCKS: the newest snapshot of %s was read with no locks, so its rows may not agree with each other.\n", tablesNoun(torn))
+		fmt.Fprintln(w, "  Every snapshot updated from it inherits that. A full snapshot taken with locks clears it.")
+	}
+	if unknown > 0 {
+		fmt.Fprintf(w, "LOCKS NOT RECORDED: the newest snapshot of %s does not say how it was locked.\n", tablesNoun(unknown))
+		fmt.Fprintln(w, "  It may have been read with no locks. A full snapshot taken with this version records it.")
+	}
+}
+
+func tablesNoun(n int) string {
+	if n == 1 {
+		return "1 table"
+	}
+	return strconv.Itoa(n) + " tables"
+}
+
 func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 	if len(baselines) == 0 {
 		return
@@ -1839,8 +1924,8 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "=== Baselines ===")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SNAPSHOT\tDATABASE\tTABLE\tSIZE\tBINLOG_FILE\tBINLOG_POS\tGTID\tREADS_FROM\tSTALENESS")
-	fmt.Fprintln(tw, "────────\t────────\t─────\t────\t───────────\t──────────\t────\t──────────\t─────────")
+	fmt.Fprintln(tw, "SNAPSHOT\tDATABASE\tTABLE\tSIZE\tBINLOG_FILE\tBINLOG_POS\tGTID\tREADS_FROM\tSTALENESS\tLOCKS")
+	fmt.Fprintln(tw, "────────\t────────\t─────\t────\t───────────\t──────────\t────\t──────────\t─────────\t─────")
 	// The ⚠ glyph is reserved for rows the banner keys on — each table's
 	// NEWEST snapshot. A superseded snapshot past coverage is routine on a
 	// healthy retention cadence (the console's rule too); it still reads
@@ -1885,12 +1970,13 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 		case !from.Equal(b.SnapshotTime):
 			readsFrom = from.UTC().Format(TSFmt)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			b.SnapshotTime.Format(TSFmt),
 			b.Database, b.Table, size,
-			binlogFile, binlogPos, gtid, readsFrom, staleness)
+			binlogFile, binlogPos, gtid, readsFrom, staleness, lockColumn(b.Lock))
 	}
 	tw.Flush()
+	writeBaselineLocks(w, baselines, newestOf)
 
 	// Continuity-banner-style loud line: a table whose NEWEST baseline
 	// predates delta coverage cannot be fully restored through that hole, and

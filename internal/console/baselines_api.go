@@ -70,6 +70,13 @@ type baselineSnapshotDTO struct {
 	ViewsSkipped int    `json:"views_skipped,omitempty"`
 	ViewsCarried bool   `json:"views_carried,omitempty"`
 	ViewsReadAt  string `json:"views_read_at,omitempty"`
+	// Lock is how the database was locked when the rows of this snapshot were
+	// read (#1380): consistent | unknown | torn, the worst of its tables.
+	// "unknown" is a snapshot with no record, which is every one written
+	// before the record existed; it is never reported as consistent. OMITTED
+	// when it cannot be said: a table of the snapshot is only in S3, where
+	// the listing reads no footer. See snapshot_lock.go.
+	Lock string `json:"lock,omitempty"`
 }
 
 type baselinesResponse struct {
@@ -347,6 +354,8 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	// curViews: the record of skipped views was looked for in this
 	// snapshot's local directory (#1879).
 	curViews := false
+	// The lock record of each snapshot's tables, keyed like rows (#1380).
+	locks := map[int64]*snapshotLocks{}
 	for _, f := range files {
 		if cur == nil || !f.SnapshotTime.Equal(curTime) {
 			if len(resp.Snapshots) >= baselinesMaxSnapshots {
@@ -389,6 +398,17 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 			curViews = false
 		}
 		cur.Tables = append(cur.Tables, f.Schema+"."+f.Table)
+		l := locks[f.SnapshotTime.UnixNano()]
+		if l == nil {
+			l = &snapshotLocks{}
+			locks[f.SnapshotTime.UnixNano()] = l
+		}
+		if baselineKindOf(f.Path) == "dir" {
+			l.add(snapshotLockMemo.of(f.Path))
+		} else {
+			l.notLooked++
+		}
+		cur.Lock = l.verdict()
 		// The snapshot's own record, from its local directory: one small
 		// file per snapshot. A snapshot found only in S3 is not read here
 		// (one request per row); its detail reads it.
