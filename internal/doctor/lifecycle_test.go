@@ -508,7 +508,7 @@ func TestSnapshotExpiryCheck(t *testing.T) {
 			if !strings.Contains(got.Remediation, tt.wantFix) {
 				t.Fatalf("Remediation %q does not contain %q", got.Remediation, tt.wantFix)
 			}
-			if strings.ContainsRune(got.Detail+got.Remediation, '—') {
+			if strings.ContainsRune(got.Detail+got.Remediation, '\u2014') {
 				t.Fatalf("the text carries an em dash: %q / %q", got.Detail, got.Remediation)
 			}
 		})

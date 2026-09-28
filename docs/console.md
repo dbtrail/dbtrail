@@ -830,7 +830,10 @@ longer drawn on the page.
   objects with a tag or a size is not counted either, and the line says how
   many of those it found. The whole-bucket one-year rule that
   `bintrail init --s3-bucket` sets does count. With several rules, the
-  shortest age is the one shown, since it deletes first. The read is one
+  shortest age is the one shown, since it deletes first. What the read does
+  not check is versioning: on a versioned bucket a rule that expires current
+  objects only leaves the old versions in place, which is why the generated
+  rule expires those too. The read is one
   request with a 5 second limit, its answer is reused for 30 seconds, and it
   is only a read: `bintrail doctor --baseline-s3` reports the same answer
   from the command line ([s3-iam-policy.md](s3-iam-policy.md)).

@@ -230,7 +230,7 @@ console.log(JSON.stringify(out, null, 1));
 				t.Errorf("%s: %q says %q", c.name, w.Text, s)
 			}
 		}
-		if strings.ContainsAny(w.Text, "—–") || strings.Contains(w.Text, "undefined") || strings.Contains(w.Text, "NaN") {
+		if strings.ContainsAny(w.Text, "\u2014\u2013") || strings.Contains(w.Text, "undefined") || strings.Contains(w.Text, "NaN") {
 			t.Errorf("%s: %q carries a dash or an unfilled value", c.name, w.Text)
 		}
 		if !strings.HasSuffix(w.Text, ".") {
