@@ -24,7 +24,7 @@ The rest of this page shows how to write the `read_parquet` globs by hand — wo
 bintrail views \
   --index-dsn    "user:pass@tcp(index-db:3306)/bintrail_index" \
   --baseline-dir /data/baselines \
-  --out          views.sql
+  --output       views.sql
 
 duckdb -init views.sql lake.db
 ```
@@ -41,7 +41,7 @@ bintrail views \
   --index-dsn    "user:pass@tcp(index-db:3306)/bintrail_index" \
   --baseline-dir /data/baselines \
   --include-events \
-  --out          views.sql
+  --output       views.sql
 ```
 
 `-init` runs the file as the session opens, so the views and the S3 secret are both there when you get the prompt. In a session that is already open, `.read views.sql` does the same.
@@ -56,7 +56,7 @@ By default these views read the **Parquet only**. Parquet exists for a partition
 bintrail views \
   --index-dsn "user:pass@tcp(index-db:3306)/bintrail_index" \
   --include-events --include-live \
-  --out views.sql
+  --output views.sql
 ```
 
 The view then reads both and is fresh to capture lag, which is seconds when the index keeps up. A partition that has been archived but not yet dropped exists on both sides, so the index leg excludes any `event_id` the archives already returned: **the archives win the overlap.** They have to. An archived row knows its `bintrail_id`, `event_date` and `event_hour` from its storage path, and an index row has to derive or forgo them, so letting the index win would replace a known source with NULL for every event in the overlap window.
@@ -81,7 +81,7 @@ Archive sources come from the index's `archive_state` registry, so a new server 
 
 ```sh
 bintrail views --archive-s3 s3://bucket/archives/ --bintrail-id <uuid> \
-  --baseline-s3 s3://bucket/baselines/ --out -
+  --baseline-s3 s3://bucket/baselines/ --output -
 ```
 
 Three properties worth knowing:
@@ -130,7 +130,7 @@ To get a table back as it stood before a purge, use `bintrail reconstruct --at` 
 | `--include-live` | Add the live index leg to `events`. Needs `--index-dsn`, and read its section above first |
 | `--no-baselines` | Emit `events` only, no `state_` views. Needs `--include-events` |
 | `--region` | AWS region to pin in the generated S3 secret |
-| `--out` | Output file, or `-` for stdout. Default `views.sql` |
+| `--output` | Output file, or `-` for stdout. Default `views.sql`. The older name `--out` keeps working |
 
 A baselines-only file needs no index at all: `--baseline-dir` or `--baseline-s3`
 on its own is enough, and the result reads on a machine that cannot reach your

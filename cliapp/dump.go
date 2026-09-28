@@ -354,7 +354,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 
 	// 5. Safely prepare the output directory (#809). Refuse to delete a
 	// non-empty directory that is not a recognizable prior mydumper/bintrail
-	// dump — a typo'd --output (or a stray BINTRAIL_OUTPUT_DIR in a sibling
+	// dump. A typo'd --output (or a stray BINTRAIL_OUTPUT_DIR in a sibling
 	// .bintrail.env) must never wipe an arbitrary tree, including baselines
 	// that reconstruct/verify depend on. A recognizable prior dump is moved
 	// aside (dir → dir.old) and only deleted once THIS dump succeeds, so a

@@ -217,7 +217,7 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 		// snapshot outside it whose views.sql would fall through to the plain
 		// copy — the exact wrong-paths artifact this branch exists to stop.
 		// Name-shaped fails closed; a views.sql at the baselines ROOT (an
-		// operator's own `bintrail views --out`) has a non-timestamp parent
+		// operator's own `bintrail views --output`) has a non-timestamp parent
 		// and still uploads verbatim, which is theirs to spell.
 		if base := filepath.Base(filepath.Dir(path)); d.Name() == SnapshotViewsName {
 			if _, isSnap := snapshotdir.ParseTime(base); isSnap {
