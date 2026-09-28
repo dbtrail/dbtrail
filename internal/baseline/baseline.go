@@ -41,6 +41,9 @@ type Stats struct {
 	TablesProcessed int
 	RowsWritten     int64
 	FilesWritten    int
+	// ViewsSkipped names, as "db.view" and sorted, the views the dump held.
+	// A view has no rows of its own, so it is not part of the baseline.
+	ViewsSkipped []string
 }
 
 // Run converts a mydumper output directory into Parquet files.
@@ -90,9 +93,19 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	}
 
 	// Discover tables.
-	tables, err := DiscoverTables(cfg.InputDir)
+	tables, views, err := DiscoverDump(cfg.InputDir)
 	if err != nil {
 		return Stats{}, fmt.Errorf("discover tables: %w", err)
+	}
+	viewNames := make([]string, len(views))
+	for i, v := range views {
+		viewNames[i] = v.Database + "." + v.Name
+		slog.Info("skipping view: a view holds no rows to copy",
+			"db", v.Database, "view", v.Name, "file", v.File)
+	}
+	if len(tables) == 0 && len(views) > 0 {
+		return Stats{}, fmt.Errorf("no tables found in %s: the dump holds %s and no table, and a view has no rows to copy; check the dump's schema filter",
+			cfg.InputDir, countNoun(len(views), "view"))
 	}
 	if len(tables) == 0 {
 		// A metadata-only dump is easy to produce with mydumper itself exiting
@@ -105,11 +118,23 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 
 	// Apply table filter.
 	if len(cfg.Tables) > 0 {
+		// Naming a view is refused, not ignored: the caller asked for a copy
+		// of something that has no rows, and would not get one.
+		if asked := viewsInFilter(viewNames, cfg.Tables); len(asked) > 0 {
+			return Stats{}, fmt.Errorf("--tables names %s (%s): a view has no rows to copy, name tables only",
+				countNoun(len(asked), "view"), strings.Join(asked, ", "))
+		}
 		discovered := len(tables)
 		tables = filterTables(tables, cfg.Tables)
 		if len(tables) == 0 {
 			return Stats{}, fmt.Errorf("--tables filter %v matched none of the %d table(s) in the dump", cfg.Tables, discovered)
 		}
+	}
+	// Under --tables the caller chose what to copy, so what was left out is
+	// not news: the views are reported only for a run that takes everything.
+	var stats Stats
+	if len(cfg.Tables) == 0 && len(viewNames) > 0 {
+		stats.ViewsSkipped = viewNames
 	}
 
 	// Timestamp string for directory name and metadata (colons → dashes for
@@ -160,9 +185,8 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 	sem := make(chan struct{}, concurrency)
 
 	var (
-		mu    sync.Mutex
-		stats Stats
-		errs  []error
+		mu   sync.Mutex
+		errs []error
 	)
 
 	var wg sync.WaitGroup
@@ -413,6 +437,30 @@ func processTable(ctx context.Context, tf TableFiles, outPath string, cfg Writer
 		return rowCount, fmt.Errorf("close writer: %w", err)
 	}
 	return rowCount, nil
+}
+
+// viewsInFilter returns the views a "db.table" filter names, compared the way
+// filterTables compares tables.
+func viewsInFilter(views, filter []string) []string {
+	set := make(map[string]bool, len(filter))
+	for _, f := range filter {
+		set[strings.ToLower(f)] = true
+	}
+	var named []string
+	for _, v := range views {
+		if set[strings.ToLower(v)] {
+			named = append(named, v)
+		}
+	}
+	return named
+}
+
+// countNoun renders "1 view" or "3 views".
+func countNoun(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
 }
 
 // filterTables returns only tables that match the "db.table" filter list.

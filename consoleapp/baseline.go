@@ -437,6 +437,7 @@ func (s *baselineSupervisor) publishDump(req console.BaselineRequest, out dumpOu
 	st.Uploading = true
 	st.LastError = ""
 	st.Tables = out.stats.TablesProcessed
+	st.ViewsSkipped = len(out.stats.ViewsSkipped)
 	st.Rows = out.stats.RowsWritten
 	st.FinishedAt = nowStamp()
 	slog.Info("baseline: snapshot published locally; uploading it to the snapshot destination in the background",
@@ -585,6 +586,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	rec := console.BaselineRunRecord{
 		Kind: console.BaselineRunDump, Trigger: req.Trigger, StartedAt: started.Format(time.RFC3339),
 		Tables: out.stats.TablesProcessed, Rows: out.stats.RowsWritten, Uploaded: uploaded,
+		ViewsSkipped: len(out.stats.ViewsSkipped),
 		// The reason this was a full backup travels with the run (#1604):
 		// recomputed later it would name whatever is true THEN.
 		Why: req.Why, WhyCode: console.BackupWhyCode(req.Why),
@@ -633,12 +635,14 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	st.State = "succeeded"
 	st.LastError = ""
 	st.Tables = out.stats.TablesProcessed
+	st.ViewsSkipped = len(out.stats.ViewsSkipped)
 	st.Rows = out.stats.RowsWritten
 	st.Uploaded = uploaded
 	st.Swept = swept
 	st.Published = st.Published || out.snapDir != ""
 	slog.Info("baseline: snapshot complete", "server", req.ServerName, "id", req.ServerID,
-		"tables", out.stats.TablesProcessed, "rows", out.stats.RowsWritten, "uploaded", uploaded, "swept", swept)
+		"tables", out.stats.TablesProcessed, "views_skipped", len(out.stats.ViewsSkipped),
+		"rows", out.stats.RowsWritten, "uploaded", uploaded, "swept", swept)
 }
 
 // s3ObjectPresent reports whether one object exists at an s3:// URL — the

@@ -1,0 +1,16 @@
+/*!40101 SET NAMES utf8mb4*/;
+/*!40014 SET FOREIGN_KEY_CHECKS=0*/;
+/*!40101 SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO,ONLY_FULL_GROUP_BY,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'*/;
+/*!40103 SET TIME_ZONE='+00:00' */;
+DROP TABLE IF EXISTS `big_orders`;
+DROP VIEW IF EXISTS `big_orders`;
+SET @PREV_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT;
+SET @PREV_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS;
+SET @PREV_COLLATION_CONNECTION=@@COLLATION_CONNECTION;
+SET character_set_client = latin1;
+SET character_set_results = latin1;
+SET collation_connection = latin1_swedish_ci;
+CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `big_orders` AS select `orders`.`id` AS `id`,`orders`.`customer` AS `customer`,`orders`.`total` AS `total` from `orders` where (`orders`.`total` > 100);
+SET character_set_client = @PREV_CHARACTER_SET_CLIENT;
+SET character_set_results = @PREV_CHARACTER_SET_RESULTS;
+SET collation_connection = @PREV_COLLATION_CONNECTION;

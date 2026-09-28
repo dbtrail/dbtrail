@@ -215,6 +215,10 @@ type BaselineStatus struct {
 	// because the destination lacked them (a refresh whose upload failed).
 	Swept  int `json:"swept,omitempty"`
 	Tables int `json:"tables,omitempty"`
+	// ViewsSkipped counts the views the source held when it was read in full.
+	// A view has no rows of its own, so it is not in the snapshot; the daemon
+	// log names each one.
+	ViewsSkipped int `json:"views_skipped,omitempty"`
 	// Carried counts tables published by reusing the previous snapshot's file
 	// rather than folding them again (refresh and restore only). It is the
 	// ONLY confirmation the operator gets that the reuse setting did anything:
