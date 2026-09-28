@@ -32,8 +32,8 @@ import (
 //     but after digits and uppercase), so a single-pass lexical WalkDir could
 //     publish it before all data is up. We defer it UNCONDITIONALLY, which keeps
 //     the S3 snapshot un-marked-complete until its data is fully present.
-//  4. best-effort _INCOMPLETE delete. s3IncompleteSnapshots only flags a
-//     snapshot incomplete when _INCOMPLETE is present AND _SUCCESS is absent, so
+//  4. best-effort _INCOMPLETE delete. The readers only take a snapshot for
+//     incomplete when _INCOMPLETE is present AND _SUCCESS is absent, so
 //     a leftover _INCOMPLETE next to a published _SUCCESS is harmless — a failed
 //     delete never demotes a completed snapshot.
 //
