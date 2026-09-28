@@ -79,6 +79,17 @@ var newS3SnapshotLister = func(ctx context.Context, s3URL string) (s3SnapshotLis
 // this. The listing costs one request per 1,000 directories.
 const s3DirsTTL = 10 * time.Second
 
+// s3DirSettle is how long a directory's newest object must have been in
+// place before the directory's contents are remembered. What this product
+// uploads is complete once _SUCCESS is listed, which it writes last. A
+// directory with no marker (an older version, another writer) can be read
+// while it is uploaded, and a read of more than one page is not one moment:
+// an upload that finishes between two pages shows _SUCCESS and not every
+// file. Remembered, either would hide the missing tables until the process
+// restarts. A directory this fresh is answered from what was read and read
+// again by the next call, one request each time.
+const s3DirSettle = 5 * time.Minute
+
 // s3DirReadConcurrency bounds the directory reads in flight for one call:
 // a cold inventory of a thousand directories is a thousand requests, and
 // the console's listing budget is 15 s, so they go out in parallel.
@@ -109,6 +120,9 @@ type s3Inventory struct {
 // no particular order, keyed off the directory's own listing.
 type s3DirContents struct {
 	files []BaselineFile
+	// fresh is set when the directory's newest object is younger than
+	// s3DirSettle: answered, and not remembered.
+	fresh bool
 }
 
 var (
@@ -347,7 +361,8 @@ func (x *s3SnapshotIndex) files(ctx context.Context, newest int) (files []Baseli
 	return files, more, nil
 }
 
-// keep stores the complete directories a round read. Called on the error
+// keep stores the complete directories a round read, but for the ones
+// still fresh (s3DirSettle). Called on the error
 // path too: a read that finished before a sibling failed is still a read
 // of an immutable directory.
 //
@@ -358,7 +373,7 @@ func (x *s3SnapshotIndex) files(ctx context.Context, newest int) (files []Baseli
 func (x *s3SnapshotIndex) keep(dirs []s3SnapshotDir, read []s3DirContents, complete []bool, signed []dirSignature) {
 	x.inv.mu.Lock()
 	for i, d := range dirs {
-		if complete[i] {
+		if complete[i] && !read[i].fresh {
 			x.inv.contents[d.name] = read[i]
 		}
 		if signed[i].read {
@@ -401,11 +416,15 @@ func (x *s3SnapshotIndex) readDir(ctx context.Context, d s3SnapshotDir) (c s3Dir
 	}
 	var success, incomplete bool
 	var plain []string
+	var newest time.Time              // zero when the store reports no times
 	bySchema := map[string][]string{} // the file names of each schema folder
 	for _, o := range infos {
 		parts := strings.Split(o.Key, "/")
 		if parts[0] != d.name {
 			continue // never the case on S3; a fake that ignores the prefix
+		}
+		if o.LastModified.After(newest) {
+			newest = o.LastModified
 		}
 		if len(parts) == 2 {
 			plain = append(plain, parts[1])
@@ -451,6 +470,8 @@ func (x *s3SnapshotIndex) readDir(ctx context.Context, d s3SnapshotDir) (c s3Dir
 	if len(infos) == 0 {
 		return s3DirContents{}, dirSignature{}, false, nil
 	}
+	// A time in the future (a clock ahead of this one) is fresh too.
+	c.fresh = !newest.IsZero() && s3Clock().Sub(newest) < s3DirSettle
 	return c, sig, true, nil
 }
 
