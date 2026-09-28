@@ -410,6 +410,14 @@ export async function runSaveScenes(ctx) {
       const fill = async (vals) => {
         await page.evaluate(() => { const a = document.getElementById("server-advanced"); if (a) a.open = true; });
         for (const [k, v] of Object.entries(vals)) await page.fill(`#server-form-mount [name="${k}"]`, v);
+        // The full form arrives with the source account the Connect screen
+        // generated. This entry has no source, so it goes: sent without a
+        // source host, a typed account is refused as a source with no host.
+        await page.evaluate(() => {
+          const f = document.querySelector("#server-form-mount #server-form").elements;
+          f.source_user.value = "";
+          f.source_password.value = "";
+        });
       };
       // Spaces around the name: the form trims it, and the stored name must
       // be the trimmed one.
@@ -746,7 +754,13 @@ export async function runSaveScenes(ctx) {
         if (b) { b.click(); return true; }
         return false;
       }));
-      const minted1 = await until(() => page.evaluate(() => (document.querySelector(".cn-urlrow code.cn-url") || {}).textContent || ""));
+      // The plaintext, read from the token card only: the page has other
+      // copyable rows (the address) drawn the same way.
+      const shownToken = () => page.evaluate(() => {
+        const card = Array.from(document.querySelectorAll(".cn-card")).find((c) => /Create a token/.test((c.querySelector(".cn-title") || {}).textContent || ""));
+        return (card && (card.querySelector(".cn-urlrow code.cn-url") || {}).textContent) || "";
+      });
+      const minted1 = await until(shownToken);
       const st1 = (await readAs(page, "/api/mcp-token")).body;
       const auth1 = minted1 ? await mcpStatus(minted1) : 0;
       check("mcp-token", "Generate token stores a token the MCP endpoint accepts",
@@ -759,10 +773,10 @@ export async function runSaveScenes(ctx) {
         if (b) { b.click(); return true; }
         return false;
       }));
-      const minted2 = await until(() => page.evaluate((old) => {
-        const t = (document.querySelector(".cn-urlrow code.cn-url") || {}).textContent || "";
-        return t && t !== old ? t : "";
-      }, minted1));
+      const minted2 = await until(async () => {
+        const t = await shownToken();
+        return t && t !== minted1 ? t : "";
+      });
       const auth2 = minted2 ? await mcpStatus(minted2) : 0;
       const authOld = minted1 ? await mcpStatus(minted1) : 0;
       check("mcp-token", "New token stores a new value and the old one stops working",
