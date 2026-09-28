@@ -116,7 +116,7 @@ SET VARIABLE bintrail_tables_checked = (SELECT CASE WHEN getvariable('bintrail_m
     '. If they were dropped or renamed, download this file again.') END);
 
 -- state_legacy_db_audit_log: this file carries no column types, so nothing is cast; decimal columns read as text
--- state_legacy_db_audit_log: reads the table file alone because its schema could not be read, so it stops with an error once a refresh writes changes beside the file; generate the views again then
+-- state_legacy_db_audit_log: reads the table file alone because its schema could not be read. If a refresh writes changes beside the file, this view stops with an error until the views are generated again
 CREATE OR REPLACE VIEW "state_legacy_db_audit_log" AS
   SELECT * FROM read_parquet(CASE WHEN getvariable('bintrail_newest_snapshot') IS NULL
     THEN error('bintrail views: this file sets a session variable; run its SET VARIABLE statement in this session first')

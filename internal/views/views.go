@@ -2261,8 +2261,8 @@ func fileAloneComment(in Input, t BaselineTable) string {
 	if t.SchemaKnown {
 		why = "another table in its schema has a name that starts with " + commentSafe(t.Table) + "."
 	}
-	return "reads the table file alone because " + why + ", so it stops with an error once a refresh " +
-		"writes changes beside the file; generate the views again then"
+	return "reads the table file alone because " + why + ". If a refresh writes changes beside the file, " +
+		"this view stops with an error until the views are generated again"
 }
 
 // chainReady says whether a FOLLOWING state view of a table with no chain
