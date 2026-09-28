@@ -8004,7 +8004,10 @@ function baselinesPanel(b, servers, opts) {
         row.classList.add("stg-row-going");
         row.append(el("span", { class: "tag-pill stg-going", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, never a table's only copy." }));
       }
-      if (uniformTables === null) row.append(el("span", { class: "stg-dest", text: (sn.tables || []).length + " table(s)" }));
+      // With skipped views the row says both counts (#1879), whether or not
+      // the table count varies: the views are what the row is there to show.
+      const skippedViews = snapshotViewsText(sn);
+      if (skippedViews || uniformTables === null) row.append(el("span", { class: "stg-dest", text: skippedViews || (sn.tables || []).length + " table(s)" }));
       if (idx === 0 && sn.staleness && sn.staleness !== "ok") {
         row.append(el("span", { class: "chip chip-mon", text:
           sn.staleness === "broken" ? "⚠ STALE: restore broken" : sn.staleness.toUpperCase() }));
@@ -8286,6 +8289,68 @@ function sourceReadLine(d) {
     "." + tail;
 }
 
+// viewsSkippedCount reads a count of skipped views off the wire: a whole
+// number above zero, or 0 for anything else. Nothing recorded arrives as no
+// key at all, and that must never be drawn as "0 views skipped".
+function viewsSkippedCount(v) {
+  return typeof v === "number" && isFinite(v) && v >= 1 ? Math.floor(v) : 0;
+}
+
+// viewsSkippedAsOf says of WHEN a carried list is. A snapshot updated from
+// the recorded changes read no views: its list is the one of the last full
+// read, so it is dated and never said as the present.
+function viewsSkippedAsOf(carried, readAt) {
+  if (!carried) return "";
+  return readAt ? " as of the full read of " + utcLabel(readAt) : " as of an earlier full read";
+}
+
+// snapshotViewsText (#1879) is a snapshot row's count: "2 tables, 1 view
+// skipped". "" when the snapshot records no skipped view, which is every
+// snapshot from before the record and every source with no views.
+function snapshotViewsText(sn) {
+  const n = viewsSkippedCount(sn && sn.views_skipped);
+  if (!n) return "";
+  const tables = ((sn && sn.tables) || []).length;
+  return (tables === 1 ? "1 table" : tables + " tables") + ", " + (n === 1 ? "1 view" : n + " views") + " skipped" +
+    viewsSkippedAsOf(sn.views_carried === true, sn.views_read_at);
+}
+
+// viewsSkippedWords is the detail of a snapshot's skipped views: a line, the
+// names, and how many are not listed. null when nothing is recorded.
+function viewsSkippedWords(v) {
+  const n = viewsSkippedCount(v && v.count);
+  if (!n) return null;
+  const clip = (name) => {
+    const chars = Array.from(String(name == null ? "" : name).replace(/\s+/g, " ").trim());
+    return chars.length > 130 ? chars.slice(0, 127).join("") + "..." : chars.join("");
+  };
+  const names = (Array.isArray(v.names) ? v.names : []).map(clip).filter((name) => name).slice(0, 20);
+  const left = Math.max(0, n - names.length);
+  const carried = v.carried === true;
+  return {
+    head: (n === 1 ? "1 view" : n + " views") + " skipped" + viewsSkippedAsOf(carried, v.read_at) +
+      ". A view holds no rows to copy." +
+      (carried ? " This snapshot was updated from the recorded changes and did not read the views again: a view created or dropped since is not shown." : ""),
+    names: names,
+    more: !left ? ""
+      : names.length ? left + " more not listed. The log of the full read names every view."
+      : "The log of the full read names " + (n === 1 ? "it." : "each one."),
+  };
+}
+
+// viewsSkippedBlock draws viewsSkippedWords. Every name is set as text,
+// never parsed as markup: it comes from a server.
+function viewsSkippedBlock(v) {
+  const d = viewsSkippedWords(v);
+  if (!d) return null;
+  const names = el("ul", { class: "views-skipped-names" });
+  for (const name of d.names) names.append(el("li", null, el("code", { text: name })));
+  return el("div", { class: "views-skipped" },
+    el("p", { class: "form-hint", text: d.head }),
+    d.names.length ? names : null,
+    d.more ? el("p", { class: "form-hint", text: d.more }) : null);
+}
+
 async function loadBackupDetail(at, box) {
   box.textContent = "Loading…";
   let d;
@@ -8320,6 +8385,8 @@ async function loadBackupDetail(at, box) {
   if (sessionMay("query:execute")) facts.append(dl);
   box.append(facts);
   if (d.incomplete) box.append(el("p", { class: "form-msg err", text: "This snapshot is marked incomplete (a failed or unfinished run); it cannot be downloaded or restored from." }));
+  const skipped = viewsSkippedBlock(d.views_skipped);
+  if (skipped) box.append(skipped);
   const tbl = el("table", { class: "bk-table" });
   // The "Made by" column is only rendered when a row actually carries a verdict
   // (#1545). An S3 source does not look it up, and a header over a column of

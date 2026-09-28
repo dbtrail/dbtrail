@@ -2099,6 +2099,12 @@ button { font-family: inherit; }
 .refused-what { color: var(--delete); }
 .refused-why { flex-basis: 100%; color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
 
+/* The views a snapshot left out (#1879): one line, then the names. */
+.views-skipped { margin: 8px 0; }
+.views-skipped .form-hint { margin: 0; }
+.views-skipped-names { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.views-skipped-names code { font-family: var(--f-mono); font-size: 12px; overflow-wrap: anywhere; }
+
 /* doctor preflight cards (monitor start) */
 .doctor-cards { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
 .doctor-card {
