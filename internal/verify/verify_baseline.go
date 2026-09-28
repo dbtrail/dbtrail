@@ -348,11 +348,7 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	res.Status, res.Detail = classify(newDigest, newCount, reconDigest, reconCount, deferredDetail)
 	// A snapshot known to be torn explains a difference; one with no record
 	// of its locks does not (#1380, withSnapshotLock).
-	var lock baseline.ReadConsistency
-	res.Status, res.Detail, lock = withSnapshotLock(res.Status, res.Detail,
-		lockSide{what: "the snapshot of " + p.NewSnapshot.UTC().Format(time.RFC3339), lock: p.NewLock},
-		lockSide{what: "the snapshot of " + prevSnapshotTime(p).UTC().Format(time.RFC3339), lock: p.PrevLock})
-	res.SnapshotLock = lock.String()
+	res.Status, res.Detail, res.SnapshotLock = pairLockVerdict(p, res.Status, res.Detail)
 	return res, nil
 }
 
@@ -655,6 +651,14 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile) (p Base
 	return pair, restsOn{from: prev.SnapshotTime, until: read.SnapshotTime,
 		holds: fmt.Sprintf("a snapshot of this table between the one it would be compared with (%s) and its last read (%s)",
 			prev.SnapshotTime.UTC().Format(time.RFC3339), readAt)}
+}
+
+// pairLockVerdict is withSnapshotLock over the two sides of a pair.
+func pairLockVerdict(p BaselinePair, st Status, detail string) (Status, string, string) {
+	st, detail, lock := withSnapshotLock(st, detail,
+		lockSide{what: "the snapshot of " + p.NewSnapshot.UTC().Format(time.RFC3339), lock: p.NewLock},
+		lockSide{what: "the snapshot of " + prevSnapshotTime(p).UTC().Format(time.RFC3339), lock: p.PrevLock})
+	return st, detail, lock.String()
 }
 
 // prevSnapshotTime names the older side of a pair: the time in its path when

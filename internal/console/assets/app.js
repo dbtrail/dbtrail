@@ -8008,6 +8008,8 @@ function baselinesPanel(b, servers, opts) {
       // the table count varies: the views are what the row is there to show.
       const skippedViews = snapshotViewsText(sn);
       if (skippedViews || uniformTables === null) row.append(el("span", { class: "stg-dest", text: skippedViews || (sn.tables || []).length + " table(s)" }));
+      const lockPill = snapshotLockPill(sn.lock);
+      if (lockPill) row.append(lockPill);
       if (idx === 0 && sn.staleness && sn.staleness !== "ok") {
         row.append(el("span", { class: "chip chip-mon", text:
           sn.staleness === "broken" ? "⚠ STALE: restore broken" : sn.staleness.toUpperCase() }));
@@ -8289,6 +8291,56 @@ function sourceReadLine(d) {
     "." + tail;
 }
 
+// SNAPSHOT_LOCK (#1380) is what a snapshot says about the locks taken when
+// the database was read: a short label and one sentence. A snapshot read with
+// no locks copies its rows at different moments, so they may not agree with
+// each other, and every snapshot updated from it inherits that.
+//
+// "consistent" draws nothing on a row: it is the normal state. Every other
+// answer draws, and so does no answer at all, because a row with nothing on
+// it reads as a good one.
+const SNAPSHOT_LOCK = {
+  torn: ["no locks", "Read with no locks. Its rows were copied at different moments and may not agree with each other."],
+  unknown: ["locks not recorded", "This snapshot does not say how it was locked. It may have been read with no locks."],
+  unread: ["locks not checked", "Stored in S3, where this list does not read how a snapshot was locked."],
+};
+
+// snapshotLockKey maps the wire value to a key of SNAPSHOT_LOCK, or "" for
+// consistent. Anything that is not one of the three words is "unread".
+function snapshotLockKey(lock) {
+  if (lock === "consistent") return "";
+  return lock === "torn" || lock === "unknown" ? lock : "unread";
+}
+
+// snapshotLockPill is the mark on a snapshot's row; null for consistent.
+function snapshotLockPill(lock) {
+  const entry = SNAPSHOT_LOCK[snapshotLockKey(lock)];
+  if (!entry) return null;
+  return el("span", { class: "tag-pill snap-lock snap-lock-" + snapshotLockKey(lock), title: entry[1], text: entry[0] });
+}
+
+// snapshotLockLine is the detail's own line. "" when nothing was looked up.
+function snapshotLockLine(d) {
+  const total = ((d && d.tables) || []).length;
+  const count = (n) => n + " of " + total + (total === 1 ? " table" : " tables");
+  const torn = (d && d.lock_torn) || 0;
+  const unknown = (d && d.lock_unknown) || 0;
+  if (!d || !d.lock) return "";
+  if (d.lock === "consistent") return "Read with locks: every row is from one moment.";
+  const parts = [];
+  if (torn) parts.push("Read with no locks: " + count(torn) + ". Rows were copied at different moments and may not agree with each other.");
+  if (unknown) parts.push("Locks not recorded: " + count(unknown) + ". They may have been read with no locks.");
+  return parts.join(" ");
+}
+
+// tableLockMark is the mark beside one table of the detail; null when the
+// table is consistent or was not looked up.
+function tableLockMark(t) {
+  if (!t || !t.lock || t.lock === "consistent") return null;
+  const entry = SNAPSHOT_LOCK[snapshotLockKey(t.lock)];
+  return el("span", { class: "bk-made-from snap-lock-" + snapshotLockKey(t.lock), title: entry[1], text: " · " + entry[0] });
+}
+
 // viewsSkippedCount reads a count of skipped views off the wire: a whole
 // number above zero, or 0 for anything else. Nothing recorded arrives as no
 // key at all, and that must never be drawn as "0 views skipped".
@@ -8377,6 +8429,8 @@ async function loadBackupDetail(at, box) {
   if (d.run && d.run.why) facts.append(el("span", { class: "stg-dest", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
   const readLine = sourceReadLine(d);
   if (readLine) facts.append(el("span", { class: "stg-dest", text: readLine }));
+  const lockLine = snapshotLockLine(d);
+  if (lockLine) facts.append(el("span", { class: "stg-dest", text: lockLine }));
   const dl = el("button", { class: "btn", type: "button",
     text: "Download (.tar.gz) · " + humanBytes(d.total_bytes || 0) });
   if (d.incomplete) dl.disabled = true;
@@ -8401,7 +8455,7 @@ async function loadBackupDetail(at, box) {
     const row = el("tr", {},
       el("td", { class: "mono", text: t.schema + "." + t.table }),
       el("td", { text: humanBytes(t.size_bytes || 0) }));
-    if (anyProv) row.append(el("td", {}, madeByCell(t)));
+    if (anyProv) row.append(el("td", {}, madeByCell(t), tableLockMark(t)));
     tb.append(row);
   });
   tbl.append(tb);

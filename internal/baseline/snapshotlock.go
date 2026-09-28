@@ -78,20 +78,27 @@ func (c ReadConsistency) String() string {
 	return "unknown"
 }
 
+// isLockMode reports whether s is exactly one of the four lock modes.
+func isLockMode(s string) bool {
+	switch LockMode(s) {
+	case LockModeFTWRL, LockModeLockAll, LockModeSafeNoLock, LockModeNoLock:
+		return true
+	}
+	return false
+}
+
 // ReadConsistencyOfStamp reads one MetaKeyLockMode value. Only an exact value
 // this program writes is an answer. Anything else is unknown: empty, another
 // spelling, a value from a later version. It does not go through
 // ParseLockMode, which reads "" as the default mode and would turn a snapshot
 // with no record into a consistent one.
 func ReadConsistencyOfStamp(stamp string) ReadConsistency {
-	switch mode := LockMode(stamp); mode {
-	case LockModeFTWRL, LockModeLockAll, LockModeSafeNoLock, LockModeNoLock:
-		if mode.PointConsistent() {
-			return ReadConsistent
-		}
+	switch {
+	case isLockMode(stamp) && LockMode(stamp).PointConsistent():
+		return ReadConsistent
+	case isLockMode(stamp):
 		return ReadTorn
-	}
-	if stamp == LockStampPGRepeatableRead {
+	case stamp == LockStampPGRepeatableRead:
 		return ReadConsistent
 	}
 	return ReadUnknown
@@ -138,7 +145,7 @@ const LockModeMarkerFile = "bintrail_dump_lock_mode"
 
 // WriteLockModeMarker records in dir the lock mode mydumper was run with.
 func WriteLockModeMarker(dir string, mode LockMode) error {
-	if ReadConsistencyOfStamp(string(mode)) == ReadUnknown {
+	if !isLockMode(string(mode)) {
 		return fmt.Errorf("write %s: %q is not a lock mode", LockModeMarkerFile, string(mode))
 	}
 	path := filepath.Join(dir, LockModeMarkerFile)
@@ -187,8 +194,7 @@ func readLockModeMarker(inputDir string) string {
 		return ""
 	}
 	mode := strings.TrimSpace(string(data))
-	switch LockMode(mode) {
-	case LockModeFTWRL, LockModeLockAll, LockModeSafeNoLock, LockModeNoLock:
+	if isLockMode(mode) {
 		return mode
 	}
 	slog.Warn("the dump's lock mode record does not name a lock mode; the snapshot will not say how it was locked",

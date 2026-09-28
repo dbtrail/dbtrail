@@ -1924,8 +1924,8 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "=== Baselines ===")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SNAPSHOT\tDATABASE\tTABLE\tSIZE\tBINLOG_FILE\tBINLOG_POS\tGTID\tREADS_FROM\tSTALENESS\tLOCKS")
-	fmt.Fprintln(tw, "────────\t────────\t─────\t────\t───────────\t──────────\t────\t──────────\t─────────\t─────")
+	fmt.Fprintln(tw, "SNAPSHOT\tDATABASE\tTABLE\tSIZE\tBINLOG_FILE\tBINLOG_POS\tGTID\tLOCKS\tREADS_FROM\tSTALENESS")
+	fmt.Fprintln(tw, "────────\t────────\t─────\t────\t───────────\t──────────\t────\t─────\t──────────\t─────────")
 	// The ⚠ glyph is reserved for rows the banner keys on — each table's
 	// NEWEST snapshot. A superseded snapshot past coverage is routine on a
 	// healthy retention cadence (the console's rule too); it still reads
@@ -1973,7 +1973,7 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			b.SnapshotTime.Format(TSFmt),
 			b.Database, b.Table, size,
-			binlogFile, binlogPos, gtid, readsFrom, staleness, lockColumn(b.Lock))
+			binlogFile, binlogPos, gtid, lockColumn(b.Lock), readsFrom, staleness)
 	}
 	tw.Flush()
 	writeBaselineLocks(w, baselines, newestOf)
