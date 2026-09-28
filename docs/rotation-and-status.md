@@ -781,12 +781,16 @@ past coverage still alerts, whatever could not be read for the table beside
 it.
 
 A chain of deltas lives for up to 24 hours before the table is written whole
-again. With a retention of 24 hours or less and table deltas on, the start
-of a chain can come close to the oldest hour the index keeps, or fall behind
-it, so the verdict can read `aging` or `broken` for a while on a server
-whose snapshots are made on time. It clears when the table is next written
-whole. A retention longer than a day keeps the start of every chain inside
-coverage.
+again. The `watch` daemon also writes a table whole when the start of its
+chain comes close to the oldest hour the index keeps: inside the last fifth of
+the retention, or less than an hour plus one refresh interval above it. It
+does this on a quiet server too, where nothing was indexed, so a snapshot the
+daemon keeps up to date reads at most `aging`, and only until its next refresh.
+
+A `bintrail baseline refresh` run by hand or from cron has only the 24 hour
+rule. With it, the start of a chain can reach the oldest hour the index keeps
+(a retention of 24 hours or less, or a server with no writes), and the verdict
+then reads `aging` or `broken` until the table is next written whole.
 
 **Indexes capturing more than one source**: live partitions are shared by
 every source, so the live floor needs no attribution — but archived
