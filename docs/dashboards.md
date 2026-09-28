@@ -40,12 +40,15 @@ of them:
   [Snapshots only in S3](#snapshots-only-in-s3) below.
 - A snapshot schedule, set on the same page. The interval is how fresh the
   charts can be.
+- The steps below assume that local directory is inside `/var/lib/bintrail`,
+  the daemon's state volume in the standard `docker-compose.yml`. If it is
+  somewhere else, mount that folder instead, at its own path.
 
 ## 1. Get the views file
 
-On the **MCP Server** page, **Download a DuckDB schema**. Leave **Pin to the
-backup that exists now** unticked: a pinned file keeps showing that one
-snapshot forever.
+On the **MCP Server** page, **Download a DuckDB schema**. If the panel shows a
+**Works on another machine** box, leave it unticked: ticked, the file names the
+S3 copy of the snapshots instead of the local folder.
 
 Or, from the command line, pointing at the same directory:
 
@@ -113,7 +116,7 @@ docker run -d --name metabase -p 3000:3000 \
 ```
 
 Read-only is enough for both: DuckDB only reads them. The snapshot files are
-written readable by every user, so Metabase's own user can read them.
+normally written readable by every user, so Metabase's own user can read them.
 
 ## 4. Add the database
 
