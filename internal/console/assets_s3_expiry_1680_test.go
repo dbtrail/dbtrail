@@ -316,7 +316,7 @@ const srv = { id: "a b/c", schedule_every_minutes: 1440, schedule_every: "1d" };
 		t.Fatalf("asked %d times, want 7", len(got.Asked))
 	}
 	for _, a := range got.Asked {
-		if a[0] != "/api/backup-settings/servers/a%20b%2Fc/expiry" {
+		if a[0] != "/api/servers/a%20b%2Fc/snapshot-expiry" {
 			t.Errorf("asked %v, want the server's own route with its id escaped", a[0])
 		}
 		if ms, _ := a[1].(float64); ms <= 0 || ms > 15000 {

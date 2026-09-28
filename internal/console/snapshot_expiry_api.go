@@ -9,7 +9,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/doctor"
 )
 
-// GET /api/backup-settings/servers/{id}/expiry: whether a rule in the
+// GET /api/servers/{id}/snapshot-expiry: whether a rule in the
 // bucket expires this server's old snapshots (#1680).
 //
 // The console generates that rule and the operator applies it (#1622); this

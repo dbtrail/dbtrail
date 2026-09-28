@@ -14,7 +14,7 @@ import (
 func snapshotExpiryGet(t *testing.T, srv *Server, id string) (int, doctor.SnapshotExpiry) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/backup-settings/servers/"+id+"/expiry", nil)
+	req := httptest.NewRequest("GET", "/api/servers/"+id+"/snapshot-expiry", nil)
 	req.SetPathValue("id", id)
 	srv.handleSnapshotExpiry(rec, req)
 	var v doctor.SnapshotExpiry
@@ -142,7 +142,7 @@ func TestSnapshotExpiry_answersAreReusedForAShortWhile(t *testing.T) {
 }
 
 func TestSnapshotExpiry_routeIsClassified(t *testing.T) {
-	if p, ok := permForRoute("GET", "/api/backup-settings/servers/abc/expiry"); !ok || p != ext.PermSettingsRead {
+	if p, ok := permForRoute("GET", "/api/servers/abc/snapshot-expiry"); !ok || p != ext.PermSettingsRead {
 		t.Errorf("permForRoute = (%q,%v), want (%q,true)", p, ok, ext.PermSettingsRead)
 	}
 }

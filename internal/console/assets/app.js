@@ -6064,7 +6064,7 @@ function s3ExpiryLine(srv, per30) {
     line.className = (w.warn ? "form-msg err" : "form-hint") + " s3-expiry";
     line.textContent = w.text;
   };
-  apiWithin("/api/backup-settings/servers/" + encodeURIComponent(srv.id) + "/expiry", S3_EXPIRY_MS).then(
+  apiWithin("/api/servers/" + encodeURIComponent(srv.id) + "/snapshot-expiry", S3_EXPIRY_MS).then(
     (v) => show(s3ExpiryWords(v, srv, per30)),
     (err) => show({ warn: false, text: "Could not ask whether the bucket expires old snapshots: " +
       String((err && err.message) || "no answer").replace(/[.\s]+$/, "") + "." }));

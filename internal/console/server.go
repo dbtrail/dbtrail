@@ -784,7 +784,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/backup-settings", s.handleBackupSettingsGet)
 	api.HandleFunc("PUT /api/backup-settings/servers/{id}", s.handleBackupSettingsServerUpdate)
 	api.HandleFunc("PUT /api/backup-settings/daemon/{key}", s.handleBackupSettingsDaemonUpdate)
-	api.HandleFunc("GET /api/backup-settings/servers/{id}/expiry", s.handleSnapshotExpiry)
+	api.HandleFunc("GET /api/servers/{id}/snapshot-expiry", s.handleSnapshotExpiry)
 	// Authenticated auth verbs. Registered on the inner mux so a forgotten
 	// root registration breaks login, never security (ServeMux specificity
 	// keeps them under the tokenMiddleware-wrapped /api/ catch-all).
