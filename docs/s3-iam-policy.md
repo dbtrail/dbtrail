@@ -60,9 +60,9 @@ bucket-level action (alongside `s3:ListBucket`) if you use the check.
 
 **`s3:GetBucketLifecycleConfiguration`** is only needed to read whether a
 rule in the bucket expires old snapshots. DBTrail never deletes a snapshot
-from S3 and never sets a bucket rule: the web console writes the rule and
+from S3 and never sets a bucket rule: the web interface writes the rule and
 you apply it. This permission lets two places say whether it is there: the
-line above the rule on the console's Snapshots settings, and the advisory
+line above the rule in the Snapshots settings, and the advisory
 check of `bintrail doctor`:
 
 ```bash
