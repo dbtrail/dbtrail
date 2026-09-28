@@ -125,7 +125,7 @@ are not.
 
 This matters when you query `binlog_events` directly, in SQL you wrote. The
 shipped commands already require it: `query`, `recover`, the MCP tools and the
-console all refuse a PK filter that does not also name a schema and a table,
+web interface all refuse a PK filter that does not also name a schema and a table,
 precisely so the index is never scanned blindly.
 
 `pk_values` is the pipe-delimited PK in column ordinal order; a PK value

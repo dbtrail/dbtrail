@@ -6,11 +6,11 @@ recovery, and status engines, reached from a browser. Browse indexed row events
 with full before/after diffs, and generate recovery (undo) SQL — all without
 leaving the terminal that started it.
 
-The console ships as its own binary (and Docker image,
+The web interface ships as its own binary (and Docker image,
 `ghcr.io/dbtrail/bintrail-console`), separate from the core `bintrail` CLI —
 install it only where an operator wants the UI.
 
-The console **never executes SQL**. Recover produces a transaction-wrapped
+The web interface **never executes SQL**. Recover produces a transaction-wrapped
 script you copy or download and apply yourself after review, exactly like
 `bintrail recover --dry-run`.
 
@@ -25,7 +25,7 @@ script you copy or download and apply yourself after review, exactly like
 bintrail-console serve --index-dsn "user:pass@tcp(127.0.0.1:3306)/binlog_index"
 ```
 
-On start it prints the URL to open. On a fresh console the first visit is a
+On start it prints the URL to open. On a fresh install the first visit is a
 **"create your password"** screen (see [Password login](#password-login));
 after that, you sign in:
 
@@ -39,7 +39,7 @@ First run: open the URL and create your username and password.
 
 Or serve it **alongside a live stream** in one process with
 `bintrail-console watch` (the daemon formerly known as `bintrail up
---console` — `up`'s preflight + init + stream plus the console and the
+--console`: `up`'s preflight + init + stream plus the web interface and the
 multi-server control plane):
 
 ```sh
@@ -48,7 +48,7 @@ bintrail-console watch --source-dsn "$SRC" --index-dsn "$IDX"
 
 `--console-listen` / `--console-token` (or `BINTRAIL_CONSOLE_LISTEN` /
 `BINTRAIL_CONSOLE_TOKEN`) customize the bind and token; a single Ctrl-C drains
-both the stream and the console. Passing `--baseline-dir` or `--baseline-s3`
+both the stream and the web interface. Passing `--baseline-dir` or `--baseline-s3`
 (or `BINTRAIL_CONSOLE_BASELINE_DIR` / `BINTRAIL_CONSOLE_BASELINE_S3`) enables
 the baseline-gated Time-travel surface here too, so one process serves the live
 stream **and** point-in-time reconstruct:
@@ -58,7 +58,7 @@ bintrail-console watch --source-dsn "$SRC" --index-dsn "$IDX" --baseline-dir /va
 ```
 
 With an S3 baseline (`--baseline-s3`), the `watch` process reads S3 at request
-time using the ambient AWS credential chain — same as the standalone console,
+time using the ambient AWS credential chain, same as standalone `serve`,
 but note the plain stream daemon didn't need AWS credentials before.
 
 For a TLS-requiring source (RDS, Aurora, Cloud SQL), `watch`'s own stream
@@ -71,7 +71,7 @@ verification).
 
 > **Scope of `--ssl-mode` under `watch`.** The flag encrypts `watch`'s embedded
 > **stream** connections — the source replication and the index *write*. It does
-> **not** currently cover the console's own index *reads* (the connections the
+> **not** currently cover the web interface's own index *reads* (the connections the
 > multi-server manager opens to serve the web UI) or the index reads behind the
 > embedded flashback port (`--flashback-listen`). Encrypt those index
 > connections by adding a `tls=` parameter to their DSN (`...?tls=true`, or
@@ -110,7 +110,7 @@ and searching events:
    it: create the index database, connect to the source, read the table
    structure (not for PostgreSQL, whose stream saves it when changes arrive),
    start capturing changes, capture the first change, and take the first
-   backup. When the console cannot create that backup, the step still shows,
+   backup. When DBTrail cannot create that backup, the step still shows,
    waiting, with the reason: creating backups is turned off for the daemon
    (see `BINTRAIL_CONSOLE_BASELINE_TRIGGER` below), or the server has no
    backup location of its own. It is left out only for a PostgreSQL server
@@ -167,7 +167,7 @@ and searching events:
    the same result cap; editing any filter returns you to page 1.
    **Export JSON / Export CSV** export *every match of the current search*, up
    to the endpoint's 1000-event cap, not just the page on screen; if the search
-   has more than that, the console says so instead of handing you a silent
+   has more than that, the web interface says so instead of handing you a silent
    prefix. Rows and exports include `connection_id` (the transaction's
    originating thread number) but never `query_text`/`query_hash`.
 3. **Schema changes** lists every CREATE, ALTER, DROP, RENAME and TRUNCATE
@@ -217,14 +217,14 @@ and searching events:
    guesses: free space that this process cannot measure reads "not
    measurable from here", never a number, and the card names why it could
    not measure it plus the fix when there is one (mount the index data
-   directory into the console read-only and set `BINTRAIL_INDEX_DATADIR_RO`
+   directory into the `bintrail-console` container read-only and set `BINTRAIL_INDEX_DATADIR_RO`
    to the mount point, the way the bundled `docker-compose.yml` does; an
    index reached at another address gets no such suggestion, because a
    mount that is not the index's would report the wrong volume's free
-   space, and an index on a local address whose server the console cannot
+   space, and an index on a local address whose server the daemon cannot
    confirm is this machine, which is what a port-forward or a tunnel looks
    like, gets the suggestion with that warning attached); and the
-   standalone read-only console, which runs no rotation of
+   standalone read-only `serve`, which runs no rotation of
    its own, reports the retention as "not known here" instead of grading an
    index another process rotates as unbounded. See
    [capacity planning](capacity.md#monitoring).
@@ -287,7 +287,7 @@ and searching events:
 
 Every view whose subject has a page on www.dbtrail.com/docs (Events, Restore,
 Snapshots, Storage, MCP Server) shows a small **Docs** link beside
-its title. It opens that page in a new tab and is a plain link: the console
+its title. It opens that page in a new tab and is a plain link: the web interface
 makes no request for it, so it costs nothing on an air-gapped host. Views with
 no page of their own show no link.
 
@@ -295,7 +295,7 @@ no page of their own show no link.
 
 The header has a server switcher and a **Servers** button: add, edit, and
 remove named connections to DBTrail index databases, and switch every view
-between them. The registry is a **local YAML file on the console host**
+between them. The registry is a **local YAML file on the host that runs `bintrail-console`**
 (`~/.config/bintrail/console-servers.yaml` by default, override with
 `--servers-file` / `BINTRAIL_CONSOLE_SERVERS`) — adding a server registers a
 connection for browsing; it does **not** start monitoring. Monitoring still
@@ -308,7 +308,7 @@ How it behaves:
   appears as an ephemeral entry labeled by its database name, e.g.
   `bintrail_index (cli)`: it is never written to the registry file and cannot
   be edited or deleted from the UI. With at least one saved server,
-  `--index-dsn` becomes optional — the console can start registry-only.
+  `--index-dsn` becomes optional: the daemon can start registry-only.
   **It is a connection to the daemon's own index database, not a monitored
   source** — under source-less `watch` nothing ever streams into it (each
   added source gets its own per-source database). For that reason a
@@ -347,7 +347,7 @@ How it behaves:
   a different host, port or user requires the password to be re-entered, so
   the saved credential is never sent to a destination the operator did not
   configure. When the server has an
-  [S3 store](upload.md#a-store-per-server-from-the-console), it also sends a
+  [S3 store](upload.md#a-store-per-server-from-the-web-interface), it also sends a
   `HeadBucket` for each of its buckets through that store.
 
 Security notes specific to the registry:
@@ -363,7 +363,7 @@ Security notes specific to the registry:
   servers can run `Test connection`, so it signs with a stored secret, or
   with the daemon's own credentials, only for the saved server's buckets at
   the saved server's endpoint.
-- **The console never migrates servers added in the UI.** The one schema
+- **The web interface never migrates the servers added in it.** The one schema
   migration (`EnsureSchema`, an idempotent ALTER) runs at startup on the DSN
   you typed on the command line — never on a DSN typed into a browser form. A
   registry index that predates the `connection_id` column returns an
@@ -372,7 +372,7 @@ Security notes specific to the registry:
 - The registry file, the [auth file](#password-login) (written by
   set-password), and the [managed MCP token file](#mcp-endpoint)
   (`~/.config/bintrail/console-mcp-token.yaml`, SHA-256 only) are the only
-  things the console ever writes. Each has a path override
+  things `bintrail-console` ever writes. Each has a path override
   (`--servers-file`, `--auth-file`, `--mcp-token-file`, or the matching
   `BINTRAIL_CONSOLE_*` variable); in a container, point all three at a mounted
   volume or they are lost when the container is recreated. Their write
@@ -386,13 +386,13 @@ rewritten lossily.
 
 ### Monitoring a source from the UI (the control plane)
 
-Under **`bintrail-console watch`** — and only there — the console is also a
+Under **`bintrail-console watch`**, and only there, the web interface is also a
 control plane: "+ Add server" with a **source MySQL** (host/user/password,
 optional schema filter) runs the `bintrail doctor` preflight inline
 (failures come back as remediation cards), provisions a dedicated index
 database for that source (`bintrail_idx_<id>` on the daemon's index server:
-`CREATE DATABASE` + tables + schema migration, done by the daemon — the
-console's request handlers still never migrate anything), and starts a
+`CREATE DATABASE` + tables + schema migration, done by the daemon; the
+web interface's request handlers still never migrate anything), and starts a
 supervised binlog stream. Auto-start: a green preflight starts streaming
 immediately; warnings (e.g. short binlog retention) show but don't block.
 
@@ -448,12 +448,12 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
 - **Archive to S3** (the `Archive to S3` field on a monitored source): set an
   `s3://bucket/prefix/` destination and the daemon's built-in rotation
   **uploads that source's rotated partitions as Parquet before dropping them**,
-  so the forensic record survives the retention window and stays queryable —
-  the console auto-discovers the archive on the next query, no extra config.
+  so the forensic record survives the retention window and stays queryable:
+  the daemon auto-discovers the archive on the next query, no extra config.
   Partitions are staged locally (`--archive-staging-dir` /
   `BINTRAIL_CONSOLE_ARCHIVE_STAGING`, default a temp dir), uploaded, then
   pruned. The S3 upload uses the **ambient AWS credential chain** (`AWS_*`
-  env, `~/.aws`, or an instance/role) — the same credentials the console needs
+  env, `~/.aws`, or an instance/role), the same credentials the daemon needs
   to read the archive back; there is no per-source credential. Archiving for a
   source begins once its identity (`bintrail_id`) is resolved (right after its
   first stream connect); until then it rotates drop-only, and the
@@ -473,7 +473,7 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   servers naming one bucket with different stores, one of them possibly
   none, is refused (422), and a store needs this server's own Archive or
   Backups location, never the daemon's `--baseline-s3` bucket. Details
-  in [upload.md → A store per server](upload.md#a-store-per-server-from-the-console).
+  in [upload.md → A store per server](upload.md#a-store-per-server-from-the-web-interface).
 - Registry fields: `source_dsn` (replication credentials — a secret with the
   same masking/keep-password discipline as the index DSN; `source_dsn: ""`
   clears it), `source_server_id` (0 = derived), `schemas`, `monitor_desired`,
@@ -497,8 +497,8 @@ the `monitor` capability is false and the verbs return 403 there.
 `bintrail-console watch` runs the built-in rotation loop that keeps the index
 from growing without bound: it drops binlog partitions older than a **retention
 window** every **interval**, keeping a few **future partitions** ready. Under
-`watch` you can tune that policy from the console — the sidebar's
-**Settings → Rotation** entry, or **⌘K → "Configure rotation…"** — without
+`watch` you can tune that policy from the web interface (the sidebar's
+**Settings → Rotation** entry, or **⌘K → "Configure rotation…"**) without
 editing flags or restarting:
 
 - **Live:** changes apply on the loop's next cycle. Retention and future-partition
@@ -506,8 +506,8 @@ editing flags or restarting:
 - **Global, one schedule:** the loop is a single shared ticker, so the policy
   applies to **every** index the daemon rotates (the boot index and every
   monitored source). Per-source retention is not offered — the schedule is one.
-- **Override vs default:** the saved policy lives in the local console registry
-  (`console-servers.yaml` — the only file the console writes). When nothing is saved the panel shows the
+- **Override vs default:** the saved policy lives in the local registry file
+  (`console-servers.yaml`, the only file `bintrail-console` writes). When nothing is saved the panel shows the
   daemon's `--rotate-retain` / `--rotate-interval` / `--rotate-add-future`
   (`BINTRAIL_ROTATE_*`) values as the **effective default**, which describes a
   server added from now on: with no override saved, each index keeps the
@@ -653,7 +653,7 @@ saved, shown with the reason nothing here is running it.
   source ahead; a source that does not answer; an index with no live
   capture). An index that records nothing while the source keeps writing
   is a capture that stopped, and a full backup is the one producer that
-  does not depend on it. One limit: stopping a source from the console
+  does not depend on it. One limit: stopping a source from the web interface
   clears its capture-gap record (the Stop is the acknowledgement of the
   loss), so a gap acknowledged that way before the cut-over no longer
   keeps the full backup, and the rows it lost stay out of the backups
@@ -732,7 +732,7 @@ longer drawn on the page.
 
 - **Local folder** (#1681) — every server keeps a copy of its snapshots in a
   folder on the machine DBTrail runs on; the yes/no question left the page
-  and the answer is yes. A server added from the console gets one of its own,
+  and the answer is yes. A server added from the web interface gets one of its own,
   `<state dir>/snapshots/<server id>` (the state directory is the one holding
   the server list, `/var/lib/bintrail` in the compose stack), created `0700`
   and named by the server's id, so renaming the server moves nothing. With no
@@ -823,11 +823,11 @@ longer drawn on the page.
   `--verify-tables`), each shown verbatim with the exact flag or variable
   name, on a plain card with one **Restart to change** chip. An empty value
   reads as the word for what applies (`none`, `off`, `all tables`, `temp
-  folder`), never as a fault. Read-only on purpose: the console never edits
+  folder`), never as a fault. Read-only on purpose: the web interface never edits
   the process's command line or environment. A value the daemon refused
   (today: an invalid lock mode) stays loud under its row.
 
-The per-server half is the whole page on the standalone `serve` console: the
+The per-server half is the whole page on standalone `serve`: the
 daemon cards describe loops only `watch` runs, but the backup location is
 registry state, and this page is its only editor.
 
@@ -888,7 +888,7 @@ and lands on Retention.
   per snapshot directory double-counts it (one `du` over the root reports the
   truth). It does not apply when the previous snapshot is read from S3,
   because linking a file needs both ends on a filesystem. A
-  `baseline_refresh:` block saved by an older console is ignored and kept in
+  `baseline_refresh:` block saved by an older version is ignored and kept in
   the registry file untouched.
   See [dump-and-baseline.md](dump-and-baseline.md#refreshing-on-a-schedule).
 - **Staged downloads**: the `.sql` backups built from the Snapshots page that
@@ -904,7 +904,7 @@ and lands on Retention.
   `state_<schema>_<table>` view per table in the newest baseline snapshot, plus
   an `events` view across every archive source registered in `archive_state`
   when you tick **Include the change log**. It
-  is the same file `bintrail views` writes. **The console does not run it.**
+  is the same file `bintrail views` writes. **The web interface does not run it.**
   You get a text file; your own DuckDB executes it, in your process, on your
   machine — which is why unrestricted SQL over your lake needs no sandbox, no
   timeout and no result cap here. No credentials appear in the file (S3 uses
@@ -936,7 +936,7 @@ and lands on Retention.
   query over it scans the whole table and competes with capture on that
   server; and the file then carries the index host, port, database and user.
   Never its password: the slot is written empty for you to fill in your own
-  session. A server whose index this console reaches over a unix socket
+  session. A server whose index the daemon reaches over a unix socket
   refuses the box, because the file locates the index by host and port so it
   can run on another machine. When the index's registered sources cannot be
   read, the file says so and the daemon logs the reason, so a revoked `SELECT`
@@ -948,7 +948,7 @@ and lands on Retention.
   For an engine that wants a table rather than files (Spark, Trino, Athena, or
   DuckDB without the merge step), `bintrail export iceberg` writes an Apache
   Iceberg copy of each table from the same baseline plus the change history
-  (archives and live index), kept current run after run; it is a scheduler command, not a console feature, and it
+  (archives and live index), kept current run after run; it is a scheduler command, not a feature of the web interface, and it
   never runs inside `watch`. See [Iceberg export](iceberg-export.md).
 - **Usage telemetry** — the current state of DBTrail's metadata-only usage
   telemetry and a one-click opt-out. Turning it off stops this `watch` daemon's
@@ -962,7 +962,7 @@ and lands on Retention.
 ### The Access profiles page
 
 **Settings > Access profiles** authors the flags, profiles and rules that
-`--profile` enforces, from the browser. It is the console path beside the
+`--profile` enforces, from the browser. It is the web interface's counterpart to the
 CLI verbs (`bintrail flag`, `bintrail profile`, `bintrail access`; see
 [server-identity.md](server-identity.md#rbac-flags)): the same code runs the
 validation and the writes, so a profile authored here is the rows the CLI
@@ -988,16 +988,16 @@ Three panels, top to bottom:
   changes what a query returns; `allow` records intent. Adding a rule for a
   profile and flag that already have one replaces its permission.
 
-This is the one console write that lands in an index database (everything
-else the console writes is the local registry file and the daemon's live
+This is the one write from the web interface that lands in an index database (everything
+else it writes is the local registry file and the daemon's live
 settings), so it runs under rules the tests pin:
 
 - reading the page needs `settings:read`; every change needs
-  `settings:write`, the permission that already governs console
+  `settings:write`, the permission that already governs web interface
   administration, so a read-only auditor role sees the configuration and
   none of the buttons;
 - while an access-control profile is active the whole page is refused,
-  reading included: a console started under `--profile` (a profile with no
+  reading included: a daemon started under `--profile` (a profile with no
   rules yet included) does not edit the rows that profile is built from, and a session that itself carries a data
   profile could lift its own redaction (the flagged tables and columns are
   exactly what its profile withholds), whatever its permissions;
@@ -1008,15 +1008,15 @@ settings), so it runs under rules the tests pin:
   `flag.remove`, `profile.add`, `profile.remove`, `access.add` or
   `access.remove`, with the flag, profile or rule it named and the server it
   targeted;
-- a change takes effect on a profiled session's next request: the console
+- a change takes effect on a profiled session's next request: the daemon
   drops that server's cached profile rules when it writes.
 
 An index created before the RBAC tables existed answers `422` here: the
-console cannot create tables on an index.
+web interface cannot create tables on an index.
 
 ### The SQL panel (removed)
 
-The console used to serve a **SQL** page: a read-only `SELECT` box answered by
+The web interface used to have a **SQL** page: a read-only `SELECT` box answered by
 DuckDB inside the daemon, over the selected server's Parquet. It was removed in
 0.75.0, together with `POST /api/sql`.
 
@@ -1049,7 +1049,7 @@ longer does anything. Remove it.
 - `BINTRAIL_CONSOLE_TLS_CERT` / `BINTRAIL_CONSOLE_TLS_KEY` — same as `--tls-cert` / `--tls-key`.
 - `BINTRAIL_CONSOLE_ALLOWED_HOSTS` — comma-separated, same as `--allowed-hosts`.
 - `BINTRAIL_CONSOLE_ALLOW_SETUP` — `1`/`true`, same as `--allow-setup`.
-- `BINTRAIL_CONSOLE_URL`: the address people open the console at, when it is not
+- `BINTRAIL_CONSOLE_URL`: the address people open the web interface at, when it is not
   the listen address (a container whose port is published as another, a reverse
   proxy). Only the startup banner uses it; nothing listens or redirects
   differently. The compose file sets it, and the installer moves it with
@@ -1117,7 +1117,7 @@ longer does anything. Remove it.
 - `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` (`watch` only) — same as `--flashback-listen`
   (e.g. `127.0.0.1:3308`): serve an embedded MySQL-protocol time-travel port for
   every monitored server, routed by the connection username. Off by default;
-  requires a console token. See [Time-travel over the MySQL protocol](#time-travel-over-the-mysql-protocol-flashback-port).
+  requires an access token. See [Time-travel over the MySQL protocol](#time-travel-over-the-mysql-protocol-flashback-port).
 
 There is deliberately **no** environment variable for the password itself —
 env vars leak through `docker inspect`, `ps e`, and `/proc`; the password is
@@ -1132,7 +1132,7 @@ the matching flags are `--console-listen`, `--console-token`, `--baseline-dir`,
 
 ## Password login
 
-**Username + password is the primary way in.** On a fresh loopback console
+**Username + password is the primary way in.** On a fresh loopback install
 with no credential, the first browser visit shows a **"create your password"**
 screen; you set it once and you're signed in. Every later visit is a normal
 sign-in. (Prefer the terminal, or setting it up before first launch? Run
@@ -1164,13 +1164,13 @@ A running server accepts it on the next login; no restart needed.
   of them), and on process restart — nothing session-shaped touches disk.
 - The login response also sets the session token as an **HttpOnly
   `bintrail_session` cookie** (`Secure; SameSite=Lax; Path=/`, `Max-Age`
-  matching the session's absolute expiry), so opening a console link in a new
+  matching the session's absolute expiry), so opening a link to the web interface in a new
   tab or window is already signed in — same store, same expiry, same
   revocation as the Bearer path; the cookie holds nothing new. Logout revokes
   the session server-side *and* expires the cookie, killing every tab at once.
   The `Secure` flag is safe on the local first-run flow (browsers treat
   loopback as a secure context); **operators terminating TLS at a reverse
-  proxy** should serve the console over `https://` end-to-end from the
+  proxy** should serve the web interface over `https://` end-to-end from the
   browser's point of view, or the browser will drop the cookie and each tab
   falls back to its own login (the Bearer flow keeps working either way).
 - **An opt-in static token** for automation: set `--token` /
@@ -1185,11 +1185,11 @@ A running server accepts it on the next login; no restart needed.
   on-host operator; the per-IP windows still apply. There is no lockout — locking
   the single user out would hand an attacker a denial-of-service against the
   operator.
-- **Rotate or reset:** from the UI (⌘K → "Change console password", revokes
+- **Rotate or reset:** from the UI (⌘K → "Change password…", revokes
   every other session immediately) or re-run `user set-password` (overwrites;
   applies on the next login, live sessions ride out their TTL). **Forgot the
   password?** Shell access is the recovery path — re-run `user set-password`.
-  `user remove` deletes the file (a loopback console then returns to first-run
+  `user remove` deletes the file (a loopback install then returns to first-run
   setup; a non-loopback one refuses its next restart until a credential is set
   again). `user status` shows what is configured without printing secrets.
 - Off-loopback password logins over plain HTTP are warned about at startup:
@@ -1198,9 +1198,9 @@ A running server accepts it on the next login; no restart needed.
 
 ### External login providers
 
-Embedding distributions — builds that construct their console binary from the
+Embedding distributions, builds that construct their own binary from the
 importable `consoleapp` package (`cmd/bintrail-console` is a thin `main()`
-over `consoleapp.Main`) — may install an external login flow (e.g. OIDC
+over `consoleapp.Main`), may install an external login flow (e.g. OIDC
 single sign-on) through the `ext.ConsoleAuth` seam: call `ext.SetConsoleAuth`
 once from `main()` before `consoleapp.Main`, like `ext.SetAuditSink`. When a
 provider is installed, the sign-in screen adds a **"Continue with \<name\>"**
@@ -1214,18 +1214,18 @@ credential like any other `/api` path.
 
 ### Extension views
 
-Embedding distributions — builds that construct their console binary from the
-importable `consoleapp` package — may add one additional view to the console
+Embedding distributions (builds that construct their own binary from the
+importable `consoleapp` package) may add one additional view to the web interface
 through the `ext.ConsoleView` seam: call `ext.SetConsoleView` once from
 `main()` before `consoleapp.Main`, like `ext.SetConsoleAuth`. An installed view
 contributes a nav item, a frontend module, and its own authenticated data API;
-the console reveals the nav item, routes to it, and loads the module in the same
+the web interface reveals the nav item, routes to it, and loads the module in the same
 page (same origin, not an iframe).
 
 The view's static assets are served **unauthenticated** at `/ext/<id>/` (the
-code always ships, like the console's own `app.js`), while its data routes at
+code always ships, like the web interface's own `app.js`), while its data routes at
 `/api/ext/<id>/` require the same bearer credential as every other `/api` path
-and are **refused while an access-control profile is active** (the console can't
+and are **refused while an access-control profile is active** (the daemon can't
 guarantee a third-party handler honors table-deny / column-redaction rules, so
 it withholds the whole surface under a profile). Each data route reads the index
 of the server currently selected in the switcher, with the operator's profile
@@ -1237,49 +1237,49 @@ The module must export `render(mount, ctx)`. `ctx` is built in one place
 | key | what it is |
 |---|---|
 | `apiBase` | the extension's own data-route prefix (`/api/ext/<id>/`) |
-| `api` | the console's authenticated fetch — bearer token and `X-Bintrail-Server` already applied. An HTTP error throws an `Error` carrying `.status`; a malformed body throws one **without** it, an aborted request rejects with `AbortError`, and a 204 resolves to `null`. Branch on `.status` defensively. |
-| `ui.dateField(label, name, size, placeholder, required)` | the console's own date field: a text input plus the calendar/clock popover, returning the same `.field` wrapper the console's forms use |
+| `api` | the web interface's authenticated fetch: bearer token and `X-Bintrail-Server` already applied. An HTTP error throws an `Error` carrying `.status`; a malformed body throws one **without** it, an aborted request rejects with `AbortError`, and a 204 resolves to `null`. Branch on `.status` defensively. |
+| `ui.dateField(label, name, size, placeholder, required)` | the web interface's own date field: a text input plus the calendar/clock popover, returning the same `.field` wrapper the web interface's forms use |
 
-`ui` exists so an extension does not reimplement a widget the console already
+`ui` exists so an extension does not reimplement a widget the web interface already
 has — two copies drift, and the operator ends up looking at two different date
-pickers in one console. It is also the boundary of what may be relied on:
+pickers on one screen. It is also the boundary of what may be relied on:
 `app.js` is a classic script, so an extension running same-origin *could* reach
 any of its functions as a window global, but only what arrives through `ctx` is
 a promise. Everything else may be renamed without notice, and because the two
 sides are built in different repos and never compile together, such a rename
 would surface as a widget that quietly stopped appearing rather than as an
-error. An extension that wants to run against older console builds should
+error. An extension that wants to run against older builds should
 feature-detect (`typeof ctx.ui?.dateField === "function"`) and degrade. Two
 things that detection does not give you. It establishes **presence, not
 shape** — a build whose builder took different arguments would still answer
 `"function"` — so treat the signature above as the contract and expect it to
-be versioned with the console, not sniffed. And `render()` is called but **not
+be versioned with the binary, not sniffed. And `render()` is called but **not
 awaited**: a synchronous throw is caught and rendered as an error in the
 mount, while an `async render()` that rejects escapes as an unhandled
 rejection and leaves the mount blank. An extension doing async work in
 `render` should catch its own failures and render them, rather than relying on
-the console to.
+the web interface to.
 
 The standalone `bintrail-console` binary ships **no extension views**: no nav
 item appears, `/api/capabilities` advertises none, and `/ext/*` and
 `/api/ext/*` are absent from the router entirely.
 
-## Serving the console on a hostname
+## Serving the web interface on a hostname
 
-The console binds `127.0.0.1:8090` by default, which is the right default and
+The web interface binds `127.0.0.1:8090` by default, which is the right default and
 the wrong one for a team. Putting it on `console.example.com` is four things:
 a DNS record, a certificate, a listener, and one header rule that is the only
 part people get stuck on.
 
 **1. DNS.** An `A` (or `AAAA`) record for the hostname pointing at the host's
-public address. Nothing about the console is involved.
+public address. Nothing about DBTrail is involved.
 
 **2. The firewall.** Open 443 to the clients that need it. Leave 8090 closed:
-nothing outside the host should reach the console's own port.
+nothing outside the host should reach the web interface's own port.
 
 **3. TLS.** Two shapes, and neither is more supported than the other.
 
-*The console terminates TLS itself:*
+*The daemon terminates TLS itself:*
 
 ```
 bintrail-console serve --index-dsn '<dsn>' \
@@ -1288,7 +1288,7 @@ bintrail-console serve --index-dsn '<dsn>' \
   --allowed-hosts console.example.com
 ```
 
-*Or a reverse proxy terminates TLS* and the console stays on loopback — the
+*Or a reverse proxy terminates TLS* and the web interface stays on loopback, the
 usual choice when the host already runs a web server, and the one that gets you
 automatic certificate renewal for free:
 
@@ -1317,18 +1317,18 @@ server {
 ```
 
 If a large export returns `504 Gateway Time-out`, that is nginx's
-`proxy_read_timeout` (60 seconds by default) elapsing while the console works
-before its first byte, not the console failing — raise it on this `location`.
+`proxy_read_timeout` (60 seconds by default) elapsing while the daemon works
+before its first byte, not the daemon failing. Raise it on this `location`.
 
 **4. The header rule, which is where the time goes.** With the vhost above the
-console answers:
+web interface answers:
 
 ```
 HTTP 403  {"error":"forbidden: host not allowed"}
 ```
 
 That is the DNS-rebinding defence doing its job, not a misconfiguration. The
-console accepts a `Host` header only if it is `localhost`, an IP literal, or a
+daemon accepts a `Host` header only if it is `localhost`, an IP literal, or a
 name you listed — so `console.example.com` has to be listed:
 
 ```
@@ -1339,7 +1339,7 @@ name you listed — so `console.example.com` has to be listed:
 
 Why the defence exists: a browser on someone's laptop can be pointed at a
 hostname that resolves to `127.0.0.1`, and without a Host check that page could
-drive a console the attacker cannot reach directly. The allowlist costs one flag
+drive a web interface the attacker cannot reach directly. The allowlist costs one flag
 and closes it.
 
 There is a way to skip the flag, and it is worth knowing about mostly so you
@@ -1347,32 +1347,32 @@ recognise it. nginx's *default* — with no `proxy_set_header Host` line at all 
 sends the upstream address as the `Host`, i.e. `127.0.0.1:8090`, which is an IP
 literal and therefore always allowed. A vhost written that way works
 immediately and never mentions `--allowed-hosts`. It also means every request
-reaches the console claiming to be for `127.0.0.1`, so the real hostname is
-absent from the console's own logs, and any future behaviour that depends on
+reaches the daemon claiming to be for `127.0.0.1`, so the real hostname is
+absent from the daemon's own logs, and any future behaviour that depends on
 knowing its public name has nothing to work with. Prefer passing the real
 `Host` and listing it.
 
 Two consequences worth stating:
 
 - **`/mcp` rides the same allowlist.** Once the hostname is allowed, an
-  MCP client can reach the console's endpoint at
+  MCP client can reach the endpoint at
   `https://console.example.com/mcp` — which removes the need for a tunnel or a
   port-forward to use it from elsewhere. It is behind the same credential as
   everything else; see [MCP endpoint](#mcp-endpoint).
-- **A non-loopback console refuses to start without a credential.** That is
+- **A daemon on a non-loopback address refuses to start without a credential.** That is
   deliberate and it is checked before any of the above matters: set a password
   (or pass `--token`) first, or the process exits. See
   [Password login](#password-login).
 
 ## Security model
 
-The binary has no Supabase/RBAC backend to lean on, so the console defends
+The binary has no Supabase/RBAC backend to lean on, so the web interface defends
 itself:
 
 - **Loopback by default + a credential required.** On a loopback bind the
-  console prompts you to create a password on first run — no credential is ever
+  web interface prompts you to create a password on first run. No credential is ever
   auto-generated for you. Binding to a non-loopback address (`0.0.0.0`, a LAN
-  IP, …) **requires** an explicit `--token` or a configured console password, or
+  IP, …) **requires** an explicit `--token` or a configured password, or
   the command refuses to start.
 - **Constant-time credential checks** (`crypto/subtle` for the token;
   sessions are looked up by SHA-256 of the presented value, so raw session
@@ -1417,7 +1417,7 @@ itself:
 
 ## PostgreSQL sources
 
-The console reads only the **index**, never the source database, so it works
+The web interface reads only the **index**, never the source database, so it works
 identically for a PostgreSQL source captured by `bintrail-pg`: the index schema
 is the same. It does adapt its **presentation** to the source family (reported
 per server as `source` in [`/api/capabilities`](#api), derived from
@@ -1426,7 +1426,7 @@ per server as `source` in [`/api/capabilities`](#api), derived from
 - **Stream vocabulary.** A PostgreSQL stream shows its cursor as an **LSN** (and
   labels the source "PostgreSQL · logical replication") instead of MySQL binlog
   file / position / GTID. Slot and publication *names* are capture-side
-  configuration and are not stored in the index, so the console does not show
+  configuration and are not stored in the index, so the web interface does not show
   them.
 - **Permanent-loss badge.** The Status page surfaces the durable loss record
   (`stream_state.gap_lost_at`) — for PostgreSQL, an invalidated/lost replication
@@ -1434,15 +1434,15 @@ per server as `source` in [`/api/capabilities`](#api), derived from
   point and capture must be re-baselined to resume.
 - **Connection-id note.** PostgreSQL logical replication (`pgoutput`) carries
   no backend connection id, so `connection_id` is empty for PostgreSQL sources
-  — no console or capture setting can add it. The Events page says so for
+  and no setting, in the web interface or in capture, can add it. The Events page says so for
   PostgreSQL sources rather than leaving it an unexplained gap.
 - **Replication-health panel.** The Status page shows the replication slot's
   WAL-retention state (`wal_status`, retained WAL, the safe margin before
   invalidation) and whether every published table is at `REPLICA IDENTITY FULL`.
-  The console is still index-only: it never queries the source. Instead the
+  The web interface is still index-only: it never queries the source. Instead the
   streaming daemon (`bintrail-pg stream` / `watch`) polls the source every ~30s
   and persists a snapshot to the index (`stream_state.source_health`), which the
-  console renders. Because a snapshot can outlive a stopped daemon, the panel
+  web interface renders. Because a snapshot can outlive a stopped daemon, the panel
   shows **how recently it was checked** and **degrades a stale snapshot** (older
   than ~90s) to muted with a warning — a frozen "reserved" must never read as
   live-healthy. If the daemon cannot read the source at all (for example a
@@ -1452,21 +1452,21 @@ per server as `source` in [`/api/capabilities`](#api), derived from
 
 ## MCP endpoint
 
-The console serves the same six read-only MCP tools as
+The web interface serves the same six read-only MCP tools as
 [`bintrail-mcp`](mcp-server.md) — `query`, `recover`, `recover_cascade`,
 `reconstruct`, `status`, `list_schema_changes` — over **Streamable HTTP**, on
 both `bintrail-console serve` and `bintrail-console watch`:
 
 | URL | Target |
 |---|---|
-| `/mcp` | The console's **default server** (same selection rules as the browser UI). |
+| `/mcp` | The web interface's **default server** (same selection rules as the browser UI). |
 | `/mcp/{id-or-name}` | A named server from the registry (`default` = the command-line entry). Unknown → `404`. |
 
 MCP clients cannot reliably send custom headers, so the server choice lives in
 the URL path (mirroring how the [time-travel port](time-travel-sql.md) routes
 by username) instead of the `X-Bintrail-Server` header.
 
-Point any Streamable-HTTP-capable MCP client at it with the console token as a
+Point any Streamable-HTTP-capable MCP client at it with the access token as a
 Bearer credential:
 
 ```json
@@ -1494,7 +1494,7 @@ Rules that differ from the standalone `bintrail-mcp` server:
   contract), its plaintext is shown exactly once at generation, and it is
   **scoped to `/mcp` alone** — it cannot drive the browser API (registry
   CRUD, monitor verbs, or its own rotation). New token / Delete token from
-  the same card take effect on the next request, including for sibling console
+  the same card take effect on the next request, including for sibling `bintrail-console`
   processes sharing the file: every `/mcp` request re-validates the
   credential, so a rotated-away or revoked token stops authenticating
   immediately. An MCP *session* is additionally bound to the credential that
@@ -1519,13 +1519,13 @@ Rules that differ from the standalone `bintrail-mcp` server:
   environment-owned and always full-access.
 - **`index_dsn`, `profile`, `baseline_dir` and `baseline_s3` tool parameters are
   rejected.** Connections, the baseline location and the RBAC posture are all
-  managed by the console process — an authenticated MCP client cannot point the
-  console at an arbitrary DSN or storage prefix, nor change redaction rules.
+  managed by the daemon: an authenticated MCP client cannot point the
+  daemon at an arbitrary DSN or storage prefix, nor change redaction rules.
 - **`reconstruct` is gated per server**, on the same signal as the Time-travel
   tab and `/api/reconstruct`: that server needs a baseline location configured,
   with archives enabled and no access-control profile active (baseline reads
   aren't redacted). Otherwise the tool refuses with that explanation.
-- **The console's read boundary applies.** Result caps match the API (events
+- **The web interface's read boundary applies.** Result caps match the API (events
   100 default / 1000 max, recover 1000 / 10000), each server's archive and
   baseline posture is honored, and `query_text` / `query_hash` are withheld
   from query results exactly as on the events API.
@@ -1582,14 +1582,14 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `POST /api/auth/login` | Exchange `{username, password}` for a session: `{token, expires_at}`. Rate-limited; requires `Content-Type: application/json`. |
 | `POST /api/auth/setup` | First-run only (loopback / `--allow-setup`, self-disables once a password exists): create the password, returns a session. |
 | `POST /api/auth/logout` | Revoke the presented session (static token → 204 no-op). |
-| `POST /api/auth/password` | Set (first time; requires static-token auth) or rotate (`current_password` verified) the console password. Revokes all sessions and returns a fresh one. |
+| `POST /api/auth/password` | Set (first time; requires static-token auth) or rotate (`current_password` verified) the password. Revokes all sessions and returns a fresh one. |
 | `GET /api/status` | Index status (same payload as `bintrail status --format json`). For a session with restricted data access, the capture-health detail names only the tables that session may read; `tables_withheld` counts the rest and the counts stay whole. |
-| `GET /api/capacity` | The doctor's index disk-capacity check for the selected server: `{status, reason, retention: {known, retain, source, enabled}, measured, sample_hours, current_bytes, events_per_day, bytes_per_event, growth_bytes_per_day, projected_bytes, remaining_bytes, free_known, free_bytes, days_until_full}`. `status` is `pass`/`warn`/`fail`/`skip` as `bintrail doctor` grades it; `reason` names the branch (`ok`, `headroom_low`, `free_under_floor`, `growth_exceeds_free`, `no_retention`, `free_unknown`, `retention_unknown`, `not_enough_history`, `not_initialized`). Rate and projection fields are absent while `measured` is false; `free_bytes` is meaningful only when `free_known`; `retention.known` is false on the standalone console. `502` when the partition statistics cannot be read. |
+| `GET /api/capacity` | The doctor's index disk-capacity check for the selected server: `{status, reason, retention: {known, retain, source, enabled}, measured, sample_hours, current_bytes, events_per_day, bytes_per_event, growth_bytes_per_day, projected_bytes, remaining_bytes, free_known, free_bytes, days_until_full}`. `status` is `pass`/`warn`/`fail`/`skip` as `bintrail doctor` grades it; `reason` names the branch (`ok`, `headroom_low`, `free_under_floor`, `growth_exceeds_free`, `no_retention`, `free_unknown`, `retention_unknown`, `not_enough_history`, `not_initialized`). Rate and projection fields are absent while `measured` is false; `free_bytes` is meaningful only when `free_known`; `retention.known` is false on standalone `serve`. `502` when the partition statistics cannot be read. |
 | `GET /api/coverage` | Live RPO summary from the index alone: restorable delta window `[delta_from, delta_to]`, `lag_seconds`, `continuity`, `freshness` and `checkpoint_age_seconds`. It reads no backup location ([#1850](https://github.com/dbtrail/dbtrail/issues/1850)): per-snapshot staleness is on the Snapshots page (`GET /api/baselines`, bounded to its window) and in `bintrail status`. |
 | `GET /api/activity` | Window aggregate behind the Overview tiles: counts by event type, distinct tables touched, and a per-table breakdown. The window **is the live retention** — derived from the oldest live `binlog_events` partition, so the counts cover exactly what the live index still holds and read the live tier only (no archive scan, and nothing archived can fall inside the window by construction). Returns `{label, since, until, refreshed_at, total, inserts, updates, deletes, other, tables, top_tables, complete, notes}`. The aggregate is a **server-side materialization** refreshed when older than ~30 minutes (a stale copy is served immediately while one recompute runs in the background); `refreshed_at` is when it was computed, and the UI renders it on the tiles ("as of …") so a cached number is never presented as live. `complete: false` means the counts are knowably a floor (an index with a pathological table count trips the grouping cap) and `notes` says so; the UI marks the affected tiles "partial". RBAC deny rules are applied, so a denied table contributes to neither the counts nor `top_tables`, and each deny profile gets its own materialization. |
 | `GET /api/schemas` | Schemas known to the index: those observed in `binlog_events` **plus** those in the latest schema snapshot, so a schema whose partitions have all been rotated out to Parquet/S3 is still listed (the archives still answer `/api/events` and `/api/recover`). `schemas` is that full union; `snapshot_only` (when present) is the subset with no live events observed — the UI labels these "snapshot only" since queries against them may return nothing; `snapshot_unavailable: true` means the snapshot half was skipped because the schema resolver failed to load (check the server log), so archive-only schemas may be missing from the list. The snapshot half is skipped under `--no-archive` or an active `--profile`, where archived data is unreachable anyway. Note this answers *which schemas this index knows of*, not *which have data in a given window* — for that, see `bintrail status`'s continuity verdict. `?schema=<name>` → that schema's tables. |
-| `GET /api/events` | Event browser. Query params: `schema, table, pk, event_type, gtid, since, until, changed_column, order, limit, limit_per_pk` plus the `after`/`before` keyset cursors. `limit_per_pk` keeps only the latest N events per row, requires `pk`, and is **refused alongside a cursor** — it is a whole-result-set cap, so paging would re-anchor it to each page's remainder. `scope=live` serves the **live index only** and answers immediately (the UI's phase 1: rows in `binlog_events` are milliseconds away, an archive scan can take tens of seconds); the response then carries `scope: "live"` and `archives_pending` (never omitted — `false` is a meaningful answer) — `true` means registered archives were **not** read and a follow-up full read is required before the list is complete (the warning says so, loudly); `false` means no follow-up read would add anything: either nothing is registered, or the archives are excluded for this console/session (a session profile always announces itself; a --no-archive console announces only when the window has gaps to point at). Anything else in `scope` is a 400, never a silent full read. |
-| `GET /api/events/head` | `{newest_event_id}`: the highest `event_id` in the live index, `0` when it holds none (#1801). The query carries a five-second deadline, because the console sets no write timeout and a metadata lock or a host that went away would otherwise hold the request open for minutes. The Overview asks for it every five seconds to learn whether anything changed, and re-reads the events list only when the number moved, up or down (a stream reset deletes rows). It is tiered with `GET /api/events` and refuses a session whose data profile does not exist on the server, exactly as the list does. It carries no row data, so it is **not** audited: a list read every five seconds per open tab would have written a `query.run` to the audit trail for every one of them, and the list is still audited each time it is actually read. The number is not narrowed by a data profile — it says the index gained a row, not in which table, which the coverage card's newest-event time already gives every session. |
+| `GET /api/events` | Event browser. Query params: `schema, table, pk, event_type, gtid, since, until, changed_column, order, limit, limit_per_pk` plus the `after`/`before` keyset cursors. `limit_per_pk` keeps only the latest N events per row, requires `pk`, and is **refused alongside a cursor**: it is a whole-result-set cap, so paging would re-anchor it to each page's remainder. `scope=live` serves the **live index only** and answers immediately (the UI's phase 1: rows in `binlog_events` are milliseconds away, an archive scan can take tens of seconds); the response then carries `scope: "live"` and `archives_pending` (never omitted; `false` is a meaningful answer). `true` means registered archives were **not** read and a follow-up full read is required before the list is complete (the warning says so, loudly); `false` means no follow-up read would add anything: either nothing is registered, or the archives are excluded for this daemon/session (a session profile always announces itself; a --no-archive daemon announces only when the window has gaps to point at). Anything else in `scope` is a 400, never a silent full read. |
+| `GET /api/events/head` | `{newest_event_id}`: the highest `event_id` in the live index, `0` when it holds none (#1801). The query carries a five-second deadline, because the daemon sets no write timeout and a metadata lock or a host that went away would otherwise hold the request open for minutes. The Overview asks for it every five seconds to learn whether anything changed, and re-reads the events list only when the number moved, up or down (a stream reset deletes rows). It is tiered with `GET /api/events` and refuses a session whose data profile does not exist on the server, exactly as the list does. It carries no row data, so it is **not** audited: a list read every five seconds per open tab would have written a `query.run` to the audit trail for every one of them, and the list is still audited each time it is actually read. The number is not narrowed by a data profile: it says the index gained a row, not in which table, which the coverage card's newest-event time already gives every session. |
 | `GET /api/schema-changes` | DDL history from the index's `schema_changes` table. Query params: `schema, table, ddl_type, since, until, limit`. `ddl_type` is one of `CREATE`, `ALTER`, `DROP`, `RENAME`, `TRUNCATE`, matched as a prefix of the stored type (`ALTER` matches `ALTER TABLE`), like the MCP `list_schema_changes` tool. Default limit 100, max 1000; `has_more` says whether the cap cut the list. Ordered by `detected_at, binlog_file, binlog_pos, id`, all descending, so DDLs detected in the same second keep their binlog order. Returns `{changes: [{id, detected_at, schema_name, table_name, ddl_type, statement, binlog_file, binlog_pos}], count, limit, has_more}`. The session's table deny and allow rules scope the rows by table: a `DROP` or `RENAME` that names several tables has a row for each, each scoped by its own rules; the statement is on the first table's row, and the others say which row carries it. One recorded by a version before this behavior has a single row, under its first table. Under an active access profile (a named profile, session restrictions, or the startup `--profile`) `statement` is empty on every row and `statement_withheld: true` says so, with `warnings` naming the scoping and the withholding. `422` when the index has no `schema_changes` table (an index provisioned before DDL tracking; `bintrail init` adds it). |
 | `POST /api/recover` | Undo-SQL generation. JSON body with the same filter fields (requires at least `schema`; an `order` field is accepted but ignored — recover always processes oldest-first). `limit_per_pk` reverses only the latest N events for the matched row and **requires `pk`** — it is the only filter that can separate events sharing a timestamp, since `since`/`until` are second-granular (`/api/events` accepts it too, so Restore's preview can mirror the same window). Returns `{sql, statement_count, row_count, warnings, notes, generated_in_ms}`. `generated_in_ms` is the wall time from request-body decode to the finished script: filter parsing, session-profile resolution, the event fetch including any archive/Parquet leg, cascade victim synthesis when auto-detected, and SQL rendering. It **excludes** selecting and opening the target server's connection, which is a one-off cost of switching servers and can dominate a first request. Always present: `0` means the script was generated in under a millisecond, not that timing is unavailable. When the target is a foreign-key **parent** whose `DELETE` cascaded below the binlog (MySQL/MariaDB index only), cascade victims are **auto-detected** and folded into the same script; the response then also carries `{cascade_detected, victim_count, set_null_count}` (see [Recover and cascade](#cascade-recovery)). Auto-detection needs a single `table` in scope; a schema-wide undo whose window holds a DELETE or UPDATE on a table with cascading children instead gets a `warnings` entry naming those children and saying the script reverses only what was recorded (undo the parent table on its own to have them repaired); a check that fails is reported as such, though an index that never recorded foreign keys answers "no children" (#1616). |
 | `POST /api/recover-cascade` | Cascade-recovery SQL generation (reverse FK `ON DELETE CASCADE` / `SET NULL` side effects). JSON body: `schema, table` (the **parent**), `pk, pks, since, until, lookback, max_depth, allow_incomplete`. Returns `{sql, statement_count, victim_count, set_null_count, complete, incomplete, generated_in_ms}` — text only, never executed. Returns `403` under an active RBAC redaction profile (see [Cascade recovery](#cascade-recovery)). |
@@ -1601,16 +1601,16 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `PUT /api/servers/{id}` | Edit. Omitted password = keep stored; `""` = clear; value = replace. `409` for the command-line entry. |
 | `DELETE /api/servers/{id}` | Remove from the registry and close its cached connection. `409` for the command-line entry. |
 | `POST /api/servers/{id}/test`, `POST /api/servers/test` | Write-free reachability probe (short timeout): `{ok, server_version, dbname, latency_ms, has_index, schema_current}`. Accepts an unsaved candidate body; with `{id}`, a blank password merges the stored one. |
-| `POST /api/servers/{id}/monitor/start` | Supervisor only (403 on the standalone console): doctor preflight → on green, record intent + provision + stream. Returns `{doctor, started, monitor}`. |
+| `POST /api/servers/{id}/monitor/start` | Supervisor only (403 on standalone `serve`): doctor preflight → on green, record intent + provision + stream. Returns `{doctor, started, monitor}`. |
 | `POST /api/servers/{id}/monitor/stop` | Supervisor only: clear intent, drain the stream (final checkpoint), release the advisory lock. |
 | `GET /api/servers/{id}/monitor` | Supervisor only: `{monitor: {state, last_error, since, source_connected, retrying, phase}}` — `stopped\|pending\|running\|stalled\|lost_position\|failed`. `phase` names a long startup step a `pending` stream is inside, currently only `resume_cleanup` (the pre-capture delete of changes a replayed window would save twice); absent when none is running. |
-| `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a backup exists for the server. A first-backup step follows the capture steps: with its job's state when console backups are enabled and the server has its own baseline location, and as `waiting` with a `detail` and `fix` when backups are turned off for the daemon or the server has no baseline location of its own (#1677). It is left out only for a PostgreSQL server with no slot or publication (the server form refuses to save one), which cannot capture either. `complete` is the backup step being done (#1801). A backup ends the list whatever the capture steps are still doing, since seeing the first change is not something anyone can make happen; a backup step that FAILED is not a done one, so it keeps the list up. A capture step that failed deliberately does not, so a finished list never comes back days later: a dead stream is reported by the Overview's own "stopped updating" note, and capture failing before any backup exists keeps the list by the same rule. The server's own backup locations are read for a complete snapshot, at most once a minute per server since an S3 location is a listing over the network, so a backup made before a restart or from the command line ends the step, and one that cannot be read is reported on the step (`detail`) instead of counting as "no backup". The job's own state comes first: a backup that failed or is running outranks an older snapshot. `check_error` means the index database could not be read, and nothing is marked done from it. |
-| `GET /api/rotation` | Effective global rotation policy: `{retain, interval, add_future, source, enabled}` — `source` is `"override"` (console-saved) or `"default"` (daemon `--rotate-*`). |
-| `PUT /api/rotation` | Supervisor only (403 on the standalone console): save a global rotation override `{retain, interval, add_future}` (validated; `off` rejected). Applies live on the next cycle. |
+| `GET /api/servers/{id}/first-run` | Supervisor only, servers with a source: `{complete, steps: [{name, state, detail, fix}], check_error}`, the Overview's Getting started list. `state` is `waiting\|running\|done\|failed`. Each capture step is done from evidence: the server's own index database exists, the supervisor reports `source_connected` for the latest run (reset when a run starts), a schema snapshot (MySQL only), a saved stream position, and a change in the index; a later step's evidence marks the earlier ones done, and the first step not done takes the supervisor's state. `complete` is true once a backup exists for the server. A first-backup step follows the capture steps: with its job's state when backups from the web interface are enabled and the server has its own baseline location, and as `waiting` with a `detail` and `fix` when backups are turned off for the daemon or the server has no baseline location of its own (#1677). It is left out only for a PostgreSQL server with no slot or publication (the server form refuses to save one), which cannot capture either. `complete` is the backup step being done (#1801). A backup ends the list whatever the capture steps are still doing, since seeing the first change is not something anyone can make happen; a backup step that FAILED is not a done one, so it keeps the list up. A capture step that failed deliberately does not, so a finished list never comes back days later: a dead stream is reported by the Overview's own "stopped updating" note, and capture failing before any backup exists keeps the list by the same rule. The server's own backup locations are read for a complete snapshot, at most once a minute per server since an S3 location is a listing over the network, so a backup made before a restart or from the command line ends the step, and one that cannot be read is reported on the step (`detail`) instead of counting as "no backup". The job's own state comes first: a backup that failed or is running outranks an older snapshot. `check_error` means the index database could not be read, and nothing is marked done from it. |
+| `GET /api/rotation` | Effective global rotation policy: `{retain, interval, add_future, source, enabled}`; `source` is `"override"` (saved in the web interface) or `"default"` (daemon `--rotate-*`). |
+| `PUT /api/rotation` | Supervisor only (403 on standalone `serve`): save a global rotation override `{retain, interval, add_future}` (validated; `off` rejected). Applies live on the next cycle. |
 | `GET /api/baselines` | Read-only listing of the **selected server's** baseline snapshots, grouped per snapshot: `{configured, source, kind, reconstruct, snapshots: [{time, age_hours, tables, binlog_file, binlog_pos, gtid_set}]}` (coordinates local-only, capped at 50 snapshots). Every configured location is listed and merged; `sources` reports each one (`source`, `kind`, `count`, `error`, and `skipped`, the number of snapshot or schema directories under it that could not be read, #1601) and `incomplete` is true when any location did not answer or answered only in part. `502` only when no location could be read at all. With `?location_only=1` it answers only `{configured, source, kind}` (the location the listing reads first: the server's own, else the daemon-wide default, a directory over a bucket) from configuration, without the schedule, the storage or the server's index; same permission as the listing, refused while a data profile is active (a named startup `--profile` even with no rules yet, or the session's, wider than the listing because the export it feeds is not redacted); any value other than `1` is a 400. MCP Server uses it for the Iceberg export command. Since #1681 it also carries, at the top level, `local_retention: {keep_newest}` when this daemon removes snapshots past a count from the selected server's local folder, and `last_prune: {at, removed}` (RFC 3339 UTC) once a prune has removed any, read from the `.last-prune.json` the prune leaves beside the snapshots; `last_prune_failure: {at, reason}` while the most recent prune attempt on that folder failed (`reason` holds one cause per line, separated by `\n` only) (from `.last-prune-failure.json`, removed by the next attempt that succeeds); and `last_prune_error` when either record exists but cannot be read. All are omitted, never null, when there is nothing to say. |
 | `GET /api/views.sql` | **Not JSON** — a `text/plain` DuckDB schema over the selected server's Parquet (the same output as `bintrail views`), served as a `views.sql` attachment. Nothing is executed here; the file runs in your own DuckDB. `?include_events=1` adds the `events` view over the archived change log, which is left out by default because defining it opens one Parquet footer per archived file (`bintrail views --include-events`). `?include_live=1` adds the leg over the live index (`bintrail views --include-live`), with the index host, port, database and user in the file and never its password; it requires `include_events=1`, since the leg hangs on that view, and 400s without it. 404 when archives are disabled or nothing is archived yet, 403 while an access-control profile is active, 422 when this server cannot carry the live leg (an index reached over a unix socket, or one with no `binlog_events` table), 502 when the index could not be asked, and 400 for an `include_live` or `include_events` value other than `1`/`true`/`0`/`false` (so a request that meant to ask never comes back as an archives-only file). |
 | `GET /api/storage` | Process-global storage context: `{aws: {access_key_env, profile, region_env, shared_config, container_creds, web_identity, web_identity_token_readable, web_identity_role_arn}}` — presence booleans and non-secret names only, never credential values. |
-| `GET /api/flashback` | Process-global: the embedded time-travel SQL port (`watch --flashback-listen`): `{enabled, listen, host, port}`. `enabled: false` alone on the standalone console and on a daemon that did not open the port; `host` is empty on a wildcard bind (the UI then uses the name it was opened with). Never the console token that authenticates the port. Backs the **Connect a SQL client** panel on Settings → MCP Server. |
+| `GET /api/flashback` | Process-global: the embedded time-travel SQL port (`watch --flashback-listen`): `{enabled, listen, host, port}`. `enabled: false` alone on standalone `serve` and on a daemon that did not open the port; `host` is empty on a wildcard bind (the UI then uses the name it was opened with). Never the access token that authenticates the port. Backs the **Connect a SQL client** panel on Settings → MCP Server. |
 | `GET /api/profiles` | RBAC data-profile **names** defined on the selected server's index: `{"profiles": ["..."]}`, sorted; empty on a legacy index without the table. Vocabulary for administration panels (e.g. a settings-surface profile picker) — never the rules or flagged tables/columns behind a name. |
 | `GET /api/access-profiles` | The selected server's access-profile configuration in one document: `{flags: [{schema, table, column, flag, created_at}], profiles: [{name, description, created_at}], rules: [{profile, flag, permission, created_at}]}` (`column` empty = a table-level flag). `settings:read`. `403` while an access-control profile is active (a startup `--profile`, even one with no rules yet, or the session's own data profile: the flagged tables and columns are what that profile withholds). `422` on an index without the RBAC tables. |
 | `POST /api/access-profiles/flags`, `.../flags/remove` | Add / remove a flag: `{flag, schema, table, column}` (`column` optional). `settings:write`; `403` while an access-control profile is active, as for the GET. Names are trimmed. Answers with the full document. `400` with the CLI's own message on missing fields or a value past its column width, `404` when the flag to remove is not there, `409` when the flag exists under a spelling that differs only by case or accents (the stored row is named). When the write landed but the readback failed, a `500` whose message begins `The change was saved but the page could not be re-read:`. |
@@ -1637,7 +1637,7 @@ every child foreign key pointing at the key the cascade wrote.
 
 **Recover handles this automatically — there is no separate tab.** When you
 generate undo SQL for a `DELETE` — or for an `UPDATE` of a referenced key — on a
-table that is a foreign-key **parent**, the console detects it (one index lookup
+table that is a foreign-key **parent**, the web interface detects it (one index lookup
 of the recorded FK graph, matched to the referential action the reversed events
 can actually trigger) and folds the invisible children into the **same** script:
 `INSERT`s for the cascade-deleted children, idempotent guarded `UPDATE`s
@@ -1678,7 +1678,7 @@ server.
 
 ### Time-travel (reconstruct)
 
-When `--baseline-dir` or `--baseline-s3` is set, the console can reconstruct a
+When `--baseline-dir` or `--baseline-s3` is set, the web interface can reconstruct a
 single row's **full state at a point in time** — the baseline snapshot merged
 with the binlog deltas after it — and show the row's history. PK column names are
 read from the schema snapshot, so you only pass the value(s) (pipe-delimited for
@@ -1720,22 +1720,22 @@ application that speaks `AS OF` SQL, `bintrail-console watch --flashback-listen
 <addr>` opens an embedded MySQL-protocol port that serves the `_flashback` /
 `_snapshot` / `_diff` virtual schemas for **every monitored server** — routed by
 the connection username (the server's registry id or display name), authenticated
-with the console token. It replaces running a separate `bintrail shim` per
+with the access token. It replaces running a separate `bintrail shim` per
 per-source index: the daemon already resolves each server's `bintrail_idx_<id>`
 and baseline, so one port covers them all. A token is required (`--console-token`
-/ `BINTRAIL_CONSOLE_TOKEN`) because MySQL-protocol auth cannot use the console's
+/ `BINTRAIL_CONSOLE_TOKEN`) because MySQL-protocol auth cannot use the web interface's
 password store. Full setup, routing, and the `_snapshot` baseline-parity edge:
 [docs/time-travel-sql.md → the embedded port](time-travel-sql.md#the-embedded-port-multi-source).
 
-The console shows the port on **Settings → MCP Server**, in the **Connect a
+The web interface shows the port on **Settings → MCP Server**, in the **Connect a
 SQL client** panel (#1446): when `watch` opened it, the listen address, the
 user rule (the server picked in the sidebar: its registry name or id, `default`
-for the command-line entry), the password rule (the console token, never
+for the command-line entry), the password rule (the access token, never
 displayed) and a ready-to-copy `mysql -h <host> -P <port> -u <server> -p` line
 for that server. When the port is off, the panel says so and names
 `--flashback-listen` / `BINTRAIL_CONSOLE_FLASHBACK_LISTEN` as daemon
-configuration; on the standalone `serve` console it says the port belongs to
-`watch`. Display only: the console never opens or closes the port.
+configuration; on standalone `serve` it says the port belongs to
+`watch`. Display only: the web interface never opens or closes the port.
 
 ### Coverage gaps and incomplete data
 
@@ -1757,7 +1757,7 @@ words when a filled reversal window elides the archives). On `/api/events`
 and `/api/recover` — and only there — `notes` is the informational sibling of
 `warnings`: it carries benign audit facts — this one records a
 completeness-preserving optimization, nothing is missing from the page — and
-the console renders it as a muted line, not as an alert. Cautionary facts
+the web interface renders it as a muted line, not as an alert. Cautionary facts
 (coverage gaps, a session's archive exclusion, divergence findings) stay in
 `warnings`. Do not generalize the field name across endpoints:
 `/api/activity`'s pre-existing `notes` is CAUTIONARY — it explains a

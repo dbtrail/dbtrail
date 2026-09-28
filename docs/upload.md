@@ -129,7 +129,7 @@ Notes:
   `doctor --archive-s3`, `init`, the agent's payload uploads, and every DuckDB
   read of `s3://` paths (`query`/`recover` over archives, `reconstruct
   --baseline-s3`, `verify`, `drill`, `baseline refresh`, the shim, the
-  console). The `views.sql` the console and `bintrail views` write names the
+  web interface). The `views.sql` the web interface and `bintrail views` write names the
   endpoint too, so it reads the same store from another machine.
 - `AWS_ENDPOINT_URL_S3` and `AWS_ENDPOINT_URL` are honored as fallbacks, so an
   environment already set up for the AWS CLI keeps working: bintrail mirrors
@@ -155,11 +155,11 @@ Notes:
 - Object Lock and `s3:GetBucketLocation` behave as the store implements
   them; `doctor --archive-s3` reports what it can query.
 
-#### A store per server, from the console
+#### A store per server, from the web interface
 
 `BINTRAIL_S3_ENDPOINT` is one setting for the whole process. When different
 servers keep their buckets in different places (one in MinIO, one in AWS, one
-in Wasabi's `eu-central-1`), the console sets the store **per server**
+in Wasabi's `eu-central-1`), the web interface sets the store **per server**
 instead: the server form's `S3 endpoint`, `S3 addressing` and `S3 region`
 fields (registry keys `s3_endpoint`, `s3_path_style`, `s3_region`), plus
 optional `S3 access key` and `S3 secret key` (`s3_access_key_id`,

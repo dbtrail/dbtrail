@@ -36,7 +36,7 @@ Before you start:
 
 **If you are using managed MySQL** (RDS, Aurora, Cloud SQL — no binlog file access):
 - [ ] Use `bintrail stream` instead of `bintrail index` — it connects over the replication protocol
-- [ ] Replication user with `REPLICATION SLAVE` and `REPLICATION CLIENT` privileges on the source (plus `LOCK TABLES` and `SHOW VIEW` for baselines, with the `lock-all` mode: `bintrail dump --lock-mode lock-all`, or `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all` for the console, `BASELINE_LOCK_MODE` in the compose `.env`; managed MySQL does not grant `BACKUP_ADMIN`, which the default mode needs)
+- [ ] Replication user with `REPLICATION SLAVE` and `REPLICATION CLIENT` privileges on the source (plus `LOCK TABLES` and `SHOW VIEW` for baselines, with the `lock-all` mode: `bintrail dump --lock-mode lock-all`, or `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all` for `bintrail-console`, `BASELINE_LOCK_MODE` in the compose `.env`; managed MySQL does not grant `BACKUP_ADMIN`, which the default mode needs)
 - [ ] Source DSN uses TCP: `user:pass@tcp(host:3306)/` (unix socket is not supported for replication)
 
 ---
@@ -335,7 +335,7 @@ bintrail dump --source-dsn "user:pass@tcp(source-db:3306)/" --output-dir /tmp/my
 bintrail baseline --input /tmp/mydumper-output --output /data/baselines
 ```
 
-Output is one `.parquet` per table under `<timestamp>/<schema>/`. Baselines power full-row time-travel (`bintrail reconstruct` and the console's Time-travel view). Full flags, mydumper install, scheduling, and troubleshooting: [Dump and Baseline](dump-and-baseline.md).
+Output is one `.parquet` per table under `<timestamp>/<schema>/`. Baselines power full-row time-travel (`bintrail reconstruct` and the web interface's Time-travel view). Full flags, mydumper install, scheduling, and troubleshooting: [Dump and Baseline](dump-and-baseline.md).
 
 ---
 
@@ -523,8 +523,8 @@ two things as plain Parquet, on disk or in S3: the archived change history
 readable by any DuckDB, Spark, Trino or Athena with no DBTrail involved.
 
 **Files, queried by name.** `bintrail views` writes a DuckDB schema over them:
-one `state_<schema>_<table>` view per table in the newest baseline, plus — with
-`--include-events` — an `events` view across every archive (the console's
+one `state_<schema>_<table>` view per table in the newest baseline, plus, with
+`--include-events`, an `events` view across every archive (the web interface's
 **MCP Server → Download a DuckDB schema** card downloads the same file). The change log
 is opt-in because defining that view opens one Parquet footer per archived file
 before it returns a row, a cost that grows with the archive.

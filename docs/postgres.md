@@ -43,26 +43,26 @@ The index MySQL has the same requirements as for any source — see
 
 ## Install
 
-The console captures PostgreSQL as a **first-class source** — the same
+DBTrail captures PostgreSQL as a **first-class source**, in the same
 `bintrail-console watch` stack the [Compose quickstart](install.md) stands up.
-There are two ways in: the **web console** (recommended — zero binaries to place)
+There are two ways in: the **web interface** (recommended: zero binaries to place)
 or the standalone **`bintrail-pg`** binary (for an existing index or a headless
 CLI deployment).
 
-### The web console — "+ Add server" (recommended)
+### The web interface: "+ Add server" (recommended)
 
 If you brought up the [Docker Compose stack](install.md) — the *same*
 `install.sh` MySQL uses — you already have everything. Do the [source-side
 setup](#postgresql-side-setup) below first, then:
 
-1. Open the console (**http://127.0.0.1:8090**) and sign in.
+1. Open the web interface (**http://127.0.0.1:8090**) and sign in.
 2. **+ Add server** → set **Source type** to **PostgreSQL**. The PostgreSQL-only
    fields appear: **Database**, **Replication slot**, and **Publication**.
 3. Fill in host, port, user, password, the database, the slot name (created for
    you on first run), and the publication (the one you created above).
    Optionally restrict **Schemas**.
 4. **Save.** DBTrail provisions a dedicated MySQL index for that source and
-   starts capturing **in-process** (the console runs the same PostgreSQL
+   starts capturing **in-process** (the daemon runs the same PostgreSQL
    preflight as `bintrail-pg doctor` — `wal_level`, publication coverage,
    `REPLICA IDENTITY FULL`, slot health — and surfaces any failure as a
    remediation card). Capture resumes automatically on restart.
@@ -70,7 +70,7 @@ setup](#postgresql-side-setup) below first, then:
 The **index stays MySQL**; only the *source* is PostgreSQL. The source type is
 fixed once saved — to change a server's capture engine, delete and re-create it.
 The form lives in `bintrail-console watch` (the Compose default); the read-only
-`serve` console browses an existing PostgreSQL-sourced index but does not add
+`serve` mode browses an existing PostgreSQL-sourced index but does not add
 sources.
 
 ### Standalone binary / image
@@ -402,12 +402,12 @@ shared daemon for PostgreSQL sources in this release — one process per source
 (systemd unit, container, etc.).
 
 You can **view and recover** PostgreSQL-captured data in the read-only web
-console (`bintrail-console`), which reads the shared index. The console presents
+interface (`bintrail-console`), which reads the shared index. The web interface presents
 PostgreSQL sources natively — LSN/slot vocabulary, a lost-slot badge, a
 connection-id note, and a live replication-health panel (slot WAL-retention, lag, RI-FULL); see
 [PostgreSQL sources](console.md#postgresql-sources). What it does **not** drive is
 *capture*: the "+ Add server" / `watch` control plane is MySQL-oriented, so run
-`bintrail-pg stream` for the capture and use the console (or the `query`/`recover`
+`bintrail-pg stream` for the capture and use the web interface (or the `query`/`recover`
 CLI) to browse and recover.
 
 ---
@@ -660,7 +660,7 @@ run across the PG 14/15/16/17 CI matrix:
 The generated reversal SQL is PostgreSQL dialect (double-quoted identifiers,
 standard-conforming string escaping, a `SET LOCAL standard_conforming_strings = on`
 guard) — the dialect is selected automatically from the source recorded in the index,
-so `bintrail-pg recover`, the console, and the MCP server all emit valid PostgreSQL
+so `bintrail-pg recover`, the web interface, and the MCP server all emit valid PostgreSQL
 for a PostgreSQL source.
 
 **Extension types** — PostGIS `geometry`/`geography` and pgvector `vector` — are
@@ -766,7 +766,7 @@ coerce, but verify your own round-trip.
 - **One database per slot.** A logical slot is scoped to a single database; to
   capture multiple databases on one cluster, run one `bintrail-pg stream` (and
   slot/publication) per database.
-- **No BYOS agent.** The web console captures PostgreSQL sources (**+ Add
+- **No BYOS agent.** The web interface captures PostgreSQL sources (**+ Add
   server** → PostgreSQL); `bintrail agent` (BYOS) does not support PostgreSQL.
 
 The gates that took PostgreSQL from beta to **GA** are closed
@@ -776,7 +776,7 @@ validation, DDL-drift handling, the silent-loss coverage guards above),
 baseline-anchored single-row `reconstruct` / time-travel with the
 baseline↔delta rendering-GUC identity and its fold-validated type matrix
 (#593), the managed-PostgreSQL smoke matrix (RDS and Aurora — see
-[Managed PostgreSQL](#managed-postgresql)), and source-aware console
+[Managed PostgreSQL](#managed-postgresql)), and source-aware web interface
 presentation including the live replication-health panel (v0.20.1).
 **Full-table** `reconstruct` remains documented out of scope (above);
 `verify` — baseline-anchored, live-source, and recover-input — is supported.

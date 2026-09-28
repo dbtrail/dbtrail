@@ -148,22 +148,22 @@ docker run -d \
 The `docker-compose.yml` at the repository root is the zero-friction setup:
 an index MySQL (persisted in a named volume) plus `bintrail-console watch` —
 preflight checks, index tables, automatic schema snapshot, the live binlog
-stream, **and the web console**, in one `up -d`. It pulls the published
+stream, **and the web interface**, in one `up -d`. It pulls the published
 `ghcr.io/dbtrail/bintrail-console` image; no Go toolchain or local build
 needed.
 
 ### Quick start
 
 No clone, no config — the compose file is self-contained and the servers
-to watch are added from the console UI afterwards:
+to watch are added from the web interface afterwards:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/dbtrail/dbtrail/main/docker-compose.yml
 docker compose up -d
 ```
 
-Open **http://127.0.0.1:8090** — on first run the console serves a **"create
-your console password"** screen. Set it once; every later visit is a normal
+Open **http://127.0.0.1:8090**. On first run the web interface asks you to **create a
+username and password**. Set them once; every later visit is a normal
 sign-in.
 
 Optional knobs go in a `.env` next to the file: `SOURCE_DSN` to start
@@ -186,11 +186,11 @@ Notes:
   (which refuses to start the stack otherwise), set `HOST_GATEWAY` in `.env`
   to this machine's address. That MySQL must listen on more than `127.0.0.1`
   (`bind-address`) and allow its DBTrail user from other hosts (`'dbtrail'@'%'`).
-- The console is published on the **host loopback only** (`127.0.0.1:8090`),
+- The web interface is published on the **host loopback only** (`127.0.0.1:8090`),
   which is why first-run browser setup is allowed (the compose sets
   `BINTRAIL_CONSOLE_ALLOW_SETUP` because the container itself binds `0.0.0.0`).
   The setup screen self-disables the moment a password exists. To reach the
-  console from another machine, **set the password from the host shell first**
+  web interface from another machine, **set the password from the host shell first**
   (`docker compose exec -it bintrail bintrail-console user set-password`) —
   until you do, the compose stack would serve the create-password screen on
   whatever you publish (a loud startup warning fires while it is open). Then
@@ -204,7 +204,7 @@ Notes:
 - `bintrail-console watch` is idempotent: restarts resume the stream from
   its saved checkpoint. The preflight (`doctor`) failing prints
   copy-pasteable remediation in the logs and the container retries.
-- Saved console connections (the Servers menu) persist in the
+- The servers saved in the web interface (the Servers menu) persist in the
   `bintrail-state` volume.
 - The managed MCP token (**Settings → MCP Server**) lives at
   `/var/lib/bintrail/console-mcp-token.yaml` in the same volume, so an AI
@@ -250,7 +250,7 @@ What a stale compose file costs:
 
 | What your file is missing | What it costs | How it looks |
 |---|---|---|
-| the console state paths on the `bintrail-state` volume | your username and password, the servers you added, and the AI connection token live inside the container, so the next `up -d` that recreates it deletes them | **Silent.** The console comes back asking you to create a password, exactly like a fresh install, and reports no loss. Fix this one first |
+| the state paths on the `bintrail-state` volume | your username and password, the servers you added, and the AI connection token live inside the container, so the next `up -d` that recreates it deletes them | **Silent.** The web interface comes back asking you to create a password, exactly like a fresh install, and reports no loss. Fix this one first |
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
 | the `iceberg-export` profile and its volume | there is no one-shot Iceberg export to run | `docker compose --profile iceberg-export run ...` says the service does not exist |
 | the `host.docker.internal` mapping (`extra_hosts`) | on Linux, a database on this same machine cannot be reached by that name | Adding the server fails with `lookup host.docker.internal: no such host` |
@@ -270,7 +270,7 @@ Two things make this easier to catch:
   nothing to report and only speaks up on a later start. The table above is
   what to check before the upgrade, not after.
 - **The file carries a version.** `x-bintrail-compose-version` at the top of
-  `docker-compose.yml` is passed to the console service, so a newer daemon can
+  `docker-compose.yml` is passed to the `bintrail` service, so a newer daemon can
   tell you your file is behind and name what is not in effect, instead of
   leaving you to diff two files. A file old enough to have no version number
   gets no such line.
@@ -279,8 +279,8 @@ Two things make this easier to catch:
 
 The `bintrail` service serves the watch daemon's Prometheus endpoint at
 **http://127.0.0.1:9090/metrics** by default (host loopback only, same
-posture as the console): per-source stream metrics — every metric carries a
-`source` label — plus the `bintrail_index_*` gauges. The scrape config and
+posture as the web interface): per-source stream metrics (every metric carries a
+`source` label) plus the `bintrail_index_*` gauges. The scrape config and
 alerting rules in [Deployment §7 Observability](deployment.md#7-observability)
 work against this endpoint as-is. A Prometheus running as a *container* on
 the same compose network scrapes `bintrail:9090` and needs no published
@@ -288,7 +288,7 @@ port. Set `METRICS_ADDR=` (empty) in `.env` to disable the endpoint. It has
 no authentication — widen the port mapping beyond loopback only behind a
 firewall.
 
-The service also carries a Docker **healthcheck** probing the console's
+The service also carries a Docker **healthcheck** probing the daemon's
 unauthenticated `GET /api/healthz`, so `docker compose ps` shows `(healthy)`
 for a live daemon and `(unhealthy)` for one whose HTTP loop has died. Two
 honest limits:
@@ -318,7 +318,7 @@ DBTrail read it from there. The password is baked into the datadir at init,
 so `bintrail-index-data` and `bintrail-index-secret` are a pair: back them up
 together, and changing the password later means resetting both volumes.
 
-**Troubleshooting** — if `docker compose up` never gets the console listening,
+**Troubleshooting**: if `docker compose up` never gets the web interface listening,
 the index MySQL likely isn't healthy yet (the `bintrail` service waits for it
 via `depends_on`, so its own log stays empty until then). Check the index
 directly: `docker compose logs index-init index-mysql`. A "password" or
@@ -374,7 +374,7 @@ source's binlogs (the bundled index was always "volume loss = re-index").
 > dump/restore, not an in-place datadir upgrade), or point `INDEX_DSN` at a BYO
 > index instead.
 
-**Upgrading a compose stack from before the console split** — older
+**Upgrading a compose stack from before the web interface moved to its own image**: older
 `docker-compose.yml` files ran `bintrail up --console` from the
 `ghcr.io/dbtrail/bintrail` image. That flag no longer exists (the combined
 daemon is now `bintrail-console watch`, in its own image), so a
@@ -382,7 +382,7 @@ daemon is now `bintrail-console watch`, in its own image), so a
 `unknown flag: --console`. The fix is to re-download `docker-compose.yml`
 (see [Upgrading the stack](#upgrading-the-stack)) — image and command changed,
 but your `.env` and all data volumes (`bintrail-index-data`,
-`bintrail-index-secret`, `bintrail-state`, including saved console servers)
+`bintrail-index-secret`, `bintrail-state`, including the servers saved in the web interface)
 carry over unchanged.
 
 ### Backing up / restoring the bundled index
@@ -430,7 +430,7 @@ writing, then `docker compose up -d` — never reload a datadir without its
 matching secret.
 
 **Verify** either restore with `bintrail status`. The core `bintrail` binary
-lives in the core image (the console image omits it), and `index-mysql`
+lives in the core image (the `bintrail-console` image omits it), and `index-mysql`
 publishes no host port, so run it as a throwaway container that shares
 `index-mysql`'s network and secret:
 
@@ -463,9 +463,9 @@ only the *bundled* index is 8.4.)
 
 ### Baselines and Time-travel (the `baseline` profile)
 
-The console's **Time-travel** surface reconstructs complete rows (baseline
-snapshot + binlog deltas), so it needs **baseline Parquet snapshots** — and the
-console image deliberately ships without the `dump`/`baseline` commands. The
+The web interface's **Time-travel** tab reconstructs complete rows (baseline
+snapshot + binlog deltas), so it needs **baseline Parquet snapshots**, and the
+`bintrail-console` image deliberately ships without the `dump`/`baseline` commands. The
 compose file includes an opt-in one-shot profile that produces them with zero
 extra installs: the official `mydumper` image dumps the source over the
 network into a transient volume, then the core `bintrail` CLI image converts
@@ -486,7 +486,7 @@ BASELINE_SCHEMAS="shop,billing" \
 Each run creates a new snapshot under
 `/var/lib/bintrail/baselines/<timestamp>/<schema>/<table>.parquet` (in the
 `bintrail-state` volume), with the source's binlog coordinates embedded so
-reconstruct knows where deltas begin. Then point the console at it:
+reconstruct knows where deltas begin. Then point the daemon at it:
 
 - **Servers added from the UI**: Snapshots (left nav) → **Where and how
   often** → the server's row → **Local folder** = `/var/lib/bintrail/baselines` (a
@@ -496,7 +496,7 @@ reconstruct knows where deltas begin. Then point the console at it:
 - **The boot `SOURCE_DSN` entry**: set `BASELINE_DIR=/var/lib/bintrail/baselines`
   in `.env` and `docker compose up -d` again.
 
-The console also has an in-process **Create baseline** button (in the sidebar
+The web interface also has an in-process **Create baseline** button (in the sidebar
 on the Snapshots page, for the selected server) that runs the same
 dump→convert→upload pipeline without the CLI profile — it's on by default in this compose stack;
 set `BASELINE_TRIGGER=0` in `.env` to disable it. The button still needs a
@@ -509,7 +509,7 @@ for the selected server — trigger a run, watch per-table match/mismatch/
 inconclusive results land, and drill into a mismatch — see
 [console.md](console.md#running-verification-from-the-console).
 
-**SQL over your Parquet** is not answered by the daemon. The console's SQL page
+**SQL over your Parquet** is not answered by the daemon. The web interface's SQL page
 was removed in 0.75.0 (see [The SQL panel
 (removed)](console.md#the-sql-panel-removed)). Open **MCP Server**, click
 **Download views.sql** on the **Download a DuckDB schema** card, and run the
@@ -550,7 +550,7 @@ Notes:
 
 Once you have baselines, the compose file can turn them into Apache Iceberg
 tables that Spark, Trino, Athena, Snowflake and DuckDB read directly. It is
-another opt-in one-shot, on the **core** image (the console image ships
+another opt-in one-shot, on the **core** image (the `bintrail-console` image ships
 without the export commands):
 
 ```bash
@@ -575,7 +575,7 @@ Notes:
   is an **output**, not a system of record: it is rebuilt from the index and
   the baselines, so losing it costs a re-export and nothing else.
 - The index DSN is the bundled one unless you set `INDEX_DSN`, exactly like
-  the other services. That is worth knowing next to the console's **Keep it
+  the other services. That is worth knowing next to the web interface's **Keep it
   current with Iceberg** panel: this profile always runs against the stack's
   own index and backups, so if the server you picked there is a different one
   (its own `baseline_s3`, say), set `INDEX_DSN` and `BASELINE_DIR` /
@@ -593,10 +593,10 @@ Notes:
 
 ### Time-travel SQL (`AS OF`) and the compose stack
 
-The console's Time-travel tab and time-travel **SQL** (`SELECT … AS OF`) are
+The web interface's Time-travel tab and time-travel **SQL** (`SELECT … AS OF`) are
 different surfaces. `AS OF` SQL is answered by `bintrail shim`, an in-process
 MySQL-protocol server (a subcommand of the **core** `bintrail` binary; the
-console image deliberately omits it).
+`bintrail-console` image deliberately omits it).
 
 **The `flashback` profile — a dedicated time-travel terminal (no ProxySQL).**
 The compose file ships an opt-in `shim` service: point a plain `mysql` client at
@@ -630,7 +630,7 @@ the `127.0.0.1:3308:3308` port mapping restricts host exposure to loopback. Note
   `.env`, and re-run `docker compose --profile flashback up -d`. Without it,
   `_flashback.*` returns only rows with binlog activity in the retained window
   (a *partial* table), and full-table `_snapshot` degrades to that behaviour.
-- **Sources added from the console UI are not served by this shim.** They stream
+- **Sources added from the web interface are not served by this shim.** They stream
   into their own per-source index database (`bintrail_idx_<id>`), not
   `bintrail_index`. To time-travel one of those, point `INDEX_DSN` at that
   database (one shim per source — see [time-travel-sql.md](./time-travel-sql.md)
@@ -657,19 +657,19 @@ surface, use the demo image ([demo.md](./demo.md)).
 
 | Variable | Used by | Description |
 |----------|---------|-------------|
-| `SOURCE_DSN` | compose (optional) | DSN for a source MySQL to start watching at boot (empty = add servers from the console UI) |
+| `SOURCE_DSN` | compose (optional) | DSN for a source MySQL to start watching at boot (empty = add servers from the web interface) |
 | `INDEX_DSN` | compose (optional) | Bring-your-own index MySQL (default: the bundled container) |
 | `SCHEMAS` | compose (optional) | Comma-separated schemas to track (empty = all user schemas) |
-| `CONSOLE_TOKEN` | compose (optional) | Opt-in static API-automation token (default: none — humans sign in with the console password) |
+| `CONSOLE_TOKEN` | compose (optional) | Opt-in static API-automation token (default: none; humans sign in with a username and password) |
 | `METRICS_ADDR` | compose (optional) | Container-side bind for the watch daemon's Prometheus `/metrics` (default `:9090`, published on the host loopback as `127.0.0.1:9090`; set empty to disable) |
 | `INDEX_MYSQL_ROOT_PASSWORD` | compose (optional) | Pin the bundled index root password (set *before* first boot; default: randomly generated into the `bintrail-index-secret` volume) |
 | `BINTRAIL_TAG` | compose (optional) | Image tag to run (default `latest`) |
 | `BASELINE_SOURCE_DSN` | compose `baseline` profile | Source MySQL to snapshot (default: `SOURCE_DSN`) |
 | `BASELINE_SCHEMAS` | compose `baseline` profile | Comma-separated schemas to snapshot (default: `SCHEMAS`; empty = all user schemas, system schemas excluded) |
 | `BASELINE_DIR` | compose (optional) | Baseline dir for the boot `SOURCE_DSN` entry — set `/var/lib/bintrail/baselines` after the first `baseline` profile run to enable Time-travel on it. Also enables full-table `_snapshot.*` on the `flashback` profile shim |
-| `BASELINE_TRIGGER` | compose (optional) | Enables the console's in-process **Create baseline** button (dump→convert→upload) for a monitored server; **on by default** — set `BASELINE_TRIGGER=0` to disable |
-| `VERIFY_TRIGGER` | compose (optional) | Enables the console's Storage **Verification** panel (runs `bintrail verify` in-process) for a monitored server; **on by default** — set `VERIFY_TRIGGER=0` to disable |
-| `BINTRAIL_CONSOLE_SQL_PANEL` | retired | The console's SQL page and `POST /api/sql` were removed in 0.75.0. Read for one release, and warns that it does nothing |
+| `BASELINE_TRIGGER` | compose (optional) | Enables the web interface's in-process **Create baseline** button (dump→convert→upload) for a monitored server; **on by default**; set `BASELINE_TRIGGER=0` to disable |
+| `VERIFY_TRIGGER` | compose (optional) | Enables the web interface's Storage **Verification** panel (runs `bintrail verify` in-process) for a monitored server; **on by default**; set `VERIFY_TRIGGER=0` to disable |
+| `BINTRAIL_CONSOLE_SQL_PANEL` | retired | The web interface's SQL page and `POST /api/sql` were removed in 0.75.0. Read for one release, and warns that it does nothing |
 | `WAREHOUSE_DIR` | compose `iceberg-export` profile (optional) | Directory the Iceberg tables are written under (default `/var/lib/bintrail-iceberg`, in the `bintrail-iceberg` volume) |
 | `BASELINE_S3` | compose `iceberg-export` profile (optional) | S3 prefix holding the baseline snapshots to export from; wins over `BASELINE_DIR` |
 | `ICEBERG_TABLES` | compose `iceberg-export` profile (optional) | Comma-separated `schema.table` list to export (default: every table in the newest snapshot) |
@@ -687,7 +687,7 @@ one from the source DSN.)
 
 ### S3 credentials (Archive to S3 / baselines)
 
-Both **Archive to S3** (per-source, set from the console UI) and reading
+Both **Archive to S3** (per-source, set from the web interface) and reading
 **baseline** snapshots back from `s3://` go through the `bintrail` service's
 ambient AWS credential chain — there's no per-source credential field. Set
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` /
@@ -701,9 +701,9 @@ container) — the chain tries those too.
 Missing/invalid credentials show up as:
 
 - In `docker compose logs -f bintrail`: `duckdb: AWS credential chain
-  resolved no usable credentials for S3 reads` (DuckDB, the console's Parquet
+  resolved no usable credentials for S3 reads` (DuckDB, the daemon's Parquet
   query engine, couldn't resolve anything from the chain).
-- In the console UI: `Could not list baselines: ... HTTP 403 Forbidden ...
+- In the web interface: `Could not list baselines: ... HTTP 403 Forbidden ...
   No credentials are provided`, or an equivalent 403 on Archive to S3 uploads.
 
 Both point at the same root cause — no usable AWS credentials reached the
@@ -725,9 +725,9 @@ volume is chowned to it), `/var/lib/bintrail` pre-created for the server
 registry. Build it from source with
 `docker build -f build/Dockerfile.bintrail-console -t bintrail-console .`
 
-### The console base image
+### The base image, `bintrail-console-base`
 
-`ghcr.io/dbtrail/bintrail-console-base` holds everything the console image
+`ghcr.io/dbtrail/bintrail-console-base` holds everything the `bintrail-console` image
 needs besides the binary: Debian, the pinned mydumper with the client library
 it needs to log in, the `bintrail` user (uid 999) and its directories. You do
 not run it yourself. It exists so that mydumper is installed in one place and
@@ -735,7 +735,7 @@ tested there: before a tag is published, `build/smoke-console-base.sh` runs the
 image's mydumper against MySQL 8.0 and 8.4 on both architectures, as a user
 created with the server's default login plugin.
 
-The console image recipes still install the same packages themselves. They
+The `bintrail-console` image recipes still install the same packages themselves. They
 move to `FROM` this image once its first tag is published. The first tag is
 published when the change that adds the image is merged. The package is created
 private on that first push and needs a one-time manual change to public.

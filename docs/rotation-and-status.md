@@ -415,14 +415,14 @@ changes stay lost). To retire the alert after remediation, **acknowledge** it:
 bintrail status --index-dsn "$IDX" --ack-capture-skips
 ```
 
-or press **Mark as read** on the capture-health box in the web console. Either
+or press **Mark as read** on the capture-health box in the web interface. Either
 one records the count you saw and the moment you saw it in
 `stream_state.capture_skips_ack`; nothing is erased, `status` keeps reporting
 the tally, and `--fail-on-gap` stops failing on it.
 
 Acknowledgement covers a **count**, not the problem: if anything is skipped
 afterwards the tally rises above what was acknowledged and both the alert and
-the console's alarm come back with no further action. That is what makes it
+the web interface's alarm come back with no further action. That is what makes it
 safe to press — it can retire a record, it cannot mute the next incident.
 
 Do **not** clear `capture_skips` by hand. That was the old advice and it is
@@ -440,7 +440,7 @@ Under `--format json` the verdict is **nested in the `stream` object** as
 whenever the `stream` object is — i.e. once a checkpoint exists — so a
 CI check uses `jq -e '.stream.continuity.status == "ok"'` (a `null` from a
 missing `stream` is itself a "can't confirm" signal). The green "no gaps" badge
-in the [web console](console.md) keys on `stream.continuity.status == "ok"`.
+in the [web interface](console.md) keys on `stream.continuity.status == "ok"`.
 
 When `stream_state` could not be **read**, the JSON output instead carries a
 top-level `stream_error` object — a **sibling** of `stream`, never a fake
@@ -477,7 +477,7 @@ checkpoint, surviving restarts) and `status` renders the verdict:
   Per-event detail is in the log of the process capturing this source […]
 ```
 
-The block after the verdict is the same text the [web console](console.md)
+The block after the verdict is the same text the [web interface](console.md)
 shows, built once in `internal/status` and shipped in the JSON as
 `capture_health.explanation`, so the two surfaces cannot tell different
 stories. It names the affected tables, distinguishes the ordinary cause (a new
@@ -524,12 +524,12 @@ carry `last_file`, `last_pos`, `last_statement_type`, `last_connection_id`
 (omitted when absent). Table-attributed reasons also carry `tables` (capped, with
 `tables_truncated` when more were skipped than are listed) and `last_detail`;
 the verdict carries `explanation`, the rendered prose above. The
-[web console](console.md) serves the same payload from `GET /api/status`, with
+[web interface](console.md) serves the same payload from `GET /api/status`, with
 one difference for a session whose data access is restricted (a data profile,
 or per-role access rules): `tables` keeps only the names that session may read,
 `tables_withheld` counts the rest, and the explanation is built from that
 shorter list ("app.users and 2 tables outside your access"). The counts are
-unchanged. The console's Overview shows an orange "Capture incomplete" box in
+unchanged. The web interface's Overview screen shows an orange "Capture incomplete" box in
 the same states, with a **Refresh schema snapshot** button for a monitored
 server: it re-reads the source's column layout and restarts that server's
 capture onto it (a schema snapshot is not a baseline — it records columns, not
@@ -651,7 +651,7 @@ bintrail recover
 
 ## Built-in Rotation in `bintrail up`
 
-`bintrail up` runs a built-in rotation loop **by default**: every hour it drops index partitions older than 48 hours and keeps 3 future hourly partitions ready, so an unattended quickstart can never grow until the disk fills. The settings are announced loudly at boot. Under `bintrail-console watch` (the stream + console daemon — same `--rotate-*` flags and env vars) the loop additionally covers every per-source database the console control plane provisions (`bintrail_idx_<entry>`).
+`bintrail up` runs a built-in rotation loop **by default**: every hour it drops index partitions older than 48 hours and keeps 3 future hourly partitions ready, so an unattended quickstart can never grow until the disk fills. The settings are announced loudly at boot. Under `bintrail-console watch` (capture plus web interface in one daemon, with the same `--rotate-*` flags and env vars) the loop additionally covers every per-source database the control plane provisions (`bintrail_idx_<entry>`).
 
 ```sh
 bintrail up ... --rotate-retain 90d        # keep more history
@@ -662,13 +662,13 @@ BINTRAIL_ROTATE_RETAIN=7d bintrail up ...  # env form (also _INTERVAL, _ADD_FUTU
 **Safety guards** (two, independent):
 
 1. **Upgrade guard** — if you never set `--rotate-retain` (running on the implicit default) and the index holds history extending beyond *twice* its window that did **not** accumulate under that window, the loop refuses to drop it. Two shapes qualify: an index that records no window of its own (see below), which is one created before the record existed — the signature of a deployment that predates built-in rotation, holding more than 60 days — and an index that holds partitions older than its own record, which is one created empty and then filled from somewhere else (`restore-index` rebuilding it from the archives, `bintrail index` over old binlog files). Either way, an operator who never chose a retention must not lose that history to an upgrade or to the first cycle after a restore. It logs an Error each cycle until you choose: `--rotate-retain 48h` to confirm today's default, `30d` to keep the older one, a larger window to keep more, or `off`. An index that has simply been running under its own record never trips this guard, including after an outage longer than its window.
-2. **Archive guard** — whether the built-in loop archives depends on how each target was provisioned. When a target carries an S3 archive destination (the console control plane sets this on the per-source databases it provisions), the loop itself archives each expired partition to S3 — and prunes the local staging copy after upload — before dropping it, the same as an explicit `rotate --archive-s3` run. When a target has **no** archive destination configured (the default boot index, or a BYO index with no console-provisioned archiving), the loop never archives on its own — it only drops-and-tops-up, and it defers to whatever *external* archiving flow it detects: if `archive_state` shows the index has *ever* been archived (e.g. your own `rotate --archive-dir` cron), the loop only drops partitions that are already archived, leaving partitions past retention but not yet archived for your cron (with a warning logged). An index with no archiving history at all — neither built-in nor external — rotates unconditionally (the bounded-volume quickstart behavior).
+2. **Archive guard**: whether the built-in loop archives depends on how each target was provisioned. When a target carries an S3 archive destination (the control plane sets this on the per-source databases it provisions), the loop itself archives each expired partition to S3 (and prunes the local staging copy after upload) before dropping it, the same as an explicit `rotate --archive-s3` run. When a target has **no** archive destination configured (the default boot index, or a BYO index with no archiving set by the control plane), the loop never archives on its own: it only drops-and-tops-up, and it defers to whatever *external* archiving flow it detects: if `archive_state` shows the index has *ever* been archived (e.g. your own `rotate --archive-dir` cron), the loop only drops partitions that are already archived, leaving partitions past retention but not yet archived for your cron (with a warning logged). An index with no archiving history at all (neither built-in nor external) rotates unconditionally (the bounded-volume quickstart behavior).
 
-**Each index remembers the window it was created under.** When `init` (or `up`, `watch`, or the console control plane provisioning a per-source database) creates an index, it records the built-in default in force at that moment — 48 hours since the release that lowered it from 30 days — in the index's own `rotation_policy` table. While you set no retention yourself, the loop drops on **that** record, not on the running binary's default — so changing the default in a later release moves the indexes created from then on and never shortens the window an existing index has been running on.
+**Each index remembers the window it was created under.** When `init` (or `up`, `watch`, or the control plane provisioning a per-source database) creates an index, it records the built-in default in force at that moment (48 hours since the release that lowered it from 30 days) in the index's own `rotation_policy` table. While you set no retention yourself, the loop drops on **that** record, not on the running binary's default, so changing the default in a later release moves the indexes created from then on and never shortens the window an existing index has been running on.
 
 An index created before this record existed carries none, and that absence is how the loop recognises it: it keeps 30 days, the default every such index ran under, and stays under the upgrade guard above. Whenever the window an index keeps differs from what a new index would start with, the daemon says so once per index, on that index's next rotation cycle (hourly by default).
 
-The exemption from the upgrade guard is about the history, not about the record: an index created empty and then FILLED with older history — `restore-index` rebuilding it from the archives, or `bintrail index` over months of old binlog files — holds partitions older than its own record, so the guard still refuses to drop them until you choose a retention. Setting `--rotate-retain` (or `BINTRAIL_ROTATE_RETAIN`, or the console's rotation settings) overrides the record everywhere; an unreadable record falls back to the same 30 days and logs why.
+The exemption from the upgrade guard is about the history, not about the record: an index created empty and then FILLED with older history (`restore-index` rebuilding it from the archives, or `bintrail index` over months of old binlog files) holds partitions older than its own record, so the guard still refuses to drop them until you choose a retention. Setting `--rotate-retain` (or `BINTRAIL_ROTATE_RETAIN`, or the web interface's rotation settings) overrides the record everywhere; an unreadable record falls back to the same 30 days and logs why.
 
 If rotation makes no progress it should have — failing, deferring partitions to a stalled archiving flow, or any mix of the two — for 3 consecutive cycles, the loop escalates to an explicit Error in the logs: the index is growing unbounded and needs attention. The explicit `bintrail rotate` command is unaffected by all of the above: it keeps its unguarded, operator-asked-for-it semantics.
 

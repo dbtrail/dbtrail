@@ -182,7 +182,7 @@ silently become the write key for every server. Two caveats:
   `--source-flavor mariadb` (same flag and `BINTRAIL_SOURCE_FLAVOR` env as
   `stream`) for its BYOS streaming, but unlike `stream` it has no saved
   checkpoint — on restart it resumes from `--start-gtid` (parsed with the
-  configured flavor) or the server's current binlog position. The web console
+  configured flavor) or the server's current binlog position. The web interface
   also captures MariaDB sources (**+ Add server** → MariaDB, with a flavor chip
   in the server list).
 - **Index-on-MariaDB is out of scope** — the index database stays MySQL.

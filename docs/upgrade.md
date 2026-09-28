@@ -23,7 +23,7 @@ against the [latest release](https://github.com/dbtrail/dbtrail/releases/latest)
 first. Skim every version **between** your current one and the target —
 entries marked **BREAKING** call out a behavior change that needs a manual
 step (a flag/env var rename, a default that flipped, an auth model change).
-Recent examples: the 0.11.0 console auth rework (token → username+password),
+Recent examples: the 0.11.0 web interface auth rework (token → username+password),
 the 0.8.x switch to rotation-on-by-default. If you're several versions
 behind, read all of them — breaking changes don't repeat themselves in later
 entries.
@@ -64,11 +64,11 @@ add the specific new line by hand if you've heavily customized the file. The
 what a stale file costs).
 
 Data volumes (`bintrail-index-data`, `bintrail-index-secret`,
-`bintrail-state`, including saved console servers) carry over unchanged
+`bintrail-state`, including the servers saved in the web interface) carry over unchanged
 across a `pull && up -d` — only the images and `docker-compose.yml` itself
 change. Two known transitions that need more than `pull`:
 
-- **A compose file from before the console split** (pre-#374) ran
+- **A compose file from before the web interface moved to its own image** (pre-#374) ran
   `bintrail up --console` from the single `ghcr.io/dbtrail/bintrail` image;
   that flag no longer exists. Take the current `docker-compose.yml` (the three
   lines above) rather than just `pull`-ing — see
@@ -138,12 +138,12 @@ introduced since your index was created, idempotently (checks
 `information_schema` first, never re-runs a migration). No `bintrail init`
 re-run needed; just start the new binary against the same index.
 
-**Not automatic — the console's multi-server registry.** A server added
-through the console's "+ Add server" UI is **never** schema-migrated by the
-console itself (only the CLI-typed boot DSN gets `EnsureSchema` — a registry
+**Not automatic: the web interface's multi-server registry.** A server added
+through the web interface's "+ Add server" form is **never** schema-migrated by the
+daemon itself (only the CLI-typed boot DSN gets `EnsureSchema`; a registry
 DSN is deliberately never `ALTER`'d by a read-mostly web process). If a
-registry server's index predates a column the new console version expects
-(e.g. `connection_id`), the console surfaces an actionable 422 instead of a
+registry server's index predates a column the new version expects
+(e.g. `connection_id`), the web interface shows an actionable 422 instead of a
 raw SQL error, telling you to run a writer command against it once:
 
 ```sh
@@ -156,7 +156,7 @@ cheapest way to migrate an index without touching real data. (`status` is
 the one exception: it deliberately does **not** migrate, so it can read a
 pre-migration index's state — don't use it for this.) Practically: any index
 a `stream`/`agent`/`index` process writes to picks up new columns
-automatically on its own next run; the console only *reads* registry
+automatically on its own next run; the web interface only *reads* registry
 servers, so a registry-only index needs this one manual touch after an
 upgrade that adds a column. This is the same architectural boundary described in
 [console.md](./console.md) (`connManager` never runs `EnsureSchema` on a

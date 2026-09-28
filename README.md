@@ -14,7 +14,7 @@ SELECT * FROM orders WHERE id = 123 AS OF '2026-05-20 14:00:00'
 
 *That query runs against production MySQL or Postgres. DBTrail makes it work.*
 
-<img src="docs/img/console-overview.png" alt="DBTrail console: recent changes across every table, deletes surfaced first" width="850">
+<img src="docs/img/console-overview.png" alt="The DBTrail web interface: recent changes across every table, deletes surfaced first" width="850">
 
 </div>
 
@@ -30,11 +30,11 @@ after images, in a searchable index:
 - **See every change.** What changed and when, for every row, with before/after diffs.
 - **Undo precisely.** Generate exact reversal SQL for just the damaged rows.
 - **Undo foreign-key cascades.** Rebuild the child rows an `ON DELETE CASCADE` wiped out. Restore the foreign keys an `ON DELETE SET NULL` cleared, or an `ON UPDATE CASCADE`/`SET NULL` re-pointed when a parent's key changed. InnoDB applies all of these below the binlog, where most tools cannot see them. See [Query & Recovery](docs/query-and-recovery.md).
-- **Time-travel.** Query any row or table as it was at any moment, from the web console or the `reconstruct` CLI. The live SQL `AS OF` interface also needs ProxySQL. See [Time-Travel SQL](docs/time-travel-sql.md).
+- **Time-travel.** Query any row or table as it was at any moment, from the web interface or the `reconstruct` CLI. The live SQL `AS OF` interface also needs ProxySQL. See [Time-Travel SQL](docs/time-travel-sql.md).
 - **Who changed this?** Session attribution (the database user, host, and client program behind a change) ships in the commercial distribution, DBTrail EE.
 - **Prove the safety net holds.** `bintrail verify` checks offline, without touching the source, that a recovery would reproduce it. `bintrail status` flags any gap in the captured stream. You find out before you need it. See [Verify](docs/verify.md).
-- **Web console.** Browse, recover, and add servers to monitor, all in the UI.
-- **Ask it in plain English.** Connect Claude Desktop to your console in one click with an `.mcpb` bundle or a copy-paste URL ([5-minute guide](docs/connect-ai.md)). Any MCP client works; see the [MCP server](docs/mcp-server.md) reference.
+- **Web interface.** Browse, recover, and add servers to monitor, all in the browser.
+- **Ask it in plain English.** Connect Claude Desktop to your web interface in one click with an `.mcpb` bundle or a copy-paste URL ([5-minute guide](docs/connect-ai.md)). Any MCP client works; see the [MCP server](docs/mcp-server.md) reference.
 
 Works with **MySQL**, **Percona Server for MySQL**, **Amazon RDS for MySQL**,
 and **Amazon Aurora MySQL** (verified). **Google Cloud SQL for MySQL** should
@@ -86,7 +86,7 @@ and Cloud SQL: **[PostgreSQL source](docs/postgres.md)** ·
 | Start here | Reference | Operations |
 |---|---|---|
 | [Install](docs/install.md) | [Query & Recovery](docs/query-and-recovery.md) | [Deployment](docs/deployment.md) · [Capacity](docs/capacity.md) |
-| [Start page](https://www.dbtrail.com/docs/quickstart/) · [Command-line quickstart](docs/quickstart.md) | [Web console](docs/console.md) | [Rotation & Status](docs/rotation-and-status.md) |
+| [Start page](https://www.dbtrail.com/docs/quickstart/) · [Command-line quickstart](docs/quickstart.md) | [Web interface](docs/console.md) | [Rotation & Status](docs/rotation-and-status.md) |
 | [DBA guide](docs/guide.md) | [Time-Travel SQL](docs/time-travel-sql.md) · [Verify recoveries](docs/verify.md) | [Docker](docs/docker.md) |
 | [30-second demo](docs/demo.md) | [Streaming](docs/streaming.md) · [Indexing](docs/indexing.md) | [Upload to S3](docs/upload.md) · [S3 IAM policy](docs/s3-iam-policy.md) · [Upgrading](docs/upgrade.md) |
 | | [MariaDB source (alpha)](docs/mariadb.md) · [PostgreSQL source](docs/postgres.md) | [Server identity](docs/server-identity.md) |

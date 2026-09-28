@@ -27,7 +27,7 @@ in *how the client connects*:
 1. **Embedded in `bintrail-console watch` — one port for every monitored server
    (multi-source).** If you already run the daemon, add `--flashback-listen`
    and it serves `_flashback` / `_snapshot` / `_diff` for *every* server in the
-   console, routed by the connection username. No separate `bintrail shim`
+   web interface, routed by the connection username. No separate `bintrail shim`
    process, no hand-built index DSN. See [the embedded port](#the-embedded-port-multi-source)
    below. Start here if you run `watch`.
 2. **A dedicated terminal — point `mysql` straight at a standalone shim (no
@@ -63,9 +63,9 @@ bintrail-console watch \
   --flashback-listen 127.0.0.1:3308            # or env BINTRAIL_CONSOLE_FLASHBACK_LISTEN
 ```
 
-**Routing is by username, auth is the console token.** Connect as the target
+**Routing is by username, auth is the access token.** Connect as the target
 server — its registry **ID** (robust; the `X-Bintrail-Server` value shown in the
-console) or its display **name** — with the console token as the password:
+web interface) or its display **name**, with the access token as the password:
 
 ```sh
 # the console shows each server's id/name in the switcher
@@ -74,13 +74,13 @@ mysql> USE myapp;   -- optional: seeded from the server's source DSN when known
 mysql> SELECT * FROM _flashback.orders AS OF '2026-05-02 10:00:00' WHERE id = 12345;
 ```
 
-Servers added in the console mid-session are reachable immediately (the registry
+Servers added in the web interface mid-session are reachable immediately (the registry
 is read live). A token is **required** — MySQL-protocol auth cannot use the
-console's password store — so set `--console-token` / `BINTRAIL_CONSOLE_TOKEN`;
+web interface's password store, so set `--console-token` / `BINTRAIL_CONSOLE_TOKEN`;
 `watch` refuses to open the port otherwise. The default `127.0.0.1` bind keeps
 it host-local; do not expose it to untrusted networks.
 
-The console shows all of this on **Settings → MCP Server**, in the **Connect a
+The web interface shows all of this on **Settings → MCP Server**, in the **Connect a
 SQL client** panel: whether the port is on, its address, the user and password
 rules, and a ready-to-copy `mysql` line for the server picked in the sidebar
 (the token itself is never displayed). When the port is off, the panel names
@@ -89,10 +89,10 @@ setting that opens it.
 
 `_snapshot.*` parity: each server reads the baseline configured on its registry
 entry (or the daemon's `--baseline-dir` / `--baseline-s3`), exactly as the
-console's Time-travel tab does — with one edge: a server configured with *both*
+web interface's Time-travel tab does, with one edge: a server configured with *both*
 a local `--baseline-dir` **and** an `--baseline-s3` copy reads `_snapshot` only
 from the local dir on this port. If local baselines have been pruned (retention)
-while a durable S3 copy remains, use the console's Time-travel tab or a standalone
+while a durable S3 copy remains, use the web interface's Time-travel tab or a standalone
 shim pointed at the S3 prefix for those tables. Single-source baseline configs —
 the common case — have full parity.
 
@@ -572,7 +572,7 @@ The DBTrail index retains the most recent hours via partition rotation; older da
 - **Full-table reconstruction is buffered, not streamed.** The MVP buffers up to 100,000 rows per query and surfaces overflow as `ER_TOO_BIG_SELECT` (1104). A streaming wire-protocol path (no row cap) is deferred until an operator reports the cap as a real bottleneck. PK-filtered point-lookups are unaffected.
 - **`_snapshot` refuses across a TRUNCATE/DROP/RENAME.** `TRUNCATE TABLE`/`DROP TABLE`/`RENAME TABLE` and MariaDB's `CREATE OR REPLACE TABLE` emit no row events, so a baseline merge spanning one of these statements would silently resurrect pre-DDL rows as if they still existed at AS OF. Both the single-row and full-table `_snapshot` paths check `schema_changes` for such a statement between the baseline snapshot and AS OF and return `ER_UNKNOWN_ERROR` (1105) naming the DDL type and timestamp instead ([#764](https://github.com/dbtrail/dbtrail/issues/764)); re-baseline the table after the DDL to resume. `_flashback` is unaffected — it never reads a baseline.
 - **No JOINs, aggregations, or non-PK WHERE filters inside the shim.** Run them outside on the resultset (`duckdb`, `pandas`, `awk`). The shim's job is to deliver correct historical row state; SQL execution against that state is the operator's tool of choice.
-- **ENUM/SET labels are decoded with the snapshot in effect at each event.** Binlog row images store ENUMs as ordinals and SETs as bitmasks; the shim (and the console Time-travel / `bintrail reconstruct` surfaces) map them back to labels using the schema snapshot whose capture time most recently precedes the event — so an enum reshaped between two events renders each event under its own definition. Remaining caveats: events older than the *first* snapshot decode with that first snapshot, and a change made between an ALTER and the next snapshot decodes with the pre-ALTER definition (stream mode auto-snapshots on DDL, so that window is normally seconds). An ordinal beyond the selected definition is returned as the raw number — the forensic ground truth, also visible in `bintrail query`'s JSON output, which is deliberately left unmapped.
+- **ENUM/SET labels are decoded with the snapshot in effect at each event.** Binlog row images store ENUMs as ordinals and SETs as bitmasks; the shim (and the web interface's Time-travel tab and `bintrail reconstruct`) map them back to labels using the schema snapshot whose capture time most recently precedes the event, so an enum reshaped between two events renders each event under its own definition. Remaining caveats: events older than the *first* snapshot decode with that first snapshot, and a change made between an ALTER and the next snapshot decodes with the pre-ALTER definition (stream mode auto-snapshots on DDL, so that window is normally seconds). An ordinal beyond the selected definition is returned as the raw number: the forensic ground truth, also visible in `bintrail query`'s JSON output, which is deliberately left unmapped.
 - **ProxySQL itself is not provisioned by DBTrail.** `bintrail proxysql-config` only writes routing rules; you install and harden ProxySQL itself (admin password, frontend TLS, monitoring) using the standard ProxySQL docs.
 - **The bare `AS OF` rule (990006) has a small residual false-positive surface.** The rule is end-anchored — only statements that *finish* with `AS OF '<text>'` route to the shim, so `AS OF` inside a string literal mid-query stays on passthrough (covered by an e2e guard test against real ProxySQL). The irreducible residue: a benign statement whose **final token** is a string literal of the exact form `AS OF '<text>'` would route to the shim and fail (the shim has no passthrough). If you hit that in practice, parenthesise or reorder the predicate — or delete rule 990006 from `mysql_query_rules` and use the `_flashback.`/hint forms instead. Note ProxySQL's `$` anchor assumes the default `re_modifiers` (CASELESS, no multiline); adding `GLOBAL`/multiline modifiers to the rule weakens the anchor to end-of-line.
 - **The bare `AS OF` form is `*`-only and trailing-only.** Column lists stay on the `_flashback`/`_snapshot` virtual schemas, and the AS OF clause must end the statement (an AS-OF-before-WHERE variant would forfeit the end anchor — the false-positive defense above). The bare form rewrites to `_flashback` (binlog-only); for baseline-aware lookups use `_snapshot`.

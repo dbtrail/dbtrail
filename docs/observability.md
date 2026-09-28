@@ -176,7 +176,7 @@ as the cleanup takes — minutes, on a large index. That reading is correct:
 nothing is becoming recoverable yet. What changed is the timing, not the
 verdict — before, the series did not exist during the cleanup, so the same
 restart stayed silent until it finished. The daemon logs `dedup-on-resume:
-deleting ...` while it happens and the console shows `CLEANING UP`, which is
+deleting ...` while it happens and the web interface shows `CLEANING UP`, which is
 how you tell this apart from a stream that is actually stuck.
 
 **Alerting on a lag gauge alone is the mistake this metric exists to prevent.**
