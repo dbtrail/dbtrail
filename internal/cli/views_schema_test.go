@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -203,6 +204,10 @@ func TestViewsCmd_refusesAnEmptySchemaThatWasTyped(t *testing.T) {
 			}
 		}
 	})
+	// A context, or a command that gets PAST the refusal hangs on its first
+	// read instead of failing here: the refusal is the only thing that returns
+	// before one is needed.
+	viewsCmd.SetContext(context.Background())
 	err := runViews(viewsCmd, nil)
 	if err == nil || !strings.Contains(err.Error(), "--schema") || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("got %v, want the empty name refused", err)
