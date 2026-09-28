@@ -37,8 +37,12 @@ func TestLocationWriters(t *testing.T) {
 		{"same folder, trailing slash and dots", e("a", "/x/", ""), []ServerEntry{e("b", "/x/./", "")}, CommandLineWriter{}, []string{"srv-b"}},
 		{"same folder through a symlink", e("a", real, ""), []ServerEntry{e("b", link, "")}, CommandLineWriter{}, []string{"srv-b"}},
 		{"same bucket prefix", e("a", "", "s3://b/p/"), []ServerEntry{e("b", "", "s3://b/p")}, CommandLineWriter{}, []string{"srv-b"}},
-		{"one prefix inside the other", e("a", "", "s3://b/p/sub/"), []ServerEntry{e("b", "", "s3://b/p/")}, CommandLineWriter{}, []string{"srv-b"}},
-		{"the other prefix inside this one", e("a", "", "s3://b/p/"), []ServerEntry{e("b", "", "s3://b/p/sub")}, CommandLineWriter{}, []string{"srv-b"}},
+		// A listing reads only the timestamp-named folders right under its
+		// prefix, so a nested prefix never mixes with its parent: moving to
+		// one is how a server follows the refusal's own advice.
+		{"one prefix inside the other", e("a", "", "s3://b/p/sub/"), []ServerEntry{e("b", "", "s3://b/p/")}, CommandLineWriter{}, nil},
+		{"the other prefix inside this one", e("a", "", "s3://b/p/"), []ServerEntry{e("b", "", "s3://b/p/sub")}, CommandLineWriter{}, nil},
+		{"same prefix, several trailing slashes", e("a", "", "s3://b/p//"), []ServerEntry{e("b", "", "s3://b/p")}, CommandLineWriter{}, []string{"srv-b"}},
 		{"sibling prefixes do not overlap", e("a", "", "s3://b/p/"), []ServerEntry{e("b", "", "s3://b/p2/")}, CommandLineWriter{}, nil},
 		{"a folder and a bucket never overlap", e("a", "/x", ""), []ServerEntry{e("b", "", "s3://b/x/")}, CommandLineWriter{}, nil},
 		{"the command-line server's folder", e("a", "/x", ""), nil, CommandLineWriter{Dir: "/x", Writes: true}, []string{"the command-line server"}},

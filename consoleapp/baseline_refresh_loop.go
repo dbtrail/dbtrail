@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -1213,6 +1214,7 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 	st.Published = foldPublished(err)
 	st.TooManyChanges = errors.Is(err, reconstruct.ErrTouchedRowBudget)
 	st.DiskRefused = foldDiskRefused(err)
+	st.ForeignSource = errors.Is(err, errForeignSource)
 	if err != nil {
 		st.State = "failed"
 		st.LastError = err.Error()
@@ -1264,6 +1266,10 @@ func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (p
 	}
 	if len(tableList) == 0 {
 		return time.Time{}, 0, 0, reuseTally{}, fmt.Errorf("no baseline snapshot to refresh under %s", src)
+	}
+	// Another writer's snapshot is never folded (#1684, foldSourceRefusal).
+	if err := foldSourceRefusal(req.IndexDSN, src, prev); err != nil {
+		return time.Time{}, 0, 0, reuseTally{}, err
 	}
 	req.TableDeltas = s.tableDeltas
 	tables, refused, reuse, err = s.foldSnapshot(req, at, tableList)
@@ -2162,11 +2168,43 @@ type refreshSkip struct{ name, why string }
 // configured S3-only baselines and set the interval would otherwise see
 // nothing happen and no reason why.
 func logSkippedRefreshTargets(skipped []string, shared []refreshSkip) {
-	for _, s := range shared {
+	for _, s := range sayChangedSharedSkips(shared) {
 		slog.Warn("snapshot refresh: server skipped, its snapshot location is shared", "server", s.name, "reason", s.why)
 	}
 	for _, name := range skipped {
 		slog.Warn("baseline refresh: server has an S3-only baseline destination and will not be refreshed "+
 			"(a refresh writes Parquet to a filesystem, so it needs a local directory to fold into)", "server", name)
 	}
+}
+
+var (
+	sharedSkipsMu sync.Mutex
+	// sharedSkipsSaid is the reason last logged per skipped server, so the
+	// skip is said when it starts or changes, not on every interval (#1684).
+	sharedSkipsSaid = map[string]string{}
+)
+
+// sayChangedSharedSkips returns the skips whose reason differs from the one
+// last said, and forgets the servers no longer skipped, so a skip that
+// clears and comes back is said again.
+func sayChangedSharedSkips(shared []refreshSkip) []refreshSkip {
+	sharedSkipsMu.Lock()
+	defer sharedSkipsMu.Unlock()
+	now := make(map[string]string, len(shared))
+	var out []refreshSkip
+	for _, s := range shared {
+		now[s.name] = s.why
+		if sharedSkipsSaid[s.name] != s.why {
+			out = append(out, s)
+		}
+	}
+	sharedSkipsSaid = now
+	return out
+}
+
+// resetSharedSkipsSaid forgets what was said; tests call it.
+func resetSharedSkipsSaid() {
+	sharedSkipsMu.Lock()
+	sharedSkipsSaid = map[string]string{}
+	sharedSkipsMu.Unlock()
 }

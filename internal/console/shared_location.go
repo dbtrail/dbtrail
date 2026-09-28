@@ -36,19 +36,21 @@ type CommandLineWriter struct {
 
 // LocationWriters returns the other writers of e's snapshot location, by
 // name, in registry order, the command-line server last. Empty means e is
-// the only one. Folders are compared as canonicalDir resolves them; S3
-// locations overlap when one prefix contains the other.
+// the only one. Folders are compared as canonicalDir resolves them, S3
+// locations as the same prefix: a listing reads only the timestamp-named
+// folders right under its prefix, so a nested prefix (s3://b/p/sub under
+// s3://b/p) never mixes with its parent, exactly as a subfolder does not.
 func LocationWriters(entries []ServerEntry, e ServerEntry, cli CommandLineWriter) []string {
 	var out []string
 	for _, o := range entries {
 		if o.ID == e.ID {
 			continue
 		}
-		if sameDir(e.BaselineDir, o.BaselineDir) || s3Overlap(e.BaselineS3, o.BaselineS3) {
+		if sameDir(e.BaselineDir, o.BaselineDir) || sameS3(e.BaselineS3, o.BaselineS3) {
 			out = append(out, o.Name)
 		}
 	}
-	if cli.Writes && (sameDir(e.BaselineDir, cli.Dir) || s3Overlap(e.BaselineS3, cli.S3)) {
+	if cli.Writes && (sameDir(e.BaselineDir, cli.Dir) || sameS3(e.BaselineS3, cli.S3)) {
 		out = append(out, commandLineWriterName)
 	}
 	return out
@@ -74,14 +76,9 @@ func sameDir(a, b string) bool {
 	return a != "" && b != "" && canonicalDir(a) == canonicalDir(b)
 }
 
-// s3Overlap: both set, and one prefix contains the other. Compared on
-// path segments, so s3://b/p and s3://b/p2 do not overlap.
-func s3Overlap(a, b string) bool {
-	if a == "" || b == "" {
-		return false
-	}
-	a, b = strings.TrimRight(a, "/"), strings.TrimRight(b, "/")
-	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+// sameS3: both set and naming the same prefix, trailing slashes aside.
+func sameS3(a, b string) bool {
+	return a != "" && b != "" && strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
 }
 
 // refusalText is err's message, "" for nil.

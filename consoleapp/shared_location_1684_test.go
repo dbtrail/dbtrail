@@ -1,7 +1,9 @@
 package consoleapp
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,5 +119,33 @@ func TestLoadConsoleRegistry_countsTheCommandLineWriter(t *testing.T) {
 		if err := reg.WriteRefusal(e); (err != nil) != tc.refused {
 			t.Errorf("command-line refresh %v: refusal = %v, want refused=%v", tc.cliRefreshes, err, tc.refused)
 		}
+	}
+}
+
+// The shared-location skip is logged when it starts or its reason changes,
+// not on every interval; it is said again once it clears and comes back.
+func TestLogSkippedRefreshTargets_saysASharedSkipOncePerChange(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	resetSharedSkipsSaid()
+	t.Cleanup(resetSharedSkipsSaid)
+	count := func() int { return strings.Count(buf.String(), "its snapshot location is shared") }
+	a := []refreshSkip{{name: "a", why: "shared with b"}}
+	for range 3 {
+		logSkippedRefreshTargets(nil, a)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("three cycles, same reason: said %d times, want 1", n)
+	}
+	logSkippedRefreshTargets(nil, []refreshSkip{{name: "a", why: "shared with b, c"}})
+	if n := count(); n != 2 {
+		t.Fatalf("a new reason: said %d times, want 2", n)
+	}
+	logSkippedRefreshTargets(nil, nil) // fixed
+	logSkippedRefreshTargets(nil, a)   // and back
+	if n := count(); n != 3 {
+		t.Fatalf("back after it cleared: said %d times, want 3", n)
 	}
 }

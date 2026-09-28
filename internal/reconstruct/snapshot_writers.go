@@ -1,11 +1,14 @@
 package reconstruct
 
 import (
+	"errors"
+	"io/fs"
 	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 )
@@ -136,4 +139,38 @@ func resetSnapshotWriters() {
 func NormalizeSnapshotWriter(id string) string {
 	id, _ = baseline.NormalizeWriter(id)
 	return id
+}
+
+// SnapshotSigners returns who signed the snapshot of source at at (#1762),
+// normalized and sorted; empty for an unsigned one. known is false when this
+// process cannot tell: an S3 snapshot whose directory no listing here has
+// read yet, or a local directory that is not there any more (a prune between
+// the listing and this read: the job that asked finds it gone on its own).
+// A local snapshot is read on the spot.
+func SnapshotSigners(source string, at time.Time) (writers []string, known bool, err error) {
+	name := SnapshotDirName(at)
+	if strings.HasPrefix(source, "s3://") {
+		s3InventoriesMu.Lock()
+		inv := s3Inventories[strings.TrimSuffix(source, "/")]
+		s3InventoriesMu.Unlock()
+		if inv == nil {
+			return nil, false, nil
+		}
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		for dir, w := range inv.writers {
+			if d, ok := parseDirTimestamp(dir); ok && SnapshotDirName(d) == name {
+				return slices.Clone(w), true, nil
+			}
+		}
+		return nil, false, nil
+	}
+	writers, _, err = baseline.ReadSnapshotWriters(filepath.Join(source, name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return writers, true, nil
 }

@@ -132,6 +132,10 @@ func (s *baselineSupervisor) executeRestore(req console.BaselineRestoreRequest) 
 	if len(tableList) == 0 {
 		return 0, 0, reuseTally{}, fmt.Errorf("no snapshot exists at or before %s; a restore folds an existing snapshot forward, so pick a moment after your oldest snapshot", req.At.UTC().Format("2006-01-02 15:04:05"))
 	}
+	// Another writer's snapshot is never restored from (#1684).
+	if err := foldSourceRefusal(req.IndexDSN, source, anchor); err != nil {
+		return 0, 0, reuseTally{}, err
+	}
 	if reconstruct.SnapshotDirName(anchor) == reconstruct.SnapshotDirName(req.At) {
 		// Compared by the DIRECTORY NAME, which is what collides, not by the
 		// instant: the name is whole seconds, and the console truncates At on

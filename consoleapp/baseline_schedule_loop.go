@@ -1156,6 +1156,13 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 		// the converted backup into the same directory that just refused the
 		// update, so on that disk it would fail the same way, after reading the
 		// source in full.
+		// ForeignSource too (#1684): the update was refused because the
+		// snapshot it builds on is another writer's, and a full read would
+		// publish into that same shared location. The slot says why instead.
+		if method == console.BackupMethodRefresh && st.Last.State == "failed" && st.Last.ForeignSource {
+			b.skip(e, time.Now().UTC(), "the update was refused and no full read stands in for it, because it would publish into the same location: "+st.Last.LastError)
+			return
+		}
 		if method == console.BackupMethodRefresh && st.Last.State == "failed" && !st.Last.Published && !st.Last.DiskRefused {
 			b.fallBack(e, *st.Last)
 		}

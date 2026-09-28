@@ -288,6 +288,11 @@ type BaselineStatus struct {
 	// file it could not hold, or a write that found the disk full. A scheduled update refused this way must NOT
 	// fall back to a full backup: that one writes into the same directory.
 	DiskRefused bool `json:"disk_refused,omitempty"`
+	// ForeignSource: the job was refused because the snapshot it would build
+	// on was written by another writer, or its writer could not be told
+	// (#1684). The schedule does not answer it with a full read: that would
+	// publish into the same shared location.
+	ForeignSource bool `json:"foreign_source,omitempty"`
 }
 
 // handleBaselineTrigger enqueues an in-process baseline for the selected server.

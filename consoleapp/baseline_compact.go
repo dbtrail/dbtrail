@@ -103,6 +103,20 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 	if len(due) == 0 {
 		return
 	}
+	// The merged chain is staged for the next refresh to adopt as this
+	// server's: another writer's snapshot is left alone (#1684), and the
+	// refusal is the job's result, where the page reads it. Checked only
+	// when there is something to merge, so a folder with nothing due never
+	// reports a failure, and before anything is written.
+	if err := foldSourceRefusal(req.IndexDSN, req.BaselineDir, at); err != nil {
+		slog.Warn("snapshot compaction: not started", "server", req.ServerName, "id", req.ServerID, "error", err)
+		s.mu.Lock()
+		if !s.busyLocked(req.ServerID) {
+			s.compacts[req.ServerID] = &console.BaselineStatus{State: "failed", Since: nowStamp(), FinishedAt: nowStamp(), LastError: err.Error()}
+		}
+		s.mu.Unlock()
+		return
+	}
 	sort.Slice(due, func(i, j int) bool { return due[i].base < due[j].base })
 	if err := s.TriggerCompact(req, due); err != nil {
 		if errors.Is(err, console.ErrBaselineRunning) {
