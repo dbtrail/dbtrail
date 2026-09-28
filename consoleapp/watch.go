@@ -509,6 +509,8 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	// not exist.
 	var backupSched *backupScheduler
 	cfg.BackupSchedules, backupSched = newBackupScheduleReporter(baselineSup, registry, upConsoleBaselineTrigger, upBaselineCarryForward)
+	// The Overview asks the source whether capture is caught up (#1794).
+	cfg.CaptureStatus = newCaptureStatusReporter(upSourceDSN)
 	notifier, err := newWatchNotifierFromFlags(ctx)
 	if err != nil {
 		return err
@@ -731,6 +733,8 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// not exist.
 	var backupSched *backupScheduler
 	cfg.BackupSchedules, backupSched = newBackupScheduleReporter(baselineSup, registry, upConsoleBaselineTrigger, upBaselineCarryForward)
+	// The Overview asks the source whether capture is caught up (#1794).
+	cfg.CaptureStatus = newCaptureStatusReporter(upSourceDSN)
 	notifier, err := newWatchNotifierFromFlags(ctx)
 	if err != nil {
 		return err
