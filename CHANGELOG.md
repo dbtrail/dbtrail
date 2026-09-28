@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.91.0] - 2026-09-28
+
 ### Fixed
 - **A view in the source no longer fails the snapshot** (#1687). One view in
   any schema left the snapshot incomplete and no table was published. Views
