@@ -42,7 +42,8 @@ Examples:
   bintrail doctor --source-dsn "user:pass@tcp(source:3306)/"
   bintrail doctor --source-dsn "$SRC" --index-dsn "$IDX" --schemas mydb
   bintrail doctor --source-dsn "$SRC" --proxysql-admin "admin:admin@tcp(127.0.0.1:6032)/"
-  bintrail doctor --source-dsn "$SRC" --archive-s3 s3://my-bucket/archives/`,
+  bintrail doctor --source-dsn "$SRC" --archive-s3 s3://my-bucket/archives/
+  bintrail doctor --source-dsn "$SRC" --baseline-s3 s3://my-bucket/backups/ --snapshot-every 6h`,
 	RunE: runDoctor,
 }
 
@@ -55,6 +56,9 @@ var (
 	docProxySQLAdmin string
 	docArchiveS3     string
 	docArchiveS3Reg  string
+	docBaselineS3    string
+	docBaselineS3Reg string
+	docSnapshotEvery string
 )
 
 func init() {
@@ -66,6 +70,9 @@ func init() {
 	doctorCmd.Flags().StringVar(&docProxySQLAdmin, "proxysql-admin", "", "ProxySQL admin DSN, e.g. admin:pass@tcp(127.0.0.1:6032)/ (optional; verifies the DBTrail time-travel routing rules are live; advisory WARN only)")
 	doctorCmd.Flags().StringVar(&docArchiveS3, "archive-s3", "", "S3 archive destination, e.g. s3://bucket/prefix (optional; reports the bucket's Object Lock ransomware posture; advisory WARN only)")
 	doctorCmd.Flags().StringVar(&docArchiveS3Reg, "archive-s3-region", "", "AWS region for --archive-s3 (optional; the SDK resolves it when empty)")
+	doctorCmd.Flags().StringVar(&docBaselineS3, "baseline-s3", "", "S3 snapshot destination, e.g. s3://bucket/backups (optional; reports whether a rule in the bucket expires old snapshots; advisory WARN only, needs s3:GetBucketLifecycleConfiguration)")
+	doctorCmd.Flags().StringVar(&docBaselineS3Reg, "baseline-s3-region", "", "AWS region for --baseline-s3 (optional; the SDK resolves it when empty)")
+	doctorCmd.Flags().StringVar(&docSnapshotEvery, "snapshot-every", "", "How often snapshots are taken, e.g. 6h or 1d (optional; with --baseline-s3, warns when the bucket rule expires snapshots sooner than that)")
 	_ = doctorCmd.MarkFlagRequired("source-dsn")
 	bindCommandEnv(doctorCmd)
 	rootCmd.AddCommand(doctorCmd)
@@ -87,7 +94,40 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if !cmd.Flags().Changed("retain") && docIndexDSN != "" {
 		retain, note = assumedRetain(cmd.Context(), docIndexDSN, retain)
 	}
-	return runDoctorTo(cmd.Context(), os.Stdout, docFormat, docSourceDSN, docIndexDSN, docSchemas, retain, note, docProxySQLAdmin, docArchiveS3, docArchiveS3Reg)
+	every, err := parseDocSnapshotEvery(docSnapshotEvery)
+	if err != nil {
+		return err
+	}
+	return runDoctorTo(cmd.Context(), os.Stdout, docFormat, docSourceDSN, docIndexDSN, docSchemas, retain, note, docProxySQLAdmin, docArchiveS3, docArchiveS3Reg,
+		snapshotExpiryChecks(docBaselineS3, docBaselineS3Reg, every)...)
+}
+
+// parseDocSnapshotEvery reads --snapshot-every; empty means the schedule was
+// not given, and the expiry check then compares no age against it.
+func parseDocSnapshotEvery(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+	every, err := cliutil.ParseInterval(s)
+	if err != nil {
+		return 0, fmt.Errorf("--snapshot-every: %w", err)
+	}
+	if every <= 0 {
+		return 0, fmt.Errorf("--snapshot-every: %q is not a positive interval", s)
+	}
+	return every, nil
+}
+
+// snapshotExpiryChecks is the snapshot expiry check (#1680; advisory, never
+// affects the exit code) when --baseline-s3 names a destination, and nothing
+// without it: snapshots kept in a local folder have no bucket rule to read.
+func snapshotExpiryChecks(baselineS3, region string, every time.Duration) []func(context.Context) doctor.CheckResult {
+	if baselineS3 == "" {
+		return nil
+	}
+	return []func(context.Context) doctor.CheckResult{func(ctx context.Context) doctor.CheckResult {
+		return doctor.CheckSnapshotExpiry(ctx, baselineS3, region, every)
+	}}
 }
 
 // parseDocRetain maps doctor's --retain value to the capacity projection's
@@ -114,13 +154,17 @@ func parseDocRetain(s string) (time.Duration, error) {
 // code). Callers wanting to route output (e.g. `bintrail
 // up` sending preflight output to stderr to keep stdout clean for streaming)
 // pass their own writer here instead of going through the cobra entry point.
-func runDoctorTo(parent context.Context, w io.Writer, format, sourceDSN, indexDSN, schemasCSV string, indexRetain time.Duration, retainNote, proxysqlAdminDSN, archiveS3, archiveS3Region string) error {
+// more are further opt-in checks, run in order after the Object Lock one.
+func runDoctorTo(parent context.Context, w io.Writer, format, sourceDSN, indexDSN, schemasCSV string, indexRetain time.Duration, retainNote, proxysqlAdminDSN, archiveS3, archiveS3Region string, more ...func(context.Context) doctor.CheckResult) error {
 	report := doctor.Build(parent, sourceDSN, indexDSN, schemasCSV, indexRetain, doctor.WithRetainNote(retainNote))
 	if proxysqlAdminDSN != "" {
 		report.Add(doctor.CheckProxySQLRules(parent, proxysqlAdminDSN))
 	}
 	if archiveS3 != "" {
 		report.Add(doctor.CheckArchiveObjectLock(parent, archiveS3, archiveS3Region, indexRetain))
+	}
+	for _, check := range more {
+		report.Add(check(parent))
 	}
 	appendExtDoctorChecks(parent, report, sourceDSN, indexDSN)
 	if err := report.Write(w, format); err != nil {
