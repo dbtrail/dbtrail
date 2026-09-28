@@ -1417,13 +1417,14 @@ function covCard(c, stamp) {
       "Capture is STALLED: the daemon has not checkpointed" + age + ". The window's upper edge is frozen: changes since then are NOT recoverable. Check that the stream is running." }));
   } else if (asked === "up_to_date") {
     // Said only when the source was asked and holds nothing capture has not
-    // recorded. The time is the newest captured change, in UTC like the
+    // recorded. "captured" because the source may have written to schemas
+    // or tables capture does not read. The time is the newest captured change, in UTC like the
     // rest of the card; past a day it carries its date.
     const since = String(c.delta_to || "");
     const at = c.lag_seconds >= 86400 ? since : since.slice(11, 19);
     card.append(typeof c.lag_seconds === "number" && at
-      ? el("p", { class: "cov-line" }, "Up to date. No changes since ", el("b", { text: at, title: utcLocalTitle(since) || null }), " (" + plainDuration(c.lag_seconds) + " ago).")
-      : el("p", { class: "cov-line", text: "Up to date. No changes yet." }));
+      ? el("p", { class: "cov-line" }, "Up to date. No captured changes since ", el("b", { text: at, title: utcLocalTitle(since) || null }), " (" + plainDuration(c.lag_seconds) + " ago).")
+      : el("p", { class: "cov-line", text: "Up to date. No captured changes yet." }));
   } else if (asked === "behind") {
     card.append(el("p", { class: "cov-line warn", text: "Behind: the source has changes capture has not read yet." }));
   } else if (fresh === "idle") {

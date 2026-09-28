@@ -127,7 +127,7 @@ console.log(JSON.stringify({
 `, &got)
 
 	// Up to date: the sentence of the issue, neutral.
-	const want = "Up to date. No changes since 11:30:27 (1h 14m ago)."
+	const want = "Up to date. No captured changes since 11:30:27 (1h 14m ago)."
 	if l := got.UpToDate.line("Up to date"); l.Text != want || l.Cls != "cov-line" {
 		t.Errorf("up to date line = %+v, want %q with no colour", l, want)
 	}
@@ -137,11 +137,11 @@ console.log(JSON.stringify({
 	if c := got.UpToDate.chip("capture "); c.Text != "capture idle" || c.Cls != "cov-chip" {
 		t.Errorf("up to date chip = %+v, want \"capture idle\" with no colour", c)
 	}
-	if l := got.UpToDateEmpty.line("Up to date"); l.Text != "Up to date. No changes yet." || l.Cls != "cov-line" {
+	if l := got.UpToDateEmpty.line("Up to date"); l.Text != "Up to date. No captured changes yet." || l.Cls != "cov-line" {
 		t.Errorf("up to date with nothing indexed = %+v", l)
 	}
 	// Past a day the clock time alone does not say which day.
-	if l := got.UpToDateOld.line("Up to date"); l.Text != "Up to date. No changes since 2026-09-22 11:30:27 (3d 4h ago)." {
+	if l := got.UpToDateOld.line("Up to date"); l.Text != "Up to date. No captured changes since 2026-09-22 11:30:27 (3d 4h ago)." {
 		t.Errorf("up to date, last change days ago = %+v", l)
 	}
 
@@ -478,7 +478,7 @@ const see = (card) => ({ card: card.textContent, flow: flowSlot.textContent, ask
 			t.Errorf("%s, before the answer: the card says it cannot tell and the drawing says quiet: %q", name, s.Before.Flow)
 		}
 		// After: both say it.
-		if !strings.Contains(s.After.Card, "Up to date. No changes since 11:30:27 (1h 14m ago).") || strings.Contains(s.After.Card, "cannot tell which") {
+		if !strings.Contains(s.After.Card, "Up to date. No captured changes since 11:30:27 (1h 14m ago).") || strings.Contains(s.After.Card, "cannot tell which") {
 			t.Errorf("%s, after the answer: card = %q", name, s.After.Card)
 		}
 		if !quiet(s.After.Flow) {

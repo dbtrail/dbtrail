@@ -130,13 +130,23 @@ func TestCaptureStatusFrom_purgedTransactions(t *testing.T) {
 	later := now.Add(time.Minute)
 	second, _ := captureStatusFrom(read(uuidB+":1-10", dump+","+uuidB+":1-10", dump, later), sample, later)
 	for i, got := range []console.CaptureStatus{first, second} {
-		if got.State != console.CaptureStateUnknown || got.Detail == "" {
+		if got.State != console.CaptureStateUnknown || !strings.Contains(got.Detail, "purged") {
 			t.Errorf("read %d, only purged transactions ahead: %+v, want unknown", i+1, got)
 		}
 	}
 	// Never up to date on purged transactions.
 	if got, _ := captureStatusFrom(read(uuidB+":1-10", dump+","+uuidB+":1-10", dump, later), sample, later); got.State == console.CaptureStateUpToDate {
 		t.Errorf("purged transactions made up to date: %+v", got)
+	}
+	// A busy source after the dump: capture has reached everything the
+	// earlier read had except what was purged. It is reading, not behind:
+	// the earlier read's purged set goes with it.
+	first, sample = captureStatusFrom(read(uuidB+":1-10", dump+","+uuidB+":1-30", dump, now), nil, now)
+	if sample == nil || sample.purged != dump {
+		t.Fatalf("the sample does not keep the purged set: %+v (first %+v)", sample, first)
+	}
+	if got, _ := captureStatusFrom(read(uuidB+":1-30", dump+","+uuidB+":1-50", dump, later), sample, later); got.State != console.CaptureStateUnknown || !strings.Contains(got.Detail, "capture is reading") {
+		t.Errorf("busy source after a dump, capture reading: %+v, want unknown", got)
 	}
 	// Real lag beside purged transactions is still behind.
 	first, sample = captureStatusFrom(read(uuidB+":1-10", dump+","+uuidB+":1-30", dump, now), nil, now)
@@ -659,5 +669,38 @@ func TestCaptureStatus_aPanicIsUnknownAndHoldsNothing(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the load after a panic never returned: the read in flight was never released")
+	}
+}
+
+// A failure after the read (here the clock) must not leave the server's
+// read marked in flight: the next load reads again instead of waiting on a
+// channel nobody closes.
+func TestCaptureStatus_aFailureAfterTheReadHoldsNothing(t *testing.T) {
+	var reads, calls int
+	c := newCaptureStatusReporter("")
+	c.read = func(context.Context, string, string) captureProbeResult {
+		reads++
+		return captureProbeResult{verdict: console.CaptureCaughtUp, captured: uuidB + ":1-10", executed: uuidB + ":1-10"}
+	}
+	c.now = func() time.Time {
+		calls++
+		if calls == 1 { // the clock read after the source answered
+			panic("clock")
+		}
+		return captureT0.Add(time.Duration(calls) * time.Hour)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		c.CaptureStatus(context.Background(), captureEntryA)
+	}()
+	done := make(chan console.CaptureStatus, 1)
+	go func() { done <- c.CaptureStatus(context.Background(), captureEntryA) }()
+	select {
+	case got := <-done:
+		if reads != 2 || got.State != console.CaptureStateUpToDate {
+			t.Fatalf("the load after it: %+v, %d reads", got, reads)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the load after a failure waited on a read that was over")
 	}
 }

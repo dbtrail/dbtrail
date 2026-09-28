@@ -152,6 +152,16 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	slot.flight = done
 	prev := slot.prev
 	c.mu.Unlock()
+	// Deferred, so that whatever happens below, the next load reads again
+	// instead of waiting on a read that is over.
+	defer func() {
+		c.mu.Lock()
+		if slot.flight == done {
+			slot.flight = nil
+		}
+		c.mu.Unlock()
+		close(done)
+	}()
 
 	// Detached from the request: a tab that closes mid-read must not leave
 	// "the request was cancelled" behind as the state of the capture.
@@ -177,14 +187,12 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	if answer.RetryInSeconds > 0 {
 		slot.ttl = captureStatusPendingTTL
 	}
-	slot.flight = nil
 	// Once per change of answer, not once per read: the page asks for as
 	// long as it is open.
 	said := answer.State + "|" + answer.Detail + "|" + r.cause
 	report := slot.logged != said
 	slot.logged = said
 	c.mu.Unlock()
-	close(done)
 
 	if report {
 		reportCaptureStatus(e, answer, r.cause)
