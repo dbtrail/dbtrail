@@ -285,6 +285,10 @@ func applyDuckDBTuning(ctx context.Context, db *sql.DB, t duckdbutil.Tuning) {
 // plus what the run needs from each table afterwards (SourceSnapshotDir).
 type TableReport struct {
 	Schema, Table string
+	// SourceSnapshot is the snapshot the table's baseline was read from, a
+	// local directory or an s3:// URL ("" for no baseline). The record of
+	// skipped views is carried from the newest of them (#1879).
+	SourceSnapshot string
 	// SourceSnapshotDir is the LOCAL snapshot directory the table's baseline
 	// was read from ("" for S3 or no baseline). The manifest writer takes the
 	// digests of files linked forward from it instead of hashing them again
@@ -880,6 +884,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// manifest.
 	if parquetMode && ctx.Err() == nil && len(errs) == 0 {
 		baseline.SignSnapshot(cfg.snapshotDir, cfg.WriterID)
+		carryViewsSkipped(ctx, cfg.snapshotDir, reports)
 		st, err := manifestWriter(cfg.snapshotDir, manifestPriorDirs(reports))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("snapshot complete but could not write integrity manifest: %w", err))
@@ -1045,6 +1050,7 @@ func ReconstructTable(
 	baselinePath, snapshotTime, _, err := FindBaseline(ctx, cfg.BaselineSrc, schema, table, cfg.At)
 	if err == nil {
 		rep.SourceSnapshotDir = localSnapshotDir(baselinePath)
+		rep.SourceSnapshot = snapshotOfTable(baselinePath)
 	}
 	if err != nil {
 		if !errors.Is(err, ErrNoBaseline) {
