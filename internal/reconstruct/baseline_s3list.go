@@ -95,6 +95,10 @@ type s3Inventory struct {
 	dirs     []s3SnapshotDir // newest first
 	dirsAt   time.Time       // zero: never listed, or invalidated
 	contents map[string]s3DirContents
+	// writers is who signed each directory read so far (#1762), complete
+	// or not, for as long as the directory is listed. An incomplete
+	// directory is read again by the next call, which replaces its entry.
+	writers map[string][]string
 	// gen counts invalidations. A directory listing that started before
 	// one is stored (it is the freshest there is) but not dated: the tree
 	// changed under it, so the next read lists again.
@@ -120,7 +124,7 @@ func s3InventoryFor(prefix string) *s3Inventory {
 	defer s3InventoriesMu.Unlock()
 	inv := s3Inventories[prefix]
 	if inv == nil {
-		inv = &s3Inventory{contents: map[string]s3DirContents{}}
+		inv = &s3Inventory{contents: map[string]s3DirContents{}, writers: map[string][]string{}}
 		s3Inventories[prefix] = inv
 	}
 	return inv
@@ -260,6 +264,11 @@ func (inv *s3Inventory) directories(ctx context.Context, lister s3SnapshotLister
 			delete(inv.contents, name)
 		}
 	}
+	for name := range inv.writers {
+		if !listed[name] {
+			delete(inv.writers, name)
+		}
+	}
 	inv.dirs, inv.dirsAt = dirs, time.Time{}
 	if inv.gen == gen {
 		inv.dirsAt = s3Clock()
@@ -294,23 +303,24 @@ func (x *s3SnapshotIndex) files(ctx context.Context, newest int) (files []Baseli
 	x.inv.mu.Unlock()
 	read := make([]s3DirContents, len(missing))
 	complete := make([]bool, len(missing))
+	signed := make([]dirSignature, len(missing))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(s3DirReadConcurrency)
 	for i, d := range missing {
 		g.Go(func() error {
-			c, ok, err := x.readDir(gctx, d)
+			c, sig, ok, err := x.readDir(gctx, d)
 			if err != nil {
 				return err
 			}
-			read[i], complete[i] = c, ok
+			read[i], complete[i], signed[i] = c, ok, sig
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
-		x.keep(missing, read, complete)
+		x.keep(missing, read, complete, signed)
 		return nil, false, err
 	}
-	x.keep(missing, read, complete)
+	x.keep(missing, read, complete, signed)
 
 	byName := make(map[string]s3DirContents, len(missing))
 	for i, d := range missing {
@@ -340,30 +350,64 @@ func (x *s3SnapshotIndex) files(ctx context.Context, newest int) (files []Baseli
 // keep stores the complete directories a round read. Called on the error
 // path too: a read that finished before a sibling failed is still a read
 // of an immutable directory.
-func (x *s3SnapshotIndex) keep(dirs []s3SnapshotDir, read []s3DirContents, complete []bool) {
+//
+// The signatures are stored for every directory that was read, complete or
+// not (#1762): an upload in progress is not listed, and its signature still
+// says who is writing here. With them stored, the location's writers are
+// checked, and more than one is logged.
+func (x *s3SnapshotIndex) keep(dirs []s3SnapshotDir, read []s3DirContents, complete []bool, signed []dirSignature) {
 	x.inv.mu.Lock()
-	defer x.inv.mu.Unlock()
 	for i, d := range dirs {
 		if complete[i] {
 			x.inv.contents[d.name] = read[i]
 		}
+		if signed[i].read {
+			x.inv.writers[d.name] = signed[i].writers
+		}
 	}
+	writers := x.inv.writersLocked()
+	x.inv.mu.Unlock()
+	warnSharedLocation(x.prefix, writers)
+}
+
+// dirSignature is what one directory read says about who wrote it. read is
+// false for a read that never finished, which says nothing.
+type dirSignature struct {
+	read    bool
+	writers []string
+}
+
+// writersLocked is the distinct writers of the directories read so far,
+// sorted. The caller holds inv.mu.
+func (inv *s3Inventory) writersLocked() []string {
+	set := writerSet{}
+	for _, w := range inv.writers {
+		set.add(w)
+	}
+	return set.sorted()
 }
 
 // readDir lists one snapshot directory and returns its table files and
 // whether the snapshot is complete (#467: an _INCOMPLETE marker with no
 // _SUCCESS beside it is a partial or in-progress upload). An incomplete
 // directory returns ok=false and no files, and is not kept.
-func (x *s3SnapshotIndex) readDir(ctx context.Context, d s3SnapshotDir) (c s3DirContents, ok bool, err error) {
+//
+// sig is who signed the directory (#1762), read off the same listing, and
+// returned for an incomplete directory too.
+func (x *s3SnapshotIndex) readDir(ctx context.Context, d s3SnapshotDir) (c s3DirContents, sig dirSignature, ok bool, err error) {
 	infos, err := x.lister.ListInfoFrom(ctx, d.name+"/", "")
 	if err != nil {
-		return s3DirContents{}, false, fmt.Errorf("list S3 baseline snapshot files: %w", err)
+		return s3DirContents{}, dirSignature{}, false, fmt.Errorf("list S3 baseline snapshot files: %w", err)
 	}
 	var success, incomplete bool
+	var plain []string
 	for _, o := range infos {
 		parts := strings.Split(o.Key, "/")
 		if parts[0] != d.name {
 			continue // never the case on S3; a fake that ignores the prefix
+		}
+		if len(parts) == 2 {
+			plain = append(plain, parts[1])
 		}
 		switch {
 		case len(parts) == 2 && parts[1] == baseline.SuccessMarker:
@@ -379,8 +423,11 @@ func (x *s3SnapshotIndex) readDir(ctx context.Context, d s3SnapshotDir) (c s3Dir
 			})
 		}
 	}
+	signed, bad := baseline.WritersFromNames(plain)
+	warnUnreadableSignatures(x.prefix+"/"+d.name, bad)
+	sig = dirSignature{read: true, writers: signed}
 	if incomplete && !success {
-		return s3DirContents{}, false, nil
+		return s3DirContents{}, sig, false, nil
 	}
 	// The directory listing showed this directory holds objects (S3 emits a
 	// common prefix for real keys only), so a read that returns NONE is a
@@ -388,9 +435,9 @@ func (x *s3SnapshotIndex) readDir(ctx context.Context, d s3SnapshotDir) (c s3Dir
 	// store, or the directory deleted since. Not kept; before the cache
 	// every call re-read it, and the next read still must.
 	if len(infos) == 0 {
-		return s3DirContents{}, false, nil
+		return s3DirContents{}, dirSignature{}, false, nil
 	}
-	return c, true, nil
+	return c, sig, true, nil
 }
 
 // filesComplete is files over a window of `probe` directories, widened by

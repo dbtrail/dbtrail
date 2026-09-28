@@ -82,6 +82,9 @@ type Config struct {
 	Compression  string // "zstd" (default), "snappy", "gzip", "none"
 	RowGroupSize int    // rows per row group; <=0 → 500_000
 	Parallelism  int    // concurrent table COPYs; <=0 → runtime.NumCPU()
+	// WriterID is the identity this snapshot is signed with (#1762): the
+	// source's bintrail_id. Empty leaves it unsigned. See baseline/writersig.go.
+	WriterID string
 
 	Logger *slog.Logger // nil → slog.Default()
 }
@@ -371,6 +374,7 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		}
 		return stats, errs[0]
 	}
+	baseline.SignSnapshot(snapDir, cfg.WriterID)
 	if err := baselineintegrity.WriteManifest(snapDir); err != nil {
 		return stats, fmt.Errorf("pgbaseline: snapshot complete but could not write integrity manifest: %w", err)
 	}
