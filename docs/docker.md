@@ -735,10 +735,8 @@ tested there: before a tag is published, `build/smoke-console-base.sh` runs the
 image's mydumper against MySQL 8.0 and 8.4 on both architectures, as a user
 created with the server's default login plugin.
 
-The console image recipes still install the same packages themselves. They
-move to `FROM` this image once its first tag is published. The first tag is
-published when the change that adds the image is merged. The package is created
-private on that first push and needs a one-time manual change to public.
+Both console image recipes are built `FROM` this image, so the console image
+you run carries exactly the mydumper that was tested.
 
 To change it, edit `build/Dockerfile.console-base` and bump the tag in
 `build/console-base.tag` in the same change. A published tag is never
