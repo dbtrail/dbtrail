@@ -28,7 +28,11 @@ type fakeS3Snapshots struct {
 	dirCalls int
 	prefixes []string // every ListInfoFrom prefix asked, in call order
 	err      error    // fails ListDirs
-	infoErr  error    // fails ListInfoFrom
+	// modified is when each key was last written, as the store reports it.
+	// A key not in it has no time, which is what a store that reports none
+	// answers.
+	modified map[string]time.Time
+	infoErr  error // fails ListInfoFrom
 	// failPrefix fails ListInfoFrom for that one prefix only.
 	failPrefix string
 	// emptyOnce answers that one prefix with no keys the first time it is
@@ -96,7 +100,7 @@ func (f *fakeS3Snapshots) ListInfoFrom(_ context.Context, prefix, startAfter str
 	}
 	for _, k := range slices.Sorted(slices.Values(f.keys)) {
 		if k > startAfter && (f.sloppy || strings.HasPrefix(k, prefix)) {
-			out = append(out, storage.ObjectInfo{Key: k})
+			out = append(out, storage.ObjectInfo{Key: k, LastModified: f.modified[k]})
 		}
 	}
 	f.served++
