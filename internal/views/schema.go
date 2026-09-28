@@ -164,7 +164,10 @@ func (in Input) sessionName(base string) string {
 	if in.Schema == "" {
 		return base
 	}
-	return base + "_" + in.Schema
+	// sanitizeIdent because a variable's name is written bare and inside a
+	// string literal, where quoting the schema is not available. A validated
+	// name comes out unchanged.
+	return base + "_" + sanitizeIdent(in.Schema)
 }
 
 // writeSchema emits the schema the views below are created in.

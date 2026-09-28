@@ -132,7 +132,7 @@ func TestSchema_twoServersInOneDatabase(t *testing.T) {
 			for schema, want := range map[string]string{"a": serverAID, "b": serverBID} {
 				var id string
 				var n int
-				if err := db.QueryRow(`SELECT min("bintrail_id"), count(DISTINCT "bintrail_id") FROM ` + schema + `.events`).Scan(&id, &n); err != nil {
+				if err := db.QueryRow(`SELECT min("bintrail_id"), count(DISTINCT "bintrail_id") FROM `+schema+`.events`).Scan(&id, &n); err != nil {
 					t.Fatalf("query %s.events: %v", schema, err)
 				}
 				if n != 1 || id != want {

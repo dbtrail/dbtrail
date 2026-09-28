@@ -334,13 +334,23 @@ func TestSchema_isQuotedWhereverItIsWritten(t *testing.T) {
 	in := schemaInputs()["pinned with the live leg"]
 	in.Schema = `x"; DROP VIEW y; --`
 	out := Generate(in)
+	// With every quoted identifier and string literal taken out of a line,
+	// what is left is the SQL the engine would parse as statements.
+	quoted := regexp.MustCompile(`"(?:[^"]|"")*"|'(?:[^']|'')*'`)
+	seen := 0
 	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "--") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
 			continue
 		}
-		if strings.Contains(line, "DROP VIEW y; --") && !strings.Contains(line, `"x""; DROP VIEW y; --`) {
+		if strings.Contains(line, "DROP") {
+			seen++
+		}
+		if strings.Contains(quoted.ReplaceAllString(line, ""), "DROP") {
 			t.Errorf("the schema name left its quotes: %s", line)
 		}
+	}
+	if seen < 3 {
+		t.Errorf("the name was written on %d statement line(s); this input has a schema, a view and an ATTACH to write it on", seen)
 	}
 	if !strings.Contains(out, `CREATE SCHEMA IF NOT EXISTS "x""; DROP VIEW y; --";`) {
 		t.Errorf("the schema is not created under its quoted name:\n%s", out)
