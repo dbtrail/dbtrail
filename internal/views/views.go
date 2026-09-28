@@ -2250,7 +2250,8 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 // producer's following mode wants (a literal, or the variable-prefixed CASE).
 // pinned says the view reads these files forever: then the chain is named
 // file by file (BaselineTable.DeltaFiles says why); a following view reads
-// the chain through the globs.
+// the chain through globs that also match the table's file, so it keeps
+// answering when a later snapshot holds the table with no chain.
 func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned bool) string {
 	if t.DeltaLegacy {
 		stem := strings.TrimSuffix(p, ".parquet")
@@ -2266,8 +2267,17 @@ func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned 
 		}
 		return baseline.TableDeltaStateSQL(expr(p), "["+strings.Join(posdels, ", ")+"]", "["+strings.Join(upserts, ", ")+"]", p, decimalReplaceClause(t))
 	}
-	posdel, upserts := baseline.TableDeltaGlobs(p)
-	return baseline.TableDeltaStateSQL(expr(p), expr(posdel), expr(upserts), p, decimalReplaceClause(t))
+	if pinned {
+		posdel, upserts := baseline.TableDeltaGlobs(p)
+		return baseline.TableDeltaStateSQL(expr(p), expr(posdel), expr(upserts), p, decimalReplaceClause(t))
+	}
+	// A following view outlives the snapshot it was generated against, and a
+	// later one can hold this table rewritten in full with no chain beside it
+	// (#1918: a refresh or a full backup with table deltas off). These globs
+	// also match the table's own file, so the view reads the base alone then
+	// instead of failing on a glob that matches nothing.
+	posdel, upserts := baseline.TableDeltaFollowGlobs(p)
+	return baseline.TableDeltaFollowStateSQL(expr(p), expr(posdel), expr(upserts), p, decimalReplaceClause(t))
 }
 
 // deltaAppearedPatterns are the two globs deltaAppearedGuard counts: the
@@ -2296,8 +2306,9 @@ func deltaAppearedPatterns(p string) (plain, rng string) {
 // its chain of deltas started, and a view reading it alone would show that as
 // the newest state, with no error, for up to a day. So the view looks for the
 // delta on every read and refuses once one is there. The other direction needs
-// no guard: a view generated WITH the delta names files that are gone once
-// deltas are off, and DuckDB says so.
+// no guard: a view generated WITH the delta reads the table's file with
+// whatever chain is beside it, none included (#1918,
+// baseline.TableDeltaFollowGlobs), so it stays right once deltas are off.
 //
 // Three things verified against DuckDB 1.5.5 rather than assumed. The guard
 // survives in a persisted view and fires per query. error() behind a CASE whose

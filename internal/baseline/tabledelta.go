@@ -45,9 +45,10 @@ import (
 // accumulated rows are never rewritten (#1718 measured the previous layout,
 // one rewritten pair per table, at 28 µs per accumulated row per refresh).
 //
-// Sequence 0 is always present. The state SQL reads the chain through a glob,
-// and DuckDB refuses a glob that matches nothing, so the empty pair is what
-// keeps a view's shape fixed between a full backup and the refreshes after it.
+// Sequence 0 is always present. It marks where the chain started, and it
+// keeps the layout the same between a full backup and the refreshes after it.
+// (A following view no longer depends on it to find a file: since #1918 its
+// globs also match the table's own file, see TableDeltaFollowGlobs.)
 //
 // # Why the files do not end in .parquet
 //
@@ -163,8 +164,9 @@ func legacyTableDeltaPaths(basePath string) (posdel, upserts string) {
 // row is filtered, so a neighbour with an extra column, or the same column
 // in another type, changes the shape of what the glob reads. Every reader
 // that has the chain in hand (reconstruct, a pinned view) names the files
-// exactly instead; the globs are for the following views, which read
-// whatever chain is beside the table when they are queried.
+// exactly instead. A following view, which reads whatever chain is beside
+// the table when it is queried, uses TableDeltaFollowGlobs, which widens
+// these by the table's own file (#1918).
 func TableDeltaGlobs(basePath string) (posdel, upserts string) {
 	stem := escapeGlob(strings.TrimSuffix(basePath, ".parquet")) + "." + strings.Repeat("[0-9]", TableDeltaSeqWidth) + "*"
 	return stem + TableDeltaPosdelSuffix, stem + TableDeltaUpsertsSuffix
@@ -586,18 +588,89 @@ func escapeGlob(s string) string {
 // so the order by file name stays sequence order (verified against DuckDB
 // 1.5.5).
 func TableDeltaStateSQL(base, posdelGlob, upsertsGlob, basePath, replace string) string {
+	upserts := fmt.Sprintf("SELECT * FROM read_parquet(%s, filename=true, union_by_name=true) WHERE %s",
+		upsertsGlob, TableDeltaNameFilter(basePath, TableDeltaUpsertsSuffix))
+	dead := fmt.Sprintf("SELECT \"%s\" FROM read_parquet(%s, filename=true) WHERE %s AND \"%s\" IS NOT NULL",
+		TableDeltaPosColumn, posdelGlob, TableDeltaNameFilter(basePath, TableDeltaPosdelSuffix), TableDeltaPosColumn)
+	return tableDeltaStateSQL(base, upserts, dead, replace)
+}
+
+// TableDeltaFollowGlobs returns the patterns TableDeltaFollowStateSQL reads
+// the chain through: TableDeltaGlobs widened to ALSO match the table's own
+// .parquet file (#1918).
+//
+// A following view is read across many snapshots, and a table can have a
+// chain in one and none in the next (a refresh or a full backup with table
+// deltas off rewrites it bare). DuckDB refuses a glob that matches nothing,
+// and it offers no way around that (verified against DuckDB 1.4.5: a list of
+// globs fails when one entry matches nothing, an empty list is refused, a
+// table function cannot take a subquery, read_parquet has no option for it).
+// So the pattern matches a file that is always there, the base, and the name
+// filter drops its rows again.
+//
+// The six character classes spell "parque" or six digits, and the last class
+// is the base's final "t" or the suffix's last letter, so the pattern admits
+// the base, the chain's plain and range pairs, and nothing else a snapshot
+// holds: not the other suffix, not a .tmp a compaction stages.
+func TableDeltaFollowGlobs(basePath string) (posdel, upserts string) {
+	head := escapeGlob(strings.TrimSuffix(basePath, ".parquet")) + "."
+	for _, c := range "parque" {
+		head += "[0-9" + string(c) + "]"
+	}
+	head += "*"
+	last := func(suffix string) string { return "[t" + suffix[len(suffix)-1:] + "]" }
+	return head + last(TableDeltaPosdelSuffix), head + last(TableDeltaUpsertsSuffix)
+}
+
+// TableDeltaFollowStateSQL is TableDeltaStateSQL for globs from
+// TableDeltaFollowGlobs: the same state when the table has a chain, and the
+// base alone when it has none (#1918).
+//
+// Two things make that hold. With no chain beside it, the base is the only
+// file the globs match, so the technical columns do not exist in what they
+// read: each read is padded with an empty relation that declares them, so the
+// SQL binds and the chain legs contribute no rows. And the base's own columns
+// now reach the posdel read through union_by_name, so a table with a column
+// of its own named "pos" can change that column's type there: the position is
+// cast back to BIGINT, which is what the base's row numbers are compared as.
+// The cast only ever sees posdel rows, because the name filter runs first.
+//
+// The posdel read does NOT use union_by_name, unlike the upserts read: with
+// it, a table column named "pos" of a type BIGINT cannot be cast to (DATE,
+// TIMESTAMP, BLOB) became the read's type and failed every query with a dead
+// row. Without it, the read takes its columns from the first file in name
+// order, which DuckDB sorts (verified on 1.4.5 and 1.5.5 over an unsorted
+// directory), and a pair's digits sort before the base's "parquet", so that
+// is a .posdel whenever the chain has one; the name filter then keeps the base
+// from being opened at all. The residual is a sibling table literally named
+// "<table>.000000" (or any name of six digits): its file sorts first, and with
+// no "pos" column of its own the dead rows would read as none, without an
+// error.
+func TableDeltaFollowStateSQL(base, posdelGlob, upsertsGlob, basePath, replace string) string {
+	upserts := fmt.Sprintf("SELECT * FROM read_parquet(%s, filename=true, union_by_name=true) WHERE %s "+
+		"UNION ALL BY NAME SELECT NULL::VARCHAR AS \"%s\", NULL::VARCHAR AS \"%s\" WHERE false",
+		upsertsGlob, TableDeltaNameFilter(basePath, TableDeltaUpsertsSuffix), TableDeltaPKColumn, TableDeltaOpColumn)
+	dead := fmt.Sprintf("SELECT CAST(\"%s\" AS BIGINT) FROM (SELECT * FROM read_parquet(%s, filename=true) WHERE %s "+
+		"UNION ALL BY NAME SELECT NULL::BIGINT AS \"%s\" WHERE false) WHERE \"%s\" IS NOT NULL",
+		TableDeltaPosColumn, posdelGlob, TableDeltaNameFilter(basePath, TableDeltaPosdelSuffix), TableDeltaPosColumn, TableDeltaPosColumn)
+	return tableDeltaStateSQL(base, upserts, dead, replace)
+}
+
+// tableDeltaStateSQL assembles the state from its two chain reads: upserts
+// selects every row of the chain's .upserts files with a filename column, and
+// dead selects the dead row numbers.
+func tableDeltaStateSQL(base, upserts, dead, replace string) string {
 	star := "*"
 	if replace != "" {
 		star = "* REPLACE (" + replace + ")"
 	}
-	return fmt.Sprintf("WITH bintrail_delta AS (SELECT * FROM read_parquet(%s, filename=true, union_by_name=true) WHERE %s), "+
+	return fmt.Sprintf("WITH bintrail_delta AS (%s), "+
 		"bintrail_latest AS (SELECT * EXCLUDE (filename) FROM bintrail_delta "+
 		"QUALIFY row_number() OVER (PARTITION BY \"%s\" ORDER BY filename DESC) = 1) "+
 		"SELECT %s FROM (SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) "+
-		"WHERE file_row_number NOT IN (SELECT \"%s\" FROM read_parquet(%s, filename=true) WHERE %s AND \"%s\" IS NOT NULL) "+
+		"WHERE file_row_number NOT IN (%s) "+
 		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM bintrail_latest WHERE \"%s\" = '%s')",
-		upsertsGlob, TableDeltaNameFilter(basePath, TableDeltaUpsertsSuffix), TableDeltaPKColumn,
-		star, base, TableDeltaPosColumn, posdelGlob, TableDeltaNameFilter(basePath, TableDeltaPosdelSuffix), TableDeltaPosColumn,
+		upserts, TableDeltaPKColumn, star, base, dead,
 		TableDeltaPKColumn, TableDeltaOpColumn, TableDeltaOpColumn, TableDeltaOpUpsert)
 }
 
@@ -775,10 +848,11 @@ func PosdelColumns() ([]Column, error) {
 //
 // The reason is the generated DuckDB views. A view's shape (the table file
 // alone, or the file with its chain) is fixed when the view is generated, and
-// a view that follows the newest snapshot is read across many of them. A full
-// backup with no pair would break those views (a glob that matches nothing is
-// an error), and views regenerated against it would then read the file alone
-// and go quietly stale at the next refresh, which does write a pair.
+// a view that follows the newest snapshot is read across many of them. Views
+// generated against a full backup with no pair would read the file alone, and
+// refuse to answer at the next refresh, which does write a pair, until they
+// are generated again. (Views generated WITH a pair read a snapshot without
+// one correctly since #1918, so this is no longer about that direction.)
 //
 // A table whose footer cannot anchor a delta (no binlog position, no snapshot
 // time, no CREATE TABLE: a PostgreSQL baseline, or one from an old build), or
