@@ -1673,7 +1673,10 @@ func takeSnapshot(sourceDB, indexDB *sql.DB, schemas []string, excludeInvalid bo
 
 			if _, err = tx.Exec(insertSQL, insertArgs...); err != nil {
 				var me *mysql.MySQLError
-				if errors.As(err, &me) && me.Number == 1062 {
+				// Name the old collation only when it is really still there, so
+				// an unrelated duplicate never sends the operator looking for a
+				// conversion warning that was never printed.
+				if unconverted, _ := fkConstraintsNamesNeedMigration(context.Background(), tx); errors.As(err, &me) && me.Number == 1062 && unconverted {
 					return SnapshotStats{}, fmt.Errorf("failed to insert fk_constraints batch: fk_constraints still compares schema names without case or accents and could not be converted (#1839; see the earlier warning): %w", err)
 				}
 				return SnapshotStats{}, fmt.Errorf("failed to insert fk_constraints batch: %w", err)

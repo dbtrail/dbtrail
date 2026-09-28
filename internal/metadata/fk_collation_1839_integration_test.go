@@ -118,6 +118,18 @@ func assertFKKeyColumnsAreBinary(t *testing.T, indexDB *sql.DB) {
 	}
 }
 
+// requireFKConversionDue pins the premise of a migration test: the legacy
+// table really is not binary yet, so the migration has an ALTER to run. On a
+// server whose default collation were already binary, the tests after it
+// would pass without converting anything.
+func requireFKConversionDue(t *testing.T, indexDB *sql.DB) {
+	t.Helper()
+	due, err := fkConstraintsNamesNeedMigration(context.Background(), indexDB)
+	if err != nil || !due {
+		t.Fatalf("legacy fk_constraints must need the conversion (the test's premise), got due=%v err=%v", due, err)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -296,6 +308,7 @@ func TestIntegrationFKCollationMigrationIsIdempotent_1839(t *testing.T) {
 	indexDB, _ := testutil.CreateTestDB(t)
 	ctx := context.Background()
 	testutil.MustExec(t, indexDB, legacyDDLFKConstraints)
+	requireFKConversionDue(t, indexDB)
 
 	if err := EnsureFKConstraintsNameCollation(ctx, indexDB); err != nil {
 		t.Fatalf("first migration: %v", err)
@@ -345,6 +358,7 @@ func TestIntegrationFKMigrationLeavesThePoolUntouched_1839(t *testing.T) {
 	indexDB.SetMaxIdleConns(1)
 	ctx := context.Background()
 	testutil.MustExec(t, indexDB, legacyDDLFKConstraints)
+	requireFKConversionDue(t, indexDB)
 
 	if err := EnsureFKConstraintsNameCollation(ctx, indexDB); err != nil {
 		t.Fatalf("migration: %v", err)

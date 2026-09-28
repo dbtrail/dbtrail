@@ -44,6 +44,9 @@ func TestEnsureSchemaMigratesFKSchemaNameCollation_1839(t *testing.T) {
 		PRIMARY KEY (snapshot_id, schema_name, constraint_name, ordinal_position)
 	) ENGINE=InnoDB`)
 	testutil.MustExec(t, db, "INSERT INTO fk_constraints VALUES (1, 'fk_x', 'shop', 'child', 'pid', 1, 'shop', 'parent', 'id')")
+	if got := fkSchemaNameCollation(t, db); got == metadata.FKConstraintsNameCollation {
+		t.Fatalf("legacy schema_name is already %s; the test would pass without migrating anything", got)
+	}
 
 	for run := 1; run <= 2; run++ {
 		if err := EnsureSchema(db); err != nil {
