@@ -297,6 +297,11 @@ func TestFindBaselineS3_aFailedListingIsNotAnAnswer(t *testing.T) {
 		if got := store.asked(); got != 0 {
 			t.Fatalf("%d requests went out after the caller gave up", got)
 		}
+		// The store was never asked, so the error does not send anyone to
+		// check the store or the credentials.
+		if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "credentials") || !strings.Contains(err.Error(), "no older snapshot was used in its place") {
+			t.Fatalf("the error of a lookup the caller gave up on: %v", err)
+		}
 	})
 	t.Run("the listing dies between two pages", func(t *testing.T) {
 		captureLog(t)

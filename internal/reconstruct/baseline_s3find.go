@@ -39,9 +39,12 @@ import (
 // What changed is the failure side. The staleness glob was advisory: when
 // it failed, the baseline already found was returned with no warning. There
 // is no advisory read left. Every directory read here is of a snapshot NEWER
-// than the pick, and the pick is only the pick if those do not hold the
-// table, so a read that fails, fails the lookup: an older snapshot is never
-// chosen because a newer one could not be read.
+// than the pick, or of one read in the same round as it (a round after the
+// first reads several at once). The pick is only the pick if the newer ones
+// do not hold the table, so a read that fails, fails the lookup: an older
+// snapshot is never chosen because a newer one could not be read. A failed
+// read of a directory older than the pick fails the lookup too, which costs
+// a retry and never a wrong answer.
 
 // findWindow is how many directories the first round reads, and the factor
 // each later round grows by. The first round is one directory because the
@@ -72,7 +75,13 @@ func findBaselineS3(ctx context.Context, s3URL, schema, table string, at time.Ti
 		// snapshot folder) and what to do. It reaches the console, the MCP
 		// tool and the shim's client as written, so it names no command and
 		// no flag.
-		return "", time.Time{}, StaleWarning{}, fmt.Errorf("find the baseline of %s.%s in %q: %w; no older snapshot was used in its place. Check that the store answers and that these credentials can list that location, then try again", schema, table, s3URL, err)
+		advice := "Check that the store answers and that these credentials can list that location, then try again"
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// The caller gave up, or its time ran out: nothing says the
+			// store or the credentials are at fault.
+			advice = "The lookup was stopped before it finished. Try again"
+		}
+		return "", time.Time{}, StaleWarning{}, fmt.Errorf("find the baseline of %s.%s in %q: %w; no older snapshot was used in its place. %s", schema, table, s3URL, err, advice)
 	}
 	return path, snap, stale, err
 }
