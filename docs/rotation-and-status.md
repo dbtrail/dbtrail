@@ -743,6 +743,16 @@ event on the transition into broken (see
 [Alerts](https://www.dbtrail.com/docs/monitoring/alerts/#webhook)). The fix is always the
 same: take a fresh baseline (`bintrail dump` + `bintrail baseline`).
 
+**How each snapshot was locked**: the `LOCKS` column says how the database
+was locked when the table's rows were read (`snapshot_lock` in JSON):
+`consistent`, `unknown`, or `⚠ no locks` (`torn` in JSON). `unknown` is a
+snapshot that does not say, which is every snapshot taken before this was
+recorded. A snapshot updated from the recorded changes inherits the answer of
+the snapshot it was built from. Under the table, status counts the tables
+whose newest snapshot was read with no locks, and the ones whose newest
+snapshot does not say. See
+[dump-and-baseline.md](dump-and-baseline.md#the-snapshot-records-how-it-was-locked).
+
 **Tables with table deltas**: when backups are updated on a schedule, a
 table's file is carried forward and its changes go into small files beside
 it. A restore of that table reads events from where that chain of files

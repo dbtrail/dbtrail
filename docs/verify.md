@@ -111,6 +111,29 @@ A table is reported `inconclusive` instead of compared when:
   records no row changes to replay, so the older baseline cannot be carried
   forward to the read. The reason names the statement and when it ran.
 
+**When a snapshot was read with no locks.** A snapshot records how the
+database was locked when it was read (see
+[dump-and-baseline.md](dump-and-baseline.md)). `verify` reads that record on
+both snapshots of a comparison, and it changes what a difference means:
+
+| The two snapshots | A difference is reported as |
+|---|---|
+| both `consistent` | `mismatch` |
+| one is `torn` (read with `no-lock`) | `inconclusive`, and the reason names the snapshot |
+| none is `torn`, one has no record (`unknown`) | `mismatch`, and the reason says which one has no record |
+
+A torn snapshot copies its rows at different moments, so it can differ from
+the recorded changes with nothing wrong in them. A snapshot with no record
+does not get that benefit: every snapshot taken before the record existed has
+none, and excusing them would hide real differences. A table that matches is a
+`match` whatever the locks were. The per-table `snapshot_lock` field in the
+JSON output carries the worst of the two.
+
+The exit code does not change: a table softened this way counts as
+`inconclusive`, so a run where every table is over a torn snapshot proves
+nothing and exits non-zero. Take a full snapshot with locks to make the table
+checkable again.
+
 The next full backup makes such a table checkable. A run where no table was
 proven exits non-zero. The window between the two baselines can be days old, so
 the events may come from the Parquet archives rather than the live index; with
@@ -324,6 +347,10 @@ bintrail verify --index-dsn "$IDX" --baseline-dir /data/baselines --format json
   to (a GTID set in MySQL live-source mode, a `file:pos` binlog coordinate in
   MySQL baseline-anchored mode, an `LSN:` WAL position for a PostgreSQL
   source); `reason` is the detail behind the verdict.
+- `tables[].snapshot_lock`: `consistent`, `unknown` or `torn`: how the
+  snapshots this table was compared with were locked when the database was
+  read, the worst of them. Omitted on a table that was compared with no
+  snapshot.
 - `tables[].inconclusive_kind` — only on `status: "inconclusive"` rows and
   only under `--check recover` (omitted otherwise, mirroring the counters
   below): `no-activity`, `nothing-to-assert`, or `unproven` — see the
