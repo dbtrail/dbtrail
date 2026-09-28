@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A view in the source no longer fails the snapshot** (#1687). One view in
+  any schema left the snapshot incomplete and no table was published. Views
+  are now skipped, since a view holds no rows of its own, and the run says
+  how many it skipped and names them.
+- **A restart during the resume cleanup no longer keeps capture down**
+  (#1708). A start now waits for a cleanup an earlier run left running,
+  instead of sending a second delete that failed on the locks of the first.
+  The wait ends at `--cleanup-wait-timeout` (default `1h`) with an error
+  that names the connection.
+- **Starting a server shows its optional improvements** (#1841). They used to
+  flash in a message that faded, with no way to reach them again.
 - **Snapshots from the console image failed on arm64 for a user created with
   the MySQL 8 default** (#1876). The arm64 mydumper package is linked against
   MariaDB Connector/C, which loads `caching_sha2_password` from a plugin
@@ -16,12 +27,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   install `libmariadb3`, which ships that directory. amd64 was not affected.
 
 ### Added
+- **The Snapshots settings and `bintrail doctor --baseline-s3` say whether the
+  bucket expires old snapshots** (#1680): the rule and its age, no rule (the
+  bucket grows without limit), or that the rules could not be read. Needs
+  the optional `s3:GetBucketLifecycleConfiguration` permission. DBTrail still
+  never deletes from S3 and never sets a bucket rule.
+- **Snapshots are signed by the installation that wrote them** (#1762). The
+  web interface and the log warn when one folder or S3 prefix holds
+  snapshots from more than one installation. Nothing is refused yet. Use one
+  folder or prefix per installation.
 - **A base image for the console, tested before it is published.**
   `ghcr.io/dbtrail/bintrail-console-base` holds Debian, the pinned mydumper
   (checksum verified per architecture) and the `bintrail` user. Its workflow
   runs the image's mydumper against MySQL 8.0 and 8.4 on amd64 and arm64
   before the tag exists. Both console image recipes are built from it, so
   mydumper is installed in one place.
+
+### Changed
+- **Wording in the web interface and in the docs** (#1840, #1761). The
+  screen is called the web interface, not the console. The optional check
+  about column renames says what is lost without it, and the Connect a SQL
+  client panel says that its password works for every server.
 
 ## [0.90.0] - 2026-09-24
 
