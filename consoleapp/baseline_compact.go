@@ -110,7 +110,7 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 				"server", req.ServerName, "id", req.ServerID, "chains", len(due))
 			return
 		}
-		slog.Warn("baseline compact: not started", "server", req.ServerName, "id", req.ServerID, "chains", len(due), "error", err)
+		slog.Warn("snapshot compaction: not started", "server", req.ServerName, "id", req.ServerID, "chains", len(due), "error", err)
 	}
 }
 

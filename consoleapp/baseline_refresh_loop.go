@@ -2163,7 +2163,7 @@ type refreshSkip struct{ name, why string }
 // nothing happen and no reason why.
 func logSkippedRefreshTargets(skipped []string, shared []refreshSkip) {
 	for _, s := range shared {
-		slog.Warn("baseline refresh: server skipped, its snapshot location is shared", "server", s.name, "reason", s.why)
+		slog.Warn("snapshot refresh: server skipped, its snapshot location is shared", "server", s.name, "reason", s.why)
 	}
 	for _, name := range skipped {
 		slog.Warn("baseline refresh: server has an S3-only baseline destination and will not be refreshed "+

@@ -366,7 +366,9 @@ servers:
 	r.MigrateProcessBaselineLocation("/proc/dir", "")
 	r2 := loadReg(t, path)
 	e := mustGet(t, r2, "aaaaaaaaaaaaaaa1")
-	if !e.NoArchive || e.LocalKeepNewest != 3 || e.BackupSchedule == nil || e.BackupSchedule.Every != "1d" || e.Extra["future_field"] != "keep-me" || e.DSN != "u:p@tcp(h:3306)/one" {
+	// The keep count is reset on a server given a folder (see
+	// TestLocationMigration_resetsTheKeepCount); everything else stays.
+	if !e.NoArchive || e.LocalKeepNewest != 0 || e.BackupSchedule == nil || e.BackupSchedule.Every != "1d" || e.Extra["future_field"] != "keep-me" || e.DSN != "u:p@tcp(h:3306)/one" {
 		t.Errorf("the entry lost fields: %+v", e)
 	}
 }
