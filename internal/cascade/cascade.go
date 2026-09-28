@@ -1778,7 +1778,10 @@ func LoadCascadeFKs(ctx context.Context, indexDB *sql.DB, schemas []string, at t
 	args := []any{snapID}
 	if len(schemas) > 0 {
 		placeholders := strings.TrimRight(strings.Repeat("?,", len(schemas)), ",")
-		q += " AND fk.schema_name IN (" + placeholders + ")"
+		// Folded, not exact: fk_constraints.schema_name is binary since
+		// #1839, and schemas are names as the user typed them. Same rule as
+		// metadata's CascadeConstraintsInIndex.
+		q += " AND CONVERT(fk.schema_name USING utf8mb4) COLLATE utf8mb4_0900_ai_ci IN (" + placeholders + ")"
 		for _, s := range schemas {
 			args = append(args, s)
 		}

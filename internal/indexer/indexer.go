@@ -851,6 +851,12 @@ func EnsureSchema(db *sql.DB) error {
 		); err != nil {
 			return err
 		}
+		// #1839: a table an older build created keys schema names case- and
+		// accent-insensitively, so twin schemas (`shop`/`Shop`) with a
+		// same-named FK failed the whole snapshot with ERROR 1062. Best
+		// effort, like the snapshot_exclusions conversion (#1815) and for the
+		// same reasons; the snapshot writer retries it.
+		metadata.MigrateFKConstraintsNamesBestEffort(context.Background(), db)
 	}
 	// snapshot_id_seq post-dates the original schema (#844): a dedicated
 	// AUTO_INCREMENT counter table that lets metadata.TakeSnapshot/
