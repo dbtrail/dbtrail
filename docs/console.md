@@ -822,6 +822,29 @@ longer drawn on the page.
   delete marker; under an Object Lock retention nothing expires before it
   ends. DBTrail itself never deletes from S3 and never sets a bucket rule;
   the rule is the operator's to apply.
+  Above the rule, one line says whether the bucket already expires these
+  snapshots (#1680). The console reads the bucket's rules after the row is
+  drawn and answers with one of three states. A rule covers this prefix: the
+  line names it and the age it expires at, and turns red when that age is no
+  longer than the schedule interval. No rule covers it: the line is red and
+  says the bucket grows without limit, with the schedule's rate when there
+  is one. The rules could not be read: the line says so, and that a missing
+  `s3:GetBucketLifecycleConfiguration` permission is the likely reason; it
+  never reads as "no rule". A disabled rule, a rule on another prefix, and a
+  rule that only moves objects to another storage class, expires old
+  versions or aborts unfinished uploads do not count. A rule limited to
+  objects with a tag or a size is not counted either, and the line says how
+  many of those it found. The whole-bucket one-year rule that
+  `bintrail init --s3-bucket` sets does count. With several rules, the
+  shortest age is the one shown, since it deletes first. Whether the bucket
+  keeps versions is not read (it needs another permission). On a bucket that
+  does, a rule that expires current objects only leaves the old versions in
+  place and the bucket still grows, which is why the generated rule expires
+  those too; when the rule found has no expiry for old versions, the line
+  says so. The read is one
+  request with a 5 second limit, its answer is reused for 30 seconds, and it
+  is only a read: `bintrail doctor --baseline-s3` reports the same answer
+  from the command line ([s3-iam-policy.md](s3-iam-policy.md)).
 - **Set at startup** — the nine daemon-wide values (`--baseline-dir`,
   `--baseline-s3`, `--baseline-retain`, `--baseline-refresh-interval`,
   `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE`, `BINTRAIL_CONSOLE_BASELINE_TRIGGER`,
