@@ -118,7 +118,13 @@ func TestFindBaselineLocal_skipsIncompleteSnapshot(t *testing.T) {
 	}
 }
 
-// TestS3IncompleteSnapshots exercises the marker-detection logic used by the S3
+// The three tests below run the glob lookup's helpers, which since #1740 are
+// the REFERENCE the s3:// lookup is compared with (baseline_s3globs_test.go),
+// not what it runs: they keep the reference honest. What the lookup itself
+// does on a failed read is pinned by
+// TestFindBaselineS3_aFailedListingIsNotAnAnswer.
+//
+// TestS3IncompleteSnapshots exercises the marker-detection logic of the glob
 // lookup against real DuckDB glob() on a local path (glob() works on local
 // paths; httpfs is only needed for the s3:// scheme, loaded by the caller).
 // _INCOMPLETE-without-_SUCCESS → incomplete; _SUCCESS present (even alongside a
@@ -166,31 +172,6 @@ func TestS3IncompleteSnapshots(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Errorf("exactly one incomplete snapshot expected, got %d: %v", len(got), got)
-	}
-}
-
-// TestStaleWarningS3_errorReturnsFoundBaseline pins the #524 HIGH fix: the
-// advisory broad-glob (s3NewestSnapshot) must NOT fail an already-located
-// baseline. When the broad glob errors, staleWarningS3 returns the zero
-// StaleWarning ("not stale") and logs a warn — it never propagates the error,
-// so findBaselineS3 returns the baseline it already found.
-func TestStaleWarningS3_errorReturnsFoundBaseline(t *testing.T) {
-	db, err := sql.Open("duckdb", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.Close() // a closed *sql.DB makes s3NewestSnapshot's QueryContext error deterministically
-
-	using := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	at := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
-
-	buf := captureWarns(t)
-	stale := staleWarningS3(context.Background(), db, "s3://bucket/prefix", "shop", "orders", using, at, map[string]bool{})
-	if stale.Stale() {
-		t.Fatalf("advisory staleness glob error must yield a non-stale (empty) StaleWarning, got %+v", stale)
-	}
-	if !bytes.Contains(buf.Bytes(), []byte("staleness check failed")) {
-		t.Fatalf("want a 'staleness check failed' warn on broad-glob error, got: %q", buf.String())
 	}
 }
 
