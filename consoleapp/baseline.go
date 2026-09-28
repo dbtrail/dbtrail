@@ -715,7 +715,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	// the very next dump. Trigger already refused an unreadable one, so the
 	// error is spent — taking the mode alone keeps this call site to one line.
 	lockMode, _ := s.lockModeNow()
-	if err := runMydumper(s.ctx, req.SourceDSN, req.Schemas, dumpDir, lockMode); err != nil {
+	if err := runMydumperFunc(s.ctx, req.SourceDSN, req.Schemas, dumpDir, lockMode); err != nil {
 		return dumpOutcome{}, fmt.Errorf("dump: %w", err)
 	}
 	// A dump that cannot be anchored is refused here, never published (#1688).
@@ -743,9 +743,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		out.cleanup = func() { os.RemoveAll(outputDir) }
 	}
 
-	bcfg := s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt)
-	bcfg.DDLMark = ddlMark
-	stats, err := baseline.Run(s.ctx, bcfg)
+	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt, ddlMark))
 	if err != nil {
 		out.cleanup()
 		return dumpOutcome{}, fmt.Errorf("convert: %w", err)
@@ -758,7 +756,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 // dumpBaselineConfig is how a dump of req's server is converted: split out
 // so what the conversion is told, the writer it signs with among it, is
 // checked without running mydumper.
-func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dumpDir, outputDir string, at time.Time) baseline.Config {
+func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dumpDir, outputDir string, at time.Time, ddlMark string) baseline.Config {
 	return baseline.Config{
 		InputDir:    dumpDir,
 		OutputDir:   outputDir,
@@ -766,6 +764,7 @@ func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dum
 		Timestamp:   at,
 		TableDeltas: s.tableDeltas,
 		WriterID:    snapshotWriterID(req),
+		DDLMark:     ddlMark,
 	}
 }
 
@@ -1027,6 +1026,9 @@ func mydumperBootWarning(lockMode baseline.LockMode) string {
 // baseline-dump pipeline also uses; on a native install it is whatever the host
 // has, which is why planMydumper reads its version first (#1688). lockMode
 // selects the sync mode when the build accepts it; see buildConsoleMydumperArgs.
+// runMydumperFunc runs mydumper; a test replaces it.
+var runMydumperFunc = runMydumper
+
 func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDir string, lockMode baseline.LockMode) error {
 	host, port, user, password, err := config.ParseSourceDSN(sourceDSN)
 	if err != nil {
