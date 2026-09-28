@@ -766,7 +766,9 @@ folder that is already older than coverage is `broken` whatever its chain
 says, because a chain never starts after its folder. A full backup of the
 table replaces the damaged files. The `watch` daemon treats such a server
 like one it cannot evaluate: it logs a warning, sends no alert on a guess,
-and does not resolve a standing `baseline_stale` alert.
+and does not resolve a standing `baseline_stale` alert. A table that is
+past coverage still alerts, whatever could not be read for the table beside
+it.
 
 **Indexes capturing more than one source**: live partitions are shared by
 every source, so the live floor needs no attribution — but archived
