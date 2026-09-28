@@ -437,7 +437,7 @@ export async function runSaveScenes(ctx) {
       await page.click("#server-add");
       await page.waitForSelector("#connect-full-form", { timeout: 5000 });
       await page.click("#connect-full-form");
-      await page.waitForSelector('#server-form:not([data-connect]) input[name="dbname"]', { timeout: 5000 });
+      await page.waitForSelector('#server-form:not([data-connect]) input[name="dbname"]', { state: "attached", timeout: 5000 });
       const fill = async (vals) => {
         await page.evaluate(() => { const a = document.getElementById("server-advanced"); if (a) a.open = true; });
         for (const [k, v] of Object.entries(vals)) await page.fill(`#server-form-mount [name="${k}"]`, v);
@@ -474,7 +474,7 @@ export async function runSaveScenes(ctx) {
       await page.click("#server-add");
       await page.waitForSelector("#connect-full-form", { timeout: 5000 });
       await page.click("#connect-full-form");
-      await page.waitForSelector('#server-form:not([data-connect]) input[name="dbname"]', { timeout: 5000 });
+      await page.waitForSelector('#server-form:not([data-connect]) input[name="dbname"]', { state: "attached", timeout: 5000 });
       await fill({ name: SRV_NAME, host: "127.0.0.1", port: "13306", user: "root", password: "testroot", dbname: "bintrail_e2e_idx" });
       await page.click("#server-form-mount button[type=submit]");
       const dupMsg = await until(() => page.evaluate(() => {
