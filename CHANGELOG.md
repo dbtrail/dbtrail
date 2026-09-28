@@ -20,8 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ghcr.io/dbtrail/bintrail-console-base` holds Debian, the pinned mydumper
   (checksum verified per architecture) and the `bintrail` user. Its workflow
   runs the image's mydumper against MySQL 8.0 and 8.4 on amd64 and arm64
-  before the tag exists. The console image recipes move onto it in a later
-  change.
+  before the tag exists. Both console image recipes are built from it, so
+  mydumper is installed in one place.
 
 ## [0.90.0] - 2026-09-24
 

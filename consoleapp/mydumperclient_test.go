@@ -18,14 +18,13 @@ import (
 // Without it mydumper cannot log in on arm64 as a user created with the MySQL
 // 8.0+ default, and nothing fails until someone takes a snapshot.
 //
-// This guard is TEMPORARY and it is the cheap kind: it reads the recipes, it
-// does not build them. The real test is build/smoke-console-base.sh, which runs
-// mydumper from the built image against real servers, but today it only covers
-// build/Dockerfile.console-base. The console recipes still carry their own copy
-// of the install block and no CI job builds them. Until they are built FROM the
-// base image, this is the only thing that fails if someone drops the package
-// from one of them. Delete it in the change that moves the last recipe onto the
-// base image.
+// The console recipes do not install mydumper themselves: they are built FROM
+// the console base image, the one place it is installed and the one
+// build/smoke-console-base.sh tests against real servers. This guard reads the
+// recipes, it does not build them. It fails if a recipe installs the package
+// without the library, and TestConsoleRecipesAreBuiltFromTheBaseImage fails if a
+// console recipe stops using the base image or names a tag other than the one
+// in build/console-base.tag.
 //
 // What it cannot see: a package that is listed and does nothing (a rename in a
 // future Debian release, a different client library in a future mydumper
@@ -202,17 +201,96 @@ func TestRecipesThatInstallMydumperInstallItsClientLibrary(t *testing.T) {
 		t.Fatalf("walking the repository: %v", err)
 	}
 
-	// The recipes this guard exists for. If the walk stops finding one, the
-	// guard is looking in the wrong place or for the wrong text, and a pass
-	// would mean nothing. When a recipe moves onto the base image, take it out
-	// of this list in the same change.
-	for _, want := range []string{
-		"build/Dockerfile.bintrail-console",
-		"build/Dockerfile.bintrail-console.goreleaser",
-		"build/Dockerfile.console-base",
-	} {
-		if !slices.Contains(withMydumper, want) {
-			t.Errorf("%s was not seen installing the mydumper package; recipes seen: %v", want, withMydumper)
+	// The recipe this guard exists for. If the walk stops finding it, the guard
+	// is looking in the wrong place or for the wrong text, and a pass would mean
+	// nothing.
+	const base = "build/Dockerfile.console-base"
+	if !slices.Contains(withMydumper, base) {
+		t.Errorf("%s was not seen installing the mydumper package; recipes seen: %v", base, withMydumper)
+	}
+	// A console recipe that installs the package again is a second copy nothing
+	// tests.
+	for _, recipe := range consoleRecipes {
+		if slices.Contains(withMydumper, recipe) {
+			t.Errorf("%s installs the mydumper package itself; it must come from the base image", recipe)
+		}
+	}
+}
+
+// The recipes that become the console image: one built from source, one that
+// takes the binary the release already compiled.
+var consoleRecipes = []string{
+	"build/Dockerfile.bintrail-console",
+	"build/Dockerfile.bintrail-console.goreleaser",
+}
+
+// lastFrom returns the image the recipe's last stage starts from, the one that
+// becomes the image, and whether the recipe has a FROM at all.
+func lastFrom(text string) (string, bool) {
+	image, found := "", false
+	for _, instruction := range allInstructions(text) {
+		fields := strings.Fields(instruction)
+		if len(fields) >= 2 && strings.EqualFold(fields[0], "FROM") {
+			image, found = fields[1], true
+			// FROM --platform=... image
+			for _, f := range fields[1:] {
+				if !strings.HasPrefix(f, "--") {
+					image = f
+					break
+				}
+			}
+		}
+	}
+	return image, found
+}
+
+func TestLastFrom(t *testing.T) {
+	cases := []struct {
+		name, text, want string
+		found            bool
+	}{
+		{"one stage", "FROM a:1\nRUN true\n", "a:1", true},
+		{"two stages", "FROM golang:1.25 AS builder\nRUN true\nFROM b:2\nCOPY x y\n", "b:2", true},
+		{"lowercase", "from a:1 as x\nfrom b:2\n", "b:2", true},
+		{"platform flag", "FROM --platform=linux/amd64 b:2\n", "b:2", true},
+		{"a FROM in a comment", "FROM a:1\n# FROM b:2\n", "a:1", true},
+		{"empty file", "", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, found := lastFrom(c.text)
+			if got != c.want || found != c.found {
+				t.Errorf("lastFrom = %q, %v; want %q, %v", got, found, c.want, c.found)
+			}
+		})
+	}
+}
+
+func TestConsoleRecipesAreBuiltFromTheBaseImage(t *testing.T) {
+	root := ".."
+	raw, err := os.ReadFile(filepath.Join(root, "build", "console-base.tag"))
+	if err != nil {
+		t.Fatalf("reading the base image tag: %v", err)
+	}
+	tag := strings.TrimSpace(string(raw))
+	if tag == "" || strings.ContainsAny(tag, " \t\n:/@") {
+		t.Fatalf("build/console-base.tag holds %q, not one tag", tag)
+	}
+	want := "ghcr.io/dbtrail/bintrail-console-base:" + tag
+
+	for _, recipe := range consoleRecipes {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(recipe)))
+		if err != nil {
+			t.Errorf("reading %s: %v", recipe, err)
+			continue
+		}
+		got, found := lastFrom(string(data))
+		if !found {
+			t.Errorf("%s has no FROM", recipe)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s is built FROM %s, want %s (the tag in build/console-base.tag)", recipe, got, want)
 		}
 	}
 }
