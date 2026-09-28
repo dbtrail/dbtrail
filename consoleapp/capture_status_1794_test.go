@@ -111,6 +111,66 @@ func TestCaptureStatusFrom(t *testing.T) {
 	}
 }
 
+// #1794 review: a source that loaded a dump taken on another server (or
+// ran SET @@GLOBAL.gtid_purged by hand) counts those transactions as
+// executed, and no binlog carries them. Capture can never read them, and
+// saves its position all the same, so a second read used to confirm
+// "behind" for as long as the daemon ran. Purged transactions may turn
+// behind into unknown, never anything into up to date.
+func TestCaptureStatusFrom_purgedTransactions(t *testing.T) {
+	now := captureT0
+	withPurged := func(r captureProbeResult, purged string) captureProbeResult { r.purged = purged; return r }
+	read := func(captured, executed, purged string, checkpoint time.Time) captureProbeResult {
+		return withPurged(behindRead(captured, executed, checkpoint), purged)
+	}
+	dump := uuidA + ":1-100"
+	// The reviewer's case: two reads, the checkpoint moving, only purged
+	// transactions ahead.
+	first, sample := captureStatusFrom(read(uuidB+":1-10", dump+","+uuidB+":1-10", dump, now), nil, now)
+	later := now.Add(time.Minute)
+	second, _ := captureStatusFrom(read(uuidB+":1-10", dump+","+uuidB+":1-10", dump, later), sample, later)
+	for i, got := range []console.CaptureStatus{first, second} {
+		if got.State != console.CaptureStateUnknown || got.Detail == "" {
+			t.Errorf("read %d, only purged transactions ahead: %+v, want unknown", i+1, got)
+		}
+	}
+	// Never up to date on purged transactions.
+	if got, _ := captureStatusFrom(read(uuidB+":1-10", dump+","+uuidB+":1-10", dump, later), sample, later); got.State == console.CaptureStateUpToDate {
+		t.Errorf("purged transactions made up to date: %+v", got)
+	}
+	// Real lag beside purged transactions is still behind.
+	first, sample = captureStatusFrom(read(uuidB+":1-10", dump+","+uuidB+":1-30", dump, now), nil, now)
+	if first.State != console.CaptureStateUnknown || first.RetryInSeconds == 0 {
+		t.Errorf("purged plus 20 ahead, first read: %+v", first)
+	}
+	if got, _ := captureStatusFrom(read(uuidB+":1-10", dump+","+uuidB+":1-30", dump, later), sample, later); got.State != console.CaptureStateBehind {
+		t.Errorf("purged plus 20 ahead, second read: %+v, want behind", got)
+	}
+	// Ordinary binlog expiry: capture already holds what was purged.
+	first, sample = captureStatusFrom(read(uuidB+":1-10", uuidB+":1-30", uuidB+":1-5", now), nil, now)
+	if got, _ := captureStatusFrom(read(uuidB+":1-10", uuidB+":1-30", uuidB+":1-5", later), sample, later); got.State != console.CaptureStateBehind {
+		t.Errorf("expired binlogs capture had read, 20 ahead: %+v (first %+v), want behind", got, first)
+	}
+	// One real transaction ahead beside purged ones: the one-ahead rule.
+	if got, _ := captureStatusFrom(read(uuidB+":1-10", dump+","+uuidB+":1-11", dump, later), &captureSample{executed: dump + "," + uuidB + ":1-11", purged: dump, at: now}, later); got.State != console.CaptureStateUnknown {
+		t.Errorf("purged plus one ahead: %+v, want unknown", got)
+	}
+	// A purged value that is not inside executed does not parse into a
+	// verdict.
+	if got, _ := captureStatusFrom(read(uuidB+":1-10", uuidB+":1-30", uuidA+":1-5", later), &captureSample{executed: uuidB + ":1-30", at: now}, later); got.State != console.CaptureStateUnknown {
+		t.Errorf("purged outside executed: %+v, want unknown", got)
+	}
+	if got, _ := captureStatusFrom(read(uuidB+":1-10", uuidB+":1-30", "not a set", later), &captureSample{executed: uuidB + ":1-30", at: now}, later); got.State != console.CaptureStateUnknown {
+		t.Errorf("purged does not parse: %+v, want unknown", got)
+	}
+	// Something purged between the two reads that capture never read is a
+	// real loss: judged against the EARLIER read's purged set, it still
+	// reaches the checkpoint check.
+	if got, _ := captureStatusFrom(read(uuidB+":1-10", uuidB+":1-30", uuidB+":1-20", later), &captureSample{executed: uuidB + ":1-30", at: now}, later); got.State == console.CaptureStateUpToDate {
+		t.Errorf("a purge between the reads: %+v", got)
+	}
+}
+
 func TestCountGTIDs(t *testing.T) {
 	for set, want := range map[string]int64{
 		uuidB + ":1":                           1,
@@ -402,13 +462,15 @@ func TestCaptureStatus_oneReadInFlightPerServer(t *testing.T) {
 // a loss does not refuse, since the page says those on lines of their own.
 func TestHeadFromState(t *testing.T) {
 	uuidQ := regexp.QuoteMeta("SELECT @@GLOBAL.server_uuid")
-	gtidQ := regexp.QuoteMeta("SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed")
+	// The whole statement: both sets of one instant, and the purged one read
+	// here only (the snapshot schedule's query is TestCompareCapture's).
+	gtidQ := "^" + regexp.QuoteMeta("SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed, @@GLOBAL.gtid_purged") + "$"
 	uuidRow := func(u string) *sqlmock.Rows { return sqlmock.NewRows([]string{"u"}).AddRow(u) }
-	twoServers := func(executed string) (func(sqlmock.Sqlmock), func(sqlmock.Sqlmock)) {
+	twoServers := func(executed, purged string) (func(sqlmock.Sqlmock), func(sqlmock.Sqlmock)) {
 		return func(m sqlmock.Sqlmock) { m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidA)) },
 			func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidB))
-				m.ExpectQuery(gtidQ).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("ON", executed))
+				m.ExpectQuery(gtidQ).WillReturnRows(sqlmock.NewRows([]string{"m", "e", "p"}).AddRow("ON", executed, purged))
 			}
 	}
 	checkpoint := captureT0.Add(-5 * time.Second)
@@ -424,6 +486,8 @@ func TestHeadFromState(t *testing.T) {
 		name      string
 		st        *status.StreamStateInfo
 		executed  string // "": the source is never read
+		purged    string
+		wantPurge string
 		sameHost  bool
 		gtidOff   bool
 		openFails bool
@@ -438,6 +502,8 @@ func TestHeadFromState(t *testing.T) {
 			s.CaptureSkips = skipLedger(4, captureT0.Add(-time.Hour))
 		}), executed: uuidB + ":1-10", verdict: console.CaptureCaughtUp, opened: true},
 		{name: "the source ahead", st: state(uuidB+":1-10", nil), executed: uuidB + ":1-30", verdict: console.CaptureBehind, detail: "the source reports transactions", opened: true},
+		{name: "the purged set is read, its whitespace dropped", st: state(uuidB+":1-10", nil), executed: uuidA + ":1-100," + uuidB + ":1-10",
+			purged: uuidA + ":1-100,\n" + uuidB + ":1-3", wantPurge: uuidA + ":1-100," + uuidB + ":1-3", verdict: console.CaptureBehind, detail: "the source reports transactions", opened: true},
 		{name: "position mode: the source never opened", st: state(uuidB+":1-10", func(s *status.StreamStateInfo) { s.Mode = "position" }),
 			detail: "the capture runs in binlog-position mode"},
 		{name: "no capture on record: the source never opened", st: nil, detail: "the index has no live capture on record"},
@@ -465,9 +531,9 @@ func TestHeadFromState(t *testing.T) {
 			case c.gtidOff:
 				im.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidA))
 				sm.ExpectQuery(uuidQ).WillReturnRows(uuidRow(uuidB))
-				sm.ExpectQuery(gtidQ).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("OFF", ""))
+				sm.ExpectQuery(gtidQ).WillReturnRows(sqlmock.NewRows([]string{"m", "e", "p"}).AddRow("OFF", "", ""))
 			case c.executed != "":
-				i, s := twoServers(c.executed)
+				i, s := twoServers(c.executed, c.purged)
 				i(im)
 				s(sm)
 			}
@@ -483,7 +549,7 @@ func TestHeadFromState(t *testing.T) {
 			if (err != nil) != c.wantErr || r.verdict != c.verdict || !strings.HasPrefix(r.detail, c.detail) || opened != c.opened {
 				t.Fatalf("got %+v err=%v opened=%v, want verdict %q detail %q… err=%v opened=%v", r, err, opened, c.verdict, c.detail, c.wantErr, c.opened)
 			}
-			if c.verdict != "" && (r.captured == "" || r.executed != c.executed || !r.checkpoint.Equal(checkpoint)) {
+			if c.verdict != "" && (r.captured == "" || r.executed != c.executed || r.purged != c.wantPurge || !r.checkpoint.Equal(checkpoint)) {
 				t.Fatalf("a verdict without what it was read from: %+v", r)
 			}
 			// What the page is told, from this read alone: never behind.

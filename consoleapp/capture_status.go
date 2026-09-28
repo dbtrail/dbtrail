@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,7 +52,9 @@ const (
 // captureSample is what the source had executed at one read.
 type captureSample struct {
 	executed string
-	at       time.Time
+	// purged is what the source had purged at the same read.
+	purged string
+	at     time.Time
 }
 
 // captureSlot is one server's last answer, the read in flight for it, and
@@ -222,6 +225,11 @@ func reportCaptureStatus(e console.ServerEntry, a console.CaptureStatus, cause s
 //   - the source holds only transactions of the kind capture records. A
 //     tagged GTID (MySQL 8.3 and later) is never recorded, so a source with
 //     one stays ahead of a capture that has read everything;
+//   - the source is ahead by transactions capture can read. Its purged set
+//     (@@GLOBAL.gtid_purged) counts as executed and no binlog carries it:
+//     a dump from another server loaded with its SET @@GLOBAL.gtid_purged
+//     leaves the source ahead forever. Those are left out of the count;
+//     they never make anything up to date;
 //   - the source is ahead by more than one transaction. A statement that
 //     commits on its own and carries no rows (a GRANT, CREATE VIEW, an empty
 //     transaction) is recorded when the NEXT transaction arrives, so after
@@ -254,10 +262,20 @@ func captureStatusFrom(r captureProbeResult, prev *captureSample, now time.Time)
 	if hasTaggedGTIDs(wrote) {
 		return unknown("the source has tagged GTIDs, which capture does not record"), prev
 	}
-	if countGTIDs(wrote)-countGTIDs(have) <= 1 {
+	// What capture can ever hold: what it has, and what the source purged
+	// without a binlog to read it from. Only "behind" is judged against it;
+	// up to date was settled above on the two sets as they are.
+	reachable, ok := withPurged(have, r.purged)
+	if !ok || !wrote.Contain(reachable) {
+		return unknown("the source's purged GTID set does not fit its executed set"), prev
+	}
+	if reachable.Equal(wrote) {
+		return unknown("the source is ahead only by transactions it purged, which no binlog carries for capture to read"), prev
+	}
+	if countGTIDs(wrote)-countGTIDs(reachable) <= 1 {
 		return unknown("the source is one transaction ahead, which may be a statement capture records with the next one"), prev
 	}
-	sample := &captureSample{executed: r.executed, at: now}
+	sample := &captureSample{executed: r.executed, purged: r.purged, at: now}
 	if prev == nil {
 		a := unknown("the source looked ahead on a first read, and is asked again")
 		a.RetryInSeconds = int(captureStatusRetry / time.Second)
@@ -267,7 +285,13 @@ func captureStatusFrom(r captureProbeResult, prev *captureSample, now time.Time)
 	if err != nil {
 		return unknown("the earlier read of the source does not parse"), sample
 	}
-	if have.Contain(earlier) {
+	// Against the purged set of the EARLIER read: a transaction purged
+	// since then that capture never read is a loss, not a catch-up.
+	reached, ok := withPurged(have, prev.purged)
+	if !ok {
+		return unknown("the earlier read of the source does not parse"), sample
+	}
+	if reached.Contain(earlier) {
 		return unknown("the source keeps writing and capture is reading it"), sample
 	}
 	if r.checkpoint.Sub(prev.at) < captureConfirmGap {
@@ -277,6 +301,19 @@ func captureStatusFrom(r captureProbeResult, prev *captureSample, now time.Time)
 		return a, prev
 	}
 	return console.CaptureStatus{State: console.CaptureStateBehind, Detail: r.detail}, prev
+}
+
+// withPurged is have plus the purged set, as a new set; false when purged
+// does not parse. An empty purged set adds nothing.
+func withPurged(have *gomysql.MysqlGTIDSet, purged string) (*gomysql.MysqlGTIDSet, bool) {
+	u, ok := have.Clone().(*gomysql.MysqlGTIDSet)
+	if !ok {
+		return nil, false
+	}
+	if err := u.Update(strings.Join(strings.Fields(purged), "")); err != nil {
+		return nil, false
+	}
+	return u, true
 }
 
 // parseGTIDPair parses the capture's set and the source's.
@@ -348,5 +385,5 @@ func headFromState(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo,
 	if ok, detail := checkpointComparable(st); !ok {
 		return captureProbeResult{detail: detail}, nil
 	}
-	return compareWithSource(ctx, idx, st, openSource)
+	return compareWithSource(ctx, idx, st, openSource, readExecutedAndPurgedGTIDs)
 }
