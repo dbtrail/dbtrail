@@ -673,6 +673,13 @@ services:
         # Record the lock mode the dump was taken with, the way `bintrail
         # dump` does, so the snapshot made from it says how it was locked.
         # The value passed the case above, so it is one of the four names.
+        # Only reached when mydumper exited 0 (set -e). Measured with
+        # mydumper v1.0.3-1 against MySQL 8.0.46, as a user with SELECT and
+        # REPLICATION but no RELOAD or BACKUP_ADMIN: FTWRL exits 1 ("Couldn't
+        # acquire LOCK INSTANCE FOR BACKUP"), LOCK_ALL exits 1 ("Lock all
+        # tables fail"), and FTWRL with BACKUP_ADMIN but no RELOAD crashes
+        # with 139. None of them reaches this line, so a mode that could not
+        # take its lock is never recorded.
         printf '%s\n' "$${BASELINE_LOCK_MODE:-ftwrl}" > /dump/snapshot/bintrail_dump_lock_mode
         # GUARD: mydumper exits 0 for a --regex that matches nothing and for
         # schemas the dump user cannot read — both yield a metadata-only or

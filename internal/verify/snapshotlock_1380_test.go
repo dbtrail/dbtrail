@@ -36,7 +36,7 @@ func TestPairLockVerdict_mismatch(t *testing.T) {
 		{"the older side is torn", c, x, StatusInconclusive, "torn",
 			lockDiff + ". The snapshot of " + older + " was taken with no locks, so its rows were copied at different moments and the difference may come from that. Take a full snapshot with locks to check this table"},
 		{"both torn", x, x, StatusInconclusive, "torn",
-			lockDiff + ". The snapshot of " + newer + " and the snapshot of " + older + " were each taken with no locks, so its rows were copied at different moments and the difference may come from that. Take a full snapshot with locks to check this table"},
+			lockDiff + ". The snapshot of " + newer + " and the snapshot of " + older + " were taken with no locks, so their rows were copied at different moments and the difference may come from that. Take a full snapshot with locks to check this table"},
 		{"torn beside unknown names the torn one", u, x, StatusInconclusive, "torn",
 			lockDiff + ". The snapshot of " + older + " was taken with no locks, so its rows were copied at different moments and the difference may come from that. Take a full snapshot with locks to check this table"},
 		{"no record on the read: still a mismatch", u, c, StatusMismatch, "unknown",
@@ -44,7 +44,7 @@ func TestPairLockVerdict_mismatch(t *testing.T) {
 		{"no record on the older side: still a mismatch", c, u, StatusMismatch, "unknown",
 			lockDiff + ". The snapshot of " + older + " does not record how it was locked, so it may have been taken with no locks. A full snapshot taken with this version records it"},
 		{"no record on either, which is every installation on the day it upgrades", u, u, StatusMismatch, "unknown",
-			lockDiff + ". The snapshot of " + newer + " and the snapshot of " + older + " each do not record how it was locked, so it may have been taken with no locks. A full snapshot taken with this version records it"},
+			lockDiff + ". Neither the snapshot of " + newer + " nor the snapshot of " + older + " records how it was locked, so they may have been taken with no locks. A full snapshot taken with this version records it"},
 		{"a value out of range is no record", baseline.ReadConsistency(42), c, StatusMismatch, "unknown",
 			lockDiff + ". The snapshot of " + newer + " does not record how it was locked, so it may have been taken with no locks. A full snapshot taken with this version records it"},
 	}
@@ -132,8 +132,20 @@ func TestSnapshotLock_exitCode(t *testing.T) {
 		verdict string
 		fails   bool
 	}{
-		{"every table over a torn snapshot", []TableResult{verdict(x, c, StatusMismatch)}, VerdictUnproven, true},
-		{"a torn table beside a proven one", []TableResult{verdict(x, c, StatusMismatch), match}, VerdictVerified, false},
+		// The owner's rule (2026-09-28): a difference over a torn snapshot
+		// fails the run, however many other tables matched.
+		{"every table over a torn snapshot", []TableResult{verdict(x, c, StatusMismatch)}, VerdictDiffers, true},
+		{"a torn difference beside a proven one", []TableResult{verdict(x, c, StatusMismatch), match}, VerdictDiffers, true},
+		{"a torn difference beside a mismatch", []TableResult{verdict(x, c, StatusMismatch), verdict(c, c, StatusMismatch)}, VerdictMismatch, true},
+		// A torn snapshot that MATCHES is not a problem.
+		{"a torn match beside a proven one", []TableResult{verdict(x, x, StatusMatch), match}, VerdictVerified, false},
+		// Any other inconclusive beside a match behaves as before.
+		{"another inconclusive beside a proven one", []TableResult{
+			{Schema: "shop", Table: "orders", Status: StatusInconclusive, Detail: "table has no primary key"}, match}, VerdictVerified, false},
+		{"another inconclusive with a kind beside a proven one", []TableResult{
+			{Schema: "shop", Table: "orders", Status: StatusInconclusive, InconclusiveKind: InconclusiveUnproven}, match}, VerdictVerified, false},
+		{"another inconclusive alone", []TableResult{
+			{Schema: "shop", Table: "orders", Status: StatusInconclusive, Detail: "table has no primary key"}}, VerdictUnproven, true},
 		{"a difference over consistent snapshots", []TableResult{verdict(c, c, StatusMismatch), match}, VerdictMismatch, true},
 		{"a difference over snapshots with no record", []TableResult{verdict(u, u, StatusMismatch), match}, VerdictMismatch, true},
 		{"a difference over no record, alone", []TableResult{verdict(u, u, StatusMismatch)}, VerdictMismatch, true},
@@ -149,7 +161,7 @@ func TestSnapshotLock_exitCode(t *testing.T) {
 			t.Errorf("%s: %d counted as nothing to check", tc.name, rep.Summary.InconclusiveNothingToCheck)
 		}
 		for _, tr := range rep.Tables {
-			if (tr.Status == StatusInconclusive) != (tr.InconclusiveKind == InconclusiveTornSnapshot) {
+			if tr.Reason != "" && strings.Contains(tr.Reason, "no locks") && (tr.Status == StatusInconclusive) != (tr.InconclusiveKind == InconclusiveTornSnapshot) {
 				t.Errorf("%s: %s.%s is %s with kind %q", tc.name, tr.Schema, tr.Table, tr.Status, tr.InconclusiveKind)
 			}
 		}
@@ -236,5 +248,24 @@ func TestLastRead_aTornReadBehindNewerSnapshots(t *testing.T) {
 	st, reason := v.status, v.detail
 	if st != StatusInconclusive || !strings.Contains(reason, "The snapshot of "+lr1.Format(time.RFC3339)+" was taken with no locks") {
 		t.Fatalf("%s: %q", st, reason)
+	}
+}
+
+// The exit error names what happened, and the summary counts it apart.
+func TestSnapshotLock_differsExitAndSummary(t *testing.T) {
+	res := TableResult{Schema: "shop", Table: "orders"}
+	pairLockVerdict(lockPair(baseline.ReadTorn, baseline.ReadConsistent), StatusMismatch, lockDiff).apply(&res)
+	rep := NewReport(ModeBaselinePair, []TableResult{res, {Schema: "shop", Table: "users", Status: StatusMatch}})
+	if rep.Summary.InconclusiveDiffers != 1 || rep.Summary.Inconclusive != 1 || rep.Summary.InconclusiveNothingToCheck != 0 {
+		t.Fatalf("summary %+v", rep.Summary)
+	}
+	err := rep.ExitError()
+	want := "1 table(s) differ from a snapshot that was read with no locks; the difference may come from that read or from the recorded changes, and a full snapshot taken with locks tells which"
+	if err == nil || err.Error() != want {
+		t.Fatalf("exit error %v, want %q", err, want)
+	}
+	raw, _ := json.Marshal(rep)
+	if !strings.Contains(string(raw), `"verdict":"differs"`) || !strings.Contains(string(raw), `"inconclusive_differs":1`) {
+		t.Fatalf("json %s", raw)
 	}
 }

@@ -129,13 +129,16 @@ none, and excusing them would hide real differences. A table that matches is a
 `match` whatever the locks were. The per-table `snapshot_lock` field in the
 JSON output carries the worst of the two.
 
-The exit code does not change: a table softened this way counts as
-`inconclusive`, so a run where every table is over a torn snapshot proves
-nothing and exits non-zero. Like every other `inconclusive`, it does not fail
-a run in which another table was proven. Such a table carries
-`inconclusive_kind: "torn-snapshot"` in the JSON output, in every mode, for a
-gate that wants to fail on it: a difference was found, and only its cause is
-in doubt. Take a full snapshot with locks to make the table
+A difference over a torn snapshot still fails the run: a difference was
+found, and only its cause is in doubt. The table is `inconclusive` with
+`inconclusive_kind: "torn-snapshot"`, it is counted in
+`summary.inconclusive_differs`, and one such table makes the run's verdict
+`differs` and the exit code non-zero, even when every other table matched.
+The run is never called verified, and the `watch` daemon sends a warning and
+does not close an open verify alert. A torn snapshot that matches is a
+`match`, and every other `inconclusive` behaves as before. This holds in all
+three content modes: baseline-anchored, live-source (`--source-dsn`) and
+PostgreSQL. Take a full snapshot with locks to make the table
 checkable again.
 
 The next full backup makes such a table checkable. A run where no table was
@@ -338,14 +341,17 @@ bintrail verify --index-dsn "$IDX" --baseline-dir /data/baselines --format json
     }
   ],
   "summary": { "match": 8, "mismatch": 1, "inconclusive": 2,
-               "inconclusive_nothing_to_check": 1, "error": 0, "total": 11 }
+               "inconclusive_nothing_to_check": 1, "inconclusive_differs": 0,
+               "error": 0, "total": 11 }
 }
 ```
 
 - `mode` — `baseline-anchored`, `live-source`, or `recover-inputs`.
 - `verdict` — the run outcome, matching the exit code: `verified` (exit 0),
   `mismatch`, `error`, `unproven` (tables reported, none proven — exit non-zero),
-  or `no_predecessor` (only one baseline; reported, exit 0, with a `message`).
+  or `no_predecessor` (only one baseline; reported, exit 0, with a `message`),
+  or `differs` (a table differs from a snapshot read with no locks; exit
+  non-zero).
 - `tables[].status` — `match` / `mismatch` / `inconclusive` / `error`, the same
   bucket counted in `summary`. `anchor` is the point the comparison was anchored
   to (a GTID set in MySQL live-source mode, a `file:pos` binlog coordinate in

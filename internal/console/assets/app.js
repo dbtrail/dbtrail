@@ -8320,13 +8320,15 @@ function snapshotLockPill(lock) {
 }
 
 // snapshotLockLine is the detail's own line. A snapshot whose files were not
-// read says so: no line would read as a good one. "" only with no detail.
+// read says so: no line would read as a good one. "" only with no detail, or
+// no table to speak of.
 function snapshotLockLine(d) {
   const total = ((d && d.tables) || []).length;
   const count = (n) => n + " of " + total + (total === 1 ? " table" : " tables");
   const torn = (d && d.lock_torn) || 0;
   const unknown = (d && d.lock_unknown) || 0;
-  if (!d) return "";
+  // No table listed: nothing to say about locks, and above all not "S3".
+  if (!d || !(d.tables || []).length) return "";
   if (snapshotLockKey(d.lock) === "unread") return "Locks not checked: " + SNAPSHOT_LOCK.unread[1];
   if (d.lock === "consistent") return "Read with locks: every row is from one moment.";
   const parts = [];
@@ -10133,6 +10135,14 @@ function vfyHeadline(rec) {
     case "error":
       return [s.match + " match", s.mismatch + " mismatch", s.error + " error"]
         .concat(notChecked > 0 ? [notChecked + " not checked"] : []).join(" · ");
+    case "differs": {
+      // Tables that differ from a snapshot read with no locks (#1380): a
+      // difference was found, so the run failed; the rest are said apart.
+      const differs = s.inconclusive_differs || 0;
+      const other = notChecked - differs;
+      return [s.match + " match", differs + (differs === 1 ? " differs" : " differ") + " from a snapshot read with no locks"]
+        .concat(other > 0 ? [other + " not checked"] : []).join(" · ");
+    }
   }
   const parts = [];
   if (s.match > 0) parts.push(s.match + " match");
@@ -10203,7 +10213,7 @@ async function loadVerifyHistory(id, box, verdictTile) {
     // A mark before the date says the outcome without reading the counts:
     // a tick, a cross, or a dash for a run that proved nothing or was
     // skipped.
-    const mark = r.state === "failed" || r.verdict === "mismatch" || r.verdict === "error" ? "bad"
+    const mark = r.state === "failed" || r.verdict === "mismatch" || r.verdict === "error" || r.verdict === "differs" ? "bad"
       : r.state === "succeeded" && r.verdict === "verified" ? "ok" : "none";
     row.append(
       el("span", { class: "vfy-hmark " + mark, text: mark === "ok" ? "\u2713" : mark === "bad" ? "\u2715" : "\u2013" }),
@@ -10250,6 +10260,8 @@ function vfyVerdictWords(latest, whyNone) {
       return { state: "bad", title: n(s.mismatch) + (s.mismatch === 1 ? " table differs" : " tables differ"), line: n(s.match) + " match", when: when, mark: "cross" };
     case "error":
       return { state: "bad", title: "Errors on " + n(s.error) + (s.error === 1 ? " table" : " tables"), line: n(s.match) + " match", when: when, mark: "cross" };
+    case "differs":
+      return { state: "bad", title: n(s.inconclusive_differs) + (s.inconclusive_differs === 1 ? " table differs" : " tables differ"), line: "from a snapshot read with no locks · " + n(s.match) + " match", when: when, mark: "cross" };
     case "no_predecessor":
       return { state: "none", title: "Nothing to compare yet", line: "Only one snapshot so far", when: when, mark: "check" };
   }
@@ -10352,6 +10364,7 @@ function renderVerifyResults(container, status, id, opts) {
     verified: ["chip chip-done", "DONE"],
     mismatch: ["chip chip-fail", "MISMATCH"],
     error: ["chip chip-fail", "ERRORS"],
+    differs: ["chip chip-fail", "DIFFERS"],
     unproven: ["chip chip-fail", "NOTHING PROVEN"],
     no_predecessor: ["chip chip-age", "NOTHING TO COMPARE"],
   };

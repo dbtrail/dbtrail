@@ -314,7 +314,7 @@ func TestSnapshotLock_words(t *testing.T) {
 	// is never said.
 	var lines []string
 	docs := []string{
-		`null`, `{}`, `{"tables":[{"table":"a"}]}`,
+		`null`, `{"tables":[]}`, `{"tables":[{"table":"a"}]}`,
 		`{"lock":"consistent","tables":[{"table":"a"}]}`,
 		`{"lock":"torn","lock_torn":1,"tables":[{"table":"a"}]}`,
 		`{"lock":"torn","lock_torn":1,"lock_unknown":2,"tables":[{"table":"a"},{"table":"b"},{"table":"c"}]}`,
@@ -322,7 +322,9 @@ func TestSnapshotLock_words(t *testing.T) {
 	}
 	runViewsScript(t, "console.log(JSON.stringify(["+strings.Join(docs, ",")+"].map(snapshotLockLine)));", &lines)
 	const unread = "Locks not checked: Stored in S3, where this list does not read how a snapshot was locked."
-	wantLines := []string{"", unread, unread,
+	// No table listed (a local snapshot with no table file): nothing, and
+	// never the S3 line. One table and no lock word: not checked.
+	wantLines := []string{"", "", unread,
 		"Read with locks: every row is from one moment.",
 		"Read with no locks: 1 of 1 table. Rows were copied at different moments and may not agree with each other.",
 		"Read with no locks: 1 of 3 tables. Rows were copied at different moments and may not agree with each other. Locks not recorded: 2 of 3 tables. They may have been read with no locks.",

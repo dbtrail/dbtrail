@@ -87,10 +87,11 @@ func SetVerifyOutcome(server string, finishedAt time.Time, match, mismatch, inco
 }
 
 // VerifyStatusDiffers is the status label of the tables where a difference
-// was found over a snapshot read with no locks (#1380). They are reported
-// inconclusive, so they are counted under "inconclusive" too; this series is
-// that slice on its own, so that an alert on differences does not read zero
-// while one is standing. "mismatch" is left meaning what it meant.
+// was found over a snapshot read with no locks (#1380). The run reports them
+// inconclusive; this series is that slice on its own. They are ALSO counted
+// in the "mismatch" series (see SetVerifyOutcome's caller), so an alert rule
+// already written on mismatch keeps firing while one stands: a difference
+// was found, and a series that read zero there would say there was none.
 const VerifyStatusDiffers = "differs"
 
 // SetVerifyDiffers publishes that slice for the run SetVerifyOutcome just

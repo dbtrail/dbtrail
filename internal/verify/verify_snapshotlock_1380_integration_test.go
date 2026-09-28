@@ -105,7 +105,8 @@ func TestVerifyBaselinePair_snapshotLock(t *testing.T) {
 		says, neverSays   string
 	}{
 		{"locked, and they differ", "ftwrl", "lock-all", differs, StatusMismatch, "consistent", "content digest differs", "locks"},
-		{"no record, and they differ", "", "", differs, StatusMismatch, "unknown", "does not record how it was locked", "was taken with no locks"},
+		{"no record, and they differ", "", "", differs, StatusMismatch, "unknown", "records how it was locked, so they may have been taken with no locks", "was taken with no locks"},
+		{"no record on the read only, and they differ", "ftwrl", "", differs, StatusMismatch, "unknown", "does not record how it was locked, so it may have been taken with no locks", "Neither"},
 		{"the read took no locks, and they differ", "ftwrl", "no-lock", differs, StatusInconclusive, "torn", "was taken with no locks", "does not record"},
 		{"the older one took no locks, and they differ", "no-lock", "ftwrl", differs, StatusInconclusive, "torn", "was taken with no locks", "does not record"},
 		{"no locks, and they agree", "no-lock", "no-lock", agrees, StatusMatch, "torn", "", "locks"},

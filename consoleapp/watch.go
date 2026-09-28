@@ -1178,7 +1178,10 @@ func verifyFinishObservers(notifier *watchNotifier) func(console.VerifyRunRecord
 // alert must fire) — do not extract one shared predicate.
 func verifyRunPublishable(rec console.VerifyRunRecord) bool {
 	s := rec.Summary
-	return rec.State == "succeeded" && s.Total > 0 && s.Inconclusive < s.Total
+	// A run whose only findings are differences over a snapshot read with no
+	// locks (#1380) is all-inconclusive and still publishes: a difference was
+	// found, and the alert must see it.
+	return rec.State == "succeeded" && s.Total > 0 && (s.Inconclusive < s.Total || s.InconclusiveDiffers > 0)
 }
 
 // setVerifyGauges publishes one finished run under the given server label
@@ -1193,7 +1196,10 @@ func setVerifyGauges(rec console.VerifyRunRecord, server string) {
 		return
 	}
 	s := rec.Summary
-	observe.SetVerifyOutcome(server, finished, s.Match, s.Mismatch, s.Inconclusive, s.Error)
+	// The tables that differ from a snapshot read with no locks count in the
+	// mismatch series too (#1380), so a rule on mismatch does not read zero
+	// while one stands; "differs" carries them on their own.
+	observe.SetVerifyOutcome(server, finished, s.Match, s.Mismatch+s.InconclusiveDiffers, s.Inconclusive, s.Error)
 	observe.SetVerifyDiffers(server, s.InconclusiveDiffers)
 }
 
