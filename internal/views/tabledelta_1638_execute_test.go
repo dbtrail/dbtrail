@@ -306,7 +306,7 @@ func TestFollowingStateView_readsADeltaThatAppearsLater(t *testing.T) {
 				GeneratedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC), Version: "test",
 				BaselineSource: root, BaselineSnapshot: time.Date(2026, 4, 30, 3, 0, 0, 0, time.UTC),
 				Follow:    mode.follow,
-				Baselines: []BaselineTable{{Schema: "shop", Table: "orders", Path: path, Rel: "shop/orders.parquet"}},
+				Baselines: []BaselineTable{{Schema: "shop", Table: "orders", Path: path, Rel: "shop/orders.parquet", SchemaKnown: true}},
 			})
 			db := execViews(t, sqlText)
 			var n int

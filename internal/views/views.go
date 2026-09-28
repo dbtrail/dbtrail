@@ -96,6 +96,9 @@ type BaselineTable struct {
 	// without the reader having to discover the storage choice through a
 	// failed sum().
 	Decimals []DecimalColumn
+	// DeltaReserved says the table has a column under a name a table delta
+	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
+	DeltaReserved bool
 	// SchemaKnown records whether the table's embedded CREATE TABLE was read at
 	// all. It separates "this table has no decimal columns" from "we could not
 	// find out", which are the same empty Decimals slice and very different
@@ -1921,26 +1924,31 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		for _, line := range decimalComments(t) {
 			fmt.Fprintf(b, "-- %s: %s\n", name, line)
 		}
+		if line := fileAloneComment(in, t); line != "" {
+			fmt.Fprintf(b, "-- %s: %s\n", name, line)
+		}
 		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.viewRef(name))
 		if in.Follow == FollowNewest {
 			writeNewestStateBody(b, in, t)
 			continue
 		}
-		// A view that FOLLOWS reads the table through its chain whether or not
-		// one exists today: it outlives the snapshot it was generated against,
-		// and the next refresh of a changed table writes a chain beside it
-		// (#1733). A pinned one reads the same files forever, so a table with
-		// no chain is its file alone.
-		if t.Delta || in.Follow.follows() {
+		if t.Delta || (in.Follow.follows() && chainReady(in, t)) {
 			fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Path, sqlString, in.Follow == FollowNone))
 			continue
 		}
+		// Only a view that FOLLOWS can meet a snapshot it was not generated
+		// against; a pinned one reads the same files forever.
+		guard := ""
+		if in.Follow.follows() {
+			plain, rng := deltaAppearedPatterns(t.Path)
+			guard = "\n  " + deltaAppearedGuard(sqlString(plain), sqlString(rng), t)
+		}
 		if replace := decimalReplaceClause(t); replace != "" {
 			fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
-			fmt.Fprintf(b, "  FROM read_parquet(%s);\n", sqlString(t.Path))
+			fmt.Fprintf(b, "  FROM read_parquet(%s)%s;\n", sqlString(t.Path), guard)
 			continue
 		}
-		fmt.Fprintf(b, "  SELECT * FROM read_parquet(%s);\n", sqlString(t.Path))
+		fmt.Fprintf(b, "  SELECT * FROM read_parquet(%s)%s;\n", sqlString(t.Path), guard)
 	}
 	b.WriteString("\n")
 	return len(wanted) > 0
@@ -2223,9 +2231,68 @@ func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
 		return fmt.Sprintf("CASE WHEN getvariable('%s') IS NULL\n    THEN error(%s)\n    ELSE getvariable('%s') || %s END",
 			newest, sqlString(newestVarUnsetMsg), newest, sqlString(rel))
 	}
-	// Through the chain even when the table has none today: the next refresh
-	// of a changed table writes one beside it (#1733).
-	fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path, false))
+	if t.Delta || chainReady(in, t) {
+		fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path, false))
+		return
+	}
+	// The guard's pattern is built beside the variable, not through path():
+	// an unset variable is already reported by the read itself.
+	plain, rng := deltaAppearedPatterns(t.Rel)
+	guard := "\n  " + deltaAppearedGuard(fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(plain)),
+		fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(rng)), t)
+	read := "read_parquet(" + path(t.Rel) + ")" + guard
+	if replace := decimalReplaceClause(t); replace != "" {
+		fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
+		fmt.Fprintf(b, "  FROM %s;\n", read)
+		return
+	}
+	fmt.Fprintf(b, "  SELECT * FROM %s;\n", read)
+}
+
+// fileAloneComment says, above a following view that reads its table's file
+// alone, why it does and what will stop it, so the refusal it raises later is
+// not the first the reader hears of it. A table with a reserved column is not
+// named: it never gets a chain, so its view never refuses.
+func fileAloneComment(in Input, t BaselineTable) string {
+	if !in.Follow.follows() || t.Delta || t.DeltaReserved || chainReady(in, t) {
+		return ""
+	}
+	why := "its schema could not be read"
+	if t.SchemaKnown {
+		why = "another table in its schema has a name that starts with " + commentSafe(t.Table) + "."
+	}
+	return "reads the table file alone because " + why + ", so it stops with an error once a refresh " +
+		"writes changes beside the file; generate the views again then"
+}
+
+// chainReady says whether a FOLLOWING state view of a table with no chain
+// today may read the table through the chain-aware body anyway (#1733). The
+// next refresh of a changed table writes a chain beside it, and a view
+// reading the file alone would then have to refuse (deltaAppearedGuard), so
+// a views file, or a DuckDB database built from one that a BI tool opens,
+// would stop answering minutes after it was made.
+//
+// Three cases keep the file-alone body and its guard, because the chain-aware
+// one is not safe there and the guard never answers wrong:
+//
+//   - The table's schema was not read. Nothing below can be checked.
+//   - The table has a column a table delta reserves. It never gets a chain,
+//     and the chain-aware SQL does not bind over it at all.
+//   - Another table in the same schema is named "<table>.<anything>". Its
+//     file can match the chain globs, and union_by_name would merge its
+//     columns into this view's shape. A table created with such a name after
+//     the file was generated is the residual TableDeltaFollowGlobs names.
+func chainReady(in Input, t BaselineTable) bool {
+	if !t.SchemaKnown || t.DeltaReserved {
+		return false
+	}
+	prefix := strings.ToLower(t.Table) + "."
+	for _, o := range in.Baselines {
+		if strings.EqualFold(o.Schema, t.Schema) && strings.HasPrefix(strings.ToLower(o.Table), prefix) {
+			return false
+		}
+	}
+	return true
 }
 
 // deltaStateBody is the state view's body for a table with a delta, and for
@@ -2264,6 +2331,49 @@ func deltaStateBody(t BaselineTable, p string, expr func(string) string, pinned 
 	// instead of failing on a glob that matches nothing.
 	posdel, upserts := baseline.TableDeltaFollowGlobs(p)
 	return baseline.TableDeltaFollowStateSQL(expr(p), expr(posdel), expr(upserts), p, decimalReplaceClause(t))
+}
+
+// deltaAppearedPatterns are the two globs deltaAppearedGuard counts: the
+// plain upserts files of the table's chain (#1718) and the range ones a
+// compaction writes (#1723). Each always holds a wildcard (the digit
+// classes), which the guard needs over S3, and each matches its shape
+// exactly, so a neighbouring table's pairs never trip this table's guard.
+// Two exact shapes rather than the wider TableDeltaGlobs: today every
+// chain the daemon writes keeps a plain pair (the job merges all but the
+// last), but nothing outside consoleapp enforces that, and the listing
+// accepts a chain of one range alone, so the guard looks for both.
+func deltaAppearedPatterns(p string) (plain, rng string) {
+	digits := strings.Repeat("[0-9]", baseline.TableDeltaSeqWidth)
+	stem := globLiteral(strings.TrimSuffix(p, ".parquet")) + "."
+	return stem + digits + baseline.TableDeltaUpsertsSuffix, stem + digits + "-" + digits + baseline.TableDeltaUpsertsSuffix
+}
+
+// deltaAppearedGuard is the WHERE clause a FOLLOWING state view over a table
+// with NO delta carries (#1638). plain and rng are SQL expressions for the
+// two globs of deltaAppearedPatterns, matching the table's .upserts files
+// and nothing else.
+//
+// A view's shape is fixed when it is generated, and a following view outlives
+// the snapshot it was generated against. If table deltas are turned on later,
+// the table's file stops being rewritten: it becomes the table as it was when
+// its chain of deltas started, and a view reading it alone would show that as
+// the newest state, with no error, for up to a day. So the view looks for the
+// delta on every read and refuses once one is there. The other direction needs
+// no guard: a view generated WITH the delta reads the table's file with
+// whatever chain is beside it, none included (#1918,
+// baseline.TableDeltaFollowGlobs), so it stays right once deltas are off.
+//
+// Three things verified against DuckDB 1.5.5 rather than assumed. The guard
+// survives in a persisted view and fires per query. error() behind a CASE whose
+// condition is a subquery is not folded at bind time, so a healthy view binds.
+// And the pattern must hold a wildcard (the digit classes): a glob over an exact s3:// key
+// lists nothing and reports the key as found. On a 40M-row file the guard adds
+// nothing measurable to a full-table sum.
+func deltaAppearedGuard(plain, rng string, t BaselineTable) string {
+	msg := fmt.Sprintf("bintrail views: %s.%s now has a table delta beside its file, and this view reads the file alone, "+
+		"so it would show the table as it was when it was last written in full. Generate the views again", t.Schema, t.Table)
+	return fmt.Sprintf("WHERE CASE WHEN (SELECT count(*) FROM glob(%s)) + (SELECT count(*) FROM glob(%s)) > 0 THEN error(%s) ELSE true END",
+		plain, rng, sqlString(msg))
 }
 
 // stateViewName builds the view identifier for a table and guarantees it is

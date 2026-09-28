@@ -40,21 +40,23 @@ func (in Input) BaselinePaths() []string {
 	return paths
 }
 
-// ApplyDecimals records each table's decimal columns from a map keyed by
-// Parquet path, as baseline.DecimalColumnsFor returns it. Pure, so the two
-// command layers that resolve the map share one rule for reading it.
+// ApplyFooters records each table's decimal columns, and whether a table
+// delta reserves one of its column names, from a map keyed by Parquet path, as
+// baseline.TableFootersFor returns it. Pure, so the command layers that
+// resolve the map share one rule for reading it.
 //
 // A table missing from the map keeps SchemaKnown false and is reported in the
 // generated file as a table whose types could not be read. That is the same
 // answer a caller gets by skipping this entirely after a failed resolution, so
 // the degraded path and the partly-degraded path say the same thing.
-func (in *Input) ApplyDecimals(decimals map[string][]DecimalColumn) {
+func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 	for i := range in.Baselines {
-		decs, ok := decimals[in.Baselines[i].Path]
+		f, ok := footers[in.Baselines[i].Path]
 		if !ok {
 			continue
 		}
-		in.Baselines[i].Decimals = decs
+		in.Baselines[i].Decimals = f.Decimals
+		in.Baselines[i].DeltaReserved = f.DeltaReserved
 		in.Baselines[i].SchemaKnown = true
 	}
 }

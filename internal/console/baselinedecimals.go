@@ -17,7 +17,7 @@ import (
 const negativeDecimalTTL = 5 * time.Minute
 
 type baselineDecimalEntry struct {
-	decimals map[string][]baseline.DecimalColumn
+	decimals map[string]baseline.TableFooter
 	at       time.Time
 	failed   bool
 }
@@ -51,7 +51,7 @@ func (s *Server) resolveBaselineDecimals(ctx context.Context, in *views.Input) {
 	e, ok := s.baselineDecimals[key]
 	s.baselineDecimalMu.Unlock()
 	if ok && (!e.failed || time.Since(e.at) < negativeDecimalTTL) {
-		in.ApplyDecimals(e.decimals)
+		in.ApplyFooters(e.decimals)
 		return
 	}
 
@@ -59,9 +59,9 @@ func (s *Server) resolveBaselineDecimals(ctx context.Context, in *views.Input) {
 	// is not context-aware, so a goroutine blocked on it could not be released
 	// by the panel's setup deadline. Two callers racing the same snapshot just
 	// do the same read twice, which is harmless.
-	decimals, err := baseline.DecimalColumnsFor(ctx, in.BaselinePaths())
+	decimals, err := baseline.TableFootersFor(ctx, in.BaselinePaths())
 	if err == nil {
-		in.ApplyDecimals(decimals)
+		in.ApplyFooters(decimals)
 	}
 	// A canceled or expired context is the CALLER's state, never a fact about
 	// the snapshot, and this cache never forgets a "successful" answer. One
@@ -80,7 +80,7 @@ func (s *Server) resolveBaselineDecimals(ctx context.Context, in *views.Input) {
 	s.rememberBaselineDecimals(key, decimals, err != nil)
 }
 
-func (s *Server) rememberBaselineDecimals(key string, decimals map[string][]baseline.DecimalColumn, failed bool) {
+func (s *Server) rememberBaselineDecimals(key string, decimals map[string]baseline.TableFooter, failed bool) {
 	s.baselineDecimalMu.Lock()
 	defer s.baselineDecimalMu.Unlock()
 	if s.baselineDecimals == nil {

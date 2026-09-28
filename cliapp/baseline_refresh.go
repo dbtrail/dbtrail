@@ -102,7 +102,7 @@ func init() {
 		"On by default (--table-deltas=false turns it off). Do not rewrite a table that changed: keep its previous file and write this run's changed rows as one numbered pair of small files beside it "+
 			"(<table>.000001.posdel, <table>.000001.upserts, then 000002, ...), linking the earlier pairs forward. The table is written again in full when the chain's files together pass a quarter of its size or the chain is a day old. "+
 			"`bintrail views` reads the chain; every other command reads the table file and the index, as before. "+
-			"A snapshot written this way must not be read by a bintrail older than this one. Turning it off again needs nothing else: the next run writes every table in full. A DuckDB view that follows the newest snapshot keeps working whether or not a table has a pair, and when a pair appears or goes away")
+			"A snapshot written this way must not be read by a bintrail older than this one. Turning it off again needs nothing else: the next run writes every table in full. A DuckDB view that follows the newest snapshot keeps working when a pair appears or goes away, except over a table whose schema it could not read or that shares its name's prefix with another table in its schema: the generated file names those, and they refuse once a pair appears, until the views are generated again")
 	f.IntVar(&brParallelism, "parallelism", 0, "Max tables refreshed concurrently (0 = one per CPU)")
 	f.IntVar(&brFetchBatch, "fetch-batch-size", 0, "Event page size for the delta fold (0 = default)")
 	f.Int64Var(&brWarnEvents, "warn-event-threshold", 5_000_000, "Warn when a table's delta window exceeds this many events (0 disables)")
