@@ -12,10 +12,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/go-mysql-org/go-mysql/replication"
 
+	"github.com/dbtrail/dbtrail/internal/ddltext"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/observe"
@@ -715,12 +715,12 @@ func handleRows(
 	// row whose position could not be established rather than store a value
 	// that later reads as "beyond every checkpoint".
 	if uint64(binlogEv.Header.LogPos) < uint64(binlogEv.Header.EventSize) {
-		return fmt.Errorf(
+		return &unestablishedPositionError{msg: fmt.Sprintf(
 			"row event at %s has end position %d smaller than its size %d (%s.%s) — the binlog position for "+
 				"this event could not be established (MariaDB 11.4+ writes cache-buffered events with end_log_pos=0; "+
 				"the zero-LogPos fill should have replaced it before this point); refusing to index the row with an "+
 				"underflowed start_pos, which the resume-time dedup would treat as beyond every checkpoint",
-			filename, binlogEv.Header.LogPos, binlogEv.Header.EventSize, schema, table)
+			filename, binlogEv.Header.LogPos, binlogEv.Header.EventSize, schema, table)}
 	}
 	startPos := uint64(binlogEv.Header.LogPos) - uint64(binlogEv.Header.EventSize)
 	endPos := uint64(binlogEv.Header.LogPos)
@@ -960,28 +960,22 @@ const (
 	DDLReplaceTable  = event.DDLReplaceTable
 )
 
-// ddlVerbRe recognizes a table DDL statement by its verb, matched against
-// normalizeDDL's output (comments gone, whitespace collapsed to one space),
-// anchored at the start. Group 1 is the verb, group 2 the text after it.
-//
-// Covered (#1664), MySQL and MariaDB:
-//
-//	ALTER [ONLINE] [IGNORE] TABLE
-//	CREATE [OR REPLACE] TABLE
-//	DROP TABLE[S]
-//	RENAME TABLE[S]
-//	TRUNCATE [TABLE]
-//
-// The verb must end at a character that cannot continue a name, which keeps
-// TABLESPACE out. A TEMPORARY table is deliberately not matched: it is in no
-// schema snapshot, and a DROP TABLE event refuses every reconstruct of a table
-// with that name over its window.
-// The s flag in ddlVerbRe and ddlNameRe is load-bearing: normalizeDDL copies
-// quoted strings verbatim, line breaks included, and the trailing .* must run
-// past them.
-var ddlVerbRe = regexp.MustCompile(
-	"(?is)^(ALTER(?: ONLINE)?(?: IGNORE)? TABLE|CREATE(?: OR REPLACE)? TABLE|DROP TABLES?|RENAME TABLES?|TRUNCATE(?: TABLE)?)" +
-		"((?:[^\\w$\\x{80}-\\x{10FFFF}].*)?)$")
+// The reading of a DDL statement's text lives in internal/ddltext, which the
+// read side shares (#1675). The names below are the ones this package has
+// always used for it.
+var ddlVerbRe = ddltext.VerbRe
+
+const ddlHeadLimit = ddltext.HeadLimit
+
+type ddlScanner = ddltext.Scanner
+
+func normalizeDDL(queryStr string) string { return ddltext.Normalize(queryStr) }
+
+func normalizeDDLUpTo(queryStr string, limit int) string {
+	return ddltext.NormalizeUpTo(queryStr, limit)
+}
+
+func isSQLSpace(b byte) bool { return ddltext.IsSpace(b) }
 
 // ddlNameRe reads the first table after the verb: an optional IF [NOT] EXISTS,
 // then [schema.]table, each name backticked, double-quoted (ANSI_QUOTES) or
@@ -998,110 +992,12 @@ var ddlNameRe = regexp.MustCompile(
 // takes no schema snapshot.
 var ddlKeysOnlyRe = regexp.MustCompile(`(?i)^ ?(?:DISABLE|ENABLE) KEYS ?;? ?$`)
 
-// ddlHeadLimit bounds how much of a statement normalizeDDL builds: only the
-// head can name a DDL verb and its table (two 64-character names, quoted, plus
-// the modifiers), and parseDDL sees every QUERY_EVENT, including
-// statement-format DML many megabytes long.
-const ddlHeadLimit = 512
-
 // unquoteDDLName strips the backticks or double quotes around a name.
 func unquoteDDLName(s string) string {
 	if len(s) >= 2 && (s[0] == '`' || s[0] == '"') && s[len(s)-1] == s[0] {
 		return s[1 : len(s)-1]
 	}
 	return s
-}
-
-// normalizeDDL returns queryStr as the server reads it for recognizing a DDL
-// verb: plain comments (/* */, -- and #) removed, the body of an executable
-// comment (/*!NNNNN ... */, MariaDB's /*M!NNNNN ... */) kept without its
-// markers, and every run of whitespace or removed comment turned into one
-// space. Quoted strings and backticked names are copied verbatim, so text
-// inside them is never taken for a comment or a keyword.
-//
-// MySQL writes DDL to the binlog as the client sent it, comments included
-// (a migration tool's /* app */, gh-ost's rename /* gh-ost */ table), and
-// logs the implicit drop of a temporary table as
-// DROP /*!40005 TEMPORARY */ TABLE, which must keep its TEMPORARY. It stops
-// once ddlHeadLimit bytes are built.
-func normalizeDDL(queryStr string) string {
-	return normalizeDDLUpTo(queryStr, ddlHeadLimit)
-}
-
-// normalizeDDLUpTo is normalizeDDL building at most limit bytes. The whole
-// statement is only worth building once it is known to be a DROP or RENAME,
-// whose tail is nothing but the names it acts on.
-func normalizeDDLUpTo(queryStr string, limit int) string {
-	var b strings.Builder
-	pending := false // a space is owed before the next copied byte
-	open := 0        // executable comments whose closing */ is still ahead
-	gap := func() { pending = b.Len() > 0 }
-	for i := 0; i < len(queryStr) && b.Len() < limit; {
-		rest := queryStr[i:]
-		switch c := queryStr[i]; {
-		case isSQLSpace(c):
-			gap()
-			i++
-		case strings.HasPrefix(rest, "/*!") || strings.HasPrefix(rest, "/*M!"):
-			i += strings.Index(rest, "!") + 1
-			for i < len(queryStr) && queryStr[i] >= '0' && queryStr[i] <= '9' {
-				i++
-			}
-			open++
-			gap()
-		case strings.HasPrefix(rest, "*/") && open > 0:
-			open--
-			i += 2
-			gap()
-		case strings.HasPrefix(rest, "/*"):
-			end := strings.Index(rest[2:], "*/")
-			if end < 0 {
-				return b.String()
-			}
-			i += 2 + end + 2
-			gap()
-		case c == '#' || strings.HasPrefix(rest, "--") && (len(rest) == 2 || isSQLSpace(rest[2])):
-			nl := strings.IndexByte(rest, '\n')
-			if nl < 0 {
-				return b.String()
-			}
-			i += nl + 1
-			gap()
-		case c == '\'' || c == '"' || c == '`':
-			if pending {
-				b.WriteByte(' ')
-				pending = false
-			}
-			j := i + 1
-			for j < len(queryStr) {
-				if queryStr[j] == '\\' && c != '`' {
-					j += 2
-					continue
-				}
-				if queryStr[j] == c {
-					if j+1 < len(queryStr) && queryStr[j+1] == c {
-						j += 2
-						continue
-					}
-					j++
-					break
-				}
-				j++
-			}
-			j = min(j, len(queryStr))
-			// Copied up to the limit only: a quoted DML value can be megabytes.
-			b.WriteString(queryStr[i:min(j, i+limit-b.Len())])
-			i = j
-		default:
-			if pending {
-				b.WriteByte(' ')
-				pending = false
-			}
-			b.WriteByte(c)
-			i++
-		}
-	}
-	return b.String()
 }
 
 // dmlKeywords are the statement prefixes that, under binlog_format=ROW, would
@@ -1228,10 +1124,6 @@ func stripLeadingSQLComments(s string) string {
 	}
 }
 
-func isSQLSpace(b byte) bool {
-	return b == ' ' || b == '\t' || b == '\r' || b == '\n' || b == '\f' || b == '\v'
-}
-
 // parseDDL parses a QUERY_EVENT for DDL statements and returns a DDL Event.
 // Returns zero Event and false if the query is not a DDL statement.
 // TRUNCATE is included for audit purposes but does not invalidate the snapshot
@@ -1330,139 +1222,35 @@ func parseDDL(logger *slog.Logger, filename string, logPos uint32, timestamp tim
 // gives both sides of every "a TO b" pair. An unqualified name takes
 // defaultSchema, as MySQL resolves it.
 func ddlNameList(rest string, rename bool, defaultSchema string) []event.DDLTable {
-	sc := ddlScanner{s: rest}
-	sc.keyword("IF EXISTS")
+	sc := ddlScanner{S: rest}
+	sc.Keyword("IF EXISTS")
 	var out []event.DDLTable
 	for {
-		n, ok := sc.qualifiedName(defaultSchema)
+		n, ok := sc.QualifiedName(defaultSchema)
 		if !ok {
 			return out
 		}
 		out = append(out, n)
 		if rename {
 			// MariaDB: RENAME TABLE a [WAIT n | NOWAIT] TO b.
-			if sc.keyword("WAIT") {
-				sc.number()
+			if sc.Keyword("WAIT") {
+				sc.Number()
 			} else {
-				sc.keyword("NOWAIT")
+				sc.Keyword("NOWAIT")
 			}
-			if !sc.keyword("TO") {
+			if !sc.Keyword("TO") {
 				return out
 			}
-			if n, ok = sc.qualifiedName(defaultSchema); !ok {
+			if n, ok = sc.QualifiedName(defaultSchema); !ok {
 				return out
 			}
 			out = append(out, n)
 		}
-		sc.space()
-		if !sc.byte(',') {
+		sc.Space()
+		if !sc.Byte(',') {
 			return out
 		}
 	}
-}
-
-// ddlScanner walks a normalizeDDL result: runs of whitespace are single
-// spaces, comments are gone, quoted names are verbatim.
-type ddlScanner struct {
-	s string
-	i int
-}
-
-func (sc *ddlScanner) space() {
-	for sc.i < len(sc.s) && sc.s[sc.i] == ' ' {
-		sc.i++
-	}
-}
-
-func (sc *ddlScanner) byte(c byte) bool {
-	if sc.i < len(sc.s) && sc.s[sc.i] == c {
-		sc.i++
-		return true
-	}
-	return false
-}
-
-// keyword consumes kw (words separated by single spaces, any case) when it is
-// next and not the start of a longer identifier.
-func (sc *ddlScanner) keyword(kw string) bool {
-	sc.space()
-	end := sc.i + len(kw)
-	if end > len(sc.s) || !strings.EqualFold(sc.s[sc.i:end], kw) {
-		return false
-	}
-	if end < len(sc.s) {
-		if r, _ := utf8.DecodeRuneInString(sc.s[end:]); isDDLNameRune(r) {
-			return false
-		}
-	}
-	sc.i = end
-	return true
-}
-
-func (sc *ddlScanner) number() {
-	sc.space()
-	for sc.i < len(sc.s) && (sc.s[sc.i] >= '0' && sc.s[sc.i] <= '9' || sc.s[sc.i] == '.') {
-		sc.i++
-	}
-}
-
-// qualifiedName reads [schema.]name.
-func (sc *ddlScanner) qualifiedName(defaultSchema string) (event.DDLTable, bool) {
-	first, ok := sc.ident()
-	if !ok {
-		return event.DDLTable{}, false
-	}
-	sc.space()
-	if sc.byte('.') {
-		if table, ok := sc.ident(); ok {
-			return event.DDLTable{Schema: first, Table: table}, true
-		}
-	}
-	return event.DDLTable{Schema: defaultSchema, Table: first}, true
-}
-
-// ident reads one name: backticked or double-quoted (ANSI_QUOTES), where a
-// doubled quote stands for itself, or unquoted.
-func (sc *ddlScanner) ident() (string, bool) {
-	sc.space()
-	if sc.i >= len(sc.s) {
-		return "", false
-	}
-	if q := sc.s[sc.i]; q == '`' || q == '"' {
-		var b strings.Builder
-		for j := sc.i + 1; j < len(sc.s); j++ {
-			if sc.s[j] != q {
-				b.WriteByte(sc.s[j])
-				continue
-			}
-			if j+1 < len(sc.s) && sc.s[j+1] == q {
-				b.WriteByte(q)
-				j++
-				continue
-			}
-			if b.Len() == 0 {
-				return "", false
-			}
-			sc.i = j + 1
-			return b.String(), true
-		}
-		return "", false // no closing quote
-	}
-	start := sc.i
-	for sc.i < len(sc.s) {
-		r, size := utf8.DecodeRuneInString(sc.s[sc.i:])
-		if !isDDLNameRune(r) {
-			break
-		}
-		sc.i += size
-	}
-	return sc.s[start:sc.i], sc.i > start
-}
-
-// isDDLNameRune is a rune an unquoted name may hold: ddlNameRe's class.
-func isDDLNameRune(r rune) bool {
-	return r == '_' || r == '$' || r >= 0x80 ||
-		r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
 }
 
 // SchemaDriftError is the #700 hard error: a TABLE_MAP whose column names
@@ -1489,3 +1277,27 @@ func (e *PartialRowImageError) Error() string { return e.msg }
 
 // TelemetryClass implements telemetry.Classed.
 func (e *PartialRowImageError) TelemetryClass() string { return "config_invalid" }
+
+// PositionWraparoundError is the #845 guard: the binlog position went
+// backward inside one file, the signature of a file grown past the 4GiB wire
+// limit. Position-mode capture cannot continue and the remedy is to start the
+// stream in GTID mode, so its usage-telemetry class is config_invalid; the
+// message names the file and both positions for the operator and never leaves
+// the process.
+type PositionWraparoundError struct{ msg string }
+
+func (e *PositionWraparoundError) Error() string { return e.msg }
+
+// TelemetryClass implements telemetry.Classed.
+func (e *PositionWraparoundError) TelemetryClass() string { return "config_invalid" }
+
+// unestablishedPositionError is the #1117 belt: a row event reached handleRows
+// without a real end position, which both producers are meant to guarantee.
+// A defect on our side rather than anything the operator configured, so its
+// usage-telemetry class is internal.
+type unestablishedPositionError struct{ msg string }
+
+func (e *unestablishedPositionError) Error() string { return e.msg }
+
+// TelemetryClass implements telemetry.Classed.
+func (e *unestablishedPositionError) TelemetryClass() string { return "internal" }

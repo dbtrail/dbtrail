@@ -69,7 +69,7 @@ type MydumperWriter struct {
 
 // NewMydumperWriter creates a writer for a single table. The directory must
 // already exist; the caller is expected to pass a freshly-created output
-// directory (e.g. from t.TempDir() or the CLI's --output-dir).
+// directory (e.g. from t.TempDir() or the CLI's --output).
 func NewMydumperWriter(outputDir, schema, table string, cols []string, chunkSize int64) (*MydumperWriter, error) {
 	if chunkSize <= 0 {
 		chunkSize = 256 << 20 // 256 MiB default

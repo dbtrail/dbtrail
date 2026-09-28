@@ -329,7 +329,7 @@ Files are written locally first, then uploaded (Hive-partitioned, Athena/Glue/Du
 
 ```sh
 # 1. Dump the source (mydumper; auto-run via Docker if installed)
-bintrail dump --source-dsn "user:pass@tcp(source-db:3306)/" --output-dir /tmp/mydumper-output --schemas mydb
+bintrail dump --source-dsn "user:pass@tcp(source-db:3306)/" --output /tmp/mydumper-output --schemas mydb
 
 # 2. Convert to Parquet (no DB connection — reads files only)
 bintrail baseline --input /tmp/mydumper-output --output /data/baselines
@@ -530,7 +530,7 @@ is opt-in because defining that view opens one Parquet footer per archived file
 before it returns a row, a cost that grows with the archive.
 
 ```sh
-bintrail views --index-dsn "$IDX" --baseline-dir /data/baselines --out views.sql
+bintrail views --index-dsn "$IDX" --baseline-dir /data/baselines --output views.sql
 duckdb -init views.sql lake.db
 ```
 

@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
@@ -64,7 +65,7 @@ var dumpLockDir = os.TempDir
 
 func init() {
 	dumpCmd.Flags().StringVar(&dmpSourceDSN, "source-dsn", "", "DSN for the source MySQL server (required)")
-	dumpCmd.Flags().StringVar(&dmpOutputDir, "output-dir", "", "Directory for mydumper output (required)")
+	cli.AddOutputFlag(dumpCmd, &dmpOutputDir, "", "Directory for mydumper output (required)", cli.OutputDirAlias)
 	dumpCmd.Flags().StringVar(&dmpSchemas, "schemas", "", "Comma-separated schema filter (e.g. mydb,otherdb)")
 	dumpCmd.Flags().StringVar(&dmpTables, "tables", "", "Comma-separated table filter (e.g. mydb.orders,mydb.items)")
 	dumpCmd.Flags().StringVar(&dmpMydumperPath, "mydumper-path", "mydumper", "Path to the mydumper binary")
@@ -76,7 +77,7 @@ func init() {
 	dumpCmd.Flags().BoolVar(&dmpEncrypt, "encrypt", false, "Encrypt dump files at rest using AES-256-CBC and write an HMAC-SHA256 integrity sidecar (<file>.enc.hmac) per file (requires openssl on $PATH)")
 	dumpCmd.Flags().StringVar(&dmpEncryptKey, "encrypt-key", "", "Path to encryption key file (default: ~/.config/bintrail/dump.key; generate with 'bintrail generate-key')")
 	_ = dumpCmd.MarkFlagRequired("source-dsn")
-	_ = dumpCmd.MarkFlagRequired("output-dir")
+	_ = dumpCmd.MarkFlagRequired(cli.OutputFlag)
 	bindCommandEnv(dumpCmd)
 
 	rootCmd.AddCommand(dumpCmd)
@@ -226,7 +227,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// never after the previous, only-good dump has already been destroyed
 	// (#809). Injectable via pingSource so unit tests can stub it.
 	if err := pingSource(dmpSourceDSN); err != nil {
-		return fmt.Errorf("cannot connect to source; refusing to touch --output-dir %q: %w", dmpOutputDir, err)
+		return fmt.Errorf("cannot connect to source; refusing to touch --output %q: %w", dmpOutputDir, err)
 	}
 
 	// 3. Parse schema and table filters.
@@ -353,7 +354,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 
 	// 5. Safely prepare the output directory (#809). Refuse to delete a
 	// non-empty directory that is not a recognizable prior mydumper/bintrail
-	// dump — a typo'd --output-dir (or a stray BINTRAIL_OUTPUT_DIR in a sibling
+	// dump. A typo'd --output (or a stray BINTRAIL_OUTPUT_DIR in a sibling
 	// .bintrail.env) must never wipe an arbitrary tree, including baselines
 	// that reconstruct/verify depend on. A recognizable prior dump is moved
 	// aside (dir → dir.old) and only deleted once THIS dump succeeds, so a
@@ -504,7 +505,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 }
 
 // pingSource validates connectivity to the source before the dump does anything
-// destructive to --output-dir. It is a variable so tests can stub it without a
+// destructive to --output. It is a variable so tests can stub it without a
 // live server (mirroring dumpLockDir). #809.
 var pingSource = defaultPingSource
 
@@ -526,7 +527,7 @@ func defaultPingSource(dsn string) error {
 	return db.Close()
 }
 
-// dumpDirMarkers are filenames whose presence in a non-empty --output-dir marks
+// dumpDirMarkers are filenames whose presence in a non-empty --output marks
 // it as a recognizable prior mydumper/bintrail dump — safe to clear. mydumper
 // writes "metadata" on success and "metadata.partial" while running or after a
 // crash; `bintrail dump` adds its own started-at sidecar.
@@ -551,11 +552,11 @@ func looksLikeDumpDir(entries []os.DirEntry) bool {
 // (restore it) on failure. When backup is empty, nothing was moved aside — the
 // directory was absent or already empty — and commit/rollback are no-ops.
 type dumpDirPrep struct {
-	dir    string // the requested --output-dir
+	dir    string // the requested --output
 	backup string // where a recognizable prior dump was moved (dir.old), or ""
 }
 
-// prepareDumpOutputDir readies --output-dir for a fresh dump without ever
+// prepareDumpOutputDir readies --output for a fresh dump without ever
 // unconditionally deleting it (#809). An absent or empty directory needs no
 // preparation. A non-empty directory that is NOT a recognizable prior dump is
 // REFUSED (no deletion) with an actionable error. A recognizable prior dump is
@@ -567,23 +568,23 @@ func prepareDumpOutputDir(dir string) (*dumpDirPrep, error) {
 		return &dumpDirPrep{dir: dir}, nil // mydumper creates it
 	}
 	if err != nil {
-		return nil, fmt.Errorf("stat --output-dir %q: %w", dir, err)
+		return nil, fmt.Errorf("stat --output %q: %w", dir, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("--output-dir %q exists and is not a directory; "+
-			"remove it yourself or point --output-dir elsewhere", dir)
+		return nil, fmt.Errorf("--output %q exists and is not a directory; "+
+			"remove it yourself or point --output elsewhere", dir)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("read --output-dir %q: %w", dir, err)
+		return nil, fmt.Errorf("read --output %q: %w", dir, err)
 	}
 	if len(entries) == 0 {
 		return &dumpDirPrep{dir: dir}, nil // empty: mydumper writes into it
 	}
 	if !looksLikeDumpDir(entries) {
-		return nil, fmt.Errorf("--output-dir %q is not empty and does not look like a prior "+
+		return nil, fmt.Errorf("--output %q is not empty and does not look like a prior "+
 			"bintrail/mydumper dump (no %q marker); refusing to delete it. "+
-			"Remove it yourself or point --output-dir elsewhere", dir, dumpDirMarkers[0])
+			"Remove it yourself or point --output elsewhere", dir, dumpDirMarkers[0])
 	}
 	// Recognizable prior dump: move it aside so a failed dump can restore it.
 	// Use a UNIQUE sibling path rather than a fixed dir.old — the earlier fixed

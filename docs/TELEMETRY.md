@@ -111,6 +111,23 @@ server's own "binlog purged" error (1236) and the `--no-gap-fill` refusal,
 and `schema_mismatch` is the stale-snapshot guard. `unknown` is what a
 failure with no bucket reports — an honest "no bucket" rather than a guess.
 
+A capture that was already running reports the class of what stopped it.
+The class names the kind of failure, not which server had it:
+
+| What stopped capture | `error_class` |
+|---|---|
+| A database server out of disk, or a full table | `storage_io` |
+| Too many connections, a lock wait timeout, a deadlock, a lost connection | `db_connection` |
+| An index write that ran past `--write-timeout` | `db_connection` |
+| No partition for the row | `not_found` |
+| A statement larger than `max_allowed_packet` | `config_invalid` |
+| A binlog file past 4GiB while capturing by position | `config_invalid` |
+| A primary key too wide for the index | `schema_mismatch` |
+| A row that could not be encoded, or a row event with no position | `internal` |
+
+Only the class name is sent. The server's error number and message stay
+on your machine.
+
 ### Why the values are coarse
 
 `version` is truncated and `arch` is bucketed on purpose. Joined together,

@@ -77,7 +77,7 @@ func init() {
 	f.StringVar(&drlAt, "at", "", "Point in time to restore to (default now)")
 	f.StringVar(&drlBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots")
 	f.StringVar(&drlBaselineS3, "baseline-s3", "", "S3 URL of baseline Parquet snapshots (s3://bucket/prefix)")
-	f.StringVar(&drlOutput, "output", "", "Write the intermediate dump here and keep it (default: temp dir; removed on success, kept on failure)")
+	AddOutputFlag(drillCmd, &drlOutput, "", "Write the intermediate dump here and keep it (default: temp dir; removed on success, kept on failure)", OutputDirAlias)
 	f.StringVar(&drlFormat, "format", "text", "Output format: text or json")
 	_ = drillCmd.MarkFlagRequired("index-dsn")
 	_ = drillCmd.MarkFlagRequired("target-dsn")

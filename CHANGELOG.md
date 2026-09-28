@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mydumper is installed in one place.
 
 ### Changed
+- **The README leads with the analytical copy** and a new page,
+  [Analytics with DuckDB](docs/analytics.md), is the way in: how the copy
+  stays current, opening it with `views.sql`, the file layout, table deltas,
+  other engines, and what the copy is not. Time travel and recovery follow,
+  from the same stream.
 - **Wording in the web interface and in the docs** (#1840, #1761). The
   screen is called the web interface, not the console. The optional check
   about column renames says what is lost without it, and the Connect a SQL

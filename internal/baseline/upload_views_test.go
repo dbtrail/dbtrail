@@ -175,7 +175,7 @@ func TestUploadWithOps_skipsViewsStagingLeftovers(t *testing.T) {
 	}
 }
 
-// An operator's own views.sql at the baselines ROOT (`bintrail views --out`)
+// An operator's own views.sql at the baselines ROOT (`bintrail views --output`)
 // is theirs to spell: its parent is no timestamp, so the gate passes it to
 // the plain copy with its original bytes. Without this, a later "always skip
 // a views.sql" simplification would silently stop uploading their file.

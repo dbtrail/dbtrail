@@ -64,7 +64,7 @@ func init() {
 	pgBaselineCmd.Flags().StringVar(&pgbReplDSN, "repl-dsn", "", "PostgreSQL REPLICATION connection string (replication=database); used only to create the slot when absent (env BINTRAIL_PG_REPL_DSN)")
 	pgBaselineCmd.Flags().StringVar(&pgbSlot, "slot", "", "Logical replication slot name to anchor against; created if absent when --repl-dsn is given (required; env BINTRAIL_PG_SLOT)")
 	pgBaselineCmd.Flags().StringVar(&pgbPublication, "publication", "", "PostgreSQL publication defining the table set (required; env BINTRAIL_PG_PUBLICATION)")
-	pgBaselineCmd.Flags().StringVar(&pgbOutput, "output", "", "Parquet output base directory (required)")
+	cli.AddOutputFlag(pgBaselineCmd, &pgbOutput, "", "Parquet output base directory (required)", cli.OutputDirAlias)
 	pgBaselineCmd.Flags().StringVar(&pgbSchemas, "schemas", "", "Only snapshot these schemas (comma-separated)")
 	pgBaselineCmd.Flags().StringVar(&pgbTables, "tables", "", "Only snapshot these tables (comma-separated, e.g. public.orders)")
 	pgBaselineCmd.Flags().StringVar(&pgbCompression, "compression", "zstd", "Parquet compression codec: zstd, snappy, gzip, none")
@@ -74,7 +74,7 @@ func init() {
 	pgBaselineCmd.Flags().StringVar(&pgbUpload, "upload", "", "S3 destination URL to upload Parquet files after generation (e.g. s3://my-bucket/baselines/)")
 	pgBaselineCmd.Flags().StringVar(&pgbUploadRegion, "upload-region", "", "AWS region for --upload (default: from AWS_REGION env var or ~/.aws/config)")
 	pgBaselineCmd.Flags().StringVar(&pgbBintrailID, "bintrail-id", "", "Server identity UUID to sign the snapshot with. One writer per --output folder or --upload prefix: two installations writing into one location mix their snapshots. Without it the snapshot is unsigned")
-	_ = pgBaselineCmd.MarkFlagRequired("output")
+	_ = pgBaselineCmd.MarkFlagRequired(cli.OutputFlag)
 	// query-dsn/slot/publication are required but validated in RunE, not via
 	// MarkFlagRequired: their BINTRAIL_PG_* env fallback (applied below, after
 	// cli.BindCommandEnv has loaded the env file) must satisfy them too —

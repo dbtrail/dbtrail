@@ -336,7 +336,7 @@ func TestRunProxySQLConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("--out - writes to stdout", func(t *testing.T) {
+	t.Run("--output - writes to stdout", func(t *testing.T) {
 		dir := t.TempDir()
 		orig, _ := os.Getwd()
 		t.Cleanup(func() { os.Chdir(orig) })

@@ -520,7 +520,7 @@ func TestRunDumpRefusesADumpWithNoPositionAndKeepsThePreviousOne(t *testing.T) {
 }
 
 // TestRunDumpMarksARefusedFirstDump (#1744): with no previous dump to restore,
-// the refused one stays in --output-dir. It is marked, so `bintrail baseline`
+// the refused one stays in --output. It is marked, so `bintrail baseline`
 // refuses it instead of publishing a baseline with no position.
 func TestRunDumpMarksARefusedFirstDump(t *testing.T) {
 	dir := t.TempDir()

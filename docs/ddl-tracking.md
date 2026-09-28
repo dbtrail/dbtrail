@@ -71,6 +71,31 @@ Decoding old rows (ENUM and SET labels, BLOB values, the width of a `BINARY` key
 
 ---
 
+## Restoring to Before a Column Was Added
+
+Column names are compared with the newest schema snapshot, because it is the only record of a DDL that left nothing else behind (file mode without a source, a snapshot that failed, a statement that was not recognized). So a column added after the moment being restored would refuse the restore.
+
+Such a column is left out of the comparison when the index proves it did not exist yet. All of this must hold, for every added column:
+
+| What | Why |
+|---|---|
+| A recorded `ALTER TABLE` on this schema and table, spelled the same, adds the column | The statement ran, so the column did not exist right before it |
+| That statement is later than the moment by its time, and after the restore's binlog cut by its position | The restore keeps row changes by both |
+| Every DDL recorded for the table after the moment only adds columns | A `DROP`, `CHANGE`, `RENAME` or a statement that cannot be read could have removed the column in between |
+| The backup recorded its binlog position | A DDL stamped before the backup may have been written after it, and only a position says |
+| No DDL is recorded for the table between the backup and the moment | The table's shape moved before the moment |
+| A schema snapshot from at or before the moment describes the table and does not have the column | It existed already, or nothing says it did not |
+| No statement after the moment adds a column the backup already has | That column was dropped by a statement with no record |
+
+Anything else refuses as before, and the refusal says which of these is missing. A statement is not read when it has an executable comment (`/*! ... */`), a line comment (`#` or `--`), a block comment left open, a backslash, bytes that are not UTF-8, `IF NOT EXISTS`, the `ADD COLUMN (a, b)` list form, a column defined as part of a key, a word in a column definition that a definition is not made of (another clause with no comma before it, `PARTITION BY`, an `AFTER` with no name), or a text as long as `ddl_query` holds. What is inside a string or a parenthesised group is skipped, not read.
+
+Two cases still refuse or stay unseen:
+
+- **No row change was captured between the moment and the `ALTER TABLE`.** The restore's cut is the first captured change after the moment, which is then past the statement, so the restore refuses.
+- **Two DDLs with no record that cancel out.** A column added before the moment and dropped after it, neither recorded, then added again by a recorded statement, is not seen. The name comparison has never seen an unrecorded add and drop.
+
+---
+
 ## The schema_changes Table
 
 ```sql
