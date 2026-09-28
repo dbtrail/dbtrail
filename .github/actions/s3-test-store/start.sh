@@ -37,7 +37,11 @@ if [ -z "${S3_STORE_IMAGE:-}" ]; then
 fi
 
 echo "Pulling ${S3_STORE_IMAGE} (at most ${pull_timeout}s)"
-if ! timeout "${pull_timeout}" docker pull "${S3_STORE_IMAGE}"; then
+timeout "${pull_timeout}" docker pull "${S3_STORE_IMAGE}"
+rc=$?
+if [ "$rc" = 124 ]; then
+  not_ready "pulling ${S3_STORE_IMAGE} took longer than ${pull_timeout}s"
+elif [ "$rc" != 0 ]; then
   not_ready "could not pull ${S3_STORE_IMAGE}"
 fi
 
