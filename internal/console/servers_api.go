@@ -86,6 +86,9 @@ type serverDTO struct {
 	// whenever no such step is running. It refines MonitorState and never
 	// replaces it: the state vocabulary every caller switches on is unchanged.
 	MonitorPhase string `json:"monitor_phase,omitempty"`
+	// MonitorPhaseDetail qualifies MonitorPhase for display (#1708), see
+	// MonitorStatus.PhaseDetail.
+	MonitorPhaseDetail string `json:"monitor_phase_detail,omitempty"`
 	// Reconstruct is the per-server Time-travel capability, derived from pure
 	// config (no connection is opened to compute it).
 	Reconstruct bool `json:"reconstruct"`
@@ -1492,7 +1495,7 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 	fillSourceDSNParts(&dto, e.SourceDSN, e.SourceFlavor())
 	if s.monitorCtrl != nil && e.SourceDSN != "" {
 		st := s.monitorCtrl.Status(e.ID)
-		dto.MonitorState, dto.MonitorPhase = st.State, st.Phase
+		dto.MonitorState, dto.MonitorPhase, dto.MonitorPhaseDetail = st.State, st.Phase, st.PhaseDetail
 	}
 	return dto
 }

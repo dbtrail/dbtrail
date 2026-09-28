@@ -133,6 +133,13 @@ type monitorJob struct {
 	// luxury, and a row reading CLEANING UP over a capturing stream is the
 	// exact kind of stale reassurance this change exists to remove.
 	phase string
+	// phaseDetail qualifies phase in a few words (the OnPhaseDetail hook). It
+	// is cleared wherever phase is: a detail never outlives its phase.
+	phaseDetail string
+	// errCode names the cause of the stored failure for the ones a screen
+	// acts on (console.MonitorErr*), "" for every other failure. Set with the
+	// failure by fail, cleared by every other transition.
+	errCode string
 	// retrying: the stored failure is one run() will retry after its backoff,
 	// not a setup failure in Start or a give-up. Any other set clears it.
 	retrying bool
@@ -149,7 +156,8 @@ func (j *monitorJob) set(state, lastErr string) {
 	j.mu.Lock()
 	j.state, j.lastErr, j.since = state, lastErr, time.Now().UTC()
 	j.retrying = false
-	j.phase = "" // a state change ends whatever startup step was running
+	j.errCode = ""
+	j.phase, j.phaseDetail = "", "" // a state change ends whatever startup step was running
 	if state == "pending" {
 		j.sourceConnected = false // every run connects again
 	}
@@ -174,17 +182,33 @@ func (j *monitorJob) progress() {
 	j.lastProgress = time.Now().UTC()
 	if j.state == "pending" {
 		j.state, j.lastErr, j.since = "running", "", j.lastProgress
-		j.phase = "" // capture is producing: no startup step is still running
+		j.phase, j.phaseDetail = "", "" // capture is producing: no startup step is still running
 	}
 	j.mu.Unlock()
 }
 
 // setRetrying stores a failure the run loop will retry after its backoff.
 func (j *monitorJob) setRetrying(lastErr string) {
+	j.fail(lastErr, "", true)
+}
+
+// fail stores a failed run together with the code of its cause, in one step so
+// no reader sees the failure without it. retrying as in setRetrying.
+func (j *monitorJob) fail(lastErr, code string, retrying bool) {
 	j.mu.Lock()
-	j.state, j.lastErr, j.since, j.retrying = "failed", lastErr, time.Now().UTC(), true
-	j.phase = ""
+	j.state, j.lastErr, j.since, j.retrying = "failed", lastErr, time.Now().UTC(), retrying
+	j.errCode = code
+	j.phase, j.phaseDetail = "", ""
 	j.mu.Unlock()
+}
+
+// monitorErrorCode maps a stream's error to the code the console sends with
+// it. Matched on the error's type, never on its text.
+func monitorErrorCode(err error) string {
+	if errors.Is(err, streamrun.ErrEarlierCleanupRunning) {
+		return console.MonitorErrEarlierCleanup
+	}
+	return ""
 }
 
 // markSourceConnected records that this run's stream reached the source.
@@ -198,6 +222,18 @@ func (j *monitorJob) markSourceConnected() {
 func (j *monitorJob) setPhase(phase string) {
 	j.mu.Lock()
 	j.phase = phase
+	j.phaseDetail = ""
+	j.mu.Unlock()
+}
+
+// setPhaseDetail qualifies the phase the stream is inside. Dropped when no
+// phase is set: the hooks fire in order, so that is a detail arriving after
+// its phase was cleared by a state change.
+func (j *monitorJob) setPhaseDetail(detail string) {
+	j.mu.Lock()
+	if j.phase != "" {
+		j.phaseDetail = detail
+	}
 	j.mu.Unlock()
 }
 
@@ -215,6 +251,7 @@ func (j *monitorJob) streamHooks() *streamrun.Hooks {
 		OnGapAutoAdvance:  j.markLostPosition,
 		OnSourceConnected: j.markSourceConnected,
 		OnPhase:           j.setPhase,
+		OnPhaseDetail:     j.setPhaseDetail,
 	}
 }
 
@@ -244,7 +281,7 @@ func (j *monitorJob) pgStreamHooks() *pgstreamrun.Hooks {
 func (j *monitorJob) snapshot() console.MonitorStatus {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected, Retrying: j.retrying, Phase: j.phase}
+	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected, Retrying: j.retrying, Phase: j.phase, PhaseDetail: j.phaseDetail, ErrorCode: j.errCode}
 	if j.state == "running" {
 		if idle := time.Since(j.lastProgress); !j.lastProgress.IsZero() && idle > monitorStalledAfter {
 			st.State = "stalled"
@@ -773,13 +810,13 @@ func (m *monitorSupervisor) run(ctx context.Context, job *monitorJob, e console.
 		if giveUp {
 			slog.Error("monitored stream crash-looped past the give-up threshold; not retrying",
 				"server", e.Name, "entry", e.ID, "looping_for", looping.Round(time.Minute), "error", scrubbed)
-			job.set("failed", fmt.Sprintf("%s (gave up after %s of crash-looping; fix the issue, then press Start to retry)",
-				scrubbed, looping.Round(time.Minute)))
+			job.fail(fmt.Sprintf("%s (gave up after %s of crash-looping; fix the issue, then press Start to retry)",
+				scrubbed, looping.Round(time.Minute)), monitorErrorCode(err), false)
 			return
 		}
 		slog.Warn("monitored stream failed; retrying with backoff",
 			"server", e.Name, "entry", e.ID, "delay", delay, "error", scrubbed)
-		job.setRetrying(scrubbed + " (retrying)")
+		job.fail(scrubbed+" (retrying)", monitorErrorCode(err), true)
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():

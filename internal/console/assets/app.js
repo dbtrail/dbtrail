@@ -126,13 +126,16 @@ const MON_STATE_TITLES = {
 // they do for any pending stream.
 const MON_PHASES = {
   resume_cleanup: { text: "CLEANING UP", title: "clearing changes the previous run had already saved, so they are not counted twice; capture starts when it finishes. On a large index this takes minutes." },
+  // #1708: no cleanup of this run has started. One from an earlier run is
+  // still running on the index, and a second one would only fail on its locks.
+  resume_cleanup_waiting: { text: "WAITING FOR CLEANUP", title: "an earlier cleanup is still running on the index; capture starts when it finishes." },
 };
 
 // monitorChip renders the monitoring chip for a server row, phase included.
 // Both the Servers list and the Settings list call it, so the two cannot drift.
 function monitorChip(s) {
   const phase = s.monitor_phase && MON_PHASES[s.monitor_phase];
-  if (phase) return el("span", { class: "chip chip-mon", text: phase.text, title: phase.title });
+  if (phase) return el("span", { class: "chip chip-mon", text: phase.text, title: phase.title + (s.monitor_phase_detail ? " (" + s.monitor_phase_detail + ")" : "") });
   return el("span", { class: "chip chip-mon", text: s.monitor_state.replace("_", " ").toUpperCase(), title: MON_STATE_TITLES[s.monitor_state] || ("monitoring " + s.monitor_state) });
 }
 
@@ -1786,10 +1789,19 @@ function ovFlowModel(inp) {
   } else if (mstate === "failed") {
     capture = piece("binlog", "bad", "stopped", mon.since ? "since " + flowHHMM(mon.since) : "");
     cut = { at: lastIndexed, piece: "capture" };
+    // #1708: decided by the code the daemon sends, never by the error text.
+    // No Start for this cause: starting again does not end the cleanup it is
+    // waiting on. "On its own" is said only when the daemon says it retries.
+    const earlierCleanup = mon.error_code === "earlier_cleanup_running";
     cards.push({ kind: "capture-failed", key: sid + "|failed|" + (mon.since || "") + "|" + (mon.last_error || ""), tone: "bad",
       title: "Capture stopped" + (lastIndexed ? " " + lastIndexed : ""),
-      lines: [mon.last_error || "The daemon reported no error text."],
-      actions: [{ label: "Start", primary: true, run: "start" }, { label: "Details", run: "status" }] });
+      lines: earlierCleanup
+        ? ["An earlier cleanup is still running on the index. " + (mon.retrying
+          ? "DBTrail checks again on its own, and capture starts when it finishes."
+          : "Capture stays stopped. Start it from Servers once the cleanup finishes.")].concat(mon.last_error ? [mon.last_error] : [])
+        : [mon.last_error || "The daemon reported no error text."],
+      actions: earlierCleanup ? [{ label: "Details", run: "status" }]
+        : [{ label: "Start", primary: true, run: "start" }, { label: "Details", run: "status" }] });
   } else if (mstate === "stalled" || mstate === "lost_position") {
     capture = piece("binlog", "bad", mstate === "stalled" ? "stalled" : "position lost", lastIndexed ? "last change " + lastIndexed : "");
     cut = { at: lastIndexed, piece: "capture" };
