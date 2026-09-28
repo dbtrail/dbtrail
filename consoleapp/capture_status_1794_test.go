@@ -267,6 +267,17 @@ func TestCaptureStatus_answersAreReusedForAShortWhile(t *testing.T) {
 	if max := int(time.Hour / captureStatusTTL); reads > max {
 		t.Fatalf("an hour of asking every 5s read the source %d times, want at most %d", reads, max)
 	}
+	// The worst case: every read finds the source ahead and unconfirmed,
+	// which is kept for the shorter time.
+	reads = 0
+	next = behindRead(uuidB+":1-10", uuidB+":1-30", captureT0.Add(-time.Hour))
+	for range 720 {
+		*clock = clock.Add(5 * time.Second)
+		c.CaptureStatus(context.Background(), captureEntryA)
+	}
+	if max := int(time.Hour / captureStatusPendingTTL); reads > max || reads == 0 {
+		t.Fatalf("an hour of asking every 5s, never settled, read the source %d times, want at most %d", reads, max)
+	}
 }
 
 func TestCaptureStatus_behindTakesTwoReads(t *testing.T) {
