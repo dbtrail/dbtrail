@@ -740,7 +740,7 @@ full-table reconstruct through that window is impossible), or `unknown`
 carries per-baseline `staleness` plus a top-level `baseline_staleness`.
 The `watch` daemon's webhook channel sends a critical `baseline_stale`
 event on the transition into broken (see
-[console.md](console.md#webhook-notifications)). The fix is always the
+[Alerts](https://www.dbtrail.com/docs/monitoring/alerts/#webhook)). The fix is always the
 same: take a fresh baseline (`bintrail dump` + `bintrail baseline`).
 
 **Indexes capturing more than one source**: live partitions are shared by

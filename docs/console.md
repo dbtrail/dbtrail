@@ -1102,15 +1102,15 @@ longer does anything. Remove it.
 - `BINTRAIL_CONSOLE_NOTIFY_WEBHOOK` (`watch` only) — same as
   `--notify-webhook`: URL for JSON notifications on lost continuity, verify
   problems, and unhealthy rotation (see
-  [Webhook notifications](#webhook-notifications)).
+  [Alerts](https://www.dbtrail.com/docs/monitoring/alerts/#webhook)).
 - `BINTRAIL_CONSOLE_VERIFY_INTERVAL` (`watch` only) — same as
   `--verify-interval`: enables scheduled verification on that cadence
   (e.g. `24h`, `7d`; see
-  [Running verification from the console](#running-verification-from-the-console)).
+  [Checks, on the Snapshots page](#the-snapshots-page)).
 - `BINTRAIL_CONSOLE_VERIFY_TABLES` (`watch` only) — same as `--verify-tables`.
 - `BINTRAIL_CONSOLE_VERIFY_TRIGGER` (`watch` only) — `1`/`true` enables the
   **Checks** section of Snapshots (runs `bintrail verify` in-process;
-  see [Running verification from the console](#running-verification-from-the-console)).
+  see [Checks, on the Snapshots page](#the-snapshots-page)).
   Off by default for a bare `watch` invocation; the bundled compose stack sets
   this on by default (see [docker.md](docker.md) — `VERIFY_TRIGGER=0` in
   `.env` opts out there).

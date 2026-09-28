@@ -507,7 +507,7 @@ The **Checks** section of Snapshots carries the verification runner (also on by 
 `VERIFY_TRIGGER=0` in `.env` to disable) that runs `bintrail verify` in-process
 for the selected server — trigger a run, watch per-table match/mismatch/
 inconclusive results land, and drill into a mismatch — see
-[console.md](console.md#running-verification-from-the-console).
+[Checks, on the Snapshots page](console.md#the-snapshots-page).
 
 **SQL over your Parquet** is not answered by the daemon. The web interface's SQL page
 was removed in 0.75.0 (see [The SQL panel
