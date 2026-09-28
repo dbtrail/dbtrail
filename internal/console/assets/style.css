@@ -2410,6 +2410,11 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .stg-row-going .stg-name, .stg-row-going .stg-rel { color: var(--ink-3); font-weight: 500; }
 .stg-going { color: var(--ink-2); background: var(--surface-3); font-family: var(--f-ui); text-transform: none; letter-spacing: 0; font-size: 11.5px; }
 .stg-row-latest .stg-going { background: var(--surface); color: var(--ink-2); }
+/* How a snapshot was locked (#1380). Plain words on a quiet ground, like
+   stg-going; only a snapshot read with no locks takes the warning ink. */
+.snap-lock { color: var(--ink-2); background: var(--surface-3); font-family: var(--f-ui); text-transform: none; letter-spacing: 0; font-size: 11.5px; }
+.stg-row-latest .snap-lock { background: var(--surface); color: var(--ink-2); }
+.snap-lock-torn, .stg-row-latest .snap-lock-torn { color: var(--orange-deep); }
 .bks-others { margin: 10px 14px 6px; }
 .stg-rel { font-family: var(--f-ui); font-size: 12.5px; color: var(--ink-3); white-space: nowrap; }
 /* The newest row is the one tint on this page, so everything it carries has

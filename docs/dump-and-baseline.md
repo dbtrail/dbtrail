@@ -233,6 +233,46 @@ knowingly accept that the snapshot may not represent any single instant.
 Neither surface downgrades silently: if the privileges for `ftwrl` are missing, the dump refuses
 with an actionable error naming the alternatives, rather than quietly producing a weaker snapshot.
 
+#### The snapshot records how it was locked
+
+Every table file of a snapshot records the lock mode of the read it comes from, in its footer
+(`bintrail.lock_mode`). It is read three ways, and only three:
+
+| Record | Read as | What it means |
+|---|---|---|
+| `ftwrl`, `lock-all`, `safe-no-lock`, or `pg-repeatable-read` (PostgreSQL) | `consistent` | every row is from one moment |
+| `no-lock` | `torn` | rows were copied at different moments and may not agree with each other |
+| none, or a value this version does not know | `unknown` | nothing says how it was locked |
+
+`unknown` is never read as `consistent`. Every snapshot taken before this record existed has
+none, and `no-lock` was the default before point-consistent dumps became the default.
+
+Where the record comes from:
+
+- `bintrail dump` writes the mode it gave mydumper into the dump, in a file named
+  `bintrail_dump_lock_mode`, and `bintrail baseline` copies it into the snapshot. The web
+  interface's full snapshot and the compose `baseline` profile do the same.
+- A dump made by running mydumper by hand has no such file, so the snapshot made from it is
+  `unknown`. The same goes for a mydumper too old to take `--sync-thread-lock-mode`: it
+  chooses its own mode, and what it chose is not on record.
+- A PostgreSQL snapshot reads every table inside one `REPEATABLE READ` transaction, so it is
+  `consistent` by construction.
+
+**The record is inherited.** A snapshot updated from the recorded changes (`baseline refresh`,
+a scheduled update, a restore to a moment, `reconstruct --output-format parquet`) reads no
+database. Each of its tables says what the snapshot it was built from said: `torn` stays
+`torn` and `unknown` stays `unknown`. The rows an update does not touch are the ones a torn
+read left as they were, so an update cannot make a snapshot consistent. A table that did not
+change is reused as the older snapshot's own file, and keeps that file's record. No published
+snapshot is modified for any of this.
+
+A snapshot is only as good as its worst table: one `torn` table makes the snapshot `torn`.
+Only a new full snapshot taken with locks clears it.
+
+`bintrail status --baseline-dir` prints it in the `LOCKS` column (`snapshot_lock` in JSON), the
+web interface marks the snapshot's row, and `bintrail verify` uses it to read a difference
+(see [verify.md](verify.md)).
+
 **Every point-consistent mode covers transactional tables only**, `lock-all` exactly as much as `ftwrl`, verified separately for each. bintrail passes `--trx-tables` on all modes, and under a mode that is attempting a consistent backup mydumper detects a non-transactional (MyISAM) table and **refuses to dump at all** ("Non transactional table found ... Restart backup using --trx-tables=0"), which the daemon passes on as the run's error, instead of silently proceeding the way it does under `NO_LOCK`. Verified empirically: the identical MyISAM table dumped successfully (with only a warning) under `NO_LOCK`, and was hard-refused under both `FTWRL` and `LOCK_ALL`. The refusal is gated to an actual "consistent backup attempt" (mydumper's own wording), which `NO_LOCK` explicitly is not attempting and the point-consistent modes are. **Switching `ftwrl` → `lock-all` does not get you past it**; a source with MyISAM tables needs those tables converted, excluded via `--tables`, or a low-privilege mode.
 
 `FTWRL` mode needs `RELOAD` or the `FLUSH_TABLES` dynamic privilege (for `FLUSH TABLES WITH READ LOCK`) on **every** source flavor, verified against the pinned mydumper build (`v1.0.3-1`) against a real MySQL 8.0 source, plus `BACKUP_ADMIN` (for `LOCK INSTANCE FOR BACKUP`) **only on MySQL/Percona 8.0+**. `BACKUP_ADMIN` is a MySQL 8.0+ dynamic privilege: it does not exist on MariaDB (any version) or MySQL 5.7, and neither of those issues `LOCK INSTANCE FOR BACKUP`, so `FTWRL` there needs only `RELOAD`/`FLUSH_TABLES`. The daemon detects this from the source's own `SELECT VERSION()` and checks for exactly the privileges that source actually needs **before** invoking mydumper, refusing with a clear, actionable error if any are missing. This is not just belt-and-suspenders: on a MySQL/Percona 8.0+ source, granting `BACKUP_ADMIN` **without** `RELOAD`/`FLUSH_TABLES` does not make mydumper fail cleanly, it makes the pinned build **crash** (a segfault, reproduced on both amd64 and arm64), so the daemon's own preflight check exists specifically to turn that crash into a clean error instead of ever letting mydumper attempt it half-privileged. Point-consistent mode never silently falls back to `NO_LOCK`. Both surfaces expose the same four modes: `bintrail dump --lock-mode`, and `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` for the daemon's in-process baseline pipeline.

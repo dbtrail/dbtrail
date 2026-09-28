@@ -1066,6 +1066,10 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 		}
 		return fmt.Errorf("mydumper failed: %w", err)
 	}
+	// How the read was locked (#1380), for baseline.Run to put in the
+	// snapshot. Only when the mode was sent: a build that did not take the
+	// flag took its own, which is not on record.
+	baseline.RecordDumpLockMode(dumpDir, lockMode, plan.sendLockFlags)
 	return nil
 }
 

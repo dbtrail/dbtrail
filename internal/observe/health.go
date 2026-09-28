@@ -72,7 +72,7 @@ func ClearContinuity(server string) {
 // alerting (or keep reading healthy) for something nobody evaluates anymore.
 func DeleteVerifyOutcome(server string) {
 	verifyLastRun.DeleteLabelValues(server)
-	for _, status := range []string{"match", "mismatch", "inconclusive", "error"} {
+	for _, status := range []string{"match", "mismatch", "inconclusive", "error", VerifyStatusDiffers} {
 		verifyTables.DeleteLabelValues(server, status)
 	}
 }
@@ -84,6 +84,20 @@ func SetVerifyOutcome(server string, finishedAt time.Time, match, mismatch, inco
 	verifyTables.WithLabelValues(server, "mismatch").Set(float64(mismatch))
 	verifyTables.WithLabelValues(server, "inconclusive").Set(float64(inconclusive))
 	verifyTables.WithLabelValues(server, "error").Set(float64(errorCount))
+}
+
+// VerifyStatusDiffers is the status label of the tables where a difference
+// was found over a snapshot read with no locks (#1380). The run reports them
+// inconclusive; this series is that slice on its own. They are ALSO counted
+// in the "mismatch" series (see SetVerifyOutcome's caller), so an alert rule
+// already written on mismatch keeps firing while one stands: a difference
+// was found, and a series that read zero there would say there was none.
+const VerifyStatusDiffers = "differs"
+
+// SetVerifyDiffers publishes that slice for the run SetVerifyOutcome just
+// published.
+func SetVerifyDiffers(server string, differs int) {
+	verifyTables.WithLabelValues(server, VerifyStatusDiffers).Set(float64(differs))
 }
 
 // SetRotationHealth publishes the last rotation cycle's health — the same

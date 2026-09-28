@@ -143,6 +143,11 @@ type VerifyTableResult struct {
 	// as "the newest snapshot is verified". Empty where no two fingerprints
 	// were compared.
 	ComparedTo string `json:"compared_to,omitempty"`
+	// SnapshotLock is how the snapshots this table was compared with were
+	// locked when the database was read: consistent | unknown | torn. The same
+	// datum, under the same name, as the CLI's snapshot_lock. Empty where no
+	// snapshot was compared.
+	SnapshotLock string `json:"snapshot_lock,omitempty"`
 	// Explainable is true only for a baseline-anchored mismatch whose pair is
 	// still cached from the run that produced this result — the precondition
 	// for calling Explain on it.
@@ -168,7 +173,12 @@ type VerifySummary struct {
 	// Inconclusive (#1416): quiet or append-only tables where zero assertions
 	// is the expected outcome. Always <= Inconclusive.
 	InconclusiveNothingToCheck int `json:"inconclusive_nothing_to_check"`
-	Error                      int `json:"error"`
+	// InconclusiveDiffers mirrors verify.Summary's: inconclusive tables where
+	// a difference was found, over a snapshot read with no locks. One of
+	// them makes the run's verdict "differs". Zero on a run recorded before
+	// the field existed.
+	InconclusiveDiffers int `json:"inconclusive_differs"`
+	Error               int `json:"error"`
 	// Total is the number of results tallied — the same `total` the CLI's
 	// `verify --format json` summary carries.
 	Total int `json:"total"`
@@ -192,7 +202,7 @@ type VerifyStatus struct {
 	Results []VerifyTableResult `json:"results,omitempty"`
 	Summary VerifySummary       `json:"summary"`
 	// Verdict is the run-level outcome of a succeeded run (verdict.Verified,
-	// Mismatch, Error, Unproven or NoPredecessor), empty for any other state.
+	// Mismatch, Error, Differs, Unproven or NoPredecessor), empty for any other state.
 	// Computed where the status is READ, never stored (WithVerdict, applied by
 	// VerifyHistory.List and by every handler that serves a status): every
 	// run already on disk gets it too, and there is one rule for it, the one
@@ -219,7 +229,7 @@ func (st VerifyStatus) WithVerdict() VerifyStatus {
 		st.Verdict = verdict.NoPredecessor
 		return st
 	}
-	st.Verdict = verdict.Of(s.Match, s.Mismatch, s.Error)
+	st.Verdict = verdict.Of(s.Match, s.Mismatch, s.Error, s.InconclusiveDiffers)
 	return st
 }
 

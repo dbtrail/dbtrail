@@ -56,6 +56,10 @@ type TableResult struct {
 	// path, and on a table that was not compared.
 	ComparedTo time.Time
 	Detail     string // reason for inconclusive/mismatch, or a note carried on a match (e.g. coverage-unverified)
+	// SnapshotLock is how the snapshots behind a comparison were locked when
+	// the database was read (#1380): consistent | unknown | torn, the worst of
+	// them. Empty on a table that was not compared with a snapshot.
+	SnapshotLock string
 
 	// Set only by the recover-input check (VerifyRecoverInputs, #1001), which
 	// compares no table content and so leaves the row counts and digests above
@@ -86,6 +90,11 @@ const (
 	// (truncated window, unresolved comparisons, drift rows). The one kind
 	// worth attention.
 	InconclusiveUnproven = "unproven"
+	// InconclusiveTornSnapshot: the table DIFFERS from a snapshot that was
+	// read with no locks (#1380), so the difference may come from the read.
+	// The one kind the content modes set. It needs attention: a difference
+	// was found, and only its cause is in doubt.
+	InconclusiveTornSnapshot = "torn-snapshot"
 )
 
 // InconclusiveKindBenign reports whether kind is one of the two
@@ -200,11 +209,17 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	// the fetch falls back to the plain Since-only window (the pre-#797
 	// behavior), same as an older baseline that never recorded a position.
 	var sincePos *query.BinlogPos
+	// How the snapshot was locked (#1380). A footer that cannot be read
+	// leaves it unknown, never consistent.
+	var snapshotLock baseline.ReadConsistency
 	if bmeta, berr := baseline.ReadParquetMetadataAny(ctx, baselinePath); berr != nil {
 		slog.Warn("could not read baseline metadata for position-anchored delta fetch; falling back to timestamp-only Since",
 			"schema", schema, "table", table, "path", baselinePath, "error", berr)
-	} else if bmeta.BinlogFile != "" && bmeta.BinlogPos > 0 {
-		sincePos = &query.BinlogPos{File: bmeta.BinlogFile, Pos: uint64(bmeta.BinlogPos)}
+	} else {
+		snapshotLock = baseline.ReadConsistencyOf(bmeta)
+		if bmeta.BinlogFile != "" && bmeta.BinlogPos > 0 {
+			sincePos = &query.BinlogPos{File: bmeta.BinlogFile, Pos: uint64(bmeta.BinlogPos)}
+		}
 	}
 
 	// 4. Latest event per PK in (baseline, asOf] — the change map the merge needs.
@@ -298,6 +313,8 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	if detail != "" {
 		res.Detail = detail // a real reason overrides the coverage note
 	}
+	withSnapshotLock(res.Status, res.Detail,
+		lockSide{what: "the snapshot of " + snapshotTime.UTC().Format(time.RFC3339), lock: snapshotLock}).apply(&res)
 	return res, nil
 }
 

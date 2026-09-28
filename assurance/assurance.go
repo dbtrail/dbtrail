@@ -134,6 +134,7 @@ const (
 	VerifyVerdictVerified      = verify.VerdictVerified
 	VerifyVerdictMismatch      = verify.VerdictMismatch
 	VerifyVerdictError         = verify.VerdictError
+	VerifyVerdictDiffers       = verify.VerdictDiffers
 	VerifyVerdictUnproven      = verify.VerdictUnproven
 	VerifyVerdictNoPredecessor = verify.VerdictNoPredecessor
 )

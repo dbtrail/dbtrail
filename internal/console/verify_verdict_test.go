@@ -41,6 +41,11 @@ func TestWithVerdict(t *testing.T) {
 		// A verdict carried in (a newer build wrote one, a hand edit) is not
 		// trusted: it is recomputed, or cleared for a run that has none.
 		{"a stale verdict on a failed run", VerifyStatus{State: VerifyStateFailed, Verdict: verdict.Verified}, ""},
+		// #1380: a table differs from a snapshot read with no locks.
+		{"a torn difference beside proof", VerifyStatus{State: VerifyStateSucceeded,
+			Summary: VerifySummary{Match: 9, Inconclusive: 1, InconclusiveDiffers: 1, Total: 10}}, verdict.Differs},
+		{"a stale verdict on a torn difference", VerifyStatus{State: VerifyStateSucceeded, Verdict: verdict.Verified,
+			Summary: VerifySummary{Match: 9, Inconclusive: 1, InconclusiveDiffers: 1, Total: 10}}, verdict.Differs},
 		{"a stale verdict on an unproven run", VerifyStatus{State: VerifyStateSucceeded, Summary: sum(0, 0, 5, 0, 0), Verdict: verdict.Verified}, verdict.Unproven},
 	}
 	for _, c := range cases {
@@ -183,6 +188,8 @@ func TestVerificationPage_saysWhatARunProved(t *testing.T) {
 		"failed":   served(VerifyStatus{State: VerifyStateFailed, FinishedAt: finished, LastError: "boom"}),
 		"empty":    served(VerifyStatus{State: VerifyStateSucceeded, FinishedAt: finished}),
 		"quiet":    served(VerifyStatus{State: VerifyStateSucceeded, FinishedAt: finished, Summary: VerifySummary{Inconclusive: 4, InconclusiveNothingToCheck: 4, Total: 4}}),
+		"differs": served(VerifyStatus{State: VerifyStateSucceeded, FinishedAt: finished,
+			Summary: VerifySummary{Match: 9, Inconclusive: 3, InconclusiveDiffers: 1, InconclusiveNothingToCheck: 1, Total: 12}}),
 		"mismatchPartial": served(VerifyStatus{State: VerifyStateSucceeded, FinishedAt: finished,
 			Summary: VerifySummary{Match: 2, Mismatch: 1, Inconclusive: 5, InconclusiveNothingToCheck: 1, Total: 8}}),
 	}
@@ -261,6 +268,9 @@ runs.unknown = Object.assign({}, runs.clean, { verdict: "someday" });
 		"mismatchPartial": "2 match · 1 mismatch · 0 error · 4 not checked",
 		"onlyOne":         "only one snapshot so far, nothing to compare yet",
 		"failed":          "failed: boom",
+		// #1380: the table that differs is said apart from the ones not
+		// checked, and nothing reads as a pass.
+		"differs": "9 match · 1 differs from a snapshot read with no locks · 1 not checked",
 	}
 	for name := range wantHead {
 		if _, ok := got[name]; !ok {
@@ -295,6 +305,7 @@ runs.unknown = Object.assign({}, runs.clean, { verdict: "someday" });
 		"quiet":           {"NOTHING PROVEN", "chip-fail"},
 		"mismatchPartial": {"MISMATCH", "chip-fail"},
 		"unknown":         {"FINISHED", "chip-age"},
+		"differs":         {"DIFFERS", "chip-fail"},
 	}
 	for name, w := range wantChip {
 		if _, ok := got[name]; !ok {

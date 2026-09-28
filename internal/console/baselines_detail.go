@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -56,6 +57,12 @@ type baselineTableSizeDTO struct {
 	// ProducedBy, when nothing was looked up.
 	SourceReadAt   string `json:"source_read_at,omitempty"`
 	FoldsSinceRead *int   `json:"folds_since_read,omitempty"`
+	// Lock is how the database was locked when these rows were read (#1380):
+	// consistent | unknown | torn. Inherited through every update, and for a
+	// reused table read off the reused file. "unknown" is a file with no
+	// record, or one whose footer could not be read. Absent, like
+	// ProducedBy, when nothing was looked up (an S3 source).
+	Lock string `json:"lock,omitempty"`
 }
 
 type baselineFilesResponse struct {
@@ -89,6 +96,14 @@ type baselineFilesResponse struct {
 	// since their read. MaxFoldsSinceRead is absent whenever it is not zero:
 	// a maximum that leaves tables out is not the most.
 	SourceReadUncounted int `json:"source_read_uncounted,omitempty"`
+	// Lock is the snapshot's word on how the database was locked when its
+	// rows were read (#1380), the worst of its tables: consistent | unknown |
+	// torn. LockTorn and LockUnknown count the tables behind the two that are
+	// not consistent; a footer that could not be read counts as unknown. All
+	// absent when no table was looked up (an S3 source).
+	Lock        string `json:"lock,omitempty"`
+	LockTorn    int    `json:"lock_torn,omitempty"`
+	LockUnknown int    `json:"lock_unknown,omitempty"`
 	// Incomplete marks a snapshot carrying an _INCOMPLETE marker without a
 	// _SUCCESS one (a failed or unfinished run). The listing excludes such
 	// snapshots, but the detail stays honest if one is addressed directly.
@@ -356,6 +371,7 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 	// from its file alone.
 	deltaNames := tableDeltaNames(files)
 	reads := snapshotSourceReads{}
+	locks := snapshotLocks{}
 	for _, f := range files {
 		resp.TotalBytes += f.Size
 		resp.Files++
@@ -386,6 +402,14 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 			// Every table looked at counts, the unreadable ones too: the
 			// snapshot's line must not speak for a table it could not date.
 			reads.add(d.read)
+			// A footer that could not be read is unknown on the table as it
+			// is in the snapshot's count, so the page can mark the table the
+			// count speaks of.
+			locks.add(d.lock, d.lockRead)
+			row.Lock = baseline.ReadUnknown.String()
+			if d.lockRead {
+				row.Lock = d.lock.String()
+			}
 			if d.read.Known() {
 				row.SourceReadAt = d.read.At.UTC().Format(consoleTSFormat)
 				if d.read.Folds >= 0 {
@@ -397,6 +421,7 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 		resp.Tables = append(resp.Tables, row)
 	}
 	reads.fill(&resp, ts)
+	resp.Lock, resp.LockTorn, resp.LockUnknown = locks.verdict(), locks.torn, locks.unknown
 	sort.Slice(resp.Tables, func(i, j int) bool {
 		if resp.Tables[i].Schema != resp.Tables[j].Schema {
 			return resp.Tables[i].Schema < resp.Tables[j].Schema
@@ -662,6 +687,12 @@ func tableDeltaNames(files []baselineSnapshotFile) map[string][]string {
 type tableDescription struct {
 	producedBy, from string
 	read             baseline.SourceRead
+	// lock is how the database was locked when the table's rows were read
+	// (#1380), from the table file's own footer: the file under a chain of
+	// table deltas is the one the rows not changed since still come from.
+	// lockRead is false when that footer could not be read.
+	lock     baseline.ReadConsistency
+	lockRead bool
 }
 
 // describeTable reads one table's footers and derives how its rows reached
@@ -691,11 +722,12 @@ func describeTable(path, dir string, names []string, snapshotAt time.Time) table
 		// NOT ProducedByUnknown: see above. An empty verdict renders as a dash.
 		return tableDescription{}
 	}
+	lock := baseline.ReadConsistencyOf(md)
 	chain, err := baseline.TableDeltaChainIn(dir, names, strings.TrimSuffix(filepath.Base(path), ".parquet"))
 	if err != nil {
 		slog.Warn("console: a snapshot table's delta files do not form a chain, so how it was made is not shown",
 			"path", path, "error", err)
-		return tableDescription{}
+		return tableDescription{lock: lock, lockRead: true}
 	}
 	describing, last := md, (*baseline.DumpMetadata)(nil)
 	if chain != nil {
@@ -703,7 +735,7 @@ func describeTable(path, dir string, names []string, snapshotAt time.Time) table
 		if err != nil {
 			slog.Warn("console: could not read the newest delta of a snapshot table for provenance",
 				"path", chain.LastFileUpserts(), "error", err)
-			return tableDescription{}
+			return tableDescription{lock: lock, lockRead: true}
 		}
 		last = &lm
 		if lm.SnapshotTimestamp.IsZero() {
@@ -714,14 +746,14 @@ func describeTable(path, dir string, names []string, snapshotAt time.Time) table
 			// When the rows were last read is still the file's to say.
 			slog.Warn("console: the newest delta of a snapshot table records no writer instant, so how the table was made is not shown",
 				"path", chain.LastFileUpserts())
-			return tableDescription{read: baseline.ChainSourceRead(md, last)}
+			return tableDescription{read: baseline.ChainSourceRead(md, last), lock: lock, lockRead: true}
 		}
 		if lm.SnapshotTimestamp.After(md.SnapshotTimestamp) {
 			describing = lm
 		}
 	}
 	p := baseline.ProvenanceOf(snapshotAt, describing)
-	d := tableDescription{producedBy: p.ProducedBy, read: baseline.ChainSourceRead(md, last)}
+	d := tableDescription{producedBy: p.ProducedBy, read: baseline.ChainSourceRead(md, last), lock: lock, lockRead: true}
 	if !p.From.IsZero() {
 		d.from = p.From.UTC().Format(consoleTSFormat)
 	}
@@ -776,4 +808,106 @@ func (r *snapshotSourceReads) fill(resp *baselineFilesResponse, snapshotAt time.
 		n := r.maxFolds
 		resp.MaxFoldsSinceRead = &n
 	}
+}
+
+// How a snapshot was locked when the database was read (#1380).
+//
+// Every table file records it in its footer (baseline.MetaKeyLockMode) and a
+// snapshot updated from the recorded changes inherits it, so the answer for a
+// snapshot is the worst of its tables: one table read with no locks makes the
+// snapshot torn. Three rules, the same on the row and in the detail:
+//
+//   - No record is "unknown", never "consistent": every snapshot written
+//     before the record existed has none.
+//   - A table that was not looked at is not spoken for. Over S3 a footer is
+//     one request per table, which the listing does not spend, so a snapshot
+//     with a table only there has no answer, unless a table that WAS looked
+//     at is torn: that is true of the snapshot whatever the others say.
+//   - A footer that cannot be read counts as unknown.
+
+// snapshotLocks folds the per-table answers of one snapshot.
+type snapshotLocks struct {
+	looked    int // tables whose footer was asked for
+	torn      int
+	unknown   int // no record, or a footer that could not be read
+	notLooked int // tables nobody asked about (S3)
+}
+
+func (l *snapshotLocks) add(c baseline.ReadConsistency, read bool) {
+	l.looked++
+	switch {
+	case !read:
+		l.unknown++
+	case c == baseline.ReadTorn:
+		l.torn++
+	case c != baseline.ReadConsistent:
+		l.unknown++
+	}
+}
+
+// verdict is the snapshot's word: torn | unknown | consistent, or "" when it
+// cannot be said (no table looked at, or some not looked at and none torn).
+func (l snapshotLocks) verdict() string {
+	switch {
+	case l.torn > 0:
+		return baseline.ReadTorn.String()
+	case l.looked == 0 || l.notLooked > 0:
+		return ""
+	case l.unknown > 0:
+		return baseline.ReadUnknown.String()
+	}
+	return baseline.ReadConsistent.String()
+}
+
+// lockMemo remembers the lock record of local table files, so the listing
+// does not open every footer of every snapshot on every load. A published
+// table file is never modified, and the entry is keyed on the file's size and
+// modification time as well as its path, so a different file at the same path
+// is read again.
+type lockMemo struct {
+	mu sync.Mutex
+	m  map[string]lockMemoEntry
+}
+
+type lockMemoEntry struct {
+	size int64
+	mod  time.Time
+	lock baseline.ReadConsistency
+}
+
+// lockMemoCap bounds the memo. Past it the memo starts over: the entries of
+// pruned snapshots are never asked for again and would otherwise stay.
+const lockMemoCap = 20000
+
+var snapshotLockMemo = &lockMemo{m: map[string]lockMemoEntry{}}
+
+// of answers for one local table file. read is false when the file or its
+// footer could not be read, which is logged and never remembered.
+func (m *lockMemo) of(path string) (lock baseline.ReadConsistency, read bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		slog.Warn("console: a snapshot table file cannot be read, so how it was locked is not known",
+			"path", path, "error", err)
+		return baseline.ReadUnknown, false
+	}
+	m.mu.Lock()
+	e, ok := m.m[path]
+	m.mu.Unlock()
+	if ok && e.size == fi.Size() && e.mod.Equal(fi.ModTime()) {
+		return e.lock, true
+	}
+	md, err := baseline.ReadParquetMetadata(path)
+	if err != nil {
+		slog.Warn("console: a snapshot table's footer cannot be read, so how it was locked is not known",
+			"path", path, "error", err)
+		return baseline.ReadUnknown, false
+	}
+	lock = baseline.ReadConsistencyOf(md)
+	m.mu.Lock()
+	if len(m.m) >= lockMemoCap {
+		m.m = map[string]lockMemoEntry{}
+	}
+	m.m[path] = lockMemoEntry{size: fi.Size(), mod: fi.ModTime(), lock: lock}
+	m.mu.Unlock()
+	return lock, true
 }

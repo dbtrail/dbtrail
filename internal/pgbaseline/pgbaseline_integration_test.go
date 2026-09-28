@@ -178,6 +178,10 @@ func TestPGBaseline_Integration(t *testing.T) {
 		t.Errorf("source read = %q / %q, want the snapshot's own instant %q and 0 updates",
 			md[baseline.MetaKeyLastDumpAt], md[baseline.MetaKeyFoldGeneration], md[baseline.MetaKeySnapshotTimestamp])
 	}
+	// #1380: read inside one transaction, and the footer says so.
+	if got := baseline.ReadConsistencyOfStamp(md[baseline.MetaKeyLockMode]); got != baseline.ReadConsistent {
+		t.Errorf("the snapshot reads %s (record %q), want consistent", got, md[baseline.MetaKeyLockMode])
+	}
 	embeddedLSN, err := strconv.ParseUint(lsnStr, 10, 64)
 	if err != nil {
 		t.Fatalf("MetaKeyLSN %q is not a decimal uint64: %v", lsnStr, err)

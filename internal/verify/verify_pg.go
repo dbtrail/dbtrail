@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/consistency"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -258,6 +260,24 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	// detail, never dropped: a "row count differs" whose real cause is a
 	// lagging daemon must carry the one clue that explains it.
 	status, detail := classify(res.SourceDigest, res.SourceRows, res.ReconstructDigest, res.ReconstructRows, deferredDetail)
+	// How the snapshot was read (#1380), same rule as every other mode. A
+	// PostgreSQL snapshot is read inside one transaction and records it; one
+	// written before the record existed has none, and neither has one whose
+	// footer cannot be read.
+	var snapshotLock baseline.ReadConsistency
+	if bmeta, berr := baseline.ReadParquetMetadataAny(ctx, baselinePath); berr != nil {
+		slog.Warn("could not read the snapshot's footer, so how it was locked is not known",
+			"schema", schema, "table", table, "path", baselinePath, "error", berr)
+	} else {
+		snapshotLock = baseline.ReadConsistencyOf(bmeta)
+	}
+	v := withSnapshotLock(status, detail,
+		lockSide{what: "the snapshot of " + snapshotTime.UTC().Format(time.RFC3339), lock: snapshotLock})
+	status, detail = v.status, v.detail
+	res.SnapshotLock = v.lock.String()
+	if v.kind != "" {
+		res.InconclusiveKind = v.kind
+	}
 	res.Status = status
 	switch {
 	case detail == "":
