@@ -70,7 +70,7 @@ bintrail doctor --source-dsn "$SRC" \
   --baseline-s3 s3://my-bucket/backups/ --snapshot-every 6h
 ```
 
-| The bucket | `doctor` reports | The console line says |
+| The bucket | `doctor` reports | The web interface line says |
 |---|---|---|
 | has a rule that covers the snapshot prefix | PASS, with the rule and its age (WARN if the age is no longer than `--snapshot-every`) | the rule and its age, in red if it is too short for the schedule |
 | has no rule that covers it | WARN | that the bucket grows without limit |

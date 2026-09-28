@@ -102,7 +102,7 @@ func (c captureCard) chip(prefix string) capturePart {
 	return capturePart{}
 }
 
-const captureUnknownSentence = "Nothing captured for 1h 14m. Either nothing changed on this server, or capture fell behind, and this page cannot tell which."
+const captureUnknownSentence = "Nothing captured for 1h 14m. Either nothing changed on this server, or capture fell behind, and DBTrail cannot tell which."
 
 func TestCoverageCardSaysWhatTheSourceAnswered(t *testing.T) {
 	var got struct {

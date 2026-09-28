@@ -517,7 +517,7 @@ func (s *Server) handleBackupSettingsDaemonUpdate(w http.ResponseWriter, r *http
 	key := r.PathValue("key")
 	if s.cm.reg == nil {
 		writeJSONError(w, http.StatusConflict,
-			"this console has no settings file to save into; it was started without a server registry")
+			"this DBTrail has no settings file to save into; it was started without a server registry")
 		return
 	}
 	// The key is checked BEFORE the body: a key this build does not model is

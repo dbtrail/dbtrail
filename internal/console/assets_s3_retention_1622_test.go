@@ -26,7 +26,7 @@ func TestS3RetentionBlockKeepsThePromises(t *testing.T) {
 		"the second command replaces every rule on the bucket",
 		"cannot spare the only complete copy",
 		"if the schedule stops it keeps expiring until none is left",
-		"and to no archived changes configured on this page",
+		"and to no archived changes configured on the Snapshots page",
 		"sit at the bucket root",
 		"the newest complete snapshot expires before the next one exists",
 	} {

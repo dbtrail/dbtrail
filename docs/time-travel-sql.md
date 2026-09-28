@@ -68,7 +68,7 @@ server — its registry **ID** (robust; the `X-Bintrail-Server` value shown in t
 web interface) or its display **name**, with the access token as the password:
 
 ```sh
-# the console shows each server's id/name in the switcher
+# the web interface shows each server's id/name in the switcher
 mysql -h 127.0.0.1 -P 3308 -u 7f4d577430b48821 -p"$BINTRAIL_CONSOLE_TOKEN"
 mysql> USE myapp;   -- optional: seeded from the server's source DSN when known
 mysql> SELECT * FROM _flashback.orders AS OF '2026-05-02 10:00:00' WHERE id = 12345;

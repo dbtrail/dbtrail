@@ -55,7 +55,7 @@ func (s *Server) handleCaptureSkipsAck(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, status.ErrAcknowledgeStale):
 		writeJSONError(w, http.StatusConflict,
-			"more events were skipped since this page loaded ("+err.Error()+"); reload and read the new count before acknowledging it")
+			"more events were skipped since the Status page loaded ("+err.Error()+"); reload and read the new count before acknowledging it")
 		return
 	case errors.Is(err, status.ErrNothingToAcknowledge):
 		writeJSONError(w, http.StatusBadRequest,
@@ -63,7 +63,7 @@ func (s *Server) handleCaptureSkipsAck(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, status.ErrAckColumnMissing):
 		writeJSONError(w, http.StatusUnprocessableEntity,
-			"this index predates the acknowledgement column; run `bintrail status --index-dsn <index> --ack-capture-skips` once against it (the console does not alter index schemas)")
+			"this index predates the acknowledgement column; run `bintrail status --index-dsn <index> --ack-capture-skips` once against it (the web interface does not alter index schemas)")
 		return
 	case err != nil:
 		writeJSONError(w, http.StatusInternalServerError, err.Error())

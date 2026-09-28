@@ -477,7 +477,7 @@ Run it on demand (or from cron on the host):
 # Single-source stack (SOURCE_DSN set in .env): no extra config needed.
 docker compose --profile baseline run --rm baseline
 
-# Any other source (e.g. one you added from the console UI):
+# Any other source (e.g. one you added from the web interface):
 BASELINE_SOURCE_DSN="repl:secret@tcp(db.example.com:3306)/" \
 BASELINE_SCHEMAS="shop,billing" \
   docker compose --profile baseline run --rm baseline

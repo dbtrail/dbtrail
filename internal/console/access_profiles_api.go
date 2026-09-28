@@ -95,7 +95,7 @@ type accessRuleRequest struct {
 // started under a profile gives (see the file comment).
 const (
 	accessProfilesRefusal        = "your session has a data profile, so it cannot view or change access profiles; sign in with an account that has none"
-	accessProfilesStartupRefusal = "access profiles are not available while an access-control profile is active (CLI: --profile); the console does not edit the rows that profile is built from"
+	accessProfilesStartupRefusal = "access profiles are not available while an access-control profile is active (CLI: --profile); the web interface does not edit the rows that profile is built from"
 	// accessReadbackFailedPrefix opens the error a mutation answers with
 	// when the write landed and only the readback failed, so the operator
 	// does not repeat a change that is already in.
