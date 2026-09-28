@@ -55,7 +55,7 @@ const (
 // errS3DirectoryVanished marks a snapshot directory the listing named and
 // whose own listing then came back empty: removed since, or a transient
 // empty answer. The lookup lists the directories again and retries once.
-var errS3DirectoryVanished = errors.New("a snapshot directory that was listed came back empty")
+var errS3DirectoryVanished = errors.New("it was listed and came back empty")
 
 func findBaselineS3(ctx context.Context, s3URL, schema, table string, at time.Time) (string, time.Time, StaleWarning, error) {
 	path, snap, stale, err := findBaselineS3Once(ctx, s3URL, schema, table, at)
@@ -68,7 +68,11 @@ func findBaselineS3(ctx context.Context, s3URL, schema, table string, at time.Ti
 		path, snap, stale, err = findBaselineS3Once(ctx, s3URL, schema, table, at)
 	}
 	if err != nil && !errors.Is(err, ErrNoBaseline) {
-		return "", time.Time{}, StaleWarning{}, fmt.Errorf("find the baseline of %s.%s in %q: %w; no older snapshot was used in its place", schema, table, s3URL, err)
+		// The error names what could not be read (the prefix, or one
+		// snapshot folder) and what to do. It reaches the console, the MCP
+		// tool and the shim's client as written, so it names no command and
+		// no flag.
+		return "", time.Time{}, StaleWarning{}, fmt.Errorf("find the baseline of %s.%s in %q: %w; no older snapshot was used in its place. Check that the store answers and that these credentials can list that location, then try again", schema, table, s3URL, err)
 	}
 	return path, snap, stale, err
 }
@@ -76,7 +80,7 @@ func findBaselineS3(ctx context.Context, s3URL, schema, table string, at time.Ti
 func findBaselineS3Once(ctx context.Context, s3URL, schema, table string, at time.Time) (string, time.Time, StaleWarning, error) {
 	x, err := openS3SnapshotIndex(ctx, s3URL)
 	if err != nil {
-		return "", time.Time{}, StaleWarning{}, err
+		return "", time.Time{}, StaleWarning{}, fmt.Errorf("could not list the snapshot folders under %q: %w", strings.TrimSuffix(s3URL, "/"), err)
 	}
 	var eligible []s3SnapshotDir // newest first, like x.dirs
 	for _, d := range x.dirs {
@@ -129,7 +133,7 @@ func (x *s3SnapshotIndex) tableIn(ctx context.Context, r s3DirRead, schema, tabl
 	key := r.dir.name + "/" + schema + "/" + table + ".parquet"
 	infos, err := x.lister.ListInfoFrom(ctx, key, "")
 	if err != nil {
-		return "", false, fmt.Errorf("list S3 baseline table file: %w", err)
+		return "", false, fmt.Errorf("could not read the snapshot folder %s/%s: list S3 baseline table file: %w", x.prefix, r.dir.name, err)
 	}
 	for _, o := range infos {
 		if o.Key == key {
@@ -184,7 +188,7 @@ func (x *s3SnapshotIndex) readDirs(ctx context.Context, dirs []s3SnapshotDir) ([
 		g.Go(func() error {
 			c, sig, ok, err := x.readDir(gctx, d)
 			if err != nil {
-				return err
+				return fmt.Errorf("could not read the snapshot folder %s/%s: %w", x.prefix, d.name, err)
 			}
 			read[j], complete[j], signed[j] = c, ok, sig
 			return nil
@@ -202,7 +206,7 @@ func (x *s3SnapshotIndex) readDirs(ctx context.Context, dirs []s3SnapshotDir) ([
 		// way but for the signature: only a listing that returned something
 		// was read for one.
 		if !complete[j] && !signed[j].read {
-			return nil, fmt.Errorf("%w: %s/%s", errS3DirectoryVanished, x.prefix, asked[j].name)
+			return nil, fmt.Errorf("could not read the snapshot folder %s/%s: %w", x.prefix, asked[j].name, errS3DirectoryVanished)
 		}
 		out[i].complete, out[i].files = complete[j], read[j].files
 	}

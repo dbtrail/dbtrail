@@ -229,7 +229,9 @@ func TestFindBaselineS3_aFailedListingIsNotAnAnswer(t *testing.T) {
 		snapshotKeys(findDay(2), []string{"shop/orders"}, "_SUCCESS"),
 		snapshotKeys(findDay(3), []string{"shop/users"}, "_SUCCESS"),
 	)
-	refused := func(t *testing.T, path string, err error) {
+	// tryAgain is the part of the error that says what to do.
+	const tryAgain = "no older snapshot was used in its place. Check that the store answers and that these credentials can list that location, then try again"
+	refused := func(t *testing.T, path string, err error, names ...string) {
 		t.Helper()
 		if err == nil {
 			t.Fatalf("the lookup answered %q", path)
@@ -243,20 +245,26 @@ func TestFindBaselineS3_aFailedListingIsNotAnAnswer(t *testing.T) {
 		if !strings.Contains(err.Error(), `"`+findRoot+`"`) || !strings.Contains(err.Error(), "shop.orders") {
 			t.Fatalf("the error does not name the source and the table: %v", err)
 		}
+		t.Logf("ERROR TEXT %s", err)
+		for _, want := range append(names, tryAgain) {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("the error does not say %q: %v", want, err)
+			}
+		}
 	}
 	t.Run("the directory listing fails", func(t *testing.T) {
 		captureLog(t)
 		f := &fakeS3Snapshots{keys: keys, err: errors.New("AccessDenied")}
 		stubS3Snapshots(t, f)
 		path, _, _, err := findBaselineS3(context.Background(), findRoot, "shop", "orders", findLate)
-		refused(t, path, err)
+		refused(t, path, err, `could not list the snapshot folders under "`+findRoot+`"`)
 	})
 	t.Run("every directory read fails", func(t *testing.T) {
 		captureLog(t)
 		f := &fakeS3Snapshots{keys: keys, infoErr: errors.New("SlowDown")}
 		stubS3Snapshots(t, f)
 		path, _, _, err := findBaselineS3(context.Background(), findRoot, "shop", "orders", findLate)
-		refused(t, path, err)
+		refused(t, path, err, "could not read the snapshot folder "+findRoot+"/"+findDay(3))
 	})
 	t.Run("the read of a newer snapshot fails", func(t *testing.T) {
 		captureLog(t)
@@ -265,7 +273,7 @@ func TestFindBaselineS3_aFailedListingIsNotAnAnswer(t *testing.T) {
 		f := &fakeS3Snapshots{keys: keys, failPrefix: findDay(3) + "/"}
 		stubS3Snapshots(t, f)
 		path, _, _, err := findBaselineS3(context.Background(), findRoot, "shop", "orders", findLate)
-		refused(t, path, err)
+		refused(t, path, err, "could not read the snapshot folder "+findRoot+"/"+findDay(3))
 		if got := f.dirsRead(); len(got) != 1 {
 			t.Fatalf("read %q after the failure, want the failed read alone", got)
 		}
@@ -275,7 +283,7 @@ func TestFindBaselineS3_aFailedListingIsNotAnAnswer(t *testing.T) {
 		f := &fakeS3Snapshots{keys: keys, failPrefix: findDay(2) + "/"}
 		stubS3Snapshots(t, f)
 		path, _, _, err := findBaselineS3(context.Background(), findRoot, "shop", "orders", findLate)
-		refused(t, path, err)
+		refused(t, path, err, "could not read the snapshot folder "+findRoot+"/"+findDay(2))
 	})
 	t.Run("the caller gave up", func(t *testing.T) {
 		captureLog(t)
@@ -366,7 +374,7 @@ func TestFindBaselineS3_aDirectoryThatComesBackEmpty(t *testing.T) {
 		if err == nil || errors.Is(err, ErrNoBaseline) || path != "" {
 			t.Fatalf("path = %q err = %v: snapshot 1 must not be used while snapshot 2 cannot be read", path, err)
 		}
-		for _, want := range []string{`"` + findRoot + `"`, findDay(2), "shop.orders"} {
+		for _, want := range []string{`"` + findRoot + `"`, "could not read the snapshot folder " + findRoot + "/" + findDay(2), "shop.orders", "then try again"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("the error does not name %s: %v", want, err)
 			}
