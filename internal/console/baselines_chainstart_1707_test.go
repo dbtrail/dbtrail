@@ -195,9 +195,10 @@ func TestBaselinesAPI_gradesOnTheChainStart(t *testing.T) {
 
 // The page reads a footer for the rows whose verdict it shows and decides
 // on, not for the window of fifty: every table of the newest snapshot and
-// each table's newest one. An older snapshot with chains has NO verdict
-// (never "ok" on a start nobody read), one with none is graded as before,
-// and one already past coverage is broken with no footer read at all.
+// each table's newest one. An older snapshot with chains is "unknown" (never
+// "ok" on a start nobody read, and never left without a verdict: the page
+// draws a missing verdict exactly like "ok"), one with none is graded as
+// before, and one already past coverage is broken with no footer read at all.
 func TestBaselinesAPI_readsAFooterOnlyForTheRowsItGrades(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	floor := now.Add(-10 * time.Hour).Truncate(time.Hour)
@@ -250,10 +251,10 @@ func TestBaselinesAPI_readsAFooterOnlyForTheRowsItGrades(t *testing.T) {
 	}
 	at := func(d time.Duration) string { return now.Add(-d).Format(consoleTSFormat) }
 	for when, verdict := range map[string]string{
-		at(time.Hour):                    "ok", // read: the chain started six hours back
-		at(2 * time.Hour):                "",   // chains nobody read: no verdict
-		at(3 * time.Hour):                "",   // "gone" was read, its neighbours were not
-		at(6 * time.Hour):                "",
+		at(time.Hour):                    "ok",      // read: the chain started six hours back
+		at(2 * time.Hour):                "unknown", // chains nobody read
+		at(3 * time.Hour):                "unknown", // "gone" was read, its neighbours were not
+		at(6 * time.Hour):                "unknown",
 		at(9*time.Hour + 30*time.Minute): "aging", // no chain: graded on itself, as before
 		floor.Add(-5 * time.Hour).Format(consoleTSFormat): "broken",
 	} {
@@ -261,6 +262,13 @@ func TestBaselinesAPI_readsAFooterOnlyForTheRowsItGrades(t *testing.T) {
 			t.Errorf("snapshot %s: staleness %q (listed %v), want %q", when, got, ok, verdict)
 		}
 	}
+	for _, s := range got.Snapshots {
+		if s.Staleness == "" {
+			t.Errorf("snapshot %s has no verdict", s.Time)
+		}
+	}
+	// The rows nobody read do not reach the headline: it is decided on each
+	// table's newest snapshot, and those were all read.
 	if got.Staleness != "aging" {
 		t.Errorf("headline = %q, want aging (plain's newest snapshot)", got.Staleness)
 	}

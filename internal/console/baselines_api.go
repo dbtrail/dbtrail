@@ -48,7 +48,10 @@ type baselineSnapshotDTO struct {
 	// and for each table's newest one, the rows the headline is decided on.
 	// A snapshot older than those is graded only when the answer needs no
 	// footer: none of its tables has a chain, or the snapshot itself is
-	// already past coverage. Otherwise the field is omitted, never "ok".
+	// already past coverage. Otherwise it is "unknown": the start was not
+	// read, so the window is not established. It is never "ok" and never
+	// left out, because a reader of this document takes a missing verdict
+	// for a good one.
 	Staleness string `json:"staleness,omitempty"`
 	// ReadsFrom is the earliest instant a reader of this snapshot's tables
 	// fetches events from, present only when it is not the snapshot's time.
@@ -327,9 +330,9 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	// Where a reader of each file starts (#1707). Bounded like the listing:
 	// this is the page's render path, and over S3 each read is a request.
 	bctx, bcancel := context.WithTimeout(r.Context(), baselineListTimeout)
-	bounds, looked := pageReadBounds(bctx, files)
+	bounds := pageReadBounds(bctx, files)
 	bcancel()
-	rows := gradeSnapshotRows(files, bounds, looked, floor, now)
+	rows := gradeSnapshotRows(files, bounds, floor, now)
 	var cur *baselineSnapshotDTO
 	var curTime time.Time
 	for _, f := range files {
@@ -393,13 +396,12 @@ var readBoundsOf = reconstruct.ReadBounds
 
 // pageReadBounds returns where a reader of each listed file starts, reading
 // a footer only for the files a verdict the page SHOWS is decided on: every
-// table of the newest snapshot, and each table's newest snapshot. looked
-// says which files those were. A file with a chain that was not looked at
-// comes back Unread: its start is not known here, and that must never grade
-// as covered.
-func pageReadBounds(ctx context.Context, files []reconstruct.BaselineFile) (bounds []status.ReadBound, looked []bool) {
-	bounds = make([]status.ReadBound, len(files))
-	looked = make([]bool, len(files))
+// table of the newest snapshot, and each table's newest snapshot. A file
+// with a chain that was not looked at comes back Unread: its start is not
+// known here, and that must never grade as covered.
+func pageReadBounds(ctx context.Context, files []reconstruct.BaselineFile) []status.ReadBound {
+	bounds := make([]status.ReadBound, len(files))
+	looked := make([]bool, len(files))
 	for _, i := range reconstruct.NewestPerTable(files) {
 		looked[i] = true
 	}
@@ -414,7 +416,7 @@ func pageReadBounds(ctx context.Context, files []reconstruct.BaselineFile) (boun
 	for i, f := range files {
 		switch {
 		case !f.HasDelta():
-			looked[i] = true // nothing to read: the zero bound is the answer
+			// Nothing to read: the zero bound is the answer.
 		case looked[i]:
 			ask = append(ask, f)
 			at = append(at, i)
@@ -425,7 +427,7 @@ func pageReadBounds(ctx context.Context, files []reconstruct.BaselineFile) (boun
 	for j, b := range readBoundsOf(ctx, ask) {
 		bounds[at[j]] = b
 	}
-	return bounds, looked
+	return bounds
 }
 
 // snapshotRowGrade is one snapshot row's verdict and the instant behind it.
@@ -435,30 +437,20 @@ type snapshotRowGrade struct {
 }
 
 // gradeSnapshotRows grades each snapshot as the worst of its tables, keyed
-// by the snapshot's time in UnixNano. A snapshot holding a table whose chain
-// start was not looked at has no verdict, unless that table grades broken
-// anyway (GradeTable: the snapshot itself is past coverage).
-func gradeSnapshotRows(files []reconstruct.BaselineFile, bounds []status.ReadBound, looked []bool, floor status.DeltaFloor, now time.Time) map[int64]snapshotRowGrade {
+// by the snapshot's time in UnixNano. A table whose chain start was not read
+// grades unknown, or broken when the snapshot itself is past coverage
+// (GradeTable), so every row listed has a verdict.
+func gradeSnapshotRows(files []reconstruct.BaselineFile, bounds []status.ReadBound, floor status.DeltaFloor, now time.Time) map[int64]snapshotRowGrade {
 	rows := map[int64]snapshotRowGrade{}
-	ungraded := map[int64]bool{}
 	for i, f := range files {
 		k := f.SnapshotTime.UnixNano()
 		row := rows[k]
 		v := floor.GradeTable(f.SnapshotTime, bounds[i], now)
-		if !looked[i] && v != status.BaselineBroken {
-			ungraded[k] = true
-		}
 		row.verdict = status.WorseBaselineStaleness(row.verdict, v)
 		if from := bounds[i].From(f.SnapshotTime); !bounds[i].Unread && (row.readsFrom.IsZero() || from.Before(row.readsFrom)) {
 			row.readsFrom = from
 		}
 		rows[k] = row
-	}
-	for k := range ungraded {
-		if row := rows[k]; row.verdict != status.BaselineBroken {
-			row.verdict = ""
-			rows[k] = row
-		}
 	}
 	return rows
 }
