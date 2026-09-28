@@ -271,7 +271,14 @@ grep -q '^services:' docker-compose.yml || die \
     or a network proxy/captive portal returned something else). Delete it and re-run."
 
 # ── 3. bring it up ──────────────────────────────────────────────────────
-step "Starting containers (the first run downloads images, which can take a minute)"
+step "Downloading the newest images (the first run can take a minute)"
+# `up -d` starts whatever image this machine already has under the tag, so a
+# machine that pulled "latest" once would start that old version for good.
+# A failed pull (offline, a registry hiccup) is not fatal: the images already
+# here still run, and the message says so.
+$COMPOSE pull || warn "could not download the newest images; starting with the ones already on this machine, which may be an older version."
+
+step "Starting containers"
 $COMPOSE up -d || die "\`$COMPOSE up -d\` failed. Check the output above.
     Says \"invalid IP address in add-host\"? Your engine does not understand
     host-gateway: put HOST_GATEWAY=<this machine's address> in ${DIR}/.env and re-run."
@@ -322,17 +329,17 @@ say "and ${B}a MySQL login that can create users${RST} and grant them privileges
 say ""
 say "${B}Next steps${RST}"
 say "  ${B}1. Sign in.${RST} Open ${B}${CONSOLE_URL}${RST} and create a username and password."
-say "  ${B}2. Connect.${RST} Click ${B}+ Add server${RST}, give the server a name, and fill in"
+say "  ${B}2. Connect.${RST} The form to add your server opens after you sign in. Fill in"
 say "     the host and port of your MySQL server. The form suggests a user and"
 say "     password for DBTrail and shows the SQL that creates that user: run it on"
-say "     your MySQL with that login, then press Save."
+say "     your MySQL with that login, then press Check and connect."
 say "     Your MySQL runs on this same machine? Use host ${B}host.docker.internal${RST}"
 say "     (on Linux, that MySQL must listen on more than 127.0.0.1)."
 say "  ${B}3. First change.${RST} Change a row on your MySQL. It shows on the Overview"
 say "     within a minute, with an Undo that writes the SQL to reverse it."
-say "  ${B}4. First snapshot.${RST} With one, DBTrail can rebuild a whole table as it was"
-say "     at a past moment. Today it takes a folder created first and a few steps"
-say "     on the Snapshots page; the start page below walks through them."
+say "  ${B}4. First copy.${RST} On Snapshots, press Read database now. DBTrail reads your"
+say "     tables once, as Parquet files you open in DuckDB; the start page below"
+say "     shows how to query them."
 say ""
 say "Your change history lives on this machine, in this stack's Docker volumes,"
 say "with your login and your saved servers. Back them up. To keep the history on"
