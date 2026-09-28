@@ -125,8 +125,8 @@ func TestDDLScanner_keywordIsAWholeWord(t *testing.T) {
 		{" IF EXISTS a", "IF EXISTS", true},
 		{" IF EXISTSa", "IF EXISTS", false},
 	} {
-		sc := ddlScanner{s: tc.s}
-		if got := sc.keyword(tc.kw); got != tc.want {
+		sc := ddlScanner{S: tc.s}
+		if got := sc.Keyword(tc.kw); got != tc.want {
 			t.Errorf("keyword(%q) on %q = %v, want %v", tc.kw, tc.s, got, tc.want)
 		}
 	}
