@@ -128,7 +128,7 @@ MCP servers can use the bridge; the MCP Server page has a copy-paste snippet:
   "mcpServers": {
     "dbtrail": {
       "command": "bintrail-mcp",
-      "args": ["--connect", "http://your-host:8090/mcp", "--token", "YOUR_CONSOLE_TOKEN"]
+      "args": ["--connect", "http://your-host:8090/mcp", "--token", "YOUR_ACCESS_TOKEN"]
     }
   }
 }

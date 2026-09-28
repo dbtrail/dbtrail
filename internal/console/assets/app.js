@@ -513,7 +513,7 @@ function showLoginOverlay(opts) {
     if (opts.ssoStart) {
       panel.append(el("p", { class: "modal-desc", text: "Sign in with the provider below to continue." }));
     } else {
-      panel.append(el("p", { class: "modal-desc", text: "Open the link that bintrail-console printed when it started. It carries the access token this page needs." }));
+      panel.append(el("p", { class: "modal-desc", text: "Open the link that bintrail-console printed when it started. It carries the access token the web interface needs." }));
     }
     appendSSOEntry(panel, opts);
     scrim.append(panel);
@@ -929,11 +929,11 @@ function badge(type) { return el("span", { class: "badge " + badgeClass(type), t
 
 // docsLink is the page-header Docs link for a route (#1450), or null when
 // DOCS_PAGES has no page for it. A plain anchor: no request, no probe.
-function docsLink(route) {
+function docsLink(route, name) {
   const slug = DOCS_PAGES[route];
   if (!slug) return null;
   const a = el("a", { class: "page-docs", href: DOCS_BASE + slug + "/", target: "_blank", rel: "noopener",
-    title: "Open the docs for this page in a new tab" });
+    title: typeof name === "string" && name ? "Open the " + name + " docs in a new tab" : "Open the docs in a new tab" });
   a.append(el("span", { text: "Docs" }), icon("external"));
   return a;
 }
@@ -944,7 +944,7 @@ function pageHead(title, subNode) {
   // BESIDE the h1, not inside it: the title wears a clipped text gradient and
   // is read as a heading, and "Events Docs" is not the page's name.
   const row = el("div", { class: "page-title-row" },
-    el("h1", { class: "page-title", text: title }), docsLink(routeFromLocation()));
+    el("h1", { class: "page-title", text: title }), docsLink(routeFromLocation(), title));
   const head = el("div", { class: "page-head" }, row);
   if (subNode) head.append(subNode);
   return head;
@@ -1433,7 +1433,7 @@ function covCard(c, stamp) {
     // behind look the same, so the line says exactly that much.
     const quiet = typeof c.lag_seconds === "number" ? "Nothing captured for " + plainDuration(c.lag_seconds) + "." : "Nothing captured yet.";
     card.append(el("p", { class: "cov-line", text:
-      quiet + " Either nothing changed on this server, or capture fell behind, and this page cannot tell which." }));
+      quiet + " Either nothing changed on this server, or capture fell behind, and DBTrail cannot tell which." }));
   } else if (fresh === "unavailable") {
     card.append(el("p", { class: "cov-line bad", text: "Capture liveness could not be read. Treat the window's upper edge as unverified." }));
   }
@@ -2579,14 +2579,14 @@ function watchOverview(f, live, firstRun) {
     if (err && err.status === 401) { stopped = true; return; } // the sign-in gate is up
     if (err && (err.status === 403 || err.status === 404)) {
       stopped = true;
-      note("This page stopped updating: " + msg + ". Reload it to try again.");
+      note("The Overview stopped updating: " + msg + ". Reload the page to try again.");
       return;
     }
     // Only once something has been drawn: before that the panel carries the
     // reason itself, and during setup the index does not exist yet, so a
     // "has not updated since" over a list whose first step reads "Creating
     // it now" would be two voices for one state.
-    if (++failures >= 3 && drawn) note("This page has not updated since " + okAt + ": " + msg + ". Trying again.");
+    if (++failures >= 3 && drawn) note("The Overview has not updated since " + okAt + ": " + msg + ". Trying again.");
     delay = Math.min(delay * 2, OV_RETRY_MAX_MS);
   };
   // woke: the tab was just shown again. The Getting started list is asked
@@ -4269,7 +4269,7 @@ function stateSection(form) {
 
   if (!capsCache.reconstruct) {
     wrap.append(el("p", { class: "state-note", text:
-      "Configure a snapshot for this server to see a row's earlier state here. Undo SQL below works without one; it reverses recorded changes, so it cannot show a row nothing has touched." }));
+      "Configure a snapshot for this server to see a row's earlier state. Undo SQL below works without one; it reverses recorded changes, so it cannot show a row nothing has touched." }));
     return wrap;
   }
 
@@ -4627,7 +4627,7 @@ function renderTimeline(container, data, onDone) {
     if (e.source !== "baseline") {
       acts.append(el("button", {
         class: "btn btn-sm tl-restore", type: "button", text: "Restore to this state",
-        title: "Reverse every change after " + e.time + " UTC, leaving the row as shown here",
+        title: "Reverse every change after " + e.time + " UTC, leaving the row as this entry shows it",
         onclick: () => {
           // Same reason the state panel's action closes first: aimUndoAtInstant
           // scrolls the form into view and previews the rows, and both are
@@ -5385,7 +5385,7 @@ function snapshotsMovedNotice(missing) {
   const was = SNAPSHOT_MOVED.get(from);
   if (!was || movedIsClosed(from)) return null;
   const why = missing === "daemon" ? " Its section is not in this web interface: checks run in the DBTrail daemon, and this one is read-only."
-    : missing === "unknown" ? " Its section is missing because the capability check failed when this page loaded; reload to get it back."
+    : missing === "unknown" ? " Its section is missing because the capability check failed when the Snapshots page loaded; reload the page to get it back."
     : "";
   const box = el("div", { class: "snap-moved" });
   box.append(el("span", { class: "snap-moved-text", text: was + " is part of Snapshots now." + why }));
@@ -5839,7 +5839,7 @@ async function renderSnapshots() {
     const moved = setupHidden ? null : snapshotsMovedNotice(missing);
     if (moved && !beside) v.append(moved);
     if (!capsKnown) v.append(el("div", { class: "error-box", text:
-      "Parts of this page are missing: the capability check failed when this page loaded, so DBTrail does not know what this server supports. Reload the page." }));
+      "Parts of the Snapshots page are missing: the capability check failed when it loaded, so DBTrail does not know what this server supports. Reload the page." }));
     if (serversErr) v.append(el("div", { class: "error-box", text: "Could not load servers: " + serversErr }));
     // Three parts, three blast radii — as when they were three pages. A
     // verify record this build cannot read must not take the list of copies
@@ -6009,7 +6009,7 @@ function rotationCard(rot) {
   kvRow(card, "policy", rot.source === "override"
     ? ("set in the web interface" + (rot.enabled ? " (live)" : ""))
     : "daemon defaults");
-  if (!rot.enabled) card.append(el("p", { class: "form-hint", text: "Rotation is turned off. Changes you save here won't take effect until the daemon restarts." }));
+  if (!rot.enabled) card.append(el("p", { class: "form-hint", text: "Rotation is turned off. Changes saved with Edit rotation take effect only after the daemon restarts." }));
   card.append(el("div", { class: "stg-cardfoot" },
     el("button", { class: "btn btn-sm", type: "button", text: "Edit rotation…", onclick: showRotationDialog })));
   return card;
@@ -6271,7 +6271,7 @@ function s3RetentionBox(srv, servers, daemonS3) {
     el("p", { class: "form-hint", text: "Save the rule as dbtrail-backups-rule.json. The first command shows the rules the bucket already has; merge this one into them, since the second command replaces every rule on the bucket, such as one that aborts unfinished uploads, or the one-year rule that bintrail init --s3-bucket sets when it creates a bucket." }),
     rule, cmd,
     el("p", { class: "form-hint", text:
-      "The rule applies to " + s.prefix + "/ only, and to no archived changes configured on this page. It expires by age alone: it cannot spare the only complete copy, nor a snapshot a restore is reading, and if the schedule stops it keeps expiring until none is left." }),
+      "The rule applies to " + s.prefix + "/ only, and to no archived changes configured on the Snapshots page. It expires by age alone: it cannot spare the only complete copy, nor a snapshot a restore is reading, and if the schedule stops it keeps expiring until none is left." }),
     el("p", { class: "form-hint", text:
       "On a bucket with versioning the rule also expires old versions after the same number of days; under an Object Lock retention nothing can be expired before that retention ends." }),
     el("p", { class: "form-hint", text: "DBTrail never deletes from S3 and never changes a bucket's rules; this one is yours to apply." }));
@@ -6524,7 +6524,7 @@ function backupServersPanel(settings) {
   }
   if (settings.registry_read_only) {
     panel.append(el("p", { class: "form-msg err", text:
-      "The server registry was written by a newer version and is read-only here; values are shown but cannot be saved." }));
+      "The server registry was written by a newer version, so this DBTrail can only read it; values are shown but cannot be saved." }));
   }
   // The daemon default S3 destination, for the retention block: the boot
   // entry backs up there and is not in the list.
@@ -7246,7 +7246,7 @@ function duckdbPanel() {
 
   body.append(cnFine("More about this file",
     el("p", { class: "form-hint", text:
-      "Runs in your own DuckDB. Nothing runs here, and no credentials are in the file." }),
+      "Runs in your own DuckDB, not in DBTrail, and no credentials are in the file." }),
     el("p", { class: "form-hint", text:
       "The views follow your newest snapshot where the snapshot folder supports it. (CLI: bintrail views)" })));
 
@@ -7647,7 +7647,7 @@ function icebergExportCommand(cur, baselines) {
 function icebergComposeNote(cur) {
   const bundled = cur && cur.kind === "ephemeral";
   return "The Docker route below runs against this stack's own index and snapshots" +
-    (bundled ? ". " : ", not the server picked here. ") +
+    (bundled ? ". " : ", not the server picked in the left sidebar. ") +
     "To point it " + (bundled ? "somewhere else" : "at this server") +
     ", set INDEX_DSN and BASELINE_DIR or BASELINE_S3 in the stack's .env file.";
 }
@@ -9426,7 +9426,7 @@ function backupTakeAway(cur, b, sqlSt) {
   if (stErr) {
     panel.append(el("p", { class: "form-msg err", text:
       "The state of the .sql build could not be read: " + String(stErr).replace(/[.\s]+$/, "") +
-      ". A build may be running or finished that this page cannot show" +
+      ". A build may be running or finished that DBTrail cannot show" +
       (sessionMay(PERM_SNAPSHOT_CREATE) ? ", so Build is off until it can be read." : ".") }));
   } else if (sql && st && st.state && !SQL_EXPORT_KNOWN.has(st.state)) {
     panel.append(el("p", { class: "form-msg err", text:
@@ -9557,7 +9557,7 @@ function backupDuckLane(b) {
   // archived data" is a false statement about the installation.
   if (!capsCache.views) {
     lane.append(el("p", { class: "form-hint", text:
-      "The file that describes these tables is not offered here, because DBTrail is set not to read archived data. " +
+      "The file that describes these tables is not offered, because DBTrail is set not to read archived data. " +
       "DuckDB still opens the Parquet files, but decimal columns arrive as text, so totals will not add up until you cast them." }));
   }
   return lane;
@@ -11126,7 +11126,7 @@ async function renderConnect() {
       { cur: cur, loc: bLoc, failed: (bLocFailed && !!cur) || serversFailed });
   } catch (err) {
     if (minted) toastError("Token display interrupted; the plain token is gone. Click New token to get a fresh one");
-    const v = VIEW(); clear(v); v.append(pageHead("Connect AI", null)); renderError(v, err);
+    const v = VIEW(); clear(v); v.append(pageHead("MCP Server", null)); renderError(v, err);
   }
 }
 
@@ -11437,7 +11437,7 @@ async function mintMCPToken(rotate) {
 }
 
 async function revokeMCPToken() {
-  if (!window.confirm("Delete the token? Every AI client using it stops working right away. You can create a new token here whenever you want.")) return;
+  if (!window.confirm("Delete the token? Every AI client using it stops working right away. You can create a new one on the MCP Server page whenever you want.")) return;
   try {
     await api("/api/mcp-token", { method: "DELETE" });
   } catch (err) {
@@ -11499,8 +11499,8 @@ function mcpTokenCard(tok, minted) {
         (tok.read_only ? "" : " Lost it? New token gives you a fresh value, shown only once; the old one stops working.") }));
     }
     if (tok.read_only) {
-      card.append(cnFine("Why is there no button here?",
-        el("p", { class: "form-hint", text: "This token was created by a newer version of bintrail. It keeps working, but this page cannot replace or delete it; upgrading DBTrail brings those buttons back." })));
+      card.append(cnFine("Why are there no New token and Delete token buttons?",
+        el("p", { class: "form-hint", text: "This token was created by a newer version of bintrail. It keeps working, but this version of DBTrail cannot replace or delete it; upgrading DBTrail brings those buttons back." })));
     } else {
       card.append(el("div", { class: "cn-links" },
         el("button", { class: "btn btn-sm", type: "button", text: "New token", onclick: () => mintMCPToken(true) }),
@@ -11516,7 +11516,7 @@ function mcpTokenCard(tok, minted) {
       el("p", { class: "form-hint" },
         "That fixed token also works (CLI: ",
         el("code", { text: "--token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }),
-        "). It is managed wherever it was set up, not here.")));
+        "). It is managed wherever it was set up, not in the web interface.")));
   }
   return card;
 }
@@ -11643,7 +11643,7 @@ function otherClientsPanel(servers) {
   const url = mcpURL(servers);
   const snippet = JSON.stringify({
     mcpServers: {
-      dbtrail: { command: "bintrail-mcp", args: ["--connect", url, "--token", "YOUR_CONSOLE_TOKEN"] },
+      dbtrail: { command: "bintrail-mcp", args: ["--connect", url, "--token", "YOUR_ACCESS_TOKEN"] },
     },
   }, null, 2);
   const panel = el("section", { class: "ov-panel cn-other", style: "margin-top:18px" });
@@ -11708,12 +11708,12 @@ function sqlClientPanel(servers, fb) {
       // watch flag as "how to turn it on" would send the reader to a flag
       // this process does not have.
       body.append(el("p", { class: "cn-sql-row" },
-        "Not available here: this DBTrail is read-only. The time-travel port is part of the watch daemon (CLI: ",
+        "Not available: this DBTrail is read-only. The time-travel port is part of the watch daemon (CLI: ",
         el("code", { text: "bintrail-console watch --flashback-listen" }),
         "). Run that daemon and your usual MySQL client can read any table as it was at a chosen moment."));
       return panel;
     }
-    body.append(el("p", { class: "cn-sql-row", text: "Off. The port is set when the daemon starts, not from this page." }));
+    body.append(el("p", { class: "cn-sql-row", text: "Off. The port is set when the daemon starts, not from the web interface." }));
     body.append(cnFine("How to turn it on",
       el("p", { class: "form-hint" },
         "Start the daemon with a port address (CLI: ", el("code", { text: "--flashback-listen 127.0.0.1:3308" }),
@@ -11733,7 +11733,7 @@ function sqlClientPanel(servers, fb) {
     user ? el("code", { text: user }) : el("code", { text: "<server name>" }),
     user ? ", the server picked in the left sidebar" : ", the name of a server in the left sidebar (none yet)"));
   body.append(el("p", { class: "cn-sql-row" },
-    "Password: the access token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }), "), never shown here"));
+    "Password: the access token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }), "), never shown in the web interface"));
   if (fb.port) {
     const line = "mysql -h " + shellWord(flashbackHost(fb)) + " -P " + fb.port + " -u " + (user ? shellWord(user) : "<server-name>") + " -p";
     body.append(el("div", { class: "cn-urlrow" },
@@ -11748,7 +11748,7 @@ function sqlClientPanel(servers, fb) {
       " Use _snapshot for the whole table (needs a snapshot) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again."),
     el("p", { class: "form-hint", text: fb.host
       ? "The port answers on that address only. Run mysql where it can reach it (on the daemon's machine when it is 127.0.0.1), or open a tunnel to it."
-      : "The port answers on every network address of the daemon's machine; the command uses the name this page was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use the daemon machine's own name or address instead." })));
+      : "The port answers on every network address of the daemon's machine; the command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use the daemon machine's own name or address instead." })));
   return panel;
 }
 
@@ -12144,7 +12144,7 @@ async function showRotationDialog() {
 
   const note = el("p", { class: "form-hint", style: "margin-top:10px" });
   if (!cur.enabled) note.textContent = "Rotation is turned off. Your changes will be saved but won't take effect until the daemon restarts.";
-  else if (cur.source === "default") note.textContent = "Currently using the daemon's built-in defaults. Saving here creates a custom setting that takes effect immediately.";
+  else if (cur.source === "default") note.textContent = "Currently using the daemon's built-in defaults. Saving creates a custom setting that takes effect immediately.";
   else note.textContent = "A custom setting is active and takes effect immediately.";
   form.append(note);
 
@@ -12550,7 +12550,7 @@ function buildServerForm() {
   mon.append(tagFlavor(el("pre", { class: "form-code", text:
     "CREATE PUBLICATION bintrail_pub FOR ALL TABLES;\n" +
     "ALTER TABLE your_table REPLICA IDENTITY FULL;" }), "postgres"));
-  mon.append(el("p", { class: "form-hint", style: "margin-top:10px", text: "Archive to S3: old data is uploaded here before it's deleted locally, so your history is kept and can still be searched. Needs AWS credentials set up on the daemon (environment variables or an IAM role)." }));
+  mon.append(el("p", { class: "form-hint", style: "margin-top:10px", text: "Archive to S3: old data is uploaded to S3 before it's deleted locally, so your history is kept and can still be searched. Needs AWS credentials set up on the daemon (environment variables or an IAM role)." }));
   form.append(mon);
 
   // BYO index is the advanced path — collapsed behind a <details> so the
@@ -13179,7 +13179,7 @@ function noCaptureReason(s) {
   // A capability check that FAILED also leaves capsCache.monitor false, and
   // that is not serve mode: telling a watch operator to restart as watch would
   // be a confident wrong remedy. The honest one there is a reload.
-  if (!capsKnown) return "will not capture: the capability check failed when this page loaded, so nothing can be started from here. Reload the page";
+  if (!capsKnown) return "will not capture: the capability check failed when the web interface loaded, so capture cannot be started. Reload the page";
   if (!capsCache.monitor) return "will not capture: DBTrail was started as serve, which reads an index and never captures. Run bintrail-console watch to capture from this server";
   if (!s.has_source) return "will not capture: no source connection. Edit this server and add one";
   return null;

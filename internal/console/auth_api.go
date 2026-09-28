@@ -130,7 +130,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		// Either a credential already exists, or this bind is neither loopback
 		// nor marked --allow-setup. Creating the password is then a CLI
 		// (`user set-password`) or authenticated (change-password) action.
-		writeJSONError(w, http.StatusForbidden, "console setup is not available (a credential is already configured, or this bind is neither loopback nor marked --allow-setup)")
+		writeJSONError(w, http.StatusForbidden, "first-run setup is not available (a credential is already configured, or this bind is neither loopback nor marked --allow-setup)")
 		return
 	}
 	if !requireJSONBody(w, r) {
@@ -253,7 +253,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	a, err := LoadAuthFile(s.authPath)
 	if err != nil {
 		slog.Error("console auth file unreadable", "path", s.authPath, "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "couldn't read the console's saved login file; check the server log")
+		writeJSONError(w, http.StatusInternalServerError, "couldn't read the web interface's saved login file; check the server log")
 		return
 	}
 	if a == nil {
@@ -336,7 +336,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	a, err := LoadAuthFile(s.authPath)
 	if err != nil {
 		slog.Error("console auth file unreadable", "path", s.authPath, "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "couldn't read the console's saved login file; check the server log")
+		writeJSONError(w, http.StatusInternalServerError, "couldn't read the web interface's saved login file; check the server log")
 		return
 	}
 

@@ -244,13 +244,13 @@ console.log(JSON.stringify(cases.map((c) => (
 			// in the visible body rather than the collapsed block.
 			name: "compose note for a registry server", note: true,
 			server: map[string]any{"kind": "registry", "host": "db.internal", "port": "3306", "dbname": "idx"},
-			want:   []string{"not the server picked here", "at this server", "INDEX_DSN", "BASELINE_S3"},
+			want:   []string{"not the server picked in the left sidebar", "at this server", "INDEX_DSN", "BASELINE_S3"},
 		},
 		{
 			name: "compose note for the stack's own index", note: true,
 			server: map[string]any{"kind": "ephemeral", "host": "index-mysql", "port": "3306", "dbname": "bintrail_index"},
 			want:   []string{"this stack's own index", "somewhere else", "INDEX_DSN", "BASELINE_DIR"},
-			absent: []string{"not the server picked here"},
+			absent: []string{"not the server picked in the left sidebar"},
 		},
 		{name: "no destination", server: tcp, baseline: map[string]any{}, null: true},
 		{name: "no server", server: nil, baseline: local, null: true},

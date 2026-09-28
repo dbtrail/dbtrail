@@ -765,7 +765,7 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 					slog.Warn("console: cascade recovery over the script-size budget; falling back to plain recover", "error", cerr)
 					warnings = append([]string{
 						fmt.Sprintf(
-							"Cascade recovery synthesized the deleted rows, but the combined script would hold ~%.1f MiB of row data, over the console's %.0f MiB budget for a single recovery. The script below re-creates the parent only; cascade-deleted child rows are NOT included. Narrow the recovery filter (schema/table/pk/time range) to shrink the window, or use `bintrail recover-cascade` from the CLI for large cascades.",
+							"Cascade recovery synthesized the deleted rows, but the combined script would hold ~%.1f MiB of row data, over the %.0f MiB budget the web interface allows for a single recovery. The script below re-creates the parent only; cascade-deleted child rows are NOT included. Narrow the recovery filter (schema/table/pk/time range) to shrink the window, or use `bintrail recover-cascade` from the CLI for large cascades.",
 							float64(be.EstimatedBytes)/(1<<20), float64(be.Budget)/(1<<20)),
 					}, warnings...)
 					break // out of the switch → plain recover below
@@ -1258,8 +1258,8 @@ func writeFetchError(w http.ResponseWriter, err error) {
 			}
 		}
 		writeJSONError(w, http.StatusUnprocessableEntity,
-			"this index predates the "+col+" column, and the console never migrates servers added in the UI; "+
-				"run a writer command against it once (bintrail index / stream / agent), or start a console with --index-dsn pointing at it")
+			"this index predates the "+col+" column, and DBTrail never migrates servers added in the web interface; "+
+				"run a writer command against it once (bintrail index / stream / agent), or start bintrail-console with --index-dsn pointing at it")
 		return
 	}
 	writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -1285,9 +1285,9 @@ func writeRecoverError(w http.ResponseWriter, err error) {
 	if errors.As(err, &be) {
 		writeJSONError(w, http.StatusUnprocessableEntity, fmt.Sprintf(
 			"refusing to generate the reversal script: the matched events hold ~%.1f MiB of row data, "+
-				"over the console's %.0f MiB budget for a single recovery. Narrow the recovery filter "+
+				"over the %.0f MiB budget the web interface allows for a single recovery. Narrow the recovery filter "+
 				"(schema/table/pk/time range) to shrink the window, or use `bintrail recover` from the CLI "+
-				"for large recoveries; it runs outside the console's shared process and supports "+
+				"for large recoveries; it runs outside the daemon's shared process and supports "+
 				"--max-script-bytes to raise or disable this budget.",
 			float64(be.EstimatedBytes)/(1<<20), float64(be.Budget)/(1<<20)))
 		return

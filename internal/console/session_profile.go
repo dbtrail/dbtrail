@@ -371,7 +371,7 @@ func (e archiveExclusion) announce(gaps bool) bool {
 func (e archiveExclusion) notice() string {
 	switch {
 	case e.server:
-		return "This console reads the LIVE INDEX ONLY (started with --no-archive, or with a profile that " +
+		return "This DBTrail reads the LIVE INDEX ONLY (started with --no-archive, or with a profile that " +
 			"implies it), so archived (rotated) hours are not searched. A short or empty result does not " +
 			"mean nothing happened in that window."
 	case e.profile:

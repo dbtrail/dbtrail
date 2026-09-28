@@ -89,7 +89,7 @@ func PGReplDSN(queryDSN string) (string, error) {
 	}
 	q := u.Query()
 	if q.Get("replication") != "" {
-		return "", errors.New("source DSN already carries a replication parameter; store the ordinary query DSN and let the console derive the replication connection")
+		return "", errors.New("source DSN already carries a replication parameter; store the ordinary query DSN and let DBTrail derive the replication connection")
 	}
 	q.Set("replication", "database")
 	u.RawQuery = q.Encode()
@@ -143,7 +143,7 @@ func validatePGQueryDSN(raw string) error {
 		return errors.New("PostgreSQL source_dsn must include a database name (postgres://user:pass@host:5432/dbname)")
 	}
 	if u.Query().Get("replication") != "" {
-		return errors.New("PostgreSQL source_dsn must be an ordinary (query) connection; drop replication=database; the console derives the replication connection automatically")
+		return errors.New("PostgreSQL source_dsn must be an ordinary (query) connection; drop replication=database; DBTrail derives the replication connection automatically")
 	}
 	return nil
 }

@@ -3076,7 +3076,7 @@ try {
     : bad("take-away: with no views capability the lane draws one download and offers no views file", JSON.stringify(duckOff.off));
   // And it must say WHY, rather than dressing a console setting as a property
   // of the data: the same folder still yields the file from the command line.
-  (duckOff.off && /not offered here/.test(duckOff.off.text) && /decimal columns arrive as text/.test(duckOff.off.text))
+  (duckOff.off && /not offered, because/.test(duckOff.off.text) && /decimal columns arrive as text/.test(duckOff.off.text))
     ? ok("take-away: the withheld views file is explained, not implied away")
     : bad("take-away: the withheld views file is explained, not implied away", JSON.stringify(duckOff.off && duckOff.off.text));
   // The on-arm is the vacuousness control: a builder that always drew one
