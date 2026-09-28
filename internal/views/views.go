@@ -424,6 +424,26 @@ type Input struct {
 	// behaviour, so the SQL panel — which decides through OnlyViews and needs
 	// events whenever a statement names it — is unaffected.
 	OmitEvents bool
+
+	// Schema, when set, is the DuckDB schema every view of this file is created
+	// in (#1874). Empty keeps the file exactly as it was before the field
+	// existed: views in `main`, named without a qualifier.
+	//
+	// It exists for the reader who loads one file per server into ONE database.
+	// A view name carries the table and never the server, and every statement is
+	// CREATE OR REPLACE, so two servers that share a schema.table overwrite each
+	// other without an error and `events` does it on the first pair.
+	//
+	// A schema holds views and nothing else. Everything in this file that lives
+	// OUTSIDE a schema has one name per session, so it is derived from Schema
+	// too (see schema.go): the ATTACH alias and its secret, and the session
+	// variables the following state views read through at query time. A view
+	// qualified into its own schema that still read a shared variable would show
+	// another server's rows, which is the overwrite again, harder to see.
+	//
+	// The producer validates it with ValidateSchemaName; the generator quotes it
+	// wherever it is written.
+	Schema string
 }
 
 // ViewSet names a subset of the views an Input defines.
@@ -476,6 +496,9 @@ func Generate(in Input) string {
 		// documented below is about the ATTACH, not about credentials.
 		writeS3Preamble(&b, region, in.S3Endpoint, in.RegionAmbiguous, in.BucketStores)
 	}
+	// Ahead of every view, and after the S3 preamble only because nothing in
+	// that preamble lives in a schema.
+	writeSchema(&b, in)
 	// The state views FIRST, then the ATTACH, then the events view that needs
 	// it.
 	//
@@ -523,7 +546,7 @@ func Generate(in Input) string {
 	// emitted with no view reading through it, above a comment introducing a
 	// hot leg that is not there.
 	if in.LiveIndex != nil && in.OnlyViews.wants(eventsViewName) {
-		writeLivePreamble(&b, in.LiveIndex)
+		writeLivePreamble(&b, in)
 	}
 	writeEventsView(&b, in, stateSurvives)
 	return b.String()
@@ -560,7 +583,12 @@ func GenerateViews(in Input) string {
 		// nothing.
 		return ""
 	}
-	return b.String()
+	// The schema goes with the views and only with them: the empty answer
+	// above stays empty, since a caller told to run nothing must not be handed
+	// a CREATE SCHEMA to run.
+	var schema strings.Builder
+	writeSchemaStatement(&schema, in)
+	return schema.String() + b.String()
 }
 
 // NeedsS3 reports whether the rendered file will read any s3:// path. Callers
@@ -1122,7 +1150,8 @@ const liveSecretName = "bintrail_index"
 // fills in their own session. Same stance as the S3 preamble, which reaches for
 // a credential chain rather than writing keys into the file; MySQL has no such
 // chain, so the slot is explicit instead.
-func writeLivePreamble(b *strings.Builder, li *LiveIndex) {
+func writeLivePreamble(b *strings.Builder, in Input) {
+	li := in.LiveIndex
 	b.WriteString("-- Live index setup, for the hot leg of the events view.\n")
 	b.WriteString("-- FILL IN THE PASSWORD BELOW before running: this file is shareable and\n")
 	b.WriteString("-- carries none. Everything else is the index location, which is not secret.\n")
@@ -1134,7 +1163,7 @@ func writeLivePreamble(b *strings.Builder, li *LiveIndex) {
 	// AT TIME ZONE 'UTC', which is ICU's. Where ICU is built in, both
 	// statements are a no-op that reports it already installed.
 	b.WriteString("INSTALL icu; LOAD icu;\n")
-	fmt.Fprintf(b, "CREATE OR REPLACE SECRET %s (\n", quoteIdent(liveSecretName))
+	fmt.Fprintf(b, "CREATE OR REPLACE SECRET %s (\n", quoteIdent(in.liveSecret()))
 	b.WriteString("    TYPE mysql,\n")
 	fmt.Fprintf(b, "    HOST %s,\n", sqlString(li.Host))
 	fmt.Fprintf(b, "    PORT %d,\n", li.Port)
@@ -1176,9 +1205,9 @@ func writeLivePreamble(b *strings.Builder, li *LiveIndex) {
 		b.WriteString("-- with an unknown-host error. Change HOST to an address that resolves\n")
 		b.WriteString("-- from where you run this, or open a tunnel to it first.\n")
 	}
-	writeLiveCaptureNote(b)
+	writeLiveCaptureNote(b, in)
 	fmt.Fprintf(b, "ATTACH '' AS %s (TYPE mysql, SECRET %s, READ_ONLY);\n\n",
-		quoteIdent(liveAttachAlias), quoteIdent(liveSecretName))
+		quoteIdent(in.liveAlias()), quoteIdent(in.liveSecret()))
 }
 
 // writeLiveCaptureNote says WHOSE server the hot leg reads, next to the ATTACH
@@ -1206,7 +1235,7 @@ func writeLivePreamble(b *strings.Builder, li *LiveIndex) {
 // until something outside it restarts it, which is the 41-minute outage
 // consoleapp/mainstream.go's own comment records. Wording it as capture
 // "falling behind while that happens" described a dip, not a stop.
-func writeLiveCaptureNote(b *strings.Builder) {
+func writeLiveCaptureNote(b *strings.Builder, in Input) {
 	b.WriteString("-- SHARED WITH CAPTURE: this attaches the index bintrail writes captured\n")
 	b.WriteString("-- events into, so a query over the events view reads the server capture is\n")
 	b.WriteString("-- writing to. The view cannot push your filter down to it (see COST below),\n")
@@ -1222,7 +1251,10 @@ func writeLiveCaptureNote(b *strings.Builder) {
 	// just said a filter does not reach the index, so advising one would
 	// contradict the sentence above it and send the reader to the one thing
 	// that cannot help.
-	b.WriteString("-- Two ways to keep it off capture: query `bintrail_live`.\"binlog_events\"\n")
+	// The catalog this file attached, by the name it attached it under: with a
+	// schema that name is the server's, and the fixed one would send the reader
+	// to whichever index another server's file attached.
+	fmt.Fprintf(b, "-- Two ways to keep it off capture: query `%s`.\"binlog_events\"\n", commentSafe(in.liveAlias()))
 	b.WriteString("-- directly with your own WHERE, which does reach the index, or point HOST\n")
 	b.WriteString("-- above at a read replica, at the cost of that replica's own lag on top of\n")
 	b.WriteString("-- capture lag.\n")
@@ -1433,8 +1465,8 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 		b.WriteString("-- replace a known source with NULL for every event in the overlap, and a\n")
 		b.WriteString("-- WHERE bintrail_id = ... would then miss rows the archives hold.\n")
 		writeAttachDegradeNote(b, stateSurvives, true)
-		writeLiveCostNote(b, true)
-		b.WriteString("CREATE OR REPLACE VIEW \"events\" AS\n")
+		writeLiveCostNote(b, in, true)
+		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.viewRef(eventsViewName))
 		b.WriteString("  WITH cold AS (\n")
 		writeColdSide(b, in, "    ")
 		b.WriteString("\n  ), hot AS (\n")
@@ -1456,8 +1488,8 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 		// No cold leg to fall back to: the index IS the only source this file
 		// names, so regenerating without it would define no events view at all.
 		writeAttachDegradeNote(b, stateSurvives, false)
-		writeLiveCostNote(b, false)
-		b.WriteString("CREATE OR REPLACE VIEW \"events\" AS\n")
+		writeLiveCostNote(b, in, false)
+		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.viewRef(eventsViewName))
 		writeEventSelect(b, in, true, nil, "  ")
 		b.WriteString(";\n\n")
 	default:
@@ -1478,7 +1510,7 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 			b.WriteString("-- Add a leg over the index by regenerating with --include-live:\n")
 			b.WriteString("--   bintrail views --index-dsn ... --include-live\n")
 		}
-		b.WriteString("CREATE OR REPLACE VIEW \"events\" AS\n")
+		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.viewRef(eventsViewName))
 		writeColdSide(b, in, "  ")
 		b.WriteString(";\n\n")
 	}
@@ -1491,7 +1523,7 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 // Measured, not assumed: event_date and event_hour are DERIVED on the index leg
 // (the index has no partition path), so a predicate on them is evaluated above
 // that scan and cannot become a partition filter the way it does on Parquet.
-func writeLiveCostNote(b *strings.Builder, withCold bool) {
+func writeLiveCostNote(b *strings.Builder, in Input, withCold bool) {
 	b.WriteString("--\n")
 	b.WriteString("-- COST: a filter on this view does not become a filter on the index. The\n")
 	b.WriteString("-- index leg derives event_date and event_hour from event_timestamp, so a\n")
@@ -1507,7 +1539,7 @@ func writeLiveCostNote(b *strings.Builder, withCold bool) {
 	}
 	b.WriteString(".\n")
 	fmt.Fprintf(b, "-- For a narrow read of recent events, query %s.\"binlog_events\" directly\n",
-		quoteIdent(liveAttachAlias))
+		commentSafe(quoteIdent(in.liveAlias())))
 	b.WriteString("-- with your own WHERE: that one does reach the index, which is indexed on\n")
 	b.WriteString("-- event_timestamp and on schema_name/table_name.\n")
 }
@@ -1647,7 +1679,7 @@ func writeEventSelect(b *strings.Builder, in Input, live bool, group *ArchiveGro
 		// Only the columns above: live binlog_events also has pk_hash, a
 		// generated column the archives do not carry, and selecting it would
 		// give the two legs different shapes.
-		fmt.Fprintf(b, "\n%sFROM %s.\"binlog_events\"", indent, quoteIdent(liveAttachAlias))
+		fmt.Fprintf(b, "\n%sFROM %s.\"binlog_events\"", indent, quoteIdent(in.liveAlias()))
 		return
 	}
 	paths := make([]string, 0, len(in.ArchiveSources))
@@ -1855,7 +1887,7 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 	b.WriteString("--\n")
 	b.WriteString("-- These are the SNAPSHOT's rows, not the table's current state: changes after\n")
 	if in.rendersEvents() {
-		b.WriteString("-- the snapshot live in the `events` view.\n")
+		fmt.Fprintf(b, "-- the snapshot live in the `%s` view.\n", commentSafe(in.viewLabel(eventsViewName)))
 	} else if in.OmitEvents && in.definesEvents() {
 		// The view COULD be defined and was left out. Both routes named,
 		// because the file is served by two producers and the console reader
@@ -1889,9 +1921,9 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		for _, line := range decimalComments(t) {
 			fmt.Fprintf(b, "-- %s: %s\n", name, line)
 		}
-		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", quoteIdent(name))
+		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.viewRef(name))
 		if in.Follow == FollowNewest {
-			writeNewestStateBody(b, t)
+			writeNewestStateBody(b, in, t)
 			continue
 		}
 		if t.Delta {
@@ -1960,7 +1992,7 @@ func writeNewestSnapshotVar(b *strings.Builder, in Input) {
 	b.WriteString("-- file is read. Re-run this statement to pick up a refresh without reopening\n")
 	b.WriteString("-- the session; every view follows it, so they never disagree about which\n")
 	b.WriteString("-- snapshot they are showing.\n")
-	fmt.Fprintf(b, "SET VARIABLE %s = (\n", newestVar)
+	fmt.Fprintf(b, "SET VARIABLE %s = (\n", in.sessionName(newestVar))
 	b.WriteString("  SELECT CASE WHEN max(file) IS NULL\n")
 	fmt.Fprintf(b, "    THEN error(%s)\n", sqlString(
 		"bintrail views: no completed snapshot under "+root+"/ (nothing there carries a "+
@@ -2050,7 +2082,12 @@ func writeSnapshotPreflight(b *strings.Builder, in Input, wanted []statePlan) {
 	b.WriteString("-- Every table below has to still be in that snapshot. A table dropped at the\n")
 	b.WriteString("-- source leaves it, and DuckDB binds a view when it is created, so without\n")
 	b.WriteString("-- this the script would stop at that one view and never define the rest.\n")
-	b.WriteString("SET VARIABLE " + missingVar + " = (\n")
+	// Both variables are read back two statements below and never again, so a
+	// shared name would cost nothing today. They carry the schema anyway: a
+	// name that is safe only because of WHEN it is read stops being safe the
+	// day something reads it later.
+	missing, checked := in.sessionName(missingVar), in.sessionName(checkVar)
+	b.WriteString("SET VARIABLE " + missing + " = (\n")
 	b.WriteString("  SELECT string_agg(t, ', ' ORDER BY t) FROM (VALUES\n")
 	for i, rel := range rels {
 		sep := ","
@@ -2083,9 +2120,9 @@ func writeSnapshotPreflight(b *strings.Builder, in Input, wanted []statePlan) {
 	// there on purpose, because the emitter above has already raised its own
 	// refusal naming the root, and a second message about missing tables would
 	// only describe the same absent snapshot in worse words.
-	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT CASE WHEN getvariable('%s') IS NOT NULL\n", checkVar, missingVar)
+	fmt.Fprintf(b, "SET VARIABLE %s = (SELECT CASE WHEN getvariable('%s') IS NOT NULL\n", checked, missing)
 	fmt.Fprintf(b, "  THEN error(%s || getvariable('%s') ||\n",
-		sqlString("bintrail views: these tables are not in the newest snapshot any more: "), missingVar)
+		sqlString("bintrail views: these tables are not in the newest snapshot any more: "), missing)
 	// Naming where it looked is what DuckDB's own "No files found" gave the
 	// reader before this check existed, and it is the half that says whether the
 	// table moved or the whole snapshot is the wrong one. Under FollowNewest the
@@ -2122,7 +2159,7 @@ func writeSnapshotPreflight(b *strings.Builder, in Input, wanted []statePlan) {
 func snapshotDirExpr(in Input) (dir, globDir string, ok bool) {
 	switch in.Follow {
 	case FollowNewest:
-		v := "getvariable('" + newestVar + "')"
+		v := "getvariable('" + in.sessionName(newestVar) + "')"
 		return v, v, true
 	case FollowPointer:
 		// filepath.Join, not a hand-built string off the raw BaselineSource.
@@ -2180,10 +2217,13 @@ func globLiteral(s string) string {
 // because the generated file SETs the variable before it creates any view —
 // error() raises when the CASE is BOUND with the variable still null, so a
 // producer must never emit these bodies ahead of writeNewestSnapshotVar.
-func writeNewestStateBody(b *strings.Builder, t BaselineTable) {
+func writeNewestStateBody(b *strings.Builder, in Input, t BaselineTable) {
+	// The schema's own variable, read on every query: see Input.sessionName for
+	// what a shared one would return.
+	newest := in.sessionName(newestVar)
 	path := func(rel string) string {
 		return fmt.Sprintf("CASE WHEN getvariable('%s') IS NULL\n    THEN error(%s)\n    ELSE getvariable('%s') || %s END",
-			newestVar, sqlString(newestVarUnsetMsg), newestVar, sqlString(rel))
+			newest, sqlString(newestVarUnsetMsg), newest, sqlString(rel))
 	}
 	if t.Delta {
 		fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Rel, path, false))
@@ -2192,8 +2232,8 @@ func writeNewestStateBody(b *strings.Builder, t BaselineTable) {
 	// The guard's pattern is built beside the variable, not through path():
 	// an unset variable is already reported by the read itself.
 	plain, rng := deltaAppearedPatterns(t.Rel)
-	guard := "\n  " + deltaAppearedGuard(fmt.Sprintf("getvariable('%s') || %s", newestVar, sqlString(plain)),
-		fmt.Sprintf("getvariable('%s') || %s", newestVar, sqlString(rng)), t)
+	guard := "\n  " + deltaAppearedGuard(fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(plain)),
+		fmt.Sprintf("getvariable('%s') || %s", newest, sqlString(rng)), t)
 	read := "read_parquet(" + path(t.Rel) + ")" + guard
 	if replace := decimalReplaceClause(t); replace != "" {
 		fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
