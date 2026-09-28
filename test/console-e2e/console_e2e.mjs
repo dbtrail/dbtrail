@@ -17,6 +17,9 @@ import zlib from "node:zlib";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import { runSaveScenes, checkScenesRan } from "./save_controls.mjs";
 
 const URL = process.env.CONSOLE_URL || "http://127.0.0.1:8090";
 const TOKEN = process.env.CONSOLE_TOKEN || "";
@@ -118,7 +121,10 @@ const bad = (name, detail) => results.push({ name, pass: false, detail });
   if (control.length !== 2 || control[0] !== 1 || control[1] !== 2) {
     bad("suite: the waitForFunction scanner detects the two-arg shape", `control flagged lines ${JSON.stringify(control)}, expected [1,2]`);
   } else {
-    const misplaced = scan(src);
+    // The Save-control scenes live in their own module; the same shape
+    // there would wait 30s just as quietly, so it is scanned too.
+    const scenesSrc = readFileSync(fileURLToPath(new globalThis.URL("./save_controls.mjs", import.meta.url)), "utf8");
+    const misplaced = [...scan(src), ...scan(scenesSrc).map((l) => "save_controls.mjs:" + l)];
     misplaced.length === 0
       ? ok("suite: every waitForFunction timeout is in the options slot")
       : bad("suite: every waitForFunction timeout is in the options slot",
@@ -5972,6 +5978,23 @@ try {
     ? ok("routes: Back onto a rewritten entry is a fresh visit, not an old address")
     : bad("routes: Back onto a rewritten entry is a fresh visit, not an old address", JSON.stringify(afterBack));
   await tab.close();
+
+  // One scene per control that saves something (#1883), last: they add and
+  // remove a server, leave a rotation override behind, and set the console
+  // password, which ends every other session. Each reads the stored value
+  // back through the API. save_controls.mjs holds the list and the scenes;
+  // checkScenesRan fails the run for any entry whose scene never reported.
+  const saveTmp = mkdtempSync(os.tmpdir() + "/console-e2e-save-");
+  let skippedScenes = [];
+  try {
+    skippedScenes = await runSaveScenes({ browser, page, ok, bad, url: URL, token: TOKEN, jsErrors, byoId, tmpDir: saveTmp });
+  } finally {
+    try { rmSync(saveTmp, { recursive: true, force: true }); } catch (_) { /* a temp dir */ }
+  }
+  const notRun = checkScenesRan(results, { skipped: skippedScenes, inCI: !!process.env.CI });
+  notRun.length === 0
+    ? ok("save: every control on the list reported from its scene")
+    : bad("save: every control on the list reported from its scene", "no result from: " + notRun.join("; "));
 
   // No uncaught JS errors over the whole run.
   jsErrors.length === 0 ? ok("no uncaught JS errors") : bad("no uncaught JS errors", JSON.stringify(jsErrors));

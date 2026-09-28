@@ -39,6 +39,12 @@ SERVERS_FILE="$(mktemp -t console-e2e-servers.XXXXXX.yaml)"
 DUMP_DIR="$(mktemp -d -t console-e2e-dump.XXXXXX)"
 BASELINE_ROOT="$(mktemp -d -t console-e2e-baseline.XXXXXX)"
 ARC_DIR="$(mktemp -d -t console-e2e-arc.XXXXXX)"
+# The login and MCP token files the daemon writes (#1883: the Save scenes set
+# a password and create a token). A directory, not mktemp files: a file that
+# exists but is empty reads as a broken one, a missing one as "none yet",
+# which is the state a fresh install starts in. Keeping them here also keeps
+# a local run off the developer's own ~/.config/bintrail files.
+STATE_DIR="$(mktemp -d -t console-e2e-state.XXXXXX)"
 export E2E_ARTIFACT_DIR="${E2E_ARTIFACT_DIR:-${RUNNER_TEMP:-/tmp}}"
 
 mysql_exec() { docker exec -i "$MYSQL_CONTAINER" mysql -uroot -ptestroot "$@" 2>/dev/null; }
@@ -49,9 +55,14 @@ cleanup() {
   mysql_exec -e "DROP DATABASE IF EXISTS $IDX_DB;" >/dev/null 2>&1 || true
   mysql_exec -e "DROP DATABASE IF EXISTS $ARC_DB;" >/dev/null 2>&1 || true
   rm -f "$SERVERS_FILE" 2>/dev/null || true
-  rm -rf "$DUMP_DIR" "$BASELINE_ROOT" "$ARC_DIR" 2>/dev/null || true
+  rm -rf "$DUMP_DIR" "$BASELINE_ROOT" "$ARC_DIR" "$STATE_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# The list of Save controls against app.js (#1883), first: it needs no daemon,
+# and a write with no scene should fail before minutes of setup.
+echo "==> every Save control in app.js has a scene (save_controls.test.mjs)"
+node --test "$HERE/save_controls.test.mjs"
 
 echo "==> build bintrail-console"
 CONSOLE_BIN="${CONSOLE_BIN:-}"
@@ -214,6 +225,8 @@ BINTRAIL_CONSOLE_TOKEN="$TOKEN" BINTRAIL_CONSOLE_BASELINE_TRIGGER=1 BINTRAIL_CON
   --console-listen "127.0.0.1:$PORT" \
   --console-token "$TOKEN" \
   --console-servers-file "$SERVERS_FILE" \
+  --console-auth-file "$STATE_DIR/console-auth.yaml" \
+  --console-mcp-token-file "$STATE_DIR/console-mcp-token.yaml" \
   --baseline-dir "$BASELINE_ROOT" \
   --flashback-listen "127.0.0.1:$FLASHBACK_PORT" \
   --console-allow-setup >"$E2E_ARTIFACT_DIR/console-e2e-daemon.log" 2>&1 &
