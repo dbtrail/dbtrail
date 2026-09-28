@@ -21,6 +21,7 @@ func resetViewsFlags() {
 	vIndexDSN, vArchiveDir, vArchiveS3, vBintrailID = "", "", "", ""
 	vRegion, vBaselineDir, vBaselineS3, vOut = "", "", "", "views.sql"
 	vNoBaselines, vIncludeEvents, vIncludeLive, vPinSnapshot = false, false, false, false
+	vSchema = ""
 }
 
 // TestRunViews_flagValidation covers the refusals that must happen BEFORE any

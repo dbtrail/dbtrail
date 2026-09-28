@@ -35,6 +35,13 @@ const (
 // the archives do not carry it, so a leg that selected it would not line up.
 func liveStandIn(t *testing.T, db *sql.DB, omit ...string) {
 	t.Helper()
+	liveStandInAs(t, db, liveAttachAlias, omit...)
+}
+
+// liveStandInAs is liveStandIn under the alias a file generated with a schema
+// attaches its index as, so two servers' stand-ins can sit in one session.
+func liveStandInAs(t *testing.T, db *sql.DB, alias string, omit ...string) {
+	t.Helper()
 	cols := []struct{ name, typ string }{
 		{"event_id", "UBIGINT"}, {"binlog_file", "VARCHAR"}, {"start_pos", "UBIGINT"},
 		{"end_pos", "UBIGINT"}, {"event_timestamp", "TIMESTAMP"}, {"gtid", "VARCHAR"},
@@ -52,10 +59,10 @@ func liveStandIn(t *testing.T, db *sql.DB, omit ...string) {
 		defs = append(defs, `"`+c.name+`" `+c.typ)
 		names = append(names, `"`+c.name+`"`)
 	}
-	if _, err := db.Exec(`ATTACH ':memory:' AS "bintrail_live"`); err != nil {
+	if _, err := db.Exec(`ATTACH ':memory:' AS ` + quoteIdent(alias)); err != nil {
 		t.Fatalf("attach stand-in catalog: %v", err)
 	}
-	if _, err := db.Exec(`CREATE TABLE "bintrail_live"."binlog_events" (` + strings.Join(defs, ", ") + `)`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE ` + quoteIdent(alias) + `."binlog_events" (` + strings.Join(defs, ", ") + `)`); err != nil {
 		t.Fatalf("create stand-in table: %v", err)
 	}
 
@@ -78,7 +85,7 @@ func liveStandIn(t *testing.T, db *sql.DB, omit ...string) {
 			vals = append(vals, r[i])
 		}
 		ph := strings.TrimSuffix(strings.Repeat("?,", len(vals)), ",")
-		stmt := `INSERT INTO "bintrail_live"."binlog_events" (` + strings.Join(names, ",") + `) VALUES (` + ph + `)`
+		stmt := `INSERT INTO ` + quoteIdent(alias) + `."binlog_events" (` + strings.Join(names, ",") + `) VALUES (` + ph + `)`
 		if _, err := db.Exec(stmt, vals...); err != nil {
 			t.Fatalf("insert stand-in row: %v", err)
 		}
