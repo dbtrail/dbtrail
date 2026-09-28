@@ -5209,9 +5209,11 @@ try {
   (bks.editRows.length === 1 && bks.editRows.every((r) => r.input && r.save && r.why.length > 0))
     ? ok("backup-settings: one savable daemon row (retention), with an input, a Save and its provenance")
     : bad("backup-settings: one savable daemon row (retention), with an input, a Save and its provenance", JSON.stringify(bks.editRows));
-  (bks.cardChips === -1 && bks.rowChips === 0 && !bks.bootInGrid && bks.sections.length === 1)
-    ? ok("backup-settings: one section, no startup card and no restart chip on the page")
-    : bad("backup-settings: one section, no startup card and no restart chip on the page",
+  // One kind of setting is drawn, so nothing titles it: a title existed only
+  // to tell it from the startup rows, which left the page.
+  (bks.cardChips === -1 && bks.rowChips === 0 && !bks.bootInGrid && bks.sections.length === 0)
+    ? ok("backup-settings: no section title, no startup card and no restart chip on the page")
+    : bad("backup-settings: no section title, no startup card and no restart chip on the page",
         JSON.stringify({ cardChips: bks.cardChips, rowChips: bks.rowChips, bootInGrid: bks.bootInGrid, sections: bks.sections }));
   (bks.visibleChars > 0 && bks.visibleChars < 1300 && bks.perServerFound && bks.fine >= 2 && bks.fineOpen === 0 && !bks.emDash)
     ? ok("snapshots: the setup section's visible text stays under budget with the fine print compact")
