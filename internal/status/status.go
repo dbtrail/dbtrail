@@ -1909,7 +1909,7 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 			// #1707: its own cause, with its own fix. The floor is fine here.
 			fmt.Fprintln(w, "The deltas beside the newest snapshot could not be read for:")
 			fmt.Fprintln(w, "  "+strings.Join(unread, ", "))
-			fmt.Fprintln(w, "Where a restore of those tables starts is not known. A full backup of")
+			fmt.Fprintln(w, "Where a restore of those tables starts is not known. A full snapshot of")
 			fmt.Fprintln(w, "them replaces the damaged files.")
 		}
 		if floorUnknown {

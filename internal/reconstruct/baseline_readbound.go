@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -95,7 +96,8 @@ var chainStartAt = baseline.TableDeltaStartAt
 // table file starts its event fetch: what FindBaseline returns for it.
 //
 // It never fails. A chain whose start cannot be read (damaged delta files, an
-// unreadable footer, a store that did not answer, ctx done first) comes back
+// unreadable footer, a store that did not answer, ctx done first, a read
+// that panicked) comes back
 // Unread, which no verdict grades as covered. Over a local folder that is
 // one footer read per file with a chain; over S3 the same, in parallel, and
 // none for a file this process already answered for.
@@ -106,7 +108,7 @@ func ReadBounds(ctx context.Context, files []BaselineFile) []status.ReadBound {
 	for i, f := range files {
 		switch {
 		case f.DeltaErr != nil:
-			slog.Warn("the table delta beside a backup file is damaged, so the age of the backup cannot be graded",
+			slog.Warn("the table delta beside a snapshot file is damaged, so the age of the snapshot cannot be graded",
 				"path", f.Path, "error", f.DeltaErr)
 			out[i].Unread = true
 			continue
@@ -124,6 +126,7 @@ func ReadBounds(ctx context.Context, files []BaselineFile) []status.ReadBound {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer recoverReadBound(f.Path, &out[i])
 			select {
 			case slots <- struct{}{}:
 				defer func() { <-slots }()
@@ -133,7 +136,7 @@ func ReadBounds(ctx context.Context, files []BaselineFile) []status.ReadBound {
 			}
 			start, err := chainStartAt(ctx, f.deltaUpsertsPath())
 			if err != nil {
-				slog.Warn("could not read where the table delta beside a backup file starts, so the age of the backup cannot be graded",
+				slog.Warn("could not read where the table delta beside a snapshot file starts, so the age of the snapshot cannot be graded",
 					"path", f.Path, "error", err)
 				out[i].Unread = true
 				return
@@ -146,6 +149,29 @@ func ReadBounds(ctx context.Context, files []BaselineFile) []status.ReadBound {
 	}
 	wg.Wait()
 	return out
+}
+
+// recoverReadBound stops a panic in one file's footer read from taking the
+// process down. ReadBounds starts a goroutine per file, which no recover of
+// its caller covers, and it runs inside the daemon that also captures: an
+// unrecovered panic here is a capture outage over a read that only grades a
+// verdict.
+//
+// The file comes back unread, whole: whatever the read had written before it
+// panicked is dropped, so half an answer cannot grade as covered, and nothing
+// is kept in the S3 memo. It is deferred after wg.Done and before the slot is
+// taken, so the wait and the slot are both released on this path too; a
+// recover that only logged would leave the caller waiting for good.
+func recoverReadBound(path string, b *status.ReadBound) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	slog.Error("reading where the table delta beside a snapshot file starts hit an internal error; "+
+		"the age of that snapshot cannot be graded and the other tables continue. "+
+		"Please report this with the stack recorded here.",
+		"path", path, "panic", r, "stack", string(debug.Stack()))
+	*b = status.ReadBound{Unread: true}
 }
 
 // NewestPerTable returns the indexes, into files, of each table's newest

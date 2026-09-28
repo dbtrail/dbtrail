@@ -763,7 +763,7 @@ says `unreadable` (`reads_from_unknown: true` in JSON) and the table grades
 `unknown`, never `ok` and never `aging`: both of those say the window is
 covered, and where the window starts is not known. One exception: a snapshot
 folder that is already older than coverage is `broken` whatever its chain
-says, because a chain never starts after its folder. A full backup of the
+says, because a chain never starts after its folder. A full snapshot of the
 table replaces the damaged files. The `watch` daemon treats such a server
 like one it cannot evaluate: it logs a warning, sends no alert on a guess,
 and does not resolve a standing `baseline_stale` alert. A table that is

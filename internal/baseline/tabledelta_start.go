@@ -35,7 +35,7 @@ func TableDeltaStartAt(ctx context.Context, upserts string) (time.Time, error) {
 		// The pair exists and cannot say where its chain began. Every safe
 		// answer needs that instant, so there is none to give.
 		return time.Time{}, fmt.Errorf("table delta %s records no chain start (%s); "+
-			"it cannot be read safely — take a full backup to replace this snapshot",
+			"it cannot be read safely; take a full snapshot to replace this one",
 			upserts, MetaKeyDeltaChainStart)
 	}
 	return um.DeltaChainStart, nil
