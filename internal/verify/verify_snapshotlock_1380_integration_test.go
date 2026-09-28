@@ -126,6 +126,9 @@ func TestVerifyBaselinePair_snapshotLock(t *testing.T) {
 			if got.Status != tc.want || got.SnapshotLock != tc.lock {
 				t.Fatalf("%s with lock %q (%s); want %s with lock %q", got.Status, got.SnapshotLock, got.Detail, tc.want, tc.lock)
 			}
+			if (got.Status == StatusInconclusive) != (got.InconclusiveKind == InconclusiveTornSnapshot) {
+				t.Errorf("%s with kind %q", got.Status, got.InconclusiveKind)
+			}
 			if tc.says != "" && !strings.Contains(got.Detail, tc.says) {
 				t.Errorf("the reason does not say %q: %q", tc.says, got.Detail)
 			}

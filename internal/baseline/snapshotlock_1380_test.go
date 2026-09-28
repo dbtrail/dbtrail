@@ -242,3 +242,29 @@ func TestRun_recordsTheLockModeOfTheDump(t *testing.T) {
 		}
 	}
 }
+
+// Under an explicit Timestamp a dump whose metadata does not parse is still
+// converted. Its lock record is a file of its own and is still read: a dump
+// taken with no locks must not come out with no record.
+func TestRun_keepsTheLockRecordWhenTheMetadataDoesNotParse(t *testing.T) {
+	inputDir, outputDir := t.TempDir(), t.TempDir()
+	copyFixture(t, "mydumper_v1_binary_json-schema.sql", filepath.Join(inputDir, "ptest.bins-schema.sql"))
+	copyFixture(t, "mydumper_v1_binary_json.sql", filepath.Join(inputDir, "ptest.bins.00000.sql"))
+	if err := os.WriteFile(filepath.Join(inputDir, "metadata"), []byte("no start line here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteLockModeMarker(inputDir, LockModeNoLock); err != nil {
+		t.Fatal(err)
+	}
+	at := ts("2026-06-10T12:00:00Z")
+	if _, err := Run(context.Background(), Config{InputDir: inputDir, OutputDir: outputDir, Compression: "none", Timestamp: at}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	md, err := ReadParquetMetadata(filepath.Join(outputDir, "2026-06-10T12-00-00Z", "ptest", "bins.parquet"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadConsistencyOf(md); got != ReadTorn {
+		t.Fatalf("the snapshot reads %s (record %q), want torn", got, md.LockMode)
+	}
+}

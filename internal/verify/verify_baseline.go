@@ -348,7 +348,7 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 	res.Status, res.Detail = classify(newDigest, newCount, reconDigest, reconCount, deferredDetail)
 	// A snapshot known to be torn explains a difference; one with no record
 	// of its locks does not (#1380, withSnapshotLock).
-	res.Status, res.Detail, res.SnapshotLock = pairLockVerdict(p, res.Status, res.Detail)
+	pairLockVerdict(p, res.Status, res.Detail).apply(&res)
 	return res, nil
 }
 
@@ -654,11 +654,10 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile) (p Base
 }
 
 // pairLockVerdict is withSnapshotLock over the two sides of a pair.
-func pairLockVerdict(p BaselinePair, st Status, detail string) (Status, string, string) {
-	st, detail, lock := withSnapshotLock(st, detail,
+func pairLockVerdict(p BaselinePair, st Status, detail string) lockVerdict {
+	return withSnapshotLock(st, detail,
 		lockSide{what: "the snapshot of " + p.NewSnapshot.UTC().Format(time.RFC3339), lock: p.NewLock},
 		lockSide{what: "the snapshot of " + prevSnapshotTime(p).UTC().Format(time.RFC3339), lock: p.PrevLock})
-	return st, detail, lock.String()
 }
 
 // prevSnapshotTime names the older side of a pair: the time in its path when

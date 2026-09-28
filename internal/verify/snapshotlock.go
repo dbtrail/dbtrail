@@ -41,16 +41,38 @@ import (
 // where no table was proven fails, so a source whose snapshots are all torn
 // exits non-zero with every table inconclusive. A known torn snapshot softens
 // only its own tables, and those count as inconclusive that need attention
-// (no InconclusiveKind), never as "nothing to check".
+// (InconclusiveTornSnapshot), never as "nothing to check".
+//
+// What it does cost, and it is the cost every inconclusive already has: a
+// table softened this way does not fail a run in which another table was
+// proven. The kind is there so a gate that wants to fail on it can.
 type lockSide struct {
 	// what names the snapshot in a sentence: "the snapshot of <time>".
 	what string
 	lock baseline.ReadConsistency
 }
 
-// withSnapshotLock applies the rule to one table's verdict and returns the
-// verdict, the reason, and the worst lock of the snapshots compared.
-func withSnapshotLock(st Status, detail string, sides ...lockSide) (Status, string, baseline.ReadConsistency) {
+// lockVerdict is one table's verdict after the rule: the status, the reason,
+// the kind of an inconclusive the rule produced ("" otherwise), and the worst
+// lock of the snapshots compared.
+type lockVerdict struct {
+	status Status
+	detail string
+	kind   string
+	lock   baseline.ReadConsistency
+}
+
+// apply writes the verdict into a table's result. The kind is set only when
+// the rule produced one, so a kind already there is kept.
+func (v lockVerdict) apply(res *TableResult) {
+	res.Status, res.Detail, res.SnapshotLock = v.status, v.detail, v.lock.String()
+	if v.kind != "" {
+		res.InconclusiveKind = v.kind
+	}
+}
+
+// withSnapshotLock applies the rule to one table's verdict.
+func withSnapshotLock(st Status, detail string, sides ...lockSide) lockVerdict {
 	locks := make([]baseline.ReadConsistency, len(sides))
 	var torn, unrecorded []string
 	for i, s := range sides {
@@ -65,20 +87,22 @@ func withSnapshotLock(st Status, detail string, sides ...lockSide) (Status, stri
 	}
 	worst := baseline.WorstReadConsistency(locks...)
 	if st != StatusMismatch {
-		return st, detail, worst
+		return lockVerdict{status: st, detail: detail, lock: worst}
 	}
 	detail = strings.TrimSuffix(strings.TrimSpace(detail), ".")
 	switch {
 	case len(torn) > 0:
-		return StatusInconclusive, detail + ". " + capitalize(joinAnd(torn)) + " " + wasWere(torn) +
-			" taken with no locks, so its rows were copied at different moments and the difference may come from that. " +
-			"Take a full snapshot with locks to check this table", worst
+		return lockVerdict{status: StatusInconclusive, kind: InconclusiveTornSnapshot, lock: worst,
+			detail: detail + ". " + capitalize(joinAnd(torn)) + " " + wasWere(torn) +
+				" taken with no locks, so its rows were copied at different moments and the difference may come from that. " +
+				"Take a full snapshot with locks to check this table"}
 	case len(unrecorded) > 0:
-		return StatusMismatch, detail + ". " + capitalize(joinAnd(unrecorded)) + " " + doesDo(unrecorded) +
-			" not record how it was locked, so it may have been taken with no locks. " +
-			"A full snapshot taken with this version records it", worst
+		return lockVerdict{status: StatusMismatch, lock: worst,
+			detail: detail + ". " + capitalize(joinAnd(unrecorded)) + " " + doesDo(unrecorded) +
+				" not record how it was locked, so it may have been taken with no locks. " +
+				"A full snapshot taken with this version records it"}
 	}
-	return st, detail, worst
+	return lockVerdict{status: st, detail: detail, lock: worst}
 }
 
 func joinAnd(s []string) string {

@@ -90,6 +90,11 @@ const (
 	// (truncated window, unresolved comparisons, drift rows). The one kind
 	// worth attention.
 	InconclusiveUnproven = "unproven"
+	// InconclusiveTornSnapshot: the table DIFFERS from a snapshot that was
+	// read with no locks (#1380), so the difference may come from the read.
+	// The one kind the content modes set. It needs attention: a difference
+	// was found, and only its cause is in doubt.
+	InconclusiveTornSnapshot = "torn-snapshot"
 )
 
 // InconclusiveKindBenign reports whether kind is one of the two
@@ -308,10 +313,8 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	if detail != "" {
 		res.Detail = detail // a real reason overrides the coverage note
 	}
-	var lock baseline.ReadConsistency
-	res.Status, res.Detail, lock = withSnapshotLock(res.Status, res.Detail,
-		lockSide{what: "the snapshot of " + snapshotTime.UTC().Format(time.RFC3339), lock: snapshotLock})
-	res.SnapshotLock = lock.String()
+	withSnapshotLock(res.Status, res.Detail,
+		lockSide{what: "the snapshot of " + snapshotTime.UTC().Format(time.RFC3339), lock: snapshotLock}).apply(&res)
 	return res, nil
 }
 

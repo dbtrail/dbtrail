@@ -131,7 +131,11 @@ JSON output carries the worst of the two.
 
 The exit code does not change: a table softened this way counts as
 `inconclusive`, so a run where every table is over a torn snapshot proves
-nothing and exits non-zero. Take a full snapshot with locks to make the table
+nothing and exits non-zero. Like every other `inconclusive`, it does not fail
+a run in which another table was proven. Such a table carries
+`inconclusive_kind: "torn-snapshot"` in the JSON output, in every mode, for a
+gate that wants to fail on it: a difference was found, and only its cause is
+in doubt. Take a full snapshot with locks to make the table
 checkable again.
 
 The next full backup makes such a table checkable. A run where no table was
@@ -354,7 +358,9 @@ bintrail verify --index-dsn "$IDX" --baseline-dir /data/baselines --format json
 - `tables[].inconclusive_kind` — only on `status: "inconclusive"` rows and
   only under `--check recover` (omitted otherwise, mirroring the counters
   below): `no-activity`, `nothing-to-assert`, or `unproven` — see the
-  taxonomy above. `summary.inconclusive_nothing_to_check` is always present
+  taxonomy above. One more kind is set in every mode: `torn-snapshot`, a
+  difference over a snapshot read with no locks.
+  `summary.inconclusive_nothing_to_check` is always present
   and counts the benign kinds; it is a subdivision of `summary.inconclusive`,
   not a fifth bucket.
 - `tables[].events_checked` / `chains_checked` / `chains_inconclusive` —

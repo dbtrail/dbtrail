@@ -60,8 +60,8 @@ type baselineTableSizeDTO struct {
 	// Lock is how the database was locked when these rows were read (#1380):
 	// consistent | unknown | torn. Inherited through every update, and for a
 	// reused table read off the reused file. "unknown" is a file with no
-	// record. Absent, like ProducedBy, when nothing was looked up or the
-	// footer could not be read.
+	// record, or one whose footer could not be read. Absent, like
+	// ProducedBy, when nothing was looked up (an S3 source).
 	Lock string `json:"lock,omitempty"`
 }
 
@@ -402,7 +402,11 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 			// Every table looked at counts, the unreadable ones too: the
 			// snapshot's line must not speak for a table it could not date.
 			reads.add(d.read)
+			// A footer that could not be read is unknown on the table as it
+			// is in the snapshot's count, so the page can mark the table the
+			// count speaks of.
 			locks.add(d.lock, d.lockRead)
+			row.Lock = baseline.ReadUnknown.String()
 			if d.lockRead {
 				row.Lock = d.lock.String()
 			}

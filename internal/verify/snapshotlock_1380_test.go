@@ -49,7 +49,11 @@ func TestPairLockVerdict_mismatch(t *testing.T) {
 			lockDiff + ". The snapshot of " + newer + " does not record how it was locked, so it may have been taken with no locks. A full snapshot taken with this version records it"},
 	}
 	for _, tc := range cases {
-		st, reason, lock := pairLockVerdict(lockPair(tc.newL, tc.prev), StatusMismatch, lockDiff)
+		v := pairLockVerdict(lockPair(tc.newL, tc.prev), StatusMismatch, lockDiff)
+		st, reason, lock := v.status, v.detail, v.lock.String()
+		if wantKind := map[Status]string{StatusInconclusive: InconclusiveTornSnapshot}[tc.want]; v.kind != wantKind {
+			t.Errorf("%s: kind %q, want %q", tc.name, v.kind, wantKind)
+		}
 		if st != tc.want || lock != tc.lock {
 			t.Errorf("%s: %s with lock %q, want %s with lock %q", tc.name, st, lock, tc.want, tc.lock)
 		}
@@ -65,7 +69,8 @@ func TestPairLockVerdict_mismatch(t *testing.T) {
 // A pair built by hand sets no lock: that is unknown, and a difference over
 // it is a mismatch.
 func TestPairLockVerdict_zeroPairIsUnknown(t *testing.T) {
-	st, _, lock := pairLockVerdict(BaselinePair{Schema: "shop", Table: "orders"}, StatusMismatch, lockDiff)
+	v := pairLockVerdict(BaselinePair{Schema: "shop", Table: "orders"}, StatusMismatch, lockDiff)
+	st, lock := v.status, v.lock.String()
 	if st != StatusMismatch || lock != "unknown" {
 		t.Fatalf("a pair that names no lock gave %s with lock %q, want a mismatch over unknown", st, lock)
 	}
@@ -76,12 +81,18 @@ func TestPairLockVerdict_zeroPairIsUnknown(t *testing.T) {
 func TestPairLockVerdict_onlyAMismatchIsTouched(t *testing.T) {
 	for _, st := range []Status{StatusMatch, StatusInconclusive, StatusError, Status("other")} {
 		for _, l := range []baseline.ReadConsistency{baseline.ReadConsistent, baseline.ReadUnknown, baseline.ReadTorn} {
-			got, reason, lock := pairLockVerdict(lockPair(l, l), st, "as it was")
-			if got != st || reason != "as it was" {
-				t.Errorf("%s over %s became %s (%q)", st, l, got, reason)
+			v := pairLockVerdict(lockPair(l, l), st, "as it was")
+			if v.status != st || v.detail != "as it was" || v.kind != "" {
+				t.Errorf("%s over %s became %s (%q, kind %q)", st, l, v.status, v.detail, v.kind)
 			}
-			if lock != l.String() {
-				t.Errorf("%s over %s reports lock %q", st, l, lock)
+			if v.lock != l {
+				t.Errorf("%s over %s reports lock %s", st, l, v.lock)
+			}
+			// A kind the table already had is kept.
+			res := TableResult{Status: st, InconclusiveKind: InconclusiveNoActivity}
+			v.apply(&res)
+			if res.InconclusiveKind != InconclusiveNoActivity || res.SnapshotLock != l.String() {
+				t.Errorf("%s over %s: applied as %+v", st, l, res)
 			}
 		}
 	}
@@ -89,14 +100,14 @@ func TestPairLockVerdict_onlyAMismatchIsTouched(t *testing.T) {
 
 // A row count that differs is softened too, and stays in the reason.
 func TestPairLockVerdict_keepsTheDifference(t *testing.T) {
-	_, reason, _ := pairLockVerdict(lockPair(baseline.ReadTorn, baseline.ReadConsistent), StatusMismatch,
-		"row count differs: source=10 reconstructed=9")
+	reason := pairLockVerdict(lockPair(baseline.ReadTorn, baseline.ReadConsistent), StatusMismatch,
+		"row count differs: source=10 reconstructed=9").detail
 	if !strings.HasPrefix(reason, "row count differs: source=10 reconstructed=9. ") {
 		t.Fatalf("the difference is not what the reason starts with: %q", reason)
 	}
 	// An empty reason, or one that ends in a stop, makes no double stop.
 	for _, d := range []string{"", "a difference.", " a difference. "} {
-		_, reason, _ := pairLockVerdict(lockPair(baseline.ReadTorn, baseline.ReadConsistent), StatusMismatch, d)
+		reason := pairLockVerdict(lockPair(baseline.ReadTorn, baseline.ReadConsistent), StatusMismatch, d).detail
 		if strings.Contains(reason, "..") || strings.HasPrefix(reason, " ") {
 			t.Errorf("reason %q from %q", reason, d)
 		}
@@ -109,8 +120,9 @@ func TestPairLockVerdict_keepsTheDifference(t *testing.T) {
 // or over ones with no record, fails it.
 func TestSnapshotLock_exitCode(t *testing.T) {
 	verdict := func(newL, prev baseline.ReadConsistency, st Status) TableResult {
-		s, d, l := pairLockVerdict(lockPair(newL, prev), st, lockDiff)
-		return TableResult{Schema: "shop", Table: "orders", Status: s, Detail: d, SnapshotLock: l}
+		res := TableResult{Schema: "shop", Table: "orders"}
+		pairLockVerdict(lockPair(newL, prev), st, lockDiff).apply(&res)
+		return res
 	}
 	c, u, x := baseline.ReadConsistent, baseline.ReadUnknown, baseline.ReadTorn
 	match := TableResult{Schema: "shop", Table: "users", Status: StatusMatch, SnapshotLock: "consistent"}
@@ -131,9 +143,18 @@ func TestSnapshotLock_exitCode(t *testing.T) {
 		if rep.Verdict != tc.verdict || (rep.ExitError() != nil) != tc.fails {
 			t.Errorf("%s: verdict %s, exit error %v; want %s, fails=%v", tc.name, rep.Verdict, rep.ExitError(), tc.verdict, tc.fails)
 		}
-		// Softened by a torn snapshot is never "nothing to check".
+		// Softened by a torn snapshot is never "nothing to check", and the
+		// report names the kind.
 		if rep.Summary.InconclusiveNothingToCheck != 0 {
 			t.Errorf("%s: %d counted as nothing to check", tc.name, rep.Summary.InconclusiveNothingToCheck)
+		}
+		for _, tr := range rep.Tables {
+			if (tr.Status == StatusInconclusive) != (tr.InconclusiveKind == InconclusiveTornSnapshot) {
+				t.Errorf("%s: %s.%s is %s with kind %q", tc.name, tr.Schema, tr.Table, tr.Status, tr.InconclusiveKind)
+			}
+		}
+		if InconclusiveKindBenign(InconclusiveTornSnapshot) {
+			t.Errorf("a difference over a torn snapshot counts as nothing to check")
 		}
 	}
 }
@@ -211,7 +232,8 @@ func TestLastRead_aTornReadBehindNewerSnapshots(t *testing.T) {
 	if p.NewLock != baseline.ReadTorn || p.PrevLock != baseline.ReadConsistent {
 		t.Fatalf("read %s, older side %s; want torn, consistent", p.NewLock, p.PrevLock)
 	}
-	st, reason, _ := pairLockVerdict(p, StatusMismatch, lockDiff)
+	v := pairLockVerdict(p, StatusMismatch, lockDiff)
+	st, reason := v.status, v.detail
 	if st != StatusInconclusive || !strings.Contains(reason, "The snapshot of "+lr1.Format(time.RFC3339)+" was taken with no locks") {
 		t.Fatalf("%s: %q", st, reason)
 	}

@@ -1843,7 +1843,6 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 	return enc.Encode(out)
 }
 
-// writeBaselines writes the baselines section to a text status report.
 // Snapshot lock words (#1380), as baseline.ReadConsistency spells them. This
 // package does not import internal/baseline, so the three are repeated here
 // and pinned against it by a test in internal/cli.
@@ -1917,6 +1916,7 @@ func tablesNoun(n int) string {
 	return strconv.Itoa(n) + " tables"
 }
 
+// writeBaselines writes the baselines section to a text status report.
 func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 	if len(baselines) == 0 {
 		return

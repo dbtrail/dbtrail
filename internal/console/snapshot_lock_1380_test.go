@@ -199,9 +199,9 @@ func TestBaselineFilesAPI_lockOfTheSnapshotAndOfEachTable(t *testing.T) {
 		{lockLockedAt, "consistent", 0, 0, "consistent", "consistent"},
 		{lockTornAt, "torn", 2, 0, "torn", "torn"},
 		{lockOldAt, "unknown", 0, 2, "unknown", "unknown"},
-		// The table whose footer cannot be read has no word of its own and
-		// counts as unknown for the snapshot.
-		{lockBadAt, "unknown", 0, 1, "consistent", ""},
+		// A footer that cannot be read is unknown, on the table and in the
+		// snapshot's count.
+		{lockBadAt, "unknown", 0, 1, "consistent", "unknown"},
 	} {
 		resp, tables := lockDetail(t, srv, tc.at)
 		if resp.Lock != tc.lock || resp.LockTorn != tc.torn || resp.LockUnknown != tc.unknown {
@@ -281,7 +281,7 @@ func TestSnapshotLock_wordsOfTheRealListingAndDetail(t *testing.T) {
 		lockLockedAt: {"Read with locks: every row is from one moment.", "", ""},
 		lockTornAt:   {"Read with no locks: 2 of 2 tables. Rows were copied at different moments and may not agree with each other.", " · no locks", " · no locks"},
 		lockOldAt:    {"Locks not recorded: 2 of 2 tables. They may have been read with no locks.", " · locks not recorded", " · locks not recorded"},
-		lockBadAt:    {"Locks not recorded: 1 of 2 tables. They may have been read with no locks.", "", ""},
+		lockBadAt:    {"Locks not recorded: 1 of 2 tables. They may have been read with no locks.", "", " · locks not recorded"},
 	} {
 		got := lines[at]
 		if got.Line != want.line {
@@ -321,7 +321,8 @@ func TestSnapshotLock_words(t *testing.T) {
 		`{"lock":"unknown","lock_unknown":1,"tables":[{"table":"a"}]}`,
 	}
 	runViewsScript(t, "console.log(JSON.stringify(["+strings.Join(docs, ",")+"].map(snapshotLockLine)));", &lines)
-	wantLines := []string{"", "", "",
+	const unread = "Locks not checked: Stored in S3, where this list does not read how a snapshot was locked."
+	wantLines := []string{"", unread, unread,
 		"Read with locks: every row is from one moment.",
 		"Read with no locks: 1 of 1 table. Rows were copied at different moments and may not agree with each other.",
 		"Read with no locks: 1 of 3 tables. Rows were copied at different moments and may not agree with each other. Locks not recorded: 2 of 3 tables. They may have been read with no locks.",
@@ -347,6 +348,10 @@ func TestSnapshotLock_isMounted(t *testing.T) {
 		t.Errorf("the snapshot list mounts the mark %d times, want once", n)
 	}
 	detail := functionBody(t, js, "async function loadBackupDetail(")
+	// The table's mark sits beside its name, in a cell every row has.
+	if !strings.Contains(detail, `el("span", { class: "mono", text: t.schema + "." + t.table }), tableLockMark(t))`) {
+		t.Error("the table's mark is not beside the table's name")
+	}
 	for _, want := range []string{"snapshotLockLine(d)", "tableLockMark(t)"} {
 		if n := strings.Count(detail, want); n != 1 {
 			t.Errorf("the opened row holds %q %d times, want once", want, n)

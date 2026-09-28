@@ -271,10 +271,13 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	} else {
 		snapshotLock = baseline.ReadConsistencyOf(bmeta)
 	}
-	var lock baseline.ReadConsistency
-	status, detail, lock = withSnapshotLock(status, detail,
+	v := withSnapshotLock(status, detail,
 		lockSide{what: "the snapshot of " + snapshotTime.UTC().Format(time.RFC3339), lock: snapshotLock})
-	res.SnapshotLock = lock.String()
+	status, detail = v.status, v.detail
+	res.SnapshotLock = v.lock.String()
+	if v.kind != "" {
+		res.InconclusiveKind = v.kind
+	}
 	res.Status = status
 	switch {
 	case detail == "":

@@ -8319,13 +8319,15 @@ function snapshotLockPill(lock) {
   return el("span", { class: "tag-pill snap-lock snap-lock-" + snapshotLockKey(lock), title: entry[1], text: entry[0] });
 }
 
-// snapshotLockLine is the detail's own line. "" when nothing was looked up.
+// snapshotLockLine is the detail's own line. A snapshot whose files were not
+// read says so: no line would read as a good one. "" only with no detail.
 function snapshotLockLine(d) {
   const total = ((d && d.tables) || []).length;
   const count = (n) => n + " of " + total + (total === 1 ? " table" : " tables");
   const torn = (d && d.lock_torn) || 0;
   const unknown = (d && d.lock_unknown) || 0;
-  if (!d || !d.lock) return "";
+  if (!d) return "";
+  if (snapshotLockKey(d.lock) === "unread") return "Locks not checked: " + SNAPSHOT_LOCK.unread[1];
   if (d.lock === "consistent") return "Read with locks: every row is from one moment.";
   const parts = [];
   if (torn) parts.push("Read with no locks: " + count(torn) + ". Rows were copied at different moments and may not agree with each other.");
@@ -8453,9 +8455,9 @@ async function loadBackupDetail(at, box) {
   const tb = el("tbody");
   (d.tables || []).forEach((t) => {
     const row = el("tr", {},
-      el("td", { class: "mono", text: t.schema + "." + t.table }),
+      el("td", {}, el("span", { class: "mono", text: t.schema + "." + t.table }), tableLockMark(t)),
       el("td", { text: humanBytes(t.size_bytes || 0) }));
-    if (anyProv) row.append(el("td", {}, madeByCell(t), tableLockMark(t)));
+    if (anyProv) row.append(el("td", {}, madeByCell(t)));
     tb.append(row);
   });
   tbl.append(tb);

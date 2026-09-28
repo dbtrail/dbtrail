@@ -96,6 +96,13 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			attrs...)
 	}
 
+	// The lock record is a file of its own, so it is read whether or not the
+	// metadata beside it could be: under an explicit Timestamp a dump whose
+	// metadata does not parse is still converted, and a dump taken with no
+	// locks must not come out of that with no record.
+	if metaReadErr != nil {
+		meta.LockMode = readLockModeMarker(cfg.InputDir)
+	}
 	switch ReadConsistencyOfStamp(meta.LockMode) {
 	case ReadTorn:
 		slog.Warn("this dump was taken with no locks, so its rows may not agree with each other; "+
