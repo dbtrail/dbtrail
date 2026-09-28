@@ -57,10 +57,10 @@ sudo dpkg -i mydumper_*.deb
 # Or from the system repository. Ubuntu 24.04 packages 0.10.1, older than
 # 0.18.1, the first build that accepts --sync-thread-lock-mode. With such a
 # build the default lock mode runs with mydumper's own FTWRL; any explicit
-# `bintrail dump --lock-mode` (even ftwrl) and a console lock mode other than
-# ftwrl are refused, naming the installed version. It is also older than
-# 0.16.3, so against MySQL 8.4 and newer it cannot record the binlog position
-# and its dumps are refused whatever the lock mode.
+# `bintrail dump --lock-mode` (even ftwrl) and a lock mode other than ftwrl set
+# in the web interface are refused, naming the installed version. It is also
+# older than 0.16.3, so against MySQL 8.4 and newer it cannot record the binlog
+# position and its dumps are refused whatever the lock mode.
 sudo apt-get install mydumper
 ```
 
@@ -362,7 +362,7 @@ Archives are kept apart by a `bintrail_id=<uuid>/` folder per server. Snapshots 
 
 Nothing refuses this today. It is reported instead:
 
-- Each snapshot is signed by its writer: an empty file named `_WRITER.<bintrail_id>` next to `_SUCCESS`. The console, `baseline refresh` and `reconstruct --output-format parquet` sign with the `bintrail_id` recorded in the index they work from. `bintrail baseline` and `bintrail-pg baseline` have no index, so they sign with `--bintrail-id` and leave the snapshot unsigned without it. A snapshot built on top of an older one is signed by the installation that builds it.
+- Each snapshot is signed by its writer: an empty file named `_WRITER.<bintrail_id>` next to `_SUCCESS`. The web interface, `baseline refresh` and `reconstruct --output-format parquet` sign with the `bintrail_id` recorded in the index they work from. `bintrail baseline` and `bintrail-pg baseline` have no index, so they sign with `--bintrail-id` and leave the snapshot unsigned without it. A snapshot built on top of an older one is signed by the installation that builds it.
 - When a listing finds snapshots signed by more than one writer in a location, it logs a warning that names them, and the web interface shows it on the Snapshots page, in the server's settings, naming the other writer.
 - Snapshots written before signatures existed are unsigned. An unsigned snapshot names no writer and never raises the warning, so a location with older snapshots and one signing installation reports nothing.
 

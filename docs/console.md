@@ -540,7 +540,7 @@ sections with addresses of their own:
 | **Where and how often** | `/snapshots#setup` | where copies are kept, and the timetable |
 
 The three old addresses (`/baselines`, `/verification`, `/backup-settings`)
-still work: each rewrites to its part of this page, and a one-line note says
+still work: each rewrites to its part of the Snapshots page, and a one-line note says
 where the page they asked for went. Closing that note is remembered in that
 browser, per old address.
 
@@ -548,7 +548,7 @@ browser, per old address.
 it replaces did not exist. It leaves out what only the watch daemon can do —
 taking a backup, running a check — and keeps what `serve` can answer: the
 listing, the backup location (which it also edits), and a timetable somebody
-saved, shown with the reason nothing here is running it.
+saved, shown with the reason `serve` is not running it.
 
 **What copies exist**
 
@@ -578,7 +578,7 @@ saved, shown with the reason nothing here is running it.
   carries it as `lock` on each snapshot (`consistent`, `unknown`, `torn`, or
   absent when not checked), and `GET /api/baselines/files` as `lock`,
   `lock_torn` and `lock_unknown`, plus `lock` on each table.
-- **Update the copy** (#1442) — a per-server timetable, set from this page:
+- **Update the copy** (#1442): a per-server timetable, set from the Snapshots page:
   one of six intervals, 5 minutes to 24 hours (the daily one lined up on a
   UTC hour). The operator picks WHEN; HOW each run is made is the daemon's decision
   per slot (`console.ChooseBackupMethod`), and the page says which one comes
@@ -788,7 +788,7 @@ longer drawn on the page.
   that did not change keeps its last file (a hard link where the filesystem
   allows it), so a new snapshot only costs the tables that changed. A server
   saved as S3-only before the page stopped asking keeps working that way
-  until its next save from this page, which turns the local copy on.
+  until its next save from the Snapshots page, which turns the local copy on.
   A folder is checked when it is saved: it must be a full path, a missing one
   is created, and DBTrail must be able to write into it. That is on the
   `watch` daemon, which takes the snapshots; the read-only `serve` creates
@@ -798,14 +798,14 @@ longer drawn on the page.
   the answers and no controls. The server edit form no longer carries these
   fields, and an edit that leaves them out keeps what is stored. Servers that existed
   before #1681 are unchanged: none gets a folder or a count it did not have.
-- **Per server** (change here) — each registry server's local-copy answer,
+- **Per server** (changed on the Snapshots page): each registry server's local-copy answer,
   Local folder, S3 location and keep count, editable in place, with which location is in force
   drawn rather than said: the server's own case (own location, daemon
   default, or no location) under its fields, with a tick or a cross per lane.
   The daemon default backs time-travel, verification and `.sql` exports but
   backups, restores and the schedule refuse, which is the cross on that
   case. The per-server fields left
-  the server edit form for this page; an edit there that leaves them out
+  the server edit form for the Snapshots page; an edit there that leaves them out
   keeps what is stored, so it cannot wipe them. A stored schedule that cannot run as
   things stand shows the refusal above the compact block; the schedule
   itself and the full-backup note sit inside it. Save wakes up when a field
@@ -870,7 +870,7 @@ longer drawn on the page.
 
 The per-server half is the whole page on standalone `serve`: the
 daemon cards describe loops only `watch` runs, but the backup location is
-registry state, and this page is its only editor.
+registry state, and the Snapshots page is its only editor.
 
 ### The Retention page
 
@@ -920,7 +920,7 @@ button that saves the default file (no change log) and shows the command to
 open it; the options stay on the card. The old `/storage` link still works
 and lands on Retention.
 
-- **Table deltas are not on this page.** Table deltas (#1638), which make a refresh keep a changed table's file and write its changes beside it, are on by default (#1729) and turned off with a daemon flag only (`--baseline-table-deltas=false`, or `BINTRAIL_BASELINE_TABLE_DELTAS=false`); there is no card here. It changes the files every refresh publishes; [Dump and baseline](dump-and-baseline.md) describes the layout, who reads it, and what to do with DuckDB views when turning it on or off.
+- **Table deltas are not on the Retention page.** Table deltas (#1638), which make a refresh keep a changed table's file and write its changes beside it, are on by default (#1729) and turned off with a daemon flag only (`--baseline-table-deltas=false`, or `BINTRAIL_BASELINE_TABLE_DELTAS=false`); there is no card for them in the web interface. It changes the files every refresh publishes; [Dump and baseline](dump-and-baseline.md) describes the layout, who reads it, and what to do with DuckDB views when turning it on or off.
 
 - **Reusing an unchanged table** (`--baseline-carry-forward-unchanged`, on
   by default) has no card since #1681. Where the filesystem allows a hard
@@ -1006,7 +1006,7 @@ and lands on Retention.
 `--profile` enforces, from the browser. It is the web interface's counterpart to the
 CLI verbs (`bintrail flag`, `bintrail profile`, `bintrail access`; see
 [server-identity.md](server-identity.md#rbac-flags)): the same code runs the
-validation and the writes, so a profile authored here is the rows the CLI
+validation and the writes, so a profile authored on the Access profiles page is the rows the CLI
 would write, refused for the same reasons with the same words. The page is
 available on `serve` and on `watch` alike (it is not a daemon feature) and
 edits the **selected server's index**, the command-line entry included.
@@ -1600,7 +1600,7 @@ does not offer it. The page learns the location from
 `GET /api/baselines?location_only=1`, which reads neither the storage nor the
 server's index; when that lookup or the server list fails for any reason
 other than a refusal, a one-line note takes the panel's place.
-Nothing runs from here: the export writes a new copy of your data and is kept
+Nothing runs from the web interface: the export writes a new copy of your data and is kept
 out of the process that captures changes. The password is shown as `***` for
 you to replace, and the command carries the index host, port, database and
 user and nothing else about the connection, so an index that needs TLS or a
