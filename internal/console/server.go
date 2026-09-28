@@ -270,6 +270,9 @@ type BaselineRefreshDefaults struct {
 // gates) lives in a connManager bundle resolved per request from the
 // X-Bintrail-Server header.
 type Server struct {
+	// snapshotExpiry keeps the last read of each bucket's expiry rules
+	// (#1680), so a settings page that redraws asks S3 once.
+	snapshotExpiry snapshotExpiryCache
 	// scheduleNow is the clock the backup-schedule handlers read (nil:
 	// time.Now). A test fixes it: the timetable's slots are anchored to the
 	// epoch, so whether the next run is also the next full backup depends on
@@ -781,6 +784,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/backup-settings", s.handleBackupSettingsGet)
 	api.HandleFunc("PUT /api/backup-settings/servers/{id}", s.handleBackupSettingsServerUpdate)
 	api.HandleFunc("PUT /api/backup-settings/daemon/{key}", s.handleBackupSettingsDaemonUpdate)
+	api.HandleFunc("GET /api/backup-settings/servers/{id}/expiry", s.handleSnapshotExpiry)
 	// Authenticated auth verbs. Registered on the inner mux so a forgotten
 	// root registration breaks login, never security (ServeMux specificity
 	// keeps them under the tokenMiddleware-wrapped /api/ catch-all).

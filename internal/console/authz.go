@@ -172,6 +172,9 @@ var apiRoutePerms = []routePerm{
 	// The daemon-wide rows are process settings, not one server's connection,
 	// so they sit behind settings:write rather than servers:write.
 	{"PUT", "/api/backup-settings/daemon/{}", ext.PermSettingsWrite},
+	// Whether a rule in the bucket expires a server's old snapshots (#1680):
+	// a read the settings row makes, so it sits with the page's own GET.
+	{"GET", "/api/backup-settings/servers/{}/expiry", ext.PermSettingsRead},
 	// The snapshot listing is a read ABOUT A SERVER, not console administration:
 	// whoever may create a snapshot has to be able to see the one they created,
 	// and the status of that server's snapshot, restore, .sql and verify jobs
