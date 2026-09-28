@@ -11500,7 +11500,7 @@ function mcpTokenCard(tok, minted) {
     }
     if (tok.read_only) {
       card.append(cnFine("Why are there no New token and Delete token buttons?",
-        el("p", { class: "form-hint", text: "This token was created by a newer version of bintrail. It keeps working, but this version of DBTrail cannot replace or delete it; upgrading DBTrail brings those buttons back." })));
+        el("p", { class: "form-hint", text: "This token was created by a newer version of DBTrail. It keeps working, but this version cannot replace or delete it; upgrading brings those buttons back." })));
     } else {
       card.append(el("div", { class: "cn-links" },
         el("button", { class: "btn btn-sm", type: "button", text: "New token", onclick: () => mintMCPToken(true) }),

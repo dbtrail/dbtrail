@@ -119,7 +119,7 @@ func TestScreenTextNamesThePlace(t *testing.T) {
 	has("iceberg", "not the server picked in the left sidebar.")
 	has("lane", "The file that describes these tables is not offered, because DBTrail is set not to read archived data.")
 	has("token", "Why are there no New token and Delete token buttons?")
-	has("token", "It keeps working, but this version of DBTrail cannot replace or delete it")
+	has("token", "This token was created by a newer version of DBTrail. It keeps working, but this version cannot replace or delete it")
 	has("token", "It is managed wherever it was set up, not in the web interface.")
 	has("sqlServe", "Not available: this DBTrail is read-only.")
 	has("sqlOff", "The port is set when the daemon starts, not from the web interface.")
