@@ -327,7 +327,7 @@ Baseline complete.
 
 The log names every skipped view, and `--format json` lists them under `views_skipped`. A source with no views prints no `views` line. The dump user still needs `SHOW VIEW`: without it mydumper stops at the first view.
 
-mydumper writes two files for a view, `<db>.<view>-schema.sql` (a placeholder table) and `<db>.<view>-schema-view.sql` (the view). `bintrail baseline` takes an object for a view only when the second file holds a `CREATE VIEW` and the object has no data file. An object with rows is always converted. If that file is empty or cannot be read, the run stops and names it.
+mydumper writes two files for a view, `<db>.<view>-schema.sql` (a placeholder table) and `<db>.<view>-schema-view.sql` (the view). `bintrail baseline` takes an object for a view only when the second file holds a `CREATE VIEW`, the object has no data file, and the first file is the placeholder mydumper writes. An object with rows is always converted, and so is a real table that is empty. If that file is empty or cannot be read, the run stops and names it.
 
 Naming a view in `--tables` is refused. A dump that holds views and no table is refused too, because there is nothing to copy.
 
