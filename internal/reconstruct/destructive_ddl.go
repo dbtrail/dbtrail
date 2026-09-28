@@ -87,8 +87,15 @@ const (
 //
 // Positions are compared by query.BinlogPos.AtOrBefore, the rule the row
 // changes are fetched by. It holds for one source's own sequence of files, in
-// position mode and GTID mode alike. Across a change of source the file names
-// of two servers do not compare, for this check as for the fetch.
+// position mode and GTID mode alike. A statement recorded under another file
+// name than the Anchor's (sameBinlogSequence) comes from another sequence, a
+// source this index followed before, and is placed by time alone: read by
+// position it would refuse every run from every later snapshot.
+//
+// What this cannot tell apart is a sequence that started over under the SAME
+// name (a new source with the same log_bin name, RESET MASTER): a statement
+// from the old numbering that sorts after the Anchor refuses, and a new
+// snapshot does not clear it. The refusal says so.
 //
 // Without an Anchor nothing is placed by position and the window is the time
 // window alone: a snapshot that recorded no position also fetches its row
@@ -101,7 +108,7 @@ func (w DDLWindow) place(d destructiveDDL) int {
 		return ddlOutside
 	}
 	pos := query.BinlogPos{File: d.File, Pos: d.Pos}
-	if d.hasPos() && pos.AtOrBefore(*w.Anchor) {
+	if d.hasPos() && (!sameBinlogSequence(d.File, w.Anchor.File) || pos.AtOrBefore(*w.Anchor)) {
 		return ddlOutside
 	}
 	if !d.AtOrBeforeUntil && (!d.hasPos() || w.Cut == nil || !pos.AtOrBefore(*w.Cut)) {
@@ -111,6 +118,20 @@ func (w DDLWindow) place(d destructiveDDL) int {
 		return ddlUnplaced
 	}
 	return ddlByPosition
+}
+
+// sameBinlogSequence reports whether two binlog file names belong to one
+// sequence: the same name before the numeric suffix. "binlog.000009" and
+// "binlog.000010" do, "mysql-bin.000009" and "binlog.000009" do not. A name
+// with no suffix is compared whole.
+func sameBinlogSequence(a, b string) bool {
+	base := func(f string) string {
+		if i := strings.LastIndexByte(f, '.'); i >= 0 {
+			return f[:i]
+		}
+		return f
+	}
+	return base(a) == base(b)
 }
 
 // CheckDestructiveDDL refuses when schema_changes records a TRUNCATE TABLE,
@@ -158,20 +179,26 @@ func destructiveDDLErr(schema, table string, d destructiveDDL, how int, w DDLWin
 		where = fmt.Sprintf("recorded at %s:%d", d.File, d.Pos)
 	}
 	placed := "between the snapshot this starts from and the requested point in time"
+	todo := fmt.Sprintf("Take a new snapshot of the table, which will hold it as it is after the %s, and start from that one",
+		strings.ToLower(d.Type))
 	switch how {
 	case ddlByPosition:
-		placed = fmt.Sprintf("after the snapshot this starts from by binlog position (the snapshot is at %s:%d), "+
-			"though not by its time: it was indexed after that snapshot was written",
-			w.Anchor.File, w.Anchor.Pos)
+		// The cause is not stated: a statement indexed late and a source
+		// whose clock is ahead both land here.
+		placed = fmt.Sprintf("inside the replayed changes by its binlog position (the snapshot is at %s:%d), "+
+			"though its time is outside them", w.Anchor.File, w.Anchor.Pos)
+		todo += ". If the source changed or its binlog files started over since the statement ran, " +
+			"the two positions do not compare and a new snapshot will not clear this: " +
+			"the statement's row has to be removed from the index table schema_changes"
 	case ddlUnplaced:
 		placed = "with nothing to place it before the snapshot this starts from, so it is counted as after it"
+		todo = "A new snapshot will not clear this: the statement's row in the index table schema_changes " +
+			"has to be given its position or removed"
 	}
 	return fmt.Errorf(
 		"%w: %s on %s.%s, run at %s (%s), lies %s. "+
-			"It wrote no row changes to replay, so the result would keep the rows it removed as if they still existed. "+
-			"Take a new snapshot of the table, which will hold it as it is after the %s, and start from that one",
-		ErrDestructiveDDL, d.Type, schema, table, d.DetectedAt.UTC().Format(time.RFC3339), where, placed,
-		strings.ToLower(d.Type))
+			"It wrote no row changes to replay, so the result would keep the rows it removed as if they still existed. %s",
+		ErrDestructiveDDL, d.Type, schema, table, d.DetectedAt.UTC().Format(time.RFC3339), where, placed, todo)
 }
 
 // errSchemaChangesMissing marks an index that has no schema_changes table at

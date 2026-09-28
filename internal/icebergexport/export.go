@@ -688,8 +688,12 @@ func (d *deps) increment(ctx context.Context, schema, tbl string, tm *metadata.T
 	if err := d.checkLiveWindow(ctx, at); err != nil {
 		return nil, err
 	}
-	if err := reconstruct.CheckDestructiveDDL(ctx, d.db, schema, tbl, reconstruct.DDLWindow{
-		Since: cur.At, Until: at, Anchor: &query.BinlogPos{File: cur.File, Pos: cur.Pos}}); err != nil {
+	// The cut is not resolved yet, so the window is bounded above by time.
+	ddlWindow := reconstruct.DDLWindow{Since: cur.At, Until: at}
+	if cur.File != "" {
+		ddlWindow.Anchor = &query.BinlogPos{File: cur.File, Pos: cur.Pos}
+	}
+	if err := reconstruct.CheckDestructiveDDL(ctx, d.db, schema, tbl, ddlWindow); err != nil {
 		return nil, err
 	}
 	if _, err := reconstruct.CheckCaptureGapStatus(ctx, d.db, schema, tbl, cur.At, at, false); err != nil {

@@ -64,6 +64,18 @@ func TestDDLWindow_place(t *testing.T) {
 		{"file 999999 against a snapshot in file 1000000", "binlog.999999", 900, false, true,
 			&query.BinlogPos{File: "binlog.1000000", Pos: 4}, nil, ddlOutside},
 
+		// Another file name is another sequence, a source the index followed
+		// before. Read by position it would refuse for good.
+		{"another file name, sorts after the snapshot", "mysql-bin.000812", 100, false, true, anchor, cut, ddlOutside},
+		{"another file name, a longer one", "mysql-bin-changelog.000002", 100, false, true, anchor, nil, ddlOutside},
+		{"another file name, inside the window by time", "mysql-bin.000812", 100, true, true, anchor, cut, ddlByTime},
+		{"the same name in another case", "BINLOG.000010", 100, false, true, anchor, cut, ddlOutside},
+		{"a name with a dot in it, same sequence", "db.prod.000010", 100, false, true,
+			&query.BinlogPos{File: "db.prod.000009", Pos: 500}, nil, ddlByPosition},
+		{"names that share only what is before their first dot", "db.west.000010", 100, false, true,
+			&query.BinlogPos{File: "db.east.000009", Pos: 500}, nil, ddlOutside},
+		{"a name with no suffix against one with", "binlog", 100, false, true, anchor, nil, ddlOutside},
+
 		// A time past the target with a position inside the cut: the source's
 		// clock is ahead, or the statement sits between the last row change
 		// at or before the target and the first one past it.
@@ -150,7 +162,8 @@ func TestCheckDestructiveDDL_reportsTheLateStatementAndNotAnOlderOne(t *testing.
 	}
 	for _, want := range []string{
 		"TRUNCATE TABLE on shop.orders", "run at 2026-01-02T10:00:00Z", "recorded at binlog.000009:640",
-		"the snapshot is at binlog.000009:500", "indexed after that snapshot was written", "Take a new snapshot",
+		"the snapshot is at binlog.000009:500", "though its time is outside them", "Take a new snapshot",
+		"a new snapshot will not clear this",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not say %q:\n%v", want, err)
@@ -189,7 +202,10 @@ func TestCheckDestructiveDDL_aRowWithNoPositionRefusesAndSaysWhy(t *testing.T) {
 	if !errors.Is(err, ErrDestructiveDDL) {
 		t.Fatalf("err = %v, want ErrDestructiveDDL", err)
 	}
-	for _, want := range []string{"its binlog position is not recorded", "counted as after it"} {
+	if strings.Contains(err.Error(), "Take a new snapshot") {
+		t.Errorf("the refusal offers a new snapshot, which does not clear a row with no position:\n%v", err)
+	}
+	for _, want := range []string{"its binlog position is not recorded", "counted as after it", "A new snapshot will not clear this"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not say %q:\n%v", want, err)
 		}

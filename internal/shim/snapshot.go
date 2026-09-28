@@ -29,7 +29,8 @@ import (
 func snapshotSincePos(ctx context.Context, baselinePath string, logger *slog.Logger, schema, table string) *query.BinlogPos {
 	bmeta, err := baseline.ReadParquetMetadataAny(ctx, baselinePath)
 	if err != nil {
-		logger.Warn("shim: could not read baseline metadata for position-anchored delta fetch; falling back to timestamp-only Since",
+		logger.Warn("shim: could not read baseline metadata for position-anchored delta fetch; falling back to timestamp-only Since, "+
+			"and a TRUNCATE, DROP or RENAME is looked for by time alone, so one indexed late is not seen",
 			"schema", schema, "table", table, "path", baselinePath, "error", err)
 		return nil
 	}

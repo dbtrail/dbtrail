@@ -337,3 +337,24 @@ func TestReconstructDump_aSnapshotWithNoPositionLooksByTime(t *testing.T) {
 		t.Fatalf("err = %v, want ErrDestructiveDDL: the TRUNCATE ran inside the window", err)
 	}
 }
+
+// A TRUNCATE recorded under another binlog file name comes from a source the
+// index followed before. Its name sorts after the snapshot's, and it refuses
+// nothing: not the first refresh, not the next.
+func TestReconstructParquet_aTruncateFromAnotherBinlogSequenceRefusesNothing(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dsn, root, base := lateDDLIndex(t)
+
+	recordTruncate(t, db, "mysql-bin.000812", 1000, base.Add(-10*time.Minute))
+	rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	if err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(30*time.Second)); err != nil {
+		t.Fatalf("the first refresh: %v", err)
+	}
+	rowChange(t, db, "binlog.000003", 700, 800, base.Add(40*time.Second), "2", `{"id":2,"status":"B"}`)
+	if err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(60*time.Second)); err != nil {
+		t.Fatalf("the second refresh: %v", err)
+	}
+	if err := foldOrders(dsn, root, t.TempDir(), reconstruct.OutputFormatMydumper, base.Add(70*time.Second)); err != nil {
+		t.Fatalf("a restore: %v", err)
+	}
+}

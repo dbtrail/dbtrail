@@ -40,10 +40,10 @@ func TestIntegrationCreateOrReplace_refusesAndDefinesTheTable(t *testing.T) {
 		}
 	}
 
-	if err := CheckDestructiveDDL(ctx, db, "shop", "t", DDLWindow{Since: at.Add(-90*time.Minute), Until: at}); !errors.Is(err, ErrDestructiveDDL) {
+	if err := CheckDestructiveDDL(ctx, db, "shop", "t", DDLWindow{Since: at.Add(-90 * time.Minute), Until: at}); !errors.Is(err, ErrDestructiveDDL) {
 		t.Errorf("CheckDestructiveDDL over the replace = %v, want ErrDestructiveDDL", err)
 	}
-	if err := CheckDestructiveDDL(ctx, db, "shop", "t", DDLWindow{Since: at.Add(-30*time.Minute), Until: at}); err != nil {
+	if err := CheckDestructiveDDL(ctx, db, "shop", "t", DDLWindow{Since: at.Add(-30 * time.Minute), Until: at}); err != nil {
 		t.Errorf("CheckDestructiveDDL after the replace = %v, want nil", err)
 	}
 	ddl, found, err := findCapturedCreateTableDDL(ctx, db, "shop", "t", at)
