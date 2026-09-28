@@ -101,6 +101,13 @@ func TestFoldSourceAuthor(t *testing.T) {
 					if err == nil || !strings.Contains(err.Error(), tc.refused) || !strings.Contains(err.Error(), "own folder or prefix") || folds.Load() != 0 {
 						t.Fatalf("%s: err = %v, folds = %d; want refused naming %q and the fix", what, err, folds.Load(), tc.refused)
 					}
+					// A writer this server does not recognise may be itself
+					// under a new identity (a failover): then a full read is
+					// the fix, and the refusal says so.
+					if strings.Contains(err.Error(), "was written by another writer") &&
+						!strings.Contains(err.Error(), "If this source's own identity changed (for example after a failover), take a full read with Read database now") {
+						t.Fatalf("%s: %v; want the failover remedy said too", what, err)
+					}
 				}
 				if (asked.Load() > 0) != tc.askedOwn {
 					t.Fatalf("%s: the index was asked %d times, want asked=%v", what, asked.Load(), tc.askedOwn)

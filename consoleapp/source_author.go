@@ -89,6 +89,6 @@ func foldSourceRefusal(indexDSN, source string, at time.Time) error {
 		return fmt.Errorf("%w: the snapshot to build on (%s) was signed by %s, and this server's index names no writer to compare with; it may be this server's own under an identity the index no longer gives, or another writer's. Nothing was built. Check the index's bintrail_id, or give this server its own folder or prefix%s",
 			errForeignSource, snap, strings.Join(foreign, ", "), onSnapshotsPage)
 	}
-	return fmt.Errorf("%w: the snapshot to build on (%s) was written by another writer (%s), not by this server (%s); building on it would publish a snapshot that belongs to neither. Give this server its own folder or prefix%s, or stop the other writer",
+	return fmt.Errorf("%w: the snapshot to build on (%s) was written by another writer (%s), not by this server (%s); building on it would publish a snapshot that belongs to neither. Give this server its own folder or prefix%s, or stop the other writer. If this source's own identity changed (for example after a failover), take a full read with Read database now",
 		errForeignSource, snap, strings.Join(foreign, ", "), ownID, onSnapshotsPage)
 }
