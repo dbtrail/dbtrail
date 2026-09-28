@@ -17,7 +17,7 @@ key range, see below), `--event-type`, `--gtid`,
 `--since` / `--until`, `--changed-column` (events that touched a given column),
 `--column-eq` (events where a column has a given value — see below), and
 `--flag` (tables/columns labeled via [RBAC flags](server-identity.md),
-authored with `bintrail flag` or from the console's Settings > Access
+authored with `bintrail flag` or from the web interface's Settings > Access
 profiles page). A
 `--pk` lookup is fast and collision-safe — it matches a hash of the PK values
 plus the exact values, and it requires `--schema` and `--table` alongside it.
@@ -66,8 +66,8 @@ Three things to know:
   instead of reporting them `inconclusive`. One wrinkle is handled for you: a
   fixed `BINARY(n)` column is padded with `0x00` on storage but the binlog row
   image drops that padding, so the two stores want the key spelled differently.
-  All three index-reading surfaces — `reconstruct --pk`, the console
-  `/api/reconstruct`, and the MCP `reconstruct` tool — reconcile both
+  All three index-reading surfaces (`reconstruct --pk`, the web interface's
+  `/api/reconstruct`, and the MCP `reconstruct` tool) reconcile both
   directions ([#1157](https://github.com/dbtrail/dbtrail/issues/1157)): the
   baseline reader re-pads the key to its declared width when the exact lookup
   misses, and the event fetch re-spells it back to the stored `pk_values` form
@@ -206,7 +206,7 @@ Notes:
 
 - Statements longer than 16 KiB are stored truncated, ending in `/* bintrail:truncated */`. Truncated statements are not digested (`query_hash` stays `NULL`) — a mid-token fragment would misrepresent the statement's shape.
 - Under an active `--profile`, `query_text` and `query_hash` are withheld on **every** row, not just rows of flagged tables — a single statement can touch several tables, so its text can embed values of a column your profile redacts even when the row itself belongs to another table.
-- The web console never shows these fields (same boundary as `connection_id`).
+- The web interface never shows these fields (same boundary as `connection_id`).
 
 ### Commit time: `commit_ts_us`
 
@@ -571,7 +571,7 @@ MySQL syntax — see [PostgreSQL](postgres.md#querying-and-recovering).
 > budget. Note `--limit` caps the event **count** (default 1000); this budget guards the rendered
 > **script size**. Binary columns render to hex (~2× their stored bytes), so for binary-heavy tables set
 > the budget below the RAM you can actually spare. The same default guards `recover-cascade`, the
-> console, and the MCP `recover` tool, which inherit it with no configuration.
+> web interface, and the MCP `recover` tool, which inherit it with no configuration.
 
 ### WHERE Clause Strategy
 

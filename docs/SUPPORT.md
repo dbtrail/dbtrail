@@ -12,7 +12,7 @@ DBTrail's contract with your infrastructure is one line:
 
 DBTrail installs and versions **its own schema** on that server — databases
 (`CREATE DATABASE IF NOT EXISTS`), tables, and idempotent migrations, via
-`init`, `up`, and the console control plane. The **bintrail binary** never
+`init`, `up`, and the control plane in `bintrail-console watch`. The **bintrail binary** never
 installs, supervises, or operates a mysqld **on the host** (no apt/yum
 mysql-server, no managed daemon) — that boundary is architectural and
 permanent.
@@ -32,7 +32,7 @@ ship-vs-operate boundary below.
 - The recovery and consistency tooling: `query`, `recover`, `recover-cascade`,
   `reconstruct`, `baseline`, and `verify` (the data-consistency check that
   proves a recovery would reproduce the source).
-- The web console, the MCP server, the time-travel shim.
+- The web interface, the MCP server, the time-travel shim.
 - The Docker images we publish, **including the pinned MySQL 8.4 index image
   bundled in docker-compose**: its build, tuned defaults, and documented
   upgrade path. We ship and version that image; we do not operate your running
@@ -145,7 +145,7 @@ yours (`bintrail-pg doctor` reports slot/WAL health — see
 
 ## Reporting issues
 
-Bugs in DBTrail's binaries, schema, tooling, console, or docs: please open
+Bugs in DBTrail's binaries, schema, tooling, web interface, or docs: please open
 an issue with reproduction steps — those are always in scope. If your report
 is about the index MySQL server's own operation (disk, backups, upgrades,
 corruption), or about data captured under an unsupported source configuration

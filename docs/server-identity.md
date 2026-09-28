@@ -100,11 +100,11 @@ The flag system lets you label tables and columns with named flags (e.g. `billin
 
 **Current state**: Fully implemented and enforced. The flag registry (`table_flags`, `profiles`, `access_rules` tables, managed by the `bintrail flag`, `bintrail profile`, and `bintrail access` CLIs) is in place, and **profile enforcement is live**: pass `--profile <name>` to `query` or `recover` and the read path withholds denied tables and redacts (NULLs) flagged columns at query time. See [`bintrail profile` / `bintrail access`](#bintrail-profile-and-bintrail-access-commands) below.
 
-**From the console**: the same three tables can be authored from the web
-console's **Settings > Access profiles** page (`bintrail-console serve` or
+**From the web interface**: the same three tables can be authored from the
+**Settings > Access profiles** page (`bintrail-console serve` or
 `watch`), against the server selected in the sidebar. The page and the CLI
 run the same code, so a profile authored in either place is the same rows
-and is refused for the same reasons; the console additionally requires the
+and is refused for the same reasons; the web interface additionally requires the
 `settings:write` permission and records every change on the audit seam. See
 [console.md](console.md#the-access-profiles-page).
 

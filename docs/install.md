@@ -23,7 +23,7 @@ it's the first section — the same four lines as the README.
 - **Other sources:** besides MySQL, DBTrail can also capture from **MariaDB**
   ([alpha](./mariadb.md) — 10.6+, 11.4 is the CI-tested target) and
   **PostgreSQL** ([GA](./postgres.md) — 14+). Both are first-class sources in
-  the web console (**+ Add server** → pick the source type); PostgreSQL also
+  the web interface (**+ Add server** → pick the source type); PostgreSQL also
   ships a standalone `bintrail-pg` binary for headless/CLI deployments. Each has
   its own prerequisites; see the linked guide.
 - Go 1.25+ (the module targets `go 1.25.11`) — only when building from source. The default `GOTOOLCHAIN=auto` fetches the right toolchain for you.
@@ -31,11 +31,11 @@ it's the first section — the same four lines as the README.
 ## Docker Compose (the bundled default)
 
 One file, zero config — an index MySQL (persisted in a volume) and
-`bintrail-console watch` in source-less daemon mode: the console plus the
+`bintrail-console watch` in source-less daemon mode: the web interface plus the
 control plane, waiting for you to add servers from the UI.
 
 The shortest path is the install script — it does the two commands below
-*and* waits for the console to actually answer before telling you where to
+*and* waits for the web interface to actually answer before telling you where to
 go next (and opens it in your browser when it can):
 
 ```sh
@@ -51,7 +51,7 @@ curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | D
 ```
 
 The variables go on `sh`, after the pipe: that is the side that runs the
-installer. `DBTRAIL_PORT` also points the console's startup banner (in
+installer. `DBTRAIL_PORT` also points the startup banner (in
 `docker compose logs`) at that port. If you change the `ports:` line of
 `docker-compose.yml` yourself, change `BINTRAIL_CONSOLE_URL` beside it too. The stack also publishes Prometheus metrics on 9090, which is
 Prometheus's own default port; when 9090 is taken the installer moves the
@@ -64,7 +64,7 @@ docker compose up -d
 docker compose logs -f bintrail
 ```
 
-The logs print the console URL:
+The logs print the address of the web interface:
 
 ```
 The DBTrail web interface is running: open it and add the MySQL servers to watch:
@@ -109,7 +109,7 @@ migrates only its schema on whatever server you point it at; the contract
 floor stays MySQL 8.0+ (only the *bundled* index is 8.4). Want it operated for
 you? That's the managed service at [dbtrail.com](https://dbtrail.com).
 
-All the optional knobs (pinned console token, schema filter, image tag)
+All the optional knobs (pinned access token, schema filter, image tag)
 live in
 [`.env.example`](https://github.com/dbtrail/dbtrail/blob/main/.env.example);
 the full walkthrough is in [docker.md](./docker.md).
@@ -131,7 +131,7 @@ docker compose up -d
 The download lands beside your file, not on top of it, so any edits of your own
 (a published port, an extra service) are still there to carry across.
 Your `.env` and every data volume carry over untouched. The one to know
-about: without the current file's console state paths, your console username
+about: without the current file's state paths, your username
 and password, the servers you added, and the AI connection token live inside
 the container and are deleted the next time it is recreated, with nothing
 saying so. [Upgrading the stack](./docker.md#upgrading-the-stack) lists what
@@ -162,8 +162,8 @@ docker run --rm ghcr.io/dbtrail/bintrail:latest --version
 
 Multi-arch (`linux/amd64` + `linux/arm64`), signed with cosign, with
 per-architecture SPDX SBOMs attached to the image as cosign attestations. The image bundles both `bintrail` and `bintrail-mcp`; the
-web console ships as its own image, `ghcr.io/dbtrail/bintrail-console`
-(`serve` = read-only console, `watch` = stream + console daemon — what the
+web interface ships as its own image, `ghcr.io/dbtrail/bintrail-console`
+(`serve` = read-only web interface, `watch` = capture plus web interface in one daemon, which is what the
 Compose stack runs). The PostgreSQL-source binary ships as its own image,
 `ghcr.io/dbtrail/bintrail-pg`. See [docker.md](./docker.md) for signature verification,
 `docker run` recipes, and the long-running stream container.
@@ -212,7 +212,7 @@ release shipped. (Releases up to v0.53.0 attached the older
 `--signature`/`--certificate` in place of `--bundle`.) Container images are
 signed separately — see [docker.md](./docker.md).
 
-The `bintrail` package carries the core CLI + `bintrail-mcp`; the web console
+The `bintrail` package carries the core CLI + `bintrail-mcp`; the web interface
 is a separate `bintrail-console` package — install it only where an operator
 wants the UI. PostgreSQL-source capture is a separate `bintrail-pg`
 package — install it only on hosts that capture from PostgreSQL.
@@ -234,7 +234,7 @@ go build ./cmd/bintrail
 ```
 
 `make build` builds both `bintrail` and `bintrail-mcp` with version metadata;
-`make build-console` builds the `bintrail-console` web-console binary;
+`make build-console` builds `bintrail-console`, the web interface binary;
 `make build-pg` builds the `bintrail-pg` PostgreSQL-source binary.
 
 > macOS binaries and a Homebrew tap are tracked in
@@ -262,7 +262,7 @@ bintrail up \
 streaming, all in one. It resumes from the last checkpoint on restart and
 auto-derives a unique `server-id` from your source DSN. Want the web UI in
 the same process? Run `bintrail-console watch` (same flags) instead — it is
-`up` plus the console and the multi-server control plane.
+`up` plus the web interface and the multi-server control plane.
 
 Once it's running, the [Quickstart](quickstart.md) covers querying the index
 and generating reversal SQL (`bintrail query` / `bintrail recover`) with worked
@@ -330,6 +330,6 @@ For cron, systemd units, and Ansible recipes, see [deployment.md](./deployment.m
 All commands accept `--log-level` (default `info`) and `--log-format`
 (default `text`). See each command's `--help` for flags and usage.
 
-The web console lives in the separate `bintrail-console` binary —
-`serve` (read-only UI over an index) and `watch` (stream + console +
+The web interface lives in the separate `bintrail-console` binary:
+`serve` (read-only UI over an index) and `watch` (stream + web interface +
 control plane in one daemon). See [console.md](./console.md).

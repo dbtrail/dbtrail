@@ -465,7 +465,7 @@ sources exist:
   proceeds with the same `coverage unverified` note (MariaDB has no
   `@@gtid_executed` to prove containment against).
 - **PostgreSQL** — baseline-anchored verify works against the PG capture
-  (`bintrail-pg stream` / the console's PostgreSQL servers), anchored on WAL
+  (`bintrail-pg stream` / the web interface's PostgreSQL servers), anchored on WAL
   LSNs instead of binlog coordinates; recover-input works too (index-only —
   it carries no anchor). Live-source mode is supported
   too: the source is fingerprinted inside one `REPEATABLE READ` snapshot,

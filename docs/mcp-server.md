@@ -17,8 +17,8 @@ never runs it), `recover_cascade` (reversal SQL for foreign-key cascade side
 effects), `reconstruct` (a row's state at a point in time), `status`, and
 `list_schema_changes` — and never writes to your database.
 
-> **First time?** If you run the web console, the shortest path is the
-> [5-minute Connect-AI guide](connect-ai.md) — console URL + token + a
+> **First time?** If you run the web interface, the shortest path is the
+> [5-minute Connect-AI guide](connect-ai.md): web interface URL + token + a
 > one-click bundle, no JSON and no DSN. This page is the full reference.
 
 ---
@@ -169,7 +169,7 @@ endpoint at all.
   `bintrail`, `bintrail-console`, `bintrail-mcp`, and `bintrail-pg` — none of
   them terminate OAuth. If you want the claude.ai path on your own
   infrastructure, put an OAuth-capable reverse proxy (any of the usual
-  identity-aware proxies) in front of `bintrail-mcp --http` or the console's
+  identity-aware proxies) in front of `bintrail-mcp --http` or the web interface's
   `/mcp` endpoint, and have it forward the authenticated request. For a shared
   backend serving several indexes, `bintrail-mcp --tenant-dsns` resolves a
   per-tenant DSN from an `X-Bintrail-Tenant` request header your proxy sets.
@@ -200,11 +200,11 @@ If your client lists tools beyond these six, you are running a build that
 registers extras through the extension seam (`ext/mcpext`) — a distribution
 that wraps this core, not the stock binary. Such tools resolve their index
 through the same routing as the built-in six, so they read the server you
-selected and inherit its posture, including the console's refusal of a
+selected and inherit its posture, including the web interface's refusal of a
 tool-level `index_dsn`.
 
-The same six tools are also served by the web console at `/mcp` (Streamable
-HTTP, console-token auth, per-server routing by URL path) — if you already run
+The same six tools are also served by the web interface at `/mcp` (Streamable
+HTTP, access token auth, per-server routing by URL path). If you already run
 `bintrail-console`, you may not need this binary at all; see
 [console.md](console.md#mcp-endpoint).
 `list_schema_changes` accepts `schema`, `table`, `ddl_type`
@@ -273,7 +273,7 @@ you already have, returning every event that statement produced across every
 table it touched. It selects a statement *shape* (literals are normalised
 away), so it is a read filter only: `recover` does not accept it, because a
 reversal scoped to a shape would undo executions nobody named. It is refused on
-surfaces that withhold statement text (the console's `/mcp`) and whenever a
+surfaces that withhold statement text (the web interface's `/mcp`) and whenever a
 `profile` is active — the digest is blanked on every returned event there, so
 filtering on it would confirm what is withheld.
 
@@ -371,7 +371,7 @@ it on every call.
 answer "what did this row look like at 3pm" for a row nobody touched in the
 retained window. `reconstruct` folds a **baseline snapshot** (from
 [`bintrail baseline`](dump-and-baseline.md)) with the events after it, so every
-column resolves — the same engine behind `bintrail reconstruct` and the console's
+column resolves. It is the same engine behind `bintrail reconstruct` and the web interface's
 Time-travel tab.
 
 Parameters: `schema`, `table` and `pk` (required; pipe-delimited for composite
@@ -381,8 +381,8 @@ and `allow_gaps`.
 Baseline location: `baseline_dir` (a local directory) or `baseline_s3`
 (`s3://bucket/prefix`) per call, falling back to the `BINTRAIL_BASELINE_DIR` /
 `BINTRAIL_BASELINE_S3` env vars — set those at startup, like the index DSN. When
-the console serves `/mcp` these parameters are **rejected**: the baseline is that
-server's own configuration, and an MCP client must not point the console at
+the web interface serves `/mcp` these parameters are **rejected**: the baseline is that
+server's own configuration, and an MCP client must not point the web interface at
 arbitrary storage.
 
 **`allow_gaps` defaults to `false`, unlike `query`'s degrade-with-warnings

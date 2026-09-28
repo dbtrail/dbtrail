@@ -93,7 +93,7 @@ and without it the check SKIPs.
   computes one (CRC32) by default on both single-part and multipart uploads.
   Nothing to configure.
 - **Reads** (`query`/`recover`/`reconstruct`/`restore-index`, the shim, the
-  console): read-only GETs, unaffected.
+  web interface): read-only GETs, unaffected.
 - **`archive reconcile --prune`**: deletes **registry rows only** — it never
   touches data files, locked or not.
 - **Baseline local prune** (`baseline --baseline-retain`): deletes **local**

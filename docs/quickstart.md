@@ -45,7 +45,7 @@ rebuild a row or a table as it was.
   with no password.
 
   If a snapshot fails with `Plugin caching_sha2_password could not be loaded`:
-  this happens with the console Docker image on arm64 hosts (Apple Silicon,
+  this happens with the `bintrail-console` Docker image on arm64 hosts (Apple Silicon,
   AWS Graviton), in every version up to and including 0.90.0. Upgrade to a
   version after 0.90.0. Until you can, add the missing library to the image
   with a Dockerfile of your own and run that image instead:
@@ -139,7 +139,7 @@ DBTrail never applies it for you. Check progress any time with
 
 | Want to... | Read... |
 |---|---|
-| Browse changes and generate undo SQL from a browser | [Web console](./console.md) |
+| Browse changes and generate undo SQL from a browser | [Web interface](./console.md) |
 | Time-travel: reconstruct full rows as of a point in time | [Dump and Baseline](./dump-and-baseline.md), or the compose [`baseline` profile](./docker.md#baselines-and-time-travel-the-baseline-profile) |
 | Use RDS, Aurora, or Cloud SQL | [Streaming](./streaming.md) |
 | Understand the query and recovery options in depth | [Query and Recovery](./query-and-recovery.md) |

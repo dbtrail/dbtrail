@@ -29,8 +29,8 @@ is documented in full, including how to turn it off, in
 ## What the extension does with data
 
 - **Where it connects.** The bundled binary makes network connections to
-  exactly one place: the console/MCP endpoint URL **you** configure at install
-  time (your own bintrail console, on your machine, LAN, VPN, or server). It
+  exactly one place: the MCP endpoint URL **you** configure at install
+  time (your own DBTrail web interface, on your machine, LAN, VPN, or server). It
   never connects to DBTrail, Anthropic, or any other third party on its own.
 - **Your access token** is entered once in Claude Desktop's configuration form
   and stored by Claude Desktop as a sensitive value (in the operating system's
@@ -57,7 +57,7 @@ to using any AI assistant: tool results that enter your Claude conversation
 are processed by **Anthropic** as conversation content, under
 [Anthropic's own privacy policy](https://www.anthropic.com/legal/privacy).
 If your change history contains sensitive row data, DBTrail's
-[RBAC profiles](docs/query-and-recovery.md) and the console's redaction rules
+[RBAC profiles](docs/query-and-recovery.md) and the web interface's redaction rules
 let you limit what the MCP surface can return before it ever reaches a
 conversation.
 

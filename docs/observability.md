@@ -176,7 +176,7 @@ as the cleanup takes — minutes, on a large index. That reading is correct:
 nothing is becoming recoverable yet. What changed is the timing, not the
 verdict — before, the series did not exist during the cleanup, so the same
 restart stayed silent until it finished. The daemon logs `dedup-on-resume:
-deleting ...` while it happens and the console shows `CLEANING UP`, which is
+deleting ...` while it happens and the web interface shows `CLEANING UP`, which is
 how you tell this apart from a stream that is actually stuck.
 
 **Alerting on a lag gauge alone is the mistake this metric exists to prevent.**
@@ -257,9 +257,9 @@ A Prometheus gauge for this state is not exposed in this release.
 
 ## Watch health metrics (`bintrail_continuity_*`, `bintrail_verify_*`, `bintrail_rotation_*`)
 
-The `bintrail-console watch` daemon exports its three safety-net conditions —
+The `bintrail-console watch` daemon exports its three safety-net conditions,
 the same ones the webhook channel notifies on
-([console.md](console.md#webhook-notifications)) — as gauges. Each publishes
+([Alerts](https://www.dbtrail.com/docs/monitoring/alerts/#webhook)), as gauges. Each publishes
 only while its feature is actually producing verdicts; an **absent series
 means "no verdict" — never evaluated, or (for the verify pair) never a
 conclusive run — never "healthy"** (the continuity gauge is even unpublished
@@ -276,7 +276,7 @@ for an index the watcher cannot reach, so unknown can never read as no-gap).
 ## Example Prometheus alert rules
 
 The push-based sibling of these metrics is the watch daemon's
-`--notify-webhook` (see [console.md](console.md#webhook-notifications)).
+`--notify-webhook` (see [Alerts](https://www.dbtrail.com/docs/monitoring/alerts/#webhook)).
 For pull-based alerting, a starting rule set over the metrics above:
 
 ```yaml

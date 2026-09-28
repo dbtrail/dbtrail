@@ -13,7 +13,7 @@ BINTRAIL_TELEMETRY=off      # this environment, e.g. in a systemd unit
 bintrail --telemetry=off …  # this one invocation
 ```
 
-Or, if you run the web console (`bintrail-console watch`): open **Status → Usage telemetry** and click the toggle. It stops the running daemon's beacons
+Or, if you run the web interface (`bintrail-console watch`): open **Status → Usage telemetry** and click the toggle. It stops the running daemon's beacons
 immediately (no restart) and records the same machine-wide choice as
 `bintrail telemetry off`.
 
@@ -24,7 +24,7 @@ bintrail telemetry show
 bintrail telemetry status   # is it on, and what decided that
 ```
 
-The web console shows the same event: on **Status → Usage telemetry**, open
+The web interface shows the same event: on **Status → Usage telemetry**, open
 **Show a sample event**. The daemon renders it through the same function the
 command uses, so the fields and their form are the same; the values are the
 daemon's own (each render draws a fresh `run_id`), and opening it sends
@@ -201,13 +201,13 @@ one did.
 | `DO_NOT_TRACK=1` | Off. Checked before any file is read or written |
 | `--telemetry=on\|off` | Off (or on) for this invocation |
 | `BINTRAIL_TELEMETRY=on\|off` | Off (or on) for this environment |
-| `~/.config/bintrail/telemetry.json` | Written by `bintrail telemetry on\|off`, or by the web console's **Status → Usage telemetry** toggle |
+| `~/.config/bintrail/telemetry.json` | Written by `bintrail telemetry on\|off`, or by the web interface's **Status → Usage telemetry** toggle |
 | *(nothing set)* | **On** |
 
-The console toggle writes that same file (so every bintrail process on the
+The toggle in the web interface writes that same file (so every bintrail process on the
 machine honours it from its next run) *and* flips the running `watch` daemon's
 live decision, so its beacons stop the moment you opt out. When a
-higher-precedence control above is in charge, the console shows that and defers
+higher-precedence control above is in charge, the web interface shows that and defers
 to it rather than pretending to override it.
 
 `bintrail telemetry off` also deletes anything already spooled locally, so
@@ -261,15 +261,15 @@ binary — cannot emit telemetry.
 | Surface | Reports? | |
 |---|---|---|
 | `bintrail`, `bintrail-pg` commands | Yes, by default | |
-| Daemons (`stream`, `agent`, `up`, `watch`, `bintrail-console serve`, `bintrail shim`, `bintrail-pg stream`, `bintrail-pg flashback`) | Yes, one beacon per day | `watch` also records the console actions below |
+| Daemons (`stream`, `agent`, `up`, `watch`, `bintrail-console serve`, `bintrail shim`, `bintrail-pg stream`, `bintrail-pg flashback`) | Yes, one beacon per day | `watch` also records the web interface actions below |
 | **Demo image** (`ghcr.io/dbtrail/bintrail-demo`) | **Never** | Hard-disabled in the image and in its entrypoint, and asserted by its smoke test. An evaluation image must not phone home from a laptop |
 | **MCP server** (`bintrail-mcp`) | **Never** | Invoked by an AI agent inside an editor or chat session — no human is present to consent and no terminal exists for a notice. It cannot link the telemetry package at all |
-| **Web console UI** (under `watch`) | A deliberate-action event, server-side | See below. No JavaScript beacon, ever — the frontend has no third-party dependencies and makes no telemetry request; the event is recorded by the server it already talks to |
+| **Web interface** (under `watch`) | A deliberate-action event, server-side | See below. No JavaScript beacon, ever: the frontend has no third-party dependencies and makes no telemetry request; the event is recorded by the server it already talks to |
 
-### Web console actions
+### Web interface actions
 
-When the console runs inside a reporting `watch` daemon, a **deliberate** UI
-action records one usage event so we can see which console features are used —
+When the web interface runs inside a reporting `watch` daemon, a **deliberate** UI
+action records one usage event so we can see which features of the web interface are used,
 the same signal a CLI `recover` gives. Only these intent surfaces are counted:
 `console-recover`, `console-recover-cascade`, `console-reconstruct` (time
 travel), `console-verify`, `console-baseline`. Passive browsing (listing events,
@@ -278,11 +278,11 @@ paging, status polling, capability checks) records nothing.
 The action name is a **compile-time constant** on the route — never derived from
 the request path, query, or body — so no schema, table, primary key, or row
 value can reach the wire; the closed allowlist still applies. Crucially, because
-the console lives in a months-long daemon that holds a single `run_id`, these
+the web interface lives in a months-long daemon that holds a single `run_id`, these
 events are recorded **without any `run_id`** (like beacons), so they cannot be
 stitched into a per-install activity timeline. They are day-granularity usage
 counts, nothing more. The read-only `bintrail-console serve` wires no
-console-action client and records none of these events; like every other
+client for web interface actions and records none of these events; like every other
 long-running daemon it still emits the daily liveness beacon, which carries
 nothing a command event doesn't.
 
@@ -370,8 +370,8 @@ statements of fact rather than intent.
 | `TestRunDaemonDoesNotBeaconBeforeFirstTick` | A crash-looping daemon emits nothing |
 | Per-daemon wiring guards (`*DaemonWiringEmitsBeacon`, one per call site across `stream`, `agent`, `up`, both `watch` paths, `serve`, `shim`, `bintrail-pg stream`, `bintrail-pg flashback`) | Every daemon this document says beacons actually starts the beacon loop — each test drives the real run function and fails if its launch line is deleted |
 | `TestBeaconCarriesNoRunID` | Daemon beacons carry no identifier |
-| `TestRecordDaemonCommandOmitsRunID` | A console action inside a daemon records no `run_id` — no per-install timeline |
-| `TestRecordActionUsesFixedName` | The console action name is a fixed constant, never derived from the request |
+| `TestRecordDaemonCommandOmitsRunID` | A web interface action inside a daemon records no `run_id`, so there is no per-install timeline |
+| `TestRecordActionUsesFixedName` | The web interface action name is a fixed constant, never derived from the request |
 | Demo image smoke test | The demo image's telemetry guard is present and applies to every process in the container |
 
 The most load-bearing of these is the first. A field allowlist alone cannot

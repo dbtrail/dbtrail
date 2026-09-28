@@ -107,8 +107,8 @@ What each part does:
   written under a `bintrail_id=<id>/` path segment, next to that source's
   `index-meta.json`. Each archived row carries the MySQL connection id and,
   when the source logs it, the original SQL statement (`query_text`). The
-  console deliberately does not show either.
-- **It only covers keys that carry the segment.** `rotate` and the console
+  web interface deliberately does not show either.
+- **It only covers keys that carry the segment.** `rotate` and `bintrail-console watch`
   always write it. `bintrail upload --source` pointed at a folder INSIDE
   `bintrail_id=<id>/` uploads keys without it, and this rule does not cover
   those objects. Upload archives from the folder that holds `bintrail_id=<id>/`.
@@ -128,8 +128,8 @@ What each part does:
 
 Two things a reader with this policy can still see, stated plainly:
 
-- **Every column of every table.** A snapshot holds full rows. Console access
-  rules (data profiles, redaction, roles) apply to the console, not to the
+- **Every column of every table.** A snapshot holds full rows. The access
+  rules (data profiles, redaction, roles) apply to the web interface, not to the
   files in the bucket.
 - **What changed between two snapshots.** Comparing two consecutive snapshots
   of a table shows which rows changed, even without the archives.
