@@ -715,12 +715,12 @@ func handleRows(
 	// row whose position could not be established rather than store a value
 	// that later reads as "beyond every checkpoint".
 	if uint64(binlogEv.Header.LogPos) < uint64(binlogEv.Header.EventSize) {
-		return fmt.Errorf(
+		return &unestablishedPositionError{msg: fmt.Sprintf(
 			"row event at %s has end position %d smaller than its size %d (%s.%s) — the binlog position for "+
 				"this event could not be established (MariaDB 11.4+ writes cache-buffered events with end_log_pos=0; "+
 				"the zero-LogPos fill should have replaced it before this point); refusing to index the row with an "+
 				"underflowed start_pos, which the resume-time dedup would treat as beyond every checkpoint",
-			filename, binlogEv.Header.LogPos, binlogEv.Header.EventSize, schema, table)
+			filename, binlogEv.Header.LogPos, binlogEv.Header.EventSize, schema, table)}
 	}
 	startPos := uint64(binlogEv.Header.LogPos) - uint64(binlogEv.Header.EventSize)
 	endPos := uint64(binlogEv.Header.LogPos)
@@ -1277,3 +1277,27 @@ func (e *PartialRowImageError) Error() string { return e.msg }
 
 // TelemetryClass implements telemetry.Classed.
 func (e *PartialRowImageError) TelemetryClass() string { return "config_invalid" }
+
+// PositionWraparoundError is the #845 guard: the binlog position went
+// backward inside one file, the signature of a file grown past the 4GiB wire
+// limit. Position-mode capture cannot continue and the remedy is to start the
+// stream in GTID mode, so its usage-telemetry class is config_invalid; the
+// message names the file and both positions for the operator and never leaves
+// the process.
+type PositionWraparoundError struct{ msg string }
+
+func (e *PositionWraparoundError) Error() string { return e.msg }
+
+// TelemetryClass implements telemetry.Classed.
+func (e *PositionWraparoundError) TelemetryClass() string { return "config_invalid" }
+
+// unestablishedPositionError is the #1117 belt: a row event reached handleRows
+// without a real end position, which both producers are meant to guarantee.
+// A defect on our side rather than anything the operator configured, so its
+// usage-telemetry class is internal.
+type unestablishedPositionError struct{ msg string }
+
+func (e *unestablishedPositionError) Error() string { return e.msg }
+
+// TelemetryClass implements telemetry.Classed.
+func (e *unestablishedPositionError) TelemetryClass() string { return "internal" }

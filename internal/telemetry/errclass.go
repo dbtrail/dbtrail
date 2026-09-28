@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"io/fs"
 	"net"
@@ -89,20 +90,71 @@ const (
 	// that ever sees it, which is why it arrives through MySQLNumbered and not
 	// as the driver's *MySQLError.
 	erMasterFatalReadingBinlog = 1236
+
+	// What a server that is reachable but unwell answers to a write (#1630).
+	// A capture daemon that ran for minutes and then died on one of these used
+	// to report unknown, which hid the failures an operator can act on.
+	//
+	// ER_DISK_FULL and ER_RECORD_FILE_FULL ("The table is full"): the server
+	// ran out of room for the write.
+	erDiskFull       = 1021
+	erRecordFileFull = 1114
+	// ER_CON_COUNT_ERROR and ER_TOO_MANY_USER_CONNECTIONS: the server was
+	// reached and turned the connection away.
+	erConCountError          = 1040
+	erTooManyUserConnections = 1203
+	// ER_LOCK_WAIT_TIMEOUT and ER_LOCK_DEADLOCK: the server gave up on the
+	// statement because of contention. See classifyMySQLNumber for why these
+	// share a class with the connection failures.
+	erLockWaitTimeout = 1205
+	erLockDeadlock    = 1213
+	// ER_NO_PARTITION_FOR_GIVEN_VALUE: the partition the row belongs in does
+	// not exist.
+	erNoPartitionForGivenValue = 1526
+	// ER_NET_PACKET_TOO_LARGE: the statement is larger than the server's
+	// max_allowed_packet.
+	erNetPacketTooLarge = 1153
+	// CR_SERVER_GONE_ERROR and CR_SERVER_LOST are CLIENT error numbers. The
+	// query driver reports the same condition as driver.ErrBadConn or
+	// ErrInvalidConn (handled in ClassifyError); the numbers are here for a
+	// proxy or a client library that relays them as a number.
+	crServerGoneError = 2006
+	crServerLost      = 2013
 )
 
 // classifyMySQLNumber maps a server error number to a class, shared by the
 // two client libraries that can surface one. A number with no bucket is
 // ClassUnknown, never a connectivity class: the server ANSWERED, so the
 // failure is specific and simply not one we have a bucket for.
+//
+// The class names the KIND of failure, not which server had it. The same
+// number means the same thing whether the index or the source sent it (a
+// source out of connections is as much a db_connection failure as an index
+// out of connections), and nothing on the wire says which side it was.
+//
+// db_connection covers a server that did not serve the request: unreachable,
+// refusing connections, or too contended to finish the statement. Lock wait
+// timeout and deadlock sit there because the class set is closed and that is
+// the one class that reads "the database was not available for this write",
+// the same reading the client-side write deadline already has. Telling
+// "contended" from "unreachable" needs a class of its own, and a new class
+// has to reach the receiving side before anything here may emit it.
 func classifyMySQLNumber(number uint16) string {
 	switch number {
 	case erAccessDenied, erDBAccessDenied, erHostNotPrivileged, erTableAccessDenied, erColumnAccessDenied, erSpecificAccess:
 		return ClassDBPermission
-	case erBadDB, erNoSuchTable:
+	case erBadDB, erNoSuchTable, erNoPartitionForGivenValue:
 		return ClassNotFound
 	case erMasterFatalReadingBinlog:
 		return ClassBinlogNotFound
+	case erDiskFull, erRecordFileFull:
+		return ClassStorageIO
+	case erConCountError, erTooManyUserConnections,
+		erLockWaitTimeout, erLockDeadlock,
+		crServerGoneError, crServerLost:
+		return ClassDBConnection
+	case erNetPacketTooLarge:
+		return ClassConfigInvalid
 	}
 	return ClassUnknown
 }
@@ -144,7 +196,10 @@ func ClassifyError(err error) string {
 	if errors.As(err, &netErr) {
 		return ClassDBConnection
 	}
-	if errors.Is(err, mysql.ErrInvalidConn) || errors.Is(err, context.DeadlineExceeded) {
+	// driver.ErrBadConn is what database/sql hands back once its own retries
+	// on a dead connection are spent: the driver's spelling of "server has
+	// gone away" and "lost connection during query".
+	if errors.Is(err, mysql.ErrInvalidConn) || errors.Is(err, driver.ErrBadConn) || errors.Is(err, context.DeadlineExceeded) {
 		return ClassDBConnection
 	}
 

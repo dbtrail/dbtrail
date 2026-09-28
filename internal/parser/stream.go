@@ -279,14 +279,14 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 			// an FDE — in-file FDEs sit at offset 4, immediately after a
 			// RotateEvent already reset lastLogPos to 0.
 		} else if hdr := binlogEv.Header; lastLogPos != 0 && hdr.LogPos != 0 && hdr.LogPos < lastLogPos {
-			return fmt.Errorf(
+			return &PositionWraparoundError{msg: fmt.Sprintf(
 				"binlog position wraparound detected in %q: position went from %d back to %d with no intervening "+
 					"file rotation — this file has grown past the 4GiB wire-format limit for a single binlog position "+
 					"(typically one oversized transaction delaying rotation), and the source is truncating end_log_pos "+
 					"on the wire; position-mode streaming cannot safely continue past this point. Switch to GTID mode, "+
 					"which has no positional limit: restart with --start-gtid using the source's current executed "+
 					"GTID set (%s)",
-				currentFile, lastLogPos, hdr.LogPos, GTIDExecutedHint(sp.flavor))
+				currentFile, lastLogPos, hdr.LogPos, GTIDExecutedHint(sp.flavor))}
 		} else if hdr.LogPos > lastLogPos {
 			lastLogPos = hdr.LogPos
 		}

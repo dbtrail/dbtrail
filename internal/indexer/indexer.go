@@ -68,6 +68,36 @@ type writeDeadlineError struct{ err error }
 func (e *writeDeadlineError) Error() string   { return e.err.Error() }
 func (e *writeDeadlineError) Unwrap() []error { return []error{e.err, ErrWriteDeadline} }
 
+// TelemetryClass implements telemetry.Classed. The class is the one this error
+// already reported through the context.DeadlineExceeded it wraps; declaring it
+// makes that a decision instead of a side effect of the wrapping (#1630). It
+// shares db_connection with a refused connection because no class in the
+// closed set says "the index was reachable and too slow".
+func (e *writeDeadlineError) TelemetryClass() string { return "db_connection" }
+
+// pkTooLongError is checkPKValuesLength's refusal, typed so usage telemetry
+// reports it as schema_mismatch: the source table's shape does not fit the
+// index schema. The message names the schema and table for the operator and
+// never leaves the process.
+type pkTooLongError struct{ msg string }
+
+func (e *pkTooLongError) Error() string { return e.msg }
+
+// TelemetryClass implements telemetry.Classed.
+func (e *pkTooLongError) TelemetryClass() string { return "schema_mismatch" }
+
+// rowEncodeError is a row image or column list that could not be encoded for
+// the INSERT. Nothing the operator configured causes it, so usage telemetry
+// reports it as internal. Error() and Unwrap delegate, so the message and
+// every errors.Is/As on the cause are unchanged.
+type rowEncodeError struct{ err error }
+
+func (e *rowEncodeError) Error() string { return e.err.Error() }
+func (e *rowEncodeError) Unwrap() error { return e.err }
+
+// TelemetryClass implements telemetry.Classed.
+func (e *rowEncodeError) TelemetryClass() string { return "internal" }
+
 // insertColumnsSQL is the column list of insertBatch's multi-row INSERT.
 // insertColumnCount must equal its column count — pinned by a unit test.
 const insertColumnsSQL = `binlog_file, start_pos, end_pos, event_timestamp, gtid, connection_id, ` +
@@ -253,15 +283,15 @@ func (idx *Indexer) insertBatch(batch []event.Event) (int64, error) {
 
 		changed, err := marshalJSON(event.ChangedColumns(ev.RowBefore, ev.RowAfter))
 		if err != nil {
-			return 0, fmt.Errorf("marshal changed_columns for %s.%s: %w", ev.Schema, ev.Table, err)
+			return 0, &rowEncodeError{fmt.Errorf("marshal changed_columns for %s.%s: %w", ev.Schema, ev.Table, err)}
 		}
 		rowBefore, err := marshalRow(ev.RowBefore)
 		if err != nil {
-			return 0, fmt.Errorf("marshal row_before for %s.%s: %w", ev.Schema, ev.Table, err)
+			return 0, &rowEncodeError{fmt.Errorf("marshal row_before for %s.%s: %w", ev.Schema, ev.Table, err)}
 		}
 		rowAfter, err := marshalRow(ev.RowAfter)
 		if err != nil {
-			return 0, fmt.Errorf("marshal row_after for %s.%s: %w", ev.Schema, ev.Table, err)
+			return 0, &rowEncodeError{fmt.Errorf("marshal row_after for %s.%s: %w", ev.Schema, ev.Table, err)}
 		}
 
 		args = append(args,
@@ -364,12 +394,12 @@ func (idx *Indexer) FirstIDOfLastBatch() int64 { return idx.firstIDOfLastBatch }
 // not false-trip this on byte length alone.
 func checkPKValuesLength(schema, table, pkValues string) error {
 	if n := utf8.RuneCountInString(pkValues); n > event.MaxPKValuesLen {
-		return fmt.Errorf(
+		return &pkTooLongError{msg: fmt.Sprintf(
 			"event for %s.%s has a primary key %d characters long, exceeding the %d-character limit of binlog_events.pk_values (VARCHAR(%d)); "+
 				"this row's primary key (composite width or a wide single column) cannot be safely indexed — truncating it would silently corrupt "+
 				"the generated pk_hash and make the row permanently unrecoverable via query/recover; narrow the primary key (fewer or shorter "+
 				"columns) or contact support about a wider index schema",
-			schema, table, n, event.MaxPKValuesLen, event.MaxPKValuesLen)
+			schema, table, n, event.MaxPKValuesLen, event.MaxPKValuesLen)}
 	}
 	return nil
 }
