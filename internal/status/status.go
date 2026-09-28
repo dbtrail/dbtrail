@@ -733,7 +733,11 @@ type BaselineInfo struct {
 	// Staleness is this snapshot's #1193 verdict against the oldest available
 	// delta coverage ("" until AnnotateBaselineStaleness runs).
 	Staleness BaselineStalenessVerdict
-	Path      string // filesystem path; ignored by display/JSON output
+	// Bound is where a reader of this table file starts its event fetch
+	// (#1707), which is what Staleness is graded on. Filled by the caller from
+	// the chain of deltas beside the file; zero for a file with none.
+	Bound ReadBound
+	Path  string // filesystem path; ignored by display/JSON output
 	// Size is the Parquet file size in bytes (0 = unknown). Surfaced so an
 	// operator can see per-table baseline size — the signal that tells whether
 	// a single-table baseline has grown into the large regime.
@@ -1533,6 +1537,12 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 		Size         int64   `json:"size_bytes,omitempty"`
 		SizeHuman    string  `json:"size_human,omitempty"`
 		Staleness    string  `json:"staleness,omitempty"`
+		// ReadsFrom is the instant staleness was graded on, present only
+		// when it is not snapshot_time: the start of the chain of deltas
+		// beside the table (#1707). ReadsFromUnknown says there is a chain
+		// and its start could not be read.
+		ReadsFrom        string `json:"reads_from,omitempty"`
+		ReadsFromUnknown bool   `json:"reads_from_unknown,omitempty"`
 	}
 	// jsonStreamError is emitted (under a distinct key, never a fake `stream` object —
 	// jsonStream's non-omitempty events_indexed:0/mode:"" would read as a real empty
@@ -1805,6 +1815,10 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 			jb.GTIDSet = &b.GTIDSet
 		}
 		jb.Staleness = string(b.Staleness)
+		jb.ReadsFromUnknown = b.Bound.Unread
+		if from := b.Bound.From(b.SnapshotTime); !b.Bound.Unread && !from.Equal(b.SnapshotTime) {
+			jb.ReadsFrom = from.UTC().Format(TSFmt)
+		}
 		out.Baselines = append(out.Baselines, jb)
 	}
 	out.BaselineStaleness = string(OverallBaselineStaleness(baselines))
@@ -1825,8 +1839,8 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "=== Baselines ===")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SNAPSHOT\tDATABASE\tTABLE\tSIZE\tBINLOG_FILE\tBINLOG_POS\tGTID\tSTALENESS")
-	fmt.Fprintln(tw, "────────\t────────\t─────\t────\t───────────\t──────────\t────\t─────────")
+	fmt.Fprintln(tw, "SNAPSHOT\tDATABASE\tTABLE\tSIZE\tBINLOG_FILE\tBINLOG_POS\tGTID\tREADS_FROM\tSTALENESS")
+	fmt.Fprintln(tw, "────────\t────────\t─────\t────\t───────────\t──────────\t────\t──────────\t─────────")
 	// The ⚠ glyph is reserved for rows the banner keys on — each table's
 	// NEWEST snapshot. A superseded snapshot past coverage is routine on a
 	// healthy retention cadence (the console's rule too); it still reads
@@ -1862,10 +1876,19 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 				staleness = "⚠ broken"
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		// Where a reader starts, which is what the verdict beside it was
+		// graded on (#1707): "-" when that is the snapshot itself.
+		readsFrom := "-"
+		switch from := b.Bound.From(b.SnapshotTime); {
+		case b.Bound.Unread:
+			readsFrom = "unreadable"
+		case !from.Equal(b.SnapshotTime):
+			readsFrom = from.UTC().Format(TSFmt)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			b.SnapshotTime.Format(TSFmt),
 			b.Database, b.Table, size,
-			binlogFile, binlogPos, gtid, staleness)
+			binlogFile, binlogPos, gtid, readsFrom, staleness)
 	}
 	tw.Flush()
 
@@ -1884,6 +1907,11 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 		fmt.Fprintln(w, "The delta-coverage floor could not be established for at least one table:")
 		fmt.Fprintln(w, "an index serving more than one source cannot attribute archived coverage to")
 		fmt.Fprintln(w, "the source that owns a baseline, and an unreadable index yields the same.")
+		if unread := unreadChainTables(baselines); len(unread) > 0 {
+			fmt.Fprintln(w, "Deltas beside the snapshot could not be read (READS_FROM unreadable) for:")
+			fmt.Fprintln(w, "  "+strings.Join(unread, ", "))
+			fmt.Fprintln(w, "A full backup of those tables replaces them.")
+		}
 		fmt.Fprintln(w, "A broken restore window would NOT be detected here — see")
 		fmt.Fprintln(w, "docs/rotation-and-status.md (Baseline staleness).")
 	}
@@ -1894,6 +1922,27 @@ func writeBaselines(w io.Writer, baselines []BaselineInfo) {
 		fmt.Fprintln(w, "delta coverage: reconstructing those tables through the missing window is")
 		fmt.Fprintln(w, "impossible. Take a fresh baseline (bintrail dump + bintrail baseline).")
 	}
+}
+
+// unreadChainTables names, sorted, the tables whose NEWEST snapshot has a
+// chain of deltas whose start could not be read and grades unknown for it:
+// the rows the not-evaluable banner is about when the floor itself is fine.
+func unreadChainTables(baselines []BaselineInfo) []string {
+	newest := make(map[string]BaselineInfo, len(baselines))
+	for _, b := range baselines {
+		k := b.Database + "." + b.Table
+		if cur, ok := newest[k]; !ok || cur.SnapshotTime.Before(b.SnapshotTime) {
+			newest[k] = b
+		}
+	}
+	var out []string
+	for k, b := range newest {
+		if b.Bound.Unread && b.Staleness == BaselineUnknown {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // RetentionInfo is the built-in rotation window one index runs on while its

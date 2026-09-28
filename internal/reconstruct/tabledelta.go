@@ -247,24 +247,7 @@ func readDeltaChainStart(ctx context.Context, basePath string) (time.Time, error
 	if err != nil || chain == nil {
 		return time.Time{}, err
 	}
-	// Every pair of a chain carries the same start; the last one is read
-	// because it is the one a refresh resumes from, so the two agree.
-	upserts := chain.LegacyUpserts
-	if !chain.Legacy {
-		upserts = chain.Last().Upserts
-	}
-	um, err := baseline.ReadParquetMetadataAny(ctx, upserts)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("read table delta %s: %w", upserts, err)
-	}
-	if um.DeltaChainStart.IsZero() {
-		// The pair exists and cannot say where its chain began. Every safe
-		// answer needs that instant, so there is none to give.
-		return time.Time{}, fmt.Errorf("table delta %s records no chain start (%s); "+
-			"it cannot be read safely — take a full backup to replace this snapshot",
-			upserts, baseline.MetaKeyDeltaChainStart)
-	}
-	return um.DeltaChainStart, nil
+	return baseline.TableDeltaStart(ctx, chain)
 }
 
 // tableDeltaCompactReason says why a run must rewrite the base instead of
