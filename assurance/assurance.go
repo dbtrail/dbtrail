@@ -56,6 +56,10 @@ type (
 	// BaselineFile is one table's Parquet file in a baseline listing. Its
 	// Schema field is BaselineInfo's Database under another name.
 	BaselineFile = reconstruct.BaselineFile
+	// ReadBound is where a reader of one table file starts its event fetch
+	// (#1707): the start of the chain of deltas beside the file, when there
+	// is one. It is what staleness is graded on; see ReadBounds.
+	ReadBound = status.ReadBound
 
 	// VerifyHistory is the persisted scheduled-verify run history (#1191).
 	VerifyHistory = console.VerifyHistory
@@ -206,9 +210,24 @@ func OldestDeltaFromDB(ctx context.Context, db *sql.DB, dbName string) (DeltaFlo
 	return status.OldestDeltaFromDB(ctx, db, dbName)
 }
 
+// ReadBounds returns, for each listed file in order, where a reader of that
+// table file starts its event fetch. Put it in BaselineInfo.Bound before
+// grading: a file with table deltas beside it is read from where its chain
+// of deltas started, which is earlier than the snapshot, and an entry left
+// with the zero Bound is graded on the snapshot's own time.
+//
+// It reads one file footer per file that has a chain (over S3, a request
+// each), so hand it the files that will be graded, not a whole inventory.
+// A start that cannot be read comes back Unread and grades unknown.
+func ReadBounds(ctx context.Context, files []BaselineFile) []ReadBound {
+	return reconstruct.ReadBounds(ctx, files)
+}
+
 // AnnotateBaselineStaleness grades each baseline in place against the floor.
 // OverallBaselineStaleness reads the verdicts this writes, so it has to run
 // first — an ungraded slice reduces to the empty verdict.
+//
+// Each entry is graded on its Bound (see ReadBounds).
 func AnnotateBaselineStaleness(baselines []BaselineInfo, floor DeltaFloor, now time.Time) {
 	status.AnnotateBaselineStaleness(baselines, floor, now)
 }

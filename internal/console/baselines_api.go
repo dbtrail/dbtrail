@@ -40,7 +40,22 @@ type baselineSnapshotDTO struct {
 	// delta coverage of the selected server's index (#1193):
 	// ok | aging | broken | unknown. "unknown" when the coverage floor could
 	// not be read — never reported as ok.
+	//
+	// Graded on where a reader of the snapshot starts its event fetch (#1707),
+	// the worst over its tables: with table deltas that is the start of the
+	// chain beside each table, which is earlier than the snapshot. Reading it
+	// costs one file footer per table, so it is read for the newest snapshot
+	// and for each table's newest one, the rows the headline is decided on.
+	// A snapshot older than those is graded only when the answer needs no
+	// footer: none of its tables has a chain, or the snapshot itself is
+	// already past coverage. Otherwise it is "unknown": the start was not
+	// read, so the window is not established. It is never "ok" and never
+	// left out, because a reader of this document takes a missing verdict
+	// for a good one.
 	Staleness string `json:"staleness,omitempty"`
+	// ReadsFrom is the earliest instant a reader of this snapshot's tables
+	// fetches events from, present only when it is not the snapshot's time.
+	ReadsFrom string `json:"reads_from,omitempty"`
 	// Kinds names every location this snapshot was found in, sorted: "dir",
 	// "s3", or both (#1542). The union over the snapshot's files, which is
 	// exactly what it claims and no more — a snapshot listing both was seen in
@@ -312,6 +327,12 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	} else {
 		floor = f
 	}
+	// Where a reader of each file starts (#1707). Bounded like the listing:
+	// this is the page's render path, and over S3 each read is a request.
+	bctx, bcancel := context.WithTimeout(r.Context(), baselineListTimeout)
+	bounds := pageReadBounds(bctx, files)
+	bcancel()
+	rows := gradeSnapshotRows(files, bounds, floor, now)
 	var cur *baselineSnapshotDTO
 	var curTime time.Time
 	for _, f := range files {
@@ -325,7 +346,11 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 				Time:     f.SnapshotTime.Format(consoleTSFormat),
 				AgeHours: now.Sub(f.SnapshotTime).Hours(),
 			}
-			dto.Staleness = string(floor.Grade(f.SnapshotTime, now))
+			row := rows[f.SnapshotTime.UnixNano()]
+			dto.Staleness = string(row.verdict)
+			if !row.readsFrom.IsZero() && !row.readsFrom.Equal(f.SnapshotTime) {
+				dto.ReadsFrom = row.readsFrom.Format(consoleTSFormat)
+			}
 			dto.Kinds = merged.Kinds[f.SnapshotTime.UnixNano()]
 			// Keyed on the file's OWN path, not on the primary source's kind:
 			// with two locations merged, the primary being S3 says nothing about
@@ -358,11 +383,76 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	// grade is the cost this bound removes.
 	infos := make([]status.BaselineInfo, len(files))
 	for i, f := range files {
-		infos[i] = status.BaselineInfo{Database: f.Schema, Table: f.Table, SnapshotTime: f.SnapshotTime}
+		infos[i] = status.BaselineInfo{Database: f.Schema, Table: f.Table, SnapshotTime: f.SnapshotTime, Bound: bounds[i]}
 	}
 	status.AnnotateBaselineStaleness(infos, floor, now)
 	resp.Staleness = string(status.OverallBaselineStaleness(infos))
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// readBoundsOf is reconstruct.ReadBounds, indirected so a test can count the
+// files the page reads a footer for.
+var readBoundsOf = reconstruct.ReadBounds
+
+// pageReadBounds returns where a reader of each listed file starts, reading
+// a footer only for the files a verdict the page SHOWS is decided on: every
+// table of the newest snapshot, and each table's newest snapshot. A file
+// with a chain that was not looked at comes back Unread: its start is not
+// known here, and that must never grade as covered.
+func pageReadBounds(ctx context.Context, files []reconstruct.BaselineFile) []status.ReadBound {
+	bounds := make([]status.ReadBound, len(files))
+	looked := make([]bool, len(files))
+	for _, i := range reconstruct.NewestPerTable(files) {
+		looked[i] = true
+	}
+	for i, f := range files {
+		if !f.SnapshotTime.Equal(files[0].SnapshotTime) {
+			break // files is newest first
+		}
+		looked[i] = true
+	}
+	var ask []reconstruct.BaselineFile
+	var at []int
+	for i, f := range files {
+		switch {
+		case !f.HasDelta():
+			// Nothing to read: the zero bound is the answer.
+		case looked[i]:
+			ask = append(ask, f)
+			at = append(at, i)
+		default:
+			bounds[i].Unread = true
+		}
+	}
+	for j, b := range readBoundsOf(ctx, ask) {
+		bounds[at[j]] = b
+	}
+	return bounds
+}
+
+// snapshotRowGrade is one snapshot row's verdict and the instant behind it.
+type snapshotRowGrade struct {
+	verdict   status.BaselineStalenessVerdict
+	readsFrom time.Time
+}
+
+// gradeSnapshotRows grades each snapshot as the worst of its tables, keyed
+// by the snapshot's time in UnixNano. A table whose chain start was not read
+// grades unknown, or broken when the snapshot itself is past coverage
+// (GradeTable), so every row listed has a verdict.
+func gradeSnapshotRows(files []reconstruct.BaselineFile, bounds []status.ReadBound, floor status.DeltaFloor, now time.Time) map[int64]snapshotRowGrade {
+	rows := map[int64]snapshotRowGrade{}
+	for i, f := range files {
+		k := f.SnapshotTime.UnixNano()
+		row := rows[k]
+		v := floor.GradeTable(f.SnapshotTime, bounds[i], now)
+		row.verdict = status.WorseBaselineStaleness(row.verdict, v)
+		if from := bounds[i].From(f.SnapshotTime); !bounds[i].Unread && (row.readsFrom.IsZero() || from.Before(row.readsFrom)) {
+			row.readsFrom = from
+		}
+		rows[k] = row
+	}
+	return rows
 }
 
 // baselineKind names a baseline source's kind on the wire: "s3" for a

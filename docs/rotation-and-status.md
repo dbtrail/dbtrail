@@ -743,6 +743,41 @@ event on the transition into broken (see
 [Alerts](https://www.dbtrail.com/docs/monitoring/alerts/#webhook)). The fix is always the
 same: take a fresh baseline (`bintrail dump` + `bintrail baseline`).
 
+**Tables with table deltas**: when backups are updated on a schedule, a
+table's file is carried forward and its changes go into small files beside
+it. A restore of that table reads events from where that chain of files
+**started**, which is earlier than the snapshot folder's time, by up to a
+day. The verdict is graded on that instant, the same one `reconstruct`
+reads from. The `READS_FROM` column shows it (`-` when it is the snapshot's
+own time), and the JSON output carries it as `reads_from`.
+
+```
+SNAPSHOT             DATABASE  TABLE   ...  READS_FROM           STALENESS
+2026-09-27 12:00:00  shop      orders  ...  2026-09-27 02:00:00  ⚠ broken
+2026-09-27 12:00:00  shop      users   ...  -                    ok
+2026-09-27 12:00:00  shop      half    ...  unreadable           unknown
+```
+
+When the files beside a table are damaged or cannot be read, `READS_FROM`
+says `unreadable` (`reads_from_unknown: true` in JSON) and the table grades
+`unknown`, never `ok` and never `aging`: both of those say the window is
+covered, and where the window starts is not known. One exception: a snapshot
+folder that is already older than coverage is `broken` whatever its chain
+says, because a chain never starts after its folder. A full snapshot of the
+table replaces the damaged files. The `watch` daemon treats such a server
+like one it cannot evaluate: it logs a warning, sends no alert on a guess,
+and does not resolve a standing `baseline_stale` alert. A table that is
+past coverage still alerts, whatever could not be read for the table beside
+it.
+
+A chain of deltas lives for up to 24 hours before the table is written whole
+again. With a retention of 24 hours or less and table deltas on, the start
+of a chain can come close to the oldest hour the index keeps, or fall behind
+it, so the verdict can read `aging` or `broken` for a while on a server
+whose snapshots are made on time. It clears when the table is next written
+whole. A retention longer than a day keeps the start of every chain inside
+coverage.
+
 **Indexes capturing more than one source**: live partitions are shared by
 every source, so the live floor needs no attribution — but archived
 partitions are per-source, and a baseline snapshot carries no source

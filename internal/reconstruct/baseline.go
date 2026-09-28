@@ -327,6 +327,12 @@ type BaselineFile struct {
 	Schema       string
 	Table        string
 	Path         string
+	// DeltaUpserts is the file NAME of the newest pair of the chain of deltas
+	// beside the file (#1638), read off the names the listing had in hand;
+	// empty when there is no chain. DeltaErr is set when the delta files
+	// beside it do not form a chain. See ReadBounds (#1707).
+	DeltaUpserts string
+	DeltaErr     error
 }
 
 // NewestSnapshotTables returns the schema.table entries of the NEWEST
@@ -598,6 +604,7 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 				continue
 			}
 			var tables []BaselineFile
+			deltas := deltaNamesOf(schemaDir, files)
 			for _, f := range files {
 				if f.IsDir() || !strings.HasSuffix(f.Name(), ".parquet") {
 					continue
@@ -616,12 +623,12 @@ func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapsho
 					tables = nil
 					break
 				}
-				tables = append(tables, BaselineFile{
+				tables = append(tables, deltas.mark(BaselineFile{
 					SnapshotTime: ts,
 					Schema:       dbDir.Name(),
 					Table:        strings.TrimSuffix(f.Name(), ".parquet"),
 					Path:         path,
-				})
+				}))
 			}
 			out = append(out, tables...)
 		}
