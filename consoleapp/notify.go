@@ -446,6 +446,14 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 					"server", t.name, "source", t.source, "reason", reason,
 					"live_floor", floor.Hour.UTC().Format(time.RFC3339))
 			}
+			// What could not be graded for one table is no evidence about
+			// another (#1707): a chain is unread per table, so a table that
+			// IS past coverage still alerts. Only the resolve is withheld.
+			if len(brokenTables) > 0 {
+				sort.Strings(brokenTables)
+				w.n.BaselineStale(t.name, edgeID, true,
+					strings.Join(brokenTables, ", "), floor.Hour.UTC().Format(time.RFC3339))
+			}
 			continue
 		}
 		w.unknownEdge.Resolve("staleness-attribution:" + edgeID)

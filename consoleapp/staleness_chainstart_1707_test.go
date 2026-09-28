@@ -197,3 +197,44 @@ func TestStartStalenessWatch_readsChainStarts(t *testing.T) {
 		t.Fatalf("the watcher is missing a reader: %+v", w)
 	}
 }
+
+// TestStalenessWatcher_unreadChainDoesNotMuteABrokenTable: what cannot be
+// read for one table is no evidence about another. A table past coverage
+// alerts although the chain of the table beside it is unread; only the
+// resolve is withheld, because that one needs every table graded.
+func TestStalenessWatcher_unreadChainDoesNotMuteABrokenTable(t *testing.T) {
+	now := time.Now().UTC()
+	oldest := now.Add(-20 * time.Hour)
+	n, f := testNotifier()
+	c := newChainWatcher(t, n)
+	c.floor = status.DeltaFloor{Hour: oldest}
+	snap := now.Add(-time.Hour)
+	c.files = []reconstruct.BaselineFile{
+		{Schema: "shop", Table: "orders", SnapshotTime: snap, DeltaUpserts: "orders.upserts.parquet"},
+		{Schema: "shop", Table: "audit", SnapshotTime: snap, DeltaErr: context.DeadlineExceeded},
+	}
+	c.bounds["shop.orders"] = status.ReadBound{ChainStart: oldest.Add(-2 * time.Hour)}
+	c.bounds["shop.audit"] = status.ReadBound{Unread: true}
+
+	c.w.runCycle(context.Background())
+	if len(f.events) != 1 || f.events[0].Resolved || f.events[0].Details["tables"] != "shop.orders" {
+		t.Fatalf("a broken table must alert beside an unread chain: %+v", f.events)
+	}
+	if !c.w.unknownEdge.Active(chainEdge) {
+		t.Fatal("the unread chain must still be latched as cannot-evaluate")
+	}
+
+	// orders is repaired, audit is still unread: nothing resolves.
+	c.bounds["shop.orders"] = status.ReadBound{ChainStart: snap.Add(-time.Hour)}
+	c.w.runCycle(context.Background())
+	if len(f.events) != 1 {
+		t.Fatalf("with a table ungraded the alert must not resolve: %+v", f.events)
+	}
+
+	// audit is readable again: now it resolves.
+	c.bounds["shop.audit"] = status.ReadBound{ChainStart: snap.Add(-time.Hour)}
+	c.w.runCycle(context.Background())
+	if len(f.events) != 2 || !f.events[1].Resolved {
+		t.Fatalf("every table graded and none broken must resolve: %+v", f.events)
+	}
+}
