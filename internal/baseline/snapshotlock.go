@@ -148,6 +148,29 @@ func WriteLockModeMarker(dir string, mode LockMode) error {
 	return nil
 }
 
+// RecordDumpLockMode is WriteLockModeMarker for the two callers that run
+// mydumper (`bintrail dump` and the web interface's full snapshot), after a
+// dump that succeeded. sent says whether mode was really given to mydumper;
+// when it was not, no record is written, and one left by an earlier dump into
+// the same directory is removed. Nothing here fails the dump: without the
+// record the snapshot says nothing about its locks, which reads as unknown.
+func RecordDumpLockMode(dir string, mode LockMode, sent bool) {
+	if !sent {
+		if err := os.Remove(filepath.Join(dir, LockModeMarkerFile)); err != nil && !os.IsNotExist(err) {
+			slog.Warn("could not remove an earlier lock mode record from the dump; remove it by hand before converting this dump",
+				"dir", dir, "file", LockModeMarkerFile, "error", err)
+		}
+		slog.Warn("mydumper was not given a lock mode, so it chose its own and the dump does not record one; "+
+			"the snapshot made from it will not say how it was locked",
+			"dir", dir)
+		return
+	}
+	if err := WriteLockModeMarker(dir, mode); err != nil {
+		slog.Warn("could not record the dump's lock mode; the snapshot made from it will not say how it was locked",
+			"dir", dir, "lock_mode", string(mode), "error", err)
+	}
+}
+
 // readLockModeMarker reads LockModeMarkerFile from a dump directory. It
 // returns "" when the file is absent, cannot be read, or does not hold exactly
 // one of the four lock modes: the snapshot is then written with no record and
