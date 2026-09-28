@@ -266,14 +266,19 @@ type stalenessWatcher struct {
 	readBounds func(ctx context.Context, files []reconstruct.BaselineFile) []status.ReadBound
 }
 
-func startStalenessWatch(ctx context.Context, n *watchNotifier, registry *console.Registry, bootDSN, globalDir, globalS3 string) {
-	w := &stalenessWatcher{
+// newStalenessWatcher is the watcher the daemon runs, with its real readers.
+func newStalenessWatcher(n *watchNotifier, registry *console.Registry, bootDSN, globalDir, globalS3 string) *stalenessWatcher {
+	return &stalenessWatcher{
 		n: n, registry: registry, bootDSN: bootDSN, globalDir: globalDir, globalS3: globalS3,
 		unknownEdge:   notify.NewEdge(0),
 		listBaselines: reconstruct.ListBaselinesReport,
 		oldestDelta:   oldestDeltaByDSN,
 		readBounds:    reconstruct.ReadBounds,
 	}
+}
+
+func startStalenessWatch(ctx context.Context, n *watchNotifier, registry *console.Registry, bootDSN, globalDir, globalS3 string) {
+	w := newStalenessWatcher(n, registry, bootDSN, globalDir, globalS3)
 	go func() {
 		if ctx.Err() == nil {
 			w.runCycle(ctx)
@@ -432,7 +437,7 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 			// alert. Skip the target whole, exactly like an unknown floor.
 			reason := "a baseline snapshot carries no usable timestamp"
 			if unreadChain {
-				reason = "the table delta beside a snapshot could not be read, so where a restore of that table starts is not known; a full backup replaces it"
+				reason = "the table delta beside a snapshot could not be read, so where a restore of that table starts is not known; a full snapshot replaces it"
 			} else if floor.BelowIsUnknown {
 				reason = "this index serves more than one source, so archived coverage below the live index window cannot be attributed to the source that owns these baselines"
 			}
