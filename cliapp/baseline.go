@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 )
 
@@ -49,7 +50,7 @@ var (
 
 func init() {
 	baselineCmd.Flags().StringVar(&bslInput, "input", "", "mydumper output directory (required)")
-	baselineCmd.Flags().StringVar(&bslOutput, "output", "", "Parquet output base directory (required)")
+	cli.AddOutputFlag(baselineCmd, &bslOutput, "", "Parquet output base directory (required)", cli.OutputDirAlias)
 	baselineCmd.Flags().StringVar(&bslTimestamp, "timestamp", "", "Snapshot timestamp override (ISO 8601; default: from mydumper metadata)")
 	baselineCmd.Flags().StringVar(&bslTables, "tables", "", "Comma-separated db.table filter (e.g. mydb.orders,mydb.items; default: all)")
 	baselineCmd.Flags().StringVar(&bslCompression, "compression", "zstd", "Parquet compression codec: zstd, snappy, gzip, none")
@@ -63,7 +64,7 @@ func init() {
 	baselineCmd.Flags().StringVar(&bslEncryptKey, "encrypt-key", "", "Path to encryption key file (default: ~/.config/bintrail/dump.key)")
 	baselineCmd.Flags().StringVar(&bslBintrailID, "bintrail-id", "", "Server identity UUID to sign the snapshot with. One writer per --output folder or --upload prefix: two installations writing into one location mix their snapshots. Without it the snapshot is unsigned")
 	_ = baselineCmd.MarkFlagRequired("input")
-	_ = baselineCmd.MarkFlagRequired("output")
+	_ = baselineCmd.MarkFlagRequired(cli.OutputFlag)
 	bindCommandEnv(baselineCmd)
 
 	rootCmd.AddCommand(baselineCmd)

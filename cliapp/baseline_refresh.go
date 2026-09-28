@@ -91,7 +91,7 @@ func init() {
 	f.StringVar(&brIndexDSN, "index-dsn", "", "DSN for the index MySQL database (required)")
 	f.StringVar(&brBaselineDir, "baseline-dir", "", "Local directory of baseline snapshots to refresh from (and, unless --output is set, to write into)")
 	f.StringVar(&brBaselineS3, "baseline-s3", "", "S3 URL prefix of baseline snapshots to refresh from (requires --output for the local destination)")
-	f.StringVar(&brOutput, "output", "", "Directory to write the new snapshot into (default: --baseline-dir). One writer per folder: two installations writing into one folder mix their snapshots")
+	cli.AddOutputFlag(baselineRefreshCmd, &brOutput, "", "Directory to write the new snapshot into (default: --baseline-dir). One writer per folder: two installations writing into one folder mix their snapshots", cli.OutputDirAlias)
 	f.StringVar(&brTables, "tables", "", "Comma-separated schema.table list (default: every table in the newest snapshot)")
 	f.StringVar(&brAt, "at", "", "Point-in-time to refresh to (default: now)")
 	f.BoolVar(&brAllowGaps, "allow-gaps", false, "Publish even when the window spans a known permanent capture gap; the snapshot is permanently marked as knowingly incomplete")

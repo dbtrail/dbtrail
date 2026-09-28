@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/dbtrail/dbtrail/internal/cli"
 )
 
 var initShimCmd = &cobra.Command{
@@ -24,7 +26,7 @@ as TODO comments; fill them in by hand. The shim validates both the
 username and the cleartext password; bintrail proxysql-config recomputes
 the SHA1 from mysql_password for ProxySQL's own user table.
 
-Use --out - to write to stdout instead of a file.`,
+Use --output - to write to stdout instead of a file.`,
 	RunE: runInitShim,
 }
 
@@ -34,7 +36,7 @@ var (
 )
 
 func init() {
-	initShimCmd.Flags().StringVar(&isOut, "out", "shim.yaml", "Output path for the generated shim config (use - for stdout)")
+	cli.AddOutputFlag(initShimCmd, &isOut, "shim.yaml", "Output path for the generated shim config (use - for stdout)", cli.OutAlias)
 	initShimCmd.Flags().StringVar(&isListen, "listen", "127.0.0.1:3308", "Listen address for `bintrail shim`'s MySQL protocol port")
 	bindCommandEnv(initShimCmd)
 	rootCmd.AddCommand(initShimCmd)
