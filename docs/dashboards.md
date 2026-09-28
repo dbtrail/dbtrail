@@ -36,8 +36,7 @@ of them:
   **Snapshots** page, under **Where and how often**, give the server a
   **Local folder**. A folder there carries a `current` pointer that every
   scheduled snapshot moves forward, and that pointer is what lets the views
-  follow. A server whose snapshots go only to S3 has no such pointer; see
-  [Snapshots only in S3](#snapshots-only-in-s3) below.
+  follow. The snapshots can go to S3 as well; the tool reads the local copy.
 - A snapshot schedule, set on the same page. The interval is how fresh the
   charts can be.
 - The steps below assume that folder is inside `/var/lib/bintrail`,
@@ -155,18 +154,7 @@ every query fails instead of only that table's.
   not read the table's schema, or another table's name starts with this one's
   name and a dot). Get the views file again when that happens.
 
-## Snapshots only in S3
-
-The views file for an S3-only server has no `current` pointer to read through.
-Instead, it looks up the newest completed snapshot in a session variable when
-it is run, and it reads S3 through a credential lookup that lasts one session.
-Neither is kept in a database file, so each connection would have to run those
-statements again, through **Init SQL**, which the driver runs before every
-query. The tool's container would also need AWS credentials. This page does not
-cover that route.
-
-Give the server a **Local folder** as well (on the Snapshots page), and
-follow the steps above.
+## Do not read a synced copy
 
 Do not point the tool at a copy made with `aws s3 sync`. A synced folder has no
 `current` pointer, and the sync can copy a snapshot's completion marker before
