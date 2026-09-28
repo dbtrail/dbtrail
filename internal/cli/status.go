@@ -176,24 +176,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			data.BaselinesUnavailable = true
 			data.BaselinesErr = bErr
 		} else {
-			for _, b := range baselines {
-				var size int64
-				if fi, sErr := os.Stat(b.Path); sErr == nil {
-					size = fi.Size()
-				} else {
-					slog.Warn("could not stat baseline file for size", "path", b.Path, "error", sErr)
-				}
-				data.Baselines = append(data.Baselines, status.BaselineInfo{
-					SnapshotTime: b.SnapshotTime,
-					Database:     b.Database,
-					Table:        b.Table,
-					BinlogFile:   b.BinlogFile,
-					BinlogPos:    b.BinlogPos,
-					GTIDSet:      b.GTIDSet,
-					Path:         b.Path,
-					Size:         size,
-				})
-			}
+			data.Baselines = statusBaselines(baselines)
 			// Staleness (#1193): grade every snapshot against the oldest
 			// available delta coverage — the live-partition floor (partition
 			// existence = coverage) extended backwards by archives. The floor
@@ -349,6 +332,34 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return nil
+}
+
+// statusBaselines turns the discovered baseline files into the entries the
+// report grades and prints. Bound is where a reader of the file starts
+// (#1707): the start of the chain of deltas beside it, or unread when there
+// is a chain and its start could not be read.
+func statusBaselines(baselines []baseline.BaselineInfo) []status.BaselineInfo {
+	var out []status.BaselineInfo
+	for _, b := range baselines {
+		var size int64
+		if fi, sErr := os.Stat(b.Path); sErr == nil {
+			size = fi.Size()
+		} else {
+			slog.Warn("could not stat baseline file for size", "path", b.Path, "error", sErr)
+		}
+		out = append(out, status.BaselineInfo{
+			SnapshotTime: b.SnapshotTime,
+			Database:     b.Database,
+			Table:        b.Table,
+			BinlogFile:   b.BinlogFile,
+			BinlogPos:    b.BinlogPos,
+			GTIDSet:      b.GTIDSet,
+			Bound:        status.ReadBound{ChainStart: b.ChainStart, Unread: b.ChainStartErr != nil},
+			Path:         b.Path,
+			Size:         size,
+		})
+	}
+	return out
 }
 
 // unreadableNewestBaseline refuses to grade a partial baseline walk (#1639):

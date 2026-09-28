@@ -401,6 +401,7 @@ func (x *s3SnapshotIndex) readDir(ctx context.Context, d s3SnapshotDir) (c s3Dir
 	}
 	var success, incomplete bool
 	var plain []string
+	bySchema := map[string][]string{} // the file names of each schema folder
 	for _, o := range infos {
 		parts := strings.Split(o.Key, "/")
 		if parts[0] != d.name {
@@ -408,6 +409,9 @@ func (x *s3SnapshotIndex) readDir(ctx context.Context, d s3SnapshotDir) (c s3Dir
 		}
 		if len(parts) == 2 {
 			plain = append(plain, parts[1])
+		}
+		if len(parts) == 3 {
+			bySchema[parts[1]] = append(bySchema[parts[1]], parts[2])
 		}
 		switch {
 		case len(parts) == 2 && parts[1] == baseline.SuccessMarker:
@@ -421,6 +425,16 @@ func (x *s3SnapshotIndex) readDir(ctx context.Context, d s3SnapshotDir) (c s3Dir
 				Table:        strings.TrimSuffix(parts[2], ".parquet"),
 				Path:         x.prefix + "/" + o.Key,
 			})
+		}
+	}
+	// The chain of deltas beside each table (#1707), off the listing just
+	// made: the directory's one read already returned those names.
+	for schema, names := range bySchema {
+		deltas := deltaNames(x.prefix+"/"+d.name+"/"+schema, names)
+		for i := range c.files {
+			if c.files[i].Schema == schema {
+				c.files[i] = deltas.mark(c.files[i])
+			}
 		}
 	}
 	signed, bad := baseline.WritersFromNames(plain)

@@ -102,6 +102,71 @@ func (f DeltaFloor) Grade(snapshotTime, now time.Time) BaselineStalenessVerdict 
 	return v
 }
 
+// ReadBound is what the files beside one table's snapshot say about where a
+// reader starts its event fetch (#1707). The zero value is a table file with
+// no chain of deltas beside it: a reader starts at the snapshot's own time.
+//
+// With table deltas a table's file is carried forward while its changes go
+// into pairs of small files beside it, and every reader that rebuilds the
+// table from the file plus the index fetches events from where that chain
+// STARTED (reconstruct.FindBaseline). That instant, not the directory's, is
+// what has to sit inside delta coverage.
+type ReadBound struct {
+	// ChainStart is where the chain of deltas beside the table file began.
+	// Zero: there is no chain.
+	ChainStart time.Time
+	// Unread says a chain is there and its start could not be read (half a
+	// pair, an unreadable footer, a bucket that did not answer), or was not
+	// looked at. The instant a reader needs is then not known here.
+	Unread bool
+}
+
+// From is the instant a reader bounds its event fetch from, by
+// reconstruct.FindBaseline's own rule: the chain's start, and only when it is
+// EARLIER than the snapshot. A start after the directory that holds it is a
+// footer that cannot be right, and is ignored there and here.
+func (b ReadBound) From(snapshotTime time.Time) time.Time {
+	if !b.ChainStart.IsZero() && b.ChainStart.Before(snapshotTime) {
+		return b.ChainStart
+	}
+	return snapshotTime
+}
+
+// GradeTable is Grade for one table's snapshot with what sits beside it: the
+// verdict is computed on the instant a reader fetches events from.
+//
+// A chain whose start could not be read is never "ok" and never "aging":
+// both say the needed window is covered, and the window is not known. It
+// grades "unknown", with one exception that is evidence and not a guess. A
+// chain starts at or before the directory that holds it, so a DIRECTORY time
+// already below the floor puts the start below it too, and that is "broken"
+// (or "unknown" under an unattributable floor, Grade's own demotion).
+func (f DeltaFloor) GradeTable(snapshotTime time.Time, b ReadBound, now time.Time) BaselineStalenessVerdict {
+	if b.Unread {
+		if v := f.Grade(snapshotTime, now); v == BaselineBroken {
+			return v
+		}
+		return BaselineUnknown
+	}
+	return f.Grade(b.From(snapshotTime), now)
+}
+
+// WorseBaselineStaleness returns the worse of two verdicts, by the order
+// OverallBaselineStaleness reduces with. The empty verdict ranks under all.
+func WorseBaselineStaleness(a, b BaselineStalenessVerdict) BaselineStalenessVerdict {
+	if stalenessRank[b] > stalenessRank[a] {
+		return b
+	}
+	return a
+}
+
+// Unknown outranks aging: aging is informational (it fires on every young
+// install and never alerts), while unknown means the restore window could
+// not be established at all. #1219 makes unknown the ROUTINE verdict for
+// below-floor snapshots on multi-source indexes, so ranking it under
+// aging would headline "mildly old" over "could not be checked".
+var stalenessRank = map[BaselineStalenessVerdict]int{BaselineOK: 1, BaselineAging: 2, BaselineUnknown: 3, BaselineBroken: 4}
+
 // OldestLivePartitionHour is the live half of the delta floor: the hour of
 // the oldest non-future binlog_events partition. Partition EXISTENCE is
 // coverage — the planner's own rule. MIN(event_timestamp) must NOT be used
@@ -253,21 +318,20 @@ func knownSourceCount(ctx context.Context, db *sql.DB) (int, error) {
 // is graded on its own anchor — a superseded old snapshot showing "broken" is
 // honest (it IS unusable); what decides the headline is
 // OverallBaselineStaleness, which only looks at each table's newest snapshot.
+//
+// The anchor is where a reader starts (#1707): the entry's Bound, which the
+// caller fills from the files beside the table. An entry with the zero Bound
+// is graded on its snapshot time, which is right only for a table file with
+// no chain of deltas beside it.
 func AnnotateBaselineStaleness(baselines []BaselineInfo, floor DeltaFloor, now time.Time) {
 	for i := range baselines {
-		baselines[i].Staleness = floor.Grade(baselines[i].SnapshotTime, now)
+		baselines[i].Staleness = floor.GradeTable(baselines[i].SnapshotTime, baselines[i].Bound, now)
 	}
 }
 
 // OverallBaselineStaleness is the worst verdict across each table's NEWEST
 // snapshot. "" when the list is empty or unannotated.
 func OverallBaselineStaleness(baselines []BaselineInfo) BaselineStalenessVerdict {
-	// Unknown outranks aging: aging is informational (it fires on every young
-	// install and never alerts), while unknown means the restore window could
-	// not be established at all. #1219 makes unknown the ROUTINE verdict for
-	// below-floor snapshots on multi-source indexes, so ranking it under
-	// aging would headline "mildly old" over "could not be checked".
-	rank := map[BaselineStalenessVerdict]int{BaselineOK: 1, BaselineAging: 2, BaselineUnknown: 3, BaselineBroken: 4}
 	newest := make(map[string]BaselineInfo, len(baselines))
 	for _, b := range baselines {
 		k := b.Database + "." + b.Table
@@ -277,9 +341,7 @@ func OverallBaselineStaleness(baselines []BaselineInfo) BaselineStalenessVerdict
 	}
 	var out BaselineStalenessVerdict
 	for _, b := range newest {
-		if rank[b.Staleness] > rank[out] {
-			out = b.Staleness
-		}
+		out = WorseBaselineStaleness(out, b.Staleness)
 	}
 	return out
 }

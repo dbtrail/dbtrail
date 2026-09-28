@@ -233,6 +233,21 @@ func TestProvider_noBaselineIsPhase1Only(t *testing.T) {
 	}
 }
 
+// A lookup that failed (#1740: a snapshot location that could not be read) is
+// an error. It is never "not covered", which would let the recovery go on
+// with Phase-1 alone and miss the rows only the baseline holds.
+func TestProvider_aFailedLookupIsNotPhase1Only(t *testing.T) {
+	failed := errors.New("could not read the snapshot folder s3://b/base/2026-09-01T00-00-00Z: SlowDown")
+	find := func(context.Context, string, string, time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
+		return "", time.Time{}, reconstruct.StaleWarning{}, failed
+	}
+	_, ok, err := New(find, childResolver("shop")).
+		BaselineChildren(context.Background(), "shop", "child", "pid", "1", time.Now(), 100)
+	if !errors.Is(err, failed) || ok {
+		t.Fatalf("ok = %v err = %v, want the lookup's own error", ok, err)
+	}
+}
+
 func TestFkFilterSafe(t *testing.T) {
 	safe := []string{"int", "BIGINT", " varchar ", "text", "enum"}
 	for _, d := range safe {

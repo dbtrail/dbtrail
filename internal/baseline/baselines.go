@@ -1,6 +1,7 @@
 package baseline
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -20,6 +21,13 @@ type BaselineInfo struct {
 	GTIDSet      string
 	LSN          uint64 // PostgreSQL WAL LSN anchor; 0 = absent (MySQL baseline, or pre-#593 PG baseline)
 	Path         string
+	// ChainStart is where the chain of deltas beside the file began (#1638),
+	// the instant every reader bounds its event fetch from; zero when the file
+	// has no chain. ChainStartErr is set when there is a chain and its start
+	// could not be read (half a pair, an unreadable footer): the instant is
+	// then unknown, which is not the same as the snapshot's own time (#1707).
+	ChainStart    time.Time
+	ChainStartErr error
 }
 
 // DiscoverBaselines walks a baseline directory and returns metadata for each
@@ -90,6 +98,17 @@ func DiscoverBaselinesReport(dir string) ([]BaselineInfo, []time.Time, error) {
 				unreadable = append(unreadable, ts)
 				continue
 			}
+			// The names of the folder, for the chain of deltas beside each
+			// table (#1707): read off the listing already made, so finding a
+			// chain costs no listing of its own, and its start one footer per
+			// table with one.
+			names := make([]string, 0, len(tableFiles))
+			for _, tf := range tableFiles {
+				if !tf.IsDir() {
+					names = append(names, tf.Name())
+				}
+			}
+			newestUpserts, damagedDelta := NewestTableDeltaUpserts(tableDir, names)
 			for _, tf := range tableFiles {
 				if tf.IsDir() || !strings.HasSuffix(tf.Name(), ".parquet") {
 					continue
@@ -120,6 +139,16 @@ func DiscoverBaselinesReport(dir string) ([]BaselineInfo, []time.Time, error) {
 					info.LSN = meta.LSN
 				} else {
 					slog.Warn("could not read Parquet metadata for baseline", "path", filePath, "error", err)
+				}
+
+				err := damagedDelta[tableName]
+				if upserts := newestUpserts[tableName]; err == nil && upserts != "" {
+					info.ChainStart, err = TableDeltaStartAt(context.Background(), upserts)
+				}
+				if err != nil {
+					slog.Warn("could not read where the table delta beside a baseline starts; its age cannot be graded",
+						"path", filePath, "error", err)
+					info.ChainStartErr = err
 				}
 
 				results = append(results, info)
