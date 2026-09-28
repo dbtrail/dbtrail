@@ -25,13 +25,13 @@ import (
 // table-scoped glob made snapshots lacking the table invisible, so it could
 // never compute a "newest eligible snapshot" to compare against. We resolve
 // that by running ONE broader listing (prefix/*/*/*.parquet, the glob the
-// listing used before #1679) — bounding the listing cost to a single extra glob —
+// listing used before #1679), bounding the listing cost to a single extra glob,
 // to derive the newest complete snapshot at-or-before `at`, and ONE marker glob
 // (prefix/*/_SUCCESS and _INCOMPLETE) to exclude partial snapshots (#467).
 //
 // The two glob steps differ in fatality: the marker glob (s3IncompleteSnapshots)
-// is a CORRECTNESS filter — its error fails the lookup so a partial snapshot can
-// never slip through — while the broad newest-snapshot glob is purely ADVISORY
+// is a CORRECTNESS filter, its error fails the lookup so a partial snapshot can
+// never slip through, while the broad newest-snapshot glob is purely ADVISORY
 // (staleWarningS3) and its error must NOT discard the already-located baseline
 // (#524 review).
 func findBaselineS3Globs(ctx context.Context, s3URL, schema, table string, at time.Time) (string, time.Time, StaleWarning, error) {
@@ -60,7 +60,7 @@ func findBaselineS3Globs(ctx context.Context, s3URL, schema, table string, at ti
 func findBaselineGlob(ctx context.Context, db *sql.DB, s3URL, schema, table string, at time.Time) (string, time.Time, StaleWarning, error) {
 	prefix := strings.TrimSuffix(s3URL, "/")
 
-	// Snapshot dirs flagged incomplete (#467) — excluded from both the
+	// Snapshot dirs flagged incomplete (#467), excluded from both the
 	// table-scoped candidate scan and the broad newest-snapshot scan.
 	incomplete, err := s3IncompleteSnapshots(ctx, db, prefix)
 	if err != nil {
@@ -117,13 +117,13 @@ func findBaselineGlob(ctx context.Context, db *sql.DB, s3URL, schema, table stri
 // throttle/timeout on a large bucket; findBaselineS3 is on the per-request shim
 // `_snapshot` / console reconstruct hot path (no caching). A transient S3 blip
 // on this purely-advisory step must NOT throw away the baseline we already
-// found — that would fail a recovery that pre-#466 succeeded, the inverse of
+// found, that would fail a recovery that pre-#466 succeeded, the inverse of
 // the goal. So on error we warn and return the zero StaleWarning ("not stale");
 // only the FATAL filters (incomplete-snapshot exclusion, the table-scoped glob)
 // can fail the lookup (#524 review).
 func staleWarningS3(ctx context.Context, db *sql.DB, prefix, schema, table string, using, at time.Time, incomplete map[string]bool) StaleWarning {
 	// Broad scan for the newest complete snapshot at-or-before `at`, whether or
-	// not it contains this table — the missing piece that let S3 fall back
+	// not it contains this table, the missing piece that let S3 fall back
 	// silently (#466).
 	newestSnap, err := s3NewestSnapshot(ctx, db, prefix, at, incomplete)
 	if err != nil {
@@ -178,7 +178,7 @@ func s3NewestSnapshot(ctx context.Context, db *sql.DB, prefix string, at time.Ti
 // partially-converted snapshot (#467) is excluded from S3 discovery. Pre-marker
 // snapshots have neither and are complete-by-default (absent from this set).
 //
-// The glob is prefix/*/_* — DuckDB's glob() does NOT brace-expand
+// The glob is prefix/*/_*, DuckDB's glob() does NOT brace-expand
 // {_SUCCESS,_INCOMPLETE} (verified empirically), and the only underscore-prefixed
 // entries in the snapshot layout are these two markers; we still filter by exact
 // basename so an unrelated _* file can't be mistaken for a marker.
@@ -198,7 +198,7 @@ func s3IncompleteSnapshots(ctx context.Context, db *sql.DB, prefix string) (map[
 			// This is a CORRECTNESS filter, not an observability listing: a
 			// silently dropped row could be an _INCOMPLETE marker, which would
 			// demote its partial snapshot to complete-by-default (residual #467).
-			// Fail loud — the safe-on-error direction for a marker filter is
+			// Fail loud, the safe-on-error direction for a marker filter is
 			// "treat as incomplete / surface the error", never silently complete.
 			// Mirrors the hardened Scan branch the listing had before #1679 (#524 review).
 			return nil, fmt.Errorf("scan S3 baseline marker path: %w", err)
