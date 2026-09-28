@@ -90,9 +90,10 @@ func TestWordList_isReadFromTheWalksScoreboard(t *testing.T) {
 // "database" is not on the walk's list: the web interface still says it in
 // fixed phrases the walk counts (the Snapshots redesign names them), and
 // adding it there would move the walk's ratchet. The onboarding text this
-// package owns uses "your MySQL" and "server" instead, and has no fixed
-// phrase that needs the word, so the allowed list is empty here.
-var databaseFixedPhrases = []string{}
+// package owns uses "your MySQL" and "server" instead. The one fixed phrase
+// it needs is a button's name, which the reader has to find on the screen
+// exactly as written.
+var databaseFixedPhrases = []string{"Read database now"}
 
 var (
 	urlRE      = regexp.MustCompile(`https?://\S+`)
@@ -209,6 +210,7 @@ func TestInstaller_refusalsAndWarningsSpeakTheWordList(t *testing.T) {
 		{"chosen metrics port taken", []string{"BUSY_PORTS=9095", "DBTRAIL_METRICS_PORT=9095"}, "already in use"},
 		{"Docker stopped", []string{"STUB_DOCKER_DOWN=1"}, "Docker isn't running"},
 		{"Compose missing", []string{"STUB_NO_COMPOSE=1"}, "Docker Compose is not available"},
+		{"image download failed", []string{"STUB_PULL_FAIL=1"}, "could not download the newest images"},
 		{"re-run over an existing stack", []string{"DBTRAIL_DIR=" + existing, "DBTRAIL_PORT=8095", "DBTRAIL_METRICS_PORT=9095"}, "ignored"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -246,8 +248,8 @@ func cleanRunSpeaksTheWordList(t *testing.T, env ...string) {
 		startPage,
 		"your MySQL",
 		"host and port",
-		// The add-server form refuses a blank Name, and it has no default.
-		"give the server a name",
+		"Check and connect",
+		"Read database now",
 		"a MySQL login that can create users",
 		"Docker volumes",
 		"docker compose down",

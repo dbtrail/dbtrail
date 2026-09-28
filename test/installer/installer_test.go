@@ -20,6 +20,9 @@ case "$1" in
   info) [ -n "$STUB_DOCKER_DOWN" ] && exit 1 ;;
   compose) [ "$2" = version ] && [ -n "$STUB_NO_COMPOSE" ] && exit 1 ;;
 esac
+case "$1 $2" in
+  "compose pull") [ -n "$STUB_PULL_FAIL" ] && exit 1 ;;
+esac
 exit 0
 `,
 	"lsof": `#!/bin/sh
@@ -42,6 +45,7 @@ type run struct {
 	failed  bool
 	dir     string // the stack directory the installer was pointed at
 	upCalls int
+	calls   string // every docker call, in order
 }
 
 func install(t *testing.T, env ...string) run {
@@ -73,7 +77,7 @@ func install(t *testing.T, env ...string) run {
 	}, env...)
 	out, err := cmd.CombinedOutput()
 	calls, _ := os.ReadFile(log)
-	return run{out: string(out), failed: err != nil, dir: dir, upCalls: strings.Count(string(calls), "compose up")}
+	return run{out: string(out), failed: err != nil, dir: dir, upCalls: strings.Count(string(calls), "compose up"), calls: string(calls)}
 }
 
 func (r run) compose(t *testing.T) string {
@@ -219,4 +223,30 @@ func portLines(c string) string {
 		}
 	}
 	return b.String()
+}
+
+// A machine that pulled "latest" once keeps that image, and `up -d` starts it
+// without asking the registry: a re-install on such a machine got a version
+// months old with no word about it. The installer pulls before it starts.
+func TestInstaller_pullsTheImagesBeforeStarting(t *testing.T) {
+	r := install(t)
+	if r.failed {
+		t.Fatalf("the install failed:\n%s", r.out)
+	}
+	pull, up := strings.Index(r.calls, "compose pull"), strings.Index(r.calls, "compose up")
+	if pull < 0 || up < 0 || pull > up {
+		t.Fatalf("want a compose pull before compose up, got calls:\n%s", r.calls)
+	}
+}
+
+// A pull that fails (offline, a registry hiccup) must not stop an install
+// that can run on the images already here; it says what that means.
+func TestInstaller_aFailedPullStartsWithTheImagesHere(t *testing.T) {
+	r := install(t, "STUB_PULL_FAIL=1")
+	if r.failed || r.upCalls != 1 {
+		t.Fatalf("a failed pull stopped the install (failed=%v up=%d):\n%s", r.failed, r.upCalls, r.out)
+	}
+	if !strings.Contains(r.out, "could not download the newest images") {
+		t.Errorf("a failed pull is not said:\n%s", r.out)
+	}
 }
