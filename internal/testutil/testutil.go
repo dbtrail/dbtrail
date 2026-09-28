@@ -397,7 +397,7 @@ func InitIndexTables(t *testing.T, db *sql.DB) {
 	MustExec(t, db, `CREATE TABLE IF NOT EXISTS fk_constraints (
 		snapshot_id              INT UNSIGNED NOT NULL,
 		constraint_name          VARCHAR(64)  NOT NULL,
-		schema_name              VARCHAR(64)  NOT NULL,
+		schema_name              VARCHAR(64)  COLLATE utf8mb4_bin NOT NULL,
 		table_name               VARCHAR(64)  NOT NULL,
 		column_name              VARCHAR(64)  NOT NULL,
 		ordinal_position         INT          NOT NULL,

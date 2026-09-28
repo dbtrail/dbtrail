@@ -1550,6 +1550,11 @@ func takeSnapshot(sourceDB, indexDB *sql.DB, schemas []string, excludeInvalid bo
 			return SnapshotStats{}, exErr
 		}
 	}
+	// Same reason for fk_constraints (#1839): an index an older build created
+	// keys schema names without case or accents. A missing table is a no-op.
+	if len(fkRows) > 0 {
+		MigrateFKConstraintsNamesBestEffort(context.Background(), indexDB)
+	}
 
 	tx, err := indexDB.Begin()
 	if err != nil {
@@ -1667,6 +1672,10 @@ func takeSnapshot(sourceDB, indexDB *sql.DB, schemas []string, excludeInvalid bo
 			}
 
 			if _, err = tx.Exec(insertSQL, insertArgs...); err != nil {
+				var me *mysql.MySQLError
+				if errors.As(err, &me) && me.Number == 1062 {
+					return SnapshotStats{}, fmt.Errorf("failed to insert fk_constraints batch: fk_constraints still compares schema names without case or accents and could not be converted (#1839; see the earlier warning): %w", err)
+				}
 				return SnapshotStats{}, fmt.Errorf("failed to insert fk_constraints batch: %w", err)
 			}
 		}
@@ -2127,7 +2136,9 @@ func CascadeConstraintsInIndex(indexDB *sql.DB, schemas []string) ([]FKCascadeEd
 	var args []any
 	if len(schemas) > 0 {
 		placeholders := strings.TrimRight(strings.Repeat("?,", len(schemas)), ",")
-		query += " AND schema_name IN (" + placeholders + ")"
+		// Folded, not exact: the column is binary since #1839 and the
+		// caller passes names as typed (fkSchemaNameFolded).
+		query += " AND " + fkSchemaNameFolded + " IN (" + placeholders + ")"
 		for _, s := range schemas {
 			args = append(args, s)
 		}
