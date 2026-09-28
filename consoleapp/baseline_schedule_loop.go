@@ -158,6 +158,12 @@ type scheduledSkip struct {
 type scheduledFallback struct {
 	at     string
 	reason string
+	// What the failed update reported (#1653): its table count, how many
+	// refused, and which. Copied here because the status slot they were
+	// read from is overwritten by the next update.
+	tables, refused int
+	refusedTables   []console.RefusedTable
+	refusedOmitted  int
 }
 
 func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBackups, carryDefault bool) *backupScheduler {
@@ -542,6 +548,8 @@ func (b *backupScheduler) ScheduleState(serverID string) console.BackupScheduleS
 	}
 	if fell {
 		out.LastFallbackAt, out.LastFallbackReason = fb.at, fb.reason
+		out.LastFallbackTables, out.LastFallbackRefused = fb.tables, fb.refused
+		out.LastFallbackRefusedTables, out.LastFallbackRefusedOmitted = fb.refusedTables, fb.refusedOmitted
 	}
 	if !started {
 		return out
@@ -1149,7 +1157,7 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 		// update, so on that disk it would fail the same way, after reading the
 		// source in full.
 		if method == console.BackupMethodRefresh && st.Last.State == "failed" && !st.Last.Published && !st.Last.DiskRefused {
-			b.fallBack(e, st.Last.LastError)
+			b.fallBack(e, *st.Last)
 		}
 		return
 	}
@@ -1160,7 +1168,8 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 // update ran for minutes, and an operator who removed or changed the
 // schedule meanwhile, perhaps because backups were misbehaving, must not
 // get a full read of production from a schedule that no longer exists.
-func (b *backupScheduler) fallBack(e console.ServerEntry, reason string) {
+func (b *backupScheduler) fallBack(e console.ServerEntry, failed console.BaselineStatus) {
+	reason := failed.LastError
 	cur, ok := b.reg.Get(e.ID)
 	if !ok || cur.BackupSchedule == nil || cur.BackupSchedule.Identity() != e.BackupSchedule.Identity() {
 		slog.Warn("snapshot schedule: the update from the recorded changes failed, but the schedule was removed or changed meanwhile; no full read taken",
@@ -1168,17 +1177,17 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, reason string) {
 		return
 	}
 	e = cur
-	failed := console.BackupWhyFoldRefusedPrefix
+	how := console.BackupWhyFoldRefusedPrefix
 	if strings.HasPrefix(reason, "internal error") {
-		failed = console.BackupWhyFoldCrashedPrefix
+		how = console.BackupWhyFoldCrashedPrefix
 	}
-	because := failed + " (" + reason + ")"
+	because := how + " (" + reason + ")"
 	now := time.Now().UTC()
 	if err := console.FullBackupPossible(e, b.gates()); err != nil {
 		b.skip(e, now, because+" and a full read cannot start here: "+err.Error())
 		return
 	}
-	slog.Warn("snapshot schedule: "+failed+", trying a full read instead", "server", e.Name, "reason", reason)
+	slog.Warn("snapshot schedule: "+how+", trying a full read instead", "server", e.Name, "reason", reason)
 	// Last look before the trigger: Forget landing between the registry
 	// read above and here drops the observation, and a full read of
 	// production for a schedule that was just removed is the thing this
@@ -1193,7 +1202,9 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, reason string) {
 	stamp := now.Format(time.RFC3339)
 	if b.startFull(e, stamp, now, because, because) {
 		b.mu.Lock()
-		b.fallback[e.ID] = scheduledFallback{at: stamp, reason: reason}
+		b.fallback[e.ID] = scheduledFallback{at: stamp, reason: reason,
+			tables: failed.Tables, refused: failed.Refused,
+			refusedTables: failed.RefusedTables, refusedOmitted: failed.RefusedTablesOmitted}
 		b.mu.Unlock()
 		// Watched like any other scheduled job, so its outcome reaches the
 		// loop's view without a page load.

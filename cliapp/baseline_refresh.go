@@ -2,7 +2,6 @@ package cliapp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -113,12 +112,10 @@ func init() {
 	baselineCmd.AddCommand(baselineRefreshCmd)
 }
 
-// refreshOutcome is one table's verdict in the run summary.
-type refreshOutcome struct {
-	Table   string
-	Verdict string // "refreshed", "unchanged", "refused-gap", "refused-ddl", "refused"
-	Detail  string
-}
+// refreshOutcome is one table's verdict in the run summary. The rule that
+// decides it lives in reconstruct, because the web interface reports the same
+// verdicts and must not decide them a second time.
+type refreshOutcome reconstruct.RefreshOutcome
 
 func runBaselineRefresh(cmd *cobra.Command, _ []string) error {
 	if brIndexDSN == "" {
@@ -235,61 +232,11 @@ func resolveRefreshTables(ctx context.Context, source string) ([]string, error) 
 }
 
 // buildRefreshOutcomes pairs every requested table with its verdict.
-//
-// The classification reads the sentinels reconstruct exports rather than the
-// message text: "the events are gone" and "the table changed shape" have
-// completely different remedies, and a summary that blurs them sends the
-// operator down the wrong one.
 func buildRefreshOutcomes(tables []string, reports []*reconstruct.TableReport, failures []reconstruct.TableFailure) []refreshOutcome {
-	failed := make(map[string]error, len(failures))
-	for _, f := range failures {
-		failed[f.Schema+"."+f.Table] = f.Err
-	}
-	done := make(map[string]bool, len(reports))
-	// Separate from done rather than a second bool on it: a carried-forward
-	// table WAS published, so it must not read as skipped, and it was not
-	// rewritten, so calling it "refreshed" would hide the thing an operator
-	// most wants to see here — which tables are actually costing them a full
-	// rewrite each cycle.
-	unchanged := make(map[string]bool, len(reports))
-	// With --table-deltas (#1638) "refreshed" alone would say the opposite of
-	// what happened for most tables: the file was NOT rewritten. The verdict
-	// stays "refreshed" (the table is current), and the detail says how.
-	deltaDetail := make(map[string]string, len(reports))
-	for _, r := range reports {
-		k := r.Schema + "." + r.Table
-		done[k] = true
-		unchanged[k] = r.CarriedForward
-		switch {
-		case r.TableDelta && !r.DeltaPairWritten:
-			deltaDetail[k] = fmt.Sprintf("no events in the window; the previous file and its %d delta pairs were kept as they are (last pair %d)",
-				r.DeltaChainFiles, r.DeltaSeq)
-		case r.TableDelta:
-			deltaDetail[k] = fmt.Sprintf("the previous file was kept and this window's change written beside it as pair %d; the chain now has %d pairs (%d rows replaced or removed, %d changed or new rows)",
-				r.DeltaSeq, r.DeltaChainFiles, r.DeltaDeadRows, r.DeltaUpsertRows)
-		case r.DeltaCompacted != "":
-			deltaDetail[k] = "written again in full: " + r.DeltaCompacted
-		}
-	}
-
-	out := make([]refreshOutcome, 0, len(tables))
-	for _, t := range tables {
-		switch err, bad := failed[t]; {
-		case bad && errors.Is(err, reconstruct.ErrCaptureGap):
-			out = append(out, refreshOutcome{t, "refused-gap", err.Error()})
-		case bad && (errors.Is(err, reconstruct.ErrSchemaChanged) || errors.Is(err, reconstruct.ErrDestructiveDDL)):
-			out = append(out, refreshOutcome{t, "refused-ddl", err.Error()})
-		case bad:
-			out = append(out, refreshOutcome{t, "refused", err.Error()})
-		case done[t] && unchanged[t]:
-			out = append(out, refreshOutcome{t, "unchanged", "no events in the window; the previous file was published as-is"})
-		case done[t]:
-			out = append(out, refreshOutcome{t, "refreshed", deltaDetail[t]})
-		default:
-			// Requested, neither reported nor failed: the run was cancelled
-			// before this table started. Not "fine" — say so.
-			out = append(out, refreshOutcome{t, "skipped", "the run ended before this table was reached"})
-		}
+	decided := reconstruct.RefreshOutcomes(tables, reports, failures)
+	out := make([]refreshOutcome, len(decided))
+	for i, o := range decided {
+		out[i] = refreshOutcome(o)
 	}
 	return out
 }

@@ -105,6 +105,9 @@ type backupScheduleRunDTO struct {
 	// — see BaselineStatus.CarriedCopied.
 	CarriedCopied int `json:"carried_copied,omitempty"`
 	Refused       int `json:"refused,omitempty"`
+	// RefusedTables / RefusedTablesOmitted: see BaselineStatus.
+	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
+	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
 }
 
 type backupScheduleSkipDTO struct {
@@ -113,6 +116,13 @@ type backupScheduleSkipDTO struct {
 	// Failed: on LastFullMissed only, the full backup started at At and
 	// failed, and Reason is its error; otherwise the slot did not start.
 	Failed bool `json:"failed,omitempty"`
+	// On LastFallback only: the tables that stopped the update the full
+	// read stood in for (#1653), and how many of them, so the page can say
+	// "3 of 12" for a list that is capped. See BaselineStatus.RefusedTables.
+	Tables               int            `json:"tables,omitempty"`
+	Refused              int            `json:"refused,omitempty"`
+	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
+	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
 }
 
 // backupScheduleRequest is the PUT body. When is the operator's; how is
@@ -278,7 +288,9 @@ func (s *Server) backupScheduleDTO(ctx context.Context, e ServerEntry, now time.
 			dto.LastSkipped = &backupScheduleSkipDTO{At: st.LastSkippedAt, Reason: st.LastSkipReason}
 		}
 		if st.LastFallbackAt != "" {
-			dto.LastFallback = &backupScheduleSkipDTO{At: st.LastFallbackAt, Reason: st.LastFallbackReason}
+			dto.LastFallback = &backupScheduleSkipDTO{At: st.LastFallbackAt, Reason: st.LastFallbackReason,
+				Tables: st.LastFallbackTables, Refused: st.LastFallbackRefused,
+				RefusedTables: st.LastFallbackRefusedTables, RefusedTablesOmitted: st.LastFallbackRefusedOmitted}
 		}
 		if st.LastFullMissedAt != "" {
 			consider(backupScheduleSkipDTO{At: st.LastFullMissedAt, Reason: st.LastFullMissedReason})
@@ -331,6 +343,7 @@ func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 		Carried:       run.Carried,
 		CarriedCopied: run.CarriedCopied,
 		Refused:       run.Refused,
+		RefusedTables: run.RefusedTables, RefusedTablesOmitted: run.RefusedTablesOmitted,
 	}
 }
 
@@ -366,6 +379,7 @@ func scheduleRunFromStatus(st BackupScheduleState) *backupScheduleRunDTO {
 		Carried:       cur.Carried,
 		CarriedCopied: cur.CarriedCopied,
 		Refused:       cur.Refused,
+		RefusedTables: cur.RefusedTables, RefusedTablesOmitted: cur.RefusedTablesOmitted,
 	}
 }
 
@@ -461,7 +475,7 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 			"server", e.Name, "every", p.Every, "backups_per_30d", p.BackupsPer30Days(), "local_only", e.BaselineS3 == "",
 			"full_every", p.FullEvery, "full_copies_per_30d", p.FullCopiesPer30Days())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"schedule": s.backupScheduleDTO(r.Context(), e, now)})
+	writeJSON(w, http.StatusOK, map[string]any{"schedule": withholdScheduleTables(r, s.backupScheduleDTO(r.Context(), e, now))})
 }
 
 // sameFullGrid reports whether two schedules put their full backups on the

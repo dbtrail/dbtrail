@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -541,7 +542,7 @@ func TestDump_guardLeavesASuccessfulPublishedRunAlone(t *testing.T) {
 	if own.st == nil || own.st.State != "succeeded" || own.st.Uploading || own.st.LastError != "" || own.st.Uploaded != 3 {
 		t.Fatalf("own after a no-panic guard = %+v", own.st)
 	}
-	if st := sup.Status("a"); st != *own.st {
+	if st := sup.Status("a"); !reflect.DeepEqual(st, *own.st) {
 		t.Fatalf("status = %+v, want the run's own entry %+v", st, *own.st)
 	}
 	// A panic AFTER finishDump wrote the terminal status (its closing log

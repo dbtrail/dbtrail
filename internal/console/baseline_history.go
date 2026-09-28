@@ -66,11 +66,18 @@ type BaselineRunRecord struct {
 	Carried int `json:"carried,omitempty"`
 	// CarriedCopied narrows Carried to the reuses published as full byte
 	// copies (no hard link, no disk saved) — see BaselineStatus.CarriedCopied.
-	CarriedCopied int    `json:"carried_copied,omitempty"`
-	Rows          int64  `json:"rows,omitempty"`
-	Uploaded      int    `json:"uploaded,omitempty"`
-	Refused       int    `json:"refused,omitempty"`
-	Error         string `json:"error,omitempty"`
+	CarriedCopied int   `json:"carried_copied,omitempty"`
+	Rows          int64 `json:"rows,omitempty"`
+	Uploaded      int   `json:"uploaded,omitempty"`
+	Refused       int   `json:"refused,omitempty"`
+	// RefusedTables names the tables behind Refused, up to RefusedTablesCap,
+	// and RefusedTablesOmitted counts the rest (#1653). A run recorded before
+	// the list existed has the count and no list, which is "not recorded",
+	// never "none refused". New keys, same file version: a version of this
+	// program from before them reads the file and ignores them.
+	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
+	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
+	Error                string         `json:"error,omitempty"`
 	// Why is the reason a scheduled run was a FULL backup rather than an
 	// update, as decided when it ran (#1604); WhyCode is BackupWhyCode of
 	// it, fixed at write time. Empty on updates and manual backups.
