@@ -828,6 +828,7 @@ type tableDeltaPublish struct {
 	// writes may carry an event-id stamp (#1720, lastEventIDFor).
 	streamCaptured   bool
 	currentGenerated map[string]bool
+	ddlMark          string // the mark to stamp, see markToStamp
 }
 
 // foldedFromChain is the source read of the state a run with deltas on folds
@@ -873,6 +874,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		SnapshotDir:      p.cfg.snapshotDir,
 		SnapshotAt:       p.cfg.At,
 		Cut:              p.cfg.cut,
+		DDLMark:          p.ddlMark,
 		CaptureGap:       p.capGap,
 		SourceBaseline:   baselineMeta{Path: p.basePath, Time: p.chainStart, Metadata: p.anchorMeta},
 		FoldedFrom:       foldedFromChain(p),

@@ -376,7 +376,8 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// --at (#764; same guard as the full-table path and the shim's
 	// _snapshot).
 	if err := reconstruct.CheckDestructiveDDL(cmd.Context(), db, recSchema, recTable,
-		reconstruct.DDLWindow{Since: snapshotTime, Until: at, Anchor: reconstruct.AnchorOf(bmeta)}); err != nil {
+		reconstruct.DDLWindow{Since: snapshotTime, Until: at, Anchor: reconstruct.AnchorOf(bmeta),
+			Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}); err != nil {
 		return err
 	}
 

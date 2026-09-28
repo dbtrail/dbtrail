@@ -266,9 +266,9 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	// image, so the row would silently resolve as if it still existed (#764).
 	// The baseline's position is read here, ahead of the fetch that also
 	// takes it: the check places a statement indexed late by it (#1912).
-	sincePos := snapshotSincePos(ctx, baselinePath, h.logger, q.Schema, q.Table)
+	sincePos, ddlMark := snapshotAnchor(ctx, baselinePath, h.logger, q.Schema, q.Table)
 	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table,
-		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos}); err != nil {
+		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
 		return nil, err
 	}
 

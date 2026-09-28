@@ -95,6 +95,14 @@ const (
 	// (query.Options.SinceEventID) when the index was written by a stream.
 	// Absent on a dump, and on any file written before this key existed.
 	MetaKeyLastEventID = "bintrail.last_event_id"
+	// MetaKeyDDLMark names the newest schema_changes row that was already in
+	// the index when this file's check for a TRUNCATE, DROP or RENAME ran, or,
+	// on a dump, when the dump started (#1912). Every row up to it has been
+	// accounted for, so the next check does not place it by binlog position
+	// alone. Its value is opaque here; reconstruct.DDLMark reads and writes it.
+	// Absent on a dump taken without access to the index, and on any file
+	// written before this key existed.
+	MetaKeyDDLMark = "bintrail.ddl_mark"
 )
 
 // RenderGUCsPinned is the canonical value the capture side stamps under
@@ -133,6 +141,8 @@ type DumpMetadata struct {
 	DeltaSeqLo int
 	// LastEventID is MetaKeyLastEventID; 0 when absent.
 	LastEventID uint64
+	// DDLMark is MetaKeyDDLMark, verbatim; "" when absent.
+	DDLMark string
 	// Producer is MetaKeySnapshotProducer: which code path wrote these bytes
 	// ("dump" | "reconstruct"). Empty on any snapshot written before #1545
 	// stamped it on the dump path; see ProvenanceOf, which does not guess.
@@ -482,6 +492,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	if v, ok := pf.Lookup(MetaKeyDeltaSeqLo); ok {
 		m.DeltaSeqLo = parseDeltaSeq(path, v)
 	}
+	if v, ok := pf.Lookup(MetaKeyDDLMark); ok {
+		m.DDLMark = v
+	}
 	if v, ok := pf.Lookup(MetaKeyLastEventID); ok {
 		m.LastEventID = parseLastEventID(path, v)
 	}
@@ -635,6 +648,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.DeltaSeq = parseDeltaSeq(path, val)
 	case MetaKeyDeltaSeqLo:
 		m.DeltaSeqLo = parseDeltaSeq(path, val)
+	case MetaKeyDDLMark:
+		m.DDLMark = val
 	case MetaKeyLastEventID:
 		m.LastEventID = parseLastEventID(path, val)
 	case MetaKeyRowCount:

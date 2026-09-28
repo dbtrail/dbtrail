@@ -138,7 +138,7 @@ func lateDDLMock(t *testing.T, since, until time.Time, rows *sqlmock.Rows) (cont
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	mock.ExpectQuery("SELECT ddl_type, detected_at, binlog_file, binlog_pos").
+	mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
 		WithArgs(since, until, "shop", "orders").WillReturnRows(rows)
 	ctx := context.Background()
 	return ctx, func(w DDLWindow) error { return CheckDestructiveDDL(ctx, db, "shop", "orders", w) }
@@ -153,8 +153,8 @@ func TestCheckDestructiveDDL_reportsTheLateStatementAndNotAnOlderOne(t *testing.
 	old := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
 	late := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
 	_, check := lateDDLMock(t, since, until, sqlmock.NewRows(ddlCols).
-		AddRow("DROP TABLE", old, "binlog.000002", 77, false, true).
-		AddRow("TRUNCATE TABLE", late, "binlog.000009", 640, false, true))
+		AddRow(1, "DROP TABLE", old, "binlog.000002", 77, false, true).
+		AddRow(2, "TRUNCATE TABLE", late, "binlog.000009", 640, false, true))
 
 	err := check(DDLWindow{Since: since, Until: until, Anchor: &query.BinlogPos{File: "binlog.000009", Pos: 500}})
 	if !errors.Is(err, ErrDestructiveDDL) {
@@ -163,7 +163,7 @@ func TestCheckDestructiveDDL_reportsTheLateStatementAndNotAnOlderOne(t *testing.
 	for _, want := range []string{
 		"TRUNCATE TABLE on shop.orders", "run at 2026-01-02T10:00:00Z", "recorded at binlog.000009:640",
 		"the snapshot is at binlog.000009:500", "though its time is outside them", "Take a new snapshot",
-		"a new snapshot will not clear this",
+		"row 2 of schema_changes", "DELETE FROM schema_changes WHERE id IN (2);",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not say %q:\n%v", want, err)
@@ -183,8 +183,8 @@ func TestCheckDestructiveDDL_statementsBeforeTheSnapshotNeverRefuse(t *testing.T
 	until := time.Date(2026, 1, 2, 10, 5, 0, 0, time.UTC)
 	old := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
 	_, check := lateDDLMock(t, since, until, sqlmock.NewRows(ddlCols).
-		AddRow("TRUNCATE TABLE", old, "binlog.000002", 77, false, true).
-		AddRow("TRUNCATE TABLE", old.Add(time.Hour), "binlog.000009", 500, false, true))
+		AddRow(3, "TRUNCATE TABLE", old, "binlog.000002", 77, false, true).
+		AddRow(4, "TRUNCATE TABLE", old.Add(time.Hour), "binlog.000009", 500, false, true))
 	if err := check(DDLWindow{Since: since, Until: until,
 		Anchor: &query.BinlogPos{File: "binlog.000009", Pos: 500},
 		Cut:    &query.BinlogPos{File: "binlog.000010", Pos: 300}}); err != nil {
@@ -197,7 +197,7 @@ func TestCheckDestructiveDDL_aRowWithNoPositionRefusesAndSaysWhy(t *testing.T) {
 	since := time.Date(2026, 1, 2, 10, 0, 5, 0, time.UTC)
 	until := time.Date(2026, 1, 2, 10, 5, 0, 0, time.UTC)
 	_, check := lateDDLMock(t, since, until, sqlmock.NewRows(ddlCols).
-		AddRow("TRUNCATE TABLE", since.Add(-time.Minute), "", 0, false, true))
+		AddRow(5, "TRUNCATE TABLE", since.Add(-time.Minute), "", 0, false, true))
 	err := check(DDLWindow{Since: since, Until: until, Anchor: &query.BinlogPos{File: "binlog.000009", Pos: 500}})
 	if !errors.Is(err, ErrDestructiveDDL) {
 		t.Fatalf("err = %v, want ErrDestructiveDDL", err)
@@ -205,7 +205,7 @@ func TestCheckDestructiveDDL_aRowWithNoPositionRefusesAndSaysWhy(t *testing.T) {
 	if strings.Contains(err.Error(), "Take a new snapshot") {
 		t.Errorf("the refusal offers a new snapshot, which does not clear a row with no position:\n%v", err)
 	}
-	for _, want := range []string{"its binlog position is not recorded", "counted as after it", "A new snapshot will not clear this"} {
+	for _, want := range []string{"its binlog position is not recorded", "counted as after it", "DELETE FROM schema_changes WHERE id IN (5);"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not say %q:\n%v", want, err)
 		}
@@ -225,10 +225,157 @@ func TestFindDestructiveDDL_looksByTimeAlone(t *testing.T) {
 	mock.ExpectQuery("detected_at >= \\?, detected_at <= \\?").
 		WithArgs(since, until, "shop", "orders").
 		WillReturnRows(sqlmock.NewRows(ddlCols).
-			AddRow("TRUNCATE TABLE", since.Add(-time.Minute), "binlog.000010", 100, false, true).
-			AddRow("DROP TABLE", since, "binlog.000010", 200, true, true))
+			AddRow(6, "TRUNCATE TABLE", since.Add(-time.Minute), "binlog.000010", 100, false, true).
+			AddRow(7, "DROP TABLE", since, "binlog.000010", 200, true, true))
 	ddl, at, found, err := FindDestructiveDDL(context.Background(), db, "shop", "orders", since, until)
 	if err != nil || !found || ddl != "DROP TABLE" || !at.Equal(since) {
 		t.Fatalf("FindDestructiveDDL = %q %s %v %v, want the DROP TABLE in the same second as since", ddl, at, found, err)
+	}
+}
+
+// The mark (#1912): a row at or below it is not placed by position alone.
+func TestDDLWindow_placeWithAMark(t *testing.T) {
+	anchor := &query.BinlogPos{File: "binlog.000003", Pos: 500}
+	cut := &query.BinlogPos{File: "binlog.000004", Pos: 300}
+	mark := &DDLMark{ID: 40}
+	tests := []struct {
+		name                    string
+		id                      uint64
+		file                    string
+		pos                     uint64
+		afterSince, beforeUntil bool
+		mark                    *DDLMark
+		want                    int
+	}{
+		// The failover case: an old statement from a numbering that started
+		// over under the same name, indexed long before the snapshot.
+		{"old numbering, indexed before the mark", 12, "binlog.000412", 900, false, true, mark, ddlOutside},
+		{"old numbering, exactly the mark", 40, "binlog.000412", 900, false, true, mark, ddlOutside},
+		{"late, indexed after the mark", 41, "binlog.000003", 640, false, true, mark, ddlByPosition},
+		{"no position, indexed before the mark", 12, "", 0, false, true, mark, ddlOutside},
+		{"no position, indexed after the mark", 41, "", 0, false, true, mark, ddlUnplaced},
+		// By time it counts whatever its id.
+		{"inside by time, indexed before the mark", 12, "binlog.000003", 640, true, true, mark, ddlByTime},
+		{"inside by the cut only, indexed before the mark", 12, "binlog.000004", 100, true, false, mark, ddlOutside},
+		{"inside by the cut only, indexed after the mark", 41, "binlog.000004", 100, true, false, mark, ddlByPosition},
+		// No mark: as before.
+		{"old numbering, no mark", 12, "binlog.000412", 900, false, true, nil, ddlByPosition},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := DDLWindow{Anchor: anchor, Cut: cut, Mark: tt.mark}
+			d := destructiveDDL{ID: tt.id, Type: "TRUNCATE TABLE", File: tt.file, Pos: tt.pos,
+				AfterSince: tt.afterSince, AtOrBeforeUntil: tt.beforeUntil}
+			if got := w.place(d); got != tt.want {
+				t.Errorf("place = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// A mark is stamped only by a check that placed statements by position, in
+// the same binlog sequence as the new file's anchor.
+func TestMarkToStamp(t *testing.T) {
+	const run = `{"id":7}`
+	a := &query.BinlogPos{File: "binlog.000003", Pos: 500}
+	c := &query.BinlogPos{File: "binlog.000004", Pos: 300}
+	for _, tt := range []struct {
+		name string
+		w    DDLWindow
+		run  string
+		want string
+	}{
+		{"positional check", DDLWindow{Anchor: a, Cut: c}, run, run},
+		{"no run mark", DDLWindow{Anchor: a, Cut: c}, "", ""},
+		{"base without a position: the check looked by time alone", DDLWindow{Cut: c}, run, ""},
+		{"no cut", DDLWindow{Anchor: a}, run, ""},
+		{"base from another binlog sequence than the cut", DDLWindow{Anchor: &query.BinlogPos{File: "mysql-bin.000003", Pos: 500}, Cut: c}, run, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := markToStamp(tt.run, tt.w); got != tt.want {
+				t.Errorf("markToStamp = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDDLMark_encodeAndParse(t *testing.T) {
+	m := DDLMark{ID: 42, File: "binlog.000412", Pos: 900, DetectedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Type: "TRUNCATE TABLE"}
+	got := ParseDDLMark(m.Encode())
+	if got == nil || *got != m {
+		t.Fatalf("round trip = %+v, want %+v", got, m)
+	}
+	for _, raw := range []string{"", "not json", `{"id":0}`, `{}`} {
+		if ParseDDLMark(raw) != nil {
+			t.Errorf("ParseDDLMark(%q) gave a mark", raw)
+		}
+	}
+}
+
+// A mark is used only while its row is still the row it names. Gone or
+// different, the index handed its ids out again, and the rows are placed by
+// position as if there were no mark.
+func TestCheckDestructiveDDL_aMarkIsUsedOnlyWhileItsRowIsTheSame(t *testing.T) {
+	since := time.Date(2026, 1, 2, 10, 0, 5, 0, time.UTC)
+	until := time.Date(2026, 1, 2, 10, 5, 0, 0, time.UTC)
+	old := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	mark := &DDLMark{ID: 40, File: "binlog.000412", Pos: 900, DetectedAt: old, Type: "TRUNCATE TABLE"}
+	w := DDLWindow{Since: since, Until: until, Anchor: &query.BinlogPos{File: "binlog.000003", Pos: 500}, Mark: mark}
+	markCols := []string{"binlog_file", "binlog_pos", "detected_at", "ddl_type"}
+	for _, tt := range []struct {
+		name    string
+		markRow *sqlmock.Rows
+		refuse  bool
+	}{
+		{"the same row", sqlmock.NewRows(markCols).AddRow("binlog.000412", 900, old, "TRUNCATE TABLE"), false},
+		{"the row is gone", sqlmock.NewRows(markCols), true},
+		{"another statement under that id", sqlmock.NewRows(markCols).AddRow("binlog.000002", 77, old, "DROP TABLE"), true},
+		{"another time under that id", sqlmock.NewRows(markCols).AddRow("binlog.000412", 900, old.Add(time.Second), "TRUNCATE TABLE"), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
+				WithArgs(since, until, "shop", "orders").
+				WillReturnRows(sqlmock.NewRows(ddlCols).
+					AddRow(12, "TRUNCATE TABLE", old, "binlog.000412", 900, false, true).
+					AddRow(13, "TRUNCATE TABLE", old, "binlog.000413", 50, false, true))
+			mock.ExpectQuery("FROM schema_changes WHERE id = \\?").WithArgs(uint64(40)).WillReturnRows(tt.markRow)
+			err = CheckDestructiveDDL(context.Background(), db, "shop", "orders", w)
+			if got := errors.Is(err, ErrDestructiveDDL); got != tt.refuse {
+				t.Fatalf("refused = %v (%v), want %v", got, err, tt.refuse)
+			}
+			if tt.refuse && !strings.Contains(err.Error(), "DELETE FROM schema_changes WHERE id IN (12, 13);") {
+				t.Errorf("the refusal does not name both rows in one DELETE:\n%v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// With no row the mark would leave out, the mark's row is not read.
+func TestCheckDestructiveDDL_aMarkThatChangesNothingIsNotRead(t *testing.T) {
+	since := time.Date(2026, 1, 2, 10, 0, 5, 0, time.UTC)
+	until := time.Date(2026, 1, 2, 10, 5, 0, 0, time.UTC)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
+		WithArgs(since, until, "shop", "orders").
+		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(41, "TRUNCATE TABLE", since.Add(-time.Minute), "binlog.000003", 640, false, true))
+	err = CheckDestructiveDDL(context.Background(), db, "shop", "orders", DDLWindow{Since: since, Until: until,
+		Anchor: &query.BinlogPos{File: "binlog.000003", Pos: 500}, Mark: &DDLMark{ID: 40}})
+	if !errors.Is(err, ErrDestructiveDDL) {
+		t.Fatalf("err = %v, want ErrDestructiveDDL: row 41 was indexed after the mark", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
 	}
 }

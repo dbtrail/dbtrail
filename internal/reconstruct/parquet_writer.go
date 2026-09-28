@@ -315,6 +315,9 @@ func snapshotFileMetadata(in mergeInput) map[string]string {
 	if in.LastEventID > 0 {
 		md[baseline.MetaKeyLastEventID] = strconv.FormatUint(in.LastEventID, 10)
 	}
+	if in.DDLMark != "" {
+		md[baseline.MetaKeyDDLMark] = in.DDLMark
+	}
 	switch {
 	case in.Cut != nil:
 		md[baseline.MetaKeyBinlogFile] = in.Cut.File

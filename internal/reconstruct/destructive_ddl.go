@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +31,9 @@ var ErrDestructiveDDL = errors.New("destructive DDL in reconstruction window")
 type DDLWindow struct {
 	Since, Until time.Time
 	Anchor, Cut  *query.BinlogPos
+	// Mark is the snapshot's DDL mark (ddl_mark.go), nil when it has none.
+	// A row at or below it is not placed by position alone.
+	Mark *DDLMark
 
 	// sinceInclusive counts a statement in the same second as Since as
 	// inside by time. See FindDestructiveDDL.
@@ -48,6 +53,7 @@ func AnchorOf(bmeta baseline.DumpMetadata) *query.BinlogPos {
 // writing row changes. AfterSince and AtOrBeforeUntil are decided by the index
 // server, like every other lookup on detected_at. Pos is the statement's END.
 type destructiveDDL struct {
+	ID                          uint64
 	Type                        string
 	DetectedAt                  time.Time
 	File                        string
@@ -100,7 +106,20 @@ const (
 // Without an Anchor nothing is placed by position and the window is the time
 // window alone: a snapshot that recorded no position also fetches its row
 // changes by time alone.
+//
+// A row at or below the snapshot's Mark was in the index before the snapshot
+// was checked or dumped, so it cannot be late: it is left out unless its time
+// places it. That is what lets an old statement from a numbering that started
+// over under the same name stop refusing once a snapshot with a mark exists.
 func (w DDLWindow) place(d destructiveDDL) int {
+	how := w.placeByTimeAndPosition(d)
+	if how != ddlByTime && how != ddlOutside && w.Mark != nil && d.ID <= w.Mark.ID {
+		return ddlOutside
+	}
+	return how
+}
+
+func (w DDLWindow) placeByTimeAndPosition(d destructiveDDL) int {
 	if d.AfterSince && d.AtOrBeforeUntil {
 		return ddlByTime
 	}
@@ -160,24 +179,33 @@ func sameBinlogSequence(a, b string) bool {
 // than a hard failure: this is an additive safety net on top of the existing
 // reconstruct contract, not a new hard dependency.
 func CheckDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, w DDLWindow) error {
-	d, how, err := findDestructiveDDL(ctx, db, schema, table, w)
+	f, err := findDestructiveDDL(ctx, db, schema, table, w)
 	if errors.Is(err, errSchemaChangesMissing) {
 		return nil // nothing to check, as this has always answered
 	}
-	if err != nil || how == ddlOutside {
+	if err != nil || f.how == ddlOutside {
 		return err
 	}
-	return destructiveDDLErr(schema, table, d, how, w)
+	return destructiveDDLErr(schema, table, f, w)
 }
 
 // destructiveDDLErr is the refusal: what ran, on which table, when, where in
 // the binlog, and what to do. It names no command-line flag, because it also
 // reaches clients that have none.
-func destructiveDDLErr(schema, table string, d destructiveDDL, how int, w DDLWindow) error {
+func destructiveDDLErr(schema, table string, f ddlFinding, w DDLWindow) error {
+	d, how := f.first, f.how
 	where := "its binlog position is not recorded"
 	if d.hasPos() {
 		where = fmt.Sprintf("recorded at %s:%d", d.File, d.Pos)
 	}
+	where += fmt.Sprintf(", row %d of schema_changes", d.ID)
+	// Every row this window counts by position alone, in one statement: an
+	// operator removing them one refusal at a time would rerun once per row.
+	ids := make([]string, len(f.positional))
+	for i, id := range f.positional {
+		ids[i] = strconv.FormatUint(id, 10)
+	}
+	deleteSQL := "DELETE FROM schema_changes WHERE id IN (" + strings.Join(ids, ", ") + ");"
 	placed := "between the snapshot this starts from and the requested point in time"
 	todo := fmt.Sprintf("Take a new snapshot of the table, which will hold it as it is after the %s, and start from that one",
 		strings.ToLower(d.Type))
@@ -187,13 +215,14 @@ func destructiveDDLErr(schema, table string, d destructiveDDL, how int, w DDLWin
 		// whose clock is ahead both land here.
 		placed = fmt.Sprintf("inside the replayed changes by its binlog position (the snapshot is at %s:%d), "+
 			"though its time is outside them", w.Anchor.File, w.Anchor.Pos)
-		todo += ". If the source changed or its binlog files started over since the statement ran, " +
-			"the two positions do not compare and a new snapshot will not clear this: " +
-			"the statement's row has to be removed from the index table schema_changes"
+		todo += ". If instead the statement ran before the snapshot, on a source whose binlog files started over " +
+			"since (a failover, RESET MASTER), the two positions do not compare. A snapshot from a full backup " +
+			"taken by the daemon clears that; otherwise remove the rows this window counts by position alone " +
+			"from the index database: " + deleteSQL
 	case ddlUnplaced:
 		placed = "with nothing to place it before the snapshot this starts from, so it is counted as after it"
-		todo = "A new snapshot will not clear this: the statement's row in the index table schema_changes " +
-			"has to be given its position or removed"
+		todo = "A snapshot from a full backup taken by the daemon clears this. Otherwise the rows this window " +
+			"counts by position alone have to be removed from the index database: " + deleteSQL
 	}
 	return fmt.Errorf(
 		"%w: %s on %s.%s, run at %s (%s), lies %s. "+
@@ -221,30 +250,71 @@ var errSchemaChangesMissing = errors.New("this index has no schema_changes table
 // it at worst leaves one table unchecked for one run. snapshotForDDLInWindow
 // takes the same second as inside for the same reason.
 func FindDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, since, until time.Time) (ddlType string, detectedAt time.Time, found bool, err error) {
-	d, how, err := findDestructiveDDL(ctx, db, schema, table, DDLWindow{Since: since, Until: until, sinceInclusive: true})
-	if errors.Is(err, errSchemaChangesMissing) || (err == nil && how == ddlOutside) {
+	f, err := findDestructiveDDL(ctx, db, schema, table, DDLWindow{Since: since, Until: until, sinceInclusive: true})
+	if errors.Is(err, errSchemaChangesMissing) || (err == nil && f.how == ddlOutside) {
 		return "", time.Time{}, false, nil
 	}
 	if err != nil {
 		return "", time.Time{}, false, err
 	}
-	return d.Type, d.DetectedAt, true, nil
+	return f.first.Type, f.first.DetectedAt, true, nil
 }
 
-// findDestructiveDDL returns the first statement inside the window, oldest
-// first, and how it was placed there: ddlOutside with a nil error when there
-// is none, and errSchemaChangesMissing when the table does not exist.
-func findDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, w DDLWindow) (destructiveDDL, int, error) {
+// ddlFinding is what a lookup found: the first statement inside the window,
+// oldest first, and how it was placed there (ddlOutside when none is), and the
+// ids of every row the window counts by position alone or with no position.
+type ddlFinding struct {
+	first      destructiveDDL
+	how        int
+	positional []uint64
+}
+
+// findDestructiveDDL places every destructive statement recorded for the
+// table. errSchemaChangesMissing when the table does not exist.
+//
+// The window's Mark is checked against the index only when it would leave a
+// row out: a mark whose row is gone or holds something else was read against
+// ids that now name other rows (restore-index, the table created again), and
+// is not used. Without it, more rows are placed, never fewer.
+func findDestructiveDDL(ctx context.Context, db *sql.DB, schema, table string, w DDLWindow) (ddlFinding, error) {
 	ddls, err := loadDestructiveDDLs(ctx, db, schema, table, w)
 	if err != nil {
-		return destructiveDDL{}, ddlOutside, err
+		return ddlFinding{how: ddlOutside}, err
 	}
-	for _, d := range ddls {
-		if how := w.place(d); how != ddlOutside {
-			return d, how, nil
+	if w.Mark != nil {
+		unmarked := w
+		unmarked.Mark = nil
+		for _, d := range ddls {
+			if w.place(d) != unmarked.place(d) {
+				ok, err := markStillNamesItsRow(ctx, db, w.Mark)
+				if err != nil {
+					return ddlFinding{how: ddlOutside}, err
+				}
+				if !ok {
+					slog.Warn("the snapshot's DDL mark names a schema_changes row that is gone or holds another statement, "+
+						"so the index's ids were handed out again; statements are placed by binlog position without it",
+						"schema", schema, "table", table, "mark_id", w.Mark.ID,
+						"mark_row", fmt.Sprintf("%s:%d %s", w.Mark.File, w.Mark.Pos, w.Mark.Type))
+					w = unmarked
+				}
+				break
+			}
 		}
 	}
-	return destructiveDDL{}, ddlOutside, nil
+	f := ddlFinding{how: ddlOutside}
+	for _, d := range ddls {
+		how := w.place(d)
+		if how == ddlOutside {
+			continue
+		}
+		if f.how == ddlOutside {
+			f.first, f.how = d, how
+		}
+		if how != ddlByTime {
+			f.positional = append(f.positional, d.ID)
+		}
+	}
+	return f, nil
 }
 
 // loadDestructiveDDLs reads every destructive statement recorded for the
@@ -267,7 +337,7 @@ func loadDestructiveDDLs(ctx context.Context, db *sql.DB, schema, table string, 
 	if w.sinceInclusive {
 		sinceOp = ">="
 	}
-	q := `SELECT ddl_type, detected_at, binlog_file, binlog_pos,
+	q := `SELECT id, ddl_type, detected_at, binlog_file, binlog_pos,
 			detected_at ` + sinceOp + ` ?, detected_at <= ?
 		FROM schema_changes
 		WHERE (schema_name = ? OR schema_name = '') AND table_name = ?
@@ -293,7 +363,7 @@ func loadDestructiveDDLs(ctx context.Context, db *sql.DB, schema, table string, 
 	var out []destructiveDDL
 	for rows.Next() {
 		var d destructiveDDL
-		if err := rows.Scan(&d.Type, &d.DetectedAt, &d.File, &d.Pos, &d.AfterSince, &d.AtOrBeforeUntil); err != nil {
+		if err := rows.Scan(&d.ID, &d.Type, &d.DetectedAt, &d.File, &d.Pos, &d.AfterSince, &d.AtOrBeforeUntil); err != nil {
 			return nil, fmt.Errorf("check schema_changes for destructive DDL on %s.%s: %w", schema, table, err)
 		}
 		out = append(out, d)

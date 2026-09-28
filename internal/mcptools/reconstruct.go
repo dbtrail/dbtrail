@@ -325,7 +325,8 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 			return ErrorResult(fmt.Errorf("read baseline metadata: %w", err)), nil, nil
 		}
 		if err := reconstruct.CheckDestructiveDDL(ctx, t.DB, args.Schema, args.Table,
-			reconstruct.DDLWindow{Since: snapshotTime, Until: atTime, Anchor: reconstruct.AnchorOf(bmeta)}); err != nil {
+			reconstruct.DDLWindow{Since: snapshotTime, Until: atTime, Anchor: reconstruct.AnchorOf(bmeta),
+				Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}); err != nil {
 			return ErrorResult(err), nil, nil
 		}
 		//      CaptureGapStatus rather than CheckCaptureGap: the shared helper
