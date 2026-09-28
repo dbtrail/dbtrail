@@ -56,7 +56,7 @@ fi
 
 echo "Waiting for ${endpoint}/minio/health/live (at most ${wait_seconds}s)"
 for _ in $(seq 1 "${wait_seconds}"); do
-  if curl -sf "${endpoint}/minio/health/live" >/dev/null; then
+  if curl -sf --max-time 2 "${endpoint}/minio/health/live" >/dev/null; then
     echo "S3-compatible test store is ready at ${endpoint}"
     {
       echo "ready=true"

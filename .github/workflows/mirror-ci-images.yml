@@ -39,6 +39,7 @@ permissions:
 jobs:
   minio:
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write # push to ghcr.io/dbtrail/ci-minio
