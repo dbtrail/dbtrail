@@ -193,11 +193,11 @@ func TestViewsCmd_refusesAnEmptySchemaThatWasTyped(t *testing.T) {
 	}
 	t.Cleanup(func() { f.Changed = false })
 
-	if err := viewsCmd.ParseFlags([]string{"--schema", "", "--baseline-dir", root, "--out", "-"}); err != nil {
+	if err := viewsCmd.ParseFlags([]string{"--schema", "", "--baseline-dir", root, "--output", "-"}); err != nil {
 		t.Fatalf("parse flags: %v", err)
 	}
 	t.Cleanup(func() {
-		for _, name := range []string{"baseline-dir", "out"} {
+		for _, name := range []string{"baseline-dir", "output"} {
 			if fl := viewsCmd.Flags().Lookup(name); fl != nil {
 				fl.Changed = false
 			}
