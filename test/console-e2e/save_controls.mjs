@@ -91,7 +91,10 @@ export const WRITES = [
 
 // ── reading app.js ──────────────────────────────────────────────────────────
 
-const WRITE_VERBS = new Set(["PUT", "POST", "DELETE", "PATCH"]);
+// DYNAMIC stands for a method this scan cannot read (a variable, a spread
+// options object): it may be a write, so it has to be on the list too.
+const DYNAMIC = "{DYNAMIC}";
+const WRITE_VERBS = new Set(["PUT", "POST", "DELETE", "PATCH", DYNAMIC]);
 
 // skipString returns the index just past the string literal that opens at i.
 // Template literals are skipped whole, their ${} parts included: a path built
@@ -173,17 +176,21 @@ function normPath(expr) {
 // in branch order), or [] when the value is not a literal: api() itself
 // forwards opts.method, and that is not a call site.
 function optionMethod(opts) {
-  if (!opts || !opts.startsWith("{")) return [];
+  if (!opts) return [];
+  // Options held in a variable: the method cannot be read here, so it may
+  // be a write.
+  if (!opts.startsWith("{")) return [DYNAMIC];
   const inner = opts.slice(1, -1);
   for (const prop of splitTop(inner, ",")) {
+    if (/^method$/.test(prop) || /^\.\.\./.test(prop)) return [DYNAMIC];
     const m = /^method\s*:\s*([\s\S]*)$/.exec(prop);
     if (!m) continue;
     const val = m[1].trim();
     const lit = (s) => (/^["'`]([A-Za-z]+)["'`]$/.exec(s.trim()) || [])[1];
     const t = ternary(val);
-    if (t) return t.map((b) => (lit(b) || "").toUpperCase());
+    if (t) return t.map((b) => (lit(b) || DYNAMIC).toUpperCase());
     const v = lit(val);
-    return v ? [v.toUpperCase()] : [];
+    return [v ? v.toUpperCase() : DYNAMIC];
   }
   return [];
 }
@@ -209,6 +216,11 @@ function lineOf(text, i) { return text.slice(0, i).split("\n").length; }
 //     with a variable path. Each call of the wrapper with a literal path is
 //     one write of that method.
 //
+// A method it cannot read (a variable, "{ method }", options held in a
+// variable or spread) is listed as {DYNAMIC}: it may be a write, so it has
+// to be on the list like any other. The one exception is api() itself, whose
+// fetch forwards the caller's method.
+//
 // It is a bracket walk, not a parser: a call written inside a comment counts
 // too, which errs on the side of listing one write too many.
 export function extractWrites(src) {
@@ -218,8 +230,13 @@ export function extractWrites(src) {
   let m;
   while ((m = re.exec(src))) {
     const open = m.index + m[0].length - 1;
+    // A definition ("function api(path, opts)") is not a call.
+    if (/function\s*$/.test(src.slice(Math.max(0, m.index - 20), m.index + (m[1] || m[3] || "").length))) continue;
     const { args } = callArgs(src, open);
     if (args.length < 2) continue;
+    // Inside api() itself the method is the caller's, forwarded: every
+    // caller is a call site of its own.
+    if (m[4] === "fetch" && enclosingFunction(src, open) === "api") continue;
     const verbs = optionMethod(args[1]).filter((v) => v !== "");
     if (!verbs.some((v) => WRITE_VERBS.has(v))) continue;
     const line = lineOf(src, open);
@@ -394,6 +411,20 @@ export async function runSaveScenes(ctx) {
   // has no source, so saving it starts no capture. Created through the form
   // by the server-form scene; the scenes after it need its id.
   let srvId = "";
+  // What the page shows as an error after a Save: the form's own line, an
+  // error notice, or the error toast. Cleared before each Save so an older
+  // one does not count.
+  const clearErrors = () => page.evaluate(() => { document.getElementById("toast-error").hidden = true; });
+  const shownErrors = () => page.evaluate(() => {
+    const out = [];
+    const m = document.getElementById("server-form-msg");
+    if (m && m.classList.contains("err") && m.textContent) out.push("form: " + m.textContent);
+    const n = document.querySelector("#notice-mount .notice");
+    if (n && /Could not|did not/.test(n.textContent)) out.push("notice: " + n.textContent.slice(0, 200));
+    const t = document.getElementById("toast-error");
+    if (t && !t.hidden && t.textContent) out.push("toast: " + t.textContent);
+    return out.join(" | ");
+  });
   const SRV_NAME = "e2e save target";
   const SRV_EDITED = "e2e save edited";
 
@@ -422,6 +453,7 @@ export async function runSaveScenes(ctx) {
       // Spaces around the name: the form trims it, and the stored name must
       // be the trimmed one.
       await fill({ name: "  " + SRV_NAME + "  ", host: "127.0.0.1", port: "13306", user: "root", password: "testroot", dbname: "bintrail_e2e_idx" });
+      await clearErrors();
       await page.click("#server-form-mount button[type=submit]");
       const created = await until(async () => {
         const r = await readAs(page, "/api/servers");
@@ -432,11 +464,8 @@ export async function runSaveScenes(ctx) {
         && created.host === "127.0.0.1" && String(created.port) === "13306" && created.user === "root"
         && created.dbname === "bintrail_e2e_idx" && created.has_password === true,
       JSON.stringify(created));
-      const formErr = await page.evaluate(() => {
-        const m = document.getElementById("server-form-msg");
-        return m && m.classList.contains("err") ? m.textContent : "";
-      });
-      check("server-form", "no error is shown after the add", formErr === "", formErr);
+      const errAfterAdd = await shownErrors();
+      check("server-form", "no error is shown after the add", errAfterAdd === "", errAfterAdd);
 
       // The same name again: the registry refuses a duplicate, the form shows
       // the server's own words, and nothing is added.
@@ -466,11 +495,14 @@ export async function runSaveScenes(ctx) {
       await page.waitForSelector('#server-form-mount input[name="name"]', { timeout: 5000 });
       const prefilled = await page.evaluate(() => document.querySelector('#server-form-mount input[name="name"]').value);
       await page.fill('#server-form-mount input[name="name"]', SRV_EDITED);
+      await clearErrors();
       await page.click("#server-form-mount button[type=submit]");
       const edited = await until(async () => {
         const r = await readAs(page, "/api/servers/" + encodeURIComponent(srvId));
         return r.body && r.body.name === SRV_EDITED ? r.body : null;
       });
+      const errAfterEdit = await shownErrors();
+      check("server-form", "no error is shown after the edit", errAfterEdit === "", errAfterEdit);
       check("server-form", "Save on the edit form stores the new name and keeps the password it did not show",
         prefilled === SRV_NAME && !!edited && edited.has_password === true && edited.dbname === "bintrail_e2e_idx",
         JSON.stringify({ prefilled, edited }));
@@ -885,7 +917,13 @@ export async function runSaveScenes(ctx) {
       const login = (pw) => page.evaluate(async (pw) => (await fetch("/api/auth/login", { method: "POST",
         headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "admin", password: pw }) })).status, pw);
       const P1 = "e2e-save-password-one", P2 = "e2e-save-password-two";
-      await page.evaluate(async () => { await gateCapabilities(); showPasswordDialog(); });
+      // The first password can only be set from the access token, and only
+      // when none is set: say so if the run did not start there.
+      const auth0 = await page.evaluate(async () => { await gateCapabilities(); return capsCache.auth || null; });
+      if (!auth0 || auth0.auth_kind !== "token" || auth0.password_set !== false) {
+        throw new Error("the password scene needs a token session and no password yet; capabilities.auth = " + JSON.stringify(auth0));
+      }
+      await page.evaluate(() => showPasswordDialog());
       await page.waitForSelector('#login-mount input[name="next"]', { timeout: 5000 });
       const first = await page.evaluate(() => !document.querySelector('#login-mount input[name="current"]'));
       await page.fill('#login-mount input[name="next"]', P1);

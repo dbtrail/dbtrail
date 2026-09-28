@@ -104,6 +104,20 @@ describe("reading call shapes", () => {
   test("the api() helper itself, forwarding opts.method, is not a call site", () => {
     assert.deepEqual(one('async function api(path, opts = {}) { const res = await fetch(path, { method: opts.method || "GET", headers }); }'), []);
   });
+  test("a method the scan cannot read may be a write, so it must be listed too", () => {
+    assert.deepEqual(one('api("/api/a", { method, body }); api("/api/b", { method: verb }); api("/api/c", opts); api("/api/d", { ...o });'),
+      ["{DYNAMIC} /api/a", "{DYNAMIC} /api/b", "{DYNAMIC} /api/c", "{DYNAMIC} /api/d"]);
+  });
+  test("a ternary method with one unreadable branch keeps that branch as a possible write", () => {
+    assert.deepEqual(one('api(id ? "/api/s/" + encodeURIComponent(id) : "/api/s", { method: id ? verb : "POST" });'),
+      ["POST /api/s", "{DYNAMIC} /api/s/{id}"]);
+  });
+  test("a GET with options that carry no method is not a write", () => {
+    assert.deepEqual(one('api("/api/a", { signal: ctl.signal }); api(url, { signal });'), []);
+  });
+  test("a function named like a wrapper is a definition, not a call", () => {
+    assert.deepEqual(one('async function api(path, opts = {}) { return 1; }'), []);
+  });
   test("a name that only ends in api or fetch is not a call", () => {
     assert.deepEqual(one('myapi("/api/a", { method: "POST" }); prefetch("/api/b", { method: "POST" }); x.api("/api/c", { method: "PUT" });'), []);
   });

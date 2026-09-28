@@ -54,9 +54,19 @@ down.
 | storage: Create-baseline gates (×5) | the button's double-gate (#686): live enabled arm, destination-missing arm, capability-off arm; the fixture snapshot listed |
 | telemetry: sample event (×3) | the Storage card's "Show a sample event" fold (#1447): closed by default, opens to a read-only `<pre>` carrying the daemon's `sample_event` string verbatim (never re-serialized in the frontend) |
 | access profiles (×6) | the Settings > Access profiles page (#1445): reachable from the sidebar on a fresh index, the real forms author a flag, a profile and a deny rule onto the index, a refusal shows the shared message, and the Remove buttons take everything back off |
+| save: one scene per control that writes (#1883) | a Save that answers 200 and stores nothing, or stores the wrong thing: each scene presses the real control, then reads the value back through the API (and in a fresh tab), including a refusal where one is cheap. The list and the scenes are in `save_controls.mjs` |
 | no uncaught JS errors | any thrown error over the whole drive |
 
 Adding a scenario: append an `ok(...)`/`bad(...)` block in `console_e2e.mjs`.
+
+Adding a control that writes (any `PUT`, `POST` or `DELETE` in `app.js`):
+add it to `WRITES` in `save_controls.mjs`, with its scene, or with the
+reason it saves nothing. `save_controls.test.mjs` reads `app.js` and fails
+until it is there; `run.sh` runs it first, and it needs no Docker:
+
+```sh
+node --test test/console-e2e/save_controls.test.mjs
+```
 A non-zero exit fails CI and writes `console-e2e-failure.png` to the artifact dir.
 
 ---
