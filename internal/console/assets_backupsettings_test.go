@@ -40,7 +40,9 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		// the way back without saying where it goes.
 		"row.editable", "row.source", "row.startup",
 		"srv.baseline_dir", "srv.baseline_s3", "srv.no_archive",
-		"srv.resolved_dir", "srv.resolved_s3", "srv.source",
+		"srv.source",
+		// The migration the registry file could not keep (#1684).
+		"settings.location_migration",
 		"srv.schedule_every", "srv.schedule_at", "srv.schedule_refusal", "srv.schedule_full_every",
 		"srv.schedule_every_minutes", "srv.archive_s3", "srv.full_backup_possible",
 		// How far back the kept count reaches, and a held folder (#1681).
@@ -190,8 +192,9 @@ func TestBackupSettingsDrawingCannotLie(t *testing.T) {
 	for _, m := range regexp.MustCompile(`backupSource(\w+)\s*=\s*"([a-z]+)"`).FindAllStringSubmatch(string(goSrc), -1) {
 		consts[m[1]] = m[2]
 	}
-	if len(consts) < 3 {
-		t.Fatalf("expected the three backupSource* constants, found %d", len(consts))
+	// Two since #1684 removed the daemon default: own location, or none.
+	if len(consts) < 2 {
+		t.Fatalf("expected the two backupSource* constants, found %d", len(consts))
 	}
 	assigned := map[string]int{}
 	for _, m := range regexp.MustCompile(`dto\.Source = backupSource(\w+)`).FindAllStringSubmatch(string(goSrc), -1) {

@@ -176,13 +176,13 @@ What the setting does:
   endpoint.
 - A store needs the server's **own** `Archive to S3` or Backups S3 location.
   A store with neither is refused, and so is one beside a location that is
-  not an `s3://bucket/prefix/` URL. A server with no Backups location of its
-  own reads the daemon's `--baseline-s3`; that bucket keeps the process-wide
-  behaviour, whatever the server's store says, and a store on a server that
-  names that bucket itself is refused (HTTP 422): it would take over every
-  server that inherits it. A store saved before the daemon was started with
-  that bucket as its `--baseline-s3` stops applying, with a warning at
-  startup naming the bucket.
+  not an `s3://bucket/prefix/` URL. The daemon's `--baseline-s3` bucket is
+  read with the process-wide endpoint (the command-line server reads it, and
+  so does every server given that location on upgrade), whatever a server's
+  store says, and a store on a server that names that bucket itself is
+  refused (HTTP 422): it would take the bucket over. A store saved before the
+  daemon was started with that bucket as its `--baseline-s3` stops applying,
+  with a warning at startup naming the bucket.
 - The server form still shows a store that is saved but not applied (a
   hand-edited conflict, or a store on a bucket that later became the
   daemon's `--baseline-s3`). The startup log names the bucket and the reason.

@@ -590,12 +590,12 @@ func TestIntegrationEvictOnDSNEdit(t *testing.T) {
 	}
 }
 
-// TestIntegrationRegistryServerInheritsProcessBaseline (#1010): a server
-// added through POST /api/servers (no baseline field) under a daemon started
-// with --baseline-dir must come up Time-travel-enabled through the REAL
-// lazy-open path: /api/capabilities on the new server reports
-// reconstruct:true. The same add under a daemon without a process baseline
-// stays gated off.
+// TestIntegrationRegistryServerInheritsProcessBaseline (#1684): a daemon
+// started with --baseline-dir no longer makes a server with no location of
+// its own Time-travel-enabled; the REAL lazy-open path reports
+// reconstruct:false for it. The server that relied on the old fallback is
+// given the location by the migration, and then the same path reports
+// reconstruct:true, reading the migrated folder.
 func TestIntegrationRegistryServerInheritsProcessBaseline(t *testing.T) {
 	db, dbName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
@@ -621,22 +621,31 @@ func TestIntegrationRegistryServerInheritsProcessBaseline(t *testing.T) {
 		if err := json.Unmarshal(body, &created); err != nil {
 			t.Fatal(err)
 		}
-		if created.Reconstruct != procBaseline {
-			t.Errorf("procBaseline=%v: created DTO reconstruct=%v, want %v",
-				procBaseline, created.Reconstruct, procBaseline)
+		if created.Reconstruct {
+			t.Errorf("procBaseline=%v: created DTO reconstruct=true for a server with no location", procBaseline)
+		}
+		caps := func() capabilitiesResponse {
+			rec, body := doReqOn(t, srv, created.ID, "GET", "/api/capabilities", "")
+			if rec.Code != 200 {
+				t.Fatalf("procBaseline=%v: capabilities code=%d body=%s", procBaseline, rec.Code, body)
+			}
+			var c capabilitiesResponse
+			if err := json.Unmarshal(body, &c); err != nil {
+				t.Fatal(err)
+			}
+			return c
+		}
+		if caps().Reconstruct {
+			t.Errorf("procBaseline=%v: lazy-opened registry server with no location reports reconstruct=true", procBaseline)
 		}
 
-		rec, body = doReqOn(t, srv, created.ID, "GET", "/api/capabilities", "")
-		if rec.Code != 200 {
-			t.Fatalf("procBaseline=%v: capabilities code=%d body=%s", procBaseline, rec.Code, body)
+		srv.cm.reg.MigrateProcessBaselineLocation(cfg.BaselineDir, "")
+		srv.cm.evict(created.ID)
+		if got := caps().Reconstruct; got != procBaseline {
+			t.Errorf("procBaseline=%v: after the migration reconstruct=%v, want %v", procBaseline, got, procBaseline)
 		}
-		var caps capabilitiesResponse
-		if err := json.Unmarshal(body, &caps); err != nil {
-			t.Fatal(err)
-		}
-		if caps.Reconstruct != procBaseline {
-			t.Errorf("procBaseline=%v: lazy-opened registry server reconstruct=%v, want %v",
-				procBaseline, caps.Reconstruct, procBaseline)
+		if b := srv.cm.bundles[created.ID]; procBaseline && (b == nil || b.baselineSrc != cfg.BaselineDir) {
+			t.Errorf("the migrated server's bundle reads %+v, want %q", b, cfg.BaselineDir)
 		}
 	}
 }

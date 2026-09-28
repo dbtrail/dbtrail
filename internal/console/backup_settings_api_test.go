@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -44,17 +45,17 @@ func backupSettingsGet(t *testing.T, srv *Server) backupSettingsDTO {
 	return dto
 }
 
-// TestBackupSettings_provenance drives the three source states the page
-// exists to distinguish: a server with its own location, one backed by the
-// daemon default (the shape that used to render an empty field,
-// indistinguishable from unconfigured), and one with nothing.
+// TestBackupSettings_provenance: a server's location is its own or it has
+// none (#1684). A daemon started with its own --baseline-dir does not back
+// a server that names nothing: it reads as "none", and resolved is the
+// entry's own value, which is what the read paths open.
 func TestBackupSettings_provenance(t *testing.T) {
 	srv := newBackupSettingsServer(t, BackupSettingsDefaults{}, "/data/baselines", "")
 	own, err := srv.cm.reg.Add(ServerEntry{Name: "own", DSN: "u:p@tcp(h:3306)/idx", BaselineDir: "/mine"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	backed, err := srv.cm.reg.Add(ServerEntry{Name: "backed", DSN: "u:p@tcp(h:3306)/idx2"})
+	bare, err := srv.cm.reg.Add(ServerEntry{Name: "bare", DSN: "u:p@tcp(h:3306)/idx2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,11 +68,32 @@ func TestBackupSettings_provenance(t *testing.T) {
 	if got := byID[own.ID]; got.Source != "server" || got.ResolvedDir != "/mine" {
 		t.Errorf("own-location server: source=%q resolved=%q; want server + /mine", got.Source, got.ResolvedDir)
 	}
-	// The daemon-default arm: raw stays EMPTY (it is the editable half) while
-	// resolved carries what findBaseline will actually open.
-	if got := byID[backed.ID]; got.Source != "default" || got.BaselineDir != "" || got.ResolvedDir != "/data/baselines" {
-		t.Errorf("default-backed server: source=%q raw=%q resolved=%q; want default + \"\" + /data/baselines",
-			got.Source, got.BaselineDir, got.ResolvedDir)
+	if got := byID[bare.ID]; got.Source != "none" || got.BaselineDir != "" || got.ResolvedDir != "" || got.ResolvedS3 != "" {
+		t.Errorf("server with no location beside a daemon default: source=%q raw=%q resolved=(%q, %q); want none and nothing resolved",
+			got.Source, got.BaselineDir, got.ResolvedDir, got.ResolvedS3)
+	}
+	if dto.LocationMigration != nil {
+		t.Errorf("location_migration = %+v with nothing unsaved", dto.LocationMigration)
+	}
+}
+
+// The migration could not update the file: the page is handed the servers
+// and the reason, next to where it already says the registry is read-only.
+func TestBackupSettings_saysTheMigrationWasNotSaved(t *testing.T) {
+	clearStores(t)
+	path := writeRegistryFile(t, "version: 99\nservers:\n  - id: aaaaaaaaaaaaaaa1\n    name: one\n    index_dsn: u:p@tcp(h:3306)/one\n")
+	reg := loadReg(t, path)
+	reg.MigrateProcessBaselineLocation("/data/baselines", "")
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, BaselineDir: "/data/baselines"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dto := backupSettingsGet(t, srv)
+	if !dto.RegistryReadOnly || dto.LocationMigration == nil || !slices.Equal(dto.LocationMigration.Migrated, []string{"one"}) || dto.LocationMigration.NotSaved == "" {
+		t.Fatalf("read_only=%v location_migration=%+v", dto.RegistryReadOnly, dto.LocationMigration)
+	}
+	if len(dto.Servers) != 1 || dto.Servers[0].Source != "server" || dto.Servers[0].BaselineDir != "/data/baselines" {
+		t.Errorf("the row does not show what this process reads: %+v", dto.Servers)
 	}
 }
 

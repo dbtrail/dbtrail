@@ -287,12 +287,9 @@ func (s *Server) handleVerifyTrigger(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// An entry with no baseline of its own inherits the process-wide
-	// --baseline-dir/--baseline-s3 (#1010), matching the reconstruct gate:
-	// the capabilities endpoint advertises Verify from the bundle's
-	// baselineConfigured, which applies the same fallback, so the trigger
-	// must accept what the UI was told is enabled.
-	e = s.cm.withBaselineDefaults(e)
+	// The entry as stored, the same one the bundle's baselineConfigured (and
+	// so the Verify capability) is derived from: the process-wide location
+	// backs no registry server since #1684.
 
 	var body struct {
 		Mode   string   `json:"mode"`

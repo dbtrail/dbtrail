@@ -232,7 +232,11 @@ type registryFile struct {
 	// living here rather than in a file of its own — see the BackupSettings
 	// type for why a second home would have been the wrong shape.
 	BackupSettings *BackupSettings `yaml:"backup_settings,omitempty"`
-	Servers        []ServerEntry   `yaml:"servers"`
+	// BaselineLocationMigrated records that the servers relying on the
+	// process-wide snapshot location were given it as their own (#1684),
+	// so the migration never runs twice. Additive, like the sections above.
+	BaselineLocationMigrated *baselineLocationMigrated `yaml:"baseline_location_migrated,omitempty"`
+	Servers                  []ServerEntry             `yaml:"servers"`
 	// Extra preserves any FUTURE envelope-level key a (future) older binary
 	// doesn't model, exactly as ServerEntry.Extra does at the entry level — so
 	// the next additive envelope field is downgrade-safe from here on. (It does
@@ -256,6 +260,9 @@ type Registry struct {
 	// process-wide endpoint (bucket → the setting's name), which no per-server
 	// store may claim; see SetProcessS3Location. Guarded by mu.
 	processBuckets map[string]string
+	// migration is what MigrateProcessBaselineLocation did at this start.
+	// Guarded by mu.
+	migration LocationMigration
 }
 
 // DefaultRegistryPath returns ~/.config/bintrail/console-servers.yaml, with
@@ -414,7 +421,7 @@ func (r *Registry) syncBucketStores() {
 		if label, ok := r.processBuckets[c.Bucket]; ok && label == c.ServerA {
 			// Not a disagreement two servers can resolve: a store on this
 			// bucket is refused outright (checkBucketStore).
-			slog.Warn("server registry: a server's S3 store names the daemon's --baseline-s3 bucket, which servers with no Snapshots location of their own read with the process-wide endpoint; the store is not applied to that bucket. Give the server another bucket, or set BINTRAIL_S3_ENDPOINT for the whole process",
+			slog.Warn("server registry: a server's S3 store names the daemon's --baseline-s3 bucket, which the command-line server (and every server given that location on upgrade) reads with the process-wide endpoint; the store is not applied to that bucket. Give the server another bucket, or set BINTRAIL_S3_ENDPOINT for the whole process",
 				"bucket", c.Bucket, "server", c.ServerB)
 			continue
 		}
@@ -428,10 +435,10 @@ func (r *Registry) syncBucketStores() {
 // and warnings about a store claiming it.
 const DaemonBaselineS3Label = "the daemon's --baseline-s3 default"
 
-// SetProcessS3Location registers an S3 location the daemon reads for servers
-// with none of their own: the --baseline-s3 fallback (withBaselineDefaults)
-// that every server with no Backups location inherits, and that the boot
-// entry reads. Its bucket counts as a bucket with no store: a server naming
+// SetProcessS3Location registers an S3 location the daemon itself reads:
+// the --baseline-s3 of the boot entry, which the servers that relied on it
+// before #1684 were given as their own (MigrateProcessBaselineLocation), so
+// they still read it the way they always did. Its bucket counts as a bucket with no store: a server naming
 // it with a store is refused, and a hand-edited one leaves it unrouted. label
 // names the setting in refusals and warnings. Called before serving.
 func (r *Registry) SetProcessS3Location(label, loc string) {
@@ -499,7 +506,7 @@ func (r *Registry) checkBucketStore(e *ServerEntry, selfID string) error {
 	}
 	for _, b := range e.s3Buckets() {
 		if label, ok := r.processBuckets[b]; ok && !st.IsZero() {
-			return fmt.Errorf("%w: bucket %q is %s, which servers with no Snapshots S3 location of their own read from AWS or the process-wide endpoint; a per-server store would take them all over, so use another bucket, or set BINTRAIL_S3_ENDPOINT for the whole process",
+			return fmt.Errorf("%w: bucket %q is %s, which the command-line server reads from AWS or the process-wide endpoint; a per-server store would take it over, so use another bucket, or set BINTRAIL_S3_ENDPOINT for the whole process",
 				ErrS3StoreConflict, b, label)
 		}
 		for _, other := range r.file.Servers {
@@ -790,6 +797,9 @@ func (r *Registry) save() error {
 	if err := writeFilePrivateAtomic(r.path, data); err != nil {
 		return fmt.Errorf("save server registry: %w", err)
 	}
+	// A migration this file could not hold at startup (#1684) is in it now:
+	// the page stops saying it is not.
+	r.migration.NotSaved = ""
 	r.syncBucketStores()
 	return nil
 }

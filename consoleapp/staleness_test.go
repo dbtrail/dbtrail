@@ -116,28 +116,32 @@ func TestWatchNotifier_BaselineStale(t *testing.T) {
 	}
 }
 
-// TestStalenessWatcher_targets pins the all-or-nothing baseline fallback and
-// the skip of servers with no baseline anywhere.
+// TestStalenessWatcher_targets: each registry server is graded against its
+// OWN location (#1684: the process-wide one backs only the command-line
+// entry), and a server with none has nothing to grade.
 func TestStalenessWatcher_targets(t *testing.T) {
 	reg := testRegistryWithEntries(t,
 		console.ServerEntry{Name: "own-dir", DSN: "d1", BaselineDir: "/own"},
 		console.ServerEntry{Name: "own-s3", DSN: "d2", BaselineS3: "s3://own"},
-		console.ServerEntry{Name: "inherits", DSN: "d3"},
+		console.ServerEntry{Name: "no-location", DSN: "d3"},
 	)
 	w := &stalenessWatcher{registry: reg, bootDSN: "boot-dsn", globalDir: "/global"}
 	got := w.targets()
-	if len(got) != 4 {
-		t.Fatalf("want boot + 3 entries, got %+v", got)
+	if len(got) != 3 {
+		t.Fatalf("want boot + the 2 entries with a location, got %+v", got)
 	}
 	bySrc := map[string]string{}
 	for _, tg := range got {
 		bySrc[tg.name] = tg.source
 	}
-	if bySrc["cli index"] != "/global" || bySrc["own-dir"] != "/own" || bySrc["own-s3"] != "s3://own" || bySrc["inherits"] != "/global" {
-		t.Fatalf("fallback wrong: %+v", bySrc)
+	if bySrc["cli index"] != "/global" || bySrc["own-dir"] != "/own" || bySrc["own-s3"] != "s3://own" {
+		t.Fatalf("sources wrong: %+v", bySrc)
+	}
+	if _, ok := bySrc["no-location"]; ok {
+		t.Fatalf("a server with no location was graded against the daemon's: %+v", bySrc)
 	}
 
-	// No global baseline: boot and the inheriting entry drop out.
+	// No global baseline: boot drops out, the entries keep their own.
 	w = &stalenessWatcher{registry: reg, bootDSN: "boot-dsn"}
 	if got := w.targets(); len(got) != 2 {
 		t.Fatalf("without a global source only own-baseline entries remain, got %+v", got)

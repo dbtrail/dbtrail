@@ -389,8 +389,10 @@ func itoa(n int) string {
 }
 
 // On a daemon started with its own snapshot location, a create that does not
-// answer keeps the #1010 fallback; an explicit yes gets the server's folder.
-func TestLocalCopy_daemonDefaultKeepsTheFallbackUnlessAsked(t *testing.T) {
+// answer gets the server's own folder all the same (#1684): the daemon's
+// location backs no registry server any more, so leaving the server empty
+// would leave it with no snapshots at all.
+func TestLocalCopy_daemonDefaultNoLongerKeepsANewServerEmpty(t *testing.T) {
 	clearStores(t)
 	state := t.TempDir()
 	reg, err := LoadRegistry(filepath.Join(state, "console-servers.yaml"))
@@ -402,8 +404,8 @@ func TestLocalCopy_daemonDefaultKeepsTheFallbackUnlessAsked(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, quiet := createServer(t, srv, newServerBody+`}`)
-	if e, _ := reg.Get(quiet.ID); e.BaselineDir != "" {
-		t.Errorf("unanswered create on a daemon with a default got %q", e.BaselineDir)
+	if e, _ := reg.Get(quiet.ID); e.BaselineDir != filepath.Join(state, "snapshots", quiet.ID) {
+		t.Errorf("unanswered create on a daemon with a default got %q, want its own folder", e.BaselineDir)
 	}
 	rec, asked := createServer(t, srv, `{"name":"b","host":"h","port":"3306","user":"u","password":"p","dbname":"i2","local_copy":true}`)
 	if rec.Code != http.StatusCreated {

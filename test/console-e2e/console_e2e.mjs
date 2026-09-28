@@ -2707,9 +2707,9 @@ try {
     // S3 only, with no scheduling loop: the row states the problem, and
     // "Add a Local folder." is the remedy only a writer gets.
     const s3only = { id: "srv-s3", name: "s3fix", source: "server", baseline_s3: "s3://b/p" };
-    // No location of its own, reading the daemon default: "save a location
-    // above" is the remedy.
-    const inherits = { id: "srv-inh", name: "inh", source: "default", resolved_dir: "/var/lib/dbtrail/b" };
+    // No location at all (#1684: the daemon's own no longer backs it):
+    // "Type one above and Save." is the remedy, and only a writer gets it.
+    const inherits = { id: "srv-inh", name: "inh", source: "none" };
     const keepViews = capsCache.views;
     const probe = () => {
       capsCache.views = false;
@@ -2744,7 +2744,7 @@ try {
     && /set not to read archived data/.test(H.operator.duckNoViews)
     && /With S3 only/.test(H.full.s3) && /Add a Local folder/.test(H.full.s3)
     && /With S3 only/.test(H.reader.s3) && !/Add a Local folder/.test(H.reader.s3)
-    && /save a location above/.test(H.full.inh) && /Time-travel reads/.test(H.reader.inh) && !/save a location above/.test(H.reader.inh))
+    && /Type one above and Save/.test(H.full.inh) && /keeps no snapshots/.test(H.reader.inh) && !/Type one above and Save/.test(H.reader.inh))
     ? ok("permissions: a hint that names a fix is shown only to a session that can make it, and keeps its reason")
     : bad("permissions: a hint that names a fix is shown only to a session that can make it, and keeps its reason", JSON.stringify(H));
 

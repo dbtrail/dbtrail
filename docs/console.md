@@ -331,10 +331,16 @@ How it behaves:
   server" — so two browser tabs can watch two different servers.
 - **Per-server Time-travel.** The reconstruct gate (baseline configured, no
   RBAC profile, archives enabled) is evaluated per server; the Time-travel view
-  appears and disappears as you switch. A server whose registry entry has no
-  baseline of its own inherits the process-wide `--baseline-dir`/`--baseline-s3`
-  (when set), so servers added from the UI get Time-travel and verify under a
-  single-baseline-dir deployment without extra configuration.
+  appears and disappears as you switch. A server's snapshot location is its
+  own, or it has none: the process-wide `--baseline-dir`/`--baseline-s3` is
+  the command-line server's location only. A server added from the UI gets a
+  folder of its own. On the first start of a version with this rule, every
+  saved server that had no location and read the process-wide one is given
+  that value as its own, once, so it keeps reading what it read before. If
+  the server file cannot be saved (written by a newer version, or not
+  writable), the servers keep it for that run and the Snapshots page says
+  the file was not updated. Several servers given the same location share
+  it, and the Snapshots page warns once their snapshots mix there.
 - **Test connection.** Each server (saved or being typed) has a write-free
   test. On a new server you are typing, it runs the source half of the startup
   checks Save runs (connection, binlog settings, grants, tables without a

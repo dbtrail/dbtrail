@@ -227,10 +227,11 @@ func TestVerifyTrigger_requiresBaselineDestination(t *testing.T) {
 	}
 }
 
-// TestVerifyTrigger_processBaselineFallback (#1010): an entry with no
-// baseline of its own inherits the process-wide --baseline-dir — the trigger
-// accepts (matching the Verify capability the UI was shown) and the
-// VerifyRequest carries the fallback dir.
+// TestVerifyTrigger_processBaselineFallback (#1684): an entry with no
+// baseline of its own does not inherit the process-wide --baseline-dir any
+// more, so baseline-anchored verification is refused for it, matching the
+// Verify capability derived from the same entry. Once the migration has
+// given it that location, the request carries it.
 func TestVerifyTrigger_processBaselineFallback(t *testing.T) {
 	reg, _ := LoadRegistry(t.TempDir() + "/console-servers.yaml")
 	ctrl := &stubVerifyCtrl{status: VerifyStatus{State: "idle"}}
@@ -244,14 +245,19 @@ func TestVerifyTrigger_processBaselineFallback(t *testing.T) {
 	}
 	id := addVerifyEntry(t, srv, "u:p@tcp(127.0.0.1:3306)/", "", "")
 	rec, body := doServersReq(t, srv, "POST", "/api/servers/"+id+"/verify", "")
+	if rec.Code != 400 || len(ctrl.triggered) != 0 {
+		t.Fatalf("no location of its own: code=%d body=%s triggered=%d, want 400 and nothing run", rec.Code, body, len(ctrl.triggered))
+	}
+	reg.MigrateProcessBaselineLocation("/var/bintrail/baselines", "")
+	rec, body = doServersReq(t, srv, "POST", "/api/servers/"+id+"/verify", "")
 	if rec.Code != 202 {
-		t.Fatalf("process baseline fallback: code=%d body=%s, want 202", rec.Code, body)
+		t.Fatalf("migrated: code=%d body=%s, want 202", rec.Code, body)
 	}
 	if len(ctrl.triggered) != 1 {
 		t.Fatalf("triggered %d runs, want 1", len(ctrl.triggered))
 	}
 	if got := ctrl.triggered[0].BaselineDir; got != "/var/bintrail/baselines" {
-		t.Errorf("VerifyRequest.BaselineDir=%q, want the process --baseline-dir", got)
+		t.Errorf("VerifyRequest.BaselineDir=%q, want the migrated --baseline-dir", got)
 	}
 }
 

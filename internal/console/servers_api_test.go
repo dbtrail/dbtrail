@@ -904,7 +904,10 @@ func TestBuildDSNRejectsRawDSNPlusPassword(t *testing.T) {
 }
 
 // TestCapabilityMatrix: the pure-config reconstruct gate over
-// baseline × no_archive × profile × process-wide baseline fallback (#1010).
+// baseline × no_archive × profile. A process-wide --baseline-dir no longer
+// backs a server with none of its own (#1684): the migration wrote it into
+// every server that read through it, so what is left with nothing has
+// nothing.
 func TestCapabilityMatrix(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -918,11 +921,8 @@ func TestCapabilityMatrix(t *testing.T) {
 		{"no baseline", ServerEntry{}, false, "", false},
 		{"no_archive kills it", ServerEntry{BaselineDir: "/b", NoArchive: true}, false, "", false},
 		{"profile kills it", ServerEntry{BaselineDir: "/b"}, true, "", false},
-		// #1010: an entry with no baseline of its own inherits the process-wide
-		// --baseline-dir; no_archive and an active profile still gate it off.
-		{"process fallback", ServerEntry{}, false, "/proc/b", true},
-		{"fallback + no_archive", ServerEntry{NoArchive: true}, false, "/proc/b", false},
-		{"fallback + profile", ServerEntry{}, true, "/proc/b", false},
+		{"a process default backs nothing", ServerEntry{}, false, "/proc/b", false},
+		{"own dir beside a process default", ServerEntry{BaselineDir: "/b"}, false, "/proc/b", true},
 	}
 	for _, tc := range cases {
 		cm := newConnManager(nil, tc.profile)
@@ -933,18 +933,14 @@ func TestCapabilityMatrix(t *testing.T) {
 	}
 }
 
-// TestRegistryBaselineFallbackAPI (#1010): a server added through the real
-// POST /api/servers path — which has no baseline field — must inherit the
-// process-wide --baseline-dir: its DTO reports reconstruct:true, and the
-// derived bundle (rebuildDerived shares newBundleDerived with the lazy open)
-// turns on both Reconstruct and Verify in /api/capabilities. The DTO's
-// baseline_dir must stay the entry's OWN (empty) value — echoing the default
-// into the edit form would persist it as per-server config on the next save.
-//
-// Without a process baseline dir the server gets a folder of its own since
-// #1681 (<state dir>/snapshots/<id>), so both capabilities are on and the DTO
-// names that folder; with one, a create that does not ask for a local copy
-// keeps the fallback, unchanged.
+// TestRegistryBaselineFallbackAPI: a server added through the real
+// POST /api/servers path, which has no baseline field, gets a folder of its
+// own (<state dir>/snapshots/<id>, #1681), so its DTO reports
+// reconstruct:true and the derived bundle (rebuildDerived shares
+// newBundleDerived with the lazy open) turns on both Reconstruct and Verify
+// in /api/capabilities. Since #1684 that holds on a daemon started with its
+// own --baseline-dir too: there is no process-wide location to inherit, and
+// a server left with none would have no snapshots at all.
 func TestRegistryBaselineFallbackAPI(t *testing.T) {
 	for _, procBaseline := range []bool{true, false} {
 		state := t.TempDir()
@@ -977,10 +973,7 @@ func TestRegistryBaselineFallbackAPI(t *testing.T) {
 		if !created.Reconstruct {
 			t.Errorf("procBaseline=%v: created DTO reconstruct=false, want true", procBaseline)
 		}
-		wantOwn := ""
-		if !procBaseline {
-			wantOwn = state + "/snapshots/" + created.ID
-		}
+		wantOwn := state + "/snapshots/" + created.ID
 		if created.BaselineDir != wantOwn || created.BaselineS3 != "" {
 			t.Errorf("procBaseline=%v: DTO must report the entry's OWN baseline (%q), got dir=%q s3=%q",
 				procBaseline, wantOwn, created.BaselineDir, created.BaselineS3)
@@ -1009,31 +1002,44 @@ func TestRegistryBaselineFallbackAPI(t *testing.T) {
 		if !caps.Verify {
 			t.Errorf("procBaseline=%v: capabilities verify=false, want true", procBaseline)
 		}
-		if b := srv.cm.bundles[created.ID]; procBaseline && b.baselineSrc != "/var/bintrail/baselines" {
-			t.Errorf("bundle baselineSrc=%q, want the process --baseline-dir", b.baselineSrc)
+		if b := srv.cm.bundles[created.ID]; b.baselineSrc != wantOwn {
+			t.Errorf("procBaseline=%v: bundle baselineSrc=%q, want its own folder %q", procBaseline, b.baselineSrc, wantOwn)
 		}
 	}
 }
 
-// TestWithBaselineDefaultsAllOrNothing (#1010): the process fallback applies
-// only when the entry carries NO baseline of its own — an entry with its own
-// dir or S3 chose its location explicitly, and mixing in the process default
-// would make findBaseline read a location never associated with that server.
-func TestWithBaselineDefaultsAllOrNothing(t *testing.T) {
+// TestRegistryServerReadsOnlyItsOwnLocation (#1684): the read paths use the
+// entry as stored. A daemon default never fills an empty entry, and never
+// mixes into an entry that names half a location.
+func TestRegistryServerReadsOnlyItsOwnLocation(t *testing.T) {
 	cm := newConnManager(nil, false)
 	cm.defaultBaselineDir = "/proc/b"
 	cm.defaultBaselineS3 = "s3://proc/"
-
-	got := cm.withBaselineDefaults(ServerEntry{})
-	if got.BaselineDir != "/proc/b" || got.BaselineS3 != "s3://proc/" {
-		t.Errorf("empty entry must inherit both defaults, got dir=%q s3=%q", got.BaselineDir, got.BaselineS3)
-	}
-	got = cm.withBaselineDefaults(ServerEntry{BaselineS3: "s3://own/"})
-	if got.BaselineDir != "" || got.BaselineS3 != "s3://own/" {
-		t.Errorf("own S3 must suppress BOTH defaults, got dir=%q s3=%q", got.BaselineDir, got.BaselineS3)
-	}
-	got = cm.withBaselineDefaults(ServerEntry{BaselineDir: "/own"})
-	if got.BaselineDir != "/own" || got.BaselineS3 != "" {
-		t.Errorf("own dir must suppress BOTH defaults, got dir=%q s3=%q", got.BaselineDir, got.BaselineS3)
+	for _, tc := range []struct {
+		name          string
+		entry         ServerEntry
+		src, fallback string
+	}{
+		{"empty", ServerEntry{}, "", ""},
+		{"own s3", ServerEntry{BaselineS3: "s3://own/"}, "s3://own/", ""},
+		{"own dir", ServerEntry{BaselineDir: "/own"}, "/own", ""},
+		{"both", ServerEntry{BaselineDir: "/own", BaselineS3: "s3://own/"}, "/own", "s3://own/"},
+	} {
+		id, err := cm.reg.Add(ServerEntry{Name: tc.name, BaselineDir: tc.entry.BaselineDir, BaselineS3: tc.entry.BaselineS3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := cm.baselineLocation(id.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.src {
+			t.Errorf("%s: baselineLocation = %q, want %q", tc.name, got, tc.src)
+		}
+		cm.bundles[id.ID] = &bundle{}
+		cm.rebuildDerived(id)
+		if b := cm.bundles[id.ID]; b.baselineSrc != tc.src || b.baselineFallbackSrc != tc.fallback || b.baselineConfigured != (tc.src != "") {
+			t.Errorf("%s: bundle = (%q, %q, %v), want (%q, %q)", tc.name, b.baselineSrc, b.baselineFallbackSrc, b.baselineConfigured, tc.src, tc.fallback)
+		}
 	}
 }

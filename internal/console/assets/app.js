@@ -3796,24 +3796,41 @@ function renderRecover(params) {
 
 // loadRestoreToMoment fills the Restore page's slot with the restore card
 // once the three reads it needs are in (the server row, the copies, the last
-// restore's state); nothing while the daemon has no restore feature or the
-// selected server is not a registry one. A generation guard drops a late
-// answer after the reader moved on.
+// restore's state); nothing while the daemon has no restore feature. Where
+// this server cannot restore, the card is still drawn, switched off, with the
+// reason (#1684). A generation guard drops a late answer after the reader
+// moved on.
 async function loadRestoreToMoment(slot) {
   if (!capsCache.baseline_restore) return;
   const id = currentServer || defaultServerId;
   if (!id) return;
   const gen = serverGen, vgen = viewGen;
   const [srvRes, b, rst] = await Promise.all([
-    api("/api/servers").catch(() => null),
-    api("/api/baselines").catch(() => null),
+    // Both errors are kept: the switched-off card says them.
+    api("/api/servers").catch((err) => ({ error: (err && err.message) || String(err) })),
+    api("/api/baselines").catch((err) => ({ error: (err && err.message) || String(err) })),
     api("/api/servers/" + encodeURIComponent(id) + "/baseline/restore").catch(() => null),
   ]);
   if (gen !== serverGen || vgen !== viewGen) return;
+  if (srvRes && srvRes.error) {
+    // Which server this is could not be read, so nothing below can decide.
+    if (sessionMay(PERM_SNAPSHOT_CREATE)) slot.append(restoreOffCard("list-error", "The server list could not be read: " + srvRes.error));
+    return;
+  }
   const cur = srvRes && Array.isArray(srvRes.servers) ? srvRes.servers.find((s) => s.id === id) : null;
   const running = !!(rst && rst.restore && rst.restore.state === "running");
   const card = running ? null : backupRestoreCard(cur, b, rst);
   if (!card && !running) return;
+  if (card && card.dataset.why) {
+    // Switched off: the run note would point at a run that cannot happen.
+    // Where the fix is on Snapshots, the note is the way there.
+    if (card.dataset.why === "no-folder" || card.dataset.why === "no-snapshot") {
+      card.append(el("p", { class: "form-hint rc-restore-note" },
+        el("a", { href: "/snapshots", text: "Snapshots ›", onclick: (e) => { e.preventDefault(); navigate("snapshots"); } })));
+    }
+    slot.append(card);
+    return;
+  }
   const note = el("p", { class: "form-hint rc-restore-note" },
     running ? "A restore is running for this server. " : "The run and its result show on ",
     el("a", { href: "/snapshots", text: running ? "Follow it on Snapshots ›" : "Snapshots ›", onclick: (e) => { e.preventDefault(); navigate("snapshots"); } }));
@@ -6460,18 +6477,16 @@ function backupDaemonEditRow(row, locked) {
 }
 
 
-// BACKUP_SOURCE_CASES draws the three answers to "which backup location is
-// in force for this server", keyed by the EXACT Source values
-// backup_settings_api.go emits; assets_backupsettings_test.go pins the two
-// sets against each other, so a fourth verdict on either side rings instead
-// of leaving a picture that still shows three. The daemon default is the
-// case the page exists for: it backs the reads (time-travel, verification,
-// .sql exports) while the writes refuse (backups, restores, the schedule), so
-// it draws as one tick and one cross.
+// BACKUP_SOURCE_CASES draws the answers to "where do this server's snapshots
+// live", keyed by the EXACT Source values backup_settings_api.go emits;
+// assets_backupsettings_test.go pins the two sets against each other, so a
+// verdict added on either side rings instead of leaving a picture that shows
+// something else. Two since #1684: a location of its own, or none. The
+// middle case, reading DBTrail's startup folder, is gone with the fallback
+// it explained.
 const BACKUP_SOURCE_CASES = {
   server: { name: "Own location", reads: true, writes: true, say: "Snapshots, restores and time travel all work here." },
-  default: { name: "No place of its own yet", reads: true, writes: false, say: "Time travel works from DBTrail's shared folder. Read database now and restores will refuse until this server has a folder or bucket of its own." },
-  none: { name: "No location", reads: false, writes: false, say: "Nothing works until this server has a folder or bucket of its own." },
+  none: { name: "No location", reads: false, writes: false, say: "This server keeps no snapshots, so time travel and restores do not work." },
 };
 
 // blCase renders one case row: the name, then a tick or a cross per lane.
@@ -6526,6 +6541,8 @@ function backupServersPanel(settings) {
     panel.append(el("p", { class: "form-msg err", text:
       "The server registry was written by a newer version, so this DBTrail can only read it; values are shown but cannot be saved." }));
   }
+  const unsaved = locationMigrationWords(settings.location_migration);
+  if (unsaved) panel.append(el("p", { class: "form-msg err", text: unsaved }));
   // The daemon default S3 destination, for the retention block: the boot
   // entry backs up there and is not in the list.
   const daemonS3 = ((settings.daemon || []).find((r) => r.key === "baseline_s3") || {}).value || "";
@@ -6535,6 +6552,19 @@ function backupServersPanel(settings) {
       (servers.length - 1) + " other " + (servers.length === 2 ? "server keeps" : "servers keep") + " settings of their own: pick one at the top of the page to see them." }));
   }
   return panel;
+}
+
+// locationMigrationWords says that this start gave servers DBTrail's startup
+// snapshot location as their own (#1684) and the registry file could not
+// keep it, or "" when there is nothing to say. They read it now, and every
+// start gives it to them again while the file stays as it is; a start
+// without that location leaves them with none.
+function locationMigrationWords(m) {
+  if (!m || !m.not_saved) return "";
+  const names = (m.servers || []).join(", ");
+  return "The startup snapshot location was given to " + (names || "some servers") +
+    ", but the server registry could not be saved: " + m.not_saved +
+    ". They use it for now. If DBTrail starts without that location, they will have none.";
 }
 
 // s3OnlyBackupWarning is the Backup settings warning for a server whose own
@@ -6564,8 +6594,7 @@ function s3OnlyBackupWarning(srv, fix = true) {
 //   local  the yes/no as clicked         s3    the S3 field as typed
 //   keep   the count as typed (0 = all)  loop  this process removes snapshots
 //   reuse  unchanged tables keep their last file on this daemon
-//   was    the saved answer, folder and provenance ("default" = this server
-//          reads DBTrail's startup folder), and whether that folder is one
+//   was    the saved answer, folder and provenance, and whether that folder is one
 //          the prune never counts (shared, or DBTrail's own), or held (it
 //          was shared and still holds the other server's snapshots)
 //   reach  how far back the count reaches (localReachWords): the count in
@@ -6583,10 +6612,6 @@ function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
   // saved, local or S3, and it is the one line here that is about data.
   for (const w of was.shared || []) say(sharedLocationWords(w), true);
   if (!local) {
-    if (!s3 && !was.local && was.source === "default") {
-      say("This server has no folder of its own. Time-travel reads DBTrail's startup folder; to take snapshots for it, answer yes or set an S3 destination.");
-      return out;
-    }
     if (!s3) {
       say("Set an S3 destination below first. With neither, this server keeps no snapshots at all.", true);
       return out;
@@ -6773,25 +6798,12 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const noArch = el("input", { type: "checkbox", name: "no_archive" });
   noArch.checked = !!srv.no_archive;
 
-  // Provenance, the row's reason to exist: which location is actually in
-  // force, drawn as its own case row. The daemon default backs the
-  // READ paths only. Create backup, restores and the schedule read the
-  // server's raw entry on purpose (the default is a shared store; folding
-  // this server's index onto another server's snapshots would publish a
-  // backup that belongs to neither, see baseline_trigger.go), so claiming
-  // the default "is in force" here told the operator their backups were
-  // covered when the write paths would refuse. The cross on that row is the
-  // whole page in one glyph; the line under it says what to do.
+  // Whether this server has a location at all, drawn as its own case row.
+  // Since #1684 there is no third answer: reads and writes use the same
+  // saved entry, so the row can never promise time travel from a place the
+  // writes refuse. The line under it says what to do.
   const src = srv.source;
   whereCard.append(blCase(src, true, sessionMay("servers:write") ? "Type one above and Save." : ""));
-  if (src === "default") {
-    // Which shared place, under "More about this server": the case row
-    // above already says what to do.
-    const eff = srv.resolved_dir || srv.resolved_s3;
-    more.push(el("p", { class: "form-hint" },
-      "Time-travel reads ", el("code", { text: eff }),
-      sessionMay("servers:write") ? ". To make snapshots for this server, save a location above." : "."));
-  }
   // The refusal beats the prediction: the schedule reads the RAW entry, so
   // clearing the dir on this very page leaves a stored schedule that will
   // refuse every slot. Never compact.
@@ -9222,19 +9234,25 @@ async function removeBackupSchedule(id, btn, msgEl) {
 // leaving that line at the bottom of the body would have put the failure in
 // the least-read place on the card.
 function backupRestoreCard(cur, b, restoreSt) {
-  // Registry servers only: the CLI (ephemeral) entry is refused by the
-  // monitor verbs with a message about monitoring, not restores.
-  if (!capsCache.baseline_restore || !cur || !cur.id || cur.kind !== "registry") return null;
+  if (!capsCache.baseline_restore || !cur || !cur.id) return null;
   // Without baseline:create the form goes, the outcome of the last restore
   // stays: GET .../baseline/restore is servers:read, and "the restore wrote
   // the copy here but could not send it to S3" is a fact about whether a
   // copy is safe, not a control. See the end of this function.
   const mayCreate = sessionMay(PERM_SNAPSHOT_CREATE);
-  // The server needs its OWN local backup directory to build INTO: the
-  // daemon-wide one is a shared store the endpoint refuses (the fold would mix
-  // servers).
-  if (!cur.baseline_dir) return null;
-  if (!b || b.error || !b.configured) return null;
+  // The cases where this server cannot restore draw the card switched off,
+  // with the reason (#1684); it used to vanish without a word. Only for a
+  // session that could restore otherwise: to one that cannot, a switched-off
+  // control says nothing it needs.
+  const off = (why, text) => mayCreate ? restoreOffCard(why, text) : null;
+  // Registry servers only: the CLI (ephemeral) entry is refused by the
+  // monitor verbs with a message about monitoring, not restores.
+  if (cur.kind !== "registry") return off("cli", "Restores are for servers added in DBTrail. The server given on the command line has no snapshot folder of its own to save the result in.");
+  // The server needs its OWN local backup directory to build INTO: a
+  // restore saves a new snapshot there.
+  if (!cur.baseline_dir) return off("no-folder", "A restore saves its result in this server's own snapshot folder, and it has none. Set one on Snapshots.");
+  if (!b || b.error) return off("list-error", "The snapshot list could not be read" + (b && b.error ? ": " + b.error : "."));
+  if (!b.configured) return off("no-folder", "A restore saves its result in this server's own snapshot folder, and it has none. Set one on Snapshots.");
   // Where the restore READS is the other half (#1541): this server's S3
   // backups when it has them, else that directory — the same rule the
   // scheduled update follows (BaselineFoldSource), and the same one the
@@ -9242,7 +9260,10 @@ function backupRestoreCard(cur, b, restoreSt) {
   // S3-backed server would prefill a moment the fold then refuses.
   const reads = cur.baseline_s3 ? "s3" : "dir";
   const usable = backupSnapshotsFor(b, reads);
-  if (!usable.length) return null;
+  if (!usable.length) {
+    return off("no-snapshot", "There is no snapshot to restore from yet" +
+      (reads === "s3" ? " in this server's S3 location" : " in this server's folder") + ". Take one on Snapshots.");
+  }
   const rst = restoreSt && restoreSt.restore;
   if (rst && rst.state === "running") return null; // the run region owns it
   const card = el("section", { class: "ov-panel bk-restore" });
@@ -9290,6 +9311,22 @@ function backupRestoreCard(cur, b, restoreSt) {
     return card;
   }
   card.append(body);
+  return card;
+}
+
+// restoreOffCard is the restore card switched off: the same heading and
+// controls, disabled, with why in place of the explanation. data-why names
+// the case for the page and the tests.
+function restoreOffCard(why, text) {
+  const card = el("section", { class: "ov-panel bk-restore bk-restore-off" });
+  card.dataset.why = why;
+  card.append(el("div", { class: "ov-panel-head" },
+    el("h2", { class: "ov-panel-title", text: "Restore to a moment" })));
+  card.append(el("p", { class: "form-hint bk-card-state", text }));
+  const input = el("input", { class: "in", type: "text", placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
+  const go = el("button", { class: "btn", type: "button", text: "Restore" });
+  input.disabled = go.disabled = true;
+  card.append(el("div", { class: "bk-restore-row" }, input, go));
   return card;
 }
 

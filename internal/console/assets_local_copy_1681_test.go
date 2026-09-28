@@ -93,7 +93,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   await step("reachRetain", Object.assign({}, inForce, { snapshot_every_minutes: 5, prune_retain_minutes: 7 * 1440 }), null);
   await step("reachScheduleOnly", Object.assign({}, inForce, { schedule_every: "1h", schedule_every_minutes: 60 }), null);
   await step("reachNotApplied", Object.assign({}, fresh, { snapshot_every_minutes: 60 }), null);
-  await step("daemonDefault", { source: "default" }, null);
+  await step("noLocation", { source: "none" }, null);
   await step("oldLocalBothYes", { baseline_dir: "/srv/snaps", baseline_s3: "s3://b/p/", local_copy: true, source: "server" }, null);
   // The schedule card's rate sentence follows the listing's local_retention.
   vm.runInContext("capsCache.backup_schedule = true;", ctx);
@@ -255,9 +255,10 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if w := joined(got["blocked"].Before); !strings.Contains(w, "nothing in it is removed, whatever the count says") || strings.Contains(w, "hourly cleanup") {
 		t.Errorf("a blocked folder: %q", w)
 	}
-	// A server read from DBTrail's startup folder is not told it has nothing.
-	if d := got["daemonDefault"]; len(d.Before.Reds) != 0 {
-		t.Errorf("a server on the startup folder is told something is wrong: %+v", d.Before)
+	// A server with no location is not told about DBTrail's startup folder:
+	// that folder backs no server since #1684.
+	if w := joined(got["noLocation"].Before); strings.Contains(w, "startup folder") || strings.Contains(w, "Time-travel reads") {
+		t.Errorf("a server with no location is told about the startup folder: %q", w)
 	}
 
 	// A server with nothing: an unrelated toggle does not send a no (which

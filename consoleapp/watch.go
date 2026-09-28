@@ -440,7 +440,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if serversPath == "" {
 		serversPath = console.DefaultRegistryPath()
 	}
-	registry, err := loadConsoleRegistry(serversPath, upConsoleBaselineS3)
+	registry, err := loadConsoleRegistry(serversPath, upConsoleBaselineDir, upConsoleBaselineS3)
 	if err != nil {
 		return fmt.Errorf("console: %w", err)
 	}
@@ -666,7 +666,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	if serversPath == "" {
 		serversPath = console.DefaultRegistryPath()
 	}
-	registry, err := loadConsoleRegistry(serversPath, upConsoleBaselineS3)
+	registry, err := loadConsoleRegistry(serversPath, upConsoleBaselineDir, upConsoleBaselineS3)
 	if err != nil {
 		return fmt.Errorf("console: %w", err)
 	}
@@ -1276,7 +1276,7 @@ func runScheduledVerifyCycle(ctx context.Context, sup *verifySupervisor, registr
 		if ctx.Err() != nil {
 			return
 		}
-		err := sup.RunScheduled(scheduledVerifyRequest(e, tables, upConsoleBaselineDir, upConsoleBaselineS3))
+		err := sup.RunScheduled(scheduledVerifyRequest(e, tables))
 		if errors.Is(err, console.ErrVerifyRunning) {
 			slog.Info("scheduled verify: skipped, a run is already in flight", "server", e.Name)
 			recordVerifySkip(history, e, "a verify run was already in flight when the schedule fired")
@@ -1285,16 +1285,12 @@ func runScheduledVerifyCycle(ctx context.Context, sup *verifySupervisor, registr
 }
 
 // scheduledVerifyRequest picks the check a scheduled cycle runs for one
-// server: baseline-anchored where a baseline location is configured — the
-// entry's own, or the process-wide fallback, all-or-nothing exactly like
-// withBaselineDefaults (#1010) — and the index-only recover-inputs check
-// otherwise, so a server with no baseline is still verified rather than
-// silently skipped.
-func scheduledVerifyRequest(e console.ServerEntry, tables []string, globalDir, globalS3 string) console.VerifyRequest {
+// server: baseline-anchored where the server has a baseline location of its
+// own (#1684: the process-wide one backs no registry server any more), and
+// the index-only recover-inputs check otherwise, so a server with no
+// baseline is still verified rather than silently skipped.
+func scheduledVerifyRequest(e console.ServerEntry, tables []string) console.VerifyRequest {
 	dir, s3 := e.BaselineDir, e.BaselineS3
-	if dir == "" && s3 == "" {
-		dir, s3 = globalDir, globalS3
-	}
 	mode := console.VerifyModeBaselineAnchored
 	if dir == "" && s3 == "" {
 		mode = console.VerifyModeRecoverInputs

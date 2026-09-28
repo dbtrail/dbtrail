@@ -83,15 +83,13 @@ func TestBackupsPanelRendersEveryLocation(t *testing.T) {
 // own job will refuse, while the page above says it is right there — the very
 // failure the merge was supposed to end, one layer down.
 //
-// The field matters and it is easy to get wrong: `cur` is the RAW registry
-// entry, while both jobs resolve through withBaselineDefaults, so a server that
-// inherits the daemon-wide backup location has an empty cur.baseline_dir and
-// still builds from a directory. b.kind comes off the bundle, which applies the
-// same defaulting and the same dir-over-S3 preference the export does.
+// The field matters: b.kind comes off the bundle, which applies the same
+// dir-over-S3 preference the export does. Since #1684 `cur` and the bundle
+// read the same entry (no daemon default fills the bundle in), but the lane
+// still follows the bundle, which is what the build opens.
 //
-// The restore card is the exception and stays on cur.baseline_dir on purpose:
-// its endpoint REFUSES the shared daemon store, because that fold would mix
-// servers. Same field, opposite meanings. Where it READS is the other half
+// The restore card stays on cur.baseline_dir on purpose: it builds INTO the
+// server's own folder, so without one it is drawn switched off. Where it READS is the other half
 // (#1541): this server's S3 backups when it has them, else that directory,
 // which is the scheduled update's rule, so the card narrows on cur.baseline_s3.
 func TestBackupJobCardsOfferOnlyWhatTheirJobCanRead(t *testing.T) {
