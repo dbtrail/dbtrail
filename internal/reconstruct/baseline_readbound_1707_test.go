@@ -463,6 +463,9 @@ func TestListBaselinesS3_marksTheChainBesideEachTable(t *testing.T) {
 	f.add(d+"/shop/gap.parquet", d+"/shop/gap.000001.posdel", d+"/shop/gap.000001.upserts")
 	f.add(d+"/shop/old.parquet", d+"/shop/old.posdel", d+"/shop/old.upserts")
 	f.add(chainKeys(d, "other/orders", 0)...)
+	// The names of two tables of shop, in another schema and with nothing
+	// beside them: what shop's folder says is not about these.
+	f.add(d+"/other/half.parquet", d+"/other/old.parquet")
 	stubS3Snapshots(t, f)
 	files, err := ListBaselines(context.Background(), "s3://b/base")
 	if err != nil {
@@ -487,7 +490,7 @@ func TestListBaselinesS3_marksTheChainBesideEachTable(t *testing.T) {
 	want := map[string]string{
 		"shop.orders": "orders.000002.upserts", "shop.orders_2": "", "shop.plain": "",
 		"shop.half": "damaged", "shop.gap": "damaged", "shop.old": "old.upserts",
-		"other.orders": "orders.000000.upserts",
+		"other.orders": "orders.000000.upserts", "other.half": "", "other.old": "",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
