@@ -126,6 +126,15 @@ type BaselinePair struct {
 	// NewHasDelta unset: a read starts its chain with an empty pair, and
 	// pairComparesNothing ignores it for a read).
 	NewReadFromDatabase bool
+	// NewLock / PrevLock: how each side's read of the database was locked
+	// (#1380), from its footer. The zero value is unknown, which is what a
+	// pair built by hand gets. See withSnapshotLock for what they change.
+	// PrevDir is the time of the snapshot that holds the older side, which
+	// PrevSnapshot is not when a chain of table deltas sits beside the file.
+	// Zero on a pair built by hand.
+	PrevDir  time.Time
+	NewLock  baseline.ReadConsistency
+	PrevLock baseline.ReadConsistency
 	// Settled, when set, is this table's answer, decided while pairing: the
 	// read it needs is not kept, not on record, or has no earlier snapshot, a
 	// footer the pairing needed would not open, or a backup folder the answer
@@ -337,6 +346,13 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 		res.ComparedTo = p.NewSnapshot
 	}
 	res.Status, res.Detail = classify(newDigest, newCount, reconDigest, reconCount, deferredDetail)
+	// A snapshot known to be torn explains a difference; one with no record
+	// of its locks does not (#1380, withSnapshotLock).
+	var lock baseline.ReadConsistency
+	res.Status, res.Detail, lock = withSnapshotLock(res.Status, res.Detail,
+		lockSide{what: "the snapshot of " + p.NewSnapshot.UTC().Format(time.RFC3339), lock: p.NewLock},
+		lockSide{what: "the snapshot of " + prevSnapshotTime(p).UTC().Format(time.RFC3339), lock: p.PrevLock})
+	res.SnapshotLock = lock.String()
 	return res, nil
 }
 
@@ -632,10 +648,23 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile) (p Base
 		NewLSN:              nMeta.LSN,
 		PrevLSN:             prevMeta.LSN,
 		NewReadFromDatabase: true,
+		PrevDir:             prev.SnapshotTime,
+		NewLock:             baseline.ReadConsistencyOf(nMeta),
+		PrevLock:            baseline.ReadConsistencyOf(prevMeta),
 	}
 	return pair, restsOn{from: prev.SnapshotTime, until: read.SnapshotTime,
 		holds: fmt.Sprintf("a snapshot of this table between the one it would be compared with (%s) and its last read (%s)",
 			prev.SnapshotTime.UTC().Format(time.RFC3339), readAt)}
+}
+
+// prevSnapshotTime names the older side of a pair: the time in its path when
+// the path holds one, since PrevSnapshot is moved back to the start of a
+// chain of table deltas beside the file.
+func prevSnapshotTime(p BaselinePair) time.Time {
+	if !p.PrevDir.IsZero() {
+		return p.PrevDir
+	}
+	return p.PrevSnapshot
 }
 
 // sortBaselinePairs orders pairs by schema.table, in place.

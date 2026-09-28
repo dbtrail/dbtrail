@@ -143,6 +143,11 @@ type VerifyTableResult struct {
 	// as "the newest snapshot is verified". Empty where no two fingerprints
 	// were compared.
 	ComparedTo string `json:"compared_to,omitempty"`
+	// SnapshotLock is how the snapshots this table was compared with were
+	// locked when the database was read: consistent | unknown | torn. The same
+	// datum, under the same name, as the CLI's snapshot_lock. Empty where no
+	// snapshot was compared.
+	SnapshotLock string `json:"snapshot_lock,omitempty"`
 	// Explainable is true only for a baseline-anchored mismatch whose pair is
 	// still cached from the run that produced this result — the precondition
 	// for calling Explain on it.

@@ -101,6 +101,12 @@ type TableReport struct {
 	// Reason is the detail behind an inconclusive/mismatch/error verdict, or a
 	// note carried on a match.
 	Reason string `json:"reason,omitempty"`
+	// SnapshotLock is how the snapshots this table was compared with were
+	// locked when the database was read (#1380): consistent | unknown | torn,
+	// the worst of them. A mismatch over a torn one is reported inconclusive;
+	// one over an unknown one stays a mismatch. Empty where no snapshot was
+	// compared.
+	SnapshotLock string `json:"snapshot_lock,omitempty"`
 
 	// The three fields below are populated only by ModeRecoverInputs. They are
 	// separate from SourceRows/ReconstructRows on purpose: those two mean
@@ -238,6 +244,7 @@ func NewReport(mode string, results []TableResult) *Report {
 			Anchor:            r.Anchor,
 			ComparedTo:        comparedTo(r.ComparedTo),
 			Reason:            reason,
+			SnapshotLock:      r.SnapshotLock,
 
 			EventsChecked:      r.EventsChecked,
 			ChainsChecked:      r.ChainsChecked,
