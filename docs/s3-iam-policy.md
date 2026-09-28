@@ -51,12 +51,36 @@ safe; add that action per the table below.
 | `s3:DeleteObject` | Baseline upload's own cleanup of its in-progress `_INCOMPLETE` marker, and `agent --validate` removing its connectivity-probe object. No bintrail command deletes archive data from S3 (`archive reconcile --prune` deletes registry rows only). Optional but recommended — omit it if you'd rather nothing in the bucket ever be deleted by bintrail |
 | `s3:AbortMultipartUpload` | Cleaning up after a **failed or interrupted** large upload: the SDK automatically aborts the in-progress multipart upload, and without this permission that abort is `AccessDenied` — the orphaned parts stay in the bucket, invisible in listings but billed as storage. Never used on the success path. Pair it with an [`AbortIncompleteMultipartUpload` lifecycle rule](deployment.md#s3-archive-bucket-abort-orphaned-multipart-uploads) on the bucket as the backstop for uploads that die before the abort can run (crash, `SIGKILL`) |
 
-## Two things this policy deliberately leaves out
+## Three things this policy deliberately leaves out
 
 **`s3:GetBucketObjectLockConfiguration`** is only needed by the advisory
 `bintrail doctor --archive-s3` posture check ([object-lock.md](object-lock.md));
 without it that check reports SKIP and everything else works. Add it as a
 bucket-level action (alongside `s3:ListBucket`) if you use the check.
+
+**`s3:GetBucketLifecycleConfiguration`** is only needed to read whether a
+rule in the bucket expires old snapshots. DBTrail never deletes a snapshot
+from S3 and never sets a bucket rule: the web console writes the rule and
+you apply it. This permission lets two places say whether it is there: the
+line above the rule on the console's Snapshots settings, and the advisory
+check of `bintrail doctor`:
+
+```bash
+bintrail doctor --source-dsn "$SRC" \
+  --baseline-s3 s3://my-bucket/backups/ --snapshot-every 6h
+```
+
+| The bucket | `doctor` reports | The console line says |
+|---|---|---|
+| has a rule that covers the snapshot prefix | PASS, with the rule and its age (WARN if the age is no longer than `--snapshot-every`) | the rule and its age, in red if it is too short for the schedule |
+| has no rule that covers it | WARN | that the bucket grows without limit |
+| could not be read | SKIP | that the rules could not be read, and that this permission is the likely reason |
+
+Without the permission you get the third row and everything else works:
+the check never fails `doctor`, and no snapshot, restore or query needs it.
+Add it as a bucket-level action (alongside `s3:ListBucket`) if you want the
+answer. Some S3-compatible stores do not implement the call; they get the
+third row too.
 
 **`s3:GetBucketLocation`** is not in the policy above. It's only needed if
 your archive/baseline bucket lives in a **different AWS region** than the
