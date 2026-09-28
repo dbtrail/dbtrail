@@ -77,6 +77,12 @@ neither: --baseline-dir/--baseline-s3 on its own is enough. That is what a
 snapshot downloaded from the web interface arrives as, and it can be queried on a
 machine that cannot reach the index at all.
 
+To keep several servers in one DuckDB database, generate one file per server
+with --schema set to a name for that server. Every view is then created
+inside that schema (wp.events, wp.state_shop_orders), so two servers that
+share a table no longer replace each other's view. Without it every view goes
+to the default schema, where the second file loaded wins without an error.
+
 The file is a snapshot of the LAYOUT, not of the rows. The state views reach a
 baseline published later on their own, by whichever route the root allows: a
 --baseline-dir file reads through the current/ pointer, and a --baseline-s3
@@ -121,6 +127,7 @@ var (
 	vIncludeLive   bool
 	vIncludeEvents bool
 	vPinSnapshot   bool
+	vSchema        string
 )
 
 func init() {
@@ -129,6 +136,7 @@ func init() {
 	viewsCmd.Flags().StringVar(&vArchiveS3, "archive-s3", "", "S3 root URL prefix of Parquet archives (requires --bintrail-id; e.g. s3://bucket/prefix/)")
 	viewsCmd.Flags().StringVar(&vBintrailID, "bintrail-id", "", "Server identity UUID (required when --archive-dir or --archive-s3 is set)")
 	viewsCmd.Flags().BoolVar(&vPinSnapshot, "pin-snapshot", false, "Bind the state views to the snapshot discovered now, so they keep returning today's rows after a baseline refresh (default: follow the newest snapshot, through the current/ pointer locally and through the newest _SUCCESS marker on S3)")
+	viewsCmd.Flags().StringVar(&vSchema, "schema", "", "Create every view inside this DuckDB schema, so the files of several servers can be loaded into one database: a view is named after its table and not its server, and without this the second server to define a table replaces the first one's view without an error. Lowercase letters, digits and underscore. With --include-live the index is attached as <schema>_live (default: the default schema, names unqualified)")
 	viewsCmd.Flags().StringVar(&vRegion, "region", "", "AWS region to pin in the generated S3 secret (default: resolved by the credential chain)")
 	viewsCmd.Flags().StringVar(&vBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots")
 	viewsCmd.Flags().StringVar(&vBaselineS3, "baseline-s3", "", "S3 URL prefix of baseline Parquet snapshots (e.g. s3://bucket/baselines/)")
@@ -139,6 +147,18 @@ func init() {
 }
 
 func runViews(cmd *cobra.Command, _ []string) error {
+	// First, ahead of every refusal that depends on what else was passed: a
+	// name that cannot be used is wrong whatever the rest of the command says.
+	if vSchema != "" {
+		if err := views.ValidateSchemaName(vSchema); err != nil {
+			return fmt.Errorf("--schema: %w", err)
+		}
+	} else if cmd.Flags().Changed("schema") {
+		// `--schema ""` is a value that was typed (an unset shell variable,
+		// usually). Reading it as "no schema" would write every view to the
+		// default schema, which is the overwrite the flag was passed to avoid.
+		return fmt.Errorf("--schema: %w", views.ValidateSchemaName(vSchema))
+	}
 	if (vArchiveDir != "" || vArchiveS3 != "") && vBintrailID == "" {
 		return fmt.Errorf("--bintrail-id is required when --archive-dir or --archive-s3 is set")
 	}
@@ -184,6 +204,7 @@ func runViews(cmd *cobra.Command, _ []string) error {
 		// never emits the preamble that would use it.
 		ArchiveRegion: vRegion,
 		OmitEvents:    !vIncludeEvents,
+		Schema:        vSchema,
 	}
 
 	switch {

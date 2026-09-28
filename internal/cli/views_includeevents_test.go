@@ -35,7 +35,7 @@ func baselineDirWithATable(t *testing.T) string {
 // changes what the NEXT test observes.
 func saveViewsFlags(t *testing.T) {
 	t.Helper()
-	strs := []*string{&vIndexDSN, &vArchiveDir, &vArchiveS3, &vBintrailID, &vBaselineDir, &vBaselineS3, &vOut}
+	strs := []*string{&vIndexDSN, &vArchiveDir, &vArchiveS3, &vBintrailID, &vBaselineDir, &vBaselineS3, &vOut, &vSchema}
 	strVals := make([]string, len(strs))
 	for i, p := range strs {
 		strVals[i] = *p

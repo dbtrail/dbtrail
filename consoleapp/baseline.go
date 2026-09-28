@@ -160,6 +160,27 @@ type baselineSupervisor struct {
 	// taking the server. The skip is right and the reason is wrong, so what
 	// this carries is the reason.
 	refreshGateSkips map[string]string
+	// refreshChecked is when a refresh cycle for each server last ENDED, whether
+	// it folded or the gate skipped it (#1705), as RefreshStatus reports it.
+	//
+	// It exists because a skipped cycle writes no run record and no status, on
+	// purpose, so on the daemon-wide interval loop a server with nothing to do
+	// and a loop that died three weeks ago showed the same last run. This says
+	// which one it is without adding an outcome: it is a time, and nothing
+	// reads it to decide anything.
+	//
+	// Kept beside the status slots rather than on them. A skipped cycle
+	// restores the slot it displaced, and that status has to come back as it
+	// was.
+	//
+	// None of the per-server maps on this supervisor is pruned when a server is
+	// deleted from the registry, these four gate maps included. Decided, not
+	// overlooked (#1705): each holds one small entry per server id this process
+	// has ever seen, so the growth is bounded by the number of servers an
+	// operator creates between restarts. A memo left behind cannot speak for a
+	// new server either, because it names the index and the destination it was
+	// read for, and a new server gets a new id.
+	refreshChecked map[string]string
 	// gateEdge rate-limits the two things the #1689 gate says about itself, so
 	// a condition that persists for months is one line a day per server rather
 	// than one per cycle. Both are conditions, not events: "I cannot evaluate
@@ -194,6 +215,7 @@ func newBaselineSupervisor(ctx context.Context, stagingDir string, lockMode base
 		foldedMarks:      make(map[string]foldMemo),
 		refreshPrior:     make(map[string]*console.BaselineStatus),
 		refreshGateSkips: make(map[string]string),
+		refreshChecked:   make(map[string]string),
 		gateEdge:         notify.NewEdge(notify.DefaultRepeatEvery),
 		restores:         make(map[string]*console.BaselineStatus),
 		exports:          make(map[string]*console.BaselineStatus),

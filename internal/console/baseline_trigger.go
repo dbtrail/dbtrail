@@ -240,6 +240,13 @@ type BaselineStatus struct {
 	// represents; it publishes no snapshot). Empty on dump jobs (the anchor
 	// is chosen mid-run).
 	At string `json:"at,omitempty"`
+	// CheckedAt (periodic refresh only, RFC3339 UTC) is when a refresh cycle
+	// for this server last ended, whether it produced a snapshot or found
+	// nothing to fold. A cycle with nothing to fold writes no status and no
+	// run record, so without this a quiet server and a refresh loop that
+	// stopped report the same last run. It describes the loop, not the run:
+	// every other field here still belongs to the last run that happened.
+	CheckedAt string `json:"checked_at,omitempty"`
 	// ExpiresAt (sql-export builds only, RFC3339 UTC) is when a finished
 	// build is removed from the daemon's disk unless downloaded first; the
 	// Snapshots page shows it as the download deadline.
