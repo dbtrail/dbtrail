@@ -277,6 +277,35 @@ bintrail stream --gap-timeout 60 --index-dsn "..." --source-dsn "..." --server-i
 
 Reducing binlog retention is also a valid mitigation, but loses the ability to fill larger gaps.
 
+### The `--write-timeout` flag
+
+Every write to the index has a deadline, 3 minutes by default. When the batch INSERT does not finish in time, capture stops with an error that starts with:
+
+```
+batch INSERT of 1000 events exceeded the 3m0s write deadline
+```
+
+This is the index being slow or a stalled network link, not the index refusing the write. Raise the deadline when a healthy write runs long, for example large batches over a slow link:
+
+```sh
+bintrail stream --write-timeout 10m --index-dsn "..." --source-dsn "..." --server-id 99999
+```
+
+Lowering `--batch-size` makes each write smaller and is the other way out.
+
+**What happens next depends on which command is capturing.**
+
+| Command | On a write deadline |
+|---|---|
+| `bintrail stream` | Exits with a non-zero status. Nothing in the process starts it again. |
+| `bintrail-console watch` | Restarts capture by itself: waits 15 seconds, doubling up to 5 minutes, and stops trying after 6 hours of continuous failures. |
+
+So run `bintrail stream` under something that restarts it, such as systemd with `Restart=always` or a container restart policy. Without one, a single slow write ends capture until someone starts it by hand.
+
+A restart is safe. The stream resumes from its last checkpoint and removes the rows written after that checkpoint before it captures them again, so a batch that timed out on the client but still committed on the server does not leave duplicates. Do not re-run a timed-out INSERT by hand for the same reason: it may already be in the index.
+
+One thing to know when alerting on `bintrail-console watch`: it keeps running through a write deadline, so an alert on the process being down does not fire. Alert on `time() - bintrail_stream_last_flush_timestamp_seconds` instead.
+
 ### RDS: stream from the primary, not a read-replica
 
 **Important for AWS RDS users:** `bintrail stream` connects as a binlog client and registers itself as a replication slave (`COM_REGISTER_SLAVE`). RDS read-replicas are `read_only=1` by default and reject the registration with:
