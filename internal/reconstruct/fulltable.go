@@ -1217,8 +1217,11 @@ func ReconstructTable(
 					"schema", schema, "table", table, "error", rerr)
 			}
 		}
-		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, tm, typesTM, schema, table); err != nil {
-			return nil, err
+		// Names against the latest snapshot, less the columns proven to have
+		// been added after the target (#1675). Unproven, they stay and refuse.
+		namesTM, unplaced := foldNamesAtTarget(ctx, db, cfg, bmeta, tm, asOf, schema, table)
+		if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, namesTM, typesTM, schema, table); err != nil {
+			return nil, explainUnplacedColumns(err, unplaced)
 		}
 		// A DDL on this table that ran between the CREATE TABLE and the target
 		// but was recorded after the target (capture behind, #1667) is not in
@@ -1238,8 +1241,8 @@ func ReconstructTable(
 			if t, rerr := resolveSnapshotTable(db, resolver, ddlSnap, schema, table); rerr != nil {
 				slog.Warn("the schema snapshot taken for a DDL before the target does not describe this table; column types are not compared with it",
 					"schema", schema, "table", table, "snapshot_id", ddlSnap, "error", rerr)
-			} else if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, tm, t, schema, table); err != nil {
-				return nil, err
+			} else if err := checkBaselineSchemaCurrent(bmeta.CreateTableSQL, namesTM, t, schema, table); err != nil {
+				return nil, explainUnplacedColumns(err, unplaced)
 			}
 		}
 		// A gapped ancestor taints every descendant: the events it lost are
