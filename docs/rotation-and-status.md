@@ -770,6 +770,14 @@ and does not resolve a standing `baseline_stale` alert. A table that is
 past coverage still alerts, whatever could not be read for the table beside
 it.
 
+A chain of deltas lives for up to 24 hours before the table is written whole
+again. With a retention of 24 hours or less and table deltas on, the start
+of a chain can come close to the oldest hour the index keeps, or fall behind
+it, so the verdict can read `aging` or `broken` for a while on a server
+whose snapshots are made on time. It clears when the table is next written
+whole. A retention longer than a day keeps the start of every chain inside
+coverage.
+
 **Indexes capturing more than one source**: live partitions are shared by
 every source, so the live floor needs no attribution — but archived
 partitions are per-source, and a baseline snapshot carries no source
