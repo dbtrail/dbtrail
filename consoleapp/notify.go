@@ -260,6 +260,10 @@ type stalenessWatcher struct {
 	// Injectable for tests — no ticker, no real DB, no real S3.
 	listBaselines func(ctx context.Context, source string) (files []reconstruct.BaselineFile, skipped int, err error)
 	oldestDelta   func(ctx context.Context, dsn string) (status.DeltaFloor, error)
+	// readBounds says where a reader of each file starts (#1707):
+	// reconstruct.ReadBounds. With nil, a file with a chain beside it is
+	// not graded at all: its snapshot time is not where a reader starts.
+	readBounds func(ctx context.Context, files []reconstruct.BaselineFile) []status.ReadBound
 }
 
 func startStalenessWatch(ctx context.Context, n *watchNotifier, registry *console.Registry, bootDSN, globalDir, globalS3 string) {
@@ -268,6 +272,7 @@ func startStalenessWatch(ctx context.Context, n *watchNotifier, registry *consol
 		unknownEdge:   notify.NewEdge(0),
 		listBaselines: reconstruct.ListBaselinesReport,
 		oldestDelta:   oldestDeltaByDSN,
+		readBounds:    reconstruct.ReadBounds,
 	}
 	go func() {
 		if ctx.Err() == nil {
@@ -384,27 +389,37 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 		}
 		w.unknownEdge.Resolve("staleness-floor:" + edgeID)
 		now := time.Now().UTC()
-		newest := make(map[string]time.Time, len(files))
-		for _, f := range files {
-			k := f.Schema + "." + f.Table
-			if f.SnapshotTime.After(newest[k]) {
-				newest[k] = f.SnapshotTime
+		// Each table's newest snapshot, and where a reader of it starts
+		// (#1707): with table deltas that is the start of the chain beside
+		// the table, which is earlier than the snapshot. One footer read per
+		// table with a chain, and over S3 none for a snapshot already read.
+		var newest []reconstruct.BaselineFile
+		for _, i := range reconstruct.NewestPerTable(files) {
+			newest = append(newest, files[i])
+		}
+		bounds := make([]status.ReadBound, len(newest))
+		if w.readBounds != nil {
+			bounds = w.readBounds(ctx, newest)
+		} else {
+			for i, f := range newest {
+				bounds[i].Unread = f.HasDelta()
 			}
 		}
 		// ALL broken tables, sorted — the edge detail must be a stable
 		// identity, and a map-iteration-ordered single pick would flip
 		// between cycles and re-fire through the repeat window.
 		var brokenTables []string
-		var ungradable bool
-		for k, ts := range newest {
-			switch floor.Grade(ts, now) {
+		var ungradable, unreadChain bool
+		for i, f := range newest {
+			switch floor.GradeTable(f.SnapshotTime, bounds[i], now) {
 			case status.BaselineBroken:
-				brokenTables = append(brokenTables, k)
+				brokenTables = append(brokenTables, f.Schema+"."+f.Table)
 			case status.BaselineUnknown:
 				// Keyed on the VERDICT, not on the floor flag: whatever makes
 				// a table ungradable, grading the rest and reporting
 				// broken=false below would resolve on partial evidence.
 				ungradable = true
+				unreadChain = unreadChain || bounds[i].Unread
 			}
 		}
 		if ungradable {
@@ -416,7 +431,9 @@ func (w *stalenessWatcher) runCycle(ctx context.Context) {
 			// source to an index would silently clear a real broken-baseline
 			// alert. Skip the target whole, exactly like an unknown floor.
 			reason := "a baseline snapshot carries no usable timestamp"
-			if floor.BelowIsUnknown {
+			if unreadChain {
+				reason = "the table delta beside a snapshot could not be read, so where a restore of that table starts is not known; a full backup replaces it"
+			} else if floor.BelowIsUnknown {
 				reason = "this index serves more than one source, so archived coverage below the live index window cannot be attributed to the source that owns these baselines"
 			}
 			if w.unknownEdge.Fire("staleness-attribution:"+edgeID, "") {

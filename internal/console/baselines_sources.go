@@ -159,8 +159,11 @@ func listBaselinesMerged(ctx context.Context, sources []string, list baselineLis
 				// Keep the LOCAL path when the same file exists in both. The
 				// footer read downstream opens Path directly, and doing that
 				// over S3 is the latency this listing deliberately avoids.
+				// The chain of deltas travels with the path (#1707): its
+				// newest pair is named beside the file it was listed with.
 				if kind == "dir" && baselineKindOf(out.Files[idx].Path) == "s3" {
 					out.Files[idx].Path = f.Path
+					out.Files[idx].DeltaUpserts, out.Files[idx].DeltaErr = f.DeltaUpserts, f.DeltaErr
 				}
 				continue
 			}
