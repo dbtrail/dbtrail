@@ -115,6 +115,89 @@ ORDER BY event_timestamp DESC;
 
 To get a table back as it stood before a purge, use `bintrail reconstruct --at` with a baseline taken before it. An archival purge (rows moved out of the operational database on purpose) leaves through the binlog as ordinary DELETEs, so the refresh cannot tell it from a business delete and drops those rows from the snapshot too; the event log is where they remain.
 
+### Several servers in one DuckDB file
+
+A view is named after its table, not after its server. Load the files of two
+servers into one database and every table they share is defined twice under one
+name: the second file wins, the first server's table is gone from the catalog,
+and nothing reports it.
+
+```text
+server wp    shop.orders  ->  state_shop_orders  \
+                                                   one name, the last file loaded wins
+server rds   shop.orders  ->  state_shop_orders  /
+```
+
+Give each server its own schema with `--schema`:
+
+```sh
+bintrail views --baseline-dir /data/baselines/wp  --schema wp  --output wp.sql
+bintrail views --baseline-dir /data/baselines/rds --schema rds --output rds.sql
+
+cat wp.sql rds.sql > all.sql
+duckdb lake.db -c ".read all.sql"
+```
+
+```text
+server wp    shop.orders  ->  wp.state_shop_orders
+server rds   shop.orders  ->  rds.state_shop_orders
+```
+
+Both tables are there, each with its own server's rows, and one query can read
+across them:
+
+```sql
+SELECT 'wp' AS server, * FROM wp.state_shop_orders
+UNION ALL
+SELECT 'rds', * FROM rds.state_shop_orders
+ORDER BY 1, 2;
+```
+
+```text
+┌─────────┬───────┬──────────┬───────────────┐
+│ server  │  id   │  status  │     total     │
+│ varchar │ int32 │ varchar  │ decimal(10,2) │
+├─────────┼───────┼──────────┼───────────────┤
+│ rds     │     1 │ shipped  │         99.99 │
+│ rds     │     2 │ paid     │          1.00 │
+│ rds     │     3 │ refunded │          5.25 │
+│ wp      │     1 │ new      │         10.50 │
+│ wp      │     2 │ paid     │         20.00 │
+└─────────┴───────┴──────────┴───────────────┘
+```
+
+To refresh one server, generate its file again and read it again. It replaces
+that server's views and leaves the others alone.
+
+The name is yours to pick, within these rules. Each one is refused with its
+reason when you run the command:
+
+| Name | Why it is refused |
+|---|---|
+| `WP`, `Wp` | DuckDB reads `WP` and `wp` as the same schema, even quoted, so two servers named that way would replace each other. Use lowercase |
+| `my server`, `wp.prod`, `wp-prod` | Only lowercase letters, digits and underscore |
+| `1wp` | A name that starts with a digit has to be quoted in every query |
+| `main`, `temp`, `system`, `memory`, `information_schema`, `pg_catalog` | DuckDB already has them. `main` is where a file generated with no `--schema` puts its views |
+| `select`, `order`, `left`, ... | SQL keywords DuckDB cannot read unquoted: `FROM order.events` is a syntax error |
+| `wp_live` | The name a server's live index is attached under (below) |
+
+Three things a schema does not cover:
+
+- **Do not name the database file after a schema.** DuckDB names a database
+  after its file, so loading `--schema wp` into `wp.db` stops at the first view
+  with `Ambiguous reference to catalog or schema "wp"`. Any other file name
+  works (`lake.db` above).
+- **The S3 settings are shared.** A DuckDB session has one S3 region, one S3
+  endpoint and one general S3 secret, and every file sets them. Servers whose
+  buckets are in the same store and region load together. Servers in different
+  regions, or one in AWS and one in an S3-compatible store, do not: the last
+  file read sets them for everyone, so the other server's reads go to the wrong
+  store or region. Keep those in separate database files.
+- **With `--include-live`, fill in each file's password.** Each file attaches its
+  own index, as `<schema>_live` (`wp_live`, `rds_live`), through its own secret.
+  Without `--schema` every file attaches `bintrail_live`, and DuckDB refuses the
+  second one.
+
 ### Every flag
 
 | Flag | What it does |
@@ -122,6 +205,7 @@ To get a table back as it stood before a purge, use `bintrail reconstruct --at` 
 | `--baseline-dir` | Local backup directory. Source of the `state_` views |
 | `--baseline-s3` | S3 backup prefix. Mutually exclusive with `--baseline-dir` |
 | `--pin-snapshot` | Freeze the `state_` views on the snapshot that exists now, instead of following the newest |
+| `--schema` | Create every view inside this DuckDB schema, so several servers fit in one database. See [Several servers in one DuckDB file](#several-servers-in-one-duckdb-file) |
 | `--include-events` | Add the `events` view. Off by default; see the cost above |
 | `--index-dsn` | The index, where archive locations are discovered. Needed with `--include-events` unless you name a location directly |
 | `--archive-dir` | Local archive root, named directly. Needs `--bintrail-id` |
