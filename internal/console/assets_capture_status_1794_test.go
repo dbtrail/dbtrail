@@ -392,3 +392,145 @@ const behind = { server_id: "a", state: "behind" };
 		t.Errorf("a failed ask: %+v", r)
 	}
 }
+
+// The wiring on the page: the card is drawn first, with what it can say
+// without the source, and the ask goes out after; the answer then redraws
+// the card AND the drawing from the same coverage read, so the two cannot
+// say two things. The card's own refresh button does the same.
+func TestOverviewDrawsFirstAndAsksAfter(t *testing.T) {
+	type step struct {
+		Card, Flow string
+		Asked      int
+	}
+	var got struct {
+		Fill, Refresh   struct{ Before, After step }
+		OtherServerFlow string
+	}
+	runCaptureJS(t, `
+console.error = () => {};
+let asked = 0, release = null;
+ctx.fetch = (url) => {
+  const body = String(url).includes("/api/capture-status") ? { server_id: "a", state: "up_to_date" }
+    : { delta_from: "2026-09-22 10:00:00", delta_to: "2026-09-22 11:30:27", continuity: "ok", freshness: "idle", lag_seconds: 4445 };
+  if (String(url).includes("/api/capture-status")) asked++;
+  const res = { ok: true, status: 200, headers: { get: () => "application/json" }, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) };
+  if (!String(url).includes("/api/capture-status")) return Promise.resolve(res);
+  return new Promise((r) => { release = () => r(res); });
+};
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
+vm.runInContext("capsCache = { monitor: true, permissions: {} }; currentServer = 'a'; defaultServerId = 'a'; TOKEN = 't';", ctx);
+const registry = { id: "a", kind: "registry", has_source: true, source_host: "db1" };
+const idle = () => ({ delta_from: "2026-09-22 10:00:00", delta_to: "2026-09-22 11:30:27", continuity: "ok", freshness: "idle", lag_seconds: 4445 });
+// The drawing on screen, painted from an earlier coverage read.
+const flowSlot = new FakeEl("div"); flowSlot.isConnected = true;
+const paintFlow = (coverage) => {
+  ctx.__inp = { coverage, baselines: {}, server: registry, schema: { state: "idle" }, uncaptured: {}, monitorCap: true, may: () => true };
+  ctx.__slot = flowSlot;
+  vm.runInContext("ovFlowLast = { inp: __inp, pctx: { serverId: 'a', registry: true, monitorCap: true }, slot: __slot, gen: serverGen }; clear(__slot); __slot.append(flowSection(ovFlowModel(__inp), ovFlowLast.pctx));", ctx);
+};
+const see = (card) => ({ card: card.textContent, flow: flowSlot.textContent, asked });
+(async () => {
+  const out = { fill: {}, refresh: {} };
+  // The page's own fill.
+  paintFlow(idle());
+  const f = { covSlot: new FakeEl("div") };
+  const c = idle();
+  vm.runInContext("fillOvCoverage", ctx)(f, c);
+  await settle();
+  out.fill.before = see(f.covSlot);
+  release(); await settle();
+  out.fill.after = see(f.covSlot);
+
+  // The card's refresh button, over a drawing that said quiet.
+  asked = 0;
+  paintFlow({ ...idle(), capture: { server_id: "a", state: "up_to_date" } });
+  const card = new FakeEl("section"); card.className = "cov-card"; card.isConnected = true;
+  const holder = { shown: card };
+  const track = (n) => { n.isConnected = true; const rw = n.replaceWith; n.replaceWith = function (x) { holder.shown = x; track(x); }; return n; };
+  track(card);
+  const btn = new FakeEl("button"); btn.closest = () => card; btn.disabled = false;
+  const done = vm.runInContext("refreshCovCard", ctx)(btn);
+  await settle();
+  out.refresh.before = see(holder.shown);
+  release(); await done; await settle();
+  out.refresh.after = see(holder.shown);
+
+  // A drawing that is another server's is left alone.
+  paintFlow(idle());
+  vm.runInContext("serverGen++;", ctx);
+  vm.runInContext("ovFlowRepaint", ctx)({ ...idle(), capture: { server_id: "a", state: "up_to_date" } });
+  out.otherServerFlow = flowSlot.textContent;
+  console.log(JSON.stringify(out));
+})();
+`, &got)
+
+	quiet := func(s string) bool { return strings.Contains(s, "quiet") }
+	for name, s := range map[string]struct{ Before, After step }{"fill": got.Fill, "refresh": got.Refresh} {
+		// Before the source answers: drawn, with the sentence it had, and
+		// no word on the box, whatever the drawing said a moment ago.
+		if !strings.Contains(s.Before.Card, "cannot tell which") || strings.Contains(s.Before.Card, "Up to date") {
+			t.Errorf("%s, before the answer: card = %q", name, s.Before.Card)
+		}
+		if s.Before.Asked != 1 {
+			t.Errorf("%s: asked %d time(s) once the card was drawn, want 1", name, s.Before.Asked)
+		}
+		if name == "refresh" && quiet(s.Before.Flow) {
+			t.Errorf("%s, before the answer: the card says it cannot tell and the drawing says quiet: %q", name, s.Before.Flow)
+		}
+		// After: both say it.
+		if !strings.Contains(s.After.Card, "Up to date. No changes since 11:30:27 (1h 14m ago).") || strings.Contains(s.After.Card, "cannot tell which") {
+			t.Errorf("%s, after the answer: card = %q", name, s.After.Card)
+		}
+		if !quiet(s.After.Flow) {
+			t.Errorf("%s, after the answer: the drawing was not painted again: %q", name, s.After.Flow)
+		}
+		if s.After.Asked != 1 {
+			t.Errorf("%s: asked %d time(s) in all, want 1", name, s.After.Asked)
+		}
+	}
+	if quiet(got.OtherServerFlow) {
+		t.Errorf("a drawing painted for another server was painted over: %q", got.OtherServerFlow)
+	}
+}
+
+// The whole path on the page, through the real loadOvFlow and the real
+// fillOvCoverage: the drawing is painted with no word on the box, the
+// source answers later, and the drawing that loadOvFlow painted is the one
+// painted again.
+func TestFlowPaintedByThePageIsPaintedAgainOnTheAnswer(t *testing.T) {
+	var got struct {
+		Before, After string
+		Asked         []string
+	}
+	runCaptureJS(t, `
+console.error = () => {};
+const asked = [];
+let release = null;
+const answers = { "/api/servers": { servers: [{ id: "a", kind: "registry", has_source: true, source_host: "db1", monitor_state: "running" }] }, "/api/baselines": { configured: true, snapshots: [] }, "/api/uncaptured-tables": {}, "/api/servers/a/schema-snapshot": { schema_snapshot: { unavailable: true, status: 0 } } };
+ctx.__asked = asked; ctx.__answers = answers;
+ctx.__capture = () => new Promise((r) => { release = () => r({ server_id: "a", state: "up_to_date" }); });
+vm.runInContext("apiWithin = (p) => { __asked.push(p); return p === '/api/capture-status' ? __capture() : Promise.resolve(__answers[p] || {}); };", ctx);
+vm.runInContext("serversEmpty = false; currentServer = 'a'; defaultServerId = 'a'; capsCache = { monitor: true, permissions: {} };", ctx);
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
+(async () => {
+  const f = { flowSlot: new FakeEl("div"), covSlot: new FakeEl("div") };
+  f.flowSlot.isConnected = true;
+  const coverage = { delta_from: "2026-09-22 10:00:00", delta_to: "2026-09-22 11:30:27", continuity: "ok", freshness: "idle", lag_seconds: 4445 };
+  vm.runInContext("fillOvCoverage", ctx)(f, coverage);
+  await vm.runInContext("loadOvFlow", ctx)(f, () => true, Promise.resolve(coverage));
+  await settle();
+  const before = f.flowSlot.textContent;
+  release(); await settle();
+  console.log(JSON.stringify({ before, after: f.flowSlot.textContent, asked: asked.filter((p) => p === "/api/capture-status") }));
+})();
+`, &got)
+	if strings.Contains(got.Before, "quiet") || !strings.Contains(got.Before, "connected") {
+		t.Errorf("before the answer the drawing says: %q", got.Before)
+	}
+	if !strings.Contains(got.After, "quiet") {
+		t.Errorf("after the answer the drawing was not painted again: %q", got.After)
+	}
+	if len(got.Asked) != 1 {
+		t.Errorf("the card and the drawing asked %d time(s) for one coverage read, want 1", len(got.Asked))
+	}
+}

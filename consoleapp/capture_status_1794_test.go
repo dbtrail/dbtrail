@@ -568,3 +568,30 @@ func TestCaptureStatus_watchWiresTheReporter(t *testing.T) {
 		t.Fatalf("CaptureStatus = %#v, want the reporter with the daemon's source", cfg.CaptureStatus)
 	}
 }
+
+// A read that panics is an answer, unknown, and the next load reads again:
+// the daemon that draws this page is the one that captures.
+func TestCaptureStatus_aPanicIsUnknownAndHoldsNothing(t *testing.T) {
+	var reads int
+	c, clock := captureReporter("", func(context.Context, string, string) captureProbeResult {
+		reads++
+		if reads == 1 {
+			panic("boom")
+		}
+		return captureProbeResult{verdict: console.CaptureCaughtUp, captured: uuidB + ":1-10", executed: uuidB + ":1-10"}
+	})
+	if got := c.CaptureStatus(context.Background(), captureEntryA); got.State != console.CaptureStateUnknown || got.Detail == "" {
+		t.Fatalf("a read that panicked: %+v", got)
+	}
+	*clock = clock.Add(captureStatusTTL)
+	done := make(chan console.CaptureStatus, 1)
+	go func() { done <- c.CaptureStatus(context.Background(), captureEntryA) }()
+	select {
+	case got := <-done:
+		if got.State != console.CaptureStateUpToDate || reads != 2 {
+			t.Fatalf("the load after it: %+v, %d reads", got, reads)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the load after a panic never returned: the read in flight was never released")
+	}
+}

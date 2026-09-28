@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -151,7 +152,16 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 
 	// Detached from the request: a tab that closes mid-read must not leave
 	// "the request was cancelled" behind as the state of the capture.
-	r := boundedCaptureProbe(context.WithoutCancel(ctx), windowProbeTimeout, func(ctx context.Context) captureProbeResult {
+	r := boundedCaptureProbe(context.WithoutCancel(ctx), windowProbeTimeout, func(ctx context.Context) (r captureProbeResult) {
+		// This process is the capture too, and the read runs on a goroutine
+		// of its own: a panic here would end the daemon over a line on a
+		// page. It is an answer instead, unknown like any read that failed.
+		defer func() {
+			if p := recover(); p != nil {
+				slog.Error("capture status: the read of the source panicked", "server", e.Name, "id", e.ID, "panic", p, "stack", string(debug.Stack()))
+				r = captureProbeResult{detail: "the source could not be read", cause: "panic"}
+			}
+		}()
 		return read(ctx, e.DSN, source)
 	})
 	at := now()
