@@ -3,7 +3,9 @@ package consoleapp
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"sync"
@@ -493,5 +495,65 @@ func TestHeadFromState(t *testing.T) {
 				src.Close()
 			}
 		})
+	}
+}
+
+// The wiring, end to end: the web interface's route, the id it gives the
+// daemon's own index, and the reporter that must recognise that id as the
+// capture started with --source-dsn. With the two ids apart, the boot
+// capture is never asked about.
+func TestCaptureStatus_routeReachesTheBootSource(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	reg, err := console.LoadRegistry(t.TempDir() + "/console-servers.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asked []string
+	rep, _ := captureReporter("u:p@tcp(boot-src:3306)/", func(_ context.Context, idx, src string) captureProbeResult {
+		asked = append(asked, idx+" <- "+src)
+		return captureProbeResult{verdict: console.CaptureCaughtUp}
+	})
+	srv, err := console.New(console.Config{
+		Listen: "127.0.0.1:8090", Token: "t", Registry: reg, CaptureStatus: rep,
+		DB: db, DBName: "binlog_index", BootDSN: "cli:pw@tcp(127.0.0.1:3306)/binlog_index",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "http://127.0.0.1:8090/api/capture-status", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	srv.Handler().ServeHTTP(rec, req)
+	var got console.CaptureStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("code %d, body %q: %v", rec.Code, rec.Body.String(), err)
+	}
+	if got.State != console.CaptureStateUpToDate || got.ServerID != bootCaptureServerID {
+		t.Fatalf("got %+v", got)
+	}
+	if len(asked) != 1 || asked[0] != "cli:pw@tcp(127.0.0.1:3306)/binlog_index <- u:p@tcp(boot-src:3306)/" {
+		t.Fatalf("asked %v", asked)
+	}
+}
+
+// Both watch entry points build their console from upConsoleConfig: the
+// reporter is wired there, with the daemon's own source.
+func TestCaptureStatus_watchWiresTheReporter(t *testing.T) {
+	old := upSourceDSN
+	t.Cleanup(func() { upSourceDSN = old })
+	upSourceDSN = "u:p@tcp(boot-src:3306)/"
+	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/binlog_index", consoleOpts{Listen: "127.0.0.1:8090", Token: "tok"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, ok := cfg.CaptureStatus.(*captureStatusReporter)
+	if !ok || rep == nil || rep.bootSourceDSN != upSourceDSN {
+		t.Fatalf("CaptureStatus = %#v, want the reporter with the daemon's source", cfg.CaptureStatus)
 	}
 }

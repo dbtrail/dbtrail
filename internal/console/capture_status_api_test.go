@@ -152,3 +152,31 @@ func TestCaptureStatus_routeIsClassified(t *testing.T) {
 		t.Errorf("permForRoute = (%q,%v), want (%q,true)", p, ok, ext.PermStatusRead)
 	}
 }
+
+// The daemon's own index is asked about under the boot id, with its index
+// DSN: the reporter knows which source that capture reads.
+func TestCaptureStatus_theDaemonsOwnIndex(t *testing.T) {
+	clearStores(t)
+	db, _, closeFn := newSQLMock(t)
+	defer closeFn()
+	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &captureStatusStub{answers: map[string]CaptureStatus{bootServerID: {State: CaptureStateUpToDate}}}
+	srv, err := New(Config{
+		Listen: "127.0.0.1:8090", Token: "t", Registry: reg, CaptureStatus: stub,
+		DB: db, DBName: "binlog_index", BootDSN: "cli:pw@tcp(127.0.0.1:3306)/binlog_index",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"", bootServerID} {
+		if code, got := captureStatusGet(t, srv, id); code != 200 || got.State != CaptureStateUpToDate || got.ServerID != bootServerID {
+			t.Errorf("header %q: code %d, got %+v", id, code, got)
+		}
+	}
+	if len(stub.asked) != 2 || stub.asked[0].DSN != "cli:pw@tcp(127.0.0.1:3306)/binlog_index" || stub.asked[0].SourceDSN != "" {
+		t.Errorf("asked about %+v", stub.asked)
+	}
+}
