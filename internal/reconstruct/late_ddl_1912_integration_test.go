@@ -133,6 +133,13 @@ func TestReconstructParquet_aTruncateIndexedLateIsStillReported(t *testing.T) {
 // snapshot of it under root taken at base and anchored at binlog.000003:500.
 func lateDDLIndex(t *testing.T) (db *sql.DB, dsn, root string, base time.Time) {
 	t.Helper()
+	return lateDDLIndexAt(t, "binlog.000003", "500")
+}
+
+// lateDDLIndexAt is lateDDLIndex with the snapshot's recorded position given;
+// an empty file records none, as older snapshots did.
+func lateDDLIndexAt(t *testing.T, file, pos string) (db *sql.DB, dsn, root string, base time.Time) {
+	t.Helper()
 	db, dbName := testutil.CreateTestDB(t)
 	if err := indexer.CreateIndexTables(context.Background(), db, 48, false, nil); err != nil {
 		t.Fatalf("CreateIndexTables: %v", err)
@@ -149,15 +156,17 @@ func lateDDLIndex(t *testing.T) (db *sql.DB, dsn, root string, base time.Time) {
 	if err != nil {
 		t.Fatalf("ParseSchemaText: %v", err)
 	}
+	meta := map[string]string{
+		baseline.MetaKeyCreateTableSQL: ordersCreateSQL,
+		"bintrail.snapshot_timestamp":  base.Format(time.RFC3339),
+	}
+	if file != "" {
+		meta[baseline.MetaKeyBinlogFile], meta[baseline.MetaKeyBinlogPos] = file, pos
+	}
 	w, err := baseline.NewWriter(filepath.Join(snapDir, "shop", "orders.parquet"), cols, baseline.WriterConfig{
 		Compression:  "none",
 		RowGroupSize: 100,
-		Metadata: map[string]string{
-			baseline.MetaKeyCreateTableSQL: ordersCreateSQL,
-			baseline.MetaKeyBinlogFile:     "binlog.000003",
-			baseline.MetaKeyBinlogPos:      "500",
-			"bintrail.snapshot_timestamp":  base.Format(time.RFC3339),
-		},
+		Metadata:     meta,
 	})
 	if err != nil {
 		t.Fatalf("baseline.NewWriter: %v", err)
@@ -307,5 +316,24 @@ func TestReconstructParquet_aTruncateStampedPastTheTargetInsideTheCut(t *testing
 	err := foldOrders(dsn, root, root, reconstruct.OutputFormatParquet, base.Add(30*time.Second))
 	if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
 		t.Fatalf("err = %v, want ErrDestructiveDDL", err)
+	}
+}
+
+// A snapshot that recorded no binlog position places nothing by position: an
+// old TRUNCATE must not refuse every restore from it. The check is then the
+// one by time, which still refuses a statement inside the window.
+func TestReconstructDump_aSnapshotWithNoPositionLooksByTime(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dsn, root, base := lateDDLIndexAt(t, "", "")
+
+	recordTruncate(t, db, "binlog.000002", 900, base.Add(-10*time.Minute))
+	rowChange(t, db, "binlog.000003", 600, 700, base.Add(10*time.Second), "1", `{"id":1,"status":"A"}`)
+	if err := foldOrders(dsn, root, t.TempDir(), reconstruct.OutputFormatMydumper, base.Add(30*time.Second)); err != nil {
+		t.Fatalf("a TRUNCATE from before the snapshot's time refused the restore: %v", err)
+	}
+	recordTruncate(t, db, "binlog.000003", 750, base.Add(20*time.Second))
+	err := foldOrders(dsn, root, t.TempDir(), reconstruct.OutputFormatMydumper, base.Add(30*time.Second))
+	if !errors.Is(err, reconstruct.ErrDestructiveDDL) {
+		t.Fatalf("err = %v, want ErrDestructiveDDL: the TRUNCATE ran inside the window", err)
 	}
 }

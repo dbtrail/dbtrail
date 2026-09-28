@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -89,6 +90,30 @@ func TestDDLWindow_place(t *testing.T) {
 				AfterSince: tt.afterSince, AtOrBeforeUntil: tt.beforeUntil}
 			if got := w.place(d); got != tt.want {
 				t.Errorf("place = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// A footer with no usable position gives no anchor. One read as a position
+// would place every statement ever recorded after it.
+func TestAnchorOf(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		file string
+		pos  int64
+		want *query.BinlogPos
+	}{
+		{"file and position", "binlog.000003", 500, &query.BinlogPos{File: "binlog.000003", Pos: 500}},
+		{"nothing recorded", "", 0, nil},
+		{"a file and no position", "binlog.000003", 0, nil},
+		{"a position and no file", "", 500, nil},
+		{"a negative position", "binlog.000003", -1, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AnchorOf(baseline.DumpMetadata{BinlogFile: tt.file, BinlogPos: tt.pos})
+			if (got == nil) != (tt.want == nil) || (got != nil && *got != *tt.want) {
+				t.Errorf("AnchorOf = %v, want %v", got, tt.want)
 			}
 		})
 	}
