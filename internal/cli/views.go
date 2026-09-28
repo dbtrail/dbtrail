@@ -92,19 +92,19 @@ view's globs also keep picking up newly rotated partitions on their own.)
 
 Examples:
   # One view per table, as of the newest baseline snapshot
-  bintrail views --index-dsn "..." --baseline-dir /data/baselines --out views.sql
+  bintrail views --index-dsn "..." --baseline-dir /data/baselines --output views.sql
 
   # Add the change log across every archive source
   bintrail views --index-dsn "..." --baseline-dir /data/baselines \
-    --include-events --out views.sql
+    --include-events --output views.sql
 
   # Open an interactive DuckDB with the views and the S3 secret loaded
-  bintrail views --index-dsn "..." --baseline-dir /data/baselines --out views.sql
+  bintrail views --index-dsn "..." --baseline-dir /data/baselines --output views.sql
   duckdb -init views.sql lake.db
 
   # Without an index: name the archive and baseline locations directly
   bintrail views --archive-s3 s3://bucket/archives/ --bintrail-id <uuid> \
-    --baseline-s3 s3://bucket/baselines/ --out views.sql`,
+    --baseline-s3 s3://bucket/baselines/ --output views.sql`,
 	RunE: runViews,
 }
 
@@ -135,7 +135,7 @@ func init() {
 	viewsCmd.Flags().BoolVar(&vNoBaselines, "no-baselines", false, "Skip the baseline state views (requires --include-events, or the file would define nothing)")
 	viewsCmd.Flags().BoolVar(&vIncludeEvents, "include-events", false, "Add the events view over every archived binlog event. Left out by default because defining it opens one Parquet footer per archived file before it returns a row, a cost that grows with the archive and is paid by every reader of the file, including one who only wanted their tables")
 	viewsCmd.Flags().BoolVar(&vIncludeLive, "include-live", false, "Add a live leg to the events view so it also covers events the index holds but rotation has not archived yet. Requires --index-dsn. The leg queries the index server directly, and the view cannot push a filter down to it, so every query is a full scan of binlog_events that competes with capture on that server: for a narrow read query the attached binlog_events directly, or point --index-dsn at a read replica of the index. The generated file carries the index host, port, database and user, and never its password: fill that in before running")
-	viewsCmd.Flags().StringVar(&vOut, "out", "views.sql", "Output file, or - for stdout")
+	AddOutputFlag(viewsCmd, &vOut, "views.sql", "Output file, or - for stdout", OutAlias)
 }
 
 func runViews(cmd *cobra.Command, _ []string) error {
@@ -442,7 +442,7 @@ func resolveBaselineDecimals(ctx context.Context, in *views.Input) {
 	in.ApplyDecimals(decimals)
 }
 
-// writeViewsOutput sends the generated SQL to --out, or to stdout for "-".
+// writeViewsOutput sends the generated SQL to --output, or to stdout for "-".
 //
 // A file is written whole via os.WriteFile rather than streamed: the generator
 // already produced the complete text, and a partial file left behind by a

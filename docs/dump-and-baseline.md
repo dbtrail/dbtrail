@@ -38,7 +38,7 @@ To pin a specific mydumper Docker image version:
 bintrail dump \
   --mydumper-image mydumper/mydumper:v1.0.3-1 \
   --source-dsn "user:pass@tcp(source-db:3306)/" \
-  --output-dir /tmp/mydumper-output
+  --output /tmp/mydumper-output
 ```
 
 <details>
@@ -119,7 +119,7 @@ Step 2: bintrail baseline  →  Parquet files (one per table)
 ```sh
 bintrail dump \
   --source-dsn "user:pass@tcp(source-db:3306)/" \
-  --output-dir /tmp/mydumper-output
+  --output /tmp/mydumper-output
 ```
 
 This dumps **every accessible schema** into `/tmp/mydumper-output` — bare `bintrail dump` applies no schema filter, so mydumper also tries `mysql`, `sys`, and `performance_schema`. Pass `--schemas mydb,otherdb` to scope it to your data: a least-privilege capture user (no `SHOW VIEW` on the `sys` views) **needs** that filter or the dump fails loudly. (The bundled Compose `baseline` profile excludes system schemas automatically; the bare CLI does not.)
@@ -129,7 +129,7 @@ This dumps **every accessible schema** into `/tmp/mydumper-output` — bare `bin
 | Flag | Default | Description |
 |---|---|---|
 | `--source-dsn` | *(required)* | DSN for the source MySQL server |
-| `--output-dir` | *(required)* | Directory for mydumper output. Never blindly deleted: a non-empty directory that is not a recognizable prior dump is refused; a prior dump is moved aside and restored if the new dump fails (see [Output directory behavior](#output-directory-behavior)) |
+| `--output` | *(required)* | Directory for mydumper output. Never blindly deleted: a non-empty directory that is not a recognizable prior dump is refused; a prior dump is moved aside and restored if the new dump fails (see [Output directory behavior](#output-directory-behavior)). The older name `--output-dir` keeps working |
 | `--schemas` | *(all)* | Comma-separated schema filter (e.g. `mydb,otherdb`) |
 | `--tables` | *(all)* | Comma-separated table filter (e.g. `mydb.orders,mydb.items`) |
 | `--mydumper-path` | `mydumper` | Path to the mydumper binary. When set, skips Docker fallback. |
@@ -155,13 +155,13 @@ With `--encrypt`, every dump file is piped through `openssl enc -aes-256-cbc -pb
 # Dump only the 'mydb' schema
 bintrail dump \
   --source-dsn "user:pass@tcp(source-db:3306)/" \
-  --output-dir /tmp/mydumper-output \
+  --output /tmp/mydumper-output \
   --schemas mydb
 
 # Dump specific tables
 bintrail dump \
   --source-dsn "user:pass@tcp(source-db:3306)/" \
-  --output-dir /tmp/mydumper-output \
+  --output /tmp/mydumper-output \
   --tables mydb.orders,mydb.customers
 ```
 
@@ -243,19 +243,19 @@ Only one `bintrail dump` can run at a time. A lockfile at `$TMPDIR/bintrail-dump
 
 ### Output directory behavior
 
-`bintrail dump` never blindly deletes the `--output-dir`:
+`bintrail dump` never blindly deletes the `--output`:
 
 - **Absent or empty** — used as-is (mydumper creates it if needed).
 - **Non-empty and recognizable as a prior dump** (contains a `metadata` or `metadata.partial` file, or the `bintrail_dump_started_at_utc` marker) — moved aside to a unique sibling `<dir>.old-<pid>-<nanos>` before the new dump starts. The backup is deleted only after the new dump **succeeds**; if the dump fails, the previous dump is restored in place.
 - **Non-empty and anything else** — the dump is **refused**:
 
   ```
-  --output-dir "<dir>" is not empty and does not look like a prior bintrail/mydumper dump (no "metadata" marker); refusing to delete it. Remove it yourself or point --output-dir elsewhere
+  --output "<dir>" is not empty and does not look like a prior bintrail/mydumper dump (no "metadata" marker); refusing to delete it. Remove it yourself or point --output elsewhere
   ```
 
-  This protects against a typo'd `--output-dir` (or a stray `BINTRAIL_OUTPUT_DIR` picked up from an env file) wiping an arbitrary directory — including baselines that `reconstruct`/`verify` depend on.
+  This protects against a typo'd `--output` (or a stray `BINTRAIL_OUTPUT_DIR` picked up from an env file) wiping an arbitrary directory, including baselines that `reconstruct`/`verify` depend on.
 
-Source connectivity is also validated **before** the output directory is touched (`cannot connect to source; refusing to touch --output-dir ...`), so a dump that fails to connect never disturbs the previous dump.
+Source connectivity is also validated **before** the output directory is touched (`cannot connect to source; refusing to touch --output ...`), so a dump that fails to connect never disturbs the previous dump.
 
 ---
 
@@ -274,7 +274,7 @@ bintrail baseline \
 | Flag | Default | Description |
 |---|---|---|
 | `--input` | *(required)* | mydumper output directory (from step 1) |
-| `--output` | *(required)* | Parquet output base directory |
+| `--output` | *(required)* | Parquet output base directory. `--output-dir` is accepted too |
 | `--timestamp` | *(from mydumper metadata)* | Override the snapshot timestamp (ISO 8601) |
 | `--tables` | *(all)* | Comma-separated `db.table` filter |
 | `--compression` | `zstd` | Parquet compression: `zstd`, `snappy`, `gzip`, `none` |
@@ -431,7 +431,7 @@ bintrail baseline refresh --index-dsn "..." \
 bintrail upload --source /data/baselines --destination s3://bucket/baselines/
 ```
 
-The same thing is available a level down as `bintrail reconstruct --output-format parquet --output-dir <baselines root>`, which is what `refresh` runs — use it when you want to name every table and instant yourself.
+The same thing is available a level down as `bintrail reconstruct --output-format parquet --output <baselines root>`, which is what `refresh` runs. Use it when you want to name every table and instant yourself.
 
 **Publication is all-or-nothing.** If any table refuses, nothing is published and the exit status is non-zero, with a per-table verdict:
 
@@ -565,7 +565,7 @@ Run a dump once when you first set up DBTrail, before starting to index binlog e
 # 1. Dump
 bintrail dump \
   --source-dsn "user:pass@tcp(source-db:3306)/" \
-  --output-dir /tmp/mydumper-output
+  --output /tmp/mydumper-output
 
 # 2. Convert to Parquet
 bintrail baseline \
@@ -590,7 +590,7 @@ For audit or compliance purposes, you may want periodic full baselines. A weekly
 # Weekly baseline dump at 2am Sunday
 0 2 * * 0 root bintrail dump \
   --source-dsn "$SOURCE_DSN" \
-  --output-dir /tmp/mydumper-weekly \
+  --output /tmp/mydumper-weekly \
   && bintrail baseline \
   --input  /tmp/mydumper-weekly \
   --output /data/baselines \
@@ -608,7 +608,7 @@ Trigger a dump at any time:
 ```sh
 bintrail dump \
   --source-dsn "user:pass@tcp(source-db:3306)/" \
-  --output-dir /tmp/mydumper-adhoc \
+  --output /tmp/mydumper-adhoc \
   --schemas mydb
 
 bintrail baseline \
@@ -640,12 +640,12 @@ The dump frequency depends on your recovery and audit requirements. DBTrail's bi
 | `mydumper not found at "/custom/path"` | Explicit `--mydumper-path` points to a missing binary | Verify the path is correct and the binary is executable |
 | `found mydumper on $PATH but it appears to be a shell script wrapper` | A shell script named `mydumper` is on your PATH (e.g. a Docker wrapper) | Remove the wrapper script — DBTrail handles Docker invocation automatically. Or use `--mydumper-path` to point to the real binary. |
 | `another dump is already running` | A previous dump is still running or crashed | Wait for it to finish, or check if the PID in `$TMPDIR/bintrail-dump.lock` is still alive. Stale locks from crashed processes are cleaned up automatically on the next run. |
-| `--output-dir ... does not look like a prior bintrail/mydumper dump ... refusing to delete it` | The output directory is non-empty and carries no `metadata`/`metadata.partial`/`bintrail_dump_started_at_utc` marker — DBTrail refuses to delete unrecognized content | Point `--output-dir` at an empty or dedicated dump directory, or remove the existing contents yourself if you are sure they are disposable. |
+| `--output ... does not look like a prior bintrail/mydumper dump ... refusing to delete it` | The output directory is non-empty and carries no `metadata`/`metadata.partial`/`bintrail_dump_started_at_utc` marker, and DBTrail refuses to delete unrecognized content | Point `--output` at an empty or dedicated dump directory, or remove the existing contents yourself if you are sure they are disposable. |
 | `mydumper failed: exit status 2` | mydumper itself encountered an error (wrong credentials, unreachable host, etc.) | Check mydumper's stderr output for details. Verify the `--source-dsn` is correct. |
 | Docker: `permission denied` on `/var/run/docker.sock` | Current user is not in the `docker` group | Run `sudo usermod -aG docker $USER` and log out/in, or use `sudo bintrail dump ...` |
 | Docker: `Cannot connect to the Docker daemon` | Docker daemon is not running | Start Docker: `sudo systemctl start docker` (Linux) or open Docker Desktop (macOS) |
 | Docker: mydumper cannot reach MySQL on localhost | On macOS/Windows, `--network host` does not work as on Linux | Use `host.docker.internal` instead of `localhost` in `--source-dsn` (e.g. `user:pass@tcp(host.docker.internal:3306)/`) |
-| Docker: volume mount permission errors | Docker cannot write to the `--output-dir` path | Ensure the output directory's parent exists and is writable. On SELinux systems, add `:z` to the volume mount or use `--security-opt label=disable`. |
+| Docker: volume mount permission errors | Docker cannot write to the `--output` path | Ensure the output directory's parent exists and is writable. On SELinux systems, add `:z` to the volume mount or use `--security-opt label=disable`. |
 | Docker: dump files owned by root | Older DBTrail versions ran the container as root | Upgrade — DBTrail now passes `--user <uid>:<gid>` to `docker run` so dump files are owned by the invoking user. |
 | Baseline produces no files | mydumper output directory is empty or has no table data files | Verify the dump ran successfully and the `--schemas`/`--tables` filters match existing tables. |
 | `--timestamp: expected ISO 8601 format` | Invalid timestamp override format | Use `2026-03-02T14:30:00Z` or `2026-03-02 14:30:00` format. |

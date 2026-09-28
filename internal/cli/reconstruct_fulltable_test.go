@@ -165,9 +165,10 @@ func TestRunReconstructFullTable_requiresOutputDir(t *testing.T) {
 	recOutputDir = ""
 	err := runReconstruct(reconstructCmd, nil)
 	if err == nil {
-		t.Fatal("expected error when --output-dir is empty")
+		t.Fatal("expected error when --output is empty")
 	}
-	if !strings.Contains(err.Error(), "--output-dir") {
+	// The documented name, not the older --output-dir (#1793).
+	if err.Error() != "--output is required in full-table mode" {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

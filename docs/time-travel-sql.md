@@ -115,7 +115,7 @@ and `BINTRAIL_SERVER_ID` from the environment (or `.bintrail.env`):
 
 ```sh
 export BINTRAIL_SOURCE_DSN='user:pass@tcp(your-db:3306)/yourdb' BINTRAIL_SERVER_ID=prod-1
-bintrail init-shim --out shim.yaml          # then fill in mysql_user + mysql_password
+bintrail init-shim --output shim.yaml          # then fill in mysql_user + mysql_password
 bintrail shim --shim-config shim.yaml \
   --index-dsn 'user:pass@tcp(127.0.0.1:3306)/bintrail_index'
 ```
@@ -162,7 +162,7 @@ Before starting, you need:
 
 ```sh
 cd /etc/bintrail   # or wherever your .bintrail.env lives
-bintrail init-shim --out shim.yaml
+bintrail init-shim --output shim.yaml
 ```
 
 The generated file has one tenant block populated from your `.bintrail.env`, plus two TODO lines for the application credentials:
@@ -276,7 +276,7 @@ After install, ProxySQL listens on:
 `bintrail proxysql-config` reads `BINTRAIL_SOURCE_DSN` from `.bintrail.env` and `shim.yaml` from the previous step and emits a deterministic SQL script:
 
 ```sh
-bintrail proxysql-config --out proxysql-setup.sql
+bintrail proxysql-config --output proxysql-setup.sql
 ```
 
 The script tells you exactly how to apply it:
@@ -498,7 +498,7 @@ ProxySQL is rejecting your credentials. Confirm your app is connecting with the 
 
 ```sh
 rm -f proxysql-setup.sql
-bintrail proxysql-config --out proxysql-setup.sql
+bintrail proxysql-config --output proxysql-setup.sql
 mysql -u admin -p -h 127.0.0.1 -P 6032 < proxysql-setup.sql
 ```
 

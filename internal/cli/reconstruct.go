@@ -72,7 +72,7 @@ By default, a coverage gap (an hour rotated out of MySQL with no archive)
 aborts the reconstruction; pass --allow-gaps to proceed with a warning.
 
 Full-table mode reconstructs entire tables at a target point in time. Use
---tables schema.table,... to select the tables and --output-dir for the
+--tables schema.table,... to select the tables and --output for the
 destination. Two output formats:
 
   --output-format mydumper   a mydumper-compatible dump directory (schema
@@ -80,8 +80,8 @@ destination. Two output formats:
                              restorable with a plain mysql client.
   --output-format parquet    a baseline snapshot: the same artifact
                              "bintrail baseline" produces, written under
-                             --output-dir/<timestamp>/ and discoverable as
-                             the newest baseline. --output-dir is the
+                             --output/<timestamp>/ and discoverable as
+                             the newest baseline. --output is the
                              BASELINES ROOT here, not the file destination.
                              The snapshot carries the exact binlog
                              coordinate where the next reconstruct resumes,
@@ -96,12 +96,12 @@ Examples:
   bintrail reconstruct --index-dsn "..." \
     --tables mydb.orders,mydb.users --baseline-dir /data/baselines \
     --at "2026-04-01 15:30:00" \
-    --output-format mydumper --output-dir ./dump-at-1530
+    --output-format mydumper --output ./dump-at-1530
 
   # Refresh the baselines from the index itself: no mydumper, no source
   bintrail reconstruct --index-dsn "..." \
     --tables mydb.orders,mydb.users --baseline-dir /data/baselines \
-    --output-format parquet --output-dir /data/baselines
+    --output-format parquet --output /data/baselines
 
   # State at a past timestamp
   bintrail reconstruct --index-dsn "..." --schema mydb --table orders \
@@ -171,7 +171,7 @@ func init() {
 	// Full-table mydumper mode (#187).
 	reconstructCmd.Flags().StringVar(&recOutputFormat, "output-format", "", "Output format for full-table mode: 'mydumper' for a mydumper-compatible dump directory, 'parquet' for a discoverable baseline snapshot (default: single-row mode)")
 	reconstructCmd.Flags().BoolVar(&recCarryForward, "carry-forward-unchanged", false, "Off by default. With --output-format parquet, publish a table that had no changes by reusing the previous snapshot's file (hard link where possible) instead of writing it again")
-	reconstructCmd.Flags().StringVar(&recOutputDir, "output-dir", "", "Output directory for full-table mode (created if missing); with --output-format=parquet this is the baselines root and the snapshot lands in a <timestamp>/ subdirectory")
+	AddOutputFlag(reconstructCmd, &recOutputDir, "", "Output directory for full-table mode (created if missing); with --output-format=parquet this is the baselines root and the snapshot lands in a <timestamp>/ subdirectory", OutputDirAlias)
 	reconstructCmd.Flags().StringVar(&recTables, "tables", "", "Comma-separated schema.table list for full-table mode (e.g. mydb.orders,mydb.users)")
 	reconstructCmd.Flags().StringVar(&recChunkSize, "chunk-size", "256MB", "Max size per SQL chunk file in full-table mode (e.g. 64MB, 1GB)")
 	reconstructCmd.Flags().IntVar(&recParallelism, "parallelism", 0, "Max tables to reconstruct concurrently in full-table mode (default: runtime.NumCPU())")
@@ -702,7 +702,7 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 		return fmt.Errorf("--tables is required in full-table mode (e.g. --tables mydb.orders,mydb.users)")
 	}
 	if recOutputDir == "" {
-		return fmt.Errorf("--output-dir is required in full-table mode")
+		return fmt.Errorf("--output is required in full-table mode")
 	}
 	if recIndexDSN == "" {
 		return fmt.Errorf("--index-dsn is required in full-table mode")

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/config"
 	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
@@ -78,7 +79,7 @@ Reads BINTRAIL_SOURCE_DSN from .bintrail.env (host of the passthrough
 backend) and shim.yaml (tenant credentials). The SQL is idempotent;
 re-running it produces the same final state.
 
-Use --out - to write to stdout instead of a file.`,
+Use --output - to write to stdout instead of a file.`,
 	RunE: runProxySQLConfig,
 }
 
@@ -110,7 +111,7 @@ const (
 )
 
 func init() {
-	proxysqlConfigCmd.Flags().StringVar(&pcOut, "out", "proxysql-setup.sql", "Output path for the generated SQL (use - for stdout)")
+	cli.AddOutputFlag(proxysqlConfigCmd, &pcOut, "proxysql-setup.sql", "Output path for the generated SQL (use - for stdout)", cli.OutAlias)
 	proxysqlConfigCmd.Flags().StringVar(&pcShimConfig, "shim-config", "shim.yaml", "Path to the shim.yaml produced by 'bintrail init-shim' and edited by you")
 	proxysqlConfigCmd.Flags().UintVar(&pcMySQLPort, "mysql-port", 3306, "Fallback MySQL port if BINTRAIL_SOURCE_DSN does not include one")
 	proxysqlConfigCmd.Flags().UintVar(&pcShimPort, "shim-port", 3308, "Port the dbtrail-shim is listening on (matches shim.yaml's listen)")

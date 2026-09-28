@@ -30,7 +30,12 @@ func TestDumpCmd_registered(t *testing.T) {
 }
 
 func TestDumpCmd_requiredFlags(t *testing.T) {
-	for _, name := range []string{"source-dsn", "output-dir"} {
+	// The documented name carries the requirement; the older --output-dir
+	// satisfies it without being required itself (#1793).
+	if f := dumpCmd.Flag("output-dir"); f == nil || f.Annotations["cobra_annotation_bash_completion_one_required_flag"] != nil {
+		t.Error("--output-dir must stay registered and must not be required on its own")
+	}
+	for _, name := range []string{"source-dsn", "output"} {
 		flag := dumpCmd.Flag(name)
 		if flag == nil {
 			t.Fatalf("flag --%s not registered", name)
@@ -63,7 +68,7 @@ func TestDumpCmd_defaults(t *testing.T) {
 
 func TestDumpCmd_allFlagsRegistered(t *testing.T) {
 	for _, name := range []string{
-		"source-dsn", "output-dir", "schemas", "tables", "mydumper-path", "mydumper-image", "threads",
+		"source-dsn", "output", "output-dir", "schemas", "tables", "mydumper-path", "mydumper-image", "threads",
 	} {
 		if dumpCmd.Flag(name) == nil {
 			t.Errorf("flag --%s not registered on dumpCmd", name)
@@ -989,7 +994,7 @@ exit 0
 	}
 }
 
-// ─── #809: destructive-op guard on --output-dir ───────────────────────────────
+// ─── #809: destructive-op guard on --output ───────────────────────────────────
 
 // stubPingSource replaces the source connectivity check with a no-op for the
 // duration of the test, so end-to-end runDump tests using a fake mydumper do
@@ -1035,7 +1040,7 @@ func TestLooksLikeDumpDir(t *testing.T) {
 
 // TestPrepareDumpOutputDir_refusesNonDumpDir is the core #809 guard: a non-empty
 // directory that is not a recognizable prior dump must be REFUSED with nothing
-// deleted — protecting an arbitrary tree hit by a typo'd --output-dir.
+// deleted, protecting an arbitrary tree hit by a typo'd --output.
 func TestPrepareDumpOutputDir_refusesNonDumpDir(t *testing.T) {
 	dir := t.TempDir()
 	precious := filepath.Join(dir, "important.txt")

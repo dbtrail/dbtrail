@@ -100,7 +100,7 @@ func TestRunInitShim(t *testing.T) {
 		}
 	})
 
-	t.Run("--out - writes to stdout", func(t *testing.T) {
+	t.Run("--output - writes to stdout", func(t *testing.T) {
 		setShimEnv(t)
 		resetShimFlags()
 		isOut = "-"

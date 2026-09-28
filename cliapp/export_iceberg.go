@@ -113,7 +113,10 @@ func init() {
 	f.StringVar(&eiIndexDSN, "index-dsn", "", "DSN for the index MySQL database (required)")
 	f.StringVar(&eiBaselineDir, "baseline-dir", "", "Local directory of baseline snapshots (one of --baseline-dir/--baseline-s3 is required)")
 	f.StringVar(&eiBaselineS3, "baseline-s3", "", "S3 URL prefix of baseline snapshots")
-	f.StringVar(&eiWarehouse, "warehouse", "", "Local directory to write the Iceberg tables under (required)")
+	// --warehouse stays the documented name here: it is the Iceberg word for
+	// this place and BINTRAIL_ICEBERG_WAREHOUSE binds it. --output is accepted
+	// so the name learned on the other commands is not refused (#1793).
+	cli.AddPathFlag(exportIcebergCmd, &eiWarehouse, "warehouse", "", "Local directory to write the Iceberg tables under (required)", cli.OutputFlag, cli.OutputDirAlias)
 	f.StringVar(&eiTables, "tables", "", "Comma-separated schema.table list (default: every table in the newest baseline snapshot)")
 	f.StringVar(&eiAt, "at", "", "Point-in-time to export up to (default: now)")
 	f.IntVar(&eiFetchBatch, "fetch-batch-size", 0, "Event page size for the delta fold (0 = default)")
