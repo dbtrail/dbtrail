@@ -712,14 +712,7 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		out.cleanup = func() { os.RemoveAll(outputDir) }
 	}
 
-	stats, err := baseline.Run(s.ctx, baseline.Config{
-		InputDir:    dumpDir,
-		OutputDir:   outputDir,
-		Compression: "zstd",
-		Timestamp:   dumpStartedAt,
-		TableDeltas: s.tableDeltas,
-		WriterID:    snapshotWriterID(req),
-	})
+	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt))
 	if err != nil {
 		out.cleanup()
 		return dumpOutcome{}, fmt.Errorf("convert: %w", err)
@@ -727,6 +720,20 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	out.stats = stats
 	out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(dumpStartedAt))
 	return out, nil
+}
+
+// dumpBaselineConfig is how a dump of req's server is converted: split out
+// so what the conversion is told, the writer it signs with among it, is
+// checked without running mydumper.
+func (s *baselineSupervisor) dumpBaselineConfig(req console.BaselineRequest, dumpDir, outputDir string, at time.Time) baseline.Config {
+	return baseline.Config{
+		InputDir:    dumpDir,
+		OutputDir:   outputDir,
+		Compression: "zstd",
+		Timestamp:   at,
+		TableDeltas: s.tableDeltas,
+		WriterID:    snapshotWriterID(req),
+	}
 }
 
 // snapshotWriterID is the identity a full snapshot of req's server is signed
@@ -783,7 +790,6 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (baseline.St
 	if err != nil {
 		return baseline.Stats{}, 0, err
 	}
-	cfg.WriterID = snapshotWriterID(req)
 	pgStats, err := pgbaseline.Run(s.ctx, cfg)
 	if err != nil {
 		return baseline.Stats{}, 0, fmt.Errorf("pg baseline: %w", err)
@@ -807,8 +813,9 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (baseline.St
 // cmd/bintrail-pg's pgBaselineConfigFromFlags. The replication DSN is derived
 // from the stored query DSN (console.PGReplDSN — the one home for that
 // derivation), needed so pgbaseline can CREATE the slot when a user baselines
-// BEFORE the first monitor start; harmless if the slot already exists. Pure —
-// unit-testable without a live PG. The registry carries only a schema filter.
+// BEFORE the first monitor start; harmless if the slot already exists.
+// Unit-testable without a live PG: the one thing it reads is the writer the
+// snapshot is signed with, from the server's index, behind a seam. The registry carries only a schema filter.
 func pgBaselineConfig(req console.BaselineRequest, outputDir string) (pgbaseline.Config, error) {
 	replDSN, err := console.PGReplDSN(req.SourceDSN)
 	if err != nil {
@@ -822,6 +829,7 @@ func pgBaselineConfig(req console.BaselineRequest, outputDir string) (pgbaseline
 		Filters:     cliutil.BuildIndexFilters(strings.Join(req.Schemas, ","), ""),
 		OutputDir:   outputDir,
 		Compression: "zstd",
+		WriterID:    snapshotWriterID(req),
 	}, nil
 }
 

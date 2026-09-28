@@ -296,3 +296,19 @@ console.log(JSON.stringify(out));
 		}
 	}
 }
+
+// The row reads what the page loader kept from the listing. The scenes above
+// set that value themselves, so this pins the one line that sets it on the
+// real page, and that the row passes it on.
+func TestSnapshotsPage_handsTheListingToTheRow(t *testing.T) {
+	js := readAsset(t, "app.js")
+	for _, want := range []string{
+		`snapSharedWith = (baselines && baselines.shared_with) || [];`,
+		`shared: asSaved ? snapSharedWith : [] },`,
+		`for (const w of was.shared || []) say(sharedLocationWords(w), true);`,
+	} {
+		if strings.Count(js, want) != 1 {
+			t.Errorf("app.js holds %q %d times, want once", want, strings.Count(js, want))
+		}
+	}
+}
