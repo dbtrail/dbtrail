@@ -402,16 +402,22 @@ jobs:
     needs: changes
     runs-on: ubuntu-22.04
 
-    # Spans the supported MariaDB range (#622): 10.6 LTS (declared minimum)
-    # through 10.11 LTS and 11.4. fail-fast: false so a regression on one
-    # version still reports the others, matching the PostgreSQL matrix. No
-    # per-version server args are needed: the `mariadb` client name, the
+    # Spans the supported MariaDB range (#622): 10.11 LTS (declared minimum,
+    # 10.6 reached end of life on 2026-07-06) through the 11.4, 11.8 and 12.3
+    # LTS releases. fail-fast: false so a regression on one version still
+    # reports the others, matching the PostgreSQL matrix. No per-version
+    # server args are needed: the `mariadb` client name, the
     # MARIADB_ROOT_PASSWORD image env, gtid_strict_mode, log_bin_compress and
-    # the ON default of binlog_annotate_row_events all hold from 10.6 up.
+    # the ON default of binlog_annotate_row_events hold on 10.11 and 11.4;
+    # these legs are what prove it for 11.8 and 12.3. 12.3 runs with its
+    # default file-based binlog: the opt-in binlog_storage_engine=innodb is
+    # not supported (docs/mariadb.md). The minimum is also in
+    # internal/doctor/mariadb_version.go, and release.yaml must list the same
+    # versions (scripts/check-mariadb-matrix-lockstep.sh).
     strategy:
       fail-fast: false
       matrix:
-        mariadb: ["10.6", "10.11", "11.4"]
+        mariadb: ["10.11", "11.4", "11.8", "12.3"]
 
     env:
       BINTRAIL_TEST_DSN: "root:testroot@tcp(127.0.0.1:13306)"
@@ -422,8 +428,8 @@ jobs:
       # unset, so the same tests skip politely there.
       BINTRAIL_REQUIRE_MARIADB: "1"
       # Data-path PRs only (plus push/nightly/dispatch). Step-level, not
-      # job-level: this job has a matrix, and its three cells are required
-      # checks — see the note on the `changes` job.
+      # job-level: this job has a matrix, and its cells are required
+      # checks. See the note on the `changes` job.
       RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
 
     steps:
@@ -509,7 +515,9 @@ jobs:
             TestOne_MariaDB_declaredMySQLRefuses \
             TestOne_MariaDB_resumeOldMySQLDefaultCheckpoint \
             TestIntegrationMonitorRegistrySourceMariaDBDetected \
+            TestBuild_MariaDBVersionRow \
             TestRecoverRoundTrip_MariaDBTypes \
+            TestRecoverRoundTrip_MariaDBUUIDKey \
             TestRecoverRoundTrip_MariaDBJSONText \
             TestRecoverSequence_MariaDB; do
             grep -q -- "--- PASS: $name " /tmp/mariadb-it.out \
@@ -982,11 +990,14 @@ jobs:
 
   # ci.yml and release.yaml start and check the S3-compatible test store
   # through shared actions, and the image pin must match what the mirror
-  # workflow copies (#1884). This job fails when either drifts. No `changes`
-  # gate on purpose: a workflow-only PR is exactly the one that can drift.
+  # workflow copies (#1884). This job fails when either drifts, and when the
+  # two files test different MariaDB versions. No `changes` gate on purpose:
+  # a workflow-only PR is exactly the one that can drift.
   workflow-lockstep:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: S3 test store lockstep (ci.yml, release.yaml, mirror)
         run: bash scripts/check-s3-store-lockstep.sh
+      - name: MariaDB matrix lockstep (ci.yml, release.yaml)
+        run: bash scripts/check-mariadb-matrix-lockstep.sh

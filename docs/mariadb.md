@@ -123,11 +123,29 @@ silently become the write key for every server. Two caveats:
 
 | Version | Status |
 |---|---|
-| **MariaDB 10.6 LTS** | **Tested** in CI. |
-| **MariaDB 10.11 LTS** | **Tested** in CI. |
+| **MariaDB 10.11 LTS** | **Tested** in CI. The minimum. |
 | **MariaDB 11.4 LTS** | **Tested** in CI. |
-| Other versions from 10.6 up | Expected to work; not covered by CI. |
-| MariaDB < 10.6 | Not supported. |
+| **MariaDB 11.8 LTS** | **Tested** in CI. |
+| **MariaDB 12.3 LTS** | **Tested** in CI, with the default file-based binlog. |
+| Other versions from 10.11 up | Expected to work; not covered by CI. |
+| MariaDB < 10.11 | Not supported. 10.6 reached end of life on 2026-07-06. |
+
+`bintrail doctor` warns when the source is older than 10.11. It does not
+refuse: capture may still work there, but no test covers it any more.
+
+**Still on 10.6 to 10.10?** Upgrade the source to 10.11 or newer, then run
+`bintrail doctor` against it again to confirm the binlog settings above
+survived the upgrade.
+
+**MariaDB 12.3 with `binlog_storage_engine=innodb` is not supported.** 12.3
+can keep the binary log inside InnoDB instead of in files. It is off by
+default. With it on, the binlog files have a new format, so `bintrail index`
+cannot read them, and the server no longer reports file names and offsets to
+a client that reads the binlog. DBTrail relies on those positions. Keep the
+default file-based binlog. See MariaDB's
+[InnoDB-based binary log](https://mariadb.com/docs/server/server-management/server-monitoring-logs/binary-log/innodb-based-binary-log)
+page and the
+[12.3 announcement](https://mariadb.org/new-binlog-implementation-in-mariadb-12-3/).
 
 ---
 
