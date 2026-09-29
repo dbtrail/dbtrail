@@ -152,6 +152,28 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 			notDetail:  []string{"is the same server as"},
 		},
 		{
+			name:       "the same address, same machine, another server id",
+			cand:       mdb("", "proxy.internal", 3306, "x", 3306, 1, t0, "aa"),
+			peers:      []mariadbServer{mdb("b", "proxy.internal", 3306, "x", 3306, 2, t0, "aa")},
+			wantStatus: "pass",
+			notDetail:  []string{"is the same server as"},
+		},
+		{
+			name:       "the same address, same server id, another machine",
+			cand:       mdb("", "proxy.internal", 3306, "x", 3306, 1, t0, "aa"),
+			peers:      []mariadbServer{mdb("b", "proxy.internal", 3306, "x", 3306, 1, t0, "bb")},
+			wantStatus: "pass",
+			notDetail:  []string{"is the same server as"},
+		},
+		{
+			name: "the same address answered by a MySQL server",
+			cand: mdb("", "proxy.internal", 3306, "x", 3306, 1, t0, "aa"),
+			peers: []mariadbServer{{name: "b", dsnHost: "proxy.internal", dsnPort: 3306, flavor: console.FlavorMySQL,
+				hostname: "x", port: 3306, serverID: 1, startedAt: t0, uuidNode: "aa"}},
+			wantStatus: "pass",
+			notDetail:  []string{"is the same server as"},
+		},
+		{
 			// The same address with an identity that could not be read in
 			// full still counts: nothing says they differ.
 			name:       "the same address, identity partly read",
@@ -447,6 +469,17 @@ func TestLoadMariaDBServer(t *testing.T) {
 			t.Errorf("s = %+v, err %v", s, err)
 		}
 	})
+	t.Run("another server error is not a refusal", func(t *testing.T) {
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		identity(mock)
+		mock.ExpectQuery(regexp.QuoteMeta("SHOW ALL SLAVES STATUS")).
+			WillReturnError(&mysql.MySQLError{Number: 1064, Message: "You have an error in your SQL syntax"})
+		s, _ := loadMariaDBServer(context.Background(), db, console.FlavorMariaDB)
+		if s.channelsRead || s.channelsErr == "" || s.channelsDenied {
+			t.Errorf("s = %+v, want an unread status that is not a refusal", s)
+		}
+	})
 	t.Run("a missing column is not a clean read", func(t *testing.T) {
 		db, mock, _ := sqlmock.New()
 		defer db.Close()
@@ -498,6 +531,8 @@ func TestLoadMariaDBServer(t *testing.T) {
 	})
 }
 
+// A peer is dialed through sourceProbeDSN: the dial is bounded as well as
+// the reads, inside mariadbPeerTimeout.
 func TestPeerProbeDSN(t *testing.T) {
 	cases := []string{
 		"u:p@tcp(db:3306)/",
@@ -505,7 +540,7 @@ func TestPeerProbeDSN(t *testing.T) {
 		"u:p@tcp(db:3306)/?timeout=1s",
 	}
 	for _, in := range cases {
-		cfg, err := mysql.ParseDSN(peerProbeDSN(in))
+		cfg, err := mysql.ParseDSN(sourceProbeDSN(in))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -515,5 +550,32 @@ func TestPeerProbeDSN(t *testing.T) {
 		if cfg.ReadTimeout == 0 || cfg.ReadTimeout > windowProbeTimeout {
 			t.Errorf("%q: read timeout %s", in, cfg.ReadTimeout)
 		}
+	}
+}
+
+// PostgreSQL entries are left out, and once the check's bound has passed the
+// rest are counted as not read instead of being dialed one by one.
+func TestCollectMariaDBPeers(t *testing.T) {
+	entries := []console.ServerEntry{
+		{Name: "a", SourceDSN: "u:p@tcp(a:3306)/"},
+		{Name: "pg", SourceDSN: "postgres://u@pg/db", Flavor: console.FlavorPostgres},
+		{Name: "b", SourceDSN: "u:p@tcp(b:3306)/"},
+	}
+	var read []string
+	reader := func(_ context.Context, e console.ServerEntry) mariadbServer {
+		read = append(read, e.Name)
+		return mariadbServer{name: e.Name, flavor: console.FlavorMariaDB}
+	}
+	got := collectMariaDBPeers(context.Background(), entries, reader)
+	if len(got) != 2 || got[0].name != "a" || got[1].name != "b" || len(read) != 2 {
+		t.Fatalf("peers %+v, read %q: want a and b, no PostgreSQL entry", got, read)
+	}
+
+	read = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got = collectMariaDBPeers(ctx, entries, reader)
+	if len(read) != 0 || len(got) != 2 || !got[0].unreachable || !got[1].unreachable {
+		t.Errorf("past the bound: peers %+v, read %q; want both unread and not verified", got, read)
 	}
 }

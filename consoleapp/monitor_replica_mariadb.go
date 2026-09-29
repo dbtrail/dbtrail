@@ -96,6 +96,11 @@ func mariadbReplicaOverlap(ctx context.Context, e console.ServerEntry, src *sql.
 		cand.channelsErr = config.ScrubDSNError(errors.New(cand.channelsErr), e.SourceDSN)
 	}
 
+	return evaluateMariaDBReplicaOverlap(cand, collectMariaDBPeers(ctx, entries, readMariaDBPeer))
+}
+
+// collectMariaDBPeers reads the monitored entries one after another with read.
+func collectMariaDBPeers(ctx context.Context, entries []console.ServerEntry, read func(context.Context, console.ServerEntry) mariadbServer) []mariadbServer {
 	peers := make([]mariadbServer, 0, len(entries))
 	for _, p := range entries {
 		// A PostgreSQL source can be neither the same server nor a replica.
@@ -107,9 +112,9 @@ func mariadbReplicaOverlap(ctx context.Context, e console.ServerEntry, src *sql.
 			peers = append(peers, mariadbServer{name: p.Name, unreachable: true})
 			continue
 		}
-		peers = append(peers, readMariaDBPeer(ctx, p))
+		peers = append(peers, read(ctx, p))
 	}
-	return evaluateMariaDBReplicaOverlap(cand, peers)
+	return peers
 }
 
 // readMariaDBPeer reads one monitored entry's source, bounded by
@@ -120,7 +125,9 @@ func readMariaDBPeer(ctx context.Context, p console.ServerEntry) mariadbServer {
 	out := mariadbServer{name: p.Name, unreachable: true}
 	ctx, cancel := context.WithTimeout(ctx, mariadbPeerTimeout)
 	defer cancel()
-	db, err := config.Connect(peerProbeDSN(p.SourceDSN))
+	// sourceProbeDSN bounds the dial too (probeDSN caps it at
+	// windowProbeTimeout): config.Connect's ping does not take a context.
+	db, err := config.Connect(sourceProbeDSN(p.SourceDSN))
 	if err != nil {
 		return out
 	}
@@ -136,19 +143,6 @@ func readMariaDBPeer(ctx context.Context, p console.ServerEntry) mariadbServer {
 	s.name = p.Name
 	s.dsnHost, s.dsnPort = sourceAddress(p.SourceDSN)
 	return s
-}
-
-// peerProbeDSN is sourceProbeDSN with the dial bounded too, by
-// mariadbPeerTimeout: config.Connect's ping does not take a context.
-func peerProbeDSN(dsn string) string {
-	cfg, err := mysql.ParseDSN(sourceProbeDSN(dsn))
-	if err != nil {
-		return dsn
-	}
-	if cfg.Timeout == 0 || cfg.Timeout > mariadbPeerTimeout {
-		cfg.Timeout = mariadbPeerTimeout
-	}
-	return cfg.FormatDSN()
 }
 
 // detectFlavorCtx is metadata.DetectSourceFlavor bounded by ctx.
