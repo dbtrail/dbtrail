@@ -259,7 +259,11 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	}
 	defer sourceDB.Close()
 
-	report.add(checkSourceConnection(ctx, sourceDB))
+	conn, version := checkSourceConnection(ctx, sourceDB)
+	report.add(conn)
+	if c, ok := checkMariaDBVersion(version); ok {
+		report.add(c)
+	}
 	report.add(checkLogBin(ctx, sourceDB))
 	report.add(checkBinlogFormat(ctx, sourceDB))
 	report.add(checkBinlogRowImage(ctx, sourceDB))
@@ -316,7 +320,9 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	return report
 }
 
-func checkSourceConnection(ctx context.Context, db *sql.DB) CheckResult {
+// checkSourceConnection also returns the VERSION() it read ("" on failure), so
+// the MariaDB version row needs no query of its own.
+func checkSourceConnection(ctx context.Context, db *sql.DB) (CheckResult, string) {
 	var version string
 	if err := db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
 		return CheckResult{
@@ -327,13 +333,13 @@ func checkSourceConnection(ctx context.Context, db *sql.DB) CheckResult {
 				"  - Permission denied: ensure the user has at least SELECT on *.*\n" +
 				"  - Transient network issue: retry once before investigating further\n" +
 				"  - Server restarted mid-handshake: wait and retry",
-		}
+		}, ""
 	}
 	return CheckResult{
 		Name:   SourceConnectionCheckName,
 		Status: StatusPass,
 		Detail: "MySQL " + version,
-	}
+	}, version
 }
 
 func checkLogBin(ctx context.Context, db *sql.DB) CheckResult {
