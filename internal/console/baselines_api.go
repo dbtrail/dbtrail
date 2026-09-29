@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -294,14 +295,29 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	// incomplete one comes back SHORTER than the cap with older ones
 	// unread, and the loop alone would call that everything.
 	anyMore := false
-	merged := listBaselinesMerged(r.Context(), baselineSourcesOf(b), func(ctx context.Context, src string) ([]reconstruct.BaselineFile, int, error) {
+	moreAt := map[string]bool{}
+	// The previous locations too (#1684), under their two guards.
+	merged := listBaselineLocations(r.Context(), readSourcesOf(b), func(ctx context.Context, src string) ([]reconstruct.BaselineFile, int, error) {
 		files, skipped, more, err := listBaselinesForPage(ctx, src, baselinesMaxSnapshots+1)
 		if err == nil && more {
 			anyMore = true
+			moreAt[src] = true
 		}
 		return files, skipped, err
-	})
+	}, previousRefusalFor(r.Context(), b))
 	resp.Truncated = anyMore
+	// A previous location whose newest snapshots, the only ones read, were
+	// all hidden may hold older ones of this server past the cap: said,
+	// and the listing is incomplete, never a history that silently ends.
+	capHid := false
+	for i := range merged.Sources {
+		src := &merged.Sources[i]
+		if src.Previous && src.Hidden > 0 && moreAt[src.Source] {
+			src.Truncated = true
+			src.HiddenWhy += fmt.Sprintf("; only the newest %d snapshots there were read, so older ones of this server may be there and are not listed", baselinesMaxSnapshots+1)
+			capHid = true
+		}
+	}
 	resp.Sources = merged.Sources
 	if merged.Listed == 0 {
 		// Nothing could be read anywhere. Still a hard failure, and the message
@@ -316,12 +332,14 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	// Incomplete when a location did not answer OR answered in part: a listing
 	// that dropped an unreadable snapshot reads exactly like a complete one
 	// otherwise (#1601).
-	resp.Incomplete = merged.Listed < len(merged.Sources) || merged.Skipped > 0
+	resp.Incomplete = merged.Listed < len(merged.Sources) || merged.Skipped > 0 || capHid
 	// Only the locations that answered: a failed listing saw nothing, and
 	// what an earlier one saw is not this response's to repeat.
 	var listed []string
 	for _, src := range merged.Sources {
-		if src.Error == "" {
+		// A previous location is not this server's to share (#1684): what
+		// others wrote there is hidden above, not a warning here.
+		if src.Error == "" && !src.Previous {
 			listed = append(listed, src.Source)
 		}
 	}

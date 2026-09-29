@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -86,6 +87,10 @@ type SQLExportRequest struct {
 	IndexDSN    string
 	BaselineSrc string // local directory or s3:// prefix
 	At          time.Time
+	// PreviousLocations are the server's previous snapshot locations
+	// (#1684): the build starts from the newest snapshot at or before At,
+	// wherever it is.
+	PreviousLocations []PreviousLocation
 }
 
 // handleSQLExportTrigger enqueues a build for the selected server:
@@ -139,6 +144,7 @@ func (s *Server) handleSQLExportTrigger(w http.ResponseWriter, r *http.Request) 
 	}
 	req := SQLExportRequest{
 		ServerID: e.ID, ServerName: e.Name, IndexDSN: e.DSN, BaselineSrc: src, At: at,
+		PreviousLocations: slices.Clone(e.PreviousBaselineLocations),
 	}
 	if err := s.sqlExport.TriggerSQLExport(req); err != nil {
 		if errors.Is(err, ErrBaselineRunning) {

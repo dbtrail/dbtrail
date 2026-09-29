@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -189,6 +190,11 @@ type BaselineRestoreRequest struct {
 	// same store, so it honours the same operator choice; leaving it out is
 	// how the two silently diverged.
 	CarryForwardUnchanged bool
+	// PreviousLocations are the server's previous snapshot locations
+	// (#1684). The restore may start from a snapshot there, when it is the
+	// newest one at or before At; it still writes only to BaselineDir and
+	// BaselineS3.
+	PreviousLocations []PreviousLocation
 }
 
 type BaselineStatus struct {
@@ -469,6 +475,7 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		BaselineS3:            e.BaselineS3,
 		At:                    at,
 		CarryForwardUnchanged: s.baselineRefreshDefaults.CarryForwardUnchanged,
+		PreviousLocations:     slices.Clone(e.PreviousBaselineLocations),
 	}
 	if err := s.baselineRestore.TriggerRestore(req); err != nil {
 		if errors.Is(err, ErrBaselineRunning) {

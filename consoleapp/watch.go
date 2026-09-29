@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1298,6 +1299,7 @@ func scheduledVerifyRequest(e console.ServerEntry, tables []string) console.Veri
 	return console.VerifyRequest{
 		ServerID: e.ID, ServerName: e.Name, Mode: mode, Tables: tables,
 		IndexDSN: e.DSN, BaselineDir: dir, BaselineS3: s3, NoArchive: e.NoArchive,
+		PreviousLocations: slices.Clone(e.PreviousBaselineLocations),
 	}
 }
 

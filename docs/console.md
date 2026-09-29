@@ -341,6 +341,18 @@ How it behaves:
   writable), the servers keep it for that run and the Snapshots page says
   the file was not updated. Several servers given the same location share
   it, and the Snapshots page warns once their snapshots mix there.
+- **Previous snapshot locations.** Changing a server's snapshot folder or S3
+  location does not hide the snapshots at the old place. The server remembers
+  it, with the time it left, and keeps reading it: time travel, restore, the
+  `.sql` build, verify and the snapshot list look at the current place first
+  and then the old ones, and the newest snapshot wins. Nothing is ever written
+  to an old place, and automatic retention applies to the current place only.
+  An old place is read only up to the time the server left it, and a snapshot
+  there that another server signed is never used as this server's. If an old
+  place cannot be read, the page names it. Forget, on the Snapshots page,
+  stops reading an old place and deletes nothing. The first snapshot at a new
+  place writes every table. Scheduled and periodic refreshes read the current
+  place only, so right after a move the next scheduled run takes a full read.
 - **Test connection.** Each server (saved or being typed) has a write-free
   test. On a new server you are typing, it runs the source half of the startup
   checks Save runs (connection, binlog settings, grants, tables without a

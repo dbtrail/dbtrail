@@ -446,6 +446,15 @@ func FindBaselinePair(ctx context.Context, source string) (pairs []BaselinePair,
 	if err != nil {
 		return nil, nil, err
 	}
+	return FindBaselinePairIn(ctx, files, unreadable)
+}
+
+// FindBaselinePairIn is FindBaselinePair over a listing already made: files
+// newest snapshot first (the order ListBaselinesUnreadable returns), and the
+// folders the listing could not read. A caller that reads more than one
+// location (a server's previous snapshot locations, #1684) merges them into
+// one such listing; the pairs carry full paths, so a pair may straddle two.
+func FindBaselinePairIn(ctx context.Context, files []reconstruct.BaselineFile, unreadable []reconstruct.UnreadableSnapshot) (pairs []BaselinePair, prevOnly []query.SchemaTable, err error) {
 	// files are newest-snapshot-first; the two most recent distinct times name
 	// the tables to answer for and the ones the newest no longer holds.
 	var tNew, tSecond time.Time

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 
 	"github.com/dbtrail/dbtrail/internal/verify/verdict"
 )
@@ -106,6 +107,9 @@ type VerifyRequest struct {
 	BaselineDir string
 	BaselineS3  string
 	NoArchive   bool
+	// PreviousLocations are the server's previous snapshot locations
+	// (#1684): the check pairs snapshots across them and the current one.
+	PreviousLocations []PreviousLocation
 }
 
 // VerifyTableResult is the wire view of one table's verify.TableResult.
@@ -338,6 +342,7 @@ func (s *Server) handleVerifyTrigger(w http.ResponseWriter, r *http.Request) {
 		ServerID: e.ID, ServerName: e.Name, Mode: mode, Tables: body.Tables,
 		IndexDSN: e.DSN, SourceDSN: e.SourceDSN,
 		BaselineDir: e.BaselineDir, BaselineS3: e.BaselineS3, NoArchive: e.NoArchive,
+		PreviousLocations: slices.Clone(e.PreviousBaselineLocations),
 	}
 	if err := s.verifyCtrl.Trigger(req); err != nil {
 		if errors.Is(err, ErrVerifyRunning) {

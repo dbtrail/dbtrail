@@ -155,6 +155,14 @@ type ServerEntry struct {
 	// page names). OWNED BY THE REGISTRY: written by markHeldFolders only,
 	// carried across every update, never taken from a caller.
 	LocalKeepHeldDir string `yaml:"local_keep_held_dir,omitempty"`
+	// PreviousBaselineLocations are the snapshot locations this server used
+	// before BaselineDir and BaselineS3 (#1684), the most recently left first.
+	// Read-only: reads consult them after the current ones, and no write,
+	// prune or shared-location check ever looks at them. OWNED BY THE
+	// REGISTRY: Update derives the list from the location change it saves,
+	// Add starts it empty, ForgetPreviousLocation removes one; a caller's
+	// value is never taken. An older binary carries it through Extra.
+	PreviousBaselineLocations []PreviousLocation `yaml:"previous_baseline_locations,omitempty"`
 
 	// Extra is the forward-compat catch-all: unknown fields written by a NEWER
 	// bintrail (e.g. the phase-2 control plane's source_dsn / server_id /
@@ -658,7 +666,8 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 		return ServerEntry{}, fmt.Errorf("generate server id: %w", err)
 	}
 	e.ID = id
-	e.LocalKeepHeldDir = "" // registry-owned; a new entry never starts held
+	e.LocalKeepHeldDir = ""           // registry-owned; a new entry never starts held
+	e.PreviousBaselineLocations = nil // registry-owned (#1684); a new entry has no past
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -699,6 +708,9 @@ func (r *Registry) Update(e ServerEntry) error {
 		}
 		// Registry-owned (#1681): always the stored value, whatever was sent.
 		e.LocalKeepHeldDir = old.LocalKeepHeldDir
+		// Registry-owned (#1684): derived from the location change this
+		// save makes, whatever was sent.
+		e.PreviousBaselineLocations = nextPreviousLocations(old, e, locationNow())
 		// The whole list is copied: marking a folder that stops being shared
 		// changes OTHER entries, and a failed save must undo all of it.
 		prev := slices.Clone(r.file.Servers)

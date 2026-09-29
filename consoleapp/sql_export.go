@@ -860,7 +860,10 @@ func (s *baselineSupervisor) finishSQLExport(req console.SQLExportRequest, dir s
 }
 
 func (s *baselineSupervisor) executeSQLExport(req console.SQLExportRequest, dir string) (tables int, rows, bytes int64, err error) {
-	tableList, err := reconstruct.SnapshotTablesAt(s.ctx, req.BaselineSrc, req.At)
+	// The newest snapshot at or before At, in the current location or a
+	// previous one (#1684); the build then folds from there.
+	src, tableList, _, err := foldBaseAcross(s.ctx, req.IndexDSN, req.BaselineSrc, req.PreviousLocations, req.At)
+	req.BaselineSrc = src
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("list the snapshot to build from: %w", err)
 	}

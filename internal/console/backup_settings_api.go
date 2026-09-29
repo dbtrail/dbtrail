@@ -131,6 +131,9 @@ type backupSettingsServerDTO struct {
 	// retention rule the page generates must never cover it, and the page
 	// can only refuse what it can see.
 	ArchiveS3 string `json:"archive_s3,omitempty"`
+	// PreviousLocations are the snapshot locations this server used before
+	// (#1684), most recently left first: still read, never written.
+	PreviousLocations []PreviousLocation `json:"previous_locations"`
 	// FullBackupPossible reports whether this daemon could take a full
 	// backup of this server right now (FullBackupPossible, IO-free like
 	// CheckBackupSchedule). The S3-only warning (#1659) needs it: with no
@@ -282,6 +285,8 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 		ResolvedDir: e.BaselineDir,
 		ResolvedS3:  e.BaselineS3,
 		ArchiveS3:   e.ArchiveS3,
+		// Never null on the wire: the page lists them, empty or not.
+		PreviousLocations: append([]PreviousLocation{}, e.PreviousBaselineLocations...),
 	}
 	if e.BaselineDir != "" || e.BaselineS3 != "" {
 		dto.Source = backupSourceServer
@@ -381,6 +386,9 @@ type backupSettingsUpdateRequest struct {
 	LocalCopy *bool `json:"local_copy"`
 	// KeepNewest sets the local retention; 0 keeps every snapshot.
 	KeepNewest *int `json:"keep_newest"`
+	// ForgetPreviousLocation stops reading one of the server's previous
+	// snapshot locations (#1684). Nothing there is deleted. Sent alone.
+	ForgetPreviousLocation *string `json:"forget_previous_location"`
 }
 
 // handleBackupSettingsServerUpdate serves PUT /api/backup-settings/servers/{id}.
@@ -401,6 +409,24 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 		writeBodyDecodeError(w, err)
 		return
 	}
+	if req.ForgetPreviousLocation != nil {
+		if req.BaselineDir != nil || req.BaselineS3 != nil || req.NoArchive != nil || req.LocalCopy != nil || req.KeepNewest != nil {
+			writeJSONError(w, http.StatusBadRequest, "forget_previous_location is sent alone")
+			return
+		}
+		saved, err := s.cm.reg.ForgetPreviousLocation(id, *req.ForgetPreviousLocation)
+		if err != nil {
+			status := registryErrStatus(err)
+			if errors.Is(err, ErrUnknownPreviousLocation) {
+				status = http.StatusNotFound
+			}
+			writeJSONError(w, status, err.Error())
+			return
+		}
+		s.cm.rebuildDerived(saved)
+		writeJSON(w, http.StatusOK, s.backupSettingsServerDTO(saved))
+		return
+	}
 	before := entry
 	if req.BaselineDir != nil {
 		entry.BaselineDir = strings.TrimSpace(*req.BaselineDir)
@@ -413,8 +439,9 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	}
 	if req.LocalCopy != nil {
 		if !*req.LocalCopy {
-			// The snapshots already in the folder stay where they are; the
-			// page says so, because nothing lists or prunes them after this.
+			// The snapshots already in the folder stay where they are. The
+			// folder becomes a previous location (#1684): still listed and
+			// read, never written to or pruned again.
 			entry.BaselineDir = ""
 		} else if entry.BaselineDir == "" {
 			entry.BaselineDir = s.cm.reg.DefaultBaselineDir(entry.ID)
@@ -459,6 +486,9 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	// no-archive gates are derived state and must be recomputed — same tail
 	// as a baseline-only edit through the servers form.
 	s.cm.rebuildDerived(entry)
+	if saved, ok := s.cm.reg.Get(entry.ID); ok {
+		entry = saved // with the previous locations the save derived (#1684)
+	}
 	writeJSON(w, http.StatusOK, s.backupSettingsServerDTO(entry))
 }
 
