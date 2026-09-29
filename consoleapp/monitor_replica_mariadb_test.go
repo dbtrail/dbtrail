@@ -129,18 +129,88 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 		},
 		{
 			name: "a monitored server replicates from this one",
-			cand: cand(),
+			cand: mdb("", "db-replica.internal", 3306, "db-replica", 3306, 4, t0, "0242ac110002"),
 			peers: []mariadbServer{mdb("replica", "db-r2.internal", 3306, "db-r2", 3306, 3, t0, "0242ac110004",
-				replicationChannel{host: "db-replica.internal", port: 3306, serverID: 1})},
+				replicationChannel{host: "db-replica.internal", port: 3306, serverID: 4})},
 			wantStatus: "warn",
 			wantDetail: []string{`appears to be the primary of already-monitored replica "replica"`},
 		},
 		{
 			name:       "the same address twice",
-			cand:       mdb("", "DB-Replica.Internal", 3306, "x", 3306, 1, t0, "aa"),
-			peers:      []mariadbServer{mdb("again", "db-replica.internal", 3306, "y", 3306, 2, t0+900, "bb")},
+			cand:       mdb("", "DB-Replica.Internal", 3306, "db-replica", 3306, 1, t0, "0242ac110002"),
+			peers:      []mariadbServer{mdb("again", "db-replica.internal", 3306, "db-replica", 3306, 1, t0+1, "0242ac110002")},
 			wantStatus: "warn",
 			wantDetail: []string{`is the same server as already-monitored "again"`},
+		},
+		{
+			// A proxy that routes by user: one address, two servers that
+			// say they are different.
+			name:       "the same address answered by two different servers",
+			cand:       mdb("", "proxy.internal", 3306, "x", 3306, 1, t0, "aa"),
+			peers:      []mariadbServer{mdb("behind-proxy", "proxy.internal", 3306, "y", 3306, 2, t0+900, "bb")},
+			wantStatus: "pass",
+			notDetail:  []string{"is the same server as"},
+		},
+		{
+			// The same address with an identity that could not be read in
+			// full still counts: nothing says they differ.
+			name:       "the same address, identity partly read",
+			cand:       mdb("", "db.internal", 3306, "x", 3306, 1, 0, ""),
+			peers:      []mariadbServer{mdb("again", "db.internal", 3306, "x", 3306, 1, t0, "aa")},
+			wantStatus: "warn",
+			wantDetail: []string{"same server"},
+		},
+		{
+			// server_id 1 is every unconfigured server's: two StatefulSets
+			// named mariadb-0 in two namespaces match on host, port and id.
+			name:       "a match on the default server id is not proof",
+			cand:       cand(replicationChannel{host: "mariadb-0", port: 3306, serverID: 1}),
+			peers:      []mariadbServer{mdb("ns-a", "10.1.0.5", 3306, "mariadb-0", 3306, 1, t0, "0242ac110077")},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+			notDetail:  []string{"replica of"},
+		},
+		{
+			name: "a monitored replica pointing here with the default server id is not proof",
+			cand: mdb("", "db-replica.internal", 3306, "db-replica", 3306, 1, t0, "0242ac110002"),
+			peers: []mariadbServer{mdb("r", "db-r2.internal", 3306, "db-r2", 3306, 3, t0, "0242ac110004",
+				replicationChannel{host: "db-replica.internal", port: 3306, serverID: 1})},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+		},
+		{
+			// Configured toward a monitored server but never connected (a
+			// wrong password): Master_Server_Id is 0, so it cannot be told.
+			name:       "a channel toward a monitored server that never connected",
+			cand:       cand(replicationChannel{host: "db-primary.internal", port: 3306, serverID: 0}),
+			peers:      []mariadbServer{primary},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+		},
+		{
+			name:       "a monitored server whose identity was only partly read",
+			cand:       cand(),
+			peers:      []mariadbServer{mdb("p", "10.9.0.1", 3306, "p", 3306, 7, 0, "0242ac110003")},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+		},
+		{
+			name:       "this server's identity only partly read",
+			cand:       mdb("", "10.0.0.5", 3306, "h", 3306, 4, t0, ""),
+			peers:      []mariadbServer{mdb("p", "10.9.0.1", 3306, "p", 3306, 7, t0, "0242ac110003")},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+		},
+		{
+			name: "a status read that failed for another reason does not blame the privilege",
+			cand: func() mariadbServer {
+				c := cand()
+				c.channelsRead, c.channelsErr = false, "the replication status has a Master_Port or Master_Server_Id that is not a number"
+				return c
+			}(),
+			peers:      []mariadbServer{primary},
+			wantStatus: "skip",
+			notDetail:  []string{"SLAVE MONITOR"},
 		},
 		{
 			name:       "one server reached at two addresses",
@@ -179,6 +249,7 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 			cand: func() mariadbServer {
 				c := cand()
 				c.channelsRead, c.channelsErr = false, "Error 1227 (42000): Access denied; you need (at least one of) the SUPER, SLAVE MONITOR privilege(s) for this operation"
+				c.channelsDenied = true
 				return c
 			}(),
 			peers:      []mariadbServer{primary},
@@ -188,7 +259,7 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 		{
 			name: "unreadable status still reports what was found",
 			cand: func() mariadbServer {
-				c := mdb("", "db-primary.internal", 3306, "x", 3306, 1, t0, "aa")
+				c := mdb("", "db-primary.internal", 3306, "db-primary", 3306, 7, t0-500, "0242ac110003")
 				c.channelsRead, c.channelsErr = false, "denied"
 				return c
 			}(),
@@ -224,7 +295,7 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 				hostname: "mysql-primary", port: 3306, serverID: 11, startedAt: t0, uuidNode: "0242ac110002"}},
 			wantStatus: "warn",
 			wantDetail: []string{`replica of already-monitored "mysql"`},
-			notDetail:  []string{"same server"},
+			notDetail:  []string{"is the same server as"},
 		},
 		{
 			// A MySQL peer's channels are never read, so an unread status is
@@ -270,8 +341,8 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 				}
 			}
 			for _, w := range tc.notDetail {
-				if strings.Contains(got.Detail, w) {
-					t.Errorf("detail %q contains %q", got.Detail, w)
+				if strings.Contains(got.Detail+got.Remediation, w) {
+					t.Errorf("card %q / %q contains %q", got.Detail, got.Remediation, w)
 				}
 			}
 			if strings.ContainsRune(got.Detail+got.Remediation, '—') {
@@ -372,7 +443,7 @@ func TestLoadMariaDBServer(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SHOW ALL SLAVES STATUS")).
 			WillReturnError(&mysql.MySQLError{Number: 1227, Message: "Access denied; you need (at least one of) the SUPER, SLAVE MONITOR privilege(s) for this operation"})
 		s, err := loadMariaDBServer(context.Background(), db, console.FlavorMariaDB)
-		if err != nil || s.channelsRead || !strings.Contains(s.channelsErr, "SLAVE MONITOR") {
+		if err != nil || s.channelsRead || !s.channelsDenied || !strings.Contains(s.channelsErr, "SLAVE MONITOR") {
 			t.Errorf("s = %+v, err %v", s, err)
 		}
 	})
@@ -383,8 +454,8 @@ func TestLoadMariaDBServer(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SHOW ALL SLAVES STATUS")).
 			WillReturnRows(sqlmock.NewRows([]string{"Master_Host", "Master_Port"}).AddRow("h", "3306"))
 		s, _ := loadMariaDBServer(context.Background(), db, console.FlavorMariaDB)
-		if s.channelsRead || s.channelsErr == "" {
-			t.Errorf("s = %+v, want an unread status", s)
+		if s.channelsRead || s.channelsErr == "" || s.channelsDenied {
+			t.Errorf("s = %+v, want an unread status that is not a refusal", s)
 		}
 	})
 	t.Run("a port that is not a number is not a clean read", func(t *testing.T) {
@@ -425,4 +496,24 @@ func TestLoadMariaDBServer(t *testing.T) {
 			t.Error("want the error")
 		}
 	})
+}
+
+func TestPeerProbeDSN(t *testing.T) {
+	cases := []string{
+		"u:p@tcp(db:3306)/",
+		"u:p@tcp(db:3306)/?timeout=30s",
+		"u:p@tcp(db:3306)/?timeout=1s",
+	}
+	for _, in := range cases {
+		cfg, err := mysql.ParseDSN(peerProbeDSN(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Timeout == 0 || cfg.Timeout > mariadbPeerTimeout {
+			t.Errorf("%q: dial timeout %s, want at most %s", in, cfg.Timeout, mariadbPeerTimeout)
+		}
+		if cfg.ReadTimeout == 0 || cfg.ReadTimeout > windowProbeTimeout {
+			t.Errorf("%q: read timeout %s", in, cfg.ReadTimeout)
+		}
+	}
 }

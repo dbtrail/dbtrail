@@ -124,7 +124,10 @@ func TestRegistryFlavorHint(t *testing.T) {
 		{console.FlavorMySQL, console.FlavorMariaDB, refused, "saved with Source type MySQL, but the server reports MariaDB"},
 		{console.FlavorMySQL, console.FlavorMariaDB, nil, ""},
 		{console.FlavorMariaDB, console.FlavorMySQL, nil, ""},
-		{"", console.FlavorMariaDB, refused, ""},
+		// An old entry saved blank reads as MySQL on every screen: a failed
+		// save leaves that label wrong, so it warns too.
+		{"", console.FlavorMariaDB, refused, "saved with Source type MySQL, but the server reports MariaDB"},
+		{"", console.FlavorMySQL, refused, ""},
 		{console.FlavorMariaDB, console.FlavorMariaDB, refused, ""},
 		{console.FlavorMySQL, console.FlavorMySQL, nil, ""},
 	}

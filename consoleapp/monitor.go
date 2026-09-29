@@ -8,7 +8,6 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -816,6 +815,7 @@ func registryFlavorHook(job *monitorJob, hint string, correct func(string) (bool
 			correctErr = errors.New("no server list to save it to")
 		} else if changed, err := correct(flavor); err != nil {
 			correctErr = err
+			slog.Warn("could not save the Source type the server reports", "entry_flavor", hint, "detected", flavor, "error", err)
 		} else if changed {
 			slog.Info("saved the Source type the server reports", "entry_flavor", hint, "detected", flavor)
 		}
@@ -830,12 +830,15 @@ func registryFlavorHook(job *monitorJob, hint string, correct func(string) (bool
 
 // registryFlavorWarning is the text shown when the server contradicts the
 // Source type saved with its entry and the saved type could not be changed
-// (correctErr), "" when they agree, none was saved, or the change was saved.
+// (correctErr), "" when they agree or the change was saved.
 // It never advises removing the server: the one that comes back is a new
 // entry with a new index, and the old one's history is left behind.
+//
+// A blank saved type reads as MySQL everywhere (ServerEntry.SourceFlavor), so
+// it is compared as MySQL: a failed save leaves that label just as wrong.
 func registryFlavorWarning(hint, detected string, correctErr error) string {
 	h, err := console.NormalizeFlavor(hint)
-	if strings.TrimSpace(hint) == "" || err != nil || h == detected || correctErr == nil {
+	if err != nil || h == detected || correctErr == nil {
 		return ""
 	}
 	return fmt.Sprintf("This server is saved with Source type %s, but the server reports %s. DBTrail captures it as %s. The saved Source type could not be changed to %s: %v.",

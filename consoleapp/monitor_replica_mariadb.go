@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -75,6 +76,8 @@ type mariadbServer struct {
 	channels     []replicationChannel
 	channelsRead bool
 	channelsErr  string
+	// channelsDenied: the read was refused for a missing privilege (1227).
+	channelsDenied bool
 	// unreachable: the server could not be read at all.
 	unreachable bool
 }
@@ -89,8 +92,21 @@ func mariadbReplicaOverlap(ctx context.Context, e console.ServerEntry, src *sql.
 	}
 	cand.dsnHost, cand.dsnPort = sourceAddress(e.SourceDSN)
 
+	if !cand.channelsRead {
+		cand.channelsErr = config.ScrubDSNError(errors.New(cand.channelsErr), e.SourceDSN)
+	}
+
 	peers := make([]mariadbServer, 0, len(entries))
 	for _, p := range entries {
+		// A PostgreSQL source can be neither the same server nor a replica.
+		if p.SourceFlavor() == console.FlavorPostgres {
+			continue
+		}
+		// Past the whole check's bound, the rest are not read: not verified.
+		if ctx.Err() != nil {
+			peers = append(peers, mariadbServer{name: p.Name, unreachable: true})
+			continue
+		}
 		peers = append(peers, readMariaDBPeer(ctx, p))
 	}
 	return evaluateMariaDBReplicaOverlap(cand, peers)
@@ -104,12 +120,12 @@ func readMariaDBPeer(ctx context.Context, p console.ServerEntry) mariadbServer {
 	out := mariadbServer{name: p.Name, unreachable: true}
 	ctx, cancel := context.WithTimeout(ctx, mariadbPeerTimeout)
 	defer cancel()
-	db, err := config.Connect(sourceProbeDSN(p.SourceDSN))
+	db, err := config.Connect(peerProbeDSN(p.SourceDSN))
 	if err != nil {
 		return out
 	}
 	defer db.Close()
-	flavor, _, err := metadata.DetectSourceFlavor(db)
+	flavor, err := detectFlavorCtx(ctx, db)
 	if err != nil {
 		return out
 	}
@@ -120,6 +136,31 @@ func readMariaDBPeer(ctx context.Context, p console.ServerEntry) mariadbServer {
 	s.name = p.Name
 	s.dsnHost, s.dsnPort = sourceAddress(p.SourceDSN)
 	return s
+}
+
+// peerProbeDSN is sourceProbeDSN with the dial bounded too, by
+// mariadbPeerTimeout: config.Connect's ping does not take a context.
+func peerProbeDSN(dsn string) string {
+	cfg, err := mysql.ParseDSN(sourceProbeDSN(dsn))
+	if err != nil {
+		return dsn
+	}
+	if cfg.Timeout == 0 || cfg.Timeout > mariadbPeerTimeout {
+		cfg.Timeout = mariadbPeerTimeout
+	}
+	return cfg.FormatDSN()
+}
+
+// detectFlavorCtx is metadata.DetectSourceFlavor bounded by ctx.
+func detectFlavorCtx(ctx context.Context, db *sql.DB) (string, error) {
+	var version string
+	if err := db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+		return "", err
+	}
+	if f := metadata.ClassifyVersion(version); f != "" {
+		return f, nil
+	}
+	return "", errors.New("SELECT VERSION() returned an empty string")
 }
 
 // loadMariaDBServer reads a server's live identity and, on MariaDB, its
@@ -149,6 +190,8 @@ func loadMariaDBServer(ctx context.Context, db *sql.DB, flavor string) (mariadbS
 	channels, err := readReplicationChannels(ctx, db)
 	if err != nil {
 		s.channelsErr = err.Error()
+		var me *mysql.MySQLError
+		s.channelsDenied = errors.As(err, &me) && me.Number == 1227 // ER_SPECIFIC_ACCESS_DENIED_ERROR
 		return s, nil
 	}
 	s.channels, s.channelsRead = channels, true
@@ -206,24 +249,36 @@ func evaluateMariaDBReplicaOverlap(cand mariadbServer, peers []mariadbServer) *c
 			unverified++
 			continue
 		}
+		replicaOf, replicaUnsure := channelsPointAt(cand.channels, p)
+		var primaryOf, primaryUnsure bool
+		if p.flavor == console.FlavorMariaDB {
+			primaryOf, primaryUnsure = channelsPointAt(p.channels, cand)
+		}
 		rel := ""
 		switch {
-		case sameAddress(cand, p) || sameRunningServer(cand, p):
+		case (sameAddress(cand, p) && !identitiesDiffer(cand, p)) || sameRunningServer(cand, p):
 			rel = "is the same server as already-monitored"
-		case anyChannelPointsAt(cand.channels, p):
+		case replicaOf:
 			rel = "appears to be a replica of already-monitored"
-		case p.flavor == console.FlavorMariaDB && anyChannelPointsAt(p.channels, cand):
+		case primaryOf:
 			rel = "appears to be the primary of already-monitored replica"
 		}
 		if rel != "" {
 			findings = append(findings, fmt.Sprintf("%s %q", rel, p.name))
 			continue
 		}
-		// A MariaDB peer whose channels were not read may replicate from
-		// this server: not verified. A MySQL peer's are never read, and a
-		// MySQL server replicating from a MariaDB one is not a setup this
-		// check looks for.
-		if p.flavor == console.FlavorMariaDB && !p.channelsRead {
+		// Not verified, never "no relationship":
+		//   - a channel whose host and port are the other server's, but whose
+		//     server id cannot tell (0: never connected; 1: every
+		//     unconfigured server's);
+		//   - a MariaDB peer whose channels were not read: it may replicate
+		//     from this server (a MySQL peer's are never read, and a MySQL
+		//     server replicating from a MariaDB one is not a setup this check
+		//     looks for);
+		//   - an identity read only in part, on either side: the same
+		//     server under two addresses could not be recognized.
+		if replicaUnsure || primaryUnsure ||
+			(p.flavor == console.FlavorMariaDB && (!p.channelsRead || identityIncomplete(p) || identityIncomplete(cand))) {
 			unverified++
 		}
 	}
@@ -236,12 +291,14 @@ func evaluateMariaDBReplicaOverlap(cand mariadbServer, peers []mariadbServer) *c
 		}
 	}
 	if !cand.channelsRead {
-		return &console.DoctorCheck{Name: replicaCheckName, Status: "skip",
-			Detail: "could not read this server's replication status (" + cand.channelsErr + "), so whether this server replicates from a monitored server is unknown",
-			Remediation: "Reading it needs the SLAVE MONITOR privilege (MariaDB 10.5.9 and later).\n" +
+		c := &console.DoctorCheck{Name: replicaCheckName, Status: "skip",
+			Detail: "could not read this server's replication status (" + cand.channelsErr + "), so whether this server replicates from a monitored server is unknown"}
+		if cand.channelsDenied {
+			c.Remediation = "Reading it needs the SLAVE MONITOR privilege (MariaDB 10.5.9 and later).\n" +
 				"Grant it to the user DBTrail connects with to have this checked:\n\n" +
-				"  GRANT SLAVE MONITOR ON *.* TO 'dbtrail'@'%';",
+				"  GRANT SLAVE MONITOR ON *.* TO 'dbtrail'@'%';"
 		}
+		return c
 	}
 	detail := fmt.Sprintf("no replica relationship detected among %d monitored source(s)", len(peers))
 	if unverified > 0 {
@@ -251,9 +308,29 @@ func evaluateMariaDBReplicaOverlap(cand mariadbServer, peers []mariadbServer) *c
 }
 
 // sameAddress: both entries are monitored at the same host:port. From this
-// one process that is one server, loopback included.
+// one process that is one server, loopback included, unless the two
+// connections say otherwise (identitiesDiffer: a proxy routing by user).
 func sameAddress(a, b mariadbServer) bool {
 	return a.dsnHost != "" && a.dsnPort != 0 && strings.EqualFold(a.dsnHost, b.dsnHost) && a.dsnPort == b.dsnPort
+}
+
+// identitiesDiffer: the two connections were answered by servers that say
+// they are different: another flavor, or, both read in full, another server
+// id or another UUID machine part.
+func identitiesDiffer(a, b mariadbServer) bool {
+	if a.flavor != "" && b.flavor != "" && a.flavor != b.flavor {
+		return true
+	}
+	if identityIncomplete(a) || identityIncomplete(b) {
+		return false
+	}
+	return a.serverID != b.serverID || a.uuidNode != b.uuidNode
+}
+
+// identityIncomplete: a MariaDB whose start time or UUID machine part could
+// not be read, so sameRunningServer cannot recognize it.
+func identityIncomplete(s mariadbServer) bool {
+	return s.flavor == console.FlavorMariaDB && (s.startedAt == 0 || s.uuidNode == "")
 }
 
 // sameRunningServer: two connections that land on one running MariaDB. Every
@@ -271,20 +348,33 @@ func sameRunningServer(a, b mariadbServer) bool {
 		d >= -2 && d <= 2 && a.uuidNode == b.uuidNode
 }
 
-func anyChannelPointsAt(channels []replicationChannel, t mariadbServer) bool {
+// channelsPointAt reports whether one of channels connects to t (match), and
+// whether one connects to t's host and port with a server id that cannot
+// tell (unsure): 0, a channel that never connected, or 1, the id of every
+// server nobody configured, which two unrelated servers share all the time.
+func channelsPointAt(channels []replicationChannel, t mariadbServer) (match, unsure bool) {
 	for _, ch := range channels {
-		if channelPointsAt(ch, t) {
-			return true
+		if !channelHostIs(ch, t) {
+			continue
+		}
+		switch {
+		case ch.serverID == 0 || ch.serverID == defaultServerID:
+			unsure = true
+		case ch.serverID == t.serverID:
+			match = true
 		}
 	}
-	return false
+	return match, unsure
 }
 
-// channelPointsAt: the channel's master is t. The server id must match and be
-// known, and the host must be t's monitored address (with that port) or t's
-// own hostname (with its own port).
-func channelPointsAt(ch replicationChannel, t mariadbServer) bool {
-	if ch.serverID == 0 || ch.serverID != t.serverID || ch.host == "" || isLoopbackHost(ch.host) {
+// defaultServerID is @@server_id on a MariaDB nobody configured.
+const defaultServerID = 1
+
+// channelHostIs: the channel's master host and port are t's monitored
+// address (with that port) or t's own hostname (with its own port). A
+// loopback master is the replica's own machine and never matches.
+func channelHostIs(ch replicationChannel, t mariadbServer) bool {
+	if ch.host == "" || isLoopbackHost(ch.host) {
 		return false
 	}
 	byAddress := t.dsnHost != "" && strings.EqualFold(ch.host, t.dsnHost) && ch.port == t.dsnPort

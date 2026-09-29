@@ -11,7 +11,6 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
-	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
 
@@ -90,7 +89,7 @@ func (m *monitorSupervisor) replicaOverlapCheck(ctx context.Context, e console.S
 	// MariaDB has no server_uuid and no gtid_mode: it has its own check. A
 	// failed ask falls through to the MySQL reads, which report their own
 	// failure as a skip.
-	if flavor, _, ferr := metadata.DetectSourceFlavor(srcDB); ferr == nil && flavor == console.FlavorMariaDB {
+	if flavor, ferr := detectFlavorCtx(ctx, srcDB); ferr == nil && flavor == console.FlavorMariaDB {
 		return mariadbReplicaOverlap(ctx, e, srcDB, entries)
 	}
 

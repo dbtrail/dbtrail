@@ -1,6 +1,7 @@
 package console
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -147,5 +148,39 @@ func TestRegistryUpdateStillStoresAFlavorOutsideTheMySQLFamily(t *testing.T) {
 	}
 	if got, _ := r.Get(added.ID); got.Flavor != FlavorPostgres {
 		t.Errorf("flavor = %q, want postgres", got.Flavor)
+	}
+}
+
+// An edit form opened before capture corrected the Source type still sends
+// the old MySQL-family value. That is not a request to change it: the edit is
+// saved and the corrected type stays. A move to or from PostgreSQL is still
+// refused (TestHandleServersUpdate_flavorImmutable).
+func TestHandleServersUpdate_staleMySQLFamilyFlavorIsKept(t *testing.T) {
+	srv := newRegistryServer(t)
+	rec, resp := doServersReq(t, srv, "POST", "/api/servers",
+		`{"name":"m1","host":"idx","user":"bt","password":"ipw","dbname":"binlog_index","flavor":"mysql"}`)
+	if rec.Code != 201 {
+		t.Fatalf("create code=%d body=%s", rec.Code, resp)
+	}
+	var dto serverDTO
+	if err := json.Unmarshal(resp, &dto); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.cm.reg.CorrectSourceFlavor(dto.ID, FlavorMariaDB); err != nil {
+		t.Fatal(err)
+	}
+	rec, resp = doServersReq(t, srv, "PUT", "/api/servers/"+dto.ID,
+		`{"name":"m1-renamed","host":"idx","user":"bt","dbname":"binlog_index","flavor":"mysql"}`)
+	if rec.Code != 200 {
+		t.Fatalf("stale form edit: code=%d, want 200 (body=%s)", rec.Code, resp)
+	}
+	got, _ := srv.cm.reg.Get(dto.ID)
+	if got.Name != "m1-renamed" || got.SourceFlavor() != FlavorMariaDB {
+		t.Errorf("after the edit: name %q flavor %q, want m1-renamed and mariadb", got.Name, got.Flavor)
+	}
+	rec, _ = doServersReq(t, srv, "PUT", "/api/servers/"+dto.ID,
+		`{"name":"m1-renamed","host":"idx","user":"bt","dbname":"binlog_index","flavor":"postgres"}`)
+	if rec.Code != 400 {
+		t.Errorf("a move to postgres: code=%d, want 400", rec.Code)
 	}
 }
