@@ -255,14 +255,16 @@ func (r roundTripResult) assertExact(t *testing.T) {
 //
 // The values are chosen for the two ways these types can be corrupted:
 //
-//   - UUID is stored (and written to the binlog) in a byte order that differs
-//     from its text order, while a binary literal assigned back to a UUID column
-//     is read in text order. A reversal that echoes the binlog bytes as X'..'
-//     would write a different UUID. Version 1, 4 and 7 UUIDs are covered because
-//     MariaDB 10.10+ swaps only some of them.
-//   - INET4, INET6 and UUID are fixed-width binary on disk. Values ending in zero
-//     bytes (10.0.0.0, 2001:db8::, a UUID ending in zeros) would lose those bytes
-//     if the capture treated them like a padded BINARY(n) and trimmed them.
+//   - Byte order. MariaDB may keep some UUIDs byte-swapped internally, but the
+//     binlog row image carries the value in TEXT order (checked with
+//     mariadb-binlog -vv on 11.4), and an X'..' literal assigned to a UUID column
+//     is read in text order too, so no swap is needed. Version 1, 4 and 7 UUIDs
+//     are covered so a server that did write swapped bytes for some versions
+//     would fail here.
+//   - Trimmed zeros. The row image trims trailing zero bytes from these
+//     fixed-width types, like BINARY(n): 10.0.0.0 arrives as one byte, the nil
+//     UUID as an empty string. Unlike BINARY(n), a UUID/INET column refuses a
+//     short binary value, so the capture must pad them back.
 //
 // Rows 1-2 are reverse-UPDATEd, rows 3-4 reverse-DELETEd (re-INSERTed), row 5
 // stays untouched and row 6 is reverse-INSERTed (deleted). The comparison is the
