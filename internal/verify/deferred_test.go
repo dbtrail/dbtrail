@@ -169,10 +169,21 @@ func TestDeferredReprUnresolved(t *testing.T) {
 		{"vector with typing unavailable", []metadata.ColumnMeta{vectorCol},
 			ch(upd(map[string]any{"emb": "AACAPw=="})), false, true},
 
-		// MariaDB UUID/INET: unresolved whatever the shape. The source and the
-		// baseline render the text form ('12345678-...', '10.0.0.0'), the event
-		// holds base64 of the binary form, and events captured before the
-		// []byte fix hold damaged raw text.
+		// MariaDB UUID/INET: the source and the baseline render the text form
+		// ('12345678-...', '10.0.0.0'). DecodeEventBinaries renders a stored
+		// full-width value to exactly that text, which is comparable. Anything
+		// else stays unresolved: base64 the decode could not type, and the
+		// damaged raw text of events captured before the []byte fix.
+		{"uuid rendered text (typed)", []metadata.ColumnMeta{uuidCol},
+			ch(upd(map[string]any{"u": "12345678-9abc-1def-8012-3456789abcde"})), true, false},
+		{"inet4 rendered text (typed)", []metadata.ColumnMeta{inet4Col},
+			ch(upd(map[string]any{"ip": "10.0.0.0"})), true, false},
+		{"inet6 rendered text (typed)", []metadata.ColumnMeta{{Name: "ip6", DataType: "inet6", ColumnType: "inet6"}},
+			ch(upd(map[string]any{"ip6": "::ffff:1.2.3.4"})), true, false},
+		{"uuid text with typing unavailable", []metadata.ColumnMeta{uuidCol},
+			ch(upd(map[string]any{"u": "12345678-9abc-1def-8012-3456789abcde"})), false, true},
+		{"uuid text the server would not print (upper case)", []metadata.ColumnMeta{uuidCol},
+			ch(upd(map[string]any{"u": "12345678-9ABC-1DEF-8012-3456789ABCDE"})), true, true},
 		{"uuid stored base64", []metadata.ColumnMeta{uuidCol},
 			ch(upd(map[string]any{"u": "EjRWeJq8He+AEjRWeJq83g=="})), true, true},
 		{"uuid decoded bytes", []metadata.ColumnMeta{uuidCol},

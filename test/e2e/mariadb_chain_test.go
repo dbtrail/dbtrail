@@ -369,7 +369,6 @@ func TestEndToEnd_MariaDBSnapshotChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open scratch MariaDB: %v", err)
 	}
-	defer scratchDB.Close()
 	if err := scratchDB.Ping(); err != nil {
 		testutil.SkipOrFailMariaDB(t, "scratch MariaDB not reachable: %v", err)
 	}
@@ -387,8 +386,13 @@ func TestEndToEnd_MariaDBSnapshotChain(t *testing.T) {
 		t.Fatalf("open MariaDB root: %v", err)
 	}
 	defer rootDB.Close()
+	// Registered after CreateTestMariaDB, so it runs before that cleanup and
+	// while the connection is still open. A leftover from an earlier run that
+	// died would make drill refuse the target, so clear it first as well.
+	testutil.MustExec(t, scratchDB, "DROP DATABASE IF EXISTS `"+sourceName+"`")
 	t.Cleanup(func() {
 		scratchDB.Exec("DROP DATABASE IF EXISTS `" + sourceName + "`")
+		scratchDB.Close()
 	})
 
 	// The dump logs in as a user that states its password method, so what is
@@ -593,7 +597,7 @@ func TestEndToEnd_MariaDBSnapshotChain(t *testing.T) {
 		label, table, pk, pkCols, where string
 	}{
 		{"items id=1 at end", "items", "1", "id", "id = 1"},
-		{"items id=8 at end", "items", "8", "id", "id = 8"},
+		{"items id=4 at end (from the folded snapshot)", "items", "4", "id", "id = 4"},
 		{"keyed 7c5c.. at end", "keyed", "7c5c7c5c-5c7c-0000-0000-000000000000", "u", "u = '7c5c7c5c-5c7c-0000-0000-000000000000'"},
 		{"keyed 7c5c.. at end, upper case", "keyed", "7C5C7C5C-5C7C-0000-0000-000000000000", "u", "u = '7c5c7c5c-5c7c-0000-0000-000000000000'"},
 		{"netkeys 255.255.255.255|ffff:: at end", "netkeys", "255.255.255.255|FFFF::", "a,b", "a = '255.255.255.255' AND b = 'ffff::'"},
@@ -605,9 +609,17 @@ func TestEndToEnd_MariaDBSnapshotChain(t *testing.T) {
 	}
 	drill("drill at end from the folded snapshot", at2, state2)
 
-	// ── 6. verify: the folded snapshot against the mydumper one, and the ────
-	// index against the live source. A MariaDB type the reader cannot render
-	// shows up here as "inconclusive", which this test does not accept.
+	// ── 6. verify, both content modes ───────────────────────────────────────
+	// Baseline-anchored verify compares two READS of the database, so take a
+	// second mydumper snapshot now: verify rebuilds the first one forward
+	// through the index to the second one's position and compares. Live mode
+	// compares the index with the source. A MariaDB type the readers cannot
+	// render shows up as "inconclusive", which this test does not accept.
+	dump2 := filepath.Join(tmp, "dump2")
+	run(t, binPath, coverDir, "dump",
+		"--source-dsn", dsnWith(t, testutil.MariaDBBaseDSN(), dumpUser, dumpPass, sourceName),
+		"--output-dir", dump2, "--schemas", sourceName, "--mydumper-path", mydumper)
+	run(t, binPath, coverDir, "baseline", "--input", dump2, "--output", baseDir)
 	var names []string
 	for _, ct := range tables {
 		names = append(names, sourceName+"."+ct.name)
@@ -617,7 +629,7 @@ func TestEndToEnd_MariaDBSnapshotChain(t *testing.T) {
 		args  []string
 	}{
 		{"baseline-anchored", []string{"--baseline-dir", baseDir}},
-		{"live source", []string{"--source-dsn", sourceDSN}},
+		{"live source", []string{"--source-dsn", sourceDSN, "--baseline-dir", baseDir}},
 	} {
 		args := append([]string{"verify", "--index-dsn", indexDSN, "--tables", strings.Join(names, ","), "--format", "json"}, mode.args...)
 		out, errOut, err := runResult(binPath, coverDir, args...)

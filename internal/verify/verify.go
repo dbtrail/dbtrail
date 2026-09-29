@@ -555,27 +555,31 @@ func deferredValueUnresolved(v any, c metadata.ColumnMeta, binariesTyped bool) b
 			return true // #736 mis-promotion leftover the decode pass could not restore
 		}
 	case "vector":
-		// VECTOR (MySQL 9.0+) is decoded by DecodeEventBinaries like BLOB
-		// (base64StoredKind), but it stays UNRESOLVED here because of a
-		// baseline-side asymmetry the spatial family does not have:
-		// internal/baseline's binary column list (mysqlToParquetNode's
-		// ByteArray case and the writer's decodeBinaryLiteral routing) covers
-		// geometry and its subtypes but NOT "vector", so a VECTOR baseline
-		// column stores the literal dump token (e.g. the ASCII "0x…" text of
-		// a --hex-blob dump), not the raw packed-float bytes. Resolving the
-		// event side would turn today's honest Inconclusive into a conclusive
-		// false MISMATCH on identical data.
+		// VECTOR (MySQL 9.0+, MariaDB 11.7+) is decoded by DecodeEventBinaries
+		// like BLOB (base64StoredKind), but it stays UNRESOLVED here. Baselines
+		// built before internal/baseline listed "vector" as a binary type store
+		// the literal dump token (e.g. the ASCII "0x…" text of a --hex-blob
+		// dump), not the raw packed-float bytes, and nothing here can tell
+		// such a baseline from a new one. Resolving the event side would turn
+		// an honest Inconclusive into a conclusive false MISMATCH on identical
+		// data for those. A baseline built since stores the bytes, and then
+		// the two sides simply agree (no difference, nothing to defer).
 		return true
 	case "uuid", "inet4", "inet6":
-		// MariaDB UUID/INET: permanently unresolved. The source SELECT and the
-		// mydumper baseline render the TEXT form ('12345678-...', '10.0.0.0'),
-		// while the event image holds base64 of the binary form (the
-		// decode pass does not know these types). And events captured before
-		// metadata.MapRow turned them into []byte hold damaged raw text
-		// (invalid UTF-8 replaced with U+FFFD), so the same value has two
-		// event spellings across that upgrade. Either difference would be a
-		// conclusive false MISMATCH; unsure means unresolved.
-		return true
+		// MariaDB UUID/INET. The source SELECT and the mydumper baseline
+		// render the TEXT form ('12345678-...', '10.0.0.0'). The event image
+		// stores base64 of the full-width bytes, which DecodeEventBinaries
+		// renders to that same text (metadata.RenderStoredMariaDBFixed), so a
+		// value that is exactly the server's text is comparable. Everything
+		// else stays unresolved: base64 the decode could not type, and the
+		// damaged raw text of events captured before metadata.MapRow turned
+		// these types into []byte (invalid UTF-8 replaced with U+FFFD), which
+		// has no rendering. Unsure means unresolved.
+		if !binariesTyped {
+			return true // may still be stored base64 — DecodeEventBinaries degraded
+		}
+		s, ok := v.(string)
+		return !ok || !metadata.IsMariaDBFixedText(c.DataType, s)
 	default:
 		// isDeferredType enumerates every deferred type in the cases above;
 		// anything else reaching here is unknown — unsure means unresolved.
@@ -662,8 +666,8 @@ func isDeferredType(dataType string) bool {
 		// as "geomcollection"; MariaDB and pre-8.0.11 report "geometrycollection".
 		"geometrycollection", "geomcollection",
 		"vector",
-		// MariaDB UUID/INET4/INET6: permanently unresolved (see
-		// deferredValueUnresolved's uuid case).
+		// MariaDB UUID/INET4/INET6: resolved only when rendered to the
+		// server's text (see deferredValueUnresolved's uuid case).
 		"uuid", "inet4", "inet6":
 		return true
 	}
