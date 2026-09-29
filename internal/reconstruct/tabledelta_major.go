@@ -355,6 +355,17 @@ func adoptMajorCompaction(ctx context.Context, p tableDeltaPublish) (np tableDel
 	return p, "", false, why, nil
 }
 
+// foldRefused says whether a refresh refused a fold of this chain, so the job
+// will not fold it again. An unreadable marker counts as not refused: the
+// refresh then leaves the chain to the job, as before the refusal.
+func foldRefused(compactDir, schema, table string, chainStart time.Time) bool {
+	if compactDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(CompactionDir(compactDir, schema, table, chainStart), CompactionRefusedMarker))
+	return err == nil
+}
+
 // CompactionRefusedMarker is left in a chain's staging folder when a refresh
 // refused the major compaction staged there (#1735). The job does not fold
 // that chain again; the folder goes when the chain ends, like any result

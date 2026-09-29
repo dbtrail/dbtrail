@@ -698,3 +698,46 @@ func TestRefreshOutcomes_sayTheFoldedFileWasPutInPlace(t *testing.T) {
 		t.Fatalf("items: %s", out[1].Detail)
 	}
 }
+
+// Once a fold is refused the job leaves that chain alone, so the refresh takes
+// the day rule back: a refused chain past a day is written in full here, not
+// left to grow to the two-day backstop.
+func TestPublishWithTableDelta_aRefusedChainGetsTheDayRuleBack(t *testing.T) {
+	r := newMajorRun(t, zooWindows())
+	r.stageIt()
+	rewriteFile(t, r.mc.Base, "", func(m map[string]string) { m[baseline.MetaKeyFoldedBaseSize] = "1" })
+	if rep := r.next(changeMap(upd(3, "a"))); rep.DeltaChainFoldRefused == "" {
+		t.Fatalf("not refused: %+v", rep)
+	}
+	r.at = r.at.Add(25 * time.Hour)
+	rep := r.next(changeMap(upd(3, "b")))
+	if !strings.Contains(rep.DeltaCompacted, "old") || strings.Contains(rep.DeltaCompacted, "has not folded") {
+		t.Fatalf("report = %+v, want the chain written in full on its age", rep)
+	}
+}
+
+// The readers #1735 names read the adopted snapshot like any other: verify's
+// chain-start lookup and the listing the console's backup detail shows.
+func TestAdoptedSnapshot_readByVerifyAndTheListing(t *testing.T) {
+	r := newMajorRun(t, zooWindows())
+	foldedAt := r.at
+	r.stageIt()
+	r.next(changeMap(upd(3, "three-v9")))
+	start, err := DeltaChainStart(context.Background(), r.base)
+	if err != nil || !start.Equal(foldedAt) {
+		t.Fatalf("DeltaChainStart = %s err=%v, want %s", start, err, foldedAt)
+	}
+	files, err := ListBaselines(context.Background(), r.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range files {
+		if f.Path == r.base {
+			found = f.SnapshotTime.Equal(r.at) && f.DeltaUpserts == "orders.000001.upserts"
+		}
+	}
+	if !found {
+		t.Fatalf("the adopted table is not listed as expected: %+v", files)
+	}
+}

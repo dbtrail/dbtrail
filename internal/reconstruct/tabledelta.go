@@ -978,8 +978,11 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	}
 	newBase := filepath.Join(p.cfg.snapshotDir, p.schema, p.table+".parquet")
 
+	// A chain whose fold a refresh refused is not folded by the job again
+	// (#1735), so the day and the quarter are this refresh's once more.
+	jobCompacts := p.cfg.CompactionJob && !(p.prev != nil && foldRefused(p.cfg.CompactDir, p.schema, p.table, p.prev.Meta.DeltaChainStart))
 	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.fold.Spill != nil, p.capGap, p.cfg.At, hasAnchor, reserved,
-		p.cfg.ChainStartFloor, newChainStart(p), p.cfg.CompactionJob); reason != "" {
+		p.cfg.ChainStartFloor, newChainStart(p), jobCompacts); reason != "" {
 		err := rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
 		if err == nil {
 			// The adopted file was read by this rewrite and is not needed
