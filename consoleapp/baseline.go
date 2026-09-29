@@ -81,6 +81,16 @@ type baselineSupervisor struct {
 	// server, sharing the single-flight: it reads the chain a refresh would
 	// extend and a full backup would replace.
 	compacts map[string]*console.BaselineStatus
+	// chainFloors is, per server id, the line the last refresh ended chains
+	// of table deltas on (#1904) and that cycle's interval: the compaction
+	// job folds a chain before its start reaches that line (#1735), so the
+	// refresh does not have to write the table in full in its own slot.
+	// Guarded by mu; nil until the first refresh records one.
+	chainFloors map[string]chainFloor
+	// foldJobs is what the compaction job remembers per server between runs
+	// (#1735): whether it could run at all, and which chains' folds failed
+	// or were refused. Guarded by mu; nil until first used.
+	foldJobs map[string]*foldJob
 	// exportRuns is each server's CURRENT build: its directory (unique per
 	// build; see sqlExportRoot for why builds never share a path), the
 	// downloads streaming it, and the removal it is owed.

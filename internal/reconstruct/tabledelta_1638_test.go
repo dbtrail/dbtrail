@@ -173,11 +173,11 @@ func ids(rows []map[string]any) []string {
 func TestTableDeltaCompactReason_leavesSmallTablesAlone(t *testing.T) {
 	at := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	prev := &tableDelta{Meta: baseline.DumpMetadata{DeltaChainStart: at.Add(-time.Hour)}, PairSize: 1<<20 - 1}
-	if got := tableDeltaCompactReason(prev, "/b/t.parquet", 700, false, nil, at, true, "", time.Time{}, time.Time{}); got != "" {
+	if got := tableDeltaCompactReason(prev, "/b/t.parquet", 700, false, nil, at, true, "", time.Time{}, time.Time{}, false); got != "" {
 		t.Errorf("under the floor: reason = %q, want none", got)
 	}
 	prev.PairSize = 1 << 20
-	if got := tableDeltaCompactReason(prev, "/b/t.parquet", 700, false, nil, at, true, "", time.Time{}, time.Time{}); !strings.Contains(got, "passed 25%") {
+	if got := tableDeltaCompactReason(prev, "/b/t.parquet", 700, false, nil, at, true, "", time.Time{}, time.Time{}, false); !strings.Contains(got, "passed 25%") {
 		t.Errorf("at the floor: reason = %q, want the size rule", got)
 	}
 }

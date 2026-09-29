@@ -3,7 +3,9 @@ package reconstruct
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -182,17 +184,24 @@ func adoptCompaction(compactDir, schema, table string, prev *tableDelta) (baseli
 	if _, err := os.Stat(filepath.Join(dir, baseline.SuccessMarker)); err != nil {
 		return none, "", false
 	}
+	for _, e := range entries {
+		if e.Name() == table+".parquet" {
+			// A major result (#1735): adoptMajorCompaction's, which kept it
+			// for the next refresh. Not a minor result that does not fit.
+			return none, "", false
+		}
+	}
 	discard := func(why string, args ...any) (baseline.TableDeltaFile, string, bool) {
 		slog.Warn("table delta compaction not adopted; removing it: "+why,
 			append([]any{"schema", schema, "table", table, "dir", dir}, args...)...)
-		if err := os.RemoveAll(dir); err != nil {
+		if err := ClearCompactionDir(dir); err != nil {
 			slog.Warn("could not remove a compaction result", "dir", dir, "error", err)
 		}
 		return none, "", false
 	}
 	var names []string
 	for _, e := range entries {
-		if !e.IsDir() && e.Name() != baseline.SuccessMarker {
+		if !e.IsDir() && e.Name() != baseline.SuccessMarker && e.Name() != CompactionRefusedMarker {
 			names = append(names, e.Name())
 		}
 	}
@@ -243,6 +252,42 @@ func adoptCompaction(compactDir, schema, table string, prev *tableDelta) (baseli
 		return discard("its two files were not written by the same run")
 	}
 	return r, dir, true
+}
+
+// ClearCompactionDir removes a chain's staged results and keeps its
+// CompactionRefusedMarker, if it has one: a refused chain may still have its
+// first pairs merged (#1735), and the record of the refusal is what keeps the
+// job from folding it again. The folder goes when it holds nothing else.
+func ClearCompactionDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// _SUCCESS first: a removal that stops half way must not leave a
+	// complete-looking result with files missing.
+	if err := os.Remove(filepath.Join(dir, baseline.SuccessMarker)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	kept := false
+	for _, e := range entries {
+		if e.Name() == baseline.SuccessMarker {
+			continue
+		}
+		if e.Name() == CompactionRefusedMarker {
+			kept = true
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	if kept {
+		return nil
+	}
+	return os.Remove(dir)
 }
 
 // sweepOtherChains removes every staged result for the table that names a
