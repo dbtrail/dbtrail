@@ -150,6 +150,26 @@ func CurrentGTIDExecuted(db *sql.DB) (string, error) {
 	return set, nil
 }
 
+// CurrentMariaDBGTIDPos returns a MariaDB source's @@GLOBAL.gtid_binlog_pos:
+// the last GTID written to the binary log in each replication domain
+// ("0-1-100,1-2-7"). It is the MariaDB sibling of CurrentGTIDExecuted and the
+// value a fresh MariaDB capture starts GTID replication from: "everything up to
+// here is already seen, send what comes after". It is the binlog position, not
+// @@gtid_current_pos, on purpose: capture reads the binlog, and on a replica
+// without log_slave_updates the replicated GTIDs are not in it.
+//
+// Whitespace is stripped so the value is usable as a start set as-is. An empty
+// result is returned as "" with no error; what it means (a server that has
+// written no transaction, or log_bin=OFF) is for the caller to sort out. A
+// query failure is an error.
+func CurrentMariaDBGTIDPos(db *sql.DB) (string, error) {
+	var pos sql.NullString
+	if err := db.QueryRow("SELECT @@GLOBAL.gtid_binlog_pos").Scan(&pos); err != nil {
+		return "", fmt.Errorf("SELECT @@GLOBAL.gtid_binlog_pos: %w", err)
+	}
+	return strings.Join(strings.Fields(pos.String), ""), nil
+}
+
 // defaultTimeout is the TCP connect timeout applied when the DSN does not
 // specify one. Prevents indefinite hangs when MySQL is unreachable.
 const defaultTimeout = 10 * time.Second

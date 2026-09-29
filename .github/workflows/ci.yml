@@ -556,6 +556,8 @@ jobs:
             TestOne_MariaDB_flavorDetectedWhenUndeclared \
             TestOne_MariaDB_declaredMySQLRefuses \
             TestOne_MariaDB_resumeOldMySQLDefaultCheckpoint \
+            TestOne_MariaDB_freshCaptureStartsInGTIDMode \
+            TestOne_MariaDB_explicitStartPosStaysPositionThenResetMovesToGTID \
             TestIntegrationMonitorRegistrySourceMariaDBDetected \
             TestBuild_MariaDBVersionRow \
             TestRecoverRoundTrip_MariaDBTypes \

@@ -650,6 +650,9 @@ func persistResetDiscard(db *sql.DB, fresh *streamState, noop bool, detail strin
 // loss records: "file:pos" in position mode, "gtid_set <set>" in GTID mode.
 func describeCheckpoint(mode, file string, pos uint64, gtidSet string) string {
 	if mode == "gtid" {
+		if strings.TrimSpace(gtidSet) == "" {
+			return "gtid_set (empty)"
+		}
 		return fmt.Sprintf("gtid_set %s", gtidSet)
 	}
 	return fmt.Sprintf("%s:%d", file, pos)
@@ -1047,22 +1050,26 @@ func resolveStartForFlavor(
 // threaded into resolveStartForFlavor so saved/flag GTID sets parse with the
 // right flavor.
 //
-// gtidAutoDiscover is tried BEFORE the position callback, and only for the
-// MySQL flavor: a non-empty executed set selects GTID mode (parsed with the
-// same flavor-aware parser as the --start-gtid branch), so a fresh stream on a
-// gtid_mode=ON source checkpoints in GTID mode and live-source verify works
-// out of the box (#1131). An empty set — gtid_mode not ON, or a fresh server
-// with zero transactions — falls back to the position callback unchanged
-// (starting GTID replication from an empty set would replay the binlog from
-// the beginning, not "start from now"). A gtidAutoDiscover ERROR is fatal, not
-// a fallback: an operator on a GTID source must not silently end up in
-// position mode.
+// gtidAutoDiscover is tried BEFORE the position callback. The caller picks it
+// by flavor: config.CurrentGTIDExecuted for MySQL, config.CurrentMariaDBGTIDPos
+// (@@gtid_binlog_pos) for MariaDB. A non-empty set selects GTID mode (parsed
+// with the same flavor-aware parser as the --start-gtid branch), so a fresh
+// stream checkpoints in GTID mode and live-source verify works out of the box
+// (#1131 for MySQL; MariaDB since verify compares @@gtid_binlog_pos per
+// domain). A gtidAutoDiscover ERROR is fatal, not a fallback: an operator on a
+// GTID source must not silently end up in position mode.
 //
-// MariaDB deliberately keeps position-only auto-discovery: its GTID
-// coordinates (domain-server-seq, @@gtid_current_pos) have different discovery
-// semantics, and the live-source verify coverage check that motivates GTID
-// mode only consumes MySQL GTID sets — auto-selecting GTID mode there would be
-// an untested behavior change with no consumer.
+// An EMPTY set means different things per flavor:
+//   - MySQL (gtid_mode not ON, or zero transactions): fall back to the
+//     position callback, unchanged. A MySQL binlog can hold transactions
+//     without GTIDs (written before gtid_mode was turned on), so a GTID start
+//     from an empty set could replay them.
+//   - MariaDB (a server that has written no transaction yet): every MariaDB
+//     transaction carries a GTID, so an empty binlog GTID state means the
+//     binlog holds no transaction and a GTID start from the empty set is
+//     exactly "from now on". The position callback still runs first as a
+//     probe: log_bin=OFF also empties @@gtid_binlog_pos, and the probe is what
+//     names that.
 func resolveStartWithAutoDiscoverForFlavor(
 	startFile, startGTID string, startPos uint32,
 	saved *streamState, flavor string,
@@ -1080,20 +1087,38 @@ func resolveStartWithAutoDiscoverForFlavor(
 	if saved != nil || startFile != "" || startGTID != "" {
 		return
 	}
-	if gtidAutoDiscover != nil && flavor == gomysql.MySQLFlavor {
+	if gtidAutoDiscover != nil {
 		set, dErr := gtidAutoDiscover()
 		if dErr != nil {
+			if flavor == gomysql.MariaDBFlavor {
+				return "", "", "", 0, nil, fmt.Errorf("auto-discover MariaDB GTID position (@@gtid_binlog_pos): %w", dErr)
+			}
 			return "", "", "", 0, nil, fmt.Errorf("auto-discover executed GTID set: %w", dErr)
 		}
 		if set != "" {
 			set = normalizeGTIDForFlavor(flavor, set)
 			gs, parseErr := parseGTIDSetForFlavor(flavor, set)
 			if parseErr != nil {
-				return "", "", "", 0, nil, fmt.Errorf("auto-discovered gtid_executed %q is unparseable: %w", set, parseErr)
+				return "", "", "", 0, nil, fmt.Errorf("auto-discovered %s %q is unparseable: %w", gtidDiscoverySource(flavor), set, parseErr)
 			}
 			return "gtid", "", set, 0, gs, nil
 		}
-		// Empty set: fall through to position discovery below.
+		if flavor == gomysql.MariaDBFlavor {
+			// The probe is the only thing that tells "nothing written yet"
+			// from log_bin=OFF here, so it is required, never skipped.
+			if autoDiscover == nil {
+				return "", "", "", 0, nil, fmt.Errorf("MariaDB @@gtid_binlog_pos is empty and no binlog position probe is wired to confirm log_bin is ON")
+			}
+			if _, _, pErr := autoDiscover(); pErr != nil {
+				return "", "", "", 0, nil, fmt.Errorf("auto-discover binlog position: %w", pErr)
+			}
+			gs, parseErr := parseGTIDSetForFlavor(flavor, "")
+			if parseErr != nil {
+				return "", "", "", 0, nil, fmt.Errorf("empty MariaDB GTID set: %w", parseErr)
+			}
+			return "gtid", "", "", 0, gs, nil
+		}
+		// MySQL, empty set: fall through to position discovery below.
 	}
 	if autoDiscover == nil {
 		return // the original "no start position" error
@@ -1103,6 +1128,52 @@ func resolveStartWithAutoDiscoverForFlavor(
 		return "", "", "", 0, nil, fmt.Errorf("auto-discover binlog position: %w", dErr)
 	}
 	return "position", af, "", ap, nil, nil
+}
+
+// emptyAsWord renders an empty GTID set readably in durable loss messages.
+func emptyAsWord(set string) string {
+	if strings.TrimSpace(set) == "" {
+		return "(empty)"
+	}
+	return set
+}
+
+// gtidDiscoverySource names the server variable a fresh GTID start is read
+// from, for logs and errors.
+func gtidDiscoverySource(flavor string) string {
+	if flavor == gomysql.MariaDBFlavor {
+		return "gtid_binlog_pos"
+	}
+	return "gtid_executed"
+}
+
+// gtidAutoDiscoverFor returns the first-run GTID discovery for the resolved
+// flavor: @@gtid_binlog_pos on MariaDB, @@gtid_executed (gated on gtid_mode=ON)
+// on MySQL. See resolveStartWithAutoDiscoverForFlavor for what each empty
+// value means.
+func gtidAutoDiscoverFor(flavor string, sourceDB *sql.DB) func() (string, error) {
+	if flavor == gomysql.MariaDBFlavor {
+		return func() (string, error) { return config.CurrentMariaDBGTIDPos(sourceDB) }
+	}
+	return func() (string, error) { return config.CurrentGTIDExecuted(sourceDB) }
+}
+
+// autoDiscoveredGTIDLine logs a first-run GTID start and returns the terminal
+// line for it. The MySQL line is byte-identical to the one before MariaDB
+// started in GTID mode. The full set goes to the structured log; the terminal
+// line is truncated (a long-lived multi-source server's set can span many
+// blocks).
+func autoDiscoveredGTIDLine(flavor, set string) string {
+	if flavor != gomysql.MariaDBFlavor {
+		slog.Info("auto-discovered executed GTID set (gtid_mode=ON)", "gtid_set", set)
+		return fmt.Sprintf("Start position: auto-discovered GTID set %s ✓\n", truncateForDisplay(set, 120))
+	}
+	if set == "" {
+		slog.Info("MariaDB source has written no transaction yet (@@gtid_binlog_pos is empty); starting in GTID mode from the empty set")
+		return "Start position: GTID mode, from the first transaction (the source has written none yet) ✓\n"
+	}
+	slog.Info("auto-discovered MariaDB GTID position (@@gtid_binlog_pos)", "gtid_set", set)
+	return fmt.Sprintf("Start position: GTID mode, from %s ✓\n", truncateForDisplay(set, 120))
 }
 
 // truncateForDisplay shortens s for a single terminal line. GTID sets are
@@ -1449,10 +1520,11 @@ func detectMariaDBGTIDGap(sourceDB *sql.DB, checkpointGTID string, timeout time.
 		}, nil
 	}
 
-	if checkpointGTID == "" {
-		return nil, fmt.Errorf("checkpoint GTID set is empty; cannot perform gap detection")
-	}
-
+	// An empty checkpoint is legitimate here (unlike MySQL's detectGTIDGap): a
+	// capture started on a MariaDB that had written nothing yet holds the empty
+	// set until its first transaction. It means "saw nothing", which parses to
+	// an empty set and fails the per-domain coverage check below in every
+	// domain of the floor: an unfillable gap, not a refusal.
 	checkpoint, err := parseMariadbSet(checkpointGTID)
 	if err != nil {
 		return nil, fmt.Errorf("parse checkpoint GTID set: %w", err)
@@ -1473,7 +1545,7 @@ func detectMariaDBGTIDGap(sourceDB *sql.DB, checkpointGTID string, timeout time.
 			Message: fmt.Sprintf(
 				"MariaDB GTID gap detected but CANNOT be filled: required GTIDs have been purged from the source "+
 					"(purge floor %s is beyond checkpoint %s); events in the purged range are permanently lost",
-				floorStr, checkpointGTID),
+				floorStr, emptyAsWord(checkpointGTID)),
 		}, nil
 	}
 
@@ -2210,7 +2282,7 @@ func One(ctx context.Context, cfg Config) error {
 	mode, startFile, startGTIDStr, startPos, accGTID, err := resolveStartWithAutoDiscoverForFlavor(
 		cfg.StartFile, cfg.StartGTID, cfg.StartPos, saved, cfg.Flavor,
 		func() (string, uint32, error) { return config.CurrentBinlogPosition(sourceDB) },
-		func() (string, error) { return config.CurrentGTIDExecuted(sourceDB) })
+		gtidAutoDiscoverFor(cfg.Flavor, sourceDB))
 	if err != nil {
 		return err
 	}
@@ -2225,8 +2297,7 @@ func One(ctx context.Context, cfg Config) error {
 			// The full set goes to the structured log; the terminal line is
 			// truncated (a long-lived multi-source server's gtid_executed can
 			// span many UUID blocks).
-			slog.Info("auto-discovered executed GTID set (gtid_mode=ON)", "gtid_set", startGTIDStr)
-			fmt.Printf("Start position: auto-discovered GTID set %s ✓\n", truncateForDisplay(startGTIDStr, 120))
+			fmt.Print(autoDiscoveredGTIDLine(cfg.Flavor, startGTIDStr))
 		}
 	}
 
@@ -2628,7 +2699,12 @@ func One(ctx context.Context, cfg Config) error {
 	case "position":
 		fmt.Printf("Streaming from %s position %d\n", startFile, startPos)
 	case "gtid":
-		fmt.Printf("Streaming from GTID set: %s\n", startGTIDStr)
+		if startGTIDStr == "" {
+			// Only a MariaDB that has written nothing yet starts here.
+			fmt.Println("Streaming from GTID set: (empty, from the first transaction)")
+		} else {
+			fmt.Printf("Streaming from GTID set: %s\n", startGTIDStr)
+		}
 	}
 
 	// (Signal handling lives in runStream — the process owner. One only

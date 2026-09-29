@@ -2,6 +2,7 @@ package streamrun
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -348,20 +349,80 @@ func TestDetectMariaDBGTIDGap_domainNeverSeen(t *testing.T) {
 	}
 }
 
-// TestDetectMariaDBGTIDGap_emptyCheckpointGuard mirrors detectGTIDGap's guard:
-// with a non-empty purge floor we cannot reason about an empty checkpoint.
-func TestDetectMariaDBGTIDGap_emptyCheckpointGuard(t *testing.T) {
+// TestDetectMariaDBGTIDGap_emptyCheckpointIsUnfillable: an empty MariaDB GTID
+// checkpoint is what a capture started on a server that had written nothing
+// yet leaves behind until its first transaction. It means "saw nothing", so a
+// non-empty purge floor is an unfillable gap in every domain (the per-domain
+// check already says so), not an error that refuses the resume.
+func TestDetectMariaDBGTIDGap_emptyCheckpointIsUnfillable(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
 	defer db.Close()
 
-	expectMariaDBGapQueries(mock, "mariadb-bin.000005", "0-2-71", "0-2-200")
+	expectMariaDBGapQueries(mock, "mariadb-bin.000005", "0-2-71,1-3-4", "0-2-200,1-3-9")
 
-	_, err = detectMariaDBGTIDGap(db, "", 10*time.Second)
-	if err == nil {
-		t.Fatal("expected an error for an empty checkpoint against a non-empty purge floor")
+	gap, err := detectMariaDBGTIDGap(db, "", 10*time.Second)
+	if err != nil {
+		t.Fatalf("an empty checkpoint must not refuse the resume: %v", err)
+	}
+	if !gap.HasGap || gap.Fillable {
+		t.Fatalf("expected an unfillable gap, got %+v", gap)
+	}
+	if !strings.Contains(gap.Message, "beyond checkpoint (empty)") {
+		t.Errorf("Message = %q, want the empty checkpoint named as (empty)", gap.Message)
+	}
+	if gap.PurgedGTIDSet != "0-2-71,1-3-4" {
+		t.Errorf("PurgedGTIDSet = %q, want the purge floor 0-2-71,1-3-4", gap.PurgedGTIDSet)
+	}
+}
+
+// TestDetectMariaDBGTIDGap_emptyCheckpointNothingPurged: an empty checkpoint on
+// a source whose binlog history is intact is a fillable gap (replay from the
+// start of the binlog), or no gap when the source is still empty.
+func TestDetectMariaDBGTIDGap_emptyCheckpointNothingPurged(t *testing.T) {
+	for _, tc := range []struct {
+		executed string
+		wantGap  bool
+	}{{"", false}, {"0-2-5", true}} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		expectMariaDBGapQueries(mock, "mariadb-bin.000001", "", tc.executed)
+		gap, err := detectMariaDBGTIDGap(db, "", 10*time.Second)
+		db.Close()
+		if err != nil {
+			t.Fatalf("executed=%q: unexpected error: %v", tc.executed, err)
+		}
+		if gap.HasGap != tc.wantGap || (gap.HasGap && !gap.Fillable) {
+			t.Errorf("executed=%q: got %+v, want HasGap=%v fillable", tc.executed, gap, tc.wantGap)
+		}
+	}
+}
+
+// TestDetectMariaDBGTIDGap_freshMultiDomainStartCoversFloor: the checkpoint a
+// fresh multi-domain start writes (every domain of @@gtid_binlog_pos) covers a
+// later purge floor in every domain, so gap detection is per domain from the
+// first event: a purge the capture already read past is not a loss.
+func TestDetectMariaDBGTIDGap_freshMultiDomainStartCoversFloor(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	// Started at 0-1-100,1-2-7; the source then purged up to those points and
+	// wrote more in domain 0 only.
+	expectMariaDBGapQueries(mock, "mariadb-bin.000009", "0-1-100,1-2-7", "0-1-120,1-2-7")
+
+	gap, err := detectMariaDBGTIDGap(db, "0-1-100,1-2-7", 10*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !gap.HasGap || !gap.Fillable {
+		t.Errorf("expected a fillable gap (domain 0 behind, nothing lost), got %+v", gap)
 	}
 }
 

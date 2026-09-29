@@ -131,3 +131,51 @@ func TestParseBYOSStartGTIDFlavor(t *testing.T) {
 		t.Errorf("want the wrapped parse error, got %v", err)
 	}
 }
+
+// TestBYOSStartGTID covers the agent's start decision. An explicit --start-gtid
+// always wins. With none, a MariaDB source starts in GTID mode from
+// @@gtid_binlog_pos (every domain), and falls back to the current binlog
+// position only when that value is empty (a server that has written nothing:
+// the agent keeps no checkpoint, so the mode lives only for this process). A
+// MySQL source is unchanged: it never asks, and starts at the current position.
+func TestBYOSStartGTID(t *testing.T) {
+	mustNotAsk := func() (string, error) {
+		t.Error("the GTID position must not be read on this path")
+		return "", nil
+	}
+	for _, tc := range []struct {
+		name, flavor, startGTID string
+		discover                func() (string, error)
+		want                    string // "" = position start
+	}{
+		{"mariadb fresh, one domain", gomysql.MariaDBFlavor, "", func() (string, error) { return "0-1-100", nil }, "0-1-100"},
+		{"mariadb fresh, several domains", gomysql.MariaDBFlavor, "", func() (string, error) { return "0-1-100,1-2-7", nil }, "0-1-100,1-2-7"},
+		{"mariadb empty position", gomysql.MariaDBFlavor, "", func() (string, error) { return "", nil }, ""},
+		{"mariadb explicit --start-gtid", gomysql.MariaDBFlavor, "0-1-5", mustNotAsk, "0-1-5"},
+		{"mysql never asks", gomysql.MySQLFlavor, "", mustNotAsk, ""},
+		{"mysql explicit --start-gtid", gomysql.MySQLFlavor, "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5", mustNotAsk,
+			"3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gset, err := byosStartGTID(tc.flavor, tc.startGTID, tc.discover)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			got := ""
+			if gset != nil {
+				got = gset.String()
+			}
+			if got != tc.want {
+				t.Errorf("start GTID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	stub := errors.New("connection reset")
+	if _, err := byosStartGTID(gomysql.MariaDBFlavor, "", func() (string, error) { return "", stub }); !errors.Is(err, stub) {
+		t.Errorf("a failed @@gtid_binlog_pos read must be an error, got %v", err)
+	}
+	if _, err := byosStartGTID(gomysql.MariaDBFlavor, "", func() (string, error) { return "garbage", nil }); err == nil {
+		t.Error("an unparseable @@gtid_binlog_pos must be an error")
+	}
+}

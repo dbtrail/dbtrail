@@ -505,10 +505,11 @@ sources exist:
   compares it with the index's checkpoint domain by domain: the index must
   have reached the source's sequence number in every domain. An index behind
   the snapshot is inconclusive, as on MySQL. The check needs the capture to
-  run in GTID mode; a capture in binlog-position mode (the default for a
-  MariaDB source, see [streaming](streaming.md)) cannot be compared, so
-  live-source verify reports inconclusive instead of assuming the index is
-  current.
+  run in GTID mode, which is how a new MariaDB capture starts. A capture in
+  binlog-position mode (started with `--start-file`, or by an older version
+  that started MariaDB in position mode) cannot be compared, so live-source
+  verify reports inconclusive instead of assuming the index is current. See
+  [MariaDB](mariadb.md#moving-a-position-mode-capture-to-gtid) to move one.
 - **PostgreSQL** — baseline-anchored verify works against the PG capture
   (`bintrail-pg stream` / the web interface's PostgreSQL servers), anchored on WAL
   LSNs instead of binlog coordinates; recover-input works too (index-only —
