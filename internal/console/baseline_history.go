@@ -83,6 +83,10 @@ type BaselineRunRecord struct {
 	// it, fixed at write time. Empty on updates and manual backups.
 	Why     string `json:"why,omitempty"`
 	WhyCode string `json:"why_code,omitempty"`
+	// DiskCheck / DiskNote: see BaselineStatus. Kept with the run so a read
+	// that ran on a low disk says so after the live status is gone.
+	DiskCheck string `json:"disk_check,omitempty"`
+	DiskNote  string `json:"disk_note,omitempty"`
 	// Events is how far the index high-water mark moved between this
 	// daemon's previous fold of the snapshot an update started from and
 	// this one (every source writing to the index counts, and so do rows a

@@ -8197,15 +8197,21 @@ async function createBaseline(id, btn) {
     done = await pollBaseline(id, true);
   }
   restore();
+  // A low disk (#1938) stays on screen: the read ran, and the next one may not.
+  const lowDisk = done && done.disk_check === "low" && done.disk_note ? done.disk_note : "";
+  const unchecked = done && done.disk_check === "unchecked" && done.disk_note ? ". " + done.disk_note : "";
   if (done && done.state === "succeeded" && !done.uploading) {
     toast("Snapshot complete: " + (done.tables || 0) + " table(s)" +
       (done.uploaded ? ", " + done.uploaded + " file(s) uploaded" : "") +
-      (done.swept ? ", " + done.swept + " earlier snapshot(s) sent too" : ""));
+      (done.swept ? ", " + done.swept + " earlier snapshot(s) sent too" : "") + unchecked);
+    if (lowDisk) toastError(lowDisk);
   } else if (done && done.uploading) {
     // The poll's cap hit mid-copy: say what is true, not "complete".
     toast("Snapshot saved on this machine. The copy to the snapshot destination is still running; the Snapshots page shows when it finishes.");
+    if (lowDisk) toastError(lowDisk);
   } else if (done) {
-    toastError("Snapshot failed: " + (done.last_error || "unknown error"));
+    const why = done.last_error || "unknown error";
+    toastError("Snapshot failed: " + why + (lowDisk ? (/[.!?]$/.test(why) ? " " : ". ") + lowDisk : ""));
   } else {
     toast("The snapshot is still running. Check back shortly.");
   }
@@ -8562,6 +8568,9 @@ async function loadBackupDetail(at, box) {
   if (sessionMay("query:execute")) facts.append(dl);
   box.append(facts);
   if (d.incomplete) box.append(el("p", { class: "form-msg err", text: "This snapshot is marked incomplete (a failed or unfinished run); it cannot be downloaded or restored from." }));
+  // The full read's disk check (#1938): a low disk in the error style, the
+  // rest as a plain line.
+  if (d.run && d.run.disk_note) box.append(el("p", { class: d.run.disk_check === "low" ? "form-msg err" : "form-hint", text: d.run.disk_note }));
   const skipped = viewsSkippedBlock(d.views_skipped);
   if (skipped) box.append(skipped);
   const tbl = el("table", { class: "bk-table" });
@@ -9101,6 +9110,11 @@ function backupScheduleCard(cur, b) {
             " Nothing was overwritten; the next scheduled run tries again." }));
         const stopped = refusedTablesBlock(run);
         if (stopped) body.append(stopped);
+      }
+      // A full read that ran on a low disk, or without its disk check
+      // (#1938): nobody clicked, so the card is where it is said.
+      if (run.disk_note && run.disk_check !== "ok") {
+        body.append(el("p", { class: run.disk_check === "low" ? "form-msg err" : "form-hint", text: run.disk_note }));
       }
       // The reason a full backup was taken, as recorded when it ran, and
       // the setting that turns the next one into an update (#1604). After

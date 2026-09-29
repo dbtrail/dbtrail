@@ -615,6 +615,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 		// recomputed later it would name whatever is true THEN.
 		Why: req.Why, WhyCode: console.BackupWhyCode(req.Why),
 	}
+	rec.DiskCheck, rec.DiskNote = s.dumpDiskOf(req.ServerID, own)
 	// A snapshot instant is recorded when a snapshot was published: a
 	// success, or a local publish whose upload failed.
 	if !out.at.IsZero() && (err == nil || (out.snapDir != "" && !out.staged)) {
@@ -641,6 +642,9 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	if err != nil {
 		st.State = "failed"
 		st.LastError = err.Error()
+		// A full read refused for disk (#1938), or one that found the disk
+		// full anyway, reads the same to the page as a refused update.
+		st.DiskRefused = foldDiskRefused(err)
 		if st.Published {
 			if errors.Is(err, context.Canceled) {
 				// A routine restart, not a lost backup: the local snapshot is
@@ -692,6 +696,15 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
 		return dumpOutcome{}, fmt.Errorf("create staging dir: %w", err)
 	}
+	// Before anything is created or dumped (#1938): the whole dump lands in
+	// the staging folder before it becomes Parquet. The verdict goes on the
+	// job's status now, so the run's history record and the schedule card
+	// carry a low-disk warning even if the read then fails.
+	check, note, err := s.checkDumpDisk(req)
+	if err != nil {
+		return dumpOutcome{}, err
+	}
+	s.noteDumpDisk(req.ServerID, check, note)
 
 	dumpDir, err := os.MkdirTemp(s.stagingDir, "dump-")
 	if err != nil {
@@ -1186,7 +1199,15 @@ func buildConsoleMydumperArgs(host string, port uint16, user string, schemas []s
 // discovery could disagree, and that is fine, since the warning is advisory, not
 // a correctness gate. Pure and unit-testable without a live database.
 func dumpableTableCountQuery(schemas []string) (string, []any) {
-	const base = "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND "
+	where, args := dumpableTablesWhere(schemas)
+	return "SELECT COUNT(*) FROM information_schema.TABLES WHERE " + where, args
+}
+
+// dumpableTablesWhere is the information_schema.TABLES filter for the tables
+// a console dump selects, shared by the no-lock count above and the disk
+// check's size estimate (dumpSizeQuery, #1938) so the two cannot drift apart.
+func dumpableTablesWhere(schemas []string) (string, []any) {
+	const base = "TABLE_TYPE = 'BASE TABLE' AND "
 	if len(schemas) == 0 {
 		return base + "TABLE_SCHEMA NOT IN ('mysql','sys','performance_schema','information_schema')", nil
 	}

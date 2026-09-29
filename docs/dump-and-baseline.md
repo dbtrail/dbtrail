@@ -108,6 +108,8 @@ Step 2: bintrail baseline  →  Parquet files (one per table)
 **Step 1** requires a live connection to the source MySQL server.
 **Step 2** operates purely on files — no database connection needed. It can run on a different machine from where the dump was taken.
 
+**Disk.** Step 1 writes the whole dump uncompressed, and step 2 writes the Parquet while the dump is still there, so the disk has to hold both at once. On synthetic data the dump stayed below the tables' `DATA_LENGTH + INDEX_LENGTH`, and dump plus Parquet reached 1.8× of it for random binary data. A full read started from the web interface or a schedule checks this before mydumper starts, refuses when the dump cannot fit, and warns when the peak may not. It writes the dump under `BINTRAIL_CONSOLE_BASELINE_STAGING` (default: `bintrail-baseline-staging` under the system temp folder), so move that to a disk with room. Measurements, the rule of thumb and how the check decides: [Capacity planning](./capacity.md#disk-for-a-full-read-the-dump-is-on-disk-before-it-is-parquet).
+
 ---
 
 ## Step 1: Running a dump (`bintrail dump`)
