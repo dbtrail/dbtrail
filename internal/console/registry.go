@@ -699,6 +699,13 @@ func (r *Registry) Update(e ServerEntry) error {
 		}
 		// Registry-owned (#1681): always the stored value, whatever was sent.
 		e.LocalKeepHeldDir = old.LocalKeepHeldDir
+		// Within MySQL and MariaDB the Source type is registry-owned too:
+		// capture corrects it (CorrectSourceFlavor), and an edit built from
+		// a copy read before that must not put the old value back. No edit
+		// can change it on purpose: the edit endpoint refuses a new flavor.
+		if mysqlFamily(old.SourceFlavor()) && mysqlFamily(e.SourceFlavor()) {
+			e.Flavor = old.Flavor
+		}
 		// The whole list is copied: marking a folder that stops being shared
 		// changes OTHER entries, and a failed save must undo all of it.
 		prev := slices.Clone(r.file.Servers)
@@ -711,6 +718,44 @@ func (r *Registry) Update(e ServerEntry) error {
 		return nil
 	}
 	return ErrUnknownServer
+}
+
+// CorrectSourceFlavor saves detected, the flavor the server reported when
+// capture asked it, as the Source type of entry id, and reports whether the
+// saved value changed. For MySQL and MariaDB the saved type is a hint that
+// capture already overrides; this makes the label every other reader sees
+// (the server list, the snapshot trigger, the capture status read) say what
+// capture runs as. Only a move between mysql and mariadb is made: an entry
+// saved as postgres is never touched, and detected must be mysql or mariadb.
+// A saved value that already means detected is left as written, so an old
+// blank entry of a MySQL server stays blank.
+func (r *Registry) CorrectSourceFlavor(id, detected string) (bool, error) {
+	want, err := NormalizeFlavor(detected)
+	if err != nil || strings.TrimSpace(detected) == "" || want == FlavorPostgres {
+		return false, fmt.Errorf("%q is not a flavor a MySQL or MariaDB server reports", detected)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.readOnly {
+		return false, ErrRegistryReadOnly
+	}
+	for i, old := range r.file.Servers {
+		if old.ID != id {
+			continue
+		}
+		have := old.SourceFlavor()
+		if have == FlavorPostgres || have == want {
+			return false, nil
+		}
+		prev := old.Flavor
+		r.file.Servers[i].Flavor = want
+		if err := r.save(); err != nil {
+			r.file.Servers[i].Flavor = prev // roll back
+			return false, err
+		}
+		return true, nil
+	}
+	return false, ErrUnknownServer
 }
 
 // UndoAdd removes an entry Add just created, when the rest of the create
