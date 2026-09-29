@@ -706,16 +706,36 @@ func TestEndToEnd_MariaDBSnapshotEd25519(t *testing.T) {
 		t.Fatalf("open as the ed25519 user: %v", err)
 	}
 	defer edDB.Close()
+	// Go's driver fails about one ed25519 login in two hundred with
+	// "malformed packet" (measured on MariaDB 10.11, with and without TLS;
+	// never with mysql_native_password). That is not what this test is about,
+	// so those two steps get a few attempts, and each flake is logged.
 	var n int
-	if err := edDB.QueryRow("SELECT n FROM t WHERE id = 1").Scan(&n); err != nil {
-		t.Fatalf("the ed25519 user cannot log in from Go, so this test proves nothing: %v", err)
+	for attempt := 1; ; attempt++ {
+		err = edDB.QueryRow("SELECT n FROM t WHERE id = 1").Scan(&n)
+		if err == nil {
+			break
+		}
+		if attempt == 3 || !strings.Contains(err.Error(), "malformed packet") {
+			t.Fatalf("the ed25519 user cannot log in from Go, so this test proves nothing: %v", err)
+		}
+		t.Logf("Go driver ed25519 login flake (attempt %d): %v", attempt, err)
 	}
 
 	binPath, coverDir := chainBinary(t)
-	dumpDir := filepath.Join(t.TempDir(), "dump")
-	out, errOut, err := runResult(binPath, coverDir, "dump",
-		"--source-dsn", dsnWith(t, testutil.MariaDBBaseDSN(), user, pass, sourceName),
-		"--output-dir", dumpDir, "--schemas", sourceName, "--mydumper-path", mydumper)
+	var out, errOut string
+	var dumpDir string
+	for attempt := 1; ; attempt++ {
+		dumpDir = filepath.Join(t.TempDir(), "dump")
+		out, errOut, err = runResult(binPath, coverDir, "dump",
+			"--source-dsn", dsnWith(t, testutil.MariaDBBaseDSN(), user, pass, sourceName),
+			"--output-dir", dumpDir, "--schemas", sourceName, "--mydumper-path", mydumper)
+		// bintrail's own connectivity check (Go driver) runs before mydumper.
+		if err == nil || attempt == 3 || !strings.Contains(errOut, "failed to ping MySQL: malformed packet") {
+			break
+		}
+		t.Logf("Go driver ed25519 login flake before mydumper ran (attempt %d): %s", attempt, strings.TrimSpace(errOut))
+	}
 	t.Logf("mydumper client library: %s", lib)
 	switch lib {
 	case "mariadb":

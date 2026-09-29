@@ -58,12 +58,27 @@ func TestShimMariaDBUUIDKey(t *testing.T) {
 		{Name: "u", MySQLType: "uuid", ParquetType: baseline.MysqlToParquetNode("uuid")},
 		{Name: "ip", MySQLType: "inet6", ParquetType: baseline.MysqlToParquetNode("inet6")},
 	}
-	baselineDir := writeBaselineSnapshot(t, snapTime, "mdb", "devices", cols, [][]string{{keyText, "::1"}})
+	baselineDir := writeBaselineSnapshot(t, snapTime, "mdb", "devices", cols, [][]string{
+		{keyText, "::1"},
+		{"ffffffff-ffff-ffff-ffff-ffffffffffff", "::ffff:10.0.0.1"}, // untouched since the baseline
+	})
 
 	h := NewHandlerWithConfig(db, Config{
 		AllowGaps: true, NoArchive: true, IndexDBName: dbName, BaselineDir: baselineDir,
 	}, slog.Default())
 	want := []string{keyText, "::ffff:0.0.0.0"}
+
+	// A row with no event since the baseline: only _snapshot knows it, and
+	// only if the UUID key is matched against the baseline's text.
+	quiet := TimeTravelQuery{Type: TypeSnapshot, Schema: "mdb", Table: "devices", PKColumn: "u",
+		PKValue: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", AsOf: asOf}
+	res, err := h.runSnapshot(quiet)
+	if err != nil {
+		t.Fatalf("_snapshot of the untouched row: %v", err)
+	}
+	if cells := rowCells(t, res.Resultset); len(cells) != 1 || !slices.Equal(cells[0], []string{"ffffffff-ffff-ffff-ffff-ffffffffffff", "::ffff:10.0.0.1"}) {
+		t.Errorf("_snapshot of the untouched row = %v, want its baseline row", cells)
+	}
 
 	for _, typed := range []string{keyText, "7C5C7C5C5C7C00000000000000000000"} {
 		q := TimeTravelQuery{Type: TypeFlashback, Schema: "mdb", Table: "devices", PKColumn: "u", PKValue: typed, AsOf: asOf}

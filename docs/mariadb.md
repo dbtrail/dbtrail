@@ -265,8 +265,6 @@ page and the
   CREATE USER 'dbtrail_dump'@'%' IDENTIFIED VIA mysql_native_password USING PASSWORD('…');
   ```
 
-  Capture (`stream`) is not affected: it logs in with Go's driver, which
-  supports `ed25519`.
 - **A `VECTOR` column needs a snapshot taken with this version.** Snapshots
   taken before stored `VECTOR` values as text, which the Parquet reader
   refuses for the whole table (`Invalid string encoding`). Take a new snapshot;
