@@ -149,8 +149,8 @@ console.log(JSON.stringify(out));
 	if want := []bool{true, true, false, false, false, false}; !equalBools(got.Covers, want) {
 		t.Errorf("s3PrefixCovers = %v, want %v (equal and nested cover; a sibling sharing characters, another bucket, the reverse nesting and a non-URL do not)", got.Covers, want)
 	}
-	if strings.Join(got.Conflicts.Archives, ",") != "B" || strings.Join(got.Conflicts.Backups, ",") != "B,D,the daemon default (s3://b/dbtrail/shared)" {
-		t.Errorf("conflicts = %+v: want B's archives refused, B (by its resolved default), D and the daemon default named, C (sibling prefix) untouched", got.Conflicts)
+	if strings.Join(got.Conflicts.Archives, ",") != "B" || strings.Join(got.Conflicts.Backups, ",") != "B,D,DBTrail's default (s3://b/dbtrail/shared)" {
+		t.Errorf("conflicts = %+v: want B's archives refused, B (by its resolved default), D and DBTrail's default named, C (sibling prefix) untouched", got.Conflicts)
 	}
 	if strings.Join(got.OwnArchive, ",") != "this server" {
 		t.Errorf("own archives under the snapshot prefix = %v, want [this server]", got.OwnArchive)

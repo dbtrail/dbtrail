@@ -272,7 +272,7 @@ type VerifyExplanation struct {
 func (s *Server) handleVerifyTrigger(w http.ResponseWriter, r *http.Request) {
 	if s.verifyCtrl == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"verify from the console is not enabled; start the watch daemon with BINTRAIL_CONSOLE_VERIFY_TRIGGER=1 or a --verify-interval schedule")
+			"verify from the console is not enabled; start the DBTrail service with BINTRAIL_CONSOLE_VERIFY_TRIGGER=1 or a --verify-interval schedule")
 		return
 	}
 	if s.rbacActiveFor(r) {
@@ -368,7 +368,7 @@ func (s *Server) handleVerifyStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.verifyCtrl == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"verify from the console is not enabled; start the watch daemon with BINTRAIL_CONSOLE_VERIFY_TRIGGER=1 or a --verify-interval schedule")
+			"verify from the console is not enabled; start the DBTrail service with BINTRAIL_CONSOLE_VERIFY_TRIGGER=1 or a --verify-interval schedule")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))
@@ -384,7 +384,7 @@ func (s *Server) handleVerifyStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleVerifyExplain(w http.ResponseWriter, r *http.Request) {
 	if s.verifyCtrl == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"verify from the console is not enabled; start the watch daemon with BINTRAIL_CONSOLE_VERIFY_TRIGGER=1 or a --verify-interval schedule")
+			"verify from the console is not enabled; start the DBTrail service with BINTRAIL_CONSOLE_VERIFY_TRIGGER=1 or a --verify-interval schedule")
 		return
 	}
 	if s.rbacActiveFor(r) {
@@ -439,7 +439,7 @@ func (s *Server) handleVerifyExplain(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleVerifyHistory(w http.ResponseWriter, r *http.Request) {
 	if s.verifyCtrl == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"verify from the console is not enabled; start the watch daemon with BINTRAIL_CONSOLE_VERIFY_TRIGGER=1 or a --verify-interval schedule")
+			"verify from the console is not enabled; start the DBTrail service with BINTRAIL_CONSOLE_VERIFY_TRIGGER=1 or a --verify-interval schedule")
 		return
 	}
 	if s.verifyHistory == nil {
@@ -448,7 +448,7 @@ func (s *Server) handleVerifyHistory(w http.ResponseWriter, r *http.Request) {
 		// set VERIFY_TRIGGER here would send them chasing a setting that is
 		// already on.
 		writeJSONError(w, http.StatusForbidden,
-			"verify is enabled but the run-history file could not be opened at daemon startup; check the watch daemon's logs")
+			"verify is enabled but the run-history file could not be opened when DBTrail started; check DBTrail's log")
 		return
 	}
 	// History carries the same per-table verdicts/reasons as the live status —
