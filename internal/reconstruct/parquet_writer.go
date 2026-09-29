@@ -632,6 +632,19 @@ func renderBaselineValue(col baseline.Column, v any) (text string, isNull bool, 
 	if v == nil {
 		return "", true, nil
 	}
+	if dt := col.MySQLType; metadata.MariaDBFixedWidth(dt) > 0 {
+		// MariaDB UUID/INET: the copy holds the server's text (mydumper dumps
+		// it that way), and the event decode renders a stored value to exactly
+		// that text. Anything else (a damaged value captured before #1944, or
+		// base64 an untyped epoch left) has no correct form; published here it
+		// would be inherited by every later refresh, so refuse, as the
+		// mydumper writer does.
+		s, ok := v.(string)
+		if !ok || !metadata.IsMariaDBFixedText(dt, s) {
+			return "", false, fmt.Errorf("column %q (%s): value %q is not a %s value this build can restore; the table is refused rather than published with a wrong value", col.Name, dt, fmt.Sprint(v), dt)
+		}
+		return s, false, nil
+	}
 	switch t := v.(type) {
 	case string:
 		return t, false, nil

@@ -168,12 +168,17 @@ func (d *eventDecoder) decodeBinaries(events []query.ResultRow) {
 	if len(events) == 0 || d.db == nil {
 		return
 	}
+	unrendered := 0
 	for i := range events {
 		m := d.binColsAt(events[i].EventTimestamp)
 		decodeImageBinaries(events[i].RowBefore, m.cols)
 		decodeImageBinaries(events[i].RowAfter, m.cols)
-		renderImageMariaDBFixed(events[i].RowBefore, m.fixed)
-		renderImageMariaDBFixed(events[i].RowAfter, m.fixed)
+		unrendered += renderImageMariaDBFixed(events[i].RowBefore, m.fixed)
+		unrendered += renderImageMariaDBFixed(events[i].RowAfter, m.fixed)
+	}
+	if unrendered > 0 {
+		slog.Warn("MariaDB UUID/INET values in the index have no correct text form (captured before this build could store them, or their schema snapshot could not be read); they are left as stored",
+			"schema", d.schema, "table", d.table, "values", unrendered)
 	}
 }
 
@@ -209,17 +214,26 @@ func (d *eventDecoder) binColsAt(t time.Time) binMemo {
 // renderImageMariaDBFixed turns each MariaDB UUID/INET4/INET6 value of one
 // event image from its stored base64 into the server's text form, in place
 // (metadata.RenderStoredMariaDBFixed). A value that is not the stored form of
-// a full-width value, such as one captured before #1944, is left as it is.
-// No-op when fixed is empty or image is nil.
-func renderImageMariaDBFixed(image map[string]any, fixed map[string]string) {
+// a full-width value, such as one captured before #1944, is left as it is,
+// and counted in the return value so the caller can say so. No-op when fixed
+// is empty or image is nil.
+func renderImageMariaDBFixed(image map[string]any, fixed map[string]string) int {
 	if len(fixed) == 0 || image == nil {
-		return
+		return 0
 	}
+	unrendered := 0
 	for col, dt := range fixed {
-		if v, ok := image[col]; ok {
-			image[col], _ = metadata.RenderStoredMariaDBFixed(dt, v)
+		v, ok := image[col]
+		if !ok || v == nil {
+			continue
+		}
+		out, rendered := metadata.RenderStoredMariaDBFixed(dt, v)
+		image[col] = out
+		if !rendered {
+			unrendered++
 		}
 	}
+	return unrendered
 }
 
 // decodeImageBinaries decodes the storage-side base64 of every BLOB/TEXT column

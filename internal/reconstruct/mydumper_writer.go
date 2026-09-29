@@ -144,12 +144,14 @@ func (w *MydumperWriter) readMariaDBFixedColumns(createSQL string) error {
 		}
 		return nil
 	}
+	// Column names are case-insensitive in MySQL/MariaDB, so match them that
+	// way: a case difference must not silently drop the X'..' form.
 	types := make(map[string]string, len(cols))
 	for _, c := range cols {
-		types[c.Name] = c.MySQLType
+		types[strings.ToLower(c.Name)] = c.MySQLType
 	}
 	for i, name := range w.cols {
-		if dt := types[name]; metadata.MariaDBFixedWidth(dt) > 0 {
+		if dt := types[strings.ToLower(name)]; metadata.MariaDBFixedWidth(dt) > 0 {
 			if w.fixed == nil {
 				w.fixed = make(map[int]string)
 			}

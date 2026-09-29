@@ -1340,6 +1340,7 @@ func (h *Handler) mapEventImages(schema, table string, rows []query.ResultRow) {
 		b64Memo[id] = m
 		return m
 	}
+	unrendered := 0
 	for i := range rows {
 		m := src.MapperAt(schema, table, rows[i].EventTimestamp)
 		m.MapImage(rows[i].RowBefore)
@@ -1353,8 +1354,12 @@ func (h *Handler) mapEventImages(schema, table string, rows []query.ResultRow) {
 		cols := base64ColsAt(rows[i].EventTimestamp)
 		decodeImageBase64(rows[i].RowBefore, cols.b64)
 		decodeImageBase64(rows[i].RowAfter, cols.b64)
-		renderImageMariaDBFixed(rows[i].RowBefore, cols.fixed)
-		renderImageMariaDBFixed(rows[i].RowAfter, cols.fixed)
+		unrendered += renderImageMariaDBFixed(rows[i].RowBefore, cols.fixed)
+		unrendered += renderImageMariaDBFixed(rows[i].RowAfter, cols.fixed)
+	}
+	if unrendered > 0 {
+		h.logger.Warn("shim: MariaDB UUID/INET values in the index have no correct text form (captured before this build could store them, or their schema snapshot could not be read); served as stored",
+			"schema", schema, "table", table, "values", unrendered)
 	}
 }
 
@@ -1384,16 +1389,24 @@ func mariaDBFixedCols(r *metadata.Resolver, schema, table string) map[string]str
 // renderImageMariaDBFixed turns each MariaDB UUID/INET4/INET6 value of one
 // event image from its stored base64 into the server's text, in place. A value
 // that is not the stored form of a full-width value (an event captured before
-// #1944) is left as it is.
-func renderImageMariaDBFixed(image map[string]any, fixed map[string]string) {
+// #1944) is left as it is and counted in the return value.
+func renderImageMariaDBFixed(image map[string]any, fixed map[string]string) int {
 	if len(fixed) == 0 || image == nil {
-		return
+		return 0
 	}
+	unrendered := 0
 	for col, dt := range fixed {
-		if v, ok := image[col]; ok {
-			image[col], _ = metadata.RenderStoredMariaDBFixed(dt, v)
+		v, ok := image[col]
+		if !ok || v == nil {
+			continue
+		}
+		out, rendered := metadata.RenderStoredMariaDBFixed(dt, v)
+		image[col] = out
+		if !rendered {
+			unrendered++
 		}
 	}
+	return unrendered
 }
 
 // base64StoredKind reports whether a column's DataType is in the BLOB or TEXT

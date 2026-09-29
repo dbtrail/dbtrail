@@ -555,6 +555,9 @@ func TestEndToEnd_MariaDBSnapshotChain(t *testing.T) {
 			t.Fatalf("%s: drill failed: %v\nstdout:\n%s\nstderr:\n%s", label, err, out, errOut)
 		}
 		for _, ct := range tables {
+			if len(want[ct.name]) == 0 {
+				t.Fatalf("%s: no source rows captured for %s; the comparison would prove nothing", label, ct.name)
+			}
 			got := ct.hexRows(t, scratchDB, sourceName)
 			if strings.Join(got, "\n") != strings.Join(want[ct.name], "\n") {
 				t.Errorf("%s: %s restored by drill differs from the source (HEX per column)\n got:\n  %s\nwant:\n  %s",

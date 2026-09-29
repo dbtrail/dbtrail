@@ -54,14 +54,17 @@ func ResolvePKMetasAt(db *sql.DB, schema, table string, at time.Time) []metadata
 	} else if id, ok := metadata.EpochAt(epochs, at); ok {
 		snapshotID = id
 	}
+	// Warn, not Debug: without the metas a MariaDB UUID/INET key is looked up
+	// by its text, which matches no event, so the answer can be the baseline
+	// row without the later changes.
 	res, err := metadata.NewResolver(db, snapshotID)
 	if err != nil {
-		slog.Debug("could not load schema snapshot for PK metadata", "error", err)
+		slog.Warn("could not load schema snapshot for PK metadata; a UUID/INET or fixed BINARY key may miss its later changes", "error", err)
 		return nil
 	}
 	tm, err := res.Resolve(schema, table)
 	if err != nil {
-		slog.Debug("could not resolve table for PK metadata", "error", err)
+		slog.Warn("could not resolve table for PK metadata; a UUID/INET or fixed BINARY key may miss its later changes", "schema", schema, "table", table, "error", err)
 		return nil
 	}
 	return tm.PKColumnMetas()

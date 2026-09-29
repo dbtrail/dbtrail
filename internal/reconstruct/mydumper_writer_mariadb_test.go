@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
 )
 
 // A MariaDB UUID/INET value reaches the writer as the server's text (from the
@@ -63,5 +65,50 @@ func TestMydumperWriter_MariaDBFixedTypeUnrestorableValueRefused(t *testing.T) {
 	err = w.WriteRow([]any{int64(1), "\x12>\ufffdg"})
 	if err == nil || !strings.Contains(err.Error(), `"u"`) {
 		t.Fatalf("WriteRow of a damaged UUID = %v, want a refusal naming the column", err)
+	}
+}
+
+// The Parquet side (baseline refresh, reconstruct --output-format parquet)
+// must refuse the same unrestorable value the mydumper writer refuses:
+// published into the copy, it would be inherited by every later refresh.
+func TestRenderBaselineValue_MariaDBFixedTypes(t *testing.T) {
+	col := func(dt string) baseline.Column { return baseline.Column{Name: "c", MySQLType: dt} }
+	if text, isNull, err := renderBaselineValue(col("uuid"), "123e4567-e89b-12d3-a456-426614174000"); err != nil || isNull || text != "123e4567-e89b-12d3-a456-426614174000" {
+		t.Errorf("rendered UUID: %q, %v, %v", text, isNull, err)
+	}
+	if _, isNull, err := renderBaselineValue(col("inet4"), nil); err != nil || !isNull {
+		t.Errorf("NULL INET4: %v, %v", isNull, err)
+	}
+	for _, c := range []struct{ dt, v string }{
+		{"uuid", "\x12>�g"},          // captured before #1944
+		{"inet4", "CgAAAA=="},        // base64 an untyped epoch left
+		{"inet6", "0:0:0:0:0:0:0:1"}, // not the text the server prints
+		{"uuid", "123E4567-E89B-12D3-A456-426614174000"},
+	} {
+		if text, _, err := renderBaselineValue(col(c.dt), c.v); err == nil || !strings.Contains(err.Error(), `"c"`) {
+			t.Errorf("%s %q rendered as %q (%v), want a refusal naming the column", c.dt, c.v, text, err)
+		}
+	}
+}
+
+// Column names match case-insensitively, as they do on the server.
+func TestMydumperWriter_MariaDBFixedColumnNameCase(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewMydumperWriter(dir, "db", "t", []string{"ID", "U"}, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteSchema("CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `u` uuid,\n  PRIMARY KEY (`id`)\n);\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteRow([]any{int64(1), "00000000-0000-0000-0000-000000000001"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "db.t.00000.sql"))
+	if !strings.Contains(string(b), "X'00000000000000000000000000000001'") {
+		t.Errorf("UUID column named in another case was not written as X'..':\n%s", b)
 	}
 }

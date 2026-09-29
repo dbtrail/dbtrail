@@ -272,9 +272,10 @@ page and the
   `VECTOR` column.
 - **Values captured before `UUID`/`INET` support stay unreadable.** Events
   indexed by a version older than the one that added it hold damaged bytes for
-  these columns. `verify` reports such a value as inconclusive, and a
-  full-table `reconstruct` or `drill` that would write one refuses the table
-  instead of loading a wrong value.
+  these columns. `verify` reports such a value as inconclusive; a full-table
+  `reconstruct`, `drill` or `baseline refresh` that would write one refuses the
+  table instead of writing a wrong value; single-row reads return it as stored
+  and log a warning.
 - **Sequences are not rewound.** MariaDB records every change to a `SEQUENCE`
   as an insert into its one-row table, and bintrail captures those like any
   other insert. A reversal that includes the sequence is refused by the server

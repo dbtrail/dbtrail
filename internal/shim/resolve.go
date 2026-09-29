@@ -297,7 +297,7 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	// re-encode with EscapePKValue — the mirror of the raw ReadBaselineRow match
 	// above (#826). The empty-string PK routes through PKValuesIn for the same
 	// reason as ResolveFlashbackRow.
-	encoded := h.eventPKValue(q)
+	encoded := eventPKValueTyped(q, dataType, true)
 	if q.PKValue != "" {
 		opts.PKValues = encoded
 	} else {
@@ -413,7 +413,14 @@ func (h *Handler) PKColumnCheck(q TimeTravelQuery) (msg string, reject bool) {
 // event.BuildPKValues. Text that is not a value of the type is left as typed,
 // so it matches nothing, as it would on the server.
 func (h *Handler) eventPKValue(q TimeTravelQuery) string {
-	if dt, ok := h.pkDataType(q.Schema, q.Table, q.PKColumn); ok && metadata.MariaDBFixedWidth(dt) > 0 {
+	dt, ok := h.pkDataType(q.Schema, q.Table, q.PKColumn)
+	return eventPKValueTyped(q, dt, ok)
+}
+
+// eventPKValueTyped is eventPKValue with the PK type already resolved, so a
+// caller that gated on the type spells the key by that same answer.
+func eventPKValueTyped(q TimeTravelQuery, dt string, ok bool) string {
+	if ok && metadata.MariaDBFixedWidth(dt) > 0 {
 		if b, err := metadata.ParseMariaDBFixed(dt, q.PKValue); err == nil {
 			col := metadata.ColumnMeta{Name: q.PKColumn, DataType: dt, IsPK: true}
 			return event.BuildPKValues([]metadata.ColumnMeta{col}, map[string]any{q.PKColumn: b})
