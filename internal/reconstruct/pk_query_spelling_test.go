@@ -65,6 +65,13 @@ func TestSpellPKFilter(t *testing.T) {
 	if spelled[uuidText] != uuidStored || len(spelled) != 1 {
 		t.Errorf("spelled = %v, want only %s -> %s", spelled, uuidText, uuidStored)
 	}
+	// Only the text form typed: the stored spelling must be added, or the
+	// fetch looks for the text alone and finds nothing.
+	o = query.Options{PKValuesIn: []string{uuidText}}
+	spellPKFilter(&o, u)
+	if want := []string{uuidText, uuidStored}; !slices.Equal(o.PKValuesIn, want) {
+		t.Errorf("PKValuesIn = %q, want %q", o.PKValuesIn, want)
+	}
 }
 
 func event0Escaped(s string) string { return strings.ReplaceAll(s, "|", `\|`) }
