@@ -121,7 +121,7 @@ func CreateTestDB(t *testing.T) (*sql.DB, string) {
 	return db, name
 }
 
-// ─── MariaDB source helpers (MariaDB-as-source alpha) ─────────────────────────
+// ─── MariaDB source helpers (MariaDB-as-source beta) ─────────────────────────
 //
 // These mirror the MySQL helpers above for a MariaDB SOURCE container, used only
 // by MariaDB-tagged integration/e2e tests. The MySQL helpers (index DB) are left

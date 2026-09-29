@@ -1,7 +1,7 @@
-# MariaDB as a source (alpha)
+# MariaDB as a source (beta)
 
 bintrail can capture from a **MariaDB** server while the index database stays
-MySQL. This is an **alpha** capability: the happy path is verified end-to-end
+MySQL. This is a **beta** capability: the happy path is verified end-to-end
 against real MariaDB, but it has documented limitations (below) and narrower
 version/topology coverage than the MySQL path. Read the limitations before
 pointing it at production.
@@ -117,8 +117,10 @@ silently become the write key for every server. Two caveats:
 
 | Version | Status |
 |---|---|
-| **MariaDB 11.4** | **Tested** in CI (the primary target). |
-| MariaDB 10.6 LTS – 11.3 | Expected to work; **not yet covered by CI**. |
+| **MariaDB 10.6 LTS** | **Tested** in CI. |
+| **MariaDB 10.11 LTS** | **Tested** in CI. |
+| **MariaDB 11.4 LTS** | **Tested** in CI. |
+| Other versions from 10.6 up | Expected to work; not covered by CI. |
 | MariaDB < 10.6 | Not supported. |
 
 ---
@@ -165,7 +167,7 @@ silently become the write key for every server. Two caveats:
 
 ---
 
-## Alpha limitations
+## Beta limitations
 
 - **The source flavor is fixed per checkpoint.** Resuming a saved MariaDB
   checkpoint requires the same `--source-flavor mariadb`. A mismatch is rejected
@@ -174,9 +176,10 @@ silently become the write key for every server. Two caveats:
   resume is validated live on a single server producing several domains (the
   `gtid_domain_id` mechanism itself — see "What works" above). What has NOT
   been validated live: topologies where the domains originate on different
-  servers (multi-master rings, Galera), a primary failover that changes the
-  `server_id` *within* a domain mid-stream, and sustained multi-domain load (no
-  soak run yet). Gap detection compares sequences per domain, so the design
+  servers (multi-master rings, Galera), and a primary failover that changes the
+  `server_id` *within* a domain mid-stream. Sustained two-domain load on a single
+  server was run for several hours in #1349 with no events lost or double
+  indexed. Gap detection compares sequences per domain, so the design
   covers these shapes, but treat them as unverified territory.
 - **BYOS agent support is the least exercised path.** `bintrail agent` accepts
   `--source-flavor mariadb` (same flag and `BINTRAIL_SOURCE_FLAVOR` env as

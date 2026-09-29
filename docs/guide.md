@@ -8,7 +8,7 @@ DBTrail indexes every INSERT, UPDATE, and DELETE from MySQL ROW-format binary lo
 
 DBTrail ingests changes two ways:
 
-- **`bintrail stream`** (and `bintrail up`, which wraps it) connects over the MySQL **replication protocol** — no access to binlog files on disk. This is the default, the only option for managed MySQL (RDS, Aurora, Cloud SQL), and runs anywhere with a TCP path to the source. See [Streaming](streaming.md). A **MariaDB** source is supported in alpha — see [MariaDB](mariadb.md). A **PostgreSQL** source is supported in beta via the separate `bintrail-pg` binary — see [PostgreSQL](postgres.md).
+- **`bintrail stream`** (and `bintrail up`, which wraps it) connects over the MySQL **replication protocol** — no access to binlog files on disk. This is the default, the only option for managed MySQL (RDS, Aurora, Cloud SQL), and runs anywhere with a TCP path to the source. See [Streaming](streaming.md). A **MariaDB** source is supported in beta — see [MariaDB](mariadb.md). A **PostgreSQL** source is supported in beta via the separate `bintrail-pg` binary — see [PostgreSQL](postgres.md).
 - **`bintrail index`** reads binlog **files** from a local path (`--binlog-dir`). Use it to **backfill** historical files on self-managed MySQL; it never reads remote, SSH, or object-storage paths, and it opens files read-only. See [Indexing](indexing.md).
 
 | | `bintrail index` | `bintrail stream` |

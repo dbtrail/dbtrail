@@ -94,7 +94,7 @@ func init() {
 	agentCmd.Flags().StringVar(&agtEndpoint, "endpoint", "", "DBTrail WebSocket endpoint URL (required)")
 	agentCmd.Flags().StringVar(&agtIndexDSN, "index-dsn", "", "DSN for the index MySQL database")
 	agentCmd.Flags().StringVar(&agtSourceDSN, "source-dsn", "", "DSN for the source MySQL database (enables forensics queries; required for BYOS streaming)")
-	agentCmd.Flags().StringVar(&agtFlavor, "source-flavor", "mysql", "Source database flavor for BYOS streaming: mysql or mariadb (MariaDB source support is alpha)")
+	agentCmd.Flags().StringVar(&agtFlavor, "source-flavor", "mysql", "Source database flavor for BYOS streaming: mysql or mariadb (MariaDB source support is beta)")
 	agentCmd.Flags().StringVar(&agtArchiveDir, "archive-dir", "", "Local directory containing Parquet archives")
 	agentCmd.Flags().StringVar(&agtArchiveS3, "archive-s3", "", "S3 path to Parquet archives (e.g. s3://bucket/prefix/)")
 	agentCmd.Flags().StringVar(&agtBufferRetain, "buffer-retain", "6h", "How long to retain events in the in-memory buffer (e.g. 6h, 24h)")

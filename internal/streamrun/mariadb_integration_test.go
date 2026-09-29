@@ -24,7 +24,7 @@ import (
 )
 
 // TestStreamLoop_liveReplication_mariadb is the MariaDB-source end-to-end guard
-// (alpha). It pairs a MySQL INDEX (CreateTestDB, 13306) with a MariaDB SOURCE
+// (beta). It pairs a MySQL INDEX (CreateTestDB, 13306) with a MariaDB SOURCE
 // (CreateTestMariaDB, 13307) and streams real row events through the full
 // engine. Beyond proving rows are captured, it is the discriminator for two
 // MariaDB-specific fixes that no unit test exercises:
