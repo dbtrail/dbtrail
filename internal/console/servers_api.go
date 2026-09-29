@@ -1563,6 +1563,12 @@ func (s *Server) bootDTO() (serverDTO, bool) {
 	if dsn != "" {
 		fillDSNParts(&dto, dsn)
 	}
+	// Read per list: capture asks its source after the console is up.
+	if s.bootSourceFlavor != nil {
+		if f := s.bootSourceFlavor(); mysqlFamily(f) {
+			dto.Flavor = f
+		}
+	}
 	return dto, true
 }
 
