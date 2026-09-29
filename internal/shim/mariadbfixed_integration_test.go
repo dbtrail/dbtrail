@@ -3,18 +3,14 @@
 package shim
 
 import (
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"log/slog"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
-	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
-	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -41,16 +37,17 @@ func TestShimMariaDBUUIDKey(t *testing.T) {
 	testutil.InsertSnapshot(t, db, 1, snapTS, "mdb", "devices", "u", 1, "PRI", "uuid", "NO")
 	testutil.InsertSnapshot(t, db, 1, snapTS, "mdb", "devices", "ip", 2, "", "inet6", "YES")
 
-	// 7c5c... puts '|' and '\' bytes in the key: escaped inside pk_values.
+	// The stored key and row images below are what `bintrail stream` wrote
+	// for this row on MariaDB 11.8 (INSERT, then UPDATE of ip), copied from
+	// binlog_events as HEX(pk_values) and the JSON images, so the lookup is
+	// held to real captured bytes and not to a second call of the same
+	// encoder. 7c5c... puts '|' and '\' bytes in the key, which pk_values
+	// escapes, and ends in zero bytes the row image trims.
 	const keyText = "7c5c7c5c-5c7c-0000-0000-000000000000"
-	keyBytes, _ := hex.DecodeString("7c5c7c5c5c7c00000000000000000000")
-	ipBefore, _ := hex.DecodeString("00000000000000000000000000000001") // ::1
-	ipAfter, _ := hex.DecodeString("00000000000000000000ffff00000000")  // ::ffff:0.0.0.0
-	pkCols := []metadata.ColumnMeta{{Name: "u", DataType: "uuid", IsPK: true}}
-	storedPK := event.BuildPKValues(pkCols, map[string]any{"u": keyBytes})
-	b64 := base64.StdEncoding.EncodeToString
-	before, _ := json.Marshal(map[string]any{"u": b64(keyBytes), "ip": b64(ipBefore)})
-	after, _ := json.Marshal(map[string]any{"u": b64(keyBytes), "ip": b64(ipAfter)})
+	storedPKBytes, _ := hex.DecodeString("5C7C5C5C5C7C5C5C5C5C5C7C00000000000000000000")
+	storedPK := string(storedPKBytes)
+	before := []byte(`{"u": "fFx8XFx8AAAAAAAAAAAAAA==", "ip": "AAAAAAAAAAAAAAAAAAAAAQ=="}`)
+	after := []byte(`{"u": "fFx8XFx8AAAAAAAAAAAAAA==", "ip": "AAAAAAAAAAAAAP//AAAAAA=="}`)
 	testutil.InsertEvent(t, db, "mariadb-bin.000001", 100, 200, eventTS.Format("2006-01-02 15:04:05"), nil,
 		"mdb", "devices", 2 /*update*/, storedPK, nil, before, after)
 
