@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"context"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 )
@@ -54,17 +56,17 @@ func ResolvePKMetasAt(db *sql.DB, schema, table string, at time.Time) []metadata
 	} else if id, ok := metadata.EpochAt(epochs, at); ok {
 		snapshotID = id
 	}
-	// Warn, not Debug: without the metas a MariaDB UUID/INET key is looked up
-	// by its text, which matches no event, so the answer can be the baseline
-	// row without the later changes.
+	// Debug only: a nil result is harmless for most keys. For a MariaDB
+	// UUID/INET key it is not, and CheckUntypedMariaDBFixedPK refuses the
+	// lookup instead of letting it answer wrong.
 	res, err := metadata.NewResolver(db, snapshotID)
 	if err != nil {
-		slog.Warn("could not load schema snapshot for PK metadata; a UUID/INET or fixed BINARY key may miss its later changes", "error", err)
+		slog.Debug("could not load schema snapshot for PK metadata", "error", err)
 		return nil
 	}
 	tm, err := res.Resolve(schema, table)
 	if err != nil {
-		slog.Warn("could not resolve table for PK metadata; a UUID/INET or fixed BINARY key may miss its later changes", "schema", schema, "table", table, "error", err)
+		slog.Debug("could not resolve table for PK metadata", "error", err)
 		return nil
 	}
 	return tm.PKColumnMetas()
@@ -236,4 +238,42 @@ func mariaDBFixedBaselineFilter(pkFilter map[string]string, pkMetas []metadata.C
 		return pkFilter, nil
 	}
 	return out, nil
+}
+
+// CheckUntypedMariaDBFixedPK refuses a single-row lookup that would answer
+// wrong without saying so. The index keys a MariaDB UUID/INET4/INET6 row by
+// the value's bytes, and only the index's schema snapshot tells a caller to
+// spell the key that way (IndexPKSpelling). Without that snapshot (pkMetas
+// nil) the key is looked up as text: the baseline row matches, no event does,
+// and the snapshot-era row would come back as the state at the target time.
+// So when pkMetas is nil and the baseline's own CREATE TABLE shows one of
+// those types among the filtered columns, this returns an error naming the
+// fix. A baseline whose footer cannot be read or holds no CREATE TABLE cannot
+// be checked and passes, as every other key does without metas.
+func CheckUntypedMariaDBFixedPK(ctx context.Context, path string, pkFilter map[string]string, pkMetas []metadata.ColumnMeta) error {
+	if len(pkMetas) > 0 {
+		return nil
+	}
+	bm, err := baseline.ReadParquetMetadataAny(ctx, path)
+	if err != nil || bm.CreateTableSQL == "" {
+		return nil
+	}
+	cols, err := baseline.ParseSchemaText(bm.CreateTableSQL)
+	if err != nil {
+		return nil
+	}
+	for _, c := range cols {
+		if metadata.MariaDBFixedWidth(c.MySQLType) == 0 {
+			continue
+		}
+		for k := range pkFilter {
+			if strings.EqualFold(strings.TrimSpace(k), c.Name) {
+				return fmt.Errorf("primary-key column %q is a MariaDB %s, which the index stores as bytes, "+
+					"and the index has no schema snapshot for this table to spell the key that way; "+
+					"the answer would leave out every change after the baseline, so it is refused: "+
+					"run `bintrail snapshot` for this schema, then try again", c.Name, strings.ToLower(c.MySQLType))
+			}
+		}
+	}
+	return nil
 }

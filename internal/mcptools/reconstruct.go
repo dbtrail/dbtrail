@@ -302,6 +302,9 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		// while the baseline stores the padded width. Best-effort: nil metas
 		// keep the exact-match behavior.
 		pkMetas := reconstruct.ResolvePKMetasAt(t.DB, args.Schema, args.Table, snapshotTime)
+		if err := reconstruct.CheckUntypedMariaDBFixedPK(ctx, path, pkFilter, pkMetas); err != nil {
+			return ErrorResult(err), nil, nil
+		}
 		baselineRow, err := reconstruct.ReadBaselineRow(ctx, path, pkFilter, pkMetas)
 		if err != nil {
 			return ErrorResult(fmt.Errorf("read baseline: %w", err)), nil, nil

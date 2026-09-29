@@ -412,6 +412,9 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// it flows past the event fetch below so the "no row found" error can be
 	// told apart from a PK-changing UPDATE that stored the row under a
 	// different (before-image) PK (#782).
+	if err := reconstruct.CheckUntypedMariaDBFixedPK(cmd.Context(), baselinePath, pkFilter, pkMetas); err != nil {
+		return err
+	}
 	baselineRow, err := reconstruct.ReadBaselineRow(cmd.Context(), baselinePath, pkFilter, pkMetas)
 	if err != nil {
 		return fmt.Errorf("read baseline: %w", err)

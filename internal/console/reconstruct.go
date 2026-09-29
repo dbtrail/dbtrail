@@ -429,6 +429,10 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	// answered "the row did not exist" for such a key while the CLI answered
 	// correctly. Best-effort: nil metas keep the exact-match behavior.
 	pkMetas := reconstruct.ResolvePKMetasAt(b.db, schema, table, snapshotTime)
+	if err := reconstruct.CheckUntypedMariaDBFixedPK(ctx, path, pkFilter, pkMetas); err != nil {
+		writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	baselineRow, err := reconstruct.ReadBaselineRow(ctx, path, pkFilter, pkMetas)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "read baseline: "+err.Error())
