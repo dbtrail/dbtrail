@@ -100,7 +100,7 @@ func stagedResult(dir, table string) string {
 	}
 	refused, err := exists(reconstruct.CompactionRefusedMarker)
 	if err != nil {
-		slog.Warn("baseline compact: a staging folder cannot be looked at; its chain is left alone", "dir", dir, "error", err)
+		slog.Warn("snapshot compaction: a staging folder cannot be looked at; its chain is left alone", "dir", dir, "error", err)
 		return "unreadable"
 	}
 	if refused {
@@ -108,7 +108,7 @@ func stagedResult(dir, table string) string {
 	}
 	done, err := exists(baseline.SuccessMarker)
 	if err != nil {
-		slog.Warn("baseline compact: a staging folder cannot be looked at; its chain is left alone", "dir", dir, "error", err)
+		slog.Warn("snapshot compaction: a staging folder cannot be looked at; its chain is left alone", "dir", dir, "error", err)
 		return "unreadable"
 	}
 	if !done {
@@ -235,7 +235,7 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 			j.refusedSaid[dir] = true
 			s.mu.Unlock()
 			if first {
-				slog.Warn("baseline compact: a refresh refused this chain's fold; it is not folded again, the refresh ends the chain itself",
+				slog.Warn("snapshot compaction: a refresh refused this chain's fold; it is not folded again, the refresh ends the chain itself",
 					"server", req.ServerName, "schema", schema, "table", table, "dir", dir)
 			}
 			continue
@@ -250,7 +250,7 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 		switch {
 		case err != nil:
 			// Sizes of zero would read as "not large": no fold this run.
-			slog.Warn("baseline compact: could not size a chain; it is not folded at this run",
+			slog.Warn("snapshot compaction: could not size a chain; it is not folded at this run",
 				"server", req.ServerName, "base", base, "error", err)
 		case failed && now.Sub(failedAt) < majorRetryAfter:
 			// Its fold failed recently: the others get their turn.
@@ -503,7 +503,7 @@ func (s *baselineSupervisor) compactMajorOne(req refreshRequest, root string, c 
 		os.RemoveAll(dir)
 		return err
 	}
-	slog.Info("baseline compact: chain folded into its table; the next refresh puts the table in place and starts the chain again from it",
+	slog.Info("snapshot compaction: chain folded into its table; the next refresh puts the table in place and starts the chain again from it",
 		"server", req.ServerName, "schema", c.schema, "table", c.table, "reason", c.major,
 		"folded_through", mc.Seq, "rows", mc.Rows, "took_ms", time.Since(started).Milliseconds())
 	return nil
