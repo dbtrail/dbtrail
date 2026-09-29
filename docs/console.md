@@ -1514,6 +1514,16 @@ MCP clients cannot reliably send custom headers, so the server choice lives in
 the URL path (mirroring how the [time-travel port](time-travel-sql.md) routes
 by username) instead of the `X-Bintrail-Server` header.
 
+The URL picks the connection's own server. One connection can still reach
+every registered server: each tool takes an optional `server` argument, a
+server name or id (or `default` for the command-line entry), that sends that
+one call to another server. Leave it out and the connection's server answers,
+as before. The tool descriptions list the names, and a call that names a
+server gets one extra line in its answer, `Answered by server: <name>`. An
+unknown name is a tool error that lists the valid ones. The access token's
+permissions apply to every server alike, and the audit record names the
+server the call went to. One call reaches one server; nothing fans out.
+
 Point any Streamable-HTTP-capable MCP client at it with the access token as a
 Bearer credential:
 

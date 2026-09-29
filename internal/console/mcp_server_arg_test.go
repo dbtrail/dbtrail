@@ -43,6 +43,10 @@ type routedFixture struct {
 }
 
 func newRoutedFixture(t *testing.T, hideBoot bool) *routedFixture {
+	return newRoutedFixtureBoot(t, hideBoot, true)
+}
+
+func newRoutedFixtureBoot(t *testing.T, hideBoot, withBoot bool) *routedFixture {
 	t.Helper()
 	reg, err := LoadRegistry("")
 	if err != nil {
@@ -75,8 +79,10 @@ func newRoutedFixture(t *testing.T, hideBoot bool) *routedFixture {
 		return &bundle{db: db, dbName: dbName, engine: query.New(db), noArchive: true}, mock
 	}
 	var b *bundle
-	s.cm.boot, f.bootMock = mockBundle("idx_boot")
-	s.cm.hideBoot = hideBoot
+	if withBoot {
+		s.cm.boot, f.bootMock = mockBundle("idx_boot")
+		s.cm.hideBoot = hideBoot
+	}
 	// Seeded as already-open bundles, so routing is proven without a MySQL:
 	// which mock receives the query is which server answered.
 	b, f.prodMock = mockBundle("idx_prod")
@@ -359,5 +365,33 @@ func TestMCPServerArg_grantsApplyToTarget(t *testing.T) {
 	res, texts = routedCall(t, analyst, "recover", map[string]any{"server": "staging"})
 	if !res.IsError || !strings.Contains(strings.Join(texts, " "), "recover:execute") {
 		t.Errorf("query-only token routed to staging must stay forbidden recover, got %v", texts)
+	}
+}
+
+// TestMCPServerArg_auditBareEndpointRegistryDefault: with no command-line
+// entry, bare /mcp's default is the first registry server, and an omitted
+// server argument must be audited under THAT id (the one the connection was
+// opened for), not under the boot entry's reserved id.
+func TestMCPServerArg_auditBareEndpointRegistryDefault(t *testing.T) {
+	rec := audittest.Install(t)
+	f := newRoutedFixtureBoot(t, false, false)
+	expectSchemaChanges(f.prodMock)
+	session := mcpGrantConnect(t, f.ts.URL+"/mcp", "t")
+	if res, texts := routedCall(t, session, "list_schema_changes", map[string]any{}); res.IsError {
+		t.Fatalf("bare /mcp: %v", texts)
+	}
+	assertMet(t, "prod", f.prodMock)
+	rec.Reset()
+	f.prodMock.ExpectQuery("FROM binlog_events").WillReturnRows(sqlmock.NewRows([]string{"event_id"}))
+	if res, texts := routedCall(t, session, "query", map[string]any{"schema": "app", "table": "users"}); res.IsError {
+		t.Fatalf("bare /mcp query: %v", texts)
+	}
+	for _, ev := range rec.Events() {
+		if ev.Action == "query.run" && ev.Detail["server"] != f.prodID {
+			t.Errorf("bare /mcp omitted server audited as %q, want the registry default %q", ev.Detail["server"], f.prodID)
+		}
+	}
+	if len(rec.Events()) == 0 {
+		t.Error("no audit record")
 	}
 }

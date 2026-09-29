@@ -182,7 +182,7 @@ func expectNoSchemaChanges(mock sqlmock.Sqlmock) {
 	}))
 }
 
-func callSchemaChanges(t *testing.T, cs *mcp.ClientSession, args map[string]any) *mcp.CallToolResult {
+func callRoutedSchemaChanges(t *testing.T, cs *mcp.ClientSession, args map[string]any) *mcp.CallToolResult {
 	t.Helper()
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_schema_changes", Arguments: args})
 	if err != nil {
@@ -211,7 +211,7 @@ func TestServerArg_omittedOrBlankRunsAsBefore(t *testing.T) {
 			return target, nil
 		}}
 		cfg.Servers = &ServerRouting{Names: []string{"prod"}}
-		res := callSchemaChanges(t, connectRouted(t, cfg), args)
+		res := callRoutedSchemaChanges(t, connectRouted(t, cfg), args)
 		if res.IsError {
 			t.Fatalf("args %v: %v", args, allText(res))
 		}
@@ -235,7 +235,7 @@ func TestServerArg_namedCallIsAttributed(t *testing.T) {
 	cfg.Servers = &ServerRouting{Names: []string{"prod", "staging"}}
 	cs := connectRouted(t, cfg)
 
-	res := callSchemaChanges(t, cs, map[string]any{"server": " staging "})
+	res := callRoutedSchemaChanges(t, cs, map[string]any{"server": " staging "})
 	if res.IsError {
 		t.Fatalf("named call failed: %v", allText(res))
 	}
@@ -262,7 +262,7 @@ func TestServerArg_failedResolveIsNotAttributed(t *testing.T) {
 		return nil, errors.New(`unknown server "nope"`)
 	}}
 	cfg.Servers = &ServerRouting{Names: []string{"prod"}}
-	res := callSchemaChanges(t, connectRouted(t, cfg), map[string]any{"server": "nope"})
+	res := callRoutedSchemaChanges(t, connectRouted(t, cfg), map[string]any{"server": "nope"})
 	if !res.IsError {
 		t.Fatal("a failed resolve must be a tool error")
 	}
