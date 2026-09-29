@@ -84,7 +84,12 @@ func RefreshOutcomes(tables []string, reports []*TableReport, failures []TableFa
 			deltaDetail[k] = "written again in full: " + r.DeltaCompacted
 		}
 		if r.DeltaChainFoldRefused != "" {
-			deltaDetail[k] = strings.TrimPrefix(deltaDetail[k]+"; the file rebuilt by the compaction job was not used and will not be rebuilt for this chain: "+r.DeltaChainFoldRefused, "; ")
+			note := "; the file rebuilt by the compaction job was not used, and will not be rebuilt for this chain: " + r.DeltaChainFoldRefused
+			if !r.DeltaChainFoldRefusalRecorded {
+				note = "; the file rebuilt by the compaction job was not used (" + r.DeltaChainFoldRefused +
+					"), and the refusal could not be recorded, so the job may rebuild it and it may be refused again"
+			}
+			deltaDetail[k] = strings.TrimPrefix(deltaDetail[k]+note, "; ")
 		}
 	}
 

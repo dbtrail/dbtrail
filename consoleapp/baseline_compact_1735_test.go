@@ -318,14 +318,15 @@ func TestSweepCompactStaging_removesAnUnfinishedFold(t *testing.T) {
 	if _, err := os.Stat(half); !os.IsNotExist(err) {
 		t.Fatal("an unfinished fold survived the sweep")
 	}
-	if stagedResult(done, "items") != "major" {
+	if kind, _, _ := stagedResult(done, "items"); kind != "major" {
 		t.Fatal("a complete fold was swept")
 	}
 }
 
 // A chain whose fold a refresh refused is not folded again (the refusal
-// would repeat, one full pass per cycle), nor merged: its folder holds the
-// record, which the sweep keeps. Said once.
+// would repeat, one full pass per cycle), but its first pairs are still
+// merged, and the record of the refusal outlives that merge and the sweep.
+// Said once.
 func TestMaybeCompact_aRefusedChainIsNotFoldedAgain(t *testing.T) {
 	sup, req, cs, stage := compactRig(t, compactMinPairs)
 	ms := stubMajor(t, nil)
@@ -336,18 +337,73 @@ func TestMaybeCompact_aRefusedChainIsNotFoldedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := captureSlogFor(t)
-	for range 2 {
-		sweepCompactStaging(req)
-		sup.maybeCompact(req)
+	sweepCompactStaging(req)
+	sup.maybeCompact(req)
+	if st := waitCompact(t, sup, "s"); st.State != "succeeded" {
+		t.Fatalf("status = %+v", st)
 	}
-	if len(ms.Calls()) != 0 || len(cs.Calls()) != 0 || sup.compactStatusFor("s").State != "idle" {
-		t.Fatalf("folds = %v minors = %v", ms.Calls(), cs.Calls())
+	sweepCompactStaging(req)
+	sup.maybeCompact(req) // the minor is staged now: nothing to do
+	if len(ms.Calls()) != 0 || len(cs.Calls()) != 1 {
+		t.Fatalf("folds = %v minors = %v, want no fold and one merge", ms.Calls(), cs.Calls())
 	}
 	if n := strings.Count(logs.String(), "refused this chain's fold"); n != 1 {
 		t.Fatalf("said %d times: %q", n, logs.String())
 	}
-	if _, err := os.Stat(filepath.Join(stage, reconstruct.CompactionRefusedMarker)); err != nil {
-		t.Fatal("the sweep removed the record of the refusal")
+	for _, f := range []string{reconstruct.CompactionRefusedMarker, baseline.SuccessMarker} {
+		if _, err := os.Stat(filepath.Join(stage, f)); err != nil {
+			t.Fatalf("%s gone: %v", f, err)
+		}
+	}
+}
+
+// A staging folder the job cannot look at is a failed run, with the reason,
+// not a table skipped in silence.
+func TestMaybeCompact_anUnreadableStagingFolderIsAFailedRun(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any folder")
+	}
+	sup, req, _, stage := compactRig(t, 3)
+	ms := stubMajor(t, nil)
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stage, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(stage, 0o755) })
+	sup.maybeCompact(req)
+	st := waitCompact(t, sup, "s")
+	if st.State != "failed" || !strings.Contains(st.LastError, "cannot be looked at") || len(ms.Calls()) != 0 {
+		t.Fatalf("status = %+v folds = %v", st, ms.Calls())
+	}
+	if runs := sup.history.List("s"); len(runs) != 1 || !strings.Contains(runs[0].Error, "cannot be looked at") {
+		t.Fatalf("history = %+v", runs)
+	}
+}
+
+// A job that never gets the slot is not folding either: after a few busy
+// looks in a row it says so, and the refresh takes its rules back until the
+// job runs.
+func TestMaybeCompact_aJobAlwaysBusyHandsTheRulesBack(t *testing.T) {
+	sup, req, _, _ := compactRig(t, 3)
+	stubMajor(t, nil)
+	sup.jobs["s"] = &console.BaselineStatus{State: "running"}
+	logs := captureSlogFor(t)
+	for i := range compactBusyTries {
+		if sup.foldJobBlocked("s") {
+			t.Fatalf("blocked after %d busy look(s)", i)
+		}
+		sup.maybeCompact(req)
+	}
+	if !sup.foldJobBlocked("s") || !strings.Contains(logs.String(), "has not had the slot") {
+		t.Fatalf("blocked=%v log=%q", sup.foldJobBlocked("s"), logs.String())
+	}
+	sup.jobs["s"] = &console.BaselineStatus{State: "succeeded"}
+	sup.maybeCompact(req)
+	waitCompact(t, sup, "s")
+	if sup.foldJobBlocked("s") {
+		t.Fatal("still blocked after the job ran")
 	}
 }
 

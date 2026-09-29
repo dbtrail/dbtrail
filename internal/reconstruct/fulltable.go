@@ -384,6 +384,9 @@ type TableReport struct {
 	// DeltaChainFoldRefused is why this run refused such a file (#1735):
 	// it was removed, and the job does not fold this chain again.
 	DeltaChainFoldRefused string
+	// DeltaChainFoldRefusalRecorded says the refusal was recorded, so the job
+	// will not fold this chain again; false when recording it failed.
+	DeltaChainFoldRefusalRecorded bool
 }
 
 // fetchFloor decides where a run with deltas on fetches from: the chain's last

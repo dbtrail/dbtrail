@@ -921,7 +921,15 @@ func newChainStart(p tableDeltaPublish) time.Time {
 // previous file plus the chain plus one new pair, or rewritten when
 // tableDeltaCompactReason says so. Either way the table leaves with a chain
 // beside it.
-func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableReport) error {
+func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableReport) (retErr error) {
+	defer func() {
+		// A refusal of the job's fold (#1735) is said in the run's detail for
+		// the table, which a failure of the same table replaces: said here
+		// too, so a later error cannot hide it.
+		if retErr != nil && rep.DeltaChainFoldRefused != "" {
+			retErr = fmt.Errorf("%w (before that, the file rebuilt by the compaction job was not used: %s)", retErr, rep.DeltaChainFoldRefused)
+		}
+	}()
 	hasAnchor := p.cfg.cut != nil || (p.anchorMeta.BinlogFile != "" && p.anchorMeta.BinlogPos > 0)
 	reserved := ""
 	if cols, err := baseline.ParseSchemaText(p.baseMeta.CreateTableSQL); err == nil {
@@ -935,14 +943,14 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	adoptedMajor := ""
 	if p.prev != nil && !p.prev.Legacy && p.cfg.CompactDir != "" &&
 		inPlaceRewriteReason(p.basePath, p.fold.Spill != nil, p.capGap, hasAnchor, reserved) == "" {
-		np, dir, ok, refused, err := adoptMajorCompaction(ctx, p)
+		np, ok, refused, recorded, err := adoptMajorCompaction(ctx, p)
 		if err != nil {
 			return err
 		}
 		if ok {
-			p, adoptedMajor = np, dir
+			p, adoptedMajor = np, "adopted"
 		}
-		rep.DeltaChainFoldRefused = refused
+		rep.DeltaChainFoldRefused, rep.DeltaChainFoldRefusalRecorded = refused, recorded
 	}
 
 	var baseSize int64
@@ -983,13 +991,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	jobCompacts := p.cfg.CompactionJob && !(p.prev != nil && foldRefused(p.cfg.CompactDir, p.schema, p.table, p.prev.Meta.DeltaChainStart))
 	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.fold.Spill != nil, p.capGap, p.cfg.At, hasAnchor, reserved,
 		p.cfg.ChainStartFloor, newChainStart(p), jobCompacts); reason != "" {
-		err := rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
-		if err == nil {
-			// The adopted file was read by this rewrite and is not needed
-			// again: the chain it started has just ended.
-			removeAdoptedMajor(adoptedMajor)
-		}
-		return err
+		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
 	}
 
 	// The guards a rewrite runs before it opens its output (#602, #843) are
@@ -1102,7 +1104,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	if adopted != "" {
 		// Linked into the new snapshot and read back as its chain: the
 		// staging has done its job. Older snapshots keep their plain pairs.
-		if err := os.RemoveAll(adopted); err != nil {
+		if err := ClearCompactionDir(adopted); err != nil {
 			slog.Warn("could not remove an adopted compaction", "dir", adopted, "error", err)
 		}
 		rep.DeltaCompactedRange = fmt.Sprintf("%d-%d", adoptedRange.SeqLo, adoptedRange.Seq)
@@ -1110,7 +1112,10 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 			"schema", p.schema, "table", p.table, "range", rep.DeltaCompactedRange)
 	}
 	if adoptedMajor != "" {
-		removeAdoptedMajor(adoptedMajor)
+		// The staged result stays until this snapshot is kept: if the run
+		// publishes nothing, the next refresh adopts it again. Once a snapshot
+		// holding the new chain is folded from, its folder names an ended
+		// chain and adoptCompaction's sweep removes it.
 		rep.DeltaChainFolded = p.foldedRange
 		slog.Info("table delta compaction adopted: the table file now holds the chain's pairs, and the chain starts again from it",
 			"schema", p.schema, "table", p.table, "folded", p.foldedRange, "chain_start", chainStart.UTC().Format(time.RFC3339))

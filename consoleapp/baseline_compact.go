@@ -64,6 +64,9 @@ type compactCandidate struct {
 	chain         *baseline.TableDeltaChain
 	chainStart    time.Time
 	major         string
+	// skipErr, when set, is this chain's failure in the run without anything
+	// being tried: its staging folder could not be looked at.
+	skipErr error
 }
 
 // The major compaction (#1735) folds a chain INTO its table: a full pass over
@@ -84,10 +87,16 @@ func majorLead(interval time.Duration) time.Duration { return time.Hour + 2*inte
 // other table would ever be folded.
 var majorRetryAfter = 6 * time.Hour
 
+// compactBusyTries is how many looks in a row may find the server busy before
+// the job counts as not running: the refresh then keeps its own rules.
+const compactBusyTries = 3
+
 // stagedResult says what waits in a chain's staging folder: "" (nothing
-// complete), "minor", "major", "refused" (a refresh refused a fold for this
-// chain, reconstruct.CompactionRefusedMarker) or "unreadable".
-func stagedResult(dir, table string) string {
+// complete), "minor" or "major", and whether a refresh refused a fold of this
+// chain (reconstruct.CompactionRefusedMarker). err is set when the folder
+// cannot be looked at: the job then leaves the chain alone, and says so as a
+// failed run.
+func stagedResult(dir, table string) (kind string, refused bool, err error) {
 	exists := func(name string) (bool, error) {
 		_, err := os.Stat(filepath.Join(dir, name))
 		if err == nil {
@@ -98,26 +107,27 @@ func stagedResult(dir, table string) string {
 		}
 		return false, err
 	}
-	refused, err := exists(reconstruct.CompactionRefusedMarker)
-	if err != nil {
-		slog.Warn("snapshot compaction: a staging folder cannot be looked at; its chain is left alone", "dir", dir, "error", err)
-		return "unreadable"
+	fail := func(err error) (string, bool, error) {
+		return "", false, fmt.Errorf("the staging folder %s cannot be looked at, so the chain beside it is not merged or folded: %w", dir, err)
 	}
-	if refused {
-		return "refused"
+	if refused, err = exists(reconstruct.CompactionRefusedMarker); err != nil {
+		return fail(err)
 	}
 	done, err := exists(baseline.SuccessMarker)
 	if err != nil {
-		slog.Warn("snapshot compaction: a staging folder cannot be looked at; its chain is left alone", "dir", dir, "error", err)
-		return "unreadable"
+		return fail(err)
 	}
 	if !done {
-		return ""
+		return "", refused, nil
 	}
-	if major, _ := exists(table + ".parquet"); major {
-		return "major"
+	major, err := exists(table + ".parquet")
+	if err != nil {
+		return fail(err)
 	}
-	return "minor"
+	if major {
+		return "major", refused, nil
+	}
+	return "minor", refused, nil
 }
 
 // foldJob is what the job remembers per server between runs.
@@ -131,6 +141,8 @@ type foldJob struct {
 	failed map[string]time.Time
 	// refusedSaid: refused chains already said, by staging folder.
 	refusedSaid map[string]bool
+	// busy: looks in a row that found the server's slot taken.
+	busy int
 }
 
 // foldJobLocked returns the server's state, created on first use. Callers hold s.mu.
@@ -208,6 +220,7 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 		staged string
 	}
 	var all []looked
+	var unreadable []compactCandidate
 	major := -1
 	for base, c := range chains {
 		if c.Legacy {
@@ -221,14 +234,28 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 			continue
 		}
 		dir := reconstruct.CompactionDir(compactDirFor(req.BaselineDir), schema, table, um.DeltaChainStart)
-		staged := stagedResult(dir, table)
-		switch staged {
-		case "major", "unreadable":
-			continue // the next refresh adopts it; or said above
-		case "refused":
-			// A refresh refused a fold of this chain and said why; folding
-			// it again would be refused again. Left as it is until the chain
-			// ends (the refresh's own rules still end it).
+		staged, refused, serr := stagedResult(dir, table)
+		cand := compactCandidate{base: base, schema: schema, table: table, chain: c, chainStart: um.DeltaChainStart}
+		if serr != nil {
+			// A failed chain in the run, so the page and the history say it.
+			cand.skipErr = serr
+			unreadable = append(unreadable, cand)
+			continue
+		}
+		if staged == "major" {
+			continue // the next refresh adopts it
+		}
+		// A staged minor does not stop a fold: the fold takes every pair the
+		// minor merged, and replaces it.
+		chainBytes, tableBytes, err := chainSizes(base, c)
+		s.mu.Lock()
+		failedAt, failed := s.foldJobLocked(req.ServerID).failed[dir]
+		s.mu.Unlock()
+		switch {
+		case refused:
+			// A refresh refused a fold of this chain and said why; folding it
+			// again would be refused again. Its first pairs are still merged,
+			// and the refresh's own rules end it.
 			s.mu.Lock()
 			j := s.foldJobLocked(req.ServerID)
 			first := !j.refusedSaid[dir]
@@ -238,16 +265,6 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 				slog.Warn("snapshot compaction: a refresh refused this chain's fold; it is not folded again, the refresh ends the chain itself",
 					"server", req.ServerName, "schema", schema, "table", table, "dir", dir)
 			}
-			continue
-		}
-		cand := compactCandidate{base: base, schema: schema, table: table, chain: c, chainStart: um.DeltaChainStart}
-		// A staged minor does not stop a fold: the fold takes every pair the
-		// minor merged, and replaces it.
-		chainBytes, tableBytes, err := chainSizes(base, c)
-		s.mu.Lock()
-		failedAt, failed := s.foldJobLocked(req.ServerID).failed[dir]
-		s.mu.Unlock()
-		switch {
 		case err != nil:
 			// Sizes of zero would read as "not large": no fold this run.
 			slog.Warn("snapshot compaction: could not size a chain; it is not folded at this run",
@@ -276,13 +293,17 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 			due = append(due, l.cand)
 		}
 	}
+	due = append(due, unreadable...)
 	if major >= 0 {
 		// Last: the minors are quick, and are staged even if the fold is
 		// stopped by a shutdown.
 		due = append(due, all[major].cand)
 	}
 	if len(due) == 0 {
-		s.setFoldJobBlocked(req.ServerID, false)
+		s.mu.Lock()
+		j := s.foldJobLocked(req.ServerID)
+		j.blocked, j.busy = false, 0
+		s.mu.Unlock()
 		return
 	}
 	// The merged chain is staged for the next refresh to adopt as this
@@ -308,9 +329,24 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 		return due[i].base < due[j].base
 	})
 	err = s.TriggerCompact(req, due)
-	s.setFoldJobBlocked(req.ServerID, err != nil && !errors.Is(err, console.ErrBaselineRunning))
+	busy := errors.Is(err, console.ErrBaselineRunning)
+	s.mu.Lock()
+	j := s.foldJobLocked(req.ServerID)
+	if busy {
+		j.busy++
+	} else {
+		j.busy = 0
+	}
+	busyLooks := j.busy
+	j.blocked = (err != nil && !busy) || busyLooks >= compactBusyTries
+	s.mu.Unlock()
 	if err != nil {
-		if errors.Is(err, console.ErrBaselineRunning) {
+		if busy {
+			if busyLooks >= compactBusyTries {
+				slog.Warn("snapshot compaction: the job has not had the slot for several looks in a row; until it runs, the refresh writes tables in full itself when their chains are a day old or past a quarter of the table",
+					"server", req.ServerName, "id", req.ServerID, "looks", busyLooks)
+				return
+			}
 			slog.Info("baseline compact: not started; the server is busy, the next refresh tries again",
 				"server", req.ServerName, "id", req.ServerID, "chains", len(due))
 			return
@@ -358,7 +394,10 @@ func (s *baselineSupervisor) runCompact(req refreshRequest, due []compactCandida
 			break
 		}
 		one := s.compactOne
-		if c.major != "" {
+		switch {
+		case c.skipErr != nil:
+			one = func(refreshRequest, string, compactCandidate) error { return c.skipErr }
+		case c.major != "":
 			one = s.compactMajorOne
 		}
 		if err := one(req, root, c); err != nil {
@@ -461,16 +500,18 @@ func (s *baselineSupervisor) compactOne(req refreshRequest, root string, c compa
 	dir := reconstruct.CompactionDir(root, c.schema, c.table, um.DeltaChainStart)
 	// A previous attempt's leftovers (no _SUCCESS, or one the refresh did
 	// not adopt) are replaced whole.
-	if err := os.RemoveAll(dir); err != nil {
+	// A refusal record (#1735) stays: it is what keeps the chain from being
+	// folded again.
+	if err := reconstruct.ClearCompactionDir(dir); err != nil {
 		return err
 	}
 	mc, err := compactMinor(s.ctx, c.base, c.chain, lo, hi, dir)
 	if err != nil {
-		os.RemoveAll(dir)
+		reconstruct.ClearCompactionDir(dir)
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, baseline.SuccessMarker), nil, 0o644); err != nil {
-		os.RemoveAll(dir)
+		reconstruct.ClearCompactionDir(dir)
 		return err
 	}
 	slog.Info("baseline compact: chain prefix merged into one range pair", "server", req.ServerName,

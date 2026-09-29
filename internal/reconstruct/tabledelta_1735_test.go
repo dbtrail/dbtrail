@@ -16,6 +16,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -173,6 +174,11 @@ func newMajorRun(t *testing.T, windows []map[string]*query.ResultRow) *majorRun 
 	return r
 }
 
+// stageDir is the chain's staging folder, staged or not.
+func (r *majorRun) stageDir() string {
+	return CompactionDir(r.compactDir, "mydb", "orders", chainStartOf(r.t, r.base))
+}
+
 func (r *majorRun) stageIt() {
 	r.t.Helper()
 	r.mc, r.stage = stageMajor(r.t, r.compactDir, r.base)
@@ -323,11 +329,8 @@ func TestPublishWithTableDelta_adoptsAMajorCompaction(t *testing.T) {
 	if sameFile(r.base, oldBase) {
 		t.Fatal("the base was carried, not replaced by the folded table")
 	}
-	if _, err := os.Stat(r.stage); !os.IsNotExist(err) {
-		t.Fatalf("the adopted result was not removed: %v", err)
-	}
 	// The new pair says it was derived from the previous snapshot's table,
-	// not from the staging folder, which no longer exists.
+	// not from the staging folder, which is swept at the next refresh.
 	pm := rawFooter(t, strings.TrimSuffix(r.base, ".parquet")+".000001.upserts")
 	if pm[MetaKeyDerivedFromPath] != oldBase {
 		t.Fatalf("derived from %q, want %q", pm[MetaKeyDerivedFromPath], oldBase)
@@ -366,6 +369,9 @@ func TestPublishWithTableDelta_adoptsAMajorCompaction(t *testing.T) {
 	rep = r.next(changeMap(del(11)))
 	if rep.DeltaChainFolded != "" || rep.DeltaSeq != 2 {
 		t.Fatalf("report after = %+v", rep)
+	}
+	if _, err := os.Stat(r.stage); !os.IsNotExist(err) {
+		t.Fatalf("the adopted result was not swept once its chain was extended: %v", err)
 	}
 }
 
@@ -491,31 +497,170 @@ func TestPublishWithTableDelta_majorResultNotAdopted(t *testing.T) {
 	}
 }
 
-// A failure to write is not a refusal: the result is kept, nothing is
-// recorded against the chain, and the next refresh adopts it (with the pair
-// the failed one wrote as its tail).
+// A failure that is not the result's fault (here the state could not be read
+// once) is not a refusal: the result is kept whole, including through the
+// minor adoption that runs on the same folder, nothing is recorded against
+// the chain, and the next refresh adopts it.
 func TestPublishWithTableDelta_majorKeptWhenAdoptionCannotWrite(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores the folder's permissions")
-	}
 	r := newMajorRun(t, zooWindows())
 	r.stageIt()
-	if err := os.Chmod(r.stage, 0o555); err != nil {
-		t.Fatal(err)
+	fails := 1
+	prev := stateKeyDigestFn
+	t.Cleanup(func() { stateKeyDigestFn = prev })
+	stateKeyDigestFn = func(ctx context.Context, base string, d *tableDelta, pk []metadata.ColumnMeta, tu duckdbutil.Tuning) (string, error) {
+		if fails > 0 {
+			fails--
+			return "", fmt.Errorf("duckdb: out of memory")
+		}
+		return prev(ctx, base, d, pk, tu)
 	}
 	rep := r.next(changeMap(upd(3, "three-v9")))
-	if err := os.Chmod(r.stage, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if rep.DeltaChainFolded != "" || rep.DeltaChainFoldRefused != "" || rep.DeltaSeq != 3 {
 		t.Fatalf("report = %+v, want the old chain extended and nothing refused", rep)
 	}
-	if _, err := os.Stat(filepath.Join(r.stage, "orders.parquet")); err != nil {
-		t.Fatalf("the result was not kept: %v", err)
+	for _, f := range []string{"orders.parquet", baseline.SuccessMarker} {
+		if _, err := os.Stat(filepath.Join(r.stage, f)); err != nil {
+			t.Fatalf("%s was not kept: %v", f, err)
+		}
 	}
 	rep = r.next(changeMap(ins(12, "twelve")))
 	if rep.DeltaChainFolded != "0-2" || rep.DeltaSeq != 2 {
 		t.Fatalf("report = %+v, want the result adopted with one tail pair", rep)
+	}
+}
+
+// The same failure every time is not retried forever (one fold per cycle
+// thrown away): after a few tries it is a refusal like any other.
+func TestPublishWithTableDelta_repeatedAdoptionFailuresBecomeARefusal(t *testing.T) {
+	r := newMajorRun(t, zooWindows())
+	r.stageIt()
+	prev := stateKeyDigestFn
+	t.Cleanup(func() { stateKeyDigestFn = prev })
+	stateKeyDigestFn = func(context.Context, string, *tableDelta, []metadata.ColumnMeta, duckdbutil.Tuning) (string, error) {
+		return "", fmt.Errorf("duckdb: out of memory")
+	}
+	var rep *TableReport
+	for i := range majorAdoptionTries {
+		rep = r.next(changeMap(upd(3, "v"+strconv.Itoa(i))))
+		if last := i == majorAdoptionTries-1; (rep.DeltaChainFoldRefused != "") != last {
+			t.Fatalf("try %d: report = %+v", i+1, rep)
+		}
+	}
+	if !strings.Contains(rep.DeltaChainFoldRefused, "out of memory") {
+		t.Fatalf("refusal = %q, want the last error named", rep.DeltaChainFoldRefused)
+	}
+	if !foldRefused(r.compactDir, "mydb", "orders", chainStartOf(t, r.base)) {
+		t.Fatal("the refusal was not recorded")
+	}
+}
+
+// When the refusal cannot be recorded, the report does not claim the fold
+// will not be made again.
+func TestRefreshOutcomes_anUnrecordedRefusalSaysSo(t *testing.T) {
+	r := newMajorRun(t, zooWindows())
+	r.stageIt()
+	rewriteFile(t, r.mc.Base, "", func(m map[string]string) { m[baseline.MetaKeyFoldedBaseSize] = "1" })
+	prev := writeRefusalMarker
+	t.Cleanup(func() { writeRefusalMarker = prev })
+	writeRefusalMarker = func(string, string) error { return fmt.Errorf("read-only file system") }
+	rep := r.next(changeMap(upd(3, "a")))
+	if rep.DeltaChainFoldRefused == "" || rep.DeltaChainFoldRefusalRecorded {
+		t.Fatalf("report = %+v", rep)
+	}
+	d := RefreshOutcomes([]string{"mydb.orders"}, []*TableReport{rep}, nil)[0].Detail
+	t.Logf("%s", d)
+	if strings.Contains(d, "will not be rebuilt") || !strings.Contains(d, "could not be recorded") {
+		t.Fatalf("detail = %q", d)
+	}
+	rep.DeltaChainFoldRefusalRecorded = true
+	if d := RefreshOutcomes([]string{"mydb.orders"}, []*TableReport{rep}, nil)[0].Detail; !strings.Contains(d, "will not be rebuilt") {
+		t.Fatalf("recorded detail = %q", d)
+	}
+}
+
+// A staging folder that cannot be looked at: the job skips the chain, so the
+// refresh must not count on it and keeps its own day rule.
+func TestPublishWithTableDelta_anUnreadableStagingGivesTheRulesBack(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any folder")
+	}
+	r := newMajorRun(t, zooWindows())
+	r.stageIt()
+	if err := os.Chmod(r.stage, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(r.stage, 0o755) })
+	r.at = r.at.Add(25 * time.Hour)
+	rep := r.next(changeMap(upd(3, "a")))
+	if !strings.Contains(rep.DeltaCompacted, "old") || strings.Contains(rep.DeltaCompacted, "has not folded") {
+		t.Fatalf("report = %+v, want the table written in full on the day rule", rep)
+	}
+}
+
+// The staged result is not removed by the refresh that adopts it: that
+// refresh's snapshot may still be thrown away (another table fails, and the
+// run publishes nothing), and then the next refresh adopts it again. It goes
+// once a later refresh finds the chain it started.
+func TestPublishWithTableDelta_theResultOutlivesADiscardedSnapshot(t *testing.T) {
+	r := newMajorRun(t, zooWindows())
+	r.stageIt()
+	oldBase, oldPrev, oldRef, oldAt := r.base, r.prevTime, r.refOut, r.at
+	rep := r.next(changeMap(upd(3, "a")))
+	if rep.DeltaChainFolded != "0-2" {
+		t.Fatalf("report = %+v", rep)
+	}
+	if _, err := os.Stat(filepath.Join(r.stage, "orders.parquet")); err != nil {
+		t.Fatalf("removed before the snapshot was kept: %v", err)
+	}
+	// The run is thrown away.
+	if err := os.RemoveAll(filepath.Dir(filepath.Dir(r.base))); err != nil {
+		t.Fatal(err)
+	}
+	r.base, r.prevTime, r.refOut, r.at = oldBase, oldPrev, oldRef, oldAt
+	if rep := r.next(changeMap(upd(3, "b"))); rep.DeltaChainFolded != "0-2" {
+		t.Fatalf("not adopted again after the discard: %+v", rep)
+	}
+	r.next(changeMap(upd(3, "c")))
+	if _, err := os.Stat(r.stage); !os.IsNotExist(err) {
+		t.Fatalf("not swept once the new chain was published and extended: %v", err)
+	}
+}
+
+// A refused chain may still have its first pairs merged: the record of the
+// refusal lives in the same folder and must outlive the minor result.
+func TestAdoptCompaction_keepsTheRefusalRecord(t *testing.T) {
+	r := newMajorRun(t, zooWindows())
+	c, _ := baseline.ListTableDelta(context.Background(), r.base)
+	if _, err := CompactTableDeltaMinor(context.Background(), r.base, c, 0, 1, r.stageDir()); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{baseline.SuccessMarker, CompactionRefusedMarker} {
+		if err := os.WriteFile(filepath.Join(r.stageDir(), f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep := r.next(changeMap(upd(3, "a")))
+	if rep.DeltaCompactedRange != "0-1" {
+		t.Fatalf("the minor result was not adopted beside the record: %+v", rep)
+	}
+	left, _ := os.ReadDir(r.stageDir())
+	if len(left) != 1 || left[0].Name() != CompactionRefusedMarker {
+		t.Fatalf("left = %v, want the refusal record alone", left)
+	}
+}
+
+// A failure after a refusal still says the refusal.
+func TestPublishWithTableDelta_aLaterFailureKeepsTheRefusal(t *testing.T) {
+	r := newMajorRun(t, zooWindows())
+	r.stageIt()
+	rewriteFile(t, r.mc.Base, "", func(m map[string]string) { m[baseline.MetaKeyFoldedBaseSize] = "1" })
+	cut := &query.BinlogPos{File: "binlog.000009", Pos: 99000}
+	_, _, err := deltaWindow(t, r.root, r.base, r.prevTime, changeMap(upd(3, "a")), r.at.Add(5*time.Minute), cut, func(p *tableDeltaPublish) {
+		p.cfg.CompactDir, p.cfg.CompactionJob = r.compactDir, true
+		p.cfg.SpaceCheck = func(string, int64) error { return fmt.Errorf("disk full") }
+	})
+	if err == nil || !strings.Contains(err.Error(), "disk full") || !strings.Contains(err.Error(), "compaction job") {
+		t.Fatalf("err = %v, want the failure and the refusal", err)
 	}
 }
 
@@ -583,7 +728,7 @@ func TestPublishWithTableDelta_forcedRewriteSkipsTheMajor(t *testing.T) {
 
 // #1904 still ends the chain in time: when even the folded pair is at or
 // before the line, the refresh writes the table in full (from the adopted
-// file, which is the cheaper read) and the result is removed.
+// file, which is the cheaper read); the result is swept by the next refresh.
 func TestPublishWithTableDelta_floorAfterAdoptionStillRewrites(t *testing.T) {
 	r := newMajorRun(t, zooWindows())
 	r.stageIt()
@@ -592,11 +737,13 @@ func TestPublishWithTableDelta_floorAfterAdoptionStillRewrites(t *testing.T) {
 	if !strings.Contains(rep.DeltaCompacted, "too close to the oldest events") {
 		t.Fatalf("report = %+v, want the chain ended at the floor", rep)
 	}
-	if _, err := os.Stat(r.stage); !os.IsNotExist(err) {
-		t.Fatal("the used result was left behind")
-	}
 	if got := chainNames(r.base); !reflect.DeepEqual(got, []string{"orders.000000.posdel", "orders.000000.upserts", "orders.parquet"}) {
 		t.Fatalf("files = %v", got)
+	}
+	r.floor = time.Time{}
+	r.next(changeMap(upd(3, "three-v10")))
+	if _, err := os.Stat(r.stage); !os.IsNotExist(err) {
+		t.Fatal("the used result was left behind")
 	}
 }
 

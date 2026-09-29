@@ -312,11 +312,14 @@ var errMajorNotAdoptable = errors.New("major compaction not adopted")
 // time (kept for the next refresh), or one that did not fit. That last one is
 // removed, and a CompactionRefusedMarker holding the reason is left in its
 // place: the job does not fold the same chain again, so a refusal that would
-// repeat costs one fold, not one per cycle. refused is that reason, for the
-// run's report. An error is only a cancelled context.
-func adoptMajorCompaction(ctx context.Context, p tableDeltaPublish) (np tableDeltaPublish, dir string, ok bool, refused string, err error) {
+// repeat costs one fold, not one per cycle. A failure that is not the
+// result's fault becomes such a refusal after majorAdoptionTries refreshes in
+// a row, for the same reason. refused is the reason, for the run's report,
+// and recorded whether the marker was written. An error is only a cancelled
+// context.
+func adoptMajorCompaction(ctx context.Context, p tableDeltaPublish) (np tableDeltaPublish, ok bool, refused string, recorded bool, err error) {
 	compactDir, schema, table := p.cfg.CompactDir, p.schema, p.table
-	dir = CompactionDir(compactDir, schema, table, p.prev.Meta.DeltaChainStart)
+	dir := CompactionDir(compactDir, schema, table, p.prev.Meta.DeltaChainStart)
 	staged := filepath.Join(dir, table+".parquet")
 	for _, f := range []string{staged, filepath.Join(dir, baseline.SuccessMarker)} {
 		if _, serr := os.Stat(f); serr != nil {
@@ -325,45 +328,72 @@ func adoptMajorCompaction(ctx context.Context, p tableDeltaPublish) (np tableDel
 			if !errors.Is(serr, fs.ErrNotExist) {
 				slog.Warn("table delta compaction: the staged result cannot be looked at; not adopted this time", "schema", schema, "table", table, "error", serr)
 			}
-			return p, "", false, "", nil
+			return p, false, "", false, nil
 		}
 	}
 	np, berr := buildMajorChain(ctx, p, dir, staged)
 	if berr == nil {
-		return np, dir, true, "", nil
+		return np, true, "", false, nil
 	}
 	if ctx.Err() != nil {
-		return p, "", false, "", ctx.Err()
-	}
-	if !errors.Is(berr, errMajorNotAdoptable) {
-		slog.Warn("table delta compaction not adopted this time; kept for the next refresh: "+berr.Error(), "schema", schema, "table", table, "dir", dir)
-		return p, "", false, "", nil
+		return p, false, "", false, ctx.Err()
 	}
 	why := strings.TrimPrefix(berr.Error(), errMajorNotAdoptable.Error()+": ")
+	if !errors.Is(berr, errMajorNotAdoptable) {
+		tries := countAdoptionTry(dir)
+		if tries < majorAdoptionTries {
+			slog.Warn("table delta compaction not adopted this time; kept for the next refresh: "+berr.Error(),
+				"schema", schema, "table", table, "dir", dir, "try", tries, "of", majorAdoptionTries)
+			return p, false, "", false, nil
+		}
+		why = fmt.Sprintf("it could not be put in place %d times in a row; the last time: %s", tries, berr)
+	}
 	slog.Warn("table delta compaction not adopted; removing it, and it is not folded again for this chain: "+why, "schema", schema, "table", table, "dir", dir)
-	if rerr := os.RemoveAll(dir); rerr != nil {
-		slog.Warn("could not remove a compaction result", "dir", dir, "error", rerr)
-		return p, "", false, why, nil
+	rerr := os.RemoveAll(dir)
+	if rerr == nil {
+		rerr = os.MkdirAll(dir, 0o755)
 	}
-	merr := os.MkdirAll(dir, 0o755)
-	if merr == nil {
-		merr = os.WriteFile(filepath.Join(dir, CompactionRefusedMarker), []byte(why+"\n"), 0o644)
+	if rerr == nil {
+		rerr = writeRefusalMarker(dir, why)
 	}
-	if merr != nil {
-		slog.Warn("could not record a refused compaction; the job may fold this chain again", "dir", dir, "error", merr)
+	if rerr != nil {
+		slog.Warn("could not record a refused compaction; the job may fold this chain again", "dir", dir, "error", rerr)
+		return p, false, why, false, nil
 	}
-	return p, "", false, why, nil
+	return p, false, why, true, nil
 }
 
-// foldRefused says whether a refresh refused a fold of this chain, so the job
-// will not fold it again. An unreadable marker counts as not refused: the
-// refresh then leaves the chain to the job, as before the refusal.
+// adoptionTriesFile counts, in a staged result's folder, the refreshes in a
+// row that failed to adopt it for a reason not its own.
+const adoptionTriesFile = "_ADOPT_TRIES"
+
+// countAdoptionTry adds one to the count and returns it. A count that cannot
+// be read or written counts as the last try: a failure to keep the count
+// must not become a retry forever.
+func countAdoptionTry(dir string) int {
+	path := filepath.Join(dir, adoptionTriesFile)
+	n := 0
+	if b, err := os.ReadFile(path); err == nil {
+		n, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return majorAdoptionTries
+	}
+	n++
+	if err := os.WriteFile(path, []byte(strconv.Itoa(n)+"\n"), 0o644); err != nil {
+		return majorAdoptionTries
+	}
+	return n
+}
+
+// foldRefused says whether the job will not fold this chain: a refresh
+// refused its fold, or the chain's staging folder cannot be looked at (the job
+// skips such a chain too). Either way the refresh keeps its own rules for it.
 func foldRefused(compactDir, schema, table string, chainStart time.Time) bool {
 	if compactDir == "" {
 		return false
 	}
 	_, err := os.Stat(filepath.Join(CompactionDir(compactDir, schema, table, chainStart), CompactionRefusedMarker))
-	return err == nil
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
 }
 
 // CompactionRefusedMarker is left in a chain's staging folder when a refresh
@@ -394,7 +424,7 @@ func buildMajorChain(ctx context.Context, p tableDeltaPublish, dir, staged strin
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if name == filepath.Base(staged) || name == baseline.SuccessMarker {
+		if name == filepath.Base(staged) || name == baseline.SuccessMarker || name == adoptionTriesFile {
 			continue
 		}
 		stem, _, _, isPair := baseline.ParseTableDeltaName(strings.TrimSuffix(name, ".tmp"))
@@ -500,11 +530,11 @@ func buildMajorChain(ctx context.Context, p tableDeltaPublish, dir, staged strin
 	case nd == nil || nd.Meta.DeltaSeq != len(tail):
 		return refuse("the chain built on it does not end at pair %d", len(tail))
 	}
-	before, err := stateKeyDigest(ctx, p.basePath, prev, p.pkCols, p.cfg.DuckDBTuning)
+	before, err := stateKeyDigestFn(ctx, p.basePath, prev, p.pkCols, p.cfg.DuckDBTuning)
 	if err != nil {
 		return retry("the state it replaces cannot be read (%v)", err)
 	}
-	after, err := stateKeyDigest(ctx, staged, nd, p.pkCols, p.cfg.DuckDBTuning)
+	after, err := stateKeyDigestFn(ctx, staged, nd, p.pkCols, p.cfg.DuckDBTuning)
 	if err != nil {
 		return retry("the state built on it cannot be read (%v)", err)
 	}
@@ -585,6 +615,20 @@ func readTouchedKeys(ctx context.Context, ddb *sql.DB, upserts string) (map[stri
 	return out, rows.Err()
 }
 
+// majorAdoptionTries is how many refreshes in a row may fail to adopt a
+// staged result for a reason that is not the result's own (a read or a write
+// that failed) before it is refused like one that does not fit.
+const majorAdoptionTries = 3
+
+// stateKeyDigestFn and writeRefusalMarker are seams a test fails through,
+// to drive the adoption's retry and refusal paths without a broken disk.
+var (
+	stateKeyDigestFn   = stateKeyDigest
+	writeRefusalMarker = func(dir, why string) error {
+		return os.WriteFile(filepath.Join(dir, CompactionRefusedMarker), []byte(why+"\n"), 0o644)
+	}
+)
+
 // stateKeyDigest is the row count and a sum of the key columns' hashes over
 // the state of basePath with its chain d: what the swap must leave
 // unchanged. A dead row number that pointed at the wrong row of base' leaves
@@ -619,15 +663,4 @@ func stateKeyDigest(ctx context.Context, basePath string, d *tableDelta, pkCols 
 		return "", err
 	}
 	return fmt.Sprintf("%d rows, key sum %s", n, sum.String), nil
-}
-
-// removeAdoptedMajor drops a staged result once the table it served is
-// published: the files it holds were linked into the new snapshot.
-func removeAdoptedMajor(dir string) {
-	if dir == "" {
-		return
-	}
-	if err := os.RemoveAll(dir); err != nil {
-		slog.Warn("could not remove an adopted compaction", "dir", dir, "error", err)
-	}
 }
