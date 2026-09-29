@@ -576,7 +576,7 @@ func deferredValueUnresolved(v any, c metadata.ColumnMeta, binariesTyped bool) b
 		// these types into []byte (invalid UTF-8 replaced with U+FFFD), which
 		// has no rendering. Unsure means unresolved.
 		if !binariesTyped {
-			return true // may still be stored base64 — DecodeEventBinaries degraded
+			return true // may still be stored base64: DecodeEventBinaries degraded
 		}
 		s, ok := v.(string)
 		return !ok || !metadata.IsMariaDBFixedText(c.DataType, s)
