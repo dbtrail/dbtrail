@@ -622,7 +622,10 @@ func baselinePKStringMatchable(dataType string) bool {
 		"decimal", "numeric",
 		"char", "varchar", "text", "tinytext", "mediumtext", "longtext",
 		"enum", "set",
-		"datetime", "timestamp", "date":
+		"datetime", "timestamp", "date",
+		// MariaDB UUID/INET: the baseline holds the server's text, and
+		// ReadBaselineRow re-spells the client's value as that text.
+		"uuid", "inet4", "inet6":
 		return true
 	default:
 		return false

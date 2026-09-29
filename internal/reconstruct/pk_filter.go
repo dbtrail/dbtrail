@@ -1,14 +1,18 @@
 package reconstruct
 
 import (
+	"context"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"maps"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 )
 
@@ -52,6 +56,9 @@ func ResolvePKMetasAt(db *sql.DB, schema, table string, at time.Time) []metadata
 	} else if id, ok := metadata.EpochAt(epochs, at); ok {
 		snapshotID = id
 	}
+	// Debug only: a nil result is harmless for most keys. For a MariaDB
+	// UUID/INET key it is not, and CheckUntypedMariaDBFixedPK refuses the
+	// lookup instead of letting it answer wrong.
 	res, err := metadata.NewResolver(db, snapshotID)
 	if err != nil {
 		slog.Debug("could not load schema snapshot for PK metadata", "error", err)
@@ -69,7 +76,10 @@ func ResolvePKMetasAt(db *sql.DB, schema, table string, at time.Time) []metadata
 // indexer stored in binlog_events.pk_values, so an event fetch matches what
 // the operator typed.
 //
-// Only fixed-width BINARY(n) components are touched, and this is the INVERSE
+// MariaDB UUID/INET4/INET6 components are parsed from their text form (any
+// spelling metadata.ParseMariaDBFixed accepts) and spelled as the captured
+// full-width bytes. Otherwise only fixed-width BINARY(n) components are
+// touched, and this is the INVERSE
 // of padFixedBinaryFilter — the two run in opposite directions on purpose,
 // because they target different stores. Reproducing event.formatPKValue
 // exactly: trailing 0x00 padding is stripped (the ROW image never carries it),
@@ -93,6 +103,20 @@ func IndexPKSpelling(pk string, pkMetas []metadata.ColumnMeta) string {
 	}
 	changed := false
 	for i, c := range pkMetas {
+		if metadata.MariaDBFixedWidth(c.DataType) > 0 {
+			// MariaDB UUID/INET4/INET6: the index keys the event by the
+			// full-width bytes (metadata.MapRow pads them), spelled by
+			// event.BuildPKValues, escaping included. A value that does not
+			// parse is left as typed; ReadBaselineRow refuses it first.
+			if b, err := metadata.ParseMariaDBFixed(c.DataType, parts[i]); err == nil {
+				spelled := event.BuildPKValues([]metadata.ColumnMeta{c}, map[string]any{c.Name: b})
+				if spelled != parts[i] {
+					parts[i] = spelled
+					changed = true
+				}
+			}
+			continue
+		}
 		if !strings.EqualFold(strings.TrimSpace(c.DataType), "binary") {
 			continue
 		}
@@ -181,4 +205,95 @@ func filterKeyFor(filter map[string]string, col string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// mariaDBFixedBaselineFilter re-spells every MariaDB UUID/INET4/INET6
+// component of a baseline PK filter as the text MariaDB prints, which is what
+// the baseline column holds (mydumper dumps the text form). The server accepts
+// other spellings (upper case, a UUID without dashes, a long-form IPv6), so an
+// exact comparison against the typed value would miss a row that exists. A
+// value that is not one of these types' text is refused: guessing a spelling
+// could resolve a different row. With no metas the filter passes through.
+func mariaDBFixedBaselineFilter(pkFilter map[string]string, pkMetas []metadata.ColumnMeta) (map[string]string, error) {
+	var out map[string]string
+	for _, c := range pkMetas {
+		if metadata.MariaDBFixedWidth(c.DataType) == 0 {
+			continue
+		}
+		key, ok := filterKeyFor(pkFilter, c.Name)
+		if !ok {
+			continue
+		}
+		v := pkFilter[key]
+		b, err := metadata.ParseMariaDBFixed(c.DataType, v)
+		if err != nil {
+			return nil, fmt.Errorf("primary-key column %q: %w", c.Name, err)
+		}
+		text, _ := metadata.FormatMariaDBFixed(c.DataType, b)
+		if out == nil {
+			out = maps.Clone(pkFilter)
+		}
+		out[key] = text
+	}
+	if out == nil {
+		return pkFilter, nil
+	}
+	return out, nil
+}
+
+// CheckUntypedMariaDBFixedPK refuses a single-row lookup that would answer
+// wrong without saying so. The index keys a MariaDB UUID/INET4/INET6 row by
+// the value's bytes, and only the index's schema snapshot tells a caller to
+// spell the key that way (IndexPKSpelling). Without that snapshot (pkMetas
+// nil) the key is looked up as text: the baseline row matches, no event does,
+// and the snapshot-era row would come back as the state at the target time.
+// So when pkMetas is nil and the baseline's own CREATE TABLE shows one of
+// those types among the filtered columns, this returns an error naming the
+// fix. An unreadable footer is an error; a CREATE the parser cannot read is
+// scanned for the type names instead. Only a footer with no CREATE TABLE at
+// all (a baseline older than that metadata) passes unchecked.
+func CheckUntypedMariaDBFixedPK(ctx context.Context, path string, pkFilter map[string]string, pkMetas []metadata.ColumnMeta) error {
+	if len(pkMetas) > 0 {
+		return nil
+	}
+	bm, err := baseline.ReadParquetMetadataAny(ctx, path)
+	if err != nil {
+		// The row read needs this same file; an error here is not a reason
+		// to let the lookup through.
+		return fmt.Errorf("read the baseline footer to type the primary key: %w", err)
+	}
+	if bm.CreateTableSQL == "" {
+		return nil
+	}
+	cols, err := baseline.ParseSchemaText(bm.CreateTableSQL)
+	if err != nil {
+		// A CREATE the parser cannot read (one line, say) still names its
+		// types. This text is the baseline's own, never a placeholder, so a
+		// UUID/INET word in it is the column type or an identifier; refusing
+		// on either is the safe side of "cannot tell".
+		lower := strings.ToLower(bm.CreateTableSQL)
+		for _, w := range []string{"uuid", "inet4", "inet6"} {
+			if strings.Contains(lower, w) {
+				return fmt.Errorf("the baseline's CREATE TABLE mentions %s and could not be parsed, "+
+					"and the index has no schema snapshot for this table to spell a MariaDB %s key the way it stores it; "+
+					"the answer could leave out every change after the baseline, so it is refused: "+
+					"run `bintrail snapshot` for this schema, then try again", strings.ToUpper(w), strings.ToUpper(w))
+			}
+		}
+		return nil
+	}
+	for _, c := range cols {
+		if metadata.MariaDBFixedWidth(c.MySQLType) == 0 {
+			continue
+		}
+		for k := range pkFilter {
+			if strings.EqualFold(strings.TrimSpace(k), c.Name) {
+				return fmt.Errorf("primary-key column %q is a MariaDB %s, which the index stores as bytes, "+
+					"and the index has no schema snapshot for this table to spell the key that way; "+
+					"the answer would leave out every change after the baseline, so it is refused: "+
+					"run `bintrail snapshot` for this schema, then try again", c.Name, strings.ToLower(c.MySQLType))
+			}
+		}
+	}
+	return nil
 }

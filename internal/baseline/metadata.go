@@ -706,3 +706,36 @@ func parseLastEventID(path, raw string) uint64 {
 	}
 	return n
 }
+
+// BinaryColumnsStoredAsText returns the columns of cols that this build stores
+// as bytes (IsBinaryType) but that the local Parquet file at path stores as a
+// UTF-8 STRING. A snapshot written before a type joined the binary list (VECTOR)
+// holds such a column. Name matching is case-insensitive.
+func BinaryColumnsStoredAsText(path string, cols []Column) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open baseline file: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat baseline file: %w", err)
+	}
+	pf, err := parquet.OpenFile(f, info.Size())
+	if err != nil {
+		return nil, fmt.Errorf("open parquet file: %w", err)
+	}
+	stringLeaf := map[string]bool{}
+	for _, fld := range pf.Schema().Fields() {
+		if lt := fld.Type().LogicalType(); lt != nil && lt.UTF8 != nil {
+			stringLeaf[strings.ToLower(fld.Name())] = true
+		}
+	}
+	var out []string
+	for _, c := range cols {
+		if IsBinaryType(c.MySQLType) && stringLeaf[strings.ToLower(c.Name)] {
+			out = append(out, c.Name)
+		}
+	}
+	return out, nil
+}

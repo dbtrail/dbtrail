@@ -157,8 +157,8 @@ func (h *Handler) ResolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (m
 	// wrong answer. Route "" through PKValuesIn (`pk_values IN (?)`), which keeps
 	// the fetch scoped to the one row; keep the pk_hash fast path otherwise.
 	// q.PKValue is raw/unescaped (#826); pk_values is event.BuildPKValues-
-	// encoded, so re-encode with EscapePKValue.
-	encoded := event.EscapePKValue(q.PKValue)
+	// encoded, so re-encode it (eventPKValue).
+	encoded := h.eventPKValue(q)
 	if q.PKValue != "" {
 		opts.PKValues = encoded
 	} else {
@@ -274,11 +274,14 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 
 	// q.PKValue is passed RAW here — Parquet baseline rows store actual column
 	// values, not event.BuildPKValues-encoded pk_values, so this seam must NOT
-	// apply event.EscapePKValue (unlike the delta fetch below). pkMetas nil:
-	// binary-family PKs never reach this call (baselinePKStringMatchable routed
-	// them to the binlog-only path above), so ReadBaselineRow's fixed BINARY(n)
-	// pad-and-retry (#1157) has nothing to reconcile on this path.
-	baselineRow, err := reconstruct.ReadBaselineRow(ctx, baselinePath, map[string]string{q.PKColumn: q.PKValue}, nil)
+	// apply event.EscapePKValue (unlike the delta fetch below). The one PK meta
+	// passed is for a MariaDB UUID/INET key: ReadBaselineRow re-spells the
+	// value as the text the baseline holds (the client may write another
+	// spelling MariaDB accepts). Binary-family PKs never reach this call
+	// (baselinePKStringMatchable routed them to the binlog-only path above),
+	// so the fixed BINARY(n) pad-and-retry (#1157) has nothing to reconcile.
+	pkMetas := []metadata.ColumnMeta{{Name: q.PKColumn, DataType: dataType, IsPK: true}}
+	baselineRow, err := reconstruct.ReadBaselineRow(ctx, baselinePath, map[string]string{q.PKColumn: q.PKValue}, pkMetas)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +297,7 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	// re-encode with EscapePKValue — the mirror of the raw ReadBaselineRow match
 	// above (#826). The empty-string PK routes through PKValuesIn for the same
 	// reason as ResolveFlashbackRow.
-	encoded := event.EscapePKValue(q.PKValue)
+	encoded := eventPKValueTyped(q, dataType, true)
 	if q.PKValue != "" {
 		opts.PKValues = encoded
 	} else {
@@ -400,4 +403,28 @@ func (h *Handler) PKColumnCheck(q TimeTravelQuery) (msg string, reject bool) {
 		), true
 	}
 	return "", false
+}
+
+// eventPKValue spells q.PKValue the way binlog_events.pk_values stores it.
+// For most keys that is event.EscapePKValue of the raw value (#826). A MariaDB
+// UUID/INET4/INET6 key is stored as its captured bytes (metadata.MapRow pads
+// them to full width, #1944), while the client writes text, in any spelling
+// MariaDB accepts; that text is parsed to the bytes and spelled by
+// event.BuildPKValues. Text that is not a value of the type is left as typed,
+// so it matches nothing, as it would on the server.
+func (h *Handler) eventPKValue(q TimeTravelQuery) string {
+	dt, ok := h.pkDataType(q.Schema, q.Table, q.PKColumn)
+	return eventPKValueTyped(q, dt, ok)
+}
+
+// eventPKValueTyped is eventPKValue with the PK type already resolved, so a
+// caller that gated on the type spells the key by that same answer.
+func eventPKValueTyped(q TimeTravelQuery, dt string, ok bool) string {
+	if ok && metadata.MariaDBFixedWidth(dt) > 0 {
+		if b, err := metadata.ParseMariaDBFixed(dt, q.PKValue); err == nil {
+			col := metadata.ColumnMeta{Name: q.PKColumn, DataType: dt, IsPK: true}
+			return event.BuildPKValues([]metadata.ColumnMeta{col}, map[string]any{q.PKColumn: b})
+		}
+	}
+	return event.EscapePKValue(q.PKValue)
 }

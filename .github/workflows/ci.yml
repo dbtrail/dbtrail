@@ -422,6 +422,10 @@ jobs:
     env:
       BINTRAIL_TEST_DSN: "root:testroot@tcp(127.0.0.1:13306)"
       BINTRAIL_TEST_MARIADB_DSN: "root:testroot@tcp(127.0.0.1:13307)"
+      # An empty MariaDB of the same version for `drill` to load into
+      # (TestEndToEnd_MariaDBSnapshotChain). It has to be MariaDB: MySQL has
+      # no UUID/INET column type.
+      BINTRAIL_TEST_MARIADB_SCRATCH_DSN: "root:testroot@tcp(127.0.0.1:13309)"
       # A MariaDB source is guaranteed present in this job, so the MariaDB tests
       # must FAIL (not silently skip) if they can't run — otherwise a handshake
       # regression would pass as green-via-skip. The 8.0/8.4 matrix leaves this
@@ -494,6 +498,44 @@ jobs:
           docker logs bintrail-test-mariadb >&2 || true
           exit 1
 
+      # The drill target of the snapshot chain test: no binlog, nothing else
+      # writes to it, and drill refuses it unless the schema it loads is absent.
+      - name: Start MariaDB drill target (bintrail-test-mariadb-scratch, ${{ matrix.mariadb }})
+        if: env.RUN == 'true'
+        run: |
+          docker run -d --name bintrail-test-mariadb-scratch \
+            -e MARIADB_ROOT_PASSWORD=testroot \
+            -p 13309:3306 \
+            mariadb:${{ matrix.mariadb }}
+          consecutive=0
+          for i in $(seq 1 60); do
+            if docker run --rm --network host mariadb:${{ matrix.mariadb }} \
+                 mariadb --protocol=TCP -h 127.0.0.1 -P 13309 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
+              consecutive=$((consecutive + 1))
+              [ "$consecutive" -ge 3 ] && { echo "MariaDB drill target is ready."; exit 0; }
+            else
+              consecutive=0
+            fi
+            sleep 2
+          done
+          echo "MariaDB drill target did not become ready in time" >&2
+          docker logs bintrail-test-mariadb-scratch >&2 || true
+          exit 1
+
+      # The snapshot chain test runs a real mydumper. Same version the console
+      # image bundles (#613) and the first-run walk installs. This jammy build
+      # links the MySQL 8.0 client library, like the amd64 console image, so
+      # TestEndToEnd_MariaDBSnapshotEd25519 checks the ed25519 limitation that
+      # ships. The checksum is the release asset's own digest.
+      - name: Install mydumper (1.0.3-1)
+        if: env.RUN == 'true'
+        run: |
+          wget -q https://github.com/mydumper/mydumper/releases/download/v1.0.3-1/mydumper_1.0.3-1.jammy_amd64.deb -O /tmp/mydumper.deb
+          echo "9f7fb46c03e1a721e86d71c42a3fe3bd88f1a7b0ec80fa91c7736826f7f1e6f4  /tmp/mydumper.deb" | sha256sum -c -
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq /tmp/mydumper.deb
+          mydumper --version
+
       # -run selects the MariaDB-named tests across all packages; -p 1 serializes
       # so the shared binlog window stays single-writer (same rationale as the
       # MySQL integration job).
@@ -523,7 +565,15 @@ jobs:
             TestConsistentTableChecksum_MariaDBGTIDBinlogPos \
             TestVerifyTable_liveSource_mariadb \
             TestVerifyTable_liveSource_mariadbIndexBehind \
-            TestVerifyTable_liveSource_mariadbPositionMode; do
+            TestVerifyTable_liveSource_mariadbPositionMode \
+            TestEndToEnd_MariaDBSnapshotChain \
+            TestEndToEnd_MariaDBSnapshotEd25519 \
+            TestFormatMariaDBFixed_matchesServer_MariaDB \
+            TestDecodeEventBinaries_MariaDBFixedTypesRenderText \
+            TestShimMariaDBUUIDKey \
+            TestRunReconstruct_MariaDBUUIDKeyWithoutIndexTypesRefuses \
+            TestIntegrationReconstruct_MariaDBUUIDKeyWithoutIndexTypesRefuses \
+            TestIntegrationReconstructTool_MariaDBUUIDKeyWithoutIndexTypesRefuses; do
             grep -q -- "--- PASS: $name " /tmp/mariadb-it.out \
               || { echo "FATAL: $name did not run and pass in the MariaDB-source job (false-green tripwire)" >&2; exit 1; }
           done

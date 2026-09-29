@@ -1297,14 +1297,22 @@ func (h *Handler) mapEventImages(schema, table string, rows []query.ResultRow) {
 	// The lone exception is a no-DB test handler (indexDB nil), where the
 	// injected fallback is the sole schema source and decoding by it is intended.
 	// The per-epoch column map is memoized.
-	b64Memo := make(map[int]map[string]bool)
-	base64ColsAt := func(t time.Time) map[string]bool {
+	//
+	// MariaDB's UUID/INET4/INET6 are stored base64 too, but served as the
+	// server's TEXT (what a SELECT returns and what the baseline holds), so
+	// they take a separate column map with the same epoch typing.
+	type epochCols struct {
+		b64   map[string]bool
+		fixed map[string]string
+	}
+	b64Memo := make(map[int]epochCols)
+	base64ColsAt := func(t time.Time) epochCols {
 		id, ok := metadata.EpochAt(epochs, t)
 		if !ok {
 			// Empty epoch list: in production decline (leave base64); only the
 			// no-DB test handler decodes via the injected fallback (bucket -1).
 			if h.indexDB != nil {
-				return nil
+				return epochCols{}
 			}
 			id = -1
 		}
@@ -1323,15 +1331,16 @@ func (h *Handler) mapEventImages(schema, table string, rows []query.ResultRow) {
 			// corruption risk this closure exists to avoid.
 			er, err := h.epochResolver(id)
 			if err != nil || er == nil {
-				b64Memo[id] = nil
-				return nil
+				b64Memo[id] = epochCols{}
+				return epochCols{}
 			}
 			r = er
 		}
-		m := base64Cols(r, schema, table)
+		m := epochCols{b64: base64Cols(r, schema, table), fixed: mariaDBFixedCols(r, schema, table)}
 		b64Memo[id] = m
 		return m
 	}
+	unrendered := 0
 	for i := range rows {
 		m := src.MapperAt(schema, table, rows[i].EventTimestamp)
 		m.MapImage(rows[i].RowBefore)
@@ -1342,10 +1351,62 @@ func (h *Handler) mapEventImages(schema, table string, rows []query.ResultRow) {
 		// after MapEventEnumLabels. Event images only — never a baseline row, so
 		// _snapshot decodes its deltas pre-merge and never double-decodes the
 		// baseline value DuckDB scans straight to a Go string.
-		b64 := base64ColsAt(rows[i].EventTimestamp)
-		decodeImageBase64(rows[i].RowBefore, b64)
-		decodeImageBase64(rows[i].RowAfter, b64)
+		cols := base64ColsAt(rows[i].EventTimestamp)
+		decodeImageBase64(rows[i].RowBefore, cols.b64)
+		decodeImageBase64(rows[i].RowAfter, cols.b64)
+		unrendered += renderImageMariaDBFixed(rows[i].RowBefore, cols.fixed)
+		unrendered += renderImageMariaDBFixed(rows[i].RowAfter, cols.fixed)
 	}
+	if unrendered > 0 {
+		h.logger.Warn("shim: MariaDB UUID/INET values in the index have no correct text form (captured before this build could store them, or their schema snapshot could not be read); served as stored",
+			"schema", schema, "table", table, "values", unrendered)
+	}
+}
+
+// mariaDBFixedCols maps each MariaDB UUID/INET4/INET6 column of schema.table
+// to its data type, using the supplied (epoch) resolver. nil when the resolver
+// is nil, the table is unknown, or it has none.
+func mariaDBFixedCols(r *metadata.Resolver, schema, table string) map[string]string {
+	if r == nil {
+		return nil
+	}
+	tm, err := r.Resolve(schema, table)
+	if err != nil {
+		return nil
+	}
+	var m map[string]string
+	for _, c := range tm.Columns {
+		if metadata.MariaDBFixedWidth(c.DataType) > 0 {
+			if m == nil {
+				m = make(map[string]string)
+			}
+			m[c.Name] = c.DataType
+		}
+	}
+	return m
+}
+
+// renderImageMariaDBFixed turns each MariaDB UUID/INET4/INET6 value of one
+// event image from its stored base64 into the server's text, in place. A value
+// that is not the stored form of a full-width value (an event captured before
+// #1944) is left as it is and counted in the return value.
+func renderImageMariaDBFixed(image map[string]any, fixed map[string]string) int {
+	if len(fixed) == 0 || image == nil {
+		return 0
+	}
+	unrendered := 0
+	for col, dt := range fixed {
+		v, ok := image[col]
+		if !ok || v == nil {
+			continue
+		}
+		out, rendered := metadata.RenderStoredMariaDBFixed(dt, v)
+		image[col] = out
+		if !rendered {
+			unrendered++
+		}
+	}
+	return unrendered
 }
 
 // base64StoredKind reports whether a column's DataType is in the BLOB or TEXT
@@ -1361,13 +1422,12 @@ func (h *Handler) mapEventImages(schema, table string, rows []query.ResultRow) {
 // the stored base64 back to those raw bytes serves exactly what a real server
 // serves for a geometry column over the MySQL protocol.
 //
-// VECTOR stays deliberately EXCLUDED here despite also arriving as []byte
-// (packed floats): internal/baseline does not route "vector" through its
-// binary path, so a baseline-seeded row's VECTOR value is the literal dump
-// token, not bytes. _snapshot merges baseline rows with event images —
-// decoding only the event side would serve two different representations of
-// the same column within one result set. Same asymmetry that keeps VECTOR
-// unresolved in internal/verify (see PR #1143).
+// VECTOR is included (binary): it arrives as []byte (packed floats), and
+// internal/baseline now stores it as bytes too, so a _snapshot result set
+// merging baseline rows with event images carries one representation. It was
+// excluded while the baseline stored VECTOR as text; a baseline built before
+// that change still holds the literal dump token (or cannot be read at all,
+// when the bytes are not UTF-8), and needs a new snapshot.
 //
 // "json" is included (non-binary) as a defense-in-depth companion to #736:
 // marshalRow now only promotes a []byte to raw JSON when it looks like a
@@ -1396,7 +1456,8 @@ func base64StoredKind(dataType string) (binary, ok bool) {
 		"multipoint", "multilinestring", "multipolygon",
 		// MySQL 8.0.11+ reports a GEOMETRYCOLLECTION column's DATA_TYPE as
 		// "geomcollection"; MariaDB and pre-8.0.11 report "geometrycollection".
-		"geometrycollection", "geomcollection":
+		"geometrycollection", "geomcollection",
+		"vector":
 		return true, true
 	case "text", "tinytext", "mediumtext", "longtext", "json":
 		return false, true
@@ -1610,7 +1671,7 @@ func (h *Handler) runDiff(q TimeTravelQuery) (*mysql.Result, error) {
 		Opts: query.Options{
 			Schema:   q.Schema,
 			Table:    q.Table,
-			PKValues: event.EscapePKValue(q.PKValue),
+			PKValues: h.eventPKValue(q),
 			Since:    &q.Since,
 			Until:    &q.Until,
 		},

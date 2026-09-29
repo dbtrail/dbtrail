@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 )
 
@@ -45,6 +46,11 @@ type MydumperWriter struct {
 
 	// cols is the column name list in the order WriteRow receives values.
 	cols []string
+
+	// fixed maps the position of each MariaDB UUID/INET4/INET6 column in cols
+	// to its data type, set by SetColumnTypes from the index's schema
+	// snapshot. Those values are written as X'..' (see writeMariaDBFixed).
+	fixed map[int]string
 
 	files       []string // written file names, for TableReport
 	rowsWritten int64    // row tuples written across all chunks — the load expectation drill checks against
@@ -123,6 +129,66 @@ func (w *MydumperWriter) WriteSchema(createSQL string) error {
 	return nil
 }
 
+// SetColumnTypes records which columns are MariaDB UUID/INET4/INET6, from the
+// index's schema snapshot for the table (the same metadata the rest of the
+// fold reads), so their values are written as X'..' (see writeMariaDBFixed).
+// Names match case-insensitively, as they do on the server. Never derived from
+// the CREATE TABLE text: on the binlog-only path that text can be a captured
+// one-line statement or a placeholder the schema parser cannot read.
+func (w *MydumperWriter) SetColumnTypes(cols []metadata.ColumnMeta) {
+	types := make(map[string]string, len(cols))
+	for _, c := range cols {
+		types[strings.ToLower(c.Name)] = c.DataType
+	}
+	w.fixed = nil
+	for i, name := range w.cols {
+		if dt := types[strings.ToLower(name)]; metadata.MariaDBFixedWidth(dt) > 0 {
+			if w.fixed == nil {
+				w.fixed = make(map[int]string)
+			}
+			w.fixed[i] = strings.ToLower(strings.TrimSpace(dt))
+		}
+	}
+}
+
+// mariaDBFixedRemedy is the fix for an unrestorable MariaDB UUID/INET value.
+// Such values are events captured before capture stored these types as bytes
+// (#1944). A snapshot taken after the upgrade anchors past them, so no fold or
+// dump reads them again.
+const mariaDBFixedRemedy = "events captured before this version stored UUID/INET4/INET6 values damaged, and they cannot be restored " +
+	"(the same refusal shows when the schema snapshot of the event cannot be read); " +
+	"take a new snapshot (`bintrail dump`, then `bintrail baseline`, or Create backup in the console) so the copy starts after them"
+
+// writeMariaDBFixed renders a MariaDB UUID/INET4/INET6 value as X'..' of its
+// full-width bytes. The value arrives as the server's text, but a dump is
+// loaded under `SET NAMES binary` (mydumper's preamble, which drill replays),
+// where MariaDB reads a quoted string as the type's BINARY form and refuses
+// the text (ER 1292 in strict mode, NULL or a wrong value otherwise). An X'..'
+// literal of the right width is read as the value itself in any charset. A
+// value with no such bytes (a damaged event captured before #1944) is refused:
+// writing it would restore a wrong value that loads cleanly.
+func writeMariaDBFixed(dt, col string, v any) (string, error) {
+	var b []byte
+	switch val := v.(type) {
+	case nil:
+		return "NULL", nil
+	case string:
+		parsed, err := metadata.ParseMariaDBFixed(dt, val)
+		if err != nil {
+			return "", fmt.Errorf("column %q (%s): %w: %s", col, dt, err, mariaDBFixedRemedy)
+		}
+		b = parsed
+	case []byte:
+		if len(val) != metadata.MariaDBFixedWidth(dt) {
+			return "", fmt.Errorf("column %q (%s): %d bytes, want %d: %s", col, dt, len(val), metadata.MariaDBFixedWidth(dt), mariaDBFixedRemedy)
+		}
+		b = val
+	default:
+		return "", fmt.Errorf("column %q (%s): unexpected value of type %T: %s", col, dt, v, mariaDBFixedRemedy)
+	}
+	return recovery.FormatSQLValue(b), nil
+}
+
 // WriteRow appends one row tuple to the current chunk, rotating to a new
 // chunk file when curBytes crosses chunkSize. values must be in the same
 // order as the cols slice passed to NewMydumperWriter; len(values) must
@@ -147,6 +213,14 @@ func (w *MydumperWriter) WriteRow(values []any) error {
 	// Format the tuple: (v1, v2, ...).
 	parts := make([]string, len(values))
 	for i, v := range values {
+		if dt, ok := w.fixed[i]; ok {
+			s, err := writeMariaDBFixed(dt, w.cols[i], v)
+			if err != nil {
+				return fmt.Errorf("%s.%s: %w", w.schema, w.table, err)
+			}
+			parts[i] = s
+			continue
+		}
 		parts[i] = recovery.FormatSQLValue(v)
 	}
 	tuple := "(" + strings.Join(parts, ", ") + ")"

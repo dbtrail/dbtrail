@@ -54,6 +54,9 @@ import (
 //     the content-gated "0x"+uppercase-hex spelling it introduced in #1132.
 //     See the binary-family note below for the one asymmetry this branch
 //     has to undo.
+//   - uuid, inet4, inet6 (MariaDB): the baseline's text form parsed back to
+//     the full-width bytes the index keys events by (metadata.MapRow pads
+//     them), then spelled by event.BuildPKValues like any []byte.
 //   - decimal, numeric: pass-through string (#214). go-mysql v1.13.0's
 //     decodeDecimal returns a pre-formatted string when useDecimal is
 //     false — and bintrail never sets useDecimal, so every DECIMAL PK
@@ -168,6 +171,22 @@ func canonicalizePKValue(raw any, col metadata.ColumnMeta) (any, error) {
 		return canonicalizeDatetime(raw, col)
 	case "date":
 		return canonicalizeDate(raw, col)
+
+	case "uuid", "inet4", "inet6":
+		// MariaDB's fixed binary types. The baseline holds the text MariaDB
+		// prints (mydumper dumps `_binary "123e4567-…"`), while pk_values
+		// holds the captured bytes, padded to full width by metadata.MapRow
+		// (#1944). Parse the text back to those bytes and let
+		// event.BuildPKValues spell them, the #1155 pattern: one encoder.
+		s, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("canonicalizePKValue: %s column %q: expected string, got %T", dt, col.Name, raw)
+		}
+		b, err := metadata.ParseMariaDBFixed(dt, s)
+		if err != nil {
+			return nil, fmt.Errorf("canonicalizePKValue: %s column %q: %w", dt, col.Name, err)
+		}
+		return b, nil
 
 	default:
 		// Render through PKTypeGateReason, the renderer verify and single-row
@@ -549,6 +568,7 @@ var supportedPKTypes = []string{
 	"year",
 	"decimal", "numeric",
 	"binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob",
+	"uuid", "inet4", "inet6",
 }
 
 // supportedPKTypeSet is supportedPKTypes as a lookup set, built once.

@@ -1517,6 +1517,7 @@ func ReconstructTable(
 		Schema:            schema,
 		Table:             table,
 		PKCols:            pkCols,
+		Columns:           tm.Columns,
 		Changes:           changes,
 		Spill:             fold.Spill,
 		LastEventID:       lastEventIDFor(fold, anchorMeta, captured),
@@ -1710,6 +1711,9 @@ type mergeInput struct {
 	Schema            string
 	Table             string
 	PKCols            []metadata.ColumnMeta
+	// Columns is the table's column metadata from the index's schema
+	// snapshot; the mydumper writer reads MariaDB UUID/INET types from it.
+	Columns []metadata.ColumnMeta
 	// Changes is the completed build side of the merge, as produced by
 	// foldEventWindow. Its entries are TRIMMED (retainEvent blanks RowBefore
 	// and the query-text fields), which is why no guard reading a before-image
@@ -1822,6 +1826,10 @@ func mergeBaselineIntoWriter(ctx context.Context, in mergeInput, rep *TableRepor
 		return fmt.Errorf("open mydumper writer: %w", err)
 	}
 	mw.spaceCheck = in.SpaceCheck
+	if err := checkMariaDBFixedTypesAgree(in.CreateTableSQL, in.Columns, in.Schema, in.Table); err != nil {
+		return err
+	}
+	mw.SetColumnTypes(in.Columns)
 	// Success finalizes via the explicit Close below (before capturing
 	// rep.Files); ANY error return instead discards every file this writer
 	// wrote — see the #1162 note in the function comment. The discard also
@@ -2591,7 +2599,7 @@ func reconstructBinlogOnly(
 	}
 
 	rep.BinlogOnly = true
-	if err := writeBinlogOnlyChanges(cfg.OutputDir, schema, table, pkCols, colNames, cfg.ChunkSize, cfg.SpaceCheck, createSQL, changes, rep); err != nil {
+	if err := writeBinlogOnlyChanges(cfg.OutputDir, schema, table, pkCols, tm.Columns, colNames, cfg.ChunkSize, cfg.SpaceCheck, createSQL, changes, rep); err != nil {
 		return nil, err
 	}
 	rep.Duration = time.Since(start)
@@ -2697,6 +2705,7 @@ var replaceTableHeadRe = regexp.MustCompile(`(?is)^((?:\s+|/\*.*?\*/|--[^\n]*(?:
 func writeBinlogOnlyChanges(
 	outputDir, schema, table string,
 	pkCols []metadata.ColumnMeta,
+	columns []metadata.ColumnMeta,
 	colNames []string,
 	chunkSize int64,
 	spaceCheck func(dir string, need int64) error,
@@ -2716,6 +2725,13 @@ func writeBinlogOnlyChanges(
 		return fmt.Errorf("open mydumper writer: %w", err)
 	}
 	mw.spaceCheck = spaceCheck
+	// The CREATE shipped here is the one captured at table creation, while the
+	// writer formats by the newest schema snapshot: an ALTER between them
+	// (CHAR(36) to UUID) must refuse, as on the baseline path.
+	if err := checkMariaDBFixedTypesAgree(createSQL, columns, schema, table); err != nil {
+		return err
+	}
+	mw.SetColumnTypes(columns)
 	// Same #1162 error-path discard as mergeBaselineIntoWriter: this path has
 	// no pre-writer guards at all, so any mid-write failure would otherwise
 	// finalize a loadable, silently-truncated chunk plus the schema file.
@@ -3157,6 +3173,25 @@ func binaryColsFromTableMeta(tm *metadata.TableMeta) map[string]bool {
 	return m
 }
 
+// mariaDBFixedColsFromTableMeta maps each MariaDB UUID/INET4/INET6 column of a
+// table to its data type. These are stored base64 like BINARY, but a reader
+// hands them back as TEXT: the source, mydumper and the baseline Parquet all
+// carry the text form, so decoding them to bytes would make the delta side
+// disagree with the baseline side of the same column. Returns nil when the
+// table has none.
+func mariaDBFixedColsFromTableMeta(tm *metadata.TableMeta) map[string]string {
+	var m map[string]string
+	for _, c := range tm.Columns {
+		if metadata.MariaDBFixedWidth(c.DataType) > 0 {
+			if m == nil {
+				m = make(map[string]string)
+			}
+			m[c.Name] = c.DataType
+		}
+	}
+	return m
+}
+
 // rowAfterOrdered walks colNames and looks up each name in rowAfter (a
 // map[string]any from a binlog event's row_after image), returning a slice
 // of values aligned to the baseline Parquet column order. On the baseline
@@ -3269,4 +3304,38 @@ func resolveSnapshotTable(db *sql.DB, latest *metadata.Resolver, id int, schema,
 func s3DownloadCopySQL(safeSrc, safeDst string) string {
 	return fmt.Sprintf("COPY (SELECT * FROM parquet_scan('%s')) TO '%s' (FORMAT PARQUET, COMPRESSION '%s')",
 		safeSrc, safeDst, ParquetWriterCompression)
+}
+
+// checkMariaDBFixedTypesAgree refuses a merge whose baseline CREATE TABLE (the
+// schema file the dump carries) and the index's schema snapshot (what the
+// writer formats values by) disagree about whether a column is a MariaDB
+// UUID/INET4/INET6. That happens after an ALTER between the two, for instance
+// CHAR(36) to UUID: X'..' would load into a CHAR column, or text into a UUID
+// column, and the load would succeed with wrong data. A CREATE the schema
+// parser cannot read leaves nothing to compare against, and the snapshot's
+// types are used as they are.
+func checkMariaDBFixedTypesAgree(createSQL string, snapshotCols []metadata.ColumnMeta, schema, table string) error {
+	baseCols, err := baseline.ParseSchemaText(createSQL)
+	if err != nil {
+		return nil
+	}
+	snap := make(map[string]string, len(snapshotCols))
+	for _, c := range snapshotCols {
+		snap[strings.ToLower(c.Name)] = strings.ToLower(strings.TrimSpace(c.DataType))
+	}
+	for _, c := range baseCols {
+		inBase := strings.ToLower(strings.TrimSpace(c.MySQLType))
+		inSnap, known := snap[strings.ToLower(c.Name)]
+		if !known {
+			continue
+		}
+		baseFixed, snapFixed := metadata.MariaDBFixedWidth(inBase) > 0, metadata.MariaDBFixedWidth(inSnap) > 0
+		if (baseFixed || snapFixed) && inBase != inSnap {
+			return fmt.Errorf("%s.%s: column %q is %s in the baseline but %s in the index's schema snapshot; "+
+				"its values cannot be written for both, so the table is refused: take a new snapshot "+
+				"(`bintrail dump`, then `bintrail baseline`) so the baseline matches the current schema",
+				schema, table, c.Name, inBase, inSnap)
+		}
+	}
+	return nil
 }

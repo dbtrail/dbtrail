@@ -190,7 +190,19 @@ page and the
   skipped transparently.
 - **MariaDB-only column types**: `UUID` (10.7+), `INET4` (10.10+), `INET6`
   (10.5+) and `VECTOR` (11.7+) are captured and restored by `recover` byte for
-  byte, including as a primary key.
+  byte, also in tables whose primary key uses them. `query --pk` and
+  `recover --pk` do not accept the text form of such a key yet (see the
+  limitations below). `reconstruct`, `drill`, `verify`, the
+  `_flashback`/`_snapshot`/`_diff` schemas and the Parquet copy return the
+  value the source holds: `UUID` and `INET` as the text MariaDB prints
+  (`123e4567-e89b-12d3-a456-426614174000`, `10.0.0.0`, `::ffff:1.2.3.4`),
+  `VECTOR` as its bytes. A `UUID` or `INET` key can be typed in any form
+  MariaDB accepts (`reconstruct --pk 7C5C7C5C5C7C00000000000000000000`).
+- **The Parquet copy, end to end**: snapshot with mydumper (`bintrail dump`
+  and `bintrail baseline`), `bintrail baseline refresh`, `reconstruct` for one
+  row and for whole tables, and `drill` into a scratch MariaDB, checked in CI
+  on every supported version by comparing `HEX()` of every column with the
+  source.
 
 ---
 
@@ -241,6 +253,49 @@ page and the
   in a MySQL `TEXT` column. If your application compares JSON by its bytes
   (a hash or a signature), compare the parsed document instead after a
   recovery.
+- **The snapshot cannot log in as an `ed25519` user on most installs.**
+  mydumper takes the snapshot, and whether it can use MariaDB's `ed25519`
+  password method depends only on the client library it was built with. The
+  amd64 packages (and the amd64 console image) use the MySQL client library,
+  which has no `client_ed25519` plugin, so the snapshot fails with
+  `Authentication plugin 'client_ed25519' cannot be loaded`. The arm64
+  packages use MariaDB Connector/C and work. Check with `mydumper --version`
+  (`built against MySQL …` or `built against MariaDB …`). Give the snapshot
+  user the `mysql_native_password` method, which every build supports:
+
+  ```sql
+  CREATE USER 'dbtrail_dump'@'%' IDENTIFIED VIA mysql_native_password USING PASSWORD('…');
+  ```
+
+- **`VECTOR` in snapshots taken before this version.** Those stored `VECTOR`
+  as text. Two cases:
+  - Values written as raw bytes (mydumper's default `_binary "…"` form) are
+    not valid text, and the Parquet reader refuses the whole table
+    (`Invalid string encoding`). Take a new snapshot; `baseline refresh`
+    cannot repair it.
+  - Values written as `0x…` text (a `--hex-blob` dump) can be read. The next
+    `baseline refresh` rewrites such a table in full, which turns the text
+    into the real bytes; it does not add a table delta beside it, because
+    that would mix the two forms and return the text's own bytes for every
+    unchanged row.
+
+  The same applies to a MySQL 9 `VECTOR` column.
+- **`query --pk` and `recover --pk` do not take a `UUID`/`INET` key as text.**
+  The index keys these rows by the value's bytes, and those two commands look
+  the key up exactly as typed, so `--pk 123e4567-…` finds nothing, without an
+  error. Select the rows with `--table` and a time window (`--since`/`--until`)
+  instead, or copy the key from the `pk_values` of a `query` result.
+  `reconstruct --pk`, the console's time travel and the `_flashback`,
+  `_snapshot` and `_diff` schemas do accept the text form.
+- **Values captured before `UUID`/`INET` support stay unreadable.** Events
+  indexed by a version older than the one that added it hold damaged bytes for
+  these columns. `verify` reports such a value as inconclusive; a full-table
+  `reconstruct`, `drill` or `baseline refresh` that would write one refuses the
+  table instead of writing a wrong value; single-row reads return it as stored
+  and log a warning. Because `baseline refresh` publishes all tables or none,
+  one such table stops every refresh until the Parquet copy starts after those
+  events: **after upgrading, take a new snapshot** (`bintrail dump`, then
+  `bintrail baseline`, or Create backup in the console).
 - **Sequences are not rewound.** MariaDB records every change to a `SEQUENCE`
   as an insert into its one-row table, and bintrail captures those like any
   other insert. A reversal that includes the sequence is refused by the server
