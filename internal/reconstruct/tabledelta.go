@@ -921,6 +921,22 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.fold.Spill != nil, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p)); reason != "" {
 		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
 	}
+	// A base written before a type joined the binary list (VECTOR) stores that
+	// column as a STRING, and a delta written now stores it as bytes. The
+	// state reads the two with UNION ALL BY NAME, where DuckDB turns the
+	// string into its ASCII bytes: every untouched row would come back wrong,
+	// silently. A full rewrite reads the string and decodes it (0x… text from
+	// a --hex-blob dump) into the real bytes, so rewrite.
+	if cols, err := baseline.ParseSchemaText(in.CreateTableSQL); err == nil {
+		mixed, err := baseline.BinaryColumnsStoredAsText(p.basePath, cols)
+		if err != nil {
+			return fmt.Errorf("read the column types of the backup file of %s.%s: %w", p.schema, p.table, err)
+		}
+		if len(mixed) > 0 {
+			reason := fmt.Sprintf("the previous file stores column(s) %s as text, and this version stores them as bytes", strings.Join(mixed, ", "))
+			return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, false, rep)
+		}
+	}
 
 	// The guards a rewrite runs before it opens its output (#602, #843) are
 	// about the window's events against the base's columns, not about how the
