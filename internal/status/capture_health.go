@@ -227,7 +227,7 @@ func remedyLine(reason string) string {
 		return "Fix: there is nothing to repair — the lost tally cannot be recovered. Once you have taken " +
 			"whatever the possibility of unrecorded loss calls for, " + ackAdvice
 	default:
-		return "Fix: see the capture daemon's log for this reason's detail."
+		return "Fix: see DBTrail's log for this reason's detail."
 	}
 }
 
