@@ -519,7 +519,11 @@ jobs:
             TestRecoverRoundTrip_MariaDBTypes \
             TestRecoverRoundTrip_MariaDBUUIDKey \
             TestRecoverRoundTrip_MariaDBJSONText \
-            TestRecoverSequence_MariaDB; do
+            TestRecoverSequence_MariaDB \
+            TestConsistentTableChecksum_MariaDBGTIDBinlogPos \
+            TestVerifyTable_liveSource_mariadb \
+            TestVerifyTable_liveSource_mariadbIndexBehind \
+            TestVerifyTable_liveSource_mariadbPositionMode; do
             grep -q -- "--- PASS: $name " /tmp/mariadb-it.out \
               || { echo "FATAL: $name did not run and pass in the MariaDB-source job (false-green tripwire)" >&2; exit 1; }
           done

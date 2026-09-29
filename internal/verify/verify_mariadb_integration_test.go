@@ -4,6 +4,7 @@ package verify
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +39,113 @@ import (
 // 2^63 (the #490 class) that must fingerprint identically between the live
 // MariaDB source and the reconstructed side.
 func TestVerifyTable_liveSource_mariadb(t *testing.T) {
+	cfg, sourceDB, sourceName := setupLiveSourceMariaDB(t)
+	seedMariaDBStreamState(t, cfg, "gtid", readBinlogPos(t, sourceDB))
+
+	got, err := VerifyTable(context.Background(), cfg, sourceName, "audit_log")
+	if err != nil {
+		t.Fatalf("VerifyTable: %v", err)
+	}
+	// The index's checkpoint holds the source's @@gtid_binlog_pos, so the
+	// coverage check passes on evidence, not on an assumption, and the
+	// comparison runs to completion. It must land on a genuine MATCH: the
+	// JSON-canonicalization hook must reconcile MariaDB's verbatim
+	// (non-normalized) LONGTEXT JSON storage against the baseline's
+	// differently-ordered keys, and the BIGINT UNSIGNED max must render
+	// identically on both sides.
+	if got.Status != StatusMatch {
+		t.Fatalf("status = %q (%s); want match: MariaDB's JSON-as-LONGTEXT (no server-side key normalization) and BIGINT UNSIGNED must still reconcile via the canonicalization hook\n  source=%s recon=%s",
+			got.Status, got.Detail, got.SourceDigest, got.ReconstructDigest)
+	}
+	if strings.Contains(got.Detail, "assuming") {
+		t.Errorf("detail = %q: coverage was assumed, not checked", got.Detail)
+	}
+	if want := readBinlogPos(t, sourceDB); got.Anchor != want {
+		t.Errorf("anchor = %q, want the source's @@gtid_binlog_pos %q", got.Anchor, want)
+	}
+}
+
+// TestVerifyTable_liveSource_mariadbIndexBehind is the case the MariaDB
+// coverage check exists for: the source has a row the index has not
+// captured yet. Before the check, verify found no @@gtid_executed, assumed
+// the index was current, and reported the missing row as a MISMATCH. Now
+// the index's checkpoint is compared per domain with @@gtid_binlog_pos, and
+// an index behind the snapshot is inconclusive, the verdict a MySQL source
+// gets in the same situation.
+func TestVerifyTable_liveSource_mariadbIndexBehind(t *testing.T) {
+	cfg, sourceDB, sourceName := setupLiveSourceMariaDB(t)
+	// A write the capture has not reached: the source has two rows, the
+	// baseline and the index know one.
+	testutil.MustExec(t, sourceDB, fmt.Sprintf(
+		"INSERT INTO `%s`.`audit_log` (id,details,big) VALUES (2,'{}',1)", sourceName))
+	seedMariaDBStreamState(t, cfg, "gtid", behindBinlogPos(t, readBinlogPos(t, sourceDB)))
+
+	got, err := VerifyTable(context.Background(), cfg, sourceName, "audit_log")
+	if err != nil {
+		t.Fatalf("VerifyTable: %v", err)
+	}
+	if got.Status != StatusInconclusive || !strings.Contains(got.Detail, "index is behind the source snapshot") {
+		t.Fatalf("status = %q (%s); want inconclusive because the index is behind, never a mismatch", got.Status, got.Detail)
+	}
+}
+
+// TestVerifyTable_liveSource_mariadbPositionMode: a capture in
+// binlog-position mode records no GTID position, so whether the index is
+// caught up cannot be told. That is inconclusive, never an assumption.
+func TestVerifyTable_liveSource_mariadbPositionMode(t *testing.T) {
+	cfg, sourceDB, sourceName := setupLiveSourceMariaDB(t)
+	// The same GTID set a GTID-mode run would have left: position mode must
+	// not read it.
+	seedMariaDBStreamState(t, cfg, "position", readBinlogPos(t, sourceDB))
+
+	got, err := VerifyTable(context.Background(), cfg, sourceName, "audit_log")
+	if err != nil {
+		t.Fatalf("VerifyTable: %v", err)
+	}
+	if got.Status != StatusInconclusive || !strings.Contains(got.Detail, "binlog-position mode") {
+		t.Fatalf("status = %q (%s); want inconclusive because the capture runs in position mode", got.Status, got.Detail)
+	}
+}
+
+// readBinlogPos is the MariaDB source's executed GTID position.
+func readBinlogPos(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var pos string
+	if err := db.QueryRow("SELECT @@global.gtid_binlog_pos").Scan(&pos); err != nil {
+		t.Fatalf("read @@gtid_binlog_pos: %v", err)
+	}
+	if strings.TrimSpace(pos) == "" {
+		t.Fatal("@@gtid_binlog_pos is empty after writes; is the binlog on in this MariaDB?")
+	}
+	return pos
+}
+
+// behindBinlogPos is pos with every domain one transaction short.
+func behindBinlogPos(t *testing.T, pos string) string {
+	t.Helper()
+	var parts []string
+	for part := range strings.SplitSeq(strings.Join(strings.Fields(pos), ""), ",") {
+		var domain, server, seq uint64
+		if _, err := fmt.Sscanf(part, "%d-%d-%d", &domain, &server, &seq); err != nil || seq == 0 {
+			t.Fatalf("cannot step back %q in %q: %v", part, pos, err)
+		}
+		parts = append(parts, fmt.Sprintf("%d-%d-%d", domain, server, seq-1))
+	}
+	return strings.Join(parts, ",")
+}
+
+func seedMariaDBStreamState(t *testing.T, cfg Config, mode, gtidSet string) {
+	t.Helper()
+	testutil.MustExec(t, cfg.IndexDB, `INSERT INTO stream_state
+		(id, mode, gtid_set, last_checkpoint, server_id)
+		VALUES (1, ?, ?, UTC_TIMESTAMP(), 1)`, mode, gtidSet)
+}
+
+// setupLiveSourceMariaDB builds a real MariaDB source table, a baseline and an
+// index (on MySQL) that agree on its one row, and returns the verify config.
+// stream_state is left empty for each test to seed.
+func setupLiveSourceMariaDB(t *testing.T) (Config, *sql.DB, string) {
+	t.Helper()
 	sourceDB, sourceName := testutil.CreateTestMariaDB(t)
 	indexDB, dbName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
@@ -114,20 +222,5 @@ func TestVerifyTable_liveSource_mariadb(t *testing.T) {
 		SourceDB: sourceDB, IndexDB: indexDB, Resolver: resolver,
 		BaselineSource: baselineDir, IndexDBName: dbName, NoArchive: true,
 	}
-
-	got, err := VerifyTable(context.Background(), cfg, sourceName, "audit_log")
-	if err != nil {
-		t.Fatalf("VerifyTable: %v", err)
-	}
-	// MariaDB has no @@global.gtid_executed, so indexCovers takes the
-	// coverage-unverified branch (proceeds without GTID containment) rather
-	// than blocking — the comparison still runs to completion. It must land on
-	// a genuine MATCH: the JSON-canonicalization hook must reconcile MariaDB's
-	// verbatim (non-normalized) LONGTEXT JSON storage against the baseline's
-	// differently-ordered keys, and the BIGINT UNSIGNED max must render
-	// identically on both sides.
-	if got.Status != StatusMatch {
-		t.Fatalf("status = %q (%s); want match — MariaDB's JSON-as-LONGTEXT (no server-side key normalization) and BIGINT UNSIGNED must still reconcile via the canonicalization hook\n  source=%s recon=%s",
-			got.Status, got.Detail, got.SourceDigest, got.ReconstructDigest)
-	}
+	return cfg, sourceDB, sourceName
 }

@@ -501,8 +501,14 @@ sources exist:
   and refuses to compare when the index is provably behind the snapshot; on a
   `gtid_mode=OFF` source it proceeds with a `coverage unverified` note.
 - **MariaDB** — baseline-anchored and recover-input as MySQL. Live-source
-  proceeds with the same `coverage unverified` note (MariaDB has no
-  `@@gtid_executed` to prove containment against).
+  mode anchors on `@@gtid_binlog_pos` (MariaDB has no `@@gtid_executed`) and
+  compares it with the index's checkpoint domain by domain: the index must
+  have reached the source's sequence number in every domain. An index behind
+  the snapshot is inconclusive, as on MySQL. The check needs the capture to
+  run in GTID mode; a capture in binlog-position mode (the default for a
+  MariaDB source, see [streaming](streaming.md)) cannot be compared, so
+  live-source verify reports inconclusive instead of assuming the index is
+  current.
 - **PostgreSQL** — baseline-anchored verify works against the PG capture
   (`bintrail-pg stream` / the web interface's PostgreSQL servers), anchored on WAL
   LSNs instead of binlog coordinates; recover-input works too (index-only —
