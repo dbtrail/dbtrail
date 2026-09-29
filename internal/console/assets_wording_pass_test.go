@@ -145,7 +145,7 @@ func TestWordingPassTheseSentences(t *testing.T) {
 		t.Fatalf("decode %s: %v", raw, err)
 	}
 
-	const notice = "This password works for every server in the sidebar."
+	const notice = "This password reads every schema on every server in the sidebar."
 	index := func(lines []string, want string) int {
 		at := -1
 		for i, l := range lines {

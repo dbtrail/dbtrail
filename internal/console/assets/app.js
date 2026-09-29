@@ -11783,7 +11783,9 @@ function sqlClientPanel(servers, fb) {
       el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") })));
     body.append(el("p", { class: "cn-sql-row", text: "Paste the token at the password prompt." }));
   }
-  body.append(el("p", { class: "cn-sql-row", text: "This password works for every server in the sidebar." }));
+  // The port does not filter by schema (#1685): say so, so it is not taken
+  // for a path that scopes access per schema.
+  body.append(el("p", { class: "cn-sql-row", text: "This password reads every schema on every server in the sidebar." }));
   body.append(cnFine("What to run, and other machines",
     el("p", { class: "form-hint" }, "Ask for a table as it was: ",
       el("code", { text: "SELECT * FROM _flashback.orders AS OF '10 minutes ago' WHERE id = 1;" }),
