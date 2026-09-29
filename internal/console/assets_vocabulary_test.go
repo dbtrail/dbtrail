@@ -208,7 +208,19 @@ func countInGoStrings(t *testing.T, dir string) int {
 // there on. So the previous WORD is tracked, not only the previous byte.
 func countInJSStrings(t scanT, src string) (int, []string) {
 	t.Helper()
-	n, i := 0, 0
+	n := 0
+	quoteRegexes := forEachJSString(t, src, func(lit string) {
+		n += len(oldVocabulary.FindAllString(lit, -1))
+	})
+	return n, quoteRegexes
+}
+
+// forEachJSString calls fn with every string literal of a JavaScript source,
+// escapes decoded, and returns the regular expressions that carry a quote
+// character (see countInJSStrings for why those are worth pinning).
+func forEachJSString(t scanT, src string, fn func(lit string)) []string {
+	t.Helper()
+	i := 0
 	var quoteRegexes []string
 	prev := byte(0) // last significant character, for the regex/division call
 	prevWord := ""  // and the identifier it belonged to, when it was one
@@ -236,7 +248,7 @@ func countInJSStrings(t scanT, src string) (int, []string) {
 		case c == '"' || c == '\'' || c == '`':
 			var lit string
 			lit, i = scanString(t, src, i)
-			n += len(oldVocabulary.FindAllString(lit, -1))
+			fn(lit)
 			prev, prevWord = c, ""
 		case isWordByte(c):
 			j := i
@@ -269,7 +281,7 @@ func countInJSStrings(t scanT, src string) (int, []string) {
 			i++
 		}
 	}
-	return n, quoteRegexes
+	return quoteRegexes
 }
 
 // scanT is the slice of *testing.T the JS scanner uses, so the scanner's own

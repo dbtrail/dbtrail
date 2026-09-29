@@ -399,7 +399,7 @@ const origPaint = paint;`, 1)
 	want("no-location", bucket, "none", "no copy location set")
 
 	ss := get("schema-serve")
-	if ss.Pieces[engine].Line != "47 tables" || !strings.Contains(ss.Pieces[engine].Sub, "run the daemon with watch") {
+	if ss.Pieces[engine].Line != "47 tables" || !strings.Contains(ss.Pieces[engine].Sub, "run bintrail-console watch to check definitions") {
 		t.Errorf("schema-serve: %+v", ss.Pieces[engine])
 	}
 	want("schema-running", engine, "warn", "refreshing table definitions")

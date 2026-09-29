@@ -562,7 +562,7 @@ try {
     const nofound = pgHealthCard({ exists: false, replica_identity_not_full: [], checked_at: iso(2000) });
     return {
       freshGreen: !fresh.classList.contains("card-stale") && /checked \d+s ago/.test(fresh.textContent) && !!fresh.querySelector(".hstat-ok"),
-      staleMuted: stale.classList.contains("card-stale") && /daemon may be stopped/.test(stale.textContent),
+      staleMuted: stale.classList.contains("card-stale") && /DBTrail may be stopped/.test(stale.textContent),
       missingTsStale: noTs.classList.contains("card-stale"),
       lostRed: !!lost.querySelector(".hstat-err") && /lost/.test(lost.textContent),
       probeErrVisible: /probe failing/i.test(perr.textContent) && /recovery is in progress/.test(perr.textContent) && !!perr.querySelector(".hstat-err"),

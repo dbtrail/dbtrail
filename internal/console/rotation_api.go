@@ -94,7 +94,7 @@ func (s *Server) effectiveRotation() rotationDTO {
 func (s *Server) handleRotationUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.monitorCtrl == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"rotation is configured by the watch daemon (bintrail-console watch); this DBTrail is read-only")
+			"rotation is configured by the DBTrail service (bintrail-console watch); this DBTrail is read-only")
 		return
 	}
 	var req rotationRequest

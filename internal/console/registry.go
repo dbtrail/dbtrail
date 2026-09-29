@@ -436,7 +436,7 @@ func (r *Registry) syncBucketStores() {
 
 // DaemonBaselineS3Label names the daemon's --baseline-s3 bucket in refusals
 // and warnings about a store claiming it.
-const DaemonBaselineS3Label = "the daemon's --baseline-s3 default"
+const DaemonBaselineS3Label = "DBTrail's --baseline-s3 default"
 
 // SetProcessS3Location registers an S3 location the daemon itself reads:
 // the --baseline-s3 of the boot entry, which the servers that relied on it

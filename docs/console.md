@@ -888,7 +888,7 @@ its question is asked, and the section after this one says where.
 
 **Retention** — what happens to your data as it ages:
 
-- **Rotation** — the effective policy (override vs daemon defaults) with an
+- **Rotation** — the effective policy (override vs DBTrail's defaults) with an
   edit shortcut to the rotation dialog.
 - **S3 archiving per source** — every monitored server with its
   `Archive to S3` destination (or `drop-only` when none), with a shortcut into

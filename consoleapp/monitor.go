@@ -325,7 +325,7 @@ func (m *monitorSupervisor) DeriveIndexDSN(entryID string) (string, error) {
 	}
 	cfg, err := mysql.ParseDSN(m.bootIndexDSN)
 	if err != nil {
-		return "", fmt.Errorf("daemon index DSN: %s", config.ScrubDSNError(err, m.bootIndexDSN))
+		return "", fmt.Errorf("the index DSN DBTrail was started with: %s", config.ScrubDSNError(err, m.bootIndexDSN))
 	}
 	cfg.DBName = "bintrail_idx_" + entryID
 	return cfg.FormatDSN(), nil
@@ -661,7 +661,7 @@ func (m *monitorSupervisor) DiscardNew(ctx context.Context, e console.ServerEntr
 	}
 	cfg, err := mysql.ParseDSN(derived)
 	if err != nil {
-		return fmt.Errorf("daemon index DSN: %s", config.ScrubDSNError(err, derived))
+		return fmt.Errorf("the index DSN DBTrail was started with: %s", config.ScrubDSNError(err, derived))
 	}
 	name := cfg.DBName
 	if !dbNameRE.MatchString(name) {

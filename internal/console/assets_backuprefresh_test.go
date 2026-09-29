@@ -169,7 +169,7 @@ func TestReusedCopiedNote_saysWhatACopyCost(t *testing.T) {
 	}
 	// The non-empty arm carries the counter and the two load-bearing claims:
 	// no disk was saved, and the cause is in the daemon log.
-	for _, want := range []string{`+ copied +`, "which saved no disk", "the daemon log says why"} {
+	for _, want := range []string{`+ copied +`, "which saved no disk", "DBTrail's log says why"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("reusedCopiedNote lost %q; a copied reuse would render as a disk saving again (#1578)", want)
 		}

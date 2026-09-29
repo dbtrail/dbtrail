@@ -227,7 +227,7 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	for _, name := range src.Columns {
 		cm, ok := colByName[name]
 		if !ok {
-			return inconclusive(res, fmt.Sprintf("source column %q is absent from the index schema snapshot (the capture daemon snapshots a relation when it first streams it); stream an event for this table so the relation is re-published", name)), nil
+			return inconclusive(res, fmt.Sprintf("source column %q is absent from the index schema snapshot (DBTrail snapshots a relation when it first streams it); stream an event for this table so the relation is re-published", name)), nil
 		}
 		orderedCols = append(orderedCols, cm)
 	}
@@ -313,7 +313,7 @@ func indexCoversPG(ctx context.Context, indexDB *sql.DB, anchorLSN uint64, windo
 		"SELECT flavor, binlog_position, gap_lost_at, gap_lost_detail FROM stream_state WHERE id = 1").
 		Scan(&flavor, &pos, &gapLostAt, &gapDetail)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, "index has no stream state yet (daemon not running or never checkpointed)"
+		return false, "index has no stream state yet (DBTrail not running or never checkpointed)"
 	}
 	if err != nil {
 		return false, "could not read index coverage: " + err.Error()
@@ -377,7 +377,7 @@ func pgCoverageVerdict(flavor string, checkpointLSN, anchorLSN uint64, gapLost b
 		return true, ""
 	}
 	return true, fmt.Sprintf(
-		"coverage unverified (index checkpoint %s is behind the snapshot anchor %s, but WAL from other databases and non-transactional activity advances the anchor without producing indexable events, so containment cannot be proven): assuming the capture daemon is caught up",
+		"coverage unverified (index checkpoint %s is behind the snapshot anchor %s, but WAL from other databases and non-transactional activity advances the anchor without producing indexable events, so containment cannot be proven): assuming DBTrail is caught up",
 		formatLSN(checkpointLSN), formatLSN(anchorLSN))
 }
 

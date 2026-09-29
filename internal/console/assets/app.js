@@ -1414,7 +1414,7 @@ function covCard(c, stamp) {
   if (fresh === "stalled") {
     const age = typeof c.checkpoint_age_seconds === "number" ? " for " + plainDuration(c.checkpoint_age_seconds) : "";
     card.append(el("p", { class: "cov-line bad", text:
-      "Capture is STALLED: the daemon has not checkpointed" + age + ". The window's upper edge is frozen: changes since then are NOT recoverable. Check that the stream is running." }));
+      "Capture is STALLED: DBTrail has not checkpointed" + age + ". The window's upper edge is frozen: changes since then are NOT recoverable. Check that the stream is running." }));
   } else if (asked === "up_to_date") {
     // Said only when the source was asked and holds nothing capture has not
     // recorded. "captured" because the source may have written to schemas
@@ -1877,7 +1877,7 @@ function ovFlowModel(inp) {
         ? ["An earlier cleanup is still running on the index. " + (mon.retrying
           ? "DBTrail checks again on its own, and capture starts when it finishes."
           : "Capture stays stopped. Start it from Servers once the cleanup finishes.")].concat(mon.last_error ? [mon.last_error] : [])
-        : [mon.last_error || "The daemon reported no error text."],
+        : [mon.last_error || "DBTrail reported no error text."],
       actions: earlierCleanup ? [{ label: "Details", run: "status" }]
         : [{ label: "Start", primary: true, run: "start" }, { label: "Details", run: "status" }] });
   } else if (mstate === "stalled" || mstate === "lost_position") {
@@ -1888,8 +1888,8 @@ function ovFlowModel(inp) {
       lines: [mstate === "stalled"
         ? "The stream is alive but nothing new has reached the index" + (lastIndexed ? " since " + lastIndexed : "") + ". It restarts on its own; there is no button for this."
         : "Events between the saved position and the oldest binlog still on the source are gone for good. Read the database again to make the copy whole."],
-      recipe: ["Is the daemon process alive, and is its clock right?",
-        "The last 100 lines of the daemon log: a stuck batch names itself there.",
+      recipe: ["Is the DBTrail process alive, and is its clock right?",
+        "The last 100 lines of DBTrail's log: a stuck batch names itself there.",
         "SHOW BINARY LOGS on the source: if the file the saved position points at is gone, capture ends in a permanent gap.",
         "Free disk and write errors on the index database."],
       actions: [{ label: "Details", run: "status" }] });
@@ -1939,7 +1939,7 @@ function ovFlowModel(inp) {
       } else if (srv && monitorCap && srv.kind !== "registry") {
         if (may("servers:write")) capture.action = { label: "Add a server", run: "add-server" };
         cards.push({ kind: "capture-boot-index", key: sid + "|boot-index", tone: "none",
-          title: "This is the daemon's own index, not a monitored server",
+          title: "This is DBTrail's own index, not a monitored server",
           lines: ["Add the database you want to protect."],
           actions: [{ label: "Add a server", primary: true, run: "add-server" }] });
       }
@@ -1973,7 +1973,7 @@ function ovFlowModel(inp) {
   if (schema.unavailable && schema.status && schema.status !== 403) {
     engine = piece("DBTrail", "warn", captured, "definitions could not be read");
   } else if (schema.unavailable) {
-    engine = piece("DBTrail", "none", captured, monitorCap ? "definitions: not checked from here" : "run the daemon with watch to check definitions");
+    engine = piece("DBTrail", "none", captured, monitorCap ? "definitions: not checked from here" : "run bintrail-console watch to check definitions");
   } else if (schema.state === "failed") {
     engine = piece("DBTrail", "bad", "definitions could not be refreshed", showReason ? (schema.last_error || "") : "", { schemaRetry: true });
   } else if (schema.state === "running") {
@@ -1998,7 +1998,7 @@ function ovFlowModel(inp) {
   const snap = (bl.snapshots || [])[0] || null;
   const snapAt = snap ? flowHHMM(snap.time) : "";
   const everyMin = sch ? flowEveryMinutes(sch.every) : 0;
-  const everyLabel = sch ? flowEveryLabel(sch.every) : (bl.refresh ? "on the daemon's timetable" : "no schedule set");
+  const everyLabel = sch ? flowEveryLabel(sch.every) : (bl.refresh ? "on DBTrail's timetable" : "no schedule set");
   const nextAt = sch && sch.runnable && sch.next_run ? flowHHMM(sch.next_run) : "";
   const ageMin = snap && typeof snap.age_hours === "number" ? snap.age_hours * 60 : -1;
   let update = piece(everyLabel || "no schedule set", "none", "", "");
@@ -2041,10 +2041,10 @@ function ovFlowModel(inp) {
     cards.push({ kind: "update-blocked", key: sid + "|blocked|" + stamp, tone: "bad",
       title: "A schema change stopped the update from changes",
       lines: [said || "A table changed shape. The copy cannot be updated from the recorded changes until that table is read again from the database."],
-      cost: "Reading the database takes longer than an update and adds load on your server. The lock mode is set when the daemon starts.",
+      cost: "Reading the database takes longer than an update and adds load on your server. The lock mode is set when DBTrail starts.",
       actions: [
         nextAt ? { label: "Wait for the scheduled read at " + nextAt, primary: true, run: "dismiss" } : { label: "Wait", primary: true, run: "dismiss" },
-        { label: "Read database now", run: "read", confirm: "Read every table from the source now?\n\nThis reads your whole database, with the lock mode set when the daemon starts, and publishes a new copy when it finishes." },
+        { label: "Read database now", run: "read", confirm: "Read every table from the source now?\n\nThis reads your whole database, with the lock mode set when DBTrail starts, and publishes a new copy when it finishes." },
       ] });
   }
 
@@ -4802,7 +4802,7 @@ function retentionBasis(ret) {
     case "recorded": return " (set when this server was added)";
     case "legacy": return " (kept from before the default changed)";
     case "unreadable": return " (its own setting could not be read, so the older default is used)";
-    default: return " (daemon default)";
+    default: return " (DBTrail's default)";
   }
 }
 
@@ -4946,7 +4946,7 @@ function capacityBox(cap) {
       break;
     case "no_retention":
       head = "⚠ Nothing caps the index: it grows without limit";
-      body = "This daemon runs with rotation off, so the index grows by " + growth + " at the current rate" +
+      body = "DBTrail runs with rotation off, so the index grows by " + growth + " at the current rate" +
         (cap.free_known ? ", and the disk fills in " + days + " (" + free + " free)" : "") + "." + stops;
       help = "Turn rotation on (CLI: --rotate-retain 48h) so old partitions are dropped and the index stays bounded. Archive to Parquet first to keep the history.";
       break;
@@ -5039,7 +5039,7 @@ function captureHealthBox(stream) {
   // saying what a remedy does NOT recover. The fallback covers a daemon too old
   // to send the field, and deliberately promises nothing on its behalf.
   const lines = (Array.isArray(h.explanation) && h.explanation.length) ? h.explanation
-    : ["Changes in those events are missing from the index. This daemon is too old to say why; run `bintrail status` against this index for the reason and the fix."];
+    : ["Changes in those events are missing from the index. This version of DBTrail is too old to say why; run `bintrail status` against this index for the reason and the fix."];
   const details = el("details", { class: "warn-details" }, el("summary", { text: "Why this happened, and what fixes it" }));
   lines.forEach((t) => details.append(el("div", { class: "warn-line", text: t })));
   const action = schemaSnapshotButton();
@@ -5225,7 +5225,7 @@ function pgHealthCard(h) {
 
   const foot = el("div", { class: "hstale" + (stale ? " hstale-warn" : "") });
   foot.append(stale
-    ? "stale; last checked " + agoText(ageSec) + " (daemon may be stopped)"
+    ? "stale; last checked " + agoText(ageSec) + " (DBTrail may be stopped)"
     : "checked " + agoText(ageSec));
   card.append(foot);
   return card;
@@ -5401,7 +5401,7 @@ function snapshotsMovedNotice(missing) {
   const from = routeArrivedFrom;
   const was = SNAPSHOT_MOVED.get(from);
   if (!was || movedIsClosed(from)) return null;
-  const why = missing === "daemon" ? " Its section is not in this web interface: checks run in the DBTrail daemon, and this one is read-only."
+  const why = missing === "daemon" ? " Its section is not in this web interface: checks run in the DBTrail service, and this one is read-only."
     : missing === "unknown" ? " Its section is missing because the capability check failed when the Snapshots page loaded; reload the page to get it back."
     : "";
   const box = el("div", { class: "snap-moved" });
@@ -6029,8 +6029,8 @@ function rotationCard(rot) {
   kvRow(card, "future partitions", rot.add_future);
   kvRow(card, "policy", rot.source === "override"
     ? ("set in the web interface" + (rot.enabled ? " (live)" : ""))
-    : "daemon defaults");
-  if (!rot.enabled) card.append(el("p", { class: "form-hint", text: "Rotation is turned off. Changes saved with Edit rotation take effect only after the daemon restarts." }));
+    : "DBTrail's defaults");
+  if (!rot.enabled) card.append(el("p", { class: "form-hint", text: "Rotation is turned off. Changes saved with Edit rotation take effect only after DBTrail restarts." }));
   card.append(el("div", { class: "stg-cardfoot" },
     el("button", { class: "btn btn-sm", type: "button", text: "Edit rotation…", onclick: showRotationDialog })));
   return card;
@@ -6095,7 +6095,7 @@ function s3RetentionConflicts(srv, servers, daemonS3) {
     if (o.archive_s3 && s3PrefixCovers(own, o.archive_s3)) archives.push(o.name);
     if (o.resolved_s3 && s3PrefixCovers(own, o.resolved_s3)) backups.push(o.name);
   }
-  if (daemonS3 && s3PrefixCovers(own, daemonS3)) backups.push("the daemon default (" + daemonS3 + ")");
+  if (daemonS3 && s3PrefixCovers(own, daemonS3)) backups.push("DBTrail's default (" + daemonS3 + ")");
   return { archives, backups };
 }
 
@@ -7314,7 +7314,7 @@ function telemetryCard(t) {
     const by = t.decided_by === "DO_NOT_TRACK" ? "the DO_NOT_TRACK environment variable"
       : t.decided_by === "BINTRAIL_TELEMETRY" ? "the BINTRAIL_TELEMETRY environment variable"
       : "the --telemetry flag";
-    card.append(el("p", { class: "form-hint", text: "Set by " + by + " on the daemon, which overrides this toggle. Change it there." }));
+    card.append(el("p", { class: "form-hint", text: "Set by " + by + " where DBTrail was started, which overrides this toggle. Change it there." }));
     card.append(telemetrySampleSection(t));
     return card;
   }
@@ -7336,7 +7336,7 @@ function telemetrySampleSection(t) {
     el("summary", { class: "form-adv-summary", text: "Show a sample event" }));
   if (!t.sample_event) {
     d.append(el("p", { class: "form-hint", text:
-      "The daemon could not render the sample event. The command line prints the same event (CLI: bintrail telemetry show)." }));
+      "DBTrail could not render the sample event. The command line prints the same event (CLI: bintrail telemetry show)." }));
     return d;
   }
   d.append(el("p", { class: "form-hint", text:
@@ -7366,7 +7366,7 @@ function baselineConfigHint(cur, serversErr) {
   if (serversErr) return "The server list could not be loaded (" + serversErr + "), so this cannot be checked.";
   if (!cur) return "Add a server first (Manage servers).";
   if (cur.kind === "ephemeral") {
-    return "Restart the daemon with --baseline-dir or --baseline-s3 (compose: BASELINE_DIR in .env).";
+    return "Restart DBTrail with --baseline-dir or --baseline-s3 (compose: BASELINE_DIR in .env).";
   }
   return "Set a Local folder or an S3 location below, under Where and how often.";
 }
@@ -7414,7 +7414,7 @@ function archivingPanel(servers, serversErr) {
 // away (#1578).
 function reusedCopiedNote(copied) {
   if (!copied) return "";
-  return " (" + copied + " of them written in full, which saved no disk; the daemon log says why)";
+  return " (" + copied + " of them written in full, which saved no disk; DBTrail's log says why)";
 }
 
 // budgetRefusedTail (#1107): an update refused for too many changed rows
@@ -8029,7 +8029,7 @@ function baselinesPanel(b, servers, opts) {
   const cur = (servers || []).find((s) => s.id === (currentServer || defaultServerId));
   let owner = cur ? serverLabel(cur) : "";
   if (!owner && b && !b.error && b.configured && !(opts && opts.serversErr)) {
-    owner = "daemon (--baseline-dir / --baseline-s3)";
+    owner = "command-line server (--baseline-dir / --baseline-s3)";
   }
   const head = el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: "Snapshots" + (owner ? " · " + owner : "") }),
@@ -9472,7 +9472,7 @@ function backupTakeAway(cur, b, sqlSt) {
       (sessionMay(PERM_SNAPSHOT_CREATE) ? ", so Build is off until it can be read." : ".") }));
   } else if (sql && st && st.state && !SQL_EXPORT_KNOWN.has(st.state)) {
     panel.append(el("p", { class: "form-msg err", text:
-      "The last .sql build reports a state this web interface does not recognise: " + st.state + ". Update DBTrail, or check the daemon's log." }));
+      "The last .sql build reports a state this web interface does not recognise: " + st.state + ". Update DBTrail, or check its log." }));
   }
   const lanes = el("div", { class: "bk-lanes" });
   if (duck) lanes.append(duck);
@@ -9785,7 +9785,7 @@ function backupSQLLane(cur, b, sqlSt) {
   // only answer "not ready".
   if (st && st.staging_error) {
     body.append(el("p", { class: "form-msg err", text:
-      "Staging problem: " + st.staging_error + ". The daemon retries every minute; check the staging directory on the machine running it." }));
+      "Staging problem: " + st.staging_error + ". DBTrail retries every minute; check the staging directory on the machine it runs on." }));
   }
   // Without baseline:create and nothing to report, there is no lane. An
   // unreadable status and a state this console does not know ARE something
@@ -10654,7 +10654,7 @@ async function openVerifyExplain(id, schema, table, btn) {
     // wording promises nothing about reopening: a scheduled run may have
     // discarded the result, and the daemon log is where a repeat belongs.
     busy.close();
-    toast("Still waiting after 20 minutes; the work continues on the server. Reopen Explain to try again, and check the daemon log if this repeats.");
+    toast("Still waiting after 20 minutes; the work continues on the server. Reopen Explain to try again, and check DBTrail's log if this repeats.");
     return;
   }
   busy.close();
@@ -11750,15 +11750,15 @@ function sqlClientPanel(servers, fb) {
       // watch flag as "how to turn it on" would send the reader to a flag
       // this process does not have.
       body.append(el("p", { class: "cn-sql-row" },
-        "Not available: this DBTrail is read-only. The time-travel port is part of the watch daemon (CLI: ",
+        "Not available: this DBTrail is read-only. The time-travel port is part of the DBTrail service (CLI: ",
         el("code", { text: "bintrail-console watch --flashback-listen" }),
-        "). Run that daemon and your usual MySQL client can read any table as it was at a chosen moment."));
+        "). Start DBTrail that way and your usual MySQL client can read any table as it was at a chosen moment."));
       return panel;
     }
-    body.append(el("p", { class: "cn-sql-row", text: "Off. The port is set when the daemon starts, not from the web interface." }));
+    body.append(el("p", { class: "cn-sql-row", text: "Off. The port is set when DBTrail starts, not from the web interface." }));
     body.append(cnFine("How to turn it on",
       el("p", { class: "form-hint" },
-        "Start the daemon with a port address (CLI: ", el("code", { text: "--flashback-listen 127.0.0.1:3308" }),
+        "Start DBTrail with a port address (CLI: ", el("code", { text: "--flashback-listen 127.0.0.1:3308" }),
         ", or the environment variable ", el("code", { text: "BINTRAIL_CONSOLE_FLASHBACK_LISTEN" }),
         ") and an access token (CLI: ", el("code", { text: "--console-token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }),
         "). This panel then shows the address and a ready to copy mysql line, and your usual MySQL client can read any table as it was at a chosen moment.")));
@@ -11770,7 +11770,7 @@ function sqlClientPanel(servers, fb) {
   // what it means and let the mysql line carry the name this page uses.
   body.append(el("p", { class: "cn-sql-row" }, "Address ",
     el("code", { text: fb.host ? fb.listen : "port " + (fb.port || fb.listen) }),
-    fb.host ? "" : " on every network address of the daemon's machine"));
+    fb.host ? "" : " on every network address of the machine DBTrail runs on"));
   body.append(el("p", { class: "cn-sql-row" }, "User ",
     user ? el("code", { text: user }) : el("code", { text: "<server name>" }),
     user ? ", the server picked in the left sidebar" : ", the name of a server in the left sidebar (none yet)"));
@@ -11791,8 +11791,8 @@ function sqlClientPanel(servers, fb) {
       el("code", { text: "SELECT * FROM _flashback.orders AS OF '10 minutes ago' WHERE id = 1;" }),
       " Use _snapshot for the whole table (needs a snapshot) and _diff for what changed between two moments. The user picks the server, so each server has its own line; pick another in the sidebar and copy again."),
     el("p", { class: "form-hint", text: fb.host
-      ? "The port answers on that address only. Run mysql where it can reach it (on the daemon's machine when it is 127.0.0.1), or open a tunnel to it."
-      : "The port answers on every network address of the daemon's machine; the command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use the daemon machine's own name or address instead." })));
+      ? "The port answers on that address only. Run mysql where it can reach it (on the machine DBTrail runs on when it is 127.0.0.1), or open a tunnel to it."
+      : "The port answers on every network address of the machine DBTrail runs on; the command uses the name the web interface was opened with. If that name is a reverse proxy in front of DBTrail, it does not pass this port through, so use that machine's own name or address instead." })));
   return panel;
 }
 
@@ -12172,7 +12172,7 @@ async function showRotationDialog() {
   const head = el("div", { class: "modal-head" });
   head.append(el("h2", { class: "modal-title", text: "Rotation" }));
   head.append(el("p", { class: "modal-desc", text:
-    "On a regular schedule, the daemon deletes indexed data older than the retention period below, and gets ready ahead of time for new data coming in. One schedule applies to every server being monitored; changes take effect on the next run." }));
+    "On a regular schedule, DBTrail deletes indexed data older than the retention period below, and gets ready ahead of time for new data coming in. One schedule applies to every server being monitored; changes take effect on the next run." }));
   head.append(el("button", { class: "modal-x", type: "button", text: "✕", onclick: closeRotationDialog }));
   modal.append(head);
 
@@ -12187,8 +12187,8 @@ async function showRotationDialog() {
   form.elements.add_future.value = (cur.add_future != null ? cur.add_future : "");
 
   const note = el("p", { class: "form-hint", style: "margin-top:10px" });
-  if (!cur.enabled) note.textContent = "Rotation is turned off. Your changes will be saved but won't take effect until the daemon restarts.";
-  else if (cur.source === "default") note.textContent = "Currently using the daemon's built-in defaults. Saving creates a custom setting that takes effect immediately.";
+  if (!cur.enabled) note.textContent = "Rotation is turned off. Your changes will be saved but won't take effect until DBTrail restarts.";
+  else if (cur.source === "default") note.textContent = "Currently using DBTrail's built-in defaults. Saving creates a custom setting that takes effect immediately.";
   else note.textContent = "A custom setting is active and takes effect immediately.";
   form.append(note);
 
@@ -12240,7 +12240,7 @@ async function submitRotation(form, msg, cur) {
   closeRotationDialog();
   // When the daemon booted with rotation off the loop isn't running, so the
   // save is inert until a restart — say so rather than implying it took effect.
-  toast(cur.enabled ? "Rotation settings saved" : "Saved. Rotation is off, so this takes effect when the daemon restarts");
+  toast(cur.enabled ? "Rotation settings saved" : "Saved. Rotation is off, so this takes effect when DBTrail restarts");
 }
 
 // Nothing else in this dialog polls: the list is fetched when it opens and
@@ -12563,10 +12563,10 @@ function buildServerForm() {
     el("select", { class: "input", name: "s3_path_style" },
       opt("", "Path style (default with an endpoint)"), opt("path", "Path style: host/bucket/key"), opt("vhost", "Virtual-hosted: bucket.host/key"))));
   monGrid.append(srvField("S3 region", "s3_region", { placeholder: "(optional) us-east-1; MinIO ignores it, Wasabi wants its endpoint's" }));
-  monGrid.append(srvField("S3 access key", "s3_access_key_id", { placeholder: "(optional) blank uses the daemon's own credentials", autocomplete: "off" }));
+  monGrid.append(srvField("S3 access key", "s3_access_key_id", { placeholder: "(optional) blank uses DBTrail's own credentials", autocomplete: "off" }));
   monGrid.append(srvField("S3 secret key", "s3_secret_access_key", { type: "password", autocomplete: "new-password" }));
   mon.append(monGrid);
-  mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Snapshots locations set on this server, for uploads and reads alike, not to the daemon's default Snapshots location. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
+  mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Snapshots locations set on this server, for uploads and reads alike, not to the default Snapshots location DBTrail was started with. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
   // SELECT covers the information_schema snapshot of columns/PKs/FKs. The
@@ -12594,7 +12594,7 @@ function buildServerForm() {
   mon.append(tagFlavor(el("pre", { class: "form-code", text:
     "CREATE PUBLICATION bintrail_pub FOR ALL TABLES;\n" +
     "ALTER TABLE your_table REPLICA IDENTITY FULL;" }), "postgres"));
-  mon.append(el("p", { class: "form-hint", style: "margin-top:10px", text: "Archive to S3: old data is uploaded to S3 before it's deleted locally, so your history is kept and can still be searched. Needs AWS credentials set up on the daemon (environment variables or an IAM role)." }));
+  mon.append(el("p", { class: "form-hint", style: "margin-top:10px", text: "Archive to S3: old data is uploaded to S3 before it's deleted locally, so your history is kept and can still be searched. Needs AWS credentials set up where DBTrail runs (environment variables or an IAM role)." }));
   form.append(mon);
 
   // BYO index is the advanced path — collapsed behind a <details> so the
@@ -13303,7 +13303,7 @@ function s3TestText(res) {
     if (b.needs_secret) return "○ " + name + ": type the S3 secret key to test these keys";
     if (b.needs_keys) return "○ " + name + ": save the server, or type S3 keys, to test these settings";
     const probed = b.ok ? "✓ " + name + " · " + b.latency_ms + " ms" : "✗ " + name + ": " + (b.error || "unreachable");
-    return b.not_applied ? probed + " · ! " + name + " is saved but the daemon is not using it; its log says why" : probed;
+    return b.not_applied ? probed + " · ! " + name + " is saved but DBTrail is not using it; its log says why" : probed;
   }).join(" · ");
 }
 

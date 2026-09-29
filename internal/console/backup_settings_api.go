@@ -388,7 +388,7 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	id := r.PathValue("id")
 	if id == bootServerID {
 		writeJSONError(w, http.StatusConflict,
-			"the command-line server cannot be edited; it mirrors the daemon's own flags")
+			"the command-line server cannot be edited; it mirrors the flags DBTrail was started with")
 		return
 	}
 	entry, ok := s.cm.reg.Get(id)

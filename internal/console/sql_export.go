@@ -93,7 +93,7 @@ type SQLExportRequest struct {
 func (s *Server) handleSQLExportTrigger(w http.ResponseWriter, r *http.Request) {
 	if s.sqlExport == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"custom .sql exports from the console are not enabled; they need the watch daemon with baseline creation or refresh turned on")
+			"custom .sql exports from the console are not enabled; they need the DBTrail service with baseline creation or refresh turned on")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))
@@ -155,7 +155,7 @@ func (s *Server) handleSQLExportTrigger(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleSQLExportStatus(w http.ResponseWriter, r *http.Request) {
 	if s.sqlExport == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"custom .sql exports from the console are not enabled; they need the watch daemon with baseline creation or refresh turned on")
+			"custom .sql exports from the console are not enabled; they need the DBTrail service with baseline creation or refresh turned on")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))
@@ -173,7 +173,7 @@ func (s *Server) handleSQLExportStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSQLExportDownload(w http.ResponseWriter, r *http.Request) {
 	if s.sqlExport == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"custom .sql exports from the console are not enabled; they need the watch daemon with baseline creation or refresh turned on")
+			"custom .sql exports from the console are not enabled; they need the DBTrail service with baseline creation or refresh turned on")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))

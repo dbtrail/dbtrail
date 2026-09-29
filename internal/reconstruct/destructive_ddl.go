@@ -217,11 +217,11 @@ func destructiveDDLErr(schema, table string, f ddlFinding, w DDLWindow) error {
 			"though its time is outside them", w.Anchor.File, w.Anchor.Pos)
 		todo += ". If instead the statement ran before the snapshot, on a source whose binlog files started over " +
 			"since (a failover, RESET MASTER), the two positions do not compare. A snapshot from a full backup " +
-			"taken by the daemon clears that; otherwise remove the rows this window counts by position alone " +
+			"taken by DBTrail clears that; otherwise remove the rows this window counts by position alone " +
 			"from the index database: " + deleteSQL
 	case ddlUnplaced:
 		placed = "with nothing to place it before the snapshot this starts from, so it is counted as after it"
-		todo = "A snapshot from a full backup taken by the daemon clears this. Otherwise the rows this window " +
+		todo = "A snapshot from a full backup taken by DBTrail clears this. Otherwise the rows this window " +
 			"counts by position alone have to be removed from the index database: " + deleteSQL
 	}
 	return fmt.Errorf(
