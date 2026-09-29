@@ -395,3 +395,68 @@ func TestMCPServerArg_auditBareEndpointRegistryDefault(t *testing.T) {
 		t.Error("no audit record")
 	}
 }
+
+// TestMCPServerArg_namesWithheldWithoutServersRead: a scoped token lacking
+// servers:read is refused GET /api/servers, so /mcp must not hand it the same
+// list through tool descriptions or the unknown-name error. It may still
+// route by a name it already knows.
+func TestMCPServerArg_namesWithheldWithoutServersRead(t *testing.T) {
+	f := newRoutedFixture(t, false)
+	mint := func(perms ...ext.Permission) string {
+		t.Helper()
+		sess, _, err := f.s.sessions.IssueWithPolicy("minter", &ext.AccessPolicy{Permissions: append([]ext.Permission{ext.PermSettingsRead}, perms...)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doJSON(t, f.s, "POST", "/api/mcp-token", sess)
+		if rec.Code != 200 {
+			t.Fatalf("mint = %d: %s", rec.Code, rec.Body.String())
+		}
+		var minted struct {
+			Token string `json:"token"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &minted); err != nil || minted.Token == "" {
+			t.Fatalf("mint response: %v (%s)", err, rec.Body.String())
+		}
+		return minted.Token
+	}
+
+	for _, tc := range []struct {
+		perms     []ext.Permission
+		wantNames bool
+	}{
+		{[]ext.Permission{ext.PermQueryExecute}, false},
+		{[]ext.Permission{ext.PermQueryExecute, ext.PermServersRead}, true},
+	} {
+		session := mcpGrantConnect(t, f.ts.URL+"/mcp/prod", mint(tc.perms...))
+		tools, err := session.ListTools(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tool := range tools.Tools {
+			if got := strings.Contains(tool.Description, `"staging"`); got != tc.wantNames {
+				t.Errorf("perms %v %s: description lists names = %v, want %v", tc.perms, tool.Name, got, tc.wantNames)
+			}
+			if strings.Contains(tool.Description, "none was registered") {
+				t.Errorf("perms %v %s: a withheld list must not read as an empty registry: %q", tc.perms, tool.Name, tool.Description)
+			}
+			if !strings.Contains(tool.Description, "Pass server") {
+				t.Errorf("perms %v %s: description does not mention the server argument: %q", tc.perms, tool.Name, tool.Description)
+			}
+		}
+		res, texts := routedCall(t, session, "list_schema_changes", map[string]any{"server": "nope"})
+		text := strings.Join(texts, " ")
+		if !res.IsError || !strings.Contains(text, "unknown server") {
+			t.Errorf("perms %v: unknown name must be a tool error, got %v", tc.perms, texts)
+		}
+		if got := strings.Contains(text, `"staging"`); got != tc.wantNames {
+			t.Errorf("perms %v: unknown-name error lists names = %v, want %v: %q", tc.perms, got, tc.wantNames, text)
+		}
+		expectSchemaChanges(f.stgM)
+		res, texts = routedCall(t, session, "list_schema_changes", map[string]any{"server": "staging"})
+		if res.IsError || len(texts) != 2 || texts[1] != "Answered by server: staging" {
+			t.Errorf("perms %v: routing by a known name must still work, got IsError=%v %v", tc.perms, res.IsError, texts)
+		}
+		assertMet(t, "staging", f.stgM)
+	}
+}

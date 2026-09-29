@@ -312,12 +312,15 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 		// #1434: one connection reaches every registered server. The names
 		// are the ones selectable when this session is created; routing
 		// itself reads the registry live (mcpRouteID).
-		Servers: &mcptools.ServerRouting{Names: s.mcpServerNames()},
+		// A scoped token without servers:read may route but is not handed
+		// the server list: /api/servers refuses it that list, and the two
+		// doors must agree (#1124).
+		Servers: s.mcpServerRouting(pol),
 		Resolve: func(ctx context.Context, _ string) (*mcptools.Target, error) {
 			// The ONE id this call runs against: the connection, the source
 			// DSN, the audit target and the attribution all come from it,
 			// never from the session's id when the call routed elsewhere.
-			rid, err := s.mcpRouteID(ctx, id)
+			rid, err := s.mcpRouteID(ctx, id, pol)
 			if err != nil {
 				return nil, err
 			}
@@ -412,6 +415,16 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 	return srv
 }
 
+// mcpServerRouting is the session's server-argument configuration: the name
+// list for a credential allowed to read it (servers:read, like GET
+// /api/servers), and a description without names otherwise.
+func (s *Server) mcpServerRouting(pol *ext.AccessPolicy) *mcptools.ServerRouting {
+	if !pol.Allows(ext.PermServersRead) {
+		return &mcptools.ServerRouting{NamesWithheld: true}
+	}
+	return &mcptools.ServerRouting{Names: s.mcpServerNames()}
+}
+
 // mcpServerNames lists the servers a tool call's server argument can name, in
 // switcher order: every registry entry, then "default" when the boot entry is
 // selectable (the hidden boot of source-less watch is not, exactly as
@@ -435,7 +448,7 @@ func (s *Server) mcpServerNames() []string {
 // server argument resolves exactly like the /mcp/{id-or-name} path: registry
 // id first, then display name, then "default" for a selectable boot entry.
 // An unknown name is an error the tool returns as its result.
-func (s *Server) mcpRouteID(ctx context.Context, sessionID string) (string, error) {
+func (s *Server) mcpRouteID(ctx context.Context, sessionID string, pol *ext.AccessPolicy) (string, error) {
 	sel := mcptools.RequestedServer(ctx)
 	if sel == "" {
 		if sessionID != "" {
@@ -445,6 +458,11 @@ func (s *Server) mcpRouteID(ctx context.Context, sessionID string) (string, erro
 	}
 	if rid, ok := s.flashbackTarget(sel); ok {
 		return rid, nil
+	}
+	if !pol.Allows(ext.PermServersRead) {
+		// The list is withheld from this token (see mcpServerNamesFor).
+		return "", fmt.Errorf("unknown server %q: use a server name or id from the web interface, "+
+			"or omit server to use this connection's server", sel)
 	}
 	names := s.mcpServerNames()
 	if len(names) == 0 {

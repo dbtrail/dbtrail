@@ -314,3 +314,17 @@ func TestServerArg_auditCarriesRoutedServer(t *testing.T) {
 		}
 	}
 }
+
+func TestServerRouting_describe(t *testing.T) {
+	withheld := (&ServerRouting{Names: []string{"prod"}, NamesWithheld: true}).describe()
+	if strings.Contains(withheld, "prod") || strings.Contains(withheld, "none was registered") {
+		t.Errorf("withheld description leaks a name or claims an empty registry: %q", withheld)
+	}
+	if empty := (&ServerRouting{}).describe(); !strings.Contains(empty, "none was registered") {
+		t.Errorf("empty registry description = %q", empty)
+	}
+	listed := (&ServerRouting{Names: []string{"prod", "a\nb"}}).describe()
+	if !strings.Contains(listed, `"prod"`) || strings.Contains(listed, "\n") {
+		t.Errorf("listed description = %q", listed)
+	}
+}

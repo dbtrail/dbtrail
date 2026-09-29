@@ -29,10 +29,18 @@ type ServerRouting struct {
 	// registry, so a server added mid-session is reachable even though it is
 	// not listed.
 	Names []string
+	// NamesWithheld describes the argument without listing any name: the
+	// caller may route but may not read the server list (a scoped console
+	// token without servers:read, which /api/servers also refuses).
+	NamesWithheld bool
 }
 
 // describe is the sentence appended to each core tool description.
 func (r *ServerRouting) describe() string {
+	if r.NamesWithheld {
+		return " Pass server, a server name or id from the web interface, to choose which monitored server answers." +
+			" Omit it to use this connection's server."
+	}
 	if len(r.Names) == 0 {
 		return " Pass server to choose which monitored server answers; none was registered when this connection opened." +
 			" Omit it to use this connection's server."
