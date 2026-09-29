@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -258,29 +259,57 @@ func assertReconstructedRow(t *testing.T, label, out string, want map[string]*st
 	}
 }
 
+// lockedBuffer is a bytes.Buffer safe to read while the process writes it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // streamProc is a running `bintrail stream`.
 type streamProc struct {
 	cmd *exec.Cmd
-	log *bytes.Buffer
+	log *lockedBuffer
 }
 
 func startStream(t *testing.T, binPath, coverDir string, args ...string) *streamProc {
 	t.Helper()
 	cmd := exec.Command(binPath, append([]string{"stream"}, args...)...)
 	cmd.Env = append(os.Environ(), "GOCOVERDIR="+coverDir, "DO_NOT_TRACK=1")
-	var log bytes.Buffer
-	cmd.Stdout = &log
-	cmd.Stderr = &log
+	log := &lockedBuffer{}
+	cmd.Stdout = log
+	cmd.Stderr = log
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start bintrail stream: %v", err)
 	}
-	p := &streamProc{cmd: cmd, log: &log}
+	p := &streamProc{cmd: cmd, log: log}
 	t.Cleanup(func() {
 		if p.cmd.ProcessState == nil {
 			_ = p.cmd.Process.Kill()
 			_ = p.cmd.Wait()
 		}
 	})
+	// The first run starts at the source's CURRENT position, found at startup:
+	// a change made before that is not captured, so wait for it.
+	deadline := time.Now().Add(30 * time.Second)
+	for !strings.Contains(log.String(), "Streaming started") {
+		if time.Now().After(deadline) {
+			_ = p.cmd.Process.Kill()
+			t.Fatalf("bintrail stream did not start within 30s\n%s", log.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	return p
 }
 

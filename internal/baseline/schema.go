@@ -25,6 +25,10 @@ import (
 // GEOMETRY and its subtypes carry WKB bytes. MySQL 8.0 canonicalizes
 // GEOMETRYCOLLECTION to GEOMCOLLECTION; both spellings are listed because a
 // schema file can come from either server generation.
+//
+// VECTOR (MySQL 9, MariaDB 11.7+) carries packed 32-bit floats. In the STRING
+// default its bytes, almost never valid UTF-8, made DuckDB refuse the whole
+// Parquet file, so no reader could open a table with a VECTOR column.
 var binaryTypeTokens = map[string]bool{
 	"binary": true, "varbinary": true,
 	"tinyblob": true, "blob": true, "mediumblob": true, "longblob": true,
@@ -32,6 +36,7 @@ var binaryTypeTokens = map[string]bool{
 	"geometry": true, "point": true, "linestring": true, "polygon": true,
 	"multipoint": true, "multilinestring": true, "multipolygon": true,
 	"geometrycollection": true, "geomcollection": true,
+	"vector": true,
 }
 
 // IsBinaryType reports whether a MySQL type token names a binary-family column
