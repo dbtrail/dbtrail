@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -53,6 +54,11 @@ type bundle struct {
 	// table/time only covered by the S3 copy silently degraded to "no
 	// baseline" instead of finding it (#766).
 	baselineFallbackSrc string
+	// previous are the snapshot locations this server used before its
+	// current ones (#1684), read by findBaseline and the listing after them,
+	// each only up to the moment the server left it. Empty for the
+	// command-line server.
+	previous []PreviousLocation
 	// baselineConfigured gates the reconstruct surface per server: a baseline
 	// is present AND archives are enabled AND no RBAC profile is active. See
 	// the rationale on newBundleDerived.
@@ -321,6 +327,7 @@ func newBundleDerived(db *sql.DB, dbName string, entry ServerEntry, profileActiv
 		baselineSrc:         src,
 		baselineFallbackSrc: fallback,
 		baselineConfigured:  src != "" && !noArchive,
+		previous:            slices.Clone(entry.PreviousBaselineLocations),
 		activity:            newActivityCache(),
 	}
 }
@@ -330,18 +337,28 @@ func newBundleDerived(db *sql.DB, dbName string, entry ServerEntry, profileActiv
 // when both a local dir and an S3 prefix are configured) on ErrNoBaseline —
 // see the baselineFallbackSrc field doc (#766).
 func (b *bundle) findBaseline(ctx context.Context, schema, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
-	path, snapshotTime, stale, err := reconstruct.FindBaseline(ctx, b.baselineSrc, schema, table, at)
+	path, snapshotTime, stale, err := b.findBaselineCurrent(ctx, schema, table, at)
+	if len(b.previous) == 0 {
+		return path, snapshotTime, stale, err
+	}
+	return b.withPreviousLocations(ctx, schema, table, at, path, snapshotTime, stale, err)
+}
+
+// findBaselineCurrent is findBaseline over the current locations alone: the
+// source, and the bucket behind a local folder.
+func (b *bundle) findBaselineCurrent(ctx context.Context, schema, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
+	path, snapshotTime, stale, err := findBaselineAt(ctx, b.baselineSrc, schema, table, at)
 	if b.baselineFallbackSrc == "" {
 		return path, snapshotTime, stale, err
 	}
 	switch {
 	case errors.Is(err, reconstruct.ErrNoBaseline):
-		return reconstruct.FindBaseline(ctx, b.baselineFallbackSrc, schema, table, at)
+		return findBaselineAt(ctx, b.baselineFallbackSrc, schema, table, at)
 	case errors.Is(err, reconstruct.ErrUnreadableSnapshot), err == nil && stale.Unreadable:
 		// #1639: a local folder could not be read. The durable copy may hold
 		// the snapshot it hides; ask it before refusing or settling for an
 		// older local one, and say why the answer came from there.
-		fpath, ftime, fstale, ferr := reconstruct.FindBaseline(ctx, b.baselineFallbackSrc, schema, table, at)
+		fpath, ftime, fstale, ferr := findBaselineAt(ctx, b.baselineFallbackSrc, schema, table, at)
 		if ferr != nil && !errors.Is(ferr, reconstruct.ErrNoBaseline) {
 			// Kept to the log: the local answer (or its refusal) still stands
 			// and says why, but a destination that cannot be read is a second
