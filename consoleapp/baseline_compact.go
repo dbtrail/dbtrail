@@ -209,7 +209,7 @@ func (s *baselineSupervisor) runCompact(req refreshRequest, due []compactCandida
 	st.FinishedAt = nowStamp()
 	st.Tables, st.Refused = merged, failed+skipped
 	if skipped > 0 {
-		st.State, st.LastError = "failed", fmt.Sprintf("stopped by daemon shutdown after %d of %d chain(s); the next refresh looks again", merged, len(due))
+		st.State, st.LastError = "failed", fmt.Sprintf("stopped because DBTrail shut down after %d of %d chain(s); the next refresh looks again", merged, len(due))
 		return
 	}
 	if runErr != nil {

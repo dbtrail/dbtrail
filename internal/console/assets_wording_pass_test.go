@@ -237,11 +237,11 @@ func TestWordingPassTheseSentences(t *testing.T) {
 	has("a locked card's fine print", got.Locked, "Saved in DBTrail's own settings file, which wins over the command line and the environment.")
 	has("no schedule, read-only", got.NoSchedule, "No scheduled snapshots. Setting one needs the DBTrail service; this web interface is read-only.")
 	has("a schedule, read-only", got.Schedule, "Scheduled snapshots: every 6h at 03:00. Schedules run in the DBTrail service; this web interface cannot change them.")
-	if want := "Backups is part of Snapshots now. Its section is not in this web interface: checks run in the DBTrail daemon, and this one is read-only. ×"; got.Moved != want {
+	if want := "Backups is part of Snapshots now. Its section is not in this web interface: checks run in the DBTrail service, and this one is read-only. ×"; got.Moved != want {
 		t.Errorf("moved notice = %q, want %q", got.Moved, want)
 	}
 	has("an unknown build state", got.UnknownState, "The last .sql build reports a state this web interface does not recognise: some-new-state. "+
-		"Update DBTrail, or check the daemon's log.")
+		"Update DBTrail, or check its log.")
 
 	if len(got.Banned) > 0 {
 		t.Errorf("these lines call the web interface a console:\n  %s", strings.Join(got.Banned, "\n  "))

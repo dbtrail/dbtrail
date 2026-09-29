@@ -1287,7 +1287,7 @@ func writeRecoverError(w http.ResponseWriter, err error) {
 			"refusing to generate the reversal script: the matched events hold ~%.1f MiB of row data, "+
 				"over the %.0f MiB budget the web interface allows for a single recovery. Narrow the recovery filter "+
 				"(schema/table/pk/time range) to shrink the window, or use `bintrail recover` from the CLI "+
-				"for large recoveries; it runs outside the daemon's shared process and supports "+
+				"for large recoveries; it runs outside DBTrail's shared process and supports "+
 				"--max-script-bytes to raise or disable this budget.",
 			float64(be.EstimatedBytes)/(1<<20), float64(be.Budget)/(1<<20)))
 		return

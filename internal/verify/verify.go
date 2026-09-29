@@ -681,7 +681,7 @@ func indexCovers(ctx context.Context, indexDB *sql.DB, srcGTID string) (bool, st
 	err := indexDB.QueryRowContext(ctx,
 		"SELECT gtid_set FROM stream_state WHERE id = 1").Scan(&idxGTID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, "index has no stream state yet (daemon not running or never checkpointed)"
+		return false, "index has no stream state yet (DBTrail not running or never checkpointed)"
 	}
 	if err != nil {
 		return false, "could not read index coverage: " + err.Error()
@@ -698,7 +698,7 @@ func indexCovers(ctx context.Context, indexDB *sql.DB, srcGTID string) (bool, st
 		return false, "source GTID set is unparseable: " + err.Error()
 	}
 	if !idxSet.Contain(srcSet) {
-		return false, fmt.Sprintf("index is behind the source snapshot (indexed %s does not contain snapshot %s); re-run once the daemon catches up",
+		return false, fmt.Sprintf("index is behind the source snapshot (indexed %s does not contain snapshot %s); re-run once DBTrail catches up",
 			idxGTID.String, srcGTID)
 	}
 	return true, ""

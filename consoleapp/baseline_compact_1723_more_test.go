@@ -151,7 +151,7 @@ func TestCompactJob_shutdownStopsAndSaysSo(t *testing.T) {
 	req := refreshRequest{ServerID: "s", ServerName: "s", BaselineDir: local, TableDeltas: true}
 	sup.maybeCompact(req)
 	st := waitCompact(t, sup, "s")
-	if st.State != "failed" || st.Tables != 0 || st.Refused != 2 || !strings.Contains(st.LastError, "stopped by daemon shutdown after 0 of 2") {
+	if st.State != "failed" || st.Tables != 0 || st.Refused != 2 || !strings.Contains(st.LastError, "stopped because DBTrail shut down after 0 of 2") {
 		t.Fatalf("status = %+v", st)
 	}
 	if calls.Load() != 1 {

@@ -303,7 +303,7 @@ type BaselineStatus struct {
 func (s *Server) handleBaselineTrigger(w http.ResponseWriter, r *http.Request) {
 	if s.baselineCtrl == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"snapshot creation from the web interface is not enabled; start the watch daemon with BINTRAIL_CONSOLE_BASELINE_TRIGGER=1")
+			"snapshot creation from the web interface is not enabled; start the DBTrail service with BINTRAIL_CONSOLE_BASELINE_TRIGGER=1")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))
@@ -337,7 +337,7 @@ func (s *Server) handleBaselineTrigger(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBaselineStatus(w http.ResponseWriter, r *http.Request) {
 	if s.baselineCtrl == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"snapshot creation from the web interface is not enabled; start the watch daemon with BINTRAIL_CONSOLE_BASELINE_TRIGGER=1")
+			"snapshot creation from the web interface is not enabled; start the DBTrail service with BINTRAIL_CONSOLE_BASELINE_TRIGGER=1")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))
@@ -367,7 +367,7 @@ func splitSchemas(s string) []string {
 func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 	if s.baselineRestore == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"point-in-time restore from the web interface is not enabled; it needs the watch daemon with baseline creation or refresh turned on")
+			"point-in-time restore from the web interface is not enabled; it needs the DBTrail service with baseline creation or refresh turned on")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))
@@ -486,7 +486,7 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBaselineRestoreStatus(w http.ResponseWriter, r *http.Request) {
 	if s.baselineRestore == nil {
 		writeJSONError(w, http.StatusForbidden,
-			"point-in-time restore from the web interface is not enabled; it needs the watch daemon with baseline creation or refresh turned on")
+			"point-in-time restore from the web interface is not enabled; it needs the DBTrail service with baseline creation or refresh turned on")
 		return
 	}
 	e, ok := s.requireMonitorEntry(w, r.PathValue("id"))

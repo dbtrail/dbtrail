@@ -166,7 +166,7 @@ func (s *Server) handleTelemetrySet(w http.ResponseWriter, r *http.Request) {
 	// this enforces it server-side.
 	if s.telemetryState().Overridden {
 		writeJSONError(w, http.StatusConflict,
-			"telemetry is controlled by an environment variable or launch flag on the daemon; change it there")
+			"telemetry is controlled by an environment variable or launch flag where DBTrail was started; change it there")
 		return
 	}
 	dir, err := telemetry.ConfigDir()
