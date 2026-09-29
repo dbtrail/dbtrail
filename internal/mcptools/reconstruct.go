@@ -474,12 +474,12 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 			Actor:   ext.ProcessActor(""),
 			Schema:  args.Schema,
 			Table:   args.Table,
-			Detail: map[string]string{
+			Detail: t.auditDetail(map[string]string{
 				"pk":     args.PK,
 				"at":     atTime.Format(time.RFC3339),
 				"events": strconv.Itoa(len(rows)),
 				"found":  strconv.FormatBool(res.Found),
-			},
+			}),
 		})
 
 		return &mcp.CallToolResult{
