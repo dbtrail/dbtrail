@@ -220,10 +220,11 @@ func mariaDBFixedBaselineFilter(pkFilter map[string]string, pkMetas []metadata.C
 		if metadata.MariaDBFixedWidth(c.DataType) == 0 {
 			continue
 		}
-		v, ok := pkFilter[c.Name]
+		key, ok := filterKeyFor(pkFilter, c.Name)
 		if !ok {
 			continue
 		}
+		v := pkFilter[key]
 		b, err := metadata.ParseMariaDBFixed(c.DataType, v)
 		if err != nil {
 			return nil, fmt.Errorf("primary-key column %q: %w", c.Name, err)
@@ -232,7 +233,7 @@ func mariaDBFixedBaselineFilter(pkFilter map[string]string, pkMetas []metadata.C
 		if out == nil {
 			out = maps.Clone(pkFilter)
 		}
-		out[c.Name] = text
+		out[key] = text
 	}
 	if out == nil {
 		return pkFilter, nil

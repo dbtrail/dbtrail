@@ -132,3 +132,13 @@ func TestMariaDBFixedBaselineFilter(t *testing.T) {
 		t.Errorf("no metas: the filter must pass through, got %v, %v", got, err)
 	}
 }
+
+// --pk-columns is typed by a person: `U` names the column `u`, as it does on
+// the server and in padFixedBinaryFilter.
+func TestMariaDBFixedBaselineFilter_columnNameCase(t *testing.T) {
+	got, err := mariaDBFixedBaselineFilter(map[string]string{"U": "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"},
+		[]metadata.ColumnMeta{colMeta("u", "uuid", "uuid")})
+	if err != nil || got["U"] != "ffffffff-ffff-ffff-ffff-ffffffffffff" {
+		t.Errorf("filter under key U = %v, %v; want the canonical text under the same key", got, err)
+	}
+}
