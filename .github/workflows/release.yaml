@@ -158,6 +158,7 @@ jobs:
     env:
       BINTRAIL_TEST_DSN: "root:testroot@tcp(127.0.0.1:13306)"
       BINTRAIL_TEST_MARIADB_DSN: "root:testroot@tcp(127.0.0.1:13307)"
+      BINTRAIL_TEST_MARIADB_SCRATCH_DSN: "root:testroot@tcp(127.0.0.1:13309)"
       BINTRAIL_REQUIRE_MARIADB: "1"
 
     steps:
@@ -215,6 +216,37 @@ jobs:
           echo "MariaDB did not become ready in time" >&2
           docker logs bintrail-test-mariadb >&2 || true
           exit 1
+
+      # Drill target and mydumper for the snapshot chain test; see the same
+      # two steps in ci.yml.
+      - name: Start MariaDB drill target (bintrail-test-mariadb-scratch, ${{ matrix.mariadb }})
+        run: |
+          docker run -d --name bintrail-test-mariadb-scratch \
+            -e MARIADB_ROOT_PASSWORD=testroot \
+            -p 13309:3306 \
+            mariadb:${{ matrix.mariadb }}
+          consecutive=0
+          for i in $(seq 1 60); do
+            if docker run --rm --network host mariadb:${{ matrix.mariadb }} \
+                 mariadb --protocol=TCP -h 127.0.0.1 -P 13309 -u root -ptestroot -e "SELECT 1" >/dev/null 2>&1; then
+              consecutive=$((consecutive + 1))
+              [ "$consecutive" -ge 3 ] && { echo "MariaDB drill target is ready."; exit 0; }
+            else
+              consecutive=0
+            fi
+            sleep 2
+          done
+          echo "MariaDB drill target did not become ready in time" >&2
+          docker logs bintrail-test-mariadb-scratch >&2 || true
+          exit 1
+
+      - name: Install mydumper (1.0.3-1)
+        run: |
+          wget -q https://github.com/mydumper/mydumper/releases/download/v1.0.3-1/mydumper_1.0.3-1.jammy_amd64.deb -O /tmp/mydumper.deb
+          echo "9f7fb46c03e1a721e86d71c42a3fe3bd88f1a7b0ec80fa91c7736826f7f1e6f4  /tmp/mydumper.deb" | sha256sum -c -
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq /tmp/mydumper.deb
+          mydumper --version
 
       - name: MariaDB-source integration tests
         run: go test -tags=integration -race -p 1 -count=1 -run 'MariaDB|Mariadb|mariadb|Flavor|FourColumns' ./...
