@@ -84,11 +84,17 @@ func TestIntegrationReplicaCheckMariaDB(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer db.Close()
+		// Closed by a cleanup, not a defer: the cleanups below use it, and a
+		// deferred Close runs before them, which fails them in silence.
+		t.Cleanup(func() { db.Close() })
 		// Never started, so it never connects: 192.0.2.1 is a documentation
 		// address. Master_Server_Id stays 0, which matches nothing.
 		testutil.MustExec(t, db, "CHANGE MASTER 'dbtrail_probe' TO MASTER_HOST='192.0.2.1', MASTER_PORT=3306, MASTER_USER='nobody', MASTER_PASSWORD='x'")
-		t.Cleanup(func() { _, _ = db.Exec("RESET SLAVE 'dbtrail_probe' ALL") })
+		t.Cleanup(func() {
+			if _, err := db.Exec("RESET SLAVE 'dbtrail_probe' ALL"); err != nil {
+				t.Errorf("remove the probe channel: %v", err)
+			}
+		})
 		s, err := loadMariaDBServer(ctx, db, console.FlavorMariaDB)
 		if err != nil {
 			t.Fatal(err)
@@ -116,11 +122,16 @@ func TestIntegrationReplicaCheckMariaDB(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer db.Close()
+		t.Cleanup(func() { db.Close() }) // after the DROP USER cleanup below
+
 		testutil.MustExec(t, db, "DROP USER IF EXISTS 'dbtrail_nomon'@'%'")
 		testutil.MustExec(t, db, "CREATE USER 'dbtrail_nomon'@'%' IDENTIFIED BY 'nomon'")
 		testutil.MustExec(t, db, "GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail_nomon'@'%'")
-		t.Cleanup(func() { _, _ = db.Exec("DROP USER IF EXISTS 'dbtrail_nomon'@'%'") })
+		t.Cleanup(func() {
+			if _, err := db.Exec("DROP USER IF EXISTS 'dbtrail_nomon'@'%'"); err != nil {
+				t.Errorf("drop the test user: %v", err)
+			}
+		})
 		cfg, err := mysql.ParseDSN(source + "/")
 		if err != nil {
 			t.Fatal(err)
