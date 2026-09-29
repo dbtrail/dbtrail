@@ -2761,6 +2761,9 @@ func TestMapEventImagesDecodesBlobText(t *testing.T) {
 					{Name: "payload", OrdinalPosition: 3, DataType: "blob"},
 					{Name: "location", OrdinalPosition: 4, DataType: "point"},
 					{Name: "embedding", OrdinalPosition: 5, DataType: "vector"},
+					{Name: "u", OrdinalPosition: 6, DataType: "uuid"},
+					{Name: "ip4", OrdinalPosition: 7, DataType: "inet4"},
+					{Name: "ip6", OrdinalPosition: 8, DataType: "inet6"},
 				}},
 			}), nil
 		},
@@ -2779,6 +2782,9 @@ func TestMapEventImagesDecodesBlobText(t *testing.T) {
 		RowAfter: map[string]any{
 			"id": json.Number("1"), "body": b64("hello world"), "payload": b64(rawBlob),
 			"location": b64(rawGeom), "embedding": b64(rawVec),
+			"u":   b64("\x12\x3e\x45\x67\xe8\x9b\x12\xd3\xa4\x56\x42\x66\x14\x17\x40\x00"),
+			"ip4": b64("\x0a\x00\x00\x00"),
+			"ip6": "\n", // captured before #1944: no rendering exists, left as it is
 		},
 	}}
 	h.mapEventImages("appdb", "docs", rows)
@@ -2799,10 +2805,18 @@ func TestMapEventImagesDecodesBlobText(t *testing.T) {
 	if got, ok := rows[0].RowAfter["location"].([]byte); !ok || string(got) != rawGeom {
 		t.Errorf("RowAfter location = %#v, want decoded []byte %q (raw SRID+WKB)", rows[0].RowAfter["location"], rawGeom)
 	}
-	// VECTOR stays deliberately excluded (baseline asymmetry — see the
-	// base64StoredKind comment): the stored base64 string is left untouched.
-	if got := rows[0].RowAfter["embedding"]; got != b64(rawVec) {
-		t.Errorf("RowAfter embedding = %#v, want untouched base64 string %q", got, b64(rawVec))
+	// VECTOR → decoded raw []byte (packed floats), what a real server serves.
+	// The baseline stores VECTOR as bytes too now, so _snapshot's merged rows
+	// carry one representation.
+	if got, ok := rows[0].RowAfter["embedding"].([]byte); !ok || string(got) != rawVec {
+		t.Errorf("RowAfter embedding = %#v, want decoded []byte %q", rows[0].RowAfter["embedding"], rawVec)
+	}
+	// MariaDB UUID/INET → the server's text, which is what a SELECT returns
+	// and what the baseline holds.
+	for col, want := range map[string]any{"u": "123e4567-e89b-12d3-a456-426614174000", "ip4": "10.0.0.0", "ip6": "\n"} {
+		if got := rows[0].RowAfter[col]; got != want {
+			t.Errorf("RowAfter %s = %#v, want %#v", col, got, want)
+		}
 	}
 	// Non-BLOB/TEXT column untouched.
 	if got := rows[0].RowAfter["id"]; got != json.Number("1") {
@@ -2863,6 +2877,7 @@ func TestBase64StoredKind(t *testing.T) {
 		"geometry", "point", "linestring", "polygon",
 		"multipoint", "multilinestring", "multipolygon",
 		"geometrycollection", "geomcollection",
+		"vector",
 	}
 	textFamily := []string{"text", "tinytext", "mediumtext", "longtext"}
 	for _, dt := range binaryFamily {
@@ -2875,16 +2890,12 @@ func TestBase64StoredKind(t *testing.T) {
 			t.Errorf("base64StoredKind(%q) = (%v,%v), want (false,true)", dt, binary, ok)
 		}
 	}
-	// Case-insensitive, and unrelated types are not decoded. VECTOR stays
-	// deliberately excluded: internal/baseline does not route "vector"
-	// through its binary path, so a _snapshot baseline-seeded row carries the
-	// literal dump token — decoding only the event side would serve two
-	// representations of the same column within one result set (same
-	// asymmetry that keeps VECTOR unresolved in internal/verify, PR #1143).
+	// Case-insensitive, and unrelated types are not decoded. MariaDB's
+	// UUID/INET are rendered as text by a separate pass, not decoded here.
 	if binary, ok := base64StoredKind("LONGTEXT"); !ok || binary {
 		t.Errorf("base64StoredKind is not case-insensitive: got (%v,%v)", binary, ok)
 	}
-	for _, dt := range []string{"int", "varchar", "vector", "datetime", ""} {
+	for _, dt := range []string{"int", "varchar", "datetime", "uuid", ""} {
 		if _, ok := base64StoredKind(dt); ok {
 			t.Errorf("base64StoredKind(%q) reported a decodable column, want none", dt)
 		}
