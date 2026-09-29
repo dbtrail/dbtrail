@@ -597,7 +597,7 @@ func rejectSurfaceParams(cfg Config, indexDSN, profile string) *mcp.CallToolResu
 	if !cfg.AllowDSNParam && indexDSN != "" {
 		return ErrorResult(errors.New(
 			"index_dsn is not accepted here: this server routes connections itself " +
-				"(select a server via the /mcp/{id-or-name} URL path; connections are managed in the web interface)"))
+				"(pick a server with the server argument or the /mcp/{id-or-name} URL path; connections are managed in the web interface)"))
 	}
 	if !cfg.AllowProfileParam && profile != "" {
 		return ErrorResult(errors.New(
