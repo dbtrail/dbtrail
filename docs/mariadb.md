@@ -190,7 +190,17 @@ page and the
   skipped transparently.
 - **MariaDB-only column types**: `UUID` (10.7+), `INET4` (10.10+), `INET6`
   (10.5+) and `VECTOR` (11.7+) are captured and restored by `recover` byte for
-  byte, including as a primary key.
+  byte, including as a primary key. `reconstruct`, `drill`, `verify`, the
+  `_flashback`/`_snapshot`/`_diff` schemas and the Parquet copy return the
+  value the source holds: `UUID` and `INET` as the text MariaDB prints
+  (`123e4567-e89b-12d3-a456-426614174000`, `10.0.0.0`, `::ffff:1.2.3.4`),
+  `VECTOR` as its bytes. A `UUID` or `INET` key can be typed in any form
+  MariaDB accepts (`reconstruct --pk 7C5C7C5C5C7C00000000000000000000`).
+- **The Parquet copy, end to end**: snapshot with mydumper (`bintrail dump`
+  and `bintrail baseline`), `bintrail baseline refresh`, `reconstruct` for one
+  row and for whole tables, and `drill` into a scratch MariaDB, checked in CI
+  on every supported version by comparing `HEX()` of every column with the
+  source.
 
 ---
 
@@ -241,6 +251,32 @@ page and the
   in a MySQL `TEXT` column. If your application compares JSON by its bytes
   (a hash or a signature), compare the parsed document instead after a
   recovery.
+- **The snapshot cannot log in as an `ed25519` user on most installs.**
+  mydumper takes the snapshot, and whether it can use MariaDB's `ed25519`
+  password method depends only on the client library it was built with. The
+  amd64 packages (and the amd64 console image) use the MySQL client library,
+  which has no `client_ed25519` plugin, so the snapshot fails with
+  `Authentication plugin 'client_ed25519' cannot be loaded`. The arm64
+  packages use MariaDB Connector/C and work. Check with `mydumper --version`
+  (`built against MySQL …` or `built against MariaDB …`). Give the snapshot
+  user the `mysql_native_password` method, which every build supports:
+
+  ```sql
+  CREATE USER 'dbtrail_dump'@'%' IDENTIFIED VIA mysql_native_password USING PASSWORD('…');
+  ```
+
+  Capture (`stream`) is not affected: it logs in with Go's driver, which
+  supports `ed25519`.
+- **A `VECTOR` column needs a snapshot taken with this version.** Snapshots
+  taken before stored `VECTOR` values as text, which the Parquet reader
+  refuses for the whole table (`Invalid string encoding`). Take a new snapshot;
+  `baseline refresh` cannot repair the old one. The same applies to a MySQL 9
+  `VECTOR` column.
+- **Values captured before `UUID`/`INET` support stay unreadable.** Events
+  indexed by a version older than the one that added it hold damaged bytes for
+  these columns. `verify` reports such a value as inconclusive, and a
+  full-table `reconstruct` or `drill` that would write one refuses the table
+  instead of loading a wrong value.
 - **Sequences are not rewound.** MariaDB records every change to a `SEQUENCE`
   as an insert into its one-row table, and bintrail captures those like any
   other insert. A reversal that includes the sequence is refused by the server
