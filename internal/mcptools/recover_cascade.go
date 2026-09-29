@@ -542,7 +542,7 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 				Actor:   ext.ProcessActor(""),
 				Schema:  args.Schema,
 				Table:   args.Table,
-				Detail:  detail,
+				Detail:  t.auditDetail(detail),
 			})
 		}
 

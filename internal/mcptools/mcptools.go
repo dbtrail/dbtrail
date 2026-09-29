@@ -125,6 +125,13 @@ type Target struct {
 	// on the standalone surface, whose gate is whether a baseline source
 	// resolved at all.
 	BaselineConfigured bool
+	// ServerID and ServerName name the server this Target belongs to on
+	// surfaces that route between several (the console, #1434). ServerID is
+	// the canonical id recorded as the audit target; ServerName is the label
+	// a routed call's answer is attributed to. Both empty on the standalone
+	// surface, which serves one index and records no server.
+	ServerID   string
+	ServerName string
 }
 
 // release closes the connection when this call owns it.
@@ -222,6 +229,10 @@ type Config struct {
 	MaxScriptBytes int64
 	// AuditSurface tags ext.Record audit events; "" means "mcp".
 	AuditSurface string
+	// Servers enables the optional per-call `server` argument on the core
+	// tools (#1434). nil (standalone) registers the tools exactly as before,
+	// with no such argument. See ServerRouting.
+	Servers *ServerRouting
 }
 
 func (c Config) queryMaxLimit() int {
@@ -269,6 +280,9 @@ func (c Config) scriptBudgetOverride() (int64, bool) {
 // cfg.Reconstruct is set and recover_cascade when cfg.RecoverCascade is set.
 // All tools are annotated read-only + idempotent.
 func NewServer(cfg Config) *mcp.Server {
+	if cfg.Servers != nil {
+		cfg = withRouteAttribution(cfg)
+	}
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "bintrail",
 		Version: cfg.Version,
@@ -276,7 +290,7 @@ func NewServer(cfg Config) *mcp.Server {
 		Instructions: cfg.Instructions,
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	addCoreTool[QueryArgs, routedQueryArgs](server, cfg, &mcp.Tool{
 		Name: "query",
 		Description: "Search indexed MySQL binlog events with filters. " +
 			"Returns matching events showing row changes (before/after images), timestamps, and metadata. " +
@@ -288,7 +302,7 @@ func NewServer(cfg Config) *mcp.Server {
 		},
 	}, MakeQueryTool(cfg))
 
-	mcp.AddTool(server, &mcp.Tool{
+	addCoreTool[RecoverArgs, routedRecoverArgs](server, cfg, &mcp.Tool{
 		Name: "recover",
 		Description: "Generate reversal SQL to undo matching binlog events (dry-run only). " +
 			"Produces a BEGIN/COMMIT-wrapped SQL script that reverses events in reverse chronological order (most recent first): " +
@@ -305,7 +319,7 @@ func NewServer(cfg Config) *mcp.Server {
 		},
 	}, MakeRecoverTool(cfg))
 
-	mcp.AddTool(server, &mcp.Tool{
+	addCoreTool[StatusArgs, routedStatusArgs](server, cfg, &mcp.Tool{
 		Name: "status",
 		Description: "Show the current state of the binlog index: " +
 			"which files have been indexed, partition layout with estimated row counts, " +
@@ -317,7 +331,7 @@ func NewServer(cfg Config) *mcp.Server {
 		},
 	}, MakeStatusTool(cfg))
 
-	mcp.AddTool(server, &mcp.Tool{
+	addCoreTool[SchemaChangesArgs, routedSchemaChangesArgs](server, cfg, &mcp.Tool{
 		Name: "list_schema_changes",
 		Description: "List DDL schema changes (CREATE, ALTER, DROP, RENAME, TRUNCATE) " +
 			"recorded during binlog indexing or streaming. " +
@@ -339,7 +353,7 @@ func NewServer(cfg Config) *mcp.Server {
 	// Opt-in (#953): only surfaces that can supply a baseline lookup advertise
 	// it — see Config.Reconstruct.
 	if cfg.Reconstruct {
-		mcp.AddTool(server, &mcp.Tool{
+		addCoreTool[ReconstructArgs, routedReconstructArgs](server, cfg, &mcp.Tool{
 			Name: "reconstruct",
 			Description: "Reconstruct a single row's full state at a point in time (time travel). " +
 				"Folds a baseline snapshot with the indexed events after it, so columns never touched " +
@@ -358,7 +372,7 @@ func NewServer(cfg Config) *mcp.Server {
 	// Unlike reconstruct this does NOT depend on a baseline — Phase-1
 	// window-only synthesis works without one — see Config.RecoverCascade.
 	if cfg.RecoverCascade {
-		mcp.AddTool(server, &mcp.Tool{
+		addCoreTool[RecoverCascadeArgs, routedRecoverCascadeArgs](server, cfg, &mcp.Tool{
 			Name: "recover_cascade",
 			Description: "Generate reversal SQL for rows hit by a foreign-key ON DELETE / ON UPDATE " +
 				"CASCADE or SET NULL (dry-run only). InnoDB runs FK cascades below the binlog, so the plain " +
@@ -587,7 +601,7 @@ func rejectSurfaceParams(cfg Config, indexDSN, profile string) *mcp.CallToolResu
 	if !cfg.AllowDSNParam && indexDSN != "" {
 		return ErrorResult(errors.New(
 			"index_dsn is not accepted here: this server routes connections itself " +
-				"(select a server via the /mcp/{id-or-name} URL path; connections are managed in the web interface)"))
+				"(pick a server with the server argument or the /mcp/{id-or-name} URL path; connections are managed in the web interface)"))
 	}
 	if !cfg.AllowProfileParam && profile != "" {
 		return ErrorResult(errors.New(
@@ -816,7 +830,7 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 			Actor:   ext.ProcessActor(args.Profile),
 			Schema:  args.Schema,
 			Table:   args.Table,
-			Detail:  map[string]string{"results": strconv.Itoa(n), "format": format},
+			Detail:  t.auditDetail(map[string]string{"results": strconv.Itoa(n), "format": format}),
 		})
 
 		return &mcp.CallToolResult{
@@ -1142,7 +1156,7 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 				Actor:   ext.ProcessActor(args.Profile),
 				Schema:  args.Schema,
 				Table:   args.Table,
-				Detail:  detail,
+				Detail:  t.auditDetail(detail),
 			})
 		}
 

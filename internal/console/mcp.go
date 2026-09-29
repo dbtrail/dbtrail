@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +31,12 @@ import (
 // MCP clients cannot reliably send custom headers, so the server choice lives
 // in the URL path — mirroring how the flashback port routes by connection
 // username — instead of the X-Bintrail-Server header the browser API uses.
+// That path choice is the SESSION's server. Each tool call may still send an
+// optional `server` argument (#1434) naming another registered server for that
+// one call, resolved by the same rules as the path (mcpRouteID); the answer
+// then names the server that replied and the audit record names it too. One
+// call reaches one server: there is no fan-out. A managed token's grants are
+// checked by tool before routing, so they apply to every target unchanged.
 //
 // Auth: a console token as a Bearer credential, compared in constant time —
 // either the static --token / BINTRAIL_CONSOLE_TOKEN or the UI-managed MCP
@@ -299,11 +307,30 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 		Instructions: "Bintrail console MCP endpoint for querying indexed binlog events, " +
 			"generating recovery SQL (including reversal of foreign-key cascade side effects), " +
 			"reconstructing a row's state at a point in time, and viewing index status. " +
-			"The target server is chosen by URL path: /mcp for the console's default server, " +
-			"/mcp/{id-or-name} for a named server from the console registry.",
+			"This connection's server is chosen by URL path: /mcp for the console's default server, " +
+			"/mcp/{id-or-name} for a named server from the console registry. " +
+			"The built-in tools also take an optional server argument that sends that one call to another " +
+			"registered server; the answer then says which server replied.",
+		// #1434: one connection reaches every registered server. The names
+		// are the ones selectable when this session is created; routing
+		// itself reads the registry live (mcpRouteID).
+		// A scoped token without servers:read may route but is not handed
+		// the server list: /api/servers refuses it that list, and the two
+		// doors must agree (#1124).
+		Servers: s.mcpServerRouting(pol),
 		Resolve: func(ctx context.Context, _ string) (*mcptools.Target, error) {
-			b, err := s.cm.Resolve(ctx, id)
+			// The ONE id this call runs against: the connection, the source
+			// DSN, the audit target and the attribution all come from it,
+			// never from the session's id when the call routed elsewhere.
+			rid, err := s.mcpRouteID(ctx, id, pol)
 			if err != nil {
+				return nil, err
+			}
+			b, err := s.cm.Resolve(ctx, rid)
+			if err != nil {
+				if sel := mcptools.RequestedServer(ctx); sel != "" && !pol.Allows(ext.PermServersRead) {
+					return nil, withheldServerError(err, sel)
+				}
 				return nil, err
 			}
 			// The selected entry's source DSN, when it has one: extension
@@ -312,13 +339,30 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 			// the registry, never from a tool argument. Empty for the boot
 			// entry and for a selection with no source configured.
 			sourceDSN := ""
-			if e, ok := s.cm.reg.Get(id); ok {
+			serverName := rid
+			if e, ok := s.cm.reg.Get(rid); ok {
 				sourceDSN = e.SourceDSN
+				serverName = e.Name
+			}
+			if sel := mcptools.RequestedServer(ctx); sel != "" && !pol.Allows(ext.PermServersRead) {
+				// Routed by a token that may not read the server list: echo
+				// what it sent rather than reveal a display name it never
+				// named (routing by id must not become a way to read names).
+				serverName = sel
+			}
+			serverID := rid
+			if rid == "" {
+				// Source-less watch with an empty registry: the hidden boot
+				// entry backs the call. Recorded under its reserved id, which
+				// is what it is, though it is not selectable by that name.
+				serverID, serverName = bootServerID, bootServerID
 			}
 			return &mcptools.Target{
-				DB:        b.db,
-				DBName:    b.dbName,
-				SourceDSN: sourceDSN,
+				DB:         b.db,
+				DBName:     b.dbName,
+				SourceDSN:  sourceDSN,
+				ServerID:   serverID,
+				ServerName: serverName,
 				// Time travel (#953): the bundle's own lookup, NOT
 				// reconstruct.FindBaseline — the method carries the #766
 				// local→S3 fallback, and binding the package function directly
@@ -380,4 +424,84 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 		srv.AddReceivingMiddleware(mcpAuthzMiddleware(pol))
 	}
 	return srv
+}
+
+// mcpServerRouting is the session's server-argument configuration: the name
+// list for a credential allowed to read it (servers:read, like GET
+// /api/servers), and a description without names otherwise.
+func (s *Server) mcpServerRouting(pol *ext.AccessPolicy) *mcptools.ServerRouting {
+	if !pol.Allows(ext.PermServersRead) {
+		return &mcptools.ServerRouting{NamesWithheld: true}
+	}
+	return &mcptools.ServerRouting{Names: s.mcpServerNames()}
+}
+
+// mcpServerNames lists the servers a tool call's server argument can name, in
+// switcher order: every registry entry, then "default" when the boot entry is
+// selectable (the hidden boot of source-less watch is not, exactly as
+// /mcp/default refuses it).
+func (s *Server) mcpServerNames() []string {
+	var names []string
+	for _, e := range s.cm.reg.List() {
+		names = append(names, e.Name)
+	}
+	if s.cm.bootSelectable() {
+		names = append(names, bootServerID)
+	}
+	return names
+}
+
+// mcpRouteID maps one tool call to the canonical connManager id it runs
+// against (#1434). No server argument keeps the session's own selection; on
+// bare /mcp that is the console default, pinned here so the audit record and
+// the attribution name the same server the connection is opened for ("" is
+// left only for the hidden boot bundle, which Resolve("") still backs). A
+// server argument resolves exactly like the /mcp/{id-or-name} path: registry
+// id first, then display name, then "default" for a selectable boot entry.
+// An unknown name is an error the tool returns as its result.
+func (s *Server) mcpRouteID(ctx context.Context, sessionID string, pol *ext.AccessPolicy) (string, error) {
+	sel := mcptools.RequestedServer(ctx)
+	if sel == "" {
+		if sessionID != "" {
+			return sessionID, nil
+		}
+		return s.cm.defaultID(), nil
+	}
+	if rid, ok := s.flashbackTarget(sel); ok {
+		return rid, nil
+	}
+	if !pol.Allows(ext.PermServersRead) {
+		// The list is withheld from this token (see mcpServerRouting).
+		return "", fmt.Errorf("unknown server %q: use a server name or id from the web interface, "+
+			"or omit server to use this connection's server", sel)
+	}
+	names := s.mcpServerNames()
+	if len(names) == 0 {
+		return "", fmt.Errorf("unknown server %q: no server is registered in the web interface yet; "+
+			"omit server to use this connection's server", sel)
+	}
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = fmt.Sprintf("%q", n)
+	}
+	return "", fmt.Errorf("unknown server %q: use one of %s, or omit server to use this connection's server",
+		sel, strings.Join(quoted, ", "))
+}
+
+// withheldServerError rewrites a connection error for a token that may not
+// read the server list. The connManager's open errors lead with the stored
+// display name (`server "<name>": ...`, including the concurrent-edit
+// retry), which such a token must not learn by routing to an id; the rewrite
+// names what the client sent instead. Any other error passes unchanged.
+func withheldServerError(err error, sel string) error {
+	const lead = "server "
+	msg := err.Error()
+	if !strings.HasPrefix(msg, lead) {
+		return err
+	}
+	quoted, qerr := strconv.QuotedPrefix(msg[len(lead):])
+	if qerr != nil {
+		return err
+	}
+	return errors.New(lead + strconv.Quote(sel) + msg[len(lead)+len(quoted):])
 }
