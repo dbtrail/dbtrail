@@ -154,3 +154,51 @@ func TestIndexCovers_EmptySourceByFlavor(t *testing.T) {
 		})
 	}
 }
+
+// When the index has no GTID checkpoint to compare with, the advice must not
+// be a plain restart at the source's current position: with the index
+// behind, that skips events and nothing records it. It names --reset, which
+// records the skipped span as permanently lost, and a new full snapshot,
+// and says the events in between are not captured.
+func TestIndexCovers_noCheckpointAdviceNeverSkipsSilently(t *testing.T) {
+	cases := []struct {
+		name, flavor, src, mode, set, variable string
+	}{
+		{"mysql, no GTID set", consistency.GTIDFlavorMySQL, "3e11fa47-bee9-11e4-9716-8f2e7c74b0e5:1-5", "position", "", "SELECT @@GLOBAL.gtid_executed"},
+		{"mariadb, position mode", consistency.GTIDFlavorMariaDB, "0-1-100", "position", "", "SELECT @@gtid_binlog_pos"},
+		{"mariadb, no GTID set", consistency.GTIDFlavorMariaDB, "0-1-100", "gtid", "", "SELECT @@gtid_binlog_pos"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if tc.flavor == consistency.GTIDFlavorMariaDB {
+				mock.ExpectQuery("SELECT mode, gtid_set FROM stream_state").
+					WillReturnRows(sqlmock.NewRows([]string{"mode", "gtid_set"}).AddRow(tc.mode, tc.set))
+			} else {
+				mock.ExpectQuery("SELECT gtid_set FROM stream_state").
+					WillReturnRows(sqlmock.NewRows([]string{"gtid_set"}).AddRow(tc.set))
+			}
+			covered, detail := indexCovers(context.Background(), db, tc.src, tc.flavor)
+			if covered {
+				t.Fatalf("covered with no GTID checkpoint: %q", detail)
+			}
+			for _, want := range []string{
+				`--reset --start-gtid "$(mysql -N -e '` + tc.variable + `')"`,
+				"permanently lost",
+				"are not captured",
+				"new full snapshot",
+			} {
+				if !strings.Contains(detail, want) {
+					t.Errorf("detail = %q\nwant it to contain %q", detail, want)
+				}
+			}
+			if strings.Contains(detail, "restart it with --start-gtid") {
+				t.Errorf("detail still advises a plain restart at the current position: %q", detail)
+			}
+		})
+	}
+}

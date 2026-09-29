@@ -53,11 +53,12 @@ func indexCoversMariaDB(ctx context.Context, indexDB *sql.DB, srcPos string) (bo
 	// the GTID set of an earlier run behind, and that set says nothing about
 	// what the index holds now.
 	if mode.String != "gtid" {
-		return false, "coverage cannot be checked: the index's capture runs in binlog-position mode, which records no GTID position to compare with the MariaDB source; run the capture in GTID mode (--start-gtid) to make it comparable"
+		return false, "coverage cannot be checked: the index's capture runs in binlog-position mode, which records no GTID position to compare with the MariaDB source. " +
+			gtidModeAdvice("mariadb")
 	}
 	if strings.TrimSpace(idxGTID.String) == "" {
-		return false, fmt.Sprintf("index has no GTID checkpoint (no stream has checkpointed in GTID mode against this index); if a stream is running, restart it with --start-gtid \"$(mysql -N -e '%s')\"",
-			parser.GTIDExecutedHint("mariadb"))
+		return false, "index has no GTID checkpoint (no stream has checkpointed in GTID mode against this index). " +
+			gtidModeAdvice("mariadb")
 	}
 	idx, err := parser.ParseMariaDBPosition(idxGTID.String)
 	if err != nil {
@@ -70,4 +71,20 @@ func indexCoversMariaDB(ctx context.Context, indexDB *sql.DB, srcPos string) (bo
 		}
 	}
 	return true, ""
+}
+
+// gtidModeAdvice is what to do when the index has no GTID checkpoint to
+// compare with. It never advises a plain restart at the source's current
+// position: with the index behind, that skips events and nothing records
+// the skip. DBTrail cannot derive the GTID position a binlog-position
+// checkpoint stands for, so there is no switch without a hole: the advice
+// names --reset, which records the skipped span as permanently lost (the
+// same record persistResetDiscard writes), and a new full snapshot, which
+// is the only way to read back what those events changed.
+func gtidModeAdvice(flavor string) string {
+	return fmt.Sprintf("Comparing needs the capture in GTID mode, and DBTrail cannot tell which GTID position the index's current checkpoint stands for, "+
+		"so it cannot switch without a hole. Restart the capture with --reset --start-gtid \"$(mysql -N -e '%s')\": "+
+		"the events between the last one the index holds and that point are not captured, and --reset records that span as permanently lost. "+
+		"Then take a new full snapshot, the only way the index gets back what those events changed.",
+		parser.GTIDExecutedHint(flavor))
 }
