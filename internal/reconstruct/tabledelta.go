@@ -2,6 +2,7 @@ package reconstruct
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -52,6 +53,11 @@ import (
 // no binlog anchor to resume from or a column whose name a delta reserves;
 // the previous pair was written by v0.83.0; the sequence is exhausted. A
 // rewrite leaves with the EMPTY sequence-0 pair that starts the next chain.
+//
+// Under the console's refresh the day and the quarter are a job's to act on
+// (#1735, tabledelta_major.go): it folds the chain into a new table file
+// outside the refresh, and the next refresh puts that file in place. The
+// refresh then rewrites on those two grounds only as a backstop.
 const tableDeltaMaxAge = 24 * time.Hour
 
 // The size rule: rewrite once the chain's files together pass
@@ -63,6 +69,16 @@ const tableDeltaMaxAge = 24 * time.Hour
 var (
 	tableDeltaMaxFraction           = 0.25
 	tableDeltaMinCompactBytes int64 = 1 << 20
+)
+
+// With the compaction job on (#1735), the refresh ends a chain on age or size
+// only once the job has clearly fallen behind: twice the age the job folds at,
+// or a chain as large as the table. The job folds at tableDeltaMaxAge and
+// tableDeltaMaxFraction, so in steady state these never fire; they bound the
+// chain when the job keeps failing. Vars so a test can reach them.
+var (
+	tableDeltaJobBackstop                 = time.Duration(2)
+	tableDeltaJobBackstopFraction float64 = 1.0
 )
 
 // tableDelta is what readTableDelta learned about the chain beside a base.
@@ -260,7 +276,55 @@ func readDeltaChainStart(ctx context.Context, basePath string) (time.Time, error
 // yet is checked on newStart: a chain begun over an old base starts at that
 // base's time, not at this run, and would otherwise carry an already too old
 // start forward for a whole cycle.
-func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, spilled bool, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time) string {
+//
+// jobCompacts is FullTableConfig.CompactionJob: a daemon job folds chains into
+// their tables outside the refresh (#1735), so the age and size rules here are
+// only the backstop for a job that has not kept up (tableDeltaJobBackstop).
+// The floor and every reason that does not depend on the chain's length stay
+// the same: they cannot wait for a job.
+func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, spilled bool, capGap *CaptureGap, at time.Time, hasAnchor bool, reserved string, chainFloor, newStart time.Time, jobCompacts bool) string {
+	if why := inPlaceRewriteReason(basePath, spilled, capGap, hasAnchor, reserved); why != "" {
+		return why
+	}
+	maxAge, maxFraction, behind := tableDeltaMaxAge, tableDeltaMaxFraction, ""
+	if jobCompacts {
+		maxAge, maxFraction = tableDeltaMaxAge*tableDeltaJobBackstop, tableDeltaJobBackstopFraction
+		behind = ", and the compaction job has not folded it"
+	}
+	if prev == nil {
+		if !chainFloor.IsZero() && !newStart.IsZero() && !newStart.After(chainFloor) {
+			return fmt.Sprintf("a new chain would start at %s, too close to the oldest events the index keeps (chains that start at or before %s are ended)",
+				newStart.UTC().Format(time.RFC3339), chainFloor.UTC().Format(time.RFC3339))
+		}
+		return ""
+	}
+	if prev.Legacy {
+		return "the previous delta was written in an older layout (one rewritten pair per table); folding it in once"
+	}
+	if prev.Meta.DeltaSeq >= baseline.TableDeltaMaxSeq {
+		return fmt.Sprintf("the chain's sequence reached %d", baseline.TableDeltaMaxSeq)
+	}
+	if age := at.Sub(prev.Meta.DeltaChainStart); age > maxAge {
+		return fmt.Sprintf("the chain is %s old%s", age.Round(time.Minute), behind)
+	}
+	if !chainFloor.IsZero() && !prev.Meta.DeltaChainStart.After(chainFloor) {
+		// #1904: a reader fetches from the chain's start, and adding a pair
+		// does not move it. Past this line the index is about to drop the
+		// events at that start, and a quiet table would ride the chain there.
+		return fmt.Sprintf("the chain started at %s, too close to the oldest events the index keeps (chains that start at or before %s are ended)",
+			prev.Meta.DeltaChainStart.UTC().Format(time.RFC3339), chainFloor.UTC().Format(time.RFC3339))
+	}
+	if prev.PairSize >= tableDeltaMinCompactBytes && float64(prev.PairSize) > maxFraction*float64(baseSize) {
+		return fmt.Sprintf("the changes beside the table (%d bytes) passed %d%% of the table (%d bytes)%s",
+			prev.PairSize, int(maxFraction*100), baseSize, behind)
+	}
+	return ""
+}
+
+// inPlaceRewriteReason is the part of tableDeltaCompactReason that does not
+// depend on the chain: the conditions under which no chain can be extended by
+// this run at all, and which no job can take off the refresh's hands (#1735).
+func inPlaceRewriteReason(basePath string, spilled bool, capGap *CaptureGap, hasAnchor bool, reserved string) string {
 	switch {
 	case strings.HasPrefix(basePath, "s3://"):
 		return "the previous snapshot is read from S3"
@@ -278,33 +342,6 @@ func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, 
 		return "the run proceeded over a known capture gap"
 	case spilled:
 		return "the window's changes did not fit in memory"
-	}
-	if prev == nil {
-		if !chainFloor.IsZero() && !newStart.IsZero() && !newStart.After(chainFloor) {
-			return fmt.Sprintf("a new chain would start at %s, too close to the oldest events the index keeps (chains that start at or before %s are ended)",
-				newStart.UTC().Format(time.RFC3339), chainFloor.UTC().Format(time.RFC3339))
-		}
-		return ""
-	}
-	if prev.Legacy {
-		return "the previous delta was written in an older layout (one rewritten pair per table); folding it in once"
-	}
-	if prev.Meta.DeltaSeq >= baseline.TableDeltaMaxSeq {
-		return fmt.Sprintf("the chain's sequence reached %d", baseline.TableDeltaMaxSeq)
-	}
-	if age := at.Sub(prev.Meta.DeltaChainStart); age > tableDeltaMaxAge {
-		return fmt.Sprintf("the chain is %s old", age.Round(time.Minute))
-	}
-	if !chainFloor.IsZero() && !prev.Meta.DeltaChainStart.After(chainFloor) {
-		// #1904: a reader fetches from the chain's start, and adding a pair
-		// does not move it. Past this line the index is about to drop the
-		// events at that start, and a quiet table would ride the chain there.
-		return fmt.Sprintf("the chain started at %s, too close to the oldest events the index keeps (chains that start at or before %s are ended)",
-			prev.Meta.DeltaChainStart.UTC().Format(time.RFC3339), chainFloor.UTC().Format(time.RFC3339))
-	}
-	if prev.PairSize >= tableDeltaMinCompactBytes && float64(prev.PairSize) > tableDeltaMaxFraction*float64(baseSize) {
-		return fmt.Sprintf("the changes beside the table (%d bytes) passed %d%% of the table (%d bytes)",
-			prev.PairSize, int(tableDeltaMaxFraction*100), baseSize)
 	}
 	return ""
 }
@@ -847,6 +884,11 @@ type tableDeltaPublish struct {
 	streamCaptured   bool
 	currentGenerated map[string]bool
 	ddlMark          string // the mark to stamp, see markToStamp
+	// Set when a major compaction was adopted (#1735): basePath is then the
+	// folded table file in the staging folder, and sourcePath the table file
+	// of the previous snapshot it replaces, which is what this snapshot was
+	// derived from. foldedRange is the pairs the job folded, "<lo>-<hi>".
+	sourcePath, foldedRange string
 }
 
 // foldedFromChain is the source read of the state a run with deltas on folds
@@ -880,6 +922,29 @@ func newChainStart(p tableDeltaPublish) time.Time {
 // tableDeltaCompactReason says so. Either way the table leaves with a chain
 // beside it.
 func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableReport) error {
+	hasAnchor := p.cfg.cut != nil || (p.anchorMeta.BinlogFile != "" && p.anchorMeta.BinlogPos > 0)
+	reserved := ""
+	if cols, err := baseline.ParseSchemaText(p.baseMeta.CreateTableSQL); err == nil {
+		reserved = reservedDeltaColumn(cols)
+	}
+	// A major compaction staged for this chain (#1735) is put in place FIRST,
+	// so every rule below judges the chain that starts at the folded table.
+	// Not when this run rewrites the table in place anyway for a reason no
+	// chain can change: the rewrite folds the old chain, and the staged
+	// result is swept once that chain has ended.
+	adoptedMajor := ""
+	if p.prev != nil && !p.prev.Legacy && p.cfg.CompactDir != "" &&
+		inPlaceRewriteReason(p.basePath, p.fold.Spill != nil, p.capGap, hasAnchor, reserved) == "" {
+		np, dir, ok, refused, err := adoptMajorCompaction(ctx, p)
+		if err != nil {
+			return err
+		}
+		if ok {
+			p, adoptedMajor = np, dir
+		}
+		rep.DeltaChainFoldRefused = refused
+	}
+
 	var baseSize int64
 	if !strings.HasPrefix(p.basePath, "s3://") {
 		fi, err := os.Stat(p.basePath)
@@ -908,18 +973,20 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		Cut:              p.cfg.cut,
 		DDLMark:          p.ddlMark,
 		CaptureGap:       p.capGap,
-		SourceBaseline:   baselineMeta{Path: p.basePath, Time: p.chainStart, Metadata: p.anchorMeta},
+		SourceBaseline:   baselineMeta{Path: cmp.Or(p.sourcePath, p.basePath), Time: p.chainStart, Metadata: p.anchorMeta},
 		FoldedFrom:       foldedFromChain(p),
 	}
 	newBase := filepath.Join(p.cfg.snapshotDir, p.schema, p.table+".parquet")
 
-	hasAnchor := p.cfg.cut != nil || (p.anchorMeta.BinlogFile != "" && p.anchorMeta.BinlogPos > 0)
-	reserved := ""
-	if cols, err := baseline.ParseSchemaText(in.CreateTableSQL); err == nil {
-		reserved = reservedDeltaColumn(cols)
-	}
-	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.fold.Spill != nil, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p)); reason != "" {
-		return rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
+	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.fold.Spill != nil, p.capGap, p.cfg.At, hasAnchor, reserved,
+		p.cfg.ChainStartFloor, newChainStart(p), p.cfg.CompactionJob); reason != "" {
+		err := rewriteWithEmptyDelta(ctx, p, in, newBase, reason, reserved != "", rep)
+		if err == nil {
+			// The adopted file was read by this rewrite and is not needed
+			// again: the chain it started has just ended.
+			removeAdoptedMajor(adoptedMajor)
+		}
+		return err
 	}
 
 	// The guards a rewrite runs before it opens its output (#602, #843) are
@@ -971,7 +1038,11 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	if p.prev != nil {
 		chainStart, seq, spaceHint = p.prev.Meta.DeltaChainStart, p.prev.Meta.DeltaSeq+1, p.prev.UpsertsSize
 		files = p.prev.Chain.Files
-		if p.cfg.CompactDir != "" {
+		// Not after a major one: the chain now starts at the folded table, so
+		// no minor result can be for it, and the sweep of other chains' results
+		// inside adoptCompaction would remove the folder this chain's files are
+		// being linked from.
+		if p.cfg.CompactDir != "" && adoptedMajor == "" {
 			if r, dir, ok := adoptCompaction(p.cfg.CompactDir, p.schema, p.table, p.prev); ok {
 				files, adopted, adoptedRange = spliceRange(files, r), dir, r
 			}
@@ -1034,6 +1105,12 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		rep.DeltaCompactedRange = fmt.Sprintf("%d-%d", adoptedRange.SeqLo, adoptedRange.Seq)
 		slog.Info("table delta compaction adopted: the chain's first pairs travel as one range pair from this snapshot on",
 			"schema", p.schema, "table", p.table, "range", rep.DeltaCompactedRange)
+	}
+	if adoptedMajor != "" {
+		removeAdoptedMajor(adoptedMajor)
+		rep.DeltaChainFolded = p.foldedRange
+		slog.Info("table delta compaction adopted: the table file now holds the chain's pairs, and the chain starts again from it",
+			"schema", p.schema, "table", p.table, "folded", p.foldedRange, "chain_start", chainStart.UTC().Format(time.RFC3339))
 	}
 	rep.TableDelta, rep.DeltaPairWritten = true, written
 	rep.DeltaSeq = seq

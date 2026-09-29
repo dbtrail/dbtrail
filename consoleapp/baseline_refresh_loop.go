@@ -60,6 +60,10 @@ type refreshRequest struct {
 	// cycle (#1904), stamped by runRefresh when table deltas are on. Zero for
 	// a restore, which writes no chain.
 	ChainStartFloor time.Time
+	// FoldJobBlocked is set by runRefresh when the compaction job could not
+	// run at its last look (#1735): the fold then keeps its own day and
+	// quarter rules instead of leaving them to a job that is not running.
+	FoldJobBlocked bool
 }
 
 // TriggerRefresh starts a periodic baseline refresh for a server, sharing the
@@ -213,6 +217,10 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	at = s.anchorRefresh(req.ServerID, at)
 	if s.tableDeltas {
 		req.ChainStartFloor = s.chainStartFloor(req, at, interval)
+		// For the compaction job that runs after this cycle (#1735): it folds
+		// a chain before its start reaches this line.
+		s.recordChainFloor(req.ServerID, req.ChainStartFloor, interval)
+		req.FoldJobBlocked = s.foldJobBlocked(req.ServerID)
 	}
 
 	// Read and REMOVED in one step, before anything below can fail. Every exit
@@ -1380,6 +1388,7 @@ func refreshFoldConfig(req refreshRequest, at time.Time, tableList []string) rec
 		TableDeltas:           req.TableDeltas,
 		ChainStartFloor:       req.ChainStartFloor,
 		CompactDir:            compactDirFor(req.BaselineDir),
+		CompactionJob:         req.TableDeltas && req.BaselineDir != "" && !req.FoldJobBlocked, // maybeCompact's own terms (#1735)
 		Parallelism:           daemonFoldParallelism,
 		WarnEventThreshold:    daemonFoldWarnEventThreshold,
 		MaxTouchedRows:        daemonFoldMaxTouchedRows,

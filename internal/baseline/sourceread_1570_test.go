@@ -251,6 +251,10 @@ func TestFooterReaders_agreeOnEveryKey(t *testing.T) {
 		"MetaKeyLastDumpAt":        "2026-06-01T03:00:00Z",
 		"MetaKeyFoldGeneration":    "4",
 		"MetaKeyLockMode":          "no-lock",
+		"MetaKeyFoldedChainStart":  "2026-06-08T03:00:00Z",
+		"MetaKeyFoldedBaseAnchor":  "binlog.000008:2000",
+		"MetaKeyFoldedBaseSize":    "2048",
+		"MetaKeyFoldedSeq":         "5",
 	}
 	keys := footerKeyConstants(t)
 	if len(keys) < len(values) {
@@ -284,7 +288,7 @@ func TestFooterReaders_agreeOnEveryKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s3 := DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1, FoldGeneration: -1}
+	s3 := DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1, FoldGeneration: -1, FoldedSeq: -1}
 	for k, v := range md {
 		if applyS3FooterKV(&s3, "s3://b/t.parquet", k, v) {
 			t.Fatalf("%s=%q reported a corrupt row count", k, v)

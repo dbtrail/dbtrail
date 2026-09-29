@@ -3,6 +3,7 @@ package reconstruct
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // The verdicts a refresh gives one table. The literals are what
@@ -67,6 +68,12 @@ func RefreshOutcomes(tables []string, reports []*TableReport, failures []TableFa
 		done[k] = true
 		unchanged[k] = r.CarriedForward
 		switch {
+		case r.TableDelta && r.DeltaChainFolded != "" && !r.DeltaPairWritten:
+			deltaDetail[k] = fmt.Sprintf("no events in the window; the file rebuilt by the compaction job (pairs %s folded in) replaced the previous one, and a new chain starts beside it",
+				r.DeltaChainFolded)
+		case r.TableDelta && r.DeltaChainFolded != "":
+			deltaDetail[k] = fmt.Sprintf("the file rebuilt by the compaction job (pairs %s folded in) replaced the previous one, and this window's change was written beside it as pair %d; the chain now has %d pairs (%d rows replaced or removed, %d changed or new rows)",
+				r.DeltaChainFolded, r.DeltaSeq, r.DeltaChainFiles, r.DeltaDeadRows, r.DeltaUpsertRows)
 		case r.TableDelta && !r.DeltaPairWritten:
 			deltaDetail[k] = fmt.Sprintf("no events in the window; the previous file and its %d delta pairs were kept as they are (last pair %d)",
 				r.DeltaChainFiles, r.DeltaSeq)
@@ -75,6 +82,9 @@ func RefreshOutcomes(tables []string, reports []*TableReport, failures []TableFa
 				r.DeltaSeq, r.DeltaChainFiles, r.DeltaDeadRows, r.DeltaUpsertRows)
 		case r.DeltaCompacted != "":
 			deltaDetail[k] = "written again in full: " + r.DeltaCompacted
+		}
+		if r.DeltaChainFoldRefused != "" {
+			deltaDetail[k] = strings.TrimPrefix(deltaDetail[k]+"; the file rebuilt by the compaction job was not used and will not be rebuilt for this chain: "+r.DeltaChainFoldRefused, "; ")
 		}
 	}
 

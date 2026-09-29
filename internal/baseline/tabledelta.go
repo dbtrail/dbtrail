@@ -119,6 +119,21 @@ const (
 	MetaKeyDeltaSeqLo = "bintrail.delta_seq_lo"
 )
 
+// Footer keys of a table file written by a MAJOR compaction (#1735): the chain
+// it folded, named the way that chain's own pairs name it. A refresh adopts
+// the file only for the chain and base these name, so a result made for a
+// chain that has since ended, or over another base, is never put in place.
+// They stay on the file once it is published, as a record of where it came
+// from; nothing reads them after adoption.
+const (
+	MetaKeyFoldedChainStart = "bintrail.folded_chain_start"
+	MetaKeyFoldedBaseAnchor = "bintrail.folded_base_anchor"
+	MetaKeyFoldedBaseSize   = "bintrail.folded_base_size"
+	// MetaKeyFoldedSeq is the last pair folded in: the chain's high end when
+	// the job read it.
+	MetaKeyFoldedSeq = "bintrail.folded_seq"
+)
+
 // TableDeltaPaths returns where the pair of sequence seq of a table's delta
 // sits, given the path (or s3:// URL) of its base .parquet file.
 func TableDeltaPaths(basePath string, seq int) (posdel, upserts string) {

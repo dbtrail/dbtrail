@@ -139,6 +139,14 @@ type DumpMetadata struct {
 	// absent (a plain pair: its low end is DeltaSeq).
 	DeltaSeq   int
 	DeltaSeqLo int
+	// FoldedChainStart / FoldedBaseAnchor / FoldedBaseSize / FoldedSeq are
+	// set only on a table file a major compaction wrote (#1735): the chain it
+	// folded, named as that chain's pairs name it, and the last pair folded.
+	// Zero, and -1 for FoldedSeq, on every other file.
+	FoldedChainStart time.Time
+	FoldedBaseAnchor string
+	FoldedBaseSize   int64
+	FoldedSeq        int
 	// LastEventID is MetaKeyLastEventID; 0 when absent.
 	LastEventID uint64
 	// DDLMark is MetaKeyDDLMark, verbatim; "" when absent.
@@ -413,7 +421,7 @@ func RequireDumpPosition(inputDir string) error {
 // at 0 would read a file that records its source read but no count as the
 // read itself.
 func emptyFooterMetadata() DumpMetadata {
-	return DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1, FoldGeneration: -1}
+	return DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1, FoldGeneration: -1, FoldedSeq: -1}
 }
 
 // ReadParquetMetadata opens a local Parquet file and extracts the baseline
@@ -491,6 +499,18 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	}
 	if v, ok := pf.Lookup(MetaKeyDeltaSeqLo); ok {
 		m.DeltaSeqLo = parseDeltaSeq(path, v)
+	}
+	if v, ok := pf.Lookup(MetaKeyFoldedChainStart); ok {
+		m.FoldedChainStart = parseFooterTime(path, MetaKeyFoldedChainStart, v)
+	}
+	if v, ok := pf.Lookup(MetaKeyFoldedBaseAnchor); ok {
+		m.FoldedBaseAnchor = v
+	}
+	if v, ok := pf.Lookup(MetaKeyFoldedBaseSize); ok {
+		m.FoldedBaseSize = parseDeltaBaseSize(path, v)
+	}
+	if v, ok := pf.Lookup(MetaKeyFoldedSeq); ok {
+		m.FoldedSeq = parseDeltaSeq(path, v)
 	}
 	if v, ok := pf.Lookup(MetaKeyDDLMark); ok {
 		m.DDLMark = v
@@ -648,6 +668,14 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.DeltaSeq = parseDeltaSeq(path, val)
 	case MetaKeyDeltaSeqLo:
 		m.DeltaSeqLo = parseDeltaSeq(path, val)
+	case MetaKeyFoldedChainStart:
+		m.FoldedChainStart = parseFooterTime(path, MetaKeyFoldedChainStart, val)
+	case MetaKeyFoldedBaseAnchor:
+		m.FoldedBaseAnchor = val
+	case MetaKeyFoldedBaseSize:
+		m.FoldedBaseSize = parseDeltaBaseSize(path, val)
+	case MetaKeyFoldedSeq:
+		m.FoldedSeq = parseDeltaSeq(path, val)
 	case MetaKeyDDLMark:
 		m.DDLMark = val
 	case MetaKeyLastEventID:

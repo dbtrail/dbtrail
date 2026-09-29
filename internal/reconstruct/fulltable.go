@@ -185,6 +185,13 @@ type FullTableConfig struct {
 	// the events it needs. The daemon's refresh sets it from how far back the
 	// index still keeps events; the zero value ends nothing on this ground.
 	ChainStartFloor time.Time
+	// CompactionJob says a daemon job folds chains into their tables outside
+	// the refresh (#1735, consoleapp's compaction job), so a refresh ends a
+	// chain on its age or size only once that job has fallen well behind
+	// (tableDeltaJobBackstop). Off, as for the command-line refresh, which has
+	// no such job, the refresh rewrites a table itself when its chain is a day
+	// old or past a quarter of it.
+	CompactionJob bool
 
 	// WarnEventThreshold logs a loud warning when a table's fetched event count
 	// exceeds it. The event window itself is PAGED since #1097, so the resident
@@ -370,6 +377,13 @@ type TableReport struct {
 	// DeltaCompactedRange is "<lo>-<hi>" when this run adopted a compaction
 	// job's range pair in place of the chain's first pairs (#1723).
 	DeltaCompactedRange string
+	// DeltaChainFolded is "<lo>-<hi>" when this run put in place a table file
+	// a compaction job folded those pairs into (#1735): the chain now starts
+	// again from that file.
+	DeltaChainFolded string
+	// DeltaChainFoldRefused is why this run refused such a file (#1735):
+	// it was removed, and the job does not fold this chain again.
+	DeltaChainFoldRefused string
 }
 
 // fetchFloor decides where a run with deltas on fetches from: the chain's last
