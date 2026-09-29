@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/duckdb/duckdb-go/v2" // DuckDB driver: reads the state views
 	drivermysql "github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/testutil"
@@ -208,6 +209,100 @@ func (ct chainTable) sourceRow(t *testing.T, db *sql.DB, schema, where string, a
 		} else {
 			out[c] = nil
 		}
+	}
+	return out
+}
+
+// textRows returns every source row the way the state views should hand it
+// back: the server's text for every column except VECTOR (HEX of its bytes),
+// ordered by the primary key.
+func (ct chainTable) textRows(t *testing.T, db *sql.DB, schema string) []string {
+	t.Helper()
+	parts := make([]string, len(ct.cols))
+	for i, c := range ct.cols {
+		if c == "v" {
+			parts[i] = "IFNULL(HEX(`v`),'NULL')"
+		} else {
+			parts[i] = fmt.Sprintf("IFNULL(CAST(`%s` AS CHAR),'NULL')", c)
+		}
+	}
+	q := fmt.Sprintf("SELECT CONCAT_WS(',', %s) FROM `%s`.`%s` ORDER BY %s",
+		strings.Join(parts, ", "), schema, ct.name, "`"+strings.Join(ct.pk, "`,`")+"`")
+	rows, err := db.Query(q)
+	if err != nil {
+		t.Fatalf("text capture of %s: %v", ct.name, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// viewStateRows runs the views file `bintrail views` wrote in DuckDB and reads
+// the table's state view in the same shape as textRows. The view is found by
+// its table-name suffix, so this does not depend on how the schema name is
+// spelled into it.
+func viewStateRows(t *testing.T, viewsFile, schema string, ct chainTable) []string {
+	t.Helper()
+	sqlText, err := os.ReadFile(viewsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ddb, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	defer ddb.Close()
+	if _, err := ddb.Exec(string(sqlText)); err != nil {
+		t.Fatalf("run views.sql: %v\n%s", err, sqlText)
+	}
+	var view string
+	if err := ddb.QueryRow("SELECT table_name FROM information_schema.tables WHERE lower(table_name) = lower(?)",
+		"state_"+schema+"_"+ct.name).Scan(&view); err != nil {
+		t.Fatalf("no state view for %s.%s in views.sql: %v", schema, ct.name, err)
+	}
+	q := fmt.Sprintf(`SELECT * FROM "%s" ORDER BY "%s"`, view, strings.Join(ct.pk, `", "`))
+	rows, err := ddb.Query(q)
+	if err != nil {
+		t.Fatalf("read %s: %v", view, err)
+	}
+	defer rows.Close()
+	names, _ := rows.Columns()
+	var out []string
+	for rows.Next() {
+		vals := make([]any, len(names))
+		ptrs := make([]any, len(names))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatal(err)
+		}
+		byName := map[string]any{}
+		for i, n := range names {
+			byName[strings.ToLower(n)] = vals[i]
+		}
+		cells := make([]string, len(ct.cols))
+		for i, c := range ct.cols {
+			switch v := byName[c].(type) {
+			case nil:
+				cells[i] = "NULL"
+			case []byte:
+				cells[i] = strings.ToUpper(hex.EncodeToString(v))
+			default:
+				cells[i] = fmt.Sprint(v)
+			}
+		}
+		out = append(out, strings.Join(cells, ","))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	return out
 }
@@ -469,8 +564,14 @@ func TestEndToEnd_MariaDBSnapshotChain(t *testing.T) {
 	// ── 1. Capture ───────────────────────────────────────────────────────────
 	run(t, binPath, coverDir, "init", "--index-dsn", indexDSN, "--partitions", "4")
 	run(t, binPath, coverDir, "snapshot", "--source-dsn", sourceDSN, "--index-dsn", indexDSN, "--schemas", sourceName)
+	// GTID mode: verify's live-source mode compares the index's GTID position
+	// with the source's, which a position-mode capture does not record.
+	var gtidPos string
+	if err := sourceDB.QueryRow("SELECT @@gtid_binlog_pos").Scan(&gtidPos); err != nil || gtidPos == "" {
+		t.Fatalf("read @@gtid_binlog_pos: %q, %v", gtidPos, err)
+	}
 	stream := startStream(t, binPath, coverDir,
-		"--index-dsn", indexDSN, "--source-dsn", sourceDSN,
+		"--index-dsn", indexDSN, "--source-dsn", sourceDSN, "--start-gtid", gtidPos,
 		"--server-id", strconv.Itoa(990000+int(time.Now().UnixNano()%9999)),
 		"--schemas", sourceName, "--checkpoint", "1")
 
@@ -611,6 +712,26 @@ func TestEndToEnd_MariaDBSnapshotChain(t *testing.T) {
 		assertReconstructedRow(t, c.label, out, want)
 	}
 	drill("drill at end from the folded snapshot", at2, state2)
+
+	// ── 5b. Fold again in delta mode (the default) and read the state ───────
+	// With table deltas a changed table keeps its previous file and gets a
+	// pair of small files beside it. Only `bintrail views` reads the pair, so
+	// the state is read through the views it writes, in DuckDB.
+	run(t, binPath, coverDir, "baseline", "refresh", "--index-dsn", indexDSN, "--baseline-dir", baseDir, "--at", at2)
+	pairs, _ := filepath.Glob(filepath.Join(baseDir, "*", sourceName, "*.upserts"))
+	if len(pairs) == 0 {
+		t.Fatalf("the default refresh wrote no delta pair, so delta mode was not exercised")
+	}
+	viewsFile := filepath.Join(tmp, "views.sql")
+	run(t, binPath, coverDir, "views", "--baseline-dir", baseDir, "--output", viewsFile)
+	for _, ct := range tables {
+		got := viewStateRows(t, viewsFile, sourceName, ct)
+		want := ct.textRows(t, sourceDB, sourceName)
+		if len(want) == 0 || strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("delta-mode state of %s differs from the source\n got:\n  %s\nwant:\n  %s",
+				ct.name, strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+		}
+	}
 
 	// ── 6. verify, both content modes ───────────────────────────────────────
 	// Baseline-anchored verify compares two READS of the database, so take a

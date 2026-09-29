@@ -265,11 +265,19 @@ page and the
   CREATE USER 'dbtrail_dump'@'%' IDENTIFIED VIA mysql_native_password USING PASSWORD('…');
   ```
 
-- **A `VECTOR` column needs a snapshot taken with this version.** Snapshots
-  taken before stored `VECTOR` values as text, which the Parquet reader
-  refuses for the whole table (`Invalid string encoding`). Take a new snapshot;
-  `baseline refresh` cannot repair the old one. The same applies to a MySQL 9
-  `VECTOR` column.
+- **`VECTOR` in snapshots taken before this version.** Those stored `VECTOR`
+  as text. Two cases:
+  - Values written as raw bytes (mydumper's default `_binary "…"` form) are
+    not valid text, and the Parquet reader refuses the whole table
+    (`Invalid string encoding`). Take a new snapshot; `baseline refresh`
+    cannot repair it.
+  - Values written as `0x…` text (a `--hex-blob` dump) can be read. The next
+    `baseline refresh` rewrites such a table in full, which turns the text
+    into the real bytes; it does not add a table delta beside it, because
+    that would mix the two forms and return the text's own bytes for every
+    unchanged row.
+
+  The same applies to a MySQL 9 `VECTOR` column.
 - **Values captured before `UUID`/`INET` support stay unreadable.** Events
   indexed by a version older than the one that added it hold damaged bytes for
   these columns. `verify` reports such a value as inconclusive; a full-table
