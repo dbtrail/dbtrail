@@ -458,5 +458,18 @@ func TestMCPServerArg_namesWithheldWithoutServersRead(t *testing.T) {
 			t.Errorf("perms %v: routing by a known name must still work, got IsError=%v %v", tc.perms, res.IsError, texts)
 		}
 		assertMet(t, "staging", f.stgM)
+
+		// Routed by ID: the answer must not reveal the display name to a
+		// token that may not read the list.
+		expectSchemaChanges(f.stgM)
+		res, texts = routedCall(t, session, "list_schema_changes", map[string]any{"server": f.stgID})
+		want := "Answered by server: " + f.stgID
+		if tc.wantNames {
+			want = "Answered by server: staging"
+		}
+		if res.IsError || len(texts) != 2 || texts[1] != want {
+			t.Errorf("perms %v: routed by id, want %q, got IsError=%v %v", tc.perms, want, res.IsError, texts)
+		}
+		assertMet(t, "staging by id", f.stgM)
 	}
 }

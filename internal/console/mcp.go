@@ -307,7 +307,7 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 			"reconstructing a row's state at a point in time, and viewing index status. " +
 			"This connection's server is chosen by URL path: /mcp for the console's default server, " +
 			"/mcp/{id-or-name} for a named server from the console registry. " +
-			"Every tool also takes an optional server argument that sends that one call to another " +
+			"The built-in tools also take an optional server argument that sends that one call to another " +
 			"registered server; the answer then says which server replied.",
 		// #1434: one connection reaches every registered server. The names
 		// are the ones selectable when this session is created; routing
@@ -338,6 +338,12 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 			if e, ok := s.cm.reg.Get(rid); ok {
 				sourceDSN = e.SourceDSN
 				serverName = e.Name
+			}
+			if sel := mcptools.RequestedServer(ctx); sel != "" && !pol.Allows(ext.PermServersRead) {
+				// Routed by a token that may not read the server list: echo
+				// what it sent rather than reveal a display name it never
+				// named (routing by id must not become a way to read names).
+				serverName = sel
 			}
 			serverID := rid
 			if rid == "" {
@@ -460,7 +466,7 @@ func (s *Server) mcpRouteID(ctx context.Context, sessionID string, pol *ext.Acce
 		return rid, nil
 	}
 	if !pol.Allows(ext.PermServersRead) {
-		// The list is withheld from this token (see mcpServerNamesFor).
+		// The list is withheld from this token (see mcpServerRouting).
 		return "", fmt.Errorf("unknown server %q: use a server name or id from the web interface, "+
 			"or omit server to use this connection's server", sel)
 	}
