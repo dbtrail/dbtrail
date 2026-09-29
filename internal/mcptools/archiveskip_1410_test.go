@@ -388,6 +388,14 @@ func TestArchivesSkippedNotesWording(t *testing.T) {
 		if !strings.HasPrefix(n, "archives_skipped: ") {
 			t.Errorf("note must start with its stable key, got %q", n)
 		}
+		// The newest-first proof fires on a full page, next to a truncation
+		// warning; the note may only claim the archives could not add rows.
+		if !strings.HasSuffix(n, "they could not add rows to this answer") {
+			t.Errorf("note must claim only that the archives could not add rows, got %q", n)
+		}
+		if strings.Contains(n, "nothing is missing") {
+			t.Errorf("note must not claim nothing is missing (it can sit next to a truncation warning): %q", n)
+		}
 		if strings.Contains(n, "--") || strings.Contains(n, "\u2014") {
 			t.Errorf("note carries a flag-shaped token or an em dash: %q", n)
 		}
@@ -417,5 +425,35 @@ func TestQueryTool1410_misfiledScanFailureNeverSkips(t *testing.T) {
 	}
 	if strings.Contains(txt, "archives_skipped") || fp.calls != 0 {
 		t.Errorf("no skip may rest on an unreadable registry (planner calls %d): %s", fp.calls, txt)
+	}
+}
+
+// A half-set env pair makes discovery unreliable (archive_discovery_failed).
+// The query tool must not then claim a skip whose premise it could not check:
+// the two lines would contradict each other.
+func TestQueryTool1410_discoveryFailureNeverSkips(t *testing.T) {
+	t.Setenv("BINTRAIL_ARCHIVE_S3", t.TempDir())
+	t.Setenv("BINTRAIL_ID", "")
+	db, mock := newSkipMock(t)
+	base := mockDiscoverableSource(t, mock)
+	brokenArchive(t, base)
+	liveInserts(mock, "42")
+	fp := &fakePlanner{plan: livePlan()}
+	installFakePlanner(t, fp)
+
+	cfg := Config{Resolve: func(context.Context, string) (*Target, error) {
+		return &Target{DB: db, DBName: "idx", ResolverLoaded: true, EnvArchiveDiscovery: true}, nil
+	}}
+	res, _, err := MakeQueryTool(cfg)(context.Background(), &mcp.CallToolRequest{},
+		QueryArgs{Schema: "app", Table: "users", Limit: 1, Order: "DESC"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	txt := resultText(res)
+	if !strings.Contains(txt, "archive_discovery_failed") {
+		t.Fatalf("want the discovery warning, got: %s", txt)
+	}
+	if strings.Contains(txt, "archives_skipped") || fp.calls != 0 {
+		t.Errorf("no skip may be claimed after a discovery failure (planner calls %d): %s", fp.calls, txt)
 	}
 }

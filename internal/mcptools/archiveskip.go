@@ -55,12 +55,14 @@ func (t *Target) liveAnswers(ctx context.Context, opts query.Options, rows []que
 // skip leaves in the response. A skip must never be silent: without it, an
 // answer from the live index alone reads the same as one from an index that
 // has no archives. They state the fact, not which proof fired, and carry no
-// flag names (an MCP client reads them). A note, not a warning: nothing is
-// missing.
+// flag names (an MCP client reads them). A note, not a warning: the archives
+// could not add rows. They deliberately do NOT say "nothing is missing": the
+// newest-first proof fires on a full page, which sits next to a truncation
+// warning that says older rows were cut, and both must stay true together.
 func queryArchivesSkippedNote() string {
-	return "archives_skipped: this result came from the live index alone; the registered archives were not read because nothing they hold could change it, so nothing is missing"
+	return "archives_skipped: this result came from the live index alone; the registered archives were not read because they could not add rows to this answer"
 }
 
 func recoverArchivesSkippedNote() string {
-	return "archives_skipped: this reversal was built from the live index alone; the registered archives were not read because nothing they hold could change it, so nothing is missing"
+	return "archives_skipped: this reversal was built from the live index alone; the registered archives were not read because they could not add rows to this answer"
 }

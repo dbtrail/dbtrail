@@ -556,7 +556,7 @@ type recoverResult struct {
 	Warnings []string `json:"warnings,omitempty"`
 	// Notes are benign records the whole-script return carries as SQL
 	// comments: today only the archives_skipped record (#1410). Split from
-	// Warnings because nothing is missing when one appears.
+	// Warnings because the archives could not have added rows.
 	Notes []string `json:"notes,omitempty"`
 }
 
@@ -761,10 +761,10 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 				return ErrorResult(err), nil, nil
 			}
 			// #1410: the same "archives not needed" proofs the CLI and the
-			// console take. Not when the misfiled-archive scan failed: that
-			// already says the registry is not readable, and a skip must never
-			// rest on a registry we could not read.
-			if !misfiledScanFailed {
+			// console take. Not when discovery or the misfiled-archive scan
+			// failed: either one already says the archive set is not fully
+			// known, and a skip must never rest on a set we could not read.
+			if !misfiledScanFailed && !discoveryFailed {
 				if kept, ok := t.liveAnswers(ctx, fetchOpts, results, archSources); ok {
 					results = kept
 					archivesSkipped = true
@@ -1058,7 +1058,7 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		// too large to return, so the envelope must carry it on its own field.
 		var warnings, notes []string
 		if archivesSkipped {
-			// A note, not a warning: nothing is missing. But it is always
+			// A note, not a warning: the archives could not add rows. It is always
 			// said, so a script built without the archives never reads like
 			// one built with them.
 			w := recoverArchivesSkippedNote()
