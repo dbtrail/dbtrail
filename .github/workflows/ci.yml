@@ -562,6 +562,10 @@ jobs:
             TestRecoverRoundTrip_MariaDBUUIDKey \
             TestRecoverRoundTrip_MariaDBJSONText \
             TestRecoverSequence_MariaDB \
+            TestConsistentTableChecksum_MariaDBGTIDBinlogPos \
+            TestVerifyTable_liveSource_mariadb \
+            TestVerifyTable_liveSource_mariadbIndexBehind \
+            TestVerifyTable_liveSource_mariadbPositionMode \
             TestEndToEnd_MariaDBSnapshotChain \
             TestEndToEnd_MariaDBSnapshotEd25519 \
             TestFormatMariaDBFixed_matchesServer_MariaDB \

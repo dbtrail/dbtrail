@@ -37,12 +37,14 @@ const erUnknownSystemVariable = 1193
 
 // TableChecksum is a point-in-time fingerprint of a single source table.
 //
-// GTIDSet is @@gtid_executed captured just after the consistent snapshot opens —
-// the point against which a Parquet snapshot can later be compared. It is empty
-// on a server with GTIDs disabled (gtid_mode=OFF) or absent (MariaDB); callers
-// that need a position anchor on such servers capture it separately.
+// GTIDSet is the source's executed GTID position captured just after the
+// consistent snapshot opens, the point against which a Parquet snapshot can
+// later be compared. GTIDFlavor names its format: @@gtid_executed on MySQL
+// (empty with gtid_mode=OFF), @@gtid_binlog_pos on MariaDB (empty when the
+// binlog holds no GTID yet). Both are empty on a server with neither
+// variable; callers that need a position anchor there capture it separately.
 //
-// @@gtid_executed is global state, not MVCC-filtered, so a commit landing in the
+// The variable is global state, not MVCC-filtered, so a commit landing in the
 // brief window between the snapshot opening and this read is reflected in the
 // GTID but not in the snapshot data. This lock-free window is the same one every
 // bintrail baseline carries (mydumper dumps with NO_LOCK and reads its metadata
@@ -56,11 +58,14 @@ const erUnknownSystemVariable = 1193
 // (e.g. JSON whitespace, which MySQL normalizes on storage) produces the same
 // one.
 type TableChecksum struct {
-	Schema   string
-	Table    string
-	GTIDSet  string
-	RowCount int64
-	Digest   string
+	Schema  string
+	Table   string
+	GTIDSet string
+	// GTIDFlavor is GTIDFlavorMySQL, GTIDFlavorMariaDB, or "" when the
+	// server has neither variable (and on the PostgreSQL path).
+	GTIDFlavor string
+	RowCount   int64
+	Digest     string
 	// LSN is the PostgreSQL WAL anchor (pg_current_wal_lsn) captured when the
 	// snapshot opens — the PG sibling of GTIDSet, set only by
 	// ConsistentTableChecksumPG (zero on the MySQL paths, which leave the
@@ -172,7 +177,7 @@ func consistentTableChecksum(ctx context.Context, db *sql.DB, schema, table stri
 	}()
 
 	// Capture the GTID anchor inside the snapshot.
-	res.GTIDSet, err = capturedGTID(ctx, conn)
+	res.GTIDSet, res.GTIDFlavor, err = capturedGTID(ctx, conn)
 	if err != nil {
 		return res, err
 	}
@@ -286,21 +291,49 @@ func DigestVersionOf(digest string) string {
 	return ""
 }
 
-// capturedGTID reads @@gtid_executed inside the snapshot. MySQL always exposes
-// this variable (empty string when gtid_mode=OFF); MariaDB does not have it, in
-// which case the GTID anchor is reported as empty rather than erroring — a
-// missing GTID is a legitimate server configuration, not a checksum failure.
-func capturedGTID(ctx context.Context, conn *sql.Conn) (string, error) {
+// The GTID formats TableChecksum.GTIDFlavor names.
+const (
+	// GTIDFlavorMySQL: GTIDSet is @@gtid_executed (uuid:interval sets).
+	GTIDFlavorMySQL = "mysql"
+	// GTIDFlavorMariaDB: GTIDSet is @@gtid_binlog_pos (domain-server-seq,
+	// one per domain).
+	GTIDFlavorMariaDB = "mariadb"
+)
+
+// capturedGTID reads the source's executed GTID position inside the snapshot,
+// and names its format. MySQL always exposes @@gtid_executed (empty string
+// when gtid_mode=OFF). MariaDB has no such variable (1193); its analog is
+// @@gtid_binlog_pos, the last GTID written to the binlog per domain, which is
+// what the capture reads and what its own gap detection compares with
+// (detectMariaDBGTIDGap). A server with neither variable reports an empty set
+// and no flavor rather than an error: a missing GTID is a legitimate server
+// configuration, not a checksum failure. Any other failure to read the
+// variable is an error, on both flavors: a position that could not be read
+// is never reported as "no position".
+func capturedGTID(ctx context.Context, conn *sql.Conn) (set, flavor string, err error) {
 	var gtid sql.NullString
-	err := conn.QueryRowContext(ctx, "SELECT @@global.gtid_executed").Scan(&gtid)
-	if err != nil {
-		var me *mysql.MySQLError
-		if errors.As(err, &me) && me.Number == erUnknownSystemVariable {
-			return "", nil // server has no @@gtid_executed (e.g. MariaDB)
-		}
-		return "", fmt.Errorf("read @@gtid_executed: %w", err)
+	err = conn.QueryRowContext(ctx, "SELECT @@global.gtid_executed").Scan(&gtid)
+	if err == nil {
+		return strings.TrimSpace(gtid.String), GTIDFlavorMySQL, nil
 	}
-	return strings.TrimSpace(gtid.String), nil
+	if !isUnknownSystemVariable(err) {
+		return "", "", fmt.Errorf("read @@gtid_executed: %w", err)
+	}
+	err = conn.QueryRowContext(ctx, "SELECT @@global.gtid_binlog_pos").Scan(&gtid)
+	if err == nil {
+		// NULL or empty: a MariaDB whose binlog holds no GTID yet. Still
+		// MariaDB, so the caller cannot mistake it for "GTIDs are off".
+		return strings.TrimSpace(gtid.String), GTIDFlavorMariaDB, nil
+	}
+	if !isUnknownSystemVariable(err) {
+		return "", "", fmt.Errorf("read @@gtid_binlog_pos: %w", err)
+	}
+	return "", "", nil
+}
+
+func isUnknownSystemVariable(err error) bool {
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && me.Number == erUnknownSystemVariable
 }
 
 // column is a non-generated source column: its name and information_schema

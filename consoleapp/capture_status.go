@@ -60,8 +60,9 @@ type captureSample struct {
 // captureSlot is one server's last answer, the read in flight for it, and
 // the sample a later read is compared with.
 type captureSlot struct {
-	// key is the pair of DSNs the slot was read from: an edited server
-	// starts over, its previous sample was another source's.
+	// key is the pair of DSNs the slot was read from, and the source's
+	// flavor: an edited server starts over, its previous sample was another
+	// source's, or another read's.
 	key    string
 	answer console.CaptureStatus
 	at     time.Time
@@ -78,16 +79,27 @@ type captureStatusReporter struct {
 	// bootSourceDSN is the source of the daemon's own capture (--source-dsn),
 	// empty on a daemon started without one.
 	bootSourceDSN string
+	// bootFlavor is the daemon's declared --source-flavor ("" when it was
+	// left to detection): the boot entry carries no flavor of its own.
+	bootFlavor string
 
 	mu    sync.Mutex
 	slots map[string]*captureSlot
 	// read and now are replaced by tests; nil means the real ones.
 	read func(ctx context.Context, indexDSN, sourceDSN string) captureProbeResult
-	now  func() time.Time
+	// readMariaDB is read for a MariaDB source; nil means the real one.
+	readMariaDB func(ctx context.Context, indexDSN, sourceDSN string) captureProbeResult
+	now         func() time.Time
 }
 
 func newCaptureStatusReporter(bootSourceDSN string) *captureStatusReporter {
 	return &captureStatusReporter{bootSourceDSN: bootSourceDSN}
+}
+
+// withBootFlavor records the daemon's declared --source-flavor.
+func (c *captureStatusReporter) withBootFlavor(flavor string) *captureStatusReporter {
+	c.bootFlavor = strings.ToLower(strings.TrimSpace(flavor))
+	return c
 }
 
 // CaptureStatus answers for e, from the last answer while it is fresh.
@@ -95,9 +107,12 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	unknown := func(detail string) console.CaptureStatus {
 		return console.CaptureStatus{ServerID: e.ID, State: console.CaptureStateUnknown, Detail: detail}
 	}
-	source := e.SourceDSN
+	source, flavor := e.SourceDSN, e.SourceFlavor()
 	if e.ID == bootCaptureServerID {
 		source = c.bootSourceDSN
+		if c.bootFlavor == console.FlavorMariaDB {
+			flavor = console.FlavorMariaDB
+		}
 	}
 	// What is known without asking anyone.
 	switch {
@@ -105,8 +120,6 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 		return unknown("this server has no source to ask")
 	case e.IsPostgres():
 		return unknown("PostgreSQL sources are not compared yet")
-	case e.SourceFlavor() == console.FlavorMariaDB:
-		return unknown("MariaDB sources are not compared yet")
 	}
 	now, read := time.Now, captureHeadFromDBs
 	if c.now != nil {
@@ -115,7 +128,15 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	if c.read != nil {
 		read = c.read
 	}
-	key := e.DSN + "\x00" + source
+	if flavor == console.FlavorMariaDB {
+		// Up to date on an exact match, else unknown (capture_status_mariadb.go).
+		read = captureHeadFromDBsMariaDB
+		if c.readMariaDB != nil {
+			read = c.readMariaDB
+		}
+	}
+	// The flavor too: an edit of the flavor alone changes which read runs.
+	key := e.DSN + "\x00" + source + "\x00" + flavor
 
 	c.mu.Lock()
 	if c.slots == nil {
