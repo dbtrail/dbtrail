@@ -71,14 +71,15 @@ func sharedLocationError(others []string) error {
 		ErrSharedLocation, strings.Join(others, ", "), onPage(PageSnapshots))
 }
 
-// sameDir: both set and naming the same folder.
+// sameDir: both set and naming the same folder. SameSnapshotLocation is
+// the rule, the one the list of previous locations uses too (#1684).
 func sameDir(a, b string) bool {
-	return a != "" && b != "" && canonicalDir(a) == canonicalDir(b)
+	return SameSnapshotLocation(a, b)
 }
 
 // sameS3: both set and naming the same prefix, trailing slashes aside.
 func sameS3(a, b string) bool {
-	return a != "" && b != "" && strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
+	return SameSnapshotLocation(a, b)
 }
 
 // refusalText is err's message, "" for nil.
