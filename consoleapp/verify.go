@@ -493,7 +493,14 @@ func (s *verifySupervisor) run(req console.VerifyRequest, baselineSrc string) {
 
 func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baselineSrc string, indexDB *sql.DB, resolver *metadata.Resolver, dbName, flavor string) error {
 	ctx := s.ctx
-	pairs, prevOnly, err := verify.FindBaselinePair(ctx, baselineSrc)
+	// The server's previous snapshot locations too (#1684): a pair may
+	// straddle a location change.
+	files, unreadable, err := listForVerify(ctx, req.IndexDSN, baselineSrc, req.PreviousLocations)
+	var pairs []verify.BaselinePair
+	var prevOnly []query.SchemaTable
+	if err == nil {
+		pairs, prevOnly, err = verify.FindBaselinePairIn(ctx, files, unreadable)
+	}
 	if errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		// #1639: a folder the walk could not read sits at or after the second
 		// newest snapshot, so no pair can be trusted (an older one is each
@@ -532,11 +539,10 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 		return fmt.Errorf("list baselines: %w", err)
 	}
 	if len(pairs) == 0 {
-		any, err := verify.AnyBaseline(ctx, baselineSrc)
-		if err != nil {
-			return fmt.Errorf("list baselines: %w", err)
-		}
-		if !any {
+		// The listing above, which holds every location read: asking the
+		// current one alone would call a server whose snapshots are all in
+		// a previous location one with none.
+		if len(files) == 0 {
 			return fmt.Errorf("no baselines found under the configured baseline destination")
 		}
 		s.setNote(req.ServerID, "only one baseline exists for this server yet; nothing to compare")

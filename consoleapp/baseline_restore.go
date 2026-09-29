@@ -124,8 +124,11 @@ var snapshotAt = reconstruct.SnapshotAt
 // promised.
 func (s *baselineSupervisor) executeRestore(req console.BaselineRestoreRequest) (tables, refused int, reuse reuseTally, err error) {
 	fold := restoreFoldRequest(req)
-	source := baselineFoldSource(fold)
-	tableList, anchor, err := snapshotAt(s.ctx, source, req.At)
+	standing := baselineFoldSource(fold)
+	// The server's previous locations are read too (#1684): the newest
+	// snapshot at or before At may be in one. Only the READ source moves;
+	// the fold still writes to BaselineDir and uploads to BaselineS3.
+	source, tableList, anchor, err := foldBaseAcross(s.ctx, req.IndexDSN, standing, req.PreviousLocations, req.At)
 	if err != nil {
 		return 0, 0, reuseTally{}, fmt.Errorf("list the snapshot to restore from: %w", err)
 	}
@@ -136,7 +139,12 @@ func (s *baselineSupervisor) executeRestore(req console.BaselineRestoreRequest) 
 	if err := foldSourceRefusal(req.IndexDSN, source, anchor); err != nil {
 		return 0, 0, reuseTally{}, err
 	}
-	if reconstruct.SnapshotDirName(anchor) == reconstruct.SnapshotDirName(req.At) {
+	if source != standing {
+		fold.FoldSource = source
+	}
+	// A snapshot at exactly At collides only where the restore WRITES, which
+	// a previous location never is.
+	if source == standing && reconstruct.SnapshotDirName(anchor) == reconstruct.SnapshotDirName(req.At) {
 		// Compared by the DIRECTORY NAME, which is what collides, not by the
 		// instant: the name is whole seconds, and the console truncates At on
 		// the way in, but a caller that did not would fold a 10:00:00.5
