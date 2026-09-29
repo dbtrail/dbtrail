@@ -1003,6 +1003,12 @@ func (g *Generator) formatColumnValue(col string, v any, geom, b64 map[string]bo
 // rejected (ER 6136), which is why the pre-#1144 base64 emission failed the
 // whole BEGIN/COMMIT script at apply time.
 //
+// MariaDB's "uuid", "inet4" and "inet6" are included (binary): metadata.MapRow
+// turns them into full-width []byte, and a UUID/INET column reads a 16- or
+// 4-byte X'..' literal as the value itself (UUID in text order), while the
+// quoted raw bytes emitted before failed to apply (ER 1292). Verified by
+// applying the reversal to a live MariaDB (TestRecoverRoundTrip_MariaDBTypes).
+//
 // "json" is included (non-binary) as a defense-in-depth companion to #736:
 // marshalRow now only promotes a []byte to raw JSON when it looks like a
 // JSON container ({ or [), so a JSON column whose top-level value is itself a
@@ -1033,7 +1039,7 @@ func (g *Generator) formatColumnValue(col string, v any, geom, b64 map[string]bo
 func base64StoredKind(dataType string) (binary, ok bool) {
 	switch strings.ToLower(dataType) {
 	case "blob", "tinyblob", "mediumblob", "longblob", "binary", "varbinary",
-		"vector":
+		"vector", "uuid", "inet4", "inet6":
 		return true, true
 	case "text", "tinytext", "mediumtext", "longtext", "json":
 		return false, true
@@ -1513,7 +1519,10 @@ func QuoteName(name string) string {
 //
 // Callers apply this where a value meets a "--", never to the value itself.
 func SanitizeForComment(s string) string {
-	if !strings.ContainsAny(s, "\r\n") {
+	// A NUL byte gets the same treatment: the server stops reading the
+	// statement at it (MariaDB answers ER 1064 "near ''"), so a binary PK such
+	// as the nil UUID broke the whole script from inside this comment.
+	if !strings.ContainsAny(s, "\r\n\x00") {
 		return s
 	}
 	return strconv.Quote(s)

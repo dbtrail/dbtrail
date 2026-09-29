@@ -515,7 +515,11 @@ jobs:
             TestOne_MariaDB_declaredMySQLRefuses \
             TestOne_MariaDB_resumeOldMySQLDefaultCheckpoint \
             TestIntegrationMonitorRegistrySourceMariaDBDetected \
-            TestBuild_MariaDBVersionRow; do
+            TestBuild_MariaDBVersionRow \
+            TestRecoverRoundTrip_MariaDBTypes \
+            TestRecoverRoundTrip_MariaDBUUIDKey \
+            TestRecoverRoundTrip_MariaDBJSONText \
+            TestRecoverSequence_MariaDB; do
             grep -q -- "--- PASS: $name " /tmp/mariadb-it.out \
               || { echo "FATAL: $name did not run and pass in the MariaDB-source job (false-green tripwire)" >&2; exit 1; }
           done

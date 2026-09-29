@@ -2077,6 +2077,19 @@ func TestBase64StoredKind_binaryVarbinary(t *testing.T) {
 	}
 }
 
+// TestBase64StoredKind_mariaDBTypes: metadata.MapRow turns MariaDB UUID, INET4
+// and INET6 values into []byte, so they are stored base64 like VARBINARY and a
+// reversal must emit them as X'hex' (a UUID/INET column reads a 16- or 4-byte
+// binary literal as the value itself).
+func TestBase64StoredKind_mariaDBTypes(t *testing.T) {
+	for _, dt := range []string{"uuid", "UUID", "inet4", "inet6", "INET6"} {
+		binary, ok := base64StoredKind(dt)
+		if !ok || !binary {
+			t.Errorf("base64StoredKind(%q) = (%v,%v), want (true,true)", dt, binary, ok)
+		}
+	}
+}
+
 // storedGeometry builds the at-rest MySQL geometry buffer (SRID little-endian + WKB)
 // that marshalRow base64-encodes into binlog_events, plus the base64 string a
 // recovery row would carry, for the #788 geometry tests.

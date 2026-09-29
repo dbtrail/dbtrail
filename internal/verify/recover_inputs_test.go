@@ -486,6 +486,38 @@ func TestCheckRecoverChains_UnresolvedEnumOrdinalIsInconclusiveNotMismatch(t *te
 	}
 }
 
+// A MariaDB UUID column across the upgrade that fixed its capture: the event
+// captured before it holds the value as damaged raw text (invalid UTF-8 bytes
+// replaced with U+FFFD), the one captured after holds base64 of the 16 bytes.
+// The two spellings of the SAME value differ, so the chain must land on
+// Inconclusive, never on a conclusive mismatch.
+func TestCheckRecoverChains_MariaDBUUIDAcrossUpgradeIsNotAMismatch(t *testing.T) {
+	cols := []metadata.ColumnMeta{
+		{Name: "id", DataType: "int", ColumnType: "int", IsPK: true},
+		{Name: "u", DataType: "uuid", ColumnType: "uuid"},
+	}
+	byName := map[string]metadata.ColumnMeta{"id": cols[0], "u": cols[1]}
+	in := recoverChainInput{
+		Schema: "shop", Table: "devices",
+		PKCols: cols[:1], ColByName: byName, BinariesTyped: true,
+	}
+	// 12345678-9abc-1def-8012-3456789abcde, as each epoch stored it.
+	preFix := "\x124Vx\uFFFD\uFFFD\x1d\uFFFD\uFFFD\x124Vx\uFFFD\uFFFD\uFFFD"
+	postFix := "EjRWeJq8He+AEjRWeJq83g=="
+	row := func(u string) map[string]any { return map[string]any{"id": json.Number("7"), "u": u} }
+	in.Events = []query.ResultRow{
+		riEvent(1, event.EventInsert, "7", nil, row(preFix)),
+		riEvent(2, event.EventUpdate, "7", row(postFix), row(postFix)),
+	}
+	out := checkRecoverChains(in)
+	if out.Status == StatusMismatch {
+		t.Fatalf("the same UUID in its pre-fix and post-fix spelling must not be a mismatch: %s", out.Detail)
+	}
+	if out.Status != StatusInconclusive {
+		t.Fatalf("got %s (%s), want %s", out.Status, out.Detail, StatusInconclusive)
+	}
+}
+
 // A column set that differs across a schema-version boundary is DDL, not
 // corruption; the same difference within one version is a real divergence.
 func TestCompareImages_ColumnSetDifference(t *testing.T) {

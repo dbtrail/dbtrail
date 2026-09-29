@@ -188,6 +188,9 @@ page and the
   [indexing.md](indexing.md).
 - Other MariaDB-only binlog events (`Gtid_list`, `Binlog_checkpoint`) are
   skipped transparently.
+- **MariaDB-only column types**: `UUID` (10.7+), `INET4` (10.10+), `INET6`
+  (10.5+) and `VECTOR` (11.7+) are captured and restored by `recover` byte for
+  byte, including as a primary key.
 
 ---
 
@@ -217,6 +220,33 @@ page and the
   saved with a server is only a hint: capture follows what the server reports,
   and the server's Overview shows a warning when the two disagree.
 - **Index-on-MariaDB is out of scope** — the index database stays MySQL.
+- **JSON columns come back as equivalent JSON, not the same text.** In MariaDB
+  a `JSON` column is text: the server keeps exactly what your application
+  wrote. The index stores JSON objects and arrays in a MySQL `JSON` column,
+  which rewrites them, so `recover` restores a document that means the same
+  thing but is spelled differently:
+  - keys come back in a different order;
+  - spaces, tabs and line breaks between values are removed;
+  - `\u00e9`-style escapes come back as the character itself, and `<`, `>`
+    and `&` come back as `\u003c`, `\u003e` and `\u0026`;
+  - `1e2` comes back as `100.0`, and `-0` as `0`.
+
+  In two cases the **value itself** changes:
+  - an integer too large for 64 bits loses digits
+    (`12345678901234567890123` comes back as `1.2345678901234568e22`);
+  - with duplicate keys (`{"a":1,"a":2}`) only the last one is kept.
+
+  A document that is a single string, number, `true`, `false` or `null`, not
+  an object or array, comes back exactly. The same applies to JSON text stored
+  in a MySQL `TEXT` column. If your application compares JSON by its bytes
+  (a hash or a signature), compare the parsed document instead after a
+  recovery.
+- **Sequences are not rewound.** MariaDB records every change to a `SEQUENCE`
+  as an insert into its one-row table, and bintrail captures those like any
+  other insert. A reversal that includes the sequence is refused by the server
+  (error 1031), so run `recover` for your tables with `--table`. The sequence
+  keeps its current value, so ids handed out during the window are not handed
+  out again.
 
 ---
 

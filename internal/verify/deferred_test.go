@@ -27,6 +27,9 @@ func TestIsDeferredType(t *testing.T) {
 		"multipoint", "multilinestring", "multipolygon",
 		"geometrycollection", "geomcollection", // MySQL 8.0.11+ reports the latter
 		"vector",
+		// MariaDB UUID/INET4/INET6: permanently unresolved (see
+		// deferredValueUnresolved's uuid case).
+		"uuid", "inet4", "inet6", "UUID",
 		"BLOB", "Enum", "GEOMETRY", // case-insensitive
 	}
 	for _, dt := range deferred {
@@ -63,6 +66,8 @@ func TestDeferredReprUnresolved(t *testing.T) {
 	geoCol := metadata.ColumnMeta{Name: "loc", DataType: "geometry"}
 	pointCol := metadata.ColumnMeta{Name: "loc", DataType: "point", ColumnType: "point"}
 	vectorCol := metadata.ColumnMeta{Name: "emb", DataType: "vector", ColumnType: "vector(4)"}
+	uuidCol := metadata.ColumnMeta{Name: "u", DataType: "uuid", ColumnType: "uuid"}
+	inet4Col := metadata.ColumnMeta{Name: "ip", DataType: "inet4", ColumnType: "inet4"}
 	binCol := metadata.ColumnMeta{Name: "v", DataType: "binary", ColumnType: "binary(16)"}
 	binNoWidth := metadata.ColumnMeta{Name: "v", DataType: "binary"} // pre-#212 snapshot
 	varbinCol := metadata.ColumnMeta{Name: "v", DataType: "varbinary"}
@@ -163,6 +168,17 @@ func TestDeferredReprUnresolved(t *testing.T) {
 			ch(upd(map[string]any{"emb": []byte{0, 0, 128, 63}})), true, true},
 		{"vector with typing unavailable", []metadata.ColumnMeta{vectorCol},
 			ch(upd(map[string]any{"emb": "AACAPw=="})), false, true},
+
+		// MariaDB UUID/INET: unresolved whatever the shape. The source and the
+		// baseline render the text form ('12345678-...', '10.0.0.0'), the event
+		// holds base64 of the binary form, and events captured before the
+		// []byte fix hold damaged raw text.
+		{"uuid stored base64", []metadata.ColumnMeta{uuidCol},
+			ch(upd(map[string]any{"u": "EjRWeJq8He+AEjRWeJq83g=="})), true, true},
+		{"uuid decoded bytes", []metadata.ColumnMeta{uuidCol},
+			ch(upd(map[string]any{"u": []byte("0123456789abcdef")})), true, true},
+		{"inet4 pre-fix raw text", []metadata.ColumnMeta{inet4Col},
+			ch(upd(map[string]any{"ip": "\n"})), true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
