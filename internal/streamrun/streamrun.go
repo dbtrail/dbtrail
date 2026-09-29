@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
@@ -181,7 +182,8 @@ func isPositionCheckpointBoundary(ev parser.Event) bool {
 // gtid_set, flavor, events_indexed, last_event_time, last_checkpoint=UTC_TIMESTAMP(),
 // server_id, bintrail_id) used by saveCheckpoint and the persistGapAutoAdvance
 // stamp: NULLs for empty gtid_set/last_event_time/bintrail_id, the flavor
-// canonicalized (empty→mysql; an invalid flavor fails loud rather than
+// canonicalized (empty→mysql, reachable only from tests: every writer in One
+// runs after the flavor was resolved from the server; an invalid flavor fails loud rather than
 // persisting garbage into the NOT NULL column), and the #775 safe-boundary
 // position (see checkpointPosition).
 func checkpointInsertArgs(state *streamState) ([]any, error) {
@@ -882,7 +884,9 @@ func normalizeGTIDForFlavor(flavor, s string) string {
 // normalizeFlavor canonicalizes a source flavor: empty defaults to MySQL,
 // "mysql"/"mariadb" pass through, and anything else is rejected. It is the
 // single home for both the empty→mysql default and the supported-flavor check,
-// used at stream startup (One) and on checkpoint persistence (saveCheckpoint).
+// used on checkpoint persistence (saveCheckpoint). One no longer uses it: it
+// validates the declared flavor with metadata.NormalizeDeclaredFlavor and
+// resolves the real one from the server.
 func normalizeFlavor(flavor string) (string, error) {
 	switch flavor {
 	case "":
@@ -924,17 +928,27 @@ func resolveStartForFlavor(
 			return "", "", "", 0, nil, fmt.Errorf("--start-file and --start-gtid are mutually exclusive")
 		}
 
-		// Reject resuming a checkpoint under a different source flavor. The saved
-		// set's format is fixed by the flavor that wrote it; continuing under
-		// another flavor would parse the saved set one way while the BinlogSyncer
-		// handshakes — and the next checkpoint persists — as another, a latent
-		// corruption. Rows predating the column read back as the migration default
-		// 'mysql'; only a genuinely empty flavor (defensive) adopts the requested
-		// one. --reset clears the checkpoint (saved == nil) and bypasses this.
+		// A checkpoint written under a different source flavor. flavor is the
+		// one the server was detected as (or declared, when detection failed),
+		// so "pass the saved flavor" is no longer advice anyone can follow.
+		// A GTID checkpoint refuses: its set is written in one dialect and
+		// cannot be parsed in the other, and continuing would persist a mixed
+		// state. A position checkpoint follows the server: file and offset mean
+		// the same thing in both flavors, and the case this exists for is a
+		// MariaDB an older build captured under the old "mysql" default. The
+		// next checkpoint records the new flavor. Rows predating the column read
+		// back as the migration default 'mysql'; an empty flavor (defensive)
+		// adopts silently. --reset clears the checkpoint (saved == nil).
 		if saved.flavor != "" && saved.flavor != flavor {
-			return "", "", "", 0, nil, fmt.Errorf(
-				"saved checkpoint is source flavor %q but %q was requested; pass --source-flavor %s (or --reset to start fresh)",
-				saved.flavor, flavor, saved.flavor)
+			if saved.mode == "gtid" {
+				return "", "", "", 0, nil, fmt.Errorf(
+					"saved checkpoint is a %s GTID set, but the source is %s; a GTID set cannot carry over between the two. "+
+						"Check that --source-dsn points at the server this index was captured from, or run with --reset to start fresh "+
+						"(the skipped range is recorded as permanently lost)",
+					saved.flavor, flavor)
+			}
+			slog.Warn("saved checkpoint was written under another source flavor; resuming at the same binlog position as the detected flavor",
+				"saved_flavor", saved.flavor, "flavor", flavor, "file", saved.binlogFile, "pos", saved.binlogPos)
 		}
 
 		// Detect mode switch: user explicitly requests a different mode.
@@ -960,8 +974,8 @@ func resolveStartForFlavor(
 			slog.Warn("checkpoint exists; ignoring --start-file/--start-gtid and resuming from saved state")
 		}
 		if saved.mode == "gtid" {
-			// flavor is authoritative here: the mismatch guard above guarantees
-			// saved.flavor is either empty (legacy) or equal to flavor.
+			// flavor is authoritative here: the guard above refuses a GTID
+			// checkpoint whose flavor is set and differs.
 			normalized := normalizeGTIDForFlavor(flavor, saved.gtidSet)
 			slog.Info("resuming from GTID set", "gtid_set", normalized, "flavor", flavor)
 			gs, parseErr := parseGTIDSetForFlavor(flavor, normalized)
@@ -1809,9 +1823,12 @@ func streamLoop(
 type Config struct {
 	IndexDSN  string
 	SourceDSN string
-	// Flavor is the source database flavor: "mysql" (default) or "mariadb".
-	// Empty is normalized to "mysql" in One(). It selects the GTID parser and
-	// the BinlogSyncer flavor, and is persisted to stream_state for resume.
+	// Flavor is the DECLARED source flavor: "mysql", "mariadb", or empty.
+	// One asks the server (Deps.DetectSourceFlavor) and runs as what it
+	// reports: empty lets detection decide, a declared flavor that contradicts
+	// it refuses, and a failed detection is accepted only when declared (with
+	// a warning). The resolved value selects the GTID parser and the
+	// BinlogSyncer flavor, and is persisted to stream_state for resume.
 	Flavor      string
 	ServerID    uint32
 	StartFile   string
@@ -1881,6 +1898,19 @@ type Hooks struct {
 	// OnPhase, again whenever the detail changes, and with "" when the phase
 	// ends. It is text to show, never to decide on.
 	OnPhaseDetail func(detail string)
+	// OnFlavorResolved fires once per run with the flavor the stream will
+	// capture as, right after the source was asked what it is. A caller that
+	// hands the flavor to other work (extension source jobs) takes it from
+	// here, not from the declared Config.Flavor, which may be empty.
+	OnFlavorResolved func(flavor string)
+}
+
+// FlavorOnce wraps fn for use as Hooks.OnFlavorResolved by a caller that runs
+// One more than once on the same hooks (a restart loop): fn runs for the first
+// resolved flavor only. Safe for concurrent calls.
+func FlavorOnce(fn func(flavor string)) func(flavor string) {
+	var once sync.Once
+	return func(flavor string) { once.Do(func() { fn(flavor) }) }
 }
 
 // PhaseResumeCleanup is the OnPhase value for the resume-time dedup: the
@@ -1907,6 +1937,8 @@ type Deps struct {
 	InsertSchemaChange     func(db *sql.DB, ev parser.Event, snapshotID *int) error
 	ParseSourceDSN         func(dsn string) (host string, port uint16, user, password string, err error)
 	OutputJSON             func(v any) error
+	// DetectSourceFlavor asks the source what it is (metadata.DetectSourceFlavor).
+	DetectSourceFlavor func(db *sql.DB) (flavor, version string, err error)
 }
 
 // validate fails fast when a required dependency is unset. One calls every Deps
@@ -1936,6 +1968,8 @@ func (d Deps) validate() error {
 		return errors.New("streamrun.Deps.ParseSourceDSN is nil")
 	case d.OutputJSON == nil:
 		return errors.New("streamrun.Deps.OutputJSON is nil")
+	case d.DetectSourceFlavor == nil:
+		return errors.New("streamrun.Deps.DetectSourceFlavor is nil")
 	}
 	return nil
 }
@@ -1994,15 +2028,14 @@ func One(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	// Normalize the source flavor once so every downstream use (GTID parsing,
-	// BinlogSyncerConfig, persistence) sees a concrete value. Empty defaults to
-	// MySQL, keeping every existing caller (which never sets Flavor) unchanged;
-	// an unsupported flavor is rejected here, before any connection is opened.
-	normalizedFlavor, err := normalizeFlavor(cfg.Flavor)
+	// Validate the DECLARED flavor before any connection is opened. Empty
+	// stays empty: the source is asked what it is in step 2, and nothing
+	// before that point reads cfg.Flavor.
+	declaredFlavor, err := metadata.NormalizeDeclaredFlavor(cfg.Flavor)
 	if err != nil {
 		return err
 	}
-	cfg.Flavor = normalizedFlavor
+	cfg.Flavor = declaredFlavor
 
 	// Derived cancel: internal failures (e.g. the stream loop erroring) must
 	// stop the parser goroutine even when the caller's ctx stays live.
@@ -2032,6 +2065,31 @@ func One(ctx context.Context, cfg Config) error {
 	}
 	defer sourceDB.Close()
 
+	// Ask the server what it is and capture as that. A declared flavor that
+	// contradicts the server refuses: capturing a MariaDB as MySQL drops the
+	// statement text in silence and, on 11.4+, skips the zero-position fix
+	// (#1117); capturing a MySQL as MariaDB breaks the GTID handshake. A failed
+	// detection is never guessed. From here on cfg.Flavor is concrete, which
+	// the checkpoint writers and the --reset fresh state rely on. It runs
+	// before the binlog preflight on purpose: the hook starts extension source
+	// jobs, which do not depend on binlog settings and must not wait on them.
+	detected, version, detectErr := cfg.Deps.DetectSourceFlavor(sourceDB)
+	resolvedFlavor, flavorWarning, err := metadata.ResolveSourceFlavor(cfg.Flavor, detected, version, detectErr)
+	if err != nil {
+		return err
+	}
+	if flavorWarning != "" {
+		slog.Warn(flavorWarning)
+	} else if cfg.Flavor == "" {
+		fmt.Printf("Source: flavor=%s (detected, VERSION()=%q) \u2713\n", resolvedFlavor, version)
+	} else {
+		fmt.Printf("Source: flavor=%s \u2713\n", resolvedFlavor)
+	}
+	cfg.Flavor = resolvedFlavor
+	if cfg.Hooks != nil && cfg.Hooks.OnFlavorResolved != nil {
+		cfg.Hooks.OnFlavorResolved(cfg.Flavor)
+	}
+
 	if err := cfg.Deps.ValidateBinlogFormat(sourceDB); err != nil {
 		return err
 	}
@@ -2053,16 +2111,6 @@ func One(ctx context.Context, cfg Config) error {
 			"detail", err.Error())
 	} else {
 		fmt.Println("Source: no FK cascades \u2713")
-	}
-
-	// Advisory only: warn (never block) when the declared flavor disagrees with
-	// the server's actual VERSION(). A mismatch \u2014 e.g. the default --source-flavor
-	// mysql pointed at a MariaDB server \u2014 makes the GTID handshake misbehave.
-	// Detection never flips the configured flavor, so it can't silently
-	// mis-handshake a MySQL source.
-	if detected := metadata.DetectFlavor(sourceDB); detected != "" && detected != cfg.Flavor {
-		slog.Warn("source flavor mismatch: configured flavor differs from the detected server flavor \u2014 GTID handling may misbehave; set --source-flavor to match",
-			"configured", cfg.Flavor, "detected", detected)
 	}
 
 	if cfg.Hooks != nil && cfg.Hooks.OnSourceConnected != nil {
@@ -2602,7 +2650,7 @@ func One(ctx context.Context, cfg Config) error {
 	// Wire the shared capture-skip tally (#1034) before Run's goroutine spawns
 	// (the SetFlavor happens-before contract).
 	sp.SetSkipCounters(state.skips)
-	// cfg.Flavor is normalized (empty→"mysql") by this point (step 1 above) —
+	// cfg.Flavor is the resolved flavor by this point (step 2 above); this
 	// wires the source flavor into the live position-wraparound guard inside
 	// Run (internal/parser/stream.go) so its GTID-mode remediation names the
 	// right system variable (#845).

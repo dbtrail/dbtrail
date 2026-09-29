@@ -548,9 +548,9 @@ func TestCurrentGTIDExecuted_emptyExecutedSet(t *testing.T) {
 // the gtid_mode variable at all — Error 1193 ER_UNKNOWN_SYSTEM_VARIABLE, which
 // is what MariaDB returns. Such a server structurally cannot supply a MySQL
 // GTID set, so the result is ("", nil): position fallback, not a fatal error.
-// This is reachable in production because a MariaDB source can sit behind the
-// DEFAULT mysql flavor (e.g. `bintrail-console watch` exposes no
-// --source-flavor for its main source); a hard failure here would crash-loop
+// Capture now detects the flavor before this runs, but the function must stay
+// safe on its own: a declared mysql flavor accepted after a failed detection
+// can still point it at a MariaDB, and a hard failure here would crash-loop
 // that daemon at startup.
 func TestCurrentGTIDExecuted_unknownVariableIsNotAnError(t *testing.T) {
 	db, mock, err := sqlmock.New()

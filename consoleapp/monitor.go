@@ -18,6 +18,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/pgstreamrun"
 	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/streamdeps"
@@ -584,6 +585,11 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 		return fail(err)
 	}
 	var runOnce func(context.Context) error
+	// startJobs launches the extension source jobs (see below) with the
+	// flavor capture runs as.
+	startJobs := func(f string) {
+		ext.RunSourceJobs(jobCtx, ext.SourceJobInfo{SourceDSN: e.SourceDSN, IndexDSN: e.DSN, Flavor: f})
+	}
 	switch flavor {
 	case console.FlavorPostgres:
 		pgcfg, cErr := sourcePGStreamConfig(e, serverID, upBatchSize)
@@ -593,10 +599,16 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 		}
 		pgcfg.Hooks = job.pgStreamHooks()
 		runOnce = func(c context.Context) error { return m.pgStreamFn(c, pgcfg) }
+		startJobs(flavor)
 	default:
+		// A MySQL-family entry does not know for sure what it points at (a
+		// "mysql" entry is usually the form's default), so the stream asks
+		// the server and the jobs start from what it found. FlavorOnce: m.run
+		// re-runs the stream on these same hooks after a crash.
 		cfg := sourceStreamConfig(e, serverID, upBatchSize)
 		cfg.Hooks = job.streamHooks()
-		runOnce = func(c context.Context) error { return m.streamFn(c, cfg) }
+		cfg.Hooks.OnFlavorResolved = streamrun.FlavorOnce(startJobs)
+		runOnce = func(c context.Context) error { return explainRegistryFlavorError(m.streamFn(c, cfg)) }
 	}
 
 	// Extension source jobs (ext.RegisterSourceJob) run alongside the supervised
@@ -609,8 +621,9 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 	// so no per-retry goroutine leak), and only for a source this daemon actually
 	// streams (the advisory lock holder) — jobCtx dies with the lock, so a second
 	// daemon that re-acquires the freed lock never double-runs these jobs.
-	// No-op in the stock binary.
-	ext.RunSourceJobs(jobCtx, ext.SourceJobInfo{SourceDSN: e.SourceDSN, IndexDSN: e.DSN, Flavor: flavor})
+	// No-op in the stock binary. The PostgreSQL branch above starts them
+	// directly; the MySQL-family branch starts them from the stream's
+	// OnFlavorResolved, still bound to jobCtx and still once per Start.
 
 	m.wg.Add(1)
 	go m.run(jobCtx, job, e, flavor, runOnce)
@@ -738,6 +751,13 @@ func sourcePGStreamConfig(e console.ServerEntry, serverID uint32, batchSize int)
 // extracted from Start so the entry→config fan-out (SSL especially) is
 // unit-testable without a live DB.
 func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) streamrun.Config {
+	// Only a MariaDB entry declares its flavor. The form preselects MySQL and
+	// the Connect flow always sends "mysql", so a stored "mysql" (or a blank
+	// pre-#1019 entry) is not something the operator said: the stream detects.
+	var declared string
+	if e.SourceFlavor() == console.FlavorMariaDB {
+		declared = console.FlavorMariaDB
+	}
 	sslMode := e.SSLMode
 	if sslMode == "" {
 		sslMode = "preferred"
@@ -746,7 +766,7 @@ func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) s
 		IndexDSN:  e.DSN,
 		SourceDSN: e.SourceDSN,
 		ServerID:  serverID,
-		Flavor:    e.SourceFlavor(),
+		Flavor:    declared,
 		BatchSize: streamBatchSize(batchSize),
 		Schemas:   e.Schemas,
 		// MetricsSource keys this stream's Prometheus series; MetricsAddr
@@ -762,6 +782,31 @@ func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) s
 		GapTimeout:    30,
 		Deps:          streamdeps.Default(),
 	}
+}
+
+// explainRegistryFlavorError rewrites the fix in a source-flavor refusal for a
+// server saved in the console: it has no --source-flavor, and its Source type
+// cannot be edited. Any other error passes through unchanged.
+func explainRegistryFlavorError(err error) error {
+	var mm *metadata.FlavorMismatchError
+	if errors.As(err, &mm) {
+		mm.Fix = fmt.Sprintf("This server is saved with Source type %s. Remove it and add it again with Source type %s.",
+			sourceTypeLabel(mm.Declared), sourceTypeLabel(mm.Detected))
+		return err
+	}
+	var ue *metadata.FlavorUndetectedError
+	if errors.As(err, &ue) {
+		ue.Fix = "Check that DBTrail can still connect to this server with its saved user and password."
+	}
+	return err
+}
+
+// sourceTypeLabel is the Source type option label the console form shows.
+func sourceTypeLabel(flavor string) string {
+	if flavor == console.FlavorMariaDB {
+		return "MariaDB"
+	}
+	return "MySQL"
 }
 
 // run supervises one stream with crash-loop backoff: a stream that errors is
@@ -806,6 +851,15 @@ func (m *monitorSupervisor) run(ctx context.Context, job *monitorJob, e console.
 			return
 		}
 		scrubbed := config.ScrubDSNError(err, e.SourceDSN, e.DSN)
+		// A Source type the server contradicts cannot heal by retrying: the
+		// entry has to be re-created. Say so once and stop, instead of
+		// reconnecting for hours under a "retrying" label.
+		if mm := (*metadata.FlavorMismatchError)(nil); errors.As(err, &mm) {
+			slog.Error("monitored stream refused: source flavor mismatch; not retrying",
+				"server", e.Name, "entry", e.ID, "error", scrubbed)
+			job.fail(scrubbed, monitorErrorCode(err), false)
+			return
+		}
 		delay, looping, giveUp := policy.failed(started, time.Now())
 		if giveUp {
 			slog.Error("monitored stream crash-looped past the give-up threshold; not retrying",

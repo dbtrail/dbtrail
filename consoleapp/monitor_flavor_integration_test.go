@@ -1,0 +1,144 @@
+//go:build integration
+
+package consoleapp
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/testutil"
+)
+
+// startRegistrySource provisions and starts a supervised source through the
+// real stream (no stub), and removes its derived index database afterwards.
+func startRegistrySource(t *testing.T, ctx context.Context, sup *monitorSupervisor, bootDSN string, entry console.ServerEntry) console.ServerEntry {
+	t.Helper()
+	derived, err := sup.DeriveIndexDSN(entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.DSN = derived
+	t.Cleanup(func() {
+		if db, err := sql.Open("mysql", bootDSN); err == nil {
+			_, _ = db.Exec("DROP DATABASE IF EXISTS bintrail_idx_" + entry.ID)
+			_ = db.Close()
+		}
+	})
+	if err := sup.Start(ctx, entry); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop(context.Background(), entry.ID) })
+	return entry
+}
+
+// TestIntegrationMonitorRegistrySourceMariaDBDetected: a server added from the
+// console with the form's default Source type ("mysql") that is really a
+// MariaDB. The supervised stream asks the server, captures as mariadb, records
+// it in stream_state, and tells the source jobs mariadb. Before, it captured
+// as mysql: no statement text, and on 11.4+ a crash loop on zero positions.
+func TestIntegrationMonitorRegistrySourceMariaDBDetected(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	sourceDB, sourceName := testutil.CreateTestMariaDB(t)
+	var logBin string
+	if err := sourceDB.QueryRow("SELECT @@log_bin").Scan(&logBin); err != nil || logBin != "1" {
+		testutil.SkipOrFailMariaDB(t, "binary logging not enabled on test MariaDB")
+	}
+	testutil.MustExec(t, sourceDB, "CREATE TABLE t (id INT PRIMARY KEY)")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, bootName := testutil.CreateTestDB(t)
+	bootDSN := testutil.IntegrationDSN(bootName)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+
+	sentinel := fmt.Sprintf("flvmaria%d", time.Now().UnixNano()%1e9)
+	infoCh, _ := probeSourceJob(t, sentinel)
+	entry := startRegistrySource(t, ctx, sup, bootDSN, console.ServerEntry{
+		ID:        sentinel,
+		Name:      "flavor-mariadb",
+		SourceDSN: testutil.MariaDBBaseDSN() + "/" + sourceName,
+		Schemas:   sourceName,
+		Flavor:    console.FlavorMySQL,
+	})
+
+	select {
+	case got := <-infoCh:
+		if got.Flavor != console.FlavorMariaDB {
+			t.Fatalf("source job flavor = %q, want the detected mariadb", got.Flavor)
+		}
+	case <-time.After(90 * time.Second):
+		t.Fatalf("source job never fired; monitor status: %+v", sup.Status(entry.ID))
+	}
+
+	indexDB, err := sql.Open("mysql", entry.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer indexDB.Close()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		var f string
+		err := indexDB.QueryRow("SELECT flavor FROM stream_state WHERE id = 1").Scan(&f)
+		if err == nil && f == console.FlavorMariaDB {
+			break
+		}
+		if err == nil && f != "" && f != console.FlavorMariaDB {
+			t.Fatalf("stream_state.flavor = %q, want mariadb", f)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no mariadb checkpoint within 60s (last err %v); monitor status: %+v", err, sup.Status(entry.ID))
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// TestIntegrationMonitorRegistryFlavorMismatchRefuses: a server saved as
+// MariaDB that is really MySQL. The supervised stream refuses, the monitor
+// shows the refusal with the console's own fix (the Source type cannot be
+// edited, and there is no --source-flavor), and no source job starts.
+func TestIntegrationMonitorRegistryFlavorMismatchRefuses(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, bootName := testutil.CreateTestDB(t)
+	bootDSN := testutil.IntegrationDSN(bootName)
+	_, sourceName := testutil.CreateTestDB(t)
+	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
+
+	sentinel := fmt.Sprintf("flvmysql%d", time.Now().UnixNano()%1e9)
+	infoCh, _ := probeSourceJob(t, sentinel)
+	entry := startRegistrySource(t, ctx, sup, bootDSN, console.ServerEntry{
+		ID:        sentinel,
+		Name:      "flavor-mismatch",
+		SourceDSN: testutil.BaseDSN() + "/" + sourceName,
+		Schemas:   sourceName,
+		Flavor:    console.FlavorMariaDB,
+	})
+
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		st := sup.Status(entry.ID)
+		if st.State == "failed" {
+			t.Logf("refusal shown: %s", st.LastError)
+			if !strings.Contains(st.LastError, "saved with Source type MariaDB") ||
+				!strings.Contains(st.LastError, "add it again with Source type MySQL") {
+				t.Errorf("LastError lacks the console fix: %s", st.LastError)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a MariaDB entry pointing at MySQL never failed; status %+v", st)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	select {
+	case got := <-infoCh:
+		t.Errorf("a refused stream started source jobs: %+v", got)
+	default:
+	}
+}

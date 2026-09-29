@@ -58,15 +58,33 @@ func TestStreamCmd_allFlagsRegistered(t *testing.T) {
 	}
 }
 
-// TestStreamCmd_sourceFlavorDefault verifies --source-flavor defaults to mysql,
-// so every existing MySQL invocation is unchanged.
+// TestStreamCmd_sourceFlavorDefault verifies --source-flavor defaults to
+// empty: an operator who did not declare a flavor gets the one the server
+// reports. A "mysql" default would count as a declaration and make every
+// undeclared MariaDB refuse to start.
 func TestStreamCmd_sourceFlavorDefault(t *testing.T) {
 	f := streamCmd.Flag("source-flavor")
 	if f == nil {
 		t.Fatal("flag --source-flavor not registered")
 	}
-	if f.DefValue != "mysql" {
-		t.Errorf("expected default source-flavor=mysql, got %q", f.DefValue)
+	if f.DefValue != "" {
+		t.Errorf("expected an empty source-flavor default (detect), got %q", f.DefValue)
+	}
+}
+
+// TestStreamSourceJobsHook pins that the stream's source jobs start from the
+// flavor the stream resolved (not the declared, possibly empty, flag) and
+// start once.
+func TestStreamSourceJobsHook(t *testing.T) {
+	var got []string
+	hooks := streamSourceJobsHooks(func(f string) { got = append(got, f) })
+	if hooks == nil || hooks.OnFlavorResolved == nil {
+		t.Fatal("stream hooks must carry OnFlavorResolved")
+	}
+	hooks.OnFlavorResolved("mariadb")
+	hooks.OnFlavorResolved("mariadb")
+	if len(got) != 1 || got[0] != "mariadb" {
+		t.Errorf("source jobs started %v, want exactly once with mariadb", got)
 	}
 }
 

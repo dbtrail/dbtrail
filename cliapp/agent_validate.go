@@ -45,6 +45,12 @@ func runAgentValidate(ctx context.Context) error {
 				failed++
 			}
 
+			flavor, err := resolveAgentFlavor(db, agtFlavor, metadata.DetectSourceFlavor)
+			printCheck("Source flavor", flavor, err)
+			if err != nil {
+				failed++
+			}
+
 			detail, err = checkReplPrivileges(ctx, db)
 			printCheck("Replication privileges", detail, err)
 			if err != nil {

@@ -631,27 +631,46 @@ func TestRunBaselinePruneCycle(t *testing.T) {
 	}
 }
 
-// TestMainSourceJobInfo covers the pure flavor-resolution + SourceJobInfo
-// construction for watch's main source (the wiring in runUpStreamWithConsole
-// that fires ext.RunSourceJobs for the daemon's --source-dsn stream). The
-// live-daemon firing itself is covered in monitor_integration_test.go for the
-// supervised path; this pins the main-source construction without a daemon.
+// TestMainSourceJobInfo covers the SourceJobInfo for watch's main source. The
+// flavor is the one the main stream resolved (OnFlavorResolved) and is carried
+// verbatim: there is no "mysql" fallback left to guess with.
 func TestMainSourceJobInfo(t *testing.T) {
-	// Empty stream flavor (watchStreamConfig leaves Flavor unset; streamrun.One
-	// normalizes it to mysql) → the canonical non-empty "mysql", matching the
-	// value `bintrail up` supplies.
-	got := mainSourceJobInfo("user:pass@tcp(h:3306)/db", "idx-dsn", "")
-	want := ext.SourceJobInfo{SourceDSN: "user:pass@tcp(h:3306)/db", IndexDSN: "idx-dsn", Flavor: "mysql"}
-	if got != want {
-		t.Errorf("empty flavor: got %+v, want %+v", got, want)
-	}
-
-	// A non-empty stream flavor is carried through verbatim, so if watch ever
-	// grows a --source-flavor for its main source the job sees it unchanged.
-	got = mainSourceJobInfo("src", "idx", "mariadb")
-	want = ext.SourceJobInfo{SourceDSN: "src", IndexDSN: "idx", Flavor: "mariadb"}
+	got := mainSourceJobInfo("src", "idx", "mariadb")
+	want := ext.SourceJobInfo{SourceDSN: "src", IndexDSN: "idx", Flavor: "mariadb"}
 	if got != want {
 		t.Errorf("mariadb flavor: got %+v, want %+v", got, want)
+	}
+}
+
+// TestWatchSourceFlavorFlag pins watch's --source-flavor: empty by default
+// (detect), bound to BINTRAIL_SOURCE_FLAVOR, and carried into the main stream
+// as the declared flavor.
+func TestWatchSourceFlavorFlag(t *testing.T) {
+	f := watchCmd.Flag("source-flavor")
+	if f == nil {
+		t.Fatal("flag --source-flavor not registered on watch")
+	}
+	if f.DefValue != "" {
+		t.Errorf("default = %q, want empty (detect)", f.DefValue)
+	}
+	bound := false
+	for _, b := range watchEnvBindings {
+		if b.Flag == "source-flavor" && b.EnvVar == "BINTRAIL_SOURCE_FLAVOR" {
+			bound = true
+		}
+	}
+	if !bound {
+		t.Error("--source-flavor is not bound to BINTRAIL_SOURCE_FLAVOR")
+	}
+	orig := upSourceFlavor
+	t.Cleanup(func() { upSourceFlavor = orig })
+	upSourceFlavor = "mariadb"
+	if got := watchStreamConfig(1).Flavor; got != "mariadb" {
+		t.Errorf("watchStreamConfig Flavor = %q, want the declared mariadb", got)
+	}
+	upSourceFlavor = ""
+	if got := watchStreamConfig(1).Flavor; got != "" {
+		t.Errorf("watchStreamConfig Flavor = %q, want empty (detect)", got)
 	}
 }
 

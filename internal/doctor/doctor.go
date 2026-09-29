@@ -786,15 +786,15 @@ func checkStatementCapture(ctx context.Context, db *sql.DB) CheckResult {
 	}
 
 	// MariaDB names the same capability binlog_annotate_row_events
-	// (default ON since 10.2.4). Note stream capture additionally requires
-	// `--source-flavor mariadb` so the syncer requests ANNOTATE events.
+	// (default ON since 10.2.4). Stream capture requests ANNOTATE events when
+	// it runs as mariadb, which it does when it detects a MariaDB server.
 	err = db.QueryRowContext(ctx, "SELECT @@binlog_annotate_row_events").Scan(&val)
 	if err == nil {
 		if isOn(val) {
 			return CheckResult{
 				Name:   name,
 				Status: StatusPass,
-				Detail: "binlog_annotate_row_events=ON (MariaDB; stream capture also needs --source-flavor mariadb)",
+				Detail: "binlog_annotate_row_events=ON (MariaDB)",
 			}
 		}
 		return CheckResult{
@@ -805,7 +805,6 @@ func checkStatementCapture(ctx context.Context, db *sql.DB) CheckResult {
 			Remediation: "Show the SQL statement behind each change. To turn it on:\n\n" +
 				"  SET GLOBAL binlog_annotate_row_events = ON;\n\n" +
 				"To keep it after a restart, add binlog_annotate_row_events=ON under [mysqld] in my.cnf. " +
-				"The server type must be MariaDB (--source-flavor mariadb on the command line). " +
 				statementCaptureNotRetroactive,
 		}
 	}

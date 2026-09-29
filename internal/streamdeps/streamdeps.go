@@ -30,5 +30,6 @@ func Default() streamrun.Deps {
 		InsertSchemaChange:     indexer.InsertSchemaChange,
 		ParseSourceDSN:         config.ParseSourceDSN,
 		OutputJSON:             cliutil.OutputJSON,
+		DetectSourceFlavor:     metadata.DetectSourceFlavor,
 	}
 }

@@ -94,7 +94,7 @@ func init() {
 	agentCmd.Flags().StringVar(&agtEndpoint, "endpoint", "", "DBTrail WebSocket endpoint URL (required)")
 	agentCmd.Flags().StringVar(&agtIndexDSN, "index-dsn", "", "DSN for the index MySQL database")
 	agentCmd.Flags().StringVar(&agtSourceDSN, "source-dsn", "", "DSN for the source MySQL database (enables forensics queries; required for BYOS streaming)")
-	agentCmd.Flags().StringVar(&agtFlavor, "source-flavor", "mysql", "Source database flavor for BYOS streaming: mysql or mariadb (MariaDB source support is beta)")
+	agentCmd.Flags().StringVar(&agtFlavor, "source-flavor", "", "Source database flavor for BYOS streaming: mysql or mariadb. Empty (default) detects it from the server; a value the server contradicts refuses to start (MariaDB source support is beta)")
 	agentCmd.Flags().StringVar(&agtArchiveDir, "archive-dir", "", "Local directory containing Parquet archives")
 	agentCmd.Flags().StringVar(&agtArchiveS3, "archive-s3", "", "S3 path to Parquet archives (e.g. s3://bucket/prefix/)")
 	agentCmd.Flags().StringVar(&agtBufferRetain, "buffer-retain", "6h", "How long to retain events in the in-memory buffer (e.g. 6h, 24h)")
@@ -305,6 +305,14 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	var flushState *flushPipelineState
 
 	if byosMode {
+		// Ask the source what it is before anything is told a flavor: the
+		// source jobs below and the BYOS syncer both use the resolved value.
+		flavor, err := resolveAgentFlavor(handler.SourceDB, agtFlavor, metadata.DetectSourceFlavor)
+		if err != nil {
+			return err
+		}
+		agtFlavor = flavor
+
 		retain, err := cliutil.ParseRetain(agtBufferRetain)
 		if err != nil {
 			return fmt.Errorf("invalid --buffer-retain: %w", err)
@@ -393,7 +401,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		// Only in BYOS mode — without --source-dsn there is no live source to
 		// observe — and only with an index, since a source job's persistence
 		// target is the index database (stateless BYOS keeps nothing local).
-		if src, ok := agentSourceJobInfo(); ok {
+		if src, ok := agentSourceJobInfo(agtFlavor); ok {
 			ext.RunSourceJobs(ctx, src)
 		}
 
@@ -642,36 +650,47 @@ func (s *flushPipelineState) toFlushStatus() *agent.FlushStatus {
 // Both DSNs are required: --source-dsn is the live server a job observes, and
 // the index is the only place a job can persist what it observes — a stateless
 // BYOS agent (no --index-dsn) has neither a local destination nor a schema to
-// write into. Flavor is the agent's --source-flavor (normalized at the top of
-// runAgent), so a flavor-gated source job sees the flavor the BYOS stream
-// actually runs with. The cmp.Or default only matters when the globals are set
-// without going through cobra (tests): a job must never be told an empty
-// flavor, which a flavor-gated job would silently skip on.
-func agentSourceJobInfo() (ext.SourceJobInfo, bool) {
+// write into. flavor is the one resolveAgentFlavor settled on, so a
+// flavor-gated source job sees the flavor the BYOS stream actually runs with.
+func agentSourceJobInfo(flavor string) (ext.SourceJobInfo, bool) {
 	if agtSourceDSN == "" || agtIndexDSN == "" {
 		return ext.SourceJobInfo{}, false
 	}
 	return ext.SourceJobInfo{
 		SourceDSN: agtSourceDSN,
 		IndexDSN:  agtIndexDSN,
-		Flavor:    cmp.Or(agtFlavor, gomysql.MySQLFlavor),
+		Flavor:    flavor,
 	}, true
 }
 
-// normalizeAgentFlavor validates --source-flavor and maps the empty string to
-// the default. Mirrors internal/streamrun's normalizeFlavor (same accepted
-// literals, same defaulting) so the agent and `bintrail stream` reject and
-// accept identically. postgres is deliberately not accepted: the BYOS stream
-// is a binlog reader.
+// normalizeAgentFlavor validates --source-flavor. Empty stays empty: nothing
+// was declared, and resolveAgentFlavor asks the server. Same accepted values
+// as `bintrail stream` (metadata.NormalizeDeclaredFlavor). postgres is not
+// accepted: the BYOS stream is a binlog reader.
 func normalizeAgentFlavor(flavor string) (string, error) {
-	switch flavor {
-	case "":
-		return gomysql.MySQLFlavor, nil
-	case gomysql.MySQLFlavor, gomysql.MariaDBFlavor:
-		return flavor, nil
-	default:
-		return "", fmt.Errorf("invalid --source-flavor %q: must be %q or %q", flavor, gomysql.MySQLFlavor, gomysql.MariaDBFlavor)
+	f, err := metadata.NormalizeDeclaredFlavor(flavor)
+	if err != nil {
+		return "", fmt.Errorf("invalid --source-flavor: %w", err)
 	}
+	return f, nil
+}
+
+// resolveAgentFlavor settles the BYOS stream's flavor the way `bintrail
+// stream` does: ask the server, refuse a declared flavor it contradicts, and
+// never guess when it cannot be asked. detect is metadata.DetectSourceFlavor
+// in production.
+func resolveAgentFlavor(sourceDB *sql.DB, declared string, detect func(*sql.DB) (string, string, error)) (string, error) {
+	detected, version, detectErr := detect(sourceDB)
+	flavor, warning, err := metadata.ResolveSourceFlavor(declared, detected, version, detectErr)
+	if err != nil {
+		return "", err
+	}
+	if warning != "" {
+		slog.Warn(warning)
+	} else {
+		slog.Info("BYOS stream: source flavor", "flavor", flavor, "version", version)
+	}
+	return flavor, nil
 }
 
 // ─── BYOS streaming ────────────────────────────────────────────────────────

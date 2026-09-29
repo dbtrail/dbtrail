@@ -65,7 +65,13 @@ func TestIntegrationMonitorRunsExtSourceJob(t *testing.T) {
 	// the ext wiring with only provisioning + the advisory lock done (real
 	// MySQL), never a reachable source, and keeps the stored state at "pending"
 	// so the idempotency assertion below has a running entry to collide with.
-	sup.streamFn = func(c context.Context, _ streamrun.Config) error { <-c.Done(); return c.Err() }
+	// The stub reports a resolved flavor the way the real stream does after
+	// asking the source: the MySQL-family jobs start from that hook.
+	sup.streamFn = func(c context.Context, cfg streamrun.Config) error {
+		cfg.Hooks.OnFlavorResolved(console.FlavorMySQL)
+		<-c.Done()
+		return c.Err()
+	}
 
 	sentinel := fmt.Sprintf("extjob%d", time.Now().UnixNano()%1e9)
 	infoCh, ctxCh := probeSourceJob(t, sentinel)
@@ -92,8 +98,8 @@ func TestIntegrationMonitorRunsExtSourceJob(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sup.Stop(context.Background(), entry.ID) })
 
-	// (a) One firing, carrying the entry's source/index DSNs and the resolved
-	// (default → mysql) flavor.
+	// (a) One firing, carrying the entry's source/index DSNs and the flavor
+	// the stream resolved.
 	var jobCtx context.Context
 	select {
 	case got := <-infoCh:
@@ -153,7 +159,10 @@ func TestIntegrationMonitorExtSourceJobTornDownOnStreamExit(t *testing.T) {
 	sup := newMonitorSupervisor(ctx, bootDSN, nil, 0)
 	// A stream that returns nil immediately: run takes the clean-return terminal
 	// branch (err == nil) and, with the fix, cancels jobCtx via its defer.
-	sup.streamFn = func(_ context.Context, _ streamrun.Config) error { return nil }
+	sup.streamFn = func(_ context.Context, cfg streamrun.Config) error {
+		cfg.Hooks.OnFlavorResolved(console.FlavorMySQL)
+		return nil
+	}
 
 	sentinel := fmt.Sprintf("extjobexit%d", time.Now().UnixNano()%1e9)
 	infoCh, ctxCh := probeSourceJob(t, sentinel)
@@ -180,7 +189,7 @@ func TestIntegrationMonitorExtSourceJobTornDownOnStreamExit(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sup.Stop(context.Background(), entry.ID) })
 
-	// The job fires once (RunSourceJobs is called once per Start, not per stream
+	// The job fires once (FlavorOnce: once per Start, not per stream
 	// attempt). Capture its bound context — even if the stream already returned
 	// and cancelled jobCtx, the job still fired (RunSourceJobs launches
 	// unconditionally) and a cancelled context read here still reports Done.

@@ -212,11 +212,10 @@ func runUpStream(cmd *cobra.Command, args []string) error {
 	// share the stream's lifecycle, so runStream owns the one call site for
 	// both `up` and plain `stream` (starting them here too would run every
 	// registered job twice under `up`). populateStreamFlags above has already
-	// copied up's DSNs into the strm* globals runStream reads, and flavor is
-	// the value the stream actually runs with — `up` has no --source-flavor
-	// flag of its own, so strmFlavor holds streamCmd's default ("mysql") or
-	// the BINTRAIL_SOURCE_FLAVOR override that bindCommandEnv(streamCmd)
-	// applied at flag-binding time.
+	// copied up's DSNs into the strm* globals runStream reads. `up` has no
+	// --source-flavor flag of its own: strmFlavor is empty (the stream detects
+	// the flavor from the server) unless BINTRAIL_SOURCE_FLAVOR declared one
+	// through bindCommandEnv(streamCmd). The jobs get the resolved flavor.
 	return runStream(cmd, args)
 }
 

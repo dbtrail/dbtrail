@@ -106,6 +106,7 @@ func testStreamDeps() Deps {
 		InsertSchemaChange:     indexer.InsertSchemaChange,
 		ParseSourceDSN:         config.ParseSourceDSN,
 		OutputJSON:             cliutil.OutputJSON,
+		DetectSourceFlavor:     metadata.DetectSourceFlavor,
 	}
 }
 
@@ -127,7 +128,12 @@ func runOneUntil(t *testing.T, cfg Config, waitAttached bool, writes func(), don
 	var once sync.Once
 	var connected atomic.Bool
 	attached := make(chan struct{})
+	var onFlavor func(string) // a caller's flavor observer survives the hooks below
+	if cfg.Hooks != nil {
+		onFlavor = cfg.Hooks.OnFlavorResolved
+	}
 	cfg.Hooks = &Hooks{
+		OnFlavorResolved:  onFlavor,
 		OnSourceConnected: func() { connected.Store(true) },
 		OnCheckpoint: func() {
 			if !connected.Load() {

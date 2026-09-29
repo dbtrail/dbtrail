@@ -23,9 +23,9 @@ func TestStreamSourceJobInfoCarriesTheStreamsSource(t *testing.T) {
 
 	strmSourceDSN = "u:p@tcp(src:3306)/"
 	strmIndexDSN = "u:p@tcp(idx:3306)/bintrail_index"
-	strmFlavor = "mariadb"
+	strmFlavor = "" // not declared: the flavor comes from what the stream resolved
 
-	got := streamSourceJobInfo()
+	got := streamSourceJobInfo("mariadb")
 	if got.SourceDSN != strmSourceDSN || got.IndexDSN != strmIndexDSN || got.Flavor != "mariadb" {
 		t.Errorf("streamSourceJobInfo() = %+v, want the strm* stream configuration", got)
 	}
@@ -53,18 +53,18 @@ func TestUpReachesTheSeamWithItsOwnConfiguration(t *testing.T) {
 
 	populateStreamFlags(12345)
 
-	got := streamSourceJobInfo()
+	got := streamSourceJobInfo("mariadb")
 	if got.SourceDSN != upSourceDSN || got.IndexDSN != upIndexDSN {
 		t.Errorf("after populateStreamFlags, streamSourceJobInfo() = %+v, want up's DSNs", got)
 	}
-	if got.Flavor == "" {
-		t.Error("Flavor is empty on the `up` path: a flavor-gated source job would skip with no signal")
+	if got.Flavor != "mariadb" {
+		t.Errorf("Flavor = %q on the `up` path, want the resolved mariadb", got.Flavor)
 	}
 }
 
 func TestAgentSourceJobInfoRequiresSourceAndIndex(t *testing.T) {
-	origSource, origIndex, origFlavor := agtSourceDSN, agtIndexDSN, agtFlavor
-	t.Cleanup(func() { agtSourceDSN, agtIndexDSN, agtFlavor = origSource, origIndex, origFlavor })
+	origSource, origIndex := agtSourceDSN, agtIndexDSN
+	t.Cleanup(func() { agtSourceDSN, agtIndexDSN = origSource, origIndex })
 
 	tests := []struct {
 		name             string
@@ -75,9 +75,9 @@ func TestAgentSourceJobInfoRequiresSourceAndIndex(t *testing.T) {
 		wantFlavor       string
 	}{
 		{name: "both set", source: "u:p@tcp(src:3306)/", index: "u:p@tcp(idx:3306)/bintrail_index",
-			wantOK: true, wantSrc: "u:p@tcp(src:3306)/", wantIdx: "u:p@tcp(idx:3306)/bintrail_index",
+			flavor: "mysql", wantOK: true, wantSrc: "u:p@tcp(src:3306)/", wantIdx: "u:p@tcp(idx:3306)/bintrail_index",
 			wantFlavor: "mysql"},
-		// --source-flavor mariadb must reach the source job — a flavor-gated
+		// The resolved mariadb flavor must reach the source job: a flavor-gated
 		// job otherwise observes a MariaDB source believing it is MySQL.
 		{name: "mariadb flavor", source: "u:p@tcp(src:3306)/", index: "u:p@tcp(idx:3306)/bintrail_index",
 			flavor: "mariadb", wantOK: true, wantSrc: "u:p@tcp(src:3306)/", wantIdx: "u:p@tcp(idx:3306)/bintrail_index",
@@ -91,8 +91,8 @@ func TestAgentSourceJobInfoRequiresSourceAndIndex(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			agtSourceDSN, agtIndexDSN, agtFlavor = tc.source, tc.index, tc.flavor
-			got, ok := agentSourceJobInfo()
+			agtSourceDSN, agtIndexDSN = tc.source, tc.index
+			got, ok := agentSourceJobInfo(tc.flavor)
 			if ok != tc.wantOK {
 				t.Fatalf("agentSourceJobInfo() ok = %v, want %v", ok, tc.wantOK)
 			}
