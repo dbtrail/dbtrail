@@ -452,7 +452,9 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
     connections land on one running server;
   - a replica, when a replication channel of one server (`SHOW ALL SLAVES
     STATUS`) connects to the other by host, port and `server_id`. A
-    `127.0.0.1` or `localhost` master is never matched.
+    `127.0.0.1` or `localhost` master is never matched, and neither is a
+    `server_id` of `1`: unrelated servers share it, so such a match is
+    reported as "could not be verified".
 
   Reading replication status needs the `SLAVE MONITOR` privilege. Without it
   the check is skipped and says so.
