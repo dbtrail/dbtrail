@@ -261,6 +261,8 @@ jobs:
             TestOne_MariaDB_resumeOldMySQLDefaultCheckpoint \
             TestIntegrationMonitorRegistrySourceMariaDBDetected \
             TestBuild_MariaDBVersionRow \
+            TestBuild_MariaDBMinimalPrivilegeUser \
+            TestBuild_MariaDBGrantRemediationWorks \
             TestRecoverRoundTrip_MariaDBTypes \
             TestRecoverRoundTrip_MariaDBUUIDKey \
             TestRecoverRoundTrip_MariaDBJSONText \

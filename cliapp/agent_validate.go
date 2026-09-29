@@ -168,6 +168,9 @@ func checkReplPrivileges(ctx context.Context, db *sql.DB) (string, error) {
 	}
 
 	hasSlave, hasClient := metadata.HasReplPrivileges(grants)
+	if !hasClient && metadata.CanListBinaryLogs(ctx, db) {
+		hasClient = true
+	}
 
 	var missing []string
 	if !hasSlave {

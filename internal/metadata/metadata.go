@@ -2294,18 +2294,113 @@ func EnsureResolver(indexDB, sourceDB *sql.DB, schemas []string) (*Resolver, err
 // shared by `bintrail agent --validate` and the doctor's replication-grants
 // check, so it lives in metadata next to the other source validators rather
 // than in either consumer.
+//
+// Names are matched as whole privileges, never as substrings, and under every
+// name the server may print them with:
+//   - REPLICATION SLAVE, or REPLICATION REPLICA (the newer synonym).
+//   - REPLICATION CLIENT, or BINLOG MONITOR: MariaDB 10.5+ stores REPLICATION
+//     CLIENT under that name and SHOW GRANTS prints it so. Reading only the
+//     MySQL name refused every MariaDB user, the RDS master included, and the
+//     GRANT the refusal suggested changed nothing.
+//
+// A substring match would also accept MariaDB's REPLICATION SLAVE ADMIN, which
+// does not allow reading the binlog. Only grants ON *.* count: both privileges
+// are global, so ALL PRIVILEGES on one database carries neither.
 func HasReplPrivileges(grants []string) (slave, client bool) {
 	for _, grant := range grants {
-		upper := strings.ToUpper(grant)
-		if strings.Contains(upper, "ALL PRIVILEGES") {
-			return true, true
+		privs, global := parseGrantLine(grant)
+		if !global {
+			continue
 		}
-		if strings.Contains(upper, "REPLICATION SLAVE") {
-			slave = true
-		}
-		if strings.Contains(upper, "REPLICATION CLIENT") {
-			client = true
+		for _, p := range privs {
+			switch p {
+			case "ALL PRIVILEGES", "ALL":
+				return true, true
+			case "REPLICATION SLAVE", "REPLICATION REPLICA":
+				slave = true
+			case "REPLICATION CLIENT", "BINLOG MONITOR":
+				client = true
+			}
 		}
 	}
 	return
+}
+
+// CanListBinaryLogs reports whether this connection may run SHOW BINARY LOGS,
+// the statement REPLICATION CLIENT (BINLOG MONITOR on MariaDB) exists to allow.
+// It is the capability behind the grant text, so a caller whose SHOW GRANTS
+// parse did not find the privilege asks the server before refusing: a role, or
+// a name no parser here knows yet, still grants it. It only ever turns a
+// refusal into a pass. Any error (the privilege is missing, binary logging is
+// off, a lost connection) answers false, and the caller keeps what the grant
+// text said; the error is logged at debug level so a refusal can be traced.
+func CanListBinaryLogs(ctx context.Context, db *sql.DB) bool {
+	rows, err := db.QueryContext(ctx, "SHOW BINARY LOGS")
+	if err != nil {
+		slog.Debug("SHOW BINARY LOGS refused; keeping the SHOW GRANTS verdict", "error", err)
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+	}
+	if err := rows.Err(); err != nil {
+		slog.Debug("SHOW BINARY LOGS failed while reading; keeping the SHOW GRANTS verdict", "error", err)
+		return false
+	}
+	return true
+}
+
+// parseGrantLine splits one SHOW GRANTS line, "GRANT <privs> ON <object> TO
+// <user> ...", into its upper-cased privilege names, and reports whether the
+// object is *.* (global). Column lists ("SELECT (`a`, `b`)") are dropped
+// before the comma split, and backquoted names are skipped when looking for
+// " ON ", so a column named `on x` cannot end the privilege list early. A role
+// membership line ("GRANT `r` TO `u`") has no ON and yields nothing.
+func parseGrantLine(line string) (privs []string, global bool) {
+	s := strings.TrimSpace(line)
+	if len(s) < len("GRANT ") || !strings.EqualFold(s[:len("GRANT ")], "GRANT ") {
+		return nil, false
+	}
+	s = s[len("GRANT "):]
+	var names strings.Builder
+	depth, quote := 0, byte(0)
+	on := -1
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+			continue
+		case c == '`' || c == '\'' || c == '"':
+			quote = c
+			continue
+		case c == '(':
+			depth++
+			continue
+		case c == ')':
+			if depth > 0 {
+				depth--
+			}
+			continue
+		case depth > 0:
+			continue
+		}
+		if i+4 <= len(s) && strings.EqualFold(s[i:i+4], " ON ") {
+			on = i
+			break
+		}
+		names.WriteByte(c)
+	}
+	if on < 0 {
+		return nil, false
+	}
+	for _, p := range strings.Split(names.String(), ",") {
+		if p = strings.ToUpper(strings.Join(strings.Fields(p), " ")); p != "" {
+			privs = append(privs, p)
+		}
+	}
+	obj := strings.TrimSpace(s[on+len(" ON "):])
+	return privs, strings.HasPrefix(obj, "*.* ") || obj == "*.*"
 }
