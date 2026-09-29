@@ -139,7 +139,8 @@ type backupScheduleRequest struct {
 
 // scheduleGates resolves what this process can do, for CheckBackupSchedule.
 func (s *Server) scheduleGates() BackupScheduleGates {
-	g := BackupScheduleGates{LoopRunning: s.backupSchedules != nil, ReadOnlyConsole: s.monitorCtrl == nil}
+	g := BackupScheduleGates{LoopRunning: s.backupSchedules != nil, ReadOnlyConsole: s.monitorCtrl == nil,
+		WriteRefusal: s.cm.reg.WriteRefusal}
 	if s.backupSchedules != nil {
 		enabled, refusal := s.backupSchedules.FullBackups()
 		g.FullBackups = enabled

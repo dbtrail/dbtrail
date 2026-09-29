@@ -103,15 +103,43 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 	if len(due) == 0 {
 		return
 	}
+	// The merged chain is staged for the next refresh to adopt as this
+	// server's: another writer's snapshot is left alone (#1684), and the
+	// refusal is the job's result, where the page reads it. Checked only
+	// when there is something to merge, so a folder with nothing due never
+	// reports a failure, and before anything is written.
+	if err := foldSourceRefusal(req.IndexDSN, req.BaselineDir, at); err != nil {
+		slog.Warn("snapshot compaction: not started", "server", req.ServerName, "id", req.ServerID, "error", err)
+		s.mu.Lock()
+		if !s.busyLocked(req.ServerID) {
+			s.compacts[req.ServerID] = &console.BaselineStatus{State: "failed", Since: nowStamp(), FinishedAt: nowStamp(), LastError: err.Error()}
+		}
+		s.mu.Unlock()
+		return
+	}
 	sort.Slice(due, func(i, j int) bool { return due[i].base < due[j].base })
 	if err := s.TriggerCompact(req, due); err != nil {
-		slog.Info("baseline compact: not started; the server is busy, the next refresh tries again",
-			"server", req.ServerName, "id", req.ServerID, "chains", len(due))
+		if errors.Is(err, console.ErrBaselineRunning) {
+			slog.Info("baseline compact: not started; the server is busy, the next refresh tries again",
+				"server", req.ServerName, "id", req.ServerID, "chains", len(due))
+			return
+		}
+		slog.Warn("snapshot compaction: not started", "server", req.ServerName, "id", req.ServerID, "chains", len(due), "error", err)
 	}
 }
 
 // TriggerCompact claims the server's slot and runs the job for the chains.
 func (s *baselineSupervisor) TriggerCompact(req refreshRequest, due []compactCandidate) error {
+	// The merge writes into the folder, and a folder another server writes
+	// too may hold its chains (#1684). The command-line server is not in the
+	// registry and is never refused here.
+	if s.reg != nil {
+		if e, ok := s.reg.Get(req.ServerID); ok {
+			if err := s.reg.WriteRefusal(e); err != nil {
+				return err
+			}
+		}
+	}
 	s.mu.Lock()
 	if s.busyLocked(req.ServerID) {
 		s.mu.Unlock()

@@ -315,10 +315,11 @@ func startStalenessWatch(ctx context.Context, n *watchNotifier, registry *consol
 // stalenessTarget is one server with a baseline source to grade.
 type stalenessTarget struct{ name, dsn, source string }
 
-// targets applies the same all-or-nothing baseline fallback as
-// withBaselineDefaults (#1010): an entry with its OWN dir or S3 chose its
-// location; only a fully unset entry inherits the process-wide one. Servers
-// with no baseline anywhere have nothing to grade and are skipped.
+// targets is the command-line entry graded against the process-wide
+// location, and each registry server against its OWN (#1684: the process
+// location backs no registry server any more; the ones that read through it
+// were given it on upgrade). Servers with no location have nothing to grade
+// and are skipped.
 func (w *stalenessWatcher) targets() []stalenessTarget {
 	globalSrc := w.globalDir
 	if globalSrc == "" {
@@ -333,9 +334,6 @@ func (w *stalenessWatcher) targets() []stalenessTarget {
 			src := e.BaselineDir
 			if src == "" {
 				src = e.BaselineS3
-			}
-			if src == "" {
-				src = globalSrc
 			}
 			if src == "" {
 				continue

@@ -20,13 +20,11 @@ import (
 // on the next run that consumes them: they edit in place, through the PUT
 // below.
 //
-// The page's real job is PROVENANCE. The precedence (per server, then daemon
-// flag, then nothing) is real and was invisible: connManager falls a server
-// with no baseline location of its own back to the daemon's --baseline-dir /
-// --baseline-s3 (withBaselineDefaults), but the servers API serializes the
-// RAW registry field — so a server backed by the daemon default showed an
-// empty field, indistinguishable from a server with no backup location at
-// all. The rows here carry both spellings and say which one is in force.
+// The page's job used to be PROVENANCE: a server with no location of its
+// own read the daemon's --baseline-dir / --baseline-s3, and the page had to
+// say which one was in force. Since #1684 a server's location is its own or
+// it has none (the servers that relied on the daemon's were given it on
+// upgrade, MigrateProcessBaselineLocation), so the verdict has two answers.
 
 // BackupSettingsDefaults carries the daemon-wide flag/env values the page
 // reports, injected by the watch daemon exactly like RotationDefaults: what
@@ -90,20 +88,21 @@ type backupSettingRow struct {
 	Err string `json:"err,omitempty"`
 }
 
-// backupSettingsServerDTO is one server's backup configuration with its
-// provenance resolved: the raw registry halves (the editable ones) and the
-// effective location after the daemon-default fallback.
+// backupSettingsServerDTO is one server's backup configuration: the registry
+// halves (the editable ones) and the location its reads use.
 type backupSettingsServerDTO struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	BaselineDir string `json:"baseline_dir"`
 	BaselineS3  string `json:"baseline_s3"`
 	NoArchive   bool   `json:"no_archive"`
+	// ResolvedDir / ResolvedS3 are the location the read paths use. Equal to
+	// the two above since #1684 (no daemon default fills them in); kept on
+	// the wire because the S3 retention rule reads resolved_s3.
 	ResolvedDir string `json:"resolved_dir"`
 	ResolvedS3  string `json:"resolved_s3"`
 	// Source is one of the backupSource* verdicts: the entry names its own
-	// location, the daemon's --baseline-dir/--baseline-s3 back it, or
-	// neither exists.
+	// location, or it has none.
 	Source string `json:"source"`
 	// The schedule as CONFIGURED (its own endpoints own editing it; the
 	// Snapshots page shows the run history and the next-method prediction).
@@ -146,8 +145,7 @@ type backupSettingsServerDTO struct {
 	ScheduleLoop bool `json:"schedule_loop"`
 	// LocalCopy answers the one per-server question (#1681): does this
 	// server keep a copy of its snapshots on this machine. It is whether the
-	// entry names its OWN folder; the daemon default folder backs reads only
-	// (see backupSourceDefault), so it does not count as this server's copy.
+	// entry names its own folder.
 	LocalCopy bool `json:"local_copy"`
 	// DefaultDir is the folder a "yes" would use when none is typed:
 	// <state dir>/snapshots/<id>. Empty where the registry has no file.
@@ -191,22 +189,27 @@ type backupSettingsServerDTO struct {
 	SnapshotEveryMinutes int `json:"snapshot_every_minutes,omitempty"`
 }
 
-// The three provenance verdicts a server's backup location can have. The
-// page DRAWS them (BACKUP_SOURCE_CASES in app.js) rather than describing
-// them, and a drawing cannot be allowed to lie: assets_backupsettings_test.go
-// pins the JS keys to exactly these values AND to the number of places
-// below that assign one, so a fourth verdict added on either side fails on
-// the desk instead of leaving a picture that still shows three.
+// The verdicts a server's backup location can have. The page DRAWS them
+// (BACKUP_SOURCE_CASES in app.js) rather than describing them, and a drawing
+// cannot be allowed to lie: assets_backupsettings_test.go pins the JS keys to
+// exactly these values AND to the number of places below that assign one,
+// so a verdict added on either side fails on the desk instead of leaving a
+// picture that shows something else. There were three until #1684 removed
+// the daemon default ("default").
 const (
-	backupSourceServer  = "server"
-	backupSourceDefault = "default"
-	backupSourceNone    = "none"
+	backupSourceServer = "server"
+	backupSourceNone   = "none"
 )
 
 type backupSettingsDTO struct {
 	Daemon           []backupSettingRow        `json:"daemon"`
 	Servers          []backupSettingsServerDTO `json:"servers"`
 	RegistryReadOnly bool                      `json:"registry_read_only"`
+	// LocationMigration is set when this start gave servers the startup
+	// snapshot location as their own (#1684) and the registry file could not
+	// hold it: the page names them, because the next start tries again and
+	// until a save succeeds the file still says they have none.
+	LocationMigration *LocationMigration `json:"location_migration,omitempty"`
 	// ReuseUnchanged is whether a new snapshot reuses the previous file of a
 	// table that did not change (#1681): the daemon's reuse flag, or table
 	// deltas, which link the file forward on their own. What "keep a copy on
@@ -233,10 +236,9 @@ func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request)
 	dto := backupSettingsDTO{
 		RegistryReadOnly: s.cm.reg != nil && s.cm.reg.ReadOnly(),
 		Daemon: []backupSettingRow{
-			// The two backup locations stay startup-only here ON PURPOSE:
-			// #1684 deletes the process-wide fallback outright, so making
-			// them editable would build an interface for a setting that is
-			// being removed, and migrate operators onto it first.
+			// The two backup locations stay startup-only: since #1684 they
+			// are the command-line server's own location and back no
+			// registry server, so there is nothing here to edit.
 			{Key: "baseline_dir", Value: s.cm.defaultBaselineDir, CLI: "--baseline-dir", NeedsRestart: true},
 			{Key: "baseline_s3", Value: s.cm.defaultBaselineS3, CLI: "--baseline-s3", NeedsRestart: true},
 			s.backupSettingRow(BackupSettingBaselineRetain, d.BaselineRetain, "--baseline-retain"),
@@ -257,6 +259,9 @@ func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if s.cm.reg != nil {
+		if m := s.cm.reg.LocationMigration(); m.NotSaved != "" {
+			dto.LocationMigration = &m
+		}
 		for _, e := range s.cm.reg.List() {
 			dto.Servers = append(dto.Servers, s.backupSettingsServerDTO(e))
 		}
@@ -264,28 +269,23 @@ func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, dto)
 }
 
-// backupSettingsServerDTO resolves one entry's provenance through the SAME
-// fallback the connection manager applies (withBaselineDefaults) — read from
-// it, never re-derived, so this page cannot disagree with what findBaseline
-// will actually open.
+// backupSettingsServerDTO is one entry's row. The location is the entry's
+// own, the same value the connection manager builds the bundle from, so this
+// page cannot disagree with what findBaseline will actually open.
 func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO {
-	resolved := s.cm.withBaselineDefaults(e)
 	dto := backupSettingsServerDTO{
 		ID:          e.ID,
 		Name:        e.Name,
 		BaselineDir: e.BaselineDir,
 		BaselineS3:  e.BaselineS3,
 		NoArchive:   e.NoArchive,
-		ResolvedDir: resolved.BaselineDir,
-		ResolvedS3:  resolved.BaselineS3,
+		ResolvedDir: e.BaselineDir,
+		ResolvedS3:  e.BaselineS3,
 		ArchiveS3:   e.ArchiveS3,
 	}
-	switch {
-	case e.BaselineDir != "" || e.BaselineS3 != "":
+	if e.BaselineDir != "" || e.BaselineS3 != "" {
 		dto.Source = backupSourceServer
-	case resolved.BaselineDir != "" || resolved.BaselineS3 != "":
-		dto.Source = backupSourceDefault
-	default:
+	} else {
 		dto.Source = backupSourceNone
 	}
 	dto.LocalCopy = e.BaselineDir != ""

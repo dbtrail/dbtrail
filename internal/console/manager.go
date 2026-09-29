@@ -82,12 +82,11 @@ type connManager struct {
 	profileActive bool
 
 	// defaultBaselineDir / defaultBaselineS3 are the process-wide
-	// --baseline-dir / --baseline-s3 flags, used as the baseline source for
-	// registry entries that carry none of their own (#1010). Without this
-	// fallback, a server added from the UI (whose add form has no baseline
-	// field) could never enable Time-travel/reconstruct/verify even though the
-	// daemon was started with a usable --baseline-dir — the common
-	// single-baseline-dir deployment. Written once before serving
+	// --baseline-dir / --baseline-s3 flags: the command-line server's
+	// location, and a folder the per-server retention never counts. They
+	// back NO registry server since #1684: the servers that read through
+	// them were given the value as their own (MigrateProcessBaselineLocation),
+	// so reads and writes resolve the same entry. Written once before serving
 	// (console.New), like profileActive; read-only afterwards.
 	defaultBaselineDir string
 	defaultBaselineS3  string
@@ -187,7 +186,7 @@ func (cm *connManager) Resolve(ctx context.Context, id string) (*bundle, error) 
 			// Derive the published gates from the CURRENT entry: a
 			// baseline/no-archive-only edit during the open keeps this db but
 			// must not publish the stale entry's reconstruct gate.
-			nb := newBundleDerived(b.db, b.dbName, cm.withBaselineDefaults(cur), cm.profileActive)
+			nb := newBundleDerived(b.db, b.dbName, cur, cm.profileActive)
 			nb.dsn = b.dsn
 			nb.resolver = b.resolver
 			nb.resolverUnavailable = b.resolverUnavailable
@@ -245,10 +244,10 @@ func (cm *connManager) target(id string) (*bundle, string, error) {
 
 // baselineLocation returns where a server's snapshots live, the source its
 // bundle carries, WITHOUT opening its index connection: for a registry entry
-// the location is configuration (its own, else the daemon's), and Connect AI
-// asks for it on every open, where a dead index would hold the page on the
-// connect timeout. Derived by the same baselineSources over the same
-// withBaselineDefaults the bundle is built from.
+// the location is configuration (its own, or none), and Connect AI asks for
+// it on every open, where a dead index would hold the page on the connect
+// timeout. Derived by the same baselineSources over the same entry the
+// bundle is built from.
 func (cm *connManager) baselineLocation(id string) (string, error) {
 	boot, id, err := cm.target(id)
 	if err != nil {
@@ -261,7 +260,7 @@ func (cm *connManager) baselineLocation(id string) (string, error) {
 	if !ok {
 		return "", ErrUnknownServer
 	}
-	src, _ := baselineSources(cm.withBaselineDefaults(entry))
+	src, _ := baselineSources(entry)
 	return src, nil
 }
 
@@ -283,25 +282,10 @@ func (cm *connManager) buildBundle(entry ServerEntry) (*bundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server %q: %s", entry.Name, scrubDSNError(err, entry.DSN))
 	}
-	b := newBundleDerived(db, cfg.DBName, cm.withBaselineDefaults(entry), cm.profileActive)
+	b := newBundleDerived(db, cfg.DBName, entry, cm.profileActive)
 	b.dsn = entry.DSN
 	b.resolver, b.resolverUnavailable = loadResolver(db)
 	return b, nil
-}
-
-// withBaselineDefaults returns the entry with the process-wide
-// --baseline-dir / --baseline-s3 filled in when it carries no baseline source
-// of its own (#1010). The fallback is all-or-nothing: an entry with its OWN
-// dir or S3 configured chose its baseline location explicitly, and mixing a
-// per-entry S3 with the process dir (or vice versa) would make findBaseline's
-// dir-over-S3 preference and #766 S3 retry read from a location the operator
-// never associated with that server.
-func (cm *connManager) withBaselineDefaults(entry ServerEntry) ServerEntry {
-	if entry.BaselineDir == "" && entry.BaselineS3 == "" {
-		entry.BaselineDir = cm.defaultBaselineDir
-		entry.BaselineS3 = cm.defaultBaselineS3
-	}
-	return entry
 }
 
 // baselineSources picks an entry's baseline source and its fallback: the
@@ -472,7 +456,7 @@ func (cm *connManager) rebuildDerived(entry ServerEntry) {
 	if !ok {
 		return
 	}
-	nb := newBundleDerived(old.db, old.dbName, cm.withBaselineDefaults(entry), cm.profileActive)
+	nb := newBundleDerived(old.db, old.dbName, entry, cm.profileActive)
 	nb.dsn = old.dsn
 	nb.engine = old.engine
 	nb.resolver = old.resolver
@@ -494,7 +478,6 @@ func (cm *connManager) cached(id string) bool {
 // capability reports the reconstruct gate for a registry entry as pure config —
 // no connection is opened, so /api/servers can label every entry instantly.
 func (cm *connManager) capability(entry ServerEntry) bool {
-	entry = cm.withBaselineDefaults(entry)
 	src := entry.BaselineDir
 	if src == "" {
 		src = entry.BaselineS3

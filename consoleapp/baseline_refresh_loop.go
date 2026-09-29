@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -1213,6 +1214,7 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 	st.Published = foldPublished(err)
 	st.TooManyChanges = errors.Is(err, reconstruct.ErrTouchedRowBudget)
 	st.DiskRefused = foldDiskRefused(err)
+	st.ForeignSource = errors.Is(err, errForeignSource)
 	if err != nil {
 		st.State = "failed"
 		st.LastError = err.Error()
@@ -1264,6 +1266,10 @@ func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (p
 	}
 	if len(tableList) == 0 {
 		return time.Time{}, 0, 0, reuseTally{}, fmt.Errorf("no baseline snapshot to refresh under %s", src)
+	}
+	// Another writer's snapshot is never folded (#1684, foldSourceRefusal).
+	if err := foldSourceRefusal(req.IndexDSN, src, prev); err != nil {
+		return time.Time{}, 0, 0, reuseTally{}, err
 	}
 	req.TableDeltas = s.tableDeltas
 	tables, refused, reuse, err = s.foldSnapshot(req, at, tableList)
@@ -1585,8 +1591,8 @@ func startBaselineRefreshLoop(ctx context.Context, reg *console.Registry, sup *b
 		// instead of running a console with a flag that is silently inert.
 		return fmt.Errorf("internal: --baseline-refresh-interval was set without a baseline supervisor")
 	}
-	targets, skipped := baselineRefreshTargets(registryEntries(reg), globalDSN, globalBaselineDir)
-	logSkippedRefreshTargets(skipped)
+	targets, skipped, shared := baselineRefreshTargets(registryEntries(reg), globalDSN, globalBaselineDir)
+	logSkippedRefreshTargets(skipped, shared)
 	// Name the reuse setting AND where it came from, once, at the one moment
 	// an operator is reading the log to see whether their configuration took.
 	// Since #1681 the source is always the flag, and the line stays: the
@@ -1988,8 +1994,8 @@ func refreshTargetsFor(reg *console.Registry, globalDSN, globalBaselineDir strin
 // refreshTargetsWith is the same thing with the setting ALREADY resolved, so
 // one cycle resolves it once and logs exactly the value it dispatched with.
 func refreshTargetsWith(reg *console.Registry, globalDSN, globalBaselineDir string, carry bool) []refreshRequest {
-	reqs, skipped := baselineRefreshTargets(registryEntries(reg), globalDSN, globalBaselineDir)
-	logSkippedRefreshTargets(skipped)
+	reqs, skipped, shared := baselineRefreshTargets(registryEntries(reg), globalDSN, globalBaselineDir)
+	logSkippedRefreshTargets(skipped, shared)
 	for i := range reqs {
 		reqs[i].CarryForwardUnchanged = carry
 	}
@@ -2116,9 +2122,17 @@ func registryEntries(reg *console.Registry) []console.ServerEntry {
 // the disk-space card in #1681), where a warning per page load would have been
 // log spam. The callers that dispatch work log the skip via
 // logSkippedRefreshTargets, preserving the old visibility.
-func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBaselineDir string) ([]refreshRequest, []string) {
+//
+// A registry server whose location another server writes too is skipped as
+// well, with its refusal (#1684): the fold would read the other's newest
+// snapshot and publish into the same folder. The command-line server counts
+// as a writer of its folder when it is a target here, and is never skipped
+// for it: the folder is its own startup flag.
+func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBaselineDir string) ([]refreshRequest, []string, []refreshSkip) {
 	var out []refreshRequest
 	var skippedS3Only []string
+	var shared []refreshSkip
+	cli := console.CommandLineWriter{Dir: globalBaselineDir, Writes: globalDSN != "" && globalBaselineDir != ""}
 	seen := map[string]bool{}
 	add := func(id, name, dsn, dir string) {
 		if dsn == "" || dir == "" || seen[id] {
@@ -2133,10 +2147,19 @@ func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBase
 			skippedS3Only = append(skippedS3Only, e.Name)
 			continue
 		}
+		if e.DSN != "" && e.BaselineDir != "" {
+			if err := console.SharedLocationRefusal(entries, e, cli); err != nil {
+				shared = append(shared, refreshSkip{name: e.Name, why: err.Error()})
+				continue
+			}
+		}
 		add(e.ID, e.Name, e.DSN, e.BaselineDir)
 	}
-	return out, skippedS3Only
+	return out, skippedS3Only, shared
 }
+
+// refreshSkip is a server the refresh leaves alone, and why.
+type refreshSkip struct{ name, why string }
 
 // logSkippedRefreshTargets is the warning half baselineRefreshTargets no
 // longer carries: a server with only an S3 baseline destination is skipped
@@ -2144,9 +2167,44 @@ func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBase
 // in-place S3 refresh is not something the loop can do, and an operator who
 // configured S3-only baselines and set the interval would otherwise see
 // nothing happen and no reason why.
-func logSkippedRefreshTargets(skipped []string) {
+func logSkippedRefreshTargets(skipped []string, shared []refreshSkip) {
+	for _, s := range sayChangedSharedSkips(shared) {
+		slog.Warn("snapshot refresh: server skipped, its snapshot location is shared", "server", s.name, "reason", s.why)
+	}
 	for _, name := range skipped {
 		slog.Warn("baseline refresh: server has an S3-only baseline destination and will not be refreshed "+
 			"(a refresh writes Parquet to a filesystem, so it needs a local directory to fold into)", "server", name)
 	}
+}
+
+var (
+	sharedSkipsMu sync.Mutex
+	// sharedSkipsSaid is the reason last logged per skipped server, so the
+	// skip is said when it starts or changes, not on every interval (#1684).
+	sharedSkipsSaid = map[string]string{}
+)
+
+// sayChangedSharedSkips returns the skips whose reason differs from the one
+// last said, and forgets the servers no longer skipped, so a skip that
+// clears and comes back is said again.
+func sayChangedSharedSkips(shared []refreshSkip) []refreshSkip {
+	sharedSkipsMu.Lock()
+	defer sharedSkipsMu.Unlock()
+	now := make(map[string]string, len(shared))
+	var out []refreshSkip
+	for _, s := range shared {
+		now[s.name] = s.why
+		if sharedSkipsSaid[s.name] != s.why {
+			out = append(out, s)
+		}
+	}
+	sharedSkipsSaid = now
+	return out
+}
+
+// resetSharedSkipsSaid forgets what was said; tests call it.
+func resetSharedSkipsSaid() {
+	sharedSkipsMu.Lock()
+	sharedSkipsSaid = map[string]string{}
+	sharedSkipsMu.Unlock()
 }

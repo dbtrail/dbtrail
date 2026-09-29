@@ -134,12 +134,12 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 }
 
 // hasOwnBackupLocation: the server has a backup location of its own, the one
-// a console-created backup writes to. The daemon-wide default does not count:
-// a backup refuses the shared store. The precheck and the Getting started
+// a console-created backup writes to. Since #1684 that is the entry as
+// stored: no daemon-wide default fills it in (a server that relied on one
+// was given it as its own at upgrade). The precheck and the Getting started
 // list's reason call it, and the Snapshots page strip (baselineContextStrip in
-// app.js) repeats the same raw emptiness test, so change them together. A
-// restore also refuses the shared store but needs a local Backup dir, and
-// does not use this.
+// app.js) repeats the same emptiness test, so change them together. A
+// restore needs a local Backup dir, and does not use this.
 func hasOwnBackupLocation(e ServerEntry) bool {
 	return e.BaselineDir != "" || e.BaselineS3 != ""
 }
@@ -288,6 +288,11 @@ type BaselineStatus struct {
 	// file it could not hold, or a write that found the disk full. A scheduled update refused this way must NOT
 	// fall back to a full backup: that one writes into the same directory.
 	DiskRefused bool `json:"disk_refused,omitempty"`
+	// ForeignSource: the job was refused because the snapshot it would build
+	// on was written by another writer, or its writer could not be told
+	// (#1684). The schedule does not answer it with a full read: that would
+	// publish into the same shared location.
+	ForeignSource bool `json:"foreign_source,omitempty"`
 }
 
 // handleBaselineTrigger enqueues an in-process baseline for the selected server.
@@ -307,6 +312,12 @@ func (s *Server) handleBaselineTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := baselineTriggerPrecheck(e); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// A location another server writes too is refused (#1684): the snapshot
+	// would land beside theirs with nothing saying whose it is.
+	if err := s.cm.reg.WriteRefusal(e); err != nil {
+		writeJSONError(w, http.StatusConflict, err.Error())
 		return
 	}
 
@@ -366,10 +377,9 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 	if e.BaselineDir == "" {
 		// Same constraint as the periodic refresh: the fold WRITES the new
 		// snapshot on disk (it reads the previous one from the bucket when the
-		// server has one, #1541), so it needs the SERVER'S OWN local directory. The daemon-level --baseline-dir is deliberately not
-		// a fallback here: it is a shared store, and folding this server's
-		// index onto another server's snapshots would publish a backup that
-		// belongs to neither.
+		// server has one, #1541), so it needs the SERVER'S OWN local
+		// directory. The daemon-level --baseline-dir backs no registry server
+		// since #1684.
 		if e.BaselineS3 != "" {
 			writeJSONError(w, http.StatusBadRequest,
 				"this server keeps its snapshots only in S3; point-in-time restore needs a local snapshot directory"+onPage(PageSnapshots))
@@ -377,6 +387,12 @@ func (s *Server) handleBaselineRestore(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONError(w, http.StatusBadRequest,
 			"this server has no snapshot directory of its own; set one first"+onPage(PageSnapshots))
+		return
+	}
+	// The fold writes into this folder and reads the newest snapshot there,
+	// which in a shared folder may be another server's (#1684).
+	if err := s.cm.reg.WriteRefusal(e); err != nil {
+		writeJSONError(w, http.StatusConflict, err.Error())
 		return
 	}
 	var body struct {

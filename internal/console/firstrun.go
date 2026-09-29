@@ -347,24 +347,31 @@ func (s *Server) handleFirstRun(w http.ResponseWriter, r *http.Request) {
 	}
 	in := firstRunInput{Monitor: s.monitorCtrl.Status(e.ID), Postgres: e.IsPostgres()}
 	loadFirstRunIndex(r.Context(), e.DSN, &in)
-	// A PostgreSQL server with no slot or publication lists no backup step,
-	// whether or not backups are on: capture cannot run for it either, so the
-	// capture steps are what is stuck, and a backup reason would point at the
-	// wrong fix. Checked first, because the precheck reports a missing
-	// location before the slot. A refusal this list has no words for lists no
-	// step rather than blame the location.
+	s.firstRunBackup(e, &in)
+	s.checkOwnSnapshot(r.Context(), e, &in)
+	writeJSON(w, http.StatusOK, firstRunSteps(in))
+}
+
+// firstRunBackup fills the backup half of the first-run input.
+//
+// A PostgreSQL server with no slot or publication lists no backup step,
+// whether or not backups are on: capture cannot run for it either, so the
+// capture steps are what is stuck, and a backup reason would point at the
+// wrong fix. Checked first, because the precheck reports a missing
+// location before the slot. A refusal this list has no words for lists no
+// step rather than blame the location; a shared location (#1684), whose
+// every write is refused, is one.
+func (s *Server) firstRunBackup(e ServerEntry, in *firstRunInput) {
 	switch {
 	case pgSourceIncomplete(e):
 	case s.baselineCtrl == nil:
 		in.BackupOff, in.BackupNoLocation = true, !hasOwnBackupLocation(e)
-	case baselineTriggerPrecheck(e) == nil:
+	case baselineTriggerPrecheck(e) == nil && s.cm.reg.WriteRefusal(e) == nil:
 		b := s.baselineCtrl.Status(e.ID)
 		in.Backup = &b
 	case !hasOwnBackupLocation(e):
 		in.BackupNoLocation = true
 	}
-	s.checkOwnSnapshot(r.Context(), e, &in)
-	writeJSON(w, http.StatusOK, firstRunSteps(in))
 }
 
 // snapshotCheckTTL is how long one answer about a server's own backup

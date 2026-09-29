@@ -92,6 +92,11 @@ type serverDTO struct {
 	// Reconstruct is the per-server Time-travel capability, derived from pure
 	// config (no connection is opened to compute it).
 	Reconstruct bool `json:"reconstruct"`
+	// WriteRefusal is why no snapshot may be written for this server: its
+	// location is one another server writes too (#1684). The page shows it
+	// instead of offering Read database now and the restore, which would
+	// answer 409. Empty when it may write.
+	WriteRefusal string `json:"write_refusal,omitempty"`
 	Editable    bool `json:"editable"`
 	Deletable   bool `json:"deletable"`
 	// Connected reports whether a live connection is currently cached.
@@ -338,11 +343,11 @@ func (s *Server) buildNewEntry(req serverRequest) (ServerEntry, bool, error) {
 }
 
 // newLocalCopy is what a create asked of its local copy (#1681): want is
-// the answer (omitted counts as yes), asked whether it was given at all.
-type newLocalCopy struct{ want, asked bool }
+// the answer (omitted counts as yes).
+type newLocalCopy struct{ want bool }
 
 func localCopyOf(req serverRequest) newLocalCopy {
-	return newLocalCopy{want: req.LocalCopy == nil || *req.LocalCopy, asked: req.LocalCopy != nil}
+	return newLocalCopy{want: req.LocalCopy == nil || *req.LocalCopy}
 }
 
 // persistNewEntry appends the entry and, when its index is derived, fills that
@@ -406,16 +411,14 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 			return ServerEntry{}, created, fmt.Errorf("could not choose where this server's changes are kept: %w", dErr)
 		}
 	}
-	// A daemon started with its own --baseline-dir/--baseline-s3 backs a
-	// server with no location of its own (#1010), and a create that does
-	// not answer the question keeps that: giving the server a folder would
-	// silently switch its reads off the daemon default. #1684 removes that
-	// fallback; until then only an explicit "yes" overrides it.
-	daemonDefault := s.cm.defaultBaselineDir != "" || s.cm.defaultBaselineS3 != ""
+	// A daemon started with its own --baseline-dir/--baseline-s3 no longer
+	// backs a server with no location of its own (#1684), so a create that
+	// does not answer gets a folder of its own there too: left empty, the
+	// server would have no snapshots at all.
 	// Only where DBTrail takes the snapshots: the read-only serve creates no
 	// folders, so a server it adds gets none and answers no until it is
 	// given one.
-	if s.mayCreateFolders && local.want && added.BaselineDir == "" && (local.asked || !daemonDefault) {
+	if s.mayCreateFolders && local.want && added.BaselineDir == "" {
 		if def := s.cm.reg.DefaultBaselineDir(added.ID); def != "" {
 			fresh := !dirExists(def)
 			if err := prepareLocalSnapshotDir(def); err != nil {
@@ -1481,6 +1484,7 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		S3AccessKeyID:        e.S3AccessKeyID,
 		HasS3SecretAccessKey: e.S3SecretAccessKey != "",
 		Reconstruct:          s.cm.capability(e),
+		WriteRefusal:         refusalText(s.cm.reg.WriteRefusal(e)),
 		Editable:             !s.cm.reg.ReadOnly(),
 		Deletable:            !s.cm.reg.ReadOnly(),
 		Connected:            s.cm.cached(e.ID),

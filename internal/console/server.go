@@ -600,15 +600,14 @@ func New(cfg Config) (*Server, error) {
 	s.managedTok.initFromDisk(mcpTokenPath, mcpTokFile)
 	s.cm.hideBoot = cfg.HideBoot
 	s.bootCaptureFilter = cfg.BootCaptureFilter
-	// Registry entries with no baseline of their own (every UI/API-added
-	// server — the add form has no baseline field) fall back to the process
-	// flags, so a daemon started with --baseline-dir/--baseline-s3 enables
-	// Time-travel/reconstruct/verify for them too, not just the boot entry
-	// (#1010).
+	// The process flags are the command-line server's location. They back
+	// no registry server since #1684; the ones that read through them were
+	// given the value on upgrade (MigrateProcessBaselineLocation, run where
+	// the registry is loaded, before any loop reads it).
 	s.cm.defaultBaselineDir = cfg.BaselineDir
 	s.cm.defaultBaselineS3 = cfg.BaselineS3
-	// Every server that inherits that bucket reads it with the process-wide
-	// endpoint, so no per-server store may claim it (#1575).
+	// That bucket is read with the process-wide endpoint, so no per-server
+	// store may claim it (#1575).
 	if cfg.Registry != nil && cfg.BaselineS3 != "" {
 		cfg.Registry.SetProcessS3Location(DaemonBaselineS3Label, cfg.BaselineS3)
 	}

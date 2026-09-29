@@ -14,22 +14,21 @@ func TestScheduledVerifyRequest_modeSelection(t *testing.T) {
 		return console.ServerEntry{ID: "id1", Name: "wp", DSN: "dsn", BaselineDir: dir, BaselineS3: s3}
 	}
 	cases := []struct {
-		name             string
-		e                console.ServerEntry
-		globalDir, globS string
-		wantMode         console.VerifyMode
-		wantDir, wantS3  string
+		name            string
+		e               console.ServerEntry
+		wantMode        console.VerifyMode
+		wantDir, wantS3 string
 	}{
-		{"own baseline dir", entry("/b", ""), "/g", "s3://g", console.VerifyModeBaselineAnchored, "/b", ""},
-		{"global fallback", entry("", ""), "/g", "s3://g", console.VerifyModeBaselineAnchored, "/g", "s3://g"},
-		// All-or-nothing like withBaselineDefaults (#1010): an entry with its
-		// own S3 must not inherit the global dir on top.
-		{"own S3 never mixes with global dir", entry("", "s3://own"), "/g", "", console.VerifyModeBaselineAnchored, "", "s3://own"},
-		{"no baseline anywhere → recover-inputs", entry("", ""), "", "", console.VerifyModeRecoverInputs, "", ""},
+		{"own baseline dir", entry("/b", ""), console.VerifyModeBaselineAnchored, "/b", ""},
+		{"own S3", entry("", "s3://own"), console.VerifyModeBaselineAnchored, "", "s3://own"},
+		{"both", entry("/b", "s3://own"), console.VerifyModeBaselineAnchored, "/b", "s3://own"},
+		// #1684: the daemon's --baseline-dir no longer backs a server with
+		// none of its own, so the schedule checks what it can without one.
+		{"no location of its own → recover-inputs", entry("", ""), console.VerifyModeRecoverInputs, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := scheduledVerifyRequest(tc.e, []string{"s.t"}, tc.globalDir, tc.globS)
+			req := scheduledVerifyRequest(tc.e, []string{"s.t"})
 			if req.Mode != tc.wantMode || req.BaselineDir != tc.wantDir || req.BaselineS3 != tc.wantS3 {
 				t.Fatalf("got mode=%s dir=%q s3=%q, want mode=%s dir=%q s3=%q",
 					req.Mode, req.BaselineDir, req.BaselineS3, tc.wantMode, tc.wantDir, tc.wantS3)

@@ -110,14 +110,8 @@ func (s *Server) handleSQLExportTrigger(w http.ResponseWriter, r *http.Request) 
 			"custom .sql exports are unavailable while an access-control profile is active: baseline reads aren't redacted")
 		return
 	}
-	// An entry with no baseline of its own inherits the process-wide
-	// --baseline-dir/--baseline-s3 (#1010), like the verify trigger: the
-	// Backups listing the card gates on applies the same fallback, so the
-	// trigger must accept what the UI was told is configured. The restore
-	// trigger's shared-store refusal is about PUBLISHING into that store;
-	// this build publishes nothing, and the listing and time-travel already
-	// attribute those snapshots to this entry.
-	e = s.cm.withBaselineDefaults(e)
+	// The entry's own location, the one the listing the card gates on reads:
+	// the process-wide one backs no registry server since #1684.
 	src := e.BaselineDir
 	if src == "" {
 		src = e.BaselineS3

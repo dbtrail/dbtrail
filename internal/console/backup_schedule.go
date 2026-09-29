@@ -347,6 +347,18 @@ type BackupScheduleGates struct {
 	// the dearer producer (#1721). Nil: never cut over (a process with no
 	// measurements, or a test).
 	Window BackupWindowProbe
+	// WriteRefusal is why e may not write snapshots at all: its location is
+	// one another server writes too (#1684, Registry.WriteRefusal). It beats
+	// every producer, the update included. Nil: no such check (a test).
+	WriteRefusal func(ServerEntry) error
+}
+
+// writeRefused applies gates.WriteRefusal, nil-safe.
+func (g BackupScheduleGates) writeRefused(e ServerEntry) error {
+	if g.WriteRefusal == nil {
+		return nil
+	}
+	return g.WriteRefusal(e)
 }
 
 // BackupWindow is what a scheduled update would have to fold, as the daemon
@@ -626,7 +638,10 @@ func FullBackupPossible(e ServerEntry, gates BackupScheduleGates) error {
 		// consults the MySQL lock mode.
 		return errors.New(gates.FullBackupsErr)
 	}
-	return baselineTriggerPrecheck(e)
+	if err := baselineTriggerPrecheck(e); err != nil {
+		return err
+	}
+	return gates.writeRefused(e)
 }
 
 // BaselineFoldSource is where a fold for e reads its PREVIOUS snapshot from,
@@ -787,6 +802,11 @@ func CheckBackupSchedule(e ServerEntry, sched BackupSchedule, gates BackupSchedu
 	if !gates.LoopRunning {
 		return notRunnable(scheduleRefusalNoLoop)
 	}
+	// Both producers write into the location, so a shared one refuses them
+	// both (#1684).
+	if err := gates.writeRefused(e); err != nil {
+		return notRunnable(err.Error())
+	}
 	fullErr := FullBackupPossible(e, gates)
 	if fullErr == nil {
 		return nil
@@ -861,6 +881,9 @@ func ChooseBackupMethod(ctx context.Context, e ServerEntry, gates BackupSchedule
 // loop passes its tick, so the age rule reads the slot's clock and a test
 // can pin it.
 func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupScheduleGates, now time.Time) (method, why string, err error) {
+	if werr := gates.writeRefused(e); werr != nil {
+		return BackupMethodFull, "", werr
+	}
 	fullErr := FullBackupPossible(e, gates)
 	rebuildErr := rebuildPossible(e)
 	if rebuildErr != nil {

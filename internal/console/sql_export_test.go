@@ -173,18 +173,23 @@ func TestSQLExport_gates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// An entry with no baseline of its own inherits the process-wide
-	// default (#1010): the Backups listing the card gates on applies the
-	// same fallback, so the trigger must accept it — refusing here made
-	// every Build click 400 on the shipped compose deployment.
+	// An entry with no location of its own no longer inherits the
+	// process-wide default (#1684): refused, like the listing the card
+	// gates on, which reads the same entry. The server that relied on the
+	// default is given it at startup, and then it builds from there.
 	srvDef := newSQLExportServerWithDefault(t, stub, "/proc-wide/baselines")
 	bareDef, err := srvDef.cm.reg.Add(ServerEntry{Name: "bare2", DSN: "i:p@tcp(h:3306)/idx"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	rec, body = doServersReq(t, srvDef, "POST", "/api/servers/"+bareDef.ID+"/sql-export", `{"at":"2026-06-10 12:00:00"}`)
+	if rec.Code != 400 || !strings.Contains(string(body), "no snapshot location") {
+		t.Fatalf("no location of its own on a daemon with a default: code=%d body=%s, want 400", rec.Code, body)
+	}
+	srvDef.cm.reg.MigrateProcessBaselineLocation("/proc-wide/baselines", "")
+	rec, body = doServersReq(t, srvDef, "POST", "/api/servers/"+bareDef.ID+"/sql-export", `{"at":"2026-06-10 12:00:00"}`)
 	if rec.Code != 202 || stub.last.BaselineSrc != "/proc-wide/baselines" {
-		t.Fatalf("inherited default: code=%d body=%s src=%q, want 202 with the process-wide dir", rec.Code, body, stub.last.BaselineSrc)
+		t.Fatalf("migrated: code=%d body=%s src=%q, want 202 with the migrated dir", rec.Code, body, stub.last.BaselineSrc)
 	}
 
 	// Unlike the point-in-time restore, an S3-only backup store qualifies:

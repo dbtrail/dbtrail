@@ -135,7 +135,8 @@ func TestBaselinesAPI_locationOnly(t *testing.T) {
 // here points at an index nobody listens on, so an answer that went through
 // the index connection comes back 502. And the answer is the location the
 // server's bundle carries (the listing's primary source): its own directory,
-// else its own bucket, else the daemon's default, never a mix.
+// else its own bucket, else none. The daemon's default backs no registry
+// server since #1684.
 func TestBaselinesAPI_locationOnlyRegistry(t *testing.T) {
 	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
 	if err != nil {
@@ -150,7 +151,7 @@ func TestBaselinesAPI_locationOnlyRegistry(t *testing.T) {
 		entry     ServerEntry
 		src, kind string
 	}{
-		{ServerEntry{Name: "inherits", DSN: deadIndex}, "/daemon/baselines", "dir"},
+		{ServerEntry{Name: "no-location", DSN: deadIndex}, "", ""},
 		{ServerEntry{Name: "own-dir", DSN: deadIndex, BaselineDir: "/own/dir"}, "/own/dir", "dir"},
 		{ServerEntry{Name: "own-s3", DSN: deadIndex, BaselineS3: "s3://own-bucket/b"}, "s3://own-bucket/b", "s3"},
 		{ServerEntry{Name: "both", DSN: deadIndex, BaselineDir: "/both/dir", BaselineS3: "s3://both-bucket/b"}, "/both/dir", "dir"},
@@ -172,13 +173,13 @@ func TestBaselinesAPI_locationOnlyRegistry(t *testing.T) {
 		if err := json.Unmarshal(body, &got); err != nil {
 			t.Fatal(err)
 		}
-		if !got.Configured || got.Source != tc.src || got.Kind != tc.kind {
+		if got.Configured != (tc.src != "") || got.Source != tc.src || got.Kind != tc.kind {
 			t.Errorf("%s: got %+v, want %s source %q", tc.entry.Name, got, tc.kind, tc.src)
 		}
 		// The same location the bundle a lazy open would publish carries (the
 		// listing reads the bundle), derived here without the dial it needs.
 		entry, _ := reg.Get(ids[i])
-		b := newBundleDerived(nil, "", srv.cm.withBaselineDefaults(entry), false)
+		b := newBundleDerived(nil, "", entry, false)
 		if b.baselineSrc != got.Source {
 			t.Errorf("%s: location_only %q, the bundle carries %q", tc.entry.Name, got.Source, b.baselineSrc)
 		}
