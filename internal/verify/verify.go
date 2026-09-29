@@ -566,6 +566,16 @@ func deferredValueUnresolved(v any, c metadata.ColumnMeta, binariesTyped bool) b
 		// event side would turn today's honest Inconclusive into a conclusive
 		// false MISMATCH on identical data.
 		return true
+	case "uuid", "inet4", "inet6":
+		// MariaDB UUID/INET: permanently unresolved. The source SELECT and the
+		// mydumper baseline render the TEXT form ('12345678-...', '10.0.0.0'),
+		// while the event image holds base64 of the binary form (the
+		// decode pass does not know these types). And events captured before
+		// metadata.MapRow turned them into []byte hold damaged raw text
+		// (invalid UTF-8 replaced with U+FFFD), so the same value has two
+		// event spellings across that upgrade. Either difference would be a
+		// conclusive false MISMATCH; unsure means unresolved.
+		return true
 	default:
 		// isDeferredType enumerates every deferred type in the cases above;
 		// anything else reaching here is unknown — unsure means unresolved.
@@ -651,7 +661,10 @@ func isDeferredType(dataType string) bool {
 		// MySQL 8.0.11+ (WL#2388) reports a GEOMETRYCOLLECTION column's DATA_TYPE
 		// as "geomcollection"; MariaDB and pre-8.0.11 report "geometrycollection".
 		"geometrycollection", "geomcollection",
-		"vector":
+		"vector",
+		// MariaDB UUID/INET4/INET6: permanently unresolved (see
+		// deferredValueUnresolved's uuid case).
+		"uuid", "inet4", "inet6":
 		return true
 	}
 	return false
