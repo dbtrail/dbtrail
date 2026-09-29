@@ -27,6 +27,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/serverid"
@@ -62,6 +63,7 @@ Examples:
 
 var (
 	upSourceDSN             string
+	upSourceFlavor          string
 	upIndexDSN              string
 	upServerID              uint32
 	upSchemas               string
@@ -164,6 +166,7 @@ var watchEnvBindings = []struct {
 }{
 	{"index-dsn", "BINTRAIL_INDEX_DSN"},
 	{"source-dsn", "BINTRAIL_SOURCE_DSN"},
+	{"source-flavor", "BINTRAIL_SOURCE_FLAVOR"},
 	{"schemas", "BINTRAIL_SCHEMAS"},
 	{"tables", "BINTRAIL_TABLES"},
 	{"server-id", "BINTRAIL_SERVER_ID"},
@@ -203,6 +206,7 @@ func bindWatchEnv(cmd *cobra.Command) {
 
 func init() {
 	watchCmd.Flags().StringVar(&upSourceDSN, "source-dsn", "", "DSN for the source MySQL server (omit to start source-less and add servers from the UI)")
+	watchCmd.Flags().StringVar(&upSourceFlavor, "source-flavor", "", "Flavor of the --source-dsn server: mysql or mariadb. Empty (default) detects it from the server; a value the server contradicts refuses to start")
 	watchCmd.Flags().StringVar(&upIndexDSN, "index-dsn", "", "DSN for the index MySQL database (required)")
 	watchCmd.Flags().Uint32Var(&upServerID, "server-id", 0, "MySQL replica server ID (default: hash of source host:user:dbname)")
 	watchCmd.Flags().StringVar(&upSchemas, "schemas", "", "Comma-separated schemas to index (default: all user schemas)")
@@ -275,6 +279,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// before any phase runs. The loop itself starts with phase 3. The Changed
 	// check covers flag and env alike (bindWatchEnv marks env-set flags
 	// Changed); an explicitly-chosen retention disables the upgrade guard.
+	if _, err := metadata.NormalizeDeclaredFlavor(upSourceFlavor); err != nil {
+		return fmt.Errorf("--source-flavor: %w", err)
+	}
 	var err error
 	upRotationCfg, err = rotation.ParseSettings(upRotateRetain, upRotateInterval, upRotateAddFuture,
 		cmd.Flags().Changed("rotate-retain"))
@@ -833,11 +840,14 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// never-fatal, daemon-scoped contract as `bintrail up` (cliapp/up.go) and the
 	// built-in rotation loop above. The supervised registry sources get their own
 	// jobs from the monitor supervisor (consoleapp/monitor.go); this call covers
-	// only the single main source `watch --source-dsn` streams. Flavor is the
-	// value the main stream below actually runs with (streamCfg.Flavor). No-op in
-	// the stock binary.
+	// only the single main source `watch --source-dsn` streams. They start once
+	// the stream has asked the source what it is, with the flavor capture runs
+	// as; FlavorOnce keeps a write-deadline restart from starting them again.
+	// No-op in the stock binary.
 	streamCfg := watchStreamConfig(serverID)
-	ext.RunSourceJobs(ctx, mainSourceJobInfo(upSourceDSN, upIndexDSN, streamCfg.Flavor))
+	streamCfg.Hooks = &streamrun.Hooks{OnFlavorResolved: streamrun.FlavorOnce(func(flavor string) {
+		ext.RunSourceJobs(ctx, mainSourceJobInfo(upSourceDSN, upIndexDSN, flavor))
+	})}
 
 	streamErr := runMainStreamWithWriteDeadlineRetry(ctx, streamCfg)
 	stop()                // drain the console even if the stream returned without a signal
@@ -860,6 +870,7 @@ func watchStreamConfig(serverID uint32) streamrun.Config {
 	return streamrun.Config{
 		IndexDSN:   upIndexDSN,
 		SourceDSN:  upSourceDSN,
+		Flavor:     upSourceFlavor,
 		ServerID:   serverID,
 		StartFile:  "",
 		StartPos:   4,
@@ -884,17 +895,9 @@ func watchStreamConfig(serverID uint32) streamrun.Config {
 }
 
 // mainSourceJobInfo builds the ext.SourceJobInfo for `watch`'s main (non-registry)
-// source. Extracted from runUpStreamWithConsole so the flavor resolution is
-// unit-testable without a live daemon. streamFlavor is watchStreamConfig's
-// Flavor: `watch` exposes no --source-flavor for its main source, so it is empty
-// and streamrun.One normalizes it to "mysql" internally; we default it to the
-// same canonical value here so a registered job sees the non-empty flavor
-// `bintrail up` supplies (never "").
-func mainSourceJobInfo(sourceDSN, indexDSN, streamFlavor string) ext.SourceJobInfo {
-	flavor := streamFlavor
-	if flavor == "" {
-		flavor = console.FlavorMySQL
-	}
+// source. flavor is the one the main stream resolved (OnFlavorResolved), never
+// the declared --source-flavor, which is empty when detection decides.
+func mainSourceJobInfo(sourceDSN, indexDSN, flavor string) ext.SourceJobInfo {
 	return ext.SourceJobInfo{SourceDSN: sourceDSN, IndexDSN: indexDSN, Flavor: flavor}
 }
 

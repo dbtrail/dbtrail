@@ -94,7 +94,7 @@ var envSections = []envSection{
 		Bindings: []envTemplateEntry{
 			{"BINTRAIL_INDEX_DSN", "user:pass@tcp(host:3306)/binlog_index"},
 			{"BINTRAIL_SOURCE_DSN", "user:pass@tcp(host:3306)/myapp"},
-			{"BINTRAIL_SOURCE_FLAVOR", "mysql"},
+			{"BINTRAIL_SOURCE_FLAVOR", ""},
 		},
 	},
 	{

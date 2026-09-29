@@ -89,6 +89,9 @@ type serverDTO struct {
 	// MonitorPhaseDetail qualifies MonitorPhase for display (#1708), see
 	// MonitorStatus.PhaseDetail.
 	MonitorPhaseDetail string `json:"monitor_phase_detail,omitempty"`
+	// MonitorWarning is MonitorStatus.FlavorWarning: the server contradicts
+	// the Source type saved with this entry, and capture follows the server.
+	MonitorWarning string `json:"monitor_warning,omitempty"`
 	// Reconstruct is the per-server Time-travel capability, derived from pure
 	// config (no connection is opened to compute it).
 	Reconstruct bool `json:"reconstruct"`
@@ -1500,6 +1503,7 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 	if s.monitorCtrl != nil && e.SourceDSN != "" {
 		st := s.monitorCtrl.Status(e.ID)
 		dto.MonitorState, dto.MonitorPhase, dto.MonitorPhaseDetail = st.State, st.Phase, st.PhaseDetail
+		dto.MonitorWarning = st.FlavorWarning
 	}
 	return dto
 }

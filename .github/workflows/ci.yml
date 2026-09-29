@@ -374,6 +374,10 @@ jobs:
             || { echo "FATAL: caching_sha2 cold-auth seam test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationCrashRestartExactlyOnce_position' /tmp/mysql-it.out \
             || { echo "FATAL: crash→restart exactly-once test did not run — false-green tripwire" >&2; exit 1; }
+          grep -q -- '--- PASS: TestOne_SourceFlavor_mysqlDeclaredMariaDBRefuses ' /tmp/mysql-it.out \
+            || { echo "FATAL: source-flavor refusal test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestOne_SourceFlavor_mysqlDetectedWhenUndeclared ' /tmp/mysql-it.out \
+            || { echo "FATAL: source-flavor detection test did not run (false-green tripwire)" >&2; exit 1; }
 
       # The S3 tripwire, kept apart from the step above so a store that did
       # not start is red even when every other test passed. It runs when the
@@ -487,9 +491,27 @@ jobs:
       # -run selects the MariaDB-named tests across all packages; -p 1 serializes
       # so the shared binlog window stays single-writer (same rationale as the
       # MySQL integration job).
+      #
+      # Tests pick themselves by NAME here, so a rename, a build-tag drift or a
+      # skip would drop them from this job and it would still exit 0. The
+      # tripwire below asserts the key MariaDB-source tests actually PASSED
+      # (-v prints the --- PASS lines; pipefail keeps go test's exit code
+      # through the tee), the same guard the MySQL job carries.
       - name: MariaDB-source integration tests
         if: env.RUN == 'true'
-        run: go test -tags=integration -race -p 1 -count=1 -run 'MariaDB|Mariadb|mariadb|Flavor|FourColumns' ./...
+        run: |
+          set -o pipefail
+          go test -tags=integration -race -p 1 -count=1 -v -run 'MariaDB|Mariadb|mariadb|Flavor|FourColumns' ./... 2>&1 | tee /tmp/mariadb-it.out
+          for name in \
+            TestStreamLoop_liveReplication_mariadb \
+            TestStreamLoop_mariadbResumeDedupDoesNotDeleteIndexedRows \
+            TestOne_MariaDB_flavorDetectedWhenUndeclared \
+            TestOne_MariaDB_declaredMySQLRefuses \
+            TestOne_MariaDB_resumeOldMySQLDefaultCheckpoint \
+            TestIntegrationMonitorRegistrySourceMariaDBDetected; do
+            grep -q -- "--- PASS: $name " /tmp/mariadb-it.out \
+              || { echo "FATAL: $name did not run and pass in the MariaDB-source job (false-green tripwire)" >&2; exit 1; }
+          done
 
   integration-postgres-source:
     # PostgreSQL-as-source (#534). Like integration-mariadb-source, this pairs a

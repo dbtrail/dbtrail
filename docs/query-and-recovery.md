@@ -200,7 +200,7 @@ SET PERSIST binlog_rows_query_log_events = ON;
 SET GLOBAL binlog_annotate_row_events = ON;
 ```
 
-`bintrail doctor` reports the setting. On MariaDB, **streaming** capture additionally needs `--source-flavor mariadb` — the server only forwards ANNOTATE events to a replica that asks for them (file-based `bintrail index` reads them regardless). Events indexed while capture is off (and all events indexed before upgrading) simply have `NULL` in both columns — nothing else changes.
+`bintrail doctor` reports the setting. On MariaDB, the server only forwards ANNOTATE events to a replica that asks for them; streaming capture asks whenever it runs as MariaDB, which it does when it detects a MariaDB server (file-based `bintrail index` reads them regardless). Events indexed while capture is off (and all events indexed before upgrading) simply have `NULL` in both columns; nothing else changes.
 
 Notes:
 

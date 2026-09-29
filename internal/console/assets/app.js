@@ -1948,6 +1948,13 @@ function ovFlowModel(inp) {
     }
   }
 
+  // The Source type saved with a server is a hint: capture follows what the
+  // server reports, and says so when the two disagree. Never a failure.
+  if (srv && srv.monitor_warning) {
+    cards.push({ kind: "source-type", key: sid + "|source-type|" + srv.monitor_warning, tone: "warn",
+      title: "Source type does not match the server", lines: [srv.monitor_warning], actions: [] });
+  }
+
   // The source box says "up to date", like the card, only when the source
   // was asked and capture holds all it wrote (#1794). Not "quiet": equal
   // sets prove capture read all it can, not that nothing was written to

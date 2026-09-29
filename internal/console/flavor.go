@@ -10,11 +10,12 @@ import (
 
 // Source-family flavors. The registry records which capture engine a source
 // needs: MySQL and MariaDB both index through the go-mysql binlog path (MariaDB
-// differs only by GTID dialect at stream time, --source-flavor mariadb), while
+// differs only by GTID dialect at stream time), while
 // PostgreSQL indexes through pgstreamrun. The string values are deliberately the
 // SAME literals stream_state.flavor stores (see internal/query.SourceFlavor and
-// recovery.DialectForFlavor) so a registry-declared flavor and the index-read
-// flavor never disagree. Empty is treated as MySQL so every pre-#1019 registry
+// recovery.DialectForFlavor). For MySQL and MariaDB the saved value is a hint:
+// capture asks the server and follows it, and the console warns when the two
+// disagree, so the saved label and stream_state.flavor CAN differ. Empty is treated as MySQL so every pre-#1019 registry
 // entry keeps working — the same additive discipline as an empty SSLMode.
 const (
 	FlavorMySQL    = "mysql"

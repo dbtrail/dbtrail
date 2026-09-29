@@ -571,8 +571,8 @@ func (o Options) ValidateStatementFilter() error {
 // It exists to disambiguate the one result a digest filter cannot explain by
 // itself: ZERO rows. That is either "this statement touched nothing" or "no
 // event here could have carried a digest" — the source was not logging
-// statements (MySQL defaults binlog_rows_query_log_events OFF), a MariaDB
-// stream ran without --source-flavor mariadb, the window predates #699, or the
+// statements (MySQL defaults binlog_rows_query_log_events OFF), an older
+// version captured a MariaDB as MySQL (before flavor detection), the window predates #699, or the
 // source is Postgres, whose capture plane writes the column never. Those are
 // opposite answers to a forensic question and they print identically.
 //
@@ -624,7 +624,7 @@ func DigestCaptureInWindow(ctx context.Context, db *sql.DB, opts Options) (bool,
 // Shared so the CLI's stderr line and the MCP notice cannot drift into saying
 // different things about the same finding.
 const NoDigestCaptureWarning = "Warning: no event in this window carries a statement digest, so this empty result does NOT mean the statement touched nothing. " +
-	"The source was not logging statements when these events were captured (MySQL: binlog_rows_query_log_events, MariaDB: binlog_annotate_row_events + --source-flavor mariadb; PostgreSQL sources never populate it)."
+	"The source was not logging statements when these events were captured (MySQL: binlog_rows_query_log_events, MariaDB: binlog_annotate_row_events, and older versions that captured a MariaDB as MySQL did not collect it; PostgreSQL sources never populate it)."
 
 // NormalizeQueryHash canonicalises a user-supplied statement digest to the form
 // stored in binlog_events.query_hash: 64 lowercase hex characters, as produced

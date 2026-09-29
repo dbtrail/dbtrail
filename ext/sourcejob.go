@@ -5,11 +5,10 @@ import (
 	"log/slog"
 )
 
-// SourceJobInfo describes one capture source at daemon startup, handed to
-// every registered source job. Flavor names the source family; core wiring
-// currently only ever carries "mysql" or "mariadb" (the flavor the daemon
-// streams with; `bintrail agent` has no flavor flag and always reports
-// "mysql"). Both DSNs are populated by every core wiring point: a job that
+// SourceJobInfo describes one capture source, handed to every registered
+// source job. Flavor names the source family the capture actually runs as:
+// "mysql" or "mariadb" as detected from the server (or declared, when the
+// server could not be asked), or "postgres". It is never empty. Both DSNs are populated by every core wiring point: a job that
 // needs somewhere to persist what it observes can rely on IndexDSN being set.
 type SourceJobInfo struct {
 	SourceDSN string
@@ -37,8 +36,9 @@ func RegisterSourceJob(job func(ctx context.Context, src SourceJobInfo)) {
 
 // RunSourceJobs launches every registered source job, each on its own
 // goroutine, and returns immediately. Called by the core once per capture
-// source at daemon startup, with a context bound to the daemon lifetime —
-// the passed ctx
+// source. For a MySQL or MariaDB source that happens once the capture has
+// asked the server what it is, so it can come later than daemon startup
+// (the source was down) or not at all (capture refused the flavor). The passed ctx
 // bounds the jobs' lifetime. Jobs are secondary and must never be fatal to
 // the daemon; the core enforces that here: a panicking job is recovered and
 // logged, never propagated to the stream, and a slow job cannot block

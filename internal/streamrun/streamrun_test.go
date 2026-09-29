@@ -366,25 +366,43 @@ func TestResolveStartForFlavor_resumeMariaDBGTID(t *testing.T) {
 	}
 }
 
-// TestResolveStartForFlavor_flavorMismatchErrors verifies that resuming a saved
-// checkpoint under a different source flavor is rejected (latent-corruption
-// guard): the saved set would be parsed as one flavor while the syncer handshake
-// and the next checkpoint use another. A legacy checkpoint (empty flavor) adopts
-// the requested flavor instead of erroring.
+// TestResolveStartForFlavor_flavorMismatchErrors verifies what happens when the
+// saved checkpoint's flavor disagrees with the flavor the server was detected
+// as. A GTID checkpoint refuses: the saved set is written in one dialect and
+// cannot be parsed in the other, so only --reset gets past it. A position
+// checkpoint follows the server: binlog file and offset mean the same thing in
+// both flavors, and the typical case is a MariaDB that an older build captured
+// under the old "mysql" default. A legacy checkpoint (empty flavor) adopts too.
 func TestResolveStartForFlavor_flavorMismatchErrors(t *testing.T) {
-	// Saved as mariadb, requested mysql → error (covers GTID mode).
+	// Saved GTID set as mariadb, server is mysql: refuse and name --reset.
 	mdb := &streamState{mode: "gtid", gtidSet: "0-1-100", flavor: gomysql.MariaDBFlavor}
-	if _, _, _, _, _, err := resolveStartForFlavor("", "", 0, mdb, gomysql.MySQLFlavor); err == nil {
-		t.Error("expected error resuming a mariadb checkpoint under mysql flavor")
+	_, _, _, _, _, err := resolveStartForFlavor("", "", 0, mdb, gomysql.MySQLFlavor)
+	if err == nil || !strings.Contains(err.Error(), "--reset") {
+		t.Errorf("GTID checkpoint under another flavor must refuse and name --reset, got %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "--source-flavor mariadb") {
+		t.Errorf("must not advise a --source-flavor that detection would refuse: %v", err)
+	}
+	t.Logf("gtid refusal: %v", err)
+
+	// Saved GTID set as mysql, server is mariadb: same refusal.
+	myg := &streamState{mode: "gtid", gtidSet: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5", flavor: gomysql.MySQLFlavor}
+	if _, _, _, _, _, err := resolveStartForFlavor("", "", 0, myg, gomysql.MariaDBFlavor); err == nil {
+		t.Error("expected a refusal resuming a mysql GTID checkpoint on a mariadb server")
 	}
 
-	// Saved as mysql, requested mariadb → error (covers position mode).
-	my := &streamState{mode: "position", binlogFile: "binlog.000001", binlogPos: 4, flavor: gomysql.MySQLFlavor}
-	if _, _, _, _, _, err := resolveStartForFlavor("", "", 0, my, gomysql.MariaDBFlavor); err == nil {
-		t.Error("expected error resuming a mysql checkpoint under mariadb flavor")
+	// Saved position as mysql (old default), server is mariadb: resume at the
+	// saved position under the detected flavor.
+	my := &streamState{mode: "position", binlogFile: "mariadb-bin.000003", binlogPos: 1234, flavor: gomysql.MySQLFlavor}
+	mode, file, _, pos, _, err := resolveStartForFlavor("", "", 0, my, gomysql.MariaDBFlavor)
+	if err != nil {
+		t.Fatalf("a position checkpoint should follow the detected flavor, got %v", err)
+	}
+	if mode != "position" || file != "mariadb-bin.000003" || pos != 1234 {
+		t.Errorf("resume point = %s %s:%d, want position mariadb-bin.000003:1234", mode, file, pos)
 	}
 
-	// Legacy checkpoint (empty flavor) adopts the requested flavor — no error.
+	// Legacy checkpoint (empty flavor) adopts the requested flavor, no error.
 	legacy := &streamState{mode: "position", binlogFile: "binlog.000001", binlogPos: 4}
 	if _, _, _, _, _, err := resolveStartForFlavor("", "", 0, legacy, gomysql.MariaDBFlavor); err != nil {
 		t.Errorf("legacy checkpoint (empty flavor) should adopt requested flavor, got error: %v", err)
@@ -1881,3 +1899,17 @@ func TestCheckpointPosition_positionFallback(t *testing.T) {
 // against. Named rather than a bare 0 so a reader of those call sites sees
 // which behaviour is being pinned.
 const noDedupFloor = int64(0)
+
+// TestFlavorOnce pins the restart-loop guard on OnFlavorResolved: a caller that
+// re-runs One on the same hooks starts its flavor-dependent work once, with
+// the first resolved flavor.
+func TestFlavorOnce(t *testing.T) {
+	var got []string
+	f := FlavorOnce(func(fl string) { got = append(got, fl) })
+	f("mariadb")
+	f("mariadb")
+	f("mysql")
+	if len(got) != 1 || got[0] != "mariadb" {
+		t.Errorf("calls = %v, want exactly [mariadb]", got)
+	}
+}

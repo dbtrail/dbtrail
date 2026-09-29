@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/pgstreamrun"
 	"github.com/dbtrail/dbtrail/internal/serverid"
 	"github.com/dbtrail/dbtrail/internal/streamdeps"
@@ -140,6 +142,10 @@ type monitorJob struct {
 	// acts on (console.MonitorErr*), "" for every other failure. Set with the
 	// failure by fail, cleared by every other transition.
 	errCode string
+	// flavorWarning says the server contradicts the Source type saved with
+	// its registry entry. Set on every flavor resolution ("" when they agree);
+	// never a failure: the saved type is a hint and capture follows the server.
+	flavorWarning string
 	// retrying: the stored failure is one run() will retry after its backoff,
 	// not a setup failure in Start or a give-up. Any other set clears it.
 	retrying bool
@@ -212,6 +218,13 @@ func monitorErrorCode(err error) string {
 }
 
 // markSourceConnected records that this run's stream reached the source.
+// setFlavorWarning records (or clears, with "") the Source type warning.
+func (j *monitorJob) setFlavorWarning(w string) {
+	j.mu.Lock()
+	j.flavorWarning = w
+	j.mu.Unlock()
+}
+
 func (j *monitorJob) markSourceConnected() {
 	j.mu.Lock()
 	j.sourceConnected = true
@@ -281,7 +294,7 @@ func (j *monitorJob) pgStreamHooks() *pgstreamrun.Hooks {
 func (j *monitorJob) snapshot() console.MonitorStatus {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected, Retrying: j.retrying, Phase: j.phase, PhaseDetail: j.phaseDetail, ErrorCode: j.errCode}
+	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected, Retrying: j.retrying, Phase: j.phase, PhaseDetail: j.phaseDetail, ErrorCode: j.errCode, FlavorWarning: j.flavorWarning}
 	if j.state == "running" {
 		if idle := time.Since(j.lastProgress); !j.lastProgress.IsZero() && idle > monitorStalledAfter {
 			st.State = "stalled"
@@ -584,6 +597,11 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 		return fail(err)
 	}
 	var runOnce func(context.Context) error
+	// startJobs launches the extension source jobs (see below) with the
+	// flavor capture runs as.
+	startJobs := func(f string) {
+		ext.RunSourceJobs(jobCtx, ext.SourceJobInfo{SourceDSN: e.SourceDSN, IndexDSN: e.DSN, Flavor: f})
+	}
 	switch flavor {
 	case console.FlavorPostgres:
 		pgcfg, cErr := sourcePGStreamConfig(e, serverID, upBatchSize)
@@ -593,10 +611,15 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 		}
 		pgcfg.Hooks = job.pgStreamHooks()
 		runOnce = func(c context.Context) error { return m.pgStreamFn(c, pgcfg) }
+		startJobs(flavor)
 	default:
+		// The saved Source type of a MySQL-family entry is a hint: the stream
+		// asks the server and captures as what it reports, the jobs start from
+		// that, and a contradiction shows on the server's status as a warning.
 		cfg := sourceStreamConfig(e, serverID, upBatchSize)
 		cfg.Hooks = job.streamHooks()
-		runOnce = func(c context.Context) error { return m.streamFn(c, cfg) }
+		cfg.Hooks.OnFlavorResolved = registryFlavorHook(job, e.Flavor, startJobs)
+		runOnce = func(c context.Context) error { return explainRegistryFlavorError(m.streamFn(c, cfg)) }
 	}
 
 	// Extension source jobs (ext.RegisterSourceJob) run alongside the supervised
@@ -609,8 +632,9 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 	// so no per-retry goroutine leak), and only for a source this daemon actually
 	// streams (the advisory lock holder) — jobCtx dies with the lock, so a second
 	// daemon that re-acquires the freed lock never double-runs these jobs.
-	// No-op in the stock binary.
-	ext.RunSourceJobs(jobCtx, ext.SourceJobInfo{SourceDSN: e.SourceDSN, IndexDSN: e.DSN, Flavor: flavor})
+	// No-op in the stock binary. The PostgreSQL branch above starts them
+	// directly; the MySQL-family branch starts them from the stream's
+	// OnFlavorResolved, still bound to jobCtx and still once per Start.
 
 	m.wg.Add(1)
 	go m.run(jobCtx, job, e, flavor, runOnce)
@@ -746,7 +770,9 @@ func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) s
 		IndexDSN:  e.DSN,
 		SourceDSN: e.SourceDSN,
 		ServerID:  serverID,
-		Flavor:    e.SourceFlavor(),
+		// Never declared: the Source type saved with the entry is a hint
+		// (registryFlavorHook compares it), the stream detects the flavor.
+		Flavor:    "",
 		BatchSize: streamBatchSize(batchSize),
 		Schemas:   e.Schemas,
 		// MetricsSource keys this stream's Prometheus series; MetricsAddr
@@ -762,6 +788,51 @@ func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) s
 		GapTimeout:    30,
 		Deps:          streamdeps.Default(),
 	}
+}
+
+// explainRegistryFlavorError rewrites the fix in a "could not detect the
+// source flavor" refusal for a server saved in the console: it has no
+// --source-flavor to point at. Any other error passes through unchanged.
+func explainRegistryFlavorError(err error) error {
+	var ue *metadata.FlavorUndetectedError
+	if errors.As(err, &ue) {
+		ue.Fix = "Check that DBTrail can still connect to this server with its saved user and password."
+	}
+	return err
+}
+
+// registryFlavorHook is the OnFlavorResolved of a supervised MySQL-family
+// stream: it records the Source type warning on every resolution (a restart
+// re-checks) and starts the source jobs once.
+func registryFlavorHook(job *monitorJob, hint string, startJobs func(string)) func(string) {
+	once := streamrun.FlavorOnce(startJobs)
+	return func(flavor string) {
+		w := registryFlavorWarning(hint, flavor)
+		if w != "" {
+			slog.Warn(w, "entry_flavor", hint, "detected", flavor)
+		}
+		job.setFlavorWarning(w)
+		once(flavor)
+	}
+}
+
+// registryFlavorWarning is the text shown when the server contradicts the
+// Source type saved with its entry, "" when they agree or none was saved.
+func registryFlavorWarning(hint, detected string) string {
+	h, err := console.NormalizeFlavor(hint)
+	if strings.TrimSpace(hint) == "" || err != nil || h == detected {
+		return ""
+	}
+	return fmt.Sprintf("This server is saved with Source type %s, but the server reports %s. DBTrail captures it as %s. To fix the label, remove the server and add it again with Source type %s.",
+		sourceTypeLabel(h), sourceTypeLabel(detected), sourceTypeLabel(detected), sourceTypeLabel(detected))
+}
+
+// sourceTypeLabel is the Source type option label the console form shows.
+func sourceTypeLabel(flavor string) string {
+	if flavor == console.FlavorMariaDB {
+		return "MariaDB"
+	}
+	return "MySQL"
 }
 
 // run supervises one stream with crash-loop backoff: a stream that errors is

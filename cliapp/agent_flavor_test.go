@@ -1,23 +1,27 @@
 package cliapp
 
 import (
+	"database/sql"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/dbtrail/dbtrail/internal/metadata"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 )
 
-// TestAgentCmdSourceFlavorFlag pins the flag registration and its default:
-// every pre-existing agent invocation (no flag, no env) must keep streaming
-// with the MySQL flavor. Mirrors TestStreamCmd_sourceFlavorDefault.
+// TestAgentCmdSourceFlavorFlag pins the flag registration and its empty
+// default: with nothing declared, the BYOS stream captures as the flavor the
+// server reports. Mirrors TestStreamCmd_sourceFlavorDefault.
 func TestAgentCmdSourceFlavorFlag(t *testing.T) {
 	f := agentCmd.Flag("source-flavor")
 	if f == nil {
 		t.Fatal("flag --source-flavor not registered on agentCmd")
 	}
-	if f.DefValue != "mysql" {
-		t.Errorf("expected default source-flavor=mysql, got %q", f.DefValue)
+	if f.DefValue != "" {
+		t.Errorf("expected an empty source-flavor default (detect), got %q", f.DefValue)
 	}
 }
 
@@ -27,14 +31,13 @@ func TestNormalizeAgentFlavor(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{in: "", want: gomysql.MySQLFlavor},
+		// Empty stays empty: not declared, the server decides.
+		{in: "", want: ""},
 		{in: "mysql", want: gomysql.MySQLFlavor},
 		{in: "mariadb", want: gomysql.MariaDBFlavor},
+		{in: " MariaDB ", want: gomysql.MariaDBFlavor},
 		// The BYOS stream is a binlog reader; postgres is a different capturer.
 		{in: "postgres", wantErr: true},
-		// go-mysql's flavor literals are lowercase; a case-mismatch must fail
-		// loudly here, not surface as a cryptic syncer handshake error.
-		{in: "MySQL", wantErr: true},
 		{in: "percona", wantErr: true},
 	}
 	for _, tc := range tests {
@@ -52,6 +55,29 @@ func TestNormalizeAgentFlavor(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("normalizeAgentFlavor(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestResolveAgentFlavor pins the BYOS stream's use of detection: nothing
+// declared takes the server's flavor, a contradiction refuses, and a failed
+// detection refuses unless declared.
+func TestResolveAgentFlavor(t *testing.T) {
+	maria := func(*sql.DB) (string, string, error) { return "mariadb", "11.4.2-MariaDB", nil }
+	broken := func(*sql.DB) (string, string, error) { return "", "", errors.New("SELECT VERSION() failed: boom") }
+
+	if f, err := resolveAgentFlavor(nil, "", maria); err != nil || f != "mariadb" {
+		t.Errorf("undeclared on MariaDB = (%q, %v), want mariadb", f, err)
+	}
+	var mm *metadata.FlavorMismatchError
+	if _, err := resolveAgentFlavor(nil, "mysql", maria); !errors.As(err, &mm) {
+		t.Errorf("declared mysql on MariaDB must refuse, got %v", err)
+	}
+	var ue *metadata.FlavorUndetectedError
+	if _, err := resolveAgentFlavor(nil, "", broken); !errors.As(err, &ue) {
+		t.Errorf("undeclared with failed detection must refuse, got %v", err)
+	}
+	if f, err := resolveAgentFlavor(nil, "mariadb", broken); err != nil || f != "mariadb" {
+		t.Errorf("declared with failed detection = (%q, %v), want mariadb", f, err)
 	}
 }
 

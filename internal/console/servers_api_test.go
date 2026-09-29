@@ -1043,3 +1043,18 @@ func TestRegistryServerReadsOnlyItsOwnLocation(t *testing.T) {
 		}
 	}
 }
+
+// TestServersListCarriesMonitorWarning: the Source type warning the
+// supervisor records reaches the server list the Overview card reads.
+func TestServersListCarriesMonitorWarning(t *testing.T) {
+	s, ctrl := newSupervisorServer(t)
+	e := ServerEntry{ID: "w1", Name: "w1", DSN: "u:p@tcp(idx:3306)/i", SourceDSN: "u:p@tcp(src:3306)/", Flavor: FlavorMariaDB}
+	ctrl.status = MonitorStatus{State: "running", FlavorWarning: "saved with Source type MariaDB, but the server reports MySQL"}
+	dto := s.entryDTO(e)
+	if dto.MonitorWarning != ctrl.status.FlavorWarning {
+		t.Errorf("MonitorWarning = %q, want %q", dto.MonitorWarning, ctrl.status.FlavorWarning)
+	}
+	if dto.MonitorState != "running" {
+		t.Errorf("a warning must not change the state: %q", dto.MonitorState)
+	}
+}

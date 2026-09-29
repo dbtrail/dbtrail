@@ -17,15 +17,21 @@ apply to a MariaDB source.
 
 ## Quickstart
 
-Opt in with `--source-flavor mariadb` (or `BINTRAIL_SOURCE_FLAVOR=mariadb`). The
-flag defaults to `mysql`, so every existing MySQL command is unchanged.
+No flag is needed. On start, bintrail asks the source `SELECT VERSION()` and
+captures as MariaDB when the answer says MariaDB, and as MySQL otherwise
+(Percona and Aurora MySQL count as MySQL). This applies to `stream`, `up`,
+`agent`, `bintrail-console watch` and servers added in the web interface.
+
+`--source-flavor mysql|mariadb` (or `BINTRAIL_SOURCE_FLAVOR`) is optional. If you
+set it and the server says otherwise, bintrail refuses to start and names both.
+If the server cannot be asked, bintrail refuses unless you set it; with it set,
+it starts with a warning.
 
 **Live streaming** (the common case — works against managed MariaDB too):
 
 ```bash
 bintrail stream \
   --source-dsn 'dbtrail:pw@tcp(mariadb-host:3306)/' \
-  --source-flavor mariadb \
   --index-dsn 'user:pw@tcp(index-host:3306)/binlog_index' \
   --server-id 200 --schemas shop
 ```
@@ -155,8 +161,8 @@ silently become the write key for every server. Two caveats:
 - **Statement capture** (`query_text`/`query_hash`): MariaDB's `Annotate_rows`
   event carries the originating SQL statement and is captured like MySQL's
   `ROWS_QUERY_EVENT`. `binlog_annotate_row_events` is ON by default since
-  10.2.4; streaming already works because `--source-flavor mariadb` makes the
-  syncer request the events. See
+  10.2.4; streaming requests the events whenever it runs as MariaDB, which it
+  does once it detects a MariaDB server. See
   [query-and-recovery.md](query-and-recovery.md#statement-capture-query_text-and-query_hash).
 - **Capture-time schema-drift detection**: `binlog_row_metadata=FULL` works on
   MariaDB 10.5+ (`SET GLOBAL` — MariaDB has no `SET PERSIST`; persist it in
@@ -169,9 +175,12 @@ silently become the write key for every server. Two caveats:
 
 ## Beta limitations
 
-- **The source flavor is fixed per checkpoint.** Resuming a saved MariaDB
-  checkpoint requires the same `--source-flavor mariadb`. A mismatch is rejected
-  with an actionable error; use `--reset` to start fresh.
+- **A GTID checkpoint is fixed to its flavor.** A saved GTID set cannot be
+  read in the other flavor's format, so resuming one against a server of the
+  other flavor is refused; use `--reset` to start fresh. A position checkpoint
+  written under the other flavor (for example by an older build that captured a
+  MariaDB as MySQL) resumes at the same binlog position as the detected flavor,
+  with a warning.
 - **Multi-server multi-domain topologies are untested.** Per-domain GTID
   resume is validated live on a single server producing several domains (the
   `gtid_domain_id` mechanism itself — see "What works" above). What has NOT
@@ -181,13 +190,14 @@ silently become the write key for every server. Two caveats:
   server was run for several hours in #1349 with no events lost or double
   indexed. Gap detection compares sequences per domain, so the design
   covers these shapes, but treat them as unverified territory.
-- **BYOS agent support is the least exercised path.** `bintrail agent` accepts
-  `--source-flavor mariadb` (same flag and `BINTRAIL_SOURCE_FLAVOR` env as
-  `stream`) for its BYOS streaming, but unlike `stream` it has no saved
-  checkpoint — on restart it resumes from `--start-gtid` (parsed with the
-  configured flavor) or the server's current binlog position. The web interface
-  also captures MariaDB sources (**+ Add server** → MariaDB, with a flavor chip
-  in the server list).
+- **BYOS agent support is the least exercised path.** `bintrail agent` detects
+  the flavor the same way for its BYOS streaming (same optional
+  `--source-flavor` and `BINTRAIL_SOURCE_FLAVOR` as `stream`), but unlike
+  `stream` it has no saved checkpoint. On restart it resumes from `--start-gtid` (parsed with the
+  detected flavor) or the server's current binlog position. The web interface
+  also captures MariaDB sources and detects them the same way. The Source type
+  saved with a server is only a hint: capture follows what the server reports,
+  and the server's Overview shows a warning when the two disagree.
 - **Index-on-MariaDB is out of scope** — the index database stays MySQL.
 
 ---
@@ -197,9 +207,9 @@ silently become the write key for every server. Two caveats:
 | Symptom | Cause / fix |
 |---|---|
 | `WARN … MariaDB source has no @@server_uuid; synthesized …` | Expected — MariaDB has no `server_uuid`. Benign; bintrail synthesizes a stable `bintrail_id` from the source address instead. See [Server identity on MariaDB](#server-identity-on-mariadb). |
-| `invalid Mysql GTID` when starting against MariaDB | You omitted `--source-flavor mariadb` — the MariaDB GTID set was parsed as a MySQL set. Add the flag. |
-| `WARN source flavor mismatch: configured … detected …` | `--source-flavor` doesn't match the server's actual flavor. Set it to match. |
-| `saved checkpoint is source flavor "mariadb" but "mysql" was requested` | You resumed a MariaDB checkpoint without `--source-flavor mariadb`. Add the flag, or `--reset` to start fresh. |
+| `source flavor mismatch: declared "mysql", but the server reports "mariadb"` | `--source-flavor` (or `BINTRAIL_SOURCE_FLAVOR`) contradicts the server. Remove it so bintrail detects the flavor, or set it to what the server reports. (A server added in the web interface never refuses for this: it captures as the server reports and shows a warning.) |
+| `could not detect the source flavor` | `SELECT VERSION()` failed on the source, usually a broken connection. Fix the connection, or set `--source-flavor` to start anyway (with a warning). |
+| `saved checkpoint is a mariadb GTID set, but the source is mysql` | The index was captured from a server of the other flavor. Check `--source-dsn`, or `--reset` to start fresh. |
 | `MariaDB GTID gap detected but CANNOT be filled` | The source purged binlogs your checkpoint still needed. bintrail auto-advances past the lost range and records the data loss durably; pass `--no-gap-fill` to refuse to start instead. Raise `binlog_expire_logs_seconds` to give bintrail more time to resume. |
 | `auto-discover binlog position` errors on an old MariaDB | Ensure `log_bin = ON` and the source user has `REPLICATION CLIENT`. |
 

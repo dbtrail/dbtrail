@@ -82,7 +82,7 @@ var (
 func init() {
 	streamCmd.Flags().StringVar(&strmIndexDSN, "index-dsn", "", "DSN for the index MySQL database (required)")
 	streamCmd.Flags().StringVar(&strmSourceDSN, "source-dsn", "", "DSN for the source MySQL server (required)")
-	streamCmd.Flags().StringVar(&strmFlavor, "source-flavor", "mysql", "Source database flavor: mysql or mariadb (MariaDB source support is beta)")
+	streamCmd.Flags().StringVar(&strmFlavor, "source-flavor", "", "Source database flavor: mysql or mariadb. Empty (default) detects it from the server; a value the server contradicts refuses to start (MariaDB source support is beta)")
 	streamCmd.Flags().Uint32Var(&strmServerID, "server-id", 0, "Unique replica server ID (required, must differ from all other servers)")
 	streamCmd.Flags().StringVar(&strmStartFile, "start-file", "", "Initial binlog file (mutually exclusive with --start-gtid)")
 	streamCmd.Flags().Uint32Var(&strmStartPos, "start-pos", 4, "Initial position within start file")
@@ -180,19 +180,29 @@ func runStream(cmd *cobra.Command, args []string) error {
 	// here, `bintrail stream` itself and `bintrail up` (which delegates to
 	// runStream after populateStreamFlags has copied its DSNs into the strm*
 	// globals). ctx is the signal-bound child installed above, so the jobs
-	// stop draining when the stream does.
-	ext.RunSourceJobs(ctx, streamSourceJobInfo())
+	// stop draining when the stream does. They start once the stream has asked
+	// the source what it is, so a job is told the flavor capture runs as, not
+	// the declared flag, which may be empty.
+	cfg := streamConfigFromFlags()
+	cfg.Hooks = streamSourceJobsHooks(func(flavor string) {
+		ext.RunSourceJobs(ctx, streamSourceJobInfo(flavor))
+	})
+	return streamrun.One(ctx, cfg)
+}
 
-	return streamrun.One(ctx, streamConfigFromFlags())
+// streamSourceJobsHooks returns the stream hooks that start the source jobs
+// (start) once, with the resolved flavor.
+func streamSourceJobsHooks(start func(flavor string)) *streamrun.Hooks {
+	return &streamrun.Hooks{OnFlavorResolved: streamrun.FlavorOnce(start)}
 }
 
 // streamSourceJobInfo describes the stream's capture source for the extension
 // source-job seam. Extracted from runStream so the mapping is unit-testable
 // without starting a daemon (mirrors consoleapp's mainSourceJobInfo).
-func streamSourceJobInfo() ext.SourceJobInfo {
+func streamSourceJobInfo(flavor string) ext.SourceJobInfo {
 	return ext.SourceJobInfo{
 		SourceDSN: strmSourceDSN,
 		IndexDSN:  strmIndexDSN,
-		Flavor:    strmFlavor,
+		Flavor:    flavor,
 	}
 }
