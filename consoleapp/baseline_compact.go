@@ -1,6 +1,7 @@
 package consoleapp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -158,10 +159,13 @@ func (s *baselineSupervisor) foldJobLocked(serverID string) *foldJob {
 	return j
 }
 
+// setFoldJobBlocked records a look that stopped for a reason other than a
+// busy slot, which ends any run of busy looks.
 func (s *baselineSupervisor) setFoldJobBlocked(serverID string, blocked bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.foldJobLocked(serverID).blocked = blocked
+	j := s.foldJobLocked(serverID)
+	j.blocked, j.busy = blocked, 0
 }
 
 // foldJobBlocked says whether the job could not run at its last look.
@@ -338,7 +342,14 @@ func (s *baselineSupervisor) maybeCompact(req refreshRequest) {
 		j.busy = 0
 	}
 	busyLooks := j.busy
-	j.blocked = (err != nil && !busy) || busyLooks >= compactBusyTries
+	switch {
+	case busy:
+		// A busy look says nothing about whether the job would run: a block
+		// an earlier look set stays.
+		j.blocked = j.blocked || busyLooks >= compactBusyTries
+	default:
+		j.blocked = err != nil
+	}
 	s.mu.Unlock()
 	if err != nil {
 		if busy {
@@ -505,13 +516,18 @@ func (s *baselineSupervisor) compactOne(req refreshRequest, root string, c compa
 	if err := reconstruct.ClearCompactionDir(dir); err != nil {
 		return err
 	}
+	clear := func() {
+		if cerr := reconstruct.ClearCompactionDir(dir); cerr != nil {
+			slog.Warn("snapshot compaction: could not remove a merge that did not finish; the next refresh cycle sweeps it", "dir", dir, "error", cerr)
+		}
+	}
 	mc, err := compactMinor(s.ctx, c.base, c.chain, lo, hi, dir)
 	if err != nil {
-		reconstruct.ClearCompactionDir(dir)
+		clear()
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, baseline.SuccessMarker), nil, 0o644); err != nil {
-		reconstruct.ClearCompactionDir(dir)
+		clear()
 		return err
 	}
 	slog.Info("baseline compact: chain prefix merged into one range pair", "server", req.ServerName,
@@ -569,6 +585,22 @@ func sweepCompactStaging(req refreshRequest) {
 		}
 		return
 	}
+	// A complete result for a table the newest snapshot does not hold (a table
+	// dropped, or left out of the refresh) is never looked at by a refresh
+	// again, so nothing else would sweep it (#1735). Unknown newest snapshot:
+	// nothing is removed on that ground.
+	newest := ""
+	if at, _, err := reconstruct.NewestSnapshot(context.Background(), req.BaselineDir); err == nil && !at.IsZero() {
+		newest = filepath.Join(req.BaselineDir, reconstruct.SnapshotDirName(at))
+	}
+	backedUp := func(rel string) bool {
+		if newest == "" {
+			return true
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+		_, err := os.Stat(filepath.Join(newest, parts[0], parts[1]+".parquet"))
+		return err == nil || !errors.Is(err, fs.ErrNotExist)
+	}
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -584,11 +616,12 @@ func sweepCompactStaging(req refreshRequest) {
 		if strings.Count(rel, string(filepath.Separator)) != 2 { // <schema>/<table>/<chain start>
 			return nil
 		}
-		if _, err := os.Stat(filepath.Join(path, baseline.SuccessMarker)); err == nil {
+		_, done := os.Stat(filepath.Join(path, baseline.SuccessMarker))
+		_, refused := os.Stat(filepath.Join(path, reconstruct.CompactionRefusedMarker))
+		if (done == nil || refused == nil) && backedUp(rel) {
+			// A result for a refresh to adopt, or the record that stops the
+			// fold running again.
 			return filepath.SkipDir
-		}
-		if _, err := os.Stat(filepath.Join(path, reconstruct.CompactionRefusedMarker)); err == nil {
-			return filepath.SkipDir // the record that stops the fold running again
 		}
 		if err := os.RemoveAll(path); err != nil {
 			slog.Warn("baseline compact: could not remove an unfinished compaction", "dir", path, "error", err)

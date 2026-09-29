@@ -567,6 +567,11 @@ func TestRefreshOutcomes_anUnrecordedRefusalSaysSo(t *testing.T) {
 	if rep.DeltaChainFoldRefused == "" || rep.DeltaChainFoldRefusalRecorded {
 		t.Fatalf("report = %+v", rep)
 	}
+	// Without its record the fold is left where it is: removed, the job
+	// would fold the whole table again at its next look.
+	if _, err := os.Stat(r.mc.Base); err != nil {
+		t.Fatalf("the fold was removed without a record of why: %v", err)
+	}
 	d := RefreshOutcomes([]string{"mydb.orders"}, []*TableReport{rep}, nil)[0].Detail
 	t.Logf("%s", d)
 	if strings.Contains(d, "will not be rebuilt") || !strings.Contains(d, "could not be recorded") {
@@ -886,5 +891,71 @@ func TestAdoptedSnapshot_readByVerifyAndTheListing(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the adopted table is not listed as expected: %+v", files)
+	}
+}
+
+// A table written in full on every cycle (here: a capture gap each time)
+// never reaches the minor adoption, which is where old chains' folders were
+// swept: the refresh sweeps them itself.
+func TestPublishWithTableDelta_rewrittenEveryCycleStillSweeps(t *testing.T) {
+	r := newMajorRun(t, zooWindows())
+	r.stageIt()
+	if rep := r.next(changeMap(upd(3, "a"))); rep.DeltaChainFolded != "0-2" {
+		t.Fatalf("report = %+v", rep)
+	}
+	r.capGap = &CaptureGap{At: r.at, Detail: "test"}
+	r.next(changeMap(upd(3, "b")))
+	if _, err := os.Stat(r.stage); !os.IsNotExist(err) {
+		t.Fatalf("the ended chain's folder was not swept: %v", err)
+	}
+}
+
+// Tries are counted in a row: a successful adoption whose snapshot was then
+// thrown away starts the count again.
+func TestPublishWithTableDelta_aSuccessResetsTheTries(t *testing.T) {
+	r := newMajorRun(t, zooWindows())
+	r.stageIt()
+	fail := true
+	prev := stateKeyDigestFn
+	t.Cleanup(func() { stateKeyDigestFn = prev })
+	stateKeyDigestFn = func(ctx context.Context, base string, d *tableDelta, pk []metadata.ColumnMeta, tu duckdbutil.Tuning) (string, error) {
+		if fail {
+			return "", fmt.Errorf("duckdb: out of memory")
+		}
+		return prev(ctx, base, d, pk, tu)
+	}
+	for range majorAdoptionTries - 1 {
+		r.next(changeMap(upd(3, "a")))
+	}
+	oldBase, oldPrev, oldRef, oldAt := r.base, r.prevTime, r.refOut, r.at
+	fail = false
+	if rep := r.next(changeMap(upd(3, "b"))); rep.DeltaChainFolded == "" {
+		t.Fatalf("not adopted: %+v", rep)
+	}
+	os.RemoveAll(filepath.Dir(filepath.Dir(r.base))) // the run is thrown away
+	r.base, r.prevTime, r.refOut, r.at = oldBase, oldPrev, oldRef, oldAt
+	fail = true
+	for i := range majorAdoptionTries - 1 {
+		if rep := r.next(changeMap(upd(3, "c"+strconv.Itoa(i)))); rep.DeltaChainFoldRefused != "" {
+			t.Fatalf("refused after %d failures in a row: %+v", i+1, rep)
+		}
+	}
+}
+
+// A refusal record beside a staged fold (a removal that stopped half way) is
+// the last word: the fold is not adopted, and what is left is cleared.
+func TestPublishWithTableDelta_aRefusalRecordBesideAFoldWins(t *testing.T) {
+	r := newMajorRun(t, zooWindows())
+	r.stageIt()
+	if err := os.WriteFile(filepath.Join(r.stage, CompactionRefusedMarker), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep := r.next(changeMap(upd(3, "a")))
+	if rep.DeltaChainFolded != "" {
+		t.Fatalf("adopted beside its refusal: %+v", rep)
+	}
+	left, _ := os.ReadDir(r.stage)
+	if len(left) != 1 || left[0].Name() != CompactionRefusedMarker {
+		t.Fatalf("left = %v", left)
 	}
 }

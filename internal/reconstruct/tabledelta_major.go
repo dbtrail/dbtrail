@@ -331,8 +331,21 @@ func adoptMajorCompaction(ctx context.Context, p tableDeltaPublish) (np tableDel
 			return p, false, "", false, nil
 		}
 	}
+	if _, serr := os.Stat(filepath.Join(dir, CompactionRefusedMarker)); serr == nil {
+		// A fold beside its own refusal (the removal stopped half way): not
+		// adopted, and what is left is cleared. A minor result beside a
+		// refusal is adoptCompaction's, and never reaches here.
+		if cerr := ClearCompactionDir(dir); cerr != nil {
+			slog.Warn("could not remove a refused compaction; its record stops it from being adopted", "dir", dir, "error", cerr)
+		}
+		return p, false, "", false, nil
+	}
 	np, berr := buildMajorChain(ctx, p, dir, staged)
 	if berr == nil {
+		// Tries count in a row: this one worked.
+		if rerr := os.Remove(filepath.Join(dir, adoptionTriesFile)); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+			slog.Warn("table delta compaction: could not reset the count of failed tries", "dir", dir, "error", rerr)
+		}
 		return np, true, "", false, nil
 	}
 	if ctx.Err() != nil {
@@ -349,16 +362,15 @@ func adoptMajorCompaction(ctx context.Context, p tableDeltaPublish) (np tableDel
 		why = fmt.Sprintf("it could not be put in place %d times in a row; the last time: %s", tries, berr)
 	}
 	slog.Warn("table delta compaction not adopted; removing it, and it is not folded again for this chain: "+why, "schema", schema, "table", table, "dir", dir)
-	rerr := os.RemoveAll(dir)
-	if rerr == nil {
-		rerr = os.MkdirAll(dir, 0o755)
-	}
-	if rerr == nil {
-		rerr = writeRefusalMarker(dir, why)
-	}
-	if rerr != nil {
-		slog.Warn("could not record a refused compaction; the job may fold this chain again", "dir", dir, "error", rerr)
+	// The record first, then the rest goes. Without the record the fold stays
+	// where it is: the job skips a staged fold, and removing it would have the
+	// job fold the whole table again at its next look.
+	if rerr := writeRefusalMarker(dir, why); rerr != nil {
+		slog.Warn("could not record a refused compaction; it is left in place and refused again at the next refresh", "dir", dir, "error", rerr)
 		return p, false, why, false, nil
+	}
+	if rerr := ClearCompactionDir(dir); rerr != nil {
+		slog.Warn("could not remove a refused compaction; its record stops it from being adopted", "dir", dir, "error", rerr)
 	}
 	return p, false, why, true, nil
 }
@@ -392,8 +404,14 @@ func foldRefused(compactDir, schema, table string, chainStart time.Time) bool {
 	if compactDir == "" {
 		return false
 	}
-	_, err := os.Stat(filepath.Join(CompactionDir(compactDir, schema, table, chainStart), CompactionRefusedMarker))
-	return err == nil || !errors.Is(err, fs.ErrNotExist)
+	path := filepath.Join(CompactionDir(compactDir, schema, table, chainStart), CompactionRefusedMarker)
+	_, err := os.Stat(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("table delta compaction: the staging folder cannot be looked at, so this refresh ends the chain on its own day and quarter rules",
+			"schema", schema, "table", table, "path", path, "error", err)
+		return true
+	}
+	return err == nil
 }
 
 // CompactionRefusedMarker is left in a chain's staging folder when a refresh

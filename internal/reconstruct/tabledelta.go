@@ -940,6 +940,18 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	// Not when this run rewrites the table in place anyway for a reason no
 	// chain can change: the rewrite folds the old chain, and the staged
 	// result is swept once that chain has ended.
+	// Staged results of chains other than the one this run reads from are for
+	// chains the published snapshot has ended: swept here, on every path, since
+	// a table rewritten on every cycle never reaches the minor adoption's own
+	// sweep (#1735). Keyed on the SOURCE snapshot's chain, never on what this
+	// run is about to write: that snapshot may still be thrown away.
+	if p.cfg.CompactDir != "" && !strings.HasPrefix(p.basePath, "s3://") {
+		var keep time.Time
+		if p.prev != nil {
+			keep = p.prev.Meta.DeltaChainStart
+		}
+		sweepOtherChains(p.cfg.CompactDir, p.schema, p.table, keep)
+	}
 	adoptedMajor := ""
 	if p.prev != nil && !p.prev.Legacy && p.cfg.CompactDir != "" &&
 		inPlaceRewriteReason(p.basePath, p.fold.Spill != nil, p.capGap, hasAnchor, reserved) == "" {

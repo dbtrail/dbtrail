@@ -266,8 +266,16 @@ func ClearCompactionDir(dir string) error {
 	if err != nil {
 		return err
 	}
+	// _SUCCESS first: a removal that stops half way must not leave a
+	// complete-looking result with files missing.
+	if err := os.Remove(filepath.Join(dir, baseline.SuccessMarker)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	kept := false
 	for _, e := range entries {
+		if e.Name() == baseline.SuccessMarker {
+			continue
+		}
 		if e.Name() == CompactionRefusedMarker {
 			kept = true
 			continue

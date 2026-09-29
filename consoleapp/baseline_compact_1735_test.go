@@ -484,3 +484,53 @@ func TestMaybeCompact_aBlockedJobHandsTheRulesBack(t *testing.T) {
 		t.Fatal("still blocked after the job ran")
 	}
 }
+
+// A complete result for a table the newest snapshot no longer holds (dropped,
+// or left out of the refresh) is swept: no refresh will ever sweep it.
+func TestSweepCompactStaging_removesResultsOfTablesNoLongerBackedUp(t *testing.T) {
+	local := t.TempDir()
+	snap := filepath.Join(local, reconstruct.SnapshotDirName(chainStart.Add(time.Hour)))
+	writeSnapshotFiles(t, snap, baseline.SuccessMarker) // holds shop.orders only
+	req := refreshRequest{BaselineDir: local, TableDeltas: true}
+	kept := reconstruct.CompactionDir(compactDirFor(local), "shop", "orders", chainStart)
+	gone := reconstruct.CompactionDir(compactDirFor(local), "shop", "items", chainStart)
+	for _, d := range []string{kept, gone} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, baseline.SuccessMarker), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweepCompactStaging(req)
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Fatal("the result of a table no longer backed up was kept")
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatal("a current table's result was swept")
+	}
+}
+
+// Busy looks count in a row: a look that stopped for another reason starts
+// the count again (and blocks on its own account).
+func TestMaybeCompact_busyLooksCountInARow(t *testing.T) {
+	sup, req, _, _ := compactRig(t, 3)
+	stubMajor(t, nil)
+	sup.jobs["s"] = &console.BaselineStatus{State: "running"}
+	logs := captureSlogFor(t)
+	sup.maybeCompact(req)
+	sup.maybeCompact(req)
+	prev := listSnapshotChains
+	listSnapshotChains = func(context.Context, string) (map[string]*baseline.TableDeltaChain, error) {
+		return nil, errors.New("listing failed")
+	}
+	sup.maybeCompact(req)
+	listSnapshotChains = prev
+	sup.maybeCompact(req)
+	if strings.Contains(logs.String(), "has not had the slot") {
+		t.Fatalf("three busy looks counted across a failed one: %q", logs.String())
+	}
+	if !sup.foldJobBlocked("s") {
+		t.Fatal("a busy look cleared the block the failed look set")
+	}
+}
