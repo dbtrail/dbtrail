@@ -156,7 +156,15 @@ func FindBaseline(ctx context.Context, source, schema, table string, at time.Tim
 // retry runs only on a miss, so it can never override a correct hit. Callers
 // with no index open — and therefore no declared column widths — pass nil and
 // keep the exact-match-only behavior.
+//
+// A MariaDB UUID/INET4/INET6 component is first re-spelled as the text the
+// baseline holds (mariaDBFixedBaselineFilter); a value that is not one of
+// those types' text is refused with an error.
 func ReadBaselineRow(ctx context.Context, path string, pkFilter map[string]string, pkMetas []metadata.ColumnMeta) (map[string]any, error) {
+	pkFilter, err := mariaDBFixedBaselineFilter(pkFilter, pkMetas)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := ReadBaselineRows(ctx, path, pkFilter, 1)
 	if err != nil {
 		return nil, err

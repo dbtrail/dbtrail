@@ -3157,6 +3157,25 @@ func binaryColsFromTableMeta(tm *metadata.TableMeta) map[string]bool {
 	return m
 }
 
+// mariaDBFixedColsFromTableMeta maps each MariaDB UUID/INET4/INET6 column of a
+// table to its data type. These are stored base64 like BINARY, but a reader
+// hands them back as TEXT: the source, mydumper and the baseline Parquet all
+// carry the text form, so decoding them to bytes would make the delta side
+// disagree with the baseline side of the same column. Returns nil when the
+// table has none.
+func mariaDBFixedColsFromTableMeta(tm *metadata.TableMeta) map[string]string {
+	var m map[string]string
+	for _, c := range tm.Columns {
+		if metadata.MariaDBFixedWidth(c.DataType) > 0 {
+			if m == nil {
+				m = make(map[string]string)
+			}
+			m[c.Name] = c.DataType
+		}
+	}
+	return m
+}
+
 // rowAfterOrdered walks colNames and looks up each name in rowAfter (a
 // map[string]any from a binlog event's row_after image), returning a slice
 // of values aligned to the baseline Parquet column order. On the baseline

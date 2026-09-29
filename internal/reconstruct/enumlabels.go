@@ -120,9 +120,12 @@ type eventDecoder struct {
 // binMemo caches one epoch's BLOB/TEXT column set. cols may be nil with ok
 // true: that is "this epoch resolved fine and the table has no BLOB/TEXT
 // columns", which is different from "the epoch could not be resolved".
+// fixed holds the epoch's MariaDB UUID/INET4/INET6 columns (name to data
+// type), rendered as text rather than decoded to bytes.
 type binMemo struct {
-	cols map[string]bool
-	ok   bool
+	cols  map[string]bool
+	fixed map[string]string
+	ok    bool
 }
 
 func newEventDecoder(db *sql.DB, schema, table string, latest *metadata.Resolver) *eventDecoder {
@@ -166,9 +169,11 @@ func (d *eventDecoder) decodeBinaries(events []query.ResultRow) {
 		return
 	}
 	for i := range events {
-		binCols := d.binColsAt(events[i].EventTimestamp)
-		decodeImageBinaries(events[i].RowBefore, binCols)
-		decodeImageBinaries(events[i].RowAfter, binCols)
+		m := d.binColsAt(events[i].EventTimestamp)
+		decodeImageBinaries(events[i].RowBefore, m.cols)
+		decodeImageBinaries(events[i].RowAfter, m.cols)
+		renderImageMariaDBFixed(events[i].RowBefore, m.fixed)
+		renderImageMariaDBFixed(events[i].RowAfter, m.fixed)
 	}
 }
 
@@ -176,29 +181,45 @@ func (d *eventDecoder) decodeBinaries(events []query.ResultRow) {
 // The memo check sits before NewResolver so a snapshot whose resolver fails to
 // load is probed at most once, not once per row — and, since #1097, at most
 // once for the whole window rather than once per page.
-func (d *eventDecoder) binColsAt(t time.Time) map[string]bool {
+func (d *eventDecoder) binColsAt(t time.Time) binMemo {
 	id, ok := metadata.EpochAt(d.epochs, t)
 	if !ok {
 		d.typed = false
-		return nil // no snapshots → no safe typing → leave values as base64
+		return binMemo{} // no snapshots → no safe typing → leave values as base64
 	}
 	if m, seen := d.binMemo[id]; seen {
 		if !m.ok {
 			d.typed = false
 		}
-		return m.cols
+		return m
 	}
 	var m binMemo
 	if r, nerr := metadata.NewResolver(d.db, id); nerr == nil && r != nil {
 		if tm, rerr := r.Resolve(d.schema, d.table); rerr == nil {
-			m = binMemo{cols: binaryColsFromTableMeta(tm), ok: true}
+			m = binMemo{cols: binaryColsFromTableMeta(tm), fixed: mariaDBFixedColsFromTableMeta(tm), ok: true}
 		}
 	}
 	d.binMemo[id] = m
 	if !m.ok {
 		d.typed = false
 	}
-	return m.cols
+	return m
+}
+
+// renderImageMariaDBFixed turns each MariaDB UUID/INET4/INET6 value of one
+// event image from its stored base64 into the server's text form, in place
+// (metadata.RenderStoredMariaDBFixed). A value that is not the stored form of
+// a full-width value, such as one captured before #1944, is left as it is.
+// No-op when fixed is empty or image is nil.
+func renderImageMariaDBFixed(image map[string]any, fixed map[string]string) {
+	if len(fixed) == 0 || image == nil {
+		return
+	}
+	for col, dt := range fixed {
+		if v, ok := image[col]; ok {
+			image[col], _ = metadata.RenderStoredMariaDBFixed(dt, v)
+		}
+	}
 }
 
 // decodeImageBinaries decodes the storage-side base64 of every BLOB/TEXT column

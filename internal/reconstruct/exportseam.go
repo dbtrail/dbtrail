@@ -48,11 +48,12 @@ func MaterializeBaselineLocal(ctx context.Context, path string, tuning duckdbuti
 
 // IsBase64StoredType reports whether a column of this DATA_TYPE is stored
 // base64-encoded in the event row images (BLOB and TEXT families, JSON, the
-// spatial types, VECTOR), i.e. one whose exported value depends on the epoch
-// decoder having resolved. One list, the decoder's own.
+// spatial types, VECTOR, and MariaDB's UUID/INET4/INET6), i.e. one whose
+// exported value depends on the epoch decoder having resolved. One list, the
+// decoder's own.
 func IsBase64StoredType(dataType string) bool {
 	_, ok := base64StoredKind(dataType)
-	return ok
+	return ok || metadata.MariaDBFixedWidth(dataType) > 0
 }
 
 // EventDecoder is the per-table, epoch-aware decoder the full-table fold

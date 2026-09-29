@@ -3,12 +3,14 @@ package reconstruct
 import (
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"maps"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 )
 
@@ -69,7 +71,10 @@ func ResolvePKMetasAt(db *sql.DB, schema, table string, at time.Time) []metadata
 // indexer stored in binlog_events.pk_values, so an event fetch matches what
 // the operator typed.
 //
-// Only fixed-width BINARY(n) components are touched, and this is the INVERSE
+// MariaDB UUID/INET4/INET6 components are parsed from their text form (any
+// spelling metadata.ParseMariaDBFixed accepts) and spelled as the captured
+// full-width bytes. Otherwise only fixed-width BINARY(n) components are
+// touched, and this is the INVERSE
 // of padFixedBinaryFilter — the two run in opposite directions on purpose,
 // because they target different stores. Reproducing event.formatPKValue
 // exactly: trailing 0x00 padding is stripped (the ROW image never carries it),
@@ -93,6 +98,20 @@ func IndexPKSpelling(pk string, pkMetas []metadata.ColumnMeta) string {
 	}
 	changed := false
 	for i, c := range pkMetas {
+		if metadata.MariaDBFixedWidth(c.DataType) > 0 {
+			// MariaDB UUID/INET4/INET6: the index keys the event by the
+			// full-width bytes (metadata.MapRow pads them), spelled by
+			// event.BuildPKValues, escaping included. A value that does not
+			// parse is left as typed; ReadBaselineRow refuses it first.
+			if b, err := metadata.ParseMariaDBFixed(c.DataType, parts[i]); err == nil {
+				spelled := event.BuildPKValues([]metadata.ColumnMeta{c}, map[string]any{c.Name: b})
+				if spelled != parts[i] {
+					parts[i] = spelled
+					changed = true
+				}
+			}
+			continue
+		}
 		if !strings.EqualFold(strings.TrimSpace(c.DataType), "binary") {
 			continue
 		}
@@ -181,4 +200,37 @@ func filterKeyFor(filter map[string]string, col string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// mariaDBFixedBaselineFilter re-spells every MariaDB UUID/INET4/INET6
+// component of a baseline PK filter as the text MariaDB prints, which is what
+// the baseline column holds (mydumper dumps the text form). The server accepts
+// other spellings (upper case, a UUID without dashes, a long-form IPv6), so an
+// exact comparison against the typed value would miss a row that exists. A
+// value that is not one of these types' text is refused: guessing a spelling
+// could resolve a different row. With no metas the filter passes through.
+func mariaDBFixedBaselineFilter(pkFilter map[string]string, pkMetas []metadata.ColumnMeta) (map[string]string, error) {
+	var out map[string]string
+	for _, c := range pkMetas {
+		if metadata.MariaDBFixedWidth(c.DataType) == 0 {
+			continue
+		}
+		v, ok := pkFilter[c.Name]
+		if !ok {
+			continue
+		}
+		b, err := metadata.ParseMariaDBFixed(c.DataType, v)
+		if err != nil {
+			return nil, fmt.Errorf("primary-key column %q: %w", c.Name, err)
+		}
+		text, _ := metadata.FormatMariaDBFixed(c.DataType, b)
+		if out == nil {
+			out = maps.Clone(pkFilter)
+		}
+		out[c.Name] = text
+	}
+	if out == nil {
+		return pkFilter, nil
+	}
+	return out, nil
 }
