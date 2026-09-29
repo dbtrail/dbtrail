@@ -1358,7 +1358,7 @@ func TestWriteGroupedJSON_preservesInputOrderAndEmits_emptyGroups(t *testing.T) 
 		{EventID: 2, SchemaName: "db", TableName: "t", PKValues: "a", EventType: binparser.EventDelete},
 	}
 	var buf bytes.Buffer
-	n, err := writeGroupedJSON([]string{"a", "b", "c"}, rows, &buf)
+	n, err := writeGroupedJSON([]string{"a", "b", "c"}, nil, rows, &buf)
 	if err != nil {
 		t.Fatalf("writeGroupedJSON: %v", err)
 	}
@@ -1384,6 +1384,33 @@ func TestWriteGroupedJSON_preservesInputOrderAndEmits_emptyGroups(t *testing.T) 
 	}
 	if len(got.Results[2].Events) != 0 {
 		t.Errorf("expected empty events for PK with no matches, got %d", len(got.Results[2].Events))
+	}
+}
+
+// A MariaDB UUID key typed as text is stored as its bytes in hex, so its rows
+// carry that spelling. The group must still be the typed label's, with the
+// rows in it; before, the group came back empty while the rows were fetched.
+func TestWriteGroupedJSON_findsRowsUnderTheStoredSpelling(t *testing.T) {
+	const text, stored = "cc5c4e6e-bc5a-11f1-9a0c-0affd251cac9", "0xCC5C4E6EBC5A11F19A0C0AFFD251CAC9"
+	rows := []query.ResultRow{
+		{EventID: 1, SchemaName: "shop", TableName: "sessions", PKValues: stored, EventType: binparser.EventUpdate},
+	}
+	var buf bytes.Buffer
+	n, err := writeGroupedJSON([]string{text, "other"}, map[string]string{text: stored}, rows, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Results []struct {
+			PK     string           `json:"pk"`
+			Events []map[string]any `json:"events"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v\noutput: %s", err, buf.String())
+	}
+	if n != 1 || len(got.Results) != 2 || got.Results[0].PK != text || len(got.Results[0].Events) != 1 {
+		t.Errorf("n=%d, output %s; want the one event grouped under the typed label", n, buf.String())
 	}
 }
 

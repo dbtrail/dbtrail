@@ -24,6 +24,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 var queryCmd = &cobra.Command{
@@ -333,6 +334,17 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		opts.ProfileActive = true
 	}
 
+	// ── Spell a MariaDB UUID/INET key the way the index stores it ───────────
+	// The index keys those rows by the value's bytes; the operator types the
+	// text form. Unlike the #957 note above, this reads the snapshot, but only
+	// for a key that parses as one of these types, and it keeps the typed form
+	// as the alternate. After the profile rules, so a denied table's key is
+	// never described.
+	spelledPKs, err := reconstruct.SpellIndexPKFilter(cmd.Context(), db, &opts)
+	if err != nil {
+		return err
+	}
+
 	// ── Resolve --pk-min/--pk-max against the table's key shape ─────────────
 	// (#1440) The cast both engines compare through is chosen from the PK
 	// column's declared signedness, and a composite or non-integer key is
@@ -495,7 +507,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 
 	var n int
 	if groupedJSON {
-		n, err = writeGroupedJSON(qPKs, results, os.Stdout)
+		n, err = writeGroupedJSON(qPKs, spelledPKs, results, os.Stdout)
 	} else {
 		n, err = query.Format(results, qFormat, os.Stdout)
 	}
@@ -720,7 +732,7 @@ func sanitizeArchiveErrorMessage(err error) string {
 // separate lookup. Returns the total number of events written across all
 // groups (matching the row-count semantic of query.Format for the truncation
 // warning at the call site).
-func writeGroupedJSON(pks []string, rows []query.ResultRow, w io.Writer) (int, error) {
+func writeGroupedJSON(pks []string, spelled map[string]string, rows []query.ResultRow, w io.Writer) (int, error) {
 	type groupedEvent struct {
 		EventID        uint64         `json:"event_id"`
 		BinlogFile     string         `json:"binlog_file"`
@@ -775,8 +787,14 @@ func writeGroupedJSON(pks []string, rows []query.ResultRow, w io.Writer) (int, e
 		// #957) — match both, but always report the group under the user's
 		// literal --pks input.
 		evs := append([]groupedEvent{}, byPK[pk]...)
-		if esc := event.EscapePKValue(pk); esc != pk {
+		esc := event.EscapePKValue(pk)
+		if esc != pk {
 			evs = append(evs, byPK[esc]...)
+		}
+		// A MariaDB UUID/INET key is stored as its bytes, not as the text the
+		// label carries (reconstruct.SpellIndexPKFilter).
+		if sp, ok := spelled[pk]; ok && sp != pk && sp != esc {
+			evs = append(evs, byPK[sp]...)
 		}
 		groups = append(groups, group{PK: pk, Events: evs})
 		total += len(evs)

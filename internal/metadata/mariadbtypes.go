@@ -153,6 +153,27 @@ func ParseMariaDBFixed(dataType, s string) ([]byte, error) {
 	return nil, errors.New("not a MariaDB UUID/INET4/INET6 column: " + dataType)
 }
 
+// ParseMariaDBFixedKey is ParseMariaDBFixed for a key a person typed, which may
+// also be the value's bytes in hex: "0x" (either case) followed by exactly the
+// type's width in hex digits. That is how query and recover print such a key
+// (the pk_values spelling), so a key copied from their output works as input
+// too. It is only for typed keys: a baseline holds the text form, and its
+// readers keep using ParseMariaDBFixed.
+func ParseMariaDBFixedKey(dataType, s string) ([]byte, error) {
+	if len(s) >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
+		w := MariaDBFixedWidth(dataType)
+		if w == 0 {
+			return nil, errors.New("not a MariaDB UUID/INET4/INET6 column: " + dataType)
+		}
+		b, err := hex.DecodeString(s[2:])
+		if err != nil || len(b) != w {
+			return nil, fmt.Errorf("%q is not %d bytes in hex, the width of a %s", s, w, strings.ToUpper(strings.TrimSpace(dataType)))
+		}
+		return b, nil
+	}
+	return ParseMariaDBFixed(dataType, s)
+}
+
 // RenderStoredMariaDBFixed turns a UUID/INET4/INET6 value as the index stores
 // it in an event image (base64 of the full-width bytes, since #1944) into
 // MariaDB's text form. ok is false, and v comes back unchanged, for anything
