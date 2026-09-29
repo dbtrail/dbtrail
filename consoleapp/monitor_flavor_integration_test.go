@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -159,5 +160,71 @@ func TestIntegrationMonitorRegistryFlavorHintContradicted(t *testing.T) {
 			t.Fatalf("no running mysql capture within 60s (flavor %q, err %v); status %+v", f, qerr, st)
 		}
 		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// TestIntegrationMonitorRegistrySourceMariaDBRelabeled: the same server saved
+// as MySQL, on a supervisor with a real server list. Capture saves the flavor
+// the server reports as the entry's Source type, so the server list, the
+// snapshot trigger and the capture status read all see MariaDB, and there is
+// no warning left to show. Before, the entry kept saying MySQL for as long as
+// it existed.
+func TestIntegrationMonitorRegistrySourceMariaDBRelabeled(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	sourceDB, sourceName := testutil.CreateTestMariaDB(t)
+	var logBin string
+	if err := sourceDB.QueryRow("SELECT @@log_bin").Scan(&logBin); err != nil || logBin != "1" {
+		testutil.SkipOrFailMariaDB(t, "binary logging not enabled on test MariaDB")
+	}
+	testutil.MustExec(t, sourceDB, "CREATE TABLE t (id INT PRIMARY KEY)")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, bootName := testutil.CreateTestDB(t)
+	bootDSN := testutil.IntegrationDSN(bootName)
+	reg, err := console.LoadRegistry(filepath.Join(t.TempDir(), "servers.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, err := reg.Add(console.ServerEntry{
+		Name:      "saved-as-mysql",
+		DSN:       bootDSN,
+		SourceDSN: testutil.MariaDBBaseDSN() + "/" + sourceName,
+		Schemas:   sourceName,
+		Flavor:    console.FlavorMySQL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := newMonitorSupervisor(ctx, bootDSN, reg, 0)
+	infoCh, _ := probeSourceJob(t, added.ID)
+	entry := startRegistrySource(t, ctx, sup, bootDSN, added)
+
+	select {
+	case got := <-infoCh:
+		if got.Flavor != console.FlavorMariaDB {
+			t.Fatalf("source job flavor = %q, want the detected mariadb", got.Flavor)
+		}
+	case <-time.After(90 * time.Second):
+		t.Fatalf("source job never fired; monitor status: %+v", sup.Status(entry.ID))
+	}
+	// The hook saves before it starts the source jobs, so the entry already
+	// says MariaDB here.
+	saved, ok := reg.Get(entry.ID)
+	if !ok || saved.SourceFlavor() != console.FlavorMariaDB {
+		t.Fatalf("saved Source type = %q, want mariadb", saved.Flavor)
+	}
+	if req := console.BaselineRequestFor(saved); req.Flavor != console.FlavorMariaDB {
+		t.Errorf("snapshot request flavor = %q, want mariadb", req.Flavor)
+	}
+	if w := sup.Status(entry.ID).FlavorWarning; w != "" {
+		t.Errorf("warning left after the Source type was saved: %q", w)
+	}
+	reloaded, err := console.LoadRegistry(reg.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk, _ := reloaded.Get(entry.ID); onDisk.Flavor != console.FlavorMariaDB {
+		t.Errorf("Source type on disk = %q, want mariadb", onDisk.Flavor)
 	}
 }

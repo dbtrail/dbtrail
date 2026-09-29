@@ -618,7 +618,7 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 		// that, and a contradiction shows on the server's status as a warning.
 		cfg := sourceStreamConfig(e, serverID, upBatchSize)
 		cfg.Hooks = job.streamHooks()
-		cfg.Hooks.OnFlavorResolved = registryFlavorHook(job, e.Flavor, startJobs)
+		cfg.Hooks.OnFlavorResolved = registryFlavorHook(job, e.Flavor, m.flavorCorrector(e.ID), startJobs)
 		runOnce = func(c context.Context) error { return explainRegistryFlavorError(m.streamFn(c, cfg)) }
 	}
 
@@ -802,12 +802,24 @@ func explainRegistryFlavorError(err error) error {
 }
 
 // registryFlavorHook is the OnFlavorResolved of a supervised MySQL-family
-// stream: it records the Source type warning on every resolution (a restart
-// re-checks) and starts the source jobs once.
-func registryFlavorHook(job *monitorJob, hint string, startJobs func(string)) func(string) {
+// stream. On every resolution (a restart re-checks) it saves the flavor the
+// server reported as the entry's Source type through correct, so the server
+// list, the snapshot trigger and the capture status read all say what capture
+// runs as. The warning on the server's status is only for a correction that
+// could not be saved (correct nil means there is no registry to save to).
+// The source jobs start once.
+func registryFlavorHook(job *monitorJob, hint string, correct func(string) (bool, error), startJobs func(string)) func(string) {
 	once := streamrun.FlavorOnce(startJobs)
 	return func(flavor string) {
-		w := registryFlavorWarning(hint, flavor)
+		var correctErr error
+		if correct == nil {
+			correctErr = errors.New("no server list to save it to")
+		} else if changed, err := correct(flavor); err != nil {
+			correctErr = err
+		} else if changed {
+			slog.Info("saved the Source type the server reports", "entry_flavor", hint, "detected", flavor)
+		}
+		w := registryFlavorWarning(hint, flavor, correctErr)
 		if w != "" {
 			slog.Warn(w, "entry_flavor", hint, "detected", flavor)
 		}
@@ -817,14 +829,26 @@ func registryFlavorHook(job *monitorJob, hint string, startJobs func(string)) fu
 }
 
 // registryFlavorWarning is the text shown when the server contradicts the
-// Source type saved with its entry, "" when they agree or none was saved.
-func registryFlavorWarning(hint, detected string) string {
+// Source type saved with its entry and the saved type could not be changed
+// (correctErr), "" when they agree, none was saved, or the change was saved.
+// It never advises removing the server: the one that comes back is a new
+// entry with a new index, and the old one's history is left behind.
+func registryFlavorWarning(hint, detected string, correctErr error) string {
 	h, err := console.NormalizeFlavor(hint)
-	if strings.TrimSpace(hint) == "" || err != nil || h == detected {
+	if strings.TrimSpace(hint) == "" || err != nil || h == detected || correctErr == nil {
 		return ""
 	}
-	return fmt.Sprintf("This server is saved with Source type %s, but the server reports %s. DBTrail captures it as %s. To fix the label, remove the server and add it again with Source type %s.",
-		sourceTypeLabel(h), sourceTypeLabel(detected), sourceTypeLabel(detected), sourceTypeLabel(detected))
+	return fmt.Sprintf("This server is saved with Source type %s, but the server reports %s. DBTrail captures it as %s. The saved Source type could not be changed to %s: %v.",
+		sourceTypeLabel(h), sourceTypeLabel(detected), sourceTypeLabel(detected), sourceTypeLabel(detected), correctErr)
+}
+
+// flavorCorrector is the correct func of registryFlavorHook for entry id: the
+// registry's CorrectSourceFlavor, or nil when the supervisor has no registry.
+func (m *monitorSupervisor) flavorCorrector(id string) func(string) (bool, error) {
+	if m.registry == nil {
+		return nil
+	}
+	return func(detected string) (bool, error) { return m.registry.CorrectSourceFlavor(id, detected) }
 }
 
 // sourceTypeLabel is the Source type option label the console form shows.
