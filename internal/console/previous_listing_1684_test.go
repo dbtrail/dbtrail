@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -77,5 +78,63 @@ func TestBaselinesAPI_previousLocations(t *testing.T) {
 	rec, body = doServersReq(t, srv, "GET", "/api/baselines/files?at=2026-09-27+00:00:00", "")
 	if rec.Code == 200 {
 		t.Fatalf("detail of a snapshot written after the move: %d %s", rec.Code, body)
+	}
+}
+
+// The Snapshots settings row: a move shows the place left, and forgetting it
+// takes it off the list and deletes nothing.
+func TestBackupSettingsAPI_previousLocations(t *testing.T) {
+	fixedLocationClock(t, time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC))
+	oldDir, newDir := t.TempDir(), t.TempDir()
+	writeBaselineFixture(t, oldDir, "2026-09-20T00-00-00Z", "shop", "orders.parquet")
+	reg, _ := LoadRegistry("")
+	e, err := reg.Add(ServerEntry{Name: "a", DSN: "u:p@tcp(h:3306)/idx", BaselineDir: oldDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearStores(t)
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A bundle already open for the server, as after a first selection: the
+	// save must hand it the place left, not leave it with the old list.
+	srv.cm.bundles[e.ID] = &bundle{}
+	rec, body := doServersReq(t, srv, "PUT", "/api/backup-settings/servers/"+e.ID, `{"baseline_dir":"`+newDir+`"}`)
+	if rec.Code != 200 {
+		t.Fatalf("move: %d %s", rec.Code, body)
+	}
+	var dto backupSettingsServerDTO
+	if err := json.Unmarshal(body, &dto); err != nil {
+		t.Fatal(err)
+	}
+	if len(dto.PreviousLocations) != 1 || dto.PreviousLocations[0].Location != oldDir || dto.PreviousLocations[0].LeftAt != "2026-09-29T10:00:00Z" {
+		t.Fatalf("previous = %+v, want the folder left", dto.PreviousLocations)
+	}
+	// The selected server's bundle reads the place left: the listing shows it.
+	if b := srv.cm.bundles[e.ID]; len(b.previous) != 1 || b.previous[0].Location != oldDir {
+		t.Fatalf("the bundle does not read the place left: %+v", b.previous)
+	}
+	rec, body = doServersReq(t, srv, "PUT", "/api/backup-settings/servers/"+e.ID, `{"forget_previous_location":"`+oldDir+`/","keep_newest":2}`)
+	if rec.Code != 400 {
+		t.Fatalf("forget with another field: %d %s, want 400", rec.Code, body)
+	}
+	rec, body = doServersReq(t, srv, "PUT", "/api/backup-settings/servers/"+e.ID, `{"forget_previous_location":"`+oldDir+`/"}`)
+	if rec.Code != 200 {
+		t.Fatalf("forget: %d %s", rec.Code, body)
+	}
+	dto = backupSettingsServerDTO{}
+	if err := json.Unmarshal(body, &dto); err != nil {
+		t.Fatal(err)
+	}
+	if dto.PreviousLocations == nil || len(dto.PreviousLocations) != 0 {
+		t.Fatalf("previous after forget = %#v, want an empty list", dto.PreviousLocations)
+	}
+	if _, err := os.Stat(filepath.Join(oldDir, "2026-09-20T00-00-00Z", "shop", "orders.parquet")); err != nil {
+		t.Fatalf("forgetting deleted a snapshot: %v", err)
+	}
+	rec, _ = doServersReq(t, srv, "PUT", "/api/backup-settings/servers/"+e.ID, `{"forget_previous_location":"`+oldDir+`"}`)
+	if rec.Code != 404 {
+		t.Fatalf("forgetting twice: %d, want 404", rec.Code)
 	}
 }

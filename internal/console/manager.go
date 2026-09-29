@@ -467,6 +467,11 @@ func (cm *connManager) evict(id string) {
 // must stay immutable once published). No-op when the bundle isn't cached —
 // the next lazy open reads the updated entry anyway.
 func (cm *connManager) rebuildDerived(entry ServerEntry) {
+	// The entry as SAVED: the registry derives fields the caller's copy
+	// does not have, the previous snapshot locations among them (#1684).
+	if cur, ok := cm.reg.Get(entry.ID); ok {
+		entry = cur
+	}
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	old, ok := cm.bundles[entry.ID]
