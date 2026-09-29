@@ -160,6 +160,123 @@ func TestMapRow_binaryToBytes(t *testing.T) {
 	}
 }
 
+// TestMapRow_mariaDBFixedBinaryTypes pins the MariaDB UUID/INET4/INET6/VECTOR
+// capture. go-mysql hands these back as a raw Go string (the binlog types them
+// as fixed STRING or VARCHAR with no charset), so like BINARY they must become
+// []byte or json.Marshal replaces every invalid-UTF-8 byte with U+FFFD. The
+// fixed-width ones also need their trailing zero bytes back: MariaDB's row image
+// trims them (INET4 10.0.0.0 arrives as the single byte 0x0a, the nil UUID as an
+// empty string), and a UUID/INET column rejects a short binary value, so a
+// reversal built from the trimmed bytes would not apply.
+func TestMapRow_mariaDBFixedBinaryTypes(t *testing.T) {
+	r := buildTestResolver(map[string]*TableMeta{
+		"mydb.hosts": {
+			Schema: "mydb", Table: "hosts",
+			Columns: []ColumnMeta{
+				{Name: "u", OrdinalPosition: 1, IsPK: true, DataType: "uuid", ColumnType: "uuid"},
+				{Name: "v4", OrdinalPosition: 2, DataType: "inet4", ColumnType: "inet4"},
+				{Name: "v6", OrdinalPosition: 3, DataType: "INET6", ColumnType: "inet6"},
+				{Name: "vec", OrdinalPosition: 4, DataType: "vector", ColumnType: "vector(2)"},
+			},
+			PKColumns: []string{"u"},
+		},
+	})
+	zeros := func(n int) string { return string(make([]byte, n)) }
+
+	cases := []struct {
+		name string
+		row  []any
+		want [4]string // nil-able columns compared as strings; "<nil>" for NULL
+	}{
+		{
+			name: "full width, high bytes",
+			row: []any{
+				"\x12\x34\x56\x78\x9a\xbc\x1d\xef\x80\x12\x34\x56\x78\x9a\xbc\xde",
+				"\xff\xff\xff\xff",
+				"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff",
+				"\x00\x00\xc0\x3f\x00\x00\x00\xc0",
+			},
+			want: [4]string{
+				"\x12\x34\x56\x78\x9a\xbc\x1d\xef\x80\x12\x34\x56\x78\x9a\xbc\xde",
+				"\xff\xff\xff\xff",
+				"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff",
+				"\x00\x00\xc0\x3f\x00\x00\x00\xc0",
+			},
+		},
+		{
+			name: "trailing zero bytes trimmed by the row image",
+			row:  []any{"\xe0\xb5\xa0\xf4\x3c\x9d\x4b\x8e\x9f\x1a", "\x0a", "\x20\x01\x0d\xb8", "\x00\x00\x80\x3f"},
+			want: [4]string{
+				"\xe0\xb5\xa0\xf4\x3c\x9d\x4b\x8e\x9f\x1a" + zeros(6),
+				"\x0a" + zeros(3),
+				"\x20\x01\x0d\xb8" + zeros(12),
+				"\x00\x00\x80\x3f", // VECTOR is variable length: never padded
+			},
+		},
+		{
+			name: "all-zero value arrives empty",
+			row:  []any{"", "", "", ""},
+			want: [4]string{zeros(16), zeros(4), zeros(16), ""},
+		},
+		{
+			name: "already []byte",
+			row:  []any{[]byte("\x01"), []byte("\x01\x02\x03\x04"), []byte("\xfe\x80"), []byte("\x01")},
+			want: [4]string{"\x01" + zeros(15), "\x01\x02\x03\x04", "\xfe\x80" + zeros(14), "\x01"},
+		},
+		{
+			name: "NULL stays NULL",
+			row:  []any{"\x01", nil, nil, nil},
+			want: [4]string{"\x01" + zeros(15), "<nil>", "<nil>", "<nil>"},
+		},
+	}
+	cols := [4]string{"u", "v4", "v6", "vec"}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			named, err := r.MapRow("mydb", "hosts", tc.row)
+			if err != nil {
+				t.Fatalf("MapRow: %v", err)
+			}
+			for i, col := range cols {
+				v := named[col]
+				if tc.want[i] == "<nil>" {
+					if v != nil {
+						t.Errorf("%s: want nil, got %#v", col, v)
+					}
+					continue
+				}
+				b, ok := v.([]byte)
+				if !ok {
+					t.Errorf("%s: want []byte, got %T (%#v)", col, v, v)
+					continue
+				}
+				if string(b) != tc.want[i] {
+					t.Errorf("%s: got %x, want %x", col, b, tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestMapRow_mariaDBFixedBinaryTooLong: a value longer than the type's width
+// cannot come from a real row image. It is passed through as []byte unchanged,
+// never truncated, so a reversal built from it fails loud at apply time instead
+// of silently writing a shorter value.
+func TestMapRow_mariaDBFixedBinaryTooLong(t *testing.T) {
+	r := buildTestResolver(map[string]*TableMeta{
+		"mydb.h": {
+			Schema: "mydb", Table: "h",
+			Columns: []ColumnMeta{{Name: "v4", OrdinalPosition: 1, DataType: "inet4", ColumnType: "inet4"}},
+		},
+	})
+	named, err := r.MapRow("mydb", "h", []any{"\x01\x02\x03\x04\x05"})
+	if err != nil {
+		t.Fatalf("MapRow: %v", err)
+	}
+	if b, ok := named["v4"].([]byte); !ok || string(b) != "\x01\x02\x03\x04\x05" {
+		t.Errorf("v4: want the 5 bytes unchanged as []byte, got %#v", named["v4"])
+	}
+}
+
 // TestMapRow_latin1Transcoding verifies scenario 1 from #756: a legacy latin1
 // CHAR/VARCHAR value ("José", stored as cp1252 bytes — MySQL's "latin1" is
 // actually Windows-1252, not ISO-8859-1) is transcoded to valid UTF-8 instead

@@ -597,6 +597,10 @@ func (r *Resolver) MapRow(schema, table string, row []any) (map[string]any, erro
 // TEXT/BLOB/JSON/GEOMETRY are unaffected: go-mysql already delivers those as
 // []byte, so they never reach this function as a string.
 //
+// MariaDB's UUID/INET4/INET6 take the BINARY route plus a width pad (see
+// padFixedBinary), and VECTOR takes the BINARY route when it arrives as a
+// string (MySQL 9's VECTOR already arrives as []byte, so this is a no-op there).
+//
 // Residual, accepted ambiguity (same class as marshalRow's
 // looksLikeJSONContainer gate, and #736's bool/json.Number repair): a
 // latin1/cp1252 value whose raw bytes happen to ALSO form valid UTF-8 (e.g.
@@ -613,12 +617,14 @@ func (r *Resolver) MapRow(schema, table string, row []any) (map[string]any, erro
 // exactly the fail-loud default branch below — not silent corruption, and
 // not a guess at an unverified charset.
 func coerceTextEncoding(v any, col ColumnMeta) (any, error) {
-	switch strings.ToLower(col.DataType) {
-	case "binary", "varbinary":
+	switch dt := strings.ToLower(col.DataType); dt {
+	case "binary", "varbinary", "vector":
 		if s, ok := v.(string); ok {
 			return []byte(s), nil
 		}
 		return v, nil
+	case "uuid", "inet4", "inet6":
+		return padFixedBinary(v, mariaDBFixedWidth[dt]), nil
 	case "char", "varchar":
 		s, ok := v.(string)
 		if !ok || utf8.ValidString(s) {
@@ -656,6 +662,39 @@ func coerceTextEncoding(v any, col ColumnMeta) (any, error) {
 	default:
 		return v, nil
 	}
+}
+
+// mariaDBFixedWidth is the storage width in bytes of MariaDB's fixed binary
+// types (UUID 10.7+, INET4 10.10+, INET6 10.5+).
+var mariaDBFixedWidth = map[string]int{"uuid": 16, "inet4": 4, "inet6": 16}
+
+// padFixedBinary turns a MariaDB UUID/INET4/INET6 value into []byte of the
+// type's full width. go-mysql delivers these as a raw Go string (the binlog
+// types them as a binary STRING), so they need the same []byte treatment as
+// BINARY (#756). And MariaDB's row image trims their trailing zero bytes, the
+// way it does for BINARY(n): INET4 10.0.0.0 arrives as the single byte 0x0a and
+// the nil UUID as an empty string. BINARY(n) pads a short value back on write,
+// but a UUID/INET column rejects it (ER 1292), so the zeros are restored here.
+// The bytes are in text order for UUID (verified against MariaDB 11.4 binlogs),
+// which is also the order an X'..' literal assigned to a UUID column is read in.
+// A value longer than the width cannot come from a row image; it is returned
+// unchanged rather than truncated.
+func padFixedBinary(v any, width int) any {
+	var b []byte
+	switch val := v.(type) {
+	case string:
+		b = []byte(val)
+	case []byte:
+		b = val
+	default:
+		return v
+	}
+	if len(b) >= width {
+		return b
+	}
+	padded := make([]byte, width)
+	copy(padded, b)
+	return padded
 }
 
 // coerceUnsigned reinterprets an integer value decoded by go-mysql into the

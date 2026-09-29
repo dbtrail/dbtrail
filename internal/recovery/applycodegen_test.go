@@ -235,6 +235,12 @@ func TestSanitizeForComment_lineBreakForms(t *testing.T) {
 		// too — the emitted line is then single-line under any definition.
 		{"line separator alone", "a\u2028b", "a\u2028b"},
 		{"line separator with lf", "a\u2028\nb", `"a\u2028\nb"`},
+		// A NUL byte ends the statement text for the server's parser (MariaDB
+		// answers ER 1064 "near ''"), so a binary PK such as the nil UUID,
+		// whose pk_values is 16 NUL bytes (valid UTF-8, so not hex-rendered),
+		// broke the whole reversal script from inside its "--" comment.
+		{"nul", "a\x00b", `"a\x00b"`},
+		{"nil uuid pk", string(make([]byte, 16)), `"` + strings.Repeat(`\x00`, 16) + `"`},
 		{"none", "orders", "orders"}, // identity: golden output depends on this
 		{"empty", "", ""},
 	} {
