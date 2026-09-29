@@ -273,7 +273,10 @@ jobs:
             TestEndToEnd_MariaDBSnapshotEd25519 \
             TestFormatMariaDBFixed_matchesServer_MariaDB \
             TestDecodeEventBinaries_MariaDBFixedTypesRenderText \
-            TestShimMariaDBUUIDKey; do
+            TestShimMariaDBUUIDKey \
+            TestRunReconstruct_MariaDBUUIDKeyWithoutIndexTypesRefuses \
+            TestIntegrationReconstruct_MariaDBUUIDKeyWithoutIndexTypesRefuses \
+            TestIntegrationReconstructTool_MariaDBUUIDKeyWithoutIndexTypesRefuses; do
             grep -q -- "--- PASS: $name " /tmp/mariadb-it.out \
               || { echo "FATAL: $name did not run and pass in the MariaDB-source job (false-green tripwire)" >&2; exit 1; }
           done

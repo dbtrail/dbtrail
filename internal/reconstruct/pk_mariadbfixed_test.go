@@ -1,10 +1,13 @@
 package reconstruct
 
 import (
+	"context"
 	"encoding/hex"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 )
@@ -140,5 +143,46 @@ func TestMariaDBFixedBaselineFilter_columnNameCase(t *testing.T) {
 		[]metadata.ColumnMeta{colMeta("u", "uuid", "uuid")})
 	if err != nil || got["U"] != "ffffffff-ffff-ffff-ffff-ffffffffffff" {
 		t.Errorf("filter under key U = %v, %v; want the canonical text under the same key", got, err)
+	}
+}
+
+// CheckUntypedMariaDBFixedPK must not let a lookup through because it could
+// not decide: a CREATE the schema parser cannot read (one line, say) still
+// names the UUID key, and a footer that cannot be read is an error.
+func TestCheckUntypedMariaDBFixedPK_undecidableCases(t *testing.T) {
+	write := func(create string) string {
+		p := filepath.Join(t.TempDir(), "t.parquet")
+		cols := []baseline.Column{
+			{Name: "u", MySQLType: "uuid", ParquetType: baseline.MysqlToParquetNode("uuid")},
+		}
+		w, err := baseline.NewWriter(p, cols, baseline.WriterConfig{Compression: "none", RowGroupSize: 10,
+			Metadata: map[string]string{baseline.MetaKeyCreateTableSQL: create}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteRow([]string{"00000000-0000-0000-0000-000000000001"}, []bool{false}); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	filter := map[string]string{"u": "00000000-0000-0000-0000-000000000001"}
+	ctx := context.Background()
+	if err := CheckUntypedMariaDBFixedPK(ctx, write("CREATE TABLE t (u UUID PRIMARY KEY)"), filter, nil); err == nil {
+		t.Error("a one-line CREATE naming a UUID key must still refuse")
+	}
+	if err := CheckUntypedMariaDBFixedPK(ctx, write("CREATE TABLE `t` (\n  `u` uuid NOT NULL,\n  PRIMARY KEY (`u`)\n);\n"), filter, nil); err == nil {
+		t.Error("a UUID key without index types must refuse")
+	}
+	if err := CheckUntypedMariaDBFixedPK(ctx, filepath.Join(t.TempDir(), "missing.parquet"), filter, nil); err == nil {
+		t.Error("an unreadable footer must be an error, not a pass")
+	}
+	if err := CheckUntypedMariaDBFixedPK(ctx, write("CREATE TABLE t (id INT PRIMARY KEY)"), map[string]string{"id": "1"}, nil); err != nil {
+		t.Errorf("a plain key must pass: %v", err)
+	}
+	if err := CheckUntypedMariaDBFixedPK(ctx, "unused", filter, []metadata.ColumnMeta{colMeta("u", "uuid", "uuid")}); err != nil {
+		t.Errorf("with index types there is nothing to check: %v", err)
 	}
 }

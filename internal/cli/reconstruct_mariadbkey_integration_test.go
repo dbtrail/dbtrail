@@ -87,7 +87,7 @@ func TestRunReconstruct_MariaDBUUIDKeyWithoutIndexTypesRefuses(t *testing.T) {
 	if runErr == nil {
 		t.Fatalf("reconstruct answered without the index's column types for a UUID key: %s", out)
 	}
-	if !strings.Contains(runErr.Error(), "uuid") || !strings.Contains(runErr.Error(), "bintrail snapshot") {
+	if !strings.Contains(runErr.Error(), "stores as bytes") || !strings.Contains(runErr.Error(), "bintrail snapshot") {
 		t.Errorf("refusal should name the UUID key and the fix (bintrail snapshot): %v", runErr)
 	}
 }

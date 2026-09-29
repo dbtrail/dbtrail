@@ -1826,6 +1826,9 @@ func mergeBaselineIntoWriter(ctx context.Context, in mergeInput, rep *TableRepor
 		return fmt.Errorf("open mydumper writer: %w", err)
 	}
 	mw.spaceCheck = in.SpaceCheck
+	if err := checkMariaDBFixedTypesAgree(in.CreateTableSQL, in.Columns, in.Schema, in.Table); err != nil {
+		return err
+	}
 	mw.SetColumnTypes(in.Columns)
 	// Success finalizes via the explicit Close below (before capturing
 	// rep.Files); ANY error return instead discards every file this writer
@@ -3295,4 +3298,38 @@ func resolveSnapshotTable(db *sql.DB, latest *metadata.Resolver, id int, schema,
 func s3DownloadCopySQL(safeSrc, safeDst string) string {
 	return fmt.Sprintf("COPY (SELECT * FROM parquet_scan('%s')) TO '%s' (FORMAT PARQUET, COMPRESSION '%s')",
 		safeSrc, safeDst, ParquetWriterCompression)
+}
+
+// checkMariaDBFixedTypesAgree refuses a merge whose baseline CREATE TABLE (the
+// schema file the dump carries) and the index's schema snapshot (what the
+// writer formats values by) disagree about whether a column is a MariaDB
+// UUID/INET4/INET6. That happens after an ALTER between the two, for instance
+// CHAR(36) to UUID: X'..' would load into a CHAR column, or text into a UUID
+// column, and the load would succeed with wrong data. A CREATE the schema
+// parser cannot read leaves nothing to compare against, and the snapshot's
+// types are used as they are.
+func checkMariaDBFixedTypesAgree(createSQL string, snapshotCols []metadata.ColumnMeta, schema, table string) error {
+	baseCols, err := baseline.ParseSchemaText(createSQL)
+	if err != nil {
+		return nil
+	}
+	snap := make(map[string]string, len(snapshotCols))
+	for _, c := range snapshotCols {
+		snap[strings.ToLower(c.Name)] = strings.ToLower(strings.TrimSpace(c.DataType))
+	}
+	for _, c := range baseCols {
+		inBase := strings.ToLower(strings.TrimSpace(c.MySQLType))
+		inSnap, known := snap[strings.ToLower(c.Name)]
+		if !known {
+			continue
+		}
+		baseFixed, snapFixed := metadata.MariaDBFixedWidth(inBase) > 0, metadata.MariaDBFixedWidth(inSnap) > 0
+		if (baseFixed || snapFixed) && inBase != inSnap {
+			return fmt.Errorf("%s.%s: column %q is %s in the baseline but %s in the index's schema snapshot; "+
+				"its values cannot be written for both, so the table is refused: take a new snapshot "+
+				"(`bintrail dump`, then `bintrail baseline`) so the baseline matches the current schema",
+				schema, table, c.Name, inBase, inSnap)
+		}
+	}
+	return nil
 }

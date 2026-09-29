@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,5 +165,48 @@ func TestWriteBinlogOnlyChanges_MariaDBFixedTypesFromSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "(1, X'00000000000000000000000000000001')") {
 		t.Errorf("binlog-only chunk did not write the UUID as X'..':\n%s", b)
+	}
+}
+
+// The merge path writes the BASELINE's CREATE TABLE as the schema file, while
+// the column types it formats values by come from the index's schema
+// snapshot. If an ALTER turned CHAR(36) into UUID (or back) between the two,
+// X'..' would be written into a CHAR column (or text into a UUID one), and the
+// load would succeed with wrong data. The two must agree, or the table is
+// refused.
+func TestMergeBaselineIntoWriter_MariaDBFixedTypeDisagreementRefused(t *testing.T) {
+	create := "CREATE TABLE `orders` (\n  `id` int NOT NULL,\n  `status` char(36) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n"
+	for _, c := range []struct {
+		name    string
+		create  string
+		columns []metadata.ColumnMeta
+		wantErr bool
+	}{
+		{"baseline CHAR(36), snapshot UUID", create,
+			[]metadata.ColumnMeta{{Name: "id", DataType: "int"}, {Name: "status", DataType: "uuid"}}, true},
+		{"baseline UUID, snapshot CHAR", strings.Replace(create, "char(36)", "uuid", 1),
+			[]metadata.ColumnMeta{{Name: "id", DataType: "int"}, {Name: "status", DataType: "char"}}, true},
+		{"both UUID", strings.Replace(create, "char(36)", "uuid", 1),
+			[]metadata.ColumnMeta{{Name: "id", DataType: "int"}, {Name: "STATUS", DataType: "uuid"}}, false},
+		{"both CHAR", create,
+			[]metadata.ColumnMeta{{Name: "id", DataType: "int"}, {Name: "status", DataType: "char"}}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := mergeBaselineIntoWriter(context.Background(), mergeInput{
+				LocalBaselinePath: writeTestBaseline(t, [][]string{{"1", "00000000-0000-0000-0000-000000000001"}}),
+				CreateTableSQL:    c.create,
+				Schema:            "mydb", Table: "orders",
+				PKCols:    pkColsIntID(),
+				Columns:   c.columns,
+				Changes:   map[string]*query.ResultRow{},
+				OutputDir: t.TempDir(),
+			}, &TableReport{Schema: "mydb", Table: "orders"})
+			if c.wantErr && (err == nil || !strings.Contains(err.Error(), "status")) {
+				t.Errorf("got %v, want a refusal naming column status", err)
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("got %v, want no error", err)
+			}
+		})
 	}
 }

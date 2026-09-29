@@ -65,7 +65,9 @@ func TestIntegrationReconstructTool_MariaDBUUIDKeyWithoutIndexTypesRefuses(t *te
 	if !res.IsError {
 		t.Fatalf("the tool answered a UUID key without the index's column types: %s", text)
 	}
-	if !strings.Contains(text, "bintrail snapshot") {
-		t.Errorf("refusal should name the fix (bintrail snapshot): %s", text)
+	// "stores as bytes" is the new refusal's own wording; other refusals of
+	// this tool also mention `bintrail snapshot`.
+	if !strings.Contains(text, "stores as bytes") || !strings.Contains(text, "bintrail snapshot") {
+		t.Errorf("want the UUID-key refusal naming `bintrail snapshot`: %s", text)
 	}
 }

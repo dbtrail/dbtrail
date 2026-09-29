@@ -249,18 +249,37 @@ func mariaDBFixedBaselineFilter(pkFilter map[string]string, pkMetas []metadata.C
 // and the snapshot-era row would come back as the state at the target time.
 // So when pkMetas is nil and the baseline's own CREATE TABLE shows one of
 // those types among the filtered columns, this returns an error naming the
-// fix. A baseline whose footer cannot be read or holds no CREATE TABLE cannot
-// be checked and passes, as every other key does without metas.
+// fix. An unreadable footer is an error; a CREATE the parser cannot read is
+// scanned for the type names instead. Only a footer with no CREATE TABLE at
+// all (a baseline older than that metadata) passes unchecked.
 func CheckUntypedMariaDBFixedPK(ctx context.Context, path string, pkFilter map[string]string, pkMetas []metadata.ColumnMeta) error {
 	if len(pkMetas) > 0 {
 		return nil
 	}
 	bm, err := baseline.ReadParquetMetadataAny(ctx, path)
-	if err != nil || bm.CreateTableSQL == "" {
+	if err != nil {
+		// The row read needs this same file; an error here is not a reason
+		// to let the lookup through.
+		return fmt.Errorf("read the baseline footer to type the primary key: %w", err)
+	}
+	if bm.CreateTableSQL == "" {
 		return nil
 	}
 	cols, err := baseline.ParseSchemaText(bm.CreateTableSQL)
 	if err != nil {
+		// A CREATE the parser cannot read (one line, say) still names its
+		// types. This text is the baseline's own, never a placeholder, so a
+		// UUID/INET word in it is the column type or an identifier; refusing
+		// on either is the safe side of "cannot tell".
+		lower := strings.ToLower(bm.CreateTableSQL)
+		for _, w := range []string{"uuid", "inet4", "inet6"} {
+			if strings.Contains(lower, w) {
+				return fmt.Errorf("the baseline's CREATE TABLE mentions %s and could not be parsed, "+
+					"and the index has no schema snapshot for this table to spell a MariaDB %s key the way it stores it; "+
+					"the answer could leave out every change after the baseline, so it is refused: "+
+					"run `bintrail snapshot` for this schema, then try again", strings.ToUpper(w), strings.ToUpper(w))
+			}
+		}
 		return nil
 	}
 	for _, c := range cols {
