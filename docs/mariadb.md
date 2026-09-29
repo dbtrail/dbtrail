@@ -1,7 +1,7 @@
-# MariaDB as a source (alpha)
+# MariaDB as a source (beta)
 
 bintrail can capture from a **MariaDB** server while the index database stays
-MySQL. This is an **alpha** capability: the happy path is verified end-to-end
+MySQL. This is a **beta** capability: the happy path is verified end-to-end
 against real MariaDB, but it has documented limitations (below) and narrower
 version/topology coverage than the MySQL path. Read the limitations before
 pointing it at production.
@@ -117,8 +117,10 @@ silently become the write key for every server. Two caveats:
 
 | Version | Status |
 |---|---|
-| **MariaDB 11.4** | **Tested** in CI (the primary target). |
-| MariaDB 10.6 LTS – 11.3 | Expected to work; **not yet covered by CI**. |
+| **MariaDB 10.6 LTS** | **Tested** in CI. |
+| **MariaDB 10.11 LTS** | **Tested** in CI. |
+| **MariaDB 11.4 LTS** | **Tested** in CI. |
+| Other versions from 10.6 up | Expected to work; not covered by CI. |
 | MariaDB < 10.6 | Not supported. |
 
 ---
@@ -165,7 +167,7 @@ silently become the write key for every server. Two caveats:
 
 ---
 
-## Alpha limitations
+## Beta limitations
 
 - **The source flavor is fixed per checkpoint.** Resuming a saved MariaDB
   checkpoint requires the same `--source-flavor mariadb`. A mismatch is rejected

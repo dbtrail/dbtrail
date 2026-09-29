@@ -62,7 +62,7 @@ DBTrail keeps every change on your MySQL server, before and after, and writes th
 
 Works with **MySQL**, **Percona Server for MySQL**, **Amazon RDS for MySQL**,
 and **Amazon Aurora MySQL** (verified). **Google Cloud SQL for MySQL** should
-work too; please report issues. **MariaDB** is supported as an alpha source
+work too; please report issues. **MariaDB** is supported as a beta source
 ([MariaDB source](docs/mariadb.md)). DBTrail connects over the replication
 protocol and never needs the binlog files on disk, which is why managed cloud
 databases work. It requires MySQL 8.0+ with `binlog_format=ROW` and
@@ -111,7 +111,7 @@ Prefer the command line? See the [command-line quickstart](docs/quickstart.md).
 | [30-second demo](docs/demo.md) | [Verify recoveries](docs/verify.md) · [Web interface](docs/console.md) | [Upload to S3](docs/upload.md) · [S3 IAM policy](docs/s3-iam-policy.md) · [Upgrading](docs/upgrade.md) |
 | | [Streaming](docs/streaming.md) · [Indexing](docs/indexing.md) · [DDL tracking](docs/ddl-tracking.md) | [Server identity](docs/server-identity.md) |
 | | [Connect an AI assistant](docs/connect-ai.md) · [MCP server](docs/mcp-server.md) | [Parquet debugging](docs/parquet-debugging.md) |
-| | [MariaDB source (alpha)](docs/mariadb.md) | |
+| | [MariaDB source (beta)](docs/mariadb.md) | |
 
 ## Privacy
 

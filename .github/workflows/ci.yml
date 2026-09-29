@@ -387,7 +387,7 @@ jobs:
           test-log: /tmp/mysql-it.out
 
   integration-mariadb-source:
-    # MariaDB-as-source alpha. A MariaDB-source test pairs a NEW MariaDB SOURCE
+    # MariaDB-as-source beta. A MariaDB-source test pairs a NEW MariaDB SOURCE
     # container (13307) with the existing MySQL INDEX container (13306) — two
     # containers a single matrix cell of the `integration` job cannot host, and
     # bolting MariaDB into that job would also perturb the shared-binlog window

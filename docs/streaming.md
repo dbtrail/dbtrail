@@ -89,12 +89,12 @@ If you scope `SELECT`, it must cover **every column of every monitored table**, 
 
 ---
 
-## MariaDB as a source (alpha)
+## MariaDB as a source (beta)
 
 bintrail can stream from a **MariaDB** source (the index stays MySQL) — pass
 `--source-flavor mariadb`. Everything on this page applies — including gap
 detection on resume, which now works for MariaDB in both position and GTID mode.
-The MariaDB-specific setup, version support, alpha limitations, and
+The MariaDB-specific setup, version support, beta limitations, and
 troubleshooting live on the dedicated page: **[MariaDB](mariadb.md)**.
 
 ## PostgreSQL as a source

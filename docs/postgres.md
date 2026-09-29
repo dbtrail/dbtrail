@@ -846,4 +846,4 @@ which are plain SQL.
 - [Streaming](streaming.md) — index requirements and the streaming model.
 - [Query & Recovery](query-and-recovery.md) — querying history and generating
   reversal SQL (flavor-agnostic — same for PostgreSQL, MySQL, and MariaDB).
-- [MariaDB as a source](mariadb.md) — the sibling alpha source.
+- [MariaDB as a source](mariadb.md) — the sibling beta source.
