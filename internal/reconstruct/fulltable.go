@@ -1517,6 +1517,7 @@ func ReconstructTable(
 		Schema:            schema,
 		Table:             table,
 		PKCols:            pkCols,
+		Columns:           tm.Columns,
 		Changes:           changes,
 		Spill:             fold.Spill,
 		LastEventID:       lastEventIDFor(fold, anchorMeta, captured),
@@ -1710,6 +1711,9 @@ type mergeInput struct {
 	Schema            string
 	Table             string
 	PKCols            []metadata.ColumnMeta
+	// Columns is the table's column metadata from the index's schema
+	// snapshot; the mydumper writer reads MariaDB UUID/INET types from it.
+	Columns []metadata.ColumnMeta
 	// Changes is the completed build side of the merge, as produced by
 	// foldEventWindow. Its entries are TRIMMED (retainEvent blanks RowBefore
 	// and the query-text fields), which is why no guard reading a before-image
@@ -1822,6 +1826,7 @@ func mergeBaselineIntoWriter(ctx context.Context, in mergeInput, rep *TableRepor
 		return fmt.Errorf("open mydumper writer: %w", err)
 	}
 	mw.spaceCheck = in.SpaceCheck
+	mw.SetColumnTypes(in.Columns)
 	// Success finalizes via the explicit Close below (before capturing
 	// rep.Files); ANY error return instead discards every file this writer
 	// wrote — see the #1162 note in the function comment. The discard also
@@ -2591,7 +2596,7 @@ func reconstructBinlogOnly(
 	}
 
 	rep.BinlogOnly = true
-	if err := writeBinlogOnlyChanges(cfg.OutputDir, schema, table, pkCols, colNames, cfg.ChunkSize, cfg.SpaceCheck, createSQL, changes, rep); err != nil {
+	if err := writeBinlogOnlyChanges(cfg.OutputDir, schema, table, pkCols, tm.Columns, colNames, cfg.ChunkSize, cfg.SpaceCheck, createSQL, changes, rep); err != nil {
 		return nil, err
 	}
 	rep.Duration = time.Since(start)
@@ -2697,6 +2702,7 @@ var replaceTableHeadRe = regexp.MustCompile(`(?is)^((?:\s+|/\*.*?\*/|--[^\n]*(?:
 func writeBinlogOnlyChanges(
 	outputDir, schema, table string,
 	pkCols []metadata.ColumnMeta,
+	columns []metadata.ColumnMeta,
 	colNames []string,
 	chunkSize int64,
 	spaceCheck func(dir string, need int64) error,
@@ -2716,6 +2722,7 @@ func writeBinlogOnlyChanges(
 		return fmt.Errorf("open mydumper writer: %w", err)
 	}
 	mw.spaceCheck = spaceCheck
+	mw.SetColumnTypes(columns)
 	// Same #1162 error-path discard as mergeBaselineIntoWriter: this path has
 	// no pre-writer guards at all, so any mid-write failure would otherwise
 	// finalize a loadable, silently-truncated chunk plus the schema file.

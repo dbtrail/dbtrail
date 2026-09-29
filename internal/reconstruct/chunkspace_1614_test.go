@@ -40,7 +40,7 @@ func TestSpaceCheck_reachesBothMydumperWriters(t *testing.T) {
 		changes := map[string]*query.ResultRow{
 			pkStrForInt(1): {EventType: parser.EventInsert, PKValues: pkStrForInt(1), RowAfter: map[string]any{"id": float64(1), "status": "new"}},
 		}
-		err := writeBinlogOnlyChanges(t.TempDir(), "mydb", "orders", pkColsIntID(), []string{"id", "status"}, 0, refuse,
+		err := writeBinlogOnlyChanges(t.TempDir(), "mydb", "orders", pkColsIntID(), nil, []string{"id", "status"}, 0, refuse,
 			binlogOnlySchemaPlaceholder("mydb", "orders"), changes, rep)
 		if !errors.Is(err, full) {
 			t.Fatalf("err = %v, want the disk refusal", err)

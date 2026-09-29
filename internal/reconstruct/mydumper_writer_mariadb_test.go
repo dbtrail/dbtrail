@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/query"
 )
 
 // A MariaDB UUID/INET value reaches the writer as the server's text (from the
@@ -23,6 +26,7 @@ func TestMydumperWriter_MariaDBFixedTypesAsHex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	w.SetColumnTypes([]metadata.ColumnMeta{{Name: "id", DataType: "int"}, {Name: "u", DataType: "uuid"}, {Name: "i4", DataType: "inet4"}, {Name: "i6", DataType: "INET6"}, {Name: "note", DataType: "varchar"}})
 	create := "/*!40101 SET NAMES binary*/;\nCREATE TABLE `t` (\n  `id` int(11) NOT NULL,\n  `u` uuid DEFAULT NULL,\n  `i4` inet4 DEFAULT NULL,\n  `i6` INET6 DEFAULT NULL,\n  `note` varchar(20) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n"
 	if err := w.WriteSchema(create); err != nil {
 		t.Fatal(err)
@@ -59,6 +63,7 @@ func TestMydumperWriter_MariaDBFixedTypeUnrestorableValueRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	w.SetColumnTypes([]metadata.ColumnMeta{{Name: "id", DataType: "int"}, {Name: "u", DataType: "uuid"}})
 	if err := w.WriteSchema("CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `u` uuid,\n  PRIMARY KEY (`id`)\n);\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +103,7 @@ func TestMydumperWriter_MariaDBFixedColumnNameCase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	w.SetColumnTypes([]metadata.ColumnMeta{{Name: "id", DataType: "int"}, {Name: "u", DataType: "uuid"}})
 	if err := w.WriteSchema("CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `u` uuid,\n  PRIMARY KEY (`id`)\n);\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -110,5 +116,48 @@ func TestMydumperWriter_MariaDBFixedColumnNameCase(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(dir, "db.t.00000.sql"))
 	if !strings.Contains(string(b), "X'00000000000000000000000000000001'") {
 		t.Errorf("UUID column named in another case was not written as X'..':\n%s", b)
+	}
+}
+
+// The binlog-only path hands WriteSchema a one-line CREATE captured from
+// schema_changes, or a placeholder comment naming the table. Text that merely
+// contains "uuid" (a table called device_uuid_map on plain MySQL) must not
+// fail the table: the column types come from the index's schema snapshot.
+func TestMydumperWriter_SchemaTextNamingUUIDDoesNotFail(t *testing.T) {
+	for _, create := range []string{
+		"-- bintrail: no baseline for db.device_uuid_map; schema placeholder\n",
+		"CREATE TABLE device_uuid_map (id INT PRIMARY KEY, inet6_note VARCHAR(20))",
+	} {
+		w, err := NewMydumperWriter(t.TempDir(), "db", "device_uuid_map", []string{"id", "inet6_note"}, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteSchema(create); err != nil {
+			t.Errorf("WriteSchema(%q) = %v, want no error on plain MySQL", create, err)
+		}
+	}
+}
+
+// The binlog-only path passes the snapshot's column types to the writer, so a
+// MariaDB UUID column is written as X'..' even when the schema file is a
+// placeholder the parser cannot read.
+func TestWriteBinlogOnlyChanges_MariaDBFixedTypesFromSnapshot(t *testing.T) {
+	outDir := t.TempDir()
+	cols := []metadata.ColumnMeta{{Name: "id", DataType: "int", IsPK: true}, {Name: "u", DataType: "uuid"}}
+	changes := map[string]*query.ResultRow{
+		"1": {EventType: event.EventInsert, PKValues: "1",
+			RowAfter: map[string]any{"id": float64(1), "u": "00000000-0000-0000-0000-000000000001"}},
+	}
+	rep := &TableReport{Schema: "db", Table: "device_uuid_map"}
+	if err := writeBinlogOnlyChanges(outDir, "db", "device_uuid_map", cols[:1], cols, []string{"id", "u"}, 0, nil,
+		binlogOnlySchemaPlaceholder("db", "device_uuid_map"), changes, rep); err != nil {
+		t.Fatalf("writeBinlogOnlyChanges: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(outDir, "db.device_uuid_map.00000.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "(1, X'00000000000000000000000000000001')") {
+		t.Errorf("binlog-only chunk did not write the UUID as X'..':\n%s", b)
 	}
 }

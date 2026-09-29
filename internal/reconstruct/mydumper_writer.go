@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 )
@@ -49,8 +48,8 @@ type MydumperWriter struct {
 	cols []string
 
 	// fixed maps the position of each MariaDB UUID/INET4/INET6 column in cols
-	// to its data type, read from the CREATE TABLE WriteSchema receives. Those
-	// values are written as X'..' (see writeMariaDBFixed).
+	// to its data type, set by SetColumnTypes from the index's schema
+	// snapshot. Those values are written as X'..' (see writeMariaDBFixed).
 	fixed map[int]string
 
 	files       []string // written file names, for TableReport
@@ -127,38 +126,29 @@ func (w *MydumperWriter) WriteSchema(createSQL string) error {
 	if err := os.WriteFile(path, []byte(createSQL), 0o644); err != nil {
 		return fmt.Errorf("write schema file %s: %w", path, err)
 	}
-	return w.readMariaDBFixedColumns(createSQL)
+	return nil
 }
 
-// readMariaDBFixedColumns records which columns are MariaDB UUID/INET4/INET6,
-// from the table's CREATE TABLE. A statement the schema parser cannot read is
-// only an error when it names one of those types: every other column is
-// written the same way whatever its type, and refusing would break a table the
-// writer handled before.
-func (w *MydumperWriter) readMariaDBFixedColumns(createSQL string) error {
-	cols, err := baseline.ParseSchemaText(createSQL)
-	if err != nil {
-		lower := strings.ToLower(createSQL)
-		if strings.Contains(lower, "uuid") || strings.Contains(lower, "inet4") || strings.Contains(lower, "inet6") {
-			return fmt.Errorf("read column types of %s.%s from its CREATE TABLE: %w", w.schema, w.table, err)
-		}
-		return nil
-	}
-	// Column names are case-insensitive in MySQL/MariaDB, so match them that
-	// way: a case difference must not silently drop the X'..' form.
+// SetColumnTypes records which columns are MariaDB UUID/INET4/INET6, from the
+// index's schema snapshot for the table (the same metadata the rest of the
+// fold reads), so their values are written as X'..' (see writeMariaDBFixed).
+// Names match case-insensitively, as they do on the server. Never derived from
+// the CREATE TABLE text: on the binlog-only path that text can be a captured
+// one-line statement or a placeholder the schema parser cannot read.
+func (w *MydumperWriter) SetColumnTypes(cols []metadata.ColumnMeta) {
 	types := make(map[string]string, len(cols))
 	for _, c := range cols {
-		types[strings.ToLower(c.Name)] = c.MySQLType
+		types[strings.ToLower(c.Name)] = c.DataType
 	}
+	w.fixed = nil
 	for i, name := range w.cols {
 		if dt := types[strings.ToLower(name)]; metadata.MariaDBFixedWidth(dt) > 0 {
 			if w.fixed == nil {
 				w.fixed = make(map[int]string)
 			}
-			w.fixed[i] = dt
+			w.fixed[i] = strings.ToLower(strings.TrimSpace(dt))
 		}
 	}
-	return nil
 }
 
 // writeMariaDBFixed renders a MariaDB UUID/INET4/INET6 value as X'..' of its
