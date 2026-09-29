@@ -148,11 +148,12 @@ jobs:
     permissions:
       contents: read
 
-    # Same 10.6 LTS / 10.11 LTS / 11.4 matrix as ci.yml (#622).
+    # Same 10.11 / 11.4 / 11.8 / 12.3 LTS matrix as ci.yml (#622).
+    # scripts/check-mariadb-matrix-lockstep.sh fails CI when the two differ.
     strategy:
       fail-fast: false
       matrix:
-        mariadb: ["10.6", "10.11", "11.4"]
+        mariadb: ["10.11", "11.4", "11.8", "12.3"]
 
     env:
       BINTRAIL_TEST_DSN: "root:testroot@tcp(127.0.0.1:13306)"
