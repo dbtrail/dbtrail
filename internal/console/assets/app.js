@@ -5619,7 +5619,8 @@ function snapshotHero(b, cov, cur, acts) {
   // not say where the newest one is: the place is set but not lit.
   const kinds = (snap && snap.kinds) || [];
   const tile = (kind, label, off, ico) => {
-    const src = srcs.find((x) => x.kind === kind);
+    // Where the server writes now: a previous place (#1684) is not one.
+    const src = srcs.find((x) => x.kind === kind && !x.previous);
     const state = !src ? "off" : kinds.includes(kind) ? "on" : "dim";
     return el("div", { class: "hero-card hero-tile " + state, title: src ? src.source : null },
       icon(ico, "hero-ico"), el("span", { class: "hero-tile-t", text: src ? label : off }));
@@ -6808,6 +6809,12 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // writes refuse. The line under it says what to do.
   const src = srv.source;
   whereCard.append(blCase(src, true, sessionMay("servers:write") ? "Type one above and Save." : ""));
+  // The places this server used before (#1684): still read, never written.
+  const prevBox = previousLocationsBox(srv, !!readOnly || !sessionMay("servers:write"));
+  if (prevBox) whereCard.append(prevBox);
+  // What a move does, said while it is typed, before Save.
+  const moveNote = el("div", { class: "bks-local-words" });
+  whereCard.append(moveNote);
   // The refusal beats the prediction: the schedule reads the RAW entry, so
   // clearing the dir on this very page leaves a stored schedule that will
   // refuse every slot. Never compact.
@@ -6910,6 +6917,9 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
       const keepHere = w.err || w === infos[infos.length - 1];
       (keepHere ? words : wordsMore).append(el("p", { class: w.err ? "form-msg err" : (keepHere ? "form-hint keep-reach" : "form-hint"), text: w.text }));
     });
+    clear(moveNote);
+    locationMoveWords(was.rawDir, dir.value.trim(), was.s3, s3v).forEach((t) =>
+      moveNote.append(el("p", { class: "form-hint", text: t })));
     clear(shape);
     shape.hidden = keep.hidden;
     if (!shape.hidden) keepShapeDraw(shape, keepNow() || 0, srv.snapshot_every_minutes || 0, srv.prune_retain_minutes || 0);
@@ -6970,6 +6980,69 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // as on the disk-space card: the block is for reading, not for acting.
   if (mayWrite) box.append(el("div", { class: "stg-cardfoot" }, save), msg);
   box.append(cnFine("More about this server", ...more));
+  return box;
+}
+
+// locationMoveWords says what saving a new snapshot place does, before the
+// Save (#1684): the old place stays readable and nothing new goes there, the
+// first snapshot at the new place writes every table, and keeping by count
+// applies to the new place only. Empty while nothing saved is being moved.
+function locationMoveWords(dirWas, dirNow, s3Was, s3Now) {
+  const norm = (v) => String(v || "").trim().replace(/\/+$/, "");
+  const left = [];
+  if (dirWas && norm(dirWas) !== norm(dirNow)) left.push(dirWas);
+  if (s3Was && norm(s3Was) !== norm(s3Now)) left.push(s3Was);
+  if (!left.length) return [];
+  const old = left.join(" and ");
+  return [
+    old + " stays readable here after you save, and nothing new is written there.",
+    "The first snapshot at the new place writes every table.",
+    "Keeping by count applies to the new place only. Nothing at " + old + " is removed.",
+  ];
+}
+
+// previousLocationsBox lists the snapshot places this server used before
+// (#1684), each with when it left and a Forget button. Forget stops reading
+// the place; nothing there is deleted. null when there are none.
+function previousLocationsBox(srv, locked) {
+  const prev = (srv && srv.previous_locations) || [];
+  if (!prev.length) return null;
+  const box = el("div", { class: "bk-srcs" });
+  box.append(el("span", { class: "field-label", text: "Read before, never written" }));
+  const msg = el("p", { class: "form-msg err" });
+  msg.hidden = true;
+  prev.forEach((p) => {
+    const when = String(p.left_at || "").replace("T", " ").replace(/Z$/, " UTC");
+    const row = el("div", { class: "bk-src" },
+      el("span", { class: "bk-src-k", text: backupKindWord(/^s3:\/\//i.test(p.location) ? "s3" : "dir") }),
+      el("code", { class: "stg-code", text: p.location }),
+      el("span", { class: "bk-src-n", text: "until " + when }));
+    if (!locked) {
+      const forget = el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Forget" });
+      forget.onclick = async () => {
+        if (typeof window.confirm === "function" &&
+          !window.confirm("Stop reading " + p.location + "? Its snapshots stay where they are, but time travel, restore and this list no longer see them.")) return;
+        forget.disabled = true;
+        msg.hidden = true;
+        try {
+          await api("/api/backup-settings/servers/" + encodeURIComponent(srv.id), {
+            method: "PUT",
+            body: { forget_previous_location: p.location },
+          });
+        } catch (err) {
+          msg.textContent = (err && err.message) || String(err);
+          msg.hidden = false;
+          forget.disabled = false;
+          return;
+        }
+        toast("Forgot " + p.location);
+        await renderSnapshots();
+      };
+      row.append(forget);
+    }
+    box.append(row);
+  });
+  box.append(msg);
   return box;
 }
 
@@ -7847,16 +7920,20 @@ function backupSourceList(b) {
   const srcs = (b && b.sources) || [];
   if (srcs.length < 2) return el("code", { class: "stg-code", text: (b && b.source) || "" });
   return el("div", { class: "bk-srcs" }, ...srcs.map((s) => el("div", { class: "bk-src" },
-    el("span", { class: "bk-src-k", text: backupKindWord(s.kind) }),
+    el("span", { class: "bk-src-k", text: backupKindWord(s.kind) + (s.previous ? ", used before" : "") }),
     el("code", { class: "stg-code", text: s.source }),
     s.error
       ? el("span", { class: "chip chip-mon", text: "unreadable" })
       : (s.skipped > 0
         ? el("span", { class: "chip chip-mon", text: "listed in part", title: s.skipped + " folder(s) under it could not be read" })
-        : el("span", { class: "bk-src-n", text: s.count + " file(s)" })))));
+        : el("span", { class: "bk-src-n", text: s.count + " file(s)" })),
+    // A previous place (#1684) shows only this server's snapshots.
+    s.hidden > 0 ? el("span", { class: "bk-src-n", text: s.hidden + " not shown: " + firstLine(s.hidden_why) }) : null)));
 }
 
-function backupKindWord(kind) { return kind === "s3" ? "S3" : "disk"; }
+// backupKindWord names where a copy is. "previous" is a snapshot found in a
+// place the server used before (#1684).
+function backupKindWord(kind) { return kind === "s3" ? "S3" : kind === "previous" ? "used before" : "disk"; }
 
 // firstLine trims a backend error to its opening line. An S3 listing failure
 // arrives as a DuckDB error carrying the whole generated SQL statement across
@@ -7894,7 +7971,7 @@ function backupIncompleteNotice(b) {
     el("div", { text: "Some snapshots are not listed: " + bad.length +
       " of " + ((b.sources) || []).length + " locations could not be read in full." }));
   bad.forEach((s) => box.append(el("div", { class: "bk-src" },
-    el("span", { class: "bk-src-k", text: backupKindWord(s.kind) }),
+    el("span", { class: "bk-src-k", text: backupKindWord(s.kind) + (s.previous ? ", used before" : "") }),
     el("code", { class: "stg-code", text: s.source }),
     el("span", { class: "bk-src-n", text: s.error ? firstLine(s.error) : "listed in part: " + s.skipped + " folder(s) could not be read" }))));
   return box;
