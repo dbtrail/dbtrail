@@ -359,7 +359,7 @@ func TestConsistentTableChecksum_MissingTableErrors(t *testing.T) {
 	}
 }
 
-func TestConsistentTableChecksum_MariaDBGTIDAbsent(t *testing.T) {
+func TestConsistentTableChecksum_MariaDBGTIDBinlogPos(t *testing.T) {
 	testutil.SkipIfNoMariaDB(t)
 	db, schema := testutil.CreateTestMariaDB(t)
 	testutil.MustExec(t, db, "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(64))")
@@ -367,14 +367,26 @@ func TestConsistentTableChecksum_MariaDBGTIDAbsent(t *testing.T) {
 
 	ctx := context.Background()
 	// MariaDB has no @@global.gtid_executed (error 1193). The checksum must
-	// still succeed with an empty GTID anchor, not fail — a wrong error constant
-	// or non-matching errors.As would break every MariaDB-source checksum.
+	// still succeed, not fail (a wrong error constant or non-matching
+	// errors.As would break every MariaDB-source checksum), and it must carry
+	// the MariaDB executed position instead of an empty anchor: an empty one
+	// made verify assume the index was current.
 	c, err := ConsistentTableChecksum(ctx, db, schema, "t")
 	if err != nil {
 		t.Fatalf("checksum on MariaDB: %v", err)
 	}
-	if c.GTIDSet != "" {
-		t.Errorf("GTIDSet = %q on MariaDB, want empty", c.GTIDSet)
+	// Exact equality holds because nothing writes to this MariaDB between the
+	// two reads (the CI job runs one test at a time, -p 1). A concurrent
+	// writer would make this fail, never pass wrongly.
+	var pos string
+	if err := db.QueryRowContext(ctx, "SELECT @@global.gtid_binlog_pos").Scan(&pos); err != nil {
+		t.Fatalf("read @@gtid_binlog_pos: %v", err)
+	}
+	if pos == "" {
+		t.Fatal("@@gtid_binlog_pos is empty after an INSERT; is the binlog on in this MariaDB?")
+	}
+	if c.GTIDFlavor != GTIDFlavorMariaDB || c.GTIDSet != pos {
+		t.Errorf("anchor = (%q, %q), want (%q, %q)", c.GTIDSet, c.GTIDFlavor, pos, GTIDFlavorMariaDB)
 	}
 	if c.RowCount != 2 {
 		t.Errorf("RowCount = %d, want 2", c.RowCount)

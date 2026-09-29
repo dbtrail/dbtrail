@@ -31,7 +31,7 @@ const captureUnknownAnswersJS = `[
   ["read-only web interface", { server_id: "a", state: "unknown", detail: "this web interface is read-only and is not connected to the source" }],
   ["no source configured", { server_id: "a", state: "unknown", detail: "this server has no source to ask" }],
   ["position mode", { server_id: "a", state: "unknown", detail: "the capture runs in binlog-position mode, which is not compared" }],
-  ["MariaDB", { server_id: "a", state: "unknown", detail: "MariaDB sources are not compared yet" }],
+  ["MariaDB source ahead", { server_id: "a", state: "unknown", detail: "the source is ahead of the capture's checkpoint; a MariaDB source is only compared for an exact match" }],
   ["PostgreSQL", { server_id: "a", state: "unknown", detail: "PostgreSQL sources are not compared yet" }],
   ["the probe failed", { server_id: "a", state: "unknown", detail: "the source did not answer" }],
   ["the probe timed out", { server_id: "a", state: "unknown", detail: "the probe did not finish in time" }],

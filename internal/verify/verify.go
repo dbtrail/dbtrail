@@ -190,7 +190,7 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 	// recent writes (a stale last_event_time does not mean "behind"). A GTID-off
 	// source can't be checked this way — verify proceeds but flags the result
 	// as coverage-unverified rather than blocking.
-	covered, coverageNote := indexCovers(ctx, cfg.IndexDB, src.GTIDSet)
+	covered, coverageNote := indexCovers(ctx, cfg.IndexDB, src.GTIDSet, src.GTIDFlavor)
 	if !covered {
 		return inconclusive(res, coverageNote), nil
 	}
@@ -678,11 +678,17 @@ func isNoBaseline(err error) bool { return errors.Is(err, reconstruct.ErrNoBasel
 // (srcGTID). If it does not, a reconstruct would be missing events the source
 // has, so the comparison is inconclusive rather than a mismatch.
 //
+// A MariaDB source (flavor consistency.GTIDFlavorMariaDB) is compared by
+// indexCoversMariaDB, per domain, and never takes the branch below.
+//
 // A source with GTIDs disabled (empty srcGTID) cannot be coverage-checked this
 // way; verify proceeds without the coverage guarantee, flagging the result as
 // coverage-unverified (rather than blocking or reporting inconclusive) — it
 // returns (true, note).
-func indexCovers(ctx context.Context, indexDB *sql.DB, srcGTID string) (bool, string) {
+func indexCovers(ctx context.Context, indexDB *sql.DB, srcGTID, flavor string) (bool, string) {
+	if flavor == consistency.GTIDFlavorMariaDB {
+		return indexCoversMariaDB(ctx, indexDB, srcGTID)
+	}
 	if strings.TrimSpace(srcGTID) == "" {
 		// No GTID to check containment against (gtid_mode=OFF). Proceed without
 		// the coverage guarantee rather than blocking — a behind index on a
@@ -700,7 +706,8 @@ func indexCovers(ctx context.Context, indexDB *sql.DB, srcGTID string) (bool, st
 		return false, "could not read index coverage: " + err.Error()
 	}
 	if !idxGTID.Valid || strings.TrimSpace(idxGTID.String) == "" {
-		return false, "index has no GTID checkpoint (the stream is running in position mode, or no stream has run against this index); if a stream is running, restart it with --start-gtid \"$(mysql -N -e 'SELECT @@GLOBAL.gtid_executed')\""
+		return false, "index has no GTID checkpoint (the stream is running in position mode, or no stream has run against this index). " +
+			gtidModeAdvice("mysql")
 	}
 	idxSet, err := gomysql.ParseMysqlGTIDSet(idxGTID.String)
 	if err != nil {
