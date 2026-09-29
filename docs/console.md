@@ -1524,6 +1524,13 @@ unknown name is a tool error that lists the valid ones. The access token's
 permissions apply to every server alike, and the audit record names the
 server the call went to. One call reaches one server; nothing fans out.
 
+A token minted by a session without the `servers:read` permission is not
+shown the server list, the same list `/api/servers` refuses it: the tool
+descriptions carry no names, the unknown-name error lists no valid ones, and
+an answer or a connection error echoes the name or id the call sent instead
+of the server's stored name. It can still route to a server it already
+knows.
+
 Point any Streamable-HTTP-capable MCP client at it with the access token as a
 Bearer credential:
 

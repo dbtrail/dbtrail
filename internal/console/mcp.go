@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -326,6 +328,9 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 			}
 			b, err := s.cm.Resolve(ctx, rid)
 			if err != nil {
+				if sel := mcptools.RequestedServer(ctx); sel != "" && !pol.Allows(ext.PermServersRead) {
+					return nil, withheldServerError(err, sel)
+				}
 				return nil, err
 			}
 			// The selected entry's source DSN, when it has one: extension
@@ -481,4 +486,22 @@ func (s *Server) mcpRouteID(ctx context.Context, sessionID string, pol *ext.Acce
 	}
 	return "", fmt.Errorf("unknown server %q: use one of %s, or omit server to use this connection's server",
 		sel, strings.Join(quoted, ", "))
+}
+
+// withheldServerError rewrites a connection error for a token that may not
+// read the server list. The connManager's open errors lead with the stored
+// display name (`server "<name>": ...`, including the concurrent-edit
+// retry), which such a token must not learn by routing to an id; the rewrite
+// names what the client sent instead. Any other error passes unchanged.
+func withheldServerError(err error, sel string) error {
+	const lead = "server "
+	msg := err.Error()
+	if !strings.HasPrefix(msg, lead) {
+		return err
+	}
+	quoted, qerr := strconv.QuotedPrefix(msg[len(lead):])
+	if qerr != nil {
+		return err
+	}
+	return errors.New(lead + strconv.Quote(sel) + msg[len(lead)+len(quoted):])
 }

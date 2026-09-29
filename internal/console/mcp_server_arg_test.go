@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -471,5 +472,64 @@ func TestMCPServerArg_namesWithheldWithoutServersRead(t *testing.T) {
 			t.Errorf("perms %v: routed by id, want %q, got IsError=%v %v", tc.perms, want, res.IsError, texts)
 		}
 		assertMet(t, "staging by id", f.stgM)
+	}
+}
+
+// TestMCPServerArg_unreachableByIDWithheldName: the connection error names the
+// server by its stored display name, which a token without servers:read must
+// not learn by routing to an id. The error echoes what the client sent.
+func TestMCPServerArg_unreachableByIDWithheldName(t *testing.T) {
+	f := newRoutedFixture(t, false)
+	broken, err := f.s.cm.reg.Add(ServerEntry{Name: "prod-billing", DSN: "u:hunter2secret@tcp(127.0.0.1:1)/idx_broken?timeout=2s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _, err := f.s.sessions.IssueWithPolicy("minter", &ext.AccessPolicy{Permissions: []ext.Permission{ext.PermSettingsRead, ext.PermQueryExecute}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := doJSON(t, f.s, "POST", "/api/mcp-token", sess)
+	var minted struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &minted); err != nil || minted.Token == "" {
+		t.Fatalf("mint: %v (%s)", err, rec.Body.String())
+	}
+	session := mcpGrantConnect(t, f.ts.URL+"/mcp/prod", minted.Token)
+	res, texts := routedCall(t, session, "list_schema_changes", map[string]any{"server": broken.ID})
+	text := strings.Join(texts, "\n")
+	if !res.IsError {
+		t.Fatalf("unreachable server must be a tool error, got %v", texts)
+	}
+	if strings.Contains(text, "prod-billing") {
+		t.Errorf("error revealed the display name to a token without servers:read: %q", text)
+	}
+	if !strings.Contains(text, broken.ID) {
+		t.Errorf("error must echo the id the client sent, got %q", text)
+	}
+	if strings.Contains(text, "hunter2secret") {
+		t.Errorf("error leaked the DSN password: %q", text)
+	}
+
+	// With servers:read the name is fine to show (the static token here).
+	full := mcpGrantConnect(t, f.ts.URL+"/mcp/prod", "t")
+	_, texts = routedCall(t, full, "list_schema_changes", map[string]any{"server": broken.ID})
+	if !strings.Contains(strings.Join(texts, "\n"), `server "prod-billing"`) {
+		t.Errorf("a full-access token should still see the name, got %v", texts)
+	}
+}
+
+func TestWithheldServerError(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`server "prod-billing": failed to ping MySQL: refused`, `server "abc123": failed to ping MySQL: refused`},
+		{`server "prod-billing" is being edited concurrently; retry`, `server "abc123" is being edited concurrently; retry`},
+		{`server "we\"ird: name": invalid DSN: x`, `server "abc123": invalid DSN: x`},
+		{`unknown server id`, `unknown server id`},
+		{`server prod: unquoted`, `server prod: unquoted`},
+	}
+	for _, tc := range cases {
+		if got := withheldServerError(errors.New(tc.in), "abc123").Error(); got != tc.want {
+			t.Errorf("%q -> %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
