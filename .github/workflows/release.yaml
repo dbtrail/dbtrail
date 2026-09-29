@@ -254,6 +254,21 @@ jobs:
           set -o pipefail
           go test -tags=integration -race -p 1 -count=1 -v -run 'MariaDB|Mariadb|mariadb|Flavor|FourColumns' ./... 2>&1 | tee /tmp/mariadb-it.out
           for name in \
+            TestStreamLoop_liveReplication_mariadb \
+            TestStreamLoop_mariadbResumeDedupDoesNotDeleteIndexedRows \
+            TestOne_MariaDB_flavorDetectedWhenUndeclared \
+            TestOne_MariaDB_declaredMySQLRefuses \
+            TestOne_MariaDB_resumeOldMySQLDefaultCheckpoint \
+            TestIntegrationMonitorRegistrySourceMariaDBDetected \
+            TestBuild_MariaDBVersionRow \
+            TestRecoverRoundTrip_MariaDBTypes \
+            TestRecoverRoundTrip_MariaDBUUIDKey \
+            TestRecoverRoundTrip_MariaDBJSONText \
+            TestRecoverSequence_MariaDB \
+            TestConsistentTableChecksum_MariaDBGTIDBinlogPos \
+            TestVerifyTable_liveSource_mariadb \
+            TestVerifyTable_liveSource_mariadbIndexBehind \
+            TestVerifyTable_liveSource_mariadbPositionMode \
             TestEndToEnd_MariaDBSnapshotChain \
             TestEndToEnd_MariaDBSnapshotEd25519 \
             TestFormatMariaDBFixed_matchesServer_MariaDB \

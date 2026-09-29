@@ -190,7 +190,9 @@ page and the
   skipped transparently.
 - **MariaDB-only column types**: `UUID` (10.7+), `INET4` (10.10+), `INET6`
   (10.5+) and `VECTOR` (11.7+) are captured and restored by `recover` byte for
-  byte, including as a primary key. `reconstruct`, `drill`, `verify`, the
+  byte, also in tables whose primary key uses them. `query --pk` and
+  `recover --pk` do not accept the text form of such a key yet (see the
+  limitations below). `reconstruct`, `drill`, `verify`, the
   `_flashback`/`_snapshot`/`_diff` schemas and the Parquet copy return the
   value the source holds: `UUID` and `INET` as the text MariaDB prints
   (`123e4567-e89b-12d3-a456-426614174000`, `10.0.0.0`, `::ffff:1.2.3.4`),
@@ -278,12 +280,22 @@ page and the
     unchanged row.
 
   The same applies to a MySQL 9 `VECTOR` column.
+- **`query --pk` and `recover --pk` do not take a `UUID`/`INET` key as text.**
+  The index keys these rows by the value's bytes, and those two commands look
+  the key up exactly as typed, so `--pk 123e4567-…` finds nothing, without an
+  error. Select the rows with `--table` and a time window (`--since`/`--until`)
+  instead, or copy the key from the `pk_values` of a `query` result.
+  `reconstruct --pk`, the console's time travel and the `_flashback`,
+  `_snapshot` and `_diff` schemas do accept the text form.
 - **Values captured before `UUID`/`INET` support stay unreadable.** Events
   indexed by a version older than the one that added it hold damaged bytes for
   these columns. `verify` reports such a value as inconclusive; a full-table
   `reconstruct`, `drill` or `baseline refresh` that would write one refuses the
   table instead of writing a wrong value; single-row reads return it as stored
-  and log a warning.
+  and log a warning. Because `baseline refresh` publishes all tables or none,
+  one such table stops every refresh until the Parquet copy starts after those
+  events: **after upgrading, take a new snapshot** (`bintrail dump`, then
+  `bintrail baseline`, or Create backup in the console).
 - **Sequences are not rewound.** MariaDB records every change to a `SEQUENCE`
   as an insert into its one-row table, and bintrail captures those like any
   other insert. A reversal that includes the sequence is refused by the server
