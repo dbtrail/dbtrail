@@ -31,24 +31,17 @@ import (
 // (an unreadable folder there, #1639) stands as before.
 func foldBaseAcross(ctx context.Context, indexDSN, standing string, previous []console.PreviousLocation, at time.Time) (source string, tables []string, anchor time.Time, err error) {
 	tables, anchor, err = snapshotAt(ctx, standing, at)
-	if err != nil || len(previous) == 0 {
+	if len(previous) == 0 {
 		return standing, tables, anchor, err
 	}
-	source = standing
-	ownID, asked := "", false
-	own := func() string {
-		if !asked {
-			asked = true
-			id, err := snapshotWriterIDFunc(indexDSN)
-			if err != nil {
-				slog.Warn("snapshot base: this server's own identity could not be read; a signed snapshot in a previous location is not used",
-					"error", err)
-				return ""
-			}
-			ownID = reconstruct.NormalizeSnapshotWriter(id)
+	if err != nil {
+		if !console.CurrentLocationEmpty(err) {
+			return standing, nil, time.Time{}, console.NotConsulted(err, len(previous))
 		}
-		return ownID
+		tables, anchor = nil, time.Time{} // a new place nothing was written to yet
 	}
+	source = standing
+	own := ownIdentityOnce(indexDSN)
 	var notes []string
 	for _, p := range previous {
 		until, ok := p.Until()
@@ -109,19 +102,16 @@ var listBaselinesUnreadable = reconstruct.ListBaselinesUnreadable
 // and "only one snapshot, nothing to compare" would be a false all-clear.
 func listForVerify(ctx context.Context, indexDSN, src string, previous []console.PreviousLocation) ([]reconstruct.BaselineFile, []reconstruct.UnreadableSnapshot, error) {
 	files, unreadable, err := listBaselinesUnreadable(ctx, src)
-	if err != nil || len(previous) == 0 {
+	if len(previous) == 0 {
 		return files, unreadable, err
 	}
-	ownID, asked := "", false
-	own := func() string {
-		if !asked {
-			asked = true
-			if id, err := snapshotWriterIDFunc(indexDSN); err == nil {
-				ownID = reconstruct.NormalizeSnapshotWriter(id)
-			}
+	if err != nil {
+		if !console.CurrentLocationEmpty(err) {
+			return nil, nil, console.NotConsulted(err, len(previous))
 		}
-		return ownID
+		files, unreadable = nil, nil // a new place nothing was written to yet
 	}
+	own := ownIdentityOnce(indexDSN)
 	type key struct {
 		at            int64
 		schema, table string
@@ -151,8 +141,14 @@ func listForVerify(ctx context.Context, indexDSN, src string, previous []console
 			if !done {
 				v = console.PreviousSnapshotRefusal(p.Location, f.SnapshotTime, own)
 				verdict[ts] = v
+				if v != nil && !console.ForeignPreviousSnapshot(v) {
+					// Who wrote it could not be told: it may be this
+					// server's own, and leaving it out could turn into
+					// "nothing to compare". Every table is inconclusive.
+					return nil, nil, fmt.Errorf("%w: %v", reconstruct.ErrUnreadableSnapshot, v)
+				}
 				if v != nil {
-					slog.Info("verify: a snapshot of a previous location is not this server's and is not compared", "why", v)
+					slog.Warn("verify: a snapshot of a previous location is another writer's and is not compared", "why", v)
 				}
 			}
 			k := key{ts, f.Schema, f.Table}
@@ -179,4 +175,27 @@ func listForVerify(ctx context.Context, indexDSN, src string, previous []console
 		return a.Table < b.Table
 	})
 	return files, unreadable, nil
+}
+
+// ownIdentityOnce reads the identity of the server whose index is indexDSN
+// at most once, normalized, and logs a failure: a signed snapshot in a
+// previous location is then not used, and the refusal says why.
+func ownIdentityOnce(indexDSN string) func() (string, error) {
+	var id string
+	var err error
+	asked := false
+	return func() (string, error) {
+		if !asked {
+			asked = true
+			var raw string
+			raw, err = snapshotWriterIDFunc(indexDSN)
+			if err != nil {
+				slog.Warn("snapshot base: this server's own identity could not be read; a signed snapshot in a previous location is not used",
+					"error", err)
+				return "", err
+			}
+			id = reconstruct.NormalizeSnapshotWriter(raw)
+		}
+		return id, err
+	}
 }

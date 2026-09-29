@@ -304,7 +304,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 			moreAt[src] = true
 		}
 		return files, skipped, err
-	}, previousRefusal(r.Context(), b))
+	}, previousRefusalFor(r.Context(), b))
 	resp.Truncated = anyMore
 	// A previous location whose newest snapshots, the only ones read, were
 	// all hidden may hold older ones of this server past the cap: said,
@@ -313,6 +313,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	for i := range merged.Sources {
 		src := &merged.Sources[i]
 		if src.Previous && src.Hidden > 0 && moreAt[src.Source] {
+			src.Truncated = true
 			src.HiddenWhy += fmt.Sprintf("; only the newest %d snapshots there were read, so older ones of this server may be there and are not listed", baselinesMaxSnapshots+1)
 			capHid = true
 		}

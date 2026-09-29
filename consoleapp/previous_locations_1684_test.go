@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -175,5 +176,37 @@ func TestListForVerify_previousLocations(t *testing.T) {
 	_, _, err = listForVerify(context.Background(), "idx", cur, []console.PreviousLocation{prevAt(gone, left)})
 	if !errors.Is(err, reconstruct.ErrUnreadableSnapshot) || !strings.Contains(err.Error(), gone) {
 		t.Fatalf("err = %v, want an unreadable-folder refusal naming %s", err, gone)
+	}
+}
+
+// A current folder that does not exist yet: the restore and verify read the
+// previous locations. A signature that cannot be told makes verify stop as
+// on an unreadable folder, never "nothing to compare".
+func TestPreviousLocations_currentFolderMissingAndUnknownAuthor(t *testing.T) {
+	left := refreshAt.Add(-24 * time.Hour)
+	prev := t.TempDir()
+	stageAt(t, prev, left.Add(-time.Hour))
+	stageAt(t, prev, left.Add(-2*time.Hour))
+	missing := filepath.Join(t.TempDir(), "not-created-yet")
+	ownIdentity(t, ownWriter, nil)
+	folds := captureFold(t)
+	sup := refusedFixture(t)
+	_, _, _, err := sup.executeRestore(console.BaselineRestoreRequest{ServerID: "s", ServerName: "s", BaselineDir: missing, IndexDSN: "idx", At: refreshAt,
+		PreviousLocations: []console.PreviousLocation{prevAt(prev, left)}})
+	if err != nil || len(*folds) != 1 || (*folds)[0].BaselineSrc != prev || (*folds)[0].OutputDir != missing {
+		t.Fatalf("err = %v folds = %+v, want a fold from the previous place into the new one", err, *folds)
+	}
+	files, _, err := listForVerify(context.Background(), "idx", missing, []console.PreviousLocation{prevAt(prev, left)})
+	if err != nil || len(files) != 2 {
+		t.Fatalf("verify listing: %d files, %v", len(files), err)
+	}
+	// Signed, and this server's identity cannot be read.
+	if err := os.WriteFile(filepath.Join(prev, reconstruct.SnapshotDirName(left.Add(-time.Hour)), baseline.WriterMarkerPrefix+ownWriter), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ownIdentity(t, "", errors.New("index down"))
+	_, _, err = listForVerify(context.Background(), "idx", missing, []console.PreviousLocation{prevAt(prev, left)})
+	if !errors.Is(err, reconstruct.ErrUnreadableSnapshot) || !strings.Contains(err.Error(), "index down") {
+		t.Fatalf("err = %v, want an unreadable refusal naming the identity failure", err)
 	}
 }

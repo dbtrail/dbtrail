@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/serverid"
 )
 
 // Reads across a server's previous snapshot locations (#1684).
@@ -38,38 +40,103 @@ var findBaselineAt = reconstruct.FindBaseline
 var previousSnapshotSigners = reconstruct.SnapshotSigners
 
 // bundleOwnWriter is the bundle's own writer identity, normalized; "" when
-// its index names none or cannot be read. A seam for tests.
-var bundleOwnWriter = func(ctx context.Context, b *bundle) string {
-	return ownWriterID(ctx, b.db, "")
+// its index names none, and an error when it cannot be read. A seam for tests.
+var bundleOwnWriter = func(ctx context.Context, b *bundle) (string, error) {
+	if b.db == nil {
+		return "", errors.New("this server's index connection is not open")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	id, err := serverid.SnapshotWriterID(ctx, b.db)
+	if err != nil {
+		return "", err
+	}
+	return reconstruct.NormalizeSnapshotWriter(id), nil
+}
+
+// previousRefusal is PreviousSnapshotRefusal's answer. foreign tells a
+// snapshot another writer signed (left out: it is not this server's) from
+// one whose author could not be told (a gap: it may be this server's).
+type previousRefusal struct {
+	msg     string
+	foreign bool
+}
+
+func (e *previousRefusal) Error() string { return e.msg }
+
+// ForeignPreviousSnapshot reports a refusal because another writer signed
+// the snapshot, as opposed to one whose author could not be told.
+func ForeignPreviousSnapshot(err error) bool {
+	var r *previousRefusal
+	return errors.As(err, &r) && r.foreign
 }
 
 // PreviousSnapshotRefusal says why the snapshot of the previous location loc
 // taken at snap must not be served as this server's, nil when it may. own is
-// this server's writer identity, normalized, "" when unknown; asked only for
-// a signed snapshot.
-func PreviousSnapshotRefusal(loc string, snap time.Time, own func() string) error {
+// this server's writer identity, normalized ("" when its index names none);
+// asked only for a signed snapshot.
+func PreviousSnapshotRefusal(loc string, snap time.Time, own func() (string, error)) error {
 	name := strings.TrimRight(loc, "/") + "/" + reconstruct.SnapshotDirName(snap)
 	signers, known, err := previousSnapshotSigners(loc, snap)
 	if err != nil {
-		return fmt.Errorf("the snapshot %s in the previous location %s was not used: who wrote it could not be read (%v)", name, loc, err)
+		return &previousRefusal{msg: fmt.Sprintf("the snapshot %s in the previous location %s was not used: who wrote it could not be read (%v)", name, loc, err)}
 	}
 	if !known {
-		return fmt.Errorf("the snapshot %s in the previous location %s was not used: who wrote it is not known here", name, loc)
+		return &previousRefusal{msg: fmt.Sprintf("the snapshot %s in the previous location %s was not used: who wrote it is not known here", name, loc)}
 	}
 	if len(signers) == 0 {
 		return nil
 	}
-	ownID := own()
+	ownID, oerr := own()
+	if oerr != nil {
+		return &previousRefusal{msg: fmt.Sprintf("the snapshot %s in the previous location %s was not used: it was signed by %s, and this server's own identity could not be read to compare (%v)",
+			name, loc, strings.Join(signers, ", "), oerr)}
+	}
 	if ownID == "" {
-		return fmt.Errorf("the snapshot %s in the previous location %s was not used: it was signed by %s, and this server's index names no writer to compare with",
-			name, loc, strings.Join(signers, ", "))
+		return &previousRefusal{msg: fmt.Sprintf("the snapshot %s in the previous location %s was not used: it was signed by %s, and this server's index names no writer to compare with",
+			name, loc, strings.Join(signers, ", "))}
 	}
 	foreign := slices.DeleteFunc(slices.Clone(signers), func(w string) bool { return w == ownID })
 	if len(foreign) > 0 {
-		return fmt.Errorf("the snapshot %s in the previous location %s was not used: it was written by another writer (%s), not by this server",
-			name, loc, strings.Join(foreign, ", "))
+		return &previousRefusal{foreign: true, msg: fmt.Sprintf("the snapshot %s in the previous location %s was not used: it was written by another writer (%s), not by this server",
+			name, loc, strings.Join(foreign, ", "))}
 	}
 	return nil
+}
+
+// ownOnce reads the bundle's identity at most once.
+func ownOnce(ctx context.Context, b *bundle) func() (string, error) {
+	var id string
+	var err error
+	asked := false
+	return func() (string, error) {
+		if !asked {
+			id, err = bundleOwnWriter(ctx, b)
+			asked = true
+			if err != nil {
+				slog.Warn("console: this server's own identity could not be read; signed snapshots in its previous locations are not used", "error", err)
+			}
+		}
+		return id, err
+	}
+}
+
+// CurrentLocationEmpty reports a current-location answer that means
+// "nothing there": no snapshot, or a folder that does not exist yet (a new
+// place nothing has been written to). Only then are previous locations
+// consulted in place of it; any other failure stands, since the current
+// place may hold a newer snapshot it could not read.
+func CurrentLocationEmpty(err error) bool {
+	return errors.Is(err, reconstruct.ErrNoBaseline) || errors.Is(err, fs.ErrNotExist)
+}
+
+// NotConsulted adds to a current-location failure that the previous
+// locations were not consulted, so a refusal never reads as the whole story.
+func NotConsulted(err error, previous int) error {
+	if err == nil || previous == 0 {
+		return err
+	}
+	return fmt.Errorf("%w (the %d previous snapshot location(s) were not consulted, because the current one could not be read)", err, previous)
 }
 
 // previousUntilNote is why a previous location whose move time does not
@@ -93,27 +160,24 @@ func snapshotDirOf(path string, fallback time.Time) time.Time {
 // previous ones. A current answer that is a refusal other than "none there"
 // stands: the current location may hold a newer snapshot it could not read.
 func (b *bundle) withPreviousLocations(ctx context.Context, schema, table string, at time.Time, path string, snapshotTime time.Time, stale reconstruct.StaleWarning, err error) (string, time.Time, reconstruct.StaleWarning, error) {
-	if err != nil && !errors.Is(err, reconstruct.ErrNoBaseline) {
-		return path, snapshotTime, stale, err
+	if err != nil && !CurrentLocationEmpty(err) {
+		return path, snapshotTime, stale, NotConsulted(err, len(b.previous))
 	}
 	found := err == nil
 	var best time.Time
 	if found {
 		best = snapshotDirOf(path, snapshotTime)
 	}
-	ownID, asked := "", false
-	own := func() string {
-		if !asked {
-			ownID, asked = bundleOwnWriter(ctx, b), true
-		}
-		return ownID
-	}
+	own := ownOnce(ctx, b)
 	var notes []string
 	for _, p := range b.previous {
 		until, ok := p.Until()
 		if !ok {
 			notes = append(notes, previousUntilNote(p))
 			continue
+		}
+		if found && !until.After(best) {
+			continue // nothing there can be newer than what was found
 		}
 		bound := at
 		if until.Before(bound) {
@@ -141,6 +205,9 @@ func (b *bundle) withPreviousLocations(ctx context.Context, schema, table string
 	}
 	if !found {
 		if len(notes) == 0 {
+			if err == nil || !errors.Is(err, reconstruct.ErrNoBaseline) {
+				err = fmt.Errorf("%w for %s.%s", reconstruct.ErrNoBaseline, schema, table)
+			}
 			return "", time.Time{}, reconstruct.StaleWarning{}, err
 		}
 		// Not ErrNoBaseline: a plain "no snapshot" would read as a history
@@ -197,7 +264,7 @@ func previousFiles(loc string, files []reconstruct.BaselineFile, until time.Time
 	}
 	var parts []string
 	if n := len(after); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d written after this server left, by whoever uses the location now", n))
+		parts = append(parts, fmt.Sprintf("%d dated after this server left it", n))
 	}
 	if n := len(refused); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d not this server's: %v", n, firstRefusal))
@@ -230,14 +297,8 @@ func readSourcesOf(b *bundle) []listSource {
 
 // previousRefusal is PreviousSnapshotRefusal bound to the bundle's own
 // identity, read at most once.
-func previousRefusal(ctx context.Context, b *bundle) func(loc string, snap time.Time) error {
-	ownID, asked := "", false
-	own := func() string {
-		if !asked {
-			ownID, asked = bundleOwnWriter(ctx, b), true
-		}
-		return ownID
-	}
+func previousRefusalFor(ctx context.Context, b *bundle) func(loc string, snap time.Time) error {
+	own := ownOnce(ctx, b)
 	return func(loc string, snap time.Time) error {
 		return PreviousSnapshotRefusal(loc, snap, own)
 	}

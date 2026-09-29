@@ -7966,14 +7966,15 @@ function backupIncompleteNotice(b) {
   // open, skipped and counted) is as much a hazard as one that failed: the
   // list is still a subset. Keying on error alone printed "0 of 1 locations
   // could not be read" over such a listing and named nothing.
-  const bad = ((b.sources) || []).filter((s) => s.error || s.skipped > 0);
+  // A previous place read only in part (#1684, truncated) is named too.
+  const bad = ((b.sources) || []).filter((s) => s.error || s.skipped > 0 || s.truncated);
   const box = el("div", { class: "error-box" },
     el("div", { text: "Some snapshots are not listed: " + bad.length +
       " of " + ((b.sources) || []).length + " locations could not be read in full." }));
   bad.forEach((s) => box.append(el("div", { class: "bk-src" },
     el("span", { class: "bk-src-k", text: backupKindWord(s.kind) + (s.previous ? ", used before" : "") }),
     el("code", { class: "stg-code", text: s.source }),
-    el("span", { class: "bk-src-n", text: s.error ? firstLine(s.error) : "listed in part: " + s.skipped + " folder(s) could not be read" }))));
+    el("span", { class: "bk-src-n", text: s.error ? firstLine(s.error) : s.skipped > 0 ? "listed in part: " + s.skipped + " folder(s) could not be read" : firstLine(s.hidden_why) }))));
   return box;
 }
 

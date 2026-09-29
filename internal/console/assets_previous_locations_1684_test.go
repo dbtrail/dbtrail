@@ -85,6 +85,9 @@ const out = {};
   out.forgetCall = calls[0] || null;
   out.sources = visibleText(ctx.backupSourceList(list));
   out.incomplete = visibleText(ctx.backupIncompleteNotice(list));
+  const cut = { incomplete: true, sources: [{ source: "/cur", kind: "dir", count: 1 }, { source: "/old", kind: "dir", count: 0, previous: true, truncated: true, hidden: 51,
+    hidden_why: "51 dated after this server left it; only the newest 51 snapshots there were read, so older ones of this server may be there and are not listed" }] };
+  out.truncated = visibleText(ctx.backupIncompleteNotice(cut));
   // A server that writes to S3 only now, with a folder used before: the
   // "On disk" tile is about where it writes, so it stays off.
   const s3now = Object.assign({}, list, { sources: [{ source: "s3://b/p", kind: "s3", count: 0 }].concat(list.sources.filter((x) => x.previous)) });
@@ -120,6 +123,7 @@ const out = {};
 		Sources      []string `json:"sources"`
 		Incomplete   []string `json:"incomplete"`
 		LockedForget bool     `json:"lockedForget"`
+		Truncated    []string `json:"truncated"`
 		DiskTile     string   `json:"diskTile"`
 		HeroErr      string   `json:"heroErr"`
 	}
@@ -157,6 +161,10 @@ const out = {};
 	if got.ForgetCall == nil || got.ForgetCall.U != "/api/backup-settings/servers/"+e.ID || got.ForgetCall.Body["forget_previous_location"] != oldDir || len(got.ForgetCall.Body) != 1 {
 		t.Errorf("Forget sent %+v", got.ForgetCall)
 	}
+	t.Logf("truncated: %q", got.Truncated)
+	if tr := joined(got.Truncated); !strings.Contains(tr, "1 of 2 locations") || !strings.Contains(tr, "/old") || !strings.Contains(tr, "older ones of this server may be there") {
+		t.Errorf("a previous place read only in part is not named: %s", tr)
+	}
 	if got.HeroErr != "" || !strings.Contains(got.DiskTile, "off") || !strings.Contains(got.DiskTile, "No local copy") {
 		t.Errorf("the On disk tile of an S3-only server lights for a folder used before: %q %s", got.DiskTile, got.HeroErr)
 	}
@@ -164,7 +172,7 @@ const out = {};
 		t.Error("a session that may not write sees Forget")
 	}
 	src := joined(got.Sources)
-	for _, want := range []string{"disk, used before", oldDir, "1 not shown: 1 written after this server left", gone, "unreadable"} {
+	for _, want := range []string{"disk, used before", oldDir, "1 not shown: 1 dated after this server left it", gone, "unreadable"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("the source list does not show %q: %s", want, src)
 		}

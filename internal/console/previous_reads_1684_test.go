@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -76,7 +77,7 @@ func stubLocations(t *testing.T, locs map[string]fakeLocation, own string) *fake
 		}
 		return w, true, nil
 	}
-	bundleOwnWriter = func(context.Context, *bundle) string { return own }
+	bundleOwnWriter = func(context.Context, *bundle) (string, error) { return own, nil }
 	t.Cleanup(func() { findBaselineAt, previousSnapshotSigners, bundleOwnWriter = prevFind, prevSigners, prevOwn })
 	return f
 }
@@ -124,18 +125,25 @@ func TestFindBaselineAcrossLocations_newestWins(t *testing.T) {
 // answer, and the answer says which one could not be read.
 func TestFindBaselineAcrossLocations_unreachablePrevious(t *testing.T) {
 	stubLocations(t, map[string]fakeLocation{
-		"/cur":            {snaps: map[time.Time][]string{readsAt.Add(-time.Hour): nil}},
+		"/cur":            {snaps: map[time.Time][]string{leftAt.Add(-time.Hour): nil}},
 		"s3://gone/snaps": {err: errors.New("AccessDenied")},
 		"/prev":           {snaps: map[time.Time][]string{t0: nil}},
 	}, "")
 	b := &bundle{baselineSrc: "/cur", previous: []PreviousLocation{prevLoc("s3://gone/snaps", leftAt), prevLoc("/prev", leftAt)}}
 	path, _, stale, err := b.findBaseline(context.Background(), "db", "t", readsAt)
-	if err != nil || path != snapPath("/cur", readsAt.Add(-time.Hour)) {
+	if err != nil || path != snapPath("/cur", leftAt.Add(-time.Hour)) {
 		t.Fatalf("got %s %v, want the current answer", path, err)
 	}
 	if !strings.Contains(stale.Message, "s3://gone/snaps") || !strings.Contains(stale.Message, "AccessDenied") {
 		t.Fatalf("the answer does not name the location it could not read: %q", stale.Message)
 	}
+	// A place left before the snapshot found could not have held a newer
+	// one: it is not asked, and not warned about.
+	b.previous = []PreviousLocation{prevLoc("s3://gone/snaps", leftAt.Add(-2*time.Hour))}
+	if _, _, stale, err = b.findBaseline(context.Background(), "db", "t", readsAt); err != nil || stale.Stale() {
+		t.Fatalf("a place that could not have won was warned about: %v %q", err, stale.Message)
+	}
+	b.previous = []PreviousLocation{prevLoc("s3://gone/snaps", leftAt), prevLoc("/prev", leftAt)}
 	// Nothing current: the answer comes from the readable previous one, and
 	// still names the unreadable one.
 	b.baselineSrc = "/empty"
@@ -271,7 +279,7 @@ func TestPreviousSnapshotRefusal(t *testing.T) {
 	stubLocations(t, map[string]fakeLocation{
 		"/p": {snaps: map[time.Time][]string{t0: {"other"}, t0.Add(time.Hour): nil, t0.Add(2 * time.Hour): {"me"}}},
 	}, "")
-	own := func() string { return "me" }
+	own := func() (string, error) { return "me", nil }
 	if err := PreviousSnapshotRefusal("/p", t0, own); err == nil || !strings.Contains(err.Error(), "other") {
 		t.Fatalf("another writer's snapshot: %v", err)
 	}
@@ -356,5 +364,38 @@ func TestListBaselineLocations_previous(t *testing.T) {
 	}, lister, refuse)
 	if len(got.Files) != 1 || got.Listed != 1 || !strings.Contains(got.Sources[1].Error, "cannot be read") {
 		t.Fatalf("an unparseable move time: files %d listed %d source %+v", len(got.Files), got.Listed, got.Sources[1])
+	}
+}
+
+// A current folder that does not exist yet (a new place nothing was written
+// to) is "nothing there": the previous locations answer. Any other current
+// failure stands and says the previous ones were not consulted. An identity
+// that cannot be read is said as such, not as "names no writer".
+func TestFindBaselineAcrossLocations_currentFolderMissing(t *testing.T) {
+	stubLocations(t, map[string]fakeLocation{
+		"/new":  {err: fmt.Errorf("read baseline directory %q: %w", "/new", os.ErrNotExist)},
+		"/prev": {snaps: map[time.Time][]string{t0: nil}},
+	}, "")
+	b := &bundle{baselineSrc: "/new", previous: []PreviousLocation{prevLoc("/prev", leftAt)}}
+	path, _, _, err := b.findBaseline(context.Background(), "db", "t", readsAt)
+	if err != nil || path != snapPath("/prev", t0) {
+		t.Fatalf("got %s %v, want the previous location's snapshot", path, err)
+	}
+	stubLocations(t, map[string]fakeLocation{
+		"/new":  {err: errors.New("permission denied")},
+		"/prev": {snaps: map[time.Time][]string{t0: nil}},
+	}, "")
+	_, _, _, err = b.findBaseline(context.Background(), "db", "t", readsAt)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") || !strings.Contains(err.Error(), "not consulted") {
+		t.Fatalf("err = %v, want the current failure and that the previous ones were not consulted", err)
+	}
+	stubLocations(t, map[string]fakeLocation{
+		"/new":  {snaps: map[time.Time][]string{}},
+		"/prev": {snaps: map[time.Time][]string{t0: {"me"}}},
+	}, "")
+	bundleOwnWriter = func(context.Context, *bundle) (string, error) { return "", errors.New("index down") }
+	_, _, _, err = b.findBaseline(context.Background(), "db", "t", readsAt)
+	if err == nil || !strings.Contains(err.Error(), "index down") || strings.Contains(err.Error(), "names no writer") {
+		t.Fatalf("err = %v, want the identity failure named", err)
 	}
 }

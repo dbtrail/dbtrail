@@ -49,6 +49,10 @@ type baselineSourceDTO struct {
 	LeftAt    string `json:"left_at,omitempty"`
 	Hidden    int    `json:"hidden,omitempty"`
 	HiddenWhy string `json:"hidden_why,omitempty"`
+	// Truncated: this previous location's newest snapshots, the only ones
+	// read, were all hidden, so older ones of this server may lie past the
+	// cap. The listing beside it is incomplete, and names this location.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // baselineKindOf classifies a source the way the rest of the console does.

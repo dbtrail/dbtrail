@@ -30,7 +30,7 @@ func TestBaselinesAPI_previousLocations(t *testing.T) {
 		t.Fatal(err)
 	}
 	prevOwn := bundleOwnWriter
-	bundleOwnWriter = func(context.Context, *bundle) string { return "me-1" }
+	bundleOwnWriter = func(context.Context, *bundle) (string, error) { return "me-1", nil }
 	t.Cleanup(func() { bundleOwnWriter = prevOwn })
 
 	srv := newBaselineServer(t, cur, true)
