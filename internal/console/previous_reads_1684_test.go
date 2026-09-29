@@ -289,3 +289,72 @@ func TestPreviousSnapshotRefusal(t *testing.T) {
 		t.Fatalf("an unreadable signature: %v", err)
 	}
 }
+
+// The snapshot list reads the previous locations too, under the same two
+// guards, and says what it left out and which location it could not read.
+func TestListBaselineLocations_previous(t *testing.T) {
+	both := t0.Add(48 * time.Hour)
+	foreign := t0.Add(time.Hour)
+	after := leftAt.Add(time.Hour)
+	lister := fakeLister(map[string][]reconstruct.BaselineFile{
+		"/cur": {{SnapshotTime: both, Schema: "db", Table: "t", Path: snapPath("/cur", both)}},
+		"/prev": {
+			{SnapshotTime: after, Schema: "db", Table: "t", Path: snapPath("/prev", after)},
+			{SnapshotTime: both, Schema: "db", Table: "t", Path: snapPath("/prev", both)},
+			{SnapshotTime: foreign, Schema: "db", Table: "t", Path: snapPath("/prev", foreign)},
+			{SnapshotTime: foreign, Schema: "db", Table: "u", Path: strings.Replace(snapPath("/prev", foreign), "t.parquet", "u.parquet", 1)},
+			{SnapshotTime: t0, Schema: "db", Table: "t", Path: snapPath("/prev", t0)},
+		},
+	}, map[string]error{"s3://gone/snaps": errors.New("AccessDenied")})
+	refuse := func(loc string, snap time.Time) error {
+		if loc == "/prev" && snap.Equal(foreign) {
+			return errors.New("written by another writer (other)")
+		}
+		return nil
+	}
+	got := listBaselineLocations(context.Background(), []listSource{
+		{Source: "/cur"},
+		{Source: "/prev", Previous: &PreviousLocation{Location: "/prev", LeftAt: leftAt.Format(time.RFC3339)}},
+		{Source: "s3://gone/snaps", Previous: &PreviousLocation{Location: "s3://gone/snaps", LeftAt: leftAt.Format(time.RFC3339)}},
+	}, lister, refuse)
+
+	var paths []string
+	for _, f := range got.Files {
+		paths = append(paths, f.Path)
+	}
+	want := []string{snapPath("/cur", both), snapPath("/prev", t0)}
+	if strings.Join(paths, ",") != strings.Join(want, ",") {
+		t.Fatalf("files = %v, want %v (the current copy of a shared time, nothing after the move, nothing another writer signed)", paths, want)
+	}
+	if k := got.Kinds[both.UnixNano()]; strings.Join(k, ",") != "dir,previous" {
+		t.Fatalf("kinds of the shared time = %v", k)
+	}
+	if k := got.Kinds[t0.UnixNano()]; strings.Join(k, ",") != "previous" {
+		t.Fatalf("kinds of the previous-only snapshot = %v", k)
+	}
+	if got.Listed != 2 || len(got.Sources) != 3 {
+		t.Fatalf("listed %d of %d sources", got.Listed, len(got.Sources))
+	}
+	prev := got.Sources[1]
+	if !prev.Previous || prev.LeftAt != leftAt.Format(time.RFC3339) || prev.Count != 2 || prev.Hidden != 2 {
+		t.Fatalf("previous source = %+v, want previous, left_at, 2 kept and 2 snapshots hidden", prev)
+	}
+	if !strings.Contains(prev.HiddenWhy, "after this server left") || !strings.Contains(prev.HiddenWhy, "another writer") {
+		t.Fatalf("hidden_why does not say both reasons: %q", prev.HiddenWhy)
+	}
+	gone := got.Sources[2]
+	if !gone.Previous || !strings.Contains(gone.Error, "AccessDenied") {
+		t.Fatalf("the unreadable previous location is not named: %+v", gone)
+	}
+	if got.Sources[0].Previous {
+		t.Fatal("the current location is marked previous")
+	}
+	// A move time that cannot be read: the location is not read, and says so.
+	got = listBaselineLocations(context.Background(), []listSource{
+		{Source: "/cur"},
+		{Source: "/prev", Previous: &PreviousLocation{Location: "/prev", LeftAt: "garbage"}},
+	}, lister, refuse)
+	if len(got.Files) != 1 || got.Listed != 1 || !strings.Contains(got.Sources[1].Error, "cannot be read") {
+		t.Fatalf("an unparseable move time: files %d listed %d source %+v", len(got.Files), got.Listed, got.Sources[1])
+	}
+}

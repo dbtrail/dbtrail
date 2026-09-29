@@ -41,6 +41,14 @@ type baselineSourceDTO struct {
 	// could not be read (#1601); a non-zero value means the count above is a
 	// floor and the listing may be missing whole snapshots.
 	Skipped int `json:"skipped,omitempty"`
+	// Previous marks a location the server used before its current one
+	// (#1684), read-only; LeftAt is when it left, RFC3339. Hidden counts the
+	// snapshots there that are not this server's to show: written after it
+	// left, or signed by another writer. HiddenWhy says which.
+	Previous  bool   `json:"previous,omitempty"`
+	LeftAt    string `json:"left_at,omitempty"`
+	Hidden    int    `json:"hidden,omitempty"`
+	HiddenWhy string `json:"hidden_why,omitempty"`
 }
 
 // baselineKindOf classifies a source the way the rest of the console does.
@@ -110,16 +118,43 @@ type mergedBaselines struct {
 type baselineLister func(ctx context.Context, source string) (files []reconstruct.BaselineFile, skipped int, err error)
 
 func listBaselinesMerged(ctx context.Context, sources []string, list baselineLister) mergedBaselines {
+	srcs := make([]listSource, 0, len(sources))
+	for _, src := range sources {
+		srcs = append(srcs, listSource{Source: src})
+	}
+	return listBaselineLocations(ctx, srcs, list, nil)
+}
+
+// listBaselineLocations is listBaselinesMerged over current AND previous
+// locations (#1684). A previous location contributes only what is this
+// server's: snapshots from before it left (previousFiles), and never one
+// refuse turns down. Its snapshots are of kind "previous" in Kinds, and on a
+// time two locations share, the copy listed first (the current one) is kept.
+// refuse is asked once per snapshot of a previous location; nil allows all.
+func listBaselineLocations(ctx context.Context, srcs []listSource, list baselineLister, refuse func(loc string, snap time.Time) error) mergedBaselines {
 	out := mergedBaselines{Kinds: map[int64][]string{}}
 	seen := map[baselineFileKey]int{}
 	kindSeen := map[int64]map[string]bool{}
 
-	for _, src := range sources {
+	for _, ls := range srcs {
+		src := ls.Source
 		if src == "" {
 			continue
 		}
 		kind := baselineKindOf(src)
 		report := baselineSourceDTO{Source: src, Kind: kind}
+		var until time.Time
+		if ls.Previous != nil {
+			report.Previous, report.LeftAt = true, ls.Previous.LeftAt
+			var ok bool
+			if until, ok = ls.Previous.Until(); !ok {
+				report.Error = previousUntilNote(*ls.Previous)
+				out.Sources = append(out.Sources, report)
+				slog.Warn("console: a previous snapshot location was not listed; the time the server left it cannot be read",
+					"source", src, "left_at", ls.Previous.LeftAt)
+				continue
+			}
+		}
 		srcCtx, cancel := context.WithTimeout(ctx, baselineListTimeout)
 		files, skipped, err := list(srcCtx, src)
 		cancel()
@@ -139,6 +174,10 @@ func listBaselinesMerged(ctx context.Context, sources []string, list baselineLis
 		}
 		out.Listed++
 		out.Skipped += skipped
+		if ls.Previous != nil {
+			files, report.Hidden, report.HiddenWhy = previousFiles(src, files, until, refuse)
+			kind = "previous"
+		}
 		report.Count = len(files)
 		report.Skipped = skipped
 		if skipped > 0 {

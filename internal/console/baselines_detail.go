@@ -310,7 +310,24 @@ func (s *Server) resolveSnapshotRequest(w http.ResponseWriter, r *http.Request, 
 	// The same fallback bundle.findBaseline already performs, for the same
 	// reason: local retention prunes while the durable copy remains.
 	var firstErr error
-	for _, src := range baselineSourcesOf(b) {
+	refuse := previousRefusal(r.Context(), b)
+	for _, ls := range readSourcesOf(b) {
+		src := ls.Source
+		if ls.Previous != nil {
+			// A previous location (#1684) answers only for a snapshot of
+			// this server: from before it left, not another writer's. A
+			// refusal is said, after every location was tried.
+			until, ok := ls.Previous.Until()
+			if !ok || ts.After(until) {
+				continue
+			}
+			if err := refuse(src, ts); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+		}
 		// Bounded, for the reason the listing is: an s3:// source builds an
 		// object store (which HEADs the bucket) and then lists it, inside the
 		// process that is also capturing, and the server sets no WriteTimeout

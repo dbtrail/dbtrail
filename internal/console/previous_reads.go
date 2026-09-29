@@ -158,3 +158,87 @@ func (b *bundle) withPreviousLocations(ctx context.Context, schema, table string
 	}
 	return path, snapshotTime, stale, nil
 }
+
+// listSource is one location a listing reads: current, or previous with the
+// record of when the server left it.
+type listSource struct {
+	Source   string
+	Previous *PreviousLocation
+}
+
+// previousFiles keeps the files of a previous location that are this
+// server's to show: taken at or before until, in a snapshot refuse allows.
+// hidden counts the snapshots left out, why says why in words.
+func previousFiles(loc string, files []reconstruct.BaselineFile, until time.Time, refuse func(loc string, snap time.Time) error) (kept []reconstruct.BaselineFile, hidden int, why string) {
+	after, refused := map[int64]bool{}, map[int64]bool{}
+	verdict := map[int64]error{}
+	var firstRefusal error
+	for _, f := range files {
+		ts := f.SnapshotTime.UnixNano()
+		if f.SnapshotTime.After(until) {
+			after[ts] = true
+			continue
+		}
+		if refuse != nil {
+			err, asked := verdict[ts]
+			if !asked {
+				err = refuse(loc, f.SnapshotTime)
+				verdict[ts] = err
+			}
+			if err != nil {
+				if firstRefusal == nil {
+					firstRefusal = err
+				}
+				refused[ts] = true
+				continue
+			}
+		}
+		kept = append(kept, f)
+	}
+	var parts []string
+	if n := len(after); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d written after this server left, by whoever uses the location now", n))
+	}
+	if n := len(refused); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d not this server's: %v", n, firstRefusal))
+	}
+	if len(parts) > 0 {
+		slog.Info("console: snapshots of a previous location are not listed as this server's", "location", loc, "why", strings.Join(parts, "; "))
+	}
+	return kept, len(after) + len(refused), strings.Join(parts, "; ")
+}
+
+// readSourcesOf is every location a read of the bundle consults, in order:
+// the current ones (baselineSourcesOf), then the previous ones, most recently
+// left first. baselineSourcesOf stays current-only: the Restore card, the
+// prune record and the shared-location warning are about where this server
+// writes.
+func readSourcesOf(b *bundle) []listSource {
+	var out []listSource
+	for _, src := range baselineSourcesOf(b) {
+		out = append(out, listSource{Source: src})
+	}
+	if b == nil {
+		return out
+	}
+	for i := range b.previous {
+		p := b.previous[i]
+		out = append(out, listSource{Source: p.Location, Previous: &p})
+	}
+	return out
+}
+
+// previousRefusal is PreviousSnapshotRefusal bound to the bundle's own
+// identity, read at most once.
+func previousRefusal(ctx context.Context, b *bundle) func(loc string, snap time.Time) error {
+	ownID, asked := "", false
+	own := func() string {
+		if !asked {
+			ownID, asked = bundleOwnWriter(ctx, b), true
+		}
+		return ownID
+	}
+	return func(loc string, snap time.Time) error {
+		return PreviousSnapshotRefusal(loc, snap, own)
+	}
+}
