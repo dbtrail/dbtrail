@@ -133,13 +133,13 @@ func listForVerify(ctx context.Context, indexDSN, src string, previous []console
 	for _, p := range previous {
 		until, ok := p.Until()
 		if !ok {
-			return nil, nil, fmt.Errorf("%w: the previous snapshot location %s was not read, because the time this server left it (%q) cannot be read; forget it on the Snapshots page, or fix the saved settings",
-				reconstruct.ErrUnreadableSnapshot, p.Location, p.LeftAt)
+			return nil, nil, fmt.Errorf("%w: the previous snapshot location %s was not read, because the time this server left it (%q) cannot be read; forget it%s, or fix the saved settings",
+				reconstruct.ErrUnreadableSnapshot, p.Location, p.LeftAt, onSnapshotsPage)
 		}
 		pf, pu, err := listBaselinesUnreadable(ctx, p.Location)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%w: the previous snapshot location %s could not be read (%v); make it readable, or forget it on the Snapshots page",
-				reconstruct.ErrUnreadableSnapshot, p.Location, err)
+			return nil, nil, fmt.Errorf("%w: the previous snapshot location %s could not be read (%v); make it readable, or forget it%s",
+				reconstruct.ErrUnreadableSnapshot, p.Location, err, onSnapshotsPage)
 		}
 		verdict := map[int64]error{}
 		for _, f := range pf {
