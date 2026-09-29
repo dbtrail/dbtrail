@@ -94,7 +94,7 @@ func TestBaselineFiles_localDetail(t *testing.T) {
 	}
 	if err := h.Append(BaselineRunRecord{ServerID: bootServerID, Kind: BaselineRunDump, Trigger: BaselineRunTriggerScheduled,
 		SnapshotTime: "2026-06-10T12:00:00Z", StartedAt: "2026-06-10T11:58:30Z", FinishedAt: "2026-06-10T12:00:00Z",
-		Why: BackupWhyNoLocalDir, WhyCode: "no_local_dir"}); err != nil {
+		Why: BackupWhyNoLocalDir, WhyCode: "no_local_dir", DiskCheck: "low", DiskNote: "Low disk: /stage has 9.0 GiB free."}); err != nil {
 		t.Fatal(err)
 	}
 	srv.baselineHistory = h
@@ -107,6 +107,10 @@ func TestBaselineFiles_localDetail(t *testing.T) {
 	}
 	if got.Run == nil || got.Run.Kind != BaselineRunDump || got.Run.Seconds != 90 || got.Run.Why != BackupWhyNoLocalDir || got.Run.WhyCode != "no_local_dir" {
 		t.Fatalf("run = %+v, want the recorded dump, 90 s, and its reason", got.Run)
+	}
+	// The full read's disk check travels with the run (#1938).
+	if got.Run.DiskCheck != "low" || got.Run.DiskNote != "Low disk: /stage has 9.0 GiB free." {
+		t.Fatalf("run = %+v, want the disk check kept", got.Run)
 	}
 	// Span runs from the first parquet to the markers: 120s.
 	if got.WriteSpanSeconds != 120 || got.WroteFrom != "2026-06-10 12:00:00" || got.WroteTo != "2026-06-10 12:02:00" {

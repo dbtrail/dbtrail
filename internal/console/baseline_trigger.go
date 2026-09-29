@@ -288,6 +288,15 @@ type BaselineStatus struct {
 	// file it could not hold, or a write that found the disk full. A scheduled update refused this way must NOT
 	// fall back to a full backup: that one writes into the same directory.
 	DiskRefused bool `json:"disk_refused,omitempty"`
+	// DiskCheck and DiskNote (full reads of MySQL/MariaDB only, #1938): the
+	// free-space check taken before mydumper starts. DiskCheck is "ok",
+	// "low" (room for the dump, maybe not for the dump plus its Parquet copy;
+	// the read ran anyway) or "unchecked" (the check could not run, and the
+	// read went ahead). DiskNote is the sentence to show. A refusal is a
+	// failed run with DiskRefused set and the reason in LastError, and
+	// carries neither. Set while the read is still running.
+	DiskCheck string `json:"disk_check,omitempty"`
+	DiskNote  string `json:"disk_note,omitempty"`
 	// ForeignSource: the job was refused because the snapshot it would build
 	// on was written by another writer, or its writer could not be told
 	// (#1684). The schedule does not answer it with a full read: that would

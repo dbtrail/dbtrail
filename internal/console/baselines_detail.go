@@ -127,6 +127,9 @@ type baselineRunDTO struct {
 	// possible when it ran (#1604). Persisted with the run, never recomputed.
 	Why     string `json:"why,omitempty"`
 	WhyCode string `json:"why_code,omitempty"`
+	// DiskCheck / DiskNote: the full read's free-space check (#1938).
+	DiskCheck string `json:"disk_check,omitempty"`
+	DiskNote  string `json:"disk_note,omitempty"`
 }
 
 // baselineSnapshotFile is one stored file of a snapshot: its path relative to
@@ -435,7 +438,8 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.baselineHistory != nil {
 		if rec := s.baselineHistory.FindBySnapshot(s.selectedServerID(r), ts.Format(time.RFC3339)); rec != nil {
-			run := &baselineRunDTO{Kind: rec.Kind, Tables: rec.Tables, Rows: rec.Rows, Why: rec.Why, WhyCode: rec.WhyCode}
+			run := &baselineRunDTO{Kind: rec.Kind, Tables: rec.Tables, Rows: rec.Rows, Why: rec.Why, WhyCode: rec.WhyCode,
+				DiskCheck: rec.DiskCheck, DiskNote: rec.DiskNote}
 			if st, err1 := time.Parse(time.RFC3339, rec.StartedAt); err1 == nil {
 				if fin, err2 := time.Parse(time.RFC3339, rec.FinishedAt); err2 == nil {
 					run.Seconds = fin.Sub(st).Seconds()
