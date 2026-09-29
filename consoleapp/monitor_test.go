@@ -176,6 +176,13 @@ func TestRegistryFlavorHint(t *testing.T) {
 	if len(asked) != 2 || asked[0] != console.FlavorMySQL || asked[1] != console.FlavorMySQL {
 		t.Errorf("correction asked with %q, want the detected flavor on each resolution", asked)
 	}
+	// The other direction: a server saved as MySQL that reports MariaDB is
+	// corrected to MariaDB.
+	asked = nil
+	registryFlavorHook(&monitorJob{}, console.FlavorMySQL, correct, func(string) {})(console.FlavorMariaDB)
+	if len(asked) != 1 || asked[0] != console.FlavorMariaDB {
+		t.Errorf("correction asked with %q, want mariadb", asked)
+	}
 
 	// No registry to correct (nil): the contradiction stays visible.
 	job2 := &monitorJob{}

@@ -227,6 +227,23 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 			notDetail:  []string{"same server"},
 		},
 		{
+			// A MySQL peer's channels are never read, so an unread status is
+			// not a gap in what this check could have looked at.
+			name: "a monitored MySQL server's unread replication status is not counted",
+			cand: cand(),
+			peers: []mariadbServer{{name: "mysql", dsnHost: "mysql-primary", dsnPort: 3306, flavor: console.FlavorMySQL,
+				hostname: "mysql-primary", port: 3306, serverID: 11}},
+			wantStatus: "pass",
+			notDetail:  []string{"could not be verified"},
+		},
+		{
+			// Two socket connections have no address: nothing to compare.
+			name:       "two entries without an address are not the same address",
+			cand:       mdb("", "", 0, "a", 3306, 1, t0, "aa"),
+			peers:      []mariadbServer{mdb("sock", "", 0, "b", 3306, 2, t0, "bb")},
+			wantStatus: "pass",
+		},
+		{
 			name: "a monitored MySQL server is never the same server as a MariaDB one by its live identity",
 			cand: mdb("", "10.0.0.5", 3306, "h", 3306, 1, t0, "0242ac110002"),
 			peers: []mariadbServer{{name: "mysql", dsnHost: "10.0.0.6", dsnPort: 3306, flavor: console.FlavorMySQL,
@@ -390,6 +407,11 @@ func TestLoadMariaDBServer(t *testing.T) {
 		s, err := loadMariaDBServer(context.Background(), db, console.FlavorMySQL)
 		if err != nil || s.startedAt != 0 || s.uuidNode != "" {
 			t.Errorf("s = %+v, err %v", s, err)
+		}
+		// sqlmock reports unmet expectations, never a surplus query: a read
+		// of the channels would show up as an error recorded here.
+		if s.channelsRead || s.channelsErr != "" {
+			t.Errorf("a MySQL server's replication status was read: %+v", s)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("a MySQL server's channels must not be read: %v", err)
