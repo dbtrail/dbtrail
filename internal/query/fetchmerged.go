@@ -284,6 +284,77 @@ func anchorSatisfiedLive(opts Options, rows []ResultRow) bool {
 	return false
 }
 
+// ArchivesNotNeeded runs the four archive short-circuits, in the one order
+// fetchPage uses, over the rows the live index returned. ok means every
+// resolved archive source can be left unread because nothing it holds could
+// change the result; kept is then the result itself (the top-N proof cuts it
+// to Limit, the others return rows whole). ok is false, and kept is rows, when
+// no proof holds: the caller must read the archives.
+//
+// It is exported for the surfaces that run their own live-plus-archive loop
+// instead of FetchMerged (the MCP query and recover tools, #1410), so they
+// take the same proofs without taking the shared loop's failure semantics. A
+// caller that skips on ok owes its reader the elision record, exactly like
+// FetchMergedFull's archivesElided.
+//
+// plan may be nil: the anchor proof needs none, and the three others decline
+// without one. See PlanArchiveSkip for building it.
+func ArchivesNotNeeded(opts Options, rows []ResultRow, plan *QueryPlan) (kept []ResultRow, ok bool) {
+	if anchorSatisfiedLive(opts, rows) {
+		slog.Debug("planner: skipping archive sources (the anchored event is already live)",
+			"event_id", opts.EventAnchor.EventID)
+		return rows, true
+	}
+	if windowSatisfiedLive(opts, plan) {
+		slog.Debug("planner: skipping archive sources (the Since bound sits inside contiguous live coverage)",
+			"since", opts.Since)
+		return rows, true
+	}
+	if topNSatisfiedLive(opts, rows, plan) {
+		slog.Debug("planner: skipping archive sources (newest-first page filled from contiguous live coverage)",
+			"limit", opts.Limit)
+		return rows[:opts.Limit], true
+	}
+	if perPKSatisfiedLive(opts, rows, plan) {
+		slog.Debug("planner: skipping archive sources (every named PK already has its latest N live)",
+			"limit_per_pk", opts.LimitPerPK)
+		return rows, true
+	}
+	return rows, false
+}
+
+// ArchiveSkipNeedsPlan reports whether one of the three plan-consuming proofs
+// in ArchivesNotNeeded could fire for this request and these live rows, so a
+// caller that pays a round trip for the plan pays it only then. It checks the
+// cheap premises only (a Since bound; a filled newest-first page; a per-row
+// limit over named PKs). A false here can only cost a skip, never a row: the
+// proofs themselves stay the judge of correctness.
+func ArchiveSkipNeedsPlan(opts Options, rows []ResultRow) bool {
+	if opts.Since != nil && opts.SincePos == nil {
+		return true
+	}
+	if opts.Limit > 0 && len(rows) >= opts.Limit && OrderDirection(opts.Order) == "DESC" {
+		return true
+	}
+	return opts.LimitPerPK > 0 && opts.PKValuesAlt == "" &&
+		(opts.PKValues != "" || len(opts.PKValuesIn) > 0)
+}
+
+// PlanArchiveSkip builds the QueryPlan ArchivesNotNeeded consumes, the same
+// way resolveMergeSources builds it for FetchMerged: Plan over the window when
+// the request has a Since or Until bound, PlanBrowse when it has neither, both
+// scoped to the archive sources the caller resolved and never in no-archive
+// mode. The plan only ever ENABLES a skip, so a caller treats an error as "no
+// plan" and reads the archives; it must not enforce the plan's GapHours on a
+// surface that did not before.
+func PlanArchiveSkip(ctx context.Context, db *sql.DB, dbName string, opts Options, archSources []string) (*QueryPlan, error) {
+	scope := ScopeFromPaths(archSources)
+	if opts.Since != nil || opts.Until != nil {
+		return Plan(ctx, db, dbName, opts.Since, opts.Until, false, scope)
+	}
+	return PlanBrowse(ctx, db, dbName, scope)
+}
+
 // windowSatisfiedLive reports that a Since-bounded window is provably beyond
 // the archives' reach, so the archive sources can be skipped without reading
 // them. It is the proof behind the sharpest measured shape (#1414): a click on
@@ -933,25 +1004,8 @@ func fetchPage(
 		rows = r
 	}
 
-	if anchorSatisfiedLive(o.Opts, rows) {
-		slog.Debug("planner: skipping archive sources (the anchored event is already live)",
-			"event_id", o.Opts.EventAnchor.EventID, "sources", len(src.archSources))
-		return rows, nil, nil, 0, true, nil
-	}
-	if windowSatisfiedLive(o.Opts, src.plan) {
-		slog.Debug("planner: skipping archive sources (the Since bound sits inside contiguous live coverage)",
-			"since", o.Opts.Since, "sources", len(src.archSources))
-		return rows, nil, nil, 0, true, nil
-	}
-	if topNSatisfiedLive(o.Opts, rows, src.plan) {
-		slog.Debug("planner: skipping archive sources (newest-first page filled from contiguous live coverage)",
-			"limit", o.Opts.Limit, "sources", len(src.archSources))
-		return rows[:o.Opts.Limit], nil, nil, 0, true, nil
-	}
-	if perPKSatisfiedLive(o.Opts, rows, src.plan) {
-		slog.Debug("planner: skipping archive sources (every named PK already has its latest N live)",
-			"limit_per_pk", o.Opts.LimitPerPK, "sources", len(src.archSources))
-		return rows, nil, nil, 0, true, nil
+	if kept, ok := ArchivesNotNeeded(o.Opts, rows, src.plan); ok {
+		return kept, nil, nil, 0, true, nil
 	}
 
 	// Archive fetches get the misfiled-archive file-scoping hint (#1037); the

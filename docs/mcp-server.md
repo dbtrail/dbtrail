@@ -316,6 +316,18 @@ a partial undo, not a smaller one. The refusal names the escape hatch — retry
 with `no_archive: true` to generate from the live index only, accepting that
 archived events will not be reversed.
 
+When the live index alone already holds the answer, the archives are not read
+at all ([#1410](https://github.com/dbtrail/dbtrail/issues/1410)). This takes the
+same proofs as the CLI and the web interface: every named `pk` already has its
+latest `limit_per_pk` events live, a `since` bound sits inside the live
+partitions, or a newest-first page (`order: DESC`) is already full of live rows.
+The skip is always said: `query` ends with a `Note: archives_skipped: …` line,
+and `recover` adds a `-- Note: archives_skipped: …` comment to the script (and a
+`notes` entry when the result is the JSON envelope). A reversal with no
+`limit_per_pk` and no `since` still reads every archive, because the archives
+hold the older half of that answer. Archives named by the `BINTRAIL_ARCHIVE_S3`
++ `BINTRAIL_ID` env vars are always read.
+
 **Large reversal scripts.** An MCP client caps how big a tool result can be, and
 a cascade touching thousands of rows produces a script well past that cap. Both
 `recover` and `recover_cascade` handle this the same way

@@ -568,6 +568,10 @@ type recoverResult struct {
 	// comments (truncation, divergence, snapshot unavailable). A summary or a
 	// withheld script has no text to carry them in, so they ride here.
 	Warnings []string `json:"warnings,omitempty"`
+	// Notes are benign records the whole-script return carries as SQL
+	// comments: today only the archives_skipped record (#1410). Split from
+	// Warnings because the archives could not have added rows.
+	Notes []string `json:"notes,omitempty"`
 }
 
 // StatusArgs are the status tool's parameters.
@@ -749,6 +753,9 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 		// merge (#1325) — same blindness: the merge layer slog.Warns, but an
 		// MCP client sees only the result text.
 		var divergedEvents int
+		// The live index already answered and the archives went unread
+		// (#1410). Recorded in the result: a skip is never silent.
+		var archivesSkipped bool
 		if len(archSources) == 0 && !t.RedactStatementText {
 			// Fast path: no archives and no post-fetch redaction — fetch and
 			// format in one step.
@@ -767,16 +774,28 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 			if err != nil {
 				return ErrorResult(err), nil, nil
 			}
-			for _, src := range archSources {
-				ar, err := parquetquery.Fetch(ctx, fetchOpts, src)
-				if err != nil {
-					slog.Warn("archive query failed, skipping", "source", src, "error", err)
-					skippedArchives = append(skippedArchives, src)
-					continue
+			// #1410: the same "archives not needed" proofs the CLI and the
+			// console take. Not when discovery or the misfiled-archive scan
+			// failed: either one already says the archive set is not fully
+			// known, and a skip must never rest on a set we could not read.
+			if !misfiledScanFailed && !discoveryFailed {
+				if kept, ok := t.liveAnswers(ctx, fetchOpts, results, archSources); ok {
+					results = kept
+					archivesSkipped = true
 				}
-				results = append(results, ar...)
 			}
-			if len(archSources) > 0 {
+			if !archivesSkipped {
+				for _, src := range archSources {
+					ar, err := parquetquery.Fetch(ctx, fetchOpts, src)
+					if err != nil {
+						slog.Warn("archive query failed, skipping", "source", src, "error", err)
+						skippedArchives = append(skippedArchives, src)
+						continue
+					}
+					results = append(results, ar...)
+				}
+			}
+			if len(archSources) > 0 && !archivesSkipped {
 				// MergeAndTrimReport, not MergeResultsReport: each source
 				// applied its own per-PK cap independently (SQL window /
 				// DuckDB QUALIFY), so the union can still exceed limit_per_pk
@@ -800,6 +819,9 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 		text += EventDivergenceNotice(divergedEvents)
 		if misfiledScanFailed {
 			text += "\nWarning: " + archiveScanIncompleteWarning() + "\n"
+		}
+		if archivesSkipped {
+			text += "\nNote: " + queryArchivesSkippedNote() + "\n"
 		}
 
 		ext.Record(ctx, ext.AuditEvent{
@@ -942,6 +964,9 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		// finding the reviewing operator must see: the kept copy's row images
 		// become the reversal SQL.
 		var divergedEvents int
+		// The live index already answered and the archives went unread
+		// (#1410); recorded below as a note on the script.
+		var archivesSkipped bool
 		if len(archSources) > 0 {
 			fetchOpts := opts
 			extraHours, misfiledScanFailed := misfiledArchiveHours(ctx, t.DB, opts.Since, opts.Until)
@@ -960,20 +985,29 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 			if err != nil {
 				return ErrorResult(err), nil, nil
 			}
-			for _, src := range archSources {
-				ar, err := parquetquery.Fetch(ctx, fetchOpts, src)
-				if err != nil {
-					slog.Warn("archive query failed, skipping", "source", src, "error", err)
-					skippedArchives = append(skippedArchives, src)
-					continue
+			// #1410: skip the loop only when the live rows provably ARE the
+			// answer. Everything the loop reads is still read under the old
+			// rule, so a failed source keeps refusing below; a skip only
+			// removes reads that could not have changed the script.
+			if kept, ok := t.liveAnswers(ctx, fetchOpts, rows, archSources); ok {
+				rows = kept
+				archivesSkipped = true
+			} else {
+				for _, src := range archSources {
+					ar, err := parquetquery.Fetch(ctx, fetchOpts, src)
+					if err != nil {
+						slog.Warn("archive query failed, skipping", "source", src, "error", err)
+						skippedArchives = append(skippedArchives, src)
+						continue
+					}
+					rows = append(rows, ar...)
 				}
-				rows = append(rows, ar...)
+				// MergeAndTrimReport, not MergeResultsReport: each source applied
+				// its own per-PK cap independently, so the union can still exceed
+				// limit_per_pk per PK — mirror the CLI recover merge
+				// (FetchMerged), carrying the #1325 divergence count through.
+				rows, divergedEvents = query.MergeAndTrimReport(rows, opts.Limit, opts.LimitPerPK, opts.Order)
 			}
-			// MergeAndTrimReport, not MergeResultsReport: each source applied
-			// its own per-PK cap independently, so the union can still exceed
-			// limit_per_pk per PK — mirror the CLI recover merge
-			// (FetchMerged), carrying the #1325 divergence count through.
-			rows, divergedEvents = query.MergeAndTrimReport(rows, opts.Limit, opts.LimitPerPK, opts.Order)
 		} else {
 			rows, err = engine.Fetch(ctx, opts)
 			if err != nil {
@@ -1036,7 +1070,15 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		// as a plain string: a summary or a withheld script carries no text, and
 		// the truncation warning is the one most likely to accompany a script
 		// too large to return, so the envelope must carry it on its own field.
-		var warnings []string
+		var warnings, notes []string
+		if archivesSkipped {
+			// A note, not a warning: the archives could not add rows. It is always
+			// said, so a script built without the archives never reads like
+			// one built with them.
+			w := recoverArchivesSkippedNote()
+			text += "\n-- Note: " + w + ".\n"
+			notes = append(notes, w)
+		}
 		if resolverErr != nil {
 			w := fmt.Sprintf("schema snapshot unavailable (%v); WHERE clauses use all columns", resolverErr)
 			text += "\n-- Note: " + w + ".\n"
@@ -1142,6 +1184,7 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 			NextSQLOffset:  script.NextOffset,
 			SQLNote:        script.Note,
 			Warnings:       warnings,
+			Notes:          notes,
 		}, "", "  ")
 		if err != nil {
 			return ErrorResult(fmt.Errorf("encode recover result: %w", err)), nil, nil
@@ -1393,12 +1436,11 @@ func ErrorResult(err error) *mcp.CallToolResult {
 // the fallback would otherwise silently discard. The fully-env-configured
 // path never fails discovery.
 func EnvArchiveSources(ctx context.Context, db *sql.DB) ([]string, bool) {
-	archiveS3 := os.Getenv("BINTRAIL_ARCHIVE_S3")
-	bintrailID := os.Getenv("BINTRAIL_ID")
-	if archiveS3 != "" && bintrailID != "" {
-		base := strings.TrimSuffix(archiveS3, "/") + "/bintrail_id=" + bintrailID
+	if base, ok := envArchiveBase(); ok {
 		return []string{base}, false
 	}
+	archiveS3 := os.Getenv("BINTRAIL_ARCHIVE_S3")
+	bintrailID := os.Getenv("BINTRAIL_ID")
 	if archiveS3 != "" || bintrailID != "" {
 		slog.Warn("partial archive env var config; both BINTRAIL_ARCHIVE_S3 and BINTRAIL_ID must be set",
 			"BINTRAIL_ARCHIVE_S3", archiveS3, "BINTRAIL_ID", bintrailID)
@@ -1412,6 +1454,19 @@ func EnvArchiveSources(ctx context.Context, db *sql.DB) ([]string, bool) {
 		return s, true
 	}
 	return stateArchiveSources(ctx, db)
+}
+
+// envArchiveBase returns the archive source the BINTRAIL_ARCHIVE_S3 +
+// BINTRAIL_ID pair names, and whether both are set. One reader for the pair,
+// so discovery and the live-first check (liveAnswers) cannot disagree about
+// when the env pair is in charge.
+func envArchiveBase() (string, bool) {
+	archiveS3 := os.Getenv("BINTRAIL_ARCHIVE_S3")
+	bintrailID := os.Getenv("BINTRAIL_ID")
+	if archiveS3 == "" || bintrailID == "" {
+		return "", false
+	}
+	return strings.TrimSuffix(archiveS3, "/") + "/bintrail_id=" + bintrailID, true
 }
 
 // misfiledArchiveHours wraps query.MisfiledArchiveHours (#1037). The second
