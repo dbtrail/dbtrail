@@ -2725,6 +2725,12 @@ func writeBinlogOnlyChanges(
 		return fmt.Errorf("open mydumper writer: %w", err)
 	}
 	mw.spaceCheck = spaceCheck
+	// The CREATE shipped here is the one captured at table creation, while the
+	// writer formats by the newest schema snapshot: an ALTER between them
+	// (CHAR(36) to UUID) must refuse, as on the baseline path.
+	if err := checkMariaDBFixedTypesAgree(createSQL, columns, schema, table); err != nil {
+		return err
+	}
 	mw.SetColumnTypes(columns)
 	// Same #1162 error-path discard as mergeBaselineIntoWriter: this path has
 	// no pre-writer guards at all, so any mid-write failure would otherwise

@@ -210,3 +210,21 @@ func TestMergeBaselineIntoWriter_MariaDBFixedTypeDisagreementRefused(t *testing.
 		})
 	}
 }
+
+// The binlog-only path ships the CREATE captured at table creation, while the
+// writer formats values by the newest schema snapshot. An ALTER CHAR(36) ->
+// UUID in between would write X'..' into a file whose CREATE says CHAR(36).
+func TestWriteBinlogOnlyChanges_MariaDBFixedTypeDisagreementRefused(t *testing.T) {
+	cols := []metadata.ColumnMeta{{Name: "id", DataType: "int", IsPK: true}, {Name: "u", DataType: "uuid"}}
+	changes := map[string]*query.ResultRow{
+		"1": {EventType: event.EventInsert, PKValues: "1",
+			RowAfter: map[string]any{"id": float64(1), "u": "00000000-0000-0000-0000-000000000001"}},
+	}
+	create := "-- bintrail: CREATE TABLE captured from schema_changes at table-creation time\n" +
+		"CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `u` char(36) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n"
+	err := writeBinlogOnlyChanges(t.TempDir(), "db", "t", cols[:1], cols, []string{"id", "u"}, 0, nil,
+		create, changes, &TableReport{Schema: "db", Table: "t"})
+	if err == nil || !strings.Contains(err.Error(), `"u"`) {
+		t.Fatalf("got %v, want a refusal naming column u", err)
+	}
+}
