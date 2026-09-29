@@ -85,6 +85,16 @@ const out = {};
   out.forgetCall = calls[0] || null;
   out.sources = visibleText(ctx.backupSourceList(list));
   out.incomplete = visibleText(ctx.backupIncompleteNotice(list));
+  // A server that writes to S3 only now, with a folder used before: the
+  // "On disk" tile is about where it writes, so it stays off.
+  const s3now = Object.assign({}, list, { sources: [{ source: "s3://b/p", kind: "s3", count: 0 }].concat(list.sources.filter((x) => x.previous)) });
+  let heroErr = "";
+  try {
+    const hero = ctx.snapshotHero(s3now, null, { id: "s1", kind: "registry", baseline_s3: "s3://b/p" }, null);
+    const tile = find(hero, (n) => /hero-tile/.test(n.className) && (n.textContent.includes("disk") || n.textContent.includes("local copy")));
+    out.diskTile = tile ? tile.className + " | " + tile.textContent : "none";
+  } catch (e) { heroErr = String(e); }
+  out.heroErr = heroErr;
   vm.runInContext("capsCache.permissions = { \"servers:write\": false };", ctx);
   out.lockedForget = !!find(ctx.backupServerRow(row0, false, [], "", true), (n) => n.tag === "button" && n._text === "Forget");
   console.log(JSON.stringify(out));
@@ -110,6 +120,8 @@ const out = {};
 		Sources      []string `json:"sources"`
 		Incomplete   []string `json:"incomplete"`
 		LockedForget bool     `json:"lockedForget"`
+		DiskTile     string   `json:"diskTile"`
+		HeroErr      string   `json:"heroErr"`
 	}
 	if err := json.Unmarshal(raw, &got); err != nil || got.Err != "" {
 		t.Fatalf("node output %s: %v", raw, err)
@@ -144,6 +156,9 @@ const out = {};
 	}
 	if got.ForgetCall == nil || got.ForgetCall.U != "/api/backup-settings/servers/"+e.ID || got.ForgetCall.Body["forget_previous_location"] != oldDir || len(got.ForgetCall.Body) != 1 {
 		t.Errorf("Forget sent %+v", got.ForgetCall)
+	}
+	if got.HeroErr != "" || !strings.Contains(got.DiskTile, "off") || !strings.Contains(got.DiskTile, "No local copy") {
+		t.Errorf("the On disk tile of an S3-only server lights for a folder used before: %q %s", got.DiskTile, got.HeroErr)
 	}
 	if got.LockedForget {
 		t.Error("a session that may not write sees Forget")
