@@ -24,6 +24,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -406,6 +407,33 @@ func TestRecoverRoundTrip_MariaDBUUIDKey(t *testing.T) {
 	}
 	res := rt.run(t, indexDB, sourceDB, sourceName)
 	res.assertExact(t)
+
+	// A key typed the way the application shows it, or copied from query
+	// output as hex, must find its row's event. Before, query and recover
+	// looked the key up as typed while the index keys it by the value's bytes,
+	// and answered 0 rows with no error. This runs the lookup on what real
+	// capture stored, including the all-zero UUID, whose bytes are valid UTF-8
+	// and so are stored as themselves rather than in hex.
+	for _, pk := range []string{
+		"e0b5a0f4-3c9d-4b8e-9f1a-000000000000",
+		"E0B5A0F43C9D4B8E9F1A000000000000",
+		"00000000-0000-0000-0000-000000000000",
+		"0x00000000000000000000000000000000",
+		"6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+		"0x6BA7B8109DAD11D180B400C04FD430C8",
+	} {
+		opts := query.Options{Schema: sourceName, Table: "ukeys", PKValues: pk}
+		if _, err := reconstruct.SpellIndexPKFilter(t.Context(), indexDB, &opts); err != nil {
+			t.Fatalf("spell --pk %s: %v", pk, err)
+		}
+		rows, err := query.New(indexDB).Fetch(t.Context(), opts)
+		if err != nil {
+			t.Fatalf("fetch --pk %s: %v", pk, err)
+		}
+		if len(rows) != 1 {
+			t.Errorf("--pk %s (looked up as %q): %d events, want the 1 mutation of that row", pk, opts.PKValues, len(rows))
+		}
+	}
 }
 
 // TestRecoverRoundTrip_MariaDBJSONText measures what recover restores into a

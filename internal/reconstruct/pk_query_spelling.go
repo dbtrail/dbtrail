@@ -36,7 +36,8 @@ var ErrPKTypeUnknown = errors.New("primary key type unknown")
 // numeric or plain text key costs nothing. When one does and the snapshot
 // cannot say what the column is, the lookup is refused with ErrPKTypeUnknown
 // instead of answering "no history" on a guess. A table the request's profile
-// denies is left alone, so the answer cannot describe its key.
+// denies, or leaves out of its allow list, is left alone, so the answer cannot
+// describe its key.
 //
 // Call it after the request's RBAC posture is on opts, and after any #957
 // escape alternates are set: it replaces PKValuesAlt when it re-spells.
