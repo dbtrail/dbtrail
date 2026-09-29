@@ -77,6 +77,8 @@ func TestCheckMariaDBVersion_warnSaysWhatToDo(t *testing.T) {
 			t.Errorf("Remediation lacks %q: %q", want, c.Remediation)
 		}
 	}
+	// The console shows this row when a server is added from the browser.
+	assertConsoleWording(t, "MariaDB version", c)
 	if c.Optional {
 		t.Error("an unsupported server version is not an optional improvement")
 	}

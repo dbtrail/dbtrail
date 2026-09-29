@@ -75,10 +75,8 @@ func majorMinor(v string) (major, minor int, ok bool) {
 	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
 		end++
 	}
-	if end == 0 {
-		return 0, 0, false
-	}
-	minor, err = strconv.Atoi(rest[:end])
+	minor, err = strconv.Atoi(rest[:end]) // an empty minor fails here
+
 	if err != nil {
 		return 0, 0, false
 	}
