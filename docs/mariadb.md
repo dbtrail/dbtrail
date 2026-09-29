@@ -176,9 +176,10 @@ silently become the write key for every server. Two caveats:
   resume is validated live on a single server producing several domains (the
   `gtid_domain_id` mechanism itself — see "What works" above). What has NOT
   been validated live: topologies where the domains originate on different
-  servers (multi-master rings, Galera), a primary failover that changes the
-  `server_id` *within* a domain mid-stream, and sustained multi-domain load (no
-  soak run yet). Gap detection compares sequences per domain, so the design
+  servers (multi-master rings, Galera), and a primary failover that changes the
+  `server_id` *within* a domain mid-stream. Sustained two-domain load on a single
+  server was run for several hours in #1349 with no events lost or double
+  indexed. Gap detection compares sequences per domain, so the design
   covers these shapes, but treat them as unverified territory.
 - **BYOS agent support is the least exercised path.** `bintrail agent` accepts
   `--source-flavor mariadb` (same flag and `BINTRAIL_SOURCE_FLAVOR` env as
