@@ -151,6 +151,14 @@ func (w *MydumperWriter) SetColumnTypes(cols []metadata.ColumnMeta) {
 	}
 }
 
+// mariaDBFixedRemedy is the fix for an unrestorable MariaDB UUID/INET value.
+// Such values are events captured before capture stored these types as bytes
+// (#1944). A snapshot taken after the upgrade anchors past them, so no fold or
+// dump reads them again.
+const mariaDBFixedRemedy = "events captured before this version stored UUID/INET4/INET6 values damaged, and they cannot be restored " +
+	"(the same refusal shows when the schema snapshot of the event cannot be read); " +
+	"take a new snapshot (`bintrail dump`, then `bintrail baseline`, or Create backup in the console) so the copy starts after them"
+
 // writeMariaDBFixed renders a MariaDB UUID/INET4/INET6 value as X'..' of its
 // full-width bytes. The value arrives as the server's text, but a dump is
 // loaded under `SET NAMES binary` (mydumper's preamble, which drill replays),
@@ -167,16 +175,16 @@ func writeMariaDBFixed(dt, col string, v any) (string, error) {
 	case string:
 		parsed, err := metadata.ParseMariaDBFixed(dt, val)
 		if err != nil {
-			return "", fmt.Errorf("column %q (%s): %w; the value cannot be restored", col, dt, err)
+			return "", fmt.Errorf("column %q (%s): %w: %s", col, dt, err, mariaDBFixedRemedy)
 		}
 		b = parsed
 	case []byte:
 		if len(val) != metadata.MariaDBFixedWidth(dt) {
-			return "", fmt.Errorf("column %q (%s): %d bytes, want %d; the value cannot be restored", col, dt, len(val), metadata.MariaDBFixedWidth(dt))
+			return "", fmt.Errorf("column %q (%s): %d bytes, want %d: %s", col, dt, len(val), metadata.MariaDBFixedWidth(dt), mariaDBFixedRemedy)
 		}
 		b = val
 	default:
-		return "", fmt.Errorf("column %q (%s): unexpected value of type %T; the value cannot be restored", col, dt, v)
+		return "", fmt.Errorf("column %q (%s): unexpected value of type %T: %s", col, dt, v, mariaDBFixedRemedy)
 	}
 	return recovery.FormatSQLValue(b), nil
 }

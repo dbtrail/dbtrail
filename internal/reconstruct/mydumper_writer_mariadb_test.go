@@ -71,6 +71,9 @@ func TestMydumperWriter_MariaDBFixedTypeUnrestorableValueRefused(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `"u"`) {
 		t.Fatalf("WriteRow of a damaged UUID = %v, want a refusal naming the column", err)
 	}
+	if !strings.Contains(err.Error(), "bintrail dump") || !strings.Contains(err.Error(), "bintrail baseline") {
+		t.Errorf("refusal does not name the remedy (a new snapshot): %v", err)
+	}
 }
 
 // The Parquet side (baseline refresh, reconstruct --output-format parquet)
@@ -92,6 +95,8 @@ func TestRenderBaselineValue_MariaDBFixedTypes(t *testing.T) {
 	} {
 		if text, _, err := renderBaselineValue(col(c.dt), c.v); err == nil || !strings.Contains(err.Error(), `"c"`) {
 			t.Errorf("%s %q rendered as %q (%v), want a refusal naming the column", c.dt, c.v, text, err)
+		} else if !strings.Contains(err.Error(), "bintrail dump") || !strings.Contains(err.Error(), "bintrail baseline") {
+			t.Errorf("%s refusal does not name the remedy (a new snapshot with bintrail dump + bintrail baseline): %v", c.dt, err)
 		}
 	}
 }

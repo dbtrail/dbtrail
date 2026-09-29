@@ -641,7 +641,7 @@ func renderBaselineValue(col baseline.Column, v any) (text string, isNull bool, 
 		// mydumper writer does.
 		s, ok := v.(string)
 		if !ok || !metadata.IsMariaDBFixedText(dt, s) {
-			return "", false, fmt.Errorf("column %q (%s): value %q is not a %s value this build can restore; the table is refused rather than published with a wrong value", col.Name, dt, fmt.Sprint(v), dt)
+			return "", false, fmt.Errorf("column %q (%s): value %q has no correct %s form, so the table is not published with it: %s", col.Name, dt, fmt.Sprint(v), dt, mariaDBFixedRemedy)
 		}
 		return s, false, nil
 	}
