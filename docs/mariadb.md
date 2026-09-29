@@ -195,9 +195,9 @@ silently become the write key for every server. Two caveats:
   `--source-flavor` and `BINTRAIL_SOURCE_FLAVOR` as `stream`), but unlike
   `stream` it has no saved checkpoint. On restart it resumes from `--start-gtid` (parsed with the
   detected flavor) or the server's current binlog position. The web interface
-  also captures MariaDB sources and detects them the same way. A server saved
-  with Source type MariaDB counts as declared; one saved with the default
-  MySQL is detected.
+  also captures MariaDB sources and detects them the same way. The Source type
+  saved with a server is only a hint: capture follows what the server reports,
+  and the server's Overview shows a warning when the two disagree.
 - **Index-on-MariaDB is out of scope** — the index database stays MySQL.
 
 ---
@@ -207,7 +207,7 @@ silently become the write key for every server. Two caveats:
 | Symptom | Cause / fix |
 |---|---|
 | `WARN … MariaDB source has no @@server_uuid; synthesized …` | Expected — MariaDB has no `server_uuid`. Benign; bintrail synthesizes a stable `bintrail_id` from the source address instead. See [Server identity on MariaDB](#server-identity-on-mariadb). |
-| `source flavor mismatch: declared "mysql", but the server reports "mariadb"` | `--source-flavor` (or `BINTRAIL_SOURCE_FLAVOR`) contradicts the server. Remove it so bintrail detects the flavor, or set it to what the server reports. For a server added in the web interface, remove it and add it again with the right Source type. |
+| `source flavor mismatch: declared "mysql", but the server reports "mariadb"` | `--source-flavor` (or `BINTRAIL_SOURCE_FLAVOR`) contradicts the server. Remove it so bintrail detects the flavor, or set it to what the server reports. (A server added in the web interface never refuses for this: it captures as the server reports and shows a warning.) |
 | `could not detect the source flavor` | `SELECT VERSION()` failed on the source, usually a broken connection. Fix the connection, or set `--source-flavor` to start anyway (with a warning). |
 | `saved checkpoint is a mariadb GTID set, but the source is mysql` | The index was captured from a server of the other flavor. Check `--source-dsn`, or `--reset` to start fresh. |
 | `MariaDB GTID gap detected but CANNOT be filled` | The source purged binlogs your checkpoint still needed. bintrail auto-advances past the lost range and records the data loss durably; pass `--no-gap-fill` to refuse to start instead. Raise `binlog_expire_logs_seconds` to give bintrail more time to resume. |

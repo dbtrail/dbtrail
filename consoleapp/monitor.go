@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -141,6 +142,10 @@ type monitorJob struct {
 	// acts on (console.MonitorErr*), "" for every other failure. Set with the
 	// failure by fail, cleared by every other transition.
 	errCode string
+	// flavorWarning says the server contradicts the Source type saved with
+	// its registry entry. Set on every flavor resolution ("" when they agree);
+	// never a failure: the saved type is a hint and capture follows the server.
+	flavorWarning string
 	// retrying: the stored failure is one run() will retry after its backoff,
 	// not a setup failure in Start or a give-up. Any other set clears it.
 	retrying bool
@@ -213,6 +218,13 @@ func monitorErrorCode(err error) string {
 }
 
 // markSourceConnected records that this run's stream reached the source.
+// setFlavorWarning records (or clears, with "") the Source type warning.
+func (j *monitorJob) setFlavorWarning(w string) {
+	j.mu.Lock()
+	j.flavorWarning = w
+	j.mu.Unlock()
+}
+
 func (j *monitorJob) markSourceConnected() {
 	j.mu.Lock()
 	j.sourceConnected = true
@@ -282,7 +294,7 @@ func (j *monitorJob) pgStreamHooks() *pgstreamrun.Hooks {
 func (j *monitorJob) snapshot() console.MonitorStatus {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected, Retrying: j.retrying, Phase: j.phase, PhaseDetail: j.phaseDetail, ErrorCode: j.errCode}
+	st := console.MonitorStatus{State: j.state, LastError: j.lastErr, SourceConnected: j.sourceConnected, Retrying: j.retrying, Phase: j.phase, PhaseDetail: j.phaseDetail, ErrorCode: j.errCode, FlavorWarning: j.flavorWarning}
 	if j.state == "running" {
 		if idle := time.Since(j.lastProgress); !j.lastProgress.IsZero() && idle > monitorStalledAfter {
 			st.State = "stalled"
@@ -601,13 +613,12 @@ func (m *monitorSupervisor) Start(ctx context.Context, e console.ServerEntry) er
 		runOnce = func(c context.Context) error { return m.pgStreamFn(c, pgcfg) }
 		startJobs(flavor)
 	default:
-		// A MySQL-family entry does not know for sure what it points at (a
-		// "mysql" entry is usually the form's default), so the stream asks
-		// the server and the jobs start from what it found. FlavorOnce: m.run
-		// re-runs the stream on these same hooks after a crash.
+		// The saved Source type of a MySQL-family entry is a hint: the stream
+		// asks the server and captures as what it reports, the jobs start from
+		// that, and a contradiction shows on the server's status as a warning.
 		cfg := sourceStreamConfig(e, serverID, upBatchSize)
 		cfg.Hooks = job.streamHooks()
-		cfg.Hooks.OnFlavorResolved = streamrun.FlavorOnce(startJobs)
+		cfg.Hooks.OnFlavorResolved = registryFlavorHook(job, e.Flavor, startJobs)
 		runOnce = func(c context.Context) error { return explainRegistryFlavorError(m.streamFn(c, cfg)) }
 	}
 
@@ -751,13 +762,6 @@ func sourcePGStreamConfig(e console.ServerEntry, serverID uint32, batchSize int)
 // extracted from Start so the entry→config fan-out (SSL especially) is
 // unit-testable without a live DB.
 func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) streamrun.Config {
-	// Only a MariaDB entry declares its flavor. The form preselects MySQL and
-	// the Connect flow always sends "mysql", so a stored "mysql" (or a blank
-	// pre-#1019 entry) is not something the operator said: the stream detects.
-	var declared string
-	if e.SourceFlavor() == console.FlavorMariaDB {
-		declared = console.FlavorMariaDB
-	}
 	sslMode := e.SSLMode
 	if sslMode == "" {
 		sslMode = "preferred"
@@ -766,7 +770,9 @@ func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) s
 		IndexDSN:  e.DSN,
 		SourceDSN: e.SourceDSN,
 		ServerID:  serverID,
-		Flavor:    declared,
+		// Never declared: the Source type saved with the entry is a hint
+		// (registryFlavorHook compares it), the stream detects the flavor.
+		Flavor:    "",
 		BatchSize: streamBatchSize(batchSize),
 		Schemas:   e.Schemas,
 		// MetricsSource keys this stream's Prometheus series; MetricsAddr
@@ -784,21 +790,41 @@ func sourceStreamConfig(e console.ServerEntry, serverID uint32, batchSize int) s
 	}
 }
 
-// explainRegistryFlavorError rewrites the fix in a source-flavor refusal for a
-// server saved in the console: it has no --source-flavor, and its Source type
-// cannot be edited. Any other error passes through unchanged.
+// explainRegistryFlavorError rewrites the fix in a "could not detect the
+// source flavor" refusal for a server saved in the console: it has no
+// --source-flavor to point at. Any other error passes through unchanged.
 func explainRegistryFlavorError(err error) error {
-	var mm *metadata.FlavorMismatchError
-	if errors.As(err, &mm) {
-		mm.Fix = fmt.Sprintf("This server is saved with Source type %s. Remove it and add it again with Source type %s.",
-			sourceTypeLabel(mm.Declared), sourceTypeLabel(mm.Detected))
-		return err
-	}
 	var ue *metadata.FlavorUndetectedError
 	if errors.As(err, &ue) {
 		ue.Fix = "Check that DBTrail can still connect to this server with its saved user and password."
 	}
 	return err
+}
+
+// registryFlavorHook is the OnFlavorResolved of a supervised MySQL-family
+// stream: it records the Source type warning on every resolution (a restart
+// re-checks) and starts the source jobs once.
+func registryFlavorHook(job *monitorJob, hint string, startJobs func(string)) func(string) {
+	once := streamrun.FlavorOnce(startJobs)
+	return func(flavor string) {
+		w := registryFlavorWarning(hint, flavor)
+		if w != "" {
+			slog.Warn(w, "entry_flavor", hint, "detected", flavor)
+		}
+		job.setFlavorWarning(w)
+		once(flavor)
+	}
+}
+
+// registryFlavorWarning is the text shown when the server contradicts the
+// Source type saved with its entry, "" when they agree or none was saved.
+func registryFlavorWarning(hint, detected string) string {
+	h, err := console.NormalizeFlavor(hint)
+	if strings.TrimSpace(hint) == "" || err != nil || h == detected {
+		return ""
+	}
+	return fmt.Sprintf("This server is saved with Source type %s, but the server reports %s. DBTrail captures it as %s. To fix the label, remove the server and add it again with Source type %s.",
+		sourceTypeLabel(h), sourceTypeLabel(detected), sourceTypeLabel(detected), sourceTypeLabel(detected))
 }
 
 // sourceTypeLabel is the Source type option label the console form shows.
@@ -851,15 +877,6 @@ func (m *monitorSupervisor) run(ctx context.Context, job *monitorJob, e console.
 			return
 		}
 		scrubbed := config.ScrubDSNError(err, e.SourceDSN, e.DSN)
-		// A Source type the server contradicts cannot heal by retrying: the
-		// entry has to be re-created. Say so once and stop, instead of
-		// reconnecting for hours under a "retrying" label.
-		if mm := (*metadata.FlavorMismatchError)(nil); errors.As(err, &mm) {
-			slog.Error("monitored stream refused: source flavor mismatch; not retrying",
-				"server", e.Name, "entry", e.ID, "error", scrubbed)
-			job.fail(scrubbed, monitorErrorCode(err), false)
-			return
-		}
 		delay, looping, giveUp := policy.failed(started, time.Now())
 		if giveUp {
 			slog.Error("monitored stream crash-looped past the give-up threshold; not retrying",

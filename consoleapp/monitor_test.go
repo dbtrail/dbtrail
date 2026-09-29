@@ -85,44 +85,75 @@ func TestSourceStreamConfig(t *testing.T) {
 		t.Errorf("registry TLS did not propagate to the stream config: %+v", got)
 	}
 
-	// A MariaDB entry is a choice the operator made: it is declared, so a
-	// server that turns out to be MySQL refuses instead of mis-capturing.
+	// Even a saved MariaDB Source type is only a hint: the stream detects.
 	maria := sourceStreamConfig(console.ServerEntry{
 		ID: "e3", DSN: "idx-dsn", SourceDSN: "src-dsn", Flavor: console.FlavorMariaDB,
 	}, 9, 0)
-	if maria.Flavor != console.FlavorMariaDB {
-		t.Errorf("Flavor = %q, want mariadb", maria.Flavor)
+	if maria.Flavor != "" {
+		t.Errorf("Flavor = %q, want empty: a saved MariaDB Source type is a hint, the stream detects", maria.Flavor)
 	}
 }
 
-// TestExplainRegistryFlavorError pins the fix a console-saved server shows: it
-// has no --source-flavor and its Source type cannot be edited, so the
-// command-line advice would be a dead end.
+// TestExplainRegistryFlavorError pins the fix a console-saved server shows when
+// the server could not be asked what it is: it has no --source-flavor.
 func TestExplainRegistryFlavorError(t *testing.T) {
-	_, _, err := metadata.ResolveSourceFlavor("mariadb", "mysql", "8.4.2", nil)
+	_, _, err := metadata.ResolveSourceFlavor("", "", "", errors.New("SELECT VERSION() failed: bad connection"))
 	got := explainRegistryFlavorError(err).Error()
-	t.Logf("registry mismatch: %s", got)
-	if strings.Contains(got, "--source-flavor") ||
-		!strings.Contains(got, "saved with Source type MariaDB") ||
-		!strings.Contains(got, "add it again with Source type MySQL") {
-		t.Errorf("registry mismatch message: %s", got)
-	}
-
-	_, _, err = metadata.ResolveSourceFlavor("", "", "", errors.New("SELECT VERSION() failed: bad connection"))
-	got = explainRegistryFlavorError(err).Error()
 	t.Logf("registry undetected: %s", got)
 	if strings.Contains(got, "--source-flavor") || !strings.Contains(got, "saved user and password") {
 		t.Errorf("registry undetected message: %s", got)
 	}
-
 	other := errors.New("boom")
 	if explainRegistryFlavorError(other) != other || explainRegistryFlavorError(nil) != nil {
 		t.Error("other errors and nil must pass through unchanged")
 	}
-	for _, s := range []string{got} {
-		if strings.ContainsRune(s, '\u2014') {
-			t.Errorf("em dash in operator text: %s", s)
+}
+
+// TestRegistryFlavorHint: the Source type saved with a console server is a
+// hint. The stream always detects; when the server contradicts the hint the
+// server's status carries a warning, and it clears once they agree.
+func TestRegistryFlavorHint(t *testing.T) {
+	cases := []struct{ hint, detected, wantWarn string }{
+		{console.FlavorMariaDB, console.FlavorMySQL, "saved with Source type MariaDB, but the server reports MySQL"},
+		{console.FlavorMySQL, console.FlavorMariaDB, "saved with Source type MySQL, but the server reports MariaDB"},
+		{"", console.FlavorMariaDB, ""},
+		{console.FlavorMariaDB, console.FlavorMariaDB, ""},
+		{console.FlavorMySQL, console.FlavorMySQL, ""},
+	}
+	for _, tc := range cases {
+		got := registryFlavorWarning(tc.hint, tc.detected)
+		if tc.wantWarn == "" && got != "" || tc.wantWarn != "" && !strings.Contains(got, tc.wantWarn) {
+			t.Errorf("hint %q detected %q: warning %q, want containing %q", tc.hint, tc.detected, got, tc.wantWarn)
 		}
+		if strings.ContainsRune(got, '\u2014') {
+			t.Errorf("em dash in operator text: %s", got)
+		}
+	}
+	t.Logf("warning: %s", registryFlavorWarning(console.FlavorMariaDB, console.FlavorMySQL))
+
+	job := &monitorJob{}
+	job.set("pending", "")
+	hooks := job.streamHooks()
+	jobs := 0
+	onFlavor := registryFlavorHook(job, console.FlavorMariaDB, func(string) { jobs++ })
+	hooks.OnFlavorResolved = onFlavor
+	hooks.OnFlavorResolved(console.FlavorMySQL)
+	if w := job.snapshot().FlavorWarning; !strings.Contains(w, "Source type MariaDB") {
+		t.Errorf("status FlavorWarning = %q, want the contradiction", w)
+	}
+	if st := job.snapshot().State; st == "failed" {
+		t.Error("a contradicted hint must not fail the job")
+	}
+	hooks.OnFlavorResolved(console.FlavorMySQL) // a restart
+	if jobs != 1 {
+		t.Errorf("source jobs started %d times, want 1", jobs)
+	}
+	// The hint is what the operator saved; it does not change between runs,
+	// so a second resolution that agrees would only come from a different
+	// server. The warning still follows the latest resolution.
+	registryFlavorHook(job, console.FlavorMySQL, func(string) {})(console.FlavorMySQL)
+	if w := job.snapshot().FlavorWarning; w != "" {
+		t.Errorf("warning not cleared when hint and server agree: %q", w)
 	}
 }
 
@@ -297,35 +328,6 @@ func TestMonitorRun_circuitBreakerGivesUp(t *testing.T) {
 	}
 	if !strings.Contains(st.LastError, "boom") {
 		t.Errorf("LastError = %q, want the underlying error preserved", st.LastError)
-	}
-}
-
-// TestMonitorRun_flavorMismatchIsNotRetried: a server whose saved Source type
-// contradicts what it reports cannot heal by retrying, so the supervisor
-// reports it once, not as retrying, and stops.
-func TestMonitorRun_flavorMismatchIsNotRetried(t *testing.T) {
-	oldBase, oldCap := monitorBackoffBase, monitorBackoffCap
-	monitorBackoffBase, monitorBackoffCap = time.Millisecond, time.Millisecond
-	defer func() { monitorBackoffBase, monitorBackoffCap = oldBase, oldCap }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	calls := 0
-	m := &monitorSupervisor{baseCtx: ctx, jobs: map[string]*monitorJob{}}
-	job := &monitorJob{cancel: cancel, done: make(chan struct{})}
-	job.set("pending", "")
-	m.wg.Add(1)
-	m.run(ctx, job, console.ServerEntry{ID: "e8", Name: "mism"}, console.FlavorMariaDB, func(context.Context) error {
-		calls++
-		_, _, err := metadata.ResolveSourceFlavor("mariadb", "mysql", "8.4.2", nil)
-		return explainRegistryFlavorError(err)
-	})
-	st := job.snapshot()
-	if calls != 1 {
-		t.Errorf("stream ran %d times, want 1 (no retry)", calls)
-	}
-	if st.State != "failed" || st.Retrying || !strings.Contains(st.LastError, "Source type MySQL") {
-		t.Errorf("status = %+v, want a terminal failure carrying the fix", st)
 	}
 }
 

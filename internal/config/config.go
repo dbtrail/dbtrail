@@ -116,11 +116,10 @@ func scanBinlogStatus(db *sql.DB, stmt string) (file string, pos uint32, err err
 // A server without the gtid_mode variable at all — Error 1193
 // ER_UNKNOWN_SYSTEM_VARIABLE, which is what MariaDB returns — also yields
 // ("", nil): such a server structurally cannot supply a MySQL GTID set, so
-// falling back to position discovery is correct. This matters because a
-// MariaDB source can reach this call under the DEFAULT mysql flavor
-// (streamrun gates on the configured flavor, and e.g. `bintrail-console
-// watch` exposes no --source-flavor for its main source); a hard failure
-// here would crash-loop that daemon at startup. Genuine connection/query
+// falling back to position discovery is correct. Capture now detects the
+// flavor from the server before this runs, but a MariaDB can still reach it:
+// a declared mysql flavor is accepted when the server could not be asked, and
+// a hard failure here would crash-loop that daemon at startup. Genuine connection/query
 // failures remain errors — the caller treats them as fatal by design.
 func CurrentGTIDExecuted(db *sql.DB) (string, error) {
 	var gtidMode string

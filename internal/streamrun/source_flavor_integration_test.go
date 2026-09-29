@@ -67,12 +67,24 @@ func runAttachedWithFlavorHook(t *testing.T, cfg Config, writes func(), done fun
 	return got, err
 }
 
+// mysqlFlavorSource makes a MySQL source schema with one table: the stream's
+// first schema snapshot refuses an empty schema ("no columns found").
+func mysqlFlavorSource(t *testing.T) string {
+	t.Helper()
+	sourceDB, sourceName := testutil.CreateTestDB(t)
+	testutil.MustExec(t, sourceDB, `CREATE TABLE orders (
+		id     INT PRIMARY KEY AUTO_INCREMENT,
+		amount DECIMAL(10,2) NOT NULL
+	)`)
+	return sourceName
+}
+
 // TestOne_SourceFlavor_mysqlDetectedWhenUndeclared: a MySQL source with no
 // declared flavor captures as mysql and records it.
 func TestOne_SourceFlavor_mysqlDetectedWhenUndeclared(t *testing.T) {
 	indexDB, indexName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
-	_, sourceName := testutil.CreateTestDB(t)
+	sourceName := mysqlFlavorSource(t)
 
 	cfg := flavorTestConfig(indexName, testutil.IntegrationDSN(sourceName), sourceName, "", 99981)
 	got, err := runAttachedWithFlavorHook(t, cfg, nil, func() bool { return true })
@@ -92,7 +104,7 @@ func TestOne_SourceFlavor_mysqlDetectedWhenUndeclared(t *testing.T) {
 func TestOne_SourceFlavor_mysqlDeclaredMariaDBRefuses(t *testing.T) {
 	indexDB, indexName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
-	_, sourceName := testutil.CreateTestDB(t)
+	sourceName := mysqlFlavorSource(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -119,7 +131,7 @@ func TestOne_SourceFlavor_detectionFailure(t *testing.T) {
 	t.Run("undeclared refuses", func(t *testing.T) {
 		indexDB, indexName := testutil.CreateTestDB(t)
 		testutil.InitIndexTables(t, indexDB)
-		_, sourceName := testutil.CreateTestDB(t)
+		sourceName := mysqlFlavorSource(t)
 		cfg := flavorTestConfig(indexName, testutil.IntegrationDSN(sourceName), sourceName, "", 99983)
 		cfg.Deps.DetectSourceFlavor = failing
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -137,7 +149,7 @@ func TestOne_SourceFlavor_detectionFailure(t *testing.T) {
 	t.Run("declared mysql runs", func(t *testing.T) {
 		indexDB, indexName := testutil.CreateTestDB(t)
 		testutil.InitIndexTables(t, indexDB)
-		_, sourceName := testutil.CreateTestDB(t)
+		sourceName := mysqlFlavorSource(t)
 		cfg := flavorTestConfig(indexName, testutil.IntegrationDSN(sourceName), sourceName, "mysql", 99984)
 		cfg.Deps.DetectSourceFlavor = failing
 		if err := runOneUntil(t, cfg, true, nil, func() bool { return true }); err != nil {

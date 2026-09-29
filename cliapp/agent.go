@@ -696,7 +696,7 @@ func resolveAgentFlavor(sourceDB *sql.DB, declared string, detect func(*sql.DB) 
 // ─── BYOS streaming ────────────────────────────────────────────────────────
 
 // runBYOSStream reads binlogs from the source MySQL (or MariaDB, under
-// --source-flavor mariadb) and writes events to the in-memory buffer, and
+// a detected or declared mariadb flavor) and writes events to the in-memory buffer, and
 // optionally flushes metadata/payload to sinks.
 func runBYOSStream(ctx context.Context, sourceDB *sql.DB, buf *buffer.Buffer, fc *byosFlushConfig) error {
 	// Validate binlog settings.

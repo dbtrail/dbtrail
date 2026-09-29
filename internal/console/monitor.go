@@ -91,6 +91,10 @@ type MonitorStatus struct {
 	// acts on (MonitorErr*). Empty for every other failure, which LastError
 	// describes. A screen decides on this and never on LastError's text.
 	ErrorCode string `json:"error_code,omitempty"`
+	// FlavorWarning, when set, says the server contradicts the Source type
+	// saved with its entry. Capture follows the server; this is a warning to
+	// show, never a failure.
+	FlavorWarning string `json:"flavor_warning,omitempty"`
 }
 
 // MonitorErrEarlierCleanup is the ErrorCode of a start that waited its whole

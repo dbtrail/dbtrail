@@ -376,6 +376,8 @@ jobs:
             || { echo "FATAL: crash→restart exactly-once test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestOne_SourceFlavor_mysqlDeclaredMariaDBRefuses ' /tmp/mysql-it.out \
             || { echo "FATAL: source-flavor refusal test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestOne_SourceFlavor_mysqlDetectedWhenUndeclared ' /tmp/mysql-it.out \
+            || { echo "FATAL: source-flavor detection test did not run (false-green tripwire)" >&2; exit 1; }
 
       # The S3 tripwire, kept apart from the step above so a store that did
       # not start is red even when every other test passed. It runs when the
