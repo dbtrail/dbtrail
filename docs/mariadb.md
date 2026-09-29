@@ -236,8 +236,9 @@ page and the
   `stream` it has no saved checkpoint. On restart it resumes from `--start-gtid` (parsed with the
   detected flavor) or the server's current binlog position. The web interface
   also captures MariaDB sources and detects them the same way. The Source type
-  saved with a server is only a hint: capture follows what the server reports,
-  and the server's Overview shows a warning when the two disagree.
+  saved with a server is only a hint: capture follows what the server reports
+  and saves it as the server's Source type. The server's Overview shows a
+  warning only when that save fails.
 - **Index-on-MariaDB is out of scope** — the index database stays MySQL.
 - **JSON columns come back as equivalent JSON, not the same text.** In MariaDB
   a `JSON` column is text: the server keeps exactly what your application
