@@ -25,8 +25,12 @@ import (
 // random binary data, which Parquet cannot compress. (The issue quotes 1.6x;
 // that ratio is against the table's file on disk, which is larger than
 // DATA_LENGTH + INDEX_LENGTH. Against the sum this check reads, the same
-// table peaked at 1.8x.) Hence two lines: below 1x the run is refused, below
-// 1.8x it runs and says the disk is low.
+// table peaked at 1.8x.) The sum is also an upper bound for the dump alone:
+// secondary indexes are not dumped and deleted rows still count, and the
+// smallest dump measured was 0.6x of it for a table that was not mostly
+// deleted. So a refusal waits for less than half the estimate, a line no
+// measured dump reached, and everything between that and 1.8x runs with a
+// warning that says the same things a refusal would.
 
 // Values of BaselineStatus.DiskCheck.
 const (
@@ -40,6 +44,10 @@ const (
 // DATA_LENGTH + INDEX_LENGTH (random binary: 94 MiB dump + 84 MiB Parquet
 // over 99 MiB).
 const dumpPeakTenths = 18
+
+// dumpRefuseTenths is the refusal line as tenths of the estimate: below half
+// of it no measured dump fit, so refusing there is not a guess.
+const dumpRefuseTenths = 5
 
 // dumpEstimateTimeout bounds the information_schema read. It runs before every
 // full read, and a source that does not answer in time must cost a note, not
@@ -97,6 +105,10 @@ func estimateDumpSize(ctx context.Context, sourceDSN string, schemas []string) (
 	}
 	defer conn.Close()
 	var est dumpEstimate
+	// ctx bounds how long this waits, not how long the source works: on a
+	// timeout the driver closes the connection without KILL QUERY, so an
+	// information_schema scan over many tables can keep running on the source
+	// for a while after the read has moved on.
 	if _, err := conn.ExecContext(ctx, "SET SESSION information_schema_stats_expiry = 0"); err != nil {
 		var me *mysqldriver.MySQLError
 		if errors.As(err, &me) && me.Number == 1193 {
@@ -149,6 +161,7 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 	}
 	need := uint64(max(est.bytes, 0))
 	peak := need * dumpPeakTenths / 10
+	floor := need * dumpRefuseTenths / 10
 	shared, unknown := localDir == "", false
 	outDir := stagingDir
 	if !shared {
@@ -172,12 +185,20 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 		short += " The source may have reported sizes up to a day old."
 	}
 
+	if stageFree < floor {
+		freeS, floorS := sizePair(stageFree, floor)
+		return "", "", fmt.Errorf("%w: a full read writes the whole dump to %s before converting it. The tables add up to about %s, "+
+			"an upper bound (secondary indexes are not dumped, deleted rows still count), and no measured dump came to less than "+
+			"half of it, %s; the folder has %s free.%s Nothing was dumped from the source. %s",
+			errFoldDiskFull, stagingDir, humanSize(int64(need)), floorS, freeS, short, moveStagingHint)
+	}
 	if stageFree < need {
-		freeS, needS := sizePair(stageFree, need)
-		return "", "", fmt.Errorf("%w: a full read writes the whole dump to %s before converting it, and needs about %s free there; it has %s.%s "+
-			"Nothing was dumped from the source. Free space there, or move this folder to a bigger disk "+
-			"(the \".sql build folder\" setting, or BINTRAIL_CONSOLE_BASELINE_STAGING) and restart DBTrail",
-			errFoldDiskFull, stagingDir, needS, freeS, short)
+		// Below the bound, above the refusal line: the dump may fit, may not.
+		// Loud, and with everything a refusal would say.
+		return dumpDiskLow, fmt.Sprintf("Low disk: a full read writes the whole dump to %s before converting it. The tables add up to about %s, "+
+			"an upper bound (secondary indexes are not dumped, deleted rows still count), and the folder has %s free, so the dump may not fit "+
+			"and this read may fail with a full disk.%s %s",
+			stagingDir, humanSize(int64(need)), humanSize(int64(stageFree)), short, moveStagingHint), nil
 	}
 	if !shared || unknown {
 		outFree, ok, why := measureFree(outDir)
@@ -203,12 +224,16 @@ func dumpDiskVerdict(stagingDir, localDir string, est dumpEstimate, estErr error
 	}
 	if stageFree < peak {
 		return dumpDiskLow, fmt.Sprintf("Low disk: %s has %s free. The dump needs about %s, and with its Parquet copy "+
-			"%s it can reach about %s for data that does not compress. This read may fail with a full disk.%s",
-			stagingDir, humanSize(int64(stageFree)), humanSize(int64(need)), where, humanSize(int64(peak)), short), nil
+			"%s it can reach about %s for data that does not compress. This read may fail with a full disk.%s %s",
+			stagingDir, humanSize(int64(stageFree)), humanSize(int64(need)), where, humanSize(int64(peak)), short, moveStagingHint), nil
 	}
 	return dumpDiskOK, fmt.Sprintf("Disk check: a full read needs about %s free at %s (up to %s with the Parquet copy); %s free.%s",
 		humanSize(int64(need)), stagingDir, humanSize(int64(peak)), humanSize(int64(stageFree)), short), nil
 }
+
+// moveStagingHint is how an operator gives the staging folder more room.
+const moveStagingHint = "Free space there, or move this folder to a bigger disk " +
+	"(the \".sql build folder\" setting, or BINTRAIL_CONSOLE_BASELINE_STAGING) and restart DBTrail."
 
 // measureFree is diskSpaceFn with the fold check's reading of it: an error,
 // or a filesystem that reports no size, is "cannot tell", never "full".

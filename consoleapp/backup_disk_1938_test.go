@@ -56,23 +56,38 @@ func TestDumpDiskVerdict(t *testing.T) {
 	stage := t.TempDir()
 	est := dumpEstimate{bytes: int64(10 * gib), tables: 3}
 
-	t.Run("estimate above free refuses and says how to move the folder", func(t *testing.T) {
-		diskByPath(t, map[string]uint64{stage: 9 * gib})
+	// The estimate is an upper bound (secondary indexes are not dumped,
+	// deleted rows still count), and the smallest dump the #1938 measurement
+	// saw was well under it, so only less than half of it refuses.
+	t.Run("below half the estimate refuses and says how to move the folder", func(t *testing.T) {
+		diskByPath(t, map[string]uint64{stage: 4 * gib})
 		_, _, err := dumpDiskVerdict(stage, "", est, nil)
 		if !errors.Is(err, errFoldDiskFull) {
 			t.Fatalf("err = %v, want a disk refusal", err)
 		}
-		for _, want := range []string{stage, "10.0 GiB", "9.0 GiB", "BINTRAIL_CONSOLE_BASELINE_STAGING", `".sql build folder"`, "restart"} {
+		for _, want := range []string{stage, "10.0 GiB", "4.0 GiB", "5.0 GiB", "upper bound", "BINTRAIL_CONSOLE_BASELINE_STAGING", `".sql build folder"`, "restart"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("refusal lacks %q: %v", want, err)
 			}
 		}
 	})
-	t.Run("exactly the estimate is not a refusal", func(t *testing.T) {
-		diskByPath(t, map[string]uint64{stage: 10 * gib})
+	t.Run("exactly half the estimate is not a refusal", func(t *testing.T) {
+		diskByPath(t, map[string]uint64{stage: 5 * gib})
 		check, _, err := dumpDiskVerdict(stage, "", est, nil)
 		if err != nil || check != dumpDiskLow {
 			t.Fatalf("check = %q, err = %v, want low and no refusal", check, err)
+		}
+	})
+	t.Run("between half and the estimate warns with everything the refusal says", func(t *testing.T) {
+		diskByPath(t, map[string]uint64{stage: 9 * gib})
+		check, note, err := dumpDiskVerdict(stage, "", est, nil)
+		if err != nil || check != dumpDiskLow {
+			t.Fatalf("check = %q, err = %v, want low and no refusal", check, err)
+		}
+		for _, want := range []string{"Low disk", stage, "10.0 GiB", "9.0 GiB free", "upper bound", "BINTRAIL_CONSOLE_BASELINE_STAGING", `".sql build folder"`, "restart"} {
+			if !strings.Contains(note, want) {
+				t.Errorf("warning lacks %q: %s", want, note)
+			}
 		}
 	})
 	t.Run("between 1x and 1.8x runs and warns", func(t *testing.T) {
@@ -81,7 +96,7 @@ func TestDumpDiskVerdict(t *testing.T) {
 		if err != nil || check != dumpDiskLow {
 			t.Fatalf("check = %q, err = %v", check, err)
 		}
-		for _, want := range []string{"Low disk", stage, "15.0 GiB free", "about 10.0 GiB", "about 18.0 GiB"} {
+		for _, want := range []string{"Low disk", stage, "15.0 GiB free", "about 10.0 GiB", "about 18.0 GiB", "BINTRAIL_CONSOLE_BASELINE_STAGING"} {
 			if !strings.Contains(note, want) {
 				t.Errorf("note lacks %q: %s", want, note)
 			}
@@ -148,9 +163,16 @@ func TestDumpDiskVerdict_localFolderOnAnotherDisk(t *testing.T) {
 	stubSameFS(t, false, nil)
 
 	t.Run("small staging with a huge local folder refuses", func(t *testing.T) {
-		diskByPath(t, map[string]uint64{stage: 5 * gib, local: 1000 * gib})
+		diskByPath(t, map[string]uint64{stage: 4 * gib, local: 1000 * gib})
 		if _, _, err := dumpDiskVerdict(stage, local, est, nil); !errors.Is(err, errFoldDiskFull) || !strings.Contains(err.Error(), stage) {
 			t.Fatalf("err = %v, want a refusal naming the staging folder", err)
+		}
+	})
+	t.Run("staging below the estimate warns, naming the staging folder", func(t *testing.T) {
+		diskByPath(t, map[string]uint64{stage: 7 * gib, local: 1000 * gib})
+		check, note, err := dumpDiskVerdict(stage, local, est, nil)
+		if err != nil || check != dumpDiskLow || !strings.Contains(note, stage) || !strings.Contains(note, "BINTRAIL_CONSOLE_BASELINE_STAGING") {
+			t.Fatalf("check = %q, note = %q, err = %v", check, note, err)
 		}
 	})
 	t.Run("the dump fits at staging and needs no Parquet margin there", func(t *testing.T) {
@@ -274,19 +296,24 @@ func TestExecute_diskRefusalStopsBeforeMydumper(t *testing.T) {
 	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), tables: 1}, nil)
 	diskByPath(t, map[string]uint64{stage: gib})
 	calls := countMydumper(t)
+	var marks atomic.Int32
+	prevMark := dumpDDLMarkFunc
+	dumpDDLMarkFunc = func(console.BaselineRequest) string { marks.Add(1); return "" }
+	t.Cleanup(func() { dumpDDLMarkFunc = prevMark })
+	// A staging folder nothing can be created in: a check placed after the
+	// dump folder is made fails on that first, and the deferred removal of a
+	// folder that was made cannot hide it.
+	if err := os.Chmod(stage, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stage, 0o755) })
 	s := newBaselineSupervisor(context.Background(), stage, baseline.LockModeFTWRL)
 	_, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: "src", S3: "s3://b/p"})
 	if !errors.Is(err, errFoldDiskFull) {
-		t.Fatalf("err = %v", err)
+		t.Fatalf("err = %v, want the disk refusal before any folder is created", err)
 	}
-	if calls.Load() != 0 {
-		t.Fatal("mydumper ran after the disk check refused")
-	}
-	ents, _ := os.ReadDir(stage)
-	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), "dump-") || strings.HasPrefix(e.Name(), "baseline-") {
-			t.Fatalf("the refusal left %s behind", e.Name())
-		}
+	if calls.Load() != 0 || marks.Load() != 0 {
+		t.Fatalf("after the refusal: mydumper ran %d time(s), the DDL mark was read %d time(s)", calls.Load(), marks.Load())
 	}
 }
 
@@ -376,7 +403,13 @@ func TestFullRead_refusalIsDiskRefused(t *testing.T) {
 // slot, and nothing stands in for it with another full read.
 func TestBackupScheduler_diskRefusedFullReadIsOnItsSlot(t *testing.T) {
 	b, reg, sup := newScheduleFixture(t, true)
-	stubEstimate(t, dumpEstimate{bytes: int64(10 * gib), tables: 2}, nil)
+	var estimates atomic.Int32
+	prevEst := dumpSizeEstimateFn
+	dumpSizeEstimateFn = func(context.Context, string, []string) (dumpEstimate, error) {
+		estimates.Add(1)
+		return dumpEstimate{bytes: int64(10 * gib), tables: 2}, nil
+	}
+	t.Cleanup(func() { dumpSizeEstimateFn = prevEst })
 	diskByPath(t, map[string]uint64{sup.stagingDir: gib})
 	calls := countMydumper(t)
 	e := addScheduled(t, reg, false)
@@ -389,8 +422,12 @@ func TestBackupScheduler_diskRefusedFullReadIsOnItsSlot(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("mydumper ran")
 	}
-	if st.LastFallbackAt != "" {
-		t.Fatalf("a fallback was recorded: %q", st.LastFallbackReason)
+	// Every full read starts with the estimate, so a second one means a
+	// second full read. Give the watcher several polls to start one.
+	time.Sleep(20 * fallbackPoll)
+	b.watchers.Wait()
+	if n := estimates.Load(); n != 1 {
+		t.Fatalf("%d full reads started, want only the refused one", n)
 	}
 	runs := sup.history.List(e.ID)
 	if len(runs) != 1 {

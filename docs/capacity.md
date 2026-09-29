@@ -164,13 +164,16 @@ In every case the dump alone stayed below `DATA_LENGTH + INDEX_LENGTH`. `DATA_LE
 
 **Rule of thumb.** Free space at the staging folder ≥ the size of the dumped tables (data + indexes), and about 1.8× that when the Parquet goes to the same disk and the data is mostly binary or random.
 
-**What DBTrail checks.** Before mydumper starts, a full read of a MySQL or MariaDB server sums `DATA_LENGTH + INDEX_LENGTH` of the tables it is about to dump and compares that with the free space at the staging folder:
+**What DBTrail checks.** Before mydumper starts, a full read of a MySQL or MariaDB server sums `DATA_LENGTH + INDEX_LENGTH` of the tables it is about to dump and compares that with the free space at the staging folder. That sum is an upper bound for the dump itself: secondary indexes are not dumped, and rows that were deleted still count. So the check refuses only when a dump clearly cannot fit, and otherwise warns:
 
-- Less free than the estimate: the read is **refused** before anything is dumped, and the message names the folder, the need and what is free.
-- Less than 1.8× the estimate, with the Parquet on the same disk (always the case for an S3-only destination, whose Parquet is staged in the same folder): the read runs, and the snapshot's status and run history say the disk is low.
+- Less free than **half** the estimate: the read is **refused** before anything is dumped. No measured dump came to less than half of it (the smallest, apart from a table with most of its rows deleted, was 0.6×).
+- Between half and the full estimate: the read runs, with a loud warning that the dump may not fit.
+- Below 1.8× the estimate, with the Parquet on the same disk (always the case for an S3-only destination, whose Parquet is staged in the same folder): the read runs, with a warning that the dump plus its Parquet may not fit.
 - The sizes cannot be read, or the free space cannot be measured: the read runs, and says the check did not run. A guess never refuses a backup.
 
-When the local snapshot folder is on another disk, the staging folder only has to hold the dump, and a small snapshot folder is a warning, never a refusal. "Another disk" means another filesystem: btrfs subvolumes, ZFS datasets and thin LVM volumes look separate but draw from one pool, so on those the 1.8× margin is yours to keep. When DBTrail cannot tell whether the two folders share a disk, it asks for the larger margin and measures both. The size of a PostgreSQL full read is not checked: it writes Parquet directly, with no dump in between. Neither is a dump you run yourself with `bintrail dump`.
+Every refusal and warning names the folder, the estimate, what is free, and how to move the folder. They show in the snapshot's status, its run history, its detail, the schedule card, and the message after a read you started yourself.
+
+When the local snapshot folder is on another disk, the staging folder only has to hold the dump, and a small snapshot folder is a warning, never a refusal. "Another disk" means another filesystem: btrfs subvolumes, ZFS datasets and thin LVM volumes look separate but draw from one pool, so on those the 1.8× margin is yours to keep. When DBTrail cannot tell whether the two folders share a disk, it asks for the larger margin and measures both. Full reads of several servers that run at the same time share one staging folder, and each check sees the whole free space, not what is left after the others: size the folder for the reads you let overlap. The size of a PostgreSQL full read is not checked: it writes Parquet directly, with no dump in between. Neither is a dump you run yourself with `bintrail dump`.
 
 **Where the staging folder is, and how to move it.** By default it is `bintrail-baseline-staging` under the system temp folder (`$TMPDIR`, usually `/tmp`), which on many hosts is a small or memory-backed filesystem. Point it at a disk with room with `BINTRAIL_CONSOLE_BASELINE_STAGING=/path`, or with the **.sql build folder** row in the web interface's backup settings (the same folder), then restart DBTrail. It is read once at startup.
 

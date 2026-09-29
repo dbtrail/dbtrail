@@ -87,12 +87,23 @@ func TestIntegrationEstimateDumpSize(t *testing.T) {
 	if err != nil || all.tables < 1 || all.bytes < est.bytes {
 		t.Fatalf("all schemas: %+v, %v", all, err)
 	}
-	var sys int
-	if err := db.QueryRow("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA IN ('mysql','sys','performance_schema')").Scan(&sys); err != nil {
+	// The table counts, read the way the estimate reads them: every base
+	// table on the server, and the system schemas alone. The estimate must
+	// be the first minus the second, so a filter that let the system schemas
+	// in (or dropped user ones) shows up as a different count.
+	var everything, sys int
+	if err := db.QueryRow("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_TYPE = 'BASE TABLE'").Scan(&everything); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA IN ('mysql','sys','performance_schema','information_schema')").Scan(&sys); err != nil {
 		t.Fatal(err)
 	}
 	if sys == 0 {
 		t.Fatal("the server has no system tables, so this case proves nothing")
+	}
+	if all.tables != everything-sys {
+		t.Fatalf("all schemas counted %d tables; the server has %d, %d of them in system schemas, so want %d",
+			all.tables, everything, sys, everything-sys)
 	}
 
 	// A source that refuses gives an error, which the verdict turns into
