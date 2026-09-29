@@ -345,7 +345,7 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 					t.Errorf("card %q / %q contains %q", got.Detail, got.Remediation, w)
 				}
 			}
-			if strings.ContainsRune(got.Detail+got.Remediation, '—') {
+			if strings.ContainsRune(got.Detail+got.Remediation, '\u2014') {
 				t.Errorf("em dash in operator text: %s", got.Detail)
 			}
 			t.Logf("%s: %s", got.Status, got.Detail)
