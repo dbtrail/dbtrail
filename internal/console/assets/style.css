@@ -2242,6 +2242,7 @@ section.bk-restore { margin-top: 18px; }
 }
 .stg-dest.muted { color: var(--ink-3); }
 .stg-age { color: var(--ink-3); font-size: var(--fs-xs); white-space: nowrap; }
+.stg-foot { padding: 0 14px 12px; margin: 6px 0 0; }
 .stg-hint { margin-bottom: 0; }
 .stg-cardfoot { margin-top: 12px; }
 
