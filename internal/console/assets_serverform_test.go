@@ -253,7 +253,7 @@ func TestServerFormSectionsCannotOutgrowTheDialog(t *testing.T) {
 }
 
 // TestIcebergStageCardsSitOnADifferentGround (#1573): the .ice-stage cards
-// were --surface-2 on a --surface-2 panel, a measured 1.000 contrast the
+// were --raised on a --raised panel, a measured 1.000 contrast the
 // stylesheet's own comment admitted.
 func TestIcebergStageCardsSitOnADifferentGround(t *testing.T) {
 	css := readAsset(t, "style.css")
@@ -262,17 +262,17 @@ func TestIcebergStageCardsSitOnADifferentGround(t *testing.T) {
 		t.Fatal("no .ice-stage rule")
 	}
 	rule := css[i : strings.Index(css[i:], "}")+i]
-	if strings.Contains(rule, "var(--surface-2)") {
-		t.Errorf("the .ice-stage card is still --surface-2 on the panel's --surface-2 ground: %s", rule)
+	if strings.Contains(rule, "var(--raised)") {
+		t.Errorf("the .ice-stage card is still --raised on the panel's --raised ground: %s", rule)
 	}
 	// The ground the card sits on is --panel-bg, which the studio direction
-	// (the one index.html hardcodes) sets to --surface-2. If that ground ever
+	// (the one index.html hardcodes) sets to --raised. If that ground ever
 	// moves to --surface, the card's --surface fill collides again.
 	if !strings.Contains(rule, "var(--surface)") {
 		t.Errorf("the .ice-stage card does not use the --surface fill: %s", rule)
 	}
-	if !strings.Contains(css, "--panel-bg: var(--surface-2);") {
-		t.Error("no direction sets --panel-bg to --surface-2 any more; re-check the .ice-stage card against its ground")
+	if !strings.Contains(css, "--panel-bg: var(--raised);") {
+		t.Error("no direction sets --panel-bg to --raised any more; re-check the .ice-stage card against its ground")
 	}
 }
 

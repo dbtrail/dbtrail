@@ -1,18 +1,240 @@
 /* ============================================================
    dbtrail console — the dbtrail.com brand, tuned for a data tool
    Type:  Bricolage Grotesque (display) · Geist (UI) · IBM Plex Mono (data)
-   Palette: the site's cool purple-tinted neutrals + its product accents
-   (blue / mint / red), mapped by ROLE — site hue+chroma at the console's
-   lightness steps, so WCAG AA holds where the marketing values would not
-   (the site's muted ink is ~3.1:1 on white; a console cannot ship that).
-   Brand accents (the site's tropical sunset — pink/peach/violet/sun) live
-   on chrome and config surfaces — the sidebar's tropical-morning ground, page titles,
-   the tinted fact cards, the sign-in gate, empty states, the busy
-   indicator, text selection (see the tropical pass at EOF). Never on data:
-   row-carrying surfaces and the INSERT/UPDATE/DELETE code stay exactly as
-   they are.
-   Three directions via [data-dir="paper" | "studio" | "trail"].
+
+   ONE token block (#1950). Every colour, radius and elevation in this file
+   is a var() into the two blocks below; the only literals live here. The
+   light set is the console's measured palette (the site's hue + chroma at
+   console lightness, verified against WCAG floors); the dark set is defined
+   but nothing sets data-theme yet, so it renders nowhere.
+
+   The DATA colours (INSERT/UPDATE/DELETE, the diff) are sacred: reserved for
+   those meanings, never worn as decoration, never repainted by a brand rule.
+   Brand accents (the site's sunset: pink/peach/violet/sun) live on chrome and
+   config surfaces only and never on a surface that carries a row.
+   Three directions via [data-dir="paper" | "studio" | "trail"] (studio ships).
    ============================================================ */
+
+:root {
+  /* ---- neutrals: cool purple-tinted surfaces (site line hue) ---- */
+  --bg:        oklch(0.985 0.006 340);  /* the canvas (blush; .main paints the haze over it) */
+  --surface:   #ffffff;                 /* cards, panels, fields */
+  --raised:    oklch(0.985 0.004 320);  /* hover grounds, tile fills, the filter bar */
+  --inset:     oklch(0.972 0.006 320);  /* code insets, pills, tracks, lanes */
+  --well:      #F1ECF5;                 /* the deepest neutral fill: an "off" tile */
+  --line:      oklch(0.918 0.012 320);
+  --line-soft: oklch(0.948 0.008 320);
+  /* hairlines on a tinted card, where --line-soft drowns (1.01 on violet);
+     measured 1.34-1.36 on all four tints, above the 1.15 divider floor */
+  --line-on-tint: oklch(0.5 0.05 320 / 0.22);
+  /* ALWAYS white, in every theme: text on the brand gradient, the toggle knob */
+  --white:     #ffffff;
+
+  /* ---- ink ramp: site ink hue/chroma at console lightness steps.
+     Verified floors: >=4.5:1 for --ink-3 body text and >=3:1 for --ink-4
+     hints on every surface they appear on (assets_tint_contrast_test.go
+     and console-e2e measure the wiring). ---- */
+  --ink:   oklch(0.255 0.055 301);
+  --ink-2: oklch(0.46 0.072 303);
+  --ink-3: oklch(0.55 0.061 304);
+  --ink-4: oklch(0.648 0.048 304);
+  /* the same two steps, darkened for the tinted sidebar ground: its glow
+     corners eat the margin (measured there: 4.56:1 and 3.17:1) */
+  --ink-3-strong: oklch(0.50 0.065 304);
+  --ink-4-strong: oklch(0.585 0.055 304);
+
+  /* ---- the dark strip: ink-on-ink surfaces (the SQL block; the site's hero strip) ---- */
+  --strip:     #2D1B45;
+  --strip-2:   #1B1029;
+  --strip-ink: oklch(0.93 0.02 300);
+
+  /* ---- brand: the site's tropical sunset, at console lightness ----
+     Raw site values are for FILLS (arrows, the newest tile, icon accents).
+     Anything that is TEXT wears the darkened stops: the hero canvas stops
+     drop a uniform L -0.12 so a white panel on them stays >=3:1 (brightest
+     stop 3.26:1), and the headline gradient bottoms out at 3.53:1 on the
+     studio tile, so it may land on LARGE text only (never body). Read off
+     rendered pixels in Chromium; --brand-warm-a is outside sRGB, so a
+     converter guesses the mapping. */
+  --pink:     #FF4D8D;   /* site CTA pink, raw */
+  --pink-mid: #D9367A;   /* pink as an accent at icon/display size (4.41:1 on white) */
+  --orange:   #EB6834;   /* orange as an accent at icon size */
+  --sun:      oklch(0.879 0.163 91);   /* site sun; text selection, the active rail */
+  --sun-mid:  #B8860B;   /* gold at display size (3.25:1 on white: large text only) */
+  --brand-canvas-1: oklch(0.635 0.18 348);  /* site hero pink   #FF7AC3, darkened */
+  --brand-canvas-2: oklch(0.66 0.142 53);   /* site hero peach  #FF9D5C, darkened */
+  --brand-canvas-3: oklch(0.555 0.19 293);  /* site hero violet #9D7AFF, darkened */
+  --brand-warm-a:   oklch(0.63 0.218 3);    /* site CTA pink    #FF4D8D, darkened */
+  --brand-warm-b:   oklch(0.63 0.155 51);   /* site CTA orange  #FF8A3D, darkened */
+  --grad:         linear-gradient(135deg, var(--brand-warm-a) 0%, var(--brand-warm-b) 55%, var(--brand-canvas-3) 100%);
+  --brand-canvas: linear-gradient(160deg, var(--brand-canvas-1) 0%, var(--brand-canvas-2) 52%, var(--brand-canvas-3) 100%);
+  --brand-warm:   linear-gradient(135deg, var(--brand-warm-a), var(--brand-warm-b));
+  /* the pill behind 14px white text: the CTA sunset darkened to 5.9 / 5.3:1 */
+  --grad-deep:    linear-gradient(120deg, oklch(0.53 0.2 3) 0%, oklch(0.54 0.14 51) 100%);
+  /* the tropical chrome (sidebar morning, canvas haze). Alphas are the
+     ceiling that keeps --ink-3 >=4.5:1 where the layers overlap; the haze
+     peak band only ever holds the page head's ink/ink-2 text. */
+  --side-ground: linear-gradient(198deg, oklch(0.972 0.012 340) 0%, oklch(0.942 0.022 300) 100%);
+  --side-line:   oklch(0.9 0.02 320);
+  --side-label:  oklch(0.46 0.095 88);  /* deep gold: 5.1:1 in the violet glow corner, where --sun-deep grades 4.49 */
+  --glow-pink:   oklch(0.8 0.1 348 / 0.22);
+  --glow-violet: oklch(0.72 0.12 293 / 0.18);
+  --haze-sun:    oklch(0.88 0.09 88 / 0.30);
+  --haze-violet: oklch(0.75 0.1 293 / 0.14);
+  /* empty-state washes: brand at low ALPHA over whatever ground is under
+     them (never a baked light value), so a dark ground re-points --surface
+     and these hold. Ceiling: --ink-3 stays >=4.5:1 where both overlap (4.59). */
+  --brand-wash-sun:  color-mix(in srgb, var(--sun) 12%, transparent);
+  --brand-wash-pink: color-mix(in srgb, var(--brand-canvas-1) 3%, transparent);
+  /* the Overview loading bars, warmed toward the hero pink (#1385). Mixed
+     over --line so they track the ramp. Floor: the solid stop must stay
+     distinguishable from its panel or a loading Overview reads as an empty
+     one; measured peak 1.60 on the studio tile, 1.43 on the violet panel,
+     the console-e2e assertion holds >=1.3 (plain --line sat at 1.23). The
+     erosive direction is LIGHTENING --line; darkening gains margin. */
+  --skel-warm: color-mix(in srgb, var(--brand-canvas-1) 26%, var(--line));
+  /* the Events list's loading bars (#1397): neutral on purpose (a flat pulse,
+     not a shimmer). Was --inset at 1.09:1, fainter than the 1.17 hairline
+     between the rows it stood in for; this mix measures 1.64 (pulse trough
+     1.24). Erosive direction: raising the --line share (80% is 1.52). */
+  --skel-neutral: color-mix(in srgb, var(--line) 70%, var(--ink-4));
+
+  /* ---- tints: the home-surface language (#1421), with text partners
+     DARKENED to hold the 4.5:1 floor the site's own deep values miss
+     (site --pink-deep 3.83, --orange-deep 3.77, sun text 3.84, bare violet
+     3.68). Hex on purpose: assets_tint_contrast_test.go reads these.
+     Decorative only: pink/orange never land on a surface with event data. ---- */
+  --violet-tint: #EFE9FF;  --violet-deep: #5A3BD6;  --violet-line: #DDD4F2;
+  /* sun sits ONE step from the warning ground (the site's butter measured
+     1.008 against --ochre-bg, the same colour): lightened to 1.03 */
+  --sun-tint:    #FFF9E4;  --sun-deep:    #7A5F00;  --sun-line:    #EADFC4;
+  --pink-tint:   #FFE9F5;  --pink-deep:   #B02762;
+  --orange-tint: #FFF1E2;  --orange-deep: #A04E10;
+  --mint-tint:   #DDF7EC;
+
+  /* ---- accent: product blue, the pressed / focused state ---- */
+  --accent:    oklch(0.54 0.17 260);
+  --accent-2:  oklch(0.48 0.17 260);
+  --accent-bg: oklch(0.962 0.018 258);
+  --accent-a:  var(--accent);
+  /* blue -> brand violet: the one gradient-only brand moment (rails, primary
+     button). L capped so white button text stays >=4.5:1 on either stop. */
+  --accent-b:  oklch(0.575 0.17 286);
+  --focus-ring: 0 0 0 3px var(--accent-bg);
+  /* warm accent and the warning register (L set by the AA floors: each
+     doubles as small text on its tint and on white) */
+  --orange-2:  oklch(0.545 0.146 50);
+  --orange-bg: oklch(0.965 0.03 55);
+  --ochre:     oklch(0.715 0.115 91);
+  --ochre-bg:  oklch(0.97 0.035 91);
+
+  /* ---- data colours: SACRED. INSERT=mint, UPDATE=blue, DELETE=red (+tints),
+     the mapping the site itself declares. Reserved for these meanings. ---- */
+  --insert:    oklch(0.515 0.135 165);
+  --insert-bg: oklch(0.965 0.035 168);
+  --update:    oklch(0.54 0.17 260);
+  --update-bg: oklch(0.962 0.018 258);
+  --delete:    oklch(0.555 0.19 23);
+  --delete-bg: oklch(0.966 0.025 22);
+  --diff-del:    oklch(0.555 0.17 23);
+  --diff-add:    oklch(0.52 0.12 165);
+  --diff-del-bg: oklch(0.96 0.04 23 / 0.6);
+  --diff-add-bg: oklch(0.955 0.045 165 / 0.6);
+  /* ---- status: ok / warn / error (state, not row data) ---- */
+  --ok:    #0E8A5E;
+  --warn:  var(--orange-2);
+  --error: var(--delete);
+
+  /* ---- elevation ---- */
+  --scrim:     oklch(0.3 0.03 305 / 0.33);
+  --shadow:    0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);  /* cards */
+  --shadow-lg: 0 30px 80px -24px oklch(0.3 0.03 305 / 0.45);                    /* overlays */
+  --shadow-sm: 0 1px 2px oklch(0.4 0.04 305 / 0.22);                             /* a filled button's lip */
+  --panel-shadow: 0 1px 2px oklch(0.6 0.03 305 / 0.04);                          /* legacy direction tunable */
+
+  /* ---- radii ---- */
+  --r-xs: 4px; --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-xl: 22px; --r-pill: 999px;
+  /* legacy direction tunables (re-pointed per data-dir; go with step 8) */
+  --radius: 12px; --radius-sm: 8px; --radius-lg: 20px;
+
+  /* ---- spacing: a 4px grid ---- */
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px; --s-6: 24px;
+  --s-8: 32px; --s-10: 40px; --s-12: 48px;
+
+  /* ---- type ---- */
+  --f-display: "Bricolage Grotesque", system-ui, sans-serif;  /* page titles */
+  --f-ui:      "Geist", system-ui, sans-serif;
+  --f-mono:    "IBM Plex Mono", ui-monospace, monospace;      /* data: timestamps, keys, SQL, paths */
+  /* the UI scale (Geist); mono uses --fs-xs / --fs-sm */
+  --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 28px;
+  --title-font: var(--f-display);
+  --title-weight: 600;
+  --title-tracking: -0.02em;
+
+  /* ---- direction tunables + motion ---- */
+  --panel-bg: var(--raised);
+  --panel-border: var(--line);
+  --rail: var(--line);
+  --shell-w: 248px;
+  --ease: cubic-bezier(.22, .61, .36, 1);
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+}
+
+/* The dark set (values from the approved makeover mockup). Defined only:
+   nothing sets data-theme until the dark-mode slice wires the toggle. */
+[data-theme="dark"] {
+  --bg: #120C1A; --surface: #1A1224; --raised: #221830; --inset: #2A1F3A; --well: #31253F;
+  --line: rgba(255,255,255,.08); --line-soft: rgba(255,255,255,.05); --line-on-tint: rgba(255,255,255,.14);
+  --ink: #F4ECFA; --ink-2: #C9B8DD; --ink-3: #9A87B3; --ink-4: #7D6B96;
+  --ink-3-strong: #A896C0; --ink-4-strong: #8B79A4;
+  --strip: #0D0716; --strip-2: #07030D; --strip-ink: #F4ECFA;
+  --pink-mid: #FF8CC6; --sun-mid: #FFD23D;
+  --side-ground: linear-gradient(198deg, #1A1224 0%, #150E1F 100%);
+  --side-line: rgba(255,255,255,.08); --side-label: #E0B83A;
+  --glow-pink: rgba(255,77,141,.10); --glow-violet: rgba(124,92,255,.10);
+  --haze-sun: rgba(255,210,61,.06); --haze-violet: rgba(124,92,255,.06);
+  --violet-tint: rgba(124,92,255,.14); --violet-deep: #B9A9FF; --violet-line: rgba(124,92,255,.35);
+  --sun-tint: rgba(255,210,61,.10);   --sun-deep: #FFD23D;    --sun-line: rgba(255,210,61,.30);
+  --pink-tint: rgba(255,77,141,.12);  --pink-deep: #FF8CC6;
+  --orange-tint: rgba(255,138,61,.12); --orange-deep: #FFA062;
+  --mint-tint: rgba(43,200,147,.12);
+  --accent: #6EA2FF; --accent-2: #8FB6FF; --accent-bg: rgba(110,162,255,.16);
+  --orange-2: #FFA062; --orange-bg: rgba(255,138,61,.12); --ochre: #E0B83A; --ochre-bg: rgba(255,210,61,.10);
+  --insert: #3DDBA3; --insert-bg: rgba(61,219,163,.12);
+  --update: #6EA2FF; --update-bg: rgba(110,162,255,.13);
+  --delete: #FF7A82; --delete-bg: rgba(255,122,130,.13);
+  --diff-del: #FF7A82; --diff-add: #3DDBA3; --diff-del-bg: rgba(255,122,130,.16); --diff-add-bg: rgba(61,219,163,.16);
+  --ok: #3DDBA3;
+  --scrim: rgba(0,0,0,.55);
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.35);
+  --shadow-lg: 0 30px 80px -24px rgba(0,0,0,.6);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
+  --panel-shadow: 0 1px 2px rgba(0,0,0,.3);
+}
+
+/* ---------- direction: paper (editorial calm) ---------- */
+[data-dir="paper"] {
+  --radius: 5px; --radius-sm: var(--r-xs);
+  --panel-bg: transparent;
+  --panel-border: transparent;
+  --panel-shadow: none;
+  --title-tracking: -0.025em;
+}
+/* ---------- direction: studio (warm workstation — default) ---------- */
+[data-dir="studio"] {
+  --radius: 12px; --radius-sm: 8px;
+  --panel-bg: var(--raised);
+  --panel-border: var(--line);
+}
+/* ---------- direction: trail (expressive) ---------- */
+[data-dir="trail"] {
+  --radius: 16px; --radius-sm: 11px;
+  --panel-bg: var(--surface);
+  --panel-border: var(--line);
+  --panel-shadow: var(--shadow);
+  --title-weight: 700;
+  --title-tracking: -0.03em;
+}
 
 /* Vendored brand typefaces — latin-subset woff2 embedded in the binary
    (assets/fonts/, provenance + license in VENDOR.md). The console makes
@@ -60,282 +282,6 @@
   unicode-range: U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+2013-2014, U+2018-2019, U+201C-201D, U+2022, U+2026, U+2039-203A, U+2212, U+2713;
 }
 
-:root {
-  /* cool purple-tinted surfaces (site line hue). The canvas is the
-     tropical pass's warm blush (EOF section); panels stay white-led so
-     they lift off it. */
-  --bg:        oklch(0.985 0.006 340);
-  --surface:   #ffffff;
-  --surface-2: oklch(0.985 0.004 320);
-  --surface-3: oklch(0.972 0.006 320);
-  --line:      oklch(0.918 0.012 320);
-  --line-soft: oklch(0.948 0.008 320);
-
-  /* ink ramp — site ink hue/chroma at console lightness steps.
-     ink-3/ink-4 sit slightly below their old L: the old steps (0.605/0.72)
-     never met the floors this ramp is verified against (>=4.5:1 muted text,
-     >=3:1 hints on every surface they appear on). */
-  --ink:   oklch(0.255 0.055 301);
-  --ink-2: oklch(0.46 0.072 303);
-  --ink-3: oklch(0.55 0.061 304);
-  --ink-4: oklch(0.648 0.048 304);
-
-  /* accents — site product-accent hues; L set by the AA floors
-     (each accent doubles as small text on its tint and on white) */
-  --blue:    oklch(0.54 0.17 260);
-  --blue-2:  oklch(0.48 0.17 260);
-  --blue-bg: oklch(0.962 0.018 258);
-  --orange:  oklch(0.70 0.16 50);
-  --orange-2:oklch(0.545 0.146 50);
-  --orange-bg: oklch(0.965 0.03 55);
-  --ochre:   oklch(0.715 0.115 91);
-  --ochre-bg: oklch(0.97 0.035 91);
-
-  /* semantic (badges + diff) — sacred; the mapping the site itself declares:
-     INSERT=mint, UPDATE=blue, DELETE=red (+tints). Reserved for these
-     meanings only — brand pink/violet/sun never encode data. */
-  --insert:  oklch(0.515 0.135 165);
-  --insert-bg: oklch(0.965 0.035 168);
-  --update:  oklch(0.54 0.17 260);
-  --update-bg: oklch(0.962 0.018 258);
-  --delete:  oklch(0.555 0.19 23);
-  --delete-bg: oklch(0.966 0.025 22);
-
-  --diff-del: oklch(0.555 0.17 23);
-  --diff-add: oklch(0.52 0.12 165);
-  --diff-del-bg: oklch(0.96 0.04 23 / 0.6);
-  --diff-add-bg: oklch(0.955 0.045 165 / 0.6);
-
-  /* brand moments only (never data): sun paints text selection like the
-     site; violet lives inside the accent gradient via --accent-b. */
-  --sun: oklch(0.879 0.163 91);
-  --scrim: oklch(0.3 0.03 305 / 0.33);
-
-  /* ---- the site's tropical sunset, at console lightness ----
-     dbtrail.com's hero canvas and headline/CTA stops, translated to oklch and
-     mapped the same way #1359 mapped the ink ramp: the site's HUE + CHROMA are
-     kept exactly, the LIGHTNESS is lowered, because the marketing values do not
-     survive a console's contrast floors. The binding pair is the white panel
-     that floats ON the canvas: at site lightness the peach stop leaves it at
-     2.05:1, below the 3:1 a UI surface needs to be identifiable, so all three
-     hero stops drop a uniform ΔL ≈ -0.12 (relationships preserved, ordering
-     preserved) which puts the BRIGHTEST stop at 3.26:1 and the others above it.
-     Every canvas layer is built from these three stops, so the canvas can never
-     be brighter than --brand-canvas-2 anywhere.
-     Worn across the chrome since the tropical pass (EOF): the sidebar
-     ground, the active pill, page titles, the tinted fact cards. They
-     never encode data: the semantic INSERT/UPDATE/DELETE tokens above and
-     the diff colors are untouched, and pink never lands on a surface that
-     carries a row. */
-  --brand-canvas-1: oklch(0.635 0.18 348);  /* site hero pink   #FF7AC3 */
-  --brand-canvas-2: oklch(0.66 0.142 53);   /* site hero peach  #FF9D5C */
-  --brand-canvas-3: oklch(0.555 0.19 293);  /* site hero violet #9D7AFF */
-  --brand-warm-a:   oklch(0.63 0.218 3);    /* site CTA pink    #FF4D8D */
-  --brand-warm-b:   oklch(0.63 0.155 51);   /* site CTA orange  #FF8A3D */
-  --brand-canvas: linear-gradient(160deg, var(--brand-canvas-1) 0%, var(--brand-canvas-2) 52%, var(--brand-canvas-3) 100%);
-  --brand-headline: linear-gradient(135deg, var(--brand-warm-a) 0%, var(--brand-warm-b) 55%, var(--brand-canvas-3) 100%);
-  --brand-warm: linear-gradient(135deg, var(--brand-warm-a), var(--brand-warm-b));
-  /* The empty-state washes are the brand colors at low ALPHA over whatever
-     surface is under them, never a baked-in light value — the composite
-     follows the ground, so the pairs below hold by construction and a future
-     dark ground would re-point --surface, not these rules. Alphas are the
-     ceiling that keeps --ink-3 body text >=4.5:1 where BOTH washes overlap
-     (4.59:1; --ink-3 on bare --surface is only 4.96:1, so a wash has little
-     room and these are deliberately faint).
-     Derived with color-mix rather than re-typed as an oklch literal: a literal
-     would silently stop being "--sun at 12%" the day --sun moves. */
-  --brand-wash-sun:  color-mix(in srgb, var(--sun) 12%, transparent);
-  --brand-wash-pink: color-mix(in srgb, var(--brand-canvas-1) 3%, transparent);
-  /* The OVERVIEW loading bars, warmed toward the hero pink (#1385). Not every
-     skeleton: the Events list's .ev-skel-bar is a flat fill with a pulse
-     rather than a shimmer, and it stays NEUTRAL — see --skel-neutral below
-     for why the warmth stops here.
-
-     A much stronger mix than the two washes above because the TOKEN is opaque
-     — it mixes toward --line, where those mix toward transparent — so the
-     alpha ceiling that protects text read through them protects nothing here.
-     (The rendered bar is not opaque: the DECLARATION's mid-stop is
-     `transparent`, which is what produces the sweep.)
-
-     The bound that does apply is the opposite one: the solid stop has to stay
-     distinguishable from the panel, or a loading Overview reads as an empty
-     one. Read off rendered pixels, per direction:
-
-       ground                                 warmed   was (--line)
-       --surface-2, the studio tile             1.60         1.23
-       paper and trail (both resolve white)     1.68         1.28
-
-     Studio was the worst case when the stat tiles still consumed
-     --panel-bg; since #1421 they are white bento tiles and the worst
-     ground for these bars is the VIOLET PANEL (peak 1.43 there, still
-     above the 1.3 floor the browser assertion holds — it now photographs
-     that ground too). More separated than before, not less — the
-     direction was not the expected one, and is why it was measured
-     rather than converted.
-
-     Those figures are the stop's PEAK against its ground. The mid-stop is
-     transparent and the shimmer sweeps it, so every point on the bar passes
-     through roughly 1.0:1 once per cycle. That is the placeholder's whole
-     visual idiom, not a defect, but it is why the number belongs to the stop
-     and not to "the bar".
-
-     color-mix over --line rather than a new colour, so the bar still tracks
-     the ink ramp. It tracks BOTH inputs, and tracking does not preserve the
-     ratio above. The erosive direction is LIGHTENING --line toward the panel
-     it sits on: --line is L 0.918 against --surface-2's 0.985, so moving it up
-     that gap pulls the studio figure from 1.60 to about 1.37 at the far end.
-     Darkening is the safe direction and gains margin (L 0.85 measures 1.92). The browser assertion is what holds the floor;
-     the numbers here are a record of one moment.
-
-     On the data rule: these bars do appear inside .ov-evlist and .ov-tables,
-     which will carry rows. They never coexist with one — a placeholder is
-     replaced by the rows it stood in for — and a skeleton encodes nothing, so
-     no brand colour is carrying data here. */
-  --skel-warm: color-mix(in srgb, var(--brand-canvas-1) 26%, var(--line));
-  /* The EVENTS list's loading bars (#1397). The ground is the page canvas
-     (blush --bg since the tropical pass; these figures were measured on
-     white, and the blush moves them ~1-2% — the e2e probe reads the real
-     painted ancestor either way): .events declares no background and every
-     element between the bar and <body> is transparent, in all three
-     directions (they re-point --panel-bg, which this list never consumes).
-     Against it, read off rendered pixels:
-
-       .ev-skel-bar, was --surface-3      1.09   (pulse trough 1.04)
-       the --line-soft divider beside it  1.17
-       this token                         1.64   (pulse trough 1.24)
-
-     The bar was fainter than the hairline separating the rows it stands in
-     for, so a loading list rendered as an empty list with dividers — the
-     "blank list" the .ev-skel-row comment says must never be the busy state,
-     on the page an operator opens mid-incident. The pulse made that worse
-     rather than better, and it is gated behind prefers-reduced-motion, so
-     with motion reduced there was nothing moving to suggest the bar was
-     there at all. The dip goes lower still (1.04), but the static case is the
-     one with nothing compensating for it, and it is the one the console-e2e
-     floor measures.
-
-     The pulse itself is left as it was: its dimmest point now clears the old
-     RESTING value, so the animation no longer carries the bar's visibility.
-     A separate assertion holds that, because deepening a pulse is an
-     ordinary polish edit and 0.45 -> 0.12 lands below where this started.
-
-     For scale, .skel-line — the Overview bar — peaks at 1.68 on this same
-     white ground, and 1.60 on the studio tile it usually sits on. Peaks
-     only: it is a gradient sweeping a TRANSPARENT mid-stop, so unlike this
-     bar it passes through roughly 1.0:1 once per cycle. An earlier draft of
-     this table gave it a "trough 1.25", which was this bar's opacity pulse
-     arithmetic applied to an element that has no opacity pulse.
-
-     color-mix across the two ends of the ramp the bar lives between, not a
-     new literal, so it tracks a retune of either. The erosive direction is
-     raising the --line share, which walks it back toward the page: 80% is
-     1.52 and 90% is 1.39. Lightening either input erodes it more gently
-     (--line at L 0.95 is 1.53, --ink-4 at L 0.72 is 1.54). The console-e2e
-     assertions hold the floor; these numbers are one moment's record.
-
-     NEUTRAL is the status quo, not a ratified rule, and nothing enforces it
-     — any hue clearing the floor would pass. #1385's close gives two reasons
-     for stopping the warmth here: that this is a flat pulse rather than a
-     shimmer and out of scope for an issue that named the shimmer, and a
-     strict reading of the rule as written above: "pink never lands on a
-     surface that carries a row". That comment argues the other way about
-     its OWN bars, which also sit in row-carrying panels — a placeholder
-     never coexists with a row, and encodes nothing. #1397 was filed as a
-     visibility fix and says so outright ("worth fixing whatever colour it
-     ends up"). So: a decline was recorded, no rule was ratified, and nothing
-     in the code holds either — which is why this is a comment. */
-  --skel-neutral: color-mix(in srgb, var(--line) 70%, var(--ink-4));
-
-  /* fonts */
-  --f-display: "Bricolage Grotesque", system-ui, sans-serif;
-  --f-ui: "Geist", system-ui, sans-serif;
-  --f-mono: "IBM Plex Mono", ui-monospace, monospace;
-
-  /* tunables (direction + tweaks drive these) */
-  --radius: 12px;
-  --radius-sm: 8px;
-  --panel-bg: var(--surface-2);
-  --panel-border: var(--line);
-  --panel-shadow: 0 1px 2px oklch(0.6 0.03 305 / 0.04);
-  --accent: var(--blue);
-  --accent-2: var(--blue-2);
-  --accent-bg: var(--blue-bg);
-  --accent-a: var(--blue);
-  /* blue -> brand violet: the one gradient-only brand moment (rails, primary
-     button). L capped so white button text stays >=4.5:1 on either stop. */
-  --accent-b: oklch(0.575 0.17 286);
-  --title-font: var(--f-display);
-  --title-weight: 600;
-  --title-tracking: -0.02em;
-  --rail: var(--line);
-
-  /* home-surface language (#1421): the site's tint palette, with text
-     partners DARKENED to hold the AA floors the site's own deep values miss.
-     Measured before choosing (WCAG ratio on the tint): site --pink-deep
-     #D9367A lands 3.83:1, --orange-deep #C2611B 3.77:1, the sun tag text
-     #9A7800 3.84:1 (on the site's butter #FFF6D8; 3.94 on this file's
-     lightened --sun-tint), bare --violet 3.68:1 (the site's own --violet, measured
-     on the landing stylesheet at dbtrail.com — not a token in this file) —
-     every one below the 4.5:1 floor
-     this file's ink ramp is verified against. The -deep values below all
-     clear 5.2:1 on their tint and on white. Decorative use only: the
-     semantic INSERT/UPDATE/DELETE mapping above stays reserved, and pink/
-     orange stay away from surfaces that carry event data (a pink panel
-     behind DELETE badges would dissolve the one color code operators rely
-     on). */
-  --violet-tint: #EFE9FF;
-  --violet-deep: #5A3BD6;
-  /* sun sits ONE STEP from the console's warning ground: the site's butter
-     (#FFF6D8) measures 1.008 against --ochre-bg — the same color, so a data
-     panel wore the warn register. Lightened to keep the identity while
-     separating the registers (1.03 vs --ochre-bg, floor-tested); warn
-     surfaces still must never nest inside a sun card. */
-  --sun-tint:    #FFF9E4;
-  --sun-deep:    #7A5F00;
-  --pink-tint:   #FFE9F5;
-  --pink-deep:   #B02762;
-  --orange-tint: #FFF1E2;
-  --orange-deep: #A04E10;
-  /* row hairlines drown on a tint (--line-soft on violet: 1.01 — invisible;
-     the Events-skeleton comment above documents the same failure mode for
-     bars). Each tint carries its own divider, floor-tested at >=1.15. */
-  --violet-line: #DDD4F2;
-  --sun-line:    #EADFC4;
-  /* the bento card radius — a step above --radius, never replacing it.
-     Deliberately NOT re-pointed per direction: under paper (--radius: 5px)
-     the bento cards keep 20px — mixed registers, accepted while paper stays
-     dev-only (index.html hardcodes studio). */
-  --radius-lg: 20px;
-
-  --shell-w: 248px;
-  --ease: cubic-bezier(.22, .61, .36, 1);
-  --ease-out: cubic-bezier(.16, 1, .3, 1);
-}
-
-/* ---------- direction: paper (editorial calm) ---------- */
-[data-dir="paper"] {
-  --radius: 5px; --radius-sm: 4px;
-  --panel-bg: transparent;
-  --panel-border: transparent;
-  --panel-shadow: none;
-  --title-tracking: -0.025em;
-}
-/* ---------- direction: studio (warm workstation — default) ---------- */
-[data-dir="studio"] {
-  --radius: 12px; --radius-sm: 8px;
-  --panel-bg: var(--surface-2);
-  --panel-border: var(--line);
-}
-/* ---------- direction: trail (expressive) ---------- */
-[data-dir="trail"] {
-  --radius: 16px; --radius-sm: 11px;
-  --panel-bg: var(--surface);
-  --panel-border: var(--line);
-  --panel-shadow: 0 6px 24px -14px oklch(0.5 0.04 305 / 0.28);
-  --title-weight: 700;
-  --title-tracking: -0.03em;
-}
-
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 svg { width: 16px; height: 16px; display: block; flex: none; }
@@ -345,7 +291,7 @@ svg { width: 16px; height: 16px; display: block; flex: none; }
 body {
   margin: 0;
   font-family: var(--f-ui);
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.5;
   color: var(--ink);
   background: var(--bg);
@@ -395,17 +341,16 @@ button { font-family: inherit; }
 .brand { display: flex; align-items: center; gap: 11px; }
 .brand-mark {
   width: 30px; height: 30px; flex: none;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   display: grid; place-items: center;
-  color: #fff;
-  background: linear-gradient(150deg, var(--ink) 0%, oklch(0.32 0.055 301) 100%);
-  box-shadow: 0 1px 0 oklch(1 0 0 / 0.4) inset, 0 2px 6px oklch(0.3 0.03 305 / 0.18);
+  color: var(--white);
+  background: var(--strip);
 }
 [data-dir="trail"] .brand-mark,
 [data-accent="warm"] .brand-mark {
   background: linear-gradient(150deg, var(--accent-a) 0%, var(--accent-b) 130%);
 }
-.brand-mark img { width: 30px; height: 30px; border-radius: 8px; display: block; }
+.brand-mark img { width: 30px; height: 30px; border-radius: var(--r-sm); display: block; }
 .brand-name {
   font-family: var(--f-display);
   font-weight: 700;
@@ -431,7 +376,7 @@ button { font-family: inherit; }
   background: var(--insert-bg);
   border: 1px solid color-mix(in srgb, var(--insert) 25%, transparent);
   padding: 3px 7px 2px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   white-space: nowrap;
 }
 
@@ -461,7 +406,7 @@ button { font-family: inherit; }
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--insert) 16%, transparent);
 }
 .srv-select:hover { border-color: var(--ink-4); }
-.srv-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.srv-select:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
 
 .srv-manage {
   display: flex; align-items: center; gap: 8px;
@@ -471,7 +416,7 @@ button { font-family: inherit; }
   padding: 8px 12px; cursor: pointer; width: 100%;
   transition: background .15s, border-color .15s, color .15s;
 }
-.srv-manage:hover { background: var(--surface-2); color: var(--ink); border-color: var(--ink-4); }
+.srv-manage:hover { background: var(--raised); color: var(--ink); border-color: var(--ink-4); }
 .srv-manage svg { color: var(--ink-3); }
 
 /* nav */
@@ -492,7 +437,7 @@ button { font-family: inherit; }
 }
 .nav::-webkit-scrollbar { width: 11px; }
 .nav::-webkit-scrollbar-thumb {
-  background: var(--line); border-radius: 6px;
+  background: var(--line); border-radius: var(--r-sm);
   border: 3px solid var(--surface); background-clip: content-box;
 }
 .nav::-webkit-scrollbar-thumb:hover { background: var(--ink-4); border: 3px solid var(--surface); background-clip: content-box; }
@@ -517,7 +462,7 @@ button { font-family: inherit; }
   width: 17px; height: 17px; flex: none; color: var(--ink-4);
   transition: color .18s, transform .25s var(--ease-out);
 }
-.nav-item:hover { background: var(--surface-2); color: var(--ink); }
+.nav-item:hover { background: var(--raised); color: var(--ink); }
 .nav-item:hover .ni-icon { color: var(--ink-2); }
 .nav-item.active { color: var(--ink); font-weight: 600; background: var(--accent-bg); }
 .nav-item.active .ni-icon { color: var(--accent); }
@@ -582,7 +527,7 @@ button { font-family: inherit; }
    ============================================================ */
 .main { overflow-y: auto; overflow-x: hidden; position: relative; }
 .main::-webkit-scrollbar { width: 11px; }
-.main::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; border: 3px solid var(--bg); background-clip: content-box; }
+.main::-webkit-scrollbar-thumb { background: var(--line); border-radius: var(--r-sm); border: 3px solid var(--bg); background-clip: content-box; }
 .main::-webkit-scrollbar-thumb:hover { background: var(--ink-4); border: 3px solid var(--bg); background-clip: content-box; }
 
 .view { max-width: 1180px; margin: 0 auto; padding: 40px 48px 96px; }
@@ -607,7 +552,7 @@ button { font-family: inherit; }
   display: inline-flex; align-items: center; gap: 5px; flex: none;
   font-family: var(--f-ui); font-size: 12px; font-weight: 500; line-height: 1;
   color: var(--ink-3); text-decoration: none;
-  border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px 5px 11px;
+  border: 1px solid var(--line); border-radius: var(--r-pill); padding: 5px 9px 5px 11px;
   transition: color .15s, border-color .15s, background .15s;
 }
 .page-docs svg { width: 12px; height: 12px; color: var(--ink-4); }
@@ -678,7 +623,7 @@ button { font-family: inherit; }
 .input:hover, .select:hover { border-color: var(--ink-4); }
 .input:focus, .select:focus {
   outline: none; border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-bg);
+  box-shadow: var(--focus-ring);
 }
 [data-dir="paper"] .input, [data-dir="paper"] .select {
   border: none; border-bottom: 1.5px solid var(--line);
@@ -706,7 +651,7 @@ button { font-family: inherit; }
   margin-bottom: 14px; box-shadow: var(--panel-shadow);
   transition: border-color .15s, box-shadow .15s;
 }
-.ev-searchwrap:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.ev-searchwrap:focus-within { border-color: var(--accent); box-shadow: var(--focus-ring); }
 .ev-search-ic { display: grid; place-items: center; flex: none; }
 .ev-search-ic svg { width: 17px; height: 17px; color: var(--ink-4); }
 .ev-search {
@@ -720,12 +665,12 @@ button { font-family: inherit; }
   display: grid; place-items: center;
 }
 .ev-search-x svg { width: 14px; height: 14px; }
-.ev-search-x:hover { background: var(--surface-2); color: var(--ink); }
+.ev-search-x:hover { background: var(--raised); color: var(--ink); }
 .ev-advbtn {
   display: inline-flex; align-items: center; gap: 7px; flex: none;
   height: 34px; padding: 0 13px; cursor: pointer;
   font-family: var(--f-ui); font-size: 13px; font-weight: 600; color: var(--ink-2);
-  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-sm);
   transition: background .15s, color .15s, border-color .15s;
 }
 .ev-advbtn svg { width: 15px; height: 15px; }
@@ -736,7 +681,7 @@ button { font-family: inherit; }
 .ev-advanced {
   display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: flex-end;
   border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 18px 20px; margin-bottom: 16px; background: var(--surface-2);
+  padding: 18px 20px; margin-bottom: 16px; background: var(--raised);
 }
 [data-dir="paper"] .ev-advanced { background: transparent; }
 .ev-advanced[hidden] { display: none; }
@@ -757,27 +702,27 @@ button { font-family: inherit; }
   cursor: pointer; white-space: nowrap;
   transition: transform .12s var(--ease), box-shadow .15s, background .15s, border-color .15s, color .15s;
 }
-.btn:hover { border-color: var(--ink-4); background: var(--surface-2); }
+.btn:hover { border-color: var(--ink-4); background: var(--raised); }
 .btn:active { transform: translateY(1px); }
 .btn svg { width: 15px; height: 15px; }
 
 .btn-primary {
-  color: #fff; background: linear-gradient(135deg, var(--accent-a), var(--accent-b)); border-color: transparent;
-  box-shadow: 0 1px 2px oklch(0.4 0.04 305 / 0.22), 0 1px 0 oklch(1 0 0 / 0.2) inset;
+  color: var(--white); background: linear-gradient(135deg, var(--accent-a), var(--accent-b)); border-color: transparent;
+  box-shadow: var(--shadow-sm), 0 1px 0 color-mix(in srgb, var(--white) 20%, transparent) inset;
 }
 /* Re-assert the gradient: .btn:hover (same specificity, earlier in source)
-   sets background:var(--surface-2), which would otherwise win and leave the
+   sets background:var(--raised), which would otherwise win and leave the
    primary button's white text on a light-gray fill — invisible on hover. */
 .btn-primary:hover { filter: brightness(1.05) saturate(1.04); border-color: transparent;
   background: linear-gradient(135deg, var(--accent-a), var(--accent-b));
-  box-shadow: 0 5px 16px -5px oklch(0.5 0.08 305 / 0.45), 0 1px 0 oklch(1 0 0 / 0.2) inset; }
+  box-shadow: var(--shadow), 0 1px 0 color-mix(in srgb, var(--white) 20%, transparent) inset; }
 
-.btn-accent { color: #fff; background: var(--orange-2); border-color: transparent; }
-.btn-accent:hover { background: oklch(0.51 0.146 50); border-color: transparent; }
+.btn-accent { color: var(--white); background: var(--orange-2); border-color: transparent; }
+.btn-accent:hover { background: color-mix(in srgb, var(--orange-2) 90%, var(--ink)); border-color: transparent; }
 
 .btn-sm { height: 32px; padding: 0 12px; font-size: 12.5px; }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
-.btn-ghost:hover { background: var(--surface-2); color: var(--ink); border-color: transparent; }
+.btn-ghost:hover { background: var(--raised); color: var(--ink); border-color: transparent; }
 .btn[disabled] { opacity: .45; pointer-events: none; }
 
 /* ============================================================
@@ -787,28 +732,28 @@ button { font-family: inherit; }
   display: inline-flex; align-items: center;
   font-family: var(--f-mono); font-size: 10.5px; font-weight: 600;
   letter-spacing: 0.06em; text-transform: uppercase;
-  padding: 3px 8px 2px; border-radius: 6px;
+  padding: 3px 8px 2px; border-radius: var(--r-sm);
   border: 1px solid currentColor; line-height: 1.1;
 }
 .badge::before { content: ""; }
 .b-update { color: var(--update); background: var(--update-bg); }
 .b-insert { color: var(--insert); background: var(--insert-bg); }
 .b-delete { color: var(--delete); background: var(--delete-bg); }
-.b-baseline { color: var(--ink-3); background: var(--surface-2); }
-[data-dir="trail"] .badge { color: #fff; border-color: transparent; }
+.b-baseline { color: var(--ink-3); background: var(--raised); }
+[data-dir="trail"] .badge { color: var(--white); border-color: transparent; }
 [data-dir="trail"] .b-update { background: var(--update); }
 [data-dir="trail"] .b-insert { background: var(--insert); }
 [data-dir="trail"] .b-delete { background: var(--delete); }
-[data-dir="trail"] .b-baseline { background: var(--ink-3); color: #fff; }
+[data-dir="trail"] .b-baseline { background: var(--ink-3); color: var(--white); }
 
 .chip {
   display: inline-flex; align-items: center; gap: 5px;
   font-family: var(--f-mono); font-size: 10px; font-weight: 600;
-  letter-spacing: 0.04em; padding: 2px 6px; border-radius: 5px;
+  letter-spacing: 0.04em; padding: 2px 6px; border-radius: var(--r-sm);
   border: 1px solid currentColor;
 }
 .chip-cli { color: var(--orange-2); background: var(--orange-bg); }
-.chip-tt { color: var(--blue); background: var(--blue-bg); }
+.chip-tt { color: var(--accent); background: var(--accent-bg); }
 
 /* ============================================================
    results / tables
@@ -837,8 +782,8 @@ button { font-family: inherit; }
   cursor: pointer; position: relative;
   transition: background .14s;
 }
-.ev-row:hover { background: var(--surface-2); }
-.ev-row.open { background: var(--surface-2); }
+.ev-row:hover { background: var(--raised); }
+.ev-row.open { background: var(--raised); }
 [data-dir="trail"] .ev-row.open { background: var(--accent-bg); }
 .ev-time { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink); }
 .ev-table { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2); }
@@ -868,7 +813,7 @@ button { font-family: inherit; }
   padding: 13px 14px; border-bottom: 1px solid var(--line-soft);
   cursor: pointer; transition: background .14s;
 }
-.sc-row:hover, .sc-row.open { background: var(--surface-2); }
+.sc-row:hover, .sc-row.open { background: var(--raised); }
 .sc-pos { font-family: var(--f-mono); font-size: 12px; color: var(--ink-3); }
 .sc-stmt {
   grid-column: 1 / -1; margin: 6px 0 0;
@@ -888,7 +833,7 @@ button { font-family: inherit; }
   align-items: center; gap: 12px;
   padding: 13px 14px; border-bottom: 1px solid var(--line-soft);
 }
-.ev-skel-bar { height: 12px; border-radius: 6px; background: var(--skel-neutral); }
+.ev-skel-bar { height: 12px; border-radius: var(--r-sm); background: var(--skel-neutral); }
 .ev-skel-time { width: 76%; }
 .ev-skel-table { width: 58%; }
 .ev-skel-type { width: 62%; }
@@ -925,7 +870,7 @@ button { font-family: inherit; }
 }
 .diff-h {
   color: var(--ink-4); font-size: 11px; letter-spacing: 0.04em;
-  background: var(--surface-2); text-transform: lowercase;
+  background: var(--raised); text-transform: lowercase;
 }
 .diff-col { color: var(--ink-2); }
 .diff-before { color: var(--diff-del); }
@@ -941,7 +886,7 @@ button { font-family: inherit; }
 .diff-foot {
   display: flex; align-items: center; gap: 14px;
   padding: 11px 14px; border-top: 1px solid var(--line-soft);
-  background: var(--surface-2);
+  background: var(--raised);
 }
 .diff-foot-note { font-size: 12px; color: var(--ink-3); margin-right: auto; }
 [data-dir="trail"] .diff-foot { background: var(--accent-bg); }
@@ -1007,11 +952,11 @@ button { font-family: inherit; }
   .cards > .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
 .card {
-  background: #fff;
+  background: var(--surface);
   border: 0;
-  border-radius: 22px;
+  border-radius: var(--r-xl);
   padding: 22px 22px 8px;
-  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
+  box-shadow: var(--shadow);
   position: relative; overflow: hidden;
 }
 [data-dir="paper"] .card { background: transparent; border-color: var(--line); padding-left: 0; padding-right: 22px; }
@@ -1048,7 +993,7 @@ button { font-family: inherit; }
 .code-head {
   display: flex; align-items: center; gap: 12px;
   padding: 11px 16px; border-bottom: 1px solid var(--line);
-  background: var(--surface-2);
+  background: var(--raised);
 }
 .code-head .lbl { font-family: var(--f-mono); font-size: 12px; color: var(--ink-2); }
 .code-head .lbl b { color: var(--ink); }
@@ -1060,7 +1005,7 @@ button { font-family: inherit; }
   counter-reset: ln;
 }
 .code .cl { display: block; white-space: pre; }
-.code .tok-kw { color: var(--blue-2); font-weight: 600; }
+.code .tok-kw { color: var(--accent-2); font-weight: 600; }
 .code .tok-fn { color: var(--orange-2); }
 .code .tok-str { color: var(--insert); }
 .code .tok-num { color: var(--delete); }
@@ -1215,8 +1160,8 @@ button { font-family: inherit; }
   width: 100%; max-width: 760px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 18px;
-  box-shadow: 0 30px 80px -24px oklch(0.3 0.03 305 / 0.45);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 @media (prefers-reduced-motion: no-preference) {
@@ -1229,12 +1174,12 @@ button { font-family: inherit; }
 .modal-desc b { color: var(--ink); font-weight: 600; }
 .modal-x {
   position: absolute; right: 20px; top: 22px;
-  width: 32px; height: 32px; border-radius: 8px;
+  width: 32px; height: 32px; border-radius: var(--r-sm);
   display: grid; place-items: center; cursor: pointer;
   border: none; background: transparent; color: var(--ink-3);
   transition: background .15s, color .15s;
 }
-.modal-x:hover { background: var(--surface-2); color: var(--ink); }
+.modal-x:hover { background: var(--raised); color: var(--ink); }
 .modal-body { padding: 18px 28px 28px; }
 
 /* notice: an action's outcome, centered above the dialog that asked (#1769).
@@ -1250,8 +1195,8 @@ button { font-family: inherit; }
   display: flex; flex-direction: column;
   background: var(--surface);
   border: 1px solid var(--line); border-top: 4px solid var(--ink-3);
-  border-radius: 18px;
-  box-shadow: 0 30px 80px -24px oklch(0.3 0.03 305 / 0.45);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 .notice.ok { border-top-color: var(--insert); }
@@ -1292,7 +1237,7 @@ button { font-family: inherit; }
 .form-section > legend, .form-legend {
   font-family: var(--f-mono); font-size: 11px; font-weight: 600;
   letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--blue); padding: 0 6px; margin-left: 6px;
+  color: var(--accent); padding: 0 6px; margin-left: 6px;
 }
 .form-hint { color: var(--ink-2); font-size: 12.5px; margin: 4px 0 16px; }
 .form-hint code { font-family: var(--f-mono); font-size: 12px; }
@@ -1303,12 +1248,12 @@ button { font-family: inherit; }
   margin: 6px 0 14px; padding: 12px 14px;
   font-family: var(--f-mono); font-size: 12px; line-height: 1.65;
   color: var(--ink); white-space: pre; overflow-x: auto;
-  background: var(--surface-2); border: 1px solid var(--line);
+  background: var(--raised); border: 1px solid var(--line);
   border-radius: var(--radius); user-select: all;
 }
 .form-advanced { margin-top: 18px; }
 .form-adv-summary { cursor: pointer; font-family: var(--f-ui); font-size: 13px; font-weight: 500; color: var(--ink-3); list-style: none; }
-.form-adv-summary:hover, .form-advanced[open] > .form-adv-summary { color: var(--blue); }
+.form-adv-summary:hover, .form-advanced[open] > .form-adv-summary { color: var(--accent); }
 .form-adv-summary[hidden] { display: none; }
 .form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .form-grid .field { width: auto; }
@@ -1360,7 +1305,7 @@ button { font-family: inherit; }
 .busy-modal.busy-failed .busy-note { display: none; }
 .busy-error {
   margin: 16px 0 0; padding: 12px 14px; text-align: left;
-  background: var(--surface-2); border: 1px solid var(--line);
+  background: var(--raised); border: 1px solid var(--line);
   border-radius: var(--radius-sm);
 }
 .busy-error-title { margin: 0 0 6px; font-weight: 600; font-size: 13.5px; color: var(--ink); }
@@ -1390,10 +1335,10 @@ button { font-family: inherit; }
 #tweaks {
   position: fixed; right: 18px; bottom: 18px; z-index: 9000;
   width: 268px;
-  background: oklch(1 0 0 / 0.82);
+  background: color-mix(in srgb, var(--white) 82%, transparent);
   -webkit-backdrop-filter: blur(22px) saturate(160%); backdrop-filter: blur(22px) saturate(160%);
-  border: 1px solid var(--line); border-radius: 15px;
-  box-shadow: 0 18px 50px -20px oklch(0.3 0.03 305 / 0.4), 0 1px 0 oklch(1 0 0 / 0.6) inset;
+  border: 1px solid var(--line); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg), 0 1px 0 color-mix(in srgb, var(--white) 60%, transparent) inset;
   font-family: var(--f-ui); color: var(--ink);
   display: none; flex-direction: column; overflow: hidden;
 }
@@ -1404,27 +1349,27 @@ button { font-family: inherit; }
 }
 .twk-h { display: flex; align-items: center; justify-content: space-between; padding: 13px 12px 11px 16px; border-bottom: 1px solid var(--line-soft); }
 .twk-h b { font-family: var(--f-display); font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
-.twk-h .x { border: none; background: none; color: var(--ink-3); cursor: pointer; width: 24px; height: 24px; border-radius: 6px; font-size: 15px; }
-.twk-h .x:hover { background: var(--surface-2); color: var(--ink); }
+.twk-h .x { border: none; background: none; color: var(--ink-3); cursor: pointer; width: 24px; height: 24px; border-radius: var(--r-sm); font-size: 15px; }
+.twk-h .x:hover { background: var(--raised); color: var(--ink); }
 .twk-b { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 15px; max-height: 70vh; overflow-y: auto; }
 .twk-grp { display: flex; flex-direction: column; gap: 8px; }
 .twk-lab { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; color: var(--ink-3); }
-.seg { display: flex; gap: 3px; background: var(--surface-2); border-radius: 9px; padding: 3px; }
+.seg { display: flex; gap: 3px; background: var(--raised); border-radius: var(--r-md); padding: 3px; }
 .seg button {
   flex: 1; border: none; background: none; cursor: pointer;
   font-family: inherit; font-size: 12px; font-weight: 500; color: var(--ink-2);
-  padding: 6px 4px; border-radius: 6px; transition: background .15s, color .15s, box-shadow .15s;
+  padding: 6px 4px; border-radius: var(--r-sm); transition: background .15s, color .15s, box-shadow .15s;
 }
-.seg button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px oklch(0.4 0.02 305 / 0.12); font-weight: 600; }
+.seg button.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); font-weight: 600; }
 .swatches { display: flex; gap: 7px; }
-.swatches button { width: 30px; height: 30px; border-radius: 8px; border: 2px solid transparent; cursor: pointer; padding: 0; position: relative; transition: transform .12s; }
+.swatches button { width: 30px; height: 30px; border-radius: var(--r-sm); border: 2px solid transparent; cursor: pointer; padding: 0; position: relative; transition: transform .12s; }
 .swatches button:hover { transform: scale(1.08); }
 .swatches button.on { border-color: var(--ink); }
-.swatches button.on::after { content: "✓"; position: absolute; inset: 0; display: grid; place-items: center; color: #fff; font-size: 13px; text-shadow: 0 1px 2px rgba(0,0,0,.4); }
+.swatches button.on::after { content: "✓"; position: absolute; inset: 0; display: grid; place-items: center; color: var(--white); font-size: 13px; text-shadow: 0 1px 2px var(--scrim); }
 .twk-toggle { display: flex; align-items: center; justify-content: space-between; }
-.tg { width: 38px; height: 22px; border-radius: 999px; background: var(--line); border: none; cursor: pointer; position: relative; transition: background .2s; flex: none; }
+.tg { width: 38px; height: 22px; border-radius: var(--r-pill); background: var(--line); border: none; cursor: pointer; position: relative; transition: background .2s; flex: none; }
 .tg.on { background: var(--accent); }
-.tg::after { content: ""; position: absolute; left: 2px; top: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .2s var(--ease-out); }
+.tg::after { content: ""; position: absolute; left: 2px; top: 2px; width: 18px; height: 18px; border-radius: 50%; background: var(--white); box-shadow: var(--shadow-sm); transition: transform .2s var(--ease-out); }
 .tg.on::after { transform: translateX(16px); }
 .twk-note { font-size: 11px; color: var(--ink-4); line-height: 1.45; }
 
@@ -1457,9 +1402,9 @@ button { font-family: inherit; }
    page.
    ============================================================ */
 .tcard {
-  border-radius: 22px; border: 0;
-  background: #fff; padding: 20px 22px; min-width: 0;
-  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
+  border-radius: var(--r-xl); border: 0;
+  background: var(--surface); padding: 20px 22px; min-width: 0;
+  box-shadow: var(--shadow);
 }
 /* tint modifiers live further down, AFTER the .ov-panel ground rules —
    one vocabulary, always hyphenated: class="tcard tcard-violet". (An
@@ -1469,14 +1414,14 @@ button { font-family: inherit; }
 .tag-pill {
   display: inline-block; font-family: var(--f-ui); font-size: 11px;
   font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
-  padding: 4px 11px; border-radius: 999px;
-  background: var(--surface-3); color: var(--ink-2);
+  padding: 4px 11px; border-radius: var(--r-pill);
+  background: var(--inset); color: var(--ink-2);
 }
 /* the dark code block: SQL and DSNs on ink, the strongest same-product
    signal the site sends. Defined with the recipe; the page sweeps
    (#1415/#1419) adopt it where code is rendered. */
 .code-ink {
-  background: var(--ink); color: oklch(0.93 0.02 300);
+  background: var(--strip); color: var(--strip-ink);
   border-radius: var(--radius); padding: 12px 15px;
   font-family: var(--f-mono); font-size: 12.5px; line-height: 1.55;
   overflow-x: auto;
@@ -1518,24 +1463,24 @@ button { font-family: inherit; }
 }
 .flow-box {
   --flow-c: var(--ink-4); --flow-ink: var(--ink); --flow-sub: var(--ink-3);
-  background: #fff; border: 0; border-radius: 22px;
-  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
+  background: var(--surface); border: 0; border-radius: var(--r-xl);
+  box-shadow: var(--shadow);
   padding: 28px 18px 26px; min-width: 0; min-height: 170px; color: var(--flow-ink);
   display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
 }
-.flow-box:nth-child(3) { background: linear-gradient(160deg, #FF5A97, #E8397C); --flow-ink: #fff; --flow-sub: rgba(255,255,255,0.86); box-shadow: 0 10px 28px rgba(232,57,124,0.28); }
-.flow-box:nth-child(5) { background: #E8F8F0; }
-.flow-box:nth-child(7) { background: #FFF6DC; }
+.flow-box:nth-child(3) { background: linear-gradient(160deg, var(--pink), var(--pink-mid)); --flow-ink: var(--white); --flow-sub: color-mix(in srgb, var(--white) 86%, transparent); box-shadow: 0 10px 28px color-mix(in srgb, var(--pink-mid) 28%, transparent); }
+.flow-box:nth-child(5) { background: var(--mint-tint); }
+.flow-box:nth-child(7) { background: var(--sun-tint); }
 .flow-box.ok   { --flow-c: var(--insert); }
-.flow-box.warn { --flow-c: var(--orange-2); background: #FFF1E2; --flow-ink: var(--ink); --flow-sub: var(--ink-3); }
+.flow-box.warn { --flow-c: var(--orange-2); background: var(--orange-tint); --flow-ink: var(--ink); --flow-sub: var(--ink-3); }
 .flow-box.bad  { --flow-c: var(--delete);   background: var(--delete-bg); --flow-ink: var(--ink); --flow-sub: var(--ink-3); }
 .flow-box.off, .flow-arrow.off { opacity: 0.55; filter: grayscale(1); }
 .flow-ico { width: 36px; height: 36px; flex: none; display: inline-flex; color: var(--flow-ink); margin-bottom: 10px; }
 .flow-ico svg { width: 36px; height: 36px; }
 .flow-ico-mysql { width: 55px; height: 36px; object-fit: contain; }
 .flow-lockup { height: 36px; width: auto; display: block; margin-bottom: 10px; }
-.flow-box:nth-child(5) .flow-ico { color: #0E8A5E; }
-.flow-box:nth-child(7) .flow-ico { color: #EB6834; }
+.flow-box:nth-child(5) .flow-ico { color: var(--ok); }
+.flow-box:nth-child(7) .flow-ico { color: var(--orange); }
 .flow-box-head { display: flex; flex-direction: column; align-items: center; font-family: var(--f-display); font-weight: 700; font-size: 18px; letter-spacing: -0.01em; line-height: 1.2; color: var(--flow-ink); }
 .flow-box-head b, .flow-box-head .flow-lockup-wrap { display: inline-flex; align-items: center; gap: 7px; }
 .flow-state { font-family: var(--f-ui); font-size: 14px; color: var(--flow-ink); margin-top: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; }
@@ -1543,14 +1488,14 @@ button { font-family: inherit; }
 .flow-box.warn .flow-state, .flow-arrow.warn .flow-state { color: var(--orange-2); }
 .flow-sub { font-family: var(--f-ui); font-size: 13px; color: var(--flow-sub); margin-top: 4px; overflow-wrap: anywhere; }
 .flow-arrow {
-  --flow-c: #FF4D8D;
+  --flow-c: var(--pink);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   padding: 0 4px; min-width: 0; text-align: center;
 }
 .flow-arrow.ok   { --flow-c: var(--insert); }
 .flow-arrow.warn { --flow-c: var(--orange-2); }
 .flow-arrow.bad  { --flow-c: var(--delete); }
-.flow-label { font-family: var(--f-ui); font-size: 12.5px; font-weight: 600; color: #D9367A; }
+.flow-label { font-family: var(--f-ui); font-size: 12.5px; font-weight: 600; color: var(--pink-mid); }
 .flow-arrow.ok .flow-label { color: var(--insert); }
 .flow-arrow.warn .flow-label { color: var(--orange-2); }
 .flow-arrow.bad .flow-label { color: var(--delete); }
@@ -1564,7 +1509,7 @@ button { font-family: inherit; }
 .flow-arrow.bad .flow-big { color: var(--delete); }
 .flow-arrow .flow-state { margin-top: 2px; justify-content: center; color: var(--ink-2); }
 .flow-arrow .flow-sub { color: var(--ink-3); }
-.flow-link { font-family: var(--f-ui); font-size: 14px; font-weight: 600; color: #D9367A; text-decoration: none; border-bottom: 2px solid currentColor; }
+.flow-link { font-family: var(--f-ui); font-size: 14px; font-weight: 600; color: var(--pink-mid); text-decoration: none; border-bottom: 2px solid currentColor; }
 .flow-link:hover { color: var(--ink); }
 /* The action row under the drawing (#1860): one filled button, then links. */
 .flow-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px 22px; margin-top: 22px; }
@@ -1589,7 +1534,7 @@ button { font-family: inherit; }
 .bad-box .warn-line { margin-top: 8px; }
 .bad-box .warn-actions { margin-top: 10px; }
 .flow-card { margin-top: 12px; font-family: var(--f-ui); font-size: 14px; }
-.fr-go { font-weight: 600; color: #D9367A; text-decoration: none; border-bottom: 1px solid currentColor; white-space: nowrap; }
+.fr-go { font-weight: 600; color: var(--pink-mid); text-decoration: none; border-bottom: 1px solid currentColor; white-space: nowrap; }
 .fr-go:hover { color: var(--ink); }
 .ov-fold { margin-top: 20px; }
 .ov-fold > summary { cursor: pointer; font-family: var(--f-ui); font-size: 13.5px; color: var(--ink-3); padding: 6px 0; }
@@ -1627,7 +1572,7 @@ button { font-family: inherit; }
    progress instead of a hang. */
 .skel-box { display: flex; flex-direction: column; gap: 10px; padding: 6px 0; }
 .skel-line {
-  height: 13px; border-radius: 4px;
+  height: 13px; border-radius: var(--r-xs);
   background: linear-gradient(90deg, var(--skel-warm) 25%, transparent 50%, var(--skel-warm) 75%);
   background-size: 200% 100%;
 }
@@ -1644,9 +1589,9 @@ button { font-family: inherit; }
 
 .ov-grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 18px; align-items: start; }
 .ov-panel {
-  background: #fff; border: 0;
-  border-radius: 22px; padding: 14px 14px 16px;
-  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
+  background: var(--surface); border: 0;
+  border-radius: var(--r-xl); padding: 14px 14px 16px;
+  box-shadow: var(--shadow);
 }
 /* the tint modifiers (#1421) — one OPT-IN vocabulary: the hyphenated class
    IS the modifier, valid on .tcard and .ov-panel alike ("tcard tcard-violet",
@@ -1681,7 +1626,7 @@ button { font-family: inherit; }
   border-top: 1px solid var(--line-soft); transition: background .14s;
 }
 .ov-ev:first-child { border-top: none; }
-.ov-ev:hover { background: var(--surface-2); }
+.ov-ev:hover { background: var(--raised); }
 .ov-ev-time { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--ink-2); }
 .ov-ev-tbl { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* --ink-2, not -3: this text sits on the violet tint, where --ink-3
@@ -1702,9 +1647,9 @@ button { font-family: inherit; }
   padding: 11px 14px; border-top: 1px solid var(--line-soft); transition: background .14s;
 }
 .ov-tablerow:first-child { border-top: none; }
-.ov-tablerow:hover { background: var(--surface-2); }
+.ov-tablerow:hover { background: var(--raised); }
 .ov-tname { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 13px; color: var(--ink); }
-.ov-bar { display: flex; height: 7px; border-radius: 4px; overflow: hidden; background: var(--surface-3); gap: 1.5px; }
+.ov-bar { display: flex; height: 7px; border-radius: var(--r-xs); overflow: hidden; background: var(--inset); gap: 1.5px; }
 .ov-seg { display: block; }
 .ov-seg.i { background: var(--insert); }
 .ov-seg.u { background: var(--update); }
@@ -1723,7 +1668,7 @@ button { font-family: inherit; }
 .filter-chip {
   display: inline-flex; align-items: center; gap: 6px;
   font-family: var(--f-mono); font-size: 12px; color: var(--accent);
-  background: var(--accent-bg); border: 1px solid transparent; border-radius: 999px;
+  background: var(--accent-bg); border: 1px solid transparent; border-radius: var(--r-pill);
   padding: 3px 6px 3px 11px; cursor: pointer; margin-left: 12px;
 }
 [data-accent="warm"] .filter-chip { color: var(--orange-2); }
@@ -1741,13 +1686,13 @@ button { font-family: inherit; }
   font-family: var(--f-ui); font-size: 13px;
   transition: border-color .15s, background .15s, color .15s;
 }
-.cmdk-trigger:hover { border-color: var(--ink-4); color: var(--ink-2); background: var(--surface-2); }
+.cmdk-trigger:hover { border-color: var(--ink-4); color: var(--ink-2); background: var(--raised); }
 .cmdk-trigger svg { width: 15px; height: 15px; color: var(--ink-4); }
 .cmdk-trigger > span:first-of-type { flex: 1; text-align: left; }
 .cmdk-kbd {
   font-family: var(--f-mono); font-size: 10.5px; color: var(--ink-3);
-  border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px 0;
-  background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 1px 6px 0;
+  background: var(--raised);
 }
 
 .cmdk-scrim {
@@ -1761,8 +1706,8 @@ button { font-family: inherit; }
 .cmdk {
   width: 100%; max-width: 580px;
   background: var(--surface); border: 1px solid var(--line);
-  border-radius: 16px; overflow: hidden;
-  box-shadow: 0 32px 80px -28px oklch(0.3 0.03 305 / 0.5), 0 1px 0 oklch(1 0 0 / 0.6) inset;
+  border-radius: var(--r-lg); overflow: hidden;
+  box-shadow: var(--shadow-lg), 0 1px 0 color-mix(in srgb, var(--white) 60%, transparent) inset;
 }
 @media (prefers-reduced-motion: no-preference) {
   .cmdk-scrim.open .cmdk { animation: cmdkin .26s var(--ease-out); }
@@ -1780,7 +1725,7 @@ button { font-family: inherit; }
 .cmdk-q::placeholder { color: var(--ink-4); }
 .cmdk-escpill {
   font-family: var(--f-mono); font-size: 10.5px; color: var(--ink-3);
-  border: 1px solid var(--line); border-radius: 5px; padding: 2px 6px 1px; flex: none;
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 2px 6px 1px; flex: none;
 }
 .cmdk-list { max-height: 50vh; overflow-y: auto; padding: 8px; }
 .cmdk-group {
@@ -1791,7 +1736,7 @@ button { font-family: inherit; }
 .cmdk-group:first-child { padding-top: 6px; }
 .cmdk-item {
   display: flex; align-items: center; gap: 12px; width: 100%;
-  padding: 10px 11px; border: none; border-radius: 9px; cursor: pointer;
+  padding: 10px 11px; border: none; border-radius: var(--r-md); cursor: pointer;
   background: none; text-align: left; color: var(--ink);
   font-family: var(--f-ui); font-size: 14px;
 }
@@ -1800,7 +1745,7 @@ button { font-family: inherit; }
 .cmdk-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmdk-hint {
   font-family: var(--f-mono); font-size: 10.5px; color: var(--ink-3);
-  border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px 0; flex: none;
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 1px 6px 0; flex: none;
 }
 .cmdk-item.sel { background: var(--accent-bg); color: var(--ink); }
 .cmdk-item.sel .cmdk-ic { color: var(--accent); }
@@ -1916,7 +1861,7 @@ button { font-family: inherit; }
   padding: clamp(48px, 15vh, 150px) 24px 56px;
 }
 .modal-scrim.login-gate .login-panel {
-  box-shadow: 0 40px 90px -30px oklch(0.2 0.06 300 / 0.55), 0 1px 0 oklch(1 0 0 / 0.5) inset;
+  box-shadow: var(--shadow-lg), 0 1px 0 color-mix(in srgb, var(--white) 50%, transparent) inset;
 }
 /* The panel's own title takes the site's headline gradient — the same
    pink->orange->violet as dbtrail.com's H1. 22px/600 is WCAG "large text", and
@@ -1925,7 +1870,7 @@ button { font-family: inherit; }
    instead of a transparent fill. */
 @supports (background-clip: text) or (-webkit-background-clip: text) {
   .modal-scrim.login-gate .login-panel .modal-title {
-    background: var(--brand-headline);
+    background: var(--grad);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
@@ -1962,7 +1907,7 @@ button { font-family: inherit; }
 /* generic empty / deleted notes */
 .deleted-note {
   font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2);
-  background: var(--surface-2); border: 1px solid var(--line);
+  background: var(--raised); border: 1px solid var(--line);
   border-radius: var(--radius-sm); padding: 14px 16px;
 }
 
@@ -1998,7 +1943,7 @@ button { font-family: inherit; }
    deleting the box instead would trade an annoyance for lost evidence. */
 .muted-box {
   font-family: var(--f-ui); font-size: 13.5px; color: var(--ink-2);
-  background: var(--surface-3); border: 1px solid var(--line);
+  background: var(--inset); border: 1px solid var(--line);
   border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
   white-space: pre-wrap;
 }
@@ -2064,7 +2009,7 @@ button { font-family: inherit; }
 .srv-item .row-acts { display: inline-flex; gap: 7px; margin-left: auto; }
 .health-dot {
   width: 8px; height: 8px; border-radius: 50%; flex: none;
-  background: var(--ink-4); box-shadow: 0 0 0 3px var(--surface-3);
+  background: var(--ink-4); box-shadow: 0 0 0 3px var(--inset);
 }
 .health-dot.ok { background: var(--insert); }
 .srv-desc { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3); }
@@ -2110,7 +2055,7 @@ button { font-family: inherit; }
 .doctor-card {
   display: flex; gap: 10px; align-items: flex-start;
   border: 1px solid var(--line); border-radius: var(--radius-sm);
-  padding: 10px 12px; background: var(--surface-2);
+  padding: 10px 12px; background: var(--raised);
 }
 .doctor-card.pass { border-color: var(--insert); }
 .doctor-card.fail { border-color: var(--delete); }
@@ -2127,8 +2072,8 @@ button { font-family: inherit; }
 .dc-body { flex: 1; min-width: 0; }
 /* First-run steps (#1606): waiting is a muted ring, never the failure red. */
 .fr-card {
-  margin-bottom: 20px; background: #fff; border: 0; border-radius: 22px;
-  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
+  margin-bottom: 20px; background: var(--surface); border: 0; border-radius: var(--r-xl);
+  box-shadow: var(--shadow);
   padding: 22px 24px 20px;
 }
 .fr-card .dc-name { font-family: var(--f-display); font-weight: 700; font-size: 16.5px; letter-spacing: -0.01em; color: var(--ink); }
@@ -2159,7 +2104,7 @@ button { font-family: inherit; }
 .dc-rem li { margin: 0 0 2px; }
 .dc-rem pre {
   font-family: var(--f-mono); font-size: 11.5px; line-height: 1.4;
-  background: var(--surface-3); border-radius: 4px; padding: 8px 10px;
+  background: var(--inset); border-radius: var(--r-xs); padding: 8px 10px;
   margin: 0 0 6px; white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .dc-rem > :last-child { margin-bottom: 0; }
@@ -2187,7 +2132,7 @@ button { font-family: inherit; }
 .uncap-intro { font-size: 12.5px; line-height: 1.45; color: var(--ink-2); margin: 0 0 6px; max-width: 72ch; }
 .uncap-sql {
   font-family: var(--f-mono); font-size: 11.5px; line-height: 1.4;
-  background: var(--surface-3); border-radius: 4px; padding: 8px 10px;
+  background: var(--inset); border-radius: var(--r-xs); padding: 8px 10px;
   margin: 0 0 6px; white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .uncap-more > summary { cursor: pointer; font-size: 12.5px; color: var(--ink-2); padding: 2px 0; }
@@ -2201,7 +2146,7 @@ button { font-family: inherit; }
   z-index: 60; max-width: 80vw;
   font-family: var(--f-ui); font-size: 13px; color: var(--bg);
   background: var(--ink); border-radius: var(--radius-sm);
-  padding: 11px 18px; box-shadow: 0 8px 28px -10px oklch(0.3 0.03 305 / 0.5);
+  padding: 11px 18px; box-shadow: var(--shadow-lg);
 }
 
 /* Persistent failure notice. Unlike the transient toast it never auto-hides,
@@ -2221,7 +2166,7 @@ button { font-family: inherit; }
 /* Concurrent failures stack rather than overwrite, so the messages need their
    own column — as direct children of the flex row they would sit side by side. */
 .toast.toast-error .toast-body { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.toast.toast-error .toast-msg + .toast-msg { border-top: 1px solid oklch(1 0 0 / 0.18); padding-top: 10px; }
+.toast.toast-error .toast-msg + .toast-msg { border-top: 1px solid color-mix(in srgb, var(--white) 18%, transparent); padding-top: 10px; }
 .toast.toast-error .toast-close {
   flex: none; align-self: flex-start;
   background: none; border: 0; cursor: pointer;
@@ -2245,7 +2190,7 @@ button { font-family: inherit; }
 
 /* ── Backups: expandable rows, detail, restore card ── */
 .bk-expandable { cursor: pointer; }
-.bk-expandable:hover { background: var(--surface-2); }
+.bk-expandable:hover { background: var(--raised); }
 .bk-detail { padding: 6px 10px 12px 38px; border-bottom: 1px solid var(--line); }
 .bk-facts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 4px 0 8px; }
 .bk-table { border-collapse: collapse; font-size: 12.5px; }
@@ -2334,7 +2279,7 @@ details.vfy-helpfold > summary::after {
   transform: rotate(90deg); transition: transform 0.15s ease;
 }
 details.vfy-helpfold[open] > summary::after { transform: rotate(-90deg); }
-details.vfy-helpfold > summary:hover { color: var(--blue); }
+details.vfy-helpfold > summary:hover { color: var(--accent); }
 .vfy-modehelp { margin: 8px 2px 0; max-width: 860px; }
 
 /* structured result rows (#1419 §2/§3): mark | table | verdict | counts |
@@ -2378,11 +2323,11 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .chip-live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .chip-done { color: var(--insert); border-color: var(--insert); background: color-mix(in srgb, var(--insert) 8%, transparent); }
 .chip-fail { color: var(--delete); border-color: var(--delete); background: color-mix(in srgb, var(--delete) 8%, transparent); }
-.chip-age { color: var(--ink-3); border-color: var(--line); background: var(--surface-2); }
+.chip-age { color: var(--ink-3); border-color: var(--line); background: var(--raised); }
 
 /* indeterminate progress strip (#1420): the engine has no planned-total, so
    this is honest motion, not a fake percentage. */
-.vfy-progress { height: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; position: relative; }
+.vfy-progress { height: 4px; border-radius: 2px; background: var(--inset); overflow: hidden; position: relative; }
 .vfy-progress-bar { display: block; height: 100%; width: 30%; border-radius: 2px; background: var(--ochre); }
 .vfy-sofar { font-style: italic; }
 @media (prefers-reduced-motion: no-preference) {
@@ -2408,11 +2353,11 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .stg-row-latest { background: var(--violet-tint); border-radius: var(--radius-sm); }
 /* A copy past the count in force: still here, going at the next cleanup. */
 .stg-row-going .stg-name, .stg-row-going .stg-rel { color: var(--ink-3); font-weight: 500; }
-.stg-going { color: var(--ink-2); background: var(--surface-3); font-family: var(--f-ui); text-transform: none; letter-spacing: 0; font-size: 11.5px; }
+.stg-going { color: var(--ink-2); background: var(--inset); font-family: var(--f-ui); text-transform: none; letter-spacing: 0; font-size: 11.5px; }
 .stg-row-latest .stg-going { background: var(--surface); color: var(--ink-2); }
 /* How a snapshot was locked (#1380). Plain words on a quiet ground, like
    stg-going; only a snapshot read with no locks takes the warning ink. */
-.snap-lock { color: var(--ink-2); background: var(--surface-3); font-family: var(--f-ui); text-transform: none; letter-spacing: 0; font-size: 11.5px; }
+.snap-lock { color: var(--ink-2); background: var(--inset); font-family: var(--f-ui); text-transform: none; letter-spacing: 0; font-size: 11.5px; }
 .stg-row-latest .snap-lock { background: var(--surface); color: var(--ink-2); }
 .snap-lock-torn, .stg-row-latest .snap-lock-torn { color: var(--orange-deep); }
 .bks-others { margin: 10px 14px 6px; }
@@ -2445,7 +2390,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .stg-row-latest .bk-where { color: var(--ink-2); border-color: var(--violet-line); }
 .stg-row-latest .bk-chev  { color: var(--ink-2); }
 .stg-row-latest .tag-pill { background: var(--surface); color: var(--violet-deep); }
-/* Hover must not erase the mark. --surface-2 is LIGHTER than the tint, so
+/* Hover must not erase the mark. --raised is LIGHTER than the tint, so
    pointing at the newest row used to remove the one thing distinguishing
    it. Keep the ground, add a ring. */
 .stg-row-latest.bk-expandable:hover {
@@ -2477,13 +2422,13 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
    wrapping code box (it borrowed .dc-rem until #1777 made that a container). */
 .vfy-explain-pre {
   font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2);
-  background: var(--surface-3); border-radius: 4px; padding: 8px 10px;
+  background: var(--inset); border-radius: var(--r-xs); padding: 8px 10px;
   margin: 6px 0 0; white-space: pre-wrap; overflow-x: auto;
   max-height: 26vh; overflow-y: auto;
 }
 .stg-code {
   font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2);
-  background: var(--surface-3); border-radius: 4px; padding: 7px 10px;
+  background: var(--inset); border-radius: var(--r-xs); padding: 7px 10px;
   align-self: flex-start; overflow-x: auto; max-width: 100%;
 }
 
@@ -2513,7 +2458,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
   background: transparent; border: none; border-radius: var(--radius-sm);
   color: var(--ink-3); cursor: pointer;
 }
-.dt-trigger:hover { background: var(--surface-2); color: var(--ink); }
+.dt-trigger:hover { background: var(--raised); color: var(--ink); }
 .dt-trigger-ic svg { width: 15px; height: 15px; }
 [data-dir="paper"] .dt-trigger { right: -2px; }
 
@@ -2525,7 +2470,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .dt-pop {
   position: fixed; z-index: 55; width: 264px;
   background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--radius); box-shadow: 0 20px 55px -22px oklch(0.3 0.03 305 / 0.4);
+  border-radius: var(--radius); box-shadow: var(--shadow-lg);
   padding: 12px; font-family: var(--f-ui);
 }
 .dt-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
@@ -2535,7 +2480,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
   background: transparent; border: none; border-radius: var(--radius-sm);
   color: var(--ink-3); cursor: pointer;
 }
-.dt-nav:hover { background: var(--surface-2); color: var(--ink); }
+.dt-nav:hover { background: var(--raised); color: var(--ink); }
 .dt-nav-ic { display: grid; place-items: center; }
 .dt-nav-ic svg { width: 14px; height: 14px; }
 .dt-nav-prev .dt-nav-ic { transform: rotate(180deg); }
@@ -2547,10 +2492,10 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
   background: transparent; border: none; border-radius: var(--radius-sm);
   height: 28px; cursor: pointer;
 }
-.dt-day:hover { background: var(--surface-2); }
+.dt-day:hover { background: var(--raised); }
 .dt-day.is-muted { color: var(--ink-4); }
 .dt-day.is-today { box-shadow: inset 0 0 0 1px var(--accent); }
-.dt-day.is-sel { background: var(--accent); color: #fff; }
+.dt-day.is-sel { background: var(--accent); color: var(--white); }
 
 .dt-time { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
 .dt-time-select { width: 68px; height: 32px; padding: 6px 22px 6px 8px; font-size: 12.5px; }
@@ -2582,7 +2527,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
    right; in non-flex contexts (meta lines) the auto margin is inert. */
 .tz-chip {
   font-size: 10px; color: var(--ink-4); letter-spacing: .05em;
-  border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 1px 5px;
   margin-left: 8px; margin-right: auto; cursor: default; white-space: nowrap;
 }
 .cov-refresh-btn {
@@ -2615,7 +2560,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
   .cov-refresh-btn.spin { opacity: .55; }
 }
 .cov-chips { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-.cov-chip { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 12px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink-2); }
+.cov-chip { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 12px; padding: 2px 9px; border: 1px solid var(--line); border-radius: var(--r-md); color: var(--ink-2); }
 .cov-chip.ok { color: var(--insert); border-color: var(--insert); }
 .cov-chip.warn { color: var(--update); border-color: var(--update); }
 .cov-chip.bad { color: var(--delete); border-color: var(--delete); font-weight: 600; }
@@ -2665,7 +2610,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
   .ov-stat { transition: transform .22s var(--ease), box-shadow .22s var(--ease); }
   .ov-stat:hover {
     transform: translateY(-3px);
-    box-shadow: 0 12px 26px -14px oklch(0.4 0.06 305 / 0.42), var(--panel-shadow);
+    box-shadow: var(--shadow), var(--panel-shadow);
   }
 
   /* Nav: the icon leads the eye toward the destination. 2px — responsive
@@ -2714,7 +2659,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 
      ground                             warm-a  warm-b  canvas-3
      white                               3.94    3.70     5.15
-     --surface-2, the studio tile        3.76    3.53     4.91
+     --raised, the studio tile        3.76    3.53     4.91
      the studio sidebar                  3.82    3.59     5.00
 
    So the floor across them is 3.53:1, still clear of 3:1.
@@ -2749,7 +2694,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
    that hides the ink behind evidence that the engine can paint over it.
 
    Evidence about the ENGINE, and only that: an @supports test cannot notice
-   that --brand-headline stopped resolving, which computes to the same
+   that --grad stopped resolving, which computes to the same
    invisible pair. Scenario 17e in console-e2e is what sees that one.
 
    There is deliberately no forced-colors companion, worth writing down because
@@ -2793,7 +2738,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
      that protection is latent today, not load-bearing. */
   .brand-name,
   .ov-stat-num {
-    background-image: var(--brand-headline);
+    background-image: var(--grad);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
@@ -2835,43 +2780,38 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 
 /* ---- sidebar: tropical morning — light, never white ---- */
 .side {
-  /* A light lavender-blush ground with the same sunset accents the night
-     version wore (the operator asked for light-but-not-white). The default
-     ink ramp mostly survives — only its two faint steps darken, because a
-     tinted ground plus the corner glows eats their margin. Measured on the
-     worse composite each floor faces (the glow corners): ink-3' 4.56:1
-     (floor 4.5), ink-4' 3.17:1 (floor 3.0, hint/icon tier); off the glows
-     they sit at 5.2-5.7 and 3.6-3.9. */
-  --ink-3: oklch(0.50 0.065 304);
-  --ink-4: oklch(0.585 0.055 304);
-  border-right: 1px solid oklch(0.9 0.02 320);
+  /* A light lavender-blush ground with the site's sunset accents (light but
+     never white). Only the ramp's two faint steps darken: the tinted ground
+     plus the corner glows eats their margin (see --ink-3-strong). */
+  --ink-3: var(--ink-3-strong);
+  --ink-4: var(--ink-4-strong);
+  border-right: 1px solid var(--side-line);
   background:
-    radial-gradient(95% 34% at 112% -4%, oklch(0.8 0.1 348 / 0.22), transparent 68%),
-    radial-gradient(130% 44% at -25% 106%, oklch(0.72 0.12 293 / 0.18), transparent 62%),
-    linear-gradient(198deg, oklch(0.972 0.012 340) 0%, oklch(0.942 0.022 300) 100%);
+    radial-gradient(95% 34% at 112% -4%, var(--glow-pink), transparent 68%),
+    radial-gradient(130% 44% at -25% 106%, var(--glow-violet), transparent 62%),
+    var(--side-ground);
 }
 .side .brand-mark {
-  /* no background: the favicon img covers the 30px box completely (zero
-     transparent pixels), so only the glow shows. */
-  box-shadow: 0 2px 10px oklch(0.55 0.2 3 / 0.35);
+  /* the favicon img covers the 30px box completely, so only the glow shows */
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--brand-warm-a) 35%, transparent);
 }
 /* every section label is deep gold — the sun's text partner on a light
    ground (its own tint token sun-deep grades 4.49:1 in the violet glow
    corner, a hair under the small-text floor; this literal clears 5.1). */
-.side .nav-label { color: oklch(0.46 0.095 88); }
+.side .nav-label { color: var(--side-label); }
 /* white fields and hovers lift off the tint the way cards lift off the
    blush canvas. */
-.side .nav-item:hover { background: oklch(1 0 0 / 0.6); }
+.side .nav-item:hover { background: color-mix(in srgb, var(--white) 60%, transparent); }
 /* the active page is the sunset itself: the site's CTA pink->orange,
    darkened for 14px white text (measured 5.9:1 on the pink stop, 5.3:1 on
    the orange). */
 .side .nav-item.active {
-  color: #fff;
-  background: linear-gradient(120deg, oklch(0.53 0.2 3) 0%, oklch(0.54 0.14 51) 100%);
-  box-shadow: 0 6px 18px -8px oklch(0.55 0.2 3 / 0.5);
+  color: var(--white);
+  background: var(--grad-deep);
+  box-shadow: 0 6px 18px -8px color-mix(in srgb, var(--brand-warm-a) 50%, transparent);
 }
-.side .nav-item.active .ni-icon { color: #fff; }
-.side .nav-item.active .nav-kbd { color: oklch(1 0 0 / 0.75); }
+.side .nav-item.active .ni-icon { color: var(--white); }
+.side .nav-item.active .nav-kbd { color: color-mix(in srgb, var(--white) 75%, transparent); }
 
 /* ---- content: off the hospital white ----
    (the blush canvas itself lives on the ONE --bg declaration in the token
@@ -2888,9 +2828,9 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
    a scrolled list's headers would ride the peak. */
 .main {
   background:
-    radial-gradient(52% 340px at 82% -60px, oklch(0.88 0.09 88 / 0.30), transparent 70%),
-    radial-gradient(46% 300px at 12% -80px, oklch(0.8 0.1 348 / 0.22), transparent 70%),
-    radial-gradient(30% 260px at 55% -80px, oklch(0.75 0.1 293 / 0.14), transparent 75%),
+    radial-gradient(52% 340px at 82% -60px, var(--haze-sun), transparent 70%),
+    radial-gradient(46% 300px at 12% -80px, var(--glow-pink), transparent 70%),
+    radial-gradient(30% 260px at 55% -80px, var(--haze-violet), transparent 75%),
     var(--bg);
   background-attachment: local, local, local, scroll;
 }
@@ -2903,7 +2843,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
    (the background lives inside the guard too, for that reason). */
 @supports (background-clip: text) or (-webkit-background-clip: text) {
   .page-title {
-    background: var(--brand-headline);
+    background: var(--grad);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
@@ -2943,15 +2883,15 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 /* dotted kv separators drown on a tint (same failure the tcard dividers
    fixed); restate them against the tinted grounds (measured 1.34-1.36 on
    all four, above the 1.15 divider floor). */
-.cards .card .kv { border-bottom-color: oklch(0.5 0.05 320 / 0.22); }
+.cards .card .kv { border-bottom-color: var(--line-on-tint); }
 /* the same two remap side effects inside tinted cards: the inset code chip
-   (--surface-3 vs sun-tint: 1.031, vs orange-tint: 1.021 — under the 1.02
+   (--inset vs sun-tint: 1.031, vs orange-tint: 1.021 — under the 1.02
    identity floor's margin) goes white-with-hairline like the tcard
    tag-pills; pgHealthCard's ink-3 text (4.31:1 on pink) steps up to ink-2
    and its --line-soft divider (1.013 on pink) takes the kv literal. */
-.cards .card .stg-code { background: var(--surface); border: 1px solid oklch(0.5 0.05 320 / 0.16); }
+.cards .card .stg-code { background: var(--surface); border: 1px solid var(--line-on-tint); }
 .cards .card .hstat-muted, .cards .card .hstale { color: var(--ink-2); }
-.cards .card .hstale { border-top-color: oklch(0.5 0.05 320 / 0.22); }
+.cards .card .hstale { border-top-color: var(--line-on-tint); }
 
 /* Connect AI, simple pass: the step number is a badge, the two Claude fields
    are a drawn dialog, and everything conditional folds into <details>. */
@@ -2965,8 +2905,8 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .cn-num {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 50%; flex: none;
-  background: linear-gradient(120deg, oklch(0.53 0.2 3), oklch(0.54 0.14 51));
-  color: #fff; font-size: 14px; font-weight: 700;
+  background: var(--grad-deep);
+  color: var(--white); font-size: 14px; font-weight: 700;
 }
 .cn-fine { margin-top: 10px; }
 /* The mock and the ask bubble sit INSIDE a tinted config card, where the
@@ -2983,16 +2923,16 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .dk-shape { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 14px; max-width: 320px; }
 .dk-row { display: flex; align-items: flex-end; gap: 4px; }
 /* SOLID fills, and that is the whole correction. These marks were drawn in
-   --surface-2, which is what --panel-bg resolves to: the fill measured 1.000
+   --raised, which is what --panel-bg resolves to: the fill measured 1.000
    against its own ground and only the hairline ever drew them. On the tinted
    card that went unnoticed, because the tint gave the fill a ground to differ
    from; moving to the neutral panel is what exposed it. */
-.dk-tile { width: 26px; height: 26px; border-radius: 5px; background: var(--ink-4); flex: none; }
+.dk-tile { width: 26px; height: 26px; border-radius: var(--r-sm); background: var(--ink-4); flex: none; }
 /* Must stay AFTER .dk-row: both are 0-1-0, so source order decides the gap. */
 .dk-strip {
   flex-wrap: nowrap; overflow: hidden; gap: 3px;
-  -webkit-mask-image: linear-gradient(90deg, #000 60%, transparent);
-  mask-image: linear-gradient(90deg, #000 60%, transparent);
+  -webkit-mask-image: linear-gradient(90deg, black 60%, transparent);
+  mask-image: linear-gradient(90deg, black 60%, transparent);
 }
 /* --accent is the checkbox's own accent-color, so ticking the box paints the
    strip the exact colour of the tick: the control and the drawing say the same
@@ -3003,15 +2943,15 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .dk-cap { font-size: 11.5px; color: var(--ink-3); margin-top: 5px; }
 .cn-dk-body { padding: 0 14px 14px; }
 
-.cn-mock { border: 1px solid oklch(0.5 0.05 320 / 0.22); border-radius: 10px; background: var(--surface); margin: 10px 0; max-width: 430px; box-shadow: 0 1px 2px rgb(0 0 0 / 0.04); }
+.cn-mock { border: 1px solid var(--line-on-tint); border-radius: var(--r-md); background: var(--surface); margin: 10px 0; max-width: 430px; box-shadow: var(--panel-shadow); }
 .cn-mock-bar { display: flex; align-items: center; padding: 7px 12px; border-bottom: 1px solid var(--line-soft); color: var(--ink-4); font-size: 11.5px; }
-.cn-mock-dots { width: 8px; height: 8px; border-radius: 50%; flex: none; background: oklch(0.72 0.17 25); box-shadow: 13px 0 0 oklch(0.83 0.14 85), 26px 0 0 oklch(0.72 0.17 145); margin-right: 44px; }
+.cn-mock-dots { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--delete); box-shadow: 13px 0 0 var(--sun), 26px 0 0 var(--insert); margin-right: 44px; }
 .cn-mock-row { padding: 9px 12px 3px; }
 .cn-mock-row:last-child { padding-bottom: 12px; }
 .cn-mock-label { font-size: 11.5px; font-weight: 600; color: var(--ink-3); margin-bottom: 4px; }
-.cn-mock-field { display: flex; align-items: center; gap: 8px; border: 1px dashed var(--line); border-radius: 8px; padding: 6px 10px; background: var(--surface-2); font-size: 12.5px; color: var(--ink-3); font-style: italic; }
-.cn-chip { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; flex: none; background: linear-gradient(120deg, oklch(0.53 0.2 3), oklch(0.54 0.14 51)); color: #fff; font-size: 11.5px; font-weight: 700; font-style: normal; }
-.cn-ask { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; margin: 8px 0 2px; padding: 8px 14px; border-radius: 14px 14px 14px 4px; background: var(--surface); border: 1px solid oklch(0.5 0.05 320 / 0.22); font-size: 12.5px; color: var(--ink-2); }
+.cn-mock-field { display: flex; align-items: center; gap: 8px; border: 1px dashed var(--line); border-radius: var(--r-sm); padding: 6px 10px; background: var(--raised); font-size: 12.5px; color: var(--ink-3); font-style: italic; }
+.cn-chip { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; flex: none; background: var(--grad-deep); color: var(--white); font-size: 11.5px; font-weight: 700; font-style: normal; }
+.cn-ask { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; margin: 8px 0 2px; padding: 8px 14px; border-radius: var(--r-lg) var(--r-lg) var(--r-lg) var(--r-xs); background: var(--surface); border: 1px solid var(--line-on-tint); font-size: 12.5px; color: var(--ink-2); }
 /* inline flag/env names in hints never wrap mid-token: a --flag broken
    across lines reads as "- -flag" to the non-technical audience this page
    addresses. */
@@ -3031,11 +2971,11 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .dk-names-count { font-size: 11px; color: var(--ink-4); flex: none; }
 .dk-names-list { display: flex; flex-wrap: wrap; gap: 4px; max-height: 132px; overflow-y: auto; }
 .dk-name {
-  font: inherit; font-size: 11px; font-family: var(--mono, ui-monospace, monospace);
-  padding: 3px 7px; border: 1px solid var(--line); border-radius: 5px;
-  background: var(--surface-1); color: var(--ink-2); cursor: pointer;
+  font: inherit; font-size: 11px; font-family: var(--f-mono);
+  padding: 3px 7px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--ink-2); cursor: pointer;
 }
-.dk-name:hover { border-color: var(--accent); color: var(--ink-1); }
+.dk-name:hover { border-color: var(--accent); color: var(--ink); }
 
 /* The one command the reader has to reproduce, with a Copy button. Real text
    rather than a drawing: a terminal mock was built here and dropped, because at
@@ -3043,18 +2983,18 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
    sends, so nothing could pin it. */
 .dk-run {
   display: flex; align-items: center; gap: 8px; margin: 12px 14px 0;
-  padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px;
-  background: var(--surface-1);
+  padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface);
 }
 /* In the Backups take-away lane (#1573) the lane's own padding is the gutter. */
 .bk-lane .dk-run { margin: 0; }
-.dk-cmd { font-size: 11px; font-family: var(--mono, ui-monospace, monospace); color: var(--ink-2); word-break: break-all; flex: 1; }
+.dk-cmd { font-size: 11px; font-family: var(--f-mono); color: var(--ink-2); word-break: break-all; flex: 1; }
 .dk-copy {
   font: inherit; font-size: 11px; flex: none; cursor: pointer;
-  padding: 3px 8px; border: 1px solid var(--line); border-radius: 5px;
-  background: var(--surface-2); color: var(--ink-3);
+  padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--raised); color: var(--ink-3);
 }
-.dk-copy:hover { border-color: var(--accent); color: var(--ink-1); }
+.dk-copy:hover { border-color: var(--accent); color: var(--ink); }
 
 /* Iceberg export panel (#1467). The drawing that replaced four paragraphs:
    three stages left to right, then two bars for what a run costs. The intent is
@@ -3083,7 +3023,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .bk-src { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .bk-src-k { font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; color: var(--ink-4); min-width: 30px; }
 .bk-src-n { font-size: 11.5px; color: var(--ink-4); }
-.bk-where { font-size: 10.5px; color: var(--ink-4); border: 1px solid var(--line-soft); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+.bk-where { font-size: 10.5px; color: var(--ink-4); border: 1px solid var(--line-soft); border-radius: var(--r-pill); padding: 1px 8px; white-space: nowrap; }
 .ctx-srcs { display: grid; gap: 2px; min-width: 0; }
 /* Backup detail: how each table's rows got into the snapshot (#1545). */
 .bk-made { font-size: 11.5px; color: var(--ink-3); }
@@ -3095,7 +3035,7 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
    so a hover background was hiding the feature rather than hinting at it. */
 .bk-pager { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--line-soft); }
 /* --ink-3, not --ink-4: this is the only thing on the page telling a reader
-   where they are in the list, and --ink-4 on --surface-2 is 3.15:1 (the hint
+   where they are in the list, and --ink-4 on --raised is 3.15:1 (the hint
    floor, not the body one). --ink-3 is 4.74:1. Raised in the same change that
    lifted three siblings off the floor for the same reason. */
 .bk-pager-n { font-size: 11.5px; color: var(--ink-3); }
@@ -3103,9 +3043,9 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .bk-expandable[aria-expanded="true"] .bk-chev { transform: rotate(90deg); }
 
 /* ── Take a copy with you: the two lanes ───────────────────────────────────
-   White lanes on the panel's --surface-2, so each reads as a card and not as
+   White lanes on the panel's --raised, so each reads as a card and not as
    a region of the panel. The Iceberg panel's .ice-stage cards use the same
-   --surface fill for the same reason (#1573); --surface-2 on --surface-2 left
+   --surface fill for the same reason (#1573); --raised on --raised left
    them separated by a hairline and nothing else. */
 /* auto-fit, not a fixed 1fr 1fr: the MySQL lane is absent whenever the
    selected server is the ephemeral --index-dsn entry or sql_export is off,
@@ -3120,8 +3060,8 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .bk-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; padding: 4px 14px 14px; }
 @media (max-width: 860px) { .bk-lanes { grid-template-columns: 1fr; } }
 .bk-lane {
-  background: var(--surface-3); border: 0;
-  border-radius: 18px; padding: 20px;
+  background: var(--inset); border: 0;
+  border-radius: var(--r-lg); padding: 20px;
   display: flex; flex-direction: column; gap: 10px;
 }
 .bk-lane-t {
@@ -3143,14 +3083,14 @@ details.vfy-helpfold > summary:hover { color: var(--blue); }
 .bk-file {
   position: relative; display: flex; flex-direction: column; gap: 3px;
   min-width: 104px; padding: 10px 12px 9px;
-  background: var(--surface-3); border: 1px solid var(--line); border-radius: 8px;
+  background: var(--inset); border: 1px solid var(--line); border-radius: var(--r-sm);
 }
 /* the folded corner, so a rectangle reads as a file */
 .bk-file::after {
   content: ""; position: absolute; top: -1px; right: -1px;
   border-width: 0 11px 11px 0; border-style: solid;
   border-color: var(--surface) var(--surface) var(--line) var(--line);
-  border-top-right-radius: 8px;
+  border-top-right-radius: var(--r-sm);
 }
 .bk-file-n { font-family: var(--f-mono); font-size: 12.5px; font-weight: 500; color: var(--ink); }
 .bk-file-c { font-size: 12px; color: var(--ink-3); }
@@ -3201,7 +3141,7 @@ details.bk-take > summary .ov-panel-title::after {
   transform: rotate(90deg); transition: transform 0.15s ease;
 }
 details.bk-take[open] > summary .ov-panel-title::after { transform: rotate(-90deg); }
-details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
+details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 /* A quiet fact about the last .sql build (it expired unread), said on the
    folded panel's own line so nobody has to open it to learn a copy is gone. */
 .bk-take-sum { flex-wrap: wrap; }
@@ -3225,15 +3165,15 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .snap-moved {
   display: flex; align-items: center; gap: 10px;
   margin: 0 0 14px; padding: 8px 12px;
-  border: 1px solid var(--line); border-radius: 8px;
-  background: var(--surface-2); color: var(--ink-2); font-size: 13px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--raised); color: var(--ink-2); font-size: 13px;
 }
 .snap-moved-text { flex: 1; }
 .snap-moved-x {
   border: 0; background: none; cursor: pointer; color: var(--ink-3);
-  font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 6px;
+  font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: var(--r-sm);
 }
-.snap-moved-x:hover { color: var(--ink); background: var(--surface-3); }
+.snap-moved-x:hover { color: var(--ink); background: var(--inset); }
 .bks-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 /* An empty value renders as the word for what applies, in the muted style: a
    value, not a gap. A refused value shows the fallback the daemon fell to,
@@ -3277,10 +3217,10 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .fr-fold::before { content: "\25B8 "; }
 .fr-card.fr-open .fr-fold::before { content: "\25BE "; }
 .rc-restore-slot { margin-top: 20px; }
-.rc-restore-note a { color: #D9367A; font-weight: 600; text-decoration: none; border-bottom: 1px solid currentColor; }
+.rc-restore-note a { color: var(--pink-mid); font-weight: 600; text-decoration: none; border-bottom: 1px solid currentColor; }
 /* the Snapshots page's one daemon row: a plain white card, the tints stay
    for the configuration pages */
-.cards.cards-plain .card { background: #fff; }
+.cards.cards-plain .card { background: var(--surface); }
 .cards.cards-plain .card .card-title { color: var(--ink); }
 
 /* ── Snapshots: the hero and the tabs (round 3) ─────────────────────────────
@@ -3293,32 +3233,32 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 }
 .snap-hero .hero-actions, .snap-hero .hero-note { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
 .hero-card {
-  background: #fff; border: 0; border-radius: 22px; padding: 22px 24px;
-  box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);
+  background: var(--surface); border: 0; border-radius: var(--r-xl); padding: 22px 24px;
+  box-shadow: var(--shadow);
   display: flex; flex-direction: column; justify-content: center; gap: 6px; min-width: 0;
 }
 .hero-k { font-family: var(--f-ui); font-size: 12px; font-weight: 500; color: var(--ink-3); }
 .hero-big-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .hero-big { font-family: var(--f-display); font-size: 36px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.05; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.hero-age.ok .hero-big { color: #0E8A5E; }
-.hero-age.warn .hero-big { color: #B8860B; }
-.hero-age.bad .hero-big { color: #E8397C; }
-.hero-age.bad { box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(232,57,124,0.18); }
-.hero-dot { width: 14px; height: 14px; border-radius: 50%; flex: none; background: var(--ink-4); box-shadow: 0 0 0 5px var(--surface-3); }
-.hero-dot.ok { background: #0E8A5E; box-shadow: 0 0 0 5px #DDF7EC; }
-.hero-dot.warn { background: #EB6834; box-shadow: 0 0 0 5px #FFF6DC; }
-.hero-dot.bad { background: #E8397C; box-shadow: 0 0 0 5px #FFE9F5; }
+.hero-age.ok .hero-big { color: var(--ok); }
+.hero-age.warn .hero-big { color: var(--sun-mid); }
+.hero-age.bad .hero-big { color: var(--pink-mid); }
+.hero-age.bad { box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 4%, transparent), 0 10px 28px color-mix(in srgb, var(--pink-mid) 18%, transparent); }
+.hero-dot { width: 14px; height: 14px; border-radius: 50%; flex: none; background: var(--ink-4); box-shadow: 0 0 0 5px var(--inset); }
+.hero-dot.ok { background: var(--ok); box-shadow: 0 0 0 5px var(--mint-tint); }
+.hero-dot.warn { background: var(--orange); box-shadow: 0 0 0 5px var(--sun-tint); }
+.hero-dot.bad { background: var(--pink-mid); box-shadow: 0 0 0 5px var(--pink-tint); }
 @media (prefers-reduced-motion: no-preference) {
   .hero-dot.bad { animation: hero-pulse 1.6s ease-in-out infinite; }
-  @keyframes hero-pulse { 0%, 100% { box-shadow: 0 0 0 5px #FFE9F5; } 50% { box-shadow: 0 0 0 9px #FFE9F5; } }
+  @keyframes hero-pulse { 0%, 100% { box-shadow: 0 0 0 5px var(--pink-tint); } 50% { box-shadow: 0 0 0 9px var(--pink-tint); } }
 }
 .hero-sub { font-family: var(--f-ui); font-size: 13px; color: var(--ink-2); }
 .hero-sub .hero-link { font-weight: 600; text-decoration: none; }
 .hero-where { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .hero-tile { align-items: center; text-align: center; gap: 8px; padding: 18px 12px; }
-.hero-tile.on { background: #DDF7EC; color: #0E8A5E; box-shadow: none; }
-.hero-tile.dim { background: #F1ECF5; color: var(--ink-3); box-shadow: none; }
-.hero-tile.off { background: #F1ECF5; color: #A899B8; box-shadow: none; }
+.hero-tile.on { background: var(--mint-tint); color: var(--ok); box-shadow: none; }
+.hero-tile.dim { background: var(--well); color: var(--ink-3); box-shadow: none; }
+.hero-tile.off { background: var(--well); color: var(--ink-4); box-shadow: none; }
 .hero-tile.off .hero-ico svg { stroke-dasharray: 3 3; }
 .hero-ico { display: inline-flex; width: 32px; height: 32px; }
 .hero-ico svg { width: 100%; height: 100%; }
@@ -3327,12 +3267,12 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .hero-days { gap: 10px; }
 .hero-strip { position: relative; height: 34px; border-bottom: 2px solid var(--line); }
 .hero-tick { position: absolute; bottom: 0; width: 3px; height: 16px; border-radius: 2px; background: var(--ink-4); transform: translateX(-50%); }
-.hero-tick.newest { background: #E8397C; height: 22px; }
+.hero-tick.newest { background: var(--pink-mid); height: 22px; }
 .hero-days-foot { display: flex; justify-content: space-between; font-family: var(--f-ui); font-size: 11px; color: var(--ink-3); }
 .hero-check { align-items: center; text-align: center; gap: 8px; padding: 18px 12px; box-shadow: none; }
-.hero-check.ok { background: #DDF7EC; color: #0E8A5E; }
-.hero-check.bad { background: #FFE9F5; color: #D9367A; }
-.hero-check.none { background: #F1ECF5; color: var(--ink-3); }
+.hero-check.ok { background: var(--mint-tint); color: var(--ok); }
+.hero-check.bad { background: var(--pink-tint); color: var(--pink-mid); }
+.hero-check.none { background: var(--well); color: var(--ink-3); }
 .hero-note { font-family: var(--f-ui); font-size: 13px; color: var(--ink-3); }
 @media (max-width: 960px) {
   .snap-hero { grid-template-columns: 1fr 1fr; }
@@ -3340,7 +3280,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 
 .snap-tabs { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--line); margin: 6px 0 18px; }
 .snap-tablist { display: flex; align-items: center; gap: 6px; }
-.snap-tab.has-alarm::after { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #E8397C; margin-left: 7px; vertical-align: middle; }
+.snap-tab.has-alarm::after { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--pink-mid); margin-left: 7px; vertical-align: middle; }
 .snap-tab-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; padding-bottom: 8px; }
 .snap-tab {
   font-family: var(--f-ui); font-size: 15px; font-weight: 500; color: var(--ink-2);
@@ -3358,12 +3298,12 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 
 /* ── Snapshots tabs (round 3): offers are buttons, questions are controls
    that show the value in force. ── */
-.stg-card { background: #fff; border: 0; border-radius: 22px; box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07); padding: 20px 22px; }
+.stg-card { background: var(--surface); border: 0; border-radius: var(--r-xl); box-shadow: var(--shadow); padding: 20px 22px; }
 .stg-card-t { display: flex; align-items: center; gap: 10px; font-family: var(--f-display); font-size: 18px; font-weight: 700; letter-spacing: -0.01em; color: var(--ink); margin: 0 0 14px; }
 .stg-card-t .field-label { font-family: var(--f-display); font-size: 18px; font-weight: 700; color: var(--ink); }
 .stg-ico { display: inline-flex; width: 24px; height: 24px; flex: none; }
 .stg-ico svg { width: 100%; height: 100%; }
-.stg-ico-pink { color: #D9367A; } .stg-ico-mint { color: #0E8A5E; } .stg-ico-orange { color: #EB6834; } .stg-ico-sun { color: #B8860B; }
+.stg-ico-pink { color: var(--pink-mid); } .stg-ico-mint { color: var(--ok); } .stg-ico-orange { color: var(--orange); } .stg-ico-sun { color: var(--sun-mid); }
 .stg-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch; }
 .stg-two > .stg-card, .stg-two > .card { display: flex; flex-direction: column; }
 .stg-two > .card.stg-card .cn-fine { margin-top: auto; }
@@ -3375,11 +3315,11 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .bk-schedule.stg-card .bk-card-body { padding: 0; }
 .sch-pills { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin: 2px 0 12px; }
 @media (max-width: 700px) { .sch-pills { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-.sch-pill { font-family: var(--f-ui); font-size: 14px; font-weight: 600; padding: 11px 0; border-radius: 14px; border: 1.5px solid var(--line); background: #fff; color: var(--ink); cursor: pointer; }
+.sch-pill { font-family: var(--f-ui); font-size: 14px; font-weight: 600; padding: 11px 0; border-radius: var(--r-lg); border: 1.5px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
 .sch-pill:hover { border-color: var(--ink-4); }
-.sch-pill.is-on { background: var(--brand-warm-a); border-color: var(--brand-warm-a); color: #fff; font-weight: 700; }
+.sch-pill.is-on { background: var(--brand-warm-a); border-color: var(--brand-warm-a); color: var(--white); font-weight: 700; }
 .keep-step { display: flex; align-items: center; gap: 12px; margin: 4px 0 10px; }
-.keep-btn { width: 42px; height: 42px; border-radius: 50%; border: 1.5px solid var(--line); background: #fff; font-size: 20px; color: var(--ink); cursor: pointer; flex: none; }
+.keep-btn { width: 42px; height: 42px; border-radius: 50%; border: 1.5px solid var(--line); background: var(--surface); font-size: 20px; color: var(--ink); cursor: pointer; flex: none; }
 .keep-btn:hover { border-color: var(--ink-4); }
 .keep-step .keep-n { font-family: var(--f-display); font-size: 40px; font-weight: 800; letter-spacing: -0.02em; width: 110px; text-align: center; border: 0; background: transparent; color: var(--ink); padding: 0; height: auto; -moz-appearance: textfield; }
 .keep-step .keep-n::-webkit-outer-spin-button, .keep-step .keep-n::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
@@ -3388,16 +3328,16 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 .keep-card .keep-reach { font-size: 15px; line-height: 1.5; color: var(--ink); margin: 14px 0 0; }
 .keep-shape { margin: 8px 0 4px; }
 .ks-row { display: flex; align-items: flex-end; gap: 6px; height: 44px; }
-.ks-tile { width: 28px; height: 36px; border-radius: 6px; background: #DDF7EC; border: 1.5px solid #0E8A5E; flex: none; }
-.ks-tile.ks-newest { background: #FF4D8D; border-color: #E8397C; height: 44px; }
+.ks-tile { width: 28px; height: 36px; border-radius: var(--r-sm); background: var(--mint-tint); border: 1.5px solid var(--ok); flex: none; }
+.ks-tile.ks-newest { background: var(--pink); border-color: var(--pink-mid); height: 44px; }
 .ks-tile.ks-open { border-left-style: dashed; }
 .ks-tile.ks-gone { background: transparent; border: 1.5px dashed var(--ink-4); opacity: .5; height: 30px; }
 .ks-cut { width: 2px; height: 44px; background: var(--ink-4); border-radius: 1px; margin: 0 4px; flex: none; }
 .ks-more { font-family: var(--f-ui); font-size: 12px; font-weight: 600; color: var(--ink-3); align-self: center; }
 .ks-axis { display: flex; justify-content: space-between; margin-top: 6px; padding-top: 6px; border-top: 2px solid var(--line); font-family: var(--f-ui); font-size: 12px; color: var(--ink-3); }
-.ks-right { color: #E8397C; font-weight: 600; }
-.where-tile { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 16px; background: var(--surface-3); margin: 0 0 10px; }
-.where-tile.on { background: #DDF7EC; color: #0E8A5E; }
+.ks-right { color: var(--pink-mid); font-weight: 600; }
+.where-tile { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: var(--r-lg); background: var(--inset); margin: 0 0 10px; }
+.where-tile.on { background: var(--mint-tint); color: var(--ok); }
 .where-ico { display: inline-flex; width: 26px; height: 26px; flex: none; color: currentColor; }
 .where-ico svg { width: 100%; height: 100%; }
 .where-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
@@ -3411,39 +3351,39 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
 @media (max-width: 960px) { .snap-checks { grid-template-columns: 1fr; } }
 .snap-checks .vfy-region { margin-top: 0; }
 .snap-checks-l, .snap-checks-r { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.snap-checks .tcard { background: #fff; border: 0; border-radius: 22px; box-shadow: 0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07); padding: 22px 24px; }
+.snap-checks .tcard { background: var(--surface); border: 0; border-radius: var(--r-xl); box-shadow: var(--shadow); padding: 22px 24px; }
 .snap-checks .vfy-region-head .ov-panel-title { font-size: 12px; font-family: var(--f-ui); font-weight: 500; color: var(--ink-3); }
 .snap-checks .vfy-control .vfy-region-head { margin-top: 18px; }
 .snap-checks .vfy-actions { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
 .snap-checks .vfy-mode { min-width: 0; width: 100%; }
 .snap-checks .vfy-run { align-self: flex-start; }
 .vfy-state { display: flex; align-items: center; gap: 14px; }
-.vfy-state-ico { width: 56px; height: 56px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; flex: none; background: var(--surface-3); color: var(--ink-3); }
-.vfy-state.ok .vfy-state-ico { background: #DDF7EC; color: #0E8A5E; }
-.vfy-state.bad .vfy-state-ico { background: #FFE9F5; color: #D9367A; }
-.vfy-state.warn .vfy-state-ico { background: #FFF6DC; color: #B8860B; }
+.vfy-state-ico { width: 56px; height: 56px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; flex: none; background: var(--inset); color: var(--ink-3); }
+.vfy-state.ok .vfy-state-ico { background: var(--mint-tint); color: var(--ok); }
+.vfy-state.bad .vfy-state-ico { background: var(--pink-tint); color: var(--pink-mid); }
+.vfy-state.warn .vfy-state-ico { background: var(--sun-tint); color: var(--sun-mid); }
 .vfy-vico { display: inline-flex; width: 30px; height: 30px; }
 .vfy-vico svg { width: 100%; height: 100%; }
 .vfy-state-t { font-family: var(--f-display); font-size: 22px; font-weight: 800; letter-spacing: -0.01em; color: var(--ink); line-height: 1.1; }
-.vfy-state.bad .vfy-state-t { color: #D9367A; }
+.vfy-state.bad .vfy-state-t { color: var(--pink-mid); }
 .vfy-state-s { font-family: var(--f-ui); font-size: 13px; color: var(--ink-2); margin-top: 3px; }
 .vfy-hmark { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex: none; }
-.vfy-hmark.ok { background: #DDF7EC; color: #0E8A5E; }
-.vfy-hmark.bad { background: #FFE9F5; color: #D9367A; }
-.vfy-hmark.none { background: var(--surface-3); color: var(--ink-3); }
+.vfy-hmark.ok { background: var(--mint-tint); color: var(--ok); }
+.vfy-hmark.bad { background: var(--pink-tint); color: var(--pink-mid); }
+.vfy-hmark.none { background: var(--inset); color: var(--ink-3); }
 
 .bk-lane-head { display: flex; align-items: center; gap: 10px; }
-.bk-lane-ico { display: inline-flex; width: 26px; height: 26px; color: #D9367A; flex: none; }
+.bk-lane-ico { display: inline-flex; width: 26px; height: 26px; color: var(--pink-mid); flex: none; }
 /* !important: the file icon constant carries an inline 16px size */
 .bk-lane-ico svg { width: 100% !important; height: 100% !important; }
 
 .stg-top { margin-bottom: 4px; }
-.stg-top .card.stg-card { background: #fff; }
+.stg-top .card.stg-card { background: var(--surface); }
 .stg-top .card.stg-card::after { display: none; }
-.bl-case { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 12px; font-size: 13px; }
-.bl-case.bl-ok { background: #DDF7EC; color: #0E8A5E; }
-.bl-case.bl-part { background: #FFF6DC; color: #7A5F00; }
-.bl-case.bl-no { background: #FFE9F5; color: #B02762; }
+.bl-case { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: var(--r-md); font-size: 13px; }
+.bl-case.bl-ok { background: var(--mint-tint); color: var(--ok); }
+.bl-case.bl-part { background: var(--sun-tint); color: var(--sun-deep); }
+.bl-case.bl-no { background: var(--pink-tint); color: var(--pink-deep); }
 .bl-case .bl-name { min-width: 0; font-weight: 700; color: inherit; white-space: nowrap; }
 .bl-case .bl-say { color: inherit; }
 /* The row's own name repeats the panel title now that only the selected
@@ -3455,4 +3395,4 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--blue); }
    S3 field; the staged-builds note closes the .sql lane. */
 .s3-signing { margin-top: 10px; }
 .s3-signing[hidden] { display: none; }
-.stg-staged { margin-top: 12px; padding-top: 10px; border-top: 1px solid oklch(0.9 0.02 300 / 0.6); }
+.stg-staged { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
