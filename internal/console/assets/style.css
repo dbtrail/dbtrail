@@ -532,29 +532,8 @@ button { font-family: inherit; }
 /* ============================================================
    filter bar
    ============================================================ */
-.filters {
-  display: flex; flex-wrap: wrap; gap: 16px 18px; align-items: flex-end;
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius);
-  padding: 20px;
-  box-shadow: var(--panel-shadow);
-  margin-bottom: 26px;
-}
-[data-dir="paper"] .filters {
-  padding: 0 0 22px; border-radius: 0;
-  border-bottom: 1px solid var(--line);
-  gap: 14px 26px;
-}
-[data-dir="trail"] .filters {
-  position: relative; overflow: hidden;
-  border: 1px solid var(--panel-border);
-  padding-left: 26px;
-}
-[data-dir="trail"] .filters::before {
-  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px;
-  background: linear-gradient(var(--accent-a), var(--accent-b));
-}
+/* the filter form is a card (#1950) */
+.filters { display: flex; flex-wrap: wrap; gap: 16px 18px; align-items: flex-end; padding: 20px; margin-bottom: 26px; }
 
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .field-label {
@@ -584,21 +563,12 @@ button { font-family: inherit; }
   outline: none; border-color: var(--accent);
   box-shadow: var(--focus-ring);
 }
-[data-dir="paper"] .input, [data-dir="paper"] .select {
-  border: none; border-bottom: 1.5px solid var(--line);
-  border-radius: 0; padding-left: 0; background-color: transparent;
-}
-[data-dir="paper"] .select { background-position: right 2px center; padding-right: 22px; }
-[data-dir="paper"] .input:focus, [data-dir="paper"] .select:focus {
-  box-shadow: none; border-bottom-color: var(--accent);
-}
 .field--sm { width: 116px; }
 .field--md { width: 168px; }
 .field--lg { width: 210px; }
 .field--grow { flex: 1 1 150px; }
 
 .filter-actions { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-[data-dir="paper"] .filter-actions { width: 100%; padding-top: 4px; }
 
 /* ============================================================
    smart search (Events)
@@ -891,7 +861,6 @@ button { font-family: inherit; }
 .diff-row-changed .diff-before { background: var(--diff-del-bg); }
 .diff-row-changed .diff-after  { background: var(--diff-add-bg); }
 .diff-grid > div:nth-last-child(-n+3) { border-bottom: none; }
-.diff-same { color: var(--ink-3); }
 
 /* diff footer — the "deshazlo" moment, right where you understood the change */
 .diff-foot {
@@ -900,29 +869,22 @@ button { font-family: inherit; }
   background: var(--raised);
 }
 .diff-foot-note { font-size: var(--fs-xs); color: var(--ink-3); margin-right: auto; }
-[data-dir="trail"] .diff-foot { background: var(--accent-bg); }
 
 /* ============================================================
    recover context banner — scope made unmissable
    ============================================================ */
-.ctx-banner {
-  display: flex; align-items: center; gap: 14px;
-  border: 1px solid var(--line); border-left: 3px solid var(--accent);
-  border-radius: var(--radius); padding: 15px 16px 15px 17px;
-  margin-bottom: 22px; background: var(--accent-bg);
-}
-[data-accent="warm"] .ctx-banner { border-left-color: var(--orange-2); }
+/* the Undo banner: the alert recipe's accent variant (#1950), a selection,
+   not an alarm; its words in the UI face, the target in the data face. */
+.ctx-banner { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; color: var(--ink); background: var(--accent-bg); border-color: var(--accent); }
 .ctx-banner .badge { flex: none; align-self: flex-start; margin-top: 1px; }
 .ctx-banner .ctx-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ctx-eyebrow {
-  font-family: var(--f-mono); font-size: var(--fs-xs); font-weight: 600;
-  letter-spacing: 0.07em; text-transform: uppercase; color: var(--accent);
+  font-family: var(--f-ui); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent);
 }
-[data-accent="warm"] .ctx-eyebrow { color: var(--orange-2); }
 .ctx-title { font-family: var(--f-mono); font-size: var(--fs-md); font-weight: 600; color: var(--ink); }
-.ctx-detail { font-family: var(--f-mono); font-size: var(--fs-sm); color: var(--ink-2); }
+.ctx-detail { font-family: var(--f-ui); font-size: var(--fs-sm); color: var(--ink-2); }
 .ctx-banner .spacer { flex: 1; }
-.ctx-banner #ctx-clear { flex: none; }
 
 /* ============================================================
    status cards
@@ -966,7 +928,7 @@ button { font-family: inherit; }
    card-shaped panel wears this rule; a feature's own class keeps only its
    inner layout. Tints are OPT-IN modifiers (violet, sun: the two structure
    tints, at most two per screen), never a rotation. */
-.card, .tcard, .ov-panel, .hero-card, .stg-card, .fr-card {
+.card, .tcard, .ov-panel, .hero-card, .stg-card, .fr-card, .codepanel, .state-section, .filters {
   background: var(--surface); border: 0; border-radius: var(--r-xl);
   box-shadow: var(--shadow); min-width: 0;
 }
@@ -1003,32 +965,20 @@ button { font-family: inherit; }
 /* ============================================================
    code / SQL output
    ============================================================ */
-.codepanel {
-  border: 1px solid var(--line); border-radius: var(--radius);
-  overflow: hidden; background: var(--surface);
-  box-shadow: var(--panel-shadow);
-}
-.code-head {
-  display: flex; align-items: center; gap: 12px;
-  padding: 11px 16px; border-bottom: 1px solid var(--line);
-  background: var(--raised);
-}
-.code-head .lbl { font-family: var(--f-mono); font-size: 12px; color: var(--ink-2); }
-.code-head .lbl b { color: var(--ink); }
+/* the SQL card (#1950): the card recipe, the one header pattern (name and
+   counts left, Copy and Download right), a footer; mono for the SQL only. */
+.codepanel { overflow: hidden; }
+.code-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 20px; border-bottom: 1px solid var(--line-soft); }
+.code-head .lbl { flex: 1 1 200px; min-width: 0; font-family: var(--f-ui); font-size: var(--fs-sm); color: var(--ink-2); }
+.code-head .lbl b { font-family: var(--f-mono); color: var(--ink); }
 .code-head .spacer { flex: 1; }
+.code-foot { padding: 10px 20px; border-top: 1px solid var(--line-soft); font-size: var(--fs-xs); color: var(--ink-3); }
 .code {
   margin: 0; padding: 18px 20px; overflow-x: auto;
   font-family: var(--f-mono); font-size: 13px; line-height: 1.7;
   color: var(--ink); tab-size: 2;
   counter-reset: ln;
 }
-.code .cl { display: block; white-space: pre; }
-.code .tok-kw { color: var(--accent-2); font-weight: 600; }
-.code .tok-fn { color: var(--orange-2); }
-.code .tok-str { color: var(--insert); }
-.code .tok-num { color: var(--delete); }
-.code .tok-com { color: var(--ink-4); font-style: italic; }
-.code .tok-id { color: var(--ink); }
 
 /* ============================================================
    empty / placeholder states
@@ -1100,7 +1050,6 @@ button { font-family: inherit; }
 @keyframes railgrow { from { transform: scaleY(0); } to { transform: scaleY(1); } }
 /* keep the spine calm-gray only for the default blue accent; any warm/color accent paints it */
 [data-accent="blue"][data-dir="studio"] .timeline::before { background: var(--line); }
-[data-accent="blue"][data-dir="paper"] .timeline::before { background: var(--line); width: 1.5px; }
 
 
 .tl-node {
@@ -1396,7 +1345,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    ============================================================ */
 [data-density="compact"] .view { padding-top: 28px; }
 [data-density="compact"] .filters { padding: 14px 16px; margin-bottom: 18px; gap: 12px 16px; }
-[data-dir="paper"][data-density="compact"] .filters { padding: 0 0 14px; }
 [data-density="compact"] .input, [data-density="compact"] .select { height: 32px; }
 [data-density="compact"] .btn { height: 32px; }
 [data-density="compact"] .ev-row { padding-top: 8px; padding-bottom: 8px; }
@@ -1430,15 +1378,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
   font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
   padding: 4px 11px; border-radius: var(--r-pill);
   background: var(--inset); color: var(--ink-2);
-}
-/* the dark code block: SQL and DSNs on ink, the strongest same-product
-   signal the site sends. Defined with the recipe; the page sweeps
-   (#1415/#1419) adopt it where code is rendered. */
-.code-ink {
-  background: var(--strip); color: var(--strip-ink);
-  border-radius: var(--radius); padding: 12px 15px;
-  font-family: var(--f-mono); font-size: 12.5px; line-height: 1.55;
-  overflow-x: auto;
 }
 
 /* ============================================================
@@ -1786,15 +1725,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .ov-coverage span { text-transform: uppercase; letter-spacing: 0.06em; font-size: var(--fs-xs); }
 .ov-coverage b { color: var(--ink); font-weight: 500; }
 
-/* filter chip on Events */
-.filter-chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-family: var(--f-mono); font-size: 12px; color: var(--accent);
-  background: var(--accent-bg); border: 1px solid transparent; border-radius: var(--r-pill);
-  padding: 3px 6px 3px 11px; cursor: pointer; margin-left: 12px;
-}
-[data-accent="warm"] .filter-chip { color: var(--orange-2); }
-.filter-chip svg { width: 12px; height: 12px; }
 .filter-chip:hover { border-color: currentColor; }
 
 /* ============================================================
@@ -1888,14 +1818,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 /* Restore: the folded-in row-state panel (#1298). Reads as a section of the
    page rather than a second form — the whole point of the merge is that the
    target above is entered once. */
-.state-section {
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius);
-  padding: 18px 20px 20px;
-  box-shadow: var(--panel-shadow);
-  margin-bottom: 26px;
-}
+.state-section { padding: 18px 20px 20px; margin-bottom: 26px; }
 .state-title { margin: 0 0 6px; }
 .state-note { color: var(--ink-3); font-size: 13px; max-width: 72ch; margin: 0 0 14px; }
 .state-bar { display: flex; flex-wrap: wrap; gap: 16px 18px; align-items: flex-end; }
@@ -2032,7 +1955,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 
 /* generic empty / deleted notes */
 .deleted-note {
-  font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2);
+  font-family: var(--f-ui); font-size: 13px; color: var(--ink-2);
   background: var(--raised); border: 1px solid var(--line);
   border-radius: var(--radius-sm); padding: 14px 16px;
 }
@@ -2042,7 +1965,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    orange (a degraded capture), ok green (an affirmation), muted the page's own
    ink (an ACKNOWLEDGED record, #1314: still on the page, no longer alarming;
    deleting it would trade an annoyance for lost evidence). */
-.error-box, .bad-box, .ok-box, .warn-box, .muted-box {
+.error-box, .bad-box, .ok-box, .warn-box, .muted-box, .ctx-banner, .warn-item {
   font-family: var(--f-ui); font-size: 13.5px; border: 1px solid;
   border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0; white-space: pre-wrap;
 }
@@ -2066,12 +1989,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 }
 .warn-details[open] > summary { margin-bottom: 4px; }
 .warnings:empty { display: none; }
-.warn-item {
-  display: flex; gap: 8px; align-items: flex-start;
-  font-family: var(--f-mono); font-size: 12px; color: var(--orange-2);
-  background: var(--orange-bg); border: 1px solid var(--ochre);
-  border-radius: var(--radius-sm); padding: 9px 12px; margin: 6px 0;
-}
+.warn-item { display: flex; gap: 8px; align-items: flex-start; color: var(--orange-2); background: var(--orange-bg); border-color: var(--ochre); padding: 9px 12px; margin: 6px 0; }
 /* Info notes (#1365): the quiet sibling of .warn-item for the response
    `notes` list — benign audit facts (the archive-elision record) whose job is
    auditability, not attention. Muted ink (ink-3 meets the >=4.5:1 floor), no
@@ -2079,7 +1997,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    the "benign fact styled like an incident" bug this class exists to end. */
 .notes:empty { display: none; }
 .note-item {
-  font-family: var(--f-mono); font-size: 12px; color: var(--ink-3);
+  font-family: var(--f-ui); font-size: var(--fs-sm); color: var(--ink-3);
   padding: 2px 0; margin: 4px 0;
 }
 
@@ -2105,8 +2023,9 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .statetable { width: 100%; border-collapse: collapse; font-family: var(--f-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
 .statetable th, .statetable td {
   text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line-soft);
-  vertical-align: top;
+  vertical-align: top; height: 40px; box-sizing: border-box;
 }
+.statetable tr:hover > * { background: var(--raised); }
 .statetable th { color: var(--ink-3); font-weight: 600; width: 200px; }
 .statetable td { color: var(--ink); }
 
@@ -2529,13 +2448,10 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .dt-input { width: 100%; padding-right: 32px; }
 .dt-trigger { position: absolute; right: 4px; top: 4px; }
 .dt-trigger-ic svg { width: 15px; height: 15px; }
-[data-dir="paper"] .dt-trigger { right: -2px; }
 
 /* Rendered into document.body (position:fixed, JS-positioned) rather than
-   in-flow next to .dt-wrap: [data-dir="trail"] .filters above sets
-   overflow:hidden for its accent bar (see .filters::before), which would
-   clip an in-flow popover under that skin. Positioning math lives in
-   toggleDatePicker() in app.js. */
+   in-flow next to .dt-wrap, so no clipping ancestor can cut it. Positioning
+   math lives in toggleDatePicker() in app.js. */
 .dt-pop {
   position: fixed; z-index: 55; width: 264px;
   background: var(--surface); border: 1px solid var(--line);
@@ -2957,7 +2873,6 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .bk-src-k { font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; color: var(--ink-4); min-width: 30px; }
 .bk-src-n { font-size: var(--fs-xs); color: var(--ink-4); }
 .bk-where { font-size: var(--fs-xs); color: var(--ink-4); border: 1px solid var(--line-soft); border-radius: var(--r-pill); padding: 1px 8px; white-space: nowrap; }
-.ctx-srcs { display: grid; gap: 2px; min-width: 0; }
 /* Backup detail: how each table's rows got into the snapshot (#1545). */
 .bk-made { font-size: var(--fs-xs); color: var(--ink-3); }
 .bk-made-from { color: var(--ink-4); }
@@ -3114,6 +3029,30 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .fr-fold::before { content: "\25B8 "; }
 .fr-card.fr-open .fr-fold::before { content: "\25BE "; }
 .rc-restore-slot { margin-top: 20px; }
+/* the row before and after the undo, drawn (#1950): two tiles, the arrow
+   with the verb, the changed cells on the diff tokens, the cascade children
+   as a stack beside the result. */
+.undo-draw { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 14px; align-items: center; margin: 0 0 16px; }
+.undo-tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; min-width: 0; }
+.undo-tile.undo-gone { border-style: dashed; background: transparent; }
+.undo-tile-h { font-family: var(--f-ui); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); background: var(--raised); padding: 6px 12px; }
+.undo-gone .undo-tile-h { background: transparent; }
+.undo-cell { display: flex; justify-content: space-between; gap: 12px; padding: 5px 12px; font-family: var(--f-mono); font-size: var(--fs-xs); border-top: 1px solid var(--line-soft); }
+.undo-k { color: var(--ink-3); }
+.undo-v { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.undo-cell.undo-del { background: var(--diff-del-bg); } .undo-cell.undo-del .undo-v { color: var(--diff-del); }
+.undo-cell.undo-add { background: var(--diff-add-bg); } .undo-cell.undo-add .undo-v { color: var(--diff-add); }
+.undo-more, .undo-none { padding: 6px 12px; font-size: var(--fs-xs); color: var(--ink-4); border-top: 1px solid var(--line-soft); }
+.undo-none { border-top: 0; padding: 18px 12px; text-align: center; }
+.undo-arrow { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 96px; }
+.undo-verb { font-family: var(--f-mono); font-size: var(--fs-xs); font-weight: 700; color: var(--ink); white-space: nowrap; }
+.undo-line { position: relative; width: 100%; height: 12px; }
+.undo-line::before { content: ""; position: absolute; left: 0; right: 9px; top: 5px; height: 2px; background: var(--ink-3); border-radius: 2px; }
+.undo-line::after { content: ""; position: absolute; right: 0; top: 0; border: 6px solid transparent; border-left: 9px solid var(--ink-3); border-right: 0; }
+.undo-kids { grid-column: 3; display: flex; align-items: center; gap: 4px; font-size: var(--fs-xs); color: var(--ink-2); }
+.undo-kid { width: 14px; height: 18px; border-radius: 3px; background: var(--diff-add-bg); border: 1px solid var(--diff-add); flex: none; }
+.undo-kids-t { margin-left: 6px; }
+@media (max-width: 640px) { .undo-draw { grid-template-columns: 1fr; } .undo-line { width: 40px; transform: rotate(90deg); margin: 14px 0; } .undo-kids { grid-column: 1; } }
 
 /* ── Snapshots: the hero and the tabs (round 3) ─────────────────────────────
    The hero SHOWS the copy: its age (big, with a dot the schedule colours),

@@ -4339,11 +4339,10 @@ function downloadEventsCSV(events) {
 
 function renderRecover(params) {
   const v = VIEW(); clear(v);
-  const sub = el("p", { class: "page-sub" },
-    "See a row as it was at any moment, and get the SQL that puts it back. ",
-    el("b", { text: "Nothing is ever executed" }),
-    "; copy or download the script and apply it yourself after review.");
-  v.append(pageHead("Restore", sub));
+  // No opening sentence (#1950): the drawing above the script shows what an
+  // undo does, and "nothing runs on its own" is the SQL card's footer, where
+  // the script is.
+  v.append(pageHead("Restore", null));
 
   // Context banner when arriving via an event "Undo" (pendingRecover).
   const ctx = pendingRecover;
@@ -4431,7 +4430,10 @@ function renderRecover(params) {
   v.append(el("div", { id: "recover-warnings", class: "warnings" }));
   v.append(el("div", { id: "recover-notes", class: "notes" }));
   v.append(el("div", { id: "recover-preview" }));
-  v.append(el("div", { id: "recover-out" }));
+  const out = el("div", { id: "recover-out" });
+  // Empty until a change is picked (#1950): what will appear here, drawn.
+  if (!ctx) out.append(undoEmptyState());
+  v.append(out);
 
   form.addEventListener("submit", (e) => { e.preventDefault(); generateUndo(form); });
   // Editing the target retires the anchor, and the banner with it.
@@ -4888,12 +4890,17 @@ async function generateUndo(form) {
       if (victims) parts.push("restores " + victims + " related row(s) that MySQL deleted automatically");
       if (setNulls) parts.push("fixes " + setNulls + " reference(s) that were cleared automatically");
       if (keyRestores) parts.push("fixes " + keyRestores + " reference(s) that MySQL re-pointed automatically");
+      // One line (#1950): the drawing's child stack says the rest.
       out.append(el("div", { class: "ctx-banner" },
         el("span", { class: "badge b-baseline", text: "CASCADE" }),
         el("div", { class: "ctx-main" },
-          el("span", { class: "ctx-eyebrow", text: "Also repairing rows MySQL changed automatically along with this one" }),
-          el("span", { class: "ctx-detail", text: "this script also " + parts.join(", ") + "." }))));
+          el("span", { class: "ctx-detail", text: "This script also " + parts.join(", ") + "." }))));
     }
+    // The drawing (#1950): only when the change was picked on Events, where
+    // its row images are; a free search reverses many events and has the
+    // preview list instead.
+    const ctx = pendingRecover;
+    if (ctx && (ctx.before || ctx.after) && form.elements.event && form.elements.event.value) out.append(undoDrawing(ctx, data));
     const meta = (data.cascade_detected
       ? data.statement_count + " statement(s) · " + (data.victim_count || 0) + " cascade child row(s) · " +
         (data.set_null_count || 0) + " SET NULL restore(s) · " + (data.key_restore_count || 0) + " FK restore(s)"
@@ -4934,10 +4941,12 @@ function codePanel(sql, metaLabel) {
   const lbl = el("span", { class: "lbl" }, el("b", { text: "reversal.sql" }), " · " + (metaLabel || "read-only preview"));
   head.append(lbl);
   head.append(el("span", { class: "spacer" }));
-  head.append(el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: copySQL }));
-  head.append(el("button", { class: "btn btn-sm", type: "button", text: "Download", onclick: downloadSQL }));
+  head.append(el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Copy", onclick: copySQL }));
+  head.append(el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Download", onclick: downloadSQL }));
   panel.append(head);
   panel.append(el("pre", { class: "code", text: sql }));
+  // The card's footer (#1950): the promise the page used to open with.
+  panel.append(el("div", { class: "code-foot", text: "Nothing runs on its own. Copy or download the script and apply it yourself after review." }));
   return panel;
 }
 function copySQL() {
@@ -4945,11 +4954,74 @@ function copySQL() {
 }
 function downloadSQL() { downloadBlob("dbtrail-undo.sql", lastSQL, "application/sql"); }
 
+// UNDO_EMPTY_ART: a row now, an arrow back, the row as it was, drawn
+// (static, so svgEl is right here).
+const UNDO_EMPTY_ART = `<svg viewBox="0 0 160 72" aria-hidden="true"><rect x="2" y="14" width="58" height="44" rx="8" fill="var(--surface)" stroke="var(--line)"/><rect x="12" y="26" width="26" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="12" y="40" width="38" height="5" rx="2.5" fill="var(--diff-del-bg)" stroke="var(--diff-del)"/><rect x="100" y="14" width="58" height="44" rx="8" fill="var(--surface)" stroke="var(--line)"/><rect x="110" y="26" width="26" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="110" y="40" width="38" height="5" rx="2.5" fill="var(--diff-add-bg)" stroke="var(--diff-add)"/><path d="M64 36h30" stroke="var(--ink-3)" stroke-width="2"/><path d="M88 30l7 6-7 6" fill="none" stroke="var(--ink-3)" stroke-width="2"/></svg>`;
+
+function undoEmptyState() {
+  const box = el("div", { class: "empty undo-empty" });
+  box.append(el("div", { class: "empty-art", "aria-hidden": "true" }, svgEl(UNDO_EMPTY_ART)));
+  box.append(el("h3", { text: "Pick a change to undo" }));
+  box.append(el("p", { text: "Undo on any row in Events, or fill in the target above. The script that puts the row back appears here." }));
+  return box;
+}
+
+// UNDO_VERB: what the undo of each change does, the word the arrow carries.
+const UNDO_VERB = { INSERT: "DELETE", UPDATE: "UPDATE back", DELETE: "re-INSERT" };
+
+// undoDrawing draws the affected row before and after the undo (#1950): the
+// row as it is now (the change's after-image), the arrow with what the
+// script does, and the row as the script leaves it (the before-image). A
+// deleted row is a dashed empty tile. Changed columns come first and wear
+// the diff tokens; the rest follow in the page's ink, capped, so the drawing
+// stays a glance. In the cascade case the child rows the script also puts
+// back stand beside the result as a stack. Built with el(); the text
+// alternative says the same in words.
+function undoDrawing(ctx, data) {
+  const type = String(ctx.type || "").toUpperCase();
+  const before = ctx.before || {}, after = ctx.after || {};
+  const changed = new Set(ctx.changed || []);
+  const whole = type === "INSERT" || type === "DELETE";
+  const cols = Array.from(new Set([...Object.keys(before), ...Object.keys(after)])).sort();
+  const ordered = cols.filter((c) => changed.has(c)).concat(cols.filter((c) => !changed.has(c)));
+  const shown = ordered.slice(0, 5), more = ordered.length - shown.length;
+  const short = (v) => { const s = valueToString(v); return s.length > 22 ? s.slice(0, 21) + "\u2026" : s; };
+  const tile = (title, row, gone, tone) => {
+    const t = el("div", { class: "undo-tile" + (gone ? " undo-gone" : "") });
+    t.append(el("div", { class: "undo-tile-h", text: title }));
+    if (gone) { t.append(el("div", { class: "undo-none", text: "no row" })); return t; }
+    shown.forEach((c) => {
+      const hot = whole || changed.has(c);
+      t.append(el("div", { class: "undo-cell" + (hot ? " " + tone : "") },
+        el("span", { class: "undo-k", text: c }), el("span", { class: "undo-v", text: short(row[c]), title: valueToString(row[c]) })));
+    });
+    if (more > 0) t.append(el("div", { class: "undo-more", text: "+" + more + " more column" + (more === 1 ? "" : "s") }));
+    return t;
+  };
+  const now = tile("now", after, type === "DELETE", "undo-del");
+  const then = tile("after the undo", before, type === "INSERT", "undo-add");
+  const arrow = el("div", { class: "undo-arrow" }, el("span", { class: "undo-verb", text: UNDO_VERB[type] || "undo" }), el("span", { class: "undo-line", "aria-hidden": "true" }));
+  const fig = el("div", { class: "undo-draw" }, now, arrow, then);
+  const kids = data && data.cascade_detected ? (data.victim_count || 0) : 0;
+  if (kids) {
+    const stack = el("div", { class: "undo-kids" });
+    for (let i = 0; i < Math.min(kids, 3); i++) stack.append(el("span", { class: "undo-kid" }));
+    stack.append(el("span", { class: "undo-kids-t", text: "+" + kids + " related row" + (kids === 1 ? "" : "s") + " MySQL deleted, re-inserted" }));
+    fig.append(stack);
+  }
+  const said = whole ? "" : shown.filter((c) => changed.has(c)).map((c) => c + " " + short(after[c]) + " back to " + short(before[c])).join(", ");
+  fig.setAttribute("role", "img");
+  fig.setAttribute("aria-label", "Undo of the " + type + " on " + ctx.schema + "." + ctx.table + " pk " + ctx.pk + ": " + (UNDO_VERB[type] || "undo") + (said ? ", " + said : "") + (kids ? "; " + kids + " related rows re-inserted" : "") + ".");
+  return fig;
+}
+
 // Bridge: an event → Recover, scoped to that row up to the event's timestamp.
 function undoEvent(e) {
   pendingRecover = {
     schema: e.schema_name, table: e.table_name, pk: e.pk_values,
     type: e.event_type, time: e.event_timestamp,
+    // The row images, for the drawing above the script (#1950).
+    before: e.row_before || null, after: e.row_after || null, changed: e.changed_columns || [],
     // The server's own identity token for this row, echoed back verbatim
     // (eventDTO.Anchor). Never rebuilt from `time`: that one is second-
     // granular and offset-less, which is exactly the ambiguity the anchor
