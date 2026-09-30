@@ -5,6 +5,7 @@ package parser
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
@@ -141,6 +142,28 @@ func (sp *StreamParser) SetSyncDDLHook(fn func(Event) error) {
 	sp.onDDL.Store(&fn)
 }
 
+// ErrResentCutTransaction marks a ResentCutTransactionError, for errors.Is.
+var ErrResentCutTransaction = errors.New("the source re-sent a transaction that was cut by a disconnect after some of its rows were captured")
+
+// ResentCutTransactionError: the connection to the source dropped in the
+// middle of a transaction, after Rows of its row events were already emitted,
+// and on reconnect the source sent the whole transaction again. Indexing the
+// re-send would put those rows in twice. The stream stops instead; capture
+// restarts from its last checkpoint, and that checkpoint's resume cleanup
+// deletes the partial copy (its GTID is not in the saved set) before the
+// transaction is read again in full.
+type ResentCutTransactionError struct {
+	GTID string
+	Rows int
+}
+
+func (e *ResentCutTransactionError) Error() string {
+	return fmt.Sprintf("the connection to the source dropped in the middle of transaction %s after %d of its row events were captured, "+
+		"and the source sent it again from the start; stopping so capture resumes from its last checkpoint, whose cleanup removes the partial copy", e.GTID, e.Rows)
+}
+
+func (e *ResentCutTransactionError) Is(target error) bool { return target == ErrResentCutTransaction }
+
 // Run reads events from the streamer and sends matching row events to out.
 // It tracks the current binlog filename (from RotateEvent) and GTID (from
 // GTIDEvent), and uses them to populate each emitted Event.
@@ -173,6 +196,31 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	// see the file parser's currentQueryText for the full contract.
 	var currentQueryText string
 
+	// Re-send guard. After a transparent reconnect in GTID mode, go-mysql
+	// resumes from the set it held BEFORE the last GTID event it read
+	// (BinlogSyncer.retrySync hands prevGset to the source), so the source
+	// sends that last transaction again. If this parser already saw it commit,
+	// indexing it again would duplicate its rows forever.
+	//
+	//   - lastCommittedGTID: the last transaction known COMPLETE: its XID (or
+	//     next-GTID fallback) commit was emitted, or, for a DDL that carries
+	//     rows (CREATE TABLE ... SELECT), its XID arrived. A plain DDL never
+	//     lands here: from the re-send alone it cannot be told apart from a
+	//     CREATE ... SELECT cut before its rows, so a re-sent DDL is processed
+	//     again (a second DDL event is cheap; lost rows are not).
+	//   - ddlTxnGTID: the GTID of a DDL transaction still open, promoted at its
+	//     XID.
+	//   - afterRotate: set by an artificial rotate and consumed by the next
+	//     transaction start. Servers send one at every (re)connect AND at every
+	//     binlog file switch, so it never means "reconnect" by itself: it only
+	//     arms two exact-GTID comparisons at the next transaction start.
+	//   - skipTxn: drop every event of a re-sent committed transaction until the
+	//     next transaction starts.
+	var lastCommittedGTID, ddlTxnGTID string
+	var afterRotate, skipTxn bool
+	// txnRows counts the row events emitted for the transaction in flight.
+	var txnRows int
+
 	// em is the stamped way out (#1223 T1). It is REBUILT on every delivered
 	// binlog event, just below, so each emitted row carries the time go-mysql
 	// handed us the event it came from. The closures below close over the
@@ -200,7 +248,43 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 		if err := em.send(ctx, commitEv); err != nil {
 			return err
 		}
+		lastCommittedGTID = currentGTID
 		currentGTID = "" // committed; the next-GTID fallback must not re-commit it
+		return nil
+	}
+
+	// beginTxn is shared by both flavors' GTID events. After a rotate, the
+	// same GTID as the transaction still waiting for its next-GTID fallback
+	// commit is that transaction sent again (cut by a disconnect, or with no
+	// XID): it was never committed, so it is not committed now either. Any
+	// other GTID means the pending one ended, and the fallback commits it as
+	// always (this is the file-switch case). Then it decides whether the new
+	// transaction is a re-send of one already complete (see the re-send guard
+	// above), which sets skipTxn.
+	beginTxn := func(hdr *replication.EventHeader, gtid string) error {
+		if afterRotate && currentGTID != "" && currentGTID == gtid {
+			if txnRows > 0 {
+				// Cut after some of its rows were already emitted (and may
+				// already be written). The re-send would index them again,
+				// and they cannot be taken back from here: stop, so capture
+				// restarts from its last checkpoint, whose cleanup deletes
+				// the partial copy before the transaction is read again.
+				return &ResentCutTransactionError{GTID: gtid, Rows: txnRows}
+			}
+			currentGTID = ""
+		}
+		if err := emitCommit(hdr); err != nil {
+			return err
+		}
+		currentGTID = gtid
+		skipTxn = afterRotate && gtid != "" && gtid == lastCommittedGTID
+		afterRotate = false
+		ddlTxnGTID = ""
+		txnRows = 0
+		if skipTxn {
+			sp.logger.Info("dropping a transaction the source re-sent after a reconnect; it was already captured",
+				"gtid", gtid, "file", currentFile)
+		}
 		return nil
 	}
 
@@ -291,9 +375,32 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 			lastLogPos = hdr.LogPos
 		}
 
+		// Events of a re-sent committed transaction are dropped until the next
+		// transaction starts. Rotations and GTID events still go through: the
+		// file name must stay current, and a GTID event ends the skip. A tagged
+		// GTID event (MySQL 8.4) starts a transaction too, so it ends the skip
+		// even though nothing below handles it.
+		if skipTxn {
+			switch binlogEv.Event.(type) {
+			case *replication.RotateEvent, *replication.GTIDEvent, *replication.MariadbGTIDEvent:
+			case *replication.GtidTaggedLogEvent:
+				skipTxn = false
+			default:
+				return nil
+			}
+		}
+
 		switch ev := binlogEv.Event.(type) {
 		case *replication.RotateEvent:
 			currentFile = string(ev.NextLogName)
+			if binlogEv.Header.Flags&replication.LOG_EVENT_ARTIFICIAL_F != 0 {
+				// (Re)connect or file switch. currentGTID is kept: whether the
+				// pending transaction ended is decided at the next transaction
+				// start (beginTxn). A skip in progress ends: after a reconnect
+				// the source starts over.
+				skipTxn = false
+				afterRotate = true
+			}
 
 		case *replication.GTIDEvent:
 			// A new transaction is starting, so the previous one has terminated. If
@@ -313,10 +420,13 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 			// statement before an idle period or shutdown stays uncommitted until
 			// traffic resumes — it is re-streamed on restart (harmless: these carry
 			// no rows). DML is unaffected (it commits immediately at its XID).
-			if err := emitCommit(binlogEv.Header); err != nil {
+			if err := beginTxn(binlogEv.Header, formatGTID(binlogEv.Header.EventType, ev.SID, ev.GNO)); err != nil {
 				return err
 			}
-			currentGTID = formatGTID(binlogEv.Header.EventType, ev.SID, ev.GNO)
+			if skipTxn {
+				currentGTID = ""
+				return nil
+			}
 			currentQueryText = "" // transaction boundary — statement text never crosses it
 			// immediate_commit_timestamp (µs since epoch), MySQL 8.0.1+; zero
 			// on older servers — the "unknown" value Event.CommitTsUS documents.
@@ -332,10 +442,13 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 			// GTIDEvent case above for the #491 next-GTID-fallback rationale.
 			// ev.GTID.String() yields "0-1-100" and "" for the zero GTID, so the
 			// emit guard inside emitGTIDTracking is built in.
-			if err := emitCommit(binlogEv.Header); err != nil {
+			if err := beginTxn(binlogEv.Header, ev.GTID.String()); err != nil {
 				return err
 			}
-			currentGTID = ev.GTID.String()
+			if skipTxn {
+				currentGTID = ""
+				return nil
+			}
 			currentQueryText = ""
 			// MariaDB's GTID event has no commit timestamp: reset rather than
 			// carry the previous transaction's value forward — a stale
@@ -374,6 +487,7 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 				if err := em.send(ctx, ddlEv); err != nil {
 					return err
 				}
+				ddlTxnGTID = currentGTID
 				// Table DDL auto-commits its own GTID; EventDDL is the commit
 				// boundary the consumer acts on, so clear the in-flight GTID to keep
 				// the next-GTID fallback from re-committing it. Other QueryEvents
@@ -421,6 +535,12 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 			// InnoDB transaction commit — the boundary at which it's safe to
 			// advance the durable GTID checkpoint (#491).
 			currentQueryText = ""
+			if currentGTID == "" && ddlTxnGTID != "" {
+				// The XID of a DDL transaction that carries rows (CREATE
+				// TABLE ... SELECT): now it is complete.
+				lastCommittedGTID = ddlTxnGTID
+				ddlTxnGTID = ""
+			}
 			if err := emitCommit(binlogEv.Header); err != nil {
 				return err
 			}
@@ -491,7 +611,7 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 		// and not where the consumer receives off `out`, because `out` is
 		// buffered and a receive-side stamp would swallow the queue wait, which
 		// is the largest part of the lag precisely when the indexer is behind.
-		em = emitter{ch: out, readAt: time.Now()}
+		em = emitter{ch: out, readAt: time.Now(), rows: &txnRows}
 
 		if err := handleEvent(binlogEv); err != nil {
 			if ctx.Err() != nil {

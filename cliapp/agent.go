@@ -738,7 +738,7 @@ func runBYOSStream(ctx context.Context, sourceDB *sql.DB, buf *buffer.Buffer, fc
 		return err
 	}
 
-	slog.Info("BYOS stream started", "start_gtid", agtStartGTID)
+	slog.Info("BYOS stream started")
 
 	// Run event loop.
 	events := make(chan parser.Event, 1000)
@@ -785,14 +785,15 @@ func byosSyncerConfig(serverID uint32, flavor, host string, port uint16, user, p
 	return cfg
 }
 
-// startBYOSSyncer starts the binlog syncer from the given GTID set or
-// from the server's current binlog position.
+// startBYOSSyncer starts the binlog syncer from the GTID set byosStartGTID
+// picks, or from the server's current binlog position when it picks none.
 func startBYOSSyncer(sourceDB *sql.DB, syncer *replication.BinlogSyncer, flavor, startGTID string) (*replication.BinlogStreamer, error) {
-	if startGTID != "" {
-		gset, err := parseBYOSStartGTID(flavor, startGTID)
-		if err != nil {
-			return nil, err
-		}
+	gset, err := byosStartGTID(flavor, startGTID, func() (string, error) { return config.CurrentMariaDBGTIDPos(sourceDB) })
+	if err != nil {
+		return nil, err
+	}
+	if gset != nil {
+		slog.Info("starting from GTID set", "gtid_set", gset.String(), "flavor", flavor)
 		s, err := syncer.StartSyncGTID(gset)
 		return s, parser.WrapReplicationError(err)
 	}
@@ -804,6 +805,31 @@ func startBYOSSyncer(sourceDB *sql.DB, syncer *replication.BinlogSyncer, flavor,
 	slog.Info("starting from current binlog position", "file", file, "pos", pos)
 	s, err := syncer.StartSync(gomysql.Position{Name: file, Pos: pos})
 	return s, parser.WrapReplicationError(err)
+}
+
+// byosStartGTID decides where the BYOS stream starts. An explicit --start-gtid
+// wins. Otherwise a MariaDB source starts in GTID mode from mariadbPos
+// (@@gtid_binlog_pos, every domain), the same default `stream` uses; a nil
+// result means "start at the current binlog position", which is what a MySQL
+// source always does here and what a MariaDB that has written no transaction
+// yet does. The agent keeps no checkpoint, so the mode only governs this
+// process's own reconnects. A failed or unparseable read is an error, never a
+// silent position start.
+func byosStartGTID(flavor, startGTID string, mariadbPos func() (string, error)) (gomysql.GTIDSet, error) {
+	if startGTID != "" {
+		return parseBYOSStartGTID(flavor, startGTID)
+	}
+	if flavor != gomysql.MariaDBFlavor {
+		return nil, nil
+	}
+	pos, err := mariadbPos()
+	if err != nil {
+		return nil, fmt.Errorf("read the MariaDB GTID position: %w", err)
+	}
+	if pos == "" {
+		return nil, nil
+	}
+	return parseBYOSStartGTID(flavor, pos)
 }
 
 // parseBYOSStartGTID parses --start-gtid with the parser for the configured

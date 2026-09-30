@@ -56,9 +56,13 @@ func indexCoversMariaDB(ctx context.Context, indexDB *sql.DB, srcPos string) (bo
 		return false, "coverage cannot be checked: the index's capture runs in binlog-position mode, which records no GTID position to compare with the MariaDB source. " +
 			gtidModeAdvice("mariadb")
 	}
+	// GTID mode with an empty set is a healthy capture: one started on a
+	// MariaDB that had written nothing yet holds the empty set until it records
+	// its first transaction. The source position is not empty (checked above),
+	// so the index is behind. The --reset advice would record a false loss.
 	if strings.TrimSpace(idxGTID.String) == "" {
-		return false, "index has no GTID checkpoint (no stream has checkpointed in GTID mode against this index). " +
-			gtidModeAdvice("mariadb")
+		return false, fmt.Sprintf("index is behind the source snapshot: the capture has recorded no transaction yet (snapshot %s); re-run once DBTrail catches up",
+			srcPos)
 	}
 	idx, err := parser.ParseMariaDBPosition(idxGTID.String)
 	if err != nil {

@@ -72,9 +72,10 @@ type streamState struct {
 	//
 	// Zero means "no floor", which reduces both passes to the unbounded
 	// statements they were before: a checkpoint written by an older build, a
-	// run that has not flushed a batch yet, and every checkpoint-shaped writer
-	// that builds a bare streamState (--reset, the gap auto-advance stamp) all
-	// land there. Slower, never wrong.
+	// run that has not flushed a batch yet all land there. Slower, never
+	// wrong. A run that starts with no checkpoint (first run, --reset) starts
+	// from freshDedupFloor instead, and the gap auto-advance carries the saved
+	// floor.
 	dedupFloorID  int64
 	gtidSet       string // serialized GTID set (GTID mode only)
 	flavor        string // source flavor: "mysql" (default) or "mariadb"; selects the GTID parser on resume
@@ -91,6 +92,10 @@ type streamState struct {
 	// state, the gap auto-advance stamp) persists NULL, which the upsert's
 	// COALESCE turns into "preserve whatever is already there".
 	skips *parser.SkipCounters
+	// lastSaveErr is the error of the most recent checkpoint save, nil when
+	// it succeeded. One restarts itself after a cut transaction only when the
+	// final save succeeded: an older checkpoint may not bound the cleanup.
+	lastSaveErr error
 
 	// accGTID is the in-memory accumulated GTID set (GTID mode only).
 	// It is serialized to gtidSet on checkpoint. Typed as the gomysql.GTIDSet
@@ -231,10 +236,10 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 	args = append(args, captureSkips)
 	// NULL when there is no floor, so the column reads as "no daemon has
 	// written one" rather than as a floor of zero. Unlike capture_skips this
-	// is deliberately NOT COALESCEd: a checkpoint-shaped writer with a bare
-	// streamState (--reset, the gap auto-advance stamp) MUST clear a stale
-	// floor rather than preserve it, because the floor it left behind belongs
-	// to coordinates that writer just discarded (#1690).
+	// is deliberately NOT COALESCEd: a checkpoint-shaped writer replaces the
+	// floor with its own (--reset writes the fresh floor of its new start)
+	// rather than preserving one that belongs to coordinates it discarded
+	// (#1690).
 	var dedupFloor any
 	if state.dedupFloorID > 0 {
 		dedupFloor = state.dedupFloorID
@@ -485,12 +490,39 @@ func deleteEventsSinceCheckpointGTID(db *sql.DB, file string, pos uint64, savedS
 	for i, g := range stragglers {
 		args[i] = g
 	}
-	res, err := db.Exec(`DELETE FROM binlog_events WHERE gtid IN (`+placeholders+`)`, args...)
+	// Bounded to the checkpoint's file (the only place the scan above looked,
+	// and a transaction never spans a rotation) and, with a floor, to rows
+	// this capture could have written: a GTID string can repeat in older
+	// history (a MariaDB source after RESET MASTER numbers 0-1-1 again), and
+	// an unbounded delete by GTID would take that history with it.
+	stmt := `DELETE FROM binlog_events WHERE gtid IN (` + placeholders + `) AND binlog_file = ?`
+	args = append(args, file)
+	if floor > 0 {
+		stmt += ` AND event_id >= ?`
+		args = append(args, floor)
+	}
+	res, err := db.Exec(stmt, args...)
 	if err != nil {
 		return n, fmt.Errorf("delete straggler gtid events: %w", err)
 	}
 	n2, err := res.RowsAffected()
 	return n + n2, err
+}
+
+// freshDedupFloor is the dedup floor for a run that starts with no checkpoint
+// (a first run, or --reset): one above every row already in binlog_events, a
+// valid lower bound for every row this run writes (event_id only grows). With
+// it, the resume cleanup of this run's first checkpoint can only touch this
+// run's rows. Without it the cleanup is unbounded, and a first checkpoint that
+// carries binlog coordinates (a fresh GTID start seeds them) would let it
+// delete older history in the same index: rows under a file name that sorts
+// after the new one, or whose GTID string repeats.
+func freshDedupFloor(db *sql.DB) (int64, error) {
+	var floor int64
+	if err := db.QueryRow(`SELECT COALESCE(MAX(event_id), 0) + 1 FROM binlog_events`).Scan(&floor); err != nil {
+		return 0, fmt.Errorf("read the index's highest event_id for a fresh dedup floor: %w", err)
+	}
+	return floor, nil
 }
 
 // persistGapAutoAdvance durably records an unfillable-gap auto-advance. It stamps
@@ -650,6 +682,9 @@ func persistResetDiscard(db *sql.DB, fresh *streamState, noop bool, detail strin
 // loss records: "file:pos" in position mode, "gtid_set <set>" in GTID mode.
 func describeCheckpoint(mode, file string, pos uint64, gtidSet string) string {
 	if mode == "gtid" {
+		if strings.TrimSpace(gtidSet) == "" {
+			return "gtid_set (empty)"
+		}
 		return fmt.Sprintf("gtid_set %s", gtidSet)
 	}
 	return fmt.Sprintf("%s:%d", file, pos)
@@ -1047,22 +1082,26 @@ func resolveStartForFlavor(
 // threaded into resolveStartForFlavor so saved/flag GTID sets parse with the
 // right flavor.
 //
-// gtidAutoDiscover is tried BEFORE the position callback, and only for the
-// MySQL flavor: a non-empty executed set selects GTID mode (parsed with the
-// same flavor-aware parser as the --start-gtid branch), so a fresh stream on a
-// gtid_mode=ON source checkpoints in GTID mode and live-source verify works
-// out of the box (#1131). An empty set — gtid_mode not ON, or a fresh server
-// with zero transactions — falls back to the position callback unchanged
-// (starting GTID replication from an empty set would replay the binlog from
-// the beginning, not "start from now"). A gtidAutoDiscover ERROR is fatal, not
-// a fallback: an operator on a GTID source must not silently end up in
-// position mode.
+// gtidAutoDiscover is tried BEFORE the position callback. The caller picks it
+// by flavor: config.CurrentGTIDExecuted for MySQL, config.CurrentMariaDBGTIDPos
+// (@@gtid_binlog_pos) for MariaDB. A non-empty set selects GTID mode (parsed
+// with the same flavor-aware parser as the --start-gtid branch), so a fresh
+// stream checkpoints in GTID mode and live-source verify works out of the box
+// (#1131 for MySQL; MariaDB since verify compares @@gtid_binlog_pos per
+// domain). A gtidAutoDiscover ERROR is fatal, not a fallback: an operator on a
+// GTID source must not silently end up in position mode.
 //
-// MariaDB deliberately keeps position-only auto-discovery: its GTID
-// coordinates (domain-server-seq, @@gtid_current_pos) have different discovery
-// semantics, and the live-source verify coverage check that motivates GTID
-// mode only consumes MySQL GTID sets — auto-selecting GTID mode there would be
-// an untested behavior change with no consumer.
+// An EMPTY set means different things per flavor:
+//   - MySQL (gtid_mode not ON, or zero transactions): fall back to the
+//     position callback, unchanged. A MySQL binlog can hold transactions
+//     without GTIDs (written before gtid_mode was turned on), so a GTID start
+//     from an empty set could replay them.
+//   - MariaDB (a server that has written no transaction yet): every MariaDB
+//     transaction carries a GTID, so an empty binlog GTID state means the
+//     binlog holds no transaction and a GTID start from the empty set is
+//     exactly "from now on". The position callback still runs first as a
+//     probe: log_bin=OFF also empties @@gtid_binlog_pos, and the probe is what
+//     names that.
 func resolveStartWithAutoDiscoverForFlavor(
 	startFile, startGTID string, startPos uint32,
 	saved *streamState, flavor string,
@@ -1080,20 +1119,38 @@ func resolveStartWithAutoDiscoverForFlavor(
 	if saved != nil || startFile != "" || startGTID != "" {
 		return
 	}
-	if gtidAutoDiscover != nil && flavor == gomysql.MySQLFlavor {
+	if gtidAutoDiscover != nil {
 		set, dErr := gtidAutoDiscover()
 		if dErr != nil {
+			if flavor == gomysql.MariaDBFlavor {
+				return "", "", "", 0, nil, fmt.Errorf("auto-discover MariaDB GTID position (@@gtid_binlog_pos): %w", dErr)
+			}
 			return "", "", "", 0, nil, fmt.Errorf("auto-discover executed GTID set: %w", dErr)
 		}
 		if set != "" {
 			set = normalizeGTIDForFlavor(flavor, set)
 			gs, parseErr := parseGTIDSetForFlavor(flavor, set)
 			if parseErr != nil {
-				return "", "", "", 0, nil, fmt.Errorf("auto-discovered gtid_executed %q is unparseable: %w", set, parseErr)
+				return "", "", "", 0, nil, fmt.Errorf("auto-discovered %s %q is unparseable: %w", gtidDiscoverySource(flavor), set, parseErr)
 			}
 			return "gtid", "", set, 0, gs, nil
 		}
-		// Empty set: fall through to position discovery below.
+		if flavor == gomysql.MariaDBFlavor {
+			// The probe is the only thing that tells "nothing written yet"
+			// from log_bin=OFF here, so it is required, never skipped.
+			if autoDiscover == nil {
+				return "", "", "", 0, nil, fmt.Errorf("MariaDB @@gtid_binlog_pos is empty and no binlog position probe is wired to confirm log_bin is ON")
+			}
+			if _, _, pErr := autoDiscover(); pErr != nil {
+				return "", "", "", 0, nil, fmt.Errorf("auto-discover binlog position: %w", pErr)
+			}
+			gs, parseErr := parseGTIDSetForFlavor(flavor, "")
+			if parseErr != nil {
+				return "", "", "", 0, nil, fmt.Errorf("empty MariaDB GTID set: %w", parseErr)
+			}
+			return "gtid", "", "", 0, gs, nil
+		}
+		// MySQL, empty set: fall through to position discovery below.
 	}
 	if autoDiscover == nil {
 		return // the original "no start position" error
@@ -1103,6 +1160,95 @@ func resolveStartWithAutoDiscoverForFlavor(
 		return "", "", "", 0, nil, fmt.Errorf("auto-discover binlog position: %w", dErr)
 	}
 	return "position", af, "", ap, nil, nil
+}
+
+// emptyAsWord renders an empty GTID set readably in durable loss messages.
+func emptyAsWord(set string) string {
+	if strings.TrimSpace(set) == "" {
+		return "(empty)"
+	}
+	return set
+}
+
+// gtidStartAnchor records the source's binlog coordinates for a fresh
+// GTID-mode start, so its first checkpoint carries a binlog_file. Without one
+// the checkpoint has an empty binlog_file until the first row event, both resume
+// cleanups (deleteEventsSinceCheckpoint, deleteEventsSinceCheckpointGTID) skip
+// an empty file, and a crash after the first batch but before the next
+// checkpoint duplicates that batch on restart.
+//
+// wrap reads the position BEFORE the GTID set, so nearly every transaction
+// the stream will receive (the ones missing from that set) sits at or past
+// the position, which is what the position-keyed cleanup deletes. Not quite
+// all on MySQL: a transaction is written to the binlog shortly before it
+// joins gtid_executed, so one can sit just below the position and still be
+// missing from the set. In the same file the straggler pass catches it; only
+// if the file rotated between the two reads can it come back once more after
+// a crash. That residue duplicates, it never loses.
+//
+// The coordinates only bound the cleanup from above. What keeps it from
+// touching older history in the same index is the fresh dedup floor
+// (freshDedupFloor), set for every run that starts without a checkpoint.
+type gtidStartAnchor struct {
+	file string
+	pos  uint32
+	err  error
+	read bool
+}
+
+func (a *gtidStartAnchor) wrap(position func() (string, uint32, error), gtid func() (string, error)) func() (string, error) {
+	return func() (string, error) {
+		a.read = true
+		a.file, a.pos, a.err = position()
+		return gtid()
+	}
+}
+
+// seed returns the coordinates to seed the checkpoint with, ok=false when
+// the position was never read or could not be read.
+func (a *gtidStartAnchor) seed() (string, uint32, bool) {
+	if !a.read || a.err != nil || a.file == "" {
+		return "", 0, false
+	}
+	return a.file, a.pos, true
+}
+
+// gtidDiscoverySource names the server variable a fresh GTID start is read
+// from, for logs and errors.
+func gtidDiscoverySource(flavor string) string {
+	if flavor == gomysql.MariaDBFlavor {
+		return "gtid_binlog_pos"
+	}
+	return "gtid_executed"
+}
+
+// gtidAutoDiscoverFor returns the first-run GTID discovery for the resolved
+// flavor: @@gtid_binlog_pos on MariaDB, @@gtid_executed (gated on gtid_mode=ON)
+// on MySQL. See resolveStartWithAutoDiscoverForFlavor for what each empty
+// value means.
+func gtidAutoDiscoverFor(flavor string, sourceDB *sql.DB) func() (string, error) {
+	if flavor == gomysql.MariaDBFlavor {
+		return func() (string, error) { return config.CurrentMariaDBGTIDPos(sourceDB) }
+	}
+	return func() (string, error) { return config.CurrentGTIDExecuted(sourceDB) }
+}
+
+// autoDiscoveredGTIDLine logs a first-run GTID start and returns the terminal
+// line for it. The MySQL line is byte-identical to the one before MariaDB
+// started in GTID mode. The full set goes to the structured log; the terminal
+// line is truncated (a long-lived multi-source server's set can span many
+// blocks).
+func autoDiscoveredGTIDLine(flavor, set string) string {
+	if flavor != gomysql.MariaDBFlavor {
+		slog.Info("auto-discovered executed GTID set (gtid_mode=ON)", "gtid_set", set)
+		return fmt.Sprintf("Start position: auto-discovered GTID set %s ✓\n", truncateForDisplay(set, 120))
+	}
+	if set == "" {
+		slog.Info("MariaDB source has written no transaction yet (@@gtid_binlog_pos is empty); starting in GTID mode from the empty set")
+		return "Start position: GTID mode, from the first transaction (the source has written none yet) ✓\n"
+	}
+	slog.Info("auto-discovered MariaDB GTID position (@@gtid_binlog_pos)", "gtid_set", set)
+	return fmt.Sprintf("Start position: GTID mode, from %s ✓\n", truncateForDisplay(set, 120))
 }
 
 // truncateForDisplay shortens s for a single terminal line. GTID sets are
@@ -1449,10 +1595,11 @@ func detectMariaDBGTIDGap(sourceDB *sql.DB, checkpointGTID string, timeout time.
 		}, nil
 	}
 
-	if checkpointGTID == "" {
-		return nil, fmt.Errorf("checkpoint GTID set is empty; cannot perform gap detection")
-	}
-
+	// An empty checkpoint is legitimate here (unlike MySQL's detectGTIDGap): a
+	// capture started on a MariaDB that had written nothing yet holds the empty
+	// set until its first transaction. It means "saw nothing", which parses to
+	// an empty set and fails the per-domain coverage check below in every
+	// domain of the floor: an unfillable gap, not a refusal.
 	checkpoint, err := parseMariadbSet(checkpointGTID)
 	if err != nil {
 		return nil, fmt.Errorf("parse checkpoint GTID set: %w", err)
@@ -1473,7 +1620,7 @@ func detectMariaDBGTIDGap(sourceDB *sql.DB, checkpointGTID string, timeout time.
 			Message: fmt.Sprintf(
 				"MariaDB GTID gap detected but CANNOT be filled: required GTIDs have been purged from the source "+
 					"(purge floor %s is beyond checkpoint %s); events in the purged range are permanently lost",
-				floorStr, checkpointGTID),
+				floorStr, emptyAsWord(checkpointGTID)),
 		}, nil
 	}
 
@@ -1677,7 +1824,9 @@ func streamLoop(
 		if err := flush(); err != nil {
 			return err
 		}
+		state.lastSaveErr = nil
 		if err := saveCheckpoint(db, state); err != nil {
+			state.lastSaveErr = err
 			slog.Warn("saveCheckpoint failed", "error", err)
 			m.Errors.WithLabelValues("checkpoint").Inc()
 		} else {
@@ -2000,8 +2149,73 @@ func drainParser(cancel context.CancelFunc, parseErrCh <-chan error) error {
 // is cancelled or a fatal error occurs. It is self-contained by design: no
 // package globals, no signal handling, safe to run N instances concurrently
 // (each against its own index database).
-
+//
+// One restarts itself, in process, when the parser stops with
+// parser.ErrResentCutTransaction: the connection to the source dropped in the
+// middle of a transaction whose first rows were already captured, and the
+// source re-sent it whole. Restarting is what indexes it once: the resume
+// cleanup of the last checkpoint deletes the partial copy (its GTID is not in
+// the saved set), and the transaction is read again in full. Every caller
+// (stream, up, watch and its console sources) gets that without its own
+// restart policy. Any other error returns unchanged. A restart that fails the
+// same way again within a minute counts toward a limit; past it the error is
+// returned, so a source that keeps cutting transactions stops loudly instead
+// of spinning.
 func One(ctx context.Context, cfg Config) error {
+	const maxQuickRestarts = 5
+	quick := 0
+	for {
+		started := time.Now()
+		err := oneRunFn(ctx, cfg)
+		if err == nil || ctx.Err() != nil || !errors.Is(err, parser.ErrResentCutTransaction) {
+			return err
+		}
+		if time.Since(started) > time.Minute {
+			quick = 0
+		}
+		quick++
+		if quick > maxQuickRestarts {
+			return fmt.Errorf("gave up after %d quick restarts: %w", maxQuickRestarts, err)
+		}
+		slog.Warn("restarting capture from its last checkpoint so a transaction cut by a disconnect is indexed once",
+			"error", err, "restart", quick)
+		// The restart resumes from the checkpoint the pass just left. The
+		// first pass's start instructions must not apply again: --reset would
+		// throw that checkpoint away (skipping the rest of the transaction and
+		// recording a false loss), and --start-* would replay without the
+		// resume cleanup.
+		cfg.Reset = false
+		cfg.StartFile, cfg.StartPos, cfg.StartGTID = "", 0, ""
+		select {
+		case <-time.After(cutRestartDelay):
+		case <-ctx.Done():
+			return err
+		}
+	}
+}
+
+// notRestartableIfUnsaved keeps a cut-transaction error from restarting capture
+// in process when the final checkpoint could not be saved: the restart would
+// resume from an older checkpoint, which may not bound the cleanup of the
+// partial copy (a start from an explicit --start-gtid records no file). The
+// error then returns without the sentinel, so it stops loudly and a later
+// start cleans up from whatever checkpoint is durable.
+func notRestartableIfUnsaved(parseErr, lastSaveErr error) error {
+	if lastSaveErr == nil || !errors.Is(parseErr, parser.ErrResentCutTransaction) {
+		return parseErr
+	}
+	return fmt.Errorf("%s; the final checkpoint could not be saved (%v), so capture does not restart itself", parseErr.Error(), lastSaveErr)
+}
+
+// oneRunFn and cutRestartDelay are seams for One's restart test.
+var (
+	oneRunFn        = oneRun
+	cutRestartDelay = time.Second
+)
+
+// oneRun is one pass of One: connect, resume or start, and stream until ctx
+// ends or an error stops it.
+func oneRun(ctx context.Context, cfg Config) error {
 	if !cliutil.IsValidOutputFormat(cfg.Format) {
 		return fmt.Errorf("invalid --format %q; must be text or json", cfg.Format)
 	}
@@ -2207,12 +2421,27 @@ func One(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	var anchor gtidStartAnchor
+	currentPosition := func() (string, uint32, error) { return config.CurrentBinlogPosition(sourceDB) }
 	mode, startFile, startGTIDStr, startPos, accGTID, err := resolveStartWithAutoDiscoverForFlavor(
 		cfg.StartFile, cfg.StartGTID, cfg.StartPos, saved, cfg.Flavor,
-		func() (string, uint32, error) { return config.CurrentBinlogPosition(sourceDB) },
-		func() (string, error) { return config.CurrentGTIDExecuted(sourceDB) })
+		currentPosition,
+		anchor.wrap(currentPosition, gtidAutoDiscoverFor(cfg.Flavor, sourceDB)))
 	if err != nil {
 		return err
+	}
+	// A fresh, auto-discovered GTID start: seed the checkpoint's binlog
+	// coordinates (see gtidStartAnchor). Only here: with an explicit
+	// --start-gtid the start set can be far behind the current position, and
+	// seeding "now" would let the cleanup miss the rows replayed before it.
+	if mode == "gtid" && saved == nil && cfg.StartFile == "" && cfg.StartGTID == "" {
+		if f, p, ok := anchor.seed(); ok {
+			startFile, startPos = f, p
+		} else if anchor.read {
+			slog.Warn("could not read the source's binlog position for a fresh GTID start; "+
+				"until the first event arrives, a crash can leave that first batch indexed twice on restart",
+				"error", anchor.err)
+		}
 	}
 	// Surface the auto-discovered start point when this was a first-run,
 	// no-flags invocation. Mirrors the agent BYOS startup checkmark style.
@@ -2225,8 +2454,17 @@ func One(ctx context.Context, cfg Config) error {
 			// The full set goes to the structured log; the terminal line is
 			// truncated (a long-lived multi-source server's gtid_executed can
 			// span many UUID blocks).
-			slog.Info("auto-discovered executed GTID set (gtid_mode=ON)", "gtid_set", startGTIDStr)
-			fmt.Printf("Start position: auto-discovered GTID set %s ✓\n", truncateForDisplay(startGTIDStr, 120))
+			fmt.Print(autoDiscoveredGTIDLine(cfg.Flavor, startGTIDStr))
+		}
+	}
+
+	// A run with no checkpoint (first run or --reset) starts its dedup floor
+	// above every row already in the index (see freshDedupFloor), so the
+	// cleanup on its next resume can only touch rows it wrote.
+	var freshFloor int64
+	if saved == nil {
+		if freshFloor, err = freshDedupFloor(indexDB); err != nil {
+			return err
 		}
 	}
 
@@ -2238,15 +2476,16 @@ func One(ctx context.Context, cfg Config) error {
 	// checkpoint tick would overwrite a carried value anyway).
 	if resetDiscarded != nil {
 		fresh := &streamState{
-			mode:       mode,
-			binlogFile: startFile,
-			binlogPos:  uint64(startPos),
-			safeFile:   startFile,
-			safePos:    uint64(startPos),
-			gtidSet:    startGTIDStr,
-			flavor:     cfg.Flavor,
-			serverID:   cfg.ServerID,
-			bintrailID: bintrailID,
+			mode:         mode,
+			binlogFile:   startFile,
+			binlogPos:    uint64(startPos),
+			safeFile:     startFile,
+			safePos:      uint64(startPos),
+			gtidSet:      startGTIDStr,
+			flavor:       cfg.Flavor,
+			serverID:     cfg.ServerID,
+			bintrailID:   bintrailID,
+			dedupFloorID: freshFloor,
 		}
 		noop, detail := classifyResetDiscard(resetDiscarded, cfg.Flavor, mode, startFile, startPos, startGTIDStr,
 			cfg.StartFile == "" && cfg.StartGTID == "",
@@ -2497,6 +2736,8 @@ func One(ctx context.Context, cfg Config) error {
 		// A crash right after that leaves the next resume scanning the whole
 		// table, which is the outage this change exists to remove.
 		state.dedupFloorID = saved.dedupFloorID
+	} else {
+		state.dedupFloorID = freshFloor
 	}
 	if startGTIDStr != "" {
 		state.gtidSet = startGTIDStr
@@ -2624,11 +2865,30 @@ func One(ctx context.Context, cfg Config) error {
 		return startErr
 	}
 
+	// A run with no checkpoint writes its start point now, once the source
+	// accepted the start and before a single event is read, instead of at the
+	// first ticker tick. Until that tick a restart (a crash, or One restarting
+	// itself after a cut transaction) would find no checkpoint and start over
+	// at the source's CURRENT position: the rows captured so far would stay,
+	// and whatever the source sent after them would be skipped. Not earlier:
+	// a start the source refused must leave nothing behind, so a corrected
+	// --start-* flag is honored on the next run.
+	if saved == nil {
+		if err := saveCheckpoint(indexDB, state); err != nil {
+			return fmt.Errorf("save the start checkpoint: %w", err)
+		}
+	}
+
 	switch mode {
 	case "position":
 		fmt.Printf("Streaming from %s position %d\n", startFile, startPos)
 	case "gtid":
-		fmt.Printf("Streaming from GTID set: %s\n", startGTIDStr)
+		if startGTIDStr == "" {
+			// Only a MariaDB that has written nothing yet starts here.
+			fmt.Println("Streaming from GTID set: (empty, from the first transaction)")
+		} else {
+			fmt.Printf("Streaming from GTID set: %s\n", startGTIDStr)
+		}
 	}
 
 	// (Signal handling lives in runStream — the process owner. One only
@@ -2766,7 +3026,7 @@ func One(ctx context.Context, cfg Config) error {
 		return loopErr
 	}
 	if parseErr != nil && !errors.Is(parseErr, context.Canceled) {
-		return parseErr
+		return notRestartableIfUnsaved(parseErr, state.lastSaveErr)
 	}
 
 	if cfg.Format == "json" {

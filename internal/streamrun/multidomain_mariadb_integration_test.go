@@ -145,10 +145,10 @@ func TestIntegrationMultiDomainGTIDResumeExactlyOnce_mariadb(t *testing.T) {
 	}
 
 	// ── run 1: stream interleaved two-domain traffic, checkpoint durably ──
-	// StartGTID pins run 1 to GTID mode from the pre-write executed set (a
-	// fresh MariaDB run would otherwise auto-discover POSITION mode — the GTID
-	// auto-discover is MySQL-only by design), so the checkpoint this run leaves
-	// behind is the multi-domain GTID checkpoint whose RESUME is under test.
+	// StartGTID pins run 1 to the PRE-write executed set (a fresh run with no
+	// flags would start from the post-write @@gtid_binlog_pos and skip ids
+	// 1-6), so the checkpoint this run leaves behind is the multi-domain GTID
+	// checkpoint whose RESUME is under test.
 	insertInterleaved(1, 6)
 	phase1Executed := currentExecuted()
 

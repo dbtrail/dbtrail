@@ -590,3 +590,58 @@ func TestCurrentGTIDExecuted_queryErrorPropagates(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 }
+
+// ─── CurrentMariaDBGTIDPos ──────────────────────────────────────────────────
+
+// TestCurrentMariaDBGTIDPos covers the values @@GLOBAL.gtid_binlog_pos can
+// take: one domain, several domains, whitespace around or inside, empty (a
+// server that has written nothing), and SQL NULL (read as empty, never an
+// error: an empty value is the caller's to interpret).
+func TestCurrentMariaDBGTIDPos(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		val  any
+		want string
+	}{
+		{"single domain", "0-1-100", "0-1-100"},
+		{"several domains", "0-1-100,1-2-7", "0-1-100,1-2-7"},
+		{"whitespace", " 0-1-100,\n1-2-7 \t", "0-1-100,1-2-7"},
+		{"empty", "", ""},
+		{"null", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
+			mock.ExpectQuery(`SELECT @@GLOBAL.gtid_binlog_pos`).WillReturnRows(
+				sqlmock.NewRows([]string{"@@GLOBAL.gtid_binlog_pos"}).AddRow(tc.val))
+			got, err := CurrentMariaDBGTIDPos(db)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestCurrentMariaDBGTIDPos_queryErrorPropagates: a failed read is an error;
+// the caller treats it as fatal rather than falling back to position mode.
+func TestCurrentMariaDBGTIDPos_queryErrorPropagates(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	stub := errors.New("connection reset")
+	mock.ExpectQuery(`SELECT @@GLOBAL.gtid_binlog_pos`).WillReturnError(stub)
+	if _, err := CurrentMariaDBGTIDPos(db); !errors.Is(err, stub) {
+		t.Fatalf("err = %v, want the wrapped query error", err)
+	}
+}

@@ -1567,21 +1567,226 @@ func TestResolveStartWithAutoDiscover_gtidUnparseableIsFatal(t *testing.T) {
 	}
 }
 
-// TestResolveStartWithAutoDiscoverForFlavor_mariadbSkipsGTIDDiscovery verifies
-// MariaDB keeps today's position-only auto-discovery: the GTID callback is
-// never invoked for the mariadb flavor (its GTID coordinates have different
-// discovery semantics, and live-source verify only consumes MySQL GTID sets).
-func TestResolveStartWithAutoDiscoverForFlavor_mariadbSkipsGTIDDiscovery(t *testing.T) {
-	mode, file, _, pos, _, err := resolveStartWithAutoDiscoverForFlavor("", "", 4, nil,
+// positionDiscoverMustNotBeCalled is the position-callback sibling of
+// gtidDiscoverMustNotBeCalled.
+func positionDiscoverMustNotBeCalled(t *testing.T) func() (string, uint32, error) {
+	t.Helper()
+	return func() (string, uint32, error) {
+		t.Error("position auto-discover must not be called on this path")
+		return "", 0, nil
+	}
+}
+
+// TestResolveStartWithAutoDiscoverForFlavor_mariadbFreshSingleDomainGTID: a
+// fresh MariaDB capture with no flags starts in GTID mode from the source's
+// @@gtid_binlog_pos, and the position callback is never consulted.
+func TestResolveStartWithAutoDiscoverForFlavor_mariadbFreshSingleDomainGTID(t *testing.T) {
+	mode, file, gtidStr, pos, accGTID, err := resolveStartWithAutoDiscoverForFlavor("", "", 4, nil,
 		gomysql.MariaDBFlavor,
-		func() (string, uint32, error) { return "mariadb-bin.000002", 1483, nil },
+		positionDiscoverMustNotBeCalled(t),
+		func() (string, error) { return "0-1-100", nil })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != "gtid" || gtidStr != "0-1-100" || file != "" || pos != 0 {
+		t.Errorf("got mode=%q gtid=%q file=%q pos=%d, want gtid/0-1-100/\"\"/0", mode, gtidStr, file, pos)
+	}
+	ms, ok := accGTID.(*gomysql.MariadbGTIDSet)
+	if !ok {
+		t.Fatalf("accGTID = %T, want *MariadbGTIDSet (parsed with the MariaDB parser)", accGTID)
+	}
+	if got := ms.String(); got != "0-1-100" {
+		t.Errorf("accGTID = %q, want 0-1-100", got)
+	}
+}
+
+// TestResolveStartWithAutoDiscoverForFlavor_mariadbFreshMultiDomainGTID: every
+// domain in @@gtid_binlog_pos lands in the start set. A domain left out would
+// read as "purged and never seen" to the per-domain gap check on the next
+// resume, so this is what makes gap detection per domain correct from the
+// first event.
+func TestResolveStartWithAutoDiscoverForFlavor_mariadbFreshMultiDomainGTID(t *testing.T) {
+	mode, _, gtidStr, _, accGTID, err := resolveStartWithAutoDiscoverForFlavor("", "", 4, nil,
+		gomysql.MariaDBFlavor,
+		positionDiscoverMustNotBeCalled(t),
+		func() (string, error) { return "0-1-100,1-2-7,5-9-3", nil })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != "gtid" || gtidStr != "0-1-100,1-2-7,5-9-3" {
+		t.Errorf("got mode=%q gtid=%q, want gtid/0-1-100,1-2-7,5-9-3", mode, gtidStr)
+	}
+	ms, ok := accGTID.(*gomysql.MariadbGTIDSet)
+	if !ok {
+		t.Fatalf("accGTID = %T, want *MariadbGTIDSet", accGTID)
+	}
+	want := map[uint32]uint64{0: 100, 1: 7, 5: 3}
+	if len(ms.Sets) != len(want) {
+		t.Fatalf("accGTID has %d domains (%q), want %d", len(ms.Sets), ms.String(), len(want))
+	}
+	for domain, seq := range want {
+		g, ok := ms.Sets[domain]
+		if !ok || g.SequenceNumber != seq {
+			t.Errorf("domain %d = %+v, want seq %d", domain, g, seq)
+		}
+	}
+}
+
+// TestResolveStartWithAutoDiscoverForFlavor_mariadbEmptyBinlogPos: a brand-new
+// MariaDB that has written no transaction reports an empty @@gtid_binlog_pos.
+// That is neither refused nor guessed at: the position probe still runs (it is
+// what names log_bin=OFF, which also empties @@gtid_binlog_pos), and the capture
+// starts in GTID mode from the empty set. On MariaDB every transaction carries a
+// GTID, so an empty binlog GTID state means the binlog holds no transaction, and
+// "everything after nothing" is exactly "from now on".
+func TestResolveStartWithAutoDiscoverForFlavor_mariadbEmptyBinlogPos(t *testing.T) {
+	probed := false
+	mode, file, gtidStr, pos, accGTID, err := resolveStartWithAutoDiscoverForFlavor("", "", 4, nil,
+		gomysql.MariaDBFlavor,
+		func() (string, uint32, error) { probed = true; return "mariadb-bin.000001", 330, nil },
+		func() (string, error) { return "", nil })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !probed {
+		t.Error("the position probe must run on an empty @@gtid_binlog_pos (it is the log_bin check)")
+	}
+	if mode != "gtid" || gtidStr != "" || file != "" || pos != 0 {
+		t.Errorf("got mode=%q gtid=%q file=%q pos=%d, want gtid with an empty set", mode, gtidStr, file, pos)
+	}
+	ms, ok := accGTID.(*gomysql.MariadbGTIDSet)
+	if !ok {
+		t.Fatalf("accGTID = %T, want an empty *MariadbGTIDSet", accGTID)
+	}
+	if len(ms.Sets) != 0 {
+		t.Errorf("accGTID = %q, want empty", ms.String())
+	}
+}
+
+// TestResolveStartWithAutoDiscoverForFlavor_mariadbEmptyBinlogPosLogBinOff: the
+// same empty value with the binary log off must surface the position probe's
+// error, not start a GTID stream that cannot work.
+func TestResolveStartWithAutoDiscoverForFlavor_mariadbEmptyBinlogPosLogBinOff(t *testing.T) {
+	probeErr := errors.New("current binlog position empty: log_bin appears to be OFF")
+	_, _, _, _, _, err := resolveStartWithAutoDiscoverForFlavor("", "", 4, nil,
+		gomysql.MariaDBFlavor,
+		func() (string, uint32, error) { return "", 0, probeErr },
+		func() (string, error) { return "", nil })
+	if !errors.Is(err, probeErr) {
+		t.Fatalf("err = %v, want the position probe's error", err)
+	}
+}
+
+// TestResolveStartWithAutoDiscoverForFlavor_mariadbEmptyNeedsTheProbe: with no
+// position probe wired, an empty @@gtid_binlog_pos cannot be told apart from
+// log_bin=OFF, so it is an error rather than a silent GTID start.
+func TestResolveStartWithAutoDiscoverForFlavor_mariadbEmptyNeedsTheProbe(t *testing.T) {
+	_, _, _, _, _, err := resolveStartWithAutoDiscoverForFlavor("", "", 4, nil,
+		gomysql.MariaDBFlavor, nil, func() (string, error) { return "", nil })
+	if err == nil || !strings.Contains(err.Error(), "log_bin") {
+		t.Fatalf("err = %v, want a refusal naming log_bin", err)
+	}
+}
+
+// TestDescribeCheckpoint_emptyGTIDSet: a reset to or from an empty MariaDB set
+// writes a readable loss record, never a dangling "gtid_set ".
+func TestDescribeCheckpoint_emptyGTIDSet(t *testing.T) {
+	if got := describeCheckpoint("gtid", "", 0, ""); got != "gtid_set (empty)" {
+		t.Errorf("got %q, want %q", got, "gtid_set (empty)")
+	}
+	if got := describeCheckpoint("gtid", "", 0, "0-1-5"); got != "gtid_set 0-1-5" {
+		t.Errorf("got %q, want %q", got, "gtid_set 0-1-5")
+	}
+}
+
+// TestResolveStartWithAutoDiscoverForFlavor_mariadbDiscoveryErrorIsFatal: a
+// failed @@gtid_binlog_pos read is a hard error, never a silent fall back to
+// position mode (the MySQL rule, #1131).
+func TestResolveStartWithAutoDiscoverForFlavor_mariadbDiscoveryErrorIsFatal(t *testing.T) {
+	stubErr := errors.New("SELECT @@GLOBAL.gtid_binlog_pos: connection reset")
+	_, _, _, _, _, err := resolveStartWithAutoDiscoverForFlavor("", "", 4, nil,
+		gomysql.MariaDBFlavor,
+		positionDiscoverMustNotBeCalled(t),
+		func() (string, error) { return "", stubErr })
+	if !errors.Is(err, stubErr) {
+		t.Fatalf("err = %v, want the wrapped discovery error", err)
+	}
+}
+
+// TestResolveStartWithAutoDiscoverForFlavor_mariadbUnparseableIsFatal: a value
+// the MariaDB parser rejects fails loud.
+func TestResolveStartWithAutoDiscoverForFlavor_mariadbUnparseableIsFatal(t *testing.T) {
+	_, _, _, _, _, err := resolveStartWithAutoDiscoverForFlavor("", "", 4, nil,
+		gomysql.MariaDBFlavor,
+		positionDiscoverMustNotBeCalled(t),
+		func() (string, error) { return "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5", nil })
+	if err == nil || !strings.Contains(err.Error(), "unparseable") {
+		t.Fatalf("err = %v, want an unparseable-set error", err)
+	}
+}
+
+// TestResolveStartWithAutoDiscoverForFlavor_mariadbPositionCheckpointUnchanged:
+// a MariaDB capture that already has a position-mode checkpoint keeps resuming
+// in position mode at the saved coordinates. Neither discovery runs.
+func TestResolveStartWithAutoDiscoverForFlavor_mariadbPositionCheckpointUnchanged(t *testing.T) {
+	saved := &streamState{mode: "position", binlogFile: "mariadb-bin.000007", binlogPos: 5120,
+		flavor: gomysql.MariaDBFlavor}
+	mode, file, gtidStr, pos, accGTID, err := resolveStartWithAutoDiscoverForFlavor("", "", 4, saved,
+		gomysql.MariaDBFlavor,
+		positionDiscoverMustNotBeCalled(t),
 		gtidDiscoverMustNotBeCalled(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if mode != "position" || file != "mariadb-bin.000002" || pos != 1483 {
-		t.Errorf("got mode=%q file=%q pos=%d, want position/mariadb-bin.000002/1483",
-			mode, file, pos)
+	if mode != "position" || file != "mariadb-bin.000007" || pos != 5120 || gtidStr != "" || accGTID != nil {
+		t.Errorf("got mode=%q file=%q pos=%d gtid=%q acc=%v, want position/mariadb-bin.000007/5120",
+			mode, file, pos, gtidStr, accGTID)
+	}
+}
+
+// TestResolveStartWithAutoDiscoverForFlavor_mariadbExplicitStartPos: an explicit
+// --start-file/--start-pos keeps position mode on MariaDB.
+func TestResolveStartWithAutoDiscoverForFlavor_mariadbExplicitStartPos(t *testing.T) {
+	mode, file, _, pos, accGTID, err := resolveStartWithAutoDiscoverForFlavor("mariadb-bin.000003", "", 1234, nil,
+		gomysql.MariaDBFlavor,
+		positionDiscoverMustNotBeCalled(t),
+		gtidDiscoverMustNotBeCalled(t))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != "position" || file != "mariadb-bin.000003" || pos != 1234 || accGTID != nil {
+		t.Errorf("got mode=%q file=%q pos=%d, want position/mariadb-bin.000003/1234", mode, file, pos)
+	}
+}
+
+// TestResolveStartWithAutoDiscoverForFlavor_mariadbExplicitStartGTID: an
+// explicit --start-gtid wins over discovery.
+func TestResolveStartWithAutoDiscoverForFlavor_mariadbExplicitStartGTID(t *testing.T) {
+	mode, _, gtidStr, _, _, err := resolveStartWithAutoDiscoverForFlavor("", "0-1-42,1-2-3", 4, nil,
+		gomysql.MariaDBFlavor,
+		positionDiscoverMustNotBeCalled(t),
+		gtidDiscoverMustNotBeCalled(t))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != "gtid" || gtidStr != "0-1-42,1-2-3" {
+		t.Errorf("got mode=%q gtid=%q, want gtid/0-1-42,1-2-3", mode, gtidStr)
+	}
+}
+
+// TestResolveStartWithAutoDiscover_mysqlEmptyStillPosition pins that MySQL is
+// untouched by the MariaDB default: an empty gtid_executed still falls back to
+// POSITION mode (no GTID start from an empty MySQL set).
+func TestResolveStartWithAutoDiscover_mysqlEmptyStillPosition(t *testing.T) {
+	mode, file, gtidStr, pos, accGTID, err := resolveStartWithAutoDiscoverForFlavor("", "", 4, nil,
+		gomysql.MySQLFlavor,
+		func() (string, uint32, error) { return "mysql-bin.000009", 157, nil },
+		func() (string, error) { return "", nil })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != "position" || file != "mysql-bin.000009" || pos != 157 || gtidStr != "" || accGTID != nil {
+		t.Errorf("got mode=%q file=%q pos=%d gtid=%q, want position/mysql-bin.000009/157", mode, file, pos, gtidStr)
 	}
 }
 
@@ -1622,6 +1827,27 @@ func TestClassifyResetDiscard_positionToGTIDAtCurrentIsNoop(t *testing.T) {
 	}
 	if detail != "" {
 		t.Errorf("expected empty detail for a no-op, got %q", detail)
+	}
+}
+
+// TestClassifyResetDiscard_mariadbPositionToGTID: --reset on MariaDB now lands
+// in GTID mode (auto-discovered from @@gtid_binlog_pos). From a position
+// checkpoint that sits at the source's current coordinates that is a no-op
+// (the zero-loss way to move an existing capture to GTID); from one behind
+// them it is a recorded jump.
+func TestClassifyResetDiscard_mariadbPositionToGTID(t *testing.T) {
+	current := func() (string, uint32, error) { return "mariadb-bin.000004", 8812, nil }
+
+	atCurrent := &streamState{mode: "position", binlogFile: "mariadb-bin.000004", binlogPos: 8812, flavor: gomysql.MariaDBFlavor}
+	noop, detail := classifyResetDiscard(atCurrent, gomysql.MariaDBFlavor, "gtid", "", 0, "0-1-100,1-2-7", true, current)
+	if !noop || detail != "" {
+		t.Errorf("at current coordinates: noop=%v detail=%q, want a no-op", noop, detail)
+	}
+
+	behind := &streamState{mode: "position", binlogFile: "mariadb-bin.000004", binlogPos: 4000, flavor: gomysql.MariaDBFlavor}
+	noop, detail = classifyResetDiscard(behind, gomysql.MariaDBFlavor, "gtid", "", 0, "0-1-100,1-2-7", true, current)
+	if noop || !strings.Contains(detail, "permanently lost") || !strings.Contains(detail, "gtid_set 0-1-100,1-2-7") {
+		t.Errorf("behind current coordinates: noop=%v detail=%q, want a recorded jump naming the GTID start", noop, detail)
 	}
 }
 
@@ -1791,7 +2017,7 @@ func TestDeleteEventsSinceCheckpointGTID_deletesStragglers(t *testing.T) {
 		WithArgs("mysql-bin.000005", uint64(1234)).
 		WillReturnRows(sqlmock.NewRows([]string{"gtid"}).AddRow(stragglerGTID))
 	mock.ExpectExec("DELETE FROM binlog_events WHERE gtid IN").
-		WithArgs(stragglerGTID).
+		WithArgs(stragglerGTID, "mysql-bin.000005").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	n, err := deleteEventsSinceCheckpointGTID(db, "mysql-bin.000005", 1234, savedSet, gomysql.MySQLFlavor, noDedupFloor)
@@ -1911,5 +2137,226 @@ func TestFlavorOnce(t *testing.T) {
 	f("mysql")
 	if len(got) != 1 || got[0] != "mariadb" {
 		t.Errorf("calls = %v, want exactly [mariadb]", got)
+	}
+}
+
+// TestGTIDAutoDiscoverFor_picksTheFlavorsVariable pins the wiring One uses: a
+// MariaDB source is asked for @@gtid_binlog_pos, a MySQL source for gtid_mode
+// then gtid_executed (unchanged).
+func TestGTIDAutoDiscoverFor_picksTheFlavorsVariable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.ExpectQuery(`SELECT @@GLOBAL.gtid_binlog_pos`).WillReturnRows(
+		sqlmock.NewRows([]string{"v"}).AddRow("0-1-9,2-3-4"))
+	got, err := gtidAutoDiscoverFor(gomysql.MariaDBFlavor, db)()
+	if err != nil || got != "0-1-9,2-3-4" {
+		t.Fatalf("mariadb: got %q, %v", got, err)
+	}
+	mock.ExpectQuery(`SELECT @@GLOBAL.gtid_mode`).WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow("ON"))
+	mock.ExpectQuery(`SELECT @@GLOBAL.gtid_executed`).WillReturnRows(
+		sqlmock.NewRows([]string{"v"}).AddRow("3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5"))
+	got, err = gtidAutoDiscoverFor(gomysql.MySQLFlavor, db)()
+	if err != nil || got != "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5" {
+		t.Fatalf("mysql: got %q, %v", got, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAutoDiscoveredGTIDLine renders the first-run start line with real
+// values. The MySQL line must stay byte-identical to what it printed before.
+func TestAutoDiscoveredGTIDLine(t *testing.T) {
+	for _, tc := range []struct{ flavor, set, want string }{
+		{gomysql.MySQLFlavor, "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-77",
+			"Start position: auto-discovered GTID set 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-77 ✓\n"},
+		{gomysql.MariaDBFlavor, "0-1786932434-44",
+			"Start position: GTID mode, from 0-1786932434-44 ✓\n"},
+		{gomysql.MariaDBFlavor, "0-1-100,1-2-7",
+			"Start position: GTID mode, from 0-1-100,1-2-7 ✓\n"},
+		{gomysql.MariaDBFlavor, "",
+			"Start position: GTID mode, from the first transaction (the source has written none yet) ✓\n"},
+	} {
+		got := autoDiscoveredGTIDLine(tc.flavor, tc.set)
+		t.Logf("%s %q -> %s", tc.flavor, tc.set, strings.TrimSpace(got))
+		if got != tc.want {
+			t.Errorf("%s %q:\n got %q\nwant %q", tc.flavor, tc.set, got, tc.want)
+		}
+	}
+}
+
+// TestGTIDStartAnchor pins how a fresh GTID-mode start gets binlog
+// coordinates for its first checkpoint. Without them the checkpoint carries
+// an empty binlog_file and both resume cleanups skip, so a crash after the first
+// batch but before the next checkpoint duplicates that batch on restart.
+//
+// The position is read BEFORE the GTID set: every transaction not in the set
+// then committed after the position was read, so it sits at or past that
+// position, and the position-keyed cleanup reaches all of them.
+func TestGTIDStartAnchor(t *testing.T) {
+	var order []string
+	var a gtidStartAnchor
+	discover := a.wrap(
+		func() (string, uint32, error) { order = append(order, "position"); return "binlog.000009", 4411, nil },
+		func() (string, error) { order = append(order, "gtid"); return "0-1-5", nil })
+	if _, _, ok := a.seed(); ok {
+		t.Fatal("an anchor that was never read must not seed anything")
+	}
+	set, err := discover()
+	if err != nil || set != "0-1-5" {
+		t.Fatalf("wrapped discovery = %q, %v", set, err)
+	}
+	if strings.Join(order, ",") != "position,gtid" {
+		t.Errorf("read order = %v, want position before gtid", order)
+	}
+	file, pos, ok := a.seed()
+	if !ok || file != "binlog.000009" || pos != 4411 {
+		t.Errorf("seed = %q:%d ok=%v, want binlog.000009:4411", file, pos, ok)
+	}
+
+	// A failed position read does not block the GTID start (MySQL never
+	// needed it before), but it seeds nothing and says so.
+	var b gtidStartAnchor
+	failing := b.wrap(
+		func() (string, uint32, error) { return "", 0, errors.New("SHOW MASTER STATUS denied") },
+		func() (string, error) { return "0-1-5", nil })
+	if _, err := failing(); err != nil {
+		t.Fatalf("a failed position read must not fail discovery: %v", err)
+	}
+	if _, _, ok := b.seed(); ok {
+		t.Error("a failed position read must not seed coordinates")
+	}
+	if b.err == nil {
+		t.Error("the position read error must be kept for the caller to report")
+	}
+}
+
+// TestStragglerDeleteIsBounded: the straggler pass deletes only rows of the
+// checkpoint's file and, with a floor, only rows this run could have written.
+// Unbounded, a GTID string re-used by older history (a MariaDB source after
+// RESET MASTER numbers 0-1-1 again) would delete that history.
+func TestStragglerDeleteIsBounded(t *testing.T) {
+	m := &capturingMatcher{}
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	saved, err := parseGTIDSetForFlavor("mariadb", "0-1-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectExec("").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("").WillReturnRows(sqlmock.NewRows([]string{"gtid"}).AddRow("0-1-9"))
+	mock.ExpectExec("").WithArgs("0-1-9", "mariadb-bin.000003", int64(700)).WillReturnResult(sqlmock.NewResult(0, 1))
+	if _, err := deleteEventsSinceCheckpointGTID(db, "mariadb-bin.000003", 5000, saved, "mariadb", 700); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	last := m.seen[len(m.seen)-1]
+	if !strings.Contains(last, "binlog_file = ?") || !strings.Contains(last, "event_id >= ?") {
+		t.Errorf("straggler delete is not bounded by file and floor: %q", last)
+	}
+}
+
+// TestFreshDedupFloor: a run with no checkpoint starts its floor above every
+// row already in the index, so its resume cleanup can only ever touch rows it
+// wrote itself.
+func TestFreshDedupFloor(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(event_id\), 0\) \+ 1 FROM binlog_events`).
+		WillReturnRows(sqlmock.NewRows([]string{"f"}).AddRow(int64(48211908)))
+	got, err := freshDedupFloor(db)
+	if err != nil || got != 48211908 {
+		t.Fatalf("freshDedupFloor = %d, %v; want 48211908", got, err)
+	}
+	mock.ExpectQuery(`SELECT COALESCE`).WillReturnError(errors.New("index gone"))
+	if _, err := freshDedupFloor(db); err == nil {
+		t.Error("a failed read must be an error, never a zero floor")
+	}
+}
+
+// TestOne_restartsOnlyOnCutTransaction pins One's in-process restart: only
+// parser.ErrResentCutTransaction restarts the run, any other error returns
+// at once, and a run that keeps failing that way gives up after the limit.
+func TestOne_restartsOnlyOnCutTransaction(t *testing.T) {
+	prevFn, prevDelay := oneRunFn, cutRestartDelay
+	t.Cleanup(func() { oneRunFn, cutRestartDelay = prevFn, prevDelay })
+	cutRestartDelay = time.Millisecond
+	cut := &parser.ResentCutTransactionError{GTID: "0-1-7", Rows: 3}
+
+	calls := 0
+	oneRunFn = func(context.Context, Config) error {
+		calls++
+		if calls < 3 {
+			return errors.Join(errors.New("stream"), cut)
+		}
+		return nil
+	}
+	if err := One(context.Background(), Config{}); err != nil || calls != 3 {
+		t.Errorf("two cuts then success: err=%v calls=%d, want nil after 3 runs", err, calls)
+	}
+
+	calls = 0
+	other := errors.New("index write deadline")
+	oneRunFn = func(context.Context, Config) error { calls++; return other }
+	if err := One(context.Background(), Config{}); !errors.Is(err, other) || calls != 1 {
+		t.Errorf("another error: err=%v calls=%d, want it returned after 1 run", err, calls)
+	}
+
+	// A restart resumes from the checkpoint the first pass left. It must not
+	// apply the first pass's start instructions again: --reset would throw
+	// that checkpoint away (skipping the rest of the cut transaction and
+	// recording a false loss), and --start-* would replay without cleanup.
+	var seen []Config
+	oneRunFn = func(_ context.Context, cfg Config) error {
+		seen = append(seen, cfg)
+		if len(seen) == 1 {
+			return cut
+		}
+		return nil
+	}
+	first := Config{Reset: true, StartFile: "binlog.000003", StartPos: 1234, StartGTID: "0-1-5", Schemas: "shop"}
+	if err := One(context.Background(), first); err != nil || len(seen) != 2 {
+		t.Fatalf("err=%v runs=%d", err, len(seen))
+	}
+	if seen[0].Reset != true || seen[0].StartFile != "binlog.000003" {
+		t.Errorf("the first pass must get the config as given: %+v", seen[0])
+	}
+	if r := seen[1]; r.Reset || r.StartFile != "" || r.StartPos != 0 || r.StartGTID != "" || r.Schemas != "shop" {
+		t.Errorf("the restart must drop --reset and --start-* and keep the rest: %+v", r)
+	}
+
+	calls = 0
+	oneRunFn = func(context.Context, Config) error { calls++; return cut }
+	err := One(context.Background(), Config{})
+	if !errors.Is(err, parser.ErrResentCutTransaction) || calls != 6 {
+		t.Errorf("endless cuts: err=%v calls=%d, want the cut error after 6 runs", err, calls)
+	}
+}
+
+// TestNotRestartableIfUnsaved: after a cut transaction, capture restarts
+// itself only when the final checkpoint was saved.
+func TestNotRestartableIfUnsaved(t *testing.T) {
+	cut := &parser.ResentCutTransactionError{GTID: "0-1-7", Rows: 2}
+	if err := notRestartableIfUnsaved(cut, nil); !errors.Is(err, parser.ErrResentCutTransaction) {
+		t.Errorf("saved: %v, want the restartable cut error", err)
+	}
+	err := notRestartableIfUnsaved(cut, errors.New("index gone"))
+	if err == nil || errors.Is(err, parser.ErrResentCutTransaction) || !strings.Contains(err.Error(), "index gone") {
+		t.Errorf("unsaved: %v, want a non-restartable error naming the failed save", err)
+	}
+	other := errors.New("other")
+	if err := notRestartableIfUnsaved(other, errors.New("x")); err != other {
+		t.Errorf("other errors pass unchanged, got %v", err)
 	}
 }

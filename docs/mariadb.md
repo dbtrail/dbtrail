@@ -152,7 +152,11 @@ page and the
 ## What works
 
 - **Live capture** in both **position mode** and **GTID mode** (MariaDB
-  `domain-server-seq` GTIDs, e.g. `0-1-100`).
+  `domain-server-seq` GTIDs, e.g. `0-1-100`). A new capture starts in **GTID
+  mode** on its own, from `@@gtid_binlog_pos` (every domain), so live-source
+  `verify` can compare it with the source. `--start-file`/`--start-pos` still
+  starts in position mode, and a capture that already has a position-mode
+  checkpoint keeps resuming in position mode.
 - **GTID resume with gap detection** — restart and bintrail re-reads the saved
   MariaDB GTID set and continues where it left off. On resume it verifies the
   source still retains the binlogs needed: MariaDB has no `@@gtid_purged`, so the
@@ -212,6 +216,32 @@ page and the
   on every supported version by comparing `HEX()` of every column with the
   source.
 
+### Moving a position-mode capture to GTID
+
+Captures started before GTID became the default keep running in position mode.
+Nothing moves them automatically. To move one without losing events:
+
+1. Pick a moment with no writes on the source, and wait until
+   `bintrail status` shows the capture caught up.
+2. Stop the capture.
+3. Run `bintrail stream` once with `--reset` and no `--start-*` flags, against
+   the same index. After that, restart the capture the usual way.
+
+```
+position checkpoint == source's current binlog position  ->  GTID mode, nothing recorded as lost
+position checkpoint  < source's current binlog position  ->  GTID mode, the skipped window is recorded as lost
+```
+
+`--reset` compares the old checkpoint with the source's current binlog
+position. If they match, nothing was skipped and nothing is recorded. If a
+write slipped in, the reset says so: `bintrail status` shows the window as
+permanently lost. It never hides a gap.
+
+With an explicit `--start-gtid` (a first start or a `--reset`), the start
+checkpoint records no binlog file until the first row arrives, so a crash in
+that short window can leave the first rows indexed twice. The start without
+flags records the file and has no such window.
+
 ---
 
 ## Beta limitations
@@ -241,8 +271,9 @@ page and the
 - **BYOS agent support is the least exercised path.** `bintrail agent` detects
   the flavor the same way for its BYOS streaming (same optional
   `--source-flavor` and `BINTRAIL_SOURCE_FLAVOR` as `stream`), but unlike
-  `stream` it has no saved checkpoint. On restart it resumes from `--start-gtid` (parsed with the
-  detected flavor) or the server's current binlog position. The web interface
+  `stream` it has no saved checkpoint. On restart it starts from `--start-gtid` (parsed with the
+  detected flavor), or else from the server's current `@@gtid_binlog_pos` in GTID
+  mode (the current binlog position when that is still empty). The web interface
   also captures MariaDB sources and detects them the same way. The Source type
   saved with a server is only a hint: capture follows what the server reports
   and saves it as the server's Source type. The server's Overview shows a

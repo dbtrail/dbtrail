@@ -66,8 +66,12 @@ func TestIndexCovers_MariaDB(t *testing.T) {
 		{name: "position mode", src: "0-1-100", expect: row("position", nil), detail: "binlog-position mode"},
 		{name: "position mode with a stale GTID set left behind", src: "0-1-100", expect: row("position", "0-1-100"), detail: "binlog-position mode"},
 		{name: "no mode recorded", src: "0-1-100", expect: row(nil, "0-1-100"), detail: "binlog-position mode"},
-		{name: "GTID mode, no set saved", src: "0-1-100", expect: row("gtid", nil), detail: "SELECT @@gtid_binlog_pos"},
-		{name: "GTID mode, blank set saved", src: "0-1-100", expect: row("gtid", "  "), detail: "SELECT @@gtid_binlog_pos"},
+		// GTID mode with an empty set is a healthy capture that has recorded no
+		// transaction yet (a MariaDB capture started on a server that had written
+		// nothing). Behind, never the --reset advice, which would record a false
+		// loss.
+		{name: "GTID mode, no set saved", src: "0-1-100", expect: row("gtid", nil), detail: "index is behind the source snapshot: the capture has recorded no transaction yet"},
+		{name: "GTID mode, blank set saved", src: "0-1-100", expect: row("gtid", "  "), detail: "index is behind the source snapshot: the capture has recorded no transaction yet"},
 		{name: "no stream state row", src: "0-1-100",
 			expect: func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(stateQuery).WillReturnRows(sqlmock.NewRows([]string{"mode", "gtid_set"}))
@@ -166,7 +170,6 @@ func TestIndexCovers_noCheckpointAdviceNeverSkipsSilently(t *testing.T) {
 	}{
 		{"mysql, no GTID set", consistency.GTIDFlavorMySQL, "3e11fa47-bee9-11e4-9716-8f2e7c74b0e5:1-5", "position", "", "SELECT @@GLOBAL.gtid_executed"},
 		{"mariadb, position mode", consistency.GTIDFlavorMariaDB, "0-1-100", "position", "", "SELECT @@gtid_binlog_pos"},
-		{"mariadb, no GTID set", consistency.GTIDFlavorMariaDB, "0-1-100", "gtid", "", "SELECT @@gtid_binlog_pos"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
