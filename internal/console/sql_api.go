@@ -574,10 +574,10 @@ func (s *Server) writeSQLError(w http.ResponseWriter, r *http.Request, err error
 	case errors.As(err, &werr):
 		slog.Error("console: the SQL worker failed", "error", err, "server", r.Header.Get(serverHeader))
 		writeJSONError(w, http.StatusInternalServerError,
-			"the SQL worker failed before it could answer; the console log has the details")
+			"the SQL worker failed before it could answer; DBTrail's log has the details")
 	default:
 		slog.Error("console: sql query failed", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "the query could not be run; the console log has the details")
+		writeJSONError(w, http.StatusInternalServerError, "the query could not be run; DBTrail's log has the details")
 	}
 }
 

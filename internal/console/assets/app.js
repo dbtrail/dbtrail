@@ -2571,16 +2571,16 @@ function sqlErrorView(status, message, limits) {
   switch (status) {
     case 400: return { text: "The request was not understood.", detail: msg };
     case 403:
-      if (/data profile/.test(msg)) return { text: "SQL is off while a data profile is active. The profile filters what this console shows, and SQL reads the raw files, which it cannot filter.", detail: "" };
-      return { text: "Your session may not run SQL here.", detail: "" };
+      if (/data profile/.test(msg)) return { text: "SQL is off while a data profile is active. The profile filters what the web interface shows, and SQL reads the raw files, which it cannot filter.", detail: "" };
+      return { text: "Your session is not allowed to run SQL.", detail: "" };
     case 409:
-      if (/only on S3/.test(msg)) return { text: "The copy for this server is only on S3. SQL in this page needs a local copy.", detail: "" };
+      if (/only on S3/.test(msg)) return { text: "The copy for this server is only on S3. SQL in the web interface needs a local copy.", detail: "" };
       if (/no copy|no view/.test(msg)) return { text: "There is no copy to run SQL on yet.", detail: "" };
-      return { text: "This copy cannot be queried here.", detail: msg };
+      return { text: "This copy cannot be queried from the web interface.", detail: msg };
     case 422: return { text: "The query did not run.", detail: msg };
     case 429: return { text: "A query of yours is already running, or the server is at its limit of two. Wait for it to finish.", detail: "" };
     case 504: return { text: "The query ran longer than the " + (lim.timeout_seconds ? lim.timeout_seconds + " s " : "time ") + "limit and was stopped. Narrow it: a WHERE on a table, or a smaller window on events.", detail: "" };
-    case 500: return { text: "The query could not be run. The console log has the details.", detail: "" };
+    case 500: return { text: "The query could not be run. DBTrail's log has the details.", detail: "" };
     case 502: return { text: "The copy could not be read.", detail: msg };
     default: return { text: status ? "The query failed." : "The server did not answer.", detail: msg };
   }
