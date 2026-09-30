@@ -14377,9 +14377,12 @@ function drawConnectLights(form, report, started) {
     if (l.checks.length && l.status !== "ok" && !started) li.append(connectFindings(l.checks));
     return li;
   }));
-  // The fix is what the person came for: bring the first red light into view.
+  // The fix is what the person came for: bring step 3 into view from its
+  // title, so the lights, the fix and what happens next are what is on
+  // screen, not the fields of step 2 above them.
   const bad = list.querySelector("li.bad");
-  if (bad && typeof bad.scrollIntoView === "function") bad.scrollIntoView({ block: "nearest", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+  const s3 = form.querySelector("div[data-cx-step=3]");
+  if (bad && s3 && typeof s3.scrollIntoView === "function") s3.scrollIntoView({ block: "start", behavior: prefersReducedMotion() ? "auto" : "smooth" });
 }
 
 // runConnectCheck runs the startup checks for what the form holds and draws
