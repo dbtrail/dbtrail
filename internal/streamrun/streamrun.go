@@ -1138,6 +1138,41 @@ func emptyAsWord(set string) string {
 	return set
 }
 
+// gtidStartAnchor records the source's binlog coordinates for a fresh
+// GTID-mode start, so its first checkpoint carries a binlog_file. Without one
+// the checkpoint says binlog_file = '' until the first row event, both resume
+// cleanups (deleteEventsSinceCheckpoint, deleteEventsSinceCheckpointGTID) skip
+// an empty file, and a crash after the first batch but before the next
+// checkpoint duplicates that batch on restart.
+//
+// wrap reads the position BEFORE the GTID set. Every transaction the stream
+// will receive is missing from that set, so it committed after the set was
+// read, hence after the position was read: its rows sit at or past the
+// position, which is exactly what the position-keyed cleanup deletes.
+type gtidStartAnchor struct {
+	file string
+	pos  uint32
+	err  error
+	read bool
+}
+
+func (a *gtidStartAnchor) wrap(position func() (string, uint32, error), gtid func() (string, error)) func() (string, error) {
+	return func() (string, error) {
+		a.read = true
+		a.file, a.pos, a.err = position()
+		return gtid()
+	}
+}
+
+// seed returns the coordinates to seed the checkpoint with, ok=false when
+// the position was never read or could not be read.
+func (a *gtidStartAnchor) seed() (string, uint32, bool) {
+	if !a.read || a.err != nil || a.file == "" {
+		return "", 0, false
+	}
+	return a.file, a.pos, true
+}
+
 // gtidDiscoverySource names the server variable a fresh GTID start is read
 // from, for logs and errors.
 func gtidDiscoverySource(flavor string) string {
@@ -2279,12 +2314,27 @@ func One(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	var anchor gtidStartAnchor
+	currentPosition := func() (string, uint32, error) { return config.CurrentBinlogPosition(sourceDB) }
 	mode, startFile, startGTIDStr, startPos, accGTID, err := resolveStartWithAutoDiscoverForFlavor(
 		cfg.StartFile, cfg.StartGTID, cfg.StartPos, saved, cfg.Flavor,
-		func() (string, uint32, error) { return config.CurrentBinlogPosition(sourceDB) },
-		gtidAutoDiscoverFor(cfg.Flavor, sourceDB))
+		currentPosition,
+		anchor.wrap(currentPosition, gtidAutoDiscoverFor(cfg.Flavor, sourceDB)))
 	if err != nil {
 		return err
+	}
+	// A fresh, auto-discovered GTID start: seed the checkpoint's binlog
+	// coordinates (see gtidStartAnchor). Only here: with an explicit
+	// --start-gtid the start set can be far behind the current position, and
+	// seeding "now" would let the cleanup miss the rows replayed before it.
+	if mode == "gtid" && saved == nil && cfg.StartFile == "" && cfg.StartGTID == "" {
+		if f, p, ok := anchor.seed(); ok {
+			startFile, startPos = f, p
+		} else if anchor.read {
+			slog.Warn("could not read the source's binlog position for a fresh GTID start; "+
+				"until the first event arrives, a crash can leave that first batch indexed twice on restart",
+				"error", anchor.err)
+		}
 	}
 	// Surface the auto-discovered start point when this was a first-run,
 	// no-flags invocation. Mirrors the agent BYOS startup checkmark style.

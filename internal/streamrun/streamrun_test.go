@@ -2187,3 +2187,49 @@ func TestAutoDiscoveredGTIDLine(t *testing.T) {
 		}
 	}
 }
+
+// TestGTIDStartAnchor pins how a fresh GTID-mode start gets binlog
+// coordinates for its first checkpoint. Without them the checkpoint carries
+// binlog_file = '' and both resume cleanups skip, so a crash after the first
+// batch but before the next checkpoint duplicates that batch on restart.
+//
+// The position is read BEFORE the GTID set: every transaction not in the set
+// then committed after the position was read, so it sits at or past that
+// position, and the position-keyed cleanup reaches all of them.
+func TestGTIDStartAnchor(t *testing.T) {
+	var order []string
+	var a gtidStartAnchor
+	discover := a.wrap(
+		func() (string, uint32, error) { order = append(order, "position"); return "binlog.000009", 4411, nil },
+		func() (string, error) { order = append(order, "gtid"); return "0-1-5", nil })
+	if _, _, ok := a.seed(); ok {
+		t.Fatal("an anchor that was never read must not seed anything")
+	}
+	set, err := discover()
+	if err != nil || set != "0-1-5" {
+		t.Fatalf("wrapped discovery = %q, %v", set, err)
+	}
+	if strings.Join(order, ",") != "position,gtid" {
+		t.Errorf("read order = %v, want position before gtid", order)
+	}
+	file, pos, ok := a.seed()
+	if !ok || file != "binlog.000009" || pos != 4411 {
+		t.Errorf("seed = %q:%d ok=%v, want binlog.000009:4411", file, pos, ok)
+	}
+
+	// A failed position read does not block the GTID start (MySQL never
+	// needed it before), but it seeds nothing and says so.
+	var b gtidStartAnchor
+	failing := b.wrap(
+		func() (string, uint32, error) { return "", 0, errors.New("SHOW MASTER STATUS denied") },
+		func() (string, error) { return "0-1-5", nil })
+	if _, err := failing(); err != nil {
+		t.Fatalf("a failed position read must not fail discovery: %v", err)
+	}
+	if _, _, ok := b.seed(); ok {
+		t.Error("a failed position read must not seed coordinates")
+	}
+	if b.err == nil {
+		t.Error("the position read error must be kept for the caller to report")
+	}
+}
