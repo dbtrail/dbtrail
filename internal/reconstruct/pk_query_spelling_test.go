@@ -9,6 +9,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	mysqldrv "github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -145,6 +146,7 @@ func TestSpellIndexPKFilter_unknownTypeRefuses(t *testing.T) {
 		mock.ExpectQuery("SELECT snapshot_id").WillReturnRows(sqlmock.NewRows([]string{"snapshot_id", "schema_name", "table_name"}))
 		mock.ExpectQuery("SELECT 1 FROM binlog_events").WithArgs("shop", "sessions", key, key).
 			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectQuery("SELECT 1 FROM archive_state").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 		o := query.Options{Schema: "shop", Table: "sessions", PKValues: key}
 		_, err = SpellIndexPKFilter(context.Background(), db, &o)
 		db.Close()
@@ -216,5 +218,50 @@ func TestSpellIndexPKFilter_describedWithoutKeyPasses(t *testing.T) {
 	o := query.Options{Schema: "shop", Table: "logs", PKValues: "10.0.0.1"}
 	if _, err := SpellIndexPKFilter(context.Background(), db, &o); err != nil || o.PKValues != "10.0.0.1" {
 		t.Errorf("err %v, PKValues %q", err, o.PKValues)
+	}
+}
+
+// No snapshot, nothing live under the key as typed, but archives exist: the
+// table's whole history may be in Parquet (a MySQL CHAR(36) UUID, an md5 or an
+// IP key), and that lookup worked before. Proving absence there would mean
+// reading the archives, so the key goes through as typed (with a warning)
+// instead of being refused.
+func TestSpellIndexPKFilter_archivedHistoryIsNotRefused(t *testing.T) {
+	for _, archives := range []*sqlmock.Rows{
+		sqlmock.NewRows([]string{"1"}).AddRow(1),
+	} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		mock.ExpectQuery("SELECT snapshot_id").WillReturnRows(sqlmock.NewRows([]string{"snapshot_id", "schema_name", "table_name"}))
+		mock.ExpectQuery("SELECT 1 FROM binlog_events").WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectQuery("SELECT 1 FROM archive_state").WillReturnRows(archives)
+		o := query.Options{Schema: "shop", Table: "t", PKValues: uuidText}
+		_, err = SpellIndexPKFilter(context.Background(), db, &o)
+		db.Close()
+		if err != nil {
+			t.Errorf("refused a key whose history may be archived: %v", err)
+		}
+		if o.PKValues != uuidText {
+			t.Errorf("PKValues = %q, want the key as typed", o.PKValues)
+		}
+	}
+}
+
+// An index with no archive_state table (never rotated) has no archives: the
+// live miss is the whole answer, so the refusal stands.
+func TestSpellIndexPKFilter_noArchiveTableStillRefuses(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT snapshot_id").WillReturnRows(sqlmock.NewRows([]string{"snapshot_id", "schema_name", "table_name"}))
+	mock.ExpectQuery("SELECT 1 FROM binlog_events").WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	mock.ExpectQuery("SELECT 1 FROM archive_state").WillReturnError(&mysqldrv.MySQLError{Number: 1146, Message: "Table 'idx.archive_state' doesn't exist"})
+	o := query.Options{Schema: "shop", Table: "t", PKValues: uuidText}
+	if _, err := SpellIndexPKFilter(context.Background(), db, &o); !errors.Is(err, ErrPKTypeUnknown) {
+		t.Errorf("err = %v, want ErrPKTypeUnknown", err)
 	}
 }

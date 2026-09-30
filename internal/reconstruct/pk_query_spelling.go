@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -97,6 +100,21 @@ func SpellIndexPKFilter(ctx context.Context, db *sql.DB, opts *query.Options) (m
 			return nil, fmt.Errorf("could not check the index for the key %q of %s.%s: %w", sample, opts.Schema, opts.Table, err)
 		}
 		if hit {
+			return nil, nil
+		}
+		// The live index is not the whole history once partitions have been
+		// archived: a table whose events all moved to Parquet (a MySQL
+		// CHAR(36) UUID or an IP key, say) matched as typed before, and
+		// proving it absent there would mean reading the archives. So with
+		// archives on record the key goes through as typed, with a warning.
+		archived, err := archivesRegistered(ctx, db)
+		if err != nil {
+			return nil, fmt.Errorf("could not check the index for archives of %s.%s: %w", opts.Schema, opts.Table, err)
+		}
+		if archived {
+			slog.Warn("no schema snapshot describes this table, so a key that looks like a MariaDB UUID/INET value is looked up as typed; "+
+				"if the table's key is one of those types, the answer can be empty; take a schema snapshot (`bintrail snapshot`) to rule that out",
+				"schema", opts.Schema, "table", opts.Table, "key", sample)
 			return nil, nil
 		}
 		return nil, fmt.Errorf("%w: no schema snapshot describes %s.%s, so there is no way to tell whether the key %q is a MariaDB UUID/INET value, "+
@@ -216,4 +234,21 @@ func typedKeyIndexed(ctx context.Context, db *sql.DB, schema, table string, keys
 		return true, nil
 	}
 	return false, nil
+}
+
+// archivesRegistered reports whether the index has any archived partition on
+// record. An index that never rotated has no archive_state table at all.
+func archivesRegistered(ctx context.Context, db *sql.DB) (bool, error) {
+	var one int
+	err := db.QueryRowContext(ctx, "SELECT 1 FROM archive_state LIMIT 1").Scan(&one)
+	var me *mysql.MySQLError
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case errors.As(err, &me) && me.Number == 1146:
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return true, nil
 }
