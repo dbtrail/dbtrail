@@ -2986,10 +2986,17 @@ function renderOverview() {
 // The button opens that same dialog with the add form already open. Shown
 // only where a server can be monitored from here, like the sidebar note: a
 // read-only console cannot start capturing a new source.
+// ADD_FIRST_ART: the path with its first station not added yet: a dashed
+// database, a dashed wire, DBTrail and the copy (static, so svgEl is right).
+const ADD_FIRST_ART = `<svg viewBox="0 0 200 52" aria-hidden="true"><ellipse cx="24" cy="12" rx="18" ry="6" fill="none" stroke="var(--ink-4)" stroke-width="1.5" stroke-dasharray="4 3"/><path d="M6 12v26c0 3.3 8 6 18 6s18-2.7 18-6V12" fill="none" stroke="var(--ink-4)" stroke-width="1.5" stroke-dasharray="4 3"/><path d="M50 28h26" stroke="var(--ink-4)" stroke-width="2" stroke-dasharray="4 4"/><rect x="84" y="10" width="44" height="36" rx="9" fill="var(--pink-tint)" stroke="var(--pink-mid)" stroke-width="1.5"/><path d="M96 34l8-8 6 5 8-9" fill="none" stroke="var(--pink-mid)" stroke-width="2"/><path d="M136 28h22" stroke="var(--ink-4)" stroke-width="2"/><rect x="164" y="12" width="32" height="32" rx="8" fill="var(--mint-tint)" stroke="var(--ok)" stroke-width="1.5"/></svg>`;
+
 function addServerCard() {
   const card = el("section", { class: "ov-panel fr-card add-first" });
   card.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Getting started" }))));
+  // What is missing, drawn (#1950): your database, dashed, then DBTrail and
+  // the copy. The sentence stays: it says what Add server will do.
+  card.append(el("div", { class: "empty-art", "aria-hidden": "true" }, svgEl(ADD_FIRST_ART)));
   card.append(el("p", { class: "add-first-lead",
     text: "Add the database you want to protect. DBTrail checks that it is ready, sets up its index and starts capturing its changes." }));
   card.append(el("button", { class: "btn btn-primary", type: "button", id: "ov-add-server", text: "+ Add server",

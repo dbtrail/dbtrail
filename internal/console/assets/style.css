@@ -514,8 +514,6 @@ button { font-family: inherit; }
 }
 .field--sm { width: 116px; }
 .field--md { width: 168px; }
-.field--lg { width: 210px; }
-.field--grow { flex: 1 1 150px; }
 
 .filter-actions { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
 
@@ -1107,7 +1105,7 @@ button { font-family: inherit; }
   min-inline-size: 0;
 }
 .form-section > legend, .form-legend {
-  font-family: var(--f-mono); font-size: var(--fs-xs); font-weight: 600;
+  font-family: var(--f-ui); font-size: 11px; font-weight: 600;
   letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--accent); padding: 0 6px; margin-left: 6px;
 }
@@ -1786,6 +1784,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .login-form .modal-foot { margin-top: 4px; }
 .login-form .modal-foot .btn { flex: 1; }
 .login-panel .form-msg { font-family: var(--f-ui); font-size: 13px; margin-top: 6px; }
+#login-msg:empty { display: none; }
 /* External-login entry under the gate (only when /api/auth advertises a
    provider): a subtle "or" divider, then a full-width link styled as a
    button — <a class="btn"> needs the underline stripped. */
@@ -1896,7 +1895,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .srv-status.ok { color: var(--insert); }
 .srv-status.err { color: var(--delete); }
 .srv-status.pending { color: var(--ink-2); }
-#server-test-result { margin-left: 2px; }
 
 /* add/edit server form messages */
 .form-msg { font-family: var(--f-mono); font-size: 12px; margin-top: 10px; min-height: 1em; }
@@ -2107,6 +2105,7 @@ section.bk-restore { margin-top: 18px; }
 .ap-empty .empty-art svg, .cn-key svg, .srv-empty .empty-art svg { width: 120px; height: 40px; }
 /* no taller than the line it replaced: the add form opens under it (first-run walk) */
 .empty.srv-empty { padding: 18px 16px; gap: 8px; margin: 0; }
+.modal-body:has(#server-form-mount > *) .srv-empty { display: none; }
 .cn-key { margin: 2px 0 8px; }
 /* how flags, profiles and rules work together, drawn (#1950) */
 .ap-draw { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -8px 0 22px; }

@@ -29,6 +29,8 @@ func TestOverviewOffersTheFirstServer(t *testing.T) {
 	script := `
 const calls = [];
 const el = (tag, attrs, ...kids) => ({ tag, attrs: attrs || {}, kids: [], append(...k) { this.kids.push(...k); } });
+// The add-first card carries a static drawing since #1950.
+const svgEl = () => ({ tag: "svg", attrs: {}, kids: [] });
 const never = new Promise(() => {});
 const api = () => never;
 const openServersModal = () => calls.push("open");
