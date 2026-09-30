@@ -73,14 +73,28 @@ func Ultrafast() Tuning { return Tuning{S3Direct: true} }
 // that exceeds the cap fails outright instead of spilling to disk, which is
 // WORSE than leaving memory_limit unset entirely. See SetTempDirectory.
 func (t Tuning) Apply(ctx context.Context, db *sql.DB) {
+	for _, stmt := range t.Statements() {
+		applyTuningStmt(ctx, db, stmt)
+	}
+}
+
+// Statements renders the SET statements Apply would run, one per non-zero
+// field, for a caller that needs them under a different failure policy. Apply
+// is best-effort by design (a shared daemon session must not abort a query
+// over a knob); the SQL sandbox worker (internal/sqlsandbox) runs the same
+// statements but treats a failed cap as fatal, because there the cap IS the
+// guarantee.
+func (t Tuning) Statements() []string {
+	var stmts []string
 	if t.Threads > 0 {
-		applyTuningStmt(ctx, db, fmt.Sprintf("SET threads = %d", t.Threads))
+		stmts = append(stmts, fmt.Sprintf("SET threads = %d", t.Threads))
 	}
 	if t.MemoryLimit != "" {
 		// Mirror parquetquery's temp_directory concatenation; escape single
 		// quotes so an operator-supplied value can't break out of the literal.
-		applyTuningStmt(ctx, db, "SET memory_limit = '"+strings.ReplaceAll(t.MemoryLimit, "'", "''")+"'")
+		stmts = append(stmts, "SET memory_limit = '"+strings.ReplaceAll(t.MemoryLimit, "'", "''")+"'")
 	}
+	return stmts
 }
 
 // SetTempDirectory points a DuckDB session's temp_directory at the OS temp

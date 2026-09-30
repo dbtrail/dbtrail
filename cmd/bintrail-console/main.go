@@ -22,5 +22,8 @@ var (
 )
 
 func main() {
+	// The SQL sandbox worker is this same binary re-executed; answer that
+	// before anything else so no per-process setup runs for every query.
+	consoleapp.RunSQLWorkerIfInvoked()
 	os.Exit(consoleapp.Main(Version, CommitSHA, BuildDate))
 }

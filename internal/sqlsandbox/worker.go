@@ -1,0 +1,434 @@
+package sqlsandbox
+
+import (
+	"context"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"math/big"
+	"os"
+	"runtime/debug"
+	"sort"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/duckdb/duckdb-go/v2"
+
+	"github.com/dbtrail/dbtrail/internal/duckdbutil"
+)
+
+// IsWorkerProcess reports whether this process was started as a worker by a
+// Runner (the marker is in the environment). The console's hidden command is
+// selected by argument; the package's own test binary uses this.
+func IsWorkerProcess() bool { return os.Getenv(workerEnv) == "1" }
+
+// WorkerMain is the child's whole life: read one job from stdin, run it,
+// write one result to stdout, exit. The exit code is 0 whenever a result
+// (including a structured error) was written; anything else is a protocol
+// failure the parent reports as a WorkerError with stderr attached.
+func WorkerMain(stdin io.Reader, stdout, stderr io.Writer) int {
+	// First thing: on Linux, be the kernel's first choice if memory runs
+	// out on the host, ahead of the console that is also the capture plane.
+	lowerOOMPriority(stderr)
+	var job wireJob
+	if err := json.NewDecoder(stdin).Decode(&job); err != nil {
+		fmt.Fprintf(stderr, "sql worker: read job: %v\n", err)
+		return 2
+	}
+	// The parent kills this process at its deadline. If the parent is gone
+	// (crashed, OOM-killed) nobody will, so the child stops on its own a
+	// little after: the query is not worth 2 threads and 2 GB for hours.
+	if job.TimeoutNS > 0 {
+		stop := time.AfterFunc(time.Duration(job.TimeoutNS)+selfDeadlineGrace, func() {
+			fmt.Fprintln(stderr, "sql worker: past its deadline with no parent kill; exiting")
+			os.Exit(selfDeadlineExit)
+		})
+		defer stop.Stop()
+	}
+	res := runJob(job, stderr)
+	if err := json.NewEncoder(stdout).Encode(res); err != nil {
+		fmt.Fprintf(stderr, "sql worker: write result: %v\n", err)
+		return 2
+	}
+	return 0
+}
+
+// selfDeadlineGrace is how long past the parent's timeout the child waits for
+// the parent's kill before exiting on its own; selfDeadlineExit is its exit
+// status then. Only an orphan ever reaches it: a live parent kills the
+// process group at the timeout itself.
+const (
+	selfDeadlineGrace = 2 * time.Second
+	selfDeadlineExit  = 3
+)
+
+// runJob never panics out: a panic anywhere below becomes a session error
+// with the stack on stderr, so the parent gets a typed answer.
+func runJob(job wireJob, stderr io.Writer) (res wireResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(stderr, "sql worker: panic: %v\n%s", r, debug.Stack())
+			res = wireResult{Error: &wireError{Kind: errSession, Message: fmt.Sprintf("sql worker panicked: %v", r)}}
+		}
+	}()
+	ctx := context.Background()
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		return sessionErr("open DuckDB: %v", err)
+	}
+	defer db.Close()
+	// ONE connection for everything. DuckDB scopes some settings (TimeZone)
+	// and every SET VARIABLE to the connection, and the views script uses
+	// both; a pooled second connection would not see them.
+	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return sessionErr("open DuckDB connection: %v", err)
+	}
+	defer conn.Close()
+
+	if reason := checkStatement(ctx, conn, job.SQL); reason != "" {
+		return wireResult{Error: &wireError{Kind: errRefused, Message: reason}}
+	}
+
+	// Caps first, so the views install already runs under them.
+	caps := duckdbutil.Tuning{Threads: job.Threads, MemoryLimit: job.MemoryLimit}
+	for _, stmt := range caps.Statements() {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return sessionErr("%s: %v", stmt, err)
+		}
+	}
+	// Then the restrictions, then the views, then the lock. The views are
+	// installed AFTER external access is restricted so an installed view can
+	// only ever reach the copy directories, and BEFORE the lock because the
+	// script sets the session time zone.
+	lock := lockdownStatements(job.CopyDirs)
+	restrict, lockLast := lock[:len(lock)-1], lock[len(lock)-1]
+	for _, stmt := range restrict {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return sessionErr("%s: %v", stmt, err)
+		}
+	}
+	if strings.TrimSpace(job.ViewsSQL) != "" {
+		if _, err := conn.ExecContext(ctx, job.ViewsSQL); err != nil {
+			return sessionErr("install the copy's views: %v", err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, lockLast); err != nil {
+		return sessionErr("%s: %v", lockLast, err)
+	}
+
+	start := time.Now()
+	rows, err := conn.QueryContext(ctx, job.SQL)
+	if err != nil {
+		return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
+	}
+	defer rows.Close()
+	types, err := rows.ColumnTypes()
+	if err != nil {
+		return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
+	}
+	res.Columns = make([]Column, len(types))
+	typeNames := make([]string, len(types))
+	for i, ct := range types {
+		typeNames[i] = ct.DatabaseTypeName()
+		res.Columns[i] = Column{Name: ct.Name(), Type: typeNames[i]}
+	}
+	res.Rows = [][]any{}
+	var rd renderer
+	var bytesSoFar int64
+	for rows.Next() {
+		if len(res.Rows) == job.MaxRows {
+			// One past the cap: the result was cut. Do not keep it.
+			res.Truncated = true
+			break
+		}
+		raw := make([]any, len(types))
+		ptrs := make([]any, len(types))
+		for i := range raw {
+			ptrs[i] = &raw[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
+		}
+		row := make([]any, len(raw))
+		for i, v := range raw {
+			row[i] = rd.cell(v, typeNames[i])
+		}
+		// Count the result as it grows, in the bytes the parent will read,
+		// and stop before building one it would refuse anyway.
+		if job.MaxResultBytes > 0 {
+			enc, err := json.Marshal(row)
+			if err != nil {
+				return wireResult{Error: &wireError{Kind: errQuery, Message: "encode row: " + err.Error()}}
+			}
+			bytesSoFar += int64(len(enc)) + 2
+			if bytesSoFar > job.MaxResultBytes {
+				return wireResult{Error: &wireError{Kind: errTooLarge,
+					Message: fmt.Sprintf("the result passed %d bytes at row %d", job.MaxResultBytes, len(res.Rows)+1)}}
+			}
+		}
+		res.Rows = append(res.Rows, row)
+	}
+	res.TruncatedCells = rd.truncated
+	if err := rows.Err(); err != nil {
+		return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
+	}
+	res.ElapsedNS = int64(time.Since(start))
+	return res
+}
+
+func sessionErr(format string, args ...any) wireResult {
+	return wireResult{Error: &wireError{Kind: errSession, Message: fmt.Sprintf(format, args...)}}
+}
+
+// sandboxSettings are the DuckDB settings the lock-down sets, verified to
+// exist on DuckDB v1.4.5 (TestSandboxSettingsExistInPinnedEngine keeps that
+// true across engine bumps). allowed_paths (single files) also exists there
+// and is not needed: the copy is whole directories.
+var sandboxSettings = []string{
+	"allowed_directories",
+	"enable_external_access",
+	"autoinstall_known_extensions",
+	"autoload_known_extensions",
+	"temp_directory",
+	"lock_configuration",
+}
+
+// lockdownStatements is the session lock-down, in order, lock LAST. What
+// each one blocks, as observed on DuckDB v1.4.5:
+//
+//   - allowed_directories = [copy dirs]: the directories reads may touch
+//     while external access is off. A path outside them, including one that
+//     traverses out with "..", is a Permission Error. Note it admits WRITES
+//     into these directories too (COPY ... TO succeeds); the single-SELECT
+//     check in checkStatement is what keeps the copy read-only.
+//   - enable_external_access = false: no file system operations outside
+//     allowed_directories (read_csv('/etc/passwd'), read_parquet elsewhere,
+//     glob, ATTACH a file, COPY TO elsewhere), no http:// or s3:// URLs,
+//     no INSTALL (it cannot reach the extension directory), no LOAD.
+//   - autoinstall_known_extensions / autoload_known_extensions = false: a
+//     function that lives in a not-yet-loaded extension does not trigger a
+//     download or a load; it is simply not there.
+//   - temp_directory = ”: no spill. A query past memory_limit fails with
+//     an Out of Memory Error instead of writing to disk. The worker never
+//     writes anything.
+//   - lock_configuration = true: from here on every SET, RESET and config
+//     PRAGMA is "Cannot change configuration option ... the configuration
+//     has been locked", including this one and every setting above.
+//
+// Two orderings are load-bearing, and TestLockdownRunsInOrderOnPinnedEngine
+// pins both on the real engine: temp_directory must be set BEFORE external
+// access goes off (afterwards DuckDB answers "Modifying the temp_directory
+// has been disabled by configuration"), and lock_configuration must be LAST.
+func lockdownStatements(copyDirs []string) []string {
+	quoted := make([]string, len(copyDirs))
+	for i, d := range copyDirs {
+		quoted[i] = "'" + strings.ReplaceAll(d, "'", "''") + "'"
+	}
+	return []string{
+		"SET allowed_directories = [" + strings.Join(quoted, ", ") + "]",
+		"SET temp_directory = ''",
+		"SET autoinstall_known_extensions = false",
+		"SET autoload_known_extensions = false",
+		"SET enable_external_access = false",
+		"SET lock_configuration = true",
+	}
+}
+
+// allowedTableFunctions are the table functions a statement may call, at any
+// depth: readers of files (DuckDB's own allowed_directories decides WHICH
+// files), Parquet metadata, generators, JSON walkers, and the read-only
+// pragma_* views. duckdb_* catalog functions are allowed by prefix below.
+//
+// Everything else is refused by name, because a SELECT-shaped statement can
+// still change state through a table function after the lock (verified on
+// v1.4.5): enable_logging(storage='file', ...) turns on a logger that later
+// writes CSV files into the copy, disable_logging, checkpoint,
+// force_checkpoint and truncate_duckdb_logs all run, query('...') and
+// json_execute_serialized_sql('...') run arbitrary text hidden in a string,
+// and query_table names a table by string.
+var allowedTableFunctions = map[string]bool{
+	"read_parquet": true, "parquet_scan": true,
+	"read_csv": true, "read_csv_auto": true, "sniff_csv": true,
+	"read_json": true, "read_json_auto": true, "read_json_objects": true, "read_json_objects_auto": true,
+	"read_ndjson": true, "read_ndjson_auto": true, "read_ndjson_objects": true,
+	"read_text": true, "read_blob": true, "glob": true,
+	"parquet_metadata": true, "parquet_schema": true, "parquet_file_metadata": true,
+	"parquet_kv_metadata": true, "parquet_bloom_probe": true,
+	"range": true, "generate_series": true, "unnest": true, "repeat": true,
+	"json_each": true, "json_tree": true,
+	"pragma_version": true, "pragma_platform": true, "pragma_database_size": true,
+	"pragma_storage_info": true, "pragma_table_info": true, "pragma_metadata_info": true,
+	"pragma_collations": true, "pragma_show": true, "pragma_user_agent": true,
+}
+
+func tableFunctionAllowed(name string) bool {
+	return allowedTableFunctions[name] || strings.HasPrefix(name, "duckdb_")
+}
+
+// refusedTableFunction walks the serialized statement tree and returns the
+// first table function that is not allowed, or "" when every one is. A
+// table function is the node DuckDB serializes as type TABLE_FUNCTION with
+// its call under "function"; it can sit in FROM, a join side, a CTE, a
+// subquery anywhere (select list, WHERE, LIMIT), a LATERAL, or a set
+// operation side, so the walk is over every key of every object. A
+// TABLE_FUNCTION node whose call cannot be read is refused too: unknown is
+// not allowed.
+func refusedTableFunction(node any) string {
+	switch x := node.(type) {
+	case map[string]any:
+		if x["type"] == "TABLE_FUNCTION" {
+			fn, _ := x["function"].(map[string]any)
+			name, _ := fn["function_name"].(string)
+			if name == "" {
+				return "(unrecognized table function)"
+			}
+			if !tableFunctionAllowed(strings.ToLower(name)) {
+				return name
+			}
+		}
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r := refusedTableFunction(x[k]); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if r := refusedTableFunction(e); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
+}
+
+// checkStatement asks DuckDB's own parser what the text is, through
+// json_serialize_sql (built into the engine; verified on v1.4.5), and returns
+// a refusal reason, or "" when the text is exactly one SELECT-shaped
+// statement whose table functions are all allowed. The serializer accepts
+// SELECT, FROM-first, VALUES, WITH, set operations, DESCRIBE, SHOW and
+// SUMMARIZE, and reports "Only SELECT statements can be serialized" for
+// everything else (COPY, CREATE, ATTACH, INSTALL, LOAD, SET, RESET, PRAGMA,
+// CALL, EXPLAIN, INSERT, a top-level PIVOT, ...). A comment or
+// whitespace-only text parses to zero statements.
+func checkStatement(ctx context.Context, conn *sql.Conn, text string) string {
+	var raw string
+	if err := conn.QueryRowContext(ctx, "SELECT json_serialize_sql(?::VARCHAR)::VARCHAR", text).Scan(&raw); err != nil {
+		return "could not parse the statement: " + err.Error()
+	}
+	var parsed struct {
+		Error        bool   `json:"error"`
+		ErrorType    string `json:"error_type"`
+		ErrorMessage string `json:"error_message"`
+		Statements   []any  `json:"statements"`
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return "could not parse the statement: " + err.Error()
+	}
+	switch {
+	case parsed.Error && strings.Contains(parsed.ErrorMessage, "Only SELECT statements"):
+		return "only a single SELECT statement can run here (no COPY, CREATE, ATTACH, INSTALL, LOAD, SET, PRAGMA or CALL)"
+	case parsed.Error && parsed.ErrorType == "parser":
+		return "syntax error: " + parsed.ErrorMessage
+	case parsed.Error:
+		return parsed.ErrorType + " error: " + parsed.ErrorMessage
+	case len(parsed.Statements) == 0:
+		return "the query is empty"
+	case len(parsed.Statements) > 1:
+		return fmt.Sprintf("one statement at a time: %d statements were given", len(parsed.Statements))
+	}
+	if name := refusedTableFunction(parsed.Statements[0]); name != "" {
+		return fmt.Sprintf("the table function %s is not allowed here; only readers (read_parquet, glob, the parquet_* metadata functions, range, unnest, json_each and the duckdb_* catalog) can run on the copy", name)
+	}
+	return ""
+}
+
+// renderer turns driver values into cells and counts the ones it cut.
+type renderer struct{ truncated int }
+
+// cell renders one value as a JSON-shaped cell (see Result). typ is DuckDB's
+// type name for the column, used to tell a DATE from a TIMESTAMP, both of
+// which the driver hands over as time.Time. Text longer than MaxCellBytes is
+// cut (on a rune boundary) and marked.
+func (r *renderer) cell(v any, typ string) any {
+	switch x := v.(type) {
+	case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return x
+	case string:
+		return r.text(x)
+	case float32:
+		return floatCell(float64(x))
+	case float64:
+		return floatCell(x)
+	case time.Time:
+		switch {
+		case typ == "DATE":
+			return x.Format("2006-01-02")
+		case typ == "TIME" || strings.HasPrefix(typ, "TIME "):
+			return x.Format("15:04:05.999999")
+		default:
+			return x.UTC().Format(time.RFC3339Nano)
+		}
+	case []byte:
+		if utf8.Valid(x) {
+			return r.text(string(x))
+		}
+		return r.text("0x" + strings.ToUpper(hex.EncodeToString(x)))
+	case *big.Int:
+		return x.String()
+	case duckdb.UUID:
+		return x.String()
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = r.cell(e, "")
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[k] = r.cell(e, "")
+		}
+		return out
+	case fmt.Stringer:
+		return r.text(x.String())
+	default:
+		return r.text(fmt.Sprint(x))
+	}
+}
+
+func (r *renderer) text(s string) string {
+	if len(s) <= MaxCellBytes {
+		return s
+	}
+	cut := MaxCellBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	r.truncated++
+	return s[:cut] + cellTruncatedMarker
+}
+
+// floatCell keeps a finite float as a number and renders the values JSON
+// cannot carry as text.
+func floatCell(f float64) any {
+	switch {
+	case math.IsNaN(f):
+		return "NaN"
+	case math.IsInf(f, 1):
+		return "Infinity"
+	case math.IsInf(f, -1):
+		return "-Infinity"
+	}
+	return f
+}
