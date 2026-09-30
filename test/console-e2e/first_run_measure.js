@@ -48,7 +48,6 @@
     ".fr-step.failed",       // first-run step failed, --delete mark
     ".vfy-row.fail",         // verification row, --delete
     ".bk-card-state.alarm",  // backup card state, --delete
-    ".bks-value.bks-refused",// backup setting refused, --delete
     ".toast-error",          // the failure toast: the interface's error node
     ".warn-box",             // --orange / --ochre box
     ".warn-item",            // --orange / --ochre line

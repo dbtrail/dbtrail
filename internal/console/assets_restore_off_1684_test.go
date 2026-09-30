@@ -48,7 +48,10 @@ const shape = (n) => {
   if (!n) return null;
   const all = []; const walk = (x) => { if (!x || !x.children) return; all.push(x); x.children.forEach(walk); };
   walk(n);
-  const btn = all.find((x) => x.tag === "button");
+  // The card's own button is the one with words on it: since #1950 the moment
+  // field is the date-time component, whose calendar button comes first in
+  // the DOM and carries an icon, not a label.
+  const btn = all.find((x) => x.tag === "button" && x.textContent);
   const input = all.find((x) => x.tag === "input");
   return { why: n.dataset.why || "", text: n.textContent,
     button: btn ? btn.textContent : "", disabled: !!(btn && btn.disabled && input && input.disabled) };

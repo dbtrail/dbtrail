@@ -254,7 +254,7 @@ func TestSnapshotLock_wordsOfTheRealListingAndDetail(t *testing.T) {
 		got := ""
 		if p := pills[at]; p != nil {
 			got = p.Text
-			if !strings.Contains(p.Class, "tag-pill") || !strings.Contains(p.Class, "snap-lock") {
+			if !strings.Contains(p.Class, "chip") || !strings.Contains(p.Class, "snap-lock") {
 				t.Errorf("row %s: the mark has class %q", at, p.Class)
 			}
 		}

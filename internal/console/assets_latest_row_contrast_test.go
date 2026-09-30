@@ -29,13 +29,13 @@ const latestRowGround = "violet-tint"
 // is the anti-rot half -- a class appended directly to the row fails until
 // it is named here.
 var latestRowChildren = []string{
-	"tag-pill", // "Newest"
+	"chip-newest", // "Newest"
 	"stg-name", // the timestamp
 	"stg-rel",  // the age
 	"stg-dest", // tables / binlog coordinates
 	"chip-mon", // staleness, newest row only
 	"bk-where", // from backupWhereChip()
-	"stg-going",     // a copy past the count in force (never on the newest row, listed so the guard sees it)
+	"chip-unknown",  // a copy past the count in force (never on the newest row, listed so the guard sees it), and the lock mark
 	"stg-row-going", // the row modifier for the same case
 	"bk-chev",  // the expand affordance
 }
@@ -218,26 +218,30 @@ func anyToken(t *testing.T, css, name string) string {
 	return cssHexToken(t, []byte(css), name)
 }
 
-// The pill is NOT a contrast case: its default ink-2 on --inset is 6.74:1
-// and always read fine. What it loses on the tint is its edge, and white
-// barely improves that (1.09 -> 1.18). It takes the white ground for one
-// reason only, and it is the reason this test exists: .tcard-violet .tag-pill
-// already does, and the same pill on the same tint must not have two looks.
-// A ratio assertion cannot express that, so it is checked structurally.
+// The "Newest" mark is NOT a contrast case: what a mark loses on the tint is
+// its edge, so it takes the white ground, and it does so for one reason that
+// a ratio cannot express: .tcard-violet .tag-pill already does, and the same
+// mark on the same tint must not have two looks. Since #1950 the row's mark
+// is a chip of the status family (.chip-newest) rather than a tag-pill, so
+// the comparison is on the two declarations that make the look: the ground
+// and the ink.
 func TestNewestBackupRowPillMatchesTheOtherVioletPill(t *testing.T) {
 	css := string(readStyleCSS(t))
 	want := ruleBody(css, ".tcard-violet .tag-pill")
 	if want == "" {
-		t.Fatal("no .tcard-violet .tag-pill rule: this test compares the newest snapshot row's pill " +
+		t.Fatal("no .tcard-violet .tag-pill rule: this test compares the newest snapshot row's mark " +
 			"against it, so if that rule moved, re-point this rather than deleting it")
 	}
-	got := ruleBody(css, ".stg-row-latest .tag-pill")
+	got := ruleBody(css, ".chip-newest")
 	if got == "" {
-		t.Fatal("the newest snapshot row's pill no longer overrides its ground. It sits on the same " +
+		t.Fatal("the newest snapshot row's mark has no rule of its own. It sits on the same " +
 			"--violet-tint as the .tcard-violet pill and must look the same there")
 	}
-	if norm(got) != norm(want) {
-		t.Errorf("the two pills on --violet-tint have drifted apart:\n  .tcard-violet    %s\n  .stg-row-latest  %s", norm(want), norm(got))
+	for _, decl := range strings.Split(norm(want), ";") {
+		decl = strings.TrimSpace(decl)
+		if decl != "" && !strings.Contains(norm(got), decl) {
+			t.Errorf("the two marks on --violet-tint have drifted apart: .tcard-violet .tag-pill declares %q, .chip-newest is %q", decl, norm(got))
+		}
 	}
 }
 

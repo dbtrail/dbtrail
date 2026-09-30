@@ -790,7 +790,7 @@ button { font-family: inherit; }
   cursor: pointer; position: relative;
   transition: background .14s;
 }
-.ev-row:hover { background: var(--raised); }
+.ev-row:hover, .vfy-row:hover { background: var(--raised); }
 .ev-row.open { background: var(--raised); }
 [data-dir="trail"] .ev-row.open { background: var(--accent-bg); }
 .ev-time { font-family: var(--f-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
@@ -972,7 +972,7 @@ button { font-family: inherit; }
 }
 .card { padding: 22px 22px 8px; position: relative; overflow: hidden; }
 /* ONE header pattern: title left, meta and action right. */
-.card-head, .ov-panel-head, .vfy-region-head, .bks-head {
+.card-head, .ov-panel-head, .vfy-region-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
 .card-title, .ov-panel-title, .stg-card-t, .bk-lane-t, .fr-card .dc-name, .state-title, .empty h3 {
@@ -2255,6 +2255,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    see duckdbPanel and icebergExportPanel), so without this the cards would
    touch the panel above them and each other. */
 section.bk-restore { margin-top: 18px; }
+.stg-two > section.bk-restore { margin-top: 0; }
 .bk-card-body { padding: 0 14px 12px; }
 .bk-card-state { padding: 0 14px; margin: 0 0 2px; }
 /* The alarm keeps the UI font and changes colour only. Reusing .form-msg
@@ -2263,6 +2264,9 @@ section.bk-restore { margin-top: 18px; }
 .bk-card-state.alarm { color: var(--delete); }
 .bk-restore-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
 .bk-restore-row .input { max-width: 260px; }
+/* the moment field is the date-time component: a fixed slot in the row */
+.bk-restore-row .bk-moment { flex: 0 1 240px; }
+.bk-restore-row .bk-moment .input { max-width: none; }
 
 .stg-name { font-weight: 600; color: var(--ink); white-space: nowrap; }
 .stg-name.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-weight: 600; font-size: var(--fs-sm); }
@@ -2380,9 +2384,11 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 /* border:none kills the UA button chrome, so the .stg-row divider it also
    resets is re-added explicitly — review caught the collapsed list running
    together with no hairlines */
-.vfy-histrow { width: 100%; text-align: left; background: none; border: none; border-bottom: 1px solid var(--line-soft); cursor: pointer; font: inherit; color: inherit; }
+.vfy-histrow { width: 100%; text-align: left; flex-wrap: wrap; background: none; border: none; border-bottom: 1px solid var(--line-soft); cursor: pointer; font: inherit; color: inherit; }
 .vfy-histrow .ev-caret { transition: transform .14s; }
 .vfy-histrow.open .ev-caret { transform: rotate(90deg); }
+.vfy-hmode, .vfy-hout { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vfy-tally { display: inline-flex; gap: 6px; flex: none; }
 .vfy-histdetail { padding: 4px 10px 10px 30px; border-top: 1px dashed var(--line-soft); }
 
 /* the newest snapshot is what a restore actually uses — it gets the
@@ -2390,43 +2396,25 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .stg-row-latest { background: var(--violet-tint); border-radius: var(--radius-sm); }
 /* A copy past the count in force: still here, going at the next cleanup. */
 .stg-row-going .stg-name, .stg-row-going .stg-rel { color: var(--ink-3); font-weight: 500; }
-.stg-going { color: var(--ink-2); background: var(--inset); font-family: var(--f-ui); text-transform: none; letter-spacing: 0; font-size: var(--fs-xs); }
-.stg-row-latest .stg-going { background: var(--surface); color: var(--ink-2); }
-/* How a snapshot was locked (#1380). Plain words on a quiet ground, like
-   stg-going; only a snapshot read with no locks takes the warning ink. */
-.snap-lock { color: var(--ink-2); background: var(--inset); font-family: var(--f-ui); text-transform: none; letter-spacing: 0; font-size: var(--fs-xs); }
-.stg-row-latest .snap-lock { background: var(--surface); color: var(--ink-2); }
-.snap-lock-torn, .stg-row-latest .snap-lock-torn { color: var(--orange-deep); }
+/* The rows' marks are chips of the status family (#1950): Newest, a copy
+   going at the next cleanup, how a snapshot was locked (#1380). The detail
+   line's "no locks" words keep the warning ink. */
+.snap-lock-torn { color: var(--orange-deep); }
 .bks-others { margin: 10px 14px 6px; }
 .stg-rel { font-family: var(--f-ui); font-size: var(--fs-xs); color: var(--ink-3); white-space: nowrap; }
-/* The newest row is the one tint on this page, so everything it carries has
-   to survive the ground it sits on. Measured with the converter in
-   assets_tint_contrast_test.go; the rules below are guarded by
-   assets_latest_row_contrast_test.go, which walks what the row RENDERS. On
-   --violet-tint: --ink-3 is 4.20:1 and --ink-4 is 2.80:1.
-
-   The row's age and its location chip had been under their floor since the
-   tint went on. The chevron never was: it arrives in this same change, so it
-   was born under the floor rather than falling below it. The tint itself is
-   not optional -- it marks the copy a restore actually reads.
-
-   The location chip needed its BORDER moved too, not just its ink: it is
-   drawn with --line-soft, which the token block already records as 1.01:1 on
-   violet, invisible. --violet-line is the token that exists for this and
-   measures 1.20:1. The staleness chip next to it needs nothing -- its own
-   --ochre border is 2.14:1 on the tint, so its shape survives the ground its
-   --ochre-bg fill does not.
-
-   The pill is a different case and is NOT a contrast fix, so do not read it
-   as one. Its default ink-2 on surface-3 measures 6.74:1 and was always
-   legible; what it lost on this ground was its EDGE (surface-3 against the
-   tint is 1.09:1). White barely moves that (1.18:1). It takes the white
-   ground because .tcard-violet .tag-pill already does, and one pill on one
-   tint should not have two looks. */
+/* The newest row is the one tint on this list, so what it carries has to
+   survive that ground (guarded by assets_latest_row_contrast_test.go, which
+   walks what the row RENDERS). On --violet-tint --ink-3 is 4.20:1 and
+   --ink-4 2.80:1, so the age, the location chip and the chevron step up to
+   --ink-2. The location chip's BORDER moves too: --line-soft is 1.01:1 on
+   violet, invisible; --violet-line is the token for it (1.20:1). */
 .stg-row-latest .stg-rel  { color: var(--ink-2); }
 .stg-row-latest .bk-where { color: var(--ink-2); border-color: var(--violet-line); }
 .stg-row-latest .bk-chev  { color: var(--ink-2); }
-.stg-row-latest .tag-pill { background: var(--surface); color: var(--violet-deep); }
+/* On the tint a chip takes the white ground, as the violet card's pill does,
+   so it keeps its edge; the quiet chip's ink steps up to the row's. */
+.chip-newest { text-transform: uppercase; color: var(--violet-deep); background: var(--surface); border-color: var(--violet-line); }
+.stg-row-latest .chip-unknown { color: var(--ink-2); background: var(--surface); border-color: var(--violet-line); }
 /* Hover must not erase the mark. --raised is LIGHTER than the tint, so
    pointing at the newest row used to remove the one thing distinguishing
    it. Keep the ground, add a ring. */
@@ -2962,6 +2950,7 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .bk-lane-lead { margin: 0; font-size: 13px; color: var(--ink-2); }
 .bk-lane-go { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .bk-lane .bk-restore-body { padding: 0; }
+.bk-lane .stg-card-t { margin: 0; }
 
 /* The drawing: one tile per DOWNLOAD, not per file -- the Parquet tile is a
    whole folder arriving as one .tar.gz, so counting files would be wrong by
@@ -2987,28 +2976,12 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .bk-file-c { font-size: 12px; color: var(--ink-3); }
 .bk-shape-plus { align-self: center; font-size: 15px; color: var(--ink-4); }
 
-/* Backups & snapshots settings (#1582). The daemon card's rows carry four
-   facts each — meaning, value, the restart chip, and the flag to change —
-   which the two-column .kv cannot hold: a grid puts the flag on its own line
-   under the label, so the value column stays scannable. */
-.bks-row {
-  display: grid; grid-template-columns: 1fr auto auto; gap: 2px 10px;
-  align-items: baseline; padding: 10px 0; border-bottom: 1px dotted var(--line);
-}
-.bks-row:last-child { border-bottom: none; }
 /* An editable daemon-wide row (#1682): label, input + buttons, provenance. */
 .bks-erow { padding: 12px 0; border-bottom: 1px dotted var(--line); }
 .bks-erow:last-child { border-bottom: none; }
 .bks-erow-in { display: flex; gap: 8px; align-items: center; margin: 4px 0 6px; flex-wrap: wrap; }
 .bks-erow-in .input { flex: 0 1 200px; min-width: 0; }
-.bks-label { font-size: 13px; color: var(--ink-2); }
-.bks-value {
-  font-family: var(--f-mono); font-size: 13px; color: var(--ink);
-  font-weight: 500; text-align: right; overflow-wrap: anywhere;
-}
-.bks-value.muted { color: var(--ink-3); font-weight: 400; }
 .bks-restart { font-size: 10px; white-space: nowrap; }
-.bks-cli { grid-column: 1; font-size: var(--fs-xs); color: var(--ink-3); font-family: var(--f-mono); }
 .bks-server { padding: 18px 0; border-bottom: 1px dotted var(--line); }
 .bks-server:last-child { border-bottom: none; padding-bottom: 4px; }
 .bks-server-name { margin: 0 0 12px; font-family: var(--f-display); font-size: 16px; font-weight: 700; }
@@ -3061,12 +3034,6 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 }
 .snap-moved-text { flex: 1; }
 .snap-moved-x { font-size: var(--fs-lg); }
-/* An empty value renders as the word for what applies, in the muted style: a
-   value, not a gap. A refused value shows the fallback the daemon fell to,
-   in the fault colour, with the loud line under the row saying why; not
-   struck through, because the fallback is a real value, just not in force. */
-.bks-value.bks-default { color: var(--ink-3); font-weight: 400; }
-.bks-value.bks-refused { color: var(--delete); }
 .bks-more { margin-bottom: 4px; }
 .bks-server .cn-fine { margin-top: 6px; }
 .bks-server .stg-cardfoot { margin-top: 12px; display: flex; justify-content: flex-end; }
@@ -3088,14 +3055,10 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .bl-name { min-width: 118px; font-weight: 600; color: var(--ink-2); }
 .bl-lane { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
 .bl-mark { font-weight: 700; }
-.bl-lane.on .bl-mark { color: var(--insert); }
-.bl-lane.no .bl-mark { color: var(--delete); }
-.bl-lane.no { color: var(--ink-3); }
 .bks-server .bl-case { margin: 10px 0 6px; }
 .bl-case.bl-unknown .bl-name { color: var(--delete); }
 .bl-case.is-current { background: var(--violet-tint); border-color: var(--violet-line); color: var(--ink-2); }
 .bl-case.is-current .bl-name { color: var(--ink); }
-.bl-case.is-current .bl-lane.no { color: var(--ink-2); }
 .fr-card:not(.fr-open) .fr-step:not(.fr-cur) { display: none; }
 .fr-fold { margin-top: 10px; background: none; border: 0; padding: 0; cursor: pointer; font-family: var(--f-ui); font-size: 13px; color: var(--ink-3); }
 .fr-fold::before { content: "\25B8 "; }
@@ -3129,11 +3092,16 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 }
 .hero-sub { font-family: var(--f-ui); font-size: 13px; color: var(--ink-2); }
 .hero-where { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.hero-tile { align-items: center; text-align: center; gap: 8px; padding: 18px 12px; }
-.hero-tile.on { background: var(--mint-tint); color: var(--ok); box-shadow: none; }
-.hero-tile.dim { background: var(--raised); color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line); }
-/* off is a state, not a disabled control: full-strength ink, a dashed edge, no grey fill */
-.hero-tile.off { background: var(--surface); color: var(--ink-2); box-shadow: none; border: 1px dashed var(--ink-4); }
+/* ONE status tile (#1950): where the copy lives, what the last check found.
+   Lit is mint. The quiet states keep full-strength ink on the surface, never
+   the grey of a disabled control: OFF (nothing set) wears the off chip's
+   dashed edge; not there yet, or not known yet, a hairline. A fault or a
+   doubt is an edge and an ink, not a third tint. */
+.hero-tile { align-items: center; text-align: center; gap: 8px; padding: 18px 12px; box-shadow: inset 0 0 0 1px var(--line); color: var(--ink-2); }
+.hero-tile.on, .hero-tile.ok { background: var(--mint-tint); color: var(--ok); box-shadow: none; }
+.hero-tile.bad { color: var(--pink-mid); box-shadow: inset 0 0 0 1.5px var(--pink-mid); }
+.hero-tile.warn { color: var(--orange-2); box-shadow: inset 0 0 0 1.5px var(--ochre); }
+.hero-tile.off { box-shadow: none; border: 1px dashed var(--ink-4); }
 .hero-tile.off .hero-ico svg { stroke-dasharray: 3 3; }
 .hero-ico { display: inline-flex; width: 32px; height: 32px; }
 .hero-ico svg { width: 100%; height: 100%; }
@@ -3144,10 +3112,6 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .hero-tick { position: absolute; bottom: 0; width: 3px; height: 16px; border-radius: 2px; background: var(--ink-4); transform: translateX(-50%); }
 .hero-tick.newest { background: var(--pink-mid); height: 22px; }
 .hero-days-foot { display: flex; justify-content: space-between; font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-size: var(--fs-xs); color: var(--ink-3); }
-.hero-check { align-items: center; text-align: center; gap: 8px; padding: 18px 12px; box-shadow: none; }
-.hero-check.ok { background: var(--mint-tint); color: var(--ok); }
-.hero-check.bad { background: var(--pink-tint); color: var(--pink-mid); }
-.hero-check.none { background: var(--raised); color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line); }
 .hero-note { font-family: var(--f-ui); font-size: 13px; color: var(--ink-3); }
 @media (max-width: 960px) {
   .snap-hero { grid-template-columns: 1fr 1fr; }
@@ -3182,7 +3146,8 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .stg-card-t { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; }
 .stg-card-t .field-label { font: inherit; color: var(--ink); }
 .stg-ico { display: inline-flex; width: 24px; height: 24px; flex: none; }
-.stg-ico svg { width: 100%; height: 100%; }
+/* !important: the file icon constant carries an inline 16px size */
+.stg-ico svg { width: 100% !important; height: 100% !important; }
 .stg-ico-pink { color: var(--pink-mid); } .stg-ico-mint { color: var(--ok); } .stg-ico-orange { color: var(--orange); } .stg-ico-sun { color: var(--sun-mid); }
 .stg-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch; }
 .stg-two > .stg-card, .stg-two > .card { display: flex; flex-direction: column; }
@@ -3216,6 +3181,25 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .ks-more { font-family: var(--f-ui); font-size: 12px; font-weight: 600; color: var(--ink-3); align-self: center; }
 .ks-axis { display: flex; justify-content: space-between; margin-top: 6px; padding-top: 6px; border-top: 2px solid var(--line); font-family: var(--f-ui); font-size: 12px; color: var(--ink-3); }
 .ks-right { color: var(--pink-mid); font-weight: 600; }
+/* the schedule as a chain (#1950): the read, then pairs of change files, the
+   next link dashed. The keep-shape tiles, one drawing language. */
+.ks-chain { max-width: 340px; margin: 10px 0 8px; }
+.ks-pair { display: inline-flex; align-items: flex-end; gap: 2px; flex: none; }
+.ks-pair i { width: 8px; height: 22px; border-radius: 2px; background: var(--inset); border: 1.5px solid var(--ink-3); }
+.ks-tile.ks-next, .ks-next i { background: transparent; border-style: dashed; }
+/* the four verdicts a finished check hands out, drawn (#1950) */
+.vfy-verdicts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 10px 0 12px; }
+.vfy-vt { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 10px; align-items: center; padding: 8px 12px; border-radius: var(--r-md); background: var(--raised); }
+.vfy-vt-n { grid-row: 1 / 3; font-family: var(--f-display); font-size: 24px; font-weight: 800; line-height: 1; color: var(--ink); min-width: 1.4ch; }
+.vfy-vt-k { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); white-space: nowrap; }
+.vfy-vt-c { font-size: var(--fs-xs); color: var(--ink-3); }
+.vfy-vt.ok { background: var(--mint-tint); }
+.vfy-vt.ok .vfy-vt-n { color: var(--ok); }
+.vfy-vt.bad { background: var(--delete-bg); }
+.vfy-vt.bad .vfy-vt-n { color: var(--delete); }
+.vfy-vt.warn { background: var(--ochre-bg); }
+.vfy-vt.warn .vfy-vt-n { color: var(--orange-2); }
+.vfy-vt.zero .vfy-vt-n { color: var(--ink-4); }
 .where-tile { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: var(--r-lg); background: var(--inset); margin: 0 0 10px; }
 .where-tile.on { background: var(--mint-tint); color: var(--ok); }
 .where-ico { display: inline-flex; width: 26px; height: 26px; flex: none; color: currentColor; }
@@ -3252,10 +3236,6 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .vfy-hmark.bad { background: var(--pink-tint); color: var(--pink-mid); }
 .vfy-hmark.none { background: var(--raised); color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line); }
 
-.bk-lane-head { display: flex; align-items: center; gap: 10px; }
-.bk-lane-ico { display: inline-flex; width: 26px; height: 26px; color: var(--pink-mid); flex: none; }
-/* !important: the file icon constant carries an inline 16px size */
-.bk-lane-ico svg { width: 100% !important; height: 100% !important; }
 
 .stg-top { margin-bottom: 4px; }
 .bl-case { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: var(--r-md); font-size: 13px; }
