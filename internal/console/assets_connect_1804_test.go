@@ -204,6 +204,7 @@ let focused = null;
 const mount = new FakeEl("div"), wrap = new FakeEl("div");
 document.getElementById = (id) => id === "server-form-mount" ? mount : id === "server-add-wrap" ? wrap : id === "server-form" ? (mount.children[0] || null) : null;
 ctx.setTimeout = (fn) => { fn(); return 1; };
+ctx.clearTimeout = () => {};
 const form = () => mount.children[0];
 const calls = [];
 let putGate = null, checkGate = null;
@@ -211,119 +212,215 @@ ctx.__api = async (path, opts) => {
   const method = (opts && opts.method) || "GET";
   calls.push(method + " " + path + (opts && opts.body ? " " + JSON.stringify(opts.body) : ""));
   if (method === "PUT") { if (putGate) await putGate; calls.push("PUT done"); return { found: true, auto_name: (opts.body.source_host || "x") + "-auto" }; }
-  if (path === "/api/servers/check") { if (checkGate) await checkGate; return ctx.__checkAnswer; }
+  if (path === "/api/servers/identify") return ctx.__identifyAnswer;
+  if (path === "/api/servers/check") { if (checkGate) await checkGate; if (ctx.__checkThrows) throw new Error(ctx.__checkThrows); return ctx.__checkAnswer; }
   if (method === "GET" && path === "/api/servers/draft") return ctx.__draftAnswer;
   return {};
 };
-const notices = [], toasts = [];
+const notices = [], toasts = [], scheduled = [];
+let serverLists = 0;
 ctx.__notice = (n) => notices.push(n.title + " | " + (n.tone || "") + " | " + (n.summary || ""));
 ctx.__toast = (t) => toasts.push(t);
-vm.runInContext("api = (p, o) => __api(p, o); refreshServersList = async () => {}; toast = (t) => __toast(t); toastError = (t) => __toast('ERR ' + t); formMsg = () => {}; openNotice = (n) => __notice(n); openServersModal = () => {};", ctx);
+ctx.__scheduled = scheduled;
+ctx.__lists = () => { serverLists++; };
+vm.runInContext("api = (p, o) => __api(p, o); refreshServersList = async () => { __lists(); }; toast = (t) => __toast(t); toastError = (t) => __toast('ERR ' + t); formMsg = () => {}; openNotice = (n) => __notice(n); openServersModal = () => {}; connectSchedule = (fn) => { __scheduled.push(fn); return __scheduled.length; };", ctx);
 const setCaps = (caps) => vm.runInContext("capsCache = " + JSON.stringify(caps) + ";", ctx);
 const show = (caps) => { setCaps(caps); vm.runInContext("showServerForm(null)", ctx); return form(); };
-const texts = (f) => { const out = []; walk(f, (n) => { if (n.tag !== "pre" && n._text) out.push(n._text); if (n.attrs && n.attrs.placeholder) out.push(n.attrs.placeholder); }); return out; };
-const flush = () => new Promise((r) => setImmediate(r));
+const texts = (f) => { const out = []; walk(f, (n) => { if (n.tag !== "pre" && n._text) out.push(n._text); if (n.attrs && n.attrs.placeholder) out.push(n.attrs.placeholder); if (n.attrs && n.attrs["aria-label"]) out.push(n.attrs["aria-label"]); }); return out; };
+const flush = async (n = 1) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+const step = (f) => f.dataset.step;
+const shown = (f, n) => !f.querySelector("div[data-cx-step=" + n + "]").hidden;
+const button = (f) => f.querySelector("button[type=submit]").textContent;
+const lights = (f) => f.querySelector("ol#connect-lights").children.map((li) => li.className.replace("cx-light ", "") + ":" + li.children[1]._text);
+const result = (f) => { const t = []; walk(f.querySelector("div#connect-result"), (n) => { if (n.tag === "p" && n._text) t.push(n._text); }); return t; };
+const identified = (f) => { const t = []; walk(f.querySelector("div#connect-found"), (n) => { if ((n.tag === "strong" || n.tag === "p") && n._text) t.push(n._text); }); return t; };
+const mariaRDS = { addr: "db1:3306", version: "10.11.6-MariaDB-log", flavor: "mariadb", managed: "rds" };
+// toStep2 opens a fresh screen and identifies the answer given.
+const toStep2 = async (host, answer) => {
+  setCaps({ monitor: true });
+  vm.runInContext("showConnectForm(null)", ctx);
+  const f = form();
+  f.elements.source_host.value = host; f.elements.source_host.fire("input");
+  ctx.__identifyAnswer = answer;
+  f.fire("submit"); await flush(4);
+  return f;
+};
 (async () => {
   const { bannedHits } = await import(process.argv[3]);
   const out = {};
   let f = show({ monitor: true });
-  out.fresh = { connect: f.attrs["data-connect"] === "1", user: f.elements.source_user.value, pwLen: f.elements.source_password.value.length,
-    pwAgainHidden: !!f.querySelector("p#connect-pw-again").hidden, focused,
+  out.fresh = { connect: f.attrs["data-connect"] === "1", step: step(f), focused, submit: button(f),
+    step2Hidden: !shown(f, 2), step3Hidden: !shown(f, 3), pwAgainHidden: !!f.querySelector("p#connect-pw-again").hidden,
     fields: Object.keys(f.elements).filter((k) => !["id", "flavor"].includes(k)).sort(),
-    banned: texts(f).flatMap((t) => bannedHits(t).map((h) => h.word + " in: " + t)),
-    submit: f.querySelector("button[type=submit]").textContent };
-  // Typing saves the draft: no password in it, the name only as typed, and
-  // the answer's automatic name becomes the placeholder.
+    banned: texts(f).flatMap((t) => bannedHits(t).map((h) => h.word + " in: " + t)) };
+  // Typing saves the draft: no password, the name only as typed, no
+  // identification before step 1 found anything.
   calls.length = 0;
   f.elements.source_host.value = "db1"; f.elements.source_host.fire("input");
-  await flush(); await flush();
+  await flush(2);
   out.draftPut = calls.find((c) => c.startsWith("PUT")) || "";
-  out.placeholder = f.elements.name.placeholder;
-  // A check with no password left is refused in the page.
+  // Step 1 with no host asks for it and probes nothing.
+  f.elements.source_host.value = "";
+  calls.length = 0;
+  f.fire("submit"); await flush();
+  out.noHostCalls = calls.slice();
+  // Find it: one probe, then step 2 for what answered.
+  f.elements.source_host.value = "db1"; f.elements.source_port.value = "";
+  ctx.__identifyAnswer = mariaRDS;
+  calls.length = 0;
+  f.fire("submit"); await flush(4);
+  out.identifyCalls = calls.filter((c) => c.startsWith("POST /api/servers/identify"));
+  out.found = { step: step(f), step2: shown(f, 2), submit: button(f), texts: identified(f), flavor: f.elements.flavor.value,
+    managed: !!f.elements.cx_managed.checked, grant: f.querySelector("pre[data-grant]").attrs["data-grant"],
+    block: f.querySelector("pre[data-grant]").textContent, user: f.elements.source_user.value, pwLen: f.elements.source_password.value.length,
+    draftPut: calls.filter((c) => c.startsWith("PUT /api/servers/draft")).pop() || "",
+    banned: texts(f).flatMap((t) => bannedHits(t).map((h) => h.word + " in: " + t)) };
+  // A different host undoes it: back to step 1.
+  f.elements.source_host.value = "db1b"; f.elements.source_host.fire("input");
+  out.backToWhere = { step: step(f), step2Hidden: !shown(f, 2), found: identified(f).length };
+  // A proxy: the flavor is a choice, MySQL chosen, nothing forced.
+  f = await toStep2("proxy1", { addr: "proxy1:6033", version: "8.0.11", proxy: "proxysql" });
+  const pick = f.querySelector("div#connect-found").querySelectorAll("button");
+  out.proxy = { step: step(f), texts: identified(f), buttons: pick.map((b) => b._text + "=" + b.attrs["aria-pressed"]), flavor: f.elements.flavor.value };
+  pick.find((b) => b._text === "MariaDB").fire("click"); await flush();
+  out.proxy.chosen = { flavor: f.elements.flavor.value, grant: f.querySelector("pre[data-grant]").attrs["data-grant"], title: identified(f)[0],
+    buttons: pick.map((b) => b._text + "=" + b.attrs["aria-pressed"]) };
+  // A failure stays on step 1 with the path drawn.
+  setCaps({ monitor: true });
+  vm.runInContext("showConnectForm(null)", ctx);
+  f = form();
+  f.elements.source_host.value = "nope.example"; ctx.__identifyAnswer = { addr: "nope.example:3306", kind: "name_not_found" };
+  f.fire("submit"); await flush(4);
+  const path = f.querySelector("div#connect-found").querySelector("div.cx-path");
+  out.miss = { step: step(f), step2Hidden: !shown(f, 2), drawing: path ? path.attrs["aria-label"] : "", bad: path ? path.querySelectorAll("span.bad").length : 0 };
+  // Step 2: I ran it with no password checks nothing.
+  f = await toStep2("db1", mariaRDS);
   f.elements.source_password.value = "";
   calls.length = 0;
   f.fire("submit"); await flush();
-  out.noPasswordCalls = calls.slice();
-  // A draft save still in flight is awaited before the check is sent.
+  out.noPassword = { calls: calls.filter((c) => c.includes("/api/servers/check")), step: step(f) };
+  // I ran it: step 3. A draft save in flight is awaited before the check.
   f.elements.source_password.value = "Pw-1";
   let open; putGate = new Promise((r) => { open = r; });
   calls.length = 0;
   f.elements.source_user.value = "alice"; f.elements.source_user.fire("input");
-  ctx.__checkAnswer = { ok: false, name: "db1", doctor: { checks: [{ name: "Source MySQL connection", status: "fail", kind: "access_denied" }], failed: 1 } };
+  scheduled.length = 0;
+  ctx.__checkAnswer = { ok: false, name: "db1", doctor: { failed: 1, checks: [{ name: "Source MySQL connection", status: "fail", kind: "access_denied", light: "login", detail: "Access denied for user 'alice'" }] } };
   f.fire("submit"); await flush();
   out.checkBeforePutDone = calls.some((c) => c.startsWith("POST /api/servers/check"));
   out.cancelOffDuringCheck = !!f.querySelector("button#server-cancel").disabled;
-  open(); putGate = null; await flush(); await flush(); await flush();
+  open(); putGate = null; await flush(4);
   out.order = calls.map((c) => c.split(" {")[0]);
   out.checkBody = JSON.parse((calls.find((c) => c.startsWith("POST /api/servers/check")) || "x {}").slice("POST /api/servers/check ".length));
-  out.failNotice = notices.slice();
-  out.formStillThere = !!form();
-  // A started check closes the screen.
-  ctx.__checkAnswer = { ok: true, started: true, name: "db1", doctor: { checks: [], warnings: 0 } };
-  f.fire("submit"); await flush(); await flush(); await flush();
-  out.startedClosed = !form();
-  out.toasts = toasts.slice();
-  // A start whose only findings are optional improvements opens the notice
-  // that folds them (a toast would hide them), and says nothing of warnings.
-  setCaps({ monitor: true });
-  vm.runInContext("showConnectForm(null)", ctx);
-  f = form();
-  f.elements.source_host.value = "db7"; f.elements.source_password.value = "Pw-7";
+  out.failed = { step: step(f), lights: lights(f), auto: f.querySelector("p#connect-auto")._text, scheduled: scheduled.length, notices: notices.length,
+    submit: button(f), banned: texts(f).flatMap((t) => bannedHits(t).map((h) => h.word + " in: " + t)) };
+  // The re-check runs by itself, and stops after CONNECT_RECHECK_MAX rounds.
+  const max = vm.runInContext("CONNECT_RECHECK_MAX", ctx);
+  let rounds = 1;
+  while (scheduled.length && rounds < max + 5) { const fn = scheduled.shift(); calls.length = 0; fn(); await flush(4); if (calls.some((c) => c.startsWith("POST /api/servers/check"))) rounds++; }
+  out.recheck = { rounds, max, auto: f.querySelector("p#connect-auto")._text, pending: scheduled.length };
+  // A re-check that fires after the screen moved on does nothing.
+  scheduled.length = 0;
+  f.fire("submit"); await flush(4);
+  const late = scheduled.shift();
+  f.elements.source_host.value = "elsewhere"; f.elements.source_host.fire("input");
+  calls.length = 0;
+  if (late) { late(); await flush(4); }
+  out.lateRecheckCalls = calls.filter((c) => c.startsWith("POST /api/servers/check"));
+  // A connection that failed on the network: the rest is not reached.
+  f = await toStep2("db1", mariaRDS);
+  f.elements.source_password.value = "Pw-2";
+  ctx.__checkAnswer = { ok: false, name: "db1", doctor: { failed: 1, checks: [{ name: "Source MySQL connection", status: "fail", kind: "timeout", light: "reach" }] } };
+  f.fire("submit"); await flush(4);
+  out.unreached = lights(f);
+  // A key missing: the rows and permissions lights are green, keys red.
+  ctx.__checkAnswer = { ok: false, name: "db1", doctor: { failed: 1, checks: [
+    { name: "Source MySQL connection", status: "pass", light: "reach" },
+    { name: "binlog_format=ROW", status: "pass", light: "rows" },
+    { name: "REPLICATION SLAVE + CLIENT grants", status: "pass", light: "permissions" },
+    { name: "Every table has a PRIMARY KEY", status: "fail", kind: "no_primary_key", light: "keys", subjects: ["shop.t"], statements: ["ALTER TABLE shop.t ADD PRIMARY KEY (id);"] }] } };
+  f.fire("submit"); await flush(4);
+  out.keys = lights(f);
+  // Started: said in place, the button closes, no notice, the list refreshed.
+  const noticesBefore = notices.length, listsBefore = serverLists;
+  scheduled.length = 0;
+  ctx.__checkAnswer = { ok: true, started: true, name: "db1", doctor: { warnings: 0, checks: [{ name: "Source MySQL connection", status: "pass", light: "reach" }] } };
+  f.fire("submit"); await flush(6);
+  out.started = { step: step(f), submit: button(f), result: result(f), lights: lights(f), notices: notices.length - noticesBefore, lists: serverLists - listsBefore,
+    scheduled: scheduled.length, still: !!form(), managedNote: result(f).some((t) => t.includes("lock-all")) };
+  f.fire("submit"); await flush();
+  out.doneCloses = !form();
+  // A start whose only findings are optional improvements folds them, and
+  // counts no warning; one real warning beside it is the one counted.
+  f = await toStep2("db7", { addr: "db7:3306", version: "8.4.3", flavor: "mysql" });
+  f.elements.source_password.value = "Pw-7";
   ctx.__checkAnswer = { ok: true, started: true, name: "db7", doctor: { warnings: 0, optional: 1,
-    checks: [{ name: "Statement capture (query_text)", status: "warn", optional: true, remediation: "Show the SQL statement behind each change. To turn it on:\n\n  SET PERSIST binlog_rows_query_log_events = ON;" }] } };
-  const noticesBefore = notices.length, toastsBefore = toasts.length;
-  f.fire("submit"); for (let i = 0; i < 4; i++) await flush();
-  out.optionalOnly = { notices: notices.slice(noticesBefore), toasts: toasts.slice(toastsBefore) };
-  // One real warning beside the optional one: only the real one is counted.
-  vm.runInContext("showConnectForm(null)", ctx);
-  f = form();
-  f.elements.source_host.value = "db8"; f.elements.source_password.value = "Pw-8";
+    checks: [{ name: "Statement capture (query_text)", status: "warn", optional: true, light: "rows", remediation: "Show the SQL statement behind each change. To turn it on:\n\n  SET PERSIST binlog_rows_query_log_events = ON;" }] } };
+  f.fire("submit"); await flush(6);
+  out.optionalOnly = { result: result(f), card: f.querySelector("div#connect-result").children[0].className, lights: lights(f) };
+  f = await toStep2("db8", { addr: "db8:3306", version: "8.4.3", flavor: "mysql" });
+  f.elements.source_password.value = "Pw-8";
   ctx.__checkAnswer = { ok: true, started: true, name: "db8", doctor: { warnings: 1, optional: 1,
-    checks: ctx.__checkAnswer.doctor.checks.concat([{ name: "No FK CASCADE constraints", status: "warn", detail: "x" }]) } };
-  const mixedBefore = notices.length;
-  f.fire("submit"); for (let i = 0; i < 4; i++) await flush();
-  out.mixed = notices.slice(mixedBefore);
-  // Typing while a check that ends in "started" runs: the edit waits for the
-  // check, and once capture has started it must never be saved. Saved, it
-  // rewrites the draft the server just discarded, the next page load reopens
-  // Connect filled in, and pressing the button adds the same database twice.
-  setCaps({ monitor: true });
-  vm.runInContext("showConnectForm(null)", ctx);
-  f = form();
-  f.elements.source_host.value = "db5"; f.elements.source_password.value = "Pw-5";
-  await flush(); await flush();
+    checks: ctx.__checkAnswer.doctor.checks.concat([{ name: "No FK CASCADE constraints", status: "warn", detail: "x", light: "other" }]) } };
+  f.fire("submit"); await flush(6);
+  out.mixed = { result: result(f), card: f.querySelector("div#connect-result").children[0].className, lights: lights(f) };
+  // The start itself failed: said, with nothing re-checked.
+  f = await toStep2("db6", { addr: "db6:3306", version: "8.4.3", flavor: "mysql" });
+  f.elements.source_password.value = "Pw-6";
+  scheduled.length = 0;
+  ctx.__checkAnswer = { ok: false, name: "db6", error: "launch failed", kept: false, doctor: { checks: [{ name: "Source MySQL connection", status: "pass", light: "reach" }] } };
+  f.fire("submit"); await flush(6);
+  out.startFailed = { step: step(f), result: result(f), scheduled: scheduled.length, submit: button(f) };
+  // The check could not be sent: said, and tried again by itself.
+  scheduled.length = 0;
+  ctx.__checkThrows = "network down";
+  f.fire("submit"); await flush(6);
+  ctx.__checkThrows = "";
+  out.networkDown = { auto: f.querySelector("p#connect-auto")._text, scheduled: scheduled.length };
+  // Typing while a check that ends in "started" runs is never saved after.
+  f = await toStep2("db5", { addr: "db5:3306", version: "8.4.3", flavor: "mysql" });
+  f.elements.source_password.value = "Pw-5";
+  await flush(2);
   let openCheck; checkGate = new Promise((r) => { openCheck = r; });
   ctx.__checkAnswer = { ok: true, started: true, name: "db5", doctor: { checks: [], warnings: 0 } };
-  f.fire("submit"); await flush(); await flush();
+  f.fire("submit"); await flush(2);
   calls.length = 0;
   f.elements.source_user.value = "typed-during-check"; f.elements.source_user.fire("input");
   openCheck(); checkGate = null;
-  for (let i = 0; i < 6; i++) await flush();
+  await flush(6);
   out.putsAfterStarted = calls.filter((c) => c.startsWith("PUT /api/servers/draft"));
-  // A restored draft: no password generated, and the screen asks for it.
+  // A restored draft with what step 1 found comes back at step 2, probing
+  // nothing: no password generated, the screen asks for it.
   setCaps({ monitor: true });
-  vm.runInContext("showConnectForm({ name: '', source_host: 'db', source_port: '3307', source_user: 'alice', auto_name: 'db-3307' })", ctx);
+  calls.length = 0;
+  // A reload starts a page with no password generated yet.
+  vm.runInContext("pendingSourcePassword = ''", ctx);
+  vm.runInContext("showConnectForm({ name: '', source_host: 'db', source_port: '3307', source_user: 'alice', flavor: 'mariadb', auto_name: 'db-3307', identified: { version: '10.11.6-MariaDB-log', flavor: 'mariadb' } })", ctx);
   f = form();
-  out.restored = { pw: f.elements.source_password.value, user: f.elements.source_user.value, name: f.elements.name.value, placeholder: f.elements.name.placeholder,
-    pwAgainShown: !f.querySelector("p#connect-pw-again").hidden, focused, block: f.querySelector("pre[data-grant=mysql]").textContent.split("\n")[0] };
+  out.restored = { step: step(f), pw: f.elements.source_password.value, user: f.elements.source_user.value, focused, texts: identified(f),
+    pwAgainShown: !f.querySelector("p#connect-pw-again").hidden, block: f.querySelector("pre[data-grant]").textContent.split("\n")[0],
+    grant: f.querySelector("pre[data-grant]").attrs["data-grant"], probes: calls.filter((c) => c.includes("identify")) };
+  // Without it, step 1.
+  vm.runInContext("showConnectForm({ source_host: 'db', source_port: '3307', source_user: 'alice' })", ctx);
+  out.restoredNoIdentity = { step: step(form()), focused };
   // Cancel waits for a pending save, then deletes the draft.
+  f = form();
   putGate = new Promise((r) => { open = r; });
   calls.length = 0;
   f.elements.source_host.value = "db2"; f.elements.source_host.fire("input");
-  await flush(); // the save is on the wire, held open by putGate
+  await flush();
   f.querySelector("button#server-cancel").fire("click"); await flush();
   out.deleteBeforePutDone = calls.some((c) => c.startsWith("DELETE"));
-  open(); putGate = null; await flush(); await flush(); await flush();
+  open(); putGate = null; await flush(3);
   out.cancelOrder = calls.map((c) => c.split(" {")[0]);
-  // A save still queued when Cancel is pressed is never sent: sent after the
-  // DELETE, it would bring the form back on the next page load.
+  // A save still queued when Cancel is pressed is never sent.
   setCaps({ monitor: true });
   vm.runInContext("showConnectForm(null)", ctx);
   f = form();
   calls.length = 0;
   f.elements.source_host.value = "db3"; f.elements.source_host.fire("input");
   f.querySelector("button#server-cancel").fire("click");
-  await flush(); await flush(); await flush();
+  await flush(3);
   out.queuedAfterCancel = calls.map((c) => c.split(" {")[0]);
   // Restore after reload: only for a session that may add servers.
   calls.length = 0;
@@ -335,17 +432,18 @@ const flush = () => new Promise((r) => setImmediate(r));
   setCaps({ monitor: true });
   await vm.runInContext("restoreConnectDraft()", ctx);
   out.restoredHost = form() ? form().elements.source_host.value : null;
-  // The link to the long form carries what was typed and drops the draft.
+  // The link to the long form carries what was typed, the flavor included,
+  // and drops the draft.
+  f = await toStep2("db9", { addr: "db9:3310", version: "10.6.2-MariaDB", flavor: "mariadb" });
   calls.length = 0;
-  f = form();
   f.elements.source_port.value = "3310";
-  f.querySelector("button#connect-full-form").fire("click"); await flush(); await flush();
+  f.querySelector("button#connect-full-form").fire("click"); await flush(2);
   out.full = { long: !!form() && form().attrs["data-connect"] === undefined && !!form().elements.host,
     host: form() ? form().elements.source_host.value : null, port: form() ? form().elements.source_port.value : null,
-    deleted: calls.some((c) => c.startsWith("DELETE /api/servers/draft")) };
-  // A reload right after typing: the saves still on their way are cut off,
-  // so the fields are stashed as the page goes away and win on restore. The
-  // password is never stashed, and a finished form is not stashed at all.
+    flavor: form() ? form().elements.flavor.value : null, deleted: calls.some((c) => c.startsWith("DELETE /api/servers/draft")) };
+  // The pagehide stash: the fields, never the password, and a finished form
+  // not at all. A stashed address that differs from the saved draft's drops
+  // what step 1 found for the old one.
   const store = new Map();
   ctx.sessionStorage = { getItem: (k) => store.has(k) ? store.get(k) : null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
   mount.replaceChildren();
@@ -358,11 +456,11 @@ const flush = () => new Promise((r) => setImmediate(r));
   out.stash = [...store.values()].join("");
   mount.replaceChildren();
   calls.length = 0;
-  ctx.__draftAnswer = { found: true, draft: { source_host: "late-host" }, auto_name: "late-host" };
+  ctx.__draftAnswer = { found: true, draft: { source_host: "old-host", identified: { version: "8.4.3", flavor: "mysql" } }, auto_name: "late-host" };
   await vm.runInContext("restoreConnectDraft()", ctx);
-  for (let i = 0; i < 4; i++) await flush();
+  await flush(4);
   f = form();
-  out.stashRestored = f ? { host: f.elements.source_host.value, port: f.elements.source_port.value, user: f.elements.source_user.value, pw: f.elements.source_password.value } : null;
+  out.stashRestored = f ? { host: f.elements.source_host.value, port: f.elements.source_port.value, user: f.elements.source_user.value, pw: f.elements.source_password.value, step: step(f) } : null;
   out.stashResynced = calls.some((c) => c.startsWith("PUT /api/servers/draft") && c.includes("late_user"));
   out.stashConsumed = store.size === 0;
   f.dataset.done = "1";
@@ -378,124 +476,242 @@ const flush = () => new Promise((r) => setImmediate(r));
 
 func TestConnectScreenWiring(t *testing.T) {
 	raw := runNodeConnect(t, renderHarnessJS+connectHarnessJS)
+	type lightsOut = []string
 	var out struct {
 		Fresh struct {
-			Connect, PwAgainHidden bool
-			User, Focused, Submit  string
-			PwLen                  int
-			Fields, Banned         []string
+			Connect, Step2Hidden, Step3Hidden, PwAgainHidden bool
+			Step, Focused, Submit                            string
+			Fields, Banned                                   []string
 		}
-		DraftPut, Placeholder              string
-		NoPasswordCalls, Order, FailNotice []string
-		CheckBeforePutDone, FormStillThere bool
-		CheckBody                          map[string]any
-		StartedClosed                      bool
-		Toasts                             []string
-		OptionalOnly                       struct{ Notices, Toasts []string }
-		Mixed                              []string
-		Restored                           struct {
-			Pw, User, Name, Placeholder, Focused, Block string
-			PwAgainShown                                bool
+		DraftPut      string
+		NoHostCalls   []string
+		IdentifyCalls []string
+		Found         struct {
+			Step, Submit, Flavor, Grant, Block, User, DraftPut string
+			Step2, Managed                                     bool
+			PwLen                                              int
+			Texts, Banned                                      []string
 		}
-		DeleteBeforePutDone, CancelOffDuringCheck                              bool
-		CancelOrder, ReadOnlyRestoreCalls, QueuedAfterCancel, PutsAfterStarted []string
-		RestoredHost                                                           *string
-		ServeIsLongForm                                                        bool
-		Stash                                                                  string
-		StashRestored                                                          *struct{ Host, Port, User, Pw string }
-		StashResynced, StashConsumed, DoneNotStashed                           bool
-		Full                                                                   struct {
-			Long, Deleted bool
-			Host, Port    *string
+		BackToWhere struct {
+			Step        string
+			Step2Hidden bool
+			Found       int
 		}
+		Proxy struct {
+			Step, Flavor   string
+			Texts, Buttons []string
+			Chosen         struct {
+				Flavor, Grant, Title string
+				Buttons              []string
+			}
+		}
+		Miss struct {
+			Step, Drawing string
+			Step2Hidden   bool
+			Bad           int
+		}
+		NoPassword struct {
+			Calls []string
+			Step  string
+		}
+		CheckBeforePutDone, CancelOffDuringCheck bool
+		Order                                    []string
+		CheckBody                                map[string]any
+		Failed                                   struct {
+			Step, Auto, Submit string
+			Lights, Banned     []string
+			Scheduled, Notices int
+		}
+		Recheck struct {
+			Rounds, Max, Pending int
+			Auto                 string
+		}
+		LateRecheckCalls []string
+		Unreached, Keys  lightsOut
+		Started          struct {
+			Step, Submit              string
+			Result, Lights            []string
+			Notices, Lists, Scheduled int
+			Still, ManagedNote        bool
+		}
+		DoneCloses   bool
+		OptionalOnly struct {
+			Result, Lights []string
+			Card           string
+		}
+		Mixed struct {
+			Result, Lights []string
+			Card           string
+		}
+		StartFailed struct {
+			Step, Submit string
+			Result       []string
+			Scheduled    int
+		}
+		NetworkDown struct {
+			Auto      string
+			Scheduled int
+		}
+		PutsAfterStarted []string
+		Restored         struct {
+			Step, Pw, User, Focused, Block, Grant string
+			PwAgainShown                          bool
+			Texts, Probes                         []string
+		}
+		RestoredNoIdentity                                   struct{ Step, Focused string }
+		DeleteBeforePutDone                                  bool
+		CancelOrder, QueuedAfterCancel, ReadOnlyRestoreCalls []string
+		RestoredHost                                         *string
+		Full                                                 struct {
+			Long, Deleted      bool
+			Host, Port, Flavor *string
+		}
+		Stash                                                         string
+		StashRestored                                                 *struct{ Host, Port, User, Pw, Step string }
+		StashResynced, StashConsumed, DoneNotStashed, ServeIsLongForm bool
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("decode %s: %v", raw, err)
 	}
-	t.Logf("%+v", out)
 
+	// Step 1: host and port, one button, nothing else asked yet.
 	f := out.Fresh
-	if !f.Connect {
-		t.Fatal("a new server on a process that captures did not open the Connect screen")
-	}
-	if strings.Join(f.Fields, ",") != "name,source_host,source_password,source_port,source_user" {
-		t.Errorf("Connect fields = %v, want host, port, user, password and name", f.Fields)
-	}
-	if f.User != "dbtrail" || f.PwLen < 20 || !f.PwAgainHidden || f.Focused != "source_host" {
+	if !f.Connect || f.Step != "1" || !f.Step2Hidden || !f.Step3Hidden || f.Focused != "source_host" || f.Submit != "Find it" || !f.PwAgainHidden {
 		t.Errorf("fresh screen: %+v", f)
+	}
+	if strings.Join(f.Fields, ",") != "cx_managed,name,source_host,source_password,source_port,source_user" {
+		t.Errorf("Connect fields = %v", f.Fields)
 	}
 	if len(f.Banned) > 0 {
 		t.Errorf("the screen uses words the first run bans: %v", f.Banned)
 	}
-	if f.Submit != "Check and connect" {
-		t.Errorf("button = %q", f.Submit)
+	if !strings.HasPrefix(out.DraftPut, "PUT /api/servers/draft ") || strings.Contains(out.DraftPut, "source_password") ||
+		!strings.Contains(out.DraftPut, `"name":""`) || strings.Contains(out.DraftPut, "identified") {
+		t.Errorf("typing saves the draft with no password, the name as typed and nothing found yet: %s", out.DraftPut)
+	}
+	// A probe may count against DBTrail's address: only a press with a host
+	// sends one, and exactly one.
+	if len(out.NoHostCalls) != 0 {
+		t.Errorf("Find it with no host called %v", out.NoHostCalls)
+	}
+	if len(out.IdentifyCalls) != 1 || out.IdentifyCalls[0] != `POST /api/servers/identify {"source_host":"db1","source_port":""}` {
+		t.Errorf("identify calls = %v", out.IdentifyCalls)
 	}
 
-	if !strings.HasPrefix(out.DraftPut, "PUT /api/servers/draft ") {
-		t.Fatalf("typing did not save the draft: %q", out.DraftPut)
+	// What answered opens step 2, with the block for that server.
+	fd := out.Found
+	if fd.Step != "2" || !fd.Step2 || fd.Submit != "I ran it" || strings.Join(fd.Texts, "|") != "MariaDB 10.11 on Amazon RDS" {
+		t.Errorf("found: step %q, step 2 shown %v, button %q, tile %v", fd.Step, fd.Step2, fd.Submit, fd.Texts)
 	}
-	if strings.Contains(out.DraftPut, "source_password") || strings.Contains(out.DraftPut, "Pw-") {
-		t.Errorf("the draft save sends the password: %s", out.DraftPut)
+	if fd.Flavor != "mariadb" || fd.Grant != "mariadb" || !fd.Managed {
+		t.Errorf("found: flavor %q, block %q, managed %v; want the MariaDB block for RDS", fd.Flavor, fd.Grant, fd.Managed)
 	}
-	if !strings.Contains(out.DraftPut, `"name":""`) || !strings.Contains(out.DraftPut, `"flavor":"mysql"`) {
-		t.Errorf("the draft save must send the name as typed (empty) and the flavor: %s", out.DraftPut)
+	if !strings.Contains(fd.Block, "\nGRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';") || strings.Contains(fd.Block, "\nGRANT RELOAD") {
+		t.Errorf("on RDS the lock-all grant is the live line and RELOAD is not:\n%s", fd.Block)
 	}
-	if out.Placeholder != "db1-auto" {
-		t.Errorf("the name placeholder is not the automatic name the server answered: %q", out.Placeholder)
+	if fd.User != "dbtrail" || fd.PwLen < 20 || !strings.Contains(fd.Block, "IDENTIFIED BY '") {
+		t.Errorf("found: user %q, password of %d characters, block without it", fd.User, fd.PwLen)
+	}
+	if !strings.Contains(fd.DraftPut, `"identified":{"version":"10.11.6-MariaDB-log","flavor":"mariadb","managed":"rds"}`) || strings.Contains(fd.DraftPut, "source_password") {
+		t.Errorf("the draft keeps what step 1 found and never the password: %s", fd.DraftPut)
+	}
+	if len(fd.Banned) > 0 {
+		t.Errorf("step 2 uses words the first run bans: %v", fd.Banned)
+	}
+	if b := out.BackToWhere; b.Step != "1" || !b.Step2Hidden || b.Found != 0 {
+		t.Errorf("another host after step 1 found one: %+v; want step 1 again, the answer gone", b)
 	}
 
-	for _, c := range out.NoPasswordCalls {
-		if strings.Contains(c, "/api/servers/check") {
-			t.Errorf("a check with no password was sent: %v", out.NoPasswordCalls)
-		}
+	// A proxy: the flavor is a choice, with MySQL chosen, so nothing is forced.
+	px := out.Proxy
+	if px.Step != "2" || px.Flavor != "mysql" || strings.Join(px.Buttons, ",") != "MySQL=true,MariaDB=false" ||
+		len(px.Texts) != 2 || !strings.Contains(px.Texts[1], "ProxySQL") {
+		t.Errorf("proxy: %+v", px)
+	}
+	if c := px.Chosen; c.Flavor != "mariadb" || c.Grant != "mariadb" || c.Title != "MariaDB" || strings.Join(c.Buttons, ",") != "MySQL=false,MariaDB=true" {
+		t.Errorf("choosing MariaDB behind the proxy: %+v", c)
+	}
+	if m := out.Miss; m.Step != "1" || !m.Step2Hidden || m.Drawing != "DBTrail could not find nope.example" || m.Bad != 2 {
+		t.Errorf("a name that does not exist: %+v; want step 1, the path drawn with the name part broken", m)
+	}
+
+	// Step 2 to 3.
+	if len(out.NoPassword.Calls) != 0 || out.NoPassword.Step != "2" {
+		t.Errorf("I ran it with no password: %+v", out.NoPassword)
 	}
 	if out.CheckBeforePutDone {
-		t.Errorf("the check went out while a draft save was in flight; a late save could bring back a finished form: %v", out.Order)
+		t.Errorf("the check went out while a draft save was in flight: %v", out.Order)
 	}
-	iPut, iCheck := -1, -1
-	for i, c := range out.Order {
-		if c == "PUT done" && iPut < 0 {
-			iPut = i
-		}
-		if strings.HasPrefix(c, "POST /api/servers/check") {
-			iCheck = i
-		}
-	}
-	if iPut < 0 || iCheck < 0 || iCheck < iPut {
+	if strings.Join(out.Order, ",") != "PUT /api/servers/draft,PUT done,POST /api/servers/check" {
 		t.Errorf("order = %v; want the draft save finished before the check", out.Order)
-	}
-	if out.CheckBody["source_password"] != "Pw-1" || out.CheckBody["name"] != "" || out.CheckBody["source_user"] != "alice" {
-		t.Errorf("check body = %v; want the typed password, the typed (empty) name, the typed user", out.CheckBody)
-	}
-	if len(out.FailNotice) != 1 || !strings.HasPrefix(out.FailNotice[0], "Capture did not start | err") || !out.FormStillThere {
-		t.Errorf("a failed check: notices %v, form kept %v", out.FailNotice, out.FormStillThere)
-	}
-	if !out.StartedClosed || len(out.Toasts) == 0 || !strings.Contains(out.Toasts[len(out.Toasts)-1], "Capture started for db1") {
-		t.Errorf("a started check: closed %v, toasts %v", out.StartedClosed, out.Toasts)
-	}
-
-	if m := out.Mixed; len(m) != 1 || m[0] != "Capture started | warn | Capture started, with 1 warning" {
-		t.Errorf("one real warning beside an optional item: notices %q; want only the real one counted", m)
-	}
-	if o := out.OptionalOnly; len(o.Notices) != 1 || o.Notices[0] != "Capture started | ok | Capture started" || len(o.Toasts) != 0 {
-		t.Errorf("a start with only optional improvements: notices %v toasts %v; want the Capture started notice that folds them", o.Notices, o.Toasts)
-	}
-
-	if len(out.PutsAfterStarted) != 0 {
-		t.Errorf("an edit typed during a check that started capture was saved afterwards, so the finished form comes back on the next load: %v", out.PutsAfterStarted)
-	}
-	r := out.Restored
-	if r.Pw != "" {
-		t.Errorf("a restored form filled in a password (%d chars); the account was created with the old one", len(r.Pw))
-	}
-	if !r.PwAgainShown || r.Focused != "source_password" || r.User != "alice" || r.Name != "" || r.Placeholder != "db-3307" {
-		t.Errorf("restored form: %+v", r)
-	}
-	if !strings.HasPrefix(r.Block, "--") {
-		t.Errorf("with no password the block must have nothing runnable, first line %q", r.Block)
 	}
 	if !out.CancelOffDuringCheck {
 		t.Error("Cancel stays usable while a check runs; it cannot stop a start already on its way")
+	}
+	if out.CheckBody["source_password"] != "Pw-1" || out.CheckBody["name"] != "" || out.CheckBody["source_user"] != "alice" || out.CheckBody["flavor"] != "mariadb" {
+		t.Errorf("check body = %v; want the typed password and user, no name, the flavor step 1 found", out.CheckBody)
+	}
+	fl := out.Failed
+	wantFailed := "ok:DBTrail reaches it,bad:The user logs in,wait:The change log keeps full rows,wait:Permissions,wait:Every table has a key"
+	if fl.Step != "3" || strings.Join(fl.Lights, ",") != wantFailed || fl.Notices != 0 || fl.Submit != "Check again" {
+		t.Errorf("a refused password: %+v; want the lights with login red and the rest not reached, in place", fl)
+	}
+	if fl.Scheduled != 1 || fl.Auto != "Checking again every 10 seconds. Nothing to press." {
+		t.Errorf("a failed round schedules one re-check and says so: %+v", fl)
+	}
+	if len(fl.Banned) > 0 {
+		t.Errorf("step 3 uses words the first run bans: %v", fl.Banned)
+	}
+	if r := out.Recheck; r.Rounds != r.Max || r.Pending != 0 || r.Auto != "Stopped checking. Press Check again when it is fixed." {
+		t.Errorf("the re-check loop: %+v; want exactly CONNECT_RECHECK_MAX rounds, then a stop that says so", r)
+	}
+	if len(out.LateRecheckCalls) != 0 {
+		t.Errorf("a re-check that fired after the address changed still checked: %v", out.LateRecheckCalls)
+	}
+	if got := strings.Join(out.Unreached, ","); got != "bad:DBTrail reaches it,wait:The user logs in,wait:The change log keeps full rows,wait:Permissions,wait:Every table has a key" {
+		t.Errorf("a connection that timed out: %s", got)
+	}
+	if got := strings.Join(out.Keys, ","); got != "ok:DBTrail reaches it,ok:The user logs in,ok:The change log keeps full rows,ok:Permissions,bad:Every table has a key" {
+		t.Errorf("a table without a key: %s", got)
+	}
+
+	// Started: said in place, nothing to dismiss, the button closes.
+	st := out.Started
+	if st.Step != "done" || st.Submit != "Done" || !st.Still || st.Notices != 0 || st.Lists != 1 || st.Scheduled != 0 {
+		t.Errorf("started: %+v", st)
+	}
+	if len(st.Result) < 2 || st.Result[0] != "Capture started" || !strings.Contains(st.Result[1], "Capture started for db1") || !st.ManagedNote {
+		t.Errorf("started result: %v; want the start said, and the lock-all note for RDS", st.Result)
+	}
+	if !out.DoneCloses {
+		t.Error("Done did not close the screen")
+	}
+	if o := out.OptionalOnly; o.Card != "notice-inline ok" || len(o.Result) < 2 || !strings.Contains(o.Result[1], "Capture started for db7") {
+		t.Errorf("a start with only optional improvements: %+v; want the ok card, no warning", o)
+	}
+	if m := out.Mixed; m.Card != "notice-inline warn" || len(m.Result) < 2 || m.Result[1] != "Check this when you can:" || m.Lights[len(m.Lights)-1] != "warn:Other checks" {
+		t.Errorf("one real warning beside an optional one: %+v", m)
+	}
+	if sf := out.StartFailed; sf.Step != "3" || sf.Scheduled != 0 || len(sf.Result) != 3 || sf.Result[0] != "Capture did not start" || sf.Submit != "Check again" {
+		t.Errorf("a start that failed after every check passed: %+v; want it said, and no re-check", sf)
+	}
+	if n := out.NetworkDown; n.Scheduled != 1 || !strings.HasPrefix(n.Auto, "The checks could not run: network down.") {
+		t.Errorf("a check that could not be sent: %+v; want the reason kept and a re-check", n)
+	}
+	if len(out.PutsAfterStarted) != 0 {
+		t.Errorf("an edit typed during a check that started capture was saved afterwards: %v", out.PutsAfterStarted)
+	}
+
+	// Reload: back at step 2 with nothing probed and no password made up.
+	r := out.Restored
+	if r.Step != "2" || len(r.Probes) != 0 || strings.Join(r.Texts, "|") != "MariaDB 10.11" || r.Grant != "mariadb" {
+		t.Errorf("restored with what step 1 found: %+v; want step 2 for MariaDB, no probe", r)
+	}
+	if r.Pw != "" || !r.PwAgainShown || r.Focused != "source_password" || r.User != "alice" || !strings.HasPrefix(r.Block, "--") {
+		t.Errorf("restored form: %+v; the account was created with a password the page no longer has", r)
+	}
+	if rn := out.RestoredNoIdentity; rn.Step != "1" || rn.Focused != "source_host" {
+		t.Errorf("restored with nothing found: %+v; want step 1", rn)
 	}
 	if out.DeleteBeforePutDone {
 		t.Errorf("Cancel deleted the draft while a save was in flight: %v", out.CancelOrder)
@@ -512,17 +728,17 @@ func TestConnectScreenWiring(t *testing.T) {
 	if out.RestoredHost == nil || *out.RestoredHost != "db9" {
 		t.Errorf("the saved draft was not opened again after a reload: %v", out.RestoredHost)
 	}
-	if !out.Full.Long || !out.Full.Deleted || out.Full.Host == nil || *out.Full.Host != "db9" || *out.Full.Port != "3310" {
-		t.Errorf("the link to the long form: %+v (want the long form, the typed host and port carried, the draft deleted)", out.Full)
+	if fu := out.Full; !fu.Long || !fu.Deleted || fu.Host == nil || *fu.Host != "db9" || *fu.Port != "3310" || *fu.Flavor != "mariadb" {
+		t.Errorf("the link to the long form: %+v (want the long form, the host, port and flavor carried, the draft deleted)", fu)
 	}
 	if strings.Contains(out.Stash, "Pw-never-stashed") || !strings.Contains(out.Stash, "late_user") {
 		t.Errorf("the pagehide stash: %s (want the fields, never the password)", out.Stash)
 	}
-	if r := out.StashRestored; r == nil || r.Host != "late-host" || r.Port != "3399" || r.User != "late_user" || r.Pw != "" {
-		t.Errorf("a reload that cut off the save lost fields: %+v", out.StashRestored)
+	if sr := out.StashRestored; sr == nil || sr.Host != "late-host" || sr.Port != "3399" || sr.User != "late_user" || sr.Pw != "" || sr.Step != "1" {
+		t.Errorf("a stashed address that differs from the saved one: %+v; want its fields, and step 1 (what was found was for the old address)", out.StashRestored)
 	}
 	if !out.StashResynced || !out.StashConsumed || !out.DoneNotStashed {
-		t.Errorf("stash: resynced to the server %v, consumed %v, a finished form not stashed %v", out.StashResynced, out.StashConsumed, out.DoneNotStashed)
+		t.Errorf("stash: resynced %v, consumed %v, a finished form not stashed %v", out.StashResynced, out.StashConsumed, out.DoneNotStashed)
 	}
 	if !out.ServeIsLongForm {
 		t.Error("a console that only reads an index lost the long add form")
