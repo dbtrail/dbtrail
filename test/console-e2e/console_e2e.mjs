@@ -4624,7 +4624,7 @@ try {
   //
   // What is at stake is not decoration. A gradient has to satisfy its contrast
   // bar at every point along the sweep, and this one bottoms out at 3.53:1 on
-  // the studio tile ground it actually paints on (3.70:1 on white) — so it can
+  // the tile ground it actually paints on (3.70:1 on white) — so it can
   // be relied on at WCAG's LARGE-text bar of 3:1 and never at the 4.5:1 body
   // bar. (Its violet stop alone would clear 4.5:1; that buys nothing, the
   // other stops share the sweep.) A tile that takes the gradient without being large text is
@@ -4738,7 +4738,7 @@ try {
     // The same bar on the VIOLET PANEL ground (#1421/#1423 review): since the
     // stat tiles went white-bento, the worst ground these bars stand on is the
     // tinted Recent-changes panel (ovSkelLines renders straight into
-    // .ov-evlist there), and the studio-tile measurement above no longer
+    // .ov-evlist there), and the tile measurement above no longer
     // covers the worst case. A bare .skel-line inside a .tcard-violet host is
     // the stylesheet half; the panel's real markup carries no gate.
     const vhost = document.createElement("div");
@@ -4782,22 +4782,18 @@ try {
     ? ok("brand paint: the sidebar wordmark wears the headline gradient")
     : bad("brand paint: the sidebar wordmark wears the headline gradient", JSON.stringify(brand));
   // A floor placed BETWEEN the two measured states, not at the measurement:
-  // the warmed stop renders 1.60:1 on the studio tile and the plain --line it
+  // the warmed stop renders 1.60:1 on the tile and the plain --line it
   // replaced rendered 1.23:1, so 1.3 separates them. That is what makes the
   // check bind — reverting the declaration lands at 1.23 and rings. It is not
   // a general washout detector: the mix has to fall to roughly 5% pink before
   // 1.3 fires on its own, so a "make it subtler" retune is NOT caught here.
-  //
-  // Studio is measured because it is the shipped direction and also the worst
-  // of the three grounds; paper and trail resolve to white, where the same
-  // stop sits at 1.68:1.
   (brand.skelParsed && brand.skelGround && brand.skelPainted.includes("gradient") && brand.skelRatio >= 1.3)
     ? ok("brand paint: the warmed loading bar's stop stays clear of its panel")
     : bad("brand paint: the warmed loading bar's stop stays clear of its panel",
         JSON.stringify({ stop: brand.skelStop, ground: brand.skelGround || "NONE FOUND",
           ratio: Number(brand.skelRatio.toFixed(3)), parsed: brand.skelParsed }));
   // The violet panel is the worst ground the bars stand on since the tiles
-  // went white (measured 1.43 there vs 1.60 on the studio tile). Same 1.3
+  // went white (measured 1.43 there vs 1.60 on the tile). Same 1.3
   // floor: reverting the bar to plain --line lands ~1.08 on violet and rings.
   (brand.skelVioletParsed && brand.skelVioletRatio >= 1.3)
     ? ok("brand paint: the warmed loading bar stays clear of the violet panel ground")
@@ -5551,8 +5547,7 @@ try {
   // Every bar is measured (40 of them) because a rule can repaint SOME: the
   // nth-child rule reaches only even rows, and the five .ev-skel-* width
   // classes sit on the same element as .ev-skel-bar, so they repaint the bar
-  // without naming it. All three directions are measured because stripping
-  // fills is `paper`'s idiom — five existing rules do exactly that.
+  // without naming it.
   //
   // The pulse is sampled rather than modelled. An earlier draft read the
   // keyframes and folded the minimum opacity into the maths, which is blind
@@ -5638,20 +5633,11 @@ try {
       return document.querySelectorAll(".ev-skel-bar").length;
     });
   };
-  const skelSetDir = (dir) => page.evaluate((d) => {
-    const root = document.documentElement;
-    d === null ? root.removeAttribute("data-dir") : root.setAttribute("data-dir", d);
-  }, dir);
-
-  const skelPrevDir = await page.evaluate(() => document.documentElement.getAttribute("data-dir"));
-  let skelBars = 0;
-  const skelRest = {};
-  for (const dir of ["studio", "paper", "trail"]) {
-    await skelSetDir(dir);
-    skelBars = await skelPaint();
-    skelRest[dir] = skelWorst(await skelShot());
-  }
-  await skelSetDir(skelPrevDir);
+  // One theme ships: the paper and trail directions this used to sweep were
+  // never selectable and are gone (#1950, slice 8), so the resting bars are
+  // photographed once, on the ground a person sees.
+  const skelBars = await skelPaint();
+  const skelRest = { console: skelWorst(await skelShot()) };
 
   // Then the pulse, sampled rather than modelled: freeze the animation with a
   // negative delay and photograph it. Whatever it animates is in the picture,
@@ -5665,11 +5651,6 @@ try {
   // An eased pulse is flat around its extreme, so the grid finds today's, and
   // it would find one moved off 50% — which the previous five-phase grid,
   // clustered around this keyframe's own minimum, would not have.
-  //
-  // One direction, not three: the pulse dims whatever the fill is, so sweeping
-  // it per direction would re-measure the same multiplier. A direction that
-  // strips the fill is caught by the resting floor above, in the direction
-  // that strips it.
   //
   // The freeze is verified rather than trusted. If the paused state or the
   // delay silently failed to take, every photograph would land on the RESTING
@@ -5731,8 +5712,7 @@ try {
 
   // Hoisted out of the two floors below so a broken fixture reads as a broken
   // fixture. An empty sample list has no worst member, and every floor is
-  // satisfied by nothing at all — the vacuous direction. Each shot must also
-  // carry its own bars, since the list is repainted per direction.
+  // satisfied by nothing at all — the vacuous direction.
   (skelBars >= 30 && skelRestWorst && skelPulseWorst)
     ? ok("events skeleton: the loading state paints bars this scenario can photograph")
     : bad("events skeleton: the loading state paints bars this scenario can photograph", skelDetail());
@@ -5747,13 +5727,9 @@ try {
   // PULSE floor below is what binds there, one point before this one. It has
   // no opinion about hue either; --skel-warm measures 1.68 and would sail
   // through, which is deliberate and explained at the token.
-  //
-  // Three directions, not four axes: [data-accent] is NOT swept, so an
-  // accent-scoped rule on these bars would go unphotographed. Said plainly
-  // because the directions ARE swept and a reader could assume the rest.
   (skelRestWorst && skelRestWorst.ratio >= 1.35)
-    ? ok("events skeleton: every bar stays visible at rest, in every direction")
-    : bad("events skeleton: every bar stays visible at rest, in every direction", skelDetail());
+    ? ok("events skeleton: every bar stays visible at rest")
+    : bad("events skeleton: every bar stays visible at rest", skelDetail());
   // The pulse's own floor, separate because it fails to a different edit —
   // deepening the dip rather than weakening the fill. 1.15 sits between the
   // old RESTING value (1.09) and this bar's dip (1.24), so the claim that the

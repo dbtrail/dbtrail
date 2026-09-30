@@ -322,7 +322,9 @@ func TestBackupsPagerNumberClearsTheBodyFloor(t *testing.T) {
 		t.Fatal("no .bk-pager-n colour rule: if the pager's position line moved, re-point this " +
 			"rather than deleting it")
 	}
-	// --raised is --panel-bg, the ground .stg-list sits on inside .ov-panel.
+	// The pager paints no ground of its own: it sits on its .ov-panel card,
+	// --surface since the ONE card rule (#1950). --raised is a shade darker
+	// than --surface, so a pass measured on it also holds on the real ground.
 	if r := wcagRatioHex(anyToken(t, css, tok), anyToken(t, css, "raised")); r < 4.5 {
 		t.Errorf(".bk-pager-n is var(--%s) on --raised = %.2f:1, below the 4.5:1 body floor. "+
 			"This line is the only thing saying which page the reader is on", tok, r)
