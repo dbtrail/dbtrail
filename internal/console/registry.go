@@ -736,9 +736,6 @@ func (r *Registry) CorrectSourceFlavor(id, detected string) (bool, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.readOnly {
-		return false, ErrRegistryReadOnly
-	}
 	for i, old := range r.file.Servers {
 		if old.ID != id {
 			continue
@@ -746,6 +743,11 @@ func (r *Registry) CorrectSourceFlavor(id, detected string) (bool, error) {
 		have := old.SourceFlavor()
 		if have == FlavorPostgres || have == want {
 			return false, nil
+		}
+		// Read-only only matters when something would be written: an entry
+		// already right is not a failed correction.
+		if r.readOnly {
+			return false, ErrRegistryReadOnly
 		}
 		prev := old.Flavor
 		r.file.Servers[i].Flavor = want

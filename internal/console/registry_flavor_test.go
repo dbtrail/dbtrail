@@ -184,3 +184,27 @@ func TestHandleServersUpdate_staleMySQLFamilyFlavorIsKept(t *testing.T) {
 		t.Errorf("a move to postgres: code=%d, want 400", rec.Code)
 	}
 }
+
+// A read-only registry whose entry already says what the server reports is
+// not a failed correction: nothing needs saving, so nothing is refused (the
+// hook would otherwise warn on every start about a server labeled right).
+func TestRegistryCorrectSourceFlavor_readOnlyAlreadyRight(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "console-servers.yaml")
+	content := "version: 99\nservers:\n  - id: aaaa\n    name: future\n    index_dsn: u:p@tcp(h:3306)/db\n    flavor: mariadb\n  - id: bbbb\n    name: blank\n    index_dsn: u:p@tcp(h:3306)/db\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := r.CorrectSourceFlavor("aaaa", FlavorMariaDB); err != nil || changed {
+		t.Errorf("mariadb entry, mariadb reported: changed=%v err=%v, want no change and no error", changed, err)
+	}
+	if changed, err := r.CorrectSourceFlavor("bbbb", FlavorMySQL); err != nil || changed {
+		t.Errorf("blank entry, mysql reported: changed=%v err=%v, want no change and no error", changed, err)
+	}
+	if _, err := r.CorrectSourceFlavor("bbbb", FlavorMariaDB); !errors.Is(err, ErrRegistryReadOnly) {
+		t.Errorf("a needed change on a read-only registry: err=%v, want ErrRegistryReadOnly", err)
+	}
+}
