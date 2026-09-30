@@ -17,7 +17,7 @@
 
 :root {
   /* ---- neutrals: cool purple-tinted surfaces (site line hue) ---- */
-  --bg:        oklch(0.985 0.006 340);  /* the canvas (blush; .main paints the haze over it) */
+  --bg:        oklch(0.985 0.006 340);  /* the canvas: flat, the one page ground (#1950) */
   --surface:   #ffffff;                 /* cards, panels, fields */
   --raised:    oklch(0.985 0.004 320);  /* hover grounds, tile fills, the filter bar */
   --inset:     oklch(0.972 0.006 320);  /* code insets, pills, tracks, lanes */
@@ -39,8 +39,6 @@
   --ink-4: oklch(0.648 0.048 304);
   /* the same two steps, darkened for the tinted sidebar ground: its glow
      corners eat the margin (measured there: 4.56:1 and 3.17:1) */
-  --ink-3-strong: oklch(0.50 0.065 304);
-  --ink-4-strong: oklch(0.585 0.055 304);
 
   /* ---- the dark strip: ink-on-ink surfaces (the SQL block; the site's hero strip) ---- */
   --strip:     #2D1B45;
@@ -73,13 +71,6 @@
   /* the tropical chrome (sidebar morning, canvas haze). Alphas are the
      ceiling that keeps --ink-3 >=4.5:1 where the layers overlap; the haze
      peak band only ever holds the page head's ink/ink-2 text. */
-  --side-ground: linear-gradient(198deg, oklch(0.972 0.012 340) 0%, oklch(0.942 0.022 300) 100%);
-  --side-line:   oklch(0.9 0.02 320);
-  --side-label:  oklch(0.46 0.095 88);  /* deep gold: 5.1:1 in the violet glow corner, where --sun-deep grades 4.49 */
-  --glow-pink:   oklch(0.8 0.1 348 / 0.22);
-  --glow-violet: oklch(0.72 0.12 293 / 0.18);
-  --haze-sun:    oklch(0.88 0.09 88 / 0.30);
-  --haze-violet: oklch(0.75 0.1 293 / 0.14);
   /* empty-state washes: brand at low ALPHA over whatever ground is under
      them (never a baked light value), so a dark ground re-points --surface
      and these hold. Ceiling: --ink-3 stays >=4.5:1 where both overlap (4.59). */
@@ -188,13 +179,8 @@
   --bg: #120C1A; --surface: #1A1224; --raised: #221830; --inset: #2A1F3A;
   --line: rgba(255,255,255,.08); --line-soft: rgba(255,255,255,.05); --line-on-tint: rgba(255,255,255,.14);
   --ink: #F4ECFA; --ink-2: #C9B8DD; --ink-3: #9A87B3; --ink-4: #7D6B96;
-  --ink-3-strong: #A896C0; --ink-4-strong: #8B79A4;
   --strip: #0D0716; --strip-2: #07030D; --strip-ink: #F4ECFA;
   --pink-mid: #FF8CC6; --sun-mid: #FFD23D;
-  --side-ground: linear-gradient(198deg, #1A1224 0%, #150E1F 100%);
-  --side-line: rgba(255,255,255,.08); --side-label: #E0B83A;
-  --glow-pink: rgba(255,77,141,.10); --glow-violet: rgba(124,92,255,.10);
-  --haze-sun: rgba(255,210,61,.06); --haze-violet: rgba(124,92,255,.06);
   --violet-tint: rgba(124,92,255,.14); --violet-deep: #B9A9FF; --violet-line: rgba(124,92,255,.35);
   --sun-tint: rgba(255,210,61,.10);   --sun-deep: #FFD23D;    --sun-line: rgba(255,210,61,.30);
   --pink-tint: rgba(255,77,141,.12);  --pink-deep: #FF8CC6;
@@ -337,8 +323,8 @@ button { font-family: inherit; }
   gap: 22px;
   z-index: 5;
 }
-/* The per-direction sidebar grounds are gone: the tropical sidebar at the
-   end of this file owns the ground in every direction. */
+/* The sidebar is flat: --surface with a --line edge, ink on quiet neutrals
+   (#1950). Brand paint in here is the wordmark and the active rail only. */
 
 /* brand */
 .brand { display: flex; align-items: center; gap: 11px; }
@@ -363,42 +349,22 @@ button { font-family: inherit; }
   line-height: 1;
 }
 .brand-sub {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--ink-3);
+  white-space: nowrap;
   letter-spacing: 0.02em;
   margin-top: 2px;
 }
-.ro-pill {
-  margin-left: auto;
-  align-self: flex-start;
-  font-family: var(--f-mono);
-  font-size: 9.5px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--insert);
-  background: var(--insert-bg);
-  border: 1px solid color-mix(in srgb, var(--insert) 25%, transparent);
-  padding: 3px 7px 2px;
-  border-radius: var(--r-pill);
-  white-space: nowrap;
-}
+/* the READ-ONLY chip is the chip component (chip chip-ok in index.html);
+   this rule only places it. */
+.ro-pill { margin-left: auto; align-self: flex-start; }
 
 /* server switcher */
 .srv-block { display: flex; flex-direction: column; gap: 8px; }
-.srv-select {
-  appearance: none;
-  width: 100%;
-  font-family: var(--f-mono);
-  font-size: 12.5px;
-  color: var(--ink);
-  background: var(--surface) var(--chevron) no-repeat right 12px center;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 9px 30px 9px 30px;
-  cursor: pointer;
-  transition: border-color .15s, box-shadow .15s;
-  position: relative;
-}
+/* the switcher is the select component (class="select srv-select" in
+   index.html); the dot sits in its left padding. Both classes, so this
+   outranks the component's padding shorthand, which is declared later. */
+.select.srv-select { width: 100%; padding-left: 30px; }
 .srv-wrap { position: relative; }
 .srv-dot {
   position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
@@ -406,18 +372,10 @@ button { font-family: inherit; }
   background: var(--insert);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--insert) 16%, transparent);
 }
-.srv-select:hover { border-color: var(--ink-4); }
-.srv-select:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
 
-.srv-manage {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 12.5px; color: var(--ink-2);
-  background: none; border: 1px dashed var(--line);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px; cursor: pointer; width: 100%;
-  transition: background .15s, border-color .15s, color .15s;
-}
-.srv-manage:hover { background: var(--raised); color: var(--ink); border-color: var(--ink-4); }
+/* Manage servers is the secondary button (btn btn-sm), full width, text
+   to the left like the nav items under it. */
+.srv-manage { width: 100%; justify-content: flex-start; }
 .srv-manage svg { color: var(--ink-3); }
 
 /* nav */
@@ -445,16 +403,18 @@ button { font-family: inherit; }
 .nav-group { display: flex; flex-direction: column; gap: 2px; }
 .nav-group + .nav-group { margin-top: 16px; }
 .nav-label {
-  font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase;
-  color: var(--ink-4); font-weight: 600; padding: 0 10px 8px;
+  font-family: var(--f-mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--ink-3); padding: 0 10px 8px;
 }
 .nav-item {
   position: relative;
   display: flex; align-items: center; gap: 11px;
   padding: 9px 11px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-sm);
   color: var(--ink-2);
-  font-size: 14px; font-weight: 500;
+  font-size: var(--fs-md); font-weight: 500;
+  text-decoration: none;
   cursor: pointer; border: none; background: none;
   text-align: left; width: 100%;
   transition: color .18s var(--ease), background .18s var(--ease);
@@ -465,16 +425,17 @@ button { font-family: inherit; }
 }
 .nav-item:hover { background: var(--raised); color: var(--ink); }
 .nav-item:hover .ni-icon { color: var(--ink-2); }
-.nav-item.active { color: var(--ink); font-weight: 600; background: var(--accent-bg); }
-.nav-item.active .ni-icon { color: var(--accent); }
+.nav-item.active { color: var(--ink); font-weight: 600; background: var(--raised); }
+.nav-item.active .ni-icon { color: var(--ink); }
 .nav-item.active .ni-icon { transform: translateX(1px); }
-/* active rail accent — the sun, since the tropical pass: the sunset pill
-   carries the page, the rail is its light. The timeline rail keeps the
-   plain accent gradient; it reads data. */
+/* the active page is a quiet surface with a brand rail on its left edge:
+   the one place the sidebar wears the gradient besides the wordmark
+   (#1950). The timeline rail keeps the plain accent gradient; it reads
+   data. */
 .nav-item.active::before {
   content: ""; position: absolute; left: -18px; top: 50%; transform: translateY(-50%);
   width: 3px; height: 18px; border-radius: 0 3px 3px 0;
-  background: var(--sun);
+  background: var(--grad);
 }
 @media (prefers-reduced-motion: no-preference) {
   .nav-item.active::before { animation: railpop .3s var(--ease-out); }
@@ -495,27 +456,25 @@ button { font-family: inherit; }
 .side-foot {
   margin-top: auto;
   display: flex; flex-direction: column; gap: 3px;
-  font-family: var(--f-mono); font-size: 11px; color: var(--ink-4);
+  font-family: var(--f-mono); font-size: var(--fs-xs); color: var(--ink-4);
   padding: 12px 10px 2px; border-top: 1px solid var(--line-soft);
 }
 .side-foot b { color: var(--ink-3); font-weight: 500; }
 .side-docs {
   display: flex; align-items: center; gap: 9px;
-  font-family: var(--f-ui); font-size: 13px; color: var(--ink-2);
-  text-decoration: none; padding: 8px 8px; margin: -4px -6px 8px; border-radius: var(--radius-sm);
+  font-family: var(--f-ui); font-size: var(--fs-sm); color: var(--ink-2);
+  text-decoration: none; padding: 8px 8px; margin: -4px -6px 8px; border-radius: var(--r-sm);
   transition: background .15s, color .15s;
 }
 .side-docs svg { width: 15px; height: 15px; color: var(--ink-4); }
 .side-docs span { flex: 1; }
-.side-docs:hover { background: var(--accent-bg); color: var(--accent); }
-.side-docs:hover svg { color: var(--accent); }
-[data-accent="warm"] .side-docs:hover { color: var(--orange-2); }
-[data-accent="warm"] .side-docs:hover svg { color: var(--orange-2); }
+.side-docs:hover { background: var(--raised); color: var(--ink); }
+.side-docs:hover svg { color: var(--ink-2); }
 .side-logout {
   display: flex; align-items: center; gap: 9px; width: calc(100% + 12px);
-  font-family: var(--f-ui); font-size: 13px; color: var(--ink-2);
+  font-family: var(--f-ui); font-size: var(--fs-sm); color: var(--ink-2);
   background: none; border: none; cursor: pointer; text-align: left;
-  padding: 8px 8px; margin: -4px -6px 8px; border-radius: var(--radius-sm);
+  padding: 8px 8px; margin: -4px -6px 8px; border-radius: var(--r-sm);
   transition: background .15s, color .15s;
 }
 .side-logout svg { width: 15px; height: 15px; color: var(--ink-4); }
@@ -534,30 +493,28 @@ button { font-family: inherit; }
 .view { max-width: 1180px; margin: 0 auto; padding: 40px 48px 96px; }
 
 .page-head { margin-bottom: 30px; }
+/* ONE page header (#1950): the title in the display face, ink, never a
+   gradient; one line under it; actions right-aligned on the title row. */
 .page-title {
-  font-family: var(--title-font);
-  font-weight: var(--title-weight);
-  letter-spacing: var(--title-tracking);
+  font-family: var(--f-display);
+  font-weight: 700;
+  letter-spacing: -0.025em;
   font-size: 30px; line-height: 1.05; color: var(--ink);
   margin: 0 0 10px; display: flex; align-items: center; gap: 12px;
 }
-.page-sub { color: var(--ink-2); font-size: 14.5px; max-width: 62ch; margin: 0; }
+.page-sub { color: var(--ink-2); font-size: var(--fs-md); max-width: 62ch; margin: 0; }
 .page-sub b { color: var(--ink); font-weight: 600; }
 /* The title row holds the h1 and, on pages that have a docs page, the Docs
    link (#1450). The row carries the h1's old bottom margin so the sub line
    keeps its distance whether or not a link is present. */
 .page-title-row { display: flex; align-items: center; gap: 14px; margin: 0 0 10px; }
 .page-title-row .page-title { margin: 0; }
-/* Quiet on purpose: it is a fixture of the header, not a call to action. */
-.page-docs {
-  display: inline-flex; align-items: center; gap: 5px; flex: none;
-  font-family: var(--f-ui); font-size: 12px; font-weight: 500; line-height: 1;
-  color: var(--ink-3); text-decoration: none;
-  border: 1px solid var(--line); border-radius: var(--r-pill); padding: 5px 9px 5px 11px;
-  transition: color .15s, border-color .15s, background .15s;
-}
+.page-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: none; }
+/* The Docs link is the chip component (class="chip page-docs"): a fixture
+   of the header, not a call to action. */
+.page-docs { text-decoration: none; transition: color .15s, border-color .15s; }
 .page-docs svg { width: 12px; height: 12px; color: var(--ink-4); }
-.page-docs:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+.page-docs:hover { color: var(--ink); border-color: var(--ink-4); }
 .page-docs:hover svg { color: var(--accent); }
 [data-accent="warm"] .page-docs:hover { color: var(--orange-2); border-color: var(--orange-2); }
 [data-accent="warm"] .page-docs:hover svg { color: var(--orange-2); }
@@ -762,6 +719,8 @@ button { font-family: inherit; }
 .chip-error, .chip-fail, .chip.chip-nosrc { color: var(--delete); border-color: var(--delete); background: color-mix(in srgb, var(--delete) 8%, transparent); }
 .chip-off { color: var(--ink-2); background: var(--surface); border: 1px dashed var(--ink-4); }
 .chip-unknown, .chip-age { color: var(--ink-3); background: var(--raised); border-color: var(--line); }
+/* the small chip, for tight rows like the sidebar brand line */
+.chip-sm { font-size: 10px; padding: 0 6px; letter-spacing: 0.02em; }
 .chip-live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
 /* ============================================================
@@ -1677,9 +1636,9 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .cmdk-trigger {
   display: flex; align-items: center; gap: 9px;
   width: 100%; padding: 9px 11px; cursor: pointer;
-  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
   background: var(--surface); color: var(--ink-3);
-  font-family: var(--f-ui); font-size: 13px;
+  font-family: var(--f-ui); font-size: var(--fs-sm);
   transition: border-color .15s, background .15s, color .15s;
 }
 .cmdk-trigger:hover { border-color: var(--ink-4); color: var(--ink-2); background: var(--raised); }
@@ -2728,89 +2687,18 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 
 
 /* ============================================================
-   the tropical pass — dbtrail.com's sunset, worn for real.
-   Two moves: the sidebar goes to a light tropical morning wearing the
-   site's sunset, and the content canvas warms up (haze, gradient
-   page titles, home-language tinted cards). The DATA rules survive
-   untouched: INSERT/UPDATE/DELETE tokens, the diff, the timeline and
-   every row-carrying surface keep their exact colors — the warmth
-   lives on chrome and config surfaces only.
+   the shell, quiet (#1950 slice 4)
+   The tropical pass that lived here (tinted sidebar with corner glows,
+   a sunset active pill, gradient page titles, sunset haze on the canvas)
+   is gone: the sidebar is flat --surface, the canvas is flat --bg,
+   titles are ink. Brand paint on chrome is now exactly the wordmark, the
+   active rail, the primary button's hover and at most one hero element
+   per page.
    ============================================================ */
-
-/* ---- sidebar: tropical morning — light, never white ---- */
-.side {
-  /* A light lavender-blush ground with the site's sunset accents (light but
-     never white). Only the ramp's two faint steps darken: the tinted ground
-     plus the corner glows eats their margin (see --ink-3-strong). */
-  --ink-3: var(--ink-3-strong);
-  --ink-4: var(--ink-4-strong);
-  border-right: 1px solid var(--side-line);
-  background:
-    radial-gradient(95% 34% at 112% -4%, var(--glow-pink), transparent 68%),
-    radial-gradient(130% 44% at -25% 106%, var(--glow-violet), transparent 62%),
-    var(--side-ground);
-}
-.side .brand-mark {
-  /* the favicon img covers the 30px box completely, so only the glow shows */
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--brand-warm-a) 35%, transparent);
-}
-/* every section label is deep gold — the sun's text partner on a light
-   ground (its own tint token sun-deep grades 4.49:1 in the violet glow
-   corner, a hair under the small-text floor; this literal clears 5.1). */
-.side .nav-label { color: var(--side-label); }
-/* white fields and hovers lift off the tint the way cards lift off the
-   blush canvas. */
-.side .nav-item:hover { background: color-mix(in srgb, var(--white) 60%, transparent); }
-/* the active page is the sunset itself: the site's CTA pink->orange,
-   darkened for 14px white text (measured 5.9:1 on the pink stop, 5.3:1 on
-   the orange). */
-.side .nav-item.active {
-  color: var(--white);
-  background: var(--grad-deep);
-  box-shadow: 0 6px 18px -8px color-mix(in srgb, var(--brand-warm-a) 50%, transparent);
-}
-.side .nav-item.active .ni-icon { color: var(--white); }
-.side .nav-item.active .nav-kbd { color: color-mix(in srgb, var(--white) 75%, transparent); }
-
-/* ---- content: off the hospital white ----
-   (the blush canvas itself lives on the ONE --bg declaration in the token
-   block; two :root declarations of one token is how the first goes dead) */
-/* sunset haze at the top of the PAGE, not the viewport:
-   background-attachment local anchors it to the scroll content, so it
-   scrolls away with the page head. That is what makes the alphas safe: at
-   these strengths ink-3/ink-4 measure 4.3/2.9 at the peak — below their
-   floors — but the peak band (the first ~120px) only ever holds the page
-   head's ink/ink-2 text, and the first ink-3/ink-4 consumers (list
-   headers) enter ~250px down where the layers have faded out (the longest
-   layer's ray ends by ~280px; the Events loading skeleton's first bar
-   measures 308px in content coordinates). Fixed to the viewport instead,
-   a scrolled list's headers would ride the peak. */
-.main {
-  background:
-    radial-gradient(52% 340px at 82% -60px, var(--haze-sun), transparent 70%),
-    radial-gradient(46% 300px at 12% -80px, var(--glow-pink), transparent 70%),
-    radial-gradient(30% 260px at 55% -80px, var(--haze-violet), transparent 75%),
-    var(--bg);
-  background-attachment: local, local, local, scroll;
-}
-/* page titles wear the site's headline gradient. Children that carry their
-   own color (chips) keep it; the clipped gradient only paints text that
-   inherits. Inside @supports like every other clipped-ink rule in this
-   file: color:transparent without evidence the engine can paint over it is
-   invisible titles, the exact failure the Go asset guard rings on. Without
-   support the title stays plain ink and no gradient box paints behind it
-   (the background lives inside the guard too, for that reason). */
-@supports (background-clip: text) or (-webkit-background-clip: text) {
-  .page-title {
-    background: var(--grad);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    /* fit-content so the gradient spans the WORD, not the column: on a
-       full-width box a short title samples only the first stop. */
-    width: fit-content;
-  }
-}
+/* Dialogs take keyboard focus themselves when they open with nothing to
+   type into (focusModal), so the close button never wears the ring on
+   open. The panel is a programmatic target, not a tab stop: no ring. */
+.modal:focus { outline: none; }
 
 /* Connect AI, simple pass: the step number is a badge, the two Claude fields
    are a drawn dialog, and everything conditional folds into <details>. */
