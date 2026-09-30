@@ -2709,9 +2709,13 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 /* Iceberg export panel (#1467). The drawing that replaced four paragraphs:
    three stages left to right, then two bars for what a run costs. The intent is
    that it stays shorter than the prose it replaced; nothing measures that, so
-   read it as the reason these sizes are small rather than as a rule. */
-.ice-flow { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; margin: 2px 0 12px; }
-.ice-stage { flex: 1 1 150px; min-width: 132px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 9px 11px; }
+   read it as the reason these sizes are small rather than as a rule.
+   The row centres, not stretches: each card is as tall as its words (a
+   stretched pair read as two empty boxes beside the one carrying the engine
+   pills), and the arrows, centred too, sit on the middle line of the cards
+   they join. */
+.ice-flow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 2px 0 12px; }
+.ice-stage { flex: 1 1 150px; min-width: 132px; border: 1px solid var(--line); border-radius: 10px; background: var(--inset); padding: 9px 11px; }
 .ice-stage-t { font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
 .ice-stage-s { font-size: 11.5px; color: var(--ink-4); margin-top: 3px; }
 .ice-arrow { align-self: center; flex: none; color: var(--ink-4); font-size: 15px; }
@@ -2752,10 +2756,10 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .bk-expandable[aria-expanded="true"] .bk-chev { transform: rotate(90deg); }
 
 /* ── Take a copy with you: the two lanes ───────────────────────────────────
-   White lanes on the panel's --raised, so each reads as a card and not as
-   a region of the panel. The Iceberg panel's .ice-stage cards use the same
-   --surface fill for the same reason (#1573); --raised on --raised left
-   them separated by a hairline and nothing else. */
+   --inset lanes on the panel's white --surface, so each reads as a card and
+   not as a region of the panel. The Iceberg panel's .ice-stage cards use the
+   same --inset fill for the same reason (#1573): a card the colour of its
+   panel is separated by a hairline and nothing else. */
 /* auto-fit, not a fixed 1fr 1fr: the MySQL lane is absent whenever the
    selected server is the ephemeral --index-dsn entry or sql_export is off,
    and a fixed pair left the surviving lane at half width beside an empty

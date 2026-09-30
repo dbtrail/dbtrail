@@ -5505,6 +5505,23 @@ try {
     ? ok("connect: the Iceberg export panel is here, pointed at this server's snapshot folder")
     : bad("connect: the Iceberg export panel is here, pointed at this server's snapshot folder",
         JSON.stringify({ ice: cn.ice, want: iceDirArg }));
+  // The three stage cards size to their words: the first two carry a title
+  // and a line, the third also the engine pills, so a stretched row turns the
+  // first two into big empty boxes. And the arrows sit on the middle line of
+  // the cards they join.
+  const iceGeo = await page.evaluate(() => {
+    const box = (n) => { const r = n.getBoundingClientRect(); return { top: r.top, h: r.height, mid: r.top + r.height / 2 }; };
+    const stages = Array.from(document.querySelectorAll(".view .cn-ice .ice-flow .ice-stage")).map(box);
+    const arrows = Array.from(document.querySelectorAll(".view .cn-ice .ice-flow .ice-arrow")).map(box);
+    return { stages, arrows };
+  });
+  const iceMid = (a, b) => Math.abs(a.mid - b.mid) <= 2;
+  (iceGeo.stages.length === 3 && iceGeo.arrows.length === 2
+    && iceGeo.stages[0].h < iceGeo.stages[2].h - 10 && iceGeo.stages[1].h < iceGeo.stages[2].h - 10
+    && iceMid(iceGeo.arrows[0], iceGeo.stages[0]) && iceMid(iceGeo.arrows[0], iceGeo.stages[1])
+    && iceMid(iceGeo.arrows[1], iceGeo.stages[1]))
+    ? ok("connect: the Iceberg stage cards are as tall as their words, the arrows on their middle line")
+    : bad("connect: the Iceberg stage cards are as tall as their words, the arrows on their middle line", JSON.stringify(iceGeo));
   // "shown only once" is carried by the fresh state and the managed state
   // (except managed read_only, which drops the Lost-it clause and the phrase
   // with it); this run exercises the fresh one (no scenario mints a token).
