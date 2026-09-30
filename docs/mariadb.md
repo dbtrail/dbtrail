@@ -214,23 +214,31 @@ page and the
   written under the other flavor (for example by an older build that captured a
   MariaDB as MySQL) resumes at the same binlog position as the detected flavor,
   with a warning.
-- **Multi-server multi-domain topologies are untested.** Per-domain GTID
-  resume is validated live on a single server producing several domains (the
-  `gtid_domain_id` mechanism itself — see "What works" above). What has NOT
-  been validated live: topologies where the domains originate on different
-  servers (multi-master rings, Galera), and a primary failover that changes the
-  `server_id` *within* a domain mid-stream. Sustained two-domain load on a single
-  server was run for several hours in #1349 with no events lost or double
-  indexed. Gap detection compares sequences per domain, so the design
-  covers these shapes, but treat them as unverified territory.
+- **These topologies are not supported:**
+  - Galera clusters;
+  - multi-master rings;
+  - several servers writing into the same GTID domain;
+  - a primary failover that changes the `server_id` within a domain while
+    capture runs.
+
+  Capturing from one of them is outside what DBTrail supports today. Bug
+  reports about data captured from them are out of scope
+  ([SUPPORT.md](SUPPORT.md#supported-source-families)).
+
+  **A single server writing into several domains is supported.** Per-domain
+  GTID resume is validated live (see "What works" above), and a two-domain
+  load on one server ran for 4 hours 38 minutes in #1349 with no events lost
+  or indexed twice. A multi-source replica, where each source writes its own
+  domain, has not been tested.
 - **BYOS agent support is the least exercised path.** `bintrail agent` detects
   the flavor the same way for its BYOS streaming (same optional
   `--source-flavor` and `BINTRAIL_SOURCE_FLAVOR` as `stream`), but unlike
   `stream` it has no saved checkpoint. On restart it resumes from `--start-gtid` (parsed with the
   detected flavor) or the server's current binlog position. The web interface
   also captures MariaDB sources and detects them the same way. The Source type
-  saved with a server is only a hint: capture follows what the server reports,
-  and the server's Overview shows a warning when the two disagree.
+  saved with a server is only a hint: capture follows what the server reports
+  and saves it as the server's Source type. The server's Overview shows a
+  warning only when that save fails.
 - **Index-on-MariaDB is out of scope** — the index database stays MySQL.
 - **JSON columns come back as equivalent JSON, not the same text.** In MariaDB
   a `JSON` column is text: the server keeps exactly what your application

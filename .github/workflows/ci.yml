@@ -557,6 +557,9 @@ jobs:
             TestOne_MariaDB_declaredMySQLRefuses \
             TestOne_MariaDB_resumeOldMySQLDefaultCheckpoint \
             TestIntegrationMonitorRegistrySourceMariaDBDetected \
+            TestIntegrationMonitorRegistrySourceMariaDBRelabeled \
+            TestIntegrationWatchMariaDBSource \
+            TestIntegrationReplicaCheckMariaDB \
             TestBuild_MariaDBVersionRow \
             TestRecoverRoundTrip_MariaDBTypes \
             TestRecoverRoundTrip_MariaDBUUIDKey \

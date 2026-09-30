@@ -60,6 +60,11 @@ type Config struct {
 	// watching (#1802). nil means this process does not run the boot capture,
 	// and the report then claims no count at all.
 	BootCaptureFilter *status.CaptureFilter
+	// BootSourceFlavor reports the flavor THIS process's boot capture runs as
+	// ("mysql" or "mariadb"; "" until capture has asked its source). The boot
+	// entry has no saved Source type, so the server list labels it with this.
+	// nil means this process runs no boot capture.
+	BootSourceFlavor func() string
 	// Registry is the named-server store (a local YAML file — the only thing
 	// the console ever writes). nil means an empty in-memory registry.
 	Registry *Registry
@@ -314,6 +319,8 @@ type Server struct {
 	// bootCaptureFilter: the scope this process's boot capture runs with,
 	// nil when it runs none (see Config.BootCaptureFilter).
 	bootCaptureFilter *status.CaptureFilter
+	// bootSourceFlavor: see Config.BootSourceFlavor.
+	bootSourceFlavor func() string
 	// baselineCtrl: non-nil only when the watch daemon opted into in-process
 	// baseline creation (see Config.BaselineCtrl).
 	baselineCtrl BaselineController
@@ -600,6 +607,7 @@ func New(cfg Config) (*Server, error) {
 	s.managedTok.initFromDisk(mcpTokenPath, mcpTokFile)
 	s.cm.hideBoot = cfg.HideBoot
 	s.bootCaptureFilter = cfg.BootCaptureFilter
+	s.bootSourceFlavor = cfg.BootSourceFlavor
 	// The process flags are the command-line server's location. They back
 	// no registry server since #1684; the ones that read through them were
 	// given the value on upgrade (MigrateProcessBaselineLocation, run where

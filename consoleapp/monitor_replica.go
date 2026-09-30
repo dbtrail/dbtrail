@@ -32,6 +32,13 @@ const replicaOverlapTimeout = 15 * time.Second
 
 const replicaCheckName = "Replica / duplicate detection"
 
+// replicaOverlapRemediation is the warn card's remediation, MySQL and MariaDB.
+const replicaOverlapRemediation = "Monitoring a primary and its replica (or the same server twice) indexes every\n" +
+	"row change once per entry: duplicate history, duplicate storage.\n\n" +
+	"This is a WARN, not a hard fail: monitoring has already started. If the\n" +
+	"overlap is unintentional, press Stop on one of the entries (usually keep\n" +
+	"the primary)."
+
 // peerIdentity is one monitored entry's recorded identity, as the pure
 // evaluator consumes it.
 type peerIdentity struct {
@@ -77,6 +84,14 @@ func (m *monitorSupervisor) replicaOverlapCheck(ctx context.Context, e console.S
 			Detail: "could not connect to the source to compare GTID lineage: " + err.Error()}
 	}
 	defer srcDB.Close()
+
+	// The server says what it is; the saved Source type may be stale. A
+	// MariaDB has no server_uuid and no gtid_mode: it has its own check. A
+	// failed ask falls through to the MySQL reads, which report their own
+	// failure as a skip.
+	if flavor, ferr := detectFlavorCtx(ctx, srcDB); ferr == nil && flavor == console.FlavorMariaDB {
+		return mariadbReplicaOverlap(ctx, e, srcDB, entries)
+	}
 
 	gtidMode, candUUID, candExecuted, err := loadCandidateIdentity(ctx, srcDB)
 	if err != nil {
@@ -172,14 +187,10 @@ func evaluateReplicaOverlap(candUUID, candExecuted string, peers []peerIdentity)
 
 	if len(findings) > 0 {
 		return &console.DoctorCheck{
-			Name:   replicaCheckName,
-			Status: "warn",
-			Detail: "this server " + strings.Join(findings, "; "),
-			Remediation: "Monitoring a primary and its replica (or the same server twice) indexes every\n" +
-				"row change once per entry: duplicate history, duplicate storage.\n\n" +
-				"This is a WARN, not a hard fail: monitoring has already started. If the\n" +
-				"overlap is unintentional, press Stop on one of the entries (usually keep\n" +
-				"the primary).",
+			Name:        replicaCheckName,
+			Status:      "warn",
+			Detail:      "this server " + strings.Join(findings, "; "),
+			Remediation: replicaOverlapRemediation,
 		}
 	}
 	detail := fmt.Sprintf("no replica relationship detected among %d monitored source(s)", len(peers))

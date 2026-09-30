@@ -110,33 +110,57 @@ func TestExplainRegistryFlavorError(t *testing.T) {
 }
 
 // TestRegistryFlavorHint: the Source type saved with a console server is a
-// hint. The stream always detects; when the server contradicts the hint the
-// server's status carries a warning, and it clears once they agree.
+// hint. The stream always detects. The hook saves what the server reported as
+// the entry's Source type, so every screen reads it; only when that save
+// fails does the server's status carry a warning, which names why.
 func TestRegistryFlavorHint(t *testing.T) {
-	cases := []struct{ hint, detected, wantWarn string }{
-		{console.FlavorMariaDB, console.FlavorMySQL, "saved with Source type MariaDB, but the server reports MySQL"},
-		{console.FlavorMySQL, console.FlavorMariaDB, "saved with Source type MySQL, but the server reports MariaDB"},
-		{"", console.FlavorMariaDB, ""},
-		{console.FlavorMariaDB, console.FlavorMariaDB, ""},
-		{console.FlavorMySQL, console.FlavorMySQL, ""},
+	refused := errors.New("server registry was written by a newer bintrail; upgrade bintrail to edit it")
+	cases := []struct {
+		hint, detected string
+		correctErr     error
+		wantWarn       string
+	}{
+		{console.FlavorMariaDB, console.FlavorMySQL, refused, "saved with Source type MariaDB, but the server reports MySQL"},
+		{console.FlavorMySQL, console.FlavorMariaDB, refused, "saved with Source type MySQL, but the server reports MariaDB"},
+		{console.FlavorMySQL, console.FlavorMariaDB, nil, ""},
+		{console.FlavorMariaDB, console.FlavorMySQL, nil, ""},
+		// An old entry saved blank reads as MySQL on every screen: a failed
+		// save leaves that label wrong, so it warns too.
+		{"", console.FlavorMariaDB, refused, "saved with Source type MySQL, but the server reports MariaDB"},
+		{"", console.FlavorMySQL, refused, ""},
+		{console.FlavorMariaDB, console.FlavorMariaDB, refused, ""},
+		{console.FlavorMySQL, console.FlavorMySQL, nil, ""},
 	}
 	for _, tc := range cases {
-		got := registryFlavorWarning(tc.hint, tc.detected)
+		got := registryFlavorWarning(tc.hint, tc.detected, tc.correctErr)
 		if tc.wantWarn == "" && got != "" || tc.wantWarn != "" && !strings.Contains(got, tc.wantWarn) {
-			t.Errorf("hint %q detected %q: warning %q, want containing %q", tc.hint, tc.detected, got, tc.wantWarn)
+			t.Errorf("hint %q detected %q err %v: warning %q, want containing %q", tc.hint, tc.detected, tc.correctErr, got, tc.wantWarn)
+		}
+		if tc.wantWarn != "" && !strings.Contains(got, "upgrade bintrail to edit it") {
+			t.Errorf("warning %q does not say why the Source type was not changed", got)
+		}
+		if strings.Contains(got, "remove the server") {
+			t.Errorf("warning %q advises removing the server, which leaves its history behind", got)
 		}
 		if strings.ContainsRune(got, '\u2014') {
 			t.Errorf("em dash in operator text: %s", got)
 		}
 	}
-	t.Logf("warning: %s", registryFlavorWarning(console.FlavorMariaDB, console.FlavorMySQL))
+	t.Logf("warning: %s", registryFlavorWarning(console.FlavorMariaDB, console.FlavorMySQL, refused))
 
+	// The hook asks for the correction on every resolution, with what the
+	// server reported, and the warning follows the latest one.
 	job := &monitorJob{}
 	job.set("pending", "")
 	hooks := job.streamHooks()
 	jobs := 0
-	onFlavor := registryFlavorHook(job, console.FlavorMariaDB, func(string) { jobs++ })
-	hooks.OnFlavorResolved = onFlavor
+	var asked []string
+	correctErr := refused
+	correct := func(d string) (bool, error) {
+		asked = append(asked, d)
+		return correctErr == nil, correctErr
+	}
+	hooks.OnFlavorResolved = registryFlavorHook(job, console.FlavorMariaDB, correct, func(string) { jobs++ })
 	hooks.OnFlavorResolved(console.FlavorMySQL)
 	if w := job.snapshot().FlavorWarning; !strings.Contains(w, "Source type MariaDB") {
 		t.Errorf("status FlavorWarning = %q, want the contradiction", w)
@@ -144,16 +168,30 @@ func TestRegistryFlavorHint(t *testing.T) {
 	if st := job.snapshot().State; st == "failed" {
 		t.Error("a contradicted hint must not fail the job")
 	}
-	hooks.OnFlavorResolved(console.FlavorMySQL) // a restart
+	correctErr = nil
+	hooks.OnFlavorResolved(console.FlavorMySQL) // a restart, and this time the save works
 	if jobs != 1 {
 		t.Errorf("source jobs started %d times, want 1", jobs)
 	}
-	// The hint is what the operator saved; it does not change between runs,
-	// so a second resolution that agrees would only come from a different
-	// server. The warning still follows the latest resolution.
-	registryFlavorHook(job, console.FlavorMySQL, func(string) {})(console.FlavorMySQL)
 	if w := job.snapshot().FlavorWarning; w != "" {
-		t.Errorf("warning not cleared when hint and server agree: %q", w)
+		t.Errorf("warning kept after the Source type was corrected: %q", w)
+	}
+	if len(asked) != 2 || asked[0] != console.FlavorMySQL || asked[1] != console.FlavorMySQL {
+		t.Errorf("correction asked with %q, want the detected flavor on each resolution", asked)
+	}
+	// The other direction: a server saved as MySQL that reports MariaDB is
+	// corrected to MariaDB.
+	asked = nil
+	registryFlavorHook(&monitorJob{}, console.FlavorMySQL, correct, func(string) {})(console.FlavorMariaDB)
+	if len(asked) != 1 || asked[0] != console.FlavorMariaDB {
+		t.Errorf("correction asked with %q, want mariadb", asked)
+	}
+
+	// No registry to correct (nil): the contradiction stays visible.
+	job2 := &monitorJob{}
+	registryFlavorHook(job2, console.FlavorMySQL, nil, func(string) {})(console.FlavorMariaDB)
+	if w := job2.snapshot().FlavorWarning; !strings.Contains(w, "saved with Source type MySQL, but the server reports MariaDB") {
+		t.Errorf("no registry: warning %q, want the contradiction", w)
 	}
 }
 

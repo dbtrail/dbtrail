@@ -79,9 +79,11 @@ type captureStatusReporter struct {
 	// bootSourceDSN is the source of the daemon's own capture (--source-dsn),
 	// empty on a daemon started without one.
 	bootSourceDSN string
-	// bootFlavor is the daemon's declared --source-flavor ("" when it was
-	// left to detection): the boot entry carries no flavor of its own.
-	bootFlavor string
+	// bootFlavor reports the flavor the daemon's own capture runs as (its
+	// sourceFlavorCell: the declared --source-flavor, then what the source
+	// reported); nil or "" reads as MySQL. The boot entry carries no flavor
+	// of its own.
+	bootFlavor func() string
 
 	mu    sync.Mutex
 	slots map[string]*captureSlot
@@ -96,9 +98,9 @@ func newCaptureStatusReporter(bootSourceDSN string) *captureStatusReporter {
 	return &captureStatusReporter{bootSourceDSN: bootSourceDSN}
 }
 
-// withBootFlavor records the daemon's declared --source-flavor.
-func (c *captureStatusReporter) withBootFlavor(flavor string) *captureStatusReporter {
-	c.bootFlavor = strings.ToLower(strings.TrimSpace(flavor))
+// withBootFlavor sets where the daemon's own capture flavor is read from.
+func (c *captureStatusReporter) withBootFlavor(flavor func() string) *captureStatusReporter {
+	c.bootFlavor = flavor
 	return c
 }
 
@@ -110,7 +112,7 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	source, flavor := e.SourceDSN, e.SourceFlavor()
 	if e.ID == bootCaptureServerID {
 		source = c.bootSourceDSN
-		if c.bootFlavor == console.FlavorMariaDB {
+		if c.bootFlavor != nil && c.bootFlavor() == console.FlavorMariaDB {
 			flavor = console.FlavorMariaDB
 		}
 	}

@@ -445,6 +445,31 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   **looks like a replica or duplicate of an already-monitored one** — GTID
   lineage comparison; monitoring both would double-index the same changes.
   Detection needs `gtid_mode=ON`; in position mode the check is skipped.
+  A MariaDB source has no `server_uuid`, and its GTIDs name servers by
+  `server_id`, which is `1` on every server nobody configured, so GTIDs are
+  not compared there. Instead the check reports:
+  - the same server, when two entries use the same `host:port`, or when both
+    connections land on one running server;
+  - a replica, when a replication channel of one server (`SHOW ALL SLAVES
+    STATUS`) connects to the other by host, port and `server_id`, and the
+    other server confirms it: its `SHOW SLAVE HOSTS` lists the replica.
+    The channel's host is resolved in the replica's network, so without
+    that confirmation (for example two cloned stacks that both have a
+    `mariadb-primary`) the pair is reported as "could not be verified". A
+    `127.0.0.1` or `localhost` master is never matched, and neither is a
+    `server_id` of `1`, which unrelated servers share.
+
+  Reading replication status needs the `SLAVE MONITOR` privilege, and
+  reading the replica list needs `REPLICATION MASTER ADMIN`. Without the
+  first the check is skipped and says so; without the second a replica is
+  reported as "could not be verified".
+- The Source type saved with a MySQL or MariaDB server is a hint. Capture asks
+  the server what it is, and DBTrail saves that as the server's Source type,
+  so the server list and every page show what capture runs as. A warning
+  shows on the server's Overview only when the saved type cannot be changed
+  (for example, a server list written by a newer version). The daemon's own
+  source (`watch --source-dsn`) is labeled with the flavor its capture
+  detected.
 - With `--metrics-addr`, the daemon serves one Prometheus `/metrics` endpoint
   for all supervised streams; every stream series carries a `source` label set
   to the entry ID (see [streaming.md](streaming.md)). Exception: the capture-loss

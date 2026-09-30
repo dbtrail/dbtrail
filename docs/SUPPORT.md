@@ -143,10 +143,23 @@ yours (`bintrail-pg doctor` reports slot/WAL health — see
 [postgres.md](./postgres.md)). Capturing from a misconfigured source
 (non-`FULL` row image, missing `REPLICA IDENTITY`, `PARTIAL_JSON`) is out of scope.
 
+**MariaDB topologies that are not supported.** DBTrail captures a MariaDB
+source that is one server, including one server that writes into several GTID
+domains. These are not supported, and data captured from them is out of scope:
+
+- Galera clusters;
+- multi-master rings;
+- several servers writing into the same GTID domain;
+- a primary failover that changes the `server_id` within a domain while
+  capture runs.
+
+See [mariadb.md](./mariadb.md#beta-limitations).
+
 ## Reporting issues
 
 Bugs in DBTrail's binaries, schema, tooling, web interface, or docs: please open
 an issue with reproduction steps — those are always in scope. If your report
 is about the index MySQL server's own operation (disk, backups, upgrades,
 corruption), or about data captured under an unsupported source configuration
-(non-`FULL` row image, `PARTIAL_JSON`), see the lists above first.
+(non-`FULL` row image, `PARTIAL_JSON`, or one of the MariaDB topologies listed
+above), see the lists above first.

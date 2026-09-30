@@ -532,7 +532,11 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, ferr.Error())
 			return
 		}
-		if reqFlavor != flavor {
+		// Between MySQL and MariaDB the saved type is capture's to set
+		// (Registry.CorrectSourceFlavor): a form opened before capture
+		// corrected it still sends the old value, which is not a request to
+		// change it. The stored value stays.
+		if reqFlavor != flavor && !(mysqlFamily(reqFlavor) && mysqlFamily(flavor)) {
 			writeJSONError(w, http.StatusBadRequest, "source flavor cannot be changed; delete and re-create the server")
 			return
 		}
@@ -1562,6 +1566,12 @@ func (s *Server) bootDTO() (serverDTO, bool) {
 	}
 	if dsn != "" {
 		fillDSNParts(&dto, dsn)
+	}
+	// Read per list: capture asks its source after the console is up.
+	if s.bootSourceFlavor != nil {
+		if f := s.bootSourceFlavor(); mysqlFamily(f) {
+			dto.Flavor = f
+		}
 	}
 	return dto, true
 }
