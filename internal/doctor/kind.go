@@ -164,9 +164,6 @@ const loopbackRetryTimeout = 3 * time.Second
 // its greeting is the whole proof. The finding then SUGGESTS the address; the
 // person decides whether to use it.
 func proveLoopback(sourceDSN, kind string, retry func(host, port string) string) string {
-	if retry == nil || !loopbackRetryAfter(kind) {
-		return ""
-	}
 	cfg, err := mysql.ParseDSN(sourceDSN)
 	if err != nil {
 		return ""
@@ -175,7 +172,13 @@ func proveLoopback(sourceDSN, kind string, retry func(host, port string) string)
 	if err != nil {
 		host, port = cfg.Addr, ""
 	}
-	if !isLoopbackHost(host) {
+	return proveLoopbackAt(host, port, kind, retry)
+}
+
+// proveLoopbackAt is proveLoopback for a host and port already split, the
+// shape the server identification probe (#1953) has in hand.
+func proveLoopbackAt(host, port, kind string, retry func(host, port string) string) string {
+	if retry == nil || !loopbackRetryAfter(kind) || !isLoopbackHost(host) {
 		return ""
 	}
 	alt := retry(host, port)
@@ -221,33 +224,92 @@ func greetingAt(ctx context.Context, addr string) bool {
 		return false
 	}
 	defer conn.Close()
-	if dl, ok := ctx.Deadline(); ok {
-		_ = conn.SetReadDeadline(dl)
+	var dl time.Time
+	if d, ok := ctx.Deadline(); ok {
+		dl = d
+	}
+	_, answer := readGreeting(conn, dl)
+	return answer == answerMySQL
+}
+
+// What the other end did with the first packet a MySQL server would send.
+const (
+	// answerMySQL: a MySQL or MariaDB greeting, a handshake or an error packet.
+	answerMySQL = "mysql"
+	// answerSilent: it accepted the connection and said nothing before the
+	// deadline. A server that waits for the client to speak first does that
+	// (PostgreSQL, HTTP, a TLS-only port), and so does a MySQL whose lookup
+	// of the client's name outlasts the deadline: silence alone proves no
+	// flavor.
+	answerSilent = "silent"
+	// answerClosed: it accepted the connection and closed it without a byte,
+	// the way a port forwarder with nothing behind it does.
+	answerClosed = "closed"
+	// answerOther: it said something, and not a MySQL greeting.
+	answerOther = "other"
+)
+
+// readGreeting reads the first packet on conn and parses it, writing nothing.
+// A zero deadline means no deadline of its own (the caller bounds the read).
+func readGreeting(conn net.Conn, deadline time.Time) (greeting, string) {
+	if !deadline.IsZero() {
+		_ = conn.SetReadDeadline(deadline)
 	}
 	hdr := make([]byte, 4)
-	if _, err := io.ReadFull(conn, hdr); err != nil {
-		return false
+	if n, err := io.ReadFull(conn, hdr); err != nil {
+		if n > 0 {
+			return greeting{}, answerOther
+		}
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return greeting{}, answerSilent
+		}
+		return greeting{}, answerClosed
 	}
 	n := int(hdr[0]) | int(hdr[1])<<8 | int(hdr[2])<<16
 	if hdr[3] != 0 || n < 1 || n > maxGreetingLen {
-		return false
+		return greeting{}, answerOther
 	}
 	payload := make([]byte, n)
 	if _, err := io.ReadFull(conn, payload); err != nil {
-		return false
+		return greeting{}, answerOther
 	}
-	return isMySQLGreeting(payload)
+	g, ok := parseGreeting(payload)
+	if !ok {
+		return greeting{}, answerOther
+	}
+	return g, answerMySQL
+}
+
+// greeting is what a MySQL or MariaDB server's first packet said.
+type greeting struct {
+	// version is the handshake's version string, verbatim ("8.4.3",
+	// "5.5.5-10.11.6-MariaDB-log"). Empty for an error packet.
+	version string
+	// errCode is the error an error packet carried (1129, 1130, ...). Zero
+	// for a handshake.
+	errCode int
 }
 
 // isMySQLGreeting recognises the first packet a MySQL or MariaDB server
-// sends. Two shapes count:
+// sends; see parseGreeting for the two shapes that count.
+func isMySQLGreeting(p []byte) bool {
+	_, ok := parseGreeting(p)
+	return ok
+}
+
+// parseGreeting reads the first packet a MySQL or MariaDB server sends. Two
+// shapes count:
 //   - a handshake, protocol 10: a printable version string ended by a zero
 //     byte, then at least the connection id, the first part of the salt and
 //     its filler (13 bytes);
 //   - an error packet (0xff and a two-byte error code), which is how a
 //     server refuses a client's HOST before any login ("Host ... is not
 //     allowed to connect", 1130). It is still a MySQL server answering.
-func isMySQLGreeting(p []byte) bool {
+func parseGreeting(p []byte) (greeting, bool) {
+	if len(p) == 0 {
+		return greeting{}, false
+	}
 	switch p[0] {
 	case 0x0a:
 		end := -1
@@ -257,18 +319,22 @@ func isMySQLGreeting(p []byte) bool {
 				break
 			}
 			if p[i] < 0x20 || p[i] > 0x7e {
-				return false
+				return greeting{}, false
 			}
 		}
-		return end > 1 && len(p)-end-1 >= 13
+		if end > 1 && len(p)-end-1 >= 13 {
+			return greeting{version: string(p[1:end])}, true
+		}
 	case 0xff:
 		if len(p) < 3 {
-			return false
+			return greeting{}, false
 		}
 		code := int(p[1]) | int(p[2])<<8
-		return code >= 1000 && code < 6000
+		if code >= 1000 && code < 6000 {
+			return greeting{errCode: code}, true
+		}
 	}
-	return false
+	return greeting{}, false
 }
 
 // primaryKeyStatement is the statement that makes a refused table capturable
