@@ -997,6 +997,8 @@ button { font-family: inherit; }
 }
 .kv-v.big { font-size: 22px; font-weight: 600; }
 .kv-v.muted { color: var(--ink-3); }
+/* words, not a figure: the UI face (#1950) */
+.kv-v.words { font-family: var(--f-ui); font-weight: 400; color: var(--ink-2); }
 
 /* ============================================================
    code / SQL output
@@ -1532,20 +1534,15 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 /* the SQL wire points at the four cards under the strip */
 .flow-arrow:nth-child(6) .flow-state::after { content: " \2193"; }
 .flow-arrow .flow-fix { font-size: var(--fs-xs); }
+/* the Status strip (#1950): the same pieces, always open, no fold line */
+.flow-static { padding-top: 16px; }
+.flow-static .flow-arrow:nth-child(6) .flow-state::after { content: none; }
+.flow-mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.page-asof { display: inline-flex; align-items: center; gap: 8px; margin-right: 6px; }
 .health-dot.none { background: var(--ink-4); }
 .health-dot.warn { background: var(--orange-2); }
 .health-dot.bad  { background: var(--delete); }
 .health-dot.off  { background: var(--ink-4); }
-/* the red sibling of .warn-box: a stopped capture or a refused update, with
-   the decision under it. The console had no red box before the flow. */
-.bad-box {
-  font-family: var(--f-ui); font-size: 13.5px; color: var(--delete);
-  background: var(--delete-bg); border: 1px solid var(--delete);
-  border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
-  white-space: pre-wrap;
-}
-.bad-box .warn-line { margin-top: 8px; }
-.bad-box .warn-actions { margin-top: 10px; }
 .flow-card { margin-top: 12px; font-family: var(--f-ui); font-size: 14px; }
 .ov-fold { margin-top: 20px; }
 .ov-fold > summary { cursor: pointer; font-family: var(--f-ui); font-size: 13.5px; color: var(--ink-3); padding: 6px 0; }
@@ -2040,44 +2037,23 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
   border-radius: var(--radius-sm); padding: 14px 16px;
 }
 
-/* error + warning surfaces (mapped onto the warm palette) */
-.error-box {
-  font-family: var(--f-mono); font-size: 12.5px; color: var(--delete);
-  background: var(--delete-bg); border: 1px solid var(--delete);
-  border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
-  white-space: pre-wrap;
+/* ONE alarm box (#1950): a sentence in the UI face with a verdict colour.
+   error and bad are red (a loss, a stopped capture, a refused update), warn
+   orange (a degraded capture), ok green (an affirmation), muted the page's own
+   ink (an ACKNOWLEDGED record, #1314: still on the page, no longer alarming;
+   deleting it would trade an annoyance for lost evidence). */
+.error-box, .bad-box, .ok-box, .warn-box, .muted-box {
+  font-family: var(--f-ui); font-size: 13.5px; border: 1px solid;
+  border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0; white-space: pre-wrap;
 }
-/* affirmative counterpart to .error-box — the green "no data lost" continuity
-   confirmation, mapped onto the positive (insert) green of the palette. */
-.ok-box {
-  font-family: var(--f-ui); font-size: 13.5px; color: var(--insert);
-  background: var(--insert-bg); border: 1px solid var(--insert);
-  border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
-  white-space: pre-wrap;
-}
-/* capture-health degraded surface (#1034) — sustained in-stream skips: orange,
-   sitting between the green all-clear and the red permanent-loss record. */
-.warn-box {
-  font-family: var(--f-ui); font-size: 13.5px; color: var(--orange-2);
-  background: var(--orange-bg); border: 1px solid var(--ochre);
-  border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
-  white-space: pre-wrap;
-}
-/* One paragraph per explanation line (#1296). Without the gap the cause, the
-   fix and the "this does not recover what was already skipped" caveat run
-   together as one block — and the caveat is the part that gets skimmed past. */
-/* an ACKNOWLEDGED capture-skip record (#1314): the loss is still on the page,
-   in the page's own muted text — no colour, no border emphasis. An operator
-   who has read the alarm and said so should not keep being alarmed by it, and
-   deleting the box instead would trade an annoyance for lost evidence. */
-.muted-box {
-  font-family: var(--f-ui); font-size: 13.5px; color: var(--ink-2);
-  background: var(--inset); border: 1px solid var(--line);
-  border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
-  white-space: pre-wrap;
-}
-.warn-box .warn-line, .ok-box .warn-line, .muted-box .warn-line { margin-top: 8px; }
-.warn-box .warn-actions, .ok-box .warn-actions, .muted-box .warn-actions { margin-top: 10px; }
+.error-box, .bad-box { color: var(--delete); background: var(--delete-bg); border-color: var(--delete); }
+.ok-box { color: var(--insert); background: var(--insert-bg); border-color: var(--insert); }
+.warn-box { color: var(--orange-2); background: var(--orange-bg); border-color: var(--ochre); }
+.muted-box { color: var(--ink-2); background: var(--inset); border-color: var(--line); }
+/* One paragraph per explanation line (#1296): the caveat that gets skimmed
+   past must not run into the cause and the fix. */
+.bad-box .warn-line, .warn-box .warn-line, .ok-box .warn-line, .muted-box .warn-line { margin-top: 8px; }
+.bad-box .warn-actions, .warn-box .warn-actions, .ok-box .warn-actions, .muted-box .warn-actions { margin-top: 10px; }
 .ack-actions { margin-top: 10px; }
 /* The long-form cause/remedy/scope, collapsed (#1312). It used to render flat
    and unconditionally — ~250 words inside an alarm box, which is the reliable

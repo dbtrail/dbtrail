@@ -863,6 +863,10 @@ function toastEscape(e) {
 // Popovers that live outside #modal and consume Escape themselves.
 const ESCAPE_OWNING_POPOVERS = ".dt-pop";
 
+// INDEX_EMPTY_ART: the path with its middle station not yet there, drawn
+// (source, a dashed DBTrail box, the copy). Static, so svgEl is right here.
+const INDEX_EMPTY_ART = `<svg viewBox="0 0 160 72" aria-hidden="true"><rect x="2" y="20" width="40" height="32" rx="8" fill="var(--raised)" stroke="var(--line)"/><rect x="60" y="14" width="40" height="44" rx="8" fill="none" stroke="var(--ink-4)" stroke-width="1.5" stroke-dasharray="4 3"/><rect x="118" y="20" width="40" height="32" rx="8" fill="var(--mint-tint)" stroke="var(--ok)"/><path d="M44 36h12M100 36h14" stroke="var(--ink-4)" stroke-width="2" stroke-dasharray="3 3"/><path d="M53 32l4 4-4 4M111 32l4 4-4 4" fill="none" stroke="var(--ink-4)" stroke-width="2"/></svg>`;
+
 function renderError(container, err) {
   if (!container) return;
   clear(container);
@@ -875,6 +879,7 @@ function renderError(container, err) {
   const m = indexMissingFrom(msg);
   if (m) {
     const box = el("div", { class: "empty" });
+    box.append(el("div", { class: "empty-art", "aria-hidden": "true" }, svgEl(INDEX_EMPTY_ART)));
     box.append(el("h3", { text: "This server isn't indexing yet", title: indexMissingDetail(m) }));
     box.append(el("p", { text: indexMissingWords() }));
     box.append(el("button", { class: "btn btn-sm", type: "button", text: "Servers",
@@ -1224,6 +1229,10 @@ function utcLabel(stamp) {
   const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z)?$/.exec(String(stamp || ""));
   return m ? m[1] + " " + m[2] + " UTC" : String(stamp || "");
 }
+
+// utcBare is utcLabel without the zone word, for a page that states the zone
+// once in its header (#1950): the Status view.
+function utcBare(stamp) { return utcLabel(stamp).replace(/ UTC$/, ""); }
 
 // tzChip is the section-level zone declaration: a small "UTC" chip for the
 // head of a card/panel whose body renders bare timestamps.
@@ -2203,26 +2212,15 @@ function flowSummaryLine(model) {
   return parts.length ? " · " + parts.join(" · ") : "";
 }
 
-// flowSection paints one model as a foldable strip (#1950): a summary line
-// (the verdict, and the figures when folded) over stations and wires in one
-// grid (style.css .flow), about 180px tall so the use cards under it stay
-// above the fold. Plain HTML: the decision card under a broken wire carries
-// buttons and wrapping text, which an SVG cannot hold, and under 880 px the
-// grid stacks. Colour and label change by class and text; nothing is drawn.
-// Open the first time, then as this browser left it.
-function flowSection(model, ctx) {
-  const sec = el("details", { class: "flow" + (model.cut ? " flow-cut" : ""), "aria-label": "The path from your database to its copy" });
-  const top = el("summary", { class: "flow-top" });
-  const verdict = flowVerdict(model);
-  top.append(el("span", { class: "flow-verdict " + verdict.tone },
-    el("span", { class: "health-dot " + verdict.tone, "aria-hidden": "true" }), " " + verdict.word));
-  const sumline = el("span", { class: "flow-sumline" });
-  top.append(sumline);
-  top.append(el("span", { class: "flow-foldhint", "aria-hidden": "true" }));
-  sec.append(top);
+// flowGrid draws the seven pieces of the path (four stations, three
+// arrows) from a model's pieces. Shared by the Overview flow and the
+// Status strip (#1950): one drawing language, fed by each page's own read.
+// A sub marked mono is data (a binlog position, an LSN) and is set in the
+// data face; everything else stays in the UI face.
+function flowGrid(pieces, ctx) {
   const grid = el("div", { class: "flow-grid" });
   const isArrow = (i) => i % 2 === 1;
-  model.pieces.forEach((p, i) => {
+  pieces.forEach((p, i) => {
     const node = el("div", { class: (isArrow(i) ? "flow-arrow" : "flow-box") + " " + (p.tone || "none") });
     if (isArrow(i)) {
       node.append(el("span", { class: "flow-label", text: String(p.title || "") }));
@@ -2230,7 +2228,7 @@ function flowSection(model, ctx) {
       const val = el("div", { class: "flow-val" });
       if (p.big) val.append(el("div", { class: "flow-big", text: p.big, title: p.stamp ? utcLocalTitle(p.stamp) || null : null, "data-stamp": p.stamp || null }));
       if (p.line) val.append(el("div", { class: "flow-state" }, el("span", { class: "health-dot " + (p.tone || "none") }), " " + p.line));
-      if (p.sub) val.append(el("div", { class: "flow-sub", text: p.sub }));
+      if (p.sub) val.append(el("div", { class: "flow-sub" + (p.mono ? " flow-mono" : ""), text: p.sub }));
       if (p.action) {
         val.append(el("a", { class: "flow-link flow-fix", href: "#", text: p.action.label + " ›",
           onclick: (e) => { e.preventDefault(); runFlowAction(p.action.run, ctx); } }));
@@ -2255,12 +2253,33 @@ function flowSection(model, ctx) {
       }
       node.append(head);
       if (p.line) node.append(el("div", { class: "flow-state", text: p.line }));
-      if (p.sub) node.append(el("div", { class: "flow-sub", text: p.sub }));
+      if (p.sub) node.append(el("div", { class: "flow-sub" + (p.mono ? " flow-mono" : ""), text: p.sub }));
       if (p.rewind) node.append(el("div", { class: "flow-sub", text: p.rewind }));
       if (p.schemaRetry) { const b = schemaSnapshotButton(); if (b) node.append(b); }
     }
     grid.append(node);
   });
+  return grid;
+}
+
+// flowSection paints one model as a foldable strip (#1950): a summary line
+// (the verdict, and the figures when folded) over stations and wires in one
+// grid (style.css .flow), about 180px tall so the use cards under it stay
+// above the fold. Plain HTML: the decision card under a broken wire carries
+// buttons and wrapping text, which an SVG cannot hold, and under 880 px the
+// grid stacks. Colour and label change by class and text; nothing is drawn.
+// Open the first time, then as this browser left it.
+function flowSection(model, ctx) {
+  const sec = el("details", { class: "flow" + (model.cut ? " flow-cut" : ""), "aria-label": "The path from your database to its copy" });
+  const top = el("summary", { class: "flow-top" });
+  const verdict = flowVerdict(model);
+  top.append(el("span", { class: "flow-verdict " + verdict.tone },
+    el("span", { class: "health-dot " + verdict.tone, "aria-hidden": "true" }), " " + verdict.word));
+  const sumline = el("span", { class: "flow-sumline" });
+  top.append(sumline);
+  top.append(el("span", { class: "flow-foldhint", "aria-hidden": "true" }));
+  sec.append(top);
+  const grid = flowGrid(model.pieces, ctx);
   sec.append(grid);
   // One decision at a time: the card of the piece that broke first.
   const card = model.cards.find((c) => !ovFlowDismissed.has(c.key));
@@ -5355,6 +5374,116 @@ function renderTimeline(container, data, onDone) {
 
 // ── Status ─────────────────────────────────────────────────────────────────
 
+// flowBehind: an age in seconds as the short figure the arrow carries.
+function flowBehind(sec) {
+  if (typeof sec !== "number" || !isFinite(sec) || sec < 0) return "";
+  if (sec < 60) return Math.round(sec) + " s";
+  if (sec < 3600) return Math.round(sec / 60) + " min";
+  if (sec < 172800) return (sec / 3600).toFixed(sec < 36000 ? 1 : 0) + " h";
+  return Math.round(sec / 86400) + " d";
+}
+
+// flowSpan: how far back the index reaches, from its earliest to its latest
+// event, as a short figure.
+function flowSpan(from, to) {
+  const a = Date.parse(String(from || "").replace(" ", "T") + (/(Z|[+-]\d\d:\d\d)$/.test(String(from || "")) ? "" : "Z"));
+  const b = Date.parse(String(to || "").replace(" ", "T") + (/(Z|[+-]\d\d:\d\d)$/.test(String(to || "")) ? "" : "Z"));
+  if (isNaN(a) || isNaN(b) || b < a) return "";
+  return flowBehind((b - a) / 1000);
+}
+
+// statusFlowModel is the capture path as the Status read sees it (#1950):
+// the same seven pieces the Overview draws, each station saying its live
+// state. It replaced the page's opening sentence and the green "no gaps" box:
+// what they said, the stations now show, and the two claims the old box had
+// to keep apart in words (no gaps inside what was captured; whether capture
+// is running) sit on two different pieces, the DBTrail station and the
+// capture arrow, so neither can be read as the other. The permanent-loss
+// alarm stays a red box below: an alarm with a stamp is not a state.
+function statusFlowModel(data, capacity, caps) {
+  data = data || {};
+  caps = caps || {};
+  const pg = caps.source === "postgresql";
+  const stream = data.stream || null;
+  const cov = data.coverage || {};
+  const arch = data.archives || null;
+  const servers = (data.servers || []).filter((s) => !s.decommissioned_at);
+  const srv = servers[0] || null;
+  const piece = (title, tone, line, sub, extra) => Object.assign({ title, tone, line: line || "", sub: sub || "" }, extra || {});
+  const n = (x) => Number(x || 0).toLocaleString();
+  const pieces = [];
+
+  // 0. the source
+  pieces.push(piece(pg ? "Your PostgreSQL" : "Your MySQL", "none",
+    srv ? srv.host + ":" + srv.port : "source not recorded",
+    servers.length > 1 ? servers.length + " sources in this index" : "", { mono: !!srv }));
+
+  // 1. capture: liveness, from the daemon's checkpoint
+  const label = pg ? "WAL" : "binlog";
+  if (data.stream_error) {
+    pieces.push(piece(label, "warn", "state could not be read", data.stream_error.error || ""));
+  } else if (!stream) {
+    const files = (data.files || []).length;
+    pieces.push(piece(label, "off", "no live capture", files ? files + " file" + (files === 1 ? "" : "s") + " indexed" : ""));
+  } else {
+    const f = stream.freshness || {};
+    const tone = f.status === "current" || f.status === "idle" ? "ok" : f.status === "stalled" ? "bad" : "warn";
+    const word = f.status === "current" ? "capturing" : f.status === "idle" ? "idle, nothing new" : f.status === "stalled" ? "stalled" : "liveness not known";
+    const pos = pg ? (stream.binlog_file ? "LSN " + stream.binlog_file : "")
+      : (stream.binlog_file ? stream.binlog_file + ":" + stream.binlog_position : (stream.mode || ""));
+    pieces.push(piece(label, tone, word, pos, { big: flowBehind(f.checkpoint_age_seconds), mono: true }));
+  }
+
+  // 2. DBTrail: what the index holds, and whether it holds all of it
+  const events = cov.total_events !== undefined ? cov.total_events : data.total_events_estimate;
+  const parts = (data.partitions || []).length;
+  const held = n(events) + " events · " + parts + " hour" + (parts === 1 ? "" : "s");
+  const ch = stream && stream.capture_health;
+  let dbt;
+  if (stream && stream.gap_lost) dbt = piece("DBTrail", "bad", "events permanently lost", held);
+  else if (ch && ch.status === "degraded" && !ch.acknowledged) dbt = piece("DBTrail", "warn", n(ch.total_skipped) + " changes skipped", held);
+  else if (stream && stream.continuity && stream.continuity.status === "ok") dbt = piece("DBTrail", "ok", "no gaps", held);
+  else if (stream) dbt = piece("DBTrail", "none", "gaps not checkable", held);
+  else dbt = piece("DBTrail", "none", held, "");
+  pieces.push(dbt);
+
+  // 3. history: how far back the copy can go
+  const span = flowSpan(cov.earliest_event, cov.latest_event);
+  const ret = data.retention || {};
+  const bounds = cov.earliest_event && cov.latest_event ? utcBare(cov.earliest_event) + " to " + utcBare(cov.latest_event).slice(11) : "";
+  pieces.push(piece("history", "none", span ? "of history" + (ret.retain ? ", kept " + ret.retain : "") : (cov.earliest_event ? "" : "nothing indexed yet"),
+    bounds, { big: span, mono: true }));
+
+  // 4. the copy: snapshots and archives
+  const bls = data.baselines || [];
+  const st = data.baseline_staleness || "";
+  const archLine = arch ? n(arch.total_files) + " archive file" + (arch.total_files === 1 ? "" : "s") + (arch.total_size_human ? " · " + arch.total_size_human : "")
+    : (data.archives_error ? "archives could not be read" : "no archives yet");
+  if (bls.length) {
+    const tone = st === "ok" ? "ok" : st === "broken" ? "bad" : (st === "aging" || st === "unknown" || data.baselines_unavailable) ? "warn" : "none";
+    const word = st === "ok" ? "up to date" : st === "aging" ? "aging" : st === "broken" ? "behind" : st === "unknown" ? "staleness not evaluable" : "";
+    pieces.push(piece("Your copy", tone, bls.length + " snapshot" + (bls.length === 1 ? "" : "s") + (word ? ", " + word : ""), archLine));
+  } else {
+    pieces.push(piece("Your copy", data.baselines_unavailable ? "warn" : "off", data.baselines_unavailable ? "snapshots could not be read" : "no snapshot yet", archLine));
+  }
+
+  // 5. SQL: how the copy is read
+  pieces.push(piece("SQL", "none", caps.reconstruct ? "time travel on" : "", ""));
+
+  // 6. the reader
+  pieces.push(piece("DuckDB", "none", caps.views ? DUCKDB_VIEWS_FILE + " ready" : "Parquet files", ""));
+  return { pieces };
+}
+
+// statusFlow draws the strip with a text alternative: every station's title
+// and state, so a screen reader hears what the drawing shows.
+function statusFlow(model) {
+  const alt = model.pieces.map((p) => p.title + ": " + [p.big, p.line, p.sub].filter(Boolean).join(", ")).join("; ") + ".";
+  const sec = el("section", { class: "flow flow-static", role: "img", "aria-label": "The capture path. " + alt });
+  sec.append(flowGrid(model.pieces, {}));
+  return sec;
+}
+
 async function renderStatus() {
   const gen = serverGen, vgen = viewGen;
   viewLoading();
@@ -5375,8 +5504,14 @@ async function renderStatus() {
   updateSideMeta(data);
 
   const v = VIEW(); clear(v);
-  const sub = el("p", { class: "page-sub", text: "A quick health check: what was captured, how far back it goes, and where live capture stands now." });
-  v.append(pageHead("Status", sub));
+  // The zone once, for the page (#1950): every timestamp below is UTC, and
+  // one "as of" for the read that painted all of it. Refresh is this view's
+  // one action, and its primary.
+  v.append(pageHead("Status", null, [
+    el("span", { class: "page-asof" }, tzChip(), el("span", { class: "cov-asof", text: "as of " + nowClock().replace(" UTC", "") })),
+    el("button", { class: "btn btn-primary btn-sm", type: "button", text: "Refresh", onclick: () => renderStatus() }),
+  ]));
+  v.append(statusFlow(statusFlowModel(data, capacity, capsCache)));
 
   const cards = el("div", { class: "cards" });
   const cov = data.coverage || {};
@@ -5390,31 +5525,23 @@ async function renderStatus() {
   // gateCapabilities → renderRoute).
   const pg = capsCache.source === "postgresql";
 
-  cards.append(statusCard("Summary", [
-    ["total events (est.)", data.total_events_estimate, true],
-    ["indexed files", (data.files || []).length],
-    ["partitions", (data.partitions || []).length],
-  ]));
-  cards.append(statusCard("Coverage", [
-    ["earliest event (UTC)", cov.earliest_event],
-    ["latest event (UTC)", cov.latest_event],
-    ["total events", cov.total_events],
-    ["schema changes", cov.schema_changes],
-  ]));
+  // The Summary and Coverage cards went with the strip (#1950): the DBTrail
+  // station says the events and the partitions, the history arrow the span
+  // and its two bounds, the capture arrow the position and the indexed
+  // files. The cards keep what the strip does not show.
   if (stream) cards.append(statusCard(pg ? "Stream · PostgreSQL" : "Stream", pg ? [
     ["source", "PostgreSQL · logical replication"],
-    ["LSN", stream.binlog_file],
     ["events indexed", stream.events_indexed],
+    ["last checkpoint", utcBare(stream.last_checkpoint)],
   ] : [
     ["mode", stream.mode],
-    ["binlog file", stream.binlog_file],
-    ["position", stream.binlog_position],
     ["events indexed", stream.events_indexed],
+    ["last checkpoint", utcBare(stream.last_checkpoint)],
   ]));
   if (arch) cards.append(statusCard("Archives", [
-    ["files", arch.total_files],
     ["rows", arch.total_rows],
-    ["size", arch.total_size_human],
+    ["local files", arch.local_files],
+    ["S3 files", arch.s3_files],
   ]));
   cards.append(capacityCard(capacity));
   // Usage telemetry (#1867): what this process sends is a fact about the
@@ -5496,6 +5623,15 @@ function capacityStateClass(status) {
   }
 }
 
+function capacityChipClass(status) {
+  switch (status) {
+    case "pass": return "chip-ok";
+    case "warn": return "chip-warn";
+    case "fail": return "chip-error";
+    default: return "chip-unknown";
+  }
+}
+
 function capacityStateText(cap) {
   switch (cap.reason) {
     case "ok": return "ok";
@@ -5566,27 +5702,32 @@ function capacityCard(cap) {
     return card;
   }
   const ret = cap.retention || {};
+  // A row's value is a figure (mono) or words (the UI face, #1950): "not
+  // enough history yet" is a sentence, not data.
   const rows = [["index size", humanBytes(cap.current_bytes), true]];
   rows.push(["write rate", cap.measured
     ? humanBytes(cap.growth_bytes_per_day) + " a day (" + Math.round(cap.events_per_day).toLocaleString() + " events)"
-    : "not enough history yet"]);
-  rows.push(["keeps for", !ret.known ? "not known here" : (ret.enabled ? ret.retain + retentionBasis(ret) : "rotation is off")]);
+    : "not enough history yet", false, !cap.measured]);
+  const basis = ret.known && ret.enabled ? retentionBasis(ret) : "";
+  rows.push(["keeps for", !ret.known ? "not known here" : (ret.enabled ? ret.retain + basis : "rotation is off"), false, !ret.known || !ret.enabled || !!basis]);
   if (cap.measured && cap.projected_bytes > 0) rows.push(["steady size", humanBytes(cap.projected_bytes)]);
-  rows.push(["free on disk", cap.free_known ? humanBytes(cap.free_bytes) : "not measurable from here"]);
-  if (cap.days_until_full !== null && cap.days_until_full !== undefined) rows.push(["free space lasts", daysText(cap.days_until_full) + " at this rate"]);
-  rows.forEach(([k, val, big]) => {
+  rows.push(["free on disk", cap.free_known ? humanBytes(cap.free_bytes) : "not measurable from here", false, !cap.free_known]);
+  if (cap.days_until_full !== null && cap.days_until_full !== undefined) rows.push(["free space lasts", daysText(cap.days_until_full) + " at this rate", false, true]);
+  rows.forEach(([k, val, big, words]) => {
     card.append(el("div", { class: "kv" },
       el("span", { class: "kv-k", text: k }),
-      el("span", { class: "kv-v" + (big ? " big" : ""), text: val })));
+      el("span", { class: "kv-v" + (big ? " big" : "") + (words ? " words" : ""), text: val })));
   });
-  card.append(healthKV("state", el("span", { class: "hstat " + capacityStateClass(cap.status), text: capacityStateText(cap) })));
+  // The state is a chip of the status family (#1950); the hstat-* classes
+  // stay as the grade's name for the tests that read it.
+  card.append(healthKV("state", el("span", { class: "chip chip-sm " + capacityChipClass(cap.status) + " hstat " + capacityStateClass(cap.status), text: capacityStateText(cap) })));
   const note = capacityNote(cap);
-  if (note) card.append(el("div", { class: "hlist", text: note }));
+  if (note) card.append(el("p", { class: "form-hint", text: note }));
   // Unmeasurable free space is explained under every grade, not just the
   // free_unknown one: the row above reads "not measurable from here" for a
   // fresh index and a short history too.
   const freeNote = capacityFreeNote(cap);
-  if (freeNote) card.append(el("div", { class: "hlist", text: freeNote }));
+  if (freeNote) card.append(el("p", { class: "form-hint", text: freeNote }));
   return card;
 }
 
@@ -5640,13 +5781,11 @@ function capacityBox(cap) {
 // (PostgreSQL, #532); the index is valid only up to that point and capture must
 // be re-baselined to resume. It keys on gap_lost, emitted independently of
 // continuity — so a legacy backend that omits continuity still shows it on a lost
-// stream. The green ok-box is the affirmative counterpart and keys on
-// continuity.status === "ok" (newer backends only); the two are mutually
-// exclusive (gap_lost takes precedence). The green box asserts only
-// gap-CONTIGUITY of the captured range — NOT that the stream is live or caught
-// up; "unknown" (legacy index) and a missing continuity field return null
-// (neither box). Pure and fixture-drivable, mirroring pgHealthCard — the
-// console-e2e harness pins the ok/gap_lost/neither states.
+// stream. The affirmative counterpart (continuity.status === "ok") is the
+// strip's DBTrail station since #1950, not a box; "unknown" (legacy index)
+// and a missing continuity field draw no verdict anywhere. Pure and
+// fixture-drivable, mirroring pgHealthCard: the console-e2e harness pins the
+// gap_lost/neither states here and the ok state on statusFlowModel.
 function continuityBox(stream, pg) {
   if (!stream) return null;
   if (stream.gap_lost) {
@@ -5658,12 +5797,10 @@ function continuityBox(stream, pg) {
     lost.append(el("div", { text: "Detected: " + utcLabel(stream.gap_lost.at) }));
     return lost;
   }
-  if (stream.continuity && stream.continuity.status === "ok") {
-    const ok = el("div", { class: "ok-box" });
-    ok.append(el("b", { text: "✓ No gaps in captured stream" }));
-    ok.append(el("div", { text: "No gaps in what was captured so far. That does not mean the stream is running or caught up right now." }));
-    return ok;
-  }
+  // A clean verdict is a STATE, and states live on the strip: the DBTrail
+  // station says "no gaps" while the capture arrow says whether capture is
+  // running, so the two claims cannot be read as one (#1950). Only the alarm
+  // is a box.
   return null;
 }
 

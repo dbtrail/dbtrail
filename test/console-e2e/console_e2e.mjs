@@ -577,27 +577,37 @@ try {
   ph.notFoundShown ? ok("pg-health: absent slot shows 'not found yet'") : bad("pg-health: absent slot shows 'not found yet'", "missing not-found state");
 
   // Scenario 8 — stream-continuity surface (#645). Fixture-drives continuityBox
-  // (pure, like pgHealthCard): the green "no gaps" affirmation must RENDER as the
-  // green ok-box (color actually applied, not just the class present), a stamped
-  // gap must render the red error-box and take precedence over a stale ok, and the
-  // unknown/legacy/missing/nil cases must show NEITHER box (no clean verdict from
-  // un-evaluated data). This is the only check that the new green badge displays
-  // correctly — the Go suite sees the JSON contract, never the pixels.
+  // (pure, like pgHealthCard) and, since #1950, statusFlowModel: the "no gaps"
+  // affirmation is the strip's DBTrail station (green, colour actually applied,
+  // not just the class), drawn apart from the capture arrow that says whether
+  // capture is running, so a clean index and a stalled stream read as two
+  // facts; a stamped gap must render the red error-box and take precedence
+  // over a stale ok, and the unknown/legacy/missing/nil cases must show NO
+  // verdict (no clean word from un-evaluated data). This is the only check
+  // that the green state displays correctly; the Go suite sees the JSON
+  // contract, never the pixels.
   const cont = await page.evaluate(() => {
     const okBox = continuityBox({ continuity: { status: "ok" } }, false);
+    const okModel = statusFlowModel({ stream: { continuity: { status: "ok" }, freshness: { status: "stalled", checkpoint_age_seconds: 900 } } }, null, {});
+    const unknownModel = statusFlowModel({ stream: { continuity: { status: "unknown" } } }, null, {});
+    const okStrip = statusFlow(okModel);
+    document.body.appendChild(okStrip);
+    const okDot = okStrip.querySelector(".flow-box.ok .health-dot.ok");
+    const okColor = okDot ? getComputedStyle(okDot).backgroundColor : "";
+    okStrip.remove();
     const gapBox = continuityBox({ gap_lost: { at: "2026-06-22 12:00:00", detail: "unfillable binlog gap" } }, false);
     const gapWins = continuityBox({ gap_lost: { at: "t", detail: "d" }, continuity: { status: "ok" } }, false);
     const unknownBox = continuityBox({ continuity: { status: "unknown" } }, false);
     const missingBox = continuityBox({ mode: "gtid" }, false); // legacy backend: no continuity field
     const nilBox = continuityBox(null, false);
-    // The green box must actually be GREEN — append it and read the computed border
-    // color, so a CSS-cascade break (class present, color not applied) is caught.
-    let okBorder = "";
-    if (okBox) { document.body.appendChild(okBox); okBorder = getComputedStyle(okBox).borderColor; okBox.remove(); }
     return {
-      okGreenClass: !!okBox && okBox.classList.contains("ok-box"),
-      okGreenText: !!okBox && /No gaps in captured stream/.test(okBox.textContent) && /does not mean the stream is running/.test(okBox.textContent),
-      okBorder,
+      // the ok box is gone: the station carries the state
+      okNoBox: okBox === null,
+      okStation: okModel.pieces[2].tone === "ok" && /no gaps/.test(okModel.pieces[2].line),
+      // the liveness claim sits on the arrow, not on the station
+      okApart: okModel.pieces[1].tone === "bad" && /stalled/.test(okModel.pieces[1].line),
+      okColor,
+      unknownStation: unknownModel.pieces[2].tone === "none",
       gapRed: !!gapBox && gapBox.classList.contains("error-box") && /permanently lost/i.test(gapBox.textContent),
       gapPrecedence: !!gapWins && gapWins.classList.contains("error-box"),
       unknownNeither: unknownBox === null,
@@ -605,12 +615,13 @@ try {
       nilNeither: nilBox === null,
     };
   });
-  cont.okGreenClass ? ok("continuity: ok renders the green ok-box") : bad("continuity: ok renders the green ok-box", "no .ok-box");
-  cont.okGreenText ? ok("continuity: green box scoped to contiguity (not a liveness claim)") : bad("continuity: green box scoped to contiguity (not a liveness claim)", "wording missing/overclaims");
-  // any non-default, non-transparent border color proves the .ok-box class resolved (--insert green).
-  (cont.okBorder && cont.okBorder !== "rgba(0, 0, 0, 0)" && cont.okBorder !== "rgb(0, 0, 0)")
-    ? ok("continuity: green ok-box actually renders green (CSS applied)")
-    : bad("continuity: green ok-box actually renders green (CSS applied)", `borderColor=${cont.okBorder}`);
+  (cont.okNoBox && cont.okStation) ? ok("continuity: ok is the strip's green DBTrail station, not a box") : bad("continuity: ok is the strip's green DBTrail station, not a box", JSON.stringify(cont));
+  cont.okApart ? ok("continuity: the liveness claim sits on the capture arrow, apart from the no-gaps station") : bad("continuity: the liveness claim sits on the capture arrow, apart from the no-gaps station", JSON.stringify(cont));
+  // any non-default, non-transparent colour proves the ok class resolved (--insert green).
+  (cont.okColor && cont.okColor !== "rgba(0, 0, 0, 0)" && cont.okColor !== "rgb(0, 0, 0)")
+    ? ok("continuity: the green station actually renders green (CSS applied)")
+    : bad("continuity: the green station actually renders green (CSS applied)", `color=${cont.okColor}`);
+  cont.unknownStation ? ok("continuity: unknown draws no verdict on the station") : bad("continuity: unknown draws no verdict on the station", "station claimed a verdict for unknown");
   cont.gapRed ? ok("continuity: gap_lost renders the red error-box") : bad("continuity: gap_lost renders the red error-box", "no .error-box");
   cont.gapPrecedence ? ok("continuity: gap_lost takes precedence over a stale ok") : bad("continuity: gap_lost takes precedence over a stale ok", "green won over a gap");
   cont.unknownNeither ? ok("continuity: unknown shows neither box") : bad("continuity: unknown shows neither box", "rendered a box for unknown");
