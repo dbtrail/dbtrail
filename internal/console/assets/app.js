@@ -5826,6 +5826,8 @@ function snapshotTabs(has) {
       buttons[k].classList.toggle("is-on", k === id);
     }
     snapTab = id;
+    const dl = actions.querySelector ? actions.querySelector(".snap-dl") : null;
+    if (dl) dl.classList.toggle("btn-primary", id === "versions");
     if (!quiet) snapTabAuto = false;
     if (!quiet && typeof history !== "undefined" && history.replaceState) {
       history.replaceState(history.state, "", location.pathname + location.search + "#" + id);
@@ -6001,7 +6003,7 @@ function snapshotHero(b, cov, cur, acts) {
   // Only where a check can run: on a daemon with checks off the history
   // read answers 403, which is not a failure to report.
   if (capsCache.verify_trigger && cur && cur.id) {
-    const check = el("div", { class: "hero-card hero-check none" }, icon("check", "hero-ico"), el("span", { class: "hero-tile-t", text: "Checking…" }));
+    const check = el("div", { class: "hero-card hero-tile hero-check none" }, icon("check", "hero-ico"), el("span", { class: "hero-tile-t", text: "Checking…" }));
     hero.append(check);
     loadSnapshotVerdict(cur.id, check);
   }
@@ -6012,7 +6014,10 @@ function snapshotHero(b, cov, cur, acts) {
   // configuration fix, and sending a reader who lacks the permission to fix
   // a setting they cannot touch is worse than saying nothing.
   const actions = (acts && acts.mount) || el("div", { class: "hero-actions" });
-  if (acts && acts.download) actions.append(el("button", { class: "btn btn-primary", type: "button", text: "Download", onclick: acts.download }));
+  // One filled button per tab (#1950): Download is it on Versions, the tab
+  // it acts on; on Checks that is Run verification, and on Settings the Save
+  // of the form being changed (snapshotTabs.select keeps this in step).
+  if (acts && acts.download) actions.append(el("button", { class: "btn snap-dl" + (snapTab && snapTab !== "versions" ? "" : " btn-primary"), type: "button", text: "Download", onclick: acts.download }));
   if (cur && cur.id && cur.kind === "registry" && sessionMay(PERM_SNAPSHOT_CREATE)) {
     // cur is the RAW registry entry, while b.configured also counts the
     // daemon-wide default, which a backup refuses to write to. The precheck
@@ -6059,7 +6064,7 @@ async function loadSnapshotVerdict(id, tile) {
 function snapshotCheckTileFill(tile, latest, whyNone) {
   if (!tile) return;
   const w = vfyVerdictWords(latest, whyNone);
-  tile.className = "hero-card hero-check " + w.state;
+  tile.className = "hero-card hero-tile hero-check " + w.state;
   clear(tile);
   tile.append(icon(w.mark, "hero-ico"), el("span", { class: "hero-tile-t", text: w.title }));
   if (w.when) tile.append(el("span", { class: "hero-tile-s", text: w.when }));
@@ -7195,7 +7200,10 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
 
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
-  const save = el("button", { class: "btn btn-primary", type: "button", text: "Save" });
+  // Filled only while this form differs from what was loaded (sync): the
+  // Settings tab holds two Saves, and the one being changed is the one the
+  // eye should find (#1950). data-save is the hook the browser scenes press.
+  const save = el("button", { class: "btn", type: "button", text: "Save", "data-save": "location" });
   // Two different reasons to be read-only. registry_read_only is the
   // registry file itself (a newer version wrote it), and the Save stays
   // visible, disabled, beside the reason. A session without servers:write
@@ -7259,7 +7267,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     shape.hidden = keep.hidden;
     if (!shape.hidden) keepShapeDraw(shape, keepNow() || 0, srv.snapshot_every_minutes || 0, srv.prune_retain_minutes || 0);
   };
-  const sync = () => { paint(); save.disabled = locked || !dirty(); };
+  const sync = () => { paint(); save.disabled = locked || !dirty(); save.classList.toggle("btn-primary", !save.disabled); };
   for (const input of [dir, s3, keep]) {
     input.addEventListener("input", sync);
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !save.disabled) save.click(); });
@@ -8457,7 +8465,7 @@ function baselinesPanel(b, servers, opts) {
     pageWindow.rows.forEach((sn, i) => {
       const idx = pageWindow.start + i;
       const row = el("div", { class: "stg-row" + (idx === 0 ? " stg-row-latest" : "") });
-      if (idx === 0) row.append(el("span", { class: "tag-pill", text: "Newest" }));
+      if (idx === 0) row.append(el("span", { class: "chip chip-newest", text: "Newest" }));
       const when = tsSpan("stg-name mono", sn.time);
       // The binlog coordinates are for whoever debugs a copy, not for the
       // list: they ride as the tooltip of the time.
@@ -8466,7 +8474,7 @@ function baselinesPanel(b, servers, opts) {
       row.append(el("span", { class: "stg-rel", text: formatAge(sn.age_hours) + " ago" }));
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");
-        row.append(el("span", { class: "tag-pill stg-going", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, never a table's only copy." }));
+        row.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, never a table's only copy." }));
       }
       // With skipped views the row says both counts (#1879), whether or not
       // the table count varies: the views are what the row is there to show.
@@ -8786,7 +8794,9 @@ function snapshotLockKey(lock) {
 function snapshotLockPill(lock) {
   const entry = SNAPSHOT_LOCK[snapshotLockKey(lock)];
   if (!entry) return null;
-  return el("span", { class: "tag-pill snap-lock snap-lock-" + snapshotLockKey(lock), title: entry[1], text: entry[0] });
+  // A chip of the status family (#1950): read with no locks is a warning,
+  // not recorded and not checked are unknowns.
+  return el("span", { class: "chip snap-lock " + (snapshotLockKey(lock) === "torn" ? "chip-warn" : "chip-unknown"), title: entry[1], text: entry[0] });
 }
 
 // snapshotLockLine is the detail's own line. A snapshot whose files were not
@@ -9233,6 +9243,42 @@ function choicePills(choices, value, label, onChange) {
 // with every backup feature off still has the schedule in its file, the API
 // reports it as not runnable with the reason, and hiding the card there
 // would hide exactly the message this feature exists to show.
+// momentField is the "as of" field of the restore card and the .sql lane:
+// the date-time component (the mono field with its calendar button, the
+// same one the Events filters use), never a bare text input. Typing still
+// works; the picker only fills the same text. Returns { wrap, input }.
+function momentField(value) {
+  const input = el("input", { class: "input dt-input", type: "text", spellcheck: "false",
+    placeholder: "YYYY-MM-DD HH:MM:SS", "aria-label": "Moment (UTC)" });
+  input.value = value || "";
+  const trigger = el("button", { class: "btn btn-icon btn-sm btn-ghost dt-trigger", type: "button", "aria-label": "Open calendar" },
+    icon("calendar", "dt-trigger-ic"));
+  trigger.addEventListener("click", (e) => { e.preventDefault(); toggleDatePicker(input, trigger); });
+  return { wrap: el("div", { class: "dt-wrap bk-moment" }, input, trigger), input, trigger };
+}
+
+// scheduleChainDraw draws how the copy moves (#1950): one read of the
+// database, then updates built from the recorded changes (each a pair of
+// change files), and the next link dashed: a pair when the next run is an
+// update, a tile when it is a full read. It replaced the healthy "Next run
+// will ..." sentence and carries it, reason included, as its text
+// alternative and tooltip. The keep-shape drawing's own tiles (ks-), so the
+// page speaks one drawing language. A next run that is a WARNING (every run
+// reads the database in full) is never drawn: it stays a red sentence.
+function scheduleChainDraw(sch, alt) {
+  const full = sch.next_method !== "refresh";
+  const box = el("div", { class: "ks-chain", role: "img", "aria-label": alt, title: alt });
+  const row = el("div", { class: "ks-row" });
+  const pair = (cls) => el("span", { class: "ks-pair" + (cls || "") }, el("i"), el("i"));
+  row.append(el("span", { class: "ks-tile" }), pair(), pair(), pair());
+  row.append(full ? el("span", { class: "ks-tile ks-next" }) : pair(" ks-next"));
+  box.append(row);
+  box.append(el("div", { class: "ks-axis" },
+    el("span", { class: "ks-left", text: "a full read, then updates" }),
+    el("span", { class: "ks-right", text: "next: " + (full ? "full read" : "update") + (sch.next_run ? " " + flowHHMM(sch.next_run) : "") })));
+  return box;
+}
+
 function backupScheduleCard(cur, b) {
   if (!cur || !cur.id || cur.kind !== "registry") return null;
   if (!b || b.error) return null;
@@ -9328,9 +9374,13 @@ function backupScheduleCard(cur, b) {
   at.style.maxWidth = "90px";
   const atWrap = el("span", { class: "bk-sched-at" }, el("span", { class: "form-hint", text: "at" }), at, el("span", { class: "form-hint", text: "UTC" }));
   const syncAt = () => { atWrap.hidden = every.value !== "1d"; };
-  const every = choicePills(choices, saved, "Update the copy every", syncAt);
+  // Filled once the form is touched, like the server card's Save (#1950):
+  // at rest neither Save on this tab asks for the eye.
+  const touched = () => save.classList.add("btn-primary");
+  const every = choicePills(choices, saved, "Update the copy every", () => { syncAt(); touched(); });
   syncAt();
-  const save = el("button", { class: "btn btn-primary", type: "button", text: sch ? "Save" : "Turn on" });
+  const save = el("button", { class: "btn", type: "button", text: sch ? "Save" : "Turn on", "data-save": "schedule" });
+  at.addEventListener("input", touched);
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   save.onclick = () => saveBackupSchedule(cur.id, { every: every.value, at: at.value.trim(), full_every: sch && sch.full_every ? sch.full_every : "" }, save, msg);
@@ -9401,9 +9451,13 @@ function backupScheduleCard(cur, b) {
         alarmNote = "Every run reads your database in full.";
         everyRunCode = sch.next_method_why_code;
       }
-      body.append(el("p", { class: everyRun ? "form-msg err" : "form-hint", text:
-        "Next run " + how + (sch.next_method_why ? " (" + sch.next_method_why + ")." : ".") +
-        (everyRun && sessionMayConfigureServer() ? " " + BACKUP_WHY_REMEDY[sch.next_method_why_code] : "") }));
+      const nextLine = "Next run " + how + (sch.next_method_why ? " (" + sch.next_method_why + ")." : ".");
+      if (everyRun) {
+        body.append(el("p", { class: "form-msg err", text:
+          nextLine + (sessionMayConfigureServer() ? " " + BACKUP_WHY_REMEDY[sch.next_method_why_code] : "") }));
+      } else {
+        body.append(scheduleChainDraw(sch, nextLine));
+      }
     }
     if (sch.history_unavailable) {
       // Without the run history only what this daemon started since boot is
@@ -9639,14 +9693,13 @@ function backupRestoreCard(cur, b, restoreSt) {
   const body = el("div", { class: "bk-card-body" });
   body.append(el("p", { class: "form-hint", text:
     "Pick a past moment. DBTrail rebuilds every table as it was then and saves the result as a new snapshot on the Snapshots page. Your database is not touched." }));
-  const input = el("input", { class: "input", type: "text", spellcheck: "false",
-    placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
-  input.value = (usable[0] && usable[0].time) || "";
+  const moment = momentField((usable[0] && usable[0].time) || "");
+  const input = moment.input;
   const go = el("button", { class: "btn", type: "button", text: "Restore" });
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   go.onclick = () => startBackupRestore(cur.id, input.value.trim(), go, msg);
-  body.append(el("div", { class: "bk-restore-row" }, input, go), msg);
+  body.append(el("div", { class: "bk-restore-row" }, moment.wrap, go), msg);
   const elsewhere = backupElsewhereNote(b, usable, reads);
   if (elsewhere) body.append(elsewhere);
   if (rst && rst.state === "failed") {
@@ -9687,10 +9740,10 @@ function restoreOffCard(why, text) {
   card.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: "Restore to a moment" })));
   card.append(el("p", { class: "form-hint bk-card-state", text }));
-  const input = el("input", { class: "input", type: "text", placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
+  const moment = momentField("");
   const go = el("button", { class: "btn", type: "button", text: "Restore" });
-  input.disabled = go.disabled = true;
-  card.append(el("div", { class: "bk-restore-row" }, input, go));
+  moment.input.disabled = moment.trigger.disabled = go.disabled = true;
+  card.append(el("div", { class: "bk-restore-row" }, moment.wrap, go));
   return card;
 }
 
@@ -9874,7 +9927,7 @@ function backupLane(title, files, tail, ico) {
   const n = files.length;
   const word = (LANE_COUNT_WORD[n] || String(n)) + " download" + (n === 1 ? "" : "s");
   return el("div", { class: "bk-lane" },
-    el("div", { class: "bk-lane-head" }, ico ? icon(ico, "bk-lane-ico") : null, el("h3", { class: "bk-lane-t", text: title })),
+    el("div", { class: "stg-card-t" }, ico ? icon(ico, "stg-ico stg-ico-pink") : null, el("h3", { class: "bk-lane-t", text: title })),
     backupFilesShape(files),
     el("p", { class: "bk-lane-lead", text: word + tail }));
 }
@@ -10073,9 +10126,8 @@ function backupSQLLane(cur, b, sqlSt) {
   }
   if (mayCreate) body.append(el("p", { class: "form-hint", text:
     "Plain SQL in mydumper format. Your database is never touched." }));
-  const input = el("input", { class: "input", type: "text", spellcheck: "false",
-    placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
-  input.value = (usable[0] && usable[0].time) || "";
+  const moment = momentField((usable[0] && usable[0].time) || "");
+  const input = moment.input;
   const go = el("button", { class: "btn", type: "button", text: "Build" });
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
@@ -10086,7 +10138,7 @@ function backupSQLLane(cur, b, sqlSt) {
   // backupTakeAway says why the button is off.
   if (sqlSt && sqlSt.error) go.disabled = true;
   if (mayCreate) {
-    body.append(el("div", { class: "bk-restore-row" }, input, go), msg);
+    body.append(el("div", { class: "bk-restore-row" }, moment.wrap, go), msg);
     if (b.kind === "dir") {
       const elsewhere = backupElsewhereNote(b, usable, reads);
       if (elsewhere) body.append(elsewhere);
@@ -10665,6 +10717,25 @@ const VFY_MODE_LABEL = { "baseline-anchored": "compared two saved snapshots", "l
 // --verify-interval loop writes the same store. On a fetch error (including
 // the 403 feature-off case) the box keeps whatever it already shows; the
 // trigger UI above explains how to enable verification.
+// vfyTally draws a past run's counts as chips of the status family (#1950):
+// only the verdicts that happened, so the row fits one line and a failure is
+// the one red thing on it. The full counts stay in the tooltip.
+function vfyTally(r) {
+  const s = r.summary || {};
+  const n = (x) => Number(x || 0);
+  const unproven = n(s.inconclusive) - n(s.inconclusive_nothing_to_check);
+  const box = el("span", { class: "vfy-tally", title: vfySummaryText(Object.assign({ match: 0, mismatch: 0, inconclusive: 0, error: 0 }, s)) });
+  let drawn = 0;
+  [[n(s.match), "ok", "match"], [n(s.mismatch), "fail", "mismatch"],
+    [n(s.inconclusive), unproven > 0 ? "warn" : "unknown", "inconclusive"], [n(s.error), "error", "error"]].forEach(([count, tone, word]) => {
+    if (!count) return;
+    drawn++;
+    box.append(el("span", { class: "chip chip-sm chip-" + tone, text: count + " " + word }));
+  });
+  if (!drawn) box.append(el("span", { class: "stg-age", text: r.verdict === "no_predecessor" ? "nothing to compare" : "no table was compared" }));
+  return box;
+}
+
 async function loadVerifyHistory(id, box, verdictTile) {
   // The two tiles that say the verdict: the Checks card's (handed in on
   // paint, else the one on screen: a run that just ended refreshes the
@@ -10702,17 +10773,16 @@ async function loadVerifyHistory(id, box, verdictTile) {
       el("span", { class: "stg-age", text: vfyHeadline(latest) })));
   }
   recs.slice(0, 8).forEach((r, i) => {
-    const s = r.summary || {};
-    let outcome;
+    let outcome = "";
     if (r.state === "skipped") outcome = "skipped: " + (r.skip_reason || "");
     else if (r.state === "failed") outcome = "failed: " + (r.last_error || "unknown error");
-    else outcome = vfySummaryText(s);
     const when = utcLabel(r.finished_at || r.since || "");
     // Expandable (#1417): the per-table detail is ALREADY in this record —
     // VerifyRunRecord embeds VerifyStatus, results included — the old
     // renderer just dropped it on the floor. Disclosure, not navigation:
     // the history is short and comparing runs side by side is the point.
     const detailID = "vfy-hist-" + i;
+    const mode = (VFY_MODE_LABEL[r.mode] || r.mode || "") + (r.trigger === "scheduled" ? " (scheduled)" : "");
     const row = el("button", { class: "stg-row vfy-histrow", type: "button", "aria-expanded": "false", "aria-controls": detailID });
     // A mark before the date says the outcome without reading the counts:
     // a tick, a cross, or a dash for a run that proved nothing or was
@@ -10723,8 +10793,8 @@ async function loadVerifyHistory(id, box, verdictTile) {
       el("span", { class: "vfy-hmark " + mark, text: mark === "ok" ? "\u2713" : mark === "bad" ? "\u2715" : "\u2013" }),
       icon("caret", "ev-caret"),
       el("span", { class: "stg-name mono", text: when }),
-      el("span", { text: (VFY_MODE_LABEL[r.mode] || r.mode || "") + (r.trigger === "scheduled" ? " (scheduled)" : "") }),
-      el("span", { class: "stg-age", text: outcome }));
+      el("span", { class: "vfy-hmode", text: mode, title: mode }),
+      outcome ? el("span", { class: "stg-age vfy-hout", text: outcome, title: outcome }) : vfyTally(r));
     const detail = el("div", { class: "vfy-histdetail", id: detailID, hidden: "" });
     let rendered = false;
     row.onclick = () => {
@@ -10827,6 +10897,38 @@ function vfyCountsText(r) {
   return n(r.events_checked) + " changes · " + n(r.chains_checked) + " rows";
 }
 
+// vfyVerdictDrawing draws what a finished check found as the four verdicts a
+// table can get, each with how many tables got it (#1950): the same four the
+// docs draw (match, mismatch, inconclusive, error). It replaced the counts
+// line and the verdict sentence, and carries that sentence as its text
+// alternative, so a screen reader hears the answer the drawing shows. A
+// verdict nobody got is drawn dim, so the eye lands on the ones that
+// happened; the inconclusive tile is a warning only for the part the check
+// could not prove, never for the tables that had nothing to check.
+function vfyVerdictDrawing(s) {
+  s = s || {};
+  const n = (x) => Number(x || 0);
+  const benign = n(s.inconclusive_nothing_to_check);
+  const unproven = n(s.inconclusive) - benign;
+  const incNote = benign && unproven > 0 ? benign + " nothing to check, " + unproven + " not proven"
+    : benign ? "nothing to check, that is normal"
+    : unproven > 0 ? "not proven, worth a look" : "not proven either way";
+  const tiles = [
+    ["match", n(s.match), "ok", "Match", "proven"],
+    ["mismatch", n(s.mismatch), "bad", "Mismatch", n(s.mismatch) ? "read these tables first" : "would not restore"],
+    ["inconclusive", n(s.inconclusive), unproven > 0 ? "warn" : "none", "Inconclusive", incNote],
+    ["error", n(s.error), "bad", "Error", "the check failed"],
+  ];
+  const fig = el("div", { class: "vfy-verdicts", role: "img", "aria-label": vfyVerdictSentence(Object.assign({ match: 0, mismatch: 0, inconclusive: 0, error: 0 }, s)) });
+  tiles.forEach(([key, count, tone, label, note]) => {
+    fig.append(el("div", { class: "vfy-vt vfy-vt-" + key + " " + (count ? tone : "zero") },
+      el("span", { class: "vfy-vt-n", text: String(count) }),
+      el("span", { class: "vfy-vt-k", text: label }),
+      el("span", { class: "vfy-vt-c", text: note })));
+  });
+  return fig;
+}
+
 // renderVerifyResults draws one run's summary + per-table rows into
 // container. Used by the live poll loop (results appear as they land) AND by
 // an expanded history record (#1417) — a VerifyRunRecord embeds VerifyStatus,
@@ -10887,7 +10989,9 @@ function renderVerifyResults(container, status, id, opts) {
     // has not finished (sharpest for inconclusive, #1416).
     summaryRow.append(el("span", { class: "stg-age", text: done + " table(s) checked so far" }));
     if (done) summaryRow.append(el("span", { class: "stg-age vfy-sofar", text: vfySummaryText(s) + " (so far)" }));
-  } else if (done) {
+  } else if (done && status.state !== "succeeded") {
+    // A run that failed part-way keeps its tally in words; a finished one
+    // draws it (below).
     summaryRow.append(el("span", { class: "stg-age", text: vfySummaryText(s) }));
   }
   container.append(summaryRow);
@@ -10896,12 +11000,11 @@ function renderVerifyResults(container, status, id, opts) {
     // CSS-animated behind prefers-reduced-motion, like every other motion here.
     container.append(el("div", { class: "vfy-progress" }, el("span", { class: "vfy-progress-bar" })));
   }
-  // The verdict sentence (#1416): the answer to the operator's question in
-  // words, so it does not have to be derived from 28 rows. Only on a FINISHED
-  // run — a partial tally must not be read as a verdict (#1420).
-  if (status.state === "succeeded") {
-    container.append(el("p", { class: "form-hint vfy-verdict-sentence", text: vfyVerdictSentence(s) }));
-  }
+  // The verdict (#1416), drawn since #1950: the answer to the operator's
+  // question at a glance, so it does not have to be derived from 28 rows.
+  // Only on a FINISHED run: a partial tally must not be read as a verdict
+  // (#1420).
+  if (status.state === "succeeded") container.append(vfyVerdictDrawing(s));
   const comparedTo = vfyComparedToLine(status.results);
   if (comparedTo) container.append(el("p", { class: "form-hint vfy-compared-to", text: comparedTo }));
   if (status.note) container.append(el("p", { class: "form-hint", text: status.note }));

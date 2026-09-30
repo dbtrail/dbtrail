@@ -143,7 +143,10 @@ const draw = (caps, sched) => {
   const st = byClass(card, "bk-card-state")[0];
   return { state: st.textContent, alarm: String(st.className).includes("alarm"),
     red: byClass(card, "form-msg err").map((n) => flat(n).join("")).filter((s) => s),
-    hints: byClass(card, "form-hint").map((n) => flat(n).join("")),
+    // The healthy next-run sentence is a drawing since #1950 (the chain); its
+    // words, reason included, are the drawing's text alternative, read here
+    // beside the hints so the assertions below hold on the same sentence.
+    hints: byClass(card, "form-hint").map((n) => flat(n).join("")).concat(byClass(card, "ks-chain").map((n) => n.attrs["aria-label"])),
     full: (inputs(card).find((i) => i.attrs["aria-label"] === "Full read every") || {}).value };
 };
 console.log(JSON.stringify({

@@ -65,6 +65,9 @@ func TestS3OnlyBackupWarning_1659(t *testing.T) {
 var capsCache = {};
 const lines = [];
 const el = (tag, o) => ({ class: o.class, text: o.text });
+// The healthy next run is a drawing since #1950; its words are the drawing's
+// text alternative, kept here as the line so the copy checks still read them.
+const scheduleChainDraw = (sch, alt) => ({ class: "ks-chain", text: alt });
 function nextRun(sch) {
   const body = { append: (n) => lines.push(n) };
   let alarm = false, everyRunCode = "";
@@ -165,8 +168,8 @@ console.log(JSON.stringify(out));
 	if got.Lines[0].Class != "form-msg err" || !strings.Contains(got.Lines[0].Text, "Set a Local folder for this server") {
 		t.Errorf("no Snapshot dir: not a red line naming the setting: %+v", got.Lines[0])
 	}
-	if got.Lines[1].Class != "form-hint" || got.Lines[2].Class != "form-hint" || got.Lines[4].Class != "form-hint" || got.Lines[5].Class != "form-hint" {
-		t.Errorf("a first snapshot or an update is not a hint: %+v", got.Lines)
+	if got.Lines[1].Class != "ks-chain" || got.Lines[2].Class != "ks-chain" || got.Lines[4].Class != "ks-chain" || got.Lines[5].Class != "ks-chain" {
+		t.Errorf("a first snapshot or an update is not the quiet drawing: %+v", got.Lines)
 	}
 	if got.Lines[3].Class != "form-msg err" || !strings.Contains(got.Lines[3].Text, "Set an index connection") {
 		t.Errorf("no index connection: not a red line naming the setting: %+v", got.Lines[3])

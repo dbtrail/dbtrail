@@ -561,7 +561,7 @@ export async function runSaveScenes(ctx) {
       await page.waitForSelector('.bks-server input[name="baseline_dir"]', { timeout: 15000 });
       // A relative folder is refused by the server, in its words.
       await page.fill('.bks-server input[name="baseline_dir"]', "relative/snaps");
-      await page.click(".bks-server .stg-cardfoot .btn-primary");
+      await page.click('.bks-server .stg-cardfoot [data-save="location"]');
       const refused = await until(() => page.evaluate(() => {
         const m = Array.from(document.querySelectorAll(".bks-server > p.form-msg.err")).find((p) => !p.hidden && p.textContent);
         return m ? m.textContent : "";
@@ -577,7 +577,7 @@ export async function runSaveScenes(ctx) {
       const want = tmpDir + "/e2e-save-loc/";
       mkdirSync(want, { recursive: true });
       await page.fill('.bks-server input[name="baseline_dir"]', "  " + want + "  ");
-      await page.click(".bks-server .stg-cardfoot .btn-primary");
+      await page.click('.bks-server .stg-cardfoot [data-save="location"]');
       own = await until(async () => {
         st = await readAs(page, "/api/backup-settings");
         const o = st.body && (st.body.servers || []).find((s) => s.id === srvId);
@@ -600,12 +600,19 @@ export async function runSaveScenes(ctx) {
       if (!srvId) throw new Error("no server from the server-form scene");
       await page.evaluate(async (id) => { await switchServer(id); navigate("snapshots"); }, srvId);
       await openSnapSettings(page);
-      await page.waitForSelector(".bk-schedule .bk-restore-row .btn-primary", { timeout: 15000 });
+      // The Saves on this tab are found by their data-save hook, not by
+      // .btn-primary: since #1950 a Save is filled only while its form is
+      // being changed, so at rest the schedule's button is a plain one.
+      const SAVE = '.bk-schedule .bk-restore-row [data-save="schedule"]';
+      await page.waitForSelector(SAVE, { timeout: 15000 });
+      const atRest = await page.evaluate((sel) => document.querySelector(sel).classList.contains("btn-primary"), SAVE);
       // A time of day the server cannot read: refused in its words, nothing
       // stored.
       await page.click(".bk-schedule .sch-pill[data-value='1d']");
       await page.fill(".bk-schedule input[aria-label='At (UTC)']", "25:99");
-      await page.click(".bk-schedule .bk-restore-row .btn-primary");
+      const changed = await page.evaluate((sel) => document.querySelector(sel).classList.contains("btn-primary"), SAVE);
+      check("schedule", "the Save is filled only once its form is changed", !atRest && changed, JSON.stringify({ atRest, changed }));
+      await page.click(SAVE);
       const refusal = await until(() => page.evaluate(() => {
         const m = document.querySelector(".bk-schedule p.form-msg.err[data-sched-edit]");
         return m && !m.hidden ? m.textContent : "";
@@ -618,7 +625,7 @@ export async function runSaveScenes(ctx) {
       const at = farHour();
       await page.click(".bk-schedule .sch-pill[data-value='1d']");
       await page.fill(".bk-schedule input[aria-label='At (UTC)']", " " + at + " ");
-      await page.click(".bk-schedule .bk-restore-row .btn-primary");
+      await page.click(SAVE);
       const saved = await until(async () => {
         const r = await readAs(page, "/api/baselines", srvId);
         return r.body && r.body.schedule ? r.body.schedule : null;

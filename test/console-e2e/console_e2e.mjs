@@ -2943,7 +2943,9 @@ try {
     const input = card.querySelector("input");
     out.prefilled = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(input.value);
     input.value = "not-a-time";
-    card.querySelector("button").click();
+    // the first button is the date-time field's calendar since #1950; the
+    // submit is the one with words on it
+    Array.from(card.querySelectorAll("button")).find((b) => b.textContent.trim()).click();
     for (let i = 0; i < 40; i++) {
       const msg = card.querySelector(".form-msg.err");
       if (msg && !msg.hidden && msg.textContent) { out.inlineErr = msg.textContent; break; }
@@ -3644,7 +3646,8 @@ try {
       liveChip: !!tmp.querySelector(".chip-live"),
       progress: !!tmp.querySelector(".vfy-progress"),
       soFar: /so far/.test(tmp.textContent),
-      noVerdict: !tmp.querySelector(".vfy-verdict-sentence"),
+      // the verdict is the four-tile drawing since #1950, not a sentence
+      noVerdict: !tmp.querySelector(".vfy-verdicts"),
       ageChipDistinct: !tmp.querySelector(".chip-age"),
     };
     tmp.remove();
@@ -3714,10 +3717,12 @@ try {
     return c && !/RUNNING/.test(c.textContent);
   }, undefined, { timeout: 60000 });
   const vfyDone = await page.evaluate(() => ({
-    verdictSentence: (document.querySelector(".vfy-results .form-hint") || {}).textContent || "",
+    // #1950: the verdict is drawn; the sentence it replaced is its text
+    // alternative, and the counts are read off its tiles.
+    verdictSentence: (document.querySelector(".vfy-results .vfy-verdicts") || { getAttribute: () => "" }).getAttribute("aria-label") || "",
     rows: document.querySelectorAll(".vfy-results .vfy-row").length,
     chip: (document.querySelector(".vfy-results .vfy-summary .chip") || {}).textContent || "",
-    counts: (document.querySelector(".vfy-results .vfy-summary .stg-age:last-child") || {}).textContent || "",
+    counts: ((document.querySelector(".vfy-results .vfy-vt-match .vfy-vt-n") || {}).textContent || "") + " match",
   }));
   const provedSome = /^[1-9]\d* match/.test(vfyDone.counts);
   (vfyDone.rows > 0 && vfyDone.verdictSentence.length > 0 && vfyDone.chip !== "FAILED"
