@@ -41,9 +41,24 @@ type ConnectDraft struct {
 	SourceDatabase    string `yaml:"source_database,omitempty" json:"source_database"`
 	SourceSlot        string `yaml:"source_slot,omitempty" json:"source_slot"`
 	SourcePublication string `yaml:"source_publication,omitempty" json:"source_publication"`
+	// Identified is what step 1 of the Connect screen found at SourceHost and
+	// SourcePort (#1953), kept so a reload in step 2 or 3 comes back there
+	// without probing the server again: a probe may count against DBTrail's
+	// address on the server, so a page load must never cause one.
+	Identified *DraftIdentity `yaml:"identified,omitempty" json:"identified,omitempty"`
 	// SavedAt is when this draft was last written (RFC3339), so a screen can
 	// say how old it is before offering to restore it.
 	SavedAt string `yaml:"saved_at,omitempty" json:"saved_at"`
+}
+
+// DraftIdentity is the part of doctor.Identification the Connect screen
+// needs to draw step 1's answer and step 2's block again.
+type DraftIdentity struct {
+	Version     string `yaml:"version,omitempty" json:"version,omitempty"`
+	Flavor      string `yaml:"flavor,omitempty" json:"flavor,omitempty"`
+	Managed     string `yaml:"managed,omitempty" json:"managed,omitempty"`
+	Proxy       string `yaml:"proxy,omitempty" json:"proxy,omitempty"`
+	ServerError int    `yaml:"server_error,omitempty" json:"server_error,omitempty"`
 }
 
 // DraftStore holds the one Connect draft. One, not a set: two people

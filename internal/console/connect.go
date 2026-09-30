@@ -228,6 +228,13 @@ func (s *Server) saveConnectDraft(req serverRequest, typedName string) {
 		SourceSlot:        strings.TrimSpace(req.SourceSlot),
 		SourcePublication: strings.TrimSpace(req.SourcePublication),
 	}
+	// The check carries no identification; the draft it replaces may. Kept
+	// while the address is the same one step 1 identified, or a reload
+	// during the checks would come back without it.
+	if prev, ok, err := s.drafts.Load(); err == nil && ok && prev.Identified != nil &&
+		prev.SourceHost == d.SourceHost && prev.SourcePort == d.SourcePort {
+		d.Identified = prev.Identified
+	}
 	if err := s.drafts.Save(d); err != nil {
 		slog.Warn("connect: the form could not be saved, so a reload will lose it", "error", err.Error())
 	}

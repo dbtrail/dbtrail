@@ -399,6 +399,7 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 			Subjects:    c.Subjects,
 			Statements:  c.Statements,
 			Optional:    c.Optional,
+			Light:       doctor.LightFor(c.Name, c.Kind),
 		}
 		// Per-check trace so `--log-level debug` shows the full preflight from
 		// the host, not just the pass/fail tally returned to the browser.
@@ -414,6 +415,7 @@ func (m *monitorSupervisor) doctor(ctx context.Context, e console.ServerEntry, o
 	// registry to compare against.
 	if c := m.replicaOverlapCheck(ctx, e); c != nil {
 		c.Detail = config.ScrubDSNText(c.Detail, e.SourceDSN, e.DSN)
+		c.Light = doctor.LightOther
 		out.Checks = append(out.Checks, *c)
 		tallyCheck(out, c.Status)
 	}

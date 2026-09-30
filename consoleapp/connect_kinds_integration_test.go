@@ -57,6 +57,16 @@ func TestIntegrationDoctorUnsaved_namesTablesWithoutAKey(t *testing.T) {
 	if want := []string{"ALTER TABLE `" + name + "`.`loose` ADD COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;"}; !slices.Equal(c.Statements, want) {
 		t.Errorf("statements = %v, want %v", c.Statements, want)
 	}
+	// Every check reaches the Connect screen with the light it is drawn
+	// under (#1953), the refused table under "every table has a key".
+	if c.Light != doctor.LightKeys {
+		t.Errorf("light = %q, want %q", c.Light, doctor.LightKeys)
+	}
+	for _, chk := range r.Checks {
+		if !slices.Contains(doctor.Lights(), chk.Light) {
+			t.Errorf("check %q reached the screen with light %q", chk.Name, chk.Light)
+		}
+	}
 }
 
 func TestIntegrationDoctorUnsaved_provesTheLoopbackCase(t *testing.T) {
