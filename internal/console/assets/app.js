@@ -14508,8 +14508,9 @@ function readConnectStash() {
   } catch (_) { return null; }
 }
 
-// connectNotice is the answer to a check: the findings on top in plain words,
-// every check one click away.
+// connectNotice is the answer to a check that got past every light: capture
+// started (with what to look at when there is time), or it did not start.
+// The findings on top in plain words, every check one click away.
 function connectNotice(res) {
   const checks = (res.doctor && res.doctor.checks) || [];
   const count = (k, one, many) => k + " " + (k === 1 ? one : many);
@@ -14537,11 +14538,9 @@ function connectNotice(res) {
           : "Nothing was saved. Press Check again to try again."],
       content: [opt, all].filter(Boolean), button: "Back to the form" };
   }
-  const fails = checks.filter((c) => c.status === "fail");
-  const shown = fails.length ? fails : checks;
-  return { tone: "err", title: "Capture did not start", summary: "Capture did not start: " + count(fails.length, "thing", "things") + " to fix",
-    lines: [(fails.length === 1 ? "Fix this" : "Fix these") + ", then press Check again. Nothing was saved."],
-    content: [connectFindings(shown), opt, all].filter(Boolean), button: "Back to the form" };
+  // A check that failed is drawn as the Connect screen's lights (#1953) and
+  // checked again by itself; it is never a notice.
+  return null;
 }
 
 // codeOf returns the code blocks of a check's own fix, joined. The fix doctor
@@ -14599,8 +14598,8 @@ function connectFindingParts(c) {
       const byHand = subjects.filter((_, i) => !statements[i]);
       const pk = c.kind === "no_primary_key";
       return {
-        text: pk ? "DBTrail cannot capture a table without a primary key." + (code ? " Run this on the server to add one, then check again:" : "")
-          : "DBTrail captures InnoDB tables only." + (code ? " Run this on the server at a quiet moment, since it rewrites each table, then check again:" : ""),
+        text: pk ? "DBTrail cannot capture a table without a primary key." + (code ? " Run this on the server to add one:" : "")
+          : "DBTrail captures InnoDB tables only." + (code ? " Run this on the server at a quiet moment, since it rewrites each table:" : ""),
         code,
         note: byHand.length ? (pk ? "Add a primary key by hand to: " : "Convert by hand: ") + byHand.join(", ") : "",
       };
