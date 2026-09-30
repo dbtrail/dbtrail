@@ -12322,17 +12322,45 @@ async function renderAccessProfiles() {
   }
 }
 
+// accessHead: the page head, with the one line the drawing cannot say (#1950).
 function accessProfilesHead() {
-  const sub = el("p", { class: "page-sub" },
-    "Decide who sees what. Label tables and columns with flags, group people into profiles, and deny a profile the flags it must not see. ",
-    "Queries run under that profile then skip those tables and blank those columns. ",
-    "These are the same settings the command line manages (CLI: bintrail flag, bintrail profile, bintrail access), stored in this server's index.");
+  const sub = el("p", { class: "page-sub", text: "Decide who sees what. The same settings as the command line (CLI: bintrail flag, profile, access), stored in this server's index." });
   return pageHead("Access profiles", sub);
+}
+
+// accessDrawing draws how the three lists work together (#1950): a flag on a
+// column, a profile, a deny rule, and what a query under that profile sees
+// (the column blanked). It replaced the paragraph that said so. Fed by the
+// first deny rule whose flag is on a table; anything short of that (no deny
+// rule, or a rule whose flag labels nothing yet) is drawn as an EXAMPLE, from
+// the placeholders the forms show: dimmed dashed tiles, "For example," on the
+// first label and in the text alternative, so example data never reads as a
+// denial that exists. Built with el().
+function accessDrawing(doc) {
+  const rules = (doc && doc.rules) || [], flags = (doc && doc.flags) || [];
+  const denies = rules.filter((x) => x.permission === "deny");
+  const r = denies.find((x) => flags.some((y) => y.flag === x.flag)) || null;
+  const f = r ? flags.find((x) => x.flag === r.flag) : null;
+  const example = !f;
+  const flag = example ? "pii" : r.flag, profile = example ? "marketing" : r.profile;
+  const where = example ? "shop.customers" : f.schema + "." + f.table, col = example ? "email" : (f.column || "");
+  const step = (k, body) => el("div", { class: "ap-step" }, el("span", { class: "ap-step-k", text: k }), body);
+  const arrow = () => el("span", { class: "ap-arrow", "aria-hidden": "true" });
+  const fig = el("div", { class: "ap-draw" + (example ? " ap-draw-example" : "") },
+    step(example ? "For example, flag" : "flag", el("span", { class: "ap-cell" }, el("span", { class: "mono", text: where + (col ? "." + col : "") }), el("span", { class: "chip chip-tt", text: flag }))),
+    arrow(),
+    step("profile", el("span", { class: "ap-cell" }, el("b", { text: profile }), el("span", { class: "chip chip-fail", text: "DENY " + flag }))),
+    arrow(),
+    step("a query sees", el("span", { class: "ap-cell" }, el("span", { class: "mono", text: col ? col + ": " : where }), el("span", { class: "ap-blank", text: col ? "blank" : "hidden" }))));
+  fig.setAttribute("role", "img");
+  fig.setAttribute("aria-label", (example ? "For example: a flag " : "A flag ") + flag + " on " + where + (col ? " column " + col : "") + "; the profile " + profile + " denies " + flag + "; a query run under " + profile + (col ? " sees that column blanked." : " does not see that table."));
+  return fig;
 }
 
 function buildAccessProfiles(doc) {
   const v = VIEW(); clear(v);
   v.append(accessProfilesHead());
+  v.append(accessDrawing(doc));
   const stack = el("div", { class: "ap-stack", id: "ap-stack" });
   stack.append(accessFlagsPanel(doc));
   stack.append(accessProfilesPanel(doc));
@@ -12380,16 +12408,31 @@ function accessInput(name, placeholder, opts) {
 
 // accessPanel is the shared frame: a titled panel with a count, a list of
 // rows (or an empty line), an add form and a one-line hint.
+// ACCESS_EMPTY_ART: an empty list, three dashed rows (static).
+const ACCESS_EMPTY_ART = `<svg viewBox="0 0 120 40" aria-hidden="true"><rect x="2" y="2" width="116" height="10" rx="5" fill="none" stroke="var(--ink-4)" stroke-dasharray="4 3"/><rect x="2" y="15" width="116" height="10" rx="5" fill="none" stroke="var(--line)" stroke-dasharray="4 3"/><rect x="2" y="28" width="116" height="10" rx="5" fill="none" stroke="var(--line)" stroke-dasharray="4 3"/></svg>`;
+
 function accessPanel(id, title, count, rows, emptyText, form, hint) {
   const panel = el("section", { class: "ov-panel", id });
   panel.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: title }),
     el("span", { class: "chip chip-age", text: String(count) })));
   const list = el("div", { class: "stg-list" });
-  if (!rows.length) list.append(el("div", { class: "ev-empty ap-empty", text: emptyText }));
+  if (!rows.length) {
+    list.append(el("div", { class: "empty ev-empty ap-empty" },
+      el("div", { class: "empty-art", "aria-hidden": "true" }, svgEl(ACCESS_EMPTY_ART)),
+      el("p", { text: emptyText })));
+  }
   rows.forEach((r) => list.append(r));
   panel.append(list);
-  if (form) panel.append(form);
+  if (form) {
+    // Plain at rest; the form being filled gets the filled button (#1950),
+    // never a disabled one.
+    form.addEventListener("input", () => {
+      const b = form.querySelector('button[type="submit"]');
+      if (b && !b.disabled) b.classList.add("btn-primary");
+    });
+    panel.append(form);
+  }
   panel.append(el("p", { class: "form-hint stg-foot", text: hint }));
   return panel;
 }
@@ -12570,6 +12613,9 @@ function cnFine(label, ...kids) {
 // mcpTokenCard (#1052): generate, rotate, and revoke the managed MCP token
 // without leaving the UI. The token value renders exactly once — right after
 // generation — and is otherwise represented only by its creation date.
+// TOKEN_EMPTY_ART: a key with an empty dashed slot beside it (static).
+const TOKEN_EMPTY_ART = `<svg viewBox="0 0 120 36" aria-hidden="true"><circle cx="16" cy="18" r="9" fill="none" stroke="var(--ink-3)" stroke-width="2"/><path d="M25 18h30M47 18v7M40 18v5" stroke="var(--ink-3)" stroke-width="2"/><rect x="66" y="8" width="50" height="20" rx="6" fill="none" stroke="var(--ink-4)" stroke-width="1.5" stroke-dasharray="4 3"/></svg>`;
+
 function mcpTokenCard(tok, minted) {
   const card = cnCard(1, "Create a token");
   // The one-time plaintext renders UNCONDITIONALLY: a failed status fetch
@@ -12602,9 +12648,13 @@ function mcpTokenCard(tok, minted) {
         el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Delete token", onclick: revokeMCPToken })));
     }
   } else if (!minted) {
+    // No token yet (#1950): a small key, and Generate token is the page's one
+    // filled button, unless a token set at startup already works, where a
+    // filled button would push people to replace a working one.
+    card.append(el("div", { class: "empty-art cn-key", "aria-hidden": "true" }, svgEl(TOKEN_EMPTY_ART)));
     card.append(el("p", { class: "stg-hint", text: "The token is Claude's password for DBTrail. It is shown only once, so copy it right away." }));
     card.append(el("div", { class: "cn-links" },
-      el("button", { class: "btn btn-sm", type: "button", text: "Generate token", onclick: () => mintMCPToken(false) })));
+      el("button", { class: "btn btn-sm" + (tok.static ? "" : " btn-primary"), type: "button", text: "Generate token", onclick: () => mintMCPToken(false) })));
   }
   if (tok.static) {
     card.append(cnFine("A token was set at startup, and it already works",
@@ -13318,6 +13368,10 @@ async function submitRotation(form, msg, cur) {
 let serversPhaseTimer = null;
 const serversPhaseInterval = 5000;
 
+// SERVERS_EMPTY_ART: a database with a dashed link to DBTrail, not made yet
+// (static, so svgEl is right here).
+const SERVERS_EMPTY_ART = `<svg viewBox="0 0 160 72" aria-hidden="true"><ellipse cx="40" cy="18" rx="24" ry="8" fill="var(--surface)" stroke="var(--ink-4)" stroke-width="1.5"/><path d="M16 18v34c0 4.4 10.7 8 24 8s24-3.6 24-8V18" fill="var(--surface)" stroke="var(--ink-4)" stroke-width="1.5"/><path d="M16 35c0 4.4 10.7 8 24 8s24-3.6 24-8" fill="none" stroke="var(--line)" stroke-width="1.5"/><path d="M72 38h30" stroke="var(--ink-4)" stroke-width="2" stroke-dasharray="4 4"/><rect x="108" y="20" width="44" height="36" rx="9" fill="none" stroke="var(--ink-4)" stroke-width="1.5" stroke-dasharray="4 3"/><path d="M130 31v14M123 38h14" stroke="var(--ink-3)" stroke-width="2"/></svg>`;
+
 async function refreshServersList() {
   const list = document.getElementById("servers-list");
   if (serversPhaseTimer) { clearTimeout(serversPhaseTimer); serversPhaseTimer = null; }
@@ -13326,7 +13380,13 @@ async function refreshServersList() {
   try { servers = await loadServers(); }
   catch (err) { renderError(list, err); return; }
   clear(list);
-  if (!servers.length) { list.append(el("div", { class: "ev-empty", text: "No servers yet. Add your first connection." })); return; }
+  if (!servers.length) {
+    // The .empty component with a small drawing (#1950), the same words.
+    list.append(el("div", { class: "empty ev-empty srv-empty" },
+      el("div", { class: "empty-art", "aria-hidden": "true" }, svgEl(SERVERS_EMPTY_ART)),
+      el("p", { text: "No servers yet. Add your first connection." })));
+    return;
+  }
   servers.forEach((s) => list.append(serverRow(s)));
   if (servers.some((s) => s.monitor_phase)) serversPhaseTimer = setTimeout(refreshServersList, serversPhaseInterval);
 }

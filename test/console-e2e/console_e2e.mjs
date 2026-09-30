@@ -1209,6 +1209,27 @@ try {
       ? ok("access profiles: fresh index renders three empty panels, Add rule disabled until a profile exists")
       : bad("access profiles: fresh index renders three empty panels, Add rule disabled until a profile exists", JSON.stringify(apEmpty));
 
+    // #1950: the drawing above the lists never shows example data as a denial
+    // that exists. The live empty page, plus the real function on fixtures:
+    // no rules, a real deny rule with its flag row, and a deny rule whose flag
+    // labels nothing yet (a real profile must not sit beside an invented table
+    // without the example marker).
+    const apDraw = await page.evaluate(() => {
+      const read = (n) => n ? { example: n.classList.contains("ap-draw-example"), label: n.getAttribute("aria-label") || "" } : null;
+      const deny = { profile: "p1", flag: "f1", permission: "deny" };
+      return {
+        live: read(document.querySelector(".view .ap-draw")),
+        none: read(accessDrawing({ flags: [], profiles: [], rules: [] })),
+        real: read(accessDrawing({ flags: [{ flag: "f1", schema: "s", table: "t", column: "c" }], profiles: [{ name: "p1" }], rules: [deny] })),
+        orphan: read(accessDrawing({ flags: [], profiles: [{ name: "p1" }], rules: [deny] })),
+      };
+    });
+    const isExample = (d) => !!d && d.example && /^For example:/.test(d.label);
+    (isExample(apDraw.live) && isExample(apDraw.none) && isExample(apDraw.orphan)
+      && apDraw.real && !apDraw.real.example && /^A flag f1 on s\.t column c/.test(apDraw.real.label))
+      ? ok("access profiles: the drawing marks example data as an example, and only a real deny rule on a flagged table reads as fact")
+      : bad("access profiles: the drawing marks example data as an example, and only a real deny rule on a flagged table reads as fact", JSON.stringify(apDraw));
+
     await page.fill('#ap-flag-form input[name="flag"]', "pii");
     await page.fill('#ap-flag-form input[name="schema"]', FIX);
     await page.fill('#ap-flag-form input[name="table"]', "customers");
