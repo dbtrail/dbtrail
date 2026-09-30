@@ -131,6 +131,9 @@ var apiRoutePerms = []routePerm{
 	// saved form is part of adding a server (it never holds the password,
 	// #1804), so reading it is a write-tier action, not a listing.
 	{"POST", "/api/servers/check", permForDraftRoutes},
+	// Step 1 of connecting (#1953): it dials an address the caller typed, so
+	// a read-only session must not have it (it would map the network).
+	{"POST", "/api/servers/identify", permForDraftRoutes},
 	{"GET", "/api/servers/draft", permForDraftRoutes},
 	{"PUT", "/api/servers/draft", permForDraftRoutes},
 	{"DELETE", "/api/servers/draft", permForDraftRoutes},

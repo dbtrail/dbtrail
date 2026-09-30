@@ -343,7 +343,11 @@ type Server struct {
 	verifyHistory *VerifyHistory
 	// drafts holds the one half-filled Connect form (#1803), beside the
 	// server registry. Always non-nil; it is in-memory when the registry is.
-	drafts          *DraftStore
+	drafts *DraftStore
+	// identify spaces out the step-1 server probes per address (#1953);
+	// identifyFn replaces the probe in tests (nil: the real greeting read).
+	identify        identifyThrottle
+	identifyFn      func(ctx context.Context, host, port string) (doctor.Identification, error)
 	baselineRestore BaselineRestorer
 	// backupSchedules: non-nil only on a watch daemon with a baseline
 	// supervisor (see Config.BackupSchedules).
@@ -771,6 +775,7 @@ func (s *Server) buildHandler() http.Handler {
 	// Connect (#1803): one call that checks the database and starts capturing,
 	// and the half-filled form kept while somebody goes to run the SQL on it.
 	api.HandleFunc("POST /api/servers/check", s.handleServersCheck)
+	api.HandleFunc("POST /api/servers/identify", s.handleServersIdentify)
 	api.HandleFunc("GET /api/servers/draft", s.handleConnectDraftGet)
 	api.HandleFunc("PUT /api/servers/draft", s.handleConnectDraftPut)
 	api.HandleFunc("DELETE /api/servers/draft", s.handleConnectDraftDelete)

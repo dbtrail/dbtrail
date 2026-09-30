@@ -35,9 +35,13 @@ func errorGreeting(code int, msg string) []byte {
 	return packet(0, append([]byte{0xff, byte(code), byte(code >> 8)}, msg...))
 }
 
-// fastProbe keeps the silent-server case from waiting the production budget.
+// fastProbe keeps the silent-server case from waiting the production budget,
+// and keeps the address-to-allow lookup off the network (it would resolve the
+// test's made-up names for real).
 func fastProbe(c *identifyConfig) {
 	c.readTimeout = 300 * time.Millisecond
+	c.localAddr = func(context.Context, string) string { return "" }
+	c.inContainer = func() bool { return false }
 }
 
 func identifyAt(t *testing.T, l *recordingListener, host string, opts ...func(*identifyConfig)) Identification {
@@ -251,6 +255,88 @@ func TestIdentify_theRequestDeadlineIsNotNoAnswer(t *testing.T) {
 	}
 }
 
+// When nothing answers, the probe names the address DBTrail sends from, the
+// one a firewall has to allow; inside a container it says it cannot know.
+func TestIdentify_noAnswerNamesTheAddressToAllow(t *testing.T) {
+	// The dialer's error carries the IP it was trying.
+	timeout := dialFailing(&net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 3306}, Err: os.ErrDeadlineExceeded})
+	for _, c := range []struct {
+		name          string
+		inContainer   bool
+		wantFrom      string
+		wantContainer bool
+	}{
+		{"on the machine", false, "10.0.3.7", false},
+		{"in a container", true, "", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := identify(t.Context(), "db.example.com", "3306", fastProbe, timeout, func(cfg *identifyConfig) {
+				cfg.inContainer = func() bool { return c.inContainer }
+				cfg.localAddr = func(_ context.Context, addr string) string {
+					// The literal IP the dial tried, never the name again.
+					if addr != "203.0.113.9:3306" {
+						t.Errorf("local address asked for %q", addr)
+					}
+					return "10.0.3.7"
+				}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.From != c.wantFrom || got.InContainer != c.wantContainer {
+				t.Errorf("got from %q in_container %v; want %q %v", got.From, got.InContainer, c.wantFrom, c.wantContainer)
+			}
+		})
+	}
+}
+
+// Without the IP the dial tried there is no address to name: looking the name
+// up again could land on another of its addresses.
+func TestIdentify_noAnswerWithoutTheDialedIPNamesNone(t *testing.T) {
+	got, err := identify(t.Context(), "db.example.com", "3306", fastProbe,
+		dialFailing(&net.OpError{Op: "dial", Err: os.ErrDeadlineExceeded}), func(cfg *identifyConfig) {
+			cfg.localAddr = func(context.Context, string) string {
+				t.Error("asked for a local address with no dialed IP")
+				return "10.0.3.7"
+			}
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != KindTimeout || got.From != "" {
+		t.Errorf("got kind %q from %q; want timeout and no address", got.Kind, got.From)
+	}
+}
+
+// Only a firewall needs the address: a refusal or a missing name does not.
+func TestIdentify_otherCausesNameNoAddress(t *testing.T) {
+	got, err := identify(t.Context(), "127.0.0.1", closedPort(t), fastProbe, func(cfg *identifyConfig) {
+		cfg.inContainer = func() bool { return false }
+		cfg.localAddr = func(context.Context, string) string { return "10.0.3.7" }
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.From != "" || got.InContainer {
+		t.Errorf("a refusal carried from %q in_container %v", got.From, got.InContainer)
+	}
+}
+
+// The real route lookup, against loopback: it sends nothing and names the
+// loopback address.
+func TestRouteLocalAddr_loopback(t *testing.T) {
+	if got := routeLocalAddr(t.Context(), "127.0.0.1:3306"); got != "127.0.0.1" {
+		t.Errorf("routeLocalAddr = %q, want 127.0.0.1", got)
+	}
+	if got := routeLocalAddr(t.Context(), "not an address"); got != "" {
+		t.Errorf("routeLocalAddr of garbage = %q, want empty", got)
+	}
+	// A name is never resolved here.
+	if got := routeLocalAddr(t.Context(), "localhost:3306"); got != "" {
+		t.Errorf("routeLocalAddr of a name = %q, want empty (no lookup)", got)
+	}
+}
+
 // localhost typed into a DBTrail that runs in a container is the container.
 // The existing loopback proof (#1803) looks for a greeting at the host's
 // address, sending nothing, and suggests it when one is there.
@@ -456,5 +542,26 @@ func TestIdentifyKinds(t *testing.T) {
 		if slices.Contains(Kinds(), k) {
 			t.Errorf("%q is in Kinds(); the setup screen does not draw it", k)
 		}
+	}
+}
+
+func TestTargetAddr_oneSpellingPerServer(t *testing.T) {
+	for _, c := range [][2]string{
+		{"db.example.com", "3306"},
+		{"DB.Example.COM", "3306"},
+		{"db.example.com.", ""},
+		{" db.example.com:3306 ", ""},
+		{"db.example.com:3306", "3306"},
+	} {
+		got, err := TargetAddr(c[0], c[1])
+		if err != nil || got != "db.example.com:3306" {
+			t.Errorf("TargetAddr(%q, %q) = %q, %v; want db.example.com:3306", c[0], c[1], got, err)
+		}
+	}
+	if got, _ := TargetAddr("[::1]", "3307"); got != "[::1]:3307" {
+		t.Errorf("TargetAddr of IPv6 = %q", got)
+	}
+	if _, err := TargetAddr("", "3306"); !errors.Is(err, ErrInvalidAddress) {
+		t.Errorf("empty host: %v", err)
 	}
 }

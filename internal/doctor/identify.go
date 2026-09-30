@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"syscall"
@@ -98,6 +99,17 @@ type Identification struct {
 	// Suggest is the address a MySQL server answered at, for
 	// KindLoopbackInContainer.
 	Suggest string `json:"suggest,omitempty"`
+	// From is, for KindTimeout, the address this machine sends from to reach
+	// Addr: the one a firewall or a security group has to let in. It is the
+	// local end of the route the system picks, read without sending a packet
+	// and without asking any outside service (DBTrail does not phone home).
+	// Across a NAT the server sees a different, public address, so a screen
+	// must say so. Empty when unknown.
+	From string `json:"from,omitempty"`
+	// InContainer is set, for KindTimeout, when DBTrail runs in a container:
+	// the local address is then the container's, which no firewall outside it
+	// sees, so From is left empty instead of naming the wrong address.
+	InContainer bool `json:"in_container,omitempty"`
 }
 
 // ErrInvalidAddress is returned for a host or port that is not an address,
@@ -123,6 +135,11 @@ type identifyConfig struct {
 	loopbackRetry func(host, port string) string
 	dialTimeout   time.Duration
 	readTimeout   time.Duration
+	// localAddr returns the local address the system would send from to
+	// reach ip (a literal address); inContainer reports whether this process
+	// runs in one.
+	localAddr   func(ctx context.Context, ip string) string
+	inContainer func() bool
 }
 
 // Identify probes host:port without logging in. loopbackRetry, when non-nil,
@@ -149,6 +166,8 @@ func identify(ctx context.Context, host, port string, opts ...func(*identifyConf
 		dial:        d.DialContext,
 		dialTimeout: identifyDialTimeout,
 		readTimeout: identifyReadTimeout,
+		localAddr:   routeLocalAddr,
+		inContainer: runsInContainer,
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -182,6 +201,16 @@ func identify(ctx context.Context, host, port string, opts ...func(*identifyConf
 		if alt != "" {
 			id.Kind = KindLoopbackInContainer
 			id.Suggest = alt
+		}
+		if id.Kind == KindTimeout {
+			if cfg.inContainer() {
+				id.InContainer = true
+			} else if ip := dialedIP(err); ip != "" {
+				id.From = cfg.localAddr(ctx, net.JoinHostPort(ip, port))
+			}
+			if ctx.Err() != nil {
+				return Identification{}, ctx.Err()
+			}
 		}
 		return id, nil
 	}
@@ -221,6 +250,61 @@ func identify(ctx context.Context, host, port string, opts ...func(*identifyConf
 	return id, nil
 }
 
+// dialedIP is the remote IP a failed dial was trying, from the error the
+// dialer returns, or "". A name with several addresses (round-robin DNS, IPv4
+// and IPv6) resolves to more than one, and the firewall to open is the one on
+// the path to the address that timed out, so the name is never looked up
+// again: without the literal IP there is no From.
+func dialedIP(err error) string {
+	var op *net.OpError
+	if !errors.As(err, &op) || op.Addr == nil {
+		return ""
+	}
+	host, _, splitErr := net.SplitHostPort(op.Addr.String())
+	if splitErr != nil {
+		return ""
+	}
+	if net.ParseIP(host) == nil {
+		return ""
+	}
+	return host
+}
+
+// routeLocalAddr returns the local IP the system would send from to reach
+// addr, a literal IP and port, or "". Connecting a UDP socket to a literal
+// address only picks the route: no packet leaves the machine, not even a DNS
+// query.
+func routeLocalAddr(ctx context.Context, addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err != nil || net.ParseIP(h) == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "udp", addr)
+	if err != nil {
+		return ""
+	}
+	defer c.Close()
+	if ua, ok := c.LocalAddr().(*net.UDPAddr); ok && ua.IP != nil && !ua.IP.IsUnspecified() {
+		return ua.IP.String()
+	}
+	return ""
+}
+
+// runsInContainer reports the usual signs of running in a container: the
+// marker files Docker and Podman create, or the variable Kubernetes sets. A
+// container without any of them reads as not one; From then names the
+// container's address, which is why a screen always adds the NAT caveat.
+func runsInContainer() bool {
+	for _, f := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(f); err == nil {
+			return true
+		}
+	}
+	return os.Getenv("KUBERNETES_SERVICE_HOST") != ""
+}
+
 // classifyDialError names why the TCP connect failed, or "". It looks through
 // every wrap, never at the message text. It differs from ClassifyConnectError
 // in one place, on purpose: a name the resolver says does not exist is
@@ -245,6 +329,19 @@ func classifyDialError(err error) string {
 		return KindTimeout
 	}
 	return ""
+}
+
+// TargetAddr is the host:port Identify would probe for what was typed, in
+// one spelling per server (host lower-cased): "DB.example.com" with port
+// 3306 and "db.example.com:3306" with no port are the same address. A caller
+// that spaces out probes per address keys on it, so a different spelling
+// cannot buy a second probe. ErrInvalidAddress as Identify.
+func TargetAddr(host, port string) (string, error) {
+	h, p, err := parseTarget(host, port)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(strings.TrimSuffix(strings.ToLower(h), "."), p), nil
 }
 
 // parseTarget trims and checks what was typed into the host and port fields.
