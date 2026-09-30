@@ -21,7 +21,7 @@ it's the first section — the same four lines as the README.
 - An **index MySQL 8.0+** database for DBTrail's data (the Compose stack
   bundles one).
 - **Other sources:** besides MySQL, DBTrail can also capture from **MariaDB**
-  ([beta](./mariadb.md): 10.11+, with 10.11, 11.4, 11.8 and 12.3 tested in CI) and
+  ([10.11+](./mariadb.md), with 10.11, 11.4, 11.8 and 12.3 tested in CI) and
   **PostgreSQL** ([GA](./postgres.md) — 14+). Both are first-class sources in
   the web interface (**+ Add server** → pick the source type); PostgreSQL also
   ships a standalone `bintrail-pg` binary for headless/CLI deployments. Each has

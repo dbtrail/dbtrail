@@ -1,10 +1,10 @@
-# MariaDB as a source (beta)
+# MariaDB as a source
 
 bintrail can capture from a **MariaDB** server while the index database stays
-MySQL. This is a **beta** capability: the happy path is verified end-to-end
-against real MariaDB, but it has documented limitations (below) and narrower
-version/topology coverage than the MySQL path. Read the limitations before
-pointing it at production.
+MySQL. Capture, recovery, the Parquet copy and the web interface are verified
+end-to-end against MariaDB 10.11, 11.4, 11.8 and 12.3 in CI. Some topologies
+and one data type behave differently from the MySQL path; read the
+limitations below before pointing it at production.
 
 **Scope:** MariaDB is supported as a **source** (the database you capture
 changes from). The **index** — where bintrail stores the indexed events — stays
@@ -244,7 +244,7 @@ flags records the file and has no such window.
 
 ---
 
-## Beta limitations
+## Limitations
 
 - **A GTID checkpoint is fixed to its flavor.** A saved GTID set cannot be
   read in the other flavor's format, so resuming one against a server of the

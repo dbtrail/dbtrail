@@ -122,7 +122,7 @@ at a non-MySQL server is **not** supported.
 | Source | Status | Capture mechanism | Guide |
 |---|---|---|---|
 | **MySQL** 8.0+ (incl. Percona, RDS, Aurora, Cloud SQL) | Supported | ROW-format binlog over the replication protocol | [streaming.md](./streaming.md) |
-| **MariaDB** 10.11+ (10.11, 11.4, 11.8 and 12.3 tested) | Beta | ROW-format binlog (MariaDB GTID) | [mariadb.md](./mariadb.md) |
+| **MariaDB** 10.11+ (10.11, 11.4, 11.8 and 12.3 tested) | Supported | ROW-format binlog (MariaDB GTID) | [mariadb.md](./mariadb.md) |
 | **PostgreSQL** | Supported — via the separate `bintrail-pg` binary | Logical replication (`pgoutput`) | [postgres.md](./postgres.md) |
 
 **We install nothing in your source database.** DBTrail connects as an ordinary
@@ -153,7 +153,7 @@ domains. These are not supported, and data captured from them is out of scope:
 - a primary failover that changes the `server_id` within a domain while
   capture runs.
 
-See [mariadb.md](./mariadb.md#beta-limitations).
+See [mariadb.md](./mariadb.md#limitations).
 
 ## Reporting issues
 

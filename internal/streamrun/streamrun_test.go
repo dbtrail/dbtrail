@@ -276,7 +276,7 @@ func TestResolveStart_invalidStartGTIDFlag(t *testing.T) {
 	}
 }
 
-// ─── MariaDB flavor: GTID parsing + resolveStart (beta) ──────────────────────
+// ─── MariaDB flavor: GTID parsing + resolveStart ─────────────────────────────
 
 // TestParseGTIDSetForFlavor verifies the flavor dispatch: MariaDB strings parse
 // to *MariadbGTIDSet (domain-server-seq, not zero-padded), MySQL strings to
