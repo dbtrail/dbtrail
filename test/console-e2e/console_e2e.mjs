@@ -465,6 +465,16 @@ try {
   lightsSeen && /User logs in/.test(lightsSeen.bad) && /MySQL refused the user or the password/.test(lightsSeen.bad) && !lightsSeen.notice && /Checking again in 10 seconds/.test(lightsSeen.auto)
     ? ok("connect: a wrong password is refused in plain words")
     : bad("connect: a wrong password is refused in plain words", JSON.stringify(lightsSeen));
+  // A fix inside a light stays inside the dialog: laid out as a row, a long
+  // statement once pushed the card past the dialog's right edge.
+  const lightOverflow = await page.evaluate(() => {
+    const dlg = document.getElementById("server-form-mount").closest(".modal").getBoundingClientRect();
+    return Array.from(document.querySelectorAll("#connect-lights .doctor-card"))
+      .map((c) => c.getBoundingClientRect()).filter((r) => r.right > dlg.right + 1).map((r) => Math.round(r.right) + " > " + Math.round(dlg.right));
+  });
+  lightOverflow.length === 0
+    ? ok("connect: the fix inside a light fits inside the dialog")
+    : bad("connect: the fix inside a light fits inside the dialog", lightOverflow.join("; "));
   await page.click("#server-cancel");
   let saved = null;
   for (let i = 0; i < 20; i++) {

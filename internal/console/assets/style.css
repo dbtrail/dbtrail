@@ -1158,7 +1158,7 @@ button { font-family: inherit; }
 .cx-path:has(.cx-seg.bad em) { padding-bottom: 16px; }
 .cx-managed { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); margin: 0 0 12px; }
 .cx-lights { list-style: none; margin: 0; padding: 0; }
-.cx-light { position: relative; display: grid; grid-template-columns: 26px 1fr; gap: 6px 12px; align-items: center; padding: 0 0 14px; }
+.cx-light { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 6px 12px; align-items: center; padding: 0 0 14px; }
 .cx-light:not(:last-child)::before { content: ""; position: absolute; left: 12px; top: 26px; bottom: 0; border-left: 2px dashed var(--line); }
 .cx-dot { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 700;
   background: var(--inset); color: var(--ink-4); z-index: 1; }
@@ -1167,7 +1167,14 @@ button { font-family: inherit; }
 .cx-light.warn .cx-dot { background: var(--ochre); color: var(--surface); }
 .cx-light.wait .cx-label { color: var(--ink-4); }
 .cx-label { font-weight: 500; }
-.cx-light > .doctor-cards { grid-column: 2; }
+.cx-light > .doctor-cards { grid-column: 2; min-width: 0; margin-top: 4px; }
+/* Inside a light the fix stacks: text, then the code (scrolling sideways if a
+   statement is long), then its Copy button. As a row it pushed out of the
+   dialog. */
+.cx-light .doctor-card { flex-direction: column; align-items: stretch; min-width: 0; }
+.cx-light .doctor-card .form-code { max-width: 100%; margin: 0; }
+.cx-light .doctor-card p { margin: 0; }
+.cx-light .doctor-card .btn { align-self: flex-start; }
 .cx-auto { font-size: 12.5px; color: var(--ink-3); margin: 0 0 10px; }
 .cx-auto:empty { display: none; }
 .cx .modal-foot .cx-full { margin-left: auto; }
