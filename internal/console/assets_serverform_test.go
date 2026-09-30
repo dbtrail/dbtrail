@@ -262,21 +262,10 @@ func TestIcebergStageCardsStandOutFromTheirGround(t *testing.T) {
 		t.Fatal("no .ice-stage rule")
 	}
 	rule := css[i : strings.Index(css[i:], "}")+i]
-	if strings.Contains(rule, "var(--raised)") {
-		t.Errorf("the .ice-stage card is still --raised on the panel's --raised ground: %s", rule)
-	}
-	if !strings.Contains(rule, "var(--surface)") {
-		t.Errorf("the .ice-stage card does not use the --surface fill: %s", rule)
-	}
-	// The ground the cards sit on is the Iceberg panel, an .ov-panel, which
-	// the ONE card rule (#1950) paints --surface too. So today the fill does
-	// not separate card from ground; the card's own --line border does, and
-	// losing it would leave the stages invisible. (This test used to check
-	// --panel-bg, a token no rule read: it passed while the ground changed.)
-	// The ground is the LAST rule that names .ov-panel as one of its
-	// selectors and sets a background, as the cascade would pick it; read by
-	// selector, not by the whole list, so adding a class to the card rule
-	// does not break this.
+	// The ground the cards sit on is the Iceberg panel, an .ov-panel: the
+	// LAST rule that names .ov-panel as one of its selectors and sets a
+	// background, as the cascade would pick it. Read by selector, not by the
+	// whole list, so adding a class to the ONE card rule does not break this.
 	ground := ""
 	for _, m := range regexp.MustCompile(`([^{}]+)\{([^{}]*)\}`).FindAllStringSubmatch(stripCSSComments(css), -1) {
 		for _, sel := range strings.Split(m[1], ",") {
@@ -288,11 +277,26 @@ func TestIcebergStageCardsStandOutFromTheirGround(t *testing.T) {
 	if ground == "" {
 		t.Fatal("no rule paints the .ov-panel ground; re-check the .ice-stage card against wherever it moved")
 	}
-	if !strings.Contains(ground, "background: var(--surface)") {
-		t.Errorf("the .ov-panel ground is no longer --surface; re-check the .ice-stage card against it: %s", ground)
+	bg := regexp.MustCompile(`background:\s*var\(--([a-z0-9-]+)\)`)
+	fill, under := bg.FindStringSubmatch(rule), bg.FindStringSubmatch(ground)
+	if fill == nil || under == nil {
+		t.Fatalf("cannot read a background token from the card (%q) or its ground (%q)", rule, ground)
+	}
+	// The two grounds must DIFFER, and by enough to see. #1573 measured the
+	// card at 1.000 on its panel; since the ONE card rule both were --surface
+	// again, which only the border below separated. The floor sits between
+	// the two neutral fills on the ramp: --inset (the fill, and the lanes'
+	// on the same white card) measures 1.089 on --surface, --raised only
+	// 1.047, which a reader can hardly tell from the panel.
+	if fill[1] == under[1] {
+		t.Fatalf("the .ice-stage card is var(--%s) on a var(--%s) panel: the same ground (#1573)", fill[1], under[1])
+	}
+	if r := wcagRatioHex(anyToken(t, css, fill[1]), anyToken(t, css, under[1])); r < 1.06 {
+		t.Errorf("the .ice-stage card (var(--%s)) on its panel (var(--%s)) measures %.3f:1, below 1.06: "+
+			"too close to the panel to read as a card (#1573)", fill[1], under[1], r)
 	}
 	if !strings.Contains(rule, "border: 1px solid var(--line)") {
-		t.Errorf("the .ice-stage card sits --surface on a --surface panel and lost the border that separates them: %s", rule)
+		t.Errorf("the .ice-stage card lost its --line border: %s", rule)
 	}
 }
 

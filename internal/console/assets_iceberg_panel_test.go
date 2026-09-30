@@ -566,12 +566,13 @@ func TestAppendedPanelCSSPaintsNoBrandWarmth(t *testing.T) {
 	for _, m := range regexp.MustCompile(`var\(\s*(--[a-z0-9-]+)`).FindAllStringSubmatch(body, -1) {
 		name := m[1]
 		if strings.HasPrefix(name, "--ink") || strings.HasPrefix(name, "--line") ||
-			strings.HasPrefix(name, "--surface") {
+			strings.HasPrefix(name, "--surface") ||
+			name == "--inset" { // the neutral inset ground the stage cards sit on (#1573); no hue, never warm
 			continue
 		}
 		t.Errorf("the Iceberg panel CSS uses %s. Its run bars encode a magnitude with their "+
 			"WIDTHS, and style.css's own rule is that the warm palette never encodes data; "+
-			"only --ink-* / --line* / --surface* belong here.", name)
+			"only --ink-* / --line* / --surface* / --inset belong here.", name)
 	}
 }
 
