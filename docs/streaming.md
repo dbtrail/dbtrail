@@ -250,6 +250,32 @@ that is stamped durably in `stream_state` and surfaced by `bintrail status`
 also clears the duplicate window. Running with `--no-gap-fill` prevents the
 situation from arising at all, at the cost of refusing to start.
 
+#### Known limitation: tagged GTIDs (MySQL 8.3 and later)
+
+MySQL 8.3 added tagged GTIDs: a session can run
+`SET gtid_next = 'AUTOMATIC:<tag>'` and its transactions get a GTID of the form
+`server-uuid:<tag>:N`. Capture does not track these transactions. It reads their
+rows, but it never adds their GTIDs to the accumulated `gtid_set` it saves in
+`stream_state`. What follows from that:
+
+- **Rows can be indexed twice.** On a reconnect or a restart, capture asks the
+  source for every transaction not in the saved set. The tagged ones are never
+  in it, so the source sends them again and their rows are inserted a second
+  time. Recovery SQL generated over those rows can replay the same change twice.
+- **A purged tagged binlog reads as lost data.** Once the source purges a binlog
+  that held tagged transactions, the gap check on the next start finds tagged
+  GTIDs in `@@gtid_purged` that the checkpoint does not cover, and reports an
+  unfillable gap (`EVENTS PERMANENTLY LOST`) even though those rows were
+  captured.
+- **The web interface cannot say capture is up to date.** A source that has
+  written tagged GTIDs always holds transactions the saved set does not, so the
+  capture state shows as unknown instead of up to date.
+
+Untagged GTIDs, MariaDB GTIDs and position mode are not affected. Tagged GTIDs
+only appear when an application or operator sets a tag on purpose; if yours
+does, capture that source in position mode (`--start-file`/`--start-pos`, or
+`--reset` to move an existing capture, see [Mode switching](#mode-switching)).
+
 ### The `--no-gap-fill` flag
 
 By default, DBTrail auto-advances past unfillable gaps. If you want the stream to **refuse to start** when a gap is detected (so you can investigate and decide how to proceed), use:
