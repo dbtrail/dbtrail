@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 // TestMain widens mydumperlock.ProbeTimeout for every test in this package.
@@ -23,6 +24,14 @@ import (
 // fake-mydumper test cannot forget it. A test that needs the timeout to fire
 // sets its own short value and restores this one with t.Cleanup.
 func TestMain(m *testing.M) {
+	// Re-executed as the SQL sandbox worker (sqlsandbox.New with a zero
+	// Config spawns THIS binary with the worker command): run the real root
+	// command, pre-run hook included, exactly as the shipped binary does one
+	// cobra dispatch in.
+	if sqlsandbox.IsWorkerInvocation(os.Args) {
+		rootCmd.SetArgs(os.Args[1:])
+		os.Exit(Main("test", "none", "unknown"))
+	}
 	mydumperlock.ProbeTimeout = fakeMydumperBound
 	os.Exit(m.Run())
 }
