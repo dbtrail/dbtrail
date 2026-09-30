@@ -5,6 +5,8 @@ import (
 	"os"
 	"slices"
 	"testing"
+
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 // TestMain isolates the package from the developer's real home directory:
@@ -13,6 +15,12 @@ import (
 // ~/.config/bintrail/console-auth.yaml on the dev machine would flip
 // password mode on for every test that constructs a Server.
 func TestMain(m *testing.M) {
+	// Re-executed as the SQL sandbox worker by a Runner a test built with
+	// this binary as its Exe: run the job and exit. The console binary does
+	// the same through its hidden command; here there is no cobra tree.
+	if sqlsandbox.IsWorkerProcess() {
+		os.Exit(sqlsandbox.WorkerMain(os.Stdin, os.Stdout, os.Stderr))
+	}
 	tmp, err := os.MkdirTemp("", "console-test-home-*")
 	if err == nil {
 		os.Setenv("HOME", tmp)

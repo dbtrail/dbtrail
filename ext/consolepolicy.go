@@ -53,6 +53,14 @@ const (
 	PermSettingsWrite Permission = "settings:write"
 	// PermExtViewRead — reach an installed extension view's data routes.
 	PermExtViewRead Permission = "extview:read"
+	// PermSQLExecute — run free read-only SQL over the Parquet copy from the
+	// console (#1952). Its own permission, apart from PermQueryExecute: the
+	// events surface withholds tables and redacts columns under a data
+	// profile, while free SQL reads the raw files and cannot, so it is
+	// refused for any data-restricted session whatever it holds; and the raw
+	// archive carries connection_id and the statement text, which the events
+	// responses omit on purpose.
+	PermSQLExecute Permission = "sql:execute"
 )
 
 // allPermissions is every permission the core defines, in a stable order. The
@@ -70,6 +78,7 @@ var allPermissions = []Permission{
 	PermSettingsRead,
 	PermSettingsWrite,
 	PermExtViewRead,
+	PermSQLExecute,
 }
 
 // AllPermissions returns a copy of every permission the core defines. Callers

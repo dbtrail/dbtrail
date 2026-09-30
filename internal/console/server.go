@@ -25,7 +25,9 @@ import (
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/status"
+	"github.com/dbtrail/dbtrail/internal/views"
 )
 
 // Config configures a console Server. The caller (cmd/bintrail/console.go) is
@@ -157,6 +159,10 @@ type Config struct {
 	// daemon's beacons immediately. nil on the read-only console (serve), where
 	// the toggle still persists the machine-wide choice to the consent file.
 	Telemetry TelemetryController
+	// SQLLimits are the caps free SQL over the copy runs under (#1952):
+	// threads, memory, wall clock, rows. Zero fields take
+	// sqlsandbox.DefaultLimits (2 threads, 2 GB, 60 s, 1,000 rows).
+	SQLLimits sqlsandbox.Limits
 	// BaselineDir / BaselineS3 enable point-in-time reconstruct (Phase 2) on
 	// the boot entry. When either is set (and no RBAC profile is active), the
 	// "Reconstruct" surface is exposed. BaselineDir takes precedence;
@@ -363,6 +369,19 @@ type Server struct {
 	mayCreateFolders bool
 	// version is the running build's version string (Config.Version).
 	version string
+	// sqlRunner runs one read-only SQL statement on a server's Parquet copy
+	// in a separate child process (#1952). ONE per console process: its
+	// global in-flight cap applies across servers, because every worker
+	// competes with capture on the same host.
+	sqlRunner sqlRunner
+	// sqlLimits are the caps sqlRunner runs under, every field resolved (a
+	// zero Config.SQLLimits is sqlsandbox.DefaultLimits); the handler reads
+	// them to bound max_rows and to name the timeout in its refusal.
+	sqlLimits sqlsandbox.Limits
+	// sqlViewsObserver, when set (tests only), sees the views input the SQL
+	// route built before it generates the views: what the worker will be
+	// handed is otherwise only visible as rendered SQL text.
+	sqlViewsObserver func(views.Input)
 	// archiveFetcher reads one archive source for the browsing endpoints —
 	// parquetquery.Fetch in production, injectable so a test can pin the
 	// seam a mock DB cannot see: sqlmock never reports a SURPLUS query, so
@@ -612,6 +631,8 @@ func New(cfg Config) (*Server, error) {
 	// no registry server since #1684; the ones that read through them were
 	// given the value on upgrade (MigrateProcessBaselineLocation, run where
 	// the registry is loaded, before any loop reads it).
+	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
+	s.sqlRunner = sqlsandbox.New(sqlsandbox.Config{Limits: s.sqlLimits})
 	s.cm.defaultBaselineDir = cfg.BaselineDir
 	s.cm.defaultBaselineS3 = cfg.BaselineS3
 	// That bucket is read with the process-wide endpoint, so no per-server
@@ -715,6 +736,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/baselines/files", s.handleBaselineFiles)
 	api.HandleFunc("GET /api/baselines/download", s.handleBaselineDownload)
 	api.HandleFunc("GET /api/views.sql", s.handleViewsSQL)
+	api.HandleFunc("POST /api/sql", s.recordAction("sql", s.handleSQL))
 	// The sandboxed SQL panel (#1177). Registered unconditionally so the
 	// route's refusal (403 with the opt-in hint) is actionable; the real gate
 	// is inside the handler, like the monitor/baseline-trigger verbs.

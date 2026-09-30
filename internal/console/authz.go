@@ -234,6 +234,7 @@ var apiRoutePerms = []routePerm{
 	// settings:read alone can learn the index endpoint here. Both are
 	// admin-shaped tiers, and neither yields a credential.
 	{"GET", "/api/views.sql", ext.PermSettingsRead},
+	{"POST", "/api/sql", ext.PermSQLExecute},
 	{"GET", "/api/telemetry", ext.PermSettingsRead},
 	{"POST", "/api/telemetry", ext.PermSettingsRead},
 	{"GET", "/api/mcp-token", ext.PermSettingsRead},

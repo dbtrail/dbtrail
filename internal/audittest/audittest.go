@@ -184,6 +184,11 @@ var Required = []Requirement{
 		Why:   "the console's row-level mismatch drill-down",
 	},
 	{
+		Pair:  Pair{Surface: "console", Action: "sql.run"},
+		Owner: OwnerConsoleUnit,
+		Why:   "free read-only SQL over the Parquet copy from the web console: raw row data, and the statement is the reader's own",
+	},
+	{
 		Pair:  Pair{Surface: "console", Action: "authz.denied"},
 		Owner: OwnerConsoleUnit,
 		Why:   "an authorization refusal — one of the two console events that are not data reads",
