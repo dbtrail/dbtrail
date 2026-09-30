@@ -6202,11 +6202,13 @@ function buildRetention(serversRes, rotation) {
   const servers = (serversRes && serversRes.servers) || [];
   const serversErr = serversRes && serversRes.error;
   const v = VIEW(); clear(v);
-  v.append(pageHead("Retention", el("p", { class: "page-sub" },
-    "How long indexed data is kept, and where it goes when it ages out.")));
+  // No opening sentence (#1950): the rotation card draws how long data is
+  // kept and where it goes.
+  v.append(pageHead("Retention", null));
 
   const cards = el("div", { class: "cards" });
-  cards.append(rotationCard(rotation));
+  const sources = servers.filter((s) => s.has_source);
+  cards.append(rotationCard(rotation, sources.length ? sources.some((s) => !!s.archive_s3) : undefined));
   v.append(cards);
 
   const grid = el("div", { class: "ov-grid", style: "margin-top:18px" });
@@ -6897,27 +6899,65 @@ async function renderSnapshots() {
   }
 }
 
-function kvRow(card, k, val) {
+// words: the value is a sentence, not a figure, so it takes the UI face (#1950).
+function kvRow(card, k, val, words) {
   card.append(el("div", { class: "kv" },
     el("span", { class: "kv-k", text: k }),
-    el("span", { class: "kv-v", text: val === null || val === undefined || val === "" ? "—" : String(val) })));
+    el("span", { class: "kv-v" + (words ? " words" : ""), text: val === null || val === undefined || val === "" ? "—" : String(val) })));
 }
 
-function rotationCard(rot) {
+// rotationTiles draws what rotation does (#1950): the hours the index keeps
+// (the newest pink), the ones it dropped (dashed, past the cut), where a
+// dropped hour goes (the S3 tile: lit when a source archives, dashed when
+// old data is deleted and not saved), and the partitions made ahead of time
+// (dashed, after now). The keep-shape tiles of Snapshots, one drawing
+// language. Fed by the settings it illustrates, so the dialog redraws it as
+// the fields change. The text alternative says the same in words.
+function rotationTiles(retain, interval, addFuture, archived) {
+  const retainMin = flowEveryMinutes(retain), everyMin = flowEveryMinutes(interval) || 60;
+  const kept = retainMin ? Math.max(1, Math.round(retainMin / everyMin)) : 0;
+  const shown = Math.min(kept, 6), extra = kept - shown;
+  const ahead = Math.max(0, Math.min(Number(addFuture) || 0, 4));
+  const box = el("div", { class: "keep-shape rot-shape" });
+  const row = el("div", { class: "ks-row" });
+  // Lit (a kept tile, lower) when a source archives; the faded dashed tile of
+  // a dropped hour when old data is deleted and not saved, or nothing is known.
+  row.append(el("span", { class: archived === true ? "ks-tile ks-s3" : "ks-tile ks-gone", title: archived === true ? "archived to S3" : archived === false ? "not archived" : null }));
+  row.append(el("span", { class: "ks-more", text: "←" }));
+  row.append(el("span", { class: "ks-tile ks-gone" }), el("span", { class: "ks-tile ks-gone" }), el("span", { class: "ks-cut" }));
+  if (extra > 0) row.append(el("span", { class: "ks-more", text: "+" + extra }));
+  for (let i = 0; i < shown; i++) row.append(el("span", { class: "ks-tile" + (i === shown - 1 ? " ks-newest" : "") }));
+  for (let i = 0; i < ahead; i++) row.append(el("span", { class: "ks-tile ks-next" }));
+  if ((Number(addFuture) || 0) > ahead) row.append(el("span", { class: "ks-more", text: "+" + ((Number(addFuture) || 0) - ahead) }));
+  box.append(row);
+  const dropped = "dropped every " + (interval || "hour") + (archived === true ? ", archived to S3" : archived === false ? ", not saved" : "");
+  box.append(el("div", { class: "ks-axis" },
+    el("span", { class: "ks-left", text: dropped + (retain ? " · kept " + retain : "") }),
+    el("span", { class: "ks-right", text: "now" + (ahead ? " · " + (Number(addFuture) || 0) + " ahead" : "") })));
+  const alt = "Rotation: the index keeps " + (retain || "its window") + " of hourly partitions and drops the older ones every " + (interval || "hour")
+    + (archived === true ? ", saving each to S3 before it is dropped" : archived === false ? "; a dropped hour is deleted, not saved" : "")
+    + ((Number(addFuture) || 0) ? ", with " + addFuture + " partitions made ahead of time" : "") + ".";
+  box.setAttribute("role", "img");
+  box.setAttribute("aria-label", alt);
+  return box;
+}
+
+function rotationCard(rot, archived) {
   const card = el("div", { class: "card" }, el("div", { class: "card-title", text: "Rotation" }));
   if (!rot || rot.error) {
     card.append(el("p", { class: "form-hint", text: "Could not load the rotation policy" + (rot && rot.error ? ": " + rot.error : ".") }));
     return card;
   }
-  kvRow(card, "retention", rot.retain + (rot.source === "override" ? "" : " for a new server"));
+  card.append(rotationTiles(rot.retain, rot.interval, rot.add_future, archived));
+  kvRow(card, "retention", rot.retain + (rot.source === "override" ? "" : " for a new server"), rot.source !== "override");
   if (rot.source !== "override" && rot.index_retain && rot.index_retain !== rot.retain) {
-    kvRow(card, "this server keeps", rot.index_retain + retentionBasis({ source: rot.source, basis: rot.index_basis }));
+    kvRow(card, "this server keeps", rot.index_retain + retentionBasis({ source: rot.source, basis: rot.index_basis }), true);
   }
   kvRow(card, "interval", rot.interval);
   kvRow(card, "future partitions", rot.add_future);
   kvRow(card, "policy", rot.source === "override"
     ? ("set in the web interface" + (rot.enabled ? " (live)" : ""))
-    : "DBTrail's defaults");
+    : "DBTrail's defaults", true);
   if (!rot.enabled) card.append(el("p", { class: "form-hint", text: "Rotation is turned off. Changes saved with Edit rotation take effect only after DBTrail restarts." }));
   card.append(el("div", { class: "stg-cardfoot" },
     el("button", { class: "btn btn-sm", type: "button", text: "Edit rotation…", onclick: showRotationDialog })));
@@ -8284,7 +8324,8 @@ function archivingPanel(servers, serversErr) {
     sources.forEach((s) => {
       const row = el("div", { class: "stg-row" });
       row.append(el("span", { class: "stg-name", text: s.name }));
-      row.append(el("span", { class: "stg-dest" + (s.archive_s3 ? "" : " muted"), text: s.archive_s3 || "not archived: old data gets deleted, not saved" }));
+      // A chip of the status family (#1950): off is a state, not a fault.
+      row.append(s.archive_s3 ? el("span", { class: "stg-dest", text: s.archive_s3 }) : el("span", { class: "chip chip-off", text: "not archived" }));
       if (s.monitor_state) row.append(monitorChip(s));
       row.append(el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Configure",
         onclick: () => { openServersModal(); editServer(s.id); } }));
@@ -8292,8 +8333,6 @@ function archivingPanel(servers, serversErr) {
     });
   }
   panel.append(list);
-  panel.append(el("p", { class: "form-hint stg-foot", text:
-    "Old data is saved to S3 before it's deleted locally, so your history isn't lost." }));
   return panel;
 }
 
@@ -11836,8 +11875,10 @@ let scLastQuery = null;
 
 function renderSchemaChanges(params) {
   const v = VIEW(); clear(v);
+  // The zone once, in the header (#1950): every timestamp below is UTC.
   v.append(pageHead("Schema changes",
-    el("p", { class: "page-sub", text: "Every CREATE, ALTER, DROP, RENAME and TRUNCATE the stream recorded, newest first." })));
+    el("p", { class: "page-sub", text: "Every CREATE, ALTER, DROP, RENAME and TRUNCATE the stream recorded, newest first." }),
+    [el("span", { class: "page-asof" }, tzChip())]));
 
   const form = el("form", { class: "filters", id: "sc-form" });
   form.append(fieldSelect("Schema", "schema", "md", true));
@@ -11859,7 +11900,7 @@ function renderSchemaChanges(params) {
 
   const list = el("div", { class: "events", id: "sc-list" });
   const head = el("div", { class: "sc-head" });
-  ["time (UTC)", "table", "type", "binlog position"].forEach((h) => head.append(el("span", { text: h })));
+  ["time", "table", "type", "binlog position"].forEach((h) => head.append(el("span", { text: h })));
   list.append(head);
   list.append(el("div", { id: "sc-rows" }));
   v.append(list);
@@ -11922,10 +11963,15 @@ async function runSchemaChangesQuery(form) {
 // withheld: the server dropped every statement because an access profile is
 // active (the response warning says why); the cell says so instead of
 // rendering as an empty statement.
+// SCHEMA_EMPTY_ART: a table with a column being added, drawn (static, so
+// svgEl is right here).
+const SCHEMA_EMPTY_ART = `<svg viewBox="0 0 160 72" aria-hidden="true"><rect x="14" y="8" width="96" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/><path d="M14 24h96M46 8v56M78 8v56" stroke="var(--line)"/><rect x="22" y="13" width="16" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="54" y="13" width="16" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="86" y="13" width="16" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="118" y="8" width="28" height="56" rx="8" fill="var(--update-bg)" stroke="var(--update)" stroke-dasharray="4 3"/><path d="M132 30v12M126 36h12" stroke="var(--update)" stroke-width="2"/></svg>`;
+
 function buildSchemaChangeRows(container, changes, filtered, withheld) {
   clear(container);
   if (!changes.length) {
     const box = el("div", { class: "empty" });
+    box.append(el("div", { class: "empty-art", "aria-hidden": "true" }, svgEl(SCHEMA_EMPTY_ART)));
     box.append(el("h3", { text: "No schema changes found" }));
     box.append(el("p", { text: filtered
       ? "No DDL matched these filters. Widen the time range or clear a filter to see more."
@@ -13178,12 +13224,15 @@ async function showRotationDialog() {
 
   const head = el("div", { class: "modal-head" });
   head.append(el("h2", { class: "modal-title", text: "Rotation" }));
-  head.append(el("p", { class: "modal-desc", text:
-    "On a regular schedule, DBTrail deletes indexed data older than the retention period below, and gets ready ahead of time for new data coming in. One schedule applies to every server being monitored; changes take effect on the next run." }));
   head.append(el("button", { class: "btn btn-icon btn-ghost modal-x", type: "button", text: "✕", onclick: closeRotationDialog }));
   modal.append(head);
 
-  const form = el("form", { class: "filters", style: "display:block" });
+  const form = el("form", { class: "modal-body" });
+  // What the fields set, drawn from their values as they change (#1950); the
+  // sentence it replaced is its text alternative.
+  const shape = el("div", { class: "rot-shape" });
+  const redraw = () => { clear(shape); shape.append(rotationTiles(form.elements.retain.value.trim(), form.elements.interval.value.trim(), form.elements.add_future.value.trim())); };
+  form.append(shape);
   const grid = el("div", { class: "form-grid" });
   grid.append(srvField("Retention", "retain", { placeholder: "e.g. 30d, 24h" }));
   grid.append(srvField("Interval", "interval", { placeholder: "e.g. 1h, 30m" }));
@@ -13192,6 +13241,7 @@ async function showRotationDialog() {
   form.elements.retain.value = cur.retain || "";
   form.elements.interval.value = cur.interval || "";
   form.elements.add_future.value = (cur.add_future != null ? cur.add_future : "");
+  redraw();
 
   const note = el("p", { class: "form-hint", style: "margin-top:10px" });
   if (!cur.enabled) note.textContent = "Rotation is turned off. Your changes will be saved but won't take effect until DBTrail restarts.";
@@ -13199,12 +13249,17 @@ async function showRotationDialog() {
   else note.textContent = "A custom setting is active and takes effect immediately.";
   form.append(note);
 
+  form.append(el("p", { class: "form-hint", text: "One schedule for every monitored server; changes take effect on the next run." }));
   const msg = el("div", { class: "form-msg" });
   const foot = el("div", { class: "modal-foot" });
-  foot.append(el("button", { class: "btn btn-primary", type: "submit", text: "Save" }));
+  // Plain at rest, filled once a field changes (#1950): the one primary is
+  // the control being changed.
+  const saveBtn = el("button", { class: "btn", type: "submit", text: "Save" });
+  foot.append(saveBtn);
   foot.append(el("button", { class: "btn btn-ghost", type: "button", text: "Cancel", onclick: closeRotationDialog }));
   form.append(foot);
   form.append(msg);
+  form.addEventListener("input", () => { saveBtn.classList.add("btn-primary"); redraw(); });
   form.addEventListener("submit", (e) => { e.preventDefault(); submitRotation(form, msg, cur); });
   modal.append(form);
 
