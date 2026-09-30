@@ -5813,8 +5813,9 @@ try {
     }
     const note = document.querySelector("#ev-notes .note-item");
     const cs = note ? getComputedStyle(note) : null;
-    const bar = document.querySelector(".result-bar");
     const notesBox = document.getElementById("ev-notes");
+    const line = notesBox ? notesBox.closest(".ev-countline") : null;
+    const scope = notesBox ? notesBox.querySelector("details.ev-scope") : null;
     return {
       noteCount: document.querySelectorAll("#ev-notes .note-item").length,
       noteText: note ? note.textContent : "",
@@ -5824,7 +5825,11 @@ try {
       inAlertContainer: note ? !!note.closest(".warnings, .warn-box, .error-box") : true,
       bg: cs ? cs.backgroundColor : "",
       border: cs ? cs.borderTopStyle : "",
-      underCountLine: !!(bar && notesBox && (bar.compareDocumentPosition(notesBox) & Node.DOCUMENT_POSITION_FOLLOWING)),
+      // #1950: the note is no longer a full-width line under the result bar.
+      // It is the detail of a chip beside the count, folded until asked for.
+      besideCount: !!(line && line.querySelector(".result-count")),
+      chip: scope ? (scope.querySelector("summary") || {}).textContent || "" : "",
+      folded: !!scope && !scope.open,
     };
   });
   arcInfo.noteCount === 1 && /answered from the live index/.test(arcInfo.noteText)
@@ -5839,9 +5844,9 @@ try {
   arcInfo.warnCount === 0
     ? ok("severity split: no alert component renders for the benign fact")
     : bad("severity split: no alert component renders for the benign fact", `warnCount=${arcInfo.warnCount}`);
-  arcInfo.underCountLine
-    ? ok("severity split: the note sits under the result-count line")
-    : bad("severity split: the note sits under the result-count line", "notes container precedes the result bar");
+  (arcInfo.besideCount && arcInfo.chip === "live index only" && arcInfo.folded)
+    ? ok("severity split: the note is the scope chip's detail beside the count, folded")
+    : bad("severity split: the note is the scope chip's detail beside the count, folded", JSON.stringify({ beside: arcInfo.besideCount, chip: arcInfo.chip, folded: arcInfo.folded }));
 
   // The ALERT register: a time range covering the manufactured gap hour must
   // keep the warning component — amber box, ⚠ icon — and claim no elision.

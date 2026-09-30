@@ -923,6 +923,30 @@ function renderNotes(node, notes) {
   (notes || []).forEach((n) => node.append(el("div", { class: "note-item", text: n })));
 }
 
+// renderEventNotes is how the Events view shows the response `notes` list
+// (#1950): as a state, not as a mechanism. The notes this view receives say
+// what the list was read from (the live index alone, because nothing else
+// exists to read or because the archives could add nothing), so they fold
+// into one quiet chip beside the count, "live index only", and the server's
+// own sentences sit one click away, word for word. The meaning is the
+// server's and is not rewritten here; a note that says something else gets
+// a plain "note" chip over the same disclosure. Warnings never come this
+// way: they stay in the alert box above the list.
+function renderEventNotes(node, notes) {
+  if (!node) return;
+  clear(node);
+  notes = notes || [];
+  if (!notes.length) return;
+  const live = notes.every((n) => /live[- ]index/i.test(n));
+  const d = el("details", { class: "ev-scope" });
+  d.append(el("summary", { class: "chip chip-unknown ev-scope-chip",
+    text: live ? "live index only" : notes.length === 1 ? "1 note" : notes.length + " notes" }));
+  const box = el("div", { class: "ev-scope-detail" });
+  notes.forEach((n) => box.append(el("div", { class: "note-item", text: n })));
+  d.append(box);
+  node.append(d);
+}
+
 // ── badge / page-head builders ────────────────────────────────────────────────
 
 function badge(type) { return el("span", { class: "badge " + badgeClass(type), text: type }); }
@@ -3188,7 +3212,10 @@ function renderEvents(params) {
   }
 
   const form = el("form", { id: "ev-form" });
-  // search bar
+  // ONE toolbar row (#1950): the search field with Filters, then the
+  // keyboard hint, the pager and the exports, grouped right. The buttons are
+  // type=button, so living inside the form submits nothing.
+  const toolbar = el("div", { class: "ev-toolbar" });
   const searchwrap = el("div", { class: "ev-searchwrap" });
   searchwrap.append(icon("search", "ev-search-ic"));
   const search = el("input", { class: "ev-search", id: "ev-search", name: "q",
@@ -3197,27 +3224,18 @@ function renderEvents(params) {
   if (params && params.q) search.value = params.q;
   searchwrap.append(search);
   const advBtn = el("button", { class: "btn btn-sm ev-advbtn", type: "button", text: "Filters",
-    onclick: () => { const a = $("#ev-advanced", VIEW()); a.toggleAttribute("hidden"); advBtn.classList.toggle("on"); } });
+    "aria-expanded": "false", "aria-controls": "ev-advanced",
+    onclick: () => {
+      const a = $("#ev-advanced", VIEW());
+      a.toggleAttribute("hidden");
+      const on = !a.hasAttribute("hidden");
+      advBtn.classList.toggle("on", on);
+      advBtn.setAttribute("aria-expanded", on ? "true" : "false");
+    } });
   searchwrap.append(advBtn);
-  form.append(searchwrap);
-
-  // advanced panel
-  const adv = el("div", { class: "ev-advanced", id: "ev-advanced", hidden: "" });
-  adv.append(fieldSelect("Schema", "schema", "md", true));
-  adv.append(fieldSelect("Table", "table", "md", false, true));
-  adv.append(fieldInput("PK", "pk", "sm", "1006"));
-  adv.append(fieldSelect("Type", "event_type", "sm", false, false, ["", "INSERT", "UPDATE", "DELETE"], "any"));
-  adv.append(fieldInput("Changed column", "changed_column", "md", "email"));
-  adv.append(fieldDateInput("Since (UTC)", "since", "md", "YYYY-MM-DD HH:MM:SS"));
-  adv.append(fieldDateInput("Until (UTC)", "until", "md", "YYYY-MM-DD HH:MM:SS"));
-  adv.append(fieldInput("Limit", "limit", "sm", "100"));
-  form.append(adv);
-  v.append(form);
-
-  // result bar
+  toolbar.append(searchwrap);
+  // The keys are data and wear mono; the words beside them do not.
   const bar = el("div", { class: "result-bar" });
-  bar.append(el("span", { class: "result-count" }, el("b", { id: "ev-count", text: "…" }), el("span", { id: "ev-count-note", text: " event(s)" })));
-  bar.append(el("span", { class: "spacer" }));
   bar.append(el("span", { class: "kbd-hint" },
     el("b", { text: "j" }), "/", el("b", { text: "k" }), " move · ",
     el("b", { text: "↵" }), " expand · ", el("b", { text: "u" }), " undo"));
@@ -3236,8 +3254,31 @@ function renderEvents(params) {
   bar.append(el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Export CSV",
     title: "Export all matches of this search, not just this page (max 1000 events)",
     onclick: (e) => exportEvents("csv", e.target) }));
-  v.append(bar);
+  toolbar.append(bar);
+  form.append(toolbar);
 
+  // advanced panel
+  const adv = el("div", { class: "ev-advanced", id: "ev-advanced", hidden: "" });
+  adv.append(fieldSelect("Schema", "schema", "md", true));
+  adv.append(fieldSelect("Table", "table", "md", false, true));
+  adv.append(fieldInput("PK", "pk", "sm", "1006"));
+  adv.append(fieldSelect("Type", "event_type", "sm", false, false, ["", "INSERT", "UPDATE", "DELETE"], "any"));
+  adv.append(fieldInput("Changed column", "changed_column", "md", "email"));
+  adv.append(fieldDateInput("Since (UTC)", "since", "md", "YYYY-MM-DD HH:MM:SS"));
+  adv.append(fieldDateInput("Until (UTC)", "until", "md", "YYYY-MM-DD HH:MM:SS"));
+  adv.append(fieldInput("Limit", "limit", "sm", "100"));
+  form.append(adv);
+  v.append(form);
+
+  // The count line: how many, and what the list was read from. The response
+  // `notes` (benign audit facts: the live-index scope, the archive-elision
+  // record, #1365) are a quiet chip beside the count with the server's
+  // sentence one click away (renderEventNotes), never a full-width line and
+  // never the alert component.
+  const countline = el("div", { class: "ev-countline" });
+  countline.append(el("span", { class: "result-count" }, el("b", { id: "ev-count", text: "…" }), el("span", { id: "ev-count-note", text: " event(s)" })));
+  countline.append(el("span", { id: "ev-notes", class: "notes" }));
+  v.append(countline);
   // Scope/coverage notices for this result set (#1311). The response has
   // carried a `warnings` array all along and this view dropped it, which meant
   // the default browse -- the exact case a profiled session reads live-index
@@ -3245,11 +3286,6 @@ function renderEvents(params) {
   // threw it away at the browser. Above the list on purpose: a caveat about
   // what a result does NOT include is worthless below the result.
   v.append(el("div", { id: "ev-warnings", class: "warnings" }));
-  // Info notes (#1365) under the result-count line, BELOW the warnings:
-  // alerts render first in both views (Recover has the same order). The muted
-  // register for the response `notes` list (benign audit facts like the
-  // archive-elision record) — never the alert component.
-  v.append(el("div", { id: "ev-notes", class: "notes" }));
 
   // events list
   const list = el("div", { class: "events", id: "events-list" });
@@ -3619,7 +3655,7 @@ async function runEventsQuery(form, keepPage) {
       warnings = warnings.concat("Reading archived history in the background; the list below will complete itself.");
     }
     renderWarnings($("#ev-warnings", VIEW()), warnings);
-    renderNotes($("#ev-notes", VIEW()), data.notes);
+    renderEventNotes($("#ev-notes", VIEW()), data.notes);
 
     // Client-side refine: unscoped pk/col + free terms.
     const events = refineEvents(data.events || [], refine);
@@ -3708,7 +3744,7 @@ async function runEventsQuery(form, keepPage) {
     // Clear stale advisories along with the rows: a lingering "nothing is
     // missing here" (or an old warning) beside an error is misleading (#1365).
     renderWarnings($("#ev-warnings", VIEW()), []);
-    renderNotes($("#ev-notes", VIEW()), []);
+    renderEventNotes($("#ev-notes", VIEW()), []);
     if (countEl) countEl.textContent = "0";
     return;
   } finally {
@@ -3812,15 +3848,46 @@ async function exportEvents(kind, btn) {
   }
 }
 
+// EVENTS_EMPTY_ART: what the list will hold, drawn (three rows of changes:
+// a time, a table, the kind of change, a key). A static constant in the
+// page's tokens; decoration beside the words, so it carries no text.
+const EVENTS_EMPTY_ART = `<svg viewBox="0 0 160 72" aria-hidden="true"><rect x="1" y="1" width="158" height="70" rx="8" fill="var(--surface)" stroke="var(--line)"/><rect x="12" y="13" width="34" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="54" y="13" width="40" height="5" rx="2.5" fill="var(--line)"/><rect x="102" y="10" width="26" height="11" rx="5.5" fill="var(--insert-bg)" stroke="var(--insert)"/><rect x="136" y="13" width="12" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="12" y="34" width="34" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="54" y="34" width="52" height="5" rx="2.5" fill="var(--line)"/><rect x="102" y="31" width="26" height="11" rx="5.5" fill="var(--update-bg)" stroke="var(--update)"/><rect x="136" y="34" width="12" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="12" y="55" width="34" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="54" y="55" width="32" height="5" rx="2.5" fill="var(--line)"/><rect x="102" y="52" width="26" height="11" rx="5.5" fill="var(--delete-bg)" stroke="var(--delete)"/><rect x="136" y="55" width="12" height="5" rx="2.5" fill="var(--ink-4)"/></svg>`;
+
+// eventsEmptyState is the list with nothing in it (#1950): the drawing of
+// what will appear, one line, and the one action that makes it appear. Two
+// cases that need opposite actions: a search or filter that matches nothing
+// (clear it), and a list that is empty with nothing narrowing it (no change
+// was captured yet, so the way forward is the capture's own page).
+function eventsEmptyState(scopeNote) {
+  const form = $("#ev-form", VIEW());
+  const narrowed = !!form && Array.from(new FormData(form).values()).some((v) => String(v).trim() && v !== "any");
+  const box = el("div", { class: "empty ev-empty" });
+  box.append(el("div", { class: "empty-art", "aria-hidden": "true" }, svgEl(EVENTS_EMPTY_ART)));
+  if (narrowed) {
+    box.append(el("h3", { text: "No changes match your search" }));
+    // The paging scope travels with the verdict: "nothing here" on page 3 of
+    // a refined search is a statement about that page, not about the index.
+    if (scopeNote) box.append(el("p", { text: scopeNote.replace(/^ · /, "") }));
+    box.append(el("button", { class: "btn", type: "button", text: "Clear the search",
+      onclick: () => { form.reset(); runEventsQuery(form); } }));
+  } else {
+    box.append(el("h3", { text: "No changes yet" }));
+    box.append(el("p", { text: "Rows appear here as your database writes them." }));
+    box.append(el("button", { class: "btn", type: "button", text: "Check capture", onclick: () => navigate("status") }));
+  }
+  return box;
+}
+
 function buildEventRows(container, events, scopeNote) {
   clear(container);
+  // Keys line up on the right only when every key on screen is a number; one
+  // composite or text key and the column reads left, like text.
+  const list = container.parentElement;
+  if (list && list.classList) {
+    list.classList.toggle("pk-num", events.length > 0 && events.every((e) => /^-?\d+$/.test(String(e.pk_values))));
+  }
   if (!events.length) {
-    const empty = el("div", { class: "ev-empty" },
-      scopeNote ? "No changes match your search" + scopeNote + ", or " : "No changes match your search. ",
-      el("b", { text: scopeNote ? "clear it" : "Clear it", style: "cursor:pointer",
-        onclick: () => { const s = $("#ev-search", VIEW()); if (s) { s.value = ""; runEventsQuery($("#ev-form", VIEW())); } } }),
-      " to see everything.");
-    container.append(empty);
+    container.append(eventsEmptyState(scopeNote));
     return;
   }
   events.forEach((e, i) => {

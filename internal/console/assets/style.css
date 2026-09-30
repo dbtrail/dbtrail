@@ -603,11 +603,39 @@ button { font-family: inherit; }
 /* ============================================================
    smart search (Events)
    ============================================================ */
+/* ONE toolbar row (#1950): the search field with Filters, then the keyboard
+   hint, the pager and the exports grouped right. The count and the scope
+   chip sit on their own quiet line under it. */
+.ev-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.ev-toolbar .ev-searchwrap { flex: 1 1 280px; min-width: 0; margin-bottom: 0; }
+.ev-toolbar .result-bar { flex: none; margin-bottom: 0; gap: 4px; }
+.ev-toolbar .kbd-hint { margin-right: 8px; }
+/* position + z-index: the view's children each become a stacking context
+   while they enter (the rise animation), so without its own level the line
+   and its chip's panel would paint UNDER the list that follows it. */
+.ev-countline { position: relative; z-index: 3; display: flex; align-items: center; gap: 10px; min-height: 24px; margin-bottom: 8px; font-size: var(--fs-sm); color: var(--ink-2); }
+/* the number is data and wears mono; "event(s)" does not */
+.ev-countline .result-count { font-family: var(--f-ui); }
+.ev-countline .result-count b { font-family: var(--f-mono); }
+/* the scope chip: a state beside the count, the server's sentence in a
+   small panel under it */
+.ev-scope { position: relative; }
+.ev-scope > summary { list-style: none; cursor: pointer; }
+.ev-scope > summary::-webkit-details-marker { display: none; }
+.ev-scope > summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.ev-scope-detail {
+  position: absolute; z-index: 5; top: calc(100% + 6px); left: 0; width: min(520px, 70vw);
+  padding: 10px 12px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md); box-shadow: var(--shadow-lg);
+}
+.ev-scope-detail .note-item { font-family: var(--f-ui); font-size: var(--fs-sm); color: var(--ink-2); margin: 0; padding: 2px 0; }
+@media (max-width: 1180px) { .ev-toolbar .kbd-hint { display: none; } }
+@media (max-width: 900px) { .ev-toolbar { flex-wrap: wrap; } }
 .ev-searchwrap {
   display: flex; align-items: center; gap: 8px;
-  border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--surface); padding: 5px 6px 5px 14px;
-  margin-bottom: 14px; box-shadow: var(--panel-shadow);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); padding: 4px 6px 4px 14px;
+  margin-bottom: 12px; box-shadow: var(--panel-shadow);
   transition: border-color .15s, box-shadow .15s;
 }
 .ev-searchwrap:focus-within { border-color: var(--accent); box-shadow: var(--focus-ring); }
@@ -620,19 +648,23 @@ button { font-family: inherit; }
 .ev-search::placeholder { color: var(--ink-4); font-family: var(--f-ui); }
 .ev-search-x { flex: none; }
 .ev-advbtn { flex: none; gap: 7px; }
-.ev-advbtn.on { background: var(--accent-bg); color: var(--accent); border-color: transparent; }
-[data-accent="warm"] .ev-advbtn.on { color: var(--orange-2); }
+/* pressed, not filled: the view's one filled button is the open row's */
+.ev-advbtn.on { background: var(--raised); color: var(--ink); border-color: var(--ink-4); }
 
 .ev-advanced {
-  display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: flex-end;
-  border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 18px 20px; margin-bottom: 16px; background: var(--raised);
+  display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-end;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 16px 20px; margin-bottom: 12px; background: var(--raised);
 }
 [data-dir="paper"] .ev-advanced { background: transparent; }
 .ev-advanced[hidden] { display: none; }
 
 .ev-empty { padding: 44px 24px; text-align: center; color: var(--ink-3); font-size: var(--fs-md); }
 .ev-empty b { color: var(--ink); font-weight: 600; }
+/* the Events list with nothing in it is the empty-state component: a small
+   drawing of the rows that will appear, one line, one action */
+.empty.ev-empty { padding: 40px 24px; gap: 12px; margin-top: 12px; }
+.empty-art svg { width: 160px; height: 72px; }
 
 /* ============================================================
    buttons: ONE family (#1950). Variants: primary (ink at rest, the
@@ -743,14 +775,18 @@ button { font-family: inherit; }
 /* ONE table (#1950): 40px rows, hover, a sticky header, tabular figures,
    timestamps that never wrap. The Events and Schema-changes grids, the
    Overview lists, the Snapshots rows and the verification rows all follow it. */
+/* header labels are not data: the UI face in small caps, never mono */
 .ev-head {
-  font-family: var(--f-mono); font-size: var(--fs-xs); letter-spacing: 0.04em;
-  color: var(--ink-4); text-transform: lowercase;
-  padding: 0 14px 10px; border-bottom: 1px solid var(--line);
+  font-family: var(--f-ui); font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  color: var(--ink-3); text-transform: uppercase;
+  padding: 0 16px 8px; border-bottom: 1px solid var(--line);
   position: sticky; top: 0; z-index: 2; background: var(--bg);
 }
+/* numeric keys line up on the right (set only when every key on screen is
+   a number); the gap to the next column stays readable */
+.events.pk-num .ev-pk, .events.pk-num .ev-head span:nth-child(4) { text-align: right; padding-right: 20px; }
 .ev-row {
-  min-height: 40px; padding: 8px 14px; border-bottom: 1px solid var(--line-soft);
+  min-height: 40px; padding: 8px 16px; border-bottom: 1px solid var(--line-soft);
   cursor: pointer; position: relative;
   transition: background .14s;
 }
@@ -777,13 +813,13 @@ button { font-family: inherit; }
   align-items: center; gap: 12px;
 }
 .sc-head {
-  font-family: var(--f-mono); font-size: var(--fs-xs); letter-spacing: 0.04em;
-  color: var(--ink-4); text-transform: lowercase;
-  padding: 0 14px 10px; border-bottom: 1px solid var(--line);
+  font-family: var(--f-ui); font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  color: var(--ink-3); text-transform: uppercase;
+  padding: 0 16px 8px; border-bottom: 1px solid var(--line);
   position: sticky; top: 0; z-index: 2; background: var(--bg);
 }
 .sc-row {
-  min-height: 40px; padding: 8px 14px; border-bottom: 1px solid var(--line-soft);
+  min-height: 40px; padding: 8px 16px; border-bottom: 1px solid var(--line-soft);
   cursor: pointer; transition: background .14s;
 }
 .sc-row:hover, .sc-row.open { background: var(--raised); }
@@ -826,9 +862,9 @@ button { font-family: inherit; }
 /* diff panel (expand) */
 .diff-wrap { overflow: hidden; }
 .diff {
-  margin: 2px 14px 16px;
+  margin: 4px 16px 16px;
   border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-md);
   overflow: hidden;
   background: var(--surface);
 }
@@ -838,12 +874,14 @@ button { font-family: inherit; }
 @keyframes diffin { from { transform: translateY(-6px); } to { transform: none; } }
 .diff-grid { display: grid; grid-template-columns: 150px 1fr 1fr; }
 .diff-grid > div {
-  padding: 8px 14px; font-family: var(--f-mono); font-size: var(--fs-sm);
+  padding: 8px 16px; font-family: var(--f-mono); font-size: var(--fs-sm);
   border-bottom: 1px solid var(--line-soft);
 }
-.diff-h {
-  color: var(--ink-4); font-size: var(--fs-xs); letter-spacing: 0.04em;
-  background: var(--raised); text-transform: lowercase;
+/* AFTER the cell rule: the three labels are not data, so they take the
+   table header's small caps instead of the cells' mono */
+.diff-grid > .diff-h {
+  font-family: var(--f-ui); font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  color: var(--ink-3); background: var(--raised); text-transform: uppercase;
 }
 .diff-col { color: var(--ink-2); }
 .diff-before { color: var(--diff-del); }
@@ -857,11 +895,11 @@ button { font-family: inherit; }
 
 /* diff footer — the "deshazlo" moment, right where you understood the change */
 .diff-foot {
-  display: flex; align-items: center; gap: 14px;
-  padding: 11px 14px; border-top: 1px solid var(--line-soft);
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; border-top: 1px solid var(--line);
   background: var(--raised);
 }
-.diff-foot-note { font-size: 12px; color: var(--ink-3); margin-right: auto; }
+.diff-foot-note { font-size: var(--fs-xs); color: var(--ink-3); margin-right: auto; }
 [data-dir="trail"] .diff-foot { background: var(--accent-bg); }
 
 /* ============================================================
@@ -1766,8 +1804,12 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .cmdk-empty { padding: 28px; text-align: center; color: var(--ink-4); font-size: 13.5px; }
 
 /* keyboard hint + row cursor on Events */
-.kbd-hint { font-family: var(--f-mono); font-size: 10.5px; color: var(--ink-4); margin-right: 4px; }
-.kbd-hint b { color: var(--ink-3); font-weight: 600; }
+/* the keys are data (mono keycaps); the words beside them are not */
+.kbd-hint { font-family: var(--f-ui); font-size: var(--fs-xs); color: var(--ink-3); margin-right: 4px; white-space: nowrap; }
+.kbd-hint b {
+  font-family: var(--f-mono); font-size: 11px; font-weight: 600; color: var(--ink-2);
+  border: 1px solid var(--line); border-radius: var(--r-xs); padding: 0 4px; background: var(--surface);
+}
 .ev-row.cursor { background: var(--accent-bg); box-shadow: inset 2px 0 0 var(--accent); }
 [data-accent="warm"] .ev-row.cursor { box-shadow: inset 2px 0 0 var(--orange-2); }
 .ev-row.cursor .ev-caret { opacity: 1; color: var(--accent); }
