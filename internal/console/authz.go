@@ -235,6 +235,7 @@ var apiRoutePerms = []routePerm{
 	// admin-shaped tiers, and neither yields a credential.
 	{"GET", "/api/views.sql", ext.PermSettingsRead},
 	{"POST", "/api/sql", ext.PermSQLExecute},
+	{"GET", "/api/sql", ext.PermSQLExecute},
 	{"GET", "/api/telemetry", ext.PermSettingsRead},
 	{"POST", "/api/telemetry", ext.PermSettingsRead},
 	{"GET", "/api/mcp-token", ext.PermSettingsRead},

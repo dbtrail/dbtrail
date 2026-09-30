@@ -9,10 +9,13 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
@@ -110,22 +113,172 @@ func wantsCSV(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/csv")
 }
 
-func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
-	b := s.resolveOr(w, r)
-	if b == nil {
-		return
-	}
+// sqlGate is the part of the route's gating both forms share (the statement
+// POST and the metadata GET): the data-profile refusal, audited, and the
+// archive switch. It writes the refusal and returns false.
+func (s *Server) sqlGate(w http.ResponseWriter, r *http.Request, b *bundle) bool {
 	if s.profileActiveFor(r) {
 		recordProfileGateDeny(r, "sql")
 		writeJSONError(w, http.StatusForbidden,
 			"SQL on the copy is unavailable while a data profile is active: the profile withholds "+
 				"tables and redacts columns on the console's own reads, and free SQL reads the raw "+
 				"Parquet files, which it cannot filter")
-		return
+		return false
 	}
 	if b.noArchive {
 		writeJSONError(w, http.StatusConflict,
 			"archive access is disabled for this server, so its copy cannot be read")
+		return false
+	}
+	return true
+}
+
+// sqlAvailable is the `sql` capability: whether POST /api/sql can work for
+// this session on this server. The session holds sql:execute, no data
+// profile is active, archive access is on, and there is something LOCAL to
+// query: a complete snapshot in a local snapshot directory, or failing that
+// a change log that lives on local disk only.
+//
+// It runs on every page load, so it is cheap on purpose: a directory probe
+// that stops at the first table file (no footer read, no S3 listing), and
+// the archive lookup that reads archive_state without walking the archive
+// tree. That makes it CONSERVATIVE in two corners, where the card stays
+// hidden although the route would answer a statement over events:
+//
+//   - the snapshot root is s3:// and the change log is local (the route has
+//     to list S3 before it can say anything, which a capability must not);
+//   - there is no local snapshot, and the change log is registered in S3
+//     as well as still present on local disk (telling "still present"
+//     takes the tree walk this probe avoids).
+//
+// It is never optimistic: where it says true, GET /api/sql answers 200
+// (TestCapabilities_sqlAgreesWithTheRoute).
+func (s *Server) sqlAvailable(r *http.Request, b *bundle) bool {
+	if b == nil || b.noArchive || s.sqlRunner == nil || s.profileActiveFor(r) ||
+		!policyFrom(r.Context()).Allows(ext.PermSQLExecute) {
+		return false
+	}
+	if strings.HasPrefix(b.baselineSrc, "s3://") {
+		return false
+	}
+	if b.baselineSrc != "" && reconstruct.HasLocalSnapshot(b.baselineSrc) {
+		return true
+	}
+	// The portable lookup: no tree walk, no warning per call. A source it
+	// names in S3 is not (known to be) local.
+	sources, err := consoleArchiveSources(r.Context(), b.db, true)
+	if err != nil || len(sources) == 0 {
+		return false
+	}
+	return sqlArchivesLocal(sources)
+}
+
+// sqlArchivesLocal reports whether the change log can be read by the
+// sandbox: there is at least one archive source and none of them is in S3.
+func sqlArchivesLocal(sources []string) bool {
+	if len(sources) == 0 {
+		return false
+	}
+	for _, src := range sources {
+		if strings.HasPrefix(src, "s3://") {
+			return false
+		}
+	}
+	return true
+}
+
+// sqlMentionsEvents reports whether the statement names the events view.
+// The events view is the expensive half of the views to install: defining
+// it opens Parquet footers across the archive (one per archived file where
+// the column sets cannot be grouped), which on a real archive can cost
+// more than the whole time budget, and it is why the first SQL page was
+// removed. So the worker installs it only for a statement that names it.
+// A word match, deliberately loose, because a false negative would be
+// "events does not exist" for a statement that really reads it. A false
+// positive (the word as an alias, inside a string, a column of that name)
+// installs the view for nothing: on a local change log that reintroduces
+// the footer cost and can spend the whole time budget; on a change log that
+// lives in S3 it changes nothing, because the view is not installed there
+// at all (sqlViewsFor).
+var sqlEventsWord = regexp.MustCompile(`(?i)\bevents\b`)
+
+func sqlMentionsEvents(statement string) bool { return sqlEventsWord.MatchString(statement) }
+
+// sqlInfoResponse is GET /api/sql: what the panel needs before the first
+// query, read from the same resolver as /api/views.sql with no DuckDB and
+// no worker. Views are the names a statement can use.
+type sqlInfoResponse struct {
+	Views         []string     `json:"views"`
+	CopyUpdatedAt *time.Time   `json:"copy_updated_at"`
+	Limits        sqlLimitsDTO `json:"limits"`
+}
+
+// sqlLimitsDTO are the caps a query runs under, so the panel states the
+// real ones instead of hardcoding them.
+type sqlLimitsDTO struct {
+	TimeoutSeconds int `json:"timeout_seconds"`
+	MaxRows        int `json:"max_rows"`
+	MaxCellBytes   int `json:"max_cell_bytes"`
+}
+
+// handleSQLInfo is GET /api/sql. Same permission and the same gates as the
+// POST; it lists the views the copy defines (events, when a LOCAL change
+// log exists, and one state view per table of the newest snapshot), the
+// snapshot they are pinned to, and the limits. Metadata only: names, a
+// time, three numbers. Not audited as a data read.
+func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
+	b := s.resolveOr(w, r)
+	if b == nil {
+		return
+	}
+	if !s.sqlGate(w, r, b) {
+		return
+	}
+	in, err := s.buildViewsInput(r.Context(), b, viewsRequest{PinSnapshot: true, OmitEvents: true})
+	switch {
+	case errors.Is(err, errNoViewSources):
+		writeJSONError(w, http.StatusConflict, errNoViewSources.Error()+"; there is no copy to run SQL on yet")
+		return
+	case err != nil:
+		writeJSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if in.NeedsS3() {
+		writeJSONError(w, http.StatusConflict, sqlCopyNotLocalMessage)
+		return
+	}
+	// The events view is offered only over a local change log: a statement
+	// reading it where the change log is in S3 cannot be answered here.
+	eventsLocal := sqlArchivesLocal(in.ArchiveSources)
+	names := []string{}
+	for _, n := range in.DefinedViews() {
+		if n == "events" && !eventsLocal {
+			continue
+		}
+		names = append(names, n)
+	}
+	if len(names) == 0 {
+		writeJSONError(w, http.StatusConflict, sqlCopyNotLocalMessage)
+		return
+	}
+	resp := sqlInfoResponse{Views: names, Limits: sqlLimitsDTO{
+		TimeoutSeconds: int(s.sqlLimits.Timeout / time.Second),
+		MaxRows:        s.sqlLimits.MaxRows,
+		MaxCellBytes:   sqlsandbox.MaxCellBytes,
+	}}
+	if !in.BaselineSnapshot.IsZero() {
+		at := in.BaselineSnapshot.UTC()
+		resp.CopyUpdatedAt = &at
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
+	b := s.resolveOr(w, r)
+	if b == nil {
+		return
+	}
+	if !s.sqlGate(w, r, b) {
 		return
 	}
 	if f := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format"))); f != "" && f != "csv" && f != "json" {
@@ -147,10 +300,7 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The copy's layout, resolved the way /api/views.sql resolves it: local
-	// paths (never the portable S3 spellings), the state views pinned to the
-	// snapshot that exists now, no live leg.
-	in, err := s.buildViewsInput(r.Context(), b, viewsRequest{PinSnapshot: true})
+	in, eventsInS3, err := s.sqlViewsFor(r.Context(), b, req.SQL)
 	switch {
 	case errors.Is(err, errNoViewSources):
 		writeJSONError(w, http.StatusConflict,
@@ -160,7 +310,9 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if in.NeedsS3() {
+	if in.NeedsS3() || (!in.RendersAnyView() && eventsInS3) {
+		// The tables themselves are in S3, or the change log in S3 is all
+		// there is: nothing here is local.
 		writeJSONError(w, http.StatusConflict, sqlCopyNotLocalMessage)
 		return
 	}
@@ -196,6 +348,14 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.sqlRunner.Run(r.Context(), job)
 	if err != nil {
+		var qerr *sqlsandbox.QueryError
+		if eventsInS3 && errors.As(err, &qerr) && sqlEventsMissing.MatchString(qerr.Message) {
+			// The statement really read events, which was not installed
+			// because the change log is in S3: say that, not DuckDB's
+			// "does not exist".
+			writeJSONError(w, http.StatusUnprocessableEntity, sqlEventsInS3Message)
+			return
+		}
 		s.writeSQLError(w, r, err)
 		return
 	}
@@ -260,8 +420,12 @@ func sqlCopyDirs(in views.Input) []string {
 		seen[d] = true
 		dirs = append(dirs, d)
 	}
-	for _, src := range in.ArchiveSources {
-		add(src)
+	// The archive bases only when the events view is installed: they are
+	// what it reads, and nothing else does.
+	if in.RendersEventsView() {
+		for _, src := range in.ArchiveSources {
+			add(src)
+		}
 	}
 	for _, t := range in.SelectedBaselines() {
 		if t.Path != "" {
@@ -333,6 +497,50 @@ func dirCoversConfig(copyDirs, files []string) (dir, file string, covered bool) 
 	}
 	return "", "", false
 }
+
+// sqlViewsFor resolves the views the worker installs for one statement, the
+// way /api/views.sql resolves them: local paths (never the portable S3
+// spellings), the state views pinned to the snapshot that exists now, no
+// live leg.
+//
+// The events view is decided in two steps. First the layout WITHOUT it:
+// that read never touches S3, and it says where the change log lives. Then
+// the view is added only when the statement names it (sqlMentionsEvents) or
+// when it is all the copy has, AND the change log is local. eventsInS3
+// reports the other case: the statement names events (or nothing else is
+// defined) and the change log is in S3, so the view was left out. A
+// statement that merely contains the word then runs over the tables as it
+// should, and one that really reads events gets sqlEventsInS3Message
+// instead of "the copy is only on S3", which would be false for a server
+// whose tables are local.
+func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string) (in views.Input, eventsInS3 bool, err error) {
+	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true, OmitEvents: true})
+	if err != nil {
+		return views.Input{}, false, err
+	}
+	if !sqlMentionsEvents(statement) && in.RendersAnyView() {
+		return in, false, nil
+	}
+	if len(in.ArchiveSources) == 0 {
+		return in, false, nil
+	}
+	if !sqlArchivesLocal(in.ArchiveSources) {
+		return in, true, nil
+	}
+	in, err = s.buildViewsInput(ctx, b, viewsRequest{PinSnapshot: true})
+	if err != nil {
+		return views.Input{}, false, err
+	}
+	return in, false, nil
+}
+
+// sqlEventsMissing matches DuckDB's answer to a statement that reads a
+// table named events that is not defined.
+var sqlEventsMissing = regexp.MustCompile(`(?i)table with name "?events"? does not exist`)
+
+// sqlEventsInS3Message answers a statement that reads events on a server
+// whose change log is in S3.
+const sqlEventsInS3Message = "the change history for this server is on S3, so events cannot be read here; the tables can"
 
 // sqlCopyNotLocalMessage is the 409 for a copy the worker cannot reach.
 const sqlCopyNotLocalMessage = "the copy for this server is only on S3; SQL in the browser needs a local copy"

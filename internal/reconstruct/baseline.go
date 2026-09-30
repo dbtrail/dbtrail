@@ -546,6 +546,50 @@ func listBaselinesNewestUnreadable(ctx context.Context, source string, newest in
 	return files, unreadable, false, nil
 }
 
+// HasLocalSnapshot reports whether a LOCAL baseline directory holds at least
+// one snapshot the listing would return: a timestamp-named directory that is
+// complete (#467) with a table file under a schema directory. It stops at
+// the first one it finds and reads no Parquet footer, so it is cheap enough
+// for a capability probe that runs on every page load; ListBaselinesReport
+// is the full answer. An unreadable directory is "no".
+func HasLocalSnapshot(baselineDir string) bool {
+	entries, err := os.ReadDir(baselineDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, ok := parseDirTimestamp(entry.Name()); !ok {
+			continue
+		}
+		snapDir := filepath.Join(baselineDir, entry.Name())
+		if !baseline.SnapshotComplete(snapDir) {
+			continue
+		}
+		dbDirs, err := os.ReadDir(snapDir)
+		if err != nil {
+			continue
+		}
+		for _, dbDir := range dbDirs {
+			if !dbDir.IsDir() {
+				continue
+			}
+			files, err := os.ReadDir(filepath.Join(snapDir, dbDir.Name()))
+			if err != nil {
+				continue
+			}
+			for _, f := range files {
+				if !f.IsDir() && strings.HasSuffix(f.Name(), ".parquet") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func listBaselinesLocal(baselineDir string) ([]BaselineFile, []UnreadableSnapshot, error) {
 	entries, err := os.ReadDir(baselineDir)
 	if err != nil {

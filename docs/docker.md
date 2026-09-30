@@ -254,7 +254,7 @@ What a stale compose file costs:
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
 | the `iceberg-export` profile and its volume | there is no one-shot Iceberg export to run | `docker compose --profile iceberg-export run ...` says the service does not exist |
 | the `host.docker.internal` mapping (`extra_hosts`) | on Linux, a database on this same machine cannot be reached by that name | Adding the server fails with `lookup host.docker.internal: no such host` |
-| `BINTRAIL_CONSOLE_SQL_PANEL` (the current file does not set it) | nothing: the SQL page was removed in 0.75.0 | Remove the variable. It is read for one release and warns; download a DuckDB schema from **MCP Server** and query the same Parquet yourself |
+| `BINTRAIL_CONSOLE_SQL_PANEL` (the current file does not set it) | nothing: the SQL page it switched was removed in 0.75.0 | Remove the variable. It is read for one release and warns. SQL in the browser is on the Overview now and this variable does not control it |
 
 Two things make this easier to catch:
 
@@ -509,12 +509,12 @@ for the selected server — trigger a run, watch per-table match/mismatch/
 inconclusive results land, and drill into a mismatch — see
 [Checks, on the Snapshots page](console.md#the-snapshots-page).
 
-**SQL over your Parquet** is not answered by the daemon. The web interface's SQL page
-was removed in 0.75.0 (see [The SQL panel
-(removed)](console.md#the-sql-panel-removed)). Open **MCP Server**, click
-**Download views.sql** on the **Download a DuckDB schema** card, and run the
-file in your own DuckDB: no row cap, no time
-limit, and nothing executing inside the process that captures.
+**SQL over your Parquet** runs from the Overview: the **Ask it here** card opens
+an editor, and each query runs in a separate process with its own limits, over
+the copy on local disk, never inside the process that captures and never on
+MySQL (see [SQL in the browser](console.md#sql-in-the-browser)). For no row cap
+and no time limit, open **MCP Server**, click **Download views.sql** on the
+**Download a DuckDB schema** card, and run the file in your own DuckDB.
 
 Notes:
 
@@ -669,7 +669,7 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `BASELINE_DIR` | compose (optional) | Baseline dir for the boot `SOURCE_DSN` entry — set `/var/lib/bintrail/baselines` after the first `baseline` profile run to enable Time-travel on it. Also enables full-table `_snapshot.*` on the `flashback` profile shim |
 | `BASELINE_TRIGGER` | compose (optional) | Enables the web interface's in-process **Create baseline** button (dump→convert→upload) for a monitored server; **on by default**; set `BASELINE_TRIGGER=0` to disable |
 | `VERIFY_TRIGGER` | compose (optional) | Enables the web interface's Storage **Verification** panel (runs `bintrail verify` in-process) for a monitored server; **on by default**; set `VERIFY_TRIGGER=0` to disable |
-| `BINTRAIL_CONSOLE_SQL_PANEL` | retired | The web interface's SQL page and `POST /api/sql` were removed in 0.75.0. Read for one release, and warns that it does nothing |
+| `BINTRAIL_CONSOLE_SQL_PANEL` | retired | It switched the web interface's first SQL page, removed in 0.75.0. Read for one release, and warns that it does nothing. It does not control SQL in the browser |
 | `WAREHOUSE_DIR` | compose `iceberg-export` profile (optional) | Directory the Iceberg tables are written under (default `/var/lib/bintrail-iceberg`, in the `bintrail-iceberg` volume) |
 | `BASELINE_S3` | compose `iceberg-export` profile (optional) | S3 prefix holding the baseline snapshots to export from; wins over `BASELINE_DIR` |
 | `ICEBERG_TABLES` | compose `iceberg-export` profile (optional) | Comma-separated `schema.table` list to export (default: every table in the newest snapshot) |

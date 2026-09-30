@@ -77,6 +77,7 @@ export const WRITES = [
   { method: "POST", path: "/api/auth/login", count: 1, kind: "action", reason: "signs in; stores nothing but the session" },
   { method: "POST", path: "/api/auth/logout", count: 1, kind: "action", reason: "signs out; stores nothing" },
   { method: "POST", path: "/api/recover", count: 1, kind: "action", reason: "writes recovery SQL to the page; stores nothing" },
+  { method: "POST", path: "/api/sql", count: 1, kind: "action", reason: "runs one read-only query on the copy and shows or saves its result; stores nothing" },
   { method: "POST", path: "/api/servers/test", count: 1, kind: "action", reason: "tests a connection; stores nothing" },
   { method: "POST", path: "/api/servers/{id}/test", count: 2, kind: "action", reason: "tests a connection; stores nothing" },
   { method: "POST", path: "/api/servers/{id}/schema-snapshot", count: 1, kind: "action", reason: "starts a schema snapshot job" },

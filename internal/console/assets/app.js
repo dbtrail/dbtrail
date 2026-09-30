@@ -2423,7 +2423,7 @@ const USE_ART = {
 // are the yes), one sentence, one action. The `cap` card exists only where
 // the server reports the capability.
 const USE_CARDS = [
-  { id: "sql", title: "Ask it here", cap: "sql", action: "Open SQL",
+  { id: "sql", title: "Ask it here", cap: "sql", action: "Open SQL", primary: true,
     tags: [["now", true], ["always current", true], ["nothing to install", false]],
     line: () => ["Write SQL in this page. It runs on DBTrail's copy, not on MySQL."] },
   { id: "laptop", title: "Take it to your laptop", action: "Download",
@@ -2437,20 +2437,349 @@ const USE_CARDS = [
     line: () => ["Point your client at the time-travel port and add ", el("code", { text: "AS OF" }), "."] },
 ];
 
-// renderSQLPanel is the mount point for the in-page SQL panel (#1952): it
-// paints the panel into `box` and returns true, or returns false where this
-// build has none. This build has none; the "Ask it here" card stays hidden
-// behind the `sql` capability that build will report, so the card and the
-// panel arrive together.
-function renderSQLPanel(box) { return false; }
+// ── SQL on the copy (#1952) ──────────────────────────────────────────────────
+//
+// The panel "Ask it here" opens: a list of the tables the copy defines, a
+// plain textarea, Run, and the result as a table. The statement runs on the
+// server in a separate sandboxed process over the Parquet copy (POST
+// /api/sql), never on MySQL. Nothing here parses or highlights SQL, and
+// nothing is fetched from anywhere but this console.
+//
+// The pieces that decide what a person reads are pure functions, so they are
+// tested with plain values (assets_sql_panel_test.go).
+
+// SQL_LIST_MAX is how many table names the list paints at once. A copy can
+// define thousands of views; the filter narrows, the list never grows.
+const SQL_LIST_MAX = 50;
+// SQL_CELL_SHOW is how many characters of one cell the table paints. The
+// full value stays in the CSV; a result table is for reading, not storing.
+const SQL_CELL_SHOW = 300;
+
+// sqlColumnIsNumeric: whether a DuckDB column type is a number, so its
+// column right-aligns. By TYPE, never by looking at the values: a text
+// column full of digits (a zip code) stays left.
+function sqlColumnIsNumeric(type) {
+  return /^(U?(TINYINT|SMALLINT|INTEGER|BIGINT|HUGEINT)|FLOAT|DOUBLE|REAL|DECIMAL(\(.*\))?)$/i.test(String(type || "").trim());
+}
+
+// sqlAgo: "3 min ago" for an ISO time, "" when it cannot be read.
+function sqlAgo(iso, nowMs) {
+  const t = Date.parse(iso);
+  if (!isFinite(t)) return "";
+  const sec = Math.max(0, (nowMs - t) / 1000);
+  if (sec < 60) return "just now";
+  if (sec < 3600) return Math.round(sec / 60) + " min ago";
+  if (sec < 86400) return Math.round(sec / 3600) + " h ago";
+  const d = Math.round(sec / 86400);
+  return d + (d === 1 ? " day ago" : " days ago");
+}
+
+// sqlStatusLine: the one line that says what a query runs on and under
+// which limits, from what the server reported (GET /api/sql), never from
+// numbers written here.
+function sqlStatusLine(info, nowMs) {
+  const parts = [];
+  const ago = info && info.copy_updated_at ? sqlAgo(info.copy_updated_at, nowMs) : "";
+  parts.push(ago ? "runs on the copy updated " + ago : "runs on DBTrail's copy");
+  parts.push("read-only");
+  const lim = (info && info.limits) || {};
+  if (lim.timeout_seconds) parts.push(lim.timeout_seconds + " s limit");
+  return parts.join(" · ");
+}
+
+// sqlFilterViews: the names to paint for a filter, at most `max`, and how
+// many more match. Case-insensitive substring; an empty filter is the head
+// of the list.
+function sqlFilterViews(names, filter, max) {
+  const f = String(filter || "").trim().toLowerCase();
+  const all = (names || []).filter((n) => !f || String(n).toLowerCase().includes(f));
+  return { shown: all.slice(0, max), more: Math.max(0, all.length - max), matched: all.length };
+}
+
+// sqlStarterQuery: a first query over the first table (a state view when
+// there is one, else whatever the copy defines).
+function sqlStarterQuery(names) {
+  const list = names || [];
+  const first = list.find((n) => /^state_/.test(n)) || list[0];
+  return first ? "SELECT * FROM " + first + " LIMIT 100" : "";
+}
+
+// sqlCell: how one result cell is shown. NULL is its own token (isNull),
+// distinct from the text "NULL" and from an empty string. A nested value
+// (LIST, STRUCT, JSON) is its compact JSON text. Nothing here parses a
+// string cell: a long JSON value may have been cut on the server and is no
+// longer valid JSON.
+function sqlCell(v) {
+  if (v === null || v === undefined) return { text: "NULL", isNull: true };
+  if (typeof v === "object") return { text: JSON.stringify(v), isNull: false };
+  return { text: String(v), isNull: false };
+}
+
+// sqlCountLine: "3 rows in 184 ms". The time is the round trip the person
+// waited, measured in the page (the worker's own clock covers the statement
+// alone, not starting the process or installing the views, and reads "0 ms"
+// for a small query that took a fifth of a second to come back).
+function sqlCountLine(res, ms) {
+  const n = ((res && res.rows) || []).length;
+  const t = Math.round(ms || 0);
+  const took = t < 1 ? "under 1 ms" : t < 1000 ? t + " ms" : (t / 1000).toFixed(1) + " s";
+  return n.toLocaleString("en-US") + (n === 1 ? " row" : " rows") + " in " + took;
+}
+
+// sqlResultNotes: what was cut, said out loud. A result cut at the row cap,
+// and long values cut in place (the count says how many, not which).
+function sqlResultNotes(res, exactInts) {
+  const notes = [];
+  const n = ((res && res.rows) || []).length;
+  // A browser that cannot hand the page a number's own digits rounds whole
+  // numbers past 2^53 (an id of nineteen digits). Said where it can happen:
+  // a BIGINT or UBIGINT column on such a browser.
+  if (!exactInts && ((res && res.columns) || []).some((c) => /^U?BIGINT$/i.test(String(c.type || "").trim()))) {
+    notes.push("Large whole numbers may be rounded on this browser. Download CSV has every digit.");
+  }
+  if (res && res.truncated) notes.push("Showing the first " + n.toLocaleString("en-US") + " rows. The result has more: add a WHERE or a LIMIT to see a different part.");
+  const cut = (res && res.truncated_cells) || 0;
+  if (cut > 0) notes.push(cut === 1 ? "1 long value was cut." : cut.toLocaleString("en-US") + " long values were cut.");
+  return notes;
+}
+
+// sqlErrorView: one plain sentence per way a query can fail, and, where the
+// server's own words are the useful part (what DuckDB said, why a statement
+// was refused), those words verbatim as `detail`.
+function sqlErrorView(status, message, limits) {
+  const msg = String(message || "");
+  const lim = limits || {};
+  switch (status) {
+    case 400: return { text: "The request was not understood.", detail: msg };
+    case 403:
+      if (/data profile/.test(msg)) return { text: "SQL is off while a data profile is active. The profile filters what this console shows, and SQL reads the raw files, which it cannot filter.", detail: "" };
+      return { text: "Your session may not run SQL here.", detail: "" };
+    case 409:
+      if (/only on S3/.test(msg)) return { text: "The copy for this server is only on S3. SQL in this page needs a local copy.", detail: "" };
+      if (/no copy|no view/.test(msg)) return { text: "There is no copy to run SQL on yet.", detail: "" };
+      return { text: "This copy cannot be queried here.", detail: msg };
+    case 422: return { text: "The query did not run.", detail: msg };
+    case 429: return { text: "A query of yours is already running, or the server is at its limit of two. Wait for it to finish.", detail: "" };
+    case 504: return { text: "The query ran longer than the " + (lim.timeout_seconds ? lim.timeout_seconds + " s " : "time ") + "limit and was stopped. Narrow it: a WHERE on a table, or a smaller window on events.", detail: "" };
+    case 500: return { text: "The query could not be run. The console log has the details.", detail: "" };
+    case 502: return { text: "The copy could not be read.", detail: msg };
+    default: return { text: status ? "The query failed." : "The server did not answer.", detail: msg };
+  }
+}
+
+// SQL_EXACT_INTS: whether this engine hands a JSON reviver the number's
+// source text. Asked once; without it sqlParseResult cannot keep the digits
+// of a whole number past 2^53, and sqlResultNotes says so on the result.
+const SQL_EXACT_INTS = (() => {
+  try { return JSON.parse("1", function (k, v, c) { return !!(c && typeof c.source === "string"); }) === true; } catch (_) { return false; }
+})();
+
+// sqlParseResult reads the JSON result keeping every digit of an integer
+// JavaScript cannot hold (a BIGINT past 2^53 comes back as its digits, as
+// text) where the engine exposes the source text to the reviver.
+function sqlParseResult(text) {
+  return JSON.parse(text, function (k, v, c) {
+    return typeof v === "number" && c && typeof c.source === "string" && !Number.isSafeInteger(v) && /^-?\d+$/.test(c.source) ? c.source : v;
+  });
+}
+
+// sqlPost sends one statement. JSON by default; with csv it asks for the
+// CSV form (Accept: text/csv) and returns the file's text. Same auth, server
+// header and 401 handling as api().
+async function sqlPost(statement, signal, csv) {
+  const headers = { "Content-Type": "application/json" };
+  if (csv) headers.Accept = "text/csv";
+  if (TOKEN) headers.Authorization = "Bearer " + TOKEN;
+  if (currentServer) headers["X-Bintrail-Server"] = currentServer;
+  const res = await fetch("/api/sql", { method: "POST", headers, body: JSON.stringify({ sql: statement }), signal });
+  const text = await res.text();
+  if (!res.ok) {
+    if (res.status === 401) handleUnauthorized();
+    let msg = text || "HTTP " + res.status;
+    try { const j = JSON.parse(text); if (j && j.error) msg = j.error; } catch (_) { /* raw text it is */ }
+    throw apiError(res.status, msg);
+  }
+  if (csv) return text;
+  try { return sqlParseResult(text); } catch (_) { throw new Error("malformed response from /api/sql"); }
+}
+
+// sqlResultTable paints the result: a real table with a caption, a header
+// that stays while the rows scroll, numbers right-aligned by column type.
+function sqlResultTable(res, ms) {
+  const cols = res.columns || [];
+  const numeric = cols.map((c) => sqlColumnIsNumeric(c.type));
+  const table = el("table", { class: "sqlp-table" });
+  table.append(el("caption", { class: "sqlp-sr", text: "Query result, " + sqlCountLine(res, ms) }));
+  const hr = el("tr");
+  cols.forEach((c, i) => hr.append(el("th", { scope: "col", class: numeric[i] ? "num" : "", text: c.name, title: c.type })));
+  table.append(el("thead", null, hr));
+  const body = el("tbody");
+  (res.rows || []).forEach((row) => {
+    const tr = el("tr");
+    row.forEach((v, i) => {
+      const cell = sqlCell(v);
+      const td = el("td", { class: numeric[i] ? "num" : "" });
+      if (cell.isNull) td.append(el("span", { class: "sqlp-null", text: "NULL" }));
+      else if (cell.text.length > SQL_CELL_SHOW) { td.textContent = cell.text.slice(0, SQL_CELL_SHOW) + "…"; td.title = cell.text.slice(0, 2000); }
+      else td.textContent = cell.text;
+      tr.append(td);
+    });
+    body.append(tr);
+  });
+  table.append(body);
+  return el("div", { class: "sqlp-scroll" }, table);
+}
+
+// renderSQLPanel paints the panel into `box` and returns true. One query at
+// a time: Run is off while one runs, and the previous result is cleared, not
+// left on screen under a new statement. A running query is aborted by
+// Cancel, and also when the panel goes away under it (Close, another card,
+// another server, another page): the server stops the worker when the
+// request is dropped, so the next Run is not refused as "already running".
+function renderSQLPanel(box) {
+  const gen = serverGen;
+  const st = { info: null, ctl: null, lastSQL: "" };
+  const alive = () => gen === serverGen && box.isConnected;
+
+  const filter = el("input", { class: "sqlp-filter", type: "search", placeholder: "Filter tables", "aria-label": "Filter tables", autocomplete: "off" });
+  const list = el("div", { class: "sqlp-list", role: "list" });
+  const tables = el("div", { class: "sqlp-tables" }, filter, list);
+
+  const ta = el("textarea", { class: "sqlp-editor", id: "sqlp-sql", rows: "6", spellcheck: "false", autocomplete: "off", autocapitalize: "off" });
+  const run = el("button", { class: "btn btn-sm btn-primary sqlp-run", type: "button", text: "Run", title: "Ctrl+Enter or ⌘+Enter" });
+  const cancel = el("button", { class: "btn btn-sm sqlp-cancel", type: "button", text: "Cancel" });
+  cancel.hidden = true;
+  const count = el("span", { class: "sqlp-count" });
+  const csv = el("button", { class: "btn btn-sm btn-ghost sqlp-csv", type: "button", text: "Download CSV" });
+  csv.disabled = true;
+  const meta = el("span", { class: "sqlp-meta", text: sqlStatusLine(null, Date.now()) });
+  const msg = el("div", { class: "sqlp-msg", role: "status", "aria-live": "polite" });
+  const results = el("div", { class: "sqlp-results", tabindex: "-1", role: "region", "aria-label": "Query results" });
+  const right = el("div", { class: "sqlp-q" },
+    el("label", { class: "sqlp-sr", for: "sqlp-sql", text: "SQL statement" }), ta,
+    el("div", { class: "sqlp-bar" }, run, cancel, count, csv), msg, results);
+  box.append(el("div", { class: "sqlp" }, tables, right), el("p", { class: "sqlp-foot" }, meta));
+
+  const insert = (name) => {
+    const a = ta.selectionStart || 0, b = ta.selectionEnd || 0;
+    ta.value = ta.value.slice(0, a) + name + ta.value.slice(b);
+    ta.focus();
+    ta.selectionStart = ta.selectionEnd = a + name.length;
+  };
+  const paintList = () => {
+    clear(list);
+    const names = (st.info && st.info.views) || [];
+    filter.placeholder = names.length ? "Filter " + names.length.toLocaleString("en-US") + (names.length === 1 ? " table" : " tables") : "Filter tables";
+    const f = sqlFilterViews(names, filter.value, SQL_LIST_MAX);
+    f.shown.forEach((n) => list.append(el("button", { class: "sqlp-name", type: "button", role: "listitem", text: n, title: "Insert " + n, onclick: () => insert(n) })));
+    if (f.more > 0) list.append(el("div", { class: "sqlp-more", text: "… " + f.more.toLocaleString("en-US") + " more. Filter to narrow." }));
+    if (names.length && f.matched === 0) list.append(el("div", { class: "sqlp-more", text: "No table matches." }));
+  };
+  filter.addEventListener("input", paintList);
+
+  const showError = (err) => {
+    clear(msg);
+    const v = sqlErrorView((err && err.status) || 0, (err && err.message) || "", st.info && st.info.limits);
+    msg.append(el("p", { class: "sqlp-err", text: v.text }));
+    if (v.detail) msg.append(el("pre", { class: "sqlp-detail", text: v.detail }));
+  };
+  const busy = (on) => {
+    run.disabled = on;
+    cancel.hidden = !on;
+    ta.readOnly = on;
+  };
+
+  const runNow = async () => {
+    if (st.ctl) return;
+    const statement = ta.value;
+    if (!statement.trim()) { clear(msg); msg.append(el("p", { class: "sqlp-err", text: "Write a query first." })); return; }
+    clear(msg); clear(results);
+    count.textContent = "";
+    csv.disabled = true;
+    st.lastSQL = "";
+    results.append(ovSkelLines(4));
+    const ctl = new AbortController();
+    st.ctl = ctl;
+    busy(true);
+    // The panel can be taken away while the query runs (Close, another
+    // card, a server switch, another page). Nothing tells it so, so it
+    // looks: the moment it is gone the request is dropped, which is what
+    // stops the worker on the server. Removing the panel is a change to
+    // the page, so the observer sees it at once; the timer is for a server
+    // switch, which changes the server first and the page a moment later.
+    const dropIfGone = () => { if (!alive()) ctl.abort(); };
+    const seen = typeof MutationObserver === "function" ? new MutationObserver(dropIfGone) : null;
+    if (seen) seen.observe(document.body, { childList: true, subtree: true });
+    const gone = setInterval(dropIfGone, 200);
+    const t0 = performance.now();
+    try {
+      const res = await sqlPost(statement, ctl.signal, false);
+      if (!alive()) return;
+      const ms = performance.now() - t0;
+      clear(results);
+      st.lastSQL = statement;
+      count.textContent = sqlCountLine(res, ms);
+      sqlResultNotes(res, SQL_EXACT_INTS).forEach((n) => results.append(el("p", { class: "sqlp-note", text: n })));
+      if ((res.columns || []).length) results.append(sqlResultTable(res, ms));
+      csv.disabled = false;
+      // The copy a later query runs on may be newer than the one the panel
+      // opened on: the answer carries the snapshot it actually used.
+      if (st.info && res.copy_updated_at) { st.info.copy_updated_at = res.copy_updated_at; meta.textContent = sqlStatusLine(st.info, Date.now()); }
+      results.focus();
+    } catch (err) {
+      if (!alive()) return;
+      clear(results);
+      if (err && err.name === "AbortError") { clear(msg); msg.append(el("p", { class: "sqlp-note", text: "Cancelled." })); }
+      else showError(err);
+    } finally {
+      clearInterval(gone);
+      if (seen) seen.disconnect();
+      if (st.ctl === ctl) st.ctl = null;
+      if (alive()) busy(false);
+    }
+  };
+  run.onclick = runNow;
+  cancel.onclick = () => { if (st.ctl) st.ctl.abort(); };
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runNow(); }
+  });
+  csv.onclick = async () => {
+    if (!st.lastSQL) return;
+    csv.disabled = true;
+    try {
+      const text = await sqlPost(st.lastSQL, undefined, true);
+      downloadBlob("dbtrail-sql.csv", text, "text/csv");
+    } catch (err) {
+      if (alive()) showError(err);
+    } finally {
+      if (alive()) csv.disabled = !st.lastSQL;
+    }
+  };
+
+  // What the copy defines, when it was updated, and the real limits: one
+  // cheap read (no query runs), so the list and the status line are true
+  // before the first Run.
+  list.append(ovSkelLines(3));
+  api("/api/sql").then((info) => {
+    if (!alive()) return;
+    st.info = info || {};
+    meta.textContent = sqlStatusLine(st.info, Date.now());
+    paintList();
+    if (!ta.value) ta.value = sqlStarterQuery(st.info.views);
+  }, (err) => {
+    if (!alive()) return;
+    clear(list);
+    list.append(el("div", { class: "sqlp-more", text: "The table list could not be read." }));
+    showError(err);
+  });
+  return true;
+}
 
 // USE_PANELS: what each card opens under the row. Each reuses the surface
 // that already does the job elsewhere in the console, so the Overview never
 // grows a second way to download, set up or connect.
 const USE_PANELS = {
-  sql(body) {
-    if (!renderSQLPanel(body)) body.append(el("p", { class: "use-note", text: "Writing SQL in this page is not part of this build yet." }));
-  },
+  sql(body) { renderSQLPanel(body); },
   laptop(body, st) {
     if (st.cta === "none") {
       body.append(el("p", { class: "use-note", text: "The list of copies could not be read. Reload the page to try again." }));
@@ -2568,7 +2897,7 @@ function useCopySection() {
     def.tags.forEach(([t, yes]) => tags.append(el("span", { class: "use-tag" + (yes ? " y" : ""), text: t })));
     card.append(tags);
     card.append(el("p", { class: "use-line" }, ...def.line()));
-    const btn = el("button", { class: "btn use-act", type: "button", text: def.action, "aria-expanded": "false",
+    const btn = el("button", { class: "btn use-act" + (def.primary ? " btn-primary" : ""), type: "button", text: def.action, "aria-expanded": "false",
       onclick: (e) => { e.stopPropagation(); open(def.id); } });
     card.append(btn);
     card.addEventListener("click", () => open(def.id));
