@@ -932,19 +932,22 @@ function badge(type) { return el("span", { class: "badge " + badgeClass(type), t
 function docsLink(route, name) {
   const slug = DOCS_PAGES[route];
   if (!slug) return null;
-  const a = el("a", { class: "page-docs", href: DOCS_BASE + slug + "/", target: "_blank", rel: "noopener",
+  const a = el("a", { class: "chip page-docs", href: DOCS_BASE + slug + "/", target: "_blank", rel: "noopener",
     title: typeof name === "string" && name ? "Open the " + name + " docs in a new tab" : "Open the docs in a new tab" });
   a.append(el("span", { text: "Docs" }), icon("external"));
   return a;
 }
 
-function pageHead(title, subNode) {
+function pageHead(title, subNode, actions) {
   // The route is read from the location on every call, so the link follows
   // every route change and re-render, not only the first paint. It sits
-  // BESIDE the h1, not inside it: the title wears a clipped text gradient and
-  // is read as a heading, and "Events Docs" is not the page's name.
+  // BESIDE the h1, not inside it: the title is read as a heading, and
+  // "Events Docs" is not the page's name.
   const row = el("div", { class: "page-title-row" },
     el("h1", { class: "page-title", text: title }), docsLink(routeFromLocation(), title));
+  // Header actions sit right-aligned on the title row (#1950): one slot, so
+  // every view that grows an action puts it in the same place.
+  if (actions && actions.length) row.append(el("div", { class: "page-actions" }, ...actions));
   const head = el("div", { class: "page-head" }, row);
   if (subNode) head.append(subNode);
   return head;
@@ -10768,12 +10771,19 @@ function openModal(opts) {
 }
 
 // focusModal moves keyboard focus into a freshly-opened dialog (#968): the
-// first form field when there is one, else the first button (usually the ✕
-// close). Escape-to-close lives in globalKeydown, keyed off the shared #modal
-// slot — no per-dialog wiring needed.
+// first form field when there is one, else the dialog panel itself
+// (tabindex -1: a programmatic target, not a tab stop). It used to land on
+// the first button, which put the focus ring on the close X the moment a
+// dialog with nothing to type into opened (#1950); the panel holds focus
+// without drawing anything, and Tab from it reaches the first control.
+// Escape-to-close lives in globalKeydown, keyed off the shared #modal slot,
+// so no per-dialog wiring is needed.
 function focusModal(scrim) {
-  const f = scrim.querySelector("input, select, textarea") || scrim.querySelector("button");
-  if (f) f.focus();
+  const f = scrim.querySelector("input, select, textarea");
+  if (f) { f.focus(); return; }
+  const panel = scrim.querySelector('[role="dialog"]') || scrim;
+  if (!panel.hasAttribute("tabindex")) panel.setAttribute("tabindex", "-1");
+  panel.focus();
 }
 
 const VFY_KIND_LABEL = {

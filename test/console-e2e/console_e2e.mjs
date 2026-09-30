@@ -4767,24 +4767,19 @@ try {
     : bad("brand paint: the warmed loading bar stays clear of the violet panel ground",
         JSON.stringify({ ratio: Number((brand.skelVioletRatio || 0).toFixed(3)), parsed: brand.skelVioletParsed }));
 
-  // ── Scenario 17t — the tropical pass: the console wears the site's
-  // sunset for real. Five independent guards, each on the surface where the
-  // colour actually lands: the sidebar's tinted morning ground (light but
-  // NEVER white, and never back to the dark night), its dark text, the
-  // active pill, the gradient page title, and the tinted card rotation. Computed style, not declarations — a scoped token remap that
-  // stops resolving (the exact way this pass could silently die) leaves
-  // declarations intact and only the computed values change.
-  const trop = await page.evaluate(() => {
-    const side = document.querySelector(".side");
-    const item = document.querySelector(".nav-item:not(.active)");
-    const active = document.querySelector(".nav-item.active");
-    const title = document.querySelector(".page-title");
-    // Normalized through a canvas: computed colors come back as authored
-    // (oklch on this branch, rgb elsewhere), and a parse-only reader would
-    // go red on FORMAT instead of value. Cheap gamma-encoded luma, NOT the
-    // WCAG luminance 17e computes — 0.6 is a coarse light/dark split, never
-    // a contrast floor. Fails safe: a rejected color leaves the canvas
-    // black and reads as dark.
+  // ── Scenario 17t: the quiet shell (#1950 slice 4). This replaced the
+  // tropical-pass scenario and is its mirror, not a relaxation: every probe
+  // asserts the FLAT state off computed style on the surface where the colour
+  // lands, so a token that stops resolving still fails. The sidebar is flat
+  // --surface with no gradient layers, its text is dark ink and never
+  // underlined, the active page is the raised surface with a brand rail on
+  // its left edge (not a pill), page titles are plain ink, and the canvas
+  // carries no haze.
+  const shell = await page.evaluate(() => {
+    const cs = (n, p) => getComputedStyle(n, p || null);
+    // Cheap gamma-encoded luma through a canvas, a coarse light/dark split
+    // and never a contrast floor. Fails safe: a rejected colour leaves the
+    // canvas black and reads as dark.
     const lum = (c) => {
       const cv = document.createElement("canvas");
       cv.width = cv.height = 1;
@@ -4794,46 +4789,65 @@ try {
       const d = ctx.getImageData(0, 0, 1, 1).data;
       return (0.2126 * d[0] + 0.7152 * d[1] + 0.0722 * d[2]) / 255;
     };
-    const sideCS = getComputedStyle(side);
-    // the linear layer's first stop IS the ground's identity: light but not
-    // white. Serialized computed backgroundImage keeps the authored oklch.
-    const linear = sideCS.backgroundImage.split("linear-gradient")[1] || "";
-    const stop = (/oklch\([^)]+\)/.exec(linear) || [""])[0];
+    // A token's value as the engine serialises it, so it compares as a
+    // string against the same engine's computed backgroundColor.
+    const ref = (token) => {
+      const s = document.createElement("span");
+      s.style.backgroundColor = "var(" + token + ")";
+      document.body.appendChild(s);
+      const v = cs(s).backgroundColor;
+      s.remove();
+      return v;
+    };
+    const side = document.querySelector(".side");
+    const item = document.querySelector(".nav-item:not(.active)");
+    const active = document.querySelector(".nav-item.active");
+    const title = document.querySelector(".page-title");
+    const main = document.querySelector(".main");
     return {
-      groundImage: sideCS.backgroundImage,
-      stopLum: stop ? lum(stop) : -1,
-      itemLum: item ? lum(getComputedStyle(item).color) : -1,
-      activeImage: active ? getComputedStyle(active).backgroundImage : "",
-      activeColor: active ? getComputedStyle(active).color : "",
-      titleClip: title ? getComputedStyle(title).webkitBackgroundClip : "",
-      titleColor: title ? getComputedStyle(title).color : "",
-      titleImage: title ? getComputedStyle(title).backgroundImage : "",
+      sideImage: cs(side).backgroundImage,
+      sideColor: cs(side).backgroundColor,
+      surface: ref("--surface"),
+      raised: ref("--raised"),
+      itemLum: item ? lum(cs(item).color) : -1,
+      itemUnderline: item ? cs(item).textDecorationLine : "",
+      activeImage: active ? cs(active).backgroundImage : "",
+      activeColor: active ? cs(active).backgroundColor : "",
+      activeLum: active ? lum(cs(active).color) : -1,
+      railImage: active ? cs(active, "::before").backgroundImage : "",
+      titleClip: title ? cs(title).webkitBackgroundClip : "",
+      titleColor: title ? cs(title).color : "",
+      titleImage: title ? cs(title).backgroundImage : "",
+      mainImage: cs(main).backgroundImage,
     };
   });
-  (/radial-gradient/.test(trop.groundImage) && /linear-gradient/.test(trop.groundImage))
-    ? ok("tropical: the sidebar wears the tinted ground (radial glows over the linear base)")
-    : bad("tropical: the sidebar wears the tinted ground (radial glows over the linear base)", trop.groundImage.slice(0, 120));
-  (trop.stopLum > 0.80 && trop.stopLum < 0.985)
-    ? ok("tropical: the sidebar ground is light but never white (and never the night)")
-    : bad("tropical: the sidebar ground is light but never white (and never the night)", "stop luminance " + trop.stopLum.toFixed(3));
-  (trop.itemLum >= 0 && trop.itemLum < 0.4)
-    ? ok("tropical: sidebar text stays dark ink on the light ground")
-    : bad("tropical: sidebar text stays dark ink on the light ground", "luminance " + trop.itemLum.toFixed(3));
-  (/linear-gradient/.test(trop.activeImage) && trop.activeColor === "rgb(255, 255, 255)")
-    ? ok("tropical: the active page is the sunset pill with white text")
-    : bad("tropical: the active page is the sunset pill with white text", JSON.stringify({ i: trop.activeImage.slice(0, 80), c: trop.activeColor }));
-  (trop.titleClip === "text" && trop.titleColor === "rgba(0, 0, 0, 0)" && /gradient/.test(trop.titleImage))
-    ? ok("tropical: page titles wear the headline gradient")
-    : bad("tropical: page titles wear the headline gradient", JSON.stringify({ clip: trop.titleClip, c: trop.titleColor }));
+  (shell.sideImage === "none" && shell.sideColor === shell.surface)
+    ? ok("shell: the sidebar is flat --surface, no gradient layers")
+    : bad("shell: the sidebar is flat --surface, no gradient layers", JSON.stringify({ i: shell.sideImage.slice(0, 80), c: shell.sideColor, want: shell.surface }));
+  (shell.itemLum >= 0 && shell.itemLum < 0.4)
+    ? ok("shell: sidebar text is dark ink")
+    : bad("shell: sidebar text is dark ink", "luminance " + shell.itemLum.toFixed(3));
+  shell.itemUnderline === "none"
+    ? ok("shell: navigation is never underlined")
+    : bad("shell: navigation is never underlined", shell.itemUnderline);
+  (shell.activeImage === "none" && shell.activeColor === shell.raised && shell.activeLum >= 0 && shell.activeLum < 0.4)
+    ? ok("shell: the active page is the raised surface with ink text, not a pill")
+    : bad("shell: the active page is the raised surface with ink text, not a pill", JSON.stringify({ i: shell.activeImage.slice(0, 80), c: shell.activeColor, want: shell.raised, lum: shell.activeLum }));
+  /linear-gradient/.test(shell.railImage)
+    ? ok("shell: the active rail wears the brand gradient")
+    : bad("shell: the active rail wears the brand gradient", shell.railImage.slice(0, 80));
+  (shell.titleClip !== "text" && shell.titleColor !== "rgba(0, 0, 0, 0)" && shell.titleImage === "none")
+    ? ok("shell: page titles are plain ink, no gradient")
+    : bad("shell: page titles are plain ink, no gradient", JSON.stringify({ clip: shell.titleClip, c: shell.titleColor, i: shell.titleImage.slice(0, 60) }));
+  shell.mainImage === "none"
+    ? ok("shell: the canvas is flat --bg, no haze")
+    : bad("shell: the canvas is flat --bg, no haze", shell.mainImage.slice(0, 80));
 
-  // Two guards that outlived the night version. Selection: ::selection
-  // resolves var() against the originating element, so any future ink
-  // remap inside .side puts light glyphs on the sun highlight (the night
-  // draft measured 1.32:1) — dark ink must hold. Haze:
-  // background-attachment local is what keeps scrolled list headers off
-  // the haze peak; a background shorthand edit on .main silently resets
-  // it to scroll.
-  const tropSide = await page.evaluate(() => {
+  // Selection outlived every sidebar ground: ::selection resolves var()
+  // against the originating element, so any future ink remap inside .side
+  // puts light glyphs on the sun highlight (the night draft measured 1.32:1);
+  // dark ink must hold.
+  const shellSel = await page.evaluate(() => {
     const lum = (c) => {
       const cv = document.createElement("canvas");
       cv.width = cv.height = 1;
@@ -4844,17 +4858,11 @@ try {
       return (0.2126 * d[0] + 0.7152 * d[1] + 0.0722 * d[2]) / 255;
     };
     const meta = document.querySelector(".side-meta");
-    return {
-      selLum: meta ? lum(getComputedStyle(meta, "::selection").color) : -1,
-      attachment: getComputedStyle(document.querySelector(".main")).backgroundAttachment,
-    };
+    return { selLum: meta ? lum(getComputedStyle(meta, "::selection").color) : -1 };
   });
-  (tropSide.selLum >= 0 && tropSide.selLum < 0.4)
-    ? ok("tropical: sidebar text selection keeps dark ink on the sun highlight")
-    : bad("tropical: sidebar text selection keeps dark ink on the sun highlight", "lum " + tropSide.selLum.toFixed(3));
-  /^local/.test(tropSide.attachment)
-    ? ok("tropical: the haze is anchored to scroll content, not the viewport")
-    : bad("tropical: the haze is anchored to scroll content, not the viewport", tropSide.attachment);
+  (shellSel.selLum >= 0 && shellSel.selLum < 0.4)
+    ? ok("shell: sidebar text selection keeps dark ink on the sun highlight")
+    : bad("shell: sidebar text selection keeps dark ink on the sun highlight", "lum " + shellSel.selLum.toFixed(3));
 
 
   // One card ground (#1950 slice 3): the Status cards used to rotate through
