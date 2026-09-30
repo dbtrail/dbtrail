@@ -208,7 +208,7 @@ func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsReques
 			// Not "nothing here": the location holds snapshot directories
 			// this process could not open (#1601). "No baseline yet" would
 			// send the operator to take a backup they already have.
-			err := fmt.Errorf("list baselines: %d snapshot director(y/ies) under %s could not be read (the console log has the error); nothing readable to generate views over", baseUnreadable, baseSrc)
+			err := fmt.Errorf("list baselines: %d snapshot director(y/ies) under %s could not be read (DBTrail's log has the error); nothing readable to generate views over", baseUnreadable, baseSrc)
 			if archiveErr != nil {
 				// Two things broke; name both, or the operator fixes the
 				// permission and meets the second refusal cold.

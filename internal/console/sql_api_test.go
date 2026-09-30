@@ -431,8 +431,8 @@ func TestSQLAPI_errorMapping(t *testing.T) {
 		{"busy", sqlsandbox.ErrBusy, 429, "already running", ""},
 		{"not local", sqlsandbox.ErrCopyNotLocal, 409, "only on S3", ""},
 		{"too large", sqlsandbox.ErrResultTooLarge, 422, "too large", ""},
-		{"worker", &sqlsandbox.WorkerError{Err: errors.New("exit status 2"), Stderr: "panic at /var/lib/secret/path"}, 500, "console log", "/var/lib/secret"},
-		{"unknown", errors.New("something else"), 500, "console log", "something else"},
+		{"worker", &sqlsandbox.WorkerError{Err: errors.New("exit status 2"), Stderr: "panic at /var/lib/secret/path"}, 500, "DBTrail's log", "/var/lib/secret"},
+		{"unknown", errors.New("something else"), 500, "DBTrail's log", "something else"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
