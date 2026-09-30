@@ -13975,8 +13975,10 @@ function connectAddr(form) {
   const f = form.elements;
   return f.source_host.value.trim() + ":" + (f.source_port.value.trim() || "3306");
 }
-// The pending automatic re-check, per form, and how many rounds ran.
+// The pending automatic re-check, per form, and how many rounds ran; and the
+// same for a step 1 that did not get there.
 const connectRecheck = new WeakMap();
+const connectFindRetry = new WeakMap();
 
 // connectSchedule runs fn after ms. Its own name so the Go harness, where
 // setTimeout runs at once, can hold the re-check loop instead of spinning it.
@@ -14066,6 +14068,10 @@ function setConnectStep(form, n) {
   $all("[data-cx-dot]", form).forEach((d) => d.classList.toggle("on", Number(d.dataset.cxDot) <= num));
   const btn = form.querySelector("button[type=submit]");
   if (btn) btn.textContent = CONNECT_STEP_BUTTON[n];
+  // The way to the full form is for steps 1 and 2. On step 3 the checks are
+  // running for a server already found, and leaving would stop them.
+  const full = form.querySelector("button#connect-full-form");
+  if (full) full.hidden = num > 2;
 }
 
 function buildConnectForm() {
@@ -14160,7 +14166,9 @@ function showConnectForm(draft) {
   // A new address undoes what was found for the old one: its block and its
   // checks describe another server.
   ["source_host", "source_port"].forEach((k) => f[k].addEventListener("input", () => {
-    if (form.dataset.step !== "1" && !form.dataset.done) backToWhere(form);
+    if (form.dataset.done) return;
+    if (form.dataset.step !== "1") backToWhere(form);
+    else stopConnectRecheck(form);
   }));
   ["source_host", "source_port", "source_user"].forEach((k) =>
     f[k].addEventListener("input", () => saveConnectDraftSoon(form)));
@@ -14188,9 +14196,11 @@ function backToWhere(form) {
   setConnectStep(form, 1);
 }
 
-async function identifyConnect(form) {
+async function identifyConnect(form, pressed = true) {
   if (form.dataset.busy) return;
   const f = form.elements;
+  const round = pressed ? 1 : ((connectFindRetry.get(form) || {}).round || 0) + 1;
+  stopConnectRecheck(form);
   if (!f.source_host.value.trim()) { formMsg("Fill in Host, the address of your database.", true); f.source_host.focus(); return; }
   const btn = form.querySelector("button[type=submit]");
   const asked = connectAddr(form);
@@ -14210,9 +14220,32 @@ async function identifyConnect(form) {
   }
   // Host or Port changed while it looked: the answer is about another server.
   if (!form.isConnected || connectAddr(form) !== asked) return;
-  if (id.kind) showNotFound(form, id);
-  else showIdentified(form, id, "");
+  if (id.kind) {
+    showNotFound(form, id);
+    scheduleFindRetry(form, round);
+  } else showIdentified(form, id, "");
   saveConnectDraftSoon(form);
+}
+
+// scheduleFindRetry looks again in 10 seconds, CONNECT_RECHECK_MAX times at
+// most, then waits for a press. Safe for the server: none of the causes
+// completes a MySQL handshake, which is what counts toward max_connect_errors
+// (a blocked address is refused before one, and a greeting that answers ends
+// the retries by moving to step 2).
+function scheduleFindRetry(form, round) {
+  const line = form.querySelector("p#connect-find-auto");
+  if (round >= CONNECT_RECHECK_MAX) {
+    if (line) line.textContent = "Stopped trying. Press Find it when it is fixed.";
+    return;
+  }
+  const asked = connectAddr(form);
+  const timer = connectSchedule(() => {
+    const r = connectFindRetry.get(form);
+    if (!r || r.timer !== timer || !form.isConnected || form.dataset.done || form.dataset.step !== "1" || connectAddr(form) !== asked) return;
+    identifyConnect(form, false);
+  }, CONNECT_RECHECK_MS);
+  connectFindRetry.set(form, { timer, round });
+  if (line) line.textContent = "Trying again in 10 seconds.";
 }
 
 // showNotFound draws why step 1 did not get there and stays on it.
@@ -14230,10 +14263,11 @@ function showNotFound(form, id) {
   if (p.use) {
     const useHost = p.use.replace(/:\d+$/, "");
     box.append(el("button", { class: "btn btn-sm", type: "button", text: "Use " + useHost, onclick: () => {
-      f.source_host.value = useHost; saveConnectDraftSoon(form); identifyConnect(form);
+      f.source_host.value = useHost; saveConnectDraftSoon(form); identifyConnect(form, true);
     } }));
   }
   if (p.note) box.append(el("p", { class: "form-hint", text: p.note }));
+  box.append(el("p", { class: "cx-auto", id: "connect-find-auto", "aria-live": "polite" }));
   $("#connect-found", form).replaceChildren(box);
   setConnectStep(form, 1);
 }
@@ -14285,9 +14319,11 @@ function connectIdentityBody(form) {
 }
 
 function stopConnectRecheck(form) {
-  const r = connectRecheck.get(form);
-  if (r && r.timer) clearTimeout(r.timer);
-  connectRecheck.delete(form);
+  for (const m of [connectRecheck, connectFindRetry]) {
+    const r = m.get(form);
+    if (r && r.timer) clearTimeout(r.timer);
+    m.delete(form);
+  }
 }
 
 // LIGHT_STATE says each light's state in words, for a screen reader.

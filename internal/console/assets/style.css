@@ -1178,6 +1178,7 @@ button { font-family: inherit; }
 .cx-auto { font-size: 12.5px; color: var(--ink-3); margin: 0 0 10px; }
 .cx-auto:empty { display: none; }
 .cx .modal-foot .cx-full { margin-left: auto; }
+.cx .modal-foot .cx-full[hidden] { display: none; }
 .notice-inline { padding: 12px 14px; border-radius: var(--r-md); border: 1px solid var(--line); border-top: 3px solid var(--insert); margin: 6px 0; }
 .notice-inline.warn { border-top-color: var(--ochre); }
 .notice-inline.err { border-top-color: var(--delete); }

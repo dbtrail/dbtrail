@@ -298,6 +298,47 @@ const toStep2 = async (host, answer) => {
   f.fire("submit"); await flush(4);
   const path = f.querySelector("div#connect-found").querySelector("div.cx-path");
   out.miss = { step: step(f), step2Hidden: !shown(f, 2), drawing: path ? path.attrs["aria-label"] : "", bad: path ? path.querySelectorAll("span.bad").length : 0 };
+  // A failure is looked at again by itself, bounded, and a success ends it.
+  scheduled.length = 0;
+  f.fire("submit"); await flush(4);
+  const findLine = () => (f.querySelector("p#connect-find-auto") || {})._text || "";
+  out.findRetry = { scheduled: scheduled.length, line: findLine() };
+  const maxFind = vm.runInContext("CONNECT_RECHECK_MAX", ctx);
+  let probes = 1;
+  while (scheduled.length && probes < maxFind + 5) { const fn = scheduled.shift(); calls.length = 0; fn(); await flush(4); if (calls.some((c) => c.startsWith("POST /api/servers/identify"))) probes++; }
+  out.findRetry.probes = probes; out.findRetry.max = maxFind; out.findRetry.stopped = findLine(); out.findRetry.pending = scheduled.length;
+  // Edited meanwhile: a retry that fires looks at nothing.
+  scheduled.length = 0;
+  f.fire("submit"); await flush(4);
+  const staleFind = scheduled.shift();
+  f.elements.source_host.value = "nope2.example"; f.elements.source_host.fire("input");
+  calls.length = 0;
+  if (staleFind) { staleFind(); await flush(4); }
+  out.findRetry.afterEdit = calls.filter((c) => c.startsWith("POST /api/servers/identify")).length;
+  // Changed with no input event (an autofill): the address it was for is gone.
+  scheduled.length = 0;
+  f.fire("submit"); await flush(4);
+  const silentFind = scheduled.shift();
+  f.elements.source_host.value = "autofilled.example";
+  calls.length = 0;
+  if (silentFind) { silentFind(); await flush(4); }
+  out.findRetry.afterSilentEdit = calls.filter((c) => c.startsWith("POST /api/servers/identify")).length;
+  // Typed and put back: the person is acting, so nothing looks behind them.
+  scheduled.length = 0;
+  f.elements.source_host.value = "nope2.example";
+  f.fire("submit"); await flush(4);
+  const typedFind = scheduled.shift();
+  f.elements.source_host.value = "nope2.exampl"; f.elements.source_host.fire("input");
+  f.elements.source_host.value = "nope2.example"; f.elements.source_host.fire("input");
+  calls.length = 0;
+  if (typedFind) { typedFind(); await flush(4); }
+  out.findRetry.afterTyping = calls.filter((c) => c.startsWith("POST /api/servers/identify")).length;
+  // The server comes up: the retry finds it and step 2 opens, retries over.
+  scheduled.length = 0;
+  f.fire("submit"); await flush(4);
+  ctx.__identifyAnswer = { addr: "nope2.example:3306", version: "8.4.3", flavor: "mysql" };
+  const upFn = scheduled.shift(); if (upFn) { upFn(); await flush(4); }
+  out.findRetry.found = { step: step(f), pending: scheduled.length };
   // Step 2: I ran it with no password checks nothing.
   f = await toStep2("db1", mariaRDS);
   f.elements.source_password.value = "";
@@ -317,7 +358,7 @@ const toStep2 = async (host, answer) => {
   open(); putGate = null; await flush(4);
   out.order = calls.map((c) => c.split(" {")[0]);
   out.checkBody = JSON.parse((calls.find((c) => c.startsWith("POST /api/servers/check")) || "x {}").slice("POST /api/servers/check ".length));
-  out.failed = { step: step(f), lights: lights(f), said: lightLabels(f), auto: f.querySelector("p#connect-auto")._text, scheduled: scheduled.length, notices: notices.length,
+  out.failed = { step: step(f), lights: lights(f), said: lightLabels(f), fullHidden: !!f.querySelector("button#connect-full-form").hidden, auto: f.querySelector("p#connect-auto")._text, scheduled: scheduled.length, notices: notices.length,
     submit: button(f), banned: texts(f).flatMap((t) => bannedHits(t).map((h) => h.word + " in: " + t)) };
   // The re-check runs by itself, and stops after CONNECT_RECHECK_MAX rounds.
   const max = vm.runInContext("CONNECT_RECHECK_MAX", ctx);
@@ -568,6 +609,14 @@ func TestConnectScreenWiring(t *testing.T) {
 			Step2Hidden   bool
 			Bad           int
 		}
+		FindRetry struct {
+			Scheduled, Probes, Max, Pending, AfterEdit, AfterSilentEdit, AfterTyping int
+			Line, Stopped                                                            string
+			Found                                                                    struct {
+				Step    string
+				Pending int
+			}
+		}
 		NoPassword struct {
 			Calls []string
 			Step  string
@@ -579,6 +628,7 @@ func TestConnectScreenWiring(t *testing.T) {
 			Step, Auto, Submit   string
 			Lights, Banned, Said []string
 			Scheduled, Notices   int
+			FullHidden           bool
 		}
 		Recheck struct {
 			Rounds, Max, Pending int
@@ -716,6 +766,20 @@ func TestConnectScreenWiring(t *testing.T) {
 	if c := px.Chosen; c.Flavor != "mariadb" || c.Grant != "mariadb" || c.Title != "MariaDB" || strings.Join(c.Buttons, ",") != "MySQL=false,MariaDB=true" {
 		t.Errorf("choosing MariaDB behind the proxy: %+v", c)
 	}
+	fr := out.FindRetry
+	if fr.Scheduled != 1 || fr.Line != "Trying again in 10 seconds." {
+		t.Errorf("a failed Find it: %+v; want one retry scheduled and said", fr)
+	}
+	if fr.Probes != fr.Max || fr.Pending != 0 || fr.Stopped != "Stopped trying. Press Find it when it is fixed." {
+		t.Errorf("the step 1 retries: %+v; want exactly CONNECT_RECHECK_MAX probes, then a stop that says so", fr)
+	}
+	if fr.AfterEdit != 0 || fr.AfterSilentEdit != 0 || fr.AfterTyping != 0 {
+		t.Errorf("a retry probed after Host changed: typed %d, changed with no event %d, typed and put back %d; want none",
+			fr.AfterEdit, fr.AfterSilentEdit, fr.AfterTyping)
+	}
+	if fr.Found.Step != "2" || fr.Found.Pending != 0 {
+		t.Errorf("a retry that finds the server: %+v; want step 2 and no more retries", fr.Found)
+	}
 	if m := out.Miss; m.Step != "1" || !m.Step2Hidden || m.Drawing != "DBTrail could not find nope.example" || m.Bad != 2 {
 		t.Errorf("a name that does not exist: %+v; want step 1, the path drawn with the name part broken", m)
 	}
@@ -740,6 +804,9 @@ func TestConnectScreenWiring(t *testing.T) {
 	wantFailed := "ok:DBTrail reaches it,bad:User logs in,wait:Change log keeps full rows,wait:Permissions,wait:Every table has a key"
 	if fl.Step != "3" || strings.Join(fl.Lights, ",") != wantFailed || fl.Notices != 0 || fl.Submit != "Check again" {
 		t.Errorf("a refused password: %+v; want the lights with login red and the rest not reached, in place", fl)
+	}
+	if !fl.FullHidden {
+		t.Error("the link to the full form stays on step 3, where leaving would stop the checks")
 	}
 	if strings.Join(fl.Said, ",") != "DBTrail reaches it: passed,User logs in: failed,Change log keeps full rows: not checked yet,Permissions: not checked yet,Every table has a key: not checked yet" {
 		t.Errorf("the lights' states in words, for a screen reader: %v", fl.Said)
