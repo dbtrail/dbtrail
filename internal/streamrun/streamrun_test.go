@@ -2190,7 +2190,7 @@ func TestAutoDiscoveredGTIDLine(t *testing.T) {
 
 // TestGTIDStartAnchor pins how a fresh GTID-mode start gets binlog
 // coordinates for its first checkpoint. Without them the checkpoint carries
-// binlog_file = '' and both resume cleanups skip, so a crash after the first
+// an empty binlog_file and both resume cleanups skip, so a crash after the first
 // batch but before the next checkpoint duplicates that batch on restart.
 //
 // The position is read BEFORE the GTID set: every transaction not in the set
