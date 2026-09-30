@@ -245,24 +245,14 @@ func (s *Server) saveConnectDraft(req serverRequest, typedName string) {
 // draftResponse is GET and PUT /api/servers/draft. Found tells "nothing
 // saved" from "saved, and every field happens to be blank": a screen must not
 // restore the second over what somebody is typing.
-//
-// AutoName is the name the server would get if it were added now with no name
-// typed: DeriveServerName made unique against the registry, as the check does.
-// It is worked out on every answer and never stored, so the screen can show it
-// as the name field's placeholder without it ever coming back as typed.
 type draftResponse struct {
-	Found    bool          `json:"found"`
-	Draft    *ConnectDraft `json:"draft,omitempty"`
-	AutoName string        `json:"auto_name,omitempty"`
+	Found bool          `json:"found"`
+	Draft *ConnectDraft `json:"draft,omitempty"`
 }
 
 // draftAnswer builds the answer for a saved draft.
 func (s *Server) draftAnswer(d ConnectDraft) draftResponse {
-	out := draftResponse{Found: true, Draft: &d}
-	if strings.TrimSpace(d.Name) == "" {
-		out.AutoName = s.cm.reg.NameFor("", DeriveServerName(d.SourceHost, d.SourcePort, d.Flavor))
-	}
-	return out
+	return draftResponse{Found: true, Draft: &d}
 }
 
 // handleConnectDraftGet serves GET /api/servers/draft.

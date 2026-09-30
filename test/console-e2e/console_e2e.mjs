@@ -446,7 +446,7 @@ try {
   await page.fill('#server-form-mount input[name="source_port"]', "13306");
   await page.click("#server-form-mount button[type=submit]");
   if (await waitStep("2", "connect: the suite's MySQL is identified from its greeting")) {
-    const tile = await page.evaluate(() => document.getElementById("connect-found").innerText);
+    const tile = await page.evaluate(() => (document.querySelector("#connect-found strong") || {}).textContent || "");
     /^MySQL \d+\.\d+/.test(tile.trim())
       ? ok("connect: the suite's MySQL is identified from its greeting")
       : bad("connect: the suite's MySQL is identified from its greeting", JSON.stringify(tile));

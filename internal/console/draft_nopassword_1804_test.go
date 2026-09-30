@@ -62,49 +62,28 @@ func TestConnectDraftNeverStoresThePassword(t *testing.T) {
 	assertClean("after a PUT that sent one")
 }
 
-// The automatic name is what the name field shows as its placeholder. It is
-// worked out on every answer and never stored, so it can never come back as
-// a name somebody typed.
-func TestConnectDraftAnswersWithTheAutomaticName(t *testing.T) {
+// The Connect screen asks for no name (#1953): the server is named after its
+// address when the check saves it. A draft never stores a name nobody typed,
+// so none can come back later as if somebody had.
+func TestConnectDraftStoresNoAutomaticName(t *testing.T) {
 	srv, _ := newSupervisorServer(t)
 	rec, body := doServersReq(t, srv, "PUT", "/api/servers/draft",
 		`{"source_host":"DB.Example.COM","source_port":"3307","source_user":"u"}`)
 	if rec.Code != 200 {
 		t.Fatalf("PUT: code=%d body=%s", rec.Code, body)
 	}
-	if !strings.Contains(string(body), `"auto_name":"db.example.com-3307"`) {
-		t.Errorf("PUT answer lacks the automatic name: %s", body)
-	}
-	_, body = doServersReq(t, srv, "GET", "/api/servers/draft", "")
-	if !strings.Contains(string(body), `"auto_name":"db.example.com-3307"`) {
-		t.Errorf("GET answer lacks the automatic name: %s", body)
-	}
 	d, _, _ := srv.drafts.Load()
 	if d.Name != "" {
-		t.Errorf("the automatic name was stored as typed: %q", d.Name)
-	}
-	// A typed name wins, and there is then no automatic one to show.
-	_, body = doServersReq(t, srv, "PUT", "/api/servers/draft", `{"name":"orders","source_host":"db"}`)
-	if strings.Contains(string(body), "auto_name") {
-		t.Errorf("a typed name still gets an automatic one: %s", body)
-	}
-	// No host, no name to work out.
-	_, body = doServersReq(t, srv, "PUT", "/api/servers/draft", `{"source_user":"u"}`)
-	if strings.Contains(string(body), "auto_name") {
-		t.Errorf("no host, yet an automatic name: %s", body)
+		t.Errorf("a name was stored that nobody typed: %q", d.Name)
 	}
 }
 
-// The suggested name is the one the check would really give: made unique
-// against the servers already registered, not the bare name from the host.
-func TestConnectDraftAutoNameIsTheNameTheCheckAssigns(t *testing.T) {
+// The name the check gives is made unique against the servers already
+// registered, not the bare name from the host.
+func TestConnectCheckNamesTheServerUniquely(t *testing.T) {
 	srv, ctrl := newSupervisorServer(t)
 	if _, err := srv.cm.reg.Add(ServerEntry{Name: "db-3307", DSN: "u:p@tcp(h:3306)/d", SourceDSN: "u:p@tcp(db:3307)/"}); err != nil {
 		t.Fatal(err)
-	}
-	_, body := doServersReq(t, srv, "PUT", "/api/servers/draft", `{"source_host":"db","source_port":"3307","source_user":"u"}`)
-	if !strings.Contains(string(body), `"auto_name":"db-3307-2"`) {
-		t.Errorf("with db-3307 taken, the suggested name should be db-3307-2: %s", body)
 	}
 	ctrl.report = &DoctorReport{Failed: 1, Checks: []DoctorCheck{{Name: "x", Status: "fail"}}}
 	_, cbody := doServersReq(t, srv, "POST", "/api/servers/check", `{"source_host":"db","source_port":"3307","source_user":"u","source_password":"p"}`)

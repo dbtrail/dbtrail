@@ -13528,7 +13528,8 @@ function genSourcePassword() {
 // The backup line is what the DEFAULT lock mode (ftwrl) checks for
 // (internal/mydumperlock/privileges.go): RELOAD, plus BACKUP_ADMIN on MySQL
 // and Percona 8.0 or later. LOCK TABLES is only what lock-all needs, which is
-// the RDS/Aurora path, so it is the commented alternative (#1658).
+// the RDS/Aurora path: the commented alternative (#1658), or the live line
+// when managed is set (the Connect screen's RDS box, #1953).
 function grantBlocks(user, password, hasSavedPassword, managed) {
   const typedUser = String(user || "").trim();
   const acct = sqlString(typedUser || "dbtrail") + "@'%'";
@@ -13890,7 +13891,9 @@ let connectDraftQueued = false;
 function connectBody(form, withPassword) {
   const f = form.elements;
   const body = {
-    name: f.name.value.trim(), flavor: f.flavor.value || "mysql",
+    // No name: the screen asks for none, and the server names the server
+    // after its address, unique against the others (DeriveServerName).
+    name: "", flavor: f.flavor.value || "mysql",
     source_host: f.source_host.value.trim(), source_port: f.source_port.value.trim(),
     source_user: f.source_user.value.trim(),
   };
@@ -13919,7 +13922,6 @@ function saveConnectDraftSoon(form) {
     if (!form.isConnected || form.dataset.done) return;
     return api("/api/servers/draft", { method: "PUT", body: connectBody(form, false) }).then((res) => {
       if (!form.isConnected || form.dataset.done) return;
-      if (res) form.elements.name.placeholder = res.auto_name || CONNECT_NAME_HINT;
       if (form.dataset.saveFailed) { delete form.dataset.saveFailed; formMsg("", false); }
     }, (err) => {
       if (!form.isConnected || form.dataset.done) return;
@@ -13949,7 +13951,6 @@ async function flushConnectDraft() {
 //    capture the moment nothing fails, and a failing round is checked again
 //    every 10 seconds, a bounded number of times, with nothing to press.
 
-const CONNECT_NAME_HINT = "Optional. Made from the host";
 const FLAVOR_LABEL = { mysql: "MySQL", mariadb: "MariaDB" };
 const MANAGED_LABEL = { rds: "Amazon RDS", aurora: "Amazon Aurora" };
 const PROXY_LABEL = { proxysql: "ProxySQL", maxscale: "MaxScale", rds_proxy: "RDS Proxy" };
@@ -13961,6 +13962,19 @@ const CONNECT_RECHECK_MAX = 30;
 
 // What step 1 found, per form: the identification, kept out of the DOM.
 const connectIdentity = new WeakMap();
+// connectRestored marks a form filled from a draft, for its whole life: the
+// account may have been created with a password the page no longer has, so
+// no step may generate one (#1804), not even a later Find it.
+const connectRestored = new WeakSet();
+// connectManaged is the RDS/Aurora box as the person set it, per address,
+// so a reload or a second Find it does not quietly undo it.
+const connectManaged = new WeakMap();
+// connectAddr is the address a request was made for: an answer that comes
+// back after Host or Port changed describes another server and is dropped.
+function connectAddr(form) {
+  const f = form.elements;
+  return f.source_host.value.trim() + ":" + (f.source_port.value.trim() || "3306");
+}
 // The pending automatic re-check, per form, and how many rounds ran.
 const connectRecheck = new WeakMap();
 
@@ -14049,11 +14063,6 @@ function setConnectStep(form, n) {
   form.dataset.step = String(n);
   const num = n === "done" ? 4 : n;
   $all("[data-cx-step]", form).forEach((s) => { s.hidden = Number(s.dataset.cxStep) > num; });
-  // The way out to the full form belongs to step 1 only: kept on the later
-  // steps it pushes their one button below the fold. Host and port stay
-  // visible: editing them is how the person goes back.
-  const full = $("#connect-full-row", form);
-  if (full) full.hidden = num > 1;
   $all("[data-cx-dot]", form).forEach((d) => d.classList.toggle("on", Number(d.dataset.cxDot) <= num));
   const btn = form.querySelector("button[type=submit]");
   if (btn) btn.textContent = CONNECT_STEP_BUTTON[n];
@@ -14063,8 +14072,6 @@ function buildConnectForm() {
   const form = el("form", { class: "filters cx", id: "server-form", "data-connect": "1", style: "display:block;margin-top:18px" });
   form.append(el("input", { type: "hidden", name: "id" }));
   form.append(el("input", { type: "hidden", name: "flavor", value: "mysql" }));
-  // Only the draft fills it: a name somebody typed on an older screen.
-  form.append(el("input", { type: "hidden", name: "name" }));
   form.append(el("h3", { class: "form-legend", text: "Connect a database" }));
   form.append(el("div", { class: "cx-dots", "aria-hidden": "true" },
     el("span", { "data-cx-dot": "1" }), el("span", { "data-cx-dot": "2" }), el("span", { "data-cx-dot": "3" })));
@@ -14086,7 +14093,11 @@ function buildConnectForm() {
     el("div", { class: "cx-row" },
       el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(pre.textContent, "SQL") }),
       el("label", { class: "cx-managed" },
-        el("input", { type: "checkbox", name: "cx_managed", onchange: () => refreshGrants(form) }), " On Amazon RDS or Aurora"))));
+        el("input", { type: "checkbox", name: "cx_managed", onchange: () => {
+          connectManaged.set(form, { addr: connectAddr(form), on: !!form.elements.cx_managed.checked });
+          refreshGrants(form);
+          saveConnectDraftSoon(form);
+        } }), " On Amazon RDS or Aurora"))));
   const acct = el("div", { class: "form-grid" });
   acct.append(srvField("User", "source_user", { placeholder: "dbtrail" }));
   acct.append(srvField("Password", "source_password", { type: "password", autocomplete: "new-password" }));
@@ -14098,18 +14109,19 @@ function buildConnectForm() {
 
   const s3 = el("div", { class: "cx-step", "data-cx-step": "3", hidden: true });
   s3.append(el("p", { class: "cx-title", text: "3. Checking" }));
-  s3.append(el("ol", { class: "cx-lights", id: "connect-lights" }));
-  s3.append(el("p", { class: "cx-auto", id: "connect-auto" }));
+  s3.append(el("ol", { class: "cx-lights", id: "connect-lights", "aria-live": "polite" }));
+  s3.append(el("p", { class: "cx-auto", id: "connect-auto", "aria-live": "polite" }));
   s3.append(el("div", { id: "connect-result" }));
   form.append(s3);
 
-  form.append(el("p", { class: "form-hint", id: "connect-full-row" },
-    el("button", { class: "btn btn-sm btn-ghost", type: "button", id: "connect-full-form", text: "PostgreSQL, S3 or your own store? Open the full form",
-      onclick: () => openFullForm(form) })));
   form.append(el("div", { id: "server-form-msg", class: "form-msg" }));
   const foot = el("div", { class: "modal-foot filter-actions" });
   foot.append(el("button", { class: "btn btn-primary", type: "submit", text: CONNECT_STEP_BUTTON[1] }));
   foot.append(el("button", { class: "btn btn-ghost", type: "button", id: "server-cancel", text: "Cancel" }));
+  // In the foot, on every step, taking no row of its own: a row above the
+  // button would push it below the fold on steps 2 and 3.
+  foot.append(el("button", { class: "btn btn-sm btn-ghost cx-full", type: "button", id: "connect-full-form", text: "PostgreSQL, S3 or your own store? Open the full form",
+    onclick: () => openFullForm(form) }));
   form.append(foot);
   return form;
 }
@@ -14129,15 +14141,17 @@ function showConnectForm(draft) {
   const f = form.elements;
   setConnectStep(form, 1);
   if (draft) {
-    f.name.value = draft.name || "";
+    if (draft.source_user) connectRestored.add(form);
     f.source_host.value = draft.source_host || "";
     f.source_port.value = draft.source_port || "";
     f.source_user.value = draft.source_user || "";
     if (draft.identified) {
-      showIdentified(form, draft.identified, draft.flavor, true);
-      $("#connect-pw-again", form).hidden = false;
-      refreshGrants(form);
+      const id = draft.identified;
+      connectManaged.set(form, { addr: connectAddr(form), on: !!id.managed });
+      showIdentified(form, id, draft.flavor);
     }
+    $("#connect-pw-again", form).hidden = !connectRestored.has(form);
+    refreshGrants(form);
   }
   $("#server-cancel", form).addEventListener("click", () => discardConnect(form));
   form.addEventListener("submit", (e) => { e.preventDefault(); connectSubmit(form); });
@@ -14179,6 +14193,7 @@ async function identifyConnect(form) {
   const f = form.elements;
   if (!f.source_host.value.trim()) { formMsg("Fill in Host, the address of your database.", true); f.source_host.focus(); return; }
   const btn = form.querySelector("button[type=submit]");
+  const asked = connectAddr(form);
   form.dataset.busy = "1";
   if (btn) { btn.disabled = true; btn.textContent = "Looking…"; }
   formMsg("", false);
@@ -14186,13 +14201,15 @@ async function identifyConnect(form) {
   try {
     id = await api("/api/servers/identify", { method: "POST", body: { source_host: f.source_host.value.trim(), source_port: f.source_port.value.trim() } });
   } catch (err) {
-    if (form.isConnected) formMsg("DBTrail could not look: " + ((err && err.message) || err), true);
+    if (form.isConnected && connectAddr(form) === asked) formMsg("DBTrail could not look: " + ((err && err.message) || err), true);
     return;
   } finally {
     delete form.dataset.busy;
     if (btn) { btn.disabled = false; btn.textContent = CONNECT_STEP_BUTTON[form.dataset.step]; }
+    if (form.dataset.saveAfter) { delete form.dataset.saveAfter; saveConnectDraftSoon(form); }
   }
-  if (!form.isConnected) return;
+  // Host or Port changed while it looked: the answer is about another server.
+  if (!form.isConnected || connectAddr(form) !== asked) return;
   if (id.kind) showNotFound(form, id);
   else showIdentified(form, id, "");
   saveConnectDraftSoon(form);
@@ -14223,13 +14240,13 @@ function showNotFound(form, id) {
 
 // showIdentified draws what answered and opens step 2 for it. flavor is a
 // choice made before (a restored draft), used when the greeting named none.
-// restored: the form came back from a draft, whose account was created with a
-// password the page no longer has, so none is generated (#1804).
-function showIdentified(form, id, flavor, restored) {
+// A form filled from a draft never gets a generated password (#1804).
+function showIdentified(form, id, flavor) {
   connectIdentity.set(form, id);
   const f = form.elements;
   f.flavor.value = id.flavor || (FLAVOR_LABEL[flavor] ? flavor : "") || f.flavor.value || "mysql";
-  f.cx_managed.checked = !!id.managed;
+  const chosen = connectManaged.get(form);
+  f.cx_managed.checked = chosen && chosen.addr === connectAddr(form) ? chosen.on : !!id.managed;
   const title = el("strong", { text: connectTitle(id, f.flavor.value) });
   const tile = el("div", { class: "cx-found" }, el("span", { class: "cx-mark", "aria-hidden": "true", text: "✓" }), title);
   const note = connectNote(id);
@@ -14237,20 +14254,22 @@ function showIdentified(form, id, flavor, restored) {
     const pick = el("div", { class: "cx-pick" });
     const choose = (fl) => {
       f.flavor.value = fl;
-      $all("button", pick).forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.flavor === fl)));
+      $all("button", pick).forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.pick === fl)));
       title.textContent = connectTitle(id, fl);
       refreshGrants(form);
       saveConnectDraftSoon(form);
     };
     for (const fl of ["mysql", "mariadb"]) {
-      pick.append(el("button", { class: "btn btn-sm", type: "button", "data-flavor": fl, "aria-pressed": String(f.flavor.value === fl),
+      // data-pick, not data-flavor: [data-flavor] is the full form's gating,
+      // and a global rule hides every such node the full form did not light.
+      pick.append(el("button", { class: "btn btn-sm", type: "button", "data-pick": fl, "aria-pressed": String(f.flavor.value === fl),
         text: FLAVOR_LABEL[fl], onclick: () => choose(fl) }));
     }
     tile.append(el("p", { text: note }), pick);
   }
   $("#connect-found", form).replaceChildren(tile);
   setConnectStep(form, 2);
-  if (restored) refreshGrants(form);
+  if (connectRestored.has(form)) refreshGrants(form);
   else applyGrantDefaults(form);
 }
 
@@ -14259,7 +14278,9 @@ function connectIdentityBody(form) {
   const id = connectIdentity.get(form);
   if (!id) return undefined;
   const out = {};
-  for (const k of ["version", "flavor", "managed", "proxy", "server_error"]) if (id[k]) out[k] = id[k];
+  for (const k of ["version", "flavor", "proxy", "server_error"]) if (id[k]) out[k] = id[k];
+  // The box as it stands, which is the detection unless the person changed it.
+  if (form.elements.cx_managed.checked) out.managed = id.managed || "rds";
   return out;
 }
 
@@ -14268,6 +14289,9 @@ function stopConnectRecheck(form) {
   if (r && r.timer) clearTimeout(r.timer);
   connectRecheck.delete(form);
 }
+
+// LIGHT_STATE says each light's state in words, for a screen reader.
+const LIGHT_STATE = { ok: "passed", bad: "failed", warn: "passed with a warning", wait: "not checked yet" };
 
 // LIGHT_WORDS names each light (doctor.Lights), in the order they are drawn.
 const LIGHT_WORDS = [
@@ -14309,7 +14333,9 @@ function drawConnectLights(form, report, started) {
   const list = $("#connect-lights", form);
   if (!list) return;
   list.replaceChildren(...connectLights(report).map((l) => {
-    const li = el("li", { class: "cx-light " + l.status },
+    // The state is said, not only coloured: a screen reader reads the label
+    // with it ("User logs in: failed").
+    const li = el("li", { class: "cx-light " + l.status, "aria-label": l.label + ": " + LIGHT_STATE[l.status] },
       el("span", { class: "cx-dot", "aria-hidden": "true", text: l.status === "ok" ? "✓" : l.status === "wait" ? "" : "!" }),
       el("span", { class: "cx-label", text: l.label }));
     if (l.checks.length && l.status !== "ok" && !started) li.append(connectFindings(l.checks));
@@ -14335,6 +14361,7 @@ async function runConnectCheck(form, pressed) {
   if (!f.source_user.value.trim()) { setConnectStep(form, 2); formMsg("Fill in User.", true); f.source_user.focus(); return; }
   if (!f.source_password.value) { setConnectStep(form, 2); formMsg("Fill in Password. It is not kept after a reload.", true); f.source_password.focus(); return; }
   const body = connectBody(form, true);
+  const asked = connectAddr(form);
   const btn = form.querySelector("button[type=submit]");
   // Cancel is off while the check runs: it cannot stop a start already on
   // its way, and a Cancel that is then followed by "Capture started" lies.
@@ -14345,12 +14372,18 @@ async function runConnectCheck(form, pressed) {
   if (cancel) cancel.disabled = true;
   if (auto) auto.textContent = "Checking…";
   formMsg("", false);
-  let res, failure = "";
+  let res, failure = "", lasting = false;
   try {
     await flushConnectDraft();
     res = await api("/api/servers/check", { method: "POST", body });
   } catch (err) {
     failure = (err && err.message) || String(err);
+    // No answer from the server at all (the network): say what did not run.
+    // An answer carries its own words ("the startup checks could not run").
+    if (!(err && err.status)) failure = "the checks could not run: " + failure;
+    // A 4xx is an answer about what was sent (a refused save, a bad value):
+    // asking again unchanged cannot fix it. Network trouble and 5xx can pass.
+    lasting = !!(err && err.status >= 400 && err.status < 500);
   } finally {
     // A started capture keeps the form marked done, so no save that was
     // waiting can put back the draft the server just removed.
@@ -14362,15 +14395,26 @@ async function runConnectCheck(form, pressed) {
   }
   if (!form.isConnected) {
     if (res && (res.started || res.error)) openNotice(connectNotice(res));
+    else openNotice({ tone: "err", title: "Capture did not start", lines: ["Nothing was saved. Open + Add server to see what to fix."], button: "OK" });
     return;
   }
+  // Host or Port changed while the checks ran. A start still happened, for
+  // the address it was asked about, and is said as such; anything else is
+  // about a server no longer on screen and is dropped.
+  if (connectAddr(form) !== asked && !(res && res.started)) return;
   const result = $("#connect-result", form);
   result.replaceChildren();
   if (failure) {
+    // The last round's lights are not this round's answer.
+    $("#connect-lights", form).replaceChildren();
     setConnectStep(form, 3);
-    return scheduleConnectRecheck(form, round, "The checks could not run: " + failure + ".");
+    const said = failure.charAt(0).toUpperCase() + failure.slice(1) + (/[.!?]$/.test(failure) ? "" : ".");
+    if (lasting) {
+      if (auto) auto.textContent = said + " Press Check again once it is fixed.";
+      return;
+    }
+    return scheduleConnectRecheck(form, round, said);
   }
-  if (res.name && !f.name.value.trim()) f.name.placeholder = res.name;
   drawConnectLights(form, res.doctor, !!res.started);
   if (res.started) {
     if (body.source_password === pendingSourcePassword) pendingSourcePassword = "";
@@ -14441,7 +14485,7 @@ async function discardConnect(form) {
 async function openFullForm(form) {
   const f = form.elements;
   const carry = {};
-  ["name", "source_host", "source_port", "source_user", "source_password", "flavor"].forEach((k) => { carry[k] = f[k].value; });
+  ["source_host", "source_port", "source_user", "source_password", "flavor"].forEach((k) => { carry[k] = f[k].value; });
   form.dataset.done = "1";
   stopConnectRecheck(form);
   await flushConnectDraft();
@@ -14472,10 +14516,10 @@ async function restoreConnectDraft() {
   // What step 1 found describes the address it was found at: a later host or
   // port from this tab's stash makes it describe nothing.
   if (d.identified && (d.source_host !== saved.source_host || (d.source_port || "") !== (saved.source_port || ""))) delete d.identified;
-  if (!(d.source_host || d.source_port || d.source_user || d.name)) return;
+  if (!(d.source_host || d.source_port || d.source_user)) return;
   if (document.getElementById("server-form")) return; // somebody already opened a form
   if (!document.getElementById("server-form-mount")) openServersModal();
-  showConnectForm(Object.assign({ auto_name: res && res.auto_name }, d));
+  showConnectForm(d);
   // Bring the server's copy up to what is now on screen.
   const form = document.getElementById("server-form");
   if (local && form) saveConnectDraftSoon(form);
@@ -14492,7 +14536,7 @@ function stashConnectDraft() {
   const form = document.getElementById("server-form");
   if (!form || !form.dataset.connect || form.dataset.done) return;
   const b = connectBody(form, false);
-  try { sessionStorage.setItem(CONNECT_STASH_KEY, JSON.stringify({ name: b.name, source_host: b.source_host, source_port: b.source_port, source_user: b.source_user })); }
+  try { sessionStorage.setItem(CONNECT_STASH_KEY, JSON.stringify({ source_host: b.source_host, source_port: b.source_port, source_user: b.source_user })); }
   catch (_) { /* storage off: the server's copy is all there is */ }
 }
 
@@ -14503,7 +14547,7 @@ function readConnectStash() {
     const v = raw ? JSON.parse(raw) : null;
     if (!v || typeof v !== "object") return null;
     const out = {};
-    for (const k of ["name", "source_host", "source_port", "source_user"]) if (typeof v[k] === "string" && v[k]) out[k] = v[k];
+    for (const k of ["source_host", "source_port", "source_user"]) if (typeof v[k] === "string" && v[k]) out[k] = v[k];
     return Object.keys(out).length ? out : null;
   } catch (_) { return null; }
 }

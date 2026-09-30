@@ -213,7 +213,7 @@ ctx.__api = async (path, opts) => {
   calls.push(method + " " + path + (opts && opts.body ? " " + JSON.stringify(opts.body) : ""));
   if (method === "PUT") { if (putGate) await putGate; calls.push("PUT done"); return { found: true, auto_name: (opts.body.source_host || "x") + "-auto" }; }
   if (path === "/api/servers/identify") return ctx.__identifyAnswer;
-  if (path === "/api/servers/check") { if (checkGate) await checkGate; if (ctx.__checkThrows) throw new Error(ctx.__checkThrows); return ctx.__checkAnswer; }
+  if (path === "/api/servers/check") { if (checkGate) await checkGate; if (ctx.__checkThrows) { const e = new Error(ctx.__checkThrows); if (ctx.__checkThrowsStatus) e.status = ctx.__checkThrowsStatus; throw e; } return ctx.__checkAnswer; }
   if (method === "GET" && path === "/api/servers/draft") return ctx.__draftAnswer;
   return {};
 };
@@ -232,6 +232,7 @@ const step = (f) => f.dataset.step;
 const shown = (f, n) => !f.querySelector("div[data-cx-step=" + n + "]").hidden;
 const button = (f) => f.querySelector("button[type=submit]").textContent;
 const lights = (f) => f.querySelector("ol#connect-lights").children.map((li) => li.className.replace("cx-light ", "") + ":" + li.children[1]._text);
+const lightLabels = (f) => f.querySelector("ol#connect-lights").children.map((li) => li.attrs["aria-label"]);
 const result = (f) => { const t = []; walk(f.querySelector("div#connect-result"), (n) => { if (n.tag === "p" && n._text) t.push(n._text); }); return t; };
 const identified = (f) => { const t = []; walk(f.querySelector("div#connect-found"), (n) => { if ((n.tag === "strong" || n.tag === "p") && n._text) t.push(n._text); }); return t; };
 const mariaRDS = { addr: "db1:3306", version: "10.11.6-MariaDB-log", flavor: "mariadb", managed: "rds" };
@@ -270,7 +271,7 @@ const toStep2 = async (host, answer) => {
   calls.length = 0;
   f.fire("submit"); await flush(4);
   out.identifyCalls = calls.filter((c) => c.startsWith("POST /api/servers/identify"));
-  out.found = { step: step(f), step2: shown(f, 2), submit: button(f), texts: identified(f), flavor: f.elements.flavor.value, fullRowHidden: !!f.querySelector("p#connect-full-row").hidden,
+  out.found = { step: step(f), step2: shown(f, 2), submit: button(f), texts: identified(f), flavor: f.elements.flavor.value, fullShown: !!f.querySelector("button#connect-full-form") && !f.querySelector("button#connect-full-form").hidden,
     managed: !!f.elements.cx_managed.checked, grant: f.querySelector("pre[data-grant]").attrs["data-grant"],
     block: f.querySelector("pre[data-grant]").textContent, user: f.elements.source_user.value, pwLen: f.elements.source_password.value.length,
     draftPut: calls.filter((c) => c.startsWith("PUT /api/servers/draft")).pop() || "",
@@ -282,7 +283,10 @@ const toStep2 = async (host, answer) => {
   // A proxy: the flavor is a choice, MySQL chosen, nothing forced.
   f = await toStep2("proxy1", { addr: "proxy1:6033", version: "8.0.11", proxy: "proxysql" });
   const pick = f.querySelector("div#connect-found").querySelector("div.cx-pick").querySelectorAll("button");
-  out.proxy = { step: step(f), texts: identified(f), buttons: pick.map((b) => b._text + "=" + b.attrs["aria-pressed"]), flavor: f.elements.flavor.value };
+  // [data-flavor] is the full form's gating: a global rule hides every such
+  // node the full form did not light, so none may be on this screen.
+  const gated = []; walk(f, (n) => { if (n.attrs && n.attrs["data-flavor"] !== undefined) gated.push(n.tag + ":" + (n._text || "")); });
+  out.proxy = { step: step(f), texts: identified(f), buttons: pick.map((b) => b._text + "=" + b.attrs["aria-pressed"]), flavor: f.elements.flavor.value, gated };
   pick.find((b) => b._text === "MariaDB").fire("click"); await flush();
   out.proxy.chosen = { flavor: f.elements.flavor.value, grant: f.querySelector("pre[data-grant]").attrs["data-grant"], title: identified(f)[0],
     buttons: pick.map((b) => b._text + "=" + b.attrs["aria-pressed"]) };
@@ -313,7 +317,7 @@ const toStep2 = async (host, answer) => {
   open(); putGate = null; await flush(4);
   out.order = calls.map((c) => c.split(" {")[0]);
   out.checkBody = JSON.parse((calls.find((c) => c.startsWith("POST /api/servers/check")) || "x {}").slice("POST /api/servers/check ".length));
-  out.failed = { step: step(f), lights: lights(f), auto: f.querySelector("p#connect-auto")._text, scheduled: scheduled.length, notices: notices.length,
+  out.failed = { step: step(f), lights: lights(f), said: lightLabels(f), auto: f.querySelector("p#connect-auto")._text, scheduled: scheduled.length, notices: notices.length,
     submit: button(f), banned: texts(f).flatMap((t) => bannedHits(t).map((h) => h.word + " in: " + t)) };
   // The re-check runs by itself, and stops after CONNECT_RECHECK_MAX rounds.
   const max = vm.runInContext("CONNECT_RECHECK_MAX", ctx);
@@ -390,6 +394,58 @@ const toStep2 = async (host, answer) => {
   openCheck(); checkGate = null;
   await flush(6);
   out.putsAfterStarted = calls.filter((c) => c.startsWith("PUT /api/servers/draft"));
+  // An answer that comes back after Host changed is about another server and
+  // is dropped: identify, then a check.
+  setCaps({ monitor: true });
+  vm.runInContext("showConnectForm(null)", ctx);
+  f = form();
+  f.elements.source_host.value = "typo.example";
+  let openIdent; const identGate = new Promise((r) => { openIdent = r; });
+  const realApi = ctx.__api;
+  ctx.__api = async (p, o) => { if (p === "/api/servers/identify") { await identGate; } return realApi(p, o); };
+  ctx.__identifyAnswer = mariaRDS;
+  f.fire("submit"); await flush();
+  f.elements.source_host.value = "fixed.example"; f.elements.source_host.fire("input");
+  openIdent(); await flush(4);
+  ctx.__api = realApi;
+  out.lateIdentify = { step: step(f), found: identified(f).length };
+  f = await toStep2("db1", mariaRDS);
+  f.elements.source_password.value = "Pw-9";
+  let openLate; checkGate = new Promise((r) => { openLate = r; });
+  scheduled.length = 0;
+  ctx.__checkAnswer = { ok: false, name: "db1", doctor: { failed: 1, checks: [{ name: "Source MySQL connection", status: "fail", kind: "timeout", light: "reach" }] } };
+  f.fire("submit"); await flush(2);
+  f.elements.source_host.value = "db1-new"; f.elements.source_host.fire("input");
+  openLate(); checkGate = null; await flush(4);
+  out.lateCheck = { step: step(f), lights: lights(f).length, scheduled: scheduled.length };
+  // A check that is refused as a request (4xx) is not asked again unchanged;
+  // the last round's lights go.
+  f = await toStep2("db1", mariaRDS);
+  f.elements.source_password.value = "Pw-10";
+  ctx.__checkAnswer = { ok: false, name: "db1", doctor: { failed: 1, checks: [{ name: "Source MySQL connection", status: "fail", kind: "timeout", light: "reach" }] } };
+  f.fire("submit"); await flush(4);
+  scheduled.length = 0;
+  ctx.__checkThrowsStatus = 409; ctx.__checkThrows = "a server named db1 already exists";
+  f.fire("submit"); await flush(4);
+  ctx.__checkThrows = ""; ctx.__checkThrowsStatus = 0;
+  out.refusedRequest = { auto: f.querySelector("p#connect-auto")._text, scheduled: scheduled.length, lights: lights(f).length };
+  // The RDS box as the person set it survives a second Find it.
+  f = await toStep2("custom-dns", { addr: "custom-dns:3306", version: "8.0.39", flavor: "mysql" });
+  f.elements.cx_managed.checked = true; f.elements.cx_managed.fire("change");
+  await flush(2);
+  const managedPut = calls.filter((c) => c.startsWith("PUT /api/servers/draft")).pop() || "";
+  ctx.__identifyAnswer = { addr: "custom-dns:3306", version: "8.0.39", flavor: "mysql" };
+  f.elements.source_host.value = "custom-dns"; f.elements.source_host.fire("input");
+  f.fire("submit"); await flush(4);
+  out.managedKept = { checked: !!f.elements.cx_managed.checked, block: f.querySelector("pre[data-grant]").textContent.includes("GRANT LOCK TABLES"), put: managedPut };
+  // A form filled from a draft never generates a password, not even after a
+  // second Find it.
+  vm.runInContext("pendingSourcePassword = ''", ctx);
+  vm.runInContext("showConnectForm({ source_host: 'db', source_port: '3307', source_user: 'alice' })", ctx);
+  f = form();
+  ctx.__identifyAnswer = { addr: "db:3307", version: "8.4.3", flavor: "mysql" };
+  f.fire("submit"); await flush(4);
+  out.restoredFindIt = { step: step(f), pw: f.elements.source_password.value, pwAgainShown: !f.querySelector("p#connect-pw-again").hidden };
   // A restored draft with what step 1 found comes back at step 2, probing
   // nothing: no password generated, the screen asks for it.
   setCaps({ monitor: true });
@@ -489,7 +545,7 @@ func TestConnectScreenWiring(t *testing.T) {
 		IdentifyCalls []string
 		Found         struct {
 			Step, Submit, Flavor, Grant, Block, User, DraftPut string
-			Step2, Managed, FullRowHidden                      bool
+			Step2, Managed, FullShown                          bool
 			PwLen                                              int
 			Texts, Banned                                      []string
 		}
@@ -500,9 +556,9 @@ func TestConnectScreenWiring(t *testing.T) {
 		}
 
 		Proxy struct {
-			Step, Flavor   string
-			Texts, Buttons []string
-			Chosen         struct {
+			Step, Flavor          string
+			Texts, Buttons, Gated []string
+			Chosen                struct {
 				Flavor, Grant, Title string
 				Buttons              []string
 			}
@@ -520,9 +576,9 @@ func TestConnectScreenWiring(t *testing.T) {
 		Order                                    []string
 		CheckBody                                map[string]any
 		Failed                                   struct {
-			Step, Auto, Submit string
-			Lights, Banned     []string
-			Scheduled, Notices int
+			Step, Auto, Submit   string
+			Lights, Banned, Said []string
+			Scheduled, Notices   int
 		}
 		Recheck struct {
 			Rounds, Max, Pending int
@@ -560,7 +616,27 @@ func TestConnectScreenWiring(t *testing.T) {
 			PwAgainShown                          bool
 			Texts, Probes                         []string
 		}
-		RestoredNoIdentity                                   struct{ Step, Focused string }
+		RestoredNoIdentity struct{ Step, Focused string }
+		LateIdentify       struct {
+			Step  string
+			Found int
+		}
+		LateCheck struct {
+			Step              string
+			Lights, Scheduled int
+		}
+		RefusedRequest struct {
+			Auto              string
+			Scheduled, Lights int
+		}
+		ManagedKept struct {
+			Checked, Block bool
+			Put            string
+		}
+		RestoredFindIt struct {
+			Step, Pw     string
+			PwAgainShown bool
+		}
 		DeleteBeforePutDone                                  bool
 		CancelOrder, QueuedAfterCancel, ReadOnlyRestoreCalls []string
 		RestoredHost                                         *string
@@ -581,7 +657,7 @@ func TestConnectScreenWiring(t *testing.T) {
 	if !f.Connect || f.Step != "1" || !f.Step2Hidden || !f.Step3Hidden || f.Focused != "source_host" || f.Submit != "Find it" || !f.PwAgainHidden {
 		t.Errorf("fresh screen: %+v", f)
 	}
-	if strings.Join(f.Fields, ",") != "cx_managed,name,source_host,source_password,source_port,source_user" {
+	if strings.Join(f.Fields, ",") != "cx_managed,source_host,source_password,source_port,source_user" {
 		t.Errorf("Connect fields = %v", f.Fields)
 	}
 	if len(f.Banned) > 0 {
@@ -623,9 +699,9 @@ func TestConnectScreenWiring(t *testing.T) {
 	if b := out.BackToWhere; b.Step != "1" || !b.Step2Hidden || b.Found != 0 {
 		t.Errorf("another host after step 1 found one: %+v; want step 1 again, the answer gone", b)
 	}
-	// Past step 1 the full-form link goes: kept, it pushes the button down.
-	if !fd.FullRowHidden {
-		t.Error("the link to the full form stays on step 2, pushing its button down")
+	// The way to the full form (S3, an own store) stays on every step.
+	if !fd.FullShown {
+		t.Error("the link to the full form is gone on step 2")
 	}
 
 	// A proxy: the flavor is a choice, with MySQL chosen, so nothing is forced.
@@ -633,6 +709,9 @@ func TestConnectScreenWiring(t *testing.T) {
 	if px.Step != "2" || px.Flavor != "mysql" || strings.Join(px.Buttons, ",") != "MySQL=true,MariaDB=false" ||
 		len(px.Texts) != 2 || !strings.Contains(px.Texts[1], "ProxySQL") {
 		t.Errorf("proxy: %+v", px)
+	}
+	if len(px.Gated) != 0 {
+		t.Errorf("nodes with data-flavor on the Connect screen, which the full form's CSS hides: %v", px.Gated)
 	}
 	if c := px.Chosen; c.Flavor != "mariadb" || c.Grant != "mariadb" || c.Title != "MariaDB" || strings.Join(c.Buttons, ",") != "MySQL=false,MariaDB=true" {
 		t.Errorf("choosing MariaDB behind the proxy: %+v", c)
@@ -661,6 +740,9 @@ func TestConnectScreenWiring(t *testing.T) {
 	wantFailed := "ok:DBTrail reaches it,bad:User logs in,wait:Change log keeps full rows,wait:Permissions,wait:Every table has a key"
 	if fl.Step != "3" || strings.Join(fl.Lights, ",") != wantFailed || fl.Notices != 0 || fl.Submit != "Check again" {
 		t.Errorf("a refused password: %+v; want the lights with login red and the rest not reached, in place", fl)
+	}
+	if strings.Join(fl.Said, ",") != "DBTrail reaches it: passed,User logs in: failed,Change log keeps full rows: not checked yet,Permissions: not checked yet,Every table has a key: not checked yet" {
+		t.Errorf("the lights' states in words, for a screen reader: %v", fl.Said)
 	}
 	if fl.Scheduled != 1 || fl.Auto != "Checking again in 10 seconds." {
 		t.Errorf("a failed round schedules one re-check and says so: %+v", fl)
@@ -718,6 +800,22 @@ func TestConnectScreenWiring(t *testing.T) {
 	}
 	if rn := out.RestoredNoIdentity; rn.Step != "1" || rn.Focused != "source_host" {
 		t.Errorf("restored with nothing found: %+v; want step 1", rn)
+	}
+	// Answers that come back after Host changed are about another server.
+	if li := out.LateIdentify; li.Step != "1" || li.Found != 0 {
+		t.Errorf("an identify answer for the old host was drawn for the new one: %+v", li)
+	}
+	if lc := out.LateCheck; lc.Step != "1" || lc.Lights != 0 || lc.Scheduled != 0 {
+		t.Errorf("a check answer for the old host pulled the screen back: %+v; want step 1, no lights, no re-check", lc)
+	}
+	if rr := out.RefusedRequest; rr.Scheduled != 0 || rr.Lights != 0 || !strings.HasPrefix(rr.Auto, "A server named db1 already exists.") || !strings.Contains(rr.Auto, "Press Check again") {
+		t.Errorf("a check refused as a request: %+v; want the server's words once, the old lights gone, no automatic retry", rr)
+	}
+	if mk := out.ManagedKept; !mk.Checked || !mk.Block || !strings.Contains(mk.Put, `"managed":"rds"`) {
+		t.Errorf("the RDS box the person ticked: %+v; want it kept across Find it and saved in the draft", mk)
+	}
+	if rf := out.RestoredFindIt; rf.Step != "2" || rf.Pw != "" || !rf.PwAgainShown {
+		t.Errorf("a restored form after a second Find it: %+v; want no password made up, the hint shown", rf)
 	}
 	if out.DeleteBeforePutDone {
 		t.Errorf("Cancel deleted the draft while a save was in flight: %v", out.CancelOrder)
