@@ -252,10 +252,10 @@ func TestServerFormSectionsCannotOutgrowTheDialog(t *testing.T) {
 	}
 }
 
-// TestIcebergStageCardsSitOnADifferentGround (#1573): the .ice-stage cards
+// TestIcebergStageCardsStandOutFromTheirGround (#1573): the .ice-stage cards
 // were --raised on a --raised panel, a measured 1.000 contrast the
 // stylesheet's own comment admitted.
-func TestIcebergStageCardsSitOnADifferentGround(t *testing.T) {
+func TestIcebergStageCardsStandOutFromTheirGround(t *testing.T) {
 	css := readAsset(t, "style.css")
 	i := strings.Index(css, ".ice-stage {")
 	if i < 0 {
@@ -265,14 +265,34 @@ func TestIcebergStageCardsSitOnADifferentGround(t *testing.T) {
 	if strings.Contains(rule, "var(--raised)") {
 		t.Errorf("the .ice-stage card is still --raised on the panel's --raised ground: %s", rule)
 	}
-	// The ground the card sits on is --panel-bg, which the studio direction
-	// (the one index.html hardcodes) sets to --raised. If that ground ever
-	// moves to --surface, the card's --surface fill collides again.
 	if !strings.Contains(rule, "var(--surface)") {
 		t.Errorf("the .ice-stage card does not use the --surface fill: %s", rule)
 	}
-	if !strings.Contains(css, "--panel-bg: var(--raised);") {
-		t.Error("no direction sets --panel-bg to --raised any more; re-check the .ice-stage card against its ground")
+	// The ground the cards sit on is the Iceberg panel, an .ov-panel, which
+	// the ONE card rule (#1950) paints --surface too. So today the fill does
+	// not separate card from ground; the card's own --line border does, and
+	// losing it would leave the stages invisible. (This test used to check
+	// --panel-bg, a token no rule read: it passed while the ground changed.)
+	// The ground is the LAST rule that names .ov-panel as one of its
+	// selectors and sets a background, as the cascade would pick it; read by
+	// selector, not by the whole list, so adding a class to the card rule
+	// does not break this.
+	ground := ""
+	for _, m := range regexp.MustCompile(`([^{}]+)\{([^{}]*)\}`).FindAllStringSubmatch(stripCSSComments(css), -1) {
+		for _, sel := range strings.Split(m[1], ",") {
+			if strings.TrimSpace(sel) == ".ov-panel" && strings.Contains(m[2], "background") {
+				ground = m[2]
+			}
+		}
+	}
+	if ground == "" {
+		t.Fatal("no rule paints the .ov-panel ground; re-check the .ice-stage card against wherever it moved")
+	}
+	if !strings.Contains(ground, "background: var(--surface)") {
+		t.Errorf("the .ov-panel ground is no longer --surface; re-check the .ice-stage card against it: %s", ground)
+	}
+	if !strings.Contains(rule, "border: 1px solid var(--line)") {
+		t.Errorf("the .ice-stage card sits --surface on a --surface panel and lost the border that separates them: %s", rule)
 	}
 }
 

@@ -12,7 +12,6 @@
    those meanings, never worn as decoration, never repainted by a brand rule.
    Brand accents (the site's sunset: pink/peach/violet/sun) live on chrome and
    config surfaces only and never on a surface that carries a row.
-   Three directions via [data-dir="paper" | "studio" | "trail"] (studio ships).
    ============================================================ */
 
 :root {
@@ -106,10 +105,6 @@
   --accent:    oklch(0.54 0.17 260);
   --accent-2:  oklch(0.48 0.17 260);
   --accent-bg: oklch(0.962 0.018 258);
-  --accent-a:  var(--accent);
-  /* blue -> brand violet: the one gradient-only brand moment (rails, primary
-     button). L capped so white button text stays >=4.5:1 on either stop. */
-  --accent-b:  oklch(0.575 0.17 286);
   --focus-ring: 0 0 0 3px var(--accent-bg);
   /* the <select> chevron: --ink-4, baked into a data URI because a
      background image cannot read a custom property */
@@ -143,11 +138,12 @@
   --shadow:    0 1px 2px rgba(45,27,69,0.04), 0 10px 28px rgba(45,27,69,0.07);  /* cards */
   --shadow-lg: 0 30px 80px -24px oklch(0.3 0.03 305 / 0.45);                    /* overlays */
   --shadow-sm: 0 1px 2px oklch(0.4 0.04 305 / 0.22);                             /* a filled button's lip */
-  --panel-shadow: 0 1px 2px oklch(0.6 0.03 305 / 0.04);                          /* legacy direction tunable */
+  --panel-shadow: 0 1px 2px oklch(0.6 0.03 305 / 0.04);                          /* a panel's lip */
 
   /* ---- radii ---- */
   --r-xs: 4px; --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-xl: 22px; --r-pill: 999px;
-  /* legacy direction tunables (re-pointed per data-dir; go with step 8) */
+  /* the radii the older rules read: 12/8/20 sit between steps of the scale
+     above, so moving them onto it would change what renders */
   --radius: 12px; --radius-sm: 8px; --radius-lg: 20px;
 
   /* ---- spacing: a 4px grid ---- */
@@ -161,13 +157,8 @@
   /* the UI scale (Geist); mono uses --fs-xs / --fs-sm */
   --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 28px;
   --title-font: var(--f-display);
-  --title-weight: 600;
-  --title-tracking: -0.02em;
 
-  /* ---- direction tunables + motion ---- */
-  --panel-bg: var(--raised);
-  --panel-border: var(--line);
-  --rail: var(--line);
+  /* ---- shell + motion ---- */
   --shell-w: 248px;
   --ease: cubic-bezier(.22, .61, .36, 1);
   --ease-out: cubic-bezier(.16, 1, .3, 1);
@@ -199,30 +190,6 @@
   --shadow-lg: 0 30px 80px -24px rgba(0,0,0,.6);
   --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
   --panel-shadow: 0 1px 2px rgba(0,0,0,.3);
-}
-
-/* ---------- direction: paper (editorial calm) ---------- */
-[data-dir="paper"] {
-  --radius: 5px; --radius-sm: var(--r-xs);
-  --panel-bg: transparent;
-  --panel-border: transparent;
-  --panel-shadow: none;
-  --title-tracking: -0.025em;
-}
-/* ---------- direction: studio (warm workstation — default) ---------- */
-[data-dir="studio"] {
-  --radius: 12px; --radius-sm: 8px;
-  --panel-bg: var(--raised);
-  --panel-border: var(--line);
-}
-/* ---------- direction: trail (expressive) ---------- */
-[data-dir="trail"] {
-  --radius: 16px; --radius-sm: 11px;
-  --panel-bg: var(--surface);
-  --panel-border: var(--line);
-  --panel-shadow: var(--shadow);
-  --title-weight: 700;
-  --title-tracking: -0.03em;
 }
 
 /* Vendored brand typefaces — latin-subset woff2 embedded in the binary
@@ -276,7 +243,6 @@ html, body { height: 100%; }
 svg { width: 16px; height: 16px; display: block; flex: none; }
 .brand-mark svg { width: 18px; height: 18px; }
 .ni-icon svg { width: 17px; height: 17px; }
-.tt-warn svg, .empty-ic svg { width: 18px; height: 18px; }
 body {
   margin: 0;
   font-family: var(--f-ui);
@@ -334,10 +300,6 @@ button { font-family: inherit; }
   display: grid; place-items: center;
   color: var(--white);
   background: var(--strip);
-}
-[data-dir="trail"] .brand-mark,
-[data-accent="warm"] .brand-mark {
-  background: linear-gradient(150deg, var(--accent-a) 0%, var(--accent-b) 130%);
 }
 .brand-mark img { width: 30px; height: 30px; border-radius: var(--r-sm); display: block; }
 .brand-name {
@@ -440,11 +402,6 @@ button { font-family: inherit; }
 @media (prefers-reduced-motion: no-preference) {
   .nav-item.active::before { animation: railpop .3s var(--ease-out); }
 }
-[data-dir="trail"] .nav-item.active::before {
-  height: 26px; width: 4px;
-}
-[data-dir="paper"] .nav-item.active { background: transparent; }
-[data-dir="paper"] .nav-item.active::before { left: -2px; }
 @keyframes railpop { from { height: 0; opacity: 0; } to { opacity: 1; } }
 
 .nav-kbd {
@@ -516,8 +473,6 @@ button { font-family: inherit; }
 .page-docs svg { width: 12px; height: 12px; color: var(--ink-4); }
 .page-docs:hover { color: var(--ink); border-color: var(--ink-4); }
 .page-docs:hover svg { color: var(--accent); }
-[data-accent="warm"] .page-docs:hover { color: var(--orange-2); border-color: var(--orange-2); }
-[data-accent="warm"] .page-docs:hover svg { color: var(--orange-2); }
 
 /* enter animation for views — transform-only so content is ALWAYS visible
    (the preview's animation clock can freeze at t=0; opacity-from-0 would blank it) */
@@ -626,7 +581,6 @@ button { font-family: inherit; }
   border: 1px solid var(--line); border-radius: var(--r-md);
   padding: 16px 20px; margin-bottom: 12px; background: var(--raised);
 }
-[data-dir="paper"] .ev-advanced { background: transparent; }
 .ev-advanced[hidden] { display: none; }
 
 .ev-empty { padding: 44px 24px; text-align: center; color: var(--ink-3); font-size: var(--fs-md); }
@@ -698,11 +652,6 @@ button { font-family: inherit; }
 .b-insert { color: var(--insert); background: var(--insert-bg); }
 .b-delete { color: var(--delete); background: var(--delete-bg); }
 .b-baseline { color: var(--ink-3); background: var(--raised); }
-[data-dir="trail"] .badge { color: var(--white); border-color: transparent; }
-[data-dir="trail"] .b-update { background: var(--update); }
-[data-dir="trail"] .b-insert { background: var(--insert); }
-[data-dir="trail"] .b-delete { background: var(--delete); }
-[data-dir="trail"] .b-baseline { background: var(--ink-3); color: var(--white); }
 
 .chip {
   display: inline-flex; align-items: center; gap: 5px;
@@ -762,7 +711,6 @@ button { font-family: inherit; }
 }
 .ev-row:hover, .vfy-row:hover { background: var(--raised); }
 .ev-row.open { background: var(--raised); }
-[data-dir="trail"] .ev-row.open { background: var(--accent-bg); }
 .ev-time { font-family: var(--f-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
 .ev-table { font-family: var(--f-mono); font-size: var(--fs-sm); color: var(--ink-2); }
 .ev-pk { font-family: var(--f-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--ink); }
@@ -934,17 +882,12 @@ button { font-family: inherit; }
 }
 .card { padding: 22px 22px 8px; position: relative; overflow: hidden; }
 /* ONE header pattern: title left, meta and action right. */
-.card-head, .ov-panel-head, .vfy-region-head {
+.ov-panel-head, .vfy-region-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
 .card-title, .ov-panel-title, .stg-card-t, .bk-lane-t, .fr-card .dc-name, .state-title, .empty h3 {
   font-family: var(--f-ui); font-size: var(--fs-lg); font-weight: 600;
   letter-spacing: -0.01em; line-height: 1.3; color: var(--ink); margin: 0;
-}
-[data-dir="paper"] .card { background: transparent; border-color: var(--line); padding-left: 0; padding-right: 22px; }
-[data-dir="trail"] .card::before {
-  content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
-  background: linear-gradient(var(--accent-a), var(--accent-b));
 }
 .card-title { margin-bottom: 14px; }
 .kv {
@@ -984,9 +927,7 @@ button { font-family: inherit; }
    ============================================================ */
 /* An empty screen is where the console should be friendliest, so this is a
    brand moment: a faint sunrise wash over --surface and a sunset hairline on
-   the top edge. (.empty-ic below stays muted ink — no construction site builds
-   one today, so branding it would be a change nothing renders.)
-   It stays a FRAME treatment — the wash never reaches a row, and
+   the top edge. It stays a FRAME treatment — the wash never reaches a row, and
    .ev-empty (which doubles as an inline error line: "Could not load servers…")
    deliberately does NOT get it. Alphas are set by the --ink-3 body pair, which
    holds >=4.5:1 even where both washes overlap. */
@@ -1022,23 +963,12 @@ button { font-family: inherit; }
 }
 .tt-meta b { color: var(--ink); font-weight: 500; }
 
-.tt-warn {
-  display: flex; align-items: center; gap: 11px;
-  font-size: 13px; color: var(--orange-2);
-  background: var(--orange-bg);
-  border: 1px solid color-mix(in srgb, var(--orange) 30%, transparent);
-  border-radius: var(--radius-sm);
-  padding: 12px 16px; margin-bottom: 24px;
-}
-.tt-warn svg { flex: none; }
-.tt-warn .mono { font-family: var(--f-mono); }
-
 .timeline { position: relative; padding-left: 30px; margin-top: 8px; }
 /* the rail that draws itself */
 .timeline::before {
   content: ""; position: absolute; left: 5px; top: 6px; bottom: 8px;
   width: 2px; border-radius: 2px;
-  background: linear-gradient(var(--accent-a), var(--accent-b));
+  background: var(--line);
   transform-origin: top;
   transform: scaleY(1);
 }
@@ -1046,9 +976,6 @@ button { font-family: inherit; }
   .timeline.drawn::before { animation: railgrow .9s var(--ease-out); }
 }
 @keyframes railgrow { from { transform: scaleY(0); } to { transform: scaleY(1); } }
-/* keep the spine calm-gray only for the default blue accent; any warm/color accent paints it */
-[data-accent="blue"][data-dir="studio"] .timeline::before { background: var(--line); }
-
 
 .tl-node {
   position: relative; padding: 0 0 26px 4px;
@@ -1338,23 +1265,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .twk-note { font-size: 11px; color: var(--ink-4); line-height: 1.45; }
 
 /* ============================================================
-   density — compact tightens the data surfaces
-   ============================================================ */
-[data-density="compact"] .view { padding-top: 28px; }
-[data-density="compact"] .filters { padding: 14px 16px; margin-bottom: 18px; gap: 12px 16px; }
-[data-density="compact"] .input, [data-density="compact"] .select { height: 32px; }
-[data-density="compact"] .btn { height: 32px; }
-[data-density="compact"] .ev-row { padding-top: 8px; padding-bottom: 8px; }
-[data-density="compact"] .ev-head { padding-bottom: 8px; }
-[data-density="compact"] .result-bar { margin-bottom: 10px; }
-[data-density="compact"] .kv { padding: 7px 0; }
-[data-density="compact"] .card { padding-top: 16px; }
-[data-density="compact"] .card-title { margin-bottom: 11px; }
-[data-density="compact"] .tl-node { padding-bottom: 16px; }
-[data-density="compact"] .diff-grid > div { padding-top: 6px; padding-bottom: 6px; }
-[data-density="compact"] .page-head { margin-bottom: 22px; }
-
-/* ============================================================
    home-surface card recipe (#1421) — the site's bento language as
    reusable console classes. A tinted card's tint IS its edge
    (border-color transparent); white cards keep the hairline. The
@@ -1387,7 +1297,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
   background: var(--surface); border: 1px solid var(--line);
   border-radius: var(--radius-lg); padding: 18px 20px; box-shadow: var(--panel-shadow);
 }
-[data-dir="paper"] .ov-stat { background: transparent; border-color: var(--line); }
 .ov-stat-v { font-family: var(--f-display); font-size: 32px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; color: var(--ink); }
 .ov-stat-v.small { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 19px; font-weight: 500; }
 .ov-stat-v.danger { color: var(--delete); }
@@ -1672,9 +1581,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 /* the tint-aware dividers (see the token block) */
 .tcard-violet .ov-ev, .tcard-violet .ov-tablerow, .tcard-violet .ov-coverage { border-top-color: var(--violet-line); }
 .tcard-sun .ov-ev, .tcard-sun .ov-tablerow, .tcard-sun .ov-coverage { border-top-color: var(--sun-line); }
-[data-dir="paper"] .ov-panel { background: transparent; border-color: var(--line); }
 .ov-panel-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 14px 10px; }
-#ov-browse svg { width: 13px; height: 13px; }
 
 .ov-evlist { display: flex; flex-direction: column; }
 .ov-ev {
@@ -1798,7 +1705,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 }
 .cmdk-item.sel { background: var(--accent-bg); color: var(--ink); }
 .cmdk-item.sel .cmdk-ic { color: var(--accent); }
-[data-accent="warm"] .cmdk-item.sel .cmdk-ic { color: var(--orange-2); }
 .cmdk-empty { padding: 28px; text-align: center; color: var(--ink-4); font-size: 13.5px; }
 
 /* keyboard hint + row cursor on Events */
@@ -1809,7 +1715,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
   border: 1px solid var(--line); border-radius: var(--r-xs); padding: 0 4px; background: var(--surface);
 }
 .ev-row.cursor { background: var(--accent-bg); box-shadow: inset 2px 0 0 var(--accent); }
-[data-accent="warm"] .ev-row.cursor { box-shadow: inset 2px 0 0 var(--orange-2); }
 .ev-row.cursor .ev-caret { opacity: 1; color: var(--accent); }
 
 /* Restore: the folded-in row-state panel (#1298). Reads as a section of the
