@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "measured_at_commit": "d55c2870",
+  "measured_at_commit": "a121b316",
   "platform": "darwin/153.0.8010.12",
   "viewport": "1280x720",
   "runs": {
@@ -10,7 +10,7 @@
       "fields_typed": 7,
       "forced_choices": 0,
       "trips_out_of_browser": 1,
-      "words_per_step_max": 150,
+      "words_per_step_max": 135,
       "words_per_error_max": "not measurable",
       "banned_words": 12,
       "yellow_red": 1,
@@ -31,7 +31,7 @@
       "words_per_step_max": 84,
       "banned_words": 7,
       "yellow_red": 3,
-      "primary_below_fold_px": 252
+      "primary_below_fold_px": 251
     },
     "no-primary-key": {
       "clicks_to_capture": 8,
@@ -41,7 +41,7 @@
       "words_per_step_max": 93,
       "words_per_error_max": 46,
       "banned_words": 7,
-      "primary_below_fold_px": 349
+      "primary_below_fold_px": 348
     },
     "refused-update": {
       "renewal_sentence_with_gate_open": "not measurable",
@@ -85,7 +85,7 @@
         ]
       },
       "words_per_step_max": {
-        "worst": "undo",
+        "worst": "first-snapshot",
         "steps": [
           {
             "step": "sign-in",
@@ -139,8 +139,8 @@
           {
             "step": "undo",
             "kind": "step",
-            "words_above_fold": 150,
-            "words_whole": 269,
+            "words_above_fold": 63,
+            "words_whole": 268,
             "layer": "view"
           },
           {
@@ -202,8 +202,8 @@
       "changes_visible_without_reload": {
         "changes": [
           "INSERT: seen after 9.3 s",
-          "UPDATE: seen after 9.7 s",
-          "DELETE: seen after 7.6 s"
+          "UPDATE: seen after 9.8 s",
+          "DELETE: seen after 7.7 s"
         ]
       },
       "primary_below_fold_px": {
@@ -211,7 +211,7 @@
         "steps": [
           "sign-in: 0 px (Create & sign in)",
           "after-sign-in: 0 px (+ Add server)",
-          "connect: 298 px (Check and connect)",
+          "connect: 297 px (Check and connect)",
           "save-result: 0 px (OK)",
           "snapshot-location: 368 px (Save (the snapshot location))",
           "snapshot-ready: 0 px (Read database now)"
@@ -266,21 +266,21 @@
             "step": "connect",
             "kind": "step",
             "words_above_fold": 84,
-            "words_whole": 401,
+            "words_whole": 425,
             "layer": "modal"
           },
           {
             "step": "save-result",
             "kind": "step",
             "words_above_fold": 18,
-            "words_whole": 271,
+            "words_whole": 295,
             "layer": "notice"
           },
           {
             "step": "after-ok",
             "kind": "step",
             "words_above_fold": 64,
-            "words_whole": 253,
+            "words_whole": 277,
             "layer": "modal"
           },
           {
@@ -312,7 +312,7 @@
       "primary_below_fold_px": {
         "worst": "connect",
         "steps": [
-          "connect: 252 px (Check and connect)",
+          "connect: 251 px (Check and connect)",
           "save-result: 0 px (OK)"
         ]
       }
@@ -404,7 +404,7 @@
       "primary_below_fold_px": {
         "worst": "connect",
         "steps": [
-          "connect: 349 px (Check and connect)",
+          "connect: 348 px (Check and connect)",
           "save-refused: 0 px (Back to the form)",
           "save-result: 0 px (OK)"
         ]
