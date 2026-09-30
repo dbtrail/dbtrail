@@ -2313,10 +2313,50 @@ func TestOne_restartsOnlyOnCutTransaction(t *testing.T) {
 		t.Errorf("another error: err=%v calls=%d, want it returned after 1 run", err, calls)
 	}
 
+	// A restart resumes from the checkpoint the first pass left. It must not
+	// apply the first pass's start instructions again: --reset would throw
+	// that checkpoint away (skipping the rest of the cut transaction and
+	// recording a false loss), and --start-* would replay without cleanup.
+	var seen []Config
+	oneRunFn = func(_ context.Context, cfg Config) error {
+		seen = append(seen, cfg)
+		if len(seen) == 1 {
+			return cut
+		}
+		return nil
+	}
+	first := Config{Reset: true, StartFile: "binlog.000003", StartPos: 1234, StartGTID: "0-1-5", Schemas: "shop"}
+	if err := One(context.Background(), first); err != nil || len(seen) != 2 {
+		t.Fatalf("err=%v runs=%d", err, len(seen))
+	}
+	if seen[0].Reset != true || seen[0].StartFile != "binlog.000003" {
+		t.Errorf("the first pass must get the config as given: %+v", seen[0])
+	}
+	if r := seen[1]; r.Reset || r.StartFile != "" || r.StartPos != 0 || r.StartGTID != "" || r.Schemas != "shop" {
+		t.Errorf("the restart must drop --reset and --start-* and keep the rest: %+v", r)
+	}
+
 	calls = 0
 	oneRunFn = func(context.Context, Config) error { calls++; return cut }
 	err := One(context.Background(), Config{})
 	if !errors.Is(err, parser.ErrResentCutTransaction) || calls != 6 {
 		t.Errorf("endless cuts: err=%v calls=%d, want the cut error after 6 runs", err, calls)
+	}
+}
+
+// TestNotRestartableIfUnsaved: after a cut transaction, capture restarts
+// itself only when the final checkpoint was saved.
+func TestNotRestartableIfUnsaved(t *testing.T) {
+	cut := &parser.ResentCutTransactionError{GTID: "0-1-7", Rows: 2}
+	if err := notRestartableIfUnsaved(cut, nil); !errors.Is(err, parser.ErrResentCutTransaction) {
+		t.Errorf("saved: %v, want the restartable cut error", err)
+	}
+	err := notRestartableIfUnsaved(cut, errors.New("index gone"))
+	if err == nil || errors.Is(err, parser.ErrResentCutTransaction) || !strings.Contains(err.Error(), "index gone") {
+		t.Errorf("unsaved: %v, want a non-restartable error naming the failed save", err)
+	}
+	other := errors.New("other")
+	if err := notRestartableIfUnsaved(other, errors.New("x")); err != other {
+		t.Errorf("other errors pass unchanged, got %v", err)
 	}
 }

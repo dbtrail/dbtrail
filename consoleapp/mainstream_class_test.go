@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 	"github.com/dbtrail/dbtrail/internal/telemetry"
 	"github.com/dbtrail/dbtrail/internal/testutil/fakemysql"
@@ -82,5 +84,28 @@ func TestWriteDeadline_restartKeyAndClassUnchanged(t *testing.T) {
 	}
 	if got := telemetry.ClassifyError(err); got != telemetry.ClassDBConnection {
 		t.Errorf("ClassifyError = %q, want %q", got, telemetry.ClassDBConnection)
+	}
+}
+
+// A transaction cut by a disconnect is restarted by streamrun.One itself; when
+// One gives up after its quick restarts, the main source of watch still rides
+// it out under the daemon's crash-loop policy instead of stopping the whole
+// daemon (console and every capture with it).
+//
+// Must not t.Parallel(): mutates the monitor policy globals.
+func TestRunMainStream_cutTransactionRestarts(t *testing.T) {
+	shrinkMonitorBackoff(t)
+	prev := mainStreamFn
+	t.Cleanup(func() { mainStreamFn = prev })
+	calls := 0
+	mainStreamFn = func(ctx context.Context, cfg streamrun.Config) error {
+		calls++
+		if calls == 1 {
+			return fmt.Errorf("gave up: %w", &parser.ResentCutTransactionError{GTID: "0-1-7", Rows: 2})
+		}
+		return nil
+	}
+	if err := runMainStreamWithWriteDeadlineRetry(context.Background(), streamrun.Config{}); err != nil || calls != 2 {
+		t.Fatalf("err=%v runs=%d, want the stream restarted once and then fine", err, calls)
 	}
 }

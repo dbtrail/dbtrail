@@ -92,6 +92,10 @@ type streamState struct {
 	// state, the gap auto-advance stamp) persists NULL, which the upsert's
 	// COALESCE turns into "preserve whatever is already there".
 	skips *parser.SkipCounters
+	// lastSaveErr is the error of the most recent checkpoint save, nil when
+	// it succeeded. One restarts itself after a cut transaction only when the
+	// final save succeeded: an older checkpoint may not bound the cleanup.
+	lastSaveErr error
 
 	// accGTID is the in-memory accumulated GTID set (GTID mode only).
 	// It is serialized to gtidSet on checkpoint. Typed as the gomysql.GTIDSet
@@ -1820,7 +1824,9 @@ func streamLoop(
 		if err := flush(); err != nil {
 			return err
 		}
+		state.lastSaveErr = nil
 		if err := saveCheckpoint(db, state); err != nil {
+			state.lastSaveErr = err
 			slog.Warn("saveCheckpoint failed", "error", err)
 			m.Errors.WithLabelValues("checkpoint").Inc()
 		} else {
@@ -2173,12 +2179,32 @@ func One(ctx context.Context, cfg Config) error {
 		}
 		slog.Warn("restarting capture from its last checkpoint so a transaction cut by a disconnect is indexed once",
 			"error", err, "restart", quick)
+		// The restart resumes from the checkpoint the pass just left. The
+		// first pass's start instructions must not apply again: --reset would
+		// throw that checkpoint away (skipping the rest of the transaction and
+		// recording a false loss), and --start-* would replay without the
+		// resume cleanup.
+		cfg.Reset = false
+		cfg.StartFile, cfg.StartPos, cfg.StartGTID = "", 0, ""
 		select {
 		case <-time.After(cutRestartDelay):
 		case <-ctx.Done():
 			return err
 		}
 	}
+}
+
+// notRestartableIfUnsaved keeps a cut-transaction error from restarting capture
+// in process when the final checkpoint could not be saved: the restart would
+// resume from an older checkpoint, which may not bound the cleanup of the
+// partial copy (a start from an explicit --start-gtid records no file). The
+// error then returns without the sentinel, so it stops loudly and a later
+// start cleans up from whatever checkpoint is durable.
+func notRestartableIfUnsaved(parseErr, lastSaveErr error) error {
+	if lastSaveErr == nil || !errors.Is(parseErr, parser.ErrResentCutTransaction) {
+		return parseErr
+	}
+	return fmt.Errorf("%s; the final checkpoint could not be saved (%v), so capture does not restart itself", parseErr.Error(), lastSaveErr)
 }
 
 // oneRunFn and cutRestartDelay are seams for One's restart test.
@@ -2734,18 +2760,6 @@ func oneRun(ctx context.Context, cfg Config) error {
 	}
 	state.skips = skips
 
-	// A run with no checkpoint writes its start point now, before it reads a
-	// single event, instead of at the first ticker tick. Until that tick a
-	// restart (a crash, or One restarting itself after a cut transaction)
-	// would find no checkpoint and start over at the source's CURRENT
-	// position: the rows captured so far would stay, and whatever the source
-	// sent after them would be skipped.
-	if saved == nil {
-		if err := saveCheckpoint(indexDB, state); err != nil {
-			return fmt.Errorf("save the start checkpoint: %w", err)
-		}
-	}
-
 	// ── 7. Parse source DSN for BinlogSyncer ─────────────────────────────
 	host, port, user, password, err := cfg.Deps.ParseSourceDSN(cfg.SourceDSN)
 	if err != nil {
@@ -2849,6 +2863,20 @@ func oneRun(ctx context.Context, cfg Config) error {
 	}
 	if startErr != nil {
 		return startErr
+	}
+
+	// A run with no checkpoint writes its start point now, once the source
+	// accepted the start and before a single event is read, instead of at the
+	// first ticker tick. Until that tick a restart (a crash, or One restarting
+	// itself after a cut transaction) would find no checkpoint and start over
+	// at the source's CURRENT position: the rows captured so far would stay,
+	// and whatever the source sent after them would be skipped. Not earlier:
+	// a start the source refused must leave nothing behind, so a corrected
+	// --start-* flag is honored on the next run.
+	if saved == nil {
+		if err := saveCheckpoint(indexDB, state); err != nil {
+			return fmt.Errorf("save the start checkpoint: %w", err)
+		}
 	}
 
 	switch mode {
@@ -2998,7 +3026,7 @@ func oneRun(ctx context.Context, cfg Config) error {
 		return loopErr
 	}
 	if parseErr != nil && !errors.Is(parseErr, context.Canceled) {
-		return parseErr
+		return notRestartableIfUnsaved(parseErr, state.lastSaveErr)
 	}
 
 	if cfg.Format == "json" {

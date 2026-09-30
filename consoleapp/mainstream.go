@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
 
@@ -57,7 +58,11 @@ func runMainStreamWithWriteDeadlineRetry(ctx context.Context, cfg streamrun.Conf
 		err := mainStreamFn(ctx, cfg)
 		// ctx.Err() first: on shutdown One's final checkpoint flush can hit the
 		// same deadline, and that is a stopping daemon, not a stall to ride out.
-		if err == nil || ctx.Err() != nil || !errors.Is(err, indexer.ErrWriteDeadline) {
+		// A transaction cut by a disconnect is normally restarted by One
+		// itself; this catches the case where One gave up after its quick
+		// restarts, so the daemon rides it out instead of stopping.
+		if err == nil || ctx.Err() != nil ||
+			(!errors.Is(err, indexer.ErrWriteDeadline) && !errors.Is(err, parser.ErrResentCutTransaction)) {
 			return err
 		}
 		// Circuit breaker. The give-up path is the OLD behaviour, unchanged and

@@ -159,7 +159,7 @@ type ResentCutTransactionError struct {
 
 func (e *ResentCutTransactionError) Error() string {
 	return fmt.Sprintf("the connection to the source dropped in the middle of transaction %s after %d of its row events were captured, "+
-		"and the source sent it again from the start; stopping so capture restarts from its last checkpoint and indexes it once", e.GTID, e.Rows)
+		"and the source sent it again from the start; stopping so capture resumes from its last checkpoint, whose cleanup removes the partial copy", e.GTID, e.Rows)
 }
 
 func (e *ResentCutTransactionError) Is(target error) bool { return target == ErrResentCutTransaction }

@@ -74,4 +74,10 @@ func TestOne_startSyncRefusalIsClassed(t *testing.T) {
 	if got := telemetry.ClassifyError(err); got != telemetry.ClassDBPermission {
 		t.Errorf("ClassifyError = %q (server error %d), want %q", got, re.MySQLErrorNumber(), telemetry.ClassDBPermission)
 	}
+	// A start the source refused leaves no checkpoint: the next run must
+	// honor a corrected --start-* flag instead of resuming a start that never
+	// connected, and the console must not show capture as started.
+	if st, err := loadStreamState(indexDB); err != nil || st != nil {
+		t.Errorf("a refused first start left a checkpoint: %+v (%v)", st, err)
+	}
 }
