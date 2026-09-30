@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -146,9 +147,11 @@ func TestStreamParser_repeatWithoutReconnectNotDropped(t *testing.T) {
 	}
 }
 
-// A re-sent DDL transaction is dropped too: it would re-run the DDL hook and
-// record the schema change twice.
-func TestStreamParser_resentCommittedDDLDropped(t *testing.T) {
+// A plain DDL is committed by its own EventDDL, not by an XID, and a CREATE
+// TABLE ... SELECT shares that shape up to its rows. Seen from the re-send
+// alone the two cannot be told apart, so a re-sent DDL is processed again: a
+// second DDL event is cheap, the rows of a cut CREATE ... SELECT are not.
+func TestStreamParser_resentDDLProcessedAgain(t *testing.T) {
 	sp := NewStreamParser(makeOrdersResolver(), Filters{}, nil)
 	hookRuns := 0
 	sp.SetSyncDDLHook(func(Event) error { hookRuns++; return nil })
@@ -170,8 +173,101 @@ func TestStreamParser_resentCommittedDDLDropped(t *testing.T) {
 			ddl++
 		}
 	}
-	if ddl != 1 || hookRuns != 1 {
-		t.Errorf("DDL events = %d, hook runs = %d, want 1 and 1", ddl, hookRuns)
+	if ddl != 2 || hookRuns != 2 {
+		t.Errorf("DDL events = %d, hook runs = %d, want 2 and 2 (a re-sent DDL is never dropped)", ddl, hookRuns)
+	}
+}
+
+// CREATE TABLE ... SELECT cut by a transparent reconnect after its DDL event
+// and before its XID: the re-send carries rows never received, and they must
+// be emitted. (A process CRASH at that point is a different, older path: the
+// DDL event already advanced the saved GTID set, so a restart resumes past the
+// rest of those rows. Not covered here.)
+func TestStreamParser_resentCutCreateSelectKeepsRows(t *testing.T) {
+	evs := runResend(t, "",
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(1), makeQueryEventWithSchema("shop", "CREATE TABLE orders SELECT 1 AS id, 10 AS amount"),
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(1), makeQueryEventWithSchema("shop", "CREATE TABLE orders SELECT 1 AS id, 10 AS amount"),
+		makeOrdersInsertEvent(1, 10), makeXIDEvent(300),
+	)
+	if got := idsOf(evs); !equalAny(got, []any{int64(1)}) {
+		t.Errorf("rows = %v, want [1]: the re-sent CREATE ... SELECT rows were never received before", got)
+	}
+}
+
+// A CREATE TABLE ... SELECT whose XID was received is complete: its re-send
+// is dropped like any committed transaction.
+func TestStreamParser_resentCompleteCreateSelectDropped(t *testing.T) {
+	evs := runResend(t, "",
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(1), makeQueryEventWithSchema("shop", "CREATE TABLE orders SELECT 1 AS id, 10 AS amount"),
+		makeOrdersInsertEvent(1, 10), makeXIDEvent(300),
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(1), makeQueryEventWithSchema("shop", "CREATE TABLE orders SELECT 1 AS id, 10 AS amount"),
+		makeOrdersInsertEvent(1, 10), makeXIDEvent(300),
+		makeGTIDEvent(2), makeQueryEvent("BEGIN"), insertAt(2, 350), makeXIDEvent(400),
+	)
+	if got := idsOf(evs); !equalAny(got, []any{int64(1), int64(2)}) {
+		t.Errorf("rows = %v, want [1 2]", got)
+	}
+}
+
+// A binlog file switch also sends an artificial rotate (after the real one).
+// A transaction with no XID that ends the old file (GRANT, CREATE DATABASE,
+// a non-transactional COMMIT) is committed by the next GTID event, as always:
+// the switch must not wipe it, or the GTID set keeps a hole that later reads
+// as a purged gap.
+func TestStreamParser_fileSwitchKeepsPendingNonXIDCommit(t *testing.T) {
+	evs := runResend(t, "",
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(1), makeQueryEvent("GRANT SELECT ON shop.* TO 'u'@'%'"),
+		makeRotate("binlog.000002"),
+		artificialRotate("binlog.000002", 4),
+		makeGTIDEvent(2), makeQueryEvent("BEGIN"), makeOrdersInsertEvent(2, 20), makeXIDEvent(300),
+	)
+	got := commitsOf(evs)
+	if len(got) != 2 || !strings.HasSuffix(got[0], ":1") || !strings.HasSuffix(got[1], ":2") {
+		t.Errorf("commits = %v, want GTID 1 (the GRANT) then GTID 2", got)
+	}
+	if ids := idsOf(evs); !equalAny(ids, []any{int64(2)}) {
+		t.Errorf("rows = %v, want [2]", ids)
+	}
+}
+
+// A reconnect right after a transaction with no XID: the re-send of that same
+// GTID is the uncommitted transaction again, so it is not committed twice and
+// not dropped.
+func TestStreamParser_reconnectAfterNonXIDTransaction(t *testing.T) {
+	evs := runResend(t, "",
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(1), makeQueryEvent("GRANT SELECT ON shop.* TO 'u'@'%'"),
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(1), makeQueryEvent("GRANT SELECT ON shop.* TO 'u'@'%'"),
+		makeGTIDEvent(2), makeQueryEvent("BEGIN"), makeOrdersInsertEvent(2, 20), makeXIDEvent(300),
+	)
+	got := commitsOf(evs)
+	if len(got) != 2 || !strings.HasSuffix(got[0], ":1") || !strings.HasSuffix(got[1], ":2") {
+		t.Errorf("commits = %v, want GTID 1 once, then GTID 2", got)
+	}
+}
+
+// A MySQL 8.4 tagged GTID event starts a new transaction too: it ends a skip,
+// so the transaction after a dropped re-send is never swallowed.
+func TestStreamParser_taggedGTIDEndsSkip(t *testing.T) {
+	tagged := &replication.BinlogEvent{
+		Header: &replication.EventHeader{EventType: replication.GTID_TAGGED_LOG_EVENT},
+		Event:  &replication.GtidTaggedLogEvent{GTIDEvent: replication.GTIDEvent{SID: make([]byte, 16), GNO: 2}},
+	}
+	evs := runResend(t, "",
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(1), makeQueryEvent("BEGIN"), makeOrdersInsertEvent(1, 10), makeXIDEvent(300),
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(1), makeQueryEvent("BEGIN"), makeOrdersInsertEvent(1, 10), makeXIDEvent(300),
+		tagged, makeQueryEvent("BEGIN"), insertAt(2, 350), makeXIDEvent(400),
+	)
+	if got := idsOf(evs); !equalAny(got, []any{int64(1), int64(2)}) {
+		t.Errorf("rows = %v, want [1 2]: the tagged-GTID transaction was swallowed by the skip", got)
 	}
 }
 

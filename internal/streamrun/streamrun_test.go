@@ -2017,7 +2017,7 @@ func TestDeleteEventsSinceCheckpointGTID_deletesStragglers(t *testing.T) {
 		WithArgs("mysql-bin.000005", uint64(1234)).
 		WillReturnRows(sqlmock.NewRows([]string{"gtid"}).AddRow(stragglerGTID))
 	mock.ExpectExec("DELETE FROM binlog_events WHERE gtid IN").
-		WithArgs(stragglerGTID).
+		WithArgs(stragglerGTID, "mysql-bin.000005").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	n, err := deleteEventsSinceCheckpointGTID(db, "mysql-bin.000005", 1234, savedSet, gomysql.MySQLFlavor, noDedupFloor)
@@ -2231,5 +2231,56 @@ func TestGTIDStartAnchor(t *testing.T) {
 	}
 	if b.err == nil {
 		t.Error("the position read error must be kept for the caller to report")
+	}
+}
+
+// TestStragglerDeleteIsBounded: the straggler pass deletes only rows of the
+// checkpoint's file and, with a floor, only rows this run could have written.
+// Unbounded, a GTID string re-used by older history (a MariaDB source after
+// RESET MASTER numbers 0-1-1 again) would delete that history.
+func TestStragglerDeleteIsBounded(t *testing.T) {
+	m := &capturingMatcher{}
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	saved, err := parseGTIDSetForFlavor("mariadb", "0-1-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectExec("").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("").WillReturnRows(sqlmock.NewRows([]string{"gtid"}).AddRow("0-1-9"))
+	mock.ExpectExec("").WithArgs("0-1-9", "mariadb-bin.000003", int64(700)).WillReturnResult(sqlmock.NewResult(0, 1))
+	if _, err := deleteEventsSinceCheckpointGTID(db, "mariadb-bin.000003", 5000, saved, "mariadb", 700); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	last := m.seen[len(m.seen)-1]
+	if !strings.Contains(last, "binlog_file = ?") || !strings.Contains(last, "event_id >= ?") {
+		t.Errorf("straggler delete is not bounded by file and floor: %q", last)
+	}
+}
+
+// TestFreshDedupFloor: a run with no checkpoint starts its floor above every
+// row already in the index, so its resume cleanup can only ever touch rows it
+// wrote itself.
+func TestFreshDedupFloor(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(event_id\), 0\) \+ 1 FROM binlog_events`).
+		WillReturnRows(sqlmock.NewRows([]string{"f"}).AddRow(int64(48211908)))
+	got, err := freshDedupFloor(db)
+	if err != nil || got != 48211908 {
+		t.Fatalf("freshDedupFloor = %d, %v; want 48211908", got, err)
+	}
+	mock.ExpectQuery(`SELECT COALESCE`).WillReturnError(errors.New("index gone"))
+	if _, err := freshDedupFloor(db); err == nil {
+		t.Error("a failed read must be an error, never a zero floor")
 	}
 }

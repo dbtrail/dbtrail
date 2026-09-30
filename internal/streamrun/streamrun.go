@@ -72,9 +72,10 @@ type streamState struct {
 	//
 	// Zero means "no floor", which reduces both passes to the unbounded
 	// statements they were before: a checkpoint written by an older build, a
-	// run that has not flushed a batch yet, and every checkpoint-shaped writer
-	// that builds a bare streamState (--reset, the gap auto-advance stamp) all
-	// land there. Slower, never wrong.
+	// run that has not flushed a batch yet all land there. Slower, never
+	// wrong. A run that starts with no checkpoint (first run, --reset) starts
+	// from freshDedupFloor instead, and the gap auto-advance carries the saved
+	// floor.
 	dedupFloorID  int64
 	gtidSet       string // serialized GTID set (GTID mode only)
 	flavor        string // source flavor: "mysql" (default) or "mariadb"; selects the GTID parser on resume
@@ -231,10 +232,10 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 	args = append(args, captureSkips)
 	// NULL when there is no floor, so the column reads as "no daemon has
 	// written one" rather than as a floor of zero. Unlike capture_skips this
-	// is deliberately NOT COALESCEd: a checkpoint-shaped writer with a bare
-	// streamState (--reset, the gap auto-advance stamp) MUST clear a stale
-	// floor rather than preserve it, because the floor it left behind belongs
-	// to coordinates that writer just discarded (#1690).
+	// is deliberately NOT COALESCEd: a checkpoint-shaped writer replaces the
+	// floor with its own (--reset writes the fresh floor of its new start)
+	// rather than preserving one that belongs to coordinates it discarded
+	// (#1690).
 	var dedupFloor any
 	if state.dedupFloorID > 0 {
 		dedupFloor = state.dedupFloorID
@@ -485,12 +486,39 @@ func deleteEventsSinceCheckpointGTID(db *sql.DB, file string, pos uint64, savedS
 	for i, g := range stragglers {
 		args[i] = g
 	}
-	res, err := db.Exec(`DELETE FROM binlog_events WHERE gtid IN (`+placeholders+`)`, args...)
+	// Bounded to the checkpoint's file (the only place the scan above looked,
+	// and a transaction never spans a rotation) and, with a floor, to rows
+	// this capture could have written: a GTID string can repeat in older
+	// history (a MariaDB source after RESET MASTER numbers 0-1-1 again), and
+	// an unbounded delete by GTID would take that history with it.
+	stmt := `DELETE FROM binlog_events WHERE gtid IN (` + placeholders + `) AND binlog_file = ?`
+	args = append(args, file)
+	if floor > 0 {
+		stmt += ` AND event_id >= ?`
+		args = append(args, floor)
+	}
+	res, err := db.Exec(stmt, args...)
 	if err != nil {
 		return n, fmt.Errorf("delete straggler gtid events: %w", err)
 	}
 	n2, err := res.RowsAffected()
 	return n + n2, err
+}
+
+// freshDedupFloor is the dedup floor for a run that starts with no checkpoint
+// (a first run, or --reset): one above every row already in binlog_events, a
+// valid lower bound for every row this run writes (event_id only grows). With
+// it, the resume cleanup of this run's first checkpoint can only touch this
+// run's rows. Without it the cleanup is unbounded, and a first checkpoint that
+// carries binlog coordinates (a fresh GTID start seeds them) would let it
+// delete older history in the same index: rows under a file name that sorts
+// after the new one, or whose GTID string repeats.
+func freshDedupFloor(db *sql.DB) (int64, error) {
+	var floor int64
+	if err := db.QueryRow(`SELECT COALESCE(MAX(event_id), 0) + 1 FROM binlog_events`).Scan(&floor); err != nil {
+		return 0, fmt.Errorf("read the index's highest event_id for a fresh dedup floor: %w", err)
+	}
+	return floor, nil
 }
 
 // persistGapAutoAdvance durably records an unfillable-gap auto-advance. It stamps
@@ -1140,15 +1168,23 @@ func emptyAsWord(set string) string {
 
 // gtidStartAnchor records the source's binlog coordinates for a fresh
 // GTID-mode start, so its first checkpoint carries a binlog_file. Without one
-// the checkpoint says binlog_file = '' until the first row event, both resume
+// the checkpoint has an empty binlog_file until the first row event, both resume
 // cleanups (deleteEventsSinceCheckpoint, deleteEventsSinceCheckpointGTID) skip
 // an empty file, and a crash after the first batch but before the next
 // checkpoint duplicates that batch on restart.
 //
-// wrap reads the position BEFORE the GTID set. Every transaction the stream
-// will receive is missing from that set, so it committed after the set was
-// read, hence after the position was read: its rows sit at or past the
-// position, which is exactly what the position-keyed cleanup deletes.
+// wrap reads the position BEFORE the GTID set, so nearly every transaction
+// the stream will receive (the ones missing from that set) sits at or past
+// the position, which is what the position-keyed cleanup deletes. Not quite
+// all on MySQL: a transaction is written to the binlog shortly before it
+// joins gtid_executed, so one can sit just below the position and still be
+// missing from the set. In the same file the straggler pass catches it; only
+// if the file rotated between the two reads can it come back once more after
+// a crash. That residue duplicates, it never loses.
+//
+// The coordinates only bound the cleanup from above. What keeps it from
+// touching older history in the same index is the fresh dedup floor
+// (freshDedupFloor), set for every run that starts without a checkpoint.
 type gtidStartAnchor struct {
 	file string
 	pos  uint32
@@ -2351,6 +2387,16 @@ func One(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	// A run with no checkpoint (first run or --reset) starts its dedup floor
+	// above every row already in the index (see freshDedupFloor), so the
+	// cleanup on its next resume can only touch rows it wrote.
+	var freshFloor int64
+	if saved == nil {
+		if freshFloor, err = freshDedupFloor(indexDB); err != nil {
+			return err
+		}
+	}
+
 	// Persist the --reset discard now that the new start position is known
 	// (#1079) — see persistResetDiscard for the jump/no-op semantics. The
 	// counters restart with the stream: the in-memory streaming state below
@@ -2359,15 +2405,16 @@ func One(ctx context.Context, cfg Config) error {
 	// checkpoint tick would overwrite a carried value anyway).
 	if resetDiscarded != nil {
 		fresh := &streamState{
-			mode:       mode,
-			binlogFile: startFile,
-			binlogPos:  uint64(startPos),
-			safeFile:   startFile,
-			safePos:    uint64(startPos),
-			gtidSet:    startGTIDStr,
-			flavor:     cfg.Flavor,
-			serverID:   cfg.ServerID,
-			bintrailID: bintrailID,
+			mode:         mode,
+			binlogFile:   startFile,
+			binlogPos:    uint64(startPos),
+			safeFile:     startFile,
+			safePos:      uint64(startPos),
+			gtidSet:      startGTIDStr,
+			flavor:       cfg.Flavor,
+			serverID:     cfg.ServerID,
+			bintrailID:   bintrailID,
+			dedupFloorID: freshFloor,
 		}
 		noop, detail := classifyResetDiscard(resetDiscarded, cfg.Flavor, mode, startFile, startPos, startGTIDStr,
 			cfg.StartFile == "" && cfg.StartGTID == "",
@@ -2618,6 +2665,8 @@ func One(ctx context.Context, cfg Config) error {
 		// A crash right after that leaves the next resume scanning the whole
 		// table, which is the outage this change exists to remove.
 		state.dedupFloorID = saved.dedupFloorID
+	} else {
+		state.dedupFloorID = freshFloor
 	}
 	if startGTIDStr != "" {
 		state.gtidSet = startGTIDStr

@@ -3,10 +3,16 @@
 package cliapp
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
+	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,7 +55,9 @@ func TestBYOSStream_MariaDBReconnectAfterCommitOnce(t *testing.T) {
 		t.Fatalf("startBYOSSyncer: %v", err)
 	}
 
-	sp := parser.NewStreamParser(resolver, cliutil.BuildIndexFilters(schema, ""), nil)
+	var logBuf lockedLog
+	sp := parser.NewStreamParser(resolver, cliutil.BuildIndexFilters(schema, ""),
+		slog.New(slog.NewTextHandler(io.MultiWriter(&logBuf, os.Stderr), nil)))
 	sp.SetFlavor("mariadb")
 	out := make(chan parser.Event, 256)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -131,4 +139,27 @@ func TestBYOSStream_MariaDBReconnectAfterCommitOnce(t *testing.T) {
 	if len(ids) != 4 {
 		t.Errorf("rows emitted = %v, want ids 1-4", ids)
 	}
+	// The guard must have acted exactly once, or no re-send happened and the
+	// test proved nothing.
+	if n := strings.Count(logBuf.String(), "dropping a transaction the source re-sent after a reconnect"); n != 1 {
+		t.Errorf("the re-send guard acted %d times, want exactly 1", n)
+	}
+}
+
+// lockedLog is a bytes.Buffer safe for the parser goroutine's log writes.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLog) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLog) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

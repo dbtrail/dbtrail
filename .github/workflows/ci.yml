@@ -376,6 +376,8 @@ jobs:
             || { echo "FATAL: GTID reconnect exactly-once test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationGTIDCrashBeforeFirstFileCheckpointIndexesOnce ' /tmp/mysql-it.out \
             || { echo "FATAL: GTID first-checkpoint crash test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationGTIDResetKeepsOlderHistory ' /tmp/mysql-it.out \
+            || { echo "FATAL: GTID reset history-survival test did not run (false-green tripwire)" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationCrashRestartExactlyOnce_position' /tmp/mysql-it.out \
             || { echo "FATAL: crash→restart exactly-once test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestOne_SourceFlavor_mysqlDeclaredMariaDBRefuses ' /tmp/mysql-it.out \
@@ -564,6 +566,7 @@ jobs:
             TestOne_MariaDB_explicitStartPosStaysPositionThenResetMovesToGTID \
             TestOne_MariaDB_reconnectAfterCommitIndexesOnce \
             TestOne_MariaDB_crashBeforeFirstFileCheckpointIndexesOnce \
+            TestOne_MariaDB_resetKeepsOlderHistory \
             TestBYOSStream_MariaDBReconnectAfterCommitOnce \
             TestIntegrationMonitorRegistrySourceMariaDBDetected \
             TestBuild_MariaDBVersionRow \
