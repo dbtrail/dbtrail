@@ -346,8 +346,6 @@ function snapshotLocation() {
   };
 }
 
-const noticeTitle = () => page.locator("#notice-mount #notice-title").textContent({ timeout: 1000 }).catch(() => "");
-const noticeOpen = () => page.locator("#notice-mount .notice").isVisible().catch(() => false);
 const recentRow = (pk, type) => page.locator(".ov-evlist .ov-ev").filter({ hasText: "#" + pk }).filter({ has: page.locator(".badge", { hasText: type }) });
 
 async function signIn() {
@@ -363,23 +361,45 @@ async function signIn() {
   await form.waitFor({ state: "detached", timeout: 30000 });
 }
 
-// addServer drives the add-server form from the moment it is open until the
-// save's outcome. Returns the notice title (or "" when no notice opened).
-async function fillServer(step, name, user, password) {
+// fillServer drives the first two steps of the Connect screen (#1953): host
+// and port, Find it, then the account the permissions block created. The
+// screen asks for no name: the server is named after its address.
+async function fillServer(step, user, password) {
   const f = page.locator("#server-form");
-  await type(f.locator("input[name=name]"), name, "name", step);
+  const submit = page.locator("#server-form-mount button[type=submit]");
   await type(f.locator("input[name=source_host]"), SRC_HOST, "host", step);
   await type(f.locator("input[name=source_port]"), SRC_PORT, "port", step);
+  await click(submit, "Find it");
+  await page.locator('#server-form[data-step="2"]').waitFor({ timeout: 30000 });
+  await measure(step + "-account", "step", { locator: submit, label: "I ran it" });
+  await copyChecks(step + "-account");
   await type(f.locator("input[name=source_user]"), user, "user", step);
   await type(f.locator("input[name=source_password]"), password, "password", step);
 }
+// saveServer presses I ran it and waits for step 3 to settle: capture started
+// (the form says done), a light with a fix, or a start that failed after
+// every check passed. Returns "started", "refused" or "error".
 async function saveServer() {
-  await click(page.locator("#server-form-mount button[type=submit]"), "Check and connect");
-  // Save runs the startup checks and starts capture; a person waits for the
-  // answer. A clean start with no warning closes the form with a toast and
-  // opens no notice.
-  await waitFor(async () => (await noticeOpen()) || !(await page.locator("#server-form").isVisible()), "the result of Save", 120000);
-  return (await noticeOpen()) ? noticeTitle() : "";
+  await click(page.locator("#server-form-mount button[type=submit]"), "I ran it");
+  return connectOutcome(120000);
+}
+async function connectOutcome(timeout) {
+  return waitFor(async () => {
+    const form = page.locator("#server-form");
+    const st = await form.getAttribute("data-step", { timeout: 1000 }).catch(() => null);
+    if (st === "done") return "started";
+    if (st !== "3" || (await form.getAttribute("data-busy", { timeout: 1000 }).catch(() => "1")) !== null) return null;
+    if (await page.locator("#connect-result .notice-inline.err").count()) return "error";
+    if (await page.locator("#connect-lights .cx-light.bad").count()) return "refused";
+    return null;
+  }, "the result of the checks", timeout);
+}
+// startedName is the name the server was saved under, as the result says it.
+async function startedName() {
+  const text = await page.locator("#connect-result").innerText();
+  const m = /Capture started for (.+?)\. /.exec(text);
+  if (!m) throw new Error("the result does not name the server: " + text);
+  return m[1];
 }
 async function closeServersDialog() {
   await click(page.locator("#modal .modal-x"), "close the Servers dialog (✕)");
@@ -424,24 +444,20 @@ async function runClean(block) {
   await click(add, "+ Add server");
   await page.locator("#server-form").waitFor({ timeout: 10000 });
   const save = page.locator("#server-form-mount button[type=submit]");
-  await measure("connect", "step", { locator: save, label: "Check and connect" });
-  await copyChecks("connect");
-  await fillServer("connect", "shop-db", block.user, block.password);
+  await measure("connect", "step", { locator: save, label: "Find it" });
+  await fillServer("connect", block.user, block.password);
 
-  // Connect has one button (#1804): it checks and starts in the same press,
-  // so there is no separate Test connection to take.
-
-  const title = await saveServer();
-  if (/did not|could not/i.test(title)) throw new Error("capture did not start on a clean MySQL: notice \"" + title + "\"");
-  if (title) {
-    await measure("save-result", "step", { locator: page.locator("#notice-close"), label: await page.locator("#notice-close").textContent() });
-    await click(page.locator("#notice-close"), "OK");
-  }
-  const id = await serverId("shop-db");
+  // Step 3 checks and starts in one press, and says how it went in place:
+  // there is no notice to dismiss.
+  const outcome = await saveServer();
+  if (outcome !== "started") throw new Error("capture did not start on a clean MySQL: " + outcome + ": " + (await page.locator("#server-form").innerText()));
+  await measure("save-result", "step");
+  const name = await startedName();
+  const id = await serverId(name);
   await waitCaptureSettled(id);
   await measure("after-ok", "step");
   await closeServersDialog();
-  await selectServer("shop-db");
+  await selectServer(name);
   await waitFirstRunList();
   await measure("first-change-waiting", "step");
 
@@ -615,10 +631,15 @@ async function reloadMidConnect() {
   await click(page.locator("#manage-servers"), "Manage servers");
   await click(page.locator("#server-add"), "+ Add server");
   await page.locator("#server-form").waitFor({ timeout: 10000 });
-  const draft = { host: "draft-host.invalid", port: "3399", user: "draft_user", password: "draft-pass-1" };
+  // Step 1 against the real server, so step 2 opens and the account fields are
+  // there to fill: the reload this run is about comes while the person runs
+  // the permissions block, which is step 2.
+  const draft = { host: SRC_HOST, port: SRC_PORT, user: "draft_user", password: "draft-pass-1" };
   const f = page.locator("#server-form");
   await type(f.locator("input[name=source_host]"), draft.host, "host", "connect");
   await type(f.locator("input[name=source_port]"), draft.port, "port", "connect");
+  await click(page.locator("#server-form-mount button[type=submit]"), "Find it");
+  await page.locator('#server-form[data-step="2"]').waitFor({ timeout: 30000 });
   await type(f.locator("input[name=source_user]"), draft.user, "user", "connect");
   await type(f.locator("input[name=source_password]"), draft.password, "password", "connect");
   // Where the person leaves to run the permissions block, and comes back.
@@ -631,30 +652,27 @@ async function reloadMidConnect() {
 }
 
 // A server added once the first one exists: the same steps without Sign in.
-async function addAnotherServer(runName, name, user, block, onRefused) {
+async function addAnotherServer(runName, user, block, onRefused) {
   await toOverview();
   startRun(runName);
   outOfBrowser("create the capture user " + user + ": run the permissions block on MySQL", () => srcSQL(blockFor(block, user)));
   await click(page.locator("#manage-servers"), "Manage servers");
   await click(page.locator("#server-add"), "+ Add server");
   await page.locator("#server-form").waitFor({ timeout: 10000 });
-  await measure("connect", "step", { locator: page.locator("#server-form-mount button[type=submit]"), label: "Check and connect" });
-  await fillServer("connect", name, user, block.password);
-  let title = await saveServer();
-  if (/did not/i.test(title)) {
-    await measure("save-refused", "error", { locator: page.locator("#notice-close"), label: await page.locator("#notice-close").textContent() });
-    if (!onRefused) throw new Error(runName + ": capture did not start: " + title);
+  await measure("connect", "step", { locator: page.locator("#server-form-mount button[type=submit]"), label: "Find it" });
+  await fillServer("connect", user, block.password);
+  let outcome = await saveServer();
+  if (outcome === "refused") {
+    await measure("save-refused", "error");
+    if (!onRefused) throw new Error(runName + ": capture did not start: " + (await page.locator("#server-form").innerText()));
     await onRefused();
-    await click(page.locator("#notice-close"), "Back to the form");
-    title = await saveServer();
-    if (/did not|could not/i.test(title)) throw new Error(runName + ": capture still did not start: " + title);
-  } else if (/could not/i.test(title)) {
-    throw new Error(runName + ": " + title);
+    // Nothing to press: step 3 checks again by itself every 10 seconds.
+    outcome = await waitFor(async () => (await page.locator("#server-form").getAttribute("data-step", { timeout: 1000 }).catch(() => null)) === "done" ? "started" : null,
+      "the next automatic check to start capture", 60000);
   }
-  if (title) {
-    await measure("save-result", "step", { locator: page.locator("#notice-close"), label: await page.locator("#notice-close").textContent() });
-    await click(page.locator("#notice-close"), "OK");
-  }
+  if (outcome !== "started") throw new Error(runName + ": capture did not start: " + outcome + ": " + (await page.locator("#server-form").innerText()));
+  await measure("save-result", "step");
+  const name = await startedName();
   const id = await serverId(name);
   await waitCaptureSettled(id);
   await measure("after-ok", "step");
@@ -669,10 +687,10 @@ async function noPrimaryKey(block) {
   // The person's own table, already on their MySQL before DBTrail arrives.
   srcSQL("CREATE TABLE shop.audit_log (happened_at DATETIME NOT NULL, actor VARCHAR(64), action VARCHAR(64));\n" +
     "INSERT INTO shop.audit_log VALUES (NOW(), 'ana', 'login'), (NOW(), 'bo', 'export'), (NOW(), 'ana', 'logout');\n");
-  await addAnotherServer("no-primary-key", "shop-audit", "dbtrail3", block, async () => {
+  await addAnotherServer("no-primary-key", "dbtrail3", block, async () => {
     // What the refusal asks for: SQL on the database. When it offers more
     // than one statement for the same table, the person has to pick one.
-    const alters = await page.evaluate(() => Array.from(document.querySelectorAll("#notice-mount pre, #notice-mount code"))
+    const alters = await page.evaluate(() => Array.from(document.querySelectorAll("#connect-lights pre, #connect-lights code"))
       .filter((p) => p.getClientRects().length && /ALTER TABLE/i.test(p.innerText)).length);
     // Always say what was seen, zero included: capture WAS refused for a
     // table with no primary key, so a screen with no statement on it means
@@ -703,7 +721,7 @@ try {
   await attempt("clean", async () => { final = await runClean(block); });
   if (final) refusedUpdate(final);
   await attempt("reload-mid-connect", reloadMidConnect);
-  await attempt("second-server", () => addAnotherServer("second-server", "shop-db-2", "dbtrail2", block, null));
+  await attempt("second-server", () => addAnotherServer("second-server", "dbtrail2", block, null));
   await attempt("no-primary-key", () => noPrimaryKey(block));
 } finally {
   await browser.close().catch(() => {});

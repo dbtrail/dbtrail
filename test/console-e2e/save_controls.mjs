@@ -75,6 +75,7 @@ export const WRITES = [
   { method: "POST", path: "/api/auth/setup", count: 1, kind: "action",
     reason: "creates the first login; the first-run walk signs up through it on a clean install" },
   { method: "POST", path: "/api/auth/login", count: 1, kind: "action", reason: "signs in; stores nothing but the session" },
+  { method: "POST", path: "/api/servers/identify", count: 1, kind: "action", reason: "reads a server's greeting for step 1 of Connect (#1953); stores nothing" },
   { method: "POST", path: "/api/auth/logout", count: 1, kind: "action", reason: "signs out; stores nothing" },
   { method: "POST", path: "/api/recover", count: 1, kind: "action", reason: "writes recovery SQL to the page; stores nothing" },
   { method: "POST", path: "/api/sql", count: 1, kind: "action", reason: "runs one read-only query on the copy and shows or saves its result; stores nothing" },
@@ -738,20 +739,22 @@ export async function runSaveScenes(ctx) {
         await tab.waitForSelector("#server-add", { timeout: 5000 });
         await tab.click("#server-add");
         await tab.waitForSelector('#server-form[data-connect] input[name="source_host"]', { timeout: 5000 });
-        await tab.fill('#server-form-mount input[name="source_host"]', "db-e2e.example.com");
-        await tab.fill('#server-form-mount input[name="source_port"]', "3307");
+        // Step 1 against the suite's own MySQL, so step 2 opens (#1953).
+        await tab.fill('#server-form-mount input[name="source_host"]', "127.0.0.1");
+        await tab.fill('#server-form-mount input[name="source_port"]', "13306");
+        await tab.click("#server-form-mount button[type=submit]");
+        await tab.waitForSelector('#server-form[data-step="2"]', { timeout: 20000 });
         await tab.fill('#server-form-mount input[name="source_user"]', "e2e_user");
         await tab.fill('#server-form-mount input[name="source_password"]', "e2e-draft-secret");
-        await tab.fill('#server-form-mount input[name="name"]', "e2e draft name");
       };
       await typeDraft(page);
       const draft = await until(async () => {
         const r = (await readAs(page, "/api/servers/draft")).body;
-        return r && r.found && r.draft && r.draft.name === "e2e draft name" && r.draft.source_user === "e2e_user" ? r : null;
+        return r && r.found && r.draft && r.draft.source_user === "e2e_user" && r.draft.identified ? r : null;
       });
       const raw = JSON.stringify(draft || {});
-      check("draft", "typing stores the draft on the server, without the password",
-        !!draft && draft.draft.source_host === "db-e2e.example.com" && draft.draft.source_port === "3307"
+      check("draft", "typing stores the draft on the server, with what step 1 found and without the password",
+        !!draft && draft.draft.source_host === "127.0.0.1" && draft.draft.source_port === "13306" && !!draft.draft.identified.version
         && !/e2e-draft-secret/.test(raw) && !("source_password" in (draft.draft || {})), raw);
 
       // A fresh tab has no copy of its own, so the form it reopens came from
@@ -760,12 +763,12 @@ export async function runSaveScenes(ctx) {
       try {
         await tab.waitForSelector('#server-form[data-connect] input[name="source_host"]', { timeout: 10000 });
         const shown = await tab.evaluate(() => {
-          const f = document.getElementById("server-form").elements;
-          return { host: f.source_host.value, port: f.source_port.value, user: f.source_user.value, name: f.name.value, pw: f.source_password.value };
+          const form = document.getElementById("server-form"), f = form.elements;
+          return { host: f.source_host.value, port: f.source_port.value, user: f.source_user.value, pw: f.source_password.value, step: form.dataset.step };
         });
-        check("draft", "a fresh tab reopens Connect filled from the server, password empty",
-          shown.host === "db-e2e.example.com" && shown.port === "3307" && shown.user === "e2e_user"
-          && shown.name === "e2e draft name" && shown.pw === "", JSON.stringify(shown));
+        check("draft", "a fresh tab reopens Connect at step 2 filled from the server, password empty",
+          shown.host === "127.0.0.1" && shown.port === "13306" && shown.user === "e2e_user"
+          && shown.step === "2" && shown.pw === "", JSON.stringify(shown));
         await tab.click("#connect-full-form");
         const gone = await until(async () => (await readAs(tab, "/api/servers/draft")).body?.found === false);
         check("draft", "Open the full form throws the stored draft away", !!gone, "draft still found");
@@ -781,14 +784,15 @@ export async function runSaveScenes(ctx) {
       await page.evaluate(() => closeServersModal());
     });
 
-    // ── Check and connect, refused ──────────────────────────────────────
+    // ── Connect's checks, refused ───────────────────────────────────────
     // console_e2e.mjs drives a refused check ("connect: a wrong password is
-    // refused in plain words") and reads the notice. What it does not read
-    // is the list: a refused check must not leave a server behind.
+    // refused in plain words") and reads the lights. What it does not read
+    // is the list: a refused check must not leave a server behind. It used
+    // root, which no server the suite saves logs in as.
     await scene("connect-check", async () => {
       const r = await readAs(page, "/api/servers");
-      const left = ((r.body && r.body.servers) || []).filter((s) => s.name === "e2e-draft");
-      check("connect-check", "a refused Check and connect stores no server", r.status === 200 && left.length === 0,
+      const left = ((r.body && r.body.servers) || []).filter((s) => s.source_user === "root");
+      check("connect-check", "a refused check stores no server", r.status === 200 && left.length === 0,
         JSON.stringify({ status: r.status, left }));
     });
 
