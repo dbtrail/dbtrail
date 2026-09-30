@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/parser"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
 // auditEventRow feeds one indexed UPDATE through a sqlmock index — enough for
@@ -111,6 +113,24 @@ func TestAuditContract_ConsoleUnit(t *testing.T) {
 					"/api/servers/"+id+"/verify/explain?schema=wp&table=posts", "")
 				if w.Code != http.StatusOK {
 					t.Fatalf("verify explain: code=%d body=%s", w.Code, body)
+				}
+			},
+		},
+		{
+			name:       "sql",
+			action:     "sql.run",
+			wantActor:  tokenActor,
+			wantDetail: map[string]string{"sql": "SELECT id FROM state_shop_orders", "rows": "1", "truncated": "false"},
+			call: func(t *testing.T) {
+				s, _ := newSQLServer(t, &fakeSQLRunner{res: sqlsandbox.Result{
+					Columns: []sqlsandbox.Column{{Name: "id", Type: "INTEGER"}},
+					Rows:    [][]any{{json.Number("1")}},
+				}})
+				w := httptest.NewRecorder()
+				s.handleSQL(w, httptest.NewRequest("POST", "/api/sql",
+					strings.NewReader(`{"sql":"SELECT id FROM state_shop_orders"}`)))
+				if w.Code != http.StatusOK {
+					t.Fatalf("sql: code=%d body=%s", w.Code, w.Body.String())
 				}
 			},
 		},
