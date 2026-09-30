@@ -1371,9 +1371,7 @@ function covCard(c, stamp) {
     card.append(el("p", { class: "cov-line" },
       "Restorable up to ", el("b", { text: c.delta_to, title: utcLocalTitle(c.delta_to) || null }), "; the window start could not be determined."));
   } else {
-    card.append(el("p", { class: "cov-line" },
-      "Any point between ", el("b", { text: c.delta_from, title: utcLocalTitle(c.delta_from) || null }),
-      " and ", el("b", { text: c.delta_to, title: utcLocalTitle(c.delta_to) || null }), " is restorable."));
+    card.append(covTimeline(c));
   }
   const chips = el("div", { class: "cov-chips" });
   // Freshness (#1227) is what makes the number readable, so it decides the
@@ -1443,6 +1441,27 @@ function covCard(c, stamp) {
   return card;
 }
 
+// covTimeline draws the restore window (#1950): the earliest point, the
+// changes kept since, the latest one. It replaced the sentence "Any point
+// between A and B is restorable" and carries the same claim as its text
+// alternative (aria-label), so a screen reader hears what the drawing says.
+// The two stamps are data, in mono; the three words under them are the only
+// prose. Its upper edge is the last INDEXED change, never "now": with a dead
+// stream that would be false assurance, and the chips beside it say how far
+// behind "latest" is.
+function covTimeline(c) {
+  const fig = el("div", { class: "cov-tl", role: "img",
+    "aria-label": "Any point between " + c.delta_from + " and " + c.delta_to + " (UTC) is restorable." });
+  fig.append(el("span", { class: "cov-tl-end" },
+    el("b", { class: "cov-tl-stamp", text: c.delta_from, title: utcLocalTitle(c.delta_from) || null }),
+    el("span", { class: "cov-tl-k", text: "earliest" })));
+  fig.append(el("span", { class: "cov-tl-bar", "aria-hidden": "true" }, el("span", { class: "cov-tl-k", text: "changes kept" })));
+  fig.append(el("span", { class: "cov-tl-end" },
+    el("b", { class: "cov-tl-stamp", text: c.delta_to, title: utcLocalTitle(c.delta_to) || null }),
+    el("span", { class: "cov-tl-k", text: "latest" })));
+  return fig;
+}
+
 // ── Overview: progressive render (#1352) ─────────────────────────────────────
 // The page frame and per-card skeletons paint SYNCHRONOUSLY; each card fills as
 // ITS fetch lands. The pre-#1352 Promise.all gated first paint on the slowest
@@ -1501,6 +1520,17 @@ function ovFrame() {
   f.flowSlot = el("div");
   f.flowSlot.append(el("section", { class: "flow flow-pending" }, ovSkelLines(2), el("div", { class: "skel-note", text: "reading the path from your database to its copy…" })));
   v.append(f.flowSlot);
+  // Use your copy (#1950): the four ways to read the copy, one card each,
+  // under the flow. The shape is static; it shows once the flow's reads say
+  // a copy exists, and its figures (the table count, the newest copy behind
+  // the download) move with those reads and again on the slow refresh,
+  // without repainting the cards, so a panel a reader opened stays open.
+  // Cleared where the flow is: a console that lists no server has nothing
+  // to use.
+  f.use = useCopySection();
+  f.useSlot = el("div");
+  f.useSlot.append(f.use.section);
+  v.append(f.useSlot);
   // One grey line under the drawing (#1860): does the copy carry life? Two
   // numbers over the index's own window, filled by fillOvActivity; the
   // per-table figures live in the fold below.
@@ -1663,12 +1693,18 @@ function ovFoldLine(title, count, purpose) {
 }
 
 // ovFoldRemember keeps a fold the way this browser left it (#1860): closed
-// the first time, then as it was. A per-browser convenience, so browser
-// storage; it may be absent or refused (a private window), and the fold
-// then simply starts closed.
+// the first time (open, for a fold that says so), then as it was. A
+// per-browser convenience, so browser storage; it may be absent or refused
+// (a private window), and the fold then simply starts as it does the first
+// time.
 const OV_FOLD_KEY = "dbtrail.overview.fold.";
-function ovFoldRemember(details, name) {
-  try { if (localStorage.getItem(OV_FOLD_KEY + name) === "open") details.open = true; } catch (e) { /* no storage: starts closed */ }
+function ovFoldRemember(details, name, openByDefault) {
+  if (openByDefault) details.open = true;
+  try {
+    const was = localStorage.getItem(OV_FOLD_KEY + name);
+    if (was === "open") details.open = true;
+    else if (was === "closed") details.open = false;
+  } catch (e) { /* no storage: starts as it does the first time */ }
   details.addEventListener("toggle", () => {
     try { localStorage.setItem(OV_FOLD_KEY + name, details.open ? "open" : "closed"); } catch (e) { /* not remembered */ }
   });
@@ -2060,8 +2096,8 @@ function ovFlowModel(inp) {
 
   // The bucket, and the reader.
   let bucket;
-  if (blUnknown) bucket = piece("Your bucket", "warn", "could not be read", "");
-  else if (bl.configured === false) bucket = piece("Your bucket", "none", "no copy location set", "");
+  if (blUnknown) bucket = piece("Your copy", "warn", "could not be read", "");
+  else if (bl.configured === false) bucket = piece("Your copy", "none", "no copy location set", "");
   else if (snap) {
     const kinds = (snap.kinds || []).map((k) => (k === "dir" ? "disk" : k === "s3" ? "S3" : k));
     // What this machine keeps is the one retention figure the API carries
@@ -2070,14 +2106,24 @@ function ovFlowModel(inp) {
     // "snapshot" is one version of the copy (D10); "copies" read as several
     // copies of the database.
     const keeps = keep > 0 ? "keeps " + keep + (keep === 1 ? " snapshot" : " snapshots") : "";
-    bucket = piece("Your bucket", "none", tablesWord((snap.tables || []).length), [kinds.join(" + "), keeps].filter(Boolean).join(" · "));
-  } else bucket = piece("Your bucket", "none", bl.snapshots ? "no copy yet" : "", "");
-  const sql = piece("SQL", "none", "Query the copy", "", { link: "connect" });
-  // The action row under the drawing (#1860): ONE filled button, "Query the
-  // copy", where a copy exists to query; a link to set the copy up where
-  // none does yet; nothing where the listing could not be read (a button
-  // over an unknown would promise what the page cannot see). The row's
-  // links follow the session: views.sql needs settings:read.
+    bucket = piece("Your copy", "none", tablesWord((snap.tables || []).length), [kinds.join(" + "), keeps].filter(Boolean).join(" · "));
+  } else bucket = piece("Your copy", "none", bl.snapshots ? "no copy yet" : "", "");
+  // How far back a row can be taken (#1950): the start of the window the
+  // coverage read reports, the time alone when it opened the same day the
+  // newest change landed, the date with it otherwise. Only beside a copy
+  // that exists; greyed away with the rest downstream of a break.
+  const rewindFrom = String(cov.delta_from || "");
+  if (snap && !blUnknown && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(rewindFrom)) {
+    const sameDay = rewindFrom.slice(0, 10) === String(cov.delta_to || "").slice(0, 10);
+    bucket.rewind = "rewind to " + (sameDay ? flowHHMM(rewindFrom) : rewindFrom.slice(0, 16).replace("T", " "));
+  }
+  // The SQL wire names the four use cards under the drawing (#1950): the
+  // cards are the actions, so the drawing carries no action row of its own.
+  const sql = piece("SQL", "none", "4 ways", "");
+  // Whether a copy exists to take (the laptop card reads it): "button" where
+  // one does, "setup" where none does yet, "none" where the listing could
+  // not be read (a download over an unknown would promise what the page
+  // cannot see). views.sql follows the session: it needs settings:read.
   const cta = blUnknown ? "none" : (bl.configured === false || !snap) ? "setup" : "button";
   const viewsSQL = may("settings:read");
   const reader = piece("Any reader", "none", "DuckDB here", "your tools");
@@ -2087,7 +2133,7 @@ function ovFlowModel(inp) {
     // No stamp (nothing was ever indexed): "not updating" says the same
     // without implying a change that never happened.
     const asOf = cut.at ? "as of " + cut.at : "not updating";
-    const dim = (p) => { p.tone = "off"; p.big = ""; p.line = asOf; p.sub = ""; p.schemaRetry = false; };
+    const dim = (p) => { p.tone = "off"; p.big = ""; p.line = asOf; p.sub = ""; p.rewind = ""; p.schemaRetry = false; };
     if (cut.piece === "capture") { dim(engine); dim(update); }
     dim(bucket);
   }
@@ -2102,12 +2148,54 @@ const ovFlowDismissed = new Set();
 // newer one painted must not repaint the slot with what it found first.
 let ovFlowSeq = 0;
 
-// flowSection paints one model. Boxes and arrows are plain HTML in a grid
-// (style.css .flow): the decision card under a broken arrow carries buttons
-// and wrapping text, which an SVG cannot hold, and under 880 px the grid
-// stacks. Colour and label change by class and text; nothing is drawn.
+// flowVerdict is the one word at the head of the strip: what the path is
+// doing, in the tone of the piece that decides it. Never "All good" without
+// a green capture AND a green copy: a fresh copy under a stopped capture is
+// the false green the whole drawing exists to refuse.
+function flowVerdict(model) {
+  const capture = model.pieces[1], update = model.pieces[3];
+  const tones = model.pieces.map((p) => p.tone);
+  if (model.cut) {
+    const word = model.cut.piece === "capture" ? "Capture stopped" : "Update stopped";
+    return { tone: capture.tone === "none" ? "none" : "bad", word };
+  }
+  if (tones.includes("bad")) return { tone: "bad", word: "Needs attention" };
+  if (tones.includes("warn")) return { tone: "warn", word: "Check the path" };
+  if (capture.tone === "ok") return { tone: "ok", word: update.tone === "ok" ? "All good" : "Capturing" };
+  if (/not capturing/.test(capture.line)) return { tone: "none", word: "Not capturing" };
+  return { tone: "none", word: "No data yet" };
+}
+
+// flowSummaryLine is what the folded strip says in place of the drawing:
+// the same figures, in order, each said once.
+function flowSummaryLine(model) {
+  const [, capture, engine, update, bucket] = model.pieces;
+  const parts = [];
+  const add = (s) => { if (s && !parts.includes(s)) parts.push(s); };
+  add(capture.line);
+  add(update.big ? "copy " + update.big : update.line);
+  add(engine.line);
+  add(bucket.sub);
+  return parts.length ? " · " + parts.join(" · ") : "";
+}
+
+// flowSection paints one model as a foldable strip (#1950): a summary line
+// (the verdict, and the figures when folded) over stations and wires in one
+// grid (style.css .flow), about 180px tall so the use cards under it stay
+// above the fold. Plain HTML: the decision card under a broken wire carries
+// buttons and wrapping text, which an SVG cannot hold, and under 880 px the
+// grid stacks. Colour and label change by class and text; nothing is drawn.
+// Open the first time, then as this browser left it.
 function flowSection(model, ctx) {
-  const sec = el("section", { class: "flow" + (model.cut ? " flow-cut" : ""), "aria-label": "The path from your database to its copy" });
+  const sec = el("details", { class: "flow" + (model.cut ? " flow-cut" : ""), "aria-label": "The path from your database to its copy" });
+  const top = el("summary", { class: "flow-top" });
+  const verdict = flowVerdict(model);
+  top.append(el("span", { class: "flow-verdict " + verdict.tone },
+    el("span", { class: "health-dot " + verdict.tone, "aria-hidden": "true" }), " " + verdict.word));
+  const sumline = el("span", { class: "flow-sumline" });
+  top.append(sumline);
+  top.append(el("span", { class: "flow-foldhint", "aria-hidden": "true" }));
+  sec.append(top);
   const grid = el("div", { class: "flow-grid" });
   const isArrow = (i) => i % 2 === 1;
   model.pieces.forEach((p, i) => {
@@ -2117,10 +2205,7 @@ function flowSection(model, ctx) {
       node.append(el("span", { class: "flow-line", "aria-hidden": "true" }));
       const val = el("div", { class: "flow-val" });
       if (p.big) val.append(el("div", { class: "flow-big", text: p.big, title: p.stamp ? utcLocalTitle(p.stamp) || null : null, "data-stamp": p.stamp || null }));
-      if (p.link) {
-        val.append(el("a", { class: "flow-link", href: "/" + p.link, text: p.line + " ›",
-          onclick: (e) => { e.preventDefault(); navigate(p.link); } }));
-      } else if (p.line) val.append(el("div", { class: "flow-state" }, el("span", { class: "health-dot " + (p.tone || "none") }), " " + p.line));
+      if (p.line) val.append(el("div", { class: "flow-state" }, el("span", { class: "health-dot " + (p.tone || "none") }), " " + p.line));
       if (p.sub) val.append(el("div", { class: "flow-sub", text: p.sub }));
       if (p.action) {
         val.append(el("a", { class: "flow-link flow-fix", href: "#", text: p.action.label + " ›",
@@ -2147,6 +2232,7 @@ function flowSection(model, ctx) {
       node.append(head);
       if (p.line) node.append(el("div", { class: "flow-state", text: p.line }));
       if (p.sub) node.append(el("div", { class: "flow-sub", text: p.sub }));
+      if (p.rewind) node.append(el("div", { class: "flow-sub", text: p.rewind }));
       if (p.schemaRetry) { const b = schemaSnapshotButton(); if (b) node.append(b); }
     }
     grid.append(node);
@@ -2155,30 +2241,13 @@ function flowSection(model, ctx) {
   // One decision at a time: the card of the piece that broke first.
   const card = model.cards.find((c) => !ovFlowDismissed.has(c.key));
   if (card) sec.append(flowCard(card, ctx, () => { ovFlowDismissed.add(card.key); sec.replaceWith(flowSection(model, ctx)); }));
-  sec.append(flowActions(model, !!card));
+  // Folded, the summary line carries the figures the drawing would show;
+  // open, only the verdict, so nothing is said twice on one screen.
+  const fill = () => { sumline.textContent = sec.open ? "" : flowSummaryLine(model); };
+  ovFoldRemember(sec, "flow", true);
+  sec.addEventListener("toggle", fill);
+  fill();
   return sec;
-}
-
-// flowActions is the row under the drawing (#1860): the one filled button of
-// the first screen, "Query the copy", then the links. With a decision card
-// showing, the button steps down to a ghost button: the card's own button is
-// the one filled button then, and two would be two protagonists. A page with no
-// copy yet offers to set it up instead; a page whose listing failed offers
-// nothing it cannot vouch for.
-function flowActions(model, demoted) {
-  const row = el("div", { class: "flow-actions" });
-  const link = (text, go) => el("button", { class: "btn btn-sm btn-ghost", type: "button", text, onclick: go });
-  const cta = model.cta || "none";
-  if (cta === "button") {
-    row.append(demoted
-      ? link("Query the copy", () => navigate("connect"))
-      : el("button", { class: "btn btn-primary flow-cta", type: "button", text: "Query the copy", onclick: () => navigate("connect") }));
-  } else if (cta === "setup") {
-    row.append(link("Set up the copy", () => navigate("snapshots#setup")));
-  }
-  if (model.viewsSQL) row.append(link("Download " + DUCKDB_VIEWS_FILE + " (DuckDB views)", () => downloadViewsSQL({})));
-  row.append(link("MCP Server", () => navigate("connect")));
-  return row;
 }
 
 // runFlowAction is the fix an arrow link or a card button names (#1853):
@@ -2251,7 +2320,7 @@ function flowCard(card, ctx, close) {
 // not cancel a paint in flight either: the sequence that drops a late
 // paint is taken once coverage has answered, not when the reads go out.
 function loadOvFlow(f, live, coverageP) {
-  if (serversEmpty) { clear(f.flowSlot); return Promise.resolve(); }
+  if (serversEmpty) { clear(f.flowSlot); if (f.useSlot) clear(f.useSlot); return Promise.resolve(); }
   const id = currentServer || defaultServerId;
   const read = (path) => apiWithin(path, OV_REQUEST_MS);
   // A read that fails is said as a failure by the model, never as a fact
@@ -2276,9 +2345,11 @@ function loadOvFlow(f, live, coverageP) {
       const inp = { coverage, baselines: bl, server: srv, serverUnknown: !!unknown, monitor: mon, schema: sch, uncaptured: unc,
         monitorCap: !!capsCache.monitor, may: sessionMay };
       const pctx = { serverId: id, registry, monitorCap: !!capsCache.monitor };
-      ovFlowLast = { inp, pctx, slot: f.flowSlot, gen: serverGen };
+      ovFlowLast = { inp, pctx, slot: f.flowSlot, use: f.use || null, gen: serverGen };
+      const model = ovFlowModel(inp);
       clear(f.flowSlot);
-      f.flowSlot.append(flowSection(ovFlowModel(inp), pctx));
+      f.flowSlot.append(flowSection(model, pctx));
+      if (f.use) f.use.update(model, inp);
     });
   });
 }
@@ -2296,8 +2367,205 @@ function ovFlowRepaint(coverage) {
   const last = ovFlowLast;
   if (!last || !coverage || last.gen !== serverGen || !last.slot.isConnected) return;
   last.inp = Object.assign({}, last.inp, { coverage });
+  const model = ovFlowModel(last.inp);
   clear(last.slot);
-  last.slot.append(flowSection(ovFlowModel(last.inp), last.pctx));
+  last.slot.append(flowSection(model, last.pctx));
+  if (last.use) last.use.update(model, last.inp);
+}
+
+// ── Use your copy (#1950) ────────────────────────────────────────────────────
+//
+// Four ways to read the copy, one card each, under the flow. The question a
+// reader brings is "now or fast?" and "always current or offline?", so every
+// card answers both in its tags before its sentence, and carries ONE action.
+// The card that is picked opens its panel under the row, one at a time. The
+// cards never list tables: the row reads the same on a server with 20 tables
+// and one with 2,000, and table names live inside a panel, behind a filter.
+// The drawings are static constants (svgEl: never data); the words on the
+// cards are the same on every server, and only the figures move
+// (useCopySection.update): the table count in the header, the newest copy
+// behind the download.
+
+// USE_ART: one drawing per card, 120x64, in the page's tokens so it follows
+// the theme. No text inside: a drawing is not prose.
+const USE_ART = {
+  sql: `<svg viewBox="0 0 120 64" aria-hidden="true"><rect x="4" y="4" width="112" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/><circle cx="14" cy="13" r="2.5" fill="var(--pink)"/><circle cx="22" cy="13" r="2.5" fill="var(--sun)"/><circle cx="30" cy="13" r="2.5" fill="var(--ok)"/><rect x="12" y="22" width="52" height="4" rx="2" fill="var(--pink-deep)"/><rect x="12" y="30" width="34" height="4" rx="2" fill="var(--ink-4)"/><rect x="12" y="42" width="96" height="3" rx="1.5" fill="var(--line)"/><rect x="12" y="49" width="70" height="3" rx="1.5" fill="var(--line)"/><rect x="88" y="21" width="20" height="6" rx="3" fill="var(--ink)"/></svg>`,
+  laptop: `<svg viewBox="0 0 120 64" aria-hidden="true"><rect x="22" y="10" width="76" height="40" rx="5" fill="var(--surface)" stroke="var(--ok)" stroke-width="1.5"/><rect x="12" y="50" width="96" height="6" rx="3" fill="var(--ok)"/><rect x="34" y="20" width="28" height="4" rx="2" fill="var(--line)"/><rect x="34" y="28" width="40" height="4" rx="2" fill="var(--line)"/><rect x="34" y="36" width="22" height="4" rx="2" fill="var(--line)"/><path d="M82 18v14m-6-5 6 6 6-6" fill="none" stroke="var(--ok)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  dash: `<svg viewBox="0 0 120 64" aria-hidden="true"><rect x="10" y="6" width="100" height="52" rx="7" fill="var(--surface)" stroke="var(--line)"/><rect x="22" y="36" width="10" height="14" rx="2" fill="var(--orange)"/><rect x="36" y="26" width="10" height="24" rx="2" fill="var(--sun)"/><rect x="50" y="32" width="10" height="18" rx="2" fill="var(--orange)"/><path d="M70 44 82 30l10 8 10-16" fill="none" stroke="var(--ink)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><rect x="22" y="14" width="30" height="4" rx="2" fill="var(--ink-4)"/></svg>`,
+  client: `<svg viewBox="0 0 120 64" aria-hidden="true"><rect x="6" y="6" width="108" height="52" rx="7" fill="var(--strip)"/><rect x="14" y="18" width="14" height="4" rx="2" fill="var(--pink-mid)"/><rect x="32" y="18" width="52" height="4" rx="2" fill="var(--strip-ink)" opacity=".85"/><rect x="14" y="28" width="14" height="4" rx="2" fill="var(--pink-mid)"/><rect x="32" y="28" width="30" height="4" rx="2" fill="var(--sun)"/><rect x="14" y="40" width="90" height="3" rx="1.5" fill="var(--strip-ink)" opacity=".35"/><rect x="14" y="47" width="60" height="3" rx="1.5" fill="var(--strip-ink)" opacity=".35"/></svg>`,
+};
+
+// USE_CARDS: title, the tags that answer the two questions (the green ones
+// are the yes), one sentence, one action. The `cap` card exists only where
+// the server reports the capability.
+const USE_CARDS = [
+  { id: "sql", title: "Ask it here", cap: "sql", action: "Open SQL",
+    tags: [["now", true], ["always current", true], ["nothing to install", false]],
+    line: () => ["Write SQL in this page. It runs on DBTrail's copy, not on MySQL."] },
+  { id: "laptop", title: "Take it to your laptop", action: "Download",
+    tags: [["fast", true], ["works offline", true], ["the copy at one moment", false]],
+    line: () => ["One download: your tables plus ", el("code", { text: DUCKDB_VIEWS_FILE }), ". Open it in DuckDB."] },
+  { id: "dash", title: "Dashboards for the team", action: "Set it up",
+    tags: [["fast", true], ["always current", true], ["set up once", false]],
+    line: () => ["Metabase, or any tool that runs DuckDB, reading the copy."] },
+  { id: "client", title: "From your MySQL client", action: "Show host and port",
+    tags: [["now", true], ["always current", true], ["one row or table, as it was", false]],
+    line: () => ["Point your client at the time-travel port and add ", el("code", { text: "AS OF" }), "."] },
+];
+
+// renderSQLPanel is the mount point for the in-page SQL panel (#1952): it
+// paints the panel into `box` and returns true, or returns false where this
+// build has none. This build has none; the "Ask it here" card stays hidden
+// behind the `sql` capability that build will report, so the card and the
+// panel arrive together.
+function renderSQLPanel(box) { return false; }
+
+// USE_PANELS: what each card opens under the row. Each reuses the surface
+// that already does the job elsewhere in the console, so the Overview never
+// grows a second way to download, set up or connect.
+const USE_PANELS = {
+  sql(body) {
+    if (!renderSQLPanel(body)) body.append(el("p", { class: "use-note", text: "Writing SQL in this page is not part of this build yet." }));
+  },
+  laptop(body, st) {
+    if (st.cta === "none") {
+      body.append(el("p", { class: "use-note", text: "The list of copies could not be read. Reload the page to try again." }));
+      return;
+    }
+    // The row hides while no copy exists; this is the panel left open when
+    // the newest copy went away under it.
+    if (st.cta === "setup" || !st.snap) {
+      body.append(el("p", { class: "use-note", text: "No copy to take yet." }));
+      return;
+    }
+    body.append(el("p", { class: "use-note" }, "The newest copy, from ",
+      el("b", { text: st.snap.time, title: utcLocalTitle(st.snap.time) || null }), " UTC. Open the folder in DuckDB and run ",
+      el("code", { text: DUCKDB_VIEWS_FILE }), "."));
+    const row = el("div", { class: "use-acts" });
+    const msg = el("p", { class: "form-msg err" });
+    msg.hidden = true;
+    // Row data takes query:execute, like the same download on Snapshots.
+    if (sessionMay("query:execute")) {
+      const dl = el("button", { class: "btn", type: "button", text: "Download the data" });
+      dl.onclick = async () => {
+        const err = await downloadNewestBackup(st.snap.time, dl);
+        if (err && !msg.isConnected) { toastError(err); return; }
+        msg.textContent = err;
+        msg.hidden = !err;
+      };
+      row.append(dl);
+    } else {
+      body.append(el("p", { class: "use-note", text: "Your session may not download row data." }));
+    }
+    if (st.viewsSQL && capsCache.views) {
+      const vb = el("button", { class: "btn", type: "button", text: "Download " + DUCKDB_VIEWS_FILE });
+      vb.onclick = async () => {
+        vb.disabled = true;
+        try { await downloadViewsSQL({}); }
+        catch (err) { toastError("could not generate views: " + ((err && err.message) || err)); }
+        finally { vb.disabled = false; }
+      };
+      row.append(vb);
+    }
+    body.append(row, msg);
+  },
+  dash(body) {
+    body.append(el("p", { class: "use-note" }, "Point Metabase, or any tool that runs DuckDB, at the copy and load ",
+      el("code", { text: DUCKDB_VIEWS_FILE }), " once. Every query then reads the newest copy."));
+    // The same schema card MCP Server carries, under the same gate.
+    if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) body.append(duckdbPanel());
+    body.append(docsMore("guides/dashboards", "", "dashboards on the copy"));
+  },
+  client(body) {
+    // The same panel MCP Server carries, read when the card is opened and
+    // not before: two requests nobody asked for would run on every paint.
+    body.append(ovSkelLines(3));
+    const gen = serverGen;
+    Promise.all([
+      api("/api/flashback").catch(() => null),
+      api("/api/servers").then((d) => (d && d.servers) || [], () => []),
+    ]).then(([fb, servers]) => {
+      if (gen !== serverGen || !body.isConnected) return;
+      clear(body);
+      body.append(sqlClientPanel(servers, fb));
+    });
+  },
+};
+
+// useCopySection builds the row once and returns { section, update }: the
+// cards and the panel slot are static, update() moves the figures.
+function useCopySection() {
+  const section = el("section", { class: "use", "aria-label": "Use your copy" });
+  // Hidden until the flow's reads say a copy exists: before the first copy
+  // nothing is "ready to query", and the Getting started list is the page's
+  // one task. The drawing's own links carry the setup until then.
+  section.hidden = true;
+  const head = el("div", { class: "use-h" });
+  const lead = el("p", { class: "use-lead" });
+  const leadText = (n) => (n ? "Your " + n + (n === 1 ? " table" : " tables") : "Your tables") + ", ready to query. Now or fast? Always current or offline? Each card says.";
+  lead.textContent = leadText(0);
+  head.append(el("div", { class: "use-h-text" }, el("h2", { class: "use-title", text: "Use your copy" }), lead));
+  head.append(el("a", { class: "use-claude", href: "/connect", text: "Connect Claude ›",
+    onclick: (e) => { e.preventDefault(); navigate("connect"); } }));
+  section.append(head);
+  const grid = el("div", { class: "use-cards" });
+  const panel = el("div", { class: "use-panel" });
+  panel.hidden = true;
+  const state = { open: "", snap: null, cta: "none", viewsSQL: false, cards: {}, buttons: {} };
+  const mark = () => {
+    for (const [id, card] of Object.entries(state.cards)) {
+      card.className = "use-card" + (id === state.open ? " on" : "");
+      state.buttons[id].setAttribute("aria-expanded", id === state.open ? "true" : "false");
+    }
+  };
+  const close = () => { state.open = ""; panel.hidden = true; clear(panel); mark(); };
+  const open = (id) => {
+    if (state.open === id) { close(); return; }
+    state.open = id;
+    mark();
+    const def = USE_CARDS.find((c) => c.id === id);
+    clear(panel);
+    const title = el("b", { class: "use-panel-title", text: def.title, tabindex: "-1" });
+    panel.append(el("div", { class: "use-panel-h" }, title,
+      el("button", { class: "btn btn-sm btn-ghost use-panel-x", type: "button", text: "Close", onclick: close })));
+    const body = el("div", { class: "use-panel-body" });
+    panel.append(body);
+    USE_PANELS[id](body, state);
+    panel.hidden = false;
+    title.focus();
+  };
+  USE_CARDS.forEach((def) => {
+    const card = el("div", { class: "use-card", "data-use": def.id });
+    const art = el("div", { class: "use-art use-art-" + def.id, "aria-hidden": "true" });
+    if (USE_ART[def.id]) art.append(svgEl(USE_ART[def.id]));
+    card.append(art);
+    card.append(el("h3", { class: "use-card-t", text: def.title }));
+    const tags = el("div", { class: "use-tags" });
+    def.tags.forEach(([t, yes]) => tags.append(el("span", { class: "use-tag" + (yes ? " y" : ""), text: t })));
+    card.append(tags);
+    card.append(el("p", { class: "use-line" }, ...def.line()));
+    const btn = el("button", { class: "btn use-act", type: "button", text: def.action, "aria-expanded": "false",
+      onclick: (e) => { e.stopPropagation(); open(def.id); } });
+    card.append(btn);
+    card.addEventListener("click", () => open(def.id));
+    if (def.cap && !capsCache[def.cap]) card.hidden = true;
+    state.cards[def.id] = card;
+    state.buttons[def.id] = btn;
+    grid.append(card);
+  });
+  section.append(grid, panel);
+  const update = (model, inp) => {
+    const unc = (inp && inp.uncaptured) || {};
+    lead.textContent = leadText(typeof unc.tables_captured === "number" ? unc.tables_captured : 0);
+    const bl = (inp && inp.baselines) || {};
+    state.snap = (bl.snapshots || [])[0] || null;
+    state.cta = (model && model.cta) || "none";
+    state.viewsSQL = !!(model && model.viewsSQL);
+    section.hidden = state.cta === "setup";
+    // The SQL card follows the capability of the server on screen.
+    state.cards.sql.hidden = !capsCache.sql;
+  };
+  return { section, update };
 }
 
 function renderOverview() {

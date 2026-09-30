@@ -36,11 +36,13 @@ for (const [name, c] of Object.entries(cases)) {
     cut: m.cut ? m.cut.piece + "@" + m.cut.at : "",
     screen: text(sec),
     okClasses: find(sec, "ok").length,
-    // the cards' buttons only: the action row under the drawing holds ghost
-    // buttons of its own (read through "actions"), never a fix
+    // the cards' buttons only, never a fix link; the strip carries no
+    // action row of its own since #1950 (the use cards are the actions),
+    // which "actions" and "ctaButtons" pin as empty
     buttons: find(sec, "flow-card").flatMap((k) => find(k, "btn")).map(text),
     fixLinks: find(sec, "flow-fix").map(text),
-    cta: m.cta || "", actions: find(sec, "flow-actions").map(text), ctaButtons: find(sec, "flow-cta").map(text),
+    cta: m.cta || "", viewsSQL: !!m.viewsSQL, actions: find(sec, "flow-actions").map(text), ctaButtons: find(sec, "flow-cta").map(text),
+    verdict: find(sec, "flow-verdict").map(text).join("").trim(),
     cardOnScreen: find(sec, "flow-card").length,
   };
 }
@@ -64,7 +66,9 @@ type flowOut struct {
 	OkClasses    int
 	Buttons      []string
 	FixLinks     []string
-	CTA          string   `json:"cta"`
+	CTA          string `json:"cta"`
+	ViewsSQL     bool   `json:"viewsSQL"`
+	Verdict      string
 	Actions      []string `json:"actions"`
 	CTAButtons   []string `json:"ctaButtons"`
 	CardOnScreen int
@@ -98,6 +102,17 @@ func TestOverviewFlowModel(t *testing.T) {
 			"uncaptured": c{"tables_captured": 47}}},
 		// C3: idle is green and says "connected", never "up to date".
 		"idle": {"input": c{"coverage": c{"freshness": "idle", "continuity": "ok", "delta_to": "2026-09-23 14:58:52"}, "baselines": c{}, "server": nil, "schema": c{"unavailable": true}, "uncaptured": c{}}},
+		// #1950: the copy station says how far back a row can be taken, off the
+		// coverage read's own window start; never downstream of a break.
+		"rewind-same-day": {"input": c{
+			"coverage":  c{"freshness": "current", "continuity": "ok", "lag_seconds": 12, "delta_from": "2026-09-23 09:00:00", "delta_to": "2026-09-23 14:58:52"},
+			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched}, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{}}},
+		"rewind-earlier": {"input": c{
+			"coverage":  c{"freshness": "current", "continuity": "ok", "lag_seconds": 12, "delta_from": "2026-09-20T09:00:00Z", "delta_to": "2026-09-23 14:58:52"},
+			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched}, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{}}},
+		"rewind-cut": {"input": c{
+			"coverage":  c{"freshness": "stalled", "continuity": "ok", "delta_from": "2026-09-23 09:00:00", "delta_to": "2026-09-23 14:02:10", "checkpoint_age_seconds": 2460},
+			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched}, "server": nil, "schema": c{"unavailable": true}, "uncaptured": c{}}},
 		// C4 + U11: capture stalled by the index's verdict; the young copy goes grey "as of".
 		"stalled-index": {"input": c{
 			"coverage":  c{"freshness": "stalled", "continuity": "ok", "delta_to": "2026-09-23 14:02:10", "checkpoint_age_seconds": 2460},
@@ -275,7 +290,7 @@ const origPaint = paint;`, 1)
 	if b := get("stalled-index").Pieces[bucket]; b.Tone != "off" || b.Sub != "" {
 		t.Errorf("stalled-index: bucket downstream of a break = %+v", b)
 	}
-	if h.Pieces[reader].Line != "DuckDB here" || h.Pieces[reader].Sub != "your tools" || h.Pieces[sqlArrow].Line != "Query the copy" {
+	if h.Pieces[reader].Line != "DuckDB here" || h.Pieces[reader].Sub != "your tools" || h.Pieces[sqlArrow].Line != "4 ways" {
 		t.Errorf("healthy: reader/sql = %+v %+v", h.Pieces[reader], h.Pieces[sqlArrow])
 	}
 	if strings.Contains(h.Screen, "Athena") || strings.Contains(h.Screen, "ClickHouse") {
@@ -437,27 +452,52 @@ const origPaint = paint;`, 1)
 	if hasLabel(nc.Buttons, "Read database now") || !hasLabel(nc.Buttons, "Wait for the scheduled read at 15:00") == false && len(nc.Buttons) == 0 {
 		t.Errorf("fold-refused-noperm-create: buttons %v (no Read for a session without baseline:create)", nc.Buttons)
 	}
-	// #1860: the action row under the drawing. One filled button where a copy
-	// exists to query; a link to set the copy up where none does; nothing to
-	// query where the listing failed; and with a decision card showing, the
-	// button steps down to a ghost button so the card's is the one filled button.
-	if h.CTA != "button" || !reflect.DeepEqual(h.CTAButtons, []string{"Query the copy"}) || len(h.Actions) != 1 || !strings.Contains(h.Actions[0], "Download views.sql (DuckDB views)") || !strings.Contains(h.Actions[0], "MCP Server") {
-		t.Errorf("healthy: cta=%q buttons=%v actions=%v", h.CTA, h.CTAButtons, h.Actions)
+	if sd := get("rewind-same-day"); !strings.Contains(sd.Screen, "rewind to 09:00") || strings.Contains(sd.Screen, "rewind to 2026") {
+		t.Errorf("rewind-same-day: want the time alone, got %q", sd.Screen)
 	}
-	if nl := get("no-location"); nl.CTA != "setup" || len(nl.CTAButtons) != 0 || !strings.Contains(nl.Actions[0], "Set up the copy") {
-		t.Errorf("no-location: cta=%q buttons=%v actions=%v", nl.CTA, nl.CTAButtons, nl.Actions)
+	if re := get("rewind-earlier"); !strings.Contains(re.Screen, "rewind to 2026-09-20 09:00") {
+		t.Errorf("rewind-earlier: want the date with the time, got %q", re.Screen)
+	}
+	if strings.Contains(get("rewind-cut").Screen, "rewind") || strings.Contains(h.Screen, "rewind") {
+		t.Errorf("a rewind line was drawn downstream of a break, or with no window start: cut %q healthy %q", get("rewind-cut").Screen, h.Screen)
+	}
+	// #1950: the four use cards under the strip ARE the actions, so the strip
+	// paints no action row and no filled button of its own. The model still
+	// says whether a copy exists to take (cta), which the laptop card reads,
+	// and whether views.sql may be offered (viewsSQL: settings:read).
+	for name, o := range out {
+		if len(o.Actions) != 0 || len(o.CTAButtons) != 0 {
+			t.Errorf("%s: the strip grew an action row again: actions=%v cta buttons=%v", name, o.Actions, o.CTAButtons)
+		}
+	}
+	if h.CTA != "button" || !h.ViewsSQL {
+		t.Errorf("healthy: cta=%q viewsSQL=%v, want a copy to take and views.sql on offer", h.CTA, h.ViewsSQL)
+	}
+	if nl := get("no-location"); nl.CTA != "setup" {
+		t.Errorf("no-location: cta=%q, want setup", nl.CTA)
 	}
 	if ns := get("no-schedule"); ns.CTA != "button" {
 		t.Errorf("no-schedule (a copy exists): cta=%q, want button", ns.CTA)
 	}
-	if bd := get("baselines-down"); bd.CTA != "none" || len(bd.CTAButtons) != 0 || strings.Contains(bd.Actions[0], "Query the copy") {
-		t.Errorf("baselines-down: cta=%q buttons=%v actions=%v, want no offer to query what could not be read", bd.CTA, bd.CTAButtons, bd.Actions)
+	if bd := get("baselines-down"); bd.CTA != "none" {
+		t.Errorf("baselines-down: cta=%q, want none: no offer to take what could not be read", bd.CTA)
 	}
-	if fl := get("failed"); len(fl.CTAButtons) != 0 || !strings.Contains(fl.Actions[0], "Query the copy") || fl.CardOnScreen != 1 {
-		t.Errorf("failed (card showing): the button must step down to a ghost button: buttons=%v actions=%v card=%d", fl.CTAButtons, fl.Actions, fl.CardOnScreen)
+	if fl := get("failed"); fl.CardOnScreen != 1 {
+		t.Errorf("failed: card on screen = %d, want 1", fl.CardOnScreen)
 	}
-	if nv := get("fold-refused-noperm-create"); strings.Contains(nv.Actions[0], "views.sql") {
-		t.Errorf("a session without settings:read is offered views.sql: %v", nv.Actions)
+	if nv := get("fold-refused-noperm-create"); nv.ViewsSQL {
+		t.Errorf("a session without settings:read is offered views.sql")
+	}
+	// The verdict word at the head of the strip: never green off a stopped
+	// or unknown capture, and "All good" only with a green copy beside it.
+	if h.Verdict != "All good" || s.Verdict != "Capture stopped" || u.Verdict != "Check the path" || get("empty").Verdict != "No data yet" {
+		t.Errorf("verdicts: healthy %q stalled-index %q unknown %q empty %q", h.Verdict, s.Verdict, u.Verdict, get("empty").Verdict)
+	}
+	if fr := get("fold-refused"); fr.Verdict != "Update stopped" {
+		t.Errorf("fold-refused: verdict %q, want 'Update stopped'", fr.Verdict)
+	}
+	if strings.Contains(h.Screen, "Query the copy") || strings.Contains(h.Screen, "MCP Server") {
+		t.Errorf("healthy: the strip still names the old action row: %q", h.Screen)
 	}
 	if fr := get("first-read"); fr.Pieces[engine].Line != "first read pending" {
 		t.Errorf("first-read: engine line = %q, want the wait in words, never a 0 count", fr.Pieces[engine].Line)
