@@ -1247,7 +1247,7 @@ function covRefresh(stamp) {
     wrap.append(el("span", { class: "cov-asof", text: "as of " + stamp.at }));
   }
   const btn = el("button", {
-    class: "cov-refresh-btn", type: "button",
+    class: "btn btn-icon btn-sm btn-ghost cov-refresh-btn", type: "button",
     title: "Re-read the restore window and capture state",
     "aria-label": "Refresh restore coverage",
     onclick: (e) => refreshCovCard(e.currentTarget),
@@ -1542,7 +1542,7 @@ function ovFrame() {
     el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Recent changes" })),
     tzChip(),
     el("a", { class: "btn btn-sm btn-ghost", href: "/events",
-      onclick: (e) => { e.preventDefault(); navigate("events"); }, text: "Browse all events ›" })));
+      onclick: (e) => { e.preventDefault(); navigate("events"); }, text: "Browse all events" })));
   f.recentBody = el("div", { class: "ov-evlist" });
   f.recentBody.append(ovSkelLines(4), el("div", { class: "skel-note", text: "loading recent changes…" }));
   f.recentPanel.append(f.recentBody);
@@ -2158,20 +2158,20 @@ function flowSection(model, ctx) {
 
 // flowActions is the row under the drawing (#1860): the one filled button of
 // the first screen, "Query the copy", then the links. With a decision card
-// showing, the button steps down to a link: the card's own button is the
-// one filled button then, and two would be two protagonists. A page with no
+// showing, the button steps down to a ghost button: the card's own button is
+// the one filled button then, and two would be two protagonists. A page with no
 // copy yet offers to set it up instead; a page whose listing failed offers
 // nothing it cannot vouch for.
 function flowActions(model, demoted) {
   const row = el("div", { class: "flow-actions" });
-  const link = (text, go) => el("a", { class: "flow-link", href: "#", text, onclick: (e) => { e.preventDefault(); go(); } });
+  const link = (text, go) => el("button", { class: "btn btn-sm btn-ghost", type: "button", text, onclick: go });
   const cta = model.cta || "none";
   if (cta === "button") {
     row.append(demoted
-      ? link("Query the copy ›", () => navigate("connect"))
+      ? link("Query the copy", () => navigate("connect"))
       : el("button", { class: "btn btn-primary flow-cta", type: "button", text: "Query the copy", onclick: () => navigate("connect") }));
   } else if (cta === "setup") {
-    row.append(link("Set up the copy ›", () => navigate("snapshots#setup")));
+    row.append(link("Set up the copy", () => navigate("snapshots#setup")));
   }
   if (model.viewsSQL) row.append(link("Download " + DUCKDB_VIEWS_FILE + " (DuckDB views)", () => downloadViewsSQL({})));
   row.append(link("MCP Server", () => navigate("connect")));
@@ -2925,7 +2925,7 @@ function renderEvents(params) {
     placeholder: 'Search changes. Try "orders", "type:delete", "pk:1006", "col:email"' });
   if (params && params.q) search.value = params.q;
   searchwrap.append(search);
-  const advBtn = el("button", { class: "ev-advbtn", type: "button", text: "Filters",
+  const advBtn = el("button", { class: "btn btn-sm ev-advbtn", type: "button", text: "Filters",
     onclick: () => { const a = $("#ev-advanced", VIEW()); a.toggleAttribute("hidden"); advBtn.classList.toggle("on"); } });
   searchwrap.append(advBtn);
   form.append(searchwrap);
@@ -3157,12 +3157,12 @@ function renderDTPop(pop, state, input) {
 
   const head = el("div", { class: "dt-head" });
   head.append(
-    el("button", { class: "dt-nav dt-nav-prev", type: "button", "aria-label": "Previous month", onclick: () => {
+    el("button", { class: "btn btn-icon btn-sm btn-ghost dt-nav dt-nav-prev", type: "button", "aria-label": "Previous month", onclick: () => {
       state.view.mo--; if (state.view.mo < 0) { state.view.mo = 11; state.view.y--; }
       renderDTPop(pop, state, input);
     } }, icon("caret", "dt-nav-ic")),
     el("span", { class: "dt-month", text: `${DT_MON[state.view.mo]} ${state.view.y}` }),
-    el("button", { class: "dt-nav", type: "button", "aria-label": "Next month", onclick: () => {
+    el("button", { class: "btn btn-icon btn-sm btn-ghost dt-nav", type: "button", "aria-label": "Next month", onclick: () => {
       state.view.mo++; if (state.view.mo > 11) { state.view.mo = 0; state.view.y++; }
       renderDTPop(pop, state, input);
     } }, icon("caret", "dt-nav-ic")));
@@ -3219,7 +3219,7 @@ function renderDTPop(pop, state, input) {
       clearDTValue(input);
       closeDatePicker();
     } }),
-    el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Apply", onclick: () => {
+    el("button", { class: "btn btn-sm", type: "button", text: "Apply", onclick: () => {
       applyDTValue(input, state.sel.y, state.sel.mo, state.sel.d, state.h, state.mi);
       closeDatePicker();
     } }));
@@ -3231,7 +3231,7 @@ function renderDTPop(pop, state, input) {
 // the picker is a progressive-enhancement affordance over the same input.
 function fieldDateInput(label, name, size, placeholder, required) {
   const input = el("input", { class: "input dt-input", name, placeholder: placeholder || "" });
-  const trigger = el("button", { class: "dt-trigger", type: "button", "aria-label": "Open calendar" },
+  const trigger = el("button", { class: "btn btn-icon btn-sm btn-ghost dt-trigger", type: "button", "aria-label": "Open calendar" },
     icon("calendar", "dt-trigger-ic"));
   trigger.addEventListener("click", (e) => { e.preventDefault(); toggleDatePicker(input, trigger); });
   const wrap = el("div", { class: "dt-wrap" }, input, trigger);
@@ -4526,7 +4526,7 @@ function renderTimetravel(params) {
   form.append(gapsField);
   const actions = el("div", { class: "filter-actions" });
   actions.append(el("button", { class: "btn btn-ghost", type: "button", text: "Full history", onclick: () => runReconstruct(form, true) }));
-  actions.append(el("button", { class: "btn btn-primary", type: "submit", text: "Value at that time" }));
+  actions.append(el("button", { class: "btn", type: "submit", text: "Value at that time" }));
   form.append(actions);
   v.append(form);
 
@@ -4644,7 +4644,7 @@ function renderTimeline(container, data, onDone) {
     // and the SQL finally agree.
     const acts = el("div", { class: "tl-actions" });
     acts.append(el("button", {
-      class: "btn btn-sm tl-use", type: "button", text: "Use this moment",
+      class: "btn btn-sm btn-ghost tl-use", type: "button", text: "Use this moment",
       title: "Set the At field above to " + e.time + " UTC",
       onclick: () => useTimelineInstant(e.time),
     }));
@@ -5414,7 +5414,7 @@ function snapshotsMovedNotice(missing) {
   const box = el("div", { class: "snap-moved" });
   box.append(el("span", { class: "snap-moved-text", text: was + " is part of Snapshots now." + why }));
   box.append(el("button", {
-    class: "snap-moved-x", type: "button", title: "Dismiss", "aria-label": "Dismiss",
+    class: "btn btn-icon btn-sm btn-ghost snap-moved-x", type: "button", title: "Dismiss", "aria-label": "Dismiss",
     onclick: () => { closeMoved(from); box.remove(); },
   }, "×"));
   return box;
@@ -6768,8 +6768,8 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     keep.value = Math.max(0, n + d) ? String(Math.max(0, n + d)) : "";
     keep.dispatchEvent(new Event("input"));
   };
-  const minus = el("button", { class: "keep-btn", type: "button", "aria-label": "Keep one fewer", text: "\u2212", onclick: () => step(-1) });
-  const plus = el("button", { class: "keep-btn", type: "button", "aria-label": "Keep one more", text: "+", onclick: () => step(1) });
+  const minus = el("button", { class: "btn btn-icon keep-btn", type: "button", "aria-label": "Keep one fewer", text: "\u2212", onclick: () => step(-1) });
+  const plus = el("button", { class: "btn btn-icon keep-btn", type: "button", "aria-label": "Keep one more", text: "+", onclick: () => step(1) });
   const unit = el("span", { class: "keep-unit", text: "snapshots" });
   const keepField = el("div", { class: "stg-card keep-card" },
     el("div", { class: "stg-card-t" }, icon("layers", "stg-ico stg-ico-mint"), el("span", { class: "field-label", text: "Keep by count" })),
@@ -7170,7 +7170,7 @@ function duckdbCommandLine(file) {
   const cmd = "duckdb -init " + file + " lake.db";
   const box = el("div", { class: "dk-run" },
     el("code", { class: "dk-cmd", text: cmd }),
-    el("button", { class: "dk-copy", type: "button", text: "Copy" }));
+    el("button", { class: "btn btn-sm dk-copy", type: "button", text: "Copy" }));
   box.querySelector(".dk-copy").onclick = () => copyText(cmd, "command");
   return box;
 }
@@ -7389,7 +7389,7 @@ function archivingPanel(servers, serversErr) {
   const panel = el("section", { class: "ov-panel" });
   panel.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: "S3 archiving per source" }),
-    el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Manage servers ›", onclick: openServersModal })));
+    el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Manage servers", onclick: openServersModal })));
   const list = el("div", { class: "stg-list" });
   const sources = servers.filter((s) => s.has_source);
   if (serversErr) {
@@ -8985,7 +8985,7 @@ function backupScheduleCard(cur, b) {
   const saved = sch ? scheduleChoice(sch.every) : "1d";
   const choices = SCHEDULE_CHOICES.slice();
   if (!choices.some(([v]) => v === saved)) choices.push([saved, sch.every]);
-  const at = el("input", { class: "in", type: "text", spellcheck: "false", placeholder: "03:00", "aria-label": "At (UTC)" });
+  const at = el("input", { class: "input", type: "text", spellcheck: "false", placeholder: "03:00", "aria-label": "At (UTC)" });
   at.value = sch ? sch.at : "03:00";
   at.style.maxWidth = "90px";
   const atWrap = el("span", { class: "bk-sched-at" }, el("span", { class: "form-hint", text: "at" }), at, el("span", { class: "form-hint", text: "UTC" }));
@@ -9301,7 +9301,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   const body = el("div", { class: "bk-card-body" });
   body.append(el("p", { class: "form-hint", text:
     "Pick a past moment. DBTrail rebuilds every table as it was then and saves the result as a new snapshot on the Snapshots page. Your database is not touched." }));
-  const input = el("input", { class: "in", type: "text", spellcheck: "false",
+  const input = el("input", { class: "input", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
   const go = el("button", { class: "btn", type: "button", text: "Restore" });
@@ -9349,7 +9349,7 @@ function restoreOffCard(why, text) {
   card.append(el("div", { class: "ov-panel-head" },
     el("h2", { class: "ov-panel-title", text: "Restore to a moment" })));
   card.append(el("p", { class: "form-hint bk-card-state", text }));
-  const input = el("input", { class: "in", type: "text", placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
+  const input = el("input", { class: "input", type: "text", placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   const go = el("button", { class: "btn", type: "button", text: "Restore" });
   input.disabled = go.disabled = true;
   card.append(el("div", { class: "bk-restore-row" }, input, go));
@@ -9568,7 +9568,7 @@ function backupDuckLane(b) {
     : ". The data, on its own.", "duck");
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
-  const dl = el("button", { class: "btn btn-primary", type: "button", text: "Download the data" });
+  const dl = el("button", { class: "btn", type: "button", text: "Download the data" });
   dl.onclick = async () => {
     const err = await downloadNewestBackup(snaps[0].time, dl);
     // The lane may have been repainted while the request was in flight, which
@@ -9735,10 +9735,10 @@ function backupSQLLane(cur, b, sqlSt) {
   }
   if (mayCreate) body.append(el("p", { class: "form-hint", text:
     "Plain SQL in mydumper format. Your database is never touched." }));
-  const input = el("input", { class: "in", type: "text", spellcheck: "false",
+  const input = el("input", { class: "input", type: "text", spellcheck: "false",
     placeholder: "YYYY-MM-DD HH:MM:SS (UTC)" });
   input.value = (usable[0] && usable[0].time) || "";
-  const go = el("button", { class: "btn btn-primary", type: "button", text: "Build" });
+  const go = el("button", { class: "btn", type: "button", text: "Build" });
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   go.onclick = () => startSQLExport(cur.id, input.value.trim(), go, msg);
@@ -10689,7 +10689,7 @@ async function openVerifyExplain(id, schema, table, btn) {
     "; checked against binlog position " + ex.anchor + "." }));
   head.append(el("p", { class: "modal-desc", text:
     "Recovered = what replaying the change log on top of the older snapshot produced. Snapshot (real) = the actual values from the newer, trusted snapshot." }));
-  head.append(el("button", { class: "modal-x", type: "button", text: "✕", onclick: closeVerifyExplain }));
+  head.append(el("button", { class: "btn btn-icon btn-ghost modal-x", type: "button", text: "✕", onclick: closeVerifyExplain }));
   modal.append(head);
 
   const body = el("div", { class: "vfy-explain-body" });
@@ -10751,7 +10751,7 @@ function openModal(opts) {
   const head = el("div", { class: "modal-head" });
   if (opts.title) head.append(el("h2", { class: "modal-title", text: opts.title }));
   for (const d of opts.desc || []) head.append(el("p", { class: "modal-desc", text: d }));
-  head.append(el("button", { class: "modal-x", type: "button", text: "✕", onclick: close }));
+  head.append(el("button", { class: "btn btn-icon btn-ghost modal-x", type: "button", text: "✕", onclick: close }));
   modal.append(head);
   const body = el("div", { class: "modal-body" });
   modal.append(body);
@@ -11384,7 +11384,7 @@ function accessFlagsPanel(doc) {
   const table = accessInput("table", "customers");
   const column = accessInput("column", "leave empty for the whole table");
   form.append(accessField("Flag", name), accessField("Schema", schema), accessField("Table", table), accessField("Column (optional)", column));
-  form.append(el("button", { class: "btn btn-sm btn-primary", type: "submit", text: "Add flag" }));
+  form.append(el("button", { class: "btn btn-sm", type: "submit", text: "Add flag" }));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = { flag: name.value.trim(), schema: schema.value.trim(), table: table.value.trim(), column: column.value.trim() };
@@ -11416,7 +11416,7 @@ function accessProfilesPanel(doc) {
   const name = accessInput("name", "marketing");
   const desc = accessInput("description", "Marketing analysts");
   form.append(accessField("Profile", name), accessField("Description (optional)", desc));
-  form.append(el("button", { class: "btn btn-sm btn-primary", type: "submit", text: "Add profile" }));
+  form.append(el("button", { class: "btn btn-sm", type: "submit", text: "Add profile" }));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = { name: name.value.trim(), description: desc.value.trim() };
@@ -11457,7 +11457,7 @@ function accessRulesPanel(doc) {
   const perm = el("select", { class: "select", name: "permission" });
   perm.append(opt("deny", "deny"), opt("allow", "allow"));
   form.append(accessField("Profile", profile), accessField("Flag", flag), datalist, accessField("Permission", perm));
-  form.append(el("button", { class: "btn btn-sm btn-primary", type: "submit", text: "Add rule", disabled: !profiles.length }));
+  form.append(el("button", { class: "btn btn-sm", type: "submit", text: "Add rule", disabled: !profiles.length }));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = { profile: profile.value, flag: flag.value.trim(), permission: perm.value };
@@ -11567,7 +11567,7 @@ function mcpTokenCard(tok, minted) {
     } else {
       card.append(el("div", { class: "cn-links" },
         el("button", { class: "btn btn-sm", type: "button", text: "New token", onclick: () => mintMCPToken(true) }),
-        el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Delete token", onclick: revokeMCPToken })));
+        el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Delete token", onclick: revokeMCPToken })));
     }
   } else if (!minted) {
     card.append(el("p", { class: "stg-hint", text: "The token is Claude's password for DBTrail. It is shown only once, so copy it right away." }));
@@ -12139,7 +12139,7 @@ function buildServersModal() {
     "This process can also ", el("b", { text: "monitor" }),
     " a new MySQL database for you: add one below and DBTrail checks it's ready, sets up its index, and starts capturing changes; no terminal needed."));
   head.append(desc);
-  head.append(el("button", { class: "modal-x", type: "button", text: "✕", onclick: closeServersModal }));
+  head.append(el("button", { class: "btn btn-icon btn-ghost modal-x", type: "button", text: "✕", onclick: closeServersModal }));
   modal.append(head);
 
   const body = el("div", { class: "modal-body" });
@@ -12194,7 +12194,7 @@ async function showRotationDialog() {
   head.append(el("h2", { class: "modal-title", text: "Rotation" }));
   head.append(el("p", { class: "modal-desc", text:
     "On a regular schedule, DBTrail deletes indexed data older than the retention period below, and gets ready ahead of time for new data coming in. One schedule applies to every server being monitored; changes take effect on the next run." }));
-  head.append(el("button", { class: "modal-x", type: "button", text: "✕", onclick: closeRotationDialog }));
+  head.append(el("button", { class: "btn btn-icon btn-ghost modal-x", type: "button", text: "✕", onclick: closeRotationDialog }));
   modal.append(head);
 
   const form = el("form", { class: "filters", style: "display:block" });
@@ -12322,12 +12322,12 @@ function serverRow(s) {
   const monitorable = capsCache.monitor && s.has_source && s.kind !== "ephemeral";
   if (monitorable) {
     const running = isLiveMonitorState(s.monitor_state);
-    acts.append(el("button", { class: "btn btn-sm" + (running ? "" : " btn-primary"), type: "button", text: running ? "Stop" : "Start",
+    acts.append(el("button", { class: "btn btn-sm", type: "button", text: running ? "Stop" : "Start",
       onclick: () => running ? stopMonitorRow(s.id) : startMonitorRow(s.id) }));
   }
   acts.append(el("button", { class: "btn btn-sm", type: "button", text: "Test", onclick: () => testServerRow(s.id) }));
   acts.append(el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Edit", disabled: !s.editable, onclick: () => editServer(s.id) }));
-  acts.append(el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Delete", disabled: !s.deletable, onclick: () => deleteServer(s) }));
+  acts.append(el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Delete", disabled: !s.deletable, onclick: () => deleteServer(s) }));
   item.append(acts);
   return item;
 }
@@ -12560,7 +12560,7 @@ function buildServerForm() {
   // Source family selector — reveals the PostgreSQL-only fields below.
   monGrid.append(el("label", { class: "field" },
     el("span", { class: "field-label", text: "Source type" }),
-    el("select", { class: "input", name: "flavor" },
+    el("select", { class: "select", name: "flavor" },
       opt("mysql", "MySQL"), opt("postgres", "PostgreSQL"), opt("mariadb", "MariaDB"))));
   monGrid.append(srvField("Source host", "source_host", { placeholder: "db.example.com" }));
   monGrid.append(srvField("Source port", "source_port", { placeholder: "3306" }));
@@ -12581,7 +12581,7 @@ function buildServerForm() {
   monGrid.append(srvField("S3 endpoint", "s3_endpoint", { placeholder: "(optional) http://minio:9000 for MinIO, Wasabi, LocalStack" }));
   monGrid.append(el("label", { class: "field" },
     el("span", { class: "field-label", text: "S3 addressing" }),
-    el("select", { class: "input", name: "s3_path_style" },
+    el("select", { class: "select", name: "s3_path_style" },
       opt("", "Path style (default with an endpoint)"), opt("path", "Path style: host/bucket/key"), opt("vhost", "Virtual-hosted: bucket.host/key"))));
   monGrid.append(srvField("S3 region", "s3_region", { placeholder: "(optional) us-east-1; MinIO ignores it, Wasabi wants its endpoint's" }));
   monGrid.append(srvField("S3 access key", "s3_access_key_id", { placeholder: "(optional) blank uses DBTrail's own credentials", autocomplete: "off" }));
