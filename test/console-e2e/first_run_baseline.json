@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "measured_at_commit": "a121b316",
+  "measured_at_commit": "e38d8b19",
   "platform": "darwin/153.0.8010.12",
   "viewport": "1280x720",
   "runs": {
@@ -31,7 +31,7 @@
       "words_per_step_max": 84,
       "banned_words": 7,
       "yellow_red": 3,
-      "primary_below_fold_px": 251
+      "primary_below_fold_px": 248
     },
     "no-primary-key": {
       "clicks_to_capture": 8,
@@ -41,7 +41,7 @@
       "words_per_step_max": 93,
       "words_per_error_max": 46,
       "banned_words": 7,
-      "primary_below_fold_px": 348
+      "primary_below_fold_px": 344
     },
     "refused-update": {
       "renewal_sentence_with_gate_open": "not measurable",
@@ -104,8 +104,8 @@
           {
             "step": "connect",
             "kind": "step",
-            "words_above_fold": 82,
-            "words_whole": 264,
+            "words_above_fold": 75,
+            "words_whole": 257,
             "layer": "modal"
           },
           {
@@ -202,8 +202,8 @@
       "changes_visible_without_reload": {
         "changes": [
           "INSERT: seen after 9.3 s",
-          "UPDATE: seen after 9.8 s",
-          "DELETE: seen after 7.7 s"
+          "UPDATE: seen after 9.6 s",
+          "DELETE: seen after 7.5 s"
         ]
       },
       "primary_below_fold_px": {
@@ -211,7 +211,7 @@
         "steps": [
           "sign-in: 0 px (Create & sign in)",
           "after-sign-in: 0 px (+ Add server)",
-          "connect: 297 px (Check and connect)",
+          "connect: 185 px (Check and connect)",
           "save-result: 0 px (OK)",
           "snapshot-location: 368 px (Save (the snapshot location))",
           "snapshot-ready: 0 px (Read database now)"
@@ -312,7 +312,7 @@
       "primary_below_fold_px": {
         "worst": "connect",
         "steps": [
-          "connect: 251 px (Check and connect)",
+          "connect: 248 px (Check and connect)",
           "save-result: 0 px (OK)"
         ]
       }
@@ -404,7 +404,7 @@
       "primary_below_fold_px": {
         "worst": "connect",
         "steps": [
-          "connect: 348 px (Check and connect)",
+          "connect: 344 px (Check and connect)",
           "save-refused: 0 px (Back to the form)",
           "save-result: 0 px (OK)"
         ]
