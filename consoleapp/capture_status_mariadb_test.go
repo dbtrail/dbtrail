@@ -190,7 +190,7 @@ func TestCaptureStatus_mariadbBootSourceUsesTheDeclaredFlavor(t *testing.T) {
 		mysqlReads++
 		return captureProbeResult{verdict: console.CaptureCaughtUp}
 	})
-	c.bootFlavor = console.FlavorMariaDB
+	c.withBootFlavor(func() string { return console.FlavorMariaDB })
 	c.readMariaDB = func(context.Context, string, string) captureProbeResult {
 		mariadbReads++
 		return captureProbeResult{verdict: console.CaptureCaughtUp}

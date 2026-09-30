@@ -437,6 +437,9 @@ func runDump(cmd *cobra.Command, args []string) error {
 	dumpStartedAt := time.Now().UTC()
 	if runErr := c.Run(); runErr != nil {
 		if stderr := strings.TrimSpace(stderrBuf.String()); stderr != "" {
+			if hint := mydumperlock.FTWRLDeniedHint(lockMode, stderr, mydumperlock.RemedyCLI); hint != "" {
+				return fmt.Errorf("mydumper failed: %w: %s; stderr: %s", runErr, hint, stderr)
+			}
 			return fmt.Errorf("mydumper failed: %w; stderr: %s", runErr, stderr)
 		}
 		return fmt.Errorf("mydumper failed: %w", runErr)

@@ -232,3 +232,10 @@ func fillPGSourceDSNParts(dto *serverDTO, dsn string) {
 	}
 	dto.SourceDatabase = strings.TrimPrefix(u.Path, "/")
 }
+
+// mysqlFamily reports whether a normalized flavor is MySQL or MariaDB, the
+// two that share one capture engine and differ only in what the server
+// reports.
+func mysqlFamily(flavor string) bool {
+	return flavor == FlavorMySQL || flavor == FlavorMariaDB
+}

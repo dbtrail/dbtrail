@@ -21,6 +21,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
@@ -519,6 +520,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeSessionProfileError(w, r, err)
 		return
 	}
+	if !spellPKFilter(w, r, b.db, &opts) {
+		return
+	}
 	// Probe one row past the page to learn whether anything is behind it. The
 	// extra row is never serialized (trimmed below) — it exists only so the
 	// header can say "more available" or "end of results" instead of the
@@ -642,6 +646,9 @@ func (s *Server) handleRecover(w http.ResponseWriter, r *http.Request) {
 	opts, err = s.applySessionProfile(r.Context(), r, b, opts)
 	if err != nil {
 		writeSessionProfileError(w, r, err)
+		return
+	}
+	if !spellPKFilter(w, r, b.db, &opts) {
 		return
 	}
 	// Refuse to generate an undo script for the entire index; a recovery must
@@ -1229,6 +1236,24 @@ func atoiDefault(s string, def int) int {
 		return def
 	}
 	return n
+}
+
+// spellPKFilter spells a MariaDB UUID/INET key the way the index stores it
+// (its bytes), so a key typed as text finds its rows instead of an empty
+// result (reconstruct.SpellIndexPKFilter). A key whose column type the
+// snapshot cannot tell is refused with a 422; it reports whether to go on.
+// Call it after applySessionProfile, so a withheld table's key is never
+// described.
+func spellPKFilter(w http.ResponseWriter, r *http.Request, db *sql.DB, opts *query.Options) bool {
+	if _, err := reconstruct.SpellIndexPKFilter(r.Context(), db, opts); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, reconstruct.ErrPKTypeUnknown) {
+			status = http.StatusUnprocessableEntity
+		}
+		writeJSONError(w, status, err.Error())
+		return false
+	}
+	return true
 }
 
 // writeFetchError maps a cross-source fetch failure onto the right HTTP

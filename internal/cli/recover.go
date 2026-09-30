@@ -22,6 +22,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 )
 
@@ -303,6 +304,14 @@ func runRecover(cmd *cobra.Command, args []string) error {
 			}
 		}
 		opts.PKValuesIn = expanded
+	}
+
+	// A MariaDB UUID/INET key is stored as its bytes, and typed as text: spell
+	// it the stored way, or the script undoes nothing and says 0 statements.
+	// After the escape alternates above (it replaces PKValuesAlt when it
+	// re-spells) and after the profile rules.
+	if _, err := reconstruct.SpellIndexPKFilter(cmd.Context(), db, &opts); err != nil {
+		return err
 	}
 
 	// ── Fetch events (live + archives) ────────────────────────────────────────

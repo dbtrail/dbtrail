@@ -910,7 +910,19 @@ func checkReplicationGrants(ctx context.Context, db *sql.DB) CheckResult {
 		grants = append(grants, g)
 	}
 
+	if err := rows.Err(); err != nil {
+		return CheckResult{
+			Name:        ReplicationGrantsCheckName,
+			Status:      StatusFail,
+			Detail:      err.Error(),
+			Remediation: queryErrorRemediation("SHOW GRANTS"),
+		}
+	}
+
 	slave, client := metadata.HasReplPrivileges(grants)
+	if !client && metadata.CanListBinaryLogs(ctx, db) {
+		client = true
+	}
 	if slave && client {
 		return CheckResult{
 			Name:   ReplicationGrantsCheckName,
@@ -941,11 +953,12 @@ func checkReplicationGrants(ctx context.Context, db *sql.DB) CheckResult {
 		Detail:   "missing: " + strings.Join(missing, ", "),
 		Kind:     KindMissingPrivilege,
 		Subjects: missing,
-		Remediation: fmt.Sprintf("Run on the source MySQL as a privileged user (e.g. root):\n\n"+
+		Remediation: fmt.Sprintf("Run on the source as a user that can grant privileges (root, or the master user on RDS and Aurora):\n\n"+
 			"  GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO %s;\n"+
 			"  FLUSH PRIVILEGES;\n\n"+
 			"REPLICATION SLAVE lets bintrail stream binlog events.\n"+
-			"REPLICATION CLIENT lets it run SHOW BINARY LOGS / SHOW MASTER STATUS for gap detection.", user),
+			"REPLICATION CLIENT lets it run SHOW BINARY LOGS / SHOW MASTER STATUS for gap detection.\n"+
+			"MariaDB 10.5+ accepts the same GRANT and shows REPLICATION CLIENT as BINLOG MONITOR.", user),
 	}
 }
 

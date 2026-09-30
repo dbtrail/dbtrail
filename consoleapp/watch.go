@@ -678,7 +678,9 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("console: %w", err)
 	}
 
-	cfg, err := upConsoleConfig(db, upIndexDSN, upConsoleOpts(), registry)
+	// The flavor the main stream runs as, for the console's boot entry.
+	mainFlavor := newSourceFlavorCell(upSourceFlavor)
+	cfg, err := upConsoleConfigFor(db, upIndexDSN, upConsoleOpts(), registry, mainFlavor)
 	if err != nil {
 		return err
 	}
@@ -843,9 +845,10 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	// only the single main source `watch --source-dsn` streams. They start once
 	// the stream has asked the source what it is, with the flavor capture runs
 	// as; FlavorOnce keeps a write-deadline restart from starting them again.
-	// No-op in the stock binary.
+	// Every resolution also updates the flavor the console shows for the boot
+	// entry. No-op in the stock binary.
 	streamCfg := watchStreamConfig(serverID)
-	streamCfg.Hooks = &streamrun.Hooks{OnFlavorResolved: streamrun.FlavorOnce(func(flavor string) {
+	streamCfg.Hooks = &streamrun.Hooks{OnFlavorResolved: mainStreamFlavorHook(mainFlavor, func(flavor string) {
 		ext.RunSourceJobs(ctx, mainSourceJobInfo(upSourceDSN, upIndexDSN, flavor))
 	})}
 
@@ -1576,6 +1579,14 @@ func bootCaptureFilter() *status.CaptureFilter {
 }
 
 func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console.Registry) (console.Config, error) {
+	return upConsoleConfigFor(db, indexDSN, opts, reg, newSourceFlavorCell(upSourceFlavor))
+}
+
+// upConsoleConfigFor is upConsoleConfig with the cell the daemon's own
+// capture records its flavor in (mainStreamFlavorHook): the source-ful watch
+// passes the one its stream writes, so the boot entry's label and its
+// capture status read follow what the source reports.
+func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *console.Registry, bootFlavor *sourceFlavorCell) (console.Config, error) {
 	cfg, err := mysql.ParseDSN(indexDSN)
 	if err != nil {
 		return console.Config{}, fmt.Errorf("invalid --index-dsn: %w", err)
@@ -1587,6 +1598,11 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console
 	// because both watch entry points reach this function and neither reaches
 	// the other, and once per process: it is a startup line, not a monitor.
 	composeDriftReporter(indexDSN, opts)
+	// Only a daemon that captures its own source has a flavor to show.
+	var bootSourceFlavor func() string
+	if upSourceDSN != "" {
+		bootSourceFlavor = bootFlavor.get
+	}
 	return console.Config{
 		DB:      db,
 		DBName:  cfg.DBName,
@@ -1598,7 +1614,8 @@ func upConsoleConfig(db *sql.DB, indexDSN string, opts consoleOpts, reg *console
 		// The Overview asks the source whether capture is caught up (#1794).
 		// Here because both watch entry points reach this function; the
 		// read-only serve does not, and answers unknown.
-		CaptureStatus: newCaptureStatusReporter(upSourceDSN).withBootFlavor(upSourceFlavor),
+		CaptureStatus:    newCaptureStatusReporter(upSourceDSN).withBootFlavor(bootFlavor.get),
+		BootSourceFlavor: bootSourceFlavor,
 
 		BaselineDir:     opts.BaselineDir,
 		BaselineS3:      opts.BaselineS3,

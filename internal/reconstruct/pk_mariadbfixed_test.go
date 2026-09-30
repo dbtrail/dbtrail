@@ -186,3 +186,33 @@ func TestCheckUntypedMariaDBFixedPK_undecidableCases(t *testing.T) {
 		t.Errorf("with index types there is nothing to check: %v", err)
 	}
 }
+
+// query and recover print a UUID/INET key as its bytes in hex (the pk_values
+// spelling, "0xCC5C…"). reconstruct refused that form ("is not a UUID"), so a
+// key copied from their output did not work here. Both spellings must.
+func TestMariaDBFixedKey_hexBytesAccepted(t *testing.T) {
+	for _, c := range mariaDBFixedPKCases {
+		typed := make([]string, len(c.hexes))
+		for i, h := range c.hexes {
+			typed[i] = "0x" + strings.ToUpper(h)
+		}
+		want := capturedPK(t, c.cols, c.hexes...)
+		if got := IndexPKSpelling(strings.Join(typed, "|"), c.cols); got != want {
+			t.Errorf("%s: IndexPKSpelling(%q) = %q, the index stores %q", c.name, strings.Join(typed, "|"), got, want)
+		}
+		filter := map[string]string{}
+		for i, col := range c.cols {
+			filter[col.Name] = typed[i]
+		}
+		got, err := mariaDBFixedBaselineFilter(filter, c.cols)
+		if err != nil {
+			t.Errorf("%s: baseline filter refused the hex form: %v", c.name, err)
+			continue
+		}
+		for i, col := range c.cols {
+			if got[col.Name] != c.text[i] {
+				t.Errorf("%s: filter %s = %q, want the baseline's text %q", c.name, col.Name, got[col.Name], c.text[i])
+			}
+		}
+	}
+}

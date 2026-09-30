@@ -25,6 +25,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 )
 
@@ -217,16 +218,23 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	// end-to-end by this command and both are emitted, so there is no subset
 	// invariant to preserve between them (unlike the console's auto-detect path,
 	// which must derive its parents from the rows the recover already returned).
+	// A MariaDB UUID/INET parent key typed as text is stored as its bytes:
+	// spell it that way, as `recover` does, or no parent is found.
+	keyOpts := query.Options{Schema: rcSchema, Table: rcTable, PKValues: rcPK, PKValuesIn: rcPKs}
+	if _, err := reconstruct.SpellIndexPKFilter(cmd.Context(), db, &keyOpts); err != nil {
+		return err
+	}
 	parentDeletes, err := fetcher.Fetch(cmd.Context(), query.Options{
-		Schema:     rcSchema,
-		Table:      rcTable,
-		PKValues:   rcPK,
-		PKValuesIn: rcPKs,
-		EventType:  &del,
-		Since:      since,
-		Until:      until,
-		Order:      "ASC",
-		Limit:      rcLimit,
+		Schema:      rcSchema,
+		Table:       rcTable,
+		PKValues:    keyOpts.PKValues,
+		PKValuesAlt: keyOpts.PKValuesAlt,
+		PKValuesIn:  keyOpts.PKValuesIn,
+		EventType:   &del,
+		Since:       since,
+		Until:       until,
+		Order:       "ASC",
+		Limit:       rcLimit,
 	})
 	if err != nil {
 		return fmt.Errorf("fetch parent deletes: %w%s", err, archiveReadHint(err))
@@ -237,15 +245,16 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 	// is never reversed here — that would undo a change the operator never asked
 	// about.
 	parentUpdates, err := fetcher.Fetch(cmd.Context(), query.Options{
-		Schema:     rcSchema,
-		Table:      rcTable,
-		PKValues:   rcPK,
-		PKValuesIn: rcPKs,
-		EventType:  &upd,
-		Since:      since,
-		Until:      until,
-		Order:      "ASC",
-		Limit:      rcLimit,
+		Schema:      rcSchema,
+		Table:       rcTable,
+		PKValues:    keyOpts.PKValues,
+		PKValuesAlt: keyOpts.PKValuesAlt,
+		PKValuesIn:  keyOpts.PKValuesIn,
+		EventType:   &upd,
+		Since:       since,
+		Until:       until,
+		Order:       "ASC",
+		Limit:       rcLimit,
 	})
 	if err != nil {
 		return fmt.Errorf("fetch parent updates: %w%s", err, archiveReadHint(err))

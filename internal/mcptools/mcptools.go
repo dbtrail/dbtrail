@@ -47,6 +47,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
@@ -720,6 +721,12 @@ func MakeQueryTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Query
 		if err := t.resolvePKRange(&opts); err != nil {
 			return ErrorResult(err), nil, nil
 		}
+		// A MariaDB UUID/INET key is stored as its bytes; spell a text key
+		// that way, or refuse when the snapshot cannot tell (#1440's
+		// ordering: after the posture).
+		if _, err := reconstruct.SpellIndexPKFilter(ctx, t.DB, &opts); err != nil {
+			return ErrorResult(err), nil, nil
+		}
 
 		format := args.Format
 		if format == "" {
@@ -914,6 +921,11 @@ func MakeRecoverTool(cfg Config) func(context.Context, *mcp.CallToolRequest, Rec
 		// after the posture: a reversal over a lexicographic "range" would
 		// undo rows nobody named.
 		if err := t.resolvePKRange(&opts); err != nil {
+			return ErrorResult(err), nil, nil
+		}
+		// Same spelling as the query tool: a text UUID/INET key would
+		// otherwise match nothing and the script would undo nothing.
+		if _, err := reconstruct.SpellIndexPKFilter(ctx, t.DB, &opts); err != nil {
 			return ErrorResult(err), nil, nil
 		}
 
