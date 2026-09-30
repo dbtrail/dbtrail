@@ -11,7 +11,7 @@ import (
 // read. Everything the row carries therefore sits on --violet-tint instead of
 // on the page ground, and three of its children were below their floor the
 // moment the tint went on: the age at --ink-3 (4.20:1), the location chip and
-// the chevron at --ink-4 (2.80:1), plus a pill whose --surface-3 ground on
+// the chevron at --ink-4 (2.80:1), plus a pill whose --inset ground on
 // violet is 1.09:1 -- the mark was invisible on the only row that wears it.
 //
 // TestTintGroundsHoldTheAAFloorForTheirBodyText already measures the TOKENS
@@ -91,14 +91,14 @@ func TestNewestBackupRowClearsItsFloorOnTheTint(t *testing.T) {
 	}
 }
 
-// Hover used to swap the row to --surface-2, which is LIGHTER than the tint:
+// Hover used to swap the row to --raised, which is LIGHTER than the tint:
 // pointing at the newest row removed the one thing that distinguished it.
 func TestNewestBackupRowKeepsItsTintOnHover(t *testing.T) {
 	css := string(readStyleCSS(t))
 	rule := ruleBody(css, ".stg-row-latest.bk-expandable:hover")
 	if rule == "" {
 		t.Fatal("no hover rule scoped to .stg-row-latest: the generic .bk-expandable:hover sets " +
-			"background:var(--surface-2), which is lighter than --violet-tint, so hovering the " +
+			"background:var(--raised), which is lighter than --violet-tint, so hovering the " +
 			"newest row erases the mark the tint exists to carry")
 	}
 	if !strings.Contains(rule, "var(--"+latestRowGround+")") {
@@ -218,7 +218,7 @@ func anyToken(t *testing.T, css, name string) string {
 	return cssHexToken(t, []byte(css), name)
 }
 
-// The pill is NOT a contrast case: its default ink-2 on surface-3 is 6.74:1
+// The pill is NOT a contrast case: its default ink-2 on --inset is 6.74:1
 // and always read fine. What it loses on the tint is its edge, and white
 // barely improves that (1.09 -> 1.18). It takes the white ground for one
 // reason only, and it is the reason this test exists: .tcard-violet .tag-pill
@@ -318,9 +318,9 @@ func TestBackupsPagerNumberClearsTheBodyFloor(t *testing.T) {
 		t.Fatal("no .bk-pager-n colour rule: if the pager's position line moved, re-point this " +
 			"rather than deleting it")
 	}
-	// --surface-2 is --panel-bg, the ground .stg-list sits on inside .ov-panel.
-	if r := wcagRatioHex(anyToken(t, css, tok), anyToken(t, css, "surface-2")); r < 4.5 {
-		t.Errorf(".bk-pager-n is var(--%s) on --surface-2 = %.2f:1, below the 4.5:1 body floor. "+
+	// --raised is --panel-bg, the ground .stg-list sits on inside .ov-panel.
+	if r := wcagRatioHex(anyToken(t, css, tok), anyToken(t, css, "raised")); r < 4.5 {
+		t.Errorf(".bk-pager-n is var(--%s) on --raised = %.2f:1, below the 4.5:1 body floor. "+
 			"This line is the only thing saying which page the reader is on", tok, r)
 	}
 }
