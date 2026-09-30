@@ -447,12 +447,6 @@ button { font-family: inherit; }
 [data-dir="paper"] .nav-item.active::before { left: -2px; }
 @keyframes railpop { from { height: 0; opacity: 0; } to { opacity: 1; } }
 
-.nav-kbd {
-  margin-left: auto; font-family: var(--f-mono); font-size: 10.5px;
-  color: var(--ink-4); opacity: 0; transition: opacity .15s;
-}
-.nav-item:hover .nav-kbd, .nav-item.active .nav-kbd { opacity: 1; }
-
 .side-foot {
   margin-top: auto;
   display: flex; flex-direction: column; gap: 3px;
@@ -616,7 +610,6 @@ button { font-family: inherit; }
   font-family: var(--f-mono); font-size: var(--fs-md); color: var(--ink); padding: 9px 4px;
 }
 .ev-search::placeholder { color: var(--ink-4); font-family: var(--f-ui); }
-.ev-search-x { flex: none; }
 .ev-advbtn { flex: none; gap: 7px; }
 /* pressed, not filled: the view's one filled button is the open row's */
 .ev-advbtn.on { background: var(--raised); color: var(--ink); border-color: var(--ink-4); }
@@ -1293,49 +1286,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
   background: var(--surface); z-index: 1;
 }
 
-/* ============================================================
-   tweaks panel (vanilla)
-   ============================================================ */
-#tweaks {
-  position: fixed; right: 18px; bottom: 18px; z-index: 9000;
-  width: 268px;
-  background: color-mix(in srgb, var(--white) 82%, transparent);
-  -webkit-backdrop-filter: blur(22px) saturate(160%); backdrop-filter: blur(22px) saturate(160%);
-  border: 1px solid var(--line); border-radius: var(--r-lg);
-  box-shadow: var(--shadow-lg), 0 1px 0 color-mix(in srgb, var(--white) 60%, transparent) inset;
-  font-family: var(--f-ui); color: var(--ink);
-  display: none; flex-direction: column; overflow: hidden;
-}
-#tweaks.open { display: flex; }
-@keyframes twkin { from { transform: translateY(10px) scale(.98); } to { transform: none; } }
-@media (prefers-reduced-motion: no-preference) {
-  #tweaks.open { animation: twkin .28s var(--ease-out); }
-}
-.twk-h { display: flex; align-items: center; justify-content: space-between; padding: 13px 12px 11px 16px; border-bottom: 1px solid var(--line-soft); }
-.twk-h b { font-family: var(--f-display); font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
-.twk-h .x { border: none; background: none; color: var(--ink-3); cursor: pointer; width: 24px; height: 24px; border-radius: var(--r-sm); font-size: 15px; }
-.twk-h .x:hover { background: var(--raised); color: var(--ink); }
-.twk-b { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 15px; max-height: 70vh; overflow-y: auto; }
-.twk-grp { display: flex; flex-direction: column; gap: 8px; }
-.twk-lab { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; color: var(--ink-3); }
-.seg { display: flex; gap: 3px; background: var(--raised); border-radius: var(--r-md); padding: 3px; }
-.seg button {
-  flex: 1; border: none; background: none; cursor: pointer;
-  font-family: inherit; font-size: 12px; font-weight: 500; color: var(--ink-2);
-  padding: 6px 4px; border-radius: var(--r-sm); transition: background .15s, color .15s, box-shadow .15s;
-}
-.seg button.on { background: var(--ink); color: var(--white); font-weight: 600; }
-.swatches { display: flex; gap: 7px; }
-.swatches button { width: 30px; height: 30px; border-radius: var(--r-sm); border: 2px solid transparent; cursor: pointer; padding: 0; position: relative; transition: transform .12s; }
-.swatches button:hover { transform: scale(1.08); }
-.swatches button.on { border-color: var(--ink); }
-.swatches button.on::after { content: "✓"; position: absolute; inset: 0; display: grid; place-items: center; color: var(--white); font-size: 13px; text-shadow: 0 1px 2px var(--scrim); }
-.twk-toggle { display: flex; align-items: center; justify-content: space-between; }
-.tg { width: 38px; height: 22px; border-radius: var(--r-pill); background: var(--line); border: none; cursor: pointer; position: relative; transition: background .2s; flex: none; }
-.tg.on { background: var(--ink); }
-.tg::after { content: ""; position: absolute; left: 2px; top: 2px; width: 18px; height: 18px; border-radius: 50%; background: var(--white); box-shadow: var(--shadow-sm); transition: transform .2s var(--ease-out); }
-.tg.on::after { transform: translateX(16px); }
-.twk-note { font-size: 11px; color: var(--ink-4); line-height: 1.45; }
 
 /* ============================================================
    density — compact tightens the data surfaces
@@ -1391,7 +1341,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .ov-stat-v { font-family: var(--f-display); font-size: 32px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; color: var(--ink); }
 .ov-stat-v.small { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 19px; font-weight: 500; }
 .ov-stat-v.danger { color: var(--delete); }
-.ov-stat-day { color: var(--ink-4); font-size: 13px; }
 .ov-stat-k { font-size: 12px; color: var(--ink-3); margin-top: 8px; letter-spacing: 0.01em; }
 /* Each tile's own scope ("last 24 h", "all time · estimate") — #1300. Quieter
    than the label, but never hidden: these tiles are screenshotted out of the
@@ -1712,7 +1661,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .ov-seg.i { background: var(--insert); }
 .ov-seg.u { background: var(--update); }
 .ov-seg.d { background: var(--delete); }
-.ov-pills { display: none; }
 .ov-total { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
 .ov-coverage {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -1722,7 +1670,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .ov-coverage span { text-transform: uppercase; letter-spacing: 0.06em; font-size: var(--fs-xs); }
 .ov-coverage b { color: var(--ink); font-weight: 500; }
 
-.filter-chip:hover { border-color: currentColor; }
 
 /* ============================================================
    command palette (⌘K) + sidebar trigger
@@ -2251,7 +2198,21 @@ section.bk-restore { margin-top: 18px; }
    viewports; the submit button sits on the fields' baseline. ── */
 .ap-stack { display: grid; gap: 18px; }
 .ap-row .stg-dest { flex: 1; }
-.ap-empty { padding: 18px 0; text-align: left; }
+.empty.ap-empty { padding: 18px 16px; gap: 8px; margin: 4px 0 10px; }
+.ap-empty .empty-art svg, .cn-key svg, .srv-empty .empty-art svg { width: 120px; height: 40px; }
+/* no taller than the line it replaced: the add form opens under it (first-run walk) */
+.empty.srv-empty { padding: 18px 16px; gap: 8px; margin: 0; }
+.cn-key { margin: 2px 0 8px; }
+/* how flags, profiles and rules work together, drawn (#1950) */
+.ap-draw { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -8px 0 22px; }
+.ap-step { display: flex; flex-direction: column; gap: 4px; }
+.ap-step-k { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+.ap-cell { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow); font-size: var(--fs-sm); }
+.ap-blank { padding: 0 18px; border-radius: 3px; background: var(--inset); color: var(--ink-4); font-size: var(--fs-xs); }
+.ap-draw-example { opacity: .6; }
+.ap-draw-example .ap-cell { box-shadow: none; border: 1.5px dashed var(--ink-4); background: transparent; }
+.ap-arrow { width: 28px; height: 2px; background: var(--ink-4); position: relative; margin-top: 18px; }
+.ap-arrow::after { content: ""; position: absolute; right: -2px; top: -4px; border: 5px solid transparent; border-left: 7px solid var(--ink-4); border-right: 0; }
 .ap-form {
   display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
   padding: 8px 14px 4px; border-top: 1px solid var(--line-soft);
@@ -2798,7 +2759,6 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .dk-bar { width: 5px; height: 14px; border-radius: 2px; background: var(--ink); flex: none; }
 .dk-off .dk-bar { background: var(--line); }
 .dk-cap { font-size: 11.5px; color: var(--ink-3); margin-top: 5px; }
-.cn-dk-body { padding: 0 14px 14px; }
 
 .cn-mock { border: 1px solid var(--line-on-tint); border-radius: var(--r-md); background: var(--surface); margin: 10px 0; max-width: 430px; box-shadow: var(--panel-shadow); }
 .cn-mock-bar { display: flex; align-items: center; padding: 7px 12px; border-bottom: 1px solid var(--line-soft); color: var(--ink-4); font-size: 11.5px; }
