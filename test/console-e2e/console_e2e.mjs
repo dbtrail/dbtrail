@@ -6025,6 +6025,30 @@ try {
     : bad("routes: Back onto a rewritten entry is a fresh visit, not an old address", JSON.stringify(afterBack));
   await tab.close();
 
+  // Status, "Your copy" station, against the REAL endpoints (#1950): the
+  // fixture server has a snapshot, so the station must say so. It read
+  // snapshot fields from /api/status, which the console never fills, and
+  // said "no snapshot yet" everywhere; the model tests fed hand-written
+  // objects carrying those fields, so none of them could see it.
+  await page.evaluate(async (id) => { await switchServer(id); }, byoId);
+  await page.evaluate(() => navigate("status"));
+  let copyStation = null;
+  try {
+    await page.waitForFunction(() => Array.from(document.querySelectorAll(".flow-static .flow-box")).some((n) => /Your copy/.test(n.textContent)), null, { timeout: 20000 });
+    copyStation = await page.evaluate(async () => {
+      const box = Array.from(document.querySelectorAll(".flow-static .flow-box")).find((n) => /Your copy/.test(n.textContent));
+      const bl = await api("/api/baselines");
+      const snaps = bl.snapshots || [];
+      const hhmm = snaps.length ? (/^\d{4}-\d{2}-\d{2}[ T](\d{2}:\d{2})/.exec(snaps[0].time) || [])[1] || "" : "";
+      return { text: box ? box.textContent : "", n: snaps.length, hhmm, staleness: bl.staleness || "" };
+    });
+  } catch (_) { /* reported below */ }
+  const wantCount = copyStation && (copyStation.n + " snapshot" + (copyStation.n === 1 ? "" : "s"));
+  (copyStation && copyStation.n >= 1 && !/no snapshot yet|could not be read/.test(copyStation.text)
+    && copyStation.text.includes(wantCount) && copyStation.hhmm && copyStation.text.includes("newest " + copyStation.hhmm))
+    ? ok("status: the Your copy station shows the server's snapshots, as /api/baselines lists them")
+    : bad("status: the Your copy station shows the server's snapshots, as /api/baselines lists them", JSON.stringify(copyStation));
+
   // Scenario 18 — SQL on the copy from the Overview (#1952), against the
   // REAL route: the daemon re-executes itself as the sandboxed worker for
   // every statement below, over the baseline snapshot run.sh built. What

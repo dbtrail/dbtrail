@@ -5479,9 +5479,15 @@ function flowSpan(from, to) {
 // is running) sit on two different pieces, the DBTrail station and the
 // capture arrow, so neither can be read as the other. The permanent-loss
 // alarm stays a red box below: an alarm with a stamp is not a state.
-function statusFlowModel(data, capacity, caps) {
+// `copy` is the /api/baselines answer, or { unavailable: true } when that
+// read failed: the snapshot list the Overview and the Snapshots page read.
+// /api/status carries no snapshot fields in the console (only the CLI's
+// status --baseline-dir fills baselines/baseline_staleness), so reading them
+// there drew "no snapshot yet" on every server, snapshots or not (#1950).
+function statusFlowModel(data, capacity, caps, copy) {
   data = data || {};
   caps = caps || {};
+  copy = copy || { unavailable: true };
   const pg = caps.source === "postgresql";
   const stream = data.stream || null;
   const cov = data.coverage || {};
@@ -5533,17 +5539,25 @@ function statusFlowModel(data, capacity, caps) {
   pieces.push(piece("history", "none", span ? "of history" + (ret.retain ? ", kept " + ret.retain : "") : (cov.earliest_event ? "" : "nothing indexed yet"),
     bounds, { big: span, mono: true }));
 
-  // 4. the copy: snapshots and archives
-  const bls = data.baselines || [];
-  const st = data.baseline_staleness || "";
+  // 4. the copy: snapshots (from /api/baselines, see above) and archives.
+  // A failed read says so; it is never "no snapshot yet". The grade is the
+  // listing's own headline, the one the Snapshots page shows.
+  const snaps = copy.snapshots || [];
+  const st = copy.staleness || "";
   const archLine = arch ? n(arch.total_files) + " archive file" + (arch.total_files === 1 ? "" : "s") + (arch.total_size_human ? " · " + arch.total_size_human : "")
     : (data.archives_error ? "archives could not be read" : "no archives yet");
-  if (bls.length) {
-    const tone = st === "ok" ? "ok" : st === "broken" ? "bad" : (st === "aging" || st === "unknown" || data.baselines_unavailable) ? "warn" : "none";
+  if (copy.unavailable) {
+    pieces.push(piece("Your copy", "warn", "snapshots could not be read", archLine));
+  } else if (snaps.length) {
+    // A listing that could not read every location is a subset: at least a warning.
+    const tone = st === "broken" ? "bad" : (st === "aging" || st === "unknown" || copy.incomplete) ? "warn" : st === "ok" ? "ok" : "none";
     const word = st === "ok" ? "up to date" : st === "aging" ? "aging" : st === "broken" ? "behind" : st === "unknown" ? "staleness not evaluable" : "";
-    pieces.push(piece("Your copy", tone, bls.length + " snapshot" + (bls.length === 1 ? "" : "s") + (word ? ", " + word : ""), archLine));
+    const count = snaps.length + (copy.truncated ? "+" : "") + " snapshot" + (snaps.length === 1 && !copy.truncated ? "" : "s");
+    const newest = flowHHMM(snaps[0].time);
+    pieces.push(piece("Your copy", tone, count + (word ? ", " + word : ""),
+      (newest ? "newest " + newest + " · " : "") + archLine));
   } else {
-    pieces.push(piece("Your copy", data.baselines_unavailable ? "warn" : "off", data.baselines_unavailable ? "snapshots could not be read" : "no snapshot yet", archLine));
+    pieces.push(piece("Your copy", "off", "no snapshot yet", archLine));
   }
 
   // 5. SQL: how the copy is read
@@ -5566,7 +5580,7 @@ function statusFlow(model) {
 async function renderStatus() {
   const gen = serverGen, vgen = viewGen;
   viewLoading();
-  let data, capacity, telemetry;
+  let data, capacity, telemetry, copy;
   // The index-disk read degrades independently (as the Storage panels do): a
   // failed /api/capacity renders its own note inside the card, never blanking
   // the health page it sits on. Telemetry (#1867, from the dissolved This
@@ -5575,8 +5589,11 @@ async function renderStatus() {
   // was never meant to see.
   const asErr = (err) => ({ error: (err && err.message) || String(err) });
   try {
-    [data, capacity, telemetry] = await Promise.all([api("/api/status"), api("/api/capacity").catch(asErr),
-      sessionMay("settings:read") ? api("/api/telemetry").catch(asErr) : Promise.resolve(null)]);
+    // The snapshot list, as the Overview reads it: bounded, because a slow
+    // S3 listing must not hold the whole page, and a failure is drawn as one.
+    [data, capacity, telemetry, copy] = await Promise.all([api("/api/status"), api("/api/capacity").catch(asErr),
+      sessionMay("settings:read") ? api("/api/telemetry").catch(asErr) : Promise.resolve(null),
+      apiWithin("/api/baselines", OV_REQUEST_MS).then((d) => d || {}, () => ({ unavailable: true }))]);
   }
   catch (err) { if (gen !== serverGen || vgen !== viewGen) return; const v = VIEW(); clear(v); v.append(pageHead("Status", null)); renderError(v, err); return; }
   if (gen !== serverGen || vgen !== viewGen) return;
@@ -5590,7 +5607,7 @@ async function renderStatus() {
     el("span", { class: "page-asof" }, tzChip(), el("span", { class: "cov-asof", text: "as of " + nowClock().replace(" UTC", "") })),
     el("button", { class: "btn btn-primary btn-sm", type: "button", text: "Refresh", onclick: () => renderStatus() }),
   ]));
-  v.append(statusFlow(statusFlowModel(data, capacity, capsCache)));
+  v.append(statusFlow(statusFlowModel(data, capacity, capsCache, copy)));
 
   const cards = el("div", { class: "cards" });
   const cov = data.coverage || {};
