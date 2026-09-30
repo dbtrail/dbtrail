@@ -88,8 +88,8 @@ The boundary triage cites:
 
 ## Source server configuration (required for correct capture)
 
-DBTrail captures changes from your **source** database — **MySQL**, **MariaDB**
-(beta), or **PostgreSQL**; see [Supported source families](#supported-source-families)
+DBTrail captures changes from your **source** database — **MySQL**, **MariaDB**,
+or **PostgreSQL** (beta); see [Supported source families](#supported-source-families)
 below. The requirements here cover a **MySQL** (and MariaDB) source's ROW-format
 binary logs; PostgreSQL's capture requirements (logical replication, `wal_level`,
 `REPLICA IDENTITY`) live in [docs/postgres.md](./postgres.md). Faithful capture
@@ -123,7 +123,7 @@ at a non-MySQL server is **not** supported.
 |---|---|---|---|
 | **MySQL** 8.0+ (incl. Percona, RDS, Aurora, Cloud SQL) | Supported | ROW-format binlog over the replication protocol | [streaming.md](./streaming.md) |
 | **MariaDB** 10.11+ (10.11, 11.4, 11.8 and 12.3 tested) | Supported | ROW-format binlog (MariaDB GTID) | [mariadb.md](./mariadb.md) |
-| **PostgreSQL** | Supported — via the separate `bintrail-pg` binary | Logical replication (`pgoutput`) | [postgres.md](./postgres.md) |
+| **PostgreSQL** 14+ | Beta — via the separate `bintrail-pg` binary | Logical replication (`pgoutput`) | [postgres.md](./postgres.md) |
 
 **We install nothing in your source database.** DBTrail connects as an ordinary
 read-only replication client. For PostgreSQL specifically, capture uses the

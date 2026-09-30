@@ -2,7 +2,7 @@
 
 bintrail can capture from a **PostgreSQL** server while the index database stays
 MySQL. PostgreSQL capture lives in its own binary, **`bintrail-pg`**. This is a
-**GA** capability: capture is type-faithful,
+**beta** capability: capture is type-faithful,
 `REPLICA IDENTITY FULL`-enforced, replication-slot/WAL-retention-monitored, and
 DDL-drift-safe, all verified end-to-end against real PostgreSQL (14–17 in CI)
 and smoke-validated on managed PostgreSQL (RDS / Aurora). It still has
@@ -769,7 +769,7 @@ coerce, but verify your own round-trip.
 - **No BYOS agent.** The web interface captures PostgreSQL sources (**+ Add
   server** → PostgreSQL); `bintrail agent` (BYOS) does not support PostgreSQL.
 
-The gates that took PostgreSQL from beta to **GA** are closed
+The data-safety gates for PostgreSQL are closed
 ([#597](https://github.com/dbtrail/dbtrail/issues/597)): the data-safety set
 (type fidelity, identity/generated recovery, slot/WAL monitoring, RI-FULL
 validation, DDL-drift handling, the silent-loss coverage guards above),

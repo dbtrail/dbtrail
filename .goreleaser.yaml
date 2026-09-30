@@ -239,7 +239,7 @@ nfpms:
     description: >-
       Capture a live PostgreSQL logical-replication stream into the bintrail
       MySQL index with full before/after images, and generate reversal SQL for
-      recovery (PostgreSQL-source support is alpha).
+      recovery (PostgreSQL-source support is beta).
     license: Apache-2.0
     formats:
       - deb
