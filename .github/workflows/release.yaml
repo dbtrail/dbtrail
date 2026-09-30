@@ -131,6 +131,10 @@ jobs:
             || { echo "FATAL: MySQL end-to-end integration test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestCachingSha2ColdAuthSeam' /tmp/mysql-it.out \
             || { echo "FATAL: caching_sha2 cold-auth seam test did not run — false-green tripwire" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationGTIDReconnectAfterCommitIndexesOnce ' /tmp/mysql-it.out \
+            || { echo "FATAL: GTID reconnect exactly-once test did not run (false-green tripwire)" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationGTIDCrashBeforeFirstFileCheckpointIndexesOnce ' /tmp/mysql-it.out \
+            || { echo "FATAL: GTID first-checkpoint crash test did not run (false-green tripwire)" >&2; exit 1; }
 
       # Same S3 tripwire as ci.yml, from the same shared action.
       - name: S3-compatible leg
@@ -261,6 +265,9 @@ jobs:
             TestOne_MariaDB_resumeOldMySQLDefaultCheckpoint \
             TestOne_MariaDB_freshCaptureStartsInGTIDMode \
             TestOne_MariaDB_explicitStartPosStaysPositionThenResetMovesToGTID \
+            TestOne_MariaDB_reconnectAfterCommitIndexesOnce \
+            TestOne_MariaDB_crashBeforeFirstFileCheckpointIndexesOnce \
+            TestBYOSStream_MariaDBReconnectAfterCommitOnce \
             TestIntegrationMonitorRegistrySourceMariaDBDetected \
             TestBuild_MariaDBVersionRow \
             TestRecoverRoundTrip_MariaDBTypes \
