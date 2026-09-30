@@ -311,7 +311,7 @@ func TestStreamParser_anonymousGTIDEventEmitsNoTrackingEvent(t *testing.T) {
 	}
 }
 
-// ─── MariaDB GTIDEvent (beta) ───────────────────────────────────────────────
+// ─── MariaDB GTIDEvent ──────────────────────────────────────────────────────
 
 // TestStreamParser_mariadbGTIDEventEmitsTrackingEvent verifies that a MariaDB
 // GTID event (MariadbGTIDEvent, domain-server-seq) emits an EventGTID tracking
