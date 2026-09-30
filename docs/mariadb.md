@@ -197,14 +197,15 @@ page and the
   `::ffff:1.2.3.4`), `VECTOR` as its bytes. `query` and `recover` show such a
   key as its bytes in hex (`0x123E4567E89B12D3A456426614174000`).
 - **Typing a `UUID` or `INET` key.** `query --pk`, `recover --pk`,
-  `reconstruct --pk`, and the console and MCP searches accept the key in any
+  `recover-cascade --pk`, `reconstruct --pk`, and the console and MCP searches
+  accept the key in any
   form MariaDB accepts (`123e4567-e89b-12d3-a456-426614174000`, upper case,
   no dashes) and as the hex bytes `query` prints (`0x123E…`). To spell it the
   way the index stores it, they read the key's column type from the index's
-  schema snapshot. If no snapshot describes the table, a key that looks like
-  a `UUID` or an IP address is refused with an error instead of answering
-  "no history"; take a snapshot (`bintrail snapshot`) or select the rows by
-  table and time window.
+  schema snapshot. If no snapshot describes the table and no event is stored
+  under the key as typed, a key that looks like a `UUID` or an IP address is
+  refused with an error instead of answering "no history"; take a snapshot
+  (`bintrail snapshot`) or select the rows by table and time window.
 - **The Parquet copy, end to end**: snapshot with mydumper (`bintrail dump`
   and `bintrail baseline`), `bintrail baseline refresh`, `reconstruct` for one
   row and for whole tables, and `drill` into a scratch MariaDB, checked in CI

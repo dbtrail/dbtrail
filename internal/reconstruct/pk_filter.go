@@ -79,8 +79,7 @@ func ResolvePKMetasAt(db *sql.DB, schema, table string, at time.Time) []metadata
 // MariaDB UUID/INET4/INET6 components are parsed from their text form (any
 // spelling metadata.ParseMariaDBFixedKey accepts, the bytes in hex included)
 // and spelled as the captured full-width bytes. Otherwise only fixed-width
-// BINARY(n) components are
-// touched, and this is the INVERSE
+// BINARY(n) components are touched, and this is the INVERSE
 // of padFixedBinaryFilter — the two run in opposite directions on purpose,
 // because they target different stores. Reproducing event.formatPKValue
 // exactly: trailing 0x00 padding is stripped (the ROW image never carries it),
@@ -212,9 +211,10 @@ func filterKeyFor(filter map[string]string, col string) (string, bool) {
 // component of a baseline PK filter as the text MariaDB prints, which is what
 // the baseline column holds (mydumper dumps the text form). The server accepts
 // other spellings (upper case, a UUID without dashes, a long-form IPv6), and a
-// key copied from query output is the bytes in hex, so an exact comparison against the typed value would miss a row that exists. A
-// value that is not one of these types' text is refused: guessing a spelling
-// could resolve a different row. With no metas the filter passes through.
+// key copied from query output is the bytes in hex, so an exact comparison
+// against the typed value would miss a row that exists. A value that is not
+// one of these types' text is refused: guessing a spelling could resolve a
+// different row. With no metas the filter passes through.
 func mariaDBFixedBaselineFilter(pkFilter map[string]string, pkMetas []metadata.ColumnMeta) (map[string]string, error) {
 	var out map[string]string
 	for _, c := range pkMetas {

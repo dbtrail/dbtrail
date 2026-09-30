@@ -79,15 +79,28 @@ func SpellIndexPKFilter(ctx context.Context, db *sql.DB, opts *query.Options) (m
 	if sample == "" {
 		return nil, nil
 	}
-	metas, err := latestPKMetas(ctx, db, opts.Schema, opts.Table)
+	metas, described, err := latestPKMetas(ctx, db, opts.Schema, opts.Table)
 	if err != nil {
-		return nil, fmt.Errorf("%w: could not read the schema snapshot for %s.%s to tell whether its primary key is a MariaDB UUID/INET column, "+
-			"which the index stores as bytes; looked up as typed, the key %q could match nothing and read as a row with no history: %v",
-			ErrPKTypeUnknown, opts.Schema, opts.Table, sample, err)
+		// A database fault, not an unknown type: no sentinel, so a surface
+		// reports it as the server error it is.
+		return nil, fmt.Errorf("could not read the schema snapshot for %s.%s to tell whether its primary key is a MariaDB UUID/INET column, "+
+			"which the index stores as bytes: %w", opts.Schema, opts.Table, err)
 	}
-	if len(metas) == 0 {
-		return nil, fmt.Errorf("%w: no schema snapshot describes the primary key of %s.%s, so there is no way to tell whether the key %q is a MariaDB UUID/INET value, "+
-			"which the index stores as bytes; looked up as typed it could match nothing and read as a row with no history, so the lookup is refused. "+
+	if !described {
+		// No snapshot says what the key is. A key already in its stored
+		// spelling (a MySQL CHAR(36) UUID, an IP-address VARCHAR, a hex
+		// BINARY(16) copied from query output) still matches as typed, so
+		// refuse only when the live index holds no event under what was
+		// typed: that is the answer that would read as "no history".
+		hit, err := typedKeyIndexed(ctx, db, opts.Schema, opts.Table, typed)
+		if err != nil {
+			return nil, fmt.Errorf("could not check the index for the key %q of %s.%s: %w", sample, opts.Schema, opts.Table, err)
+		}
+		if hit {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: no schema snapshot describes %s.%s, so there is no way to tell whether the key %q is a MariaDB UUID/INET value, "+
+			"which the index stores as bytes, and no event is indexed under the key as typed; the answer would read as a row with no history, so the lookup is refused. "+
 			"Take a schema snapshot (`bintrail snapshot`), or select the rows by table and time window instead",
 			ErrPKTypeUnknown, opts.Schema, opts.Table, sample)
 	}
@@ -154,31 +167,53 @@ func looksLikeMariaDBFixedKey(v string) bool {
 // latestPKMetas loads the primary-key columns of schema.table from the newest
 // schema snapshot that describes the table. Not simply the newest snapshot: a
 // table dropped since is absent from it, and its history is still in the
-// index. It returns nil, nil when no snapshot describes the table. The names
+// index. described is false when no snapshot describes the table; a described
+// table with no primary key returns no metas and described true. The names
 // are matched the way the index matches them (the column collation), then
 // resolved under the spelling the snapshot stored.
-func latestPKMetas(ctx context.Context, db *sql.DB, schema, table string) ([]metadata.ColumnMeta, error) {
+func latestPKMetas(ctx context.Context, db *sql.DB, schema, table string) (metas []metadata.ColumnMeta, described bool, err error) {
 	var (
 		id          int
 		sName, tNam string
 	)
-	err := db.QueryRowContext(ctx,
+	err = db.QueryRowContext(ctx,
 		"SELECT snapshot_id, schema_name, table_name FROM schema_snapshots "+
 			"WHERE schema_name = ? AND table_name = ? ORDER BY snapshot_id DESC LIMIT 1",
 		schema, table).Scan(&id, &sName, &tNam)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	res, err := metadata.NewResolver(db, id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	tm, err := res.Resolve(sName, tNam)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return tm.PKColumnMetas(), nil
+	return tm.PKColumnMetas(), true, nil
+}
+
+// typedKeyIndexed reports whether the live index holds an event of
+// schema.table under any of the typed keys, spelled exactly as typed (the
+// pk_hash + pk_values pair every key lookup uses).
+func typedKeyIndexed(ctx context.Context, db *sql.DB, schema, table string, keys []string) (bool, error) {
+	for _, k := range keys {
+		var one int
+		err := db.QueryRowContext(ctx,
+			"SELECT 1 FROM binlog_events WHERE schema_name = ? AND table_name = ? "+
+				"AND pk_hash = SHA2(?, 256) AND pk_values = ? LIMIT 1",
+			schema, table, k, k).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
 }

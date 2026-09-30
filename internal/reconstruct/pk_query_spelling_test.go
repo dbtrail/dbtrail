@@ -134,35 +134,87 @@ func TestSpellIndexPKFilter_plainKeysReadNothing(t *testing.T) {
 	}
 }
 
-// A key that looks like a UUID/INET value and a snapshot that cannot say what
-// the column is: refused, never looked up as typed (that answered "no history").
+// A key that looks like a UUID/INET value, no snapshot to type it, and no
+// event indexed under it as typed: refused, never answered "no history".
 func TestSpellIndexPKFilter_unknownTypeRefuses(t *testing.T) {
-	cases := map[string]func(sqlmock.Sqlmock){
-		"no snapshot describes the table": func(m sqlmock.Sqlmock) {
-			m.ExpectQuery("SELECT snapshot_id").WillReturnRows(sqlmock.NewRows([]string{"snapshot_id", "schema_name", "table_name"}))
-		},
-		"the snapshot cannot be read": func(m sqlmock.Sqlmock) {
-			m.ExpectQuery("SELECT snapshot_id").WillReturnError(errors.New("Error 1146: Table 'idx.schema_snapshots' doesn't exist"))
-		},
-	}
-	for name, setup := range cases {
-		for _, key := range []string{uuidText, uuidStored, "192.168.1.10", "::ffff:1.2.3.4"} {
-			db, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			setup(mock)
-			o := query.Options{Schema: "shop", Table: "sessions", PKValues: key}
-			_, err = SpellIndexPKFilter(context.Background(), db, &o)
-			db.Close()
-			if !errors.Is(err, ErrPKTypeUnknown) {
-				t.Errorf("%s, key %q: err = %v, want ErrPKTypeUnknown", name, key, err)
-				continue
-			}
-			if strings.Contains(err.Error(), "--") {
-				t.Errorf("%s: the refusal names a CLI flag, which an MCP client cannot use: %v", name, err)
-			}
-			t.Logf("%s: %v", name, err)
+	for _, key := range []string{uuidText, uuidStored, "192.168.1.10", "::ffff:1.2.3.4"} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
 		}
+		mock.ExpectQuery("SELECT snapshot_id").WillReturnRows(sqlmock.NewRows([]string{"snapshot_id", "schema_name", "table_name"}))
+		mock.ExpectQuery("SELECT 1 FROM binlog_events").WithArgs("shop", "sessions", key, key).
+			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		o := query.Options{Schema: "shop", Table: "sessions", PKValues: key}
+		_, err = SpellIndexPKFilter(context.Background(), db, &o)
+		db.Close()
+		if !errors.Is(err, ErrPKTypeUnknown) {
+			t.Errorf("key %q: err = %v, want ErrPKTypeUnknown", key, err)
+			continue
+		}
+		if strings.Contains(err.Error(), "--") {
+			t.Errorf("the refusal names a CLI flag, which an MCP client cannot use: %v", err)
+		}
+		t.Logf("%v", err)
+	}
+}
+
+// No snapshot, but the live index holds an event under the key exactly as
+// typed: a MySQL CHAR(36) UUID, a VARCHAR IP, or a hex BINARY(16) copied from
+// query output. That lookup worked before and must keep working.
+func TestSpellIndexPKFilter_noSnapshotButTypedKeyIndexedPasses(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT snapshot_id").WillReturnRows(sqlmock.NewRows([]string{"snapshot_id", "schema_name", "table_name"}))
+	mock.ExpectQuery("SELECT 1 FROM binlog_events").WithArgs("shop", "t", "a", "a").WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	mock.ExpectQuery("SELECT 1 FROM binlog_events").WithArgs("shop", "t", uuidText, uuidText).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	o := query.Options{Schema: "shop", Table: "t", PKValuesIn: []string{"a", uuidText}}
+	if _, err := SpellIndexPKFilter(context.Background(), db, &o); err != nil {
+		t.Fatalf("refused a key the index holds as typed: %v", err)
+	}
+	if !slices.Equal(o.PKValuesIn, []string{"a", uuidText}) {
+		t.Errorf("PKValuesIn changed to %q", o.PKValuesIn)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// A database fault is reported as one, not as an unknown key type (which the
+// console turns into a client error).
+func TestSpellIndexPKFilter_readErrorIsNotTheSentinel(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT snapshot_id").WillReturnError(errors.New("Error 2013: Lost connection"))
+	o := query.Options{Schema: "shop", Table: "sessions", PKValues: uuidText}
+	_, err = SpellIndexPKFilter(context.Background(), db, &o)
+	if err == nil || errors.Is(err, ErrPKTypeUnknown) {
+		t.Errorf("err = %v, want a plain error", err)
+	}
+}
+
+// A snapshot that describes the table but gives it no primary key: nothing
+// to spell, and no refusal.
+func TestSpellIndexPKFilter_describedWithoutKeyPasses(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT snapshot_id, schema_name, table_name FROM schema_snapshots").
+		WillReturnRows(sqlmock.NewRows([]string{"snapshot_id", "schema_name", "table_name"}).AddRow(3, "shop", "logs"))
+	mock.ExpectQuery("FROM schema_snapshots").WithArgs(3).
+		WillReturnRows(sqlmock.NewRows(snapshotRowCols).
+			AddRow("shop", "logs", "ip", 1, "", "varchar", "varchar(64)", 0, 0, "utf8mb4", "YES"))
+	o := query.Options{Schema: "shop", Table: "logs", PKValues: "10.0.0.1"}
+	if _, err := SpellIndexPKFilter(context.Background(), db, &o); err != nil || o.PKValues != "10.0.0.1" {
+		t.Errorf("err %v, PKValues %q", err, o.PKValues)
 	}
 }

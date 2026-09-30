@@ -1238,13 +1238,6 @@ func atoiDefault(s string, def int) int {
 	return n
 }
 
-// writeFetchError maps a cross-source fetch failure onto the right HTTP
-// response. The interesting case: a registry index that predates one of the
-// post-initial-schema binlog_events columns (connection_id, or #699's
-// query_text/query_hash) fails the events SELECT with MySQL error 1054. The
-// console deliberately never migrates registry servers (EnsureSchema — an
-// ALTER — is confined to the command-line DSN), so instead of a cryptic 500 we
-// return an actionable 422 telling the operator how to migrate.
 // spellPKFilter spells a MariaDB UUID/INET key the way the index stores it
 // (its bytes), so a key typed as text finds its rows instead of an empty
 // result (reconstruct.SpellIndexPKFilter). A key whose column type the
@@ -1263,6 +1256,13 @@ func spellPKFilter(w http.ResponseWriter, r *http.Request, db *sql.DB, opts *que
 	return true
 }
 
+// writeFetchError maps a cross-source fetch failure onto the right HTTP
+// response. The interesting case: a registry index that predates one of the
+// post-initial-schema binlog_events columns (connection_id, or #699's
+// query_text/query_hash) fails the events SELECT with MySQL error 1054. The
+// console deliberately never migrates registry servers (EnsureSchema — an
+// ALTER — is confined to the command-line DSN), so instead of a cryptic 500 we
+// return an actionable 422 telling the operator how to migrate.
 func writeFetchError(w http.ResponseWriter, err error) {
 	// A policy refusal, not a fault: the changed-column filter is withheld
 	// under column-level redaction (#1449; the engine's sentinel carries the

@@ -129,3 +129,26 @@ func TestRecover_MariaDBUUIDKeyTextSpelling(t *testing.T) {
 		t.Errorf("the script does not re-insert the deleted row:\n%s", script)
 	}
 }
+
+// `recover-cascade --pk` fetches its parent events by the same key: typed as
+// text, it found no parent and generated nothing.
+func TestRecoverCascade_MariaDBUUIDKeyTextSpelling(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	dbName, dsn := seedMariaDBUUIDKey(t)
+	out := t.TempDir() + "/cascade.sql"
+	rcIndexDSN, rcSchema, rcTable = dsn, dbName, "sessions"
+	rcPK, rcPKs, rcSince, rcUntil = mariaUUIDText, nil, "", ""
+	rcOutput, rcDryRun, rcFormat = out, false, "text"
+	rcLookback, rcMaxDepth, rcLimit, rcAllowIncomplete = "30d", 5, 1000, false
+	t.Cleanup(resetCascadeFlags)
+	if err := runCascadeCmd(t); err != nil {
+		t.Fatalf("runRecoverCascade: %v", err)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if script := string(b); !strings.Contains(script, "`"+dbName+"`.`sessions`") {
+		t.Errorf("the parent keyed by the text UUID was not re-inserted:\n%s", script)
+	}
+}

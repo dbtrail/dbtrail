@@ -22,8 +22,17 @@ func FTWRLDeniedHint(mode baseline.LockMode, output string, remedy Remedy) strin
 	if mode != baseline.LockModeFTWRL {
 		return ""
 	}
-	low := strings.ToLower(output)
-	if !strings.Contains(low, "global lock") || !strings.Contains(low, "access denied") {
+	// Both phrases on ONE line: the console hands over combined output, and an
+	// unrelated "Access denied" (a missing SHOW VIEW, say) next to some other
+	// line about the lock must not be blamed on RDS.
+	found := false
+	for _, line := range strings.Split(strings.ToLower(output), "\n") {
+		if strings.Contains(line, "global lock") && strings.Contains(line, "access denied") {
+			found = true
+			break
+		}
+	}
+	if !found {
 		return ""
 	}
 	how := "pass --lock-mode lock-all"
@@ -32,5 +41,5 @@ func FTWRLDeniedHint(mode baseline.LockMode, output string, remedy Remedy) strin
 	}
 	return "mydumper could not take the global read lock (FLUSH TABLES WITH READ LOCK) that lock mode ftwrl, the default, uses. " +
 		"On RDS and Aurora no user may take it, not even the master user with RELOAD, so there the lock mode must be lock-all: " +
-		how + ". It needs only LOCK TABLES"
+		how + ". It needs only LOCK TABLES. On a server you run yourself, GRANT RELOAD to this user instead"
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 )
 
@@ -289,17 +290,25 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 		// query.Options.EventType holds a single type, and an all-types fetch
 		// would let INSERTs (which never cascade) eat the limit budget the
 		// DELETE/UPDATE roots need.
+		// A MariaDB UUID/INET parent key typed as text is stored as its bytes:
+		// spell it that way, as the recover tool does, or no parent is found.
+		keyOpts := query.Options{Schema: args.Schema, Table: args.Table, PKValues: args.PK, PKValuesIn: args.PKs,
+			DenyTables: t.DenyTables}
+		if _, err := reconstruct.SpellIndexPKFilter(ctx, t.DB, &keyOpts); err != nil {
+			return ErrorResult(err), nil, nil
+		}
 		fetchRoots := func(et *event.EventType) ([]query.ResultRow, error) {
 			return fetcher.Fetch(ctx, query.Options{
-				Schema:     args.Schema,
-				Table:      args.Table,
-				PKValues:   args.PK,
-				PKValuesIn: args.PKs,
-				EventType:  et,
-				Since:      since,
-				Until:      until,
-				Order:      "ASC",
-				Limit:      limit,
+				Schema:      args.Schema,
+				Table:       args.Table,
+				PKValues:    keyOpts.PKValues,
+				PKValuesAlt: keyOpts.PKValuesAlt,
+				PKValuesIn:  keyOpts.PKValuesIn,
+				EventType:   et,
+				Since:       since,
+				Until:       until,
+				Order:       "ASC",
+				Limit:       limit,
 			})
 		}
 		parentDeletes, err := fetchRoots(&del)

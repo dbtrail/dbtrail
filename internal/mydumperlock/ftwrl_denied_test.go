@@ -19,7 +19,7 @@ func TestFTWRLDeniedHint(t *testing.T) {
 		remedy Remedy
 		want   []string
 	}{
-		{RemedyCLI, []string{"RDS", "Aurora", "--lock-mode lock-all"}},
+		{RemedyCLI, []string{"RDS", "Aurora", "--lock-mode lock-all", "GRANT RELOAD"}},
 		{RemedyConsole, []string{"RDS", "Aurora", "Lock while dumping", "lock-all", "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all"}},
 	} {
 		got := FTWRLDeniedHint(baseline.LockModeFTWRL, rdsGlobalLockDenied, c.remedy)
@@ -50,6 +50,8 @@ func TestFTWRLDeniedHint_quietOtherwise(t *testing.T) {
 		{baseline.LockModeFTWRL, "Error connecting to database: Access denied for user 'u'@'10.0.0.9' (using password: YES)"},
 		{baseline.LockModeFTWRL, "Couldn't acquire global lock, snapshots will not be consistent: Lock wait timeout exceeded"},
 		{baseline.LockModeFTWRL, ""},
+		// The two phrases on different lines: another failure beside a lock line.
+		{baseline.LockModeFTWRL, "Couldn't acquire global lock, retrying\nError: Access denied; you need the SHOW VIEW privilege"},
 		{baseline.LockModeLockAll, rdsGlobalLockDenied},
 		{baseline.LockModeSafeNoLock, rdsGlobalLockDenied},
 		{baseline.LockModeNoLock, rdsGlobalLockDenied},

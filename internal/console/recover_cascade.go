@@ -163,11 +163,19 @@ func (s *Server) handleRecoverCascade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A MariaDB UUID/INET parent key typed as text is stored as its bytes:
+	// spell it that way, as /api/recover does, or no parent is found.
+	keyOpts := query.Options{Schema: body.Schema, Table: body.Table, PKValues: body.PK, PKValuesIn: body.PKs,
+		DenyTables: s.denyTables}
+	if !spellPKFilter(w, r, b.db, &keyOpts) {
+		return
+	}
 	synth, err := s.synthesizeCascade(r.Context(), b, cascadeSynthParams{
 		Schema:   body.Schema,
 		Table:    body.Table,
-		PK:       body.PK,
-		PKs:      body.PKs,
+		PK:       keyOpts.PKValues,
+		PKAlt:    keyOpts.PKValuesAlt,
+		PKs:      keyOpts.PKValuesIn,
 		Since:    since,
 		Until:    until,
 		Lookback: lookback,
@@ -270,6 +278,7 @@ func (s *Server) handleRecoverCascade(w http.ResponseWriter, r *http.Request) {
 type cascadeSynthParams struct {
 	Schema, Table string
 	PK            string
+	PKAlt         string // the typed key when PK was re-spelled (reconstruct.SpellIndexPKFilter)
 	PKs           []string
 	GTID          string
 	ChangedColumn string
@@ -348,6 +357,7 @@ func (s *Server) synthesizeCascade(ctx context.Context, b *bundle, p cascadeSynt
 				Schema:        p.Schema,
 				Table:         p.Table,
 				PKValues:      p.PK,
+				PKValuesAlt:   p.PKAlt,
 				PKValuesIn:    p.PKs,
 				EventType:     et,
 				GTID:          p.GTID,
