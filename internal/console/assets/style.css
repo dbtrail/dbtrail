@@ -958,7 +958,6 @@ button { font-family: inherit; }
   font-weight: 500; font-variant-numeric: tabular-nums; text-align: right;
 }
 .kv-v.big { font-size: 22px; font-weight: 600; }
-.kv-v.muted { color: var(--ink-3); }
 /* words, not a figure: the UI face (#1950) */
 .kv-v.words { font-family: var(--f-ui); font-weight: 400; color: var(--ink-2); }
 
@@ -1011,7 +1010,6 @@ button { font-family: inherit; }
   content: ""; position: absolute; inset: 0 0 auto; height: 3px;
   background: linear-gradient(90deg, var(--brand-canvas-1) 0%, var(--brand-canvas-2) 52%, var(--brand-canvas-3) 100%);
 }
-.empty-ic { color: var(--ink-4); }
 .empty h3 { color: var(--ink-2); }
 .empty p { margin: 0; max-width: 42ch; font-size: var(--fs-sm); }
 
@@ -1211,7 +1209,6 @@ button { font-family: inherit; }
 .form-adv-summary[hidden] { display: none; }
 .form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .form-grid .field { width: auto; }
-.form-grid.two { grid-template-columns: repeat(2, 1fr); }
 .check { display: flex; align-items: center; gap: 10px; font-size: var(--fs-sm); color: var(--ink); cursor: pointer; }
 /* one checkbox and one radio, drawn (no native look): ink when checked */
 input[type="checkbox"], input[type="radio"] {
@@ -2245,7 +2242,6 @@ section.bk-restore { margin-top: 18px; }
 }
 .stg-dest.muted { color: var(--ink-3); }
 .stg-age { color: var(--ink-3); font-size: var(--fs-xs); white-space: nowrap; }
-.stg-foot { padding: 0 14px 12px; margin: 6px 0 0; }
 .stg-hint { margin-bottom: 0; }
 .stg-cardfoot { margin-top: 12px; }
 
@@ -3176,6 +3172,9 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .ks-pair { display: inline-flex; align-items: flex-end; gap: 2px; flex: none; }
 .ks-pair i { width: 8px; height: 22px; border-radius: 2px; background: var(--inset); border: 1.5px solid var(--ink-3); }
 .ks-tile.ks-next, .ks-next i { background: transparent; border-style: dashed; }
+/* rotation drawn (#1950): the S3 tile a dropped hour goes to */
+.ks-tile.ks-s3 { height: 30px; }
+.rot-shape { margin: 4px 0 16px; }
 /* the four verdicts a finished check hands out, drawn (#1950) */
 .vfy-verdicts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 10px 0 12px; }
 .vfy-vt { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 10px; align-items: center; padding: 8px 12px; border-radius: var(--r-md); background: var(--raised); }

@@ -5942,6 +5942,8 @@ try {
       table: rows[0] ? rows[0].textContent.includes(FIX + ".orders") : false,
       navActive: !!nav && nav.classList.contains("active"),
       headCol: head ? head.textContent : "",
+      // #1950: the zone is stated once, in the page header
+      tzChip: !!document.querySelector(".view .page-head .tz-chip"),
       tsTitle: t ? (t.getAttribute("title") || "") : "",
       count: (document.querySelector("#sc-count") || {}).textContent,
     };
@@ -5952,7 +5954,7 @@ try {
     : bad("schema changes: same-second DDLs list in binlog order (ALTER above CREATE)", JSON.stringify(scr));
   scr.table ? ok("schema changes: rows name schema.table") : bad("schema changes: rows name schema.table", JSON.stringify(scr));
   scr.navActive ? ok("schema changes: the sidebar entry is active on its route") : bad("schema changes: the sidebar entry is active on its route", "no active .nav-item[data-route=schema-changes]");
-  scr.headCol === "time (UTC)" ? ok("schema changes: the time column declares UTC") : bad("schema changes: the time column declares UTC", JSON.stringify(scr.headCol));
+  (scr.headCol === "time" && scr.tzChip) ? ok("schema changes: the page header declares UTC once, the time column does not repeat it") : bad("schema changes: the page header declares UTC once, the time column does not repeat it", JSON.stringify({ headCol: scr.headCol, tzChip: scr.tzChip }));
   scr.tsTitle.startsWith("UTC; in your local time:") ? ok("schema changes: rows carry the local-time tooltip") : bad("schema changes: rows carry the local-time tooltip", JSON.stringify(scr.tsTitle));
   scr.count === "2" ? ok("schema changes: the count line says 2") : bad("schema changes: the count line says 2", JSON.stringify(scr.count));
   await page.selectOption('#sc-form select[name="ddl_type"]', "CREATE");
