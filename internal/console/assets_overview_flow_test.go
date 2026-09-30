@@ -36,7 +36,9 @@ for (const [name, c] of Object.entries(cases)) {
     cut: m.cut ? m.cut.piece + "@" + m.cut.at : "",
     screen: text(sec),
     okClasses: find(sec, "ok").length,
-    buttons: find(sec, "btn").map(text),
+    // the cards' buttons only: the action row under the drawing holds ghost
+    // buttons of its own (read through "actions"), never a fix
+    buttons: find(sec, "flow-card").flatMap((k) => find(k, "btn")).map(text),
     fixLinks: find(sec, "flow-fix").map(text),
     cta: m.cta || "", actions: find(sec, "flow-actions").map(text), ctaButtons: find(sec, "flow-cta").map(text),
     cardOnScreen: find(sec, "flow-card").length,
@@ -438,11 +440,11 @@ const origPaint = paint;`, 1)
 	// #1860: the action row under the drawing. One filled button where a copy
 	// exists to query; a link to set the copy up where none does; nothing to
 	// query where the listing failed; and with a decision card showing, the
-	// button steps down to a link so the card's is the one filled button.
+	// button steps down to a ghost button so the card's is the one filled button.
 	if h.CTA != "button" || !reflect.DeepEqual(h.CTAButtons, []string{"Query the copy"}) || len(h.Actions) != 1 || !strings.Contains(h.Actions[0], "Download views.sql (DuckDB views)") || !strings.Contains(h.Actions[0], "MCP Server") {
 		t.Errorf("healthy: cta=%q buttons=%v actions=%v", h.CTA, h.CTAButtons, h.Actions)
 	}
-	if nl := get("no-location"); nl.CTA != "setup" || len(nl.CTAButtons) != 0 || !strings.Contains(nl.Actions[0], "Set up the copy ›") {
+	if nl := get("no-location"); nl.CTA != "setup" || len(nl.CTAButtons) != 0 || !strings.Contains(nl.Actions[0], "Set up the copy") {
 		t.Errorf("no-location: cta=%q buttons=%v actions=%v", nl.CTA, nl.CTAButtons, nl.Actions)
 	}
 	if ns := get("no-schedule"); ns.CTA != "button" {
@@ -451,8 +453,8 @@ const origPaint = paint;`, 1)
 	if bd := get("baselines-down"); bd.CTA != "none" || len(bd.CTAButtons) != 0 || strings.Contains(bd.Actions[0], "Query the copy") {
 		t.Errorf("baselines-down: cta=%q buttons=%v actions=%v, want no offer to query what could not be read", bd.CTA, bd.CTAButtons, bd.Actions)
 	}
-	if fl := get("failed"); len(fl.CTAButtons) != 0 || !strings.Contains(fl.Actions[0], "Query the copy ›") || fl.CardOnScreen != 1 {
-		t.Errorf("failed (card showing): the button must step down to a link: buttons=%v actions=%v card=%d", fl.CTAButtons, fl.Actions, fl.CardOnScreen)
+	if fl := get("failed"); len(fl.CTAButtons) != 0 || !strings.Contains(fl.Actions[0], "Query the copy") || fl.CardOnScreen != 1 {
+		t.Errorf("failed (card showing): the button must step down to a ghost button: buttons=%v actions=%v card=%d", fl.CTAButtons, fl.Actions, fl.CardOnScreen)
 	}
 	if nv := get("fold-refused-noperm-create"); strings.Contains(nv.Actions[0], "views.sql") {
 		t.Errorf("a session without settings:read is offered views.sql: %v", nv.Actions)
