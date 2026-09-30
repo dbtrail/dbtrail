@@ -451,13 +451,18 @@ variant: [streaming.md](streaming.md#the-source-mysql-user).
   - the same server, when two entries use the same `host:port`, or when both
     connections land on one running server;
   - a replica, when a replication channel of one server (`SHOW ALL SLAVES
-    STATUS`) connects to the other by host, port and `server_id`. A
+    STATUS`) connects to the other by host, port and `server_id`, and the
+    other server confirms it: its `SHOW SLAVE HOSTS` lists the replica.
+    The channel's host is resolved in the replica's network, so without
+    that confirmation (for example two cloned stacks that both have a
+    `mariadb-primary`) the pair is reported as "could not be verified". A
     `127.0.0.1` or `localhost` master is never matched, and neither is a
-    `server_id` of `1`: unrelated servers share it, so such a match is
-    reported as "could not be verified".
+    `server_id` of `1`, which unrelated servers share.
 
-  Reading replication status needs the `SLAVE MONITOR` privilege. Without it
-  the check is skipped and says so.
+  Reading replication status needs the `SLAVE MONITOR` privilege, and
+  reading the replica list needs `REPLICATION MASTER ADMIN`. Without the
+  first the check is skipped and says so; without the second a replica is
+  reported as "could not be verified".
 - The Source type saved with a MySQL or MariaDB server is a hint. Capture asks
   the server what it is, and DBTrail saves that as the server's Source type,
   so the server list and every page show what capture runs as. A warning

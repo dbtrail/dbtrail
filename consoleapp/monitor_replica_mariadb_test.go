@@ -29,12 +29,23 @@ func mdb(name, dsnHost string, dsnPort int, hostname string, port int, serverID 
 	}
 }
 
+// withReplicas sets what s's SHOW SLAVE HOSTS lists, as read.
+func withReplicas(s mariadbServer, hosts ...slaveHost) mariadbServer {
+	s.slaveHosts, s.slaveHostsRead = hosts, true
+	return s
+}
+
 func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 	const t0 = int64(1_790_000_000)
 	cand := func(channels ...replicationChannel) mariadbServer {
-		return mdb("", "db-replica.internal", 3306, "db-replica", 3306, 1, t0, "0242ac110002", channels...)
+		return mdb("", "db-replica.internal", 3306, "db-replica", 3306, 4, t0, "0242ac110002", channels...)
 	}
-	primary := mdb("primary", "db-primary.internal", 3306, "db-primary", 3306, 7, t0-500, "0242ac110003")
+	// The primary confirms from its side: SHOW SLAVE HOSTS lists the
+	// candidate (server id 4, port 3306) as its replica.
+	primary := withReplicas(mdb("primary", "db-primary.internal", 3306, "db-primary", 3306, 7, t0-500, "0242ac110003"),
+		slaveHost{serverID: 4, port: 3306, masterID: 7})
+	// The same primary, when its side lists nothing.
+	unconfirmed := withReplicas(mdb("primary", "db-primary.internal", 3306, "db-primary", 3306, 7, t0-500, "0242ac110003"))
 
 	cases := []struct {
 		name       string
@@ -59,6 +70,62 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 			peers:      []mariadbServer{primary},
 			wantStatus: "warn",
 			wantDetail: []string{`appears to be a replica of already-monitored "primary"`},
+		},
+		{
+			// Two cloned compose stacks: each has a mariadb-primary with
+			// server_id 2, and the candidate's Master_Host resolves inside
+			// its own stack. The monitored one lists no such replica.
+			name: "cloned stacks: same master name, port and server id, not confirmed by the primary",
+			cand: cand(replicationChannel{host: "mariadb-primary", port: 3306, serverID: 2}),
+			peers: []mariadbServer{withReplicas(mdb("stack-a", "10.1.0.5", 3306, "mariadb-primary", 3306, 2, t0, "0242ac110077"),
+				slaveHost{serverID: 9, port: 3306, masterID: 2})},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+			notDetail:  []string{"replica of"},
+		},
+		{
+			name:       "the primary lists the replica's id on another port",
+			cand:       cand(replicationChannel{host: "db-primary.internal", port: 3306, serverID: 7}),
+			peers:      []mariadbServer{withReplicas(unconfirmed, slaveHost{serverID: 4, port: 3307, masterID: 7})},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+		},
+		{
+			name:       "the primary lists the replica's id under another master id",
+			cand:       cand(replicationChannel{host: "db-primary.internal", port: 3306, serverID: 7}),
+			peers:      []mariadbServer{withReplicas(unconfirmed, slaveHost{serverID: 4, port: 3306, masterID: 8})},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+		},
+		{
+			name: "the primary's replica list could not be read",
+			cand: cand(replicationChannel{host: "db-primary.internal", port: 3306, serverID: 7}),
+			peers: []mariadbServer{func() mariadbServer {
+				p := primary
+				p.slaveHostsRead = false
+				return p
+			}()},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+		},
+		{
+			// A replica on the default server id is listed by that id on
+			// every cloned primary alike.
+			name: "a replica with the default server id is not confirmed by its listing",
+			cand: mdb("", "db-replica.internal", 3306, "db-replica", 3306, 1, t0, "0242ac110002",
+				replicationChannel{host: "db-primary.internal", port: 3306, serverID: 7}),
+			peers:      []mariadbServer{withReplicas(unconfirmed, slaveHost{serverID: 1, port: 3306, masterID: 7})},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+		},
+		{
+			// A monitored server at this very address that did not answer
+			// (another password): the same address is the same server.
+			name:       "a monitored server at the same address that did not answer",
+			cand:       cand(),
+			peers:      []mariadbServer{{name: "again", dsnHost: "DB-REPLICA.internal", dsnPort: 3306, unreachable: true}},
+			wantStatus: "warn",
+			wantDetail: []string{`is the same server as already-monitored "again"`},
 		},
 		{
 			name:       "replicates from a monitored server, by its hostname, in another case",
@@ -129,7 +196,8 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 		},
 		{
 			name: "a monitored server replicates from this one",
-			cand: mdb("", "db-replica.internal", 3306, "db-replica", 3306, 4, t0, "0242ac110002"),
+			cand: withReplicas(mdb("", "db-replica.internal", 3306, "db-replica", 3306, 4, t0, "0242ac110002"),
+				slaveHost{serverID: 3, port: 3306, masterID: 4}),
 			peers: []mariadbServer{mdb("replica", "db-r2.internal", 3306, "db-r2", 3306, 3, t0, "0242ac110004",
 				replicationChannel{host: "db-replica.internal", port: 3306, serverID: 4})},
 			wantStatus: "warn",
@@ -310,14 +378,15 @@ func TestEvaluateMariaDBReplicaOverlap(t *testing.T) {
 		{
 			// A MySQL peer: its replication status is not read (MariaDB's
 			// SHOW ALL SLAVES STATUS), and it is not counted as unverified
-			// for that. This server replicating from it is still found.
+			// for that. Its replica list is not read either, so this server
+			// replicating from it cannot be confirmed: not verified.
 			name: "a monitored MySQL server this one replicates from",
 			cand: cand(replicationChannel{host: "mysql-primary", port: 3306, serverID: 11}),
 			peers: []mariadbServer{{name: "mysql", dsnHost: "mysql-primary", dsnPort: 3306, flavor: console.FlavorMySQL,
 				hostname: "mysql-primary", port: 3306, serverID: 11, startedAt: t0, uuidNode: "0242ac110002"}},
-			wantStatus: "warn",
-			wantDetail: []string{`replica of already-monitored "mysql"`},
-			notDetail:  []string{"is the same server as"},
+			wantStatus: "pass",
+			wantDetail: []string{"1 could not be verified"},
+			notDetail:  []string{"is the same server as", "replica of"},
 		},
 		{
 			// A MySQL peer's channels are never read, so an unread status is
@@ -432,9 +501,15 @@ func TestLoadMariaDBServer(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"Connection_name", "Slave_IO_State", "Master_Host", "Master_User", "Master_Port", "Master_Server_Id"}).
 				AddRow("", "", " db-primary ", "rep", "3306", "9").
 				AddRow("b", "", "db-b", "rep", "3307", "0"))
+		mock.ExpectQuery(regexp.QuoteMeta("SHOW SLAVE HOSTS")).
+			WillReturnRows(sqlmock.NewRows([]string{"Server_id", "Host", "Port", "Master_id"}).
+				AddRow("5", "172.23.0.3", "3306", "7"))
 		s, err := loadMariaDBServer(context.Background(), db, console.FlavorMariaDB)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if !s.slaveHostsRead || len(s.slaveHosts) != 1 || s.slaveHosts[0] != (slaveHost{serverID: 5, port: 3306, masterID: 7}) {
+			t.Errorf("replica list = %+v (read %v)", s.slaveHosts, s.slaveHostsRead)
 		}
 		if s.hostname != "db1" || s.port != 3306 || s.serverID != 7 || s.uuidNode != "5b8c656024db" || s.startedAt != 1_789_999_900 {
 			t.Errorf("identity = %+v", s)
@@ -467,6 +542,32 @@ func TestLoadMariaDBServer(t *testing.T) {
 		s, err := loadMariaDBServer(context.Background(), db, console.FlavorMariaDB)
 		if err != nil || s.channelsRead || !s.channelsDenied || !strings.Contains(s.channelsErr, "SLAVE MONITOR") {
 			t.Errorf("s = %+v, err %v", s, err)
+		}
+	})
+	t.Run("an unreadable replica list is recorded, not returned", func(t *testing.T) {
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		identity(mock)
+		mock.ExpectQuery(regexp.QuoteMeta("SHOW ALL SLAVES STATUS")).
+			WillReturnRows(sqlmock.NewRows([]string{"Master_Host", "Master_Port", "Master_Server_Id"}))
+		mock.ExpectQuery(regexp.QuoteMeta("SHOW SLAVE HOSTS")).
+			WillReturnError(&mysql.MySQLError{Number: 1227, Message: "Access denied; you need (at least one of) the REPLICATION MASTER ADMIN privilege(s)"})
+		s, err := loadMariaDBServer(context.Background(), db, console.FlavorMariaDB)
+		if err != nil || s.slaveHostsRead || !s.channelsRead {
+			t.Errorf("s = %+v, err %v", s, err)
+		}
+	})
+	t.Run("a replica list with a number that does not parse is not read", func(t *testing.T) {
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		identity(mock)
+		mock.ExpectQuery(regexp.QuoteMeta("SHOW ALL SLAVES STATUS")).
+			WillReturnRows(sqlmock.NewRows([]string{"Master_Host", "Master_Port", "Master_Server_Id"}))
+		mock.ExpectQuery(regexp.QuoteMeta("SHOW SLAVE HOSTS")).
+			WillReturnRows(sqlmock.NewRows([]string{"Server_id", "Host", "Port", "Master_id"}).AddRow("x", "h", "3306", "7"))
+		s, _ := loadMariaDBServer(context.Background(), db, console.FlavorMariaDB)
+		if s.slaveHostsRead {
+			t.Errorf("s = %+v, want the list unread", s)
 		}
 	})
 	t.Run("another server error is not a refusal", func(t *testing.T) {

@@ -32,7 +32,11 @@ import (
 //     @@server_id, start time within two seconds, and the machine part of a
 //     version 1 UUID() it generates);
 //   - a replica: one of its replication channels (SHOW ALL SLAVES STATUS)
-//     connects to the other server, by host AND port AND Master_Server_Id.
+//     connects to the other server, by host AND port AND Master_Server_Id,
+//     AND the other server confirms it from its side: its SHOW SLAVE HOSTS
+//     lists the replica's server id and port. Without that confirmation a
+//     match on names is "could not be verified": the channel's host is
+//     resolved in the replica's network, not this process's.
 //     The host is compared with the address the other entry is monitored at,
 //     or with that server's own @@hostname (with its own @@port). A loopback
 //     master is the replica's own machine, not this process's, and never
@@ -53,6 +57,13 @@ type replicationChannel struct {
 	host     string
 	port     int
 	serverID uint32 // Master_Server_Id: 0 until the channel has connected once
+}
+
+// slaveHost is one row of SHOW SLAVE HOSTS: a replica connected to the server.
+type slaveHost struct {
+	serverID uint32
+	port     int
+	masterID uint32
 }
 
 // mariadbServer is one server as this check reads it. The candidate is read
@@ -78,6 +89,11 @@ type mariadbServer struct {
 	channelsErr  string
 	// channelsDenied: the read was refused for a missing privilege (1227).
 	channelsDenied bool
+	// slaveHosts is what SHOW SLAVE HOSTS lists: the replicas connected to
+	// this server, as the server itself sees them. slaveHostsRead false
+	// when it could not be read. Only read on MariaDB.
+	slaveHosts     []slaveHost
+	slaveHostsRead bool
 	// unreachable: the server could not be read at all.
 	unreachable bool
 }
@@ -123,6 +139,7 @@ func collectMariaDBPeers(ctx context.Context, entries []console.ServerEntry, rea
 // server's credentials.
 func readMariaDBPeer(ctx context.Context, p console.ServerEntry) mariadbServer {
 	out := mariadbServer{name: p.Name, unreachable: true}
+	out.dsnHost, out.dsnPort = sourceAddress(p.SourceDSN)
 	ctx, cancel := context.WithTimeout(ctx, mariadbPeerTimeout)
 	defer cancel()
 	// sourceProbeDSN bounds the dial too (probeDSN caps it at
@@ -181,14 +198,17 @@ func loadMariaDBServer(ctx context.Context, db *sql.DB, flavor string) (mariadbS
 	if flavor != console.FlavorMariaDB {
 		return s, nil
 	}
-	channels, err := readReplicationChannels(ctx, db)
-	if err != nil {
+	if channels, err := readReplicationChannels(ctx, db); err != nil {
 		s.channelsErr = err.Error()
 		var me *mysql.MySQLError
 		s.channelsDenied = errors.As(err, &me) && me.Number == 1227 // ER_SPECIFIC_ACCESS_DENIED_ERROR
-		return s, nil
+	} else {
+		s.channels, s.channelsRead = channels, true
 	}
-	s.channels, s.channelsRead = channels, true
+	// An unread list only means no replica of this server can be confirmed.
+	if hosts, err := readSlaveHosts(ctx, db); err == nil {
+		s.slaveHosts, s.slaveHostsRead = hosts, true
+	}
 	return s, nil
 }
 
@@ -234,19 +254,68 @@ func readReplicationChannels(ctx context.Context, db *sql.DB) ([]replicationChan
 	return out, rows.Err()
 }
 
+// readSlaveHosts is SHOW SLAVE HOSTS, read by column name. It needs
+// REPLICATION MASTER ADMIN on MariaDB 10.5.2 and later.
+func readSlaveHosts(ctx context.Context, db *sql.DB) ([]slaveHost, error) {
+	rows, err := db.QueryContext(ctx, "SHOW SLAVE HOSTS")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	idx := map[string]int{}
+	for i, c := range cols {
+		idx[strings.ToLower(c)] = i
+	}
+	idI, okS := idx["server_id"]
+	portI, okP := idx["port"]
+	masterI, okM := idx["master_id"]
+	if !okS || !okP || !okM {
+		return nil, fmt.Errorf("the replica list has no Server_id, Port or Master_id column")
+	}
+	var out []slaveHost
+	for rows.Next() {
+		vals := make([]sql.RawBytes, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		id, ierr := strconv.ParseUint(string(vals[idI]), 10, 32)
+		port, perr := strconv.Atoi(string(vals[portI]))
+		master, merr := strconv.ParseUint(string(vals[masterI]), 10, 32)
+		if ierr != nil || perr != nil || merr != nil {
+			return nil, fmt.Errorf("the replica list has a Server_id, Port or Master_id that is not a number")
+		}
+		out = append(out, slaveHost{serverID: uint32(id), port: port, masterID: uint32(master)})
+	}
+	return out, rows.Err()
+}
+
 // evaluateMariaDBReplicaOverlap builds the card from what was read. Pure.
 func evaluateMariaDBReplicaOverlap(cand mariadbServer, peers []mariadbServer) *console.DoctorCheck {
 	var findings []string
 	unverified := 0
 	for _, p := range peers {
 		if p.unreachable {
-			unverified++
+			// The same address is the same server, answered or not (a
+			// monitored entry with another password, say).
+			if sameAddress(cand, p) {
+				findings = append(findings, fmt.Sprintf("is the same server as already-monitored %q", p.name))
+			} else {
+				unverified++
+			}
 			continue
 		}
-		replicaOf, replicaUnsure := channelsPointAt(cand.channels, p)
+		replicaOf, replicaUnsure := channelsPointAt(cand.channels, cand, p)
 		var primaryOf, primaryUnsure bool
 		if p.flavor == console.FlavorMariaDB {
-			primaryOf, primaryUnsure = channelsPointAt(p.channels, cand)
+			primaryOf, primaryUnsure = channelsPointAt(p.channels, p, cand)
 		}
 		rel := ""
 		switch {
@@ -342,23 +411,49 @@ func sameRunningServer(a, b mariadbServer) bool {
 		d >= -2 && d <= 2 && a.uuidNode == b.uuidNode
 }
 
-// channelsPointAt reports whether one of channels connects to t (match), and
-// whether one connects to t's host and port with a server id that cannot
-// tell (unsure): 0, a channel that never connected, or 1, the id of every
-// server nobody configured, which two unrelated servers share all the time.
-func channelsPointAt(channels []replicationChannel, t mariadbServer) (match, unsure bool) {
+// channelsPointAt reports whether one of replica's channels connects to
+// primary (match), and whether one looks like it but cannot be told
+// (unsure). A channel names its master by a host as the REPLICA resolves it,
+// so a name, a port and a server id are not proof on their own: two cloned
+// stacks each have a mariadb-primary with the same server id. A match needs
+// the primary's own side to agree: its SHOW SLAVE HOSTS lists the replica
+// (primaryListsReplica). Unsure is a channel toward primary's host and port
+// with:
+//   - server id 0: it never connected;
+//   - server id 1: the id of every server nobody configured;
+//   - the right server id, but a primary that does not list the replica or
+//     whose list could not be read.
+func channelsPointAt(channels []replicationChannel, replica, primary mariadbServer) (match, unsure bool) {
 	for _, ch := range channels {
-		if !channelHostIs(ch, t) {
+		if !channelHostIs(ch, primary) {
 			continue
 		}
 		switch {
 		case ch.serverID == 0 || ch.serverID == defaultServerID:
 			unsure = true
-		case ch.serverID == t.serverID:
+		case ch.serverID != primary.serverID:
+		case primaryListsReplica(primary, replica):
 			match = true
+		default:
+			unsure = true
 		}
 	}
 	return match, unsure
+}
+
+// primaryListsReplica: primary's SHOW SLAVE HOSTS has a replica with
+// replica's server id and port, connected to primary's server id. A replica
+// on the default server id is never confirmed: every clone lists it alike.
+func primaryListsReplica(primary, replica mariadbServer) bool {
+	if !primary.slaveHostsRead || replica.serverID == 0 || replica.serverID == defaultServerID {
+		return false
+	}
+	for _, h := range primary.slaveHosts {
+		if h.serverID == replica.serverID && h.port == replica.port && h.masterID == primary.serverID {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultServerID is @@server_id on a MariaDB nobody configured.
