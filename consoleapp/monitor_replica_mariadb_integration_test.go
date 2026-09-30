@@ -4,6 +4,7 @@ package consoleapp
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,9 +88,21 @@ func TestIntegrationReplicaCheckMariaDB(t *testing.T) {
 		// Closed by a cleanup, not a defer: the cleanups below use it, and a
 		// deferred Close runs before them, which fails them in silence.
 		t.Cleanup(func() { db.Close() })
-		// Never started, so it never connects: 192.0.2.1 is a documentation
-		// address. Master_Server_Id stays 0, which matches nothing.
-		testutil.MustExec(t, db, "CHANGE MASTER 'dbtrail_probe' TO MASTER_HOST='192.0.2.1', MASTER_PORT=3306, MASTER_USER='nobody', MASTER_PASSWORD='x'")
+		// A channel toward the monitored source itself, by its own hostname
+		// and port (what channelHostIs matches), never started: it never
+		// connects, so Master_Server_Id stays 0. The host and port match; only
+		// the server id rule keeps it from being called a replica.
+		srcDB, err := config.Connect(source + "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srcIdentity, err := loadMariaDBServer(ctx, srcDB, console.FlavorMariaDB)
+		srcDB.Close()
+		if err != nil || srcIdentity.hostname == "" || srcIdentity.port == 0 {
+			t.Fatalf("source identity = %+v, err %v", srcIdentity, err)
+		}
+		testutil.MustExec(t, db, fmt.Sprintf("CHANGE MASTER 'dbtrail_probe' TO MASTER_HOST='%s', MASTER_PORT=%d, MASTER_USER='nobody', MASTER_PASSWORD='x'",
+			srcIdentity.hostname, srcIdentity.port))
 		t.Cleanup(func() {
 			if _, err := db.Exec("RESET SLAVE 'dbtrail_probe' ALL"); err != nil {
 				t.Errorf("remove the probe channel: %v", err)
@@ -104,7 +117,7 @@ func TestIntegrationReplicaCheckMariaDB(t *testing.T) {
 		}
 		var seen bool
 		for _, ch := range s.channels {
-			if ch.host == "192.0.2.1" && ch.port == 3306 && ch.serverID == 0 {
+			if ch.host == srcIdentity.hostname && ch.port == srcIdentity.port && ch.serverID == 0 {
 				seen = true
 			}
 		}
@@ -112,8 +125,8 @@ func TestIntegrationReplicaCheckMariaDB(t *testing.T) {
 			t.Errorf("channels = %+v, want the probe channel", s.channels)
 		}
 		card := check(t, scratch+"/", console.ServerEntry{Name: "source", SourceDSN: source + "/"})
-		if card.Status != "pass" {
-			t.Errorf("card = %+v, want pass: a channel that never connected names no server", *card)
+		if card.Status != "pass" || !strings.Contains(card.Detail, "1 could not be verified") {
+			t.Errorf("card = %+v, want pass with the source not verified: a channel toward it that never connected proves nothing either way", *card)
 		}
 	})
 
