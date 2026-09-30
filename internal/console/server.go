@@ -737,6 +737,7 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/baselines/download", s.handleBaselineDownload)
 	api.HandleFunc("GET /api/views.sql", s.handleViewsSQL)
 	api.HandleFunc("POST /api/sql", s.recordAction("sql", s.handleSQL))
+	api.HandleFunc("GET /api/sql", s.handleSQLInfo)
 	// The sandboxed SQL panel (#1177). Registered unconditionally so the
 	// route's refusal (403 with the opt-in hint) is actionable; the real gate
 	// is inside the handler, like the monitor/baseline-trigger verbs.

@@ -5998,6 +5998,359 @@ try {
     : bad("routes: Back onto a rewritten entry is a fresh visit, not an old address", JSON.stringify(afterBack));
   await tab.close();
 
+  // Scenario 18 — SQL on the copy from the Overview (#1952), against the
+  // REAL route: the daemon re-executes itself as the sandboxed worker for
+  // every statement below, over the baseline snapshot run.sh built. What
+  // node tests cannot see: the capability the daemon reports for a local
+  // copy, the card it wakes, the worker's answer painted as a table, its
+  // refusals as sentences, and the CSV bytes handed to the browser.
+  await page.evaluate(async (id) => { await switchServer(id); }, byoId);
+  await page.evaluate(() => navigate("overview"));
+  let sqlCard = false;
+  try {
+    await page.waitForFunction(() => {
+      const c = document.querySelector('.use-card[data-use="sql"]');
+      return capsCache.sql === true && c && !c.hidden && c.offsetParent !== null;
+    });
+    sqlCard = true;
+  } catch (_) { /* reported below with what the page did show */ }
+  sqlCard
+    ? ok("sql: the Ask it here card shows for a server with a local copy (capability sql)")
+    : bad("sql: the Ask it here card shows for a server with a local copy (capability sql)", await page.evaluate(() => JSON.stringify({
+      sql: capsCache.sql, views: capsCache.views, perms: (capsCache.permissions || {})["sql:execute"],
+      useHidden: (document.querySelector(".use") || {}).hidden, cards: Array.from(document.querySelectorAll(".use-card")).map((c) => c.dataset.use + ":" + c.hidden) })));
+  if (sqlCard) {
+    const row = await page.evaluate(() => {
+      const cards = Array.from(document.querySelectorAll(".use-card")).filter((c) => !c.hidden);
+      const act = document.querySelector('.use-card[data-use="sql"] .use-act');
+      return { n: cards.length, tops: new Set(cards.map((c) => Math.round(c.getBoundingClientRect().top))).size,
+        primary: cards.filter((c) => c.querySelector(".use-act.btn-primary")).map((c) => c.dataset.use).join(),
+        action: (act || {}).textContent, ink: act ? getComputedStyle(act).color : "" };
+    });
+    (row.n === 4 && row.tops === 1 && row.primary === "sql" && row.action === "Open SQL")
+      ? ok("sql: four cards in one row, Open SQL the one primary action")
+      : bad("sql: four cards in one row, Open SQL the one primary action", JSON.stringify(row));
+
+    // Every request the page makes from here to the CSV download is
+    // recorded, by a listener that is in place BEFORE the panel opens. An
+    // alert() a painted value managed to run would be counted, not shown.
+    const sqlReqs = [];
+    const onSQLRequest = (req) => sqlReqs.push({ method: req.method(), url: req.url() });
+    page.on("request", onSQLRequest);
+    const sqlPosts = () => sqlReqs.filter((r) => r.method === "POST" && r.url === URL + "/api/sql").length;
+    await page.evaluate(() => { window.__sqlAlerts = 0; window.alert = () => { window.__sqlAlerts++; }; });
+
+    // openSQL clicks the card and waits for the panel to be ready: the
+    // table list painted and the starter query in the editor.
+    const openSQL = async () => {
+      await page.click('.use-card[data-use="sql"] .use-act');
+      try {
+        await page.waitForFunction(() => {
+          const ta = document.querySelector(".sqlp-editor");
+          return ta && ta.value.startsWith("SELECT * FROM ") && document.querySelectorAll(".sqlp-name").length > 0;
+        });
+        return true;
+      } catch (_) { return false; }
+    };
+    const panelUp = await openSQL();
+    const opened = await page.evaluate(() => ({
+      starter: (document.querySelector(".sqlp-editor") || {}).value || "",
+      names: Array.from(document.querySelectorAll(".sqlp-name")).map((n) => n.textContent),
+      meta: (document.querySelector(".sqlp-meta") || {}).textContent || "",
+      label: !!document.querySelector('label[for="sqlp-sql"]'),
+      csvDisabled: (document.querySelector(".sqlp-csv") || {}).disabled,
+      err: (document.querySelector(".sqlp-msg") || {}).textContent || "",
+    }));
+    const stateView = `state_${FIX}_orders`;
+    (panelUp && opened.starter === `SELECT * FROM ${stateView} LIMIT 100` && opened.names.includes(stateView) && opened.label && opened.csvDisabled === true)
+      ? ok("sql: the panel opens with the copy's tables, a starter query over the first one, a labelled editor")
+      : bad("sql: the panel opens with the copy's tables, a starter query over the first one, a labelled editor", JSON.stringify(opened));
+    /^runs on the copy updated .+ · read-only · 60 s limit$/.test(opened.meta)
+      ? ok("sql: the status line states the copy's age and the server's real limit")
+      : bad("sql: the status line states the copy's age and the server's real limit", opened.meta);
+
+    // One filled button per view: with the panel open that is Run, so the
+    // card's own button has stepped down to the plain one (dark text, the
+    // filled one has white), and it says it is pressed.
+    let steppedDown = false;
+    try {
+      await page.waitForFunction((filledInk) => {
+        const act = document.querySelector('.use-card[data-use="sql"] .use-act');
+        const run = document.querySelector(".sqlp-run");
+        return act && run && getComputedStyle(run).color === filledInk && getComputedStyle(act).color !== filledInk && act.getAttribute("aria-expanded") === "true";
+      }, row.ink, { timeout: 5000 });
+      steppedDown = true;
+    } catch (_) { /* reported below */ }
+    steppedDown
+      ? ok("sql: while the panel is open Run is the one filled button; the card's own button steps down")
+      : bad("sql: while the panel is open Run is the one filled button; the card's own button steps down", await page.evaluate(() => JSON.stringify({
+        act: getComputedStyle(document.querySelector('.use-card[data-use="sql"] .use-act')).color, run: getComputedStyle(document.querySelector(".sqlp-run")).color })));
+
+    // readSQL reads what the panel shows; runSQL types a statement, runs it
+    // and waits for Run to come back first.
+    const readSQL = () => page.evaluate(() => ({
+      head: Array.from(document.querySelectorAll(".sqlp-table th")).map((n) => n.textContent + (n.classList.contains("num") ? ":num" : "")),
+      rows: Array.from(document.querySelectorAll(".sqlp-table tbody tr")).map((tr) => Array.from(tr.children).map((td) => (td.querySelector(".sqlp-null") ? "<NULL>" : td.textContent))),
+      tdNum: Array.from(document.querySelectorAll(".sqlp-table tbody tr:first-child td")).map((td) => td.classList.contains("num")),
+      align: Array.from(document.querySelectorAll(".sqlp-table tbody tr:first-child td")).map((td) => getComputedStyle(td).textAlign),
+      headAlign: Array.from(document.querySelectorAll(".sqlp-table th")).map((th) => getComputedStyle(th).textAlign),
+      rowHeight: (() => { const td = document.querySelector(".sqlp-table tbody td"); return td ? Math.round(td.getBoundingClientRect().height) : 0; })(),
+      hasTable: !!document.querySelector(".sqlp-table"),
+      count: (document.querySelector(".sqlp-count") || {}).textContent || "",
+      notes: Array.from(document.querySelectorAll(".sqlp-results .sqlp-note")).map((n) => n.textContent),
+      msg: (document.querySelector(".sqlp-msg") || {}).textContent || "",
+      err: (document.querySelector(".sqlp-msg .sqlp-err") || {}).textContent || "",
+      detail: (document.querySelector(".sqlp-msg .sqlp-detail") || {}).textContent || "",
+      caption: (document.querySelector(".sqlp-table caption") || {}).textContent || "",
+      focusOnResults: !!(document.activeElement && document.activeElement.classList.contains("sqlp-results")),
+      csvDisabled: (document.querySelector(".sqlp-csv") || {}).disabled,
+      runDisabled: (document.querySelector(".sqlp-run") || {}).disabled,
+      cancelShown: !(document.querySelector(".sqlp-cancel") || { hidden: true }).hidden,
+      readOnly: (document.querySelector(".sqlp-editor") || {}).readOnly,
+      live: (document.querySelector(".sqlp-msg") || { getAttribute: () => "" }).getAttribute("aria-live"),
+    }));
+    const runSQL = async (statement, how) => {
+      await page.evaluate((q) => { const ta = document.querySelector(".sqlp-editor"); ta.value = q; ta.focus(); }, statement);
+      if (how === "keys") await page.keyboard.press("Control+Enter");
+      else await page.click(".sqlp-run");
+      await page.waitForFunction(() => { const r = document.querySelector(".sqlp-run"); return r && !r.disabled; }, null, { timeout: 90000 });
+      return readSQL();
+    };
+
+    // The starter query, as it stands, through Run.
+    const first = await runSQL(opened.starter);
+    // The state view decides its own column order; read each column by name.
+    const col = (name) => first.head.findIndex((h) => h.split(":")[0] === name);
+    const ids = first.rows.map((r) => r[col("id")]).sort().join();
+    (first.err === "" && first.head.slice().sort().join() === "email,id:num,status" && ids === "1,2,4" && first.rows.every((r) => r[col("status")] === "new")
+      && first.tdNum.filter(Boolean).length === 1 && first.tdNum[col("id")] === true
+      && first.align.filter((a) => a === "right").length === 1 && first.align[col("id")] === "right"
+      && first.headAlign.filter((a) => a === "right").length === 1 && first.headAlign[col("id")] === "right"
+      && /^3 rows in (under 1|\d+) ms$|^3 rows in \d+\.\d s$/.test(first.count) && first.rowHeight === 40 && first.caption.startsWith("Query result, 3 rows in ")
+      && first.focusOnResults && first.csvDisabled === false)
+      ? ok("sql: the starter query runs on the copy and paints its rows (the number column drawn to the right, 40px rows, a caption, focus on the result)")
+      : bad("sql: the starter query runs on the copy and paints its rows (the number column drawn to the right, 40px rows, a caption, focus on the result)", JSON.stringify(first));
+
+    // A click on a table name puts it where the cursor is, and over a
+    // selection in its place; the editor keeps the focus and the statement
+    // that results runs.
+    const clickName = async (text, from, to) => {
+      const at = await page.evaluate(([q, a, b, name]) => {
+        const ta = document.querySelector(".sqlp-editor");
+        ta.value = q; ta.focus(); ta.selectionStart = a; ta.selectionEnd = b;
+        return Array.from(document.querySelectorAll(".sqlp-name")).findIndex((n) => n.textContent === name);
+      }, [text, from, to, stateView]);
+      await page.locator(".sqlp-name").nth(at).click();
+      return page.evaluate(() => { const ta = document.querySelector(".sqlp-editor"); return { value: ta.value, caret: ta.selectionStart, end: ta.selectionEnd, focused: document.activeElement === ta }; });
+    };
+    const atCaret = await clickName("SELECT count(*) AS n FROM  WHERE id > 1", 26, 26);
+    const overSel = await clickName("SELECT count(*) AS n FROM xx WHERE id > 1", 26, 28);
+    const wantInserted = `SELECT count(*) AS n FROM ${stateView} WHERE id > 1`;
+    const insertedRun = await runSQL(overSel.value);
+    (atCaret.value === wantInserted && atCaret.caret === 26 + stateView.length && atCaret.end === atCaret.caret && atCaret.focused
+      && overSel.value === wantInserted && overSel.caret === 26 + stateView.length && overSel.focused
+      && insertedRun.err === "" && JSON.stringify(insertedRun.rows) === JSON.stringify([["2"]]))
+      ? ok("sql: a click on a table name inserts it at the cursor (or over the selection) and the statement runs")
+      : bad("sql: a click on a table name inserts it at the cursor (or over the selection) and the statement runs", JSON.stringify({ atCaret, overSel, rows: insertedRun.rows, err: insertedRun.err, detail: insertedRun.detail }));
+
+    // NULL, the text NULL, an empty string and a nested value are four
+    // different things on screen; Ctrl+Enter runs.
+    // NULL::VARCHAR, not a bare NULL: DuckDB types a bare NULL column as
+    // INTEGER, which would (rightly) align it as a number.
+    const kinds = await runSQL("SELECT NULL::VARCHAR AS n, 'NULL' AS s, '' AS e, [1, 2] AS l, 1.5::DOUBLE AS d, '02134' AS zip", "keys");
+    (kinds.err === "" && JSON.stringify(kinds.rows) === JSON.stringify([["<NULL>", "NULL", "", "[1,2]", "1.5", "02134"]])
+      && JSON.stringify(kinds.tdNum) === JSON.stringify([false, false, false, false, true, false])
+      && JSON.stringify(kinds.align.map((a) => a === "right")) === JSON.stringify([false, false, false, false, true, false]))
+      ? ok("sql: NULL is its own token, nested values are JSON text, a digits-only text column stays left; Ctrl+Enter runs")
+      : bad("sql: NULL is its own token, nested values are JSON text, a digits-only text column stays left; Ctrl+Enter runs", JSON.stringify(kinds));
+
+    // What a query returns is somebody's data, and it can look like markup.
+    // A column NAME and two VALUES carrying tags are painted as the
+    // characters they are: no element of their kind exists under the panel,
+    // no cell has a child element, and neither script ran.
+    const markupCell = "<img src=x onerror=alert(1)>";
+    const markupScript = "<script>window.__sqlx=1</script>";
+    const markup = await runSQL(`SELECT '${markupCell}' AS "<i>x</i>", '${markupScript}' AS s`);
+    const markupDom = await page.evaluate(() => ({
+      made: document.querySelectorAll(".use-panel img, .use-panel i, .use-panel script, .use-panel iframe").length,
+      cells: document.querySelectorAll(".sqlp-table th, .sqlp-table td").length,
+      withChildren: Array.from(document.querySelectorAll(".sqlp-table th, .sqlp-table td")).filter((n) => n.childElementCount !== 0).length,
+      ran: typeof window.__sqlx, alerts: window.__sqlAlerts,
+    }));
+    (markup.err === "" && JSON.stringify(markup.head) === JSON.stringify(["<i>x</i>", "s"]) && JSON.stringify(markup.rows) === JSON.stringify([[markupCell, markupScript]])
+      && markupDom.made === 0 && markupDom.cells === 4 && markupDom.withChildren === 0 && markupDom.ran === "undefined" && markupDom.alerts === 0)
+      ? ok("sql: a column name and values that look like HTML are painted as text; no element is made from them and nothing runs")
+      : bad("sql: a column name and values that look like HTML are painted as text; no element is made from them and nothing runs", JSON.stringify({ head: markup.head, rows: markup.rows, err: markup.err, detail: markup.detail, markupDom }));
+
+    // The same for an ERROR: DuckDB quotes the name it did not find, and
+    // that name is painted as text too.
+    const markupErr = await runSQL(`SELECT * FROM "${markupCell}"`);
+    const markupErrDom = await page.evaluate(() => ({
+      made: document.querySelectorAll(".use-panel img, .use-panel i, .use-panel script, .use-panel iframe").length,
+      detailChildren: (document.querySelector(".sqlp-msg .sqlp-detail") || { childElementCount: -1 }).childElementCount,
+      errChildren: (document.querySelector(".sqlp-msg .sqlp-err") || { childElementCount: -1 }).childElementCount,
+      alerts: window.__sqlAlerts,
+    }));
+    (markupErr.err === "The query did not run." && markupErr.detail.includes(markupCell) && !markupErr.hasTable
+      && markupErrDom.made === 0 && markupErrDom.detailChildren === 0 && markupErrDom.errChildren === 0 && markupErrDom.alerts === 0)
+      ? ok("sql: an error that quotes HTML-looking text shows it as text")
+      : bad("sql: an error that quotes HTML-looking text shows it as text", JSON.stringify({ err: markupErr.err, detail: markupErr.detail, hasTable: markupErr.hasTable, markupErrDom }));
+
+    // A whole number past what a JavaScript number holds keeps every digit
+    // in this browser, and no rounding notice is shown for it.
+    const bigInt = await runSQL("SELECT 9007199254740993 AS big, 12 AS small");
+    (bigInt.err === "" && JSON.stringify(bigInt.rows) === JSON.stringify([["9007199254740993", "12"]]) && JSON.stringify(bigInt.tdNum) === JSON.stringify([true, true]) && bigInt.notes.length === 0)
+      ? ok("sql: a whole number past 2^53 is shown with every digit")
+      : bad("sql: a whole number past 2^53 is shown with every digit", JSON.stringify({ rows: bigInt.rows, notes: bigInt.notes, err: bigInt.err, tdNum: bigInt.tdNum }));
+
+    // A statement that is not a SELECT is refused before it runs, in words.
+    const refused = await runSQL(`DELETE FROM ${stateView}`);
+    (refused.err === "The query did not run." && /only a single SELECT/.test(refused.detail) && !refused.hasTable && refused.csvDisabled === true && refused.live === "polite")
+      ? ok("sql: a DELETE is refused with the reason, no result table, in the live region")
+      : bad("sql: a DELETE is refused with the reason, no result table, in the live region", JSON.stringify(refused));
+
+    // A read outside the copy is DuckDB's permission error and nothing else:
+    // no row of the file reaches the page.
+    const outside = await runSQL("SELECT * FROM read_csv('/etc/passwd')");
+    const leaked = await page.evaluate(() => /root:|\/bin\/(ba)?sh|nologin/.test(document.querySelector(".use-panel").textContent));
+    (outside.err === "The query did not run." && /Permission Error/.test(outside.detail) && !outside.hasTable && !leaked)
+      ? ok("sql: reading a file outside the copy shows the permission error and none of the file")
+      : bad("sql: reading a file outside the copy shows the permission error and none of the file", JSON.stringify({ outside, leaked }));
+
+    // More rows than the cap: exactly the cap is painted and the page says so.
+    const big = await runSQL("SELECT range AS n FROM range(1500)");
+    (big.err === "" && big.rows.length === 1000 && /^1,000 rows in /.test(big.count) && big.notes.length === 1 && big.notes[0].startsWith("Showing the first 1,000 rows."))
+      ? ok("sql: a result past the row cap shows the first 1,000 rows and says there are more")
+      : bad("sql: a result past the row cap shows the first 1,000 rows and says there are more", JSON.stringify({ n: big.rows.length, count: big.count, notes: big.notes, err: big.err }));
+
+    // A query that would run to the time limit: a million rows against a
+    // million. While it runs, Run is off, Cancel is there, the editor is
+    // locked, and a second Ctrl+Enter sends nothing.
+    const slowSQL = "SELECT sum(a.range * b.range) AS total FROM range(1000000) a, range(1000000) b";
+    const startSlow = async () => {
+      await page.evaluate((q) => { const ta = document.querySelector(".sqlp-editor"); ta.value = q; }, slowSQL);
+      await page.click(".sqlp-run");
+      await page.waitForFunction(() => { const c = document.querySelector(".sqlp-cancel"); return c && !c.hidden; });
+    };
+    await startSlow();
+    const postsBefore = sqlPosts();
+    await page.focus(".sqlp-editor");
+    await page.keyboard.press("Control+Enter");
+    await page.keyboard.type("x");
+    await page.waitForTimeout(500);
+    const during = await readSQL();
+    const duringValue = await page.evaluate(() => document.querySelector(".sqlp-editor").value);
+    (postsBefore > 0 && sqlPosts() === postsBefore && during.runDisabled === true && during.cancelShown && during.readOnly === true && duringValue === slowSQL && !during.hasTable && during.err === "")
+      ? ok("sql: while a query runs, Run is off, Cancel shows, the editor is locked and a second Ctrl+Enter sends nothing")
+      : bad("sql: while a query runs, Run is off, Cancel shows, the editor is locked and a second Ctrl+Enter sends nothing", JSON.stringify({ postsBefore, postsNow: sqlPosts(), during, duringValue }));
+
+    // Cancel stops it, says so, and gives the panel back: the very next
+    // query succeeds (the server let go of the cancelled one).
+    await page.click(".sqlp-cancel");
+    await page.waitForFunction(() => { const r = document.querySelector(".sqlp-run"); return r && !r.disabled; }, null, { timeout: 90000 });
+    const cancelled = await readSQL();
+    const afterCancel = await runSQL("SELECT 1 AS one");
+    (cancelled.msg === "Cancelled." && !cancelled.hasTable && !cancelled.cancelShown && cancelled.readOnly === false && cancelled.csvDisabled === true
+      && afterCancel.err === "" && JSON.stringify(afterCancel.rows) === JSON.stringify([["1"]]))
+      ? ok("sql: Cancel stops the query, says Cancelled, and the next query runs at once")
+      : bad("sql: Cancel stops the query, says Cancelled, and the next query runs at once", JSON.stringify({ cancelled, after: { rows: afterCancel.rows, err: afterCancel.err, detail: afterCancel.detail } }));
+
+    // Closing the panel under a running query drops that query too. If it
+    // did not, the server would still be running it and would refuse the
+    // next one as "already running" for up to the time limit. With the
+    // panel closed the card's button is the filled one again.
+    await startSlow();
+    await page.click(".use-panel-x");
+    let refilled = false;
+    try {
+      await page.waitForFunction((filledInk) => {
+        const act = document.querySelector('.use-card[data-use="sql"] .use-act');
+        return !document.querySelector(".sqlp") && act && getComputedStyle(act).color === filledInk;
+      }, row.ink, { timeout: 5000 });
+      refilled = true;
+    } catch (_) { /* reported below */ }
+    const reopened = await openSQL();
+    const afterClose = await runSQL("SELECT 2 AS two");
+    (refilled && reopened && afterClose.err === "" && JSON.stringify(afterClose.rows) === JSON.stringify([["2"]]))
+      ? ok("sql: closing the panel under a running query stops it; reopened, the next query runs")
+      : bad("sql: closing the panel under a running query stops it; reopened, the next query runs", JSON.stringify({ refilled, reopened, rows: afterClose.rows, err: afterClose.err, detail: afterClose.detail }));
+
+    // The same when the SERVER is switched under a running query.
+    await startSlow();
+    await page.evaluate(async ([other, back]) => { await switchServer(other); await switchServer(back); navigate("overview"); }, [arcId, byoId]);
+    let backOnCard = false;
+    try {
+      await page.waitForFunction(() => {
+        const c = document.querySelector('.use-card[data-use="sql"]');
+        return capsCache.sql === true && c && !c.hidden && c.offsetParent !== null && !document.querySelector(".sqlp");
+      });
+      backOnCard = true;
+    } catch (_) { /* reported below */ }
+    const reopened2 = backOnCard && await openSQL();
+    const afterSwitch = reopened2 ? await runSQL("SELECT 3 AS three") : { rows: [], err: "the panel did not reopen", detail: "" };
+    (reopened2 && afterSwitch.err === "" && JSON.stringify(afterSwitch.rows) === JSON.stringify([["3"]]))
+      ? ok("sql: switching server under a running query stops it; back on the server, the next query runs")
+      : bad("sql: switching server under a running query stops it; back on the server, the next query runs", JSON.stringify({ backOnCard, reopened2, rows: afterSwitch.rows, err: afterSwitch.err, detail: afterSwitch.detail }));
+
+    // Download CSV saves the statement that RAN, not what the editor holds
+    // now: the editor is changed after the run and left unrun. The file
+    // arrives as a real browser download, under its name.
+    await runSQL(`SELECT id, status FROM ${stateView} ORDER BY id`);
+    await page.evaluate(() => {
+      document.querySelector(".sqlp-editor").value = "SELECT 42 AS answer";
+      window.__sqlBlobType = "";
+      const orig = URL.createObjectURL;
+      URL.createObjectURL = (b) => { window.__sqlBlobType = b.type; URL.createObjectURL = orig; return orig.call(URL, b); };
+    });
+    let csvFile;
+    try {
+      const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), page.click(".sqlp-csv")]);
+      csvFile = { name: dl.suggestedFilename(), text: readFileSync(await dl.path(), "utf8"), type: await page.evaluate(() => window.__sqlBlobType) };
+    } catch (err) { csvFile = { error: String(err) }; }
+    (csvFile.name === "dbtrail-sql.csv" && csvFile.text === "id,status\r\n1,new\r\n2,new\r\n4,new" && csvFile.type === "text/csv")
+      ? ok("sql: Download CSV saves dbtrail-sql.csv with the server's CSV of the query that ran, byte for byte, not of what the editor holds now")
+      : bad("sql: Download CSV saves dbtrail-sql.csv with the server's CSV of the query that ran, byte for byte, not of what the editor holds now", JSON.stringify(csvFile));
+
+    // From before the panel opened to the download: the page talked to
+    // this console and to nothing else. The anchor is that the listener
+    // did see the panel's own requests, so an empty list cannot pass.
+    page.off("request", onSQLRequest);
+    const sawInfo = sqlReqs.some((r) => r.method === "GET" && r.url === URL + "/api/sql");
+    const elsewhere = sqlReqs.map((r) => r.url).filter((u) => !(u.startsWith(URL + "/") || u.startsWith("blob:")));
+    (sawInfo && sqlPosts() >= 10 && elsewhere.length === 0)
+      ? ok("sql: opening the panel, running queries and downloading the CSV request nothing outside this console")
+      : bad("sql: opening the panel, running queries and downloading the CSV request nothing outside this console", JSON.stringify({ sawInfo, posts: sqlPosts(), total: sqlReqs.length, elsewhere }));
+
+    // One panel at a time: another card closes this one.
+    await page.click('.use-card[data-use="client"] .use-act');
+    const swapped = await page.evaluate(() => ({ sqlp: !!document.querySelector(".sqlp"), title: (document.querySelector(".use-panel-title") || {}).textContent }));
+    (!swapped.sqlp && swapped.title === "From your MySQL client")
+      ? ok("sql: opening another card replaces the SQL panel")
+      : bad("sql: opening another card replaces the SQL panel", JSON.stringify(swapped));
+
+    // A session the server reports sql:false for does not see the card. The
+    // server-side half (no sql:execute, a data profile, an S3-only copy all
+    // report false) is pinned in Go; this is the page obeying the capability.
+    const hiddenCard = await page.evaluate(async () => {
+      const keep = capsCache.sql;
+      capsCache.sql = false;
+      navigate("overview");
+      for (let i = 0; i < 100; i++) {
+        const c = document.querySelector('.use-card[data-use="sql"]');
+        if (c && c.hidden && !document.querySelector(".use").hidden) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const c = document.querySelector('.use-card[data-use="sql"]');
+      const out = { hidden: !!(c && c.hidden), others: Array.from(document.querySelectorAll(".use-card")).filter((k) => !k.hidden).length };
+      capsCache.sql = keep;
+      navigate("overview");
+      return out;
+    });
+    (hiddenCard.hidden && hiddenCard.others === 3)
+      ? ok("sql: without the capability the card is not shown and the other three are")
+      : bad("sql: without the capability the card is not shown and the other three are", JSON.stringify(hiddenCard));
+  }
+
   // One scene per control that saves something (#1883), last: they add and
   // remove a server, leave a rotation override behind, and set the console
   // password, which ends every other session. Each reads the stored value

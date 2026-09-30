@@ -1609,6 +1609,80 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .use-panel-x { margin-left: auto; }
 .use-panel-body { padding: 14px 16px 16px; }
 .use-note { margin: 0 0 10px; color: var(--ink-2); font-size: var(--fs-md); }
+
+/* SQL on the copy (#1952): the panel the "Ask it here" card opens. A list of
+   tables on the left, the statement and its result on the right. The result
+   follows the ONE table above: 40px rows, a header that stays, mono cells,
+   tabular figures, numbers to the right. */
+/* One filled button per view: while the SQL panel is open its Run is the
+   primary, so the card's own button steps down to the plain one (it stays
+   "Open SQL", pressed: aria-expanded says so). */
+.use-card.on[data-use="sql"] .use-act,
+.use-card.on[data-use="sql"] .use-act:hover { background: var(--surface); color: var(--ink); border-color: var(--line); box-shadow: none; }
+.use-card.on[data-use="sql"] .use-act:focus-visible { background: var(--surface); color: var(--ink); border-color: var(--accent); box-shadow: var(--focus-ring); }
+.sqlp { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 0; margin: -14px -16px 0; border-bottom: 1px solid var(--line); }
+.sqlp-tables { border-right: 1px solid var(--line); padding: 10px; min-width: 0; }
+.sqlp-filter {
+  width: 100%; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px 8px; margin-bottom: 8px;
+  background: var(--bg); color: var(--ink); font: inherit; font-size: var(--fs-sm);
+}
+.sqlp-filter:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+.sqlp-list { display: flex; flex-direction: column; max-height: 360px; overflow-y: auto; }
+.sqlp-name {
+  appearance: none; border: 0; background: transparent; text-align: left; cursor: pointer;
+  padding: 4px 6px; border-radius: var(--r-xs); color: var(--ink-2);
+  font-family: var(--f-mono); font-size: var(--fs-xs); line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none;
+}
+.sqlp-name:hover { background: var(--raised); color: var(--ink); }
+.sqlp-name:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.sqlp-more { padding: 4px 6px; color: var(--ink-3); font-family: var(--f-mono); font-size: var(--fs-xs); }
+.sqlp-q { display: flex; flex-direction: column; min-width: 0; }
+.sqlp-editor {
+  display: block; width: 100%; min-height: 132px; resize: vertical; border: 0; border-bottom: 1px solid var(--line);
+  padding: 14px 16px; background: var(--bg); color: var(--ink);
+  font-family: var(--f-mono); font-size: var(--fs-sm); line-height: 1.7; tab-size: 2;
+}
+.sqlp-editor:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+.sqlp-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line); min-height: 46px; }
+.sqlp-count { color: var(--ink-3); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.sqlp-csv { margin-left: auto; }
+.sqlp-msg:empty { display: none; }
+.sqlp-msg { padding: 12px 16px 0; }
+.sqlp-err { margin: 0; color: var(--error); font-size: var(--fs-md); }
+.sqlp-detail {
+  margin: 8px 0 0; padding: 10px 12px; border-radius: var(--r-sm); background: var(--inset); color: var(--ink);
+  font-family: var(--f-mono); font-size: var(--fs-xs); line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  max-height: 220px; overflow: auto;
+}
+.sqlp-results:focus { outline: none; }
+.sqlp-results:empty { display: none; }
+.sqlp-results .skel-box { padding: 14px 16px; }
+.sqlp-note { margin: 0; padding: 10px 16px; color: var(--ink-2); font-size: var(--fs-sm); background: var(--sun-tint); border-bottom: 1px solid var(--line-soft); }
+.sqlp-msg .sqlp-note { padding: 0 0 12px; background: transparent; border: 0; }
+.sqlp-scroll { max-height: 440px; overflow: auto; }
+.sqlp-table { border-collapse: collapse; width: 100%; }
+.sqlp-table th {
+  position: sticky; top: 0; z-index: 2; background: var(--bg); text-align: left; white-space: nowrap;
+  font-family: var(--f-mono); font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.04em; color: var(--ink-3);
+  padding: 8px 16px; border-bottom: 1px solid var(--line);
+}
+.sqlp-table td {
+  height: 40px; padding: 0 16px; border-bottom: 1px solid var(--line-soft); white-space: nowrap;
+  font-family: var(--f-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--ink);
+  max-width: 520px; overflow: hidden; text-overflow: ellipsis;
+}
+.sqlp-table tbody tr:hover td { background: var(--raised); }
+.sqlp-table .num { text-align: right; }
+.sqlp-null { color: var(--ink-4); font-size: var(--fs-xs); letter-spacing: 0.04em; border: 1px solid var(--line); border-radius: var(--r-xs); padding: 0 4px; }
+.sqlp-foot { margin: 10px 0 0; color: var(--ink-3); font-size: var(--fs-xs); text-align: right; }
+.sqlp-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+@media (max-width: 760px) {
+  .sqlp { grid-template-columns: minmax(0, 1fr); }
+  .sqlp-tables { border-right: 0; border-bottom: 1px solid var(--line); }
+  .sqlp-list { max-height: 148px; }
+  .sqlp-foot { text-align: left; }
+}
 .use-acts { display: flex; gap: 8px; flex-wrap: wrap; }
 @media (prefers-reduced-motion: no-preference) {
   .use-card { transition: transform .18s var(--ease), box-shadow .18s, border-color .18s; }

@@ -81,6 +81,12 @@ type capabilitiesResponse struct {
 	// control. Never advertised without Views: a choice about a file the reader
 	// cannot download at all is not a choice.
 	ViewsPortableBaseline bool `json:"views_portable_baseline"`
+	// SQL: POST /api/sql can work for this session on the selected server
+	// (#1952): the session holds sql:execute, no data profile is active,
+	// archive access is on, and the copy is local rather than only on S3.
+	// The Overview shows its "Ask it here" card on this and nothing else, so
+	// the card is never offered where the route can only refuse.
+	SQL bool `json:"sql"`
 	// BaselineTrigger: this process can create baseline snapshots in-process from
 	// the console (the watch daemon opted in with BINTRAIL_CONSOLE_BASELINE_TRIGGER=1).
 	// Process-global, like Monitor — the endpoint does the per-server validation
@@ -234,6 +240,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		restricted := sessionRestricted(r)
 		resp.Reconstruct = b.baselineConfigured && !restricted
 		resp.Views = s.viewsAvailable(r, b)
+		resp.SQL = s.sqlAvailable(r, b)
 		// Gated on Views for the reason the field's doc gives, and read off the
 		// same bundle field the handler refuses on, so the control cannot be
 		// offered for a server the route would then reject.

@@ -1087,27 +1087,61 @@ settings), so it runs under rules the tests pin:
 An index created before the RBAC tables existed answers `422` here: the
 web interface cannot create tables on an index.
 
-### The SQL panel (removed)
+### SQL in the browser
 
-The web interface used to have a **SQL** page: a read-only `SELECT` box answered by
-DuckDB inside the daemon, over the selected server's Parquet. It was removed in
-0.75.0, together with `POST /api/sql`.
+The Overview's **Ask it here** card opens an editor on the page. You write a
+`SELECT`, press **Run** (or Ctrl+Enter, Cmd+Enter on a Mac), and the result
+comes back as a table. It runs on DBTrail's copy of your data, the Parquet
+files on the index host. It never runs on MySQL.
 
-Two reasons. It executed SQL in the same process that captures, which is why it
-needed a sandbox, a statement gate, two timeout budgets and a single-query
-latch. And it was not usable on a real archive: defining the `events` view
-opens one Parquet footer per archived file before returning a row, measured at
-114.2s over 1886 files, against a 30s setup budget. `SHOW TABLES` — the only
-way to learn the derived `state_*` names — built the whole catalog and hit that
-budget, and the page's own example named `events`.
+What you can query is what the copy defines: one table per source table, named
+`state_<schema>_<table>` (the table as of the newest snapshot), and `events`,
+the change log, when archived changes exist on local disk. The list on the left
+shows them; type in the filter to narrow it, click a name to put it in the
+query. The line under the editor says how old the copy is.
 
-Query the same Parquet in your own DuckDB instead. **Download a DuckDB schema**
-on the **MCP Server** page writes a `views.sql` over the same files, with no row
-cap, no time limit and nothing running in the daemon. See
+The limits, so a query can never hurt capture:
+
+- Each query runs in its own process, separate from the one that captures,
+  with 2 threads and 2 GB of memory. A query that needs more fails with an
+  out-of-memory message; capture does not notice.
+- 60 seconds. A longer query is stopped.
+- 1,000 rows come back. The page says when there were more. **Download CSV**
+  saves the same rows as a file.
+- One query at a time per person, two at a time for the whole server.
+- Read-only. One `SELECT` per run (`DESCRIBE`, `SHOW` and `SUMMARIZE` work
+  too). It can read the copy and nothing else on the host: no other file, no
+  network, no extension.
+
+Every query is written to the audit trail when one is installed: who ran it,
+on which server, the statement, and how many rows came back.
+
+Who sees it: a session that holds the `sql:execute` permission. With no access
+policy (the built-in password login and the static token) every session holds
+it. It is **not available**:
+
+- to a session with a data profile or table and column restrictions. The
+  profile filters what the console shows, and SQL reads the raw files, which it
+  cannot filter;
+- for a server whose copy is only on S3. SQL in the browser needs the copy on
+  local disk (a local snapshot directory, or a local archive directory);
+- when archive access is disabled for the server.
+
+In those cases the card is not shown. For no row cap and no time limit, query
+the same files in your own DuckDB: **Download a DuckDB schema** on the **MCP
+Server** page writes a `views.sql` over them. See
 [Query in DuckDB](https://www.dbtrail.com/docs/guides/query-in-duckdb/).
 
-`BINTRAIL_CONSOLE_SQL_PANEL` is still read for one release and warns that it no
-longer does anything. Remove it.
+The API behind it is `POST /api/sql` with `{"sql": "..."}` (JSON result, or CSV
+with `?format=csv`), and `GET /api/sql` for the list of tables, the copy's age
+and the limits. Both need `sql:execute`.
+
+An earlier SQL page was removed in 0.75.0. It ran queries inside the process
+that captures, and it defined the `events` view on every page load, which took
+minutes on a large archive. This one runs each query in a separate process and
+reads the change log only for a query that names `events`.
+`BINTRAIL_CONSOLE_SQL_PANEL`, which switched the old page, is still read for
+one release and warns that it no longer does anything. Remove it.
 
 ### Environment variables
 
@@ -1128,10 +1162,10 @@ longer does anything. Remove it.
   differently. The compose file sets it, and the installer moves it with
   `DBTRAIL_PORT`. A value that is not an `http` or `https` URL with a host is
   ignored with a warning.
-- `BINTRAIL_CONSOLE_SQL_PANEL` — retired. The SQL page and `POST /api/sql` were
-  removed in 0.75.0 (see [The SQL panel (removed)](#the-sql-panel-removed)). The
-  variable is still read for one release and warns that it does nothing; a later
-  release stops reading it.
+- `BINTRAIL_CONSOLE_SQL_PANEL`: retired. It switched the first SQL page, which
+  was removed in 0.75.0. It does not control [SQL in the browser](#sql-in-the-browser),
+  which is gated by the `sql:execute` permission. The variable is still read for
+  one release and warns that it does nothing; a later release stops reading it.
 - `BINTRAIL_CONSOLE_ARCHIVE_STAGING` (`watch` only) — local staging dir for the
   Archive-to-S3 feature, same as `--archive-staging-dir`. AWS credentials for
   the upload come from the ambient chain (`AWS_*` / `~/.aws` / role).

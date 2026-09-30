@@ -170,9 +170,25 @@ func (f *sqlFixture) expectArchive() {
 		return
 	}
 	localFile := filepath.Join(f.archiveDir, "event_date=2026-05-01", "event_hour=03", "events.parquet")
-	f.mock.ExpectQuery("FROM archive_state").WillReturnRows(
-		sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}).
-			AddRow(sqlArchiveID, localFile, nil, nil))
+	// Two answers per call, matched on the archive-sources query alone: one
+	// request can read it twice (capabilities asks for views and for sql;
+	// a change-log-only copy resolves its views twice), and the looser
+	// "FROM archive_state" would let the grouping query eat one.
+	for range 2 {
+		f.mock.ExpectQuery(`MIN\(local_path\)`).WillReturnRows(
+			sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}).
+				AddRow(sqlArchiveID, localFile, nil, nil))
+	}
+}
+
+// expectArchiveS3 queues the archive_state answer for a change log that
+// lives in S3 only: a bucket and a key, no local path.
+func (f *sqlFixture) expectArchiveS3() {
+	for range 2 {
+		f.mock.ExpectQuery(`MIN\(local_path\)`).WillReturnRows(
+			sqlmock.NewRows([]string{"bintrail_id", "sample_local", "sample_bucket", "sample_key"}).
+				AddRow(sqlArchiveID, nil, "e2e-bucket", "arch/bintrail_id="+sqlArchiveID+"/event_date=2026-05-01/event_hour=03/events.parquet"))
+	}
 }
 
 func (f *sqlFixture) post(t *testing.T, body string, hdr ...string) *httptest.ResponseRecorder {
@@ -205,6 +221,20 @@ func newSQLServer(t *testing.T, runner sqlRunner) (*Server, string) {
 	return f.s, f.root
 }
 
+// sqlCodeOnly drops the comment lines of a generated views file: its header
+// names locations in prose (an S3 change log it left out, for one), and
+// only what executes matters to the locked worker.
+func sqlCodeOnly(text string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		b.WriteString(line + "\n")
+	}
+	return b.String()
+}
+
 func oneRowResult() sqlsandbox.Result {
 	return sqlsandbox.Result{
 		Columns: []sqlsandbox.Column{{Name: "id", Type: "INTEGER"}, {Name: "status", Type: "VARCHAR"}},
@@ -221,7 +251,8 @@ func TestSQLAPI_runsTheStatementOnTheCopy(t *testing.T) {
 	f := newSQLFixture(t, &fakeSQLRunner{res: oneRowResult()}, true)
 	var seen *views.Input
 	f.s.sqlViewsObserver = func(in views.Input) { seen = &in }
-	w := f.post(t, `{"sql":"SELECT id, status FROM state_shop_orders","max_rows":50}`)
+	const stmt = "SELECT o.id, o.status FROM state_shop_orders o WHERE o.id IN (SELECT 1 FROM events)"
+	w := f.post(t, `{"sql":"`+stmt+`","max_rows":50}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
 	}
@@ -248,7 +279,7 @@ func TestSQLAPI_runsTheStatementOnTheCopy(t *testing.T) {
 			t.Errorf("job.CopyDirs hands the sandbox the snapshot root or the snapshot directory: %v", job.CopyDirs)
 		}
 	}
-	if job.SQL != "SELECT id, status FROM state_shop_orders" || job.Limits.MaxRows != 50 {
+	if job.SQL != stmt || job.Limits.MaxRows != 50 {
 		t.Errorf("job SQL/MaxRows = %q/%d", job.SQL, job.Limits.MaxRows)
 	}
 	// The views input, positively: no live leg although the DSN makes it
@@ -256,7 +287,7 @@ func TestSQLAPI_runsTheStatementOnTheCopy(t *testing.T) {
 	if seen == nil {
 		t.Fatal("the views observer never ran")
 	}
-	if seen.LiveIndex != nil || seen.LiveLegUnavailable || seen.Follow != views.FollowNone || seen.PortableRouting {
+	if seen.LiveIndex != nil || seen.LiveLegUnavailable || seen.Follow != views.FollowNone || seen.PortableRouting || seen.OmitEvents {
 		t.Errorf("views input: LiveIndex=%v LiveLegUnavailable=%v Follow=%v PortableRouting=%v",
 			seen.LiveIndex != nil, seen.LiveLegUnavailable, seen.Follow, seen.PortableRouting)
 	}
@@ -268,9 +299,22 @@ func TestSQLAPI_runsTheStatementOnTheCopy(t *testing.T) {
 		t.Errorf("views do not define the state view and the events view:\n%s", job.ViewsSQL)
 	}
 	for _, forbidden := range []string{"ATTACH", "INSTALL", "LOAD ", "s3://"} {
-		if strings.Contains(job.ViewsSQL, forbidden) {
+		if strings.Contains(sqlCodeOnly(job.ViewsSQL), forbidden) {
 			t.Errorf("views carry %q, which the locked worker refuses:\n%s", forbidden, job.ViewsSQL)
 		}
+	}
+	// A statement that does not name events gets neither the events view nor
+	// the archive directory: defining that view is the expensive half.
+	w = f.post(t, `{"sql":"SELECT id FROM state_shop_orders"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("state-only: code=%d body=%s", w.Code, w.Body.String())
+	}
+	job = f.runner.last(t)
+	if len(job.CopyDirs) != 1 || job.CopyDirs[0] != f.schemaDir {
+		t.Errorf("state-only job.CopyDirs = %v, want only %s", job.CopyDirs, f.schemaDir)
+	}
+	if !seen.OmitEvents || strings.Contains(job.ViewsSQL, "VIEW events") || strings.Contains(job.ViewsSQL, "VIEW \"events\"") {
+		t.Errorf("state-only statement still installs the events view (OmitEvents=%v)", seen.OmitEvents)
 	}
 	// The body may not raise the cap.
 	w = f.post(t, `{"sql":"SELECT 1","max_rows":100000}`)
@@ -622,6 +666,16 @@ func TestSQLAPI_changeLogWithoutSnapshotHasNoCopyTime(t *testing.T) {
 	if job := f.runner.last(t); len(job.CopyDirs) != 1 || job.CopyDirs[0] != f.archiveDir {
 		t.Errorf("job.CopyDirs = %v, want only the archive base", job.CopyDirs)
 	}
+	// On a change-log-only copy the events view is all there is to install,
+	// so a statement that does not name it still runs (two resolver reads).
+	f.expectArchive()
+	w = f.post(t, `{"sql":"SELECT 1"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("SELECT 1 on a change-log-only copy: code=%d body=%s", w.Code, w.Body.String())
+	}
+	if job := f.runner.last(t); len(job.CopyDirs) != 1 || job.CopyDirs[0] != f.archiveDir {
+		t.Errorf("fallback job.CopyDirs = %v, want the archive base", job.CopyDirs)
+	}
 }
 
 // The CSV form: by query parameter or Accept header, an attachment with a
@@ -805,3 +859,326 @@ func TestSQLCopyDirs_relativePathsBecomeAbsolute(t *testing.T) {
 // sqlsandboxLocal mirrors the sandbox's own "is this a local copy dir" rule
 // (absolute, not s3://), so the test above fails the way the runner would.
 func sqlsandboxLocal(d string) bool { return filepath.IsAbs(d) && !strings.HasPrefix(d, "s3://") }
+
+func TestSQLMentionsEvents(t *testing.T) {
+	for stmt, want := range map[string]bool{
+		"SELECT * FROM events":                   true,
+		"select count(*) from EVENTS e":          true,
+		"SELECT * FROM \"events\" LIMIT 1":       true,
+		"SELECT * FROM state_shop_orders":        false,
+		"SELECT * FROM state_shop_events_log":    false,
+		"SELECT * FROM state_x WHERE eventsx=1":  false,
+		"SELECT * FROM main.events":              true,
+		"SELECT * FROM memory.main.events e":     true,
+		"FROM Events":                            true,
+		"SELECT count(*) FROM events;":           true,
+		"SELECT * FROM (events)":                 true,
+		"SELECT count(*) AS events FROM state_x": true,
+	} {
+		if got := sqlMentionsEvents(stmt); got != want {
+			t.Errorf("sqlMentionsEvents(%q) = %v, want %v", stmt, got, want)
+		}
+	}
+}
+
+// GET /api/sql: the names a statement can use, the pinned snapshot's time
+// and the real limits, read without a worker; same gates as the POST.
+func TestSQLAPI_infoListsViewsCopyTimeAndLimits(t *testing.T) {
+	f := newSQLFixture(t, &fakeSQLRunner{res: oneRowResult()}, true)
+	f.s.sqlLimits = resolveSQLLimits(sqlsandbox.Limits{Timeout: 45 * time.Second, MaxRows: 250})
+	get := func(s *Server, ctx context.Context) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/api/sql", nil)
+		if ctx != nil {
+			req = req.WithContext(ctx)
+		}
+		w := httptest.NewRecorder()
+		s.handleSQLInfo(w, req)
+		return w
+	}
+	f.expectArchive()
+	w := get(f.s, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	var info sqlInfoResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(info.Views, ",") != "events,state_shop_orders" {
+		t.Errorf("views = %v, want [events state_shop_orders]", info.Views)
+	}
+	if info.CopyUpdatedAt == nil || !info.CopyUpdatedAt.Equal(sqlSnapshotAt) {
+		t.Errorf("copy_updated_at = %v", info.CopyUpdatedAt)
+	}
+	if info.Limits.TimeoutSeconds != 45 || info.Limits.MaxRows != 250 || info.Limits.MaxCellBytes != sqlsandbox.MaxCellBytes {
+		t.Errorf("limits = %+v", info.Limits)
+	}
+	if f.runner.calls() != 0 {
+		t.Errorf("the metadata read spawned a worker: %+v", f.runner.jobs)
+	}
+	// Without a change log the list is the state views alone.
+	g := newSQLFixture(t, &fakeSQLRunner{}, false)
+	w = get(g.s, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"views":["state_shop_orders"]`) {
+		t.Errorf("no archive: code=%d body=%s", w.Code, w.Body.String())
+	}
+	// The profile gate refuses the listing too: view names are table names.
+	pol := &ext.AccessPolicy{Permissions: []ext.Permission{ext.PermSQLExecute}, Profile: "auditors"}
+	w = get(g.s, context.WithValue(context.Background(), policyCtxKey{}, pol))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("restricted session: code=%d body=%s, want 403", w.Code, w.Body.String())
+	}
+	if p, ok := permForRoute("GET", "/api/sql"); !ok || p != ext.PermSQLExecute {
+		t.Errorf("GET /api/sql classified as %q (%v)", p, ok)
+	}
+}
+
+// The `sql` capability is true exactly where the route can work: a session
+// holding sql:execute, no data profile, archive access on, a local copy.
+func TestCapabilities_sql(t *testing.T) {
+	caps := func(s *Server, pol *ext.AccessPolicy) bool {
+		req := httptest.NewRequest("GET", "/api/capabilities", nil)
+		if pol != nil {
+			req = req.WithContext(context.WithValue(req.Context(), policyCtxKey{}, pol))
+		}
+		w := httptest.NewRecorder()
+		s.handleCapabilities(w, req)
+		var resp capabilitiesResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("capabilities: %v: %s", err, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `"sql":`) {
+			t.Fatalf("capabilities carries no sql field: %s", w.Body.String())
+		}
+		return resp.SQL
+	}
+	f := newSQLFixture(t, &fakeSQLRunner{}, false)
+	if !caps(f.s, nil) {
+		t.Error("local snapshot directory, policy-less session: sql should be true")
+	}
+	if !caps(f.s, &ext.AccessPolicy{Permissions: []ext.Permission{ext.PermSQLExecute}}) {
+		t.Error("session holding sql:execute: sql should be true")
+	}
+	if caps(f.s, &ext.AccessPolicy{Permissions: []ext.Permission{ext.PermQueryExecute, ext.PermSettingsRead}}) {
+		t.Error("session without sql:execute: sql should be false")
+	}
+	if caps(f.s, &ext.AccessPolicy{Permissions: []ext.Permission{ext.PermSQLExecute}, Profile: "auditors"}) {
+		t.Error("data-restricted session: sql should be false")
+	}
+	f.s.profileActive = true
+	if caps(f.s, nil) {
+		t.Error("process-wide profile: sql should be false")
+	}
+	f.s.profileActive = false
+	f.s.cm.boot.noArchive = true
+	if caps(f.s, nil) {
+		t.Error("archive access disabled: sql should be false")
+	}
+	f.s.cm.boot.noArchive = false
+	f.s.cm.boot.baselineSrc = "s3://bucket/baselines"
+	if caps(f.s, nil) {
+		t.Error("S3-only snapshot root and no change log: sql should be false")
+	}
+	// An S3 snapshot root with a LOCAL change log is one of the two
+	// documented conservative corners: the route would have to list S3
+	// before it could answer, which a capability probe must not do.
+	a := newSQLFixture(t, &fakeSQLRunner{}, true)
+	a.s.cm.boot.baselineSrc = "s3://bucket/baselines"
+	a.expectArchive()
+	if caps(a.s, nil) {
+		t.Error("S3 snapshot root: sql should be false (conservative, documented on sqlAvailable)")
+	}
+	a = newSQLFixture(t, &fakeSQLRunner{}, true)
+	a.s.cm.boot.baselineSrc = ""
+	a.expectArchive()
+	if !caps(a.s, nil) {
+		t.Error("no snapshot root, local change log: sql should be true")
+	}
+	f.s.cm.boot.baselineSrc = ""
+	if caps(f.s, nil) {
+		t.Error("no copy at all: sql should be false")
+	}
+}
+
+// The mixed layout: the tables on local disk, the change log in S3. A
+// statement over the tables runs; one that merely CONTAINS the word events
+// runs too (the word match is loose on purpose, and must not turn a valid
+// query into "the copy is only on S3"); one that really reads events gets
+// a sentence that says what is where; the listing offers the tables only.
+func TestSQLAPI_localTablesWithChangeLogInS3(t *testing.T) {
+	f := newSQLFixture(t, &fakeSQLRunner{res: oneRowResult()}, true)
+	postS3 := func(body string) *httptest.ResponseRecorder {
+		f.expectArchiveS3()
+		return postSQL(t, f.s, body)
+	}
+	var seen *views.Input
+	f.s.sqlViewsObserver = func(in views.Input) { seen = &in }
+	for _, stmt := range []string{
+		"SELECT id FROM state_shop_orders",
+		"SELECT count(*) AS events FROM state_shop_orders",
+		"SELECT id FROM state_shop_orders WHERE status LIKE '%events%'",
+	} {
+		w := postS3(`{"sql":"` + stmt + `"}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: code=%d body=%s", stmt, w.Code, w.Body.String())
+		}
+		job := f.runner.last(t)
+		if len(job.CopyDirs) != 1 || job.CopyDirs[0] != f.schemaDir {
+			t.Errorf("%s: job.CopyDirs = %v, want only %s", stmt, job.CopyDirs, f.schemaDir)
+		}
+		if code := sqlCodeOnly(job.ViewsSQL); !seen.OmitEvents || strings.Contains(code, "s3://") || strings.Contains(code, "INSTALL") || strings.Contains(code, "ATTACH") {
+			t.Errorf("%s: the views reach for S3 (OmitEvents=%v):\n%s", stmt, seen.OmitEvents, code)
+		}
+	}
+	// A statement that really reads events: DuckDB says the table does not
+	// exist (it was not installed); the person reads why.
+	f.runner.err = &sqlsandbox.QueryError{Message: "Catalog Error: Table with name events does not exist!\nDid you mean \"state_shop_orders\"?"}
+	w := postS3(`{"sql":"SELECT count(*) FROM events"}`)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "on S3, so events cannot be read here; the tables can") {
+		t.Errorf("reading events with the change log in S3: code=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "only on S3") || strings.Contains(w.Body.String(), "Catalog Error") {
+		t.Errorf("the answer blames the whole copy or echoes the catalog error: %s", w.Body.String())
+	}
+	// Any other DuckDB error there stays DuckDB's.
+	f.runner.err = &sqlsandbox.QueryError{Message: "Binder Error: column nope not found"}
+	if w := postS3(`{"sql":"SELECT nope FROM events"}`); w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "Binder Error") {
+		t.Errorf("another error: code=%d body=%s", w.Code, w.Body.String())
+	}
+	f.runner.err = nil
+	// The listing offers the tables only.
+	f.expectArchiveS3()
+	g := httptest.NewRecorder()
+	f.s.handleSQLInfo(g, httptest.NewRequest("GET", "/api/sql", nil))
+	if g.Code != http.StatusOK || !strings.Contains(g.Body.String(), `"views":["state_shop_orders"]`) {
+		t.Errorf("listing: code=%d body=%s", g.Code, g.Body.String())
+	}
+	// On a fully local copy the same catalog error is NOT rewritten.
+	l := newSQLFixture(t, &fakeSQLRunner{err: &sqlsandbox.QueryError{Message: "Catalog Error: Table with name events does not exist!"}}, false)
+	if w := l.post(t, `{"sql":"SELECT * FROM events"}`); !strings.Contains(w.Body.String(), "Catalog Error") {
+		t.Errorf("no change log at all: the catalog error should stand: %s", w.Body.String())
+	}
+	// A change log in S3 and nothing else: that copy really is only on S3.
+	o := newSQLFixture(t, &fakeSQLRunner{res: oneRowResult()}, true)
+	o.s.cm.boot.baselineSrc = ""
+	o.expectArchiveS3()
+	if w := postSQL(t, o.s, `{"sql":"SELECT 1"}`); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), sqlCopyNotLocalMessage) {
+		t.Errorf("S3-only change log, no snapshot: code=%d body=%s", w.Code, w.Body.String())
+	}
+	if o.runner.calls() != 0 {
+		t.Errorf("an S3-only copy reached the runner")
+	}
+}
+
+// GET /api/sql refuses what the POST refuses, with the same words.
+func TestSQLAPI_infoRefusals(t *testing.T) {
+	get := func(s *Server) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		s.handleSQLInfo(w, httptest.NewRequest("GET", "/api/sql", nil))
+		return w
+	}
+	// No copy at all.
+	n := newSQLFixture(t, &fakeSQLRunner{}, false)
+	n.s.cm.boot.baselineSrc = ""
+	if w := get(n.s); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), errNoViewSources.Error()) {
+		t.Errorf("no copy: code=%d body=%s", w.Code, w.Body.String())
+	}
+	// Archive access disabled.
+	n.s.cm.boot.noArchive = true
+	if w := get(n.s); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "disabled") {
+		t.Errorf("archive disabled: code=%d body=%s", w.Code, w.Body.String())
+	}
+	// A change log in S3 and nothing else.
+	o := newSQLFixture(t, &fakeSQLRunner{}, true)
+	o.s.cm.boot.baselineSrc = ""
+	o.expectArchiveS3()
+	if w := get(o.s); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), sqlCopyNotLocalMessage) {
+		t.Errorf("S3-only: code=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// The capability never promises what the route refuses: over every state
+// a unit fixture can stand up, `sql` is true exactly when GET /api/sql is
+// 200. (Where the capability is conservative, the route needs S3 to answer
+// at all; those two corners are documented on sqlAvailable.)
+func TestCapabilities_sqlAgreesWithTheRoute(t *testing.T) {
+	states := map[string]func(t *testing.T) (*sqlFixture, func()){
+		"local snapshot": func(t *testing.T) (*sqlFixture, func()) {
+			return newSQLFixture(t, &fakeSQLRunner{}, false), func() {}
+		},
+		"local directory, zero snapshots": func(t *testing.T) (*sqlFixture, func()) {
+			f := newSQLFixture(t, &fakeSQLRunner{}, false)
+			f.s.cm.boot.baselineSrc = t.TempDir()
+			return f, func() {}
+		},
+		"local directory with only an incomplete snapshot": func(t *testing.T) (*sqlFixture, func()) {
+			f := newSQLFixture(t, &fakeSQLRunner{}, false)
+			if err := baseline.WriteIncompleteMarker(filepath.Join(f.root, sqlSnapshotDirName)); err != nil {
+				t.Fatal(err)
+			}
+			return f, func() {}
+		},
+		"no snapshot root, local change log": func(t *testing.T) (*sqlFixture, func()) {
+			f := newSQLFixture(t, &fakeSQLRunner{}, true)
+			f.s.cm.boot.baselineSrc = ""
+			return f, f.expectArchive
+		},
+		"no snapshot root, change log in S3": func(t *testing.T) (*sqlFixture, func()) {
+			f := newSQLFixture(t, &fakeSQLRunner{}, true)
+			f.s.cm.boot.baselineSrc = ""
+			return f, f.expectArchiveS3
+		},
+		"local snapshot, change log in S3": func(t *testing.T) (*sqlFixture, func()) {
+			f := newSQLFixture(t, &fakeSQLRunner{}, true)
+			return f, f.expectArchiveS3
+		},
+		"no copy at all": func(t *testing.T) (*sqlFixture, func()) {
+			f := newSQLFixture(t, &fakeSQLRunner{}, false)
+			f.s.cm.boot.baselineSrc = ""
+			return f, func() {}
+		},
+		"archive access disabled": func(t *testing.T) (*sqlFixture, func()) {
+			f := newSQLFixture(t, &fakeSQLRunner{}, false)
+			f.s.cm.boot.noArchive = true
+			return f, func() {}
+		},
+	}
+	want := map[string]bool{
+		"local snapshot": true, "local directory, zero snapshots": false, "local directory with only an incomplete snapshot": false,
+		"no snapshot root, local change log": true, "no snapshot root, change log in S3": false,
+		"local snapshot, change log in S3": true, "no copy at all": false, "archive access disabled": false,
+	}
+	for name, build := range states {
+		t.Run(name, func(t *testing.T) {
+			f, expect := build(t)
+			expect()
+			cw := httptest.NewRecorder()
+			f.s.handleCapabilities(cw, httptest.NewRequest("GET", "/api/capabilities", nil))
+			var caps capabilitiesResponse
+			if err := json.Unmarshal(cw.Body.Bytes(), &caps); err != nil {
+				t.Fatal(err)
+			}
+			// A fresh set of answers for the route's own read.
+			g, expect2 := build(t)
+			expect2()
+			gw := httptest.NewRecorder()
+			g.s.handleSQLInfo(gw, httptest.NewRequest("GET", "/api/sql", nil))
+			if caps.SQL != (gw.Code == http.StatusOK) {
+				t.Errorf("capability sql=%v but GET /api/sql is %d: %s", caps.SQL, gw.Code, gw.Body.String())
+			}
+			if caps.SQL != want[name] {
+				t.Errorf("capability sql=%v, want %v", caps.SQL, want[name])
+			}
+		})
+	}
+	// The S3-only fixture the review asked for: an S3 snapshot root AND a
+	// change log registered in S3 only. False, without a network call.
+	f := newSQLFixture(t, &fakeSQLRunner{}, true)
+	f.s.cm.boot.baselineSrc = "s3://bucket/baselines"
+	f.expectArchiveS3()
+	cw := httptest.NewRecorder()
+	f.s.handleCapabilities(cw, httptest.NewRequest("GET", "/api/capabilities", nil))
+	if strings.Contains(cw.Body.String(), `"sql":true`) {
+		t.Errorf("an S3-only copy reports sql:true: %s", cw.Body.String())
+	}
+}
