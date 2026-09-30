@@ -5446,16 +5446,16 @@ function snapTabFromHash() {
 // panel, marks its tab and writes the address (a hash, which the router
 // keeps); with `quiet` it leaves the address alone.
 function snapshotTabs(has) {
-  const bar = el("div", { class: "snap-tabs" });
-  const list = el("div", { class: "snap-tablist", role: "tablist", "aria-label": "Snapshots" });
+  const bar = el("div", { class: "tabs snap-tabs" });
+  const list = el("div", { class: "tablist snap-tablist", role: "tablist", "aria-label": "Snapshots" });
   bar.append(list);
   const panels = {}, buttons = {}, order = [];
   const names = [["versions", "Versions"], ["checks", "Checks"], ["settings", "Settings"]];
   for (const [id, label] of names) {
     if (id !== "versions" && !has[id]) continue;
-    panels[id] = el("div", { class: "snap-panel", id: "snap-" + id, role: "tabpanel", "aria-labelledby": "snap-tab-" + id });
+    panels[id] = el("div", { class: "tabpanel snap-panel", id: "snap-" + id, role: "tabpanel", "aria-labelledby": "snap-tab-" + id });
     panels[id].hidden = true;
-    const btn = el("button", { class: "snap-tab", type: "button", role: "tab", id: "snap-tab-" + id, "aria-controls": "snap-" + id,
+    const btn = el("button", { class: "tab snap-tab", type: "button", role: "tab", id: "snap-tab-" + id, "aria-controls": "snap-" + id,
       "aria-selected": "false", tabindex: "-1", "data-tab": id, text: label });
     btn.onclick = () => select(id);
     buttons[id] = btn;
@@ -5477,7 +5477,7 @@ function snapshotTabs(has) {
     select(order[to]);
     buttons[order[to]].focus();
   });
-  const actions = el("div", { class: "snap-tab-actions" });
+  const actions = el("div", { class: "tab-actions snap-tab-actions" });
   bar.append(actions);
   function select(id, quiet) {
     if (!panels[id]) id = "versions";

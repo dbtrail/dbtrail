@@ -674,7 +674,7 @@ button { font-family: inherit; }
 [data-dir="paper"] .ev-advanced { background: transparent; }
 .ev-advanced[hidden] { display: none; }
 
-.ev-empty { padding: 44px 24px; text-align: center; color: var(--ink-3); font-size: 14px; }
+.ev-empty { padding: 44px 24px; text-align: center; color: var(--ink-3); font-size: var(--fs-md); }
 .ev-empty b { color: var(--ink); font-weight: 600; }
 
 /* ============================================================
@@ -781,23 +781,27 @@ button { font-family: inherit; }
   grid-template-columns: 200px 1fr 116px 88px 1.2fr;
   align-items: center; gap: 12px;
 }
+/* ONE table (#1950): 40px rows, hover, a sticky header, tabular figures,
+   timestamps that never wrap. The Events and Schema-changes grids, the
+   Overview lists, the Snapshots rows and the verification rows all follow it. */
 .ev-head {
-  font-family: var(--f-mono); font-size: 11px; letter-spacing: 0.04em;
+  font-family: var(--f-mono); font-size: var(--fs-xs); letter-spacing: 0.04em;
   color: var(--ink-4); text-transform: lowercase;
   padding: 0 14px 10px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 2; background: var(--bg);
 }
 .ev-row {
-  padding: 13px 14px; border-bottom: 1px solid var(--line-soft);
+  min-height: 40px; padding: 8px 14px; border-bottom: 1px solid var(--line-soft);
   cursor: pointer; position: relative;
   transition: background .14s;
 }
 .ev-row:hover { background: var(--raised); }
 .ev-row.open { background: var(--raised); }
 [data-dir="trail"] .ev-row.open { background: var(--accent-bg); }
-.ev-time { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink); }
-.ev-table { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2); }
-.ev-pk { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink); }
-.ev-cols { font-family: var(--f-mono); font-size: 12px; color: var(--ink-3); }
+.ev-time { font-family: var(--f-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.ev-table { font-family: var(--f-mono); font-size: var(--fs-sm); color: var(--ink-2); }
+.ev-pk { font-family: var(--f-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--ink); }
+.ev-cols { font-family: var(--f-mono); font-size: var(--fs-xs); color: var(--ink-3); }
 .ev-cols .hl { color: var(--orange-2); }
 .ev-caret {
   position: absolute; left: -2px; top: 50%; transform: translateY(-50%);
@@ -814,19 +818,20 @@ button { font-family: inherit; }
   align-items: center; gap: 12px;
 }
 .sc-head {
-  font-family: var(--f-mono); font-size: 11px; letter-spacing: 0.04em;
+  font-family: var(--f-mono); font-size: var(--fs-xs); letter-spacing: 0.04em;
   color: var(--ink-4); text-transform: lowercase;
   padding: 0 14px 10px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 2; background: var(--bg);
 }
 .sc-row {
-  padding: 13px 14px; border-bottom: 1px solid var(--line-soft);
+  min-height: 40px; padding: 8px 14px; border-bottom: 1px solid var(--line-soft);
   cursor: pointer; transition: background .14s;
 }
 .sc-row:hover, .sc-row.open { background: var(--raised); }
-.sc-pos { font-family: var(--f-mono); font-size: 12px; color: var(--ink-3); }
+.sc-pos { font-family: var(--f-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; color: var(--ink-3); white-space: nowrap; }
 .sc-stmt {
   grid-column: 1 / -1; margin: 6px 0 0;
-  font-family: var(--f-mono); font-size: 12px; line-height: 1.5; color: var(--ink-2);
+  font-family: var(--f-mono); font-size: var(--fs-xs); line-height: 1.5; color: var(--ink-2);
   white-space: pre-wrap; word-break: break-word;
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
@@ -855,7 +860,7 @@ button { font-family: inherit; }
 @keyframes skelpulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 .ev-skel-note {
   display: none; padding: 18px 14px; text-align: center;
-  color: var(--ink-3); font-size: 13px;
+  color: var(--ink-3); font-size: var(--fs-sm);
 }
 .ev-loading.slow .ev-skel-note { display: block; }
 
@@ -874,11 +879,11 @@ button { font-family: inherit; }
 @keyframes diffin { from { transform: translateY(-6px); } to { transform: none; } }
 .diff-grid { display: grid; grid-template-columns: 150px 1fr 1fr; }
 .diff-grid > div {
-  padding: 8px 14px; font-family: var(--f-mono); font-size: 12.5px;
+  padding: 8px 14px; font-family: var(--f-mono); font-size: var(--fs-sm);
   border-bottom: 1px solid var(--line-soft);
 }
 .diff-h {
-  color: var(--ink-4); font-size: 11px; letter-spacing: 0.04em;
+  color: var(--ink-4); font-size: var(--fs-xs); letter-spacing: 0.04em;
   background: var(--raised); text-transform: lowercase;
 }
 .diff-col { color: var(--ink-2); }
@@ -913,12 +918,12 @@ button { font-family: inherit; }
 .ctx-banner .badge { flex: none; align-self: flex-start; margin-top: 1px; }
 .ctx-banner .ctx-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ctx-eyebrow {
-  font-family: var(--f-mono); font-size: 10px; font-weight: 600;
+  font-family: var(--f-mono); font-size: var(--fs-xs); font-weight: 600;
   letter-spacing: 0.07em; text-transform: uppercase; color: var(--accent);
 }
 [data-accent="warm"] .ctx-eyebrow { color: var(--orange-2); }
-.ctx-title { font-family: var(--f-mono); font-size: 14.5px; font-weight: 600; color: var(--ink); }
-.ctx-detail { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2); }
+.ctx-title { font-family: var(--f-mono); font-size: var(--fs-md); font-weight: 600; color: var(--ink); }
+.ctx-detail { font-family: var(--f-mono); font-size: var(--fs-sm); color: var(--ink-2); }
 .ctx-banner .spacer { flex: 1; }
 .ctx-banner #ctx-clear { flex: none; }
 
@@ -960,24 +965,29 @@ button { font-family: inherit; }
 @media (min-width: 881px) and (max-width: 1159px) {
   .cards > .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
-.card {
-  background: var(--surface);
-  border: 0;
-  border-radius: var(--r-xl);
-  padding: 22px 22px 8px;
-  box-shadow: var(--shadow);
-  position: relative; overflow: hidden;
+/* ONE card (#1950): a white surface, no hairline, --r-xl, --shadow. Every
+   card-shaped panel wears this rule; a feature's own class keeps only its
+   inner layout. Tints are OPT-IN modifiers (violet, sun: the two structure
+   tints, at most two per screen), never a rotation. */
+.card, .tcard, .ov-panel, .hero-card, .stg-card, .fr-card {
+  background: var(--surface); border: 0; border-radius: var(--r-xl);
+  box-shadow: var(--shadow); min-width: 0;
+}
+.card { padding: 22px 22px 8px; position: relative; overflow: hidden; }
+/* ONE header pattern: title left, meta and action right. */
+.card-head, .ov-panel-head, .vfy-region-head, .bks-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.card-title, .ov-panel-title, .stg-card-t, .bk-lane-t, .fr-card .dc-name, .state-title, .empty h3 {
+  font-family: var(--f-ui); font-size: var(--fs-lg); font-weight: 600;
+  letter-spacing: -0.01em; line-height: 1.3; color: var(--ink); margin: 0;
 }
 [data-dir="paper"] .card { background: transparent; border-color: var(--line); padding-left: 0; padding-right: 22px; }
 [data-dir="trail"] .card::before {
   content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
   background: linear-gradient(var(--accent-a), var(--accent-b));
 }
-.card-title {
-  font-family: var(--f-display); font-size: 16px; font-weight: 700;
-  letter-spacing: -0.01em;
-  color: var(--ink); margin-bottom: 14px;
-}
+.card-title { margin-bottom: 14px; }
 .kv {
   display: flex; align-items: baseline; justify-content: space-between;
   gap: 12px; padding: 11px 0; border-bottom: 1px dotted var(--line);
@@ -1032,12 +1042,15 @@ button { font-family: inherit; }
    .ev-empty (which doubles as an inline error line: "Could not load servers…")
    deliberately does NOT get it. Alphas are set by the --ink-3 body pair, which
    holds >=4.5:1 even where both washes overlap. */
+/* ONE empty state (#1950): .empty standing alone on a page, .stg-empty the
+   same frame inside a panel; .ev-empty is the plain one-line form a list
+   uses (it doubles as an inline error line, so it takes no frame). */
 .empty {
   position: relative; overflow: hidden;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   text-align: center; padding: 64px 24px; gap: 14px;
   border: 1px dashed color-mix(in srgb, var(--brand-canvas-2) 26%, var(--line));
-  border-radius: var(--radius);
+  border-radius: var(--r-lg);
   color: var(--ink-3);
   background:
     radial-gradient(128% 104% at 50% -14%, var(--brand-wash-sun), transparent 64%),
@@ -1050,14 +1063,14 @@ button { font-family: inherit; }
   background: linear-gradient(90deg, var(--brand-canvas-1) 0%, var(--brand-canvas-2) 52%, var(--brand-canvas-3) 100%);
 }
 .empty-ic { color: var(--ink-4); }
-.empty h3 { font-family: var(--title-font); font-weight: 600; color: var(--ink-2); margin: 0; font-size: 17px; letter-spacing: -0.01em; }
-.empty p { margin: 0; max-width: 42ch; font-size: 13.5px; }
+.empty h3 { color: var(--ink-2); }
+.empty p { margin: 0; max-width: 42ch; font-size: var(--fs-sm); }
 
 /* ============================================================
    time-travel timeline — the star
    ============================================================ */
 .tt-meta {
-  font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-3);
+  font-family: var(--f-mono); font-size: var(--fs-sm); color: var(--ink-3);
   margin-bottom: 24px;
 }
 .tt-meta b { color: var(--ink); font-weight: 500; }
@@ -1110,7 +1123,7 @@ button { font-family: inherit; }
 .tl-dot.delete { border-color: var(--delete); }
 
 .tl-head { display: flex; align-items: center; gap: 11px; margin-bottom: 7px; }
-.tl-time { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+.tl-time { font-family: var(--f-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap; }
 .tl-body {
   font-family: var(--f-mono); font-size: 13px; color: var(--ink);
   display: flex; flex-wrap: wrap; gap: 7px 20px;
@@ -1407,18 +1420,14 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    during incidents, and the playful register stays on the landing
    page.
    ============================================================ */
-.tcard {
-  border-radius: var(--r-xl); border: 0;
-  background: var(--surface); padding: 20px 22px; min-width: 0;
-  box-shadow: var(--shadow);
-}
+.tcard { padding: 20px 22px; }
 /* tint modifiers live further down, AFTER the .ov-panel ground rules —
    one vocabulary, always hyphenated: class="tcard tcard-violet". (An
    earlier draft had .tcard.violet here AND .ov-panel.tcard-violet below;
    review caught that "tcard tcard-violet" — the natural reading — rendered
    white.) */
 .tag-pill {
-  display: inline-block; font-family: var(--f-ui); font-size: 11px;
+  display: inline-block; font-family: var(--f-ui); font-size: var(--fs-xs);
   font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
   padding: 4px 11px; border-radius: var(--r-pill);
   background: var(--inset); color: var(--ink-2);
@@ -1577,7 +1586,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
   background-size: 200% 100%;
 }
 .skel-line.skel-stat { height: 26px; width: 72px; margin-bottom: 4px; }
-.skel-note { font-family: var(--f-mono); font-size: 11px; color: var(--ink-4); margin-top: 8px; }
+.skel-note { font-family: var(--f-mono); font-size: var(--fs-xs); color: var(--ink-4); margin-top: 8px; }
 @keyframes skel-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 /* Without the shimmer the bar is still visible: at the static
    background-position the gradient renders solid --skel-warm across its left
@@ -1588,52 +1597,40 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 }
 
 .ov-grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 18px; align-items: start; }
-.ov-panel {
-  background: var(--surface); border: 0;
-  border-radius: var(--r-xl); padding: 14px 14px 16px;
-  box-shadow: var(--shadow);
-}
-/* the tint modifiers (#1421) — one OPT-IN vocabulary: the hyphenated class
-   IS the modifier, valid on .tcard and .ov-panel alike ("tcard tcard-violet",
-   "ov-panel tcard-sun"). Violet and sun are the STRUCTURE tints —
-   pink/orange stay away from event data by rule. The tint is the edge; the
-   hairline goes. These sit AFTER the .ov-panel ground rules because at
-   equal (0-1-0) specificity the cascade decides — placed earlier, the
-   panel's own background wins and all four classes go inert.
-   [data-dir="paper"] .ov-panel (0-2-0) still beats them, stripping the
-   tint under paper: dev-only today (index.html hardcodes studio), the
-   same trade the old 0-2-0 tie made. */
+.ov-panel { padding: 14px 14px 16px; }
+/* the two tint modifiers (#1421, #1950): OPT-IN, valid on any card
+   ("ov-panel tcard-violet"). Violet and sun are the STRUCTURE tints, the
+   most a screen may show; pink/orange never land near event data. They sit
+   AFTER the card ground rule because at equal specificity the cascade
+   decides. */
 .tcard-violet { background: var(--violet-tint); border-color: transparent; }
 .tcard-sun    { background: var(--sun-tint);    border-color: transparent; }
-.tcard-pink   { background: var(--pink-tint);   border-color: transparent; }
-.tcard-orange { background: var(--orange-tint); border-color: transparent; }
 .tcard-violet .tag-pill { background: var(--surface); color: var(--violet-deep); }
 .tcard-sun    .tag-pill { background: var(--surface); color: var(--sun-deep); }
-.tcard-pink   .tag-pill { background: var(--surface); color: var(--pink-deep); }
-.tcard-orange .tag-pill { background: var(--surface); color: var(--orange-deep); }
 /* the tint-aware dividers (see the token block) */
 .tcard-violet .ov-ev, .tcard-violet .ov-tablerow, .tcard-violet .ov-coverage { border-top-color: var(--violet-line); }
 .tcard-sun .ov-ev, .tcard-sun .ov-tablerow, .tcard-sun .ov-coverage { border-top-color: var(--sun-line); }
 [data-dir="paper"] .ov-panel { background: transparent; border-color: var(--line); }
 .ov-panel-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 14px 10px; }
-.ov-panel-title { font-family: var(--title-font); font-weight: 600; font-size: 15px; letter-spacing: -0.01em; margin: 0; color: var(--ink); }
 #ov-browse svg { width: 13px; height: 13px; }
 
 .ov-evlist { display: flex; flex-direction: column; }
 .ov-ev {
-  display: grid; grid-template-columns: 64px auto 1fr auto auto; align-items: center; gap: 11px;
-  padding: 9px 12px; border-radius: var(--radius-sm); cursor: pointer;
+  display: grid; grid-template-columns: auto auto 1fr auto auto; align-items: center; gap: 11px;
+  min-height: 40px; padding: 6px 12px; border-radius: var(--radius-sm); cursor: pointer;
   border-top: 1px solid var(--line-soft); transition: background .14s;
 }
 .ov-ev:first-child { border-top: none; }
 .ov-ev:hover { background: var(--raised); }
-.ov-ev-time { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--ink-2); }
-.ov-ev-tbl { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* a timestamp never wraps: mono, one line, and a floor wide enough for
+   YYYY-MM-DD HH:MM:SS (the 64px column it had wrapped it onto three lines) */
+.ov-ev-time { font-family: var(--f-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap; min-width: 19ch; }
+.ov-ev-tbl { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: var(--fs-sm); color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* --ink-2, not -3: this text sits on the violet tint, where --ink-3
    measures 4.20:1 — below the 4.5 floor the ink ramp is verified against
    (review reproduced it; -3 clears only white and sun). */
 .ov-ev-pk { color: var(--ink-2); }
-.ov-ev-cols { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--ink-2); text-align: right; white-space: nowrap; }
+.ov-ev-cols { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: var(--fs-xs); color: var(--ink-2); text-align: right; white-space: nowrap; }
 /* Undo is drawn on every row (#1801). It used to appear only under the
    mouse (and on keyboard focus, #968), so a first look at the list showed no
    way to undo anything. */
@@ -1643,7 +1640,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .ov-tablerow {
   display: grid; grid-template-columns: 1fr 56px auto; align-items: center; gap: 12px;
   width: 100%; text-align: left; background: none; border: none; cursor: pointer;
-  padding: 11px 14px; border-top: 1px solid var(--line-soft); transition: background .14s;
+  min-height: 40px; padding: 6px 14px; border-top: 1px solid var(--line-soft); transition: background .14s;
 }
 .ov-tablerow:first-child { border-top: none; }
 .ov-tablerow:hover { background: var(--raised); }
@@ -1658,9 +1655,9 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .ov-coverage {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 13px 14px 8px; margin-top: 4px; border-top: 1px solid var(--line-soft);
-  font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3);
+  font-family: var(--f-mono); font-size: var(--fs-xs); color: var(--ink-3);
 }
-.ov-coverage span { text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+.ov-coverage span { text-transform: uppercase; letter-spacing: 0.06em; font-size: var(--fs-xs); }
 .ov-coverage b { color: var(--ink); font-weight: 500; }
 
 /* filter chip on Events */
@@ -1769,7 +1766,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
   box-shadow: var(--panel-shadow);
   margin-bottom: 26px;
 }
-.state-title { font-size: 15px; font-weight: 600; color: var(--ink); margin: 0 0 6px; }
+.state-title { margin: 0 0 6px; }
 .state-note { color: var(--ink-3); font-size: 13px; max-width: 72ch; margin: 0 0 14px; }
 .state-bar { display: flex; flex-wrap: wrap; gap: 16px 18px; align-items: flex-end; }
 .state-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 14px; }
@@ -1898,7 +1895,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 /* result/meta lines reused across Events, Recover, Reconstruct */
 .meta-line {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3);
+  font-family: var(--f-mono); font-size: var(--fs-xs); color: var(--ink-3);
   margin: 4px 0 14px;
 }
 .meta-line b { color: var(--ink); font-weight: 600; }
@@ -1985,20 +1982,20 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .hstat-err    { color: var(--delete); }
 .hstat-muted  { color: var(--ink-3); }
 .hlist {
-  font-family: var(--f-mono); font-size: 11.5px; color: var(--orange-2);
+  font-family: var(--f-mono); font-size: var(--fs-xs); color: var(--orange-2);
   margin: 4px 0 2px; padding-left: 2px; display: flex; flex-direction: column; gap: 2px;
 }
 .hstale {
-  font-family: var(--f-mono); font-size: 11px; color: var(--ink-3);
+  font-family: var(--f-mono); font-size: var(--fs-xs); color: var(--ink-3);
   margin-top: 9px; padding-top: 7px; border-top: 1px solid var(--line-soft);
 }
 .hstale-warn { color: var(--orange-2); }
 .card-stale { opacity: 0.6; }
 
 /* point-in-time state table (Time-travel "Value as of T") */
-.statetable { width: 100%; border-collapse: collapse; font-family: var(--f-mono); font-size: 12.5px; }
+.statetable { width: 100%; border-collapse: collapse; font-family: var(--f-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
 .statetable th, .statetable td {
-  text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line-soft);
+  text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line-soft);
   vertical-align: top;
 }
 .statetable th { color: var(--ink-3); font-weight: 600; width: 200px; }
@@ -2033,7 +2030,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    happened and the fix on one line, the reason under them. */
 .refused-tables { margin: 6px 0 12px; }
 .refused-tables .form-msg { margin: 0; }
-.refused-list { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12.5px; }
+.refused-list { list-style: none; margin: 4px 0 0; padding: 0; font-size: var(--fs-sm); }
 .refused-list li { display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; padding: 5px 0; border-top: 1px solid var(--line); }
 .refused-list code { font-family: var(--f-mono); font-size: 12px; overflow-wrap: anywhere; }
 .refused-what { color: var(--delete); }
@@ -2066,12 +2063,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .doctor-card.warn .dc-mark { color: var(--orange-2); }
 .dc-body { flex: 1; min-width: 0; }
 /* First-run steps (#1606): waiting is a muted ring, never the failure red. */
-.fr-card {
-  margin-bottom: 20px; background: var(--surface); border: 0; border-radius: var(--r-xl);
-  box-shadow: var(--shadow);
-  padding: 22px 24px 20px;
-}
-.fr-card .dc-name { font-family: var(--f-display); font-weight: 700; font-size: 16.5px; letter-spacing: -0.01em; color: var(--ink); }
+.fr-card { margin-bottom: 20px; padding: 22px 24px 20px; }
 .fr-card .fr-step.waiting .dc-name { color: var(--ink); }
 .fr-card .fr-fix { font-family: var(--f-ui); font-size: 14px; color: var(--ink-2); margin-top: 4px; }
 .fr-card .fr-step .dc-mark { width: 18px; text-align: center; }
@@ -2178,8 +2170,8 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .stg-list { display: flex; flex-direction: column; padding: 2px 14px 10px; }
 .stg-row {
   display: flex; align-items: center; gap: 10px;
-  padding: 9px 0; border-bottom: 1px solid var(--line-soft);
-  font-size: 13px;
+  min-height: 40px; padding: 6px 0; border-bottom: 1px solid var(--line-soft);
+  font-size: var(--fs-sm);
 }
 .stg-row:last-child { border-bottom: none; }
 
@@ -2188,7 +2180,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .bk-expandable:hover { background: var(--raised); }
 .bk-detail { padding: 6px 10px 12px 38px; border-bottom: 1px solid var(--line); }
 .bk-facts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 4px 0 8px; }
-.bk-table { border-collapse: collapse; font-size: 12.5px; }
+.bk-table { border-collapse: collapse; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
 .bk-table th { text-align: left; font-weight: 600; padding: 2px 18px 2px 0; color: var(--ink-3); }
 .bk-table td { padding: 2px 18px 2px 0; }
 .bk-restore-body { padding: 8px 2px 2px; }
@@ -2214,13 +2206,13 @@ section.bk-restore { margin-top: 18px; }
 .bk-restore-row .input { max-width: 260px; }
 
 .stg-name { font-weight: 600; color: var(--ink); white-space: nowrap; }
-.stg-name.mono { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13.5px; }
+.stg-name.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-weight: 600; font-size: var(--fs-sm); }
 .stg-dest {
   color: var(--ink-2); flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .stg-dest.muted { color: var(--ink-3); }
-.stg-age { color: var(--ink-3); font-size: 12px; white-space: nowrap; }
+.stg-age { color: var(--ink-3); font-size: var(--fs-xs); white-space: nowrap; }
 .stg-foot { padding: 0 14px 12px; margin: 6px 0 0; }
 .stg-hint { margin-bottom: 0; }
 .stg-cardfoot { margin-top: 12px; }
@@ -2243,14 +2235,14 @@ section.bk-restore { margin-top: 18px; }
    because they sit inside a panel rather than standing alone. */
 .stg-empty {
   padding: 15px 16px 17px; display: flex; flex-direction: column; gap: 7px;
-  border: 1px solid color-mix(in srgb, var(--brand-canvas-2) 22%, var(--line));
-  border-radius: var(--radius);
+  border: 1px dashed color-mix(in srgb, var(--brand-canvas-2) 26%, var(--line));
+  border-radius: var(--r-lg);
   background:
     radial-gradient(118% 128% at 100% -10%, var(--brand-wash-sun), transparent 66%),
     var(--surface);
 }
-.stg-empty-lead { margin: 0; font-size: 13.5px; font-weight: 600; color: var(--ink-2); }
-.stg-empty-sub { margin: 0; font-size: 12.5px; color: var(--ink-3); max-width: 52ch; }
+.stg-empty-lead { margin: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--ink-2); }
+.stg-empty-sub { margin: 0; font-size: var(--fs-xs); color: var(--ink-3); max-width: 52ch; }
 
 /* Verification panel (#677) */
 .vfy-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -2261,8 +2253,7 @@ section.bk-restore { margin-top: 18px; }
 
 /* ── /verification region surfaces (#1419): control / current / history ── */
 .vfy-region { margin-top: 16px; padding: 16px 18px 18px; }
-.vfy-region-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-.vfy-region-head .ov-panel-title { margin: 0; }
+.vfy-region-head { margin-bottom: 10px; }
 /* The mode help is a fold since #1573: open on arrival it was the largest
    block left on the first screen. Its summary reads as the hint it replaces —
    no browser triangle, the same caret as the take-away panel. */
@@ -2288,7 +2279,7 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
      reason column (user report, 2026-08-22). Grid tracks do not grow for
      overflowing fixed sizes; they must be allowed to fit. */
   display: grid; grid-template-columns: 18px minmax(150px, 240px) 100px minmax(0, max-content) minmax(120px, 1fr) auto;
-  align-items: center; gap: 10px; padding: 7px 10px;
+  align-items: center; gap: 10px; min-height: 40px; padding: 6px 10px;
   border-top: 1px solid var(--line-soft); border-left: 3px solid transparent;
 }
 .vfy-row:first-child { border-top: none; }
@@ -2301,14 +2292,14 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .vfy-row.fail .vfy-mark { color: var(--delete); }
 .vfy-row.warn .vfy-mark { color: var(--orange-2); }
 .vfy-row.note .vfy-mark { color: var(--ink-4); }
-.vfy-tbl { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vfy-verdict { font-family: var(--f-mono); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.vfy-tbl { font-family: var(--f-mono); font-size: var(--fs-sm); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vfy-verdict { font-family: var(--f-mono); font-size: var(--fs-xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
 .vfy-row.pass .vfy-verdict { color: var(--insert); }
 .vfy-row.fail .vfy-verdict { color: var(--delete); }
 .vfy-row.warn .vfy-verdict { color: var(--orange-2); }
 .vfy-row.note .vfy-verdict { color: var(--ink-3); }
-.vfy-counts { font-family: var(--f-mono); font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.vfy-reason { font-size: 12px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.vfy-counts { font-family: var(--f-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vfy-reason { font-size: var(--fs-xs); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .vfy-reason.wrap { white-space: normal; }
 
 
@@ -2348,7 +2339,7 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .stg-row-latest .snap-lock { background: var(--surface); color: var(--ink-2); }
 .snap-lock-torn, .stg-row-latest .snap-lock-torn { color: var(--orange-deep); }
 .bks-others { margin: 10px 14px 6px; }
-.stg-rel { font-family: var(--f-ui); font-size: 12.5px; color: var(--ink-3); white-space: nowrap; }
+.stg-rel { font-family: var(--f-ui); font-size: var(--fs-xs); color: var(--ink-3); white-space: nowrap; }
 /* The newest row is the one tint on this page, so everything it carries has
    to survive the ground it sits on. Measured with the converter in
    assets_tint_contrast_test.go; the rules below are guarded by
@@ -2392,9 +2383,9 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
    "no se entiende una verga"). */
 .vfy-explain-modal { max-width: 900px; }
 .vfy-explain-body { padding: 4px 28px 16px; display: flex; flex-direction: column; gap: 8px; max-height: 45vh; overflow-y: auto; }
-.vfy-diff-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12.5px; }
+.vfy-diff-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: var(--fs-sm); }
 .vfy-diff-table th {
-  text-align: left; font-weight: 600; color: var(--ink-3); font-size: 11px;
+  text-align: left; font-weight: 600; color: var(--ink-3); font-size: var(--fs-xs);
   text-transform: uppercase; letter-spacing: .02em;
   padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line-soft);
 }
@@ -2821,46 +2812,6 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
   }
 }
 
-/* ---- cards speak the home's tint language ----
-   Config/fact cards INSIDE a .cards grid rotate through the four home tint
-   TOKENS with their AA-verified deep partners (the #1421 palette; the
-   tcard-* classes on the Overview stay opt-in and untouched). Scoped to
-   .cards on purpose: a standalone .card (the SQL panel) keeps its neutral
-   panel ground and border — with the page canvas now blush, its old
-   surface-2 fill alone would have no visible edge. Row-carrying surfaces
-   are not .card and stay out entirely.
-   Each family carries its own soft BORDER as well as the tint: the sun
-   tint measures 1.008:1 against the blush canvas (below the 1.02
-   two-grounds floor), so without an edge that card dissolves into the
-   page. */
-.cards .card::after {
-  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
-}
-.cards .card:nth-child(4n+1) { background: var(--pink-tint); }
-.cards .card:nth-child(4n+2) { background: var(--sun-tint); }
-.cards .card:nth-child(4n+3) { background: var(--violet-tint); }
-.cards .card:nth-child(4n+0) { background: var(--orange-tint); }
-.cards .card:nth-child(4n+1) .card-title { color: var(--pink-deep); }
-.cards .card:nth-child(4n+2) .card-title { color: var(--sun-deep); }
-.cards .card:nth-child(4n+3) .card-title { color: var(--violet-deep); }
-.cards .card:nth-child(4n+0) .card-title { color: var(--orange-deep); }
-.cards .card:nth-child(4n+1)::after { background: linear-gradient(90deg, var(--brand-warm-a), transparent 75%); }
-.cards .card:nth-child(4n+2)::after { background: linear-gradient(90deg, var(--sun), transparent 75%); }
-.cards .card:nth-child(4n+3)::after { background: linear-gradient(90deg, var(--brand-canvas-3), transparent 75%); }
-.cards .card:nth-child(4n+0)::after { background: linear-gradient(90deg, var(--brand-warm-b), transparent 75%); }
-/* dotted kv separators drown on a tint (same failure the tcard dividers
-   fixed); restate them against the tinted grounds (measured 1.34-1.36 on
-   all four, above the 1.15 divider floor). */
-.cards .card .kv { border-bottom-color: var(--line-on-tint); }
-/* the same two remap side effects inside tinted cards: the inset code chip
-   (--inset vs sun-tint: 1.031, vs orange-tint: 1.021 — under the 1.02
-   identity floor's margin) goes white-with-hairline like the tcard
-   tag-pills; pgHealthCard's ink-3 text (4.31:1 on pink) steps up to ink-2
-   and its --line-soft divider (1.013 on pink) takes the kv literal. */
-.cards .card .stg-code { background: var(--surface); border: 1px solid var(--line-on-tint); }
-.cards .card .hstat-muted, .cards .card .hstale { color: var(--ink-2); }
-.cards .card .hstale { border-top-color: var(--line-on-tint); }
-
 /* Connect AI, simple pass: the step number is a badge, the two Claude fields
    are a drawn dialog, and everything conditional folds into <details>. */
 .cn-title { display: flex; align-items: center; gap: 10px; }
@@ -2977,12 +2928,12 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
    keeps a local directory and an S3 destination. */
 .bk-srcs { display: grid; gap: 4px; margin: 4px 0; }
 .bk-src { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.bk-src-k { font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; color: var(--ink-4); min-width: 30px; }
-.bk-src-n { font-size: 11.5px; color: var(--ink-4); }
+.bk-src-k { font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; color: var(--ink-4); min-width: 30px; }
+.bk-src-n { font-size: var(--fs-xs); color: var(--ink-4); }
 .bk-where { font-size: var(--fs-xs); color: var(--ink-4); border: 1px solid var(--line-soft); border-radius: var(--r-pill); padding: 1px 8px; white-space: nowrap; }
 .ctx-srcs { display: grid; gap: 2px; min-width: 0; }
 /* Backup detail: how each table's rows got into the snapshot (#1545). */
-.bk-made { font-size: 11.5px; color: var(--ink-3); }
+.bk-made { font-size: var(--fs-xs); color: var(--ink-3); }
 .bk-made-from { color: var(--ink-4); }
 .bk-made-none { color: var(--ink-4); }
 
@@ -2994,7 +2945,7 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
    where they are in the list, and --ink-4 on --raised is 3.15:1 (the hint
    floor, not the body one). --ink-3 is 4.74:1. Raised in the same change that
    lifted three siblings off the floor for the same reason. */
-.bk-pager-n { font-size: 11.5px; color: var(--ink-3); }
+.bk-pager-n { font-size: var(--fs-xs); color: var(--ink-3); }
 .bk-chev { margin-left: auto; color: var(--ink-4); font-size: 15px; line-height: 1; flex: none; transition: transform .12s ease; }
 .bk-expandable[aria-expanded="true"] .bk-chev { transform: rotate(90deg); }
 
@@ -3019,10 +2970,6 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
   background: var(--inset); border: 0;
   border-radius: var(--r-lg); padding: 20px;
   display: flex; flex-direction: column; gap: 10px;
-}
-.bk-lane-t {
-  margin: 0; font-family: var(--f-display); font-size: 15px;
-  font-weight: 600; letter-spacing: -0.01em; color: var(--ink);
 }
 .bk-lane-lead { margin: 0; font-size: 13px; color: var(--ink-2); }
 .bk-lane-go { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -3073,7 +3020,7 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 }
 .bks-value.muted { color: var(--ink-3); font-weight: 400; }
 .bks-restart { font-size: 10px; white-space: nowrap; }
-.bks-cli { grid-column: 1; font-size: 11px; color: var(--ink-3); font-family: var(--f-mono); }
+.bks-cli { grid-column: 1; font-size: var(--fs-xs); color: var(--ink-3); font-family: var(--f-mono); }
 .bks-server { padding: 18px 0; border-bottom: 1px dotted var(--line); }
 .bks-server:last-child { border-bottom: none; padding-bottom: 4px; }
 .bks-server-name { margin: 0 0 12px; font-family: var(--f-display); font-size: 16px; font-weight: 700; }
@@ -3126,7 +3073,6 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 }
 .snap-moved-text { flex: 1; }
 .snap-moved-x { font-size: var(--fs-lg); }
-.bks-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 /* An empty value renders as the word for what applies, in the muted style: a
    value, not a gap. A refused value shows the fallback the daemon fell to,
    in the fault colour, with the loud line under the row saying why; not
@@ -3167,10 +3113,6 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .fr-fold::before { content: "\25B8 "; }
 .fr-card.fr-open .fr-fold::before { content: "\25BE "; }
 .rc-restore-slot { margin-top: 20px; }
-/* the Snapshots page's one daemon row: a plain white card, the tints stay
-   for the configuration pages */
-.cards.cards-plain .card { background: var(--surface); }
-.cards.cards-plain .card .card-title { color: var(--ink); }
 
 /* ── Snapshots: the hero and the tabs (round 3) ─────────────────────────────
    The hero SHOWS the copy: its age (big, with a dot the schedule colours),
@@ -3181,11 +3123,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
   align-items: stretch; margin: 6px 0 18px;
 }
 .snap-hero .hero-actions, .snap-hero .hero-note { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
-.hero-card {
-  background: var(--surface); border: 0; border-radius: var(--r-xl); padding: 22px 24px;
-  box-shadow: var(--shadow);
-  display: flex; flex-direction: column; justify-content: center; gap: 6px; min-width: 0;
-}
+.hero-card { padding: 22px 24px; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
 .hero-k { font-family: var(--f-ui); font-size: 12px; font-weight: 500; color: var(--ink-3); }
 .hero-big-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .hero-big { font-family: var(--f-display); font-size: 36px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.05; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -3217,7 +3155,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .hero-strip { position: relative; height: 34px; border-bottom: 2px solid var(--line); }
 .hero-tick { position: absolute; bottom: 0; width: 3px; height: 16px; border-radius: 2px; background: var(--ink-4); transform: translateX(-50%); }
 .hero-tick.newest { background: var(--pink-mid); height: 22px; }
-.hero-days-foot { display: flex; justify-content: space-between; font-family: var(--f-ui); font-size: 11px; color: var(--ink-3); }
+.hero-days-foot { display: flex; justify-content: space-between; font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-size: var(--fs-xs); color: var(--ink-3); }
 .hero-check { align-items: center; text-align: center; gap: 8px; padding: 18px 12px; box-shadow: none; }
 .hero-check.ok { background: var(--mint-tint); color: var(--ok); }
 .hero-check.bad { background: var(--pink-tint); color: var(--pink-mid); }
@@ -3227,18 +3165,23 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
   .snap-hero { grid-template-columns: 1fr 1fr; }
 }
 
-.snap-tabs { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--line); margin: 6px 0 18px; }
-.snap-tablist { display: flex; align-items: center; gap: 6px; }
-.snap-tab.has-alarm::after { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--pink-mid); margin-left: 7px; vertical-align: middle; }
-.snap-tab-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; padding-bottom: 8px; }
-.snap-tab {
-  font-family: var(--f-ui); font-size: 15px; font-weight: 500; color: var(--ink-2);
-  padding: 12px 18px; margin-bottom: -1px; background: none; border: 0;
-  border-bottom: 3px solid transparent; cursor: pointer;
+/* ONE tab component (#1950): .tabs > .tablist > .tab, the selected tab an
+   ink rule under ink text, actions on the right. The Snapshots tabs are the
+   first user; the snap-* names stay beside the generic ones. */
+.tabs, .snap-tabs { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--line); margin: 6px 0 18px; }
+.tablist, .snap-tablist { display: flex; align-items: center; gap: 4px; }
+.tab-actions, .snap-tab-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; padding-bottom: 8px; }
+.tab, .snap-tab {
+  font-family: var(--f-ui); font-size: var(--fs-md); font-weight: 500; color: var(--ink-2);
+  padding: 10px 14px; margin-bottom: -1px; background: none; border: 0;
+  border-bottom: 2px solid transparent; border-radius: var(--r-sm) var(--r-sm) 0 0; cursor: pointer;
+  transition: color .15s, background .15s, border-color .15s;
 }
-.snap-tab:hover { color: var(--ink); }
-.snap-tab.is-on { color: var(--ink); font-weight: 700; border-bottom-color: var(--brand-warm-a); }
-.snap-panel[hidden] { display: none; }
+.tab:hover, .snap-tab:hover { color: var(--ink); background: var(--raised); }
+.tab:focus-visible, .snap-tab:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.tab.is-on, .snap-tab.is-on { color: var(--ink); font-weight: 600; border-bottom-color: var(--ink); }
+.tab.has-alarm::after, .snap-tab.has-alarm::after { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--pink-mid); margin-left: 7px; vertical-align: middle; }
+.tabpanel[hidden], .snap-panel[hidden] { display: none; }
 .snap-panel .snap-sect:first-child, .snap-panel .snap-moved + .snap-sect { margin-top: 4px; padding-top: 0; border-top: 0; }
 /* The section heading under a tab repeats the tab's label, so it is kept
    for what it IS (the anchor of an old address, the landmark a screen
@@ -3247,9 +3190,9 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 
 /* ── Snapshots tabs (round 3): offers are buttons, questions are controls
    that show the value in force. ── */
-.stg-card { background: var(--surface); border: 0; border-radius: var(--r-xl); box-shadow: var(--shadow); padding: 20px 22px; }
-.stg-card-t { display: flex; align-items: center; gap: 10px; font-family: var(--f-display); font-size: 18px; font-weight: 700; letter-spacing: -0.01em; color: var(--ink); margin: 0 0 14px; }
-.stg-card-t .field-label { font-family: var(--f-display); font-size: 18px; font-weight: 700; color: var(--ink); }
+.stg-card { padding: 20px 22px; }
+.stg-card-t { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; }
+.stg-card-t .field-label { font: inherit; color: var(--ink); }
 .stg-ico { display: inline-flex; width: 24px; height: 24px; flex: none; }
 .stg-ico svg { width: 100%; height: 100%; }
 .stg-ico-pink { color: var(--pink-mid); } .stg-ico-mint { color: var(--ok); } .stg-ico-orange { color: var(--orange); } .stg-ico-sun { color: var(--sun-mid); }
@@ -3300,7 +3243,7 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 @media (max-width: 960px) { .snap-checks { grid-template-columns: 1fr; } }
 .snap-checks .vfy-region { margin-top: 0; }
 .snap-checks-l, .snap-checks-r { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.snap-checks .tcard { background: var(--surface); border: 0; border-radius: var(--r-xl); box-shadow: var(--shadow); padding: 22px 24px; }
+.snap-checks .tcard { padding: 22px 24px; }
 .snap-checks .vfy-region-head .ov-panel-title { font-size: 12px; font-family: var(--f-ui); font-weight: 500; color: var(--ink-3); }
 .snap-checks .vfy-control .vfy-region-head { margin-top: 18px; }
 .snap-checks .vfy-actions { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
@@ -3327,8 +3270,6 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .bk-lane-ico svg { width: 100% !important; height: 100% !important; }
 
 .stg-top { margin-bottom: 4px; }
-.stg-top .card.stg-card { background: var(--surface); }
-.stg-top .card.stg-card::after { display: none; }
 .bl-case { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: var(--r-md); font-size: 13px; }
 .bl-case.bl-ok { background: var(--mint-tint); color: var(--ok); }
 .bl-case.bl-part { background: var(--sun-tint); color: var(--sun-deep); }

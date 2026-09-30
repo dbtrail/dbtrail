@@ -4857,9 +4857,10 @@ try {
     : bad("tropical: the haze is anchored to scroll content, not the viewport", tropSide.attachment);
 
 
-  // The card tint rotation, on the page from the user's own screenshot. Two
-  // distinct tinted grounds prove rotation; "not white" alone would pass a
-  // single flat tint.
+  // One card ground (#1950 slice 3): the Status cards used to rotate through
+  // four home tints, more than the two accent tints a screen may show. They
+  // now share the card surface; two cards proving EQUAL and opaque is what
+  // rules the rotation out (a rotation would make them differ).
   // On Status, which always carries two or more cards (This daemon, the
   // page this used to photograph, was dissolved in #1867).
   await page.evaluate(() => navigate("status"));
@@ -4868,9 +4869,9 @@ try {
     const cards = Array.from(document.querySelectorAll(".cards .card")).slice(0, 2);
     return cards.map((c) => getComputedStyle(c).backgroundColor);
   });
-  (tints.length === 2 && tints[0] !== tints[1] && !tints.includes("rgb(255, 255, 255)") && !tints.includes("rgba(0, 0, 0, 0)"))
-    ? ok("tropical: config cards rotate through the home's tint palette")
-    : bad("tropical: config cards rotate through the home's tint palette", JSON.stringify(tints));
+  (tints.length === 2 && tints[0] === tints[1] && !tints.includes("rgba(0, 0, 0, 0)"))
+    ? ok("cards: config cards share the one card ground")
+    : bad("cards: config cards share the one card ground", JSON.stringify(tints));
 
   // ── Scenario 17g2 — a .cards row leaves no empty track ──
   // The grid was repeat(3, 1fr), which is right only for the pages that carry
