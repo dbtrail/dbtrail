@@ -112,7 +112,7 @@ func TestOverviewFlowReadsBesideCoverage(t *testing.T) {
 	if out.PaintedDespiteNull == 0 {
 		t.Error("a null coverage cancelled the paint that was in flight beside it")
 	}
-	if out.PaintedWhenAnswered == 0 || !strings.Contains(out.Screen, "Your bucket") {
+	if out.PaintedWhenAnswered == 0 || !strings.Contains(out.Screen, "Your copy") {
 		t.Errorf("an answered coverage did not paint the flow: nodes=%d screen=%q", out.PaintedWhenAnswered, out.Screen)
 	}
 }
