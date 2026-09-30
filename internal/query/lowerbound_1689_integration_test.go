@@ -32,21 +32,45 @@ import (
 // The predicate's form is pinned with no server at all by
 // TestBuildQuery_sincePosLowerBoundIsIndexUsable, and the two-sided range was
 // measured directly on both versions.
+//
+// The fixture runs at FIXED hours, twice (#1979). It used to count from
+// time.Now(), and on the last evening of a month (from 21:00 UTC) its window
+// crossed the month end, where MySQL keeps the table's FIRST partition in the
+// plan whatever the predicate says: measured on 8.4.9, a range from
+// 2026-09-30 23:00 to 2026-10-01 00:40 also opens a partition two days below
+// it, and one that crosses only a day does not. Presumably the same NULL rule
+// that stores an invalid date in the lowest partition: a range spanning a
+// month end could hold 2026-09-31, whose TO_SECONDS is NULL. So the test went
+// red one evening a month and never tested the month end otherwise. Now both
+// shapes run every time, and the fixture puts one empty hour BELOW the window,
+// so the table's first partition is never one of the hours asserted on.
 func TestBuildQuery_sincePosPruningHoldsWhicheverIndexIsChosen(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		base time.Time
+	}{
+		{"within a month", time.Date(2026, 3, 10, 10, 0, 0, 0, time.UTC)},
+		// The floor's hour is 23:00 on September 30 and the window is in
+		// 00:00 on October 1, so the scanned range spans the month end.
+		{"across a month end", time.Date(2026, 9, 30, 21, 0, 0, 0, time.UTC)},
+	} {
+		t.Run(c.name, func(t *testing.T) { checkSincePosPruning(t, c.base) })
+	}
+}
+
+func checkSincePosPruning(t *testing.T, base time.Time) {
 	db, dbName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
 	ctx := context.Background()
 
 	// Four consecutive hours, each needing its OWN partition for the pruning
-	// half of this test to mean anything. The hours run forward from the current
-	// one only so the fixture reads like a live index: SetupPartitionedTable
-	// takes whatever hours it is handed, past included, so nothing here depends
-	// on that direction.
+	// half of this test to mean anything, plus an empty hour below them that
+	// is the table's first partition (see the test's comment: MySQL may open
+	// it for a range across a month end, and no assertion here is about it).
 	//
 	// 40k rows across 8 tables, bulk-loaded: on a table of a few hundred rows the
 	// optimizer reads everything and reports no index scan at all, and a plan
 	// with no scan says nothing about the predicate under test.
-	base := time.Now().UTC().Truncate(time.Hour)
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatalf("conn: %v", err)
@@ -56,9 +80,9 @@ func TestBuildQuery_sincePosPruningHoldsWhicheverIndexIsChosen(t *testing.T) {
 	// hourly layout the real schema has is built here first: with one partition
 	// there is nothing to prune, and this test could not fail however wrong the
 	// predicate was.
-	hours := make([]time.Time, 4)
+	hours := make([]time.Time, 5)
 	for h := range hours {
-		hours[h] = base.Add(time.Duration(h) * time.Hour)
+		hours[h] = base.Add(time.Duration(h-1) * time.Hour)
 	}
 	testutil.SetupPartitionedTable(t, db, dbName, hours)
 	// Seeded through one dedicated connection because the recursion limit is a
@@ -131,6 +155,7 @@ func TestBuildQuery_sincePosPruningHoldsWhicheverIndexIsChosen(t *testing.T) {
 				"but the plan opens it (#1689). partitions=%s", name, parts)
 		}
 	}
+	t.Logf("partitions opened: %s", parts)
 	// The control: the partitions that CAN hold an admitted row are still read,
 	// or the assertion above would pass on a plan that reads nothing at all.
 	for _, h := range []int{2, 3} {
