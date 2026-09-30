@@ -709,6 +709,76 @@ func TestHasReplPrivileges(t *testing.T) {
 			wantSlave:  true,
 			wantClient: true,
 		},
+		// MariaDB 10.5+ stores REPLICATION CLIENT as BINLOG MONITOR, and SHOW
+		// GRANTS prints the new name. This line is verbatim from RDS for
+		// MariaDB 11.4 after GRANT REPLICATION SLAVE, REPLICATION CLIENT.
+		{
+			name:       "MariaDB prints REPLICATION CLIENT as BINLOG MONITOR",
+			grants:     []string{"GRANT SELECT, LOCK TABLES, REPLICATION SLAVE, BINLOG MONITOR, SHOW VIEW ON *.* TO `bintrail`@`%` IDENTIFIED BY PASSWORD '*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19'"},
+			wantSlave:  true,
+			wantClient: true,
+		},
+		{
+			name: "RDS for MariaDB master user (no ALL PRIVILEGES)",
+			grants: []string{"GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, RELOAD, PROCESS, REFERENCES, INDEX, ALTER, " +
+				"SHOW DATABASES, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, REPLICATION SLAVE, BINLOG MONITOR, CREATE VIEW, " +
+				"SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, CREATE USER, EVENT, TRIGGER, BINLOG ADMIN, REPLICATION MASTER ADMIN, " +
+				"SLAVE MONITOR ON *.* TO `admin`@`%` IDENTIFIED BY PASSWORD '*0000000000000000000000000000000000000000' WITH GRANT OPTION"},
+			wantSlave:  true,
+			wantClient: true,
+		},
+		{
+			name:       "REPLICATION REPLICA is the same privilege as REPLICATION SLAVE",
+			grants:     []string{"GRANT REPLICATION REPLICA, BINLOG MONITOR ON *.* TO `u`@`%`"},
+			wantSlave:  true,
+			wantClient: true,
+		},
+		// Privileges whose NAMES contain the ones we look for but that do not
+		// grant them. A substring match read each of these as present.
+		{
+			name:       "REPLICATION SLAVE ADMIN is not REPLICATION SLAVE",
+			grants:     []string{"GRANT REPLICATION SLAVE ADMIN, BINLOG MONITOR ON *.* TO `u`@`%`"},
+			wantSlave:  false,
+			wantClient: true,
+		},
+		{
+			name:       "SLAVE MONITOR, BINLOG ADMIN and BINLOG REPLAY grant neither",
+			grants:     []string{"GRANT SLAVE MONITOR, BINLOG ADMIN, BINLOG REPLAY ON *.* TO `u`@`%`"},
+			wantSlave:  false,
+			wantClient: false,
+		},
+		{
+			name:       "MySQL dynamic REPLICATION_SLAVE_ADMIN is not REPLICATION SLAVE",
+			grants:     []string{"GRANT REPLICATION_SLAVE_ADMIN ON *.* TO `u`@`%`"},
+			wantSlave:  false,
+			wantClient: false,
+		},
+		// Replication privileges exist only at global scope, so ALL PRIVILEGES
+		// on one database carries neither.
+		{
+			name:       "ALL PRIVILEGES on one database is not enough",
+			grants:     []string{"GRANT ALL PRIVILEGES ON `shop`.* TO `u`@`%`"},
+			wantSlave:  false,
+			wantClient: false,
+		},
+		{
+			name:       "column list with a comma and ON inside a quoted name",
+			grants:     []string{"GRANT SELECT (`a`, `on x`) ON `db`.`t` TO `u`@`%`"},
+			wantSlave:  false,
+			wantClient: false,
+		},
+		{
+			name:       "role membership line is skipped",
+			grants:     []string{"GRANT `replication slave` TO `u`@`%`"},
+			wantSlave:  false,
+			wantClient: false,
+		},
+		{
+			name:       "leading whitespace and a trailing newline",
+			grants:     []string{"  GRANT REPLICATION SLAVE, BINLOG MONITOR ON *.* TO 'u'@'%'\n"},
+			wantSlave:  true,
+			wantClient: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

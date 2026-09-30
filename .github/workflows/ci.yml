@@ -561,6 +561,14 @@ jobs:
             TestIntegrationWatchMariaDBSource \
             TestIntegrationReplicaCheckMariaDB \
             TestBuild_MariaDBVersionRow \
+            TestBuild_MariaDBMinimalPrivilegeUser \
+            TestBuild_MariaDBGrantRemediationWorks \
+            TestQuery_MariaDBUUIDKeyEitherSpelling \
+            TestQuery_MariaDBUUIDKeyWithoutSnapshotRefuses \
+            TestRecover_MariaDBUUIDKeyTextSpelling \
+            TestRecoverCascade_MariaDBUUIDKeyTextSpelling \
+            TestIntegrationMariaDBUUIDKeyTextSpelling \
+            TestTools_MariaDBUUIDKeyTextSpelling \
             TestRecoverRoundTrip_MariaDBTypes \
             TestRecoverRoundTrip_MariaDBUUIDKey \
             TestRecoverRoundTrip_MariaDBJSONText \

@@ -190,3 +190,37 @@ func TestIsMariaDBFixedText_rejectsOtherSpellings(t *testing.T) {
 		}
 	}
 }
+
+// A key typed by a person may also be the bytes in hex, which is how query and
+// recover print a UUID/INET key (the pk_values spelling, "0xCC5C…"). Copying
+// the key from that output into reconstruct used to fail with "is not a UUID".
+func TestParseMariaDBFixedKey_acceptsTheHexBytes(t *testing.T) {
+	for _, c := range []struct{ dt, in, want string }{
+		{"uuid", "0xCC5C4E6EBC5A11F19A0C0AFFD251CAC9", "cc5c4e6ebc5a11f19a0c0affd251cac9"},
+		{"uuid", "0Xcc5c4e6ebc5a11f19a0c0affd251cac9", "cc5c4e6ebc5a11f19a0c0affd251cac9"},
+		{"uuid", "cc5c4e6e-bc5a-11f1-9a0c-0affd251cac9", "cc5c4e6ebc5a11f19a0c0affd251cac9"},
+		{"inet4", "0xC0A8010A", "c0a8010a"},
+		{"inet4", "192.168.1.10", "c0a8010a"},
+		{"inet6", "0x00000000000000000000FFFF01020304", "00000000000000000000ffff01020304"},
+		{"inet6", "::ffff:1.2.3.4", "00000000000000000000ffff01020304"},
+	} {
+		b, err := ParseMariaDBFixedKey(c.dt, c.in)
+		if err != nil || hex.EncodeToString(b) != c.want {
+			t.Errorf("%s %q: %x, %v; want %s", c.dt, c.in, b, err, c.want)
+		}
+	}
+	for _, c := range []struct{ dt, in string }{
+		{"uuid", "0x"},
+		{"uuid", "0xCC5C4E6EBC5A11F19A0C0AFFD251CA"},     // 15 bytes
+		{"uuid", "0xCC5C4E6EBC5A11F19A0C0AFFD251CAC9FF"}, // 17 bytes
+		{"uuid", "0xZZ5C4E6EBC5A11F19A0C0AFFD251CAC9"},
+		{"uuid", " 0xCC5C4E6EBC5A11F19A0C0AFFD251CAC9"},
+		{"inet4", "0xC0A801"},
+		{"inet6", "0xC0A8010A"}, // an INET4's width is not an INET6
+		{"varchar", "0x00"},
+	} {
+		if b, err := ParseMariaDBFixedKey(c.dt, c.in); err == nil {
+			t.Errorf("%s %q accepted as %x, want refused", c.dt, c.in, b)
+		}
+	}
+}

@@ -406,6 +406,70 @@ func TestCheckReplicationGrants_namesTheMissingPrivilege(t *testing.T) {
 	}
 }
 
+// The line RDS for MariaDB 11.4 printed after GRANT REPLICATION SLAVE,
+// REPLICATION CLIENT: MariaDB 10.5+ stores the second one as BINLOG MONITOR.
+// Doctor refused it, so `up` and `watch` would not start there with any user.
+func TestCheckReplicationGrants_MariaDBBinlogMonitorPasses(t *testing.T) {
+	got := grantsDB(t, "GRANT SELECT, LOCK TABLES, REPLICATION SLAVE, BINLOG MONITOR, SHOW VIEW ON *.* TO `bintrail`@`%`")
+	if got.Status != StatusPass {
+		t.Fatalf("status %q (%s), want pass: BINLOG MONITOR is MariaDB's name for REPLICATION CLIENT", got.Status, got.Detail)
+	}
+}
+
+// When the grant text does not show the client privilege, doctor asks the
+// server instead: SHOW BINARY LOGS is what that privilege allows. A role or a
+// name this parser does not know must not refuse a user who can run it.
+func TestCheckReplicationGrants_listingBinaryLogsProvesTheClientPrivilege(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants"}).
+		AddRow("GRANT REPLICATION SLAVE ON *.* TO `dbtrail`@`%`").
+		AddRow("GRANT `binlog_reader` TO `dbtrail`@`%`"))
+	mock.ExpectQuery("SHOW BINARY LOGS").WillReturnRows(sqlmock.NewRows([]string{"Log_name", "File_size"}).
+		AddRow("mysql-bin.000001", 120))
+	got := checkReplicationGrants(context.Background(), db)
+	if got.Status != StatusPass {
+		t.Errorf("status %q (%s), want pass: the server listed its binary logs for this user", got.Status, got.Detail)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// A refused SHOW BINARY LOGS keeps the refusal, and the fix it prints must
+// work where the user is: on MariaDB (whose SHOW GRANTS says BINLOG MONITOR)
+// and on RDS, where there is no root.
+func TestCheckReplicationGrants_refusalWorksOnMariaDBAndRDS(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants"}).
+		AddRow("GRANT REPLICATION SLAVE ON *.* TO `dbtrail`@`%`"))
+	mock.ExpectQuery("SHOW BINARY LOGS").WillReturnError(errors.New("Error 1227 (42000): Access denied; you need (at least one of) the SUPER, BINLOG MONITOR privilege(s) for this operation"))
+	got := checkReplicationGrants(context.Background(), db)
+	if got.Status != StatusFail || !slices.Equal(got.Subjects, []string{"REPLICATION CLIENT"}) {
+		t.Fatalf("got %q subjects %v, want a fail naming REPLICATION CLIENT", got.Status, got.Subjects)
+	}
+	t.Logf("remediation:\n%s", got.Remediation)
+	for _, want := range []string{
+		"GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO `dbtrail`@`%`;",
+		"BINLOG MONITOR",
+		"master user",
+	} {
+		if !strings.Contains(got.Remediation, want) {
+			t.Errorf("remediation lacks %q:\n%s", want, got.Remediation)
+		}
+	}
+	if strings.Contains(got.Remediation, "—") {
+		t.Errorf("em dash in remediation:\n%s", got.Remediation)
+	}
+}
+
 func TestCheckReplicationGrants_aFailedQueryHasNoKind(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

@@ -59,7 +59,7 @@ Identical to a MySQL source (see [Streaming → The Source MySQL User](streaming
 | `binlog_format = ROW` | Validated at preflight; `bintrail` refuses to start otherwise. |
 | `binlog_row_image = FULL` | Set it **server-wide** (`SHOW VARIABLES LIKE 'binlog_row_image';`). MariaDB defaults to `FULL`, but verify. |
 | `log_bin = ON` | Binary logging must be enabled. |
-| Source user grants | `REPLICATION SLAVE, REPLICATION CLIENT, SELECT` — the same set as MySQL. Add `RELOAD, SHOW VIEW` for baselines (`LOCK TABLES, SHOW VIEW` with `lock-all` on managed MariaDB). MariaDB has no `BACKUP_ADMIN` and never issues `LOCK INSTANCE FOR BACKUP`, so on a self-hosted MariaDB the default `ftwrl` mode needs only `RELOAD`/`FLUSH_TABLES`. RDS for MariaDB is different: its `RELOAD` does not allow `FLUSH TABLES WITH READ LOCK`, so use `lock-all` there. |
+| Source user grants | `REPLICATION SLAVE, REPLICATION CLIENT, SELECT`, the same set as MySQL. MariaDB 10.5+ stores `REPLICATION CLIENT` as `BINLOG MONITOR`, so `SHOW GRANTS` shows that name; `doctor` accepts both. Add `RELOAD, SHOW VIEW` for baselines (`LOCK TABLES, SHOW VIEW` with `lock-all` on managed MariaDB). MariaDB has no `BACKUP_ADMIN` and never issues `LOCK INSTANCE FOR BACKUP`, so on a self-hosted MariaDB the default `ftwrl` mode needs only `RELOAD`/`FLUSH_TABLES`. RDS for MariaDB is different: its `RELOAD` does not allow `FLUSH TABLES WITH READ LOCK`, so use `lock-all` there. |
 
 > MariaDB does not have a `server_uuid` system variable. bintrail detects this
 > and emits a benign `WARN … MariaDB source has no @@server_uuid; synthesized a
@@ -190,14 +190,22 @@ page and the
   skipped transparently.
 - **MariaDB-only column types**: `UUID` (10.7+), `INET4` (10.10+), `INET6`
   (10.5+) and `VECTOR` (11.7+) are captured and restored by `recover` byte for
-  byte, also in tables whose primary key uses them. `query --pk` and
-  `recover --pk` do not accept the text form of such a key yet (see the
-  limitations below). `reconstruct`, `drill`, `verify`, the
-  `_flashback`/`_snapshot`/`_diff` schemas and the Parquet copy return the
-  value the source holds: `UUID` and `INET` as the text MariaDB prints
-  (`123e4567-e89b-12d3-a456-426614174000`, `10.0.0.0`, `::ffff:1.2.3.4`),
-  `VECTOR` as its bytes. A `UUID` or `INET` key can be typed in any form
-  MariaDB accepts (`reconstruct --pk 7C5C7C5C5C7C00000000000000000000`).
+  byte, also in tables whose primary key uses them. `reconstruct`, `drill`,
+  `verify`, the `_flashback`/`_snapshot`/`_diff` schemas and the Parquet copy
+  return the value the source holds: `UUID` and `INET` as the text MariaDB
+  prints (`123e4567-e89b-12d3-a456-426614174000`, `10.0.0.0`,
+  `::ffff:1.2.3.4`), `VECTOR` as its bytes. `query` and `recover` show such a
+  key as its bytes in hex (`0x123E4567E89B12D3A456426614174000`).
+- **Typing a `UUID` or `INET` key.** `query --pk`, `recover --pk`,
+  `recover-cascade --pk`, `reconstruct --pk`, and the console and MCP searches
+  accept the key in any
+  form MariaDB accepts (`123e4567-e89b-12d3-a456-426614174000`, upper case,
+  no dashes) and as the hex bytes `query` prints (`0x123E…`). To spell it the
+  way the index stores it, they read the key's column type from the index's
+  schema snapshot. If no snapshot describes the table and no event is stored
+  under the key as typed, a key that looks like a `UUID` or an IP address is
+  refused with an error instead of answering "no history"; take a snapshot
+  (`bintrail snapshot`) or select the rows by table and time window.
 - **The Parquet copy, end to end**: snapshot with mydumper (`bintrail dump`
   and `bintrail baseline`), `bintrail baseline refresh`, `reconstruct` for one
   row and for whole tables, and `drill` into a scratch MariaDB, checked in CI
@@ -288,13 +296,6 @@ page and the
     unchanged row.
 
   The same applies to a MySQL 9 `VECTOR` column.
-- **`query --pk` and `recover --pk` do not take a `UUID`/`INET` key as text.**
-  The index keys these rows by the value's bytes, and those two commands look
-  the key up exactly as typed, so `--pk 123e4567-…` finds nothing, without an
-  error. Select the rows with `--table` and a time window (`--since`/`--until`)
-  instead, or copy the key from the `pk_values` of a `query` result.
-  `reconstruct --pk`, the console's time travel and the `_flashback`,
-  `_snapshot` and `_diff` schemas do accept the text form.
 - **Values captured before `UUID`/`INET` support stay unreadable.** Events
   indexed by a version older than the one that added it hold damaged bytes for
   these columns. `verify` reports such a value as inconclusive; a full-table

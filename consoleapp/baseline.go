@@ -1119,6 +1119,9 @@ func runMydumper(ctx context.Context, sourceDSN string, schemas []string, dumpDi
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if msg := strings.TrimSpace(string(out)); msg != "" {
+			if hint := mydumperlock.FTWRLDeniedHint(lockMode, msg, mydumperlock.RemedyConsole); hint != "" {
+				return fmt.Errorf("mydumper failed: %w: %s; output: %s", err, hint, msg)
+			}
 			return fmt.Errorf("mydumper failed: %w; output: %s", err, msg)
 		}
 		return fmt.Errorf("mydumper failed: %w", err)
