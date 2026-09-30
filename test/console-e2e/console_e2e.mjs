@@ -462,7 +462,7 @@ try {
       return { bad: bad ? bad.innerText : "", notice: !!document.querySelector("#notice-mount .notice"), auto: document.getElementById("connect-auto").innerText };
     });
   }
-  lightsSeen && /The user logs in/.test(lightsSeen.bad) && /MySQL refused the user or the password/.test(lightsSeen.bad) && !lightsSeen.notice && /Checking again every 10 seconds/.test(lightsSeen.auto)
+  lightsSeen && /User logs in/.test(lightsSeen.bad) && /MySQL refused the user or the password/.test(lightsSeen.bad) && !lightsSeen.notice && /Checking again in 10 seconds/.test(lightsSeen.auto)
     ? ok("connect: a wrong password is refused in plain words")
     : bad("connect: a wrong password is refused in plain words", JSON.stringify(lightsSeen));
   await page.click("#server-cancel");

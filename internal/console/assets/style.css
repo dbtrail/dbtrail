@@ -1130,6 +1130,13 @@ button { font-family: inherit; }
 .cx-step[hidden] { display: none; }
 .cx-title { font-family: var(--f-display); font-weight: 600; font-size: var(--fs-md, 15px); margin: 14px 0 8px; color: var(--ink); }
 .cx-where { grid-template-columns: 1fr 110px; }
+/* While a server is being connected the dialog is that form: the list of the
+   others and the dialog's lead come back with Done or Cancel. */
+.modal-body:has(#server-form-mount > form[data-connect]) #servers-list { display: none; }
+.modal:has(#server-form-mount > form[data-connect]) .modal-desc { display: none; }
+.cx-row { display: flex; align-items: center; gap: 14px; margin: -6px 0 12px; }
+.cx-row .cx-managed { margin: 0; }
+
 .cx-found { display: grid; grid-template-columns: 28px 1fr; gap: 4px 12px; align-items: center;
   margin: 4px 0 6px; padding: 12px 14px; border-radius: var(--r-md); background: var(--strip); color: var(--strip-ink); }
 .cx-found .cx-mark { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
@@ -1163,6 +1170,7 @@ button { font-family: inherit; }
 .cx-light > .doctor-cards { grid-column: 2; }
 .cx-auto { font-size: 12.5px; color: var(--ink-3); margin: 0 0 10px; }
 .cx-auto:empty { display: none; }
+#connect-full-row[hidden] { display: none; }
 .notice-inline { padding: 12px 14px; border-radius: var(--r-md); border: 1px solid var(--line); border-top: 3px solid var(--insert); margin: 6px 0; }
 .notice-inline.warn { border-top-color: var(--ochre); }
 .notice-inline.err { border-top-color: var(--delete); }

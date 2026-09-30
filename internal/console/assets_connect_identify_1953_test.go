@@ -78,8 +78,8 @@ func TestIdentifyKindsSayEveryKind(t *testing.T) {
 `
 	var got map[string]struct {
 		Text, Code, Note, Broken, Label, Copy, Use string
-		Banned                                   []string
-		Words                                    int
+		Banned                                     []string
+		Words                                      int
 	}
 	raw := runNodeConnect(t, script)
 	if err := json.Unmarshal(raw, &got); err != nil {

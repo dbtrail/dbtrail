@@ -14049,6 +14049,11 @@ function setConnectStep(form, n) {
   form.dataset.step = String(n);
   const num = n === "done" ? 4 : n;
   $all("[data-cx-step]", form).forEach((s) => { s.hidden = Number(s.dataset.cxStep) > num; });
+  // The way out to the full form belongs to step 1 only: kept on the later
+  // steps it pushes their one button below the fold. Host and port stay
+  // visible: editing them is how the person goes back.
+  const full = $("#connect-full-row", form);
+  if (full) full.hidden = num > 1;
   $all("[data-cx-dot]", form).forEach((d) => d.classList.toggle("on", Number(d.dataset.cxDot) <= num));
   const btn = form.querySelector("button[type=submit]");
   if (btn) btn.textContent = CONNECT_STEP_BUTTON[n];
@@ -14075,12 +14080,13 @@ function buildConnectForm() {
 
   const s2 = el("div", { class: "cx-step", "data-cx-step": "2", hidden: true });
   s2.append(el("p", { class: "cx-title", text: "2. Let DBTrail in" }));
-  s2.append(el("p", { class: "form-hint", text: "Run this once on that server, as an admin:" }));
+  s2.append(el("p", { class: "form-hint", text: "Run this on that server, as an admin:" }));
   const pre = el("pre", { class: "form-code", "data-grant": "mysql", text: grantBlocks("", "").mysql });
   s2.append(el("div", {}, pre,
-    el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(pre.textContent, "SQL") })));
-  s2.append(el("label", { class: "cx-managed" },
-    el("input", { type: "checkbox", name: "cx_managed", onchange: () => refreshGrants(form) }), " On Amazon RDS or Aurora"));
+    el("div", { class: "cx-row" },
+      el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(pre.textContent, "SQL") }),
+      el("label", { class: "cx-managed" },
+        el("input", { type: "checkbox", name: "cx_managed", onchange: () => refreshGrants(form) }), " On Amazon RDS or Aurora"))));
   const acct = el("div", { class: "form-grid" });
   acct.append(srvField("User", "source_user", { placeholder: "dbtrail" }));
   acct.append(srvField("Password", "source_password", { type: "password", autocomplete: "new-password" }));
@@ -14097,7 +14103,7 @@ function buildConnectForm() {
   s3.append(el("div", { id: "connect-result" }));
   form.append(s3);
 
-  form.append(el("p", { class: "form-hint" },
+  form.append(el("p", { class: "form-hint", id: "connect-full-row" },
     el("button", { class: "btn btn-sm btn-ghost", type: "button", id: "connect-full-form", text: "PostgreSQL, S3 or your own store? Open the full form",
       onclick: () => openFullForm(form) })));
   form.append(el("div", { id: "server-form-msg", class: "form-msg" }));
@@ -14266,8 +14272,8 @@ function stopConnectRecheck(form) {
 // LIGHT_WORDS names each light (doctor.Lights), in the order they are drawn.
 const LIGHT_WORDS = [
   ["reach", "DBTrail reaches it"],
-  ["login", "The user logs in"],
-  ["rows", "The change log keeps full rows"],
+  ["login", "User logs in"],
+  ["rows", "Change log keeps full rows"],
   ["permissions", "Permissions"],
   ["keys", "Every table has a key"],
   ["other", "Other checks"],
@@ -14309,6 +14315,9 @@ function drawConnectLights(form, report, started) {
     if (l.checks.length && l.status !== "ok" && !started) li.append(connectFindings(l.checks));
     return li;
   }));
+  // The fix is what the person came for: bring the first red light into view.
+  const bad = list.querySelector("li.bad");
+  if (bad && typeof bad.scrollIntoView === "function") bad.scrollIntoView({ block: "nearest", behavior: prefersReducedMotion() ? "auto" : "smooth" });
 }
 
 // runConnectCheck runs the startup checks for what the form holds and draws
@@ -14397,7 +14406,7 @@ function scheduleConnectRecheck(form, round, why) {
     runConnectCheck(form, false);
   }, CONNECT_RECHECK_MS);
   connectRecheck.set(form, { timer, round });
-  if (auto) auto.textContent = lead + "Checking again every 10 seconds. Nothing to press.";
+  if (auto) auto.textContent = lead + "Checking again in 10 seconds.";
 }
 
 // connectResultCard says in place how a check that got past every light

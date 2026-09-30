@@ -270,7 +270,7 @@ const toStep2 = async (host, answer) => {
   calls.length = 0;
   f.fire("submit"); await flush(4);
   out.identifyCalls = calls.filter((c) => c.startsWith("POST /api/servers/identify"));
-  out.found = { step: step(f), step2: shown(f, 2), submit: button(f), texts: identified(f), flavor: f.elements.flavor.value,
+  out.found = { step: step(f), step2: shown(f, 2), submit: button(f), texts: identified(f), flavor: f.elements.flavor.value, fullRowHidden: !!f.querySelector("p#connect-full-row").hidden,
     managed: !!f.elements.cx_managed.checked, grant: f.querySelector("pre[data-grant]").attrs["data-grant"],
     block: f.querySelector("pre[data-grant]").textContent, user: f.elements.source_user.value, pwLen: f.elements.source_password.value.length,
     draftPut: calls.filter((c) => c.startsWith("PUT /api/servers/draft")).pop() || "",
@@ -278,9 +278,10 @@ const toStep2 = async (host, answer) => {
   // A different host undoes it: back to step 1.
   f.elements.source_host.value = "db1b"; f.elements.source_host.fire("input");
   out.backToWhere = { step: step(f), step2Hidden: !shown(f, 2), found: identified(f).length };
+
   // A proxy: the flavor is a choice, MySQL chosen, nothing forced.
   f = await toStep2("proxy1", { addr: "proxy1:6033", version: "8.0.11", proxy: "proxysql" });
-  const pick = f.querySelector("div#connect-found").querySelectorAll("button");
+  const pick = f.querySelector("div#connect-found").querySelector("div.cx-pick").querySelectorAll("button");
   out.proxy = { step: step(f), texts: identified(f), buttons: pick.map((b) => b._text + "=" + b.attrs["aria-pressed"]), flavor: f.elements.flavor.value };
   pick.find((b) => b._text === "MariaDB").fire("click"); await flush();
   out.proxy.chosen = { flavor: f.elements.flavor.value, grant: f.querySelector("pre[data-grant]").attrs["data-grant"], title: identified(f)[0],
@@ -488,7 +489,7 @@ func TestConnectScreenWiring(t *testing.T) {
 		IdentifyCalls []string
 		Found         struct {
 			Step, Submit, Flavor, Grant, Block, User, DraftPut string
-			Step2, Managed                                     bool
+			Step2, Managed, FullRowHidden                      bool
 			PwLen                                              int
 			Texts, Banned                                      []string
 		}
@@ -497,6 +498,7 @@ func TestConnectScreenWiring(t *testing.T) {
 			Step2Hidden bool
 			Found       int
 		}
+
 		Proxy struct {
 			Step, Flavor   string
 			Texts, Buttons []string
@@ -621,6 +623,10 @@ func TestConnectScreenWiring(t *testing.T) {
 	if b := out.BackToWhere; b.Step != "1" || !b.Step2Hidden || b.Found != 0 {
 		t.Errorf("another host after step 1 found one: %+v; want step 1 again, the answer gone", b)
 	}
+	// Past step 1 the full-form link goes: kept, it pushes the button down.
+	if !fd.FullRowHidden {
+		t.Error("the link to the full form stays on step 2, pushing its button down")
+	}
 
 	// A proxy: the flavor is a choice, with MySQL chosen, so nothing is forced.
 	px := out.Proxy
@@ -652,11 +658,11 @@ func TestConnectScreenWiring(t *testing.T) {
 		t.Errorf("check body = %v; want the typed password and user, no name, the flavor step 1 found", out.CheckBody)
 	}
 	fl := out.Failed
-	wantFailed := "ok:DBTrail reaches it,bad:The user logs in,wait:The change log keeps full rows,wait:Permissions,wait:Every table has a key"
+	wantFailed := "ok:DBTrail reaches it,bad:User logs in,wait:Change log keeps full rows,wait:Permissions,wait:Every table has a key"
 	if fl.Step != "3" || strings.Join(fl.Lights, ",") != wantFailed || fl.Notices != 0 || fl.Submit != "Check again" {
 		t.Errorf("a refused password: %+v; want the lights with login red and the rest not reached, in place", fl)
 	}
-	if fl.Scheduled != 1 || fl.Auto != "Checking again every 10 seconds. Nothing to press." {
+	if fl.Scheduled != 1 || fl.Auto != "Checking again in 10 seconds." {
 		t.Errorf("a failed round schedules one re-check and says so: %+v", fl)
 	}
 	if len(fl.Banned) > 0 {
@@ -668,10 +674,10 @@ func TestConnectScreenWiring(t *testing.T) {
 	if len(out.LateRecheckCalls) != 0 {
 		t.Errorf("a re-check that fired after the address changed still checked: %v", out.LateRecheckCalls)
 	}
-	if got := strings.Join(out.Unreached, ","); got != "bad:DBTrail reaches it,wait:The user logs in,wait:The change log keeps full rows,wait:Permissions,wait:Every table has a key" {
+	if got := strings.Join(out.Unreached, ","); got != "bad:DBTrail reaches it,wait:User logs in,wait:Change log keeps full rows,wait:Permissions,wait:Every table has a key" {
 		t.Errorf("a connection that timed out: %s", got)
 	}
-	if got := strings.Join(out.Keys, ","); got != "ok:DBTrail reaches it,ok:The user logs in,ok:The change log keeps full rows,ok:Permissions,bad:Every table has a key" {
+	if got := strings.Join(out.Keys, ","); got != "ok:DBTrail reaches it,ok:User logs in,ok:Change log keeps full rows,ok:Permissions,bad:Every table has a key" {
 		t.Errorf("a table without a key: %s", got)
 	}
 
