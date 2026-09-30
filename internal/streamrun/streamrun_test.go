@@ -2284,3 +2284,39 @@ func TestFreshDedupFloor(t *testing.T) {
 		t.Error("a failed read must be an error, never a zero floor")
 	}
 }
+
+// TestOne_restartsOnlyOnCutTransaction pins One's in-process restart: only
+// parser.ErrResentCutTransaction restarts the run, any other error returns
+// at once, and a run that keeps failing that way gives up after the limit.
+func TestOne_restartsOnlyOnCutTransaction(t *testing.T) {
+	prevFn, prevDelay := oneRunFn, cutRestartDelay
+	t.Cleanup(func() { oneRunFn, cutRestartDelay = prevFn, prevDelay })
+	cutRestartDelay = time.Millisecond
+	cut := &parser.ResentCutTransactionError{GTID: "0-1-7", Rows: 3}
+
+	calls := 0
+	oneRunFn = func(context.Context, Config) error {
+		calls++
+		if calls < 3 {
+			return errors.Join(errors.New("stream"), cut)
+		}
+		return nil
+	}
+	if err := One(context.Background(), Config{}); err != nil || calls != 3 {
+		t.Errorf("two cuts then success: err=%v calls=%d, want nil after 3 runs", err, calls)
+	}
+
+	calls = 0
+	other := errors.New("index write deadline")
+	oneRunFn = func(context.Context, Config) error { calls++; return other }
+	if err := One(context.Background(), Config{}); !errors.Is(err, other) || calls != 1 {
+		t.Errorf("another error: err=%v calls=%d, want it returned after 1 run", err, calls)
+	}
+
+	calls = 0
+	oneRunFn = func(context.Context, Config) error { calls++; return cut }
+	err := One(context.Background(), Config{})
+	if !errors.Is(err, parser.ErrResentCutTransaction) || calls != 6 {
+		t.Errorf("endless cuts: err=%v calls=%d, want the cut error after 6 runs", err, calls)
+	}
+}

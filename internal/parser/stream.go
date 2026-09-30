@@ -5,6 +5,7 @@ package parser
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
@@ -141,6 +142,28 @@ func (sp *StreamParser) SetSyncDDLHook(fn func(Event) error) {
 	sp.onDDL.Store(&fn)
 }
 
+// ErrResentCutTransaction marks a ResentCutTransactionError, for errors.Is.
+var ErrResentCutTransaction = errors.New("the source re-sent a transaction that was cut by a disconnect after some of its rows were captured")
+
+// ResentCutTransactionError: the connection to the source dropped in the
+// middle of a transaction, after Rows of its row events were already emitted,
+// and on reconnect the source sent the whole transaction again. Indexing the
+// re-send would put those rows in twice. The stream stops instead; capture
+// restarts from its last checkpoint, and that checkpoint's resume cleanup
+// deletes the partial copy (its GTID is not in the saved set) before the
+// transaction is read again in full.
+type ResentCutTransactionError struct {
+	GTID string
+	Rows int
+}
+
+func (e *ResentCutTransactionError) Error() string {
+	return fmt.Sprintf("the connection to the source dropped in the middle of transaction %s after %d of its row events were captured, "+
+		"and the source sent it again from the start; stopping so capture restarts from its last checkpoint and indexes it once", e.GTID, e.Rows)
+}
+
+func (e *ResentCutTransactionError) Is(target error) bool { return target == ErrResentCutTransaction }
+
 // Run reads events from the streamer and sends matching row events to out.
 // It tracks the current binlog filename (from RotateEvent) and GTID (from
 // GTIDEvent), and uses them to populate each emitted Event.
@@ -195,6 +218,8 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	//     next transaction starts.
 	var lastCommittedGTID, ddlTxnGTID string
 	var afterRotate, skipTxn bool
+	// txnRows counts the row events emitted for the transaction in flight.
+	var txnRows int
 
 	// em is the stamped way out (#1223 T1). It is REBUILT on every delivered
 	// binlog event, just below, so each emitted row carries the time go-mysql
@@ -238,6 +263,14 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	// above), which sets skipTxn.
 	beginTxn := func(hdr *replication.EventHeader, gtid string) error {
 		if afterRotate && currentGTID != "" && currentGTID == gtid {
+			if txnRows > 0 {
+				// Cut after some of its rows were already emitted (and may
+				// already be written). The re-send would index them again,
+				// and they cannot be taken back from here: stop, so capture
+				// restarts from its last checkpoint, whose cleanup deletes
+				// the partial copy before the transaction is read again.
+				return &ResentCutTransactionError{GTID: gtid, Rows: txnRows}
+			}
 			currentGTID = ""
 		}
 		if err := emitCommit(hdr); err != nil {
@@ -247,6 +280,7 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 		skipTxn = afterRotate && gtid != "" && gtid == lastCommittedGTID
 		afterRotate = false
 		ddlTxnGTID = ""
+		txnRows = 0
 		if skipTxn {
 			sp.logger.Info("dropping a transaction the source re-sent after a reconnect; it was already captured",
 				"gtid", gtid, "file", currentFile)
@@ -577,7 +611,7 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 		// and not where the consumer receives off `out`, because `out` is
 		// buffered and a receive-side stamp would swallow the queue wait, which
 		// is the largest part of the lag precisely when the indexer is behind.
-		em = emitter{ch: out, readAt: time.Now()}
+		em = emitter{ch: out, readAt: time.Now(), rows: &txnRows}
 
 		if err := handleEvent(binlogEv); err != nil {
 			if ctx.Err() != nil {

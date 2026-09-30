@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -104,20 +105,75 @@ func TestStreamParser_resentCommittedTransactionDropped_mariadb(t *testing.T) {
 	}
 }
 
-// A transaction cut by the disconnect (no commit seen) is NOT committed, so its
-// re-send is the only complete copy and must pass through.
-func TestStreamParser_resentUncommittedTransactionKept(t *testing.T) {
+// A transaction cut by the disconnect after some of its rows were already
+// emitted: the source re-sends it whole, and indexing the re-send would put
+// those first rows in twice. The parser cannot take rows back, so it stops
+// with ErrResentCutTransaction; capture restarts from its last checkpoint,
+// whose cleanup deletes the partial copy (the transaction's GTID is not in the
+// saved set) before the whole transaction is read again.
+func TestStreamParser_resentCutTransactionWithRowsStops(t *testing.T) {
+	for _, flavor := range []string{"", "mariadb"} {
+		sp := NewStreamParser(makeOrdersResolver(), Filters{}, nil)
+		gtid := makeGTIDEvent(1)
+		if flavor == "mariadb" {
+			sp.SetFlavor(flavor)
+			gtid = makeMariadbGTIDEvent(0, 1, 7)
+		}
+		streamer := replication.NewBinlogStreamer()
+		out := make(chan Event, 64)
+		for _, ev := range []*replication.BinlogEvent{
+			artificialRotate("binlog.000001", 4),
+			gtid, makeQueryEvent("BEGIN"), makeOrdersInsertEvent(1, 10),
+			artificialRotate("binlog.000001", 4),
+			gtid, makeQueryEvent("BEGIN"), makeOrdersInsertEvent(1, 10), makeXIDEvent(300),
+		} {
+			if err := streamer.AddEventToStreamer(ev); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := sp.Run(context.Background(), streamer, out)
+		if !errors.Is(err, ErrResentCutTransaction) {
+			t.Fatalf("%q: Run = %v, want ErrResentCutTransaction", flavor, err)
+		}
+		evs := drainAll(out)
+		if got := idsOf(evs); len(got) != 1 {
+			t.Errorf("%q: rows = %v, want only the first (partial) copy emitted before the stop", flavor, got)
+		}
+		if got := commitsOf(evs); len(got) != 0 {
+			t.Errorf("%q: commits = %v, want none: the cut transaction was never committed", flavor, got)
+		}
+	}
+}
+
+// The row count is per transaction: rows of an earlier, complete transaction
+// never make a later cut one (that emitted nothing) look like it had rows.
+func TestStreamParser_rowCountResetsPerTransaction(t *testing.T) {
 	evs := runResend(t, "",
 		artificialRotate("binlog.000001", 4),
-		makeGTIDEvent(1), makeQueryEvent("BEGIN"), makeOrdersInsertEvent(1, 10),
+		makeGTIDEvent(1), makeQueryEvent("BEGIN"), makeOrdersInsertEvent(1, 10), makeXIDEvent(300),
+		makeGTIDEvent(2), makeQueryEvent("BEGIN"),
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(2), makeQueryEvent("BEGIN"), makeOrdersInsertEvent(2, 20), makeXIDEvent(300),
+	)
+	if got := idsOf(evs); !equalAny(got, []any{int64(1), int64(2)}) {
+		t.Errorf("rows = %v, want [1 2] (a cut transaction with no rows emitted is simply read again)", got)
+	}
+}
+
+// A cut transaction that had emitted NO rows yet (cut before its first row,
+// or only rows of filtered tables) is simply read again: nothing to undo.
+func TestStreamParser_resentCutTransactionWithoutRowsContinues(t *testing.T) {
+	evs := runResend(t, "",
+		artificialRotate("binlog.000001", 4),
+		makeGTIDEvent(1), makeQueryEvent("BEGIN"),
 		artificialRotate("binlog.000001", 4),
 		makeGTIDEvent(1), makeQueryEvent("BEGIN"), makeOrdersInsertEvent(1, 10), makeXIDEvent(300),
 	)
 	if got := commitsOf(evs); len(got) != 1 {
 		t.Fatalf("commits = %v, want the re-sent transaction committed once", got)
 	}
-	if got := idsOf(evs); len(got) != 2 {
-		t.Errorf("rows = %v, want the re-sent copy emitted (the cut copy was never committed)", got)
+	if got := idsOf(evs); !equalAny(got, []any{int64(1)}) {
+		t.Errorf("rows = %v, want [1]", got)
 	}
 }
 

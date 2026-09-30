@@ -401,3 +401,114 @@ func TestIntegrationGTIDResetKeepsOlderHistory(t *testing.T) {
 	testutil.InitIndexTables(t, indexDB)
 	runResetKeepsOlderHistory(t, mysqlGTIDDupSource(t, 99965), indexDB, indexName, "3e11fa47-71ca-11e1-9e33-c80aa9429562:77")
 }
+
+// cutRestartLogged is the log line One writes when it restarts after the
+// parser stopped on a transaction cut by a disconnect.
+const cutRestartLogged = "restarting capture from its last checkpoint so a transaction cut by a disconnect is indexed once"
+
+// runCutMidTransaction: one large transaction (many single-row statements, so
+// many row events) is committed; while its rows are still arriving, the
+// source's dump thread is killed. The source re-sends the whole transaction
+// after go-mysql reconnects. Every row must end up indexed exactly once, and
+// the restart path must be the one that got it there.
+func runCutMidTransaction(t *testing.T, src dupSource, indexDB *sql.DB, indexName string) {
+	t.Helper()
+	const n = 20000
+	logs := teeLogs(t)
+	testutil.MustExec(t, src.db, "ALTER TABLE orders ADD COLUMN pad VARCHAR(1000) NOT NULL DEFAULT ''")
+
+	cfg := src.config(indexName)
+	cfg.BatchSize = 100
+	cfg.Checkpoint = 1
+	var want string
+	if err := runOneUntil(t, cfg, true,
+		func() {
+			tx, err := src.db.Begin()
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			stmt, err := tx.Prepare("INSERT INTO orders (amount, pad) VALUES (1, REPEAT('x', 1000))")
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			for range n {
+				if _, err := stmt.Exec(); err != nil {
+					t.Fatalf("insert: %v", err)
+				}
+			}
+			stmt.Close()
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			want = src.executedSet(t)
+			// Kill while the transaction's rows are still arriving.
+			for deadline := time.Now().Add(60 * time.Second); indexedOrders(t, indexDB, src.schema) == 0; {
+				if time.Now().After(deadline) {
+					t.Fatal("no row of the transaction was indexed within 60s")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			if got := indexedOrders(t, indexDB, src.schema); got >= n {
+				t.Fatalf("the whole transaction (%d rows) was indexed before the kill; the scenario needs a cut", got)
+			}
+			for _, id := range dumpThreads(t, src.db) {
+				if _, err := src.db.Exec(fmt.Sprintf("KILL %d", id)); err != nil {
+					t.Fatalf("KILL %d: %v", id, err)
+				}
+			}
+		},
+		func() bool {
+			return indexedOrders(t, indexDB, src.schema) >= n && src.checkpointReached(t, indexDB, want)
+		},
+	); err != nil {
+		t.Fatalf("One: %v", err)
+	}
+	if !strings.Contains(logs.String(), cutRestartLogged) {
+		t.Errorf("capture never restarted on a cut transaction: the kill did not cut the transaction, so this run proved nothing")
+	}
+	assertExactlyOnce(t, indexedPKs(t, indexDB, src.schema, "orders"), pkRange(1, n))
+}
+
+func TestOne_MariaDB_cutMidTransactionIndexesOnce(t *testing.T) {
+	indexDB, indexName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
+	runCutMidTransaction(t, mariadbDupSource(t, 99966), indexDB, indexName)
+}
+
+func TestIntegrationGTIDCutMidTransactionIndexesOnce(t *testing.T) {
+	indexDB, indexName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
+	runCutMidTransaction(t, mysqlGTIDDupSource(t, 99967), indexDB, indexName)
+}
+
+// runFreshStartCheckpointsAtOnce: a run with no checkpoint writes its start
+// point before it reads any event, not at the first ticker tick. Until then a
+// restart would find no checkpoint and start over at the source's CURRENT
+// position, skipping what was sent in between. The ticker is set to an hour,
+// so only the start checkpoint can satisfy this.
+func runFreshStartCheckpointsAtOnce(t *testing.T, src dupSource, indexDB *sql.DB, indexName string) {
+	t.Helper()
+	cfg := src.config(indexName)
+	cfg.Checkpoint = 3600
+	if err := runOneUntil(t, cfg, false, nil, func() bool {
+		st, err := loadStreamState(indexDB)
+		if err != nil {
+			t.Fatalf("poll stream_state: %v", err)
+		}
+		return st != nil
+	}); err != nil {
+		t.Fatalf("One: %v", err)
+	}
+}
+
+func TestOne_MariaDB_freshStartCheckpointsAtOnce(t *testing.T) {
+	indexDB, indexName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
+	runFreshStartCheckpointsAtOnce(t, mariadbDupSource(t, 99968), indexDB, indexName)
+}
+
+func TestIntegrationGTIDFreshStartCheckpointsAtOnce(t *testing.T) {
+	indexDB, indexName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
+	runFreshStartCheckpointsAtOnce(t, mysqlGTIDDupSource(t, 99969), indexDB, indexName)
+}

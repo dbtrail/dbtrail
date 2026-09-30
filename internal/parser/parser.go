@@ -51,6 +51,9 @@ type Event = event.Event
 type emitter struct {
 	ch     chan<- Event
 	readAt time.Time
+	// rows, when set, counts the row events (insert/update/delete) sent,
+	// so the stream parser knows whether a transaction already emitted rows.
+	rows *int
 }
 
 // emitTo builds an unstamped emitter, for the file path and for tests.
@@ -62,6 +65,12 @@ func (e emitter) send(ctx context.Context, ev Event) error {
 	ev.ReadAt = e.readAt
 	select {
 	case e.ch <- ev:
+		if e.rows != nil {
+			switch ev.EventType {
+			case EventInsert, EventUpdate, EventDelete:
+				*e.rows++
+			}
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

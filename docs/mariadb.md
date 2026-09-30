@@ -229,6 +229,11 @@ position. If they match, nothing was skipped and nothing is recorded. If a
 write slipped in, the reset says so: `bintrail status` shows the window as
 permanently lost. It never hides a gap.
 
+With an explicit `--start-gtid` (a first start or a `--reset`), the start
+checkpoint records no binlog file until the first row arrives, so a crash in
+that short window can leave the first rows indexed twice. The start without
+flags records the file and has no such window.
+
 ---
 
 ## Beta limitations

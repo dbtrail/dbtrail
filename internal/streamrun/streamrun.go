@@ -2143,8 +2143,53 @@ func drainParser(cancel context.CancelFunc, parseErrCh <-chan error) error {
 // is cancelled or a fatal error occurs. It is self-contained by design: no
 // package globals, no signal handling, safe to run N instances concurrently
 // (each against its own index database).
-
+//
+// One restarts itself, in process, when the parser stops with
+// parser.ErrResentCutTransaction: the connection to the source dropped in the
+// middle of a transaction whose first rows were already captured, and the
+// source re-sent it whole. Restarting is what indexes it once: the resume
+// cleanup of the last checkpoint deletes the partial copy (its GTID is not in
+// the saved set), and the transaction is read again in full. Every caller
+// (stream, up, watch and its console sources) gets that without its own
+// restart policy. Any other error returns unchanged. A restart that fails the
+// same way again within a minute counts toward a limit; past it the error is
+// returned, so a source that keeps cutting transactions stops loudly instead
+// of spinning.
 func One(ctx context.Context, cfg Config) error {
+	const maxQuickRestarts = 5
+	quick := 0
+	for {
+		started := time.Now()
+		err := oneRunFn(ctx, cfg)
+		if err == nil || ctx.Err() != nil || !errors.Is(err, parser.ErrResentCutTransaction) {
+			return err
+		}
+		if time.Since(started) > time.Minute {
+			quick = 0
+		}
+		quick++
+		if quick > maxQuickRestarts {
+			return fmt.Errorf("gave up after %d quick restarts: %w", maxQuickRestarts, err)
+		}
+		slog.Warn("restarting capture from its last checkpoint so a transaction cut by a disconnect is indexed once",
+			"error", err, "restart", quick)
+		select {
+		case <-time.After(cutRestartDelay):
+		case <-ctx.Done():
+			return err
+		}
+	}
+}
+
+// oneRunFn and cutRestartDelay are seams for One's restart test.
+var (
+	oneRunFn        = oneRun
+	cutRestartDelay = time.Second
+)
+
+// oneRun is one pass of One: connect, resume or start, and stream until ctx
+// ends or an error stops it.
+func oneRun(ctx context.Context, cfg Config) error {
 	if !cliutil.IsValidOutputFormat(cfg.Format) {
 		return fmt.Errorf("invalid --format %q; must be text or json", cfg.Format)
 	}
@@ -2688,6 +2733,18 @@ func One(ctx context.Context, cfg Config) error {
 		slog.Error("could not parse persisted capture-skip counters — the previous ledger may have recorded permanent loss; preserving the fact under reason unreadable_previous_ledger", "error", err)
 	}
 	state.skips = skips
+
+	// A run with no checkpoint writes its start point now, before it reads a
+	// single event, instead of at the first ticker tick. Until that tick a
+	// restart (a crash, or One restarting itself after a cut transaction)
+	// would find no checkpoint and start over at the source's CURRENT
+	// position: the rows captured so far would stay, and whatever the source
+	// sent after them would be skipped.
+	if saved == nil {
+		if err := saveCheckpoint(indexDB, state); err != nil {
+			return fmt.Errorf("save the start checkpoint: %w", err)
+		}
+	}
 
 	// ── 7. Parse source DSN for BinlogSyncer ─────────────────────────────
 	host, port, user, password, err := cfg.Deps.ParseSourceDSN(cfg.SourceDSN)
