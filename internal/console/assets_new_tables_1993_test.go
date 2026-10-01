@@ -44,60 +44,137 @@ func TestNewTablesNote_words(t *testing.T) {
 	for i := range RefusedTablesCap {
 		many = append(many, "app.t"+string(rune('a'+i)))
 	}
-	cases := map[string]any{
-		"two": BaselineStatus{State: "succeeded", Published: true, Tables: 1,
-			NewTables: []string{"demo.devices", "demo.orders"}},
-		"one":     scheduleRunFromRecord(&BaselineRunRecord{Kind: BaselineRunRefresh, NewTables: []string{"demo.orders"}}),
-		"capped":  BaselineStatus{State: "succeeded", NewTables: many, NewTablesOmitted: 30},
-		"onlyOut": BaselineStatus{State: "succeeded", NewTablesOmitted: 3},
-		"unchecked": BaselineStatus{State: "succeeded",
-			NewTablesUnchecked: ScrubReason("could not ask the source which tables it has: dial tcp 10.0.0.5:3306: connect: connection refused")},
-		"none": BaselineStatus{State: "succeeded", Tables: 6},
+	// The gate's own refusal text, as FullBackupPossible returns it when the
+	// web interface may not create snapshots (the #1993 situation).
+	gateErr := FullBackupPossible(ServerEntry{SourceDSN: "u:p@tcp(h:3306)/", BaselineDir: "/b"}, BackupScheduleGates{})
+	if gateErr == nil {
+		t.Fatal("fixture: the closed gate let a full read through")
+	}
+	two := []string{"demo.devices", "demo.orders"}
+	at := "2026-10-01T09:05:00Z"
+	st := func(action, reason string) BaselineStatus {
+		return BaselineStatus{State: "succeeded", Published: true, Tables: 1, NewTables: two, NewTablesSnapshot: at,
+			NewTablesAction: action, NewTablesActionReason: reason}
+	}
+	snapAt := func(ts time.Time, tables ...string) map[string]any {
+		return map[string]any{"time": ts.Format(consoleTSFormat), "tables": tables}
+	}
+	same := snapAt(time.Date(2026, 10, 1, 9, 5, 0, 0, time.UTC), "demo.kept")
+	later := time.Date(2026, 10, 1, 9, 30, 0, 0, time.UTC)
+	type tc struct {
+		Run  any `json:"run"`
+		Snap any `json:"snap"`
+	}
+	cases := map[string]tc{
+		"full_read":     {st(NewTablesActionFullRead, ""), same},
+		"not_possible":  {st(NewTablesActionNotPossible, gateErr.Error()), same},
+		"gave_up":       {st(NewTablesActionGaveUp, ""), same},
+		"still_missing": {st(NewTablesActionStillMissing, ""), same},
+		"no_schedule":   {st(NewTablesActionNoSchedule, ""), same},
+		"old_record":    {st("", ""), same},
+		"one_record": {scheduleRunFromRecord(&BaselineRunRecord{Kind: BaselineRunRefresh, SnapshotTime: at,
+			NewTables: []string{"demo.orders"}, NewTablesAction: NewTablesActionFullRead}), same},
+		"capped": {BaselineStatus{State: "succeeded", NewTables: many, NewTablesOmitted: 30, NewTablesSnapshot: at,
+			NewTablesAction: NewTablesActionNoSchedule}, same},
+		"count_only": {BaselineStatus{State: "succeeded", NewTablesOmitted: 3, NewTablesSnapshot: at, NewTablesAction: NewTablesActionFullRead}, same},
+		"unchecked": {BaselineStatus{State: "succeeded", NewTablesSnapshot: at,
+			NewTablesUnchecked: ScrubReason("could not ask the source which tables it has: dial tcp 10.0.0.5:3306: connect: connection refused")}, same},
+		"none": {BaselineStatus{State: "succeeded", Tables: 6}, same},
+		// A full read after the update holds one of the two.
+		"later_holds_one": {st(NewTablesActionFullRead, ""), snapAt(later, "demo.kept", "demo.orders")},
+		// A full read after the update holds both: nothing left to say.
+		"later_holds_all": {st(NewTablesActionFullRead, ""), snapAt(later, "demo.kept", "demo.devices", "demo.orders")},
+		// A point-in-time restore after the update, built from the old copy.
+		"later_restore": {st(NewTablesActionNotPossible, gateErr.Error()), snapAt(later, "demo.kept")},
+		"one_no_schedule": {BaselineStatus{State: "succeeded", NewTables: []string{"demo.orders"}, NewTablesSnapshot: at,
+			NewTablesAction: NewTablesActionNoSchedule}, same},
 	}
 	arg, err := json.Marshal(cases)
 	if err != nil {
 		t.Fatal(err)
 	}
 	js := readAsset(t, "app.js")
-	script := functionBody(t, js, "function newTablesNote(") + "\n" +
+	script := "const READ_DB_CONFIRM = 'confirm';\n" + functionBody(t, js, "function utcLabel(") + "\n" + functionBody(t, js, "function newTablesNote(") + "\n" +
 		"const cases = " + string(arg) + ";\nconst out = {};\n" +
-		"for (const [k, v] of Object.entries(cases)) out[k] = newTablesNote(v);\n" +
-		"out.nil = newTablesNote(null);\nprocess.stdout.write(JSON.stringify(out));\n"
-	var got map[string]*struct {
-		Warn  bool   `json:"warn"`
-		Count int    `json:"count"`
-		Title string `json:"title"`
-		Text  string `json:"text"`
+		"for (const [k, v] of Object.entries(cases)) out[k] = newTablesNote(v.run, v.snap);\n" +
+		"out.nil = newTablesNote(null, null);\nprocess.stdout.write(JSON.stringify(out));\n"
+	type note struct {
+		Warn    bool   `json:"warn"`
+		Count   int    `json:"count"`
+		Title   string `json:"title"`
+		Text    string `json:"text"`
+		Actions []struct {
+			Label   string `json:"label"`
+			Run     string `json:"run"`
+			Primary bool   `json:"primary"`
+		} `json:"actions"`
 	}
+	var got map[string]*note
 	raw := runNodeNewTables(t, script)
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("parse: %v\n%s", err, raw)
 	}
-	want := map[string]string{
-		"two": "2 tables are not in your copy yet: demo.devices, demo.orders. They were created on your database after the snapshot " +
-			"this update started from. They join the copy at the next full snapshot.",
-		"one": "1 table is not in your copy yet: demo.orders. It was created on your database after the snapshot " +
-			"this update started from. It joins the copy at the next full snapshot.",
-		"capped": "50 tables are not in your copy yet: " + strings.Join(many, ", ") + " and 30 more. They were created on your database " +
-			"after the snapshot this update started from. They join the copy at the next full snapshot.",
-		"onlyOut": "3 tables are not in your copy yet. They were created on your database after the snapshot " +
-			"this update started from. They join the copy at the next full snapshot.",
-		"unchecked": "Could not check your database for tables created since the previous snapshot, so this snapshot may be missing some. " +
-			"Reason: could not ask the source which tables it has: dial tcp 10.0.0.5:3306: connect: connection refused",
+	const head2 = "2 tables are not in your copy yet: demo.devices, demo.orders. They were created on your database after the snapshot this update started from. "
+	want := map[string]struct{ text, actions string }{
+		"full_read": {head2 + "A full snapshot was started to include them.", "Wait for the full snapshot*"},
+		"not_possible": {head2 + "A full snapshot cannot start from here: creating snapshots from the web interface is turned off here " +
+			"(BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1). Until that is fixed, they will not join the copy on their own. " +
+			"Fix it, or take a full snapshot with the bintrail command line.", "OK*"},
+		"gave_up": {head2 + "Full snapshots were started to include them and none finished, so DBTrail stopped trying on its own. " +
+			"Check why the last full snapshot failed on the Snapshots page, then take one.", "Read database now*|Later"},
+		"still_missing": {head2 + "A full snapshot read your database after that and still did not include them, so another one would not either. " +
+			"Check that the server's schema list covers their schema and that the name is spelled the way the database lists it.", "OK*"},
+		"no_schedule": {head2 + "Automatic refreshes never read your database in full, so they join the copy only when a full snapshot is taken.",
+			"Read database now*|Later"},
+		"old_record": {head2 + "They join the copy when a full snapshot is taken.", "Read database now*|Later"},
+		"one_record": {"1 table is not in your copy yet: demo.orders. It was created on your database after the snapshot this update started from. " +
+			"A full snapshot was started to include it.", "Wait for the full snapshot*"},
+		"capped": {"50 tables are not in your copy yet: " + strings.Join(many, ", ") + " and 30 more. They were created on your database " +
+			"after the snapshot this update started from. Automatic refreshes never read your database in full, so they join the copy only " +
+			"when a full snapshot is taken.", "Read database now*|Later"},
+		"count_only": {"3 tables are not in your copy yet. They were created on your database after the snapshot this update started from. " +
+			"A full snapshot was started to include them.", "Wait for the full snapshot*"},
+		"unchecked": {"Could not check your database for tables created since the previous snapshot, so this snapshot may be missing some. " +
+			"Reason: could not ask the source which tables it has: dial tcp 10.0.0.5:3306: connect: connection refused", ""},
+		"later_holds_one": {"1 table is not in your copy yet: demo.devices. It was created on your database after the snapshot this update " +
+			"started from. It joins the copy when a full snapshot is taken.", "Read database now*|Later"},
+		"later_restore": {head2 + "They join the copy when a full snapshot is taken.", "Read database now*|Later"},
+		"one_no_schedule": {"1 table is not in your copy yet: demo.orders. It was created on your database after the snapshot this update " +
+			"started from. Automatic refreshes never read your database in full, so it joins the copy only when a full snapshot is taken.",
+			"Read database now*|Later"},
 	}
 	for k, w := range want {
-		if got[k] == nil || got[k].Text != w {
-			t.Errorf("%s:\n got %+v\nwant %q", k, got[k], w)
+		g := got[k]
+		if g == nil {
+			t.Errorf("%s: no note, want %q", k, w.text)
+			continue
 		}
-		if got[k] != nil && strings.ContainsAny(got[k].Text, "\u2014\u2013") {
-			t.Errorf("%s: dash in the copy: %q", k, got[k].Text)
+		var acts []string
+		for _, a := range g.Actions {
+			l := a.Label
+			if a.Primary {
+				l += "*"
+			}
+			acts = append(acts, l)
+		}
+		if g.Text != w.text || strings.Join(acts, "|") != w.actions {
+			t.Errorf("%s:\n got  %q [%s]\n want %q [%s]", k, g.Text, strings.Join(acts, "|"), w.text, w.actions)
+		}
+		if strings.ContainsAny(g.Text, "\u2014\u2013") {
+			t.Errorf("%s: dash in the copy: %q", k, g.Text)
+		}
+		// A full snapshot is promised only where one was started.
+		if k != "full_read" && k != "one_record" && k != "count_only" && strings.Contains(g.Text, "was started to include") {
+			t.Errorf("%s promises a full snapshot that was not started: %q", k, g.Text)
 		}
 	}
-	if got["two"].Title != "2 tables are not in your copy yet" || !got["two"].Warn || got["unchecked"].Warn {
-		t.Errorf("title/tone: two %+v unchecked %+v", got["two"], got["unchecked"])
+	if got["full_read"].Title != "2 tables are not in your copy yet" || !got["full_read"].Warn || got["unchecked"].Warn {
+		t.Errorf("title/tone: %+v / %+v", got["full_read"], got["unchecked"])
 	}
-	if got["none"] != nil || got["nil"] != nil {
-		t.Errorf("a run with nothing left out says something: none %+v nil %+v", got["none"], got["nil"])
+	for _, k := range []string{"none", "nil", "later_holds_all"} {
+		if got[k] != nil {
+			t.Errorf("%s says something: %+v", k, got[k])
+		}
 	}
 }
 
@@ -139,35 +216,49 @@ func TestOverviewFlow_newTables(t *testing.T) {
 	sched := func(run any) c {
 		return c{"every": "5m", "runnable": true, "next_run": "2026-10-01T09:10:00Z", "last_run": run}
 	}
+	gateErr := FullBackupPossible(ServerEntry{SourceDSN: "u:p@tcp(h:3306)/", BaselineDir: "/b"}, BackupScheduleGates{})
+	if gateErr == nil {
+		t.Fatal("fixture: the closed gate let a full read through")
+	}
+	base := func(bl c) c {
+		return c{"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{}, "baselines": bl}}
+	}
 	cases := map[string]c{
-		"scheduled": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
-			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched(runDTO(&BaselineRunRecord{
-				Kind: BaselineRunRefresh, SnapshotTime: "2026-10-01T09:05:00Z", FinishedAt: "2026-10-01T09:05:02Z", Tables: 1,
-				NewTables: []string{"demo.devices", "demo.orders"}}))}}},
-		"unscheduled-current": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
-			"baselines": c{"configured": true, "snapshots": []any{snap}, "refresh": status(BaselineStatus{State: "succeeded",
-				At: "2026-10-01T09:05:00Z", FinishedAt: "2026-10-01T09:05:02Z", NewTables: []string{"demo.orders"}})}}},
-		"unscheduled-superseded": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
-			"baselines": c{"configured": true, "snapshots": []any{snap}, "refresh": status(BaselineStatus{State: "succeeded",
-				At: "2026-10-01T08:00:00Z", NewTables: []string{"demo.orders"}})}}},
-		"unchecked": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
-			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched(runDTO(&BaselineRunRecord{
-				Kind: BaselineRunRefresh, SnapshotTime: "2026-10-01T09:05:00Z", NewTablesUnchecked: "could not ask the source"}))}}},
-		// The full read the schedule took for them failed: the newest copy
-		// is still the update's, and the live refresh status still says so.
-		"full-failed": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
-			"baselines": c{"configured": true, "snapshots": []any{snap},
-				"refresh": status(BaselineStatus{State: "succeeded", At: "2026-10-01T09:05:00Z", NewTables: []string{"demo.orders"}}),
-				"schedule": sched(runDTO(&BaselineRunRecord{Kind: BaselineRunDump, StartedAt: "2026-10-01T09:05:03Z", Error: "mydumper: access denied",
-					Why: NewTablesWhy(1), WhyCode: BackupWhyCode(NewTablesWhy(1))}))}}},
-		// A newer snapshot (a manual full read) than the update's: silent.
-		"newer-snapshot": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
-			"baselines": c{"configured": true, "snapshots": []any{c{"time": "2026-10-01 09:30:00", "age_hours": 0.01, "tables": []string{"demo.kept", "demo.orders"}}},
-				"schedule": sched(runDTO(&BaselineRunRecord{Kind: BaselineRunRefresh, SnapshotTime: "2026-10-01T09:05:00Z", NewTables: []string{"demo.orders"}}))}}},
-		"after-full": {"input": c{"coverage": cov, "server": registry, "schema": c{"state": "idle"}, "uncaptured": c{},
-			"baselines": c{"configured": true, "snapshots": []any{snap}, "schedule": sched(runDTO(&BaselineRunRecord{
-				Kind: BaselineRunDump, SnapshotTime: "2026-10-01T09:05:00Z", Tables: 3,
-				Why: NewTablesWhy(2), WhyCode: BackupWhyCode(NewTablesWhy(2))}))}}},
+		// The #1993 situation: full reads may not start from the web interface.
+		"scheduled-gate-closed": base(c{"configured": true, "snapshots": []any{snap}, "schedule": sched(runDTO(&BaselineRunRecord{
+			Kind: BaselineRunRefresh, SnapshotTime: "2026-10-01T09:05:00Z", FinishedAt: "2026-10-01T09:05:02Z", Tables: 1,
+			NewTables: []string{"demo.devices", "demo.orders"}, NewTablesAction: NewTablesActionNotPossible, NewTablesActionReason: gateErr.Error()}))}),
+		"scheduled-full-read": base(c{"configured": true, "snapshots": []any{snap}, "schedule": sched(runDTO(&BaselineRunRecord{
+			Kind: BaselineRunRefresh, SnapshotTime: "2026-10-01T09:05:00Z", Tables: 1,
+			NewTables: []string{"demo.devices", "demo.orders"}, NewTablesAction: NewTablesActionFullRead}))}),
+		"unscheduled-current": base(c{"configured": true, "snapshots": []any{snap}, "refresh": status(BaselineStatus{State: "succeeded",
+			At: "2026-10-01T09:05:00Z", NewTablesSnapshot: "2026-10-01T09:05:00Z", NewTables: []string{"demo.orders"},
+			NewTablesAction: NewTablesActionNoSchedule})}),
+		// A later snapshot that does not hold the table (a point-in-time
+		// restore built from the old copy): still said.
+		"later-restore": base(c{"configured": true, "snapshots": []any{c{"time": "2026-10-01 09:30:00", "age_hours": 0.01, "tables": []string{"demo.kept"}}},
+			"refresh": status(BaselineStatus{State: "succeeded", NewTablesSnapshot: "2026-10-01T09:05:00Z", NewTables: []string{"demo.orders"},
+				NewTablesAction: NewTablesActionNoSchedule})}),
+		// The refresh after the reporting one failed: its status keeps the list.
+		"refresh-failed-after": base(c{"configured": true, "snapshots": []any{snap}, "refresh": status(BaselineStatus{State: "failed",
+			At: "2026-10-01T09:10:00Z", LastError: "capture gap", NewTablesSnapshot: "2026-10-01T09:05:00Z", NewTables: []string{"demo.orders"},
+			NewTablesAction: NewTablesActionNotPossible, NewTablesActionReason: gateErr.Error()})}),
+		"unchecked": base(c{"configured": true, "snapshots": []any{snap}, "schedule": sched(runDTO(&BaselineRunRecord{
+			Kind: BaselineRunRefresh, SnapshotTime: "2026-10-01T09:05:00Z", NewTablesUnchecked: "could not ask the source"}))}),
+		// The full read the schedule took for them failed: the newest copy is
+		// still the update's, and the live refresh status still says so.
+		"full-failed": base(c{"configured": true, "snapshots": []any{snap},
+			"refresh": status(BaselineStatus{State: "succeeded", At: "2026-10-01T09:05:00Z", NewTablesSnapshot: "2026-10-01T09:05:00Z",
+				NewTables: []string{"demo.orders"}, NewTablesAction: NewTablesActionFullRead}),
+			"schedule": sched(runDTO(&BaselineRunRecord{Kind: BaselineRunDump, StartedAt: "2026-10-01T09:05:03Z", Error: "mydumper: access denied",
+				Why: NewTablesWhy(1), WhyCode: BackupWhyCode(NewTablesWhy(1))}))}),
+		// A newer snapshot holds the table (a full read, scheduled or manual).
+		"newer-snapshot-holds-it": base(c{"configured": true, "snapshots": []any{c{"time": "2026-10-01 09:30:00", "age_hours": 0.01, "tables": []string{"demo.kept", "demo.orders"}}},
+			"refresh": status(BaselineStatus{State: "succeeded", NewTablesSnapshot: "2026-10-01T09:05:00Z", NewTables: []string{"demo.orders"},
+				NewTablesAction: NewTablesActionFullRead})}),
+		"after-full": base(c{"configured": true, "snapshots": []any{snap}, "schedule": sched(runDTO(&BaselineRunRecord{
+			Kind: BaselineRunDump, SnapshotTime: "2026-10-01T09:05:00Z", Tables: 3,
+			Why: NewTablesWhy(2), WhyCode: BackupWhyCode(NewTablesWhy(2))}))}),
 	}
 	arg, err := json.Marshal(cases)
 	if err != nil {
@@ -197,39 +288,51 @@ func TestOverviewFlow_newTables(t *testing.T) {
 		return k
 	}
 
-	s := out["scheduled"]
-	if p := s.Pieces[bucket]; p.Title != "Your copy" || p.Tone != "warn" || p.Sub != "2 new tables not in it yet" {
-		t.Errorf("scheduled: copy box %+v", p)
+	card := func(name string) (flowPiece, []flowCardOut) {
+		o, ok := out[name]
+		if !ok {
+			t.Fatalf("case %q missing", name)
+		}
+		return o.Pieces[bucket], newCards(o)
 	}
-	k := newCards(s)
-	wantText := "2 tables are not in your copy yet: demo.devices, demo.orders. They were created on your database after the snapshot " +
-		"this update started from. They join the copy at the next full snapshot."
-	if len(k) != 1 || k[0].Title != "2 tables are not in your copy yet" || len(k[0].Lines) != 1 || k[0].Lines[0] != wantText ||
-		strings.Join(k[0].Actions, "|") != "Wait for the next full snapshot|Read database now" {
-		t.Errorf("scheduled: card %+v", k)
+	const two = "2 tables are not in your copy yet: demo.devices, demo.orders. They were created on your database after the snapshot " +
+		"this update started from. "
+	wantCards := map[string]struct{ sub, text, actions string }{
+		"scheduled-gate-closed": {"2 new tables not in it yet", two + "A full snapshot cannot start from here: creating snapshots from the web " +
+			"interface is turned off here (BINTRAIL_CONSOLE_BASELINE_TRIGGER is not set to 1). Until that is fixed, they will not join the copy " +
+			"on their own. Fix it, or take a full snapshot with the bintrail command line.", "OK"},
+		"scheduled-full-read": {"2 new tables not in it yet", two + "A full snapshot was started to include them.", "Wait for the full snapshot"},
+		"unscheduled-current": {"1 new table not in it yet", "1 table is not in your copy yet: demo.orders. It was created on your database after " +
+			"the snapshot this update started from. Automatic refreshes never read your database in full, so it joins the copy only when a full " +
+			"snapshot is taken.", "Read database now|Later"},
+		"later-restore": {"1 new table not in it yet", "1 table is not in your copy yet: demo.orders. It was created on your database after " +
+			"the snapshot this update started from. It joins the copy when a full snapshot is taken.", "Read database now|Later"},
+		"refresh-failed-after": {"1 new table not in it yet", "", ""},
+		"full-failed":          {"1 new table not in it yet", "", ""},
 	}
-	if !strings.Contains(s.Screen, wantText) {
-		t.Errorf("scheduled: the card text is not on screen: %q", s.Screen)
+	for name, w := range wantCards {
+		box, k := card(name)
+		// A failed update with no schedule stops the drawing at the copy
+		// ("update stopped"), which dims the box as before; the card stays.
+		dimmed := name == "refresh-failed-after" && box.Tone == "off"
+		if (!dimmed && (box.Tone != "warn" || box.Sub != w.sub)) || len(k) != 1 {
+			t.Errorf("%s: box %+v cards %+v", name, box, k)
+			continue
+		}
+		if w.text != "" && (len(k[0].Lines) != 1 || k[0].Lines[0] != w.text || strings.Join(k[0].Actions, "|") != w.actions) {
+			t.Errorf("%s:\n got  %q %v\n want %q [%s]", name, k[0].Lines, k[0].Actions, w.text, w.actions)
+		}
+		if w.text != "" && !strings.Contains(out[name].Screen, w.text) {
+			t.Errorf("%s: the card text is not on screen", name)
+		}
 	}
-
-	if k := newCards(out["unscheduled-current"]); len(k) != 1 || out["unscheduled-current"].Pieces[bucket].Tone != "warn" {
-		t.Errorf("unscheduled refresh whose snapshot is the newest: cards %+v box %+v", k, out["unscheduled-current"].Pieces[bucket])
+	if box, k := card("unchecked"); len(k) != 0 || box.Tone == "warn" || !strings.Contains(box.Sub, "new tables not checked") {
+		t.Errorf("unchecked: box %+v cards %+v", box, k)
 	}
-	if k := newCards(out["unscheduled-superseded"]); len(k) != 0 || out["unscheduled-superseded"].Pieces[bucket].Tone == "warn" {
-		t.Errorf("a refresh a newer snapshot replaced still warns: cards %+v box %+v", k, out["unscheduled-superseded"].Pieces[bucket])
-	}
-	u := out["unchecked"]
-	if len(newCards(u)) != 0 || u.Pieces[bucket].Tone == "warn" || !strings.Contains(u.Pieces[bucket].Sub, "new tables not checked") {
-		t.Errorf("unchecked: box %+v cards %+v", u.Pieces[bucket], u.Cards)
-	}
-	if len(newCards(out["full-failed"])) != 1 || out["full-failed"].Pieces[bucket].Tone != "warn" {
-		t.Errorf("a failed full read hid the gap: %+v", out["full-failed"])
-	}
-	if len(newCards(out["newer-snapshot"])) != 0 || out["newer-snapshot"].Pieces[bucket].Tone == "warn" {
-		t.Errorf("a newer snapshot did not silence it: %+v", out["newer-snapshot"])
-	}
-	if len(newCards(out["after-full"])) != 0 || out["after-full"].Pieces[bucket].Tone == "warn" {
-		t.Errorf("the full read that included them still warns: %+v", out["after-full"])
+	for _, name := range []string{"newer-snapshot-holds-it", "after-full"} {
+		if box, k := card(name); len(k) != 0 || box.Tone == "warn" {
+			t.Errorf("%s still warns: box %+v cards %+v", name, box, k)
+		}
 	}
 }
 
@@ -246,44 +349,47 @@ func TestNewTablesWhy(t *testing.T) {
 	}
 }
 
-// A session with a data profile is not handed the names, on the live status
-// and on the schedule's last run; the "not checked" reason names no table and
-// stays.
+// A session with a data profile is not handed the names on the schedule's
+// last run (the one surface of this it can reach: the snapshot listing is
+// refused to it outright). It keeps the COUNT, and the fact that the check did
+// not run without the driver's error, which can name the source account and
+// host.
 func TestNewTables_withheldFromASessionWithADataProfile(t *testing.T) {
-	open := httptest.NewRequest("GET", "/api/servers/a/baseline/restore", nil)
+	open := httptest.NewRequest("GET", "/api/servers/a/backup-schedule", nil)
 	profiled := open.WithContext(context.WithValue(open.Context(), policyCtxKey{},
 		&ext.AccessPolicy{Profile: "analyst", Permissions: ext.AllPermissions()}))
 	if !sessionRestricted(profiled) {
 		t.Fatal("the fixture session is not restricted; this test covers nothing")
 	}
-	st := BaselineStatus{State: "succeeded", NewTables: []string{"hr.salaries"}, NewTablesOmitted: 2, NewTablesUnchecked: ""}
-	if got := withholdRefusedTables(open, st); len(got.NewTables) != 1 {
-		t.Fatalf("a session with no profile lost the list: %+v", got)
+	mk := func() *backupScheduleDTO {
+		return &backupScheduleDTO{LastRun: &backupScheduleRunDTO{NewTables: []string{"hr.salaries", "hr.bonus"}, NewTablesOmitted: 1,
+			NewTablesUnchecked: "could not ask the source which tables it has: Error 1045: Access denied for user 'snap'@'10.0.0.5'"}}
 	}
-	if got := withholdRefusedTables(profiled, st); got.NewTables != nil || got.NewTablesOmitted != 0 {
-		t.Errorf("a profiled session was handed the names: %+v", got)
+	if kept := withholdScheduleTables(open, mk()); len(kept.LastRun.NewTables) != 2 || kept.LastRun.NewTablesOmitted != 1 {
+		t.Fatalf("a session with no profile lost the list: %+v", kept.LastRun)
 	}
-	dto := &backupScheduleDTO{LastRun: &backupScheduleRunDTO{NewTables: []string{"hr.salaries"}, NewTablesOmitted: 1}}
-	if cut := withholdScheduleTables(profiled, dto); cut.LastRun.NewTables != nil || cut.LastRun.NewTablesOmitted != 0 {
-		t.Errorf("a profiled session was handed the schedule's names: %+v", cut.LastRun)
+	cut := withholdScheduleTables(profiled, mk())
+	if cut.LastRun.NewTables != nil || cut.LastRun.NewTablesOmitted != 3 {
+		t.Errorf("a profiled session was handed the names, or lost the count: %+v", cut.LastRun)
 	}
-	unc := BaselineStatus{NewTablesUnchecked: "could not ask the source which tables it has: Error 1045: Access denied for user 'snap'@'10.0.0.5'"}
-	if got := withholdRefusedTables(profiled, unc); got.NewTablesUnchecked != "the source could not be asked" {
-		t.Errorf("a profiled session was handed the driver error, or lost the fact: %q", got.NewTablesUnchecked)
+	if cut.LastRun.NewTablesUnchecked != "the source could not be asked" {
+		t.Errorf("a profiled session was handed the driver error, or lost the fact: %q", cut.LastRun.NewTablesUnchecked)
 	}
-	if got := withholdRefusedTables(profiled, BaselineStatus{}); got.NewTablesUnchecked != "" {
-		t.Errorf("a checked run became unchecked: %q", got.NewTablesUnchecked)
+	none := withholdScheduleTables(profiled, &backupScheduleDTO{LastRun: &backupScheduleRunDTO{}})
+	if none.LastRun.NewTablesUnchecked != "" || none.LastRun.NewTablesOmitted != 0 {
+		t.Errorf("a checked run with nothing left out changed: %+v", none.LastRun)
 	}
 }
 
 // The wire names the page reads, from the bytes.
 func TestNewTablesWireNamesMatchTheFrontend(t *testing.T) {
-	raw, err := json.Marshal(BaselineStatus{NewTables: []string{"s.t"}, NewTablesOmitted: 1, NewTablesUnchecked: "x"})
+	raw, err := json.Marshal(BaselineStatus{NewTables: []string{"s.t"}, NewTablesOmitted: 1, NewTablesUnchecked: "x",
+		NewTablesAction: "a", NewTablesActionReason: "r", NewTablesSnapshot: "2026-10-01T09:05:00Z"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := functionBody(t, readAsset(t, "app.js"), "function newTablesNote(")
-	for _, key := range []string{"new_tables", "new_tables_omitted", "new_tables_unchecked"} {
+	for _, key := range []string{"new_tables", "new_tables_omitted", "new_tables_unchecked", "new_tables_action", "new_tables_action_reason", "new_tables_snapshot"} {
 		if !strings.Contains(string(raw), `"`+key+`"`) {
 			t.Errorf("the status does not serialise %s: %s", key, raw)
 		}
@@ -291,8 +397,9 @@ func TestNewTablesWireNamesMatchTheFrontend(t *testing.T) {
 			t.Errorf("newTablesNote does not read %s", key)
 		}
 	}
-	rec, _ := json.Marshal(scheduleRunFromRecord(&BaselineRunRecord{NewTables: []string{"s.t"}, NewTablesOmitted: 1, NewTablesUnchecked: "x"}))
-	for _, key := range []string{`"new_tables":["s.t"]`, `"new_tables_omitted":1`, `"new_tables_unchecked":"x"`} {
+	rec, _ := json.Marshal(scheduleRunFromRecord(&BaselineRunRecord{NewTables: []string{"s.t"}, NewTablesOmitted: 1, NewTablesUnchecked: "x",
+		NewTablesAction: "a", NewTablesActionReason: "r"}))
+	for _, key := range []string{`"new_tables":["s.t"]`, `"new_tables_omitted":1`, `"new_tables_unchecked":"x"`, `"new_tables_action":"a"`, `"new_tables_action_reason":"r"`} {
 		if !strings.Contains(string(rec), key) {
 			t.Errorf("the schedule's last run does not carry %s: %s", key, rec)
 		}
@@ -316,8 +423,11 @@ func TestNewTablesSnapshotsPageRendered(t *testing.T) {
 	run, _ := json.Marshal(scheduleRunFromRecord(&BaselineRunRecord{Kind: BaselineRunRefresh, StartedAt: "2026-10-01T09:05:00Z",
 		FinishedAt: "2026-10-01T09:05:02Z", SnapshotTime: "2026-10-01T09:05:00Z", Tables: 1, NewTables: []string{"demo.devices", "demo.orders"}}))
 	refresh, _ := json.Marshal(BaselineStatus{State: "succeeded", At: "2026-10-01T09:05:00Z", FinishedAt: "2026-10-01T09:05:02Z",
-		Tables: 1, NewTables: []string{"demo.devices", "demo.orders"}})
-	stale, _ := json.Marshal(BaselineStatus{State: "succeeded", At: "2026-10-01T08:00:00Z", Tables: 1, NewTables: []string{"demo.orders"}})
+		Tables: 1, NewTables: []string{"demo.devices", "demo.orders"}, NewTablesSnapshot: "2026-10-01T09:05:00Z"})
+	// Its list is about a snapshot older than the newest, and the newest
+	// holds the table: nothing to say.
+	stale, _ := json.Marshal(BaselineStatus{State: "succeeded", At: "2026-10-01T08:00:00Z", Tables: 1, NewTables: []string{"demo.kept"},
+		NewTablesSnapshot: "2026-10-01T08:00:00Z"})
 	snapTime, _ := json.Marshal(time.Date(2026, 10, 1, 9, 5, 0, 0, time.UTC).Format(consoleTSFormat))
 	script := renderHarnessJS + `
 vm.runInContext("capsCache = { backup_schedule: true, baseline_restore: true, baseline_trigger: false };", ctx);
@@ -345,7 +455,7 @@ console.log(JSON.stringify({
 		t.Fatalf("decode %q: %v", raw, err)
 	}
 	want := "2 tables are not in your copy yet: demo.devices, demo.orders. They were created on your database after the snapshot " +
-		"this update started from. They join the copy at the next full snapshot."
+		"this update started from. They join the copy when a full snapshot is taken."
 	has := func(lines []string) bool {
 		for _, l := range lines {
 			if l == want {

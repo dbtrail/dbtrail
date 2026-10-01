@@ -123,7 +123,8 @@ func TestScheduledRefresh_newTablesStartOneFullRead(t *testing.T) {
 			refresh = &recs[i]
 		}
 	}
-	if refresh == nil || len(refresh.NewTables) != console.RefusedTablesCap || refresh.NewTablesOmitted != 30 {
+	if refresh == nil || len(refresh.NewTables) != console.RefusedTablesCap || refresh.NewTablesOmitted != 30 ||
+		refresh.NewTablesAction != console.NewTablesActionFullRead {
 		t.Fatalf("the update's record does not carry 20 names and 30 more: %+v", refresh)
 	}
 	waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
@@ -139,8 +140,8 @@ func TestScheduledRefresh_newTablesStartOneFullRead(t *testing.T) {
 	if st.LastMethod != console.BackupMethodRefresh || st.LastStartedAt == before {
 		t.Fatalf("a second full read started for tables a full read already missed: %+v", st)
 	}
-	if len(st.Last.NewTables) == 0 {
-		t.Fatalf("the gap is no longer reported: %+v", st.Last)
+	if len(st.Last.NewTables) == 0 || st.Last.NewTablesAction != console.NewTablesActionStillMissing {
+		t.Fatalf("the gap is no longer reported, or the decision is not: %+v", st.Last)
 	}
 }
 
@@ -157,7 +158,7 @@ func TestScheduledRefresh_newTablesRetryAfterAFailedFullRead(t *testing.T) {
 	}
 	st = waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
 	if st.Last.State != "failed" {
-		t.Skipf("the fixture's full read did not fail (%+v); the retry rule is not exercised", st.Last)
+		t.Fatalf("the fixture's full read did not fail (%+v); the retry rule is not exercised", st.Last)
 	}
 	time.Sleep(1100 * time.Millisecond)
 	st = rebuildOnce(t, b, e, time.Now().UTC().Format(time.RFC3339))
@@ -182,7 +183,7 @@ func TestScheduledRefresh_newTablesFailingFullReadIsBounded(t *testing.T) {
 		if st.LastMethod == console.BackupMethodFull {
 			fulls++
 			if st = waitTerminalMethod(t, b, e.ID, console.BackupMethodFull); st.Last.State != "failed" {
-				t.Skipf("the fixture's full read did not fail (%+v)", st.Last)
+				t.Fatalf("the fixture's full read did not fail (%+v)", st.Last)
 			}
 		}
 	}
@@ -204,6 +205,10 @@ func TestScheduledRefresh_newTablesGateClosedReportsTheGap(t *testing.T) {
 	}
 	if !reflect.DeepEqual(st.Last.NewTables, []string{"shop.orders"}) {
 		t.Fatalf("gap not reported: %+v", st.Last)
+	}
+	// The run says no full read is coming, and why: the page must not promise one.
+	if st.Last.NewTablesAction != console.NewTablesActionNotPossible || !strings.Contains(st.Last.NewTablesActionReason, "BINTRAIL_CONSOLE_BASELINE_TRIGGER") {
+		t.Fatalf("the decision is not recorded: action %q reason %q", st.Last.NewTablesAction, st.Last.NewTablesActionReason)
 	}
 }
 
@@ -265,16 +270,23 @@ func TestCheckNewTables_postgresIsUnchecked(t *testing.T) {
 	}
 }
 
-// The status slot is reused: a run with no new tables clears the list the
-// run before left there.
-func TestApplyNewTables_clearsAndDropsOnUnpublished(t *testing.T) {
-	st := &console.BaselineStatus{NewTables: []string{"s.old"}, NewTablesOmitted: 3, NewTablesUnchecked: "x"}
-	applyNewTables(st, newTablesCheck{}, true)
-	if st.NewTables != nil || st.NewTablesOmitted != 0 || st.NewTablesUnchecked != "" {
-		t.Fatalf("stale list kept: %+v", st)
+// A published update replaces the list (an empty one clears it); an update
+// that published nothing leaves it, because the newest copy is still the one
+// the list describes.
+func TestApplyNewTables_replacesOnPublishKeepsOtherwise(t *testing.T) {
+	st := &console.BaselineStatus{NewTables: []string{"s.old"}, NewTablesOmitted: 3, NewTablesSnapshot: "2026-10-01T08:00:00Z",
+		NewTablesAction: console.NewTablesActionNotPossible}
+	applyNewTables(st, newTablesCheck{all: []string{"s.a"}, tables: []string{"s.a"}}, false, refreshAt)
+	if !reflect.DeepEqual(st.NewTables, []string{"s.old"}) || st.NewTablesSnapshot != "2026-10-01T08:00:00Z" || st.NewTablesAction == "" {
+		t.Fatalf("an update that published nothing changed the list: %+v", st)
 	}
-	applyNewTables(st, newTablesCheck{tables: []string{"s.a"}}, false)
-	if st.NewTables != nil {
-		t.Fatalf("a run that published nothing names new tables: %+v", st)
+	applyNewTables(st, newTablesCheck{all: []string{"s.a"}, tables: []string{"s.a"}, action: console.NewTablesActionFullRead}, true, refreshAt)
+	if !reflect.DeepEqual(st.NewTables, []string{"s.a"}) || st.NewTablesOmitted != 0 || st.NewTablesSnapshot != refreshAt.UTC().Format(time.RFC3339) ||
+		st.NewTablesAction != console.NewTablesActionFullRead {
+		t.Fatalf("a published update did not replace the list: %+v", st)
+	}
+	applyNewTables(st, newTablesCheck{}, true, refreshAt)
+	if st.NewTables != nil || st.NewTablesSnapshot != "" || st.NewTablesAction != "" {
+		t.Fatalf("a published update with nothing left out kept a list: %+v", st)
 	}
 }

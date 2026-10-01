@@ -67,6 +67,13 @@ type refreshRequest struct {
 	SourceDSN      string
 	Schemas        []string
 	SourcePostgres bool
+	// PlanNewTables, set by the backup schedule, decides what happens to the
+	// tables a published update left out (#1993): it is handed every one of
+	// them and returns a console.NewTablesAction* value and, for a refusal,
+	// the reason. Asked once the snapshot reached its destination, before the
+	// run is recorded, so the record says what is coming. Nil: the
+	// daemon-wide loop, which never takes a full read.
+	PlanNewTables func(all []string) (action, reason string)
 }
 
 // TriggerRefresh starts a periodic baseline refresh for a server, sharing the
@@ -102,7 +109,9 @@ func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Du
 	s.refreshPrior[req.ServerID] = s.refreshes[req.ServerID]
 	// A new cycle, so any earlier gate skip stops speaking for this server.
 	delete(s.refreshGateSkips, req.ServerID)
-	s.refreshes[req.ServerID] = &console.BaselineStatus{State: "running", Since: since}
+	next := &console.BaselineStatus{State: "running", Since: since}
+	carryNewTables(next, s.refreshes[req.ServerID])
+	s.refreshes[req.ServerID] = next
 	s.mu.Unlock()
 
 	slog.Info("baseline refresh: starting", "server", req.ServerName, "id", req.ServerID)
@@ -302,6 +311,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// instead measures how long it takes to spawn a goroutine, which is
 	// microseconds no matter what the refresh costs.
 	took := time.Since(elapsed)
+	if err == nil {
+		gap.action, gap.reason = planNewTables(req, gap.all)
+	}
 	rec := console.BaselineRunRecord{
 		Kind: console.BaselineRunRefresh, Trigger: req.Trigger, StartedAt: started.Format(time.RFC3339),
 		SnapshotTime: publishedSnapshotTime(at, err),
@@ -323,8 +335,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		}
 	}
 	rec.NewTables, rec.NewTablesOmitted, rec.NewTablesUnchecked = gap.tables, gap.omitted, gap.unchecked
+	rec.NewTablesAction, rec.NewTablesActionReason = gap.action, gap.reason
 	s.recordRun(req.ServerID, req.ServerName, foldRunCounts(rec, tables, refused, reuse), err)
-	reportNewTables(req, gap)
+	s.reportNewTables(req, gap)
 	// Where the readers of what this cycle published start (#1904), for the
 	// gate to grade next. Outside s.mu: it reads the snapshot's files.
 	var readsFrom time.Time
@@ -369,7 +382,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 			readsFrom: readsFrom, readsFromKnown: readsFromKnown}
 	}
 	applyFoldStatus(st, tables, refused, reuse, err)
-	applyNewTables(st, gap, foldPublished(err))
+	applyNewTables(st, gap, foldPublished(err), at)
 	if err != nil {
 		// The refusal itself was already reported above, before this lock was
 		// taken. What happens HERE is almost nothing: no duration report. Every
@@ -732,6 +745,17 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 		return false
 	}
 	s.gateEdge.Resolve("reanchor:" + req.ServerID)
+	// A CREATE TABLE writes no row, so it does not move the mark: a table
+	// created on a quiet server would otherwise never be looked for (#1993).
+	if created, err := tablesCreatedSince(ctx, req.IndexDSN, prev.publishedAt); err != nil || created {
+		if err != nil {
+			slog.Debug("snapshot refresh: could not ask the index whether tables were created since the last snapshot; folding", "server", req.ServerName, "error", err)
+		} else {
+			slog.Info("snapshot refresh: nothing has been indexed, but a table was created since the last snapshot; folding to look for it",
+				"server", req.ServerName, "id", req.ServerID)
+		}
+		return false
+	}
 	return true
 }
 

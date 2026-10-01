@@ -724,6 +724,25 @@ const (
 	BackupWhyNewTablesPrefix = "new tables were created on your database after the previous snapshot"
 )
 
+// What the daemon decided about tables a published update left out (#1993),
+// recorded on the update as NewTablesAction.
+const (
+	// NewTablesActionFullRead: a full read is being started to include them.
+	NewTablesActionFullRead = "full_read"
+	// NewTablesActionNotPossible: a full read cannot start here
+	// (FullBackupPossible refused; the reason is NewTablesActionReason).
+	NewTablesActionNotPossible = "not_possible"
+	// NewTablesActionGaveUp: full reads were started for them and kept
+	// failing; no more are started on their own.
+	NewTablesActionGaveUp = "gave_up"
+	// NewTablesActionStillMissing: a full read went through after they were
+	// first reported and still lacks them, so another would too.
+	NewTablesActionStillMissing = "still_missing"
+	// NewTablesActionNoSchedule: the update was the daemon-wide refresh,
+	// which never takes a full read.
+	NewTablesActionNoSchedule = "no_schedule"
+)
+
 // BackupWhyCodeNewTables is BackupWhyCode's code for NewTablesWhy.
 const BackupWhyCodeNewTables = "new_tables"
 

@@ -126,8 +126,6 @@ func clipRunes(s string, n int) string {
 func withholdRefusedTables(r *http.Request, st BaselineStatus) BaselineStatus {
 	if sessionRestricted(r) {
 		st.RefusedTables, st.RefusedTablesOmitted = nil, 0
-		st.NewTables, st.NewTablesOmitted = nil, 0
-		st.NewTablesUnchecked = withheldUnchecked(st.NewTablesUnchecked)
 	}
 	return st
 }
@@ -140,7 +138,9 @@ func withholdScheduleTables(r *http.Request, dto *backupScheduleDTO) *backupSche
 	}
 	if dto.LastRun != nil {
 		dto.LastRun.RefusedTables, dto.LastRun.RefusedTablesOmitted = nil, 0
-		dto.LastRun.NewTables, dto.LastRun.NewTablesOmitted = nil, 0
+		// The names go, the count stays: "3 tables are not in your copy
+		// yet" names nothing a profile could deny.
+		dto.LastRun.NewTables, dto.LastRun.NewTablesOmitted = nil, dto.LastRun.NewTablesOmitted+len(dto.LastRun.NewTables)
 		dto.LastRun.NewTablesUnchecked = withheldUnchecked(dto.LastRun.NewTablesUnchecked)
 	}
 	if dto.LastFallback != nil {

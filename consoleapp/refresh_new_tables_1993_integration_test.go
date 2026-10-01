@@ -120,3 +120,32 @@ func TestScheduledRefresh_unreachableSourceSaysTheCheckDidNotRun(t *testing.T) {
 		t.Fatalf("an unchecked source started a full read: %+v", st)
 	}
 }
+
+// The quiet-server gate's index read, against a real schema_changes table: a
+// CREATE TABLE recorded after the last snapshot is found, one before it is not.
+func TestTablesCreatedSince_readsSchemaChanges(t *testing.T) {
+	db, name := testutil.CreateTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE schema_changes (id BIGINT AUTO_INCREMENT PRIMARY KEY, detected_at DATETIME NOT NULL,
+		schema_name VARCHAR(64), table_name VARCHAR(64), ddl_type VARCHAR(50) NOT NULL, ddl_query TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	dsn := testutil.IntegrationDSN(name)
+	since := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	if got, err := realTablesCreatedSince(ctx, dsn, since); err != nil || got {
+		t.Fatalf("empty table: got %v, %v", got, err)
+	}
+	if _, err := db.Exec("INSERT INTO schema_changes (detected_at, schema_name, table_name, ddl_type) VALUES (?, 'shop', 'old', 'CREATE TABLE'), (?, 'shop', 'x', 'ALTER TABLE')",
+		since.Add(-time.Hour), since.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := realTablesCreatedSince(ctx, dsn, since); err != nil || got {
+		t.Fatalf("only an older CREATE and a newer ALTER: got %v, %v", got, err)
+	}
+	if _, err := db.Exec("INSERT INTO schema_changes (detected_at, schema_name, table_name, ddl_type) VALUES (?, 'shop', 'new', 'CREATE TABLE')", since.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := realTablesCreatedSince(ctx, dsn, since); err != nil || !got {
+		t.Fatalf("a CREATE after the snapshot: got %v, %v", got, err)
+	}
+}

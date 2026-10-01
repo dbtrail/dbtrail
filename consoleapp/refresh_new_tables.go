@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/event"
 )
 
 // Tables created after the previous snapshot (#1993).
@@ -21,21 +23,27 @@ import (
 // said so: with full reads turned off by the schedule, the table never joined
 // the copy at all. Each update therefore asks the source which tables its
 // scope holds now and names the ones the snapshot lacks. What happens next is
-// the scheduler's (includeNewTables): a full read when one may start here,
-// otherwise the gap stays reported on the run.
+// the scheduler's (newTablesPlanner decides and the run records it,
+// includeNewTables starts the full read): a full read when one may start here,
+// otherwise the gap stays reported on the run with the reason.
 
 // newTablesCheck is what one update learned about tables it left out.
 // unchecked non-empty means the source was not asked or did not answer, and
 // then tables is empty because it is unknown, never because there were none.
 type newTablesCheck struct {
-	tables    []string // capped at console.RefusedTablesCap, sorted
+	all       []string // every table left out, sorted: what the schedule compares
+	tables    []string // all, capped at console.RefusedTablesCap for display
 	omitted   int
 	unchecked string
+	// action and reason: what the daemon decided about them
+	// (console.NewTablesAction*), set once the snapshot is published.
+	action, reason string
 }
 
 // sourceTablesTimeout bounds the one information_schema read an update makes on
-// the source. The update runs inside the capture process; a source that does
-// not answer must not hold the fold.
+// the source (and the schema_changes read the quiet-server gate makes on the
+// index). The update runs inside the capture process; a database that does not
+// answer must not hold it.
 const sourceTablesTimeout = 15 * time.Second
 
 // listSourceTables answers "which tables does this server's snapshot scope
@@ -123,20 +131,75 @@ func (s *baselineSupervisor) checkNewTables(req refreshRequest, snapshot []strin
 		return newTablesCheck{unchecked: console.ScrubReason(
 			fmt.Sprintf("could not ask the source which tables it has: %v", err), req.SourceDSN)}
 	}
-	kept, omitted := console.NewTablesOf(tablesLeftOut(snapshot, source, foldCase))
-	return newTablesCheck{tables: kept, omitted: omitted}
+	all := tablesLeftOut(snapshot, source, foldCase)
+	kept, omitted := console.NewTablesOf(all)
+	return newTablesCheck{all: all, tables: kept, omitted: omitted}
 }
 
-// applyNewTables writes one update's check onto its status. Set on every run,
-// published or not, like applyFoldStatus's fields: the slot is reused, and a
-// list left from the run before would name tables this run never left out. A
-// run that published nothing carries no list: the full read the schedule takes
-// in its place reads every table.
-func applyNewTables(st *console.BaselineStatus, c newTablesCheck, published bool) {
+// planNewTables asks the request's planner what happens to the tables the
+// update left out. Called only for an update whose snapshot reached its
+// destination; nothing to decide when nothing was left out.
+func planNewTables(req refreshRequest, all []string) (action, reason string) {
+	if len(all) == 0 {
+		return "", ""
+	}
+	if req.PlanNewTables == nil {
+		return console.NewTablesActionNoSchedule, ""
+	}
+	return req.PlanNewTables(all)
+}
+
+// applyNewTables writes one update's check onto its live status.
+//
+// A published update replaces the list, every field, an empty list included:
+// its snapshot is the newest one, and the list describes exactly it. An update
+// that published nothing leaves the list as it was: the newest copy is still
+// the one the list describes, and clearing it would let a run of failing
+// updates hide a table the copy lacks.
+func applyNewTables(st *console.BaselineStatus, c newTablesCheck, published bool, at time.Time) {
 	if !published {
-		c = newTablesCheck{}
+		return
 	}
 	st.NewTables, st.NewTablesOmitted, st.NewTablesUnchecked = c.tables, c.omitted, c.unchecked
+	st.NewTablesAction, st.NewTablesActionReason = c.action, c.reason
+	st.NewTablesSnapshot = ""
+	if len(c.tables) > 0 || c.omitted > 0 || c.unchecked != "" {
+		st.NewTablesSnapshot = at.UTC().Format(time.RFC3339)
+	}
+}
+
+// carryNewTables copies the list a previous update left on its status onto the
+// status of the run that is starting: while it runs, and if it publishes
+// nothing, the newest copy still lacks those tables.
+func carryNewTables(next, prev *console.BaselineStatus) {
+	if prev == nil {
+		return
+	}
+	next.NewTables, next.NewTablesOmitted, next.NewTablesUnchecked = prev.NewTables, prev.NewTablesOmitted, prev.NewTablesUnchecked
+	next.NewTablesAction, next.NewTablesActionReason = prev.NewTablesAction, prev.NewTablesActionReason
+	next.NewTablesSnapshot = prev.NewTablesSnapshot
+}
+
+// tablesCreatedSince asks the index whether capture recorded a CREATE TABLE
+// after since (schema_changes, #700). Indirected for tests.
+var tablesCreatedSince = func(ctx context.Context, indexDSN string, since time.Time) (bool, error) {
+	db, err := config.Connect(indexDSN)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(ctx, sourceTablesTimeout)
+	defer cancel()
+	var one int
+	switch err := db.QueryRowContext(ctx,
+		"SELECT 1 FROM schema_changes WHERE ddl_type IN (?, ?) AND detected_at >= ? LIMIT 1",
+		event.DDLCreateTable, event.DDLReplaceTable, since.UTC().Add(-time.Minute)).Scan(&one); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return true, nil
 }
 
 // withSource stamps e's source and snapshot scope onto an update request, so
@@ -150,25 +213,30 @@ func withSource(req *refreshRequest, e console.ServerEntry) {
 
 // reportNewTables puts the check in the daemon log, where the published line
 // alone used to read as the whole database.
-func reportNewTables(req refreshRequest, c newTablesCheck) {
+func (s *baselineSupervisor) reportNewTables(req refreshRequest, c newTablesCheck) {
 	switch {
 	case c.unchecked != "" && req.SourceDSN == "":
-		// The same at every cycle of a server that has no source to ask;
-		// the run's status says it, the log does not repeat it as a warning.
-		slog.Debug("snapshot refresh: no source to check for tables created after the previous snapshot",
-			"server", req.ServerName, "id", req.ServerID)
+		// The same at every cycle of a server with no source to ask: said
+		// once at Info, then at Debug. The run's status says it each time.
+		args := []any{"server", req.ServerName, "id", req.ServerID}
+		if s.gateEdge != nil && s.gateEdge.Fire("nosource:"+req.ServerID, "1") {
+			slog.Info("snapshot refresh: this server has no source connection, so tables created after the previous snapshot are not looked for", args...)
+		} else {
+			slog.Debug("snapshot refresh: no source to check for tables created after the previous snapshot", args...)
+		}
 	case c.unchecked != "":
 		slog.Warn("snapshot refresh: could not check for tables created after the previous snapshot; this snapshot may be missing some",
 			"server", req.ServerName, "id", req.ServerID, "reason", c.unchecked)
-	case len(c.tables) > 0 || c.omitted > 0:
+	case len(c.all) > 0:
 		slog.Warn("snapshot refresh: tables created after the previous snapshot are not in this snapshot",
-			"server", req.ServerName, "id", req.ServerID, "count", len(c.tables)+c.omitted,
-			"tables", strings.Join(c.tables, ","), "not_listed", c.omitted)
+			"server", req.ServerName, "id", req.ServerID, "count", len(c.all),
+			"tables", strings.Join(c.tables, ","), "not_listed", c.omitted, "next", c.action, "reason", c.reason)
 	}
 }
 
-// newTablesTry is one full read the schedule started for tables an update left
-// out: which tables, and the loop's stamp for that start.
+// newTablesTry is a full read the schedule started (or promised) for tables an
+// update left out: which tables, the loop's stamp for that start, and how many
+// were started for them so far.
 type newTablesTry struct {
 	names map[string]bool
 	at    string
@@ -182,106 +250,137 @@ type newTablesTry struct {
 // same new tables before it stops and leaves the gap reported.
 const newTablesMaxAttempts = 3
 
-// includeNewTables answers an update that PUBLISHED without tables created on
-// the source after its starting snapshot (#1993). There is no per-table read
-// (#1649 was not built), so the way to include them is a full read, under the
-// same gate as every other full read the schedule takes (FullBackupPossible).
-// Where that gate is closed the update stays published, and the gap stays
-// reported on the run until a full snapshot holds the tables.
+// newTablesPlanner is the schedule's PlanNewTables for e. It decides, and
+// records for the watcher, without starting anything: the update records the
+// decision with its run, so the page says what is coming, and the watcher
+// starts the full read once the update has finished.
 //
-// Started as its own job right after the update, not instead of it: the update
-// has already published every table it holds, so a full read that then fails
-// or is refused leaves the copy as current as the schedule could make it.
-//
-// No loop: a full read that went through and still lacks a table (a name the
-// dump spells differently, a scope the two reads disagree on) would otherwise
-// start another at every slot. Only a table no such full read has been tried
-// for starts one; a full read that FAILED does not count as tried.
-func (b *backupScheduler) includeNewTables(e console.ServerEntry, done console.BaselineStatus) {
-	if len(done.NewTables) == 0 && done.NewTablesOmitted == 0 {
-		if done.NewTablesUnchecked == "" {
-			b.mu.Lock()
-			delete(b.newTablesTried, e.ID)
-			b.mu.Unlock()
+// There is no per-table read (#1649 was not built), so the way to include new
+// tables is a full read, under the same gate as every other full read the
+// schedule takes (FullBackupPossible). No loop: a full read that went through
+// and still lacks a table (a name the dump spells differently, a scope the two
+// reads disagree on) would otherwise start another at every slot.
+func (b *backupScheduler) newTablesPlanner(e console.ServerEntry) func(all []string) (string, string) {
+	return func(all []string) (string, string) {
+		attempts, verdict := b.newTablesOwed(e.ID, all)
+		if verdict != "" {
+			return verdict, ""
 		}
+		cur, ok := b.reg.Get(e.ID)
+		if !ok {
+			cur = e
+		}
+		if err := console.FullBackupPossible(cur, b.gates()); err != nil {
+			return console.NewTablesActionNotPossible, err.Error()
+		}
+		names := make(map[string]bool, len(all))
+		for _, n := range all {
+			names[n] = true
+		}
+		b.mu.Lock()
+		b.newTablesPending[e.ID] = newTablesTry{names: names, attempts: attempts}
+		b.mu.Unlock()
+		return console.NewTablesActionFullRead, ""
+	}
+}
+
+// includeNewTables starts the full read the planner promised for an update
+// that finished (#1993). Started as its own job right after the update, not
+// instead of it: the update has already published every table it holds, so a
+// full read that then fails leaves the copy as current as the schedule could
+// make it. Every other decision was made and recorded by the planner.
+func (b *backupScheduler) includeNewTables(e console.ServerEntry, done console.BaselineStatus) {
+	b.mu.Lock()
+	pending, promised := b.newTablesPending[e.ID]
+	delete(b.newTablesPending, e.ID)
+	if len(done.NewTables) == 0 && done.NewTablesOmitted == 0 && done.NewTablesUnchecked == "" {
+		// The newest snapshot holds every table in scope: nothing is owed.
+		delete(b.newTablesTried, e.ID)
+	}
+	b.mu.Unlock()
+	if done.NewTablesAction != console.NewTablesActionFullRead || !promised {
 		return
 	}
 	cur, ok := b.reg.Get(e.ID)
 	if !ok || cur.BackupSchedule == nil || e.BackupSchedule == nil || cur.BackupSchedule.Identity() != e.BackupSchedule.Identity() {
 		slog.Info("snapshot schedule: the update left out tables created after the previous snapshot, but the schedule was removed or changed meanwhile; no full read taken",
 			"server", e.Name, "id", e.ID, "tables", strings.Join(done.NewTables, ","))
+		b.sup.withdrawNewTablesPromise(e.ID)
 		return
 	}
 	e = cur
-	attempts, owed := b.newTablesOwed(e.ID, done.NewTables)
-	if !owed {
-		slog.Warn("snapshot schedule: tables created after the previous snapshot are still not in it after a full read was taken for them "+
-			"(it went through, or failed too many times); not starting another, the gap stays reported",
-			"server", e.Name, "id", e.ID, "tables", strings.Join(done.NewTables, ","), "not_listed", done.NewTablesOmitted, "full_reads_started", attempts)
-		return
-	}
-	if err := console.FullBackupPossible(e, b.gates()); err != nil {
-		slog.Warn("snapshot schedule: the update left out tables created after the previous snapshot, and a full read cannot start here; they join the copy at the next full snapshot",
-			"server", e.Name, "id", e.ID, "tables", strings.Join(done.NewTables, ","), "not_listed", done.NewTablesOmitted, "reason", err)
-		return
-	}
 	b.mu.Lock()
 	_, observed := b.seen[e.ID]
 	b.mu.Unlock()
 	if !observed {
 		slog.Info("snapshot schedule: the update left out tables created after the previous snapshot, but the schedule was removed meanwhile; no full read taken",
 			"server", e.Name, "id", e.ID)
+		b.sup.withdrawNewTablesPromise(e.ID)
 		return
 	}
 	now := time.Now().UTC()
 	stamp := now.Format(time.RFC3339)
-	why := console.NewTablesWhy(len(done.NewTables) + done.NewTablesOmitted)
+	n := len(pending.names)
 	slog.Info("snapshot schedule: the update left out tables created after the previous snapshot; taking a full read to include them",
-		"server", e.Name, "id", e.ID, "tables", strings.Join(done.NewTables, ","), "not_listed", done.NewTablesOmitted)
-	if b.startFull(e, stamp, now, "", why) {
-		names := make(map[string]bool, len(done.NewTables))
-		for _, n := range done.NewTables {
-			names[n] = true
-		}
+		"server", e.Name, "id", e.ID, "count", n, "tables", strings.Join(done.NewTables, ","), "attempt", pending.attempts+1)
+	if b.startFull(e, stamp, now, "", console.NewTablesWhy(n)) {
 		b.mu.Lock()
-		b.newTablesTried[e.ID] = newTablesTry{names: names, at: stamp, attempts: attempts + 1}
+		b.newTablesTried[e.ID] = newTablesTry{names: pending.names, at: stamp, attempts: pending.attempts + 1}
 		b.mu.Unlock()
 		b.watch(e, stamp, console.BackupMethodFull)
+		return
+	}
+	// startFull recorded why it did not start (another job held the server,
+	// or a refusal). The update's status must not keep saying one started.
+	b.sup.withdrawNewTablesPromise(e.ID)
+}
+
+// withdrawNewTablesPromise takes back a "full read started" decision from the
+// live status when the full read did not start: the page then says the tables
+// join at the next full snapshot, without claiming one is running. The next
+// update decides again.
+func (s *baselineSupervisor) withdrawNewTablesPromise(serverID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st := s.refreshes[serverID]; st != nil && st.NewTablesAction == console.NewTablesActionFullRead {
+		st.NewTablesAction = ""
 	}
 }
 
-// newTablesOwed reports whether a full read should still be started for
-// names, and how many were already started for them. Yes when one of them was
-// never tried. Otherwise no when a full read recorded at or after the last
-// one started for them went through (it read the source and still lacks them:
-// another would too), or when newTablesMaxAttempts were started and failed;
-// yes while fewer failed. Without a run history a failed full read cannot be
-// told from one that missed the tables, and the answer is no: a loop of full
-// reads against production is the worse error, and the gap stays reported
-// either way.
-func (b *backupScheduler) newTablesOwed(serverID string, names []string) (attempts int, owed bool) {
+// newTablesOwed answers, for every table an update left out, whether a full
+// read is still owed for them, and how many were already started. verdict ""
+// means owed: one of them was never tried, or the full reads started for them
+// failed fewer than newTablesMaxAttempts times. NewTablesActionStillMissing:
+// a full read recorded at or after the last one started for them went through
+// (it read the source and still lacks them: another would too).
+// NewTablesActionGaveUp: newTablesMaxAttempts were started and none went
+// through, or there is no run history to tell (a loop of full reads against
+// production is the worse error; the gap stays reported either way).
+//
+// A skipped slot is a dump-kind record with no error (AppendSkip): it is not
+// a full read that went through, the same rule every history reader applies.
+func (b *backupScheduler) newTablesOwed(serverID string, all []string) (attempts int, verdict string) {
 	b.mu.Lock()
 	tried, ok := b.newTablesTried[serverID]
 	b.mu.Unlock()
 	if !ok {
-		return 0, true
+		return 0, ""
 	}
-	fresh := false
-	for _, n := range names {
+	for _, n := range all {
 		if !tried.names[n] {
-			fresh = true
+			return 0, ""
 		}
 	}
-	if fresh {
-		return 0, true
-	}
-	if b.sup.history == nil || tried.attempts >= newTablesMaxAttempts {
-		return tried.attempts, false
+	if b.sup.history == nil {
+		return tried.attempts, console.NewTablesActionGaveUp
 	}
 	for _, r := range b.sup.history.List(serverID) {
-		if r.Kind == console.BaselineRunDump && r.Error == "" && r.StartedAt >= tried.at {
-			return tried.attempts, false
+		if r.Kind == console.BaselineRunDump && r.Error == "" && r.SkipReason == "" && r.StartedAt >= tried.at {
+			return tried.attempts, console.NewTablesActionStillMissing
 		}
 	}
-	return tried.attempts, true
+	if tried.attempts >= newTablesMaxAttempts {
+		return tried.attempts, console.NewTablesActionGaveUp
+	}
+	return tried.attempts, ""
 }

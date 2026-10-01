@@ -79,10 +79,12 @@ type BaselineRunRecord struct {
 	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
 	// NewTables / NewTablesOmitted / NewTablesUnchecked: see BaselineStatus
 	// (#1993). Kept with the run: the live status is overwritten by the next.
-	NewTables          []string `json:"new_tables,omitempty"`
-	NewTablesOmitted   int      `json:"new_tables_omitted,omitempty"`
-	NewTablesUnchecked string   `json:"new_tables_unchecked,omitempty"`
-	Error              string   `json:"error,omitempty"`
+	NewTables             []string `json:"new_tables,omitempty"`
+	NewTablesOmitted      int      `json:"new_tables_omitted,omitempty"`
+	NewTablesUnchecked    string   `json:"new_tables_unchecked,omitempty"`
+	NewTablesAction       string   `json:"new_tables_action,omitempty"`
+	NewTablesActionReason string   `json:"new_tables_action_reason,omitempty"`
+	Error                 string   `json:"error,omitempty"`
 	// Failure: see BaselineStatus.Failure. Absent in records written before
 	// #1986, which the page draws as the generic card.
 	Failure *SnapshotFailure `json:"failure,omitempty"`

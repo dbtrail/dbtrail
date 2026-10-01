@@ -112,6 +112,9 @@ type backupScheduler struct {
 	// read was started for, and when (#1993, includeNewTables). Memory only:
 	// a restart forgets it, and costs at most one more full read.
 	newTablesTried map[string]newTablesTry
+	// newTablesPending: per server, the full read PlanNewTables promised and
+	// the watcher has not started yet.
+	newTablesPending map[string]newTablesTry
 	// warned holds the servers whose unreadable schedule was already reported,
 	// so the log says it once rather than every minute.
 	warned map[string]bool
@@ -174,15 +177,16 @@ type scheduledFallback struct {
 func newBackupScheduler(sup *baselineSupervisor, reg *console.Registry, fullBackups, carryDefault bool) *backupScheduler {
 	b := &backupScheduler{
 		sup: sup, reg: reg, fullBackups: fullBackups, carryDefault: carryDefault,
-		seen:           make(map[string]seenSlot),
-		seenFull:       make(map[string]seenSlot),
-		started:        make(map[string]scheduledStart),
-		skipped:        make(map[string]scheduledSkip),
-		fullMissed:     make(map[string]scheduledSkip),
-		fullOwed:       make(map[string]string),
-		fallback:       make(map[string]scheduledFallback),
-		newTablesTried: make(map[string]newTablesTry),
-		warned:         make(map[string]bool),
+		seen:             make(map[string]seenSlot),
+		seenFull:         make(map[string]seenSlot),
+		started:          make(map[string]scheduledStart),
+		skipped:          make(map[string]scheduledSkip),
+		fullMissed:       make(map[string]scheduledSkip),
+		fullOwed:         make(map[string]string),
+		fallback:         make(map[string]scheduledFallback),
+		newTablesTried:   make(map[string]newTablesTry),
+		newTablesPending: make(map[string]newTablesTry),
+		warned:           make(map[string]bool),
 	}
 	b.window = b.measureWindow
 	return b
@@ -978,6 +982,7 @@ func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBa
 		Trigger:               console.BaselineRunTriggerScheduled,
 	}
 	withSource(&req, e)
+	req.PlanNewTables = b.newTablesPlanner(e)
 	// The interval is what the overrun warning measures against and names;
 	// for a scheduled rebuild that is the schedule's own `every`. Passing the
 	// wrong one here does not only mislabel a log attribute: it decides
@@ -1236,6 +1241,7 @@ func (b *backupScheduler) fallBack(e console.ServerEntry, failed console.Baselin
 func (b *backupScheduler) Forget(serverID string) {
 	b.mu.Lock()
 	delete(b.newTablesTried, serverID)
+	delete(b.newTablesPending, serverID)
 	delete(b.seen, serverID)
 	delete(b.seenFull, serverID)
 	delete(b.warned, serverID)
