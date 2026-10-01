@@ -27,6 +27,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A cleartext fallback under `ssl_mode: preferred` is now reported only after
   the cleartext connection has actually been made; a retry that fails no
   longer logs that it is reading without encryption.
+
+
+## [0.94.0] - 2026-10-01
+### Fixed
+- **Sources that only accept encrypted connections can be added from the
+  console** (#1994, #1995). Amazon RDS for MariaDB 11.8 ships with
+  `require_secure_transport=ON`; the 3-step connect flow, Test, Start, the
+  `watch` preflight, the replica-overlap check, the Overview capture state,
+  the quiet-server probe, the schema snapshot button and live verify all
+  connected in plaintext and failed with error 3159, although capture itself
+  connects with TLS. They now share capture's TLS resolution (empty
+  `ssl_mode` = `preferred`: TLS when the server offers it, plaintext only when
+  it offers none, logged). `bintrail up`'s preflight follows `--ssl-mode` too.
+  A server that requires TLS while DBTrail is set to connect without it gets a
+  plain-English message naming the setting to change, and a local TLS settings
+  mistake (unknown mode, missing CA file) names the field instead of giving
+  network advice. An invalid `ssl_mode` in console-servers.yaml warns at boot
+  and never stops the daemon.
+- **Console snapshots work against a source that requires TLS** (#1996,
+  #2000). The privilege check, server version read, multi-table no-lock
+  warning, disk estimate and new-tables check use the entry's TLS mode, and
+  mydumper gets matching TLS options. On builds whose `--ssl-mode REQUIRED`
+  does not enforce TLS (mydumper linked against MariaDB Connector/C, the arm64
+  image), a mandatory-TLS connection runs right before the dump and pins
+  mydumper to the server certificate it saw (`ssl-fp`), so the dump refuses a
+  server without TLS or a different certificate. With no `ssl_ca`, verify
+  modes and DSN `tls=true` use the system CA bundle (`SSL_CERT_FILE` first). A
+  snapshot read without encryption says so on the run ("Read without
+  encryption: ..."), and mydumper's TLS errors are worded on the card.
+- **Scheduled refreshes no longer silently leave out tables created after the
+  previous snapshot** (#1993, #1998). Each refresh compares the source's
+  tables in scope with the previous snapshot. New tables are named on the
+  Overview and the Snapshots page; when full reads are allowed one full
+  snapshot is started to include them (bounded retries, no loop against the
+  source), otherwise the page says why they will not join on their own. A
+  quiet server notices a fresh `CREATE TABLE`. Profile-restricted sessions see
+  the count without names.
+- **The Servers list and the Overview SQL card no longer freeze on a stale
+  state** (#1992, #1999). A server left PENDING with no startup phase kept that
+  badge until the dialog was reopened, and the "Ask it here" card stayed
+  hidden after the first copy appeared until the page was reloaded.
 ## [0.93.0] - 2026-10-01
 ### Changed
 - **Breaking for scripts that parse `bintrail status --baseline-dir`**: the
