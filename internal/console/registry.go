@@ -315,8 +315,23 @@ func LoadRegistry(path string) (*Registry, error) {
 			"turn_it_off_with", "the watch daemon's --baseline-carry-forward-unchanged=false (or BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED=false)",
 			"note", "the block is left in the file untouched")
 	}
+	warnUnusableSSLModes(path, r.file.Servers)
 	r.syncBucketStores()
 	return r, nil
+}
+
+// warnUnusableSSLModes names, once at load, each entry whose ssl_mode is not
+// one capture accepts. It does not refuse the file: the console is a recovery
+// path and must boot. That entry's capture and checks fail with the same
+// reason when they connect; this line says it before anyone has to look.
+func warnUnusableSSLModes(path string, entries []ServerEntry) {
+	for _, e := range entries {
+		if e.SSLMode != "" && !config.ValidSSLMode(e.SSLMode) {
+			slog.Warn("a server's ssl_mode is not a TLS mode; its capture and checks will refuse to connect until it is fixed",
+				"file", path, "server", e.Name, "ssl_mode", e.SSLMode,
+				"use", "disabled, preferred, required, verify-ca or verify-identity (or delete the line for preferred)")
+		}
+	}
 }
 
 // DefaultSourceSSLMode is the TLS mode a source connection uses when its

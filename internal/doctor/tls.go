@@ -62,3 +62,25 @@ func dsnTLSOff(dsn string) bool {
 	cfg, err := mysql.ParseDSN(dsn)
 	return err == nil && cfg.TLS == nil && strings.EqualFold(cfg.TLSConfig, "false")
 }
+
+// TLSSettingsText words a config.TLSSettingsError for the surfaces that set a
+// source's TLS (a console entry's ssl_* fields, or --ssl-* / BINTRAIL_SSL_*
+// for watch, up and stream): what is wrong, and the setting by every name. ok is false for any other
+// error.
+func TLSSettingsText(err error) (detail, remediation string, ok bool) {
+	var se *config.TLSSettingsError
+	if !errors.As(err, &se) {
+		return "", "", false
+	}
+	field, flag, env := "ssl_mode", "--ssl-mode", "BINTRAIL_SSL_MODE"
+	switch se.Setting {
+	case "ssl-ca":
+		field, flag, env = "ssl_ca", "--ssl-ca", "BINTRAIL_SSL_CA"
+	case "ssl-cert":
+		field, flag, env = "ssl_cert and ssl_key", "--ssl-cert and --ssl-key", "BINTRAIL_SSL_CERT and BINTRAIL_SSL_KEY"
+	}
+	return "The TLS settings for this source cannot be used: " + se.Problem + ".",
+		"Fix " + field + ": for a server added in the web console, in its entry in console-servers.yaml; " +
+			"for a server given on the command line, " + flag + " (or " + env + ").",
+		true
+}

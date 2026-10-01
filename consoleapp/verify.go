@@ -601,7 +601,7 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 
 func (s *verifySupervisor) runLiveSource(req console.VerifyRequest, indexDB *sql.DB, resolver *metadata.Resolver, dbName string) error {
 	ctx := s.ctx
-	sourceDB, err := connectSource(req.SourceDSN, req.SourceSSL)
+	sourceDB, err := connectSourceAsked(req.SourceDSN, req.SourceSSL)
 	if err != nil {
 		return fmt.Errorf("connect source: %w", err)
 	}

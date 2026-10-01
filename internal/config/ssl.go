@@ -25,6 +25,34 @@ type SSL struct {
 	Key  string
 }
 
+// TLSSettingsError is a TLS setting that cannot be used (an unknown mode, a CA
+// or client certificate file that cannot be read): a LOCAL problem, found
+// before anything dials, so no network advice applies to it. Error() keeps
+// the command-line wording (--ssl-mode, --ssl-ca, ...); a surface configured
+// some other way (the console's ssl_* entry fields) words it from Setting and
+// Problem instead.
+type TLSSettingsError struct {
+	// Setting is the setting at fault, in flag spelling without the dashes:
+	// "ssl-mode", "ssl-ca" or "ssl-cert" (a certificate/key pair).
+	Setting string
+	// Problem says what is wrong without naming a flag or a file format.
+	Problem  string
+	Err      error
+	flagText string
+}
+
+func (e *TLSSettingsError) Error() string { return e.flagText }
+func (e *TLSSettingsError) Unwrap() error { return e.Err }
+
+// ValidSSLMode reports whether mode is one BuildTLSConfig accepts.
+func ValidSSLMode(mode string) bool {
+	switch mode {
+	case "disabled", "preferred", "required", "verify-ca", "verify-identity":
+		return true
+	}
+	return false
+}
+
 // ConnectSSL opens and pings dsn honoring ssl, with the semantics capture uses
 // for its source and index helper connections (#946/#947):
 //
@@ -38,8 +66,7 @@ type SSL struct {
 //
 // An empty or unknown Mode is an error, as it is for capture: the caller picks
 // the default, so a typo never quietly becomes a weaker mode. A tls= in the
-// DSN wins over ssl (applyTLS), and survives the cleartext retry, which then
-// fails closed instead of downgrading.
+// DSN wins over ssl (applyTLS); with one there is no cleartext retry at all.
 //
 // onCleartext may be nil. It gets the error that proved the server has no
 // TLS; the caller decides how loudly to say "unencrypted" (a long-lived
@@ -59,7 +86,10 @@ func connectSSL(dsn string, ssl SSL, onCleartext func(error), open func(string, 
 	if err == nil {
 		return db, nil
 	}
-	if ssl.Mode != "preferred" || !IsTLSUnsupportedError(err) {
+	// A tls= in the DSN wins over ssl on every attempt (applyTLS), so a
+	// "retry in cleartext" would re-run the DSN's own setting: no retry, and
+	// no claim that the connection went out unencrypted.
+	if ssl.Mode != "preferred" || !IsTLSUnsupportedError(err) || DSNHasExplicitTLS(dsn) {
 		return nil, err
 	}
 	if onCleartext != nil {
@@ -78,13 +108,15 @@ func BuildTLSConfig(mode, ca, cert, key, serverName string) (*tls.Config, error)
 	if mode == "disabled" {
 		return nil, nil
 	}
-	switch mode {
-	case "preferred", "required", "verify-ca", "verify-identity":
-	default:
-		return nil, fmt.Errorf("invalid --ssl-mode %q: must be one of disabled, preferred, required, verify-ca, verify-identity", mode)
+	if !ValidSSLMode(mode) {
+		return nil, &TLSSettingsError{Setting: "ssl-mode",
+			Problem:  fmt.Sprintf("%q is not a TLS mode; use disabled, preferred, required, verify-ca or verify-identity", mode),
+			flagText: fmt.Sprintf("invalid --ssl-mode %q: must be one of disabled, preferred, required, verify-ca, verify-identity", mode)}
 	}
 	if (cert == "") != (key == "") {
-		return nil, fmt.Errorf("--ssl-cert and --ssl-key must both be specified together")
+		return nil, &TLSSettingsError{Setting: "ssl-cert",
+			Problem:  "a client certificate and its key must be set together (ssl_cert and ssl_key)",
+			flagText: "--ssl-cert and --ssl-key must both be specified together"}
 	}
 
 	cfg := &tls.Config{}
@@ -94,11 +126,15 @@ func BuildTLSConfig(mode, ca, cert, key, serverName string) (*tls.Config, error)
 	if ca != "" {
 		pem, err := os.ReadFile(ca)
 		if err != nil {
-			return nil, fmt.Errorf("read --ssl-ca %q: %w", ca, err)
+			return nil, &TLSSettingsError{Setting: "ssl-ca", Err: err,
+				Problem:  fmt.Sprintf("the CA file %q could not be read: %v", ca, err),
+				flagText: fmt.Sprintf("read --ssl-ca %q: %v", ca, err)}
 		}
 		caPool = x509.NewCertPool()
 		if !caPool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("--ssl-ca %q: no valid certificates found", ca)
+			return nil, &TLSSettingsError{Setting: "ssl-ca",
+				Problem:  fmt.Sprintf("the CA file %q holds no valid certificate", ca),
+				flagText: fmt.Sprintf("--ssl-ca %q: no valid certificates found", ca)}
 		}
 		cfg.RootCAs = caPool
 	}
@@ -107,7 +143,9 @@ func BuildTLSConfig(mode, ca, cert, key, serverName string) (*tls.Config, error)
 	if cert != "" {
 		kp, err := tls.LoadX509KeyPair(cert, key)
 		if err != nil {
-			return nil, fmt.Errorf("load --ssl-cert/--ssl-key: %w", err)
+			return nil, &TLSSettingsError{Setting: "ssl-cert", Err: err,
+				Problem:  fmt.Sprintf("the client certificate or its key could not be loaded: %v", err),
+				flagText: fmt.Sprintf("load --ssl-cert/--ssl-key: %v", err)}
 		}
 		cfg.Certificates = []tls.Certificate{kp}
 	}

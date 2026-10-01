@@ -1,6 +1,7 @@
 package cliapp
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -9,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/doctor"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/rotation"
@@ -120,7 +122,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		// unattended reboot would crash-loop instead of capturing while
 		// there is still room). Standalone `doctor` keeps full FAIL
 		// semantics for CI.
-		preflight := doctor.Build(cmd.Context(), upSourceDSN, upIndexDSN, upSchemas, upRotationCfg.Retain)
+		preflight := upPreflight(cmd.Context())
 		appendExtDoctorChecks(cmd.Context(), preflight, upSourceDSN, upIndexDSN)
 		if err := preflight.Write(os.Stderr, "text"); err != nil {
 			return fmt.Errorf("write preflight report: %w", err)
@@ -248,22 +250,42 @@ func populateStreamFlags(serverID uint32) {
 	strmTables = upTables
 	strmCheckpoint = upCheckpoint
 	strmMetricsAddr = upMetricsAddr
-	if !streamCmd.Flags().Changed("ssl-mode") {
-		strmSSLMode = "preferred"
-	}
-	if !streamCmd.Flags().Changed("ssl-ca") {
-		strmSSLCA = ""
-	}
-	if !streamCmd.Flags().Changed("ssl-cert") {
-		strmSSLCert = ""
-	}
-	if !streamCmd.Flags().Changed("ssl-key") {
-		strmSSLKey = ""
-	}
+	ssl := upStreamSSL()
+	strmSSLMode, strmSSLCA, strmSSLCert, strmSSLKey = ssl.Mode, ssl.CA, ssl.Cert, ssl.Key
 	strmFormat = upFormat
 	strmReset = false
 	strmNoGapFill = false
 	if !streamCmd.Flags().Changed("gap-timeout") {
 		strmGapTimeout = 30
 	}
+}
+
+// upStreamSSL is the source TLS `up` runs its stream with: up's hardcoded
+// default (preferred, no files) for each setting the operator has not set on
+// streamCmd, by flag or by BINTRAIL_SSL_* (bindCommandEnv marks those
+// Changed). populateStreamFlags and the preflight both read it, so they
+// cannot disagree.
+func upStreamSSL() config.SSL {
+	ssl := config.SSL{Mode: "preferred"}
+	if streamCmd.Flags().Changed("ssl-mode") {
+		ssl.Mode = strmSSLMode
+	}
+	if streamCmd.Flags().Changed("ssl-ca") {
+		ssl.CA = strmSSLCA
+	}
+	if streamCmd.Flags().Changed("ssl-cert") {
+		ssl.Cert = strmSSLCert
+	}
+	if streamCmd.Flags().Changed("ssl-key") {
+		ssl.Key = strmSSLKey
+	}
+	return ssl
+}
+
+// upPreflight runs up's preflight checks with the source TLS the stream will
+// use (upStreamSSL), so it cannot refuse a server that only accepts encrypted
+// connections while the stream would have reached it.
+func upPreflight(ctx context.Context) *doctor.Report {
+	return doctor.Build(ctx, upSourceDSN, upIndexDSN, upSchemas, upRotationCfg.Retain,
+		doctor.WithSourceSSL(upStreamSSL()))
 }

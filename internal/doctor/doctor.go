@@ -264,6 +264,19 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	schemas := cliutil.ParseSchemaList(schemasCSV)
 
 	// ── Source MySQL checks ──────────────────────────────────────────────────
+	// A TLS setting that cannot be used is a local problem: say which one,
+	// before any connection attempt, instead of the network advice below.
+	if cfg.sourceSSL != nil {
+		s := *cfg.sourceSSL
+		if _, err := config.BuildTLSConfig(s.Mode, s.CA, s.Cert, s.Key, config.DSNHost(sourceDSN)); err != nil {
+			c := CheckResult{Name: SourceConnectionCheckName, Status: StatusFail, Detail: err.Error()}
+			if detail, fix, ok := TLSSettingsText(err); ok {
+				c.Detail, c.Remediation = detail, fix
+			}
+			report.add(c)
+			return report
+		}
+	}
 	sourceDB, err := cfg.openSource(sourceDSN)
 	if err != nil {
 		c := CheckResult{

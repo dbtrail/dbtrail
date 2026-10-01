@@ -146,7 +146,7 @@ func readMariaDBPeer(ctx context.Context, p console.ServerEntry) mariadbServer {
 	// windowProbeTimeout): config.Connect's ping does not take a context.
 	// The peer's OWN TLS settings, not the candidate's: each saved source is
 	// read the way its own capture reads it.
-	db, err := connectSource(sourceProbeDSN(p.SourceDSN), p.SourceSSL())
+	db, err := connectSourceAsked(sourceProbeDSN(p.SourceDSN), p.SourceSSL())
 	if err != nil {
 		return out
 	}

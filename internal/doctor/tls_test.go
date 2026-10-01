@@ -94,3 +94,38 @@ func TestUnencryptedRefusal(t *testing.T) {
 		})
 	}
 }
+
+// A TLS setting that cannot be used names the field, never the network.
+func TestTLSSettingsText(t *testing.T) {
+	_, err := config.BuildTLSConfig("require", "", "", "", "h")
+	detail, fix, ok := TLSSettingsText(err)
+	t.Logf("detail: %s", detail)
+	t.Logf("fix:    %s", fix)
+	if !ok || !strings.Contains(detail, `"require" is not a TLS mode`) || !strings.Contains(fix, "ssl_mode") ||
+		!strings.Contains(fix, "console-servers.yaml") || strings.Contains(detail, "--") {
+		t.Fatalf("detail %q fix %q ok %v", detail, fix, ok)
+	}
+	_, err = config.BuildTLSConfig("verify-ca", "/nonexistent/ca.pem", "", "", "h")
+	if _, fix, _ := TLSSettingsText(err); !strings.Contains(fix, "ssl_ca") {
+		t.Fatalf("CA fix %q", fix)
+	}
+	if _, _, ok := TLSSettingsText(errors.New("dial tcp: refused")); ok {
+		t.Fatal("a network error read as a settings error")
+	}
+}
+
+// Build reports a bad TLS setting as itself, before dialing: no security-group
+// advice for a typo in ssl_mode.
+func TestBuild_TLSSettingsErrorIsLocal(t *testing.T) {
+	r := Build(t.Context(), "u:p@tcp(127.0.0.1:1)/", "", "", 0, ForUnsavedServer(),
+		WithSourceSSL(config.SSL{Mode: "verify-ca", CA: "/nonexistent/ca.pem"}))
+	if len(r.Checks) != 1 {
+		t.Fatalf("checks = %+v", r.Checks)
+	}
+	c := r.Checks[0]
+	t.Logf("detail: %s", c.Detail)
+	t.Logf("fix:    %s", c.Remediation)
+	if c.Status != StatusFail || !strings.Contains(c.Remediation, "ssl_ca") || strings.Contains(c.Remediation, "security group") {
+		t.Fatalf("check = %+v", c)
+	}
+}

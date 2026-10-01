@@ -92,6 +92,44 @@ func TestConnectSSL_RetryRule(t *testing.T) {
 	}
 }
 
+// A tls= in the DSN wins on every attempt, so there is nothing to retry and
+// nothing went out unencrypted: no retry, no cleartext callback.
+func TestConnectSSL_DSNTLSNeverRetries(t *testing.T) {
+	f := &fakeOpen{answers: []error{mysql.ErrNoTLS, nil}}
+	warned := false
+	_, err := connectSSL(sslTestDSN+"?tls=true", SSL{Mode: "preferred"}, func(error) { warned = true }, f.open)
+	if err == nil || !errors.Is(err, mysql.ErrNoTLS) || strings.Contains(err.Error(), "cleartext") {
+		t.Fatalf("err = %v, want the first error unchanged", err)
+	}
+	if len(f.got) != 1 || warned {
+		t.Fatalf("attempts = %d, warned = %v; want 1 attempt, no warning", len(f.got), warned)
+	}
+}
+
+// Settings errors are typed and local: they name the setting and say what is
+// wrong without a flag, and keep the command-line wording in Error().
+func TestBuildTLSConfig_SettingsErrors(t *testing.T) {
+	for _, tc := range []struct {
+		ssl     SSL
+		setting string
+		flag    string
+	}{
+		{SSL{Mode: "require"}, "ssl-mode", "--ssl-mode"},
+		{SSL{Mode: "verify-ca", CA: "/nonexistent/ca.pem"}, "ssl-ca", "--ssl-ca"},
+		{SSL{Mode: "required", Cert: "/c.pem"}, "ssl-cert", "--ssl-cert"},
+	} {
+		_, err := BuildTLSConfig(tc.ssl.Mode, tc.ssl.CA, tc.ssl.Cert, tc.ssl.Key, "h")
+		var se *TLSSettingsError
+		if !errors.As(err, &se) || se.Setting != tc.setting {
+			t.Errorf("%+v: err = %v, want a TLSSettingsError on %s", tc.ssl, err, tc.setting)
+			continue
+		}
+		if strings.Contains(se.Problem, "--") || !strings.Contains(err.Error(), tc.flag) {
+			t.Errorf("%+v: Problem %q / Error %q", tc.ssl, se.Problem, err)
+		}
+	}
+}
+
 // A nil onCleartext is allowed: the retry still happens.
 func TestConnectSSL_NilOnCleartext(t *testing.T) {
 	f := &fakeOpen{answers: []error{mysql.ErrNoTLS, nil}}
