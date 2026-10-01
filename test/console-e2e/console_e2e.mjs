@@ -6472,8 +6472,17 @@ try {
     // A session the server reports sql:false for does not see the card. The
     // server-side half (no sql:execute, a data profile, an S3-only copy all
     // report false) is pinned in Go; this is the page obeying the capability.
+    // The SERVER answers false here, not only the page's cache: the Overview
+    // asks the capabilities again when it sees a copy (#1992), so a false
+    // written into capsCache alone is corrected by the server's true.
+    const keepSql = await page.evaluate(() => capsCache.sql);
+    const capsRoute = "**/api/capabilities";
+    await page.route(capsRoute, async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      await route.fulfill({ response: res, json: Object.assign({}, body, { sql: false }) });
+    });
     const hiddenCard = await page.evaluate(async () => {
-      const keep = capsCache.sql;
       capsCache.sql = false;
       navigate("overview");
       for (let i = 0; i < 100; i++) {
@@ -6483,10 +6492,10 @@ try {
       }
       const c = document.querySelector('.use-card[data-use="sql"]');
       const out = { hidden: !!(c && c.hidden), others: Array.from(document.querySelectorAll(".use-card")).filter((k) => !k.hidden).length };
-      capsCache.sql = keep;
-      navigate("overview");
       return out;
     });
+    await page.unroute(capsRoute);
+    await page.evaluate((keep) => { capsCache.sql = keep; navigate("overview"); }, keepSql);
     (hiddenCard.hidden && hiddenCard.others === 3)
       ? ok("sql: without the capability the card is not shown and the other three are")
       : bad("sql: without the capability the card is not shown and the other three are", JSON.stringify(hiddenCard));

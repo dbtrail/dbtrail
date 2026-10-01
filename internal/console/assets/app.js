@@ -2971,6 +2971,27 @@ function useCopySection() {
     section.hidden = state.cta === "setup";
     // The SQL card follows the capability of the server on screen.
     state.cards.sql.hidden = !capsCache.sql;
+    // capsCache is read when the server is picked, and the capability turns
+    // on only once a local copy exists: a server picked before its first copy
+    // kept the card hidden until a reload. So when this refresh sees a newest
+    // copy the capabilities were not asked about yet, ask again, once per
+    // copy (a server whose SQL stays off for another reason is not asked on
+    // every refresh). A failed ask is not remembered, so the next refresh
+    // retries; an answer for a server no longer on screen is dropped.
+    const snapAt = state.snap && state.snap.time;
+    if (!capsCache.sql && snapAt && snapAt !== state.sqlAskedAt && !state.sqlAsking) {
+      const gen = serverGen;
+      state.sqlAsking = true;
+      api("/api/capabilities").then((caps) => {
+        state.sqlAsking = false;
+        if (gen !== serverGen) return;
+        state.sqlAskedAt = snapAt;
+        if (caps && caps.sql) {
+          capsCache.sql = true;
+          state.cards.sql.hidden = false;
+        }
+      }, () => { state.sqlAsking = false; });
+    }
   };
   return { section, update };
 }
@@ -13686,9 +13707,20 @@ async function submitRotation(form, msg, cur) {
 // finished, which is the misreading the chip exists to prevent — worse than
 // the vague frozen PENDING it replaced, because it is specific.
 //
-// So the list re-fetches itself only while some row reports a phase. The timer
-// exists exactly as long as a phase does, and the guard below stops it the
+// So the list re-fetches itself while some row is still settling: it reports
+// a phase, or its state changes on its own (SERVERS_SETTLING, #1992). A job is pending from launch until its
+// first checkpoint, and that window often has no named step (a plain connect
+// with no snapshot step); a frozen PENDING with only a Stop button reads as
+// stuck, and pressing Stop to unstick it stops a healthy capture. The timer
+// exists exactly as long as such a row does, and the guard below stops it the
 // moment the list leaves the DOM.
+// SERVERS_SETTLING are the states that change on their own, so a row in one
+// of them must not freeze: pending flips to running at the first checkpoint,
+// failed is retried after a backoff (consoleapp/monitor.go fail/retrying,
+// and its tooltip says "retrying automatically"), and a stalled stream
+// recovers when it makes progress again. lost_position, running and stopped
+// change only through an operator action, which refreshes the list itself.
+const SERVERS_SETTLING = new Set(["pending", "failed", "stalled"]);
 let serversPhaseTimer = null;
 const serversPhaseInterval = 5000;
 
@@ -13712,7 +13744,7 @@ async function refreshServersList() {
     return;
   }
   servers.forEach((s) => list.append(serverRow(s)));
-  if (servers.some((s) => s.monitor_phase)) serversPhaseTimer = setTimeout(refreshServersList, serversPhaseInterval);
+  if (servers.some((s) => s.monitor_phase || SERVERS_SETTLING.has(s.monitor_state))) serversPhaseTimer = setTimeout(refreshServersList, serversPhaseInterval);
 }
 
 function isLiveMonitorState(st) { return st === "running" || st === "pending" || st === "stalled" || st === "lost_position"; }
