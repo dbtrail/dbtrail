@@ -18,16 +18,16 @@ func TestUpConsoleConfig_backupSettingsDefaultsReachTheConsole(t *testing.T) {
 	opts := consoleOpts{Listen: "127.0.0.1:8090", Token: "tok"}
 
 	prevRetain, prevEvery := upConsoleBaselineRetain, upBaselineRefreshEvery
-	prevLock, prevTrig := upConsoleBaselineLockMode, upConsoleBaselineTrigger
+	prevLock, prevTrig, prevSet := upConsoleBaselineLockMode, upConsoleBaselineTrigger, upConsoleBaselineLockModeSet
 	prevStage, prevVI, prevVT := upBaselineStageDir, upVerifyInterval, upVerifyTables
 	t.Cleanup(func() {
 		upConsoleBaselineRetain, upBaselineRefreshEvery = prevRetain, prevEvery
-		upConsoleBaselineLockMode, upConsoleBaselineTrigger = prevLock, prevTrig
+		upConsoleBaselineLockMode, upConsoleBaselineTrigger, upConsoleBaselineLockModeSet = prevLock, prevTrig, prevSet
 		upBaselineStageDir, upVerifyInterval, upVerifyTables = prevStage, prevVI, prevVT
 	})
 
 	upConsoleBaselineRetain, upBaselineRefreshEvery = "7d", "6h"
-	upConsoleBaselineLockMode, upConsoleBaselineTrigger = baseline.LockModeNoLock, true
+	upConsoleBaselineLockMode, upConsoleBaselineTrigger, upConsoleBaselineLockModeSet = baseline.LockModeNoLock, true, true
 	upBaselineStageDir, upVerifyInterval, upVerifyTables = "/stage", "24h", "shop.orders"
 
 	cfg, err := upConsoleConfig(nil, dsn, opts, nil)

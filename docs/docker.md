@@ -179,7 +179,10 @@ Notes:
   baselines (point-consistent by default), `RELOAD` (and `BACKUP_ADMIN` on
   MySQL/Percona 8.0+) and `SHOW VIEW`. On managed MySQL (RDS, Aurora,
   Cloud SQL) the default lock mode is not available: grant `LOCK TABLES` and
-  `SHOW VIEW` and set `BASELINE_LOCK_MODE=lock-all`. A MySQL on the
+  `SHOW VIEW` instead. The console's snapshots then use `lock-all` on their
+  own (an Amazon RDS or Aurora host name picks it, and a refused default is
+  retried once with it); `BASELINE_LOCK_MODE` in `.env` only overrides that
+  choice. A MySQL on the
   same machine is reachable from inside Docker as `host.docker.internal`.
   On Linux the compose maps it with `host-gateway`, which needs Docker Engine
   20.10 or later running as root; with rootless Docker, or Podman before 4.7
@@ -525,7 +528,9 @@ Notes:
   needs `RELOAD`/`FLUSH_TABLES` (plus `BACKUP_ADMIN` on MySQL/Percona 8.0+).
   On **managed MySQL (RDS/Aurora) `BACKUP_ADMIN` cannot be granted**, so
   `ftwrl` cannot run there: set `BASELINE_LOCK_MODE=lock-all`, which is
-  equally point-consistent and needs only `LOCK TABLES`. Otherwise
+  equally point-consistent and needs only `LOCK TABLES`. This one-shot
+  profile does not choose on its own, unlike the console's snapshots, which
+  pick `lock-all` for an RDS or Aurora host by themselves. Otherwise
   `BASELINE_LOCK_MODE=safe-no-lock` dumps without either privilege (it
   aborts rather than write a torn snapshot, so expect it to refuse on a
   write-active source) or `=no-lock` accepts a torn one. It still reads every row of the selected

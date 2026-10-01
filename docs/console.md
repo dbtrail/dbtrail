@@ -411,10 +411,11 @@ because a baseline is point-consistent by default. Without the lock privileges
 capture keeps running and only the baseline is refused, naming the exact
 `GRANT`; without `SHOW VIEW` the dump itself stops at the first view with
 mydumper's `SHOW VIEW command denied`. On
-managed MySQL (RDS, Aurora, Cloud SQL) the default lock mode is not available:
-grant `LOCK TABLES` and set the lock mode to `lock-all` (`BASELINE_LOCK_MODE` in the compose `.env`,
-`BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` otherwise) —
-`ftwrl` needs `BACKUP_ADMIN`, which managed MySQL will not grant. Full
+managed MySQL (RDS, Aurora, Cloud SQL) the default lock mode is not available
+(`ftwrl` needs `BACKUP_ADMIN`, which managed MySQL will not grant): grant
+`LOCK TABLES` and `SHOW VIEW` instead. There is nothing to set: snapshots use
+`lock-all` on their own for an Amazon RDS or Aurora host name, and retry once
+with `lock-all` when the default is refused (an IP, a CNAME, Cloud SQL). Full
 per-privilege breakdown and the least-privilege (schema-scoped `SELECT`)
 variant: [streaming.md](streaming.md#the-source-mysql-user).
 
@@ -1197,13 +1198,18 @@ one release and warns that it no longer does anything. Remove it.
   [settings that need a restart](https://www.dbtrail.com/docs/settings/backups#set-at-startup).
 - `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — local staging dir for
   S3-destined baselines created by that button (default a temp subdir).
-- `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — `ftwrl` (default),
-  `lock-all`, `safe-no-lock` or `no-lock`. Selects how mydumper synchronizes its worker
-  threads onto one instant for the **Create baseline** button. The default is
-  point-consistent and needs `RELOAD`/`FLUSH_TABLES` (plus `BACKUP_ADMIN` on
-  MySQL/Percona 8.0+). `lock-all` is also point-consistent and needs only
-  `LOCK TABLES` — **the mode to use on RDS/Aurora**, where `BACKUP_ADMIN`
-  cannot be granted and `ftwrl` therefore cannot run. `safe-no-lock` needs no
+- `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`watch` only) — empty (default:
+  automatic), `ftwrl`, `lock-all`, `safe-no-lock` or `no-lock`. Selects how
+  mydumper synchronizes its worker threads onto one instant for console
+  snapshots. **Automatic** picks per snapshot: `lock-all` for an Amazon RDS or
+  Aurora host name (`*.rds.amazonaws.com`, RDS Proxy included), `ftwrl`
+  elsewhere, and one retry with `lock-all` when `ftwrl` is refused (the global
+  lock denied, or `RELOAD`/`BACKUP_ADMIN` missing); the snapshot records the
+  mode it used. Setting the variable overrides that for every server, with no
+  retry. `ftwrl` is point-consistent and needs `RELOAD`/`FLUSH_TABLES` (plus
+  `BACKUP_ADMIN` on MySQL/Percona 8.0+). `lock-all` is also point-consistent
+  and needs only `LOCK TABLES`; it is what works on RDS/Aurora, where
+  `BACKUP_ADMIN` cannot be granted and `ftwrl` therefore cannot run. `safe-no-lock` needs no
   elevated privilege but aborts rather than write a torn snapshot; `no-lock`
   accepts one. A baseline is the seed state
   `reconstruct` merges deltas onto, which is why the weaker modes must be named

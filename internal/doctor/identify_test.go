@@ -485,9 +485,9 @@ func TestManagedFromHost(t *testing.T) {
 		{"", "", ""},
 	}
 	for _, c := range cases {
-		m, p := managedFromHost(c.host)
+		m, p := ManagedFromHost(c.host)
 		if m != c.wantManaged || p != c.wantProxy {
-			t.Errorf("managedFromHost(%q) = %q %q; want %q %q", c.host, m, p, c.wantManaged, c.wantProxy)
+			t.Errorf("ManagedFromHost(%q) = %q %q; want %q %q", c.host, m, p, c.wantManaged, c.wantProxy)
 		}
 	}
 }

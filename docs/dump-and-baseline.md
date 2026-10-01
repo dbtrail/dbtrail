@@ -196,8 +196,12 @@ In practice this skew is almost always absorbed by DBTrail's idempotent delta re
 `reconstruct` merges binlog deltas onto, so a snapshot stitched from several instants yields a table
 that never existed at any point in time, and every downstream answer — `reconstruct`, `verify`,
 `drill` — inherits it with nothing saying so. That is not something an operator should get by not
-choosing, which is why `--lock-mode` (CLI) and `BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`bintrail-console`;
-`BASELINE_LOCK_MODE` in the compose `.env`) default to `ftwrl` and the weaker modes must be asked for by name.
+choosing, which is why `--lock-mode` (CLI) defaults to `ftwrl` and the weaker modes must be asked for by name.
+The console's snapshots choose between the two point-consistent modes on their own when
+`BINTRAIL_CONSOLE_BASELINE_LOCK_MODE` (`BASELINE_LOCK_MODE` in the compose `.env`) is unset:
+`lock-all` for an Amazon RDS or Aurora host name, `ftwrl` elsewhere, and one retry with `lock-all`
+when `ftwrl` is refused. They never fall to a weaker mode; setting the variable overrides the choice.
+`bintrail dump` does not choose: its `--lock-mode` is what runs.
 
 | `--lock-mode` | mydumper mode | Point-consistent? | Works on a write-active source? | Privileges |
 |---|---|---|---|---|

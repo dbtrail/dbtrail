@@ -7351,16 +7351,16 @@ const BACKUP_DAEMON_ROWS = {
 // would lie: an empty Backup dir is no shared location at all, an empty
 // interval is a loop that never runs, an empty table filter is every table.
 // The word renders as a value in the muted style; "not set" read as a fault
-// on nine rows of a healthy install. lock_mode is never empty on the wire
-// under watch, the only surface that renders this card (the daemon resolves
-// its default before reporting), and trigger is a boolean; both carry an
-// entry so the table stays one-to-one with the rows.
+// on nine rows of a healthy install. An empty lock_mode is the automatic
+// choice (#1986: lock-all for an RDS or Aurora host, ftwrl elsewhere), not a
+// missing value. trigger is a boolean; it carries an entry so the table stays
+// one-to-one with the rows.
 const BACKUP_DAEMON_EMPTY = {
   baseline_dir: "none",
   baseline_s3: "none",
   baseline_retain: "off",
   refresh_every: "off",
-  lock_mode: "built-in",
+  lock_mode: "automatic",
   trigger: "Off",
   staging_dir: "temp folder",
   verify_interval: "off",
@@ -13579,7 +13579,7 @@ function genSourcePassword() {
 // and Percona 8.0 or later. LOCK TABLES is only what lock-all needs, which is
 // the RDS/Aurora path: the commented alternative (#1658), or the live line
 // when managed is set (the Connect screen's RDS box, #1953).
-function grantBlocks(user, password, hasSavedPassword, managed) {
+function grantBlocks(user, password, hasSavedPassword, managed, connect) {
   const typedUser = String(user || "").trim();
   const acct = sqlString(typedUser || "dbtrail") + "@'%'";
   // A placeholder, not '': an empty quoted string is a real password MySQL
@@ -13594,10 +13594,18 @@ function grantBlocks(user, password, hasSavedPassword, managed) {
   // Managed services cannot use the default lock mode (no BACKUP_ADMIN on
   // managed MySQL; RDS MariaDB's RELOAD excludes FLUSH TABLES WITH READ LOCK),
   // so they switch to lock-all, which locks tables instead of the instance.
-  const grantLockAll = (who) =>
-    "-- " + who + ": the default lock mode is not available. Run the line below instead of GRANT RELOAD and set the lock mode to lock-all\n" +
-    "-- (BASELINE_LOCK_MODE=lock-all in .env on the compose install, BINTRAIL_CONSOLE_BASELINE_LOCK_MODE otherwise).\n" +
-    "-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO " + acct + ";";
+  // The managed alternative, commented. True on both screens that show it:
+  // the Connect screen (where ticking the RDS box makes it the live line)
+  // and the full form, which has no box. Snapshots pick the matching mode on
+  // their own (#1986), so nothing here asks for a setting.
+  // On the Connect screen the box under the SQL swaps in the RDS block, so
+  // the line only points at it (#1986, checked: the box sits in the row right
+  // below the SQL).
+  // MariaDB names only RDS: Aurora does not run MariaDB.
+  const grantLockAll = (who, where) => connect
+    ? "-- On " + where + "? Tick the box below."
+    : "-- " + who + ", run this line instead of the GRANT RELOAD line above.\n" +
+      "-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO " + acct + ";";
   // SHOW VIEW is on every backup line: mydumper stops at the first view it
   // cannot read ("SHOW VIEW command denied"), so a schema holding one view
   // fails the whole backup on RELOAD alone.
@@ -13606,7 +13614,7 @@ function grantBlocks(user, password, hasSavedPassword, managed) {
   // default lock mode cannot work there at all, so offering it would only
   // fail on the first snapshot.
   const grantManaged = (who) =>
-    "-- " + who + ": snapshots lock tables instead of the whole server, so set Lock while dumping to lock-all (Snapshots, Settings).\n" +
+    "-- " + who + ": this permission lets each snapshot start every table at the same point-in-time.\n" +
     "GRANT LOCK TABLES, SHOW VIEW ON *.* TO " + acct + ";";
   const blocks = managed ? {
     mysql: grantBase + grantBackups + grantManaged("Amazon RDS and Aurora"),
@@ -13615,9 +13623,9 @@ function grantBlocks(user, password, hasSavedPassword, managed) {
     mysql: grantBase + grantBackups +
       "-- BACKUP_ADMIN is MySQL/Percona 8.0 or later. On MySQL 5.7 run this instead:\n" +
       "-- GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" +
-      "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("Managed MySQL (RDS, Aurora, Cloud SQL)"),
+      "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("On Amazon RDS, Aurora or Cloud SQL", "Amazon RDS or Aurora"),
     mariadb: grantBase + grantBackups +
-      "GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("RDS for MariaDB"),
+      "GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("On Amazon RDS for MariaDB", "Amazon RDS"),
   };
   // Three cases where no line may be runnable, because the block would not
   // create the account the form is about to save.
@@ -13649,10 +13657,14 @@ function grantBlocks(user, password, hasSavedPassword, managed) {
 function refreshGrants(form) {
   const f = form.elements;
   const managed = !!(f.cx_managed && f.cx_managed.checked);
-  const b = grantBlocks(f.source_user.value, f.source_password.value, !!savedSourcePasswords.get(form), managed);
+  const b = grantBlocks(f.source_user.value, f.source_password.value, !!savedSourcePasswords.get(form), managed, !!form.dataset.connect);
   // The Connect screen shows one block, for the flavor step 1 found or chose.
   if (form.dataset.connect) $all("pre[data-grant]", form).forEach((p) => p.setAttribute("data-grant", f.flavor.value === "mariadb" ? "mariadb" : "mysql"));
   $all("pre[data-grant]", form).forEach((p) => { p.textContent = b[p.dataset.grant]; });
+  // Built once with the Connect screen and only shown or hidden here, so a
+  // reader who opened it does not see it snap shut on the next keystroke.
+  const pit = $("details.cx-pit", form);
+  if (pit) pit.hidden = !managed;
 }
 
 // generatedPasswords remembers, per form, the password applyGrantDefaults
@@ -14143,7 +14155,7 @@ function buildConnectForm() {
   const s2 = el("div", { class: "cx-step", "data-cx-step": "2", hidden: true });
   s2.append(el("p", { class: "cx-title", text: "2. Let DBTrail in" }));
   s2.append(el("p", { class: "form-hint", text: "Run this on that server, as an admin:" }));
-  const pre = el("pre", { class: "form-code", "data-grant": "mysql", text: grantBlocks("", "").mysql });
+  const pre = el("pre", { class: "form-code", "data-grant": "mysql", text: grantBlocks("", "", false, false, true).mysql });
   s2.append(el("div", {}, pre,
     el("div", { class: "cx-row" },
       el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(pre.textContent, "SQL") }),
@@ -14152,7 +14164,14 @@ function buildConnectForm() {
           connectManaged.set(form, { addr: connectAddr(form), on: !!form.elements.cx_managed.checked });
           refreshGrants(form);
           saveConnectDraftSoon(form);
-        } }), " On Amazon RDS or Aurora"))));
+        } }), " On Amazon RDS or Aurora")),
+    // For the DBA who wants to know what LOCK TABLES is for (#1986). Closed,
+    // and only beside the RDS permission, which is the one it explains.
+    el("details", { class: "form-advanced cx-pit", hidden: true },
+      el("summary", { class: "form-adv-summary", text: "How snapshots stay point-in-time" }),
+      el("p", { class: "form-hint", text: "Writes to the copied tables may wait while a snapshot starts, until every copy thread marks the same point-in-time. " +
+        "If a long query or open transaction is still running on those tables, the wait lasts until it ends." }),
+      docsMore("guides/backup-strategy", "how-a-snapshot-stays-point-in-time", "how a snapshot stays point-in-time"))));
   const acct = el("div", { class: "form-grid" });
   acct.append(srvField("User", "source_user", { placeholder: "dbtrail" }));
   acct.append(srvField("Password", "source_password", { type: "password", autocomplete: "new-password" }));
@@ -14576,9 +14595,6 @@ function connectResultCard(res, form) {
   const n = connectNotice(res);
   const card = el("div", { class: "notice-inline " + (n.tone || "ok") }, el("p", { class: "cx-done", text: n.title }));
   for (const l of n.lines || []) card.append(el("p", { text: l }));
-  if (res.started && form.elements.cx_managed && form.elements.cx_managed.checked) {
-    card.append(el("p", { text: "On Amazon RDS and Aurora, snapshots need Lock while dumping set to lock-all, under Snapshots, Settings." }));
-  }
   for (const c of [].concat(n.content || [])) if (c) card.append(c);
   return card;
 }

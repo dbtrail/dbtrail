@@ -31,8 +31,8 @@ rebuild a row or a table as it was.
   GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
   -- MariaDB and MySQL 5.7 have no BACKUP_ADMIN; run this instead:
   -- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';
-  -- Managed MySQL (RDS, Aurora, Cloud SQL) and RDS for MariaDB cannot use the
-  -- default lock mode; run this instead, with BASELINE_LOCK_MODE=lock-all:
+  -- Managed MySQL (RDS, Aurora, Cloud SQL) and RDS for MariaDB: run this
+  -- instead of GRANT RELOAD (snapshots pick the matching mode on their own):
   -- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';
   ```
 
@@ -63,7 +63,7 @@ rebuild a row or a table as it was.
   `mysql_native_password=ON`).
 
   `RELOAD`/`BACKUP_ADMIN` let the baseline dump take a point-in-time snapshot.
-  **On managed MySQL (RDS, Aurora, Cloud SQL), `BACKUP_ADMIN` cannot be granted**, so grant `LOCK TABLES, SHOW VIEW` and set `BASELINE_LOCK_MODE=lock-all`: equally point-consistent, and the mode mydumper itself names for RDS. If you would rather grant nothing extra on a self-hosted source, `BASELINE_LOCK_MODE=safe-no-lock` never writes a torn snapshot, but it refuses on a write-active source.
+  **On managed MySQL (RDS, Aurora, Cloud SQL), `BACKUP_ADMIN` cannot be granted**, so grant `LOCK TABLES, SHOW VIEW` instead. Snapshots then use `lock-all` on their own (an Amazon RDS or Aurora host name picks it, and a refused default is retried once with it): equally point-consistent, and the mode mydumper itself names for RDS. `BASELINE_LOCK_MODE` in `.env` only overrides that choice. If you would rather grant nothing extra on a self-hosted source, `BASELINE_LOCK_MODE=safe-no-lock` never writes a torn snapshot, but it refuses on a write-active source.
   `REPLICATION SLAVE`/`REPLICATION CLIENT` drive the binlog stream; `SELECT` lets
   DBTrail snapshot the schema. DBTrail never writes to or locks the source.
   (Least-privilege variant: [streaming.md](streaming.md#the-source-mysql-user).)

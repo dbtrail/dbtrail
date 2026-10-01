@@ -282,7 +282,7 @@ func countMydumper(t *testing.T) *atomic.Int32 {
 	t.Helper()
 	var n atomic.Int32
 	prev := runMydumperFunc
-	runMydumperFunc = func(context.Context, string, []string, string, baseline.LockMode) error {
+	runMydumperFunc = func(context.Context, string, []string, string, baseline.LockMode, lockModeSource) error {
 		n.Add(1)
 		return errors.New("fake mydumper stopped")
 	}

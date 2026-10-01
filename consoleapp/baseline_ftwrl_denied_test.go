@@ -25,15 +25,19 @@ func TestRunMydumperFTWRLDeniedNamesTheSetting(t *testing.T) {
 	stubPreflight(t, nil)
 
 	err := runMydumper(context.Background(), "admin:p@tcp(127.0.0.1:1)/", []string{"appdb"},
-		filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL)
+		filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
 	if err == nil {
 		t.Fatal("runMydumper succeeded over a failed mydumper")
 	}
 	t.Logf("error: %v", err)
-	for _, want := range []string{"RDS", "Lock while dumping", "lock-all"} {
+	for _, want := range []string{"RDS", "lock-all", "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE=lock-all"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q: %v", want, err)
 		}
+	}
+	// #1986: the snapshot settings have no lock control since #1846.
+	if strings.Contains(err.Error(), "Lock while dumping") || strings.Contains(err.Error(), "snapshot settings") {
+		t.Errorf("the console error sends the operator to a control that does not exist: %v", err)
 	}
 	if strings.Contains(err.Error(), "--lock-mode") {
 		t.Errorf("the console error names the CLI flag: %v", err)

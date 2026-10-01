@@ -22,7 +22,7 @@ func lockRecordAfterRun(t *testing.T, version string, mode baseline.LockMode) st
 	if err := os.Mkdir(out, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", []string{"appdb"}, out, mode); err != nil {
+	if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", []string{"appdb"}, out, mode, lockModeFromEnv); err != nil {
 		t.Fatalf("runMydumper: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(out, "metadata"), []byte("Started dump at: 2026-06-10 12:00:00\n"), 0o644); err != nil {
@@ -62,7 +62,7 @@ func TestRunMydumper_recordsNothingForAFailedDump(t *testing.T) {
 	if err := os.Mkdir(out, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, out, baseline.LockModeNoLock); err == nil {
+	if err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", nil, out, baseline.LockModeNoLock, lockModeFromEnv); err == nil {
 		t.Fatal("a mydumper that exits 3 was taken as a dump")
 	}
 	if _, err := os.Stat(filepath.Join(out, baseline.LockModeMarkerFile)); err == nil {

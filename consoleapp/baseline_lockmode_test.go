@@ -71,7 +71,7 @@ func TestRunMydumperForwardsTheSelectedModeToThePreflight(t *testing.T) {
 	fakeConsoleMydumper(t, printsVersion(versionModern))
 
 	err := runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/db", []string{"appdb"},
-		t.TempDir(), baseline.LockModeLockAll)
+		t.TempDir(), baseline.LockModeLockAll, lockModeFromEnv)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("runMydumper err = %v, want the preflight's own error to propagate unchanged", err)
 	}

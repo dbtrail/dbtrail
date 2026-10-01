@@ -34,7 +34,7 @@ func TestBackupSchedulerFullBackups_followsTheSavedLockMode(t *testing.T) {
 		{"nothing saved keeps the boot refusal", nil, true},
 		{"a readable saved value clears it", strp("lock-all"), false},
 		{"an unreadable saved value falls back to the boot refusal", strp("lock-everything"), true},
-		{"a cleared saved value (the built-in) clears it", strp(""), false},
+		{"a cleared saved value (automatic, #1986) clears it", strp(""), false},
 		{"removing the saved value brings the boot refusal back", nil, true},
 		{"and fixing it again clears it again", strp("lock-all"), false},
 	}

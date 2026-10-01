@@ -32,11 +32,11 @@ func save(t *testing.T, reg *console.Registry, key, value string) {
 // next job uses, without a restart.
 func TestEffectiveLockMode_savedWinsOverTheStartupValue(t *testing.T) {
 	reg := liveRegistry(t)
-	if got, err := effectiveLockMode(reg, baseline.DefaultLockMode, nil); got != baseline.DefaultLockMode || err != nil {
+	if got, _, err := effectiveLockMode(reg, baseline.DefaultLockMode, false, nil); got != baseline.DefaultLockMode || err != nil {
 		t.Fatalf("with nothing saved: %v/%v, want the startup value", got, err)
 	}
 	save(t, reg, console.BackupSettingLockMode, "lock-all")
-	got, err := effectiveLockMode(reg, baseline.DefaultLockMode, nil)
+	got, _, err := effectiveLockMode(reg, baseline.DefaultLockMode, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,11 +53,11 @@ func TestEffectiveLockMode_aSavedValueClearsTheBootRefusal(t *testing.T) {
 	reg := liveRegistry(t)
 	bootErr := errors.New("unknown lock mode \"lock-everything\"")
 
-	if _, err := effectiveLockMode(reg, baseline.DefaultLockMode, bootErr); err == nil {
+	if _, _, err := effectiveLockMode(reg, baseline.DefaultLockMode, false, bootErr); err == nil {
 		t.Fatal("the boot refusal vanished with nothing saved")
 	}
 	save(t, reg, console.BackupSettingLockMode, "lock-all")
-	if _, err := effectiveLockMode(reg, baseline.DefaultLockMode, bootErr); err != nil {
+	if _, _, err := effectiveLockMode(reg, baseline.DefaultLockMode, false, bootErr); err != nil {
 		t.Errorf("err = %v: saving a readable lock mode must clear the boot refusal, or the "+
 			"setting is editable and useless", err)
 	}
@@ -72,7 +72,7 @@ func TestEffectiveLockMode_unreadableSavedValueFallsBack(t *testing.T) {
 	if err := reg.SetBackupSetting(console.BackupSettingLockMode, &bad); err != nil {
 		t.Fatal(err)
 	}
-	got, err := effectiveLockMode(reg, baseline.LockModeNoLock, nil)
+	got, _, err := effectiveLockMode(reg, baseline.LockModeNoLock, true, nil)
 	if got != baseline.LockModeNoLock || err != nil {
 		t.Errorf("%v/%v, want the startup value and no error", got, err)
 	}
@@ -141,7 +141,7 @@ func TestSupervisorLockModeNow_readsTheSavedValue(t *testing.T) {
 	sup.reg = reg
 
 	save(t, reg, console.BackupSettingLockMode, "lock-all")
-	got, err := sup.lockModeNow()
+	got, _, err := sup.lockModeNow()
 	if err != nil {
 		t.Fatal(err)
 	}

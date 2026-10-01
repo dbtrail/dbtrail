@@ -24,6 +24,7 @@ func TestInvalidLockModeDoesNotStopCapture(t *testing.T) {
 	defer func() {
 		upConsoleBaselineLockMode = baseline.DefaultLockMode
 		upConsoleBaselineLockModeErr = nil
+		upConsoleBaselineLockModeSet = false
 	}()
 	upConsoleBaselineLockMode = baseline.DefaultLockMode
 	upConsoleBaselineLockModeErr = nil
@@ -70,6 +71,7 @@ func TestBaselineWiringCarriesConfigError(t *testing.T) {
 	defer func() {
 		upConsoleBaselineLockMode = baseline.DefaultLockMode
 		upConsoleBaselineLockModeErr = nil
+		upConsoleBaselineLockModeSet = false
 	}()
 	upConsoleBaselineLockMode = baseline.DefaultLockMode
 	upConsoleBaselineLockModeErr = nil
