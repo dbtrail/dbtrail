@@ -114,6 +114,10 @@ type backupScheduleRunDTO struct {
 	// RefusedTables / RefusedTablesOmitted: see BaselineStatus.
 	RefusedTables        []RefusedTable `json:"refused_tables,omitempty"`
 	RefusedTablesOmitted int            `json:"refused_tables_omitted,omitempty"`
+	// NewTables / NewTablesOmitted / NewTablesUnchecked: see BaselineStatus.
+	NewTables          []string `json:"new_tables,omitempty"`
+	NewTablesOmitted   int      `json:"new_tables_omitted,omitempty"`
+	NewTablesUnchecked string   `json:"new_tables_unchecked,omitempty"`
 	// DiskCheck / DiskNote: a full read's free-space check (#1938), so an
 	// unattended read that ran on a low disk says so on the card.
 	DiskCheck string `json:"disk_check,omitempty"`
@@ -358,6 +362,7 @@ func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 		Refused:       run.Refused,
 		RefusedTables: run.RefusedTables, RefusedTablesOmitted: run.RefusedTablesOmitted,
 		DiskCheck: run.DiskCheck, DiskNote: run.DiskNote,
+		NewTables: run.NewTables, NewTablesOmitted: run.NewTablesOmitted, NewTablesUnchecked: run.NewTablesUnchecked,
 	}
 }
 
@@ -397,6 +402,7 @@ func scheduleRunFromStatus(st BackupScheduleState) *backupScheduleRunDTO {
 		Refused:       cur.Refused,
 		RefusedTables: cur.RefusedTables, RefusedTablesOmitted: cur.RefusedTablesOmitted,
 		DiskCheck: cur.DiskCheck, DiskNote: cur.DiskNote,
+		NewTables: cur.NewTables, NewTablesOmitted: cur.NewTablesOmitted, NewTablesUnchecked: cur.NewTablesUnchecked,
 	}
 }
 

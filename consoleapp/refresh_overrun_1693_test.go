@@ -672,7 +672,7 @@ func TestExecuteRefresh_anErrorNeverCarriesAnInstant(t *testing.T) {
 			Err: reconstruct.ErrCaptureGap}}, reconstruct.ErrCaptureGap
 	}
 
-	prev, _, _, _, err := sup.executeRefresh(refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "d",
+	prev, _, _, _, _, err := sup.executeRefresh(refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "d",
 		BaselineDir: t.TempDir()}, refreshAt)
 	if err == nil {
 		t.Fatal("the stubbed fold did not fail, so the error path was never taken")

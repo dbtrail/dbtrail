@@ -126,6 +126,7 @@ func clipRunes(s string, n int) string {
 func withholdRefusedTables(r *http.Request, st BaselineStatus) BaselineStatus {
 	if sessionRestricted(r) {
 		st.RefusedTables, st.RefusedTablesOmitted = nil, 0
+		st.NewTables, st.NewTablesOmitted = nil, 0
 	}
 	return st
 }
@@ -138,9 +139,33 @@ func withholdScheduleTables(r *http.Request, dto *backupScheduleDTO) *backupSche
 	}
 	if dto.LastRun != nil {
 		dto.LastRun.RefusedTables, dto.LastRun.RefusedTablesOmitted = nil, 0
+		dto.LastRun.NewTables, dto.LastRun.NewTablesOmitted = nil, 0
 	}
 	if dto.LastFallback != nil {
 		dto.LastFallback.RefusedTables, dto.LastFallback.RefusedTablesOmitted = nil, 0
 	}
 	return dto
+}
+
+// NewTablesOf keeps the names of the tables a published update left out
+// (#1993), sorted as given, up to RefusedTablesCap, and counts the rest: the
+// same bound and the same reason as RefusedTablesOf (a migration that creates
+// hundreds of tables must not grow the run history without limit).
+func NewTablesOf(names []string) (kept []string, omitted int) {
+	for _, n := range names {
+		if len(kept) >= RefusedTablesCap {
+			omitted++
+			continue
+		}
+		kept = append(kept, clipRunes(oneLine(n), refusedNameCap))
+	}
+	return kept, omitted
+}
+
+// ScrubReason is the treatment RefusedTablesOf gives a reason, for an error
+// text that is not a table's: one line, at most refusedReasonCap runes, and
+// each connection string in secrets, its password and any credentials left
+// in a URL or DSN removed. It reaches a browser and a file on disk.
+func ScrubReason(msg string, secrets ...string) string {
+	return clipRunes(oneLine(scrubSecrets(msg, secrets)), refusedReasonCap)
 }

@@ -60,6 +60,13 @@ type refreshRequest struct {
 	// cycle (#1904), stamped by runRefresh when table deltas are on. Zero for
 	// a restore, which writes no chain.
 	ChainStartFloor time.Time
+	// SourceDSN, Schemas and SourcePostgres are the server's source and its
+	// snapshot scope, which the update asks for the tables created after
+	// the snapshot it starts from (#1993, checkNewTables). Empty SourceDSN:
+	// no source is known, and no check is made or claimed.
+	SourceDSN      string
+	Schemas        []string
+	SourcePostgres bool
 }
 
 // TriggerRefresh starts a periodic baseline refresh for a server, sharing the
@@ -250,7 +257,10 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// fold has run its own files are in there too. See claimSnapshotDir.
 	unclaimed := claimSnapshotDir(refreshSnapshotDir(req, at))
 	req.FoldSource = resolveFoldSource(s.ctx, req)
-	prev, tables, refused, reuse, err := s.executeRefresh(req, at)
+	prev, tables, refused, reuse, gap, err := s.executeRefresh(req, at)
+	if !foldPublished(err) {
+		gap = newTablesCheck{}
+	}
 	// Publishing is not finished until the snapshot is where this server's
 	// backups live. A fold that wrote a perfect local snapshot for a server
 	// whose destination is S3 has produced a copy on one box, which is not
@@ -312,7 +322,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 			rec.IndexMark = mark.events
 		}
 	}
+	rec.NewTables, rec.NewTablesOmitted, rec.NewTablesUnchecked = gap.tables, gap.omitted, gap.unchecked
 	s.recordRun(req.ServerID, req.ServerName, foldRunCounts(rec, tables, refused, reuse), err)
+	reportNewTables(req, gap)
 	// Where the readers of what this cycle published start (#1904), for the
 	// gate to grade next. Outside s.mu: it reads the snapshot's files.
 	var readsFrom time.Time
@@ -357,6 +369,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 			readsFrom: readsFrom, readsFromKnown: readsFromKnown}
 	}
 	applyFoldStatus(st, tables, refused, reuse, err)
+	applyNewTables(st, gap, foldPublished(err))
 	if err != nil {
 		// The refusal itself was already reported above, before this lock was
 		// taken. What happens HERE is almost nothing: no duration report. Every
@@ -1246,7 +1259,7 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 // error, and the anchor the overrun reading measures its window from), the
 // table count, the number of tables that refused, the reuse and cost tally,
 // and the error.
-func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (prev time.Time, tables, refused int, reuse reuseTally, err error) {
+func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (prev time.Time, tables, refused int, reuse reuseTally, gap newTablesCheck, err error) {
 	// Listed where the fold READS (refreshFoldConfig's BaselineSrc), not where
 	// it writes. On an S3-backed server those differ, and listing the local
 	// directory here would refuse with "no baseline snapshot" on exactly the
@@ -1262,15 +1275,18 @@ func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (p
 		// instant has to decide which of the two conventions holds. Today the
 		// only caller returns before it would ask; that is not a reason to
 		// make it answerable later.
-		return time.Time{}, 0, 0, reuseTally{}, fmt.Errorf("list the snapshot to refresh: %w", err)
+		return time.Time{}, 0, 0, reuseTally{}, newTablesCheck{}, fmt.Errorf("list the snapshot to refresh: %w", err)
 	}
 	if len(tableList) == 0 {
-		return time.Time{}, 0, 0, reuseTally{}, fmt.Errorf("no baseline snapshot to refresh under %s", src)
+		return time.Time{}, 0, 0, reuseTally{}, newTablesCheck{}, fmt.Errorf("no baseline snapshot to refresh under %s", src)
 	}
 	// Another writer's snapshot is never folded (#1684, foldSourceRefusal).
 	if err := foldSourceRefusal(req.IndexDSN, src, prev); err != nil {
-		return time.Time{}, 0, 0, reuseTally{}, err
+		return time.Time{}, 0, 0, reuseTally{}, newTablesCheck{}, err
 	}
+	// Before the fold, against the very list the fold is handed: a table
+	// missing from it is a table this snapshot will not hold (#1993).
+	gap = s.checkNewTables(req, tableList)
 	req.TableDeltas = s.tableDeltas
 	tables, refused, reuse, err = s.foldSnapshot(req, at, tableList)
 	if err != nil {
@@ -1282,7 +1298,7 @@ func (s *baselineSupervisor) executeRefresh(req refreshRequest, at time.Time) (p
 		// and the rule is cheaper than the rule.
 		prev = time.Time{}
 	}
-	return prev, tables, refused, reuse, err
+	return prev, tables, refused, reuse, gap, err
 }
 
 // The bounded knobs EVERY in-daemon fold shares: the periodic refresh, the
@@ -2134,12 +2150,13 @@ func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBase
 	var shared []refreshSkip
 	cli := console.CommandLineWriter{Dir: globalBaselineDir, Writes: globalDSN != "" && globalBaselineDir != ""}
 	seen := map[string]bool{}
-	add := func(id, name, dsn, dir string) {
+	add := func(id, name, dsn, dir string) bool {
 		if dsn == "" || dir == "" || seen[id] {
-			return
+			return false
 		}
 		seen[id] = true
 		out = append(out, refreshRequest{ServerID: id, ServerName: name, IndexDSN: dsn, BaselineDir: dir})
+		return true
 	}
 	add("default", "boot", globalDSN, globalBaselineDir)
 	for _, e := range entries {
@@ -2153,7 +2170,9 @@ func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBase
 				continue
 			}
 		}
-		add(e.ID, e.Name, e.DSN, e.BaselineDir)
+		if add(e.ID, e.Name, e.DSN, e.BaselineDir) {
+			withSource(&out[len(out)-1], e)
+		}
 	}
 	return out, skippedS3Only, shared
 }

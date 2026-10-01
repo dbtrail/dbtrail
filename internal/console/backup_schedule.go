@@ -718,7 +718,26 @@ const (
 	// schedule's own full-copy timetable asked for (#1564); the rest names
 	// the cadence. Not a fault, and the page does not treat it as one.
 	BackupWhyFullCopyPrefix = "the schedule takes a full read"
+	// BackupWhyNewTablesPrefix starts the reason for a full read taken
+	// because an update left out tables created on the source after the
+	// snapshot it started from (#1993); NewTablesWhy adds the count.
+	BackupWhyNewTablesPrefix = "new tables were created on your database after the previous snapshot"
 )
+
+// BackupWhyCodeNewTables is BackupWhyCode's code for NewTablesWhy.
+const BackupWhyCodeNewTables = "new_tables"
+
+// NewTablesWhy is the reason recorded on the full read a scheduled update
+// starts to include the n tables it left out (#1993). A count, never the
+// names: the reason is served to every session that can see the schedule,
+// and a session with a data profile is not given table names (the run's own
+// NewTables list is withheld from it, withholdScheduleTables).
+func NewTablesWhy(n int) string {
+	if n == 1 {
+		return BackupWhyNewTablesPrefix + " (1 table)"
+	}
+	return fmt.Sprintf("%s (%d tables)", BackupWhyNewTablesPrefix, n)
+}
 
 // BackupWhyCodeFullCopy is BackupWhyCode's code for FullCopyWhy.
 const BackupWhyCodeFullCopy = "full_copy"
@@ -782,6 +801,8 @@ func BackupWhyCode(why string) string {
 		return "window_age"
 	case strings.HasPrefix(why, BackupWhyFullCopyPrefix):
 		return BackupWhyCodeFullCopy
+	case strings.HasPrefix(why, BackupWhyNewTablesPrefix):
+		return BackupWhyCodeNewTables
 	}
 	return ""
 }
