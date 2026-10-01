@@ -134,7 +134,7 @@ console.log(JSON.stringify(out));
 	if got.AfterNo != 0 || got.AfterYes != 1 {
 		t.Errorf("posted %d after no, %d after yes; want 0 then 1", got.AfterNo, got.AfterYes)
 	}
-	if len(got.Asked) != 2 || got.Asked[0] != got.Want || !strings.Contains(got.Want, "writes wait while it starts") {
+	if len(got.Asked) != 2 || got.Asked[0] != got.Want || !strings.Contains(got.Want, "writes may wait while it starts") {
 		t.Errorf("asked %q, want twice %q", got.Asked, got.Want)
 	}
 	if !strings.Contains(got.Hero, "Your newest copy doesn't record whether it is point-in-time. Read database now records it.") {

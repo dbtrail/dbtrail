@@ -310,6 +310,21 @@ func TestSnapshotLock_words(t *testing.T) {
 		}
 	}
 
+	// The dashed outline is for "point-in-time unknown" only: it lands on most
+	// rows of an older install, while "different points-in-time" is a finding
+	// and "not checked" is a different unknown.
+	var classes []string
+	runViewsScript(t, "console.log(JSON.stringify(["+strings.Join(values, ",")+"].map((v) => (flat(snapshotLockPill(v)) || { class: '' }).class)));", &classes)
+	for i, c := range classes {
+		dashed := strings.Contains(c, "snap-lock-dashed")
+		if dashed != (values[i] == `"unknown"`) {
+			t.Errorf("lock %s: class %q, dashed %v", values[i], c, dashed)
+		}
+	}
+	if len(classes) != len(values) {
+		t.Fatalf("%d classes for %d values", len(classes), len(values))
+	}
+
 	// The detail's line: nothing looked up says nothing, and a count of zero
 	// is never said.
 	var lines []string

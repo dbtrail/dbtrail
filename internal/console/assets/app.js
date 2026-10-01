@@ -2127,7 +2127,7 @@ function ovFlowModel(inp) {
     cards.push({ kind: "update-blocked", key: sid + "|blocked|" + stamp, tone: "bad",
       title: "A schema change stopped the update from changes",
       lines: [said || "A table changed shape. The copy cannot be updated from the recorded changes until that table is read again from the database."],
-      cost: "Reading the database takes longer than a refresh, and writes wait while it starts.",
+      cost: "Reading the database takes longer than a refresh, and writes may wait while it starts.",
       actions: [
         nextAt ? { label: "Wait for the scheduled read at " + nextAt, primary: true, run: "dismiss" } : { label: "Wait", primary: true, run: "dismiss" },
         { label: "Read database now", run: "read", confirm: READ_DB_CONFIRM },
@@ -9142,9 +9142,10 @@ function baselinesPanel(b, servers, opts) {
 // daemon for the selected server, then polls until it finishes and refreshes the
 // Storage view so the new snapshot appears. The button is disabled while in flight.
 // READ_DB_CONFIRM is asked before every "Read database now": the read is the
-// one action on these pages that reaches production, and writes wait while
-// it starts (longer behind a long-running query, docs #1987).
-const READ_DB_CONFIRM = "Read every table from your database now?\n\nBest at a quiet time: writes wait while it starts, longer if a long query is running.";
+// one action on these pages that reaches production. "may": writes wait
+// while a locked read starts (longer behind a long-running query, docs
+// #1987), but not on a PostgreSQL source or a read that takes no lock.
+const READ_DB_CONFIRM = "Read every table from your database now?\n\nBest at a quiet time: writes may wait while it starts, longer if a long query is running.";
 
 // newestCopyLine is the line beside Read database now (2026-10-01): what the
 // newest copy says about being point-in-time, and the way out. It reads the

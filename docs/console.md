@@ -607,7 +607,7 @@ saved, shown with the reason `serve` is not running it.
   without taking a lock. The answer
   is the worst of the snapshot's tables, and a snapshot updated from the
   recorded changes inherits it. Opening the row says how many tables are
-  behind it and marks each one. A snapshot kept only in S3 shows **locks not
+  behind it and marks each one. A snapshot kept only in S3 shows **not
   checked**: the list does not read its files there. `GET /api/baselines`
   carries it as `lock` on each snapshot (`consistent`, `unknown`, `torn`, or
   absent when not checked), and `GET /api/baselines/files` as `lock`,
