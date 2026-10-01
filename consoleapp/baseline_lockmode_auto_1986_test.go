@@ -143,13 +143,17 @@ func TestResolveEnv_lockModeSetIsCarriedToTheSupervisor(t *testing.T) {
 	for _, c := range []struct {
 		env     string
 		wantSet bool
-	}{{"", false}, {"ftwrl", true}, {"lock-all", true}, {"nonsense", false}} {
-		upConsoleBaselineLockMode, upConsoleBaselineLockModeSet, upConsoleBaselineLockModeErr = baseline.DefaultLockMode, false, nil
+	}{{"nonsense", false}, {"", false}, {"ftwrl", true}, {"lock-all", true}, {"", false}} {
+		// No reset by hand: each read must start clean on its own, or the
+		// "nonsense" refusal would ride into the next case.
 		t.Setenv("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE", c.env)
 		resolveBaselineLockModeEnv()
 		sup := newBaselineSupervisorFromConfig(context.Background(), t.TempDir(), nil)
 		if sup.lockModeChosen != c.wantSet {
 			t.Errorf("env %q: supervisor chosen = %v, want %v", c.env, sup.lockModeChosen, c.wantSet)
+		}
+		if (sup.configErr != nil) != (c.env == "nonsense") {
+			t.Errorf("env %q: refusal %v", c.env, sup.configErr)
 		}
 	}
 	// A previous value must not leak into an unset environment.
@@ -238,9 +242,10 @@ func TestExecute_retriesWithLockAllOnlyForTheRefusedDefault(t *testing.T) {
 				t.Fatalf("modes = %v, want %v", got, c.wantModes)
 			}
 			if len(c.wantModes) == 2 {
-				// The second failure is the one surfaced: the lock-all one.
-				if !errors.Is(err, stop) {
-					t.Errorf("err = %v, want the lock-all attempt's error", err)
+				// The second failure is the one surfaced: the lock-all one,
+				// saying that ftwrl came first.
+				if !errors.Is(err, stop) || !strings.Contains(err.Error(), "ftwrl was refused") {
+					t.Errorf("err = %v, want the lock-all attempt's error, naming the refused ftwrl", err)
 				}
 			} else if !errors.Is(err, c.first) && !strings.Contains(err.Error(), c.first.Error()) {
 				t.Errorf("err = %v, want the first attempt's error", err)
@@ -375,5 +380,42 @@ func TestRunMydumper_globalLockDeniedIsTyped(t *testing.T) {
 				t.Errorf("typed = %v, want %v: %v", got, c.typed, err)
 			}
 		})
+	}
+}
+
+// The Compose install reaches the automatic mode only if the console service
+// passes the variable EMPTY when .env does not set it. A default of ftwrl
+// there would read as an operator's choice and turn automatic off on every
+// Compose install; the first-run walk mirrors the Compose environment.
+func TestCompose_lockModeIsEmptyUnlessSet(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "\n      BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: ${BASELINE_LOCK_MODE:-}\n") {
+		t.Error("docker-compose.yml does not pass BINTRAIL_CONSOLE_BASELINE_LOCK_MODE empty by default")
+	}
+	walk, err := os.ReadFile(filepath.Join("..", "test", "console-e2e", "first-run-walk.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(walk), "\n  BINTRAIL_CONSOLE_BASELINE_LOCK_MODE= \\\n") {
+		t.Error("first-run-walk.sh does not mirror the Compose default (empty lock mode)")
+	}
+}
+
+// Trigger refuses an invalid environment value, but the saved value that let
+// it through can be cleared before the dump starts: execute refuses then too,
+// rather than run in the automatic mode.
+func TestExecute_refusesAnInvalidEnvironmentValue(t *testing.T) {
+	calls, _ := stubRetryDump(t, func(int, baseline.LockMode, string) error { return nil })
+	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
+	s.configErr = errors.New(`BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: unknown lock mode "lock-everything"`)
+	if _, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: dsnFor("db1.abc.us-east-1.rds.amazonaws.com")}); err == nil ||
+		!strings.Contains(err.Error(), "lock-everything") {
+		t.Fatalf("err = %v, want the configuration refusal", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("mydumper ran %d times over an invalid lock mode", len(*calls))
 	}
 }

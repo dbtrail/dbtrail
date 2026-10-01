@@ -745,9 +745,13 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	s.noteDumpDisk(req.ServerID, check, note)
 
 	// Resolved HERE, not at boot: a lock mode saved from the interface governs
-	// the very next dump. Trigger already refused an unreadable one, so the
-	// error is spent.
-	lockMode, chosen, _ := s.lockModeFor(req)
+	// the very next dump. Trigger refused an unreadable one already, but the
+	// saved value can be cleared between Trigger and here, bringing back an
+	// invalid environment value; that refuses too, never runs automatic.
+	lockMode, chosen, err := s.lockModeFor(req)
+	if err != nil {
+		return dumpOutcome{}, err
+	}
 	if !chosen && lockMode == baseline.LockModeLockAll {
 		slog.Info("console snapshot: the source is an Amazon RDS or Aurora endpoint, so this snapshot uses lock mode lock-all",
 			"server", req.ServerID)
@@ -764,6 +768,11 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		slog.Info("console snapshot: lock mode ftwrl was refused by the source; retrying this snapshot once with lock-all",
 			"server", req.ServerID, "error", err)
 		att, err = s.dumpAttempt(req, baseline.LockModeLockAll)
+		if err != nil {
+			// The lock-all failure is the one to act on; the ftwrl refusal
+			// before it is named, not repeated (it is in the log line above).
+			err = fmt.Errorf("lock mode ftwrl was refused by the source, and the automatic retry with lock-all failed too: %w", err)
+		}
 	}
 	if err != nil {
 		return dumpOutcome{}, err

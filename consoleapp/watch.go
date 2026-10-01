@@ -1870,7 +1870,9 @@ func resolveBaselineLockModeEnv() {
 	// selected what is now the default, so an operator who set it keeps the
 	// behaviour they asked for and needs no migration. Only this variable can
 	// select a WEAKER mode — a snapshot that can be torn has to be asked for.
-	upConsoleBaselineLockModeSet = false
+	// All three, so a second read (tests call this repeatedly) cannot keep
+	// an earlier run's mode or refusal.
+	upConsoleBaselineLockMode, upConsoleBaselineLockModeSet, upConsoleBaselineLockModeErr = baseline.DefaultLockMode, false, nil
 	if v := os.Getenv("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE"); v != "" {
 		m, err := baseline.ParseLockMode(v)
 		if err != nil {
