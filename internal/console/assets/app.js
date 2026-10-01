@@ -13601,8 +13601,9 @@ function grantBlocks(user, password, hasSavedPassword, managed, connect) {
   // On the Connect screen the box under the SQL swaps in the RDS block, so
   // the line only points at it (#1986, checked: the box sits in the row right
   // below the SQL).
-  const grantLockAll = (who) => connect
-    ? "-- On Amazon RDS or Aurora? Tick the box below."
+  // MariaDB names only RDS: Aurora does not run MariaDB.
+  const grantLockAll = (who, where) => connect
+    ? "-- On " + where + "? Tick the box below."
     : "-- " + who + ", run this line instead of the GRANT RELOAD line above.\n" +
       "-- GRANT LOCK TABLES, SHOW VIEW ON *.* TO " + acct + ";";
   // SHOW VIEW is on every backup line: mydumper stops at the first view it
@@ -13622,9 +13623,9 @@ function grantBlocks(user, password, hasSavedPassword, managed, connect) {
     mysql: grantBase + grantBackups +
       "-- BACKUP_ADMIN is MySQL/Percona 8.0 or later. On MySQL 5.7 run this instead:\n" +
       "-- GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" +
-      "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("On Amazon RDS, Aurora or Cloud SQL"),
+      "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("On Amazon RDS, Aurora or Cloud SQL", "Amazon RDS or Aurora"),
     mariadb: grantBase + grantBackups +
-      "GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("On Amazon RDS for MariaDB"),
+      "GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("On Amazon RDS for MariaDB", "Amazon RDS"),
   };
   // Three cases where no line may be runnable, because the block would not
   // create the account the form is about to save.

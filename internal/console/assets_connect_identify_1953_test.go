@@ -289,8 +289,12 @@ console.log(JSON.stringify({ cm: c.mysql, cd: c.mariadb, fm: f.mysql, fd: f.mari
 		t.Fatal(err)
 	}
 	t.Logf("Connect MySQL:\n%s\nfull form MySQL:\n%s", got.CM, got.FM)
-	for name, b := range map[string]string{"connect mysql": got.CM, "connect mariadb": got.CD} {
-		if !strings.HasSuffix(b, "\n-- On Amazon RDS or Aurora? Tick the box below.") {
+	for name, c := range map[string]struct{ b, line string }{
+		"connect mysql":   {got.CM, "\n-- On Amazon RDS or Aurora? Tick the box below."},
+		"connect mariadb": {got.CD, "\n-- On Amazon RDS? Tick the box below."},
+	} {
+		b := c.b
+		if !strings.HasSuffix(b, c.line) {
 			t.Errorf("%s does not end with the line pointing at the box:\n%s", name, b)
 		}
 		if strings.Contains(b, "LOCK TABLES") {
