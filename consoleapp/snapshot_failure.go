@@ -3,7 +3,6 @@ package consoleapp
 import (
 	"errors"
 
-	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
 )
@@ -32,7 +31,8 @@ func (e *mydumperTooOldError) Unwrap() error { return e.err }
 //     refuses BACKUP_ADMIN outright, so the GRANT could not work;
 //   - mydumper's own refusal of the global read lock (ftwrlDeniedError): the
 //     privilege check passed, so the user already holds RELOAD;
-//   - no account read from SHOW GRANTS and no user in the DSN to name.
+//   - no account read from SHOW GRANTS (the DSN's user at '%' would be a
+//     guess at the account's host).
 //
 // After execute's automatic retry the error wraps only the lock-all attempt's
 // failure, so the statement is for what lock-all needs, the mode tried last.
@@ -50,11 +50,7 @@ func snapshotFailureOf(err error, req console.BaselineRequest) *console.Snapshot
 	if errors.Is(mp, mydumperlock.ErrFTWRLPrivilegesMissing) && sourceIsManaged(req.SourceDSN) {
 		return nil
 	}
-	user := ""
-	if _, _, u, _, perr := config.ParseSourceDSN(req.SourceDSN); perr == nil {
-		user = u
-	}
-	grant := mp.Grant(user)
+	grant := mp.Grant()
 	if grant == "" {
 		return nil
 	}

@@ -161,27 +161,16 @@ func (e *MissingPrivilegesError) Is(target error) bool {
 }
 
 // Grant is the statement that gives the account what the check found
-// missing. With no account read from SHOW GRANTS it names fallbackUser (the
-// source DSN's user) at host '%', quoted like the Connect screen's sqlString.
-// "" when it would name nobody or nothing.
-func (e *MissingPrivilegesError) Grant(fallbackUser string) string {
-	if len(e.Missing) == 0 {
+// missing, naming the account exactly as SHOW GRANTS did. "" when no account
+// was read: the source DSN names the server's host, not the account's, so
+// "user@'%'" would be a guess, and a GRANT for an account that does not exist
+// (or, on MariaDB, one that creates a second account) sends the operator to
+// fix the wrong thing.
+func (e *MissingPrivilegesError) Grant() string {
+	if len(e.Missing) == 0 || e.Account == "" {
 		return ""
 	}
-	acct := e.Account
-	if acct == "" {
-		if fallbackUser == "" {
-			return ""
-		}
-		acct = sqlString(fallbackUser) + "@'%'"
-	}
-	return "GRANT " + strings.Join(e.Missing, ", ") + " ON *.* TO " + acct + ";"
-}
-
-// sqlString quotes s as a MySQL string literal, as app.js's sqlString does:
-// backslashes first, since under the default sql_mode a backslash escapes.
-func sqlString(s string) string {
-	return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''") + "'"
+	return "GRANT " + strings.Join(e.Missing, ", ") + " ON *.* TO " + e.Account + ";"
 }
 
 // missingPrivileges builds the refusal. SHOW VIEW joins the statement when
@@ -587,6 +576,9 @@ func checkPrivilegesDB(ctx context.Context, db *sql.DB, mode baseline.LockMode, 
 		alt := remedy.noCheckModes()
 		if g.grantedGlobally("RELOAD") || g.grantedGlobally("FLUSH_TABLES") {
 			needBA, verErr := requiresBackupAdmin(ctx, db)
+			if verErr != nil {
+				slog.Debug("lock-all refusal: the source version could not be read, so it does not say whether ftwrl is available", "error", verErr)
+			}
 			if verErr == nil && (!needBA || g.grantedGlobally("BACKUP_ADMIN")) {
 				alt = " — this user already holds RELOAD/FLUSH_TABLES globally, so " +
 					remedy.forMode(baseline.LockModeFTWRL) + " is available and is also point-consistent" + alt

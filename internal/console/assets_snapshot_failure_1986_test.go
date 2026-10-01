@@ -165,7 +165,14 @@ console.log(JSON.stringify(res));
 		if fix != w.fix {
 			t.Errorf("%s: fix line %q, want %q", key, fix, w.fix)
 		}
-		if len(d.Shown) > 2 {
+		rds := "On Amazon RDS or Aurora this permission cannot be granted. There, leave the snapshot settings on automatic and snapshots pick a way that works."
+		if strings.Contains(w.sql, "BACKUP_ADMIN") {
+			// RDS refuses BACKUP_ADMIN to everyone: a host reached by address
+			// looks self-hosted to the daemon, so the card says it.
+			if len(d.Shown) != 3 || d.Shown[2] != rds {
+				t.Errorf("%s: a BACKUP_ADMIN statement without the RDS line: %q", key, d.Shown)
+			}
+		} else if len(d.Shown) > 2 {
 			t.Errorf("%s: more on screen than the headline and the fix: %q", key, d.Shown)
 		}
 		if w.sql == "" {
@@ -223,7 +230,7 @@ func TestSnapshotFailure_firstRunStep(t *testing.T) {
 	out := runSnapshotFailureJS(t, `
 const card = fn("firstRunCard");
 const step = (failure) => ({ complete: false, steps: [{ name: "Take the first full DB snapshot", state: "failed",
-  detail: "dump: refused", fix: "Try again on the Snapshots page.", snapshot_failed: true, failure }] });
+  detail: "dump: refused", fix: "Try again on the Snapshots page.", snapshot_failed: true, failure, note: "Could not check for an existing snapshot: s3 denied" }] });
 const pick = (rep) => { let r = null; walk(card(rep), (n) => { if (!r && n.tag === "li") r = read(n); }); return r; };
 console.log(JSON.stringify({
   perm: pick(step({ kind: "missing_permission", grant: "GRANT LOCK TABLES ON *.* TO 'u'@'%';", privileges: 1 })),
@@ -245,6 +252,9 @@ console.log(JSON.stringify({
 		t.Errorf("permission step SQL = %q", got.Perm.SQL)
 	}
 	checkDrawn(t, "first-run permission", got.Perm, "dump: refused")
+	if !strings.Contains(perm, "Could not check for an existing snapshot: s3 denied") {
+		t.Errorf("the location check note went into the fold or away: %q", perm)
+	}
 	gen := strings.Join(got.Generic.Shown, " | ")
 	if !strings.Contains(gen, headline) || !strings.Contains(gen, "Try again on the Snapshots page.") {
 		t.Errorf("generic step shows %q, want the headline and the step's own fix", gen)
@@ -269,9 +279,12 @@ console.log(JSON.stringify({
   old: draw(Object.assign({ method: "dump" }, base)),
   refresh: draw(Object.assign({ method: "refresh" }, base)),
   sent: draw(Object.assign({ method: "dump", snapshot_time: "2026-09-19 03:00:00" }, base)),
+  // The live view of a dump that published and failed to upload: no anchor
+  // (a dump never stamps one), but published.
+  sentLive: draw(Object.assign({ method: "dump", published: true }, base)),
 }));
 `)
-	var got struct{ Perm, Old, Refresh, Sent drawn }
+	var got struct{ Perm, Old, Refresh, Sent, SentLive drawn }
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
@@ -296,5 +309,8 @@ console.log(JSON.stringify({
 	}
 	if s := strings.Join(got.Sent.Shown, " | "); strings.Contains(s, headline) || !strings.Contains(s, "could not send it") {
 		t.Errorf("a full read whose snapshot exists says it did not finish: %q", s)
+	}
+	if s := strings.Join(got.SentLive.Shown, " | "); strings.Contains(s, headline) {
+		t.Errorf("a published full read seen live says it did not finish: %q", s)
 	}
 }

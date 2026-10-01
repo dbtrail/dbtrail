@@ -83,16 +83,16 @@ func TestCheckPrivileges_missingPrivilegesCarryTheGrant(t *testing.T) {
 				return
 			}
 			if c.want == "" {
-				t.Fatalf("a refusal that cannot be sure carries a statement %q: %v", mp.Grant("dsnuser"), err)
+				t.Fatalf("a refusal that cannot be sure carries a statement %q: %v", mp.Grant(), err)
 			}
-			if got := mp.Grant("dsnuser"); got != c.want {
+			if got := mp.Grant(); got != c.want {
 				t.Errorf("Grant = %q, want %q", got, c.want)
 			}
 			if mp.Mode != c.mode {
 				t.Errorf("Mode = %q, want %q", mp.Mode, c.mode)
 			}
-			if strings.Contains(mp.Grant("dsnuser"), "IDENTIFIED") || strings.Contains(mp.Grant("dsnuser"), "*6BB") {
-				t.Errorf("the statement carries the account's password clause: %q", mp.Grant("dsnuser"))
+			if strings.Contains(mp.Grant(), "IDENTIFIED") || strings.Contains(mp.Grant(), "*6BB") {
+				t.Errorf("the statement carries the account's password clause: %q", mp.Grant())
 			}
 		})
 	}
@@ -111,24 +111,35 @@ func TestMissingPrivilegesError_onlyFTWRLIsTheRetryMarker(t *testing.T) {
 	}
 }
 
-// With no account read from SHOW GRANTS, the statement falls back to the DSN
-// user at host '%', quoted the way the Connect screen quotes it (sqlString in
-// app.js). An empty user names nobody: no statement then.
-func TestMissingPrivilegesError_grantFallsBackToTheDSNUser(t *testing.T) {
-	for _, c := range []struct{ user, want string }{
-		{"dbtrail", "GRANT LOCK TABLES ON *.* TO 'dbtrail'@'%';"},
-		{"o'brien", "GRANT LOCK TABLES ON *.* TO 'o''brien'@'%';"},
-		{`back\slash`, `GRANT LOCK TABLES ON *.* TO 'back\\slash'@'%';`},
-		{"a@b", "GRANT LOCK TABLES ON *.* TO 'a@b'@'%';"},
-		{"", ""},
-	} {
-		e := &MissingPrivilegesError{Mode: baseline.LockModeLockAll, Missing: []string{"LOCK TABLES"}}
-		if got := e.Grant(c.user); got != c.want {
-			t.Errorf("Grant(%q) = %q, want %q", c.user, got, c.want)
-		}
+// With no account read from SHOW GRANTS there is no statement. The DSN's user
+// at '%' would be a guess: the DSN names the server's host, not the account's,
+// and a GRANT for `app`@'%' when the account is `app`@'10.%' fails on MySQL 8
+// or creates a second account on MariaDB. (Flipped from the fallback this PR
+// first had, after review.)
+func TestMissingPrivilegesError_noAccountNoStatement(t *testing.T) {
+	if got := (&MissingPrivilegesError{Mode: baseline.LockModeLockAll, Missing: []string{"LOCK TABLES"}}).Grant(); got != "" {
+		t.Errorf("no account read, yet a statement: %q", got)
 	}
-	if got := (&MissingPrivilegesError{Account: "`u`@`%`"}).Grant("u"); got != "" {
+	if got := (&MissingPrivilegesError{Account: "`u`@`%`"}).Grant(); got != "" {
 		t.Errorf("no privileges named, yet a statement: %q", got)
+	}
+	// An account line SHOW GRANTS printed in a shape this cannot read whole
+	// leaves the account empty, so the refusal carries no statement.
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(grantRows("GRANT SELECT ON *.* TO u@%"))
+	err = checkPrivilegesDB(context.Background(), db, baseline.LockModeLockAll, RemedyConsole, nil)
+	var mp *MissingPrivilegesError
+	if !errors.As(err, &mp) || mp.Grant() != "" {
+		t.Errorf("unreadable account: err %v, statement %q, want a refusal with no statement", err, func() string {
+			if mp == nil {
+				return ""
+			}
+			return mp.Grant()
+		}())
 	}
 }
 

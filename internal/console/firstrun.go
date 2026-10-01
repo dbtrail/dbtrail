@@ -37,6 +37,9 @@ type FirstRunStep struct {
 	// card can explain; nil draws the generic card.
 	SnapshotFailed bool             `json:"snapshot_failed,omitempty"`
 	Failure        *SnapshotFailure `json:"failure,omitempty"`
+	// Note is a line the snapshot failure card keeps visible: why the backup
+	// locations could not be checked, when they could not.
+	Note string `json:"note,omitempty"`
 }
 
 // FirstRunReport is GET /api/servers/{id}/first-run. Complete: the list is no
@@ -215,8 +218,11 @@ func backupStep(in firstRunInput) (FirstRunStep, bool) {
 	case b.Published || b.State == "succeeded":
 		step.State, step.Fix = firstRunDone, ""
 	case b.State == "failed":
-		step.State, step.Detail, step.Fix = firstRunFailed, withCheckError(b.LastError, in.SnapshotCheckError), "Try again on the "+PageSnapshots+" page."
-		step.SnapshotFailed, step.Failure = true, b.Failure
+		// The error alone goes in Detail, which the page folds; a location
+		// that could not be checked is a different problem and stays in Note,
+		// on screen.
+		step.State, step.Detail, step.Fix = firstRunFailed, b.LastError, "Try again on the "+PageSnapshots+" page."
+		step.SnapshotFailed, step.Failure, step.Note = true, b.Failure, withCheckError("", in.SnapshotCheckError)
 	case b.State == "running":
 		step.State, step.Detail, step.Fix = firstRunRunning, withCheckError("", in.SnapshotCheckError), ""
 	case in.SnapshotExists:

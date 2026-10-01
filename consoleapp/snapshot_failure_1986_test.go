@@ -43,11 +43,9 @@ func TestSnapshotFailureOf_kinds(t *testing.T) {
 		{"lock-all privileges on an RDS host",
 			missingErr(baseline.LockModeLockAll, "`admin`@`%`", "LOCK TABLES"), rdsDSN,
 			&console.SnapshotFailure{Kind: console.SnapshotFailureMissingPermission, Grant: "GRANT LOCK TABLES ON *.* TO `admin`@`%`;", Privileges: 1}, ""},
-		{"no account read: the DSN user, quoted, at '%'",
-			missingErr(baseline.LockModeLockAll, "", "LOCK TABLES", "SHOW VIEW"), "o'b\\x:p@tcp(127.0.0.1:1)/",
-			&console.SnapshotFailure{Kind: console.SnapshotFailureMissingPermission, Grant: `GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'o''b\\x'@'%';`, Privileges: 2}, ""},
-		{"no account read and no DSN user: nobody to name", missingErr(baseline.LockModeLockAll, "", "LOCK TABLES"), ":p@tcp(127.0.0.1:1)/", nil, ""},
-		{"no account read and an unreadable DSN", missingErr(baseline.LockModeLockAll, "", "LOCK TABLES"), "not a dsn", nil, ""},
+		// No account read from SHOW GRANTS: the DSN's user at '%' would be a
+		// guess at the account's host, so no statement at all.
+		{"no account read", missingErr(baseline.LockModeLockAll, "", "LOCK TABLES", "SHOW VIEW"), "o'b\\x:p@tcp(127.0.0.1:1)/", nil, ""},
 		// The global read lock refused at run time: RELOAD is already held
 		// (the check passed), so no GRANT fixes it.
 		{"mydumper refused the global read lock", errDeniedFTWRL, ownHostDSN, nil, ""},

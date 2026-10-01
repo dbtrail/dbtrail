@@ -3043,7 +3043,7 @@ function firstRunCard(rep) {
     const body = el("div", { class: "dc-body" }, el("div", { class: "dc-name", text: s.name }));
     const known = s.snapshot_failed && s.failure && ((s.failure.kind === "missing_permission" && s.failure.grant) ||
       (s.failure.kind === "mydumper_too_old" && s.failure.min_version));
-    if (s.snapshot_failed) body.append(snapshotFailureCard(s.failure, s.detail || "", "overview"));
+    if (s.snapshot_failed) body.append(snapshotFailureCard(s.failure, s.detail || "", "overview", s.note || ""));
     else if (s.detail) body.append(el("div", { class: "fr-detail", text: s.detail }));
     // A card that names its fix already says where to try again.
     if (s.fix && !known) {
@@ -9242,6 +9242,12 @@ function snapshotFailureBody(failure, raw, where, note) {
       ". Run this on your database, then " + retry + ":" }));
     const pre = el("pre", { class: "form-code snap-fail-grant", text: f.grant });
     box.append(pre, el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(f.grant, "SQL") }));
+    // The daemon gives no statement for this on a host named as Amazon RDS
+    // or Aurora, but one reached by an address or another name looks
+    // self-hosted to it, and RDS refuses this permission to every user.
+    if (/\bBACKUP_ADMIN\b/.test(f.grant)) {
+      box.append(el("p", { class: "snap-fail-note", text: "On Amazon RDS or Aurora this permission cannot be granted. There, leave the snapshot settings on automatic and snapshots pick a way that works." }));
+    }
   } else if (f.kind === "mydumper_too_old" && f.min_version) {
     box.append(el("p", { class: "snap-fail-fix", text: "Install mydumper " + f.min_version + " or newer where DBTrail runs, then " + retry + "." }));
   } else if (where === "scheduled") {
@@ -10249,7 +10255,7 @@ function backupScheduleCard(cur, b) {
         // backup exists: the fold finished and only the upload failed. Telling
         // that operator nothing was written would send them looking for a
         // backup they already have.
-        if (!run.snapshot_time && run.method !== "refresh") {
+        if (!run.snapshot_time && !run.published && run.method !== "refresh") {
           // A full read that published nothing: the same card the toast and
           // the Overview draw (#1986), with the error folded.
           body.append(el("p", { class: "form-msg err", text: "Last scheduled snapshot failed " + when + " (" + what + ")." }),
