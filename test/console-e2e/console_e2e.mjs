@@ -3045,6 +3045,80 @@ try {
     ? ok("snapshots: the download endpoint streams a gzip archive with an attachment name")
     : bad("snapshots: the download endpoint streams a gzip archive with an attachment name", JSON.stringify({ s: bk.dlStatus, m: bk.dlMagic, cd: bk.dlDisposition, n: bk.dlBytes }));
 
+  // 15e-1b (#2002): the facts of an expanded snapshot are sentences (why the
+  // run read in full, when the database was last read, whether the copy is
+  // point-in-time), and they once wore the one-line ellipsis style of a
+  // destination path: "Point-in-time copy: every r…" with no way to read the
+  // rest. The real files response is stretched to the longest shapes each
+  // line has (a fallback reason, a read line with every tail, both lock
+  // counts) and drawn at a laptop width and a phone width. Each fact must
+  // show its whole text (no clipping), the page must not scroll sideways, and
+  // the Download button must stay on screen beside or under the facts.
+  {
+    const route = /\/api\/baselines\/files\?/;
+    await page.route(route, async (r) => {
+      const res = await r.fetch();
+      const d = await res.json();
+      d.run = Object.assign({}, d.run || {}, { seconds: 1, kind: "dump", rows: 13456789,
+        why: "fold refused (the recorded changes have a gap between 2026-09-30 11:00:00 and 2026-09-30 12:00:00 on table e2eshop.orders, so the update cannot be trusted)",
+        why_code: "fold_refused" });
+      d.source_read_at = "2026-09-29 08:15:42";
+      d.source_read_age_seconds = 183600;
+      d.max_folds_since_read = 14;
+      d.source_read_missing = 1;
+      d.source_read_uncounted = 2;
+      d.lock = "torn";
+      d.lock_torn = 1;
+      d.lock_unknown = Math.max(1, (d.tables || []).length - 1);
+      await r.fulfill({ response: res, contentType: "application/json", body: JSON.stringify(d) });
+    });
+    const facts = {};
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      facts[width] = await page.evaluate(async () => {
+        const v = document.querySelector(".view");
+        const row = v.querySelector(".stg-row.bk-expandable");
+        const at = (row.querySelector(".stg-name") || {}).textContent.trim();
+        const box = row.nextElementSibling && row.nextElementSibling.classList.contains("bk-detail")
+          ? row.nextElementSibling : v.querySelector(".bk-detail");
+        box.hidden = false;
+        await loadBackupDetail(at, box);
+        const wrap = box.querySelector(".bk-facts");
+        // Every leaf that carries a fact's text: implementation-agnostic, so
+        // the guard reads the same before and after a markup change.
+        const leaves = Array.from(wrap.querySelectorAll("*")).filter((n) =>
+          n.tagName !== "BUTTON" && !n.children.length && n.textContent.trim());
+        const vw = document.documentElement.clientWidth;
+        const btn = wrap.querySelector("button");
+        const br = btn ? btn.getBoundingClientRect() : null;
+        return {
+          texts: leaves.map((n) => n.textContent),
+          clipped: leaves.filter((n) => n.scrollWidth > n.clientWidth + 1 || n.getBoundingClientRect().right > vw + 1)
+            .map((n) => ({ t: n.textContent.slice(0, 40), sw: n.scrollWidth, cw: n.clientWidth })),
+          pageOverflow: document.documentElement.scrollWidth - vw,
+          button: br ? { left: Math.round(br.left), right: Math.round(br.right), vw } : null,
+        };
+      });
+      const det = page.locator(".bk-detail:not([hidden])").first();
+      try { await det.screenshot({ path: `${ART}/snapshot-facts-${width}.png` }); } catch (_) {}
+    }
+    await page.unroute(route);
+    await page.setViewportSize({ width: 1300, height: 1000 });
+    const lines = facts[1280].texts.join("\n");
+    (/Reason:/.test(lines) && /Last real read of your database/.test(lines) && /Different points-in-time/.test(lines))
+      ? ok("snapshots: the stretched detail draws its why, read and point-in-time facts")
+      : bad("snapshots: the stretched detail draws its why, read and point-in-time facts", lines.slice(0, 300));
+    for (const width of [1280, 390]) {
+      const f = facts[width];
+      (!f.clipped.length && f.pageOverflow <= 0)
+        ? ok(`snapshots: every fact of an expanded snapshot reads in full at ${width}px, no sideways scroll`)
+        : bad(`snapshots: every fact of an expanded snapshot reads in full at ${width}px, no sideways scroll`, JSON.stringify({ clipped: f.clipped, overflow: f.pageOverflow }));
+      (!f.button || (f.button.left >= 0 && f.button.right <= f.button.vw))
+        ? ok(`snapshots: the Download button stays on screen at ${width}px`)
+        : bad(`snapshots: the Download button stays on screen at ${width}px`, JSON.stringify(f.button));
+    }
+  }
+
   // 15e-2: the restore card. Gated on the capability the daemon advertises;
   // a bad instant is refused INLINE (the server's 400 lands next to the
   // input, not in a toast that outlives nothing).

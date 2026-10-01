@@ -9810,22 +9810,29 @@ async function loadBackupDetail(at, box) {
   }
   clear(box);
   const facts = el("div", { class: "bk-facts" });
-  facts.append(el("span", { class: "stg-dest", text: humanBytes(d.total_bytes || 0) + " in " + (d.files || 0) + " file(s)" }));
+  // One fact per line, wrapped, never cut (#2002): the why, read and
+  // point-in-time lines are whole sentences, and the ellipsis meant for a
+  // path (.stg-dest) once showed "Point-in-time copy: every r..." with no
+  // way to read the rest. The list takes the room; the Download button
+  // keeps its place at its right, or under it when the width runs out.
+  const list = el("div", { class: "bk-fact-list" });
+  facts.append(list);
+  list.append(el("span", { class: "bk-fact", text: humanBytes(d.total_bytes || 0) + " in " + (d.files || 0) + " file(s)" }));
   if (d.run && d.run.seconds > 0) {
-    facts.append(el("span", { class: "stg-dest", text:
+    list.append(el("span", { class: "bk-fact", text:
       "took " + fmtSeconds(d.run.seconds) + " (" + (BACKUP_KIND_LABEL[d.run.kind] || d.run.kind) +
       (d.run.rows ? ", " + Number(d.run.rows).toLocaleString("en-US") + " rows" : "") + ")" }));
   } else if (d.write_span_seconds > 0) {
-    facts.append(el("span", { class: "stg-dest", text:
+    list.append(el("span", { class: "bk-fact", text:
       "files written over about " + fmtSeconds(d.write_span_seconds) + " (from file timestamps; the real run took longer)" }));
   }
   // Outside the duration branch: a run stamped within one second has no
   // duration to show and still has its reason (#1604).
-  if (d.run && d.run.why) facts.append(el("span", { class: "stg-dest", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
+  if (d.run && d.run.why) list.append(el("span", { class: "bk-fact", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
   const readLine = sourceReadLine(d);
-  if (readLine) facts.append(el("span", { class: "stg-dest", text: readLine }));
+  if (readLine) list.append(el("span", { class: "bk-fact", text: readLine }));
   const lockLine = snapshotLockLine(d);
-  if (lockLine) facts.append(el("span", { class: "stg-dest", text: lockLine }));
+  if (lockLine) list.append(el("span", { class: "bk-fact", text: lockLine }));
   const dl = el("button", { class: "btn", type: "button",
     text: "Download (.tar.gz) · " + humanBytes(d.total_bytes || 0) });
   if (d.incomplete) dl.disabled = true;
